@@ -1,8 +1,15 @@
 # Groundwork — calibration source of truth
 
-Every tunable in PROTOCOL.md §13–14 is traced here to the production code it was
-lifted from, with file:line citations and the adversarial corrections that the
-grounding pass produced. When a spec constant changes, change it here too.
+Every tunable in the spec's adaptive + TX-power sections is traced here to the
+production code it was lifted from, with file:line citations and the adversarial
+corrections that the grounding pass produced. When a spec constant changes, change
+it here too.
+
+> **Section renumbering (PROTOCOL v1):** this doc's `§13.x` references map to spec
+> **§9** (adaptive link layer) and `§14.x` maps to spec **§10** (per-adapter TX
+> power). The constant *values* and citations below are unchanged; only the spec
+> section numbers moved. `loss_pre_recov` is renamed `loss_postdiv_prearq` on the
+> v1 wire (see correction 6).
 
 Sources:
 - `waybeam_wfb_ng/link_controller.c` @ `382d453` (active production controller)
@@ -24,7 +31,23 @@ Sources:
    2200 was wfb_ng's *policy* floor (`fec.bitrate_min`), not a venc limit.
 5. **wfb_ng FEC is not loss-reactive.** k/n is a static REDUNDANCY_CURVE sized
    from frame rate (link_controller.c:763–788); Adaptive-n was removed. Loss is
-   handled by MCS demote alone — which validates waybeam-link's no-FEC stance.
+   handled by MCS demote alone. NOTE (Pass 3): this argues against *adaptive block
+   RS* FEC only; it does **not** bear on a sliding-window scheme (§14 of PROTOCOL
+   is now "deferred, bench-gated on ρ", not "no FEC deliberately").
+
+6. **The 80‰ demote threshold is PRE-FEC and does not transfer (Pass 3).** In
+   wfb_ng, 80‰ was raw loss an FEC layer then absorbed before delivery.
+   waybeam-link has no FEC, so PROTOCOL v1 §9.1 reacts on `loss_postdiv_prearq`
+   (post-diversity, pre-ARQ) at a seed **~20‰**, RE-DERIVE on bench. The old 80‰ is
+   dead. The stats field and the wire field are renamed `loss_postdiv_prearq` to
+   prevent a same-name/opposite-meaning transplant bug.
+
+7. **8812EU TX+RX is field-proven (Pass 3, operator).** The devourer source note
+   about a TXAGC register desensing 8822E RX under TX+RX was over-read as a hard
+   "trap." 8812EU runs concurrent RX+TX successfully on wfb_ng; the one known real
+   limitation is a **40 MHz-bandwidth bug** → run the craft at 20 MHz. The generic
+   TX→RX AGC/PLL settle (which `guard_us` must cover, §7.2) is a normal radio cost,
+   not a chip defect; the actual settle time is measured at §17 gate 4.
 
 ## §13 constants (link_controller.c)
 
@@ -147,11 +170,17 @@ becomes a no-op). We reuse the **file format** as our per-MCS power data source.
 Devourer can't load a REG_PG table (per groundwork above), and our chips have no
 per-packet power — but we don't need either. Each §13.3 profile pins one MCS, so:
 
-> Author a waybeam-link power table **in the PHY_REG_PG.txt row format** (band /
-> rf-path / MCS → value). The controller indexes it by the *committed profile's
-> MCS* to get one target, and sets `SetTxPowerOffsetQdb()` at profile-commit
-> (§13.5). Recommend authoring values as **relative qdB trims per MCS** (the curve
-> *shape*: higher MCS needs more SNR → more power), which map directly onto
-> devourer's offset knob; the efuse/regdomain still owns the absolute ceiling
-> (regulatory-safe). Absolute-dBm targeting is possible but needs a
-> `GetTxPowerCaps/State` baseline read first.
+> Author a waybeam-link **node-local, per-adapter** power table in the
+> PHY_REG_PG.txt row format (band / rf-path / MCS → value). The controller indexes
+> it by `(this adapter, committed profile's MCS, profile.tx_power_level)` and sets
+> `SetTxPowerOffsetQdb()` at profile-commit (PROTOCOL v1 §10). The on-air profile
+> carries only the portable `tx_power_level` intent; the absolute values live here,
+> per adapter (the craft has one adapter, only ground has more).
+>
+> **CORRECTION (Pass 2/3): there is NO regulatory clamp.** The earlier
+> "efuse/regdomain owns the ceiling (regulatory-safe)" claim was WRONG.
+> `SetTxPowerIndexOverride` is a raw absolute index and `SetTxPowerOffsetQdb` an
+> uncapped offset — devourer applies whatever it is given, and the table MAY
+> intentionally exceed regulatory limits (operator responsibility). Add an opt-in
+> per-node `max_power_qdb` sanity ceiling (§10.3). `GetTxPowerCaps/State` is a
+> hardware-range reference for baseline reads, not a safety limit.
