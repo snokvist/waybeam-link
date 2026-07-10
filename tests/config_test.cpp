@@ -216,6 +216,61 @@ int main() {
         }
     }
 
+    // --- step-8 knobs: selector, venc, loopback RSSI -------------------------
+    {
+        auto r = load_config_json(R"({"node":{"originator":1,"role":"tx"},
+          "policy":{"select":{
+            "bitrate_lead_s": 0.3, "mcs_up_grace_s": 0.1,
+            "reentry_backoff_s": 4, "reentry_dwell_s": 1.5,
+            "flap_freeze_count": 2, "flap_freeze_window_s": 8,
+            "flap_freeze_s": 12, "pressure_escape_s": 1.0,
+            "failsafe_hold_s": 0.5, "failsafe_step_s": 0.5,
+            "min_profile": 1, "max_profile": 5,
+            "rung_rssi_floor_dbm": [-90, -87, -84]}},
+          "venc": {"host": "127.0.0.1:8085", "enabled": true},
+          "loopback": {"rssi_dbm": -55,
+            "rssi_fade": {"start_ms": 1000, "end_ms": 2000, "dbm": -92}}})");
+        CHECK(bool(r));
+        if (r) {
+            const Config& c = *r.value;
+            CHECK(c.policy.select.bitrate_lead_s == 0.3);
+            CHECK_EQ_U(c.policy.select.flap_freeze_count, 2);
+            CHECK_EQ_U(c.policy.select.min_profile, 1);
+            CHECK_EQ_U(c.policy.select.max_profile, 5);
+            // Partial floors array overrides the prefix, keeps seed tail.
+            CHECK(c.policy.select.rung_rssi_floor_dbm[0] == -90);
+            CHECK(c.policy.select.rung_rssi_floor_dbm[2] == -84);
+            CHECK(c.policy.select.rung_rssi_floor_dbm[3] == -80);  // seed
+            CHECK(c.venc.enabled);
+            CHECK(c.venc.host == "127.0.0.1:8085");
+            CHECK(c.loopback.rssi_dbm == -55);
+            CHECK(c.loopback.rssi_fade.has_value());
+            CHECK_EQ_U(c.loopback.rssi_fade->end_ms, 2000);
+            CHECK(c.loopback.rssi_fade->dbm == -92);
+        }
+        // Defaults hold when absent.
+        auto d = load_config_json(R"({"node":{"originator":1,"role":"rx"}})");
+        CHECK(bool(d));
+        if (d) {
+            CHECK(!d.value->venc.enabled);
+            CHECK(d.value->policy.select.pressure_escape_s == 2.0);
+            CHECK(d.value->policy.select.rung_rssi_floor_dbm[0] == -88);
+            CHECK_EQ_U(d.value->policy.select.max_profile, 255);
+            CHECK(d.value->loopback.rssi_dbm == -60);
+        }
+        // Rejections: oversize floors array; out-of-range dBm; bad fade.
+        expect_error(R"({"node":{"originator":1,"role":"rx"},
+          "policy":{"select":{"rung_rssi_floor_dbm":
+            [-1,-2,-3,-4,-5,-6,-7,-8,-9]}}})",
+                     "rung_rssi_floor_dbm");
+        expect_error(R"({"node":{"originator":1,"role":"rx"},
+          "policy":{"select":{"rung_rssi_floor_dbm":[-121]}}})",
+                     "dBm range");
+        expect_error(R"({"node":{"originator":1,"role":"rx"},
+          "loopback":{"rssi_fade":{"start_ms":5,"end_ms":5,"dbm":-90}}})",
+                     "end_ms");
+    }
+
     // --- profile table -------------------------------------------------------
     {
         // The repo's example table must load and reproduce the golden hash

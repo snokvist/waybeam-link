@@ -224,6 +224,46 @@ Result<Config> load_config_json(const std::string& json_text) {
                 sel.mcs_settle_s = ps.value("mcs_settle_s", sel.mcs_settle_s);
                 sel.down_cooldown_s = ps.value("down_cooldown_s", sel.down_cooldown_s);
                 sel.ewma_alpha = ps.value("ewma_alpha", sel.ewma_alpha);
+                sel.bitrate_lead_s =
+                    ps.value("bitrate_lead_s", sel.bitrate_lead_s);
+                sel.mcs_up_grace_s =
+                    ps.value("mcs_up_grace_s", sel.mcs_up_grace_s);
+                sel.reentry_backoff_s =
+                    ps.value("reentry_backoff_s", sel.reentry_backoff_s);
+                sel.reentry_dwell_s =
+                    ps.value("reentry_dwell_s", sel.reentry_dwell_s);
+                sel.flap_freeze_count =
+                    ps.value("flap_freeze_count", sel.flap_freeze_count);
+                sel.flap_freeze_window_s =
+                    ps.value("flap_freeze_window_s", sel.flap_freeze_window_s);
+                sel.flap_freeze_s = ps.value("flap_freeze_s", sel.flap_freeze_s);
+                sel.pressure_escape_s =
+                    ps.value("pressure_escape_s", sel.pressure_escape_s);
+                sel.failsafe_hold_s =
+                    ps.value("failsafe_hold_s", sel.failsafe_hold_s);
+                sel.failsafe_step_s =
+                    ps.value("failsafe_step_s", sel.failsafe_step_s);
+                sel.min_profile = ps.value("min_profile", sel.min_profile);
+                sel.max_profile = ps.value("max_profile", sel.max_profile);
+                if (ps.contains("rung_rssi_floor_dbm")) {
+                    const json& floors = ps.at("rung_rssi_floor_dbm");
+                    if (!floors.is_array() ||
+                        floors.size() > sel.rung_rssi_floor_dbm.size()) {
+                        return Result<Config>::fail(
+                            "select.rung_rssi_floor_dbm: array of up to 8 "
+                            "dBm values (§9.4)");
+                    }
+                    for (size_t i = 0; i < floors.size(); ++i) {
+                        const int64_t v = floors[i].get<int64_t>();
+                        if (v < -120 || v > 0) {
+                            return Result<Config>::fail(
+                                "select.rung_rssi_floor_dbm[" +
+                                std::to_string(i) +
+                                "]: out of dBm range [-120, 0]");
+                        }
+                        sel.rung_rssi_floor_dbm[i] = static_cast<int8_t>(v);
+                    }
+                }
             }
             if (p.contains("arq")) {
                 const json& pa = p.at("arq");
@@ -319,6 +359,13 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
         }
 
+        // venc (§9.6 encoder actuation; disabled default for dev/bench)
+        if (j.contains("venc")) {
+            const json& v = j.at("venc");
+            cfg.venc.host = v.value("host", cfg.venc.host);
+            cfg.venc.enabled = v.value("enabled", cfg.venc.enabled);
+        }
+
         // air (dev backend; not §15 — devourer replaces it at bring-up)
         if (j.contains("air")) {
             const json& a = j.at("air");
@@ -348,6 +395,19 @@ Result<Config> load_config_json(const std::string& json_text) {
             l.seed = lb.value("seed", l.seed);
             l.correlation = lb.value("correlation", l.correlation);
             l.return_loss_p = lb.value("return_loss_p", l.return_loss_p);
+            l.rssi_dbm = lb.value("rssi_dbm", l.rssi_dbm);
+            if (lb.contains("rssi_fade")) {
+                const json& f = lb.at("rssi_fade");
+                LoopbackCfg::RssiFade fade;
+                fade.start_ms = f.at("start_ms").get<uint64_t>();
+                fade.end_ms = f.at("end_ms").get<uint64_t>();
+                fade.dbm = f.at("dbm").get<int8_t>();
+                if (fade.end_ms <= fade.start_ms) {
+                    return Result<Config>::fail(
+                        "loopback.rssi_fade: end_ms must be > start_ms");
+                }
+                l.rssi_fade = fade;
+            }
             if (lb.contains("loss")) {
                 const json& loss = lb.at("loss");
                 l.uniform_p = loss.value("uniform_p", 0.0);

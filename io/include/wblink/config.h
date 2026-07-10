@@ -55,7 +55,8 @@ struct StreamCfg {
     RtpClassifier classifier = RtpClassifier::kSize;
 };
 
-// §9.1 cascade + §9.4/§9.5/§9.7 constants (seeds; RE-DERIVE per §17).
+// §9.1 cascade + §9.4/§9.5/§9.7/§9.8/§9.9 constants (seeds; RE-DERIVE per
+// §17). Mirrors core SelectorPolicy; the app maps seconds -> ms.
 struct SelectPolicy {
     uint16_t demote_milli = 20;
     int8_t rssi_floor_dbm = -85;
@@ -66,6 +67,29 @@ struct SelectPolicy {
     double mcs_settle_s = 5.0;
     double down_cooldown_s = 0.2;
     double ewma_alpha = 0.3;
+    // §9.5 sequencing + §9.7 flap layers + §9.8/§9.9 (step 8).
+    double bitrate_lead_s = 0.5;
+    double mcs_up_grace_s = 0.25;
+    double reentry_backoff_s = 5.0;
+    double reentry_dwell_s = 2.0;
+    uint8_t flap_freeze_count = 3;
+    double flap_freeze_window_s = 10.0;
+    double flap_freeze_s = 10.0;
+    double pressure_escape_s = 2.0;
+    double failsafe_hold_s = 1.0;  // §9.8 gate-4 seeds
+    double failsafe_step_s = 1.0;
+    // §9.4 Pass-6 ruling: node-local per-rung RSSI floors.
+    std::array<int8_t, 8> rung_rssi_floor_dbm{-88, -85, -83, -80,
+                                              -77, -73, -71, -70};
+    uint8_t min_profile = 0;    // §9.7 pin; min==max freezes adaptation
+    uint8_t max_profile = 255;  // 255 = unpinned
+};
+
+// §9.6 venc bitrate actuation. Disabled by default: dev/bench runs have no
+// encoder; on the craft this is the ONLY writer of video0.bitrate.
+struct VencCfg {
+    std::string host = "127.0.0.1:80";
+    bool enabled = false;
 };
 
 struct ArqPolicy {
@@ -152,6 +176,15 @@ struct LoopbackCfg {
     // Gilbert-Elliott, mirrors core GeParams; nullopt = uniform only.
     std::optional<std::array<double, 4>> ge;  // p_gb, p_bg, loss_g, loss_b
     double return_loss_p = 0.0;  // loss on the NACK return direction
+    // Synthetic RSSI fed to the reporter so the §9 selector can be
+    // exercised without radios; the optional fade window scripts a dip.
+    int8_t rssi_dbm = -60;
+    struct RssiFade {
+        uint64_t start_ms = 0;
+        uint64_t end_ms = 0;
+        int8_t dbm = -90;
+    };
+    std::optional<RssiFade> rssi_fade;
 };
 
 struct StatsCfg {
@@ -166,7 +199,8 @@ struct Config {
     std::vector<StreamCfg> streams;
     Policy policy;
     StatsCfg stats;
-    AirCfg air;           // dev backend; empty until devourer lands
+    VencCfg venc;          // §9.6 encoder actuation
+    AirCfg air;            // dev backend; empty until devourer lands
     LoopbackCfg loopback;  // loopback-mode loss injection
 };
 
