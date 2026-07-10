@@ -30,17 +30,66 @@ here: date, reviewer, what changed, open questions.
   operator's responsibility and may intentionally exceed regulatory limits;
   recommended opt-in `max_power` sanity ceiling in the controller.
 
+## Pass 3 — 2026-07-10 — adversarial review + latency-first redesign
+
+Five investigators (3× prior-art/code/spec grounding, 2× Opus red-team + design-synth),
+all grounded in verified source. Full arbitration in **`docs/findings-pass3.md`** —
+proposal awaiting operator sign-off; **nothing written into PROTOCOL.md yet**.
+
+- **Operator decisions locked:** first-latcher-lock ARQ; `originator` = config node ID;
+  FEC = evaluate-then-decide; findings-doc-first.
+- **8 audit blockers ruled** (findings Part A): demote 80‰ RE-DERIVE (was pre-FEC;
+  no FEC now → ~20‰ delivered); single-RX invariant REWRITE (multi-RX first-class);
+  three-ID model (`originator` u16 / `session_id` u32 / `destination` u16); two-identity
+  control packets (sender in prefix, target descriptor in body); `active_profile` +
+  `table_version` added to DATA; §13.0 objective inverted → robustness-first.
+- **Pivotal ruling — deterministic return telemetry (findings Part C):** NOT achievable
+  as a guarantee (no per-packet TX departure timestamp; can't reserve airtime; 8812EU
+  self-RX desense trap). Resolved: **best-effort opportunistic return is the shipping
+  baseline**; the TSF-anchored EOB-quiet-gap is an opportunistic optimization behind a
+  bench gate; graceful vehicle-only fallback on lost feedback. Recommend a dedicated
+  craft 2nd RX adapter.
+- **SWFEC (Part F):** red-team killed the XOR-only middle option (recovers the case
+  diversity already handles, fails the burst that motivates FEC). Real choice is binary
+  no-FEC vs GF(256) RLC, **gated on measured ρ**.
+- **Follow-me CSA (Part E):** lift our `vehicle/csa`, TSF-anchor T_switch, paired
+  ReApplyTxPower, adaptive freeze during VERIFY, two-tier straggler rendezvous + home
+  channel, anti-replay; forged-CSA = CRITICAL fleet-blackout → scoped 4-byte MAC
+  proposed.
+- **No-auth hardening (Part G):** plausible-forward-window clamp + global-per-seq
+  hold-down + `preferred_originator` + contested-only lock release neutralize the
+  injection class at near-zero cost.
+- **I/O layer (Part H):** JSON config + stats + shm/unix/4×UDP binding model; v0=UDP.
+
+### Prior open questions — resolved
+- Promote mechanism → **RSSI-margin v0, active probe deferred** (injection has no wfb
+  side-stream; findings Part D).
+- `active_profile` echo → **on DATA header** (chosen; + `table_version`).
+- ARQ scope after gate → **decided jointly with SWFEC**, both bench-gated on ρ and
+  return-RTT (Part F).
+- Per-MCS TX-power granularity → unchanged (§14 per-adapter global offset stands).
+- Bidirectional RC uplink → subsumed by the symmetric originator model (any node TXes).
+- Repo vendoring → unchanged (still private-phase; revisit at first consumer).
+
+## Pass 3b — 2026-07-10 — Fable adversarial review of findings-pass3.md
+
+Fifth-pass skeptic; confirmed N=3 adapters in one process (per-adapter libusb context +
+thread, RX-only) against `Waybeam-android/wifi/.../wifi_jni.cpp`. **Gate 1 resolved/
+rescoped** → residual unknown is one injector + N monitors in-process. 4 must-fix items
+folded into findings Pass 3b: (BLOCKER) return-path incoherence + floor-oscillation under
+single-adapter craft → damp + escalate the 2nd-adapter revisit (now software-cheap);
+(MAJOR) forged LINK_REPORT defeats "never fail optimistic" → latch-filter + plausibility;
+(MAJOR) pilot-starvation contradiction → preference = preemption; (MAJOR) craft-misses-CSA
+strand → ground commits only after craft ACK on the strong downlink + issuer reverts on
+no-video. Plus: loss_pre_recov semantic-flip rename, table_version→content-hash, big-endian
+declared, CSA MAC covers common prefix, csa_psk trust boundary = craft+ground, home_chan
+config-pinned (CSA 34→32 B), ρ→P95 estimator + two hybrid FEC options added to the bench.
+
 ## Open questions for the next pass
 
-- [ ] Promote mechanism: ship v0 RSSI-margin (§13.4a) or invest in the active
-      probe burst (§13.4b) from the start?
-- [ ] `active_profile` echo on DATA header vs. a dedicated HEARTBEAT (§13.2.1) —
-      header bytes vs. loss-robustness.
-- [ ] ARQ scope after gate 2: if the round trip only fits the longest deadlines,
-      is ARQ worth the complexity over pure diversity + concealment?
-- [ ] Per-MCS TX-power granularity: per individual MCS vs. per rate-group, and
-      whether devourer can write per-rate TXAGC live or only global power (§14).
-- [ ] Bidirectional RC (uplink CONTROL stream) — currently out of scope (§11);
-      decide if/when it folds into the multi-stream reserve (§13.9).
-- [ ] Repo vendoring: private submodule vs. snapshot-into-public-consumer during
-      the private phase (README "Consumers").
+- [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
+      diversity is ground-RX-only. Craft return path is best-effort by physics; the
+      quiet-gap fit + floor-oscillation damping are **resolved empirically at gate 4**,
+      not designed further on paper.
+- [ ] Run the four bench gates (gate 1 now RX-proven; gate 4 return-window-fit is the one
+      that gates the craft return path under single-adapter).
