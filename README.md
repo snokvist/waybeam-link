@@ -7,19 +7,22 @@ an **adaptive link layer** (per-MCS rate/power + encoder-bitrate control), and a
 coordinated **follow-me channel switch** — built on OpenIPC **devourer** for raw
 802.11 monitor/injection.
 
-> **Status: IMPLEMENTATION IN PROGRESS — build-order steps 1–8 built.**
+> **Status: IMPLEMENTATION IN PROGRESS — build-order steps 1–9 built.**
 > Wire codec, I/O/config/stats, TX framer + resend ring, merged RX engine,
 > resend scheduler + arbitration, the loopback bench + udp-air dev backend,
-> the §4.1 NAL-type ARQ classifier, and the §9/§10 adaptive layer (RX metric
+> the §4.1 NAL-type ARQ classifier, the §9/§10 adaptive layer (RX metric
 > reporter, TX decision cascade with sequenced MCS↔bitrate transitions,
 > flap-freeze + fail-safe, venc bitrate actuation, per-adapter TX-power
-> resolve) are implemented and tested (`ctest --preset dev`, ASan+UBSan;
-> SSC338Q cross-verified via `cmake --preset ssc338q`). The radio path
-> (devourer, steps 9–11) actuates the resolved power and replaces the dev
-> air backends — see `docs/build-order.md` and the §17 bench gates. Try it
-> without hardware:
+> resolve), and the **radio path** — vendored devourer behind the §3.0
+> pinned encapsulation (`air.kind: "radio"`, per-adapter RX threads, real
+> RSSI/TSF, `SetTxMode` + `SetTxPowerOffsetQdb` at profile commit) with the
+> §7.2 TSF quiet-gap pacer — are implemented and tested (`ctest --preset
+> dev`, ASan+UBSan; SSC338Q cross-verified via `cmake --preset ssc338q`).
+> Remaining: follow-me CSA (step 10) and field bring-up + the §17 bench
+> gates (step 11) — see `docs/build-order.md`. Try it without hardware:
 > `./build/dev/waybeam-link loopback -c examples/config.loopback.sample.json`
-> or the two-process udp-air pair (`examples/config.air-{tx,rx}.sample.json`).
+> or the two-process udp-air pair (`examples/config.air-{tx,rx}.sample.json`);
+> with radios, `examples/config.radio-{tx,rx}.sample.json`.
 
 ## What this is
 

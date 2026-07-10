@@ -23,6 +23,7 @@ add_wb_test(rx_test)
 add_wb_test(scheduler_test)
 add_wb_test(selector_test)
 add_wb_test(reporter_test)
+add_wb_test(quietgap_test)
 add_wb_test(loopback_test)
 
 add_wb_test(dot11_test wblink_io)

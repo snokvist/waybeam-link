@@ -29,6 +29,8 @@ struct AdapterStats {
     uint64_t tx_submitted = 0;
     uint64_t tx_failed = 0;
     uint64_t tx_timeout = 0;
+    uint64_t drop = 0;          // radio backend RX-queue overflow drops
+    uint64_t tsf_fallback = 0;  // §7.2 TSF reads that fell back to host time
     bool adapter_stalled = false;  // §6.5 liveness watchdog verdict
 };
 
