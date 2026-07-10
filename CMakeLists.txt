@@ -26,6 +26,19 @@ add_library(wblink_core STATIC
     core/src/table.cpp)
 target_include_directories(wblink_core PUBLIC core/include)
 
+# --- wblink_io: config/bindings/stats (§15). POSIX sockets + the vendored
+# nlohmann/json (io layer only — core must stay dependency-free).
+add_library(wblink_io STATIC
+    io/src/config.cpp
+    io/src/udp.cpp
+    io/src/stats.cpp)
+target_include_directories(wblink_io PUBLIC io/include)
+target_include_directories(wblink_io SYSTEM PRIVATE third_party)
+target_link_libraries(wblink_io PUBLIC wblink_core)
+
+add_executable(waybeam-link app/main.cpp)
+target_link_libraries(waybeam-link PRIVATE wblink_io)
+
 if(WBLINK_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
