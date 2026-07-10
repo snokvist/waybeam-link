@@ -27,7 +27,9 @@ add_library(wblink_core STATIC
     core/src/framer.cpp
     core/src/ring.cpp
     core/src/rx.cpp
-    core/src/scheduler.cpp)
+    core/src/scheduler.cpp
+    core/src/reporter.cpp
+    core/src/selector.cpp)
 target_include_directories(wblink_core PUBLIC core/include)
 
 # --- wblink_io: config/bindings/stats (§15). POSIX sockets + the vendored
