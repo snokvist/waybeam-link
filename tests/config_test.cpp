@@ -1,0 +1,251 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// §15.2 config loader + §9.3 profile-table loader: the spec sample parses to
+// the expected structs, absent keys keep spec-seed defaults, and every §15.1
+// load-time rule rejects with a specific error. Also cross-validates the
+// file-based table loader against the golden 0x2B hash pinned in
+// table_hash_test (proves the frac -> per-mille scaling path).
+#include "wblink/config.h"
+
+#include <string>
+
+#include "wbtest.h"
+
+using namespace wblink;
+
+namespace {
+
+// The §15.2 sample (psk included; craft/ground shape).
+const char* kSample = R"({
+  "node":  { "originator": 17, "role": "tx", "preferred_originator": 9 },
+  "profile_table": "/etc/waybeam-link/profiles.json",
+  "adapters": [
+    { "name": "wlan0", "bus": "1-1.2", "role": "tx",
+      "channel": 5805, "bw": 20,
+      "power_map": "/etc/waybeam-link/power.wlan0.txt",
+      "max_power_qdb": 2000 },
+    { "name": "wlan1", "bus": "1-1.3", "role": "rx", "channel": 5805, "bw": 20 }
+  ],
+  "streams": [
+    { "stream_id": 0, "stream_type": "RTP", "dir": "in",
+      "bind": { "kind": "udp", "listen": "127.0.0.1:5600" } },
+    { "stream_id": 1, "stream_type": "TELEMETRY", "dir": "in",
+      "bind": { "kind": "udp", "listen": "127.0.0.1:14650" } }
+  ],
+  "policy": {
+    "report_hz": 10, "report_timeout_ms": 500,
+    "select": { "demote_milli": 20, "rssi_floor_dbm": -85,
+                "rssi_fade_db_per_s": 10, "rssi_fade_arm_dbm": -65,
+                "promote_rssi_hyst_db": 6, "promote_dwell_s": 0.5,
+                "mcs_settle_s": 5.0, "down_cooldown_s": 0.2,
+                "ewma_alpha": 0.3 },
+    "arq":    { "airtime_frac": 0.15, "attempt_cap": 3, "holddown_ms": 20,
+                "fwd_clamp_blocks": 4 },
+    "fec":    { "scheme": "none", "overhead_frac": 0.0 },
+    "return": { "guard_us": 300, "return_window_us": 2000 },
+    "csa":    { "psk": "hunter2",
+                "settle_s": 3.0, "verify_timeout_ms": 150,
+                "min_interval_s": 5, "ack_timeout_ms": 1000,
+                "rendezvous_timeout_s": 5, "home_chan": 5745,
+                "channel_allowlist": [5745, 5805, 5825] }
+  },
+  "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } }
+})";
+
+bool expect_error(const std::string& json, const char* needle) {
+    auto r = load_config_json(json);
+    ++wbtest::checks;
+    if (r) {
+        std::fprintf(stderr, "expected rejection containing \"%s\", got OK\n",
+                     needle);
+        ++wbtest::failures;
+        return false;
+    }
+    ++wbtest::checks;
+    if (r.error.find(needle) == std::string::npos) {
+        std::fprintf(stderr, "error \"%s\" does not mention \"%s\"\n",
+                     r.error.c_str(), needle);
+        ++wbtest::failures;
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+int main() {
+    // --- the spec sample parses to the expected structs --------------------
+    {
+        auto r = load_config_json(kSample);
+        CHECK(bool(r));
+        if (r) {
+            const Config& c = *r.value;
+            CHECK_EQ_U(c.node.originator, 17);
+            CHECK(c.node.role == Role::kTx);
+            CHECK_EQ_U(c.node.preferred_originator, 9);
+            CHECK(c.profile_table_path == "/etc/waybeam-link/profiles.json");
+
+            CHECK_EQ_U(c.adapters.size(), 2);
+            CHECK(c.adapters[0].name == "wlan0");
+            CHECK(c.adapters[0].role == Role::kTx);
+            CHECK_EQ_U(c.adapters[0].channel_mhz, 5805);
+            CHECK_EQ_U(c.adapters[0].bw, 20);
+            CHECK(c.adapters[0].max_power_qdb.has_value() &&
+                  *c.adapters[0].max_power_qdb == 2000);
+            CHECK(!c.adapters[1].max_power_qdb.has_value());
+
+            CHECK_EQ_U(c.streams.size(), 2);
+            CHECK_EQ_U(c.streams[0].stream_id, 0);
+            CHECK_EQ_U(c.streams[0].stream_type, stream_type::kRtp);
+            CHECK(c.streams[0].dir == Dir::kIn);
+            CHECK(c.streams[0].bind.listen == "127.0.0.1:5600");
+            CHECK_EQ_U(c.streams[1].stream_type, stream_type::kTelemetry);
+
+            CHECK_EQ_U(c.policy.select.demote_milli, 20);
+            CHECK(c.policy.select.rssi_floor_dbm == -85);
+            CHECK_EQ_U(c.policy.arq.fwd_clamp_blocks, 4);
+            CHECK(c.policy.fec.scheme == FecScheme::kNone);
+            CHECK_EQ_U(c.policy.ret.guard_us, 300);
+            CHECK_EQ_U(c.policy.ret.return_window_us, 2000);
+            CHECK(c.policy.csa.psk == "hunter2");
+            CHECK_EQ_U(c.policy.csa.home_chan, 5745);
+            CHECK_EQ_U(c.policy.csa.channel_allowlist.size(), 3);
+
+            CHECK(c.stats.bind.has_value());
+            CHECK(c.stats.bind->send == "127.0.0.1:9110");
+
+            // The secret must never leak through the summary.
+            const std::string summary = dump_config_summary(c);
+            CHECK(summary.find("hunter2") == std::string::npos);
+            CHECK(summary.find("redacted") != std::string::npos);
+        }
+    }
+
+    // --- defaults: a minimal config keeps every spec seed ------------------
+    {
+        auto r = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
+        CHECK(bool(r));
+        if (r) {
+            const Config& c = *r.value;
+            CHECK(c.node.role == Role::kRx);
+            CHECK_EQ_U(c.node.preferred_originator, 0);
+            CHECK_EQ_U(c.policy.report_timeout_ms, 500);
+            CHECK_EQ_U(c.policy.select.demote_milli, 20);
+            CHECK(c.policy.select.ewma_alpha == 0.3);
+            CHECK_EQ_U(c.policy.arq.holddown_ms, 20);
+            CHECK_EQ_U(c.policy.ret.guard_us, 300);
+            CHECK(c.policy.csa.psk.empty());  // spectator: no psk
+            CHECK(c.stats.hz == 1.0);
+            CHECK(!c.stats.bind.has_value());
+        }
+    }
+
+    // --- §15.1 rejection paths ---------------------------------------------
+    // in-stream with a "send" binding (in XOR out).
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"udp","send":"127.0.0.1:1"}}]})",
+                 "\"listen\"");
+    // binding with both listen and send.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"udp","listen":"127.0.0.1:1","send":"127.0.0.1:2"}}]})",
+                 "XOR");
+    // v0 is UDP-only.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"shm","listen":"x"}}]})",
+                 "UDP-only");
+    // duplicate stream_id.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "streams":[
+        {"stream_id":0,"stream_type":"RTP","dir":"in",
+         "bind":{"kind":"udp","listen":"127.0.0.1:1"}},
+        {"stream_id":0,"stream_type":"TELEMETRY","dir":"in",
+         "bind":{"kind":"udp","listen":"127.0.0.1:2"}}]})",
+                 "duplicate stream_id");
+    // >4 UDP bindings (4 streams + stats).
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "streams":[
+        {"stream_id":0,"stream_type":"RTP","dir":"in","bind":{"kind":"udp","listen":"127.0.0.1:1"}},
+        {"stream_id":1,"stream_type":"RTP","dir":"in","bind":{"kind":"udp","listen":"127.0.0.1:2"}},
+        {"stream_id":2,"stream_type":"RTP","dir":"in","bind":{"kind":"udp","listen":"127.0.0.1:3"}},
+        {"stream_id":3,"stream_type":"RTP","dir":"in","bind":{"kind":"udp","listen":"127.0.0.1:4"}}],
+      "stats":{"hz":1,"bind":{"kind":"udp","send":"127.0.0.1:9"}}})",
+                 "too many UDP bindings");
+    // bad role.
+    expect_error(R"({"node":{"originator":1,"role":"master"}})", "role");
+    // bad bw.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "adapters":[{"name":"wlan0","role":"rx","channel":5805,"bw":30}]})",
+                 "bw");
+    // duplicate adapter name.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "adapters":[
+        {"name":"wlan0","role":"rx","channel":5805},
+        {"name":"wlan0","role":"rx","channel":5805}]})",
+                 "duplicate name");
+    // unknown stream_type string.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"VIDEO","dir":"in",
+        "bind":{"kind":"udp","listen":"127.0.0.1:1"}}]})",
+                 "stream_type");
+
+    // --- profile table -------------------------------------------------------
+    {
+        // The repo's example table must load and reproduce the golden hash
+        // 0x2B (cross-validates llround scaling against table_hash_test).
+        auto t = load_profile_table(std::string(WBLINK_SOURCE_DIR) +
+                                    "/profiles/table.example.json");
+        CHECK(bool(t));
+        if (t) {
+            CHECK_EQ_U(t.value->profiles.size(), 8);
+            CHECK_EQ_U(t.value->floor_profile, 0);
+            CHECK_EQ_U(t.value->profiles[0].airtime_budget_permille, 600);
+            CHECK_EQ_U(table_version(*t.value), 0x2B);
+        }
+    }
+    {
+        // Duplicate ids rejected.
+        auto t = load_profile_table_json(R"({"profiles":[
+          {"id":0,"mcs":0,"guard_interval":"long","tx_power_level":4,
+           "airtime_budget_frac":0.6,"arq_deadline_ms":{"iframe":80,"pframe":25},
+           "bitrate_min_kbps":2200,"reserve_bps":{"control":64000,"telemetry":32000}},
+          {"id":0,"mcs":1,"guard_interval":"long","tx_power_level":4,
+           "airtime_budget_frac":0.6,"arq_deadline_ms":{"iframe":80,"pframe":25},
+           "bitrate_min_kbps":2200,"reserve_bps":{"control":64000,"telemetry":32000}}],
+          "floor_profile":0})");
+        CHECK(!t);
+        CHECK(t.error.find("duplicate") != std::string::npos);
+    }
+    {
+        // venc hard floor (§9.6).
+        auto t = load_profile_table_json(R"({"profiles":[
+          {"id":0,"mcs":0,"guard_interval":"long","tx_power_level":4,
+           "airtime_budget_frac":0.6,"arq_deadline_ms":{"iframe":80,"pframe":25},
+           "bitrate_min_kbps":512,"reserve_bps":{"control":64000,"telemetry":32000}}],
+          "floor_profile":0})");
+        CHECK(!t);
+        CHECK(t.error.find("1000") != std::string::npos);
+    }
+    {
+        // floor_profile must name an existing id.
+        auto t = load_profile_table_json(R"({"profiles":[
+          {"id":0,"mcs":0,"guard_interval":"long","tx_power_level":4,
+           "airtime_budget_frac":0.6,"arq_deadline_ms":{"iframe":80,"pframe":25},
+           "bitrate_min_kbps":2200,"reserve_bps":{"control":64000,"telemetry":32000}}],
+          "floor_profile":5})");
+        CHECK(!t);
+        CHECK(t.error.find("floor_profile") != std::string::npos);
+    }
+    {
+        // Fractions outside [0,1] rejected.
+        auto t = load_profile_table_json(R"({"profiles":[
+          {"id":0,"mcs":0,"guard_interval":"long","tx_power_level":4,
+           "airtime_budget_frac":1.5,"arq_deadline_ms":{"iframe":80,"pframe":25},
+           "bitrate_min_kbps":2200,"reserve_bps":{"control":64000,"telemetry":32000}}],
+          "floor_profile":0})");
+        CHECK(!t);
+    }
+
+    return wbtest_finish("config_test");
+}

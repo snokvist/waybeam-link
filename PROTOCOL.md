@@ -255,6 +255,26 @@ the DATA/LINK_REPORT `table_version` against its own local table's hash. Mismatc
 liveness check; widen to CRC-16 in `ver_type` version 1 if field data shows
 collisions.
 
+**Concrete definition (normative, operator-ruled 2026-07-10):** the hash is
+**CRC-8/DVB-S2** — polynomial `0xD5`, init `0x00`, no reflection, no final XOR
+(the same CRC-8 the ecosystem's CRSF stack uses) — computed over the following
+**canonical binary serialization** of the profile table:
+
+- `count` u8 — number of profiles;
+- for each profile, **sorted ascending by `id`** (duplicate `id`s are a config
+  error), the fields in this exact order, big-endian, 25 bytes per profile:
+  `id` u8 · `mcs` u8 · `gi` u8 (0=long, 1=short) · `tx_power_level` u8 ·
+  `airtime_budget_permille` u16 · `fec_scheme` u8 (0=none, 1=rlc256,
+  2=rlc256_iframe, 3=tetrys_reactive) · `fec_overhead_permille` u16 ·
+  `arq_deadline_iframe_ms` u16 · `arq_deadline_pframe_ms` u16 ·
+  `bitrate_min_kbps` u32 · `reserve_control_bps` u32 · `reserve_telemetry_bps` u32;
+- `floor_profile` u8.
+
+Fractional JSON fields (`airtime_budget_frac`, `fec_overhead_frac`) are scaled to
+integer per-mille with `llround(frac × 1000)` before hashing. The hash is thus
+invariant to JSON formatting, key order, and comments, and changes on any semantic
+change to any profile field.
+
 ### 3.7 The `loss_postdiv_prearq` semantics (do not confuse with wfb_ng)
 
 This field is **post-diversity, pre-ARQ delivered loss** — the loss remaining
@@ -265,6 +285,15 @@ true delivered video loss, and the adaptive demote threshold (§9.1) is tuned
 against it accordingly (~20‰, not wfb_ng's pre-FEC 80‰). The stats output (§15)
 additionally exposes raw `loss_prediversity` for ρ analysis; the two must never be
 conflated in code.
+
+### 3.8 HEARTBEAT packet (type `0x4`) — 11 bytes
+
+The common prefix (§3.1) alone; there is no body (operator-ruled 2026-07-10). A
+presence/keepalive frame: it refreshes the sender's `(originator, session_id)`
+liveness against the §2 idle teardown and gives quiet nodes (e.g. a ground node
+between NACKs, or a node waiting at a rendezvous channel, §11.5) something to be
+discovered by. It carries no stream fields — HEARTBEAT never creates or refreshes
+*per-stream* RX state. Exactly 11 bytes; any other length is a decode error.
 
 ---
 
