@@ -2,6 +2,7 @@
 #define DEVOURER_RX_PACKET_H
 
 #include <cstdint>
+#include <optional>
 #include <span>
 
 /* Parsed RX packet types, shared across chip generations. The per-generation
@@ -64,6 +65,14 @@ struct rx_pkt_attrib
      * receiver's crystal and the transmitter's — the closed-loop CFO tracker's
      * input (see IRtlDevice::SetXtalCap). 0 when the phy-status carries none. */
     int8_t cfo_tail = 0;
+    /* A-MPDU RX markers. paggr: this MPDU arrived inside an aggregated PPDU
+     * (rx-desc PAGGR — 8812 dword1[15], same position in the halmac layout).
+     * ppdu_cnt (halmac only): the MAC's 2-bit received-PPDU counter —
+     * consecutive frames sharing a value shared one PPDU, THE ground-truth
+     * A-MPDU detection signal on the RX side (with paggr and the fact that
+     * only an aggregate's first subframe carries a PHY status). */
+    bool paggr = false;
+    uint8_t ppdu_cnt = 0;
     RX_PACKET_TYPE pkt_rpt_type;
 };
 
@@ -71,6 +80,35 @@ struct Packet
 {
     rx_pkt_attrib RxAtrib;
     std::span<uint8_t> Data;
+
+    /* The transmitter's hardware TX-egress TSF, when the frame carries one.
+     *
+     * For the frames the 802.11 MAC regenerates itself — beacons and probe
+     * responses — the sender's MAC overwrites the 8-byte timestamp field (MPDU
+     * bytes 24-31) with its live TSF at the instant the frame is clocked onto
+     * the air. That is a genuine hardware TX-egress timestamp, latched below the
+     * CSMA/queueing layer (bench-measured sub-µs against an independent
+     * receiver, vs ~100+ µs for any host-side "read the clock after send"
+     * approximation). Paired with RxAtrib.tsfl (this receiver's hardware RX
+     * timestamp), each such frame yields the {remote egress, local arrival}
+     * pair that one-way hardware time distribution is built on — with no
+     * host-clock jitter on either end, and against any beaconing AP, not just a
+     * devourer transmitter.
+     *
+     * Returns nullopt for frames the MAC does not stamp (data frames and mgmt
+     * frames other than beacon / probe-response). */
+    std::optional<uint64_t> TxEgressTsf() const
+    {
+        if (Data.size() < 32)
+            return std::nullopt;
+        const uint8_t fc0 = Data[0];      /* proto=0, type=mgmt, subtype in [7:4] */
+        if (fc0 != 0x80 /* beacon */ && fc0 != 0x50 /* probe response */)
+            return std::nullopt;
+        uint64_t tsf = 0;
+        for (int i = 0; i < 8; ++i)
+            tsf |= static_cast<uint64_t>(Data[24 + i]) << (8 * i);
+        return tsf;
+    }
 };
 
 #endif /* DEVOURER_RX_PACKET_H */
