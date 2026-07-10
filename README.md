@@ -7,10 +7,15 @@ an **adaptive link layer** (per-MCS rate/power + encoder-bitrate control), and a
 coordinated **follow-me channel switch** — built on OpenIPC **devourer** for raw
 802.11 monitor/injection.
 
-> **Status: SPECIFICATION SIGNED FOR IMPLEMENTATION (v1).**
-> PROTOCOL.md v1 folds in the Pass-3 adversarial review (`docs/findings-pass3.md`)
-> and the operator rulings. Several design questions are deliberately deferred to
-> empirical bench gates (§17) rather than settled on paper — see `docs/build-order.md`.
+> **Status: IMPLEMENTATION IN PROGRESS — build-order steps 1–6 built.**
+> Wire codec, I/O/config/stats, TX framer + resend ring, merged RX engine,
+> resend scheduler + arbitration, and the loopback bench + udp-air dev backend
+> are implemented and tested (`ctest --preset dev`, ASan+UBSan; SSC338Q
+> cross-verified via `cmake --preset ssc338q`). The radio path (devourer) and
+> the adaptive/CSA layers are steps 7–11 — see `docs/build-order.md` and the
+> §17 bench gates. Try it without hardware:
+> `./build/dev/waybeam-link loopback -c examples/config.loopback.sample.json`
+> or the two-process udp-air pair (`examples/config.air-{tx,rx}.sample.json`).
 
 ## What this is
 

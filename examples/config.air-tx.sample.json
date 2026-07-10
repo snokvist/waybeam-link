@@ -1,0 +1,15 @@
+{
+  "_comment": "udp-air DEV pair, TX side: RTP in on :5600, air frames fanned out to the RX process's two virtual adapters (:5801/:5802), NACK returns heard on :5810. Run beside config.air-rx.sample.json (same host or across the bench ethernet — adjust IPs). The devourer radio backend replaces the air section at build step 9+.",
+  "node": { "originator": 17, "role": "tx", "preferred_originator": 9 },
+  "profile_table": "profiles/table.example.json",
+  "streams": [
+    { "stream_id": 0, "stream_type": "RTP", "dir": "in",
+      "bind": { "kind": "udp", "listen": "127.0.0.1:5600" } }
+  ],
+  "air": {
+    "kind": "udp",
+    "tx": ["127.0.0.1:5801", "127.0.0.1:5802"],
+    "rx": ["127.0.0.1:5810"]
+  },
+  "stats": { "hz": 1 }
+}

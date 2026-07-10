@@ -1,0 +1,15 @@
+{
+  "_comment": "udp-air DEV pair, RX side: two listen sockets = two virtual diversity adapters (:5801/:5802), NACKs sent back to the TX process on :5810, delivered RTP out on :5700. Pin the latch to originator 17 (optional).",
+  "node": { "originator": 9, "role": "rx" },
+  "profile_table": "profiles/table.example.json",
+  "streams": [
+    { "stream_id": 0, "stream_type": "RTP", "dir": "out", "originator": 17,
+      "bind": { "kind": "udp", "send": "127.0.0.1:5700" } }
+  ],
+  "air": {
+    "kind": "udp",
+    "tx": ["127.0.0.1:5810"],
+    "rx": ["127.0.0.1:5801", "127.0.0.1:5802"]
+  },
+  "stats": { "hz": 1 }
+}

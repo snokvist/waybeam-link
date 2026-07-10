@@ -23,7 +23,11 @@ endif()
 # (SSC338Q / ARMv7 is a first-class target).
 add_library(wblink_core STATIC
     core/src/wire.cpp
-    core/src/table.cpp)
+    core/src/table.cpp
+    core/src/framer.cpp
+    core/src/ring.cpp
+    core/src/rx.cpp
+    core/src/scheduler.cpp)
 target_include_directories(wblink_core PUBLIC core/include)
 
 # --- wblink_io: config/bindings/stats (§15). POSIX sockets + the vendored
@@ -31,7 +35,8 @@ target_include_directories(wblink_core PUBLIC core/include)
 add_library(wblink_io STATIC
     io/src/config.cpp
     io/src/udp.cpp
-    io/src/stats.cpp)
+    io/src/stats.cpp
+    io/src/air_udp.cpp)
 target_include_directories(wblink_io PUBLIC io/include)
 target_include_directories(wblink_io SYSTEM PRIVATE third_party)
 target_link_libraries(wblink_io PUBLIC wblink_core)
