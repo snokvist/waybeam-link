@@ -1,0 +1,22 @@
+waybeam-link
+Copyright (c) 2026 snokvist
+
+This product will (when code lands) include and build upon:
+
+- OpenIPC devourer — userspace RTL8812AU/CU/EU driver, GPL-2.0.
+  https://github.com/OpenIPC/devourer
+- libusb — USB access library, LGPL-2.1-or-later.
+  https://github.com/libusb/libusb
+
+Design and calibration groundwork reuses values, formats, and control discipline
+from (all GPL-2.0, credited for provenance — no code copied into this repo yet):
+
+- waybeam_wfb_ng `link_controller` — adaptive MCS/bitrate control constants and
+  the reactive-demote / probe-promote / flap-freeze state machine (§13).
+- waybeam_venc — the live encoder-bitrate HTTP API surface (§13.6).
+- Realtek rtl88x2eu/cu driver — the `PHY_REG_PG.txt` per-rate TX-power table row
+  format, reused as the per-MCS power data structure (§14).
+
+The adaptive link layer (§13–14) is lifted-and-adapted from the above, not novel.
+The novel contributions of waybeam-link are the diversity+ARQ transport and the
+opaque passive-latch session model. See README.md.

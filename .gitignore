@@ -1,0 +1,18 @@
+# Build output (once code lands)
+/build/
+/out/
+*.o
+*.a
+*.so
+*.so.*
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Local scratch
+/scratch/
+/*.local

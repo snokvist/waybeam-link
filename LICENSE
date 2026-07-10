@@ -1,0 +1,10 @@
+waybeam-link is licensed under the GNU General Public License v2.0 or later
+(SPDX-License-Identifier: GPL-2.0-or-later).
+
+This repository currently contains specification and design documents only.
+The full GPL-2.0-or-later license text will be added here together with the
+first code, when it vendors OpenIPC devourer (GPL-2.0) and libusb
+(LGPL-2.1-or-later). Until then, the documents in this repository are released
+under GPL-2.0-or-later.
+
+See NOTICE for third-party attributions.
