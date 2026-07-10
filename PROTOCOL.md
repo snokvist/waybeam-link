@@ -602,6 +602,13 @@ injection model has no such side stream, so that mechanism is **dropped for v0**
 - **v0 — RSSI-margin promote:** promote when `rssi ≥ next_rung_floor +
   rssi_floor_hyst_db` (**6 dB**) AND no RSSI guard active AND flap-freeze clear AND
   `promote_dwell_s` (**0.5 s**) elapsed. Self-contained, no probe.
+- **`next_rung_floor` provenance (Pass-6 ruling):** per-rung RSSI floors are
+  **node-local policy**, NOT part of the hashed §9.3 wire table — they encode
+  this receiver's antenna/LNA reality, and adding them to the table would break
+  `table_version` for what is local tuning. Config:
+  `policy.select.rung_rssi_floor_dbm`, one dBm value per rung index, seeds
+  `[-88, -85, -83, -80, -77, -73, -71, -70]` (typical HT20 RX sensitivity +
+  margin; §17-overridable, bench re-derivable per rung).
 - **v1 (optional) — active probe:** TX injects a short burst at the next rung, RX
   returns its PER in `probe_per`. Add only if v0 promotes prove too timid.
 
@@ -614,6 +621,14 @@ MCS and bitrate never move together:
   (**0.25 s**), then raise it.
 - **Settle:** `mcs_settle_s` (**5.0 s**, RE-DERIVE — no-FEC loss is spikier)
   suppresses further loss-loop reaction so a transition isn't read as a fade.
+- **The "budget" (Pass-6 ruling — derived, not configured):** each rung's
+  bitrate target is computed, all-integer, from the profile itself:
+  `HT20 PHY rate(mcs, gi) × airtime_budget_permille/1000 ×
+  (1000 − fec_overhead_permille)/1000 − reserve_control_bps −
+  reserve_telemetry_bps`, floored at `bitrate_min_kbps`. PHY rates (kbps,
+  20 MHz, long GI): `{6500, 13000, 19500, 26000, 39000, 52000, 58500, 65000}`
+  for MCS0–7; short GI = ×10/9. No separate per-rung bitrate field exists —
+  the table's airtime fraction IS the bitrate policy.
 
 ### 9.6 Encoder actuation (venc, same SoC)
 Live HTTP, `MUT_LIVE`, sub-ms, no reinit:
@@ -693,6 +708,12 @@ stock Realtek `PHY_REG_PG.txt` power-by-rate format (`docs/groundwork.md §14`).
   in the `PHY_REG_PG.txt` row format, holding the **absolute** `qdb` values. The
   controller resolves `(this adapter, profile.mcs, profile.tx_power_level)` → an
   absolute `SetTxPowerOffsetQdb` value and applies it to that adapter's device.
+- **Level→absolute law (Pass-6 ruling):** the authored per-MCS curve **IS
+  level 4** (the baseline intent). The controller computes
+  `absolute_qdb = curve[mcs] + (tx_power_level − 4) × 8 qdb` (one level step =
+  2 dB), then applies the §10.3 `max_power_qdb` ceiling if configured. One
+  curve row to author per adapter; levels are a portable, monotonic offset
+  around it — no per-level tables.
 
 ### 10.3 No regulatory clamp — operator responsibility
 devourer applies whatever value it is given; `SetTxPowerIndexOverride` is a raw

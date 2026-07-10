@@ -117,6 +117,24 @@ stream forever. Amended §6.6 (flagged in PR #3, merged; spec updated here):
   (§2 startup-floor semantics, `resyncs` stat). A forger must sustain an
   unbroken flood for the full window to force a flush.
 
+## Pass 6 — 2026-07-10 — step-8 implementation-gap rulings (operator)
+
+Planning the §9/§10 build surfaced three spec gaps; operator ruled, folded into
+PROTOCOL.md spec-commit-first (same PR as the step-8 code):
+
+- **§9.4 `next_rung_floor` was unsourced** → ruled **node-local config array**
+  `policy.select.rung_rssi_floor_dbm` (one dBm floor per rung, §17-overridable,
+  seeds from typical HT20 RX sensitivity + margin). Deliberately NOT in the
+  hashed §9.3 wire table: receiver-local physics, and a table field would break
+  `table_version` for local tuning.
+- **§10.2 `tx_power_level` → absolute mapping was undefined** → ruled **curve +
+  level offset**: the authored per-adapter per-MCS curve IS level 4;
+  `absolute_qdb = curve[mcs] + (level − 4) × 8 qdb` (2 dB/step), then the
+  opt-in `max_power_qdb` ceiling.
+- **§9.5 "budget" had no definition** → documented as **derived, not
+  configured**: HT20 PHY rate × airtime fraction × (1 − FEC overhead) −
+  reserves, floored at `bitrate_min_kbps`, integer math.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
