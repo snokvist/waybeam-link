@@ -57,12 +57,15 @@ bool VencActuator::http_get(const std::string& path) {
     return sp != nullptr && sp[1] == '2';
 }
 
-bool VencActuator::set_bitrate(uint32_t kbps) {
+bool VencActuator::set_bitrate(uint32_t kbps, uint64_t now_ms) {
     if (!cfg_.enabled) {
         return true;
     }
     if (last_ && *last_ == kbps) {
         return true;  // §9.6 write-on-change: flash wear
+    }
+    if (now_ms < no_retry_until_ms_) {
+        return false;  // failure hold-off; the caller re-offers next tick
     }
     ++pushes_;
     const bool ok =
@@ -71,7 +74,8 @@ bool VencActuator::set_bitrate(uint32_t kbps) {
         last_ = kbps;
     } else {
         ++failures_;
-        // last_ stays unset/stale so the next tick retries the push.
+        no_retry_until_ms_ = now_ms + 500;
+        // last_ stays unset/stale so a later tick retries the push.
     }
     return ok;
 }

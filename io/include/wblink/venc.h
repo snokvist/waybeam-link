@@ -24,9 +24,13 @@ class VencActuator {
   public:
     explicit VencActuator(const VencCfg& cfg) : cfg_(cfg) {}
 
-    // Push kbps if it differs from the last pushed value. Returns true when
-    // no HTTP call was needed or the call succeeded (2xx status line).
-    bool set_bitrate(uint32_t kbps);
+    // Push kbps if it differs from the last SUCCESSFULLY pushed value.
+    // Returns true when no HTTP call was needed or the call succeeded (2xx
+    // status line). Callers may invoke this every tick: write-on-change
+    // dedupes, and after a failure retries are held off for 500 ms so a
+    // wedged encoder (200 ms socket budget per attempt) cannot degrade the
+    // event loop.
+    bool set_bitrate(uint32_t kbps, uint64_t now_ms);
 
     uint64_t pushes() const { return pushes_; }
     uint64_t failures() const { return failures_; }
@@ -37,6 +41,7 @@ class VencActuator {
 
     VencCfg cfg_;
     std::optional<uint32_t> last_;
+    uint64_t no_retry_until_ms_ = 0;
     uint64_t pushes_ = 0;
     uint64_t failures_ = 0;
 };
