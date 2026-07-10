@@ -87,15 +87,23 @@ NO per-packet power** — TXAGC is static until the next `SetMonitorChannel` /
 **Our hardware maps to the no-per-packet families:** 8812AU = Jaguar1, 8812CU =
 Jaguar3 (8822C-class). So:
 
-> **Design consequence (the important one):** power is a **per-operating-point
-> scalar**, not per-frame. Each §13.3 profile pins one MCS, so it carries one
-> `tx_power_qdb` offset, applied via `SetTxPowerOffsetQdb()` at the same commit as
-> the MCS change (§13.5). The driver's per-*rate* TXT table (many rates at once,
-> needed because an associated STA sends a mix) collapses for us to one value per
-> profile — the power for that profile's single MCS. Devourer applying it
-> **globally is correct**, because only one MCS is injected per profile. No
-> per-rate TXAGC register writes (Jaguar3's 0x3a00 diff table is efuse-populated
-> and not publicly writable anyway).
+> **Design consequences (two, per PROTOCOL.md §14.1–14.2.1):**
+> 1. **Not per-packet** — power moves at operating-point cadence (one MCS per
+>    profile), applied via `SetTxPowerOffsetQdb()` / `SetTxPowerIndexOverride()`.
+> 2. **Per-adapter, NOT fleet-global** — each physical adapter is a separate
+>    `IRtlDevice` with its own efuse cal / antenna / role; power is set on each
+>    device individually and the right value differs per adapter. Power is indexed
+>    by (adapter × MCS). The absolute per-adapter values live in a **node-local**
+>    per-adapter table (PHY_REG_PG.txt format); the on-air profile carries only a
+>    portable power **level/intent**.
+> 3. **NO regulatory clamp** — `SetTxPowerIndexOverride` is a *raw absolute* index,
+>    `SetTxPowerOffsetQdb` an *uncapped* offset. devourer applies whatever it's
+>    given; efuse/regdomain do NOT bound it. Power is entirely the operator's
+>    responsibility and MAY intentionally exceed regulatory limits.
+>    `GetTxPowerCaps/State` = hardware range for reference, not a safety limit.
+> (Jaguar3's 0x3a00 per-rate diff table is efuse-populated / not publicly
+> writable — irrelevant to us since we use the per-adapter global offset, not a
+> per-rate table.)
 
 Per-chip per-rate detail (for reference; not needed by our per-profile model):
 - Jaguar1: direct per-rate TXAGC registers (`RadioManagementModule.cpp:2383`).

@@ -634,53 +634,86 @@ clears its MCS at the **minimum power that works** (the OpenIPC energy objective
 §13.0). Grounded in the stock Realtek `PHY_REG_PG.txt` power-by-rate format and
 devourer's TX-power API; see `docs/groundwork.md` for citations.
 
-### 14.1 Model — power is per-profile, not per-packet
+### 14.1 Model — power is per-adapter and per-profile, not per-packet
 
-Our target radios (8812AU = Jaguar1, 8812CU = Jaguar3) have **no per-packet TX
-power** in devourer — TXAGC is static until re-tuned (only Jaguar2 has a coarse
-per-packet radiotap path). This is not a limitation for us: every §13.3 profile
-pins exactly **one** MCS, so per-MCS power collapses to **one scalar per
-profile**, applied via `SetTxPowerOffsetQdb()` at the same commit as the MCS
-change (§13.5). Devourer applying it globally is correct — only one MCS is
-injected per profile.
+Two things collapse the granularity, one thing expands it:
 
-### 14.2 Power table — reuse the `PHY_REG_PG.txt` row format
+- **Not per-packet.** 8812AU = Jaguar1, 8812CU = Jaguar3 have **no per-packet TX
+  power** in devourer — TXAGC is static until re-tuned (only Jaguar2 has a coarse
+  per-packet radiotap path). Fine for us: each §13.3 profile pins one MCS, so
+  power moves only at operating-point cadence, applied via
+  `SetTxPowerOffsetQdb()` / `SetTxPowerIndexOverride()` at the MCS-change commit
+  (§13.5), never per frame.
+- **Per-adapter, NOT fleet-global.** Every physical adapter is a **separate
+  devourer `IRtlDevice`** with its own efuse power calibration, antenna gain,
+  thermal state, and role. Power is set on **each device individually**, and the
+  correct value **differs per adapter**. So the power dimension is indexed by
+  **(adapter × MCS)**, never one fleet-wide number. ("Global" earlier meant "not
+  per-packet" — it is emphatically per-device, applied to each `IRtlDevice`
+  in the fleet on its own.)
 
-Author the per-MCS curve as a data file in the driver's proven row format:
+### 14.2 Where power lives — portable profile vs. local per-adapter table
+
+Because absolute power is hardware-specific it **cannot** live in the on-air
+profile (which is shared by index and must be portable across nodes/adapters):
+
+- **On-air profile (§13.3)** carries only a power **intent** — a target level /
+  index — alongside the MCS. Portable, hardware-agnostic.
+- **Each TX node keeps a LOCAL per-adapter power map**, one per physical adapter
+  (keyed by adapter identity / efuse), authored in the driver's proven
+  `PHY_REG_PG.txt` row format:
 
 ```
 #[v2][Exact]#
 #[2.4G]A
-[1]  <mcs_or_rate>  <trim>      # per (band, rf-path, MCS) → qdB trim
+[1]  <mcs_or_rate>  <value>     # per (adapter, band, rf-path, MCS) → power
 ...
 0xffff
 ```
 
-- **Rate/MCS axis** uses the driver's rate-index enum (`MGN_MCS0=12 …`,
-  groundwork §14). We only populate the rungs the profile table uses (HT MCS0–7).
-- **Values are relative qdB trims** (curve *shape*): higher MCS needs more SNR →
-  more power. This maps directly onto devourer's offset knob, and the
-  efuse/regulatory domain still owns the **absolute ceiling** — so a mis-authored
-  table can never exceed the legal/calibrated max (regulatory-safe by
-  construction). Absolute-dBm targeting is possible but requires a
-  `GetTxPowerCaps/GetTxPowerState` baseline read first; deferred.
+The controller resolves `(this adapter, profile.mcs, profile.level)` → an
+absolute devourer setting and applies it to that adapter's device. The MCS axis
+uses the driver rate-index enum (`MGN_MCS0=12 …`, groundwork §14); only the rungs
+the profile table uses (HT MCS0–7) need populating.
+
+### 14.2.1 No regulatory clamp — power is fully our responsibility
+
+**devourer applies whatever value it is given.** `SetTxPowerIndexOverride(idx)` is
+a *raw absolute* index and `SetTxPowerOffsetQdb(qdb)` an *uncapped* offset; neither
+is limited to the efuse/regdomain ceiling. There is **no regulatory clamp in the
+userspace driver**. Consequences:
+
+- The per-adapter table holds **absolute, operator-authored** values, not
+  "regulatory-safe trims." A mis-authored table **can and will** exceed legal /
+  calibrated limits.
+- Values **may intentionally exceed regulatory limits** for range — a deliberate
+  operator choice and **their legal responsibility**, not a guard-railed default.
+- `GetTxPowerCaps` / `GetTxPowerState` report each adapter's *hardware* range for
+  reference and per-adapter baseline reads — they are **not** a safety limit.
+- Recommend a per-node configurable `max_power` sanity ceiling in the controller
+  (opt-in, off by default) so a fat-fingered table can't silently cook a PA or
+  breach limits unless the operator explicitly raises it.
 
 ### 14.3 Actuation and sequencing
 
-- On profile commit, set the MCS (devourer `FastRetune`/radiotap rate) **and**
-  `SetTxPowerOffsetQdb(trim(profile.mcs))` together, inside the §13.5 sequenced
-  transition (bitrate still leads on demote / lags on promote).
-- `ReApplyTxPower()` re-asserts the current offset after any devourer re-tune that
-  resets TXAGC (e.g. a channel change).
+- On profile commit, for **each transmitting adapter** resolve
+  `(adapter, profile.mcs, profile.level)` from that adapter's local power map
+  (§14.2) and apply it to that adapter's `IRtlDevice` — `SetTxPowerOffsetQdb()`
+  or `SetTxPowerIndexOverride()` — together with the MCS change, inside the §13.5
+  sequenced transition (bitrate still leads on demote / lags on promote). Fleet
+  members are set **individually**; values may differ.
+- `ReApplyTxPower()` re-asserts that adapter's setting after any devourer re-tune
+  that resets TXAGC (e.g. a channel change).
 - Power is **not** a fast loop — it moves only with the operating point, at
   profile-change cadence, never per-frame.
 
 ### 14.4 Interaction with the probe (§13.4)
 
-The V+2 boundary probe (if built, §13.4b) injects at MCS+1/+2 but at the **same
-global power** as the base stream — which is what you want: hold power constant,
-vary MCS, measure whether the higher rung's PER is clean. No per-rate power split
-is needed (and none is available on J1/J3).
+The V+2 boundary probe (if built, §13.4b) injects at MCS+1/+2 but at **each
+adapter's own current power** (unchanged) — which is what you want: hold power
+constant per adapter, vary MCS, measure whether the higher rung's PER is clean.
+No per-rate power split within an adapter is needed (and none is available on
+J1/J3).
 
 ### 14.5 Deployment note
 

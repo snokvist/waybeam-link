@@ -16,6 +16,20 @@ here: date, reviewer, what changed, open questions.
   score (rule cascade), promote is a V+2 probe, venc has no bitrate-authority flag.
 - **Per-MCS TX power (§14) added** [pending — see groundwork.md TX-power section].
 
+## Pass 2 — 2026-07-10 — TX-power corrections (operator)
+
+- **Per-adapter, not fleet-global.** Each diversity adapter is a separate devourer
+  `IRtlDevice` with its own efuse power calibration/antenna/role — power is set per
+  device and differs per adapter. §14 reworked: power indexed by (adapter × MCS);
+  absolute values live in a node-local per-adapter table; the on-air profile
+  carries only a portable power *level/intent*. `tx_power_qdb` → `tx_power_level`
+  in the example profile.
+- **No regulatory clamp.** devourer's `SetTxPowerIndexOverride` is a raw absolute
+  index (uncapped); the earlier "efuse owns the ceiling / regulatory-safe by
+  construction" claim was WRONG and is removed (§14.2.1). Power is fully the
+  operator's responsibility and may intentionally exceed regulatory limits;
+  recommended opt-in `max_power` sanity ceiling in the controller.
+
 ## Open questions for the next pass
 
 - [ ] Promote mechanism: ship v0 RSSI-margin (§13.4a) or invest in the active
