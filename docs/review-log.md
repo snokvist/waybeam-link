@@ -135,6 +135,30 @@ PROTOCOL.md spec-commit-first (same PR as the step-8 code):
   configured**: HT20 PHY rate × airtime fraction × (1 − FEC overhead) −
   reserves, floored at `bitrate_min_kbps`, integer math.
 
+## Pass 7 — 2026-07-10 — step-9 encapsulation ruling (operator)
+
+Planning the devourer backend surfaced that §0 said "devourer owns radiotap +
+the 802.11 MAC header" without ever pinning the MAC header's content or the
+RX-side frame filter — wire interop territory. Operator ruled **pinned data
+frame + SA-prefix filter**, folded in as new **§3.0**:
+
+- 24-byte non-QoS Data frame, ToDS/FromDS=0, Duration 0, DA=broadcast (a
+  broadcast DA can never solicit an 802.11 MAC ACK — keeps the §1 no-MAC-ARQ
+  invariant structural, not behavioral).
+- SA = locally-administered `57:42:<net_id>:<originator u16 BE>:<adapter idx>`;
+  BSSID = fixed `57:42:4c:4b:00:00` ("WBLK"). Frame body = raw waybeam-link
+  packet, no LLC/SNAP.
+- RX filter: Data && SA prefix `57:42` (&& `net_id` equality only when the
+  node configures one) && payload magic + header validation. `net_id` is a
+  new optional node-local config so co-located systems partition at L2;
+  explicitly not access control.
+- Rejected alternative: broadcast-everything + payload-magic-only filter —
+  simpler spec text but no L2 discriminator and no co-location separation.
+
+Same pass, scope ruling: step 9 is **code-only** (vendor devourer, radio
+backend, §7.2 quiet-gap pacer; verified by tests + x86 ASan + SSC338Q cross).
+Hardware bring-up and gates 1–4 stay at step 11.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
