@@ -177,6 +177,9 @@ Result<Config> load_config_json(const std::string& json_text) {
                                    ("stream " + std::to_string(sid)).c_str());
             if (!bind) return Result<Config>::fail(bind.error);
             sc.bind = std::move(*bind.value);
+            if (s.contains("originator")) {
+                sc.originator = s.at("originator").get<uint16_t>();
+            }
             ++udp_bindings;
             cfg.streams.push_back(std::move(sc));
         }
@@ -211,6 +214,42 @@ Result<Config> load_config_json(const std::string& json_text) {
                 arq.holddown_ms = pa.value("holddown_ms", arq.holddown_ms);
                 arq.fwd_clamp_blocks =
                     pa.value("fwd_clamp_blocks", arq.fwd_clamp_blocks);
+                arq.ring_window_ms =
+                    pa.value("ring_window_ms", arq.ring_window_ms);
+                arq.ring_byte_budget =
+                    pa.value("ring_byte_budget", arq.ring_byte_budget);
+                arq.classifier_size_threshold =
+                    pa.value("classifier_size_threshold",
+                             arq.classifier_size_threshold);
+                arq.release_timeout_ms =
+                    pa.value("release_timeout_ms", arq.release_timeout_ms);
+                arq.min_recoverable_ms =
+                    pa.value("min_recoverable_ms", arq.min_recoverable_ms);
+                arq.budget_interval_ms =
+                    pa.value("budget_interval_ms", arq.budget_interval_ms);
+                arq.budget_floor_bytes =
+                    pa.value("budget_floor_bytes", arq.budget_floor_bytes);
+                arq.max_block_pkts =
+                    pa.value("max_block_pkts", arq.max_block_pkts);
+            }
+            if (p.contains("rx")) {
+                const json& pr = p.at("rx");
+                RxCfgPolicy& rx = cfg.policy.rx;
+                rx.stall_timeout_ms =
+                    pr.value("stall_timeout_ms", rx.stall_timeout_ms);
+                rx.dwell_ceiling_ms =
+                    pr.value("dwell_ceiling_ms", rx.dwell_ceiling_ms);
+                rx.admit_n = pr.value("admit_n", rx.admit_n);
+                rx.admit_window_ms =
+                    pr.value("admit_window_ms", rx.admit_window_ms);
+                rx.renack_attempts =
+                    pr.value("renack_attempts", rx.renack_attempts);
+                rx.renack_backoff_ms =
+                    pr.value("renack_backoff_ms", rx.renack_backoff_ms);
+                rx.idle_teardown_ms =
+                    pr.value("idle_teardown_ms", rx.idle_teardown_ms);
+                rx.fwd_clamp_pkts =
+                    pr.value("fwd_clamp_pkts", rx.fwd_clamp_pkts);
             }
             if (p.contains("fec")) {
                 const json& pf = p.at("fec");
@@ -256,6 +295,49 @@ Result<Config> load_config_json(const std::string& json_text) {
                 if (!bind) return Result<Config>::fail(bind.error);
                 cfg.stats.bind = std::move(*bind.value);
                 ++udp_bindings;
+            }
+        }
+
+        // air (dev backend; not §15 — devourer replaces it at bring-up)
+        if (j.contains("air")) {
+            const json& a = j.at("air");
+            const std::string kind = a.value("kind", std::string("udp"));
+            if (kind != "udp") {
+                return Result<Config>::fail(
+                    "air: kind \"" + kind + "\" unknown (v0 dev backend is udp)");
+            }
+            cfg.air.kind = AirCfg::Kind::kUdp;
+            for (const json& t : a.value("tx", json::array())) {
+                cfg.air.udp.tx.push_back(t.get<std::string>());
+            }
+            for (const json& r : a.value("rx", json::array())) {
+                cfg.air.udp.rx.push_back(r.get<std::string>());
+            }
+        }
+
+        // loopback (§16.2 synthetic loss)
+        if (j.contains("loopback")) {
+            const json& lb = j.at("loopback");
+            LoopbackCfg& l = cfg.loopback;
+            const uint64_t n_adapters = lb.value("adapters", 2u);
+            if (n_adapters < 1 || n_adapters > 8) {
+                return Result<Config>::fail("loopback: adapters must be 1..8");
+            }
+            l.adapters = static_cast<uint8_t>(n_adapters);
+            l.seed = lb.value("seed", l.seed);
+            l.correlation = lb.value("correlation", l.correlation);
+            l.return_loss_p = lb.value("return_loss_p", l.return_loss_p);
+            if (lb.contains("loss")) {
+                const json& loss = lb.at("loss");
+                l.uniform_p = loss.value("uniform_p", 0.0);
+                if (loss.contains("ge")) {
+                    const json& ge = loss.at("ge");
+                    l.ge = std::array<double, 4>{
+                        ge.at("p_gb").get<double>(),
+                        ge.at("p_bg").get<double>(),
+                        ge.at("loss_g").get<double>(),
+                        ge.at("loss_b").get<double>()};
+                }
             }
         }
 

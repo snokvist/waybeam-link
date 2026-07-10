@@ -35,7 +35,8 @@ target_include_directories(wblink_core PUBLIC core/include)
 add_library(wblink_io STATIC
     io/src/config.cpp
     io/src/udp.cpp
-    io/src/stats.cpp)
+    io/src/stats.cpp
+    io/src/air_udp.cpp)
 target_include_directories(wblink_io PUBLIC io/include)
 target_include_directories(wblink_io SYSTEM PRIVATE third_party)
 target_link_libraries(wblink_io PUBLIC wblink_core)

@@ -41,6 +41,12 @@ struct RxPolicy {
     uint8_t renack_attempts = 3;       // §6.4 bounded retries
     uint32_t renack_backoff_ms = 15;   // per-attempt backoff step
     uint32_t idle_teardown_ms = 5000;  // §2 implicit teardown
+    // §6.6 escape hatch: a stream whose packets are ALL clamp-rejected for
+    // this long is desynced by a real outage (the TX ran ahead more than
+    // the clamp allows), not under attack — resync by adopting the next
+    // packet as a fresh floor. A forger must now sustain a flood for this
+    // whole window to force a flush, vs. one packet without the clamp.
+    uint32_t clamp_resync_ms = 500;
     // §8 fallback budgets when no profile-table entry resolves.
     uint16_t default_deadline_iframe_ms = 50;
     uint16_t default_deadline_pframe_ms = 16;
@@ -66,6 +72,7 @@ struct RxStreamCounters {
     uint64_t dropped_unrecoverable = 0;  // lost + not ARQ-eligible
     uint64_t nacks_sent = 0;             // NACK packets built
     uint64_t clamp_rejected = 0;         // §6.6 hits
+    uint64_t resyncs = 0;                // sustained-clamp re-floors
     uint64_t table_mismatch = 0;         // §3.4 fallback packets
     uint32_t highest_seq = 0;
 };
@@ -154,6 +161,7 @@ class RxEngine {
         uint32_t max_block = 0;
         uint32_t last_delivered_block = 0;
         uint64_t last_activity_ms = 0;
+        uint64_t first_clamp_ms = 0;  // start of an unbroken clamp storm
         std::map<uint32_t, Held> held;
         std::map<uint32_t, BlockInfo> blocks;
         std::map<uint32_t, Gap> gaps;

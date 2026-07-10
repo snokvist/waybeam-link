@@ -313,6 +313,32 @@ int main() {
         CHECK_EQ_U(h.engine.live_adapter_count(), 1);
     }
 
+    // --- §6.6 sustained-clamp resync: outage recovery, forgery still hard ----
+    {
+        RxPolicy p;
+        p.clamp_resync_ms = 500;
+        Harness h(p);
+        h.latch();
+        // A single forged far-future packet: rejected, no state change.
+        h.feed(0, 900000, 90000, 0, 10);
+        CHECK_EQ_U(h.counters().clamp_rejected, 1);
+        CHECK_EQ_U(h.counters().resyncs, 0);
+        // Legit traffic keeps flowing -> the storm window resets.
+        h.feed(0, 3, 0, 0, 20);
+        // A real outage: the TX ran far ahead; everything now clamps...
+        h.feed(0, 5000, 500, 0, 1000);
+        h.feed(0, 5001, 500, 0, 1200);
+        h.feed(0, 5002, 500, 0, 1400);
+        CHECK_EQ_U(h.counters().resyncs, 0);  // still inside the window
+        // ...until the storm has lasted clamp_resync_ms: re-floor.
+        h.feed(0, 5003, 500, 0, 1600);
+        CHECK_EQ_U(h.counters().resyncs, 1);
+        CHECK_EQ_U(h.delivered.back().second[0], static_cast<uint8_t>(5003));
+        // Stream is live again under the new floor.
+        h.feed(0, 5004, 500, 0, 1601);
+        CHECK_EQ_U(h.delivered.back().second[0], static_cast<uint8_t>(5004));
+    }
+
     // --- §2 idle teardown ------------------------------------------------------
     {
         RxPolicy p;

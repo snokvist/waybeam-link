@@ -181,13 +181,38 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
         ++s->counters.table_mismatch;
     }
 
-    // §6.6 plausible-forward clamps.
+    // §6.6 plausible-forward clamps. The block clamp references max_block
+    // (newest legitimately heard block), NOT the last delivered block: in a
+    // deep fade the cursor advances by deadline-skips without delivering,
+    // and a delivered-block reference would freeze and clamp-reject the
+    // entire recovering stream. Ratcheting max_block costs an attacker one
+    // accepted in-clamp packet per +K step — the §6.6 accepted residual.
     if (!plausible_forward(s->cursor, v.hdr.seq, policy_.fwd_clamp_pkts) ||
-        !plausible_forward(s->last_delivered_block, v.hdr.block_id,
+        !plausible_forward(s->max_block, v.hdr.block_id,
                            policy_.fwd_clamp_blocks)) {
         ++s->counters.clamp_rejected;
-        return;
+        // Sustained-clamp escape: if NOTHING has passed the clamp for
+        // clamp_resync_ms, the stream is desynced by a real outage — adopt
+        // this packet as a fresh floor (like a re-latch, §2 startup floor).
+        if (s->first_clamp_ms == 0) {
+            s->first_clamp_ms = now_ms;
+            return;
+        }
+        if (now_ms - s->first_clamp_ms < policy_.clamp_resync_ms) {
+            return;
+        }
+        ++s->counters.resyncs;
+        s->cursor = v.hdr.seq;
+        s->max_seq = v.hdr.seq;
+        s->max_block = v.hdr.block_id;
+        s->last_delivered_block = v.hdr.block_id;
+        s->held.clear();
+        s->gaps.clear();
+        s->blocks.clear();
+        s->adapter_last_seq.clear();
+        // fall through: this packet is accepted under the new floor
     }
+    s->first_clamp_ms = 0;  // any accepted packet ends the storm window
 
     // §6.1 dedup: first copy wins; later copies feed the diversity gauge.
     if (v.hdr.seq < s->cursor || s->held.count(v.hdr.seq) != 0) {

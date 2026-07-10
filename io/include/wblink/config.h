@@ -4,6 +4,7 @@
 // spec seed value — bench re-derivation (§17) is config, not recompile.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -46,6 +47,9 @@ struct StreamCfg {
     uint8_t stream_type = 0;  // §3.4 registry value
     Dir dir = Dir::kIn;
     BindCfg bind;
+    // out-streams only: optionally pin the latch to one sender (§2 v0 latch
+    // policy — first admitted tuple matching type [+ originator]).
+    std::optional<uint16_t> originator;
 };
 
 // §9.1 cascade + §9.4/§9.5/§9.7 constants (seeds; RE-DERIVE per §17).
@@ -66,6 +70,27 @@ struct ArqPolicy {
     uint8_t attempt_cap = 3;
     uint32_t holddown_ms = 20;
     uint32_t fwd_clamp_blocks = 4;  // §6.6 clamp K, in blocks
+    // §5.2 ring + §5.3/§12 scheduler knobs (all §17-overridable seeds).
+    uint32_t ring_window_ms = 50;
+    uint32_t ring_byte_budget = 256 * 1024;
+    uint32_t classifier_size_threshold = 8 * 1024;  // §4.1 size heuristic
+    uint32_t release_timeout_ms = 500;              // §12 contested release
+    uint32_t min_recoverable_ms = 0;                // §5.3; gate-3 measured
+    uint32_t budget_interval_ms = 100;
+    uint32_t budget_floor_bytes = 4096;
+    uint32_t max_block_pkts = 64;  // §13 bitmap sanity clamp
+};
+
+// §6 RX-side knobs (all §17-overridable seeds).
+struct RxCfgPolicy {
+    uint32_t stall_timeout_ms = 200;   // §6.5
+    uint32_t dwell_ceiling_ms = 20;    // §6.2-3
+    uint8_t admit_n = 3;               // §2
+    uint32_t admit_window_ms = 1000;   // §2
+    uint8_t renack_attempts = 3;       // §6.4
+    uint32_t renack_backoff_ms = 15;   // §6.4
+    uint32_t idle_teardown_ms = 5000;  // §2
+    uint32_t fwd_clamp_pkts = 256;     // §6.6 seq clamp
 };
 
 struct FecPolicy {
@@ -96,9 +121,33 @@ struct Policy {
     uint32_t report_timeout_ms = 500;
     SelectPolicy select;
     ArqPolicy arq;
+    RxCfgPolicy rx;
     FecPolicy fec;
     ReturnPolicy ret;  // JSON key "return" (C++ keyword)
     CsaPolicy csa;
+};
+
+// Dev-tooling air backend (NOT part of §15; devourer replaces this at the
+// hardware bring-up). One UDP socket = one virtual adapter.
+struct AirUdpCfg {
+    std::vector<std::string> tx;  // frame targets (tx: video; rx: NACKs)
+    std::vector<std::string> rx;  // listen sockets = virtual adapters
+};
+struct AirCfg {
+    enum class Kind : uint8_t { kNone, kUdp };
+    Kind kind = Kind::kNone;
+    AirUdpCfg udp;
+};
+
+// Loopback-mode synthetic loss (§16.2). Dev tooling, not §15.
+struct LoopbackCfg {
+    uint8_t adapters = 2;
+    uint64_t seed = 1;
+    double correlation = 0.0;
+    double uniform_p = 0.0;
+    // Gilbert-Elliott, mirrors core GeParams; nullopt = uniform only.
+    std::optional<std::array<double, 4>> ge;  // p_gb, p_bg, loss_g, loss_b
+    double return_loss_p = 0.0;  // loss on the NACK return direction
 };
 
 struct StatsCfg {
@@ -113,6 +162,8 @@ struct Config {
     std::vector<StreamCfg> streams;
     Policy policy;
     StatsCfg stats;
+    AirCfg air;           // dev backend; empty until devourer lands
+    LoopbackCfg loopback;  // loopback-mode loss injection
 };
 
 // Minimal expected-style result (C++20 has no std::expected).
