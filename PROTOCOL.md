@@ -137,15 +137,22 @@ this shape (Pass-7 ruling):
 | Frame Control | `0x08 0x00` — Data (not QoS), ToDS=0, FromDS=0, no flags |
 | Duration | `0` |
 | addr1 (DA) | `ff:ff:ff:ff:ff:ff` — broadcast, so the frame can never solicit an 802.11 MAC ACK (§1 no-MAC-ARQ invariant) |
-| addr2 (SA) | `57:42:NN:OO:OO:AA` — locally-administered; `NN` = `net_id` u8, `OO:OO` = `originator` u16 BE (§2), `AA` = sender adapter index (diagnostics only) |
-| addr3 (BSSID) | `57:42:4c:4b:00:00` — fixed `"WBLK"` tag |
+| addr2 (SA) | `56:42:NN:OO:OO:AA` — locally-administered **unicast**; `NN` = `net_id` u8, `OO:OO` = `originator` u16 BE (§2), `AA` = sender adapter index (diagnostics only) |
+| addr3 (BSSID) | `56:42:4c:4b:00:00` — fixed `"VBLK"` tag |
 | Sequence Control | injector-incremented per frame (fragment 0) |
+
+The SA first octet is `0x56`, not the payload magic's `0x57`: `0x57` has the
+I/G bit set, making it a **group address** — nonconforming as a transmitter
+address and structurally unable to ever solicit an ACK. `0x56` keeps the
+locally-administered bit and clears I/G, so every waybeam-link SA is a valid
+unicast TA (Pass-8 ruling; keeps the hardware ACK-responder door open for the
+uplink, §7.2 note). The payload `magic` (§3.1) remains `0x57 0x42`.
 
 The frame body that follows is the raw waybeam-link packet (§3.1 onward) — no
 LLC/SNAP, no encryption. The FCS is the radio's.
 
 **RX filter** (in priority order, cheapest first): type/subtype == Data &&
-`SA[0..1] == 57:42` (&& `SA[2] == net_id` **when the node configures one**;
+`SA[0..1] == 56:42` (&& `SA[2] == net_id` **when the node configures one**;
 an unconfigured node accepts any `net_id`) && payload `magic` + full header
 validation (§3.1). `net_id` is node-local config, stamped by every TX
 (default `0`); it exists so co-located waybeam-link systems can partition

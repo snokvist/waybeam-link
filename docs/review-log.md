@@ -159,6 +159,33 @@ Same pass, scope ruling: step 9 is **code-only** (vendor devourer, radio
 backend, §7.2 quiet-gap pacer; verified by tests + x86 ASan + SSC338Q cross).
 Hardware bring-up and gates 1–4 stay at step 11.
 
+## Pass 8 — upstream devourer aggregation/HW-ACK review + §3.0 SA amendment (2026-07-11)
+
+Reviewed upstream devourer 3025e2d ("Packet aggregation and hardware ACKs in
+userspace", PR #239; four off-by-default capabilities) against our design.
+Operator ruled **no pivot**: broadcast + importance-gated NACK-ARQ stands —
+hardware ARQ retries indiscriminately (head-of-line on the craft's single
+radio), and its failure mode (designated ACKer fades → every frame re-airs to
+the retry limit) is an airtime storm exactly when the link is marginal.
+A-MPDU rejected for v1 (0.8–3 ms aggregate-fill pacing = latency adder; needs
+QoS-Data; Jaguar1/8812AU collapses under the deep feed it requires). USB TX
+aggregation rejected for the data path (shallow feed by design).
+
+Adopted:
+- **§3.0 SA amendment (spec change this pass)**: SA/BSSID first octet
+  `0x57 → 0x56`. Upstream's docs surfaced that `0x57` has the I/G bit set —
+  our SA was a **group address**, nonconforming as a TA and permanently
+  unable to solicit an ACK. `0x56` = locally-administered unicast. BSSID tag
+  becomes "VBLK". Payload magic stays `0x57 0x42`.
+- **Re-vendor at 3025e2d** (own PR): all knobs off-by-default byte-identical;
+  buys per-frame TX-status CCX reports — a TX-side wedge detector /
+  queue-latency sensor for §9 that costs zero return-path bytes. Exclude
+  upstream `reference/` (vendored kernel-driver submodules).
+- **Step-11 bench item**: hardware-ACK'd **uplink** hybrid — craft arms
+  `SetAckResponder` so ground→craft returns (NACK/LINK_REPORT, one shot per
+  §7.2 window today) get SIFS-timed hardware ARQ; downlink video stays
+  broadcast. Bench slot, not a redesign.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
