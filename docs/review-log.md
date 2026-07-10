@@ -101,6 +101,22 @@ ruled, folded into PROTOCOL.md in the same change:
 - Portability constraint recorded: reference implementation must build for
   SigmaStar SSC338Q (32-bit ARMv7, OpenIPC gnueabihf gcc 13.3) and x86 host.
 
+## Pass 5 — 2026-07-10 — §6.6 deep-fade amendment (from the step-4 build)
+
+The steps 3–6 loopback bench (§16.2 scenario d, 95 % correlated fade) proved the
+original single-cursor clamp wording death-spirals: during a deep fade the
+delivery cursor advances by deadline-skips without delivering, so a
+delivered-block clamp reference freezes and clamp-rejects the entire recovering
+stream forever. Amended §6.6 (flagged in PR #3, merged; spec updated here):
+
+- block clamp references **`max_block`** (newest legitimately heard block), not
+  the last delivered block; attacker residual = one accepted in-clamp packet per
+  `+K` ratchet step.
+- **sustained-clamp resync** (`clamp_resync_ms`, seed 500 ms): if every packet
+  clamp-rejects for the whole window, adopt the next packet as a fresh floor
+  (§2 startup-floor semantics, `resyncs` stat). A forger must sustain an
+  unbroken flood for the full window to force a flush.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
