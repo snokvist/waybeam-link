@@ -85,6 +85,22 @@ no-video. Plus: loss_pre_recov semantic-flip rename, table_version→content-has
 declared, CSA MAC covers common prefix, csa_psk trust boundary = craft+ground, home_chan
 config-pinned (CSA 34→32 B), ρ→P95 estimator + two hybrid FEC options added to the bench.
 
+## Pass 4 — 2026-07-10 — implementation-gap rulings (operator)
+
+First implementation session (§19 steps 1–2) surfaced two spec gaps; operator
+ruled, folded into PROTOCOL.md in the same change:
+
+- **HEARTBEAT (type 0x4) body was undefined** → ruled **prefix-only, 11 bytes**
+  (new §3.8). Presence/keepalive; never creates per-stream RX state.
+- **`table_version` hash was underspecified** (§3.6 named CRC-8 but pinned neither
+  polynomial nor canonical form) → ruled **CRC-8/DVB-S2 (poly 0xD5, init 0x00)**
+  over a defined **canonical binary serialization** (profiles sorted by id, fixed
+  field order, big-endian, fractions scaled to integer per-mille). Matches the
+  ecosystem's CRSF CRC-8.
+- Amendment policy: spec commit lands first, code follows in the same PR.
+- Portability constraint recorded: reference implementation must build for
+  SigmaStar SSC338Q (32-bit ARMv7, OpenIPC gnueabihf gcc 13.3) and x86 host.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
