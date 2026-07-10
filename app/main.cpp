@@ -74,6 +74,7 @@ RxPolicy rx_policy(const Config& cfg) {
     p.renack_attempts = cfg.policy.rx.renack_attempts;
     p.renack_backoff_ms = cfg.policy.rx.renack_backoff_ms;
     p.idle_teardown_ms = cfg.policy.rx.idle_teardown_ms;
+    p.clamp_resync_ms = cfg.policy.rx.clamp_resync_ms;
     return p;
 }
 
@@ -101,6 +102,7 @@ struct TxCore {
             fc.session_id = session;
             fc.stream_id = s.stream_id;
             fc.stream_type = s.stream_type;
+            fc.classifier = s.classifier;
             fc.classifier_size_threshold =
                 cfg.policy.arq.classifier_size_threshold;
             RingConfig rc;
@@ -342,12 +344,16 @@ int run_tx(const Loaded& l) {
     };
     std::fprintf(stderr, "tx: session=%u, running\n", session);
     while (g_stop == 0) {
+        // One timestamp per iteration: every callback and the tick share it,
+        // so the time injected into the core never steps backward between
+        // calls (a fresh now_ms() inside a callback can land 1 ms AFTER the
+        // tick's captured now, and u64 "now - stamp" arithmetic underflows).
         const uint64_t now = now_ms();
         bindings.value->poll_once(2, [&](const IngressEvent& ev) {
-            tx.on_ingress(ev.stream_id, ev.data, ev.len, now_ms(), inject);
+            tx.on_ingress(ev.stream_id, ev.data, ev.len, now, inject);
         });
         air.value->poll_once(0, [&](const AirRxMeta&, const uint8_t* d,
-                                    size_t n) { tx.on_air(d, n, now_ms()); });
+                                    size_t n) { tx.on_air(d, n, now); });
         tx.tick(now, inject);
         if (stats_period != 0 && now >= next_stats) {
             emit_stats(emitter, l, session, t0, &tx, nullptr);
@@ -393,11 +399,13 @@ int run_rx(const Loaded& l) {
     std::fprintf(stderr, "rx: session=%u, %zu virtual adapters, running\n",
                  session, air.value->rx_adapters());
     while (g_stop == 0) {
+        // One timestamp per iteration (see run_tx): callbacks and tick share
+        // it so core-injected time never steps backward.
+        const uint64_t now = now_ms();
         air.value->poll_once(2, [&](const AirRxMeta& meta, const uint8_t* d,
                                     size_t n) {
-            rx.on_air(meta.adapter_id, d, n, now_ms(), deliver);
+            rx.on_air(meta.adapter_id, d, n, now, deliver);
         });
-        const uint64_t now = now_ms();
         rx.tick(now, deliver, inject_nack);
         if (stats_period != 0 && now >= next_stats) {
             emit_stats(emitter, l, session, t0, nullptr, &rx);
@@ -444,6 +452,11 @@ int run_loopback(const Loaded& l) {
     LossRng return_rng;
     return_rng.s = l.cfg.loopback.seed ^ 0xFEEDFACEull;
 
+    // One timestamp per loop iteration, shared by every callback and tick
+    // (see run_tx): a fresh now_ms() inside inject can land 1 ms after the
+    // tick's captured now and u64 "now - stamp" arithmetic underflows.
+    uint64_t loop_now = now_ms();
+
     const RxEngine::Deliver deliver = [&](uint8_t sid, const uint8_t* d,
                                           size_t n) {
         if (UdpEgress* out = bindings.value->egress_for(sid)) {
@@ -455,14 +468,14 @@ int run_loopback(const Loaded& l) {
         field.begin_packet();
         for (uint8_t a = 0; a < field.adapters(); ++a) {
             if (!field.drop(a)) {
-                rx.on_air(a, f, n, now_ms(), deliver);
+                rx.on_air(a, f, n, loop_now, deliver);
             }
         }
     };
     // RX -> return direction -> TX (its own loss).
     const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n) {
         if (return_rng.uniform() >= l.cfg.loopback.return_loss_p) {
-            tx.on_air(f, n, now_ms());
+            tx.on_air(f, n, loop_now);
         }
     };
 
@@ -476,15 +489,15 @@ int run_loopback(const Loaded& l) {
                  l.cfg.loopback.adapters,
                  static_cast<unsigned long long>(l.cfg.loopback.seed));
     while (g_stop == 0) {
+        loop_now = now_ms();
         bindings.value->poll_once(2, [&](const IngressEvent& ev) {
-            tx.on_ingress(ev.stream_id, ev.data, ev.len, now_ms(), inject);
+            tx.on_ingress(ev.stream_id, ev.data, ev.len, loop_now, inject);
         });
-        const uint64_t now = now_ms();
-        tx.tick(now, inject);
-        rx.tick(now, deliver, inject_nack);
-        if (stats_period != 0 && now >= next_stats) {
+        tx.tick(loop_now, inject);
+        rx.tick(loop_now, deliver, inject_nack);
+        if (stats_period != 0 && loop_now >= next_stats) {
             emit_stats(emitter, l, session, t0, &tx, &rx);
-            next_stats = now + stats_period;
+            next_stats = loop_now + stats_period;
         }
     }
     return 0;

@@ -198,7 +198,12 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
             s->first_clamp_ms = now_ms;
             return;
         }
-        if (now_ms - s->first_clamp_ms < policy_.clamp_resync_ms) {
+        // Underflow guard: a now_ms at or before the window start counts as
+        // zero elapsed. Without it, a 1 ms backward step in injected time
+        // would make the elapsed u64 huge and fire the resync (= flush) off
+        // a single clamp-rejected packet — exactly what §6.6 must prevent.
+        if (now_ms <= s->first_clamp_ms ||
+            now_ms - s->first_clamp_ms < policy_.clamp_resync_ms) {
             return;
         }
         ++s->counters.resyncs;
@@ -385,7 +390,10 @@ void RxEngine::advance_cursor(Stream& s, uint64_t now_ms,
 void RxEngine::tick(uint64_t now_ms, const Deliver& deliver) {
     for (auto it = streams_.begin(); it != streams_.end();) {
         Stream& s = it->second;
-        if (now_ms - s.last_activity_ms > policy_.idle_teardown_ms) {
+        // Underflow guard (see the §6.6 resync): a tick whose now_ms lags a
+        // packet's stamp by 1 ms must not read as 584 My of idleness.
+        if (now_ms > s.last_activity_ms &&
+            now_ms - s.last_activity_ms > policy_.idle_teardown_ms) {
             it = streams_.erase(it);  // §2 implicit teardown
             continue;
         }

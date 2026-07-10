@@ -425,11 +425,34 @@ lower-power point on phantom diversity → real delivered loss spikes. The stall
 surfaced as `adapter_stalled` in the stats (§15).
 
 ### 6.6 Plausible-forward clamp (load-bearing injection defence, §13)
-RX rejects any DATA `seq`/`block_id` or NACK `base_seq` that jumps more than
-`fwd_clamp_K` (seed: a few blocks / one resend-ring) ahead of the current cursor.
-Real monotonic traffic never jumps by millions; this single check neutralises
-forged far-future `block_id` video-flush, garbage NACK bitmaps, and discovery
-cursor poisoning.
+RX rejects any DATA `seq`/`block_id` or NACK `base_seq` that jumps implausibly
+far ahead. Real monotonic traffic never jumps by millions; this single check
+neutralises forged far-future `block_id` video-flush, garbage NACK bitmaps, and
+discovery cursor poisoning. Two clamps with distinct references (amended after
+the step-4 build surfaced a deep-fade death spiral in the original single-cursor
+wording):
+
+- **seq clamp** — `seq` must be within `fwd_clamp_pkts` (seed 256) ahead of the
+  delivery **cursor**.
+- **block clamp** — `block_id` must be within `fwd_clamp_blocks` (seed 4) ahead
+  of **`max_block`, the newest legitimately heard block — NOT the last
+  *delivered* block.** In a deep fade the cursor advances by deadline-skips
+  without delivering anything; a delivered-block reference freezes during the
+  fade and then clamp-rejects the entire recovering stream forever. Ratcheting
+  `max_block` costs an attacker one accepted in-clamp packet per `+K` step —
+  that bounded creep is the accepted residual of this defence.
+
+**Sustained-clamp resync (escape hatch).** If *every* packet of a latched
+stream clamp-rejects continuously for `clamp_resync_ms` (seed 500 ms), the
+stream is desynced by a real outage (the TX ran further ahead than the clamp
+allows), not under attack: adopt the next packet as a fresh floor with §2
+startup-floor semantics — drop all held packets, gap state, block state, and
+per-adapter cursors; count it as `resyncs` in the §15 stats. Any packet
+accepted inside the window resets it. Security posture: without the clamp, one
+forged packet flushes video; with clamp + resync, a forger must sustain an
+unbroken flood that out-crowds *all* legitimate traffic for the full window —
+at which point it is a jammer, which no sequence-number defence survives
+anyway.
 
 ---
 

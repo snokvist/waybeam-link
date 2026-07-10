@@ -14,7 +14,10 @@
 //
 // Pure tick-driven logic: time is injected, delivery is a callback, NACKs
 // are returned as build products for the caller to encode/inject. No clocks,
-// no sockets, no threads.
+// no sockets, no threads. Injected now_ms SHOULD be nondecreasing across
+// calls (take ONE timestamp per event-loop iteration); the destructive paths
+// (idle teardown, §6.6 resync) are additionally guarded so a small backward
+// step can never underflow u64 elapsed-time math into an instant flush.
 #pragma once
 
 #include <cstddef>

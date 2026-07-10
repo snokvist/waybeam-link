@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "wblink/nal.h"
 #include "wblink/table.h"
 #include "wblink/types.h"
 
@@ -50,6 +51,8 @@ struct StreamCfg {
     // out-streams only: optionally pin the latch to one sender (§2 v0 latch
     // policy — first admitted tuple matching type [+ originator]).
     std::optional<uint16_t> originator;
+    // RTP in-streams (§4.1): "size" (default) / "h264" / "h265".
+    RtpClassifier classifier = RtpClassifier::kSize;
 };
 
 // §9.1 cascade + §9.4/§9.5/§9.7 constants (seeds; RE-DERIVE per §17).
@@ -91,6 +94,7 @@ struct RxCfgPolicy {
     uint32_t renack_backoff_ms = 15;   // §6.4
     uint32_t idle_teardown_ms = 5000;  // §2
     uint32_t fwd_clamp_pkts = 256;     // §6.6 seq clamp
+    uint32_t clamp_resync_ms = 500;    // §6.6 sustained-clamp resync window
 };
 
 struct FecPolicy {

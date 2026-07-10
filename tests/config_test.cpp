@@ -26,7 +26,7 @@ const char* kSample = R"({
     { "name": "wlan1", "bus": "1-1.3", "role": "rx", "channel": 5805, "bw": 20 }
   ],
   "streams": [
-    { "stream_id": 0, "stream_type": "RTP", "dir": "in",
+    { "stream_id": 0, "stream_type": "RTP", "dir": "in", "classifier": "h265",
       "bind": { "kind": "udp", "listen": "127.0.0.1:5600" } },
     { "stream_id": 1, "stream_type": "TELEMETRY", "dir": "in",
       "bind": { "kind": "udp", "listen": "127.0.0.1:14650" } }
@@ -98,7 +98,9 @@ int main() {
             CHECK_EQ_U(c.streams[0].stream_type, stream_type::kRtp);
             CHECK(c.streams[0].dir == Dir::kIn);
             CHECK(c.streams[0].bind.listen == "127.0.0.1:5600");
+            CHECK(c.streams[0].classifier == RtpClassifier::kH265);
             CHECK_EQ_U(c.streams[1].stream_type, stream_type::kTelemetry);
+            CHECK(c.streams[1].classifier == RtpClassifier::kSize);
 
             CHECK_EQ_U(c.policy.select.demote_milli, 20);
             CHECK(c.policy.select.rssi_floor_dbm == -85);
@@ -132,6 +134,7 @@ int main() {
             CHECK_EQ_U(c.policy.select.demote_milli, 20);
             CHECK(c.policy.select.ewma_alpha == 0.3);
             CHECK_EQ_U(c.policy.arq.holddown_ms, 20);
+            CHECK_EQ_U(c.policy.rx.clamp_resync_ms, 500);  // §6.6 seed
             CHECK_EQ_U(c.policy.ret.guard_us, 300);
             CHECK(c.policy.csa.psk.empty());  // spectator: no psk
             CHECK(c.stats.hz == 1.0);
@@ -189,6 +192,29 @@ int main() {
       "streams":[{"stream_id":0,"stream_type":"VIDEO","dir":"in",
         "bind":{"kind":"udp","listen":"127.0.0.1:1"}}]})",
                  "stream_type");
+    // classifier on a non-RTP stream (§4.1: RTP-profile-only).
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"TELEMETRY","dir":"in",
+        "classifier":"h265",
+        "bind":{"kind":"udp","listen":"127.0.0.1:1"}}]})",
+                 "RTP-profile-only");
+    // unknown classifier value.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "classifier":"av1",
+        "bind":{"kind":"udp","listen":"127.0.0.1:1"}}]})",
+                 "classifier");
+
+    // --- §6.6 clamp_resync_ms is config-overridable (§17) -------------------
+    {
+        auto r = load_config_json(
+            R"({"node":{"originator":1,"role":"rx"},
+                "policy":{"rx":{"clamp_resync_ms":100}}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK_EQ_U(r.value->policy.rx.clamp_resync_ms, 100);
+        }
+    }
 
     // --- profile table -------------------------------------------------------
     {

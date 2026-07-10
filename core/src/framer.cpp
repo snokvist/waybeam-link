@@ -39,6 +39,15 @@ bool Framer::on_datagram(const uint8_t* data, size_t len, uint64_t now_ms,
             last_rtp_ts_ = rtp->timestamp;
             prev_was_marker_ = rtp->marker;
             end_of_block = rtp->marker;
+            // §4.1 NAL classifier: stamps from the first packet of the block
+            // (FU fragments repeat the type), sticky for the block's rest.
+            if (cfg_.classifier != RtpClassifier::kSize && !block_arq_) {
+                if (const auto pl = rtp_payload(data, len, *rtp)) {
+                    block_arq_ = cfg_.classifier == RtpClassifier::kH264
+                                     ? h264_payload_important(pl->data, pl->len)
+                                     : h265_payload_important(pl->data, pl->len);
+                }
+            }
         } else {
             // Unparseable on an RTP stream: close the block defensively so a
             // junk datagram cannot glue two real frames together.
@@ -59,6 +68,7 @@ bool Framer::on_datagram(const uint8_t* data, size_t len, uint64_t now_ms,
 
     block_bytes_ += static_cast<uint32_t>(len);
     if (cfg_.stream_type == stream_type::kRtp &&
+        cfg_.classifier == RtpClassifier::kSize &&
         block_bytes_ >= cfg_.classifier_size_threshold) {
         block_arq_ = true;
     }
