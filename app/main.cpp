@@ -267,6 +267,8 @@ struct AirBackend {
             as.drop = c.rx_dropped;
             // Node-wide §7.2 TSF-read fallback count, surfaced once.
             as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
+            as.tx_reports = c.tx_reports;
+            as.tx_report_fails = c.tx_report_fails;
             snap.adapters.push_back(std::move(as));
         }
 #else

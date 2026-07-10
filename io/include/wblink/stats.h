@@ -31,6 +31,10 @@ struct AdapterStats {
     uint64_t tx_timeout = 0;
     uint64_t drop = 0;          // radio backend RX-queue overflow drops
     uint64_t tsf_fallback = 0;  // §7.2 TSF reads that fell back to host time
+    // Per-frame TX-status CCX reports (Pass 8, TX adapter only): reports
+    // stalling while tx_submitted advances = the TX-wedge signal.
+    uint64_t tx_reports = 0;
+    uint64_t tx_report_fails = 0;
     bool adapter_stalled = false;  // §6.5 liveness watchdog verdict
 };
 

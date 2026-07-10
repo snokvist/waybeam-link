@@ -73,6 +73,12 @@ class RadioAir {
         int8_t rssi_last = -128;  // dBm of the last accepted frame
         uint64_t tx_submitted = 0;
         uint64_t tx_failed = 0;
+        // Per-frame TX-status CCX reports (devourer tx.report, Pass 8) —
+        // TX adapter only. Reports stalling while tx_submitted advances is
+        // the TX-wedge signal; fails counts state != 0 (retry/lifetime
+        // drop — always 0 for broadcast, meaningful for unicast uplink).
+        uint64_t tx_reports = 0;
+        uint64_t tx_report_fails = 0;
     };
     AdapterCounters counters(size_t adapter) const;
 

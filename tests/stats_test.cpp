@@ -31,6 +31,8 @@ StatsSnapshot sample_snapshot() {
     a.tx_timeout = 0;
     a.drop = 3;
     a.tsf_fallback = 1;
+    a.tx_reports = 40;
+    a.tx_report_fails = 2;
     a.adapter_stalled = false;
     s.adapters.push_back(a);
     StreamStats st;
@@ -71,7 +73,7 @@ const char* kGolden =
     "\"adapters\":[{\"name\":\"wlan0\",\"rx\":10234,\"dup\":812,"
     "\"rssi_best\":-58,\"rssi_mean\":-63,\"snr\":22,\"noise\":-85,"
     "\"tx_submitted\":540,\"tx_failed\":2,\"tx_timeout\":0,"
-    "\"drop\":3,\"tsf_fallback\":1,"
+    "\"drop\":3,\"tsf_fallback\":1,\"tx_reports\":40,\"tx_report_fails\":2,"
     "\"adapter_stalled\":false}],"
     "\"streams\":[{\"stream_id\":0,\"type\":\"RTP\",\"seq\":90233,"
     "\"delivered\":89901,\"loss_prediversity_milli\":41,"
