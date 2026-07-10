@@ -25,6 +25,7 @@ add_wb_test(selector_test)
 add_wb_test(reporter_test)
 add_wb_test(loopback_test)
 
+add_wb_test(dot11_test wblink_io)
 add_wb_test(config_test wblink_io)
 target_compile_definitions(config_test PRIVATE
     WBLINK_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

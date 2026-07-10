@@ -136,9 +136,30 @@ int main() {
             CHECK_EQ_U(c.policy.arq.holddown_ms, 20);
             CHECK_EQ_U(c.policy.rx.clamp_resync_ms, 500);  // §6.6 seed
             CHECK_EQ_U(c.policy.ret.guard_us, 300);
+            CHECK(!c.policy.ret.quiet_gap);   // §7.1 baseline ships default
+            CHECK(!c.node.net_id.has_value());  // §3.0: accept-any when absent
             CHECK(c.policy.csa.psk.empty());  // spectator: no psk
             CHECK(c.stats.hz == 1.0);
             CHECK(!c.stats.bind.has_value());
+        }
+    }
+
+    // --- §3.0 net_id + air "radio" + §7.2 quiet-gap knobs -------------------
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx", "net_id": 5},
+          "air": {"kind": "radio"},
+          "policy": {"return": {"quiet_gap": true, "guard_us": 400,
+                                "return_window_us": 1500}}})");
+        CHECK(bool(r));
+        if (r) {
+            const Config& c = *r.value;
+            CHECK(c.node.net_id.has_value());
+            CHECK_EQ_U(*c.node.net_id, 5);
+            CHECK(c.air.kind == AirCfg::Kind::kRadio);
+            CHECK(c.policy.ret.quiet_gap);
+            CHECK_EQ_U(c.policy.ret.guard_us, 400);
+            CHECK_EQ_U(c.policy.ret.return_window_us, 1500);
         }
     }
 
@@ -158,6 +179,13 @@ int main() {
       "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
         "bind":{"kind":"shm","listen":"x"}}]})",
                  "UDP-only");
+    // §3.0 net_id is one byte.
+    expect_error(R"({"node":{"originator":1,"role":"rx","net_id":256}})",
+                 "net_id");
+    // air backend kinds are udp | radio.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "air":{"kind":"carrier-pigeon"}})",
+                 "unknown");
     // duplicate stream_id.
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "streams":[

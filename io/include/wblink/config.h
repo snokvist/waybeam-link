@@ -31,6 +31,9 @@ struct NodeCfg {
     uint16_t originator = 0;
     Role role = Role::kRx;
     uint16_t preferred_originator = 0;  // §12 preemption; 0 = none
+    // §3.0 L2 partition tag. TX always stamps it (absent ⇒ stamps 0); the
+    // RX filter enforces equality only when it is configured.
+    std::optional<uint8_t> net_id;
 };
 
 struct AdapterCfg {
@@ -127,6 +130,9 @@ struct FecPolicy {
 };
 
 struct ReturnPolicy {
+    // §7.2 TSF quiet-gap (seeds; RE-DERIVE at gate 4). Off by default —
+    // §7.1 opportunistic return is the shipping baseline.
+    bool quiet_gap = false;
     uint32_t guard_us = 300;
     uint32_t return_window_us = 2000;
 };
@@ -155,14 +161,15 @@ struct Policy {
     CsaPolicy csa;
 };
 
-// Dev-tooling air backend (NOT part of §15; devourer replaces this at the
-// hardware bring-up). One UDP socket = one virtual adapter.
+// Air backends. "udp" is dev tooling (one UDP socket = one virtual adapter,
+// NOT §15); "radio" is the devourer path (§3.0) — its adapters come from
+// the top-level adapters array, nothing is duplicated here.
 struct AirUdpCfg {
     std::vector<std::string> tx;  // frame targets (tx: video; rx: NACKs)
     std::vector<std::string> rx;  // listen sockets = virtual adapters
 };
 struct AirCfg {
-    enum class Kind : uint8_t { kNone, kUdp };
+    enum class Kind : uint8_t { kNone, kUdp, kRadio };
     Kind kind = Kind::kNone;
     AirUdpCfg udp;
 };

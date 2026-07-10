@@ -84,6 +84,7 @@ target_include_directories(wblink_io SYSTEM PRIVATE third_party)
 target_compile_options(wblink_io PRIVATE ${WBLINK_WARNINGS})
 target_link_libraries(wblink_io PUBLIC wblink_core)
 if(WBLINK_RADIO)
+    target_sources(wblink_io PRIVATE io/src/air_radio.cpp)
     target_compile_definitions(wblink_io PUBLIC WBLINK_RADIO=1)
     target_include_directories(wblink_io SYSTEM PRIVATE
         third_party/devourer/src

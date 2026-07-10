@@ -1,0 +1,380 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include "wblink/air_radio.h"
+
+#include <libusb.h>
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdio>
+#include <deque>
+#include <mutex>
+#include <thread>
+
+#include "IRtlDevice.h"
+#include "RxPacket.h"
+#include "SelectedChannel.h"
+#include "TxMode.h"
+#include "UsbOpen.h"
+#include "WiFiDriver.h"
+#include "logger.h"
+#include "wblink/dot11.h"
+
+namespace wblink {
+
+namespace {
+
+constexpr uint16_t kRealtekVid = 0x0bda;
+constexpr size_t kRxQueueCap = 512;
+
+// AdapterCfg.channel_mhz (center frequency) → 802.11 channel number.
+uint8_t mhz_to_channel(uint16_t mhz) {
+    if (mhz == 2484) {
+        return 14;
+    }
+    if (mhz >= 2412 && mhz < 2484) {
+        return static_cast<uint8_t>((mhz - 2407) / 5);
+    }
+    if (mhz >= 5000) {
+        return static_cast<uint8_t>((mhz - 5000) / 5);
+    }
+    return 0;
+}
+
+// "bus-port[.port...]" (lsusb -t style), e.g. "3-1.2".
+std::string usb_path_of(libusb_device* dev) {
+    uint8_t ports[7];
+    const int n = libusb_get_port_numbers(dev, ports, sizeof(ports));
+    std::string s = std::to_string(libusb_get_bus_number(dev));
+    s += '-';
+    for (int i = 0; i < n; ++i) {
+        if (i) {
+            s += '.';
+        }
+        s += std::to_string(ports[i]);
+    }
+    return s;
+}
+
+struct RxFrame {
+    uint8_t adapter;
+    int8_t rssi;
+    uint32_t tsfl;
+    std::vector<uint8_t> data;  // §3.0 payload (802.11 header stripped)
+};
+
+}  // namespace
+
+struct RadioAir::Impl {
+    struct Adapter {
+        std::string name;
+        std::string path;
+        bool tx = false;
+        libusb_context* ctx = nullptr;
+        libusb_device_handle* handle = nullptr;
+        std::shared_ptr<devourer::UsbDeviceLock> lock;
+        std::unique_ptr<IRtlDevice> dev;
+        std::thread rx_thread;
+        // RX-thread-owned counters (relaxed atomics; read from stats).
+        std::atomic<uint64_t> rx_frames{0};
+        std::atomic<uint64_t> rx_filtered{0};
+        std::atomic<uint64_t> rx_dropped{0};
+        std::atomic<int8_t> rssi_last{-128};
+        uint64_t tx_submitted = 0;  // main-thread only
+        uint64_t tx_failed = 0;
+    };
+
+    RadioAirCfg cfg;
+    Logger_t logger;
+    std::vector<std::unique_ptr<Adapter>> adapters;
+    size_t tx_idx = 0;
+    uint16_t seq = 0;
+    std::vector<uint8_t> tx_buf;
+
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<RxFrame> queue;
+
+    ~Impl() {
+        // Stop loops first, then join, then power the chips down and release
+        // USB — the ordering devourer's demos use. A join can block while a
+        // bring-up is still in flight (bring-up does not poll the stop flag).
+        for (auto& a : adapters) {
+            if (a->dev) {
+                a->dev->StopRxLoop();
+            }
+        }
+        for (auto& a : adapters) {
+            if (a->rx_thread.joinable()) {
+                a->rx_thread.join();
+            }
+            if (a->dev) {
+                a->dev->Stop();
+            }
+            if (a->handle) {
+                libusb_release_interface(a->handle, 0);
+                libusb_close(a->handle);
+            }
+            a->lock.reset();
+            if (a->ctx) {
+                libusb_exit(a->ctx);
+            }
+        }
+    }
+
+    // RX-loop callback: §3.0 filter on the RX thread, accepted frames cross
+    // into the caller's world through the bounded queue.
+    void on_packet(Adapter& a, uint8_t adapter_id, const Packet& p) {
+        if (p.RxAtrib.pkt_rpt_type != RX_PACKET_TYPE::NORMAL_RX ||
+            p.RxAtrib.crc_err || p.RxAtrib.icv_err) {
+            return;
+        }
+        const auto d =
+            dot11_parse(p.Data.data(), p.Data.size(), cfg.filter_net_id);
+        if (!d || d->originator == cfg.originator) {  // not ours / our own TX
+            a.rx_filtered.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        // Per-chain power byte, dBm = value − 110; 0 = no phy report on
+        // this frame → keep the previous value.
+        uint8_t best = 0;
+        for (uint8_t chain : p.RxAtrib.rssi) {
+            if (chain > best) {
+                best = chain;
+            }
+        }
+        int8_t rssi = a.rssi_last.load(std::memory_order_relaxed);
+        if (best != 0) {
+            const int dbm = static_cast<int>(best) - 110;
+            rssi = static_cast<int8_t>(dbm < -128 ? -128
+                                       : dbm > 0  ? 0
+                                                  : dbm);
+            a.rssi_last.store(rssi, std::memory_order_relaxed);
+        }
+        a.rx_frames.fetch_add(1, std::memory_order_relaxed);
+        RxFrame f;
+        f.adapter = adapter_id;
+        f.rssi = rssi;
+        f.tsfl = p.RxAtrib.tsfl;
+        f.data.assign(d->payload, d->payload + d->payload_len);
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            if (queue.size() >= kRxQueueCap) {
+                queue.pop_front();
+                a.rx_dropped.fetch_add(1, std::memory_order_relaxed);
+            }
+            queue.push_back(std::move(f));
+        }
+        cv.notify_one();
+    }
+};
+
+RadioAir::RadioAir() : impl_(new Impl) {}
+RadioAir::RadioAir(RadioAir&&) noexcept = default;
+RadioAir& RadioAir::operator=(RadioAir&&) noexcept = default;
+RadioAir::~RadioAir() = default;
+
+Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
+    if (cfg.adapters.empty()) {
+        return Result<RadioAir>::fail("radio: no adapters configured");
+    }
+    size_t n_tx = 0;
+    for (const auto& a : cfg.adapters) {
+        n_tx += (a.role == Role::kTx) ? 1 : 0;
+    }
+    if (n_tx != 1) {
+        return Result<RadioAir>::fail(
+            "radio: exactly one adapter must have role \"tx\" (the "
+            "designated uplink / craft radio), got " +
+            std::to_string(n_tx));
+    }
+
+    RadioAir air;
+    Impl& im = *air.impl_;
+    im.cfg = cfg;
+    im.logger = std::make_shared<Logger>();
+    im.logger->set_level(Logger::Level::Info);
+
+    std::vector<std::string> used_paths;
+    for (size_t i = 0; i < cfg.adapters.size(); ++i) {
+        const AdapterCfg& ac = cfg.adapters[i];
+        auto ad = std::make_unique<Impl::Adapter>();
+        ad->name = ac.name.empty() ? ("adapter" + std::to_string(i))
+                                   : ac.name;
+        ad->tx = (ac.role == Role::kTx);
+
+        // Per-adapter libusb_context (the proven multi-adapter pattern).
+        if (libusb_init(&ad->ctx) != 0) {
+            return Result<RadioAir>::fail("radio: libusb_init failed");
+        }
+        libusb_device** list = nullptr;
+        const ssize_t n = libusb_get_device_list(ad->ctx, &list);
+        libusb_device* found = nullptr;
+        std::string found_path;
+        for (ssize_t k = 0; k < n; ++k) {
+            libusb_device_descriptor dd;
+            if (libusb_get_device_descriptor(list[k], &dd) != 0 ||
+                dd.idVendor != kRealtekVid) {
+                continue;
+            }
+            const std::string path = usb_path_of(list[k]);
+            bool taken = false;
+            for (const auto& u : used_paths) {
+                taken = taken || (u == path);
+            }
+            if (taken || (!ac.bus.empty() && ac.bus != path)) {
+                continue;
+            }
+            found = list[k];
+            found_path = path;
+            break;
+        }
+        int open_rc = found ? libusb_open(found, &ad->handle)
+                            : LIBUSB_ERROR_NO_DEVICE;
+        libusb_free_device_list(list, 1);
+        if (open_rc != 0) {
+            return Result<RadioAir>::fail(
+                "radio: adapter \"" + ad->name + "\" (bus \"" + ac.bus +
+                "\"): no matching Realtek device / open failed");
+        }
+        used_paths.push_back(found_path);
+        ad->path = found_path;
+
+        const int rc = devourer::claim_interface_then_reset(
+            ad->handle, 0, im.logger, /*do_reset=*/true, ad->lock);
+        if (rc != 0) {
+            return Result<RadioAir>::fail("radio: adapter \"" + ad->name +
+                                          "\" claim/reset failed (in use?)");
+        }
+        devourer::DeviceConfig dc{};
+        // Jaguar3 needs the RX path armed during the InitWrite bring-up so
+        // StartRxLoop works on the same claimed handle (gate-1 pattern);
+        // ignored on Jaguar1.
+        dc.rx.enable_with_tx = true;
+        WiFiDriver wd(im.logger);
+        ad->dev = wd.CreateRtlDevice(ad->handle, ad->ctx, ad->lock, dc);
+        if (!ad->dev) {
+            return Result<RadioAir>::fail("radio: adapter \"" + ad->name +
+                                          "\": unsupported chip");
+        }
+        if (ad->tx) {
+            im.tx_idx = i;
+        }
+        im.adapters.push_back(std::move(ad));
+    }
+
+    // Bring-up serialized on this (the control) thread, then one RX loop
+    // thread per adapter over the already-up chip.
+    for (size_t i = 0; i < im.adapters.size(); ++i) {
+        Impl::Adapter& ad = *im.adapters[i];
+        const uint8_t chan = mhz_to_channel(cfg.adapters[i].channel_mhz);
+        if (chan == 0) {
+            return Result<RadioAir>::fail(
+                "radio: adapter \"" + ad.name + "\": bad channel_mhz " +
+                std::to_string(cfg.adapters[i].channel_mhz));
+        }
+        ad.dev->InitWrite(SelectedChannel{chan, 0, CHANNEL_WIDTH_20});
+        Impl* imp = air.impl_.get();
+        Impl::Adapter* adp = &ad;
+        const uint8_t id = static_cast<uint8_t>(i);
+        ad.rx_thread = std::thread([imp, adp, id]() {
+            try {
+                adp->dev->StartRxLoop([imp, adp, id](const Packet& p) {
+                    imp->on_packet(*adp, id, p);
+                });
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "radio: rx loop \"%s\" died: %s\n",
+                             adp->name.c_str(), e.what());
+            }
+        });
+    }
+    return Result<RadioAir>::ok(std::move(air));
+}
+
+size_t RadioAir::inject(const uint8_t* frame, size_t len) {
+    Impl& im = *impl_;
+    Impl::Adapter& tx = *im.adapters[im.tx_idx];
+    im.tx_buf.resize(kDot11TxPrefixLen + len);
+    dot11_tx_prefix(im.tx_buf.data(), im.cfg.stamp_net_id, im.cfg.originator,
+                    static_cast<uint8_t>(im.tx_idx), im.seq++);
+    std::memcpy(im.tx_buf.data() + kDot11TxPrefixLen, frame, len);
+    ++tx.tx_submitted;
+    if (tx.dev->send_packet(im.tx_buf.data(), im.tx_buf.size())) {
+        return 1;
+    }
+    ++tx.tx_failed;
+    return 0;
+}
+
+int RadioAir::poll_once(int timeout_ms, const RxCb& cb) {
+    Impl& im = *impl_;
+    std::deque<RxFrame> local;
+    {
+        std::unique_lock<std::mutex> lk(im.mu);
+        if (im.queue.empty() && timeout_ms > 0) {
+            im.cv.wait_for(lk, std::chrono::milliseconds(timeout_ms),
+                           [&] { return !im.queue.empty(); });
+        }
+        local.swap(im.queue);
+    }
+    for (const RxFrame& f : local) {
+        AirRxMeta meta;
+        meta.adapter_id = f.adapter;
+        meta.rssi = f.rssi;
+        meta.tsf_us = f.tsfl;
+        cb(meta, f.data.data(), f.data.size());
+    }
+    return static_cast<int>(local.size());
+}
+
+size_t RadioAir::rx_adapters() const { return impl_->adapters.size(); }
+
+void RadioAir::set_tx_mode(uint8_t mcs, bool sgi) {
+    devourer::TxMode m;
+    m.mode = devourer::TxMode::Mode::HT;
+    m.ht_mcs = mcs;
+    m.bw_mhz = 20;
+    m.sgi = sgi;
+    impl_->adapters[impl_->tx_idx]->dev->SetTxMode(m);
+}
+
+int RadioAir::set_power_qdb(size_t adapter, int32_t qdb) {
+    if (adapter >= impl_->adapters.size()) {
+        return 0;
+    }
+    return impl_->adapters[adapter]->dev->SetTxPowerOffsetQdb(
+        static_cast<int>(qdb));
+}
+
+std::optional<uint64_t> RadioAir::read_tsf(size_t adapter) {
+    if (adapter >= impl_->adapters.size()) {
+        return std::nullopt;
+    }
+    try {
+        const uint64_t t = impl_->adapters[adapter]->dev->ReadTsf();
+        if (t == 0) {
+            return std::nullopt;  // unsupported
+        }
+        return t;
+    } catch (const std::exception&) {
+        return std::nullopt;  // control transfer raced the RX bulk load
+    }
+}
+
+RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {
+    AdapterCounters c;
+    if (adapter >= impl_->adapters.size()) {
+        return c;
+    }
+    const Impl::Adapter& a = *impl_->adapters[adapter];
+    c.name = a.name;
+    c.tx = a.tx;
+    c.rx_frames = a.rx_frames.load(std::memory_order_relaxed);
+    c.rx_filtered = a.rx_filtered.load(std::memory_order_relaxed);
+    c.rx_dropped = a.rx_dropped.load(std::memory_order_relaxed);
+    c.rssi_last = a.rssi_last.load(std::memory_order_relaxed);
+    c.tx_submitted = a.tx_submitted;
+    c.tx_failed = a.tx_failed;
+    return c;
+}
+
+}  // namespace wblink
