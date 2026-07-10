@@ -24,9 +24,10 @@ inline constexpr size_t kDot11TxPrefixLen = kRadiotapTxLen + kDot11HdrLen;
 // §3.0 pinned constants.
 inline constexpr uint8_t kDot11FrameControl0 = 0x08;  // Data, not QoS
 inline constexpr uint8_t kDot11FrameControl1 = 0x00;  // ToDS=0 FromDS=0
-inline constexpr uint8_t kWbSaPrefix0 = 0x57;
+// 0x56 not the payload magic's 0x57: I/G clear = valid unicast TA (Pass 8).
+inline constexpr uint8_t kWbSaPrefix0 = 0x56;
 inline constexpr uint8_t kWbSaPrefix1 = 0x42;
-inline constexpr uint8_t kWbBssid[6] = {0x57, 0x42, 0x4c, 0x4b, 0x00, 0x00};
+inline constexpr uint8_t kWbBssid[6] = {0x56, 0x42, 0x4c, 0x4b, 0x00, 0x00};
 
 // Writes radiotap + the pinned 802.11 header into out (which must hold
 // kDot11TxPrefixLen bytes); the waybeam-link packet follows as the frame
@@ -41,13 +42,13 @@ inline size_t dot11_tx_prefix(uint8_t* out, uint8_t net_id,
     h[2] = 0;  // duration
     h[3] = 0;
     std::memset(h + 4, 0xff, 6);  // addr1 DA = broadcast (never MAC-ACKed)
-    h[10] = kWbSaPrefix0;         // addr2 SA = 57:42:NN:OO:OO:AA
+    h[10] = kWbSaPrefix0;         // addr2 SA = 56:42:NN:OO:OO:AA
     h[11] = kWbSaPrefix1;
     h[12] = net_id;
     h[13] = static_cast<uint8_t>(originator >> 8);
     h[14] = static_cast<uint8_t>(originator & 0xff);
     h[15] = adapter_idx;
-    std::memcpy(h + 16, kWbBssid, 6);  // addr3 BSSID = "WBLK" tag
+    std::memcpy(h + 16, kWbBssid, 6);  // addr3 BSSID = "VBLK" tag
     h[22] = static_cast<uint8_t>((seq << 4) & 0xff);  // seq ctl, fragment 0
     h[23] = static_cast<uint8_t>(seq >> 4);
     return kDot11TxPrefixLen;

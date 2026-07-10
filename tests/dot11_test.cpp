@@ -43,13 +43,13 @@ int main() {
         CHECK_EQ_U(h[1], 0x00);  // ToDS=0 FromDS=0
         CHECK_EQ_U(h[2], 0x00);  // duration
         for (int i = 4; i < 10; ++i) CHECK_EQ_U(h[i], 0xff);  // DA broadcast
-        CHECK_EQ_U(h[10], 0x57);  // SA prefix "WB"
+        CHECK_EQ_U(h[10], 0x56);  // SA prefix "VB" — unicast TA (Pass 8)
         CHECK_EQ_U(h[11], 0x42);
         CHECK_EQ_U(h[12], 5);     // net_id
         CHECK_EQ_U(h[13], 0x12);  // originator BE
         CHECK_EQ_U(h[14], 0x34);
         CHECK_EQ_U(h[15], 2);     // adapter idx
-        CHECK_EQ_U(h[16], 0x57);  // BSSID "WBLK"
+        CHECK_EQ_U(h[16], 0x56);  // BSSID "VBLK"
         CHECK_EQ_U(h[17], 0x42);
         CHECK_EQ_U(h[18], 0x4c);
         CHECK_EQ_U(h[19], 0x4b);
