@@ -1,0 +1,43 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "dev",
+      "displayName": "Host debug + ASan/UBSan",
+      "binaryDir": "${sourceDir}/build/dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "WBLINK_SANITIZE": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Host release",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "ssc338q",
+      "displayName": "SigmaStar SSC338Q cross (compile-only verify)",
+      "binaryDir": "${sourceDir}/build/ssc338q",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-ssc338q.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "ssc338q", "configurePreset": "ssc338q" }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
