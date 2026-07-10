@@ -10,3 +10,8 @@ function(add_wb_test name)
 endfunction()
 
 add_wb_test(crc8_test)
+add_wb_test(wire_vectors_test)
+add_wb_test(wire_roundtrip_test)
+add_wb_test(wire_fuzz_test)
+add_wb_test(table_hash_test)
+add_wb_test(clamp_test)

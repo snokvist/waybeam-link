@@ -21,8 +21,10 @@ endif()
 # there is exactly ONE implementation of the packet format — it must never grow
 # a dependency beyond the C++ standard library, and must stay 32-bit-clean
 # (SSC338Q / ARMv7 is a first-class target).
-add_library(wblink_core INTERFACE)
-target_include_directories(wblink_core INTERFACE core/include)
+add_library(wblink_core STATIC
+    core/src/wire.cpp
+    core/src/table.cpp)
+target_include_directories(wblink_core PUBLIC core/include)
 
 if(WBLINK_BUILD_TESTS)
     enable_testing()
