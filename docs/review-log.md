@@ -135,6 +135,57 @@ PROTOCOL.md spec-commit-first (same PR as the step-8 code):
   configured**: HT20 PHY rate × airtime fraction × (1 − FEC overhead) −
   reserves, floored at `bitrate_min_kbps`, integer math.
 
+## Pass 7 — 2026-07-10 — step-9 encapsulation ruling (operator)
+
+Planning the devourer backend surfaced that §0 said "devourer owns radiotap +
+the 802.11 MAC header" without ever pinning the MAC header's content or the
+RX-side frame filter — wire interop territory. Operator ruled **pinned data
+frame + SA-prefix filter**, folded in as new **§3.0**:
+
+- 24-byte non-QoS Data frame, ToDS/FromDS=0, Duration 0, DA=broadcast (a
+  broadcast DA can never solicit an 802.11 MAC ACK — keeps the §1 no-MAC-ARQ
+  invariant structural, not behavioral).
+- SA = locally-administered `57:42:<net_id>:<originator u16 BE>:<adapter idx>`;
+  BSSID = fixed `57:42:4c:4b:00:00` ("WBLK"). Frame body = raw waybeam-link
+  packet, no LLC/SNAP.
+- RX filter: Data && SA prefix `57:42` (&& `net_id` equality only when the
+  node configures one) && payload magic + header validation. `net_id` is a
+  new optional node-local config so co-located systems partition at L2;
+  explicitly not access control.
+- Rejected alternative: broadcast-everything + payload-magic-only filter —
+  simpler spec text but no L2 discriminator and no co-location separation.
+
+Same pass, scope ruling: step 9 is **code-only** (vendor devourer, radio
+backend, §7.2 quiet-gap pacer; verified by tests + x86 ASan + SSC338Q cross).
+Hardware bring-up and gates 1–4 stay at step 11.
+
+## Pass 8 — upstream devourer aggregation/HW-ACK review + §3.0 SA amendment (2026-07-11)
+
+Reviewed upstream devourer 3025e2d ("Packet aggregation and hardware ACKs in
+userspace", PR #239; four off-by-default capabilities) against our design.
+Operator ruled **no pivot**: broadcast + importance-gated NACK-ARQ stands —
+hardware ARQ retries indiscriminately (head-of-line on the craft's single
+radio), and its failure mode (designated ACKer fades → every frame re-airs to
+the retry limit) is an airtime storm exactly when the link is marginal.
+A-MPDU rejected for v1 (0.8–3 ms aggregate-fill pacing = latency adder; needs
+QoS-Data; Jaguar1/8812AU collapses under the deep feed it requires). USB TX
+aggregation rejected for the data path (shallow feed by design).
+
+Adopted:
+- **§3.0 SA amendment (spec change this pass)**: SA/BSSID first octet
+  `0x57 → 0x56`. Upstream's docs surfaced that `0x57` has the I/G bit set —
+  our SA was a **group address**, nonconforming as a TA and permanently
+  unable to solicit an ACK. `0x56` = locally-administered unicast. BSSID tag
+  becomes "VBLK". Payload magic stays `0x57 0x42`.
+- **Re-vendor at 3025e2d** (own PR): all knobs off-by-default byte-identical;
+  buys per-frame TX-status CCX reports — a TX-side wedge detector /
+  queue-latency sensor for §9 that costs zero return-path bytes. Exclude
+  upstream `reference/` (vendored kernel-driver submodules).
+- **Step-11 bench item**: hardware-ACK'd **uplink** hybrid — craft arms
+  `SetAckResponder` so ground→craft returns (NACK/LINK_REPORT, one shot per
+  §7.2 window today) get SIFS-timed hardware ARQ; downlink video stays
+  broadcast. Bench slot, not a redesign.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

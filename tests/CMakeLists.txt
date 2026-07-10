@@ -4,6 +4,7 @@
 # registers it with CTest. Extra link targets may follow the name.
 function(add_wb_test name)
     add_executable(${name} ${name}.cpp)
+    target_compile_options(${name} PRIVATE ${WBLINK_WARNINGS})
     target_link_libraries(${name} PRIVATE wblink_core ${ARGN})
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME ${name} COMMAND ${name})
@@ -22,8 +23,10 @@ add_wb_test(rx_test)
 add_wb_test(scheduler_test)
 add_wb_test(selector_test)
 add_wb_test(reporter_test)
+add_wb_test(quietgap_test)
 add_wb_test(loopback_test)
 
+add_wb_test(dot11_test wblink_io)
 add_wb_test(config_test wblink_io)
 target_compile_definitions(config_test PRIVATE
     WBLINK_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

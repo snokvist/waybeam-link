@@ -37,7 +37,8 @@
     {
       "name": "dev",
       "configurePreset": "dev",
-      "output": { "outputOnFailure": true }
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "name": "_test$" } }
     }
   ]
 }

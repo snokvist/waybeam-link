@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // waybeam-link — one portable binary, modes tx / rx / loopback (PROTOCOL.md
-// §16.1). Steps 1–6 are live: wire codec, I/O/config/stats, framer + ring,
-// merged RX engine, resend scheduler, loopback bench + udp-air dev backend.
-// The radio path (devourer) arrives at build steps 9–11 behind the same
-// inject/poll shape as udp-air.
+// §16.1). Steps 1–9 are live: wire codec, I/O/config/stats, framer + ring,
+// merged RX engine, resend scheduler, loopback bench, udp-air dev backend,
+// NAL classifier, §9 selector + §10 power, and the devourer radio backend
+// (§3.0) with the §7.2 TSF quiet-gap pacer.
 #include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <chrono>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "wblink/loss_model.h"
 #include "wblink/power.h"
 #include "wblink/power_file.h"
+#include "wblink/quietgap.h"
 #include "wblink/reporter.h"
 #include "wblink/ring.h"
 #include "wblink/rx.h"
@@ -26,6 +28,9 @@
 #include "wblink/stats.h"
 #include "wblink/table.h"
 #include "wblink/venc.h"
+#if WBLINK_RADIO
+#include "wblink/air_radio.h"
+#endif
 
 namespace {
 
@@ -39,6 +44,20 @@ uint64_t now_ms() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
+}
+
+uint64_t now_us() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+// §7.2: the pacer keys off END_OF_BLOCK frames in both directions.
+bool frame_is_eob(const uint8_t* f, size_t n) {
+    const Decoded dec = decode(f, n);
+    const DataView* v = std::get_if<DataView>(&dec);
+    return v != nullptr && (v->hdr.data_flags & data_flags::kEndOfBlock) != 0;
 }
 
 // §2: random per-boot session nonce.
@@ -116,6 +135,147 @@ SelectorPolicy selector_policy(const Config& cfg) {
     return p;
 }
 
+QuietGapPolicy quietgap_policy(const Config& cfg) {
+    QuietGapPolicy p;
+    p.enabled = cfg.policy.ret.quiet_gap;
+    p.guard_us = cfg.policy.ret.guard_us;
+    p.window_us = cfg.policy.ret.return_window_us;
+    return p;
+}
+
+// ---- air backend selection (udp dev backend | devourer radio, §3.0) --------
+
+struct AirBackend {
+    std::optional<UdpAir> udp;
+#if WBLINK_RADIO
+    std::optional<RadioAir> radio;
+#endif
+
+    static Result<AirBackend> create(const Config& cfg) {
+        AirBackend b;
+        if (cfg.air.kind == AirCfg::Kind::kUdp) {
+            auto a = UdpAir::create(cfg.air.udp);
+            if (!a) {
+                return Result<AirBackend>::fail(a.error);
+            }
+            b.udp.emplace(std::move(*a.value));
+            return Result<AirBackend>::ok(std::move(b));
+        }
+        if (cfg.air.kind == AirCfg::Kind::kRadio) {
+#if WBLINK_RADIO
+            RadioAirCfg rc;
+            rc.adapters = cfg.adapters;
+            rc.stamp_net_id = cfg.node.net_id.value_or(0);
+            rc.filter_net_id = cfg.node.net_id;
+            rc.originator = cfg.node.originator;
+            auto a = RadioAir::create(rc);
+            if (!a) {
+                return Result<AirBackend>::fail(a.error);
+            }
+            b.radio.emplace(std::move(*a.value));
+            return Result<AirBackend>::ok(std::move(b));
+#else
+            return Result<AirBackend>::fail(
+                "air: kind \"radio\" but this binary was built with "
+                "WBLINK_RADIO=OFF");
+#endif
+        }
+        return Result<AirBackend>::fail(
+            "no air backend configured (add an \"air\" section)");
+    }
+
+    size_t inject(const uint8_t* f, size_t n) {
+#if WBLINK_RADIO
+        if (radio) {
+            return radio->inject(f, n);
+        }
+#endif
+        return udp->inject(f, n);
+    }
+
+    int poll_once(int timeout_ms, const UdpAir::RxCb& cb) {
+#if WBLINK_RADIO
+        if (radio) {
+            return radio->poll_once(timeout_ms, cb);
+        }
+#endif
+        return udp->poll_once(timeout_ms, cb);
+    }
+
+    size_t rx_adapters() const {
+#if WBLINK_RADIO
+        if (radio) {
+            return radio->rx_adapters();
+        }
+#endif
+        return udp->rx_adapters();
+    }
+
+    // Radio-only surfaces (no-ops / nullopt on the udp dev backend).
+    void set_tx_mode(uint8_t mcs, bool sgi) {
+#if WBLINK_RADIO
+        if (radio) {
+            radio->set_tx_mode(mcs, sgi);
+        }
+#else
+        (void)mcs;
+        (void)sgi;
+#endif
+    }
+    void set_power_qdb(size_t adapter, int32_t qdb) {
+#if WBLINK_RADIO
+        if (radio) {
+            radio->set_power_qdb(adapter, qdb);
+        }
+#else
+        (void)adapter;
+        (void)qdb;
+#endif
+    }
+    std::optional<uint64_t> read_tsf(uint8_t adapter) {
+#if WBLINK_RADIO
+        if (radio) {
+            return radio->read_tsf(adapter);
+        }
+#else
+        (void)adapter;
+#endif
+        return std::nullopt;
+    }
+    bool is_radio() const {
+#if WBLINK_RADIO
+        return radio.has_value();
+#else
+        return false;
+#endif
+    }
+    void fill_adapter_stats(StatsSnapshot& snap,
+                            uint64_t tsf_fallbacks) const {
+#if WBLINK_RADIO
+        if (!radio) {
+            return;
+        }
+        for (size_t i = 0; i < radio->rx_adapters(); ++i) {
+            const auto c = radio->counters(i);
+            AdapterStats as;
+            as.name = c.name;
+            as.rx = c.rx_frames;
+            as.rssi_best = c.rssi_last;
+            as.rssi_mean = c.rssi_last;
+            as.tx_submitted = c.tx_submitted;
+            as.tx_failed = c.tx_failed;
+            as.drop = c.rx_dropped;
+            // Node-wide §7.2 TSF-read fallback count, surfaced once.
+            as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
+            snap.adapters.push_back(std::move(as));
+        }
+#else
+        (void)snap;
+        (void)tsf_fallbacks;
+#endif
+    }
+};
+
 // ---- TX side: per in-stream framer + ring + scheduler ----------------------
 
 struct TxCore {
@@ -136,9 +296,10 @@ struct TxCore {
           selector_(selector_policy(cfg), table),
           venc_(cfg.venc) {
         // §10: one power curve per TX adapter with an authored map. The
-        // resolve happens at profile commit; actuation is an intent surface
-        // until devourer lands (step 9+).
-        for (const AdapterCfg& a : cfg.adapters) {
+        // resolve happens at profile commit; the radio backend applies it
+        // (apply_power hook), otherwise it stays a logged intent.
+        for (size_t i = 0; i < cfg.adapters.size(); ++i) {
+            const AdapterCfg& a = cfg.adapters[i];
             if (a.role != Role::kTx || a.power_map.empty()) {
                 continue;
             }
@@ -149,7 +310,7 @@ struct TxCore {
                              curve.error.c_str());
                 continue;
             }
-            power_.push_back(PowerAdapter{a.name, *curve.value,
+            power_.push_back(PowerAdapter{a.name, i, *curve.value,
                                           a.max_power_qdb, std::nullopt});
         }
         for (const StreamCfg& s : cfg.streams) {
@@ -228,18 +389,28 @@ struct TxCore {
                 s.framer.set_operating_point(act.commit->profile_id,
                                              table_version_);
             }
+            // ...the TX adapter's modulation default (§10.4, radio backend)...
+            if (apply_mode) {
+                apply_mode(act.commit->mcs,
+                           act.commit->gi == GuardInterval::kShort);
+            }
             // ...and the §10 per-adapter power resolve, applied inside the
-            // same sequenced transition (intent-only until devourer).
+            // same sequenced transition (real SetTxPowerOffsetQdb on the
+            // radio backend; a logged intent elsewhere).
             for (PowerAdapter& pa : power_) {
                 const auto qdb =
                     resolve_power_qdb(pa.curve, act.commit->mcs,
                                       act.commit->tx_power_level, pa.ceiling);
                 if (qdb && (!pa.applied_qdb || *pa.applied_qdb != *qdb)) {
                     pa.applied_qdb = *qdb;
-                    std::fprintf(stderr,
-                                 "power: %s mcs=%u level=%u -> %d qdb\n",
-                                 pa.name.c_str(), act.commit->mcs,
-                                 act.commit->tx_power_level, *qdb);
+                    if (apply_power) {
+                        apply_power(pa.adapter_idx, *qdb);
+                    } else {
+                        std::fprintf(stderr,
+                                     "power: %s mcs=%u level=%u -> %d qdb\n",
+                                     pa.name.c_str(), act.commit->mcs,
+                                     act.commit->tx_power_level, *qdb);
+                    }
                 }
             }
         }
@@ -296,10 +467,15 @@ struct TxCore {
 
     struct PowerAdapter {
         std::string name;
+        size_t adapter_idx;  // position in cfg.adapters == radio index
         PowerCurve curve;
         std::optional<int32_t> ceiling;
         std::optional<int32_t> applied_qdb;
     };
+
+    // Radio-backend actuation hooks (§10.4); unset = logged intent.
+    std::function<void(uint8_t mcs, bool sgi)> apply_mode;
+    std::function<void(size_t adapter_idx, int32_t qdb)> apply_power;
 
     uint16_t originator_;
     uint32_t session_;
@@ -448,7 +624,9 @@ int load_all(const std::string& config_path, Loaded& out) {
 }
 
 void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
-                uint64_t t0, const TxCore* tx, const RxCore* rx) {
+                uint64_t t0, const TxCore* tx, const RxCore* rx,
+                const AirBackend* air = nullptr,
+                uint64_t tsf_fallbacks = 0) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -460,19 +638,16 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     if (rx != nullptr) {
         rx->fill_stats(snap);
     }
+    if (air != nullptr) {
+        air->fill_adapter_stats(snap, tsf_fallbacks);
+    }
     emitter.emit(snap);
 }
 
 // ---- modes -------------------------------------------------------------------
 
 int run_tx(const Loaded& l) {
-    if (l.cfg.air.kind != AirCfg::Kind::kUdp) {
-        std::fprintf(stderr,
-                     "tx: no air backend configured (add an \"air\" section; "
-                     "the devourer radio backend lands at build step 9+)\n");
-        return 1;
-    }
-    auto air = UdpAir::create(l.cfg.air.udp);
+    auto air = AirBackend::create(l.cfg);
     if (!air) {
         std::fprintf(stderr, "air error: %s\n", air.error.c_str());
         return 1;
@@ -484,30 +659,71 @@ int run_tx(const Loaded& l) {
     }
     const uint32_t session = session_nonce();
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv);
+    if (air.value->is_radio()) {
+        tx.apply_mode = [&](uint8_t mcs, bool sgi) {
+            air.value->set_tx_mode(mcs, sgi);
+        };
+        tx.apply_power = [&](size_t idx, int32_t qdb) {
+            air.value->set_power_qdb(idx, qdb);
+        };
+    }
     StatsEmitter emitter(true, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
     uint64_t next_stats = t0;
     const uint64_t stats_period =
         l.cfg.stats.hz > 0 ? static_cast<uint64_t>(1000.0 / l.cfg.stats.hz)
                            : 0;
-    const TxCore::Inject inject = [&](const uint8_t* f, size_t n) {
+
+    // §7.2 craft side: after an END_OF_BLOCK the pacer holds video for the
+    // quiet window so the single radio can hear returns. Frames arriving
+    // inside the window queue behind it (order preserved); the backlog
+    // override degrades to §7.1 under load.
+    QuietGap qg(quietgap_policy(l.cfg));
+    std::deque<std::vector<uint8_t>> held;
+    uint64_t now_us_it = now_us();
+    const auto send_raw = [&](const uint8_t* f, size_t n) {
         air.value->inject(f, n);
+        if (qg.enabled() && frame_is_eob(f, n)) {
+            qg.note_eob_sent(now_us_it);
+        }
     };
-    std::fprintf(stderr, "tx: session=%u, running\n", session);
+    const TxCore::Inject inject = [&](const uint8_t* f, size_t n) {
+        if (!held.empty() ||
+            !qg.can_send_video(now_us_it,
+                               static_cast<uint32_t>(held.size()))) {
+            held.emplace_back(f, f + n);
+            return;
+        }
+        send_raw(f, n);
+    };
+    std::fprintf(stderr, "tx: session=%u, running%s\n", session,
+                 qg.enabled() ? " (quiet-gap pacing)" : "");
     while (g_stop == 0) {
         // One timestamp per iteration: every callback and the tick share it,
         // so the time injected into the core never steps backward between
         // calls (a fresh now_ms() inside a callback can land 1 ms AFTER the
         // tick's captured now, and u64 "now - stamp" arithmetic underflows).
         const uint64_t now = now_ms();
-        bindings.value->poll_once(2, [&](const IngressEvent& ev) {
+        now_us_it = now_us();
+        // Flush held video the moment the gap allows it; an EOB inside the
+        // flush re-arms the gap and holds the rest.
+        while (!held.empty() &&
+               qg.can_send_video(now_us_it,
+                                 static_cast<uint32_t>(held.size()))) {
+            const std::vector<uint8_t> f = std::move(held.front());
+            held.pop_front();
+            send_raw(f.data(), f.size());
+        }
+        // Held frames need µs-scale reactivity — don't sleep in poll then.
+        const int in_timeout = held.empty() ? 2 : 0;
+        bindings.value->poll_once(in_timeout, [&](const IngressEvent& ev) {
             tx.on_ingress(ev.stream_id, ev.data, ev.len, now, inject);
         });
         air.value->poll_once(0, [&](const AirRxMeta&, const uint8_t* d,
                                     size_t n) { tx.on_air(d, n, now); });
         tx.tick(now, inject);
         if (stats_period != 0 && now >= next_stats) {
-            emit_stats(emitter, l, session, t0, &tx, nullptr);
+            emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value);
             next_stats = now + stats_period;
         }
     }
@@ -515,11 +731,7 @@ int run_tx(const Loaded& l) {
 }
 
 int run_rx(const Loaded& l) {
-    if (l.cfg.air.kind != AirCfg::Kind::kUdp) {
-        std::fprintf(stderr, "rx: no air backend configured\n");
-        return 1;
-    }
-    auto air = UdpAir::create(l.cfg.air.udp);
+    auto air = AirBackend::create(l.cfg);
     if (!air) {
         std::fprintf(stderr, "air error: %s\n", air.error.c_str());
         return 1;
@@ -538,8 +750,21 @@ int run_rx(const Loaded& l) {
             out->send(d, n);
         }
     };
+
+    // §7.2 ground side: returns (NACK/LINK_REPORT) coalesce and fire at the
+    // middle of the craft's quiet gap, anchored on the EOB's receive-TSF.
+    // Disabled (default) they inject immediately — §7.1 baseline.
+    QuietGap qg(quietgap_policy(l.cfg));
+    std::deque<std::vector<uint8_t>> ret_held;
+    std::optional<uint64_t> ret_at_us;
+    uint64_t tsf_fallbacks = 0;
+    uint64_t now_us_it = now_us();
     const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n) {
-        air.value->inject(f, n);
+        if (!qg.enabled()) {
+            air.value->inject(f, n);
+            return;
+        }
+        ret_held.emplace_back(f, f + n);
     };
     StatsEmitter emitter(true, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
@@ -547,24 +772,48 @@ int run_rx(const Loaded& l) {
     const uint64_t stats_period =
         l.cfg.stats.hz > 0 ? static_cast<uint64_t>(1000.0 / l.cfg.stats.hz)
                            : 0;
-    std::fprintf(stderr, "rx: session=%u, %zu virtual adapters, running\n",
-                 session, air.value->rx_adapters());
+    std::fprintf(stderr, "rx: session=%u, %zu adapters, running%s\n",
+                 session, air.value->rx_adapters(),
+                 qg.enabled() ? " (quiet-gap returns)" : "");
     while (g_stop == 0) {
         // One timestamp per iteration (see run_tx): callbacks and tick share
         // it so core-injected time never steps backward.
         const uint64_t now = now_ms();
-        air.value->poll_once(2, [&](const AirRxMeta& meta, const uint8_t* d,
-                                    size_t n) {
+        now_us_it = now_us();
+        // Fire the coalesced return window. No deadline (no EOB heard yet)
+        // means send immediately — never sit on a return.
+        if (!ret_held.empty() &&
+            (!ret_at_us || now_us_it >= *ret_at_us)) {
+            for (const auto& f : ret_held) {
+                air.value->inject(f.data(), f.size());
+            }
+            ret_held.clear();
+            ret_at_us.reset();
+        }
+        const int air_timeout = ret_held.empty() ? 2 : 0;
+        air.value->poll_once(air_timeout, [&](const AirRxMeta& meta,
+                                              const uint8_t* d, size_t n) {
             // udp-air carries no real RSSI; fall back to the loopback
             // section's synthetic value so the §9 selector can be exercised
-            // over the dev backend (devourer supplies real RSSI at step 9+).
+            // over the dev backend (the radio backend supplies real RSSI).
             const int8_t rssi =
                 meta.rssi != 0 ? meta.rssi : l.cfg.loopback.rssi_dbm;
             rx.on_air(meta.adapter_id, d, n, now, deliver, rssi);
+            if (qg.enabled() && frame_is_eob(d, n)) {
+                // Anchor on the SAME adapter's TSF (clocks never cross
+                // adapters); a failed read falls back to host arrival.
+                const auto tsf_now = air.value->read_tsf(meta.adapter_id);
+                if (!tsf_now) {
+                    ++tsf_fallbacks;
+                }
+                ret_at_us = qg.return_deadline(
+                    now_us_it, static_cast<uint32_t>(meta.tsf_us), tsf_now);
+            }
         });
         rx.tick(now, deliver, inject_nack);
         if (stats_period != 0 && now >= next_stats) {
-            emit_stats(emitter, l, session, t0, nullptr, &rx);
+            emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
+                       tsf_fallbacks);
             next_stats = now + stats_period;
         }
     }

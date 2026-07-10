@@ -113,6 +113,13 @@ Result<Config> load_config_json(const std::string& json_text) {
         if (n.contains("preferred_originator")) {
             cfg.node.preferred_originator = n.at("preferred_originator").get<uint16_t>();
         }
+        if (n.contains("net_id")) {
+            const uint64_t nid = n.at("net_id").get<uint64_t>();
+            if (nid > 255) {
+                return Result<Config>::fail("node: net_id must be 0..255");
+            }
+            cfg.node.net_id = static_cast<uint8_t>(nid);
+        }
 
         if (j.contains("profile_table")) {
             cfg.profile_table_path = j.at("profile_table").get<std::string>();
@@ -323,6 +330,8 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (p.contains("return")) {
                 const json& pr = p.at("return");
+                cfg.policy.ret.quiet_gap =
+                    pr.value("quiet_gap", cfg.policy.ret.quiet_gap);
                 cfg.policy.ret.guard_us = pr.value("guard_us", cfg.policy.ret.guard_us);
                 cfg.policy.ret.return_window_us =
                     pr.value("return_window_us", cfg.policy.ret.return_window_us);
@@ -366,20 +375,24 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.venc.enabled = v.value("enabled", cfg.venc.enabled);
         }
 
-        // air (dev backend; not §15 — devourer replaces it at bring-up)
+        // air ("udp" = dev backend, not §15; "radio" = devourer, §3.0 —
+        // radio adapters come from the top-level adapters array)
         if (j.contains("air")) {
             const json& a = j.at("air");
             const std::string kind = a.value("kind", std::string("udp"));
-            if (kind != "udp") {
+            if (kind == "radio") {
+                cfg.air.kind = AirCfg::Kind::kRadio;
+            } else if (kind == "udp") {
+                cfg.air.kind = AirCfg::Kind::kUdp;
+                for (const json& t : a.value("tx", json::array())) {
+                    cfg.air.udp.tx.push_back(t.get<std::string>());
+                }
+                for (const json& r : a.value("rx", json::array())) {
+                    cfg.air.udp.rx.push_back(r.get<std::string>());
+                }
+            } else {
                 return Result<Config>::fail(
-                    "air: kind \"" + kind + "\" unknown (v0 dev backend is udp)");
-            }
-            cfg.air.kind = AirCfg::Kind::kUdp;
-            for (const json& t : a.value("tx", json::array())) {
-                cfg.air.udp.tx.push_back(t.get<std::string>());
-            }
-            for (const json& r : a.value("rx", json::array())) {
-                cfg.air.udp.rx.push_back(r.get<std::string>());
+                    "air: kind \"" + kind + "\" unknown (udp | radio)");
             }
         }
 

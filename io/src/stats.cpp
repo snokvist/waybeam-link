@@ -81,6 +81,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, a.tx_failed);
         out += ",\"tx_timeout\":";
         append_u64(out, a.tx_timeout);
+        out += ",\"drop\":";
+        append_u64(out, a.drop);
+        out += ",\"tsf_fallback\":";
+        append_u64(out, a.tsf_fallback);
         out += ",\"adapter_stalled\":";
         append_bool(out, a.adapter_stalled);
         out += '}';

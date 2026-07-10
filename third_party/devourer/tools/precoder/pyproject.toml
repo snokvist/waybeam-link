@@ -1,0 +1,48 @@
+[project]
+name = "devourer-precoder"
+version = "0.1.0"
+description = "Pre-modulator subcarrier encoder for devourer — inverts the 802.11 BPSK/BCC TX pipeline so chosen OFDM data subcarriers carry chosen bits."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.23",
+    # RaptorQ (RFC 6330) fountain-code FEC for the stream link's
+    # packet-erasure channel. cberner's Rust+PyO3 implementation has
+    # manylinux abi3 wheels on PyPI so `uv sync` doesn't need a Rust
+    # toolchain. Used by stream_fec_raptorq.py.
+    "raptorq>=2",
+    # cffi binds the vendored swif-codec C library (irtf-nwcrg/swif-codec,
+    # RFC 8681 sliding-window RLC) used by stream_fec_rlc.py. The cffi
+    # extension is built in-tree by `_swif_build.py`; run that once after
+    # `uv sync`.
+    "cffi>=1.16",
+]
+
+# Phase-B RF verification (tools/precoder/fft_capture.py) needs an SDR stack.
+# Kept optional so the encoder + smoke tests install with numpy alone:
+#   uv sync --extra sdr
+[project.optional-dependencies]
+sdr = [
+    "pyrtlsdr>=0.2.93",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7",
+    "setuptools>=82.0.1",
+]
+
+[tool.pytest.ini_options]
+# test_pipeline.py lives alongside the module; default (prepend) import mode
+# puts this dir on sys.path so `import encode_subcarriers` resolves.
+testpaths = ["test_pipeline.py", "test_stream.py", "test_stream_fec.py",
+              "test_stream_fec_rlc.py", "test_stream_fec_rs.py",
+              "test_fec_subblock.py", "test_fec_fusion_sim.py",
+              "test_svc_uep_fec.py", "test_fused_fec_link.py",
+              "test_soft_erasure_fec.py", "test_fec_ab_sim.py",
+              "test_energy_model.py", "test_link_model.py",
+              "test_controller.py",
+              "test_rc_proto.py", "test_score.py",
+              "test_rendezvous.py", "test_adaptive_link.py",
+              "test_svc_pipeline.py", "test_hop_diversity_sim.py",
+              "test_hop_rx_combine.py"]

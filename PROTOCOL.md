@@ -21,8 +21,8 @@ short correlated-fade band. RTP is carried opaque end-to-end.
   magic is transmitted as the two bytes `0x57 0x42` (ASCII `"WB"`).
 - **Byte offsets** in the header tables are relative to the start of the
   waybeam-link header (i.e. the first byte after devourer's 802.11 MAC payload
-  boundary). devourer owns radiotap + the 802.11 MAC header; waybeam-link owns
-  everything below.
+  boundary). devourer owns radiotap; the 802.11 MAC header is pinned in §3.0;
+  waybeam-link owns everything below.
 - **Units:** loss in per-mille ‰ (0–1000); TX power in quarter-dB `qdb`; time in
   ms unless a field name says `_us`; bitrate in kbps.
 - **"Craft"** = the air vehicle (single radio, dominant video producer).
@@ -123,6 +123,40 @@ Three orthogonal identities, never conflated:
 ---
 
 ## 3. Wire header
+
+### 3.0 On-air 802.11 encapsulation (the devourer boundary)
+
+Every waybeam-link packet rides as the frame body of a **pinned 802.11 data
+frame** injected through devourer (radiotap prefix rate-less `TX_FLAGS`-only;
+modulation comes from the adapter's committed `SetTxMode`, §9.5/§10.4). The
+MAC header is normative — all implementations must emit and filter exactly
+this shape (Pass-7 ruling):
+
+| field | value |
+|---|---|
+| Frame Control | `0x08 0x00` — Data (not QoS), ToDS=0, FromDS=0, no flags |
+| Duration | `0` |
+| addr1 (DA) | `ff:ff:ff:ff:ff:ff` — broadcast, so the frame can never solicit an 802.11 MAC ACK (§1 no-MAC-ARQ invariant) |
+| addr2 (SA) | `56:42:NN:OO:OO:AA` — locally-administered **unicast**; `NN` = `net_id` u8, `OO:OO` = `originator` u16 BE (§2), `AA` = sender adapter index (diagnostics only) |
+| addr3 (BSSID) | `56:42:4c:4b:00:00` — fixed `"VBLK"` tag |
+| Sequence Control | injector-incremented per frame (fragment 0) |
+
+The SA first octet is `0x56`, not the payload magic's `0x57`: `0x57` has the
+I/G bit set, making it a **group address** — nonconforming as a transmitter
+address and structurally unable to ever solicit an ACK. `0x56` keeps the
+locally-administered bit and clears I/G, so every waybeam-link SA is a valid
+unicast TA (Pass-8 ruling; keeps the hardware ACK-responder door open for the
+uplink, §7.2 note). The payload `magic` (§3.1) remains `0x57 0x42`.
+
+The frame body that follows is the raw waybeam-link packet (§3.1 onward) — no
+LLC/SNAP, no encryption. The FCS is the radio's.
+
+**RX filter** (in priority order, cheapest first): type/subtype == Data &&
+`SA[0..1] == 56:42` (&& `SA[2] == net_id` **when the node configures one**;
+an unconfigured node accepts any `net_id`) && payload `magic` + full header
+validation (§3.1). `net_id` is node-local config, stamped by every TX
+(default `0`); it exists so co-located waybeam-link systems can partition
+their RX paths at L2 — it is **not** access control (§13 applies).
 
 ### 3.1 Common prefix (all packet types) — 11 bytes
 

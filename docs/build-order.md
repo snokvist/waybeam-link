@@ -63,6 +63,12 @@ TSF-dependent gates.
 9. Return-telemetry TSF quiet-gap optimisation (§7.2) — gated on hardware gate 1/4.
 10. Follow-me CSA (§11) — gated on gate 1.
 11. Field bring-up; run gates 1–4. FEC (§14) only if gate 2's P95 says so.
+    Extra bench slots (Pass 8): first injection smoke must verify the §3.0
+    Data/ToDS=0 frame actually airs (devourer noted ToDS=1 was chip-NAKed in
+    monitor mode); A/B the hardware-ACK'd **uplink** hybrid — craft
+    `SetAckResponder`, ground returns as unicast QoS-Data — against the plain
+    §7.2 window (downlink video stays broadcast either way); validate the
+    TX-report wedge detector (reports stall while `tx_submitted` advances).
 
 ## Non-negotiable operational rules (carried from the ecosystem)
 
