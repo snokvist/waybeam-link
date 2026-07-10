@@ -180,6 +180,25 @@ Result<Config> load_config_json(const std::string& json_text) {
             if (s.contains("originator")) {
                 sc.originator = s.at("originator").get<uint16_t>();
             }
+            if (s.contains("classifier")) {
+                if (sc.stream_type != stream_type::kRtp) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": classifier is RTP-profile-only (§4.1)");
+                }
+                const std::string c = s.at("classifier").get<std::string>();
+                if (c == "size") {
+                    sc.classifier = RtpClassifier::kSize;
+                } else if (c == "h264") {
+                    sc.classifier = RtpClassifier::kH264;
+                } else if (c == "h265") {
+                    sc.classifier = RtpClassifier::kH265;
+                } else {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": classifier must be \"size\", \"h264\" or \"h265\"");
+                }
+            }
             ++udp_bindings;
             cfg.streams.push_back(std::move(sc));
         }
@@ -250,6 +269,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pr.value("idle_teardown_ms", rx.idle_teardown_ms);
                 rx.fwd_clamp_pkts =
                     pr.value("fwd_clamp_pkts", rx.fwd_clamp_pkts);
+                rx.clamp_resync_ms =
+                    pr.value("clamp_resync_ms", rx.clamp_resync_ms);
             }
             if (p.contains("fec")) {
                 const json& pf = p.at("fec");
@@ -473,8 +494,14 @@ std::string dump_config_summary(const Config& cfg) {
     for (const StreamCfg& s : cfg.streams) {
         ss << "  id=" << unsigned(s.stream_id) << " type=" << unsigned(s.stream_type)
            << " " << (s.dir == Dir::kIn ? "in  <- " + s.bind.listen
-                                        : "out -> " + s.bind.send)
-           << "\n";
+                                        : "out -> " + s.bind.send);
+        if (s.stream_type == stream_type::kRtp && s.dir == Dir::kIn) {
+            ss << " classifier="
+               << (s.classifier == RtpClassifier::kH264   ? "h264"
+                   : s.classifier == RtpClassifier::kH265 ? "h265"
+                                                          : "size");
+        }
+        ss << "\n";
     }
     ss << "policy: report_hz=" << cfg.policy.report_hz
        << " demote_milli=" << cfg.policy.select.demote_milli

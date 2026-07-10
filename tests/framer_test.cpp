@@ -36,7 +36,13 @@ struct Harness {
     Framer framer;
     std::vector<Sent> sent;
     explicit Harness(uint8_t stream_type_v, uint32_t threshold = 8192)
-        : framer(FramerConfig{17, 0x01020304, 0, stream_type_v, 0, threshold}) {
+        : framer(FramerConfig{.originator = 17,
+                              .session_id = 0x01020304,
+                              .stream_id = 0,
+                              .stream_type = stream_type_v,
+                              .destination = 0,
+                              .classifier = RtpClassifier::kSize,
+                              .classifier_size_threshold = threshold}) {
         framer.set_operating_point(4, 0x2B);
     }
     bool feed(const std::vector<uint8_t>& d, uint64_t now = 0) {

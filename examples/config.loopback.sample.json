@@ -1,5 +1,5 @@
 {
-  "_comment": "Loopback bench (§16): TX and RX in one process, synthetic Gilbert-Elliott burst loss over 2 virtual adapters. Feed RTP into :5600 (e.g. gst videotestsrc ! x264enc tune=zerolatency ! rtph264pay mtu=1400 ! udpsink port=5600), watch the delivered stream on :5700 and the NDJSON stats on stdout / :9110. Stream 0 = TX ingress; stream 1 = the RX-side delivery of the latched RTP stream (local ids are independent of the wire stream_id).",
+  "_comment": "Loopback bench (§16): TX and RX in one process, synthetic Gilbert-Elliott burst loss over 2 virtual adapters. Feed RTP into :5600 (e.g. gst videotestsrc ! x264enc tune=zerolatency ! rtph264pay mtu=1400 ! udpsink port=5600), watch the delivered stream on :5700 and the NDJSON stats on stdout / :9110. Stream 0 = TX ingress; stream 1 = the RX-side delivery of the latched RTP stream (local ids are independent of the wire stream_id). When feeding real video, add \"classifier\": \"h264\" or \"h265\" to the in-stream so ARQ importance comes from the NAL type (§4.1) instead of the size heuristic.",
   "node": { "originator": 17, "role": "tx", "preferred_originator": 9 },
   "profile_table": "profiles/table.example.json",
   "streams": [

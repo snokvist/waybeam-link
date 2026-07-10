@@ -54,4 +54,37 @@ inline std::optional<RtpHeader> parse_rtp_header(const uint8_t* d, size_t len) {
     return h;
 }
 
+struct RtpPayload {
+    const uint8_t* data;
+    size_t len;
+};
+
+// Locates the RTP payload for the §4.1 classifier: skips CSRCs and the
+// RFC 3550 header extension, trims declared padding. Returns nullopt on any
+// inconsistency (extension/padding overruns the datagram) — the classifier
+// then falls back to not-important; the transport still carries the packet
+// opaquely either way.
+inline std::optional<RtpPayload> rtp_payload(const uint8_t* d, size_t len,
+                                             const RtpHeader& h) {
+    size_t off = kRtpFixedHeaderSize + h.csrc_count * 4u;
+    if (h.extension) {
+        if (off + 4 > len) {
+            return std::nullopt;
+        }
+        off += 4 + 4u * be16_read(d + off + 2);
+    }
+    size_t end = len;
+    if (h.padding) {
+        const uint8_t pad = d[len - 1];  // len >= 12 guaranteed by the parse
+        if (pad == 0 || pad > end) {
+            return std::nullopt;
+        }
+        end -= pad;
+    }
+    if (off > end) {
+        return std::nullopt;
+    }
+    return RtpPayload{d + off, end - off};
+}
+
 }  // namespace wblink

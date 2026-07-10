@@ -13,12 +13,17 @@
 //    back to one-datagram-one-block.
 //  - Non-RTP streams: one datagram = one block, EOB set, ARQ=0.
 //
-// ARQ classifier (step 3) = the §4.1 size-heuristic FALLBACK: once a block's
-// cumulative payload crosses classifier_size_threshold, this and subsequent
-// packets of the block are stamped ARQ=1. Earlier packets of the same block
-// stay unstamped — acceptable because any surviving flagged packet reveals the
-// block's eligibility (§3.2 redundant-metadata rule); the step-7 NAL
-// classifier will stamp from the first packet instead.
+// ARQ classifier (§4.1), selected per stream by FramerConfig::classifier:
+//
+//  - kH264 / kH265: the NAL-type classifier (nal.h) — IDR/parameter-set NALs
+//    mark the block important, stamped from the FIRST packet of the block
+//    (FU fragments carry the type in every fragment). Importance is sticky
+//    for the rest of the block (a STAP(SPS,PPS) opener flags the whole AU).
+//  - kSize (fallback): once a block's cumulative payload crosses
+//    classifier_size_threshold, this and subsequent packets are stamped
+//    ARQ=1. Earlier packets of the same block stay unstamped — acceptable
+//    because any surviving flagged packet reveals the block's eligibility
+//    (§3.2 redundant-metadata rule).
 //
 // Pure tick-free logic: time is injected, emission is a callback. No sockets,
 // no clocks, no allocation on the datagram path (encode into a caller-scoped
@@ -29,6 +34,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "wblink/nal.h"
 #include "wblink/types.h"
 #include "wblink/wire.h"
 
@@ -40,7 +46,9 @@ struct FramerConfig {
     uint8_t stream_id = 0;
     uint8_t stream_type = stream_type::kUnknown;
     uint16_t destination = 0;  // §3.1 advisory; 0 = broadcast
-    // §4.1 size-heuristic: cumulative block bytes above this => important.
+    // §4.1 classifier for RTP streams; ignored for other profiles.
+    RtpClassifier classifier = RtpClassifier::kSize;
+    // kSize mode: cumulative block bytes above this => important.
     uint32_t classifier_size_threshold = 8 * 1024;
 };
 
