@@ -151,10 +151,17 @@ RxEngine::Stream* RxEngine::try_latch(const DataView& v, uint64_t now_ms) {
 }
 
 void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
-                       const Deliver& deliver) {
+                       const Deliver& deliver, int8_t rssi) {
     Adapter& a = adapters_[adapter_id];
     a.last_rx_ms = now_ms;
     ++a.rx;
+    if (rssi != 0) {  // 0 = meta carried no RSSI (§7.3)
+        a.rssi_last = rssi;
+        const int32_t q4 = static_cast<int32_t>(rssi) * 16;
+        a.rssi_ewma_q4 = a.have_rssi ? a.rssi_ewma_q4 + (q4 - a.rssi_ewma_q4) / 4
+                                     : q4;
+        a.have_rssi = true;
+    }
 
     const uint64_t key = pack_key(v.hdr.prefix, v.hdr.stream_id);
     Stream* s = nullptr;
@@ -486,6 +493,9 @@ std::map<uint8_t, RxAdapterCounters> RxEngine::adapters() const {
         c.last_rx_ms = a.last_rx_ms;
         c.stalled = (newest > a.last_rx_ms) &&
                     (newest - a.last_rx_ms > policy_.stall_timeout_ms);
+        c.rssi_last = a.rssi_last;
+        c.rssi_ewma = static_cast<int8_t>(a.rssi_ewma_q4 / 16);
+        c.have_rssi = a.have_rssi;
         out.emplace(id, c);
     }
     return out;

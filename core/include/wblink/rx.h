@@ -84,6 +84,11 @@ struct RxAdapterCounters {
     uint64_t rx = 0;
     bool stalled = false;
     uint64_t last_rx_ms = 0;
+    // §7.3 report inputs: last per-packet RSSI and an integer EWMA (α = 1/4,
+    // q4 fixed point internally). 0 until the first packet carries RSSI.
+    int8_t rssi_last = 0;
+    int8_t rssi_ewma = 0;
+    bool have_rssi = false;
 };
 
 // One latched stream's identity + counters, for stats/reporting.
@@ -118,9 +123,10 @@ class RxEngine {
              std::optional<uint8_t> local_table_version);
 
     // Ingest one decoded DATA packet heard on adapter_id. Deliveries (this
-    // packet and any it unblocks) happen synchronously via deliver.
+    // packet and any it unblocks) happen synchronously via deliver. rssi is
+    // the receive RSSI in dBm (AirRxMeta), 0 = unknown (§7.3 report input).
     void on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
-                 const Deliver& deliver);
+                 const Deliver& deliver, int8_t rssi = 0);
 
     // Timers: dwell-ceiling gaps, deadline expiry, stall watchdog, idle
     // teardown. Call at a few-ms cadence.
@@ -177,6 +183,9 @@ class RxEngine {
         uint32_t last_seq = 0;  // highest seq heard (any latched stream)
         uint64_t last_rx_ms = 0;
         uint64_t rx = 0;
+        int8_t rssi_last = 0;
+        int32_t rssi_ewma_q4 = 0;  // RSSI EWMA in quarter-dBm fixed point
+        bool have_rssi = false;
     };
     struct Candidate {
         uint8_t count = 0;

@@ -16,11 +16,16 @@
 #include "wblink/config.h"
 #include "wblink/framer.h"
 #include "wblink/loss_model.h"
+#include "wblink/power.h"
+#include "wblink/power_file.h"
+#include "wblink/reporter.h"
 #include "wblink/ring.h"
 #include "wblink/rx.h"
 #include "wblink/scheduler.h"
+#include "wblink/selector.h"
 #include "wblink/stats.h"
 #include "wblink/table.h"
+#include "wblink/venc.h"
 
 namespace {
 
@@ -78,6 +83,39 @@ RxPolicy rx_policy(const Config& cfg) {
     return p;
 }
 
+uint32_t s_to_ms(double s) {
+    return s <= 0.0 ? 0u : static_cast<uint32_t>(s * 1000.0 + 0.5);
+}
+
+SelectorPolicy selector_policy(const Config& cfg) {
+    const SelectPolicy& s = cfg.policy.select;
+    SelectorPolicy p;
+    p.demote_milli = s.demote_milli;
+    p.rssi_floor_dbm = s.rssi_floor_dbm;
+    p.rssi_fade_db_per_s = s.rssi_fade_db_per_s;
+    p.rssi_fade_arm_dbm = s.rssi_fade_arm_dbm;
+    p.down_cooldown_ms = s_to_ms(s.down_cooldown_s);
+    p.ewma_alpha = s.ewma_alpha;
+    p.rung_rssi_floor_dbm = s.rung_rssi_floor_dbm;
+    p.promote_rssi_hyst_db = s.promote_rssi_hyst_db;
+    p.promote_dwell_ms = s_to_ms(s.promote_dwell_s);
+    p.bitrate_lead_ms = s_to_ms(s.bitrate_lead_s);
+    p.mcs_up_grace_ms = s_to_ms(s.mcs_up_grace_s);
+    p.mcs_settle_ms = s_to_ms(s.mcs_settle_s);
+    p.reentry_backoff_ms = s_to_ms(s.reentry_backoff_s);
+    p.reentry_dwell_ms = s_to_ms(s.reentry_dwell_s);
+    p.flap_freeze_count = s.flap_freeze_count;
+    p.flap_freeze_window_ms = s_to_ms(s.flap_freeze_window_s);
+    p.flap_freeze_ms = s_to_ms(s.flap_freeze_s);
+    p.min_profile = s.min_profile;
+    p.max_profile = s.max_profile;
+    p.report_timeout_ms = cfg.policy.report_timeout_ms;
+    p.failsafe_hold_ms = s_to_ms(s.failsafe_hold_s);
+    p.failsafe_step_ms = s_to_ms(s.failsafe_step_s);
+    p.pressure_escape_ms = s_to_ms(s.pressure_escape_s);
+    return p;
+}
+
 // ---- TX side: per in-stream framer + ring + scheduler ----------------------
 
 struct TxCore {
@@ -92,7 +130,28 @@ struct TxCore {
 
     TxCore(const Config& cfg, uint32_t session, const ProfileTable* table,
            uint8_t table_version)
-        : originator_(cfg.node.originator), session_(session) {
+        : originator_(cfg.node.originator),
+          session_(session),
+          table_version_(table_version),
+          selector_(selector_policy(cfg), table),
+          venc_(cfg.venc) {
+        // §10: one power curve per TX adapter with an authored map. The
+        // resolve happens at profile commit; actuation is an intent surface
+        // until devourer lands (step 9+).
+        for (const AdapterCfg& a : cfg.adapters) {
+            if (a.role != Role::kTx || a.power_map.empty()) {
+                continue;
+            }
+            auto curve =
+                load_power_curve(a.power_map, a.channel_mhz >= 4000);
+            if (!curve) {
+                std::fprintf(stderr, "power: %s: %s\n", a.name.c_str(),
+                             curve.error.c_str());
+                continue;
+            }
+            power_.push_back(PowerAdapter{a.name, *curve.value,
+                                          a.max_power_qdb, std::nullopt});
+        }
         for (const StreamCfg& s : cfg.streams) {
             if (s.dir != Dir::kIn) {
                 continue;
@@ -133,23 +192,63 @@ struct TxCore {
         }
     }
 
-    // Air packets heard back (uplink): serve NACKs targeting us.
+    // Air packets heard back (uplink): NACKs feed the scheduler, LINK_REPORTs
+    // feed the §9 selector.
     void on_air(const uint8_t* d, size_t n, uint64_t now) {
         const Decoded dec = decode(d, n);
-        const NackView* nack = std::get_if<NackView>(&dec);
-        if (nack == nullptr || nack->hdr.target_originator != originator_ ||
-            nack->hdr.target_session != session_) {
-            return;
-        }
-        for (Stream& s : streams_) {
-            if (s.stream_id == nack->hdr.target_stream_id) {
-                s.sched.on_nack(*nack, s.ring, now);
+        if (const NackView* nack = std::get_if<NackView>(&dec)) {
+            if (nack->hdr.target_originator != originator_ ||
+                nack->hdr.target_session != session_) {
                 return;
             }
+            for (Stream& s : streams_) {
+                if (s.stream_id == nack->hdr.target_stream_id) {
+                    s.sched.on_nack(*nack, s.ring, now);
+                    return;
+                }
+            }
+            return;
+        }
+        if (const LinkReport* r = std::get_if<LinkReport>(&dec)) {
+            if (r->target_originator != originator_ ||
+                r->target_session != session_) {
+                return;
+            }
+            ++reports_received_;
+            selector_.on_report(*r, now);
         }
     }
 
     void tick(uint64_t now, const Inject& inject) {
+        const SelectorActions act = selector_.tick(now);
+        if (act.commit) {
+            // §9.5 commit: the operating point stamped on every DATA packet
+            // (drives RX deadlines + supersession budgets)...
+            for (Stream& s : streams_) {
+                s.framer.set_operating_point(act.commit->profile_id,
+                                             table_version_);
+            }
+            // ...and the §10 per-adapter power resolve, applied inside the
+            // same sequenced transition (intent-only until devourer).
+            for (PowerAdapter& pa : power_) {
+                const auto qdb =
+                    resolve_power_qdb(pa.curve, act.commit->mcs,
+                                      act.commit->tx_power_level, pa.ceiling);
+                if (qdb && (!pa.applied_qdb || *pa.applied_qdb != *qdb)) {
+                    pa.applied_qdb = *qdb;
+                    std::fprintf(stderr,
+                                 "power: %s mcs=%u level=%u -> %d qdb\n",
+                                 pa.name.c_str(), act.commit->mcs,
+                                 act.commit->tx_power_level, *qdb);
+                }
+            }
+        }
+        // Push the CURRENT target every tick: write-on-change (§9.6) makes
+        // this a no-op normally, and a failed push (encoder briefly down)
+        // retries next tick instead of waiting for the next rung change.
+        if (selector_.bitrate_kbps() > 0) {
+            venc_.set_bitrate(selector_.bitrate_kbps(), now);
+        }
         for (Stream& s : streams_) {
             s.ring.evict(now);
             s.sched.drain(s.ring, now,
@@ -157,7 +256,11 @@ struct TxCore {
         }
     }
 
-    void fill_stats(StatsSnapshot& snap) const {
+    void set_pressure(bool on, uint64_t now) {  // §9.9 gauge (step 9+ feeds it)
+        selector_.set_pressure(on, now);
+    }
+
+    void fill_stats(StatsSnapshot& snap, uint64_t now) const {
         for (const Stream& s : streams_) {
             StreamStats st;
             st.stream_id = s.stream_id;
@@ -168,12 +271,43 @@ struct TxCore {
             st.double_send_suppressed =
                 s.sched.counters().holddown_suppressed;
             st.decode_errors = s.framer.stats().oversize_ingress;
+            st.active_profile = selector_.profile_id();
+            st.table_version = table_version_;
             snap.streams.push_back(std::move(st));
         }
+        snap.link.profile = selector_.profile_id();
+        snap.link.mcs = selector_.mcs();
+        snap.link.report_epoch = selector_.report_epoch();
+        snap.link.report_age_ms =
+            static_cast<uint32_t>(selector_.report_age_ms(now));
+        snap.link.state = selector_.state();
+        snap.link.flap_freeze = selector_.flap_frozen(now);
+        for (const PowerAdapter& pa : power_) {
+            if (pa.applied_qdb) {
+                snap.link.tx_power_qdb = *pa.applied_qdb;  // first TX adapter
+                break;
+            }
+        }
+        // §7.3 return-path visibility: the RX's epoch counter says how many
+        // reports it SENT; we know how many arrived.
+        snap.ret.reports_expected = selector_.report_epoch();
+        snap.ret.reports_received = reports_received_;
     }
+
+    struct PowerAdapter {
+        std::string name;
+        PowerCurve curve;
+        std::optional<int32_t> ceiling;
+        std::optional<int32_t> applied_qdb;
+    };
 
     uint16_t originator_;
     uint32_t session_;
+    uint8_t table_version_;
+    Selector selector_;
+    VencActuator venc_;
+    std::vector<PowerAdapter> power_;
+    uint32_t reports_received_ = 0;
     std::vector<Stream> streams_;
 };
 
@@ -186,7 +320,12 @@ struct RxCore {
            std::optional<uint8_t> table_version)
         : originator_(cfg.node.originator),
           session_(session),
-          engine_(rx_policy(cfg), wants(cfg), table, table_version) {}
+          engine_(rx_policy(cfg), wants(cfg), table, table_version),
+          reporter_(ReporterPolicy{cfg.policy.report_hz > 0
+                                       ? static_cast<uint32_t>(
+                                             1000.0 / cfg.policy.report_hz)
+                                       : 0},
+                    table_version) {}
 
     static std::vector<WantSpec> wants(const Config& cfg) {
         std::vector<WantSpec> out;
@@ -200,16 +339,26 @@ struct RxCore {
     }
 
     void on_air(uint8_t adapter, const uint8_t* d, size_t n, uint64_t now,
-                const RxEngine::Deliver& deliver) {
+                const RxEngine::Deliver& deliver, int8_t rssi = 0) {
         const Decoded dec = decode(d, n);
         if (const DataView* v = std::get_if<DataView>(&dec)) {
-            engine_.on_data(adapter, *v, now, deliver);
+            engine_.on_data(adapter, *v, now, deliver, rssi);
         }
     }
 
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
               const Inject& inject_nack) {
         engine_.tick(now, deliver);
+        // §7.3: LINK_REPORTs ride the same uplink as NACKs.
+        for (LinkReport r : reporter_.build(engine_, now)) {
+            r.prefix.originator = originator_;
+            r.prefix.destination = r.target_originator;
+            r.prefix.session_id = session_;
+            uint8_t frame[kLinkReportSize];
+            if (encode_link_report(r, frame, sizeof(frame)) > 0) {
+                inject_nack(frame, sizeof(frame));
+            }
+        }
         for (const NackRequest& req : engine_.build_nacks(now)) {
             NackHeader hdr;
             hdr.prefix.originator = originator_;
@@ -261,6 +410,7 @@ struct RxCore {
     uint16_t originator_;
     uint32_t session_;
     RxEngine engine_;
+    Reporter reporter_;
 };
 
 // ---- shared setup -----------------------------------------------------------
@@ -299,12 +449,13 @@ int load_all(const std::string& config_path, Loaded& out) {
 
 void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 uint64_t t0, const TxCore* tx, const RxCore* rx) {
+    const uint64_t now = now_ms();
     StatsSnapshot snap;
-    snap.t_ms = now_ms() - t0;
+    snap.t_ms = now - t0;
     snap.node = l.cfg.node.originator;
     snap.session = session;
     if (tx != nullptr) {
-        tx->fill_stats(snap);
+        tx->fill_stats(snap, now);
     }
     if (rx != nullptr) {
         rx->fill_stats(snap);
@@ -404,7 +555,12 @@ int run_rx(const Loaded& l) {
         const uint64_t now = now_ms();
         air.value->poll_once(2, [&](const AirRxMeta& meta, const uint8_t* d,
                                     size_t n) {
-            rx.on_air(meta.adapter_id, d, n, now, deliver);
+            // udp-air carries no real RSSI; fall back to the loopback
+            // section's synthetic value so the §9 selector can be exercised
+            // over the dev backend (devourer supplies real RSSI at step 9+).
+            const int8_t rssi =
+                meta.rssi != 0 ? meta.rssi : l.cfg.loopback.rssi_dbm;
+            rx.on_air(meta.adapter_id, d, n, now, deliver, rssi);
         });
         rx.tick(now, deliver, inject_nack);
         if (stats_period != 0 && now >= next_stats) {
@@ -463,12 +619,24 @@ int run_loopback(const Loaded& l) {
             out->send(d, n);
         }
     };
+    // Synthetic RSSI for the §9 loop: static value, with an optional
+    // scripted fade window (relative to process start).
+    const uint64_t rssi_t0 = now_ms();
+    const auto synthetic_rssi = [&]() -> int8_t {
+        if (const auto& f = l.cfg.loopback.rssi_fade) {
+            const uint64_t rel = loop_now - rssi_t0;
+            if (rel >= f->start_ms && rel < f->end_ms) {
+                return f->dbm;
+            }
+        }
+        return l.cfg.loopback.rssi_dbm;
+    };
     // TX -> synthetic air -> RX: one loss verdict per (packet, adapter).
     const TxCore::Inject inject = [&](const uint8_t* f, size_t n) {
         field.begin_packet();
         for (uint8_t a = 0; a < field.adapters(); ++a) {
             if (!field.drop(a)) {
-                rx.on_air(a, f, n, loop_now, deliver);
+                rx.on_air(a, f, n, loop_now, deliver, synthetic_rssi());
             }
         }
     };
