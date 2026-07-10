@@ -350,5 +350,39 @@ int main() {
         CHECK_EQ_U(h.engine.streams().size(), 0);
     }
 
+    // --- backward-step guards: a tick 1 ms behind a packet stamp must not ----
+    // underflow into an instant teardown (regression: the loopback event loop
+    // stamped on_data from a fresh clock inside the inject callback, then
+    // ticked with an older captured now — streams were flushed mid-flight).
+    {
+        RxPolicy p;
+        p.idle_teardown_ms = 5000;
+        Harness h(p);
+        h.latch(1000);  // last activity at t=1002
+        CHECK_EQ_U(h.engine.streams().size(), 1);
+        h.engine.tick(1001, h.sink());  // 1 ms behind the last packet
+        CHECK_EQ_U(h.engine.streams().size(), 1);
+        h.engine.tick(1002, h.sink());  // equal is not "idle" either
+        CHECK_EQ_U(h.engine.streams().size(), 1);
+    }
+
+    // ...and a clamp-rejected packet 1 ms behind the storm-window start must
+    // not underflow into an instant §6.6 resync (that would hand a forger
+    // the one-packet video flush the clamp exists to prevent).
+    {
+        RxPolicy p;
+        p.clamp_resync_ms = 500;
+        Harness h(p);
+        h.latch(1000);
+        h.feed(0, 900000, 90000, 0, 2000);  // forged: opens the storm window
+        CHECK_EQ_U(h.counters().clamp_rejected, 1);
+        h.feed(0, 900001, 90000, 0, 1999);  // 1 ms behind the window start
+        CHECK_EQ_U(h.counters().clamp_rejected, 2);
+        CHECK_EQ_U(h.counters().resyncs, 0);  // guarded: zero elapsed, no flush
+        // The window still works normally once real time has passed.
+        h.feed(0, 900002, 90000, 0, 2600);
+        CHECK_EQ_U(h.counters().resyncs, 1);
+    }
+
     return wbtest_finish("rx_test");
 }
