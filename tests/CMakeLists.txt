@@ -4,6 +4,7 @@
 # registers it with CTest. Extra link targets may follow the name.
 function(add_wb_test name)
     add_executable(${name} ${name}.cpp)
+    target_compile_options(${name} PRIVATE ${WBLINK_WARNINGS})
     target_link_libraries(${name} PRIVATE wblink_core ${ARGN})
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME ${name} COMMAND ${name})

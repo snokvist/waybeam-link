@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Extract the `array_mp_<chip>_*[]` phydm table data blocks from the vendored
+Realtek rtl8822c / rtl8822e sources, dropping the phydm parser/check_positive
+machinery devourer doesn't link. Both generations use the same halbb conditional
+encoding, walked at runtime by src/jaguar3/PhyTableLoaderJaguar3 — only the table
+DATA differs, so one generator serves both.
+
+  python3 tools/extract_8822c_phy_tables.py --chip 8822c   (default)
+  python3 tools/extract_8822c_phy_tables.py --chip 8822e
+
+The INPUT files are the vendored phydm sources under hal/phydm/. Edit this
+generator (or the vendored sources) and re-run; do not hand-edit the output.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+# Per-generation extraction config. inputs are repo-relative vendored sources;
+# the BB table (phy_reg/agc_tab/phy_reg_pg), the RF radio A/B table, and the
+# RFK cal-init table (cal_init) together make the set HalJaguar3 applies.
+CHIPS = {
+    "8822c": {
+        "tag": "libc0607/rtl88x2cu-20230728 (rtl8822c phydm)",
+        "inputs": [
+            "hal/phydm/rtl8822c/halhwimg8822c_bb.c",
+            "hal/phydm/halrf/rtl8822c/halhwimg8822c_rf.c",
+            "hal/phydm/halrf/rtl8822c/halrf_rfk_init_8822c.h",  # cal_init
+        ],
+        "out_c": "hal/phydm/rtl8822c/Hal8822c_PhyTables.c",
+        "out_h": "hal/phydm/rtl8822c/Hal8822c_PhyTables.h",
+        "header": "Hal8822c_PhyTables.h",
+        "guard": "HAL8822C_PHYTABLES_H",
+    },
+    "8822e": {
+        "tag": "OpenHD/rtl88x2eu (rtl8822e phydm, FW v5.15.0.1-197)",
+        "inputs": [
+            "hal/phydm/rtl8822e/halhwimg8822e_bb.c",
+            "hal/phydm/halrf/rtl8822e/halhwimg8822e_rf.c",
+            "hal/phydm/halrf/rtl8822e/halrf_rfk_init_8822e.h",  # cal_init
+        ],
+        "out_c": "hal/phydm/rtl8822e/Hal8822e_PhyTables.c",
+        "out_h": "hal/phydm/rtl8822e/Hal8822e_PhyTables.h",
+        "header": "Hal8822e_PhyTables.h",
+        "guard": "HAL8822E_PHYTABLES_H",
+    },
+    # 8822B (Jaguar2) uses the OLDER phydm check_positive table format (flat
+    # addr,value + conditional blocks), walked at runtime by the shared
+    # src/PhyTableLoader — not the halbb walker the 8822c/e tables use. The
+    # extraction itself is format-agnostic (it just lifts the array bodies), so
+    # the same generator serves it. No cal_init array (8822B RFK init is
+    # procedural, ported into Halrf8822b); mac_reg IS a check_positive table.
+    "8822b": {
+        "tag": "OpenHD/rtl88x2bu (rtl8822b phydm)",
+        "inputs": [
+            "hal/phydm/rtl8822b/halhwimg8822b_bb.c",
+            "hal/phydm/rtl8822b/halhwimg8822b_mac.c",
+            "hal/phydm/halrf/rtl8822b/halhwimg8822b_rf.c",
+        ],
+        "out_c": "hal/phydm/rtl8822b/Hal8822b_PhyTables.c",
+        "out_h": "hal/phydm/rtl8822b/Hal8822b_PhyTables.h",
+        "header": "Hal8822b_PhyTables.h",
+        "guard": "HAL8822B_PHYTABLES_H",
+    },
+    # 8821C (Jaguar2, 1T1R) — same OLD check_positive format as 8822B (shared
+    # src/PhyTableLoader). 1T1R: there is NO array_mp_8821c_radiob (path A only).
+    # The u32 regex lifts radioa but skips array_mp_8821c_txpwr_lmt (a packed
+    # `struct txpwr_lmt_t_8821c[]`, not u32[]) — that regulatory table is handled
+    # separately by tools/extract_8821c_txpwr_lmt.py. mac_reg IS a u32
+    # check_positive table.
+    "8821c": {
+        "tag": "morrownr/8821cu-20210916 (rtl8821c phydm, FW v5.12.0.4)",
+        "inputs": [
+            "hal/phydm/rtl8821c/halhwimg8821c_bb.c",
+            "hal/phydm/rtl8821c/halhwimg8821c_mac.c",
+            "hal/phydm/halrf/rtl8821c/halhwimg8821c_rf.c",
+        ],
+        "out_c": "hal/phydm/rtl8821c/Hal8821c_PhyTables.c",
+        "out_h": "hal/phydm/rtl8821c/Hal8821c_PhyTables.h",
+        "header": "Hal8821c_PhyTables.h",
+        "guard": "HAL8821C_PHYTABLES_H",
+    },
+}
+
+SCRIPT = Path(__file__).name
+
+
+def array_re(chip: str) -> re.Pattern:
+    # vendor decls are `const u32 array_mp_X[] = {` or `static u32 ...` (cal_init).
+    return re.compile(
+        rf"^(?:const|static)\s+u32\s+(array_mp_{chip}_\w+)\s*\[\s*\]\s*=\s*\{{\s*$"
+    )
+
+
+def extract(repo_root: Path, cfg: dict, rx: re.Pattern):
+    arrays: list[tuple[str, list[str]]] = []
+    blames: list[str] = []
+    for rel in cfg["inputs"]:
+        path = repo_root / rel
+        if not path.exists():
+            sys.exit(f"missing input: {rel}\n  -> vendor the phydm sources first.")
+        in_array: str | None = None
+        body: list[str] = []
+        for line in path.read_text().splitlines():
+            if in_array is None:
+                m = rx.match(line)
+                if m:
+                    in_array = m.group(1)
+                    body = []
+                continue
+            if line.strip().startswith("};"):
+                arrays.append((in_array, body))
+                blames.append(f"{rel}::{in_array} ({len(body)} lines)")
+                in_array = None
+                body = []
+                continue
+            body.append(line)
+    return arrays, blames
+
+
+def emit_c(cfg: dict, arrays, blames) -> str:
+    p = [f"/* Auto-generated by tools/{SCRIPT}.",
+         f" * Source: {cfg['tag']}.",
+         " * Extracted arrays:"]
+    p += [f" *   {b}" for b in blames]
+    p += [" * Edit the source files upstream and re-run; do not hand-edit. */",
+          "",
+          '#include "drv_types.h"',
+          f'#include "{cfg["header"]}"',
+          ""]
+    for name, body in arrays:
+        p.append(f"const u32 {name}[] = {{")
+        p.extend(body)
+        p.append("};")
+        p.append(f"const u32 {name}_len = sizeof({name}) / sizeof(u32);")
+        p.append("")
+    return "\n".join(p) + "\n"
+
+
+def emit_h(cfg: dict, arrays) -> str:
+    p = [f"/* Auto-generated by tools/{SCRIPT}.",
+         f" * Source: {cfg['tag']}. */",
+         "",
+         f"#ifndef {cfg['guard']}",
+         f"#define {cfg['guard']}",
+         "",
+         '#include "drv_types.h"',
+         "",
+         "#ifdef __cplusplus",
+         'extern "C" {',
+         "#endif",
+         ""]
+    for name, _ in arrays:
+        p.append(f"extern const u32 {name}[];")
+        p.append(f"extern const u32 {name}_len;")
+    p += ["", "#ifdef __cplusplus", "}", "#endif", "",
+          f"#endif /* {cfg['guard']} */"]
+    return "\n".join(p) + "\n"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--chip", choices=sorted(CHIPS), default="8822c")
+    args = ap.parse_args()
+    cfg = CHIPS[args.chip]
+    repo_root = Path(__file__).resolve().parent.parent
+    arrays, blames = extract(repo_root, cfg, array_re(args.chip))
+    if not arrays:
+        sys.exit("no arrays found — extraction regex probably needs an update")
+    (repo_root / cfg["out_c"]).write_text(emit_c(cfg, arrays, blames))
+    (repo_root / cfg["out_h"]).write_text(emit_h(cfg, arrays))
+    print(f"[{args.chip}] wrote {cfg['out_c']} "
+          f"({sum(len(b) for _, b in arrays)} body lines, {len(arrays)} arrays)")
+    for b in blames:
+        print(f"    {b}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
