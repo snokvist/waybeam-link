@@ -17,6 +17,7 @@ add_wb_test(table_hash_test)
 add_wb_test(clamp_test)
 add_wb_test(framer_test)
 add_wb_test(ring_test)
+add_wb_test(rx_test)
 
 add_wb_test(config_test wblink_io)
 target_compile_definitions(config_test PRIVATE
