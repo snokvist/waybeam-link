@@ -20,6 +20,9 @@ inline constexpr uint8_t kRadiotapTx[10] = {0x00, 0x00, 0x0a, 0x00, 0x00,
 inline constexpr size_t kRadiotapTxLen = sizeof(kRadiotapTx);
 inline constexpr size_t kDot11HdrLen = 24;
 inline constexpr size_t kDot11TxPrefixLen = kRadiotapTxLen + kDot11HdrLen;
+// §3.0: monitor RX hands up the MPDU with the chip-validated 4-byte FCS
+// appended; the radio backend strips this trailer before dot11_parse.
+inline constexpr size_t kFcsLen = 4;
 
 // §3.0 pinned constants.
 inline constexpr uint8_t kDot11FrameControl0 = 0x08;  // Data, not QoS

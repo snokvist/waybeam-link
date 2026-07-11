@@ -164,8 +164,13 @@ struct RadioAir::Impl {
             p.RxAtrib.crc_err || p.RxAtrib.icv_err) {
             return;
         }
-        const auto d =
-            dot11_parse(p.Data.data(), p.Data.size(), cfg.filter_net_id);
+        // §3.0: monitor RX delivers the MPDU with the chip-validated 4-byte
+        // FCS still appended — strip it before the length-exact parse.
+        if (p.Data.size() <= kFcsLen) {
+            return;
+        }
+        const auto d = dot11_parse(p.Data.data(), p.Data.size() - kFcsLen,
+                                   cfg.filter_net_id);
         if (!d || d->originator == cfg.originator) {  // not ours / our own TX
             a.rx_filtered.fetch_add(1, std::memory_order_relaxed);
             return;
