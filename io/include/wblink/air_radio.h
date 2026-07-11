@@ -32,6 +32,9 @@ struct RadioAirCfg {
     uint8_t stamp_net_id = 0;          // §3.0 SA net_id (TX always stamps)
     std::optional<uint8_t> filter_net_id;  // RX enforces only when configured
     uint16_t originator = 0;           // stamped in SA; own frames dropped
+    // Bench-only synthetic RX loss (air.rx_drop_permille): drop this share
+    // of filter-passed frames, independently per adapter. 0 = off.
+    uint16_t rx_drop_permille = 0;
 };
 
 class RadioAir {

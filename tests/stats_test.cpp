@@ -40,6 +40,8 @@ StatsSnapshot sample_snapshot() {
     st.type = "RTP";
     st.seq = 90233;
     st.delivered = 89901;
+    st.uniq = 90100;
+    st.diversity = 178342;
     st.loss_prediversity_milli = 41;
     st.loss_postdiv_prearq_milli = 6;
     st.recovered_arq = 220;
@@ -76,7 +78,8 @@ const char* kGolden =
     "\"drop\":3,\"tsf_fallback\":1,\"tx_reports\":40,\"tx_report_fails\":2,"
     "\"adapter_stalled\":false}],"
     "\"streams\":[{\"stream_id\":0,\"type\":\"RTP\",\"seq\":90233,"
-    "\"delivered\":89901,\"loss_prediversity_milli\":41,"
+    "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
+    "\"loss_prediversity_milli\":41,"
     "\"loss_postdiv_prearq_milli\":6,\"recovered_arq\":220,"
     "\"recovered_fec\":0,\"dropped_superseded\":110,\"dropped_deadline\":8,"
     "\"nacks_sent\":18,\"resends_sent\":230,\"double_send_suppressed\":5,"

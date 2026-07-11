@@ -43,6 +43,10 @@ struct StreamStats {
     std::string type;  // registry name, e.g. "RTP"
     uint32_t seq = 0;
     uint64_t delivered = 0;
+    // §6.1 diversity accounting (gate-2 ρ inputs): unique packets accepted
+    // and duplicate copies merged away across adapters.
+    uint64_t uniq = 0;
+    uint64_t diversity = 0;
     // §3.7: these two must never be conflated.
     uint32_t loss_prediversity_milli = 0;
     uint32_t loss_postdiv_prearq_milli = 0;

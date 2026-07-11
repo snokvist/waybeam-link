@@ -209,6 +209,7 @@ struct AirBackend {
             rc.stamp_net_id = cfg.node.net_id.value_or(0);
             rc.filter_net_id = cfg.node.net_id;
             rc.originator = cfg.node.originator;
+            rc.rx_drop_permille = cfg.air.rx_drop_permille;
             auto a = RadioAir::create(rc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
@@ -636,6 +637,8 @@ struct RxCore {
             st.type = info.stream_type == stream_type::kRtp ? "RTP" : "OTHER";
             st.seq = info.counters.highest_seq;
             st.delivered = info.counters.delivered;
+            st.uniq = info.counters.uniq;
+            st.diversity = info.counters.diversity;
             const uint64_t denom =
                 info.counters.uniq + info.counters.lost_declared;
             st.loss_postdiv_prearq_milli =
@@ -650,6 +653,13 @@ struct RxCore {
             snap.streams.push_back(std::move(st));
         }
         for (const auto& [id, a] : engine_.adapters()) {
+            // Radio backend: the air layer already emitted this adapter's
+            // counters (same index order) — graft the §6 RX-liveness stall
+            // onto that entry instead of duplicating it as "vadapterN".
+            if (id < snap.adapters.size()) {
+                snap.adapters[id].adapter_stalled = a.stalled;
+                continue;
+            }
             AdapterStats as;
             as.name = "vadapter" + std::to_string(id);
             as.rx = a.rx;
@@ -702,23 +712,30 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 uint64_t t0, const TxCore* tx, const RxCore* rx,
                 const AirBackend* air = nullptr,
                 uint64_t tsf_fallbacks = 0,
-                const char* csa_state = nullptr) {
+                const char* csa_state = nullptr,
+                uint32_t ret_window_hits = 0,
+                uint32_t ret_window_misses = 0) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
     snap.node = l.cfg.node.originator;
     snap.session = session;
+    // §7.2 observability (ground): paced vs blind coalesced return batches.
+    snap.ret.return_window_hits = ret_window_hits;
+    snap.ret.return_window_misses = ret_window_misses;
     if (csa_state != nullptr) {
         snap.link.csa_state = csa_state;
     }
     if (tx != nullptr) {
         tx->fill_stats(snap, now);
     }
-    if (rx != nullptr) {
-        rx->fill_stats(snap);
-    }
+    // Air adapters first so RxCore::fill_stats can merge its per-adapter
+    // liveness view into them by index (radio backend; no-op on udp).
     if (air != nullptr) {
         air->fill_adapter_stats(snap, tsf_fallbacks);
+    }
+    if (rx != nullptr) {
+        rx->fill_stats(snap);
     }
     emitter.emit(snap);
 }
@@ -870,6 +887,8 @@ int run_rx(const Loaded& l) {
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::vector<uint8_t>> ret_held;
     std::optional<uint64_t> ret_at_us;
+    uint32_t ret_window_hits = 0;
+    uint32_t ret_window_misses = 0;
     uint64_t tsf_fallbacks = 0;
     uint64_t now_us_it = now_us();
     const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n) {
@@ -908,6 +927,13 @@ int run_rx(const Loaded& l) {
             (!ret_at_us || now_us_it >= *ret_at_us)) {
             for (const auto& f : ret_held) {
                 air.value->inject(f.data(), f.size());
+            }
+            // §7.2 observability: a batch fired on a TSF-anchored window
+            // deadline is a hit; one sent blind (no EOB heard) is a miss.
+            if (ret_at_us) {
+                ++ret_window_hits;
+            } else if (qg.enabled()) {
+                ++ret_window_misses;
             }
             ret_held.clear();
             ret_at_us.reset();
@@ -1005,7 +1031,8 @@ int run_rx(const Loaded& l) {
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
-                                       : follower.state_str());
+                                       : follower.state_str(),
+                       ret_window_hits, ret_window_misses);
             next_stats = now + stats_period;
         }
     }
