@@ -1073,6 +1073,58 @@ int main(int argc, char **argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
+  /* DEVOURER_BB_OVERRIDE="18e8=00708000,41e8=009e0000,..." — one-shot raw BB
+   * register override applied AFTER all bring-up/SetTxMode/SetTxPower (so it
+   * wins), just before the send loop. `reg=hexbytes` where hexbytes are the
+   * EXACT on-wire data bytes (usbmon order — no byte-swap), 1/2/4 bytes. Used
+   * to test whether forcing devourer's TX-path registers to the vendor kernel's
+   * captured end-state values recovers high-MCS TX (8822e MCS4+ investigation).
+   * Each write is read back (bmRequestType 0xC0) and logged for verification. */
+  /* DEVOURER_BB_DUMP="18e8,41e8" — read+log these BB regs right before the send
+   * loop (final bring-up state), to see whether an in-code fix survived to TX. */
+  if (const char *dp = std::getenv("DEVOURER_BB_DUMP")) {
+    std::string spec(dp); size_t pos = 0;
+    while (pos < spec.size()) {
+      size_t comma = spec.find_first_of(",;", pos);
+      std::string tok = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+      pos = (comma == std::string::npos) ? spec.size() : comma + 1;
+      if (tok.empty()) continue;
+      uint16_t reg = static_cast<uint16_t>(std::strtol(tok.c_str(), nullptr, 16));
+      unsigned char rb[4] = {0, 0, 0, 0};
+      int rrc = libusb_control_transfer(handle, 0xC0, 5, reg, 0, rb, 4, 500);
+      logger->info("BB_DUMP 0x{:04x} = {:02x}{:02x}{:02x}{:02x} (rrc={})",
+                   reg, rb[0], rb[1], rb[2], rb[3], rrc);
+    }
+  }
+
+  if (const char *ov = std::getenv("DEVOURER_BB_OVERRIDE")) {
+    std::string spec(ov);
+    size_t pos = 0;
+    while (pos < spec.size()) {
+      size_t comma = spec.find_first_of(",;", pos);
+      std::string tok = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+      pos = (comma == std::string::npos) ? spec.size() : comma + 1;
+      size_t eq = tok.find('=');
+      if (eq == std::string::npos) continue;
+      uint16_t reg = static_cast<uint16_t>(std::strtol(tok.substr(0, eq).c_str(), nullptr, 16));
+      std::string hx = tok.substr(eq + 1);
+      unsigned char bytes[4] = {0, 0, 0, 0};
+      int nb = 0;
+      for (size_t i = 0; i + 1 < hx.size() && nb < 4; i += 2)
+        bytes[nb++] = static_cast<unsigned char>(std::strtol(hx.substr(i, 2).c_str(), nullptr, 16));
+      int wrc = libusb_control_transfer(handle, 0x40, 5, reg, 0, bytes, nb, 500);
+      unsigned char rb[4] = {0, 0, 0, 0};
+      int rrc = libusb_control_transfer(handle, 0xC0, 5, reg, 0, rb, nb, 500);
+      char wbuf[16] = {0}, rbuf[16] = {0};
+      for (int i = 0; i < nb; i++) {
+        std::snprintf(wbuf + i * 2, 3, "%02x", bytes[i]);
+        std::snprintf(rbuf + i * 2, 3, "%02x", rb[i]);
+      }
+      logger->info("BB_OVERRIDE 0x{:04x} <= {} (wrc={}) readback={} (rrc={})",
+                   reg, wbuf, wrc, rbuf, rrc);
+    }
+  }
+
   while (!g_devourer_should_stop) {
     if (tx_count == 0) {
       devourer::Ev(*g_ev, "init.timing")

@@ -550,6 +550,13 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
   if (_cfg.tx.ampdu)
     SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
+  /* 8822e OFDM-ref UPPER-field fix (the MCS4+/64-QAM TX fix) — applied HERE, as
+   * the last bring-up write, because the FW power-mode/coex H2C steps above
+   * reprogram 0x18e8/0x41e8 wholesale (index+upper) in firmware, clobbering an
+   * earlier apply. Bench-proven to recover MCS7 (0 -> clean, EVM -41 dB); gated
+   * OFF via DEVOURER_8822E_OFDM_REF_FIX_OFF. See apply_ofdm_ref_upper_8822e. */
+  if (_variant == jaguar3::ChipVariant::C8822E)
+    _radioManagement.apply_ofdm_ref_upper_8822e(/*skip_path_b=*/false);
   _logger->info("Jaguar3: ready for TX (monitor inject)");
 }
 
@@ -874,8 +881,13 @@ void RtlJaguar3Device::FastSetBandwidth(ChannelWidth_t bw) {
 void RtlJaguar3Device::apply_tx_power_current(bool full) {
   const int off = _tx_pwr_offset_steps;
   const int flat = _tx_pwr_override;
+  /* DEBUG/experiment knob: DEVOURER_FORCE_PATH_B_REF=1 forces the path-B OFDM
+   * ref (0x41e8) to be programmed even with RX active, overriding the 8822E
+   * RX-desense mitigation — used to measure whether the desense actually
+   * occurs on a given board/band (receive-side test; no TX). Read once. */
+  static const bool force_pb = ::getenv("DEVOURER_FORCE_PATH_B_REF") != nullptr;
   const bool skip_b =
-      _rx_wanted && _variant == jaguar3::ChipVariant::C8822E;
+      !force_pb && _rx_wanted && _variant == jaguar3::ChipVariant::C8822E;
   _txpwr_sat_low = false;
   _txpwr_sat_high = false;
   auto clamp127 = [&](int v) -> uint8_t {
