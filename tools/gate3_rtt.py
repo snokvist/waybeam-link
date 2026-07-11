@@ -60,19 +60,40 @@ def report(name, hist, max_ms, deadline_ms):
 
 def main(path, deadline_ms=50):
     rows = [json.loads(l) for l in open(path) if l.strip().startswith("{")]
-    rows = [r for r in rows if r.get("streams")]
+    rows = [r["streams"][0] for r in rows if r.get("streams")]
     if len(rows) < 2:
         print("not enough stats lines with a latched stream")
         return 1
-    first, last = rows[0]["streams"][0], rows[-1]["streams"][0]
-    for key, mx in (("nack_rtt", "nack_rtt_max_ms"),
-                    ("arq_rec", "arq_rec_max_ms")):
-        hist = [b - a for a, b in zip(first[f"{key}_hist"],
-                                      last[f"{key}_hist"])]
-        report(key, hist, last[mx], deadline_ms)
-    print(f"totals: nacks={last['nacks_sent']} "
-          f"recovered_arq={last['recovered_arq']} "
-          f"dropped_deadline={last['dropped_deadline']}")
+    # Segment-aware accumulation: an idle-teardown + relatch resets the
+    # stream's cumulative counters mid-file. A component going backwards
+    # marks the restart; that row's absolute values ARE its segment delta.
+    keys = ("nack_rtt", "arq_rec")
+    scalars = ("nacks_sent", "recovered_arq", "dropped_deadline")
+    hist = {k: list(rows[0][f"{k}_hist"]) for k in keys}
+    mx = {k: rows[0][f"{k}_max_ms"] for k in keys}
+    tot = {c: rows[0][c] for c in scalars}
+    relatches = 0
+    for prev, cur in zip(rows, rows[1:]):
+        restart = any(b < a for k in keys
+                      for a, b in zip(prev[f"{k}_hist"], cur[f"{k}_hist"]))
+        restart = restart or any(cur[c] < prev[c] for c in scalars)
+        if restart:
+            relatches += 1
+        for k in keys:
+            d = [b - (0 if restart else a)
+                 for a, b in zip(prev[f"{k}_hist"], cur[f"{k}_hist"])]
+            hist[k] = [t + x for t, x in zip(hist[k], d)]
+            mx[k] = max(mx[k], cur[f"{k}_max_ms"])
+        for c in scalars:
+            tot[c] += cur[c] - (0 if restart else prev[c])
+    if relatches:
+        print(f"note: {relatches} stream relatch(es) in file — "
+              f"segments summed")
+    for k in keys:
+        report(k, hist[k], mx[k], deadline_ms)
+    print(f"totals: nacks={tot['nacks_sent']} "
+          f"recovered_arq={tot['recovered_arq']} "
+          f"dropped_deadline={tot['dropped_deadline']}")
     return 0
 
 
