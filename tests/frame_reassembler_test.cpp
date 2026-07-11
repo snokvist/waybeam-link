@@ -1,0 +1,207 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// FrameReassembler (§6.3a) end-to-end: run FrameFramer (§5.1a) to produce a
+// block's symbols, feed them (with loss / reorder / duplication) to the
+// reassembler, and assert it emits the byte-exact original blob — or nothing,
+// when a frame is unrecoverable (no corrupt partial frames).
+#include "wblink/frame_reassembler.h"
+
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
+#include "wblink/frame_framer.h"
+#include "wblink/frame_shm_format.h"
+#include "wbtest.h"
+
+using namespace wblink;
+
+namespace {
+
+struct Sym {
+    uint32_t block_id;
+    uint8_t flags;
+    std::vector<uint8_t> payload;
+};
+
+std::vector<uint8_t> make_frame(size_t body, bool idr, uint8_t seed) {
+    std::vector<uint8_t> b(kVencFrameMetaSize + body, 0);
+    b[4] = kFrameCodecH265;
+    b[5] = idr ? kFrameFlagIdr : 0;
+    for (size_t i = 0; i < body; ++i) {
+        b[kVencFrameMetaSize + i] = static_cast<uint8_t>((i * 131u + seed * 7u) & 0xFF);
+    }
+    return b;
+}
+
+FrameFramerConfig framer_cfg(FecScheme scheme, uint16_t i_rate, uint16_t p_rate,
+                             uint16_t min_k) {
+    FrameFramerConfig c;
+    c.stream_type = stream_type::kRtp;
+    c.fec.scheme = scheme;
+    c.fec.i_rate_permille = i_rate;
+    c.fec.p_rate_permille = p_rate;
+    c.fec.min_k = min_k;
+    return c;
+}
+
+// Produce all symbols of one frame at a fixed block_id (framer starts at 0).
+std::vector<Sym> produce(FrameFramer& ff, const std::vector<uint8_t>& blob) {
+    std::vector<Sym> out;
+    ff.on_frame(blob.data(), blob.size(), 1000,
+                [&](const uint8_t* f, size_t n, const DataHeader& hdr, uint64_t) {
+                    Sym s;
+                    s.block_id = hdr.block_id;
+                    s.flags = hdr.data_flags;
+                    // payload = frame minus the 26-byte DATA header.
+                    s.payload.assign(f + kDataHeaderSize, f + n);
+                    out.push_back(std::move(s));
+                });
+    return out;
+}
+
+// A no-op emit for drops.
+FrameReassembler::Emit noop = [](const uint8_t*, size_t) {};
+
+}  // namespace
+
+int main() {
+    FrameReassemblerConfig rc;
+    rc.deadline_ms = 50;
+
+    // --- FEC on, no loss: fast path (all sources present) -------------------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 250, 100, 3));
+        auto blob = make_frame(9000, /*idr=*/true, 1);
+        auto syms = produce(ff, blob);
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        for (const Sym& s : syms) ra.push(s.block_id, s.flags, s.payload.data(),
+                                          s.payload.size(), 1000, emit);
+        CHECK_EQ_U(got.size(), 1u);
+        CHECK(got[0] == blob);
+        CHECK_EQ_U(ra.stats().frames_fast, 1u);
+        CHECK_EQ_U(ra.stats().frames_fec, 0u);
+    }
+
+    // --- FEC recovery: drop sources, recover from repairs -------------------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 300, 100, 3));
+        auto blob = make_frame(9000, /*idr=*/true, 2);
+        auto syms = produce(ff, blob);
+        // Count sources / repairs.
+        size_t nsrc = 0, nrep = 0;
+        for (const Sym& s : syms)
+            ((s.flags & data_flags::kFecRepair) ? nrep : nsrc)++;
+        CHECK(nrep >= 2);
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        // Drop the first 2 source symbols; feed the rest (incl. repairs).
+        size_t dropped = 0;
+        for (const Sym& s : syms) {
+            const bool is_rep = (s.flags & data_flags::kFecRepair) != 0;
+            if (!is_rep && dropped < 2) { ++dropped; continue; }
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(), 1000, emit);
+        }
+        CHECK_EQ_U(got.size(), 1u);
+        CHECK(got[0] == blob);
+        CHECK_EQ_U(ra.stats().frames_fec, 1u);
+    }
+
+    // --- reorder + duplication (diversity): repairs first, dupes ------------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 300, 100, 3));
+        auto blob = make_frame(9000, /*idr=*/true, 3);
+        auto syms = produce(ff, blob);
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        // Feed repairs first, then a source dropped, then all sources twice.
+        for (const Sym& s : syms)
+            if (s.flags & data_flags::kFecRepair)
+                ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(), 1000, emit);
+        bool skipped = false;
+        for (const Sym& s : syms) {
+            if (s.flags & data_flags::kFecRepair) continue;
+            if (!skipped) { skipped = true; continue; }  // drop one source
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(), 1000, emit);
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(), 1000, emit);  // dup
+        }
+        CHECK_EQ_U(got.size(), 1u);
+        CHECK(got[0] == blob);
+    }
+
+    // --- unrecoverable: drop more than r; nothing emitted; drop on deadline --
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 100, 100, 3));  // ~10% repair
+        auto blob = make_frame(9000, /*idr=*/true, 4);
+        auto syms = produce(ff, blob);
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        // Drop half the source symbols (>> r): unrecoverable.
+        size_t si = 0;
+        for (const Sym& s : syms) {
+            const bool is_rep = (s.flags & data_flags::kFecRepair) != 0;
+            if (!is_rep && (si++ % 2 == 0)) continue;  // drop every other source
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(), 100, emit);
+        }
+        CHECK_EQ_U(got.size(), 0u);  // NO partial frame
+        ra.tick(100 + rc.deadline_ms, noop);  // deadline expires
+        CHECK_EQ_U(got.size(), 0u);
+        CHECK(ra.stats().frames_deadline >= 1u);
+    }
+
+    // --- FEC OFF (ARQ-only): all sources -> deliver; any loss -> nothing -----
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kNone, 0, 0, 3));
+        auto blobA = make_frame(9000, /*idr=*/false, 5);
+        auto syms = produce(ff, blobA);
+        for (const Sym& s : syms) CHECK((s.flags & data_flags::kFecRepair) == 0);
+        // (a) full set -> exact frame.
+        {
+            FrameReassembler ra(rc);
+            std::vector<std::vector<uint8_t>> got;
+            auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+            for (const Sym& s : syms) ra.push(s.block_id, s.flags, s.payload.data(),
+                                              s.payload.size(), 200, emit);
+            CHECK_EQ_U(got.size(), 1u);
+            CHECK(got[0] == blobA);
+        }
+        // (b) drop the FIRST source (leading loss) -> NEVER a corrupt frame.
+        {
+            FrameReassembler ra(rc);
+            std::vector<std::vector<uint8_t>> got;
+            auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+            bool dropped_first = false;
+            for (const Sym& s : syms) {
+                if (!dropped_first) { dropped_first = true; continue; }
+                ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(), 200, emit);
+            }
+            CHECK_EQ_U(got.size(), 0u);
+            ra.tick(200 + rc.deadline_ms, noop);
+            CHECK_EQ_U(got.size(), 0u);  // leading-loss never mistaken for complete
+        }
+    }
+
+    // --- multi-frame in order (supersession keeps delivery ordered) ---------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 250, 100, 3));
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        std::vector<std::vector<uint8_t>> blobs;
+        for (int fr = 0; fr < 4; ++fr) {
+            auto blob = make_frame(6000 + fr * 500, fr == 0, static_cast<uint8_t>(10 + fr));
+            blobs.push_back(blob);
+            for (const Sym& s : produce(ff, blob))
+                ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                        1000 + fr, emit);
+        }
+        CHECK_EQ_U(got.size(), 4u);
+        for (int fr = 0; fr < 4; ++fr) CHECK(got[static_cast<size_t>(fr)] == blobs[static_cast<size_t>(fr)]);
+    }
+
+    return wbtest_finish("frame_reassembler_test");
+}
