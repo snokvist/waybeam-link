@@ -80,6 +80,7 @@ target_compile_options(wblink_core PRIVATE ${WBLINK_WARNINGS})
 add_library(wblink_io STATIC
     io/src/config.cpp
     io/src/udp.cpp
+    io/src/frame_shm.cpp
     io/src/stats.cpp
     io/src/air_udp.cpp
     io/src/air_mon.cpp

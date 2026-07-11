@@ -39,5 +39,6 @@ add_wb_test(config_test wblink_io)
 target_compile_definitions(config_test PRIVATE
     WBLINK_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_wb_test(udp_test wblink_io)
+add_wb_test(frame_shm_test wblink_io)
 add_wb_test(power_test wblink_io)
 add_wb_test(stats_test wblink_io)
