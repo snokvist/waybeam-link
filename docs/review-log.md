@@ -253,3 +253,10 @@ hardware-retry unicast injects (descriptor limit 12) and implement
       not designed further on paper.
 - [ ] Run the four bench gates (gate 1 now RX-proven; gate 4 return-window-fit is the one
       that gates the craft return path under single-adapter).
+- [ ] **§10 ground-uplink power scope** (surfaced by the 2026-07-11 desk §4.6 run): the
+      §10 power curve is applied only on the tx-node selector commit, so the ground's
+      designated uplink TX adapter (role tx) transmits returns at devourer's efuse-default
+      power regardless of any `power_map` — sweeping it is a no-op. Decide: bring the ground
+      return uplink under power-curve control, or reject/ignore a `power_map` on an rx-node
+      uplink (currently it's silently loaded but never applied). Not a spec ruling yet —
+      raised for the next pass.
