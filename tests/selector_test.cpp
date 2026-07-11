@@ -358,5 +358,39 @@ int main() {
         CHECK(h.sel.profile_id() < high - 1);
     }
 
+    // --- §11.3 CSA freeze: cascade halted, watchdog blackout excused ----------
+    {
+        SelectorPolicy p;
+        p.mcs_settle_ms = 0;
+        Harness h(p);
+        h.boot();
+        // Climb to the ladder top and settle — no in-flight transition left
+        // (the freeze halts new decisions; a mid-flight sequenced commit is
+        // allowed to land, so the test must start from quiescence).
+        (void)h.run(0, 9000, -40, 0);
+        const uint8_t before = h.sel.profile_id();
+        CHECK_EQ_U(before, 7);
+        // Freeze 3 s; reports stop entirely (retune blackout).
+        h.sel.csa_freeze(9000 + 3000);
+        for (uint64_t t = 9000; t <= 12000; t += 10) {
+            const SelectorActions a = h.sel.tick(t);
+            CHECK(!a.commit.has_value());  // no demote/promote in the freeze
+        }
+        const std::string_view st = h.sel.state();
+        CHECK(st == "CSA_FREEZE" || st == "HOLD");
+        CHECK_EQ_U(h.sel.profile_id(), before);
+        // Just past the freeze, still no report for a moment: the blackout is
+        // excused — no instant FAILSAFE descent (report_timeout is 500 ms
+        // default; 200 ms after the freeze end must still be fine).
+        for (uint64_t t = 12010; t <= 12200; t += 10) {
+            const SelectorActions a = h.sel.tick(t);
+            CHECK(!a.commit.has_value());
+        }
+        CHECK(std::string_view(h.sel.state()) != "FAILSAFE");
+        // Reports resume: normal operation continues at the same rung.
+        (void)h.run(12200, 12600, -40, 0);
+        CHECK_EQ_U(h.sel.profile_id(), before);
+    }
+
     return wbtest_finish("selector_test");
 }
