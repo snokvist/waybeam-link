@@ -55,6 +55,19 @@ inline constexpr uint16_t kDefaultMaxPayload = 1424;  // standard-rung default
 
 // §3.5 — target_stream_id value meaning node-scope (RF health is per-link).
 inline constexpr uint8_t kNodeScopeStreamId = 0xFF;
+
+// §14.1 — FEC repair subheader (precedes the coded payload when FEC_REPAIR is
+// set): repair_idx u8 @0, window_len u16 @1, window_base_seq u32 @3,
+// frame_len u32 @7. 11 bytes; deducted (with the 26 B header) from a rung's
+// max_payload to size source/repair symbols identically (§5.1a).
+inline constexpr size_t kFecRepairSubheaderSize = 11;
+inline constexpr size_t kFecOffRepairIdx = 0;
+inline constexpr size_t kFecOffWindowLen = 1;
+inline constexpr size_t kFecOffWindowBaseSeq = 3;
+inline constexpr size_t kFecOffFrameLen = 7;
+
+// §14.1 — GF(256) capacity: a Cauchy-RS block holds at most 256 symbols.
+inline constexpr uint16_t kFecMaxSymbols = 256;
 // §3.5 — probe_per value meaning "no probe ran this interval".
 inline constexpr uint16_t kNoProbe = 0xFFFF;
 
