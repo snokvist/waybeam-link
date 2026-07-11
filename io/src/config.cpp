@@ -380,6 +380,8 @@ Result<Config> load_config_json(const std::string& json_text) {
         if (j.contains("air")) {
             const json& a = j.at("air");
             const std::string kind = a.value("kind", std::string("udp"));
+            cfg.air.rx_drop_permille = static_cast<uint16_t>(
+                std::min(1000, std::max(0, a.value("rx_drop_permille", 0))));
             if (kind == "radio") {
                 cfg.air.kind = AirCfg::Kind::kRadio;
             } else if (kind == "udp") {

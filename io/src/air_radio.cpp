@@ -85,6 +85,8 @@ struct RadioAir::Impl {
         std::atomic<int8_t> rssi_last{-128};
         uint64_t tx_submitted = 0;  // main-thread only
         uint64_t tx_failed = 0;
+        // Bench-only synthetic-drop PRNG (RX-thread only; xorshift32).
+        uint32_t drop_rng = 0;
     };
 
     RadioAirCfg cfg;
@@ -175,6 +177,18 @@ struct RadioAir::Impl {
             a.rx_filtered.fetch_add(1, std::memory_order_relaxed);
             return;
         }
+        // Bench-only synthetic RX loss, independent per adapter: a dropped
+        // frame vanishes exactly like real air loss (before every counter).
+        if (cfg.rx_drop_permille != 0) {
+            uint32_t r = a.drop_rng;
+            r ^= r << 13;
+            r ^= r >> 17;
+            r ^= r << 5;
+            a.drop_rng = r;
+            if (r % 1000 < cfg.rx_drop_permille) {
+                return;
+            }
+        }
         // Per-chain power byte, dBm = value − 110; 0 = no phy report on
         // this frame → keep the previous value.
         uint8_t best = 0;
@@ -255,6 +269,8 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         ad->name = ac.name.empty() ? ("adapter" + std::to_string(i))
                                    : ac.name;
         ad->tx = (ac.role == Role::kTx);
+        // Nonzero, adapter-distinct xorshift32 seed for the bench drop knob.
+        ad->drop_rng = 0x9E3779B9u ^ static_cast<uint32_t>(i + 1);
 
         // Per-adapter libusb_context (the proven multi-adapter pattern).
         if (libusb_init(&ad->ctx) != 0) {

@@ -209,6 +209,7 @@ struct AirBackend {
             rc.stamp_net_id = cfg.node.net_id.value_or(0);
             rc.filter_net_id = cfg.node.net_id;
             rc.originator = cfg.node.originator;
+            rc.rx_drop_permille = cfg.air.rx_drop_permille;
             auto a = RadioAir::create(rc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
@@ -636,6 +637,8 @@ struct RxCore {
             st.type = info.stream_type == stream_type::kRtp ? "RTP" : "OTHER";
             st.seq = info.counters.highest_seq;
             st.delivered = info.counters.delivered;
+            st.uniq = info.counters.uniq;
+            st.diversity = info.counters.diversity;
             const uint64_t denom =
                 info.counters.uniq + info.counters.lost_declared;
             st.loss_postdiv_prearq_milli =

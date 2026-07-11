@@ -108,6 +108,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.seq);
         out += ",\"delivered\":";
         append_u64(out, s.delivered);
+        out += ",\"uniq\":";
+        append_u64(out, s.uniq);
+        out += ",\"diversity\":";
+        append_u64(out, s.diversity);
         out += ",\"loss_prediversity_milli\":";
         append_u64(out, s.loss_prediversity_milli);
         out += ",\"loss_postdiv_prearq_milli\":";
