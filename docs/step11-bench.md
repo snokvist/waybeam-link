@@ -324,6 +324,17 @@ and fails the burst that would motivate FEC in the first place).
 
 ### 4.2 Gate-4 seed re-derivation
 
+**RESULT 2026-07-11 (desk, Opus):** clean confound-free quiet-gap ON/OFF @3000 pps
+— ON **95.56%** delivered vs OFF **94.81%** (+0.75 pts; resolves the §2 confounded
+A/B), 91.4% paced-hit ratio (627/686). OFF has fresher LINK_REPORTs (13 vs 91 ms)
+because ON delays returns into the §7.2 window — freshness↔reliability tradeoff,
+muted at desk range (craft hears returns while TXing at RSSI −24). Guard/window
+sweep (guard 300, 3000 pps): hit ratio PEAKS at the seed window (1000→89.3%,
+**2000→91.4%**, 3000→89.6%); delivered% window-insensitive at desk range (~95.6%).
+**Seeds 300/2000 STAND** — near-optimal among swept values; residual load-degradation
+vs §2's 97%@500pps is single-radio contention, not knob mis-tuning. Range-sensitive
+re-derivation (where returns are marginal) deferred to §4.1.
+
 **Why:** `guard_us` (seed 300), `return_window_us` (seed 2000), and the §9.8
 fail-safe seeds are wfb_ng-derived placeholders (`docs/groundwork.md`) pending
 bench re-derivation; the quiet-gap A/B in §2 is confounded by a USB event and
@@ -368,8 +379,15 @@ seeds (150 ms / 500 ms) need raising.
 last-heard SA with `unicast_sent`/`unicast_fallback` in the stats return
 block; `air.ack_responder` (craft) arms the TX adapter's hardware ACK
 responder with its own SA; the RX filter accepts both shapes (Retry bit
-masked) so the halves deploy independently. **Remaining: the on-air A/B
-measurement itself** — the method below, flipping only these two knobs.
+masked) so the halves deploy independently. **VALIDATED 2026-07-11 (desk, Opus):**
+A/B at 3000 pps (15%/adapter drop, MCS7) — craft return-frame delivery **86.9%
+(622/716) broadcast → 99.9% (716/717) unicast HW-ACK**; NACK service 84%→100%+;
+LINK_REPORT age 97→89 ms; `unicast_sent`=717 with `unicast_fallback`=0 (the
+per-originator SA latch is exact, never fell back); downlink video 95.47%→95.46%
+(no regression). Past saturation (4500 pps): radio-layer return reception
+**57.9%→98.5%** (retries punch through), but ARQ is dead in BOTH arms (0 resends;
+the single-radio craft main loop is starved — only 4 of ~60 stats emits) — the §1
+airtime-ceiling physics, not a return-reliability problem. Success criteria met.
 
 **Why:** Pass 8 adopted a bench slot (not a redesign) to test whether arming
 devourer's `SetAckResponder` on the craft — so ground→craft returns
@@ -396,8 +414,15 @@ downlink video airtime.
 trigger; `io/include/wblink/txwedge.h` implements it (knobs
 `air.wedge_window_ms`/`air.wedge_min_submits`, seeds 1000/8), both mode
 loops run it and surface `tx_wedged` per adapter + a stderr transition
-line. **Remaining: the live validation** — the method below (silent
-through a healthy sweep, fires within one window of an induced wedge).
+line. **VALIDATED 2026-07-11 (desk, Opus):** SILENT through the 500–4500 pps
+sweep — craft CCX report ratio falls 100%→98.7%→41.5%→24.5% with load, yet ZERO
+windows hit the trigger (Δsub≥8 & Δrep==0) and `tx_wedged` stays False (the
+`min_submits=8` gate filters idle boundary windows; the old deficit design would
+have misfired at 24.5%). FIRES within one window of a real induced wedge:
+`authorized=0` deauthorize of the craft CU at t≈12 s (USBDEVFS_RESET was too
+gentle — auto-recovered) → submits keep advancing (+1500/win, `inject` increments
+before the failing send) while reports flatline (+0), `tx_wedged`=True + the §9.10
+stderr line, latched. All adapters recovered on teardown. Success criteria met.
 
 **Why:** §2 incidental (1) — the current design's implicit assumption (a
 report-count deficit signals a wedge) is wrong; reports legitimately drop to
@@ -414,6 +439,19 @@ only on true wedges, not high-load report contention.
 wedge.
 
 ### 4.6 TX-power actuation range check
+
+**RESULT 2026-07-11 (desk, Opus):** CU (Jaguar3) craft TX **CONFIRMED effective** —
+uniform 5G power map at 1/10/19 dBm (MCS7 pinned): applied qdb −20/16/52, received
+RSSI at ground −46.8/−37.5/−25.9 (AU path) and −42.8/−34.9/−25.0 (CU path). An 18 dB
+command swing → ~18–21 dB received swing, near-linear ~0.9–1.16 dB/dB. **The §10.2
+curve is usable as authored**; §2's "floor barely moved RSSI" was a single-point /
+driver-default-baseline artifact, not a devourer defect. AU (Jaguar1) NOT
+characterized: the rx-node never runs the §10 power-commit path on its uplink (no
+`power:` apply line; AU transmits returns at devourer efuse default MCS7 base=40/FCC),
+so sweeping the ground `power_map` is a no-op — needs the AU run as a craft-role TX,
+or the vehicle. **Open §10 scope question raised:** should the ground return uplink
+(role tx) be under power-curve control, or should a `power_map` on an rx-node uplink
+be rejected? (Raised to operator, not silently changed.)
 
 **Why:** §2 gate-2 incidental — a commanded −20 qdb power change (confirmed
 applied in link stats) barely moved received RSSI on the CU under devourer.
