@@ -83,7 +83,7 @@ bool Framer::on_datagram(const uint8_t* data, size_t len, uint64_t now_ms,
     hdr.block_id = block_id_;
     hdr.data_flags = static_cast<uint8_t>(
         (end_of_block ? data_flags::kEndOfBlock : 0) |
-        (block_arq_ ? data_flags::kArq : 0));
+        (block_arq_ ? data_flags::kArq : 0) | extra_flags_);
     hdr.active_profile = active_profile_;
     hdr.table_version = table_version_;
 

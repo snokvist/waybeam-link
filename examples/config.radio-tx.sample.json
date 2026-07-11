@@ -1,21 +1,63 @@
 {
-  "_comment": "devourer radio, CRAFT side (§3.0): single 8812EU/AU adapter, role tx — video TX + return RX timeshared on one radio at 20 MHz (§1). RTP in from the local encoder on :5600. quiet_gap paces the §7.2 listen window after each END_OF_BLOCK (seeds; re-derive at gate 4). bus is the lsusb -t style path 'bus-port[.port]'; empty = first unclaimed Realtek device. power_map is the adapter's PHY_REG_PG.txt-format absolute table (§10.2).",
-  "node": { "originator": 17, "role": "tx", "net_id": 0 },
+  "_comment": "devourer radio, CRAFT side (\u00a73.0): single 8812EU/AU adapter, role tx \u2014 video TX + return RX timeshared on one radio at 20 MHz (\u00a71). RTP in from the local encoder on :5600. quiet_gap paces the \u00a77.2 listen window after each END_OF_BLOCK (seeds; re-derive at gate 4). bus is the lsusb -t style path 'bus-port[.port]'; empty = first unclaimed Realtek device. power_map is the adapter's PHY_REG_PG.txt-format absolute table (\u00a710.2).",
+  "node": {
+    "originator": 17,
+    "role": "tx",
+    "net_id": 0
+  },
   "profile_table": "profiles/table.example.json",
   "adapters": [
-    { "name": "wlan0", "bus": "", "role": "tx",
-      "channel": 5805, "bw": 20,
+    {
+      "name": "wlan0",
+      "bus": "",
+      "role": "tx",
+      "channel": 5805,
+      "bw": 20,
       "power_map": "/etc/waybeam-link/power.wlan0.txt",
-      "max_power_qdb": 2000 }
+      "max_power_qdb": 2000
+    }
   ],
   "streams": [
-    { "stream_id": 0, "stream_type": "RTP", "dir": "in", "classifier": "h265",
-      "bind": { "kind": "udp", "listen": "127.0.0.1:5600" } }
+    {
+      "stream_id": 0,
+      "stream_type": "RTP",
+      "dir": "in",
+      "classifier": "h265",
+      "bind": {
+        "kind": "udp",
+        "listen": "127.0.0.1:5600"
+      }
+    }
   ],
-  "air": { "kind": "radio" },
-  "policy": {
-    "return": { "quiet_gap": true, "guard_us": 300, "return_window_us": 2000 }
+  "air": {
+    "kind": "radio"
   },
-  "venc": { "host": "127.0.0.1:80", "enabled": true },
-  "stats": { "hz": 1 }
+  "policy": {
+    "return": {
+      "quiet_gap": true,
+      "guard_us": 300,
+      "return_window_us": 2000
+    },
+    "csa": {
+      "psk": "CHANGE-ME-craft-and-ground-only",
+      "settle_s": 3.0,
+      "verify_timeout_ms": 150,
+      "min_interval_s": 5,
+      "ack_timeout_ms": 1000,
+      "rendezvous_timeout_s": 5,
+      "home_chan": 5745,
+      "channel_allowlist": [
+        5745,
+        5805,
+        5825
+      ]
+    }
+  },
+  "venc": {
+    "host": "127.0.0.1:80",
+    "enabled": true
+  },
+  "stats": {
+    "hz": 1
+  }
 }

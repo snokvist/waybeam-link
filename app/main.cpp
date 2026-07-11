@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // waybeam-link — one portable binary, modes tx / rx / loopback (PROTOCOL.md
-// §16.1). Steps 1–9 are live: wire codec, I/O/config/stats, framer + ring,
+// §16.1). Steps 1–10 are live: wire codec, I/O/config/stats, framer + ring,
 // merged RX engine, resend scheduler, loopback bench, udp-air dev backend,
-// NAL classifier, §9 selector + §10 power, and the devourer radio backend
-// (§3.0) with the §7.2 TSF quiet-gap pacer.
+// NAL classifier, §9 selector + §10 power, the devourer radio backend
+// (§3.0) with the §7.2 TSF quiet-gap pacer, and the §11 follow-me CSA
+// (craft follower / ground issuer; stdin trigger "csa <mhz> [class]").
+#include <poll.h>
+#include <unistd.h>
+
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -15,6 +19,7 @@
 #include "wblink/air_udp.h"
 #include "wblink/binding.h"
 #include "wblink/config.h"
+#include "wblink/csa.h"
 #include "wblink/framer.h"
 #include "wblink/loss_model.h"
 #include "wblink/power.h"
@@ -51,6 +56,42 @@ uint64_t now_us() {
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
+}
+
+// §15.2 policy.csa → the core engine's parameter block (string PSK to raw
+// bytes, seconds to ms).
+CsaParams csa_params(const Config& cfg) {
+    const CsaPolicy& c = cfg.policy.csa;
+    CsaParams p;
+    p.psk.assign(c.psk.begin(), c.psk.end());
+    p.settle_ms = static_cast<uint32_t>(c.settle_s * 1000.0);
+    p.verify_timeout_ms = c.verify_timeout_ms;
+    p.min_interval_ms = c.min_interval_s * 1000;
+    p.ack_timeout_ms = c.ack_timeout_ms;
+    p.rendezvous_timeout_ms = c.rendezvous_timeout_s * 1000;
+    p.home_chan = c.home_chan;
+    p.allowlist = c.channel_allowlist;
+    return p;
+}
+
+// One non-blocking line from stdin (the ground's §11 CSA trigger:
+// "csa <chan_mhz> [class]"). Returns false when no complete line is waiting.
+bool stdin_line(std::string& out) {
+    pollfd pfd{STDIN_FILENO, POLLIN, 0};
+    if (poll(&pfd, 1, 0) <= 0 || (pfd.revents & POLLIN) == 0) {
+        return false;
+    }
+    char buf[128];
+    const ssize_t n = read(STDIN_FILENO, buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        return false;
+    }
+    buf[n] = '\0';
+    out.assign(buf);
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
+        out.pop_back();
+    }
+    return !out.empty();
 }
 
 // §7.2: the pacer keys off END_OF_BLOCK frames in both directions.
@@ -242,6 +283,28 @@ struct AirBackend {
 #endif
         return std::nullopt;
     }
+    // §11.6 intra-process atomic switch: every local adapter retunes at
+    // T_switch (a straggler follows because a sibling heard the CSA). On the
+    // udp dev backend the retune is a logged intent — the CSA state machines
+    // stay exercisable end-to-end without radios.
+    void retune_all(uint16_t chan_mhz, uint8_t bw, bool fast) {
+#if WBLINK_RADIO
+        if (radio) {
+            for (size_t i = 0; i < radio->rx_adapters(); ++i) {
+                if (!radio->retune(i, chan_mhz, bw, fast)) {
+                    std::fprintf(stderr, "csa: adapter %zu retune to %u MHz "
+                                         "failed\n",
+                                 i, chan_mhz);
+                }
+                radio->reapply_tx_power(i);  // §11.2 post-retune TXAGC
+            }
+            return;
+        }
+#endif
+        std::fprintf(stderr, "csa: retune -> %u MHz bw=%u%s (udp backend, "
+                             "intent only)\n",
+                     chan_mhz, bw, fast ? " fast" : "");
+    }
     bool is_radio() const {
 #if WBLINK_RADIO
         return radio.has_value();
@@ -432,6 +495,16 @@ struct TxCore {
     void set_pressure(bool on, uint64_t now) {  // §9.9 gauge (step 9+ feeds it)
         selector_.set_pressure(on, now);
     }
+
+    // §11.3: freeze the cascade + pause the watchdog across the CSA blackout.
+    void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
+    // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
+    void set_csa_armed(bool on) {
+        for (Stream& s : streams_) {
+            s.framer.set_extra_flags(on ? data_flags::kCsaArmed : 0);
+        }
+    }
+    uint8_t power_level() const { return selector_.tx_power_level(); }
 
     void fill_stats(StatsSnapshot& snap, uint64_t now) const {
         for (const Stream& s : streams_) {
@@ -628,12 +701,16 @@ int load_all(const std::string& config_path, Loaded& out) {
 void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 uint64_t t0, const TxCore* tx, const RxCore* rx,
                 const AirBackend* air = nullptr,
-                uint64_t tsf_fallbacks = 0) {
+                uint64_t tsf_fallbacks = 0,
+                const char* csa_state = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
     snap.node = l.cfg.node.originator;
     snap.session = session;
+    if (csa_state != nullptr) {
+        snap.link.csa_state = csa_state;
+    }
     if (tx != nullptr) {
         tx->fill_stats(snap, now);
     }
@@ -698,6 +775,9 @@ int run_tx(const Loaded& l) {
         }
         send_raw(f, n);
     };
+    // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
+    // retunes the (single) radio at the TSF-anchored T_switch.
+    CsaFollower csa(csa_params(l.cfg));
     std::fprintf(stderr, "tx: session=%u, running%s\n", session,
                  qg.enabled() ? " (quiet-gap pacing)" : "");
     while (g_stop == 0) {
@@ -721,11 +801,42 @@ int run_tx(const Loaded& l) {
         bindings.value->poll_once(in_timeout, [&](const IngressEvent& ev) {
             tx.on_ingress(ev.stream_id, ev.data, ev.len, now, inject);
         });
-        air.value->poll_once(0, [&](const AirRxMeta&, const uint8_t* d,
-                                    size_t n) { tx.on_air(d, n, now); });
+        air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
+                                    size_t n) {
+            const Decoded dec = decode(d, n);
+            if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
+                // §11.2: anchor on this adapter's TSF; the follower manages
+                // its own issuer latch (MAC-valid bootstrap, §11.4).
+                if (csa.on_csa(*c, now_us_it,
+                               air.value->read_tsf(meta.adapter_id),
+                               static_cast<uint32_t>(meta.tsf_us),
+                               std::nullopt)) {
+                    tx.csa_freeze(now + static_cast<uint64_t>(
+                                            l.cfg.policy.csa.settle_s * 1000));
+                    tx.set_csa_armed(true);
+                    std::fprintf(stderr,
+                                 "csa: armed -> %u MHz (nonce %u, dt %u ms)\n",
+                                 c->target_chan, c->csa_nonce,
+                                 c->dt_to_switch_ms);
+                }
+                return;
+            }
+            if (!std::holds_alternative<DecodeError>(dec)) {
+                csa.note_valid_rx(now_us_it);  // §11.5 verify/rendezvous feed
+            }
+            tx.on_air(d, n, now);
+        });
+        const CsaAction ca = csa.tick(now_us_it);
+        if (ca.kind != CsaAction::Kind::kNone) {
+            tx.set_csa_armed(false);  // switching now — the ACK window is over
+            air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast);
+            std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
+                         ca.chan_mhz);
+        }
         tx.tick(now, inject);
         if (stats_period != 0 && now >= next_stats) {
-            emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value);
+            emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
+                       csa.state_str());
             next_stats = now + stats_period;
         }
     }
@@ -774,6 +885,15 @@ int run_rx(const Loaded& l) {
     const uint64_t stats_period =
         l.cfg.stats.hz > 0 ? static_cast<uint64_t>(1000.0 / l.cfg.stats.hz)
                            : 0;
+    // §11 ground: the issuer runs campaigns (stdin trigger "csa <mhz>
+    // [class]", PSK required); the follower makes a PSK-less RX node a
+    // spectator that follows others' campaigns. The issuer's own copies never
+    // reach the local follower (RadioAir drops own-originator frames).
+    const CsaParams cparams = csa_params(l.cfg);
+    CsaIssuer issuer(cparams);
+    CsaFollower follower(cparams);
+    const uint16_t op_chan =
+        l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
     std::fprintf(stderr, "rx: session=%u, %zu adapters, running%s\n",
                  session, air.value->rx_adapters(),
                  qg.enabled() ? " (quiet-gap returns)" : "");
@@ -800,6 +920,27 @@ int run_rx(const Loaded& l) {
             // over the dev backend (the radio backend supplies real RSSI).
             const int8_t rssi =
                 meta.rssi != 0 ? meta.rssi : l.cfg.loopback.rssi_dbm;
+            // §11 taps (cheap header decode; DATA still flows to the engine).
+            const Decoded dec = decode(d, n);
+            if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
+                if (follower.on_csa(*c, now_us_it,
+                                    air.value->read_tsf(meta.adapter_id),
+                                    static_cast<uint32_t>(meta.tsf_us),
+                                    std::nullopt)) {
+                    std::fprintf(stderr, "csa: following -> %u MHz\n",
+                                 c->target_chan);
+                }
+                return;
+            }
+            if (const DataView* v = std::get_if<DataView>(&dec)) {
+                if ((v->hdr.data_flags & data_flags::kCsaArmed) != 0) {
+                    issuer.note_craft_armed(now_us_it);  // §11.6 implicit ACK
+                }
+                issuer.note_craft_video(now_us_it);
+            }
+            if (!std::holds_alternative<DecodeError>(dec)) {
+                follower.note_valid_rx(now_us_it);
+            }
             rx.on_air(meta.adapter_id, d, n, now, deliver, rssi);
             if (qg.enabled() && frame_is_eob(d, n)) {
                 // Anchor on the SAME adapter's TSF (clocks never cross
@@ -813,9 +954,58 @@ int run_rx(const Loaded& l) {
             }
         });
         rx.tick(now, deliver, inject_nack);
+        // §11 trigger + campaign engine.
+        std::string line;
+        if (stdin_line(line) && line.rfind("csa ", 0) == 0) {
+            unsigned chan = 0, cls = 0;
+            if (std::sscanf(line.c_str(), "csa %u %u", &chan, &cls) >= 1) {
+                const CommonPrefix pre{l.cfg.node.originator, 0, session};
+                if (issuer.start(pre, static_cast<uint16_t>(chan), 0,
+                                 static_cast<uint8_t>(cls != 0), op_chan, 0,
+                                 4, now_us_it)) {
+                    std::fprintf(stderr, "csa: campaign -> %u MHz class %u\n",
+                                 chan, cls);
+                } else {
+                    std::fprintf(stderr, "csa: rejected (active campaign, "
+                                         "PSK, allowlist, or rate-limit)\n");
+                }
+            }
+        }
+        const CsaIssuer::IssuerAction ia = issuer.tick(now_us_it);
+        switch (ia.kind) {
+            case CsaIssuer::IssuerAction::Kind::kSendCopy: {
+                uint8_t frame[32];
+                if (encode_csa(ia.pkt, frame, sizeof(frame)) == 32) {
+                    air.value->inject(frame, 32);  // campaign timing: never
+                }                                  // quiet-gap-held
+                break;
+            }
+            case CsaIssuer::IssuerAction::Kind::kCommit:
+            case CsaIssuer::IssuerAction::Kind::kRevert:
+                air.value->retune_all(ia.chan_mhz, ia.bw, ia.fast);
+                std::fprintf(stderr, "csa: %s -> %u MHz\n",
+                             ia.kind == CsaIssuer::IssuerAction::Kind::kCommit
+                                 ? "commit"
+                                 : "revert",
+                             ia.chan_mhz);
+                break;
+            case CsaIssuer::IssuerAction::Kind::kAbort:
+                std::fprintf(stderr, "csa: aborted (no CSA_ARMED)\n");
+                break;
+            case CsaIssuer::IssuerAction::Kind::kNone:
+                break;
+        }
+        // Spectator follower actions (PSK-less RX nodes; a ground issuer's
+        // follower stays IDLE for its own campaigns — own frames are dropped).
+        const CsaAction fa = follower.tick(now_us_it);
+        if (fa.kind != CsaAction::Kind::kNone) {
+            air.value->retune_all(fa.chan_mhz, fa.bw, fa.fast);
+        }
         if (stats_period != 0 && now >= next_stats) {
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
-                       tsf_fallbacks);
+                       tsf_fallbacks,
+                       issuer.active() ? issuer.state_str()
+                                       : follower.state_str());
             next_stats = now + stats_period;
         }
     }
