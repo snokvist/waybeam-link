@@ -818,6 +818,13 @@ the data path — it is authenticated:
 - **`csa_mac` = `trunc(HMAC(csa_psk, common_prefix ‖ all CSA fields), 4)`.** The
   MAC covers the **common prefix too**, so a valid body cannot be re-wrapped under
   a fresh `session_id` after a reboot. Forgery without the PSK is dead.
+- **Primitive (normative, operator-ruled 2026-07-11):** `HMAC` is
+  **HMAC-SHA-256** (RFC 2104 over FIPS 180-4 SHA-256). The MAC input is
+  **bytes 0..27 of the encoded CSA packet** (everything before the `csa_mac`
+  field, §11.1). `trunc(·, 4)` = the **leftmost 4 bytes** of the 32-byte tag,
+  read **big-endian** into the `csa_mac` u32. `csa_psk` is the **raw bytes of
+  the config string** (any length; RFC 2104 keying handles it — no derivation
+  step).
 - **Anti-replay:** accept only if `csa_mac` verifies AND `csa_nonce >
   last_applied[(originator,session)]` AND the issuer is the currently-latched
   command source AND `target_chan` ∈ the node's config **channel allowlist** AND

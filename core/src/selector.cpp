@@ -234,6 +234,19 @@ void Selector::start_promote(size_t target, uint64_t now_ms,
 }
 
 void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
+    // §11.3 CSA freeze: cascade halted, watchdog paused. On expiry the
+    // blackout window is excused from the report age so a healthy switch
+    // does not resume straight into FAILSAFE.
+    if (csa_freeze_until_ms_ != 0) {
+        if (now_ms < csa_freeze_until_ms_) {
+            state_ = "CSA_FREEZE";
+            return;
+        }
+        if (have_report_ && last_report_ms_ < csa_freeze_until_ms_) {
+            last_report_ms_ = csa_freeze_until_ms_;
+        }
+        csa_freeze_until_ms_ = 0;
+    }
     const size_t lo = clamp_rung(0);
     const size_t hi = clamp_rung(ladder_size() - 1);
     if (lo == hi) {

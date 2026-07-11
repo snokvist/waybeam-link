@@ -107,6 +107,16 @@ class Selector {
     void set_pressure(bool on, uint64_t now_ms);  // §9.9 gauge
     SelectorActions tick(uint64_t now_ms);
 
+    // §11.3 CSA freeze: no demote/promote and the §9.8 watchdog is paused
+    // until `until_ms` — the retune blackout + re-acquire silence must not
+    // trip a spurious fail-safe descent for a healthy switch. Extends only
+    // (a later CSA can lengthen an active freeze, never shorten it).
+    void csa_freeze(uint64_t until_ms) {
+        if (until_ms > csa_freeze_until_ms_) {
+            csa_freeze_until_ms_ = until_ms;
+        }
+    }
+
     // Observability (§9.8 "observable", §15 stats link{}).
     const char* state() const { return state_; }
     uint8_t profile_id() const;
@@ -164,7 +174,8 @@ class Selector {
     std::vector<uint64_t> demoted_from_ms_;  // per rung, 0 = never
     std::vector<uint64_t> promoted_into_ms_;
 
-    // §9.8 / §9.9.
+    // §9.8 / §9.9 / §11.3.
+    uint64_t csa_freeze_until_ms_ = 0;
     uint64_t failsafe_next_step_ms_ = 0;
     bool pressure_ = false;
     uint64_t pressure_since_ms_ = 0;

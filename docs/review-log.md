@@ -186,6 +186,16 @@ Adopted:
   §7.2 window today) get SIFS-timed hardware ARQ; downlink video stays
   broadcast. Bench slot, not a redesign.
 
+## Pass 9 — §11.4 csa_mac primitive pinned (2026-07-11)
+
+Step-10 planning surfaced that §11.4 said "HMAC" without pinning the hash.
+Operator ruled **HMAC-SHA-256**, leftmost 4 tag bytes big-endian, MAC input =
+encoded CSA bytes 0..27, `csa_psk` = raw config-string bytes (RFC 2104 keying,
+no derivation). Rejected: SipHash-2-4 (needs a PSK→128-bit derivation rule and
+isn't an HMAC construction) and keyed BLAKE2s (less legible in embedded
+ecosystems). CSA is rare, so CPU cost was irrelevant; legibility and
+vendorability (Android core reuse) decided it.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

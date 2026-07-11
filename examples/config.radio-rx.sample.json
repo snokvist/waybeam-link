@@ -1,19 +1,70 @@
 {
-  "_comment": "devourer radio, GROUND side (§3.0): N diversity RX adapters + one designated uplink TX (role tx) for NACK/LINK_REPORT returns. quiet_gap schedules those returns at the middle of the craft's §7.2 listen window, anchored on the EOB receive-TSF. Delivered RTP goes to the local decoder on :5600.",
-  "node": { "originator": 9, "role": "rx", "net_id": 0 },
+  "_comment": "devourer radio, GROUND side (\u00a73.0): N diversity RX adapters + one designated uplink TX (role tx) for NACK/LINK_REPORT returns. quiet_gap schedules those returns at the middle of the craft's \u00a77.2 listen window, anchored on the EOB receive-TSF. Delivered RTP goes to the local decoder on :5600.",
+  "node": {
+    "originator": 9,
+    "role": "rx",
+    "net_id": 0
+  },
   "profile_table": "profiles/table.example.json",
   "adapters": [
-    { "name": "uplink", "bus": "", "role": "tx", "channel": 5805, "bw": 20 },
-    { "name": "div0",   "bus": "", "role": "rx", "channel": 5805, "bw": 20 },
-    { "name": "div1",   "bus": "", "role": "rx", "channel": 5805, "bw": 20 }
+    {
+      "name": "uplink",
+      "bus": "",
+      "role": "tx",
+      "channel": 5805,
+      "bw": 20
+    },
+    {
+      "name": "div0",
+      "bus": "",
+      "role": "rx",
+      "channel": 5805,
+      "bw": 20
+    },
+    {
+      "name": "div1",
+      "bus": "",
+      "role": "rx",
+      "channel": 5805,
+      "bw": 20
+    }
   ],
   "streams": [
-    { "stream_id": 0, "stream_type": "RTP", "dir": "out",
-      "bind": { "kind": "udp", "send": "127.0.0.1:5600" } }
+    {
+      "stream_id": 0,
+      "stream_type": "RTP",
+      "dir": "out",
+      "bind": {
+        "kind": "udp",
+        "send": "127.0.0.1:5600"
+      }
+    }
   ],
-  "air": { "kind": "radio" },
-  "policy": {
-    "return": { "quiet_gap": true, "guard_us": 300, "return_window_us": 2000 }
+  "air": {
+    "kind": "radio"
   },
-  "stats": { "hz": 1 }
+  "policy": {
+    "return": {
+      "quiet_gap": true,
+      "guard_us": 300,
+      "return_window_us": 2000
+    },
+    "csa": {
+      "psk": "CHANGE-ME-craft-and-ground-only",
+      "settle_s": 3.0,
+      "verify_timeout_ms": 150,
+      "min_interval_s": 5,
+      "ack_timeout_ms": 1000,
+      "rendezvous_timeout_s": 5,
+      "home_chan": 5745,
+      "channel_allowlist": [
+        5745,
+        5805,
+        5825
+      ]
+    }
+  },
+  "stats": {
+    "hz": 1
+  }
 }
