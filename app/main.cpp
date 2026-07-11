@@ -709,12 +709,17 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 uint64_t t0, const TxCore* tx, const RxCore* rx,
                 const AirBackend* air = nullptr,
                 uint64_t tsf_fallbacks = 0,
-                const char* csa_state = nullptr) {
+                const char* csa_state = nullptr,
+                uint32_t ret_window_hits = 0,
+                uint32_t ret_window_misses = 0) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
     snap.node = l.cfg.node.originator;
     snap.session = session;
+    // §7.2 observability (ground): paced vs blind coalesced return batches.
+    snap.ret.return_window_hits = ret_window_hits;
+    snap.ret.return_window_misses = ret_window_misses;
     if (csa_state != nullptr) {
         snap.link.csa_state = csa_state;
     }
@@ -879,6 +884,8 @@ int run_rx(const Loaded& l) {
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::vector<uint8_t>> ret_held;
     std::optional<uint64_t> ret_at_us;
+    uint32_t ret_window_hits = 0;
+    uint32_t ret_window_misses = 0;
     uint64_t tsf_fallbacks = 0;
     uint64_t now_us_it = now_us();
     const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n) {
@@ -917,6 +924,13 @@ int run_rx(const Loaded& l) {
             (!ret_at_us || now_us_it >= *ret_at_us)) {
             for (const auto& f : ret_held) {
                 air.value->inject(f.data(), f.size());
+            }
+            // §7.2 observability: a batch fired on a TSF-anchored window
+            // deadline is a hit; one sent blind (no EOB heard) is a miss.
+            if (ret_at_us) {
+                ++ret_window_hits;
+            } else if (qg.enabled()) {
+                ++ret_window_misses;
             }
             ret_held.clear();
             ret_at_us.reset();
@@ -1014,7 +1028,8 @@ int run_rx(const Loaded& l) {
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
-                                       : follower.state_str());
+                                       : follower.state_str(),
+                       ret_window_hits, ret_window_misses);
             next_stats = now + stats_period;
         }
     }
