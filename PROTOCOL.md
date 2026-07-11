@@ -162,6 +162,41 @@ validation (§3.1). `net_id` is node-local config, stamped by every TX
 (default `0`); it exists so co-located waybeam-link systems can partition
 their RX paths at L2 — it is **not** access control (§13 applies).
 
+**Hardware-ACKed unicast return (Pass 12; the §7.2 hybrid's wire shape —
+bench knob, both halves default off).** When the ground enables
+`return.unicast` and the craft arms `air.ack_responder`, ground→craft
+returns (**NACK / LINK_REPORT only** — CSA campaign copies stay broadcast,
+§11) are injected as **QoS-Data** instead of the pinned broadcast frame:
+
+| field | value |
+|---|---|
+| Frame Control | `0x88 0x00` — QoS-Data, ToDS=0 FromDS=0 |
+| addr1 (RA) | the target craft's §3.0 SA **as last heard** (latched per originator from accepted frames — exact match with the MACID the craft's ACK responder armed, adapter-idx byte included) |
+| addr2 (SA) / addr3 | own §3.0 SA / `"VBLK"` BSSID, unchanged |
+| QoS Control | `0x00 0x00` — TID 0, Normal ACK policy |
+| radiotap | the same rate-less prefix with `TX_FLAGS = 0` (the frame *expects* an ACK) |
+
+The injecting chip hardware-retransmits an unACKed unicast frame (devourer
+descriptor retry limit 12, Jaguar1 and Jaguar3 alike) — SIFS-timed hardware
+ARQ on the return path for zero extra return-path bytes. Pinned
+consequences:
+
+- **Receivers always accept both shapes.** The RX filter additionally
+  accepts QoS-Data whose FC1 is clear **except the Retry bit** (hardware
+  retransmissions set it); the frame body then starts at offset 26 (after
+  the QoS Control field). The knobs gate only what a node *sends/arms*, so
+  the A/B halves deploy independently.
+- A lost ACK can deliver the same return twice; NACK/LINK_REPORT handling
+  is already idempotent (§5.3 per-seq hold-down, §9.1 monotonic
+  `report_epoch`).
+- No latched SA for the target yet → that return falls back to broadcast
+  (counted, §15.3 `unicast_fallback`).
+- Arming the responder turns a passive monitor into an ACK transmitter —
+  acceptable on the *craft* (it transmits anyway); ground diversity
+  adapters never arm.
+- Downlink DATA stays broadcast unconditionally (Pass 8 rejected hardware
+  ARQ for the video path; the §1 no-MAC-ARQ invariant stands there).
+
 ### 3.1 Common prefix (all packet types) — 11 bytes
 
 | off | size | field | notes |
@@ -533,6 +568,14 @@ gap shrinks below `return_window_us` and the contract degrades to §7.1
 best-effort. This optimisation, its window fit, and whether the damped adaptive
 loop (§9) holds a stable operating point rather than oscillating at the floor, are
 **resolved empirically at §17 gate 4** — not designed further on paper.
+
+**Hardware-ACK hybrid (Pass 12; gate-4 A/B slot from Pass 8):** the return
+path — §7.1 opportunistic or §7.2 paced alike — can be switched to
+hardware-ACKed unicast: the craft arms its chip's ACK responder
+(`air.ack_responder`), the ground sends returns as unicast QoS-Data
+(`return.unicast`) and gets SIFS-timed hardware retries on them. Wire shape
+and consequences are pinned in §3.0. Both knobs default off; the A/B
+against plain broadcast returns is a §17 bench slot.
 
 ### 7.3 Cadence
 - **NACK:** event-driven on loss declaration, coalesced to one bitmap per return
@@ -1048,14 +1091,15 @@ scheme's recoverable count. **Deterministic-latency is a *target to validate*
     "arq":    { "airtime_frac": 0.15, "attempt_cap": 3, "holddown_ms": 20,
                 "fwd_clamp_blocks": 4 },
     "fec":    { "scheme": "none", "overhead_frac": 0.0 },
-    "return": { "guard_us": 300, "return_window_us": 2000 },
+    "return": { "guard_us": 300, "return_window_us": 2000,
+                "unicast": false },
     "csa":    { "psk": "<operator-provisioned; craft+ground only>",
                 "settle_s": 3.0, "verify_timeout_ms": 150,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
                 "rendezvous_timeout_s": 5, "home_chan": 5745,
                 "channel_allowlist": [5745, 5805, 5825] }
   },
-  "air":   { "kind": "radio",
+  "air":   { "kind": "radio", "ack_responder": false,
              "wedge_window_ms": 1000, "wedge_min_submits": 8 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } }
 }
@@ -1091,7 +1135,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "resends_sent": 230, "double_send_suppressed": 5,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "return": { "reports_expected": 10, "reports_received": 9,
-    "return_window_hits": 7, "return_window_misses": 2 },
+    "return_window_hits": 7, "return_window_misses": 2,
+    "unicast_sent": 0, "unicast_fallback": 0 },
   "link": { "target_originator": 9, "target_session": 183726,
     "profile": 4, "mcs": 4, "tx_power_qdb": 1800,
     "report_epoch": 1822, "report_age_ms": 40,

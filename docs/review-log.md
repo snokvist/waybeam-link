@@ -227,6 +227,24 @@ adaptation risks false-positive degradation. Also brought the §15.3 adapter
 sample back in sync with the emitted schema (`drop`, `tsf_fallback`,
 `tx_reports`, `tx_report_fails` had drifted out of the sample).
 
+## Pass 12 — §3.0 unicast HW-ACK return shape pinned (2026-07-11)
+
+The Pass-8 bench slot ("craft arms `SetAckResponder`, ground returns as
+unicast QoS-Data") left the wire shape unpinned. Pinned: FC `0x88 0x00`,
+addr1 = the craft SA **as last heard** (latched per originator — exact
+match with the armed MACID, adapter-idx byte included), QoS Control TID 0 /
+Normal ACK, radiotap `TX_FLAGS = 0`. RX-filter amendment: QoS-Data accepted
+with the Retry bit masked (hardware retransmissions set it), body at offset
+26 — receivers always accept both shapes so the knob halves
+(`return.unicast` ground, `air.ack_responder` craft) deploy independently
+for the A/B. Duplicate deliveries from a lost ACK ride the existing
+idempotent NACK/report handling. Scope: NACK + LINK_REPORT only; CSA
+campaign copies and all DATA stay broadcast (Pass 8 rejected hardware ARQ
+for the video path). No vendored changes needed: both chip families already
+hardware-retry unicast injects (descriptor limit 12) and implement
+`SetAckResponder`; an unlatched target falls back to broadcast, counted as
+`unicast_fallback` in §15.3.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
