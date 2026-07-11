@@ -80,9 +80,15 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     }
 
     // --- source symbols: k DATA packets, EOB on the last, tail unpadded (§5.1a).
+    // Payload = [4-B source subheader (k, i)][chunk].
+    src_payload_.resize(kFecSourceSubheaderSize + s);
     for (uint16_t i = 0; i < k; ++i) {
         const size_t off = static_cast<size_t>(i) * s;
-        const size_t plen = std::min<size_t>(s, len - off);
+        const size_t chunk = std::min<size_t>(s, len - off);
+        be16_write(src_payload_.data() + kFecSrcOffWindowLen, k);
+        be16_write(src_payload_.data() + kFecSrcOffSymIndex, i);
+        std::memcpy(src_payload_.data() + kFecSourceSubheaderSize, blob + off, chunk);
+        const size_t plen = kFecSourceSubheaderSize + chunk;
         DataHeader hdr;
         hdr.prefix.originator = cfg_.originator;
         hdr.prefix.destination = cfg_.destination;
@@ -95,7 +101,7 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
             base_flags | (i == k - 1 ? data_flags::kEndOfBlock : 0));
         hdr.active_profile = active_profile_;
         hdr.table_version = table_version_;
-        const size_t fl = encode_data(hdr, blob + off,
+        const size_t fl = encode_data(hdr, src_payload_.data(),
                                       static_cast<uint16_t>(plen), frame_buf_,
                                       sizeof(frame_buf_));
         if (fl > 0) {

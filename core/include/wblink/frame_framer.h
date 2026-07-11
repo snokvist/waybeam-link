@@ -105,6 +105,7 @@ class FrameFramer {
     // (k*s) for the repair computation, and one encode buffer.
     std::vector<uint8_t> src_pad_;
     std::vector<const uint8_t*> src_ptrs_;
+    std::vector<uint8_t> src_payload_;     // 4-B source subheader + chunk
     std::vector<uint8_t> repair_payload_;  // 11-B subheader + s coded bytes
     uint8_t frame_buf_[kDataHeaderSize + kMaxDataPayload];
 };

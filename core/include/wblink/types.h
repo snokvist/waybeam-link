@@ -66,6 +66,14 @@ inline constexpr size_t kFecOffWindowLen = 1;
 inline constexpr size_t kFecOffWindowBaseSeq = 3;
 inline constexpr size_t kFecOffFrameLen = 7;
 
+// §5.1a — frame-shm SOURCE symbols carry a 4-byte self-describing subheader
+// (window_len u16 @0 = k, sym_index u16 @2 = i) before the chunk, so RX
+// reassembly knows each symbol's index + the block's k without inferring from
+// seq gaps (a leading-loss run can never look like a complete frame).
+inline constexpr size_t kFecSourceSubheaderSize = 4;
+inline constexpr size_t kFecSrcOffWindowLen = 0;
+inline constexpr size_t kFecSrcOffSymIndex = 2;
+
 // §14.1 — GF(256) capacity: a Cauchy-RS block holds at most 256 symbols.
 inline constexpr uint16_t kFecMaxSymbols = 256;
 // §3.5 — probe_per value meaning "no probe ran this interval".

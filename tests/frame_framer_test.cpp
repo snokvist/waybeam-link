@@ -86,7 +86,14 @@ int main() {
             CHECK(!h.sent[i].is_repair());
             CHECK(h.sent[i].arq());  // IDR
             CHECK_EQ_U(h.sent[i].eob(), (i == k - 1));
-            reasm.insert(reasm.end(), h.sent[i].payload.begin(), h.sent[i].payload.end());
+            // §5.1a 4-byte source subheader: k, index.
+            const uint8_t* p = h.sent[i].payload.data();
+            CHECK(h.sent[i].payload.size() >= kFecSourceSubheaderSize);
+            CHECK_EQ_U(be16_read(p + kFecSrcOffWindowLen), k);
+            CHECK_EQ_U(be16_read(p + kFecSrcOffSymIndex), i);
+            reasm.insert(reasm.end(),
+                         h.sent[i].payload.begin() + kFecSourceSubheaderSize,
+                         h.sent[i].payload.end());
         }
         CHECK_EQ_U(reasm.size(), blob.size());
         CHECK(reasm == blob);
@@ -145,7 +152,10 @@ int main() {
         for (uint16_t i = 0; i < k; ++i) {
             if (i == 1 || i == k - 1) continue;  // erase symbol 1 and the last
             std::memset(pad.data(), 0, s);
-            std::memcpy(pad.data(), src[i]->payload.data(), src[i]->payload.size());
+            // chunk = source payload minus the 4-byte subheader; pad to s.
+            const uint8_t* chunk = src[i]->payload.data() + kFecSourceSubheaderSize;
+            const size_t clen = src[i]->payload.size() - kFecSourceSubheaderSize;
+            std::memcpy(pad.data(), chunk, clen);
             dec.add_source(i, pad.data());
         }
         for (uint16_t j = 0; j < r && j < 2; ++j) {

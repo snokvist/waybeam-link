@@ -482,13 +482,23 @@ payload** — FrameFramer parses only the metadata prefix, never the NAL bytes.
    the wire is self-describing (§3.2).
 4. Emit the `k` source symbols as DATA packets in order (`FEC_REPAIR` unset),
    `seq` monotonic across the whole block, `END_OF_BLOCK` on the last **source**
-   symbol.
+   symbol. Each source DATA payload is a **4-byte source subheader**
+   (`window_len u16 = k`, `sym_index u16 = i`) followed by the chunk. The
+   subheader makes every source symbol self-describing: RX reassembly (§6.3a)
+   knows each symbol's index and the block's `k` without inferring them from
+   `seq` gaps — so a stream with no FEC (ARQ-only) can never mistake a
+   leading-loss run for a complete frame.
 5. Per the §14 adaptive policy, generate and emit `r` **repair symbols**
-   (`FEC_REPAIR` set) after the source symbols, same `block_id`.
+   (`FEC_REPAIR` set, 11-byte subheader §14) after the source symbols, same
+   `block_id`.
 6. Push every emitted symbol into the resend ring (§5.2) as normal.
 
-Redundant per-packet metadata (§3.2) is stamped on every symbol, so a surviving
-symbol reveals the block's boundary, ARQ-eligibility, and operating point.
+Both subheaders are deducted from the rung `max_payload` when sizing the coded
+symbol: `s = max_payload − 26 − 11` (the 11-byte repair subheader binds; the
+4-byte source subheader is smaller, so a source packet `26 + 4 + chunk ≤
+max_payload`). Redundant per-packet metadata (§3.2) is stamped on every symbol,
+so a surviving symbol reveals the block's boundary, ARQ-eligibility, `k`, index,
+and operating point.
 
 ### 5.2 Resend ring
 - Recently sent packets for a bounded window (~50 ms, **bench-gated §17**; ~125 KB
