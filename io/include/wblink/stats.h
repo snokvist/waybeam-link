@@ -10,6 +10,7 @@
 // consumers never see fields appear.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -55,6 +56,14 @@ struct StreamStats {
     uint64_t dropped_superseded = 0;
     uint64_t dropped_deadline = 0;
     uint64_t nacks_sent = 0;
+    // §17 gate-3 estimator: cumulative NACK→RETRANSMIT latency histograms,
+    // ms upper bounds 1,2,4,8,16,32,64,+inf. nack_rtt = most-recent-NACK
+    // anchor (pure round-trip); arq_rec = first-NACK anchor (recovery vs
+    // the I-frame deadline).
+    std::array<uint64_t, 8> nack_rtt_hist{};
+    uint64_t nack_rtt_max_ms = 0;
+    std::array<uint64_t, 8> arq_rec_hist{};
+    uint64_t arq_rec_max_ms = 0;
     uint64_t resends_sent = 0;
     uint64_t double_send_suppressed = 0;
     uint64_t decode_errors = 0;

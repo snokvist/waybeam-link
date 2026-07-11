@@ -20,6 +20,7 @@
 // step can never underflow u64 elapsed-time math into an instant flush.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -78,6 +79,17 @@ struct RxStreamCounters {
     uint64_t resyncs = 0;                // sustained-clamp re-floors
     uint64_t table_mismatch = 0;         // §3.4 fallback packets
     uint32_t highest_seq = 0;
+    // §17 gate-3 estimator: NACK→RETRANSMIT latency samples, taken only when
+    // a RETRANSMIT-flagged arrival fills a NACKed gap (late originals close
+    // the gap but never sample). Cumulative histograms, ms upper bounds
+    // 1,2,4,8,16,32,64,+inf. nack_rtt = most-recent-NACK anchor (pure link
+    // round-trip, the §5 freshness input); arq_rec = first-NACK anchor (the
+    // recovery latency compared against the I-frame deadline).
+    static constexpr size_t kRttBuckets = 8;
+    std::array<uint64_t, kRttBuckets> nack_rtt_hist{};
+    uint64_t nack_rtt_max_ms = 0;
+    std::array<uint64_t, kRttBuckets> arq_rec_hist{};
+    uint64_t arq_rec_max_ms = 0;
 };
 
 struct RxAdapterCounters {
@@ -158,6 +170,9 @@ class RxEngine {
         uint8_t nack_attempts = 0;
         uint64_t next_nack_ms = 0;
         bool nack_eligible = false;
+        // §17 gate-3 anchors, stamped at NACK build (0 = never NACKed).
+        uint64_t first_nack_ms = 0;
+        uint64_t last_nack_ms = 0;
     };
     struct Stream {
         StreamKey key;

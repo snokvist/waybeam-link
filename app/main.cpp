@@ -649,6 +649,10 @@ struct RxCore {
             st.dropped_superseded = info.counters.dropped_superseded;
             st.dropped_deadline = info.counters.dropped_deadline;
             st.nacks_sent = info.counters.nacks_sent;
+            st.nack_rtt_hist = info.counters.nack_rtt_hist;
+            st.nack_rtt_max_ms = info.counters.nack_rtt_max_ms;
+            st.arq_rec_hist = info.counters.arq_rec_hist;
+            st.arq_rec_max_ms = info.counters.arq_rec_max_ms;
             st.active_profile = info.active_profile;
             snap.streams.push_back(std::move(st));
         }

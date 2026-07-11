@@ -49,6 +49,10 @@ StatsSnapshot sample_snapshot() {
     st.dropped_superseded = 110;
     st.dropped_deadline = 8;
     st.nacks_sent = 18;
+    st.nack_rtt_hist = {0, 2, 7, 6, 2, 1, 0, 0};
+    st.nack_rtt_max_ms = 34;
+    st.arq_rec_hist = {0, 1, 6, 6, 3, 1, 1, 0};
+    st.arq_rec_max_ms = 61;
     st.resends_sent = 230;
     st.double_send_suppressed = 5;
     st.decode_errors = 0;
@@ -82,7 +86,10 @@ const char* kGolden =
     "\"loss_prediversity_milli\":41,"
     "\"loss_postdiv_prearq_milli\":6,\"recovered_arq\":220,"
     "\"recovered_fec\":0,\"dropped_superseded\":110,\"dropped_deadline\":8,"
-    "\"nacks_sent\":18,\"resends_sent\":230,\"double_send_suppressed\":5,"
+    "\"nacks_sent\":18,"
+    "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
+    "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
+    "\"resends_sent\":230,\"double_send_suppressed\":5,"
     "\"decode_errors\":0,\"active_profile\":4,\"table_version\":178}],"
     "\"return\":{\"reports_expected\":10,\"reports_received\":9,"
     "\"return_window_hits\":7,\"return_window_misses\":2},"

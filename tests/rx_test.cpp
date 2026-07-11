@@ -163,6 +163,12 @@ int main() {
         CHECK_EQ_U(h.delivered[1].second[0], 3);
         // Quiesce: no further NACKs for it.
         CHECK_EQ_U(h.engine.build_nacks(21).size(), 0);
+        // §17 gate-3 sample: NACK built at 14, RETRANSMIT at 20 → 6 ms.
+        // Single NACK ⇒ both anchors agree (bucket 3 = ≤8 ms).
+        CHECK_EQ_U(h.counters().nack_rtt_hist[3], 1);
+        CHECK_EQ_U(h.counters().nack_rtt_max_ms, 6);
+        CHECK_EQ_U(h.counters().arq_rec_hist[3], 1);
+        CHECK_EQ_U(h.counters().arq_rec_max_ms, 6);
     }
 
     // --- §6.2-1 must NOT fire while one live adapter lags --------------------
@@ -262,6 +268,41 @@ int main() {
         CHECK_EQ_U(h.engine.build_nacks(90).size(), 1);   // attempt 3
         CHECK_EQ_U(h.engine.build_nacks(500).size(), 0);  // cap reached
         CHECK_EQ_U(h.counters().nacks_sent, 3);
+    }
+
+    // --- §17 gate-3: re-NACK splits the two anchors ---------------------------
+    {
+        RxPolicy p;
+        p.renack_attempts = 3;
+        p.renack_backoff_ms = 15;
+        p.default_deadline_iframe_ms = 10000;
+        Harness h(p);
+        h.latch();
+        h.feed(0, 4, 1, ARQ, 10);
+        h.feed(1, 5, 1, ARQ, 11);                        // gap 3 declared
+        CHECK_EQ_U(h.engine.build_nacks(12).size(), 1);  // first NACK @12
+        CHECK_EQ_U(h.engine.build_nacks(27).size(), 1);  // re-NACK @27
+        h.feed(0, 3, 1, ARQ | data_flags::kRetransmit, 30);
+        // round-trip = 30-27 = 3 ms (bucket 2 = ≤4);
+        // recovery   = 30-12 = 18 ms (bucket 5 = ≤32).
+        CHECK_EQ_U(h.counters().nack_rtt_hist[2], 1);
+        CHECK_EQ_U(h.counters().nack_rtt_max_ms, 3);
+        CHECK_EQ_U(h.counters().arq_rec_hist[5], 1);
+        CHECK_EQ_U(h.counters().arq_rec_max_ms, 18);
+    }
+
+    // --- §17 gate-3: a late ORIGINAL closes the gap without sampling ----------
+    {
+        Harness h;
+        h.latch();
+        h.feed(0, 4, 1, ARQ, 10);
+        h.feed(1, 5, 1, ARQ, 11);                        // gap 3 declared
+        CHECK_EQ_U(h.engine.build_nacks(12).size(), 1);  // NACKed
+        h.feed(1, 3, 1, ARQ, 20);  // late copy, no RETRANSMIT flag
+        CHECK_EQ_U(h.counters().recovered_arq, 1);
+        CHECK_EQ_U(h.counters().nack_rtt_hist[3], 0);
+        CHECK_EQ_U(h.counters().nack_rtt_max_ms, 0);
+        CHECK_EQ_U(h.counters().arq_rec_max_ms, 0);
     }
 
     // --- coalescing: several gaps -> one bitmap -------------------------------
