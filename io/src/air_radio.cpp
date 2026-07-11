@@ -3,9 +3,13 @@
 
 #include <libusb.h>
 
+#include <stdio.h>  // fopencookie (glibc/musl extension)
+
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -90,6 +94,31 @@ struct RadioAir::Impl {
     uint16_t seq = 0;
     std::vector<uint8_t> tx_buf;
 
+    // devourer's machine-event sink (Logger::events()) defaults to stdout,
+    // which would interleave with our stats stream. A cookie stream both
+    // silences it and harvests the tx.report lines (per-frame CCX TX status,
+    // Pass 8). Written from RX threads via the shared FILE* (stdio-locked);
+    // counters are relaxed atomics.
+    FILE* ev_stream = nullptr;
+    std::atomic<uint64_t> tx_reports{0};
+    std::atomic<uint64_t> tx_report_fails{0};
+
+    static bool ev_contains(const char* buf, size_t n, const char* pat,
+                            size_t m) {
+        return std::search(buf, buf + n, pat, pat + m) != buf + n;
+    }
+    static ssize_t ev_write(void* cookie, const char* buf, size_t n) {
+        auto* im = static_cast<Impl*>(cookie);
+        // EveryLine flush policy delivers one complete event line per write.
+        if (ev_contains(buf, n, "\"tx.report\"", 11)) {
+            im->tx_reports.fetch_add(1, std::memory_order_relaxed);
+            if (ev_contains(buf, n, "\"ok\":false", 10)) {
+                im->tx_report_fails.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        return static_cast<ssize_t>(n);  // always consume (drop non-reports)
+    }
+
     std::mutex mu;
     std::condition_variable cv;
     std::deque<RxFrame> queue;
@@ -118,6 +147,13 @@ struct RadioAir::Impl {
             if (a->ctx) {
                 libusb_exit(a->ctx);
             }
+        }
+        // Only after every writer (RX threads, device Stop paths) is gone.
+        if (ev_stream != nullptr) {
+            if (logger) {
+                logger->events().disable();
+            }
+            std::fclose(ev_stream);
         }
     }
 
@@ -193,6 +229,19 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     im.cfg = cfg;
     im.logger = std::make_shared<Logger>();
     im.logger->set_level(Logger::Level::Info);
+    // Route the machine-event sink into the tx.report harvester (also keeps
+    // event lines out of our stdout stats stream). No cookie stream → just
+    // silence the sink; tx.report counters then stay 0.
+    {
+        cookie_io_functions_t io{};
+        io.write = &Impl::ev_write;
+        im.ev_stream = fopencookie(&im, "w", io);
+        if (im.ev_stream != nullptr) {
+            im.logger->events().configure(im.ev_stream);
+        } else {
+            im.logger->events().disable();
+        }
+    }
 
     std::vector<std::string> used_paths;
     for (size_t i = 0; i < cfg.adapters.size(); ++i) {
@@ -250,6 +299,10 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // StartRxLoop works on the same claimed handle (gate-1 pattern);
         // ignored on Jaguar1.
         dc.rx.enable_with_tx = true;
+        // Per-frame TX-status CCX reports on the injecting adapter only
+        // (Pass 8: TX-wedge detector; SPE_RPT is per-descriptor, so RX-only
+        // adapters keep byte-identical bring-up).
+        dc.tx.report = ad->tx;
         WiFiDriver wd(im.logger);
         ad->dev = wd.CreateRtlDevice(ad->handle, ad->ctx, ad->lock, dc);
         if (!ad->dev) {
@@ -374,6 +427,11 @@ RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {
     c.rssi_last = a.rssi_last.load(std::memory_order_relaxed);
     c.tx_submitted = a.tx_submitted;
     c.tx_failed = a.tx_failed;
+    if (a.tx) {  // reports only exist for the injecting adapter's frames
+        c.tx_reports = impl_->tx_reports.load(std::memory_order_relaxed);
+        c.tx_report_fails =
+            impl_->tx_report_fails.load(std::memory_order_relaxed);
+    }
     return c;
 }
 

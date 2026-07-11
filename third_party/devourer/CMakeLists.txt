@@ -302,6 +302,12 @@ if(DEVOURER_PCIE)
     target_link_libraries(pcieprobe PUBLIC devourer)
 endif()
 
+# reglat — register round-trip latency microbench (USB ctrl-xfer vs PCIe MMIO).
+# Times RtlAdapter::rtw_read32; the PCIe path compiles only with DEVOURER_PCIE
+# (inherited via the devourer PUBLIC DEVOURER_HAVE_PCIE define). See its header.
+add_executable(reglat tests/reglat.cpp)
+target_link_libraries(reglat PUBLIC devourer PRIVATE PkgConfig::libusb)
+
 add_executable(rxdemo
     examples/rx/main.cpp
     examples/common/env_config.cpp
@@ -357,6 +363,19 @@ target_link_libraries(tdma PUBLIC devourer PRIVATE PkgConfig::libusb)
 target_include_directories(tdma PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/tdma)
+
+# timesync — LTE-eNB-style over-the-air time distribution. One MASTER broadcasts
+# its hardware TSF; SLAVES lock to it from the beacons alone (no GPS at the
+# slaves). Reuses the tdma TD frame tag. timesync.h is header-only.
+add_executable(timesync
+    examples/timesync/main.cpp
+    examples/common/env_config.cpp
+)
+target_link_libraries(timesync PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(timesync PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/tdma
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/timesync)
 
 # Stream-link DUPLEX: one binary, one chip, both directions. Combines the RX
 # loop from rxdemo and the stdin-driven TX from streamtx —
@@ -448,6 +467,21 @@ target_include_directories(TdmaTsfSelftest PRIVATE
 
 add_test(NAME tdma_tsf_math COMMAND TdmaTsfSelftest)
 
+# Headless guard for the timesync example's pure logic (examples/timesync/
+# timesync.h): the LinFit master<->local fit (ppm recovery + prediction), the
+# inter-slave agreement bound, and the 32->64-bit TSF Recon wrap. No hardware —
+# the master/slave demo that needs real adapters stays manual (out-of-band).
+add_executable(TimesyncSelftest
+    tests/timesync_selftest.cpp
+)
+target_link_libraries(TimesyncSelftest PRIVATE devourer)
+target_include_directories(TimesyncSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/tdma
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/timesync)
+
+add_test(NAME timesync_math COMMAND TimesyncSelftest)
+
 # Headless guard for the JSONL event emitter (src/Event.h) — the machine
 # event stream every test script parses (docs/logging.md): first-field
 # serialization guarantee, escaping, spill + truncation paths.
@@ -530,6 +564,16 @@ target_link_libraries(AdapterCapsSelftest PRIVATE devourer)
 
 add_test(NAME adapter_caps_derive COMMAND AdapterCapsSelftest)
 
+# Headless guard for the TsfSync one-way time-distribution fit (src/TsfSync.h):
+# skew/offset recovery from beacon {egress, arrival} TSF pairs, clock
+# translation, the local 32-bit TSF wrap, and the Packet::TxEgressTsf pick.
+add_executable(TsfSyncSelftest
+    tests/tsf_sync_selftest.cpp
+)
+target_link_libraries(TsfSyncSelftest PRIVATE devourer)
+
+add_test(NAME tsf_sync_math COMMAND TsfSyncSelftest)
+
 # Headless guard for the Jaguar2 per-packet TX-power quantizer
 # (jaguar2::txpkt_pwr_step_for_db) — dB delta -> the descriptor TXPWR_OFSET LUT
 # step. Gated on Jaguar2 being built (the header is behind DEVOURER_HAVE_JAGUAR2).
@@ -541,6 +585,18 @@ if(DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
     target_include_directories(TxPktPwrSelftest PRIVATE src)
     add_test(NAME txpkt_pwr_quant COMMAND TxPktPwrSelftest)
 endif()
+
+# Headless guard for the USB TX-aggregation URB packing (src/TxAggPlan.h) —
+# block alignment, the never-a-bulk-multiple boundary shim, the OQT
+# descs-per-bulk guard, the frame/byte caps — plus the HalMAC descriptor agg
+# fields (DMA_TXAGG_NUM placement and PKT_OFFSET checksum coverage; those
+# parts self-gate on the DEVOURER_HAVE_JAGUAR2/3 defines the library exports).
+add_executable(TxAggSelftest
+    tests/txagg_selftest.cpp
+)
+target_link_libraries(TxAggSelftest PRIVATE devourer)
+target_include_directories(TxAggSelftest PRIVATE src)
+add_test(NAME txagg_pack COMMAND TxAggSelftest)
 
 # Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
 # LSB-first Givens-angle unpacking + per-tone variance behind sense. It
@@ -565,3 +621,19 @@ if(Python3_Interpreter_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/rx_tone_localize.py --self-test
     )
 endif()
+
+# --- selftest aggregate ----------------------------------------------------
+# `cmake --build build --target selftests` builds every headless test binary in
+# one go. The mingw CI job builds this instead of a hand-maintained target list:
+# it can't build the whole tree (some examples aren't mingw targets), yet `ctest`
+# runs every registered test, so a binary missing from the build is a "Not Run"
+# failure. Collected by naming convention — every selftest target ends in
+# "Selftest" — so a newly-added selftest is picked up automatically and can never
+# be silently skipped. Must sit AFTER all *Selftest targets are defined.
+add_custom_target(selftests)
+get_directory_property(_dvr_targets BUILDSYSTEM_TARGETS)
+foreach(_dvr_t IN LISTS _dvr_targets)
+    if(_dvr_t MATCHES "Selftest$")
+        add_dependencies(selftests ${_dvr_t})
+    endif()
+endforeach()

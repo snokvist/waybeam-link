@@ -6,6 +6,8 @@
 #include <functional>
 
 #include "AdapterCaps.h"
+#include "AmpduMode.h"
+#include "DeviceConfig.h"
 #include "AdapterHealth.h"
 #include "RxQuality.h"
 #include "RxSense.h"
@@ -22,6 +24,13 @@
 struct Packet;
 
 using Action_ParsedRadioPacket = std::function<void(const Packet &)>;
+
+/* One TX frame handed to send_packets: radiotap header + 802.11 MPDU, the
+ * same buffer contract as send_packet. */
+struct TxPacketView {
+  const uint8_t *data;
+  size_t len;
+};
 
 /* IRtlDevice is the chip-family-agnostic device contract used by the demos and
  * the WiFiDriver factory. Three implementations exist:
@@ -187,6 +196,59 @@ public:
   virtual devourer::ActiveRxPaths GetActiveRxPaths() { return {}; }
 
   virtual bool send_packet(const uint8_t *packet, size_t length) = 0;
+
+  /* Hardware ACK responder (src/AckResponder.h): program the port identity
+   * (MACID/BSSID = `mac`, net_type = AP) so the MAC auto-ACKs — SIFS-timed,
+   * zero host involvement — any unicast frame addressed to `mac`, while
+   * monitor RX/injection continue unchanged. The reliable-unicast enabler:
+   * a peer TXing to `mac` with normal ack-policy gets hardware
+   * retransmissions until the ACK (its tx.report shows retries~0). `mac`
+   * must be unicast (I/G clear). Turning a passive monitor into an active
+   * transmitter is opt-in only — never a default. Returns false where
+   * unsupported. Clear = net_type back to No Link. */
+  virtual bool SetAckResponder(const devourer::MacAddr &mac) {
+    (void)mac;
+    return false;
+  }
+  virtual void ClearAckResponder() {}
+
+  /* 802.11 A-MPDU TX mode (src/AmpduMode.h): the first-class bundle of the
+   * recipe the spike + pacing sweep proved on-air. When enabled, every data
+   * frame is marked aggregatable (data QSEL + AGG_EN + MAX_AGG_NUM +
+   * AMPDU_DENSITY, and — for the no-BlockAck-peer broadcast case — a per-frame
+   * retry limit of 0), and the call programs the MAC aggregate-fill timer +
+   * burst-mode gate live (the pacing that gates net goodput). Amortizes one
+   * PHY preamble over many MPDUs: +30% on-air goodput at MCS7/20, more at
+   * higher rates. The caller must keep the TX queue fed deep enough for the
+   * MAC to aggregate (send_packets with enough in flight). Off keeps every TX
+   * byte-identical. Returns false where unsupported (USB HalMAC + Jaguar1;
+   * PCIe not wired). The lower-level DEVOURER_TX_QSEL / DEVOURER_TX_AMPDU
+   * spike knobs still compose on top for register-level experimentation. */
+  virtual bool SetAmpduMode(const devourer::AmpduMode & /*mode*/) {
+    return false;
+  }
+  virtual void ClearAmpduMode() {}
+  virtual devourer::AmpduMode GetAmpduMode() { return {}; }
+
+  /* Batch TX: submit `count` frames (each buffer = radiotap header + 802.11
+   * MPDU, the send_packet contract) in one call. With USB TX aggregation
+   * enabled (DeviceConfig tx.usb_agg_max > 0) the USB generations pack
+   * consecutive frames into shared bulk-OUT URBs (see src/TxAggPlan.h) — one
+   * transfer per burst instead of one per frame, and the frames land in the
+   * TXDMA back-to-back. The default (and the PCIe / agg-off behaviour) is a
+   * plain send_packet loop, so callers may use this unconditionally.
+   * Semantics notes: a frame whose radiotap CHANNEL differs from the current
+   * channel flushes the pending URB before the retune (per-packet hopping
+   * stays radiotap-driven); a malformed frame is skipped. Returns the number
+   * of frames successfully submitted. */
+  virtual size_t send_packets(const TxPacketView *pkts, size_t count) {
+    size_t ok = 0;
+    for (size_t i = 0; i < count; ++i)
+      if (pkts[i].data != nullptr && send_packet(pkts[i].data, pkts[i].len))
+        ++ok;
+    return ok;
+  }
+
   virtual SelectedChannel GetSelectedChannel() = 0;
 
   /* Read the 64-bit hardware TSF (Timing Synchronization Function) timer — the
@@ -198,6 +260,78 @@ public:
    * calling it concurrently with a heavy RX bulk-IN load can race (catch the
    * exception). */
   virtual uint64_t ReadTsf() { return 0; }
+
+  /* Write the 64-bit MAC TSF (REG_TSFTR). Sets the free-running microsecond clock
+   * — the primitive for TSF *adoption* (a slave slewing its clock onto the
+   * master's, so its per-frame `tsfl` reads in the master's timebase). The
+   * counter keeps running, so a read-add-write shifts by an approximate delta (a
+   * control loop absorbs the read→write latency). NOTE: this moves the reported
+   * TSF (and the beacon-body timestamp) but NOT the beacon TBTT air-time — a
+   * separate per-port timer drives the TBTT (bench-proven). To steer the
+   * hardware-timed beacon (the uplink timing-advance actuator) use
+   * AdjustBeaconTiming. No-op where unsupported. */
+  virtual void WriteTsf(uint64_t tsf) { (void)tsf; }
+
+  /* Load a beacon into the beacon reserved-page + enable the MAC beacon function,
+   * so the chip AUTO-TRANSMITS it at each TBTT — hardware-timed and
+   * hardware-TSF-stamped (the MAC inserts the live 64-bit TSF into the beacon
+   * timestamp at TX), fully host-jitter-free. `beacon` is a full 802.11 beacon
+   * MPDU (a leading radiotap header, if present, is stripped); addr2/addr3 set
+   * the port MAC/BSSID. `interval_tu` is the beacon interval in TU (1 TU =
+   * 1024 µs). One call suffices — the hardware beacons indefinitely. Implemented
+   * on Jaguar2/3 (HalMAC reserved-page download); returns false where unsupported
+   * (Jaguar1 has no reserved-page path). See docs/time-distribution.md. */
+  virtual bool StartBeacon(const uint8_t *beacon, size_t len,
+                           int interval_tu) {
+    (void)beacon; (void)len; (void)interval_tu;
+    return false;
+  }
+
+  /* Disable / restore the MAC EDCCA energy-detect gate (the vendor dis_cca
+   * recipe). With EDCCA off the MAC does not defer TX to carrier-sense, so a
+   * TBTT beacon airs exactly on schedule instead of after a CSMA backoff — the
+   * lever that collapses the hardware-beacon downlink residual to sub-µs on a
+   * shared channel (the master owns the channel). Also DEVOURER_DIS_CCA at
+   * construction. No-op where unimplemented. */
+  virtual void SetCcaMode(bool disabled) { (void)disabled; }
+
+  /* Shift the next hardware beacon TBTT by `microseconds` (>0 = later/retard,
+   * <0 = earlier/advance), quantized to whole TU (1 TU = 1024 µs). One-shot
+   * REG_BCN_INTERVAL tweak: runs one beacon interval at (nominal + round(µs/1024))
+   * TU then restores nominal, so the next TBTT — and the cadence thereafter —
+   * shifts by that many TU. This is the beacon-timing / uplink timing-advance
+   * actuator: WriteTsf moves the reported TSF but NOT the TBTT air-time (a
+   * separate per-port timer drives it), whereas the interval tweak steers it
+   * deterministically (the 802.11 IBSS/TSF-merge mechanism; bench-proven to the
+   * microsecond). Requires an active StartBeacon. BLOCKS the caller ~one beacon
+   * interval (the tweaked interval must latch and fire once before restore).
+   * Returns the actual applied shift in µs (TU-quantized); 0 if no active beacon
+   * or |microseconds| < 512. Jaguar3 only in practice: the Jaguar2 8822B beacon
+   * engine drops the beacon on any TBTT re-latch (bench-proven), so J2 refuses
+   * (returns 0) rather than silently kill it. Base is a no-op. */
+  virtual int32_t AdjustBeaconTiming(int32_t microseconds) {
+    (void)microseconds;
+    return 0;
+  }
+
+  /* Fine (sub-TU, microsecond-granular) variant of AdjustBeaconTiming. Shifts the
+   * next beacon TBTT by `microseconds` (>0 = later/retard, <0 = earlier/advance)
+   * by toggling the MAC beacon function off, shifting the port-0 TSF, and toggling
+   * it back on so the TBTT counter re-derives from the shifted TSF. Unlike the
+   * interval-tweak AdjustBeaconTiming (quantized to whole TU), this steers at
+   * microsecond resolution — the µs-fine uplink timing-advance actuator. Note it
+   * also shifts this port's reported TSF (and the beacon-body timestamp) by the
+   * same amount, which is the intended behaviour for a UE advancing its own
+   * timebase. The USB read→write latency adds a sub-ms offset (~0.5–1.2 ms) that
+   * a closed timing-advance loop absorbs — the *resolution* is microseconds.
+   * Requires an active StartBeacon; returns the applied shift in µs. Jaguar3 only:
+   * the Jaguar2 beacon engine survives neither the beacon-function toggle nor the
+   * interval tweak (both drop the beacon), so J2 refuses (returns 0). Base is a
+   * no-op. */
+  virtual int32_t AdjustBeaconTimingFine(int32_t microseconds) {
+    (void)microseconds;
+    return 0;
+  }
 
   /* Clean shutdown: halt TRX DMA and power the chip down to a re-enumerable
    * state (mirrors the kernel driver's card-disable on unbind). Call after the

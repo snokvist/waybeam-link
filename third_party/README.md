@@ -7,7 +7,7 @@ newer tree and update the provenance below.
 
 | tree | upstream | vendored commit | copied from |
 |---|---|---|---|
-| `devourer/` | https://github.com/OpenIPC/devourer | `73f1cb4` ("README: surface hardware-TSF timing…", #226) | Waybeam-android `wifi/src/main/cpp/third_party/devourer` @ `1847b3f` (the hardware-proven Android revision) |
+| `devourer/` | https://github.com/OpenIPC/devourer | `3025e2d` ("Packet aggregation and hardware ACKs in userspace", #239) | upstream clone; `reference/` (kernel-driver submodules) and `.gitmodules` excluded. All new TX capabilities (usb-agg, tx.report, A-MPDU, ACK responder) are off-by-default byte-identical; waybeam-link enables only `tx.report` (Pass 8) |
 | `libusb-cmake/` | https://github.com/libusb/libusb-cmake | `c8477c1` (includes the `libusb/` sources) | same Android checkout |
 | `nlohmann/` | https://github.com/nlohmann/json | 3.12.0 single-header | (io layer only — core stays zero-dep) |
 

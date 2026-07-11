@@ -64,9 +64,31 @@ public:
   void FastSetBandwidth(ChannelWidth_t bw) override;
   void InitWrite(SelectedChannel channel) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
+  /* Batch TX with USB aggregation (IRtlDevice contract): with
+   * cfg.tx.usb_agg_max > 1 consecutive frames are packed into shared bulk-OUT
+   * URBs — one [txdesc][frame] block per frame, first descriptor carrying the
+   * count in DMA_TXAGG_NUM (see src/TxAggPlan.h). Falls back to the
+   * per-frame loop when the knob is off. */
+  size_t send_packets(const TxPacketView *pkts, size_t count) override;
+  /* Hardware ACK responder (IRtlDevice contract; src/AckResponder.h). */
+  bool SetAckResponder(const devourer::MacAddr &mac) override;
+  void ClearAckResponder() override;
+  /* A-MPDU TX mode (IRtlDevice contract; src/AmpduMode.h). Programs the
+   * 8822B pacing regs (0x455 max-time, 0x4BC burst-mode) under _reg_mu and
+   * records the descriptor state the TX path reads. */
+  bool SetAmpduMode(const devourer::AmpduMode &mode) override;
+  void ClearAmpduMode() override;
+  devourer::AmpduMode GetAmpduMode() override { return _ampdu; }
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
+  void WriteTsf(uint64_t tsf) override;
+  bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  /* Disable/restore the MAC EDCCA gate (BIT_DIS_EDCCA 0x520[15] + EDCCA-mask
+   * 0x524[11] — HalMAC-common with J3) so a TBTT beacon airs on schedule. */
+  void SetCcaMode(bool disabled) override;
+  int32_t AdjustBeaconTiming(int32_t microseconds) override;
+  int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
   void Stop() override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;
@@ -156,6 +178,19 @@ public:
   }
 
 private:
+  /* Golden-init replay (DEVOURER_REPLAY_WSEQ) — applied at the end of both
+   * Init and InitWrite (see the definition for semantics). */
+  void apply_replay_wseq();
+
+  /* Parse one send_packet-contract buffer (radiotap + 802.11) and build its
+   * TXDMA block — 48-byte descriptor, pkt_offset×8 pad, frame — at `out`
+   * (zeroed, sized desc + pad + frame by the caller). Performs the per-packet
+   * radiotap CHANNEL retune, exactly like send_packet. Returns the block
+   * length, 0 on malformed input. Shared by send_packet (pkt_offset=0) and
+   * the send_packets URB packer. */
+  size_t build_tx_block(const uint8_t *packet, size_t length, uint8_t *out,
+                        uint8_t pkt_offset);
+
   RtlAdapter _device;
   const devourer::DeviceConfig _cfg;
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
@@ -177,6 +212,13 @@ private:
   std::atomic<int> _tx_pwr_offset_steps{0};
   /* Default per-packet TXPWR_OFSET LUT step (0 = none) — see SetTxPacketPowerStep. */
   std::atomic<uint8_t> _tx_pkt_pwr_step{0};
+  /* Rotating SW_DEFINE tag stamped when tx.report is on — the CCX report
+   * echoes its low byte, correlating reports to frames (src/TxReport.h). */
+  std::atomic<uint16_t> _tx_rpt_tag{0};
+  /* A-MPDU TX mode (SetAmpduMode). Read lock-free in the TX descriptor path
+   * (same pattern as _tx_mode_default); a control-plane write during TX is
+   * the caller's to sequence and at worst tears one frame's mode benignly. */
+  devourer::AmpduMode _ampdu;
   /* Bring-up completion: gates the live apply in the TX-power setters. */
   bool _brought_up = false;
   /* Re-program TXAGC from the current knob state at the current channel:

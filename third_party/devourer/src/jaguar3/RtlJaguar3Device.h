@@ -63,9 +63,28 @@ public:
   void FastSetBandwidth(ChannelWidth_t bw) override;
   void InitWrite(SelectedChannel channel) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
+  /* Batch TX with USB aggregation (IRtlDevice contract): with
+   * cfg.tx.usb_agg_max > 1 consecutive frames are packed into shared bulk-OUT
+   * URBs — one [txdesc][frame] block per frame, first descriptor carrying the
+   * count in DMA_TXAGG_NUM (see src/TxAggPlan.h). Falls back to the per-frame
+   * loop when the knob is off. */
+  size_t send_packets(const TxPacketView *pkts, size_t count) override;
+  /* Hardware ACK responder (IRtlDevice contract; src/AckResponder.h). */
+  bool SetAckResponder(const devourer::MacAddr &mac) override;
+  void ClearAckResponder() override;
+  /* A-MPDU TX mode (IRtlDevice contract; src/AmpduMode.h). Programs the 8822C
+   * aggregate-fill timer (0x455) under _reg_mu (serialized against the coex
+   * thread) and records the descriptor state the TX path reads. */
+  bool SetAmpduMode(const devourer::AmpduMode &mode) override;
+  void ClearAmpduMode() override;
+  devourer::AmpduMode GetAmpduMode() override { return _ampdu; }
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
+  void WriteTsf(uint64_t tsf) override;
+  bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  int32_t AdjustBeaconTiming(int32_t microseconds) override;
+  int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
   void Stop() override;
 
   /* Runtime TX-power control (IRtlDevice contract; see src/TxPower.h).
@@ -149,9 +168,10 @@ public:
    * vendor rtw_proc.c dis_cca recipe (MAC BIT_DIS_EDCCA 0x520[15] + EDCCA-mask
    * countdown 0x524[11], BB 0x1a9c[20]/0x1a14[9:8]/0x1d58[0xff8]); disabled=false
    * restores the inverse. Sticky across SetMonitorChannel; serialized on _reg_mu
-   * against the coex tick. Measure-first — kept for the swept-AWGN A/B; not on
-   * IRtlDevice until the measurement justifies it. */
-  void SetCcaMode(bool disabled);
+   * against the coex tick. On IRtlDevice: measured to collapse the hardware-beacon
+   * downlink residual from ~472 µs to 0.39 µs on a crowded channel (the TBTT
+   * beacon airs on schedule instead of after a CSMA backoff). */
+  void SetCcaMode(bool disabled) override;
 
   /* Adapter-health probes (see src/AdapterHealth.h). EFUSE probe is 8822C
    * only — the 8822E's OTP is not reliably readable post-bring-up by design
@@ -166,6 +186,15 @@ public:
   bool should_stop = false;
 
 private:
+  /* Parse one send_packet-contract buffer (radiotap + 802.11) and build its
+   * TXDMA block — 48-byte descriptor, pkt_offset×8 pad, frame — at `out`
+   * (zeroed, sized desc + pad + frame by the caller). Performs the per-packet
+   * radiotap CHANNEL retune and the NDPA-period accounting, exactly like
+   * send_packet. Returns the block length, 0 on malformed input. Shared by
+   * send_packet (pkt_offset=0) and the send_packets URB packer. */
+  size_t build_tx_block(const uint8_t *packet, size_t length, uint8_t *out,
+                        uint8_t pkt_offset);
+
   RtlAdapter _device;
   const devourer::DeviceConfig _cfg;
   Logger_t _logger;
@@ -181,6 +210,13 @@ private:
    * brought up; recorded and folded at InitWrite before. */
   std::atomic<int> _tx_pwr_override{-1};
   std::atomic<int> _tx_pwr_offset_steps{0};
+  /* Rotating SW_DEFINE tag stamped when tx.report is on — the CCX report
+   * echoes its low byte, correlating reports to frames (src/TxReport.h). */
+  std::atomic<uint16_t> _tx_rpt_tag{0};
+  /* A-MPDU TX mode (SetAmpduMode). Read lock-free in the TX descriptor path
+   * (same pattern as the TX-mode default); a control write during TX is the
+   * caller's to sequence and at worst tears one frame's mode benignly. */
+  devourer::AmpduMode _ampdu;
   /* Rail-hit flags from the last apply (references clamped at 0/0x7f). */
   std::atomic<bool> _txpwr_sat_low{false};
   std::atomic<bool> _txpwr_sat_high{false};
@@ -252,6 +288,9 @@ private:
   std::thread _coex_thread;
   volatile bool _coex_stop = false;
   void coex_runtime_loop();
+  /* Nominal beacon interval in TU while a beacon is active (0 = none); the
+   * AdjustBeaconTiming one-shot tweak restores to this. */
+  int _bcn_interval_tu = 0;
   /* StartRxLoop stop request (StopRxLoop). */
   volatile bool _rx_stop = false;
   /* True while StartRxLoop owns bulk-IN (gates the coex thread's drain). */
