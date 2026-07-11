@@ -181,6 +181,27 @@ int main() {
         }
     }
 
+    // --- frame-shm binding + fec block (§15.4/§14.1) ------------------------
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 7, "role": "tx"},
+          "streams": [{ "stream_id": 0, "stream_type": "RTP", "dir": "in",
+            "bind": { "kind": "frame-shm", "name": "venc_frame" },
+            "fec": { "scheme": "rlc256", "i_rate_permille": 300,
+                     "p_rate_permille": 120, "min_k": 4 } }]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK_EQ_U(r.value->streams.size(), 1u);
+            const StreamCfg& s = r.value->streams[0];
+            CHECK(s.bind.kind == BindKind::kFrameShm);
+            CHECK(s.bind.name == "venc_frame");
+            CHECK(s.fec.scheme == FecScheme::kRlc256);
+            CHECK_EQ_U(s.fec.i_rate_permille, 300u);
+            CHECK_EQ_U(s.fec.p_rate_permille, 120u);
+            CHECK_EQ_U(s.fec.min_k, 4u);
+        }
+    }
+
     // --- air "kernel-monitor" backend + adapter ifname ---------------------
     {
         auto r = load_config_json(R"({
@@ -214,11 +235,22 @@ int main() {
       "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
         "bind":{"kind":"udp","listen":"127.0.0.1:1","send":"127.0.0.1:2"}}]})",
                  "XOR");
-    // v0 is UDP-only.
+    // unix "shm" kind is still v1-reserved; udp + frame-shm are the live kinds.
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
         "bind":{"kind":"shm","listen":"x"}}]})",
-                 "UDP-only");
+                 "v1 feature");
+    // frame-shm needs a name.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"frame-shm"}}]})",
+                 "name");
+    // fec.scheme only on a frame-shm binding.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"udp","listen":"127.0.0.1:1"},
+        "fec":{"scheme":"rlc256"}}]})",
+                 "frame-shm binding");
     // §3.0 net_id is one byte.
     expect_error(R"({"node":{"originator":1,"role":"rx","net_id":256}})",
                  "net_id");

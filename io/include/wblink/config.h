@@ -18,13 +18,23 @@ namespace wblink {
 
 enum class Role : uint8_t { kTx, kRx };
 enum class Dir : uint8_t { kIn, kOut };
-// §15.1: shm/unix are v1; v0 is UDP-only and the loader rejects other kinds.
-enum class BindKind : uint8_t { kUdp };
+// §15.1: udp + the frame-shm shm kind are live; unix stays v1-reserved.
+enum class BindKind : uint8_t { kUdp, kFrameShm };
 
 struct BindCfg {
     BindKind kind = BindKind::kUdp;
-    std::string listen;  // "host:port", set iff the binding is an ingress
-    std::string send;    // "host:port", set iff the binding is an egress
+    std::string listen;  // udp: "host:port", set iff the binding is an ingress
+    std::string send;    // udp: "host:port", set iff the binding is an egress
+    std::string name;    // frame-shm: POSIX SHM ring name (§15.4)
+};
+
+// §14.1 per-stream FEC policy (frame-shm streams). scheme=kNone => the
+// TX FrameFramer fragments + ARQs but emits no repair symbols.
+struct StreamFecCfg {
+    FecScheme scheme = FecScheme::kNone;
+    uint16_t i_rate_permille = 250;
+    uint16_t p_rate_permille = 100;
+    uint16_t min_k = 3;
 };
 
 struct NodeCfg {
@@ -60,6 +70,8 @@ struct StreamCfg {
     std::optional<uint16_t> originator;
     // RTP in-streams (§4.1): "size" (default) / "h264" / "h265".
     RtpClassifier classifier = RtpClassifier::kSize;
+    // §14.1 FEC for frame-shm streams (ignored on udp streams).
+    StreamFecCfg fec;
 };
 
 // §9.1 cascade + §9.4/§9.5/§9.7/§9.8/§9.9 constants (seeds; RE-DERIVE per
