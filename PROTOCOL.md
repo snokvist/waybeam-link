@@ -253,7 +253,7 @@ split is what lets any node send control traffic about any other node's stream.
 | 0 | `END_OF_BLOCK` | last packet of this block |
 | 1 | `ARQ` | block is retransmit-eligible (importance / opt-in) |
 | 2 | `RETRANSMIT` | this packet is itself a resend (stats/diagnostics) |
-| 3 | `FEC_REPAIR` | packet is a FEC repair symbol (§14; a 6-byte subheader precedes payload) |
+| 3 | `FEC_REPAIR` | packet is a FEC repair symbol (§14; an 11-byte subheader precedes payload) |
 | 4 | `CSA_ARMED` | **craft→ground ARM ack** — craft has accepted the in-flight CSA campaign and will follow (§11.6) |
 | 5–7 | reserved | 0 |
 
@@ -263,8 +263,15 @@ are stamped on **every** packet of a block, not just the first. A surviving
 packet of a block reveals the block's boundary, ARQ-eligibility, and the TX's
 operating point/table even if the first packet was lost.
 
-**Header overhead:** 26 B on a ~1450 B usable MPDU → **1424 B max payload**
-(~1.8%).
+**Header overhead:** 26 B header. The **usable MPDU is profile-driven**
+(§9.3 `max_payload`), not fixed: standard rungs seed ~1450 B (⇒ **1424 B max
+payload**, ~1.8%); Realtek jumbo/A-MSDU rungs reach ~3993 B (⇒ ~3967 B
+payload). The wire `payload_len` (u16) is self-describing, so an RX decodes
+whatever budget the TX used — including across a mid-stream profile change.
+`kMaxDataPayload` is the **absolute ceiling** (4096) for buffer sizing only;
+the effective per-frame budget is `active_profile.max_payload`. Adaptive MTU
+is essential for large IDR frames on the SHM path (§5.1a/§14): a 512 KB frame
+is k≈370 source symbols at 1400 B but only k≈132 at 3967 B.
 
 ### 3.3 NACK packet — 23-byte fixed + bitmap
 
@@ -391,6 +398,13 @@ RTP profile, one block = one RTP frame (marker/timestamp boundary). The active
 profile is selected on the wire by `stream_type`; both ends apply the matching
 policy with no out-of-band agreement.
 
+**Frame-SHM ingress (§5.1a, §15.4):** when a stream is fed by a `frame-shm`
+binding, the block boundary is **direct, not inferred** — waybeam-link ingests
+one whole encoded frame per SHM slot, so one frame = one `block_id` by
+construction (no marker-bit / timestamp inference). The block model itself is
+unchanged (a block is still packets sharing `block_id`, delimited by
+`END_OF_BLOCK`); only the boundary *source* differs.
+
 | policy | RTP profile | future bulk/file profile |
 |---|---|---|
 | boundary | RTP frame (marker / timestamp change) | fixed-size or app-defined |
@@ -415,6 +429,12 @@ NAL unit type**:
 **Pure-agnostic fallback:** classify by block size (above an adaptive threshold ⇒
 important). Cruder, zero codec coupling, selectable per build.
 
+**Frame-SHM direct classifier:** on a `frame-shm` stream the encoder has already
+classified the frame — the SHM slot's `VencFrameMeta.flags` bit 0 marks IDR
+(§15.4). `FrameFramer` sets the block `ARQ` from that flag directly; **no NAL
+parsing on the link side**. This is the authoritative form of the §4.1
+classifier (the encoder's own IDR decision), not an approximation of it.
+
 **Deadline coupling:** `ARQ`-important blocks carry a longer retransmit deadline
 than best-effort blocks (a slightly-late I-frame still rescues its GOP).
 
@@ -432,12 +452,43 @@ than best-effort blocks (a slightly-late I-frame still rescues its GOP).
 5. Push `(seq → payload, block_id, flags, first-seen-tx-time)` into the resend
    ring.
 
-**No fragmentation (invariant).** Each ingress datagram MUST fit one MPDU
-payload. Configure the encoder's RTP payloader `mtu = 1400` (24 B margin under
-the 1424 B DATA payload budget). H.264/H.265 payloaders already fragment NALs to
-MTU — this is a config assertion, not new code. A runtime datagram larger than
-the payload budget is **dropped with a stat** (`oversize_ingress`), never
-silently truncated.
+**No fragmentation (invariant, UDP/RTP ingress).** On a UDP/RTP-ingested stream
+each ingress datagram MUST fit one MPDU payload. Configure the encoder's RTP
+payloader `mtu` at or under the active profile's `max_payload` budget (§9.3;
+standard rungs ~1400, jumbo rungs up to ~3960). H.264/H.265 payloaders already
+fragment NALs to MTU — this is a config assertion, not new code. A runtime
+datagram larger than the payload budget is **dropped with a stat**
+(`oversize_ingress`), never silently truncated.
+
+**The invariant is relaxed for `frame-shm` ingress** — there the ingress unit is
+a whole frame (up to 512 KB) and `FrameFramer` (§5.1a) *is* the fragmenter.
+
+### 5.1a FrameFramer (per `frame-shm` stream)
+Replaces §5.1's Framer when the ingress binding kind is `frame-shm` (§15.4).
+The ingress unit is one whole encoded frame carrying an 8-byte `VencFrameMeta`
+prefix (§15.4); the `[VencFrameMeta][Annex-B]` blob is treated as an **opaque
+payload** — FrameFramer parses only the metadata prefix, never the NAL bytes.
+
+1. Read one frame blob from the SHM binding. Assign it a fresh `block_id`
+   (one frame = one block, §4).
+2. Set `ARQ` from `VencFrameMeta.flags` bit 0 (IDR ⇒ 1), §4.1.
+3. **Fragment** the blob into `k` **source symbols** of size
+   `s = active_profile.max_payload − 26 − 11` (header + §14 repair subheader,
+   so source and repair symbols are interchangeable for coding); the last
+   symbol carries the tail (`< s`) and is zero-padded to `s` only for the FEC
+   computation (§14), never on the wire. `k = ceil(blob_len / s)`. `s` is fixed
+   for the life of the block (a frame is fragmented atomically under one
+   profile); a later frame may use a different `s` after a profile change —
+   the wire is self-describing (§3.2).
+4. Emit the `k` source symbols as DATA packets in order (`FEC_REPAIR` unset),
+   `seq` monotonic across the whole block, `END_OF_BLOCK` on the last **source**
+   symbol.
+5. Per the §14 adaptive policy, generate and emit `r` **repair symbols**
+   (`FEC_REPAIR` set) after the source symbols, same `block_id`.
+6. Push every emitted symbol into the resend ring (§5.2) as normal.
+
+Redundant per-packet metadata (§3.2) is stamped on every symbol, so a surviving
+symbol reveals the block's boundary, ARQ-eligibility, and operating point.
 
 ### 5.2 Resend ring
 - Recently sent packets for a bounded window (~50 ms, **bench-gated §17**; ~125 KB
@@ -492,6 +543,27 @@ A missing seq is declared **lost** as soon as *any* of:
 - Deliver in-order, best-effort, out the egress binding (§15) as untouched RTP.
 - "Drop" = *stop recovering + advance cursor*, never withhold already-held
   packets; the decoder's jitter buffer discards genuine late arrivals.
+
+### 6.3a Frame reassembly + SHM egress (`frame-shm` out streams)
+When the egress binding is `frame-shm` (§15.4), the RX node reassembles whole
+frames instead of forwarding per-packet payloads:
+
+1. `FrameReassembler` collects a block's source + repair symbols by `block_id`.
+2. **All `k` source symbols present** (fast path): concatenate their payloads in
+   `seq` order → the `[VencFrameMeta][Annex-B]` blob → write one SHM slot. No
+   FEC decode.
+3. **Sources missing but ≥ `k` total** (source + repair): GF(256) decode (§14.1)
+   recovers the missing source symbols, trim to `frame_len`, then egress.
+4. **< `k` after deadline / on supersession (§6.2):** frame lost, **nothing is
+   egressed** — a partial frame is useless to the decoder (no partial slots).
+5. The egressed slot is **byte-identical** to the producer's original slot
+   (§15.4) — the metadata prefix rides through transparently; the RX never
+   parses the Annex-B payload.
+
+This is §5.3 Option A. (Option B — RTP re-packetization for a decoder that cannot
+consume SHM — is out of scope for v1; a `udp` egress on a `frame-shm`-ingested
+stream is rejected at config load, since the wire payloads are frame *fragments*,
+not RTP packets.)
 
 ### 6.4 NACK generation
 - For a lost seq that is `ARQ`-flagged, not superseded, within deadline: add to
@@ -680,6 +752,10 @@ profile[i] = {
   id, mcs, guard_interval,
   tx_power_level,          // PORTABLE power intent (§10); NOT an absolute value
   airtime_budget_frac,
+  max_payload,             // u16 air MTU budget (§3.2); DATA payload ceiling on
+                           //   this rung. Standard rungs ~1424; Realtek jumbo/
+                           //   A-MSDU rungs up to ~3967. Drives FrameFramer's
+                           //   source-symbol size s (§5.1a). Absent ⇒ 1424.
   arq_deadline_ms[class],  // per §4.1 importance; I-frame class longer
   reserve_bps[stream_type],// guaranteed floor for CONTROL / TELEMETRY
   bitrate_min_kbps,        // policy floor ≥ venc hard floor 1000 (§9.6)
@@ -1022,11 +1098,14 @@ distribution (`csa_psk`) is operator-provisioned to craft + ground (§15).
 
 ---
 
-## 14. FEC (deferred — bench-gated candidate)
+## 14. FEC (frame-aligned GF(256) RLC — built, default-off, rate bench-gated)
 
-**Decision deliberately deferred.** waybeam-link ships **no FEC** initially
-(diversity + ARQ + RTP concealment + short GOP). Whether to add forward parity is
-a **binary choice gated on a measurement**, not an assumption:
+**Mechanism built, enablement bench-gated.** The GF(256) frame-aligned RLC codec
+and its wire form are pinned and implemented for the `frame-shm` path (§14.1,
+§5.1a); it defaults **off** (`fec.scheme="none"`) and the base profile table
+ships `fec_scheme=none`. Whether to *enable* forward parity, and at what rate,
+stays a **choice gated on a measurement**, not an assumption. The design
+rationale that selected GF(256) RLC over the alternatives:
 
 - **Do NOT use XOR-only (GF(2)) sliding-window FEC.** It recovers one loss per
   window — exactly the isolated-loss case diversity already handles — and fails
@@ -1058,12 +1137,57 @@ folded into the §9.5 atomic transition. (A middle priority class — parity abo
 retransmits, shed first under *local* backpressure but held through *RF* fades —
 is an allowed alternative to the permanent bitrate tax.)
 
-**Wire form (if built):** repairs are ordinary DATA packets with
-`data_flags.FEC_REPAIR` set and a 6-byte subheader before the payload:
-`repair_idx u8 · window_len u8 · window_base_seq u32`. `block_id` = the block
-repaired. RX reconstructs when losses within `[window_base_seq, +window_len)` ≤ the
-scheme's recoverable count. **Deterministic-latency is a *target to validate*
-(≤1–2 frame periods), not an RFC-given guarantee** (§17 gate 4).
+**Wire form:** repairs are ordinary DATA packets with `data_flags.FEC_REPAIR`
+set and an **11-byte subheader** before the coded payload:
+
+| off | size | field | notes |
+|---|---|---|---|
+| 0 | 1 | `repair_idx` | u8; index of this repair symbol within the block |
+| 1 | 2 | `window_len` | u16; `k` = number of source symbols in the block |
+| 3 | 4 | `window_base_seq` | u32; `seq` of the block's first source symbol |
+| 7 | 4 | `frame_len` | u32; total source-blob length (bytes) — lets RX strip the last symbol's zero-padding after a decode |
+
+`block_id` = the block repaired. `window_len` is **u16** (widened from the
+earlier u8 sketch): a 512 KB frame at a 1400 B rung is k≈370 > 255. `frame_len`
+is required because a last source symbol recovered via FEC arrives full-size
+(`s` bytes) with no length marker — RX trims `k·s − frame_len` padding bytes.
+RX reconstructs when total received symbols (source + repair) for the block ≥
+`k`. **Deterministic-latency is a *target to validate* (≤1–2 frame periods),
+not an RFC-given guarantee** (§17 gate 4).
+
+### 14.1 Frame-aligned GF(256) RLC (the built scheme, `fec.scheme="rlc256"`)
+The scheme selected for the `frame-shm` path (§5.1a). The **codec and wire form
+are pinned here and implemented**; whether to *enable* it and at what **rate**
+stays bench-gated on the §17 gate-2 ρ measurement (still pending) — the rate is
+config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
+
+- **Per-frame block coding** (not sliding-window): each frame is an independent
+  FEC block. `k` source symbols (§5.1a) + `r` repair symbols; every symbol is
+  `s` bytes for the coding (last source symbol zero-padded to `s`, padding never
+  on the wire).
+- **Systematic GF(256) RLC:** source symbols transmitted unmodified (zero encode
+  cost on the no-loss path). Each repair symbol is a GF(256) linear combination
+  `repair[j] = Σ_i c[j][i]·source[i]`; the coefficient vector `c[j][*]` is
+  generated deterministically from `(block_id, repair_idx)` so both ends
+  reconstruct it without transmitting coefficients.
+- **RX decode:** with all `k` source symbols → deliver by concatenation, no
+  decode. With ≥ `k` total symbols (any source/repair mix) → GF(256) Gaussian
+  elimination recovers the missing source symbols. With < `k` after the block
+  deadline / on supersession → frame lost (§6.2), no partial delivery.
+- **Emission order:** all `k` source symbols first (source-first delivers the
+  no-loss case without any FEC decode), `END_OF_BLOCK` on the last source
+  symbol, then the `r` repair symbols (same `block_id`).
+- **Adaptive per-frame policy** (rates provisional, gate-2-derived):
+
+  | condition | repair count | rationale |
+  |---|---|---|
+  | `k ≤ fec.min_k` (seed 3) | `r = 0` (ARQ-only) | at k=3 one repair = 33% overhead; NACK→RETRANSMIT recovers within deadline (§17 gate 3). |
+  | P-frame, `k > min_k` | `r = ceil(k · p_rate)`, seed `p_rate` 0.10 | P-frames are expendable (supersession §6.2); light parity for the short burst diversity misses. |
+  | IDR frame | `r = ceil(k · i_rate)`, seed `i_rate` 0.25 | IDR loss is catastrophic (whole GOP until next IDR); heavier parity justified. |
+
+- **Priority:** a frame's repair symbols are that frame's **live data**, emitted
+  immediately after its source symbols at the same live priority (§5.3), *not*
+  demoted to retransmit priority.
 
 ---
 
@@ -1071,7 +1195,12 @@ scheme's recoverable count. **Deterministic-latency is a *target to validate*
 
 ### 15.1 Binding model
 - Pools per node: **≤1 shm** (in XOR out), **≤1 unix socket** (in XOR out),
-  **≤4 UDP** (each independently in or out). **v0 = UDP only** (shm/unix are v1).
+  **≤4 UDP** (each independently in or out). UDP and the **`frame-shm`** shm
+  kind (§15.4) are live; the unix socket remains v1-reserved.
+- The `frame-shm` binding counts against the **shm pool (≤1)**, not the ≤4-UDP
+  pool. `bind.kind:"frame-shm"` + `bind.name:"<ring>"` (POSIX SHM object). An
+  ingress `frame-shm` routes the stream through `FrameFramer` (§5.1a); an egress
+  `frame-shm` receives whole reassembled frames (§6.3a).
 - Every `stream_id` maps to **exactly one** binding; a binding is in *xor* out,
   never both. Enforced at config load.
 - Control packets (NACK/LINK_REPORT/CSA) never touch a binding — the core consumes
@@ -1125,6 +1254,16 @@ scheme's recoverable count. **Deterministic-latency is a *target to validate*
   not recompile.
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
   stats and logs.
+- A **`frame-shm` stream** carries its own per-stream `fec` block (§14.1):
+  ```json
+  { "stream_id": 0, "stream_type": "RTP", "dir": "in",
+    "bind": { "kind": "frame-shm", "name": "venc_frame" },
+    "fec": { "scheme": "rlc256", "i_rate_permille": 250,
+             "p_rate_permille": 100, "min_k": 3 } }
+  ```
+  `scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
+  `"rlc256"` enables §14.1. Rates are integer per-mille (project convention). On
+  a `udp` stream the `fec` block is ignored (Framer path, §5.1).
 
 ### 15.3 Streaming stats (newline-delimited JSON)
 Emitted at `stats.hz` to stdout and/or the stats binding. Fields map 1:1 to the
@@ -1165,6 +1304,38 @@ the radio backend).
 `uniq`/`diversity` are the §17 gate-2 estimator inputs; the `nack_rtt_*` /
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.
+
+### 15.4 `frame-shm` binding — venc_frame_ring slot format
+The `frame-shm` binding attaches to (ingress) or creates (egress) a POSIX
+shared-memory ring produced by the waybeam encoder (`waybeam_venc`
+`venc_frame_ring`, canonical header `waybeam_venc/include/venc_frame_ring.h`).
+One slot = one whole encoded frame. waybeam-link treats a slot's payload as
+**opaque** (§1 "RTP is opaque on the wire"): it fragments/reassembles the bytes
+and reads only the 8-byte metadata prefix.
+
+**Ring:** POSIX SHM object `/<bind.name>` (default `venc_frame`). Producer-owned
+(creates `O_EXCL`, `shm_unlink`s stale + on teardown). SPSC (single producer,
+single consumer), lock-free, futex consumer-wake. Header magic `0x5646524D`
+("VFRM"), version 1; default geometry 16 slots × 512 KB (~8 MB). Free-running
+`write_idx`/`read_idx`; on a full ring the producer **drops and keeps running**
+(never blocks). All fields native-endian (same-host only).
+
+**Slot payload** = 8-byte `VencFrameMeta` prefix + Annex-B frame bytes (NAL start
+codes preserved):
+
+| off | size | field | notes |
+|---|---|---|---|
+| 0 | 4 | `pts` | u32; encoder capture timestamp (SDK units), truncated |
+| 4 | 1 | `codec` | u8; `0x01` = H.265 (only value emitted) |
+| 5 | 1 | `flags` | u8; bit 0 = IDR frame; other bits reserved 0 |
+| 6 | 2 | `reserved` | u16; must be 0 |
+| 8 | N | frame | raw Annex-B (start codes + NAL units) |
+
+The whole `[VencFrameMeta][Annex-B]` blob is the FrameFramer source-blob (§5.1a);
+on egress (§6.3a) the reassembled blob is written back byte-identical. The
+metadata (`pts`, `codec`, IDR `flags`) therefore rides TX→RX transparently inside
+the opaque payload — no DATA-header change, no re-derivation. FrameFramer reads
+`flags` bit 0 for §4.1 ARQ; nothing else parses the blob.
 
 ---
 
