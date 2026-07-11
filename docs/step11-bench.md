@@ -3,8 +3,10 @@
 Step 11 (`docs/build-order.md` §19 step 11): "Field bring-up; run gates 1–4. FEC
 (§14) only if gate 2's P95 says so," plus the Pass 8 bench slots (§3.0 smoke,
 uplink HW-ACK A/B, TX-wedge detector). Gates are defined in PROTOCOL.md §17;
-`docs/review-log.md` Pass 9 (CSA MAC) and Pass 10 (gate-3 estimator) are the two
-most recent spec rulings feeding this bench. All numbers below are
+`docs/review-log.md` Passes 9–12 (CSA MAC, gate-3 estimator, §9.10 wedge
+watchdog, §3.0 unicast returns) are the spec rulings feeding this bench — the
+machinery for the last two landed after the first bench session (§4.4/§4.5
+status notes). All numbers below are
 **session-verified 2026-07-11 on the x86 dev bench** — not simulated, not
 projected.
 
@@ -264,23 +266,26 @@ A/B needs a clean re-run before it's a real gate-4 number (§4.2).
 
 ## 3. PR stack (merge order matters — do not reorder)
 
-1. **`fix/step11-rx-fcs-strip`** (base `main`) — FCS-strip fix (§3.0) + §7.2
+**RESOLVED 2026-07-11**: the full stack landed on `main` in order on the
+operator's word — PR #9 (`fix/step11-rx-fcs-strip`), PR #10
+(`impl/step11-gate3-rtt`, rebased + retargeted after #9), PR #11
+(`docs/step11-wrapup`, rebased + retargeted after #10). What each carried,
+for the record:
+
+1. **`fix/step11-rx-fcs-strip`** — FCS-strip fix (§3.0) + §7.2
    window counters (gate-4 observables) + gate-2 observables/knob/tool
    (`uniq`/`diversity` stats, `air.rx_drop_permille`, `tools/gate2_rho.py`).
-   **OPEN, awaiting operator merge word.** Do not merge without it.
-2. **`impl/step11-gate3-rtt`** (base = `fix/step11-rx-fcs-strip`'s branch) —
+2. **`impl/step11-gate3-rtt`** —
    Pass 10 spec ruling (§17 gate-3 two-anchor estimator, §15.3 schema) +
    `nack_rtt_*`/`arq_rec_*` histogram instrumentation + `tools/gate3_rtt.py` +
-   `tools/rtp_feed.py`. **Stacked**: once #1 squash-merges into `main`,
-   **rebase this branch onto `main` and retarget its PR base to `main`** —
-   never merge it into the (now-deleted) stack base branch.
-3. **`docs/step11-wrapup`** (base = `impl/step11-gate3-rtt`'s branch, current
-   branch) — this document + `README.md` bench summary + `CLAUDE.md`
-   bring-up notes. Same rebase-and-retarget rule applies once #2 merges.
+   `tools/rtp_feed.py`.
+3. **`docs/step11-wrapup`** — this document + `README.md` bench summary +
+   `CLAUDE.md` bring-up notes.
 
-Squash-merge each only on the operator's explicit word (`CLAUDE.md` "The
-law"). Never merge a stacked PR into its stack-mate's branch after that
-branch has been squash-merged away — retarget to `main` first.
+The standing rule for any future stack: squash-merge each only on the
+operator's explicit word (`CLAUDE.md` "The law"), and never merge a stacked
+PR into its stack-mate's branch after that branch has been squash-merged
+away — rebase onto `main` and retarget first.
 
 ---
 
@@ -357,6 +362,15 @@ seeds (150 ms / 500 ms) need raising.
 
 ### 4.4 Uplink HW-ACK hybrid A/B
 
+**STATUS 2026-07-11: groundwork LANDED** (spec Pass 12 + implementation,
+`impl/step11-wedge-hwack`): §3.0 pins the unicast QoS-Data return shape;
+`return.unicast` (ground) sends NACK/LINK_REPORT unicast to the target's
+last-heard SA with `unicast_sent`/`unicast_fallback` in the stats return
+block; `air.ack_responder` (craft) arms the TX adapter's hardware ACK
+responder with its own SA; the RX filter accepts both shapes (Retry bit
+masked) so the halves deploy independently. **Remaining: the on-air A/B
+measurement itself** — the method below, flipping only these two knobs.
+
 **Why:** Pass 8 adopted a bench slot (not a redesign) to test whether arming
 devourer's `SetAckResponder` on the craft — so ground→craft returns
 (LINK_REPORT/NACK) become SIFS-timed hardware-ACKed unicast QoS-Data — beats
@@ -376,6 +390,14 @@ non-zero delivery rate past today's saturation point, without regressing
 downlink video airtime.
 
 ### 4.5 TX-wedge detector redesign
+
+**STATUS 2026-07-11: detector LANDED** (spec Pass 11 + implementation,
+`impl/step11-wedge-hwack`): §9.10 pins the zero-reports-over-window
+trigger; `io/include/wblink/txwedge.h` implements it (knobs
+`air.wedge_window_ms`/`air.wedge_min_submits`, seeds 1000/8), both mode
+loops run it and surface `tx_wedged` per adapter + a stderr transition
+line. **Remaining: the live validation** — the method below (silent
+through a healthy sweep, fires within one window of an induced wedge).
 
 **Why:** §2 incidental (1) — the current design's implicit assumption (a
 report-count deficit signals a wedge) is wrong; reports legitimately drop to
@@ -410,7 +432,5 @@ produces a corrected per-chip qdb→dB slope to feed back into
 
 ### 4.7 Merge hygiene
 
-Land the PR stack in §3, in order, each only on the operator's explicit word.
-Rebase-and-retarget each stacked branch onto `main` immediately after its
-predecessor squash-merges — do not let a branch sit stacked on a
-now-deleted base.
+**DONE 2026-07-11** — the §3 stack landed in order (see §3). The
+rebase-and-retarget rule stands for any future stack.

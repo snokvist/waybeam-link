@@ -125,6 +125,49 @@ struct RadioAir::Impl {
     std::condition_variable cv;
     std::deque<RxFrame> queue;
 
+    // §3.0 Pass 12: last-heard SA per originator (RX threads write, the
+    // main-thread inject_return reads). Tiny linear table — the fleet has
+    // a handful of originators at most.
+    struct SaEntry {
+        uint16_t orig;
+        uint8_t sa[6];
+    };
+    std::mutex sa_mu;
+    std::vector<SaEntry> sa_latch;
+    // Main-thread unicast-return counters (§15.3).
+    uint64_t ret_unicast_sent = 0;
+    uint64_t ret_unicast_fallback = 0;
+
+    void latch_sa(const Dot11Rx& d) {
+        SaEntry e;
+        e.orig = d.originator;
+        e.sa[0] = kWbSaPrefix0;
+        e.sa[1] = kWbSaPrefix1;
+        e.sa[2] = d.net_id;
+        e.sa[3] = static_cast<uint8_t>(d.originator >> 8);
+        e.sa[4] = static_cast<uint8_t>(d.originator & 0xff);
+        e.sa[5] = d.adapter_idx;
+        std::lock_guard<std::mutex> lk(sa_mu);
+        for (SaEntry& s : sa_latch) {
+            if (s.orig == e.orig) {
+                std::memcpy(s.sa, e.sa, 6);
+                return;
+            }
+        }
+        sa_latch.push_back(e);
+    }
+
+    bool lookup_sa(uint16_t orig, uint8_t out[6]) {
+        std::lock_guard<std::mutex> lk(sa_mu);
+        for (const SaEntry& s : sa_latch) {
+            if (s.orig == orig) {
+                std::memcpy(out, s.sa, 6);
+                return true;
+            }
+        }
+        return false;
+    }
+
     ~Impl() {
         // Stop loops first, then join, then power the chips down and release
         // USB — the ordering devourer's demos use. A join can block while a
@@ -206,6 +249,11 @@ struct RadioAir::Impl {
             a.rssi_last.store(rssi, std::memory_order_relaxed);
         }
         a.rx_frames.fetch_add(1, std::memory_order_relaxed);
+        // Pass 12: remember the sender's exact SA (adapter-idx byte and
+        // all) so unicast returns match its armed ACK-responder MACID.
+        if (cfg.unicast_returns) {
+            latch_sa(*d);
+        }
         RxFrame f;
         f.adapter = adapter_id;
         f.rssi = rssi;
@@ -361,6 +409,30 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
             }
         });
     }
+    // §3.0 Pass 12 (craft half): arm the TX adapter's hardware ACK
+    // responder with its own SA — the exact addr1 the ground's unicast
+    // returns will carry. Opt-in: this makes a passive monitor transmit.
+    if (cfg.ack_responder) {
+        Impl::Adapter& tx = *im.adapters[im.tx_idx];
+        devourer::MacAddr mac;
+        mac.bytes = {kWbSaPrefix0,
+                     kWbSaPrefix1,
+                     cfg.stamp_net_id,
+                     static_cast<uint8_t>(cfg.originator >> 8),
+                     static_cast<uint8_t>(cfg.originator & 0xff),
+                     static_cast<uint8_t>(im.tx_idx)};
+        if (tx.dev->SetAckResponder(mac)) {
+            std::fprintf(stderr,
+                         "radio: ack responder armed on \"%s\" "
+                         "(56:42:%02x:%02x:%02x:%02x)\n",
+                         tx.name.c_str(), mac.bytes[2], mac.bytes[3],
+                         mac.bytes[4], mac.bytes[5]);
+        } else {
+            std::fprintf(stderr,
+                         "radio: ack responder unsupported on \"%s\"\n",
+                         tx.name.c_str());
+        }
+    }
     return Result<RadioAir>::ok(std::move(air));
 }
 
@@ -377,6 +449,38 @@ size_t RadioAir::inject(const uint8_t* frame, size_t len) {
     }
     ++tx.tx_failed;
     return 0;
+}
+
+size_t RadioAir::inject_return(uint16_t dest_originator, const uint8_t* frame,
+                               size_t len) {
+    Impl& im = *impl_;
+    uint8_t sa[6];
+    if (!im.cfg.unicast_returns) {
+        return inject(frame, len);
+    }
+    if (!im.lookup_sa(dest_originator, sa)) {
+        ++im.ret_unicast_fallback;  // no SA heard yet — broadcast (§3.0)
+        return inject(frame, len);
+    }
+    Impl::Adapter& tx = *im.adapters[im.tx_idx];
+    im.tx_buf.resize(kDot11TxUnicastPrefixLen + len);
+    dot11_tx_prefix_unicast(im.tx_buf.data(), sa, im.cfg.stamp_net_id,
+                            im.cfg.originator,
+                            static_cast<uint8_t>(im.tx_idx), im.seq++);
+    std::memcpy(im.tx_buf.data() + kDot11TxUnicastPrefixLen, frame, len);
+    ++tx.tx_submitted;
+    ++im.ret_unicast_sent;
+    if (tx.dev->send_packet(im.tx_buf.data(), im.tx_buf.size())) {
+        return 1;
+    }
+    ++tx.tx_failed;
+    return 0;
+}
+
+void RadioAir::return_counters(uint64_t& unicast_sent,
+                               uint64_t& unicast_fallback) const {
+    unicast_sent = impl_->ret_unicast_sent;
+    unicast_fallback = impl_->ret_unicast_fallback;
 }
 
 int RadioAir::poll_once(int timeout_ms, const RxCb& cb) {
@@ -465,6 +569,12 @@ std::optional<uint64_t> RadioAir::read_tsf(size_t adapter) {
     } catch (const std::exception&) {
         return std::nullopt;  // control transfer raced the RX bulk load
     }
+}
+
+void RadioAir::tx_report_counters(uint64_t& submitted,
+                                  uint64_t& reports) const {
+    submitted = impl_->adapters[impl_->tx_idx]->tx_submitted;
+    reports = impl_->tx_reports.load(std::memory_order_relaxed);
 }
 
 RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {

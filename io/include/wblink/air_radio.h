@@ -35,6 +35,12 @@ struct RadioAirCfg {
     // Bench-only synthetic RX loss (air.rx_drop_permille): drop this share
     // of filter-passed frames, independently per adapter. 0 = off.
     uint16_t rx_drop_permille = 0;
+    // §3.0 Pass 12 hardware-ACK hybrid (gate-4 A/B; both default off):
+    // arm the TX adapter's ACK responder with its own SA (craft half) /
+    // send returns as unicast QoS-Data to the target's latched SA (ground
+    // half; unlatched targets fall back to broadcast, counted).
+    bool ack_responder = false;
+    bool unicast_returns = false;
 };
 
 class RadioAir {
@@ -50,6 +56,16 @@ class RadioAir {
     // Send one wire packet on the TX adapter (§3.0 encapsulation added
     // here). Returns 1 when submitted, 0 on failure.
     size_t inject(const uint8_t* frame, size_t len);
+
+    // Send one return (NACK/LINK_REPORT) toward dest_originator. With
+    // unicast_returns on and an SA latched for the target, this goes out as
+    // the §3.0 Pass-12 hardware-ACKed unicast QoS-Data; otherwise it is a
+    // plain broadcast inject() (fallback counted).
+    size_t inject_return(uint16_t dest_originator, const uint8_t* frame,
+                         size_t len);
+    // Cumulative unicast-return counters for §15.3.
+    void return_counters(uint64_t& unicast_sent,
+                         uint64_t& unicast_fallback) const;
 
     // Deliver queued RX frames (§3.0 payloads, header stripped); blocks up
     // to timeout_ms when the queue is empty. Returns frames delivered.
@@ -90,6 +106,10 @@ class RadioAir {
         uint64_t tx_report_fails = 0;
     };
     AdapterCounters counters(size_t adapter) const;
+
+    // TX adapter's cumulative (tx_submitted, tx_reports) for the §9.10
+    // wedge watchdog — cheap per-iteration accessor, no string copies.
+    void tx_report_counters(uint64_t& submitted, uint64_t& reports) const;
 
   private:
     RadioAir();

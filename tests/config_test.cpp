@@ -148,18 +148,36 @@ int main() {
     {
         auto r = load_config_json(R"({
           "node": {"originator": 3, "role": "rx", "net_id": 5},
-          "air": {"kind": "radio"},
+          "air": {"kind": "radio", "wedge_window_ms": 500,
+                  "wedge_min_submits": 4, "ack_responder": true},
           "policy": {"return": {"quiet_gap": true, "guard_us": 400,
-                                "return_window_us": 1500}}})");
+                                "return_window_us": 1500,
+                                "unicast": true}}})");
         CHECK(bool(r));
         if (r) {
             const Config& c = *r.value;
             CHECK(c.node.net_id.has_value());
             CHECK_EQ_U(*c.node.net_id, 5);
             CHECK(c.air.kind == AirCfg::Kind::kRadio);
+            CHECK_EQ_U(c.air.wedge_window_ms, 500);
+            CHECK_EQ_U(c.air.wedge_min_submits, 4);
+            CHECK(c.air.ack_responder);
             CHECK(c.policy.ret.quiet_gap);
             CHECK_EQ_U(c.policy.ret.guard_us, 400);
             CHECK_EQ_U(c.policy.ret.return_window_us, 1500);
+            CHECK(c.policy.ret.unicast);
+        }
+    }
+    // §9.10 wedge knobs + Pass-12 hybrid halves default off / to seeds.
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK_EQ_U(r.value->air.wedge_window_ms, 1000);
+            CHECK_EQ_U(r.value->air.wedge_min_submits, 8);
+            CHECK(!r.value->air.ack_responder);
+            CHECK(!r.value->policy.ret.unicast);
         }
     }
 

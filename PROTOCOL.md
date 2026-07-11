@@ -162,6 +162,41 @@ validation (§3.1). `net_id` is node-local config, stamped by every TX
 (default `0`); it exists so co-located waybeam-link systems can partition
 their RX paths at L2 — it is **not** access control (§13 applies).
 
+**Hardware-ACKed unicast return (Pass 12; the §7.2 hybrid's wire shape —
+bench knob, both halves default off).** When the ground enables
+`return.unicast` and the craft arms `air.ack_responder`, ground→craft
+returns (**NACK / LINK_REPORT only** — CSA campaign copies stay broadcast,
+§11) are injected as **QoS-Data** instead of the pinned broadcast frame:
+
+| field | value |
+|---|---|
+| Frame Control | `0x88 0x00` — QoS-Data, ToDS=0 FromDS=0 |
+| addr1 (RA) | the target craft's §3.0 SA **as last heard** (latched per originator from accepted frames — exact match with the MACID the craft's ACK responder armed, adapter-idx byte included) |
+| addr2 (SA) / addr3 | own §3.0 SA / `"VBLK"` BSSID, unchanged |
+| QoS Control | `0x00 0x00` — TID 0, Normal ACK policy |
+| radiotap | the same rate-less prefix with `TX_FLAGS = 0` (the frame *expects* an ACK) |
+
+The injecting chip hardware-retransmits an unACKed unicast frame (devourer
+descriptor retry limit 12, Jaguar1 and Jaguar3 alike) — SIFS-timed hardware
+ARQ on the return path for zero extra return-path bytes. Pinned
+consequences:
+
+- **Receivers always accept both shapes.** The RX filter additionally
+  accepts QoS-Data whose FC1 is clear **except the Retry bit** (hardware
+  retransmissions set it); the frame body then starts at offset 26 (after
+  the QoS Control field). The knobs gate only what a node *sends/arms*, so
+  the A/B halves deploy independently.
+- A lost ACK can deliver the same return twice; NACK/LINK_REPORT handling
+  is already idempotent (§5.3 per-seq hold-down, §9.1 monotonic
+  `report_epoch`).
+- No latched SA for the target yet → that return falls back to broadcast
+  (counted, §15.3 `unicast_fallback`).
+- Arming the responder turns a passive monitor into an ACK transmitter —
+  acceptable on the *craft* (it transmits anyway); ground diversity
+  adapters never arm.
+- Downlink DATA stays broadcast unconditionally (Pass 8 rejected hardware
+  ARQ for the video path; the §1 no-MAC-ARQ invariant stands there).
+
 ### 3.1 Common prefix (all packet types) — 11 bytes
 
 | off | size | field | notes |
@@ -534,6 +569,14 @@ best-effort. This optimisation, its window fit, and whether the damped adaptive
 loop (§9) holds a stable operating point rather than oscillating at the floor, are
 **resolved empirically at §17 gate 4** — not designed further on paper.
 
+**Hardware-ACK hybrid (Pass 12; gate-4 A/B slot from Pass 8):** the return
+path — §7.1 opportunistic or §7.2 paced alike — can be switched to
+hardware-ACKed unicast: the craft arms its chip's ACK responder
+(`air.ack_responder`), the ground sends returns as unicast QoS-Data
+(`return.unicast`) and gets SIFS-timed hardware retries on them. Wire shape
+and consequences are pinned in §3.0. Both knobs default off; the A/B
+against plain broadcast returns is a §17 bench slot.
+
 ### 7.3 Cadence
 - **NACK:** event-driven on loss declaration, coalesced to one bitmap per return
   window, rate-limited by the global per-seq hold-down (§5.3).
@@ -718,6 +761,36 @@ The venc output-queue fill is a local TX signal, not an RX report. It **suppress
 reactive-demote (rule 1)** (don't blame RF for encoder overshoot), does **not**
 suppress RSSI rules (2,3), and after `pressure_escape_s` climbs to drain the ring
 (rule 4).
+
+### 9.10 TX-wedge watchdog (CCX-report liveness)
+
+The §6.5 watchdog is RX-side; this is its TX-side sibling, run by any node
+whose TX adapter is a radio (§3.0). The failure mode is real and observed:
+the RTL88x2 USB TX wedge — bulk-OUT keeps accepting frames (`tx_submitted`
+advances) while nothing airs, and only a physical re-plug recovers the chip.
+
+**Trigger — report absence, never report deficit (Pass 11).** The per-frame
+CCX TX-status reports (Pass 8) are lossy under load *by design*: the step-11
+bench measured healthy report return rates of 100% at ≤500 pps falling to
+~25% at 4500 pps, so any deficit threshold misfires exactly when the link is
+busiest. A healthy chip returned *some* reports at every measured load. The
+detector therefore evaluates one verdict per `wedge_window_ms` (seed 1000)
+from the `(tx_submitted, tx_reports)` counter deltas:
+
+- `Δtx_reports > 0` → not wedged (any report proves the TX path alive);
+- `Δtx_reports == 0` and `Δtx_submitted >= wedge_min_submits` (seed 8) →
+  **wedged**;
+- too few submissions to judge → hold the previous verdict (an idle TX is
+  not evidence either way).
+
+**Action (v1) — observability only.** The verdict is surfaced per adapter as
+`tx_wedged` (§15.3) and logged on every transition; it deliberately does NOT
+actuate §9. A craft TX wedge stops video and returns together, so the §9.8
+`report_epoch` watchdog already fails the selector toward the floor, and
+recovery requires a physical re-plug regardless. Coupling the detector into
+adaptation (or an automatic USB reset) is deferred until the detector itself
+passes bench validation: silent across a healthy 500–4500 pps sweep, fires
+within one window of an induced wedge (§17 knob table).
 
 ---
 
@@ -1018,13 +1091,16 @@ scheme's recoverable count. **Deterministic-latency is a *target to validate*
     "arq":    { "airtime_frac": 0.15, "attempt_cap": 3, "holddown_ms": 20,
                 "fwd_clamp_blocks": 4 },
     "fec":    { "scheme": "none", "overhead_frac": 0.0 },
-    "return": { "guard_us": 300, "return_window_us": 2000 },
+    "return": { "guard_us": 300, "return_window_us": 2000,
+                "unicast": false },
     "csa":    { "psk": "<operator-provisioned; craft+ground only>",
                 "settle_s": 3.0, "verify_timeout_ms": 150,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
                 "rendezvous_timeout_s": 5, "home_chan": 5745,
                 "channel_allowlist": [5745, 5805, 5825] }
   },
+  "air":   { "kind": "radio", "ack_responder": false,
+             "wedge_window_ms": 1000, "wedge_min_submits": 8 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } }
 }
 ```
@@ -1045,7 +1121,9 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
   "adapters": [ { "name": "wlan0", "rx": 10234, "dup": 812,
     "rssi_best": -58, "rssi_mean": -63, "snr": 22, "noise": -85,
     "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
-    "adapter_stalled": false } ],
+    "drop": 0, "tsf_fallback": 0,
+    "tx_reports": 531, "tx_report_fails": 0,
+    "adapter_stalled": false, "tx_wedged": false } ],
   "streams": [ { "stream_id": 0, "type": "RTP",
     "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
     "loss_prediversity_milli": 41, "loss_postdiv_prearq_milli": 6,
@@ -1057,7 +1135,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "resends_sent": 230, "double_send_suppressed": 5,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "return": { "reports_expected": 10, "reports_received": 9,
-    "return_window_hits": 7, "return_window_misses": 2 },
+    "return_window_hits": 7, "return_window_misses": 2,
+    "unicast_sent": 0, "unicast_fallback": 0 },
   "link": { "target_originator": 9, "target_session": 183726,
     "profile": 4, "mcs": 4, "tx_power_qdb": 1800,
     "report_epoch": 1822, "report_age_ms": 40,
@@ -1067,6 +1146,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
 §7.2 optimisation's health directly, and `adapter_stalled` + the
 `loss_prediversity` vs `loss_postdiv_prearq` pair expose phantom diversity and the
 ρ decorrelation gauge — the two field-failure modes the design most fears.
+`tx_wedged` is the §9.10 CCX-liveness verdict (TX adapter only, meaningful on
+the radio backend).
 `uniq`/`diversity` are the §17 gate-2 estimator inputs; the `nack_rtt_*` /
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.
@@ -1116,6 +1197,7 @@ the §7.2 quiet-gap or §11 TSF anchoring — those need real radios (§17).
 | deadline budget (per class) | glass-to-glass minus pipeline | measured pipeline delay |
 | `guard_us` / `return_window_us` | §7.2 quiet gap | craft TX→RX settle + ground turnaround + return airtime |
 | EWMA α, `mcs_settle_s` | §9 smoothing/settle | no-FEC loss spikiness |
+| `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
 
 **Bench gates (must pass before the dependent design is trusted):**
 
