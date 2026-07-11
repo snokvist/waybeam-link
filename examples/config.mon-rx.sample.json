@@ -1,0 +1,56 @@
+{
+  "_comment": "kernel-monitor radio, GROUND side (§3.0): N diversity RX ifaces + one designated uplink TX (role tx) for NACK/LINK_REPORT returns. NO devourer — AF_PACKET over Linux monitor ifaces; RSSI/TSF come from RX radiotap. Bring each iface up FIRST (scripts/mon-up.sh <ifname> 161 HT20). Delivered RTP goes to the local decoder on :5600.",
+  "node": {
+    "originator": 9,
+    "role": "rx",
+    "net_id": 0
+  },
+  "profile_table": "profiles/table.example.json",
+  "adapters": [
+    {
+      "name": "uplink",
+      "ifname": "wlan0",
+      "role": "tx",
+      "channel": 5805,
+      "bw": 20
+    },
+    {
+      "name": "div0",
+      "ifname": "wlan1",
+      "role": "rx",
+      "channel": 5805,
+      "bw": 20
+    },
+    {
+      "name": "div1",
+      "ifname": "wlan2",
+      "role": "rx",
+      "channel": 5805,
+      "bw": 20
+    }
+  ],
+  "streams": [
+    {
+      "stream_id": 0,
+      "stream_type": "RTP",
+      "dir": "out",
+      "bind": {
+        "kind": "udp",
+        "send": "127.0.0.1:5600"
+      }
+    }
+  ],
+  "air": {
+    "kind": "kernel-monitor"
+  },
+  "policy": {
+    "return": {
+      "quiet_gap": true,
+      "guard_us": 300,
+      "return_window_us": 2000
+    }
+  },
+  "stats": {
+    "hz": 1
+  }
+}

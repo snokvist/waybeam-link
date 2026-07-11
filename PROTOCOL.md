@@ -155,6 +155,20 @@ MPDU **with the 4-byte FCS appended** (devourer's monitor bring-up keeps
 at the driver boundary): receivers strip the trailer before the length-exact
 §3.1 parse. Bench-verified on 8812CU (step 11).
 
+**Backend-agnostic frame; two rate-carrying mechanisms (Pass 13).** The 802.11
+frame, SA filter, and FCS handling above are identical across air backends —
+only *how the PHY rate is selected* differs. The **devourer** backend uses the
+rate-less `TX_FLAGS`-only radiotap prefix and commits the rate out-of-band via
+`SetTxMode` (§9.5/§10.4). The **kernel-monitor** backend (`air.kind
+"kernel-monitor"`: AF_PACKET raw injection through the Linux driver in monitor
+mode, no devourer) has no such out-of-band control, so it carries the rate in a
+**per-packet radiotap MCS field** (13-byte HT radiotap: `TX_FLAGS | MCS`,
+`known = BW|MCS|GI|FEC|STBC`). RX radiotap is parsed for `DBM_ANTSIGNAL` (RSSI)
+and `TSFT` (the §7.2 per-adapter TSF); the monitor netdev exposes no
+per-adapter TSF *read*, so the craft/ground fall back to host time (§7.2). The
+on-air bytes a receiver sees are unchanged — either backend interoperates with
+either on the RX side.
+
 **RX filter** (in priority order, cheapest first): type/subtype == Data &&
 `SA[0..1] == 56:42` (&& `SA[2] == net_id` **when the node configures one**;
 an unconfigured node accepts any `net_id`) && payload `magic` + full header

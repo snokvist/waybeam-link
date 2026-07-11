@@ -137,6 +137,7 @@ Result<Config> load_config_json(const std::string& json_text) {
                 return Result<Config>::fail("adapters: duplicate name \"" + ac.name + "\"");
             }
             ac.bus = a.value("bus", std::string{});
+            ac.ifname = a.value("ifname", std::string{});
             auto arole = parse_role(a.at("role").get<std::string>(),
                                     ("adapter " + ac.name).c_str());
             if (!arole) return Result<Config>::fail(arole.error);
@@ -392,6 +393,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 a.value("ack_responder", cfg.air.ack_responder);
             if (kind == "radio") {
                 cfg.air.kind = AirCfg::Kind::kRadio;
+            } else if (kind == "kernel-monitor") {
+                cfg.air.kind = AirCfg::Kind::kMonitor;
             } else if (kind == "udp") {
                 cfg.air.kind = AirCfg::Kind::kUdp;
                 for (const json& t : a.value("tx", json::array())) {
@@ -402,7 +405,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 }
             } else {
                 return Result<Config>::fail(
-                    "air: kind \"" + kind + "\" unknown (udp | radio)");
+                    "air: kind \"" + kind +
+                    "\" unknown (udp | radio | kernel-monitor)");
             }
         }
 

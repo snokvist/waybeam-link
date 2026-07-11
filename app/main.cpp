@@ -35,6 +35,7 @@
 #include "wblink/table.h"
 #include "wblink/txwedge.h"
 #include "wblink/venc.h"
+#include "wblink/air_mon.h"
 #if WBLINK_RADIO
 #include "wblink/air_radio.h"
 #endif
@@ -190,6 +191,7 @@ QuietGapPolicy quietgap_policy(const Config& cfg) {
 
 struct AirBackend {
     std::optional<UdpAir> udp;
+    std::optional<MonAir> mon;
 #if WBLINK_RADIO
     std::optional<RadioAir> radio;
 #endif
@@ -202,6 +204,20 @@ struct AirBackend {
                 return Result<AirBackend>::fail(a.error);
             }
             b.udp.emplace(std::move(*a.value));
+            return Result<AirBackend>::ok(std::move(b));
+        }
+        if (cfg.air.kind == AirCfg::Kind::kMonitor) {
+            MonAirCfg mc;
+            mc.adapters = cfg.adapters;
+            mc.stamp_net_id = cfg.node.net_id.value_or(0);
+            mc.filter_net_id = cfg.node.net_id;
+            mc.originator = cfg.node.originator;
+            mc.rx_drop_permille = cfg.air.rx_drop_permille;
+            auto a = MonAir::create(mc);
+            if (!a) {
+                return Result<AirBackend>::fail(a.error);
+            }
+            b.mon.emplace(std::move(*a.value));
             return Result<AirBackend>::ok(std::move(b));
         }
         if (cfg.air.kind == AirCfg::Kind::kRadio) {
@@ -232,6 +248,9 @@ struct AirBackend {
     }
 
     size_t inject(const uint8_t* f, size_t n) {
+        if (mon) {
+            return mon->inject(f, n);
+        }
 #if WBLINK_RADIO
         if (radio) {
             return radio->inject(f, n);
@@ -244,6 +263,9 @@ struct AirBackend {
     // can address them as §3.0 unicast when return.unicast is on; the udp
     // dev backend has no L2 addressing and ignores the target.
     size_t inject_return(uint16_t target, const uint8_t* f, size_t n) {
+        if (mon) {
+            return mon->inject_return(target, f, n);
+        }
 #if WBLINK_RADIO
         if (radio) {
             return radio->inject_return(target, f, n);
@@ -254,6 +276,9 @@ struct AirBackend {
     }
 
     int poll_once(int timeout_ms, const UdpAir::RxCb& cb) {
+        if (mon) {
+            return mon->poll_once(timeout_ms, cb);
+        }
 #if WBLINK_RADIO
         if (radio) {
             return radio->poll_once(timeout_ms, cb);
@@ -263,6 +288,9 @@ struct AirBackend {
     }
 
     size_t rx_adapters() const {
+        if (mon) {
+            return mon->rx_adapters();
+        }
 #if WBLINK_RADIO
         if (radio) {
             return radio->rx_adapters();
@@ -273,6 +301,10 @@ struct AirBackend {
 
     // Radio-only surfaces (no-ops / nullopt on the udp dev backend).
     void set_tx_mode(uint8_t mcs, bool sgi) {
+        if (mon) {
+            mon->set_tx_mode(mcs, sgi);
+            return;
+        }
 #if WBLINK_RADIO
         if (radio) {
             radio->set_tx_mode(mcs, sgi);
@@ -283,6 +315,10 @@ struct AirBackend {
 #endif
     }
     void set_power_qdb(size_t adapter, int32_t qdb) {
+        if (mon) {
+            mon->set_power_qdb(adapter, qdb);
+            return;
+        }
 #if WBLINK_RADIO
         if (radio) {
             radio->set_power_qdb(adapter, qdb);
@@ -293,6 +329,9 @@ struct AirBackend {
 #endif
     }
     std::optional<uint64_t> read_tsf(uint8_t adapter) {
+        if (mon) {
+            return mon->read_tsf(adapter);
+        }
 #if WBLINK_RADIO
         if (radio) {
             return radio->read_tsf(adapter);
@@ -307,6 +346,13 @@ struct AirBackend {
     // udp dev backend the retune is a logged intent — the CSA state machines
     // stay exercisable end-to-end without radios.
     void retune_all(uint16_t chan_mhz, uint8_t bw, bool fast) {
+        if (mon) {
+            for (size_t i = 0; i < mon->rx_adapters(); ++i) {
+                mon->retune(i, chan_mhz, bw, fast);
+                mon->reapply_tx_power(i);
+            }
+            return;
+        }
 #if WBLINK_RADIO
         if (radio) {
             for (size_t i = 0; i < radio->rx_adapters(); ++i) {
@@ -325,6 +371,9 @@ struct AirBackend {
                      chan_mhz, bw, fast ? " fast" : "");
     }
     bool is_radio() const {
+        if (mon) {
+            return true;
+        }
 #if WBLINK_RADIO
         return radio.has_value();
 #else
@@ -335,6 +384,27 @@ struct AirBackend {
     // verdict is grafted onto the TX adapter's stats entry here.
     void fill_adapter_stats(StatsSnapshot& snap, uint64_t tsf_fallbacks,
                             bool tx_wedged) const {
+        if (mon) {
+            for (size_t i = 0; i < mon->rx_adapters(); ++i) {
+                const auto c = mon->counters(i);
+                AdapterStats as;
+                as.name = c.name;
+                as.rx = c.rx_frames;
+                as.rssi_best = c.rssi_last;
+                as.rssi_mean = c.rssi_last;
+                as.tx_submitted = c.tx_submitted;
+                as.tx_failed = c.tx_failed;
+                as.drop = c.rx_dropped;
+                as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
+                // No CCX tx.report on monitor injection; wedge watchdog off.
+                as.tx_reports = 0;
+                as.tx_report_fails = 0;
+                as.tx_wedged = false;
+                snap.adapters.push_back(std::move(as));
+            }
+            (void)tx_wedged;
+            return;
+        }
 #if WBLINK_RADIO
         if (!radio) {
             return;
@@ -365,6 +435,10 @@ struct AirBackend {
 
     // §15.3 return-block unicast counters (radio backend; no-op on udp).
     void fill_return_stats(ReturnStats& ret) const {
+        if (mon) {
+            mon->return_counters(ret.unicast_sent, ret.unicast_fallback);
+            return;
+        }
 #if WBLINK_RADIO
         if (radio) {
             radio->return_counters(ret.unicast_sent, ret.unicast_fallback);

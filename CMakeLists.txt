@@ -78,6 +78,7 @@ add_library(wblink_io STATIC
     io/src/udp.cpp
     io/src/stats.cpp
     io/src/air_udp.cpp
+    io/src/air_mon.cpp
     io/src/power_file.cpp
     io/src/venc_http.cpp)
 target_include_directories(wblink_io PUBLIC io/include)

@@ -39,6 +39,10 @@ struct NodeCfg {
 struct AdapterCfg {
     std::string name;
     std::string bus;
+    // Linux monitor-mode netdev (e.g. "wlan0", "wlx84fc…") — the kernel-monitor
+    // backend (air.kind "kernel-monitor") binds AF_PACKET to it. Empty for the
+    // udp/radio backends (devourer matches on `bus`).
+    std::string ifname;
     Role role = Role::kRx;
     uint16_t channel_mhz = 0;  // center freq MHz, band-agnostic (§11.1 style)
     uint8_t bw = 20;           // 20 / 40 / 80
@@ -173,7 +177,10 @@ struct AirUdpCfg {
     std::vector<std::string> rx;  // listen sockets = virtual adapters
 };
 struct AirCfg {
-    enum class Kind : uint8_t { kNone, kUdp, kRadio };
+    // kMonitor = the kernel-driver monitor-mode backend (AF_PACKET raw inject +
+    // radiotap RX, §3.0). Like kRadio, its adapters come from the top-level
+    // adapters array (each carrying an `ifname`); it reuses rx_drop_permille.
+    enum class Kind : uint8_t { kNone, kUdp, kRadio, kMonitor };
     Kind kind = Kind::kNone;
     AirUdpCfg udp;
     // Bench-only synthetic RX loss on the radio backend: drop this many

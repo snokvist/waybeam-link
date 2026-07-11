@@ -41,14 +41,13 @@ inline constexpr uint8_t kWbSaPrefix0 = 0x56;
 inline constexpr uint8_t kWbSaPrefix1 = 0x42;
 inline constexpr uint8_t kWbBssid[6] = {0x56, 0x42, 0x4c, 0x4b, 0x00, 0x00};
 
-// Writes radiotap + the pinned 802.11 header into out (which must hold
-// kDot11TxPrefixLen bytes); the waybeam-link packet follows as the frame
-// body. seq is the injector-incremented sequence number (fragment 0).
-inline size_t dot11_tx_prefix(uint8_t* out, uint8_t net_id,
-                              uint16_t originator, uint8_t adapter_idx,
-                              uint16_t seq) {
-    std::memcpy(out, kRadiotapTx, kRadiotapTxLen);
-    uint8_t* h = out + kRadiotapTxLen;
+// Writes JUST the pinned 24-byte broadcast Data header into h (no radiotap) —
+// the single source of the §3.0 header, shared by dot11_tx_prefix (devourer
+// path, 10-byte rate-less radiotap) and the kernel-monitor backend (which
+// prepends its own per-packet MCS radiotap, see radiotap.h). seq is the
+// injector-incremented sequence number (fragment 0).
+inline void dot11_hdr24(uint8_t* h, uint8_t net_id, uint16_t originator,
+                        uint8_t adapter_idx, uint16_t seq) {
     h[0] = kDot11FrameControl0;
     h[1] = kDot11FrameControl1;
     h[2] = 0;  // duration
@@ -63,18 +62,12 @@ inline size_t dot11_tx_prefix(uint8_t* out, uint8_t net_id,
     std::memcpy(h + 16, kWbBssid, 6);  // addr3 BSSID = "VBLK" tag
     h[22] = static_cast<uint8_t>((seq << 4) & 0xff);  // seq ctl, fragment 0
     h[23] = static_cast<uint8_t>(seq >> 4);
-    return kDot11TxPrefixLen;
 }
 
-// §3.0 hardware-ACKed unicast return (Pass 12): radiotap (no NOACK) + a
-// QoS-Data header addressed to the target's latched SA. addr1's exact bytes
-// must match the MACID the target's ACK responder armed. out must hold
-// kDot11TxUnicastPrefixLen bytes.
-inline size_t dot11_tx_prefix_unicast(uint8_t* out, const uint8_t dest[6],
-                                      uint8_t net_id, uint16_t originator,
-                                      uint8_t adapter_idx, uint16_t seq) {
-    std::memcpy(out, kRadiotapTxAck, kRadiotapTxLen);
-    uint8_t* h = out + kRadiotapTxLen;
+// Writes JUST the 26-byte Pass-12 unicast QoS-Data header into h (no radiotap).
+inline void dot11_hdr_qos26(uint8_t* h, const uint8_t dest[6], uint8_t net_id,
+                            uint16_t originator, uint8_t adapter_idx,
+                            uint16_t seq) {
     h[0] = kDot11QosFrameControl0;
     h[1] = 0x00;
     h[2] = 0;  // duration
@@ -91,6 +84,28 @@ inline size_t dot11_tx_prefix_unicast(uint8_t* out, const uint8_t dest[6],
     h[23] = static_cast<uint8_t>(seq >> 4);
     h[24] = 0x00;  // QoS Control: TID 0, Normal ACK policy
     h[25] = 0x00;
+}
+
+// Writes radiotap + the pinned 802.11 header into out (which must hold
+// kDot11TxPrefixLen bytes); the waybeam-link packet follows as the frame body.
+inline size_t dot11_tx_prefix(uint8_t* out, uint8_t net_id,
+                              uint16_t originator, uint8_t adapter_idx,
+                              uint16_t seq) {
+    std::memcpy(out, kRadiotapTx, kRadiotapTxLen);
+    dot11_hdr24(out + kRadiotapTxLen, net_id, originator, adapter_idx, seq);
+    return kDot11TxPrefixLen;
+}
+
+// §3.0 hardware-ACKed unicast return (Pass 12): radiotap (no NOACK) + a
+// QoS-Data header addressed to the target's latched SA. addr1's exact bytes
+// must match the MACID the target's ACK responder armed. out must hold
+// kDot11TxUnicastPrefixLen bytes.
+inline size_t dot11_tx_prefix_unicast(uint8_t* out, const uint8_t dest[6],
+                                      uint8_t net_id, uint16_t originator,
+                                      uint8_t adapter_idx, uint16_t seq) {
+    std::memcpy(out, kRadiotapTxAck, kRadiotapTxLen);
+    dot11_hdr_qos26(out + kRadiotapTxLen, dest, net_id, originator, adapter_idx,
+                    seq);
     return kDot11TxUnicastPrefixLen;
 }
 
