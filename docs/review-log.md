@@ -263,6 +263,46 @@ auto` fixed at monitor bring-up; the 8812eu per-rate TXAGC curve owns power).
 The backend is pure POSIX → compiled unconditionally (a `WBLINK_RADIO=OFF`
 build still has a real RF path). devourer stays vendored + selectable.
 
+## Pass 14 — §14/§15.1 frame-aligned FEC plan + SHM ingress shape (2026-07-11)
+
+Planning pass — no code, no PROTOCOL.md amendment. Spec amendment will be a
+separate commit when implementation begins, per project law.
+
+Designed the full-frame SHM ingress + frame-aligned FEC pipeline
+(`docs/frame-fec-plan.md`):
+
+- **venc_frame_ring SHM format:** 8-byte metadata header (timestamp u32, codec
+  u8, flags u8 [bit 0 = IDR], reserved u16) + raw Annex B NAL data, one slot
+  per frame, 512 KB slot ceiling. waybeam produces; waybeam-link consumes.
+- **FrameFramer (core/ replacement for Framer on SHM streams):** block_id
+  assigned directly from frame count (no marker-bit inference), ARQ
+  classification from metadata IDR flag (no NAL parsing), frame fragmented into
+  k source symbols of size s = kMaxDataPayload − 6 = 1418 B.
+- **GF(256) systematic RLC per frame:** k varies per frame (22 for 30 KB
+  P-frame, 106 for 150 KB IDR); r = ceil(k * rate) repair symbols;
+  coefficients seeded deterministically from (block_id, repair_idx).
+- **Per-frame adaptive policy:** k <= fec_min_k (seed 3) -> ARQ-only (overhead
+  not justified at small k, gate-3 RTT recovers within deadline); P-frame
+  fec_p_rate seed 0.10-0.15; IDR fec_i_rate seed 0.25-0.30.
+- **Wire format:** reuses existing §14 sketch (source = normal DATA, repair =
+  DATA + FEC_REPAIR flag + 6-byte subheader). Source-first emission order.
+- **RX:** no-loss fast path (all k sources -> deliver, no decode); loss
+  recovery via Gaussian elimination when >= k total symbols; unrecoverable
+  when < k.
+- **Config shape:** `bind.kind "frame-shm"`, `fec.scheme "rlc256"`,
+  `i_rate_permille`/`p_rate_permille`/`min_k` per stream.
+- **4-step implementation sequencing:** (1) waybeam venc_frame_ring (separate
+  repo), (2) waybeam-link SHM ingress + FrameFramer source-only, (3) standalone
+  GF(256) codec, (4) FEC integration. Steps 2-4 in waybeam-link.
+
+**Spec sections to amend (when implementation begins):** §14 (concrete FEC
+scheme), §15.1 (SHM binding live), §4 (FrameFramer block model), §5.1
+(no-fragmentation invariant relaxed for SHM).
+
+**Decisions deferred to operator:** RX egress path (SHM vs RTP
+re-packetization), FEC rate seeds (pending gate-2 vehicle rho), repair symbol
+priority vs §5.3 scheduler, per-frame vs sliding-window confirmation.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
