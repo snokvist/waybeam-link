@@ -71,15 +71,17 @@ TSF-dependent gates.
     TX-report wedge detector (reports stall while `tx_submitted` advances).
 
 12. Frame-aligned FEC + SHM ingress (`docs/frame-fec-plan.md`). Four sub-steps:
-    (a) waybeam `venc_frame_ring` SHM producer (separate `waybeam_venc` repo —
-        must land first).
-    (b) waybeam-link SHM ingress + FrameFramer — source-symbol fragmentation
-        only, `fec.scheme "none"`. Validates full-frame pipeline end-to-end
-        (loopback + RF bench must match the existing RTP/UDP delivery rate).
-    (c) Standalone GF(256) RLC codec — unit-tested, ARM-benchmarked on SSC338Q.
-        Must fit within the 60 fps frame deadline minus TX airtime.
-    (d) Frame-aligned FEC integration — FrameFramer TX + RX, bench vs §17 gates
-        at the rho levels measured in gate 2.
+    (a) [DONE] waybeam `venc_frame_ring` SHM producer — `waybeam_venc`
+        `frame-shm://` output (upstream PR #99 / fork #176, v0.42.0).
+    (b) [DONE] waybeam-link SHM ingress + FrameFramer — source-symbol
+        fragmentation (`io/frame_shm.cpp`, `core/frame_framer.cpp`), plus egress
+        FrameReassembler (`core/frame_reassembler.cpp`) and app tx/rx wiring.
+    (c) [DONE] Standalone GF(256) Cauchy-RS MDS codec (`core/gf256.cpp`,
+        `core/rlc.cpp`) — unit-tested (533k+536 checks). ARM SSC338Q build
+        clean; the on-target latency bench-at-k is still TODO.
+    (d) [DONE, rates provisional] Frame-aligned FEC integrated TX+RX
+        (loopback test proves recovery); `i_rate`/`p_rate` seeds pending the
+        gate-2 ρ verdict below. Pass 15 (PR #17).
 
     **Gated on:**
     - Step 11 §4.1 real-fade gate-2 verdict (vehicle deploy) — the rho

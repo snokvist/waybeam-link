@@ -1,9 +1,22 @@
 # Frame-aligned FEC with SHM ingress — implementation plan
 
+> **STATUS: IMPLEMENTED (PR #17, review-log Pass 15).** This plan is now built.
+> The spec is pinned in PROTOCOL.md (§5.1a FrameFramer, §6.3a reassembly,
+> §14.1 GF(256) Cauchy-RS MDS, §15.4 slot format) and the code is in
+> `core/{gf256,rlc,frame_framer,frame_reassembler}.cpp`, `io/frame_shm.cpp`,
+> and the app tx/rx loops. Deviations from this original plan, as ruled during
+> implementation: the codec is **systematic Cauchy-RS MDS** (guaranteed
+> recovery, k+r≤256 cap) not generic random RLC; the repair subheader grew to
+> **11 bytes** (u16 `window_len` + u32 `frame_len`); source symbols carry a
+> **4-byte self-describing subheader** (k, index); the DATA payload budget is
+> **profile-driven (adaptive MTU)**, not fixed 1424. FEC **rates** remain
+> provisional pending the §17 gate-2 ρ verdict. Sections below are the original
+> planning text, kept for provenance.
+
 Plan for frame-sized FEC block emissions with ARQ fallback for small frames.
-This document is a planning artifact — no PROTOCOL.md amendment, no code. The
-spec amendment will be a separate commit when implementation begins, per project
-law (`CLAUDE.md` "spec amendments commit FIRST").
+This document was a planning artifact — the PROTOCOL.md amendment and code
+landed together in PR #17, per project law (`CLAUDE.md` "spec amendments commit
+FIRST").
 
 ---
 
