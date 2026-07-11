@@ -209,6 +209,24 @@ real recovery latency the deadline doesn't forgive). Samples are gated on the
 (≤1,2,4,8,16,32,64,>64) in stream stats; offline percentiles from JSONL
 deltas (`tools/gate3_rtt.py`), matching the gate-2 analyzer pattern.
 
+## Pass 11 — §9.10 TX-wedge watchdog pinned (2026-07-11)
+
+The Pass-8 bench slot said "reports stall while `tx_submitted` advances"
+without pinning what "stall" means. The step-11 saturation series
+(docs/step11-bench.md §2, incidental 1) showed the obvious reading — a
+report-count *deficit* — is wrong: healthy CCX return rates fall from 100%
+at ≤500 pps to ~25% at 4500 pps under normal report-channel contention.
+Pinned the trigger as report **absence**: one verdict per `wedge_window_ms`
+(seed 1000) — `Δtx_reports == 0` while `Δtx_submitted >= wedge_min_submits`
+(seed 8) sets `tx_wedged`; any report clears it; an idle window holds the
+previous verdict. Action is **observability only** in v1 (`tx_wedged` in
+§15.3 + a transition log line): a craft TX wedge already trips the §9.8
+report-epoch fail-safe (video and returns die together), recovery needs a
+physical re-plug regardless, and coupling an unvalidated detector into
+adaptation risks false-positive degradation. Also brought the §15.3 adapter
+sample back in sync with the emitted schema (`drop`, `tsf_fallback`,
+`tx_reports`, `tx_report_fails` had drifted out of the sample).
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

@@ -719,6 +719,36 @@ reactive-demote (rule 1)** (don't blame RF for encoder overshoot), does **not**
 suppress RSSI rules (2,3), and after `pressure_escape_s` climbs to drain the ring
 (rule 4).
 
+### 9.10 TX-wedge watchdog (CCX-report liveness)
+
+The §6.5 watchdog is RX-side; this is its TX-side sibling, run by any node
+whose TX adapter is a radio (§3.0). The failure mode is real and observed:
+the RTL88x2 USB TX wedge — bulk-OUT keeps accepting frames (`tx_submitted`
+advances) while nothing airs, and only a physical re-plug recovers the chip.
+
+**Trigger — report absence, never report deficit (Pass 11).** The per-frame
+CCX TX-status reports (Pass 8) are lossy under load *by design*: the step-11
+bench measured healthy report return rates of 100% at ≤500 pps falling to
+~25% at 4500 pps, so any deficit threshold misfires exactly when the link is
+busiest. A healthy chip returned *some* reports at every measured load. The
+detector therefore evaluates one verdict per `wedge_window_ms` (seed 1000)
+from the `(tx_submitted, tx_reports)` counter deltas:
+
+- `Δtx_reports > 0` → not wedged (any report proves the TX path alive);
+- `Δtx_reports == 0` and `Δtx_submitted >= wedge_min_submits` (seed 8) →
+  **wedged**;
+- too few submissions to judge → hold the previous verdict (an idle TX is
+  not evidence either way).
+
+**Action (v1) — observability only.** The verdict is surfaced per adapter as
+`tx_wedged` (§15.3) and logged on every transition; it deliberately does NOT
+actuate §9. A craft TX wedge stops video and returns together, so the §9.8
+`report_epoch` watchdog already fails the selector toward the floor, and
+recovery requires a physical re-plug regardless. Coupling the detector into
+adaptation (or an automatic USB reset) is deferred until the detector itself
+passes bench validation: silent across a healthy 500–4500 pps sweep, fires
+within one window of an induced wedge (§17 knob table).
+
 ---
 
 ## 10. Per-adapter TX power
@@ -1025,6 +1055,8 @@ scheme's recoverable count. **Deterministic-latency is a *target to validate*
                 "rendezvous_timeout_s": 5, "home_chan": 5745,
                 "channel_allowlist": [5745, 5805, 5825] }
   },
+  "air":   { "kind": "radio",
+             "wedge_window_ms": 1000, "wedge_min_submits": 8 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } }
 }
 ```
@@ -1045,7 +1077,9 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
   "adapters": [ { "name": "wlan0", "rx": 10234, "dup": 812,
     "rssi_best": -58, "rssi_mean": -63, "snr": 22, "noise": -85,
     "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
-    "adapter_stalled": false } ],
+    "drop": 0, "tsf_fallback": 0,
+    "tx_reports": 531, "tx_report_fails": 0,
+    "adapter_stalled": false, "tx_wedged": false } ],
   "streams": [ { "stream_id": 0, "type": "RTP",
     "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
     "loss_prediversity_milli": 41, "loss_postdiv_prearq_milli": 6,
@@ -1067,6 +1101,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
 §7.2 optimisation's health directly, and `adapter_stalled` + the
 `loss_prediversity` vs `loss_postdiv_prearq` pair expose phantom diversity and the
 ρ decorrelation gauge — the two field-failure modes the design most fears.
+`tx_wedged` is the §9.10 CCX-liveness verdict (TX adapter only, meaningful on
+the radio backend).
 `uniq`/`diversity` are the §17 gate-2 estimator inputs; the `nack_rtt_*` /
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.
@@ -1116,6 +1152,7 @@ the §7.2 quiet-gap or §11 TSF anchoring — those need real radios (§17).
 | deadline budget (per class) | glass-to-glass minus pipeline | measured pipeline delay |
 | `guard_us` / `return_window_us` | §7.2 quiet gap | craft TX→RX settle + ground turnaround + return airtime |
 | EWMA α, `mcs_settle_s` | §9 smoothing/settle | no-FEC loss spikiness |
+| `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
 
 **Bench gates (must pass before the dependent design is trusted):**
 
