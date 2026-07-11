@@ -245,6 +245,24 @@ hardware-retry unicast injects (descriptor limit 12) and implement
 `SetAckResponder`; an unlatched target falls back to broadcast, counted as
 `unicast_fallback` in §15.3.
 
+## Pass 13 — §3.0 kernel-monitor backend + per-packet radiotap MCS (2026-07-11)
+
+Added a second air backend (`air.kind "kernel-monitor"`) that injects/receives
+raw 802.11 through the Linux driver in monitor mode (AF_PACKET, no devourer),
+after the devourer 8822e 16-QAM+ TX proved dead in UNII-3 (5805, the gate
+channel) — the kernel driver transmits clean MCS7 there. **Spec impact is
+minimal and additive:** the on-air frame, SA filter, and FCS handling are
+unchanged; only the *rate-carrying mechanism* is generalized (§3.0 "Pass 13"
+paragraph). devourer keeps its rate-less `TX_FLAGS`-only radiotap + out-of-band
+`SetTxMode`; the kernel-monitor backend carries the PHY rate in a per-packet
+radiotap **MCS** field (13-byte HT radiotap). RX radiotap yields `DBM_ANTSIGNAL`
+(RSSI) and `TSFT` (§7.2 per-adapter TSF); no per-adapter TSF *read* on a monitor
+netdev → host-time fallback (already a supported §7.2 path). CSA-over-monitor
+retune and precise per-rate power actuation are deferred (channel + `txpower
+auto` fixed at monitor bring-up; the 8812eu per-rate TXAGC curve owns power).
+The backend is pure POSIX → compiled unconditionally (a `WBLINK_RADIO=OFF`
+build still has a real RF path). devourer stays vendored + selectable.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

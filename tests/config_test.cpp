@@ -181,6 +181,28 @@ int main() {
         }
     }
 
+    // --- air "kernel-monitor" backend + adapter ifname ---------------------
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 7, "role": "rx", "net_id": 2},
+          "air": {"kind": "kernel-monitor", "rx_drop_permille": 30},
+          "adapters": [
+            {"name": "uplink", "ifname": "wlan0", "role": "tx", "channel": 5805},
+            {"name": "div0", "ifname": "wlx01", "role": "rx", "channel": 5805}
+          ]})");
+        CHECK(bool(r));
+        if (r) {
+            const Config& c = *r.value;
+            CHECK(c.air.kind == AirCfg::Kind::kMonitor);
+            CHECK_EQ_U(c.air.rx_drop_permille, 30);
+            CHECK_EQ_U(c.adapters.size(), 2);
+            CHECK(c.adapters[0].ifname == "wlan0");
+            CHECK(c.adapters[0].role == Role::kTx);
+            CHECK(c.adapters[1].ifname == "wlx01");
+            CHECK(c.adapters[1].role == Role::kRx);
+        }
+    }
+
     // --- §15.1 rejection paths ---------------------------------------------
     // in-stream with a "send" binding (in XOR out).
     expect_error(R"({"node":{"originator":1,"role":"rx"},
