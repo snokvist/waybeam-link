@@ -1,7 +1,7 @@
 {
   "_comment": "Example PROTOCOL.md v1 §9.3 operating-point table. DATA, not code. Constants are wfb_ng-derived SEEDS (docs/groundwork.md); RE-DERIVE on bench (§17). NOT a validated flight table.",
-  "_table_version_note": "table_version on the wire is a CRC-8 CONTENT HASH of this table's canonical serialization (§3.6), NOT this integer. This field is advisory/human only. 0x2B is this table's actual computed hash (pinned in tests/table_hash_test.cpp).",
-  "table_version_hint": 43,
+  "_table_version_note": "table_version on the wire is a CRC-8 CONTENT HASH of this table's canonical serialization (§3.6), NOT this integer. This field is advisory/human only. 0x41 is this table's actual computed hash (pinned in tests/table_hash_test.cpp).",
+  "table_version_hint": 65,
   "units": {
     "tx_power_level": "PORTABLE power INTENT index (§10.2). NOT absolute. Each TX node resolves (adapter, mcs, level) -> an absolute qdb via that adapter's LOCAL power map. No regulatory clamp (§10.3).",
     "airtime_budget_frac": "fraction of wall-clock airtime this link may occupy",

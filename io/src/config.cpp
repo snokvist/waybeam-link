@@ -511,6 +511,15 @@ Result<ProfileTable> load_profile_table_json(const std::string& json_text) {
                                             (where + ".airtime_budget_frac").c_str());
             if (!airtime) return Result<ProfileTable>::fail(airtime.error);
             p.airtime_budget_permille = *airtime.value;
+            // §3.2/§9.3 air MTU budget; default standard-rung 1424, ceiling 4096.
+            const uint32_t mp = pj.value("max_payload", uint32_t{kDefaultMaxPayload});
+            if (mp < kDataHeaderSize + 32 || mp > kMaxDataPayload) {
+                return Result<ProfileTable>::fail(
+                    where + ": max_payload must be in [" +
+                    std::to_string(kDataHeaderSize + 32) + ", " +
+                    std::to_string(kMaxDataPayload) + "]");
+            }
+            p.max_payload = static_cast<uint16_t>(mp);
             auto scheme = parse_fec_scheme(pj.value("fec_scheme", std::string("none")),
                                            (where + ".fec_scheme").c_str());
             if (!scheme) return Result<ProfileTable>::fail(scheme.error);

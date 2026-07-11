@@ -350,7 +350,7 @@ int main() {
             CHECK_EQ_U(t.value->profiles.size(), 8);
             CHECK_EQ_U(t.value->floor_profile, 0);
             CHECK_EQ_U(t.value->profiles[0].airtime_budget_permille, 600);
-            CHECK_EQ_U(table_version(*t.value), 0x2B);
+            CHECK_EQ_U(table_version(*t.value), 0x41);  // §9.3 max_payload field
         }
     }
     {

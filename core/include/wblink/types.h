@@ -47,8 +47,11 @@ inline constexpr size_t kLinkReportSize = 39;
 inline constexpr size_t kHeartbeatSize = 11;
 inline constexpr size_t kCsaSize = 32;
 
-// §3.2 — 26 B header on a ~1450 B usable MPDU.
-inline constexpr uint16_t kMaxDataPayload = 1424;
+// §3.2 — absolute DATA payload ceiling for buffer sizing (Realtek jumbo/A-MSDU
+// rungs reach ~3967 B; 4096 caps it). The EFFECTIVE per-frame budget is
+// profile-driven (Profile.max_payload, §9.3); standard rungs seed 1424.
+inline constexpr uint16_t kMaxDataPayload = 4096;
+inline constexpr uint16_t kDefaultMaxPayload = 1424;  // standard-rung default
 
 // §3.5 — target_stream_id value meaning node-scope (RF health is per-link).
 inline constexpr uint8_t kNodeScopeStreamId = 0xFF;
