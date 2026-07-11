@@ -650,6 +650,13 @@ struct RxCore {
             snap.streams.push_back(std::move(st));
         }
         for (const auto& [id, a] : engine_.adapters()) {
+            // Radio backend: the air layer already emitted this adapter's
+            // counters (same index order) — graft the §6 RX-liveness stall
+            // onto that entry instead of duplicating it as "vadapterN".
+            if (id < snap.adapters.size()) {
+                snap.adapters[id].adapter_stalled = a.stalled;
+                continue;
+            }
             AdapterStats as;
             as.name = "vadapter" + std::to_string(id);
             as.rx = a.rx;
@@ -714,11 +721,13 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     if (tx != nullptr) {
         tx->fill_stats(snap, now);
     }
-    if (rx != nullptr) {
-        rx->fill_stats(snap);
-    }
+    // Air adapters first so RxCore::fill_stats can merge its per-adapter
+    // liveness view into them by index (radio backend; no-op on udp).
     if (air != nullptr) {
         air->fill_adapter_stats(snap, tsf_fallbacks);
+    }
+    if (rx != nullptr) {
+        rx->fill_stats(snap);
     }
     emitter.emit(snap);
 }
