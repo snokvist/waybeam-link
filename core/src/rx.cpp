@@ -19,6 +19,16 @@ uint64_t pack_key(const CommonPrefix& p, uint8_t stream_id) {
     return pack_key(StreamKey{p.originator, p.session_id, stream_id});
 }
 
+// §17 gate-3 histogram bucket for a latency in ms: upper bounds
+// 1,2,4,8,16,32,64,+inf (index 0..7).
+size_t rtt_bucket(uint64_t ms) {
+    size_t b = 0;
+    while (b < RxStreamCounters::kRttBuckets - 1 && ms > (1ull << b)) {
+        ++b;
+    }
+    return b;
+}
+
 }  // namespace
 
 RxEngine::RxEngine(const RxPolicy& policy, std::vector<WantSpec> wants,
@@ -238,6 +248,24 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
     if (const auto git = s->gaps.find(v.hdr.seq); git != s->gaps.end()) {
         if (git->second.declared_lost) {
             ++s->counters.recovered_arq;
+            // §17 gate-3 samples: only a RETRANSMIT-flagged fill of a seq
+            // we actually NACKed measures the loop; a late original closes
+            // the gap without sampling. Injected time may step backward
+            // between build_nacks and here — clamp to zero.
+            const Gap& g = git->second;
+            if (g.last_nack_ms != 0 &&
+                (v.hdr.data_flags & data_flags::kRetransmit) != 0) {
+                const uint64_t rtt =
+                    now_ms > g.last_nack_ms ? now_ms - g.last_nack_ms : 0;
+                const uint64_t rec =
+                    now_ms > g.first_nack_ms ? now_ms - g.first_nack_ms : 0;
+                ++s->counters.nack_rtt_hist[rtt_bucket(rtt)];
+                s->counters.nack_rtt_max_ms =
+                    std::max(s->counters.nack_rtt_max_ms, rtt);
+                ++s->counters.arq_rec_hist[rtt_bucket(rec)];
+                s->counters.arq_rec_max_ms =
+                    std::max(s->counters.arq_rec_max_ms, rec);
+            }
         }
         s->gaps.erase(git);
     }
@@ -457,6 +485,13 @@ std::vector<NackRequest> RxEngine::build_nacks(uint64_t now_ms) {
             ++g.nack_attempts;
             g.next_nack_ms =
                 now_ms + policy_.renack_backoff_ms * g.nack_attempts;
+            // §17 gate-3 anchors. Build time, not air time: the §7.2 pacer
+            // may hold the batch up to one return window, and that hold is
+            // part of the recovery latency being measured.
+            if (g.first_nack_ms == 0) {
+                g.first_nack_ms = now_ms;
+            }
+            g.last_nack_ms = now_ms;
         }
         ++s.counters.nacks_sent;
         out.push_back(std::move(req));

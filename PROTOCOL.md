@@ -1047,11 +1047,14 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
     "adapter_stalled": false } ],
   "streams": [ { "stream_id": 0, "type": "RTP",
-    "seq": 90233, "delivered": 89901,
+    "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
     "loss_prediversity_milli": 41, "loss_postdiv_prearq_milli": 6,
     "recovered_arq": 220, "recovered_fec": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
-    "nacks_sent": 18, "resends_sent": 230, "double_send_suppressed": 5,
+    "nacks_sent": 18,
+    "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
+    "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
+    "resends_sent": 230, "double_send_suppressed": 5,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "return": { "reports_expected": 10, "reports_received": 9,
     "return_window_hits": 7, "return_window_misses": 2 },
@@ -1064,6 +1067,9 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
 §7.2 optimisation's health directly, and `adapter_stalled` + the
 `loss_prediversity` vs `loss_postdiv_prearq` pair expose phantom diversity and the
 ρ decorrelation gauge — the two field-failure modes the design most fears.
+`uniq`/`diversity` are the §17 gate-2 estimator inputs; the `nack_rtt_*` /
+`arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
+the §17 gate-3 estimator outputs.
 
 ---
 
@@ -1126,6 +1132,14 @@ the §7.2 quiet-gap or §11 TSF anchoring — those need real radios (§17).
    required.*
 3. **NACK→RETRANSMIT round-trip P90** vs the I-frame deadline on the saturated
    uplink — decides whether ARQ is ever in-deadline. *Hardware-required.*
+   *Estimator (ground-side, ms-domain):* each NACKed seq is anchored at its
+   **first** and its **most recent** NACK build; a gap-filling arrival carrying
+   `RETRANSMIT=1` yields two samples — **round-trip** (most-recent-NACK →
+   arrival; the §5 freshness-gate input) and **recovery** (first-NACK →
+   arrival; the quantity compared against the I-frame deadline, since a lost
+   NACK's re-NACK backoff is real recovery latency). Late originals without
+   the flag close the gap but never sample. Exposed as cumulative
+   power-of-two-ms histograms in stream stats (`nack_rtt_*`, `arq_rec_*`).
 4. **Return-window fit + adaptive-loop stability** — at target fps/bitrate, does
    the §7.2 quiet gap beat pure-opportunistic return, and does the §9.8 damped
    step-down/promote pair hold a stable operating point rather than oscillate at

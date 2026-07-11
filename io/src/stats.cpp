@@ -46,6 +46,15 @@ void append_i32(std::string& out, int32_t v) {
 
 void append_bool(std::string& out, bool v) { out += v ? "true" : "false"; }
 
+void append_hist(std::string& out, const std::array<uint64_t, 8>& h) {
+    out += '[';
+    for (size_t i = 0; i < h.size(); ++i) {
+        if (i != 0) out += ',';
+        append_u64(out, h[i]);
+    }
+    out += ']';
+}
+
 }  // namespace
 
 void format_stats_line(const StatsSnapshot& snap, std::string& out) {
@@ -126,6 +135,14 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.dropped_deadline);
         out += ",\"nacks_sent\":";
         append_u64(out, s.nacks_sent);
+        out += ",\"nack_rtt_hist\":";
+        append_hist(out, s.nack_rtt_hist);
+        out += ",\"nack_rtt_max_ms\":";
+        append_u64(out, s.nack_rtt_max_ms);
+        out += ",\"arq_rec_hist\":";
+        append_hist(out, s.arq_rec_hist);
+        out += ",\"arq_rec_max_ms\":";
+        append_u64(out, s.arq_rec_max_ms);
         out += ",\"resends_sent\":";
         append_u64(out, s.resends_sent);
         out += ",\"double_send_suppressed\":";

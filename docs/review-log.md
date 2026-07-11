@@ -196,6 +196,19 @@ isn't an HMAC construction) and keyed BLAKE2s (less legible in embedded
 ecosystems). CSA is rare, so CPU cost was irrelevant; legibility and
 vendorability (Android core reuse) decided it.
 
+## Pass 10 — §17 gate-3 estimator pinned (2026-07-11)
+
+Gate 3 said "NACK→RETRANSMIT round-trip P90" without pinning the anchor when
+re-NACKs occur. Pinned **both** anchors as distinct observables: *round-trip*
+(most-recent NACK → RETRANSMIT arrival — the pure link RTT the §5
+freshness-priority gate consumes) and *recovery* (first NACK → arrival — the
+gate-3 headline vs the I-frame deadline, because a lost NACK's backoff wait is
+real recovery latency the deadline doesn't forgive). Samples are gated on the
+`RETRANSMIT=1` flag so a late original copy never contaminates the series
+(`recovered_arq` still counts it). Cumulative power-of-two-ms histograms
+(≤1,2,4,8,16,32,64,>64) in stream stats; offline percentiles from JSONL
+deltas (`tools/gate3_rtt.py`), matching the gate-2 analyzer pattern.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
