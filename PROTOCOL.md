@@ -149,7 +149,11 @@ unicast TA (Pass-8 ruling; keeps the hardware ACK-responder door open for the
 uplink, §7.2 note). The payload `magic` (§3.1) remains `0x57 0x42`.
 
 The frame body that follows is the raw waybeam-link packet (§3.1 onward) — no
-LLC/SNAP, no encryption. The FCS is the radio's.
+LLC/SNAP, no encryption. The FCS is the radio's. Monitor-mode RX delivers the
+MPDU **with the 4-byte FCS appended** (devourer's monitor bring-up keeps
+`APP_FCS`; the chip has already validated it — CRC-error frames are dropped
+at the driver boundary): receivers strip the trailer before the length-exact
+§3.1 parse. Bench-verified on 8812CU (step 11).
 
 **RX filter** (in priority order, cheapest first): type/subtype == Data &&
 `SA[0..1] == 56:42` (&& `SA[2] == net_id` **when the node configures one**;
