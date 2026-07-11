@@ -335,6 +335,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cfg.policy.ret.guard_us = pr.value("guard_us", cfg.policy.ret.guard_us);
                 cfg.policy.ret.return_window_us =
                     pr.value("return_window_us", cfg.policy.ret.return_window_us);
+                cfg.policy.ret.unicast =
+                    pr.value("unicast", cfg.policy.ret.unicast);
             }
             if (p.contains("csa")) {
                 const json& pc = p.at("csa");
@@ -386,6 +388,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 a.value("wedge_window_ms", cfg.air.wedge_window_ms);
             cfg.air.wedge_min_submits =
                 a.value("wedge_min_submits", cfg.air.wedge_min_submits);
+            cfg.air.ack_responder =
+                a.value("ack_responder", cfg.air.ack_responder);
             if (kind == "radio") {
                 cfg.air.kind = AirCfg::Kind::kRadio;
             } else if (kind == "udp") {

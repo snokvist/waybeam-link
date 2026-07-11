@@ -77,6 +77,10 @@ struct ReturnStats {
     uint32_t reports_received = 0;
     uint32_t return_window_hits = 0;
     uint32_t return_window_misses = 0;
+    // §3.0 Pass 12 unicast returns: sent unicast vs fell back to broadcast
+    // (no SA latched for the target yet).
+    uint64_t unicast_sent = 0;
+    uint64_t unicast_fallback = 0;
 };
 
 struct LinkStats {

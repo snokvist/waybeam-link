@@ -23,6 +23,18 @@ std::vector<uint8_t> mpdu_of(uint8_t net_id, uint16_t orig, uint8_t adapter,
     return f;
 }
 
+// The Pass-12 unicast QoS-Data return, ditto.
+std::vector<uint8_t> mpdu_unicast_of(const uint8_t dest[6], uint8_t net_id,
+                                     uint16_t orig, uint8_t adapter,
+                                     uint16_t seq,
+                                     const std::vector<uint8_t>& pay) {
+    std::vector<uint8_t> f(kDot11TxUnicastPrefixLen + pay.size());
+    dot11_tx_prefix_unicast(f.data(), dest, net_id, orig, adapter, seq);
+    std::memcpy(f.data() + kDot11TxUnicastPrefixLen, pay.data(), pay.size());
+    f.erase(f.begin(), f.begin() + kRadiotapTxLen);
+    return f;
+}
+
 const std::vector<uint8_t> kPay = {0x57, 0x42, 0x01, 0xaa, 0xbb};  // magic…
 
 }  // namespace
@@ -75,10 +87,62 @@ int main() {
         CHECK(!dot11_parse(f.data(), f.size(), uint8_t{8}).has_value());
     }
 
+    // --- Pass-12 unicast return: TX prefix layout ---------------------------
+    {
+        const uint8_t dest[6] = {0x56, 0x42, 0x05, 0x12, 0x34, 0x00};
+        uint8_t buf[kDot11TxUnicastPrefixLen];
+        const size_t n = dot11_tx_prefix_unicast(buf, dest, 5, 0x1234, 2,
+                                                 0x0abc);
+        CHECK_EQ_U(n, kDot11TxUnicastPrefixLen);
+        // Radiotap: TX_FLAGS present but 0 — the frame EXPECTS an ACK.
+        CHECK_EQ_U(buf[5], 0x80);
+        CHECK_EQ_U(buf[8], 0x00);
+        const uint8_t* h = buf + kRadiotapTxLen;
+        CHECK_EQ_U(h[0], 0x88);  // QoS-Data
+        CHECK_EQ_U(h[1], 0x00);
+        CHECK(std::memcmp(h + 4, dest, 6) == 0);  // addr1 RA = the craft SA
+        CHECK_EQ_U(h[10], 0x56);                  // own SA unchanged
+        CHECK_EQ_U(h[12], 5);
+        CHECK_EQ_U(h[24], 0x00);  // QoS Control: TID 0, Normal ACK
+        CHECK_EQ_U(h[25], 0x00);
+    }
+
+    // --- Pass-12 unicast return: roundtrip + Retry-bit masking --------------
+    {
+        const uint8_t dest[6] = {0x56, 0x42, 0x07, 0xbe, 0xef, 0x00};
+        const auto f = mpdu_unicast_of(dest, 7, 0x0011, 0, 9, kPay);
+        auto r = dot11_parse(f.data(), f.size());
+        CHECK(r.has_value());
+        if (r) {
+            CHECK_EQ_U(r->net_id, 7);
+            CHECK_EQ_U(r->originator, 0x0011);
+            CHECK_EQ_U(r->payload_len, kPay.size());
+            CHECK(std::memcmp(r->payload, kPay.data(), kPay.size()) == 0);
+        }
+        // Hardware retransmissions set the Retry bit — still ours.
+        auto retry = f;
+        retry[1] |= kDot11Fc1RetryBit;
+        CHECK(dot11_parse(retry.data(), retry.size()).has_value());
+        // Any other FC1 bit (ToDS, PM) is not ours.
+        auto tods = f;
+        tods[1] = 0x01;
+        CHECK(!dot11_parse(tods.data(), tods.size()).has_value());
+        auto pm = f;
+        pm[1] = 0x10;
+        CHECK(!dot11_parse(pm.data(), pm.size()).has_value());
+        // The magic is checked at the QoS body offset (26).
+        auto nomagic = f;
+        nomagic[kDot11QosHdrLen] = 0x00;
+        CHECK(!dot11_parse(nomagic.data(), nomagic.size()).has_value());
+        // Bare QoS header + 1 never parses.
+        CHECK(!dot11_parse(f.data(), kDot11QosHdrLen + 1).has_value());
+    }
+
     // --- rejections ----------------------------------------------------------
     {
         auto f = mpdu_of(0, 1, 0, 0, kPay);
-        // Wrong Frame Control (QoS Data, beacon, ToDS set).
+        // FC0 flipped to QoS-Data on a 24-byte frame: the body offset moves
+        // to 26, so the magic check lands mid-payload and rejects.
         auto qos = f;
         qos[0] = 0x88;
         CHECK(!dot11_parse(qos.data(), qos.size()).has_value());
@@ -88,6 +152,11 @@ int main() {
         auto tods = f;
         tods[1] = 0x01;
         CHECK(!dot11_parse(tods.data(), tods.size()).has_value());
+        // The broadcast shape does NOT tolerate the Retry bit (§3.0 pins
+        // FC1 == 0x00; broadcast is never hardware-retried).
+        auto bretry = f;
+        bretry[1] = kDot11Fc1RetryBit;
+        CHECK(!dot11_parse(bretry.data(), bretry.size()).has_value());
         // Foreign SA prefix (ambient traffic).
         auto foreign = f;
         foreign[10] = 0x00;

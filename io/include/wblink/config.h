@@ -135,6 +135,10 @@ struct ReturnPolicy {
     bool quiet_gap = false;
     uint32_t guard_us = 300;
     uint32_t return_window_us = 2000;
+    // §3.0 Pass 12: send returns as hardware-ACKed unicast QoS-Data to the
+    // target's latched SA (ground half of the gate-4 A/B; craft half is
+    // air.ack_responder). Off = pinned broadcast returns.
+    bool unicast = false;
 };
 
 struct CsaPolicy {
@@ -179,6 +183,10 @@ struct AirCfg {
     // §9.10 TX-wedge watchdog (radio backend, §17 seeds). window 0 disables.
     uint32_t wedge_window_ms = 1000;
     uint32_t wedge_min_submits = 8;
+    // §3.0 Pass 12: arm the TX adapter's hardware ACK responder with its
+    // own SA (craft half of the gate-4 A/B). Opt-in — makes a passive
+    // monitor transmit ACKs.
+    bool ack_responder = false;
 };
 
 // Loopback-mode synthetic loss (§16.2). Dev tooling, not §15.

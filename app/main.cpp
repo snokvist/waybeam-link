@@ -212,6 +212,9 @@ struct AirBackend {
             rc.filter_net_id = cfg.node.net_id;
             rc.originator = cfg.node.originator;
             rc.rx_drop_permille = cfg.air.rx_drop_permille;
+            // §3.0 Pass 12 hardware-ACK hybrid halves.
+            rc.ack_responder = cfg.air.ack_responder;
+            rc.unicast_returns = cfg.policy.ret.unicast;
             auto a = RadioAir::create(rc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
@@ -234,6 +237,19 @@ struct AirBackend {
             return radio->inject(f, n);
         }
 #endif
+        return udp->inject(f, n);
+    }
+
+    // Returns (NACK/LINK_REPORT) carry their target so the radio backend
+    // can address them as §3.0 unicast when return.unicast is on; the udp
+    // dev backend has no L2 addressing and ignores the target.
+    size_t inject_return(uint16_t target, const uint8_t* f, size_t n) {
+#if WBLINK_RADIO
+        if (radio) {
+            return radio->inject_return(target, f, n);
+        }
+#endif
+        (void)target;
         return udp->inject(f, n);
     }
 
@@ -344,6 +360,17 @@ struct AirBackend {
         (void)snap;
         (void)tsf_fallbacks;
         (void)tx_wedged;
+#endif
+    }
+
+    // §15.3 return-block unicast counters (radio backend; no-op on udp).
+    void fill_return_stats(ReturnStats& ret) const {
+#if WBLINK_RADIO
+        if (radio) {
+            radio->return_counters(ret.unicast_sent, ret.unicast_fallback);
+        }
+#else
+        (void)ret;
 #endif
     }
 
@@ -586,7 +613,9 @@ struct TxCore {
 // ---- RX side: engine + NACK encode -----------------------------------------
 
 struct RxCore {
-    using Inject = std::function<void(const uint8_t*, size_t)>;
+    // (frame, len, target_originator) — the target rides along so returns
+    // can be addressed as §3.0 unicast when return.unicast is on.
+    using Inject = std::function<void(const uint8_t*, size_t, uint16_t)>;
 
     RxCore(const Config& cfg, uint32_t session, const ProfileTable* table,
            std::optional<uint8_t> table_version)
@@ -628,7 +657,7 @@ struct RxCore {
             r.prefix.session_id = session_;
             uint8_t frame[kLinkReportSize];
             if (encode_link_report(r, frame, sizeof(frame)) > 0) {
-                inject_nack(frame, sizeof(frame));
+                inject_nack(frame, sizeof(frame), r.target_originator);
             }
         }
         for (const NackRequest& req : engine_.build_nacks(now)) {
@@ -645,7 +674,7 @@ struct RxCore {
                 hdr, req.bitmap.data(),
                 static_cast<uint8_t>(req.bitmap.size()), frame, sizeof(frame));
             if (n > 0) {
-                inject_nack(frame, n);
+                inject_nack(frame, n, req.target_originator);
             }
         }
     }
@@ -748,6 +777,10 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     // §7.2 observability (ground): paced vs blind coalesced return batches.
     snap.ret.return_window_hits = ret_window_hits;
     snap.ret.return_window_misses = ret_window_misses;
+    // §3.0 Pass 12: unicast-return counters (radio backend only).
+    if (air != nullptr) {
+        air->fill_return_stats(snap.ret);
+    }
     if (csa_state != nullptr) {
         snap.link.csa_state = csa_state;
     }
@@ -921,18 +954,19 @@ int run_rx(const Loaded& l) {
     // middle of the craft's quiet gap, anchored on the EOB's receive-TSF.
     // Disabled (default) they inject immediately — §7.1 baseline.
     QuietGap qg(quietgap_policy(l.cfg));
-    std::deque<std::vector<uint8_t>> ret_held;
+    std::deque<std::pair<std::vector<uint8_t>, uint16_t>> ret_held;
     std::optional<uint64_t> ret_at_us;
     uint32_t ret_window_hits = 0;
     uint32_t ret_window_misses = 0;
     uint64_t tsf_fallbacks = 0;
     uint64_t now_us_it = now_us();
-    const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n) {
+    const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n,
+                                           uint16_t target) {
         if (!qg.enabled()) {
-            air.value->inject(f, n);
+            air.value->inject_return(target, f, n);
             return;
         }
-        ret_held.emplace_back(f, f + n);
+        ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
     };
     StatsEmitter emitter(true, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
@@ -965,8 +999,8 @@ int run_rx(const Loaded& l) {
         // means send immediately — never sit on a return.
         if (!ret_held.empty() &&
             (!ret_at_us || now_us_it >= *ret_at_us)) {
-            for (const auto& f : ret_held) {
-                air.value->inject(f.data(), f.size());
+            for (const auto& [f, target] : ret_held) {
+                air.value->inject_return(target, f.data(), f.size());
             }
             // §7.2 observability: a batch fired on a TSF-anchored window
             // deadline is a hit; one sent blind (no EOB heard) is a miss.
@@ -1156,8 +1190,10 @@ int run_loopback(const Loaded& l) {
             }
         }
     };
-    // RX -> return direction -> TX (its own loss).
-    const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n) {
+    // RX -> return direction -> TX (its own loss). No L2 addressing in
+    // loopback — the unicast target is meaningless here.
+    const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n,
+                                           uint16_t) {
         if (return_rng.uniform() >= l.cfg.loopback.return_loss_p) {
             tx.on_air(f, n, loop_now);
         }
