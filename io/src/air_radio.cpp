@@ -398,6 +398,39 @@ int RadioAir::set_power_qdb(size_t adapter, int32_t qdb) {
         static_cast<int>(qdb));
 }
 
+bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t bw,
+                      bool fast) {
+    if (adapter >= impl_->adapters.size()) {
+        return false;
+    }
+    const uint8_t chan = mhz_to_channel(chan_mhz);
+    if (chan == 0) {
+        return false;
+    }
+    IRtlDevice& dev = *impl_->adapters[adapter]->dev;
+    if (fast && bw == 0) {
+        // §11.2 class 0: same-width hop, ~0.5–2.5 ms. FastRetune skips the
+        // TXAGC re-apply, so the caller follows up with reapply_tx_power().
+        dev.FastRetune(chan);
+    } else {
+        SelectedChannel c{};
+        c.Channel = chan;
+        c.ChannelOffset = 0;
+        c.ChannelWidth = bw == 2   ? CHANNEL_WIDTH_80
+                         : bw == 1 ? CHANNEL_WIDTH_40
+                                   : CHANNEL_WIDTH_20;
+        dev.SetMonitorChannel(c);
+    }
+    return true;
+}
+
+bool RadioAir::reapply_tx_power(size_t adapter) {
+    if (adapter >= impl_->adapters.size()) {
+        return false;
+    }
+    return impl_->adapters[adapter]->dev->ReApplyTxPower();
+}
+
 std::optional<uint64_t> RadioAir::read_tsf(size_t adapter) {
     if (adapter >= impl_->adapters.size()) {
         return std::nullopt;

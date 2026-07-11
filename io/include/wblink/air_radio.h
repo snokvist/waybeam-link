@@ -63,6 +63,12 @@ class RadioAir {
     // Hardware TSF of one adapter (µs, control transfer — can fail under
     // heavy RX load; nullopt then, caller falls back to host time, §7.2).
     std::optional<uint64_t> read_tsf(size_t adapter);
+    // §11 CSA retune. fast + bw==0 → FastRetune (class 0, TXAGC untouched —
+    // follow with reapply_tx_power); otherwise a full SetMonitorChannel.
+    // false = bad adapter/channel. bw: §11.1 encoding (0=20 1=40 2=80).
+    bool retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast);
+    // §10.4/§11.2: re-program TX power at the current channel post-retune.
+    bool reapply_tx_power(size_t adapter);
 
     struct AdapterCounters {
         std::string name;
