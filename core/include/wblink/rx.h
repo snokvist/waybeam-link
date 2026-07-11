@@ -124,7 +124,10 @@ struct NackRequest {
 
 class RxEngine {
   public:
+    // block_id + data_flags ride along so a frame-shm egress reassembler
+    // (§6.3a) can group a block's symbols; the UDP egress path ignores them.
     using Deliver = std::function<void(uint8_t local_stream_id,
+                                       uint32_t block_id, uint8_t data_flags,
                                        const uint8_t* payload, size_t len)>;
 
     // local_table_version: this node's §3.6 hash; packets carrying a

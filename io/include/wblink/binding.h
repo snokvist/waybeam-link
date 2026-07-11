@@ -88,6 +88,15 @@ class BindingSet {
     int poll_once(int timeout_ms,
                   const std::function<void(const IngressEvent&)>& cb);
 
+    // As above, but also waits on extra_fds (frame-shm consumer eventfds).
+    // For each readable extra fd, on_extra(index-into-extra_fds) fires so the
+    // app can drain that ring. Unifies the wait so a frame-shm-only node (no
+    // UDP ingress) still blocks on its ring's eventfd.
+    int poll_once(int timeout_ms,
+                  const std::function<void(const IngressEvent&)>& cb,
+                  const std::vector<int>& extra_fds,
+                  const std::function<void(size_t)>& on_extra);
+
   private:
     struct In {
         uint8_t stream_id;

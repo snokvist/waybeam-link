@@ -37,7 +37,8 @@ struct Harness {
         v.payload = &payload;
         v.payload_len = 1;
         engine.on_data(adapter, v, now,
-                       [](uint8_t, const uint8_t*, size_t) {}, rssi);
+                       [](uint8_t, uint32_t, uint8_t, const uint8_t*, size_t) {},
+                       rssi);
     }
 };
 
@@ -77,7 +78,7 @@ int main() {
     h.feed(1, 3, 200, -70);
     h.feed(0, 5, 210, -50);
     h.feed(1, 5, 210, -70);
-    h.engine.tick(230, [](uint8_t, const uint8_t*, size_t) {});
+    h.engine.tick(230, [](uint8_t, uint32_t, uint8_t, const uint8_t*, size_t) {});
     auto r2 = h.reporter.build(h.engine, 240);
     CHECK_EQ_U(r2.size(), 1);
     CHECK(r2[0].loss_postdiv_prearq > 0);  // the window saw the loss

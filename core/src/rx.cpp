@@ -368,8 +368,8 @@ void RxEngine::advance_cursor(Stream& s, uint64_t now_ms,
                               const Deliver& deliver) {
     while (s.cursor <= s.max_seq) {
         if (const auto h = s.held.find(s.cursor); h != s.held.end()) {
-            deliver(s.local_stream_id, h->second.payload.data(),
-                    h->second.payload.size());
+            deliver(s.local_stream_id, h->second.block_id, h->second.flags,
+                    h->second.payload.data(), h->second.payload.size());
             ++s.counters.delivered;
             s.last_delivered_block = h->second.block_id;
             s.held.erase(h);
