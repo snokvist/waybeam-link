@@ -80,7 +80,7 @@ const char* kGolden =
     "\"rssi_best\":-58,\"rssi_mean\":-63,\"snr\":22,\"noise\":-85,"
     "\"tx_submitted\":540,\"tx_failed\":2,\"tx_timeout\":0,"
     "\"drop\":3,\"tsf_fallback\":1,\"tx_reports\":40,\"tx_report_fails\":2,"
-    "\"adapter_stalled\":false}],"
+    "\"adapter_stalled\":false,\"tx_wedged\":false}],"
     "\"streams\":[{\"stream_id\":0,\"type\":\"RTP\",\"seq\":90233,"
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
     "\"loss_prediversity_milli\":41,"

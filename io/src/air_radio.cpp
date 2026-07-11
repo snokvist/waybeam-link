@@ -467,6 +467,12 @@ std::optional<uint64_t> RadioAir::read_tsf(size_t adapter) {
     }
 }
 
+void RadioAir::tx_report_counters(uint64_t& submitted,
+                                  uint64_t& reports) const {
+    submitted = impl_->adapters[impl_->tx_idx]->tx_submitted;
+    reports = impl_->tx_reports.load(std::memory_order_relaxed);
+}
+
 RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {
     AdapterCounters c;
     if (adapter >= impl_->adapters.size()) {

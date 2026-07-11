@@ -382,6 +382,10 @@ Result<Config> load_config_json(const std::string& json_text) {
             const std::string kind = a.value("kind", std::string("udp"));
             cfg.air.rx_drop_permille = static_cast<uint16_t>(
                 std::min(1000, std::max(0, a.value("rx_drop_permille", 0))));
+            cfg.air.wedge_window_ms =
+                a.value("wedge_window_ms", cfg.air.wedge_window_ms);
+            cfg.air.wedge_min_submits =
+                a.value("wedge_min_submits", cfg.air.wedge_min_submits);
             if (kind == "radio") {
                 cfg.air.kind = AirCfg::Kind::kRadio;
             } else if (kind == "udp") {

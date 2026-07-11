@@ -100,6 +100,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, a.tx_report_fails);
         out += ",\"adapter_stalled\":";
         append_bool(out, a.adapter_stalled);
+        out += ",\"tx_wedged\":";
+        append_bool(out, a.tx_wedged);
         out += '}';
     }
     out += ']';

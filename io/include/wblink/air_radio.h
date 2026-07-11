@@ -91,6 +91,10 @@ class RadioAir {
     };
     AdapterCounters counters(size_t adapter) const;
 
+    // TX adapter's cumulative (tx_submitted, tx_reports) for the §9.10
+    // wedge watchdog — cheap per-iteration accessor, no string copies.
+    void tx_report_counters(uint64_t& submitted, uint64_t& reports) const;
+
   private:
     RadioAir();
     struct Impl;

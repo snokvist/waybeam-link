@@ -28,6 +28,7 @@ add_wb_test(hmac_test)
 add_wb_test(csa_test)
 add_wb_test(loopback_test)
 
+add_wb_test(txwedge_test wblink_io)
 add_wb_test(dot11_test wblink_io)
 add_wb_test(config_test wblink_io)
 target_compile_definitions(config_test PRIVATE

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <deque>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "wblink/air_udp.h"
@@ -32,6 +33,7 @@
 #include "wblink/selector.h"
 #include "wblink/stats.h"
 #include "wblink/table.h"
+#include "wblink/txwedge.h"
 #include "wblink/venc.h"
 #if WBLINK_RADIO
 #include "wblink/air_radio.h"
@@ -313,8 +315,10 @@ struct AirBackend {
         return false;
 #endif
     }
-    void fill_adapter_stats(StatsSnapshot& snap,
-                            uint64_t tsf_fallbacks) const {
+    // §9.10: the watchdog runs in the mode loop (it owns the clock); its
+    // verdict is grafted onto the TX adapter's stats entry here.
+    void fill_adapter_stats(StatsSnapshot& snap, uint64_t tsf_fallbacks,
+                            bool tx_wedged) const {
 #if WBLINK_RADIO
         if (!radio) {
             return;
@@ -333,12 +337,28 @@ struct AirBackend {
             as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
             as.tx_reports = c.tx_reports;
             as.tx_report_fails = c.tx_report_fails;
+            as.tx_wedged = c.tx && tx_wedged;
             snap.adapters.push_back(std::move(as));
         }
 #else
         (void)snap;
         (void)tsf_fallbacks;
+        (void)tx_wedged;
 #endif
+    }
+
+    // TX adapter's cumulative (tx_submitted, tx_reports) for the §9.10
+    // watchdog; nullopt on the udp dev backend (no CCX reports to watch).
+    std::optional<std::pair<uint64_t, uint64_t>> tx_report_counters() const {
+#if WBLINK_RADIO
+        if (radio) {
+            uint64_t s = 0;
+            uint64_t r = 0;
+            radio->tx_report_counters(s, r);
+            return std::make_pair(s, r);
+        }
+#endif
+        return std::nullopt;
     }
 };
 
@@ -718,7 +738,8 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 uint64_t tsf_fallbacks = 0,
                 const char* csa_state = nullptr,
                 uint32_t ret_window_hits = 0,
-                uint32_t ret_window_misses = 0) {
+                uint32_t ret_window_misses = 0,
+                bool tx_wedged = false) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -736,7 +757,7 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     // Air adapters first so RxCore::fill_stats can merge its per-adapter
     // liveness view into them by index (radio backend; no-op on udp).
     if (air != nullptr) {
-        air->fill_adapter_stats(snap, tsf_fallbacks);
+        air->fill_adapter_stats(snap, tsf_fallbacks, tx_wedged);
     }
     if (rx != nullptr) {
         rx->fill_stats(snap);
@@ -799,6 +820,9 @@ int run_tx(const Loaded& l) {
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
     // retunes the (single) radio at the TSF-anchored T_switch.
     CsaFollower csa(csa_params(l.cfg));
+    // §9.10 TX-wedge watchdog over the TX adapter's CCX-report counters.
+    TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
+                                l.cfg.air.wedge_min_submits});
     std::fprintf(stderr, "tx: session=%u, running%s\n", session,
                  qg.enabled() ? " (quiet-gap pacing)" : "");
     while (g_stop == 0) {
@@ -855,9 +879,17 @@ int run_tx(const Loaded& l) {
                          ca.chan_mhz);
         }
         tx.tick(now, inject);
+        if (const auto trc = air.value->tx_report_counters()) {
+            if (wedge.poll(now, trc->first, trc->second)) {
+                std::fprintf(stderr, "%s", wedge.wedged()
+                        ? "air: TX WEDGE — submissions advancing, zero CCX "
+                          "reports over the window (§9.10)\n"
+                        : "air: tx wedge cleared — CCX reports resumed\n");
+            }
+        }
         if (stats_period != 0 && now >= next_stats) {
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
-                       csa.state_str());
+                       csa.state_str(), 0, 0, wedge.wedged());
             next_stats = now + stats_period;
         }
     }
@@ -915,6 +947,10 @@ int run_rx(const Loaded& l) {
     const CsaParams cparams = csa_params(l.cfg);
     CsaIssuer issuer(cparams);
     CsaFollower follower(cparams);
+    // §9.10: the ground's designated uplink TX adapter gets the same
+    // CCX-liveness watchdog as the craft's radio.
+    TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
+                                l.cfg.air.wedge_min_submits});
     const uint16_t op_chan =
         l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
     std::fprintf(stderr, "rx: session=%u, %zu adapters, running%s\n",
@@ -1031,12 +1067,20 @@ int run_rx(const Loaded& l) {
         if (fa.kind != CsaAction::Kind::kNone) {
             air.value->retune_all(fa.chan_mhz, fa.bw, fa.fast);
         }
+        if (const auto trc = air.value->tx_report_counters()) {
+            if (wedge.poll(now, trc->first, trc->second)) {
+                std::fprintf(stderr, "%s", wedge.wedged()
+                        ? "air: TX WEDGE — submissions advancing, zero CCX "
+                          "reports over the window (§9.10)\n"
+                        : "air: tx wedge cleared — CCX reports resumed\n");
+            }
+        }
         if (stats_period != 0 && now >= next_stats) {
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
                                        : follower.state_str(),
-                       ret_window_hits, ret_window_misses);
+                       ret_window_hits, ret_window_misses, wedge.wedged());
             next_stats = now + stats_period;
         }
     }
