@@ -1165,15 +1165,27 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
   FEC block. `k` source symbols (§5.1a) + `r` repair symbols; every symbol is
   `s` bytes for the coding (last source symbol zero-padded to `s`, padding never
   on the wire).
-- **Systematic GF(256) RLC:** source symbols transmitted unmodified (zero encode
-  cost on the no-loss path). Each repair symbol is a GF(256) linear combination
-  `repair[j] = Σ_i c[j][i]·source[i]`; the coefficient vector `c[j][*]` is
-  generated deterministically from `(block_id, repair_idx)` so both ends
-  reconstruct it without transmitting coefficients.
+- **Systematic MDS (Cauchy Reed–Solomon over GF(256)):** source symbols are
+  transmitted unmodified (zero encode cost on the no-loss path). Each repair
+  symbol is `repair[j] = Σ_i c[j][i]·source[i]`, where the coefficient row
+  `c[j][*]` is a **Cauchy** row — `c[j][i] = 1 / (x_j ⊕ y_i)` over GF(256) with
+  `x_j` (repair) and `y_i` (source) drawn from disjoint fixed element sets. Both
+  ends reconstruct the row from the repair subheader `(repair_idx, window_len=k)`
+  alone — no coefficients on the wire. The Cauchy structure is **MDS**: any `k`
+  of the `k+r` symbols are linearly independent, so recovery is *guaranteed*
+  (not probabilistic).
+- **Capacity cap `k + r ≤ 256`** (GF(256) has 256 distinct elements). Adaptive
+  MTU (§3.2) keeps this satisfied for large frames — a 512 KB IDR is k≈132 at a
+  jumbo rung (leaving ≥124 for repair) but k≈370 at 1400 B. If a frame's
+  `k + r_target > 256` at the current MTU, FrameFramer **disables FEC for that
+  frame** (`r = 0`, ARQ-only) and raises a stat (`fec_oversize_k`); the source
+  symbols still ship. This is the concrete reason the SHM path pairs with
+  adaptive/jumbo MTU.
 - **RX decode:** with all `k` source symbols → deliver by concatenation, no
   decode. With ≥ `k` total symbols (any source/repair mix) → GF(256) Gaussian
-  elimination recovers the missing source symbols. With < `k` after the block
-  deadline / on supersession → frame lost (§6.2), no partial delivery.
+  elimination on the received rows recovers the missing source symbols
+  (guaranteed by MDS). With < `k` after the block deadline / on supersession →
+  frame lost (§6.2), no partial delivery.
 - **Emission order:** all `k` source symbols first (source-first delivers the
   no-loss case without any FEC decode), `END_OF_BLOCK` on the last source
   symbol, then the `r` repair symbols (same `block_id`).
