@@ -22,8 +22,18 @@ coordinated **follow-me channel switch** — built on OpenIPC **devourer** for r
 > freeze; ground trigger = stdin `csa <mhz> [class]`) — are implemented and
 > tested (`ctest --preset dev`, ASan+UBSan; SSC338Q cross-verified via
 > `cmake --preset ssc338q`).
-> Remaining: field bring-up + the §17 bench gates (step 11) — see
-> `docs/build-order.md`. Try it without hardware:
+> Step 11 (field bring-up + the §17 bench gates) has **run** on the x86 bench
+> (2× RTL8812CU + 1× RTL8812AU): the §3.0 on-air encapsulation is
+> field-verified (monitor RX delivers the MPDU with a +4-byte FCS trailer,
+> stripped before parse); gate 1 **PASSED** (injector + monitor siblings mix
+> in one process, both chip families, per-frame CCX `tx.report` live); gate 3
+> **PASSED** (NACK→RETRANSMIT recovery P90 ≤4 ms at 65% airtime, well inside
+> the 40 ms I-frame deadline; ARQ ceases past saturation by design); gate 2
+> machinery is validated and **desk-partial** (single-adapter synthetic fade
+> behaves textbook-independent; the correlated-fade verdict is deferred to
+> vehicle range testing); gate 4 observables are live (return-window
+> paced-hit ratio 97%→77% across load). See `docs/step11-bench.md` for the
+> full bench report and the remaining-work plan. Try it without hardware:
 > `./build/dev/waybeam-link loopback -c examples/config.loopback.sample.json`
 > or the two-process udp-air pair (`examples/config.air-{tx,rx}.sample.json`);
 > with radios, `examples/config.radio-{tx,rx}.sample.json`.
@@ -80,6 +90,28 @@ docs/
 profiles/
   table.example.json   The §9.3 operating-point table (data, not code).
 ```
+
+## Bench tools
+
+Scripts under `tools/` support the §17 bench gates:
+
+- `tools/rtp_feed.py <duration-s> <pps> [fps=60]` — frame-structured synthetic
+  H.265 RTP to `127.0.0.1:5600`: `<fps>` access units/s, per-AU M-bit on the
+  last packet, one IDR (NAL 19) per second. The saturation feeder for gates 3/4.
+- `tools/gate2_rho.py <ground-stats.jsonl> [min-seq-delta=30]` — the §17 gate-2
+  windowed cross-adapter loss correlation, ground-side self-aligned on the
+  stream's own seq deltas (immune to craft/ground start-time skew). Reports
+  per-adapter mean/P95 loss, joint post-diversity loss vs. the independence
+  product, and Pearson ρ between adapters.
+- `tools/gate3_rtt.py <ground-stats.jsonl> [iframe-deadline-ms=50]` — the §17
+  gate-3 NACK→RETRANSMIT latency report, diffed from the run's cumulative
+  `nack_rtt_*`/`arq_rec_*` histograms and segment-aware across stream
+  relatches. Reports P50/P90 plus the share provably inside the I-frame
+  deadline.
+
+Bench knob: `air.rx_drop_permille` (per-adapter independent synthetic RX
+drop; bench-only, default off) — used to manufacture known-independent loss
+for gate-2 machinery validation.
 
 ## Deployment invariant (must hold before this can drive a craft)
 
