@@ -54,6 +54,30 @@ uint32_t Halrf8822e::rf_read(uint8_t path, uint16_t addr, uint32_t mask) {
 }
 void Halrf8822e::rf_write(uint8_t path, uint16_t addr, uint32_t mask,
                           uint32_t val) {
+  /* 8822e: RF reg 0x0 is NOT written through the direct 0x3c00/0x4c00 window
+   * like every other RF reg — it must go through the legacy 3-wire "FON" path
+   * 0x1808/0x4108 as a full-DWORD write with the addr in [27:20] (=0 here).
+   * Routing it through the direct window (as the rest of the RF regs use) makes
+   * the write a no-op on the gain-table index pointer, so txgapk_save_all reads
+   * the index-0 LUT entry for every gain index (all-zero on 5 GHz) and TXGAPK is
+   * skipped, leaving the 5 GHz PA un-linearized → MCS5-7 EVM floor. Port of the
+   * reg_addr==RF_0x0 branch of config_phydm_write_rf_reg_8822e. */
+  static const bool legacy_rf0 = ::getenv("DEVOURER_RF0_LEGACY") != nullptr;
+  if ((addr & 0xff) == 0x0 && !legacy_rf0) {
+    static constexpr uint16_t FON_WIN[2] = {0x1808, 0x4108};
+    uint32_t m = mask & RFREG_MASK;
+    uint32_t data;
+    if (m != RFREG_MASK) {
+      uint32_t orig = rf_read(path, 0x0, RFREG_MASK); /* read via 0x3c00 window */
+      data = (orig & ~m) | ((val << mask_shift(m)) & m);
+    } else {
+      data = val & RFREG_MASK;
+    }
+    /* data_and_addr = ((0 << 20) | data) & 0x0fffffff; full 32-bit BB write. */
+    _device.rtw_write32(FON_WIN[path & 1], data & 0x000fffff);
+    delay_us(1);
+    return;
+  }
   uint16_t direct = static_cast<uint16_t>(RF_WIN[path & 1] + ((addr & 0xff) << 2));
   bb_set(direct, mask & RFREG_MASK, val);
 }
@@ -1059,6 +1083,26 @@ void Halrf8822e::phy_iq_calibrate(ChannelWidth_t bw, uint8_t channel) {
   std::snprintf(buf, sizeof(buf), "0x%02x", _iqk.fail_step);
   _logger->info("Jaguar3(8822e): IQK done (times=" +
                 std::to_string(_iqk.iqk_times) + " fail_step=" + buf + ")");
+
+  /* DEBUG (DEVOURER_IQK_DUMP): verify the TX I/Q correction is actually ENABLED
+   * per path. Kernel success end-state = 0x1b70 BIT8==1 and 0x1b38 != bypass
+   * (0x40000000 post-fail / 0x20000000 pre-cal identity). A bypass/default here
+   * leaves an uncorrected TX image tone that spares QPSK but garbles 16/64-QAM. */
+  if (::getenv("DEVOURER_IQK_DUMP") != nullptr) {
+    uint32_t save_1b00 = _device.rtw_read32(0x1b00);
+    for (uint8_t p = 0; p < 2; ++p) {
+      bb_set(0x1b00, 0x00000006, p);
+      uint32_t txxy = _device.rtw_read32(0x1b38);
+      uint32_t enb = bb_get(0x1b70, 1u << 8);
+      const char *st = (txxy == 0x40000000) ? "BYPASS(fail)"
+                       : (txxy == 0x20000000) ? "IDENTITY(uncal)"
+                                              : "applied";
+      _logger->info("Jaguar3(8822e): IQK-DUMP path{} 0x1b38={:08x} "
+                    "apply_en(0x1b70.8)={} => {}",
+                    p, txxy, enb, st);
+    }
+    _device.rtw_write32(0x1b00, save_1b00);
+  }
 
   /* TX gain calibration — sets the 8822E TX gain table (the gross 5 GHz gain).
    * Runs after IQK on the tuned channel (halrf_init order: IQK then TXGAPK). */

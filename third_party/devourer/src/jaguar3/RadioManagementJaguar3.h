@@ -122,6 +122,12 @@ public:
   void apply_tx_power_refs_8822e(uint8_t ref_a, uint8_t ref_b,
                                  bool skip_path_b_ofdm_ref);
 
+  /* 8822e OFDM-ref UPPER field ([24:17] TXAGC-offset + bit-8 clear) — the
+   * MCS4+/64-QAM TX fix (see .cpp). Applied after the [16:10] index writes in
+   * both ref paths. Gated OFF via DEVOURER_8822E_OFDM_REF_FIX_OFF; offsets
+   * env-tunable (DEVOURER_8822E_OFDM_OFF_A/B, ch36 defaults 0x38/0x4f). */
+  void apply_ofdm_ref_upper_8822e(bool skip_path_b);
+
 private:
   /* Jaguar3 baseband bandwidth/clock registers (from
    * config_phydm_switch_bandwidth_8822c). These do NOT exist on Jaguar1. */

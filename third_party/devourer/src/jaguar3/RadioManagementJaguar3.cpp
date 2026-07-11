@@ -684,6 +684,37 @@ static bool pg_addr_to_rates(uint32_t addr, std::array<uint8_t, 4> &rates) {
 }
 #endif /* DEVOURER_HAVE_JAGUAR3_8822E */
 
+/* 8822e OFDM-ref UPPER field ([24:17] TXAGC-offset + bit-8), which devourer left
+ * at a wrong default → 16/64-QAM TX garbled while BPSK/QPSK survived (the MCS4+
+ * cap). Bench-proven (EU→CU MCS7 override A/B, EVM −41 dB, doctor-clean): forcing
+ * path-B 0x41e8[24:17]=0x4F & bit8=0 (path A 0x18e8[24:17]=0x38 & bit8=0) recovers
+ * MCS7 from 0 → thousands of clean frames. Path B is necessary; path A additive.
+ * The kernel's exact derivation of these offsets is #if0'd in halrf_tssi_8822e.c,
+ * so the values are ch36-captured constants — env-tunable, gated OFF via
+ * DEVOURER_8822E_OFDM_REF_FIX_OFF pending efuse-general confirmation upstream. */
+void RadioManagementJaguar3::apply_ofdm_ref_upper_8822e(bool skip_path_b) {
+  if (::getenv("DEVOURER_8822E_OFDM_REF_FIX_OFF") != nullptr)
+    return;
+  auto envoff = [](const char *k, uint32_t def) -> uint32_t {
+    const char *v = ::getenv(k);
+    return v ? static_cast<uint32_t>(std::strtol(v, nullptr, 0)) : def;
+  };
+  /* Chip u32 = little-endian of the vendor-kernel captured wire bytes (usbmon
+   * "00708000"/"009e0000"). A full-DWORD write reproduces the exact proven-good
+   * register state — sidesteps the [16:10]/[24:17] field + endianness tangle. */
+  const uint32_t full_a = envoff("DEVOURER_8822E_OFDM_A_FULL", 0x00807000u);
+  const uint32_t full_b = envoff("DEVOURER_8822E_OFDM_B_FULL", 0x00009e00u);
+  _device.phy_set_bb_reg(0x1c90, 1u << 15, 0); /* txagc write enable */
+  _device.phy_set_bb_reg(0x18e8, 0xFFFFFFFFu, full_a);
+  if (!skip_path_b) {
+    _device.phy_set_bb_reg(0x1c90, 1u << 15, 0);
+    _device.phy_set_bb_reg(0x41e8, 0xFFFFFFFFu, full_b);
+  }
+  _logger->info("Jaguar3(8822e): OFDM-ref fix applied — 0x18e8<=0x{:08x} "
+                "0x41e8<=0x{:08x} (path B {})",
+                full_a, full_b, skip_path_b ? "SKIPPED" : "written");
+}
+
 void RadioManagementJaguar3::apply_tx_power_refs_8822e(
     uint8_t ref_a, uint8_t ref_b, bool skip_path_b_ofdm_ref) {
   invalidate_fast_caches(); /* writes the 0x1c90 TXAGC gate below */
@@ -701,6 +732,9 @@ void RadioManagementJaguar3::apply_tx_power_refs_8822e(
     wr(0x41e8, 0x1fc00, ref_b); /* path B — RX-desense hazard, see header */
   wr(0x18a0, 0x7f0000, ref_a);  /* CCK ref */
   wr(0x41a0, 0x7f0000, ref_b);
+  /* NB: the OFDM-ref UPPER-field fix (MCS4+) is NOT applied here — the FW
+   * power-mode/coex steps later in InitWrite clobber it; it is re-applied at the
+   * end of InitWrite (RtlJaguar3Device::InitWrite). */
 }
 
 void RadioManagementJaguar3::apply_power_by_rate_8822e(
@@ -755,6 +789,7 @@ void RadioManagementJaguar3::apply_power_by_rate_8822e(
     wr(0x41e8, 0x1fc00, ref_b);   /* path B — RX-desense hazard, see header */
   wr(0x18a0, 0x7f0000, ref_a);    /* CCK ref (2.4G) */
   wr(0x41a0, 0x7f0000, ref_b);
+  /* OFDM-ref UPPER-field fix re-applied at end of InitWrite (post FW/coex). */
 
   /* Pass 2: write the per-rate diff table for this band (path-A entries; the
    * 0x3a00 table is path-shared and path-B pg values are identical). */
