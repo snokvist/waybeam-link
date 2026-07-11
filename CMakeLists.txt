@@ -61,6 +61,8 @@ endif()
 add_library(wblink_core STATIC
     core/src/wire.cpp
     core/src/table.cpp
+    core/src/gf256.cpp
+    core/src/rlc.cpp
     core/src/framer.cpp
     core/src/ring.cpp
     core/src/rx.cpp
