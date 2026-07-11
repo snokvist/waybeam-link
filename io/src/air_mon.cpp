@@ -71,9 +71,12 @@ struct MonAir::Impl {
     bool sgi = false;
     uint8_t bw = 20;
     std::vector<uint8_t> tx_buf;
-    uint64_t tx_submitted = 0;
-    uint64_t tx_failed = 0;
-    uint64_t unicast_fallback = 0;
+    // Written by inject()/inject_return() on the main thread, read by
+    // counters()/return_counters() — atomic (relaxed) to match RadioAir and
+    // stay race-free if stats are ever read off-thread.
+    std::atomic<uint64_t> tx_submitted{0};
+    std::atomic<uint64_t> tx_failed{0};
+    std::atomic<uint64_t> unicast_fallback{0};
 
     ~Impl() {
         running.store(false, std::memory_order_relaxed);
@@ -154,10 +157,10 @@ size_t MonAir::Impl::send_frame(const uint8_t* payload, size_t len) {
     }
     const ssize_t w = ::send(a->fd, tx_buf.data(), tx_buf.size(), 0);
     if (w < 0 || static_cast<size_t>(w) != tx_buf.size()) {
-        ++tx_failed;
+        tx_failed.fetch_add(1, std::memory_order_relaxed);
         return 0;
     }
-    ++tx_submitted;
+    tx_submitted.fetch_add(1, std::memory_order_relaxed);
     return 1;
 }
 
@@ -250,14 +253,14 @@ size_t MonAir::inject(const uint8_t* frame, size_t len) {
 size_t MonAir::inject_return(uint16_t dest_originator, const uint8_t* frame,
                              size_t len) {
     (void)dest_originator;  // monitor: no HW ACK responder → broadcast
-    ++impl_->unicast_fallback;
+    impl_->unicast_fallback.fetch_add(1, std::memory_order_relaxed);
     return impl_->send_frame(frame, len);
 }
 
 void MonAir::return_counters(uint64_t& unicast_sent,
                              uint64_t& unicast_fallback) const {
     unicast_sent = 0;
-    unicast_fallback = impl_->unicast_fallback;
+    unicast_fallback = impl_->unicast_fallback.load(std::memory_order_relaxed);
 }
 
 int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
@@ -331,8 +334,8 @@ MonAir::AdapterCounters MonAir::counters(size_t adapter) const {
     c.rssi_last =
         static_cast<int8_t>(a->rssi_last.load(std::memory_order_relaxed));
     if (a->tx) {
-        c.tx_submitted = impl_->tx_submitted;
-        c.tx_failed = impl_->tx_failed;
+        c.tx_submitted = impl_->tx_submitted.load(std::memory_order_relaxed);
+        c.tx_failed = impl_->tx_failed.load(std::memory_order_relaxed);
     }
     return c;
 }
