@@ -1612,6 +1612,15 @@ overflow the receiver's UDP queue even when the intended channel loss is zero.
 This pacing models serialization only; it does not model PHY overhead or
 contention.
 
+Accepted retransmissions that have passed the §5.3 deadline, attempt, hold-down,
+and airtime-budget gates use a separate deadline-priority lane. At each
+serialization opportunity this lane is drained before queued live packets. This
+does not exempt retransmissions from the §5.3 airtime cap; it only prevents an
+already-authorized recovery from waiting behind a complete encoded-frame burst
+in a host-side pacing FIFO. Air receive readiness MUST also wake a transmitter
+that is waiting for local stream ingress, so NACK handling does not inherit the
+local-ingress polling interval.
+
 ---
 
 ## 17. Empirical knobs & bench gates

@@ -569,6 +569,25 @@ remain ignored.
 **Amended:** §6.3a (zero-retention release/supersession rule). Code follows
 separately.
 
+## Pass 26 — expedite authorized ARQ retransmissions (2026-07-13)
+
+Ethernet gate-3 testing separated sub-millisecond network propagation from
+application recovery latency. Two avoidable host-side waits remained: the TX
+main loop could sleep on local stream ingress while a return packet was ready,
+and the UDP serialization model appended an authorized retransmission behind a
+whole queued encoded-frame burst. The latter can consume most or all of a
+short JSCC deadline even though the §5.3 scheduler has already accepted,
+budgeted, and freshness-sorted the resend.
+
+Authorized retransmissions now use a deadline-priority serialization lane, and
+air-return readiness participates in the TX ingress wait. The §5.3 airtime cap,
+per-requester partition, attempt cap, deadline gate, global hold-down, and
+freshness ordering remain unchanged. This is bounded priority for packets the
+scheduler already admitted, not an unlimited ARQ fast path.
+
+**Amended:** §16.3 (paced retransmit priority and return-path wakeup). Code
+follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
