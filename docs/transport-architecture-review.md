@@ -30,14 +30,16 @@ and several observability gaps need resolution before unattended deployment.
    backend rather than acknowledged. This branch now rejects local CSA control
    and ignores received campaigns on kernel-monitor; real retune remains absent.
 
-2. **Frame-SHM producer restart strands an attached consumer.**
+2. **Frame-SHM producer restart stranded an attached consumer (ingress fixed).**
    `FrameShmRing::create()` unlinks and recreates the name. Existing mappings
    remain attached to the old object. TX retries only while its ring pointer is
    null, so a venc restart after initial attachment is never detected. The same
    issue affects an egress consumer when the RX process recreates its ring.
-   The header has an `epoch` field but it is always initialized to zero and
-   cannot identify replacement objects. Recovery needs an epoch/producer
-   liveness contract or periodic name/inode revalidation and reattachment.
+   This branch now follows the canonical epoch convention and makes the TX
+   consumer periodically revalidate the named object's device/inode and
+   `init_complete`, then detach and re-enter lazy attachment after venc
+   replacement. External consumers of an RX egress ring still need equivalent
+   replacement detection in their own ring library.
 
 ### High
 
@@ -182,8 +184,7 @@ to normal point-to-point UDP:
 
 ## Recommended sequence
 
-1. Define and implement frame-SHM producer epoch/reconnect behavior.
-2. Implement HEARTBEAT scheduling/handling and a read-only discovery endpoint.
-3. Specify the pre-diversity estimator and expose SHM/kernel-overflow counters.
-4. Add a config topology expander for paired ARQ return paths.
-5. Add optional UDP broadcast/sniffer mode as a dedicated simulation backend.
+1. Implement HEARTBEAT scheduling/handling and a read-only discovery endpoint.
+2. Specify the pre-diversity estimator and expose SHM/kernel-overflow counters.
+3. Add a config topology expander for paired ARQ return paths.
+4. Add optional UDP broadcast/sniffer mode as a dedicated simulation backend.

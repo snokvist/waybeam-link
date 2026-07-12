@@ -1157,6 +1157,7 @@ int run_tx(const Loaded& l) {
     }
     std::vector<uint8_t> frame_buf(kFrameRingDefaultSlotSize);
     uint64_t next_shm_attach_ms = 0;
+    uint64_t next_shm_identity_check_ms = 0;
 
     StatsEmitter emitter(true, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
@@ -1245,6 +1246,18 @@ int run_tx(const Loaded& l) {
         // tick's captured now, and u64 "now - stamp" arithmetic underflows).
         const uint64_t now = now_ms();
         now_us_it = now_us();
+        if (now >= next_shm_identity_check_ms) {
+            for (ShmIn& si : shm_ins) {
+                if (si.ring && !si.ring->backing_object_current()) {
+                    std::fprintf(stderr,
+                                 "tx: frame-shm '%s' producer replaced; "
+                                 "reattaching\n",
+                                 si.name.c_str());
+                    si.ring.reset();
+                }
+            }
+            next_shm_identity_check_ms = now + 250;
+        }
         // Flush held video the moment the gap allows it; an EOB inside the
         // flush re-arms the gap and holds the rest.
         while (!held.empty() &&

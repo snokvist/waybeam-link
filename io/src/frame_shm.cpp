@@ -134,7 +134,11 @@ R FrameShmRing::create(const std::string& name, uint32_t slots,
     store_u32(b, kFrHdrSlotCount, slots);
     store_u32(b, kFrHdrSlotDataSize, slot_size);
     store_u32(b, kFrHdrTotalSize, static_cast<uint32_t>(total));
-    store_u32(b, kFrHdrEpoch, 0);
+    timespec ts{};
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    store_u32(b, kFrHdrEpoch,
+              static_cast<uint32_t>(static_cast<uint64_t>(ts.tv_sec) * 1000u +
+                                    static_cast<uint64_t>(ts.tv_nsec) / 1000000u));
     // Publish config last: a release store on init_complete makes every prior
     // header write visible to a consumer that acquire-loads it.
     atomic_store_u32(b, kFrHdrInitComplete, 1, __ATOMIC_RELEASE);
@@ -211,11 +215,31 @@ R FrameShmRing::attach(const std::string& name) {
     ring->slot_data_size_ = slot_size;
     ring->slot_stride_ = stride;
     ring->name_ = shm_name;
+    ring->backing_dev_ = static_cast<uint64_t>(st.st_dev);
+    ring->backing_ino_ = static_cast<uint64_t>(st.st_ino);
     ring->is_owner_ = false;
     ring->is_consumer_ = true;
     ring->event_fd_ = efd;
     ring->reader_ = std::thread([r = ring.get()] { r->reader_loop(); });
     return R::ok(std::move(ring));
+}
+
+bool FrameShmRing::backing_object_current() const {
+    if (!is_consumer_ || map_ == nullptr ||
+        atomic_load_u32(map_, kFrHdrInitComplete, __ATOMIC_ACQUIRE) != 1) {
+        return false;
+    }
+    const int fd = ::shm_open(name_.c_str(), O_RDWR, 0);
+    if (fd < 0) {
+        return false;
+    }
+    struct stat st{};
+    const bool current =
+        ::fstat(fd, &st) == 0 &&
+        static_cast<uint64_t>(st.st_dev) == backing_dev_ &&
+        static_cast<uint64_t>(st.st_ino) == backing_ino_;
+    ::close(fd);
+    return current;
 }
 
 // ---- reader thread (consumer) ---------------------------------------------

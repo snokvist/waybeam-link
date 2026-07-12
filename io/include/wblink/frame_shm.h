@@ -59,6 +59,10 @@ class FrameShmRing {
     void drain_event();                          // read() the eventfd after servicing
     bool is_consumer() const { return is_consumer_; }
 
+    // False when the producer cleared init_complete or unlinked/recreated the
+    // name behind this consumer's existing mapping.
+    bool backing_object_current() const;
+
     struct Stats {
         uint64_t writes = 0;
         uint64_t reads = 0;
@@ -81,6 +85,8 @@ class FrameShmRing {
     uint32_t slot_data_size_ = 0;
     size_t slot_stride_ = 0;    // align8(4 + slot_data_size)
     std::string name_;          // leading-'/' shm name
+    uint64_t backing_dev_ = 0;  // fstat identity captured at attach
+    uint64_t backing_ino_ = 0;
     bool is_owner_ = false;     // producer: shm_unlink on destroy
     bool is_consumer_ = false;  // consumer: has reader thread + eventfd
     int event_fd_ = -1;         // consumer eventfd (readiness)
