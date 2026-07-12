@@ -100,7 +100,7 @@ class Fleet:
 
 
 def _infer_role(snap):
-    """No role field in §15.3; infer from what moved."""
+    """No role field in §15.3; report observed adapter traffic direction."""
     adapters = snap.get("adapters") or []
     tx = any((a.get("tx_submitted") or 0) > 0 or (a.get("tx_reports") or 0) > 0
              for a in adapters)

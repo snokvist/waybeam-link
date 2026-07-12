@@ -39,6 +39,10 @@ class DashboardSchemaTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, HTML)
 
+    def test_inferred_role_is_not_presented_as_process_mode(self):
+        self.assertIn('rec.role==="loopback"?"TX+RX"', HTML)
+        self.assertIn("not configured process mode", HTML)
+
 
 if __name__ == "__main__":
     unittest.main()
