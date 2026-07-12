@@ -611,6 +611,13 @@ frames instead of forwarding per-packet payloads:
    (§15.4) — the metadata prefix rides through transparently; the RX never
    parses the Annex-B payload.
 
+There is no completed-frame reorder buffer. On observing any packet from block
+`N`, every incomplete block older than `N` is finalized as superseded. Once
+block `N` is released, older blocks can therefore neither delay it nor appear
+after it; any late symbol for an older finalized block is ignored. This is the
+frame-SHM form of §6.2's latency-first rule and the retention window is zero
+blocks, not a jitter-buffer allowance.
+
 This is §5.3 Option A. (Option B — RTP re-packetization for a decoder that cannot
 consume SHM — is out of scope for v1; a `udp` egress on a `frame-shm`-ingested
 stream is rejected at config load, since the wire payloads are frame *fragments*,

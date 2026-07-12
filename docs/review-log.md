@@ -552,6 +552,23 @@ fallback until the measured estimator is connected.
 **Amended:** §14.2 (inner-controller inputs, clamps, ARQ/deadline gates, and
 reason-code contract). Code follows separately.
 
+## Pass 25 — release supersedes every older incomplete frame (2026-07-12)
+
+The operator confirmed the wfb_ng-style latency rule: once the receiver has a
+newer available frame/block, waiting for any older incomplete frame is invalid.
+The protocol already said a newer block supersedes older incomplete blocks, but
+`FrameReassembler` retained a two-block window. Ordered RX delivery prevented
+late output in common cases, yet stale reassembly state and counters survived
+until a later block or deadline.
+
+Frame-SHM reassembly now has a zero-block retention window. Seeing block `N`
+finalizes every older incomplete block as superseded; releasing `N` can never
+be delayed by, or followed by, an older frame. Late symbols for finalized blocks
+remain ignored.
+
+**Amended:** §6.3a (zero-retention release/supersession rule). Code follows
+separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
