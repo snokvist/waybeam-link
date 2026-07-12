@@ -229,6 +229,7 @@ struct RadioAir::Impl {
             r ^= r << 5;
             a.drop_rng = r;
             if (r % 1000 < cfg.rx_drop_permille) {
+                a.rx_dropped.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
         }
