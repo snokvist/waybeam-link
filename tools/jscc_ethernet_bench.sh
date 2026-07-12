@@ -17,6 +17,8 @@ LIVE=${LIVE:-1}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
 JSCC_DEADLINE_MS=${JSCC_DEADLINE_MS:-16}
 PACKET_TRACE_MAX=${PACKET_TRACE_MAX:-75000}
+RAMP_DWELL_S=${RAMP_DWELL_S:-4}
+RAMP_LEVELS=${RAMP_LEVELS:-"0 25 50 100 150 200 100 50 0"}
 REMOTE_TRACE_DIR=${REMOTE_TRACE_DIR:-/mnt/mmcblk0p1/waybeam-link-traces}
 FEC_I_RATE_PERMILLE=${FEC_I_RATE_PERMILLE:-250}
 FEC_P_RATE_PERMILLE=${FEC_P_RATE_PERMILLE:-100}
@@ -234,9 +236,38 @@ case "$COMMAND" in
         echo
         exit 0
         ;;
+    loss-ramp)
+        supervisor_running || fail "continuous bench is not running"
+        artifacts=$(sed -n 's/^artifacts=//p' "$RUNTIME_INFO")
+        [[ -n "$artifacts" ]] || fail "missing runtime artifact directory"
+        output="$artifacts/loss-ramp-stats.jsonl"
+        reset_loss() {
+            curl -fsS -X POST -H 'Content-Type: application/json' \
+                -d '{"permille":0}' "$GROUND_CONTROL/api/v1/bench/rx-drop" \
+                >/dev/null 2>&1 || true
+        }
+        trap reset_loss EXIT INT TERM
+        : >"$output"
+        for level in $RAMP_LEVELS; do
+            [[ "$level" =~ ^([0-9]{1,3}|1000)$ ]] || \
+                fail "RAMP_LEVELS values must be 0..1000"
+            curl -fsS -X POST -H 'Content-Type: application/json' \
+                -d "{\"permille\":$level}" \
+                "$GROUND_CONTROL/api/v1/bench/rx-drop" >/dev/null
+            sleep "$RAMP_DWELL_S"
+            snapshot=$(curl -fsS "$GROUND_CONTROL/api/v1/stats")
+            printf '{"permille":%s,"snapshot":%s}\n' \
+                "$level" "$snapshot" >>"$output"
+            echo "loss ramp: $level permille"
+        done
+        reset_loss
+        trap - EXIT INT TERM
+        echo "loss ramp stats: $output"
+        exit 0
+        ;;
     finite) LIVE=0 ;;
     run) LIVE=1 ;;
-    *) echo "usage: $0 [start|stop|status|recover-video|run|finite]" >&2; exit 2 ;;
+    *) echo "usage: $0 [start|stop|status|recover-video|loss-ramp|run|finite]" >&2; exit 2 ;;
 esac
 
 trap cleanup EXIT

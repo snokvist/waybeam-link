@@ -83,6 +83,7 @@ int main() {
     bool fec_ok = true;
     int reset_calls = 0;
     int recovery_stream = -2;
+    int bench_drop = -1;
 
     auto srv = ControlServer::create("127.0.0.1:0");
     CHECK(static_cast<bool>(srv));
@@ -117,6 +118,11 @@ int main() {
     h.video_recover = [&](int stream_id) -> std::string {
         recovery_stream = stream_id;
         return stream_id < 0 ? "no matching latched RTP stream" : "";
+    };
+    h.bench_rx_drop = [&](int permille) -> std::string {
+        if (permille < 0 || permille > 1000) return "out of range";
+        bench_drop = permille;
+        return "";
     };
     // h.csa intentionally left null → endpoint must 409.
     s.set_handlers(std::move(h));
@@ -248,6 +254,22 @@ int main() {
             "POST /api/v1/video/recover HTTP/1.0\r\n\r\n";
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
         CHECK_EQ_U(recovery_stream, static_cast<uint64_t>(-1));
+    }
+    // UDP-air synthetic loss retunes in-process and validates its range.
+    {
+        const std::string body = "{\"permille\":175}";
+        const std::string req =
+            "POST /api/v1/bench/rx-drop HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(bench_drop, 175);
+    }
+    {
+        const std::string body = "{\"permille\":1001}";
+        const std::string req =
+            "POST /api/v1/bench/rx-drop HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }
     // malformed JSON → 400.
     {

@@ -368,6 +368,13 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         if (!h_.video_recover) return na();
         return done(h_.video_recover(j.value("stream_id", -1)));
     }
+    if (path == "/api/v1/bench/rx-drop") {
+        if (!h_.bench_rx_drop) return na();
+        if (!j.contains("permille")) {
+            return reply(400, "Bad Request", json_err("permille required"));
+        }
+        return done(h_.bench_rx_drop(j.value("permille", -1)));
+    }
     return reply(404, "Not Found", json_err("unknown path"));
 }
 

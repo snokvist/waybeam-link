@@ -671,6 +671,13 @@ struct AirBackend {
         // switch succeeded can strand the node while its interface stays put.
         return !mon.has_value();
     }
+    bool set_udp_rx_drop(int permille) {
+        if (!udp || permille < 0 || permille > 1000) {
+            return false;
+        }
+        udp->set_rx_drop_permille(static_cast<uint16_t>(permille));
+        return true;
+    }
     // §9.10: the watchdog runs in the mode loop (it owns the clock); its
     // verdict is grafted onto the TX adapter's stats entry here.
     void fill_adapter_stats(StatsSnapshot& snap, uint64_t tsf_fallbacks,
@@ -1973,6 +1980,12 @@ int run_rx(const Loaded& l) {
         h.video_recover = [&](int stream_id) {
             return rx.request_recovery(stream_id, inject_nack);
         };
+        if (air.value->udp) {
+            h.bench_rx_drop = [&](int permille) -> std::string {
+                return air.value->set_udp_rx_drop(permille)
+                    ? std::string() : "permille must be 0..1000";
+            };
+        }
         h.reset_stats = [&] {
             rx.reset_stats();
             for (ShmOut& so : shm_outs) {

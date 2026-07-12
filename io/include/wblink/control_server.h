@@ -39,6 +39,7 @@ struct ControlHandlers {
         fec;
     std::function<void()> reset_stats;  // side-effect only; always 200
     std::function<std::string(int stream_id)> video_recover;
+    std::function<std::string(int permille)> bench_rx_drop;
 };
 
 class ControlServer {

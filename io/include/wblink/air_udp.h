@@ -48,6 +48,8 @@ class UdpAir {
     // Returns frames delivered, or -1 on poll error.
     int poll_once(int timeout_ms, const RxCb& cb);
     void set_trace(TraceCb cb) { trace_ = std::move(cb); }
+    void set_rx_drop_permille(uint16_t value) { rx_drop_permille_ = value; }
+    uint16_t rx_drop_permille() const { return rx_drop_permille_; }
 
     size_t rx_adapters() const { return adapters_.size(); }
     uint16_t adapter_port(size_t i) const {

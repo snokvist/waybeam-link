@@ -376,6 +376,8 @@ tools/jscc_ethernet_bench.sh start
 tools/jscc_ethernet_bench.sh status
 # After Radeon-VRX creates/recreates its decoder pipeline:
 tools/jscc_ethernet_bench.sh recover-video
+# In-process UDP loss ramp; estimator state is preserved and loss resets to 0:
+RAMP_DWELL_S=4 tools/jscc_ethernet_bench.sh loss-ramp
 ```
 
 The stable application SHM name is `venc_frame_out` (POSIX object

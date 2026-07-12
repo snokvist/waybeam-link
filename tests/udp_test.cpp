@@ -288,6 +288,12 @@ int main() {
             CHECK_EQ_U(air.value->rx_frames(0), 0u);
             CHECK_EQ_U(air.value->rx_dropped(0), 1u);
             CHECK_EQ_U(drop_events, 1u);
+            air.value->set_trace({});
+            air.value->set_rx_drop_permille(0);
+            CHECK_EQ_U(air.value->rx_drop_permille(), 0u);
+            CHECK_EQ_U(sender.value->inject(&msg, 1), 1u);
+            CHECK_EQ_U(air.value->poll_once(100, discard), 1u);
+            CHECK_EQ_U(air.value->rx_frames(0), 1u);
         }
     }
 
