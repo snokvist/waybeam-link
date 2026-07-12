@@ -379,6 +379,25 @@ fields + frame-shm mapping prose).
 per-instance direct-to-REST dashboard mode (the UDP-push fleet bridge ships now
 in `tools/link_monitor.py`, PR #18).
 
+**Addendum — runtime pin snap (found in E2E-over-UDP validation).** Exercising
+`POST /link/profile {min:1,max:1}` against a live udp-air pair showed the link
+report `state=PINNED` but the operating point staying put (`profile` unchanged)
+instead of snapping to the pinned rung. Root cause: `Selector::evaluate()`'s
+`min==max` branch set `state_="PINNED"` and returned **without** moving `rung_`;
+config-time pins worked only because the ctor clamps `rung_`, but the §15.5
+runtime path (`set_profile_pin`) relied on `evaluate()`, which never re-clamped.
+Fix: the pin branch now snaps `rung_` to the pinned rung and emits the commit
+(direction-agnostic, no flap bookkeeping — the pin overrides adaptation). §9.7
+clarified to state the snap explicitly; `selector_test` gains a runtime-repin
+case (down, up, idempotent no-commit, unpin-resumes). Re-verified live: pin
+drove `active_profile` 6→1 with `mcs`/bitrate following, both TX and RX panes
+reflecting profile 1. Also confirmed in the same run: full REST read surface,
+`/fec`→400 on a UDP stream, `/csa`→409 on TX, `/nope`→404, `/stats/reset` zeroing
+counters, native SSE, and the fleet monitor aggregating both instances over UDP.
+The two-target udp-air `tx:[a,b]` split-fanout under-reports `delivered` vs the
+wire (dev-backend artifact, not a stats bug: single-adapter and real diversity
+both account exactly — verified `delivered==uniq==wire` on a 1-adapter run).
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

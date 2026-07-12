@@ -841,7 +841,11 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
   `flap_freeze_window_s` (**10 s**) pins the rung below for `flap_freeze_s`
   (**10 s**). Flap is *worse* without FEC (each flap = a visible glitch) → this is
   more valuable here, not less.
-- **`min==max` pin:** freezes adaptation at a rung (bench / known-bad-link).
+- **`min==max` pin:** freezes adaptation at the pinned rung (bench /
+  known-bad-link). A runtime re-pin (§15.5 `POST /api/v1/link/profile`) **snaps**
+  the operating point to that rung immediately, in either direction — it is a
+  select-and-hold, not a freeze-in-place. (Config-time pins already land there via
+  the boot clamp; the runtime path clamps in `evaluate()` on the next tick.)
 
 ### 9.8 Fail-safe on lost feedback
 TX runs a `report_epoch` watchdog. No fresh, monotonic-forward epoch within
