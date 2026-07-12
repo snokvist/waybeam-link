@@ -488,6 +488,32 @@ struct AirBackend {
         return sent;
     }
 
+    size_t inject_resend(const uint8_t* f, size_t n) {
+        size_t sent = 0;
+        if (mon) {
+            sent = mon->inject(f, n);
+        } else {
+#if WBLINK_RADIO
+            if (radio) {
+                sent = radio->inject(f, n);
+            } else
+#endif
+            {
+                sent = udp->inject_resend(f, n);
+            }
+        }
+        if (sent > 0) last_tx_ms = now_ms();
+        return sent;
+    }
+
+    std::vector<int> wait_fds() const {
+        if (mon) return {mon->wait_fd()};
+#if WBLINK_RADIO
+        if (radio) return {radio->wait_fd()};
+#endif
+        return udp->wait_fds();
+    }
+
     // Returns (NACK/LINK_REPORT) carry their target so the radio backend
     // can address them as §3.0 unicast when return.unicast is on; the udp
     // dev backend has no L2 addressing and ignores the target.
@@ -938,7 +964,8 @@ struct TxCore {
         }
     }
 
-    void tick(uint64_t now, const Inject& inject) {
+    void tick(uint64_t now, const Inject& inject,
+              const Inject& inject_resend = {}) {
         const SelectorActions act = selector_.tick(now);
         if (act.commit) {
             // §9.5 commit: the operating point stamped on every DATA packet
@@ -987,8 +1014,9 @@ struct TxCore {
         }
         for (Stream& s : streams_) {
             s.ring.evict(now);
-            s.sched.drain(s.ring, now,
-                          [&](const uint8_t* f, size_t l) { inject(f, l); });
+            s.sched.drain(s.ring, now, [&](const uint8_t* f, size_t l) {
+                (inject_resend ? inject_resend : inject)(f, l);
+            });
         }
     }
 
@@ -1549,6 +1577,9 @@ int run_tx(const Loaded& l) {
         }
         send_raw(f, n);
     };
+    const TxCore::Inject inject_resend = [&](const uint8_t* f, size_t n) {
+        air.value->inject_resend(f, n);
+    };
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
     // retunes the (single) radio at the TSF-anchored T_switch.
     CsaFollower csa(csa_params(l.cfg));
@@ -1664,7 +1695,11 @@ int run_tx(const Loaded& l) {
                 shm_fds.push_back(si.ring->event_fd());
             }
         }
+        const size_t shm_fd_count = shm_fds.size();
+        const std::vector<int> air_fds = air.value->wait_fds();
+        shm_fds.insert(shm_fds.end(), air_fds.begin(), air_fds.end());
         const auto drain_shm = [&](size_t j) {
+            if (j >= shm_fd_count) return;  // air readiness; drained below
             size_t k = 0;
             for (ShmIn& si : shm_ins) {
                 if (!si.ring) {
@@ -1700,10 +1735,11 @@ int run_tx(const Loaded& l) {
         if (!have_udp_ins && shm_fds.empty() && in_timeout > 0) {
             ::poll(nullptr, 0, in_timeout);
         }
+        const uint64_t service_now = now_ms();
         air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
                                     size_t n) {
             const Decoded dec = decode(d, n);
-            discovery.observe(dec, now);
+            discovery.observe(dec, service_now);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
                 if (!air.value->supports_csa()) {
                     return;
@@ -1727,7 +1763,7 @@ int run_tx(const Loaded& l) {
             if (!std::holds_alternative<DecodeError>(dec)) {
                 csa.note_valid_rx(now_us_it);  // §11.5 verify/rendezvous feed
             }
-            tx.on_air(d, n, now);
+            tx.on_air(d, n, service_now);
         });
         const CsaAction ca = csa.tick(now_us_it);
         if (ca.kind != CsaAction::Kind::kNone) {
@@ -1736,8 +1772,8 @@ int run_tx(const Loaded& l) {
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
                          ca.chan_mhz);
         }
-        tx.tick(now, inject);
-        air.value->heartbeat(l.cfg.node.originator, session, now);
+        tx.tick(service_now, inject, inject_resend);
+        air.value->heartbeat(l.cfg.node.originator, session, service_now);
         if (const auto trc = air.value->tx_report_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()

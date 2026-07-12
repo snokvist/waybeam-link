@@ -40,6 +40,9 @@ class UdpAir {
 
     // Send one air frame to every tx target. Returns targets reached.
     size_t inject(const uint8_t* frame, size_t len);
+    // Enqueue an already-authorized §5.3 retransmission ahead of paced live
+    // traffic. Identical to inject() when pacing is disabled.
+    size_t inject_resend(const uint8_t* frame, size_t len);
 
     // Drain all listen sockets; cb per frame, tagged with the adapter index.
     // Returns frames delivered, or -1 on poll error.
@@ -59,7 +62,10 @@ class UdpAir {
     }
     uint64_t tx_submitted() const { return tx_submitted_; }
     uint64_t tx_failed() const { return tx_failed_; }
-    bool tx_pending() const { return !tx_queue_.empty(); }
+    bool tx_pending() const {
+        return !tx_queue_.empty() || !resend_queue_.empty();
+    }
+    std::vector<int> wait_fds() const;
 
   private:
     std::vector<UdpEgress> targets_;
@@ -77,6 +83,7 @@ class UdpAir {
     uint64_t tx_submitted_ = 0;         // successful target datagrams
     uint64_t tx_failed_ = 0;            // failed target datagrams
     std::deque<std::vector<uint8_t>> tx_queue_;
+    std::deque<std::vector<uint8_t>> resend_queue_;
     TraceCb trace_;
 
     void service_paced_tx();

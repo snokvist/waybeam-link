@@ -70,6 +70,7 @@ class RadioAir {
     // Deliver queued RX frames (§3.0 payloads, header stripped); blocks up
     // to timeout_ms when the queue is empty. Returns frames delivered.
     int poll_once(int timeout_ms, const RxCb& cb);
+    int wait_fd() const;
 
     size_t rx_adapters() const;
 

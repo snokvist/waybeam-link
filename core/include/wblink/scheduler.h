@@ -3,9 +3,9 @@
 // (PROTOCOL.md §5.3, §12, §13).
 //
 // Consumes decoded NACKs against the resend ring and emits RETRANSMIT
-// frames under the §5.3 discipline: live packets always outrank resends
-// (the caller injects live directly and only drains this scheduler with
-// leftover airtime), an airtime cap partitioned per requesting originator,
+// frames under the §5.3 discipline: admitted resends receive bounded deadline
+// priority at the transport while remaining fenced by an airtime cap
+// partitioned per requesting originator,
 // the load-bearing GLOBAL per-seq hold-down (1000 NACKs for seq N ⇒ one
 // resend), importance/deadline/attempt gates, freshness-priority ordering,
 // and the §12 first-latcher lock with preferred-originator preemption and

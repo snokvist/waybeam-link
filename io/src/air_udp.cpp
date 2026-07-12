@@ -59,7 +59,7 @@ size_t UdpAir::inject(const uint8_t* frame, size_t len) {
             return 0;
         }
         constexpr size_t kPacedQueueCap = 8192;
-        if (tx_queue_.size() >= kPacedQueueCap) {
+        if (tx_queue_.size() + resend_queue_.size() >= kPacedQueueCap) {
             ++tx_failed_;
             return 0;
         }
@@ -91,14 +91,40 @@ size_t UdpAir::inject(const uint8_t* frame, size_t len) {
     return reached;
 }
 
+size_t UdpAir::inject_resend(const uint8_t* frame, size_t len) {
+    if (pace_mbps_ == 0) return inject(frame, len);
+    if (targets_.empty()) {
+        ++tx_failed_;
+        return 0;
+    }
+    constexpr size_t kPacedQueueCap = 8192;
+    if (tx_queue_.size() + resend_queue_.size() >= kPacedQueueCap) {
+        ++tx_failed_;
+        return 0;
+    }
+    resend_queue_.emplace_back(frame, frame + len);
+    return 1;
+}
+
+std::vector<int> UdpAir::wait_fds() const {
+    std::vector<int> out;
+    out.reserve(adapters_.size());
+    for (const UdpIngress& adapter : adapters_) out.push_back(adapter.fd());
+    return out;
+}
+
 void UdpAir::service_paced_tx() {
-    if (pace_mbps_ == 0 || tx_queue_.empty() || targets_.empty()) return;
+    if (pace_mbps_ == 0 || (tx_queue_.empty() && resend_queue_.empty()) ||
+        targets_.empty()) return;
     const auto now = std::chrono::steady_clock::now();
     if (next_tx_.time_since_epoch().count() == 0) next_tx_ = now;
     size_t serviced = 0;
     constexpr size_t kCatchupCap = 16;
-    while (!tx_queue_.empty() && now >= next_tx_ && serviced < kCatchupCap) {
-        const std::vector<uint8_t>& frame = tx_queue_.front();
+    while ((!tx_queue_.empty() || !resend_queue_.empty()) && now >= next_tx_ &&
+           serviced < kCatchupCap) {
+        const bool resend = !resend_queue_.empty();
+        const std::vector<uint8_t>& frame =
+            resend ? resend_queue_.front() : tx_queue_.front();
         if (targets_[0].send(frame.data(), frame.size())) {
             if (trace_) trace_("tx", "submitted", 0, frame.data(), frame.size());
             ++tx_submitted_;
@@ -114,13 +140,20 @@ void UdpAir::service_paced_tx() {
             (static_cast<uint64_t>(frame.size()) * 8000u + pace_mbps_ - 1u) /
             pace_mbps_;
         next_tx_ += std::chrono::nanoseconds(ns);
-        tx_queue_.pop_front();
+        if (resend) {
+            resend_queue_.pop_front();
+        } else {
+            tx_queue_.pop_front();
+        }
         ++serviced;
     }
-    if (!tx_queue_.empty() && serviced == kCatchupCap && now >= next_tx_) {
+    if ((!tx_queue_.empty() || !resend_queue_.empty()) &&
+        serviced == kCatchupCap && now >= next_tx_) {
         // Process stalls must not be repaid as an unbounded host-speed burst.
         const uint64_t ns =
-            (static_cast<uint64_t>(tx_queue_.front().size()) * 8000u +
+            (static_cast<uint64_t>((!resend_queue_.empty()
+                                        ? resend_queue_.front()
+                                        : tx_queue_.front()).size()) * 8000u +
              pace_mbps_ - 1u) /
             pace_mbps_;
         next_tx_ = now + std::chrono::nanoseconds(ns);
@@ -137,7 +170,8 @@ int UdpAir::poll_once(int timeout_ms, const RxCb& cb) {
     for (const UdpIngress& a : adapters_) {
         fds.push_back(pollfd{a.fd(), POLLIN, 0});
     }
-    if (!tx_queue_.empty() && next_tx_.time_since_epoch().count() != 0) {
+    if ((!tx_queue_.empty() || !resend_queue_.empty()) &&
+        next_tx_.time_since_epoch().count() != 0) {
         const auto remaining = next_tx_ - std::chrono::steady_clock::now();
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             remaining + std::chrono::microseconds(999))

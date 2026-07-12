@@ -7,7 +7,10 @@
 #include "wblink/wire.h"
 
 #include <cstring>
+#include <chrono>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "wbtest.h"
 
@@ -209,6 +212,51 @@ int main() {
             CHECK_EQ_U(air.value->inject(&msg, 1), 0u);
             CHECK(!air.value->tx_pending());
             CHECK_EQ_U(air.value->tx_failed(), 1u);
+        }
+    }
+
+    // Authorized resends bypass an already queued live-frame burst while all
+    // packets still pass through the same serialization clock.
+    {
+        AirUdpCfg rx_cfg;
+        rx_cfg.rx = {"127.0.0.1:0"};
+        auto rx = UdpAir::create(rx_cfg);
+        CHECK(bool(rx));
+        if (rx) {
+            AirUdpCfg tx_cfg;
+            tx_cfg.pace_mbps = 1;
+            tx_cfg.tx = {"127.0.0.1:" +
+                          std::to_string(rx.value->adapter_port(0))};
+            auto tx = UdpAir::create(tx_cfg);
+            CHECK(bool(tx));
+            if (tx) {
+                const uint8_t live1[] = {1};
+                const uint8_t live2[] = {2};
+                const uint8_t resend[] = {9};
+                CHECK_EQ_U(tx.value->inject(live1, sizeof(live1)), 1u);
+                CHECK_EQ_U(tx.value->inject(live2, sizeof(live2)), 1u);
+                CHECK_EQ_U(tx.value->inject_resend(resend, sizeof(resend)), 1u);
+                std::vector<uint8_t> order;
+                for (int tries = 0; tries < 100 && order.size() < 3; ++tries) {
+                    tx.value->poll_once(0, discard);
+                    rx.value->poll_once(
+                        0, [&](const AirRxMeta&, const uint8_t* data, size_t n) {
+                            if (n == 1) order.push_back(data[0]);
+                        });
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                }
+                CHECK_EQ_U(order.size(), 3u);
+                if (order.size() == 3) {
+                    CHECK_EQ_U(order[0], 9u);
+                    CHECK_EQ_U(order[1], 1u);
+                    CHECK_EQ_U(order[2], 2u);
+                }
+                CHECK(!tx.value->tx_pending());
+                CHECK_EQ_U(tx.value->tx_submitted(), 3u);
+            }
+            const std::vector<int> fds = rx.value->wait_fds();
+            CHECK_EQ_U(fds.size(), 1u);
+            if (!fds.empty()) CHECK(fds[0] >= 0);
         }
     }
 
