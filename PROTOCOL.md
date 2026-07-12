@@ -1326,6 +1326,10 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
     "loss_prediversity_milli": 41, "loss_postdiv_prearq_milli": 6,
     "recovered_arq": 220, "recovered_fec": 0,
+    "frame_count": 89571, "frame_bytes": 5872391040,
+    "frame_size_last": 65432, "frame_size_min": 8120,
+    "frame_size_max": 241810, "frame_interval_us": 11106,
+    "frame_jitter_us": 184,
     "frames_fast": 89571, "frames_unrecoverable": 0, "malformed": 0,
     "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
@@ -1352,6 +1356,19 @@ the radio backend).
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.
 
+On a **`frame-shm` binding**, `frame_count` and `frame_bytes` count successful
+whole-frame transfers at the local SHM boundary: consumer `read_frame()` on TX
+ingress, producer `write_frame()` on RX egress. `frame_size_last`,
+`frame_size_min`, and `frame_size_max` are the successful slot payload sizes in
+bytes since start/reset (`frame_size_min` is 0 before the first frame).
+`frame_interval_us` is the monotonic-host-time gap between the two most recent
+successful transfers. `frame_jitter_us` is an integer EWMA of the absolute
+change between consecutive intervals, updated as `J += (|D| - J) / 16`; both
+timing fields are 0 until enough frames have arrived. These fields are 0 on UDP
+bindings. They measure local frame-boundary cadence, not RTP packet jitter and
+not encoder PTS cadence. Stats reset clears the counters, extrema, and timing
+history together.
+
 On a **`frame-shm` egress** stream (§6.3a) the per-frame reassembler counters
 map onto these fields directly: `recovered_fec` = frames rebuilt from repair
 symbols, `frames_fast` = frames delivered all-source with no decode,
@@ -1360,6 +1377,8 @@ symbols, `frames_fast` = frames delivered all-source with no decode,
 before decode, and `dropped_superseded`/`dropped_deadline` = frames dropped by
 supersession / past their deadline. On a UDP (RTP/telemetry) stream the
 per-frame fields (`frames_fast`, `frames_unrecoverable`, `malformed`) stay 0.
+On frame-SHM ingress, `malformed` counts whole frames rejected by FrameFramer;
+RX-only reassembly outcome fields remain 0.
 
 `shm_full_drops`, `shm_oversize_drops`, and `shm_bad_slots` expose local ring
 backpressure/ABI failures separately from air/frame-reassembly loss. They are 0

@@ -475,6 +475,24 @@ and records per-frame CSV plus link stats. Initial 300-frame baseline passed at 
 with 10% independent loss per path, post-diversity loss measured 1.0%, 16 frames
 were FEC-recovered, and none were unrecoverable.
 
+## Pass 21 — frame-SHM size/cadence observability (2026-07-12)
+
+Live JSCC bench review found that frame byte size and arrival cadence existed
+only in the finite consumer trace, while TX-side frame-SHM activity was not
+visible in streaming stats. The common measurement boundary is the local SHM
+ring: successful consumer reads on TX ingress and successful producer writes on
+RX egress. Stream stats add cumulative count/bytes, last/min/max frame size,
+latest inter-frame interval, and a 1/16 EWMA of interval variation. Failed ring
+operations stay in their existing full/oversize/bad-slot counters.
+
+The monitor review also found that its long-lived bridge retained superseded
+sessions indefinitely, report age was graphed on the delivery scale without
+explaining its expected sawtooth, and TX streams displayed RX-only reassembly
+outcomes. Those are presentation/retention defects, not wire behavior.
+
+**Amended:** §15.3 (additive frame boundary telemetry and ingress/egress
+mapping). Code follows in separate commits.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
