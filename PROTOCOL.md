@@ -1299,6 +1299,15 @@ fixed-rate §14.1 policy remains the runtime fallback until a measured estimator
 feeds this decision; loss of controller input therefore preserves the authored
 configuration rather than silently selecting optimistic protection.
 
+Before runtime actuation, frame-SHM RX runs a **shadow-only** estimator over
+post-diversity source-symbol loss. For block `N`, prediction is calculated only
+from finalized blocks before `N`; block `N` is observed after its outcome is
+fixed. The initial diagnostic is the nearest-rank P95 of the trailing 120
+blocks, requires 20 samples, and predicts zero during cold start. It changes no
+wire field, parity count, ARQ gate, or deadline. Its purpose is to expose
+underprediction and adaptation lag in §15.3 while fixed §14.1 protection stays
+authoritative. These seeds are not an adopted RF loss model.
+
 ---
 
 ## 15. I/O bindings, configuration & observability
@@ -1397,6 +1406,9 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "frame_size_max": 241810, "frame_interval_us": 11106,
     "frame_jitter_us": 184,
     "frames_fast": 89571, "frames_unrecoverable": 0, "malformed": 0,
+    "jscc_shadow_blocks": 89681, "jscc_predicted_loss_symbols": 3,
+    "jscc_observed_loss_symbols": 1, "jscc_underpredicted_blocks": 72,
+    "jscc_predicted_parity_symbols": 271044,
     "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
@@ -1445,6 +1457,16 @@ supersession / past their deadline. On a UDP (RTP/telemetry) stream the
 per-frame fields (`frames_fast`, `frames_unrecoverable`, `malformed`) stay 0.
 On frame-SHM ingress, `malformed` counts whole frames rejected by FrameFramer;
 RX-only reassembly outcome fields remain 0.
+
+The `jscc_*` fields are receiver-side, diagnostic-only shadow state from
+§14.2. `jscc_shadow_blocks` counts finalized blocks observed by the estimator;
+`jscc_predicted_loss_symbols` and `jscc_observed_loss_symbols` are the most
+recent causal prediction and result; `jscc_underpredicted_blocks` counts
+results greater than their prior prediction; and
+`jscc_predicted_parity_symbols` sums hypothetical predicted parity. They are
+zero on TX ingress and UDP streams. Stats reset clears both the estimator
+window and these counters so a new observation generation has an unambiguous
+cold start. None of these values changes active §14.1 FEC.
 
 `shm_full_drops`, `shm_oversize_drops`, and `shm_bad_slots` expose local ring
 backpressure/ABI failures separately from air/frame-reassembly loss. They are 0

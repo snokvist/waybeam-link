@@ -588,6 +588,24 @@ scheduler already admitted, not an unlimited ARQ fast path.
 **Amended:** §16.3 (paced retransmit priority and return-path wakeup). Code
 follows separately.
 
+## Pass 27 — causal JSCC estimator shadow telemetry (2026-07-13)
+
+Offline loss-matrix replay showed that an empirical quantile can save parity,
+but also that estimator lag creates deadline failures under changing and
+correlated loss. Runtime adaptive FEC is therefore not authorized. The next
+measurement stage observes post-diversity source-symbol loss at frame-SHM RX
+with a causal trailing-window P95: every block's prediction is fixed before
+that block contributes an observation.
+
+The initial 120-block window, 20-sample threshold, and zero cold start are
+diagnostic seeds, not an RF model. Additive stats expose the latest prediction
+and observation, cumulative underprediction, hypothetical parity, and sample
+count. Reset starts a new estimator generation. Fixed §14.1 parity remains the
+only runtime authority.
+
+**Amended:** §14.2 (shadow estimator ordering and non-enforcement); §15.3
+(additive `jscc_*` receiver stream fields). Code follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
