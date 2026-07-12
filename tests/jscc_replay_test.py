@@ -110,11 +110,15 @@ class JsccReplayTest(unittest.TestCase):
         self.assertEqual("fec", decisions[1]["outcome"])
         self.assertEqual(1, decisions[-1]["fast"])
         self.assertEqual(1, decisions[-1]["fec"])
+        self.assertEqual(2, decisions[-1]["parity_available_symbols"])
+        self.assertEqual(2, decisions[-1]["parity_selected_symbols"])
 
         replay_args.fec = "off"
         replay_args.arq = "off"
         decisions = jscc_replay.replay_blocks(records, replay_args)
         self.assertEqual("deadline_discard", decisions[1]["outcome"])
+        self.assertEqual(1000, decisions[-1]["parity_reduction_permille"])
+        self.assertIsNone(decisions[-1]["estimator_underpredicted_blocks"])
 
     def test_seeded_loss_models_are_deterministic(self):
         args = jscc_replay.parse_args([
@@ -142,9 +146,42 @@ class JsccReplayTest(unittest.TestCase):
             "matrix", str(self.root / "events.jsonl"),
             "--output", str(self.root / "matrix.json")])
         matrix = jscc_replay.replay_matrix(records, matrix_args)
-        self.assertEqual(36, len(matrix))
+        self.assertEqual(45, len(matrix))
         self.assertEqual("recorded:independent", matrix[0]["scenario"])
         self.assertEqual("fec_only", matrix[0]["ablation"])
+
+    def test_adaptive_fec_estimator_is_causal(self):
+        args = jscc_replay.parse_args([
+            "build-events", "--tx-packets", str(self.root / "tx-packets.jsonl"),
+            "--rx-packets", str(self.root / "rx-packets.jsonl"),
+            "--output", str(self.root / "events.jsonl")])
+        records = jscc_replay.build_event_trace(args)
+        replay_args = jscc_replay.parse_args([
+            "replay", str(self.root / "events.jsonl"), "--fec", "adaptive",
+            "--arq", "off",
+            "--loss-model", "recorded", "--estimator-window", "2",
+            "--estimator-min-samples", "1", "--estimator-quantile", "1"])
+        decisions = jscc_replay.replay_blocks(records, replay_args)
+
+        self.assertEqual(0, decisions[0]["predicted_loss_symbols"])
+        self.assertEqual(0, decisions[0]["parity_m"])
+        self.assertEqual(0, decisions[0]["observed_loss_symbols"])
+        self.assertEqual(0, decisions[1]["predicted_loss_symbols"])
+        self.assertEqual(1, decisions[1]["observed_loss_symbols"])
+        self.assertEqual("deadline_discard", decisions[1]["outcome"])
+        self.assertEqual(1000, decisions[-1]["parity_reduction_permille"])
+        self.assertEqual(1, decisions[-1]["estimator_underpredicted_blocks"])
+
+    def test_estimator_uses_cold_start_then_trailing_quantile(self):
+        estimator = jscc_replay.CausalLossEstimator(3, 0.5, 2, 7)
+        self.assertEqual(7, estimator.predict())
+        estimator.observe(1)
+        self.assertEqual(7, estimator.predict())
+        estimator.observe(5)
+        self.assertEqual(1, estimator.predict())
+        estimator.observe(9)
+        estimator.observe(2)
+        self.assertEqual(5, estimator.predict())
 
 
 if __name__ == "__main__":

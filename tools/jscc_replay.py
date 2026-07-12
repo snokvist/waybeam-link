@@ -25,6 +25,39 @@ FRAME_META_BYTES = 8
 FEC_MAX_SYMBOLS = 256
 
 
+def nearest_rank(values, quantile):
+    """Return the deterministic nearest-rank quantile for integer samples."""
+    if not values:
+        return 0
+    rank = max(1, math.ceil(quantile * len(values)))
+    return sorted(values)[rank - 1]
+
+
+class CausalLossEstimator:
+    """Trailing-window empirical loss predictor; observe only after deciding."""
+    def __init__(self, window, quantile, min_samples, cold_start):
+        if window <= 0:
+            raise ValueError("estimator window must be positive")
+        if not 0.0 <= quantile <= 1.0:
+            raise ValueError("estimator quantile must be in [0, 1]")
+        if min_samples < 0 or min_samples > window:
+            raise ValueError("estimator min samples must be in [0, window]")
+        self.window = window
+        self.quantile = quantile
+        self.min_samples = min_samples
+        self.cold_start = cold_start
+        self.samples = []
+
+    def predict(self):
+        if len(self.samples) < self.min_samples:
+            return self.cold_start
+        return nearest_rank(self.samples, self.quantile)
+
+    def observe(self, lost_source_symbols):
+        self.samples.append(max(0, int(lost_source_symbols)))
+        del self.samples[:-self.window]
+
+
 def load_json(path):
     return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
 
@@ -300,11 +333,29 @@ def replay_blocks(records, args):
          for path in packet.get("paths", [])), default=-1)
     paths = args.paths or max(1, recorded_paths)
     injector = LossInjector(args, total_packets, paths)
+    estimator = CausalLossEstimator(
+        args.estimator_window, args.estimator_quantile,
+        args.estimator_min_samples, args.estimator_cold_start)
     global_packet = 0
     decisions = []
     counts = {name: 0 for name in
               ("fast", "fec", "arq", "deadline_discard", "unrecoverable")}
+    parity_available_total = 0
+    parity_selected_total = 0
+    estimator_underpredicted = 0
     for block in blocks:
+        predicted_loss = estimator.predict()
+        recorded_parity = int(block["parity_m"])
+        if args.fec == "adaptive":
+            selected_parity = min(
+                recorded_parity, args.estimator_cap,
+                max(args.estimator_floor, predicted_loss))
+        elif args.fec == "on":
+            selected_parity = recorded_parity
+        else:
+            selected_parity = 0
+        parity_available_total += recorded_parity
+        parity_selected_total += selected_parity
         received = set()
         retransmitted = set()
         arrival_finish_us = 0
@@ -340,11 +391,16 @@ def replay_blocks(records, args):
             global_packet += 1
         k = int(block["source_k"])
         sources = sum(kind == "source" for kind, _ in received)
-        available = len(received)
+        received_repairs = sum(kind == "repair" and symbol < selected_parity
+                               for kind, symbol in received)
+        available = sources + received_repairs
+        observed_loss = max(0, k - sources)
+        estimator_underpredicted += predicted_loss < observed_loss
+        estimator.observe(observed_loss)
         deadline_us = deadline_ms * 1000
         if sources >= k:
             outcome, reason = "fast", "all_sources_received"
-        elif args.fec == "on" and available >= k:
+        elif selected_parity and available >= k:
             outcome, reason = "fec", "source_plus_repair_rank"
         elif (args.loss_model == "recorded" and retransmitted and
               sum(kind == "source" for kind, _ in received | retransmitted) >= k and
@@ -370,7 +426,10 @@ def replay_blocks(records, args):
             "source_k": k,
             "received_sources": sources,
             "received_symbols": available,
-            "parity_m": block["parity_m"] if args.fec == "on" else 0,
+            "observed_loss_symbols": observed_loss,
+            "predicted_loss_symbols": predicted_loss,
+            "parity_available_m": recorded_parity,
+            "parity_m": selected_parity,
             "outcome": outcome,
             "reason": reason,
         })
@@ -383,9 +442,25 @@ def replay_blocks(records, args):
         "paths": paths,
         "path_correlation": args.path_correlation,
         "fec": args.fec,
+        "estimator": ({
+            "kind": "trailing_empirical_quantile",
+            "window": args.estimator_window,
+            "quantile": args.estimator_quantile,
+            "min_samples": args.estimator_min_samples,
+            "cold_start": args.estimator_cold_start,
+            "floor": args.estimator_floor,
+            "cap": args.estimator_cap,
+        } if args.fec == "adaptive" else None),
         "arq": args.arq,
         "rtt_ms": args.rtt_ms,
         "deadline_ms": deadline_ms,
+        "parity_available_symbols": parity_available_total,
+        "parity_selected_symbols": parity_selected_total,
+        "parity_reduction_permille": (
+            round(1000 * (parity_available_total - parity_selected_total) /
+                  parity_available_total) if parity_available_total else 0),
+        "estimator_underpredicted_blocks": (
+            estimator_underpredicted if args.fec == "adaptive" else None),
         **counts,
     })
     return decisions
@@ -407,6 +482,7 @@ def replay_matrix(records, args):
         ("fec_only", "on", "off", "off"),
         ("fec_arq", "on", "eligible", "off"),
         ("fec_arq_discard", "on", "eligible", "on"),
+        ("adaptive_fec_arq_discard", "adaptive", "eligible", "on"),
         ("arq_discard", "off", "eligible", "on"),
     )
     results = []
@@ -476,6 +552,15 @@ def write_jsonl(path, records):
     pathlib.Path(path).write_text(text, encoding="utf-8")
 
 
+def add_estimator_args(parser):
+    parser.add_argument("--estimator-window", type=int, default=120)
+    parser.add_argument("--estimator-quantile", type=float, default=0.95)
+    parser.add_argument("--estimator-min-samples", type=int, default=20)
+    parser.add_argument("--estimator-cold-start", type=int, default=0)
+    parser.add_argument("--estimator-floor", type=int, default=0)
+    parser.add_argument("--estimator-cap", type=int, default=255)
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -506,9 +591,10 @@ def parse_args(argv):
     run.add_argument("--loss-period", type=int, default=100)
     run.add_argument("--burst-length", type=int, default=10)
     run.add_argument("--rtt-ms", type=int, default=4)
-    run.add_argument("--fec", choices=("on", "off"), default="on")
+    run.add_argument("--fec", choices=("on", "off", "adaptive"), default="on")
     run.add_argument("--arq", choices=("off", "eligible", "force"), default="eligible")
     run.add_argument("--deadline-discard", choices=("on", "off"), default="on")
+    add_estimator_args(run)
     matrix = sub.add_parser("matrix", help="run the standard loss/ablation matrix")
     matrix.add_argument("trace")
     matrix.add_argument("--deadline-ms", type=int)
@@ -520,6 +606,7 @@ def parse_args(argv):
     matrix.add_argument("--loss-period", type=int, default=100)
     matrix.add_argument("--burst-length", type=int, default=10)
     matrix.add_argument("--rtt-ms", type=int, default=4)
+    add_estimator_args(matrix)
     return parser.parse_args(argv)
 
 
