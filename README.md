@@ -147,16 +147,23 @@ TX stream + FEC:
 ]
 ```
 
-**(a) Monitor injection (real RF)** — one adapter in Linux monitor mode:
+**(a) RF injection** — `air.kind "radio"` (devourer/libusb) is the verified craft
+path for the 8812EU: the kernel driver is unbound so libusb owns the raw USB
+device and injects directly (the `rtl88x2eu` driver does **not** inject via
+mac80211 monitor — `iw set monitor` leaves `tx_packets=0`). Use the bench init
+script `/etc/init.d/waybeam-link {start|stop}`, which does `adapter stop` +
+`rmmod 8812eu` before launching:
 
 ```json
-"adapters": [{ "name": "wlan0", "ifname": "wlan0", "role": "tx", "channel": 5805, "bw": 20 }],
-"air": { "kind": "kernel-monitor" }
+"adapters": [{ "name": "eu-craft", "bus": "", "role": "tx", "channel": 5805, "bw": 20,
+               "power_map": "/etc/waybeam-link/power.craft.floor.txt", "max_power_qdb": -40 }],
+"air": { "kind": "radio" },
+"policy": { "select": { "min_profile": 0, "max_profile": 0 } }
 ```
 
-Bring the iface up first: `ip link set wlan0 down; iw wlan0 set monitor none;
-ip link set wlan0 up; iw wlan0 set channel 161 HT20`. Craft runs 20 MHz, low MCS
-at 5805 (§10, 8812EU limits).
+Craft runs 20 MHz, MCS pinned low at 5805 (§10, 8812EU sub-band limits). Drivers
+that *do* support mac80211 monitor injection can instead use
+`air.kind "kernel-monitor"` with an `ifname` + `ip link … monitor` setup.
 
 **(b) UDP sim (no radios)** — DATA fanned out over ethernet to the ground:
 
@@ -199,6 +206,13 @@ Read the ground egress ring with any `venc_frame_ring` consumer, e.g.
 validates `VencFrameMeta`, Annex-B start codes, IDR flags, and pts monotonicity
 (exit 0 = PASS). Add `air.rx_drop_permille` to the RX config to exercise FEC
 recovery under synthetic loss.
+
+**Verified end-to-end** (Star6E .201 → x86 ground): venc `frame-shm://venc_frame`
+→ craft `radio` inject (8812EU, MCS0, 5805) → ground kernel-monitor RX → reassemble
+→ `venc_frame_out`, read back **byte-clean** (bad_meta=0, bad_startcode=0,
+pts_regress=0) at ~90 fps, `decode_errors=0`. Also proven over the udp-air sim
+(same, at full bitrate) and the in-process `frame_shm_loopback_test` (FEC recovery
+byte-exact).
 
 ## Deployment invariant (must hold before this can drive a craft)
 
