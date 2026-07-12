@@ -1593,9 +1593,10 @@ otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3 }` | retune a `frame-shm` stream's §14.1 FEC rates (TX node) |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
+| `POST /api/v1/bench/rx-drop` | `{ "permille": 0 }` | UDP-air bench RX only: retune independent synthetic loss per listener (0–1000); 409 on RF backends |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and
-`fec` on the TX. An endpoint invoked in a mode where it does not apply returns
+`fec` on the TX, and `bench/rx-drop` only on UDP-air RX. An endpoint invoked in a mode where it does not apply returns
 **409**; an unknown path **404**; a malformed or oversize body **400**. The
 write knobs are exactly the §9/§11/§14 levers that were previously boot-time
 JSON only; the profile pin is the operating-point (MCS + bitrate) lever, since

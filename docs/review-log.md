@@ -635,6 +635,18 @@ behavior changes.
 **Amended:** §15.3 (additive frame-SHM TX symbol and classification counters).
 Code follows separately.
 
+## Pass 30 — live UDP loss-ramp control (2026-07-13)
+
+Restarting the Ethernet receiver to change synthetic loss resets the causal
+estimator and cannot test adaptation lag. A bench-only control endpoint may
+therefore retune `udp`/`udp-broadcast` synthetic RX loss in-process. It is
+bounded to 0–1000 permille, rejects non-UDP backends, changes no persistent
+configuration, and is reset to zero after scripted ramps. Monitor and Devourer
+behavior is explicitly untouched.
+
+**Amended:** §15.5 (UDP-air bench synthetic-loss control). Code follows
+separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
