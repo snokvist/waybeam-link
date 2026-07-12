@@ -36,6 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HTML_PATH = os.path.join(HERE, "link_monitor.html")
+INSTANCE_TTL_S = 30
 
 
 class Fleet:
@@ -69,6 +70,14 @@ class Fleet:
             "snap": snap,
         }
         with self._lock:
+            # A restarted process supersedes the previous session for the same
+            # source/node immediately. Do not resurrect every historical card
+            # when a browser bootstraps from this long-running bridge.
+            node = snap.get("node")
+            for old_key, old in list(self._instances.items()):
+                if (old_key != key and old["src"] == src_ip and
+                        old["snap"].get("node") == node):
+                    del self._instances[old_key]
             prev = self._instances.get(key)
             rec["first_seen"] = prev["first_seen"] if prev else now
             rec["updates"] = (prev["updates"] + 1) if prev else 1
@@ -84,14 +93,21 @@ class Fleet:
 
     def snapshot_all(self):
         with self._lock:
+            self._expire_locked(time.time())
             return list(self._instances.values())
 
     def subscribe(self):
         q = queue.Queue(maxsize=256)
         with self._lock:
+            self._expire_locked(time.time())
             self._subs.append(q)
             backlog = list(self._instances.values())
         return q, backlog
+
+    def _expire_locked(self, now):
+        for key, rec in list(self._instances.items()):
+            if now - rec["recv_wall"] > INSTANCE_TTL_S:
+                del self._instances[key]
 
     def unsubscribe(self, q):
         with self._lock:

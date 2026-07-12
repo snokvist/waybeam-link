@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 import pathlib
+import importlib.util
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 HTML = (ROOT / "tools" / "link_monitor.html").read_text(encoding="utf-8")
+spec = importlib.util.spec_from_file_location(
+    "link_monitor", ROOT / "tools" / "link_monitor.py")
+link_monitor = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(link_monitor)
 
 
 class DashboardSchemaTest(unittest.TestCase):
@@ -13,7 +18,9 @@ class DashboardSchemaTest(unittest.TestCase):
             "frames_fast", "recovered_fec", "frames_unrecoverable",
             "malformed", "decode_errors", "dropped_superseded",
             "dropped_deadline", "shm_full_drops", "shm_oversize_drops",
-            "shm_bad_slots",
+            "shm_bad_slots", "frame_count", "frame_bytes", "frame_size_last",
+            "frame_size_min", "frame_size_max", "frame_interval_us",
+            "frame_jitter_us",
         ):
             self.assertIn(f"s.{field}", HTML)
 
@@ -35,7 +42,8 @@ class DashboardSchemaTest(unittest.TestCase):
 
     def test_monitor_has_metric_tabs_and_live_trends(self):
         for text in ("Overview", "Link & adapters", "Streams", "Frame & SHM",
-                     "Trends", "data-chart=", "Encoded frame byte size"):
+                     "Trends", "data-chart=", "Encoded frame size",
+                     "Frame arrival cadence"):
             with self.subTest(text=text):
                 self.assertIn(text, HTML)
 
@@ -48,6 +56,16 @@ class DashboardSchemaTest(unittest.TestCase):
         self.assertNotIn('setInterval(render,1000)', HTML)
         self.assertIn('pointerenter', HTML)
         self.assertIn('deliveryRates', HTML)
+
+    def test_bridge_evicts_superseded_and_stale_sessions(self):
+        fleet = link_monitor.Fleet({})
+        fleet.ingest("192.0.2.1", '{"t_ms":1,"node":9,"session":1}')
+        fleet.ingest("192.0.2.1", '{"t_ms":2,"node":9,"session":2}')
+        self.assertEqual([2], [r["snap"]["session"] for r in fleet.snapshot_all()])
+        with fleet._lock:
+            next(iter(fleet._instances.values()))["recv_wall"] -= 31
+        self.assertEqual([], fleet.snapshot_all())
+        self.assertIn("instances.delete(k)", HTML)
 
 
 if __name__ == "__main__":
