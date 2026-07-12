@@ -333,8 +333,8 @@ tools/jscc_ethernet_bench.sh start
 tools/jscc_ethernet_bench.sh status
 ```
 
-The stable application SHM name is `wblink_jscc_out` (POSIX object
-`/wblink_jscc_out`). `status` prints the active name and consumer mode. To run
+The stable application SHM name is `venc_frame_out` (POSIX object
+`/venc_frame_out`). `status` prints the active name and consumer mode. To run
 the built-in continuous validator instead, stop any external decoder and use
 `BENCH_CONSUMER=gst tools/jscc_ethernet_bench.sh start`. The harness rejects a
 detected second consumer because the venc frame ring is strictly
