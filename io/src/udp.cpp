@@ -3,6 +3,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <linux/filter.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -85,7 +86,8 @@ UdpIngress::UdpIngress(UdpIngress&& other) noexcept
     : fd_(std::exchange(other.fd_, -1)),
       bound_port_(std::exchange(other.bound_port_, 0)),
       kernel_drop_last_(std::exchange(other.kernel_drop_last_, 0)),
-      kernel_drops_(std::exchange(other.kernel_drops_, 0)) {}
+      kernel_drops_(std::exchange(other.kernel_drops_, 0)),
+      socket_filtered_(std::exchange(other.socket_filtered_, 0)) {}
 
 UdpIngress& UdpIngress::operator=(UdpIngress&& other) noexcept {
     if (this != &other) {
@@ -94,11 +96,13 @@ UdpIngress& UdpIngress::operator=(UdpIngress&& other) noexcept {
         bound_port_ = std::exchange(other.bound_port_, 0);
         kernel_drop_last_ = std::exchange(other.kernel_drop_last_, 0);
         kernel_drops_ = std::exchange(other.kernel_drops_, 0);
+        socket_filtered_ = std::exchange(other.socket_filtered_, 0);
     }
     return *this;
 }
 
-Result<UdpIngress> UdpIngress::open(const std::string& listen) {
+Result<UdpIngress> UdpIngress::open(const std::string& listen,
+                                    uint16_t reject_originator) {
     auto sa = to_sockaddr(listen);
     if (!sa) {
         return Result<UdpIngress>::fail("listen " + sa.error);
@@ -117,6 +121,28 @@ Result<UdpIngress> UdpIngress::open(const std::string& listen) {
     ::setsockopt(in.fd_, SOL_SOCKET, SO_RCVBUF, &kUdpReceiveBufferBytes,
                  sizeof(kUdpReceiveBufferBytes));
     ::setsockopt(in.fd_, SOL_SOCKET, SO_RXQ_OVFL, &one, sizeof(one));
+    if (reject_originator != 0) {
+        // Drop our own originator before it can consume receive-queue capacity.
+        sock_filter code[] = {
+            BPF_STMT(BPF_LD | BPF_W | BPF_LEN, 0),
+            BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 8 + 5, 0, 3),
+            // Linux presents the UDP header (8 bytes) before datagram payload
+            // to a classic filter attached to an AF_INET/SOCK_DGRAM socket.
+            BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 8 + 3),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, reject_originator, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, 0),
+            BPF_STMT(BPF_RET | BPF_K, UINT32_MAX),
+        };
+        sock_fprog prog{};
+        prog.len = static_cast<unsigned short>(sizeof(code) / sizeof(code[0]));
+        prog.filter = code;
+        if (::setsockopt(in.fd_, SOL_SOCKET, SO_ATTACH_FILTER, &prog,
+                         sizeof(prog)) != 0) {
+            return Result<UdpIngress>::fail(
+                "setsockopt(SO_ATTACH_FILTER): " +
+                std::string(std::strerror(errno)));
+        }
+    }
     if (::bind(in.fd_, reinterpret_cast<const sockaddr*>(&*sa.value),
                sizeof(*sa.value)) < 0) {
         return Result<UdpIngress>::fail("bind('" + listen + "'): " +
@@ -173,7 +199,7 @@ UdpEgress& UdpEgress::operator=(UdpEgress&& other) noexcept {
     return *this;
 }
 
-Result<UdpEgress> UdpEgress::open(const std::string& target) {
+Result<UdpEgress> UdpEgress::open(const std::string& target, bool broadcast) {
     auto sa = to_sockaddr(target);
     if (!sa) {
         return Result<UdpEgress>::fail("send " + sa.error);
@@ -184,6 +210,14 @@ Result<UdpEgress> UdpEgress::open(const std::string& target) {
     }
     UdpEgress out;
     out.fd_ = *fd.value;
+    if (broadcast) {
+        int one = 1;
+        if (::setsockopt(out.fd_, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one)) !=
+            0) {
+            return Result<UdpEgress>::fail("setsockopt(SO_BROADCAST): " +
+                                           std::string(std::strerror(errno)));
+        }
+    }
     if (::connect(out.fd_, reinterpret_cast<const sockaddr*>(&*sa.value),
                   sizeof(*sa.value)) < 0) {
         return Result<UdpEgress>::fail("connect('" + target + "'): " +

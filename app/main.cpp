@@ -290,9 +290,12 @@ struct AirBackend {
 
     static Result<AirBackend> create(const Config& cfg) {
         AirBackend b;
-        if (cfg.air.kind == AirCfg::Kind::kUdp) {
+        if (cfg.air.kind == AirCfg::Kind::kUdp ||
+            cfg.air.kind == AirCfg::Kind::kUdpBroadcast) {
             AirUdpCfg uc = cfg.air.udp;
             uc.rx_drop_permille = cfg.air.rx_drop_permille;  // bench synthetic loss
+            uc.broadcast = cfg.air.kind == AirCfg::Kind::kUdpBroadcast;
+            uc.originator = cfg.node.originator;
             auto a = UdpAir::create(uc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
@@ -503,6 +506,7 @@ struct AirBackend {
         return false;
 #endif
     }
+    bool tx_pending() const { return udp && udp->tx_pending(); }
     bool supports_csa() const {
         // UDP intentionally exercises CSA state without a physical retune.
         // Kernel-monitor cannot retune yet and must fail closed: pretending a
@@ -519,6 +523,7 @@ struct AirBackend {
                 AdapterStats as;
                 as.name = "udp" + std::to_string(i);
                 as.rx = udp->rx_frames(i);
+                as.filtered = udp->rx_filtered(i);
                 as.drop = udp->rx_dropped(i);
                 as.kernel_drop = udp->kernel_dropped(i);
                 if (i == 0) {
@@ -550,6 +555,7 @@ struct AirBackend {
                 as.tx_submitted = c.tx_submitted;
                 as.tx_failed = c.tx_failed;
                 as.drop = c.rx_dropped;
+                as.filtered = c.rx_filtered;
                 as.kernel_drop = c.kernel_dropped;
                 as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
                 // No CCX tx.report on monitor injection; wedge watchdog off.
@@ -1491,7 +1497,7 @@ int run_tx(const Loaded& l) {
             }
         };
         // Held frames need µs-scale reactivity — don't sleep in poll then.
-        const int in_timeout = held.empty() ? 2 : 0;
+        const int in_timeout = held.empty() && !air.value->tx_pending() ? 2 : 0;
         bindings.value->poll_once(
             in_timeout,
             [&](const IngressEvent& ev) {

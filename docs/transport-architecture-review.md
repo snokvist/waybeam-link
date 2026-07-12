@@ -173,6 +173,12 @@ to normal point-to-point UDP:
    important; loopback broadcast is suitable for the Linux CI bench.
 4. Add `SO_RXQ_OVFL`, sender identity, and duplicate/self-filter tests.
 
+This follow-up is implemented as `air.kind:"udp-broadcast"`. The verified
+loopback bench uses one shared channel, socket-level self-origin filtering,
+explicit serialization pacing, and the same frame-SHM/GStreamer chain. Clean
+traffic reports zero synthetic and kernel loss; injected loss remains separate.
+
 ## Recommended sequence
 
-1. Add optional UDP broadcast/sniffer mode as a dedicated simulation backend.
+The approved transport-audit implementation sequence is complete. Hardware RF
+bench gates and the remaining medium findings are separate follow-up work.

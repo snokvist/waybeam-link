@@ -4,6 +4,7 @@
 // parallel-safe), plus host:port parsing edges.
 #include "wblink/binding.h"
 #include "wblink/air_udp.h"
+#include "wblink/wire.h"
 
 #include <cstring>
 #include <string>
@@ -33,6 +34,51 @@ int main() {
             CHECK_EQ_U(air.value->poll_once(100, discard), 1u);
             CHECK_EQ_U(air.value->rx_frames(0), 1u);
             CHECK_EQ_U(air.value->rx_dropped(0), 0u);
+        }
+    }
+
+    // One loopback broadcast reaches every shared-port listener; each listener
+    // rejects its own originator exactly as the RF backends do.
+    {
+        AirUdpCfg craft_cfg;
+        craft_cfg.broadcast = true;
+        craft_cfg.originator = 17;
+        craft_cfg.rx = {"0.0.0.0:0"};
+        auto craft = UdpAir::create(craft_cfg);
+        CHECK(bool(craft));
+        if (craft) {
+            const uint16_t port = craft.value->adapter_port(0);
+            AirUdpCfg ground_cfg;
+            ground_cfg.broadcast = true;
+            ground_cfg.originator = 9;
+            ground_cfg.rx = {"0.0.0.0:" + std::to_string(port)};
+            auto ground = UdpAir::create(ground_cfg);
+            CHECK(bool(ground));
+
+            AirUdpCfg sender_cfg;
+            sender_cfg.broadcast = true;
+            sender_cfg.tx = {"127.255.255.255:" + std::to_string(port)};
+            auto sender = UdpAir::create(sender_cfg);
+            CHECK(bool(sender));
+            if (ground && sender) {
+                uint8_t frame[kCommonPrefixSize]{};
+                const Heartbeat hb{{17, 0, 1234}};
+                CHECK_EQ_U(encode_heartbeat(hb, frame, sizeof(frame)),
+                           sizeof(frame));
+                CHECK_EQ_U(sender.value->inject(frame, sizeof(frame)), 1u);
+                CHECK_EQ_U(craft.value->poll_once(100, discard), 0u);
+                CHECK_EQ_U(ground.value->poll_once(100, discard), 1u);
+                CHECK_EQ_U(craft.value->rx_filtered(0), 0u);
+                CHECK_EQ_U(craft.value->kernel_dropped(0), 0u);
+                CHECK_EQ_U(ground.value->rx_frames(0), 1u);
+
+                const uint8_t junk[] = {1, 2, 3};
+                CHECK_EQ_U(sender.value->inject(junk, sizeof(junk)), 1u);
+                CHECK_EQ_U(craft.value->poll_once(100, discard), 0u);
+                CHECK_EQ_U(ground.value->poll_once(100, discard), 0u);
+                CHECK_EQ_U(craft.value->rx_filtered(0), 1u);
+                CHECK_EQ_U(ground.value->rx_filtered(0), 1u);
+            }
         }
     }
 

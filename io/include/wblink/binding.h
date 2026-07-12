@@ -33,11 +33,16 @@ class UdpIngress {
     UdpIngress& operator=(UdpIngress&& other) noexcept;
 
     // Binds "host:port" non-blocking; port 0 = ephemeral (tests).
-    static Result<UdpIngress> open(const std::string& listen);
+    static Result<UdpIngress> open(const std::string& listen,
+                                   uint16_t reject_originator = 0);
 
     int fd() const { return fd_; }
     uint16_t bound_port() const { return bound_port_; }
-    uint64_t kernel_drops() const { return kernel_drops_; }
+    uint64_t kernel_drops() const {
+        return kernel_drops_ > socket_filtered_ ? kernel_drops_ - socket_filtered_
+                                                : 0;
+    }
+    void note_socket_filtered() { ++socket_filtered_; }
 
     // One datagram; >0 = bytes, 0 = nothing pending, -1 = error.
     long recv_one(uint8_t* buf, size_t cap);
@@ -47,6 +52,7 @@ class UdpIngress {
     uint16_t bound_port_ = 0;
     uint32_t kernel_drop_last_ = 0;
     uint64_t kernel_drops_ = 0;
+    uint64_t socket_filtered_ = 0;
 };
 
 class UdpEgress {
@@ -59,7 +65,8 @@ class UdpEgress {
     UdpEgress& operator=(UdpEgress&& other) noexcept;
 
     // Connects a datagram socket to "host:port".
-    static Result<UdpEgress> open(const std::string& target);
+    static Result<UdpEgress> open(const std::string& target,
+                                  bool broadcast = false);
 
     int fd() const { return fd_; }
     bool send(const uint8_t* data, size_t len);

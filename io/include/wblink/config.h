@@ -190,12 +190,15 @@ struct AirUdpCfg {
     // Bench-only per-adapter synthetic RX drop (0–1000), parity with the
     // monitor/radio backends — manufactures known loss on the udp-air path.
     uint16_t rx_drop_permille = 0;
+    bool broadcast = false;
+    uint16_t originator = 0;  // self-filter identity in broadcast mode
+    uint32_t pace_mbps = 0;   // broadcast serialization rate; 0 = unpaced
 };
 struct AirCfg {
     // kMonitor = the kernel-driver monitor-mode backend (AF_PACKET raw inject +
     // radiotap RX, §3.0). Like kRadio, its adapters come from the top-level
     // adapters array (each carrying an `ifname`); it reuses rx_drop_permille.
-    enum class Kind : uint8_t { kNone, kUdp, kRadio, kMonitor };
+    enum class Kind : uint8_t { kNone, kUdp, kUdpBroadcast, kRadio, kMonitor };
     Kind kind = Kind::kNone;
     AirUdpCfg udp;
     // Bench-only synthetic RX loss on the radio backend: drop this many

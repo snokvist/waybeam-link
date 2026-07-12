@@ -438,18 +438,30 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cfg.air.kind = AirCfg::Kind::kRadio;
             } else if (kind == "kernel-monitor") {
                 cfg.air.kind = AirCfg::Kind::kMonitor;
-            } else if (kind == "udp") {
-                cfg.air.kind = AirCfg::Kind::kUdp;
+            } else if (kind == "udp" || kind == "udp-broadcast") {
+                cfg.air.kind = kind == "udp" ? AirCfg::Kind::kUdp
+                                               : AirCfg::Kind::kUdpBroadcast;
                 for (const json& t : a.value("tx", json::array())) {
                     cfg.air.udp.tx.push_back(t.get<std::string>());
                 }
                 for (const json& r : a.value("rx", json::array())) {
                     cfg.air.udp.rx.push_back(r.get<std::string>());
                 }
+                cfg.air.udp.pace_mbps = a.value("pace_mbps", 0u);
+                if (cfg.air.kind == AirCfg::Kind::kUdpBroadcast &&
+                    (cfg.air.udp.tx.size() != 1 || cfg.air.udp.rx.size() != 1)) {
+                    return Result<Config>::fail(
+                        "air: udp-broadcast requires exactly one tx and one rx endpoint");
+                }
+                if (cfg.air.kind == AirCfg::Kind::kUdp &&
+                    cfg.air.udp.pace_mbps != 0) {
+                    return Result<Config>::fail(
+                        "air: pace_mbps is only valid for udp-broadcast");
+                }
             } else {
                 return Result<Config>::fail(
                     "air: kind \"" + kind +
-                    "\" unknown (udp | radio | kernel-monitor)");
+                    "\" unknown (udp | udp-broadcast | radio | kernel-monitor)");
             }
         }
 

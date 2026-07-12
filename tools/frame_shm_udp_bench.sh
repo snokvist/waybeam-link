@@ -10,6 +10,12 @@ FRAMES=${FRAMES:-90}
 WARMUP_FRAMES=${WARMUP_FRAMES:-3}
 BITRATES=${BITRATES:-"1000 4000 8000"}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
+AIR_KIND=${AIR_KIND:-udp}
+
+if [[ "$AIR_KIND" != udp && "$AIR_KIND" != udp-broadcast ]]; then
+    echo "AIR_KIND must be udp or udp-broadcast" >&2
+    exit 2
+fi
 
 if [[ ! -x "$LINK" || ! -x "$GST" ]]; then
     echo "bench binaries missing under $BUILD" >&2
@@ -43,6 +49,17 @@ run_one() {
     local total_frames=$((FRAMES + WARMUP_FRAMES))
     local tx_cfg="$TMP/tx-${index}.json"
     local rx_cfg="$TMP/rx-${index}.json"
+    local tx_air rx_air expected_adapters
+
+    if [[ "$AIR_KIND" == udp-broadcast ]]; then
+        tx_air="{\"kind\":\"udp-broadcast\",\"tx\":[\"127.255.255.255:$data0\"],\"rx\":[\"0.0.0.0:$data0\"],\"pace_mbps\":10}"
+        rx_air="{\"kind\":\"udp-broadcast\",\"tx\":[\"127.255.255.255:$data0\"],\"rx\":[\"0.0.0.0:$data0\"],\"pace_mbps\":10,\"rx_drop_permille\":$RX_DROP_PERMILLE}"
+        expected_adapters=1
+    else
+        tx_air="{\"kind\":\"udp\",\"tx\":[\"127.0.0.1:$data0\",\"127.0.0.1:$data1\"],\"rx\":[\"127.0.0.1:$ret\"]}"
+        rx_air="{\"kind\":\"udp\",\"rx\":[\"127.0.0.1:$data0\",\"127.0.0.1:$data1\"],\"tx\":[\"127.0.0.1:$ret\"],\"rx_drop_permille\":$RX_DROP_PERMILLE}"
+        expected_adapters=2
+    fi
 
     cat >"$tx_cfg" <<EOF
 {
@@ -52,8 +69,7 @@ run_one() {
     "bind":{"kind":"frame-shm","name":"$in_ring"},
     "fec":{"scheme":"rlc256","i_rate_permille":250,
            "p_rate_permille":100,"min_k":3}}],
-  "air":{"kind":"udp","tx":["127.0.0.1:$data0","127.0.0.1:$data1"],
-         "rx":["127.0.0.1:$ret"]},
+  "air":$tx_air,
   "policy":{"select":{"min_profile":0,"max_profile":0}},
   "stats":{"hz":5}
 }
@@ -64,8 +80,7 @@ EOF
   "profile_table":"profiles/table.example.json",
   "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
     "originator":17,"bind":{"kind":"frame-shm","name":"$out_ring"}}],
-  "air":{"kind":"udp","rx":["127.0.0.1:$data0","127.0.0.1:$data1"],
-         "tx":["127.0.0.1:$ret"],"rx_drop_permille":$RX_DROP_PERMILLE},
+  "air":$rx_air,
   "policy":{"select":{"min_profile":0,"max_profile":0}},
   "stats":{"hz":5}
 }
@@ -93,7 +108,8 @@ EOF
     wait "$tx_pid" "$rx_pid" 2>/dev/null || true
 
     python3 - "$TMP/tx-${index}.jsonl" "$TMP/rx-${index}.jsonl" \
-              "$FRAMES" "$total_frames" "$RX_DROP_PERMILLE" <<'PY'
+              "$FRAMES" "$total_frames" "$RX_DROP_PERMILLE" \
+              "$expected_adapters" <<'PY'
 import json
 import sys
 
@@ -111,13 +127,15 @@ def last(path):
 
 tx, rx = last(sys.argv[1]), last(sys.argv[2])
 expected, generated, loss = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+expected_adapters = int(sys.argv[6])
 txs = tx["streams"][0]
 rxs = rx["streams"][0]
 assert txs["delivered"] == generated, ("TX frames", txs["delivered"], generated)
 assert sum(a["tx_submitted"] for a in tx["adapters"]) > 0
-assert len(rx["adapters"]) == 2, rx["adapters"]
+assert len(rx["adapters"]) == expected_adapters, rx["adapters"]
 assert all(a["rx"] + a["drop"] > 0 for a in rx["adapters"])
 if loss == 0:
+    assert all(a["kernel_drop"] == 0 for a in tx["adapters"] + rx["adapters"])
     assert rxs["frames_fast"] + rxs["recovered_fec"] >= expected, rxs
     assert rxs["decode_errors"] == 0 and rxs["malformed"] == 0, rxs
 print("stats tx_frames=%d rx_fast=%d rx_fec=%d loss_milli=%d nacks=%d resends=%d" %
@@ -125,7 +143,7 @@ print("stats tx_frames=%d rx_fast=%d rx_fec=%d loss_milli=%d nacks=%d resends=%d
        rxs["loss_postdiv_prearq_milli"], rxs["nacks_sent"],
        txs["resends_sent"]))
 PY
-    echo "bitrate=${bitrate}kbps drop=${RX_DROP_PERMILLE}permille"
+    echo "bitrate=${bitrate}kbps air=${AIR_KIND} drop=${RX_DROP_PERMILLE}permille"
     cat "$TMP/producer-${index}.log"
     cat "$TMP/consumer-${index}.log"
 }

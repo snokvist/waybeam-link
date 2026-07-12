@@ -265,6 +265,23 @@ Once the named SHM producer exists, validate each generated node with
 `waybeam-link tx -c /tmp/waybeam-pair/tx.json --check` and the corresponding
 `rx` command.
 
+For a closer RF-broadcast analogue on one Linux host, put both nodes on one
+shared loopback broadcast channel:
+
+```json
+"air": {
+  "kind": "udp-broadcast",
+  "tx": ["127.255.255.255:5801"],
+  "rx": ["0.0.0.0:5801"],
+  "pace_mbps": 10
+}
+```
+
+Each node receives foreign waybeam packets from the shared channel and filters
+its own originator before the socket queue. `pace_mbps` prevents encoded-frame
+bursts from becoming accidental host queue loss. Exercise the full frame-SHM
+video chain with `AIR_KIND=udp-broadcast tools/frame_shm_udp_bench.sh`.
+
 Run: `waybeam-link rx -c <rx>.json`.
 
 ### Verify

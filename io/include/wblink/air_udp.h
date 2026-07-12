@@ -11,7 +11,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <functional>
+#include <deque>
 #include <vector>
 
 #include "wblink/binding.h"
@@ -45,22 +47,32 @@ class UdpAir {
     // Bench synthetic-drop counter for adapter i (0 unless rx_drop_permille>0).
     uint64_t rx_dropped(size_t i) const { return rx_dropped_[i]; }
     uint64_t rx_frames(size_t i) const { return rx_frames_[i]; }
+    uint64_t rx_filtered(size_t i) const { return rx_filtered_[i]; }
     uint64_t kernel_dropped(size_t i) const {
         return adapters_[i].kernel_drops();
     }
     uint64_t tx_submitted() const { return tx_submitted_; }
     uint64_t tx_failed() const { return tx_failed_; }
+    bool tx_pending() const { return !tx_queue_.empty(); }
 
   private:
     std::vector<UdpEgress> targets_;
     std::vector<UdpIngress> adapters_;
     std::vector<uint8_t> buf_ = std::vector<uint8_t>(4096);
     uint16_t rx_drop_permille_ = 0;
+    bool broadcast_ = false;
+    uint16_t originator_ = 0;
+    uint32_t pace_mbps_ = 0;
+    std::chrono::steady_clock::time_point next_tx_{};
     std::vector<uint32_t> rng_;         // per-adapter xorshift state
     std::vector<uint64_t> rx_dropped_;  // per-adapter synthetic-drop count
     std::vector<uint64_t> rx_frames_;   // accepted frames per adapter
+    std::vector<uint64_t> rx_filtered_; // malformed/self broadcast frames
     uint64_t tx_submitted_ = 0;         // successful target datagrams
     uint64_t tx_failed_ = 0;            // failed target datagrams
+    std::deque<std::vector<uint8_t>> tx_queue_;
+
+    void service_paced_tx();
 };
 
 }  // namespace wblink
