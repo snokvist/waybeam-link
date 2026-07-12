@@ -11,6 +11,7 @@
 
 #include "wblink/frame_framer.h"
 #include "wblink/frame_shm_format.h"
+#include "wblink/endian.h"
 #include "wbtest.h"
 
 using namespace wblink;
@@ -151,6 +152,67 @@ int main() {
         ra.tick(100 + rc.deadline_ms, noop);  // deadline expires
         CHECK_EQ_U(got.size(), 0u);
         CHECK(ra.stats().frames_deadline >= 1u);
+        CHECK_EQ_U(ra.stats().frames_unrecoverable, 1u);
+    }
+
+    // --- conflicting symbol metadata is rejected, never allowed to poison k --
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kNone, 0, 0, 3));
+        auto blob = make_frame(9000, /*idr=*/false, 20);
+        auto syms = produce(ff, blob);
+        CHECK(syms.size() > 2);
+
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+
+        ra.push(syms[0].block_id, syms[0].flags, syms[0].payload.data(),
+                syms[0].payload.size(), 1000, emit);
+        Sym forged = syms[1];
+        const uint16_t real_k = be16_read(forged.payload.data());
+        be16_write(forged.payload.data(), static_cast<uint16_t>(real_k - 1));
+        ra.push(forged.block_id, forged.flags, forged.payload.data(),
+                forged.payload.size(), 1000, emit);
+        for (size_t i = 1; i < syms.size(); ++i) {
+            const Sym& s = syms[i];
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(), 1000,
+                    emit);
+        }
+        CHECK_EQ_U(got.size(), 1u);
+        CHECK(!got.empty() && got[0] == blob);
+        CHECK_EQ_U(ra.stats().malformed, 1u);
+    }
+
+    // --- conflicting repair frame_len/coded-size cannot corrupt FEC output ---
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 300, 100, 3));
+        auto blob = make_frame(9000, /*idr=*/true, 21);
+        auto syms = produce(ff, blob);
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+
+        bool forged_one = false;
+        for (const Sym& s : syms) {
+            if (!forged_one && (s.flags & data_flags::kFecRepair) != 0) {
+                ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                        1000, emit);
+                Sym forged = s;
+                be32_write(forged.payload.data() + kFecOffFrameLen,
+                           static_cast<uint32_t>(blob.size() - 1));
+                ra.push(forged.block_id, forged.flags, forged.payload.data(),
+                        forged.payload.size(), 1000, emit);
+                forged_one = true;
+            }
+        }
+        for (const Sym& s : syms) {
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(), 1000,
+                    emit);
+        }
+        CHECK(forged_one);
+        CHECK_EQ_U(got.size(), 1u);
+        CHECK(!got.empty() && got[0] == blob);
+        CHECK_EQ_U(ra.stats().malformed, 1u);
     }
 
     // --- FEC OFF (ARQ-only): all sources -> deliver; any loss -> nothing -----
