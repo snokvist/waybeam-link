@@ -1485,6 +1485,31 @@ A single portable binary vendors devourer and adds waybeam-link.
 `loopback` mode has **no hardware TSF** (§9.2 host clock only) and cannot validate
 the §7.2 quiet-gap or §11 TSF anchoring — those need real radios (§17).
 
+### 16.3 UDP broadcast/sniffer air backend
+
+`air.kind: "udp-broadcast"` is the RF-broadcast bench analogue. It uses the
+existing `air.tx` and `air.rx` arrays but requires exactly one endpoint in each:
+`tx[0]` is an IPv4 broadcast destination and `rx[0]` is the shared listen
+address/port. Multiple nodes may bind the same `rx[0]` port. Every injected air
+frame is sent once to the channel; every local listener receives and passively
+filters the channel rather than owning a point-to-point route.
+
+The backend enables `SO_BROADCAST` on TX and shared-address binding on RX. Before
+delivery to the core it validates the complete waybeam wire packet (§3), rejects
+malformed/non-waybeam datagrams, and rejects packets whose common-prefix
+`originator` equals the local node. These filtered packets increment the
+adapter's `filtered` counter, never `rx` or synthetic `drop`. Valid packets from
+all other originators, including HEARTBEAT and return traffic, are delivered
+unchanged. Thus a node may transmit and sniff the same channel without consuming
+its own looped-back traffic. Ordinary `air.kind: "udp"` retains its existing
+multi-target/multi-listener point-to-point simulation semantics and performs no
+new filtering.
+
+This backend is Linux/IPv4 bench tooling, not a claim that UDP broadcast models
+RF timing, RSSI, collision, capture, or half-duplex behavior. Loopback use SHOULD
+send to `127.255.255.255:<port>` and listen on `0.0.0.0:<port>`; subnet broadcast
+may be used for a multi-host LAN bench.
+
 ---
 
 ## 17. Empirical knobs & bench gates

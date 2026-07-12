@@ -433,6 +433,22 @@ The approved transport-audit sequence resolves the advertised-but-zero
 **Amended:** §3.7 (normative estimator); §15.3 (additive local-drop fields and
 mapping). Code follows separately.
 
+## Pass 19 — UDP broadcast/sniffer bench backend (2026-07-12)
+
+The approved transport-audit follow-up adds a dedicated RF-broadcast analogue
+without changing point-to-point UDP-air behavior:
+
+- `air.kind "udp-broadcast"` is one shared IPv4 broadcast channel, expressed as
+  exactly one TX destination plus one shared RX listen endpoint.
+- TX enables `SO_BROADCAST`; multiple nodes may share the RX port.
+- RX validates complete waybeam packets and filters the local originator before
+  core delivery, matching the RF backends' passive-sniff/self-filter boundary.
+- Filtered/malformed/self frames are counted separately from accepted and
+  synthetic-dropped traffic.
+
+**Amended:** §16.3 (backend config and receive semantics). Code follows in a
+separate commit.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
