@@ -169,6 +169,43 @@ int main() {
         }
     }
 
+    // One sendmmsg batch preserves datagram boundaries and order.
+    {
+        AirUdpCfg receiver_cfg;
+        receiver_cfg.rx = {"127.0.0.1:0"};
+        auto receiver = UdpAir::create(receiver_cfg);
+        CHECK(bool(receiver));
+        if (receiver) {
+            AirUdpCfg sender_cfg;
+            sender_cfg.tx = {"127.0.0.1:" +
+                             std::to_string(receiver.value->adapter_port(0))};
+            auto sender = UdpAir::create(sender_cfg);
+            CHECK(bool(sender));
+            if (sender) {
+                std::vector<std::vector<uint8_t>> frames;
+                for (uint8_t i = 0; i < 32; ++i) {
+                    frames.push_back({i, static_cast<uint8_t>(i ^ 0x5a)});
+                }
+                CHECK_EQ_U(sender.value->inject_batch(frames), frames.size());
+                CHECK_EQ_U(sender.value->tx_submitted(), frames.size());
+                size_t next = 0;
+                for (int tries = 0; tries < 100 && next < frames.size(); ++tries) {
+                    receiver.value->poll_once(
+                        10, [&](const AirRxMeta&, const uint8_t* data, size_t len) {
+                            CHECK_EQ_U(len, 2);
+                            CHECK(next < frames.size());
+                            if (next < frames.size()) {
+                                CHECK_EQ_U(data[0], frames[next][0]);
+                                CHECK_EQ_U(data[1], frames[next][1]);
+                                ++next;
+                            }
+                        });
+                }
+                CHECK_EQ_U(next, frames.size());
+            }
+        }
+    }
+
     {
         AirUdpCfg cfg;
         cfg.rx = {"127.0.0.1:0"};

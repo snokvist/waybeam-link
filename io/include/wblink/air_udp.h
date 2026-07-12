@@ -35,6 +35,10 @@ class UdpAir {
 
     // Send one air frame to every tx target. Returns targets reached.
     size_t inject(const uint8_t* frame, size_t len);
+    // Submit one encoded video frame's packet burst with one sendmmsg per
+    // target. Returns successful datagrams across all targets.
+    size_t inject_batch(const std::vector<std::vector<uint8_t>>& frames);
+    bool batch_tx_supported() const { return pace_mbps_ == 0; }
 
     // Drain all listen sockets; cb per frame, tagged with the adapter index.
     // Returns frames delivered, or -1 on poll error.

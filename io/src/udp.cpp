@@ -230,6 +230,32 @@ bool UdpEgress::send(const uint8_t* data, size_t len) {
     return ::send(fd_, data, len, 0) == static_cast<ssize_t>(len);
 }
 
+size_t UdpEgress::send_many(
+    const std::vector<std::vector<uint8_t>>& frames) {
+    if (frames.empty()) {
+        return 0;
+    }
+    std::vector<iovec> iov(frames.size());
+    std::vector<mmsghdr> msgs(frames.size());
+    for (size_t i = 0; i < frames.size(); ++i) {
+        iov[i].iov_base = const_cast<uint8_t*>(frames[i].data());
+        iov[i].iov_len = frames[i].size();
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+    const int rc = ::sendmmsg(fd_, msgs.data(),
+                              static_cast<unsigned int>(msgs.size()), 0);
+    size_t sent = rc > 0 ? static_cast<size_t>(rc) : 0;
+    // A nonblocking socket may accept only a prefix. Preserve the old
+    // best-effort-per-datagram behavior for the remainder.
+    for (size_t i = sent; i < frames.size(); ++i) {
+        if (send(frames[i].data(), frames[i].size())) {
+            ++sent;
+        }
+    }
+    return sent;
+}
+
 // ---- BindingSet -----------------------------------------------------------
 
 Result<BindingSet> BindingSet::create(const Config& cfg) {
