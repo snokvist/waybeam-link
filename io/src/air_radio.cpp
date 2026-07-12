@@ -4,6 +4,8 @@
 #include <libusb.h>
 
 #include <stdio.h>  // fopencookie (glibc/musl extension)
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -124,6 +126,7 @@ struct RadioAir::Impl {
     std::mutex mu;
     std::condition_variable cv;
     std::deque<RxFrame> queue;
+    int ready_fd = -1;
 
     // §3.0 Pass 12: last-heard SA per originator (RX threads write, the
     // main-thread inject_return reads). Tiny linear table — the fleet has
@@ -200,6 +203,7 @@ struct RadioAir::Impl {
             }
             std::fclose(ev_stream);
         }
+        if (ready_fd >= 0) ::close(ready_fd);
     }
 
     // RX-loop callback: §3.0 filter on the RX thread, accepted frames cross
@@ -271,6 +275,9 @@ struct RadioAir::Impl {
             queue.push_back(std::move(f));
         }
         cv.notify_one();
+        const uint64_t one = 1;
+        const ssize_t notified = ::write(ready_fd, &one, sizeof(one));
+        (void)notified;  // EAGAIN means an unread wakeup is already pending.
     }
 };
 
@@ -296,6 +303,11 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
 
     RadioAir air;
     Impl& im = *air.impl_;
+    im.ready_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (im.ready_fd < 0) {
+        return Result<RadioAir>::fail(std::string("radio: eventfd: ") +
+                                      std::strerror(errno));
+    }
     im.cfg = cfg;
     im.logger = std::make_shared<Logger>();
     im.logger->set_level(Logger::Level::Info);
@@ -489,6 +501,8 @@ void RadioAir::return_counters(uint64_t& unicast_sent,
 int RadioAir::poll_once(int timeout_ms, const RxCb& cb) {
     Impl& im = *impl_;
     std::deque<RxFrame> local;
+    uint64_t ready = 0;
+    while (::read(im.ready_fd, &ready, sizeof(ready)) > 0) {}
     {
         std::unique_lock<std::mutex> lk(im.mu);
         if (im.queue.empty() && timeout_ms > 0) {
@@ -506,6 +520,8 @@ int RadioAir::poll_once(int timeout_ms, const RxCb& cb) {
     }
     return static_cast<int>(local.size());
 }
+
+int RadioAir::wait_fd() const { return impl_->ready_fd; }
 
 size_t RadioAir::rx_adapters() const { return impl_->adapters.size(); }
 

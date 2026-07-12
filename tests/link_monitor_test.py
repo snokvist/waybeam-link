@@ -21,6 +21,15 @@ class DashboardSchemaTest(unittest.TestCase):
             "shm_bad_slots", "frame_count", "frame_bytes", "frame_size_last",
             "frame_size_min", "frame_size_max", "frame_interval_us",
             "frame_jitter_us",
+            "jscc_shadow_blocks", "jscc_predicted_loss_symbols",
+            "jscc_observed_loss_symbols", "jscc_underpredicted_blocks",
+            "jscc_predicted_parity_symbols",
+            "jscc_predicted_repair_symbols", "jscc_observed_repair_symbols",
+            "jscc_repair_underpredicted_blocks",
+            "jscc_repair_demand_censored_blocks",
+            "jscc_repair_predicted_parity_symbols",
+            "source_symbols_sent", "repair_symbols_sent",
+            "fec_oversize_frames", "idr_frames",
         ):
             self.assertIn(f"s.{field}", HTML)
 

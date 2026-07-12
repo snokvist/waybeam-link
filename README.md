@@ -138,6 +138,24 @@ PTS monotonicity, decoder EOS, frame counts, both UDP adapter counters, FEC,
 ARQ, malformed/decode outcomes, and SHM producer drops. `FRAMES`, `BITRATES`,
 `WARMUP_FRAMES`, `RX_DROP_PERMILLE`, and `BUILD` are overridable. Set
 `KEEP_TMP=1` to retain configs, logs, and stats JSONL after a failure.
+Synthetic `x265enc` uses periodic IDRs and deliberately fails on a 512 KB SHM
+oversize. Stress-only runs may set `ALLOW_PRODUCER_OVERSIZE=1`; this accepts
+only an oversize-only producer result with no full-ring drops and enough usable
+frames for the consumer. Normal runs continue to fail on every oversize.
+
+ARQ stress uses one listener (fully correlated/single-path loss), disables FEC,
+and permits the consumer to finish with fewer frames while requiring the actual
+NACK/retransmit/recovery counters to advance:
+
+```sh
+FRAMES=300 BITRATES=8000 AIR_KIND=udp-broadcast RX_LISTENERS=1 \
+RX_DROP_PERMILLE=20 FEC_SCHEME=none ALLOW_FRAME_LOSS=1 EXPECT_ARQ=1 \
+CONSUMER_TIMEOUT_MS=15000 ARQ_IFRAME_DEADLINE_MS=16 \
+ARQ_PFRAME_DEADLINE_MS=16 tools/frame_shm_udp_bench.sh
+```
+
+Deadline overrides generate a temporary matched profile table for both local
+processes. They do not edit `profiles/table.example.json`.
 
 ### Fleet monitor (live dashboard)
 
@@ -170,7 +188,25 @@ browser-side trend history. Hover an underlined label for its precise meaning.
 Frame-SHM streams report successful local frame transfers, cumulative bytes,
 last/min/max frame size, latest arrival interval, and smoothed arrival jitter.
 The finite bench additionally writes its per-frame trace and summary to
-`frames.csv` and `summary.json`.
+`frames.csv` and `summary.json`. It converts that data to the versioned
+`controller-trace.jsonl` contract and deterministically replays it into
+`controller-decisions.jsonl`. The initial deadline is excess inter-arrival time
+over the run's median cadence; it is not cross-host one-way latency. VFRM PTS
+is retained as an opaque SDK correlation value and is not treated as
+milliseconds. Override the provisional 16 ms budget with `JSCC_DEADLINE_MS=25`.
+Finite runs also enable the capped UDP packet-event observer and emit
+`{tx,rx}-packets.jsonl`, `controller-packet-trace.jsonl`, and
+`controller-packet-decisions.jsonl`. `PACKET_TRACE_MAX` defaults to 75,000
+events per process; `trace_end.events_dropped` makes an incomplete capture
+explicit. `controller-matrix.json` contains the standard nine recorded/loss
+scenarios crossed with four FEC/ARQ/deadline ablations.
+Vehicle packet traces default to the SD card at
+`/mnt/mmcblk0p1/waybeam-link-traces` and are removed after retrieval. Override
+the location with `REMOTE_TRACE_DIR`; avoid `/tmp` for extended captures because
+it is a small RAM-backed filesystem on the SSC338Q.
+`FEC_I_RATE_PERMILLE`, `FEC_P_RATE_PERMILLE`, and `FEC_MIN_K` override only the
+generated/deployed waybeam-link bench config. They never edit venc settings;
+set both rates to zero for an ARQ-only hardware run.
 
 ## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
 
@@ -340,6 +376,8 @@ tools/jscc_ethernet_bench.sh start
 tools/jscc_ethernet_bench.sh status
 # After Radeon-VRX creates/recreates its decoder pipeline:
 tools/jscc_ethernet_bench.sh recover-video
+# In-process UDP loss ramp; estimator state is preserved and loss resets to 0:
+RAMP_DWELL_S=4 tools/jscc_ethernet_bench.sh loss-ramp
 ```
 
 The stable application SHM name is `venc_frame_out` (POSIX object
@@ -349,6 +387,40 @@ the built-in continuous validator instead, stop any external decoder and use
 detected second consumer because the venc frame ring is strictly
 single-consumer. Foreground `finite` runs always use the GStreamer trace
 consumer.
+
+Replay an artifact with a different relative deadline without rerunning the
+encoder:
+
+```sh
+python3 tools/jscc_replay.py replay \
+  artifacts/jscc-ethernet-*/controller-trace.jsonl \
+  --deadline-ms 25 --output /tmp/jscc-decisions.jsonl
+```
+
+Each frame records its encoded size, raw SDK PTS/arrival cadence, calculated
+symbol size, `k`, target/emitted parity, and whether `k+m <= 256`. Per-frame
+path delivery and RTT are explicitly `null` until packet-event and uplink
+tracing are added; replay does not infer data the Ethernet frame trace cannot
+observe.
+
+Packet-event traces group the existing DATA/NACK wire records by frame block.
+They retain source/repair symbol identity, both virtual listener outcomes,
+synthetic drops, retransmissions, NACK timing, and final replay outcome. Replay
+can replace recorded delivery with deterministic failure models and pin FEC,
+ARQ, or deadline discard for ablation:
+
+```sh
+python3 tools/jscc_replay.py replay controller-packet-trace.jsonl \
+  --loss-model burst --loss-period 100 --burst-length 12 \
+  --path-correlation correlated --fec on --arq eligible \
+  --rtt-ms 4 --deadline-ms 16
+```
+
+Loss models are `recorded`, `none`, `burst`, `incremental`, `low-frequency`,
+and `high-frequency`. Synthetic diversity defaults to independent paths;
+`--path-correlation correlated` applies the same loss decision to every path.
+All timing remains receiver-host-relative. Kernel queue drops are cumulative
+stats and cannot be reconstructed as individual packet events.
 
 `recover-video` sends a receiver-to-transmitter recovery request for the
 latched RTP stream. The vehicle then requests one IDR from venc; steady-state

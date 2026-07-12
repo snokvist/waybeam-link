@@ -611,6 +611,13 @@ frames instead of forwarding per-packet payloads:
    (§15.4) — the metadata prefix rides through transparently; the RX never
    parses the Annex-B payload.
 
+There is no completed-frame reorder buffer. On observing any packet from block
+`N`, every incomplete block older than `N` is finalized as superseded. Once
+block `N` is released, older blocks can therefore neither delay it nor appear
+after it; any late symbol for an older finalized block is ignored. This is the
+frame-SHM form of §6.2's latency-first rule and the retention window is zero
+blocks, not a jitter-buffer allowance.
+
 This is §5.3 Option A. (Option B — RTP re-packetization for a decoder that cannot
 consume SHM — is out of scope for v1; a `udp` egress on a `frame-shm`-ingested
 stream is rejected at config load, since the wire payloads are frame *fragments*,
@@ -1256,6 +1263,62 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
   immediately after its source symbols at the same live priority (§5.3), *not*
   demoted to retransmit priority.
 
+### 14.2 JSCC inner decision contract
+
+The controller's per-frame decision is a pure, deterministic calculation. It
+does not consume instantaneous RSSI and does not assume independent packet loss.
+Its loss estimator supplies `predicted_loss_symbols`, a conservative frame-loss
+quantile fitted from a defined observation window or replay trace. Until the RF
+burst model is measured, this value is an explicit input rather than a hidden
+binomial calculation.
+
+Inputs are `k`, `predicted_loss_symbols`, configured `fec_floor_symbols` and
+`fec_cap_symbols`, frame `deadline_us`, elapsed time, estimated remaining source
+TX airtime, P95 return RTT, estimated resend airtime, ARQ guard time, and whether
+the frame is ARQ-capable. The decision is:
+
+1. If elapsed time plus remaining source TX airtime exceeds the frame deadline,
+   discard before spending more airtime (`deadline_unreachable`). Equality is
+   allowed and is not a miss.
+2. Otherwise choose
+   `m = min(max(predicted_loss_symbols, fec_floor_symbols), fec_cap_symbols,
+   256-k)`. If `k>256`, `m=0` and capacity is limited. A clamp below the
+   predicted count is reported as `fec_capacity_limited`; it does not by itself
+   discard a frame that may still arrive intact.
+3. ARQ is eligible only for an ARQ-capable frame when the time remaining after
+   original source transmission is at least
+   `rtt_p95_us + resend_airtime_us + arq_guard_us`. Equality is eligible.
+4. The reason code is stable and mutually exclusive:
+   `deadline_unreachable`, `fec_capacity_limited`, `fec_and_arq`, `fec_only`,
+   `arq_only`, or `unprotected`. Numeric telemetry may map these names to a
+   local enum, but the names are the diagnostic contract.
+
+The estimator, airtime model, and outer/middle loop are separate components.
+This contract only allocates protection for the current frame. The existing
+fixed-rate §14.1 policy remains the runtime fallback until a measured estimator
+feeds this decision; loss of controller input therefore preserves the authored
+configuration rather than silently selecting optimistic protection.
+
+Before runtime actuation, frame-SHM RX runs a **shadow-only** estimator over
+post-diversity source-symbol loss. For block `N`, prediction is calculated only
+from finalized blocks before `N`; block `N` is observed after its outcome is
+fixed. The initial diagnostic is the nearest-rank P95 of the trailing 120
+blocks, requires 20 samples, and predicts zero during cold start. It changes no
+wire field, parity count, ARQ gate, or deadline. Its purpose is to expose
+underprediction and adaptation lag in §15.3 while fixed §14.1 protection stays
+authoritative. These seeds are not an adopted RF loss model.
+
+A second protection-aware shadow estimates **transmitted repair demand**, not
+only missing source symbols. For a recovered block this is one plus the highest
+repair index needed to supply `k` received equations, so repair-packet loss is
+included. An unrecovered block reports the lower bound `repairs_emitted_so_far
++ missing_equations`; that observation is marked censored and must not be
+treated as an exact sample. Demand is normalized to permille of `k`, estimated
+as the trailing-120 maximum, then converted back to symbols for the next
+block. It requires 20 samples and uses a 100-permille cold-start rate. This
+candidate is also shadow-only and does not supersede the original source-loss
+telemetry.
+
 ---
 
 ## 15. I/O bindings, configuration & observability
@@ -1354,12 +1417,22 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "frame_size_max": 241810, "frame_interval_us": 11106,
     "frame_jitter_us": 184,
     "frames_fast": 89571, "frames_unrecoverable": 0, "malformed": 0,
+    "jscc_shadow_blocks": 89681, "jscc_predicted_loss_symbols": 3,
+    "jscc_observed_loss_symbols": 1, "jscc_underpredicted_blocks": 72,
+    "jscc_predicted_parity_symbols": 271044,
+    "jscc_predicted_repair_symbols": 4,
+    "jscc_observed_repair_symbols": 3,
+    "jscc_repair_underpredicted_blocks": 18,
+    "jscc_repair_demand_censored_blocks": 2,
+    "jscc_repair_predicted_parity_symbols": 358121,
     "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
     "resends_sent": 230, "double_send_suppressed": 5,
+    "source_symbols_sent": 4120300, "repair_symbols_sent": 358944,
+    "fec_oversize_frames": 0, "idr_frames": 17,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "return": { "reports_expected": 10, "reports_received": 9,
     "return_window_hits": 7, "return_window_misses": 2,
@@ -1403,6 +1476,26 @@ per-frame fields (`frames_fast`, `frames_unrecoverable`, `malformed`) stay 0.
 On frame-SHM ingress, `malformed` counts whole frames rejected by FrameFramer;
 RX-only reassembly outcome fields remain 0.
 
+The `jscc_*` fields are receiver-side, diagnostic-only shadow state from
+§14.2. `jscc_shadow_blocks` counts finalized blocks observed by the estimator;
+`jscc_predicted_loss_symbols` and `jscc_observed_loss_symbols` are the most
+recent causal prediction and result; `jscc_underpredicted_blocks` counts
+results greater than their prior prediction; and
+`jscc_predicted_parity_symbols` sums hypothetical predicted parity. They are
+zero on TX ingress and UDP streams. Stats reset clears both the estimator
+window and these counters so a new observation generation has an unambiguous
+cold start. None of these values changes active §14.1 FEC.
+
+The `jscc_*repair*` fields are the separate protection-aware shadow.
+`jscc_predicted_repair_symbols` and `jscc_observed_repair_symbols` are its
+latest causal prediction and transmitted-repair demand;
+`jscc_repair_underpredicted_blocks` counts exact or lower-bound observations
+above their prior prediction; `jscc_repair_demand_censored_blocks` counts
+unrecovered lower-bound observations; and
+`jscc_repair_predicted_parity_symbols` is cumulative hypothetical parity. A
+censored observation is evidence of insufficient protection, not an exact
+demand measurement. Reset clears this estimator and its counters too.
+
 `shm_full_drops`, `shm_oversize_drops`, and `shm_bad_slots` expose local ring
 backpressure/ABI failures separately from air/frame-reassembly loss. They are 0
 on UDP bindings. On frame-SHM egress they come from the producer ring; on
@@ -1413,6 +1506,14 @@ which remains backend/synthetic queue loss.
 `filtered` is the backend's cumulative count of structurally rejected or
 self-originated receive frames. It is 0 where filtering occurs below an
 observable boundary.
+
+On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
+the exact cumulative §14.1 symbols emitted by `FrameFramer`;
+`fec_oversize_frames` counts frames sent source-only because `k+r` exceeded
+GF(256) capacity; and `idr_frames` counts frames whose VFRM metadata carried
+the IDR flag. They are zero on RX and non-frame-SHM streams. These counters are
+the fixed-policy baseline for comparing hypothetical JSCC shadow parity; byte
+or bitrate inference is not an acceptable substitute.
 
 ### 15.4 `frame-shm` binding — venc_frame_ring slot format
 The `frame-shm` binding attaches to (ingress) or creates (egress) a POSIX
@@ -1492,9 +1593,10 @@ otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3 }` | retune a `frame-shm` stream's §14.1 FEC rates (TX node) |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
+| `POST /api/v1/bench/rx-drop` | `{ "permille": 0 }` | UDP-air bench RX only: retune independent synthetic loss per listener (0–1000); 409 on RF backends |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and
-`fec` on the TX. An endpoint invoked in a mode where it does not apply returns
+`fec` on the TX, and `bench/rx-drop` only on UDP-air RX. An endpoint invoked in a mode where it does not apply returns
 **409**; an unknown path **404**; a malformed or oversize body **400**. The
 write knobs are exactly the §9/§11/§14 levers that were previously boot-time
 JSON only; the profile pin is the operating-point (MCS + bitrate) lever, since
@@ -1568,6 +1670,15 @@ serialization a complete encoded frame is emitted as a host-speed burst and may
 overflow the receiver's UDP queue even when the intended channel loss is zero.
 This pacing models serialization only; it does not model PHY overhead or
 contention.
+
+Accepted retransmissions that have passed the §5.3 deadline, attempt, hold-down,
+and airtime-budget gates use a separate deadline-priority lane. At each
+serialization opportunity this lane is drained before queued live packets. This
+does not exempt retransmissions from the §5.3 airtime cap; it only prevents an
+already-authorized recovery from waiting behind a complete encoded-frame burst
+in a host-side pacing FIFO. Air receive readiness MUST also wake a transmitter
+that is waiting for local stream ingress, so NACK handling does not inherit the
+local-ingress polling interval.
 
 ---
 

@@ -7,7 +7,10 @@
 #include "wblink/wire.h"
 
 #include <cstring>
+#include <chrono>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "wbtest.h"
 
@@ -22,6 +25,16 @@ int main() {
         auto air = UdpAir::create(cfg);
         CHECK(bool(air));
         if (air) {
+            unsigned accepted_events = 0;
+            air.value->set_trace(
+                [&](const char* direction, const char* outcome, int adapter,
+                    const uint8_t*, size_t len) {
+                    CHECK(std::strcmp(direction, "rx") == 0);
+                    CHECK(std::strcmp(outcome, "accepted") == 0);
+                    CHECK_EQ_U(adapter, 0);
+                    CHECK_EQ_U(len, 3u);
+                    ++accepted_events;
+                });
             AirUdpCfg sender_cfg;
             sender_cfg.tx = {"127.0.0.1:" +
                              std::to_string(air.value->adapter_port(0))};
@@ -34,6 +47,7 @@ int main() {
             CHECK_EQ_U(air.value->poll_once(100, discard), 1u);
             CHECK_EQ_U(air.value->rx_frames(0), 1u);
             CHECK_EQ_U(air.value->rx_dropped(0), 0u);
+            CHECK_EQ_U(accepted_events, 1u);
         }
     }
 
@@ -88,13 +102,45 @@ int main() {
                 CHECK_EQ_U(ground.value->rx_filtered(0), 1u);
                 CHECK_EQ_U(ground.value->rx_filtered(1), 1u);
 
+                uint8_t recovery_frame[kRecoveryRequestSize]{};
+                RecoveryRequest recovery;
+                recovery.prefix = {9, 17, 9012};
+                recovery.target_originator = 17;
+                recovery.target_session = 1234;
+                recovery.target_stream_id = 0;
+                CHECK_EQ_U(encode_recovery_request(
+                               recovery, recovery_frame,
+                               sizeof(recovery_frame)),
+                           sizeof(recovery_frame));
+                CHECK_EQ_U(ground.value->inject(recovery_frame,
+                                                sizeof(recovery_frame)),
+                           1u);
+                unsigned recovery_received = 0;
+                const UdpAir::RxCb receive_recovery =
+                    [&](const AirRxMeta&, const uint8_t* data, size_t len) {
+                        const Decoded decoded = decode(data, len);
+                        const auto* request =
+                            std::get_if<RecoveryRequest>(&decoded);
+                        CHECK(request != nullptr);
+                        if (request != nullptr) {
+                            CHECK_EQ_U(request->target_originator, 17u);
+                            CHECK_EQ_U(request->target_session, 1234u);
+                            ++recovery_received;
+                        }
+                    };
+                CHECK_EQ_U(craft.value->poll_once(100, receive_recovery), 1u);
+                CHECK_EQ_U(recovery_received, 1u);
+                CHECK_EQ_U(ground.value->poll_once(100, discard), 0u);
+                CHECK_EQ_U(ground.value->rx_filtered(0), 2u);
+                CHECK_EQ_U(ground.value->rx_filtered(1), 2u);
+
                 const uint8_t junk[] = {1, 2, 3};
                 CHECK_EQ_U(sender.value->inject(junk, sizeof(junk)), 1u);
                 CHECK_EQ_U(craft.value->poll_once(100, discard), 0u);
                 CHECK_EQ_U(ground.value->poll_once(100, discard), 0u);
                 CHECK_EQ_U(craft.value->rx_filtered(0), 1u);
-                CHECK_EQ_U(ground.value->rx_filtered(0), 2u);
-                CHECK_EQ_U(ground.value->rx_filtered(1), 2u);
+                CHECK_EQ_U(ground.value->rx_filtered(0), 3u);
+                CHECK_EQ_U(ground.value->rx_filtered(1), 3u);
             }
         }
     }
@@ -169,6 +215,51 @@ int main() {
         }
     }
 
+    // Authorized resends bypass an already queued live-frame burst while all
+    // packets still pass through the same serialization clock.
+    {
+        AirUdpCfg rx_cfg;
+        rx_cfg.rx = {"127.0.0.1:0"};
+        auto rx = UdpAir::create(rx_cfg);
+        CHECK(bool(rx));
+        if (rx) {
+            AirUdpCfg tx_cfg;
+            tx_cfg.pace_mbps = 1;
+            tx_cfg.tx = {"127.0.0.1:" +
+                          std::to_string(rx.value->adapter_port(0))};
+            auto tx = UdpAir::create(tx_cfg);
+            CHECK(bool(tx));
+            if (tx) {
+                const uint8_t live1[] = {1};
+                const uint8_t live2[] = {2};
+                const uint8_t resend[] = {9};
+                CHECK_EQ_U(tx.value->inject(live1, sizeof(live1)), 1u);
+                CHECK_EQ_U(tx.value->inject(live2, sizeof(live2)), 1u);
+                CHECK_EQ_U(tx.value->inject_resend(resend, sizeof(resend)), 1u);
+                std::vector<uint8_t> order;
+                for (int tries = 0; tries < 100 && order.size() < 3; ++tries) {
+                    tx.value->poll_once(0, discard);
+                    rx.value->poll_once(
+                        0, [&](const AirRxMeta&, const uint8_t* data, size_t n) {
+                            if (n == 1) order.push_back(data[0]);
+                        });
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                }
+                CHECK_EQ_U(order.size(), 3u);
+                if (order.size() == 3) {
+                    CHECK_EQ_U(order[0], 9u);
+                    CHECK_EQ_U(order[1], 1u);
+                    CHECK_EQ_U(order[2], 2u);
+                }
+                CHECK(!tx.value->tx_pending());
+                CHECK_EQ_U(tx.value->tx_submitted(), 3u);
+            }
+            const std::vector<int> fds = rx.value->wait_fds();
+            CHECK_EQ_U(fds.size(), 1u);
+            if (!fds.empty()) CHECK(fds[0] >= 0);
+        }
+    }
+
     {
         AirUdpCfg cfg;
         cfg.rx = {"127.0.0.1:0"};
@@ -176,6 +267,16 @@ int main() {
         auto air = UdpAir::create(cfg);
         CHECK(bool(air));
         if (air) {
+            unsigned drop_events = 0;
+            air.value->set_trace(
+                [&](const char* direction, const char* outcome, int adapter,
+                    const uint8_t*, size_t len) {
+                    CHECK(std::strcmp(direction, "rx") == 0);
+                    CHECK(std::strcmp(outcome, "synthetic_drop") == 0);
+                    CHECK_EQ_U(adapter, 0);
+                    CHECK_EQ_U(len, 1u);
+                    ++drop_events;
+                });
             AirUdpCfg sender_cfg;
             sender_cfg.tx = {"127.0.0.1:" +
                              std::to_string(air.value->adapter_port(0))};
@@ -186,6 +287,13 @@ int main() {
             CHECK_EQ_U(air.value->poll_once(100, discard), 0u);
             CHECK_EQ_U(air.value->rx_frames(0), 0u);
             CHECK_EQ_U(air.value->rx_dropped(0), 1u);
+            CHECK_EQ_U(drop_events, 1u);
+            air.value->set_trace({});
+            air.value->set_rx_drop_permille(0);
+            CHECK_EQ_U(air.value->rx_drop_permille(), 0u);
+            CHECK_EQ_U(sender.value->inject(&msg, 1), 1u);
+            CHECK_EQ_U(air.value->poll_once(100, discard), 1u);
+            CHECK_EQ_U(air.value->rx_frames(0), 1u);
         }
     }
 

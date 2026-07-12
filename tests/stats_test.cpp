@@ -56,6 +56,16 @@ StatsSnapshot sample_snapshot() {
     st.frames_fast = 89571;
     st.frames_unrecoverable = 0;
     st.malformed = 0;
+    st.jscc_shadow_blocks = 89681;
+    st.jscc_predicted_loss_symbols = 3;
+    st.jscc_observed_loss_symbols = 1;
+    st.jscc_underpredicted_blocks = 72;
+    st.jscc_predicted_parity_symbols = 271044;
+    st.jscc_predicted_repair_symbols = 4;
+    st.jscc_observed_repair_symbols = 3;
+    st.jscc_repair_underpredicted_blocks = 18;
+    st.jscc_repair_demand_censored_blocks = 2;
+    st.jscc_repair_predicted_parity_symbols = 358121;
     st.dropped_superseded = 110;
     st.dropped_deadline = 8;
     st.nacks_sent = 18;
@@ -65,6 +75,10 @@ StatsSnapshot sample_snapshot() {
     st.arq_rec_max_ms = 61;
     st.resends_sent = 230;
     st.double_send_suppressed = 5;
+    st.source_symbols_sent = 4120300;
+    st.repair_symbols_sent = 358944;
+    st.fec_oversize_frames = 0;
+    st.idr_frames = 17;
     st.decode_errors = 0;
     st.active_profile = 4;
     st.table_version = 178;
@@ -102,13 +116,25 @@ const char* kGolden =
     "\"frame_size_min\":8120,\"frame_size_max\":241810,"
     "\"frame_interval_us\":11106,\"frame_jitter_us\":184,"
     "\"frames_fast\":89571,\"frames_unrecoverable\":0,"
-    "\"malformed\":0,\"shm_full_drops\":0,\"shm_oversize_drops\":0,"
+    "\"malformed\":0,\"jscc_shadow_blocks\":89681,"
+    "\"jscc_predicted_loss_symbols\":3,"
+    "\"jscc_observed_loss_symbols\":1,"
+    "\"jscc_underpredicted_blocks\":72,"
+    "\"jscc_predicted_parity_symbols\":271044,"
+    "\"jscc_predicted_repair_symbols\":4,"
+    "\"jscc_observed_repair_symbols\":3,"
+    "\"jscc_repair_underpredicted_blocks\":18,"
+    "\"jscc_repair_demand_censored_blocks\":2,"
+    "\"jscc_repair_predicted_parity_symbols\":358121,"
+    "\"shm_full_drops\":0,\"shm_oversize_drops\":0,"
     "\"shm_bad_slots\":0,\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"
     "\"nacks_sent\":18,"
     "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
     "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
     "\"resends_sent\":230,\"double_send_suppressed\":5,"
+    "\"source_symbols_sent\":4120300,\"repair_symbols_sent\":358944,"
+    "\"fec_oversize_frames\":0,\"idr_frames\":17,"
     "\"decode_errors\":0,\"active_profile\":4,\"table_version\":178}],"
     "\"return\":{\"reports_expected\":10,\"reports_received\":9,"
     "\"return_window_hits\":7,\"return_window_misses\":2,"

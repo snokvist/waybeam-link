@@ -105,6 +105,16 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         it = blocks_.find(block_id);  // supersede() never drops the newest
     }
 
+    if (it != blocks_.end() && !it->second.shadow_armed) {
+        it->second.shadow_prediction = static_cast<uint16_t>(
+            std::min<uint32_t>(loss_estimator_.predict(), UINT16_MAX));
+        const uint32_t rate = repair_estimator_.predict();
+        it->second.repair_prediction = static_cast<uint16_t>(
+            std::min<uint64_t>((static_cast<uint64_t>(rate) * it->second.k +
+                                999) / 1000, UINT16_MAX));
+        it->second.shadow_armed = true;
+    }
+
     if (it != blocks_.end() && try_complete(block_id, it->second, emit)) {
         blocks_.erase(it);
     }
@@ -123,6 +133,7 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
             scratch_.insert(scratch_.end(), kv.second.begin(), kv.second.end());
         }
         emit(scratch_.data(), scratch_.size());
+        observe_shadow(b);
         ++stats_.frames_delivered;
         ++stats_.frames_fast;
         finalize(id);
@@ -151,6 +162,7 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
             if (dec.decode(scratch_.data())) {
                 scratch_.resize(b.frame_len);  // trim last-symbol padding
                 emit(scratch_.data(), scratch_.size());
+                observe_shadow(b);
                 ++stats_.frames_delivered;
                 ++stats_.frames_fec;
                 finalize(id);
@@ -172,6 +184,7 @@ void FrameReassembler::supersede(uint32_t new_highest, const Emit& /*emit*/) {
                 ++stats_.frames_unrecoverable;
             }
             ++stats_.frames_superseded;
+            observe_shadow(it->second);
             finalize(it->first);
             it = blocks_.erase(it);
         } else {
@@ -188,11 +201,57 @@ void FrameReassembler::tick(uint64_t now_ms, const Emit& /*emit*/) {
                 ++stats_.frames_unrecoverable;
             }
             ++stats_.frames_deadline;
+            observe_shadow(it->second);
             finalize(it->first);
             it = blocks_.erase(it);
         } else {
             ++it;
         }
+    }
+}
+
+void FrameReassembler::observe_shadow(Block& b) {
+    if (!b.shadow_armed || b.k == 0) {
+        return;
+    }
+    const uint16_t observed = static_cast<uint16_t>(
+        b.k - std::min<size_t>(b.sources.size(), b.k));
+    const uint16_t repairs_seen = static_cast<uint16_t>(b.repairs.size());
+    const uint16_t emitted_so_far = b.repairs.empty()
+        ? 0 : static_cast<uint16_t>(b.repairs.rbegin()->first + 1);
+    const bool demand_censored = repairs_seen < observed;
+    const uint16_t repair_demand = demand_censored
+        ? static_cast<uint16_t>(std::min<uint32_t>(
+              UINT16_MAX, emitted_so_far + observed - repairs_seen))
+        : (observed == 0 ? 0 : emitted_so_far);
+    stats_.jscc_predicted_loss_symbols = b.shadow_prediction;
+    stats_.jscc_observed_loss_symbols = observed;
+    stats_.jscc_underpredicted_blocks += b.shadow_prediction < observed;
+    stats_.jscc_predicted_parity_symbols += b.shadow_prediction;
+    stats_.jscc_predicted_repair_symbols = b.repair_prediction;
+    stats_.jscc_observed_repair_symbols = repair_demand;
+    stats_.jscc_repair_underpredicted_blocks +=
+        b.repair_prediction < repair_demand;
+    stats_.jscc_repair_demand_censored_blocks += demand_censored;
+    stats_.jscc_repair_predicted_parity_symbols += b.repair_prediction;
+    ++stats_.jscc_shadow_blocks;
+    loss_estimator_.observe(observed);
+    const uint32_t demand_rate = b.k == 0
+        ? 0 : (static_cast<uint32_t>(repair_demand) * 1000 + b.k - 1) / b.k;
+    repair_estimator_.observe(demand_rate);
+    b.shadow_armed = false;
+}
+
+void FrameReassembler::reset_stats() {
+    stats_ = {};
+    loss_estimator_.reset();
+    repair_estimator_.reset();
+    for (auto& [id, block] : blocks_) {
+        (void)id;
+        block.shadow_prediction = 0;
+        block.repair_prediction = static_cast<uint16_t>(
+            (100u * block.k + 999u) / 1000u);
+        block.shadow_armed = true;
     }
 }
 

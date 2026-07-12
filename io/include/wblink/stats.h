@@ -68,6 +68,16 @@ struct StreamStats {
     uint64_t frames_fast = 0;
     uint64_t frames_unrecoverable = 0;
     uint64_t malformed = 0;
+    uint64_t jscc_shadow_blocks = 0;
+    uint16_t jscc_predicted_loss_symbols = 0;
+    uint16_t jscc_observed_loss_symbols = 0;
+    uint64_t jscc_underpredicted_blocks = 0;
+    uint64_t jscc_predicted_parity_symbols = 0;
+    uint16_t jscc_predicted_repair_symbols = 0;
+    uint16_t jscc_observed_repair_symbols = 0;
+    uint64_t jscc_repair_underpredicted_blocks = 0;
+    uint64_t jscc_repair_demand_censored_blocks = 0;
+    uint64_t jscc_repair_predicted_parity_symbols = 0;
     uint64_t shm_full_drops = 0;
     uint64_t shm_oversize_drops = 0;
     uint64_t shm_bad_slots = 0;
@@ -84,6 +94,10 @@ struct StreamStats {
     uint64_t arq_rec_max_ms = 0;
     uint64_t resends_sent = 0;
     uint64_t double_send_suppressed = 0;
+    uint64_t source_symbols_sent = 0;
+    uint64_t repair_symbols_sent = 0;
+    uint64_t fec_oversize_frames = 0;
+    uint64_t idr_frames = 0;
     uint64_t decode_errors = 0;
     uint8_t active_profile = 0;
     uint8_t table_version = 0;

@@ -533,6 +533,120 @@ identical and deduplicate normally.
 **Amended:** §16.3 (multi-listener virtual diversity). Code follows in a
 separate commit.
 
+## Pass 24 — deterministic JSCC inner decision (2026-07-12)
+
+The approved JSCC roadmap needs a per-frame protection decision without
+prematurely fitting independent-loss math to unmeasured RF bursts. The inner
+controller therefore accepts a conservative predicted loss-symbol count from a
+separate estimator, clamps parity against configured and GF(256) capacity, and
+reports when the requested protection cannot fit. ARQ is eligible only when
+P95 RTT plus resend airtime and guard fit after original source transmission.
+Deadline discard is reserved for a frame whose original transmission cannot
+finish by its deadline; statistical under-protection alone does not prove that
+the frame is doomed.
+
+The decision is pure, uses injected timing, and has stable reason names for
+replay and diagnostics. Existing fixed FEC rates remain the fail-safe runtime
+fallback until the measured estimator is connected.
+
+**Amended:** §14.2 (inner-controller inputs, clamps, ARQ/deadline gates, and
+reason-code contract). Code follows separately.
+
+## Pass 25 — release supersedes every older incomplete frame (2026-07-12)
+
+The operator confirmed the wfb_ng-style latency rule: once the receiver has a
+newer available frame/block, waiting for any older incomplete frame is invalid.
+The protocol already said a newer block supersedes older incomplete blocks, but
+`FrameReassembler` retained a two-block window. Ordered RX delivery prevented
+late output in common cases, yet stale reassembly state and counters survived
+until a later block or deadline.
+
+Frame-SHM reassembly now has a zero-block retention window. Seeing block `N`
+finalizes every older incomplete block as superseded; releasing `N` can never
+be delayed by, or followed by, an older frame. Late symbols for finalized blocks
+remain ignored.
+
+**Amended:** §6.3a (zero-retention release/supersession rule). Code follows
+separately.
+
+## Pass 26 — expedite authorized ARQ retransmissions (2026-07-13)
+
+Ethernet gate-3 testing separated sub-millisecond network propagation from
+application recovery latency. Two avoidable host-side waits remained: the TX
+main loop could sleep on local stream ingress while a return packet was ready,
+and the UDP serialization model appended an authorized retransmission behind a
+whole queued encoded-frame burst. The latter can consume most or all of a
+short JSCC deadline even though the §5.3 scheduler has already accepted,
+budgeted, and freshness-sorted the resend.
+
+Authorized retransmissions now use a deadline-priority serialization lane, and
+air-return readiness participates in the TX ingress wait. The §5.3 airtime cap,
+per-requester partition, attempt cap, deadline gate, global hold-down, and
+freshness ordering remain unchanged. This is bounded priority for packets the
+scheduler already admitted, not an unlimited ARQ fast path.
+
+**Amended:** §16.3 (paced retransmit priority and return-path wakeup). Code
+follows separately.
+
+## Pass 27 — causal JSCC estimator shadow telemetry (2026-07-13)
+
+Offline loss-matrix replay showed that an empirical quantile can save parity,
+but also that estimator lag creates deadline failures under changing and
+correlated loss. Runtime adaptive FEC is therefore not authorized. The next
+measurement stage observes post-diversity source-symbol loss at frame-SHM RX
+with a causal trailing-window P95: every block's prediction is fixed before
+that block contributes an observation.
+
+The initial 120-block window, 20-sample threshold, and zero cold start are
+diagnostic seeds, not an RF model. Additive stats expose the latest prediction
+and observation, cumulative underprediction, hypothetical parity, and sample
+count. Reset starts a new estimator generation. Fixed §14.1 parity remains the
+only runtime authority.
+
+**Amended:** §14.2 (shadow estimator ordering and non-enforcement); §15.3
+(additive `jscc_*` receiver stream fields). Code follows separately.
+
+## Pass 28 — protection-aware JSCC shadow (2026-07-13)
+
+The first runtime shadow predicts missing source symbols. That is useful loss
+telemetry but is not sufficient for parity allocation because repair packets
+can also be lost, and raw symbol counts scale with block size. Deterministic
+replay now measures transmitted repair demand, normalizes it by `k`, and marks
+unrecoverable observations as censored lower bounds.
+
+A 120-block maximum with a 10% cold-start rate matched fixed FEC under steady
+15% independent loss while selecting less parity, but added one failure under
+incremental loss. It remains non-enforcing. Additive fields expose this second
+shadow independently; the existing source-loss fields retain their meaning.
+
+**Amended:** §14.2 (repair-demand definition, normalization, censoring, and
+shadow-only seeds); §15.3 (additive protection-shadow fields). Code follows
+separately.
+
+## Pass 29 — exact frame-FEC transmission counters (2026-07-13)
+
+Protection shadow telemetry reports hypothetical parity, but live stats did
+not export `FrameFramer`'s existing source/repair counters. Comparing against
+an inferred bitrate would conflate frame size, metadata, headers, and IDR rate.
+Additive TX stream fields now expose the exact emitted source and repair symbol
+counts, capacity-disabled frames, and IDR-classified frames. No transmission
+behavior changes.
+
+**Amended:** §15.3 (additive frame-SHM TX symbol and classification counters).
+Code follows separately.
+
+## Pass 30 — live UDP loss-ramp control (2026-07-13)
+
+Restarting the Ethernet receiver to change synthetic loss resets the causal
+estimator and cannot test adaptation lag. A bench-only control endpoint may
+therefore retune `udp`/`udp-broadcast` synthetic RX loss in-process. It is
+bounded to 0–1000 permille, rejects non-UDP backends, changes no persistent
+configuration, and is reset to zero after scripted ramps. Monitor and Devourer
+behavior is explicitly untouched.
+
+**Amended:** §15.5 (UDP-air bench synthetic-loss control). Code follows
+separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

@@ -317,7 +317,7 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
     if (method != "POST") {
         return reply(405, "Method Not Allowed", json_err("use GET or POST"));
     }
-    json j;
+    json j = json::object();
     if (!body.empty()) {
         j = json::parse(body, nullptr, false);
         if (j.is_discarded()) {
@@ -367,6 +367,13 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
     if (path == "/api/v1/video/recover") {
         if (!h_.video_recover) return na();
         return done(h_.video_recover(j.value("stream_id", -1)));
+    }
+    if (path == "/api/v1/bench/rx-drop") {
+        if (!h_.bench_rx_drop) return na();
+        if (!j.contains("permille")) {
+            return reply(400, "Bad Request", json_err("permille required"));
+        }
+        return done(h_.bench_rx_drop(j.value("permille", -1)));
     }
     return reply(404, "Not Found", json_err("unknown path"));
 }

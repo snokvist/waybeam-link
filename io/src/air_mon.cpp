@@ -6,6 +6,7 @@
 #include <linux/if_packet.h>  // sockaddr_ll
 #include <net/if.h>           // if_nametoindex
 #include <sys/socket.h>
+#include <sys/eventfd.h>
 #include <sys/time.h>  // struct timeval (SO_RCVTIMEO)
 #include <unistd.h>    // close
 
@@ -66,6 +67,7 @@ struct MonAir::Impl {
     std::condition_variable cv;
     std::deque<RxFrame> queue;
     std::atomic<bool> running{true};
+    int ready_fd = -1;
 
     // TX state — main thread only.
     uint16_t seq = 0;
@@ -91,6 +93,7 @@ struct MonAir::Impl {
                 ::close(a->fd);
             }
         }
+        if (ready_fd >= 0) ::close(ready_fd);
     }
 
     void rx_loop(Adapter* a, uint8_t adapter_id);
@@ -167,6 +170,9 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
             queue.push_back(std::move(f));
         }
         cv.notify_one();
+        const uint64_t one = 1;
+        const ssize_t notified = ::write(ready_fd, &one, sizeof(one));
+        (void)notified;  // EAGAIN means an unread wakeup is already pending.
     }
 }
 
@@ -202,6 +208,11 @@ Result<MonAir> MonAir::create(const MonAirCfg& cfg) {
     }
     auto impl = std::make_unique<Impl>();
     impl->cfg = cfg;
+    impl->ready_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (impl->ready_fd < 0) {
+        return Result<MonAir>::fail(std::string("kernel-monitor: eventfd: ") +
+                                    std::strerror(errno));
+    }
 
     int tx_count = 0;
     for (size_t i = 0; i < cfg.adapters.size(); ++i) {
@@ -299,6 +310,8 @@ void MonAir::return_counters(uint64_t& unicast_sent,
 
 int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
     std::deque<Impl::RxFrame> local;
+    uint64_t ready = 0;
+    while (::read(impl_->ready_fd, &ready, sizeof(ready)) > 0) {}
     {
         std::unique_lock<std::mutex> lk(impl_->mu);
         if (impl_->queue.empty() && timeout_ms > 0) {
@@ -318,6 +331,8 @@ int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
     }
     return delivered;
 }
+
+int MonAir::wait_fd() const { return impl_->ready_fd; }
 
 size_t MonAir::rx_adapters() const { return impl_->adapters.size(); }
 

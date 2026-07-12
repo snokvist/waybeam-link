@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <csignal>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <chrono>
@@ -25,6 +26,7 @@
 #include "wblink/config.h"
 #include "wblink/control_server.h"
 #include "wblink/csa.h"
+#include "wblink/endian.h"
 #include "wblink/frame_framer.h"
 #include "wblink/frame_reassembler.h"
 #include "wblink/frame_shm.h"
@@ -68,6 +70,128 @@ uint64_t now_us() {
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
 }
+
+// Bench-only, bounded packet-event trace. The wire remains the source of truth:
+// this observer decodes existing frames and never feeds decisions back in.
+class PacketEventTrace {
+  public:
+    explicit PacketEventTrace(const char* role) : role_(role) {
+        const char* path = std::getenv("WBLINK_PACKET_TRACE");
+        if (path == nullptr || *path == '\0') return;
+        if (const char* cap = std::getenv("WBLINK_PACKET_TRACE_MAX")) {
+            char* end = nullptr;
+            const unsigned long long parsed = std::strtoull(cap, &end, 10);
+            if (end != cap && *end == '\0' && parsed > 0) {
+                cap_ = static_cast<uint64_t>(parsed);
+            }
+        }
+        out_ = std::fopen(path, "w");
+        if (out_ == nullptr) {
+            std::fprintf(stderr, "packet-trace: cannot open %s\n", path);
+            return;
+        }
+        static constexpr size_t kBufferBytes = 1024 * 1024;
+        buffer_.resize(kBufferBytes);
+        std::setvbuf(out_, buffer_.data(), _IOFBF, buffer_.size());
+        std::fprintf(out_,
+                     "{\"type\":\"schema\",\"schema\":\"waybeam-packet-events-v1\","
+                     "\"role\":\"%s\",\"cap\":%llu}\n",
+                     role_, static_cast<unsigned long long>(cap_));
+    }
+
+    ~PacketEventTrace() {
+        if (out_ == nullptr) return;
+        std::fprintf(out_,
+                     "{\"type\":\"trace_end\",\"events\":%llu,"
+                     "\"events_dropped\":%llu}\n",
+                     static_cast<unsigned long long>(events_),
+                     static_cast<unsigned long long>(dropped_));
+        std::fclose(out_);
+    }
+
+    bool enabled() const { return out_ != nullptr; }
+    void flush() { if (out_ != nullptr) std::fflush(out_); }
+
+    void packet(const char* direction, const char* outcome, int adapter,
+                const uint8_t* frame, size_t len) {
+        if (out_ == nullptr) return;
+        if (events_ >= cap_) {
+            ++dropped_;
+            return;
+        }
+        ++events_;
+        const uint64_t t = now_us();
+        const Decoded dec = decode(frame, len);
+        if (const DataView* data = std::get_if<DataView>(&dec)) {
+            const bool repair =
+                (data->hdr.data_flags & data_flags::kFecRepair) != 0;
+            uint16_t k = 0;
+            uint16_t symbol = 0;
+            uint32_t frame_len = 0;
+            if (repair && data->payload_len >= kFecRepairSubheaderSize) {
+                k = be16_read(data->payload + kFecOffWindowLen);
+                symbol = data->payload[kFecOffRepairIdx];
+                frame_len = be32_read(data->payload + kFecOffFrameLen);
+            } else if (!repair && data->payload_len >= kFecSourceSubheaderSize) {
+                k = be16_read(data->payload + kFecSrcOffWindowLen);
+                symbol = be16_read(data->payload + kFecSrcOffSymIndex);
+            }
+            std::fprintf(
+                out_,
+                "{\"type\":\"packet\",\"t_us\":%llu,\"direction\":\"%s\","
+                "\"outcome\":\"%s\",\"adapter\":%d,\"packet\":\"data\","
+                "\"originator\":%u,\"session\":%u,\"stream\":%u,"
+                "\"block\":%u,\"seq\":%u,\"kind\":\"%s\","
+                "\"symbol\":%u,\"k\":%u,\"frame_len\":%u,"
+                "\"arq\":%s,\"retransmit\":%s,\"eob\":%s,"
+                "\"bytes\":%zu}\n",
+                static_cast<unsigned long long>(t), direction, outcome, adapter,
+                data->hdr.prefix.originator, data->hdr.prefix.session_id,
+                data->hdr.stream_id, data->hdr.block_id, data->hdr.seq,
+                repair ? "repair" : "source", symbol, k, frame_len,
+                (data->hdr.data_flags & data_flags::kArq) ? "true" : "false",
+                (data->hdr.data_flags & data_flags::kRetransmit) ? "true" : "false",
+                (data->hdr.data_flags & data_flags::kEndOfBlock) ? "true" : "false",
+                len);
+            return;
+        }
+        if (const NackView* nack = std::get_if<NackView>(&dec)) {
+            std::string bitmap;
+            static constexpr char kHex[] = "0123456789abcdef";
+            bitmap.reserve(static_cast<size_t>(nack->bitmap_len) * 2);
+            for (uint8_t i = 0; i < nack->bitmap_len; ++i) {
+                bitmap.push_back(kHex[nack->bitmap[i] >> 4]);
+                bitmap.push_back(kHex[nack->bitmap[i] & 0x0f]);
+            }
+            std::fprintf(
+                out_,
+                "{\"type\":\"packet\",\"t_us\":%llu,\"direction\":\"%s\","
+                "\"outcome\":\"%s\",\"adapter\":%d,\"packet\":\"nack\","
+                "\"originator\":%u,\"session\":%u,\"stream\":%u,"
+                "\"target_originator\":%u,\"target_session\":%u,"
+                "\"base_seq\":%u,\"bitmap\":\"%s\",\"bytes\":%zu}\n",
+                static_cast<unsigned long long>(t), direction, outcome, adapter,
+                nack->hdr.prefix.originator, nack->hdr.prefix.session_id,
+                nack->hdr.target_stream_id, nack->hdr.target_originator,
+                nack->hdr.target_session, nack->hdr.base_seq, bitmap.c_str(), len);
+            return;
+        }
+        std::fprintf(out_,
+                     "{\"type\":\"packet\",\"t_us\":%llu,"
+                     "\"direction\":\"%s\",\"outcome\":\"%s\","
+                     "\"adapter\":%d,\"packet\":\"other\",\"bytes\":%zu}\n",
+                     static_cast<unsigned long long>(t), direction, outcome,
+                     adapter, len);
+    }
+
+  private:
+    const char* role_;
+    std::FILE* out_ = nullptr;
+    std::vector<char> buffer_;
+    uint64_t cap_ = 75000;
+    uint64_t events_ = 0;
+    uint64_t dropped_ = 0;
+};
 
 // Pass 17: bounded, observational catalog. It never feeds latch decisions.
 class DiscoveryCatalog {
@@ -364,6 +488,32 @@ struct AirBackend {
         return sent;
     }
 
+    size_t inject_resend(const uint8_t* f, size_t n) {
+        size_t sent = 0;
+        if (mon) {
+            sent = mon->inject(f, n);
+        } else {
+#if WBLINK_RADIO
+            if (radio) {
+                sent = radio->inject(f, n);
+            } else
+#endif
+            {
+                sent = udp->inject_resend(f, n);
+            }
+        }
+        if (sent > 0) last_tx_ms = now_ms();
+        return sent;
+    }
+
+    std::vector<int> wait_fds() const {
+        if (mon) return {mon->wait_fd()};
+#if WBLINK_RADIO
+        if (radio) return {radio->wait_fd()};
+#endif
+        return udp->wait_fds();
+    }
+
     // Returns (NACK/LINK_REPORT) carry their target so the radio backend
     // can address them as §3.0 unicast when return.unicast is on; the udp
     // dev backend has no L2 addressing and ignores the target.
@@ -411,6 +561,14 @@ struct AirBackend {
         }
 #endif
         return udp->poll_once(timeout_ms, cb);
+    }
+
+    void set_packet_trace(PacketEventTrace* trace) {
+        if (!udp || trace == nullptr || !trace->enabled()) return;
+        udp->set_trace([trace](const char* direction, const char* outcome,
+                              int adapter, const uint8_t* frame, size_t len) {
+            trace->packet(direction, outcome, adapter, frame, len);
+        });
     }
 
     size_t rx_adapters() const {
@@ -512,6 +670,13 @@ struct AirBackend {
         // Kernel-monitor cannot retune yet and must fail closed: pretending a
         // switch succeeded can strand the node while its interface stays put.
         return !mon.has_value();
+    }
+    bool set_udp_rx_drop(int permille) {
+        if (!udp || permille < 0 || permille > 1000) {
+            return false;
+        }
+        udp->set_rx_drop_permille(static_cast<uint16_t>(permille));
+        return true;
     }
     // §9.10: the watchdog runs in the mode loop (it owns the clock); its
     // verdict is grafted onto the TX adapter's stats entry here.
@@ -806,7 +971,8 @@ struct TxCore {
         }
     }
 
-    void tick(uint64_t now, const Inject& inject) {
+    void tick(uint64_t now, const Inject& inject,
+              const Inject& inject_resend = {}) {
         const SelectorActions act = selector_.tick(now);
         if (act.commit) {
             // §9.5 commit: the operating point stamped on every DATA packet
@@ -855,8 +1021,9 @@ struct TxCore {
         }
         for (Stream& s : streams_) {
             s.ring.evict(now);
-            s.sched.drain(s.ring, now,
-                          [&](const uint8_t* f, size_t l) { inject(f, l); });
+            s.sched.drain(s.ring, now, [&](const uint8_t* f, size_t l) {
+                (inject_resend ? inject_resend : inject)(f, l);
+            });
         }
     }
 
@@ -927,6 +1094,13 @@ struct TxCore {
                 st.seq = s.frame_framer->next_seq();
                 st.delivered = s.frame_framer->stats().frames;
                 st.malformed = s.frame_framer->stats().malformed_frame;
+                st.source_symbols_sent =
+                    s.frame_framer->stats().source_symbols;
+                st.repair_symbols_sent =
+                    s.frame_framer->stats().repair_symbols;
+                st.fec_oversize_frames =
+                    s.frame_framer->stats().fec_oversize_k;
+                st.idr_frames = s.frame_framer->stats().idr_frames;
             }
             st.resends_sent = s.sched.counters().resends_sent;
             st.double_send_suppressed =
@@ -1236,6 +1410,22 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
             st->frames_fast = fr.frames_fast;
             st->frames_unrecoverable = fr.frames_unrecoverable;
             st->malformed = fr.malformed;
+            st->jscc_shadow_blocks = fr.jscc_shadow_blocks;
+            st->jscc_predicted_loss_symbols = fr.jscc_predicted_loss_symbols;
+            st->jscc_observed_loss_symbols = fr.jscc_observed_loss_symbols;
+            st->jscc_underpredicted_blocks = fr.jscc_underpredicted_blocks;
+            st->jscc_predicted_parity_symbols =
+                fr.jscc_predicted_parity_symbols;
+            st->jscc_predicted_repair_symbols =
+                fr.jscc_predicted_repair_symbols;
+            st->jscc_observed_repair_symbols =
+                fr.jscc_observed_repair_symbols;
+            st->jscc_repair_underpredicted_blocks =
+                fr.jscc_repair_underpredicted_blocks;
+            st->jscc_repair_demand_censored_blocks =
+                fr.jscc_repair_demand_censored_blocks;
+            st->jscc_repair_predicted_parity_symbols =
+                fr.jscc_repair_predicted_parity_symbols;
             st->decode_errors = fr.decode_failures;
             st->dropped_superseded = fr.frames_superseded;
             st->dropped_deadline = fr.frames_deadline;
@@ -1334,6 +1524,8 @@ int run_tx(const Loaded& l) {
         std::fprintf(stderr, "air error: %s\n", air.error.c_str());
         return 1;
     }
+    PacketEventTrace packet_trace("tx");
+    air.value->set_packet_trace(&packet_trace);
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
         std::fprintf(stderr, "binding error: %s\n", bindings.error.c_str());
@@ -1414,6 +1606,9 @@ int run_tx(const Loaded& l) {
             return;
         }
         send_raw(f, n);
+    };
+    const TxCore::Inject inject_resend = [&](const uint8_t* f, size_t n) {
+        air.value->inject_resend(f, n);
     };
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
     // retunes the (single) radio at the TSF-anchored T_switch.
@@ -1530,7 +1725,11 @@ int run_tx(const Loaded& l) {
                 shm_fds.push_back(si.ring->event_fd());
             }
         }
+        const size_t shm_fd_count = shm_fds.size();
+        const std::vector<int> air_fds = air.value->wait_fds();
+        shm_fds.insert(shm_fds.end(), air_fds.begin(), air_fds.end());
         const auto drain_shm = [&](size_t j) {
+            if (j >= shm_fd_count) return;  // air readiness; drained below
             size_t k = 0;
             for (ShmIn& si : shm_ins) {
                 if (!si.ring) {
@@ -1566,10 +1765,11 @@ int run_tx(const Loaded& l) {
         if (!have_udp_ins && shm_fds.empty() && in_timeout > 0) {
             ::poll(nullptr, 0, in_timeout);
         }
+        const uint64_t service_now = now_ms();
         air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
                                     size_t n) {
             const Decoded dec = decode(d, n);
-            discovery.observe(dec, now);
+            discovery.observe(dec, service_now);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
                 if (!air.value->supports_csa()) {
                     return;
@@ -1593,7 +1793,7 @@ int run_tx(const Loaded& l) {
             if (!std::holds_alternative<DecodeError>(dec)) {
                 csa.note_valid_rx(now_us_it);  // §11.5 verify/rendezvous feed
             }
-            tx.on_air(d, n, now);
+            tx.on_air(d, n, service_now);
         });
         const CsaAction ca = csa.tick(now_us_it);
         if (ca.kind != CsaAction::Kind::kNone) {
@@ -1602,8 +1802,8 @@ int run_tx(const Loaded& l) {
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
                          ca.chan_mhz);
         }
-        tx.tick(now, inject);
-        air.value->heartbeat(l.cfg.node.originator, session, now);
+        tx.tick(service_now, inject, inject_resend);
+        air.value->heartbeat(l.cfg.node.originator, session, service_now);
         if (const auto trc = air.value->tx_report_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
@@ -1640,6 +1840,8 @@ int run_rx(const Loaded& l) {
         std::fprintf(stderr, "air error: %s\n", air.error.c_str());
         return 1;
     }
+    PacketEventTrace packet_trace("rx");
+    air.value->set_packet_trace(&packet_trace);
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
         std::fprintf(stderr, "binding error: %s\n", bindings.error.c_str());
@@ -1778,6 +1980,12 @@ int run_rx(const Loaded& l) {
         h.video_recover = [&](int stream_id) {
             return rx.request_recovery(stream_id, inject_nack);
         };
+        if (air.value->udp) {
+            h.bench_rx_drop = [&](int permille) -> std::string {
+                return air.value->set_udp_rx_drop(permille)
+                    ? std::string() : "permille must be 0..1000";
+            };
+        }
         h.reset_stats = [&] {
             rx.reset_stats();
             for (ShmOut& so : shm_outs) {
