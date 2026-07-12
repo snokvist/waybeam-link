@@ -277,7 +277,9 @@ no auth (bind `127.0.0.1` for host-local, a routable addr on a trusted net):
 
 **Read** (any node): `GET /api/v1/stats` (the §15.3 object), `…/stats/stream`
 (SSE, one object per stats tick), `…/info` (identity), `…/health` (terse
-`{state,mcs,profile,rssi_best,loss_milli,…}`). **Write** (live, no restart):
+`{state,mcs,profile,rssi_best,loss_milli,…}`), and `…/discovery` (bounded
+HEARTBEAT-derived nodes plus DATA-derived stream candidates/latches). **Write**
+(live, no restart):
 
 | Endpoint | Body | Where |
 |---|---|---|

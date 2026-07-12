@@ -288,6 +288,11 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         if (path == "/api/v1/health") {
             return reply(200, "OK", h_.health_json ? h_.health_json() : "{}");
         }
+        if (path == "/api/v1/discovery") {
+            return reply(200, "OK",
+                         h_.discovery_json ? h_.discovery_json()
+                                           : "{\"nodes\":[],\"streams\":[]}");
+        }
         if (path == "/api/v1/stats/stream") {
             const std::string hdr =
                 "HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n"

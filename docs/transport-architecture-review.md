@@ -43,11 +43,10 @@ and several observability gaps need resolution before unattended deployment.
 
 ### High
 
-3. **The normative HEARTBEAT has no application implementation.**
-   The codec and vectors exist, but no mode schedules or handles HEARTBEAT.
-   Quiet TX nodes send nothing. This weakens rendezvous and makes passive
-   discovery dependent on active DATA/return traffic, contrary to the protocol
-   presence mechanism.
+3. **The normative HEARTBEAT had no application implementation (fixed).**
+   Pass 17 now emits a 1 Hz keepalive only while otherwise quiet, tracks bounded
+   node/stream observations without affecting admission, and exposes them at
+   `GET /api/v1/discovery`.
 
 4. **`loss_prediversity_milli` is permanently zero at runtime.**
    The schema, dashboard, and protocol describe it as the raw diversity/correlation
@@ -184,7 +183,6 @@ to normal point-to-point UDP:
 
 ## Recommended sequence
 
-1. Implement HEARTBEAT scheduling/handling and a read-only discovery endpoint.
-2. Specify the pre-diversity estimator and expose SHM/kernel-overflow counters.
-3. Add a config topology expander for paired ARQ return paths.
-4. Add optional UDP broadcast/sniffer mode as a dedicated simulation backend.
+1. Specify the pre-diversity estimator and expose SHM/kernel-overflow counters.
+2. Add a config topology expander for paired ARQ return paths.
+3. Add optional UDP broadcast/sniffer mode as a dedicated simulation backend.

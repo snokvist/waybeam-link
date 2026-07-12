@@ -94,6 +94,11 @@ int main() {
     h.stats_line = [] { return std::string("{\"t_ms\":1,\"node\":7}"); };
     h.info_json = [] { return std::string("{\"role\":\"tx\"}"); };
     h.health_json = [] { return std::string("{\"state\":\"HOLD\"}"); };
+    h.discovery_json = [] {
+        return std::string(
+            "{\"nodes\":[{\"originator\":17,\"session\":3,"
+            "\"last_seen_ms\":9}],\"streams\":[]}");
+    };
     h.profile = [&](int mn, int mx) -> std::string {
         if (mx != 255 && mn > mx) return "min>max";
         pin_min = mn;
@@ -128,6 +133,12 @@ int main() {
         const std::string r =
             roundtrip(s, port, "GET /api/v1/health HTTP/1.0\r\n\r\n");
         CHECK_EQ_U(status_of(r), 200);
+    }
+    {
+        const std::string r =
+            roundtrip(s, port, "GET /api/v1/discovery HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"originator\":17") != std::string::npos);
     }
     // Query string is stripped.
     {

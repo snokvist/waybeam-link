@@ -15,6 +15,7 @@
 #include <chrono>
 #include <deque>
 #include <memory>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -67,6 +68,109 @@ uint64_t now_us() {
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
 }
+
+// Pass 17: bounded, observational catalog. It never feeds latch decisions.
+class DiscoveryCatalog {
+  public:
+    void observe(const Decoded& dec, uint64_t now) {
+        const CommonPrefix* p = nullptr;
+        const DataView* data = std::get_if<DataView>(&dec);
+        if (data != nullptr) {
+            p = &data->hdr.prefix;
+        } else if (const Heartbeat* hb = std::get_if<Heartbeat>(&dec)) {
+            p = &hb->prefix;
+        } else {
+            return;
+        }
+        const uint64_t nk = (static_cast<uint64_t>(p->originator) << 32) |
+                            p->session_id;
+        nodes_[nk] = Node{p->originator, p->session_id, now};
+        if (data != nullptr) {
+            const uint64_t sk = (nk << 8) | data->hdr.stream_id;
+            Stream& s = streams_[sk];
+            if (s.packet_count == 0) {
+                s.originator = p->originator;
+                s.session = p->session_id;
+                s.stream_id = data->hdr.stream_id;
+                s.stream_type = data->hdr.stream_type;
+                s.first_seen_ms = now;
+            }
+            ++s.packet_count;
+            s.last_seen_ms = now;
+        }
+        trim();
+    }
+
+    std::string json(uint64_t now, const std::vector<StreamKey>& latched) {
+        age(now);
+        std::string out = "{\"nodes\":[";
+        bool comma = false;
+        for (const auto& [key, n] : nodes_) {
+            (void)key;
+            if (comma) out += ',';
+            comma = true;
+            out += "{\"originator\":" + std::to_string(n.originator) +
+                   ",\"session\":" + std::to_string(n.session) +
+                   ",\"last_seen_ms\":" + std::to_string(n.last_seen_ms) + "}";
+        }
+        out += "],\"streams\":[";
+        comma = false;
+        for (const auto& [key, s] : streams_) {
+            (void)key;
+            bool is_latched = false;
+            for (const StreamKey& k : latched) {
+                is_latched = is_latched ||
+                             (k.originator == s.originator &&
+                              k.session_id == s.session &&
+                              k.stream_id == s.stream_id);
+            }
+            if (comma) out += ',';
+            comma = true;
+            out += "{\"originator\":" + std::to_string(s.originator) +
+                   ",\"session\":" + std::to_string(s.session) +
+                   ",\"stream_id\":" + std::to_string(s.stream_id) +
+                   ",\"stream_type\":" + std::to_string(s.stream_type) +
+                   ",\"packet_count\":" + std::to_string(s.packet_count) +
+                   ",\"first_seen_ms\":" + std::to_string(s.first_seen_ms) +
+                   ",\"last_seen_ms\":" + std::to_string(s.last_seen_ms) +
+                   ",\"latched\":" + (is_latched ? "true" : "false") + "}";
+        }
+        out += "]}";
+        return out;
+    }
+
+  private:
+    struct Node {
+        uint16_t originator = 0;
+        uint32_t session = 0;
+        uint64_t last_seen_ms = 0;
+    };
+    struct Stream {
+        uint16_t originator = 0;
+        uint32_t session = 0;
+        uint8_t stream_id = 0;
+        uint8_t stream_type = 0;
+        uint64_t packet_count = 0;
+        uint64_t first_seen_ms = 0;
+        uint64_t last_seen_ms = 0;
+    };
+    void age(uint64_t now) {
+        for (auto it = nodes_.begin(); it != nodes_.end();) {
+            it = now > it->second.last_seen_ms + 5000 ? nodes_.erase(it)
+                                                       : std::next(it);
+        }
+        for (auto it = streams_.begin(); it != streams_.end();) {
+            it = now > it->second.last_seen_ms + 5000 ? streams_.erase(it)
+                                                       : std::next(it);
+        }
+    }
+    void trim() {
+        while (nodes_.size() > 64) nodes_.erase(nodes_.begin());
+        while (streams_.size() > 64) streams_.erase(streams_.begin());
+    }
+    std::map<uint64_t, Node> nodes_;
+    std::map<uint64_t, Stream> streams_;
+};
 
 // §15.2 policy.csa → the core engine's parameter block (string PSK to raw
 // bytes, seconds to ms).
@@ -182,6 +286,7 @@ struct AirBackend {
 #if WBLINK_RADIO
     std::optional<RadioAir> radio;
 #endif
+    uint64_t last_tx_ms = 0;
 
     static Result<AirBackend> create(const Config& cfg) {
         AirBackend b;
@@ -237,31 +342,60 @@ struct AirBackend {
     }
 
     size_t inject(const uint8_t* f, size_t n) {
+        size_t sent = 0;
         if (mon) {
-            return mon->inject(f, n);
-        }
+            sent = mon->inject(f, n);
+        } else {
 #if WBLINK_RADIO
-        if (radio) {
-            return radio->inject(f, n);
-        }
+            if (radio) {
+                sent = radio->inject(f, n);
+            } else
 #endif
-        return udp->inject(f, n);
+            {
+                sent = udp->inject(f, n);
+            }
+        }
+        if (sent > 0) {
+            last_tx_ms = now_ms();
+        }
+        return sent;
     }
 
     // Returns (NACK/LINK_REPORT) carry their target so the radio backend
     // can address them as §3.0 unicast when return.unicast is on; the udp
     // dev backend has no L2 addressing and ignores the target.
     size_t inject_return(uint16_t target, const uint8_t* f, size_t n) {
+        size_t sent = 0;
         if (mon) {
-            return mon->inject_return(target, f, n);
-        }
+            sent = mon->inject_return(target, f, n);
+        } else {
 #if WBLINK_RADIO
-        if (radio) {
-            return radio->inject_return(target, f, n);
-        }
+            if (radio) {
+                sent = radio->inject_return(target, f, n);
+            } else
 #endif
-        (void)target;
-        return udp->inject(f, n);
+            {
+                (void)target;
+                sent = udp->inject(f, n);
+            }
+        }
+        if (sent > 0) {
+            last_tx_ms = now_ms();
+        }
+        return sent;
+    }
+
+    void heartbeat(uint16_t originator, uint32_t session, uint64_t now) {
+        if (now < last_tx_ms || now - last_tx_ms < 1000) {
+            return;
+        }
+        Heartbeat hb;
+        hb.prefix.originator = originator;
+        hb.prefix.session_id = session;
+        uint8_t frame[kHeartbeatSize];
+        if (encode_heartbeat(hb, frame, sizeof(frame)) == sizeof(frame)) {
+            inject(frame, sizeof(frame));
+        }
     }
 
     int poll_once(int timeout_ms, const UdpAir::RxCb& cb) {
@@ -930,6 +1064,14 @@ struct RxCore {
     // so the caller resets those; here we zero the RX engine's counters.
     void reset_stats() { engine_.reset_stats(); }
 
+    std::vector<StreamKey> stream_keys() const {
+        std::vector<StreamKey> out;
+        for (const RxStreamInfo& info : engine_.streams()) {
+            out.push_back(info.key);
+        }
+        return out;
+    }
+
     uint16_t originator_;
     uint32_t session_;
     RxEngine engine_;
@@ -1114,6 +1256,7 @@ int run_tx(const Loaded& l) {
         return 1;
     }
     const uint32_t session = session_nonce();
+    DiscoveryCatalog discovery;
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv);
     if (air.value->is_radio()) {
         tx.apply_mode = [&](uint8_t mcs, bool sgi) {
@@ -1213,6 +1356,9 @@ int run_tx(const Loaded& l) {
         };
         h.info_json = [&] { return build_info_json(l, session, "tx"); };
         h.health_json = [&] { return build_health_json(last_snap); };
+        h.discovery_json = [&] {
+            return discovery.json(now_ms(), {});
+        };
         h.profile = [&](int mn, int mx) -> std::string {
             if (mn < 0 || mn > 255 || mx < 0 || mx > 255)
                 return "min/max must be 0..255";
@@ -1334,6 +1480,7 @@ int run_tx(const Loaded& l) {
         air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
                                     size_t n) {
             const Decoded dec = decode(d, n);
+            discovery.observe(dec, now);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
                 if (!air.value->supports_csa()) {
                     return;
@@ -1367,6 +1514,7 @@ int run_tx(const Loaded& l) {
                          ca.chan_mhz);
         }
         tx.tick(now, inject);
+        air.value->heartbeat(l.cfg.node.originator, session, now);
         if (const auto trc = air.value->tx_report_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
@@ -1403,6 +1551,7 @@ int run_rx(const Loaded& l) {
         return 1;
     }
     const uint32_t session = session_nonce();
+    DiscoveryCatalog discovery;
     RxCore rx(l.cfg, session, l.have_table ? &l.table : nullptr,
               l.have_table ? std::optional<uint8_t>(l.tv) : std::nullopt);
 
@@ -1516,6 +1665,9 @@ int run_rx(const Loaded& l) {
         };
         h.info_json = [&] { return build_info_json(l, session, "rx"); };
         h.health_json = [&] { return build_health_json(last_snap); };
+        h.discovery_json = [&] {
+            return discovery.json(now_ms(), rx.stream_keys());
+        };
         h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
             if (!air.value->supports_csa()) {
                 return "CSA unsupported by kernel-monitor backend";
@@ -1577,6 +1729,7 @@ int run_rx(const Loaded& l) {
                 meta.rssi != 0 ? meta.rssi : l.cfg.loopback.rssi_dbm;
             // §11 taps (cheap header decode; DATA still flows to the engine).
             const Decoded dec = decode(d, n);
+            discovery.observe(dec, now);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
                 if (!air.value->supports_csa()) {
                     return;
@@ -1612,6 +1765,7 @@ int run_rx(const Loaded& l) {
             }
         });
         rx.tick(now, deliver, inject_nack);
+        air.value->heartbeat(l.cfg.node.originator, session, now);
         // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
         // so a stalled block never wedges frame-shm egress.
         for (ShmOut& so : shm_outs) {
