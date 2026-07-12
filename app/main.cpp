@@ -520,6 +520,7 @@ struct AirBackend {
                 as.name = "udp" + std::to_string(i);
                 as.rx = udp->rx_frames(i);
                 as.drop = udp->rx_dropped(i);
+                as.kernel_drop = udp->kernel_dropped(i);
                 if (i == 0) {
                     as.tx_submitted = udp->tx_submitted();
                     as.tx_failed = udp->tx_failed();
@@ -549,6 +550,7 @@ struct AirBackend {
                 as.tx_submitted = c.tx_submitted;
                 as.tx_failed = c.tx_failed;
                 as.drop = c.rx_dropped;
+                as.kernel_drop = c.kernel_dropped;
                 as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
                 // No CCX tx.report on monitor injection; wedge watchdog off.
                 as.tx_reports = 0;
@@ -1027,6 +1029,12 @@ struct RxCore {
             st.delivered = info.counters.delivered;
             st.uniq = info.counters.uniq;
             st.diversity = info.counters.diversity;
+            st.loss_prediversity_milli =
+                info.counters.prediv_expected == 0
+                    ? 0
+                    : static_cast<uint32_t>(
+                          info.counters.prediv_lost * 1000 /
+                          info.counters.prediv_expected);
             const uint64_t denom =
                 info.counters.uniq + info.counters.lost_declared;
             st.loss_postdiv_prearq_milli =
@@ -1122,6 +1130,8 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 bool tx_wedged = false,
                 const std::vector<std::pair<uint8_t, FrameReassemblerStats>>*
                     frame_stats = nullptr,
+                const std::vector<std::pair<uint8_t, FrameShmRing::Stats>>*
+                    shm_stats = nullptr,
                 StatsSnapshot* out_snap = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
@@ -1174,6 +1184,18 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
             st->decode_errors = fr.decode_failures;
             st->dropped_superseded = fr.frames_superseded;
             st->dropped_deadline = fr.frames_deadline;
+        }
+    }
+    if (shm_stats != nullptr) {
+        for (const auto& [sid, ss] : *shm_stats) {
+            for (StreamStats& st : snap.streams) {
+                if (st.stream_id == sid) {
+                    st.shm_full_drops = ss.full_drops;
+                    st.shm_oversize_drops = ss.oversize_drops;
+                    st.shm_bad_slots = ss.bad_slots;
+                    break;
+                }
+            }
         }
     }
     if (out_snap != nullptr) {
@@ -1378,7 +1400,12 @@ int run_tx(const Loaded& l) {
                        ? ""
                        : "no frame-shm stream with that id";
         };
-        h.reset_stats = [&] { tx.reset_stats(); };
+        h.reset_stats = [&] {
+            tx.reset_stats();
+            for (ShmIn& si : shm_ins) {
+                if (si.ring) si.ring->reset_stats();
+            }
+        };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (tx)\n",
                      l.cfg.control.bind.c_str());
@@ -1527,9 +1554,15 @@ int run_tx(const Loaded& l) {
             control->service(now);
         }
         if (stats_period != 0 && now >= next_stats) {
+            std::vector<std::pair<uint8_t, FrameShmRing::Stats>> shm_stats;
+            for (const ShmIn& si : shm_ins) {
+                if (si.ring) {
+                    shm_stats.emplace_back(si.stream_id, si.ring->stats());
+                }
+            }
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
                        csa.state_str(), 0, 0, wedge.wedged(), nullptr,
-                       &last_snap);
+                       &shm_stats, &last_snap);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -1684,6 +1717,7 @@ int run_rx(const Loaded& l) {
             rx.reset_stats();
             for (ShmOut& so : shm_outs) {
                 so.reasm->reset_stats();
+                so.ring->reset_stats();
             }
             ret_window_hits = 0;
             ret_window_misses = 0;
@@ -1819,16 +1853,19 @@ int run_rx(const Loaded& l) {
         if (stats_period != 0 && now >= next_stats) {
             // §6.3a: fold the per-out-stream reassembler counters into stats.
             std::vector<std::pair<uint8_t, FrameReassemblerStats>> frame_stats;
+            std::vector<std::pair<uint8_t, FrameShmRing::Stats>> shm_stats;
             frame_stats.reserve(shm_outs.size());
+            shm_stats.reserve(shm_outs.size());
             for (const ShmOut& so : shm_outs) {
                 frame_stats.emplace_back(so.stream_id, so.reasm->stats());
+                shm_stats.emplace_back(so.stream_id, so.ring->stats());
             }
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
                                        : follower.state_str(),
                        ret_window_hits, ret_window_misses, wedge.wedged(),
-                       &frame_stats, &last_snap);
+                       &frame_stats, &shm_stats, &last_snap);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -1983,7 +2020,7 @@ int run_loopback(const Loaded& l) {
         }
         if (stats_period != 0 && loop_now >= next_stats) {
             emit_stats(emitter, l, session, t0, &tx, &rx, nullptr, 0, nullptr,
-                       0, 0, false, nullptr, &last_snap);
+                       0, 0, false, nullptr, nullptr, &last_snap);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }

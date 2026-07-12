@@ -71,6 +71,7 @@ class FrameShmRing {
         uint64_t bad_slots = 0;
     };
     const Stats& stats() const { return stats_; }
+    void reset_stats() { stats_ = {}; }
 
   private:
     FrameShmRing() = default;

@@ -48,26 +48,19 @@ and several observability gaps need resolution before unattended deployment.
    node/stream observations without affecting admission, and exposes them at
    `GET /api/v1/discovery`.
 
-4. **`loss_prediversity_milli` is permanently zero at runtime.**
-   The schema, dashboard, and protocol describe it as the raw diversity/correlation
-   gauge, but `RxCore::fill_stats()` only computes post-diversity loss. The
-   existing `gate2_rho.py` reconstructs per-adapter loss from deltas, so bench
-   analysis works, but the advertised live metric and `/health` input do not.
-   A normative estimator is required before implementation because retransmits,
-   adapter reorder, and control packets make a naive adapter-RX ratio ambiguous.
+4. **`loss_prediversity_milli` was permanently zero at runtime (fixed).**
+   Pass 18 adds the normative per-adapter original-DATA estimator. It excludes
+   retransmits and duplicates, fills bounded reorder exactly once, preserves
+   sequence anchors across stats reset, and feeds both stats and `/health`.
 
-5. **Frame-SHM egress backpressure is invisible in node stats.**
-   `FrameShmRing` counts full, oversize, and bad-slot outcomes, but the RX
-   delivery callback ignores `write_frame()` failure and none of these counters
-   enter section 15.3 stats. A healthy air link can therefore show successful
-   frame reassembly while the decoder loses frames at a full SHM ring.
+5. **Frame-SHM egress backpressure was invisible in node stats (fixed).**
+   Pass 18 publishes full-ring, oversize-frame, and bad-slot counters per stream
+   and resets them through the existing stats reset endpoint.
 
-6. **UDP kernel queue overflow is not counted.**
-   UDP-air `drop` counts configured synthetic loss only. Kernel receive-queue
-   overflow silently appears as air loss and cannot be reconciled against
-   ground truth. This branch raises `SO_RCVBUF` to tolerate frame bursts, but a
-   fit-for-purpose simulator should enable/read `SO_RXQ_OVFL` and report it
-   separately from injected loss.
+6. **Kernel receive-queue overflow was not counted (fixed).**
+   Pass 18 reads `SO_RXQ_OVFL` ancillary data on UDP-air and kernel-monitor
+   sockets and reports cumulative loss separately from configured synthetic
+   drops.
 
 ### Medium
 
@@ -183,6 +176,5 @@ to normal point-to-point UDP:
 
 ## Recommended sequence
 
-1. Specify the pre-diversity estimator and expose SHM/kernel-overflow counters.
-2. Add a config topology expander for paired ARQ return paths.
-3. Add optional UDP broadcast/sniffer mode as a dedicated simulation backend.
+1. Add a config topology expander for paired ARQ return paths.
+2. Add optional UDP broadcast/sniffer mode as a dedicated simulation backend.

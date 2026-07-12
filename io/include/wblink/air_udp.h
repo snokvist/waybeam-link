@@ -45,6 +45,9 @@ class UdpAir {
     // Bench synthetic-drop counter for adapter i (0 unless rx_drop_permille>0).
     uint64_t rx_dropped(size_t i) const { return rx_dropped_[i]; }
     uint64_t rx_frames(size_t i) const { return rx_frames_[i]; }
+    uint64_t kernel_dropped(size_t i) const {
+        return adapters_[i].kernel_drops();
+    }
     uint64_t tx_submitted() const { return tx_submitted_; }
     uint64_t tx_failed() const { return tx_failed_; }
 

@@ -52,7 +52,9 @@ struct MonAir::Impl {
         std::atomic<uint64_t> rx_frames{0};
         std::atomic<uint64_t> rx_filtered{0};
         std::atomic<uint64_t> rx_dropped{0};
+        std::atomic<uint64_t> kernel_dropped{0};
         std::atomic<int> rssi_last{-128};
+        uint32_t kernel_drop_last = 0;  // RX thread only
         uint32_t rng = 1;
     };
 
@@ -98,9 +100,31 @@ struct MonAir::Impl {
 void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
     std::vector<uint8_t> buf(kRxBufLen);
     while (running.load(std::memory_order_relaxed)) {
-        const ssize_t n = ::recv(a->fd, buf.data(), buf.size(), 0);
+        iovec iov{};
+        iov.iov_base = buf.data();
+        iov.iov_len = buf.size();
+        alignas(cmsghdr) char control[CMSG_SPACE(sizeof(uint32_t))]{};
+        msghdr msg{};
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control;
+        msg.msg_controllen = sizeof(control);
+        const ssize_t n = ::recvmsg(a->fd, &msg, 0);
         if (n <= 0) {
             continue;  // SO_RCVTIMEO / EINTR → re-check running
+        }
+        for (cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr;
+             cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+            if (cmsg->cmsg_level != SOL_SOCKET ||
+                cmsg->cmsg_type != SO_RXQ_OVFL ||
+                cmsg->cmsg_len < CMSG_LEN(sizeof(uint32_t))) {
+                continue;
+            }
+            uint32_t total = 0;
+            std::memcpy(&total, CMSG_DATA(cmsg), sizeof(total));
+            const uint32_t delta = total - a->kernel_drop_last;
+            a->kernel_drop_last = total;
+            a->kernel_dropped.fetch_add(delta, std::memory_order_relaxed);
         }
         const size_t len = static_cast<size_t>(n);
         const auto rt = radiotap_parse(buf.data(), len);
@@ -197,6 +221,14 @@ Result<MonAir> MonAir::create(const MonAirCfg& cfg) {
             return Result<MonAir>::fail(
                 std::string("kernel-monitor: socket(AF_PACKET): ") +
                 std::strerror(errno));
+        }
+        int rxq_overflow = 1;
+        if (::setsockopt(fd, SOL_SOCKET, SO_RXQ_OVFL, &rxq_overflow,
+                         sizeof(rxq_overflow)) != 0) {
+            const std::string err = std::strerror(errno);
+            ::close(fd);
+            return Result<MonAir>::fail(
+                "kernel-monitor: setsockopt(SO_RXQ_OVFL): " + err);
         }
         struct sockaddr_ll sll;
         std::memset(&sll, 0, sizeof(sll));
@@ -333,6 +365,7 @@ MonAir::AdapterCounters MonAir::counters(size_t adapter) const {
     c.rx_frames = a->rx_frames.load(std::memory_order_relaxed);
     c.rx_filtered = a->rx_filtered.load(std::memory_order_relaxed);
     c.rx_dropped = a->rx_dropped.load(std::memory_order_relaxed);
+    c.kernel_dropped = a->kernel_dropped.load(std::memory_order_relaxed);
     c.rssi_last =
         static_cast<int8_t>(a->rssi_last.load(std::memory_order_relaxed));
     if (a->tx) {

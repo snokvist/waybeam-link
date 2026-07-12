@@ -82,14 +82,17 @@ const char* kGolden =
     "\"adapters\":[{\"name\":\"wlan0\",\"rx\":10234,\"dup\":812,"
     "\"rssi_best\":-58,\"rssi_mean\":-63,\"snr\":22,\"noise\":-85,"
     "\"tx_submitted\":540,\"tx_failed\":2,\"tx_timeout\":0,"
-    "\"drop\":3,\"tsf_fallback\":1,\"tx_reports\":40,\"tx_report_fails\":2,"
+    "\"drop\":3,\"kernel_drop\":0,\"tsf_fallback\":1,\"tx_reports\":40,"
+    "\"tx_report_fails\":2,"
     "\"adapter_stalled\":false,\"tx_wedged\":false}],"
     "\"streams\":[{\"stream_id\":0,\"type\":\"RTP\",\"seq\":90233,"
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
     "\"loss_prediversity_milli\":41,"
     "\"loss_postdiv_prearq_milli\":6,\"recovered_arq\":220,"
     "\"recovered_fec\":0,\"frames_fast\":89571,\"frames_unrecoverable\":0,"
-    "\"malformed\":0,\"dropped_superseded\":110,\"dropped_deadline\":8,"
+    "\"malformed\":0,\"shm_full_drops\":0,\"shm_oversize_drops\":0,"
+    "\"shm_bad_slots\":0,\"dropped_superseded\":110,"
+    "\"dropped_deadline\":8,"
     "\"nacks_sent\":18,"
     "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
     "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
@@ -156,8 +159,10 @@ int main() {
         for (int tries = 0; tries < 100 && n <= 0; ++tries) {
             n = in.value->recv_one(buf, sizeof(buf));
         }
-        CHECK_EQ_U(static_cast<unsigned long long>(n), std::strlen(kGolden));
-        CHECK(std::memcmp(buf, kGolden, static_cast<size_t>(n)) == 0);
+        const size_t golden_len = std::strlen(kGolden);
+        CHECK_EQ_U(static_cast<unsigned long long>(n), golden_len);
+        CHECK(n >= 0 && static_cast<size_t>(n) == golden_len &&
+              std::memcmp(buf, kGolden, golden_len) == 0);
     }
 
     return wbtest_finish("stats_test");

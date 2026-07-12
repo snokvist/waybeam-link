@@ -236,6 +236,10 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
     }
     s->first_clamp_ms = 0;  // any accepted packet ends the storm window
 
+    if ((v.hdr.data_flags & data_flags::kRetransmit) == 0) {
+        note_adapter_seq(*s, adapter_id, v.hdr.seq);
+    }
+
     // §6.1 dedup: first copy wins; later copies feed the diversity gauge.
     if (v.hdr.seq < s->cursor || s->held.count(v.hdr.seq) != 0) {
         ++s->counters.diversity;
@@ -297,6 +301,39 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
     note_gaps(*s, now_ms);
     evaluate_gaps(*s, now_ms);
     advance_cursor(*s, now_ms, deliver);
+}
+
+void RxEngine::note_adapter_seq(Stream& s, uint8_t adapter_id, uint32_t seq) {
+    AdapterSeq& a = s.adapter_seq[adapter_id];
+    if (!a.have) {
+        a.have = true;
+        a.highest = seq;
+        ++a.expected;
+        ++a.received;
+        return;
+    }
+    if (seq > a.highest) {
+        const uint32_t delta = seq - a.highest;
+        if (delta > policy_.fwd_clamp_pkts) {
+            // A recovered/stalled adapter may legitimately jump far ahead.
+            // Re-anchor rather than charging its silent interval as RF loss.
+            a.highest = seq;
+            a.missing.clear();
+            ++a.expected;
+            ++a.received;
+            return;
+        }
+        for (uint32_t m = a.highest + 1; m < seq; ++m) {
+            a.missing.insert(m);
+        }
+        a.expected += delta;
+        ++a.received;
+        a.highest = seq;
+        return;
+    }
+    if (a.missing.erase(seq) != 0) {
+        ++a.received;  // bounded out-of-order fill, exactly once
+    }
 }
 
 void RxEngine::note_gaps(Stream& s, uint64_t now_ms) {
@@ -509,6 +546,11 @@ std::vector<RxStreamInfo> RxEngine::streams() const {
         info.best_effort = s.best_effort;
         info.active_profile = s.active_profile;
         info.counters = s.counters;
+        for (const auto& [adapter, a] : s.adapter_seq) {
+            (void)adapter;
+            info.counters.prediv_expected += a.expected;
+            info.counters.prediv_lost += a.expected - a.received;
+        }
         out.push_back(std::move(info));
     }
     return out;
@@ -550,6 +592,12 @@ void RxEngine::reset_stats() {
     // reset mid-flight cannot perturb delivery or the §6.5 stall verdict.
     for (auto& [key, s] : streams_) {
         s.counters = {};
+        for (auto& [adapter, a] : s.adapter_seq) {
+            (void)adapter;
+            a.expected = 0;
+            a.received = 0;
+            a.missing.clear();
+        }
     }
     for (auto& [id, a] : adapters_) {
         a.rx = 0;

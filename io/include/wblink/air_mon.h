@@ -87,6 +87,7 @@ class MonAir {
         uint64_t rx_frames = 0;
         uint64_t rx_filtered = 0;
         uint64_t rx_dropped = 0;
+        uint64_t kernel_dropped = 0;
         int8_t rssi_last = -128;
         uint64_t tx_submitted = 0;
         uint64_t tx_failed = 0;

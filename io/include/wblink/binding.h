@@ -37,6 +37,7 @@ class UdpIngress {
 
     int fd() const { return fd_; }
     uint16_t bound_port() const { return bound_port_; }
+    uint64_t kernel_drops() const { return kernel_drops_; }
 
     // One datagram; >0 = bytes, 0 = nothing pending, -1 = error.
     long recv_one(uint8_t* buf, size_t cap);
@@ -44,6 +45,8 @@ class UdpIngress {
   private:
     int fd_ = -1;
     uint16_t bound_port_ = 0;
+    uint32_t kernel_drop_last_ = 0;
+    uint64_t kernel_drops_ = 0;
 };
 
 class UdpEgress {
