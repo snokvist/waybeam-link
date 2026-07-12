@@ -51,7 +51,8 @@ int main() {
             AirUdpCfg ground_cfg;
             ground_cfg.broadcast = true;
             ground_cfg.originator = 9;
-            ground_cfg.rx = {"0.0.0.0:" + std::to_string(port)};
+            ground_cfg.rx = {"0.0.0.0:" + std::to_string(port),
+                             "0.0.0.0:" + std::to_string(port)};
             auto ground = UdpAir::create(ground_cfg);
             CHECK(bool(ground));
 
@@ -67,10 +68,11 @@ int main() {
                            sizeof(frame));
                 CHECK_EQ_U(sender.value->inject(frame, sizeof(frame)), 1u);
                 CHECK_EQ_U(craft.value->poll_once(100, discard), 0u);
-                CHECK_EQ_U(ground.value->poll_once(100, discard), 1u);
+                CHECK_EQ_U(ground.value->poll_once(100, discard), 2u);
                 CHECK_EQ_U(craft.value->rx_filtered(0), 0u);
                 CHECK_EQ_U(craft.value->kernel_dropped(0), 0u);
                 CHECK_EQ_U(ground.value->rx_frames(0), 1u);
+                CHECK_EQ_U(ground.value->rx_frames(1), 1u);
 
                 const uint8_t junk[] = {1, 2, 3};
                 CHECK_EQ_U(sender.value->inject(junk, sizeof(junk)), 1u);
@@ -78,6 +80,7 @@ int main() {
                 CHECK_EQ_U(ground.value->poll_once(100, discard), 0u);
                 CHECK_EQ_U(craft.value->rx_filtered(0), 1u);
                 CHECK_EQ_U(ground.value->rx_filtered(0), 1u);
+                CHECK_EQ_U(ground.value->rx_filtered(1), 1u);
             }
         }
     }

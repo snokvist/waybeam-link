@@ -262,11 +262,13 @@ int main() {
         auto r = load_config_json(R"({
           "node":{"originator":1,"role":"rx"},
           "air":{"kind":"udp-broadcast","tx":["127.255.255.255:5801"],
-                 "rx":["0.0.0.0:5801"],"pace_mbps":20}})");
+                 "rx":["0.0.0.0:5801","0.0.0.0:5801"],
+                 "pace_mbps":20}})");
         CHECK(bool(r));
         if (r) {
             CHECK(r.value->air.kind == AirCfg::Kind::kUdpBroadcast);
             CHECK_EQ_U(r.value->air.udp.pace_mbps, 20);
+            CHECK_EQ_U(r.value->air.udp.rx.size(), 2);
         }
     }
     expect_error(R"({"node":{"originator":1,"role":"rx"},

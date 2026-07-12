@@ -10,6 +10,7 @@ GST=${GST:-"$BUILD/frame_shm_gst_bench"}
 CRAFT=${CRAFT:-root@192.168.2.201}
 CRAFT_IP=${CRAFT_IP:-192.168.2.201}
 GROUND_IP=${GROUND_IP:-192.168.2.242}
+BROADCAST_IP=${BROADCAST_IP:-192.168.2.255}
 FRAMES=${FRAMES:-720}
 TIMEOUT_MS=${TIMEOUT_MS:-30000}
 LIVE=${LIVE:-1}
@@ -265,8 +266,8 @@ cat >"$ARTIFACTS/tx.json" <<EOF
     "bind":{"kind":"frame-shm","name":"venc_frame"},
     "fec":{"scheme":"rlc256","i_rate_permille":250,
            "p_rate_permille":100,"min_k":3}}],
-  "air":{"kind":"udp","tx":["$GROUND_IP:5801","$GROUND_IP:5802"],
-         "rx":["0.0.0.0:5810"]},
+  "air":{"kind":"udp-broadcast","tx":["$BROADCAST_IP:5801"],
+         "rx":["0.0.0.0:5801"]},
   "policy":{"select":{"min_profile":0,"max_profile":0}},
   "venc":{"host":"127.0.0.1:80","enabled":true},
   "stats":{"hz":5,"bind":{"kind":"udp","send":"$GROUND_IP:9110"}}
@@ -278,8 +279,10 @@ cat >"$ARTIFACTS/rx.json" <<EOF
   "profile_table":"profiles/table.example.json",
   "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
     "originator":17,"bind":{"kind":"frame-shm","name":"$OUT_RING"}}],
-  "air":{"kind":"udp","rx":["0.0.0.0:5801","0.0.0.0:5802"],
-         "tx":["$CRAFT_IP:5810"],"rx_drop_permille":$RX_DROP_PERMILLE},
+  "air":{"kind":"udp-broadcast",
+         "rx":["0.0.0.0:5801","0.0.0.0:5801"],
+         "tx":["$BROADCAST_IP:5801"],
+         "rx_drop_permille":$RX_DROP_PERMILLE},
   "policy":{"select":{"min_profile":0,"max_profile":0}},
   "control":{"bind":"127.0.0.1:8092"},
   "stats":{"hz":5,"bind":{"kind":"udp","send":"127.0.0.1:9110"}}
@@ -302,9 +305,13 @@ fi
 remote_put "$ROOT/build/ssc338q/waybeam-link" /tmp/waybeam-link-jscc-dev.new
 remote_put "$ARTIFACTS/tx.json" /tmp/waybeam-link-jscc-ethernet.json.new
 remote "mkdir -p /etc/waybeam-link &&
-        cp /tmp/waybeam-link-jscc-dev.new $REMOTE_INSTALL && chmod 0755 $REMOTE_INSTALL &&
+        if ! cmp -s /tmp/waybeam-link-jscc-dev.new $REMOTE_INSTALL; then
+            cp /tmp/waybeam-link-jscc-dev.new $REMOTE_INSTALL && chmod 0755 $REMOTE_INSTALL
+        fi &&
         rm -f /tmp/waybeam-link-jscc-dev.new &&
-        cp /tmp/waybeam-link-jscc-ethernet.json.new $REMOTE_CFG && chmod 0644 $REMOTE_CFG"
+        if ! cmp -s /tmp/waybeam-link-jscc-ethernet.json.new $REMOTE_CFG; then
+            cp /tmp/waybeam-link-jscc-ethernet.json.new $REMOTE_CFG && chmod 0644 $REMOTE_CFG
+        fi"
 remote "cp /etc/waybeam.json $REMOTE_BACKUP"
 REMOTE_CHANGED=1
 remote "/usr/bin/json_cli -s .outgoing.server '\"frame-shm://venc_frame\"' -i /etc/waybeam.json &&
