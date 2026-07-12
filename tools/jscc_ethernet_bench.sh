@@ -15,6 +15,7 @@ FRAMES=${FRAMES:-720}
 TIMEOUT_MS=${TIMEOUT_MS:-30000}
 LIVE=${LIVE:-1}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
+JSCC_DEADLINE_MS=${JSCC_DEADLINE_MS:-16}
 VENC_CONTROL_ENABLED=${VENC_CONTROL_ENABLED:-0}
 VEHICLE_MAIN_CPU=${VEHICLE_MAIN_CPU:-1}
 VEHICLE_SHM_CPU=${VEHICLE_SHM_CPU:-0}
@@ -244,6 +245,7 @@ fi
 [[ "$TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] || fail "TIMEOUT_MS must be positive"
 [[ "$LIVE" == 0 || "$LIVE" == 1 ]] || fail "LIVE must be 0 or 1"
 [[ "$RX_DROP_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || fail "RX_DROP_PERMILLE must be 0..1000"
+[[ "$JSCC_DEADLINE_MS" =~ ^[1-9][0-9]*$ ]] || fail "JSCC_DEADLINE_MS must be positive"
 [[ "$VENC_CONTROL_ENABLED" == 0 || "$VENC_CONTROL_ENABLED" == 1 ]] || \
     fail "VENC_CONTROL_ENABLED must be 0 or 1"
 [[ "$VEHICLE_MAIN_CPU" =~ ^[0-9]+$ ]] || fail "VEHICLE_MAIN_CPU must be numeric"
@@ -324,10 +326,13 @@ remote "mkdir -p /etc/waybeam-link &&
         if ! cmp -s /tmp/waybeam-link-jscc-ethernet.json.new $REMOTE_CFG; then
             cp /tmp/waybeam-link-jscc-ethernet.json.new $REMOTE_CFG && chmod 0644 $REMOTE_CFG
         fi"
-remote "cp /etc/waybeam.json $REMOTE_BACKUP"
-REMOTE_CHANGED=1
-remote "/usr/bin/json_cli -s .outgoing.server '\"frame-shm://venc_frame\"' -i /etc/waybeam.json &&
-        /etc/init.d/S95waybeam restart"
+if [[ "$(remote "/usr/bin/json_cli -g .outgoing.server --raw -i /etc/waybeam.json")" != \
+      "frame-shm://venc_frame" ]]; then
+    remote "cp /etc/waybeam.json $REMOTE_BACKUP &&
+            /usr/bin/json_cli -s .outgoing.server '\"frame-shm://venc_frame\"' -i /etc/waybeam.json &&
+            /etc/init.d/S95waybeam restart"
+    REMOTE_CHANGED=1
+fi
 remote "rm -f $REMOTE_STATS $REMOTE_ERR; setsid $REMOTE_INSTALL tx -c $REMOTE_CFG \
         >$REMOTE_STATS 2>$REMOTE_ERR </dev/null & echo \$! >$REMOTE_PID"
 
@@ -431,6 +436,16 @@ summary = {
 (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 print(json.dumps(summary, indent=2))
 PY
+
+python3 "$ROOT/tools/jscc_replay.py" build \
+    --frames "$ARTIFACTS/frames.csv" \
+    --config "$ARTIFACTS/tx.json" \
+    --table "$ROOT/profiles/table.example.json" \
+    --deadline-ms "$JSCC_DEADLINE_MS" \
+    --output "$ARTIFACTS/controller-trace.jsonl"
+python3 "$ROOT/tools/jscc_replay.py" replay \
+    "$ARTIFACTS/controller-trace.jsonl" \
+    --output "$ARTIFACTS/controller-decisions.jsonl"
 
 [[ "$consumer_rc" == 0 ]] || fail "GStreamer validation failed (see $ARTIFACTS/consumer.log)"
 echo "jscc ethernet bench: PASS ($ARTIFACTS)"
