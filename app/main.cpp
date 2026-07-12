@@ -369,6 +369,12 @@ struct AirBackend {
         return false;
 #endif
     }
+    bool supports_csa() const {
+        // UDP intentionally exercises CSA state without a physical retune.
+        // Kernel-monitor cannot retune yet and must fail closed: pretending a
+        // switch succeeded can strand the node while its interface stays put.
+        return !mon.has_value();
+    }
     // §9.10: the watchdog runs in the mode loop (it owns the clock); its
     // verdict is grafted onto the TX adapter's stats entry here.
     void fill_adapter_stats(StatsSnapshot& snap, uint64_t tsf_fallbacks,
@@ -1316,6 +1322,9 @@ int run_tx(const Loaded& l) {
                                     size_t n) {
             const Decoded dec = decode(d, n);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
+                if (!air.value->supports_csa()) {
+                    return;
+                }
                 // §11.2: anchor on this adapter's TSF; the follower manages
                 // its own issuer latch (MAC-valid bootstrap, §11.4).
                 if (csa.on_csa(*c, now_us_it,
@@ -1495,6 +1504,9 @@ int run_rx(const Loaded& l) {
         h.info_json = [&] { return build_info_json(l, session, "rx"); };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
+            if (!air.value->supports_csa()) {
+                return "CSA unsupported by kernel-monitor backend";
+            }
             const CommonPrefix pre{l.cfg.node.originator, 0, session};
             if (issuer.start(pre, static_cast<uint16_t>(mhz), 0,
                              static_cast<uint8_t>(klass != 0), op_chan, 0, 4,
@@ -1553,6 +1565,9 @@ int run_rx(const Loaded& l) {
             // §11 taps (cheap header decode; DATA still flows to the engine).
             const Decoded dec = decode(d, n);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
+                if (!air.value->supports_csa()) {
+                    return;
+                }
                 if (follower.on_csa(*c, now_us_it,
                                     air.value->read_tsf(meta.adapter_id),
                                     static_cast<uint32_t>(meta.tsf_us),

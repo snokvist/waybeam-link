@@ -263,8 +263,10 @@ struct RadioAir::Impl {
         {
             std::lock_guard<std::mutex> lk(mu);
             if (queue.size() >= kRxQueueCap) {
+                const uint8_t dropped_adapter = queue.front().adapter;
                 queue.pop_front();
-                a.rx_dropped.fetch_add(1, std::memory_order_relaxed);
+                adapters[dropped_adapter]->rx_dropped.fetch_add(
+                    1, std::memory_order_relaxed);
             }
             queue.push_back(std::move(f));
         }
