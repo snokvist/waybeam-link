@@ -167,8 +167,10 @@ SSE feed).
 
 The dashboard separates those groups into tabs and keeps five minutes of
 browser-side trend history. Hover an underlined label for its precise meaning.
-Live stats currently do not include encoded-frame byte sizes or frame-arrival
-jitter; the finite bench writes those measurements to `summary.json` instead.
+Frame-SHM streams report successful local frame transfers, cumulative bytes,
+last/min/max frame size, latest arrival interval, and smoothed arrival jitter.
+The finite bench additionally writes its per-frame trace and summary to
+`frames.csv` and `summary.json`.
 
 ## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
 
