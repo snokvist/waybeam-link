@@ -64,14 +64,14 @@ and several observability gaps need resolution before unattended deployment.
 
 ### Medium
 
-7. **Discovery exists internally but has no scan/list API.**
+7. **Discovery had no scan/list API (fixed; dynamic switching remains).**
    Every DATA header carries originator, session, stream ID, and stream type.
    An output config may omit originator and the RX will admission-latch the
    first matching `stream_type`, so automatic hook-on is possible today.
-   There is no endpoint that lists candidate streams, sessions, activity, or
-   type before selecting one, and a taken local output cannot switch until idle
-   teardown. HEARTBEAT cannot advertise stream types because its specified body
-   is empty.
+   Pass 17 exposes bounded node and typed-stream candidates at
+   `GET /api/v1/discovery`. A taken local output still cannot switch until idle
+   teardown, and HEARTBEAT cannot advertise stream types because its specified
+   body is empty.
 
 8. **ARQ duplex topology was manual (UDP fixed).**
    RX correctly emits NACK/LINK_REPORT through the same air backend. Radio and
