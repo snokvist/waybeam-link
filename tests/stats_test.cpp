@@ -75,6 +75,10 @@ StatsSnapshot sample_snapshot() {
     st.arq_rec_max_ms = 61;
     st.resends_sent = 230;
     st.double_send_suppressed = 5;
+    st.source_symbols_sent = 4120300;
+    st.repair_symbols_sent = 358944;
+    st.fec_oversize_frames = 0;
+    st.idr_frames = 17;
     st.decode_errors = 0;
     st.active_profile = 4;
     st.table_version = 178;
@@ -129,6 +133,8 @@ const char* kGolden =
     "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
     "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
     "\"resends_sent\":230,\"double_send_suppressed\":5,"
+    "\"source_symbols_sent\":4120300,\"repair_symbols_sent\":358944,"
+    "\"fec_oversize_frames\":0,\"idr_frames\":17,"
     "\"decode_errors\":0,\"active_profile\":4,\"table_version\":178}],"
     "\"return\":{\"reports_expected\":10,\"reports_received\":9,"
     "\"return_window_hits\":7,\"return_window_misses\":2,"

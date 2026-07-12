@@ -28,6 +28,8 @@ class DashboardSchemaTest(unittest.TestCase):
             "jscc_repair_underpredicted_blocks",
             "jscc_repair_demand_censored_blocks",
             "jscc_repair_predicted_parity_symbols",
+            "source_symbols_sent", "repair_symbols_sent",
+            "fec_oversize_frames", "idr_frames",
         ):
             self.assertIn(f"s.{field}", HTML)
 

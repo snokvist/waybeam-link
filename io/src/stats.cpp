@@ -199,6 +199,14 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.resends_sent);
         out += ",\"double_send_suppressed\":";
         append_u64(out, s.double_send_suppressed);
+        out += ",\"source_symbols_sent\":";
+        append_u64(out, s.source_symbols_sent);
+        out += ",\"repair_symbols_sent\":";
+        append_u64(out, s.repair_symbols_sent);
+        out += ",\"fec_oversize_frames\":";
+        append_u64(out, s.fec_oversize_frames);
+        out += ",\"idr_frames\":";
+        append_u64(out, s.idr_frames);
         out += ",\"decode_errors\":";
         append_u64(out, s.decode_errors);
         out += ",\"active_profile\":";

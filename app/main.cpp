@@ -1087,6 +1087,13 @@ struct TxCore {
                 st.seq = s.frame_framer->next_seq();
                 st.delivered = s.frame_framer->stats().frames;
                 st.malformed = s.frame_framer->stats().malformed_frame;
+                st.source_symbols_sent =
+                    s.frame_framer->stats().source_symbols;
+                st.repair_symbols_sent =
+                    s.frame_framer->stats().repair_symbols;
+                st.fec_oversize_frames =
+                    s.frame_framer->stats().fec_oversize_k;
+                st.idr_frames = s.frame_framer->stats().idr_frames;
             }
             st.resends_sent = s.sched.counters().resends_sent;
             st.double_send_suppressed =
