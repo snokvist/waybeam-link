@@ -199,6 +199,19 @@ class JsccReplayTest(unittest.TestCase):
         self.assertEqual((0, False),
                          jscc_replay.repair_demand(10, 10, set(), 0))
 
+    def test_adaptive_margin_is_applied_before_parity_selection(self):
+        args = jscc_replay.parse_args([
+            "build-events", "--tx-packets", str(self.root / "tx-packets.jsonl"),
+            "--rx-packets", str(self.root / "rx-packets.jsonl"),
+            "--output", str(self.root / "events.jsonl")])
+        records = jscc_replay.build_event_trace(args)
+        replay_args = jscc_replay.parse_args([
+            "replay", str(self.root / "events.jsonl"), "--fec", "adaptive",
+            "--estimator-margin", "1", "--estimator-cold-start", "0"])
+        decisions = jscc_replay.replay_blocks(records, replay_args)
+        self.assertEqual(1, decisions[0]["predicted_loss_symbols"])
+        self.assertEqual(1, decisions[0]["parity_m"])
+
 
 if __name__ == "__main__":
     unittest.main()

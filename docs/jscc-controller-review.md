@@ -292,3 +292,15 @@ matched the already-limited fixed result and saved no parity. The remaining
 incremental-loss miss means this candidate is still shadow-only. Runtime
 telemetry must be upgraded from raw missing sources to repair demand before the
 candidate can be judged on the real encoder stream.
+
+After that upgrade, a second 10%-per-listener real-encoder run observed 1,992
+frames: 1,361 fast and 631 fixed-FEC recoveries, with zero unrecoverable,
+deadline, kernel, or SHM drops. Exact TX counters measured 4.10 fixed repair
+symbols/frame; protection shadow predicted 3.37/frame, a 17.9% reduction, but
+underpredicted one block. Replay safety-margin ablation found that one extra
+symbol did not remove the incremental-loss miss; two did, retaining 9.1% parity
+saving under steady high-frequency independent loss and 18.8% under incremental
+loss because selection remained capped by fixed available parity. A runtime
+actuator must retain that fixed-policy cap. The live estimator is still
+non-enforcing, and an in-process loss ramp is still needed because restarting
+the receiver resets its causal window.

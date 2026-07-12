@@ -343,6 +343,8 @@ class LossInjector:
 
 
 def replay_blocks(records, args):
+    if args.estimator_margin < 0:
+        raise ValueError("estimator margin must be non-negative")
     blocks = [record for record in records if record.get("type") == "block"]
     deadline_ms = (int(records[0]["deadline_ms"]) if args.deadline_ms is None
                    else args.deadline_ms)
@@ -369,6 +371,7 @@ def replay_blocks(records, args):
         predicted_loss = (math.ceil(predicted_sample * k / 1000)
                           if args.estimator_target == "repair-rate"
                           else predicted_sample)
+        predicted_loss += args.estimator_margin
         recorded_parity = int(block["parity_m"])
         if args.fec == "adaptive":
             selected_parity = min(
@@ -484,6 +487,7 @@ def replay_blocks(records, args):
             "cold_start": args.estimator_cold_start,
             "floor": args.estimator_floor,
             "cap": args.estimator_cap,
+            "margin": args.estimator_margin,
         } if args.fec == "adaptive" else None),
         "arq": args.arq,
         "rtt_ms": args.rtt_ms,
@@ -594,6 +598,7 @@ def add_estimator_args(parser):
     parser.add_argument("--estimator-cold-start", type=int, default=100)
     parser.add_argument("--estimator-floor", type=int, default=0)
     parser.add_argument("--estimator-cap", type=int, default=255)
+    parser.add_argument("--estimator-margin", type=int, default=0)
     parser.add_argument("--estimator-target",
                         choices=("repair-rate", "repair-demand"),
                         default="repair-rate")
