@@ -301,6 +301,24 @@ underpredicted one block. Replay safety-margin ablation found that one extra
 symbol did not remove the incremental-loss miss; two did, retaining 9.1% parity
 saving under steady high-frequency independent loss and 18.8% under incremental
 loss because selection remained capped by fixed available parity. A runtime
-actuator must retain that fixed-policy cap. The live estimator is still
+actuator must instead retain the configured §14.2/GF capacity cap; fixed FEC is
+the fallback, not the ceiling. Replay cannot evaluate parity beyond the repair
+symbols present in its capture. The live estimator is still
 non-enforcing, and an in-process loss ramp is still needed because restarting
 the receiver resets its causal window.
+
+The UDP bench now supports an in-process loss ramp through
+`POST /api/v1/bench/rx-drop`; it is unavailable on monitor/Devourer backends and
+always resets loss to zero after the script. With fixed 10% P-frame FEC, a
+0→25→50→100→150→200→100→50→0 permille ramp preserved estimator state but lost
+four frames at 150–200 permille. All four were censored demand observations:
+the capture itself lacked enough fixed repair symbols. The protection shadow
+underpredicted three rising-edge blocks and reached five predicted repairs.
+
+A brief 20% fixed-FEC envelope then ran 0→50→100→150→200 permille. It delivered
+all 1,182 frames (302 through FEC at the final sample), with zero unrecoverable,
+deadline, kernel, SHM, or censored-demand drops. Shadow prediction rose to
+seven repairs and underpredicted two rising-edge blocks. The steady estimator
+is therefore credible, but the transient acceptance gate still fails. The next
+candidate needs a bounded regime-change guard (or temporary fixed fallback)
+during upward loss transitions rather than a permanently larger steady margin.
