@@ -13,6 +13,7 @@ RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
 AIR_KIND=${AIR_KIND:-udp}
 PACKET_TRACE=${PACKET_TRACE:-0}
 PACKET_TRACE_MAX=${PACKET_TRACE_MAX:-75000}
+ALLOW_PRODUCER_OVERSIZE=${ALLOW_PRODUCER_OVERSIZE:-0}
 
 if [[ "$AIR_KIND" != udp && "$AIR_KIND" != udp-broadcast ]]; then
     echo "AIR_KIND must be udp or udp-broadcast" >&2
@@ -20,6 +21,10 @@ if [[ "$AIR_KIND" != udp && "$AIR_KIND" != udp-broadcast ]]; then
 fi
 if [[ "$PACKET_TRACE" != 0 && "$PACKET_TRACE" != 1 ]]; then
     echo "PACKET_TRACE must be 0 or 1" >&2
+    exit 2
+fi
+if [[ "$ALLOW_PRODUCER_OVERSIZE" != 0 && "$ALLOW_PRODUCER_OVERSIZE" != 1 ]]; then
+    echo "ALLOW_PRODUCER_OVERSIZE must be 0 or 1" >&2
     exit 2
 fi
 
@@ -58,9 +63,9 @@ run_one() {
     local tx_air rx_air expected_adapters
 
     if [[ "$AIR_KIND" == udp-broadcast ]]; then
-        tx_air="{\"kind\":\"udp-broadcast\",\"tx\":[\"127.255.255.255:$data0\"],\"rx\":[\"0.0.0.0:$data0\"],\"pace_mbps\":10}"
-        rx_air="{\"kind\":\"udp-broadcast\",\"tx\":[\"127.255.255.255:$data0\"],\"rx\":[\"0.0.0.0:$data0\"],\"pace_mbps\":10,\"rx_drop_permille\":$RX_DROP_PERMILLE}"
-        expected_adapters=1
+        tx_air="{\"kind\":\"udp-broadcast\",\"tx\":[\"127.255.255.255:$data0\"],\"rx\":[\"0.0.0.0:$data0\"],\"pace_mbps\":100}"
+        rx_air="{\"kind\":\"udp-broadcast\",\"tx\":[\"127.255.255.255:$data0\"],\"rx\":[\"0.0.0.0:$data0\",\"0.0.0.0:$data0\"],\"pace_mbps\":100,\"rx_drop_permille\":$RX_DROP_PERMILLE}"
+        expected_adapters=2
     else
         tx_air="{\"kind\":\"udp\",\"tx\":[\"127.0.0.1:$data0\",\"127.0.0.1:$data1\"],\"rx\":[\"127.0.0.1:$ret\"]}"
         rx_air="{\"kind\":\"udp\",\"rx\":[\"127.0.0.1:$data0\",\"127.0.0.1:$data1\"],\"tx\":[\"127.0.0.1:$ret\"],\"rx_drop_permille\":$RX_DROP_PERMILLE}"
@@ -114,8 +119,29 @@ EOF
     local consumer_pid=$!
     pids+=("$consumer_pid")
     sleep 0.3
+    set +e
     "$GST" produce "$in_ring" "$bitrate" "$total_frames" \
         >"$TMP/producer-${index}.log" 2>&1
+    local producer_rc=$?
+    set -e
+    if (( producer_rc != 0 )); then
+        if [[ "$ALLOW_PRODUCER_OVERSIZE" != 1 ]]; then
+            return "$producer_rc"
+        fi
+        python3 - "$TMP/producer-${index}.log" "$FRAMES" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(r"producer frames=(\d+).*full_drop=(\d+) oversize_drop=(\d+)", text)
+if not match:
+    raise SystemExit("producer stress result missing")
+frames, full, oversize = map(int, match.groups())
+if frames < int(sys.argv[2]) or full != 0 or oversize == 0:
+    raise SystemExit(f"unexpected producer failure: {match.group(0)}")
+print(f"producer stress accepted: {oversize} oversize frame(s), {frames} usable")
+PY
+    fi
     wait "$consumer_pid"
     sleep 0.3
     kill -TERM "$tx_pid" "$rx_pid" 2>/dev/null || true

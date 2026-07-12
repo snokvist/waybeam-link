@@ -138,6 +138,10 @@ PTS monotonicity, decoder EOS, frame counts, both UDP adapter counters, FEC,
 ARQ, malformed/decode outcomes, and SHM producer drops. `FRAMES`, `BITRATES`,
 `WARMUP_FRAMES`, `RX_DROP_PERMILLE`, and `BUILD` are overridable. Set
 `KEEP_TMP=1` to retain configs, logs, and stats JSONL after a failure.
+Synthetic `x265enc` uses periodic IDRs and deliberately fails on a 512 KB SHM
+oversize. Stress-only runs may set `ALLOW_PRODUCER_OVERSIZE=1`; this accepts
+only an oversize-only producer result with no full-ring drops and enough usable
+frames for the consumer. Normal runs continue to fail on every oversize.
 
 ### Fleet monitor (live dashboard)
 

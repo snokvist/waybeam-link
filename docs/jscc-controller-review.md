@@ -190,3 +190,32 @@ delivery, NACKs, and retransmissions. Replay provides seeded burst,
 incremental, sparse-periodic, and high-frequency loss with independent or
 fully correlated diversity plus FEC/ARQ/deadline-discard ablations. This is
 tooling only: no DATA field, protocol rule, or production stats field changed.
+
+### Initial packet-event matrix
+
+A complete local frame-SHM run captured 302 blocks from a 15 Mbit/s x265 snow
+stream through one UDP broadcast and two shared-port listeners. Both traces
+ended normally with zero dropped trace events; all recorded/no-loss blocks took
+the fast path. The standard matrix then replaced delivery with deterministic
+15% high-frequency loss, 12/100-packet bursts, ramping loss, or sparse periodic
+loss. Selected results (`fast / FEC / failed`) were:
+
+| scenario | fixed FEC | no FEC |
+|---|---:|---:|
+| 12/100 burst, independent paths | 302 / 0 / 0 | 302 / 0 / 0 |
+| 12/100 burst, correlated paths | 135 / 21 / 146 | 135 / 0 / 167 |
+| incremental, independent paths | 226 / 76 / 0 | 226 / 0 / 76 |
+| sparse periodic, correlated paths | 170 / 129 / 3 | 170 / 0 / 132 |
+| 15% high-frequency, independent paths | 109 / 190 / 3 | 109 / 0 / 193 |
+| 15% high-frequency, correlated paths | 0 / 72 / 230 | 0 / 0 / 302 |
+
+At the provisional 16 ms deadline and 4 ms RTT, ARQ recovered none of the
+synthetic ARQ-class IDRs: their original packet train had already consumed the
+available recovery window. This supports the architecture's RTT/deadline gate;
+it is not evidence that ARQ is useless for the real GDR stream.
+
+The snow producer also dropped one periodic IDR above the 512 KB SHM slot at 15
+Mbit/s (and three at 25 Mbit/s in an earlier incomplete stress trace). This is
+kept separate from the real `size=auto` GDR envelope, where the measured maximum
+was 74,789 B. Normal benches fail on synthetic oversize; an explicit
+`ALLOW_PRODUCER_OVERSIZE=1` exists only to retain otherwise-valid stress runs.
