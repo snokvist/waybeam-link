@@ -45,6 +45,11 @@ struct FrameReassemblerStats {
     uint16_t jscc_observed_loss_symbols = 0;
     uint64_t jscc_underpredicted_blocks = 0;
     uint64_t jscc_predicted_parity_symbols = 0;
+    uint16_t jscc_predicted_repair_symbols = 0;
+    uint16_t jscc_observed_repair_symbols = 0;
+    uint64_t jscc_repair_underpredicted_blocks = 0;
+    uint64_t jscc_repair_demand_censored_blocks = 0;
+    uint64_t jscc_repair_predicted_parity_symbols = 0;
 };
 
 class FrameReassembler {
@@ -78,6 +83,7 @@ class FrameReassembler {
         bool have_eob = false;
         bool shadow_armed = false;
         uint16_t shadow_prediction = 0;
+        uint16_t repair_prediction = 0;
         // index -> chunk bytes (source i; last chunk may be < s, unpadded).
         std::map<uint16_t, std::vector<uint8_t>> sources;
         // repair_idx -> s coded bytes.
@@ -100,6 +106,8 @@ class FrameReassembler {
     bool have_finalized_ = false;
     std::vector<uint8_t> scratch_;  // reused decode/concat buffer
     JsccLossEstimator loss_estimator_;
+    JsccLossEstimator repair_estimator_{
+        JsccLossEstimatorConfig{120, 1000, 20, 100}};
 };
 
 }  // namespace wblink

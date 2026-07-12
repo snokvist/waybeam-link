@@ -24,6 +24,10 @@ class DashboardSchemaTest(unittest.TestCase):
             "jscc_shadow_blocks", "jscc_predicted_loss_symbols",
             "jscc_observed_loss_symbols", "jscc_underpredicted_blocks",
             "jscc_predicted_parity_symbols",
+            "jscc_predicted_repair_symbols", "jscc_observed_repair_symbols",
+            "jscc_repair_underpredicted_blocks",
+            "jscc_repair_demand_censored_blocks",
+            "jscc_repair_predicted_parity_symbols",
         ):
             self.assertIn(f"s.{field}", HTML)
 

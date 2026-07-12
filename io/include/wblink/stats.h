@@ -73,6 +73,11 @@ struct StreamStats {
     uint16_t jscc_observed_loss_symbols = 0;
     uint64_t jscc_underpredicted_blocks = 0;
     uint64_t jscc_predicted_parity_symbols = 0;
+    uint16_t jscc_predicted_repair_symbols = 0;
+    uint16_t jscc_observed_repair_symbols = 0;
+    uint64_t jscc_repair_underpredicted_blocks = 0;
+    uint64_t jscc_repair_demand_censored_blocks = 0;
+    uint64_t jscc_repair_predicted_parity_symbols = 0;
     uint64_t shm_full_drops = 0;
     uint64_t shm_oversize_drops = 0;
     uint64_t shm_bad_slots = 0;

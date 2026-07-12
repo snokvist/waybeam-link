@@ -1402,6 +1402,16 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
             st->jscc_underpredicted_blocks = fr.jscc_underpredicted_blocks;
             st->jscc_predicted_parity_symbols =
                 fr.jscc_predicted_parity_symbols;
+            st->jscc_predicted_repair_symbols =
+                fr.jscc_predicted_repair_symbols;
+            st->jscc_observed_repair_symbols =
+                fr.jscc_observed_repair_symbols;
+            st->jscc_repair_underpredicted_blocks =
+                fr.jscc_repair_underpredicted_blocks;
+            st->jscc_repair_demand_censored_blocks =
+                fr.jscc_repair_demand_censored_blocks;
+            st->jscc_repair_predicted_parity_symbols =
+                fr.jscc_repair_predicted_parity_symbols;
             st->decode_errors = fr.decode_failures;
             st->dropped_superseded = fr.frames_superseded;
             st->dropped_deadline = fr.frames_deadline;

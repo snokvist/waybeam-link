@@ -61,6 +61,11 @@ StatsSnapshot sample_snapshot() {
     st.jscc_observed_loss_symbols = 1;
     st.jscc_underpredicted_blocks = 72;
     st.jscc_predicted_parity_symbols = 271044;
+    st.jscc_predicted_repair_symbols = 4;
+    st.jscc_observed_repair_symbols = 3;
+    st.jscc_repair_underpredicted_blocks = 18;
+    st.jscc_repair_demand_censored_blocks = 2;
+    st.jscc_repair_predicted_parity_symbols = 358121;
     st.dropped_superseded = 110;
     st.dropped_deadline = 8;
     st.nacks_sent = 18;
@@ -112,6 +117,11 @@ const char* kGolden =
     "\"jscc_observed_loss_symbols\":1,"
     "\"jscc_underpredicted_blocks\":72,"
     "\"jscc_predicted_parity_symbols\":271044,"
+    "\"jscc_predicted_repair_symbols\":4,"
+    "\"jscc_observed_repair_symbols\":3,"
+    "\"jscc_repair_underpredicted_blocks\":18,"
+    "\"jscc_repair_demand_censored_blocks\":2,"
+    "\"jscc_repair_predicted_parity_symbols\":358121,"
     "\"shm_full_drops\":0,\"shm_oversize_drops\":0,"
     "\"shm_bad_slots\":0,\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"

@@ -165,6 +165,16 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.jscc_underpredicted_blocks);
         out += ",\"jscc_predicted_parity_symbols\":";
         append_u64(out, s.jscc_predicted_parity_symbols);
+        out += ",\"jscc_predicted_repair_symbols\":";
+        append_u64(out, s.jscc_predicted_repair_symbols);
+        out += ",\"jscc_observed_repair_symbols\":";
+        append_u64(out, s.jscc_observed_repair_symbols);
+        out += ",\"jscc_repair_underpredicted_blocks\":";
+        append_u64(out, s.jscc_repair_underpredicted_blocks);
+        out += ",\"jscc_repair_demand_censored_blocks\":";
+        append_u64(out, s.jscc_repair_demand_censored_blocks);
+        out += ",\"jscc_repair_predicted_parity_symbols\":";
+        append_u64(out, s.jscc_repair_predicted_parity_symbols);
         out += ",\"shm_full_drops\":";
         append_u64(out, s.shm_full_drops);
         out += ",\"shm_oversize_drops\":";
