@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>waybeam-link monitor</title>
+<style>
+  :root {
+    --bg:#0e1116; --panel:#161b22; --panel2:#1b2129; --line:#2a313c;
+    --fg:#d7dde5; --dim:#8b95a3; --accent:#4da3ff;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --idle:#6e7681;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { display:flex; align-items:center; gap:14px; padding:10px 16px;
+    background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  header h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.3px; }
+  header .sub { color:var(--dim); font-size:12px; }
+  #conn { margin-left:auto; font:12px var(--mono); padding:3px 9px; border-radius:12px;
+    border:1px solid var(--line); }
+  #conn.up { color:var(--ok); border-color:#1d3a24; }
+  #conn.down { color:var(--bad); border-color:#40201f; }
+  #grid { display:grid; gap:14px; padding:16px;
+    grid-template-columns:repeat(auto-fill,minmax(430px,1fr)); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    overflow:hidden; }
+  .card.stale { opacity:.55; }
+  .chead { display:flex; align-items:center; gap:10px; padding:9px 12px;
+    background:var(--panel2); border-bottom:1px solid var(--line); }
+  .role { font:11px var(--mono); font-weight:700; padding:2px 7px; border-radius:5px;
+    text-transform:uppercase; }
+  .role.tx { background:#12324f; color:#8ac4ff; }
+  .role.rx { background:#14361f; color:#7ee08e; }
+  .role.loopback { background:#3a2d10; color:#e5c15a; }
+  .role\?, .role.q { background:#30363d; color:var(--dim); }
+  .cname { font-weight:600; font-size:14px; }
+  .cid { color:var(--dim); font:11px var(--mono); }
+  .dot { width:9px; height:9px; border-radius:50%; margin-left:auto; }
+  .dot.ok { background:var(--ok); box-shadow:0 0 6px #3fb95088; }
+  .dot.warn { background:var(--warn); }
+  .dot.bad { background:var(--bad); }
+  .age { color:var(--dim); font:11px var(--mono); min-width:52px; text-align:right; }
+  .body { padding:10px 12px; display:flex; flex-direction:column; gap:10px; }
+  .link-row { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { font:11px var(--mono); background:var(--panel2); border:1px solid var(--line);
+    border-radius:6px; padding:3px 8px; white-space:nowrap; }
+  .chip b { color:var(--fg); font-weight:700; }
+  .chip .k { color:var(--dim); }
+  .chip.hot { border-color:#40201f; color:#ff9d96; }
+  .chip.state-HOLD b { color:var(--ok); }
+  .chip.state-PROBE b, .chip.state-DEMOTE b { color:var(--warn); }
+  .sec-title { color:var(--dim); font-size:11px; text-transform:uppercase;
+    letter-spacing:.5px; margin:2px 0 -2px; }
+  table { width:100%; border-collapse:collapse; font:11px var(--mono); }
+  th,td { text-align:right; padding:3px 6px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:600; }
+  td.l,th.l { text-align:left; }
+  tr:last-child td { border-bottom:none; }
+  .flag { padding:1px 5px; border-radius:4px; font-weight:700; }
+  .flag.bad { background:#40201f; color:#ff9d96; }
+  .flag.ok { color:var(--idle); }
+  .v-ok { color:var(--ok); } .v-warn { color:var(--warn); } .v-bad { color:var(--bad); }
+  .empty { color:var(--dim); padding:40px; text-align:center; grid-column:1/-1; }
+  footer { color:var(--dim); font-size:11px; padding:8px 16px; border-top:1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>waybeam-link <span class="sub">fleet monitor</span></h1>
+  <span class="sub" id="count">0 instances</span>
+  <span id="conn" class="down">connecting…</span>
+</header>
+<div id="grid"><div class="empty" id="empty">Waiting for stats datagrams…<br>
+  Point an instance's stats egress at this host: <code>"stats":{"hz":5,"bind":{"kind":"udp","send":"THIS_HOST:9110"}}</code></div></div>
+<footer>SSE <code>/api/stream</code> · rates derived from <code>t_ms</code> deltas · dBm = tx_power_qdb/4 · loss% = milli/10</footer>
+
+<script>
+"use strict";
+const grid = document.getElementById("grid");
+const empty = document.getElementById("empty");
+const connEl = document.getElementById("conn");
+const countEl = document.getElementById("count");
+const state = new Map();   // key -> {rec, prevSnap, prevT, cardEl}
+
+function fmt(n){ if(n==null) return "–"; if(n>=1e6) return (n/1e6).toFixed(1)+"M";
+  if(n>=1e3) return (n/1e3).toFixed(1)+"k"; return String(n); }
+function pct(milli){ return (milli/10).toFixed(milli>=100?0:1)+"%"; }
+function ageClass(ms){ return ms<1500?"ok":ms<4000?"warn":"bad"; }
+
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function render(){
+  const now = Date.now();
+  let n = 0;
+  for (const st of state.values()){
+    n++;
+    const rec = st.rec, snap = rec.snap;
+    const age = now - st.wall;
+    // derive per-second rates from t_ms delta
+    let dt = 0;
+    if (st.prevSnap) dt = (snap.t_ms - st.prevSnap.t_ms)/1000;
+    const rate = (cur,prev)=> (dt>0 && prev!=null) ? Math.max(0,(cur-prev)/dt) : null;
+
+    const card = st.cardEl;
+    card.className = "card" + (age>4000?" stale":"");
+    const link = snap.link||{};
+    const stateCls = "state-"+(link.state||"?");
+    const dbm = (link.tx_power_qdb/4).toFixed(1);
+
+    // adapters
+    let arows = (snap.adapters||[]).map(a=>{
+      const flags = [];
+      if (a.tx_wedged) flags.push('<span class="flag bad">WEDGED</span>');
+      if (a.adapter_stalled) flags.push('<span class="flag bad">STALL</span>');
+      if (!flags.length) flags.push('<span class="flag ok">·</span>');
+      const txf = a.tx_failed>0 ? 'v-bad':'';
+      return `<tr><td class="l">${esc(a.name)}</td>
+        <td>${a.rssi_best||0}/${a.rssi_mean||0}</td><td>${a.snr||0}</td>
+        <td>${fmt(a.rx)}</td><td>${fmt(a.dup)}</td>
+        <td>${fmt(a.tx_submitted)}</td><td class="${txf}">${fmt(a.tx_failed)}</td>
+        <td>${fmt(a.tx_reports)}</td><td class="l">${flags.join(" ")}</td></tr>`;
+    }).join("") || `<tr><td class="l" colspan="9" style="color:var(--dim)">no adapters</td></tr>`;
+
+    // streams
+    let srows = (snap.streams||[]).map((s,i)=>{
+      const ps = st.prevSnap && st.prevSnap.streams ? st.prevSnap.streams[i] : null;
+      const dps = rate(s.delivered, ps?ps.delivered:null);
+      const lp = s.loss_prediversity_milli||0, la = s.loss_postdiv_prearq_milli||0;
+      const derr = s.decode_errors>0?'v-bad':'';
+      return `<tr><td class="l">#${s.stream_id} ${esc(s.type||"")}</td>
+        <td>${dps==null?"–":dps.toFixed(0)}</td>
+        <td class="${lp>50?'v-warn':''}">${pct(lp)}</td>
+        <td class="${la>50?'v-warn':''}">${pct(la)}</td>
+        <td>${fmt(s.recovered_arq)}</td><td>${fmt(s.recovered_fec)}</td>
+        <td>${fmt(s.dropped_superseded)}</td><td>${fmt(s.dropped_deadline)}</td>
+        <td class="${derr}">${fmt(s.decode_errors)}</td>
+        <td>${s.nack_rtt_max_ms||0}/${s.arq_rec_max_ms||0}</td></tr>`;
+    }).join("") || `<tr><td class="l" colspan="10" style="color:var(--dim)">no streams</td></tr>`;
+
+    const ret = snap.return||{};
+    card.innerHTML = `
+      <div class="chead">
+        <span class="role ${rec.role==='?'?'q':rec.role}">${esc(rec.role)}</span>
+        <span class="cname">${esc(rec.label||rec.src)}</span>
+        <span class="cid">node ${snap.node} · sess ${snap.session}</span>
+        <span class="dot ${ageClass(age)}"></span>
+        <span class="age">${(age/1000).toFixed(1)}s</span>
+      </div>
+      <div class="body">
+        <div class="link-row">
+          <span class="chip ${stateCls}"><span class="k">state</span> <b>${esc(link.state||"?")}</b></span>
+          <span class="chip"><span class="k">prof</span> <b>${link.profile??"–"}</b></span>
+          <span class="chip"><span class="k">mcs</span> <b>${link.mcs??"–"}</b></span>
+          <span class="chip"><span class="k">pwr</span> <b>${isNaN(dbm)?"–":dbm} dBm</b></span>
+          <span class="chip ${link.flap_freeze?'hot':''}"><span class="k">flap</span> <b>${link.flap_freeze?"FREEZE":"ok"}</b></span>
+          <span class="chip"><span class="k">csa</span> <b>${esc(link.csa_state||"–")}</b></span>
+          <span class="chip"><span class="k">rpt age</span> <b>${link.report_age_ms??"–"}ms</b></span>
+        </div>
+        <div class="sec-title">adapters</div>
+        <table><thead><tr>
+          <th class="l">name</th><th>rssi b/m</th><th>snr</th><th>rx</th><th>dup</th>
+          <th>tx</th><th>txfail</th><th>rpts</th><th class="l">flags</th>
+        </tr></thead><tbody>${arows}</tbody></table>
+        <div class="sec-title">streams &nbsp;<span style="text-transform:none;color:var(--idle)">deliv/s · loss(pre/post) · arq/fec · sup/dl · derr · rtt/rec</span></div>
+        <table><thead><tr>
+          <th class="l">stream</th><th>d/s</th><th>lpre</th><th>lpost</th>
+          <th>arq</th><th>fec</th><th>sup</th><th>dl</th><th>derr</th><th>rtt/rec</th>
+        </tr></thead><tbody>${srows}</tbody></table>
+        <div class="link-row">
+          <span class="chip"><span class="k">reports</span> <b>${fmt(ret.reports_received)}/${fmt(ret.reports_expected)}</b></span>
+          <span class="chip"><span class="k">win hit/miss</span> <b>${fmt(ret.return_window_hits)}/${fmt(ret.return_window_misses)}</b></span>
+          <span class="chip"><span class="k">ucast/fb</span> <b>${fmt(ret.unicast_sent)}/${fmt(ret.unicast_fallback)}</b></span>
+          <span class="chip"><span class="k">updates</span> <b>${rec.updates||0}</b></span>
+        </div>
+      </div>`;
+  }
+  countEl.textContent = n + (n===1?" instance":" instances");
+  empty.style.display = n?"none":"block";
+}
+
+function upsert(rec){
+  let st = state.get(rec.key);
+  if (!st){
+    const cardEl = document.createElement("div");
+    grid.appendChild(cardEl);
+    st = { cardEl, prevSnap:null };
+    state.set(rec.key, st);
+  } else {
+    st.prevSnap = st.rec ? st.rec.snap : null;
+  }
+  st.rec = rec;
+  st.wall = Date.now();
+}
+
+function connect(){
+  const es = new EventSource("/api/stream");
+  es.onopen = ()=>{ connEl.className="up"; connEl.textContent="● live"; };
+  es.onerror = ()=>{ connEl.className="down"; connEl.textContent="reconnecting…"; };
+  es.onmessage = (e)=>{ try{ upsert(JSON.parse(e.data)); }catch(_){} };
+}
+connect();
+setInterval(render, 250);           // repaint + age ticking
+// prune instances gone silent >30s
+setInterval(()=>{ const now=Date.now(); for(const [k,st] of state){
+  if(now-st.wall>30000){ st.cardEl.remove(); state.delete(k); } } }, 5000);
+</script>
+</body>
+</html>

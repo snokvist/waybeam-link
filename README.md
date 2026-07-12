@@ -114,6 +114,32 @@ drop; bench-only, default off) — used to manufacture known-independent loss
 for gate-2 machinery validation and to exercise FEC recovery. Honored by all
 three air backends (`udp`, `kernel-monitor`, `radio`).
 
+### Fleet monitor (live dashboard)
+
+`tools/link_monitor.py` — a stdlib-only bridge that turns the §15.3 stats
+NDJSON into a browser dashboard for human link evaluation. Point each
+instance's stats egress at the monitor host (every instance may share one
+port; snapshots key by `(src-ip, node, session)`):
+
+```json
+"stats": { "hz": 5, "bind": { "kind": "udp", "send": "<monitor-ip>:9110" } }
+```
+
+Then:
+
+```
+python3 tools/link_monitor.py          # HTTP :8099, UDP :9110
+python3 tools/link_monitor.py --label 192.168.2.201=vehicle --label 192.168.2.242=ground
+```
+
+Open `http://localhost:8099/`. Each instance gets a card: link state /
+profile / MCS / tx-power / CSA, per-adapter RSSI/SNR/tx-fail/wedged, per-stream
+delivered-rate / pre+post loss / ARQ + FEC recovery / superseded+deadline
+drops / decode-errors / NACK-RTT, and return-path health — all SSE-live with
+staleness dots. The bridge never touches the binaries; it only consumes the
+stats push (`GET /api/instances` for a JSON snapshot, `GET /api/stream` for the
+SSE feed).
+
 ## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
 
 The low-latency video path. The encoder (`waybeam_venc`) publishes whole encoded
