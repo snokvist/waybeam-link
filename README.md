@@ -324,20 +324,22 @@ The detached bench keeps running after the command returns. View both nodes at
 encoder with `tools/jscc_ethernet_bench.sh stop`. For a foreground finite
 recorded run, use `FRAMES=1440 tools/jscc_ethernet_bench.sh finite`.
 
-By default the bench attaches its GStreamer validator to the ground egress.
-To give the single-consumer ring to an external decoder such as Radeon-VRX,
-restart in external-consumer mode:
+Continuous `start` defaults to leaving the ground egress ring for an external
+decoder such as Radeon-VRX:
 
 ```sh
 tools/jscc_ethernet_bench.sh stop
-BENCH_CONSUMER=external tools/jscc_ethernet_bench.sh start
+tools/jscc_ethernet_bench.sh start
 tools/jscc_ethernet_bench.sh status
 ```
 
 The stable application SHM name is `wblink_jscc_out` (POSIX object
-`/wblink_jscc_out`). `status` prints the active name and consumer mode. Do not
-attach a second consumer while the default GStreamer validator is running;
-the venc frame ring is strictly single-consumer.
+`/wblink_jscc_out`). `status` prints the active name and consumer mode. To run
+the built-in continuous validator instead, stop any external decoder and use
+`BENCH_CONSUMER=gst tools/jscc_ethernet_bench.sh start`. The harness rejects a
+detected second consumer because the venc frame ring is strictly
+single-consumer. Foreground `finite` runs always use the GStreamer trace
+consumer.
 
 ## REST control plane (PROTOCOL.md §15.5)
 

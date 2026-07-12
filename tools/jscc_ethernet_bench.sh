@@ -14,7 +14,7 @@ FRAMES=${FRAMES:-720}
 TIMEOUT_MS=${TIMEOUT_MS:-30000}
 LIVE=${LIVE:-1}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
-BENCH_CONSUMER=${BENCH_CONSUMER:-gst}
+BENCH_CONSUMER=${BENCH_CONSUMER:-external}
 ARTIFACTS=${ARTIFACTS:-"$ROOT/artifacts/jscc-ethernet-$(date +%Y%m%d-%H%M%S)"}
 REMOTE_INSTALL=/usr/bin/waybeam-link
 REMOTE_CFG=/etc/waybeam-link/jscc-ethernet.json
@@ -35,6 +35,22 @@ REMOTE_CHANGED=0
 CLEANED=0
 
 fail() { echo "jscc ethernet bench: $*" >&2; exit 1; }
+
+assert_single_consumer() {
+    local maps pid
+    local -a consumers=()
+    for maps in /proc/[0-9]*/maps; do
+        pid=${maps#/proc/}
+        pid=${pid%/maps}
+        [[ "$pid" == "$GROUND_PID" ]] && continue
+        if grep -Fq "/dev/shm/$OUT_RING" "$maps" 2>/dev/null; then
+            consumers+=("$pid:$(cat "/proc/$pid/comm" 2>/dev/null || echo unknown)")
+        fi
+    done
+    if (( ${#consumers[@]} > 1 )); then
+        fail "frame-shm '$OUT_RING' has multiple consumers: ${consumers[*]}"
+    fi
+}
 
 remote() {
     ssh -o BatchMode=yes -o ConnectTimeout=5 "$CRAFT" "$@"
@@ -286,6 +302,12 @@ remote "/usr/bin/json_cli -s .outgoing.server '\"frame-shm://venc_frame\"' -i /e
         /etc/init.d/S95waybeam restart"
 remote "rm -f $REMOTE_STATS $REMOTE_ERR; setsid $REMOTE_INSTALL tx -c $REMOTE_CFG \
         >$REMOTE_STATS 2>$REMOTE_ERR </dev/null & echo \$! >$REMOTE_PID"
+
+# The venc ring ABI has one shared read_idx. Two consumers do not fan out;
+# they steal alternating frames from each other. Catch accidental viewer +
+# GStreamer attachment before declaring the continuous bench ready.
+sleep 0.5
+assert_single_consumer
 
 if [[ "$LIVE" == 1 ]]; then
     echo "JSCC Ethernet bench is running"
