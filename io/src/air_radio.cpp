@@ -276,7 +276,8 @@ struct RadioAir::Impl {
         }
         cv.notify_one();
         const uint64_t one = 1;
-        (void)::write(ready_fd, &one, sizeof(one));
+        const ssize_t notified = ::write(ready_fd, &one, sizeof(one));
+        (void)notified;  // EAGAIN means an unread wakeup is already pending.
     }
 };
 

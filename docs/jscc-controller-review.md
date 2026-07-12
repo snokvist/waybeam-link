@@ -233,10 +233,19 @@ emits one ARQ-class IDR every 30 frames; ordinary P-frames remain unprotected.
 | 2% | 16 ms | 17 | 12 | 10 | 197/303 | 8/11 |
 | 2% | 8 ms | 15 | 11 | 0 | 188/303 | 0/11 |
 
-Recovered-packet RTT was at most 9 ms in the 16/80 ms runs. At 8 ms the TX did
-send retransmissions, but none reached RX early enough to recover a declared
-gap. This places the current Ethernet/loop scheduling crossover between 8 and
-16 ms for this workload. A 144 fps frame period is only 6.94 ms, so changing to
-a 144-capable sensor mode cannot make current ARQ useful without first reducing
-return/detection/retransmit latency. The 60 fps real-vehicle test remains the
-next hardware step.
+The initial recovered-packet RTT was at most 9 ms. Profiling found two
+application delays rather than Ethernet propagation: TX could sleep on local
+ingress while a return was ready, and paced UDP queued an authorized resend
+behind the current live-frame burst. Pass 26 added air-readiness wakeups to all
+three backends and a bounded resend-priority lane after the existing scheduler
+gates. Repeating the same 2%/16 ms synthetic run recovered 15 packets, all in
+the <=1 ms bucket (maximum 1 ms).
+
+A real SSC338Q-to-x86 ARQ-only run used the stable auto/25 Mbit/s/60 fps encoder,
+15% independent loss per each of two virtual listeners, and repeated forced GDR
+recovery frames. It measured 19 recoveries: 16 in <=1 ms and three in <=2 ms;
+P90 <=2 ms, maximum 2 ms, with no ARQ deadline drops. This establishes that the
+application path can fit a 16 ms Ethernet deadline. It does not set the RF
+deadline: monitor/devourer testing must still include airtime, contention,
+quiet-gap scheduling, and return loss before the runtime controller consumes an
+RTT percentile.
