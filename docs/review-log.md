@@ -452,6 +452,30 @@ without changing point-to-point UDP-air behavior:
 **Amended:** §15.3 (`filtered` adapter field); §16.3 (backend config and receive
 semantics). Code follows in a separate commit.
 
+## Pass 20 — JSCC architecture review + live Ethernet harness (2026-07-12)
+
+Reviewed `docs/waybeam-jscc-controller.md` against the implemented frame-SHM,
+FEC, ARQ, deadline, stats, and venc-control paths. This pass makes no protocol
+ruling and does not amend `PROTOCOL.md`; it separates existing mechanisms from
+controller-roadmap requirements in `docs/jscc-controller-review.md`.
+
+Corrections/findings: the implemented Cauchy cap is `k+r<=256`, source and
+repair symbols already carry `k`, current deadlines are relative to first RX
+observation rather than absolute display slots, and there is no per-frame
+encoder QP/size actuator (the separate `GET /request/idr` actuator is available).
+The live encoder produced about 90 fps despite a configured 144 fps; the first
+passive GDR baseline contained no IDR markers (a later run naturally contained
+one, and the explicit `GET /request/idr` actuator is available).
+
+Added a repeatable SSC338Q-to-x86 Ethernet bench using the encoder-owned
+`venc_frame` ring, two UDP diversity observations, frame reassembly/FEC, an x86
+egress ring, and real GStreamer H.265 decode. The runner persistently installs
+the craft config, executes the cross-build from tmpfs (the 5.7 MB overlay cannot
+hold a second binary), restores the encoder config after each run, and records
+per-frame CSV plus link stats. Initial 300-frame baseline passed at zero loss;
+with 10% independent loss per path, post-diversity loss measured 1.0%, 16 frames
+were FEC-recovered, and none were unrecoverable.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

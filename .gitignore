@@ -15,4 +15,5 @@
 
 # Local scratch
 /scratch/
+/artifacts/
 /*.local

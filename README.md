@@ -299,6 +299,12 @@ pts_regress=0) at ~90 fps, `decode_errors=0`. Also proven over the udp-air sim
 (same, at full bitrate) and the in-process `frame_shm_loopback_test` (FEC recovery
 byte-exact).
 
+For a repeatable live-encoder Ethernet run, use
+`tools/jscc_ethernet_bench.sh`. It temporarily switches the craft encoder to
+frame-SHM, simulates two ground diversity observations over UDP, validates the
+reconstructed stream with GStreamer, records per-frame size/arrival data, and
+restores the craft configuration on exit. See `docs/jscc-controller-review.md`.
+
 ## REST control plane (PROTOCOL.md §15.5)
 
 Every mode (`tx` / `rx` / `loopback`) exposes an optional HTTP/1.0 control
