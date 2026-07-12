@@ -249,3 +249,30 @@ application path can fit a 16 ms Ethernet deadline. It does not set the RF
 deadline: monitor/devourer testing must still include airtime, contention,
 quiet-gap scheduling, and return loss before the runtime controller consumes an
 RTT percentile.
+
+### Causal loss-estimator shadow
+
+Packet-event replay now includes a tooling-only trailing-window empirical
+loss-symbol quantile. A block is predicted strictly from previously completed
+blocks and contributes its observation only after its outcome is fixed.
+Adaptive replay limits itself to repair symbols present in the captured trace,
+so it cannot claim protection that was never transmitted. Summaries report
+selected versus available parity and estimator underprediction.
+
+On the 302-block synthetic corpus with 15% high-frequency independent loss,
+the conservative 120-block maximum reduced selected parity by about 25% but
+still produced three more deadline failures than fixed FEC. This rejects
+immediate adaptive actuation: parity saving alone is not the objective.
+
+The same estimator now runs in shadow at frame-SHM RX using a 120-block P95,
+20-sample threshold, and zero cold start. It changes no transmitted parity or
+ARQ decision. A controlled real-encoder Ethernet run injected 10% independent
+loss into each of two broadcast listeners. Across 1,072 finalized frames,
+fixed FEC delivered 747 frames fast and recovered 325, with zero unrecoverable,
+deadline, kernel, or SHM-full drops. Shadow selected 1,548 hypothetical parity
+symbols and underpredicted 45 blocks (4.2%); the latest converged prediction was
+two lost source symbols. The underprediction tail is visible in the live
+dashboard and is why §14.1 fixed rates remain authoritative.
+
+The normal zero-loss auto/25 Mbit/s/60 fps bench was restored after this run.
+Monitor-mode and Devourer/RF validation remains deliberately deferred.
