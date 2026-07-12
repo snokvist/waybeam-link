@@ -4,6 +4,7 @@
 // the multiplicative identity and absorbing zero, and inverses for every
 // nonzero element.
 #include <cstdint>
+#include <cstring>
 
 #include "wblink/gf256.h"
 #include "wbtest.h"
@@ -67,6 +68,31 @@ int main() {
         // a*(b+c) == a*b + a*c
         CHECK_EQ_U(gf_mul(a, gf_add(b, c)),
                    gf_add(gf_mul(a, b), gf_mul(a, c)));
+    }
+
+    // Bulk multiply-XOR is byte-exact with scalar field multiplication and
+    // preserves the existing destination contents.
+    {
+        uint8_t input[1024];
+        uint8_t bulk[1024];
+        uint8_t scalar[1024];
+        for (size_t i = 0; i < sizeof(input); ++i) {
+            input[i] = rng.u8();
+            bulk[i] = scalar[i] = rng.u8();
+        }
+        for (int coefficient = 0; coefficient < 256; ++coefficient) {
+            uint8_t got[1024];
+            uint8_t want[1024];
+            std::memcpy(got, bulk, sizeof(got));
+            std::memcpy(want, scalar, sizeof(want));
+            gf_mul_xor(static_cast<uint8_t>(coefficient), input, got,
+                       sizeof(got));
+            for (size_t i = 0; i < sizeof(want); ++i) {
+                want[i] = static_cast<uint8_t>(
+                    want[i] ^ gf_mul(static_cast<uint8_t>(coefficient), input[i]));
+            }
+            CHECK(std::memcmp(got, want, sizeof(got)) == 0);
+        }
     }
 
     return wbtest_finish("gf256_test");

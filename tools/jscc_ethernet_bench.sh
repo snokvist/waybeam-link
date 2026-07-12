@@ -10,10 +10,14 @@ GST=${GST:-"$BUILD/frame_shm_gst_bench"}
 CRAFT=${CRAFT:-root@192.168.2.201}
 CRAFT_IP=${CRAFT_IP:-192.168.2.201}
 GROUND_IP=${GROUND_IP:-192.168.2.242}
+BROADCAST_IP=${BROADCAST_IP:-192.168.2.255}
 FRAMES=${FRAMES:-720}
 TIMEOUT_MS=${TIMEOUT_MS:-30000}
 LIVE=${LIVE:-1}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
+VENC_CONTROL_ENABLED=${VENC_CONTROL_ENABLED:-0}
+VEHICLE_MAIN_CPU=${VEHICLE_MAIN_CPU:-1}
+VEHICLE_SHM_CPU=${VEHICLE_SHM_CPU:-0}
 BENCH_CONSUMER=${BENCH_CONSUMER:-external}
 ARTIFACTS=${ARTIFACTS:-"$ROOT/artifacts/jscc-ethernet-$(date +%Y%m%d-%H%M%S)"}
 REMOTE_INSTALL=/usr/bin/waybeam-link
@@ -240,6 +244,15 @@ fi
 [[ "$TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] || fail "TIMEOUT_MS must be positive"
 [[ "$LIVE" == 0 || "$LIVE" == 1 ]] || fail "LIVE must be 0 or 1"
 [[ "$RX_DROP_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || fail "RX_DROP_PERMILLE must be 0..1000"
+[[ "$VENC_CONTROL_ENABLED" == 0 || "$VENC_CONTROL_ENABLED" == 1 ]] || \
+    fail "VENC_CONTROL_ENABLED must be 0 or 1"
+[[ "$VEHICLE_MAIN_CPU" =~ ^[0-9]+$ ]] || fail "VEHICLE_MAIN_CPU must be numeric"
+[[ "$VEHICLE_SHM_CPU" =~ ^[0-9]+$ ]] || fail "VEHICLE_SHM_CPU must be numeric"
+if [[ "$VENC_CONTROL_ENABLED" == 1 ]]; then
+    VENC_ENABLED_JSON=true
+else
+    VENC_ENABLED_JSON=false
+fi
 mkdir -p "$ARTIFACTS"
 printf 'frame_shm=%s\nconsumer=%s\nartifacts=%s\n' \
     "$OUT_RING" "$BENCH_CONSUMER" "$ARTIFACTS" >"$RUNTIME_INFO"
@@ -265,10 +278,10 @@ cat >"$ARTIFACTS/tx.json" <<EOF
     "bind":{"kind":"frame-shm","name":"venc_frame"},
     "fec":{"scheme":"rlc256","i_rate_permille":250,
            "p_rate_permille":100,"min_k":3}}],
-  "air":{"kind":"udp","tx":["$GROUND_IP:5801","$GROUND_IP:5802"],
-         "rx":["0.0.0.0:5810"]},
+  "air":{"kind":"udp-broadcast","tx":["$BROADCAST_IP:5801"],
+         "rx":["0.0.0.0:5801"]},
   "policy":{"select":{"min_profile":0,"max_profile":0}},
-  "venc":{"host":"127.0.0.1:80","enabled":true},
+  "venc":{"host":"127.0.0.1:80","enabled":$VENC_ENABLED_JSON},
   "stats":{"hz":5,"bind":{"kind":"udp","send":"$GROUND_IP:9110"}}
 }
 EOF
@@ -278,8 +291,10 @@ cat >"$ARTIFACTS/rx.json" <<EOF
   "profile_table":"profiles/table.example.json",
   "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
     "originator":17,"bind":{"kind":"frame-shm","name":"$OUT_RING"}}],
-  "air":{"kind":"udp","rx":["0.0.0.0:5801","0.0.0.0:5802"],
-         "tx":["$CRAFT_IP:5810"],"rx_drop_permille":$RX_DROP_PERMILLE},
+  "air":{"kind":"udp-broadcast",
+         "rx":["0.0.0.0:5801","0.0.0.0:5801"],
+         "tx":["$BROADCAST_IP:5801"],
+         "rx_drop_permille":$RX_DROP_PERMILLE},
   "policy":{"select":{"min_profile":0,"max_profile":0}},
   "control":{"bind":"127.0.0.1:8092"},
   "stats":{"hz":5,"bind":{"kind":"udp","send":"127.0.0.1:9110"}}
@@ -302,15 +317,28 @@ fi
 remote_put "$ROOT/build/ssc338q/waybeam-link" /tmp/waybeam-link-jscc-dev.new
 remote_put "$ARTIFACTS/tx.json" /tmp/waybeam-link-jscc-ethernet.json.new
 remote "mkdir -p /etc/waybeam-link &&
-        cp /tmp/waybeam-link-jscc-dev.new $REMOTE_INSTALL && chmod 0755 $REMOTE_INSTALL &&
+        if ! cmp -s /tmp/waybeam-link-jscc-dev.new $REMOTE_INSTALL; then
+            cp /tmp/waybeam-link-jscc-dev.new $REMOTE_INSTALL && chmod 0755 $REMOTE_INSTALL
+        fi &&
         rm -f /tmp/waybeam-link-jscc-dev.new &&
-        cp /tmp/waybeam-link-jscc-ethernet.json.new $REMOTE_CFG && chmod 0644 $REMOTE_CFG"
+        if ! cmp -s /tmp/waybeam-link-jscc-ethernet.json.new $REMOTE_CFG; then
+            cp /tmp/waybeam-link-jscc-ethernet.json.new $REMOTE_CFG && chmod 0644 $REMOTE_CFG
+        fi"
 remote "cp /etc/waybeam.json $REMOTE_BACKUP"
 REMOTE_CHANGED=1
 remote "/usr/bin/json_cli -s .outgoing.server '\"frame-shm://venc_frame\"' -i /etc/waybeam.json &&
         /etc/init.d/S95waybeam restart"
 remote "rm -f $REMOTE_STATS $REMOTE_ERR; setsid $REMOTE_INSTALL tx -c $REMOTE_CFG \
         >$REMOTE_STATS 2>$REMOTE_ERR </dev/null & echo \$! >$REMOTE_PID"
+
+# The encoder and all video/ethernet IRQs are pinned to CPU 0 on SSC338Q.
+# Keep TX/FEC on CPU 1; the low-cost SHM readiness thread may share CPU 0.
+remote "p=\$(cat $REMOTE_PID); \
+        i=0; while [ \$(find /proc/\$p/task -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) -lt 2 ] && [ \$i -lt 50 ]; do sleep 0.1; i=\$((i + 1)); done; \
+        taskset -p \$((1 << $VEHICLE_MAIN_CPU)) \$p >/dev/null; \
+        for task in /proc/\$p/task/*; do tid=\${task##*/}; \
+            [ \"\$tid\" = \"\$p\" ] || taskset -p \$((1 << $VEHICLE_SHM_CPU)) \$tid >/dev/null; \
+        done"
 
 # The venc ring ABI has one shared read_idx. Two consumers do not fan out;
 # they steal alternating frames from each other. Catch accidental viewer +

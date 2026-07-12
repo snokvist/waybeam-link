@@ -513,6 +513,26 @@ actuator once. Steady-state GDR remains unchanged.
 **Amended:** §3.1/§3.9 (RECOVERY_REQUEST) and §15.5
 (`POST /api/v1/video/recover`). Code follows in a separate commit.
 
+## Pass 23 — UDP broadcast virtual diversity (2026-07-12)
+
+The live Ethernet load investigation found that the JSCC harness still used
+ordinary UDP with two TX destinations. That sends and copies every air frame
+twice on the constrained vehicle, contrary to the intended RF-broadcast model.
+Pass 19 allowed multiple nodes to share the broadcast channel but constrained
+each process to one RX socket, so one ground process could not expose two
+pre-diversity observations.
+
+The operator ruled that the vehicle sends each air frame once to an IPv4
+broadcast channel while the ground opens multiple passive listeners. A
+udp-broadcast config therefore has exactly one TX endpoint and one or more RX
+endpoints; repeated RX endpoints are explicitly valid virtual adapters. Linux
+broadcast fanout delivers one copy to each `SO_REUSEADDR` socket. Independent
+synthetic loss remains per adapter; without injected loss the observations are
+identical and deduplicate normally.
+
+**Amended:** §16.3 (multi-listener virtual diversity). Code follows in a
+separate commit.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

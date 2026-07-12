@@ -5,6 +5,7 @@
 // 32-bit-clean for the Android-vendored core.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace wblink {
@@ -16,6 +17,11 @@ inline uint8_t gf_add(uint8_t a, uint8_t b) {
 
 // §14.1 — GF(256) multiply: 0 if either operand is 0, else exp[log[a]+log[b]].
 uint8_t gf_mul(uint8_t a, uint8_t b);
+
+// out[i] ^= coefficient * input[i] for len bytes. Resolves the field tables
+// once for the whole span; repair encoding must not call gf_mul per byte.
+void gf_mul_xor(uint8_t coefficient, const uint8_t* input, uint8_t* out,
+                size_t len);
 
 // §14.1 — GF(256) multiplicative inverse. Precondition: a != 0.
 uint8_t gf_inv(uint8_t a);

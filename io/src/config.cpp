@@ -449,9 +449,9 @@ Result<Config> load_config_json(const std::string& json_text) {
                 }
                 cfg.air.udp.pace_mbps = a.value("pace_mbps", 0u);
                 if (cfg.air.kind == AirCfg::Kind::kUdpBroadcast &&
-                    (cfg.air.udp.tx.size() != 1 || cfg.air.udp.rx.size() != 1)) {
+                    (cfg.air.udp.tx.size() != 1 || cfg.air.udp.rx.empty())) {
                     return Result<Config>::fail(
-                        "air: udp-broadcast requires exactly one tx and one rx endpoint");
+                        "air: udp-broadcast requires exactly one tx and at least one rx endpoint");
                 }
                 if (cfg.air.kind == AirCfg::Kind::kUdp &&
                     cfg.air.udp.pace_mbps != 0) {
