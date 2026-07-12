@@ -16,6 +16,8 @@ namespace wblink {
 
 namespace {
 
+constexpr int kUdpReceiveBufferBytes = 4 * 1024 * 1024;
+
 void close_fd(int& fd) {
     if (fd >= 0) {
         ::close(fd);
@@ -105,6 +107,11 @@ Result<UdpIngress> UdpIngress::open(const std::string& listen) {
     in.fd_ = *fd.value;
     const int one = 1;
     ::setsockopt(in.fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    // Frame-SHM emits an encoded frame's symbols as a tight burst. Give the
+    // UDP-air bench enough queue to model air delivery rather than localhost
+    // scheduler jitter; the kernel may clamp this to net.core.rmem_max.
+    ::setsockopt(in.fd_, SOL_SOCKET, SO_RCVBUF, &kUdpReceiveBufferBytes,
+                 sizeof(kUdpReceiveBufferBytes));
     if (::bind(in.fd_, reinterpret_cast<const sockaddr*>(&*sa.value),
                sizeof(*sa.value)) < 0) {
         return Result<UdpIngress>::fail("bind('" + listen + "'): " +

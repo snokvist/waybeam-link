@@ -104,6 +104,30 @@ add_executable(waybeam-link app/main.cpp)
 target_compile_options(waybeam-link PRIVATE ${WBLINK_WARNINGS})
 target_link_libraries(waybeam-link PRIVATE wblink_io)
 
+# Native-only real-video bench. Keep GStreamer out of the target binary and
+# cross build; the tool still uses the production FrameShmRing implementation.
+if(NOT CMAKE_CROSSCOMPILING AND EXISTS "/usr/bin/pkg-config")
+    execute_process(
+        COMMAND /usr/bin/pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0
+        OUTPUT_VARIABLE WBLINK_GST_CFLAGS
+        RESULT_VARIABLE WBLINK_GST_CFLAGS_RC
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(
+        COMMAND /usr/bin/pkg-config --libs gstreamer-1.0 gstreamer-app-1.0
+        OUTPUT_VARIABLE WBLINK_GST_LIBS
+        RESULT_VARIABLE WBLINK_GST_LIBS_RC
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(WBLINK_GST_CFLAGS_RC EQUAL 0 AND WBLINK_GST_LIBS_RC EQUAL 0)
+        separate_arguments(WBLINK_GST_CFLAGS NATIVE_COMMAND "${WBLINK_GST_CFLAGS}")
+        separate_arguments(WBLINK_GST_LIBS NATIVE_COMMAND "${WBLINK_GST_LIBS}")
+        add_executable(frame_shm_gst_bench tools/frame_shm_gst_bench.cpp)
+        target_compile_options(frame_shm_gst_bench PRIVATE
+            ${WBLINK_WARNINGS} ${WBLINK_GST_CFLAGS})
+        target_link_libraries(frame_shm_gst_bench PRIVATE
+            wblink_io ${WBLINK_GST_LIBS})
+    endif()
+endif()
+
 if(WBLINK_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)

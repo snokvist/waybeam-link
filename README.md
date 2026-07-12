@@ -114,6 +114,31 @@ drop; bench-only, default off) — used to manufacture known-independent loss
 for gate-2 machinery validation and to exercise FEC recovery. Honored by all
 three air backends (`udp`, `kernel-monitor`, `radio`).
 
+### Real-video frame-SHM/UDP bench
+
+On a host with GStreamer development packages plus `x265enc`, `h265parse`, and
+`avdec_h265`, the native build adds `frame_shm_gst_bench`. The orchestrator
+runs two real `waybeam-link` processes with a paired UDP return path and two
+virtual diversity adapters:
+
+```text
+GStreamer H.265 -> frame-SHM -> TX -> UDP-air x2 -> RX -> frame-SHM
+                                                       -> H.265 decoder
+```
+
+```sh
+cmake --preset release
+cmake --build --preset release -j
+tools/frame_shm_udp_bench.sh
+RX_DROP_PERMILLE=100 BITRATES=4000 tools/frame_shm_udp_bench.sh
+```
+
+The clean sweep defaults to 1/4/8 Mbit/s. It checks frame metadata, Annex-B,
+PTS monotonicity, decoder EOS, frame counts, both UDP adapter counters, FEC,
+ARQ, malformed/decode outcomes, and SHM producer drops. `FRAMES`, `BITRATES`,
+`WARMUP_FRAMES`, `RX_DROP_PERMILLE`, and `BUILD` are overridable. Set
+`KEEP_TMP=1` to retain configs, logs, and stats JSONL after a failure.
+
 ### Fleet monitor (live dashboard)
 
 `tools/link_monitor.py` — a stdlib-only bridge that turns the §15.3 stats
