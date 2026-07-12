@@ -10,13 +10,14 @@ namespace wblink {
 namespace {
 
 // GF(256) log/exp tables with primitive polynomial 0x11D
-// (x^8 + x^4 + x^3 + x^2 + 1) and generator g=2. exp[] is doubled to 512 B so
-// exp[log[a]+log[b]] — index up to 254+254=508 — needs no modulo. Built once at
-// first use via a function-local static: thread-safe under C++11 and free of
-// the static-initialization-order hazard a global table would carry.
+// (x^8 + x^4 + x^3 + x^2 + 1) and generator g=2. exp[] is doubled so a log-sum
+// needs no modulo. The nibble product tables let ARMv7 NEON multiply 16 field
+// elements using two 16-entry vtbl lookups. Built once at first use.
 struct GfTables {
     uint8_t log[256];
     uint8_t exp[512];
+    uint8_t mul_lo[256][16];
+    uint8_t mul_hi[256][16];
 
     GfTables() {
         uint16_t x = 1;
@@ -36,6 +37,19 @@ struct GfTables {
         // log[0] is mathematically undefined; pin it so the table is total and
         // never reads uninitialized memory (gf_mul short-circuits a==0/b==0).
         log[0] = 0;
+        for (int coefficient = 0; coefficient < 256; ++coefficient) {
+            for (int nibble = 0; nibble < 16; ++nibble) {
+                const auto product = [&](int value) -> uint8_t {
+                    if (coefficient == 0 || value == 0) {
+                        return 0;
+                    }
+                    return exp[static_cast<int>(log[coefficient]) +
+                               static_cast<int>(log[value])];
+                };
+                mul_lo[coefficient][nibble] = product(nibble);
+                mul_hi[coefficient][nibble] = product(nibble << 4);
+            }
+        }
     }
 };
 
@@ -66,27 +80,28 @@ void gf_mul_xor(uint8_t coefficient, const uint8_t* input, uint8_t* out,
         return;
     }
     size_t i = 0;
+    const GfTables& t = tables();
 #if defined(__ARM_NEON)
-    // Carry-less multiply by a scalar coefficient, 16 field elements at a
-    // time. Reduction uses x^8 = x^4+x^3+x^2+1 (0x1d for polynomial 0x11d).
-    const uint8x16_t high_bit = vdupq_n_u8(0x80);
-    const uint8x16_t reduction = vdupq_n_u8(0x1d);
+    uint8x8x2_t low_table;
+    low_table.val[0] = vld1_u8(&t.mul_lo[coefficient][0]);
+    low_table.val[1] = vld1_u8(&t.mul_lo[coefficient][8]);
+    uint8x8x2_t high_table;
+    high_table.val[0] = vld1_u8(&t.mul_hi[coefficient][0]);
+    high_table.val[1] = vld1_u8(&t.mul_hi[coefficient][8]);
+    const uint8x8_t low_mask = vdup_n_u8(0x0f);
     for (; i + 16 <= len; i += 16) {
-        uint8x16_t a = vld1q_u8(input + i);
-        uint8x16_t product = vdupq_n_u8(0);
-        uint8_t factor = coefficient;
-        while (factor != 0) {
-            if ((factor & 1u) != 0) {
-                product = veorq_u8(product, a);
-            }
-            const uint8x16_t high = vceqq_u8(vandq_u8(a, high_bit), high_bit);
-            a = veorq_u8(vshlq_n_u8(a, 1), vandq_u8(high, reduction));
-            factor = static_cast<uint8_t>(factor >> 1);
-        }
+        const uint8x16_t input_vec = vld1q_u8(input + i);
+        const uint8x8_t input_low = vget_low_u8(input_vec);
+        const uint8x8_t input_high = vget_high_u8(input_vec);
+        const auto multiply = [&](uint8x8_t values) {
+            return veor_u8(vtbl2_u8(low_table, vand_u8(values, low_mask)),
+                           vtbl2_u8(high_table, vshr_n_u8(values, 4)));
+        };
+        const uint8x16_t product =
+            vcombine_u8(multiply(input_low), multiply(input_high));
         vst1q_u8(out + i, veorq_u8(vld1q_u8(out + i), product));
     }
 #endif
-    const GfTables& t = tables();
     const int coefficient_log = static_cast<int>(t.log[coefficient]);
     for (; i < len; ++i) {
         const uint8_t v = input[i];
