@@ -79,14 +79,14 @@ SSC338Q waybeam -> venc_frame -> waybeam-link TX
     -> venc_frame_out -> GStreamer H.265 decode
 ```
 
-The craft overlay has insufficient space for a second link binary. The runner
-therefore uploads the current SSC338Q cross-build to tmpfs as
-`/tmp/waybeam-link-jscc-dev`, while persistently installing its small generated
-config as `/etc/waybeam-link/jscc-ethernet.json`. It backs up `/etc/waybeam.json`,
+The runner deploys the current SSC338Q cross-build over
+`/usr/bin/waybeam-link` and persistently installs its generated config as
+`/etc/waybeam-link/jscc-ethernet.json`. It backs up `/etc/waybeam.json`,
 temporarily selects `frame-shm://venc_frame`, restarts the encoder, and restores
-the exact encoder config on exit. It stores configs, TX/RX NDJSON,
-stderr, decoded-frame validation, a per-frame arrival/size/PTS CSV, and a JSON
-summary under `artifacts/` (gitignored).
+the exact encoder config on exit. Continuous mode runs until interrupted and
+keeps the decoder plus dashboard active. Finite mode additionally stores
+configs, TX/RX NDJSON, stderr, decoded-frame validation, a per-frame
+arrival/size/PTS CSV, and a JSON summary under `artifacts/` (gitignored).
 
 Both nodes also push their 5 Hz stats to the x86 monitor on UDP port 9110. The
 runner starts `tools/link_monitor.py` if it is not already running; view the
@@ -99,8 +99,9 @@ matching profile tables, and Ethernet addresses `192.168.2.201` (craft) and
 ```sh
 cmake --build --preset release -j
 cmake --build --preset ssc338q -j
-FRAMES=1440 tools/jscc_ethernet_bench.sh
-RX_DROP_PERMILLE=100 FRAMES=1440 tools/jscc_ethernet_bench.sh
+tools/jscc_ethernet_bench.sh                    # continuous; Ctrl-C stops
+LIVE=0 FRAMES=1440 tools/jscc_ethernet_bench.sh # finite trace + summary
+LIVE=0 RX_DROP_PERMILLE=100 FRAMES=1440 tools/jscc_ethernet_bench.sh
 ```
 
 Pass requires the requested number of valid H.265 frames, successful decode,

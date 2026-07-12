@@ -305,6 +305,16 @@ frame-SHM, simulates two ground diversity observations over UDP, validates the
 reconstructed stream with GStreamer, records per-frame size/arrival data, and
 restores the craft configuration on exit. See `docs/jscc-controller-review.md`.
 
+```sh
+cmake --build --preset release -j
+cmake --build --preset ssc338q -j
+tools/jscc_ethernet_bench.sh
+```
+
+The bench runs continuously in the foreground; view both nodes at
+`http://192.168.2.242:8099/` and press `Ctrl-C` to stop and restore the encoder.
+For a finite recorded run, use `LIVE=0 FRAMES=1440 tools/jscc_ethernet_bench.sh`.
+
 ## REST control plane (PROTOCOL.md §15.5)
 
 Every mode (`tx` / `rx` / `loopback`) exposes an optional HTTP/1.0 control

@@ -469,10 +469,9 @@ one, and the explicit `GET /request/idr` actuator is available).
 
 Added a repeatable SSC338Q-to-x86 Ethernet bench using the encoder-owned
 `venc_frame` ring, two UDP diversity observations, frame reassembly/FEC, an x86
-egress ring, and real GStreamer H.265 decode. The runner persistently installs
-the craft config, executes the cross-build from tmpfs (the 5.7 MB overlay cannot
-hold a second binary), restores the encoder config after each run, and records
-per-frame CSV plus link stats. Initial 300-frame baseline passed at zero loss;
+egress ring, and real GStreamer H.265 decode. The runner persistently deploys
+the cross-build and craft config, restores the encoder config after each run,
+and records per-frame CSV plus link stats. Initial 300-frame baseline passed at zero loss;
 with 10% independent loss per path, post-diversity loss measured 1.0%, 16 frames
 were FEC-recovered, and none were unrecoverable.
 

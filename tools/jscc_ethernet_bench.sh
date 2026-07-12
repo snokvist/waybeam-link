@@ -12,9 +12,10 @@ CRAFT_IP=${CRAFT_IP:-192.168.2.201}
 GROUND_IP=${GROUND_IP:-192.168.2.242}
 FRAMES=${FRAMES:-720}
 TIMEOUT_MS=${TIMEOUT_MS:-30000}
+LIVE=${LIVE:-1}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
 ARTIFACTS=${ARTIFACTS:-"$ROOT/artifacts/jscc-ethernet-$(date +%Y%m%d-%H%M%S)"}
-REMOTE_INSTALL=/tmp/waybeam-link-jscc-dev
+REMOTE_INSTALL=/usr/bin/waybeam-link
 REMOTE_CFG=/etc/waybeam-link/jscc-ethernet.json
 REMOTE_STATS=/tmp/waybeam-link-jscc-ethernet.jsonl
 REMOTE_ERR=/tmp/waybeam-link-jscc-ethernet.err
@@ -25,6 +26,7 @@ GROUND_PID=
 CONSUMER_PID=
 MONITOR_PID=
 REMOTE_CHANGED=0
+CLEANED=0
 
 fail() { echo "jscc ethernet bench: $*" >&2; exit 1; }
 
@@ -45,7 +47,7 @@ remote_get() {
 }
 
 stop_remote_link() {
-    # shellcheck disable=SC2016 -- this script is intentionally evaluated remotely.
+    # shellcheck disable=SC2016
     remote 'if [ -s /tmp/waybeam-link-jscc-ethernet.pid ]; then
         p=$(cat /tmp/waybeam-link-jscc-ethernet.pid)
         kill -TERM "$p" 2>/dev/null || true
@@ -68,13 +70,22 @@ restore_remote() {
 }
 
 cleanup() {
+    if [[ "$CLEANED" == 1 ]]; then return; fi
+    CLEANED=1
     if [[ -n "$CONSUMER_PID" ]]; then kill -TERM "$CONSUMER_PID" 2>/dev/null || true; fi
     if [[ -n "$GROUND_PID" ]]; then kill -TERM "$GROUND_PID" 2>/dev/null || true; fi
     if [[ -n "$MONITOR_PID" ]]; then kill -TERM "$MONITOR_PID" 2>/dev/null || true; fi
     wait 2>/dev/null || true
     restore_remote
 }
-trap cleanup EXIT INT TERM
+
+on_signal() {
+    echo "stopping JSCC Ethernet bench" >&2
+    cleanup
+    exit 130
+}
+trap cleanup EXIT
+trap on_signal INT TERM
 
 [[ -x "$LINK" ]] || fail "missing $LINK (build the release preset)"
 [[ -x "$GST" ]] || fail "missing $GST (GStreamer development packages are required)"
@@ -82,6 +93,7 @@ trap cleanup EXIT INT TERM
     fail "missing build/ssc338q/waybeam-link (build the ssc338q preset)"
 [[ "$FRAMES" =~ ^[1-9][0-9]*$ ]] || fail "FRAMES must be positive"
 [[ "$TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] || fail "TIMEOUT_MS must be positive"
+[[ "$LIVE" == 0 || "$LIVE" == 1 ]] || fail "LIVE must be 0 or 1"
 [[ "$RX_DROP_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || fail "RX_DROP_PERMILLE must be 0..1000"
 mkdir -p "$ARTIFACTS"
 
@@ -128,14 +140,20 @@ EOF
 (cd "$ROOT" && "$LINK" rx -c "$ARTIFACTS/rx.json") \
     >"$ARTIFACTS/rx-stats.jsonl" 2>"$ARTIFACTS/rx.err" &
 GROUND_PID=$!
-"$GST" consume-trace "$OUT_RING" "$FRAMES" "$TIMEOUT_MS" \
-    "$ARTIFACTS/frames.csv" >"$ARTIFACTS/consumer.log" 2>&1 &
+if [[ "$LIVE" == 1 ]]; then
+    "$GST" consume "$OUT_RING" 4294967295 4294967295 \
+        >"$ARTIFACTS/consumer.log" 2>&1 &
+else
+    "$GST" consume-trace "$OUT_RING" "$FRAMES" "$TIMEOUT_MS" \
+        "$ARTIFACTS/frames.csv" >"$ARTIFACTS/consumer.log" 2>&1 &
+fi
 CONSUMER_PID=$!
 
 remote_put "$ROOT/build/ssc338q/waybeam-link" /tmp/waybeam-link-jscc-dev.new
 remote_put "$ARTIFACTS/tx.json" /tmp/waybeam-link-jscc-ethernet.json.new
 remote "mkdir -p /etc/waybeam-link &&
-        mv /tmp/waybeam-link-jscc-dev.new $REMOTE_INSTALL && chmod 0755 $REMOTE_INSTALL &&
+        cp /tmp/waybeam-link-jscc-dev.new $REMOTE_INSTALL && chmod 0755 $REMOTE_INSTALL &&
+        rm -f /tmp/waybeam-link-jscc-dev.new &&
         cp /tmp/waybeam-link-jscc-ethernet.json.new $REMOTE_CFG && chmod 0644 $REMOTE_CFG"
 remote "cp /etc/waybeam.json $REMOTE_BACKUP"
 REMOTE_CHANGED=1
@@ -143,6 +161,16 @@ remote "/usr/bin/json_cli -s .outgoing.server '\"frame-shm://venc_frame\"' -i /e
         /etc/init.d/S95waybeam restart"
 remote "rm -f $REMOTE_STATS $REMOTE_ERR; setsid $REMOTE_INSTALL tx -c $REMOTE_CFG \
         >$REMOTE_STATS 2>$REMOTE_ERR </dev/null & echo \$! >$REMOTE_PID"
+
+if [[ "$LIVE" == 1 ]]; then
+    echo "JSCC Ethernet bench is running; press Ctrl-C to stop"
+    set +e
+    wait "$CONSUMER_PID"
+    consumer_rc=$?
+    set -e
+    CONSUMER_PID=
+    fail "continuous decoder exited unexpectedly (status $consumer_rc; see $ARTIFACTS/consumer.log)"
+fi
 
 set +e
 wait "$CONSUMER_PID"
