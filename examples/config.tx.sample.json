@@ -30,5 +30,6 @@
                 "rendezvous_timeout_s": 5, "home_chan": 5745,
                 "channel_allowlist": [5745, 5805, 5825] }
   },
-  "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } }
+  "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
+  "control": { "bind": "127.0.0.1:8091" }
 }

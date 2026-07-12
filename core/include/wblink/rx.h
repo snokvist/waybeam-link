@@ -155,6 +155,11 @@ class RxEngine {
     std::map<uint8_t, RxAdapterCounters> adapters() const;
     uint8_t live_adapter_count() const;  // latched, non-stalled (§6.5)
 
+    // §15.5 stats/reset: zero every latched stream's counters and each
+    // adapter's rx tally (fresh measurement window). Latch/cursor/gap state,
+    // RSSI EWMA and the discovery table are untouched — observability only.
+    void reset_stats();
+
   private:
     struct Held {
         std::vector<uint8_t> payload;

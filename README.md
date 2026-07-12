@@ -19,7 +19,7 @@ coordinated **follow-me channel switch** — built on OpenIPC **devourer** for r
 > §7.2 TSF quiet-gap pacer, and the **follow-me CSA** (§11: HMAC-SHA-256'd
 > campaigns, craft follower with TSF-anchored switch + auto-revert + home
 > rendezvous, ground issuer with commit-after-CSA_ARMED, §11.3 selector
-> freeze; ground trigger = stdin `csa <mhz> [class]`) — are implemented and
+> freeze; ground trigger = `POST /api/v1/csa`, §15.5) — are implemented and
 > tested (`ctest --preset dev`, ASan+UBSan; SSC338Q cross-verified via
 > `cmake --preset ssc338q`).
 > Step 11 (field bring-up + the §17 bench gates) has **run** on the x86 bench
@@ -213,6 +213,41 @@ recovery under synthetic loss.
 pts_regress=0) at ~90 fps, `decode_errors=0`. Also proven over the udp-air sim
 (same, at full bitrate) and the in-process `frame_shm_loopback_test` (FEC recovery
 byte-exact).
+
+## REST control plane (PROTOCOL.md §15.5)
+
+Every mode (`tx` / `rx` / `loopback`) exposes an optional HTTP/1.0 control
+surface — config-gated, folded into the single event loop (no threads/locks),
+no auth (bind `127.0.0.1` for host-local, a routable addr on a trusted net):
+
+```json
+"control": { "bind": "0.0.0.0:8091" }
+```
+
+**Read** (any node): `GET /api/v1/stats` (the §15.3 object), `…/stats/stream`
+(SSE, one object per stats tick), `…/info` (identity), `…/health` (terse
+`{state,mcs,profile,rssi_best,loss_milli,…}`). **Write** (live, no restart):
+
+| Endpoint | Body | Where |
+|---|---|---|
+| `POST /api/v1/csa` | `{"mhz":5805,"class":0}` | rx / ground (replaces the old stdin trigger) |
+| `POST /api/v1/link/profile` | `{"min":3,"max":3}` | tx (`min==max` pins the MCS+bitrate operating point; `{"max":255}` unpins) |
+| `POST /api/v1/fec` | `{"stream_id":0,"i_permille":250,"p_permille":100,"min_k":3}` | tx (frame-shm streams) |
+| `POST /api/v1/stats/reset` | `{}` | any (fresh measurement window) |
+
+A write that doesn't apply to the running mode returns `409`; a malformed body
+`400`. Examples:
+
+```
+curl -s http://127.0.0.1:8091/api/v1/stats | jq .link
+curl -s http://127.0.0.1:8091/api/v1/link/profile -d '{"min":2,"max":2}'   # pin MCS2
+curl -s http://127.0.0.1:8091/api/v1/csa          -d '{"mhz":5745}'         # switch channel
+curl -N http://127.0.0.1:8091/api/v1/stats/stream                          # live SSE
+```
+
+The `tools/link_monitor.py` fleet dashboard rides the UDP stats push and needs
+no `control` block; with `control` enabled you can additionally point tooling
+straight at each instance's `GET /api/v1/stats/stream`.
 
 ## Deployment invariant (must hold before this can drive a craft)
 

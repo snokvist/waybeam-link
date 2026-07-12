@@ -87,6 +87,9 @@ class Framer {
     uint32_t next_seq() const { return next_seq_; }
     uint32_t current_block() const { return block_id_; }
 
+    // §15.5 stats/reset: zero the cumulative counters (state untouched).
+    void reset_stats() { stats_ = {}; }
+
   private:
     FramerConfig cfg_;
     FramerStats stats_;

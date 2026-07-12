@@ -74,6 +74,10 @@ class ResendScheduler {
 
     const SchedulerCounters& counters() const { return counters_; }
 
+    // §15.5 stats/reset: zero the cumulative counters (in-flight requests and
+    // scheduling state are untouched).
+    void reset_counters() { counters_ = {}; }
+
   private:
     struct Request {
         uint16_t requester = 0;  // upgraded to preferred if it also asks

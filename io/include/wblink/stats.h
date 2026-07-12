@@ -54,6 +54,11 @@ struct StreamStats {
     uint32_t loss_postdiv_prearq_milli = 0;
     uint64_t recovered_arq = 0;
     uint64_t recovered_fec = 0;
+    // §6.3a frame-shm reassembler outcomes (0 on udp streams): fast-path
+    // (all-source, no decode), finalized-below-k, and pre-decode rejects.
+    uint64_t frames_fast = 0;
+    uint64_t frames_unrecoverable = 0;
+    uint64_t malformed = 0;
     uint64_t dropped_superseded = 0;
     uint64_t dropped_deadline = 0;
     uint64_t nacks_sent = 0;
@@ -116,6 +121,11 @@ class StatsEmitter {
         : to_stdout_(to_stdout), udp_(udp) {}
 
     void emit(const StatsSnapshot& snap);
+
+    // The most recently emitted §15.3 line (trailing '\n' included), or empty
+    // before the first emit. The §15.5 control plane re-serves this for
+    // GET /stats and pushes it to SSE subscribers — no re-serialization.
+    const std::string& last_line() const { return line_; }
 
   private:
     bool to_stdout_;

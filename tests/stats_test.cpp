@@ -46,6 +46,9 @@ StatsSnapshot sample_snapshot() {
     st.loss_postdiv_prearq_milli = 6;
     st.recovered_arq = 220;
     st.recovered_fec = 0;
+    st.frames_fast = 89571;
+    st.frames_unrecoverable = 0;
+    st.malformed = 0;
     st.dropped_superseded = 110;
     st.dropped_deadline = 8;
     st.nacks_sent = 18;
@@ -85,7 +88,8 @@ const char* kGolden =
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
     "\"loss_prediversity_milli\":41,"
     "\"loss_postdiv_prearq_milli\":6,\"recovered_arq\":220,"
-    "\"recovered_fec\":0,\"dropped_superseded\":110,\"dropped_deadline\":8,"
+    "\"recovered_fec\":0,\"frames_fast\":89571,\"frames_unrecoverable\":0,"
+    "\"malformed\":0,\"dropped_superseded\":110,\"dropped_deadline\":8,"
     "\"nacks_sent\":18,"
     "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
     "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"

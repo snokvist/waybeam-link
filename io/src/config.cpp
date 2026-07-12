@@ -408,6 +408,12 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
         }
 
+        // control (§15.5 REST control plane; off unless a bind is given)
+        if (j.contains("control")) {
+            const json& c = j.at("control");
+            cfg.control.bind = c.value("bind", std::string());
+        }
+
         // venc (§9.6 encoder actuation; disabled default for dev/bench)
         if (j.contains("venc")) {
             const json& v = j.at("venc");
