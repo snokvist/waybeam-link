@@ -623,6 +623,18 @@ shadow independently; the existing source-loss fields retain their meaning.
 shadow-only seeds); §15.3 (additive protection-shadow fields). Code follows
 separately.
 
+## Pass 29 — exact frame-FEC transmission counters (2026-07-13)
+
+Protection shadow telemetry reports hypothetical parity, but live stats did
+not export `FrameFramer`'s existing source/repair counters. Comparing against
+an inferred bitrate would conflate frame size, metadata, headers, and IDR rate.
+Additive TX stream fields now expose the exact emitted source and repair symbol
+counts, capacity-disabled frames, and IDR-classified frames. No transmission
+behavior changes.
+
+**Amended:** §15.3 (additive frame-SHM TX symbol and classification counters).
+Code follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

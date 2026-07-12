@@ -1431,6 +1431,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
     "resends_sent": 230, "double_send_suppressed": 5,
+    "source_symbols_sent": 4120300, "repair_symbols_sent": 358944,
+    "fec_oversize_frames": 0, "idr_frames": 17,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "return": { "reports_expected": 10, "reports_received": 9,
     "return_window_hits": 7, "return_window_misses": 2,
@@ -1504,6 +1506,14 @@ which remains backend/synthetic queue loss.
 `filtered` is the backend's cumulative count of structurally rejected or
 self-originated receive frames. It is 0 where filtering occurs below an
 observable boundary.
+
+On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
+the exact cumulative §14.1 symbols emitted by `FrameFramer`;
+`fec_oversize_frames` counts frames sent source-only because `k+r` exceeded
+GF(256) capacity; and `idr_frames` counts frames whose VFRM metadata carried
+the IDR flag. They are zero on RX and non-frame-SHM streams. These counters are
+the fixed-policy baseline for comparing hypothetical JSCC shadow parity; byte
+or bitrate inference is not an acceptable substitute.
 
 ### 15.4 `frame-shm` binding — venc_frame_ring slot format
 The `frame-shm` binding attaches to (ingress) or creates (egress) a POSIX
