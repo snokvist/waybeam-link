@@ -253,18 +253,24 @@ RTT percentile.
 ### Causal loss-estimator shadow
 
 Packet-event replay now includes a tooling-only trailing-window empirical
-loss-symbol quantile. A block is predicted strictly from previously completed
+repair-demand quantile. A block is predicted strictly from previously completed
 blocks and contributes its observation only after its outcome is fixed.
 Adaptive replay limits itself to repair symbols present in the captured trace,
 so it cannot claim protection that was never transmitted. Summaries report
-selected versus available parity and estimator underprediction.
+selected versus available parity, estimator underprediction, and observations
+that are censored because the captured fixed parity could not recover them.
+Repair demand is the first transmitted repair index that supplies enough
+received equations, so lost repair packets count as protection demand. Demand
+is normalized by block `k` before estimation and converted back to symbols for
+each new block; this avoids applying a large frame's raw loss count to a small
+frame or vice versa.
 
 On the 302-block synthetic corpus with 15% high-frequency independent loss,
 the conservative 120-block maximum reduced selected parity by about 25% but
 still produced three more deadline failures than fixed FEC. This rejects
 immediate adaptive actuation: parity saving alone is not the objective.
 
-The same estimator now runs in shadow at frame-SHM RX using a 120-block P95,
+The initial source-loss estimator runs in shadow at frame-SHM RX using a 120-block P95,
 20-sample threshold, and zero cold start. It changes no transmitted parity or
 ARQ decision. A controlled real-encoder Ethernet run injected 10% independent
 loss into each of two broadcast listeners. Across 1,072 finalized frames,
@@ -276,3 +282,13 @@ dashboard and is why §14.1 fixed rates remain authoritative.
 
 The normal zero-loss auto/25 Mbit/s/60 fps bench was restored after this run.
 Monitor-mode and Devourer/RF validation remains deliberately deferred.
+
+Protection-aware replay tested a 120-block maximum and a conservative 10%
+cold-start rate against the same matrix. In 15% high-frequency independent
+loss it matched fixed FEC's 190 recoveries and three failures while selecting
+13.1% less parity. Under incremental independent loss it selected 46.2% less
+parity but introduced one additional failure; under correlated burst loss it
+matched the already-limited fixed result and saved no parity. The remaining
+incremental-loss miss means this candidate is still shadow-only. Runtime
+telemetry must be upgraded from raw missing sources to repair demand before the
+candidate can be judged on the real encoder stream.

@@ -58,6 +58,25 @@ class CausalLossEstimator:
         del self.samples[:-self.window]
 
 
+def repair_demand(source_k, received_sources, received_repair_indices,
+                  parity_available):
+    """Return transmitted repairs needed and whether it is a lower bound."""
+    missing = max(0, int(source_k) - int(received_sources))
+    if missing == 0:
+        return 0, False
+    repairs = set(int(index) for index in received_repair_indices)
+    received = 0
+    for emitted in range(1, int(parity_available) + 1):
+        received += emitted - 1 in repairs
+        if received >= missing:
+            return emitted, False
+    # The capture did not contain enough successful repairs. Assume every
+    # hypothetical additional repair lands: this is a conservative lower bound
+    # on demand, not a claim that the block would recover at this count.
+    shortfall = missing - received
+    return min(255, int(parity_available) + shortfall), True
+
+
 def load_json(path):
     return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
 
@@ -343,8 +362,13 @@ def replay_blocks(records, args):
     parity_available_total = 0
     parity_selected_total = 0
     estimator_underpredicted = 0
+    repair_demand_censored = 0
     for block in blocks:
-        predicted_loss = estimator.predict()
+        predicted_sample = estimator.predict()
+        k = int(block["source_k"])
+        predicted_loss = (math.ceil(predicted_sample * k / 1000)
+                          if args.estimator_target == "repair-rate"
+                          else predicted_sample)
         recorded_parity = int(block["parity_m"])
         if args.fec == "adaptive":
             selected_parity = min(
@@ -389,14 +413,21 @@ def replay_blocks(records, args):
                 received.add((packet["kind"], int(packet["symbol"])))
                 any_received = True
             global_packet += 1
-        k = int(block["source_k"])
         sources = sum(kind == "source" for kind, _ in received)
-        received_repairs = sum(kind == "repair" and symbol < selected_parity
-                               for kind, symbol in received)
+        received_repair_indices = {symbol for kind, symbol in received
+                                   if kind == "repair"}
+        received_repairs = sum(symbol < selected_parity
+                               for symbol in received_repair_indices)
         available = sources + received_repairs
         observed_loss = max(0, k - sources)
-        estimator_underpredicted += predicted_loss < observed_loss
-        estimator.observe(observed_loss)
+        observed_demand, demand_censored = repair_demand(
+            k, sources, received_repair_indices, recorded_parity)
+        repair_demand_censored += demand_censored
+        estimator_underpredicted += predicted_loss < observed_demand
+        observed_sample = (math.ceil(observed_demand * 1000 / k)
+                           if args.estimator_target == "repair-rate" and k
+                           else observed_demand)
+        estimator.observe(observed_sample)
         deadline_us = deadline_ms * 1000
         if sources >= k:
             outcome, reason = "fast", "all_sources_received"
@@ -427,6 +458,8 @@ def replay_blocks(records, args):
             "received_sources": sources,
             "received_symbols": available,
             "observed_loss_symbols": observed_loss,
+            "observed_repair_demand_symbols": observed_demand,
+            "repair_demand_censored": demand_censored,
             "predicted_loss_symbols": predicted_loss,
             "parity_available_m": recorded_parity,
             "parity_m": selected_parity,
@@ -444,6 +477,7 @@ def replay_blocks(records, args):
         "fec": args.fec,
         "estimator": ({
             "kind": "trailing_empirical_quantile",
+            "target": args.estimator_target,
             "window": args.estimator_window,
             "quantile": args.estimator_quantile,
             "min_samples": args.estimator_min_samples,
@@ -461,6 +495,7 @@ def replay_blocks(records, args):
                   parity_available_total) if parity_available_total else 0),
         "estimator_underpredicted_blocks": (
             estimator_underpredicted if args.fec == "adaptive" else None),
+        "repair_demand_censored_blocks": repair_demand_censored,
         **counts,
     })
     return decisions
@@ -554,11 +589,14 @@ def write_jsonl(path, records):
 
 def add_estimator_args(parser):
     parser.add_argument("--estimator-window", type=int, default=120)
-    parser.add_argument("--estimator-quantile", type=float, default=0.95)
+    parser.add_argument("--estimator-quantile", type=float, default=1.0)
     parser.add_argument("--estimator-min-samples", type=int, default=20)
-    parser.add_argument("--estimator-cold-start", type=int, default=0)
+    parser.add_argument("--estimator-cold-start", type=int, default=100)
     parser.add_argument("--estimator-floor", type=int, default=0)
     parser.add_argument("--estimator-cap", type=int, default=255)
+    parser.add_argument("--estimator-target",
+                        choices=("repair-rate", "repair-demand"),
+                        default="repair-rate")
 
 
 def parse_args(argv):

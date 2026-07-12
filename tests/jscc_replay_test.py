@@ -160,7 +160,8 @@ class JsccReplayTest(unittest.TestCase):
             "replay", str(self.root / "events.jsonl"), "--fec", "adaptive",
             "--arq", "off",
             "--loss-model", "recorded", "--estimator-window", "2",
-            "--estimator-min-samples", "1", "--estimator-quantile", "1"])
+            "--estimator-min-samples", "1", "--estimator-quantile", "1",
+            "--estimator-cold-start", "0"])
         decisions = jscc_replay.replay_blocks(records, replay_args)
 
         self.assertEqual(0, decisions[0]["predicted_loss_symbols"])
@@ -168,9 +169,12 @@ class JsccReplayTest(unittest.TestCase):
         self.assertEqual(0, decisions[0]["observed_loss_symbols"])
         self.assertEqual(0, decisions[1]["predicted_loss_symbols"])
         self.assertEqual(1, decisions[1]["observed_loss_symbols"])
+        self.assertEqual(1, decisions[1]["observed_repair_demand_symbols"])
+        self.assertFalse(decisions[1]["repair_demand_censored"])
         self.assertEqual("deadline_discard", decisions[1]["outcome"])
         self.assertEqual(1000, decisions[-1]["parity_reduction_permille"])
         self.assertEqual(1, decisions[-1]["estimator_underpredicted_blocks"])
+        self.assertEqual(0, decisions[-1]["repair_demand_censored_blocks"])
 
     def test_estimator_uses_cold_start_then_trailing_quantile(self):
         estimator = jscc_replay.CausalLossEstimator(3, 0.5, 2, 7)
@@ -182,6 +186,18 @@ class JsccReplayTest(unittest.TestCase):
         estimator.observe(9)
         estimator.observe(2)
         self.assertEqual(5, estimator.predict())
+
+    def test_repair_demand_accounts_for_lost_repairs_and_censoring(self):
+        demand, censored = jscc_replay.repair_demand(10, 8, {1, 3}, 4)
+        self.assertEqual(4, demand)
+        self.assertFalse(censored)
+
+        demand, censored = jscc_replay.repair_demand(10, 7, {0}, 2)
+        self.assertEqual(4, demand)
+        self.assertTrue(censored)
+
+        self.assertEqual((0, False),
+                         jscc_replay.repair_demand(10, 10, set(), 0))
 
 
 if __name__ == "__main__":
