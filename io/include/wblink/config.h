@@ -236,6 +236,12 @@ struct StatsCfg {
     std::optional<BindCfg> bind;  // egress only
 };
 
+// §15.5 REST control plane. Empty bind = server off (default). "addr:port";
+// bind 127.0.0.1 for host-local, a routable addr on a trusted net (no auth).
+struct ControlCfg {
+    std::string bind;  // "" = disabled
+};
+
 struct Config {
     NodeCfg node;
     std::string profile_table_path;
@@ -243,6 +249,7 @@ struct Config {
     std::vector<StreamCfg> streams;
     Policy policy;
     StatsCfg stats;
+    ControlCfg control;    // §15.5 REST control plane (off unless bind set)
     VencCfg venc;          // §9.6 encoder actuation
     AirCfg air;            // dev backend; empty until devourer lands
     LoopbackCfg loopback;  // loopback-mode loss injection

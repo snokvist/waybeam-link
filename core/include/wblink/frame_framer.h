@@ -74,6 +74,21 @@ class FrameFramer {
     // §11.6 CSA_ARMED etc. — OR'd into every outgoing DATA header while set.
     void set_extra_flags(uint8_t f) { extra_flags_ = f; }
 
+    // §14.1 live FEC-rate retune (control plane §15.5). The scheme is fixed at
+    // construction (rlc256 vs none is structural); only the per-mille repair
+    // overheads and the ARQ-only threshold move. Effective on the next frame.
+    void set_fec_rates(uint16_t i_permille, uint16_t p_permille,
+                       uint16_t min_k) {
+        cfg_.fec.i_rate_permille = i_permille;
+        cfg_.fec.p_rate_permille = p_permille;
+        cfg_.fec.min_k = min_k;
+    }
+    const FrameFecConfig& fec() const { return cfg_.fec; }
+
+    // §15.5 stats/reset: zero the cumulative counters (fresh measurement
+    // window). State (seq, block id, operating point) is untouched.
+    void reset_stats() { stats_ = {}; }
+
     // Fragment + FEC one whole frame blob ([VencFrameMeta][Annex-B]). Returns
     // false iff the frame was dropped (malformed / empty).
     bool on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,

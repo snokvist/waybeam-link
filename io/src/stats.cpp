@@ -131,6 +131,12 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.recovered_arq);
         out += ",\"recovered_fec\":";
         append_u64(out, s.recovered_fec);
+        out += ",\"frames_fast\":";
+        append_u64(out, s.frames_fast);
+        out += ",\"frames_unrecoverable\":";
+        append_u64(out, s.frames_unrecoverable);
+        out += ",\"malformed\":";
+        append_u64(out, s.malformed);
         out += ",\"dropped_superseded\":";
         append_u64(out, s.dropped_superseded);
         out += ",\"dropped_deadline\":";

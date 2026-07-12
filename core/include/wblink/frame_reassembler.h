@@ -59,6 +59,10 @@ class FrameReassembler {
 
     const FrameReassemblerStats& stats() const { return stats_; }
 
+    // §15.5 stats/reset: zero the cumulative counters (in-flight blocks and
+    // the finalized watermark are untouched).
+    void reset_stats() { stats_ = {}; }
+
   private:
     struct Block {
         uint16_t k = 0;           // symbol count (from any subheader); 0 = unknown

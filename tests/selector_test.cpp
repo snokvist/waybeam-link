@@ -278,6 +278,49 @@ int main() {
         CHECK(std::string_view(h.sel.state()) == "PINNED");
     }
 
+    // --- §9.7 runtime re-pin snaps the operating point (bench lever) ----------
+    {
+        Harness h;
+        h.boot();
+        // Climb to a high rung on a strong, clean link.
+        (void)h.run(0, 8000, -30, 0);
+        const uint8_t climbed = h.sel.profile_id();
+        CHECK(climbed >= 5);
+
+        // Apply a runtime pin and drain any in-flight promote/bitrate phase so
+        // evaluate() (which only runs in kIdle) actually sees the pin. Returns
+        // the profile committed while landing on the pin (0xFF if none seen).
+        auto repin_to = [&](uint8_t rung, uint64_t t0) -> uint8_t {
+            h.sel.set_profile_pin(rung, rung);
+            uint8_t committed = 0xFF;
+            for (uint64_t t = t0; t < t0 + 500; t += 10) {
+                const SelectorActions a = h.sel.tick(t);
+                if (a.commit) committed = a.commit->profile_id;
+                if (h.sel.profile_id() == rung &&
+                    std::string_view(h.sel.state()) == "PINNED") {
+                    break;
+                }
+            }
+            return committed;
+        };
+
+        // Re-pin DOWN at runtime: must jump to the pinned rung, not freeze.
+        CHECK_EQ_U(repin_to(1, 8100), 1);
+        CHECK_EQ_U(h.sel.profile_id(), 1);
+        CHECK(std::string_view(h.sel.state()) == "PINNED");
+        // Re-pin UP: the pin overrides adaptation in either direction.
+        CHECK_EQ_U(repin_to(6, 8600), 6);
+        CHECK_EQ_U(h.sel.profile_id(), 6);
+        // Idempotent: re-evaluating an already-satisfied pin emits no commit.
+        const SelectorActions same = h.sel.tick(9200);
+        CHECK(!same.commit.has_value());
+        CHECK_EQ_U(h.sel.profile_id(), 6);
+        // Unpin ({max:255}) and confirm adaptation resumes off the pinned rung.
+        h.sel.set_profile_pin(0, 255);
+        (void)h.run(9300, 13000, -95, 500);
+        CHECK(std::string_view(h.sel.state()) != "PINNED");
+    }
+
     // --- §9.8 fail-safe: hold, then damped descent; stale never promotes -----
     {
         SelectorPolicy p;

@@ -4,7 +4,8 @@
 // merged RX engine, resend scheduler, loopback bench, udp-air dev backend,
 // NAL classifier, §9 selector + §10 power, the devourer radio backend
 // (§3.0) with the §7.2 TSF quiet-gap pacer, and the §11 follow-me CSA
-// (craft follower / ground issuer; stdin trigger "csa <mhz> [class]").
+// (craft follower / ground issuer, triggered via POST /api/v1/csa), and the
+// §15.5 REST control plane (stats + live knobs; stdin CSA trigger is gone).
 #include <poll.h>
 #include <unistd.h>
 
@@ -21,6 +22,7 @@
 #include "wblink/air_udp.h"
 #include "wblink/binding.h"
 #include "wblink/config.h"
+#include "wblink/control_server.h"
 #include "wblink/csa.h"
 #include "wblink/frame_framer.h"
 #include "wblink/frame_reassembler.h"
@@ -80,26 +82,6 @@ CsaParams csa_params(const Config& cfg) {
     p.home_chan = c.home_chan;
     p.allowlist = c.channel_allowlist;
     return p;
-}
-
-// One non-blocking line from stdin (the ground's §11 CSA trigger:
-// "csa <chan_mhz> [class]"). Returns false when no complete line is waiting.
-bool stdin_line(std::string& out) {
-    pollfd pfd{STDIN_FILENO, POLLIN, 0};
-    if (poll(&pfd, 1, 0) <= 0 || (pfd.revents & POLLIN) == 0) {
-        return false;
-    }
-    char buf[128];
-    const ssize_t n = read(STDIN_FILENO, buf, sizeof(buf) - 1);
-    if (n <= 0) {
-        return false;
-    }
-    buf[n] = '\0';
-    out.assign(buf);
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
-        out.pop_back();
-    }
-    return !out.empty();
 }
 
 // §7.2: the pacer keys off END_OF_BLOCK frames in both directions.
@@ -705,6 +687,40 @@ struct TxCore {
     }
     uint8_t power_level() const { return selector_.tx_power_level(); }
 
+    // §15.5 control-plane knobs -------------------------------------------
+    // §9.7 profile pin: clamp the operating-point ladder to [min,max] by id.
+    void set_profile_pin(uint8_t min_profile, uint8_t max_profile) {
+        selector_.set_profile_pin(min_profile, max_profile);
+    }
+    // §14.1 live FEC-rate retune for a frame-shm stream. Returns false if the
+    // stream_id is unknown or is not a frame-shm (FrameFramer) stream.
+    bool set_stream_fec(uint8_t stream_id, uint16_t i_permille,
+                        uint16_t p_permille, uint16_t min_k) {
+        for (Stream& s : streams_) {
+            if (s.stream_id != stream_id) {
+                continue;
+            }
+            if (!s.frame_framer) {
+                return false;  // udp stream: no per-stream FEC (§15.2)
+            }
+            s.frame_framer->set_fec_rates(i_permille, p_permille, min_k);
+            return true;
+        }
+        return false;
+    }
+    void reset_stats() {
+        for (Stream& s : streams_) {
+            if (s.framer) {
+                s.framer->reset_stats();
+            }
+            if (s.frame_framer) {
+                s.frame_framer->reset_stats();
+            }
+            s.sched.reset_counters();
+        }
+        reports_received_ = 0;
+    }
+
     void fill_stats(StatsSnapshot& snap, uint64_t now) const {
         for (const Stream& s : streams_) {
             StreamStats st;
@@ -879,6 +895,10 @@ struct RxCore {
         }
     }
 
+    // §15.5 stats/reset. The frame-shm reassemblers live in run_rx (ShmOut),
+    // so the caller resets those; here we zero the RX engine's counters.
+    void reset_stats() { engine_.reset_stats(); }
+
     uint16_t originator_;
     uint32_t session_;
     RxEngine engine_;
@@ -926,7 +946,10 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 const char* csa_state = nullptr,
                 uint32_t ret_window_hits = 0,
                 uint32_t ret_window_misses = 0,
-                bool tx_wedged = false) {
+                bool tx_wedged = false,
+                const std::vector<std::pair<uint8_t, FrameReassemblerStats>>*
+                    frame_stats = nullptr,
+                StatsSnapshot* out_snap = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -953,7 +976,97 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     if (rx != nullptr) {
         rx->fill_stats(snap);
     }
+    // §6.3a frame-shm egress: fold each reassembler's frame-level outcomes into
+    // the matching stream (by stream_id). recovered_arq / delivered / loss stay
+    // the packet-layer view from RxEngine; these are the frame-layer view.
+    if (frame_stats != nullptr) {
+        for (const auto& [sid, fr] : *frame_stats) {
+            StreamStats* st = nullptr;
+            for (StreamStats& s : snap.streams) {
+                if (s.stream_id == sid) {
+                    st = &s;
+                    break;
+                }
+            }
+            if (st == nullptr) {  // not latched yet — surface it anyway
+                snap.streams.push_back(StreamStats{});
+                st = &snap.streams.back();
+                st->stream_id = sid;
+                st->type = "RTP";
+            }
+            st->recovered_fec = fr.frames_fec;
+            st->frames_fast = fr.frames_fast;
+            st->frames_unrecoverable = fr.frames_unrecoverable;
+            st->malformed = fr.malformed;
+            st->decode_errors = fr.decode_failures;
+            st->dropped_superseded = fr.frames_superseded;
+            st->dropped_deadline = fr.frames_deadline;
+        }
+    }
+    if (out_snap != nullptr) {
+        *out_snap = snap;  // §15.5: GET /health reads the freshest snapshot
+    }
     emitter.emit(snap);
+}
+
+// §15.5 GET /info — static identity. Hand-built (no json dep in app/); the
+// field values are numeric or house-controlled strings (no escaping needed).
+std::string build_info_json(const Loaded& l, uint32_t session,
+                            const char* role) {
+    std::string s = "{\"role\":\"";
+    s += role;
+    s += "\",\"node\":" + std::to_string(l.cfg.node.originator);
+    s += ",\"session\":" + std::to_string(session);
+    s += ",\"table_version\":" + std::to_string(l.tv);
+    s += ",\"streams\":[";
+    bool first = true;
+    for (const StreamCfg& st : l.cfg.streams) {
+        if (!first) s += ',';
+        first = false;
+        s += "{\"stream_id\":" + std::to_string(st.stream_id);
+        s += ",\"dir\":\"";
+        s += (st.dir == Dir::kIn ? "in" : "out");
+        s += "\",\"bind\":\"";
+        s += (st.bind.kind == BindKind::kFrameShm ? "frame-shm" : "udp");
+        s += "\"}";
+    }
+    s += "],\"adapters\":[";
+    first = true;
+    for (const AdapterCfg& a : l.cfg.adapters) {
+        if (!first) s += ',';
+        first = false;
+        s += "{\"name\":\"" + a.name + "\",\"role\":\"";
+        s += (a.role == Role::kTx ? "tx" : "rx");
+        s += "\",\"channel\":" + std::to_string(a.channel_mhz) + "}";
+    }
+    s += "],\"control\":\"" + l.cfg.control.bind + "\"}";
+    return s;
+}
+
+// §15.5 GET /health — terse link summary from the freshest snapshot.
+std::string build_health_json(const StatsSnapshot& snap) {
+    int32_t rssi_best = 0;
+    bool have = false;
+    for (const AdapterStats& a : snap.adapters) {
+        if (!have || a.rssi_best > rssi_best) {
+            rssi_best = a.rssi_best;
+            have = true;
+        }
+    }
+    uint32_t loss_milli = 0;
+    uint64_t delivered = 0;
+    if (!snap.streams.empty()) {
+        loss_milli = snap.streams.front().loss_prediversity_milli;
+        delivered = snap.streams.front().delivered;
+    }
+    std::string s = "{\"state\":\"" + snap.link.state + "\"";
+    s += ",\"profile\":" + std::to_string(snap.link.profile);
+    s += ",\"mcs\":" + std::to_string(snap.link.mcs);
+    s += ",\"rssi_best\":" + std::to_string(have ? rssi_best : 0);
+    s += ",\"loss_milli\":" + std::to_string(loss_milli);
+    s += ",\"delivered\":" + std::to_string(delivered);
+    s += ",\"csa_state\":\"" + snap.link.csa_state + "\"}";
+    return s;
 }
 
 // ---- modes -------------------------------------------------------------------
@@ -1049,6 +1162,49 @@ int run_tx(const Loaded& l) {
     // §9.10 TX-wedge watchdog over the TX adapter's CCX-report counters.
     TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
                                 l.cfg.air.wedge_min_submits});
+    // §15.5 REST control plane. TX node owns the profile-pin + FEC-retune
+    // knobs; CSA is issuer-only (rx), so h.csa stays null → 409.
+    StatsSnapshot last_snap;
+    std::unique_ptr<ControlServer> control;
+    if (!l.cfg.control.bind.empty()) {
+        auto cs = ControlServer::create(l.cfg.control.bind);
+        if (!cs) {
+            std::fprintf(stderr, "control: %s\n", cs.error.c_str());
+            return 1;
+        }
+        control = std::move(*cs.value);
+        ControlHandlers h;
+        h.stats_line = [&]() -> std::string {
+            std::string s = emitter.last_line();
+            if (!s.empty() && s.back() == '\n') s.pop_back();
+            return s;
+        };
+        h.info_json = [&] { return build_info_json(l, session, "tx"); };
+        h.health_json = [&] { return build_health_json(last_snap); };
+        h.profile = [&](int mn, int mx) -> std::string {
+            if (mn < 0 || mn > 255 || mx < 0 || mx > 255)
+                return "min/max must be 0..255";
+            if (mx != 255 && mn > mx) return "min > max";
+            tx.set_profile_pin(static_cast<uint8_t>(mn),
+                               static_cast<uint8_t>(mx));
+            return "";
+        };
+        h.fec = [&](int sid, int ip, int pp, int mk) -> std::string {
+            if (sid < 0 || sid > 255) return "bad stream_id";
+            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1)
+                return "bad fec rates (0..4000 permille, min_k>=1)";
+            return tx.set_stream_fec(static_cast<uint8_t>(sid),
+                                     static_cast<uint16_t>(ip),
+                                     static_cast<uint16_t>(pp),
+                                     static_cast<uint16_t>(mk))
+                       ? ""
+                       : "no frame-shm stream with that id";
+        };
+        h.reset_stats = [&] { tx.reset_stats(); };
+        control->set_handlers(std::move(h));
+        std::fprintf(stderr, "control: REST on %s (tx)\n",
+                     l.cfg.control.bind.c_str());
+    }
     std::fprintf(stderr, "tx: session=%u, running%s\n", session,
                  qg.enabled() ? " (quiet-gap pacing)" : "");
     while (g_stop == 0) {
@@ -1172,9 +1328,16 @@ int run_tx(const Loaded& l) {
                         : "air: tx wedge cleared — CCX reports resumed\n");
             }
         }
+        if (control) {
+            control->service(now);
+        }
         if (stats_period != 0 && now >= next_stats) {
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
-                       csa.state_str(), 0, 0, wedge.wedged());
+                       csa.state_str(), 0, 0, wedge.wedged(), nullptr,
+                       &last_snap);
+            if (control) {
+                control->publish_stats(emitter.last_line());
+            }
             next_stats = now + stats_period;
         }
     }
@@ -1287,6 +1450,47 @@ int run_rx(const Loaded& l) {
                                 l.cfg.air.wedge_min_submits});
     const uint16_t op_chan =
         l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
+    // §15.5 REST control plane. RX/ground node owns the CSA trigger (replaces
+    // the removed stdin trigger); profile/fec are TX-only knobs → null → 409.
+    StatsSnapshot last_snap;
+    std::unique_ptr<ControlServer> control;
+    if (!l.cfg.control.bind.empty()) {
+        auto cs = ControlServer::create(l.cfg.control.bind);
+        if (!cs) {
+            std::fprintf(stderr, "control: %s\n", cs.error.c_str());
+            return 1;
+        }
+        control = std::move(*cs.value);
+        ControlHandlers h;
+        h.stats_line = [&]() -> std::string {
+            std::string s = emitter.last_line();
+            if (!s.empty() && s.back() == '\n') s.pop_back();
+            return s;
+        };
+        h.info_json = [&] { return build_info_json(l, session, "rx"); };
+        h.health_json = [&] { return build_health_json(last_snap); };
+        h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
+            const CommonPrefix pre{l.cfg.node.originator, 0, session};
+            if (issuer.start(pre, static_cast<uint16_t>(mhz), 0,
+                             static_cast<uint8_t>(klass != 0), op_chan, 0, 4,
+                             now_us_it)) {
+                return "";
+            }
+            return "rejected (active campaign, PSK, allowlist, or rate-limit)";
+        };
+        h.reset_stats = [&] {
+            rx.reset_stats();
+            for (ShmOut& so : shm_outs) {
+                so.reasm->reset_stats();
+            }
+            ret_window_hits = 0;
+            ret_window_misses = 0;
+            tsf_fallbacks = 0;
+        };
+        control->set_handlers(std::move(h));
+        std::fprintf(stderr, "control: REST on %s (rx)\n",
+                     l.cfg.control.bind.c_str());
+    }
     std::fprintf(stderr, "rx: session=%u, %zu adapters, running%s\n",
                  session, air.value->rx_adapters(),
                  qg.enabled() ? " (quiet-gap returns)" : "");
@@ -1362,23 +1566,8 @@ int run_rx(const Loaded& l) {
                 so.ring->write_frame(f, len);
             });
         }
-        // §11 trigger + campaign engine.
-        std::string line;
-        if (stdin_line(line) && line.rfind("csa ", 0) == 0) {
-            unsigned chan = 0, cls = 0;
-            if (std::sscanf(line.c_str(), "csa %u %u", &chan, &cls) >= 1) {
-                const CommonPrefix pre{l.cfg.node.originator, 0, session};
-                if (issuer.start(pre, static_cast<uint16_t>(chan), 0,
-                                 static_cast<uint8_t>(cls != 0), op_chan, 0,
-                                 4, now_us_it)) {
-                    std::fprintf(stderr, "csa: campaign -> %u MHz class %u\n",
-                                 chan, cls);
-                } else {
-                    std::fprintf(stderr, "csa: rejected (active campaign, "
-                                         "PSK, allowlist, or rate-limit)\n");
-                }
-            }
-        }
+        // §11 campaign engine. The trigger is now POST /api/v1/csa (§15.5);
+        // the stdin trigger was removed with the control-plane migration.
         const CsaIssuer::IssuerAction ia = issuer.tick(now_us_it);
         switch (ia.kind) {
             case CsaIssuer::IssuerAction::Kind::kSendCopy: {
@@ -1417,12 +1606,25 @@ int run_rx(const Loaded& l) {
                         : "air: tx wedge cleared — CCX reports resumed\n");
             }
         }
+        if (control) {
+            control->service(now);
+        }
         if (stats_period != 0 && now >= next_stats) {
+            // §6.3a: fold the per-out-stream reassembler counters into stats.
+            std::vector<std::pair<uint8_t, FrameReassemblerStats>> frame_stats;
+            frame_stats.reserve(shm_outs.size());
+            for (const ShmOut& so : shm_outs) {
+                frame_stats.emplace_back(so.stream_id, so.reasm->stats());
+            }
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
                                        : follower.state_str(),
-                       ret_window_hits, ret_window_misses, wedge.wedged());
+                       ret_window_hits, ret_window_misses, wedge.wedged(),
+                       &frame_stats, &last_snap);
+            if (control) {
+                control->publish_stats(emitter.last_line());
+            }
             next_stats = now + stats_period;
         }
     }
@@ -1513,6 +1715,52 @@ int run_loopback(const Loaded& l) {
     const uint64_t stats_period =
         l.cfg.stats.hz > 0 ? static_cast<uint64_t>(1000.0 / l.cfg.stats.hz)
                            : 0;
+    // §15.5 REST control plane on the bench: tx knobs (profile/fec) + reset
+    // (both sides). CSA is a no-op with synthetic air → left null → 409.
+    StatsSnapshot last_snap;
+    std::unique_ptr<ControlServer> control;
+    if (!l.cfg.control.bind.empty()) {
+        auto cs = ControlServer::create(l.cfg.control.bind);
+        if (!cs) {
+            std::fprintf(stderr, "control: %s\n", cs.error.c_str());
+            return 1;
+        }
+        control = std::move(*cs.value);
+        ControlHandlers h;
+        h.stats_line = [&]() -> std::string {
+            std::string s = emitter.last_line();
+            if (!s.empty() && s.back() == '\n') s.pop_back();
+            return s;
+        };
+        h.info_json = [&] { return build_info_json(l, session, "loopback"); };
+        h.health_json = [&] { return build_health_json(last_snap); };
+        h.profile = [&](int mn, int mx) -> std::string {
+            if (mn < 0 || mn > 255 || mx < 0 || mx > 255)
+                return "min/max must be 0..255";
+            if (mx != 255 && mn > mx) return "min > max";
+            tx.set_profile_pin(static_cast<uint8_t>(mn),
+                               static_cast<uint8_t>(mx));
+            return "";
+        };
+        h.fec = [&](int sid, int ip, int pp, int mk) -> std::string {
+            if (sid < 0 || sid > 255) return "bad stream_id";
+            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1)
+                return "bad fec rates (0..4000 permille, min_k>=1)";
+            return tx.set_stream_fec(static_cast<uint8_t>(sid),
+                                     static_cast<uint16_t>(ip),
+                                     static_cast<uint16_t>(pp),
+                                     static_cast<uint16_t>(mk))
+                       ? ""
+                       : "no frame-shm stream with that id";
+        };
+        h.reset_stats = [&] {
+            tx.reset_stats();
+            rx.reset_stats();
+        };
+        control->set_handlers(std::move(h));
+        std::fprintf(stderr, "control: REST on %s (loopback)\n",
+                     l.cfg.control.bind.c_str());
+    }
     std::fprintf(stderr, "loopback: %u adapters, seed=%llu, running\n",
                  l.cfg.loopback.adapters,
                  static_cast<unsigned long long>(l.cfg.loopback.seed));
@@ -1523,8 +1771,15 @@ int run_loopback(const Loaded& l) {
         });
         tx.tick(loop_now, inject);
         rx.tick(loop_now, deliver, inject_nack);
+        if (control) {
+            control->service(loop_now);
+        }
         if (stats_period != 0 && loop_now >= next_stats) {
-            emit_stats(emitter, l, session, t0, &tx, &rx);
+            emit_stats(emitter, l, session, t0, &tx, &rx, nullptr, 0, nullptr,
+                       0, 0, false, nullptr, &last_snap);
+            if (control) {
+                control->publish_stats(emitter.last_line());
+            }
             next_stats = loop_now + stats_period;
         }
     }

@@ -841,7 +841,11 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
   `flap_freeze_window_s` (**10 s**) pins the rung below for `flap_freeze_s`
   (**10 s**). Flap is *worse* without FEC (each flap = a visible glitch) → this is
   more valuable here, not less.
-- **`min==max` pin:** freezes adaptation at a rung (bench / known-bad-link).
+- **`min==max` pin:** freezes adaptation at the pinned rung (bench /
+  known-bad-link). A runtime re-pin (§15.5 `POST /api/v1/link/profile`) **snaps**
+  the operating point to that rung immediately, in either direction — it is a
+  select-and-hold, not a freeze-in-place. (Config-time pins already land there via
+  the boot clamp; the runtime path clamps in `evaluate()` on the next tick.)
 
 ### 9.8 Fail-safe on lost feedback
 TX runs a `report_epoch` watchdog. No fresh, monotonic-forward epoch within
@@ -1266,7 +1270,8 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
   },
   "air":   { "kind": "radio", "ack_responder": false,
              "wedge_window_ms": 1000, "wedge_min_submits": 8 },
-  "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } }
+  "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
+  "control": { "bind": "0.0.0.0:8091" }
 }
 ```
 - RX nodes use `"dir":"out"` streams (UDP `send` targets) and `role:"rx"` adapters
@@ -1303,6 +1308,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
     "loss_prediversity_milli": 41, "loss_postdiv_prearq_milli": 6,
     "recovered_arq": 220, "recovered_fec": 0,
+    "frames_fast": 89571, "frames_unrecoverable": 0, "malformed": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
@@ -1326,6 +1332,15 @@ the radio backend).
 `uniq`/`diversity` are the §17 gate-2 estimator inputs; the `nack_rtt_*` /
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.
+
+On a **`frame-shm` egress** stream (§6.3a) the per-frame reassembler counters
+map onto these fields directly: `recovered_fec` = frames rebuilt from repair
+symbols, `frames_fast` = frames delivered all-source with no decode,
+`frames_unrecoverable` = frames finalized below `k` (no way to decode),
+`decode_errors` = FEC decode returned an error, `malformed` = symbols rejected
+before decode, and `dropped_superseded`/`dropped_deadline` = frames dropped by
+supersession / past their deadline. On a UDP (RTP/telemetry) stream the
+per-frame fields (`frames_fast`, `frames_unrecoverable`, `malformed`) stay 0.
 
 ### 15.4 `frame-shm` binding — venc_frame_ring slot format
 The `frame-shm` binding attaches to (ingress) or creates (egress) a POSIX
@@ -1358,6 +1373,48 @@ on egress (§6.3a) the reassembled blob is written back byte-identical. The
 metadata (`pts`, `codec`, IDR `flags`) therefore rides TX→RX transparently inside
 the opaque payload — no DATA-header change, no re-derivation. FrameFramer reads
 `flags` bit 0 for §4.1 ARQ; nothing else parses the blob.
+
+### 15.5 Control plane (REST/HTTP)
+Optional, config-gated: `"control": { "bind": "<addr>:<port>" }` (absent = off;
+default port `8091`). A minimal **HTTP/1.0** server folded into the single
+event loop — **no threads, no locks**: the listen socket and any in-flight
+connections are polled with a 0 ms timeout once per tick, each connection
+serves **one** bounded request (headers + body ≤ 8 KiB) and is closed, except
+the SSE stream which is held open. A slow or partial request is **dropped, not
+awaited** — the flight loop never blocks on a client.
+
+Auth posture matches the data plane (§13, no-auth): the control port rides a
+**trusted same-host/LAN** network. Bind `127.0.0.1` to keep it host-local
+(SSH/tunnel to reach it); bind a routable address only on a trusted net.
+`csa.psk` and any secret are **never** echoed by `GET /info`. **This control
+plane supersedes the ground CSA stdin trigger, which is removed** — `POST
+/api/v1/csa` is now the only campaign trigger.
+
+**Read** (idempotent, present on every node):
+
+| Method + path | Returns |
+|---|---|
+| `GET /api/v1/stats` | the current §15.3 snapshot as one JSON object (no trailing newline) |
+| `GET /api/v1/stats/stream` | `text/event-stream`; one §15.3 object per `stats.hz` tick |
+| `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]`, `build` |
+| `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
+
+**Write** (live; `200 { "ok": true, … }` on success, `4xx { "ok": false, "error": "…" }`
+otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
+
+| Method + path | Body | Effect |
+|---|---|---|
+| `POST /api/v1/csa` | `{ "mhz": 5805, "class": 0 }` | start a §11 CSA campaign (issuer/ground node) |
+| `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
+| `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3 }` | retune a `frame-shm` stream's §14.1 FEC rates (TX node) |
+| `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
+
+Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and
+`fec` on the TX. An endpoint invoked in a mode where it does not apply returns
+**409**; an unknown path **404**; a malformed or oversize body **400**. The
+write knobs are exactly the §9/§11/§14 levers that were previously boot-time
+JSON only; the profile pin is the operating-point (MCS + bitrate) lever, since
+a profile bundles rate/power/MTU per §9.3.
 
 ---
 

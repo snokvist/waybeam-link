@@ -15,5 +15,6 @@
     "loss": { "ge": { "p_gb": 0.01, "p_bg": 0.2, "loss_g": 0.0, "loss_b": 0.8 } },
     "return_loss_p": 0.05
   },
-  "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } }
+  "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
+  "control": { "bind": "127.0.0.1:8091" }
 }

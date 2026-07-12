@@ -544,4 +544,16 @@ uint8_t RxEngine::live_adapter_count() const {
     return live;
 }
 
+void RxEngine::reset_stats() {
+    // Zero the observability counters only; latch/cursor/gap machinery and
+    // per-adapter liveness timing (last_rx_ms, RSSI EWMA) are preserved so a
+    // reset mid-flight cannot perturb delivery or the §6.5 stall verdict.
+    for (auto& [key, s] : streams_) {
+        s.counters = {};
+    }
+    for (auto& [id, a] : adapters_) {
+        a.rx = 0;
+    }
+}
+
 }  // namespace wblink
