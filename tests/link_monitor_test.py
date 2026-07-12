@@ -43,6 +43,12 @@ class DashboardSchemaTest(unittest.TestCase):
         self.assertIn('rec.role==="loopback"?"TX+RX"', HTML)
         self.assertIn("not configured process mode", HTML)
 
+    def test_interaction_does_not_rebuild_on_liveness_ticks(self):
+        self.assertIn('setInterval(updateLiveness,250)', HTML)
+        self.assertNotIn('setInterval(render,1000)', HTML)
+        self.assertIn('pointerenter', HTML)
+        self.assertIn('deliveryRates', HTML)
+
 
 if __name__ == "__main__":
     unittest.main()
