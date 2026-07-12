@@ -322,3 +322,32 @@ seven repairs and underpredicted two rising-edge blocks. The steady estimator
 is therefore credible, but the transient acceptance gate still fails. The next
 candidate needs a bounded regime-change guard (or temporary fixed fallback)
 during upward loss transitions rather than a permanently larger steady margin.
+
+### Next implementation stage
+
+Continue on Ethernet before monitor-mode or Devourer/RF testing:
+
+1. Run the pure §14.2 inner decision in non-enforcing runtime shadow mode. Feed
+   it the protection-aware repair prediction, exact `k`, frame deadline,
+   measured P95 ARQ RTT, resend airtime, and source-transmission airtime. Report
+   its reason code and every input used; missing input must select the authored
+   fixed-policy fallback rather than an inferred default.
+2. Add a bounded upward-transition guard. Evaluate temporary fixed fallback,
+   an explicit repair margin, and ARQ coverage of the first unexpected block.
+   Do not claim that a causal estimator can predict an arbitrary loss step
+   before observing it.
+3. Capture a high-parity packet trace from the real encoder. Replay may reduce
+   captured repairs, but cannot evaluate repair counts above the capture; use a
+   configured/GF capacity cap for controller decisions, not the ordinary 10%
+   fixed rate as an artificial ceiling.
+4. Extend the in-process Ethernet ramp with hold periods and repeated rising
+   and falling edges. Compare fixed FEC, estimator-only, guarded estimator,
+   FEC+ARQ, and deadline-discard ablations using frame deadline misses as the
+   primary result and parity/airtime as secondary cost.
+5. Require repeated zero-censor runs, no additional deadline misses versus the
+   selected baseline, responsive stats, zero kernel/SHM drops, and stable CPU
+   and memory before adding an opt-in adaptive actuator. Keep fixed §14.1 FEC
+   as the fail-safe on stale or absent controller input.
+6. Only after the Ethernet gate passes, proceed to monitor/Devourer tests for
+   correlated RF loss, packet airtime, return-path loss, quiet-gap fit, and RF
+   RTT. Ethernet results must not set those RF parameters.
