@@ -380,6 +380,18 @@ against it accordingly (~20‰, not wfb_ng's pre-FEC 80‰). The stats output (�
 additionally exposes raw `loss_prediversity` for ρ analysis; the two must never be
 conflated in code.
 
+**Pre-diversity estimator (operator-approved implementation pass 2026-07-12):**
+after a stream latches, RX maintains one sequence-opportunity tracker per
+adapter over original DATA only (`RETRANSMIT=0`). A forward sequence advance by
+`d` adds `d` expected opportunities and one received opportunity; bounded
+out-of-order arrivals fill previously missing opportunities exactly once.
+Duplicates and retransmits add neither expected nor received opportunities.
+`loss_prediversity_milli = 1000 * sum(expected-received) / sum(expected)` across
+the stream's adapters. Trackers begin at each adapter's first post-latch packet,
+so late adapter startup is not counted as loss. The missing set is bounded by
+the existing plausible-forward clamp. Stats reset zeros estimator totals while
+preserving each adapter's current sequence anchor.
+
 ### 3.8 HEARTBEAT packet (type `0x4`) — 11 bytes
 
 The common prefix (§3.1) alone; there is no body (operator-ruled 2026-07-10). A
@@ -1307,7 +1319,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
   "adapters": [ { "name": "wlan0", "rx": 10234, "dup": 812,
     "rssi_best": -58, "rssi_mean": -63, "snr": 22, "noise": -85,
     "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
-    "drop": 0, "tsf_fallback": 0,
+    "drop": 0, "kernel_drop": 0, "tsf_fallback": 0,
     "tx_reports": 531, "tx_report_fails": 0,
     "adapter_stalled": false, "tx_wedged": false } ],
   "streams": [ { "stream_id": 0, "type": "RTP",
@@ -1315,6 +1327,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "loss_prediversity_milli": 41, "loss_postdiv_prearq_milli": 6,
     "recovered_arq": 220, "recovered_fec": 0,
     "frames_fast": 89571, "frames_unrecoverable": 0, "malformed": 0,
+    "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
@@ -1347,6 +1360,14 @@ symbols, `frames_fast` = frames delivered all-source with no decode,
 before decode, and `dropped_superseded`/`dropped_deadline` = frames dropped by
 supersession / past their deadline. On a UDP (RTP/telemetry) stream the
 per-frame fields (`frames_fast`, `frames_unrecoverable`, `malformed`) stay 0.
+
+`shm_full_drops`, `shm_oversize_drops`, and `shm_bad_slots` expose local ring
+backpressure/ABI failures separately from air/frame-reassembly loss. They are 0
+on UDP bindings. On frame-SHM egress they come from the producer ring; on
+frame-SHM ingress `shm_bad_slots` comes from the consumer ring. Adapter
+`kernel_drop` is the Linux socket's `SO_RXQ_OVFL` cumulative receive-queue loss
+(UDP/kernel socket backends; 0 where unavailable). It is distinct from `drop`,
+which remains backend/synthetic queue loss.
 
 ### 15.4 `frame-shm` binding — venc_frame_ring slot format
 The `frame-shm` binding attaches to (ingress) or creates (egress) a POSIX

@@ -416,6 +416,23 @@ HEARTBEAT wire type and the discovery surface identified by the transport audit:
 **Amended:** §3.8 (1 Hz quiet-only emission rule); §15.5 (discovery endpoint and
 bounded JSON contract). Code follows in separate commits.
 
+## Pass 18 — pre-diversity + local-drop observability (2026-07-12)
+
+The approved transport-audit sequence resolves the advertised-but-zero
+`loss_prediversity` gauge and separates local host backpressure from air loss:
+
+- Pre-diversity loss is a post-latch, per-stream/per-adapter original-DATA
+  sequence-opportunity estimator. Bounded reorder fills missing opportunities;
+  duplicates and RETRANSMIT packets are excluded. Adapter totals are aggregated
+  only at stats formatting time.
+- Stats reset zeros estimator totals without moving sequence anchors.
+- Stream stats add frame-SHM full/oversize/bad-slot counters. Adapter stats add
+  Linux `SO_RXQ_OVFL` kernel receive-queue loss as `kernel_drop`; it is not
+  folded into synthetic/backend `drop`.
+
+**Amended:** §3.7 (normative estimator); §15.3 (additive local-drop fields and
+mapping). Code follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
