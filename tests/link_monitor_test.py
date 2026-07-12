@@ -54,7 +54,11 @@ class DashboardSchemaTest(unittest.TestCase):
     def test_interaction_does_not_rebuild_on_liveness_ticks(self):
         self.assertIn('setInterval(updateLiveness,250)', HTML)
         self.assertNotIn('setInterval(render,1000)', HTML)
-        self.assertIn('pointerenter', HTML)
+        self.assertNotIn('pointerenter', HTML)
+        self.assertNotIn('focusin', HTML)
+        self.assertIn('pointerover', HTML)
+        self.assertIn('lockReason="tooltip"', HTML)
+        self.assertIn('unlock(st,"tab")', HTML)
         self.assertIn('deliveryRates', HTML)
 
     def test_bridge_evicts_superseded_and_stale_sessions(self):
