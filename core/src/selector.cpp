@@ -251,6 +251,17 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
     const size_t hi = clamp_rung(ladder_size() - 1);
     if (lo == hi) {
         state_ = "PINNED";  // §9.7 min==max
+        // A runtime re-pin (set_profile_pin) must snap the operating point to
+        // the pinned rung — that is the whole bench / known-bad-link use case.
+        // The ctor clamps rung_ for config-time pins, but a live re-pin only
+        // moves policy_, so jump here directly (direction-agnostic, no flap
+        // bookkeeping: the pin overrides adaptation outright).
+        if (rung_ != lo) {
+            rung_ = lo;
+            last_change_ms_ = now_ms;
+            const Profile& p = table_->profiles[lo];
+            a.commit = ProfileCommit{p.id, p.mcs, p.gi, p.tx_power_level};
+        }
         return;
     }
 
