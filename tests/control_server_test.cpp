@@ -241,6 +241,14 @@ int main() {
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
         CHECK_EQ_U(recovery_stream, static_cast<uint64_t>(-1));
     }
+    // An empty optional body behaves like {}, never a null JSON value that
+    // can throw from value() and terminate the server.
+    {
+        const std::string req =
+            "POST /api/v1/video/recover HTTP/1.0\r\n\r\n";
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+        CHECK_EQ_U(recovery_stream, static_cast<uint64_t>(-1));
+    }
     // malformed JSON → 400.
     {
         const std::string body = "{not json";

@@ -99,13 +99,45 @@ int main() {
                 CHECK_EQ_U(ground.value->rx_filtered(0), 1u);
                 CHECK_EQ_U(ground.value->rx_filtered(1), 1u);
 
+                uint8_t recovery_frame[kRecoveryRequestSize]{};
+                RecoveryRequest recovery;
+                recovery.prefix = {9, 17, 9012};
+                recovery.target_originator = 17;
+                recovery.target_session = 1234;
+                recovery.target_stream_id = 0;
+                CHECK_EQ_U(encode_recovery_request(
+                               recovery, recovery_frame,
+                               sizeof(recovery_frame)),
+                           sizeof(recovery_frame));
+                CHECK_EQ_U(ground.value->inject(recovery_frame,
+                                                sizeof(recovery_frame)),
+                           1u);
+                unsigned recovery_received = 0;
+                const UdpAir::RxCb receive_recovery =
+                    [&](const AirRxMeta&, const uint8_t* data, size_t len) {
+                        const Decoded decoded = decode(data, len);
+                        const auto* request =
+                            std::get_if<RecoveryRequest>(&decoded);
+                        CHECK(request != nullptr);
+                        if (request != nullptr) {
+                            CHECK_EQ_U(request->target_originator, 17u);
+                            CHECK_EQ_U(request->target_session, 1234u);
+                            ++recovery_received;
+                        }
+                    };
+                CHECK_EQ_U(craft.value->poll_once(100, receive_recovery), 1u);
+                CHECK_EQ_U(recovery_received, 1u);
+                CHECK_EQ_U(ground.value->poll_once(100, discard), 0u);
+                CHECK_EQ_U(ground.value->rx_filtered(0), 2u);
+                CHECK_EQ_U(ground.value->rx_filtered(1), 2u);
+
                 const uint8_t junk[] = {1, 2, 3};
                 CHECK_EQ_U(sender.value->inject(junk, sizeof(junk)), 1u);
                 CHECK_EQ_U(craft.value->poll_once(100, discard), 0u);
                 CHECK_EQ_U(ground.value->poll_once(100, discard), 0u);
                 CHECK_EQ_U(craft.value->rx_filtered(0), 1u);
-                CHECK_EQ_U(ground.value->rx_filtered(0), 2u);
-                CHECK_EQ_U(ground.value->rx_filtered(1), 2u);
+                CHECK_EQ_U(ground.value->rx_filtered(0), 3u);
+                CHECK_EQ_U(ground.value->rx_filtered(1), 3u);
             }
         }
     }

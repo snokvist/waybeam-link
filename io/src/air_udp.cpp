@@ -16,6 +16,7 @@ const CommonPrefix* prefix_of(const Decoded& dec) {
     if (const auto* p = std::get_if<LinkReport>(&dec)) return &p->prefix;
     if (const auto* p = std::get_if<Heartbeat>(&dec)) return &p->prefix;
     if (const auto* p = std::get_if<CsaPacket>(&dec)) return &p->prefix;
+    if (const auto* p = std::get_if<RecoveryRequest>(&dec)) return &p->prefix;
     return nullptr;
 }
 }  // namespace

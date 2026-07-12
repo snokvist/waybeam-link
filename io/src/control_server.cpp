@@ -317,7 +317,7 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
     if (method != "POST") {
         return reply(405, "Method Not Allowed", json_err("use GET or POST"));
     }
-    json j;
+    json j = json::object();
     if (!body.empty()) {
         j = json::parse(body, nullptr, false);
         if (j.is_discarded()) {
