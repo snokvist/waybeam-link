@@ -66,8 +66,11 @@ size_t UdpAir::inject(const uint8_t* frame, size_t len) {
         return 1;
     }
     size_t reached = 0;
-    for (UdpEgress& t : targets_) {
+    for (size_t target_idx = 0; target_idx < targets_.size(); ++target_idx) {
+        UdpEgress& t = targets_[target_idx];
         if (t.send(frame, len)) {
+            if (trace_) trace_("tx", "submitted", static_cast<int>(target_idx),
+                               frame, len);
             ++reached;
             ++tx_submitted_;
             if (broadcast_) {
@@ -79,6 +82,8 @@ size_t UdpAir::inject(const uint8_t* frame, size_t len) {
                 }
             }
         } else {
+            if (trace_) trace_("tx", "failed", static_cast<int>(target_idx),
+                               frame, len);
             ++tx_failed_;
         }
     }
@@ -94,12 +99,14 @@ void UdpAir::service_paced_tx() {
     while (!tx_queue_.empty() && now >= next_tx_ && serviced < kCatchupCap) {
         const std::vector<uint8_t>& frame = tx_queue_.front();
         if (targets_[0].send(frame.data(), frame.size())) {
+            if (trace_) trace_("tx", "submitted", 0, frame.data(), frame.size());
             ++tx_submitted_;
             for (size_t i = 0; i < adapters_.size(); ++i) {
                 ++rx_filtered_[i];
                 adapters_[i].note_socket_filtered();
             }
         } else {
+            if (trace_) trace_("tx", "failed", 0, frame.data(), frame.size());
             ++tx_failed_;
         }
         const uint64_t ns =
@@ -155,6 +162,8 @@ int UdpAir::poll_once(int timeout_ms, const RxCb& cb) {
                 const Decoded dec = decode(buf_.data(), static_cast<size_t>(n));
                 const CommonPrefix* prefix = prefix_of(dec);
                 if (prefix == nullptr || prefix->originator == originator_) {
+                    if (trace_) trace_("rx", "filtered", static_cast<int>(i),
+                                       buf_.data(), static_cast<size_t>(n));
                     ++rx_filtered_[i];
                     continue;
                 }
@@ -166,12 +175,16 @@ int UdpAir::poll_once(int timeout_ms, const RxCb& cb) {
                 s ^= s >> 17;
                 s ^= s << 5;
                 if (s % 1000u < rx_drop_permille_) {
+                    if (trace_) trace_("rx", "synthetic_drop", static_cast<int>(i),
+                                       buf_.data(), static_cast<size_t>(n));
                     ++rx_dropped_[i];
                     continue;
                 }
             }
             AirRxMeta meta;
             meta.adapter_id = static_cast<uint8_t>(i);
+            if (trace_) trace_("rx", "accepted", static_cast<int>(i),
+                               buf_.data(), static_cast<size_t>(n));
             ++rx_frames_[i];
             cb(meta, buf_.data(), static_cast<size_t>(n));
             ++delivered;

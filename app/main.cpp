@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <csignal>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <chrono>
@@ -25,6 +26,7 @@
 #include "wblink/config.h"
 #include "wblink/control_server.h"
 #include "wblink/csa.h"
+#include "wblink/endian.h"
 #include "wblink/frame_framer.h"
 #include "wblink/frame_reassembler.h"
 #include "wblink/frame_shm.h"
@@ -68,6 +70,128 @@ uint64_t now_us() {
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
 }
+
+// Bench-only, bounded packet-event trace. The wire remains the source of truth:
+// this observer decodes existing frames and never feeds decisions back in.
+class PacketEventTrace {
+  public:
+    explicit PacketEventTrace(const char* role) : role_(role) {
+        const char* path = std::getenv("WBLINK_PACKET_TRACE");
+        if (path == nullptr || *path == '\0') return;
+        if (const char* cap = std::getenv("WBLINK_PACKET_TRACE_MAX")) {
+            char* end = nullptr;
+            const unsigned long long parsed = std::strtoull(cap, &end, 10);
+            if (end != cap && *end == '\0' && parsed > 0) {
+                cap_ = static_cast<uint64_t>(parsed);
+            }
+        }
+        out_ = std::fopen(path, "w");
+        if (out_ == nullptr) {
+            std::fprintf(stderr, "packet-trace: cannot open %s\n", path);
+            return;
+        }
+        static constexpr size_t kBufferBytes = 1024 * 1024;
+        buffer_.resize(kBufferBytes);
+        std::setvbuf(out_, buffer_.data(), _IOFBF, buffer_.size());
+        std::fprintf(out_,
+                     "{\"type\":\"schema\",\"schema\":\"waybeam-packet-events-v1\","
+                     "\"role\":\"%s\",\"cap\":%llu}\n",
+                     role_, static_cast<unsigned long long>(cap_));
+    }
+
+    ~PacketEventTrace() {
+        if (out_ == nullptr) return;
+        std::fprintf(out_,
+                     "{\"type\":\"trace_end\",\"events\":%llu,"
+                     "\"events_dropped\":%llu}\n",
+                     static_cast<unsigned long long>(events_),
+                     static_cast<unsigned long long>(dropped_));
+        std::fclose(out_);
+    }
+
+    bool enabled() const { return out_ != nullptr; }
+    void flush() { if (out_ != nullptr) std::fflush(out_); }
+
+    void packet(const char* direction, const char* outcome, int adapter,
+                const uint8_t* frame, size_t len) {
+        if (out_ == nullptr) return;
+        if (events_ >= cap_) {
+            ++dropped_;
+            return;
+        }
+        ++events_;
+        const uint64_t t = now_us();
+        const Decoded dec = decode(frame, len);
+        if (const DataView* data = std::get_if<DataView>(&dec)) {
+            const bool repair =
+                (data->hdr.data_flags & data_flags::kFecRepair) != 0;
+            uint16_t k = 0;
+            uint16_t symbol = 0;
+            uint32_t frame_len = 0;
+            if (repair && data->payload_len >= kFecRepairSubheaderSize) {
+                k = be16_read(data->payload + kFecOffWindowLen);
+                symbol = data->payload[kFecOffRepairIdx];
+                frame_len = be32_read(data->payload + kFecOffFrameLen);
+            } else if (!repair && data->payload_len >= kFecSourceSubheaderSize) {
+                k = be16_read(data->payload + kFecSrcOffWindowLen);
+                symbol = be16_read(data->payload + kFecSrcOffSymIndex);
+            }
+            std::fprintf(
+                out_,
+                "{\"type\":\"packet\",\"t_us\":%llu,\"direction\":\"%s\","
+                "\"outcome\":\"%s\",\"adapter\":%d,\"packet\":\"data\","
+                "\"originator\":%u,\"session\":%u,\"stream\":%u,"
+                "\"block\":%u,\"seq\":%u,\"kind\":\"%s\","
+                "\"symbol\":%u,\"k\":%u,\"frame_len\":%u,"
+                "\"arq\":%s,\"retransmit\":%s,\"eob\":%s,"
+                "\"bytes\":%zu}\n",
+                static_cast<unsigned long long>(t), direction, outcome, adapter,
+                data->hdr.prefix.originator, data->hdr.prefix.session_id,
+                data->hdr.stream_id, data->hdr.block_id, data->hdr.seq,
+                repair ? "repair" : "source", symbol, k, frame_len,
+                (data->hdr.data_flags & data_flags::kArq) ? "true" : "false",
+                (data->hdr.data_flags & data_flags::kRetransmit) ? "true" : "false",
+                (data->hdr.data_flags & data_flags::kEndOfBlock) ? "true" : "false",
+                len);
+            return;
+        }
+        if (const NackView* nack = std::get_if<NackView>(&dec)) {
+            std::string bitmap;
+            static constexpr char kHex[] = "0123456789abcdef";
+            bitmap.reserve(static_cast<size_t>(nack->bitmap_len) * 2);
+            for (uint8_t i = 0; i < nack->bitmap_len; ++i) {
+                bitmap.push_back(kHex[nack->bitmap[i] >> 4]);
+                bitmap.push_back(kHex[nack->bitmap[i] & 0x0f]);
+            }
+            std::fprintf(
+                out_,
+                "{\"type\":\"packet\",\"t_us\":%llu,\"direction\":\"%s\","
+                "\"outcome\":\"%s\",\"adapter\":%d,\"packet\":\"nack\","
+                "\"originator\":%u,\"session\":%u,\"stream\":%u,"
+                "\"target_originator\":%u,\"target_session\":%u,"
+                "\"base_seq\":%u,\"bitmap\":\"%s\",\"bytes\":%zu}\n",
+                static_cast<unsigned long long>(t), direction, outcome, adapter,
+                nack->hdr.prefix.originator, nack->hdr.prefix.session_id,
+                nack->hdr.target_stream_id, nack->hdr.target_originator,
+                nack->hdr.target_session, nack->hdr.base_seq, bitmap.c_str(), len);
+            return;
+        }
+        std::fprintf(out_,
+                     "{\"type\":\"packet\",\"t_us\":%llu,"
+                     "\"direction\":\"%s\",\"outcome\":\"%s\","
+                     "\"adapter\":%d,\"packet\":\"other\",\"bytes\":%zu}\n",
+                     static_cast<unsigned long long>(t), direction, outcome,
+                     adapter, len);
+    }
+
+  private:
+    const char* role_;
+    std::FILE* out_ = nullptr;
+    std::vector<char> buffer_;
+    uint64_t cap_ = 250000;
+    uint64_t events_ = 0;
+    uint64_t dropped_ = 0;
+};
 
 // Pass 17: bounded, observational catalog. It never feeds latch decisions.
 class DiscoveryCatalog {
@@ -411,6 +535,14 @@ struct AirBackend {
         }
 #endif
         return udp->poll_once(timeout_ms, cb);
+    }
+
+    void set_packet_trace(PacketEventTrace* trace) {
+        if (!udp || trace == nullptr || !trace->enabled()) return;
+        udp->set_trace([trace](const char* direction, const char* outcome,
+                              int adapter, const uint8_t* frame, size_t len) {
+            trace->packet(direction, outcome, adapter, frame, len);
+        });
     }
 
     size_t rx_adapters() const {
@@ -1334,6 +1466,8 @@ int run_tx(const Loaded& l) {
         std::fprintf(stderr, "air error: %s\n", air.error.c_str());
         return 1;
     }
+    PacketEventTrace packet_trace("tx");
+    air.value->set_packet_trace(&packet_trace);
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
         std::fprintf(stderr, "binding error: %s\n", bindings.error.c_str());
@@ -1640,6 +1774,8 @@ int run_rx(const Loaded& l) {
         std::fprintf(stderr, "air error: %s\n", air.error.c_str());
         return 1;
     }
+    PacketEventTrace packet_trace("rx");
+    air.value->set_packet_trace(&packet_trace);
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
         std::fprintf(stderr, "binding error: %s\n", bindings.error.c_str());

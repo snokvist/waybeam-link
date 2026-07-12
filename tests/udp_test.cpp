@@ -22,6 +22,16 @@ int main() {
         auto air = UdpAir::create(cfg);
         CHECK(bool(air));
         if (air) {
+            unsigned accepted_events = 0;
+            air.value->set_trace(
+                [&](const char* direction, const char* outcome, int adapter,
+                    const uint8_t*, size_t len) {
+                    CHECK(std::strcmp(direction, "rx") == 0);
+                    CHECK(std::strcmp(outcome, "accepted") == 0);
+                    CHECK_EQ_U(adapter, 0);
+                    CHECK_EQ_U(len, 3u);
+                    ++accepted_events;
+                });
             AirUdpCfg sender_cfg;
             sender_cfg.tx = {"127.0.0.1:" +
                              std::to_string(air.value->adapter_port(0))};
@@ -34,6 +44,7 @@ int main() {
             CHECK_EQ_U(air.value->poll_once(100, discard), 1u);
             CHECK_EQ_U(air.value->rx_frames(0), 1u);
             CHECK_EQ_U(air.value->rx_dropped(0), 0u);
+            CHECK_EQ_U(accepted_events, 1u);
         }
     }
 
@@ -176,6 +187,16 @@ int main() {
         auto air = UdpAir::create(cfg);
         CHECK(bool(air));
         if (air) {
+            unsigned drop_events = 0;
+            air.value->set_trace(
+                [&](const char* direction, const char* outcome, int adapter,
+                    const uint8_t*, size_t len) {
+                    CHECK(std::strcmp(direction, "rx") == 0);
+                    CHECK(std::strcmp(outcome, "synthetic_drop") == 0);
+                    CHECK_EQ_U(adapter, 0);
+                    CHECK_EQ_U(len, 1u);
+                    ++drop_events;
+                });
             AirUdpCfg sender_cfg;
             sender_cfg.tx = {"127.0.0.1:" +
                              std::to_string(air.value->adapter_port(0))};
@@ -186,6 +207,7 @@ int main() {
             CHECK_EQ_U(air.value->poll_once(100, discard), 0u);
             CHECK_EQ_U(air.value->rx_frames(0), 0u);
             CHECK_EQ_U(air.value->rx_dropped(0), 1u);
+            CHECK_EQ_U(drop_events, 1u);
         }
     }
 

@@ -30,6 +30,11 @@ class UdpAir {
   public:
     using RxCb =
         std::function<void(const AirRxMeta&, const uint8_t*, size_t)>;
+    // Bench-only packet-event observation. direction is "tx" or "rx";
+    // outcome is "submitted", "failed", "accepted", "filtered", or
+    // "synthetic_drop". Disabled unless a caller installs the callback.
+    using TraceCb = std::function<void(const char* direction, const char* outcome,
+                                       int adapter, const uint8_t*, size_t)>;
 
     static Result<UdpAir> create(const AirUdpCfg& cfg);
 
@@ -39,6 +44,7 @@ class UdpAir {
     // Drain all listen sockets; cb per frame, tagged with the adapter index.
     // Returns frames delivered, or -1 on poll error.
     int poll_once(int timeout_ms, const RxCb& cb);
+    void set_trace(TraceCb cb) { trace_ = std::move(cb); }
 
     size_t rx_adapters() const { return adapters_.size(); }
     uint16_t adapter_port(size_t i) const {
@@ -71,6 +77,7 @@ class UdpAir {
     uint64_t tx_submitted_ = 0;         // successful target datagrams
     uint64_t tx_failed_ = 0;            // failed target datagrams
     std::deque<std::vector<uint8_t>> tx_queue_;
+    TraceCb trace_;
 
     void service_paced_tx();
 };

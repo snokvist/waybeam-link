@@ -11,11 +11,13 @@ import csv
 import json
 import math
 import pathlib
+import random
 import statistics
 import sys
 
 
 SCHEMA = "waybeam-jscc-trace-v1"
+PACKET_SCHEMA = "waybeam-packet-events-v1"
 DATA_HEADER_BYTES = 26
 FEC_REPAIR_HEADER_BYTES = 11
 FRAME_META_BYTES = 8
@@ -126,6 +128,268 @@ def read_trace(path):
     return records
 
 
+def read_jsonl(path):
+    return [json.loads(line) for line in pathlib.Path(path).read_text(
+        encoding="utf-8").splitlines() if line.strip()]
+
+
+def build_event_trace(args):
+    tx_rows = read_jsonl(args.tx_packets)
+    rx_rows = read_jsonl(args.rx_packets)
+    if not tx_rows or tx_rows[0].get("schema") != PACKET_SCHEMA:
+        raise ValueError(f"TX trace must use {PACKET_SCHEMA}")
+    if not rx_rows or rx_rows[0].get("schema") != PACKET_SCHEMA:
+        raise ValueError(f"RX trace must use {PACKET_SCHEMA}")
+
+    def dropped(rows):
+        end = next((row for row in reversed(rows)
+                    if row.get("type") == "trace_end"), None)
+        return None if end is None else int(end.get("events_dropped", 0))
+
+    tx_dropped, rx_dropped = dropped(tx_rows), dropped(rx_rows)
+    if tx_dropped is None or rx_dropped is None:
+        raise ValueError("packet trace is incomplete (missing trace_end)")
+
+    blocks = {}
+    for row in tx_rows:
+        if (row.get("type") != "packet" or row.get("packet") != "data" or
+                row.get("direction") != "tx" or row.get("outcome") != "submitted"):
+            continue
+        key = (int(row["session"]), int(row["stream"]), int(row["block"]))
+        block = blocks.setdefault(key, {"packets": {}, "retransmissions": [],
+                                        "first_tx_us": int(row["t_us"])})
+        block["first_tx_us"] = min(block["first_tx_us"], int(row["t_us"]))
+        if row.get("retransmit", False):
+            block["retransmissions"].append(dict(row))
+        else:
+            block["packets"].setdefault(int(row["seq"]), dict(row))
+    if not blocks:
+        raise ValueError("TX packet trace contains no submitted DATA")
+
+    rx_first = {}
+    rx_by_packet = {}
+    for row in rx_rows:
+        if row.get("type") != "packet" or row.get("packet") != "data":
+            continue
+        key = (int(row["session"]), int(row["stream"]), int(row["block"]))
+        if key not in blocks:
+            continue
+        rx_first[key] = min(rx_first.get(key, int(row["t_us"])), int(row["t_us"]))
+        rx_by_packet.setdefault((key, int(row["seq"])), []).append(row)
+
+    records = [{
+        "type": "schema",
+        "schema": SCHEMA,
+        "source": "packet_events",
+        "deadline_model": "receiver_relative",
+        "deadline_ms": args.deadline_ms,
+        "deadline_note": "RX event offsets are host-local; not cross-host one-way latency",
+        "tx_trace_events_dropped": tx_dropped,
+        "rx_trace_events_dropped": rx_dropped,
+    }]
+    for ordinal, key in enumerate(sorted(blocks, key=lambda item: blocks[item]["first_tx_us"])):
+        block = blocks[key]
+        packets = []
+        source_bytes = 0
+        k = 0
+        arq = False
+        for seq, packet in sorted(block["packets"].items(), key=lambda item: item[1]["t_us"]):
+            if packet["kind"] == "source":
+                source_bytes += max(0, int(packet["bytes"]) - DATA_HEADER_BYTES - 4)
+            k = max(k, int(packet.get("k", 0)))
+            arq = arq or bool(packet.get("arq", False))
+            paths = []
+            for event in rx_by_packet.get((key, seq), []):
+                paths.append({
+                    "adapter": int(event["adapter"]),
+                    "outcome": event["outcome"],
+                    "arrival_offset_us": int(event["t_us"]) - rx_first[key],
+                    "retransmit": bool(event.get("retransmit", False)),
+                })
+            packets.append({
+                "seq": seq,
+                "kind": packet["kind"],
+                "symbol": int(packet["symbol"]),
+                "tx_offset_us": int(packet["t_us"]) - block["first_tx_us"],
+                "paths": paths,
+            })
+        nacks = []
+        packet_seqs = set(block["packets"])
+        for event in rx_rows:
+            if (event.get("type") != "packet" or event.get("packet") != "nack" or
+                    event.get("direction") != "tx" or
+                    event.get("outcome") != "submitted"):
+                continue
+            bitmap = bytes.fromhex(event.get("bitmap", ""))
+            missing = [int(event["base_seq"]) + bit
+                       for bit in range(len(bitmap) * 8)
+                       if bitmap[bit // 8] & (1 << (bit % 8))]
+            relevant = sorted(packet_seqs.intersection(missing))
+            if relevant:
+                nacks.append({
+                    "offset_us": int(event["t_us"]) - rx_first.get(key, int(event["t_us"])),
+                    "base_seq": int(event["base_seq"]),
+                    "missing_seq": relevant,
+                })
+        records.append({
+            "type": "block",
+            "frame": ordinal,
+            "session": key[0],
+            "stream": key[1],
+            "block": key[2],
+            "frame_bytes": source_bytes - FRAME_META_BYTES,
+            "source_k": k,
+            "parity_m": sum(packet["kind"] == "repair" for packet in packets),
+            "arq_eligible": arq,
+            "deadline_ms": args.deadline_ms,
+            "packets": packets,
+            "nacks": nacks,
+            "retransmissions": [{
+                "seq": int(packet["seq"]),
+                "tx_offset_us": int(packet["t_us"]) - block["first_tx_us"],
+            } for packet in block["retransmissions"]],
+        })
+    write_jsonl(args.output, records)
+    return records
+
+
+class LossInjector:
+    def __init__(self, args, total_packets, paths):
+        self.args = args
+        self.total_packets = max(1, total_packets)
+        self.paths = paths
+        self.rng = [random.Random(args.seed + adapter * 0x9E3779B1)
+                    for adapter in range(paths)]
+        self.correlated = {}
+
+    def delivered(self, ordinal, adapter):
+        if self.args.path_correlation == "correlated":
+            if ordinal not in self.correlated:
+                self.correlated[ordinal] = self._delivered(ordinal, 0)
+            return self.correlated[ordinal]
+        return self._delivered(ordinal, adapter)
+
+    def _delivered(self, ordinal, adapter):
+        model = self.args.loss_model
+        if model == "none":
+            return True
+        shifted = ordinal + adapter * max(1, self.args.loss_period // self.paths)
+        if model == "burst":
+            return shifted % self.args.loss_period >= self.args.burst_length
+        if model == "low-frequency":
+            return shifted % self.args.loss_period != 0
+        if model == "incremental":
+            fraction = ordinal / max(1, self.total_packets - 1)
+            threshold = round(self.args.loss_start_permille +
+                              fraction * (self.args.loss_end_permille -
+                                          self.args.loss_start_permille))
+            return self.rng[adapter].randrange(1000) >= threshold
+        if model == "high-frequency":
+            return self.rng[adapter].randrange(1000) >= self.args.loss_end_permille
+        raise ValueError(f"unknown loss model {model}")
+
+
+def replay_blocks(records, args):
+    blocks = [record for record in records if record.get("type") == "block"]
+    deadline_ms = (int(records[0]["deadline_ms"]) if args.deadline_ms is None
+                   else args.deadline_ms)
+    total_packets = sum(len(block["packets"]) for block in blocks)
+    recorded_paths = 1 + max(
+        (path["adapter"] for block in blocks for packet in block["packets"]
+         for path in packet.get("paths", [])), default=-1)
+    paths = args.paths or max(1, recorded_paths)
+    injector = LossInjector(args, total_packets, paths)
+    global_packet = 0
+    decisions = []
+    counts = {name: 0 for name in
+              ("fast", "fec", "arq", "deadline_discard", "unrecoverable")}
+    for block in blocks:
+        received = set()
+        retransmitted = set()
+        arrival_finish_us = 0
+        retransmit_finish_us = 0
+        any_received = False
+        for packet in block["packets"]:
+            if args.loss_model == "recorded":
+                accepted = [path for path in packet.get("paths", [])
+                            if path["outcome"] == "accepted" and
+                            not path.get("retransmit", False)]
+                accepted_retx = [path for path in packet.get("paths", [])
+                                 if path["outcome"] == "accepted" and
+                                 path.get("retransmit", False)]
+                delivered = bool(accepted)
+                if accepted:
+                    arrival_finish_us = max(
+                        arrival_finish_us,
+                        min(int(path["arrival_offset_us"]) for path in accepted))
+                if accepted_retx:
+                    retransmitted.add((packet["kind"], int(packet["symbol"])))
+                    retransmit_finish_us = max(
+                        retransmit_finish_us,
+                        min(int(path["arrival_offset_us"]) for path in accepted_retx))
+            else:
+                delivered = any(injector.delivered(global_packet, adapter)
+                                for adapter in range(paths))
+                if delivered:
+                    arrival_finish_us = max(arrival_finish_us,
+                                            int(packet["tx_offset_us"]))
+            if delivered:
+                received.add((packet["kind"], int(packet["symbol"])))
+                any_received = True
+            global_packet += 1
+        k = int(block["source_k"])
+        sources = sum(kind == "source" for kind, _ in received)
+        available = len(received)
+        deadline_us = deadline_ms * 1000
+        if sources >= k:
+            outcome, reason = "fast", "all_sources_received"
+        elif args.fec == "on" and available >= k:
+            outcome, reason = "fec", "source_plus_repair_rank"
+        elif (args.loss_model == "recorded" and retransmitted and
+              sum(kind == "source" for kind, _ in received | retransmitted) >= k and
+              retransmit_finish_us <= deadline_us):
+            outcome, reason = "arq", "recorded_retransmit_completed"
+        else:
+            eligible = args.arq == "force" or (
+                args.arq == "eligible" and block.get("arq_eligible", False))
+            arq_finish_us = arrival_finish_us + args.rtt_ms * 1000
+            if eligible and any_received and arq_finish_us <= deadline_us:
+                outcome, reason = "arq", "rtt_inside_remaining_deadline"
+            elif args.deadline_discard == "on":
+                outcome, reason = "deadline_discard", (
+                    "no_loss_observation" if not any_received else
+                    "insufficient_symbols_before_deadline")
+            else:
+                outcome, reason = "unrecoverable", "recovery_disabled_or_late"
+        counts[outcome] += 1
+        decisions.append({
+            "type": "decision",
+            "frame": block["frame"],
+            "block": block["block"],
+            "source_k": k,
+            "received_sources": sources,
+            "received_symbols": available,
+            "parity_m": block["parity_m"] if args.fec == "on" else 0,
+            "outcome": outcome,
+            "reason": reason,
+        })
+    decisions.append({
+        "type": "summary",
+        "schema": SCHEMA,
+        "source": "packet_events",
+        "frames": len(blocks),
+        "loss_model": args.loss_model,
+        "paths": paths,
+        "path_correlation": args.path_correlation,
+        "fec": args.fec,
+        "arq": args.arq,
+        "rtt_ms": args.rtt_ms,
+        "deadline_ms": deadline_ms,
+        **counts,
+    })
+    return decisions
+
+
 def replay(records, deadline_override=None):
     header = records[0]
     deadline_ms = header["deadline_ms"] if deadline_override is None else deadline_override
@@ -186,10 +450,30 @@ def parse_args(argv):
     build.add_argument("--table", required=True)
     build.add_argument("--deadline-ms", type=int, default=16)
     build.add_argument("--output", required=True)
+    events = sub.add_parser("build-events", help="group TX/RX packet events into blocks")
+    events.add_argument("--tx-packets", required=True)
+    events.add_argument("--rx-packets", required=True)
+    events.add_argument("--deadline-ms", type=int, default=16)
+    events.add_argument("--output", required=True)
     run = sub.add_parser("replay", help="replay a trace deterministically")
     run.add_argument("trace")
     run.add_argument("--deadline-ms", type=int)
     run.add_argument("--output")
+    run.add_argument("--loss-model", choices=("recorded", "none", "burst",
+                     "incremental", "low-frequency", "high-frequency"),
+                     default="recorded")
+    run.add_argument("--seed", type=int, default=1)
+    run.add_argument("--paths", type=int)
+    run.add_argument("--path-correlation", choices=("independent", "correlated"),
+                     default="independent")
+    run.add_argument("--loss-start-permille", type=int, default=0)
+    run.add_argument("--loss-end-permille", type=int, default=100)
+    run.add_argument("--loss-period", type=int, default=100)
+    run.add_argument("--burst-length", type=int, default=10)
+    run.add_argument("--rtt-ms", type=int, default=4)
+    run.add_argument("--fec", choices=("on", "off"), default="on")
+    run.add_argument("--arq", choices=("off", "eligible", "force"), default="eligible")
+    run.add_argument("--deadline-discard", choices=("on", "off"), default="on")
     return parser.parse_args(argv)
 
 
@@ -199,8 +483,19 @@ def main(argv=None):
         if args.command == "build":
             records = build_trace(args)
             output = replay(records)
+        elif args.command == "build-events":
+            records = build_event_trace(args)
+            output = [{"type": "summary", "schema": SCHEMA,
+                       "source": "packet_events",
+                       "blocks": len(records) - 1}]
         else:
-            output = replay(read_trace(args.trace), args.deadline_ms)
+            records = read_trace(args.trace)
+            if records[0].get("source") == "packet_events":
+                if args.deadline_ms is None:
+                    args.deadline_ms = int(records[0]["deadline_ms"])
+                output = replay_blocks(records, args)
+            else:
+                output = replay(records, args.deadline_ms)
         if getattr(args, "output", None) and args.command == "replay":
             write_jsonl(args.output, output)
         print(json.dumps(output[-1], indent=2, sort_keys=True))

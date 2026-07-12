@@ -11,9 +11,15 @@ WARMUP_FRAMES=${WARMUP_FRAMES:-3}
 BITRATES=${BITRATES:-"1000 4000 8000"}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
 AIR_KIND=${AIR_KIND:-udp}
+PACKET_TRACE=${PACKET_TRACE:-0}
+PACKET_TRACE_MAX=${PACKET_TRACE_MAX:-250000}
 
 if [[ "$AIR_KIND" != udp && "$AIR_KIND" != udp-broadcast ]]; then
     echo "AIR_KIND must be udp or udp-broadcast" >&2
+    exit 2
+fi
+if [[ "$PACKET_TRACE" != 0 && "$PACKET_TRACE" != 1 ]]; then
+    echo "PACKET_TRACE must be 0 or 1" >&2
     exit 2
 fi
 
@@ -86,11 +92,18 @@ EOF
 }
 EOF
 
-    (cd "$ROOT" && "$LINK" rx -c "$rx_cfg") \
+    local tx_trace= rx_trace=
+    if [[ "$PACKET_TRACE" == 1 ]]; then
+        tx_trace="$TMP/tx-packets-${index}.jsonl"
+        rx_trace="$TMP/rx-packets-${index}.jsonl"
+    fi
+    (cd "$ROOT" && env WBLINK_PACKET_TRACE="$rx_trace" \
+        WBLINK_PACKET_TRACE_MAX="$PACKET_TRACE_MAX" "$LINK" rx -c "$rx_cfg") \
         >"$TMP/rx-${index}.jsonl" 2>"$TMP/rx-${index}.log" &
     local rx_pid=$!
     pids+=("$rx_pid")
-    (cd "$ROOT" && "$LINK" tx -c "$tx_cfg") \
+    (cd "$ROOT" && env WBLINK_PACKET_TRACE="$tx_trace" \
+        WBLINK_PACKET_TRACE_MAX="$PACKET_TRACE_MAX" "$LINK" tx -c "$tx_cfg") \
         >"$TMP/tx-${index}.jsonl" 2>"$TMP/tx-${index}.log" &
     local tx_pid=$!
     pids+=("$tx_pid")

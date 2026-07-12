@@ -16,6 +16,7 @@ TIMEOUT_MS=${TIMEOUT_MS:-30000}
 LIVE=${LIVE:-1}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
 JSCC_DEADLINE_MS=${JSCC_DEADLINE_MS:-16}
+PACKET_TRACE_MAX=${PACKET_TRACE_MAX:-250000}
 VENC_CONTROL_ENABLED=${VENC_CONTROL_ENABLED:-0}
 VEHICLE_MAIN_CPU=${VEHICLE_MAIN_CPU:-1}
 VEHICLE_SHM_CPU=${VEHICLE_SHM_CPU:-0}
@@ -25,6 +26,7 @@ REMOTE_INSTALL=/usr/bin/waybeam-link
 REMOTE_CFG=/etc/waybeam-link/jscc-ethernet.json
 REMOTE_STATS=/tmp/waybeam-link-jscc-ethernet.jsonl
 REMOTE_ERR=/tmp/waybeam-link-jscc-ethernet.err
+REMOTE_PACKET_TRACE=/tmp/waybeam-link-jscc-packets.jsonl
 REMOTE_PID=/tmp/waybeam-link-jscc-ethernet.pid
 REMOTE_BACKUP=/tmp/waybeam-jscc-ethernet.json.backup
 OUT_RING=${OUT_RING:-venc_frame_out}
@@ -246,6 +248,7 @@ fi
 [[ "$LIVE" == 0 || "$LIVE" == 1 ]] || fail "LIVE must be 0 or 1"
 [[ "$RX_DROP_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || fail "RX_DROP_PERMILLE must be 0..1000"
 [[ "$JSCC_DEADLINE_MS" =~ ^[1-9][0-9]*$ ]] || fail "JSCC_DEADLINE_MS must be positive"
+[[ "$PACKET_TRACE_MAX" =~ ^[1-9][0-9]*$ ]] || fail "PACKET_TRACE_MAX must be positive"
 [[ "$VENC_CONTROL_ENABLED" == 0 || "$VENC_CONTROL_ENABLED" == 1 ]] || \
     fail "VENC_CONTROL_ENABLED must be 0 or 1"
 [[ "$VEHICLE_MAIN_CPU" =~ ^[0-9]+$ ]] || fail "VEHICLE_MAIN_CPU must be numeric"
@@ -303,7 +306,16 @@ cat >"$ARTIFACTS/rx.json" <<EOF
 }
 EOF
 
-(cd "$ROOT" && "$LINK" rx -c "$ARTIFACTS/rx.json") \
+if [[ "$LIVE" == 0 ]]; then
+    LOCAL_PACKET_TRACE="$ARTIFACTS/rx-packets.jsonl"
+    REMOTE_PACKET_TRACE_ENV="$REMOTE_PACKET_TRACE"
+else
+    LOCAL_PACKET_TRACE=
+    REMOTE_PACKET_TRACE_ENV=
+fi
+(cd "$ROOT" && env WBLINK_PACKET_TRACE="$LOCAL_PACKET_TRACE" \
+    WBLINK_PACKET_TRACE_MAX="$PACKET_TRACE_MAX" \
+    "$LINK" rx -c "$ARTIFACTS/rx.json") \
     >"$ARTIFACTS/rx-stats.jsonl" 2>"$ARTIFACTS/rx.err" &
 GROUND_PID=$!
 if [[ "$LIVE" == 1 && "$BENCH_CONSUMER" == gst ]]; then
@@ -333,7 +345,10 @@ if [[ "$(remote "/usr/bin/json_cli -g .outgoing.server --raw -i /etc/waybeam.jso
             /etc/init.d/S95waybeam restart"
     REMOTE_CHANGED=1
 fi
-remote "rm -f $REMOTE_STATS $REMOTE_ERR; setsid $REMOTE_INSTALL tx -c $REMOTE_CFG \
+remote "rm -f $REMOTE_STATS $REMOTE_ERR $REMOTE_PACKET_TRACE; \
+        WBLINK_PACKET_TRACE='$REMOTE_PACKET_TRACE_ENV' \
+        WBLINK_PACKET_TRACE_MAX='$PACKET_TRACE_MAX' \
+        setsid $REMOTE_INSTALL tx -c $REMOTE_CFG \
         >$REMOTE_STATS 2>$REMOTE_ERR </dev/null & echo \$! >$REMOTE_PID"
 
 # The encoder and all video/ethernet IRQs are pinned to CPU 0 on SSC338Q.
@@ -380,6 +395,7 @@ GROUND_PID=
 stop_remote_link
 remote_get "$REMOTE_STATS" "$ARTIFACTS/tx-stats.jsonl"
 remote_get "$REMOTE_ERR" "$ARTIFACTS/tx.err"
+remote_get "$REMOTE_PACKET_TRACE" "$ARTIFACTS/tx-packets.jsonl"
 
 python3 - "$ARTIFACTS" "$FRAMES" "$RX_DROP_PERMILLE" <<'PY'
 import csv
@@ -446,6 +462,14 @@ python3 "$ROOT/tools/jscc_replay.py" build \
 python3 "$ROOT/tools/jscc_replay.py" replay \
     "$ARTIFACTS/controller-trace.jsonl" \
     --output "$ARTIFACTS/controller-decisions.jsonl"
+python3 "$ROOT/tools/jscc_replay.py" build-events \
+    --tx-packets "$ARTIFACTS/tx-packets.jsonl" \
+    --rx-packets "$ARTIFACTS/rx-packets.jsonl" \
+    --deadline-ms "$JSCC_DEADLINE_MS" \
+    --output "$ARTIFACTS/controller-packet-trace.jsonl"
+python3 "$ROOT/tools/jscc_replay.py" replay \
+    "$ARTIFACTS/controller-packet-trace.jsonl" \
+    --output "$ARTIFACTS/controller-packet-decisions.jsonl"
 
 [[ "$consumer_rc" == 0 ]] || fail "GStreamer validation failed (see $ARTIFACTS/consumer.log)"
 echo "jscc ethernet bench: PASS ($ARTIFACTS)"

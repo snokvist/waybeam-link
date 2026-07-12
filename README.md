@@ -176,6 +176,11 @@ The finite bench additionally writes its per-frame trace and summary to
 over the run's median cadence; it is not cross-host one-way latency. VFRM PTS
 is retained as an opaque SDK correlation value and is not treated as
 milliseconds. Override the provisional 16 ms budget with `JSCC_DEADLINE_MS=25`.
+Finite runs also enable the capped UDP packet-event observer and emit
+`{tx,rx}-packets.jsonl`, `controller-packet-trace.jsonl`, and
+`controller-packet-decisions.jsonl`. `PACKET_TRACE_MAX` defaults to 250,000
+events per process; `trace_end.events_dropped` makes an incomplete capture
+explicit.
 
 ## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
 
@@ -369,6 +374,25 @@ symbol size, `k`, target/emitted parity, and whether `k+m <= 256`. Per-frame
 path delivery and RTT are explicitly `null` until packet-event and uplink
 tracing are added; replay does not infer data the Ethernet frame trace cannot
 observe.
+
+Packet-event traces group the existing DATA/NACK wire records by frame block.
+They retain source/repair symbol identity, both virtual listener outcomes,
+synthetic drops, retransmissions, NACK timing, and final replay outcome. Replay
+can replace recorded delivery with deterministic failure models and pin FEC,
+ARQ, or deadline discard for ablation:
+
+```sh
+python3 tools/jscc_replay.py replay controller-packet-trace.jsonl \
+  --loss-model burst --loss-period 100 --burst-length 12 \
+  --path-correlation correlated --fec on --arq eligible \
+  --rtt-ms 4 --deadline-ms 16
+```
+
+Loss models are `recorded`, `none`, `burst`, `incremental`, `low-frequency`,
+and `high-frequency`. Synthetic diversity defaults to independent paths;
+`--path-correlation correlated` applies the same loss decision to every path.
+All timing remains receiver-host-relative. Kernel queue drops are cumulative
+stats and cannot be reconstructed as individual packet events.
 
 `recover-video` sends a receiver-to-transmitter recovery request for the
 latched RTP stream. The vehicle then requests one IDR from venc; steady-state

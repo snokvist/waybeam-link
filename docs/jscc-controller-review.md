@@ -181,3 +181,12 @@ calculates the exact frame allocation (`S`, `k`, target `m`, emitted
 `m`, and the GF(256) capacity verdict) while leaving unobserved per-frame path
 delivery and RTT as `null`. This makes the current evidence reproducible
 without overstating what the UDP bench measures.
+
+Trace v1 also accepts the optional `waybeam-packet-events-v1` bench stream.
+The UDP backend observes submitted, accepted, filtered, and synthetic-drop
+events behind a fixed cap; it is disabled unless `WBLINK_PACKET_TRACE` is set.
+The event builder groups existing wire packets by block and retains per-path
+delivery, NACKs, and retransmissions. Replay provides seeded burst,
+incremental, sparse-periodic, and high-frequency loss with independent or
+fully correlated diversity plus FEC/ARQ/deadline-discard ablations. This is
+tooling only: no DATA field, protocol rule, or production stats field changed.
