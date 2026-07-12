@@ -248,6 +248,23 @@ NACK/LINK_REPORT returns):
 "air": { "kind": "udp", "rx": ["0.0.0.0:5801"], "tx": ["<craft-ip>:5810"] }
 ```
 
+For UDP benches with ARQ, generate the reciprocal pair from one topology file
+so node identities, diversity endpoints, return injection, and preferred peers
+cannot drift independently:
+
+```sh
+tools/expand_arq_topology.py examples/topology.frame-shm-udp.sample.json \
+  --out-dir /tmp/waybeam-pair
+```
+
+The expander writes `tx.json` and `rx.json`. `udp.downlink_ports` defines the
+virtual diversity paths and `udp.return_port` defines the matched NACK/report
+path. It rejects duplicate identities, duplicate downlink ports, and collisions
+between the forward and return paths.
+Once the named SHM producer exists, validate each generated node with
+`waybeam-link tx -c /tmp/waybeam-pair/tx.json --check` and the corresponding
+`rx` command.
+
 Run: `waybeam-link rx -c <rx>.json`.
 
 ### Verify

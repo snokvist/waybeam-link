@@ -73,14 +73,13 @@ and several observability gaps need resolution before unattended deployment.
    teardown. HEARTBEAT cannot advertise stream types because its specified body
    is empty.
 
-8. **ARQ duplex topology is manual.**
+8. **ARQ duplex topology was manual (UDP fixed).**
    RX correctly emits NACK/LINK_REPORT through the same air backend. Radio and
    kernel-monitor require exactly one `role:"tx"` adapter even on a ground RX
-   node; UDP requires reciprocal `tx`/`rx` endpoints. Sample configs explain
-   this, but config does not derive or validate a matched return pair. A topology
-   generator should expand a stream declaration into downlink plus return path,
-   assign the preferred originator, and validate that ARQ-enabled streams have
-   a usable injector.
+   node; UDP requires reciprocal `tx`/`rx` endpoints. The topology expander now
+   emits both UDP configs from one declaration, assigns preferred originators,
+   and rejects identity/port collisions. Radio/monitor adapter inventory remains
+   hardware-specific and is intentionally not synthesized.
 
 9. **Startup admission can discard the first frame.**
    Admission intentionally waits for three matching packets, then uses the
@@ -176,5 +175,4 @@ to normal point-to-point UDP:
 
 ## Recommended sequence
 
-1. Add a config topology expander for paired ARQ return paths.
-2. Add optional UDP broadcast/sniffer mode as a dedicated simulation backend.
+1. Add optional UDP broadcast/sniffer mode as a dedicated simulation backend.
