@@ -51,6 +51,7 @@ int main() {
             AirUdpCfg ground_cfg;
             ground_cfg.broadcast = true;
             ground_cfg.originator = 9;
+            ground_cfg.tx = {"127.255.255.255:" + std::to_string(port)};
             ground_cfg.rx = {"0.0.0.0:" + std::to_string(port),
                              "0.0.0.0:" + std::to_string(port)};
             auto ground = UdpAir::create(ground_cfg);
@@ -74,13 +75,26 @@ int main() {
                 CHECK_EQ_U(ground.value->rx_frames(0), 1u);
                 CHECK_EQ_U(ground.value->rx_frames(1), 1u);
 
+                uint8_t own_frame[kCommonPrefixSize]{};
+                const Heartbeat own_hb{{9, 0, 5678}};
+                CHECK_EQ_U(encode_heartbeat(own_hb, own_frame,
+                                            sizeof(own_frame)),
+                           sizeof(own_frame));
+                CHECK_EQ_U(ground.value->inject(own_frame,
+                                                sizeof(own_frame)),
+                           1u);
+                CHECK_EQ_U(craft.value->poll_once(100, discard), 1u);
+                CHECK_EQ_U(ground.value->poll_once(100, discard), 0u);
+                CHECK_EQ_U(ground.value->rx_filtered(0), 1u);
+                CHECK_EQ_U(ground.value->rx_filtered(1), 1u);
+
                 const uint8_t junk[] = {1, 2, 3};
                 CHECK_EQ_U(sender.value->inject(junk, sizeof(junk)), 1u);
                 CHECK_EQ_U(craft.value->poll_once(100, discard), 0u);
                 CHECK_EQ_U(ground.value->poll_once(100, discard), 0u);
                 CHECK_EQ_U(craft.value->rx_filtered(0), 1u);
-                CHECK_EQ_U(ground.value->rx_filtered(0), 1u);
-                CHECK_EQ_U(ground.value->rx_filtered(1), 1u);
+                CHECK_EQ_U(ground.value->rx_filtered(0), 2u);
+                CHECK_EQ_U(ground.value->rx_filtered(1), 2u);
             }
         }
     }

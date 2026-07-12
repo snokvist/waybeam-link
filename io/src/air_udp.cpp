@@ -70,9 +70,13 @@ size_t UdpAir::inject(const uint8_t* frame, size_t len) {
         if (t.send(frame, len)) {
             ++reached;
             ++tx_submitted_;
-            if (broadcast_ && !rx_filtered_.empty()) {
-                ++rx_filtered_[0];  // self copy rejected by socket BPF
-                adapters_[0].note_socket_filtered();
+            if (broadcast_) {
+                // Every shared-port listener gets and rejects the local
+                // broadcast copy in its socket BPF.
+                for (size_t i = 0; i < adapters_.size(); ++i) {
+                    ++rx_filtered_[i];
+                    adapters_[i].note_socket_filtered();
+                }
             }
         } else {
             ++tx_failed_;
@@ -91,9 +95,9 @@ void UdpAir::service_paced_tx() {
         const std::vector<uint8_t>& frame = tx_queue_.front();
         if (targets_[0].send(frame.data(), frame.size())) {
             ++tx_submitted_;
-            if (!rx_filtered_.empty()) {
-                ++rx_filtered_[0];
-                adapters_[0].note_socket_filtered();
+            for (size_t i = 0; i < adapters_.size(); ++i) {
+                ++rx_filtered_[i];
+                adapters_[i].note_socket_filtered();
             }
         } else {
             ++tx_failed_;
