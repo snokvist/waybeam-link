@@ -1534,11 +1534,14 @@ the §7.2 quiet-gap or §11 TSF anchoring — those need real radios (§17).
 ### 16.3 UDP broadcast/sniffer air backend
 
 `air.kind: "udp-broadcast"` is the RF-broadcast bench analogue. It uses the
-existing `air.tx` and `air.rx` arrays but requires exactly one endpoint in each:
-`tx[0]` is an IPv4 broadcast destination and `rx[0]` is the shared listen
-address/port. Multiple nodes may bind the same `rx[0]` port. Every injected air
-frame is sent once to the channel; every local listener receives and passively
-filters the channel rather than owning a point-to-point route.
+existing `air.tx` and `air.rx` arrays and requires exactly one TX endpoint plus
+one or more RX endpoints. `tx[0]` is an IPv4 broadcast destination; every RX
+entry is a virtual adapter bound to the shared listen address/port. Entries MAY
+repeat the same endpoint: Linux broadcast fanout gives each `SO_REUSEADDR`
+socket its own observation, which exercises the normal pre-diversity merge.
+Multiple nodes may bind the same channel. Every injected air frame is sent once;
+every local listener receives and passively filters the channel rather than
+owning a point-to-point route.
 
 The backend enables `SO_BROADCAST` on TX and shared-address binding on RX. Before
 delivery to the core it validates the complete waybeam wire packet (§3), rejects
@@ -1551,8 +1554,10 @@ its own looped-back traffic. Ordinary `air.kind: "udp"` retains its existing
 multi-target/multi-listener point-to-point simulation semantics and performs no
 new filtering.
 
-This backend is Linux/IPv4 bench tooling, not a claim that UDP broadcast models
-RF timing, RSSI, collision, capture, or half-duplex behavior. Loopback use SHOULD
+Repeated local RX bindings model independent receiver delivery paths only when
+the bench applies per-adapter synthetic loss; without injected loss they receive
+identical copies. This backend is Linux/IPv4 bench tooling, not a claim that UDP
+broadcast models RF timing, RSSI, collision, capture, or half-duplex behavior. Loopback use SHOULD
 send to `127.255.255.255:<port>` and listen on `0.0.0.0:<port>`; subnet broadcast
 may be used for a multi-host LAN bench.
 
