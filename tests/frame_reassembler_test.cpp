@@ -265,5 +265,40 @@ int main() {
         for (int fr = 0; fr < 4; ++fr) CHECK(got[static_cast<size_t>(fr)] == blobs[static_cast<size_t>(fr)]);
     }
 
+    // --- newer available frame supersedes incomplete older frame -----------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kNone, 0, 0, 3));
+        auto old_blob = make_frame(6000, /*idr=*/false, 30);
+        auto new_blob = make_frame(6500, /*idr=*/false, 31);
+        auto old_syms = produce(ff, old_blob);
+        auto new_syms = produce(ff, new_blob);
+        CHECK(old_syms.size() > 1);
+        CHECK(new_syms.size() > 1);
+
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        // Leave the old block incomplete, then release the complete newer one.
+        for (size_t i = 1; i < old_syms.size(); ++i) {
+            const Sym& s = old_syms[i];
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                    1000, emit);
+        }
+        for (const Sym& s : new_syms) {
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                    1001, emit);
+        }
+        CHECK_EQ_U(got.size(), 1u);
+        CHECK(got[0] == new_blob);
+        CHECK_EQ_U(ra.stats().frames_superseded, 1u);
+        CHECK_EQ_U(ra.stats().frames_unrecoverable, 1u);
+
+        // A late symbol for the finalized old block can never appear after it.
+        const Sym& late = old_syms[0];
+        ra.push(late.block_id, late.flags, late.payload.data(), late.payload.size(),
+                1002, emit);
+        CHECK_EQ_U(got.size(), 1u);
+    }
+
     return wbtest_finish("frame_reassembler_test");
 }

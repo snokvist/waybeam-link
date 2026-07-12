@@ -26,7 +26,7 @@ namespace wblink {
 
 struct FrameReassemblerConfig {
     uint32_t deadline_ms = 50;       // §8 per-block budget; drop if unmet
-    uint32_t max_blocks_ahead = 2;   // §6.2 supersession window (blocks)
+    uint32_t max_blocks_ahead = 0;   // §6.3a: newer block supersedes all older
     uint32_t max_frame_bytes = 640 * 1024;  // sanity cap (venc slot is 512 KB)
 };
 
