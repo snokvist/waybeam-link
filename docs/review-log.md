@@ -398,6 +398,24 @@ The two-target udp-air `tx:[a,b]` split-fanout under-reports `delivered` vs the
 wire (dev-backend artifact, not a stats bug: single-adapter and real diversity
 both account exactly — verified `delivered==uniq==wire` on a 1-adapter run).
 
+## Pass 17 — quiet HEARTBEAT + passive discovery API (2026-07-12)
+
+Operator approved the missing application behavior for the already-pinned §3.8
+HEARTBEAT wire type and the discovery surface identified by the transport audit:
+
+- Every node emits HEARTBEAT at 1 Hz only while otherwise quiet. Any successfully
+  submitted packet resets the quiet interval; active links add no keepalive load.
+- HEARTBEAT refreshes bounded node presence only. It cannot create stream state
+  because its normative 11-byte body has no stream fields.
+- DATA continues to populate admission candidates and latches. New read-only
+  `GET /api/v1/discovery` returns bounded `nodes[]` plus DATA-derived `streams[]`
+  with identity, counts, monotonic first/last-seen stamps, and latch state.
+- Discovery introspection is observational: it never changes admission, latch
+  selection, teardown, or output routing.
+
+**Amended:** §3.8 (1 Hz quiet-only emission rule); §15.5 (discovery endpoint and
+bounded JSON contract). Code follows in separate commits.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

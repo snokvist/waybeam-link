@@ -389,6 +389,12 @@ between NACKs, or a node waiting at a rendezvous channel, §11.5) something to b
 discovered by. It carries no stream fields — HEARTBEAT never creates or refreshes
 *per-stream* RX state. Exactly 11 bytes; any other length is a decode error.
 
+**Emission cadence (operator-ruled 2026-07-12):** every node emits HEARTBEAT at
+**1 Hz while otherwise quiet**. Any successfully submitted DATA, NACK,
+LINK_REPORT, CSA, or HEARTBEAT resets the one-second quiet interval, so active
+traffic suppresses redundant keepalives. HEARTBEAT uses the node's current
+`originator` and per-boot `session_id`, with broadcast destination `0`.
+
 ---
 
 ## 4. Block model and profiles
@@ -1398,6 +1404,17 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/stats/stream` | `text/event-stream`; one §15.3 object per `stats.hz` tick |
 | `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]`, `build` |
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
+| `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/DATA observations |
+
+`GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
+`{originator,session,last_seen_ms}` for HEARTBEAT or DATA senders. `streams[]`
+contains DATA-derived candidates and active latches as
+`{originator,session,stream_id,stream_type,packet_count,first_seen_ms,last_seen_ms,latched}`.
+Times are monotonic node-local millisecond stamps and are comparable only within
+one node's responses. HEARTBEAT never fabricates a stream entry. Both lists are
+bounded by the §13 discovery cap, refreshed by matching traffic, and aged out
+after the existing discovery/idle windows; the endpoint does not alter latch
+selection or admission state.
 
 **Write** (live; `200 { "ok": true, … }` on success, `4xx { "ok": false, "error": "…" }`
 otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
