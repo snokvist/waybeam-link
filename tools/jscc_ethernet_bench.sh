@@ -27,6 +27,7 @@ STATE_DIR=${STATE_DIR:-/tmp/waybeam-jscc-ethernet}
 SUPERVISOR_PID="$STATE_DIR/supervisor.pid"
 SUPERVISOR_LOG="$STATE_DIR/supervisor.log"
 SYSTEMD_UNIT=waybeam-jscc-ethernet.service
+GROUND_CONTROL=http://127.0.0.1:8092
 RUNTIME_INFO="$STATE_DIR/runtime.env"
 GROUND_PID=
 CONSUMER_PID=
@@ -213,9 +214,15 @@ case "$COMMAND" in
     start) start_supervisor; exit $? ;;
     stop) stop_supervisor; exit $? ;;
     status) status_supervisor; exit $? ;;
+    recover-video)
+        curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' \
+            "$GROUND_CONTROL/api/v1/video/recover"
+        echo
+        exit 0
+        ;;
     finite) LIVE=0 ;;
     run) LIVE=1 ;;
-    *) echo "usage: $0 [start|stop|status|run|finite]" >&2; exit 2 ;;
+    *) echo "usage: $0 [start|stop|status|recover-video|run|finite]" >&2; exit 2 ;;
 esac
 
 trap cleanup EXIT
@@ -261,6 +268,7 @@ cat >"$ARTIFACTS/tx.json" <<EOF
   "air":{"kind":"udp","tx":["$GROUND_IP:5801","$GROUND_IP:5802"],
          "rx":["0.0.0.0:5810"]},
   "policy":{"select":{"min_profile":0,"max_profile":0}},
+  "venc":{"host":"127.0.0.1:80","enabled":true},
   "stats":{"hz":5,"bind":{"kind":"udp","send":"$GROUND_IP:9110"}}
 }
 EOF
@@ -273,6 +281,7 @@ cat >"$ARTIFACTS/rx.json" <<EOF
   "air":{"kind":"udp","rx":["0.0.0.0:5801","0.0.0.0:5802"],
          "tx":["$CRAFT_IP:5810"],"rx_drop_permille":$RX_DROP_PERMILLE},
   "policy":{"select":{"min_profile":0,"max_profile":0}},
+  "control":{"bind":"127.0.0.1:8092"},
   "stats":{"hz":5,"bind":{"kind":"udp","send":"127.0.0.1:9110"}}
 }
 EOF

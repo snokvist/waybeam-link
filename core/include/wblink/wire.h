@@ -90,6 +90,15 @@ struct Heartbeat {
     friend bool operator==(const Heartbeat&, const Heartbeat&) = default;
 };
 
+// §3.9 RECOVERY_REQUEST — RX asks the exact TX session to bootstrap a stream.
+struct RecoveryRequest {
+    CommonPrefix prefix;
+    uint16_t target_originator = 0;
+    uint32_t target_session = 0;
+    uint8_t target_stream_id = 0;
+    friend bool operator==(const RecoveryRequest&, const RecoveryRequest&) = default;
+};
+
 // §11.1 CSA (fixed 32 bytes). csa_mac is carried opaque here; HMAC
 // computation/verification is the CSA engine's job (§11.4, build step 10).
 struct CsaPacket {
@@ -112,14 +121,14 @@ enum class DecodeError : uint8_t {
     kTooShort,        // shorter than the common prefix
     kBadMagic,        // first two bytes are not 0x57 0x42
     kBadVersion,      // version nibble != 0
-    kUnknownType,     // type nibble not in {1..5}
+    kUnknownType,     // type nibble not in {1..6}
     kTruncated,       // shorter than the type's fixed header
     kLengthMismatch,  // buffer length disagrees with the declared/fixed size
 };
 
 // index 0 = error; otherwise one decoded packet.
 using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
-                             Heartbeat, CsaPacket>;
+                             Heartbeat, CsaPacket, RecoveryRequest>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -134,5 +143,7 @@ size_t encode_nack(const NackHeader& hdr, const uint8_t* bitmap,
 size_t encode_link_report(const LinkReport& pkt, uint8_t* out, size_t cap);
 size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap);
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap);
+size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,
+                               size_t cap);
 
 }  // namespace wblink

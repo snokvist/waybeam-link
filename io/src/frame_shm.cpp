@@ -118,6 +118,8 @@ R FrameShmRing::create(const std::string& name, uint32_t slots,
         ::shm_unlink(shm_name.c_str());
         return R::fail("frame_shm create: ftruncate: " + e);
     }
+    struct stat backing{};
+    const bool have_backing = ::fstat(fd, &backing) == 0;
     void* p = ::mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     ::close(fd);  // the mapping keeps the object alive
     if (p == MAP_FAILED) {
@@ -133,6 +135,10 @@ R FrameShmRing::create(const std::string& name, uint32_t slots,
     ring->slot_stride_ = stride;
     ring->name_ = shm_name;
     ring->is_owner_ = true;
+    if (have_backing) {
+        ring->backing_dev_ = static_cast<uint64_t>(backing.st_dev);
+        ring->backing_ino_ = static_cast<uint64_t>(backing.st_ino);
+    }
 
     uint8_t* b = ring->map_;
     std::memset(b, 0, total);  // zeroes write_idx / read_idx / futex_seq / waiting
@@ -149,6 +155,9 @@ R FrameShmRing::create(const std::string& name, uint32_t slots,
     // Publish config last: a release store on init_complete makes every prior
     // header write visible to a consumer that acquire-loads it.
     atomic_store_u32(b, kFrHdrInitComplete, 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(reinterpret_cast<uint32_t*>(b + kFrHdrFutexSeq), 1,
+                       __ATOMIC_SEQ_CST);
+    futex_wake(reinterpret_cast<uint32_t*>(b + kFrHdrFutexSeq), INT32_MAX);
     return R::ok(std::move(ring));
 }
 
@@ -430,7 +439,20 @@ FrameShmRing::~FrameShmRing() {
         map_ = nullptr;
     }
     if (is_owner_ && !name_.empty()) {
-        ::shm_unlink(name_.c_str());
+        // A newer producer may already have unlinked/recreated this name.
+        // Never let teardown of our orphaned mapping unlink its replacement.
+        const int fd = ::shm_open(name_.c_str(), O_RDWR, 0);
+        struct stat st{};
+        const bool still_ours =
+            fd >= 0 && ::fstat(fd, &st) == 0 &&
+            static_cast<uint64_t>(st.st_dev) == backing_dev_ &&
+            static_cast<uint64_t>(st.st_ino) == backing_ino_;
+        if (fd >= 0) {
+            ::close(fd);
+        }
+        if (still_ours) {
+            ::shm_unlink(name_.c_str());
+        }
     }
 }
 

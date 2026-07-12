@@ -124,6 +124,19 @@ Decoded decode_csa(const uint8_t* buf, size_t len) {
     return c;
 }
 
+Decoded decode_recovery_request(const uint8_t* buf, size_t len) {
+    if (len != kRecoveryRequestSize) {
+        return len < kRecoveryRequestSize ? DecodeError::kTruncated
+                                          : DecodeError::kLengthMismatch;
+    }
+    RecoveryRequest r;
+    r.prefix = decode_prefix(buf);
+    r.target_originator = be16_read(buf + 11);
+    r.target_session = be32_read(buf + 13);
+    r.target_stream_id = buf[17];
+    return r;
+}
+
 }  // namespace
 
 Decoded decode(const uint8_t* buf, size_t len) {
@@ -151,6 +164,8 @@ Decoded decode(const uint8_t* buf, size_t len) {
             return decode_heartbeat(buf, len);
         case PacketType::kCsa:
             return decode_csa(buf, len);
+        case PacketType::kRecoveryRequest:
+            return decode_recovery_request(buf, len);
         default:
             return DecodeError::kUnknownType;
     }
@@ -243,6 +258,18 @@ size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap) {
     out[27] = pkt.power_intent;
     be32_write(out + 28, pkt.csa_mac);
     return kCsaSize;
+}
+
+size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,
+                               size_t cap) {
+    if (out == nullptr || cap < kRecoveryRequestSize) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kRecoveryRequest, out);
+    be16_write(out + 11, pkt.target_originator);
+    be32_write(out + 13, pkt.target_session);
+    out[17] = pkt.target_stream_id;
+    return kRecoveryRequestSize;
 }
 
 }  // namespace wblink

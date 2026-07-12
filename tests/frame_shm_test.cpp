@@ -207,5 +207,19 @@ int main() {
     // Rings out of scope here: destructors join the reader thread + unlink.
     // Reaching wbtest_finish without hanging proves clean teardown.
 
+    // Destroying an orphaned old producer must not unlink a newer generation
+    // that has already recreated the same public name.
+    {
+        const std::string replacement_name =
+            "wblink-frame-shm-replace-" + std::to_string(::getpid());
+        auto old = FrameShmRing::create(replacement_name, 2, 128);
+        CHECK(static_cast<bool>(old));
+        auto replacement = FrameShmRing::create(replacement_name, 2, 128);
+        CHECK(static_cast<bool>(replacement));
+        old.value->reset();
+        auto consumer = FrameShmRing::attach(replacement_name);
+        CHECK(static_cast<bool>(consumer));
+    }
+
     return wbtest_finish("frame_shm_test");
 }

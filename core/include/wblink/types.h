@@ -19,6 +19,7 @@ enum class PacketType : uint8_t {
     kLinkReport = 0x3,
     kHeartbeat = 0x4,
     kCsa = 0x5,
+    kRecoveryRequest = 0x6,
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -46,6 +47,7 @@ inline constexpr size_t kNackFixedSize = 23;
 inline constexpr size_t kLinkReportSize = 39;
 inline constexpr size_t kHeartbeatSize = 11;
 inline constexpr size_t kCsaSize = 32;
+inline constexpr size_t kRecoveryRequestSize = 18;
 
 // §3.2 — absolute DATA payload ceiling for buffer sizing (Realtek jumbo/A-MSDU
 // rungs reach ~3967 B; 4096 caps it). The EFFECTIVE per-frame budget is

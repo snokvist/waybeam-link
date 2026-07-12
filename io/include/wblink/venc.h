@@ -31,9 +31,12 @@ class VencActuator {
     // wedged encoder (200 ms socket budget per attempt) cannot degrade the
     // event loop.
     bool set_bitrate(uint32_t kbps, uint64_t now_ms);
+    bool request_idr(uint64_t now_ms);
 
     uint64_t pushes() const { return pushes_; }
     uint64_t failures() const { return failures_; }
+    uint64_t idr_requests() const { return idr_requests_; }
+    uint64_t idr_failures() const { return idr_failures_; }
     bool enabled() const { return cfg_.enabled; }
 
   private:
@@ -44,6 +47,9 @@ class VencActuator {
     uint64_t no_retry_until_ms_ = 0;
     uint64_t pushes_ = 0;
     uint64_t failures_ = 0;
+    uint64_t next_idr_ms_ = 0;
+    uint64_t idr_requests_ = 0;
+    uint64_t idr_failures_ = 0;
 };
 
 }  // namespace wblink

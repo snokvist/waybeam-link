@@ -138,6 +138,20 @@ int main() {
     }
 
     for (int i = 0; i < kIters; ++i) {
+        RecoveryRequest r;
+        r.prefix = random_prefix(rng);
+        r.target_originator = rng.u16();
+        r.target_session = rng.u32();
+        r.target_stream_id = rng.u8();
+        const size_t n = encode_recovery_request(r, buf, sizeof(buf));
+        CHECK_EQ_U(n, kRecoveryRequestSize);
+        const Decoded d = decode(buf, n);
+        const RecoveryRequest* v = std::get_if<RecoveryRequest>(&d);
+        CHECK(v != nullptr);
+        if (v != nullptr) CHECK(*v == r);
+    }
+
+    for (int i = 0; i < kIters; ++i) {
         Heartbeat hb;
         hb.prefix = random_prefix(rng);
         const size_t n = encode_heartbeat(hb, buf, sizeof(buf));
