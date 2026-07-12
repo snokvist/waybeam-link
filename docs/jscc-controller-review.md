@@ -83,8 +83,9 @@ The runner deploys the current SSC338Q cross-build over
 `/usr/bin/waybeam-link` and persistently installs its generated config as
 `/etc/waybeam-link/jscc-ethernet.json`. It backs up `/etc/waybeam.json`,
 temporarily selects `frame-shm://venc_frame`, restarts the encoder, and restores
-the exact encoder config on exit. Continuous mode runs until interrupted and
-keeps the decoder plus dashboard active. Finite mode additionally stores
+the exact encoder config on exit. If that output is already active, it leaves
+the encoder config and process untouched. Continuous mode runs until
+interrupted and keeps the decoder plus dashboard active. Finite mode stores
 configs, TX/RX NDJSON, stderr, decoded-frame validation, a per-frame
 arrival/size/PTS CSV, and a JSON summary under `artifacts/` (gitignored).
 
@@ -126,12 +127,40 @@ but the maximum was 192-204 KB. Mean inter-arrival spacing was 13.2-13.4 ms
 while P95 was about 12.6 ms; large-frame stalls dominate the tail above P95.
 No IDR metadata was observed, as expected for the configured GDR mode.
 
+### Frame-size operating envelope
+
+The operator expects the 512 KB SHM slot ceiling to remain unreachable at the
+intended 25 Mbit/s, 60--90 fps, intra-refresh operating points. A direct source
+SHM measurement on the SSC338Q with `video0.size=auto` confirmed this for the
+available 90 fps sensor mode:
+
+| target | realized | frames | mean | maximum | slot use |
+|---:|---:|---:|---:|---:|---:|
+| 25 Mbit/s, 60 fps cap | 24.66 Mbit/s, 60.2 fps | 3,586 | 51,164 B | 74,789 B | 14.3% |
+| 25 Mbit/s, 144 fps cap | 24.82 Mbit/s, 90.2 fps | 5,371 | 34,393 B | 62,242 B | 11.9% |
+
+Both windows had valid metadata, Annex-B framing, monotonic PTS, and zero ring
+lag. The 144 setting is only a ceiling; this sensor mode supports at most 90
+fps. The 60 fps validator window contained no IDR and its legacy validator
+therefore printed `FAIL`; that condition is expected for steady GDR and none of
+its integrity checks failed.
+
+At the standard `max_payload=1424`, the actual symbol data size is 1,387 B.
+With the bench's 10% P-frame parity, the largest capacity-safe encoded frame is
+321,776 B (`k=232,m=24`). At 25% IDR-class parity it is 282,940 B
+(`k=204,m=51`). Thus FEC capacity, not the 512 KB SHM slot, is the first bound,
+but the largest observed operating frame used only 23.2% of the tighter bound.
+This evidence makes oversize a defensive counter/policy case, not a likely
+steady-state event. It does not prove behavior under an unobserved pathological
+scene or forced large IDR, so the guard must remain.
+
 ## Recommended sequence
 
-1. Establish repeatable baseline and injected-loss runs at the current 144 fps
-   and several encoder bitrates; preserve every artifact directory.
-2. Add an offline trace/replay input around controller decisions, with frame
-   size, arrival spacing, per-path delivery, RTT, and an explicit deadline.
+1. [DONE] Establish repeatable baseline and injected-loss runs and preserve the
+   artifact directories.
+2. [PARTIAL] Add an offline trace/replay input around controller decisions,
+   with frame size, arrival spacing, per-path delivery, RTT, and an explicit
+   deadline.
 3. Specify the oversized-block policy and absolute frame-deadline model before
    changing the wire or scheduler.
 4. Characterize the SSC338Q's available QP/size actuation independently of the
@@ -140,3 +169,15 @@ No IDR metadata was observed, as expected for the configured GDR mode.
    control only after ablations show the inner loop and metrics are sound.
 6. Return to RF for MCS, packet-duration/fade, correlated-loss, and uplink RTT
    experiments; Ethernet results cannot answer those questions.
+
+### Replay foundation
+
+`tools/jscc_replay.py` implements the first deterministic trace contract. A
+finite Ethernet run emits `controller-trace.jsonl` and an independently
+replayable `controller-decisions.jsonl`. Trace v1 deliberately uses excess
+inter-arrival time over the run median because the two hosts do not yet share a
+capture clock. The raw VFRM SDK PTS is retained only for correlation. It
+calculates the exact frame allocation (`S`, `k`, target `m`, emitted
+`m`, and the GF(256) capacity verdict) while leaving unobserved per-frame path
+delivery and RTT as `null`. This makes the current evidence reproducible
+without overstating what the UDP bench measures.

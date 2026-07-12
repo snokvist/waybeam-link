@@ -170,7 +170,12 @@ browser-side trend history. Hover an underlined label for its precise meaning.
 Frame-SHM streams report successful local frame transfers, cumulative bytes,
 last/min/max frame size, latest arrival interval, and smoothed arrival jitter.
 The finite bench additionally writes its per-frame trace and summary to
-`frames.csv` and `summary.json`.
+`frames.csv` and `summary.json`. It converts that data to the versioned
+`controller-trace.jsonl` contract and deterministically replays it into
+`controller-decisions.jsonl`. The initial deadline is excess inter-arrival time
+over the run's median cadence; it is not cross-host one-way latency. VFRM PTS
+is retained as an opaque SDK correlation value and is not treated as
+milliseconds. Override the provisional 16 ms budget with `JSCC_DEADLINE_MS=25`.
 
 ## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
 
@@ -349,6 +354,21 @@ the built-in continuous validator instead, stop any external decoder and use
 detected second consumer because the venc frame ring is strictly
 single-consumer. Foreground `finite` runs always use the GStreamer trace
 consumer.
+
+Replay an artifact with a different relative deadline without rerunning the
+encoder:
+
+```sh
+python3 tools/jscc_replay.py replay \
+  artifacts/jscc-ethernet-*/controller-trace.jsonl \
+  --deadline-ms 25 --output /tmp/jscc-decisions.jsonl
+```
+
+Each frame records its encoded size, raw SDK PTS/arrival cadence, calculated
+symbol size, `k`, target/emitted parity, and whether `k+m <= 256`. Per-frame
+path delivery and RTT are explicitly `null` until packet-event and uplink
+tracing are added; replay does not infer data the Ethernet frame trace cannot
+observe.
 
 `recover-video` sends a receiver-to-transmitter recovery request for the
 latched RTP stream. The vehicle then requests one IDR from venc; steady-state
