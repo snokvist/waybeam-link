@@ -533,6 +533,25 @@ identical and deduplicate normally.
 **Amended:** §16.3 (multi-listener virtual diversity). Code follows in a
 separate commit.
 
+## Pass 24 — deterministic JSCC inner decision (2026-07-12)
+
+The approved JSCC roadmap needs a per-frame protection decision without
+prematurely fitting independent-loss math to unmeasured RF bursts. The inner
+controller therefore accepts a conservative predicted loss-symbol count from a
+separate estimator, clamps parity against configured and GF(256) capacity, and
+reports when the requested protection cannot fit. ARQ is eligible only when
+P95 RTT plus resend airtime and guard fit after original source transmission.
+Deadline discard is reserved for a frame whose original transmission cannot
+finish by its deadline; statistical under-protection alone does not prove that
+the frame is doomed.
+
+The decision is pure, uses injected timing, and has stable reason names for
+replay and diagnostics. Existing fixed FEC rates remain the fail-safe runtime
+fallback until the measured estimator is connected.
+
+**Amended:** §14.2 (inner-controller inputs, clamps, ARQ/deadline gates, and
+reason-code contract). Code follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

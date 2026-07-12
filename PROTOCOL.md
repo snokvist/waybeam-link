@@ -1256,6 +1256,42 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
   immediately after its source symbols at the same live priority (§5.3), *not*
   demoted to retransmit priority.
 
+### 14.2 JSCC inner decision contract
+
+The controller's per-frame decision is a pure, deterministic calculation. It
+does not consume instantaneous RSSI and does not assume independent packet loss.
+Its loss estimator supplies `predicted_loss_symbols`, a conservative frame-loss
+quantile fitted from a defined observation window or replay trace. Until the RF
+burst model is measured, this value is an explicit input rather than a hidden
+binomial calculation.
+
+Inputs are `k`, `predicted_loss_symbols`, configured `fec_floor_symbols` and
+`fec_cap_symbols`, frame `deadline_us`, elapsed time, estimated remaining source
+TX airtime, P95 return RTT, estimated resend airtime, ARQ guard time, and whether
+the frame is ARQ-capable. The decision is:
+
+1. If elapsed time plus remaining source TX airtime exceeds the frame deadline,
+   discard before spending more airtime (`deadline_unreachable`). Equality is
+   allowed and is not a miss.
+2. Otherwise choose
+   `m = min(max(predicted_loss_symbols, fec_floor_symbols), fec_cap_symbols,
+   256-k)`. If `k>256`, `m=0` and capacity is limited. A clamp below the
+   predicted count is reported as `fec_capacity_limited`; it does not by itself
+   discard a frame that may still arrive intact.
+3. ARQ is eligible only for an ARQ-capable frame when the time remaining after
+   original source transmission is at least
+   `rtt_p95_us + resend_airtime_us + arq_guard_us`. Equality is eligible.
+4. The reason code is stable and mutually exclusive:
+   `deadline_unreachable`, `fec_capacity_limited`, `fec_and_arq`, `fec_only`,
+   `arq_only`, or `unprotected`. Numeric telemetry may map these names to a
+   local enum, but the names are the diagnostic contract.
+
+The estimator, airtime model, and outer/middle loop are separate components.
+This contract only allocates protection for the current frame. The existing
+fixed-rate §14.1 policy remains the runtime fallback until a measured estimator
+feeds this decision; loss of controller input therefore preserves the authored
+configuration rather than silently selecting optimistic protection.
+
 ---
 
 ## 15. I/O bindings, configuration & observability
