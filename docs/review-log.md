@@ -446,6 +446,8 @@ without changing point-to-point UDP-air behavior:
 - Adapter stats add `filtered`; malformed/self frames are counted separately
   from accepted and synthetic-dropped traffic. Kernel-monitor's existing
   internal filter counter maps to the same field.
+- Optional `pace_mbps` serializes broadcast datagrams so frame-sized host bursts
+  do not create accidental UDP queue loss on systems with a small `rmem_max`.
 
 **Amended:** §15.3 (`filtered` adapter field); §16.3 (backend config and receive
 semantics). Code follows in a separate commit.

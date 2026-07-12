@@ -1513,6 +1513,14 @@ RF timing, RSSI, collision, capture, or half-duplex behavior. Loopback use SHOUL
 send to `127.255.255.255:<port>` and listen on `0.0.0.0:<port>`; subnet broadcast
 may be used for a multi-host LAN bench.
 
+An optional positive `air.pace_mbps` serializes broadcast datagrams at that
+payload bit rate using a monotonic next-send deadline. `0` (default) is unpaced.
+Pacing is strongly recommended for frame-SHM video benches: without RF
+serialization a complete encoded frame is emitted as a host-speed burst and may
+overflow the receiver's UDP queue even when the intended channel loss is zero.
+This pacing models serialization only; it does not model PHY overhead or
+contention.
+
 ---
 
 ## 17. Empirical knobs & bench gates
