@@ -28,6 +28,7 @@ struct ControlHandlers {
     std::function<std::string()> stats_line;
     std::function<std::string()> info_json;
     std::function<std::string()> health_json;
+    std::function<std::string()> discovery_json;
 
     // Writes — return "" on success, else a short error string (→ HTTP 400).
     // A null hook means the endpoint does not apply to this mode (→ HTTP 409).

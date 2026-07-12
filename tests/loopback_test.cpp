@@ -38,6 +38,8 @@ struct Bench {
     AdapterLossField field;
     LossRng return_rng;
     double return_loss_p;
+    unsigned periodic_every = 0;
+    uint64_t air_packet = 0;
 
     uint64_t now = 1000;
     uint64_t delivered = 0;
@@ -107,9 +109,11 @@ struct Bench {
         if (v == nullptr) {
             return;
         }
+        const bool periodic_drop =
+            periodic_every != 0 && (++air_packet % periodic_every) == 0;
         field.begin_packet();
         for (uint8_t a = 0; a < field.adapters(); ++a) {
-            if (!field.drop(a)) {
+            if (!periodic_drop && !field.drop(a)) {
                 rx.on_data(a, *v, now, deliver());
             }
         }
@@ -283,6 +287,67 @@ int main() {
         // clamp_resync_ms window (100 ms ≈ 50 packets at this rate).
         CHECK(b.rx_counters().resyncs >= 1);
         CHECK(delivered_after >= 300);
+    }
+
+    // (e) sparse periodic loss: deterministic low-frequency interference.
+    {
+        Bench b(/*adapters=*/1, /*seed=*/19, /*corr=*/0.0,
+                /*uniform_p=*/0.0, std::nullopt,
+                /*return_loss=*/0.0, /*arq_threshold=*/300);
+        b.periodic_every = 50;  // exactly 2% of air attempts
+        run_stream(b, 500, 4);
+        b.print("(e) periodic-2pct");
+        const RxStreamCounters c = b.rx_counters();
+        CHECK(c.lost_declared > 20);
+        CHECK(c.recovered_arq > 10);
+        CHECK(b.sched.counters().resends_sent > 10);
+    }
+
+    // (f) high-frequency independent loss: diversity carries most packets.
+    {
+        Bench b(/*adapters=*/2, /*seed=*/23, /*corr=*/0.0,
+                /*uniform_p=*/0.35, std::nullopt,
+                /*return_loss=*/0.0, /*arq_threshold=*/300);
+        run_stream(b, 500, 4);
+        b.print("(f) independent-35pct");
+        const RxStreamCounters c = b.rx_counters();
+        CHECK(c.diversity > 500);
+        CHECK(c.lost_declared > 100);
+        CHECK(c.recovered_arq > 20);
+        CHECK(c.uniq > 1500);
+    }
+
+    // (g) incremental loss steps: declared loss reacts monotonically.
+    {
+        Bench b(/*adapters=*/1, /*seed=*/29, /*corr=*/0.0,
+                /*uniform_p=*/0.01, std::nullopt,
+                /*return_loss=*/0.0, /*arq_threshold=*/300);
+        uint64_t prev_lost = 0;
+        uint64_t previous_delta = 0;
+        const double levels[] = {0.01, 0.05, 0.15, 0.30};
+        for (size_t i = 0; i < 4; ++i) {
+            b.field = AdapterLossField(1, 100 + i, 0.0, levels[i], std::nullopt);
+            run_stream(b, 400, 4);
+            const uint64_t lost = b.rx_counters().lost_declared;
+            const uint64_t delta = lost - prev_lost;
+            CHECK(delta > previous_delta);
+            previous_delta = delta;
+            prev_lost = lost;
+        }
+        b.print("(g) incremental");
+    }
+
+    // (h) lossy return path: retry caps remain bounded and some ARQ succeeds.
+    {
+        Bench b(/*adapters=*/1, /*seed=*/31, /*corr=*/0.0,
+                /*uniform_p=*/0.12, std::nullopt,
+                /*return_loss=*/0.50, /*arq_threshold=*/300);
+        run_stream(b, 600, 4);
+        b.print("(h) return-loss-50pct");
+        const RxStreamCounters c = b.rx_counters();
+        CHECK(c.nacks_sent > 20);
+        CHECK(c.recovered_arq > 10);
+        CHECK(b.sched.counters().resends_sent <= 3 * c.lost_declared + 10);
     }
 
     return wbtest_finish("loopback_test");

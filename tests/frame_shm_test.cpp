@@ -24,6 +24,7 @@ const char* kFull = "/wblink-frame-shm-test-full";
 const char* kOversize = "/wblink-frame-shm-test-oversize";
 const char* kEvent = "/wblink-frame-shm-test-event";
 const char* kMissing = "/wblink-frame-shm-test-missing";
+const char* kRestart = "/wblink-frame-shm-test-restart";
 
 std::vector<uint8_t> pattern(size_t len, uint8_t seed) {
     std::vector<uint8_t> v(len);
@@ -37,8 +38,36 @@ std::vector<uint8_t> pattern(size_t len, uint8_t seed) {
 
 int main() {
     // Defensive: clear any stale objects up front (ENOENT is fine).
-    for (const char* n : {kRoundTrip, kFull, kOversize, kEvent, kMissing}) {
+    for (const char* n :
+         {kRoundTrip, kFull, kOversize, kEvent, kMissing, kRestart}) {
         ::shm_unlink(n);
+    }
+
+    // --- producer restart: stale mapping detected, fresh attach resumes ------
+    {
+        auto p1 = FrameShmRing::create(kRestart, 4, 128);
+        CHECK(bool(p1));
+        auto c1 = FrameShmRing::attach(kRestart);
+        CHECK(bool(c1));
+        if (p1 && c1) {
+            CHECK((*c1.value)->backing_object_current());
+            p1.value->reset();
+            CHECK(!(*c1.value)->backing_object_current());
+
+            auto p2 = FrameShmRing::create(kRestart, 4, 128);
+            CHECK(bool(p2));
+            CHECK(!(*c1.value)->backing_object_current());
+            auto c2 = FrameShmRing::attach(kRestart);
+            CHECK(bool(c2));
+            if (p2 && c2) {
+                const uint8_t frame[] = {8, 6, 7, 5, 3, 0, 9};
+                CHECK((*p2.value)->write_frame(frame, sizeof(frame)));
+                uint8_t got[16]{};
+                CHECK_EQ_U((*c2.value)->read_frame(got, sizeof(got)),
+                           sizeof(frame));
+                CHECK(std::memcmp(got, frame, sizeof(frame)) == 0);
+            }
+        }
     }
 
     // --- round-trip: varied sizes incl. > 64 KB, byte-exact, in order ------

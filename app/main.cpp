@@ -15,6 +15,7 @@
 #include <chrono>
 #include <deque>
 #include <memory>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -67,6 +68,109 @@ uint64_t now_us() {
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
 }
+
+// Pass 17: bounded, observational catalog. It never feeds latch decisions.
+class DiscoveryCatalog {
+  public:
+    void observe(const Decoded& dec, uint64_t now) {
+        const CommonPrefix* p = nullptr;
+        const DataView* data = std::get_if<DataView>(&dec);
+        if (data != nullptr) {
+            p = &data->hdr.prefix;
+        } else if (const Heartbeat* hb = std::get_if<Heartbeat>(&dec)) {
+            p = &hb->prefix;
+        } else {
+            return;
+        }
+        const uint64_t nk = (static_cast<uint64_t>(p->originator) << 32) |
+                            p->session_id;
+        nodes_[nk] = Node{p->originator, p->session_id, now};
+        if (data != nullptr) {
+            const uint64_t sk = (nk << 8) | data->hdr.stream_id;
+            Stream& s = streams_[sk];
+            if (s.packet_count == 0) {
+                s.originator = p->originator;
+                s.session = p->session_id;
+                s.stream_id = data->hdr.stream_id;
+                s.stream_type = data->hdr.stream_type;
+                s.first_seen_ms = now;
+            }
+            ++s.packet_count;
+            s.last_seen_ms = now;
+        }
+        trim();
+    }
+
+    std::string json(uint64_t now, const std::vector<StreamKey>& latched) {
+        age(now);
+        std::string out = "{\"nodes\":[";
+        bool comma = false;
+        for (const auto& [key, n] : nodes_) {
+            (void)key;
+            if (comma) out += ',';
+            comma = true;
+            out += "{\"originator\":" + std::to_string(n.originator) +
+                   ",\"session\":" + std::to_string(n.session) +
+                   ",\"last_seen_ms\":" + std::to_string(n.last_seen_ms) + "}";
+        }
+        out += "],\"streams\":[";
+        comma = false;
+        for (const auto& [key, s] : streams_) {
+            (void)key;
+            bool is_latched = false;
+            for (const StreamKey& k : latched) {
+                is_latched = is_latched ||
+                             (k.originator == s.originator &&
+                              k.session_id == s.session &&
+                              k.stream_id == s.stream_id);
+            }
+            if (comma) out += ',';
+            comma = true;
+            out += "{\"originator\":" + std::to_string(s.originator) +
+                   ",\"session\":" + std::to_string(s.session) +
+                   ",\"stream_id\":" + std::to_string(s.stream_id) +
+                   ",\"stream_type\":" + std::to_string(s.stream_type) +
+                   ",\"packet_count\":" + std::to_string(s.packet_count) +
+                   ",\"first_seen_ms\":" + std::to_string(s.first_seen_ms) +
+                   ",\"last_seen_ms\":" + std::to_string(s.last_seen_ms) +
+                   ",\"latched\":" + (is_latched ? "true" : "false") + "}";
+        }
+        out += "]}";
+        return out;
+    }
+
+  private:
+    struct Node {
+        uint16_t originator = 0;
+        uint32_t session = 0;
+        uint64_t last_seen_ms = 0;
+    };
+    struct Stream {
+        uint16_t originator = 0;
+        uint32_t session = 0;
+        uint8_t stream_id = 0;
+        uint8_t stream_type = 0;
+        uint64_t packet_count = 0;
+        uint64_t first_seen_ms = 0;
+        uint64_t last_seen_ms = 0;
+    };
+    void age(uint64_t now) {
+        for (auto it = nodes_.begin(); it != nodes_.end();) {
+            it = now > it->second.last_seen_ms + 5000 ? nodes_.erase(it)
+                                                       : std::next(it);
+        }
+        for (auto it = streams_.begin(); it != streams_.end();) {
+            it = now > it->second.last_seen_ms + 5000 ? streams_.erase(it)
+                                                       : std::next(it);
+        }
+    }
+    void trim() {
+        while (nodes_.size() > 64) nodes_.erase(nodes_.begin());
+        while (streams_.size() > 64) streams_.erase(streams_.begin());
+    }
+    std::map<uint64_t, Node> nodes_;
+    std::map<uint64_t, Stream> streams_;
+};
 
 // §15.2 policy.csa → the core engine's parameter block (string PSK to raw
 // bytes, seconds to ms).
@@ -182,12 +286,16 @@ struct AirBackend {
 #if WBLINK_RADIO
     std::optional<RadioAir> radio;
 #endif
+    uint64_t last_tx_ms = 0;
 
     static Result<AirBackend> create(const Config& cfg) {
         AirBackend b;
-        if (cfg.air.kind == AirCfg::Kind::kUdp) {
+        if (cfg.air.kind == AirCfg::Kind::kUdp ||
+            cfg.air.kind == AirCfg::Kind::kUdpBroadcast) {
             AirUdpCfg uc = cfg.air.udp;
             uc.rx_drop_permille = cfg.air.rx_drop_permille;  // bench synthetic loss
+            uc.broadcast = cfg.air.kind == AirCfg::Kind::kUdpBroadcast;
+            uc.originator = cfg.node.originator;
             auto a = UdpAir::create(uc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
@@ -237,31 +345,60 @@ struct AirBackend {
     }
 
     size_t inject(const uint8_t* f, size_t n) {
+        size_t sent = 0;
         if (mon) {
-            return mon->inject(f, n);
-        }
+            sent = mon->inject(f, n);
+        } else {
 #if WBLINK_RADIO
-        if (radio) {
-            return radio->inject(f, n);
-        }
+            if (radio) {
+                sent = radio->inject(f, n);
+            } else
 #endif
-        return udp->inject(f, n);
+            {
+                sent = udp->inject(f, n);
+            }
+        }
+        if (sent > 0) {
+            last_tx_ms = now_ms();
+        }
+        return sent;
     }
 
     // Returns (NACK/LINK_REPORT) carry their target so the radio backend
     // can address them as §3.0 unicast when return.unicast is on; the udp
     // dev backend has no L2 addressing and ignores the target.
     size_t inject_return(uint16_t target, const uint8_t* f, size_t n) {
+        size_t sent = 0;
         if (mon) {
-            return mon->inject_return(target, f, n);
-        }
+            sent = mon->inject_return(target, f, n);
+        } else {
 #if WBLINK_RADIO
-        if (radio) {
-            return radio->inject_return(target, f, n);
-        }
+            if (radio) {
+                sent = radio->inject_return(target, f, n);
+            } else
 #endif
-        (void)target;
-        return udp->inject(f, n);
+            {
+                (void)target;
+                sent = udp->inject(f, n);
+            }
+        }
+        if (sent > 0) {
+            last_tx_ms = now_ms();
+        }
+        return sent;
+    }
+
+    void heartbeat(uint16_t originator, uint32_t session, uint64_t now) {
+        if (now < last_tx_ms || now - last_tx_ms < 1000) {
+            return;
+        }
+        Heartbeat hb;
+        hb.prefix.originator = originator;
+        hb.prefix.session_id = session;
+        uint8_t frame[kHeartbeatSize];
+        if (encode_heartbeat(hb, frame, sizeof(frame)) == sizeof(frame)) {
+            inject(frame, sizeof(frame));
+        }
     }
 
     int poll_once(int timeout_ms, const UdpAir::RxCb& cb) {
@@ -369,10 +506,44 @@ struct AirBackend {
         return false;
 #endif
     }
+    bool tx_pending() const { return udp && udp->tx_pending(); }
+    bool supports_csa() const {
+        // UDP intentionally exercises CSA state without a physical retune.
+        // Kernel-monitor cannot retune yet and must fail closed: pretending a
+        // switch succeeded can strand the node while its interface stays put.
+        return !mon.has_value();
+    }
     // §9.10: the watchdog runs in the mode loop (it owns the clock); its
     // verdict is grafted onto the TX adapter's stats entry here.
     void fill_adapter_stats(StatsSnapshot& snap, uint64_t tsf_fallbacks,
                             bool tx_wedged) const {
+        if (udp) {
+            const size_t n = udp->rx_adapters();
+            for (size_t i = 0; i < n; ++i) {
+                AdapterStats as;
+                as.name = "udp" + std::to_string(i);
+                as.rx = udp->rx_frames(i);
+                as.filtered = udp->rx_filtered(i);
+                as.drop = udp->rx_dropped(i);
+                as.kernel_drop = udp->kernel_dropped(i);
+                if (i == 0) {
+                    as.tx_submitted = udp->tx_submitted();
+                    as.tx_failed = udp->tx_failed();
+                }
+                snap.adapters.push_back(std::move(as));
+            }
+            // A TX-only UDP node has no RX adapter entry to carry its aggregate.
+            if (n == 0 && (udp->tx_submitted() != 0 || udp->tx_failed() != 0)) {
+                AdapterStats as;
+                as.name = "udp-tx";
+                as.tx_submitted = udp->tx_submitted();
+                as.tx_failed = udp->tx_failed();
+                snap.adapters.push_back(std::move(as));
+            }
+            (void)tsf_fallbacks;
+            (void)tx_wedged;
+            return;
+        }
         if (mon) {
             for (size_t i = 0; i < mon->rx_adapters(); ++i) {
                 const auto c = mon->counters(i);
@@ -384,6 +555,8 @@ struct AirBackend {
                 as.tx_submitted = c.tx_submitted;
                 as.tx_failed = c.tx_failed;
                 as.drop = c.rx_dropped;
+                as.filtered = c.rx_filtered;
+                as.kernel_drop = c.kernel_dropped;
                 as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
                 // No CCX tx.report on monitor injection; wedge watchdog off.
                 as.tx_reports = 0;
@@ -862,6 +1035,12 @@ struct RxCore {
             st.delivered = info.counters.delivered;
             st.uniq = info.counters.uniq;
             st.diversity = info.counters.diversity;
+            st.loss_prediversity_milli =
+                info.counters.prediv_expected == 0
+                    ? 0
+                    : static_cast<uint32_t>(
+                          info.counters.prediv_lost * 1000 /
+                          info.counters.prediv_expected);
             const uint64_t denom =
                 info.counters.uniq + info.counters.lost_declared;
             st.loss_postdiv_prearq_milli =
@@ -898,6 +1077,14 @@ struct RxCore {
     // §15.5 stats/reset. The frame-shm reassemblers live in run_rx (ShmOut),
     // so the caller resets those; here we zero the RX engine's counters.
     void reset_stats() { engine_.reset_stats(); }
+
+    std::vector<StreamKey> stream_keys() const {
+        std::vector<StreamKey> out;
+        for (const RxStreamInfo& info : engine_.streams()) {
+            out.push_back(info.key);
+        }
+        return out;
+    }
 
     uint16_t originator_;
     uint32_t session_;
@@ -949,6 +1136,8 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 bool tx_wedged = false,
                 const std::vector<std::pair<uint8_t, FrameReassemblerStats>>*
                     frame_stats = nullptr,
+                const std::vector<std::pair<uint8_t, FrameShmRing::Stats>>*
+                    shm_stats = nullptr,
                 StatsSnapshot* out_snap = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
@@ -1001,6 +1190,18 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
             st->decode_errors = fr.decode_failures;
             st->dropped_superseded = fr.frames_superseded;
             st->dropped_deadline = fr.frames_deadline;
+        }
+    }
+    if (shm_stats != nullptr) {
+        for (const auto& [sid, ss] : *shm_stats) {
+            for (StreamStats& st : snap.streams) {
+                if (st.stream_id == sid) {
+                    st.shm_full_drops = ss.full_drops;
+                    st.shm_oversize_drops = ss.oversize_drops;
+                    st.shm_bad_slots = ss.bad_slots;
+                    break;
+                }
+            }
         }
     }
     if (out_snap != nullptr) {
@@ -1083,6 +1284,7 @@ int run_tx(const Loaded& l) {
         return 1;
     }
     const uint32_t session = session_nonce();
+    DiscoveryCatalog discovery;
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv);
     if (air.value->is_radio()) {
         tx.apply_mode = [&](uint8_t mcs, bool sgi) {
@@ -1126,6 +1328,7 @@ int run_tx(const Loaded& l) {
     }
     std::vector<uint8_t> frame_buf(kFrameRingDefaultSlotSize);
     uint64_t next_shm_attach_ms = 0;
+    uint64_t next_shm_identity_check_ms = 0;
 
     StatsEmitter emitter(true, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
@@ -1181,6 +1384,9 @@ int run_tx(const Loaded& l) {
         };
         h.info_json = [&] { return build_info_json(l, session, "tx"); };
         h.health_json = [&] { return build_health_json(last_snap); };
+        h.discovery_json = [&] {
+            return discovery.json(now_ms(), {});
+        };
         h.profile = [&](int mn, int mx) -> std::string {
             if (mn < 0 || mn > 255 || mx < 0 || mx > 255)
                 return "min/max must be 0..255";
@@ -1200,7 +1406,12 @@ int run_tx(const Loaded& l) {
                        ? ""
                        : "no frame-shm stream with that id";
         };
-        h.reset_stats = [&] { tx.reset_stats(); };
+        h.reset_stats = [&] {
+            tx.reset_stats();
+            for (ShmIn& si : shm_ins) {
+                if (si.ring) si.ring->reset_stats();
+            }
+        };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (tx)\n",
                      l.cfg.control.bind.c_str());
@@ -1214,6 +1425,18 @@ int run_tx(const Loaded& l) {
         // tick's captured now, and u64 "now - stamp" arithmetic underflows).
         const uint64_t now = now_ms();
         now_us_it = now_us();
+        if (now >= next_shm_identity_check_ms) {
+            for (ShmIn& si : shm_ins) {
+                if (si.ring && !si.ring->backing_object_current()) {
+                    std::fprintf(stderr,
+                                 "tx: frame-shm '%s' producer replaced; "
+                                 "reattaching\n",
+                                 si.name.c_str());
+                    si.ring.reset();
+                }
+            }
+            next_shm_identity_check_ms = now + 250;
+        }
         // Flush held video the moment the gap allows it; an EOB inside the
         // flush re-arms the gap and holds the rest.
         while (!held.empty() &&
@@ -1274,7 +1497,7 @@ int run_tx(const Loaded& l) {
             }
         };
         // Held frames need µs-scale reactivity — don't sleep in poll then.
-        const int in_timeout = held.empty() ? 2 : 0;
+        const int in_timeout = held.empty() && !air.value->tx_pending() ? 2 : 0;
         bindings.value->poll_once(
             in_timeout,
             [&](const IngressEvent& ev) {
@@ -1290,7 +1513,11 @@ int run_tx(const Loaded& l) {
         air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
                                     size_t n) {
             const Decoded dec = decode(d, n);
+            discovery.observe(dec, now);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
+                if (!air.value->supports_csa()) {
+                    return;
+                }
                 // §11.2: anchor on this adapter's TSF; the follower manages
                 // its own issuer latch (MAC-valid bootstrap, §11.4).
                 if (csa.on_csa(*c, now_us_it,
@@ -1320,6 +1547,7 @@ int run_tx(const Loaded& l) {
                          ca.chan_mhz);
         }
         tx.tick(now, inject);
+        air.value->heartbeat(l.cfg.node.originator, session, now);
         if (const auto trc = air.value->tx_report_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
@@ -1332,9 +1560,15 @@ int run_tx(const Loaded& l) {
             control->service(now);
         }
         if (stats_period != 0 && now >= next_stats) {
+            std::vector<std::pair<uint8_t, FrameShmRing::Stats>> shm_stats;
+            for (const ShmIn& si : shm_ins) {
+                if (si.ring) {
+                    shm_stats.emplace_back(si.stream_id, si.ring->stats());
+                }
+            }
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
                        csa.state_str(), 0, 0, wedge.wedged(), nullptr,
-                       &last_snap);
+                       &shm_stats, &last_snap);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -1356,6 +1590,7 @@ int run_rx(const Loaded& l) {
         return 1;
     }
     const uint32_t session = session_nonce();
+    DiscoveryCatalog discovery;
     RxCore rx(l.cfg, session, l.have_table ? &l.table : nullptr,
               l.have_table ? std::optional<uint8_t>(l.tv) : std::nullopt);
 
@@ -1469,7 +1704,13 @@ int run_rx(const Loaded& l) {
         };
         h.info_json = [&] { return build_info_json(l, session, "rx"); };
         h.health_json = [&] { return build_health_json(last_snap); };
+        h.discovery_json = [&] {
+            return discovery.json(now_ms(), rx.stream_keys());
+        };
         h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
+            if (!air.value->supports_csa()) {
+                return "CSA unsupported by kernel-monitor backend";
+            }
             const CommonPrefix pre{l.cfg.node.originator, 0, session};
             if (issuer.start(pre, static_cast<uint16_t>(mhz), 0,
                              static_cast<uint8_t>(klass != 0), op_chan, 0, 4,
@@ -1482,6 +1723,7 @@ int run_rx(const Loaded& l) {
             rx.reset_stats();
             for (ShmOut& so : shm_outs) {
                 so.reasm->reset_stats();
+                so.ring->reset_stats();
             }
             ret_window_hits = 0;
             ret_window_misses = 0;
@@ -1527,7 +1769,11 @@ int run_rx(const Loaded& l) {
                 meta.rssi != 0 ? meta.rssi : l.cfg.loopback.rssi_dbm;
             // §11 taps (cheap header decode; DATA still flows to the engine).
             const Decoded dec = decode(d, n);
+            discovery.observe(dec, now);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
+                if (!air.value->supports_csa()) {
+                    return;
+                }
                 if (follower.on_csa(*c, now_us_it,
                                     air.value->read_tsf(meta.adapter_id),
                                     static_cast<uint32_t>(meta.tsf_us),
@@ -1559,6 +1805,7 @@ int run_rx(const Loaded& l) {
             }
         });
         rx.tick(now, deliver, inject_nack);
+        air.value->heartbeat(l.cfg.node.originator, session, now);
         // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
         // so a stalled block never wedges frame-shm egress.
         for (ShmOut& so : shm_outs) {
@@ -1612,16 +1859,19 @@ int run_rx(const Loaded& l) {
         if (stats_period != 0 && now >= next_stats) {
             // §6.3a: fold the per-out-stream reassembler counters into stats.
             std::vector<std::pair<uint8_t, FrameReassemblerStats>> frame_stats;
+            std::vector<std::pair<uint8_t, FrameShmRing::Stats>> shm_stats;
             frame_stats.reserve(shm_outs.size());
+            shm_stats.reserve(shm_outs.size());
             for (const ShmOut& so : shm_outs) {
                 frame_stats.emplace_back(so.stream_id, so.reasm->stats());
+                shm_stats.emplace_back(so.stream_id, so.ring->stats());
             }
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
                                        : follower.state_str(),
                        ret_window_hits, ret_window_misses, wedge.wedged(),
-                       &frame_stats, &last_snap);
+                       &frame_stats, &shm_stats, &last_snap);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -1776,7 +2026,7 @@ int run_loopback(const Loaded& l) {
         }
         if (stats_period != 0 && loop_now >= next_stats) {
             emit_stats(emitter, l, session, t0, &tx, &rx, nullptr, 0, nullptr,
-                       0, 0, false, nullptr, &last_snap);
+                       0, 0, false, nullptr, nullptr, &last_snap);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }

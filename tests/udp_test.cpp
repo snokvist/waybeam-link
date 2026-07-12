@@ -3,6 +3,8 @@
 // BindingSet built from a real config (ephemeral ports so the test is
 // parallel-safe), plus host:port parsing edges.
 #include "wblink/binding.h"
+#include "wblink/air_udp.h"
+#include "wblink/wire.h"
 
 #include <cstring>
 #include <string>
@@ -12,7 +14,164 @@
 using namespace wblink;
 
 int main() {
+    const UdpAir::RxCb discard = [](const AirRxMeta&, const uint8_t*, size_t) {};
     // host:port parsing.
+    {
+        AirUdpCfg cfg;
+        cfg.rx = {"127.0.0.1:0"};
+        auto air = UdpAir::create(cfg);
+        CHECK(bool(air));
+        if (air) {
+            AirUdpCfg sender_cfg;
+            sender_cfg.tx = {"127.0.0.1:" +
+                             std::to_string(air.value->adapter_port(0))};
+            auto sender = UdpAir::create(sender_cfg);
+            CHECK(bool(sender));
+            const uint8_t msg[] = {1, 2, 3};
+            CHECK_EQ_U(sender.value->inject(msg, sizeof(msg)), 1u);
+            CHECK_EQ_U(sender.value->tx_submitted(), 1u);
+            CHECK_EQ_U(sender.value->tx_failed(), 0u);
+            CHECK_EQ_U(air.value->poll_once(100, discard), 1u);
+            CHECK_EQ_U(air.value->rx_frames(0), 1u);
+            CHECK_EQ_U(air.value->rx_dropped(0), 0u);
+        }
+    }
+
+    // One loopback broadcast reaches every shared-port listener; each listener
+    // rejects its own originator exactly as the RF backends do.
+    {
+        AirUdpCfg craft_cfg;
+        craft_cfg.broadcast = true;
+        craft_cfg.originator = 17;
+        craft_cfg.rx = {"0.0.0.0:0"};
+        auto craft = UdpAir::create(craft_cfg);
+        CHECK(bool(craft));
+        if (craft) {
+            const uint16_t port = craft.value->adapter_port(0);
+            AirUdpCfg ground_cfg;
+            ground_cfg.broadcast = true;
+            ground_cfg.originator = 9;
+            ground_cfg.rx = {"0.0.0.0:" + std::to_string(port)};
+            auto ground = UdpAir::create(ground_cfg);
+            CHECK(bool(ground));
+
+            AirUdpCfg sender_cfg;
+            sender_cfg.broadcast = true;
+            sender_cfg.tx = {"127.255.255.255:" + std::to_string(port)};
+            auto sender = UdpAir::create(sender_cfg);
+            CHECK(bool(sender));
+            if (ground && sender) {
+                uint8_t frame[kCommonPrefixSize]{};
+                const Heartbeat hb{{17, 0, 1234}};
+                CHECK_EQ_U(encode_heartbeat(hb, frame, sizeof(frame)),
+                           sizeof(frame));
+                CHECK_EQ_U(sender.value->inject(frame, sizeof(frame)), 1u);
+                CHECK_EQ_U(craft.value->poll_once(100, discard), 0u);
+                CHECK_EQ_U(ground.value->poll_once(100, discard), 1u);
+                CHECK_EQ_U(craft.value->rx_filtered(0), 0u);
+                CHECK_EQ_U(craft.value->kernel_dropped(0), 0u);
+                CHECK_EQ_U(ground.value->rx_frames(0), 1u);
+
+                const uint8_t junk[] = {1, 2, 3};
+                CHECK_EQ_U(sender.value->inject(junk, sizeof(junk)), 1u);
+                CHECK_EQ_U(craft.value->poll_once(100, discard), 0u);
+                CHECK_EQ_U(ground.value->poll_once(100, discard), 0u);
+                CHECK_EQ_U(craft.value->rx_filtered(0), 1u);
+                CHECK_EQ_U(ground.value->rx_filtered(0), 1u);
+            }
+        }
+    }
+
+    // Real node shape: both peers inject and sniff the same paced channel.
+    // Self copies are rejected before the queue; foreign traffic is delivered.
+    {
+        uint16_t port = 0;
+        {
+            auto reservation = UdpIngress::open("0.0.0.0:0");
+            CHECK(bool(reservation));
+            if (reservation) port = reservation.value->bound_port();
+        }
+        CHECK(port != 0);
+        AirUdpCfg craft_cfg;
+        craft_cfg.broadcast = true;
+        craft_cfg.originator = 17;
+        craft_cfg.pace_mbps = 10;
+        craft_cfg.tx = {"127.255.255.255:" + std::to_string(port)};
+        craft_cfg.rx = {"0.0.0.0:" + std::to_string(port)};
+        AirUdpCfg ground_cfg = craft_cfg;
+        ground_cfg.originator = 9;
+        auto craft = UdpAir::create(craft_cfg);
+        auto ground = UdpAir::create(ground_cfg);
+        CHECK(bool(craft));
+        CHECK(bool(ground));
+        if (craft && ground) {
+            uint8_t craft_frame[kCommonPrefixSize]{};
+            uint8_t ground_frame[kCommonPrefixSize]{};
+            CHECK_EQ_U(encode_heartbeat(Heartbeat{{17, 0, 111}}, craft_frame,
+                                        sizeof(craft_frame)),
+                       sizeof(craft_frame));
+            CHECK_EQ_U(encode_heartbeat(Heartbeat{{9, 17, 222}}, ground_frame,
+                                        sizeof(ground_frame)),
+                       sizeof(ground_frame));
+            CHECK_EQ_U(craft.value->inject(craft_frame, sizeof(craft_frame)), 1u);
+            CHECK_EQ_U(ground.value->inject(ground_frame, sizeof(ground_frame)),
+                       1u);
+            int craft_got = 0;
+            int ground_got = 0;
+            for (int tries = 0; tries < 100 &&
+                                (craft_got == 0 || ground_got == 0);
+                 ++tries) {
+                craft_got += craft.value->poll_once(2, discard);
+                ground_got += ground.value->poll_once(2, discard);
+            }
+            CHECK_EQ_U(craft_got, 1u);
+            CHECK_EQ_U(ground_got, 1u);
+            CHECK_EQ_U(craft.value->rx_frames(0), 1u);
+            CHECK_EQ_U(ground.value->rx_frames(0), 1u);
+            CHECK_EQ_U(craft.value->rx_filtered(0), 1u);
+            CHECK_EQ_U(ground.value->rx_filtered(0), 1u);
+            CHECK_EQ_U(craft.value->kernel_dropped(0), 0u);
+            CHECK_EQ_U(ground.value->kernel_dropped(0), 0u);
+            CHECK_EQ_U(craft.value->tx_submitted(), 1u);
+            CHECK_EQ_U(ground.value->tx_submitted(), 1u);
+        }
+    }
+
+    // A paced RX-only instance must fail injection without retaining a queue.
+    {
+        AirUdpCfg cfg;
+        cfg.pace_mbps = 10;
+        cfg.rx = {"127.0.0.1:0"};
+        auto air = UdpAir::create(cfg);
+        CHECK(bool(air));
+        if (air) {
+            const uint8_t msg = 1;
+            CHECK_EQ_U(air.value->inject(&msg, 1), 0u);
+            CHECK(!air.value->tx_pending());
+            CHECK_EQ_U(air.value->tx_failed(), 1u);
+        }
+    }
+
+    {
+        AirUdpCfg cfg;
+        cfg.rx = {"127.0.0.1:0"};
+        cfg.rx_drop_permille = 1000;
+        auto air = UdpAir::create(cfg);
+        CHECK(bool(air));
+        if (air) {
+            AirUdpCfg sender_cfg;
+            sender_cfg.tx = {"127.0.0.1:" +
+                             std::to_string(air.value->adapter_port(0))};
+            auto sender = UdpAir::create(sender_cfg);
+            CHECK(bool(sender));
+            const uint8_t msg = 7;
+            CHECK_EQ_U(sender.value->inject(&msg, 1), 1u);
+            CHECK_EQ_U(air.value->poll_once(100, discard), 0u);
+            CHECK_EQ_U(air.value->rx_frames(0), 0u);
+            CHECK_EQ_U(air.value->rx_dropped(0), 1u);
+        }
+    }
+
     {
         auto ok = split_host_port("127.0.0.1:5600");
         CHECK(bool(ok));

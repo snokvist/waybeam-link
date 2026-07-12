@@ -381,6 +381,28 @@ int main() {
         CHECK_EQ_U(h.delivered.back().second[0], static_cast<uint8_t>(5004));
     }
 
+    // --- §3.7 pre-diversity estimator: per-adapter loss + reorder fill -------
+    {
+        Harness h;
+        h.latch();
+        h.feed(1, 2, 0, 0, 3);  // adapter 1 establishes its own anchor
+        h.feed(0, 3, 0, 0, 4);
+        h.feed(1, 3, 0, 0, 4);
+        h.feed(1, 4, 0, 0, 5);  // adapter 0 misses seq 4
+        h.feed(0, 5, 0, 0, 6);
+        h.feed(1, 5, 0, 0, 6);
+        CHECK_EQ_U(h.counters().prediv_expected, 8);
+        CHECK_EQ_U(h.counters().prediv_lost, 1);
+        h.feed(0, 4, 0, 0, 7);  // bounded reorder fills it exactly once
+        h.feed(0, 4, 0, 0, 8);  // duplicate does not over-credit
+        CHECK_EQ_U(h.counters().prediv_lost, 0);
+        h.feed(0, 6, 0, data_flags::kRetransmit, 9);
+        CHECK_EQ_U(h.counters().prediv_expected, 8);  // ARQ excluded
+        h.engine.reset_stats();
+        CHECK_EQ_U(h.counters().prediv_expected, 0);
+        CHECK_EQ_U(h.counters().prediv_lost, 0);
+    }
+
     // --- §2 idle teardown ------------------------------------------------------
     {
         RxPolicy p;

@@ -26,6 +26,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <vector>
 
 #include "wblink/table.h"
@@ -78,6 +79,8 @@ struct RxStreamCounters {
     uint64_t clamp_rejected = 0;         // §6.6 hits
     uint64_t resyncs = 0;                // sustained-clamp re-floors
     uint64_t table_mismatch = 0;         // §3.4 fallback packets
+    uint64_t prediv_expected = 0;        // §3.7 adapter opportunities
+    uint64_t prediv_lost = 0;
     uint32_t highest_seq = 0;
     // §17 gate-3 estimator: NACK→RETRANSMIT latency samples, taken only when
     // a RETRANSMIT-flagged arrival fills a NACKed gap (late originals close
@@ -182,6 +185,13 @@ class RxEngine {
         uint64_t first_nack_ms = 0;
         uint64_t last_nack_ms = 0;
     };
+    struct AdapterSeq {
+        bool have = false;
+        uint32_t highest = 0;
+        uint64_t expected = 0;
+        uint64_t received = 0;
+        std::set<uint32_t> missing;
+    };
     struct Stream {
         StreamKey key;
         uint8_t local_stream_id = 0;
@@ -200,6 +210,7 @@ class RxEngine {
         // §6.1 per-adapter highest seq FOR THIS STREAM (the §6.2-1 fast path
         // must not mix streams sharing an adapter).
         std::map<uint8_t, uint32_t> adapter_last_seq;
+        std::map<uint8_t, AdapterSeq> adapter_seq;
         RxStreamCounters counters;
     };
     struct Adapter {
@@ -225,6 +236,7 @@ class RxEngine {
     uint64_t block_deadline(const Stream& s, uint64_t first_seen_ms,
                             bool arq) const;
     void note_gaps(Stream& s, uint64_t now_ms);
+    void note_adapter_seq(Stream& s, uint8_t adapter_id, uint32_t seq);
     void evaluate_gaps(Stream& s, uint64_t now_ms);
     void advance_cursor(Stream& s, uint64_t now_ms, const Deliver& deliver);
     Stream* try_latch(const DataView& v, uint64_t now_ms);

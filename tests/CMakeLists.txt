@@ -44,3 +44,13 @@ add_wb_test(frame_shm_loopback_test wblink_io)
 add_wb_test(power_test wblink_io)
 add_wb_test(stats_test wblink_io)
 add_wb_test(control_server_test wblink_io)
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME expand_arq_topology_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/expand_arq_topology_test.py)
+    add_test(NAME link_monitor_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/link_monitor_test.py)
+endif()

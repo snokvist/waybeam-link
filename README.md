@@ -114,6 +114,31 @@ drop; bench-only, default off) — used to manufacture known-independent loss
 for gate-2 machinery validation and to exercise FEC recovery. Honored by all
 three air backends (`udp`, `kernel-monitor`, `radio`).
 
+### Real-video frame-SHM/UDP bench
+
+On a host with GStreamer development packages plus `x265enc`, `h265parse`, and
+`avdec_h265`, the native build adds `frame_shm_gst_bench`. The orchestrator
+runs two real `waybeam-link` processes with a paired UDP return path and two
+virtual diversity adapters:
+
+```text
+GStreamer H.265 -> frame-SHM -> TX -> UDP-air x2 -> RX -> frame-SHM
+                                                       -> H.265 decoder
+```
+
+```sh
+cmake --preset release
+cmake --build --preset release -j
+tools/frame_shm_udp_bench.sh
+RX_DROP_PERMILLE=100 BITRATES=4000 tools/frame_shm_udp_bench.sh
+```
+
+The clean sweep defaults to 1/4/8 Mbit/s. It checks frame metadata, Annex-B,
+PTS monotonicity, decoder EOS, frame counts, both UDP adapter counters, FEC,
+ARQ, malformed/decode outcomes, and SHM producer drops. `FRAMES`, `BITRATES`,
+`WARMUP_FRAMES`, `RX_DROP_PERMILLE`, and `BUILD` are overridable. Set
+`KEEP_TMP=1` to retain configs, logs, and stats JSONL after a failure.
+
 ### Fleet monitor (live dashboard)
 
 `tools/link_monitor.py` — a stdlib-only bridge that turns the §15.3 stats
@@ -223,6 +248,40 @@ NACK/LINK_REPORT returns):
 "air": { "kind": "udp", "rx": ["0.0.0.0:5801"], "tx": ["<craft-ip>:5810"] }
 ```
 
+For UDP benches with ARQ, generate the reciprocal pair from one topology file
+so node identities, diversity endpoints, return injection, and preferred peers
+cannot drift independently:
+
+```sh
+tools/expand_arq_topology.py examples/topology.frame-shm-udp.sample.json \
+  --out-dir /tmp/waybeam-pair
+```
+
+The expander writes `tx.json` and `rx.json`. `udp.downlink_ports` defines the
+virtual diversity paths and `udp.return_port` defines the matched NACK/report
+path. It rejects duplicate identities, duplicate downlink ports, and collisions
+between the forward and return paths.
+Once the named SHM producer exists, validate each generated node with
+`waybeam-link tx -c /tmp/waybeam-pair/tx.json --check` and the corresponding
+`rx` command.
+
+For a closer RF-broadcast analogue on one Linux host, put both nodes on one
+shared loopback broadcast channel:
+
+```json
+"air": {
+  "kind": "udp-broadcast",
+  "tx": ["127.255.255.255:5801"],
+  "rx": ["0.0.0.0:5801"],
+  "pace_mbps": 10
+}
+```
+
+Each node receives foreign waybeam packets from the shared channel and filters
+its own originator before the socket queue. `pace_mbps` prevents encoded-frame
+bursts from becoming accidental host queue loss. Exercise the full frame-SHM
+video chain with `AIR_KIND=udp-broadcast tools/frame_shm_udp_bench.sh`.
+
 Run: `waybeam-link rx -c <rx>.json`.
 
 ### Verify
@@ -252,7 +311,9 @@ no auth (bind `127.0.0.1` for host-local, a routable addr on a trusted net):
 
 **Read** (any node): `GET /api/v1/stats` (the §15.3 object), `…/stats/stream`
 (SSE, one object per stats tick), `…/info` (identity), `…/health` (terse
-`{state,mcs,profile,rssi_best,loss_milli,…}`). **Write** (live, no restart):
+`{state,mcs,profile,rssi_best,loss_milli,…}`), and `…/discovery` (bounded
+HEARTBEAT-derived nodes plus DATA-derived stream candidates/latches). **Write**
+(live, no restart):
 
 | Endpoint | Body | Where |
 |---|---|---|

@@ -398,6 +398,60 @@ The two-target udp-air `tx:[a,b]` split-fanout under-reports `delivered` vs the
 wire (dev-backend artifact, not a stats bug: single-adapter and real diversity
 both account exactly — verified `delivered==uniq==wire` on a 1-adapter run).
 
+## Pass 17 — quiet HEARTBEAT + passive discovery API (2026-07-12)
+
+Operator approved the missing application behavior for the already-pinned §3.8
+HEARTBEAT wire type and the discovery surface identified by the transport audit:
+
+- Every node emits HEARTBEAT at 1 Hz only while otherwise quiet. Any successfully
+  submitted packet resets the quiet interval; active links add no keepalive load.
+- HEARTBEAT refreshes bounded node presence only. It cannot create stream state
+  because its normative 11-byte body has no stream fields.
+- DATA continues to populate admission candidates and latches. New read-only
+  `GET /api/v1/discovery` returns bounded `nodes[]` plus DATA-derived `streams[]`
+  with identity, counts, monotonic first/last-seen stamps, and latch state.
+- Discovery introspection is observational: it never changes admission, latch
+  selection, teardown, or output routing.
+
+**Amended:** §3.8 (1 Hz quiet-only emission rule); §15.5 (discovery endpoint and
+bounded JSON contract). Code follows in separate commits.
+
+## Pass 18 — pre-diversity + local-drop observability (2026-07-12)
+
+The approved transport-audit sequence resolves the advertised-but-zero
+`loss_prediversity` gauge and separates local host backpressure from air loss:
+
+- Pre-diversity loss is a post-latch, per-stream/per-adapter original-DATA
+  sequence-opportunity estimator. Bounded reorder fills missing opportunities;
+  duplicates and RETRANSMIT packets are excluded. Adapter totals are aggregated
+  only at stats formatting time.
+- Stats reset zeros estimator totals without moving sequence anchors.
+- Stream stats add frame-SHM full/oversize/bad-slot counters. Adapter stats add
+  Linux `SO_RXQ_OVFL` kernel receive-queue loss as `kernel_drop`; it is not
+  folded into synthetic/backend `drop`.
+
+**Amended:** §3.7 (normative estimator); §15.3 (additive local-drop fields and
+mapping). Code follows separately.
+
+## Pass 19 — UDP broadcast/sniffer bench backend (2026-07-12)
+
+The approved transport-audit follow-up adds a dedicated RF-broadcast analogue
+without changing point-to-point UDP-air behavior:
+
+- `air.kind "udp-broadcast"` is one shared IPv4 broadcast channel, expressed as
+  exactly one TX destination plus one shared RX listen endpoint.
+- TX enables `SO_BROADCAST`; multiple nodes may share the RX port.
+- RX validates complete waybeam packets and filters the local originator before
+  core delivery, matching the RF backends' passive-sniff/self-filter boundary.
+- Adapter stats add `filtered`; malformed/self frames are counted separately
+  from accepted and synthetic-dropped traffic. Kernel-monitor's existing
+  internal filter counter maps to the same field.
+- Optional `pace_mbps` serializes broadcast datagrams so frame-sized host bursts
+  do not create accidental UDP queue loss on systems with a small `rmem_max`.
+
+**Amended:** §15.3 (`filtered` adapter field); §16.3 (backend config and receive
+semantics). Code follows in a separate commit.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

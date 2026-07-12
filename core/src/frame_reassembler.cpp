@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "wblink/endian.h"
+#include "wblink/frame_shm_format.h"
 #include "wblink/rlc.h"
 
 namespace wblink {
@@ -46,7 +47,16 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         const uint32_t flen = be32_read(payload + kFecOffFrameLen);
         const uint8_t ridx = payload[kFecOffRepairIdx];
         const size_t coded = payload_len - kFecRepairSubheaderSize;  // = s
-        if (k == 0 || flen == 0 || flen > cfg_.max_frame_bytes) {
+        if (k == 0 || flen < kVencFrameMetaSize ||
+            flen > cfg_.max_frame_bytes || coded == 0 ||
+            coded > kMaxDataPayload ||
+            static_cast<uint16_t>(k + ridx) >= kFecMaxSymbols) {
+            ++stats_.malformed;
+            return;
+        }
+        if ((b.k != 0 && b.k != k) ||
+            (b.frame_len != 0 && b.frame_len != flen) ||
+            (b.s != 0 && b.s != coded)) {
             ++stats_.malformed;
             return;
         }
@@ -63,14 +73,20 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         }
         const uint16_t k = be16_read(payload + kFecSrcOffWindowLen);
         const uint16_t idx = be16_read(payload + kFecSrcOffSymIndex);
-        if (k == 0 || idx >= k) {
+        if (k == 0 || idx >= k || (b.k != 0 && b.k != k)) {
             ++stats_.malformed;
             return;
         }
         b.k = k;
         const size_t clen = payload_len - kFecSourceSubheaderSize;
+        if (clen == 0 || clen > kMaxDataPayload ||
+            (b.s != 0 && ((idx != k - 1 && clen != b.s) ||
+                          (idx == k - 1 && clen > b.s)))) {
+            ++stats_.malformed;
+            return;
+        }
         // A non-last source symbol carries the full coded size s (§5.1a).
-        if (idx != k - 1 && clen > b.s) {
+        if (idx != k - 1 && b.s == 0) {
             b.s = static_cast<uint16_t>(clen);
         }
         if (eob) {
@@ -151,10 +167,9 @@ void FrameReassembler::supersede(uint32_t new_highest, const Emit& /*emit*/) {
         // Blocks still in the map are incomplete (completed ones are erased).
         if (bid_diff(new_highest, it->first) >
             static_cast<int32_t>(cfg_.max_blocks_ahead)) {
-            if (static_cast<uint16_t>(it->second.sources.size() +
-                                      it->second.repairs.size()) >= it->second.k &&
-                it->second.k != 0) {
-                ++stats_.frames_unrecoverable;  // had >= k but couldn't decode
+            const Block& b = it->second;
+            if (b.k == 0 || b.sources.size() + b.repairs.size() < b.k) {
+                ++stats_.frames_unrecoverable;
             }
             ++stats_.frames_superseded;
             finalize(it->first);
@@ -168,6 +183,10 @@ void FrameReassembler::supersede(uint32_t new_highest, const Emit& /*emit*/) {
 void FrameReassembler::tick(uint64_t now_ms, const Emit& /*emit*/) {
     for (auto it = blocks_.begin(); it != blocks_.end();) {
         if (now_ms >= it->second.first_ms + cfg_.deadline_ms) {
+            const Block& b = it->second;
+            if (b.k == 0 || b.sources.size() + b.repairs.size() < b.k) {
+                ++stats_.frames_unrecoverable;
+            }
             ++stats_.frames_deadline;
             finalize(it->first);
             it = blocks_.erase(it);

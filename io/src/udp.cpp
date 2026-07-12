@@ -3,6 +3,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <linux/filter.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -15,6 +16,8 @@
 namespace wblink {
 
 namespace {
+
+constexpr int kUdpReceiveBufferBytes = 4 * 1024 * 1024;
 
 void close_fd(int& fd) {
     if (fd >= 0) {
@@ -81,18 +84,25 @@ UdpIngress::~UdpIngress() { close_fd(fd_); }
 
 UdpIngress::UdpIngress(UdpIngress&& other) noexcept
     : fd_(std::exchange(other.fd_, -1)),
-      bound_port_(std::exchange(other.bound_port_, 0)) {}
+      bound_port_(std::exchange(other.bound_port_, 0)),
+      kernel_drop_last_(std::exchange(other.kernel_drop_last_, 0)),
+      kernel_drops_(std::exchange(other.kernel_drops_, 0)),
+      socket_filtered_(std::exchange(other.socket_filtered_, 0)) {}
 
 UdpIngress& UdpIngress::operator=(UdpIngress&& other) noexcept {
     if (this != &other) {
         close_fd(fd_);
         fd_ = std::exchange(other.fd_, -1);
         bound_port_ = std::exchange(other.bound_port_, 0);
+        kernel_drop_last_ = std::exchange(other.kernel_drop_last_, 0);
+        kernel_drops_ = std::exchange(other.kernel_drops_, 0);
+        socket_filtered_ = std::exchange(other.socket_filtered_, 0);
     }
     return *this;
 }
 
-Result<UdpIngress> UdpIngress::open(const std::string& listen) {
+Result<UdpIngress> UdpIngress::open(const std::string& listen,
+                                    uint16_t reject_originator) {
     auto sa = to_sockaddr(listen);
     if (!sa) {
         return Result<UdpIngress>::fail("listen " + sa.error);
@@ -105,6 +115,34 @@ Result<UdpIngress> UdpIngress::open(const std::string& listen) {
     in.fd_ = *fd.value;
     const int one = 1;
     ::setsockopt(in.fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    // Frame-SHM emits an encoded frame's symbols as a tight burst. Give the
+    // UDP-air bench enough queue to model air delivery rather than localhost
+    // scheduler jitter; the kernel may clamp this to net.core.rmem_max.
+    ::setsockopt(in.fd_, SOL_SOCKET, SO_RCVBUF, &kUdpReceiveBufferBytes,
+                 sizeof(kUdpReceiveBufferBytes));
+    ::setsockopt(in.fd_, SOL_SOCKET, SO_RXQ_OVFL, &one, sizeof(one));
+    if (reject_originator != 0) {
+        // Drop our own originator before it can consume receive-queue capacity.
+        sock_filter code[] = {
+            BPF_STMT(BPF_LD | BPF_W | BPF_LEN, 0),
+            BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 8 + 5, 0, 3),
+            // Linux presents the UDP header (8 bytes) before datagram payload
+            // to a classic filter attached to an AF_INET/SOCK_DGRAM socket.
+            BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 8 + 3),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, reject_originator, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, 0),
+            BPF_STMT(BPF_RET | BPF_K, UINT32_MAX),
+        };
+        sock_fprog prog{};
+        prog.len = static_cast<unsigned short>(sizeof(code) / sizeof(code[0]));
+        prog.filter = code;
+        if (::setsockopt(in.fd_, SOL_SOCKET, SO_ATTACH_FILTER, &prog,
+                         sizeof(prog)) != 0) {
+            return Result<UdpIngress>::fail(
+                "setsockopt(SO_ATTACH_FILTER): " +
+                std::string(std::strerror(errno)));
+        }
+    }
     if (::bind(in.fd_, reinterpret_cast<const sockaddr*>(&*sa.value),
                sizeof(*sa.value)) < 0) {
         return Result<UdpIngress>::fail("bind('" + listen + "'): " +
@@ -119,8 +157,25 @@ Result<UdpIngress> UdpIngress::open(const std::string& listen) {
 }
 
 long UdpIngress::recv_one(uint8_t* buf, size_t cap) {
-    const ssize_t n = ::recv(fd_, buf, cap, 0);
+    iovec iov{buf, cap};
+    alignas(cmsghdr) uint8_t control[CMSG_SPACE(sizeof(uint32_t))]{};
+    msghdr msg{};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+    const ssize_t n = ::recvmsg(fd_, &msg, 0);
     if (n >= 0) {
+        for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c != nullptr;
+             c = CMSG_NXTHDR(&msg, c)) {
+            if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_RXQ_OVFL &&
+                c->cmsg_len >= CMSG_LEN(sizeof(uint32_t))) {
+                uint32_t count = 0;
+                std::memcpy(&count, CMSG_DATA(c), sizeof(count));
+                kernel_drops_ += static_cast<uint32_t>(count - kernel_drop_last_);
+                kernel_drop_last_ = count;
+            }
+        }
         return n;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -144,7 +199,7 @@ UdpEgress& UdpEgress::operator=(UdpEgress&& other) noexcept {
     return *this;
 }
 
-Result<UdpEgress> UdpEgress::open(const std::string& target) {
+Result<UdpEgress> UdpEgress::open(const std::string& target, bool broadcast) {
     auto sa = to_sockaddr(target);
     if (!sa) {
         return Result<UdpEgress>::fail("send " + sa.error);
@@ -155,6 +210,14 @@ Result<UdpEgress> UdpEgress::open(const std::string& target) {
     }
     UdpEgress out;
     out.fd_ = *fd.value;
+    if (broadcast) {
+        int one = 1;
+        if (::setsockopt(out.fd_, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one)) !=
+            0) {
+            return Result<UdpEgress>::fail("setsockopt(SO_BROADCAST): " +
+                                           std::string(std::strerror(errno)));
+        }
+    }
     if (::connect(out.fd_, reinterpret_cast<const sockaddr*>(&*sa.value),
                   sizeof(*sa.value)) < 0) {
         return Result<UdpEgress>::fail("connect('" + target + "'): " +

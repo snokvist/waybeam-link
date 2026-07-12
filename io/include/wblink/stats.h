@@ -31,6 +31,8 @@ struct AdapterStats {
     uint64_t tx_failed = 0;
     uint64_t tx_timeout = 0;
     uint64_t drop = 0;          // radio backend RX-queue overflow drops
+    uint64_t filtered = 0;      // malformed/non-network/self receive frames
+    uint64_t kernel_drop = 0;   // Linux SO_RXQ_OVFL socket queue drops
     uint64_t tsf_fallback = 0;  // §7.2 TSF reads that fell back to host time
     // Per-frame TX-status CCX reports (Pass 8, TX adapter only): reports
     // stalling while tx_submitted advances = the TX-wedge signal.
@@ -59,6 +61,9 @@ struct StreamStats {
     uint64_t frames_fast = 0;
     uint64_t frames_unrecoverable = 0;
     uint64_t malformed = 0;
+    uint64_t shm_full_drops = 0;
+    uint64_t shm_oversize_drops = 0;
+    uint64_t shm_bad_slots = 0;
     uint64_t dropped_superseded = 0;
     uint64_t dropped_deadline = 0;
     uint64_t nacks_sent = 0;

@@ -92,6 +92,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, a.tx_timeout);
         out += ",\"drop\":";
         append_u64(out, a.drop);
+        out += ",\"filtered\":";
+        append_u64(out, a.filtered);
+        out += ",\"kernel_drop\":";
+        append_u64(out, a.kernel_drop);
         out += ",\"tsf_fallback\":";
         append_u64(out, a.tsf_fallback);
         out += ",\"tx_reports\":";
@@ -137,6 +141,12 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.frames_unrecoverable);
         out += ",\"malformed\":";
         append_u64(out, s.malformed);
+        out += ",\"shm_full_drops\":";
+        append_u64(out, s.shm_full_drops);
+        out += ",\"shm_oversize_drops\":";
+        append_u64(out, s.shm_oversize_drops);
+        out += ",\"shm_bad_slots\":";
+        append_u64(out, s.shm_bad_slots);
         out += ",\"dropped_superseded\":";
         append_u64(out, s.dropped_superseded);
         out += ",\"dropped_deadline\":";
