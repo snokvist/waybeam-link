@@ -7,11 +7,6 @@ numbered `docs/review-log.md` Pass; this file only tracks *intent*.
 
 ## Active
 
-- [ ] **Dashboard: surface the new frame-shm reassembler counters.**
-  `tools/link_monitor.html` predates the §15.3 additions
-  (`frames_fast`, `frames_unrecoverable`, `malformed`). Add them to the
-  per-stream card so frame-shm FEC health is visible alongside
-  `recovered_fec`. — low effort, no binary change.
 - [ ] **Register control-plane ports in the coordination port registry.**
   Add `:8091` (REST control, PROTOCOL.md §15.5), `:8099` (fleet-monitor
   HTTP/SSE), `:9110` (stats NDJSON egress default) to
@@ -41,6 +36,9 @@ numbered `docs/review-log.md` Pass; this file only tracks *intent*.
 
 ## Completed
 
+- [x] **Dashboard frame-SHM health** — fleet cards now expose fast/FEC/
+  unrecoverable/malformed/decode outcomes, supersession/deadline drops, all
+  three SHM backpressure counters, and adapter filter/kernel-drop diagnostics.
 - [x] **UDP broadcast/sniffer follow-up** — hardened paced RX-only injection,
   added a real two-node bidirectional shared-channel test, and verified foreign
   delivery, socket-level self filtering, paced TX accounting, and zero false

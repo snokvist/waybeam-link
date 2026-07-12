@@ -23,7 +23,7 @@
   #conn.up { color:var(--ok); border-color:#1d3a24; }
   #conn.down { color:var(--bad); border-color:#40201f; }
   #grid { display:grid; gap:14px; padding:16px;
-    grid-template-columns:repeat(auto-fill,minmax(430px,1fr)); }
+    grid-template-columns:repeat(auto-fill,minmax(min(430px,100%),1fr)); }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
     overflow:hidden; }
   .card.stale { opacity:.55; }
@@ -54,6 +54,8 @@
   .sec-title { color:var(--dim); font-size:11px; text-transform:uppercase;
     letter-spacing:.5px; margin:2px 0 -2px; }
   table { width:100%; border-collapse:collapse; font:11px var(--mono); }
+  .table-scroll { width:100%; overflow-x:auto; }
+  .table-wide { min-width:720px; }
   th,td { text-align:right; padding:3px 6px; border-bottom:1px solid var(--line); }
   th { color:var(--dim); font-weight:600; }
   td.l,th.l { text-align:left; }
@@ -64,6 +66,12 @@
   .v-ok { color:var(--ok); } .v-warn { color:var(--warn); } .v-bad { color:var(--bad); }
   .empty { color:var(--dim); padding:40px; text-align:center; grid-column:1/-1; }
   footer { color:var(--dim); font-size:11px; padding:8px 16px; border-top:1px solid var(--line); }
+  @media (max-width:520px) {
+    header { gap:8px; padding:10px 12px; }
+    header h1 { flex-shrink:0; }
+    header h1 .sub, #count { display:none; }
+    #grid { padding:16px; }
+  }
 </style>
 </head>
 <body>
@@ -116,28 +124,44 @@ function render(){
       if (a.adapter_stalled) flags.push('<span class="flag bad">STALL</span>');
       if (!flags.length) flags.push('<span class="flag ok">·</span>');
       const txf = a.tx_failed>0 ? 'v-bad':'';
+      const localDrop = (a.drop||0) + (a.kernel_drop||0);
       return `<tr><td class="l">${esc(a.name)}</td>
         <td>${a.rssi_best||0}/${a.rssi_mean||0}</td><td>${a.snr||0}</td>
         <td>${fmt(a.rx)}</td><td>${fmt(a.dup)}</td>
         <td>${fmt(a.tx_submitted)}</td><td class="${txf}">${fmt(a.tx_failed)}</td>
+        <td class="${localDrop?'v-bad':''}">${fmt(a.drop)}</td>
+        <td>${fmt(a.filtered)}</td>
+        <td class="${(a.kernel_drop||0)>0?'v-bad':''}">${fmt(a.kernel_drop)}</td>
         <td>${fmt(a.tx_reports)}</td><td class="l">${flags.join(" ")}</td></tr>`;
-    }).join("") || `<tr><td class="l" colspan="9" style="color:var(--dim)">no adapters</td></tr>`;
+    }).join("") || `<tr><td class="l" colspan="12" style="color:var(--dim)">no adapters</td></tr>`;
 
     // streams
     let srows = (snap.streams||[]).map((s,i)=>{
-      const ps = st.prevSnap && st.prevSnap.streams ? st.prevSnap.streams[i] : null;
+      const ps = st.prevSnap && st.prevSnap.streams
+        ? st.prevSnap.streams.find(p=>p.stream_id===s.stream_id) : null;
       const dps = rate(s.delivered, ps?ps.delivered:null);
       const lp = s.loss_prediversity_milli||0, la = s.loss_postdiv_prearq_milli||0;
-      const derr = s.decode_errors>0?'v-bad':'';
       return `<tr><td class="l">#${s.stream_id} ${esc(s.type||"")}</td>
         <td>${dps==null?"–":dps.toFixed(0)}</td>
         <td class="${lp>50?'v-warn':''}">${pct(lp)}</td>
         <td class="${la>50?'v-warn':''}">${pct(la)}</td>
-        <td>${fmt(s.recovered_arq)}</td><td>${fmt(s.recovered_fec)}</td>
-        <td>${fmt(s.dropped_superseded)}</td><td>${fmt(s.dropped_deadline)}</td>
-        <td class="${derr}">${fmt(s.decode_errors)}</td>
+        <td>${fmt(s.recovered_arq)}</td><td>${fmt(s.nacks_sent)}</td>
         <td>${s.nack_rtt_max_ms||0}/${s.arq_rec_max_ms||0}</td></tr>`;
-    }).join("") || `<tr><td class="l" colspan="10" style="color:var(--dim)">no streams</td></tr>`;
+    }).join("") || `<tr><td class="l" colspan="7" style="color:var(--dim)">no streams</td></tr>`;
+
+    let frows = (snap.streams||[]).map(s=>{
+      return `<tr><td class="l">#${s.stream_id} ${esc(s.type||"")}</td>
+        <td>${fmt(s.frames_fast)}</td>
+        <td class="${(s.recovered_fec||0)>0?'v-ok':''}">${fmt(s.recovered_fec)}</td>
+        <td class="${(s.frames_unrecoverable||0)>0?'v-bad':''}">${fmt(s.frames_unrecoverable)}</td>
+        <td class="${(s.malformed||0)>0?'v-bad':''}">${fmt(s.malformed)}</td>
+        <td class="${(s.decode_errors||0)>0?'v-bad':''}">${fmt(s.decode_errors)}</td>
+        <td>${fmt(s.dropped_superseded)}</td>
+        <td class="${(s.dropped_deadline||0)>0?'v-warn':''}">${fmt(s.dropped_deadline)}</td>
+        <td class="${(s.shm_full_drops||0)>0?'v-bad':''}">${fmt(s.shm_full_drops)}</td>
+        <td class="${(s.shm_oversize_drops||0)>0?'v-bad':''}">${fmt(s.shm_oversize_drops)}</td>
+        <td class="${(s.shm_bad_slots||0)>0?'v-bad':''}">${fmt(s.shm_bad_slots)}</td></tr>`;
+    }).join("") || `<tr><td class="l" colspan="11" style="color:var(--dim)">no streams</td></tr>`;
 
     const ret = snap.return||{};
     card.innerHTML = `
@@ -159,15 +183,22 @@ function render(){
           <span class="chip"><span class="k">rpt age</span> <b>${link.report_age_ms??"–"}ms</b></span>
         </div>
         <div class="sec-title">adapters</div>
-        <table><thead><tr>
+        <div class="table-scroll"><table class="table-wide"><thead><tr>
           <th class="l">name</th><th>rssi b/m</th><th>snr</th><th>rx</th><th>dup</th>
-          <th>tx</th><th>txfail</th><th>rpts</th><th class="l">flags</th>
-        </tr></thead><tbody>${arows}</tbody></table>
-        <div class="sec-title">streams &nbsp;<span style="text-transform:none;color:var(--idle)">deliv/s · loss(pre/post) · arq/fec · sup/dl · derr · rtt/rec</span></div>
+          <th>tx</th><th>txfail</th><th>drop</th><th>filter</th><th>kdrop</th>
+          <th>rpts</th><th class="l">flags</th>
+        </tr></thead><tbody>${arows}</tbody></table></div>
+        <div class="sec-title">streams &nbsp;<span style="text-transform:none;color:var(--idle)">delivery · loss · ARQ</span></div>
         <table><thead><tr>
           <th class="l">stream</th><th>d/s</th><th>lpre</th><th>lpost</th>
-          <th>arq</th><th>fec</th><th>sup</th><th>dl</th><th>derr</th><th>rtt/rec</th>
+          <th>arq</th><th>nack</th><th>rtt/rec</th>
         </tr></thead><tbody>${srows}</tbody></table>
+        <div class="sec-title">frame + shm health</div>
+        <div class="table-scroll"><table class="table-wide"><thead><tr>
+          <th class="l">stream</th><th>fast</th><th>fec</th><th>unrec</th>
+          <th>mal</th><th>decode</th><th>sup</th><th>deadline</th>
+          <th>shm full</th><th>shm big</th><th>shm bad</th>
+        </tr></thead><tbody>${frows}</tbody></table></div>
         <div class="link-row">
           <span class="chip"><span class="k">reports</span> <b>${fmt(ret.reports_received)}/${fmt(ret.reports_expected)}</b></span>
           <span class="chip"><span class="k">win hit/miss</span> <b>${fmt(ret.return_window_hits)}/${fmt(ret.return_window_misses)}</b></span>
@@ -195,6 +226,10 @@ function upsert(rec){
 }
 
 function connect(){
+  fetch("/api/instances").then(r=>r.json()).then(body=>{
+    for(const rec of (body.instances||[])) upsert(rec);
+    render();
+  }).catch(()=>{});
   const es = new EventSource("/api/stream");
   es.onopen = ()=>{ connEl.className="up"; connEl.textContent="● live"; };
   es.onerror = ()=>{ connEl.className="down"; connEl.textContent="reconnecting…"; };

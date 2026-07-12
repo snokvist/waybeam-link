@@ -50,4 +50,7 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME expand_arq_topology_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/expand_arq_topology_test.py)
+    add_test(NAME link_monitor_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/link_monitor_test.py)
 endif()
