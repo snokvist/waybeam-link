@@ -16,6 +16,8 @@ TIMEOUT_MS=${TIMEOUT_MS:-30000}
 LIVE=${LIVE:-1}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
 VENC_CONTROL_ENABLED=${VENC_CONTROL_ENABLED:-0}
+VEHICLE_MAIN_CPU=${VEHICLE_MAIN_CPU:-1}
+VEHICLE_SHM_CPU=${VEHICLE_SHM_CPU:-0}
 BENCH_CONSUMER=${BENCH_CONSUMER:-external}
 ARTIFACTS=${ARTIFACTS:-"$ROOT/artifacts/jscc-ethernet-$(date +%Y%m%d-%H%M%S)"}
 REMOTE_INSTALL=/usr/bin/waybeam-link
@@ -244,6 +246,8 @@ fi
 [[ "$RX_DROP_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || fail "RX_DROP_PERMILLE must be 0..1000"
 [[ "$VENC_CONTROL_ENABLED" == 0 || "$VENC_CONTROL_ENABLED" == 1 ]] || \
     fail "VENC_CONTROL_ENABLED must be 0 or 1"
+[[ "$VEHICLE_MAIN_CPU" =~ ^[0-9]+$ ]] || fail "VEHICLE_MAIN_CPU must be numeric"
+[[ "$VEHICLE_SHM_CPU" =~ ^[0-9]+$ ]] || fail "VEHICLE_SHM_CPU must be numeric"
 if [[ "$VENC_CONTROL_ENABLED" == 1 ]]; then
     VENC_ENABLED_JSON=true
 else
@@ -326,6 +330,15 @@ remote "/usr/bin/json_cli -s .outgoing.server '\"frame-shm://venc_frame\"' -i /e
         /etc/init.d/S95waybeam restart"
 remote "rm -f $REMOTE_STATS $REMOTE_ERR; setsid $REMOTE_INSTALL tx -c $REMOTE_CFG \
         >$REMOTE_STATS 2>$REMOTE_ERR </dev/null & echo \$! >$REMOTE_PID"
+
+# The encoder and all video/ethernet IRQs are pinned to CPU 0 on SSC338Q.
+# Keep TX/FEC on CPU 1; the low-cost SHM readiness thread may share CPU 0.
+remote "p=\$(cat $REMOTE_PID); \
+        i=0; while [ \$(find /proc/\$p/task -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) -lt 2 ] && [ \$i -lt 50 ]; do sleep 0.1; i=\$((i + 1)); done; \
+        taskset -p \$((1 << $VEHICLE_MAIN_CPU)) \$p >/dev/null; \
+        for task in /proc/\$p/task/*; do tid=\${task##*/}; \
+            [ \"\$tid\" = \"\$p\" ] || taskset -p \$((1 << $VEHICLE_SHM_CPU)) \$tid >/dev/null; \
+        done"
 
 # The venc ring ABI has one shared read_idx. Two consumers do not fan out;
 # they steal alternating frames from each other. Catch accidental viewer +

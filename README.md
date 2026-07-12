@@ -321,6 +321,9 @@ tools/jscc_ethernet_bench.sh start
 The dedicated Ethernet bench leaves encoder bitrate control manual by default,
 so changes made through venc remain stable. Set `VENC_CONTROL_ENABLED=1` when
 testing waybeam-link's adaptive bitrate actuator instead.
+On the dual-core SSC338Q it also defaults the TX/FEC main thread to CPU 1 and
+the SHM readiness thread to CPU 0; override with `VEHICLE_MAIN_CPU` and
+`VEHICLE_SHM_CPU` when testing scheduler placement.
 
 The detached bench keeps running after the command returns. View both nodes at
 `http://192.168.2.242:8099/`; inspect it with
