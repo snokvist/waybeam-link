@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "wblink/types.h"
+#include "wblink/jscc_loss_estimator.h"
 
 namespace wblink {
 
@@ -39,6 +40,11 @@ struct FrameReassemblerStats {
     uint64_t frames_unrecoverable = 0;  // finalized with < k, no way to decode
     uint64_t decode_failures = 0;
     uint64_t malformed = 0;
+    uint64_t jscc_shadow_blocks = 0;
+    uint16_t jscc_predicted_loss_symbols = 0;
+    uint16_t jscc_observed_loss_symbols = 0;
+    uint64_t jscc_underpredicted_blocks = 0;
+    uint64_t jscc_predicted_parity_symbols = 0;
 };
 
 class FrameReassembler {
@@ -61,7 +67,7 @@ class FrameReassembler {
 
     // §15.5 stats/reset: zero the cumulative counters (in-flight blocks and
     // the finalized watermark are untouched).
-    void reset_stats() { stats_ = {}; }
+    void reset_stats();
 
   private:
     struct Block {
@@ -70,6 +76,8 @@ class FrameReassembler {
         uint32_t frame_len = 0;   // total blob length (from repair; 0 = unknown)
         uint64_t first_ms = 0;
         bool have_eob = false;
+        bool shadow_armed = false;
+        uint16_t shadow_prediction = 0;
         // index -> chunk bytes (source i; last chunk may be < s, unpadded).
         std::map<uint16_t, std::vector<uint8_t>> sources;
         // repair_idx -> s coded bytes.
@@ -81,6 +89,7 @@ class FrameReassembler {
     bool try_complete(uint32_t id, Block& b, const Emit& emit);
     void supersede(uint32_t new_highest, const Emit& emit);
     void finalize(uint32_t id);  // advance the done/dropped watermark
+    void observe_shadow(Block& b);
 
     FrameReassemblerConfig cfg_;
     FrameReassemblerStats stats_;
@@ -90,6 +99,7 @@ class FrameReassembler {
     uint32_t finalized_upto_ = 0;   // block_ids <= this are done/dropped
     bool have_finalized_ = false;
     std::vector<uint8_t> scratch_;  // reused decode/concat buffer
+    JsccLossEstimator loss_estimator_;
 };
 
 }  // namespace wblink

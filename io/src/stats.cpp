@@ -155,6 +155,16 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.frames_unrecoverable);
         out += ",\"malformed\":";
         append_u64(out, s.malformed);
+        out += ",\"jscc_shadow_blocks\":";
+        append_u64(out, s.jscc_shadow_blocks);
+        out += ",\"jscc_predicted_loss_symbols\":";
+        append_u64(out, s.jscc_predicted_loss_symbols);
+        out += ",\"jscc_observed_loss_symbols\":";
+        append_u64(out, s.jscc_observed_loss_symbols);
+        out += ",\"jscc_underpredicted_blocks\":";
+        append_u64(out, s.jscc_underpredicted_blocks);
+        out += ",\"jscc_predicted_parity_symbols\":";
+        append_u64(out, s.jscc_predicted_parity_symbols);
         out += ",\"shm_full_drops\":";
         append_u64(out, s.shm_full_drops);
         out += ",\"shm_oversize_drops\":";

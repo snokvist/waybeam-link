@@ -68,6 +68,11 @@ struct StreamStats {
     uint64_t frames_fast = 0;
     uint64_t frames_unrecoverable = 0;
     uint64_t malformed = 0;
+    uint64_t jscc_shadow_blocks = 0;
+    uint16_t jscc_predicted_loss_symbols = 0;
+    uint16_t jscc_observed_loss_symbols = 0;
+    uint64_t jscc_underpredicted_blocks = 0;
+    uint64_t jscc_predicted_parity_symbols = 0;
     uint64_t shm_full_drops = 0;
     uint64_t shm_oversize_drops = 0;
     uint64_t shm_bad_slots = 0;

@@ -56,6 +56,11 @@ StatsSnapshot sample_snapshot() {
     st.frames_fast = 89571;
     st.frames_unrecoverable = 0;
     st.malformed = 0;
+    st.jscc_shadow_blocks = 89681;
+    st.jscc_predicted_loss_symbols = 3;
+    st.jscc_observed_loss_symbols = 1;
+    st.jscc_underpredicted_blocks = 72;
+    st.jscc_predicted_parity_symbols = 271044;
     st.dropped_superseded = 110;
     st.dropped_deadline = 8;
     st.nacks_sent = 18;
@@ -102,7 +107,12 @@ const char* kGolden =
     "\"frame_size_min\":8120,\"frame_size_max\":241810,"
     "\"frame_interval_us\":11106,\"frame_jitter_us\":184,"
     "\"frames_fast\":89571,\"frames_unrecoverable\":0,"
-    "\"malformed\":0,\"shm_full_drops\":0,\"shm_oversize_drops\":0,"
+    "\"malformed\":0,\"jscc_shadow_blocks\":89681,"
+    "\"jscc_predicted_loss_symbols\":3,"
+    "\"jscc_observed_loss_symbols\":1,"
+    "\"jscc_underpredicted_blocks\":72,"
+    "\"jscc_predicted_parity_symbols\":271044,"
+    "\"shm_full_drops\":0,\"shm_oversize_drops\":0,"
     "\"shm_bad_slots\":0,\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"
     "\"nacks_sent\":18,"

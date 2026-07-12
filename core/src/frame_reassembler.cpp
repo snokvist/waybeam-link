@@ -105,6 +105,11 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         it = blocks_.find(block_id);  // supersede() never drops the newest
     }
 
+    if (it != blocks_.end() && !it->second.shadow_armed) {
+        it->second.shadow_prediction = loss_estimator_.predict();
+        it->second.shadow_armed = true;
+    }
+
     if (it != blocks_.end() && try_complete(block_id, it->second, emit)) {
         blocks_.erase(it);
     }
@@ -123,6 +128,7 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
             scratch_.insert(scratch_.end(), kv.second.begin(), kv.second.end());
         }
         emit(scratch_.data(), scratch_.size());
+        observe_shadow(b);
         ++stats_.frames_delivered;
         ++stats_.frames_fast;
         finalize(id);
@@ -151,6 +157,7 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
             if (dec.decode(scratch_.data())) {
                 scratch_.resize(b.frame_len);  // trim last-symbol padding
                 emit(scratch_.data(), scratch_.size());
+                observe_shadow(b);
                 ++stats_.frames_delivered;
                 ++stats_.frames_fec;
                 finalize(id);
@@ -172,6 +179,7 @@ void FrameReassembler::supersede(uint32_t new_highest, const Emit& /*emit*/) {
                 ++stats_.frames_unrecoverable;
             }
             ++stats_.frames_superseded;
+            observe_shadow(it->second);
             finalize(it->first);
             it = blocks_.erase(it);
         } else {
@@ -188,11 +196,37 @@ void FrameReassembler::tick(uint64_t now_ms, const Emit& /*emit*/) {
                 ++stats_.frames_unrecoverable;
             }
             ++stats_.frames_deadline;
+            observe_shadow(it->second);
             finalize(it->first);
             it = blocks_.erase(it);
         } else {
             ++it;
         }
+    }
+}
+
+void FrameReassembler::observe_shadow(Block& b) {
+    if (!b.shadow_armed || b.k == 0) {
+        return;
+    }
+    const uint16_t observed = static_cast<uint16_t>(
+        b.k - std::min<size_t>(b.sources.size(), b.k));
+    stats_.jscc_predicted_loss_symbols = b.shadow_prediction;
+    stats_.jscc_observed_loss_symbols = observed;
+    stats_.jscc_underpredicted_blocks += b.shadow_prediction < observed;
+    stats_.jscc_predicted_parity_symbols += b.shadow_prediction;
+    ++stats_.jscc_shadow_blocks;
+    loss_estimator_.observe(observed);
+    b.shadow_armed = false;
+}
+
+void FrameReassembler::reset_stats() {
+    stats_ = {};
+    loss_estimator_.reset();
+    for (auto& [id, block] : blocks_) {
+        (void)id;
+        block.shadow_prediction = 0;
+        block.shadow_armed = true;
     }
 }
 

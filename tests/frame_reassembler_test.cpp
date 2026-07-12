@@ -292,12 +292,20 @@ int main() {
         CHECK(got[0] == new_blob);
         CHECK_EQ_U(ra.stats().frames_superseded, 1u);
         CHECK_EQ_U(ra.stats().frames_unrecoverable, 1u);
+        CHECK_EQ_U(ra.stats().jscc_shadow_blocks, 2u);
+        CHECK_EQ_U(ra.stats().jscc_predicted_loss_symbols, 0u);
+        CHECK_EQ_U(ra.stats().jscc_observed_loss_symbols, 0u);
+        CHECK_EQ_U(ra.stats().jscc_underpredicted_blocks, 1u);
 
         // A late symbol for the finalized old block can never appear after it.
         const Sym& late = old_syms[0];
         ra.push(late.block_id, late.flags, late.payload.data(), late.payload.size(),
                 1002, emit);
         CHECK_EQ_U(got.size(), 1u);
+
+        ra.reset_stats();
+        CHECK_EQ_U(ra.stats().jscc_shadow_blocks, 0u);
+        CHECK_EQ_U(ra.stats().jscc_underpredicted_blocks, 0u);
     }
 
     return wbtest_finish("frame_reassembler_test");

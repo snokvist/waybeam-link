@@ -67,6 +67,7 @@ add_library(wblink_core STATIC
     core/src/frame_framer.cpp
     core/src/frame_reassembler.cpp
     core/src/jscc_controller.cpp
+    core/src/jscc_loss_estimator.cpp
     core/src/ring.cpp
     core/src/rx.cpp
     core/src/scheduler.cpp

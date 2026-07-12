@@ -21,6 +21,9 @@ class DashboardSchemaTest(unittest.TestCase):
             "shm_bad_slots", "frame_count", "frame_bytes", "frame_size_last",
             "frame_size_min", "frame_size_max", "frame_interval_us",
             "frame_jitter_us",
+            "jscc_shadow_blocks", "jscc_predicted_loss_symbols",
+            "jscc_observed_loss_symbols", "jscc_underpredicted_blocks",
+            "jscc_predicted_parity_symbols",
         ):
             self.assertIn(f"s.{field}", HTML)
 
