@@ -27,6 +27,18 @@ class DashboardSchemaTest(unittest.TestCase):
     def test_existing_instances_bootstrap_before_sse(self):
         self.assertIn('fetch("/api/instances")', HTML)
 
+    def test_monitor_explains_selector_states_and_metrics(self):
+        for text in ("HOLD", "PINNED", "State guide", "data-tip",
+                     "Loss before diversity"):
+            with self.subTest(text=text):
+                self.assertIn(text, HTML)
+
+    def test_monitor_has_metric_tabs_and_live_trends(self):
+        for text in ("Overview", "Link & adapters", "Streams", "Frame & SHM",
+                     "Trends", "data-chart=", "Encoded frame byte size"):
+            with self.subTest(text=text):
+                self.assertIn(text, HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

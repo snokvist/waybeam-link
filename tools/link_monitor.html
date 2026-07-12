@@ -5,241 +5,129 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>waybeam-link monitor</title>
 <style>
-  :root {
-    --bg:#0e1116; --panel:#161b22; --panel2:#1b2129; --line:#2a313c;
-    --fg:#d7dde5; --dim:#8b95a3; --accent:#4da3ff;
-    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --idle:#6e7681;
-    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-    font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
-  header { display:flex; align-items:center; gap:14px; padding:10px 16px;
-    background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
-  header h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.3px; }
-  header .sub { color:var(--dim); font-size:12px; }
-  #conn { margin-left:auto; font:12px var(--mono); padding:3px 9px; border-radius:12px;
-    border:1px solid var(--line); }
-  #conn.up { color:var(--ok); border-color:#1d3a24; }
-  #conn.down { color:var(--bad); border-color:#40201f; }
-  #grid { display:grid; gap:14px; padding:16px;
-    grid-template-columns:repeat(auto-fill,minmax(min(430px,100%),1fr)); }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
-    overflow:hidden; }
-  .card.stale { opacity:.55; }
-  .chead { display:flex; align-items:center; gap:10px; padding:9px 12px;
-    background:var(--panel2); border-bottom:1px solid var(--line); }
-  .role { font:11px var(--mono); font-weight:700; padding:2px 7px; border-radius:5px;
-    text-transform:uppercase; }
-  .role.tx { background:#12324f; color:#8ac4ff; }
-  .role.rx { background:#14361f; color:#7ee08e; }
-  .role.loopback { background:#3a2d10; color:#e5c15a; }
-  .role\?, .role.q { background:#30363d; color:var(--dim); }
-  .cname { font-weight:600; font-size:14px; }
-  .cid { color:var(--dim); font:11px var(--mono); }
-  .dot { width:9px; height:9px; border-radius:50%; margin-left:auto; }
-  .dot.ok { background:var(--ok); box-shadow:0 0 6px #3fb95088; }
-  .dot.warn { background:var(--warn); }
-  .dot.bad { background:var(--bad); }
-  .age { color:var(--dim); font:11px var(--mono); min-width:52px; text-align:right; }
-  .body { padding:10px 12px; display:flex; flex-direction:column; gap:10px; }
-  .link-row { display:flex; flex-wrap:wrap; gap:6px; }
-  .chip { font:11px var(--mono); background:var(--panel2); border:1px solid var(--line);
-    border-radius:6px; padding:3px 8px; white-space:nowrap; }
-  .chip b { color:var(--fg); font-weight:700; }
-  .chip .k { color:var(--dim); }
-  .chip.hot { border-color:#40201f; color:#ff9d96; }
-  .chip.state-HOLD b { color:var(--ok); }
-  .chip.state-PROBE b, .chip.state-DEMOTE b { color:var(--warn); }
-  .sec-title { color:var(--dim); font-size:11px; text-transform:uppercase;
-    letter-spacing:.5px; margin:2px 0 -2px; }
-  table { width:100%; border-collapse:collapse; font:11px var(--mono); }
-  .table-scroll { width:100%; overflow-x:auto; }
-  .table-wide { min-width:720px; }
-  th,td { text-align:right; padding:3px 6px; border-bottom:1px solid var(--line); }
-  th { color:var(--dim); font-weight:600; }
-  td.l,th.l { text-align:left; }
-  tr:last-child td { border-bottom:none; }
-  .flag { padding:1px 5px; border-radius:4px; font-weight:700; }
-  .flag.bad { background:#40201f; color:#ff9d96; }
-  .flag.ok { color:var(--idle); }
-  .v-ok { color:var(--ok); } .v-warn { color:var(--warn); } .v-bad { color:var(--bad); }
-  .empty { color:var(--dim); padding:40px; text-align:center; grid-column:1/-1; }
-  footer { color:var(--dim); font-size:11px; padding:8px 16px; border-top:1px solid var(--line); }
-  @media (max-width:520px) {
-    header { gap:8px; padding:10px 12px; }
-    header h1 { flex-shrink:0; }
-    header h1 .sub, #count { display:none; }
-    #grid { padding:16px; }
-  }
+  :root{--bg:#0d1117;--panel:#161b22;--raised:#1d232c;--line:#30363d;--fg:#e6edf3;
+    --dim:#9ba7b4;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149;
+    --cyan:#39c5cf;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);
+    font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+  header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;
+    padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:15px;font-weight:650;letter-spacing:0}.sub{color:var(--dim);font-size:12px}
+  #conn{margin-left:auto;font:12px var(--mono);padding:3px 8px;border:1px solid var(--line);border-radius:5px}
+  #conn.up{color:var(--ok)} #conn.down{color:var(--bad)}
+  .intro{display:flex;gap:18px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--line);
+    background:#11161d;color:var(--dim)} .intro strong{color:var(--fg)} .intro p{margin:0;max-width:850px}
+  details.help{margin-left:auto;min-width:max-content} details.help summary{cursor:pointer;color:var(--accent)}
+  details.help div{position:absolute;right:16px;margin-top:8px;z-index:8;width:min(500px,calc(100vw - 32px));
+    padding:12px;background:var(--raised);border:1px solid var(--line);box-shadow:0 8px 24px #0008}
+  details.help p+ p{margin-top:8px}
+  #grid{display:grid;gap:14px;padding:16px;grid-template-columns:repeat(auto-fit,minmax(min(520px,100%),1fr))}
+  .card{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .card.stale{opacity:.58}.chead{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;
+    gap:9px;padding:9px 12px;background:var(--raised);border-bottom:1px solid var(--line)}
+  .identity{min-width:0}.cname{display:block;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cid{display:block;color:var(--dim);font:10px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .role{font:700 10px var(--mono);padding:2px 6px;border-radius:4px;text-transform:uppercase}
+  .role.tx{background:#12324f;color:#8ac4ff}.role.rx{background:#14361f;color:#7ee08e}
+  .role.loopback{background:#3a2d10;color:#e5c15a}.role.q{background:#30363d;color:var(--dim)}
+  .dot{width:8px;height:8px;border-radius:50%}.dot.ok{background:var(--ok);box-shadow:0 0 5px #3fb95088}
+  .dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}.age{color:var(--dim);font:11px var(--mono)}
+  .tabs{display:flex;gap:2px;padding:7px 8px 0;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:thin}
+  .tab{border:0;border-bottom:2px solid transparent;background:none;color:var(--dim);font:600 11px/28px system-ui;
+    padding:0 8px;cursor:pointer;white-space:nowrap}.tab:hover,.tab:focus-visible{color:var(--fg)}
+  .tab.active{color:var(--accent);border-color:var(--accent)}.body{padding:11px 12px;min-height:210px}
+  .pane{display:none}.pane.active{display:block}.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:7px}
+  .metric{min-width:0;padding:7px 8px;background:var(--raised);border:1px solid var(--line);border-radius:5px}
+  .metric .label{display:block;color:var(--dim);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .metric .value{display:block;margin-top:2px;font:650 15px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .metric .unit{font-size:10px;color:var(--dim);font-weight:400}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+  .section{margin-top:12px}.section:first-child{margin-top:0}.section-title{margin:0 0 6px;color:var(--dim);font-size:10px;text-transform:uppercase}
+  .row-list{display:grid;gap:7px}.row-card{padding:8px;background:var(--raised);border:1px solid var(--line);border-radius:5px;min-width:0}
+  .row-head{display:flex;gap:8px;align-items:center;margin-bottom:7px}.row-head strong{overflow:hidden;text-overflow:ellipsis}
+  .row-head .tag{margin-left:auto;color:var(--dim);font:10px var(--mono)}
+  .state{color:var(--ok)}.state-PROBE,.state-DEMOTE,.state-PROMOTE,.state-FREEZE,.state-CSA_FREEZE{color:var(--warn)}
+  .state-FAILSAFE{color:var(--bad)}.flag{padding:1px 5px;border-radius:4px;background:#40201f;color:#ff9d96;font:700 10px var(--mono)}
+  [data-tip]{cursor:help;text-decoration:underline dotted #67717d;text-underline-offset:3px}
+  .chart-wrap{height:180px;padding:6px 0}.chart-wrap canvas{width:100%;height:100%;display:block}
+  .legend{display:flex;flex-wrap:wrap;gap:12px;color:var(--dim);font-size:10px}.key:before{content:"";display:inline-block;width:9px;height:2px;margin-right:5px;vertical-align:middle;background:var(--key)}
+  .notice{padding:8px;border-left:3px solid var(--warn);background:#2a2415;color:var(--dim)}
+  .empty{grid-column:1/-1;padding:50px;color:var(--dim);text-align:center}footer{padding:9px 16px;color:var(--dim);font-size:11px;border-top:1px solid var(--line)}
+  @media(max-width:600px){header{padding:9px 12px}.intro{padding:10px 12px}.intro .wide,#count{display:none}#grid{padding:10px}.body{padding:10px}.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 </head>
 <body>
-<header>
-  <h1>waybeam-link <span class="sub">fleet monitor</span></h1>
-  <span class="sub" id="count">0 instances</span>
-  <span id="conn" class="down">connecting…</span>
-</header>
-<div id="grid"><div class="empty" id="empty">Waiting for stats datagrams…<br>
-  Point an instance's stats egress at this host: <code>"stats":{"hz":5,"bind":{"kind":"udp","send":"THIS_HOST:9110"}}</code></div></div>
-<footer>SSE <code>/api/stream</code> · rates derived from <code>t_ms</code> deltas · dBm = tx_power_qdb/4 · loss% = milli/10</footer>
-
+<header><h1>waybeam-link <span class="sub">live monitor</span></h1><span class="sub" id="count">0 instances</span><span id="conn" class="down">connecting...</span></header>
+<div class="intro"><p><strong>Each card is one waybeam-link process.</strong> Vehicle TX and ground RX report independently. Counters are cumulative since that process started; values marked <span data-tip="Calculated in this browser from consecutive stats snapshots.">rate</span> are browser-derived.</p>
+  <details class="help"><summary>State guide</summary><div>
+    <p><strong>HOLD</strong>: adaptive selection is healthy and keeping the current profile because no promotion or demotion rule fired.</p>
+    <p><strong>PINNED</strong>: adaptation is intentionally disabled because the configured minimum and maximum profile are the same. This is expected in the Ethernet bench.</p>
+    <p><strong>PROMOTE / DEMOTE</strong>: moving up/down the profile ladder. <strong>FREEZE</strong>: flap protection is temporarily blocking promotion. <strong>FAILSAFE</strong>: return reports are stale or absent; promotion is forbidden and the selector may step down.</p>
+  </div></details></div>
+<main id="grid"><div class="empty" id="empty">Waiting for stats datagrams...<br><code>"stats":{"hz":5,"bind":{"kind":"udp","send":"THIS_HOST:9110"}}</code></div></main>
+<footer>Live snapshots via SSE <code>/api/stream</code>. Hover underlined labels for definitions. History is held in this browser for five minutes.</footer>
 <script>
 "use strict";
-const grid = document.getElementById("grid");
-const empty = document.getElementById("empty");
-const connEl = document.getElementById("conn");
-const countEl = document.getElementById("count");
-const state = new Map();   // key -> {rec, prevSnap, prevT, cardEl}
-
-function fmt(n){ if(n==null) return "–"; if(n>=1e6) return (n/1e6).toFixed(1)+"M";
-  if(n>=1e3) return (n/1e3).toFixed(1)+"k"; return String(n); }
-function pct(milli){ return (milli/10).toFixed(milli>=100?0:1)+"%"; }
-function ageClass(ms){ return ms<1500?"ok":ms<4000?"warn":"bad"; }
-
-function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-
-function render(){
-  const now = Date.now();
-  let n = 0;
-  for (const st of state.values()){
-    n++;
-    const rec = st.rec, snap = rec.snap;
-    const age = now - st.wall;
-    // derive per-second rates from t_ms delta
-    let dt = 0;
-    if (st.prevSnap) dt = (snap.t_ms - st.prevSnap.t_ms)/1000;
-    const rate = (cur,prev)=> (dt>0 && prev!=null) ? Math.max(0,(cur-prev)/dt) : null;
-
-    const card = st.cardEl;
-    card.className = "card" + (age>4000?" stale":"");
-    const link = snap.link||{};
-    const stateCls = "state-"+(link.state||"?");
-    const dbm = (link.tx_power_qdb/4).toFixed(1);
-
-    // adapters
-    let arows = (snap.adapters||[]).map(a=>{
-      const flags = [];
-      if (a.tx_wedged) flags.push('<span class="flag bad">WEDGED</span>');
-      if (a.adapter_stalled) flags.push('<span class="flag bad">STALL</span>');
-      if (!flags.length) flags.push('<span class="flag ok">·</span>');
-      const txf = a.tx_failed>0 ? 'v-bad':'';
-      const localDrop = (a.drop||0) + (a.kernel_drop||0);
-      return `<tr><td class="l">${esc(a.name)}</td>
-        <td>${a.rssi_best||0}/${a.rssi_mean||0}</td><td>${a.snr||0}</td>
-        <td>${fmt(a.rx)}</td><td>${fmt(a.dup)}</td>
-        <td>${fmt(a.tx_submitted)}</td><td class="${txf}">${fmt(a.tx_failed)}</td>
-        <td class="${localDrop?'v-bad':''}">${fmt(a.drop)}</td>
-        <td>${fmt(a.filtered)}</td>
-        <td class="${(a.kernel_drop||0)>0?'v-bad':''}">${fmt(a.kernel_drop)}</td>
-        <td>${fmt(a.tx_reports)}</td><td class="l">${flags.join(" ")}</td></tr>`;
-    }).join("") || `<tr><td class="l" colspan="12" style="color:var(--dim)">no adapters</td></tr>`;
-
-    // streams
-    let srows = (snap.streams||[]).map((s,i)=>{
-      const ps = st.prevSnap && st.prevSnap.streams
-        ? st.prevSnap.streams.find(p=>p.stream_id===s.stream_id) : null;
-      const dps = rate(s.delivered, ps?ps.delivered:null);
-      const lp = s.loss_prediversity_milli||0, la = s.loss_postdiv_prearq_milli||0;
-      return `<tr><td class="l">#${s.stream_id} ${esc(s.type||"")}</td>
-        <td>${dps==null?"–":dps.toFixed(0)}</td>
-        <td class="${lp>50?'v-warn':''}">${pct(lp)}</td>
-        <td class="${la>50?'v-warn':''}">${pct(la)}</td>
-        <td>${fmt(s.recovered_arq)}</td><td>${fmt(s.nacks_sent)}</td>
-        <td>${s.nack_rtt_max_ms||0}/${s.arq_rec_max_ms||0}</td></tr>`;
-    }).join("") || `<tr><td class="l" colspan="7" style="color:var(--dim)">no streams</td></tr>`;
-
-    let frows = (snap.streams||[]).map(s=>{
-      return `<tr><td class="l">#${s.stream_id} ${esc(s.type||"")}</td>
-        <td>${fmt(s.frames_fast)}</td>
-        <td class="${(s.recovered_fec||0)>0?'v-ok':''}">${fmt(s.recovered_fec)}</td>
-        <td class="${(s.frames_unrecoverable||0)>0?'v-bad':''}">${fmt(s.frames_unrecoverable)}</td>
-        <td class="${(s.malformed||0)>0?'v-bad':''}">${fmt(s.malformed)}</td>
-        <td class="${(s.decode_errors||0)>0?'v-bad':''}">${fmt(s.decode_errors)}</td>
-        <td>${fmt(s.dropped_superseded)}</td>
-        <td class="${(s.dropped_deadline||0)>0?'v-warn':''}">${fmt(s.dropped_deadline)}</td>
-        <td class="${(s.shm_full_drops||0)>0?'v-bad':''}">${fmt(s.shm_full_drops)}</td>
-        <td class="${(s.shm_oversize_drops||0)>0?'v-bad':''}">${fmt(s.shm_oversize_drops)}</td>
-        <td class="${(s.shm_bad_slots||0)>0?'v-bad':''}">${fmt(s.shm_bad_slots)}</td></tr>`;
-    }).join("") || `<tr><td class="l" colspan="11" style="color:var(--dim)">no streams</td></tr>`;
-
-    const ret = snap.return||{};
-    card.innerHTML = `
-      <div class="chead">
-        <span class="role ${rec.role==='?'?'q':rec.role}">${esc(rec.role)}</span>
-        <span class="cname">${esc(rec.label||rec.src)}</span>
-        <span class="cid">node ${snap.node} · sess ${snap.session}</span>
-        <span class="dot ${ageClass(age)}"></span>
-        <span class="age">${(age/1000).toFixed(1)}s</span>
-      </div>
-      <div class="body">
-        <div class="link-row">
-          <span class="chip ${stateCls}"><span class="k">state</span> <b>${esc(link.state||"?")}</b></span>
-          <span class="chip"><span class="k">prof</span> <b>${link.profile??"–"}</b></span>
-          <span class="chip"><span class="k">mcs</span> <b>${link.mcs??"–"}</b></span>
-          <span class="chip"><span class="k">pwr</span> <b>${isNaN(dbm)?"–":dbm} dBm</b></span>
-          <span class="chip ${link.flap_freeze?'hot':''}"><span class="k">flap</span> <b>${link.flap_freeze?"FREEZE":"ok"}</b></span>
-          <span class="chip"><span class="k">csa</span> <b>${esc(link.csa_state||"–")}</b></span>
-          <span class="chip"><span class="k">rpt age</span> <b>${link.report_age_ms??"–"}ms</b></span>
-        </div>
-        <div class="sec-title">adapters</div>
-        <div class="table-scroll"><table class="table-wide"><thead><tr>
-          <th class="l">name</th><th>rssi b/m</th><th>snr</th><th>rx</th><th>dup</th>
-          <th>tx</th><th>txfail</th><th>drop</th><th>filter</th><th>kdrop</th>
-          <th>rpts</th><th class="l">flags</th>
-        </tr></thead><tbody>${arows}</tbody></table></div>
-        <div class="sec-title">streams &nbsp;<span style="text-transform:none;color:var(--idle)">delivery · loss · ARQ</span></div>
-        <table><thead><tr>
-          <th class="l">stream</th><th>d/s</th><th>lpre</th><th>lpost</th>
-          <th>arq</th><th>nack</th><th>rtt/rec</th>
-        </tr></thead><tbody>${srows}</tbody></table>
-        <div class="sec-title">frame + shm health</div>
-        <div class="table-scroll"><table class="table-wide"><thead><tr>
-          <th class="l">stream</th><th>fast</th><th>fec</th><th>unrec</th>
-          <th>mal</th><th>decode</th><th>sup</th><th>deadline</th>
-          <th>shm full</th><th>shm big</th><th>shm bad</th>
-        </tr></thead><tbody>${frows}</tbody></table></div>
-        <div class="link-row">
-          <span class="chip"><span class="k">reports</span> <b>${fmt(ret.reports_received)}/${fmt(ret.reports_expected)}</b></span>
-          <span class="chip"><span class="k">win hit/miss</span> <b>${fmt(ret.return_window_hits)}/${fmt(ret.return_window_misses)}</b></span>
-          <span class="chip"><span class="k">ucast/fb</span> <b>${fmt(ret.unicast_sent)}/${fmt(ret.unicast_fallback)}</b></span>
-          <span class="chip"><span class="k">updates</span> <b>${rec.updates||0}</b></span>
-        </div>
-      </div>`;
-  }
-  countEl.textContent = n + (n===1?" instance":" instances");
-  empty.style.display = n?"none":"block";
-}
-
-function upsert(rec){
-  let st = state.get(rec.key);
-  if (!st){
-    const cardEl = document.createElement("div");
-    grid.appendChild(cardEl);
-    st = { cardEl, prevSnap:null };
-    state.set(rec.key, st);
-  } else {
-    st.prevSnap = st.rec ? st.rec.snap : null;
-  }
-  st.rec = rec;
-  st.wall = Date.now();
-}
-
-function connect(){
-  fetch("/api/instances").then(r=>r.json()).then(body=>{
-    for(const rec of (body.instances||[])) upsert(rec);
-    render();
-  }).catch(()=>{});
-  const es = new EventSource("/api/stream");
-  es.onopen = ()=>{ connEl.className="up"; connEl.textContent="● live"; };
-  es.onerror = ()=>{ connEl.className="down"; connEl.textContent="reconnecting…"; };
-  es.onmessage = (e)=>{ try{ upsert(JSON.parse(e.data)); }catch(_){} };
-}
-connect();
-setInterval(render, 250);           // repaint + age ticking
-// prune instances gone silent >30s
-setInterval(()=>{ const now=Date.now(); for(const [k,st] of state){
-  if(now-st.wall>30000){ st.cardEl.remove(); state.delete(k); } } }, 5000);
+const grid=document.getElementById("grid"),empty=document.getElementById("empty"),connEl=document.getElementById("conn"),countEl=document.getElementById("count");
+const instances=new Map(), selectedTabs=new Map();
+const tips={
+ state:"Link profile selector state",profile:"Active profile-table entry",mcs:"Modulation and Coding Scheme index",power:"Configured transmit power in dBm",
+ reportAge:"Age of the newest receiver feedback report",flap:"Profile-flap protection",csa:"Coordinated channel-switch state",
+ rssi:"Received signal strength: best / mean, dBm",snr:"Signal-to-noise ratio, dB",noise:"Measured noise floor, dBm",rx:"Frames accepted by this adapter",
+ dup:"Copies merged by diversity",tx:"Frames submitted for transmission",txFail:"Transmission submissions that failed",queueDrop:"Userspace receive-queue overflow drops",
+ kernelDrop:"Kernel UDP/socket receive-queue overflow drops",filtered:"Malformed, foreign-network, or self-received frames filtered out",reports:"Per-frame TX status reports",
+ delivered:"Unique stream packets delivered to the local binding",rate:"Rate calculated from consecutive cumulative counters",preLoss:"Estimated loss on an individual adapter before diversity combining",
+ postLoss:"Loss after diversity combining but before ARQ recovery",arq:"Packets recovered by retransmission",fec:"Frames recovered using repair symbols",
+ fast:"Frames completed from all source symbols without FEC decoding",unrec:"Frames finalized with too few symbols to recover",malformed:"Frame symbols rejected as inconsistent or malformed",
+ decode:"FEC decode attempts that failed",superseded:"Missing packets dropped after a newer block made them obsolete",deadline:"Missing packets or frames dropped when their recovery deadline expired",
+ shmFull:"Complete frames dropped because the decoder SHM ring was full",shmBig:"Frames too large for a decoder SHM slot",shmBad:"Corrupt SHM slots or consumer buffers too small",
+ nack:"NACK requests sent",rtt:"Largest observed NACK-to-retransmit round trip",recovery:"Largest first-NACK-to-recovery time",unique:"Unique packets accepted",
+ diversity:"Duplicate packet copies observed across adapters",returnReports:"Feedback reports received / expected",window:"Return transmissions inside / outside the scheduled return window",
+ unicast:"Return frames sent as unicast / broadcast fallback"};
+function esc(v){return String(v??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function fmt(n){if(n==null)return "-";if(n>=1e9)return(n/1e9).toFixed(1)+"G";if(n>=1e6)return(n/1e6).toFixed(1)+"M";if(n>=1e3)return(n/1e3).toFixed(1)+"k";return String(n)}
+function pct(m){return((m||0)/10).toFixed((m||0)>=100?0:1)+"%"} function tip(k){return ` data-tip="${esc(tips[k])}" title="${esc(tips[k])}"`}
+function metric(label,value,key,unit="",cls=""){return `<div class="metric"><span class="label"${tip(key)}>${label}</span><span class="value ${cls}">${value}${unit?` <span class="unit">${unit}</span>`:""}</span></div>`}
+function delta(cur,prev,dt){return dt>0&&prev!=null?Math.max(0,(cur-prev)/dt):null} function rateText(v){return v==null?"-":v.toFixed(v<10?1:0)}
+function streamPrev(st,s){return st.prev?.streams?.find(p=>p.stream_id===s.stream_id)}
+function pushHistory(st,snap){const prev=st.last,dt=prev?(snap.t_ms-prev.t_ms)/1000:0,s=snap.streams?.[0],p=prev?.streams?.find(x=>x.stream_id===s?.stream_id);
+  if(s&&dt>0&&dt<10){st.history.push({t:Date.now(),delivery:delta(s.delivered,p?.delivered,dt)||0,pre:(s.loss_prediversity_milli||0)/10,post:(s.loss_postdiv_prearq_milli||0)/10,
+    fec:delta(s.recovered_fec,p?.recovered_fec,dt)||0,arq:delta(s.recovered_arq,p?.recovered_arq,dt)||0,drops:delta((s.frames_unrecoverable||0)+(s.dropped_deadline||0)+(s.shm_full_drops||0),p?(p.frames_unrecoverable||0)+(p.dropped_deadline||0)+(p.shm_full_drops||0):null,dt)||0,age:snap.link?.report_age_ms||0});
+    st.history=st.history.filter(x=>Date.now()-x.t<300000).slice(-600)} st.last=snap}
+function adaptersPane(snap){const rows=(snap.adapters||[]).map(a=>`<div class="row-card"><div class="row-head"><strong>${esc(a.name)}</strong>${a.tx_wedged?'<span class="flag">TX WEDGED</span>':''}${a.adapter_stalled?'<span class="flag">STALLED</span>':''}</div><div class="metric-grid">
+  ${metric("RSSI best / mean",`${a.rssi_best||0} / ${a.rssi_mean||0}`,"rssi","dBm")}${metric("SNR",a.snr||0,"snr","dB")}${metric("Noise",a.noise||0,"noise","dBm")}
+  ${metric("Received",fmt(a.rx),"rx")}${metric("Diversity duplicates",fmt(a.dup),"dup")}${metric("TX submitted",fmt(a.tx_submitted),"tx")}${metric("TX failed",fmt(a.tx_failed),"txFail","",a.tx_failed?"bad":"")}
+  ${metric("Queue drops",fmt(a.drop),"queueDrop","",a.drop?"bad":"")}${metric("Kernel drops",fmt(a.kernel_drop),"kernelDrop","",a.kernel_drop?"bad":"")}${metric("Filtered",fmt(a.filtered),"filtered")}${metric("TX reports",fmt(a.tx_reports),"reports")}</div></div>`).join("");
+  return rows||'<div class="notice">This process has no configured air adapters.</div>'}
+function streamsPane(st,snap,dt){return (snap.streams||[]).map(s=>{const p=streamPrev(st,s),d=delta(s.delivered,p?.delivered,dt),lp=s.loss_prediversity_milli||0,la=s.loss_postdiv_prearq_milli||0;
+ return `<div class="row-card"><div class="row-head"><strong>Stream ${s.stream_id}</strong><span class="tag">${esc(s.type||"untyped")}</span></div><div class="metric-grid">
+ ${metric("Delivered",fmt(s.delivered),"delivered")}${metric("Delivery rate",rateText(d),"rate","packets/s")}${metric("Unique received",fmt(s.uniq),"unique")}${metric("Diversity copies",fmt(s.diversity),"diversity")}
+ ${metric("Loss before diversity",pct(lp),"preLoss","",lp>50?"warn":"")}${metric("Loss after diversity",pct(la),"postLoss","",la>50?"warn":"")}${metric("ARQ recovered",fmt(s.recovered_arq),"arq")}${metric("NACKs sent",fmt(s.nacks_sent),"nack")}
+ ${metric("Max NACK RTT",s.nack_rtt_max_ms||0,"rtt","ms")}${metric("Max ARQ recovery",s.arq_rec_max_ms||0,"recovery","ms")}</div></div>`}).join("")||'<div class="notice">No configured streams are reporting.</div>'}
+function framesPane(snap){return (snap.streams||[]).map(s=>`<div class="row-card"><div class="row-head"><strong>Stream ${s.stream_id}</strong><span class="tag">${esc(s.type||"untyped")}</span></div><div class="metric-grid">
+ ${metric("Fast-path frames",fmt(s.frames_fast),"fast")}${metric("FEC recovered",fmt(s.recovered_fec),"fec","",s.recovered_fec?"ok":"")}${metric("Unrecoverable",fmt(s.frames_unrecoverable),"unrec","",s.frames_unrecoverable?"bad":"")}
+ ${metric("Malformed",fmt(s.malformed),"malformed","",s.malformed?"bad":"")}${metric("Decode errors",fmt(s.decode_errors),"decode","",s.decode_errors?"bad":"")}${metric("Superseded drops",fmt(s.dropped_superseded),"superseded")}
+ ${metric("Deadline drops",fmt(s.dropped_deadline),"deadline","",s.dropped_deadline?"warn":"")}${metric("SHM full drops",fmt(s.shm_full_drops),"shmFull","",s.shm_full_drops?"bad":"")}${metric("SHM oversize",fmt(s.shm_oversize_drops),"shmBig","",s.shm_oversize_drops?"bad":"")}${metric("SHM bad slots",fmt(s.shm_bad_slots),"shmBad","",s.shm_bad_slots?"bad":"")}</div></div>`).join("")||'<div class="notice">Frame/SHM counters require a frame-shm stream.</div>'}
+function drawChart(canvas,history,mode){const dpr=devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;if(!w||!h)return;canvas.width=w*dpr;canvas.height=h*dpr;const c=canvas.getContext("2d");c.scale(dpr,dpr);c.clearRect(0,0,w,h);
+ const series=mode==="loss"?[["pre","#d29922"],["post","#f85149"]]:mode==="recovery"?[["fec","#3fb950"],["arq","#58a6ff"],["drops","#f85149"]]:[["delivery","#39c5cf"],["age","#d29922"]];
+ const max=Math.max(1,...history.flatMap(x=>series.map(([k])=>x[k]||0)));c.strokeStyle="#30363d";c.lineWidth=1;for(let i=0;i<4;i++){const y=8+(h-22)*i/3;c.beginPath();c.moveTo(0,y);c.lineTo(w,y);c.stroke()} c.font="10px system-ui";c.fillStyle="#9ba7b4";c.fillText(max.toFixed(max<10?1:0),4,10);
+ series.forEach(([k,color])=>{c.strokeStyle=color;c.lineWidth=1.7;c.beginPath();history.forEach((x,i)=>{const px=history.length<2?0:i*(w-2)/(history.length-1),py=8+(h-22)*(1-(x[k]||0)/max);i?c.lineTo(px,py):c.moveTo(px,py)});c.stroke()})}
+function trendsPane(key){return `<div class="section"><div class="row-head"><strong>Delivery and report age</strong></div><div class="chart-wrap"><canvas data-chart="throughput"></canvas></div><div class="legend"><span class="key" style="--key:#39c5cf">packets/s</span><span class="key" style="--key:#d29922">report age ms</span></div></div>
+ <div class="section"><div class="row-head"><strong>Packet loss</strong></div><div class="chart-wrap"><canvas data-chart="loss"></canvas></div><div class="legend"><span class="key" style="--key:#d29922">before diversity %</span><span class="key" style="--key:#f85149">after diversity %</span></div></div>
+ <div class="section"><div class="row-head"><strong>Recovery and drops</strong></div><div class="chart-wrap"><canvas data-chart="recovery"></canvas></div><div class="legend"><span class="key" style="--key:#3fb950">FEC frames/s</span><span class="key" style="--key:#58a6ff">ARQ packets/s</span><span class="key" style="--key:#f85149">critical drops/s</span></div></div>
+ <div class="notice">Encoded frame byte size and frame-arrival jitter are measured by the finite bench trace, but are not fields in live stats yet. They cannot be graphed accurately here until the stats schema exposes them.</div>`}
+function renderCard(st){const rec=st.rec,snap=rec.snap,link=snap.link||{},age=Date.now()-st.wall,dt=st.prev?(snap.t_ms-st.prev.t_ms)/1000:0,key=rec.key,tab=selectedTabs.get(key)||"overview";
+ const dbm=Number.isFinite(link.tx_power_qdb)?(link.tx_power_qdb/4).toFixed(1):"-",ret=snap.return||{},s=snap.streams?.[0]||{};
+ const overview=`<div class="metric-grid">${metric("Selector state",`<span class="state state-${esc(link.state||'?')}">${esc(link.state||"?")}</span>`,"state")}${metric("Profile",link.profile??"-","profile")}${metric("MCS",link.mcs??"-","mcs")}${metric("TX power",dbm,"power","dBm")}${metric("Report age",link.report_age_ms??"-","reportAge","ms",(link.report_age_ms||0)>1000?"warn":"")}${metric("Post-diversity loss",pct(s.loss_postdiv_prearq_milli||0),"postLoss")}</div>
+ <div class="section"><div class="section-title">Return path</div><div class="metric-grid">${metric("Reports received / expected",`${fmt(ret.reports_received)}/${fmt(ret.reports_expected)}`,"returnReports")}${metric("Window hit / miss",`${fmt(ret.return_window_hits)}/${fmt(ret.return_window_misses)}`,"window")}${metric("Unicast / fallback",`${fmt(ret.unicast_sent)}/${fmt(ret.unicast_fallback)}`,"unicast")}</div></div>`;
+ st.el.className="card"+(age>4000?" stale":"");st.el.innerHTML=`<div class="chead"><span class="role ${rec.role==='?'?'q':esc(rec.role)}">${esc(rec.role)}</span><span class="identity"><span class="cname">${esc(rec.label||rec.src)}</span><span class="cid">${esc(rec.src)} · node ${snap.node} · session ${snap.session}</span></span><span class="dot ${age<1500?'ok':age<4000?'warn':'bad'}"></span><span class="age">${(age/1000).toFixed(1)}s</span></div>
+ <nav class="tabs" aria-label="Metrics"><button class="tab ${tab==='overview'?'active':''}" data-tab="overview">Overview</button><button class="tab ${tab==='link'?'active':''}" data-tab="link">Link & adapters</button><button class="tab ${tab==='streams'?'active':''}" data-tab="streams">Streams</button><button class="tab ${tab==='frames'?'active':''}" data-tab="frames">Frame & SHM</button><button class="tab ${tab==='trends'?'active':''}" data-tab="trends">Trends</button></nav><div class="body">
+ <section class="pane ${tab==='overview'?'active':''}" data-pane="overview">${overview}</section><section class="pane ${tab==='link'?'active':''}" data-pane="link"><div class="metric-grid">${metric("Selector state",`<span class="state state-${esc(link.state||'?')}">${esc(link.state||"?")}</span>`,"state")}${metric("Profile",link.profile??"-","profile")}${metric("MCS",link.mcs??"-","mcs")}${metric("TX power",dbm,"power","dBm")}${metric("Flap protection",link.flap_freeze?"FROZEN":"clear","flap")}${metric("Channel switch",esc(link.csa_state||"IDLE"),"csa")}</div><div class="section"><div class="section-title">Air interfaces</div><div class="row-list">${adaptersPane(snap)}</div></div></section>
+ <section class="pane ${tab==='streams'?'active':''}" data-pane="streams"><div class="row-list">${streamsPane(st,snap,dt)}</div></section><section class="pane ${tab==='frames'?'active':''}" data-pane="frames"><div class="row-list">${framesPane(snap)}</div></section><section class="pane ${tab==='trends'?'active':''}" data-pane="trends">${trendsPane(key)}</section></div>`;
+ st.el.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{selectedTabs.set(key,b.dataset.tab);renderCard(st)});if(tab==="trends")st.el.querySelectorAll("canvas").forEach(c=>drawChart(c,st.history,c.dataset.chart));st.prev=snap}
+function render(){let n=0;for(const st of instances.values()){n++;renderCard(st)}countEl.textContent=`${n} ${n===1?'instance':'instances'}`;empty.style.display=n?"none":"block"}
+function upsert(rec){let st=instances.get(rec.key);if(!st){const el=document.createElement("article");grid.appendChild(el);st={el,history:[],last:null,prev:null};instances.set(rec.key,st)}pushHistory(st,rec.snap);st.rec=rec;st.wall=rec.recv_ms||Date.now()-(rec.age_ms||0)}
+function connect(){fetch("/api/instances").then(r=>r.json()).then(x=>{(x.instances||[]).forEach(upsert);render()}).catch(()=>{});const es=new EventSource("/api/stream");es.onopen=()=>{connEl.className="up";connEl.textContent="live"};es.onerror=()=>{connEl.className="down";connEl.textContent="reconnecting..."};es.onmessage=e=>{try{upsert(JSON.parse(e.data));render()}catch(_){}}}
+connect();setInterval(render,1000);setInterval(()=>{const now=Date.now();for(const[k,st]of instances)if(now-st.wall>30000){st.el.remove();instances.delete(k)}},5000);
 </script>
 </body>
 </html>

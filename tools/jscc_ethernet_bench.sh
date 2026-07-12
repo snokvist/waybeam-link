@@ -14,6 +14,7 @@ FRAMES=${FRAMES:-720}
 TIMEOUT_MS=${TIMEOUT_MS:-30000}
 LIVE=${LIVE:-1}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
+BENCH_CONSUMER=${BENCH_CONSUMER:-gst}
 ARTIFACTS=${ARTIFACTS:-"$ROOT/artifacts/jscc-ethernet-$(date +%Y%m%d-%H%M%S)"}
 REMOTE_INSTALL=/usr/bin/waybeam-link
 REMOTE_CFG=/etc/waybeam-link/jscc-ethernet.json
@@ -21,11 +22,12 @@ REMOTE_STATS=/tmp/waybeam-link-jscc-ethernet.jsonl
 REMOTE_ERR=/tmp/waybeam-link-jscc-ethernet.err
 REMOTE_PID=/tmp/waybeam-link-jscc-ethernet.pid
 REMOTE_BACKUP=/tmp/waybeam-jscc-ethernet.json.backup
-OUT_RING="wblink_jscc_out_${$}"
+OUT_RING=${OUT_RING:-wblink_jscc_out}
 STATE_DIR=${STATE_DIR:-/tmp/waybeam-jscc-ethernet}
 SUPERVISOR_PID="$STATE_DIR/supervisor.pid"
 SUPERVISOR_LOG="$STATE_DIR/supervisor.log"
 SYSTEMD_UNIT=waybeam-jscc-ethernet.service
+RUNTIME_INFO="$STATE_DIR/runtime.env"
 GROUND_PID=
 CONSUMER_PID=
 MONITOR_PID=
@@ -79,6 +81,8 @@ start_supervisor() {
     if systemctl --user show-environment >/dev/null 2>&1; then
         systemd-run --user --quiet --unit "$SYSTEMD_UNIT" --collect \
             --property=Type=exec --working-directory="$ROOT" \
+            /usr/bin/env OUT_RING="$OUT_RING" BENCH_CONSUMER="$BENCH_CONSUMER" \
+            RX_DROP_PERMILLE="$RX_DROP_PERMILLE" \
             /bin/bash -c "exec '$script' run >>'$SUPERVISOR_LOG' 2>&1"
         pid=$(systemctl --user show -p MainPID --value "$SYSTEMD_UNIT")
     else
@@ -96,6 +100,7 @@ start_supervisor() {
         if grep -q "JSCC Ethernet bench is running" "$SUPERVISOR_LOG" 2>/dev/null; then
             echo "JSCC Ethernet bench started (pid $pid)"
             echo "live dashboard: http://$GROUND_IP:8099/"
+            [[ -f "$RUNTIME_INFO" ]] && sed -n 's/^/  /p' "$RUNTIME_INFO"
             return 0
         fi
         sleep 0.1
@@ -142,6 +147,7 @@ status_supervisor() {
         fi
         echo "JSCC Ethernet bench running (pid $pid)"
         echo "live dashboard: http://$GROUND_IP:8099/"
+        [[ -f "$RUNTIME_INFO" ]] && sed -n 's/^/  /p' "$RUNTIME_INFO"
     else
         echo "JSCC Ethernet bench stopped"
         return 1
@@ -200,7 +206,11 @@ trap cleanup EXIT
 trap on_signal INT TERM
 
 [[ -x "$LINK" ]] || fail "missing $LINK (build the release preset)"
-[[ -x "$GST" ]] || fail "missing $GST (GStreamer development packages are required)"
+[[ "$BENCH_CONSUMER" == gst || "$BENCH_CONSUMER" == external ]] || \
+    fail "BENCH_CONSUMER must be gst or external"
+if [[ "$BENCH_CONSUMER" == gst || "$LIVE" == 0 ]]; then
+    [[ -x "$GST" ]] || fail "missing $GST (GStreamer development packages are required)"
+fi
 [[ -x "$ROOT/build/ssc338q/waybeam-link" ]] || \
     fail "missing build/ssc338q/waybeam-link (build the ssc338q preset)"
 [[ "$FRAMES" =~ ^[1-9][0-9]*$ ]] || fail "FRAMES must be positive"
@@ -208,6 +218,8 @@ trap on_signal INT TERM
 [[ "$LIVE" == 0 || "$LIVE" == 1 ]] || fail "LIVE must be 0 or 1"
 [[ "$RX_DROP_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || fail "RX_DROP_PERMILLE must be 0..1000"
 mkdir -p "$ARTIFACTS"
+printf 'frame_shm=%s\nconsumer=%s\nartifacts=%s\n' \
+    "$OUT_RING" "$BENCH_CONSUMER" "$ARTIFACTS" >"$RUNTIME_INFO"
 
 if ! curl -fsS --max-time 1 http://127.0.0.1:8099/api/instances >/dev/null 2>&1; then
     python3 "$ROOT/tools/link_monitor.py" \
@@ -252,14 +264,15 @@ EOF
 (cd "$ROOT" && "$LINK" rx -c "$ARTIFACTS/rx.json") \
     >"$ARTIFACTS/rx-stats.jsonl" 2>"$ARTIFACTS/rx.err" &
 GROUND_PID=$!
-if [[ "$LIVE" == 1 ]]; then
+if [[ "$LIVE" == 1 && "$BENCH_CONSUMER" == gst ]]; then
     "$GST" consume "$OUT_RING" 4294967295 4294967295 \
         >"$ARTIFACTS/consumer.log" 2>&1 &
-else
+    CONSUMER_PID=$!
+elif [[ "$LIVE" == 0 ]]; then
     "$GST" consume-trace "$OUT_RING" "$FRAMES" "$TIMEOUT_MS" \
         "$ARTIFACTS/frames.csv" >"$ARTIFACTS/consumer.log" 2>&1 &
+    CONSUMER_PID=$!
 fi
-CONSUMER_PID=$!
 
 remote_put "$ROOT/build/ssc338q/waybeam-link" /tmp/waybeam-link-jscc-dev.new
 remote_put "$ARTIFACTS/tx.json" /tmp/waybeam-link-jscc-ethernet.json.new
@@ -277,11 +290,17 @@ remote "rm -f $REMOTE_STATS $REMOTE_ERR; setsid $REMOTE_INSTALL tx -c $REMOTE_CF
 if [[ "$LIVE" == 1 ]]; then
     echo "JSCC Ethernet bench is running"
     set +e
-    wait "$CONSUMER_PID"
-    consumer_rc=$?
+    if [[ "$BENCH_CONSUMER" == gst ]]; then
+        wait "$CONSUMER_PID"
+        consumer_rc=$?
+    else
+        wait "$GROUND_PID"
+        consumer_rc=$?
+    fi
     set -e
     CONSUMER_PID=
-    fail "continuous decoder exited unexpectedly (status $consumer_rc; see $ARTIFACTS/consumer.log)"
+    GROUND_PID=
+    fail "continuous bench exited unexpectedly (status $consumer_rc; see $ARTIFACTS)"
 fi
 
 set +e

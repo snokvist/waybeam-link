@@ -165,6 +165,11 @@ staleness dots. The bridge never touches the binaries; it only consumes the
 stats push (`GET /api/instances` for a JSON snapshot, `GET /api/stream` for the
 SSE feed).
 
+The dashboard separates those groups into tabs and keeps five minutes of
+browser-side trend history. Hover an underlined label for its precise meaning.
+Live stats currently do not include encoded-frame byte sizes or frame-arrival
+jitter; the finite bench writes those measurements to `summary.json` instead.
+
 ## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
 
 The low-latency video path. The encoder (`waybeam_venc`) publishes whole encoded
@@ -316,6 +321,21 @@ The detached bench keeps running after the command returns. View both nodes at
 `tools/jscc_ethernet_bench.sh status`, and stop both endpoints plus restore the
 encoder with `tools/jscc_ethernet_bench.sh stop`. For a foreground finite
 recorded run, use `FRAMES=1440 tools/jscc_ethernet_bench.sh finite`.
+
+By default the bench attaches its GStreamer validator to the ground egress.
+To give the single-consumer ring to an external decoder such as Radeon-VRX,
+restart in external-consumer mode:
+
+```sh
+tools/jscc_ethernet_bench.sh stop
+BENCH_CONSUMER=external tools/jscc_ethernet_bench.sh start
+tools/jscc_ethernet_bench.sh status
+```
+
+The stable application SHM name is `wblink_jscc_out` (POSIX object
+`/wblink_jscc_out`). `status` prints the active name and consumer mode. Do not
+attach a second consumer while the default GStreamer validator is running;
+the venc frame ring is strictly single-consumer.
 
 ## REST control plane (PROTOCOL.md §15.5)
 
