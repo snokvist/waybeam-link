@@ -31,10 +31,7 @@ void rlc_encode_repair(uint16_t k, uint8_t repair_idx,
         if (c == 0) {
             continue;  // 0·source[i] contributes nothing (and gf_mul short-circuits)
         }
-        const uint8_t* src = sources[i];
-        for (size_t b = 0; b < s; ++b) {
-            out[b] = static_cast<uint8_t>(out[b] ^ gf_mul(c, src[b]));
-        }
+        gf_mul_xor(c, sources[i], out, s);
     }
 }
 

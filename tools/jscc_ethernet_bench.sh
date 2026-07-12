@@ -15,6 +15,7 @@ FRAMES=${FRAMES:-720}
 TIMEOUT_MS=${TIMEOUT_MS:-30000}
 LIVE=${LIVE:-1}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
+VENC_CONTROL_ENABLED=${VENC_CONTROL_ENABLED:-0}
 BENCH_CONSUMER=${BENCH_CONSUMER:-external}
 ARTIFACTS=${ARTIFACTS:-"$ROOT/artifacts/jscc-ethernet-$(date +%Y%m%d-%H%M%S)"}
 REMOTE_INSTALL=/usr/bin/waybeam-link
@@ -241,6 +242,13 @@ fi
 [[ "$TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] || fail "TIMEOUT_MS must be positive"
 [[ "$LIVE" == 0 || "$LIVE" == 1 ]] || fail "LIVE must be 0 or 1"
 [[ "$RX_DROP_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || fail "RX_DROP_PERMILLE must be 0..1000"
+[[ "$VENC_CONTROL_ENABLED" == 0 || "$VENC_CONTROL_ENABLED" == 1 ]] || \
+    fail "VENC_CONTROL_ENABLED must be 0 or 1"
+if [[ "$VENC_CONTROL_ENABLED" == 1 ]]; then
+    VENC_ENABLED_JSON=true
+else
+    VENC_ENABLED_JSON=false
+fi
 mkdir -p "$ARTIFACTS"
 printf 'frame_shm=%s\nconsumer=%s\nartifacts=%s\n' \
     "$OUT_RING" "$BENCH_CONSUMER" "$ARTIFACTS" >"$RUNTIME_INFO"
@@ -269,7 +277,7 @@ cat >"$ARTIFACTS/tx.json" <<EOF
   "air":{"kind":"udp-broadcast","tx":["$BROADCAST_IP:5801"],
          "rx":["0.0.0.0:5801"]},
   "policy":{"select":{"min_profile":0,"max_profile":0}},
-  "venc":{"host":"127.0.0.1:80","enabled":true},
+  "venc":{"host":"127.0.0.1:80","enabled":$VENC_ENABLED_JSON},
   "stats":{"hz":5,"bind":{"kind":"udp","send":"$GROUND_IP:9110"}}
 }
 EOF

@@ -318,6 +318,10 @@ cmake --build --preset ssc338q -j
 tools/jscc_ethernet_bench.sh start
 ```
 
+The dedicated Ethernet bench leaves encoder bitrate control manual by default,
+so changes made through venc remain stable. Set `VENC_CONTROL_ENABLED=1` when
+testing waybeam-link's adaptive bitrate actuator instead.
+
 The detached bench keeps running after the command returns. View both nodes at
 `http://192.168.2.242:8099/`; inspect it with
 `tools/jscc_ethernet_bench.sh status`, and stop both endpoints plus restore the
