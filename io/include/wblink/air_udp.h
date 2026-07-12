@@ -44,6 +44,9 @@ class UdpAir {
     }
     // Bench synthetic-drop counter for adapter i (0 unless rx_drop_permille>0).
     uint64_t rx_dropped(size_t i) const { return rx_dropped_[i]; }
+    uint64_t rx_frames(size_t i) const { return rx_frames_[i]; }
+    uint64_t tx_submitted() const { return tx_submitted_; }
+    uint64_t tx_failed() const { return tx_failed_; }
 
   private:
     std::vector<UdpEgress> targets_;
@@ -52,6 +55,9 @@ class UdpAir {
     uint16_t rx_drop_permille_ = 0;
     std::vector<uint32_t> rng_;         // per-adapter xorshift state
     std::vector<uint64_t> rx_dropped_;  // per-adapter synthetic-drop count
+    std::vector<uint64_t> rx_frames_;   // accepted frames per adapter
+    uint64_t tx_submitted_ = 0;         // successful target datagrams
+    uint64_t tx_failed_ = 0;            // failed target datagrams
 };
 
 }  // namespace wblink

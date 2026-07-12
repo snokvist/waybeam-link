@@ -117,7 +117,7 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
         }
         if (cfg.rx_drop_permille > 0 &&
             (xorshift32(a->rng) % 1000u) < cfg.rx_drop_permille) {
-            a->rx_filtered.fetch_add(1, std::memory_order_relaxed);
+            a->rx_dropped.fetch_add(1, std::memory_order_relaxed);
             continue;  // bench synthetic loss
         }
         int8_t rssi = static_cast<int8_t>(a->rssi_last.load(

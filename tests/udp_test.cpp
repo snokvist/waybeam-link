@@ -3,6 +3,7 @@
 // BindingSet built from a real config (ephemeral ports so the test is
 // parallel-safe), plus host:port parsing edges.
 #include "wblink/binding.h"
+#include "wblink/air_udp.h"
 
 #include <cstring>
 #include <string>
@@ -12,7 +13,49 @@
 using namespace wblink;
 
 int main() {
+    const UdpAir::RxCb discard = [](const AirRxMeta&, const uint8_t*, size_t) {};
     // host:port parsing.
+    {
+        AirUdpCfg cfg;
+        cfg.rx = {"127.0.0.1:0"};
+        auto air = UdpAir::create(cfg);
+        CHECK(bool(air));
+        if (air) {
+            AirUdpCfg sender_cfg;
+            sender_cfg.tx = {"127.0.0.1:" +
+                             std::to_string(air.value->adapter_port(0))};
+            auto sender = UdpAir::create(sender_cfg);
+            CHECK(bool(sender));
+            const uint8_t msg[] = {1, 2, 3};
+            CHECK_EQ_U(sender.value->inject(msg, sizeof(msg)), 1u);
+            CHECK_EQ_U(sender.value->tx_submitted(), 1u);
+            CHECK_EQ_U(sender.value->tx_failed(), 0u);
+            CHECK_EQ_U(air.value->poll_once(100, discard), 1u);
+            CHECK_EQ_U(air.value->rx_frames(0), 1u);
+            CHECK_EQ_U(air.value->rx_dropped(0), 0u);
+        }
+    }
+
+    {
+        AirUdpCfg cfg;
+        cfg.rx = {"127.0.0.1:0"};
+        cfg.rx_drop_permille = 1000;
+        auto air = UdpAir::create(cfg);
+        CHECK(bool(air));
+        if (air) {
+            AirUdpCfg sender_cfg;
+            sender_cfg.tx = {"127.0.0.1:" +
+                             std::to_string(air.value->adapter_port(0))};
+            auto sender = UdpAir::create(sender_cfg);
+            CHECK(bool(sender));
+            const uint8_t msg = 7;
+            CHECK_EQ_U(sender.value->inject(&msg, 1), 1u);
+            CHECK_EQ_U(air.value->poll_once(100, discard), 0u);
+            CHECK_EQ_U(air.value->rx_frames(0), 0u);
+            CHECK_EQ_U(air.value->rx_dropped(0), 1u);
+        }
+    }
+
     {
         auto ok = split_host_port("127.0.0.1:5600");
         CHECK(bool(ok));

@@ -373,6 +373,31 @@ struct AirBackend {
     // verdict is grafted onto the TX adapter's stats entry here.
     void fill_adapter_stats(StatsSnapshot& snap, uint64_t tsf_fallbacks,
                             bool tx_wedged) const {
+        if (udp) {
+            const size_t n = udp->rx_adapters();
+            for (size_t i = 0; i < n; ++i) {
+                AdapterStats as;
+                as.name = "udp" + std::to_string(i);
+                as.rx = udp->rx_frames(i);
+                as.drop = udp->rx_dropped(i);
+                if (i == 0) {
+                    as.tx_submitted = udp->tx_submitted();
+                    as.tx_failed = udp->tx_failed();
+                }
+                snap.adapters.push_back(std::move(as));
+            }
+            // A TX-only UDP node has no RX adapter entry to carry its aggregate.
+            if (n == 0 && (udp->tx_submitted() != 0 || udp->tx_failed() != 0)) {
+                AdapterStats as;
+                as.name = "udp-tx";
+                as.tx_submitted = udp->tx_submitted();
+                as.tx_failed = udp->tx_failed();
+                snap.adapters.push_back(std::move(as));
+            }
+            (void)tsf_fallbacks;
+            (void)tx_wedged;
+            return;
+        }
         if (mon) {
             for (size_t i = 0; i < mon->rx_adapters(); ++i) {
                 const auto c = mon->counters(i);

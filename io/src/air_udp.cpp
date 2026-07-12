@@ -25,6 +25,7 @@ Result<UdpAir> UdpAir::create(const AirUdpCfg& cfg) {
     }
     air.rx_drop_permille_ = cfg.rx_drop_permille;
     air.rx_dropped_.assign(air.adapters_.size(), 0);
+    air.rx_frames_.assign(air.adapters_.size(), 0);
     air.rng_.resize(air.adapters_.size());
     for (size_t i = 0; i < air.rng_.size(); ++i) {
         // Independent per-adapter seed (nonzero) — decorrelated synthetic loss.
@@ -36,7 +37,12 @@ Result<UdpAir> UdpAir::create(const AirUdpCfg& cfg) {
 size_t UdpAir::inject(const uint8_t* frame, size_t len) {
     size_t reached = 0;
     for (UdpEgress& t : targets_) {
-        reached += t.send(frame, len) ? 1u : 0u;
+        if (t.send(frame, len)) {
+            ++reached;
+            ++tx_submitted_;
+        } else {
+            ++tx_failed_;
+        }
     }
     return reached;
 }
@@ -77,6 +83,7 @@ int UdpAir::poll_once(int timeout_ms, const RxCb& cb) {
             }
             AirRxMeta meta;
             meta.adapter_id = static_cast<uint8_t>(i);
+            ++rx_frames_[i];
             cb(meta, buf_.data(), static_cast<size_t>(n));
             ++delivered;
         }
