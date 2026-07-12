@@ -16,7 +16,8 @@ TIMEOUT_MS=${TIMEOUT_MS:-30000}
 LIVE=${LIVE:-1}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
 JSCC_DEADLINE_MS=${JSCC_DEADLINE_MS:-16}
-PACKET_TRACE_MAX=${PACKET_TRACE_MAX:-250000}
+PACKET_TRACE_MAX=${PACKET_TRACE_MAX:-75000}
+REMOTE_TRACE_DIR=${REMOTE_TRACE_DIR:-/mnt/mmcblk0p1/waybeam-link-traces}
 VENC_CONTROL_ENABLED=${VENC_CONTROL_ENABLED:-0}
 VEHICLE_MAIN_CPU=${VEHICLE_MAIN_CPU:-1}
 VEHICLE_SHM_CPU=${VEHICLE_SHM_CPU:-0}
@@ -26,7 +27,7 @@ REMOTE_INSTALL=/usr/bin/waybeam-link
 REMOTE_CFG=/etc/waybeam-link/jscc-ethernet.json
 REMOTE_STATS=/tmp/waybeam-link-jscc-ethernet.jsonl
 REMOTE_ERR=/tmp/waybeam-link-jscc-ethernet.err
-REMOTE_PACKET_TRACE=/tmp/waybeam-link-jscc-packets.jsonl
+REMOTE_PACKET_TRACE="$REMOTE_TRACE_DIR/jscc-packets.jsonl"
 REMOTE_PID=/tmp/waybeam-link-jscc-ethernet.pid
 REMOTE_BACKUP=/tmp/waybeam-jscc-ethernet.json.backup
 OUT_RING=${OUT_RING:-venc_frame_out}
@@ -274,6 +275,7 @@ echo "live dashboard: http://$GROUND_IP:8099/"
 remote 'test -x /usr/bin/waybeam-link && test -x /usr/bin/json_cli &&
         test -x /etc/init.d/S95waybeam && test -f /etc/waybeam.json' \
     || fail "craft prerequisites missing"
+remote "mkdir -p '$REMOTE_TRACE_DIR'" || fail "cannot create remote trace directory"
 
 cat >"$ARTIFACTS/tx.json" <<EOF
 {
@@ -396,6 +398,7 @@ stop_remote_link
 remote_get "$REMOTE_STATS" "$ARTIFACTS/tx-stats.jsonl"
 remote_get "$REMOTE_ERR" "$ARTIFACTS/tx.err"
 remote_get "$REMOTE_PACKET_TRACE" "$ARTIFACTS/tx-packets.jsonl"
+remote "rm -f '$REMOTE_PACKET_TRACE'"
 
 python3 - "$ARTIFACTS" "$FRAMES" "$RX_DROP_PERMILLE" <<'PY'
 import csv
@@ -470,6 +473,9 @@ python3 "$ROOT/tools/jscc_replay.py" build-events \
 python3 "$ROOT/tools/jscc_replay.py" replay \
     "$ARTIFACTS/controller-packet-trace.jsonl" \
     --output "$ARTIFACTS/controller-packet-decisions.jsonl"
+python3 "$ROOT/tools/jscc_replay.py" matrix \
+    "$ARTIFACTS/controller-packet-trace.jsonl" \
+    --output "$ARTIFACTS/controller-matrix.json"
 
 [[ "$consumer_rc" == 0 ]] || fail "GStreamer validation failed (see $ARTIFACTS/consumer.log)"
 echo "jscc ethernet bench: PASS ($ARTIFACTS)"

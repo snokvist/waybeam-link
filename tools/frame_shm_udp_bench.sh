@@ -12,7 +12,7 @@ BITRATES=${BITRATES:-"1000 4000 8000"}
 RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
 AIR_KIND=${AIR_KIND:-udp}
 PACKET_TRACE=${PACKET_TRACE:-0}
-PACKET_TRACE_MAX=${PACKET_TRACE_MAX:-250000}
+PACKET_TRACE_MAX=${PACKET_TRACE_MAX:-75000}
 
 if [[ "$AIR_KIND" != udp && "$AIR_KIND" != udp-broadcast ]]; then
     echo "AIR_KIND must be udp or udp-broadcast" >&2
@@ -92,7 +92,8 @@ EOF
 }
 EOF
 
-    local tx_trace= rx_trace=
+    local tx_trace=""
+    local rx_trace=""
     if [[ "$PACKET_TRACE" == 1 ]]; then
         tx_trace="$TMP/tx-packets-${index}.jsonl"
         rx_trace="$TMP/rx-packets-${index}.jsonl"

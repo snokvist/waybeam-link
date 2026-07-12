@@ -138,6 +138,14 @@ class JsccReplayTest(unittest.TestCase):
         correlated = jscc_replay.replay_blocks(records, replay_args)[-1]
         self.assertGreater(independent["fast"], correlated["fast"])
 
+        matrix_args = jscc_replay.parse_args([
+            "matrix", str(self.root / "events.jsonl"),
+            "--output", str(self.root / "matrix.json")])
+        matrix = jscc_replay.replay_matrix(records, matrix_args)
+        self.assertEqual(36, len(matrix))
+        self.assertEqual("recorded:independent", matrix[0]["scenario"])
+        self.assertEqual("fec_only", matrix[0]["ablation"])
+
 
 if __name__ == "__main__":
     unittest.main()

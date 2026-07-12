@@ -188,7 +188,7 @@ class PacketEventTrace {
     const char* role_;
     std::FILE* out_ = nullptr;
     std::vector<char> buffer_;
-    uint64_t cap_ = 250000;
+    uint64_t cap_ = 75000;
     uint64_t events_ = 0;
     uint64_t dropped_ = 0;
 };

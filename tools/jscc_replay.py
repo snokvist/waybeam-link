@@ -7,6 +7,7 @@ sensor-to-display latency. VFRM PTS remains an opaque SDK correlation value.
 """
 
 import argparse
+import copy
 import csv
 import json
 import math
@@ -390,6 +391,40 @@ def replay_blocks(records, args):
     return decisions
 
 
+def replay_matrix(records, args):
+    loss_scenarios = (
+        ("recorded", "independent"),
+        ("none", "independent"),
+        ("burst", "independent"),
+        ("burst", "correlated"),
+        ("incremental", "independent"),
+        ("low-frequency", "independent"),
+        ("low-frequency", "correlated"),
+        ("high-frequency", "independent"),
+        ("high-frequency", "correlated"),
+    )
+    ablations = (
+        ("fec_only", "on", "off", "off"),
+        ("fec_arq", "on", "eligible", "off"),
+        ("fec_arq_discard", "on", "eligible", "on"),
+        ("arq_discard", "off", "eligible", "on"),
+    )
+    results = []
+    for loss_model, correlation in loss_scenarios:
+        for name, fec, arq, discard in ablations:
+            run = copy.copy(args)
+            run.loss_model = loss_model
+            run.path_correlation = correlation
+            run.fec = fec
+            run.arq = arq
+            run.deadline_discard = discard
+            summary = replay_blocks(records, run)[-1]
+            summary["scenario"] = f"{loss_model}:{correlation}"
+            summary["ablation"] = name
+            results.append(summary)
+    return results
+
+
 def replay(records, deadline_override=None):
     header = records[0]
     deadline_ms = header["deadline_ms"] if deadline_override is None else deadline_override
@@ -474,6 +509,17 @@ def parse_args(argv):
     run.add_argument("--fec", choices=("on", "off"), default="on")
     run.add_argument("--arq", choices=("off", "eligible", "force"), default="eligible")
     run.add_argument("--deadline-discard", choices=("on", "off"), default="on")
+    matrix = sub.add_parser("matrix", help="run the standard loss/ablation matrix")
+    matrix.add_argument("trace")
+    matrix.add_argument("--deadline-ms", type=int)
+    matrix.add_argument("--output", required=True)
+    matrix.add_argument("--seed", type=int, default=1)
+    matrix.add_argument("--paths", type=int)
+    matrix.add_argument("--loss-start-permille", type=int, default=0)
+    matrix.add_argument("--loss-end-permille", type=int, default=100)
+    matrix.add_argument("--loss-period", type=int, default=100)
+    matrix.add_argument("--burst-length", type=int, default=10)
+    matrix.add_argument("--rtt-ms", type=int, default=4)
     return parser.parse_args(argv)
 
 
@@ -488,7 +534,7 @@ def main(argv=None):
             output = [{"type": "summary", "schema": SCHEMA,
                        "source": "packet_events",
                        "blocks": len(records) - 1}]
-        else:
+        elif args.command == "replay":
             records = read_trace(args.trace)
             if records[0].get("source") == "packet_events":
                 if args.deadline_ms is None:
@@ -496,6 +542,15 @@ def main(argv=None):
                 output = replay_blocks(records, args)
             else:
                 output = replay(records, args.deadline_ms)
+        else:
+            records = read_trace(args.trace)
+            if records[0].get("source") != "packet_events":
+                raise ValueError("matrix requires a packet-event trace")
+            if args.deadline_ms is None:
+                args.deadline_ms = int(records[0]["deadline_ms"])
+            output = replay_matrix(records, args)
+            pathlib.Path(args.output).write_text(
+                json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         if getattr(args, "output", None) and args.command == "replay":
             write_jsonl(args.output, output)
         print(json.dumps(output[-1], indent=2, sort_keys=True))

@@ -178,9 +178,14 @@ is retained as an opaque SDK correlation value and is not treated as
 milliseconds. Override the provisional 16 ms budget with `JSCC_DEADLINE_MS=25`.
 Finite runs also enable the capped UDP packet-event observer and emit
 `{tx,rx}-packets.jsonl`, `controller-packet-trace.jsonl`, and
-`controller-packet-decisions.jsonl`. `PACKET_TRACE_MAX` defaults to 250,000
+`controller-packet-decisions.jsonl`. `PACKET_TRACE_MAX` defaults to 75,000
 events per process; `trace_end.events_dropped` makes an incomplete capture
-explicit.
+explicit. `controller-matrix.json` contains the standard nine recorded/loss
+scenarios crossed with four FEC/ARQ/deadline ablations.
+Vehicle packet traces default to the SD card at
+`/mnt/mmcblk0p1/waybeam-link-traces` and are removed after retrieval. Override
+the location with `REMOTE_TRACE_DIR`; avoid `/tmp` for extended captures because
+it is a small RAM-backed filesystem on the SSC338Q.
 
 ## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
 
