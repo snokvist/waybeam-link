@@ -40,7 +40,7 @@ constexpr int kIters = 20000;
 
 int main() {
     Rng rng;
-    uint8_t buf[4096];
+    uint8_t buf[kDataHeaderSize + kMaxDataPayload];
     uint8_t payload[kMaxDataPayload];
     uint8_t bitmap[255];
 

@@ -45,6 +45,7 @@ std::vector<uint8_t> canonical_serialize(const ProfileTable& table) {
         be32_write(f + 13, p->bitrate_min_kbps);
         be32_write(f + 17, p->reserve_control_bps);
         be32_write(f + 21, p->reserve_telemetry_bps);
+        be16_write(f + 25, p->max_payload);  // §9.3 appended field
         out.insert(out.end(), f, f + kCanonicalProfileSize);
     }
     out.push_back(table.floor_profile);

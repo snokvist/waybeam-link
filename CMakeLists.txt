@@ -61,7 +61,11 @@ endif()
 add_library(wblink_core STATIC
     core/src/wire.cpp
     core/src/table.cpp
+    core/src/gf256.cpp
+    core/src/rlc.cpp
     core/src/framer.cpp
+    core/src/frame_framer.cpp
+    core/src/frame_reassembler.cpp
     core/src/ring.cpp
     core/src/rx.cpp
     core/src/scheduler.cpp
@@ -76,6 +80,7 @@ target_compile_options(wblink_core PRIVATE ${WBLINK_WARNINGS})
 add_library(wblink_io STATIC
     io/src/config.cpp
     io/src/udp.cpp
+    io/src/frame_shm.cpp
     io/src/stats.cpp
     io/src/air_udp.cpp
     io/src/air_mon.cpp

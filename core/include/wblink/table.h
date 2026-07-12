@@ -28,6 +28,7 @@ struct Profile {
     GuardInterval gi = GuardInterval::kLong;
     uint8_t tx_power_level = 0;  // portable power INTENT (§10.2), not qdb
     uint16_t airtime_budget_permille = 0;
+    uint16_t max_payload = 1424;  // §3.2 air MTU budget; drives FrameFramer s (§5.1a)
     FecScheme fec_scheme = FecScheme::kNone;
     uint16_t fec_overhead_permille = 0;
     uint16_t arq_deadline_iframe_ms = 0;
@@ -43,8 +44,9 @@ struct ProfileTable {
     uint8_t floor_profile = 0;
 };
 
-// Canonical serialization size: count u8 + 25 B per profile + floor u8.
-inline constexpr size_t kCanonicalProfileSize = 25;
+// Canonical serialization size: count u8 + 27 B per profile + floor u8.
+// (25 B pinned fields + max_payload u16 appended, §9.3.)
+inline constexpr size_t kCanonicalProfileSize = 27;
 
 // True if two profiles share an id — a config error the loader must reject
 // before hashing (§3.6: profiles are sorted by id in the canonical form).

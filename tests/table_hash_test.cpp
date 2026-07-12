@@ -40,7 +40,7 @@ Profile example_profile(uint8_t id) {
 // Pinned golden hash of the example table. Every vendored copy of the codec
 // (e.g. Waybeam-android :wifi) must reproduce this value for this table;
 // recompute only on a deliberate §3.6 canonical-form revision.
-constexpr uint8_t kGoldenExampleHash = 0x2B;
+constexpr uint8_t kGoldenExampleHash = 0x41;  // recomputed after §9.3 max_payload field
 
 ProfileTable example_table() {
     ProfileTable t;

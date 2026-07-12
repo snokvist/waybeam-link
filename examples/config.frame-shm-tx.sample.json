@@ -1,0 +1,16 @@
+{
+  "_comment": "frame-shm TX side (§5.1a/§15.4): the RTP in-stream is fed from a waybeam_venc SHM ring 'venc_frame' (whole encoded frames, [VencFrameMeta][Annex-B]) instead of a UDP socket. The FrameFramer fragments each frame into k source symbols + Cauchy-RS repair per the fec block, then fans DATA out over the air backend (:5801/:5802). NACK returns heard on :5810. Run beside config.frame-shm-rx.sample.json; a venc producer must own the 'venc_frame' ring. For real radios use \"kind\": \"radio\".",
+  "node": { "originator": 17, "role": "tx", "preferred_originator": 9 },
+  "profile_table": "profiles/table.example.json",
+  "streams": [
+    { "stream_id": 0, "stream_type": "RTP", "dir": "in",
+      "bind": { "kind": "frame-shm", "name": "venc_frame" },
+      "fec": { "scheme": "rlc256", "i_rate_permille": 250, "p_rate_permille": 100, "min_k": 3 } }
+  ],
+  "air": {
+    "kind": "udp",
+    "tx": ["127.0.0.1:5801", "127.0.0.1:5802"],
+    "rx": ["127.0.0.1:5810"]
+  },
+  "stats": { "hz": 1 }
+}

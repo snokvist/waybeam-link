@@ -70,6 +70,32 @@ TSF-dependent gates.
     §7.2 window (downlink video stays broadcast either way); validate the
     TX-report wedge detector (reports stall while `tx_submitted` advances).
 
+12. Frame-aligned FEC + SHM ingress (`docs/frame-fec-plan.md`). Four sub-steps:
+    (a) [DONE] waybeam `venc_frame_ring` SHM producer — `waybeam_venc`
+        `frame-shm://` output (upstream PR #99 / fork #176, v0.42.0).
+    (b) [DONE] waybeam-link SHM ingress + FrameFramer — source-symbol
+        fragmentation (`io/frame_shm.cpp`, `core/frame_framer.cpp`), plus egress
+        FrameReassembler (`core/frame_reassembler.cpp`) and app tx/rx wiring.
+    (c) [DONE] Standalone GF(256) Cauchy-RS MDS codec (`core/gf256.cpp`,
+        `core/rlc.cpp`) — unit-tested (533k+536 checks). ARM SSC338Q build
+        clean; the on-target latency bench-at-k is still TODO.
+    (d) [DONE, rates provisional] Frame-aligned FEC integrated TX+RX
+        (loopback test proves recovery); `i_rate`/`p_rate` seeds pending the
+        gate-2 ρ verdict below. Pass 15 (PR #17).
+
+    **Gated on:**
+    - Step 11 §4.1 real-fade gate-2 verdict (vehicle deploy) — the rho
+      measurement decides whether FEC is justified at all, and informs the
+      rate seeds (`i_rate_permille`, `p_rate_permille`).
+    - Sub-step (a) in `waybeam_venc` — waybeam-link cannot consume SHM frames
+      until waybeam produces them.
+    - Sub-step (b) validated before (c)/(d) — the SHM ingress pipeline must
+      work without FEC before FEC is layered on.
+
+    **Spec impact:** PROTOCOL.md §14 (FEC scheme pinned), §15.1 (SHM binding
+    live), §4 (FrameFramer block model), §5.1 (no-fragmentation invariant
+    relaxed). Spec amendment commits first, per project law.
+
 ## Non-negotiable operational rules (carried from the ecosystem)
 
 - **Single bitrate authority** (§9.6) — verify no competing writer before flight

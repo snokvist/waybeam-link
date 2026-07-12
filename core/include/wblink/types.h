@@ -47,11 +47,35 @@ inline constexpr size_t kLinkReportSize = 39;
 inline constexpr size_t kHeartbeatSize = 11;
 inline constexpr size_t kCsaSize = 32;
 
-// §3.2 — 26 B header on a ~1450 B usable MPDU.
-inline constexpr uint16_t kMaxDataPayload = 1424;
+// §3.2 — absolute DATA payload ceiling for buffer sizing (Realtek jumbo/A-MSDU
+// rungs reach ~3967 B; 4096 caps it). The EFFECTIVE per-frame budget is
+// profile-driven (Profile.max_payload, §9.3); standard rungs seed 1424.
+inline constexpr uint16_t kMaxDataPayload = 4096;
+inline constexpr uint16_t kDefaultMaxPayload = 1424;  // standard-rung default
 
 // §3.5 — target_stream_id value meaning node-scope (RF health is per-link).
 inline constexpr uint8_t kNodeScopeStreamId = 0xFF;
+
+// §14.1 — FEC repair subheader (precedes the coded payload when FEC_REPAIR is
+// set): repair_idx u8 @0, window_len u16 @1, window_base_seq u32 @3,
+// frame_len u32 @7. 11 bytes; deducted (with the 26 B header) from a rung's
+// max_payload to size source/repair symbols identically (§5.1a).
+inline constexpr size_t kFecRepairSubheaderSize = 11;
+inline constexpr size_t kFecOffRepairIdx = 0;
+inline constexpr size_t kFecOffWindowLen = 1;
+inline constexpr size_t kFecOffWindowBaseSeq = 3;
+inline constexpr size_t kFecOffFrameLen = 7;
+
+// §5.1a — frame-shm SOURCE symbols carry a 4-byte self-describing subheader
+// (window_len u16 @0 = k, sym_index u16 @2 = i) before the chunk, so RX
+// reassembly knows each symbol's index + the block's k without inferring from
+// seq gaps (a leading-loss run can never look like a complete frame).
+inline constexpr size_t kFecSourceSubheaderSize = 4;
+inline constexpr size_t kFecSrcOffWindowLen = 0;
+inline constexpr size_t kFecSrcOffSymIndex = 2;
+
+// §14.1 — GF(256) capacity: a Cauchy-RS block holds at most 256 symbols.
+inline constexpr uint16_t kFecMaxSymbols = 256;
 // §3.5 — probe_per value meaning "no probe ran this interval".
 inline constexpr uint16_t kNoProbe = 0xFFFF;
 

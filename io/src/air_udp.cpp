@@ -23,6 +23,13 @@ Result<UdpAir> UdpAir::create(const AirUdpCfg& cfg) {
         }
         air.adapters_.push_back(std::move(*in.value));
     }
+    air.rx_drop_permille_ = cfg.rx_drop_permille;
+    air.rx_dropped_.assign(air.adapters_.size(), 0);
+    air.rng_.resize(air.adapters_.size());
+    for (size_t i = 0; i < air.rng_.size(); ++i) {
+        // Independent per-adapter seed (nonzero) — decorrelated synthetic loss.
+        air.rng_[i] = 0x9e3779b9u + static_cast<uint32_t>(i) * 0x85ebca6bu + 1u;
+    }
     return Result<UdpAir>::ok(std::move(air));
 }
 
@@ -56,6 +63,17 @@ int UdpAir::poll_once(int timeout_ms, const RxCb& cb) {
             const long n = adapters_[i].recv_one(buf_.data(), buf_.size());
             if (n <= 0) {
                 break;
+            }
+            // Bench synthetic per-adapter RX drop (parity with mon/radio).
+            if (rx_drop_permille_ > 0) {
+                uint32_t& s = rng_[i];
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                if (s % 1000u < rx_drop_permille_) {
+                    ++rx_dropped_[i];
+                    continue;
+                }
             }
             AirRxMeta meta;
             meta.adapter_id = static_cast<uint8_t>(i);

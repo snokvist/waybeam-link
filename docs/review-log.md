@@ -263,6 +263,87 @@ auto` fixed at monitor bring-up; the 8812eu per-rate TXAGC curve owns power).
 The backend is pure POSIX → compiled unconditionally (a `WBLINK_RADIO=OFF`
 build still has a real RF path). devourer stays vendored + selectable.
 
+## Pass 14 — §14/§15.1 frame-aligned FEC plan + SHM ingress shape (2026-07-11)
+
+Planning pass — no code, no PROTOCOL.md amendment. Spec amendment will be a
+separate commit when implementation begins, per project law.
+
+Designed the full-frame SHM ingress + frame-aligned FEC pipeline
+(`docs/frame-fec-plan.md`):
+
+- **venc_frame_ring SHM format:** 8-byte metadata header (timestamp u32, codec
+  u8, flags u8 [bit 0 = IDR], reserved u16) + raw Annex B NAL data, one slot
+  per frame, 512 KB slot ceiling. waybeam produces; waybeam-link consumes.
+- **FrameFramer (core/ replacement for Framer on SHM streams):** block_id
+  assigned directly from frame count (no marker-bit inference), ARQ
+  classification from metadata IDR flag (no NAL parsing), frame fragmented into
+  k source symbols of size s = kMaxDataPayload − 6 = 1418 B.
+- **GF(256) systematic RLC per frame:** k varies per frame (22 for 30 KB
+  P-frame, 106 for 150 KB IDR); r = ceil(k * rate) repair symbols;
+  coefficients seeded deterministically from (block_id, repair_idx).
+- **Per-frame adaptive policy:** k <= fec_min_k (seed 3) -> ARQ-only (overhead
+  not justified at small k, gate-3 RTT recovers within deadline); P-frame
+  fec_p_rate seed 0.10-0.15; IDR fec_i_rate seed 0.25-0.30.
+- **Wire format:** reuses existing §14 sketch (source = normal DATA, repair =
+  DATA + FEC_REPAIR flag + 6-byte subheader). Source-first emission order.
+- **RX:** no-loss fast path (all k sources -> deliver, no decode); loss
+  recovery via Gaussian elimination when >= k total symbols; unrecoverable
+  when < k.
+- **Config shape:** `bind.kind "frame-shm"`, `fec.scheme "rlc256"`,
+  `i_rate_permille`/`p_rate_permille`/`min_k` per stream.
+- **4-step implementation sequencing:** (1) waybeam venc_frame_ring (separate
+  repo), (2) waybeam-link SHM ingress + FrameFramer source-only, (3) standalone
+  GF(256) codec, (4) FEC integration. Steps 2-4 in waybeam-link.
+
+**Spec sections to amend (when implementation begins):** §14 (concrete FEC
+scheme), §15.1 (SHM binding live), §4 (FrameFramer block model), §5.1
+(no-fragmentation invariant relaxed for SHM).
+
+**Decisions deferred to operator:** RX egress path (SHM vs RTP
+re-packetization), FEC rate seeds (pending gate-2 vehicle rho), repair symbol
+priority vs §5.3 scheduler, per-frame vs sliding-window confirmation.
+
+## Pass 15 — §5.1a/§6.3a/§14.1/§15.4 frame-SHM ingress+egress + GF(256) RLC pinned (2026-07-11)
+
+Implementation begins (PR #17). Spec amended FIRST (this commit); code follows.
+The Pass 14 plan is now pinned into PROTOCOL.md, with **four operator rulings**
+resolving gaps the plan left open:
+
+- **Ruling — metadata transport:** the 8-byte `VencFrameMeta` is **prepended
+  into the opaque payload**, not carried in the DATA header. The block payload =
+  `[VencFrameMeta][Annex-B]`, byte-identical to the venc slot (§15.4). RX egress
+  writes it back verbatim; the DATA header is untouched; "RTP opaque on the wire"
+  (§1) holds. FrameFramer reads only `flags` bit 0 (§4.1).
+- **Ruling — `window_len` u8 → u16 + new `frame_len` u32:** the §14 repair
+  subheader grows 6 B → **11 B** (`repair_idx u8, window_len u16,
+  window_base_seq u32, frame_len u32`). u8 `window_len` overflowed (512 KB at a
+  1400 B rung ⇒ k≈370 > 255); `frame_len` is required to strip a FEC-recovered
+  last symbol's zero-padding. Source-symbol size becomes
+  `s = max_payload − 26 − 11`.
+- **Ruling — adaptive MTU (§3.2/§9.3):** the DATA payload budget is
+  **profile-driven** (`Profile.max_payload`, u16), not the fixed 1424 constant,
+  which becomes the absolute buffer ceiling (4096). Standard rungs ~1424; Realtek
+  jumbo/A-MSDU rungs up to ~3967 — essential for large IDRs (512 KB ⇒ k≈370 at
+  1400 vs k≈132 at 3967). The wire `payload_len` is self-describing, so RX
+  decodes whatever `s` TX chose (even across a mid-stream profile change); `s` is
+  fixed per FEC block. Dynamic switching rides the existing §9 profile selector —
+  no separate MTU control loop.
+- **Ruling — RX egress = SHM only (Option A):** §5.3 Option B (RTP
+  re-packetization) is out of scope for v1; a `udp` egress on a `frame-shm`
+  stream is rejected at config load (wire payloads are frame fragments, not RTP).
+
+**Amended:** §3.2 (profile-driven payload budget + 11-B FEC subheader ref), §4 +
+§4.1 (frame block boundary + IDR-flag classifier), §5.1 (invariant relaxed) +
+new §5.1a (FrameFramer), new §6.3a (frame reassembly + SHM egress), §9.3
+(`max_payload`), §14 (built/default-off) + new §14.1 (GF(256) RLC scheme, wire,
+adaptive policy), §15.1 (`frame-shm` live), §15.2 (per-stream `fec` block), new
+§15.4 (venc_frame_ring slot format).
+
+**Still deferred to bench (not blocking):** FEC rate seeds (gate-2 ρ pending;
+`i_rate` 250 / `p_rate` 100 per-mille / `min_k` 3 as config seeds); per-profile
+`max_payload` seeds (bench-derived); on-device jumbo MPDU injection verification
+on real Realtek radios (loopback/bench unaffected).
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

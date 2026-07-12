@@ -172,6 +172,11 @@ bool UdpEgress::send(const uint8_t* data, size_t len) {
 Result<BindingSet> BindingSet::create(const Config& cfg) {
     BindingSet set;
     for (const StreamCfg& s : cfg.streams) {
+        // §15.4 frame-shm streams are owned by the app (FrameShmRing), not by
+        // the UDP binding layer — skip them here.
+        if (s.bind.kind == BindKind::kFrameShm) {
+            continue;
+        }
         if (s.dir == Dir::kIn) {
             auto in = UdpIngress::open(s.bind.listen);
             if (!in) {
@@ -249,6 +254,51 @@ int BindingSet::poll_once(int timeout_ms,
             cb(IngressEvent{ins_[idx].stream_id, buf_.data(),
                             static_cast<size_t>(n)});
             ++delivered;
+        }
+    }
+    return delivered;
+}
+
+int BindingSet::poll_once(int timeout_ms,
+                          const std::function<void(const IngressEvent&)>& cb,
+                          const std::vector<int>& extra_fds,
+                          const std::function<void(size_t)>& on_extra) {
+    // Unified wait over the UDP ingress fds AND the caller's extra fds (the
+    // frame-shm consumer eventfds). A frame-shm-only node has no UDP ingress,
+    // so the blocking wait must live on the ring's eventfd here.
+    std::vector<pollfd> fds;
+    fds.reserve(ins_.size() + extra_fds.size());
+    for (const In& i : ins_) {
+        fds.push_back(pollfd{i.sock.fd(), POLLIN, 0});
+    }
+    for (const int fd : extra_fds) {
+        fds.push_back(pollfd{fd, POLLIN, 0});
+    }
+    if (fds.empty()) {
+        return 0;
+    }
+    const int rc = ::poll(fds.data(), fds.size(), timeout_ms);
+    if (rc < 0) {
+        return errno == EINTR ? 0 : -1;
+    }
+    int delivered = 0;
+    for (size_t idx = 0; idx < ins_.size(); ++idx) {
+        if ((fds[idx].revents & POLLIN) == 0) {
+            continue;
+        }
+        for (;;) {
+            const long n = ins_[idx].sock.recv_one(buf_.data(), buf_.size());
+            if (n <= 0) {
+                break;
+            }
+            cb(IngressEvent{ins_[idx].stream_id, buf_.data(),
+                            static_cast<size_t>(n)});
+            ++delivered;
+        }
+    }
+    for (size_t j = 0; j < extra_fds.size(); ++j) {
+        if ((fds[ins_.size() + j].revents & POLLIN) != 0) {
+            on_extra(j);
         }
     }
     return delivered;

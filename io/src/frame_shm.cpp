@@ -1,0 +1,364 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include "wblink/frame_shm.h"
+
+#include <fcntl.h>
+#include <linux/futex.h>
+#include <sys/eventfd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstring>
+#include <ctime>
+
+namespace wblink {
+
+namespace {
+
+using R = Result<std::unique_ptr<FrameShmRing>>;
+
+constexpr uint32_t kReaderTimeoutNs = 100 * 1000 * 1000;  // 100 ms observe-stop tick
+
+std::string normalize_name(const std::string& name) {
+    if (!name.empty() && name.front() == '/') {
+        return name;
+    }
+    return "/" + name;
+}
+
+bool is_pow2(uint32_t v) { return v != 0 && (v & (v - 1)) == 0; }
+
+size_t align8(size_t v) { return (v + 7) & ~static_cast<size_t>(7); }
+
+// ---- native-endian header field access (offsets from frame_shm_format.h) ----
+// Config words (line 0) are plain reads/writes; index words (lines 1/2) go
+// through __atomic_* with the memory order the SPSC protocol requires.
+
+uint32_t load_u32(const uint8_t* base, size_t off) {
+    uint32_t v;
+    std::memcpy(&v, base + off, sizeof(v));
+    return v;
+}
+
+void store_u32(uint8_t* base, size_t off, uint32_t v) {
+    std::memcpy(base + off, &v, sizeof(v));
+}
+
+uint64_t atomic_load_u64(const uint8_t* base, size_t off, int order) {
+    return __atomic_load_n(reinterpret_cast<const uint64_t*>(base + off), order);
+}
+
+void atomic_store_u64(uint8_t* base, size_t off, uint64_t v, int order) {
+    __atomic_store_n(reinterpret_cast<uint64_t*>(base + off), v, order);
+}
+
+uint32_t atomic_load_u32(const uint8_t* base, size_t off, int order) {
+    return __atomic_load_n(reinterpret_cast<const uint32_t*>(base + off), order);
+}
+
+void atomic_store_u32(uint8_t* base, size_t off, uint32_t v, int order) {
+    __atomic_store_n(reinterpret_cast<uint32_t*>(base + off), v, order);
+}
+
+// Shared (cross-process) futex — NOT the _PRIVATE variant: producer and
+// consumer live in different processes / mappings of the same shm object, so
+// the kernel must key the wait on the physical page, not the mm.
+long futex_wait(uint32_t* addr, uint32_t expected, uint32_t timeout_ns) {
+    timespec ts{};
+    ts.tv_sec = 0;
+    ts.tv_nsec = static_cast<long>(timeout_ns);
+    return syscall(SYS_futex, reinterpret_cast<int*>(addr), FUTEX_WAIT,
+                   static_cast<int>(expected), &ts, nullptr, 0);
+}
+
+void futex_wake(uint32_t* addr, int count) {
+    syscall(SYS_futex, reinterpret_cast<int*>(addr), FUTEX_WAKE, count, nullptr,
+            nullptr, 0);
+}
+
+}  // namespace
+
+// ---- create (producer) ----------------------------------------------------
+
+R FrameShmRing::create(const std::string& name, uint32_t slots,
+                       uint32_t slot_size) {
+    if (!is_pow2(slots)) {
+        return R::fail("frame_shm create: slots must be a power of two");
+    }
+    if (slot_size == 0) {
+        return R::fail("frame_shm create: slot_size must be > 0");
+    }
+    const std::string shm_name = normalize_name(name);
+    const size_t stride = align8(kFrameSlotLenPrefix + slot_size);
+    const size_t total = kFrameRingHeaderSize + static_cast<size_t>(slots) * stride;
+    if (total > 0xFFFFFFFFu) {
+        return R::fail("frame_shm create: total_size overflows u32 header field");
+    }
+
+    // Clear any stale object so the O_EXCL open below is authoritative.
+    ::shm_unlink(shm_name.c_str());
+    const int fd = ::shm_open(shm_name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd < 0) {
+        return R::fail("frame_shm create: shm_open('" + shm_name + "'): " +
+                       std::strerror(errno));
+    }
+    if (::ftruncate(fd, static_cast<off_t>(total)) != 0) {
+        const std::string e = std::strerror(errno);
+        ::close(fd);
+        ::shm_unlink(shm_name.c_str());
+        return R::fail("frame_shm create: ftruncate: " + e);
+    }
+    void* p = ::mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    ::close(fd);  // the mapping keeps the object alive
+    if (p == MAP_FAILED) {
+        ::shm_unlink(shm_name.c_str());
+        return R::fail("frame_shm create: mmap: " + std::string(std::strerror(errno)));
+    }
+
+    auto ring = std::unique_ptr<FrameShmRing>(new FrameShmRing());
+    ring->map_ = static_cast<uint8_t*>(p);
+    ring->map_size_ = total;
+    ring->slot_count_ = slots;
+    ring->slot_data_size_ = slot_size;
+    ring->slot_stride_ = stride;
+    ring->name_ = shm_name;
+    ring->is_owner_ = true;
+
+    uint8_t* b = ring->map_;
+    std::memset(b, 0, total);  // zeroes write_idx / read_idx / futex_seq / waiting
+    store_u32(b, kFrHdrMagic, kFrameRingMagic);
+    store_u32(b, kFrHdrVersion, kFrameRingVersion);
+    store_u32(b, kFrHdrSlotCount, slots);
+    store_u32(b, kFrHdrSlotDataSize, slot_size);
+    store_u32(b, kFrHdrTotalSize, static_cast<uint32_t>(total));
+    store_u32(b, kFrHdrEpoch, 0);
+    // Publish config last: a release store on init_complete makes every prior
+    // header write visible to a consumer that acquire-loads it.
+    atomic_store_u32(b, kFrHdrInitComplete, 1, __ATOMIC_RELEASE);
+    return R::ok(std::move(ring));
+}
+
+// ---- attach (consumer) ----------------------------------------------------
+
+R FrameShmRing::attach(const std::string& name) {
+    const std::string shm_name = normalize_name(name);
+    const int fd = ::shm_open(shm_name.c_str(), O_RDWR, 0);
+    if (fd < 0) {
+        return R::fail("frame_shm attach: shm_open('" + shm_name + "'): " +
+                       std::strerror(errno));
+    }
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) {
+        const std::string e = std::strerror(errno);
+        ::close(fd);
+        return R::fail("frame_shm attach: fstat: " + e);
+    }
+    const size_t map_size = static_cast<size_t>(st.st_size);
+    if (map_size < kFrameRingHeaderSize) {
+        ::close(fd);
+        return R::fail("frame_shm attach: object smaller than ring header");
+    }
+    void* p = ::mmap(nullptr, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    ::close(fd);
+    if (p == MAP_FAILED) {
+        return R::fail("frame_shm attach: mmap: " + std::string(std::strerror(errno)));
+    }
+    uint8_t* b = static_cast<uint8_t*>(p);
+
+    // Acquire on init_complete pairs with the producer's release; every other
+    // header field is safe to read once it reads back 1.
+    const uint32_t inited = atomic_load_u32(b, kFrHdrInitComplete, __ATOMIC_ACQUIRE);
+    const uint32_t magic = load_u32(b, kFrHdrMagic);
+    const uint32_t version = load_u32(b, kFrHdrVersion);
+    const uint32_t slots = load_u32(b, kFrHdrSlotCount);
+    const uint32_t slot_size = load_u32(b, kFrHdrSlotDataSize);
+    const uint32_t total_hdr = load_u32(b, kFrHdrTotalSize);
+
+    auto bail = [&](const std::string& msg) -> R {
+        ::munmap(p, map_size);
+        return R::fail("frame_shm attach: " + msg);
+    };
+    if (magic != kFrameRingMagic) {
+        return bail("bad magic");
+    }
+    if (version != kFrameRingVersion) {
+        return bail("version mismatch");
+    }
+    if (inited != 1) {
+        return bail("producer has not published init_complete");
+    }
+    if (!is_pow2(slots) || slot_size == 0) {
+        return bail("invalid geometry (slot_count not pow2 or slot_size 0)");
+    }
+    const size_t stride = align8(kFrameSlotLenPrefix + slot_size);
+    const size_t total = kFrameRingHeaderSize + static_cast<size_t>(slots) * stride;
+    if (total != map_size || total_hdr != map_size) {
+        return bail("total_size disagrees with mmap size");
+    }
+
+    const int efd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (efd < 0) {
+        return bail("eventfd: " + std::string(std::strerror(errno)));
+    }
+
+    auto ring = std::unique_ptr<FrameShmRing>(new FrameShmRing());
+    ring->map_ = b;
+    ring->map_size_ = map_size;
+    ring->slot_count_ = slots;
+    ring->slot_data_size_ = slot_size;
+    ring->slot_stride_ = stride;
+    ring->name_ = shm_name;
+    ring->is_owner_ = false;
+    ring->is_consumer_ = true;
+    ring->event_fd_ = efd;
+    ring->reader_ = std::thread([r = ring.get()] { r->reader_loop(); });
+    return R::ok(std::move(ring));
+}
+
+// ---- reader thread (consumer) ---------------------------------------------
+
+void FrameShmRing::reader_loop() {
+    uint8_t* b = map_;
+    uint32_t* seq_addr = reinterpret_cast<uint32_t*>(b + kFrHdrFutexSeq);
+    while (!stop_.load(std::memory_order_acquire)) {
+        // Readiness is a level, not an edge: whenever the ring holds an
+        // undrained frame, nudge the main loop. This is robust to the
+        // start-up race where the producer bumps futex_seq before this thread
+        // ever parks — we detect the pending frame directly instead of relying
+        // on catching that one wake.
+        const uint64_t wr = atomic_load_u64(b, kFrHdrWriteIdx, __ATOMIC_ACQUIRE);
+        const uint64_t rd = atomic_load_u64(b, kFrHdrReadIdx, __ATOMIC_ACQUIRE);
+        if (wr != rd) {
+            const uint64_t one = 1;
+            const ssize_t n = ::write(event_fd_, &one, sizeof(one));
+            (void)n;  // eventfd add of 1 never blocks/short-writes here
+        }
+        // Park until the producer seq-bumps (low-latency wake) or the 100 ms
+        // tick fires (re-check pending / stop_). Publish "waiting" BEFORE
+        // loading the seq we sleep on: the producer seq-bumps then reads
+        // consumer_waiting, and the seq_cst ordering makes the race decidable —
+        // either it sees waiting=1 and wakes us, or FUTEX_WAIT sees the moved
+        // seq and returns immediately.
+        atomic_store_u32(b, kFrHdrConsumerWaiting, 1, __ATOMIC_SEQ_CST);
+        const uint32_t seq = atomic_load_u32(b, kFrHdrFutexSeq, __ATOMIC_SEQ_CST);
+        futex_wait(seq_addr, seq, kReaderTimeoutNs);
+        atomic_store_u32(b, kFrHdrConsumerWaiting, 0, __ATOMIC_SEQ_CST);
+    }
+}
+
+// ---- write_frame (producer) -----------------------------------------------
+
+bool FrameShmRing::write_frame(const uint8_t* data, size_t len) {
+    if (len > slot_data_size_) {
+        ++stats_.oversize_drops;
+        return false;
+    }
+    uint8_t* b = map_;
+    // Producer owns write_idx (relaxed self-read); acquire read_idx to see the
+    // consumer's latest release.
+    const uint64_t w = atomic_load_u64(b, kFrHdrWriteIdx, __ATOMIC_RELAXED);
+    const uint64_t r = atomic_load_u64(b, kFrHdrReadIdx, __ATOMIC_ACQUIRE);
+    if (w - r >= slot_count_) {  // full: drop, never block (§15.4)
+        ++stats_.full_drops;
+        return false;
+    }
+    const size_t slot = static_cast<size_t>(w & (slot_count_ - 1));
+    uint8_t* p = b + kFrameRingHeaderSize + slot * slot_stride_;
+    const uint32_t l = static_cast<uint32_t>(len);
+    std::memcpy(p, &l, sizeof(l));
+    if (len > 0) {
+        std::memcpy(p + kFrameSlotLenPrefix, data, len);
+    }
+    // Release-store write_idx publishes the slot bytes to the consumer's
+    // acquire-load.
+    atomic_store_u64(b, kFrHdrWriteIdx, w + 1, __ATOMIC_RELEASE);
+
+    // Bump futex_seq and wake the consumer if it parked (seq_cst pairs with the
+    // reader's waiting-store / seq-load ordering).
+    __atomic_add_fetch(reinterpret_cast<uint32_t*>(b + kFrHdrFutexSeq), 1,
+                       __ATOMIC_SEQ_CST);
+    if (atomic_load_u32(b, kFrHdrConsumerWaiting, __ATOMIC_SEQ_CST) != 0) {
+        futex_wake(reinterpret_cast<uint32_t*>(b + kFrHdrFutexSeq), 1);
+    }
+    ++stats_.writes;
+    return true;
+}
+
+// ---- read_frame (consumer, owning thread only) ----------------------------
+
+long FrameShmRing::read_frame(uint8_t* buf, size_t cap) {
+    uint8_t* b = map_;
+    const uint64_t w = atomic_load_u64(b, kFrHdrWriteIdx, __ATOMIC_ACQUIRE);
+    const uint64_t r = atomic_load_u64(b, kFrHdrReadIdx, __ATOMIC_RELAXED);
+    if (r == w) {
+        return 0;  // empty
+    }
+    const size_t slot = static_cast<size_t>(r & (slot_count_ - 1));
+    const uint8_t* p = b + kFrameRingHeaderSize + slot * slot_stride_;
+    uint32_t len;
+    std::memcpy(&len, p, sizeof(len));
+    if (len > slot_data_size_) {
+        // Corrupt slot: skip it so a single bad frame can't stall the ring.
+        ++stats_.bad_slots;
+        atomic_store_u64(b, kFrHdrReadIdx, r + 1, __ATOMIC_RELEASE);
+        return -1;
+    }
+    if (len > cap) {
+        // Caller buffer too small — don't advance; caller retries with a bigger
+        // buffer. Counted as a bad slot for visibility.
+        ++stats_.bad_slots;
+        return -1;
+    }
+    if (len > 0) {
+        std::memcpy(buf, p + kFrameSlotLenPrefix, len);
+    }
+    atomic_store_u64(b, kFrHdrReadIdx, r + 1, __ATOMIC_RELEASE);
+    ++stats_.reads;
+    return static_cast<long>(len);
+}
+
+// ---- eventfd drain --------------------------------------------------------
+
+void FrameShmRing::drain_event() {
+    if (event_fd_ < 0) {
+        return;
+    }
+    uint64_t sink;
+    for (;;) {
+        const ssize_t n = ::read(event_fd_, &sink, sizeof(sink));
+        if (n != static_cast<ssize_t>(sizeof(sink))) {
+            break;  // EAGAIN (drained) or short read — nothing more to consume
+        }
+    }
+}
+
+// ---- teardown -------------------------------------------------------------
+
+FrameShmRing::~FrameShmRing() {
+    if (reader_.joinable()) {
+        stop_.store(true, std::memory_order_release);
+        // Kick the futex so the reader doesn't sit out its 100 ms timeout; the
+        // mapping is still valid until after the join.
+        if (map_ != nullptr) {
+            futex_wake(reinterpret_cast<uint32_t*>(map_ + kFrHdrFutexSeq),
+                       INT32_MAX);
+        }
+        reader_.join();
+    }
+    if (event_fd_ >= 0) {
+        ::close(event_fd_);
+        event_fd_ = -1;
+    }
+    if (map_ != nullptr) {
+        ::munmap(map_, map_size_);
+        map_ = nullptr;
+    }
+    if (is_owner_ && !name_.empty()) {
+        ::shm_unlink(name_.c_str());
+    }
+}
+
+}  // namespace wblink

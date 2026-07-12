@@ -85,7 +85,7 @@ struct Bench {
     }
 
     RxEngine::Deliver deliver() {
-        return [this](uint8_t, const uint8_t* d, size_t n) {
+        return [this](uint8_t, uint32_t, uint8_t, const uint8_t* d, size_t n) {
             ++delivered;
             // Delivered datagram = RTP header + payload; the marker counter
             // sits right after the 12-byte fixed header.

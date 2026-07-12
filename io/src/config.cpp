@@ -70,9 +70,20 @@ Result<uint16_t> frac_to_permille(double frac, const char* where) {
 Result<BindCfg> parse_bind(const json& j, Dir dir, const char* where) {
     BindCfg b;
     const std::string kind = j.at("kind").get<std::string>();
+    if (kind == "frame-shm") {
+        // §15.4 SHM ring: uses "name" (not listen/send); dir selects
+        // consumer (in => attach) vs producer (out => create).
+        b.kind = BindKind::kFrameShm;
+        if (!j.contains("name") || j.at("name").get<std::string>().empty()) {
+            return Result<BindCfg>::fail(std::string(where) +
+                                         ": frame-shm binding needs a non-empty \"name\" (§15.4)");
+        }
+        b.name = j.at("name").get<std::string>();
+        return Result<BindCfg>::ok(std::move(b));
+    }
     if (kind != "udp") {
         return Result<BindCfg>::fail(std::string(where) + ": bind kind \"" + kind +
-                                     "\" — shm/unix are v1 features, v0 is UDP-only (§15.1)");
+                                     "\" — unix is a v1 feature; use \"udp\" or \"frame-shm\" (§15.1)");
     }
     b.kind = BindKind::kUdp;
     const bool has_listen = j.contains("listen");
@@ -158,6 +169,7 @@ Result<Config> load_config_json(const std::string& json_text) {
         // streams (§15.1: one binding each, in XOR out, unique stream_id)
         std::set<unsigned> stream_ids;
         size_t udp_bindings = 0;
+        size_t shm_bindings = 0;
         for (const json& s : j.value("streams", json::array())) {
             StreamCfg sc;
             const uint64_t sid = s.at("stream_id").get<uint64_t>();
@@ -207,8 +219,33 @@ Result<Config> load_config_json(const std::string& json_text) {
                         ": classifier must be \"size\", \"h264\" or \"h265\"");
                 }
             }
-            ++udp_bindings;
+            // §14.1 per-stream FEC (frame-shm only).
+            if (s.contains("fec")) {
+                const json& f = s.at("fec");
+                auto scheme = parse_fec_scheme(f.value("scheme", std::string("none")),
+                                               ("stream " + std::to_string(sid) + ".fec").c_str());
+                if (!scheme) return Result<Config>::fail(scheme.error);
+                sc.fec.scheme = *scheme.value;
+                sc.fec.i_rate_permille = f.value("i_rate_permille", uint16_t{250});
+                sc.fec.p_rate_permille = f.value("p_rate_permille", uint16_t{100});
+                sc.fec.min_k = f.value("min_k", uint16_t{3});
+                if (sc.fec.scheme != FecScheme::kNone && sc.bind.kind != BindKind::kFrameShm) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": fec.scheme is only valid on a frame-shm binding (§14.1)");
+                }
+            }
+            if (sc.bind.kind == BindKind::kFrameShm) {
+                ++shm_bindings;
+            } else {
+                ++udp_bindings;
+            }
             cfg.streams.push_back(std::move(sc));
+        }
+        if (shm_bindings > 1) {
+            return Result<Config>::fail(
+                "too many frame-shm bindings (" + std::to_string(shm_bindings) +
+                "); the §15.1 shm pool is <=1 per node (in XOR out)");
         }
 
         // policy — every absent key keeps its spec-seed default.
@@ -511,6 +548,15 @@ Result<ProfileTable> load_profile_table_json(const std::string& json_text) {
                                             (where + ".airtime_budget_frac").c_str());
             if (!airtime) return Result<ProfileTable>::fail(airtime.error);
             p.airtime_budget_permille = *airtime.value;
+            // §3.2/§9.3 air MTU budget; default standard-rung 1424, ceiling 4096.
+            const uint32_t mp = pj.value("max_payload", uint32_t{kDefaultMaxPayload});
+            if (mp < kDataHeaderSize + 32 || mp > kMaxDataPayload) {
+                return Result<ProfileTable>::fail(
+                    where + ": max_payload must be in [" +
+                    std::to_string(kDataHeaderSize + 32) + ", " +
+                    std::to_string(kMaxDataPayload) + "]");
+            }
+            p.max_payload = static_cast<uint16_t>(mp);
             auto scheme = parse_fec_scheme(pj.value("fec_scheme", std::string("none")),
                                            (where + ".fec_scheme").c_str());
             if (!scheme) return Result<ProfileTable>::fail(scheme.error);

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <chrono>
 #include <deque>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -21,6 +22,10 @@
 #include "wblink/binding.h"
 #include "wblink/config.h"
 #include "wblink/csa.h"
+#include "wblink/frame_framer.h"
+#include "wblink/frame_reassembler.h"
+#include "wblink/frame_shm.h"
+#include "wblink/frame_shm_format.h"
 #include "wblink/framer.h"
 #include "wblink/loss_model.h"
 #include "wblink/power.h"
@@ -199,7 +204,9 @@ struct AirBackend {
     static Result<AirBackend> create(const Config& cfg) {
         AirBackend b;
         if (cfg.air.kind == AirCfg::Kind::kUdp) {
-            auto a = UdpAir::create(cfg.air.udp);
+            AirUdpCfg uc = cfg.air.udp;
+            uc.rx_drop_permille = cfg.air.rx_drop_permille;  // bench synthetic loss
+            auto a = UdpAir::create(uc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
             }
@@ -468,9 +475,13 @@ struct AirBackend {
 struct TxCore {
     using Inject = std::function<void(const uint8_t*, size_t)>;
 
+    // A stream carries EITHER a UDP-datagram Framer (§5.1) or a whole-frame
+    // FrameFramer (§5.1a, frame-shm ingress) — never both. Exactly one of the
+    // two optionals is engaged per the ingress binding kind.
     struct Stream {
         uint8_t stream_id;
-        Framer framer;
+        std::optional<Framer> framer;             // udp ingress
+        std::optional<FrameFramer> frame_framer;  // frame-shm ingress
         ResendRing ring;
         ResendScheduler sched;
     };
@@ -480,6 +491,7 @@ struct TxCore {
         : originator_(cfg.node.originator),
           session_(session),
           table_version_(table_version),
+          table_(table),
           selector_(selector_policy(cfg), table),
           venc_(cfg.venc) {
         // §10: one power curve per TX adapter with an authored map. The
@@ -504,37 +516,89 @@ struct TxCore {
             if (s.dir != Dir::kIn) {
                 continue;
             }
-            FramerConfig fc;
-            fc.originator = cfg.node.originator;
-            fc.session_id = session;
-            fc.stream_id = s.stream_id;
-            fc.stream_type = s.stream_type;
-            fc.classifier = s.classifier;
-            fc.classifier_size_threshold =
-                cfg.policy.arq.classifier_size_threshold;
             RingConfig rc;
             rc.window_ms = cfg.policy.arq.ring_window_ms;
             rc.byte_budget = cfg.policy.arq.ring_byte_budget;
-            streams_.emplace_back(Stream{
-                s.stream_id, Framer(fc), ResendRing(rc),
-                ResendScheduler(scheduler_policy(cfg), table)});
-            streams_.back().framer.set_operating_point(0, table_version);
+            Stream st{s.stream_id, std::nullopt, std::nullopt, ResendRing(rc),
+                      ResendScheduler(scheduler_policy(cfg), table)};
+            if (s.bind.kind == BindKind::kFrameShm) {
+                // §5.1a: whole-frame ingress from a venc SHM ring. FEC policy
+                // comes from the stream's fec block; MTU from the floor rung.
+                FrameFramerConfig fc;
+                fc.originator = cfg.node.originator;
+                fc.session_id = session;
+                fc.stream_id = s.stream_id;
+                fc.stream_type = s.stream_type;
+                fc.fec.scheme = s.fec.scheme;
+                fc.fec.i_rate_permille = s.fec.i_rate_permille;
+                fc.fec.p_rate_permille = s.fec.p_rate_permille;
+                fc.fec.min_k = s.fec.min_k;
+                st.frame_framer.emplace(fc);
+                st.frame_framer->set_operating_point(0, table_version,
+                                                     max_payload_for(0));
+            } else {
+                FramerConfig fc;
+                fc.originator = cfg.node.originator;
+                fc.session_id = session;
+                fc.stream_id = s.stream_id;
+                fc.stream_type = s.stream_type;
+                fc.classifier = s.classifier;
+                fc.classifier_size_threshold =
+                    cfg.policy.arq.classifier_size_threshold;
+                st.framer.emplace(fc);
+                st.framer->set_operating_point(0, table_version);
+            }
+            streams_.push_back(std::move(st));
         }
+    }
+
+    // §5.1a MTU budget: the active rung's max_payload (profile 0 = floor at
+    // startup), or the standard-rung default when no table is loaded.
+    uint16_t max_payload_for(uint8_t profile_id) const {
+        if (table_ != nullptr) {
+            for (const Profile& p : table_->profiles) {
+                if (p.id == profile_id) {
+                    return p.max_payload;
+                }
+            }
+        }
+        return kDefaultMaxPayload;
     }
 
     void on_ingress(uint8_t stream_id, const uint8_t* d, size_t n,
                     uint64_t now, const Inject& inject) {
         for (Stream& s : streams_) {
-            if (s.stream_id != stream_id) {
+            if (s.stream_id != stream_id || !s.framer) {
                 continue;
             }
-            s.framer.on_datagram(
+            s.framer->on_datagram(
                 d, n, now,
                 [&](const uint8_t* frame, size_t len, const DataHeader& hdr,
                     uint64_t t) {
                     inject(frame, len);
                     s.ring.push(frame, len, hdr, t);
                     s.sched.note_live_bytes(len);
+                });
+            return;
+        }
+    }
+
+    // §5.1a frame-shm ingress: one whole [VencFrameMeta][Annex-B] blob is
+    // fragmented + FEC'd by the stream's FrameFramer. Same emit contract as
+    // on_ingress (inject + ring + scheduler bookkeeping).
+    void on_frame(uint8_t stream_id, const uint8_t* blob, size_t len,
+                  uint64_t now, const Inject& inject) {
+        for (Stream& s : streams_) {
+            if (s.stream_id != stream_id || !s.frame_framer) {
+                continue;
+            }
+            s.frame_framer->on_frame(
+                blob, len, now,
+                [&](const uint8_t* frame, size_t flen, const DataHeader& hdr,
+                    uint64_t t) {
+                    inject(frame, flen);
+                    s.ring.push(frame, flen, hdr, t);
+                    s.sched.note_live_bytes(flen);
                 });
             return;
         }
@@ -572,9 +636,16 @@ struct TxCore {
         if (act.commit) {
             // §9.5 commit: the operating point stamped on every DATA packet
             // (drives RX deadlines + supersession budgets)...
+            const uint16_t mp = max_payload_for(act.commit->profile_id);
             for (Stream& s : streams_) {
-                s.framer.set_operating_point(act.commit->profile_id,
-                                             table_version_);
+                if (s.framer) {
+                    s.framer->set_operating_point(act.commit->profile_id,
+                                                  table_version_);
+                }
+                if (s.frame_framer) {
+                    s.frame_framer->set_operating_point(act.commit->profile_id,
+                                                        table_version_, mp);
+                }
             }
             // ...the TX adapter's modulation default (§10.4, radio backend)...
             if (apply_mode) {
@@ -622,8 +693,14 @@ struct TxCore {
     void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
     // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
     void set_csa_armed(bool on) {
+        const uint8_t f = on ? data_flags::kCsaArmed : 0;
         for (Stream& s : streams_) {
-            s.framer.set_extra_flags(on ? data_flags::kCsaArmed : 0);
+            if (s.framer) {
+                s.framer->set_extra_flags(f);
+            }
+            if (s.frame_framer) {
+                s.frame_framer->set_extra_flags(f);
+            }
         }
     }
     uint8_t power_level() const { return selector_.tx_power_level(); }
@@ -633,12 +710,18 @@ struct TxCore {
             StreamStats st;
             st.stream_id = s.stream_id;
             st.type = "TX";
-            st.seq = s.framer.next_seq();
-            st.delivered = s.framer.stats().frames;
+            if (s.framer) {
+                st.seq = s.framer->next_seq();
+                st.delivered = s.framer->stats().frames;
+                st.decode_errors = s.framer->stats().oversize_ingress;
+            } else if (s.frame_framer) {
+                st.seq = s.frame_framer->next_seq();
+                st.delivered = s.frame_framer->stats().frames;
+                st.decode_errors = s.frame_framer->stats().malformed_frame;
+            }
             st.resends_sent = s.sched.counters().resends_sent;
             st.double_send_suppressed =
                 s.sched.counters().holddown_suppressed;
-            st.decode_errors = s.framer.stats().oversize_ingress;
             st.active_profile = selector_.profile_id();
             st.table_version = table_version_;
             snap.streams.push_back(std::move(st));
@@ -677,6 +760,7 @@ struct TxCore {
     uint16_t originator_;
     uint32_t session_;
     uint8_t table_version_;
+    const ProfileTable* table_;
     Selector selector_;
     VencActuator venc_;
     std::vector<PowerAdapter> power_;
@@ -895,6 +979,41 @@ int run_tx(const Loaded& l) {
             air.value->set_power_qdb(idx, qdb);
         };
     }
+    // §15.4 frame-shm ingress: one consumer ring per frame-shm in-stream. The
+    // venc producer may not be up yet, so a failed attach is not fatal — it
+    // retries lazily in the loop. have_udp_ins tells us whether BindingSet has
+    // any pollable ingress fd of its own (frame-shm-only nodes have none).
+    struct ShmIn {
+        uint8_t stream_id;
+        std::string name;
+        std::unique_ptr<FrameShmRing> ring;  // null until attached
+    };
+    std::vector<ShmIn> shm_ins;
+    bool have_udp_ins = false;
+    for (const StreamCfg& s : l.cfg.streams) {
+        if (s.dir != Dir::kIn) {
+            continue;
+        }
+        if (s.bind.kind != BindKind::kFrameShm) {
+            have_udp_ins = true;
+            continue;
+        }
+        ShmIn si{s.stream_id, s.bind.name, nullptr};
+        auto r = FrameShmRing::attach(s.bind.name);
+        if (r) {
+            si.ring = std::move(*r.value);
+            std::fprintf(stderr, "tx: frame-shm '%s' attached\n",
+                         s.bind.name.c_str());
+        } else {
+            std::fprintf(stderr,
+                         "tx: frame-shm '%s' not up yet (%s); retrying\n",
+                         s.bind.name.c_str(), r.error.c_str());
+        }
+        shm_ins.push_back(std::move(si));
+    }
+    std::vector<uint8_t> frame_buf(kFrameRingDefaultSlotSize);
+    uint64_t next_shm_attach_ms = 0;
+
     StatsEmitter emitter(true, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
     uint64_t next_stats = t0;
@@ -948,11 +1067,70 @@ int run_tx(const Loaded& l) {
             held.pop_front();
             send_raw(f.data(), f.size());
         }
+        // Lazy (re)attach of any frame-shm producer that wasn't up at startup.
+        bool any_pending = false;
+        for (const ShmIn& si : shm_ins) {
+            if (!si.ring) {
+                any_pending = true;
+            }
+        }
+        if (any_pending && now >= next_shm_attach_ms) {
+            for (ShmIn& si : shm_ins) {
+                if (si.ring) {
+                    continue;
+                }
+                if (auto r = FrameShmRing::attach(si.name)) {
+                    si.ring = std::move(*r.value);
+                    std::fprintf(stderr, "tx: frame-shm '%s' attached\n",
+                                 si.name.c_str());
+                }
+            }
+            next_shm_attach_ms = now + 500;
+        }
+        // Union the frame-shm consumer eventfds into the ingress wait. shm_fds
+        // lists only attached rings, in order; drain_shm(j) maps index j back.
+        std::vector<int> shm_fds;
+        for (const ShmIn& si : shm_ins) {
+            if (si.ring) {
+                shm_fds.push_back(si.ring->event_fd());
+            }
+        }
+        const auto drain_shm = [&](size_t j) {
+            size_t k = 0;
+            for (ShmIn& si : shm_ins) {
+                if (!si.ring) {
+                    continue;
+                }
+                if (k++ != j) {
+                    continue;
+                }
+                si.ring->drain_event();
+                for (;;) {
+                    const long got =
+                        si.ring->read_frame(frame_buf.data(), frame_buf.size());
+                    if (got <= 0) {
+                        break;
+                    }
+                    tx.on_frame(si.stream_id, frame_buf.data(),
+                                static_cast<size_t>(got), now, inject);
+                }
+                return;
+            }
+        };
         // Held frames need µs-scale reactivity — don't sleep in poll then.
         const int in_timeout = held.empty() ? 2 : 0;
-        bindings.value->poll_once(in_timeout, [&](const IngressEvent& ev) {
-            tx.on_ingress(ev.stream_id, ev.data, ev.len, now, inject);
-        });
+        bindings.value->poll_once(
+            in_timeout,
+            [&](const IngressEvent& ev) {
+                tx.on_ingress(ev.stream_id, ev.data, ev.len, now, inject);
+            },
+            shm_fds, drain_shm);
+        // Nothing to wait on yet (no UDP ingress and every frame-shm producer
+        // still down): poll_once returned instantly — pace to avoid a busy spin
+        // while waiting for the producer to come up.
+        if (!have_udp_ins && shm_fds.empty() && in_timeout > 0) {
+            ::poll(nullptr, 0, in_timeout);
+        }
         air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
                                     size_t n) {
             const Decoded dec = decode(d, n);
@@ -1017,8 +1195,56 @@ int run_rx(const Loaded& l) {
     const uint32_t session = session_nonce();
     RxCore rx(l.cfg, session, l.have_table ? &l.table : nullptr,
               l.have_table ? std::optional<uint8_t>(l.tv) : std::nullopt);
-    const RxEngine::Deliver deliver = [&](uint8_t sid, const uint8_t* d,
+
+    // §15.4 frame-shm egress: one producer ring + a §6.3a reassembler per
+    // frame-shm out-stream. deliver_now carries the loop's per-iteration clock
+    // into the deliver lambda (the reassembler needs now_ms for its deadlines).
+    struct ShmOut {
+        uint8_t stream_id;
+        std::unique_ptr<FrameShmRing> ring;
+        std::unique_ptr<FrameReassembler> reasm;
+    };
+    std::vector<ShmOut> shm_outs;
+    for (const StreamCfg& s : l.cfg.streams) {
+        if (s.dir != Dir::kOut || s.bind.kind != BindKind::kFrameShm) {
+            continue;
+        }
+        auto r = FrameShmRing::create(s.bind.name);
+        if (!r) {
+            std::fprintf(stderr, "frame-shm egress '%s': %s\n",
+                         s.bind.name.c_str(), r.error.c_str());
+            return 1;
+        }
+        FrameReassemblerConfig frc;
+        // Map the drop deadline from the floor rung's I-frame budget when a
+        // table is loaded; otherwise keep the §6.3a default.
+        if (l.have_table) {
+            for (const Profile& p : l.table.profiles) {
+                if (p.id == l.table.floor_profile &&
+                    p.arq_deadline_iframe_ms > 0) {
+                    frc.deadline_ms = p.arq_deadline_iframe_ms;
+                }
+            }
+        }
+        std::fprintf(stderr, "rx: frame-shm egress '%s' created\n",
+                     s.bind.name.c_str());
+        shm_outs.push_back(ShmOut{s.stream_id, std::move(*r.value),
+                                  std::make_unique<FrameReassembler>(frc)});
+    }
+    uint64_t deliver_now = now_ms();
+
+    const RxEngine::Deliver deliver = [&](uint8_t sid, uint32_t block_id,
+                                          uint8_t flags, const uint8_t* d,
                                           size_t n) {
+        for (ShmOut& so : shm_outs) {
+            if (so.stream_id == sid) {
+                so.reasm->push(block_id, flags, d, n, deliver_now,
+                               [&](const uint8_t* f, size_t len) {
+                                   so.ring->write_frame(f, len);
+                               });
+                return;
+            }
+        }
         if (UdpEgress* out = bindings.value->egress_for(sid)) {
             out->send(d, n);
         }
@@ -1069,6 +1295,7 @@ int run_rx(const Loaded& l) {
         // it so core-injected time never steps backward.
         const uint64_t now = now_ms();
         now_us_it = now_us();
+        deliver_now = now;  // the deliver lambda's clock for reassembler pushes
         // Fire the coalesced return window. No deadline (no EOB heard yet)
         // means send immediately — never sit on a return.
         if (!ret_held.empty() &&
@@ -1128,6 +1355,13 @@ int run_rx(const Loaded& l) {
             }
         });
         rx.tick(now, deliver, inject_nack);
+        // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
+        // so a stalled block never wedges frame-shm egress.
+        for (ShmOut& so : shm_outs) {
+            so.reasm->tick(now, [&](const uint8_t* f, size_t len) {
+                so.ring->write_frame(f, len);
+            });
+        }
         // §11 trigger + campaign engine.
         std::string line;
         if (stdin_line(line) && line.rfind("csa ", 0) == 0) {
@@ -1237,8 +1471,8 @@ int run_loopback(const Loaded& l) {
     // tick's captured now and u64 "now - stamp" arithmetic underflows.
     uint64_t loop_now = now_ms();
 
-    const RxEngine::Deliver deliver = [&](uint8_t sid, const uint8_t* d,
-                                          size_t n) {
+    const RxEngine::Deliver deliver = [&](uint8_t sid, uint32_t, uint8_t,
+                                          const uint8_t* d, size_t n) {
         if (UdpEgress* out = bindings.value->egress_for(sid)) {
             out->send(d, n);
         }
