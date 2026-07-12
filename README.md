@@ -111,7 +111,94 @@ Scripts under `tools/` support the §17 bench gates:
 
 Bench knob: `air.rx_drop_permille` (per-adapter independent synthetic RX
 drop; bench-only, default off) — used to manufacture known-independent loss
-for gate-2 machinery validation.
+for gate-2 machinery validation and to exercise FEC recovery. Honored by all
+three air backends (`udp`, `kernel-monitor`, `radio`).
+
+## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
+
+The low-latency video path. The encoder (`waybeam_venc`) publishes whole encoded
+frames into a POSIX shared-memory ring; waybeam-link ingests them, fragments each
+into source symbols + GF(256) Cauchy-RS repair symbols (§14.1), injects over the
+air, and on the ground reassembles + FEC-decodes back into a **byte-identical**
+SHM slot for the decoder. SHM is same-host on each end; the air hop is either
+real monitor-mode injection or the udp-air bench sim.
+
+```
+venc(frame-shm://venc_frame) → wl tx (FrameFramer+FEC) → AIR → wl rx (reassemble+FEC) → frame-shm(venc_frame_out) → decoder
+```
+
+FEC is transparent to the RX (it decodes whatever the TX emits); `fec.scheme
+"none"` fragments + ARQs without repair symbols. Both ends must share
+`node.net_id` on the monitor/radio path. Adaptive MTU: symbols are sized from the
+active profile's `max_payload` (jumbo rungs keep large IDRs under the GF(256)
+k+r≤256 cap). Example configs: `examples/config.frame-shm-{tx,rx}.sample.json`.
+
+### Vehicle / craft side — TX (frame-shm ingress)
+
+Point venc at the ring, then restart it:
+`json_cli -s .outgoing.server '"frame-shm://venc_frame"' -i /etc/waybeam.json`.
+TX stream + FEC:
+
+```json
+"streams": [
+  { "stream_id": 0, "stream_type": "RTP", "dir": "in",
+    "bind": { "kind": "frame-shm", "name": "venc_frame" },
+    "fec": { "scheme": "rlc256", "i_rate_permille": 250, "p_rate_permille": 100, "min_k": 3 } }
+]
+```
+
+**(a) Monitor injection (real RF)** — one adapter in Linux monitor mode:
+
+```json
+"adapters": [{ "name": "wlan0", "ifname": "wlan0", "role": "tx", "channel": 5805, "bw": 20 }],
+"air": { "kind": "kernel-monitor" }
+```
+
+Bring the iface up first: `ip link set wlan0 down; iw wlan0 set monitor none;
+ip link set wlan0 up; iw wlan0 set channel 161 HT20`. Craft runs 20 MHz, low MCS
+at 5805 (§10, 8812EU limits).
+
+**(b) UDP sim (no radios)** — DATA fanned out over ethernet to the ground:
+
+```json
+"air": { "kind": "udp", "tx": ["<ground-ip>:5801"], "rx": ["0.0.0.0:5810"] }
+```
+
+Run (repo root as cwd for `profiles/`): `waybeam-link tx -c <tx>.json`.
+
+### Ground / air side — RX (frame-shm egress)
+
+```json
+"streams": [
+  { "stream_id": 0, "stream_type": "RTP", "dir": "out", "originator": 17,
+    "bind": { "kind": "frame-shm", "name": "venc_frame_out" } }
+]
+```
+
+**(a) Monitor injection** — one or more adapters in monitor mode on the craft's
+channel (extra `role":"rx"` adapters add diversity; one `role":"tx"` carries
+NACK/LINK_REPORT returns):
+
+```json
+"adapters": [{ "name": "wlan1", "ifname": "wlx…", "role": "rx", "channel": 5805, "bw": 20 }],
+"air": { "kind": "kernel-monitor" }
+```
+
+**(b) UDP sim** — mirror the TX targets:
+
+```json
+"air": { "kind": "udp", "rx": ["0.0.0.0:5801"], "tx": ["<craft-ip>:5810"] }
+```
+
+Run: `waybeam-link rx -c <rx>.json`.
+
+### Verify
+
+Read the ground egress ring with any `venc_frame_ring` consumer, e.g.
+`waybeam_venc/tools/frame_shm_consumer_test venc_frame_out <seconds>` — it
+validates `VencFrameMeta`, Annex-B start codes, IDR flags, and pts monotonicity
+(exit 0 = PASS). Add `air.rx_drop_permille` to the RX config to exercise FEC
+recovery under synthetic loss.
 
 ## Deployment invariant (must hold before this can drive a craft)
 

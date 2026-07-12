@@ -187,6 +187,9 @@ struct Policy {
 struct AirUdpCfg {
     std::vector<std::string> tx;  // frame targets (tx: video; rx: NACKs)
     std::vector<std::string> rx;  // listen sockets = virtual adapters
+    // Bench-only per-adapter synthetic RX drop (0–1000), parity with the
+    // monitor/radio backends — manufactures known loss on the udp-air path.
+    uint16_t rx_drop_permille = 0;
 };
 struct AirCfg {
     // kMonitor = the kernel-driver monitor-mode backend (AF_PACKET raw inject +

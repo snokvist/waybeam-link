@@ -204,7 +204,9 @@ struct AirBackend {
     static Result<AirBackend> create(const Config& cfg) {
         AirBackend b;
         if (cfg.air.kind == AirCfg::Kind::kUdp) {
-            auto a = UdpAir::create(cfg.air.udp);
+            AirUdpCfg uc = cfg.air.udp;
+            uc.rx_drop_permille = cfg.air.rx_drop_permille;  // bench synthetic loss
+            auto a = UdpAir::create(uc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
             }
