@@ -41,6 +41,10 @@ numbered `docs/review-log.md` Pass; this file only tracks *intent*.
 
 ## Completed
 
+- [x] **UDP broadcast/sniffer follow-up** — hardened paced RX-only injection,
+  added a real two-node bidirectional shared-channel test, and verified foreign
+  delivery, socket-level self filtering, paced TX accounting, and zero false
+  kernel-overflow counts.
 - [x] **Fleet monitor** — `tools/link_monitor.py` + `link_monitor.html`,
   UDP-NDJSON → HTTP/SSE bridge, per-instance cards. (PR #18, 2026-07-12)
 - [x] **REST control plane §15.5** — in-loop single-threaded HTTP server;

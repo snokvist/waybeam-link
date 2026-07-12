@@ -82,6 +82,76 @@ int main() {
         }
     }
 
+    // Real node shape: both peers inject and sniff the same paced channel.
+    // Self copies are rejected before the queue; foreign traffic is delivered.
+    {
+        uint16_t port = 0;
+        {
+            auto reservation = UdpIngress::open("0.0.0.0:0");
+            CHECK(bool(reservation));
+            if (reservation) port = reservation.value->bound_port();
+        }
+        CHECK(port != 0);
+        AirUdpCfg craft_cfg;
+        craft_cfg.broadcast = true;
+        craft_cfg.originator = 17;
+        craft_cfg.pace_mbps = 10;
+        craft_cfg.tx = {"127.255.255.255:" + std::to_string(port)};
+        craft_cfg.rx = {"0.0.0.0:" + std::to_string(port)};
+        AirUdpCfg ground_cfg = craft_cfg;
+        ground_cfg.originator = 9;
+        auto craft = UdpAir::create(craft_cfg);
+        auto ground = UdpAir::create(ground_cfg);
+        CHECK(bool(craft));
+        CHECK(bool(ground));
+        if (craft && ground) {
+            uint8_t craft_frame[kCommonPrefixSize]{};
+            uint8_t ground_frame[kCommonPrefixSize]{};
+            CHECK_EQ_U(encode_heartbeat(Heartbeat{{17, 0, 111}}, craft_frame,
+                                        sizeof(craft_frame)),
+                       sizeof(craft_frame));
+            CHECK_EQ_U(encode_heartbeat(Heartbeat{{9, 17, 222}}, ground_frame,
+                                        sizeof(ground_frame)),
+                       sizeof(ground_frame));
+            CHECK_EQ_U(craft.value->inject(craft_frame, sizeof(craft_frame)), 1u);
+            CHECK_EQ_U(ground.value->inject(ground_frame, sizeof(ground_frame)),
+                       1u);
+            int craft_got = 0;
+            int ground_got = 0;
+            for (int tries = 0; tries < 100 &&
+                                (craft_got == 0 || ground_got == 0);
+                 ++tries) {
+                craft_got += craft.value->poll_once(2, discard);
+                ground_got += ground.value->poll_once(2, discard);
+            }
+            CHECK_EQ_U(craft_got, 1u);
+            CHECK_EQ_U(ground_got, 1u);
+            CHECK_EQ_U(craft.value->rx_frames(0), 1u);
+            CHECK_EQ_U(ground.value->rx_frames(0), 1u);
+            CHECK_EQ_U(craft.value->rx_filtered(0), 1u);
+            CHECK_EQ_U(ground.value->rx_filtered(0), 1u);
+            CHECK_EQ_U(craft.value->kernel_dropped(0), 0u);
+            CHECK_EQ_U(ground.value->kernel_dropped(0), 0u);
+            CHECK_EQ_U(craft.value->tx_submitted(), 1u);
+            CHECK_EQ_U(ground.value->tx_submitted(), 1u);
+        }
+    }
+
+    // A paced RX-only instance must fail injection without retaining a queue.
+    {
+        AirUdpCfg cfg;
+        cfg.pace_mbps = 10;
+        cfg.rx = {"127.0.0.1:0"};
+        auto air = UdpAir::create(cfg);
+        CHECK(bool(air));
+        if (air) {
+            const uint8_t msg = 1;
+            CHECK_EQ_U(air.value->inject(&msg, 1), 0u);
+            CHECK(!air.value->tx_pending());
+            CHECK_EQ_U(air.value->tx_failed(), 1u);
+        }
+    }
+
     {
         AirUdpCfg cfg;
         cfg.rx = {"127.0.0.1:0"};

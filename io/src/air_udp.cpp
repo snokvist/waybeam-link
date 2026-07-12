@@ -53,13 +53,17 @@ Result<UdpAir> UdpAir::create(const AirUdpCfg& cfg) {
 
 size_t UdpAir::inject(const uint8_t* frame, size_t len) {
     if (pace_mbps_ != 0) {
+        if (targets_.empty()) {
+            ++tx_failed_;
+            return 0;
+        }
         constexpr size_t kPacedQueueCap = 8192;
         if (tx_queue_.size() >= kPacedQueueCap) {
             ++tx_failed_;
             return 0;
         }
         tx_queue_.emplace_back(frame, frame + len);
-        return targets_.empty() ? 0 : 1;
+        return 1;
     }
     size_t reached = 0;
     for (UdpEgress& t : targets_) {
