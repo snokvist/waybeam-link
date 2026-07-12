@@ -143,6 +143,20 @@ oversize. Stress-only runs may set `ALLOW_PRODUCER_OVERSIZE=1`; this accepts
 only an oversize-only producer result with no full-ring drops and enough usable
 frames for the consumer. Normal runs continue to fail on every oversize.
 
+ARQ stress uses one listener (fully correlated/single-path loss), disables FEC,
+and permits the consumer to finish with fewer frames while requiring the actual
+NACK/retransmit/recovery counters to advance:
+
+```sh
+FRAMES=300 BITRATES=8000 AIR_KIND=udp-broadcast RX_LISTENERS=1 \
+RX_DROP_PERMILLE=20 FEC_SCHEME=none ALLOW_FRAME_LOSS=1 EXPECT_ARQ=1 \
+CONSUMER_TIMEOUT_MS=15000 ARQ_IFRAME_DEADLINE_MS=16 \
+ARQ_PFRAME_DEADLINE_MS=16 tools/frame_shm_udp_bench.sh
+```
+
+Deadline overrides generate a temporary matched profile table for both local
+processes. They do not edit `profiles/table.example.json`.
+
 ### Fleet monitor (live dashboard)
 
 `tools/link_monitor.py` — a stdlib-only bridge that turns the §15.3 stats

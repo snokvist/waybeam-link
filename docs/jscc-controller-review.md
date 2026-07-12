@@ -219,3 +219,24 @@ Mbit/s (and three at 25 Mbit/s in an earlier incomplete stress trace). This is
 kept separate from the real `size=auto` GDR envelope, where the measured maximum
 was 74,789 B. Normal benches fail on synthetic oversize; an explicit
 `ALLOW_PRODUCER_OVERSIZE=1` exists only to retain otherwise-valid stress runs.
+
+### Initial ARQ deadline gate
+
+The same real TX/RX scheduler path was exercised at 8 Mbit/s with FEC disabled,
+one UDP-broadcast listener, and deterministic packet loss. The synthetic encoder
+emits one ARQ-class IDR every 30 frames; ordinary P-frames remain unprotected.
+
+| loss | deadline | NACK | resend | recovered packets | delivered frames | delivered IDR |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10% | 80 ms | 172 | 110 | 97 | 31/303 | 1/11 |
+| 2% | 80 ms | 44 | 14 | 13 | 183/303 | 9/11 |
+| 2% | 16 ms | 17 | 12 | 10 | 197/303 | 8/11 |
+| 2% | 8 ms | 15 | 11 | 0 | 188/303 | 0/11 |
+
+Recovered-packet RTT was at most 9 ms in the 16/80 ms runs. At 8 ms the TX did
+send retransmissions, but none reached RX early enough to recover a declared
+gap. This places the current Ethernet/loop scheduling crossover between 8 and
+16 ms for this workload. A 144 fps frame period is only 6.94 ms, so changing to
+a 144-capable sensor mode cannot make current ARQ useful without first reducing
+return/detection/retransmit latency. The 60 fps real-vehicle test remains the
+next hardware step.
