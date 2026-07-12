@@ -344,6 +344,41 @@ adaptive policy), §15.1 (`frame-shm` live), §15.2 (per-stream `fec` block), ne
 `max_payload` seeds (bench-derived); on-device jumbo MPDU injection verification
 on real Realtek radios (loopback/bench unaffected).
 
+## Pass 16 — §15.5 REST control plane + frame-shm stats mapping (2026-07-12)
+
+Implementation begins (PR B, feature/rest-control-plane). Spec amended FIRST
+(this commit); code follows. Two operator decisions taken up front:
+
+- **Decision — control scope = core write set.** The REST plane exposes the
+  read/observability surface (`GET /stats`, `/stats/stream` SSE, `/info`,
+  `/health`) plus the four live knobs that were previously boot-time JSON only:
+  `POST /csa` (replacing the stdin trigger, now **removed**), `POST /link/profile`
+  (§9.7 pin = the MCS+bitrate operating-point lever), `POST /fec` (§14.1 rate
+  retune), `POST /stats/reset`. A TX-power override is deferred: it fights the
+  §9/§10 per-tick selector power write and needs an override-latch — a later pass.
+- **Decision — LAN-bindable, no auth.** Matches the §13 data-plane posture and
+  venc's own same-SoC `/api/v1/set`. `control.bind` is operator-chosen
+  (`127.0.0.1` for host-local, a routable addr on a trusted net); no token. The
+  server is single-threaded, folded into the event loop (0 ms-timeout poll per
+  tick, one bounded request/conn, dropped-not-awaited), so it cannot stall the
+  flight path. Secrets (`csa.psk`) are never echoed by `/info`.
+
+Also pinned: the **frame-shm stats gap**. On a `frame-shm` egress the RX path
+runs `FrameReassembler`, whose per-frame counters were not surfaced — `recovered_fec`
+read 0 even when FEC recovered frames. §15.3 now maps the reassembler counters
+onto the stream fields (`recovered_fec`←`frames_fec`, `decode_errors`←`decode_failures`,
+`dropped_superseded/deadline`←`frames_superseded/deadline`) and adds three
+additive fields — `frames_fast`, `frames_unrecoverable`, `malformed` — which
+stay 0 on UDP streams.
+
+**Amended:** new §15.5 (control plane: endpoints, JSON, MUT class, bind/no-auth,
+stdin-trigger removal); §15.2 (`control` config block); §15.3 (three new stream
+fields + frame-shm mapping prose).
+
+**Deferred (not blocking):** TX-power override knob (override-latch design);
+per-instance direct-to-REST dashboard mode (the UDP-push fleet bridge ships now
+in `tools/link_monitor.py`, PR #18).
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
