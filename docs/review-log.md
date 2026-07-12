@@ -606,6 +606,23 @@ only runtime authority.
 **Amended:** §14.2 (shadow estimator ordering and non-enforcement); §15.3
 (additive `jscc_*` receiver stream fields). Code follows separately.
 
+## Pass 28 — protection-aware JSCC shadow (2026-07-13)
+
+The first runtime shadow predicts missing source symbols. That is useful loss
+telemetry but is not sufficient for parity allocation because repair packets
+can also be lost, and raw symbol counts scale with block size. Deterministic
+replay now measures transmitted repair demand, normalizes it by `k`, and marks
+unrecoverable observations as censored lower bounds.
+
+A 120-block maximum with a 10% cold-start rate matched fixed FEC under steady
+15% independent loss while selecting less parity, but added one failure under
+incremental loss. It remains non-enforcing. Additive fields expose this second
+shadow independently; the existing source-loss fields retain their meaning.
+
+**Amended:** §14.2 (repair-demand definition, normalization, censoring, and
+shadow-only seeds); §15.3 (additive protection-shadow fields). Code follows
+separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

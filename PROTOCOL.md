@@ -1308,6 +1308,17 @@ wire field, parity count, ARQ gate, or deadline. Its purpose is to expose
 underprediction and adaptation lag in §15.3 while fixed §14.1 protection stays
 authoritative. These seeds are not an adopted RF loss model.
 
+A second protection-aware shadow estimates **transmitted repair demand**, not
+only missing source symbols. For a recovered block this is one plus the highest
+repair index needed to supply `k` received equations, so repair-packet loss is
+included. An unrecovered block reports the lower bound `repairs_emitted_so_far
++ missing_equations`; that observation is marked censored and must not be
+treated as an exact sample. Demand is normalized to permille of `k`, estimated
+as the trailing-120 maximum, then converted back to symbols for the next
+block. It requires 20 samples and uses a 100-permille cold-start rate. This
+candidate is also shadow-only and does not supersede the original source-loss
+telemetry.
+
 ---
 
 ## 15. I/O bindings, configuration & observability
@@ -1409,6 +1420,11 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "jscc_shadow_blocks": 89681, "jscc_predicted_loss_symbols": 3,
     "jscc_observed_loss_symbols": 1, "jscc_underpredicted_blocks": 72,
     "jscc_predicted_parity_symbols": 271044,
+    "jscc_predicted_repair_symbols": 4,
+    "jscc_observed_repair_symbols": 3,
+    "jscc_repair_underpredicted_blocks": 18,
+    "jscc_repair_demand_censored_blocks": 2,
+    "jscc_repair_predicted_parity_symbols": 358121,
     "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
@@ -1467,6 +1483,16 @@ results greater than their prior prediction; and
 zero on TX ingress and UDP streams. Stats reset clears both the estimator
 window and these counters so a new observation generation has an unambiguous
 cold start. None of these values changes active §14.1 FEC.
+
+The `jscc_*repair*` fields are the separate protection-aware shadow.
+`jscc_predicted_repair_symbols` and `jscc_observed_repair_symbols` are its
+latest causal prediction and transmitted-repair demand;
+`jscc_repair_underpredicted_blocks` counts exact or lower-bound observations
+above their prior prediction; `jscc_repair_demand_censored_blocks` counts
+unrecovered lower-bound observations; and
+`jscc_repair_predicted_parity_symbols` is cumulative hypothetical parity. A
+censored observation is evidence of insufficient protection, not an exact
+demand measurement. Reset clears this estimator and its counters too.
 
 `shm_full_drops`, `shm_oversize_drops`, and `shm_bad_slots` expose local ring
 backpressure/ABI failures separately from air/frame-reassembly loss. They are 0
