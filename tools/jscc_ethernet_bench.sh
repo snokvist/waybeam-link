@@ -18,6 +18,9 @@ RX_DROP_PERMILLE=${RX_DROP_PERMILLE:-0}
 JSCC_DEADLINE_MS=${JSCC_DEADLINE_MS:-16}
 PACKET_TRACE_MAX=${PACKET_TRACE_MAX:-75000}
 REMOTE_TRACE_DIR=${REMOTE_TRACE_DIR:-/mnt/mmcblk0p1/waybeam-link-traces}
+FEC_I_RATE_PERMILLE=${FEC_I_RATE_PERMILLE:-250}
+FEC_P_RATE_PERMILLE=${FEC_P_RATE_PERMILLE:-100}
+FEC_MIN_K=${FEC_MIN_K:-3}
 VENC_CONTROL_ENABLED=${VENC_CONTROL_ENABLED:-0}
 VEHICLE_MAIN_CPU=${VEHICLE_MAIN_CPU:-1}
 VEHICLE_SHM_CPU=${VEHICLE_SHM_CPU:-0}
@@ -108,6 +111,9 @@ start_supervisor() {
             --property=Type=exec --working-directory="$ROOT" \
             /usr/bin/env OUT_RING="$OUT_RING" BENCH_CONSUMER="$BENCH_CONSUMER" \
             RX_DROP_PERMILLE="$RX_DROP_PERMILLE" \
+            FEC_I_RATE_PERMILLE="$FEC_I_RATE_PERMILLE" \
+            FEC_P_RATE_PERMILLE="$FEC_P_RATE_PERMILLE" FEC_MIN_K="$FEC_MIN_K" \
+            VENC_CONTROL_ENABLED="$VENC_CONTROL_ENABLED" \
             /bin/bash -c "exec '$script' run >>'$SUPERVISOR_LOG' 2>&1"
         pid=$(systemctl --user show -p MainPID --value "$SYSTEMD_UNIT")
     else
@@ -250,6 +256,11 @@ fi
 [[ "$RX_DROP_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || fail "RX_DROP_PERMILLE must be 0..1000"
 [[ "$JSCC_DEADLINE_MS" =~ ^[1-9][0-9]*$ ]] || fail "JSCC_DEADLINE_MS must be positive"
 [[ "$PACKET_TRACE_MAX" =~ ^[1-9][0-9]*$ ]] || fail "PACKET_TRACE_MAX must be positive"
+[[ "$FEC_I_RATE_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || \
+    fail "FEC_I_RATE_PERMILLE must be 0..1000"
+[[ "$FEC_P_RATE_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || \
+    fail "FEC_P_RATE_PERMILLE must be 0..1000"
+[[ "$FEC_MIN_K" =~ ^[0-9]+$ ]] || fail "FEC_MIN_K must be non-negative"
 [[ "$VENC_CONTROL_ENABLED" == 0 || "$VENC_CONTROL_ENABLED" == 1 ]] || \
     fail "VENC_CONTROL_ENABLED must be 0 or 1"
 [[ "$VEHICLE_MAIN_CPU" =~ ^[0-9]+$ ]] || fail "VEHICLE_MAIN_CPU must be numeric"
@@ -283,8 +294,8 @@ cat >"$ARTIFACTS/tx.json" <<EOF
   "profile_table":"/etc/waybeam-link/table.example.json",
   "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
     "bind":{"kind":"frame-shm","name":"venc_frame"},
-    "fec":{"scheme":"rlc256","i_rate_permille":250,
-           "p_rate_permille":100,"min_k":3}}],
+    "fec":{"scheme":"rlc256","i_rate_permille":$FEC_I_RATE_PERMILLE,
+           "p_rate_permille":$FEC_P_RATE_PERMILLE,"min_k":$FEC_MIN_K}}],
   "air":{"kind":"udp-broadcast","tx":["$BROADCAST_IP:5801"],
          "rx":["0.0.0.0:5801"]},
   "policy":{"select":{"min_profile":0,"max_profile":0}},

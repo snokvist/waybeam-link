@@ -204,6 +204,9 @@ Vehicle packet traces default to the SD card at
 `/mnt/mmcblk0p1/waybeam-link-traces` and are removed after retrieval. Override
 the location with `REMOTE_TRACE_DIR`; avoid `/tmp` for extended captures because
 it is a small RAM-backed filesystem on the SSC338Q.
+`FEC_I_RATE_PERMILLE`, `FEC_P_RATE_PERMILLE`, and `FEC_MIN_K` override only the
+generated/deployed waybeam-link bench config. They never edit venc settings;
+set both rates to zero for an ARQ-only hardware run.
 
 ## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
 
