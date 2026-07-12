@@ -364,24 +364,6 @@ struct AirBackend {
         return sent;
     }
 
-    bool batch_tx_supported() const {
-        return udp && udp->batch_tx_supported();
-    }
-    size_t inject_batch(const std::vector<std::vector<uint8_t>>& frames) {
-        if (!udp) {
-            size_t sent = 0;
-            for (const auto& frame : frames) {
-                sent += inject(frame.data(), frame.size());
-            }
-            return sent;
-        }
-        const size_t sent = udp->inject_batch(frames);
-        if (sent > 0) {
-            last_tx_ms = now_ms();
-        }
-        return sent;
-    }
-
     // Returns (NACK/LINK_REPORT) carry their target so the radio backend
     // can address them as §3.0 unicast when return.unicast is on; the udp
     // dev backend has no L2 addressing and ignores the target.
@@ -647,8 +629,6 @@ struct AirBackend {
 
 struct TxCore {
     using Inject = std::function<void(const uint8_t*, size_t)>;
-    using OwnedFrames = std::vector<std::vector<uint8_t>>;
-    using InjectBatch = std::function<void(const OwnedFrames&)>;
 
     // A stream carries EITHER a UDP-datagram Framer (§5.1) or a whole-frame
     // FrameFramer (§5.1a, frame-shm ingress) — never both. Exactly one of the
@@ -764,28 +744,19 @@ struct TxCore {
     // fragmented + FEC'd by the stream's FrameFramer. Same emit contract as
     // on_ingress (inject + ring + scheduler bookkeeping).
     void on_frame(uint8_t stream_id, const uint8_t* blob, size_t len,
-                  uint64_t now, const Inject& inject,
-                  const InjectBatch* inject_batch = nullptr) {
+                  uint64_t now, const Inject& inject) {
         for (Stream& s : streams_) {
             if (s.stream_id != stream_id || !s.frame_framer) {
                 continue;
             }
-            OwnedFrames batch;
             s.frame_framer->on_frame(
                 blob, len, now,
                 [&](const uint8_t* frame, size_t flen, const DataHeader& hdr,
                     uint64_t t) {
-                    if (inject_batch != nullptr) {
-                        batch.emplace_back(frame, frame + flen);
-                    } else {
-                        inject(frame, flen);
-                    }
+                    inject(frame, flen);
                     s.ring.push(frame, flen, hdr, t);
                     s.sched.note_live_bytes(flen);
                 });
-            if (inject_batch != nullptr && !batch.empty()) {
-                (*inject_batch)(batch);
-            }
             return;
         }
     }
@@ -1444,10 +1415,6 @@ int run_tx(const Loaded& l) {
         }
         send_raw(f, n);
     };
-    const TxCore::InjectBatch inject_batch =
-        [&](const TxCore::OwnedFrames& frames) { air.value->inject_batch(frames); };
-    const TxCore::InjectBatch* frame_batch =
-        !qg.enabled() && air.value->batch_tx_supported() ? &inject_batch : nullptr;
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
     // retunes the (single) radio at the TSF-anchored T_switch.
     CsaFollower csa(csa_params(l.cfg));
@@ -1580,8 +1547,7 @@ int run_tx(const Loaded& l) {
                         break;
                     }
                     tx.on_frame(si.stream_id, frame_buf.data(),
-                                static_cast<size_t>(got), now, inject,
-                                frame_batch);
+                                static_cast<size_t>(got), now, inject);
                 }
                 return;
             }

@@ -85,31 +85,6 @@ size_t UdpAir::inject(const uint8_t* frame, size_t len) {
     return reached;
 }
 
-size_t UdpAir::inject_batch(
-    const std::vector<std::vector<uint8_t>>& frames) {
-    if (pace_mbps_ != 0) {
-        size_t accepted = 0;
-        for (const auto& frame : frames) {
-            accepted += inject(frame.data(), frame.size());
-        }
-        return accepted;
-    }
-    size_t submitted = 0;
-    for (UdpEgress& target : targets_) {
-        const size_t sent = target.send_many(frames);
-        submitted += sent;
-        tx_submitted_ += sent;
-        tx_failed_ += frames.size() - sent;
-    }
-    if (broadcast_ && submitted != 0) {
-        for (size_t i = 0; i < adapters_.size(); ++i) {
-            rx_filtered_[i] += submitted;
-            adapters_[i].note_socket_filtered(submitted);
-        }
-    }
-    return submitted;
-}
-
 void UdpAir::service_paced_tx() {
     if (pace_mbps_ == 0 || tx_queue_.empty() || targets_.empty()) return;
     const auto now = std::chrono::steady_clock::now();

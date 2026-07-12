@@ -42,7 +42,7 @@ class UdpIngress {
         return kernel_drops_ > socket_filtered_ ? kernel_drops_ - socket_filtered_
                                                 : 0;
     }
-    void note_socket_filtered(uint64_t count = 1) { socket_filtered_ += count; }
+    void note_socket_filtered() { ++socket_filtered_; }
 
     // One datagram; >0 = bytes, 0 = nothing pending, -1 = error.
     long recv_one(uint8_t* buf, size_t cap);
@@ -70,7 +70,6 @@ class UdpEgress {
 
     int fd() const { return fd_; }
     bool send(const uint8_t* data, size_t len);
-    size_t send_many(const std::vector<std::vector<uint8_t>>& frames);
 
   private:
     int fd_ = -1;
