@@ -443,11 +443,12 @@ without changing point-to-point UDP-air behavior:
 - TX enables `SO_BROADCAST`; multiple nodes may share the RX port.
 - RX validates complete waybeam packets and filters the local originator before
   core delivery, matching the RF backends' passive-sniff/self-filter boundary.
-- Filtered/malformed/self frames are counted separately from accepted and
-  synthetic-dropped traffic.
+- Adapter stats add `filtered`; malformed/self frames are counted separately
+  from accepted and synthetic-dropped traffic. Kernel-monitor's existing
+  internal filter counter maps to the same field.
 
-**Amended:** §16.3 (backend config and receive semantics). Code follows in a
-separate commit.
+**Amended:** §15.3 (`filtered` adapter field); §16.3 (backend config and receive
+semantics). Code follows in a separate commit.
 
 ## Open questions for the next pass
 

@@ -1319,7 +1319,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
   "adapters": [ { "name": "wlan0", "rx": 10234, "dup": 812,
     "rssi_best": -58, "rssi_mean": -63, "snr": 22, "noise": -85,
     "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
-    "drop": 0, "kernel_drop": 0, "tsf_fallback": 0,
+    "drop": 0, "filtered": 0, "kernel_drop": 0, "tsf_fallback": 0,
     "tx_reports": 531, "tx_report_fails": 0,
     "adapter_stalled": false, "tx_wedged": false } ],
   "streams": [ { "stream_id": 0, "type": "RTP",
@@ -1368,6 +1368,9 @@ frame-SHM ingress `shm_bad_slots` comes from the consumer ring. Adapter
 `kernel_drop` is the Linux socket's `SO_RXQ_OVFL` cumulative receive-queue loss
 (UDP/kernel socket backends; 0 where unavailable). It is distinct from `drop`,
 which remains backend/synthetic queue loss.
+`filtered` is the backend's cumulative count of structurally rejected or
+self-originated receive frames. It is 0 where filtering occurs below an
+observable boundary.
 
 ### 15.4 `frame-shm` binding — venc_frame_ring slot format
 The `frame-shm` binding attaches to (ingress) or creates (egress) a POSIX
