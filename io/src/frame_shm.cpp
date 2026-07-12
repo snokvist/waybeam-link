@@ -33,6 +33,13 @@ bool is_pow2(uint32_t v) { return v != 0 && (v & (v - 1)) == 0; }
 
 size_t align8(size_t v) { return (v + 7) & ~static_cast<size_t>(7); }
 
+uint64_t monotonic_us() {
+    timespec ts{};
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000u +
+           static_cast<uint64_t>(ts.tv_nsec) / 1000u;
+}
+
 // ---- native-endian header field access (offsets from frame_shm_format.h) ----
 // Config words (line 0) are plain reads/writes; index words (lines 1/2) go
 // through __atomic_* with the memory order the SPSC protocol requires.
@@ -111,6 +118,8 @@ R FrameShmRing::create(const std::string& name, uint32_t slots,
         ::shm_unlink(shm_name.c_str());
         return R::fail("frame_shm create: ftruncate: " + e);
     }
+    struct stat backing{};
+    const bool have_backing = ::fstat(fd, &backing) == 0;
     void* p = ::mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     ::close(fd);  // the mapping keeps the object alive
     if (p == MAP_FAILED) {
@@ -126,6 +135,10 @@ R FrameShmRing::create(const std::string& name, uint32_t slots,
     ring->slot_stride_ = stride;
     ring->name_ = shm_name;
     ring->is_owner_ = true;
+    if (have_backing) {
+        ring->backing_dev_ = static_cast<uint64_t>(backing.st_dev);
+        ring->backing_ino_ = static_cast<uint64_t>(backing.st_ino);
+    }
 
     uint8_t* b = ring->map_;
     std::memset(b, 0, total);  // zeroes write_idx / read_idx / futex_seq / waiting
@@ -142,6 +155,9 @@ R FrameShmRing::create(const std::string& name, uint32_t slots,
     // Publish config last: a release store on init_complete makes every prior
     // header write visible to a consumer that acquire-loads it.
     atomic_store_u32(b, kFrHdrInitComplete, 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(reinterpret_cast<uint32_t*>(b + kFrHdrFutexSeq), 1,
+                       __ATOMIC_SEQ_CST);
+    futex_wake(reinterpret_cast<uint32_t*>(b + kFrHdrFutexSeq), INT32_MAX);
     return R::ok(std::move(ring));
 }
 
@@ -308,6 +324,7 @@ bool FrameShmRing::write_frame(const uint8_t* data, size_t len) {
         futex_wake(reinterpret_cast<uint32_t*>(b + kFrHdrFutexSeq), 1);
     }
     ++stats_.writes;
+    note_frame(len);
     return true;
 }
 
@@ -341,7 +358,48 @@ long FrameShmRing::read_frame(uint8_t* buf, size_t cap) {
     }
     atomic_store_u64(b, kFrHdrReadIdx, r + 1, __ATOMIC_RELEASE);
     ++stats_.reads;
+    note_frame(len);
     return static_cast<long>(len);
+}
+
+void FrameShmRing::note_frame(size_t len) {
+    const uint32_t size = static_cast<uint32_t>(len);
+    stats_.frame_bytes += len;
+    stats_.frame_size_last = size;
+    if (stats_.frame_size_min == 0 || size < stats_.frame_size_min) {
+        stats_.frame_size_min = size;
+    }
+    if (size > stats_.frame_size_max) {
+        stats_.frame_size_max = size;
+    }
+
+    const uint64_t now = monotonic_us();
+    if (last_frame_us_ != 0) {
+        const uint64_t interval = now - last_frame_us_;
+        stats_.frame_interval_us = interval;
+        if (previous_interval_us_ != 0) {
+            const uint64_t variation = interval > previous_interval_us_
+                                           ? interval - previous_interval_us_
+                                           : previous_interval_us_ - interval;
+            // Fixed-point J*16 form of J += (variation - J) / 16.
+            const uint64_t current = (jitter_q4_us_ + 8u) >> 4u;
+            if (variation >= current) {
+                jitter_q4_us_ += variation - current;
+            } else {
+                jitter_q4_us_ -= current - variation;
+            }
+            stats_.frame_jitter_us = (jitter_q4_us_ + 8u) >> 4u;
+        }
+        previous_interval_us_ = interval;
+    }
+    last_frame_us_ = now;
+}
+
+void FrameShmRing::reset_stats() {
+    stats_ = {};
+    last_frame_us_ = 0;
+    previous_interval_us_ = 0;
+    jitter_q4_us_ = 0;
 }
 
 // ---- eventfd drain --------------------------------------------------------
@@ -381,7 +439,20 @@ FrameShmRing::~FrameShmRing() {
         map_ = nullptr;
     }
     if (is_owner_ && !name_.empty()) {
-        ::shm_unlink(name_.c_str());
+        // A newer producer may already have unlinked/recreated this name.
+        // Never let teardown of our orphaned mapping unlink its replacement.
+        const int fd = ::shm_open(name_.c_str(), O_RDWR, 0);
+        struct stat st{};
+        const bool still_ours =
+            fd >= 0 && ::fstat(fd, &st) == 0 &&
+            static_cast<uint64_t>(st.st_dev) == backing_dev_ &&
+            static_cast<uint64_t>(st.st_ino) == backing_ino_;
+        if (fd >= 0) {
+            ::close(fd);
+        }
+        if (still_ours) {
+            ::shm_unlink(name_.c_str());
+        }
     }
 }
 

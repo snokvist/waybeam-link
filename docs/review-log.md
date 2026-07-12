@@ -452,6 +452,67 @@ without changing point-to-point UDP-air behavior:
 **Amended:** §15.3 (`filtered` adapter field); §16.3 (backend config and receive
 semantics). Code follows in a separate commit.
 
+## Pass 20 — JSCC architecture review + live Ethernet harness (2026-07-12)
+
+Reviewed `docs/waybeam-jscc-controller.md` against the implemented frame-SHM,
+FEC, ARQ, deadline, stats, and venc-control paths. This pass makes no protocol
+ruling and does not amend `PROTOCOL.md`; it separates existing mechanisms from
+controller-roadmap requirements in `docs/jscc-controller-review.md`.
+
+Corrections/findings: the implemented Cauchy cap is `k+r<=256`, source and
+repair symbols already carry `k`, current deadlines are relative to first RX
+observation rather than absolute display slots, and there is no per-frame
+encoder QP/size actuator (the separate `GET /request/idr` actuator is available).
+The live encoder produced about 90 fps despite a configured 144 fps; the first
+passive GDR baseline contained no IDR markers (a later run naturally contained
+one, and the explicit `GET /request/idr` actuator is available).
+
+Added a repeatable SSC338Q-to-x86 Ethernet bench using the encoder-owned
+`venc_frame` ring, two UDP diversity observations, frame reassembly/FEC, an x86
+egress ring, and real GStreamer H.265 decode. The runner persistently deploys
+the cross-build and craft config, restores the encoder config after each run,
+and records per-frame CSV plus link stats. Initial 300-frame baseline passed at zero loss;
+with 10% independent loss per path, post-diversity loss measured 1.0%, 16 frames
+were FEC-recovered, and none were unrecoverable.
+
+## Pass 21 — frame-SHM size/cadence observability (2026-07-12)
+
+Live JSCC bench review found that frame byte size and arrival cadence existed
+only in the finite consumer trace, while TX-side frame-SHM activity was not
+visible in streaming stats. The common measurement boundary is the local SHM
+ring: successful consumer reads on TX ingress and successful producer writes on
+RX egress. Stream stats add cumulative count/bytes, last/min/max frame size,
+latest inter-frame interval, and a 1/16 EWMA of interval variation. Failed ring
+operations stay in their existing full/oversize/bad-slot counters.
+
+The monitor review also found that its long-lived bridge retained superseded
+sessions indefinitely, report age was graphed on the delivery scale without
+explaining its expected sawtooth, and TX streams displayed RX-only reassembly
+outcomes. Those are presentation/retention defects, not wire behavior.
+
+**Amended:** §15.3 (additive frame boundary telemetry and ingress/egress
+mapping). Code follows in separate commits.
+
+## Pass 22 — explicit decoder-generation recovery (2026-07-12)
+
+Live VFRM inspection showed that a fresh Radeon decoder could continuously drain
+the current ring yet never display after a pipeline disconnect/reconnect. Across
+roughly 800 post-reset access units the stream carried trailing slices and
+periodic VPS/SPS/PPS, but no NAL type 16–23 random-access picture and no IDR
+metadata flag. Restarting the Ethernet bench restarted venc and happened to
+bootstrap the decoder, proving that ring consumption is not decoder readiness.
+
+VFRM v1 intentionally has no consumer-generation signal, and Radeon keeps
+draining while its local display pipeline is disabled. The SHM producer
+therefore cannot infer a decoder reset from `read_idx`, inode, epoch, or futex
+state. Periodic IDRs would undermine the GDR frame-size invariant. The protocol
+adds an explicit, best-effort RECOVERY_REQUEST return and a ground-local REST
+trigger; the matched TX rate-limits requests and calls venc's existing IDR
+actuator once. Steady-state GDR remains unchanged.
+
+**Amended:** §3.1/§3.9 (RECOVERY_REQUEST) and §15.5
+(`POST /api/v1/video/recover`). Code follows in a separate commit.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

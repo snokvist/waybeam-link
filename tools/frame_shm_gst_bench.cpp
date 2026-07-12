@@ -132,7 +132,7 @@ int produce(const std::string& ring_name, uint32_t bitrate_kbps,
 }
 
 int consume(const std::string& ring_name, uint32_t expected_frames,
-            uint32_t timeout_ms) {
+            uint32_t timeout_ms, const char* trace_path = nullptr) {
     auto ring = attach_retry(ring_name, timeout_ms);
     if (!ring) {
         std::fprintf(stderr, "consumer: ring %s did not appear\n", ring_name.c_str());
@@ -157,6 +157,15 @@ int consume(const std::string& ring_name, uint32_t expected_frames,
     uint64_t bad_annexb = 0;
     uint64_t pts_regress = 0;
     uint32_t last_pts = 0;
+    std::FILE* trace = nullptr;
+    if (trace_path != nullptr) {
+        trace = std::fopen(trace_path, "w");
+        if (!trace) {
+            std::perror("consumer trace");
+            return 1;
+        }
+        std::fprintf(trace, "frame,arrival_ns,pts,bytes,idr\n");
+    }
     const auto end = std::chrono::steady_clock::now() +
                      std::chrono::milliseconds(timeout_ms);
     while (frames < expected_frames && std::chrono::steady_clock::now() < end) {
@@ -181,6 +190,15 @@ int consume(const std::string& ring_name, uint32_t expected_frames,
                            : 0u;
         last_pts = meta.pts;
         idrs += (meta.flags & kFrameFlagIdr) != 0 ? 1u : 0u;
+        if (trace) {
+            const auto arrival_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count();
+            std::fprintf(trace, "%llu,%lld,%u,%zu,%u\n",
+                         static_cast<unsigned long long>(frames),
+                         static_cast<long long>(arrival_ns), meta.pts, len,
+                         (meta.flags & kFrameFlagIdr) != 0 ? 1u : 0u);
+        }
         GstBuffer* b = gst_buffer_new_allocate(nullptr, len, nullptr);
         gst_buffer_fill(b, 0, data, len);
         GST_BUFFER_PTS(b) = static_cast<GstClockTime>(meta.pts) * GST_MSECOND;
@@ -209,6 +227,7 @@ int consume(const std::string& ring_name, uint32_t expected_frames,
     gst_element_set_state(pipeline, GST_STATE_NULL);
     gst_object_unref(src);
     gst_object_unref(pipeline);
+    if (trace) std::fclose(trace);
     std::printf("consumer frames=%llu idr=%llu bad_meta=%llu bad_annexb=%llu "
                 "pts_regress=%llu decode=%s\n",
                 static_cast<unsigned long long>(frames),
@@ -217,8 +236,8 @@ int consume(const std::string& ring_name, uint32_t expected_frames,
                 static_cast<unsigned long long>(bad_annexb),
                 static_cast<unsigned long long>(pts_regress),
                 decode_ok ? "ok" : "fail");
-    return frames == expected_frames && idrs > 0 && bad_meta == 0 &&
-                   bad_annexb == 0 && pts_regress == 0 && decode_ok
+    return frames == expected_frames && bad_meta == 0 && bad_annexb == 0 &&
+                   pts_regress == 0 && decode_ok
                ? 0
                : 2;
 }
@@ -230,8 +249,9 @@ int main(int argc, char** argv) {
     if (argc < 5) {
         std::fprintf(stderr,
                      "usage: %s produce RING BITRATE_KBPS FRAMES\n"
-                     "       %s consume RING FRAMES TIMEOUT_MS\n",
-                     argv[0], argv[0]);
+                     "       %s consume RING FRAMES TIMEOUT_MS\n"
+                     "       %s consume-trace RING FRAMES TIMEOUT_MS TRACE.csv\n",
+                     argv[0], argv[0], argv[0]);
         return 1;
     }
     const std::string mode = argv[1];
@@ -240,6 +260,9 @@ int main(int argc, char** argv) {
     const uint32_t b = static_cast<uint32_t>(std::stoul(argv[4]));
     if (mode == "produce") return produce(ring, a, b);
     if (mode == "consume") return consume(ring, a, b);
+    if (mode == "consume-trace" && argc == 6) {
+        return consume(ring, a, b, argv[5]);
+    }
     std::fprintf(stderr, "unknown mode: %s\n", mode.c_str());
     return 1;
 }

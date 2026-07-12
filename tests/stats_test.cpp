@@ -46,6 +46,13 @@ StatsSnapshot sample_snapshot() {
     st.loss_postdiv_prearq_milli = 6;
     st.recovered_arq = 220;
     st.recovered_fec = 0;
+    st.frame_count = 89571;
+    st.frame_bytes = 5872391040;
+    st.frame_size_last = 65432;
+    st.frame_size_min = 8120;
+    st.frame_size_max = 241810;
+    st.frame_interval_us = 11106;
+    st.frame_jitter_us = 184;
     st.frames_fast = 89571;
     st.frames_unrecoverable = 0;
     st.malformed = 0;
@@ -90,7 +97,11 @@ const char* kGolden =
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
     "\"loss_prediversity_milli\":41,"
     "\"loss_postdiv_prearq_milli\":6,\"recovered_arq\":220,"
-    "\"recovered_fec\":0,\"frames_fast\":89571,\"frames_unrecoverable\":0,"
+    "\"recovered_fec\":0,\"frame_count\":89571,"
+    "\"frame_bytes\":5872391040,\"frame_size_last\":65432,"
+    "\"frame_size_min\":8120,\"frame_size_max\":241810,"
+    "\"frame_interval_us\":11106,\"frame_jitter_us\":184,"
+    "\"frames_fast\":89571,\"frames_unrecoverable\":0,"
     "\"malformed\":0,\"shm_full_drops\":0,\"shm_oversize_drops\":0,"
     "\"shm_bad_slots\":0,\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"

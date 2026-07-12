@@ -82,6 +82,7 @@ int main() {
     int fec_sid = -1, fec_i = -1, fec_p = -1, fec_k = -1;
     bool fec_ok = true;
     int reset_calls = 0;
+    int recovery_stream = -2;
 
     auto srv = ControlServer::create("127.0.0.1:0");
     CHECK(static_cast<bool>(srv));
@@ -113,6 +114,10 @@ int main() {
         return fec_ok ? "" : "no frame-shm stream with that id";
     };
     h.reset_stats = [&] { ++reset_calls; };
+    h.video_recover = [&](int stream_id) -> std::string {
+        recovery_stream = stream_id;
+        return stream_id < 0 ? "no matching latched RTP stream" : "";
+    };
     // h.csa intentionally left null → endpoint must 409.
     s.set_handlers(std::move(h));
 
@@ -219,6 +224,22 @@ int main() {
             "POST /api/v1/csa HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 409);
+    }
+    // video recovery stream selection and handler error propagation.
+    {
+        const std::string body = "{\"stream_id\":7}";
+        const std::string req =
+            "POST /api/v1/video/recover HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(recovery_stream, 7);
+    }
+    {
+        const std::string req =
+            "POST /api/v1/video/recover HTTP/1.0\r\n"
+            "Content-Length: 2\r\n\r\n{}";
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+        CHECK_EQ_U(recovery_stream, static_cast<uint64_t>(-1));
     }
     // malformed JSON → 400.
     {

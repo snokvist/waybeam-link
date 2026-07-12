@@ -635,6 +635,7 @@ struct TxCore {
     // two optionals is engaged per the ingress binding kind.
     struct Stream {
         uint8_t stream_id;
+        uint8_t stream_type;
         std::optional<Framer> framer;             // udp ingress
         std::optional<FrameFramer> frame_framer;  // frame-shm ingress
         ResendRing ring;
@@ -674,7 +675,8 @@ struct TxCore {
             RingConfig rc;
             rc.window_ms = cfg.policy.arq.ring_window_ms;
             rc.byte_budget = cfg.policy.arq.ring_byte_budget;
-            Stream st{s.stream_id, std::nullopt, std::nullopt, ResendRing(rc),
+            Stream st{s.stream_id, s.stream_type, std::nullopt, std::nullopt,
+                      ResendRing(rc),
                       ResendScheduler(scheduler_policy(cfg), table)};
             if (s.bind.kind == BindKind::kFrameShm) {
                 // §5.1a: whole-frame ingress from a venc SHM ring. FEC policy
@@ -783,6 +785,24 @@ struct TxCore {
             }
             ++reports_received_;
             selector_.on_report(*r, now);
+            return;
+        }
+        if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
+            if (r->target_originator != originator_ ||
+                r->target_session != session_) {
+                return;
+            }
+            for (const Stream& s : streams_) {
+                if (s.stream_id == r->target_stream_id &&
+                    s.stream_type == stream_type::kRtp) {
+                    const bool ok = venc_.request_idr(now);
+                    std::fprintf(stderr,
+                                 "venc: decoder recovery stream=%u requester=%u %s\n",
+                                 r->target_stream_id, r->prefix.originator,
+                                 ok ? "accepted" : "failed");
+                    return;
+                }
+            }
         }
     }
 
@@ -906,7 +926,7 @@ struct TxCore {
             } else if (s.frame_framer) {
                 st.seq = s.frame_framer->next_seq();
                 st.delivered = s.frame_framer->stats().frames;
-                st.decode_errors = s.frame_framer->stats().malformed_frame;
+                st.malformed = s.frame_framer->stats().malformed_frame;
             }
             st.resends_sent = s.sched.counters().resends_sent;
             st.double_send_suppressed =
@@ -1078,6 +1098,35 @@ struct RxCore {
     // so the caller resets those; here we zero the RX engine's counters.
     void reset_stats() { engine_.reset_stats(); }
 
+    std::string request_recovery(int local_stream_id, const Inject& inject) {
+        std::optional<RxStreamInfo> selected;
+        for (const RxStreamInfo& info : engine_.streams()) {
+            if (info.stream_type != stream_type::kRtp ||
+                (local_stream_id >= 0 &&
+                 info.local_stream_id != static_cast<uint8_t>(local_stream_id))) {
+                continue;
+            }
+            if (selected && local_stream_id < 0) {
+                return "stream_id required when multiple RTP streams are latched";
+            }
+            selected = info;
+        }
+        if (!selected) {
+            return "no matching latched RTP stream";
+        }
+        RecoveryRequest req;
+        req.prefix = {originator_, selected->key.originator, session_};
+        req.target_originator = selected->key.originator;
+        req.target_session = selected->key.session_id;
+        req.target_stream_id = selected->key.stream_id;
+        uint8_t frame[kRecoveryRequestSize];
+        if (encode_recovery_request(req, frame, sizeof(frame)) != sizeof(frame)) {
+            return "failed to encode recovery request";
+        }
+        inject(frame, sizeof(frame), req.target_originator);
+        return "";
+    }
+
     std::vector<StreamKey> stream_keys() const {
         std::vector<StreamKey> out;
         for (const RxStreamInfo& info : engine_.streams()) {
@@ -1196,6 +1245,13 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
         for (const auto& [sid, ss] : *shm_stats) {
             for (StreamStats& st : snap.streams) {
                 if (st.stream_id == sid) {
+                    st.frame_count = ss.reads + ss.writes;
+                    st.frame_bytes = ss.frame_bytes;
+                    st.frame_size_last = ss.frame_size_last;
+                    st.frame_size_min = ss.frame_size_min;
+                    st.frame_size_max = ss.frame_size_max;
+                    st.frame_interval_us = ss.frame_interval_us;
+                    st.frame_jitter_us = ss.frame_jitter_us;
                     st.shm_full_drops = ss.full_drops;
                     st.shm_oversize_drops = ss.oversize_drops;
                     st.shm_bad_slots = ss.bad_slots;
@@ -1718,6 +1774,9 @@ int run_rx(const Loaded& l) {
                 return "";
             }
             return "rejected (active campaign, PSK, allowlist, or rate-limit)";
+        };
+        h.video_recover = [&](int stream_id) {
+            return rx.request_recovery(stream_id, inject_nack);
         };
         h.reset_stats = [&] {
             rx.reset_stats();

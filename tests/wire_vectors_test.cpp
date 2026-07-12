@@ -240,6 +240,33 @@ int main() {
         }
     }
 
+    // ---- RECOVERY_REQUEST (§3.9): fixed 18 B ------------------------------
+    {
+        RecoveryRequest r;
+        r.prefix = {0x0009, 0x0011, 0xAABBCCDD};
+        r.target_originator = 0x0011;
+        r.target_session = 0x01020304;
+        r.target_stream_id = 0x07;
+        const uint8_t want[] = {
+            0x57, 0x42, 0x06,        // magic, version, type
+            0x00, 0x09,              // requester
+            0x00, 0x11,              // destination
+            0xAA, 0xBB, 0xCC, 0xDD,  // requester session
+            0x00, 0x11,              // target originator
+            0x01, 0x02, 0x03, 0x04,  // target session
+            0x07,                    // target stream
+        };
+        CHECK_EQ_U(sizeof(want), kRecoveryRequestSize);
+        CHECK_EQ_U(encode_recovery_request(r, buf, sizeof(buf)), sizeof(want));
+        check_bytes(buf, want, sizeof(want));
+        const Decoded d = decode(want, sizeof(want));
+        if (const RecoveryRequest* v = expect<RecoveryRequest>(d)) {
+            CHECK(*v == r);
+        }
+        CHECK(std::holds_alternative<DecodeError>(
+            decode(want, sizeof(want) - 1)));
+    }
+
     // ---- error paths -------------------------------------------------------
     {
         // Wrong magic.

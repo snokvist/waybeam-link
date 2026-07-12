@@ -364,6 +364,10 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         h_.reset_stats();
         return done("");
     }
+    if (path == "/api/v1/video/recover") {
+        if (!h_.video_recover) return na();
+        return done(h_.video_recover(j.value("stream_id", -1)));
+    }
     return reply(404, "Not Found", json_err("unknown path"));
 }
 

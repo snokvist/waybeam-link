@@ -38,6 +38,7 @@ struct ControlHandlers {
                               int min_k)>
         fec;
     std::function<void()> reset_stats;  // side-effect only; always 200
+    std::function<std::string(int stream_id)> video_recover;
 };
 
 class ControlServer {

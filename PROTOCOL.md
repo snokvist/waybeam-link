@@ -222,7 +222,7 @@ consequences:
 | 7 | 4 | `session_id` | sender boot nonce |
 
 **Packet types** (low nibble): `0x1 DATA · 0x2 NACK · 0x3 LINK_REPORT ·
-0x4 HEARTBEAT · 0x5 CSA`. 5 of 16 used; the version nibble will not ship 16
+0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST`. 6 of 16 used; the version nibble will not ship 16
 wire-incompatible revisions, so there is no type-budget scarcity. Future types
 (e.g. a dedicated FEC-repair type, §14) take free slots.
 
@@ -406,6 +406,29 @@ discovered by. It carries no stream fields — HEARTBEAT never creates or refres
 LINK_REPORT, CSA, or HEARTBEAT resets the one-second quiet interval, so active
 traffic suppresses redundant keepalives. HEARTBEAT uses the node's current
 `originator` and per-boot `session_id`, with broadcast destination `0`.
+
+### 3.9 RECOVERY_REQUEST packet (type `0x6`) — 18 bytes
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | sender = RX node requesting decoder bootstrap |
+| 11 | 2 | `target_originator` | TX node whose encoder owns the stream |
+| 13 | 4 | `target_session` | exact current TX boot/session nonce |
+| 17 | 1 | `target_stream_id` | RTP stream requiring a random-access picture |
+
+An RX emits this return when a local decoder is newly attached or reset while
+the encoded stream remains live. A GDR stream can carry VPS/SPS/PPS indefinitely
+without an IRAP picture, so parameter sets alone do not guarantee that a fresh
+decoder can display. The matching TX requests one IDR/CRA from its encoder and
+otherwise leaves the steady-state GDR policy unchanged.
+
+The TX accepts a request only when `target_originator` and `target_session`
+match itself and `target_stream_id` names a configured RTP ingress. Requests
+are rate-limited to one encoder actuation per second; duplicates and forged
+floods inside that window are harmless. The packet is best-effort and may be
+repeated by the local controller after one second if decoder output has not
+resumed. It uses the same designated return adapter and quiet-gap scheduling as
+NACK and LINK_REPORT. This is recovery signalling, not a periodic-IDR policy.
 
 ---
 
@@ -1326,6 +1349,10 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
     "loss_prediversity_milli": 41, "loss_postdiv_prearq_milli": 6,
     "recovered_arq": 220, "recovered_fec": 0,
+    "frame_count": 89571, "frame_bytes": 5872391040,
+    "frame_size_last": 65432, "frame_size_min": 8120,
+    "frame_size_max": 241810, "frame_interval_us": 11106,
+    "frame_jitter_us": 184,
     "frames_fast": 89571, "frames_unrecoverable": 0, "malformed": 0,
     "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
@@ -1352,6 +1379,19 @@ the radio backend).
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.
 
+On a **`frame-shm` binding**, `frame_count` and `frame_bytes` count successful
+whole-frame transfers at the local SHM boundary: consumer `read_frame()` on TX
+ingress, producer `write_frame()` on RX egress. `frame_size_last`,
+`frame_size_min`, and `frame_size_max` are the successful slot payload sizes in
+bytes since start/reset (`frame_size_min` is 0 before the first frame).
+`frame_interval_us` is the monotonic-host-time gap between the two most recent
+successful transfers. `frame_jitter_us` is an integer EWMA of the absolute
+change between consecutive intervals, updated as `J += (|D| - J) / 16`; both
+timing fields are 0 until enough frames have arrived. These fields are 0 on UDP
+bindings. They measure local frame-boundary cadence, not RTP packet jitter and
+not encoder PTS cadence. Stats reset clears the counters, extrema, and timing
+history together.
+
 On a **`frame-shm` egress** stream (§6.3a) the per-frame reassembler counters
 map onto these fields directly: `recovered_fec` = frames rebuilt from repair
 symbols, `frames_fast` = frames delivered all-source with no decode,
@@ -1360,6 +1400,8 @@ symbols, `frames_fast` = frames delivered all-source with no decode,
 before decode, and `dropped_superseded`/`dropped_deadline` = frames dropped by
 supersession / past their deadline. On a UDP (RTP/telemetry) stream the
 per-frame fields (`frames_fast`, `frames_unrecoverable`, `malformed`) stay 0.
+On frame-SHM ingress, `malformed` counts whole frames rejected by FrameFramer;
+RX-only reassembly outcome fields remain 0.
 
 `shm_full_drops`, `shm_oversize_drops`, and `shm_bad_slots` expose local ring
 backpressure/ABI failures separately from air/frame-reassembly loss. They are 0
@@ -1449,6 +1491,7 @@ otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3 }` | retune a `frame-shm` stream's §14.1 FEC rates (TX node) |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
+| `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and
 `fec` on the TX. An endpoint invoked in a mode where it does not apply returns

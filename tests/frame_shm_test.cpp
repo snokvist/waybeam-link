@@ -93,6 +93,10 @@ int main() {
                 CHECK(p.write_frame(frames[i].data(), frames[i].size()));
             }
             CHECK_EQ_U(p.stats().writes, n);
+            CHECK_EQ_U(p.stats().frame_bytes, 201979);
+            CHECK_EQ_U(p.stats().frame_size_last, 4096);
+            CHECK_EQ_U(p.stats().frame_size_min, 1);
+            CHECK_EQ_U(p.stats().frame_size_max, slot_size);
 
             std::vector<uint8_t> buf(slot_size);
             for (size_t i = 0; i < n; ++i) {
@@ -103,6 +107,16 @@ int main() {
             }
             CHECK_EQ_U(c.read_frame(buf.data(), buf.size()), 0);  // now empty
             CHECK_EQ_U(c.stats().reads, n);
+            CHECK_EQ_U(c.stats().frame_bytes, p.stats().frame_bytes);
+            CHECK_EQ_U(c.stats().frame_size_last, 4096);
+            CHECK_EQ_U(c.stats().frame_size_min, 1);
+            CHECK_EQ_U(c.stats().frame_size_max, slot_size);
+            c.reset_stats();
+            CHECK_EQ_U(c.stats().reads, 0);
+            CHECK_EQ_U(c.stats().frame_bytes, 0);
+            CHECK_EQ_U(c.stats().frame_size_min, 0);
+            CHECK_EQ_U(c.stats().frame_interval_us, 0);
+            CHECK_EQ_U(c.stats().frame_jitter_us, 0);
         }
     }
 
@@ -192,6 +206,20 @@ int main() {
     }
     // Rings out of scope here: destructors join the reader thread + unlink.
     // Reaching wbtest_finish without hanging proves clean teardown.
+
+    // Destroying an orphaned old producer must not unlink a newer generation
+    // that has already recreated the same public name.
+    {
+        const std::string replacement_name =
+            "wblink-frame-shm-replace-" + std::to_string(::getpid());
+        auto old = FrameShmRing::create(replacement_name, 2, 128);
+        CHECK(static_cast<bool>(old));
+        auto replacement = FrameShmRing::create(replacement_name, 2, 128);
+        CHECK(static_cast<bool>(replacement));
+        old.value->reset();
+        auto consumer = FrameShmRing::attach(replacement_name);
+        CHECK(static_cast<bool>(consumer));
+    }
 
     return wbtest_finish("frame_shm_test");
 }

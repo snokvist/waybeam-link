@@ -80,4 +80,20 @@ bool VencActuator::set_bitrate(uint32_t kbps, uint64_t now_ms) {
     return ok;
 }
 
+bool VencActuator::request_idr(uint64_t now_ms) {
+    if (!cfg_.enabled) {
+        return false;
+    }
+    if (now_ms < next_idr_ms_) {
+        return true;
+    }
+    next_idr_ms_ = now_ms + 1000;
+    ++idr_requests_;
+    if (http_get("/request/idr")) {
+        return true;
+    }
+    ++idr_failures_;
+    return false;
+}
+
 }  // namespace wblink

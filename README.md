@@ -165,6 +165,13 @@ staleness dots. The bridge never touches the binaries; it only consumes the
 stats push (`GET /api/instances` for a JSON snapshot, `GET /api/stream` for the
 SSE feed).
 
+The dashboard separates those groups into tabs and keeps five minutes of
+browser-side trend history. Hover an underlined label for its precise meaning.
+Frame-SHM streams report successful local frame transfers, cumulative bytes,
+last/min/max frame size, latest arrival interval, and smoothed arrival jitter.
+The finite bench additionally writes its per-frame trace and summary to
+`frames.csv` and `summary.json`.
+
 ## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
 
 The low-latency video path. The encoder (`waybeam_venc`) publishes whole encoded
@@ -299,6 +306,50 @@ pts_regress=0) at ~90 fps, `decode_errors=0`. Also proven over the udp-air sim
 (same, at full bitrate) and the in-process `frame_shm_loopback_test` (FEC recovery
 byte-exact).
 
+For a repeatable live-encoder Ethernet run, use
+`tools/jscc_ethernet_bench.sh`. It temporarily switches the craft encoder to
+frame-SHM, simulates two ground diversity observations over UDP, validates the
+reconstructed stream with GStreamer, records per-frame size/arrival data, and
+restores the craft configuration on exit. See `docs/jscc-controller-review.md`.
+
+```sh
+cmake --build --preset release -j
+cmake --build --preset ssc338q -j
+tools/jscc_ethernet_bench.sh start
+```
+
+The detached bench keeps running after the command returns. View both nodes at
+`http://192.168.2.242:8099/`; inspect it with
+`tools/jscc_ethernet_bench.sh status`, and stop both endpoints plus restore the
+encoder with `tools/jscc_ethernet_bench.sh stop`. For a foreground finite
+recorded run, use `FRAMES=1440 tools/jscc_ethernet_bench.sh finite`.
+
+Continuous `start` defaults to leaving the ground egress ring for an external
+decoder such as Radeon-VRX:
+
+```sh
+tools/jscc_ethernet_bench.sh stop
+tools/jscc_ethernet_bench.sh start
+tools/jscc_ethernet_bench.sh status
+# After Radeon-VRX creates/recreates its decoder pipeline:
+tools/jscc_ethernet_bench.sh recover-video
+```
+
+The stable application SHM name is `venc_frame_out` (POSIX object
+`/venc_frame_out`). `status` prints the active name and consumer mode. To run
+the built-in continuous validator instead, stop any external decoder and use
+`BENCH_CONSUMER=gst tools/jscc_ethernet_bench.sh start`. The harness rejects a
+detected second consumer because the venc frame ring is strictly
+single-consumer. Foreground `finite` runs always use the GStreamer trace
+consumer.
+
+`recover-video` sends a receiver-to-transmitter recovery request for the
+latched RTP stream. The vehicle then requests one IDR from venc; steady-state
+GDR remains unchanged. Invoke it only after the replacement decoder pipeline is
+PLAYING and accepting SHM buffers. VFRM v1 has no consumer-generation field, so
+waybeam-link cannot infer a Radeon-only disconnect/reconnect from the ring while
+Radeon continues advancing `read_idx`.
+
 ## REST control plane (PROTOCOL.md §15.5)
 
 Every mode (`tx` / `rx` / `loopback`) exposes an optional HTTP/1.0 control
@@ -320,6 +371,7 @@ HEARTBEAT-derived nodes plus DATA-derived stream candidates/latches). **Write**
 | `POST /api/v1/csa` | `{"mhz":5805,"class":0}` | rx / ground (replaces the old stdin trigger) |
 | `POST /api/v1/link/profile` | `{"min":3,"max":3}` | tx (`min==max` pins the MCS+bitrate operating point; `{"max":255}` unpins) |
 | `POST /api/v1/fec` | `{"stream_id":0,"i_permille":250,"p_permille":100,"min_k":3}` | tx (frame-shm streams) |
+| `POST /api/v1/video/recover` | `{"stream_id":0}` (optional with one latch) | rx / ground; request one decoder-bootstrap IDR from the matched TX |
 | `POST /api/v1/stats/reset` | `{}` | any (fresh measurement window) |
 
 A write that doesn't apply to the running mode returns `409`; a malformed body
