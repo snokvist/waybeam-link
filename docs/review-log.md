@@ -493,6 +493,26 @@ outcomes. Those are presentation/retention defects, not wire behavior.
 **Amended:** §15.3 (additive frame boundary telemetry and ingress/egress
 mapping). Code follows in separate commits.
 
+## Pass 22 — explicit decoder-generation recovery (2026-07-12)
+
+Live VFRM inspection showed that a fresh Radeon decoder could continuously drain
+the current ring yet never display after a pipeline disconnect/reconnect. Across
+roughly 800 post-reset access units the stream carried trailing slices and
+periodic VPS/SPS/PPS, but no NAL type 16–23 random-access picture and no IDR
+metadata flag. Restarting the Ethernet bench restarted venc and happened to
+bootstrap the decoder, proving that ring consumption is not decoder readiness.
+
+VFRM v1 intentionally has no consumer-generation signal, and Radeon keeps
+draining while its local display pipeline is disabled. The SHM producer
+therefore cannot infer a decoder reset from `read_idx`, inode, epoch, or futex
+state. Periodic IDRs would undermine the GDR frame-size invariant. The protocol
+adds an explicit, best-effort RECOVERY_REQUEST return and a ground-local REST
+trigger; the matched TX rate-limits requests and calls venc's existing IDR
+actuator once. Steady-state GDR remains unchanged.
+
+**Amended:** §3.1/§3.9 (RECOVERY_REQUEST) and §15.5
+(`POST /api/v1/video/recover`). Code follows in a separate commit.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
