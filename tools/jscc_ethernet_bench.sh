@@ -22,6 +22,10 @@ REMOTE_ERR=/tmp/waybeam-link-jscc-ethernet.err
 REMOTE_PID=/tmp/waybeam-link-jscc-ethernet.pid
 REMOTE_BACKUP=/tmp/waybeam-jscc-ethernet.json.backup
 OUT_RING="wblink_jscc_out_${$}"
+STATE_DIR=${STATE_DIR:-/tmp/waybeam-jscc-ethernet}
+SUPERVISOR_PID="$STATE_DIR/supervisor.pid"
+SUPERVISOR_LOG="$STATE_DIR/supervisor.log"
+SYSTEMD_UNIT=waybeam-jscc-ethernet.service
 GROUND_PID=
 CONSUMER_PID=
 MONITOR_PID=
@@ -44,6 +48,104 @@ remote_get() {
     local source=$1
     local target=$2
     ssh -o BatchMode=yes -o ConnectTimeout=5 "$CRAFT" "cat '$source'" >"$target"
+}
+
+supervisor_running() {
+    if systemctl --user is-active --quiet "$SYSTEMD_UNIT" 2>/dev/null; then
+        return 0
+    fi
+    [[ -s "$SUPERVISOR_PID" ]] && kill -0 "$(cat "$SUPERVISOR_PID")" 2>/dev/null
+}
+
+reconcile_remote() {
+    stop_remote_link
+    remote 'if [ -f /tmp/waybeam-jscc-ethernet.json.backup ]; then
+        cp /tmp/waybeam-jscc-ethernet.json.backup /etc/waybeam.json
+        /etc/init.d/S95waybeam restart
+        rm -f /tmp/waybeam-jscc-ethernet.json.backup
+    fi' || true
+}
+
+start_supervisor() {
+    mkdir -p "$STATE_DIR"
+    if supervisor_running; then
+        status_supervisor
+        return 0
+    fi
+    rm -f "$SUPERVISOR_PID" "$SUPERVISOR_LOG"
+    local pid
+    local script
+    script=$(readlink -f "$0")
+    if systemctl --user show-environment >/dev/null 2>&1; then
+        systemd-run --user --quiet --unit "$SYSTEMD_UNIT" --collect \
+            --property=Type=exec --working-directory="$ROOT" \
+            /bin/bash -c "exec '$script' run >>'$SUPERVISOR_LOG' 2>&1"
+        pid=$(systemctl --user show -p MainPID --value "$SYSTEMD_UNIT")
+    else
+        nohup "$script" run >"$SUPERVISOR_LOG" 2>&1 </dev/null &
+        pid=$!
+        echo "$pid" >"$SUPERVISOR_PID"
+    fi
+    for _ in {1..600}; do
+        if ! supervisor_running; then
+            echo "JSCC Ethernet bench failed to start:" >&2
+            tail -40 "$SUPERVISOR_LOG" >&2 || true
+            rm -f "$SUPERVISOR_PID"
+            return 1
+        fi
+        if grep -q "JSCC Ethernet bench is running" "$SUPERVISOR_LOG" 2>/dev/null; then
+            echo "JSCC Ethernet bench started (pid $pid)"
+            echo "live dashboard: http://$GROUND_IP:8099/"
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "JSCC Ethernet bench startup timed out after 60 seconds; see $SUPERVISOR_LOG" >&2
+    stop_supervisor || true
+    return 1
+}
+
+stop_supervisor() {
+    if ! supervisor_running; then
+        rm -f "$SUPERVISOR_PID"
+        reconcile_remote
+        echo "JSCC Ethernet bench is not running"
+        return 0
+    fi
+    local pid=0
+    if systemctl --user is-active --quiet "$SYSTEMD_UNIT" 2>/dev/null; then
+        systemctl --user stop "$SYSTEMD_UNIT"
+    else
+        pid=$(cat "$SUPERVISOR_PID")
+        kill -TERM "$pid"
+    fi
+    for _ in {1..200}; do
+        if ! supervisor_running; then
+            rm -f "$SUPERVISOR_PID"
+            reconcile_remote
+            echo "JSCC Ethernet bench stopped"
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "JSCC Ethernet bench did not stop cleanly; see $SUPERVISOR_LOG" >&2
+    return 1
+}
+
+status_supervisor() {
+    if supervisor_running; then
+        local pid
+        if systemctl --user is-active --quiet "$SYSTEMD_UNIT" 2>/dev/null; then
+            pid=$(systemctl --user show -p MainPID --value "$SYSTEMD_UNIT")
+        else
+            pid=$(cat "$SUPERVISOR_PID")
+        fi
+        echo "JSCC Ethernet bench running (pid $pid)"
+        echo "live dashboard: http://$GROUND_IP:8099/"
+    else
+        echo "JSCC Ethernet bench stopped"
+        return 1
+    fi
 }
 
 stop_remote_link() {
@@ -84,6 +186,16 @@ on_signal() {
     cleanup
     exit 130
 }
+COMMAND=${1:-start}
+case "$COMMAND" in
+    start) start_supervisor; exit $? ;;
+    stop) stop_supervisor; exit $? ;;
+    status) status_supervisor; exit $? ;;
+    finite) LIVE=0 ;;
+    run) LIVE=1 ;;
+    *) echo "usage: $0 [start|stop|status|run|finite]" >&2; exit 2 ;;
+esac
+
 trap cleanup EXIT
 trap on_signal INT TERM
 
@@ -163,7 +275,7 @@ remote "rm -f $REMOTE_STATS $REMOTE_ERR; setsid $REMOTE_INSTALL tx -c $REMOTE_CF
         >$REMOTE_STATS 2>$REMOTE_ERR </dev/null & echo \$! >$REMOTE_PID"
 
 if [[ "$LIVE" == 1 ]]; then
-    echo "JSCC Ethernet bench is running; press Ctrl-C to stop"
+    echo "JSCC Ethernet bench is running"
     set +e
     wait "$CONSUMER_PID"
     consumer_rc=$?

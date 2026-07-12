@@ -308,12 +308,14 @@ restores the craft configuration on exit. See `docs/jscc-controller-review.md`.
 ```sh
 cmake --build --preset release -j
 cmake --build --preset ssc338q -j
-tools/jscc_ethernet_bench.sh
+tools/jscc_ethernet_bench.sh start
 ```
 
-The bench runs continuously in the foreground; view both nodes at
-`http://192.168.2.242:8099/` and press `Ctrl-C` to stop and restore the encoder.
-For a finite recorded run, use `LIVE=0 FRAMES=1440 tools/jscc_ethernet_bench.sh`.
+The detached bench keeps running after the command returns. View both nodes at
+`http://192.168.2.242:8099/`; inspect it with
+`tools/jscc_ethernet_bench.sh status`, and stop both endpoints plus restore the
+encoder with `tools/jscc_ethernet_bench.sh stop`. For a foreground finite
+recorded run, use `FRAMES=1440 tools/jscc_ethernet_bench.sh finite`.
 
 ## REST control plane (PROTOCOL.md §15.5)
 

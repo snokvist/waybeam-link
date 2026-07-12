@@ -99,9 +99,11 @@ matching profile tables, and Ethernet addresses `192.168.2.201` (craft) and
 ```sh
 cmake --build --preset release -j
 cmake --build --preset ssc338q -j
-tools/jscc_ethernet_bench.sh                    # continuous; Ctrl-C stops
-LIVE=0 FRAMES=1440 tools/jscc_ethernet_bench.sh # finite trace + summary
-LIVE=0 RX_DROP_PERMILLE=100 FRAMES=1440 tools/jscc_ethernet_bench.sh
+tools/jscc_ethernet_bench.sh start              # detached continuous bench
+tools/jscc_ethernet_bench.sh status
+tools/jscc_ethernet_bench.sh stop               # stops and restores venc
+FRAMES=1440 tools/jscc_ethernet_bench.sh finite # foreground trace + summary
+RX_DROP_PERMILLE=100 FRAMES=1440 tools/jscc_ethernet_bench.sh finite
 ```
 
 Pass requires the requested number of valid H.265 frames, successful decode,
