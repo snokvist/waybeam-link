@@ -33,6 +33,13 @@ bool is_pow2(uint32_t v) { return v != 0 && (v & (v - 1)) == 0; }
 
 size_t align8(size_t v) { return (v + 7) & ~static_cast<size_t>(7); }
 
+uint64_t monotonic_us() {
+    timespec ts{};
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000u +
+           static_cast<uint64_t>(ts.tv_nsec) / 1000u;
+}
+
 // ---- native-endian header field access (offsets from frame_shm_format.h) ----
 // Config words (line 0) are plain reads/writes; index words (lines 1/2) go
 // through __atomic_* with the memory order the SPSC protocol requires.
@@ -308,6 +315,7 @@ bool FrameShmRing::write_frame(const uint8_t* data, size_t len) {
         futex_wake(reinterpret_cast<uint32_t*>(b + kFrHdrFutexSeq), 1);
     }
     ++stats_.writes;
+    note_frame(len);
     return true;
 }
 
@@ -341,7 +349,48 @@ long FrameShmRing::read_frame(uint8_t* buf, size_t cap) {
     }
     atomic_store_u64(b, kFrHdrReadIdx, r + 1, __ATOMIC_RELEASE);
     ++stats_.reads;
+    note_frame(len);
     return static_cast<long>(len);
+}
+
+void FrameShmRing::note_frame(size_t len) {
+    const uint32_t size = static_cast<uint32_t>(len);
+    stats_.frame_bytes += len;
+    stats_.frame_size_last = size;
+    if (stats_.frame_size_min == 0 || size < stats_.frame_size_min) {
+        stats_.frame_size_min = size;
+    }
+    if (size > stats_.frame_size_max) {
+        stats_.frame_size_max = size;
+    }
+
+    const uint64_t now = monotonic_us();
+    if (last_frame_us_ != 0) {
+        const uint64_t interval = now - last_frame_us_;
+        stats_.frame_interval_us = interval;
+        if (previous_interval_us_ != 0) {
+            const uint64_t variation = interval > previous_interval_us_
+                                           ? interval - previous_interval_us_
+                                           : previous_interval_us_ - interval;
+            // Fixed-point J*16 form of J += (variation - J) / 16.
+            const uint64_t current = (jitter_q4_us_ + 8u) >> 4u;
+            if (variation >= current) {
+                jitter_q4_us_ += variation - current;
+            } else {
+                jitter_q4_us_ -= current - variation;
+            }
+            stats_.frame_jitter_us = (jitter_q4_us_ + 8u) >> 4u;
+        }
+        previous_interval_us_ = interval;
+    }
+    last_frame_us_ = now;
+}
+
+void FrameShmRing::reset_stats() {
+    stats_ = {};
+    last_frame_us_ = 0;
+    previous_interval_us_ = 0;
+    jitter_q4_us_ = 0;
 }
 
 // ---- eventfd drain --------------------------------------------------------

@@ -66,12 +66,18 @@ class FrameShmRing {
     struct Stats {
         uint64_t writes = 0;
         uint64_t reads = 0;
+        uint64_t frame_bytes = 0;
+        uint32_t frame_size_last = 0;
+        uint32_t frame_size_min = 0;
+        uint32_t frame_size_max = 0;
+        uint64_t frame_interval_us = 0;
+        uint64_t frame_jitter_us = 0;
         uint64_t full_drops = 0;
         uint64_t oversize_drops = 0;
         uint64_t bad_slots = 0;
     };
     const Stats& stats() const { return stats_; }
-    void reset_stats() { stats_ = {}; }
+    void reset_stats();
 
   private:
     FrameShmRing() = default;
@@ -79,6 +85,7 @@ class FrameShmRing {
     // Typed views onto the mapped header (offsets from frame_shm_format.h).
     uint8_t* base() const { return map_; }
     void reader_loop();  // consumer thread body
+    void note_frame(size_t len);
 
     uint8_t* map_ = nullptr;    // mmap base (page-aligned)
     size_t map_size_ = 0;       // total_size == header + slots*stride
@@ -94,6 +101,9 @@ class FrameShmRing {
     std::thread reader_;
     std::atomic<bool> stop_{false};
     Stats stats_;
+    uint64_t last_frame_us_ = 0;
+    uint64_t previous_interval_us_ = 0;
+    uint64_t jitter_q4_us_ = 0;
 };
 
 }  // namespace wblink

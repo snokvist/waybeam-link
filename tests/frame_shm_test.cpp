@@ -93,6 +93,10 @@ int main() {
                 CHECK(p.write_frame(frames[i].data(), frames[i].size()));
             }
             CHECK_EQ_U(p.stats().writes, n);
+            CHECK_EQ_U(p.stats().frame_bytes, 201979);
+            CHECK_EQ_U(p.stats().frame_size_last, 4096);
+            CHECK_EQ_U(p.stats().frame_size_min, 1);
+            CHECK_EQ_U(p.stats().frame_size_max, slot_size);
 
             std::vector<uint8_t> buf(slot_size);
             for (size_t i = 0; i < n; ++i) {
@@ -103,6 +107,16 @@ int main() {
             }
             CHECK_EQ_U(c.read_frame(buf.data(), buf.size()), 0);  // now empty
             CHECK_EQ_U(c.stats().reads, n);
+            CHECK_EQ_U(c.stats().frame_bytes, p.stats().frame_bytes);
+            CHECK_EQ_U(c.stats().frame_size_last, 4096);
+            CHECK_EQ_U(c.stats().frame_size_min, 1);
+            CHECK_EQ_U(c.stats().frame_size_max, slot_size);
+            c.reset_stats();
+            CHECK_EQ_U(c.stats().reads, 0);
+            CHECK_EQ_U(c.stats().frame_bytes, 0);
+            CHECK_EQ_U(c.stats().frame_size_min, 0);
+            CHECK_EQ_U(c.stats().frame_interval_us, 0);
+            CHECK_EQ_U(c.stats().frame_jitter_us, 0);
         }
     }
 

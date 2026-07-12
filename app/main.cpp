@@ -906,7 +906,7 @@ struct TxCore {
             } else if (s.frame_framer) {
                 st.seq = s.frame_framer->next_seq();
                 st.delivered = s.frame_framer->stats().frames;
-                st.decode_errors = s.frame_framer->stats().malformed_frame;
+                st.malformed = s.frame_framer->stats().malformed_frame;
             }
             st.resends_sent = s.sched.counters().resends_sent;
             st.double_send_suppressed =
@@ -1196,6 +1196,13 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
         for (const auto& [sid, ss] : *shm_stats) {
             for (StreamStats& st : snap.streams) {
                 if (st.stream_id == sid) {
+                    st.frame_count = ss.reads + ss.writes;
+                    st.frame_bytes = ss.frame_bytes;
+                    st.frame_size_last = ss.frame_size_last;
+                    st.frame_size_min = ss.frame_size_min;
+                    st.frame_size_max = ss.frame_size_max;
+                    st.frame_interval_us = ss.frame_interval_us;
+                    st.frame_jitter_us = ss.frame_jitter_us;
                     st.shm_full_drops = ss.full_drops;
                     st.shm_oversize_drops = ss.oversize_drops;
                     st.shm_bad_slots = ss.bad_slots;

@@ -56,6 +56,13 @@ struct StreamStats {
     uint32_t loss_postdiv_prearq_milli = 0;
     uint64_t recovered_arq = 0;
     uint64_t recovered_fec = 0;
+    uint64_t frame_count = 0;
+    uint64_t frame_bytes = 0;
+    uint32_t frame_size_last = 0;
+    uint32_t frame_size_min = 0;
+    uint32_t frame_size_max = 0;
+    uint64_t frame_interval_us = 0;
+    uint64_t frame_jitter_us = 0;
     // §6.3a frame-shm reassembler outcomes (0 on udp streams): fast-path
     // (all-source, no decode), finalized-below-k, and pre-decode rejects.
     uint64_t frames_fast = 0;
