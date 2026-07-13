@@ -379,3 +379,40 @@ unexpected P-frame. The current ARQ classification is IDR-only, so it cannot
 serve that role. Any change to frame ARQ classification requires a protocol
 ruling and a fresh Ethernet acceptance matrix. Monitor/Devourer testing remains
 deferred until that gate passes.
+
+### P-frame ARQ Ethernet gate
+
+Pass 35 added an opt-in `PFRAME_ARQ` class which retains the 16 ms P-frame
+deadline. The deterministic two-listener ramp used levels
+0→5→10→15→20→15→10→5→0% per listener, auto/25 Mbit/s/60 fps, a dedicated SHM
+ring, and the in-process GStreamer consumer. Results were:
+
+| P parity | ARQ mode | delivered frames | unrecoverable | FEC recovered | ARQ recovered | P95 RTT |
+|---:|---|---:|---:|---:|---:|---:|
+| 10% | IDR-only | 1,684 | 4 | 450 | 0 | unavailable |
+| 10% | all frames | 1,690 | 0 | 25 | 687 | 3 ms |
+| 0% | all frames | 1,661 | 23 | 0 | 630 | 3 ms |
+| 5% | all frames | 1,689 | 1 | 19 | 678 | 3 ms |
+| 7.5% | all frames | 1,679 | 1 | 22 | 675 | 4 ms |
+
+All rows had zero SHM-full drops. ARQ-only is rejected, and neither 5% nor
+7.5% parity met the zero-loss gate. At 10%, P-frame ARQ covered the first
+unexpected frames that the reactive estimator guard could not protect. It is
+not FEC-first: the in-order RX gap is recovered before later repair symbols
+reach reassembly, so hybrid protection uses ARQ as the primary fast recovery
+and fixed parity as residual safety. In the zero-loss row this cost 9,225
+repair packets plus 719 resends versus 9,530 repairs for the IDR-only baseline;
+the extra protection load was about 0.8% of source-symbol traffic.
+
+Three further 18-second 10%-parity ramps covered 2,892 measured frames with
+zero unrecoverable, superseded, deadline, SHM-full, or oversize drops. Each run
+held P95 NACK RTT at 3 ms and maximum at 5 ms. A sustained 20-second 20%-loss
+window recovered 1,741 packets by ARQ with zero frame/drop counters, used 25.7%
+of one SSC338Q core, and held RSS at 7,644 KiB.
+
+This passes the Ethernet opt-in coverage gate, but does not authorize it as a
+default or prove RF return reliability. Fixed §14.1 FEC remains authoritative;
+the normal bench was restored to `arq_mode:"idr-only"`. The next controller
+step may evaluate adaptive parity with P-frame ARQ in shadow/explicit opt-in,
+but monitor/Devourer return airtime and loss must be measured before production
+activation.
