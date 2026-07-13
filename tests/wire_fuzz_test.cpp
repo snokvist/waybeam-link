@@ -48,6 +48,10 @@ void check_consistency(const Decoded& d, const uint8_t* buf, size_t len) {
         CHECK_EQ_U(len, kHeartbeatSize);
     } else if (std::get_if<CsaPacket>(&d)) {
         CHECK_EQ_U(len, kCsaSize);
+    } else if (std::get_if<RecoveryRequest>(&d)) {
+        CHECK_EQ_U(len, kRecoveryRequestSize);
+    } else if (std::get_if<JsccFeedback>(&d)) {
+        CHECK_EQ_U(len, kJsccFeedbackSize);
     }
 }
 
@@ -93,6 +97,20 @@ std::vector<std::vector<uint8_t>> golden_packets() {
     n = encode_link_report(r, buf, sizeof(buf));
     out.emplace_back(buf, buf + n);
 
+    JsccFeedback jf;
+    jf.prefix = {9, 0, 0xAABBCCDD};
+    jf.target_originator = 17;
+    jf.target_session = 0x01020304;
+    jf.target_stream_id = 0;
+    jf.feedback_epoch = 9;
+    jf.repair_demand_permille = 125;
+    jf.rtt_p95_us = 2000;
+    jf.repair_samples = 30;
+    jf.valid_flags = jscc_feedback_flags::kKnownMask;
+    jf.observed_block_id = 4400;
+    n = encode_jscc_feedback(jf, buf, sizeof(buf));
+    out.emplace_back(buf, buf + n);
+
     Heartbeat hb;
     hb.prefix = {17, 0, 0x01020304};
     n = encode_heartbeat(hb, buf, sizeof(buf));
@@ -134,7 +152,7 @@ int main() {
     }
 
     const auto goldens = golden_packets();
-    CHECK_EQ_U(goldens.size(), 5);
+    CHECK_EQ_U(goldens.size(), 6);
 
     // 2. Every truncation of every valid packet must be an error.
     for (const auto& pkt : goldens) {
