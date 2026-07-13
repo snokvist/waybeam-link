@@ -66,11 +66,34 @@ StatsSnapshot sample_snapshot() {
     st.jscc_repair_underpredicted_blocks = 18;
     st.jscc_repair_demand_censored_blocks = 2;
     st.jscc_repair_predicted_parity_symbols = 358121;
+    st.jscc_decision_frames = 89571;
+    st.jscc_valid_decisions = 89200;
+    st.jscc_fallback_decisions = 371;
+    st.jscc_decision_valid = true;
+    st.jscc_fallback = "none";
+    st.jscc_reason = "fec_and_arq";
+    st.jscc_input_k = 38;
+    st.jscc_input_predicted_symbols = 5;
+    st.jscc_input_floor_symbols = 1;
+    st.jscc_input_cap_symbols = 16;
+    st.jscc_input_deadline_us = 16667;
+    st.jscc_input_source_tx_us = 5210;
+    st.jscc_input_rtt_p95_us = 2000;
+    st.jscc_input_resend_us = 116;
+    st.jscc_input_guard_us = 500;
+    st.jscc_output_parity_symbols = 5;
+    st.jscc_output_remaining_us = 11457;
+    st.jscc_output_arq_eligible = true;
+    st.jscc_output_discard = false;
+    st.jscc_feedback_epoch = 1821;
+    st.jscc_feedback_age_ms = 42;
     st.dropped_superseded = 110;
     st.dropped_deadline = 8;
     st.nacks_sent = 18;
     st.nack_rtt_hist = {0, 2, 7, 6, 2, 1, 0, 0};
     st.nack_rtt_max_ms = 34;
+    st.nack_rtt_samples = 24;
+    st.nack_rtt_p95_us = 2000;
     st.arq_rec_hist = {0, 1, 6, 6, 3, 1, 1, 0};
     st.arq_rec_max_ms = 61;
     st.resends_sent = 230;
@@ -126,11 +149,23 @@ const char* kGolden =
     "\"jscc_repair_underpredicted_blocks\":18,"
     "\"jscc_repair_demand_censored_blocks\":2,"
     "\"jscc_repair_predicted_parity_symbols\":358121,"
+    "\"jscc_decision_frames\":89571,\"jscc_valid_decisions\":89200,"
+    "\"jscc_fallback_decisions\":371,\"jscc_decision_valid\":true,"
+    "\"jscc_fallback\":\"none\",\"jscc_reason\":\"fec_and_arq\","
+    "\"jscc_input_k\":38,\"jscc_input_predicted_symbols\":5,"
+    "\"jscc_input_floor_symbols\":1,\"jscc_input_cap_symbols\":16,"
+    "\"jscc_input_deadline_us\":16667,\"jscc_input_source_tx_us\":5210,"
+    "\"jscc_input_rtt_p95_us\":2000,\"jscc_input_resend_us\":116,"
+    "\"jscc_input_guard_us\":500,\"jscc_output_parity_symbols\":5,"
+    "\"jscc_output_remaining_us\":11457,"
+    "\"jscc_output_arq_eligible\":true,\"jscc_output_discard\":false,"
+    "\"jscc_feedback_epoch\":1821,\"jscc_feedback_age_ms\":42,"
     "\"shm_full_drops\":0,\"shm_oversize_drops\":0,"
     "\"shm_bad_slots\":0,\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"
     "\"nacks_sent\":18,"
     "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
+    "\"nack_rtt_samples\":24,\"nack_rtt_p95_us\":2000,"
     "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
     "\"resends_sent\":230,\"double_send_suppressed\":5,"
     "\"source_symbols_sent\":4120300,\"repair_symbols_sent\":358944,"
@@ -192,7 +227,7 @@ int main() {
         StatsEmitter emitter(/*to_stdout=*/false, &*out.value);
         emitter.emit(sample_snapshot());
 
-        uint8_t buf[2048];
+        uint8_t buf[4096];
         long n = 0;
         for (int tries = 0; tries < 100 && n <= 0; ++tries) {
             n = in.value->recv_one(buf, sizeof(buf));

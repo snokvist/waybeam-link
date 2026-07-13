@@ -78,6 +78,27 @@ struct StreamStats {
     uint64_t jscc_repair_underpredicted_blocks = 0;
     uint64_t jscc_repair_demand_censored_blocks = 0;
     uint64_t jscc_repair_predicted_parity_symbols = 0;
+    uint64_t jscc_decision_frames = 0;
+    uint64_t jscc_valid_decisions = 0;
+    uint64_t jscc_fallback_decisions = 0;
+    bool jscc_decision_valid = false;
+    std::string jscc_fallback;
+    std::string jscc_reason;
+    uint16_t jscc_input_k = 0;
+    uint16_t jscc_input_predicted_symbols = 0;
+    uint16_t jscc_input_floor_symbols = 0;
+    uint16_t jscc_input_cap_symbols = 0;
+    uint32_t jscc_input_deadline_us = 0;
+    uint32_t jscc_input_source_tx_us = 0;
+    uint32_t jscc_input_rtt_p95_us = 0;
+    uint32_t jscc_input_resend_us = 0;
+    uint32_t jscc_input_guard_us = 0;
+    uint16_t jscc_output_parity_symbols = 0;
+    uint32_t jscc_output_remaining_us = 0;
+    bool jscc_output_arq_eligible = false;
+    bool jscc_output_discard = false;
+    uint32_t jscc_feedback_epoch = 0;
+    uint32_t jscc_feedback_age_ms = 0;
     uint64_t shm_full_drops = 0;
     uint64_t shm_oversize_drops = 0;
     uint64_t shm_bad_slots = 0;
@@ -90,6 +111,8 @@ struct StreamStats {
     // the I-frame deadline).
     std::array<uint64_t, 8> nack_rtt_hist{};
     uint64_t nack_rtt_max_ms = 0;
+    uint16_t nack_rtt_samples = 0;
+    uint32_t nack_rtt_p95_us = 0;
     std::array<uint64_t, 8> arq_rec_hist{};
     uint64_t arq_rec_max_ms = 0;
     uint64_t resends_sent = 0;

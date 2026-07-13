@@ -14,6 +14,7 @@
 #include <chrono>
 #include <functional>
 #include <deque>
+#include <optional>
 #include <vector>
 
 #include "wblink/binding.h"
@@ -67,6 +68,11 @@ class UdpAir {
     bool tx_pending() const {
         return !tx_queue_.empty() || !resend_queue_.empty();
     }
+    // Paced Ethernet bench airtime model (§14.2). include_pending models a
+    // new live frame appended behind both current queues; false models one
+    // prioritized resend. Unpaced UDP has no authored serialization rate.
+    std::optional<uint32_t> estimate_airtime_us(size_t bytes,
+                                                bool include_pending) const;
     std::vector<int> wait_fds() const;
 
   private:
