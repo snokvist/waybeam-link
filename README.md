@@ -382,6 +382,11 @@ tools/jscc_ethernet_bench.sh recover-video
 RAMP_DWELL_S=4 tools/jscc_ethernet_bench.sh loss-ramp
 ```
 
+For the opt-in P-frame ARQ Ethernet experiment, restart with
+`ARQ_MODE=all-frames tools/jscc_ethernet_bench.sh start`. This stamps
+non-IDRs retransmit-eligible while retaining the P-frame deadline; the default
+is `idr-only`.
+
 The stable application SHM name is `venc_frame_out` (POSIX object
 `/venc_frame_out`). `status` prints the active name and consumer mode. To run
 the built-in continuous validator instead, stop any external decoder and use

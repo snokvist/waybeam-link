@@ -187,6 +187,7 @@ int main() {
           "node": {"originator": 7, "role": "tx"},
           "streams": [{ "stream_id": 0, "stream_type": "RTP", "dir": "in",
             "bind": { "kind": "frame-shm", "name": "venc_frame" },
+            "arq_mode": "all-frames",
             "fec": { "scheme": "rlc256", "i_rate_permille": 300,
                      "p_rate_permille": 120, "min_k": 4 } }]})");
         CHECK(bool(r));
@@ -195,11 +196,20 @@ int main() {
             const StreamCfg& s = r.value->streams[0];
             CHECK(s.bind.kind == BindKind::kFrameShm);
             CHECK(s.bind.name == "venc_frame");
+            CHECK(s.arq_mode == FrameArqMode::kAllFrames);
             CHECK(s.fec.scheme == FecScheme::kRlc256);
             CHECK_EQ_U(s.fec.i_rate_permille, 300u);
             CHECK_EQ_U(s.fec.p_rate_permille, 120u);
             CHECK_EQ_U(s.fec.min_k, 4u);
         }
+        expect_error(R"({"node":{"originator":7,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"udp","listen":"127.0.0.1:5600"},
+            "arq_mode":"all-frames"}]})", "frame-shm ingress");
+        expect_error(R"({"node":{"originator":7,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "arq_mode":"sometimes"}]})", "idr-only");
     }
 
     // --- air "kernel-monitor" backend + adapter ifname ---------------------

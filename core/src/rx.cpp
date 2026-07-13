@@ -299,8 +299,12 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
         if (b.first_seen_ms == 0) {
             b.first_seen_ms = now_ms;
         }
-        b.arq = b.arq || (v.hdr.data_flags & data_flags::kArq) != 0;
-        b.deadline_ms = block_deadline(*s, b.first_seen_ms, b.arq);
+        b.arq = b.arq ||
+                (v.hdr.data_flags &
+                 (data_flags::kArq | data_flags::kPframeArq)) != 0;
+        b.iframe_class =
+            b.iframe_class || (v.hdr.data_flags & data_flags::kArq) != 0;
+        b.deadline_ms = block_deadline(*s, b.first_seen_ms, b.iframe_class);
         s->max_block = std::max(s->max_block, v.hdr.block_id);
     }
 

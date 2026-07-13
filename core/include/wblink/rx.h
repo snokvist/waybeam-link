@@ -176,6 +176,7 @@ class RxEngine {
         uint64_t first_seen_ms = 0;
         uint64_t deadline_ms = 0;
         bool arq = false;
+        bool iframe_class = false;
     };
     struct Gap {
         uint64_t first_missing_ms = 0;

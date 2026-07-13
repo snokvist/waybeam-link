@@ -219,6 +219,23 @@ Result<Config> load_config_json(const std::string& json_text) {
                         ": classifier must be \"size\", \"h264\" or \"h265\"");
                 }
             }
+            if (s.contains("arq_mode")) {
+                if (sc.bind.kind != BindKind::kFrameShm || sc.dir != Dir::kIn) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": arq_mode is only valid on frame-shm ingress");
+                }
+                const std::string mode = s.at("arq_mode").get<std::string>();
+                if (mode == "idr-only") {
+                    sc.arq_mode = FrameArqMode::kIdrOnly;
+                } else if (mode == "all-frames") {
+                    sc.arq_mode = FrameArqMode::kAllFrames;
+                } else {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": arq_mode must be \"idr-only\" or \"all-frames\"");
+                }
+            }
             // §14.1 per-stream FEC (frame-shm only).
             if (s.contains("fec")) {
                 const json& f = s.at("fec");

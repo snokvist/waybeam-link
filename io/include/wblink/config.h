@@ -78,6 +78,7 @@ struct StreamCfg {
     std::optional<uint16_t> originator;
     // RTP in-streams (§4.1): "size" (default) / "h264" / "h265".
     RtpClassifier classifier = RtpClassifier::kSize;
+    FrameArqMode arq_mode = FrameArqMode::kIdrOnly;
     // §14.1 FEC for frame-shm streams (ignored on udp streams).
     StreamFecCfg fec;
     std::optional<JsccShadowCfg> jscc_shadow;

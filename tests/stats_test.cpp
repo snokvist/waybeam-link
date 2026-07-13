@@ -102,6 +102,7 @@ StatsSnapshot sample_snapshot() {
     st.repair_symbols_sent = 358944;
     st.fec_oversize_frames = 0;
     st.idr_frames = 17;
+    st.arq_frames = 68342;
     st.decode_errors = 0;
     st.active_profile = 4;
     st.table_version = 178;
@@ -169,7 +170,7 @@ const char* kGolden =
     "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
     "\"resends_sent\":230,\"double_send_suppressed\":5,"
     "\"source_symbols_sent\":4120300,\"repair_symbols_sent\":358944,"
-    "\"fec_oversize_frames\":0,\"idr_frames\":17,"
+    "\"fec_oversize_frames\":0,\"idr_frames\":17,\"arq_frames\":68342,"
     "\"decode_errors\":0,\"active_profile\":4,\"table_version\":178}],"
     "\"return\":{\"reports_expected\":10,\"reports_received\":9,"
     "\"return_window_hits\":7,\"return_window_misses\":2,"

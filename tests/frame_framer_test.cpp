@@ -30,15 +30,19 @@ struct Harness {
     FrameFramer framer;
     std::vector<Sym> sent;
 
-    explicit Harness(FrameFecConfig fec = {}) : framer(make_cfg(fec)) {
+    explicit Harness(FrameFecConfig fec = {},
+                     FrameArqMode arq_mode = FrameArqMode::kIdrOnly)
+        : framer(make_cfg(fec, arq_mode)) {
         framer.set_operating_point(4, 0x41, 1424);
     }
-    static FrameFramerConfig make_cfg(FrameFecConfig fec) {
+    static FrameFramerConfig make_cfg(FrameFecConfig fec,
+                                      FrameArqMode arq_mode) {
         FrameFramerConfig c;
         c.originator = 7;
         c.session_id = 99;
         c.stream_id = 0;
         c.stream_type = stream_type::kRtp;
+        c.arq_mode = arq_mode;
         c.fec = fec;
         return c;
     }
@@ -69,6 +73,22 @@ std::vector<uint8_t> make_frame(size_t body, bool idr, uint8_t seed) {
 }  // namespace
 
 int main() {
+    // --- opt-in P-frame ARQ retains a distinct wire class ------------------
+    {
+        Harness h({}, FrameArqMode::kAllFrames);
+        h.feed(make_frame(3000, /*idr=*/false, 0));
+        CHECK(!h.sent.empty());
+        for (const Sym& sy : h.sent) {
+            CHECK(!sy.arq());
+            CHECK((sy.hdr.data_flags & data_flags::kPframeArq) != 0);
+        }
+        CHECK_EQ_U(h.framer.stats().idr_frames, 0u);
+        CHECK_EQ_U(h.framer.stats().arq_frames, 1u);
+        h.feed(make_frame(3000, /*idr=*/true, 1));
+        CHECK_EQ_U(h.framer.stats().idr_frames, 1u);
+        CHECK_EQ_U(h.framer.stats().arq_frames, 2u);
+    }
+
     // --- basic fragmentation, no FEC ----------------------------------------
     {
         Harness h;  // scheme none

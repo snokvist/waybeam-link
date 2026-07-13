@@ -863,6 +863,7 @@ struct TxCore {
                 fc.session_id = session;
                 fc.stream_id = s.stream_id;
                 fc.stream_type = s.stream_type;
+                fc.arq_mode = s.arq_mode;
                 fc.fec.scheme = s.fec.scheme;
                 fc.fec.i_rate_permille = s.fec.i_rate_permille;
                 fc.fec.p_rate_permille = s.fec.p_rate_permille;
@@ -961,7 +962,8 @@ struct TxCore {
                 JsccShadowFrameInput input;
                 input.source_k = k;
                 input.deadline_us = frame_deadline_us(idr);
-                input.arq_capable = idr;
+                input.arq_capable =
+                    idr || s.frame_framer->arq_mode() == FrameArqMode::kAllFrames;
                 input.now_ms = now;
                 if (estimate_airtime) {
                     input.source_tx_remaining_us =
@@ -1186,6 +1188,7 @@ struct TxCore {
                 st.fec_oversize_frames =
                     s.frame_framer->stats().fec_oversize_k;
                 st.idr_frames = s.frame_framer->stats().idr_frames;
+                st.arq_frames = s.frame_framer->stats().arq_frames;
             }
             if (s.jscc_shadow) {
                 const JsccShadowResult& js = s.jscc_latest;

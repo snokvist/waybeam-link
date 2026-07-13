@@ -251,7 +251,7 @@ split is what lets any node send control traffic about any other node's stream.
 | bit | name | meaning |
 |---|---|---|
 | 0 | `END_OF_BLOCK` | last packet of this block |
-| 1 | `ARQ` | block is retransmit-eligible (importance / opt-in) |
+| 1 | `ARQ` | important/IDR retransmit class with I-frame deadline |
 | 2 | `RETRANSMIT` | this packet is itself a resend (stats/diagnostics) |
 | 3 | `FEC_REPAIR` | packet is a FEC repair symbol (§14; an 11-byte subheader precedes payload) |
 | 4 | `CSA_ARMED` | **craft→ground ARM ack** — craft has accepted the in-flight CSA campaign and will follow (§11.6) |

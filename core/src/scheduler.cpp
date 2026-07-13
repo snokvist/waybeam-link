@@ -22,13 +22,13 @@ unsigned popcount_bitmap(const uint8_t* bitmap, uint8_t len) {
 }  // namespace
 
 uint64_t ResendScheduler::entry_deadline(const RingEntry& e) const {
-    const bool arq_class = (e.data_flags & data_flags::kArq) != 0;
-    uint16_t budget = arq_class ? 50 : 16;  // fallback mirrors RxPolicy seeds
+    const bool iframe_class = (e.data_flags & data_flags::kArq) != 0;
+    uint16_t budget = iframe_class ? 50 : 16;  // fallback mirrors RxPolicy seeds
     if (table_ != nullptr) {
         for (const Profile& p : table_->profiles) {
             if (p.id == active_profile_) {
-                budget = arq_class ? p.arq_deadline_iframe_ms
-                                   : p.arq_deadline_pframe_ms;
+                budget = iframe_class ? p.arq_deadline_iframe_ms
+                                      : p.arq_deadline_pframe_ms;
                 break;
             }
         }
@@ -107,7 +107,8 @@ void ResendScheduler::on_nack(const NackView& nack, ResendRing& ring,
             continue;
         }
         // §5.3 importance gate: only ARQ blocks are ever resent.
-        if ((e->data_flags & data_flags::kArq) == 0) {
+        if ((e->data_flags & (data_flags::kArq |
+                              data_flags::kPframeArq)) == 0) {
             ++counters_.dropped_not_arq;
             continue;
         }

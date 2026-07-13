@@ -5,9 +5,9 @@
 // VencFrameMeta prefix (§15.4), which FrameFramer fragments into k source
 // symbols and (per the §14.1 adaptive policy) r Cauchy-RS repair symbols.
 //
-// One frame = one block_id (§4). ARQ is taken directly from the metadata IDR
-// flag (§4.1) — no NAL parsing. The [VencFrameMeta][Annex-B] blob is opaque:
-// FrameFramer reads only the 8-byte prefix.
+// One frame = one block_id (§4). IDR importance is taken directly from the
+// metadata flag; optional all-frame P-ARQ is an explicit config mode (§4.1).
+// No NAL parsing: the [VencFrameMeta][Annex-B] blob remains opaque.
 //
 // Pure logic: time injected, emission is a callback, no sockets/clocks. A
 // reusable scratch buffer holds the zero-padded source symbols for the repair
@@ -39,6 +39,7 @@ struct FrameFramerConfig {
     uint8_t stream_id = 0;
     uint8_t stream_type = stream_type::kRtp;
     uint16_t destination = 0;  // §3.1 advisory; 0 = broadcast
+    FrameArqMode arq_mode = FrameArqMode::kIdrOnly;
     FrameFecConfig fec;
 };
 
@@ -49,6 +50,7 @@ struct FrameFramerStats {
     uint64_t malformed_frame = 0;   // < 8 B (no VencFrameMeta prefix): dropped
     uint64_t fec_oversize_k = 0;    // k + r_target > 256 => FEC disabled (§14.1)
     uint64_t idr_frames = 0;
+    uint64_t arq_frames = 0;
 };
 
 class FrameFramer {
@@ -84,6 +86,7 @@ class FrameFramer {
         cfg_.fec.min_k = min_k;
     }
     const FrameFecConfig& fec() const { return cfg_.fec; }
+    FrameArqMode arq_mode() const { return cfg_.arq_mode; }
 
     // §15.5 stats/reset: zero the cumulative counters (fresh measurement
     // window). State (seq, block id, operating point) is untouched.

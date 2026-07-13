@@ -39,7 +39,10 @@ inline constexpr uint8_t kArq = 0x02;
 inline constexpr uint8_t kRetransmit = 0x04;
 inline constexpr uint8_t kFecRepair = 0x08;
 inline constexpr uint8_t kCsaArmed = 0x10;
+inline constexpr uint8_t kPframeArq = 0x20;
 }  // namespace data_flags
+
+enum class FrameArqMode : uint8_t { kIdrOnly, kAllFrames };
 
 // Exact wire sizes (§3.1–3.8, §11.1).
 inline constexpr size_t kCommonPrefixSize = 11;

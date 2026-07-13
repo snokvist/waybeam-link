@@ -26,7 +26,7 @@ struct RingConfig {
 struct RingEntry {
     uint32_t seq = 0;
     uint32_t block_id = 0;
-    uint8_t data_flags = 0;  // as originally sent (ARQ bit gates resend)
+    uint8_t data_flags = 0;  // original ARQ class gates resend/deadline
     uint64_t first_tx_ms = 0;
     uint8_t attempts = 0;  // resend attempts so far (§5.3 attempt cap)
     std::vector<uint8_t> frame;
