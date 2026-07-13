@@ -389,6 +389,39 @@ int main() {
                      "end_ms");
     }
 
+    // --- optional §14.2 JSCC TX shadow has no implicit inputs ---------------
+    {
+        auto r = load_config_json(R"({
+          "node":{"originator":17,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
+              "arq_guard_us":500,"feedback_timeout_ms":500,
+              "min_rtt_samples":20}}]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->streams[0].jscc_shadow.has_value());
+            const auto& js = *r.value->streams[0].jscc_shadow;
+            CHECK_EQ_U(js.fec_floor_permille, 20);
+            CHECK_EQ_U(js.fec_cap_permille, 400);
+            CHECK_EQ_U(js.arq_guard_us, 500);
+            CHECK_EQ_U(js.feedback_timeout_ms, 500);
+            CHECK_EQ_U(js.min_rtt_samples, 20);
+        }
+        expect_error(R"({"node":{"originator":17,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"udp","listen":"127.0.0.1:5600"},
+            "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
+              "arq_guard_us":500,"feedback_timeout_ms":500,
+              "min_rtt_samples":20}}]})", "frame-shm ingress");
+        expect_error(R"({"node":{"originator":17,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "jscc_shadow":{"fec_floor_permille":500,"fec_cap_permille":400,
+              "arq_guard_us":500,"feedback_timeout_ms":500,
+              "min_rtt_samples":20}}]})", "floor <= cap");
+    }
+
     // --- profile table -------------------------------------------------------
     {
         // The repo's example table must load and reproduce the golden hash

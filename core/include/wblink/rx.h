@@ -23,6 +23,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <optional>
@@ -91,6 +92,8 @@ struct RxStreamCounters {
     static constexpr size_t kRttBuckets = 8;
     std::array<uint64_t, kRttBuckets> nack_rtt_hist{};
     uint64_t nack_rtt_max_ms = 0;
+    uint16_t nack_rtt_samples = 0;
+    uint32_t nack_rtt_p95_us = 0;
     std::array<uint64_t, kRttBuckets> arq_rec_hist{};
     uint64_t arq_rec_max_ms = 0;
 };
@@ -211,6 +214,7 @@ class RxEngine {
         // must not mix streams sharing an adapter).
         std::map<uint8_t, uint32_t> adapter_last_seq;
         std::map<uint8_t, AdapterSeq> adapter_seq;
+        std::deque<uint32_t> nack_rtt_ms;  // trailing §3.10 RTT window
         RxStreamCounters counters;
     };
     struct Adapter {

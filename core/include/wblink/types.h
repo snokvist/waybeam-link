@@ -49,7 +49,7 @@ inline constexpr size_t kLinkReportSize = 39;
 inline constexpr size_t kHeartbeatSize = 11;
 inline constexpr size_t kCsaSize = 32;
 inline constexpr size_t kRecoveryRequestSize = 18;
-inline constexpr size_t kJsccFeedbackSize = 35;
+inline constexpr size_t kJsccFeedbackSize = 37;
 
 namespace jscc_feedback_flags {
 inline constexpr uint8_t kRepairReady = 0x01;

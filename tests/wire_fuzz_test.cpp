@@ -106,6 +106,7 @@ std::vector<std::vector<uint8_t>> golden_packets() {
     jf.repair_demand_permille = 125;
     jf.rtt_p95_us = 2000;
     jf.repair_samples = 30;
+    jf.rtt_samples = 24;
     jf.valid_flags = jscc_feedback_flags::kKnownMask;
     jf.observed_block_id = 4400;
     n = encode_jscc_feedback(jf, buf, sizeof(buf));

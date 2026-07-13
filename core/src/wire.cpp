@@ -151,8 +151,9 @@ Decoded decode_jscc_feedback(const uint8_t* buf, size_t len) {
     f.repair_demand_permille = be16_read(buf + 22);
     f.rtt_p95_us = be32_read(buf + 24);
     f.repair_samples = be16_read(buf + 28);
-    f.valid_flags = buf[30];
-    f.observed_block_id = be32_read(buf + 31);
+    f.rtt_samples = be16_read(buf + 30);
+    f.valid_flags = buf[32];
+    f.observed_block_id = be32_read(buf + 33);
     if ((f.valid_flags & ~jscc_feedback_flags::kKnownMask) != 0) {
         return DecodeError::kInvalidField;
     }
@@ -309,8 +310,9 @@ size_t encode_jscc_feedback(const JsccFeedback& pkt, uint8_t* out, size_t cap) {
     be16_write(out + 22, pkt.repair_demand_permille);
     be32_write(out + 24, pkt.rtt_p95_us);
     be16_write(out + 28, pkt.repair_samples);
-    out[30] = pkt.valid_flags;
-    be32_write(out + 31, pkt.observed_block_id);
+    be16_write(out + 30, pkt.rtt_samples);
+    out[32] = pkt.valid_flags;
+    be32_write(out + 33, pkt.observed_block_id);
     return kJsccFeedbackSize;
 }
 

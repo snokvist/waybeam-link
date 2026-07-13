@@ -161,6 +161,7 @@ int main() {
         f.repair_demand_permille = rng.u16();
         f.rtt_p95_us = rng.u32();
         f.repair_samples = rng.u16();
+        f.rtt_samples = rng.u16();
         f.valid_flags = rng.u8() & jscc_feedback_flags::kKnownMask;
         f.observed_block_id = rng.u32();
         const size_t n = encode_jscc_feedback(f, buf, sizeof(buf));

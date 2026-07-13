@@ -133,7 +133,7 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
             scratch_.insert(scratch_.end(), kv.second.begin(), kv.second.end());
         }
         emit(scratch_.data(), scratch_.size());
-        observe_shadow(b);
+        observe_shadow(id, b);
         ++stats_.frames_delivered;
         ++stats_.frames_fast;
         finalize(id);
@@ -162,7 +162,7 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
             if (dec.decode(scratch_.data())) {
                 scratch_.resize(b.frame_len);  // trim last-symbol padding
                 emit(scratch_.data(), scratch_.size());
-                observe_shadow(b);
+                observe_shadow(id, b);
                 ++stats_.frames_delivered;
                 ++stats_.frames_fec;
                 finalize(id);
@@ -184,7 +184,7 @@ void FrameReassembler::supersede(uint32_t new_highest, const Emit& /*emit*/) {
                 ++stats_.frames_unrecoverable;
             }
             ++stats_.frames_superseded;
-            observe_shadow(it->second);
+            observe_shadow(it->first, it->second);
             finalize(it->first);
             it = blocks_.erase(it);
         } else {
@@ -201,7 +201,7 @@ void FrameReassembler::tick(uint64_t now_ms, const Emit& /*emit*/) {
                 ++stats_.frames_unrecoverable;
             }
             ++stats_.frames_deadline;
-            observe_shadow(it->second);
+            observe_shadow(it->first, it->second);
             finalize(it->first);
             it = blocks_.erase(it);
         } else {
@@ -210,7 +210,7 @@ void FrameReassembler::tick(uint64_t now_ms, const Emit& /*emit*/) {
     }
 }
 
-void FrameReassembler::observe_shadow(Block& b) {
+void FrameReassembler::observe_shadow(uint32_t id, Block& b) {
     if (!b.shadow_armed || b.k == 0) {
         return;
     }
@@ -239,13 +239,29 @@ void FrameReassembler::observe_shadow(Block& b) {
     const uint32_t demand_rate = b.k == 0
         ? 0 : (static_cast<uint32_t>(repair_demand) * 1000 + b.k - 1) / b.k;
     repair_estimator_.observe(demand_rate);
+    latest_observed_block_ = id;
+    have_observed_block_ = true;
     b.shadow_armed = false;
+}
+
+JsccRepairFeedbackState FrameReassembler::jscc_feedback() const {
+    JsccRepairFeedbackState out;
+    out.repair_demand_permille = static_cast<uint16_t>(
+        std::min<uint32_t>(repair_estimator_.predict(), UINT16_MAX));
+    out.repair_samples = static_cast<uint16_t>(
+        std::min<size_t>(repair_estimator_.sample_count(), UINT16_MAX));
+    out.observed_block_id = latest_observed_block_;
+    out.repair_ready = repair_estimator_.sample_count() >= 20;
+    out.have_observation = have_observed_block_;
+    return out;
 }
 
 void FrameReassembler::reset_stats() {
     stats_ = {};
     loss_estimator_.reset();
     repair_estimator_.reset();
+    latest_observed_block_ = 0;
+    have_observed_block_ = false;
     for (auto& [id, block] : blocks_) {
         (void)id;
         block.shadow_prediction = 0;

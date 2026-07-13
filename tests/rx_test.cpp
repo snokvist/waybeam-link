@@ -168,6 +168,8 @@ int main() {
         // Single NACK ⇒ both anchors agree (bucket 3 = ≤8 ms).
         CHECK_EQ_U(h.counters().nack_rtt_hist[3], 1);
         CHECK_EQ_U(h.counters().nack_rtt_max_ms, 6);
+        CHECK_EQ_U(h.counters().nack_rtt_samples, 1);
+        CHECK_EQ_U(h.counters().nack_rtt_p95_us, 6000);
         CHECK_EQ_U(h.counters().arq_rec_hist[3], 1);
         CHECK_EQ_U(h.counters().arq_rec_max_ms, 6);
     }
@@ -288,6 +290,8 @@ int main() {
         // recovery   = 30-12 = 18 ms (bucket 5 = ≤32).
         CHECK_EQ_U(h.counters().nack_rtt_hist[2], 1);
         CHECK_EQ_U(h.counters().nack_rtt_max_ms, 3);
+        CHECK_EQ_U(h.counters().nack_rtt_samples, 1);
+        CHECK_EQ_U(h.counters().nack_rtt_p95_us, 3000);
         CHECK_EQ_U(h.counters().arq_rec_hist[5], 1);
         CHECK_EQ_U(h.counters().arq_rec_max_ms, 18);
     }

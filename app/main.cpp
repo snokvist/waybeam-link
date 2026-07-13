@@ -1167,7 +1167,11 @@ struct RxCore {
                                        ? static_cast<uint32_t>(
                                              1000.0 / cfg.policy.report_hz)
                                        : 0},
-                    table_version) {}
+                    table_version),
+          feedback_period_ms_(cfg.policy.report_hz > 0
+                                  ? static_cast<uint32_t>(
+                                        1000.0 / cfg.policy.report_hz)
+                                  : 0) {}
 
     static std::vector<WantSpec> wants(const Config& cfg) {
         std::vector<WantSpec> out;
@@ -1216,6 +1220,45 @@ struct RxCore {
                 static_cast<uint8_t>(req.bitmap.size()), frame, sizeof(frame));
             if (n > 0) {
                 inject_nack(frame, n, req.target_originator);
+            }
+        }
+    }
+
+    void emit_jscc_feedback(
+        uint64_t now,
+        const std::vector<std::pair<uint8_t, JsccRepairFeedbackState>>& states,
+        const Inject& inject) {
+        if (feedback_period_ms_ == 0 || now < next_feedback_ms_) return;
+        next_feedback_ms_ = now + feedback_period_ms_;
+        for (const RxStreamInfo& info : engine_.streams()) {
+            const JsccRepairFeedbackState* state = nullptr;
+            for (const auto& [sid, candidate] : states) {
+                if (sid == info.local_stream_id) {
+                    state = &candidate;
+                    break;
+                }
+            }
+            if (state == nullptr) continue;  // not a frame-SHM egress
+            JsccFeedback f;
+            f.prefix = {originator_, info.key.originator, session_};
+            f.target_originator = info.key.originator;
+            f.target_session = info.key.session_id;
+            f.target_stream_id = info.key.stream_id;
+            f.feedback_epoch = ++feedback_epoch_;
+            f.repair_demand_permille = state->repair_demand_permille;
+            f.rtt_p95_us = info.counters.nack_rtt_p95_us;
+            f.repair_samples = state->repair_samples;
+            f.rtt_samples = info.counters.nack_rtt_samples;
+            if (state->repair_ready) {
+                f.valid_flags |= jscc_feedback_flags::kRepairReady;
+            }
+            if (f.rtt_samples > 0) {
+                f.valid_flags |= jscc_feedback_flags::kRttReady;
+            }
+            f.observed_block_id = state->observed_block_id;
+            uint8_t frame[kJsccFeedbackSize];
+            if (encode_jscc_feedback(f, frame, sizeof(frame)) == sizeof(frame)) {
+                inject(frame, sizeof(frame), f.target_originator);
             }
         }
     }
@@ -1313,6 +1356,9 @@ struct RxCore {
     uint32_t session_;
     RxEngine engine_;
     Reporter reporter_;
+    uint32_t feedback_period_ms_ = 0;
+    uint64_t next_feedback_ms_ = 0;
+    uint32_t feedback_epoch_ = 0;
 };
 
 // ---- shared setup -----------------------------------------------------------
@@ -2080,6 +2126,12 @@ int run_rx(const Loaded& l) {
                 so.ring->write_frame(f, len);
             });
         }
+        std::vector<std::pair<uint8_t, JsccRepairFeedbackState>> feedback;
+        feedback.reserve(shm_outs.size());
+        for (const ShmOut& so : shm_outs) {
+            feedback.emplace_back(so.stream_id, so.reasm->jscc_feedback());
+        }
+        rx.emit_jscc_feedback(now, feedback, inject_nack);
         // §11 campaign engine. The trigger is now POST /api/v1/csa (§15.5);
         // the stdin trigger was removed with the control-plane migration.
         const CsaIssuer::IssuerAction ia = issuer.tick(now_us_it);

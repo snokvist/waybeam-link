@@ -52,6 +52,14 @@ struct FrameReassemblerStats {
     uint64_t jscc_repair_predicted_parity_symbols = 0;
 };
 
+struct JsccRepairFeedbackState {
+    uint16_t repair_demand_permille = 0;
+    uint16_t repair_samples = 0;
+    uint32_t observed_block_id = 0;
+    bool repair_ready = false;
+    bool have_observation = false;
+};
+
 class FrameReassembler {
   public:
     // emit(frame, len): one whole [VencFrameMeta][Annex-B] blob, valid only
@@ -69,6 +77,7 @@ class FrameReassembler {
     void tick(uint64_t now_ms, const Emit& emit);
 
     const FrameReassemblerStats& stats() const { return stats_; }
+    JsccRepairFeedbackState jscc_feedback() const;
 
     // §15.5 stats/reset: zero the cumulative counters (in-flight blocks and
     // the finalized watermark are untouched).
@@ -95,7 +104,7 @@ class FrameReassembler {
     bool try_complete(uint32_t id, Block& b, const Emit& emit);
     void supersede(uint32_t new_highest, const Emit& emit);
     void finalize(uint32_t id);  // advance the done/dropped watermark
-    void observe_shadow(Block& b);
+    void observe_shadow(uint32_t id, Block& b);
 
     FrameReassemblerConfig cfg_;
     FrameReassemblerStats stats_;
@@ -108,6 +117,8 @@ class FrameReassembler {
     JsccLossEstimator loss_estimator_;
     JsccLossEstimator repair_estimator_{
         JsccLossEstimatorConfig{120, 1000, 20, 100}};
+    uint32_t latest_observed_block_ = 0;
+    bool have_observed_block_ = false;
 };
 
 }  // namespace wblink

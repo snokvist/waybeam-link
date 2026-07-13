@@ -37,6 +37,14 @@ struct StreamFecCfg {
     uint16_t min_k = 3;
 };
 
+struct JsccShadowCfg {
+    uint16_t fec_floor_permille = 0;
+    uint16_t fec_cap_permille = 0;
+    uint32_t arq_guard_us = 0;
+    uint32_t feedback_timeout_ms = 0;
+    uint16_t min_rtt_samples = 0;
+};
+
 struct NodeCfg {
     uint16_t originator = 0;
     Role role = Role::kRx;
@@ -72,6 +80,7 @@ struct StreamCfg {
     RtpClassifier classifier = RtpClassifier::kSize;
     // §14.1 FEC for frame-shm streams (ignored on udp streams).
     StreamFecCfg fec;
+    std::optional<JsccShadowCfg> jscc_shadow;
 };
 
 // §9.1 cascade + §9.4/§9.5/§9.7/§9.8/§9.9 constants (seeds; RE-DERIVE per

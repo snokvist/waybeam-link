@@ -99,7 +99,7 @@ struct RecoveryRequest {
     friend bool operator==(const RecoveryRequest&, const RecoveryRequest&) = default;
 };
 
-// §3.10 JSCC_FEEDBACK (fixed 35 bytes).
+// §3.10 JSCC_FEEDBACK (fixed 37 bytes).
 struct JsccFeedback {
     CommonPrefix prefix;
     uint16_t target_originator = 0;
@@ -109,6 +109,7 @@ struct JsccFeedback {
     uint16_t repair_demand_permille = 0;
     uint32_t rtt_p95_us = 0;
     uint16_t repair_samples = 0;
+    uint16_t rtt_samples = 0;
     uint8_t valid_flags = 0;
     uint32_t observed_block_id = 0;
     friend bool operator==(const JsccFeedback&, const JsccFeedback&) = default;

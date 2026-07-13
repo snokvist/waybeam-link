@@ -267,7 +267,7 @@ int main() {
             decode(want, sizeof(want) - 1)));
     }
 
-    // ---- JSCC_FEEDBACK (§3.10): fixed 35 B -------------------------------
+    // ---- JSCC_FEEDBACK (§3.10): fixed 37 B -------------------------------
     {
         JsccFeedback f;
         f.prefix = {0x0009, 0x0011, 0xAABBCCDD};
@@ -278,6 +278,7 @@ int main() {
         f.repair_demand_permille = 125;
         f.rtt_p95_us = 2000;
         f.repair_samples = 30;
+        f.rtt_samples = 24;
         f.valid_flags = jscc_feedback_flags::kKnownMask;
         f.observed_block_id = 4400;
         const uint8_t want[] = {
@@ -292,6 +293,7 @@ int main() {
             0x00, 0x7D,              // repair demand 125 permille
             0x00, 0x00, 0x07, 0xD0,  // RTT P95 2000 us
             0x00, 0x1E,              // 30 repair samples
+            0x00, 0x18,              // 24 RTT samples
             0x03,                    // repair + RTT ready
             0x00, 0x00, 0x11, 0x30,  // observed block 4400
         };
@@ -306,7 +308,7 @@ int main() {
             decode(want, sizeof(want) - 1)));
         uint8_t bad_flags[kJsccFeedbackSize];
         std::memcpy(bad_flags, want, sizeof(want));
-        bad_flags[30] = 0x80;
+        bad_flags[32] = 0x80;
         CHECK(std::get<DecodeError>(decode(bad_flags, sizeof(bad_flags))) ==
               DecodeError::kInvalidField);
     }
