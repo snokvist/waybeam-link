@@ -647,6 +647,27 @@ behavior is explicitly untouched.
 **Amended:** §15.5 (UDP-air bench synthetic-loss control). Code follows
 separately.
 
+## Pass 31 — explicit JSCC feedback and truthful TX shadow (2026-07-13)
+
+The protection-aware estimator lives on RX, while exact `k`, frame class,
+transport queueing, and FEC actuation live on TX. A per-frame controller cannot
+be wired honestly by joining independent one-second stats snapshots or by
+assuming missing RTT/airtime values. Enlarging the fixed v0 `LINK_REPORT` would
+also be wire-incompatible under the same version.
+
+Add a separate fixed-size `JSCC_FEEDBACK` packet carrying normalized causal
+repair demand, measured P95 ARQ RTT, readiness, estimator sample count, and the
+newest observed block. TX caches only exact-target, monotonic feedback. The
+first runtime integration is non-enforcing: it combines fresh feedback with
+TX-local frame/deadline/airtime inputs and reports the pure §14.2 decision.
+Missing or stale input explicitly selects authored fixed-policy fallback; zero
+must never stand in for an unavailable measurement. Shadow floor, cap, guard,
+freshness, and RTT sample threshold are operator-authored and have no implicit
+optimistic defaults.
+
+**Amended:** §3.1/§3.10 (new additive packet); §14.2 (runtime shadow validity
+and optional configuration); §15.2 (frame-SHM scope). Code follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

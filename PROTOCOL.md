@@ -222,7 +222,7 @@ consequences:
 | 7 | 4 | `session_id` | sender boot nonce |
 
 **Packet types** (low nibble): `0x1 DATA · 0x2 NACK · 0x3 LINK_REPORT ·
-0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST`. 6 of 16 used; the version nibble will not ship 16
+0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK`. 7 of 16 used; the version nibble will not ship 16
 wire-incompatible revisions, so there is no type-budget scarcity. Future types
 (e.g. a dedicated FEC-repair type, §14) take free slots.
 
@@ -429,6 +429,49 @@ floods inside that window are harmless. The packet is best-effort and may be
 repeated by the local controller after one second if decoder output has not
 resumed. It uses the same designated return adapter and quiet-gap scheduling as
 NACK and LINK_REPORT. This is recovery signalling, not a periodic-IDR policy.
+
+### 3.10 JSCC_FEEDBACK packet (type `0x7`) — 35 bytes
+
+An additive, per-stream RX→TX measurement packet for the §14.2 controller. It
+does not replace `LINK_REPORT`: RF selection remains node/link scoped, while
+repair demand and ARQ timing are properties of one received stream.
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | sender = RX node that owns the estimator |
+| 11 | 2 | `target_originator` | TX node that owns the source stream |
+| 13 | 4 | `target_session` | exact current TX boot/session nonce |
+| 17 | 1 | `target_stream_id` | source stream being measured |
+| 18 | 4 | `feedback_epoch` | u32 monotonic per reporter |
+| 22 | 2 | `repair_demand_permille` | causal predicted transmitted-repair demand normalized by `k` |
+| 24 | 4 | `rtt_p95_us` | causal P95 NACK-to-retransmit RTT; 0 unless valid |
+| 28 | 2 | `repair_samples` | bounded estimator sample count |
+| 30 | 1 | `valid_flags` | bit 0 repair estimate ready; bit 1 RTT ready; other bits 0 |
+| 31 | 4 | `observed_block_id` | newest finalized block included in the repair estimator |
+
+The repair field carries the estimator's normalized rate, not a symbol count,
+because the RX does not know the next frame's `k`. The TX converts it causally
+for frame `N` as `ceil(rate * k_N / 1000)`. `repair_samples` is diagnostic;
+readiness is stated only by bit 0 and requires the authored estimator minimum.
+An unrecoverable/censored block may raise the estimate but never turns a lower
+bound into an exact sample (§14.2).
+
+`rtt_p95_us` is derived only from arrivals explicitly marked `RETRANSMIT` that
+fill a NACKed gap. Bit 1 remains clear until the authored minimum number of RTT
+samples exists. Zero with bit 1 clear means unavailable, not zero latency.
+
+The receiver emits this packet at the existing report cadence after a matching
+frame-SHM stream has latched. It uses the same return injection, quiet-gap, and
+target filtering as NACK/LINK_REPORT. TX accepts it only for its own exact
+`(originator, session_id, stream_id)` and monotonic-forward `feedback_epoch`.
+The packet is measurement-only: receipt updates a bounded cache and can never
+directly alter FEC, ARQ, discard, MCS, or encoder state.
+
+The runtime shadow treats feedback as usable only while both required validity
+bits are set and its age is within the configured shadow timeout. Missing,
+invalid, stale, wrong-session, or replayed feedback selects the configured
+§14.1 fixed policy and reports the specific fallback state. It must never be
+silently replaced by zero loss or zero RTT.
 
 ---
 
@@ -1319,6 +1362,32 @@ block. It requires 20 samples and uses a 100-permille cold-start rate. This
 candidate is also shadow-only and does not supersede the original source-loss
 telemetry.
 
+The next Ethernet stage may run the pure decision on TX as a **non-enforcing
+runtime shadow**. It consumes fresh §3.10 feedback plus TX-local facts: exact
+frame `k`, metadata-derived ARQ class, the active profile deadline, configured
+shadow FEC floor/cap, queued source-transmission airtime, resend airtime, and an
+authored ARQ guard. Every input and the stable §14.2 reason are observable.
+Unknown transport airtime or incomplete feedback makes the decision invalid and
+selects §14.1 fallback; the implementation must not manufacture a PHY rate,
+RTT, deadline, or guard.
+
+Shadow configuration is optional and disabled when absent:
+
+```json
+"jscc_shadow": {
+  "fec_floor_permille": 20,
+  "fec_cap_permille": 400,
+  "arq_guard_us": 500,
+  "feedback_timeout_ms": 500,
+  "min_rtt_samples": 20
+}
+```
+
+All five values are operator-authored measurement inputs. There are no hidden
+optimistic defaults. The cap is converted per frame and then clamped by the
+GF(256) limit; it is independent of the active fixed §14.1 rate. This block
+authorizes observation only, not adaptive transmission.
+
 ---
 
 ## 15. I/O bindings, configuration & observability
@@ -1395,6 +1464,9 @@ telemetry.
   `scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
   `"rlc256"` enables §14.1. Rates are integer per-mille (project convention). On
   a `udp` stream the `fec` block is ignored (Framer path, §5.1).
+- A frame-SHM ingress may additionally carry the optional `jscc_shadow` block
+  from §14.2. It is rejected on UDP streams. Absence keeps only the fixed §14.1
+  path and emits no controller decision shadow.
 
 ### 15.3 Streaming stats (newline-delimited JSON)
 Emitted at `stats.hz` to stdout and/or the stats binding. Fields map 1:1 to the
