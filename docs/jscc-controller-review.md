@@ -351,3 +351,31 @@ Continue on Ethernet before monitor-mode or Devourer/RF testing:
 6. Only after the Ethernet gate passes, proceed to monitor/Devourer tests for
    correlated RF loss, packet airtime, return-path loss, quiet-gap fit, and RF
    RTT. Ethernet results must not set those RF parameters.
+
+### Runtime shadow and transition-guard result
+
+The first live TX/RX shadow deployment joined feedback continuously without
+changing fixed FEC. Clean traffic remained explicitly `rtt_not_ready`. After
+separating decoder recovery from bitrate ownership, one requested IDR under a
+temporary 500-permille loss per listener produced five NACKs, two ARQ
+recoveries, and a measured 1 ms P95 NACK-to-retransmit RTT. With a bench-only
+one-sample threshold, TX then reported 258 valid inner decisions; the normal
+20-sample threshold was restored afterward. Encoder bitrate control remained
+disabled and `/etc/waybeam.json` was not rewritten.
+
+A real auto/25 Mbit/s/60 fps capture used 400-permille fixed parity for 900
+consumed frames (937 packet blocks, 7,248 repair symbols, maximum `k=40`) with
+no FEC-capacity or SHM-oversize event. Repeated stepped-loss replay against
+that envelope rejected a reactive 20-block fixed-fallback guard: under
+independent steps fixed FEC had zero discards, while estimator-only and guarded
+estimator each had three. Under correlated steps fixed had seven discards and
+both adaptive candidates had eleven. The guard reduced repeated exposure after
+a miss but cannot protect the first unseen upward transition. It remains a
+tooling-only ablation and is not authorized for runtime actuation.
+
+Next work is to evaluate a leading signal (for example per-adapter degradation
+before post-diversity failure) or deadline-gated ARQ coverage for the first
+unexpected P-frame. The current ARQ classification is IDR-only, so it cannot
+serve that role. Any change to frame ARQ classification requires a protocol
+ruling and a fresh Ethernet acceptance matrix. Monitor/Devourer testing remains
+deferred until that gate passes.
