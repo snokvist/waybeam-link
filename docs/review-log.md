@@ -707,6 +707,25 @@ settings remain operator-owned during Ethernet measurements.
 **Amended:** §3.9 (independent recovery permission); §15.2 (configuration and
 defaults). Code follows separately.
 
+## Pass 35 — bounded P-frame ARQ experiment (2026-07-13)
+
+Repeated high-parity replay rejected a reactive fixed-FEC guard because no
+causal repair-demand estimator can protect the first frame of an unseen upward
+loss step. The existing pre-diversity metric is lifetime-based, and its 100 ms
+report cadence is not a frame-leading signal. Ethernet measurement instead
+showed a 1 ms P95 NACK-to-retransmit loop, inside the 16 ms P-frame deadline.
+
+Add an opt-in frame-SHM `arq_mode:"all-frames"` experiment. A new
+`PFRAME_ARQ` DATA flag makes non-IDR frames retransmit-eligible without granting
+the longer IDR deadline; the existing `ARQ` flag retains its importance and
+I-frame deadline meaning. Unknown receivers ignore the additive bit and fail
+safe as IDR-only. Default behavior remains unchanged, fixed FEC remains
+authoritative, and `arq_frames` makes the experiment auditable.
+
+**Amended:** §3.2/§3.3 (flag and NACK eligibility); §4.1/§5.1a/§5.3/§6.4
+(classification, deadline, and resend semantics); §15.2/§15.3 (configuration
+and telemetry). Code follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

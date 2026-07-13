@@ -255,10 +255,11 @@ split is what lets any node send control traffic about any other node's stream.
 | 2 | `RETRANSMIT` | this packet is itself a resend (stats/diagnostics) |
 | 3 | `FEC_REPAIR` | packet is a FEC repair symbol (§14; an 11-byte subheader precedes payload) |
 | 4 | `CSA_ARMED` | **craft→ground ARM ack** — craft has accepted the in-flight CSA campaign and will follow (§11.6) |
-| 5–7 | reserved | 0 |
+| 5 | `PFRAME_ARQ` | opt-in P-frame retransmit eligibility; retains the P-frame deadline |
+| 6–7 | reserved | 0 |
 
 **Redundant per-packet metadata (critical rule):** `stream_type`, `block_id`,
-`END_OF_BLOCK` membership, the `ARQ` flag, `active_profile`, and `table_version`
+`END_OF_BLOCK` membership, the ARQ-class flag, `active_profile`, and `table_version`
 are stamped on **every** packet of a block, not just the first. A surviving
 packet of a block reveals the block's boundary, ARQ-eligibility, and the TX's
 operating point/table even if the first packet was lost.
@@ -286,7 +287,8 @@ is k≈370 source symbols at 1400 B but only k≈132 at 3967 B.
 | 23 | var | `bitmap` | SACK-style; bit *i* set ⇒ `base_seq + i` missing |
 
 - References **seqs**, not blocks. RX lists a missing seq only if its block is
-  live: `ARQ`-flagged, not superseded (§6), within deadline (§8).
+  live: `ARQ`- or `PFRAME_ARQ`-flagged, not superseded (§6), within its class
+  deadline (§8).
 - No deadline field; TX applies its own resend deadline (no clocks cross).
 - `target_stream_type` is omitted — TX resolves it from `(session, stream_id)`.
 
@@ -527,6 +529,13 @@ classified the frame — the SHM slot's `VencFrameMeta.flags` bit 0 marks IDR
 parsing on the link side**. This is the authoritative form of the §4.1
 classifier (the encoder's own IDR decision), not an approximation of it.
 
+Frame-SHM ingress may opt into `arq_mode:"all-frames"`. IDRs keep the existing
+`ARQ` flag and I-frame deadline; non-IDRs carry `PFRAME_ARQ` and retain the
+active profile's P-frame deadline. The default `arq_mode:"idr-only"` preserves
+the existing classifier. `PFRAME_ARQ` is a measurement/coverage mechanism, not
+permission to extend latency or to actuate adaptive FEC. A receiver that does
+not understand bit 5 ignores it and therefore fails safe as IDR-only ARQ.
+
 **Deadline coupling:** `ARQ`-important blocks carry a longer retransmit deadline
 than best-effort blocks (a slightly-late I-frame still rescues its GOP).
 
@@ -563,7 +572,8 @@ payload** — FrameFramer parses only the metadata prefix, never the NAL bytes.
 
 1. Read one frame blob from the SHM binding. Assign it a fresh `block_id`
    (one frame = one block, §4).
-2. Set `ARQ` from `VencFrameMeta.flags` bit 0 (IDR ⇒ 1), §4.1.
+2. Set `ARQ` from `VencFrameMeta.flags` bit 0 (IDR ⇒ 1). With the explicit
+   `all-frames` mode, set `PFRAME_ARQ` instead on non-IDRs, §4.1.
 3. **Fragment** the blob into `k` **source symbols** of size
    `s = active_profile.max_payload − 26 − 11` (header + §14 repair subheader,
    so source and repair symbols are interchangeable for coding); the last
@@ -608,7 +618,9 @@ and operating point.
 - **Freshness-priority within the budget:** serve resends by deadline-remaining
   (most-recoverable first), not FIFO; proactively drop any seq whose remaining
   deadline < one measured NACK round-trip (§17 gate 3) — it cannot arrive in time.
-- **Importance gate:** only `ARQ=1` blocks are ever resent.
+- **Eligibility gate:** only `ARQ=1` or `PFRAME_ARQ=1` blocks are ever resent.
+- **Importance/deadline class:** `ARQ` uses the I-frame budget;
+  `PFRAME_ARQ` uses the P-frame budget. The bits are mutually exclusive.
 - **Deadline gate:** never resend past deadline.
 - **Attempt cap:** bounded resend attempts per seq.
 - Mark every resend `RETRANSMIT=1`.
@@ -675,9 +687,9 @@ stream is rejected at config load, since the wire payloads are frame *fragments*
 not RTP packets.)
 
 ### 6.4 NACK generation
-- For a lost seq that is `ARQ`-flagged, not superseded, within deadline: add to
-  the pending SACK set. Coalesce into one bitmap per return window (§7), anchored
-  at `base_seq`.
+- For a lost seq that is `ARQ`- or `PFRAME_ARQ`-flagged, not superseded, within
+  its class deadline: add to the pending SACK set. Coalesce into one bitmap per
+  return window (§7), anchored at `base_seq`.
 - Send via the **designated uplink TX adapter**; its RX blind spot while
   transmitting is covered by the diversity siblings (ground half-duplex is free).
 - Re-NACK: bounded retries with backoff; stop on RETRANSMIT receipt or on
@@ -1468,12 +1480,15 @@ authorizes observation only, not adaptive transmission.
   ```json
   { "stream_id": 0, "stream_type": "RTP", "dir": "in",
     "bind": { "kind": "frame-shm", "name": "venc_frame" },
+    "arq_mode": "idr-only",
     "fec": { "scheme": "rlc256", "i_rate_permille": 250,
              "p_rate_permille": 100, "min_k": 3 } }
   ```
   `scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
   `"rlc256"` enables §14.1. Rates are integer per-mille (project convention). On
   a `udp` stream the `fec` block is ignored (Framer path, §5.1).
+- `arq_mode` is valid only on frame-SHM ingress and is either `"idr-only"`
+  (default) or the opt-in `"all-frames"` experiment from §4.1.
 - A frame-SHM ingress may additionally carry the optional `jscc_shadow` block
   from §14.2. It is rejected on UDP streams. Absence keeps only the fixed §14.1
   path and emits no controller decision shadow.
@@ -1529,7 +1544,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
     "resends_sent": 230, "double_send_suppressed": 5,
     "source_symbols_sent": 4120300, "repair_symbols_sent": 358944,
-    "fec_oversize_frames": 0, "idr_frames": 17,
+    "fec_oversize_frames": 0, "idr_frames": 17, "arq_frames": 68342,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "return": { "reports_expected": 10, "reports_received": 9,
     "return_window_hits": 7, "return_window_misses": 2,
@@ -1624,8 +1639,9 @@ observable boundary.
 On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
 the exact cumulative §14.1 symbols emitted by `FrameFramer`;
 `fec_oversize_frames` counts frames sent source-only because `k+r` exceeded
-GF(256) capacity; and `idr_frames` counts frames whose VFRM metadata carried
-the IDR flag. They are zero on RX and non-frame-SHM streams. These counters are
+GF(256) capacity; `idr_frames` counts frames whose VFRM metadata carried the
+IDR flag; and `arq_frames` counts frames stamped with either ARQ-class flag.
+They are zero on RX and non-frame-SHM streams. These counters are
 the fixed-policy baseline for comparing hypothetical JSCC shadow parity; byte
 or bitrate inference is not an acceptable substitute.
 
