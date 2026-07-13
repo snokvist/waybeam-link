@@ -1500,6 +1500,17 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "jscc_repair_underpredicted_blocks": 18,
     "jscc_repair_demand_censored_blocks": 2,
     "jscc_repair_predicted_parity_symbols": 358121,
+    "jscc_decision_frames": 89571, "jscc_valid_decisions": 89200,
+    "jscc_fallback_decisions": 371, "jscc_decision_valid": true,
+    "jscc_fallback": "none", "jscc_reason": "fec_and_arq",
+    "jscc_input_k": 38, "jscc_input_predicted_symbols": 5,
+    "jscc_input_floor_symbols": 1, "jscc_input_cap_symbols": 16,
+    "jscc_input_deadline_us": 16667, "jscc_input_source_tx_us": 5210,
+    "jscc_input_rtt_p95_us": 2000, "jscc_input_resend_us": 116,
+    "jscc_input_guard_us": 500, "jscc_output_parity_symbols": 5,
+    "jscc_output_remaining_us": 11457,
+    "jscc_output_arq_eligible": true, "jscc_output_discard": false,
+    "jscc_feedback_epoch": 1821, "jscc_feedback_age_ms": 42,
     "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
@@ -1570,6 +1581,23 @@ unrecovered lower-bound observations; and
 `jscc_repair_predicted_parity_symbols` is cumulative hypothetical parity. A
 censored observation is evidence of insufficient protection, not an exact
 demand measurement. Reset clears this estimator and its counters too.
+
+The `jscc_decision_*`, `jscc_input_*`, `jscc_output_*`, and
+`jscc_feedback_*` fields are TX-side §14.2 runtime-shadow telemetry. Frame and
+valid/fallback counts are cumulative; the remaining fields describe the most
+recent frame evaluation. `jscc_decision_valid=false` means §14.1 remained the
+only decision and `jscc_fallback` names why: `feedback_missing`,
+`feedback_stale`, `repair_not_ready`, `rtt_not_ready`,
+`airtime_unavailable`, or `deadline_unavailable`. A valid decision reports
+fallback `none`, one stable §14.2 reason, every numeric input, chosen parity,
+remaining time, and ARQ/discard outputs. These outputs are hypothetical and do
+not alter transmitted symbols. Fields are zero/empty on RX and on streams
+without `jscc_shadow`.
+
+`nack_rtt_samples` and `nack_rtt_p95_us` accompany the existing cumulative RTT
+histogram on RX. They describe the bounded trailing sample window used in
+§3.10; zero samples means the P95 is unavailable. Stats reset clears the RTT
+window and therefore clears JSCC RTT readiness.
 
 `shm_full_drops`, `shm_oversize_drops`, and `shm_bad_slots` expose local ring
 backpressure/ABI failures separately from air/frame-reassembly loss. They are 0

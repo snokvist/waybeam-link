@@ -679,6 +679,18 @@ widens only the new, not-yet-deployed additive packet from 35 to 37 bytes.
 **Amended:** §3.10 (`rtt_samples`, offsets, size, and readiness semantics). Code
 follows separately.
 
+## Pass 33 — auditable runtime-shadow telemetry (2026-07-13)
+
+A non-enforcing controller is useful only if an operator can prove which inputs
+produced each latest decision and why fallback was selected. Add TX stream
+stats for decision counts, validity, named fallback/reason, all §14.2 numeric
+inputs, outputs, and feedback freshness. Add RX rolling RTT sample count/P95 so
+the feedback readiness input is independently visible. All fields are additive
+and zero/empty where the shadow does not apply; no actuator is authorized.
+
+**Amended:** §15.3 (runtime decision-shadow and rolling RTT telemetry). Code
+follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
