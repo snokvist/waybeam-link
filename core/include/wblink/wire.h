@@ -99,6 +99,22 @@ struct RecoveryRequest {
     friend bool operator==(const RecoveryRequest&, const RecoveryRequest&) = default;
 };
 
+// §3.10 JSCC_FEEDBACK (fixed 37 bytes).
+struct JsccFeedback {
+    CommonPrefix prefix;
+    uint16_t target_originator = 0;
+    uint32_t target_session = 0;
+    uint8_t target_stream_id = 0;
+    uint32_t feedback_epoch = 0;
+    uint16_t repair_demand_permille = 0;
+    uint32_t rtt_p95_us = 0;
+    uint16_t repair_samples = 0;
+    uint16_t rtt_samples = 0;
+    uint8_t valid_flags = 0;
+    uint32_t observed_block_id = 0;
+    friend bool operator==(const JsccFeedback&, const JsccFeedback&) = default;
+};
+
 // §11.1 CSA (fixed 32 bytes). csa_mac is carried opaque here; HMAC
 // computation/verification is the CSA engine's job (§11.4, build step 10).
 struct CsaPacket {
@@ -121,14 +137,16 @@ enum class DecodeError : uint8_t {
     kTooShort,        // shorter than the common prefix
     kBadMagic,        // first two bytes are not 0x57 0x42
     kBadVersion,      // version nibble != 0
-    kUnknownType,     // type nibble not in {1..6}
+    kUnknownType,     // type nibble not in {1..7}
     kTruncated,       // shorter than the type's fixed header
     kLengthMismatch,  // buffer length disagrees with the declared/fixed size
+    kInvalidField,    // reserved bits or structurally invalid fixed field
 };
 
 // index 0 = error; otherwise one decoded packet.
 using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
-                             Heartbeat, CsaPacket, RecoveryRequest>;
+                             Heartbeat, CsaPacket, RecoveryRequest,
+                             JsccFeedback>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -145,5 +163,6 @@ size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap);
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap);
 size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,
                                size_t cap);
+size_t encode_jscc_feedback(const JsccFeedback& pkt, uint8_t* out, size_t cap);
 
 }  // namespace wblink

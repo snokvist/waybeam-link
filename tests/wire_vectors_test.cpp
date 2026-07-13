@@ -267,6 +267,52 @@ int main() {
             decode(want, sizeof(want) - 1)));
     }
 
+    // ---- JSCC_FEEDBACK (§3.10): fixed 37 B -------------------------------
+    {
+        JsccFeedback f;
+        f.prefix = {0x0009, 0x0011, 0xAABBCCDD};
+        f.target_originator = 0x0011;
+        f.target_session = 0x01020304;
+        f.target_stream_id = 0x07;
+        f.feedback_epoch = 9;
+        f.repair_demand_permille = 125;
+        f.rtt_p95_us = 2000;
+        f.repair_samples = 30;
+        f.rtt_samples = 24;
+        f.valid_flags = jscc_feedback_flags::kKnownMask;
+        f.observed_block_id = 4400;
+        const uint8_t want[] = {
+            0x57, 0x42, 0x07,        // magic, version, type
+            0x00, 0x09,              // reporting RX
+            0x00, 0x11,              // destination TX
+            0xAA, 0xBB, 0xCC, 0xDD,  // reporter session
+            0x00, 0x11,              // target originator
+            0x01, 0x02, 0x03, 0x04,  // target session
+            0x07,                    // target stream
+            0x00, 0x00, 0x00, 0x09,  // feedback epoch
+            0x00, 0x7D,              // repair demand 125 permille
+            0x00, 0x00, 0x07, 0xD0,  // RTT P95 2000 us
+            0x00, 0x1E,              // 30 repair samples
+            0x00, 0x18,              // 24 RTT samples
+            0x03,                    // repair + RTT ready
+            0x00, 0x00, 0x11, 0x30,  // observed block 4400
+        };
+        CHECK_EQ_U(sizeof(want), kJsccFeedbackSize);
+        CHECK_EQ_U(encode_jscc_feedback(f, buf, sizeof(buf)), sizeof(want));
+        check_bytes(buf, want, sizeof(want));
+        const Decoded d = decode(want, sizeof(want));
+        if (const JsccFeedback* v = expect<JsccFeedback>(d)) {
+            CHECK(*v == f);
+        }
+        CHECK(std::holds_alternative<DecodeError>(
+            decode(want, sizeof(want) - 1)));
+        uint8_t bad_flags[kJsccFeedbackSize];
+        std::memcpy(bad_flags, want, sizeof(want));
+        bad_flags[32] = 0x80;
+        CHECK(std::get<DecodeError>(decode(bad_flags, sizeof(bad_flags))) ==
+              DecodeError::kInvalidField);
+    }
+
     // ---- error paths -------------------------------------------------------
     {
         // Wrong magic.

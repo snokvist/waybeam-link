@@ -314,15 +314,26 @@ class LossInjector:
         self.rng = [random.Random(args.seed + adapter * 0x9E3779B1)
                     for adapter in range(paths)]
         self.correlated = {}
+        try:
+            self.step_levels = [int(value) for value in
+                                args.loss_step_levels.split(",")]
+        except ValueError as error:
+            raise ValueError("loss step levels must be comma-separated integers") from error
+        if (not self.step_levels or any(value < 0 or value > 1000
+                                        for value in self.step_levels)):
+            raise ValueError("loss step levels must be in [0, 1000]")
+        if args.loss_step_dwell_blocks <= 0:
+            raise ValueError("loss step dwell blocks must be positive")
 
-    def delivered(self, ordinal, adapter):
+    def delivered(self, ordinal, adapter, block_ordinal=0):
         if self.args.path_correlation == "correlated":
             if ordinal not in self.correlated:
-                self.correlated[ordinal] = self._delivered(ordinal, 0)
+                self.correlated[ordinal] = self._delivered(
+                    ordinal, 0, block_ordinal)
             return self.correlated[ordinal]
-        return self._delivered(ordinal, adapter)
+        return self._delivered(ordinal, adapter, block_ordinal)
 
-    def _delivered(self, ordinal, adapter):
+    def _delivered(self, ordinal, adapter, block_ordinal):
         model = self.args.loss_model
         if model == "none":
             return True
@@ -339,12 +350,19 @@ class LossInjector:
             return self.rng[adapter].randrange(1000) >= threshold
         if model == "high-frequency":
             return self.rng[adapter].randrange(1000) >= self.args.loss_end_permille
+        if model == "stepped":
+            level = self.step_levels[
+                (block_ordinal // self.args.loss_step_dwell_blocks) %
+                len(self.step_levels)]
+            return self.rng[adapter].randrange(1000) >= level
         raise ValueError(f"unknown loss model {model}")
 
 
 def replay_blocks(records, args):
     if args.estimator_margin < 0:
         raise ValueError("estimator margin must be non-negative")
+    if args.transition_guard_blocks < 0:
+        raise ValueError("transition guard blocks must be non-negative")
     blocks = [record for record in records if record.get("type") == "block"]
     deadline_ms = (int(records[0]["deadline_ms"]) if args.deadline_ms is None
                    else args.deadline_ms)
@@ -365,7 +383,10 @@ def replay_blocks(records, args):
     parity_selected_total = 0
     estimator_underpredicted = 0
     repair_demand_censored = 0
-    for block in blocks:
+    transition_guard_remaining = 0
+    transition_guard_activations = 0
+    transition_guard_blocks = 0
+    for block_ordinal, block in enumerate(blocks):
         predicted_sample = estimator.predict()
         k = int(block["source_k"])
         predicted_loss = (math.ceil(predicted_sample * k / 1000)
@@ -373,14 +394,20 @@ def replay_blocks(records, args):
                           else predicted_sample)
         predicted_loss += args.estimator_margin
         recorded_parity = int(block["parity_m"])
+        guard_active = args.fec == "adaptive" and transition_guard_remaining > 0
         if args.fec == "adaptive":
-            selected_parity = min(
+            adaptive_parity = min(
                 recorded_parity, args.estimator_cap,
                 max(args.estimator_floor, predicted_loss))
+            selected_parity = recorded_parity if guard_active else adaptive_parity
         elif args.fec == "on":
             selected_parity = recorded_parity
+            adaptive_parity = selected_parity
         else:
             selected_parity = 0
+            adaptive_parity = 0
+        if guard_active:
+            transition_guard_blocks += 1
         parity_available_total += recorded_parity
         parity_selected_total += selected_parity
         received = set()
@@ -407,7 +434,8 @@ def replay_blocks(records, args):
                         retransmit_finish_us,
                         min(int(path["arrival_offset_us"]) for path in accepted_retx))
             else:
-                delivered = any(injector.delivered(global_packet, adapter)
+                delivered = any(injector.delivered(
+                                    global_packet, adapter, block_ordinal)
                                 for adapter in range(paths))
                 if delivered:
                     arrival_finish_us = max(arrival_finish_us,
@@ -431,6 +459,12 @@ def replay_blocks(records, args):
                            if args.estimator_target == "repair-rate" and k
                            else observed_demand)
         estimator.observe(observed_sample)
+        if guard_active:
+            transition_guard_remaining -= 1
+        if (args.fec == "adaptive" and args.transition_guard_blocks and
+                adaptive_parity < observed_demand and not guard_active):
+            transition_guard_remaining = args.transition_guard_blocks
+            transition_guard_activations += 1
         deadline_us = deadline_ms * 1000
         if sources >= k:
             outcome, reason = "fast", "all_sources_received"
@@ -463,6 +497,7 @@ def replay_blocks(records, args):
             "observed_loss_symbols": observed_loss,
             "observed_repair_demand_symbols": observed_demand,
             "repair_demand_censored": demand_censored,
+            "transition_guard_active": guard_active,
             "predicted_loss_symbols": predicted_loss,
             "parity_available_m": recorded_parity,
             "parity_m": selected_parity,
@@ -488,6 +523,7 @@ def replay_blocks(records, args):
             "floor": args.estimator_floor,
             "cap": args.estimator_cap,
             "margin": args.estimator_margin,
+            "transition_guard_blocks": args.transition_guard_blocks,
         } if args.fec == "adaptive" else None),
         "arq": args.arq,
         "rtt_ms": args.rtt_ms,
@@ -500,6 +536,10 @@ def replay_blocks(records, args):
         "estimator_underpredicted_blocks": (
             estimator_underpredicted if args.fec == "adaptive" else None),
         "repair_demand_censored_blocks": repair_demand_censored,
+        "transition_guard_activations": (
+            transition_guard_activations if args.fec == "adaptive" else None),
+        "transition_guard_blocks": (
+            transition_guard_blocks if args.fec == "adaptive" else None),
         **counts,
     })
     return decisions
@@ -512,27 +552,32 @@ def replay_matrix(records, args):
         ("burst", "independent"),
         ("burst", "correlated"),
         ("incremental", "independent"),
+        ("stepped", "independent"),
+        ("stepped", "correlated"),
         ("low-frequency", "independent"),
         ("low-frequency", "correlated"),
         ("high-frequency", "independent"),
         ("high-frequency", "correlated"),
     )
     ablations = (
-        ("fec_only", "on", "off", "off"),
-        ("fec_arq", "on", "eligible", "off"),
-        ("fec_arq_discard", "on", "eligible", "on"),
-        ("adaptive_fec_arq_discard", "adaptive", "eligible", "on"),
-        ("arq_discard", "off", "eligible", "on"),
+        ("fec_only", "on", "off", "off", 0),
+        ("fec_arq", "on", "eligible", "off", 0),
+        ("fec_arq_discard", "on", "eligible", "on", 0),
+        ("adaptive_fec_arq_discard", "adaptive", "eligible", "on", 0),
+        ("adaptive_guarded_fec_arq_discard", "adaptive", "eligible", "on",
+         args.transition_guard_blocks),
+        ("arq_discard", "off", "eligible", "on", 0),
     )
     results = []
     for loss_model, correlation in loss_scenarios:
-        for name, fec, arq, discard in ablations:
+        for name, fec, arq, discard, guard_blocks in ablations:
             run = copy.copy(args)
             run.loss_model = loss_model
             run.path_correlation = correlation
             run.fec = fec
             run.arq = arq
             run.deadline_discard = discard
+            run.transition_guard_blocks = guard_blocks
             summary = replay_blocks(records, run)[-1]
             summary["scenario"] = f"{loss_model}:{correlation}"
             summary["ablation"] = name
@@ -591,7 +636,7 @@ def write_jsonl(path, records):
     pathlib.Path(path).write_text(text, encoding="utf-8")
 
 
-def add_estimator_args(parser):
+def add_estimator_args(parser, transition_guard_blocks=0):
     parser.add_argument("--estimator-window", type=int, default=120)
     parser.add_argument("--estimator-quantile", type=float, default=1.0)
     parser.add_argument("--estimator-min-samples", type=int, default=20)
@@ -602,6 +647,10 @@ def add_estimator_args(parser):
     parser.add_argument("--estimator-target",
                         choices=("repair-rate", "repair-demand"),
                         default="repair-rate")
+    parser.add_argument("--transition-guard-blocks", type=int,
+                        default=transition_guard_blocks,
+                        help="after insufficient adaptive parity, use captured "
+                             "fixed parity for this many subsequent blocks")
 
 
 def parse_args(argv):
@@ -623,7 +672,8 @@ def parse_args(argv):
     run.add_argument("--deadline-ms", type=int)
     run.add_argument("--output")
     run.add_argument("--loss-model", choices=("recorded", "none", "burst",
-                     "incremental", "low-frequency", "high-frequency"),
+                     "incremental", "stepped", "low-frequency",
+                     "high-frequency"),
                      default="recorded")
     run.add_argument("--seed", type=int, default=1)
     run.add_argument("--paths", type=int)
@@ -633,6 +683,9 @@ def parse_args(argv):
     run.add_argument("--loss-end-permille", type=int, default=100)
     run.add_argument("--loss-period", type=int, default=100)
     run.add_argument("--burst-length", type=int, default=10)
+    run.add_argument("--loss-step-levels",
+                     default="0,50,100,150,200,150,100,50")
+    run.add_argument("--loss-step-dwell-blocks", type=int, default=40)
     run.add_argument("--rtt-ms", type=int, default=4)
     run.add_argument("--fec", choices=("on", "off", "adaptive"), default="on")
     run.add_argument("--arq", choices=("off", "eligible", "force"), default="eligible")
@@ -648,8 +701,11 @@ def parse_args(argv):
     matrix.add_argument("--loss-end-permille", type=int, default=100)
     matrix.add_argument("--loss-period", type=int, default=100)
     matrix.add_argument("--burst-length", type=int, default=10)
+    matrix.add_argument("--loss-step-levels",
+                        default="0,50,100,150,200,150,100,50")
+    matrix.add_argument("--loss-step-dwell-blocks", type=int, default=40)
     matrix.add_argument("--rtt-ms", type=int, default=4)
-    add_estimator_args(matrix)
+    add_estimator_args(matrix, transition_guard_blocks=20)
     return parser.parse_args(argv)
 
 

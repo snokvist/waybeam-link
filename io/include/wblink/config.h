@@ -37,6 +37,14 @@ struct StreamFecCfg {
     uint16_t min_k = 3;
 };
 
+struct JsccShadowCfg {
+    uint16_t fec_floor_permille = 0;
+    uint16_t fec_cap_permille = 0;
+    uint32_t arq_guard_us = 0;
+    uint32_t feedback_timeout_ms = 0;
+    uint16_t min_rtt_samples = 0;
+};
+
 struct NodeCfg {
     uint16_t originator = 0;
     Role role = Role::kRx;
@@ -70,8 +78,10 @@ struct StreamCfg {
     std::optional<uint16_t> originator;
     // RTP in-streams (§4.1): "size" (default) / "h264" / "h265".
     RtpClassifier classifier = RtpClassifier::kSize;
+    FrameArqMode arq_mode = FrameArqMode::kIdrOnly;
     // §14.1 FEC for frame-shm streams (ignored on udp streams).
     StreamFecCfg fec;
+    std::optional<JsccShadowCfg> jscc_shadow;
 };
 
 // §9.1 cascade + §9.4/§9.5/§9.7/§9.8/§9.9 constants (seeds; RE-DERIVE per
@@ -108,7 +118,8 @@ struct SelectPolicy {
 // encoder; on the craft this is the ONLY writer of video0.bitrate.
 struct VencCfg {
     std::string host = "127.0.0.1:80";
-    bool enabled = false;
+    bool enabled = false;           // bitrate writes (§9.6)
+    bool recovery_enabled = false;  // rate-limited IDR requests (§3.9)
 };
 
 struct ArqPolicy {

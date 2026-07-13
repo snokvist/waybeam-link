@@ -85,6 +85,30 @@ int main() {
         CHECK_EQ_U(ra.stats().frames_fec, 0u);
     }
 
+    // --- §3.10 repair feedback is causal and ready after 20 blocks ---------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 250, 100, 3));
+        FrameReassembler ra(rc);
+        for (uint8_t i = 0; i < 20; ++i) {
+            const auto blob = make_frame(3000, false, i);
+            for (const Sym& s : produce(ff, blob)) {
+                ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                        1000 + i, noop);
+            }
+        }
+        const JsccRepairFeedbackState f = ra.jscc_feedback();
+        CHECK(f.have_observation);
+        CHECK(f.repair_ready);
+        CHECK_EQ_U(f.repair_samples, 20);
+        CHECK_EQ_U(f.repair_demand_permille, 0);
+        CHECK_EQ_U(f.observed_block_id, 19);
+        ra.reset_stats();
+        const JsccRepairFeedbackState reset = ra.jscc_feedback();
+        CHECK(!reset.have_observation);
+        CHECK(!reset.repair_ready);
+        CHECK_EQ_U(reset.repair_samples, 0);
+    }
+
     // --- FEC recovery: drop sources, recover from repairs -------------------
     {
         FrameFramer ff(framer_cfg(FecScheme::kRlc256, 300, 100, 3));

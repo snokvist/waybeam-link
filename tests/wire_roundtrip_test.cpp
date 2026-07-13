@@ -152,6 +152,27 @@ int main() {
     }
 
     for (int i = 0; i < kIters; ++i) {
+        JsccFeedback f;
+        f.prefix = random_prefix(rng);
+        f.target_originator = rng.u16();
+        f.target_session = rng.u32();
+        f.target_stream_id = rng.u8();
+        f.feedback_epoch = rng.u32();
+        f.repair_demand_permille = rng.u16();
+        f.rtt_p95_us = rng.u32();
+        f.repair_samples = rng.u16();
+        f.rtt_samples = rng.u16();
+        f.valid_flags = rng.u8() & jscc_feedback_flags::kKnownMask;
+        f.observed_block_id = rng.u32();
+        const size_t n = encode_jscc_feedback(f, buf, sizeof(buf));
+        CHECK_EQ_U(n, kJsccFeedbackSize);
+        const Decoded d = decode(buf, n);
+        const JsccFeedback* v = std::get_if<JsccFeedback>(&d);
+        CHECK(v != nullptr);
+        if (v != nullptr) CHECK(*v == f);
+    }
+
+    for (int i = 0; i < kIters; ++i) {
         Heartbeat hb;
         hb.prefix = random_prefix(rng);
         const size_t n = encode_heartbeat(hb, buf, sizeof(buf));

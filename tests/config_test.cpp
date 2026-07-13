@@ -187,6 +187,7 @@ int main() {
           "node": {"originator": 7, "role": "tx"},
           "streams": [{ "stream_id": 0, "stream_type": "RTP", "dir": "in",
             "bind": { "kind": "frame-shm", "name": "venc_frame" },
+            "arq_mode": "all-frames",
             "fec": { "scheme": "rlc256", "i_rate_permille": 300,
                      "p_rate_permille": 120, "min_k": 4 } }]})");
         CHECK(bool(r));
@@ -195,11 +196,20 @@ int main() {
             const StreamCfg& s = r.value->streams[0];
             CHECK(s.bind.kind == BindKind::kFrameShm);
             CHECK(s.bind.name == "venc_frame");
+            CHECK(s.arq_mode == FrameArqMode::kAllFrames);
             CHECK(s.fec.scheme == FecScheme::kRlc256);
             CHECK_EQ_U(s.fec.i_rate_permille, 300u);
             CHECK_EQ_U(s.fec.p_rate_permille, 120u);
             CHECK_EQ_U(s.fec.min_k, 4u);
         }
+        expect_error(R"({"node":{"originator":7,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"udp","listen":"127.0.0.1:5600"},
+            "arq_mode":"all-frames"}]})", "frame-shm ingress");
+        expect_error(R"({"node":{"originator":7,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "arq_mode":"sometimes"}]})", "idr-only");
     }
 
     // --- air "kernel-monitor" backend + adapter ifname ---------------------
@@ -345,7 +355,8 @@ int main() {
             "failsafe_hold_s": 0.5, "failsafe_step_s": 0.5,
             "min_profile": 1, "max_profile": 5,
             "rung_rssi_floor_dbm": [-90, -87, -84]}},
-          "venc": {"host": "127.0.0.1:8085", "enabled": true},
+          "venc": {"host": "127.0.0.1:8085", "enabled": true,
+                   "recovery_enabled": true},
           "loopback": {"rssi_dbm": -55,
             "rssi_fade": {"start_ms": 1000, "end_ms": 2000, "dbm": -92}}})");
         CHECK(bool(r));
@@ -360,6 +371,7 @@ int main() {
             CHECK(c.policy.select.rung_rssi_floor_dbm[2] == -84);
             CHECK(c.policy.select.rung_rssi_floor_dbm[3] == -80);  // seed
             CHECK(c.venc.enabled);
+            CHECK(c.venc.recovery_enabled);
             CHECK(c.venc.host == "127.0.0.1:8085");
             CHECK(c.loopback.rssi_dbm == -55);
             CHECK(c.loopback.rssi_fade.has_value());
@@ -371,6 +383,7 @@ int main() {
         CHECK(bool(d));
         if (d) {
             CHECK(!d.value->venc.enabled);
+            CHECK(!d.value->venc.recovery_enabled);
             CHECK(d.value->policy.select.pressure_escape_s == 2.0);
             CHECK(d.value->policy.select.rung_rssi_floor_dbm[0] == -88);
             CHECK_EQ_U(d.value->policy.select.max_profile, 255);
@@ -387,6 +400,39 @@ int main() {
         expect_error(R"({"node":{"originator":1,"role":"rx"},
           "loopback":{"rssi_fade":{"start_ms":5,"end_ms":5,"dbm":-90}}})",
                      "end_ms");
+    }
+
+    // --- optional §14.2 JSCC TX shadow has no implicit inputs ---------------
+    {
+        auto r = load_config_json(R"({
+          "node":{"originator":17,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
+              "arq_guard_us":500,"feedback_timeout_ms":500,
+              "min_rtt_samples":20}}]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->streams[0].jscc_shadow.has_value());
+            const auto& js = *r.value->streams[0].jscc_shadow;
+            CHECK_EQ_U(js.fec_floor_permille, 20);
+            CHECK_EQ_U(js.fec_cap_permille, 400);
+            CHECK_EQ_U(js.arq_guard_us, 500);
+            CHECK_EQ_U(js.feedback_timeout_ms, 500);
+            CHECK_EQ_U(js.min_rtt_samples, 20);
+        }
+        expect_error(R"({"node":{"originator":17,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"udp","listen":"127.0.0.1:5600"},
+            "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
+              "arq_guard_us":500,"feedback_timeout_ms":500,
+              "min_rtt_samples":20}}]})", "frame-shm ingress");
+        expect_error(R"({"node":{"originator":17,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "jscc_shadow":{"fec_floor_permille":500,"fec_cap_permille":400,
+              "arq_guard_us":500,"feedback_timeout_ms":500,
+              "min_rtt_samples":20}}]})", "floor <= cap");
     }
 
     // --- profile table -------------------------------------------------------

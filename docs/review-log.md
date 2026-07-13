@@ -647,6 +647,85 @@ behavior is explicitly untouched.
 **Amended:** §15.5 (UDP-air bench synthetic-loss control). Code follows
 separately.
 
+## Pass 31 — explicit JSCC feedback and truthful TX shadow (2026-07-13)
+
+The protection-aware estimator lives on RX, while exact `k`, frame class,
+transport queueing, and FEC actuation live on TX. A per-frame controller cannot
+be wired honestly by joining independent one-second stats snapshots or by
+assuming missing RTT/airtime values. Enlarging the fixed v0 `LINK_REPORT` would
+also be wire-incompatible under the same version.
+
+Add a separate fixed-size `JSCC_FEEDBACK` packet carrying normalized causal
+repair demand, measured P95 ARQ RTT, readiness, estimator sample count, and the
+newest observed block. TX caches only exact-target, monotonic feedback. The
+first runtime integration is non-enforcing: it combines fresh feedback with
+TX-local frame/deadline/airtime inputs and reports the pure §14.2 decision.
+Missing or stale input explicitly selects authored fixed-policy fallback; zero
+must never stand in for an unavailable measurement. Shadow floor, cap, guard,
+freshness, and RTT sample threshold are operator-authored and have no implicit
+optimistic defaults.
+
+**Amended:** §3.1/§3.10 (new additive packet); §14.2 (runtime shadow validity
+and optional configuration); §15.2 (frame-SHM scope). Code follows separately.
+
+## Pass 32 — make RTT readiness independently checkable (2026-07-13)
+
+Codec integration exposed that Pass 31 carried repair sample count but not RTT
+sample count. Because `min_rtt_samples` is authored on TX, an RX-only readiness
+bit cannot prove the TX threshold was met. Add `rtt_samples` and define the RTT
+valid bit as "estimate present"; TX applies its own configured minimum. This
+widens only the new, not-yet-deployed additive packet from 35 to 37 bytes.
+
+**Amended:** §3.10 (`rtt_samples`, offsets, size, and readiness semantics). Code
+follows separately.
+
+## Pass 33 — auditable runtime-shadow telemetry (2026-07-13)
+
+A non-enforcing controller is useful only if an operator can prove which inputs
+produced each latest decision and why fallback was selected. Add TX stream
+stats for decision counts, validity, named fallback/reason, all §14.2 numeric
+inputs, outputs, and feedback freshness. Add RX rolling RTT sample count/P95 so
+the feedback readiness input is independently visible. All fields are additive
+and zero/empty where the shadow does not apply; no actuator is authorized.
+
+**Amended:** §15.3 (runtime decision-shadow and rolling RTT telemetry). Code
+follows separately.
+
+## Pass 34 — separate decoder recovery from bitrate ownership (2026-07-13)
+
+The Ethernet shadow bench proved that `RECOVERY_REQUEST` reached vehicle TX but
+all requests failed when `venc.enabled=false`. That flag currently gates both
+the persistent bitrate writer and the independent `/request/idr` actuator. A
+bench must not claim bitrate ownership merely to bootstrap a decoder or gather
+ARQ RTT samples.
+
+Add a separate, default-off `venc.recovery_enabled` permission. It authorizes
+only the existing rate-limited IDR request; `venc.enabled` retains its existing
+bitrate-write meaning. The two permissions are independent so the real encoder
+settings remain operator-owned during Ethernet measurements.
+
+**Amended:** §3.9 (independent recovery permission); §15.2 (configuration and
+defaults). Code follows separately.
+
+## Pass 35 — bounded P-frame ARQ experiment (2026-07-13)
+
+Repeated high-parity replay rejected a reactive fixed-FEC guard because no
+causal repair-demand estimator can protect the first frame of an unseen upward
+loss step. The existing pre-diversity metric is lifetime-based, and its 100 ms
+report cadence is not a frame-leading signal. Ethernet measurement instead
+showed a 1 ms P95 NACK-to-retransmit loop, inside the 16 ms P-frame deadline.
+
+Add an opt-in frame-SHM `arq_mode:"all-frames"` experiment. A new
+`PFRAME_ARQ` DATA flag makes non-IDR frames retransmit-eligible without granting
+the longer IDR deadline; the existing `ARQ` flag retains its importance and
+I-frame deadline meaning. Unknown receivers ignore the additive bit and fail
+safe as IDR-only. Default behavior remains unchanged, fixed FEC remains
+authoritative, and `arq_frames` makes the experiment auditable.
+
+**Amended:** §3.2/§3.3 (flag and NACK eligibility); §4.1/§5.1a/§5.3/§6.4
+(classification, deadline, and resend semantics); §15.2/§15.3 (configuration
+and telemetry). Code follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

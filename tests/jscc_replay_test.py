@@ -146,7 +146,7 @@ class JsccReplayTest(unittest.TestCase):
             "matrix", str(self.root / "events.jsonl"),
             "--output", str(self.root / "matrix.json")])
         matrix = jscc_replay.replay_matrix(records, matrix_args)
-        self.assertEqual(45, len(matrix))
+        self.assertEqual(66, len(matrix))
         self.assertEqual("recorded:independent", matrix[0]["scenario"])
         self.assertEqual("fec_only", matrix[0]["ablation"])
 
@@ -211,6 +211,32 @@ class JsccReplayTest(unittest.TestCase):
         decisions = jscc_replay.replay_blocks(records, replay_args)
         self.assertEqual(1, decisions[0]["predicted_loss_symbols"])
         self.assertEqual(1, decisions[0]["parity_m"])
+
+    def test_transition_guard_uses_fixed_parity_after_first_miss(self):
+        args = jscc_replay.parse_args([
+            "build-events", "--tx-packets", str(self.root / "tx-packets.jsonl"),
+            "--rx-packets", str(self.root / "rx-packets.jsonl"),
+            "--output", str(self.root / "events.jsonl")])
+        records = jscc_replay.build_event_trace(args)
+        replay_args = jscc_replay.parse_args([
+            "replay", str(self.root / "events.jsonl"), "--fec", "adaptive",
+            "--arq", "off", "--estimator-cold-start", "0",
+            "--estimator-min-samples", "20", "--transition-guard-blocks", "2"])
+        decisions = jscc_replay.replay_blocks(records, replay_args)
+
+        self.assertFalse(decisions[0]["transition_guard_active"])
+        self.assertFalse(decisions[1]["transition_guard_active"])
+        self.assertEqual(1, decisions[-1]["transition_guard_activations"])
+
+        # Add a third block after the miss; its captured fixed repair is used.
+        third = dict(records[1])
+        third["frame"] = 2
+        third["block"] = 2
+        records.append(third)
+        decisions = jscc_replay.replay_blocks(records, replay_args)
+        self.assertTrue(decisions[2]["transition_guard_active"])
+        self.assertEqual(third["parity_m"], decisions[2]["parity_m"])
+        self.assertEqual(1, decisions[-1]["transition_guard_blocks"])
 
 
 if __name__ == "__main__":

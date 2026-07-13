@@ -355,8 +355,10 @@ tools/jscc_ethernet_bench.sh start
 ```
 
 The dedicated Ethernet bench leaves encoder bitrate control manual by default,
-so changes made through venc remain stable. Set `VENC_CONTROL_ENABLED=1` when
-testing waybeam-link's adaptive bitrate actuator instead.
+so changes made through venc remain stable. Decoder-recovery IDR requests stay
+enabled independently and do not write encoder configuration. Set
+`VENC_CONTROL_ENABLED=1` only when testing waybeam-link's adaptive bitrate
+actuator instead.
 On the dual-core SSC338Q it also defaults the TX/FEC main thread to CPU 1 and
 the SHM readiness thread to CPU 0; override with `VEHICLE_MAIN_CPU` and
 `VEHICLE_SHM_CPU` when testing scheduler placement.
@@ -379,6 +381,11 @@ tools/jscc_ethernet_bench.sh recover-video
 # In-process UDP loss ramp; estimator state is preserved and loss resets to 0:
 RAMP_DWELL_S=4 tools/jscc_ethernet_bench.sh loss-ramp
 ```
+
+For the opt-in P-frame ARQ Ethernet experiment, restart with
+`ARQ_MODE=all-frames tools/jscc_ethernet_bench.sh start`. This stamps
+non-IDRs retransmit-eligible while retaining the P-frame deadline; the default
+is `idr-only`.
 
 The stable application SHM name is `venc_frame_out` (POSIX object
 `/venc_frame_out`). `status` prints the active name and consumer mode. To run

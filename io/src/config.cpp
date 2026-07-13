@@ -219,6 +219,23 @@ Result<Config> load_config_json(const std::string& json_text) {
                         ": classifier must be \"size\", \"h264\" or \"h265\"");
                 }
             }
+            if (s.contains("arq_mode")) {
+                if (sc.bind.kind != BindKind::kFrameShm || sc.dir != Dir::kIn) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": arq_mode is only valid on frame-shm ingress");
+                }
+                const std::string mode = s.at("arq_mode").get<std::string>();
+                if (mode == "idr-only") {
+                    sc.arq_mode = FrameArqMode::kIdrOnly;
+                } else if (mode == "all-frames") {
+                    sc.arq_mode = FrameArqMode::kAllFrames;
+                } else {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": arq_mode must be \"idr-only\" or \"all-frames\"");
+                }
+            }
             // §14.1 per-stream FEC (frame-shm only).
             if (s.contains("fec")) {
                 const json& f = s.at("fec");
@@ -234,6 +251,33 @@ Result<Config> load_config_json(const std::string& json_text) {
                         "stream " + std::to_string(sid) +
                         ": fec.scheme is only valid on a frame-shm binding (§14.1)");
                 }
+            }
+            if (s.contains("jscc_shadow")) {
+                if (sc.bind.kind != BindKind::kFrameShm || sc.dir != Dir::kIn) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": jscc_shadow is only valid on frame-shm ingress");
+                }
+                const json& js = s.at("jscc_shadow");
+                JsccShadowCfg jc;
+                jc.fec_floor_permille = js.at("fec_floor_permille").get<uint16_t>();
+                jc.fec_cap_permille = js.at("fec_cap_permille").get<uint16_t>();
+                jc.arq_guard_us = js.at("arq_guard_us").get<uint32_t>();
+                jc.feedback_timeout_ms =
+                    js.at("feedback_timeout_ms").get<uint32_t>();
+                jc.min_rtt_samples = js.at("min_rtt_samples").get<uint16_t>();
+                if (jc.fec_floor_permille > jc.fec_cap_permille ||
+                    jc.fec_cap_permille > 4000) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": jscc_shadow FEC rates require floor <= cap <= 4000");
+                }
+                if (jc.feedback_timeout_ms == 0 || jc.min_rtt_samples == 0) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": jscc_shadow timeout and min_rtt_samples must be positive");
+                }
+                sc.jscc_shadow = jc;
             }
             if (sc.bind.kind == BindKind::kFrameShm) {
                 ++shm_bindings;
@@ -419,6 +463,8 @@ Result<Config> load_config_json(const std::string& json_text) {
             const json& v = j.at("venc");
             cfg.venc.host = v.value("host", cfg.venc.host);
             cfg.venc.enabled = v.value("enabled", cfg.venc.enabled);
+            cfg.venc.recovery_enabled =
+                v.value("recovery_enabled", cfg.venc.recovery_enabled);
         }
 
         // air ("udp" = dev backend, not §15; "radio" = devourer, §3.0 —

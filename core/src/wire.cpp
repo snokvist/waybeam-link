@@ -137,6 +137,29 @@ Decoded decode_recovery_request(const uint8_t* buf, size_t len) {
     return r;
 }
 
+Decoded decode_jscc_feedback(const uint8_t* buf, size_t len) {
+    if (len != kJsccFeedbackSize) {
+        return len < kJsccFeedbackSize ? DecodeError::kTruncated
+                                      : DecodeError::kLengthMismatch;
+    }
+    JsccFeedback f;
+    f.prefix = decode_prefix(buf);
+    f.target_originator = be16_read(buf + 11);
+    f.target_session = be32_read(buf + 13);
+    f.target_stream_id = buf[17];
+    f.feedback_epoch = be32_read(buf + 18);
+    f.repair_demand_permille = be16_read(buf + 22);
+    f.rtt_p95_us = be32_read(buf + 24);
+    f.repair_samples = be16_read(buf + 28);
+    f.rtt_samples = be16_read(buf + 30);
+    f.valid_flags = buf[32];
+    f.observed_block_id = be32_read(buf + 33);
+    if ((f.valid_flags & ~jscc_feedback_flags::kKnownMask) != 0) {
+        return DecodeError::kInvalidField;
+    }
+    return f;
+}
+
 }  // namespace
 
 Decoded decode(const uint8_t* buf, size_t len) {
@@ -166,6 +189,8 @@ Decoded decode(const uint8_t* buf, size_t len) {
             return decode_csa(buf, len);
         case PacketType::kRecoveryRequest:
             return decode_recovery_request(buf, len);
+        case PacketType::kJsccFeedback:
+            return decode_jscc_feedback(buf, len);
         default:
             return DecodeError::kUnknownType;
     }
@@ -270,6 +295,25 @@ size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,
     be32_write(out + 13, pkt.target_session);
     out[17] = pkt.target_stream_id;
     return kRecoveryRequestSize;
+}
+
+size_t encode_jscc_feedback(const JsccFeedback& pkt, uint8_t* out, size_t cap) {
+    if (out == nullptr || cap < kJsccFeedbackSize ||
+        (pkt.valid_flags & ~jscc_feedback_flags::kKnownMask) != 0) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kJsccFeedback, out);
+    be16_write(out + 11, pkt.target_originator);
+    be32_write(out + 13, pkt.target_session);
+    out[17] = pkt.target_stream_id;
+    be32_write(out + 18, pkt.feedback_epoch);
+    be16_write(out + 22, pkt.repair_demand_permille);
+    be32_write(out + 24, pkt.rtt_p95_us);
+    be16_write(out + 28, pkt.repair_samples);
+    be16_write(out + 30, pkt.rtt_samples);
+    out[32] = pkt.valid_flags;
+    be32_write(out + 33, pkt.observed_block_id);
+    return kJsccFeedbackSize;
 }
 
 }  // namespace wblink

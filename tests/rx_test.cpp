@@ -76,6 +76,7 @@ struct Harness {
 
 constexpr uint8_t EOB = data_flags::kEndOfBlock;
 constexpr uint8_t ARQ = data_flags::kArq;
+constexpr uint8_t PARQ = data_flags::kPframeArq;
 
 }  // namespace
 
@@ -99,6 +100,22 @@ int main() {
         h2.feed(0, 1, 0, 0, 500);
         h2.feed(0, 2, 0, 0, 2000);  // window expired between 2nd and 3rd
         CHECK_EQ_U(h2.engine.streams().size(), 0);
+    }
+
+    // --- opt-in P-frame ARQ is eligible but keeps the short deadline --------
+    {
+        Harness h;
+        h.latch();
+        h.feed(0, 4, 1, PARQ, 10);
+        h.feed(1, 5, 1, PARQ | EOB, 11);
+        h.feed(0, 5, 1, PARQ | EOB, 12);
+        h.feed(1, 4, 1, PARQ, 13);
+        CHECK_EQ_U(h.engine.build_nacks(14).size(), 1);
+        h.engine.tick(25, h.sink());
+        CHECK_EQ_U(h.counters().dropped_deadline, 0);
+        h.engine.tick(26, h.sink());  // first seen 10 + P deadline 16
+        CHECK_EQ_U(h.counters().dropped_deadline, 1);
+        CHECK_EQ_U(h.engine.build_nacks(27).size(), 0);
     }
 
     // --- non-matching originator never latches ------------------------------
@@ -168,6 +185,8 @@ int main() {
         // Single NACK ⇒ both anchors agree (bucket 3 = ≤8 ms).
         CHECK_EQ_U(h.counters().nack_rtt_hist[3], 1);
         CHECK_EQ_U(h.counters().nack_rtt_max_ms, 6);
+        CHECK_EQ_U(h.counters().nack_rtt_samples, 1);
+        CHECK_EQ_U(h.counters().nack_rtt_p95_us, 6000);
         CHECK_EQ_U(h.counters().arq_rec_hist[3], 1);
         CHECK_EQ_U(h.counters().arq_rec_max_ms, 6);
     }
@@ -288,6 +307,8 @@ int main() {
         // recovery   = 30-12 = 18 ms (bucket 5 = ≤32).
         CHECK_EQ_U(h.counters().nack_rtt_hist[2], 1);
         CHECK_EQ_U(h.counters().nack_rtt_max_ms, 3);
+        CHECK_EQ_U(h.counters().nack_rtt_samples, 1);
+        CHECK_EQ_U(h.counters().nack_rtt_p95_us, 3000);
         CHECK_EQ_U(h.counters().arq_rec_hist[5], 1);
         CHECK_EQ_U(h.counters().arq_rec_max_ms, 18);
     }

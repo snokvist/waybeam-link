@@ -29,6 +29,15 @@ size_t rtt_bucket(uint64_t ms) {
     return b;
 }
 
+uint32_t p95_us(const std::deque<uint32_t>& samples) {
+    if (samples.empty()) return 0;
+    std::deque<uint32_t> ordered = samples;
+    std::sort(ordered.begin(), ordered.end());
+    const size_t rank = std::max<size_t>(
+        1, (ordered.size() * 950u + 999u) / 1000u);
+    return ordered[rank - 1] * 1000u;
+}
+
 }  // namespace
 
 RxEngine::RxEngine(const RxPolicy& policy, std::vector<WantSpec> wants,
@@ -266,6 +275,11 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
                 ++s->counters.nack_rtt_hist[rtt_bucket(rtt)];
                 s->counters.nack_rtt_max_ms =
                     std::max(s->counters.nack_rtt_max_ms, rtt);
+                s->nack_rtt_ms.push_back(static_cast<uint32_t>(
+                    std::min<uint64_t>(rtt, UINT32_MAX)));
+                if (s->nack_rtt_ms.size() > 120) {
+                    s->nack_rtt_ms.pop_front();
+                }
                 ++s->counters.arq_rec_hist[rtt_bucket(rec)];
                 s->counters.arq_rec_max_ms =
                     std::max(s->counters.arq_rec_max_ms, rec);
@@ -285,8 +299,12 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
         if (b.first_seen_ms == 0) {
             b.first_seen_ms = now_ms;
         }
-        b.arq = b.arq || (v.hdr.data_flags & data_flags::kArq) != 0;
-        b.deadline_ms = block_deadline(*s, b.first_seen_ms, b.arq);
+        b.arq = b.arq ||
+                (v.hdr.data_flags &
+                 (data_flags::kArq | data_flags::kPframeArq)) != 0;
+        b.iframe_class =
+            b.iframe_class || (v.hdr.data_flags & data_flags::kArq) != 0;
+        b.deadline_ms = block_deadline(*s, b.first_seen_ms, b.iframe_class);
         s->max_block = std::max(s->max_block, v.hdr.block_id);
     }
 
@@ -546,6 +564,9 @@ std::vector<RxStreamInfo> RxEngine::streams() const {
         info.best_effort = s.best_effort;
         info.active_profile = s.active_profile;
         info.counters = s.counters;
+        info.counters.nack_rtt_samples = static_cast<uint16_t>(
+            std::min<size_t>(s.nack_rtt_ms.size(), UINT16_MAX));
+        info.counters.nack_rtt_p95_us = p95_us(s.nack_rtt_ms);
         for (const auto& [adapter, a] : s.adapter_seq) {
             (void)adapter;
             info.counters.prediv_expected += a.expected;
@@ -592,6 +613,7 @@ void RxEngine::reset_stats() {
     // reset mid-flight cannot perturb delivery or the §6.5 stall verdict.
     for (auto& [key, s] : streams_) {
         s.counters = {};
+        s.nack_rtt_ms.clear();
         for (auto& [adapter, a] : s.adapter_seq) {
             (void)adapter;
             a.expected = 0;

@@ -30,6 +30,18 @@ class DashboardSchemaTest(unittest.TestCase):
             "jscc_repair_predicted_parity_symbols",
             "source_symbols_sent", "repair_symbols_sent",
             "fec_oversize_frames", "idr_frames",
+            "nack_rtt_samples", "nack_rtt_p95_us",
+            "jscc_decision_frames", "jscc_valid_decisions",
+            "jscc_fallback_decisions", "jscc_decision_valid",
+            "jscc_fallback", "jscc_reason", "jscc_input_k",
+            "jscc_input_predicted_symbols", "jscc_input_floor_symbols",
+            "jscc_input_cap_symbols", "jscc_input_deadline_us",
+            "jscc_input_source_tx_us", "jscc_input_rtt_p95_us",
+            "jscc_input_resend_us", "jscc_input_guard_us",
+            "jscc_output_parity_symbols", "jscc_output_remaining_us",
+            "jscc_output_arq_eligible", "jscc_output_discard",
+            "jscc_feedback_epoch",
+            "jscc_feedback_age_ms",
         ):
             self.assertIn(f"s.{field}", HTML)
 

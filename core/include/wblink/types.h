@@ -20,6 +20,7 @@ enum class PacketType : uint8_t {
     kHeartbeat = 0x4,
     kCsa = 0x5,
     kRecoveryRequest = 0x6,
+    kJsccFeedback = 0x7,
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -38,7 +39,10 @@ inline constexpr uint8_t kArq = 0x02;
 inline constexpr uint8_t kRetransmit = 0x04;
 inline constexpr uint8_t kFecRepair = 0x08;
 inline constexpr uint8_t kCsaArmed = 0x10;
+inline constexpr uint8_t kPframeArq = 0x20;
 }  // namespace data_flags
+
+enum class FrameArqMode : uint8_t { kIdrOnly, kAllFrames };
 
 // Exact wire sizes (§3.1–3.8, §11.1).
 inline constexpr size_t kCommonPrefixSize = 11;
@@ -48,6 +52,13 @@ inline constexpr size_t kLinkReportSize = 39;
 inline constexpr size_t kHeartbeatSize = 11;
 inline constexpr size_t kCsaSize = 32;
 inline constexpr size_t kRecoveryRequestSize = 18;
+inline constexpr size_t kJsccFeedbackSize = 37;
+
+namespace jscc_feedback_flags {
+inline constexpr uint8_t kRepairReady = 0x01;
+inline constexpr uint8_t kRttReady = 0x02;
+inline constexpr uint8_t kKnownMask = kRepairReady | kRttReady;
+}  // namespace jscc_feedback_flags
 
 // §3.2 — absolute DATA payload ceiling for buffer sizing (Realtek jumbo/A-MSDU
 // rungs reach ~3967 B; 4096 caps it). The EFFECTIVE per-frame budget is

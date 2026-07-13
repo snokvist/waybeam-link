@@ -32,6 +32,7 @@
 #include "wblink/frame_shm.h"
 #include "wblink/frame_shm_format.h"
 #include "wblink/framer.h"
+#include "wblink/jscc_runtime_shadow.h"
 #include "wblink/loss_model.h"
 #include "wblink/power.h"
 #include "wblink/power_file.h"
@@ -665,6 +666,11 @@ struct AirBackend {
 #endif
     }
     bool tx_pending() const { return udp && udp->tx_pending(); }
+    std::optional<uint32_t> estimate_airtime_us(size_t bytes,
+                                                bool include_pending) const {
+        if (!udp) return std::nullopt;
+        return udp->estimate_airtime_us(bytes, include_pending);
+    }
     bool supports_csa() const {
         // UDP intentionally exercises CSA state without a physical retune.
         // Kernel-monitor cannot retune yet and must fail closed: pretending a
@@ -803,13 +809,19 @@ struct TxCore {
         uint8_t stream_type;
         std::optional<Framer> framer;             // udp ingress
         std::optional<FrameFramer> frame_framer;  // frame-shm ingress
+        std::optional<JsccRuntimeShadow> jscc_shadow;
         ResendRing ring;
         ResendScheduler sched;
+        JsccShadowResult jscc_latest;
+        uint64_t jscc_decision_frames = 0;
+        uint64_t jscc_valid_decisions = 0;
+        uint64_t jscc_fallback_decisions = 0;
     };
 
     TxCore(const Config& cfg, uint32_t session, const ProfileTable* table,
            uint8_t table_version)
         : originator_(cfg.node.originator),
+          preferred_originator_(cfg.node.preferred_originator),
           session_(session),
           table_version_(table_version),
           table_(table),
@@ -841,8 +853,8 @@ struct TxCore {
             rc.window_ms = cfg.policy.arq.ring_window_ms;
             rc.byte_budget = cfg.policy.arq.ring_byte_budget;
             Stream st{s.stream_id, s.stream_type, std::nullopt, std::nullopt,
-                      ResendRing(rc),
-                      ResendScheduler(scheduler_policy(cfg), table)};
+                      std::nullopt, ResendRing(rc),
+                      ResendScheduler(scheduler_policy(cfg), table), {}, 0, 0, 0};
             if (s.bind.kind == BindKind::kFrameShm) {
                 // §5.1a: whole-frame ingress from a venc SHM ring. FEC policy
                 // comes from the stream's fec block; MTU from the floor rung.
@@ -851,6 +863,7 @@ struct TxCore {
                 fc.session_id = session;
                 fc.stream_id = s.stream_id;
                 fc.stream_type = s.stream_type;
+                fc.arq_mode = s.arq_mode;
                 fc.fec.scheme = s.fec.scheme;
                 fc.fec.i_rate_permille = s.fec.i_rate_permille;
                 fc.fec.p_rate_permille = s.fec.p_rate_permille;
@@ -858,6 +871,13 @@ struct TxCore {
                 st.frame_framer.emplace(fc);
                 st.frame_framer->set_operating_point(0, table_version,
                                                      max_payload_for(0));
+                if (s.jscc_shadow) {
+                    const JsccShadowCfg& jc = *s.jscc_shadow;
+                    st.jscc_shadow.emplace(JsccRuntimeShadowConfig{
+                        jc.fec_floor_permille, jc.fec_cap_permille,
+                        jc.arq_guard_us, jc.feedback_timeout_ms,
+                        jc.min_rtt_samples});
+                }
             } else {
                 FramerConfig fc;
                 fc.originator = cfg.node.originator;
@@ -887,6 +907,18 @@ struct TxCore {
         return kDefaultMaxPayload;
     }
 
+    uint32_t frame_deadline_us(bool is_idr) const {
+        if (table_ == nullptr) return 0;
+        const uint8_t active = selector_.profile_id();
+        for (const Profile& p : table_->profiles) {
+            if (p.id != active) continue;
+            const uint16_t ms = is_idr ? p.arq_deadline_iframe_ms
+                                       : p.arq_deadline_pframe_ms;
+            return static_cast<uint32_t>(ms) * 1000u;
+        }
+        return 0;
+    }
+
     void on_ingress(uint8_t stream_id, const uint8_t* d, size_t n,
                     uint64_t now, const Inject& inject) {
         for (Stream& s : streams_) {
@@ -914,6 +946,39 @@ struct TxCore {
             if (s.stream_id != stream_id || !s.frame_framer) {
                 continue;
             }
+            if (s.jscc_shadow && blob != nullptr && len >= kVencFrameMetaSize) {
+                const uint16_t symbol = s.frame_framer->symbol_size();
+                const size_t k_sz = std::max<size_t>(1, (len + symbol - 1) / symbol);
+                const uint16_t k = static_cast<uint16_t>(
+                    std::min<size_t>(k_sz, UINT16_MAX));
+                VencFrameMeta meta;
+                read_frame_meta(blob, len, &meta);
+                const bool idr = (meta.flags & kFrameFlagIdr) != 0;
+                const size_t source_bytes =
+                    len + static_cast<size_t>(k) *
+                              (kDataHeaderSize + kFecSourceSubheaderSize);
+                const size_t resend_bytes =
+                    kDataHeaderSize + kFecSourceSubheaderSize + symbol;
+                JsccShadowFrameInput input;
+                input.source_k = k;
+                input.deadline_us = frame_deadline_us(idr);
+                input.arq_capable =
+                    idr || s.frame_framer->arq_mode() == FrameArqMode::kAllFrames;
+                input.now_ms = now;
+                if (estimate_airtime) {
+                    input.source_tx_remaining_us =
+                        estimate_airtime(source_bytes, true);
+                    input.resend_airtime_us =
+                        estimate_airtime(resend_bytes, false);
+                }
+                s.jscc_latest = s.jscc_shadow->evaluate(input);
+                ++s.jscc_decision_frames;
+                if (s.jscc_latest.valid) {
+                    ++s.jscc_valid_decisions;
+                } else {
+                    ++s.jscc_fallback_decisions;
+                }
+            }
             s.frame_framer->on_frame(
                 blob, len, now,
                 [&](const uint8_t* frame, size_t flen, const DataHeader& hdr,
@@ -930,6 +995,21 @@ struct TxCore {
     // feed the §9 selector.
     void on_air(const uint8_t* d, size_t n, uint64_t now) {
         const Decoded dec = decode(d, n);
+        if (const JsccFeedback* f = std::get_if<JsccFeedback>(&dec)) {
+            if (f->target_originator != originator_ ||
+                f->target_session != session_ ||
+                (preferred_originator_ != 0 &&
+                 f->prefix.originator != preferred_originator_)) {
+                return;
+            }
+            for (Stream& s : streams_) {
+                if (s.stream_id == f->target_stream_id && s.jscc_shadow) {
+                    s.jscc_shadow->observe_feedback(*f, now);
+                    return;
+                }
+            }
+            return;
+        }
         if (const NackView* nack = std::get_if<NackView>(&dec)) {
             if (nack->hdr.target_originator != originator_ ||
                 nack->hdr.target_session != session_) {
@@ -1076,6 +1156,13 @@ struct TxCore {
             if (s.frame_framer) {
                 s.frame_framer->reset_stats();
             }
+            if (s.jscc_shadow) {
+                s.jscc_shadow->reset();
+                s.jscc_latest = {};
+                s.jscc_decision_frames = 0;
+                s.jscc_valid_decisions = 0;
+                s.jscc_fallback_decisions = 0;
+            }
             s.sched.reset_counters();
         }
         reports_received_ = 0;
@@ -1101,6 +1188,34 @@ struct TxCore {
                 st.fec_oversize_frames =
                     s.frame_framer->stats().fec_oversize_k;
                 st.idr_frames = s.frame_framer->stats().idr_frames;
+                st.arq_frames = s.frame_framer->stats().arq_frames;
+            }
+            if (s.jscc_shadow) {
+                const JsccShadowResult& js = s.jscc_latest;
+                st.jscc_decision_frames = s.jscc_decision_frames;
+                st.jscc_valid_decisions = s.jscc_valid_decisions;
+                st.jscc_fallback_decisions = s.jscc_fallback_decisions;
+                st.jscc_decision_valid = js.valid;
+                st.jscc_fallback = jscc_shadow_fallback_string(js.fallback);
+                st.jscc_reason = js.valid
+                    ? jscc_reason_string(js.decision.reason) : std::string();
+                st.jscc_input_k = js.input.source_k;
+                st.jscc_input_predicted_symbols =
+                    js.input.predicted_loss_symbols;
+                st.jscc_input_floor_symbols = js.input.fec_floor_symbols;
+                st.jscc_input_cap_symbols = js.input.fec_cap_symbols;
+                st.jscc_input_deadline_us = js.input.deadline_us;
+                st.jscc_input_source_tx_us = js.input.source_tx_remaining_us;
+                st.jscc_input_rtt_p95_us = js.input.rtt_p95_us;
+                st.jscc_input_resend_us = js.input.resend_airtime_us;
+                st.jscc_input_guard_us = js.input.arq_guard_us;
+                st.jscc_output_parity_symbols = js.decision.parity_symbols;
+                st.jscc_output_remaining_us =
+                    js.decision.remaining_after_source_us;
+                st.jscc_output_arq_eligible = js.decision.arq_eligible;
+                st.jscc_output_discard = js.decision.discard;
+                st.jscc_feedback_epoch = js.feedback_epoch;
+                st.jscc_feedback_age_ms = js.feedback_age_ms;
             }
             st.resends_sent = s.sched.counters().resends_sent;
             st.double_send_suppressed =
@@ -1139,8 +1254,11 @@ struct TxCore {
     // Radio-backend actuation hooks (§10.4); unset = logged intent.
     std::function<void(uint8_t mcs, bool sgi)> apply_mode;
     std::function<void(size_t adapter_idx, int32_t qdb)> apply_power;
+    std::function<std::optional<uint32_t>(size_t bytes, bool include_pending)>
+        estimate_airtime;
 
     uint16_t originator_;
+    uint16_t preferred_originator_ = 0;
     uint32_t session_;
     uint8_t table_version_;
     const ProfileTable* table_;
@@ -1167,7 +1285,11 @@ struct RxCore {
                                        ? static_cast<uint32_t>(
                                              1000.0 / cfg.policy.report_hz)
                                        : 0},
-                    table_version) {}
+                    table_version),
+          feedback_period_ms_(cfg.policy.report_hz > 0
+                                  ? static_cast<uint32_t>(
+                                        1000.0 / cfg.policy.report_hz)
+                                  : 0) {}
 
     static std::vector<WantSpec> wants(const Config& cfg) {
         std::vector<WantSpec> out;
@@ -1220,6 +1342,45 @@ struct RxCore {
         }
     }
 
+    void emit_jscc_feedback(
+        uint64_t now,
+        const std::vector<std::pair<uint8_t, JsccRepairFeedbackState>>& states,
+        const Inject& inject) {
+        if (feedback_period_ms_ == 0 || now < next_feedback_ms_) return;
+        next_feedback_ms_ = now + feedback_period_ms_;
+        for (const RxStreamInfo& info : engine_.streams()) {
+            const JsccRepairFeedbackState* state = nullptr;
+            for (const auto& [sid, candidate] : states) {
+                if (sid == info.local_stream_id) {
+                    state = &candidate;
+                    break;
+                }
+            }
+            if (state == nullptr) continue;  // not a frame-SHM egress
+            JsccFeedback f;
+            f.prefix = {originator_, info.key.originator, session_};
+            f.target_originator = info.key.originator;
+            f.target_session = info.key.session_id;
+            f.target_stream_id = info.key.stream_id;
+            f.feedback_epoch = ++feedback_epoch_;
+            f.repair_demand_permille = state->repair_demand_permille;
+            f.rtt_p95_us = info.counters.nack_rtt_p95_us;
+            f.repair_samples = state->repair_samples;
+            f.rtt_samples = info.counters.nack_rtt_samples;
+            if (state->repair_ready) {
+                f.valid_flags |= jscc_feedback_flags::kRepairReady;
+            }
+            if (f.rtt_samples > 0) {
+                f.valid_flags |= jscc_feedback_flags::kRttReady;
+            }
+            f.observed_block_id = state->observed_block_id;
+            uint8_t frame[kJsccFeedbackSize];
+            if (encode_jscc_feedback(f, frame, sizeof(frame)) == sizeof(frame)) {
+                inject(frame, sizeof(frame), f.target_originator);
+            }
+        }
+    }
+
     void fill_stats(StatsSnapshot& snap) const {
         for (const RxStreamInfo& info : engine_.streams()) {
             StreamStats st;
@@ -1247,6 +1408,8 @@ struct RxCore {
             st.nacks_sent = info.counters.nacks_sent;
             st.nack_rtt_hist = info.counters.nack_rtt_hist;
             st.nack_rtt_max_ms = info.counters.nack_rtt_max_ms;
+            st.nack_rtt_samples = info.counters.nack_rtt_samples;
+            st.nack_rtt_p95_us = info.counters.nack_rtt_p95_us;
             st.arq_rec_hist = info.counters.arq_rec_hist;
             st.arq_rec_max_ms = info.counters.arq_rec_max_ms;
             st.active_profile = info.active_profile;
@@ -1313,6 +1476,9 @@ struct RxCore {
     uint32_t session_;
     RxEngine engine_;
     Reporter reporter_;
+    uint32_t feedback_period_ms_ = 0;
+    uint64_t next_feedback_ms_ = 0;
+    uint32_t feedback_epoch_ = 0;
 };
 
 // ---- shared setup -----------------------------------------------------------
@@ -1534,6 +1700,9 @@ int run_tx(const Loaded& l) {
     const uint32_t session = session_nonce();
     DiscoveryCatalog discovery;
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv);
+    tx.estimate_airtime = [&](size_t bytes, bool include_pending) {
+        return air.value->estimate_airtime_us(bytes, include_pending);
+    };
     if (air.value->is_radio()) {
         tx.apply_mode = [&](uint8_t mcs, bool sgi) {
             air.value->set_tx_mode(mcs, sgi);
@@ -2080,6 +2249,12 @@ int run_rx(const Loaded& l) {
                 so.ring->write_frame(f, len);
             });
         }
+        std::vector<std::pair<uint8_t, JsccRepairFeedbackState>> feedback;
+        feedback.reserve(shm_outs.size());
+        for (const ShmOut& so : shm_outs) {
+            feedback.emplace_back(so.stream_id, so.reasm->jscc_feedback());
+        }
+        rx.emit_jscc_feedback(now, feedback, inject_nack);
         // §11 campaign engine. The trigger is now POST /api/v1/csa (§15.5);
         // the stdin trigger was removed with the control-plane migration.
         const CsaIssuer::IssuerAction ia = issuer.tick(now_us_it);

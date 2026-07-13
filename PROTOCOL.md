@@ -222,7 +222,7 @@ consequences:
 | 7 | 4 | `session_id` | sender boot nonce |
 
 **Packet types** (low nibble): `0x1 DATA · 0x2 NACK · 0x3 LINK_REPORT ·
-0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST`. 6 of 16 used; the version nibble will not ship 16
+0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK`. 7 of 16 used; the version nibble will not ship 16
 wire-incompatible revisions, so there is no type-budget scarcity. Future types
 (e.g. a dedicated FEC-repair type, §14) take free slots.
 
@@ -251,14 +251,15 @@ split is what lets any node send control traffic about any other node's stream.
 | bit | name | meaning |
 |---|---|---|
 | 0 | `END_OF_BLOCK` | last packet of this block |
-| 1 | `ARQ` | block is retransmit-eligible (importance / opt-in) |
+| 1 | `ARQ` | important/IDR retransmit class with I-frame deadline |
 | 2 | `RETRANSMIT` | this packet is itself a resend (stats/diagnostics) |
 | 3 | `FEC_REPAIR` | packet is a FEC repair symbol (§14; an 11-byte subheader precedes payload) |
 | 4 | `CSA_ARMED` | **craft→ground ARM ack** — craft has accepted the in-flight CSA campaign and will follow (§11.6) |
-| 5–7 | reserved | 0 |
+| 5 | `PFRAME_ARQ` | opt-in P-frame retransmit eligibility; retains the P-frame deadline |
+| 6–7 | reserved | 0 |
 
 **Redundant per-packet metadata (critical rule):** `stream_type`, `block_id`,
-`END_OF_BLOCK` membership, the `ARQ` flag, `active_profile`, and `table_version`
+`END_OF_BLOCK` membership, the ARQ-class flag, `active_profile`, and `table_version`
 are stamped on **every** packet of a block, not just the first. A surviving
 packet of a block reveals the block's boundary, ARQ-eligibility, and the TX's
 operating point/table even if the first packet was lost.
@@ -286,7 +287,8 @@ is k≈370 source symbols at 1400 B but only k≈132 at 3967 B.
 | 23 | var | `bitmap` | SACK-style; bit *i* set ⇒ `base_seq + i` missing |
 
 - References **seqs**, not blocks. RX lists a missing seq only if its block is
-  live: `ARQ`-flagged, not superseded (§6), within deadline (§8).
+  live: `ARQ`- or `PFRAME_ARQ`-flagged, not superseded (§6), within its class
+  deadline (§8).
 - No deadline field; TX applies its own resend deadline (no clocks cross).
 - `target_stream_type` is omitted — TX resolves it from `(session, stream_id)`.
 
@@ -429,6 +431,57 @@ floods inside that window are harmless. The packet is best-effort and may be
 repeated by the local controller after one second if decoder output has not
 resumed. It uses the same designated return adapter and quiet-gap scheduling as
 NACK and LINK_REPORT. This is recovery signalling, not a periodic-IDR policy.
+The local `venc.recovery_enabled` permission is independent of
+`venc.enabled`: the former authorizes only the rate-limited `/request/idr`
+call, while the latter authorizes bitrate writes under §9.6. A deployment may
+therefore provide decoder recovery without making waybeam-link a bitrate
+authority. Both permissions default false.
+
+### 3.10 JSCC_FEEDBACK packet (type `0x7`) — 37 bytes
+
+An additive, per-stream RX→TX measurement packet for the §14.2 controller. It
+does not replace `LINK_REPORT`: RF selection remains node/link scoped, while
+repair demand and ARQ timing are properties of one received stream.
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | sender = RX node that owns the estimator |
+| 11 | 2 | `target_originator` | TX node that owns the source stream |
+| 13 | 4 | `target_session` | exact current TX boot/session nonce |
+| 17 | 1 | `target_stream_id` | source stream being measured |
+| 18 | 4 | `feedback_epoch` | u32 monotonic per reporter |
+| 22 | 2 | `repair_demand_permille` | causal predicted transmitted-repair demand normalized by `k` |
+| 24 | 4 | `rtt_p95_us` | causal P95 NACK-to-retransmit RTT; 0 unless valid |
+| 28 | 2 | `repair_samples` | bounded estimator sample count |
+| 30 | 2 | `rtt_samples` | bounded RTT estimator sample count |
+| 32 | 1 | `valid_flags` | bit 0 repair estimate present; bit 1 RTT estimate present; other bits 0 |
+| 33 | 4 | `observed_block_id` | newest finalized block included in the repair estimator |
+
+The repair field carries the estimator's normalized rate, not a symbol count,
+because the RX does not know the next frame's `k`. The TX converts it causally
+for frame `N` as `ceil(rate * k_N / 1000)`. `repair_samples` is diagnostic;
+readiness is stated only by bit 0 and requires the authored estimator minimum.
+An unrecoverable/censored block may raise the estimate but never turns a lower
+bound into an exact sample (§14.2).
+
+`rtt_p95_us` is derived only from arrivals explicitly marked `RETRANSMIT` that
+fill a NACKed gap. Bit 1 remains clear until at least one RTT sample exists;
+the TX independently requires `rtt_samples >= min_rtt_samples` from its authored
+shadow configuration. Zero with bit 1 clear means unavailable, not zero
+latency.
+
+The receiver emits this packet at the existing report cadence after a matching
+frame-SHM stream has latched. It uses the same return injection, quiet-gap, and
+target filtering as NACK/LINK_REPORT. TX accepts it only for its own exact
+`(originator, session_id, stream_id)` and monotonic-forward `feedback_epoch`.
+The packet is measurement-only: receipt updates a bounded cache and can never
+directly alter FEC, ARQ, discard, MCS, or encoder state.
+
+The runtime shadow treats feedback as usable only while both required validity
+bits are set and its age is within the configured shadow timeout. Missing,
+invalid, stale, wrong-session, or replayed feedback selects the configured
+§14.1 fixed policy and reports the specific fallback state. It must never be
+silently replaced by zero loss or zero RTT.
 
 ---
 
@@ -476,6 +529,13 @@ classified the frame — the SHM slot's `VencFrameMeta.flags` bit 0 marks IDR
 parsing on the link side**. This is the authoritative form of the §4.1
 classifier (the encoder's own IDR decision), not an approximation of it.
 
+Frame-SHM ingress may opt into `arq_mode:"all-frames"`. IDRs keep the existing
+`ARQ` flag and I-frame deadline; non-IDRs carry `PFRAME_ARQ` and retain the
+active profile's P-frame deadline. The default `arq_mode:"idr-only"` preserves
+the existing classifier. `PFRAME_ARQ` is a measurement/coverage mechanism, not
+permission to extend latency or to actuate adaptive FEC. A receiver that does
+not understand bit 5 ignores it and therefore fails safe as IDR-only ARQ.
+
 **Deadline coupling:** `ARQ`-important blocks carry a longer retransmit deadline
 than best-effort blocks (a slightly-late I-frame still rescues its GOP).
 
@@ -512,7 +572,8 @@ payload** — FrameFramer parses only the metadata prefix, never the NAL bytes.
 
 1. Read one frame blob from the SHM binding. Assign it a fresh `block_id`
    (one frame = one block, §4).
-2. Set `ARQ` from `VencFrameMeta.flags` bit 0 (IDR ⇒ 1), §4.1.
+2. Set `ARQ` from `VencFrameMeta.flags` bit 0 (IDR ⇒ 1). With the explicit
+   `all-frames` mode, set `PFRAME_ARQ` instead on non-IDRs, §4.1.
 3. **Fragment** the blob into `k` **source symbols** of size
    `s = active_profile.max_payload − 26 − 11` (header + §14 repair subheader,
    so source and repair symbols are interchangeable for coding); the last
@@ -557,7 +618,9 @@ and operating point.
 - **Freshness-priority within the budget:** serve resends by deadline-remaining
   (most-recoverable first), not FIFO; proactively drop any seq whose remaining
   deadline < one measured NACK round-trip (§17 gate 3) — it cannot arrive in time.
-- **Importance gate:** only `ARQ=1` blocks are ever resent.
+- **Eligibility gate:** only `ARQ=1` or `PFRAME_ARQ=1` blocks are ever resent.
+- **Importance/deadline class:** `ARQ` uses the I-frame budget;
+  `PFRAME_ARQ` uses the P-frame budget. The bits are mutually exclusive.
 - **Deadline gate:** never resend past deadline.
 - **Attempt cap:** bounded resend attempts per seq.
 - Mark every resend `RETRANSMIT=1`.
@@ -624,9 +687,9 @@ stream is rejected at config load, since the wire payloads are frame *fragments*
 not RTP packets.)
 
 ### 6.4 NACK generation
-- For a lost seq that is `ARQ`-flagged, not superseded, within deadline: add to
-  the pending SACK set. Coalesce into one bitmap per return window (§7), anchored
-  at `base_seq`.
+- For a lost seq that is `ARQ`- or `PFRAME_ARQ`-flagged, not superseded, within
+  its class deadline: add to the pending SACK set. Coalesce into one bitmap per
+  return window (§7), anchored at `base_seq`.
 - Send via the **designated uplink TX adapter**; its RX blind spot while
   transmitting is covered by the diversity siblings (ground half-duplex is free).
 - Re-NACK: bounded retries with backoff; stop on RETRANSMIT receipt or on
@@ -1319,6 +1382,32 @@ block. It requires 20 samples and uses a 100-permille cold-start rate. This
 candidate is also shadow-only and does not supersede the original source-loss
 telemetry.
 
+The next Ethernet stage may run the pure decision on TX as a **non-enforcing
+runtime shadow**. It consumes fresh §3.10 feedback plus TX-local facts: exact
+frame `k`, metadata-derived ARQ class, the active profile deadline, configured
+shadow FEC floor/cap, queued source-transmission airtime, resend airtime, and an
+authored ARQ guard. Every input and the stable §14.2 reason are observable.
+Unknown transport airtime or incomplete feedback makes the decision invalid and
+selects §14.1 fallback; the implementation must not manufacture a PHY rate,
+RTT, deadline, or guard.
+
+Shadow configuration is optional and disabled when absent:
+
+```json
+"jscc_shadow": {
+  "fec_floor_permille": 20,
+  "fec_cap_permille": 400,
+  "arq_guard_us": 500,
+  "feedback_timeout_ms": 500,
+  "min_rtt_samples": 20
+}
+```
+
+All five values are operator-authored measurement inputs. There are no hidden
+optimistic defaults. The cap is converted per frame and then clamped by the
+GF(256) limit; it is independent of the active fixed §14.1 rate. This block
+authorizes observation only, not adaptive transmission.
+
 ---
 
 ## 15. I/O bindings, configuration & observability
@@ -1375,7 +1464,9 @@ telemetry.
   "air":   { "kind": "radio", "ack_responder": false,
              "wedge_window_ms": 1000, "wedge_min_submits": 8 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
-  "control": { "bind": "0.0.0.0:8091" }
+  "control": { "bind": "0.0.0.0:8091" },
+  "venc": { "host": "127.0.0.1:80", "enabled": false,
+            "recovery_enabled": true }
 }
 ```
 - RX nodes use `"dir":"out"` streams (UDP `send` targets) and `role:"rx"` adapters
@@ -1389,12 +1480,22 @@ telemetry.
   ```json
   { "stream_id": 0, "stream_type": "RTP", "dir": "in",
     "bind": { "kind": "frame-shm", "name": "venc_frame" },
+    "arq_mode": "idr-only",
     "fec": { "scheme": "rlc256", "i_rate_permille": 250,
              "p_rate_permille": 100, "min_k": 3 } }
   ```
   `scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
   `"rlc256"` enables §14.1. Rates are integer per-mille (project convention). On
   a `udp` stream the `fec` block is ignored (Framer path, §5.1).
+- `arq_mode` is valid only on frame-SHM ingress and is either `"idr-only"`
+  (default) or the opt-in `"all-frames"` experiment from §4.1.
+- A frame-SHM ingress may additionally carry the optional `jscc_shadow` block
+  from §14.2. It is rejected on UDP streams. Absence keeps only the fixed §14.1
+  path and emits no controller decision shadow.
+- `venc.enabled` authorizes the §9.6 bitrate actuator and therefore requires
+  single-writer ownership. `venc.recovery_enabled` independently authorizes
+  only §3.9 decoder-recovery IDR requests. Neither permission is implied by the
+  other, and both default false.
 
 ### 15.3 Streaming stats (newline-delimited JSON)
 Emitted at `stats.hz` to stdout and/or the stats binding. Fields map 1:1 to the
@@ -1425,6 +1526,17 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "jscc_repair_underpredicted_blocks": 18,
     "jscc_repair_demand_censored_blocks": 2,
     "jscc_repair_predicted_parity_symbols": 358121,
+    "jscc_decision_frames": 89571, "jscc_valid_decisions": 89200,
+    "jscc_fallback_decisions": 371, "jscc_decision_valid": true,
+    "jscc_fallback": "none", "jscc_reason": "fec_and_arq",
+    "jscc_input_k": 38, "jscc_input_predicted_symbols": 5,
+    "jscc_input_floor_symbols": 1, "jscc_input_cap_symbols": 16,
+    "jscc_input_deadline_us": 16667, "jscc_input_source_tx_us": 5210,
+    "jscc_input_rtt_p95_us": 2000, "jscc_input_resend_us": 116,
+    "jscc_input_guard_us": 500, "jscc_output_parity_symbols": 5,
+    "jscc_output_remaining_us": 11457,
+    "jscc_output_arq_eligible": true, "jscc_output_discard": false,
+    "jscc_feedback_epoch": 1821, "jscc_feedback_age_ms": 42,
     "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
@@ -1432,7 +1544,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
     "resends_sent": 230, "double_send_suppressed": 5,
     "source_symbols_sent": 4120300, "repair_symbols_sent": 358944,
-    "fec_oversize_frames": 0, "idr_frames": 17,
+    "fec_oversize_frames": 0, "idr_frames": 17, "arq_frames": 68342,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "return": { "reports_expected": 10, "reports_received": 9,
     "return_window_hits": 7, "return_window_misses": 2,
@@ -1496,6 +1608,23 @@ unrecovered lower-bound observations; and
 censored observation is evidence of insufficient protection, not an exact
 demand measurement. Reset clears this estimator and its counters too.
 
+The `jscc_decision_*`, `jscc_input_*`, `jscc_output_*`, and
+`jscc_feedback_*` fields are TX-side §14.2 runtime-shadow telemetry. Frame and
+valid/fallback counts are cumulative; the remaining fields describe the most
+recent frame evaluation. `jscc_decision_valid=false` means §14.1 remained the
+only decision and `jscc_fallback` names why: `feedback_missing`,
+`feedback_stale`, `repair_not_ready`, `rtt_not_ready`,
+`airtime_unavailable`, or `deadline_unavailable`. A valid decision reports
+fallback `none`, one stable §14.2 reason, every numeric input, chosen parity,
+remaining time, and ARQ/discard outputs. These outputs are hypothetical and do
+not alter transmitted symbols. Fields are zero/empty on RX and on streams
+without `jscc_shadow`.
+
+`nack_rtt_samples` and `nack_rtt_p95_us` accompany the existing cumulative RTT
+histogram on RX. They describe the bounded trailing sample window used in
+§3.10; zero samples means the P95 is unavailable. Stats reset clears the RTT
+window and therefore clears JSCC RTT readiness.
+
 `shm_full_drops`, `shm_oversize_drops`, and `shm_bad_slots` expose local ring
 backpressure/ABI failures separately from air/frame-reassembly loss. They are 0
 on UDP bindings. On frame-SHM egress they come from the producer ring; on
@@ -1510,8 +1639,9 @@ observable boundary.
 On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
 the exact cumulative §14.1 symbols emitted by `FrameFramer`;
 `fec_oversize_frames` counts frames sent source-only because `k+r` exceeded
-GF(256) capacity; and `idr_frames` counts frames whose VFRM metadata carried
-the IDR flag. They are zero on RX and non-frame-SHM streams. These counters are
+GF(256) capacity; `idr_frames` counts frames whose VFRM metadata carried the
+IDR flag; and `arq_frames` counts frames stamped with either ARQ-class flag.
+They are zero on RX and non-frame-SHM streams. These counters are
 the fixed-policy baseline for comparing hypothetical JSCC shadow parity; byte
 or bitrate inference is not an acceptable substitute.
 

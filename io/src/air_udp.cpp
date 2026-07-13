@@ -3,6 +3,7 @@
 
 #include <poll.h>
 
+#include <algorithm>
 #include <cerrno>
 
 #include "wblink/wire.h"
@@ -17,6 +18,7 @@ const CommonPrefix* prefix_of(const Decoded& dec) {
     if (const auto* p = std::get_if<Heartbeat>(&dec)) return &p->prefix;
     if (const auto* p = std::get_if<CsaPacket>(&dec)) return &p->prefix;
     if (const auto* p = std::get_if<RecoveryRequest>(&dec)) return &p->prefix;
+    if (const auto* p = std::get_if<JsccFeedback>(&dec)) return &p->prefix;
     return nullptr;
 }
 }  // namespace
@@ -111,6 +113,26 @@ std::vector<int> UdpAir::wait_fds() const {
     out.reserve(adapters_.size());
     for (const UdpIngress& adapter : adapters_) out.push_back(adapter.fd());
     return out;
+}
+
+std::optional<uint32_t> UdpAir::estimate_airtime_us(
+    size_t bytes, bool include_pending) const {
+    if (pace_mbps_ == 0) return std::nullopt;
+    uint64_t total = bytes;
+    if (include_pending) {
+        for (const auto& frame : resend_queue_) total += frame.size();
+        for (const auto& frame : tx_queue_) total += frame.size();
+    }
+    uint64_t us = (total * 8u + pace_mbps_ - 1u) / pace_mbps_;
+    if (include_pending && next_tx_.time_since_epoch().count() != 0) {
+        const auto remaining = next_tx_ - std::chrono::steady_clock::now();
+        if (remaining > std::chrono::steady_clock::duration::zero()) {
+            us += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    remaining + std::chrono::nanoseconds(999)).count());
+        }
+    }
+    return static_cast<uint32_t>(std::min<uint64_t>(us, UINT32_MAX));
 }
 
 void UdpAir::service_paced_tx() {
