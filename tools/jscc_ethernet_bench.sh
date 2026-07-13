@@ -357,7 +357,8 @@ cat >"$ARTIFACTS/tx.json" <<EOF
   "air":{"kind":"udp-broadcast","tx":["$BROADCAST_IP:5801"],
          "rx":["0.0.0.0:5801"],"pace_mbps":$UDP_PACE_MBPS},
   "policy":{"select":{"min_profile":0,"max_profile":0}},
-  "venc":{"host":"127.0.0.1:80","enabled":$VENC_ENABLED_JSON},
+  "venc":{"host":"127.0.0.1:80","enabled":$VENC_ENABLED_JSON,
+          "recovery_enabled":true},
   "stats":{"hz":5,"bind":{"kind":"udp","send":"$GROUND_IP:9110"}}
 }
 EOF

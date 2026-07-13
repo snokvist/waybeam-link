@@ -81,7 +81,7 @@ bool VencActuator::set_bitrate(uint32_t kbps, uint64_t now_ms) {
 }
 
 bool VencActuator::request_idr(uint64_t now_ms) {
-    if (!cfg_.enabled) {
+    if (!cfg_.recovery_enabled) {
         return false;
     }
     if (now_ms < next_idr_ms_) {

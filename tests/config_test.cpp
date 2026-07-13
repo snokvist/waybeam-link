@@ -345,7 +345,8 @@ int main() {
             "failsafe_hold_s": 0.5, "failsafe_step_s": 0.5,
             "min_profile": 1, "max_profile": 5,
             "rung_rssi_floor_dbm": [-90, -87, -84]}},
-          "venc": {"host": "127.0.0.1:8085", "enabled": true},
+          "venc": {"host": "127.0.0.1:8085", "enabled": true,
+                   "recovery_enabled": true},
           "loopback": {"rssi_dbm": -55,
             "rssi_fade": {"start_ms": 1000, "end_ms": 2000, "dbm": -92}}})");
         CHECK(bool(r));
@@ -360,6 +361,7 @@ int main() {
             CHECK(c.policy.select.rung_rssi_floor_dbm[2] == -84);
             CHECK(c.policy.select.rung_rssi_floor_dbm[3] == -80);  // seed
             CHECK(c.venc.enabled);
+            CHECK(c.venc.recovery_enabled);
             CHECK(c.venc.host == "127.0.0.1:8085");
             CHECK(c.loopback.rssi_dbm == -55);
             CHECK(c.loopback.rssi_fade.has_value());
@@ -371,6 +373,7 @@ int main() {
         CHECK(bool(d));
         if (d) {
             CHECK(!d.value->venc.enabled);
+            CHECK(!d.value->venc.recovery_enabled);
             CHECK(d.value->policy.select.pressure_escape_s == 2.0);
             CHECK(d.value->policy.select.rung_rssi_floor_dbm[0] == -88);
             CHECK_EQ_U(d.value->policy.select.max_profile, 255);

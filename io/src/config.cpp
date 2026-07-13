@@ -446,6 +446,8 @@ Result<Config> load_config_json(const std::string& json_text) {
             const json& v = j.at("venc");
             cfg.venc.host = v.value("host", cfg.venc.host);
             cfg.venc.enabled = v.value("enabled", cfg.venc.enabled);
+            cfg.venc.recovery_enabled =
+                v.value("recovery_enabled", cfg.venc.recovery_enabled);
         }
 
         // air ("udp" = dev backend, not §15; "radio" = devourer, §3.0 —

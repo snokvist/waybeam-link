@@ -117,7 +117,8 @@ struct SelectPolicy {
 // encoder; on the craft this is the ONLY writer of video0.bitrate.
 struct VencCfg {
     std::string host = "127.0.0.1:80";
-    bool enabled = false;
+    bool enabled = false;           // bitrate writes (§9.6)
+    bool recovery_enabled = false;  // rate-limited IDR requests (§3.9)
 };
 
 struct ArqPolicy {

@@ -38,6 +38,7 @@ class VencActuator {
     uint64_t idr_requests() const { return idr_requests_; }
     uint64_t idr_failures() const { return idr_failures_; }
     bool enabled() const { return cfg_.enabled; }
+    bool recovery_enabled() const { return cfg_.recovery_enabled; }
 
   private:
     bool http_get(const std::string& path);
