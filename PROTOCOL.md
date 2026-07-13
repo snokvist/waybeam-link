@@ -429,6 +429,11 @@ floods inside that window are harmless. The packet is best-effort and may be
 repeated by the local controller after one second if decoder output has not
 resumed. It uses the same designated return adapter and quiet-gap scheduling as
 NACK and LINK_REPORT. This is recovery signalling, not a periodic-IDR policy.
+The local `venc.recovery_enabled` permission is independent of
+`venc.enabled`: the former authorizes only the rate-limited `/request/idr`
+call, while the latter authorizes bitrate writes under §9.6. A deployment may
+therefore provide decoder recovery without making waybeam-link a bitrate
+authority. Both permissions default false.
 
 ### 3.10 JSCC_FEEDBACK packet (type `0x7`) — 37 bytes
 
@@ -1447,7 +1452,9 @@ authorizes observation only, not adaptive transmission.
   "air":   { "kind": "radio", "ack_responder": false,
              "wedge_window_ms": 1000, "wedge_min_submits": 8 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
-  "control": { "bind": "0.0.0.0:8091" }
+  "control": { "bind": "0.0.0.0:8091" },
+  "venc": { "host": "127.0.0.1:80", "enabled": false,
+            "recovery_enabled": true }
 }
 ```
 - RX nodes use `"dir":"out"` streams (UDP `send` targets) and `role:"rx"` adapters
@@ -1470,6 +1477,10 @@ authorizes observation only, not adaptive transmission.
 - A frame-SHM ingress may additionally carry the optional `jscc_shadow` block
   from §14.2. It is rejected on UDP streams. Absence keeps only the fixed §14.1
   path and emits no controller decision shadow.
+- `venc.enabled` authorizes the §9.6 bitrate actuator and therefore requires
+  single-writer ownership. `venc.recovery_enabled` independently authorizes
+  only §3.9 decoder-recovery IDR requests. Neither permission is implied by the
+  other, and both default false.
 
 ### 15.3 Streaming stats (newline-delimited JSON)
 Emitted at `stats.hz` to stdout and/or the stats binding. Fields map 1:1 to the

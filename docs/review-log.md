@@ -691,6 +691,22 @@ and zero/empty where the shadow does not apply; no actuator is authorized.
 **Amended:** §15.3 (runtime decision-shadow and rolling RTT telemetry). Code
 follows separately.
 
+## Pass 34 — separate decoder recovery from bitrate ownership (2026-07-13)
+
+The Ethernet shadow bench proved that `RECOVERY_REQUEST` reached vehicle TX but
+all requests failed when `venc.enabled=false`. That flag currently gates both
+the persistent bitrate writer and the independent `/request/idr` actuator. A
+bench must not claim bitrate ownership merely to bootstrap a decoder or gather
+ARQ RTT samples.
+
+Add a separate, default-off `venc.recovery_enabled` permission. It authorizes
+only the existing rate-limited IDR request; `venc.enabled` retains its existing
+bitrate-write meaning. The two permissions are independent so the real encoder
+settings remain operator-owned during Ethernet measurements.
+
+**Amended:** §3.9 (independent recovery permission); §15.2 (configuration and
+defaults). Code follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
