@@ -668,6 +668,17 @@ optimistic defaults.
 **Amended:** §3.1/§3.10 (new additive packet); §14.2 (runtime shadow validity
 and optional configuration); §15.2 (frame-SHM scope). Code follows separately.
 
+## Pass 32 — make RTT readiness independently checkable (2026-07-13)
+
+Codec integration exposed that Pass 31 carried repair sample count but not RTT
+sample count. Because `min_rtt_samples` is authored on TX, an RX-only readiness
+bit cannot prove the TX threshold was met. Add `rtt_samples` and define the RTT
+valid bit as "estimate present"; TX applies its own configured minimum. This
+widens only the new, not-yet-deployed additive packet from 35 to 37 bytes.
+
+**Amended:** §3.10 (`rtt_samples`, offsets, size, and readiness semantics). Code
+follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

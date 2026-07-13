@@ -430,7 +430,7 @@ repeated by the local controller after one second if decoder output has not
 resumed. It uses the same designated return adapter and quiet-gap scheduling as
 NACK and LINK_REPORT. This is recovery signalling, not a periodic-IDR policy.
 
-### 3.10 JSCC_FEEDBACK packet (type `0x7`) — 35 bytes
+### 3.10 JSCC_FEEDBACK packet (type `0x7`) — 37 bytes
 
 An additive, per-stream RX→TX measurement packet for the §14.2 controller. It
 does not replace `LINK_REPORT`: RF selection remains node/link scoped, while
@@ -446,8 +446,9 @@ repair demand and ARQ timing are properties of one received stream.
 | 22 | 2 | `repair_demand_permille` | causal predicted transmitted-repair demand normalized by `k` |
 | 24 | 4 | `rtt_p95_us` | causal P95 NACK-to-retransmit RTT; 0 unless valid |
 | 28 | 2 | `repair_samples` | bounded estimator sample count |
-| 30 | 1 | `valid_flags` | bit 0 repair estimate ready; bit 1 RTT ready; other bits 0 |
-| 31 | 4 | `observed_block_id` | newest finalized block included in the repair estimator |
+| 30 | 2 | `rtt_samples` | bounded RTT estimator sample count |
+| 32 | 1 | `valid_flags` | bit 0 repair estimate present; bit 1 RTT estimate present; other bits 0 |
+| 33 | 4 | `observed_block_id` | newest finalized block included in the repair estimator |
 
 The repair field carries the estimator's normalized rate, not a symbol count,
 because the RX does not know the next frame's `k`. The TX converts it causally
@@ -457,8 +458,10 @@ An unrecoverable/censored block may raise the estimate but never turns a lower
 bound into an exact sample (§14.2).
 
 `rtt_p95_us` is derived only from arrivals explicitly marked `RETRANSMIT` that
-fill a NACKed gap. Bit 1 remains clear until the authored minimum number of RTT
-samples exists. Zero with bit 1 clear means unavailable, not zero latency.
+fill a NACKed gap. Bit 1 remains clear until at least one RTT sample exists;
+the TX independently requires `rtt_samples >= min_rtt_samples` from its authored
+shadow configuration. Zero with bit 1 clear means unavailable, not zero
+latency.
 
 The receiver emits this packet at the existing report cadence after a matching
 frame-SHM stream has latched. It uses the same return injection, quiet-gap, and
