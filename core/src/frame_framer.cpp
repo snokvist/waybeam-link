@@ -49,6 +49,12 @@ uint16_t FrameFramer::repair_count(uint16_t k, bool is_idr) {
 
 bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
                            const Emit& emit) {
+    // §14.2 enforcement (Pass 38): the override is one-shot — consumed (and
+    // cleared) by this frame regardless of outcome.
+    const std::optional<uint16_t> ov_parity = override_parity_;
+    const bool ov_allow_parq = override_allow_parq_;
+    override_parity_.reset();
+    override_allow_parq_ = true;
     if (blob == nullptr || len < kVencFrameMetaSize) {
         ++stats_.malformed_frame;  // no VencFrameMeta prefix — drop, never send
         return false;
@@ -71,7 +77,11 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
 
     const uint32_t block_id = block_id_++;
     const uint32_t base_seq = next_seq_;
-    const bool pframe_arq = !is_idr && cfg_.arq_mode == FrameArqMode::kAllFrames;
+    // §14.2 rule 3: a valid enforced decision may clear PFRAME_ARQ for this
+    // frame; the IDR ARQ bit is never touched.
+    const bool pframe_arq = !is_idr &&
+                            cfg_.arq_mode == FrameArqMode::kAllFrames &&
+                            ov_allow_parq;
     const uint8_t base_flags = static_cast<uint8_t>(
         (is_idr ? data_flags::kArq
                 : (pframe_arq ? data_flags::kPframeArq : 0)) |
@@ -117,7 +127,15 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     }
 
     // --- repair symbols (§14.1), source-first already done above ---
-    const uint16_t r = repair_count(k, is_idr);
+    uint16_t r = repair_count(k, is_idr);
+    // §14.2 rule 1: a valid enforced decision replaces the fixed rate, still
+    // GF(256)-clamped and still subject to the min_k ARQ-only rule.
+    if (ov_parity && cfg_.fec.scheme == FecScheme::kRlc256 &&
+        k > cfg_.fec.min_k) {
+        const uint32_t cap =
+            k < kFecMaxSymbols ? kFecMaxSymbols - k : 0;
+        r = static_cast<uint16_t>(std::min<uint32_t>(*ov_parity, cap));
+    }
     if (r == 0) {
         return true;
     }

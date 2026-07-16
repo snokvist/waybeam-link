@@ -167,6 +167,7 @@ const char* kGolden =
     "\"jscc_output_remaining_us\":11457,"
     "\"jscc_output_arq_eligible\":true,\"jscc_output_discard\":false,"
     "\"jscc_feedback_epoch\":1821,\"jscc_feedback_age_ms\":42,"
+    "\"jscc_enforced_frames\":0,\"jscc_discarded_frames\":0,"
     "\"shm_full_drops\":0,\"shm_oversize_drops\":0,"
     "\"shm_bad_slots\":0,\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"

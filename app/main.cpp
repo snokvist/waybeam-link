@@ -820,6 +820,10 @@ struct TxCore {
         uint64_t jscc_decision_frames = 0;
         uint64_t jscc_valid_decisions = 0;
         uint64_t jscc_fallback_decisions = 0;
+        // §14.2 enforcement (Pass 38).
+        bool jscc_enforce = false;
+        uint64_t jscc_enforced_frames = 0;
+        uint64_t jscc_discarded_frames = 0;
     };
 
     TxCore(const Config& cfg, uint32_t session, const ProfileTable* table,
@@ -882,6 +886,7 @@ struct TxCore {
                         jc.fec_floor_permille, jc.fec_cap_permille,
                         jc.arq_guard_us, jc.feedback_timeout_ms,
                         jc.min_rtt_samples});
+                    st.jscc_enforce = jc.enforce;  // §14.2 Pass 38
                 }
             } else {
                 FramerConfig fc;
@@ -988,6 +993,18 @@ struct TxCore {
                     ++s.jscc_valid_decisions;
                 } else {
                     ++s.jscc_fallback_decisions;
+                }
+                // §14.2 enforcement (Pass 38): a VALID decision actuates for
+                // this one frame; any fallback keeps the fixed §14.1 path.
+                if (s.jscc_enforce && s.jscc_latest.valid) {
+                    if (s.jscc_latest.decision.discard) {
+                        ++s.jscc_discarded_frames;  // rule 2: drop, not queue
+                        return;
+                    }
+                    s.frame_framer->set_next_frame_override(
+                        s.jscc_latest.decision.parity_symbols,
+                        s.jscc_latest.decision.arq_eligible);
+                    ++s.jscc_enforced_frames;
                 }
             }
             s.frame_framer->on_frame(
@@ -1269,6 +1286,8 @@ struct TxCore {
                 st.jscc_output_discard = js.decision.discard;
                 st.jscc_feedback_epoch = js.feedback_epoch;
                 st.jscc_feedback_age_ms = js.feedback_age_ms;
+                st.jscc_enforced_frames = s.jscc_enforced_frames;
+                st.jscc_discarded_frames = s.jscc_discarded_frames;
             }
             st.resends_sent = s.sched.counters().resends_sent;
             st.double_send_suppressed =

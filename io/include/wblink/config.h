@@ -43,6 +43,7 @@ struct JsccShadowCfg {
     uint32_t arq_guard_us = 0;
     uint32_t feedback_timeout_ms = 0;
     uint16_t min_rtt_samples = 0;
+    bool enforce = false;  // §14.2 Pass 38: actuate valid decisions
 };
 
 struct NodeCfg {

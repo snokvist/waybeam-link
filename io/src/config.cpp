@@ -266,6 +266,7 @@ Result<Config> load_config_json(const std::string& json_text) {
                 jc.feedback_timeout_ms =
                     js.at("feedback_timeout_ms").get<uint32_t>();
                 jc.min_rtt_samples = js.at("min_rtt_samples").get<uint16_t>();
+                jc.enforce = js.value("enforce", jc.enforce);
                 if (jc.fec_floor_permille > jc.fec_cap_permille ||
                     jc.fec_cap_permille > 4000) {
                     return Result<Config>::fail(

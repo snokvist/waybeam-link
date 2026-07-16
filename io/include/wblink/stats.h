@@ -100,6 +100,9 @@ struct StreamStats {
     bool jscc_output_discard = false;
     uint32_t jscc_feedback_epoch = 0;
     uint32_t jscc_feedback_age_ms = 0;
+    // §14.2 enforcement (Pass 38): actuated valid decisions + rule-2 drops.
+    uint64_t jscc_enforced_frames = 0;
+    uint64_t jscc_discarded_frames = 0;
     uint64_t shm_full_drops = 0;
     uint64_t shm_oversize_drops = 0;
     uint64_t shm_bad_slots = 0;

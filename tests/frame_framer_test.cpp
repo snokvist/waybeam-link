@@ -237,5 +237,51 @@ int main() {
         CHECK_EQ_U(h.framer.stats().malformed_frame, 1u);
     }
 
+    // --- §14.2 enforcement override (Pass 38): one-shot, clamped -----------
+    {
+        FrameFecConfig fec;
+        fec.scheme = FecScheme::kRlc256;
+        fec.i_rate_permille = 250;
+        fec.p_rate_permille = 100;
+        Harness h(fec, FrameArqMode::kAllFrames);
+        const uint16_t s = h.framer.symbol_size();
+        auto blob = make_frame(4 * s, /*idr=*/false, 9);  // k = 5 > min_k
+        // Override: zero parity + PFRAME_ARQ cleared for this frame only.
+        h.framer.set_next_frame_override(0, /*allow_pframe_arq=*/false);
+        h.feed(blob);
+        size_t repairs = 0;
+        for (const Sym& sy : h.sent) {
+            repairs += sy.is_repair() ? 1 : 0;
+            CHECK((sy.hdr.data_flags & data_flags::kPframeArq) == 0);
+        }
+        CHECK_EQ_U(repairs, 0u);
+        // The override was consumed: the next frame is back on §14.1 fixed
+        // rates (ceil(5*0.1) = 1 repair) with PFRAME_ARQ restored.
+        h.sent.clear();
+        h.feed(blob);
+        repairs = 0;
+        bool parq = false;
+        for (const Sym& sy : h.sent) {
+            repairs += sy.is_repair() ? 1 : 0;
+            parq |= (sy.hdr.data_flags & data_flags::kPframeArq) != 0;
+        }
+        CHECK_EQ_U(repairs, 1u);
+        CHECK(parq);
+        // A huge override clamps to the GF(256) capacity (256 - k).
+        h.sent.clear();
+        h.framer.set_next_frame_override(1000, true);
+        h.feed(blob);
+        repairs = 0;
+        for (const Sym& sy : h.sent) repairs += sy.is_repair() ? 1 : 0;
+        const uint16_t k = static_cast<uint16_t>((blob.size() + s - 1) / s);
+        CHECK_EQ_U(repairs, 256u - k);
+        // The min_k ARQ-only rule survives enforcement: k <= min_k ignores
+        // the parity override entirely.
+        Harness small(fec, FrameArqMode::kIdrOnly);
+        small.framer.set_next_frame_override(8, true);
+        small.feed(make_frame(100, false, 10));  // k = 1 <= min_k 3
+        for (const Sym& sy : small.sent) CHECK(!sy.is_repair());
+    }
+
     return wbtest_finish("frame_framer_test");
 }

@@ -217,6 +217,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.jscc_feedback_epoch);
         out += ",\"jscc_feedback_age_ms\":";
         append_u64(out, s.jscc_feedback_age_ms);
+        out += ",\"jscc_enforced_frames\":";
+        append_u64(out, s.jscc_enforced_frames);
+        out += ",\"jscc_discarded_frames\":";
+        append_u64(out, s.jscc_discarded_frames);
         out += ",\"shm_full_drops\":";
         append_u64(out, s.shm_full_drops);
         out += ",\"shm_oversize_drops\":";

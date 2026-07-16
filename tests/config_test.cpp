@@ -492,6 +492,28 @@ int main() {
         CHECK(!t);
     }
 
+    // --- §14.2 enforce flag (Pass 38): parse + default off -----------------
+    {
+        auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
+              "arq_guard_us":500,"feedback_timeout_ms":500,
+              "min_rtt_samples":5,"enforce":true}}]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->streams[0].jscc_shadow.has_value());
+            CHECK(r.value->streams[0].jscc_shadow->enforce);
+        }
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
+              "arq_guard_us":500,"feedback_timeout_ms":500,
+              "min_rtt_samples":5}}]})");
+        CHECK(bool(d) && !d.value->streams[0].jscc_shadow->enforce);
+    }
+
     // --- §9.6 venc frame-cap knobs (Pass 37): defaults + validation --------
     {
         auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},

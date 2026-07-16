@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <vector>
 
 #include "wblink/table.h"  // FecScheme
@@ -104,6 +105,16 @@ class FrameFramer {
     // Source-symbol size s for the active MTU (§5.1a): max_payload - 26 - 11.
     uint16_t symbol_size() const;
 
+    // §14.2 enforcement (Pass 38): one-shot override consumed by the NEXT
+    // on_frame. parity_symbols replaces the fixed §14.1 rate (GF(256)- and
+    // min_k-clamped); allow_pframe_arq=false clears PFRAME_ARQ stamping for
+    // that frame only. The IDR ARQ bit is never affected.
+    void set_next_frame_override(uint16_t parity_symbols,
+                                 bool allow_pframe_arq) {
+        override_parity_ = parity_symbols;
+        override_allow_parq_ = allow_pframe_arq;
+    }
+
   private:
     // r for a frame of k symbols per the §14.1 adaptive policy; 0 if FEC off,
     // ARQ-only (k <= min_k), or the k+r>256 cap trips (records fec_oversize_k).
@@ -118,6 +129,8 @@ class FrameFramer {
 
     uint32_t next_seq_ = 0;
     uint32_t block_id_ = 0;
+    std::optional<uint16_t> override_parity_;  // §14.2 one-shot (Pass 38)
+    bool override_allow_parq_ = true;
 
     // Reusable scratch (amortised across frames): zero-padded source symbols
     // (k*s) for the repair computation, and one encode buffer.
