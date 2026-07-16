@@ -2,6 +2,7 @@
 #include "wblink/air_mon.h"
 
 #include <arpa/inet.h>        // htons
+#include <linux/filter.h>     // sock_filter, sock_fprog, SO_ATTACH_FILTER
 #include <linux/if_ether.h>   // ETH_P_ALL
 #include <linux/if_packet.h>  // sockaddr_ll
 #include <net/if.h>           // if_nametoindex
@@ -35,6 +36,135 @@ inline uint32_t xorshift32(uint32_t& s) {
     s ^= s << 5;
     return s;
 }
+
+// §3.0 BPF pre-filter: rejects non-waybeam frames in the kernel before the
+// recvmsg() copy to userspace.  Mirrors dot11_parse()'s cheapest checks:
+// frame-control, SA prefix 0x56/0x42, optional net_id, payload magic 0x57/0x42.
+// The variable-length radiotap header is handled by loading the LE u16 it_len
+// into the X register — all 802.11 field accesses use BPF_IND (X + offset).
+// dot11_parse() remains the correctness check; this is a performance filter.
+void attach_bpf_filter(int fd, std::optional<uint8_t> net_id,
+                       const char* ifname) {
+    // Layout: PREAMBLE(6) | FC0_DISPATCH(3) | DATA_PATH | QOS_PATH | ACCEPT(1) | REJECT(1)
+    const int data_path_len = net_id ? 12 : 10;
+    const int qos_path_len = net_id ? 13 : 11;
+    const int total = 6 + 3 + data_path_len + qos_path_len + 2;
+    const int data_start = 9;
+    const int qos_start = data_start + data_path_len;
+    const int accept_line = total - 2;
+    const int reject_line = total - 1;
+    auto jmp = [](int from, int to) -> uint8_t {
+        return static_cast<uint8_t>(to - from - 1);
+    };
+
+    std::vector<sock_filter> f;
+    f.reserve(static_cast<size_t>(total));
+
+    // Radiotap it_len (LE u16 at bytes 2..3) → X.
+    f.push_back(BPF_STMT(BPF_LD  | BPF_B | BPF_ABS, 3));
+    f.push_back(BPF_STMT(BPF_ALU | BPF_LSH | BPF_K, 8));
+    f.push_back(BPF_STMT(BPF_MISC| BPF_TAX, 0));
+    f.push_back(BPF_STMT(BPF_LD  | BPF_B | BPF_ABS, 2));
+    f.push_back(BPF_STMT(BPF_ALU | BPF_OR | BPF_X, 0));
+    f.push_back(BPF_STMT(BPF_MISC| BPF_TAX, 0));
+
+    // FC0 dispatch: Data (0x08) or QoS-Data (0x88), reject everything else.
+    int ln = 6;
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 0));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x08,
+                          jmp(ln, data_start), 0));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x88,
+                          jmp(ln, qos_start), jmp(ln, reject_line)));
+    ++ln;
+
+    // --- Data path: fc1 exact 0x00, SA prefix, [net_id], payload magic at +24 ---
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 1));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x00,
+                          0, jmp(ln, reject_line)));
+    ++ln;
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 10));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x56,
+                          0, jmp(ln, reject_line)));
+    ++ln;
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 11));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x42,
+                          0, jmp(ln, reject_line)));
+    ++ln;
+    if (net_id) {
+        f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 12));
+        ++ln;
+        f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, *net_id,
+                              0, jmp(ln, reject_line)));
+        ++ln;
+    }
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 24));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x57,
+                          0, jmp(ln, reject_line)));
+    ++ln;
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 25));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x42,
+                          jmp(ln, accept_line), jmp(ln, reject_line)));
+    ++ln;
+
+    // --- QoS path: fc1 masked (retry bit), SA prefix, [net_id], magic at +26 ---
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 1));
+    ++ln;
+    f.push_back(BPF_STMT(BPF_ALU | BPF_AND | BPF_K,
+                          static_cast<uint32_t>(~kDot11Fc1RetryBit & 0xff)));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x00,
+                          0, jmp(ln, reject_line)));
+    ++ln;
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 10));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x56,
+                          0, jmp(ln, reject_line)));
+    ++ln;
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 11));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x42,
+                          0, jmp(ln, reject_line)));
+    ++ln;
+    if (net_id) {
+        f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 12));
+        ++ln;
+        f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, *net_id,
+                              0, jmp(ln, reject_line)));
+        ++ln;
+    }
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 26));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x57,
+                          0, jmp(ln, reject_line)));
+    ++ln;
+    f.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_IND, 27));
+    ++ln;
+    f.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x42,
+                          jmp(ln, accept_line), jmp(ln, reject_line)));
+    ++ln;
+
+    f.push_back(BPF_STMT(BPF_RET | BPF_K, 0xFFFFu));
+    f.push_back(BPF_STMT(BPF_RET | BPF_K, 0));
+
+    sock_fprog prog{};
+    prog.len = static_cast<unsigned short>(f.size());
+    prog.filter = f.data();
+    if (::setsockopt(fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog,
+                     sizeof(prog)) != 0) {
+        std::fprintf(stderr,
+                     "kernel-monitor: SO_ATTACH_FILTER on %s: %s "
+                     "(non-fatal, userspace filter still active)\n",
+                     ifname, std::strerror(errno));
+    }
+}
+
 }  // namespace
 
 struct MonAir::Impl {
@@ -257,6 +387,7 @@ Result<MonAir> MonAir::create(const MonAirCfg& cfg) {
         tv.tv_sec = 0;
         tv.tv_usec = 200000;  // 200 ms so the RX thread can observe shutdown
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        attach_bpf_filter(fd, cfg.filter_net_id, ac.ifname.c_str());
 
         auto a = std::make_unique<Impl::Adapter>();
         a->name = ac.name;
