@@ -60,6 +60,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME link_monitor_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/link_monitor_test.py)
+    add_test(NAME plan_matrix_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/plan_matrix_test.py)
     add_test(NAME jscc_replay_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/jscc_replay_test.py)
