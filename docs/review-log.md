@@ -984,7 +984,11 @@ Pending operator rulings, with recommendations (2026-07-16 register):
       RX estimator counts cache-delivered symbols as lost (source-kind
       exclusion) so TX parity is sized for the AIR path and the cache stays
       redundancy, not budget.
-- [ ] **R-C: §14.3 repair window at high fps (data first, knob maybe).**
+- [x] **R-C — MEASURED (2026-07-16), zero retention stands.** 150 ‰ sweep:
+      repair success 100 % @90 fps, 82 % @120, 62 % @144; unrecoverable
+      5.7/5.3/8.9 %. Latency-first keeps the pin; revisit only on 144 fps
+      cache-primary flight data (Pass 40 makes the cache the sole repair
+      path above 100 fps).
       Zero-block retention ends cache repair at next-block arrival; at
       120 fps the post-close window is ~2–5 ms. *Recommendation:* keep zero
       retention as pinned; run the Ethernet cache bench at a 90/120/144 fps

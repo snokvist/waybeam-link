@@ -15,7 +15,7 @@ high-cadence ARQ cutoff — both Pass 40), then R-A, then reassess.
 | — | High-cadence ARQ cutoff | **RULED (Pass 40):** no ARQ above 100 fps (101–144); 10 ms is the lowest comfortable recovery window. `policy.arq.arq_max_fps` seed 100 |
 | R-A | LINK_REPORT preferred/latch gate (§3.5 gap) | **DONE:** preferred filter + first-latcher with silence re-latch ahead of the selector and fps ladder (code catching up to spec — no new ruling needed) |
 | R-B | §14.2 enforcement × §14.3 cache parity offload | **RESOLVED (Pass 42):** measured 50–150 ‰ — no offload; the trailing-max + censoring estimator is structurally immune (pinned in §14.2). `cache_offload_bench.sh` is the regression guard for any estimator-shape change |
-| R-C | §14.3 repair window at high fps | OPEN — fps-sweep the cache bench (90/120/144); only add opt-in `max_blocks_ahead=1` if replies lose the supersession race in numbers |
+| R-C | §14.3 repair window at high fps | **MEASURED, zero retention stands (2026-07-16):** 150 ‰ sweep — repair success 100 % @90 fps, 82 % @120, 62 % @144 (unrecoverable 5.7/5.3/8.9 %). Latency-first keeps zero retention pinned; the +1-frame knob is reconsidered only if a 144 fps cache-primary deployment shows the ~3 % delivery cost matters in flight (note: Pass 40 cuts ARQ >100 fps, so the cache IS the repair path there) |
 | R-E | venc volatile writes (`persist=false`) | OPEN — venc-repo HTTP contract change; wanted before long flight soaks |
 | R-F | Decoder-side deadline telemetry | **CLOSED (operator, 2026-07-16):** not load-bearing — late frames are dropped before the SHM boundary and already counted; reopen only on unexplained consumer-side latency in rig/flight data |
 | R-G | fps ladder `max` (above-preferred) | **CLOSED with R-F** — `max` stays reserved |
