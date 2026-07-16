@@ -910,6 +910,30 @@ Pass 39 to the fps ladder. Pinned enforcement semantics:
 **Amended:** §3.5 (enforcement point + relatch seed), §15.3
 (`reports_rejected`). Code follows separately in the same PR.
 
+## Pass 42 — R-B resolved by measurement: no parity offload (2026-07-16)
+
+The feared §14.2 × §14.3 loop — cache-completed blocks masking air loss,
+feedback demand dropping, the enforcing TX under-protecting — does NOT
+materialize. `tools/cache_offload_bench.sh` (enforce ON, cache OFF vs ON at
+identical loss, paced udp-broadcast):
+
+| drop | parity ratio OFF | parity ratio ON | cache repaired |
+|---:|---:|---:|---:|
+| 150 ‰ | 0.426 | 0.421 (−1 %) | 35 |
+| 80 ‰ | 0.301 | 0.259 (−14 %) | 8 |
+| 50 ‰ | 0.207 | 0.234 (+13 %) | 8 |
+
+The gap flips sign across runs — noise, not offload. The structural reason
+is pinned in §14.2: the demand estimator is a trailing-window MAXIMUM with
+censored lower bounds, and the blocks that set the max are exactly the ones
+the cache cannot complete (deficit beyond the §14.3 cap ⇒ censored high
+samples). Cache masking of shallow blocks therefore cannot pull TX
+protection down. No code change; the bench stays as the regression guard,
+and any future estimator-shape change must re-run it (adopting air-only
+observation only if the offload then appears).
+
+**Amended:** §14.2 (immunity property pinned + re-check requirement).
+
 ## Open questions for the next pass
 
 Standing constraints (not revisitable):
@@ -937,8 +961,7 @@ Pending operator rulings, with recommendations (2026-07-16 register):
       the selector/ladder; when unconfigured, first-latcher-per-target with
       the §3.5 plausibility cross-check. Low effort, closes a real spoof
       surface before any flight use of the ladder.
-- [ ] **R-B: §14.2 enforcement × §14.3 cache interaction (before enabling
-      both in flight).** The RX repair-demand estimator observes blocks AFTER
+- [x] **R-B — RESOLVED (Pass 42): no offload; estimator immunity pinned.** The RX repair-demand estimator observes blocks AFTER
       cache repair merges symbols, so a healthy cache lowers reported demand,
       the enforcing TX then sends less parity, and protection silently
       migrates onto the cache path — an unplanned dependency on the side

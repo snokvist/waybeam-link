@@ -14,7 +14,7 @@ high-cadence ARQ cutoff — both Pass 40), then R-A, then reassess.
 | R-D | Dynamic 20/40 MHz width | **RULED (Pass 40):** v1 is fleet-wide 20 MHz; 40 MHz revisited later behind a hardware verdict + CSA-shaped design |
 | — | High-cadence ARQ cutoff | **RULED (Pass 40):** no ARQ above 100 fps (101–144); 10 ms is the lowest comfortable recovery window. `policy.arq.arq_max_fps` seed 100 |
 | R-A | LINK_REPORT preferred/latch gate (§3.5 gap) | **DONE:** preferred filter + first-latcher with silence re-latch ahead of the selector and fps ladder (code catching up to spec — no new ruling needed) |
-| R-B | §14.2 enforcement × §14.3 cache parity offload | NEXT candidates — measure on a combined bench (cache + enforce on one stream); if TX parity migrates onto the cache, rule source-kind exclusion in the RX demand estimator |
+| R-B | §14.2 enforcement × §14.3 cache parity offload | **RESOLVED (Pass 42):** measured 50–150 ‰ — no offload; the trailing-max + censoring estimator is structurally immune (pinned in §14.2). `cache_offload_bench.sh` is the regression guard for any estimator-shape change |
 | R-C | §14.3 repair window at high fps | OPEN — fps-sweep the cache bench (90/120/144); only add opt-in `max_blocks_ahead=1` if replies lose the supersession race in numbers |
 | R-E | venc volatile writes (`persist=false`) | OPEN — venc-repo HTTP contract change; wanted before long flight soaks |
 | R-F | Decoder-side deadline telemetry | OPEN — additive §15.3 RX late/deadline-miss counters first; enables the deferred §13.4 emergency fps path |

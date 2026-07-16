@@ -1565,6 +1565,20 @@ block. It requires 20 samples and uses a 100-permille cold-start rate. This
 candidate is also shadow-only and does not supersede the original source-loss
 telemetry.
 
+**The trailing-window MAXIMUM with censored lower bounds is load-bearing
+against §14.3 parity offload (Pass 42, R-B measurement 2026-07-16).** Cache
+repair merges symbols BEFORE the estimator observes a block, so
+cache-completed blocks under-report air-path demand — but the blocks that
+SET a max-with-censoring estimate are precisely the ones the cache cannot
+complete (deficit beyond the §14.3 symbol cap ⇒ censored high samples), so
+the enforcing TX's parity cannot drain onto the cache. Measured across a
+50–150 ‰ loss sweep: parity ratio unchanged within noise (≤14 %,
+direction-flipping) while the cache repaired blocks in every run. Changing
+the estimator shape (mean, percentile, shorter window) forfeits this
+immunity and REQUIRES re-running `tools/cache_offload_bench.sh` and, if the
+offload appears, adopting air-only observation (cache-delivered symbols
+counted as lost for estimation).
+
 The next Ethernet stage may run the pure decision on TX as a **non-enforcing
 runtime shadow**. It consumes fresh §3.10 feedback plus TX-local facts: exact
 frame `k`, metadata-derived ARQ class, the active profile deadline, configured
