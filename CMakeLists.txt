@@ -134,6 +134,15 @@ if(NOT CMAKE_CROSSCOMPILING AND EXISTS "/usr/bin/pkg-config")
     endif()
 endif()
 
+# Synthetic frame-SHM bench endpoint (deterministic pattern producer +
+# verifying consumer) — no GStreamer, so it runs on any dev host. Used by
+# tools/cache_repair_bench.sh.
+if(NOT CMAKE_CROSSCOMPILING)
+    add_executable(frame_shm_feed tools/frame_shm_feed.cpp)
+    target_compile_options(frame_shm_feed PRIVATE ${WBLINK_WARNINGS})
+    target_link_libraries(frame_shm_feed PRIVATE wblink_io)
+endif()
+
 if(WBLINK_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)

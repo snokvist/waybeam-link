@@ -45,8 +45,9 @@ bool CacheController::eligible(const Registry& r, const StreamKey& target,
     if (s.rx_health_permille < cfg_.health_floor_permille) {
         return false;
     }
-    return bid_diff(block_id, s.oldest_block) >= 0 &&
-           bid_diff(s.newest_block, block_id) >= 0;
+    // §14.3 rule 6: only the oldest bound — newest_block is one status
+    // interval stale, so the blocks needing repair always lie past it.
+    return bid_diff(block_id, s.oldest_block) >= 0;
 }
 
 bool CacheController::close_due(const RepairCandidate& c,

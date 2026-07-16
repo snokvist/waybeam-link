@@ -158,7 +158,9 @@ int main() {
         CHECK_EQ_U(cc.tick(3011, kTarget, &c, 1).size(), 0);
         cc.on_status(fresh_status(33, 20, 1000), 3011);       // 10 < oldest
         CHECK_EQ_U(cc.tick(3012, kTarget, &c, 1).size(), 0);
-        cc.on_status(fresh_status(33, 0, 1000), 3012);        // now eligible
+        // §14.3 rule 6: a block NEWER than the stale status newest_block
+        // stays eligible (only the oldest bound is enforced).
+        cc.on_status(fresh_status(33, 0, 5), 3012);
         CHECK_EQ_U(cc.tick(3013, kTarget, &c, 1).size(), 1);
         // suppressed is counted once per block, not per tick.
         CHECK_EQ_U(cc.stats().requests_suppressed, 1);
