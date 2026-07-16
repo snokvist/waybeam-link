@@ -30,6 +30,7 @@
 #include "wblink/control_server.h"
 #include "wblink/csa.h"
 #include "wblink/endian.h"
+#include "wblink/fps_ladder.h"
 #include "wblink/frame_caps.h"
 #include "wblink/frame_framer.h"
 #include "wblink/frame_reassembler.h"
@@ -836,6 +837,21 @@ struct TxCore {
           selector_(selector_policy(cfg), table),
           venc_(cfg.venc),
           venc_knobs_(cfg.venc) {
+        // §9.11 FPS ladder (Pass 39) — config validated it requires venc.
+        if (cfg.venc.enabled && cfg.venc.fps_ladder.enabled) {
+            const FpsLadderCfg& lc = cfg.venc.fps_ladder;
+            FpsLadderPolicy fp;
+            fp.min_fps = lc.min;
+            fp.preferred_fps = lc.preferred;
+            fp.distress_milli = lc.distress_milli;
+            fp.restore_milli = lc.restore_milli;
+            fp.reduce_after_ms = lc.reduce_after_ms;
+            fp.reduce_dwell_ms = lc.reduce_dwell_ms;
+            fp.restore_after_ms = lc.restore_after_ms;
+            fp.settle_ms = lc.settle_ms;
+            fp.report_timeout_ms = cfg.policy.report_timeout_ms;
+            fps_ladder_.emplace(fp);
+        }
         // §10: one power curve per TX adapter with an authored map. The
         // resolve happens at profile commit; the radio backend applies it
         // (apply_power hook), otherwise it stays a logged intent.
@@ -1058,6 +1074,9 @@ struct TxCore {
             }
             ++reports_received_;
             selector_.on_report(*r, now);
+            if (fps_ladder_) {  // §9.11 distress/restore evidence
+                fps_ladder_->note_report(r->loss_postdiv_prearq, now);
+            }
             return;
         }
         if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
@@ -1135,6 +1154,15 @@ struct TxCore {
             cadence_frames_ = 0;
             cadence_start_ms_ = now;
         }
+        // §9.11 FPS ladder: reduce on radio-loop exhaustion, restore slowly.
+        if (fps_ladder_) {
+            const bool at_floor = table_ != nullptr &&
+                                  selector_.profile_id() ==
+                                      table_->floor_profile;
+            if (const auto f = fps_ladder_->tick(now, at_floor)) {
+                venc_.set_fps(*f, now);
+            }
+        }
         // §9.6 Pass 37 horizon caps: recomputed from slow inputs (rung
         // budget, ladder-snapped cadence, I deadline, live §14.1 rates);
         // write-on-change makes the steady state a no-op.
@@ -1145,10 +1173,14 @@ struct TxCore {
                 }
                 FrameCapInputs in;
                 in.budget_kbps = selector_.bitrate_kbps();
+                // §9.11: while the ladder runs, the COMMANDED fps is the
+                // authoritative cadence — measurement lags a change by ~1 s.
                 in.frame_period_us = snap_frame_period_us(
-                    frame_cadence_us_ != 0
-                        ? frame_cadence_us_
-                        : 1000000ull / venc_knobs_.fps_hint);
+                    fps_ladder_ && fps_ladder_->current_fps() > 0
+                        ? 1000000ull / fps_ladder_->current_fps()
+                        : (frame_cadence_us_ != 0
+                               ? frame_cadence_us_
+                               : 1000000ull / venc_knobs_.fps_hint));
                 in.iframe_deadline_ms = static_cast<uint16_t>(
                     frame_deadline_us(true) / 1000u);
                 const FrameFecConfig& fec = s.frame_framer->fec();
@@ -1310,6 +1342,7 @@ struct TxCore {
         snap.link.venc_pushes = venc_.pushes();
         snap.link.venc_failures = venc_.failures();
         snap.link.venc_settling = venc_.settling(now);
+        snap.link.venc_fps = venc_.commanded_fps();
         for (const PowerAdapter& pa : power_) {
             if (pa.applied_qdb) {
                 snap.link.tx_power_qdb = *pa.applied_qdb;  // first TX adapter
@@ -1344,6 +1377,7 @@ struct TxCore {
     Selector selector_;
     VencActuator venc_;
     VencCfg venc_knobs_;            // §9.6 cap knobs (Pass 37)
+    std::optional<FpsLadder> fps_ladder_;  // §9.11 (Pass 39)
     uint64_t frame_cadence_us_ = 0; // windowed ingress cadence estimate
     uint64_t cadence_start_ms_ = 0;
     uint32_t cadence_frames_ = 0;

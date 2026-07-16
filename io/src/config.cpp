@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "wblink/config.h"
 
+#include "wblink/fps_ladder.h"  // §9.11 ladder-membership validation
+
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -568,6 +570,38 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cfg.venc.p_headroom_permille > 1000) {
                 return Result<Config>::fail(
                     "venc: fps_hint must be >= 1 and headrooms 0..1000");
+            }
+            if (v.contains("fps_ladder")) {
+                const json& fl = v.at("fps_ladder");
+                FpsLadderCfg& lc = cfg.venc.fps_ladder;
+                lc.enabled = fl.value("enabled", lc.enabled);
+                lc.min = fl.value("min", lc.min);
+                lc.preferred = fl.value("preferred", lc.preferred);
+                lc.max = fl.value("max", lc.max);
+                lc.distress_milli =
+                    fl.value("distress_milli", lc.distress_milli);
+                lc.restore_milli = fl.value("restore_milli", lc.restore_milli);
+                lc.reduce_after_ms =
+                    fl.value("reduce_after_ms", lc.reduce_after_ms);
+                lc.reduce_dwell_ms =
+                    fl.value("reduce_dwell_ms", lc.reduce_dwell_ms);
+                lc.restore_after_ms =
+                    fl.value("restore_after_ms", lc.restore_after_ms);
+                lc.settle_ms = fl.value("settle_ms", lc.settle_ms);
+                if (lc.enabled) {
+                    if (!fps_ladder_member(lc.min) ||
+                        !fps_ladder_member(lc.preferred) ||
+                        !fps_ladder_member(lc.max) ||
+                        lc.min > lc.preferred || lc.preferred > lc.max) {
+                        return Result<Config>::fail(
+                            "venc.fps_ladder: min <= preferred <= max, all "
+                            "ladder members (§9.11)");
+                    }
+                    if (!cfg.venc.enabled) {
+                        return Result<Config>::fail(
+                            "venc.fps_ladder: requires venc.enabled (§9.11)");
+                    }
+                }
             }
         }
 

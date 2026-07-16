@@ -115,6 +115,22 @@ struct SelectPolicy {
     uint8_t max_profile = 255;  // 255 = unpinned
 };
 
+// §9.11 FPS ladder (Pass 39; requires venc.enabled). Values must be §9.6
+// ladder members with min <= preferred <= max; v1 commands within
+// [min, preferred].
+struct FpsLadderCfg {
+    bool enabled = false;
+    uint16_t min = 60;
+    uint16_t preferred = 90;
+    uint16_t max = 144;
+    uint16_t distress_milli = 20;
+    uint16_t restore_milli = 5;
+    uint32_t reduce_after_ms = 3000;
+    uint32_t reduce_dwell_ms = 4000;
+    uint32_t restore_after_ms = 8000;
+    uint32_t settle_ms = 1500;
+};
+
 // §9.6 venc bitrate actuation. Disabled by default: dev/bench runs have no
 // encoder; on the craft this is the ONLY writer of video0.bitrate.
 struct VencCfg {
@@ -128,6 +144,7 @@ struct VencCfg {
     uint16_t p_headroom_permille = 1000;
     uint32_t cap_ceiling_bytes = 196608;
     uint32_t settle_ms = 750;       // encoder-output settling window
+    FpsLadderCfg fps_ladder;        // §9.11 (Pass 39)
 };
 
 struct ArqPolicy {

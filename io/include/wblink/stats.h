@@ -161,6 +161,7 @@ struct LinkStats {
     uint64_t venc_pushes = 0;
     uint64_t venc_failures = 0;
     bool venc_settling = false;
+    uint16_t venc_fps = 0;  // §9.11 last commanded fps (0 = never)
 };
 
 // §15.3 cache blocks — present only when the §14.3 role is enabled.

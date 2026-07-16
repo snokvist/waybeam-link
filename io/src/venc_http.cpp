@@ -111,6 +111,29 @@ bool VencActuator::set_max_frame_size(uint32_t max_i_bytes,
     return ok;
 }
 
+bool VencActuator::set_fps(uint16_t fps, uint64_t now_ms) {
+    if (!cfg_.enabled || fps == 0) {
+        return true;
+    }
+    if (last_fps_ && *last_fps_ == fps) {
+        return true;  // §9.6 write-on-change: flash wear
+    }
+    if (now_ms < no_retry_until_ms_) {
+        return false;
+    }
+    ++pushes_;
+    const bool ok =
+        http_get("/api/v1/set?video0.fps=" + std::to_string(fps));
+    if (ok) {
+        last_fps_ = fps;
+        last_change_ms_ = now_ms;
+    } else {
+        ++failures_;
+        no_retry_until_ms_ = now_ms + 500;
+    }
+    return ok;
+}
+
 bool VencActuator::request_idr(uint64_t now_ms) {
     if (!cfg_.recovery_enabled) {
         return false;

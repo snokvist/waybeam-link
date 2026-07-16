@@ -38,6 +38,9 @@ class VencActuator {
     // command "unlimited" implicitly).
     bool set_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes,
                             uint64_t now_ms);
+    // §9.11 FPS ladder: write-on-change like the others; venc applies fps
+    // live (skipping no-op rebinds) and requests an IDR after a real change.
+    bool set_fps(uint16_t fps, uint64_t now_ms);
     bool request_idr(uint64_t now_ms);
 
     uint64_t pushes() const { return pushes_; }
@@ -57,6 +60,7 @@ class VencActuator {
     uint32_t commanded_max_p_bytes() const {
         return last_caps_ ? last_caps_->second : 0;
     }
+    uint16_t commanded_fps() const { return last_fps_ ? *last_fps_ : 0; }
     bool settling(uint64_t now_ms) const {
         return last_change_ms_ != 0 &&
                now_ms < last_change_ms_ + cfg_.settle_ms;
@@ -68,6 +72,7 @@ class VencActuator {
     VencCfg cfg_;
     std::optional<uint32_t> last_;
     std::optional<std::pair<uint32_t, uint32_t>> last_caps_;
+    std::optional<uint16_t> last_fps_;
     uint64_t last_change_ms_ = 0;
     uint64_t no_retry_until_ms_ = 0;
     uint64_t pushes_ = 0;

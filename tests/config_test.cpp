@@ -534,6 +534,28 @@ int main() {
           "venc":{"enabled":true,"i_headroom_permille":1200}})", "headrooms");
     }
 
+    // --- §9.11 fps ladder (Pass 39): parse + validation ---------------------
+    {
+        auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_ladder":{"enabled":true,
+            "min":60,"preferred":90,"max":144,"reduce_after_ms":1500}}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->venc.fps_ladder.enabled);
+            CHECK_EQ_U(r.value->venc.fps_ladder.preferred, 90);
+            CHECK_EQ_U(r.value->venc.fps_ladder.reduce_after_ms, 1500);
+            CHECK_EQ_U(r.value->venc.fps_ladder.restore_after_ms, 8000);
+        }
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_ladder":{"enabled":true,
+            "min":50,"preferred":90,"max":144}}})", "ladder members");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_ladder":{"enabled":true,
+            "min":90,"preferred":60,"max":144}}})", "ladder members");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"fps_ladder":{"enabled":true}}})", "requires venc.enabled");
+    }
+
     // --- §14.3 cache config: parse, defaults, and validation ---------------
     {
         auto r = load_config_json(R"({
