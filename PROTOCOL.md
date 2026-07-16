@@ -222,9 +222,11 @@ consequences:
 | 7 | 4 | `session_id` | sender boot nonce |
 
 **Packet types** (low nibble): `0x1 DATA · 0x2 NACK · 0x3 LINK_REPORT ·
-0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK`. 7 of 16 used; the version nibble will not ship 16
-wire-incompatible revisions, so there is no type-budget scarcity. Future types
-(e.g. a dedicated FEC-repair type, §14) take free slots.
+0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK ·
+0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY`. 10 of 16 used; the
+version nibble will not ship 16 wire-incompatible revisions, so there is no
+type-budget scarcity. Future types (e.g. a dedicated FEC-repair type, §14)
+take free slots.
 
 **Common prefix describes the SENDER.** Control packets (NACK, LINK_REPORT) name
 the stream they concern via a **target descriptor** in their body (§3.3, §3.5) —
@@ -482,6 +484,75 @@ bits are set and its age is within the configured shadow timeout. Missing,
 invalid, stale, wrong-session, or replayed feedback selects the configured
 §14.1 fixed policy and reports the specific fallback state. It must never be
 silently replaced by zero loss or zero RTT.
+
+### 3.11 Cache packets (types `0x8`–`0xA`) — spatial cache repair (§14.3)
+
+Three fixed-schema packets for the §14.3 Cache Controller. In v1 they travel
+**only over the UDP/IP cache sockets (§14.3, §15.2)**, never injected on the
+air path, but they carry the standard §3.1 header so a later RF binding needs
+no re-numbering. The common prefix names the **sender** (aggregator or cache
+node); the body names the **target stream** through the same target descriptor
+as NACK/LINK_REPORT (§3.1 two-identity split). A cache node is an ordinary
+waybeam-link node: its cache identity IS its `originator` (§2), and its
+`session_id` is its own per-boot nonce.
+
+#### CACHE_STATUS (type `0x8`) — 29 bytes
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | sender = the cache node |
+| 11 | 2 | `target_originator` | TX node whose stream is cached |
+| 13 | 4 | `target_session` | exact TX boot/session nonce as latched |
+| 17 | 1 | `target_stream_id` | |
+| 18 | 4 | `oldest_block` | oldest `block_id` still retained |
+| 22 | 4 | `newest_block` | newest `block_id` retained |
+| 26 | 2 | `rx_health_permille` | 0–1000; rolling mean unique/`k` over the retention window |
+| 28 | 1 | `capability_flags` | bit 0 = IP transport (always set in v1); other bits MUST be 0 |
+
+Sent to each configured aggregator endpoint every `status_interval_ms` per
+tracked stream **with a non-empty retention window** — an empty window is
+silence, not a zero-filled status. `rx_health_permille > 1000` is a decode
+error.
+
+#### CACHE_REQUEST (type `0x9`) — 32 bytes fixed + two bitmaps
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | sender = the aggregator |
+| 11 | 2 | `target_originator` | stream's TX node |
+| 13 | 4 | `target_session` | |
+| 17 | 1 | `target_stream_id` | |
+| 18 | 2 | `target_cache` | `originator` of the ONE cache addressed |
+| 20 | 4 | `request_id` | monotonic per aggregator boot |
+| 24 | 4 | `block_id` | block being repaired |
+| 28 | 2 | `window_len` | `k` (1–256), from the block's subheaders (§5.1a/§14.1) |
+| 30 | 1 | `max_symbols` | ≥1; reply symbol allowance for this request |
+| 31 | 1 | `repair_have_len` | bytes of the second bitmap (≤32) |
+| 32 | ⌈k/8⌉ | `missing_sources` | bit *i* set ⇒ source symbol *i* absent from the merged block |
+| 32+⌈k/8⌉ | var | `repair_have` | bit *r* set ⇒ repair symbol `repair_idx` *r* ALREADY held |
+
+Total length MUST equal `32 + ⌈k/8⌉ + repair_have_len`. It is sent only after
+the §14.3 local-collection phase closes below `k`. `max_symbols` is bounded by
+the FEC deficit, the per-request `reply_limit`, and the remaining §14.3
+per-block symbol cap.
+
+#### CACHE_REPLY (type `0xA`) — 17 bytes fixed + one wrapped DATA packet
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | sender = the answering cache |
+| 11 | 4 | `request_id` | echoed from the request |
+| 15 | 2 | `wrapped_len` | ≥ 26 |
+| 17 | var | `wrapped` | ONE verbatim §3.2 DATA packet (header + subheader + chunk) as heard on the air |
+
+One symbol per reply datagram; several reply datagrams may share a
+`request_id`. The wrapped bytes are the cache's stored **original wire
+packet**, unmodified — the aggregator revalidates it through the normal §3.1/
+§3.2 decode before merging, so a cache cannot hand the reassembler anything a
+radio could not have. Reply selection at the cache: requested missing sources
+first (ascending index), then held repair symbols whose `repair_idx` bit is
+clear in `repair_have` (ascending), stopping at `max_symbols`. A cache holding
+none of the useful symbols stays silent.
 
 ---
 
@@ -1216,6 +1287,9 @@ data-path crypto, or heavy state. Threats and mitigations:
 | **Forged optimistic LINK_REPORT** (defeats "never fail optimistic") | accept only from latched/preferred `(originator,session)`; plausibility cross-check; conflicting reports ⇒ fail toward degradation | 3.5, 9.8 |
 | Replayed control frames (NACK/report) | monotonic wrap-aware discipline on `seq`, `report_epoch` (u32), `csa_nonce` | 3.5, 11.4 |
 | **Forged CSA → fleet blackout** (CRITICAL) | **4-byte HMAC on CSA only** + nonce anti-replay + channel allowlist + rate-limit + config-pinned home-channel | 11.4 |
+| Forged CACHE_REQUEST → cache amplification (≤48 B request elicits up to `reply_limit` full symbols) | exact-`target_cache` match + per-requester rate cap + `request_id` dedup window + per-request symbol clamp; v1 IP-only keeps it off the air entirely | 3.11, 14.3 |
+| Forged CACHE_REPLY → junk symbol injection | accepted only for an outstanding `request_id`, from the addressed cache, for requested symbols, within allowance; wrapped packet revalidated via full §3.1/§3.2 decode + latched stream key (no worse than direct DATA injection, which is the accepted §13 posture) | 3.11, 14.3 |
+| Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
 
 The CSA MAC is the sole cryptographic element and touches only the rare
 channel-switch control action, never the bandwidth-carrying data path. Key
@@ -1408,6 +1482,103 @@ optimistic defaults. The cap is converted per frame and then clamped by the
 GF(256) limit; it is independent of the active fixed §14.1 rate. This block
 authorizes observation only, not adaptive transmission.
 
+### 14.3 Spatial cache repair (Cache Controller — v1 IP transport only)
+
+Per-adapter diversity (§6) cannot decorrelate a whole-site fade — the §17
+gate-2 ρ→1 tail is exactly the case where every co-located adapter fades
+together. A **cache** is a spatially separated waybeam-link RX node that
+latches the same stream, retains the last `blocks` blocks of raw heard
+symbols, and answers bounded repair requests from an **aggregator** (a
+frame-shm egress RX node, §6.3a). Cache repair is a third repair source next
+to diversity and vehicle ARQ; like ARQ it is opportunistic and **not
+load-bearing** (§1) — when budgets or deadlines don't fit, the block drops
+exactly as it does today.
+
+**Transport (v1 ruling):** cache traffic runs over dedicated **UDP/IP
+sockets** (Ethernet, fibre, or a routed side-link between ground sites) with
+**operator-provisioned static endpoints** (§15.2) — no on-air discovery, no
+RF injection. It therefore consumes zero Waybeam RF airtime and adds no new
+on-air attack surface. An RF cache binding (addressed injection on the shared
+channel) is reserved — the §3.11 formats are transport-agnostic — but is NOT
+part of v1 and is not implemented before the §17 gate-2 vehicle verdict.
+
+**Identity + merge (rulings):** symbols keep the §2/§6.1 merge identity
+`(originator, session, stream, block_id, symbol index)`; the repair source is
+metadata, never a second decode path. Cache-delivered symbols feed the §6.3a
+reassembler **directly** — they bypass §6.1/§6.2 per-adapter dedup, gap
+detection, and the §3.7 loss estimators (a cache is not an adapter and must
+not inflate `diversity`/`adapters` or perturb pre-diversity loss). Merging is
+idempotent by symbol index, and the §6.3a finalized watermark stands: **a late
+reply never reopens an emitted or dropped block.**
+
+**Repair window (ruling):** §6.3a zero-block retention is unchanged. The
+repair window for block `B` ends at the earliest of its §8 deadline or the
+arrival of any packet of a newer block (supersession). This is the one-frame
+default; a longer playout-buffer variant is **rejected** (latency-first, §9.0).
+
+**Local-collection close.** Cache repair for block `B` may begin only when the
+merged local block is still `< k` unique symbols AND the earliest of the
+following has passed (all RX-local wall-clock, ms granularity, evaluated at
+event-loop cadence; seeds RE-DERIVE §17):
+
+1. `END_OF_BLOCK` seen + `tail_grace_ms` (the tail proves the burst ended);
+2. `max(first_symbol + min_collect_ms, last_new_symbol + local_quiet_ms)` —
+   the `min_collect_ms` floor keeps a long run of missing middle symbols from
+   being mistaken for end-of-burst;
+3. `first_symbol + hard_close_ms` (delayed traffic must not extend collection).
+
+A block with zero received symbols is undiscoverable inside the one-frame
+window (§6.2) and is never cache-repaired. A gap on one adapter is never a
+trigger; the trigger is an incomplete **merged** block after close.
+
+**Decision rules (per block, aggregator side):**
+
+1. The aggregator is the only cache-request authority; caches never initiate.
+2. Only the cache named by `target_cache` may answer a request.
+3. Per-block transmitted-symbol cap:
+   `cap = min(⌈k · repair_fraction⌉, absolute_symbol_limit)`, counting
+   **requested allowances** (the aggregator cannot observe symbols lost on the
+   IP path; counting requests is the conservative side).
+4. `deficit = k − unique`. `deficit > cap` ⇒ the block is futile for cache
+   repair: no request is sent (vehicle ARQ is unaffected, rule 8).
+5. At most `max_cache_attempts` caches are addressed per block, sequentially:
+   the next attempt fires only if the deficit survives `request_timeout_ms`,
+   and its `missing_sources`/`repair_have` bitmaps are recomputed from the
+   current merged state.
+6. Eligibility: status fresh (`≤ status_timeout_ms`), same
+   `(target_originator, target_session, target_stream_id)` as the latched
+   stream, `rx_health_permille ≥ health_floor_permille`, and
+   `oldest_block ≤ block_id ≤ newest_block`. Ranking among eligible caches:
+   block-in-window, then health, then status freshness, then config order.
+7. Repair stops the moment the block reaches `k` (the reassembler emits).
+8. **Ordering ruling (deliberate deviation from serial repair):** cache repair
+   runs **in parallel with** the §6.4 NACK path, not serialized ahead of it.
+   Rationale: the objective is latency-first (§9.0) and IP cache repair spends
+   no RF airtime, so the airtime argument for cache-before-vehicle ordering
+   does not bind; §5.3/§6.4/§12 stay untouched, duplicate arrivals are
+   absorbed by normal dedup, and redundant vehicle resends stay bounded by the
+   existing per-originator budget + hold-down. Revisit only if an RF cache
+   transport lands.
+
+**Cache-node rules (§13 hardening):** a cache answers a request only when
+`target_cache` equals its own `originator` and the target stream is one it
+tracks with the block in window; duplicate `request_id`s from the same
+requester inside the dedup window are ignored; per-requester requests are
+rate-limited (`max_requests_per_s`); the aggregate reply for one request never
+exceeds `min(max_symbols, reply_limit)`. The aggregator accepts a CACHE_REPLY
+only for an outstanding `request_id` it issued, only from the addressed cache,
+only for the requested block, only for symbols it asked for (a missing source,
+or a repair not marked held), and only up to the request's allowance; the
+wrapped packet must pass the full §3.1/§3.2 decode and match the latched
+stream key. CACHE_STATUS is accepted only from configured cache endpoints.
+
+Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
+`local_quiet_ms 2`, `min_collect_ms 4`, `hard_close_ms 8`,
+`request_timeout_ms 4`, `repair_fraction_permille 200`,
+`absolute_symbol_limit 8`, `max_cache_attempts 2`, `reply_limit 4`,
+`health_floor_permille 800`, `status_timeout_ms 1500`,
+`status_interval_ms 500`, retention `blocks 96`, `max_requests_per_s 400`.
+
 ---
 
 ## 15. I/O bindings, configuration & observability
@@ -1424,6 +1595,10 @@ authorizes observation only, not adaptive transmission.
   never both. Enforced at config load.
 - Control packets (NACK/LINK_REPORT/CSA) never touch a binding — the core consumes
   them.
+- The §14.3 **cache sockets** (`cache.repair.listen` / `cache.store.listen`)
+  are control-plane UDP sockets like the §15.5 REST bind — they carry only
+  §3.11 packets and count against **neither** the ≤4-UDP stream pool nor the
+  shm pool.
 
 ### 15.2 Config (JSON)
 ```json
@@ -1496,6 +1671,28 @@ authorizes observation only, not adaptive transmission.
   single-writer ownership. `venc.recovery_enabled` independently authorizes
   only §3.9 decoder-recovery IDR requests. Neither permission is implied by the
   other, and both default false.
+- The §14.3 Cache Controller is configured by an optional top-level `cache`
+  object; both roles default off and a node may run either or both:
+  ```json
+  "cache": {
+    "repair": { "enabled": true, "stream_id": 0, "listen": "0.0.0.0:5802",
+      "caches": [ { "originator": 33, "endpoint": "192.168.1.33:5801" } ],
+      "tail_grace_ms": 1, "local_quiet_ms": 2, "min_collect_ms": 4,
+      "hard_close_ms": 8, "request_timeout_ms": 4,
+      "repair_fraction_permille": 200, "absolute_symbol_limit": 8,
+      "max_cache_attempts": 2, "reply_limit": 4,
+      "health_floor_permille": 800, "status_timeout_ms": 1500 },
+    "store": { "enabled": true, "listen": "0.0.0.0:5801",
+      "stream_ids": [0], "blocks": 96, "reply_limit": 4,
+      "status_to": ["192.168.1.9:5802"], "status_interval_ms": 500,
+      "max_requests_per_s": 400 }
+  }
+  ```
+  `repair.enabled` requires a non-empty `caches` list and `listen`;
+  `repair.stream_id` must name a `frame-shm` egress stream. `store.enabled`
+  requires `listen`; `status_to` lists the aggregator endpoints (empty =
+  answer requests but send no status — such a store is never eligible under
+  §14.3 rule 6). Every value is a §17-overridable seed.
 
 ### 15.3 Streaming stats (newline-delimited JSON)
 Emitted at `stats.hz` to stdout and/or the stats binding. Fields map 1:1 to the
@@ -1635,6 +1832,24 @@ which remains backend/synthetic queue loss.
 `filtered` is the backend's cumulative count of structurally rejected or
 self-originated receive frames. It is 0 where filtering occurs below an
 observable boundary.
+
+A node with a §14.3 cache role enabled additionally emits the matching
+top-level object (absent when the role is off, like `stats.bind`):
+
+```json
+"cache_repair": { "requests": 12, "replies": 11, "symbols_accepted": 18,
+  "symbols_rejected": 0, "blocks_closed_deficit": 9, "blocks_repaired": 7,
+  "blocks_futile": 1, "requests_suppressed": 2, "caches_fresh": 2 },
+"cache_store": { "requests_received": 12, "requests_answered": 11,
+  "requests_rejected": 1, "symbols_sent": 18, "status_sent": 240,
+  "blocks_held": 96, "health_permille": 971 }
+```
+
+`blocks_repaired` counts blocks that reached `k` during a cache-reply merge
+(completion attribution); `blocks_futile` counts §14.3 rule-4 skips;
+`requests_suppressed` counts eligibility failures (stale/unhealthy/no window);
+`caches_fresh` and `blocks_held`/`health_permille` are gauges. Stats reset
+zeroes the counters and leaves the gauges live.
 
 On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
 the exact cumulative §14.1 symbols emitted by `FrameFramer`;
@@ -1825,6 +2040,7 @@ local-ingress polling interval.
 | `guard_us` / `return_window_us` | §7.2 quiet gap | craft TX→RX settle + ground turnaround + return airtime |
 | EWMA α, `mcs_settle_s` | §9 smoothing/settle | no-FEC loss spikiness |
 | `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
+| cache close timers (`tail_grace_ms`/`local_quiet_ms`/`min_collect_ms`/`hard_close_ms`) | §14.3 local-collection close | loss-position sweep at target fps on the Ethernet bench; close must beat next-block supersession with round-trip margin |
 
 **Bench gates (must pass before the dependent design is trusted):**
 

@@ -726,6 +726,55 @@ authoritative, and `arq_frames` makes the experiment auditable.
 (classification, deadline, and resend semantics); §15.2/§15.3 (configuration
 and telemetry). Code follows separately.
 
+## Pass 36 — §3.11/§14.3 spatial cache repair, v1 IP transport (2026-07-16)
+
+Co-located adapters cannot decorrelate a whole-site fade; the gate-2 ρ→1 tail
+is precisely where diversity and ARQ fail together (§18). The operator adopted
+the Cache Controller V3.1 concept (external design doc + reference harness)
+as a spec extension, with these rulings pinned against V3.1 where waybeam-link
+constraints bind:
+
+1. **v1 transport is UDP/IP only** (Ethernet/routed side-link between ground
+   sites), operator-provisioned static endpoints, no on-air discovery. The RF
+   cache binding is reserved but deferred until after the gate-2 vehicle
+   verdict — the §3.11 formats are transport-agnostic so RF later costs no
+   re-numbering.
+2. **A cache is an ordinary waybeam-link node**: cache identity = `originator`,
+   epoch = the target's `session_id`; §3.11 bodies reuse the NACK/LINK_REPORT
+   target-descriptor split. No new identity space.
+3. **CACHE_REPLY wraps verbatim §3.2 DATA packets** (one per datagram). The
+   aggregator revalidates through the normal decode; a cache cannot inject
+   anything a radio could not, and no second decode path exists.
+4. **Cache symbols feed the §6.3a reassembler directly**, bypassing §6.1/§6.2
+   per-adapter state and the §3.7 estimators — a cache is not an adapter and
+   must not inflate `diversity` or perturb pre-diversity loss.
+5. **Zero-block retention stands**; the repair window ends at next-block
+   arrival or the §8 deadline. V3.1's longer-playout-buffer variant rejected.
+6. **Cache repair runs in parallel with vehicle ARQ**, deviating from V3.1's
+   serial cache-before-vehicle order: IP repair spends no RF airtime, so the
+   airtime argument does not bind, and latency-first (§9.0) argues against
+   delaying the measured 1 ms Ethernet / 2–4 ms RF NACK loop behind a cache
+   phase. §5.3/§6.4/§12 are untouched; dedup + existing budgets absorb the
+   redundancy. Revisit only with an RF cache transport.
+7. **Local close is implementable, not airtime-modeled**: earliest of
+   EOB+`tail_grace_ms`, quiet timeout floored by `min_collect_ms`, or
+   `hard_close_ms` — ms-granularity seeds, all §17 RE-DERIVE (V3.1's
+   µs-precision expected-burst-end anchor is unimplementable at the current
+   event-loop cadence and adds no safety the floor doesn't).
+8. **Budgets count requested allowances** (IP loss is unobservable at the
+   aggregator; requests are the conservative ledger): per-block cap
+   `min(⌈k·fraction⌉, absolute_limit)`, futility skip above it (cache phase
+   only — vehicle ARQ unaffected), ≤2 sequential attempts, per-request
+   `reply_limit`.
+9. **§13 additions**: request amplification (rate cap + `request_id` dedup +
+   exact-target match), reply forgery (outstanding-request + subset +
+   allowance + full revalidation), status poisoning (static endpoints only).
+
+**Amended:** §3.1 (types 0x8–0xA), §3.11 (wire formats), §13 (three rows),
+§14.3 (controller rules + seeds), §15.1 (cache sockets are control-plane),
+§15.2 (`cache` config), §15.3 (`cache_repair`/`cache_store` stats), §17 (close
+timer knob row). Code follows separately in the same PR.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
