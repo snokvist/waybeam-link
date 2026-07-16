@@ -1214,6 +1214,11 @@ stock Realtek `PHY_REG_PG.txt` power-by-rate format (`docs/groundwork.md §14`).
   in the `PHY_REG_PG.txt` row format, holding the **absolute** `qdb` values. The
   controller resolves `(this adapter, profile.mcs, profile.tx_power_level)` → an
   absolute `SetTxPowerOffsetQdb` value and applies it to that adapter's device.
+  **The resolve runs only in the tx-node selector commit (Pass 43):** a
+  `power_map` on an **rx-node** adapter (including the designated uplink)
+  would be silently loaded and never applied, so config load REJECTS it —
+  explicit beats silent. Ground-uplink power control, if gate 4 shows return
+  margin problems, is a separate future ruling.
 - **Level→absolute law (Pass-6 ruling):** the authored per-MCS curve **IS
   level 4** (the baseline intent). The controller computes
   `absolute_qdb = curve[mcs] + (tx_power_level − 4) × 8 qdb` (one level step =

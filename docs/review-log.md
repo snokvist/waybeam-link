@@ -934,6 +934,19 @@ observation only if the offload then appears).
 
 **Amended:** §14.2 (immunity property pinned + re-check requirement).
 
+## Pass 43 — §10 rx-node power_map rejected at config load (2026-07-16)
+
+The register's §10 item: the power resolve runs only in the tx-node selector
+commit, so a `power_map` on an rx-node adapter (including the ground's
+designated uplink TX adapter) was silently loaded and never applied — a
+2026-07-11 desk run swept it as a no-op. Ruling: config load rejects it with
+an explanatory error; explicit beats silent. Bringing the ground return
+uplink under real power control remains a separate future ruling, taken only
+if gate 4 shows return-margin problems.
+
+**Amended:** §10.2 (enforcement note). Code follows separately in the same
+PR.
+
 ## Open questions for the next pass
 
 Standing constraints (not revisitable):
@@ -1011,7 +1024,8 @@ Pending operator rulings, with recommendations (2026-07-16 register):
       costing zero RF airtime; an RF cache reply spends shared airtime, so
       V3.1's serial order must be re-argued THEN. Formats are already
       transport-agnostic; nothing to do now.
-- [ ] **§10 ground-uplink power scope** (2026-07-11 desk §4.6 run): the
+- [x] **§10 ground-uplink power scope — RESOLVED (Pass 43): rejected at
+      config load.** (2026-07-11 desk §4.6 run): the
       §10 power curve is applied only on the tx-node selector commit, so the
       ground's designated uplink TX adapter transmits returns at devourer's
       efuse-default power regardless of any `power_map` — sweeping it is a
