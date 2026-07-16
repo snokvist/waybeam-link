@@ -890,6 +890,26 @@ for the working order):
 **Amended:** §4.1 (cutoff), §15.3 (`arq_cutoff_frames`), §17 (knob row),
 §18 (width lock). Code follows separately in the same PR.
 
+## Pass 41 — §3.5 acceptance filter enforced at TX ingest (R-A) (2026-07-16)
+
+The register's R-A gap: §3.5 rules the acceptance filter, but the TX event
+loop forwarded any target-matching LINK_REPORT to the selector — and since
+Pass 39 to the fps ladder. Pinned enforcement semantics:
+
+1. Filter at ingest, before selector AND ladder consume the report.
+2. `preferred_originator` configured ⇒ only that originator passes; its
+   session follows reboots (§2 per-boot nonce of the same tail number).
+3. Unconfigured ⇒ first-latcher per target; a same-originator session change
+   follows immediately (reboot), a DIFFERENT originator takes the latch only
+   after `relatch_ms` of latched-reporter silence (seed 4 ×
+   `report_timeout_ms` — the §9.8 watchdog fires first, so the fail-safe
+   still owns the gap).
+4. Rejections counted (`reports_rejected`); the §3.5 plausibility
+   cross-check stays future bench work.
+
+**Amended:** §3.5 (enforcement point + relatch seed), §15.3
+(`reports_rejected`). Code follows separately in the same PR.
+
 ## Open questions for the next pass
 
 Standing constraints (not revisitable):

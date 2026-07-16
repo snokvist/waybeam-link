@@ -339,6 +339,15 @@ table can therefore never make an older/mismatched client misbehave.
   and cross-checks plausibility (reported loss vs TX-observed NACK behaviour).
   Conflicting concurrent reports for one target ⇒ **fail toward degradation**
   (§9.8), never toward the optimistic one.
+  **Enforcement point (Pass 41):** the filter runs at TX ingest, BEFORE the
+  §9 selector and the §9.11 fps ladder consume the report. With
+  `preferred_originator` configured, only that originator passes (its
+  session follows reboots). Without it, the first reporter latches; the
+  latch follows a same-originator session change (reboot, §2) and
+  **re-latches to the next reporter only after `relatch_ms` of silence**
+  (seed 4 × `report_timeout_ms`). Rejected reports are counted
+  (§15.3 `reports_rejected`); the plausibility cross-check remains §17
+  future work.
 
 ### 3.6 `table_version` — content hash, not a counter
 
@@ -1885,6 +1894,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "arq_cutoff_frames": 0,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "return": { "reports_expected": 10, "reports_received": 9,
+    "reports_rejected": 0,
     "return_window_hits": 7, "return_window_misses": 2,
     "unicast_sent": 0, "unicast_fallback": 0 },
   "link": { "target_originator": 9, "target_session": 183726,
