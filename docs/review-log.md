@@ -845,6 +845,30 @@ this pass makes the per-frame protection decision live. Rulings:
 flag), §15.3 (`jscc_enforced_frames`/`jscc_discarded_frames`). Code follows
 separately in the same PR.
 
+## Pass 39 — §9.11 FPS ladder (2026-07-16)
+
+Third step of the controller sequencing: FPS as the last-resort actuator,
+outside the §9.1 cascade. Rulings:
+
+1. **Envelope semantics:** v1 operates in `[min, preferred]`; `preferred` is
+   the recovery target and v1 never commands above it (`max` reserved for a
+   future ruling on above-preferred cadence). Values must be §9.6 ladder
+   members.
+2. **Reduce trigger is radio-loop exhaustion**, made measurable: floor rung
+   held AND smoothed report loss ≥ `distress_milli` for `reduce_after_ms` —
+   "the cascade has nothing left", not any single bad frame or FEC block.
+3. **Asymmetric hysteresis** per the design doc: restore needs off-floor +
+   low loss for ~2.7× the reduce window, plus per-step dwell and a settle
+   freeze after each command.
+4. **Stale feedback holds** — the rung fail-safe (§9.8) owns degradation on
+   silence; an fps stutter requires positive evidence.
+5. **Cap coupling:** the commanded ladder fps becomes the §9.6 cadence input
+   while the ladder is enabled — measurement lags a change by ~1 s and would
+   brief the caps wrong across every transition.
+
+**Amended:** §9.11 (new section), §15.2 (`venc.fps_ladder`), §15.3 (link
+`venc_fps`), §17 (knob row). Code follows separately in the same PR.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

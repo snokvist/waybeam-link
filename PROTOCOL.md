@@ -1120,6 +1120,52 @@ adaptation (or an automatic USB reset) is deferred until the detector itself
 passes bench validation: silent across a healthy 500–4500 pps sweep, fires
 within one window of an induced wedge (§17 knob table).
 
+### 9.11 FPS ladder (Pass 39 — last-resort operating-mode change)
+
+FPS is the slowest, most user-visible actuator (a change costs ~0.5–1 s and a
+visible cadence discontinuity), so it sits OUTSIDE the §9.1 cascade as its
+own loop with much larger hysteresis: MCS/power moves in milliseconds,
+bitrate in ~0.5 s, FPS only when everything else is exhausted. Opt-in
+(`venc.fps_ladder.enabled`, default false; requires `venc.enabled` — the
+ladder writes `video0.fps`).
+
+- **Ladder:** the discrete §9.6 set `{30, 45, 60, 75, 90, 100, 120, 144}`
+  clipped to the configured envelope. v1 operates in `[min, preferred]`:
+  `preferred` is the recovery target (the operating point the user asked
+  for); `max` is accepted in config for forward compatibility but v1 never
+  commands above `preferred`. On start the ladder commands `preferred` once
+  (aligning the encoder to the envelope).
+- **Reduce** (toward `min`) when the radio loop is exhausted: the selector
+  sits at the **floor rung** AND the smoothed report loss stays ≥
+  `distress_milli` (seed = the §9.1 `demote_milli`) for `reduce_after_ms`
+  (seed 3000), rate-limited by `reduce_dwell_ms` (seed 4000) between steps.
+  One rung of the ladder per step, never past `min`.
+- **Restore** (toward `preferred`) only on sustained positive evidence: the
+  selector is OFF the floor rung and smoothed loss ≤ `restore_milli` (seed
+  5) for `restore_after_ms` (seed 8000) — deliberately much slower than
+  reduction (§9.7 flap logic applies in spirit: each fps flap is a visible
+  stutter).
+- **Stale feedback holds.** No fresh LINK_REPORT within the report timeout
+  ⇒ the ladder neither reduces nor restores — §9.8 already fails the RUNG
+  toward degradation on silence; an fps change needs positive evidence.
+- **Settling:** after a command the ladder freezes for `settle_ms`
+  (seed 1500; venc's live fps apply + IDR recovery is ~0.5–1 s).
+- **Cap coupling:** while the ladder is enabled, the §9.6 cap cadence input
+  is the **commanded ladder fps** (authoritative immediately), not the
+  measured cadence — the measurement lags a change by ~1 s and would brief
+  the caps wrong across every transition.
+- All values are §17 RE-DERIVE seeds; emergency reduction (bypassing dwell
+  on persistent deadline misses) is deferred until bench data motivates it.
+
+```json
+"venc": { "fps_ladder": { "enabled": true, "min": 60, "preferred": 90,
+  "max": 144, "reduce_after_ms": 3000, "reduce_dwell_ms": 4000,
+  "restore_after_ms": 8000, "settle_ms": 1500 } }
+```
+
+`min ≤ preferred ≤ max`, and each must be a ladder member. §15.3 exposes the
+last commanded fps as link `venc_fps` (0 = never commanded).
+
 ---
 
 ## 10. Per-adapter TX power
@@ -1834,7 +1880,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "state": "HOLD", "flap_freeze": false, "csa_state": "IDLE",
     "venc_bitrate_kbps": 14000, "venc_max_i_bytes": 70000,
     "venc_max_p_bytes": 19444, "venc_pushes": 6, "venc_failures": 0,
-    "venc_settling": false } }
+    "venc_settling": false, "venc_fps": 90 } }
 ```
 The `venc_*` link fields are the §9.6 actuator state: the last COMMANDED
 bitrate and frame caps (0 = never pushed), cumulative pushes/failures, and
@@ -2133,6 +2179,7 @@ local-ingress polling interval.
 | `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
 | cache close timers (`tail_grace_ms`/`local_quiet_ms`/`min_collect_ms`/`hard_close_ms`) | §14.3 local-collection close | loss-position sweep at target fps on the Ethernet bench; close must beat next-block supersession with round-trip margin |
 | frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, loss-driven transitions — operator sequencing 2026-07-16), then the radio/kernel-monitor backends on the rig |
+| FPS ladder timers (`reduce_after/reduce_dwell/restore_after/settle_ms`, `distress/restore_milli`) | §9.11 last-resort loop | UDP-air ladder harness first; flight calibration per the design doc §13.3 dwell table |
 
 **Bench gates (must pass before the dependent design is trusted):**
 
