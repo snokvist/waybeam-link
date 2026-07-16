@@ -997,19 +997,15 @@ Pending operator rulings, with recommendations (2026-07-16 register):
       (e.g. `persist=false`) to the /set contract; waybeam-link then uses
       volatile sets for controller-driven fields plus a rare persisted
       baseline. Wants doing before long-duration flight soaks.
-- [ ] **R-F: decoder-side deadline telemetry (enables the §13.4 emergency
-      path).** The fps ladder's reduce trigger is TX-inferred; the design
-      doc's emergency reduction ("persistent deadline misses") needs the
-      consumer's truth. *Recommendation:* additive §15.3 RX counters
-      (late/deadline-missed frames at the reassembler boundary) first; a
-      JSCC_FEEDBACK field only if TX-side triggers prove insufficient; the
-      Pass-39-deferred emergency bypass lands with, and only with, that
-      signal.
-- [ ] **R-G: fps ladder `max` (above-preferred cadence) — defer.** v1 caps
-      at `preferred`. Higher-than-preferred fps shrinks frames and could aid
-      deadline fit, but each step is a visible stutter. *Recommendation:*
-      revisit only with bench evidence (deadline-miss telemetry from R-F at
-      the preferred point with headroom); otherwise leave `max` reserved.
+- [x] **R-F — CLOSED (operator ruling 2026-07-16): not load-bearing here.**
+      Everything late is dropped BEFORE the SHM egress boundary (§6.3a
+      supersession, §8 deadlines, Pass 38 TX discard) and those outcomes are
+      already §15.3 telemetry; beyond the ring the link can neither see nor
+      act except by dropping, which it already does. Reopen only if
+      rig/flight shows consumer-side latency the existing counters cannot
+      explain. The §9.11 emergency-reduction deferral stands.
+- [x] **R-G — CLOSED with R-F** (needed R-F's evidence). `max` stays a
+      reserved config field; §9.11 v1 semantics unchanged.
 - [ ] **R-H: RF cache transport ordering — defer until proposed.** Pass 36
       rule 8 (cache parallel to vehicle ARQ) is justified by IP repair
       costing zero RF airtime; an RF cache reply spends shared airtime, so

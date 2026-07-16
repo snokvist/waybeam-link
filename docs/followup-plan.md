@@ -17,12 +17,13 @@ high-cadence ARQ cutoff — both Pass 40), then R-A, then reassess.
 | R-B | §14.2 enforcement × §14.3 cache parity offload | **RESOLVED (Pass 42):** measured 50–150 ‰ — no offload; the trailing-max + censoring estimator is structurally immune (pinned in §14.2). `cache_offload_bench.sh` is the regression guard for any estimator-shape change |
 | R-C | §14.3 repair window at high fps | OPEN — fps-sweep the cache bench (90/120/144); only add opt-in `max_blocks_ahead=1` if replies lose the supersession race in numbers |
 | R-E | venc volatile writes (`persist=false`) | OPEN — venc-repo HTTP contract change; wanted before long flight soaks |
-| R-F | Decoder-side deadline telemetry | OPEN — additive §15.3 RX late/deadline-miss counters first; enables the deferred §13.4 emergency fps path |
-| R-G | fps ladder `max` (above-preferred) | DEFERRED — needs R-F evidence |
+| R-F | Decoder-side deadline telemetry | **CLOSED (operator, 2026-07-16):** not load-bearing — late frames are dropped before the SHM boundary and already counted; reopen only on unexplained consumer-side latency in rig/flight data |
+| R-G | fps ladder `max` (above-preferred) | **CLOSED with R-F** — `max` stays reserved |
 | R-H | RF cache transport ordering | DEFERRED — re-argue Pass 36 rule 8 only when an RF cache binding is proposed |
 | — | §10 ground-uplink power scope | OPEN — recommend config-load warning for `power_map` on an rx-node uplink now; real control only if gate 4 shows return-margin problems |
 | — | JSCC production flip | OPEN — radio-backend shadow soak during the gate campaigns; flip P-frames first; confirm discard visually before flight |
-| — | Rig verification | OPEN — `ssc338q` cross-build, venc `make lint`, and radio/kernel-monitor re-runs of the four UDP harnesses (`cache_repair` / `actuation` / `jscc_enforce` / `fps_ladder`) |
+| — | UDP controller soak | **DONE:** `tools/controller_soak_udp.sh` — all controllers at spec seeds through clean→marginal→burst→fade→interference→outage→recovery; clean-shutdown/ASan, schema, write-budget, delivery, and full-recovery assertions. `SOAK_MULT` stretches phases for long runs |
+| — | Rig verification | **NEXT:** `ssc338q` cross-build, venc `make lint`, radio/kernel-monitor re-runs of the five UDP harnesses (`cache_repair` / `actuation` / `jscc_enforce` / `fps_ladder` / `cache_offload`) and the controller soak |
 | — | venc PR #181 housekeeping | OPEN — VERSION/HISTORY bump (merge-order dependent vs #178/#179), Star6E IDR-failure return code, old-SDK soft-enforcement log line |
 
 Full problem statements and recommendations: `review-log.md` "Open
