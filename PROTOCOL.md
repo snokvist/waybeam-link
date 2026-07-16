@@ -607,6 +607,18 @@ the existing classifier. `PFRAME_ARQ` is a measurement/coverage mechanism, not
 permission to extend latency or to actuate adaptive FEC. A receiver that does
 not understand bit 5 ignores it and therefore fails safe as IDR-only ARQ.
 
+**High-cadence ARQ cutoff (Pass 40, operator-ruled).** Above `arq_max_fps`
+(config `policy.arq.arq_max_fps`, seed **100**; 0 disables the cutoff) the
+frame period drops below ~10 ms — the lowest comfortable recovery window:
+§6.3a zero-block retention finalizes an incomplete block the moment the next
+frame arrives, so at 101–144 fps even the I-frame class has under 10 ms of
+usable repair time at the receiver. While the operating cadence (the §9.6
+cadence input, ladder-snapped) exceeds the cutoff, the frame-SHM TX stamps
+**neither `ARQ` nor `PFRAME_ARQ`**, and §14.2 treats those frames as not
+ARQ-capable. Suppressed classifications are counted
+(§15.3 `arq_cutoff_frames`). Above the cutoff, recovery is FEC + diversity +
+§14.3 cache repair only.
+
 **Deadline coupling:** `ARQ`-important blocks carry a longer retransmit deadline
 than best-effort blocks (a slightly-late I-frame still rescues its GOP).
 
@@ -1870,6 +1882,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "resends_sent": 230, "double_send_suppressed": 5,
     "source_symbols_sent": 4120300, "repair_symbols_sent": 358944,
     "fec_oversize_frames": 0, "idr_frames": 17, "arq_frames": 68342,
+    "arq_cutoff_frames": 0,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "return": { "reports_expected": 10, "reports_received": 9,
     "return_window_hits": 7, "return_window_misses": 2,
@@ -2180,6 +2193,7 @@ local-ingress polling interval.
 | cache close timers (`tail_grace_ms`/`local_quiet_ms`/`min_collect_ms`/`hard_close_ms`) | §14.3 local-collection close | loss-position sweep at target fps on the Ethernet bench; close must beat next-block supersession with round-trip margin |
 | frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, loss-driven transitions — operator sequencing 2026-07-16), then the radio/kernel-monitor backends on the rig |
 | FPS ladder timers (`reduce_after/reduce_dwell/restore_after/settle_ms`, `distress/restore_milli`) | §9.11 last-resort loop | UDP-air ladder harness first; flight calibration per the design doc §13.3 dwell table |
+| `arq_max_fps` | §4.1 high-cadence ARQ cutoff | operator comfort floor 10 ms (2026-07-16); re-derive against gate-3 recovery latency at high fps |
 
 **Bench gates (must pass before the dependent design is trusted):**
 
@@ -2218,6 +2232,12 @@ local-ingress polling interval.
   prevented). The CSA MAC (§11.4) is the sole exception.
 - No TDMA; no per-packet frequency hopping; no time sync (TSF is the only shared
   anchor); no IP/ARP/AP/STA semantics on the wire.
+- **Dynamic 20/40 MHz channel width — v1 is fleet-wide 20 MHz (operator
+  ruling, Pass 40).** The craft is pinned by the 8812EU 40 MHz bug (§7.2),
+  width is a fleet property under same-channel diversity (§1), and measured
+  monitor-mode retunes (§11.2) rule out an "instant" width actuator. 40 MHz
+  returns, if ever, as a CSA-shaped campaign behind a hardware verdict
+  (review-log register R-D).
 - The craft has one radio — its return-reception is best-effort by physics (§7).
 - No importance beyond the single `ARQ` bit (I-vs-P granularity).
 - Correlated fades that beat diversity also beat ARQ (both ride the same faded

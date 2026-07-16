@@ -869,6 +869,27 @@ outside the §9.1 cascade. Rulings:
 **Amended:** §9.11 (new section), §15.2 (`venc.fps_ladder`), §15.3 (link
 `venc_fps`), §17 (knob row). Code follows separately in the same PR.
 
+## Pass 40 — 20 MHz lock + high-cadence ARQ cutoff (2026-07-16)
+
+Two operator rulings from the pending register (see `docs/followup-plan.md`
+for the working order):
+
+1. **R-D resolved: v1 is fleet-wide 20 MHz.** Dynamic 20/40 width is out of
+   scope for this version; 40 MHz is revisited later, and only as a
+   CSA-shaped campaign behind a hardware verdict for the deployed chips.
+   Recorded in §18; no code change (nothing implemented 40 MHz-dynamically).
+2. **No ARQ above 100 fps (101–144).** Operator: "10 ms is the lowest
+   comfortable window." Architecturally consistent: §6.3a zero retention
+   supersedes an incomplete block at next-frame arrival, so above 100 fps
+   even the I-frame class has <10 ms of usable receiver-side repair time.
+   The frame-SHM TX stamps neither `ARQ` nor `PFRAME_ARQ` while the §9.6
+   cadence input exceeds `policy.arq.arq_max_fps` (seed 100; 0 disables),
+   §14.2 marks those frames not ARQ-capable, and `arq_cutoff_frames` counts
+   the suppressions. Above the cutoff, recovery is FEC + diversity + cache.
+
+**Amended:** §4.1 (cutoff), §15.3 (`arq_cutoff_frames`), §17 (knob row),
+§18 (width lock). Code follows separately in the same PR.
+
 ## Open questions for the next pass
 
 Standing constraints (not revisitable):
@@ -915,7 +936,7 @@ Pending operator rulings, with recommendations (2026-07-16 register):
       supersession race, add an OPT-IN per-stream `max_blocks_ahead=1`
       (+1 frame latency) for cache-enabled streams. Prior: unnecessary at
       ≤90 fps.
-- [ ] **R-D: dynamic 20/40 MHz channel width (reject for v1).** The design
+- [x] **R-D — RULED (Pass 40): v1 locked to fleet-wide 20 MHz.** The design
       doc's "2–5 ms invisible switch" does not survive this stack: the craft
       is pinned 20 MHz (8812EU 40 MHz bug, §7.2), width is a FLEET property
       under same-channel diversity (§1) so a change is CSA-shaped (§11
