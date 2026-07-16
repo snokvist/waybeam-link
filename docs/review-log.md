@@ -784,6 +784,40 @@ Eligibility now enforces only the `oldest_block` bound; `newest_block` is
 lag telemetry. This matches the reference harness, which filtered on the
 oldest bound alone.
 
+## Pass 37 — §9.6 actuation contract v2: horizon frame caps (2026-07-16)
+
+The FPV frame-size/radio adaptation design doc (operator-supplied) asks for
+Salsify-style control: the encoder is told a maximum size for the next frame.
+The venc side landed the actuator (`maxIBytes`/`maxPBytes` + FRAMEBITS_FIRST,
+venc PR #181 + clamp fix). Rulings for the link side:
+
+1. **A per-frame budget channel is OUT OF SCOPE** (operator). venc control is
+   HTTP with persist-on-set; per-frame commands would need a new transport.
+   The way around it: caps are pure functions of SLOW inputs (rung budget,
+   snapped frame cadence, I-frame deadline, FEC rates), so recomputing them
+   only when an input changes loses nothing a per-frame channel would win —
+   the per-frame *enforcement* already lives inside venc's rate controller.
+2. **Cap formulas** (§9.6): maxP = one frame period of rung budget net of P
+   parity; maxI = the I-class recoverable deadline (§4.1/§8) of rung budget
+   net of I parity — an I-frame is sized to what ARQ/FEC can still rescue.
+   Cadence is the measured frame-shm interval snapped to the ladder fps set
+   (jitter must not churn caps); headrooms seed 1000‰, RE-DERIVE.
+3. **Caps ride the §9.5 transition** under the same write-on-change/holdoff
+   discipline as bitrate; `venc.frame_caps=false` opts out without giving up
+   bitrate authority. Ceiling = min(configured ceiling, §14.1 GF(256)
+   eligibility at the rung symbol size).
+4. **Actuator-state telemetry** (§15.3): commanded bitrate/caps + pushes/
+   failures + `venc_settling` (within `venc.settle_ms` of the last accepted
+   change) — the design doc's commanded/effective/pending model collapsed to
+   one boolean because venc's `/set` applies synchronously.
+5. **Verification order** (operator): a full actuation harness on the
+   UDP-air backend FIRST (fake venc endpoint, loss-driven rung transitions),
+   before the radio and kernel-monitor backends are verified on the rig.
+
+**Amended:** §9.6 (horizon caps + actuator model), §15.2 (`venc` knobs),
+§15.3 (link `venc_*` fields), §17 (knob row + UDP-first note). Code follows
+separately in the same PR.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;

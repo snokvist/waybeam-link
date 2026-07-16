@@ -998,6 +998,7 @@ Live HTTP, `MUT_LIVE`, sub-ms, no reinit:
 
 ```
 GET /api/v1/set?video0.bitrate=<kbps>          Host 127.0.0.1:80
+GET /api/v1/set?video0.maxIBytes=<B>&video0.maxPBytes=<B>   # one live group
 GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
 ```
 
@@ -1005,7 +1006,8 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
   `bitrate_min` is a policy floor ≥ 1000.
 - **Single bitrate authority (deployment rule, not a flag):** venc's API is
   last-writer-wins with no arbitration. waybeam-link MUST be the only writer of
-  `video0.bitrate`: if waybeam-hub is present set its `venc.bitrate_enabled=false`
+  `video0.bitrate` (and, with frame caps enabled, of `video0.maxIBytes`/
+  `maxPBytes`): if waybeam-hub is present set its `venc.bitrate_enabled=false`
   (that flag lives in hub `mod_venc`, not venc); do not run wfb_ng
   `link_controller` — waybeam-link replaces it.
 - **Write only on change (flash wear):** every `/set` persists to
@@ -1014,6 +1016,45 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
 - **Low-bitrate coupling (optional):** at floor profiles the SVC-T preset
   oscillates fps; waybeam-link MAY command `video0.resilience=racing` at the low
   end (coarse, hysteretic — `resilience` is heavier than a bitrate tweak).
+
+**Per-frame size caps — horizon actuation (Pass 37).** With `venc.enabled`
+and a frame-shm ingress stream, waybeam-link additionally commands venc's
+per-frame ceilings (`maxIBytes`/`maxPBytes`, FRAMEBITS_FIRST) so a burst
+frame can never be encoded larger than the active rung can carry inside its
+deadline. **A per-frame budget channel is ruled OUT OF SCOPE** (operator,
+2026-07-16): venc control is HTTP with persist-on-set, and Salsify-style
+next-frame commands would need a new transport. The caps are therefore
+**horizon caps** — pure functions of slow inputs, recomputed only when an
+input changes and pushed under the same write-on-change/holdoff rules as
+bitrate, riding the same §9.5 transition moments:
+
+- `frame_period_us` — the measured frame-shm ingress cadence
+  (§15.3 `frame_interval_us`), **snapped to the nearest ladder fps**
+  `{30, 45, 60, 75, 90, 100, 120, 144}` so cadence jitter cannot churn the
+  caps; `venc.fps_hint` (seed 60) until measured.
+- `budget_bps` — the active rung's §9.5 derived bitrate target (already net
+  of airtime fraction, table FEC overhead, and control/telemetry reserves).
+- `maxP = budget_bps · frame_period_us / 8·10⁶ · 1000/(1000 + p_rate‰) ·
+  p_headroom‰/1000` — the deadline-safe P ceiling: one frame period of rung
+  budget, net of the stream's §14.1 P parity.
+- `maxI = budget_bps · arq_deadline_iframe_ms / 8000 · 1000/(1000 + i_rate‰)
+  · i_headroom‰/1000` — the I-class recoverable window (§4.1/§8), net of I
+  parity: an I-frame is sized to what ARQ/FEC can still rescue, not to one
+  frame period.
+- Clamps: `maxI ≥ maxP`; both floored at venc's own 4096-byte cap floor
+  (never command sub-floor) and ceilinged at
+  `min(cap_ceiling_bytes, s·⌊256000/(1000 + rate‰)⌋)` — the §14.1
+  GF(256) eligibility bound at the rung's symbol size `s`.
+- Headroom seeds 1000 ‰ (= exactly the deadline-safe ceiling); all seeds
+  §17 RE-DERIVE. `venc.frame_caps=false` disables cap writes while keeping
+  bitrate authority.
+
+The doc-level actuator model (commanded / effective / pending): venc applies
+a 2xx `/set` synchronously, so **commanded = applied** at HTTP success; the
+encoder *output* settles over ~0.5–0.75 s. §15.3 exposes the commanded
+values plus `venc_settling` (true within `venc.settle_ms`, seed 750, of the
+last accepted change) so consumers can distinguish a pending transition
+from steady state without a second wire field.
 
 ### 9.7 Flap avoidance (three layers)
 - **Soft reentry:** re-promoting into a just-demoted rung within
@@ -1646,7 +1687,10 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
   "control": { "bind": "0.0.0.0:8091" },
   "venc": { "host": "127.0.0.1:80", "enabled": false,
-            "recovery_enabled": true }
+            "recovery_enabled": true,
+            "frame_caps": true, "fps_hint": 60,
+            "i_headroom_permille": 1000, "p_headroom_permille": 1000,
+            "cap_ceiling_bytes": 196608, "settle_ms": 750 }
 }
 ```
 - RX nodes use `"dir":"out"` streams (UDP `send` targets) and `role:"rx"` adapters
@@ -1754,8 +1798,17 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
   "link": { "target_originator": 9, "target_session": 183726,
     "profile": 4, "mcs": 4, "tx_power_qdb": 1800,
     "report_epoch": 1822, "report_age_ms": 40,
-    "state": "HOLD", "flap_freeze": false, "csa_state": "IDLE" } }
+    "state": "HOLD", "flap_freeze": false, "csa_state": "IDLE",
+    "venc_bitrate_kbps": 14000, "venc_max_i_bytes": 70000,
+    "venc_max_p_bytes": 19444, "venc_pushes": 6, "venc_failures": 0,
+    "venc_settling": false } }
 ```
+The `venc_*` link fields are the §9.6 actuator state: the last COMMANDED
+bitrate and frame caps (0 = never pushed), cumulative pushes/failures, and
+`venc_settling` — true within `venc.settle_ms` of the last accepted change
+(the doc-model "pending transition"; commanded = applied at HTTP 2xx since
+venc's `/set` is synchronous). Zero/false on nodes without `venc.enabled`.
+
 `return_window_hits/misses` (TX-side) and `reports_expected/received` expose the
 §7.2 optimisation's health directly, and `adapter_stalled` + the
 `loss_prediversity` vs `loss_postdiv_prearq` pair expose phantom diversity and the
@@ -2046,6 +2099,7 @@ local-ingress polling interval.
 | EWMA α, `mcs_settle_s` | §9 smoothing/settle | no-FEC loss spikiness |
 | `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
 | cache close timers (`tail_grace_ms`/`local_quiet_ms`/`min_collect_ms`/`hard_close_ms`) | §14.3 local-collection close | loss-position sweep at target fps on the Ethernet bench; close must beat next-block supersession with round-trip margin |
+| frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, loss-driven transitions — operator sequencing 2026-07-16), then the radio/kernel-monitor backends on the rig |
 
 **Bench gates (must pass before the dependent design is trusted):**
 
