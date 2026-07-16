@@ -871,16 +871,98 @@ outside the §9.1 cascade. Rulings:
 
 ## Open questions for the next pass
 
-- [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
+Standing constraints (not revisitable):
+
+- [ ] **Ruling 3 is FIXED** — vehicle is permanently single-adapter;
       diversity is ground-RX-only. Craft return path is best-effort by physics; the
       quiet-gap fit + floor-oscillation damping are **resolved empirically at gate 4**,
       not designed further on paper.
 - [ ] Run the four bench gates (gate 1 now RX-proven; gate 4 return-window-fit is the one
-      that gates the craft return path under single-adapter).
-- [ ] **§10 ground-uplink power scope** (surfaced by the 2026-07-11 desk §4.6 run): the
-      §10 power curve is applied only on the tx-node selector commit, so the ground's
-      designated uplink TX adapter (role tx) transmits returns at devourer's efuse-default
-      power regardless of any `power_map` — sweeping it is a no-op. Decide: bring the ground
-      return uplink under power-curve control, or reject/ignore a `power_map` on an rx-node
-      uplink (currently it's silently loaded but never applied). Not a spec ruling yet —
-      raised for the next pass.
+      that gates the craft return path under single-adapter). The Pass 36–39 UDP
+      harnesses (`cache_repair`/`actuation`/`jscc_enforce`/`fps_ladder`) re-run
+      against the radio and kernel-monitor backends as part of the same rig
+      campaign (§17 UDP-first ruling, 2026-07-16).
+
+Pending operator rulings, with recommendations (2026-07-16 register):
+
+- [ ] **R-A: LINK_REPORT preferred-originator enforcement (§3.5 gap — do
+      first).** §3.5 rules the TX accepts a report only from the latched/
+      preferred `(originator, session)`, but the TX event loop forwards ANY
+      report matching target+session to the selector — and now to the §9.11
+      fps ladder. A second (or forged, §13) reporter can steer MCS and fps.
+      JSCC_FEEDBACK already enforces the preferred filter.
+      *Recommendation:* small pass mirroring the JSCC_FEEDBACK filter: when
+      `preferred_originator` is configured, drop non-preferred reports before
+      the selector/ladder; when unconfigured, first-latcher-per-target with
+      the §3.5 plausibility cross-check. Low effort, closes a real spoof
+      surface before any flight use of the ladder.
+- [ ] **R-B: §14.2 enforcement × §14.3 cache interaction (before enabling
+      both in flight).** The RX repair-demand estimator observes blocks AFTER
+      cache repair merges symbols, so a healthy cache lowers reported demand,
+      the enforcing TX then sends less parity, and protection silently
+      migrates onto the cache path — an unplanned dependency on the side
+      link. *Recommendation:* measure first (combined bench: cache +
+      enforce on the same stream, watch `repair_demand_permille` vs
+      `cache_repair.blocks_repaired`); if the offload is real, rule that the
+      RX estimator counts cache-delivered symbols as lost (source-kind
+      exclusion) so TX parity is sized for the AIR path and the cache stays
+      redundancy, not budget.
+- [ ] **R-C: §14.3 repair window at high fps (data first, knob maybe).**
+      Zero-block retention ends cache repair at next-block arrival; at
+      120 fps the post-close window is ~2–5 ms. *Recommendation:* keep zero
+      retention as pinned; run the Ethernet cache bench at a 90/120/144 fps
+      sweep, and only if a material fraction of cache replies lose the
+      supersession race, add an OPT-IN per-stream `max_blocks_ahead=1`
+      (+1 frame latency) for cache-enabled streams. Prior: unnecessary at
+      ≤90 fps.
+- [ ] **R-D: dynamic 20/40 MHz channel width (reject for v1).** The design
+      doc's "2–5 ms invisible switch" does not survive this stack: the craft
+      is pinned 20 MHz (8812EU 40 MHz bug, §7.2), width is a FLEET property
+      under same-channel diversity (§1) so a change is CSA-shaped (§11
+      already carries `target_bw`), and measured monitor-mode retunes run to
+      ~277 ms cross-band (§11.2). *Recommendation:* no per-link width
+      actuator. If capacity beyond MCS7@20 MHz is ever needed, design it as
+      a CSA campaign parameter, gated on (a) a hardware verdict for the
+      deployed chips under injection at 40 MHz, (b) measured retune times,
+      (c) a gate-4-class bench. Until then width stays a deployment choice
+      (the matrix tool already models both).
+- [ ] **R-E: venc volatile writes (flash wear at controller cadence).**
+      Every venc `/set` persists to `/etc/waybeam.json`; write-on-change
+      helps, but bitrate+caps+fps transitions on an oscillating link still
+      wear flash. *Recommendation (venc-repo change):* add a volatile apply
+      (e.g. `persist=false`) to the /set contract; waybeam-link then uses
+      volatile sets for controller-driven fields plus a rare persisted
+      baseline. Wants doing before long-duration flight soaks.
+- [ ] **R-F: decoder-side deadline telemetry (enables the §13.4 emergency
+      path).** The fps ladder's reduce trigger is TX-inferred; the design
+      doc's emergency reduction ("persistent deadline misses") needs the
+      consumer's truth. *Recommendation:* additive §15.3 RX counters
+      (late/deadline-missed frames at the reassembler boundary) first; a
+      JSCC_FEEDBACK field only if TX-side triggers prove insufficient; the
+      Pass-39-deferred emergency bypass lands with, and only with, that
+      signal.
+- [ ] **R-G: fps ladder `max` (above-preferred cadence) — defer.** v1 caps
+      at `preferred`. Higher-than-preferred fps shrinks frames and could aid
+      deadline fit, but each step is a visible stutter. *Recommendation:*
+      revisit only with bench evidence (deadline-miss telemetry from R-F at
+      the preferred point with headroom); otherwise leave `max` reserved.
+- [ ] **R-H: RF cache transport ordering — defer until proposed.** Pass 36
+      rule 8 (cache parallel to vehicle ARQ) is justified by IP repair
+      costing zero RF airtime; an RF cache reply spends shared airtime, so
+      V3.1's serial order must be re-argued THEN. Formats are already
+      transport-agnostic; nothing to do now.
+- [ ] **§10 ground-uplink power scope** (2026-07-11 desk §4.6 run): the
+      §10 power curve is applied only on the tx-node selector commit, so the
+      ground's designated uplink TX adapter transmits returns at devourer's
+      efuse-default power regardless of any `power_map` — sweeping it is a
+      no-op. *Recommendation:* config-load warning/rejection for a
+      `power_map` on an rx-node uplink now (explicit beats silent); bring
+      the return uplink under power control only if gate 4 shows return
+      margin problems.
+- [ ] **JSCC enforcement production flip (per link class, rig data).** The
+      Pass 38 criteria (≥99% valid decisions, <1% repair underprediction,
+      RTT readiness held) are UDP-proven; the flip itself should follow a
+      radio-backend shadow soak during the gate campaigns.
+      *Recommendation:* flip P-frames first (`arq_mode all-frames` +
+      `enforce`), confirm discard behavior visually on the bench before any
+      flight use.
