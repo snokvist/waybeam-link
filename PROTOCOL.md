@@ -1521,8 +1521,38 @@ Shadow configuration is optional and disabled when absent:
 
 All five values are operator-authored measurement inputs. There are no hidden
 optimistic defaults. The cap is converted per frame and then clamped by the
-GF(256) limit; it is independent of the active fixed §14.1 rate. This block
-authorizes observation only, not adaptive transmission.
+GF(256) limit; it is independent of the active fixed §14.1 rate. Without
+`enforce`, this block authorizes observation only.
+
+**Enforcement (Pass 38, opt-in).** `"enforce": true` inside `jscc_shadow`
+turns the per-frame decision from reported to ACTUATING, with per-frame
+fail-safe — every rule below applies to one frame and resets on the next:
+
+1. **Parity:** a VALID decision's `parity_symbols` replaces the fixed §14.1
+   `repair_count` for that frame, still hard-clamped by GF(256) capacity
+   (`k + r ≤ 256`) and still subject to the §14.1 `min_k` ARQ-only rule.
+   Any named fallback (missing/stale feedback, unready estimator, missing
+   airtime or deadline) selects the fixed §14.1 rate for that frame — an
+   invalid decision can never zero out authored protection.
+2. **Deadline discard:** a VALID decision with `discard=true`
+   (`deadline_unreachable`) drops the frame at TX before spending airtime —
+   the transient-overload guard: a visible frame drop is preferred over
+   queueing stale video behind newer frames. A fallback frame always
+   transmits; missing data never fails toward dropping.
+3. **ARQ gate:** a VALID decision with `arq_eligible=false` clears
+   **`PFRAME_ARQ` only** for that frame (suppressing NACKs that cannot be
+   serviced in-deadline). The IDR `ARQ` bit is never removed — I-frame
+   importance outlives one frame timing window, and the §5.3 deadline gate
+   already bounds late resends.
+
+**Flip criteria (operator guidance, not code):** enable `enforce` only after
+a shadow soak on the same link class shows `jscc_valid_decisions ≥ 99%` of
+`jscc_decision_frames`, `jscc_repair_underpredicted_blocks` growing at
+< 1% of shadow blocks, and RTT readiness held throughout — measured on the
+UDP-air harness first (§17 verification order), then radio/kernel-monitor
+on the rig. Enforcement telemetry is additive (§15.3):
+`jscc_enforced_frames` (valid decisions actuated) and
+`jscc_discarded_frames` (rule-2 drops).
 
 ### 14.3 Spatial cache repair (Cache Controller — v1 IP transport only)
 
@@ -1716,7 +1746,8 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   (default) or the opt-in `"all-frames"` experiment from §4.1.
 - A frame-SHM ingress may additionally carry the optional `jscc_shadow` block
   from §14.2. It is rejected on UDP streams. Absence keeps only the fixed §14.1
-  path and emits no controller decision shadow.
+  path and emits no controller decision shadow. `"enforce": true` inside the
+  block activates §14.2 enforcement (Pass 38); default false = shadow-only.
 - `venc.enabled` authorizes the §9.6 bitrate actuator and therefore requires
   single-writer ownership. `venc.recovery_enabled` independently authorizes
   only §3.9 decoder-recovery IDR requests. Neither permission is implied by the
@@ -1784,6 +1815,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "jscc_output_remaining_us": 11457,
     "jscc_output_arq_eligible": true, "jscc_output_discard": false,
     "jscc_feedback_epoch": 1821, "jscc_feedback_age_ms": 42,
+    "jscc_enforced_frames": 0, "jscc_discarded_frames": 0,
     "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,

@@ -818,6 +818,33 @@ venc PR #181 + clamp fix). Rulings for the link side:
 §15.3 (link `venc_*` fields), §17 (knob row + UDP-first note). Code follows
 separately in the same PR.
 
+## Pass 38 — §14.2 enforcement gate: shadow becomes actuating (2026-07-16)
+
+The Pass 24–35 shadow program existed to justify exactly this flip with
+data. The operator's controller design (frame-size/radio adaptation doc) and
+the agreed sequencing make §14.2 the per-frame inner loop of the JSCC
+controller; horizon caps (Pass 37) bound what the encoder may produce, and
+this pass makes the per-frame protection decision live. Rulings:
+
+1. **Opt-in and per-frame fail-safe.** `jscc_shadow.enforce=true` actuates a
+   VALID decision's parity/discard/ARQ outputs for that one frame; any named
+   fallback selects the fixed §14.1 rate for that frame. Missing data can
+   therefore never zero out authored protection, and disabling the flag
+   restores pure shadow with no other behavior change.
+2. **Discard only on a valid decision** (`deadline_unreachable`): the
+   transient-overload guard drops the frame at TX rather than queueing stale
+   video. A fallback frame always transmits.
+3. **The ARQ gate touches `PFRAME_ARQ` only.** The IDR `ARQ` bit is never
+   removed by per-frame timing — importance outlives one window and §5.3
+   already deadline-gates resends.
+4. **Flip criteria stated as shadow telemetry** (≥99% valid decisions,
+   <1% repair underprediction, RTT readiness held), verified UDP-first per
+   the §17 ordering.
+
+**Amended:** §14.2 (enforcement rules + flip criteria), §15.2 (`enforce`
+flag), §15.3 (`jscc_enforced_frames`/`jscc_discarded_frames`). Code follows
+separately in the same PR.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
