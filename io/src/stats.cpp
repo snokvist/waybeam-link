@@ -317,6 +317,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.ret.reports_expected);
     out += ",\"reports_received\":";
     append_u64(out, snap.ret.reports_received);
+    out += ",\"reports_rejected\":";
+    append_u64(out, snap.ret.reports_rejected);
     out += ",\"return_window_hits\":";
     append_u64(out, snap.ret.return_window_hits);
     out += ",\"return_window_misses\":";

@@ -42,6 +42,7 @@
 #include "wblink/power.h"
 #include "wblink/power_file.h"
 #include "wblink/quietgap.h"
+#include "wblink/report_gate.h"
 #include "wblink/reporter.h"
 #include "wblink/ring.h"
 #include "wblink/rx.h"
@@ -837,7 +838,10 @@ struct TxCore {
           selector_(selector_policy(cfg), table),
           venc_(cfg.venc),
           venc_knobs_(cfg.venc),
-          arq_max_fps_(cfg.policy.arq.arq_max_fps) {
+          arq_max_fps_(cfg.policy.arq.arq_max_fps),
+          report_gate_(ReportGatePolicy{
+              cfg.node.preferred_originator,
+              cfg.policy.report_timeout_ms * 4}) {
         // §9.11 FPS ladder (Pass 39) — config validated it requires venc.
         if (cfg.venc.enabled && cfg.venc.fps_ladder.enabled) {
             const FpsLadderCfg& lc = cfg.venc.fps_ladder;
@@ -1073,6 +1077,12 @@ struct TxCore {
         if (const LinkReport* r = std::get_if<LinkReport>(&dec)) {
             if (r->target_originator != originator_ ||
                 r->target_session != session_) {
+                return;
+            }
+            // §3.5 acceptance filter (Pass 41): preferred/latched reporters
+            // only — BEFORE the selector and the §9.11 ladder consume it.
+            if (!report_gate_.accept(r->prefix.originator,
+                                     r->prefix.session_id, now)) {
                 return;
             }
             ++reports_received_;
@@ -1376,6 +1386,7 @@ struct TxCore {
         // reports it SENT; we know how many arrived.
         snap.ret.reports_expected = selector_.report_epoch();
         snap.ret.reports_received = reports_received_;
+        snap.ret.reports_rejected = report_gate_.rejected();  // §3.5 Pass 41
     }
 
     struct PowerAdapter {
@@ -1403,6 +1414,7 @@ struct TxCore {
     std::optional<FpsLadder> fps_ladder_;  // §9.11 (Pass 39)
     uint16_t arq_max_fps_ = 100;           // §4.1 Pass 40 cutoff
     bool arq_fps_suppressed_ = false;
+    ReportGate report_gate_;               // §3.5 Pass 41
     uint64_t frame_cadence_us_ = 0; // windowed ingress cadence estimate
     uint64_t cadence_start_ms_ = 0;
     uint32_t cadence_frames_ = 0;

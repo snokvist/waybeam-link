@@ -135,6 +135,7 @@ struct StreamStats {
 struct ReturnStats {
     uint32_t reports_expected = 0;
     uint32_t reports_received = 0;
+    uint64_t reports_rejected = 0;  // §3.5 Pass 41 acceptance filter
     uint32_t return_window_hits = 0;
     uint32_t return_window_misses = 0;
     // §3.0 Pass 12 unicast returns: sent unicast vs fell back to broadcast

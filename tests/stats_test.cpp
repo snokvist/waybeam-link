@@ -107,7 +107,7 @@ StatsSnapshot sample_snapshot() {
     st.active_profile = 4;
     st.table_version = 178;
     s.streams.push_back(st);
-    s.ret = ReturnStats{10, 9, 7, 2};
+    s.ret = ReturnStats{10, 9, 0, 7, 2};
     s.link.target_originator = 9;
     s.link.target_session = 183726;
     s.link.profile = 4;
@@ -182,6 +182,7 @@ const char* kGolden =
     "\"arq_cutoff_frames\":0,"
     "\"decode_errors\":0,\"active_profile\":4,\"table_version\":178}],"
     "\"return\":{\"reports_expected\":10,\"reports_received\":9,"
+    "\"reports_rejected\":0,"
     "\"return_window_hits\":7,\"return_window_misses\":2,"
     "\"unicast_sent\":0,\"unicast_fallback\":0},"
     "\"link\":{\"target_originator\":9,\"target_session\":183726,"
