@@ -728,6 +728,7 @@ struct AirBackend {
                 as.drop = c.rx_dropped;
                 as.filtered = c.rx_filtered;
                 as.kernel_drop = c.kernel_dropped;
+                as.bpf_filtered = c.bpf_filtered;
                 as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
                 // No CCX tx.report on monitor injection; wedge watchdog off.
                 as.tx_reports = 0;

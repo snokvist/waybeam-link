@@ -15,6 +15,7 @@
 #include <cerrno>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>  // strtoull
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -35,6 +36,18 @@ inline uint32_t xorshift32(uint32_t& s) {
     s ^= s >> 17;
     s ^= s << 5;
     return s;
+}
+
+uint64_t read_iface_rx_packets(const std::string& ifname) {
+    const std::string path =
+        "/sys/class/net/" + ifname + "/statistics/rx_packets";
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return 0;
+    char buf[32];
+    const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    buf[n] = '\0';
+    return std::strtoull(buf, nullptr, 10);
 }
 
 // §3.0 BPF pre-filter: rejects non-waybeam frames in the kernel before the
@@ -187,6 +200,7 @@ struct MonAir::Impl {
         std::atomic<int> rssi_last{-128};
         uint32_t kernel_drop_last = 0;  // RX thread only
         uint32_t rng = 1;
+        uint64_t iface_rx_baseline = 0;  // sysfs rx_packets at socket open
     };
 
     MonAirCfg cfg;
@@ -394,6 +408,7 @@ Result<MonAir> MonAir::create(const MonAirCfg& cfg) {
         a->ifname = ac.ifname;
         a->fd = fd;
         a->tx = (ac.role == Role::kTx);
+        a->iface_rx_baseline = read_iface_rx_packets(ac.ifname);
         a->rng = 0x9e3779b9u ^ (static_cast<uint32_t>(i) * 2654435761u);
         if (a->rng == 0) {
             a->rng = 1;
@@ -512,6 +527,12 @@ MonAir::AdapterCounters MonAir::counters(size_t adapter) const {
     c.rx_filtered = a->rx_filtered.load(std::memory_order_relaxed);
     c.rx_dropped = a->rx_dropped.load(std::memory_order_relaxed);
     c.kernel_dropped = a->kernel_dropped.load(std::memory_order_relaxed);
+    const uint64_t iface_rx = read_iface_rx_packets(a->ifname);
+    const uint64_t userspace =
+        c.rx_frames + c.rx_filtered + c.rx_dropped + c.kernel_dropped;
+    const uint64_t iface_delta =
+        iface_rx >= a->iface_rx_baseline ? iface_rx - a->iface_rx_baseline : 0;
+    c.bpf_filtered = iface_delta > userspace ? iface_delta - userspace : 0;
     c.rssi_last =
         static_cast<int8_t>(a->rssi_last.load(std::memory_order_relaxed));
     if (a->tx) {
