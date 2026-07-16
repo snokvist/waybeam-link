@@ -534,6 +534,12 @@ int main() {
           "venc":{"enabled":true,"i_headroom_permille":1200}})", "headrooms");
     }
 
+    // --- §10.2 Pass 43: power_map on an rx node is rejected -----------------
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "adapters":[{"name":"wlan1","bus":"1-1.2","role":"tx","channel":5805,
+                   "power_map":"/etc/waybeam-link/power.wlan1.txt"}]})",
+        "never applied");
+
     // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------
     {
         auto d = load_config_json(R"({"node":{"originator":9,"role":"tx"}})");

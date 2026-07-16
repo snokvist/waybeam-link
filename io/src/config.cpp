@@ -162,6 +162,16 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             ac.bw = static_cast<uint8_t>(bw);
             ac.power_map = a.value("power_map", std::string{});
+            // §10.2 Pass 43: the power resolve runs only in the tx-node
+            // selector commit — an rx-node power_map would be silently
+            // loaded and never applied. Explicit beats silent.
+            if (cfg.node.role == Role::kRx && !ac.power_map.empty()) {
+                return Result<Config>::fail(
+                    "adapter " + ac.name +
+                    ": power_map on an rx node is never applied (§10.2) — "
+                    "remove it (ground-uplink power control is a future "
+                    "ruling)");
+            }
             if (a.contains("max_power_qdb")) {
                 ac.max_power_qdb = a.at("max_power_qdb").get<int32_t>();
             }
