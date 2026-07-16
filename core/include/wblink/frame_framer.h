@@ -52,6 +52,7 @@ struct FrameFramerStats {
     uint64_t fec_oversize_k = 0;    // k + r_target > 256 => FEC disabled (§14.1)
     uint64_t idr_frames = 0;
     uint64_t arq_frames = 0;
+    uint64_t arq_cutoff_frames = 0;  // §4.1 Pass 40 high-cadence suppression
 };
 
 class FrameFramer {
@@ -115,6 +116,11 @@ class FrameFramer {
         override_allow_parq_ = allow_pframe_arq;
     }
 
+    // §4.1 Pass 40 high-cadence ARQ cutoff: while set, frames are stamped
+    // with neither ARQ nor PFRAME_ARQ (counted in arq_cutoff_frames).
+    // Sticky, driven from the TX cadence estimate each tick.
+    void set_arq_suppressed(bool on) { arq_suppressed_ = on; }
+
   private:
     // r for a frame of k symbols per the §14.1 adaptive policy; 0 if FEC off,
     // ARQ-only (k <= min_k), or the k+r>256 cap trips (records fec_oversize_k).
@@ -131,6 +137,7 @@ class FrameFramer {
     uint32_t block_id_ = 0;
     std::optional<uint16_t> override_parity_;  // §14.2 one-shot (Pass 38)
     bool override_allow_parq_ = true;
+    bool arq_suppressed_ = false;  // §4.1 Pass 40 (sticky)
 
     // Reusable scratch (amortised across frames): zero-padded source symbols
     // (k*s) for the repair computation, and one encode buffer.

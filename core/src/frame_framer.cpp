@@ -77,22 +77,29 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
 
     const uint32_t block_id = block_id_++;
     const uint32_t base_seq = next_seq_;
-    // §14.2 rule 3: a valid enforced decision may clear PFRAME_ARQ for this
-    // frame; the IDR ARQ bit is never touched.
+    // §4.1 Pass 40: above the cadence cutoff nothing is ARQ-class; §14.2
+    // rule 3: a valid enforced decision may additionally clear PFRAME_ARQ
+    // for this frame. The IDR ARQ bit is only ever removed by the cutoff.
+    const bool arq_class =
+        is_idr || cfg_.arq_mode == FrameArqMode::kAllFrames;
+    const bool idr_arq = is_idr && !arq_suppressed_;
     const bool pframe_arq = !is_idr &&
                             cfg_.arq_mode == FrameArqMode::kAllFrames &&
-                            ov_allow_parq;
+                            ov_allow_parq && !arq_suppressed_;
     const uint8_t base_flags = static_cast<uint8_t>(
-        (is_idr ? data_flags::kArq
-                : (pframe_arq ? data_flags::kPframeArq : 0)) |
+        (idr_arq ? data_flags::kArq
+                 : (pframe_arq ? data_flags::kPframeArq : 0)) |
         extra_flags_);
 
     ++stats_.frames;
     if (is_idr) {
         ++stats_.idr_frames;
     }
-    if (is_idr || pframe_arq) {
+    if (idr_arq || pframe_arq) {
         ++stats_.arq_frames;
+    }
+    if (arq_suppressed_ && arq_class) {
+        ++stats_.arq_cutoff_frames;
     }
 
     // --- source symbols: k DATA packets, EOB on the last, tail unpadded (§5.1a).

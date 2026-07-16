@@ -259,6 +259,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.idr_frames);
         out += ",\"arq_frames\":";
         append_u64(out, s.arq_frames);
+        out += ",\"arq_cutoff_frames\":";
+        append_u64(out, s.arq_cutoff_frames);
         out += ",\"decode_errors\":";
         append_u64(out, s.decode_errors);
         out += ",\"active_profile\":";

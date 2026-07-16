@@ -836,7 +836,8 @@ struct TxCore {
           table_(table),
           selector_(selector_policy(cfg), table),
           venc_(cfg.venc),
-          venc_knobs_(cfg.venc) {
+          venc_knobs_(cfg.venc),
+          arq_max_fps_(cfg.policy.arq.arq_max_fps) {
         // §9.11 FPS ladder (Pass 39) — config validated it requires venc.
         if (cfg.venc.enabled && cfg.venc.fps_ladder.enabled) {
             const FpsLadderCfg& lc = cfg.venc.fps_ladder;
@@ -995,7 +996,9 @@ struct TxCore {
                 input.source_k = k;
                 input.deadline_us = frame_deadline_us(idr);
                 input.arq_capable =
-                    idr || s.frame_framer->arq_mode() == FrameArqMode::kAllFrames;
+                    (idr ||
+                     s.frame_framer->arq_mode() == FrameArqMode::kAllFrames) &&
+                    !arq_fps_suppressed_;  // §4.1 Pass 40 cutoff
                 input.now_ms = now;
                 if (estimate_airtime) {
                     input.source_tx_remaining_us =
@@ -1163,6 +1166,24 @@ struct TxCore {
                 venc_.set_fps(*f, now);
             }
         }
+        // §4.1 Pass 40 high-cadence ARQ cutoff, driven by the same cadence
+        // input the §9.6 caps use (ladder-commanded, else measured, else
+        // hint). Sticky on the framers until the cadence drops back.
+        {
+            const uint32_t snapped = snap_frame_period_us(
+                fps_ladder_ && fps_ladder_->current_fps() > 0
+                    ? 1000000ull / fps_ladder_->current_fps()
+                    : (frame_cadence_us_ != 0
+                           ? frame_cadence_us_
+                           : 1000000ull / venc_knobs_.fps_hint));
+            arq_fps_suppressed_ = arq_max_fps_ != 0 && snapped != 0 &&
+                                  snapped < 1000000u / arq_max_fps_;
+            for (Stream& s : streams_) {
+                if (s.frame_framer) {
+                    s.frame_framer->set_arq_suppressed(arq_fps_suppressed_);
+                }
+            }
+        }
         // §9.6 Pass 37 horizon caps: recomputed from slow inputs (rung
         // budget, ladder-snapped cadence, I deadline, live §14.1 rates);
         // write-on-change makes the steady state a no-op.
@@ -1291,6 +1312,8 @@ struct TxCore {
                     s.frame_framer->stats().fec_oversize_k;
                 st.idr_frames = s.frame_framer->stats().idr_frames;
                 st.arq_frames = s.frame_framer->stats().arq_frames;
+                st.arq_cutoff_frames =
+                    s.frame_framer->stats().arq_cutoff_frames;
             }
             if (s.jscc_shadow) {
                 const JsccShadowResult& js = s.jscc_latest;
@@ -1378,6 +1401,8 @@ struct TxCore {
     VencActuator venc_;
     VencCfg venc_knobs_;            // §9.6 cap knobs (Pass 37)
     std::optional<FpsLadder> fps_ladder_;  // §9.11 (Pass 39)
+    uint16_t arq_max_fps_ = 100;           // §4.1 Pass 40 cutoff
+    bool arq_fps_suppressed_ = false;
     uint64_t frame_cadence_us_ = 0; // windowed ingress cadence estimate
     uint64_t cadence_start_ms_ = 0;
     uint32_t cadence_frames_ = 0;

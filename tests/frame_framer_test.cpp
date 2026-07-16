@@ -283,5 +283,36 @@ int main() {
         for (const Sym& sy : small.sent) CHECK(!sy.is_repair());
     }
 
+    // --- §4.1 Pass 40 high-cadence ARQ cutoff --------------------------------
+    {
+        Harness h({}, FrameArqMode::kAllFrames);
+        h.framer.set_arq_suppressed(true);
+        h.feed(make_frame(3000, /*idr=*/true, 11));
+        h.feed(make_frame(3000, /*idr=*/false, 12));
+        for (const Sym& sy : h.sent) {
+            CHECK((sy.hdr.data_flags &
+                   (data_flags::kArq | data_flags::kPframeArq)) == 0);
+        }
+        CHECK_EQ_U(h.framer.stats().arq_frames, 0u);
+        CHECK_EQ_U(h.framer.stats().arq_cutoff_frames, 2u);
+        CHECK_EQ_U(h.framer.stats().idr_frames, 1u);
+        // Cadence drops back below the cutoff: stamping resumes (sticky off).
+        h.framer.set_arq_suppressed(false);
+        h.sent.clear();
+        h.feed(make_frame(3000, /*idr=*/true, 13));
+        bool arq = false;
+        for (const Sym& sy : h.sent) {
+            arq |= (sy.hdr.data_flags & data_flags::kArq) != 0;
+        }
+        CHECK(arq);
+        CHECK_EQ_U(h.framer.stats().arq_frames, 1u);
+        CHECK_EQ_U(h.framer.stats().arq_cutoff_frames, 2u);
+        // idr-only mode: a suppressed P frame is not counted (not ARQ-class).
+        Harness p({}, FrameArqMode::kIdrOnly);
+        p.framer.set_arq_suppressed(true);
+        p.feed(make_frame(3000, /*idr=*/false, 14));
+        CHECK_EQ_U(p.framer.stats().arq_cutoff_frames, 0u);
+    }
+
     return wbtest_finish("frame_framer_test");
 }

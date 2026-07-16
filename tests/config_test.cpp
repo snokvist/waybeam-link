@@ -534,6 +534,15 @@ int main() {
           "venc":{"enabled":true,"i_headroom_permille":1200}})", "headrooms");
     }
 
+    // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------
+    {
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"tx"}})");
+        CHECK(bool(d) && d.value->policy.arq.arq_max_fps == 100);
+        auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "policy":{"arq":{"arq_max_fps":0}}})");
+        CHECK(bool(r) && r.value->policy.arq.arq_max_fps == 0);
+    }
+
     // --- §9.11 fps ladder (Pass 39): parse + validation ---------------------
     {
         auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},

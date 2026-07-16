@@ -161,6 +161,8 @@ struct ArqPolicy {
     uint32_t budget_interval_ms = 100;
     uint32_t budget_floor_bytes = 4096;
     uint32_t max_block_pkts = 64;  // §13 bitmap sanity clamp
+    // §4.1 Pass 40: no ARQ class above this cadence (0 = no cutoff).
+    uint16_t arq_max_fps = 100;
 };
 
 // §6 RX-side knobs (all §17-overridable seeds).

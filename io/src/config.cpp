@@ -382,6 +382,7 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pa.value("budget_floor_bytes", arq.budget_floor_bytes);
                 arq.max_block_pkts =
                     pa.value("max_block_pkts", arq.max_block_pkts);
+                arq.arq_max_fps = pa.value("arq_max_fps", arq.arq_max_fps);
             }
             if (p.contains("rx")) {
                 const json& pr = p.at("rx");

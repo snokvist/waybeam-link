@@ -126,6 +126,7 @@ struct StreamStats {
     uint64_t fec_oversize_frames = 0;
     uint64_t idr_frames = 0;
     uint64_t arq_frames = 0;
+    uint64_t arq_cutoff_frames = 0;  // §4.1 Pass 40 cadence suppression
     uint64_t decode_errors = 0;
     uint8_t active_profile = 0;
     uint8_t table_version = 0;
