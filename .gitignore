@@ -17,3 +17,4 @@
 /scratch/
 /artifacts/
 /*.local
+__pycache__/
