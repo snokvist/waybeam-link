@@ -239,5 +239,53 @@ int main() {
               std::memcmp(buf, kGolden, golden_len) == 0);
     }
 
+    // §15.3 cache blocks: absent by default, exact shape when enabled,
+    // placed between the streams array and the return block.
+    {
+        StatsSnapshot s;
+        std::string out;
+        format_stats_line(s, out);
+        CHECK(out.find("cache_repair") == std::string::npos);
+        CHECK(out.find("cache_store") == std::string::npos);
+
+        CacheRepairStatsOut cr;
+        cr.requests = 12;
+        cr.replies = 11;
+        cr.symbols_accepted = 18;
+        cr.blocks_closed_deficit = 9;
+        cr.blocks_repaired = 7;
+        cr.blocks_futile = 1;
+        cr.requests_suppressed = 2;
+        cr.caches_fresh = 2;
+        s.cache_repair = cr;
+        CacheStoreStatsOut cs;
+        cs.requests_received = 12;
+        cs.requests_answered = 11;
+        cs.requests_rejected = 1;
+        cs.symbols_sent = 18;
+        cs.status_sent = 240;
+        cs.blocks_held = 96;
+        cs.health_permille = 971;
+        s.cache_store = cs;
+        out.clear();
+        format_stats_line(s, out);
+        const char* want_repair =
+            "\"cache_repair\":{\"requests\":12,\"replies\":11,"
+            "\"symbols_accepted\":18,\"symbols_rejected\":0,"
+            "\"blocks_closed_deficit\":9,\"blocks_repaired\":7,"
+            "\"blocks_futile\":1,\"requests_suppressed\":2,"
+            "\"caches_fresh\":2}";
+        const char* want_store =
+            "\"cache_store\":{\"requests_received\":12,"
+            "\"requests_answered\":11,\"requests_rejected\":1,"
+            "\"symbols_sent\":18,\"status_sent\":240,\"blocks_held\":96,"
+            "\"health_permille\":971}";
+        CHECK(out.find(want_repair) != std::string::npos);
+        CHECK(out.find(want_store) != std::string::npos);
+        CHECK(out.find("\"streams\"") < out.find("\"cache_repair\""));
+        CHECK(out.find("\"cache_repair\"") < out.find("\"cache_store\""));
+        CHECK(out.find("\"cache_store\"") < out.find("\"return\""));
+    }
+
     return wbtest_finish("stats_test");
 }

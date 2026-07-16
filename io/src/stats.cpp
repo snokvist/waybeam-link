@@ -265,6 +265,48 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     }
     out += ']';
 
+    // §15.3: cache blocks appear only when the §14.3 role is enabled.
+    if (snap.cache_repair) {
+        const CacheRepairStatsOut& c = *snap.cache_repair;
+        out += ",\"cache_repair\":{\"requests\":";
+        append_u64(out, c.requests);
+        out += ",\"replies\":";
+        append_u64(out, c.replies);
+        out += ",\"symbols_accepted\":";
+        append_u64(out, c.symbols_accepted);
+        out += ",\"symbols_rejected\":";
+        append_u64(out, c.symbols_rejected);
+        out += ",\"blocks_closed_deficit\":";
+        append_u64(out, c.blocks_closed_deficit);
+        out += ",\"blocks_repaired\":";
+        append_u64(out, c.blocks_repaired);
+        out += ",\"blocks_futile\":";
+        append_u64(out, c.blocks_futile);
+        out += ",\"requests_suppressed\":";
+        append_u64(out, c.requests_suppressed);
+        out += ",\"caches_fresh\":";
+        append_u64(out, c.caches_fresh);
+        out += '}';
+    }
+    if (snap.cache_store) {
+        const CacheStoreStatsOut& c = *snap.cache_store;
+        out += ",\"cache_store\":{\"requests_received\":";
+        append_u64(out, c.requests_received);
+        out += ",\"requests_answered\":";
+        append_u64(out, c.requests_answered);
+        out += ",\"requests_rejected\":";
+        append_u64(out, c.requests_rejected);
+        out += ",\"symbols_sent\":";
+        append_u64(out, c.symbols_sent);
+        out += ",\"status_sent\":";
+        append_u64(out, c.status_sent);
+        out += ",\"blocks_held\":";
+        append_u64(out, c.blocks_held);
+        out += ",\"health_permille\":";
+        append_u64(out, c.health_permille);
+        out += '}';
+    }
+
     out += ",\"return\":{\"reports_expected\":";
     append_u64(out, snap.ret.reports_expected);
     out += ",\"reports_received\":";

@@ -23,6 +23,9 @@
 
 #include "wblink/air_udp.h"
 #include "wblink/binding.h"
+#include "wblink/cache_controller.h"
+#include "wblink/cache_store.h"
+#include "wblink/cache_udp.h"
 #include "wblink/config.h"
 #include "wblink/control_server.h"
 #include "wblink/csa.h"
@@ -1527,6 +1530,8 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                     frame_stats = nullptr,
                 const std::vector<std::pair<uint8_t, FrameShmRing::Stats>>*
                     shm_stats = nullptr,
+                const CacheRepairStatsOut* cache_repair = nullptr,
+                const CacheStoreStatsOut* cache_store = nullptr,
                 StatsSnapshot* out_snap = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
@@ -1615,6 +1620,13 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 }
             }
         }
+    }
+    // §15.3: cache blocks present only when the §14.3 role is enabled.
+    if (cache_repair != nullptr) {
+        snap.cache_repair = *cache_repair;
+    }
+    if (cache_store != nullptr) {
+        snap.cache_store = *cache_store;
     }
     if (out_snap != nullptr) {
         *out_snap = snap;  // §15.5: GET /health reads the freshest snapshot
@@ -1993,7 +2005,7 @@ int run_tx(const Loaded& l) {
             }
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
                        csa.state_str(), 0, 0, wedge.wedged(), nullptr,
-                       &shm_stats, &last_snap);
+                       &shm_stats, nullptr, nullptr, &last_snap);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -2057,6 +2069,91 @@ int run_rx(const Loaded& l) {
                                   std::make_unique<FrameReassembler>(frc)});
     }
     uint64_t deliver_now = now_ms();
+
+    // §14.3 cache roles (v1 IP transport; both optional, either or both).
+    std::unique_ptr<CacheController> cache_ctl;
+    std::unique_ptr<CacheUdp> cache_repair_sock;
+    std::map<uint16_t, CacheEndpoint> cache_endpoints;  // originator -> ep
+    FrameReassembler* cache_reasm = nullptr;
+    FrameShmRing* cache_ring = nullptr;
+    if (l.cfg.cache.repair.enabled) {
+        const CacheRepairCfg& cr = l.cfg.cache.repair;
+        for (const CacheEndpointCfg& e : cr.caches) {
+            auto ep = CacheUdp::resolve(e.endpoint);
+            if (!ep) {
+                std::fprintf(stderr, "cache.repair '%s': %s\n",
+                             e.endpoint.c_str(), ep.error.c_str());
+                return 1;
+            }
+            cache_endpoints.emplace(e.originator, *ep.value);
+        }
+        auto sock = CacheUdp::open(cr.listen);
+        if (!sock) {
+            std::fprintf(stderr, "cache.repair listen: %s\n",
+                         sock.error.c_str());
+            return 1;
+        }
+        cache_repair_sock =
+            std::make_unique<CacheUdp>(std::move(*sock.value));
+        CacheControllerConfig cc;
+        cc.self_originator = l.cfg.node.originator;
+        cc.self_session = session;
+        for (const CacheEndpointCfg& e : cr.caches) {
+            cc.caches.push_back(e.originator);
+        }
+        cc.tail_grace_ms = cr.tail_grace_ms;
+        cc.local_quiet_ms = cr.local_quiet_ms;
+        cc.min_collect_ms = cr.min_collect_ms;
+        cc.hard_close_ms = cr.hard_close_ms;
+        cc.request_timeout_ms = cr.request_timeout_ms;
+        cc.repair_fraction_permille = cr.repair_fraction_permille;
+        cc.absolute_symbol_limit = cr.absolute_symbol_limit;
+        cc.max_cache_attempts = cr.max_cache_attempts;
+        cc.reply_limit = cr.reply_limit;
+        cc.health_floor_permille = cr.health_floor_permille;
+        cc.status_timeout_ms = cr.status_timeout_ms;
+        cache_ctl = std::make_unique<CacheController>(cc);
+        for (ShmOut& so : shm_outs) {  // config validated the stream exists
+            if (so.stream_id == cr.stream_id) {
+                cache_reasm = so.reasm.get();
+                cache_ring = so.ring.get();
+            }
+        }
+        std::fprintf(stderr, "rx: cache repair on stream %u (%zu caches)\n",
+                     cr.stream_id, cr.caches.size());
+    }
+    std::unique_ptr<CacheStore> cache_store;
+    std::unique_ptr<CacheUdp> cache_store_sock;
+    std::vector<CacheEndpoint> cache_status_to;
+    uint64_t next_cache_status_ms = 0;
+    if (l.cfg.cache.store.enabled) {
+        const CacheStoreCfg& cs = l.cfg.cache.store;
+        auto sock = CacheUdp::open(cs.listen);
+        if (!sock) {
+            std::fprintf(stderr, "cache.store listen: %s\n",
+                         sock.error.c_str());
+            return 1;
+        }
+        cache_store_sock = std::make_unique<CacheUdp>(std::move(*sock.value));
+        for (const std::string& t : cs.status_to) {
+            auto ep = CacheUdp::resolve(t);
+            if (!ep) {
+                std::fprintf(stderr, "cache.store status_to '%s': %s\n",
+                             t.c_str(), ep.error.c_str());
+                return 1;
+            }
+            cache_status_to.push_back(*ep.value);
+        }
+        CacheStoreConfig sc;
+        sc.self_originator = l.cfg.node.originator;
+        sc.stream_ids = cs.stream_ids;
+        sc.blocks = cs.blocks;
+        sc.reply_limit = cs.reply_limit;
+        sc.max_requests_per_s = cs.max_requests_per_s;
+        cache_store = std::make_unique<CacheStore>(sc);
+        std::fprintf(stderr, "rx: cache store on '%s' (%zu streams)\n",
+                     cs.listen.c_str(), cs.stream_ids.size());
+    }
 
     const RxEngine::Deliver deliver = [&](uint8_t sid, uint32_t block_id,
                                           uint8_t flags, const uint8_t* d,
@@ -2161,6 +2258,12 @@ int run_rx(const Loaded& l) {
                 so.reasm->reset_stats();
                 so.ring->reset_stats();
             }
+            if (cache_ctl) {
+                cache_ctl->reset_stats();
+            }
+            if (cache_store) {
+                cache_store->reset_stats();
+            }
             ret_window_hits = 0;
             ret_window_misses = 0;
             tsf_fallbacks = 0;
@@ -2224,6 +2327,9 @@ int run_rx(const Loaded& l) {
                     issuer.note_craft_armed(now_us_it);  // §11.6 implicit ACK
                 }
                 issuer.note_craft_video(now_us_it);
+                if (cache_store) {  // §14.3: retain the verbatim wire packet
+                    cache_store->note_data(*v, d, n);
+                }
             }
             if (!std::holds_alternative<DecodeError>(dec)) {
                 follower.note_valid_rx(now_us_it);
@@ -2248,6 +2354,142 @@ int run_rx(const Loaded& l) {
             so.reasm->tick(now, [&](const uint8_t* f, size_t len) {
                 so.ring->write_frame(f, len);
             });
+        }
+        // §14.3 cache store: answer requests + push periodic status.
+        if (cache_store) {
+            uint8_t cbuf[512];
+            CacheEndpoint from;
+            long rn;
+            while ((rn = cache_store_sock->recv_one(cbuf, sizeof(cbuf),
+                                                    &from)) > 0) {
+                const Decoded cdec = decode(cbuf, static_cast<size_t>(rn));
+                const CacheRequestView* rq =
+                    std::get_if<CacheRequestView>(&cdec);
+                if (rq == nullptr) {
+                    continue;
+                }
+                std::vector<const std::vector<uint8_t>*> pkts;
+                if (cache_store->answer(*rq, now, pkts) !=
+                    CacheStore::Verdict::kAnswered) {
+                    continue;
+                }
+                for (const std::vector<uint8_t>* p : pkts) {
+                    uint8_t rbuf[kCacheReplyFixedSize + kDataHeaderSize +
+                                 kMaxDataPayload];
+                    const size_t sz = encode_cache_reply(
+                        CommonPrefix{l.cfg.node.originator,
+                                     rq->hdr.prefix.originator, session},
+                        rq->hdr.request_id, p->data(),
+                        static_cast<uint16_t>(p->size()), rbuf, sizeof(rbuf));
+                    if (sz > 0) {
+                        cache_store_sock->send_to(from, rbuf, sz);
+                    }
+                }
+            }
+            if (now >= next_cache_status_ms && !cache_status_to.empty()) {
+                next_cache_status_ms =
+                    now + l.cfg.cache.store.status_interval_ms;
+                for (const CacheStore::StatusEntry& se :
+                     cache_store->status()) {
+                    CacheStatus cs;
+                    cs.prefix = CommonPrefix{l.cfg.node.originator, 0,
+                                             session};
+                    cs.target_originator = se.key.originator;
+                    cs.target_session = se.key.session_id;
+                    cs.target_stream_id = se.stream_id;
+                    cs.oldest_block = se.oldest_block;
+                    cs.newest_block = se.newest_block;
+                    cs.rx_health_permille = se.rx_health_permille;
+                    cs.capability_flags = cache_capability::kIpTransport;
+                    uint8_t sbuf[kCacheStatusSize];
+                    if (encode_cache_status(cs, sbuf, sizeof(sbuf)) == 0) {
+                        continue;
+                    }
+                    for (const CacheEndpoint& to : cache_status_to) {
+                        if (cache_store_sock->send_to(to, sbuf,
+                                                      kCacheStatusSize)) {
+                            ++cache_store->stats().status_sent;
+                        }
+                    }
+                }
+            }
+        }
+        // §14.3 aggregator: merge replies, register status, issue requests
+        // for blocks whose local collection closed below k.
+        if (cache_ctl) {
+            uint8_t cbuf[kCacheReplyFixedSize + kDataHeaderSize +
+                         kMaxDataPayload];
+            CacheEndpoint from;
+            long rn;
+            while ((rn = cache_repair_sock->recv_one(cbuf, sizeof(cbuf),
+                                                     &from)) > 0) {
+                const Decoded cdec = decode(cbuf, static_cast<size_t>(rn));
+                if (const CacheStatus* st = std::get_if<CacheStatus>(&cdec)) {
+                    // §13: status only from the configured cache endpoint.
+                    const auto it = cache_endpoints.find(st->prefix.originator);
+                    if (it != cache_endpoints.end() && it->second == from) {
+                        cache_ctl->on_status(*st, now);
+                    }
+                    continue;
+                }
+                const CacheReplyView* rv = std::get_if<CacheReplyView>(&cdec);
+                if (rv == nullptr) {
+                    continue;
+                }
+                const auto it = cache_endpoints.find(rv->prefix.originator);
+                if (it == cache_endpoints.end() || !(it->second == from)) {
+                    continue;  // §13: replies only from configured endpoints
+                }
+                // §3.11: the wrapped bytes revalidate as an ordinary DATA
+                // packet of the latched repair stream.
+                const Decoded wdec = decode(rv->wrapped, rv->wrapped_len);
+                const DataView* wv = std::get_if<DataView>(&wdec);
+                if (wv == nullptr ||
+                    wv->hdr.stream_id != l.cfg.cache.repair.stream_id) {
+                    continue;
+                }
+                bool latched = false;
+                for (const StreamKey& k : rx.stream_keys()) {
+                    latched |= k.stream_id == wv->hdr.stream_id &&
+                               k.originator == wv->hdr.prefix.originator &&
+                               k.session_id == wv->hdr.prefix.session_id;
+                }
+                if (!latched) {
+                    continue;
+                }
+                if (cache_ctl->on_reply(rv->prefix.originator, rv->request_id,
+                                        *wv) !=
+                    CacheController::ReplyVerdict::kAccept) {
+                    continue;
+                }
+                // §14.3: cache symbols feed the reassembler directly — never
+                // the §6.1/§6.2 per-adapter state.
+                bool emitted = false;
+                cache_reasm->push(wv->hdr.block_id, wv->hdr.data_flags,
+                                  wv->payload, wv->payload_len, now,
+                                  [&](const uint8_t* f, size_t len) {
+                                      cache_ring->write_frame(f, len);
+                                      emitted = true;
+                                  });
+                if (emitted) {
+                    cache_ctl->note_completed(wv->hdr.block_id);
+                }
+            }
+            for (const StreamKey& k : rx.stream_keys()) {
+                if (k.stream_id != l.cfg.cache.repair.stream_id) {
+                    continue;
+                }
+                RepairCandidate cands[16];
+                const size_t cn = cache_reasm->repair_candidates(cands, 16);
+                for (CacheRequestOut& r : cache_ctl->tick(now, k, cands, cn)) {
+                    const auto it = cache_endpoints.find(r.cache_originator);
+                    if (it != cache_endpoints.end()) {
+                        cache_repair_sock->send_to(it->second, r.frame.data(),
+                                                   r.frame.size());
+                    }
+                }
+                break;
+            }
         }
         std::vector<std::pair<uint8_t, JsccRepairFeedbackState>> feedback;
         feedback.reserve(shm_outs.size());
@@ -2308,12 +2550,39 @@ int run_rx(const Loaded& l) {
                 frame_stats.emplace_back(so.stream_id, so.reasm->stats());
                 shm_stats.emplace_back(so.stream_id, so.ring->stats());
             }
+            // §15.3: cache blocks are emitted only when the role is enabled.
+            CacheRepairStatsOut crs;
+            if (cache_ctl) {
+                const CacheRepairStats& s = cache_ctl->stats();
+                crs.requests = s.requests;
+                crs.replies = s.replies;
+                crs.symbols_accepted = s.symbols_accepted;
+                crs.symbols_rejected = s.symbols_rejected;
+                crs.blocks_closed_deficit = s.blocks_closed_deficit;
+                crs.blocks_repaired = s.blocks_repaired;
+                crs.blocks_futile = s.blocks_futile;
+                crs.requests_suppressed = s.requests_suppressed;
+                crs.caches_fresh = s.caches_fresh;
+            }
+            CacheStoreStatsOut css;
+            if (cache_store) {
+                const CacheStoreStats& s = cache_store->stats();
+                css.requests_received = s.requests_received;
+                css.requests_answered = s.requests_answered;
+                css.requests_rejected = s.requests_rejected;
+                css.symbols_sent = s.symbols_sent;
+                css.status_sent = s.status_sent;
+                css.blocks_held = s.blocks_held;
+                css.health_permille = s.health_permille;
+            }
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
                                        : follower.state_str(),
                        ret_window_hits, ret_window_misses, wedge.wedged(),
-                       &frame_stats, &shm_stats, &last_snap);
+                       &frame_stats, &shm_stats,
+                       cache_ctl ? &crs : nullptr,
+                       cache_store ? &css : nullptr, &last_snap);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -2468,7 +2737,8 @@ int run_loopback(const Loaded& l) {
         }
         if (stats_period != 0 && loop_now >= next_stats) {
             emit_stats(emitter, l, session, t0, &tx, &rx, nullptr, 0, nullptr,
-                       0, 0, false, nullptr, nullptr, &last_snap);
+                       0, 0, false, nullptr, nullptr, nullptr, nullptr,
+                       &last_snap);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }

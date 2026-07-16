@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -151,12 +152,37 @@ struct LinkStats {
     std::string csa_state = "IDLE";
 };
 
+// §15.3 cache blocks — present only when the §14.3 role is enabled.
+struct CacheRepairStatsOut {
+    uint64_t requests = 0;
+    uint64_t replies = 0;
+    uint64_t symbols_accepted = 0;
+    uint64_t symbols_rejected = 0;
+    uint64_t blocks_closed_deficit = 0;
+    uint64_t blocks_repaired = 0;
+    uint64_t blocks_futile = 0;
+    uint64_t requests_suppressed = 0;
+    uint32_t caches_fresh = 0;  // gauge
+};
+
+struct CacheStoreStatsOut {
+    uint64_t requests_received = 0;
+    uint64_t requests_answered = 0;
+    uint64_t requests_rejected = 0;
+    uint64_t symbols_sent = 0;
+    uint64_t status_sent = 0;
+    uint32_t blocks_held = 0;      // gauge
+    uint16_t health_permille = 0;  // gauge
+};
+
 struct StatsSnapshot {
     uint64_t t_ms = 0;
     uint16_t node = 0;
     uint32_t session = 0;
     std::vector<AdapterStats> adapters;
     std::vector<StreamStats> streams;
+    std::optional<CacheRepairStatsOut> cache_repair;
+    std::optional<CacheStoreStatsOut> cache_store;
     ReturnStats ret;
     LinkStats link;
 };

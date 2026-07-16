@@ -458,6 +458,94 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.control.bind = c.value("bind", std::string());
         }
 
+        // cache (§14.3 spatial cache repair; both roles default off)
+        if (j.contains("cache")) {
+            const json& c = j.at("cache");
+            if (c.contains("repair")) {
+                const json& r = c.at("repair");
+                CacheRepairCfg& cr = cfg.cache.repair;
+                cr.enabled = r.value("enabled", cr.enabled);
+                cr.stream_id = r.value("stream_id", cr.stream_id);
+                cr.listen = r.value("listen", cr.listen);
+                for (const json& e : r.value("caches", json::array())) {
+                    CacheEndpointCfg ep;
+                    ep.originator = e.at("originator").get<uint16_t>();
+                    ep.endpoint = e.at("endpoint").get<std::string>();
+                    cr.caches.push_back(std::move(ep));
+                }
+                cr.tail_grace_ms = r.value("tail_grace_ms", cr.tail_grace_ms);
+                cr.local_quiet_ms =
+                    r.value("local_quiet_ms", cr.local_quiet_ms);
+                cr.min_collect_ms =
+                    r.value("min_collect_ms", cr.min_collect_ms);
+                cr.hard_close_ms = r.value("hard_close_ms", cr.hard_close_ms);
+                cr.request_timeout_ms =
+                    r.value("request_timeout_ms", cr.request_timeout_ms);
+                cr.repair_fraction_permille = r.value(
+                    "repair_fraction_permille", cr.repair_fraction_permille);
+                cr.absolute_symbol_limit = r.value("absolute_symbol_limit",
+                                                   cr.absolute_symbol_limit);
+                cr.max_cache_attempts =
+                    r.value("max_cache_attempts", cr.max_cache_attempts);
+                cr.reply_limit = r.value("reply_limit", cr.reply_limit);
+                cr.health_floor_permille = r.value("health_floor_permille",
+                                                   cr.health_floor_permille);
+                cr.status_timeout_ms =
+                    r.value("status_timeout_ms", cr.status_timeout_ms);
+                if (cr.enabled) {
+                    if (cr.caches.empty() || cr.listen.empty()) {
+                        return Result<Config>::fail(
+                            "cache.repair: enabled requires a non-empty "
+                            "caches list and a listen address (§15.2)");
+                    }
+                    bool frame_shm_out = false;
+                    for (const StreamCfg& s : cfg.streams) {
+                        frame_shm_out |= s.stream_id == cr.stream_id &&
+                                         s.dir == Dir::kOut &&
+                                         s.bind.kind == BindKind::kFrameShm;
+                    }
+                    if (!frame_shm_out) {
+                        return Result<Config>::fail(
+                            "cache.repair: stream_id must name a frame-shm "
+                            "egress stream (§15.2)");
+                    }
+                    if (cr.repair_fraction_permille > 1000) {
+                        return Result<Config>::fail(
+                            "cache.repair: repair_fraction_permille is 0..1000");
+                    }
+                }
+            }
+            if (c.contains("store")) {
+                const json& s = c.at("store");
+                CacheStoreCfg& cs = cfg.cache.store;
+                cs.enabled = s.value("enabled", cs.enabled);
+                cs.listen = s.value("listen", cs.listen);
+                for (const json& id : s.value("stream_ids", json::array())) {
+                    cs.stream_ids.push_back(id.get<uint8_t>());
+                }
+                cs.blocks = s.value("blocks", cs.blocks);
+                cs.reply_limit = s.value("reply_limit", cs.reply_limit);
+                for (const json& t : s.value("status_to", json::array())) {
+                    cs.status_to.push_back(t.get<std::string>());
+                }
+                cs.status_interval_ms =
+                    s.value("status_interval_ms", cs.status_interval_ms);
+                cs.max_requests_per_s =
+                    s.value("max_requests_per_s", cs.max_requests_per_s);
+                if (cs.enabled) {
+                    if (cs.listen.empty() || cs.stream_ids.empty()) {
+                        return Result<Config>::fail(
+                            "cache.store: enabled requires a listen address "
+                            "and stream_ids (§15.2)");
+                    }
+                    if (cs.blocks == 0) {
+                        return Result<Config>::fail(
+                            "cache.store: blocks must be >= 1");
+                    }
+                }
+            }
+        }
+
         // venc (§9.6 encoder actuation; disabled default for dev/bench)
         if (j.contains("venc")) {
             const json& v = j.at("venc");

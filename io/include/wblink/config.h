@@ -256,6 +256,43 @@ struct ControlCfg {
     std::string bind;  // "" = disabled
 };
 
+// §14.3 Cache Controller (both roles default off; all values §17 seeds).
+struct CacheEndpointCfg {
+    uint16_t originator = 0;
+    std::string endpoint;  // "host:port"
+};
+struct CacheRepairCfg {
+    bool enabled = false;
+    uint8_t stream_id = 0;  // must name a frame-shm egress stream
+    std::string listen;     // reply/status RX socket
+    std::vector<CacheEndpointCfg> caches;
+    uint32_t tail_grace_ms = 1;
+    uint32_t local_quiet_ms = 2;
+    uint32_t min_collect_ms = 4;
+    uint32_t hard_close_ms = 8;
+    uint32_t request_timeout_ms = 4;
+    uint16_t repair_fraction_permille = 200;
+    uint8_t absolute_symbol_limit = 8;
+    uint8_t max_cache_attempts = 2;
+    uint8_t reply_limit = 4;
+    uint16_t health_floor_permille = 800;
+    uint32_t status_timeout_ms = 1500;
+};
+struct CacheStoreCfg {
+    bool enabled = false;
+    std::string listen;
+    std::vector<uint8_t> stream_ids;
+    uint16_t blocks = 96;
+    uint8_t reply_limit = 4;
+    std::vector<std::string> status_to;  // aggregator endpoints
+    uint32_t status_interval_ms = 500;
+    uint16_t max_requests_per_s = 400;
+};
+struct CacheCfg {
+    CacheRepairCfg repair;
+    CacheStoreCfg store;
+};
+
 struct Config {
     NodeCfg node;
     std::string profile_table_path;
@@ -264,6 +301,7 @@ struct Config {
     Policy policy;
     StatsCfg stats;
     ControlCfg control;    // §15.5 REST control plane (off unless bind set)
+    CacheCfg cache;        // §14.3 cache repair/store (off by default)
     VencCfg venc;          // §9.6 encoder actuation
     AirCfg air;            // dev backend; empty until devourer lands
     LoopbackCfg loopback;  // loopback-mode loss injection

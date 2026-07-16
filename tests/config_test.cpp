@@ -492,5 +492,57 @@ int main() {
         CHECK(!t);
     }
 
+    // --- §14.3 cache config: parse, defaults, and validation ---------------
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 9, "role": "rx"},
+          "streams": [
+            {"stream_id": 0, "stream_type": "RTP", "dir": "out",
+             "bind": {"kind": "frame-shm", "name": "venc_out"}}],
+          "cache": {
+            "repair": {"enabled": true, "stream_id": 0,
+                       "listen": "127.0.0.1:5802",
+                       "caches": [{"originator": 33,
+                                   "endpoint": "127.0.0.1:5801"}]},
+            "store": {"enabled": true, "listen": "127.0.0.1:5801",
+                      "stream_ids": [0],
+                      "status_to": ["127.0.0.1:5802"]}}})");
+        CHECK(bool(r));
+        if (r) {
+            const Config& c = *r.value;
+            CHECK(c.cache.repair.enabled);
+            CHECK_EQ_U(c.cache.repair.caches.size(), 1);
+            CHECK_EQ_U(c.cache.repair.caches[0].originator, 33);
+            // §14.3 seeds survive an unconfigured field.
+            CHECK_EQ_U(c.cache.repair.local_quiet_ms, 2);
+            CHECK_EQ_U(c.cache.repair.hard_close_ms, 8);
+            CHECK_EQ_U(c.cache.repair.repair_fraction_permille, 200);
+            CHECK_EQ_U(c.cache.repair.max_cache_attempts, 2);
+            CHECK_EQ_U(c.cache.repair.health_floor_permille, 800);
+            CHECK(c.cache.store.enabled);
+            CHECK_EQ_U(c.cache.store.blocks, 96);
+            CHECK_EQ_U(c.cache.store.max_requests_per_s, 400);
+            CHECK_EQ_U(c.cache.store.status_interval_ms, 500);
+        }
+        // Both roles default off.
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
+        CHECK(bool(d) && !d.value->cache.repair.enabled &&
+              !d.value->cache.store.enabled);
+    }
+    // repair.enabled requires caches + listen, and a frame-shm egress stream.
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "cache":{"repair":{"enabled":true,"listen":"127.0.0.1:5802"}}})",
+        "caches");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
+                  "bind":{"kind":"udp","send":"127.0.0.1:5700"}}],
+      "cache":{"repair":{"enabled":true,"listen":"127.0.0.1:5802",
+        "caches":[{"originator":33,"endpoint":"127.0.0.1:5801"}]}}})",
+        "frame-shm");
+    // store.enabled requires listen + stream_ids.
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "cache":{"store":{"enabled":true,"listen":"127.0.0.1:5801"}}})",
+        "stream_ids");
+
     return wbtest_finish("config_test");
 }
