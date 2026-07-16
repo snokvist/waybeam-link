@@ -120,6 +120,13 @@ struct VencCfg {
     std::string host = "127.0.0.1:80";
     bool enabled = false;           // bitrate writes (§9.6)
     bool recovery_enabled = false;  // rate-limited IDR requests (§3.9)
+    // §9.6 Pass 37 horizon frame caps (maxIBytes/maxPBytes; §17 seeds).
+    bool frame_caps = true;         // cap writes (gated by `enabled` too)
+    uint16_t fps_hint = 60;         // cadence fallback until measured
+    uint16_t i_headroom_permille = 1000;
+    uint16_t p_headroom_permille = 1000;
+    uint32_t cap_ceiling_bytes = 196608;
+    uint32_t settle_ms = 750;       // encoder-output settling window
 };
 
 struct ArqPolicy {

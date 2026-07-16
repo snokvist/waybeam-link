@@ -30,6 +30,7 @@
 #include "wblink/control_server.h"
 #include "wblink/csa.h"
 #include "wblink/endian.h"
+#include "wblink/frame_caps.h"
 #include "wblink/frame_framer.h"
 #include "wblink/frame_reassembler.h"
 #include "wblink/frame_shm.h"
@@ -829,7 +830,8 @@ struct TxCore {
           table_version_(table_version),
           table_(table),
           selector_(selector_policy(cfg), table),
-          venc_(cfg.venc) {
+          venc_(cfg.venc),
+          venc_knobs_(cfg.venc) {
         // §10: one power curve per TX adapter with an authored map. The
         // resolve happens at profile commit; the radio backend applies it
         // (apply_power hook), otherwise it stays a logged intent.
@@ -1102,6 +1104,39 @@ struct TxCore {
         if (selector_.bitrate_kbps() > 0) {
             venc_.set_bitrate(selector_.bitrate_kbps(), now);
         }
+        // §9.6 Pass 37 horizon caps: recomputed from slow inputs (rung
+        // budget, ladder-snapped cadence, I deadline, live §14.1 rates);
+        // write-on-change makes the steady state a no-op.
+        if (venc_.frame_caps_enabled() && selector_.bitrate_kbps() > 0) {
+            for (Stream& s : streams_) {
+                if (!s.frame_framer) {
+                    continue;  // caps apply to frame-shm ingress only (§9.6)
+                }
+                FrameCapInputs in;
+                in.budget_kbps = selector_.bitrate_kbps();
+                in.frame_period_us = snap_frame_period_us(
+                    frame_cadence_us_ != 0
+                        ? frame_cadence_us_
+                        : 1000000ull / venc_knobs_.fps_hint);
+                in.iframe_deadline_ms = static_cast<uint16_t>(
+                    frame_deadline_us(true) / 1000u);
+                const FrameFecConfig& fec = s.frame_framer->fec();
+                if (fec.scheme != FecScheme::kNone) {
+                    in.i_rate_permille = fec.i_rate_permille;
+                    in.p_rate_permille = fec.p_rate_permille;
+                }
+                in.symbol_size = static_cast<uint16_t>(
+                    max_payload_for(selector_.profile_id()) -
+                    kDataHeaderSize - kFecRepairSubheaderSize);
+                in.ceiling_bytes = venc_knobs_.cap_ceiling_bytes;
+                in.i_headroom_permille = venc_knobs_.i_headroom_permille;
+                in.p_headroom_permille = venc_knobs_.p_headroom_permille;
+                const FrameCaps caps = derive_frame_caps(in);
+                venc_.set_max_frame_size(caps.max_i_bytes, caps.max_p_bytes,
+                                         now);
+                break;  // single video stream (§9.6)
+            }
+        }
         for (Stream& s : streams_) {
             s.ring.evict(now);
             s.sched.drain(s.ring, now, [&](const uint8_t* f, size_t l) {
@@ -1113,6 +1148,10 @@ struct TxCore {
     void set_pressure(bool on, uint64_t now) {  // §9.9 gauge (step 9+ feeds it)
         selector_.set_pressure(on, now);
     }
+
+    // §9.6: the measured frame-shm ingress cadence (frame_interval_us EWMA);
+    // 0 until the ring has seen enough frames — the fps_hint covers that.
+    void note_frame_interval(uint64_t us) { frame_cadence_us_ = us; }
 
     // §11.3: freeze the cascade + pause the watchdog across the CSA blackout.
     void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
@@ -1234,6 +1273,13 @@ struct TxCore {
             static_cast<uint32_t>(selector_.report_age_ms(now));
         snap.link.state = selector_.state();
         snap.link.flap_freeze = selector_.flap_frozen(now);
+        // §9.6 actuator state (Pass 37).
+        snap.link.venc_bitrate_kbps = venc_.commanded_bitrate_kbps();
+        snap.link.venc_max_i_bytes = venc_.commanded_max_i_bytes();
+        snap.link.venc_max_p_bytes = venc_.commanded_max_p_bytes();
+        snap.link.venc_pushes = venc_.pushes();
+        snap.link.venc_failures = venc_.failures();
+        snap.link.venc_settling = venc_.settling(now);
         for (const PowerAdapter& pa : power_) {
             if (pa.applied_qdb) {
                 snap.link.tx_power_qdb = *pa.applied_qdb;  // first TX adapter
@@ -1267,6 +1313,8 @@ struct TxCore {
     const ProfileTable* table_;
     Selector selector_;
     VencActuator venc_;
+    VencCfg venc_knobs_;            // §9.6 cap knobs (Pass 37)
+    uint64_t frame_cadence_us_ = 0; // measured frame-shm ingress cadence
     std::vector<PowerAdapter> power_;
     uint32_t reports_received_ = 0;
     std::vector<Stream> streams_;
@@ -1982,6 +2030,14 @@ int run_tx(const Loaded& l) {
             air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast);
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
                          ca.chan_mhz);
+        }
+        // §9.6: feed the measured ingress cadence into the cap derivation
+        // (first frame-shm ring = the single video stream).
+        for (const ShmIn& si : shm_ins) {
+            if (si.ring) {
+                tx.note_frame_interval(si.ring->stats().frame_interval_us);
+                break;
+            }
         }
         tx.tick(service_now, inject, inject_resend);
         air.value->heartbeat(l.cfg.node.originator, session, service_now);

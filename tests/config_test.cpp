@@ -492,6 +492,26 @@ int main() {
         CHECK(!t);
     }
 
+    // --- §9.6 venc frame-cap knobs (Pass 37): defaults + validation --------
+    {
+        auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_hint":90,
+                  "cap_ceiling_bytes":150000,"settle_ms":500}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->venc.frame_caps);  // default on
+            CHECK_EQ_U(r.value->venc.fps_hint, 90);
+            CHECK_EQ_U(r.value->venc.i_headroom_permille, 1000);
+            CHECK_EQ_U(r.value->venc.p_headroom_permille, 1000);
+            CHECK_EQ_U(r.value->venc.cap_ceiling_bytes, 150000);
+            CHECK_EQ_U(r.value->venc.settle_ms, 500);
+        }
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_hint":0}})", "fps_hint");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"i_headroom_permille":1200}})", "headrooms");
+    }
+
     // --- §14.3 cache config: parse, defaults, and validation ---------------
     {
         auto r = load_config_json(R"({

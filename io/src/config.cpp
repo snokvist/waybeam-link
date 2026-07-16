@@ -553,6 +553,21 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.venc.enabled = v.value("enabled", cfg.venc.enabled);
             cfg.venc.recovery_enabled =
                 v.value("recovery_enabled", cfg.venc.recovery_enabled);
+            cfg.venc.frame_caps = v.value("frame_caps", cfg.venc.frame_caps);
+            cfg.venc.fps_hint = v.value("fps_hint", cfg.venc.fps_hint);
+            cfg.venc.i_headroom_permille = v.value(
+                "i_headroom_permille", cfg.venc.i_headroom_permille);
+            cfg.venc.p_headroom_permille = v.value(
+                "p_headroom_permille", cfg.venc.p_headroom_permille);
+            cfg.venc.cap_ceiling_bytes =
+                v.value("cap_ceiling_bytes", cfg.venc.cap_ceiling_bytes);
+            cfg.venc.settle_ms = v.value("settle_ms", cfg.venc.settle_ms);
+            if (cfg.venc.fps_hint == 0 ||
+                cfg.venc.i_headroom_permille > 1000 ||
+                cfg.venc.p_headroom_permille > 1000) {
+                return Result<Config>::fail(
+                    "venc: fps_hint must be >= 1 and headrooms 0..1000");
+            }
         }
 
         // air ("udp" = dev backend, not §15; "radio" = devourer, §3.0 —

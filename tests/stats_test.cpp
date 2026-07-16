@@ -118,6 +118,12 @@ StatsSnapshot sample_snapshot() {
     s.link.state = "HOLD";
     s.link.flap_freeze = false;
     s.link.csa_state = "IDLE";
+    s.link.venc_bitrate_kbps = 14000;
+    s.link.venc_max_i_bytes = 70000;
+    s.link.venc_max_p_bytes = 19444;
+    s.link.venc_pushes = 6;
+    s.link.venc_failures = 0;
+    s.link.venc_settling = false;
     return s;
 }
 
@@ -178,7 +184,9 @@ const char* kGolden =
     "\"link\":{\"target_originator\":9,\"target_session\":183726,"
     "\"profile\":4,\"mcs\":4,\"tx_power_qdb\":1800,\"report_epoch\":1822,"
     "\"report_age_ms\":40,\"state\":\"HOLD\",\"flap_freeze\":false,"
-    "\"csa_state\":\"IDLE\"}}\n";
+    "\"csa_state\":\"IDLE\",\"venc_bitrate_kbps\":14000,"
+    "\"venc_max_i_bytes\":70000,\"venc_max_p_bytes\":19444,"
+    "\"venc_pushes\":6,\"venc_failures\":0,\"venc_settling\":false}}\n";
 
 }  // namespace
 

@@ -341,6 +341,18 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_bool(out, snap.link.flap_freeze);
     out += ",\"csa_state\":";
     append_escaped(out, snap.link.csa_state);
+    out += ",\"venc_bitrate_kbps\":";
+    append_u64(out, snap.link.venc_bitrate_kbps);
+    out += ",\"venc_max_i_bytes\":";
+    append_u64(out, snap.link.venc_max_i_bytes);
+    out += ",\"venc_max_p_bytes\":";
+    append_u64(out, snap.link.venc_max_p_bytes);
+    out += ",\"venc_pushes\":";
+    append_u64(out, snap.link.venc_pushes);
+    out += ",\"venc_failures\":";
+    append_u64(out, snap.link.venc_failures);
+    out += ",\"venc_settling\":";
+    append_bool(out, snap.link.venc_settling);
     out += "}}\n";
 }
 

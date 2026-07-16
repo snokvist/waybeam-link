@@ -150,6 +150,14 @@ struct LinkStats {
     std::string state = "HOLD";
     bool flap_freeze = false;
     std::string csa_state = "IDLE";
+    // §9.6 actuator state (Pass 37): last COMMANDED values (0 = never
+    // pushed) + the settling window; zero/false without venc.enabled.
+    uint32_t venc_bitrate_kbps = 0;
+    uint32_t venc_max_i_bytes = 0;
+    uint32_t venc_max_p_bytes = 0;
+    uint64_t venc_pushes = 0;
+    uint64_t venc_failures = 0;
+    bool venc_settling = false;
 };
 
 // §15.3 cache blocks — present only when the §14.3 role is enabled.

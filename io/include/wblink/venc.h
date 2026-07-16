@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "wblink/config.h"
 
@@ -31,6 +32,12 @@ class VencActuator {
     // wedged encoder (200 ms socket budget per attempt) cannot degrade the
     // event loop.
     bool set_bitrate(uint32_t kbps, uint64_t now_ms);
+    // §9.6 Pass 37 horizon caps: one /set carrying both fields (venc applies
+    // them as one live group). Same write-on-change + holdoff discipline;
+    // gated on cfg.enabled AND cfg.frame_caps. {0,0} is a no-op (never
+    // command "unlimited" implicitly).
+    bool set_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes,
+                            uint64_t now_ms);
     bool request_idr(uint64_t now_ms);
 
     uint64_t pushes() const { return pushes_; }
@@ -39,12 +46,29 @@ class VencActuator {
     uint64_t idr_failures() const { return idr_failures_; }
     bool enabled() const { return cfg_.enabled; }
     bool recovery_enabled() const { return cfg_.recovery_enabled; }
+    bool frame_caps_enabled() const { return cfg_.enabled && cfg_.frame_caps; }
+    // §15.3 actuator state: last commanded values (0 = never pushed) and the
+    // doc-model "pending transition" — within settle_ms of the last accepted
+    // value-changing push.
+    uint32_t commanded_bitrate_kbps() const { return last_ ? *last_ : 0; }
+    uint32_t commanded_max_i_bytes() const {
+        return last_caps_ ? last_caps_->first : 0;
+    }
+    uint32_t commanded_max_p_bytes() const {
+        return last_caps_ ? last_caps_->second : 0;
+    }
+    bool settling(uint64_t now_ms) const {
+        return last_change_ms_ != 0 &&
+               now_ms < last_change_ms_ + cfg_.settle_ms;
+    }
 
   private:
     bool http_get(const std::string& path);
 
     VencCfg cfg_;
     std::optional<uint32_t> last_;
+    std::optional<std::pair<uint32_t, uint32_t>> last_caps_;
+    uint64_t last_change_ms_ = 0;
     uint64_t no_retry_until_ms_ = 0;
     uint64_t pushes_ = 0;
     uint64_t failures_ = 0;
