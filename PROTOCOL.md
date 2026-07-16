@@ -1548,8 +1548,13 @@ trigger; the trigger is an incomplete **merged** block after close.
 6. Eligibility: status fresh (`≤ status_timeout_ms`), same
    `(target_originator, target_session, target_stream_id)` as the latched
    stream, `rx_health_permille ≥ health_floor_permille`, and
-   `oldest_block ≤ block_id ≤ newest_block`. Ranking among eligible caches:
-   block-in-window, then health, then status freshness, then config order.
+   `oldest_block ≤ block_id` — the **newest** bound is deliberately NOT
+   enforced: a status snapshot is up to one `status_interval_ms` stale, so
+   the newest blocks (exactly the ones needing repair) always lie beyond the
+   last reported `newest_block`; a cache that truly lacks the block answers
+   with silence (§3.11) at the cost of one bounded request. `newest_block`
+   is diagnostic/lag telemetry only. Ranking among eligible caches: health,
+   then status freshness, then config order.
 7. Repair stops the moment the block reaches `k` (the reassembler emits).
 8. **Ordering ruling (deliberate deviation from serial repair):** cache repair
    runs **in parallel with** the §6.4 NACK path, not serialized ahead of it.

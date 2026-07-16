@@ -775,6 +775,15 @@ constraints bind:
 §15.2 (`cache` config), §15.3 (`cache_repair`/`cache_store` stats), §17 (close
 timer knob row). Code follows separately in the same PR.
 
+**In-pass correction (first Ethernet bench, same unmerged PR):** rule 6
+originally required `block_id ≤ newest_block`. The bench showed that bound
+suppresses most legitimate requests — a status snapshot is one interval
+stale, so the blocks needing repair are always past the last reported
+`newest_block` (72 of 86 closed-deficit blocks suppressed in the first run).
+Eligibility now enforces only the `oldest_block` bound; `newest_block` is
+lag telemetry. This matches the reference harness, which filtered on the
+oldest bound alone.
+
 ## Open questions for the next pass
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
