@@ -951,6 +951,12 @@ struct TxCore {
             if (s.stream_id != stream_id || !s.frame_framer) {
                 continue;
             }
+            // §9.6 cadence: windowed frame count (the ring's last-gap
+            // interval collapses under batch drains and cannot be used).
+            if (cadence_start_ms_ == 0) {
+                cadence_start_ms_ = now;
+            }
+            ++cadence_frames_;
             if (s.jscc_shadow && blob != nullptr && len >= kVencFrameMetaSize) {
                 const uint16_t symbol = s.frame_framer->symbol_size();
                 const size_t k_sz = std::max<size_t>(1, (len + symbol - 1) / symbol);
@@ -1104,6 +1110,14 @@ struct TxCore {
         if (selector_.bitrate_kbps() > 0) {
             venc_.set_bitrate(selector_.bitrate_kbps(), now);
         }
+        // §9.6 cadence estimate: frames over a ~1 s window.
+        if (cadence_start_ms_ != 0 && now >= cadence_start_ms_ + 1000) {
+            frame_cadence_us_ = cadence_frames_ > 0
+                ? (now - cadence_start_ms_) * 1000ull / cadence_frames_
+                : 0;
+            cadence_frames_ = 0;
+            cadence_start_ms_ = now;
+        }
         // §9.6 Pass 37 horizon caps: recomputed from slow inputs (rung
         // budget, ladder-snapped cadence, I deadline, live §14.1 rates);
         // write-on-change makes the steady state a no-op.
@@ -1149,9 +1163,6 @@ struct TxCore {
         selector_.set_pressure(on, now);
     }
 
-    // §9.6: the measured frame-shm ingress cadence (frame_interval_us EWMA);
-    // 0 until the ring has seen enough frames — the fps_hint covers that.
-    void note_frame_interval(uint64_t us) { frame_cadence_us_ = us; }
 
     // §11.3: freeze the cascade + pause the watchdog across the CSA blackout.
     void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
@@ -1314,7 +1325,9 @@ struct TxCore {
     Selector selector_;
     VencActuator venc_;
     VencCfg venc_knobs_;            // §9.6 cap knobs (Pass 37)
-    uint64_t frame_cadence_us_ = 0; // measured frame-shm ingress cadence
+    uint64_t frame_cadence_us_ = 0; // windowed ingress cadence estimate
+    uint64_t cadence_start_ms_ = 0;
+    uint32_t cadence_frames_ = 0;
     std::vector<PowerAdapter> power_;
     uint32_t reports_received_ = 0;
     std::vector<Stream> streams_;
@@ -2030,14 +2043,6 @@ int run_tx(const Loaded& l) {
             air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast);
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
                          ca.chan_mhz);
-        }
-        // §9.6: feed the measured ingress cadence into the cap derivation
-        // (first frame-shm ring = the single video stream).
-        for (const ShmIn& si : shm_ins) {
-            if (si.ring) {
-                tx.note_frame_interval(si.ring->stats().frame_interval_us);
-                break;
-            }
         }
         tx.tick(service_now, inject, inject_resend);
         air.value->heartbeat(l.cfg.node.originator, session, service_now);

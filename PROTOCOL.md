@@ -1028,10 +1028,11 @@ next-frame commands would need a new transport. The caps are therefore
 input changes and pushed under the same write-on-change/holdoff rules as
 bitrate, riding the same §9.5 transition moments:
 
-- `frame_period_us` — the measured frame-shm ingress cadence
-  (§15.3 `frame_interval_us`), **snapped to the nearest ladder fps**
-  `{30, 45, 60, 75, 90, 100, 120, 144}` so cadence jitter cannot churn the
-  caps; `venc.fps_hint` (seed 60) until measured.
+- `frame_period_us` — a **windowed frames-per-ingress-second estimate**
+  (frame count over a ~1 s window; the §15.3 last-gap `frame_interval_us`
+  is batch-drain-skewed and unsuitable), **snapped to the nearest ladder
+  fps** `{30, 45, 60, 75, 90, 100, 120, 144}` so cadence jitter cannot
+  churn the caps; `venc.fps_hint` (seed 60) until measured.
 - `budget_bps` — the active rung's §9.5 derived bitrate target (already net
   of airtime fraction, table FEC overhead, and control/telemetry reserves).
 - `maxP = budget_bps · frame_period_us / 8·10⁶ · 1000/(1000 + p_rate‰) ·
