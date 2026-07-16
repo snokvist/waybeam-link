@@ -63,9 +63,12 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         b.k = k;
         b.frame_len = flen;
         b.s = static_cast<uint16_t>(coded);
-        b.repairs.emplace(ridx, std::vector<uint8_t>(
-                                    payload + kFecRepairSubheaderSize,
-                                    payload + payload_len));  // dup: no-op
+        if (b.repairs.emplace(ridx, std::vector<uint8_t>(
+                                        payload + kFecRepairSubheaderSize,
+                                        payload + payload_len))
+                .second) {  // dup: no-op
+            b.last_new_ms = now_ms;  // §14.3 quiet-timeout anchor
+        }
     } else {
         if (payload_len < kFecSourceSubheaderSize) {
             ++stats_.malformed;
@@ -89,12 +92,16 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         if (idx != k - 1 && b.s == 0) {
             b.s = static_cast<uint16_t>(clen);
         }
-        if (eob) {
+        if (eob && !b.have_eob) {
             b.have_eob = true;
+            b.eob_ms = now_ms;  // §14.3 tail-grace anchor
         }
-        b.sources.emplace(idx, std::vector<uint8_t>(
-                                   payload + kFecSourceSubheaderSize,
-                                   payload + payload_len));  // dup: no-op
+        if (b.sources.emplace(idx, std::vector<uint8_t>(
+                                       payload + kFecSourceSubheaderSize,
+                                       payload + payload_len))
+                .second) {  // dup: no-op
+            b.last_new_ms = now_ms;
+        }
     }
 
     // §6.2 supersession: newer block advances the window.
@@ -242,6 +249,43 @@ void FrameReassembler::observe_shadow(uint32_t id, Block& b) {
     latest_observed_block_ = id;
     have_observed_block_ = true;
     b.shadow_armed = false;
+}
+
+size_t FrameReassembler::repair_candidates(RepairCandidate* out,
+                                           size_t cap) const {
+    size_t n = 0;
+    for (const auto& [id, b] : blocks_) {
+        if (n >= cap) {
+            break;
+        }
+        // Only blocks whose k is known and that still sit below k unique
+        // symbols are candidates (§14.3 local-collection close applies to an
+        // incomplete MERGED block; complete blocks were erased on emit).
+        const size_t unique = b.sources.size() + b.repairs.size();
+        if (b.k == 0 || unique >= b.k) {
+            continue;
+        }
+        RepairCandidate& c = out[n++];
+        c = RepairCandidate{};
+        c.block_id = id;
+        c.k = b.k;
+        c.unique = static_cast<uint16_t>(unique);
+        c.have_eob = b.have_eob;
+        c.first_ms = b.first_ms;
+        c.last_new_ms = b.last_new_ms;
+        c.eob_ms = b.eob_ms;
+        for (uint16_t i = 0; i < b.k; ++i) {
+            if (b.sources.find(i) == b.sources.end()) {
+                c.missing_sources[i / 8] |=
+                    static_cast<uint8_t>(1u << (i % 8));
+            }
+        }
+        for (const auto& kv : b.repairs) {
+            c.have_repairs[kv.first / 8] |=
+                static_cast<uint8_t>(1u << (kv.first % 8));
+        }
+    }
+    return n;
 }
 
 JsccRepairFeedbackState FrameReassembler::jscc_feedback() const {

@@ -14,6 +14,7 @@
 // from seq gaps. Pure logic: time injected, emission is a callback, no I/O.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -60,6 +61,22 @@ struct JsccRepairFeedbackState {
     bool have_observation = false;
 };
 
+// §14.3 view of one open (incomplete, unfinalized) block, consumed by the
+// CacheController's close/deficit logic. Bitmaps are index-per-bit over the
+// §3.11 spaces: missing_sources bit i => source i absent (i < k);
+// have_repairs bit r => repair_idx r held.
+struct RepairCandidate {
+    uint32_t block_id = 0;
+    uint16_t k = 0;
+    uint16_t unique = 0;  // distinct symbols held (sources + repairs)
+    bool have_eob = false;
+    uint64_t first_ms = 0;
+    uint64_t last_new_ms = 0;
+    uint64_t eob_ms = 0;  // valid iff have_eob
+    std::array<uint8_t, 32> missing_sources{};
+    std::array<uint8_t, 32> have_repairs{};
+};
+
 class FrameReassembler {
   public:
     // emit(frame, len): one whole [VencFrameMeta][Annex-B] blob, valid only
@@ -79,6 +96,10 @@ class FrameReassembler {
     const FrameReassemblerStats& stats() const { return stats_; }
     JsccRepairFeedbackState jscc_feedback() const;
 
+    // §14.3: snapshot every open block with a known k that is still below k
+    // unique symbols. Returns the number written (<= cap).
+    size_t repair_candidates(RepairCandidate* out, size_t cap) const;
+
     // §15.5 stats/reset: zero the cumulative counters (in-flight blocks and
     // the finalized watermark are untouched).
     void reset_stats();
@@ -89,6 +110,8 @@ class FrameReassembler {
         uint16_t s = 0;           // coded symbol size (from repair, or full chunk)
         uint32_t frame_len = 0;   // total blob length (from repair; 0 = unknown)
         uint64_t first_ms = 0;
+        uint64_t last_new_ms = 0;  // §14.3 quiet-timeout anchor
+        uint64_t eob_ms = 0;       // §14.3 tail-grace anchor (valid iff have_eob)
         bool have_eob = false;
         bool shadow_armed = false;
         uint16_t shadow_prediction = 0;

@@ -115,6 +115,53 @@ struct JsccFeedback {
     friend bool operator==(const JsccFeedback&, const JsccFeedback&) = default;
 };
 
+// §3.11 CACHE_STATUS (fixed 29 bytes) — sender = the cache node.
+struct CacheStatus {
+    CommonPrefix prefix;
+    uint16_t target_originator = 0;
+    uint32_t target_session = 0;
+    uint8_t target_stream_id = 0;
+    uint32_t oldest_block = 0;
+    uint32_t newest_block = 0;
+    uint16_t rx_health_permille = 0;  // 0–1000
+    uint8_t capability_flags = 0;     // §3.11; unknown bits are a decode error
+    friend bool operator==(const CacheStatus&, const CacheStatus&) = default;
+};
+
+// §3.11 CACHE_REQUEST fixed part — sender = the aggregator.
+struct CacheRequestHeader {
+    CommonPrefix prefix;
+    uint16_t target_originator = 0;
+    uint32_t target_session = 0;
+    uint8_t target_stream_id = 0;
+    uint16_t target_cache = 0;  // originator of the ONE cache addressed
+    uint32_t request_id = 0;
+    uint32_t block_id = 0;
+    uint16_t window_len = 0;  // k, 1–256
+    uint8_t max_symbols = 0;  // >= 1
+    friend bool operator==(const CacheRequestHeader&,
+                           const CacheRequestHeader&) = default;
+};
+
+// Decoded CACHE_REQUEST: fixed part + two bitmap views (§3.11).
+// missing_sources is ceil(k/8) bytes (bit i => source i absent);
+// repair_have bit r => repair_idx r already held by the requester.
+struct CacheRequestView {
+    CacheRequestHeader hdr;
+    const uint8_t* missing_sources = nullptr;
+    const uint8_t* repair_have = nullptr;  // nullptr iff repair_have_len == 0
+    uint8_t repair_have_len = 0;
+};
+
+// Decoded CACHE_REPLY: envelope + ONE verbatim §3.2 DATA packet as a view.
+// The wrapped bytes are revalidated through decode() by the consumer (§14.3).
+struct CacheReplyView {
+    CommonPrefix prefix;
+    uint32_t request_id = 0;
+    const uint8_t* wrapped = nullptr;
+    uint16_t wrapped_len = 0;
+};
+
 // §11.1 CSA (fixed 32 bytes). csa_mac is carried opaque here; HMAC
 // computation/verification is the CSA engine's job (§11.4, build step 10).
 struct CsaPacket {
@@ -146,7 +193,8 @@ enum class DecodeError : uint8_t {
 // index 0 = error; otherwise one decoded packet.
 using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
                              Heartbeat, CsaPacket, RecoveryRequest,
-                             JsccFeedback>;
+                             JsccFeedback, CacheStatus, CacheRequestView,
+                             CacheReplyView>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -164,5 +212,14 @@ size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap);
 size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,
                                size_t cap);
 size_t encode_jscc_feedback(const JsccFeedback& pkt, uint8_t* out, size_t cap);
+size_t encode_cache_status(const CacheStatus& pkt, uint8_t* out, size_t cap);
+// missing_sources must be ceil(hdr.window_len / 8) bytes.
+size_t encode_cache_request(const CacheRequestHeader& hdr,
+                            const uint8_t* missing_sources,
+                            const uint8_t* repair_have,
+                            uint8_t repair_have_len, uint8_t* out, size_t cap);
+size_t encode_cache_reply(const CommonPrefix& prefix, uint32_t request_id,
+                          const uint8_t* wrapped, uint16_t wrapped_len,
+                          uint8_t* out, size_t cap);
 
 }  // namespace wblink

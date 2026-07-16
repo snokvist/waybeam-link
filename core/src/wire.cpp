@@ -160,6 +160,78 @@ Decoded decode_jscc_feedback(const uint8_t* buf, size_t len) {
     return f;
 }
 
+Decoded decode_cache_status(const uint8_t* buf, size_t len) {
+    if (len != kCacheStatusSize) {
+        return len < kCacheStatusSize ? DecodeError::kTruncated
+                                      : DecodeError::kLengthMismatch;
+    }
+    CacheStatus s;
+    s.prefix = decode_prefix(buf);
+    s.target_originator = be16_read(buf + 11);
+    s.target_session = be32_read(buf + 13);
+    s.target_stream_id = buf[17];
+    s.oldest_block = be32_read(buf + 18);
+    s.newest_block = be32_read(buf + 22);
+    s.rx_health_permille = be16_read(buf + 26);
+    s.capability_flags = buf[28];
+    if (s.rx_health_permille > 1000 ||
+        (s.capability_flags & ~cache_capability::kKnownMask) != 0) {
+        return DecodeError::kInvalidField;
+    }
+    return s;
+}
+
+Decoded decode_cache_request(const uint8_t* buf, size_t len) {
+    if (len < kCacheRequestFixedSize) {
+        return DecodeError::kTruncated;
+    }
+    const uint16_t k = be16_read(buf + 28);
+    const uint8_t max_symbols = buf[30];
+    const uint8_t repair_have_len = buf[31];
+    if (k == 0 || k > kFecMaxSymbols || max_symbols == 0 ||
+        repair_have_len > 32) {
+        return DecodeError::kInvalidField;
+    }
+    const size_t src_len = (static_cast<size_t>(k) + 7) / 8;
+    if (len != kCacheRequestFixedSize + src_len + repair_have_len) {
+        return DecodeError::kLengthMismatch;
+    }
+    CacheRequestView v;
+    v.hdr.prefix = decode_prefix(buf);
+    v.hdr.target_originator = be16_read(buf + 11);
+    v.hdr.target_session = be32_read(buf + 13);
+    v.hdr.target_stream_id = buf[17];
+    v.hdr.target_cache = be16_read(buf + 18);
+    v.hdr.request_id = be32_read(buf + 20);
+    v.hdr.block_id = be32_read(buf + 24);
+    v.hdr.window_len = k;
+    v.hdr.max_symbols = max_symbols;
+    v.missing_sources = buf + kCacheRequestFixedSize;
+    v.repair_have_len = repair_have_len;
+    v.repair_have =
+        repair_have_len > 0 ? buf + kCacheRequestFixedSize + src_len : nullptr;
+    return v;
+}
+
+Decoded decode_cache_reply(const uint8_t* buf, size_t len) {
+    if (len < kCacheReplyFixedSize) {
+        return DecodeError::kTruncated;
+    }
+    const uint16_t wrapped_len = be16_read(buf + 15);
+    if (wrapped_len < kDataHeaderSize) {
+        return DecodeError::kInvalidField;
+    }
+    if (len != kCacheReplyFixedSize + wrapped_len) {
+        return DecodeError::kLengthMismatch;
+    }
+    CacheReplyView v;
+    v.prefix = decode_prefix(buf);
+    v.request_id = be32_read(buf + 11);
+    v.wrapped = buf + kCacheReplyFixedSize;
+    v.wrapped_len = wrapped_len;
+    return v;
+}
+
 }  // namespace
 
 Decoded decode(const uint8_t* buf, size_t len) {
@@ -191,6 +263,12 @@ Decoded decode(const uint8_t* buf, size_t len) {
             return decode_recovery_request(buf, len);
         case PacketType::kJsccFeedback:
             return decode_jscc_feedback(buf, len);
+        case PacketType::kCacheStatus:
+            return decode_cache_status(buf, len);
+        case PacketType::kCacheRequest:
+            return decode_cache_request(buf, len);
+        case PacketType::kCacheReply:
+            return decode_cache_reply(buf, len);
         default:
             return DecodeError::kUnknownType;
     }
@@ -314,6 +392,70 @@ size_t encode_jscc_feedback(const JsccFeedback& pkt, uint8_t* out, size_t cap) {
     out[32] = pkt.valid_flags;
     be32_write(out + 33, pkt.observed_block_id);
     return kJsccFeedbackSize;
+}
+
+size_t encode_cache_status(const CacheStatus& pkt, uint8_t* out, size_t cap) {
+    if (out == nullptr || cap < kCacheStatusSize ||
+        pkt.rx_health_permille > 1000 ||
+        (pkt.capability_flags & ~cache_capability::kKnownMask) != 0) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kCacheStatus, out);
+    be16_write(out + 11, pkt.target_originator);
+    be32_write(out + 13, pkt.target_session);
+    out[17] = pkt.target_stream_id;
+    be32_write(out + 18, pkt.oldest_block);
+    be32_write(out + 22, pkt.newest_block);
+    be16_write(out + 26, pkt.rx_health_permille);
+    out[28] = pkt.capability_flags;
+    return kCacheStatusSize;
+}
+
+size_t encode_cache_request(const CacheRequestHeader& hdr,
+                            const uint8_t* missing_sources,
+                            const uint8_t* repair_have,
+                            uint8_t repair_have_len, uint8_t* out, size_t cap) {
+    if (hdr.window_len == 0 || hdr.window_len > kFecMaxSymbols ||
+        hdr.max_symbols == 0 || repair_have_len > 32) {
+        return 0;
+    }
+    const size_t src_len = (static_cast<size_t>(hdr.window_len) + 7) / 8;
+    const size_t total = kCacheRequestFixedSize + src_len + repair_have_len;
+    if (out == nullptr || cap < total || missing_sources == nullptr ||
+        (repair_have == nullptr && repair_have_len > 0)) {
+        return 0;
+    }
+    encode_prefix(hdr.prefix, PacketType::kCacheRequest, out);
+    be16_write(out + 11, hdr.target_originator);
+    be32_write(out + 13, hdr.target_session);
+    out[17] = hdr.target_stream_id;
+    be16_write(out + 18, hdr.target_cache);
+    be32_write(out + 20, hdr.request_id);
+    be32_write(out + 24, hdr.block_id);
+    be16_write(out + 28, hdr.window_len);
+    out[30] = hdr.max_symbols;
+    out[31] = repair_have_len;
+    std::memcpy(out + kCacheRequestFixedSize, missing_sources, src_len);
+    if (repair_have_len > 0) {
+        std::memcpy(out + kCacheRequestFixedSize + src_len, repair_have,
+                    repair_have_len);
+    }
+    return total;
+}
+
+size_t encode_cache_reply(const CommonPrefix& prefix, uint32_t request_id,
+                          const uint8_t* wrapped, uint16_t wrapped_len,
+                          uint8_t* out, size_t cap) {
+    const size_t total = kCacheReplyFixedSize + wrapped_len;
+    if (out == nullptr || cap < total || wrapped == nullptr ||
+        wrapped_len < kDataHeaderSize) {
+        return 0;
+    }
+    encode_prefix(prefix, PacketType::kCacheReply, out);
+    be32_write(out + 11, request_id);
+    be16_write(out + 15, wrapped_len);
+    std::memcpy(out + kCacheReplyFixedSize, wrapped, wrapped_len);
+    return total;
 }
 
 }  // namespace wblink

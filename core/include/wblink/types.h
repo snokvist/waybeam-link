@@ -21,6 +21,9 @@ enum class PacketType : uint8_t {
     kCsa = 0x5,
     kRecoveryRequest = 0x6,
     kJsccFeedback = 0x7,
+    kCacheStatus = 0x8,
+    kCacheRequest = 0x9,
+    kCacheReply = 0xA,
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -53,6 +56,15 @@ inline constexpr size_t kHeartbeatSize = 11;
 inline constexpr size_t kCsaSize = 32;
 inline constexpr size_t kRecoveryRequestSize = 18;
 inline constexpr size_t kJsccFeedbackSize = 37;
+inline constexpr size_t kCacheStatusSize = 29;
+inline constexpr size_t kCacheRequestFixedSize = 32;
+inline constexpr size_t kCacheReplyFixedSize = 17;
+
+// §3.11 CACHE_STATUS capability_flags bits.
+namespace cache_capability {
+inline constexpr uint8_t kIpTransport = 0x01;
+inline constexpr uint8_t kKnownMask = kIpTransport;
+}  // namespace cache_capability
 
 namespace jscc_feedback_flags {
 inline constexpr uint8_t kRepairReady = 0x01;
