@@ -41,6 +41,13 @@ REMOTE_STATS=/tmp/waybeam-link-jscc-ethernet.jsonl
 REMOTE_ERR=/tmp/waybeam-link-jscc-ethernet.err
 REMOTE_PACKET_TRACE="$REMOTE_TRACE_DIR/jscc-packets.jsonl"
 REMOTE_PID=/tmp/waybeam-link-jscc-ethernet.pid
+REMOTE_ROTATOR=/tmp/wblink-stats-rotate.sh
+# The vehicle streams tx stats to stdout at stats.hz (5 Hz).  A plain `> file`
+# redirect grows without bound in continuous (LIVE=1) mode and overruns the
+# ~45 MB tmpfs.  Pipe it through a rotator that caps the file at this size.
+# For SD-backed unbounded history, point REMOTE_STATS at /mnt/mmcblk0p1/... and
+# raise the cap.
+STATS_MAX_BYTES=${STATS_MAX_BYTES:-16777216}
 REMOTE_BACKUP=/tmp/waybeam-jscc-ethernet.json.backup
 OUT_RING=${OUT_RING:-venc_frame_out}
 STATE_DIR=${STATE_DIR:-/tmp/waybeam-jscc-ethernet}
@@ -422,11 +429,21 @@ if [[ "$(remote "/usr/bin/json_cli -g .outgoing.server --raw -i /etc/waybeam.jso
             /etc/init.d/S95waybeam restart"
     REMOTE_CHANGED=1
 fi
+remote_put "$ROOT/tools/wblink-stats-rotate.sh" "$REMOTE_ROTATOR"
+# Launch tx with its stdout piped through the bounded rotator so the stats
+# stream cannot overrun the vehicle tmpfs.  The whole pipeline is setsid'd so
+# it survives the ssh disconnect (a bare backgrounded rotator would take SIGHUP
+# and die, then tx would SIGPIPE).  tx is backgrounded *inside* the inner shell
+# so $REMOTE_PID holds tx's own pid (not the pipeline tail) for the taskset
+# affinity step below and for stop_remote_link().
 remote "rm -f $REMOTE_STATS $REMOTE_ERR $REMOTE_PACKET_TRACE; \
         WBLINK_PACKET_TRACE='$REMOTE_PACKET_TRACE_ENV' \
         WBLINK_PACKET_TRACE_MAX='$PACKET_TRACE_MAX' \
-        setsid $REMOTE_INSTALL tx -c $REMOTE_CFG \
-        >$REMOTE_STATS 2>$REMOTE_ERR </dev/null & echo \$! >$REMOTE_PID"
+        setsid sh -c '($REMOTE_INSTALL tx -c $REMOTE_CFG 2>$REMOTE_ERR </dev/null & \
+            echo \$! >$REMOTE_PID; wait) \
+            | sh $REMOTE_ROTATOR $REMOTE_STATS $STATS_MAX_BYTES' \
+        </dev/null >/dev/null 2>>$REMOTE_ERR & \
+        i=0; while [ ! -s $REMOTE_PID ] && [ \$i -lt 50 ]; do sleep 0.1; i=\$((i + 1)); done"
 
 # The encoder and all video/ethernet IRQs are pinned to CPU 0 on SSC338Q.
 # Keep TX/FEC on CPU 1; the low-cost SHM readiness thread may share CPU 0.
