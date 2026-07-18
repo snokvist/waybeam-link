@@ -1499,14 +1499,15 @@ authorizes observation only, not adaptive transmission.
 
 ### 15.3 Streaming stats (newline-delimited JSON)
 Emitted at `stats.hz` to stdout and/or the stats binding. Fields map 1:1 to the
-§16.2 counters plus the state an operator needs to *see* a demote, a flap-freeze, a
+§16.2 counters (the one exception, the derived `bpf_filtered` estimate, is called
+out below) plus the state an operator needs to *see* a demote, a flap-freeze, a
 table mismatch, phantom diversity, a stalled adapter, or a failing return path:
 ```json
 { "t_ms": 172834, "node": 17, "session": 2748291,
   "adapters": [ { "name": "wlan0", "rx": 10234, "dup": 812,
     "rssi_best": -58, "rssi_mean": -63, "snr": 22, "noise": -85,
     "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
-    "drop": 0, "filtered": 0, "kernel_drop": 0, "tsf_fallback": 0,
+    "drop": 0, "filtered": 0, "kernel_drop": 0, "bpf_filtered": 0, "tsf_fallback": 0,
     "tx_reports": 531, "tx_report_fails": 0,
     "adapter_stalled": false, "tx_wedged": false } ],
   "streams": [ { "stream_id": 0, "type": "RTP",
@@ -1635,6 +1636,18 @@ which remains backend/synthetic queue loss.
 `filtered` is the backend's cumulative count of structurally rejected or
 self-originated receive frames. It is 0 where filtering occurs below an
 observable boundary.
+`bpf_filtered` is a **derived estimate** — the only §15.3 field that does *not*
+map 1:1 to a §16.2 counter — of how many frames the kernel-monitor backend's
+§3.0 BPF pre-filter rejected before the `recvmsg()` copy to userspace. It is
+computed as the interface's sysfs `rx_packets` delta since socket open minus all
+userspace-observed frames (`rx + filtered + drop + kernel_drop`), floored at 0.
+Because `rx_packets` is a per-netdev driver counter incremented *below* the
+packet-socket/BPF layer, this estimate also absorbs frames the driver delivered
+to *other* sockets on the same monitor interface (e.g. a concurrent `tcpdump`)
+and any driver-level accounting skew — it is a coarse health gauge of pre-filter
+efficacy, **not** an exact filter-drop count. It is 0 on the `RadioAir` and
+`UdpAir` backends, where the BPF pre-filter does not apply. The §3.0
+`dot11_parse()` userspace check remains the correctness gate regardless.
 
 On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
 the exact cumulative §14.1 symbols emitted by `FrameFramer`;

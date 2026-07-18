@@ -726,7 +726,34 @@ authoritative, and `arq_frames` makes the experiment auditable.
 (classification, deadline, and resend semantics); §15.2/§15.3 (configuration
 and telemetry). Code follows separately.
 
+## Pass 36 — kernel BPF pre-filter efficacy gauge (2026-07-18)
+
+The kernel-monitor backend attaches a classic BPF program (`SO_ATTACH_FILTER`)
+to each adapter socket that mirrors the §3.0 RX filter's cheapest checks
+(frame-control, SA prefix `56:42`, optional `net_id`, payload magic `57:42`),
+rejecting ambient WiFi in the kernel before the `recvmsg()` copy. `dot11_parse()`
+stays the correctness gate; the BPF is a pure performance optimization and is
+non-fatal on attach failure. That part changes no wire bytes and needs no ruling.
+
+The observability question did: an operator cannot tune the filter without seeing
+how much it rejects, but a per-socket true drop count was not plumbed. Ruling —
+ship an honestly-labeled **estimate** rather than block on exact instrumentation.
+`bpf_filtered` is derived from the interface's sysfs `rx_packets` delta minus all
+userspace-observed frames, floored at 0. Because `rx_packets` is counted below
+the packet-socket/BPF layer, the estimate also absorbs frames delivered to other
+sockets on the same monitor interface and driver accounting skew — so §15.3 marks
+it the sole field that does **not** map 1:1 to a §16.2 counter and names it a
+coarse gauge, not an exact count. It is 0 on `RadioAir`/`UdpAir` (BPF N/A).
+
+**Amended:** §15.3 (the `bpf_filtered` derived-estimate field and the 1:1-mapping
+exception). Code follows separately.
+
 ## Open questions for the next pass
+
+- [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
+      too noisy in bench (concurrent sniffers, multi-socket rigs), replace it with an
+      exact per-socket count via `PACKET_STATISTICS`/`tp_drops` and drop the §16.2
+      1:1 exception. Deferred until a bench shows the estimate is inadequate.
 
 - [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
       diversity is ground-RX-only. Craft return path is best-effort by physics; the
