@@ -261,6 +261,16 @@ int main() {
         "bind":{"kind":"udp","listen":"127.0.0.1:1"},
         "fec":{"scheme":"rlc256"}}]})",
                  "frame-shm binding");
+    // Enforcing JSCC parity is not a partial mode: it requires the RLC
+    // encoder that can apply the per-frame repair override.
+    expect_error(R"({"node":{"originator":1,"role":"tx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"frame-shm","name":"venc_frame"},
+        "fec":{"scheme":"none"},
+        "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
+          "arq_guard_us":500,"feedback_timeout_ms":500,
+          "min_rtt_samples":20,"enforce":true}}]})",
+                 "requires fec.scheme=rlc256");
     // §3.0 net_id is one byte.
     expect_error(R"({"node":{"originator":1,"role":"rx","net_id":256}})",
                  "net_id");
@@ -497,6 +507,7 @@ int main() {
         auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
           "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
             "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "fec":{"scheme":"rlc256"},
             "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
               "arq_guard_us":500,"feedback_timeout_ms":500,
               "min_rtt_samples":5,"enforce":true}}]})");

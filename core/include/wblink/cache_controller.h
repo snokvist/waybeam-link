@@ -121,7 +121,9 @@ class CacheController {
 
     CacheControllerConfig cfg_;
     CacheRepairStats stats_;
-    std::map<uint16_t, Registry> registry_;
+    // One cache emits a status per tracked stream. Keep those independently;
+    // a status for telemetry must not overwrite the video-stream status.
+    std::map<uint16_t, std::vector<Registry>> registry_;
     std::map<uint32_t, BlockState> blocks_;
     std::map<uint32_t, Outstanding> outstanding_;
     uint32_t next_request_id_ = 1;

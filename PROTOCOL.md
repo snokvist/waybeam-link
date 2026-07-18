@@ -347,7 +347,9 @@ table can therefore never make an older/mismatched client misbehave.
   **re-latches to the next reporter only after `relatch_ms` of silence**
   (seed 4 × `report_timeout_ms`). Rejected reports are counted
   (§15.3 `reports_rejected`); the plausibility cross-check remains §17
-  future work.
+  future work. An accepted session/source transition starts a new selector
+  epoch and smoothing domain; state from the previous reporter MUST NOT make
+  the newly accepted identity look stale.
 
 ### 3.6 `table_version` — content hash, not a counter
 
@@ -520,8 +522,9 @@ waybeam-link node: its cache identity IS its `originator` (§2), and its
 
 Sent to each configured aggregator endpoint every `status_interval_ms` per
 tracked stream **with a non-empty retention window** — an empty window is
-silence, not a zero-filled status. `rx_health_permille > 1000` is a decode
-error.
+silence, not a zero-filled status. Aggregators retain status independently per
+cache and target stream identity; one tracked stream MUST NOT overwrite
+another's eligibility state. `rx_health_permille > 1000` is a decode error.
 
 #### CACHE_REQUEST (type `0x9`) — 32 bytes fixed + two bitmaps
 
@@ -1063,7 +1066,9 @@ bitrate, riding the same §9.5 transition moments:
   · i_headroom‰/1000` — the I-class recoverable window (§4.1/§8), net of I
   parity: an I-frame is sized to what ARQ/FEC can still rescue, not to one
   frame period.
-- Clamps: `maxI ≥ maxP`; both floored at venc's own 4096-byte cap floor
+- Clamps: `maxI ≥ maxP`; if the I-class deadline/FEC ceiling is tighter than
+  the independently derived P cap, lower `maxP` to `maxI` (never raise I past
+  its recoverable ceiling). Both are floored at venc's own 4096-byte cap floor
   (never command sub-floor) and ceilinged at
   `min(cap_ceiling_bytes, s·⌊256000/(1000 + rate‰)⌋)` — the §14.1
   GF(256) eligibility bound at the rung's symbol size `s`.
@@ -1570,19 +1575,17 @@ block. It requires 20 samples and uses a 100-permille cold-start rate. This
 candidate is also shadow-only and does not supersede the original source-loss
 telemetry.
 
-**The trailing-window MAXIMUM with censored lower bounds is load-bearing
-against §14.3 parity offload (Pass 42, R-B measurement 2026-07-16).** Cache
-repair merges symbols BEFORE the estimator observes a block, so
-cache-completed blocks under-report air-path demand — but the blocks that
-SET a max-with-censoring estimate are precisely the ones the cache cannot
-complete (deficit beyond the §14.3 symbol cap ⇒ censored high samples), so
-the enforcing TX's parity cannot drain onto the cache. Measured across a
-50–150 ‰ loss sweep: parity ratio unchanged within noise (≤14 %,
-direction-flipping) while the cache repaired blocks in every run. Changing
-the estimator shape (mean, percentile, shorter window) forfeits this
-immunity and REQUIRES re-running `tools/cache_offload_bench.sh` and, if the
-offload appears, adopting air-only observation (cache-delivered symbols
-counted as lost for estimation).
+**Air-only attribution is load-bearing against §14.3 parity offload (Pass 45,
+correcting the Pass 42 inference).** Cache symbols merge into the same decode
+state, but source/repair arrivals retain separate air-path attribution for the
+estimator. A source supplied only by a cache remains an air-path loss, and a
+cache repair does not advance `repairs_emitted_so_far`. The trailing-120
+maximum with censored lower bounds therefore sees the same air demand whether
+or not cache repair completes the block. The Pass 42 loss sweep remains a
+useful system check, but was not a structural proof: futile high-deficit blocks
+kept the maximum high while an all-cache-completable distribution could drain
+it to zero. Changes to attribution or estimator shape REQUIRE both
+`tools/cache_offload_bench.sh` and the deterministic 120-block regression.
 
 The next Ethernet stage may run the pure decision on TX as a **non-enforcing
 runtime shadow**. It consumes fresh §3.10 feedback plus TX-local facts: exact
@@ -1726,7 +1729,8 @@ trigger; the trigger is an incomplete **merged** block after close.
 **Cache-node rules (§13 hardening):** a cache answers a request only when
 `target_cache` equals its own `originator` and the target stream is one it
 tracks with the block in window; duplicate `request_id`s from the same
-requester inside the dedup window are ignored; per-requester requests are
+requester boot identity `(originator, session_id)` inside the dedup window are
+ignored; per-requester requests are
 rate-limited (`max_requests_per_s`); the aggregate reply for one request never
 exceeds `min(max_symbols, reply_limit)`. The aggregator accepts a CACHE_REPLY
 only for an outstanding `request_id` it issued, only from the addressed cache,
@@ -1838,6 +1842,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   from §14.2. It is rejected on UDP streams. Absence keeps only the fixed §14.1
   path and emits no controller decision shadow. `"enforce": true` inside the
   block activates §14.2 enforcement (Pass 38); default false = shadow-only.
+  Enforcement requires that stream's `fec.scheme` to be `"rlc256"`.
 - `venc.enabled` authorizes the §9.6 bitrate actuator and therefore requires
   single-writer ownership. `venc.recovery_enabled` independently authorizes
   only §3.9 decoder-recovery IDR requests. Neither permission is implied by the

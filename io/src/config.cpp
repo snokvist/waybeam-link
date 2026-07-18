@@ -290,6 +290,11 @@ Result<Config> load_config_json(const std::string& json_text) {
                         "stream " + std::to_string(sid) +
                         ": jscc_shadow timeout and min_rtt_samples must be positive");
                 }
+                if (jc.enforce && sc.fec.scheme != FecScheme::kRlc256) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": jscc_shadow.enforce requires fec.scheme=rlc256");
+                }
                 sc.jscc_shadow = jc;
             }
             if (sc.bind.kind == BindKind::kFrameShm) {

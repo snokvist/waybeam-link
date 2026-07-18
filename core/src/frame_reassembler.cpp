@@ -21,7 +21,8 @@ inline int32_t bid_diff(uint32_t a, uint32_t b) {
 
 void FrameReassembler::push(uint32_t block_id, uint8_t flags,
                             const uint8_t* payload, size_t payload_len,
-                            uint64_t now_ms, const Emit& emit) {
+                            uint64_t now_ms, const Emit& emit,
+                            bool air_path) {
     // Drop late/duplicate symbols for already-finalized blocks.
     if (have_finalized_ && bid_diff(block_id, finalized_upto_) <= 0) {
         return;
@@ -63,6 +64,9 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         b.k = k;
         b.frame_len = flen;
         b.s = static_cast<uint16_t>(coded);
+        if (air_path) {
+            b.air_repairs.insert(ridx);
+        }
         if (b.repairs.emplace(ridx, std::vector<uint8_t>(
                                         payload + kFecRepairSubheaderSize,
                                         payload + payload_len))
@@ -76,7 +80,13 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         }
         const uint16_t k = be16_read(payload + kFecSrcOffWindowLen);
         const uint16_t idx = be16_read(payload + kFecSrcOffSymIndex);
-        if (k == 0 || k > kFecMaxSymbols || idx >= k ||
+        // k+r is GF(256)-bounded, but §14.1 explicitly sends a block with
+        // k>256 source-only. Bound even a last-symbol-first packet by the
+        // minimum symbol geometry that FrameFramer can produce (21 bytes).
+        const uint64_t min_frame_len =
+            k > 1 ? static_cast<uint64_t>(k - 1) * kMinFrameSymbolSize + 1
+                  : 1;
+        if (k == 0 || idx >= k || min_frame_len > cfg_.max_frame_bytes ||
             (b.k != 0 && b.k != k)) {
             ++stats_.malformed;
             return;
@@ -93,9 +103,18 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         if (idx != k - 1 && b.s == 0) {
             b.s = static_cast<uint16_t>(clen);
         }
+        if (k > 1 && b.s > 0 &&
+            static_cast<uint64_t>(k - 1) * b.s + 1 >
+                cfg_.max_frame_bytes) {
+            ++stats_.malformed;
+            return;
+        }
         if (eob && !b.have_eob) {
             b.have_eob = true;
             b.eob_ms = now_ms;  // §14.3 tail-grace anchor
+        }
+        if (air_path) {
+            b.air_sources.insert(idx);
         }
         if (b.sources.emplace(idx, std::vector<uint8_t>(
                                        payload + kFecSourceSubheaderSize,
@@ -136,7 +155,22 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
 
     // (1) Fast path — all k source symbols present: concatenate, no decode.
     if (b.sources.size() == k) {
+        size_t frame_len = 0;
+        for (const auto& kv : b.sources) {
+            if (kv.second.size() > cfg_.max_frame_bytes - frame_len) {
+                ++stats_.malformed;
+                finalize(id);
+                return true;
+            }
+            frame_len += kv.second.size();
+        }
+        if (frame_len < kVencFrameMetaSize) {
+            ++stats_.malformed;
+            finalize(id);
+            return true;
+        }
         scratch_.clear();
+        scratch_.reserve(frame_len);
         for (const auto& kv : b.sources) {  // ordered 0..k-1
             scratch_.insert(scratch_.end(), kv.second.begin(), kv.second.end());
         }
@@ -223,10 +257,10 @@ void FrameReassembler::observe_shadow(uint32_t id, Block& b) {
         return;
     }
     const uint16_t observed = static_cast<uint16_t>(
-        b.k - std::min<size_t>(b.sources.size(), b.k));
-    const uint16_t repairs_seen = static_cast<uint16_t>(b.repairs.size());
-    const uint16_t emitted_so_far = b.repairs.empty()
-        ? 0 : static_cast<uint16_t>(b.repairs.rbegin()->first + 1);
+        b.k - std::min<size_t>(b.air_sources.size(), b.k));
+    const uint16_t repairs_seen = static_cast<uint16_t>(b.air_repairs.size());
+    const uint16_t emitted_so_far = b.air_repairs.empty()
+        ? 0 : static_cast<uint16_t>(*b.air_repairs.rbegin() + 1);
     const bool demand_censored = repairs_seen < observed;
     const uint16_t repair_demand = demand_censored
         ? static_cast<uint16_t>(std::min<uint32_t>(

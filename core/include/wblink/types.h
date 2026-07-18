@@ -90,6 +90,10 @@ inline constexpr size_t kFecOffRepairIdx = 0;
 inline constexpr size_t kFecOffWindowLen = 1;
 inline constexpr size_t kFecOffWindowBaseSeq = 3;
 inline constexpr size_t kFecOffFrameLen = 7;
+// Profile validation requires max_payload >= DATA header + 32 bytes. After
+// the repair subheader this leaves at least 21 coded/source bytes.
+inline constexpr uint16_t kMinFrameSymbolSize =
+    32 - kFecRepairSubheaderSize;
 
 // §5.1a — frame-shm SOURCE symbols carry a 4-byte self-describing subheader
 // (window_len u16 @0 = k, sym_index u16 @2 = i) before the chunk, so RX

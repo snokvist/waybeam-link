@@ -231,6 +231,62 @@ int main() {
         CHECK_EQ_U(ra.stats().malformed, 2);
     }
 
+    // --- §14.1 k>256 remains valid on the source-only fast path ------------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 250, 100, 3));
+        ff.set_operating_point(0, 0, 58);  // s=21, k=260
+        auto blob = make_frame(static_cast<size_t>(21) * 260 -
+                                   kVencFrameMetaSize,
+                               /*idr=*/true, 44);
+        auto syms = produce(ff, blob);
+        CHECK_EQ_U(syms.size(), 260);
+        CHECK_EQ_U(ff.stats().fec_oversize_k, 1);
+
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        for (const Sym& s : syms) {
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                    1000,
+                    [&](const uint8_t* f, size_t n) {
+                        got.emplace_back(f, f + n);
+                    });
+        }
+        CHECK_EQ_U(got.size(), 1);
+        CHECK(!got.empty() && got[0] == blob);
+        CHECK_EQ_U(ra.stats().malformed, 0);
+    }
+
+    // --- cache completion cannot erase air-path repair demand --------------
+    {
+        FrameReassembler no_cache(rc);
+        FrameReassembler cache_completed(rc);
+        const auto push_source = [&](FrameReassembler& ra, uint32_t block,
+                                     uint16_t idx, bool air_path) {
+            std::array<uint8_t, kFecSourceSubheaderSize + 4> p{};
+            be16_write(p.data() + kFecSrcOffWindowLen, 10);
+            be16_write(p.data() + kFecSrcOffSymIndex, idx);
+            const uint8_t flags =
+                idx == 9 ? data_flags::kEndOfBlock : uint8_t{0};
+            ra.push(block, flags, p.data(), p.size(), block, noop, air_path);
+        };
+        for (uint32_t block = 1; block <= 130; ++block) {
+            for (uint16_t idx = 0; idx < 9; ++idx) {
+                push_source(no_cache, block, idx, true);
+                push_source(cache_completed, block, idx, true);
+            }
+            // Direct cache merge supplies the missing source for delivery,
+            // but it remains an air-path loss for the §14.2 estimator.
+            push_source(cache_completed, block, 9, false);
+        }
+        push_source(no_cache, 131, 0, true);  // finalize block 130
+        const auto air = no_cache.jscc_feedback();
+        const auto cached = cache_completed.jscc_feedback();
+        CHECK_EQ_U(air.repair_samples, 120);
+        CHECK_EQ_U(cached.repair_samples, 120);
+        CHECK_EQ_U(air.repair_demand_permille, 100);
+        CHECK_EQ_U(cached.repair_demand_permille, 100);
+    }
+
     // --- conflicting repair frame_len/coded-size cannot corrupt FEC output ---
     {
         FrameFramer ff(framer_cfg(FecScheme::kRlc256, 300, 100, 3));

@@ -969,6 +969,32 @@ coarse gauge, not an exact count. It is 0 on `RadioAir`/`UdpAir` (BPF N/A).
 **Amended:** §15.3 (the `bpf_filtered` derived-estimate field and the 1:1-mapping
 exception). Code follows separately.
 
+## Pass 45 — full PR accuracy audit corrections (2026-07-18)
+
+A spec-to-implementation audit before radio/multi-node testing found three
+false-ready paths despite the green UDP/device matrix:
+
+1. The malformed-`k` hardening incorrectly applied the GF(256) `k≤256` bound
+   to source-only frames, contradicting §14.1's explicit oversized-block
+   fallback. Repair/cache bitmaps remain bounded, while source-only reassembly
+   now accepts the full wire `u16` range subject to producer geometry and the
+   configured frame-size ceiling.
+2. Pass 41's gate followed reporter reboot/re-latch, but Selector retained its
+   independent first-wins source and epoch. Accepted identity transitions now
+   reset the selector epoch/smoothing domain; replay rejection also gates the
+   FPS ladder.
+3. Pass 42's max-with-censoring argument was not structural. A deterministic
+   all-cache-completable window drove demand from 100‰ to zero because cache
+   sources were counted as air arrivals. Reassembly now tracks air attribution
+   separately from unified decode state, and the regression holds demand at
+   100‰ across cache completion.
+
+The same pass scopes cache status per target stream, cache request dedup per
+aggregator boot identity, rejects JSCC enforcement without `rlc256`, and makes
+the normative `maxI≥maxP` cap invariant executable by lowering P when needed.
+
+**Amended:** §3.5, §3.11, §9.6, §14.2, §14.3, §15.2 and the follow-up register.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
@@ -990,27 +1016,12 @@ Standing constraints (not revisitable):
 
 Pending operator rulings, with recommendations (2026-07-16 register):
 
-- [ ] **R-A: LINK_REPORT preferred-originator enforcement (§3.5 gap — do
-      first).** §3.5 rules the TX accepts a report only from the latched/
-      preferred `(originator, session)`, but the TX event loop forwards ANY
-      report matching target+session to the selector — and now to the §9.11
-      fps ladder. A second (or forged, §13) reporter can steer MCS and fps.
-      JSCC_FEEDBACK already enforces the preferred filter.
-      *Recommendation:* small pass mirroring the JSCC_FEEDBACK filter: when
-      `preferred_originator` is configured, drop non-preferred reports before
-      the selector/ladder; when unconfigured, first-latcher-per-target with
-      the §3.5 plausibility cross-check. Low effort, closes a real spoof
-      surface before any flight use of the ladder.
-- [x] **R-B — RESOLVED (Pass 42): no offload; estimator immunity pinned.** The RX repair-demand estimator observes blocks AFTER
-      cache repair merges symbols, so a healthy cache lowers reported demand,
-      the enforcing TX then sends less parity, and protection silently
-      migrates onto the cache path — an unplanned dependency on the side
-      link. *Recommendation:* measure first (combined bench: cache +
-      enforce on the same stream, watch `repair_demand_permille` vs
-      `cache_repair.blocks_repaired`); if the offload is real, rule that the
-      RX estimator counts cache-delivered symbols as lost (source-kind
-      exclusion) so TX parity is sized for the AIR path and the cache stays
-      redundancy, not budget.
+- [x] **R-A — RESOLVED (Pass 41, integration corrected Pass 45).** Preferred/
+      first-latched filtering runs before selector and FPS ladder; accepted
+      reboot/re-latch identities reset selector epoch/smoothing state.
+- [x] **R-B — RESOLVED (Pass 45 correction).** Unified cache decode now keeps
+      explicit air-only attribution for the repair-demand estimator, verified
+      by both the combined bench and an all-cache-completable 120-block guard.
 - [x] **R-C — MEASURED (2026-07-16), zero retention stands.** 150 ‰ sweep:
       repair success 100 % @90 fps, 82 % @120, 62 % @144; unrecoverable
       5.7/5.3/8.9 %. Latency-first keeps the pin; revisit only on 144 fps

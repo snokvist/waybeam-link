@@ -280,6 +280,13 @@ int main() {
     CHECK(store.answer(rv, 3210, out) == CacheStore::Verdict::kAnswered);
     CHECK_EQ_U(out.size(), 1);
 
+    // request_id restarts per aggregator boot. The same node's new session
+    // gets a reset dedup/rate domain rather than a false duplicate.
+    rv.hdr.prefix.session_id = 78;
+    rv.hdr.request_id = 1;
+    rv.hdr.max_symbols = 4;
+    CHECK(store.answer(rv, 3220, out) == CacheStore::Verdict::kAnswered);
+
     // A new session for the tracked stream replaces the old store.
     feed(store, make_source(17, 99, 3, 500, 3, 0, 16));
     st = store.status();
@@ -288,7 +295,7 @@ int main() {
     CHECK(st[0].key == (StreamKey{17, 99, 3}));
 
     const CacheStoreStats& cs = store.stats();
-    CHECK_EQ_U(cs.requests_answered, 4);
+    CHECK_EQ_U(cs.requests_answered, 5);
     CHECK(cs.symbols_sent >= 5);
 
     return wbtest_finish("cache_store_test");

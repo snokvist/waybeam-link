@@ -107,18 +107,23 @@ bool Selector::flap_frozen(uint64_t now_ms) const {
     return now_ms < freeze_until_ms_;
 }
 
-void Selector::on_report(const LinkReport& r, uint64_t now_ms) {
-    // v0 first-wins source rule (header): adopt the first reporter, ignore
-    // others so two RX nodes cannot fight over the smoothing state.
-    if (!report_source_) {
-        report_source_ = r.prefix.originator;
-    } else if (*report_source_ != r.prefix.originator) {
-        return;
+bool Selector::on_report(const LinkReport& r, uint64_t now_ms) {
+    // ReportGate has already authorized this identity. A session change is a
+    // reporter reboot and a source change is a silence-based re-latch; both
+    // start a new monotonic epoch/smoothing domain (§3.5 Pass 41).
+    const std::pair<uint16_t, uint32_t> identity{r.prefix.originator,
+                                                 r.prefix.session_id};
+    if (!report_source_ || *report_source_ != identity) {
+        report_source_ = identity;
+        have_report_ = false;
+        last_epoch_ = 0;
+        slope_ewma_ = 0.0;
+        fade_ticks_ = 0;
     }
     // §9.8: the watchdog wants monotonic-forward epochs; replays/stale
     // reordered reports never freshen the link.
     if (have_report_ && r.report_epoch <= last_epoch_) {
-        return;
+        return false;
     }
     last_epoch_ = r.report_epoch;
 
@@ -164,6 +169,7 @@ void Selector::on_report(const LinkReport& r, uint64_t now_ms) {
     have_report_ = true;
     last_report_ms_ = now_ms;
     failsafe_next_step_ms_ = 0;  // fresh feedback ends any fail-safe descent
+    return true;
 }
 
 void Selector::set_pressure(bool on, uint64_t now_ms) {

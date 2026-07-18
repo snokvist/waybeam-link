@@ -26,7 +26,17 @@ void CacheController::on_status(const CacheStatus& st, uint64_t now_ms) {
                   st.prefix.originator) == cfg_.caches.end()) {
         return;  // §13: only configured caches exist
     }
-    Registry& r = registry_[st.prefix.originator];
+    std::vector<Registry>& entries = registry_[st.prefix.originator];
+    auto it = std::find_if(
+        entries.begin(), entries.end(), [&](const Registry& r) {
+            return r.status.target_originator == st.target_originator &&
+                   r.status.target_stream_id == st.target_stream_id;
+        });
+    if (it == entries.end()) {
+        entries.push_back(Registry{});
+        it = std::prev(entries.end());
+    }
+    Registry& r = *it;
     r.status = st;
     r.last_seen_ms = now_ms;
 }
@@ -90,8 +100,19 @@ std::vector<CacheRequestOut> CacheController::tick(uint64_t now_ms,
     }
 
     uint32_t fresh = 0;
-    for (const auto& [orig, r] : registry_) {
-        fresh += (now_ms - r.last_seen_ms <= cfg_.status_timeout_ms) ? 1 : 0;
+    for (const uint16_t orig : cfg_.caches) {
+        const auto rit = registry_.find(orig);
+        if (rit == registry_.end()) {
+            continue;
+        }
+        const bool found = std::any_of(
+            rit->second.begin(), rit->second.end(), [&](const Registry& r) {
+                return r.status.target_originator == target.originator &&
+                       r.status.target_session == target.session_id &&
+                       r.status.target_stream_id == target.stream_id &&
+                       now_ms - r.last_seen_ms <= cfg_.status_timeout_ms;
+            });
+        fresh += found ? 1 : 0;
     }
     stats_.caches_fresh = fresh;
 
@@ -147,11 +168,18 @@ std::vector<CacheRequestOut> CacheController::tick(uint64_t now_ms,
                 continue;
             }
             const auto rit = registry_.find(orig);
-            if (rit == registry_.end() ||
-                !eligible(rit->second, target, c.block_id, now_ms)) {
+            if (rit == registry_.end()) {
                 continue;
             }
-            const Registry& r = rit->second;
+            const auto sit = std::find_if(
+                rit->second.begin(), rit->second.end(),
+                [&](const Registry& r) {
+                    return eligible(r, target, c.block_id, now_ms);
+                });
+            if (sit == rit->second.end()) {
+                continue;
+            }
+            const Registry& r = *sit;
             if (best == nullptr ||
                 r.status.rx_health_permille >
                     best->status.rx_health_permille ||

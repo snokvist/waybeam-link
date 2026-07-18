@@ -1087,8 +1087,8 @@ struct TxCore {
                 return;
             }
             ++reports_received_;
-            selector_.on_report(*r, now);
-            if (fps_ladder_) {  // §9.11 distress/restore evidence
+            const bool fresh = selector_.on_report(*r, now);
+            if (fps_ladder_ && fresh) {  // §9.11 distress/restore evidence
                 fps_ladder_->note_report(r->loss_postdiv_prearq, now);
             }
             return;
@@ -2625,7 +2625,8 @@ int run_rx(const Loaded& l) {
                                   [&](const uint8_t* f, size_t len) {
                                       cache_ring->write_frame(f, len);
                                       emitted = true;
-                                  });
+                                  },
+                                  /*air_path=*/false);
                 if (emitted) {
                     cache_ctl->note_completed(wv->hdr.block_id);
                 }

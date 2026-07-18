@@ -77,10 +77,10 @@ int main() {
         in.symbol_size = 100;
         auto caps = derive_frame_caps(in);
         CHECK_EQ_U(caps.max_i_bytes, 204 * 100);
-        // P ceiling at rate 0: 256*100 = 25600.
-        CHECK_EQ_U(caps.max_p_bytes, 25600);
-        // FEC eligibility wins over I >= P when the I ceiling is tighter.
-        CHECK(caps.max_i_bytes < caps.max_p_bytes);
+        // P's own ceiling is 25600, but the encoder invariant maxI >= maxP
+        // lowers P to the tighter I-class ceiling.
+        CHECK_EQ_U(caps.max_p_bytes, 204 * 100);
+        CHECK(caps.max_i_bytes >= caps.max_p_bytes);
     }
 
     // --- floors + insufficient inputs ----------------------------------------

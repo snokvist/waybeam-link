@@ -94,6 +94,7 @@ class CacheStore {
         std::deque<uint32_t> order;  // retention eviction order
     };
     struct RequesterState {
+        uint32_t session_id = 0;
         uint64_t window_start_ms = 0;
         uint16_t window_count = 0;
         std::deque<uint32_t> recent_ids;  // §13 request_id dedup (last 32)
@@ -106,6 +107,8 @@ class CacheStore {
     CacheStoreStats stats_;
     // keyed by stream_id (one live session per tracked stream at a time).
     std::map<uint8_t, StreamState> streams_;
+    // One bounded state per node; a session transition resets its per-boot
+    // request-id and rate domain without growing state per reboot.
     std::map<uint16_t, RequesterState> requesters_;
 };
 

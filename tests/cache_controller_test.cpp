@@ -88,6 +88,11 @@ int main() {
     {
         CacheController cc(base_cfg());
         cc.on_status(fresh_status(33, 0, 1000), 100);
+        // The same cache may report several tracked streams. A status for a
+        // different stream must not overwrite this target's registry entry.
+        CacheStatus other = fresh_status(33, 0, 1000);
+        other.target_stream_id = 4;
+        cc.on_status(other, 101);
         // Status from an unconfigured originator is ignored.
         cc.on_status(fresh_status(55, 0, 1000), 100);
 

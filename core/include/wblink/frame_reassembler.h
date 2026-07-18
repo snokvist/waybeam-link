@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <vector>
 
 #include "wblink/types.h"
@@ -88,7 +89,8 @@ class FrameReassembler {
     // Feed one deduped DATA symbol of this stream. is_repair from
     // data_flags & FEC_REPAIR; eob from data_flags & END_OF_BLOCK.
     void push(uint32_t block_id, uint8_t flags, const uint8_t* payload,
-              size_t payload_len, uint64_t now_ms, const Emit& emit);
+              size_t payload_len, uint64_t now_ms, const Emit& emit,
+              bool air_path = true);
 
     // Drop blocks past their deadline (§8). Call from the RX tick.
     void tick(uint64_t now_ms, const Emit& emit);
@@ -120,6 +122,10 @@ class FrameReassembler {
         std::map<uint16_t, std::vector<uint8_t>> sources;
         // repair_idx -> s coded bytes.
         std::map<uint8_t, std::vector<uint8_t>> repairs;
+        // Air-only attribution for the §14.2 demand estimator. Cache symbols
+        // still complete `sources`/`repairs`, but must remain losses here.
+        std::set<uint16_t> air_sources;
+        std::set<uint8_t> air_repairs;
     };
 
     // Try to finalize block b (id): emit if complete, return true if finalized

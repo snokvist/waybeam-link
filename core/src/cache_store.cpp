@@ -132,6 +132,10 @@ CacheStore::Verdict CacheStore::answer(
     }
     // §13 per-requester rate cap + request_id dedup window.
     RequesterState& rq = requesters_[req.hdr.prefix.originator];
+    if (rq.session_id != req.hdr.prefix.session_id) {
+        rq = RequesterState{};
+        rq.session_id = req.hdr.prefix.session_id;
+    }
     if (std::find(rq.recent_ids.begin(), rq.recent_ids.end(),
                   req.hdr.request_id) != rq.recent_ids.end()) {
         return Verdict::kDuplicate;  // §13: silent, not counted as rejected

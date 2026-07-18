@@ -102,10 +102,10 @@ inline FrameCaps derive_frame_caps(const FrameCapInputs& in) {
             : fec_eligibility_ceiling(in.symbol_size, in.i_rate_permille);
     if (max_p > p_ceiling) max_p = p_ceiling;
     if (max_i > i_ceiling) max_i = i_ceiling;
-    // Encoder sanity I >= P, but FEC eligibility wins: never raise maxI
-    // past its own §14.1 ceiling to chase maxP.
+    // Encoder invariant I >= P without violating either deadline/FEC ceiling:
+    // when the I-class ceiling is tighter, lower P to I rather than raising I.
     if (max_i < max_p) {
-        max_i = max_p < i_ceiling ? max_p : i_ceiling;
+        max_p = max_i;
     }
     if (max_p < kVencCapFloorBytes) max_p = kVencCapFloorBytes;
     if (max_i < kVencCapFloorBytes) max_i = kVencCapFloorBytes;
