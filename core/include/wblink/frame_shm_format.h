@@ -50,12 +50,17 @@ inline constexpr uint32_t kFrameRingDefaultSlotSize = 512 * 1024;
 inline constexpr size_t kVencFrameMetaSize = 8;
 inline constexpr uint8_t kFrameCodecH265 = 0x01;
 inline constexpr uint8_t kFrameFlagIdr = 0x01;  // VencFrameMeta.flags bit 0
+inline constexpr uint8_t kFrameFlagGdr = 0x02;  // rolling intra stripe active
+inline constexpr uint8_t kFrameFlagEnhance = 0x04;  // SVC-T droppable layer
+inline constexpr uint8_t kFrameFlagsKnown =
+    kFrameFlagIdr | kFrameFlagGdr | kFrameFlagEnhance;
 
 struct VencFrameMeta {
     uint32_t pts = 0;       // encoder capture timestamp (SDK units), truncated
     uint8_t codec = 0;      // kFrameCodecH265
-    uint8_t flags = 0;      // bit 0 = IDR
-    uint16_t reserved = 0;  // must be 0
+    uint8_t flags = 0;      // kFrameFlag* bitmap
+    uint8_t gdr_pos = 0;    // 0-based position in GDR cycle
+    uint8_t gdr_len = 0;    // GDR cycle length; 0 while inactive
 };
 
 // Read the 8-byte metadata prefix from a frame blob (native-endian, same-host).
@@ -67,7 +72,8 @@ inline bool read_frame_meta(const uint8_t* blob, size_t len, VencFrameMeta* out)
     std::memcpy(&out->pts, blob + 0, 4);
     out->codec = blob[4];
     out->flags = blob[5];
-    std::memcpy(&out->reserved, blob + 6, 2);
+    out->gdr_pos = blob[6];
+    out->gdr_len = blob[7];
     return true;
 }
 

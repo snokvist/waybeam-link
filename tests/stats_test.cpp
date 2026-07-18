@@ -134,7 +134,7 @@ const char* kGolden =
     "\"adapters\":[{\"name\":\"wlan0\",\"rx\":10234,\"dup\":812,"
     "\"rssi_best\":-58,\"rssi_mean\":-63,\"snr\":22,\"noise\":-85,"
     "\"tx_submitted\":540,\"tx_failed\":2,\"tx_timeout\":0,"
-    "\"drop\":3,\"filtered\":0,\"kernel_drop\":0,\"tsf_fallback\":1,"
+    "\"drop\":3,\"filtered\":0,\"kernel_drop\":0,\"bpf_filtered\":0,\"tsf_fallback\":1,"
     "\"tx_reports\":40,"
     "\"tx_report_fails\":2,"
     "\"adapter_stalled\":false,\"tx_wedged\":false}],"

@@ -62,8 +62,9 @@ Each SHM slot contains:
 |--------|------|-------|----------|
 | 0 | 4 | `timestamp` | u32, RTP-style 90 kHz clock |
 | 4 | 1 | `codec` | u8: 0 = H.264, 1 = H.265 |
-| 5 | 1 | `flags` | u8: bit 0 = IDR |
-| 6 | 2 | `reserved` | u16, zero |
+| 5 | 1 | `flags` | u8: bit 0 = IDR, bit 1 = GDR, bit 2 = SVC-T enhancement |
+| 6 | 1 | `gdr_pos` | u8, zero-based GDR cycle position |
+| 7 | 1 | `gdr_len` | u8, GDR cycle length; zero when inactive |
 | 8 | N | NAL data | raw Annex B (start codes + NAL units) |
 
 Total slot: 8-byte metadata header + up to (512 KB − 8) bytes of NAL data.

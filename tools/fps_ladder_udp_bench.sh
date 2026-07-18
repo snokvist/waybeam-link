@@ -113,7 +113,7 @@ sleep 20                # C: clean — slow restore back to preferred
 kill -TERM "$tx_pid" 2>/dev/null || true
 wait "$tx_pid" 2>/dev/null || true
 
-python3 - "$TMP/venc.jsonl" "$TMP/tx.jsonl" <<'PY'
+python3 - "$TMP/venc.jsonl" "$TMP/tx.jsonl" "${FAIL_FIRST:-0}" <<'PY'
 import json
 import sys
 from urllib.parse import parse_qs, urlparse
@@ -151,7 +151,7 @@ for t, _ in fps_writes:
 rows = [json.loads(l) for l in open(sys.argv[2], encoding="utf-8") if l.strip()]
 link = rows[-1]["link"]
 assert link["venc_fps"] == 90, link
-assert link["venc_failures"] == 0, link
+assert link["venc_failures"] == int(sys.argv[3]), link
 print("fps ladder: %s (dwell ok, caps coupled, restored to preferred)"
       % seq)
 PY

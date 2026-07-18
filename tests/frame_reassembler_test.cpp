@@ -5,6 +5,7 @@
 // when a frame is unrecoverable (no corrupt partial frames).
 #include "wblink/frame_reassembler.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -208,6 +209,26 @@ int main() {
         CHECK_EQ_U(got.size(), 1u);
         CHECK(!got.empty() && got[0] == blob);
         CHECK_EQ_U(ra.stats().malformed, 1u);
+    }
+
+    // --- malformed k cannot escape the GF(256) domain or bitmap bounds ------
+    {
+        FrameReassembler ra(rc);
+        std::array<uint8_t, kFecSourceSubheaderSize + 1> source{};
+        be16_write(source.data() + kFecSrcOffWindowLen, UINT16_MAX);
+        be16_write(source.data() + kFecSrcOffSymIndex, 0);
+        ra.push(90, 0, source.data(), source.size(), 1000, noop);
+
+        std::array<uint8_t, kFecRepairSubheaderSize + 1> repair{};
+        repair[kFecOffRepairIdx] = 1;  // UINT16_MAX + 1 used to wrap to 0
+        be16_write(repair.data() + kFecOffWindowLen, UINT16_MAX);
+        be32_write(repair.data() + kFecOffFrameLen, kVencFrameMetaSize);
+        ra.push(91, data_flags::kFecRepair, repair.data(), repair.size(),
+                1000, noop);
+
+        RepairCandidate cands[2];
+        CHECK_EQ_U(ra.repair_candidates(cands, 2), 0);
+        CHECK_EQ_U(ra.stats().malformed, 2);
     }
 
     // --- conflicting repair frame_len/coded-size cannot corrupt FEC output ---

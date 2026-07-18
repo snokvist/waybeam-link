@@ -13,6 +13,9 @@
 .idea/
 .vscode/
 
+# Python
+__pycache__/
+
 # Local scratch
 /scratch/
 /artifacts/

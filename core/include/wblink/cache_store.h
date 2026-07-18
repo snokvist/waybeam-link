@@ -21,6 +21,10 @@ namespace wblink {
 
 struct CacheStoreConfig {
     uint16_t self_originator = 0;  // §3.11 target_cache match
+    // Preferred target sender; 0 first-latches the initial originator.
+    // Session changes from that originator are followed, while a different
+    // sender cannot wipe the retained window for the same stream_id.
+    uint16_t target_originator = 0;
     std::vector<uint8_t> stream_ids;
     uint16_t blocks = 96;              // retention window per stream
     uint8_t reply_limit = 4;           // §14.3 per-request symbol clamp
@@ -44,8 +48,9 @@ class CacheStore {
 
     // Feed one heard DATA frame (already §3.1-decoded by the caller). Stores
     // a verbatim copy of the whole wire packet when the stream is tracked and
-    // the symbol subheader parses. A new session for the same
-    // (originator, stream) replaces the old one.
+    // the symbol subheader parses. The configured/first-latched originator
+    // owns each stream; a new session from that originator replaces the old
+    // one, while packets from other originators are ignored.
     void note_data(const DataView& v, const uint8_t* frame, size_t frame_len);
 
     enum class Verdict : uint8_t {

@@ -95,6 +95,34 @@ int main() {
         buf[28] = 0x02;
         CHECK(std::holds_alternative<DecodeError>(decode(buf, kCacheStatusSize)));
     }
+
+    // --- cache target is preferred/first-latched, never sender-flapped -----
+    {
+        CacheStoreConfig pinned_cfg;
+        pinned_cfg.self_originator = 33;
+        pinned_cfg.target_originator = 17;
+        pinned_cfg.stream_ids = {3};
+        CacheStore pinned(pinned_cfg);
+
+        feed(pinned, make_source(18, 1, 3, 900, 3, 0, 16));
+        CHECK(pinned.status().empty());
+        feed(pinned, make_source(17, 42, 3, 10, 3, 0, 16));
+        feed(pinned, make_source(18, 1, 3, 901, 3, 0, 16));
+        auto pinned_status = pinned.status();
+        CHECK_EQ_U(pinned_status.size(), 1);
+        CHECK_EQ_U(pinned_status[0].oldest_block, 10);
+        CHECK(pinned_status[0].key == (StreamKey{17, 42, 3}));
+
+        CacheStoreConfig latch_cfg = pinned_cfg;
+        latch_cfg.target_originator = 0;
+        CacheStore latched(latch_cfg);
+        feed(latched, make_source(18, 7, 3, 20, 3, 0, 16));
+        feed(latched, make_source(17, 42, 3, 30, 3, 0, 16));
+        auto latch_status = latched.status();
+        CHECK_EQ_U(latch_status.size(), 1);
+        CHECK_EQ_U(latch_status[0].oldest_block, 20);
+        CHECK(latch_status[0].key == (StreamKey{18, 7, 3}));
+    }
     {
         CacheRequestHeader h;
         h.prefix = CommonPrefix{9, 33, 77};

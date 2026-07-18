@@ -47,10 +47,10 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         const uint32_t flen = be32_read(payload + kFecOffFrameLen);
         const uint8_t ridx = payload[kFecOffRepairIdx];
         const size_t coded = payload_len - kFecRepairSubheaderSize;  // = s
-        if (k == 0 || flen < kVencFrameMetaSize ||
+        if (k == 0 || k > kFecMaxSymbols || flen < kVencFrameMetaSize ||
             flen > cfg_.max_frame_bytes || coded == 0 ||
             coded > kMaxDataPayload ||
-            static_cast<uint16_t>(k + ridx) >= kFecMaxSymbols) {
+            static_cast<uint32_t>(k) + ridx >= kFecMaxSymbols) {
             ++stats_.malformed;
             return;
         }
@@ -76,7 +76,8 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         }
         const uint16_t k = be16_read(payload + kFecSrcOffWindowLen);
         const uint16_t idx = be16_read(payload + kFecSrcOffSymIndex);
-        if (k == 0 || idx >= k || (b.k != 0 && b.k != k)) {
+        if (k == 0 || k > kFecMaxSymbols || idx >= k ||
+            (b.k != 0 && b.k != k)) {
             ++stats_.malformed;
             return;
         }
@@ -262,7 +263,7 @@ size_t FrameReassembler::repair_candidates(RepairCandidate* out,
         // symbols are candidates (§14.3 local-collection close applies to an
         // incomplete MERGED block; complete blocks were erased on emit).
         const size_t unique = b.sources.size() + b.repairs.size();
-        if (b.k == 0 || unique >= b.k) {
+        if (b.k == 0 || b.k > kFecMaxSymbols || unique >= b.k) {
             continue;
         }
         RepairCandidate& c = out[n++];

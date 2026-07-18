@@ -35,7 +35,8 @@ void CacheStore::note_data(const DataView& v, const uint8_t* frame,
         }
         k = be16_read(v.payload + kFecOffWindowLen);
         const uint8_t ridx = v.payload[kFecOffRepairIdx];
-        if (k == 0 || static_cast<uint16_t>(k + ridx) >= kFecMaxSymbols) {
+        if (k == 0 || k > kFecMaxSymbols ||
+            static_cast<uint32_t>(k) + ridx >= kFecMaxSymbols) {
             return;
         }
         idx = static_cast<uint16_t>(k + ridx);
@@ -53,7 +54,14 @@ void CacheStore::note_data(const DataView& v, const uint8_t* frame,
     const StreamKey key{v.hdr.prefix.originator, v.hdr.prefix.session_id,
                         v.hdr.stream_id};
     StreamState& st = streams_[v.hdr.stream_id];
-    if (!(st.key == key)) {  // new session (or first packet): reset the store
+    if (cfg_.target_originator != 0 &&
+        key.originator != cfg_.target_originator) {
+        return;  // operator-pinned cache target (§3.5/§14.3)
+    }
+    if (st.key.originator != 0 && st.key.originator != key.originator) {
+        return;  // first-latched sender owns this stream until restart
+    }
+    if (!(st.key == key)) {  // same sender's new session (or first packet)
         st.key = key;
         st.blocks.clear();
         st.order.clear();

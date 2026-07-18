@@ -734,6 +734,7 @@ struct AirBackend {
                 as.drop = c.rx_dropped;
                 as.filtered = c.rx_filtered;
                 as.kernel_drop = c.kernel_dropped;
+                as.bpf_filtered = c.bpf_filtered;
                 as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
                 // No CCX tx.report on monitor injection; wedge watchdog off.
                 as.tx_reports = 0;
@@ -1172,9 +1173,11 @@ struct TxCore {
             const bool at_floor = table_ != nullptr &&
                                   selector_.profile_id() ==
                                       table_->floor_profile;
-            if (const auto f = fps_ladder_->tick(now, at_floor)) {
-                venc_.set_fps(*f, now);
-            }
+            fps_ladder_->tick(now, at_floor);
+            // Re-offer the current target every tick. VencActuator dedupes a
+            // successfully applied value and retries after transient HTTP or
+            // shared-holdoff failures, so controller state cannot outrun venc.
+            venc_.set_fps(fps_ladder_->current_fps(), now);
         }
         // §4.1 Pass 40 high-cadence ARQ cutoff, driven by the same cadence
         // input the §9.6 caps use (ladder-commanded, else measured, else
@@ -2297,6 +2300,7 @@ int run_rx(const Loaded& l) {
         }
         CacheStoreConfig sc;
         sc.self_originator = l.cfg.node.originator;
+        sc.target_originator = l.cfg.node.preferred_originator;
         sc.stream_ids = cs.stream_ids;
         sc.blocks = cs.blocks;
         sc.reply_limit = cs.reply_limit;

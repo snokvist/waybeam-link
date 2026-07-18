@@ -96,6 +96,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, a.filtered);
         out += ",\"kernel_drop\":";
         append_u64(out, a.kernel_drop);
+        out += ",\"bpf_filtered\":";
+        append_u64(out, a.bpf_filtered);
         out += ",\"tsf_fallback\":";
         append_u64(out, a.tsf_fallback);
         out += ",\"tx_reports\":";

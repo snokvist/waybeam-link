@@ -182,7 +182,13 @@ int consume(const std::string& ring_name, uint32_t expected_frames,
         std::memcpy(&meta, blob.data(), sizeof(meta));
         const uint8_t* data = blob.data() + kVencFrameMetaSize;
         const size_t len = static_cast<size_t>(n) - kVencFrameMetaSize;
-        bad_meta += meta.codec != kFrameCodecH265 || meta.reserved != 0 ? 1u : 0u;
+        const bool gdr = (meta.flags & kFrameFlagGdr) != 0;
+        const bool bad_gdr = gdr ? meta.gdr_len == 0 || meta.gdr_pos >= meta.gdr_len
+                                 : meta.gdr_pos != 0 || meta.gdr_len != 0;
+        bad_meta += meta.codec != kFrameCodecH265 ||
+                            (meta.flags & ~kFrameFlagsKnown) != 0 || bad_gdr
+                        ? 1u
+                        : 0u;
         bad_annexb += annexb(data, len) ? 0u : 1u;
         pts_regress += frames > 0 && meta.pts < last_pts &&
                                last_pts - meta.pts < 0x80000000u

@@ -7,6 +7,7 @@
 #
 #   fake_venc.py <port> <log.jsonl>
 import json
+import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,16 +16,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 def main() -> None:
     port, log_path = int(sys.argv[1]), sys.argv[2]
     log = open(log_path, "a", buffering=1, encoding="utf-8")
+    fail_first = int(os.environ.get("FAIL_FIRST", "0"))
+    attempts = 0
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"
 
         def do_GET(self):  # noqa: N802 (http.server API)
+            nonlocal attempts
+            is_probe = self.path == "/ping"
+            if not is_probe:
+                attempts += 1
             log.write(json.dumps({"t": time.monotonic(),
                                   "path": self.path}) + "\n")
             try:
                 body = b'{"ok":true}'
-                self.send_response(200)
+                fail = not is_probe and attempts <= fail_first
+                self.send_response(503 if fail else 200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()

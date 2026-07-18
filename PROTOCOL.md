@@ -1734,6 +1734,10 @@ only for the requested block, only for symbols it asked for (a missing source,
 or a repair not marked held), and only up to the request's allowance; the
 wrapped packet must pass the full §3.1/§3.2 decode and match the latched
 stream key. CACHE_STATUS is accepted only from configured cache endpoints.
+For each stored `stream_id`, the cache accepts only `node.preferred_originator`
+when configured; otherwise the first sender latches until restart. A new
+session from that same originator replaces the retained window, but a different
+originator cannot flush it.
 
 Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 `local_quiet_ms 2`, `min_collect_ms 4`, `hard_close_ms 8`,
@@ -1863,14 +1867,15 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 
 ### 15.3 Streaming stats (newline-delimited JSON)
 Emitted at `stats.hz` to stdout and/or the stats binding. Fields map 1:1 to the
-§16.2 counters plus the state an operator needs to *see* a demote, a flap-freeze, a
+§16.2 counters (the one exception, the derived `bpf_filtered` estimate, is called
+out below) plus the state an operator needs to *see* a demote, a flap-freeze, a
 table mismatch, phantom diversity, a stalled adapter, or a failing return path:
 ```json
 { "t_ms": 172834, "node": 17, "session": 2748291,
   "adapters": [ { "name": "wlan0", "rx": 10234, "dup": 812,
     "rssi_best": -58, "rssi_mean": -63, "snr": 22, "noise": -85,
     "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
-    "drop": 0, "filtered": 0, "kernel_drop": 0, "tsf_fallback": 0,
+    "drop": 0, "filtered": 0, "kernel_drop": 0, "bpf_filtered": 0, "tsf_fallback": 0,
     "tx_reports": 531, "tx_report_fails": 0,
     "adapter_stalled": false, "tx_wedged": false } ],
   "streams": [ { "stream_id": 0, "type": "RTP",
@@ -2011,6 +2016,18 @@ which remains backend/synthetic queue loss.
 `filtered` is the backend's cumulative count of structurally rejected or
 self-originated receive frames. It is 0 where filtering occurs below an
 observable boundary.
+`bpf_filtered` is a **derived estimate** — the only §15.3 field that does *not*
+map 1:1 to a §16.2 counter — of how many frames the kernel-monitor backend's
+§3.0 BPF pre-filter rejected before the `recvmsg()` copy to userspace. It is
+computed as the interface's sysfs `rx_packets` delta since socket open minus all
+userspace-observed frames (`rx + filtered + drop + kernel_drop`), floored at 0.
+Because `rx_packets` is a per-netdev driver counter incremented *below* the
+packet-socket/BPF layer, this estimate also absorbs frames the driver delivered
+to *other* sockets on the same monitor interface (e.g. a concurrent `tcpdump`)
+and any driver-level accounting skew — it is a coarse health gauge of pre-filter
+efficacy, **not** an exact filter-drop count. It is 0 on the `RadioAir` and
+`UdpAir` backends, where the BPF pre-filter does not apply. The §3.0
+`dot11_parse()` userspace check remains the correctness gate regardless.
 
 A node with a §14.3 cache role enabled additionally emits the matching
 top-level object (absent when the role is off, like `stats.bind`):
@@ -2061,8 +2078,9 @@ codes preserved):
 |---|---|---|---|
 | 0 | 4 | `pts` | u32; encoder capture timestamp (SDK units), truncated |
 | 4 | 1 | `codec` | u8; `0x01` = H.265 (only value emitted) |
-| 5 | 1 | `flags` | u8; bit 0 = IDR frame; other bits reserved 0 |
-| 6 | 2 | `reserved` | u16; must be 0 |
+| 5 | 1 | `flags` | u8; bit 0 = IDR, bit 1 = GDR active, bit 2 = SVC-T enhancement layer; other bits reserved 0 |
+| 6 | 1 | `gdr_pos` | u8; zero-based GDR cycle position, 0 when inactive |
+| 7 | 1 | `gdr_len` | u8; GDR cycle length, 0 when inactive; when active `gdr_pos < gdr_len` |
 | 8 | N | frame | raw Annex-B (start codes + NAL units) |
 
 The whole `[VencFrameMeta][Annex-B]` blob is the FrameFramer source-blob (§5.1a);
