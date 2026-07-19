@@ -1244,6 +1244,23 @@ single-consumer, and producer-owned; no wire-format or layout change is made.
 
 **Amended:** §15.4 (egress object access mode and consumer write requirement).
 
+Implementation verification covered the real privilege split, not only the
+unit test. A root kernel-monitor RX created `/venc_frame_out` as `0666`; the
+already-running unprivileged radeon-vrx process attached directly and drained
+it without a helper or manual permission change. The restrictive-umask unit
+test, all 43 native sanitizer suites, and the SSC338Q cross-build also passed.
+
+The live visual check separated stress behavior from egress behavior. With the
+intentional 150‰ N=1 post-radio drop, a matched 10.4 s interval produced 89.93
+fps at the vehicle but only 89.10 fps at ground, with ten unrecoverable frames
+and visible jitter/artifacts; SHM itself had zero full/bad-slot deltas. After
+restarting only the ground aggregator without synthetic loss, a 15.3 s interval
+measured 89.97 fps at the vehicle and 89.94 fps at SHM egress, zero
+unrecoverable frames, zero SHM full/bad-slot drops, 18 FEC-only frames, and two
+ARQ-assisted frames. The operator reported perfect visual cadence. The small
+clean ARQ sample measured 3.78 ms P95 NACK-build→retransmit, below the 6 ms
+usefulness target; it is a clean-path confirmation, not a loaded-tail claim.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
