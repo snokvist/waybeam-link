@@ -500,6 +500,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cr.hard_close_ms = r.value("hard_close_ms", cr.hard_close_ms);
                 cr.request_timeout_ms =
                     r.value("request_timeout_ms", cr.request_timeout_ms);
+                cr.nack_grace_ms =
+                    r.value("nack_grace_ms", cr.nack_grace_ms);
                 cr.repair_fraction_permille = r.value(
                     "repair_fraction_permille", cr.repair_fraction_permille);
                 cr.absolute_symbol_limit = r.value("absolute_symbol_limit",
@@ -531,6 +533,10 @@ Result<Config> load_config_json(const std::string& json_text) {
                     if (cr.repair_fraction_permille > 1000) {
                         return Result<Config>::fail(
                             "cache.repair: repair_fraction_permille is 0..1000");
+                    }
+                    if (cr.nack_grace_ms > 6) {
+                        return Result<Config>::fail(
+                            "cache.repair: nack_grace_ms is 0..6");
                     }
                 }
             }

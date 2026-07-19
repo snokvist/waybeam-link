@@ -4,6 +4,7 @@
 #include "wblink/cache_controller.h"
 
 #include <algorithm>
+#include <climits>
 
 #include "wblink/endian.h"
 
@@ -19,7 +20,33 @@ inline bool bit_set(const std::array<uint8_t, 32>& bm, uint16_t i) {
 // Outstanding requests older than this are unanswerable (§6.3a one-frame
 // window is long gone) and are pruned regardless of request_timeout_ms.
 constexpr uint64_t kOutstandingPruneMs = 1000;
+constexpr size_t kTimingWindow = 512;
 }  // namespace
+
+void CacheController::TimingSeries::observe(uint64_t delta_us) {
+    const uint32_t sample = static_cast<uint32_t>(
+        std::min<uint64_t>(delta_us, UINT32_MAX));
+    ++samples_;
+    max_us_ = std::max(max_us_, sample);
+    recent_.push_back(sample);
+    if (recent_.size() > kTimingWindow) recent_.pop_front();
+}
+
+CacheTimingStats CacheController::TimingSeries::snapshot() const {
+    CacheTimingStats out{samples_, 0, max_us_};
+    if (recent_.empty()) return out;
+    std::vector<uint32_t> sorted(recent_.begin(), recent_.end());
+    std::sort(sorted.begin(), sorted.end());
+    const size_t rank = (sorted.size() * 95 + 99) / 100;
+    out.p95_us = sorted[rank - 1];
+    return out;
+}
+
+void CacheController::TimingSeries::reset() {
+    samples_ = 0;
+    max_us_ = 0;
+    recent_.clear();
+}
 
 void CacheController::on_status(const CacheStatus& st, uint64_t now_ms) {
     if (std::find(cfg_.caches.begin(), cfg_.caches.end(),
@@ -219,6 +246,8 @@ std::vector<CacheRequestOut> CacheController::tick(uint64_t now_ms,
         }
         CacheRequestOut req;
         req.cache_originator = best_orig;
+        req.request_id = hdr.request_id;
+        req.block_id = c.block_id;
         req.frame.resize(kCacheRequestFixedSize + 32 + 32);
         const size_t sz = encode_cache_request(
             hdr, c.missing_sources.data(),
@@ -249,8 +278,21 @@ std::vector<CacheRequestOut> CacheController::tick(uint64_t now_ms,
     return out;
 }
 
+void CacheController::note_request_sent(uint32_t request_id,
+                                        uint64_t now_us) {
+    const auto it = outstanding_.find(request_id);
+    if (it == outstanding_.end()) return;
+    Outstanding& o = it->second;
+    if (!o.sent_us) o.sent_us = now_us;
+    const auto bit = blocks_.find(o.block_id);
+    if (bit != blocks_.end() && !bit->second.first_request_us) {
+        bit->second.first_request_us = now_us;
+    }
+}
+
 CacheController::ReplyVerdict CacheController::on_reply(
-    uint16_t from_originator, uint32_t request_id, const DataView& wrapped) {
+    uint16_t from_originator, uint32_t request_id, const DataView& wrapped,
+    uint64_t now_us) {
     ++stats_.replies;
     const auto it = outstanding_.find(request_id);
     if (it == outstanding_.end()) {
@@ -298,12 +340,53 @@ CacheController::ReplyVerdict CacheController::on_reply(
     }
     ++o.accepted;
     ++stats_.symbols_accepted;
+    if (!o.first_reply_seen) {
+        o.first_reply_seen = true;
+        if (o.sent_us && now_us >= *o.sent_us) {
+            first_reply_timing_.observe(now_us - *o.sent_us);
+        }
+    }
     return ReplyVerdict::kAccept;
 }
 
-void CacheController::note_completed(uint32_t block_id) {
+void CacheController::note_completed(uint32_t block_id, uint64_t now_us,
+                                     bool before_nack) {
     ++stats_.blocks_repaired;
+    const auto bit = blocks_.find(block_id);
+    if (bit != blocks_.end() && bit->second.first_request_us &&
+        now_us >= *bit->second.first_request_us) {
+        completion_timing_.observe(now_us - *bit->second.first_request_us);
+        if (before_nack) ++stats_.blocks_repaired_before_nack;
+    }
     blocks_.erase(block_id);
+    for (auto it = outstanding_.begin(); it != outstanding_.end();) {
+        it = it->second.block_id == block_id ? outstanding_.erase(it)
+                                             : std::next(it);
+    }
+}
+
+CacheRepairStats CacheController::stats() const {
+    CacheRepairStats out = stats_;
+    out.request_to_first_reply = first_reply_timing_.snapshot();
+    out.request_to_completion = completion_timing_.snapshot();
+    return out;
+}
+
+void CacheController::reset_stats() {
+    stats_ = {};
+    first_reply_timing_.reset();
+    completion_timing_.reset();
+    // Do not let requests that crossed the reset boundary contribute partial
+    // intervals to the fresh measurement window.
+    for (auto& [id, o] : outstanding_) {
+        (void)id;
+        o.sent_us.reset();
+        o.first_reply_seen = true;
+    }
+    for (auto& [id, b] : blocks_) {
+        (void)id;
+        b.first_request_us.reset();
+    }
 }
 
 }  // namespace wblink

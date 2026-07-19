@@ -351,6 +351,43 @@ void RxEngine::complete_frame(uint8_t local_stream_id, uint32_t block_id,
     }
 }
 
+bool RxEngine::defer_first_nack(uint8_t local_stream_id, uint32_t block_id,
+                                uint64_t not_before_ms) {
+    for (auto& [key, s] : streams_) {
+        (void)key;
+        if (s.local_stream_id != local_stream_id) continue;
+        const auto bit = s.blocks.find(block_id);
+        if (bit == s.blocks.end()) return false;
+        if (bit->second.nack_attempted) return false;
+        BlockInfo& block = bit->second;
+        const uint64_t bounded = block.deadline_ms != 0
+                                     ? std::min(not_before_ms,
+                                                block.deadline_ms)
+                                     : not_before_ms;
+        block.first_nack_not_before_ms =
+            std::max(block.first_nack_not_before_ms, bounded);
+        for (auto& [seq, gap] : s.gaps) {
+            const auto owner = gap_block(s, seq);
+            if (owner && *owner == block_id && gap.nack_attempts == 0) {
+                gap.next_nack_ms = std::max(gap.next_nack_ms, bounded);
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+bool RxEngine::block_had_nack(uint8_t local_stream_id,
+                              uint32_t block_id) const {
+    for (const auto& [key, s] : streams_) {
+        (void)key;
+        if (s.local_stream_id != local_stream_id) continue;
+        const auto bit = s.blocks.find(block_id);
+        return bit != s.blocks.end() && bit->second.nack_attempted;
+    }
+    return false;
+}
+
 void RxEngine::note_adapter_seq(Stream& s, uint8_t adapter_id, uint32_t seq) {
     AdapterSeq& a = s.adapter_seq[adapter_id];
     if (!a.have) {
@@ -495,7 +532,13 @@ void RxEngine::evaluate_gaps(Stream& s, uint64_t now_ms) {
                 }
                 if (arq && (deadline == 0 || now_ms < deadline)) {
                     g.nack_eligible = true;
-                    g.next_nack_ms = now_ms;  // first NACK immediate
+                    g.next_nack_ms = now_ms;
+                    if (const auto bit = s.blocks.find(probe_block);
+                        bit != s.blocks.end()) {
+                        g.next_nack_ms = std::max(
+                            g.next_nack_ms,
+                            bit->second.first_nack_not_before_ms);
+                    }
                 }
             }
         }
@@ -627,6 +670,12 @@ std::vector<NackRequest> RxEngine::build_nacks(uint64_t now_ms) {
                 static_cast<uint8_t>(req.bitmap[bit / 8] | (1u << (bit % 8)));
             Gap& g = s.gaps[m];
             ++g.nack_attempts;
+            if (const auto owner = gap_block(s, m); owner) {
+                if (const auto block_it = s.blocks.find(*owner);
+                    block_it != s.blocks.end()) {
+                    block_it->second.nack_attempted = true;
+                }
+            }
             g.next_nack_ms =
                 now_ms + policy_.renack_backoff_ms * g.nack_attempts;
             // §17 gate-3 anchors. Build time, not air time: the §7.2 pacer

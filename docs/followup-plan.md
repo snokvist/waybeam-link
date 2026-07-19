@@ -19,7 +19,7 @@ high-cadence ARQ cutoff — both Pass 40), then R-A, then reassess.
 | R-E | venc volatile writes (`persist=false`) | OPEN — venc-repo HTTP contract change; wanted before long flight soaks |
 | R-F | Decoder-side deadline telemetry | **CLOSED (operator, 2026-07-16):** not load-bearing — late frames are dropped before the SHM boundary and already counted; reopen only on unexplained consumer-side latency in rig/flight data |
 | R-G | fps ladder `max` (above-preferred) | **CLOSED with R-F** — `max` stays reserved |
-| R-H | RF cache transport ordering | DEFERRED — re-argue Pass 36 rule 8 only when an RF cache binding is proposed |
+| R-H | RF cache transport ordering | DEFERRED — Pass 50 gives UDP/IP a measured 3 ms first-NACK lead; re-derive grace/priority when an RF cache binding is proposed |
 | — | §10 ground-uplink power scope | **RESOLVED (Pass 43):** `power_map` on an rx-node is rejected at config load; real return-power control remains gate-4-dependent |
 | — | JSCC production flip | OPEN — radio-backend shadow soak during the gate campaigns; flip P-frames first; confirm discard visually before flight |
 | — | UDP controller soak | **DONE:** `tools/controller_soak_udp.sh` — all controllers at spec seeds through clean→marginal→burst→fade→interference→outage→recovery; clean-shutdown/ASan, schema, write-budget, delivery, and full-recovery assertions. `SOAK_MULT` stretches phases for long runs |
@@ -28,7 +28,7 @@ high-cadence ARQ cutoff — both Pass 40), then R-A, then reassess.
 | — | Stationary receiver failover | **DONE (Pass 48):** `2308` sustained RX + return while `229b` was down; full monitor reinitialization is required for CU failback, after which the running process clears `adapter_stalled` and reuses it without restart |
 | — | `229b` return-TX diagnosis | **RESOLVED + observable (Pass 48/49):** AF_PACKET `send()` succeeds but netdev TX counters do not advance and no RF is emitted; keep RX-only. Kernel-monitor now uses netdev TX progress for `tx_wedged` (real A/B: `229b=true`, `2308=false`) |
 | — | Independent ARQ cache | **UDP/IP VERIFIED (Pass 48):** real monitor cache + 150‰ N=1 aggregator stress reduced unrecoverable frames 534→119 (−77.7%) with zero rejected replies. Resend load stayed ~0.92/frame because cache + ARQ are parallel |
-| — | Cache timing/ordering evidence | **NEXT before RF cache:** add request→first-reply/completion timing; evaluate a fresh-cache-only bounded pre-NACK grace against the existing parallel policy. Do not carry the zero-RF-airtime v1 rationale into an RF binding |
+| — | Cache timing/ordering evidence | **DONE (Pass 50):** real P95 first reply/completion 2.845/2.910 ms; a targeted 3 ms first-NACK grace cut NACK packets 22.5% and vehicle resends 21.3% in clean 1,800-frame A/B runs. Default 3 ms, range 0..6, exact block + first NACK only |
 | — | Remaining rig verification | After the stationary sequence, run radio/kernel-monitor coverage for the controller/cache harnesses (`cache_repair` / `actuation` / `jscc_enforce` / `fps_ladder` / `cache_offload`) and the controller soak |
 | — | venc PR #181 housekeeping | OPEN — VERSION/HISTORY bump (merge-order dependent vs #178/#179), Star6E IDR-failure return code, old-SDK soft-enforcement log line |
 

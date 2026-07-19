@@ -610,6 +610,7 @@ int main() {
             CHECK_EQ_U(c.cache.repair.repair_fraction_permille, 200);
             CHECK_EQ_U(c.cache.repair.max_cache_attempts, 2);
             CHECK_EQ_U(c.cache.repair.health_floor_permille, 800);
+            CHECK_EQ_U(c.cache.repair.nack_grace_ms, 3);
             CHECK(c.cache.store.enabled);
             CHECK_EQ_U(c.cache.store.blocks, 96);
             CHECK_EQ_U(c.cache.store.max_requests_per_s, 400);
@@ -630,6 +631,13 @@ int main() {
       "cache":{"repair":{"enabled":true,"listen":"127.0.0.1:5802",
         "caches":[{"originator":33,"endpoint":"127.0.0.1:5801"}]}}})",
         "frame-shm");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
+                  "bind":{"kind":"frame-shm","name":"venc_out"}}],
+      "cache":{"repair":{"enabled":true,"stream_id":0,
+        "listen":"127.0.0.1:5802","nack_grace_ms":7,
+        "caches":[{"originator":33,"endpoint":"127.0.0.1:5801"}]}}})",
+        "nack_grace_ms");
     // store.enabled requires listen + stream_ids.
     expect_error(R"({"node":{"originator":9,"role":"rx"},
       "cache":{"store":{"enabled":true,"listen":"127.0.0.1:5801"}}})",

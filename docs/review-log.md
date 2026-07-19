@@ -1178,6 +1178,51 @@ and stayed false. `tx_reports` remained zero on both monitor adapters.
 Evidence:
 `artifacts/pr26-monitor-diversity-20260719/stationary-txwedge-fix-final/`.
 
+## Pass 50 — cache timing and bounded first-NACK lead (2026-07-19)
+
+The aggregator now measures successful request submission→first accepted
+reply and first request→cache-attributed block completion with its local
+monotonic microsecond clock. Both publish cumulative sample/max values and a
+trailing-512 nearest-rank P95. Completion also retires all requests for the
+block, so later replies are rejected rather than inflating acceptance counts.
+
+Real monitor-RF collection with the independent `229b` cache and localhost
+UDP/IP control path measured 300 first replies and 195 completions in the
+clean decoder window: P95 was 2.845 ms and 2.910 ms respectively (max 4.577
+ms and 3.414 ms). The consumer decoded 900/900 frames with 11 IDRs, clean
+metadata/Annex-B/PTS, and EOS. A longer timing-only sample agreed: first-reply
+P95 2.828 ms across 1,404 samples and completion P95 2.792 ms across 878.
+
+That evidence sets a 3 ms default (`nack_grace_ms`, validated 0..6; zero
+restores parallel ordering). Cache replies and new requests are serviced
+before NACK construction. Only a successfully sent request to an eligible
+fresh cache can defer the exact block's first NACK; the hold is deadline-
+clamped and cannot affect another stream/block or any re-NACK.
+
+The matched 150‰ N=1 real-RF A/B used a warm-up drain and two 1,800-frame
+decoded windows:
+
+| metric | grace 0 ms | grace 3 ms | change |
+|---|---:|---:|---:|
+| decoder result | 1,800 clean | 1,800 clean | pass/pass |
+| NACK packets | 623 | 483 | **−22.5%** |
+| vehicle resends | 1,779 | 1,400 | **−21.3%** |
+| cache completions before any block NACK | 22 | 146 | **+124** |
+| deadline drops | 0 | 0 | unchanged |
+| unrecoverable/superseded | 22 | 37 | not paired |
+
+The last row is deliberately not used as an A/B verdict: changing resend
+traffic changes which subsequent packets consume the deterministic synthetic
+drop RNG, so the runs do not lose identical source symbols. Clean decode and
+zero deadline drops establish that the bounded lead remains functional; the
+NACK/resend counters directly establish the RF-work reduction.
+
+Evidence:
+
+- `artifacts/pr26-monitor-diversity-20260719/stationary-cache-timing-realrf-decode/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-cache-grace0-realrf/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-cache-grace3-realrf/`
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
@@ -1244,11 +1289,11 @@ Pending operator rulings, with recommendations (2026-07-16 register):
       explain. The §9.11 emergency-reduction deferral stands.
 - [x] **R-G — CLOSED with R-F** (needed R-F's evidence). `max` stays a
       reserved config field; §9.11 v1 semantics unchanged.
-- [ ] **R-H: RF cache transport ordering — defer until proposed.** Pass 36
-      rule 8 (cache parallel to vehicle ARQ) is justified by IP repair
-      costing zero RF airtime; an RF cache reply spends shared airtime, so
-      V3.1's serial order must be re-argued THEN. Formats are already
-      transport-agnostic; nothing to do now.
+- [ ] **R-H: RF cache transport ordering — defer until proposed.** Pass 50
+      gives the UDP/IP cache a measured 3 ms first-NACK lead. An RF cache
+      reply spends shared airtime, so the grace and priority lane must be
+      re-derived for that binding. Formats are transport-agnostic; do not
+      assume the UDP/IP seed transfers unchanged.
 - [x] **§10 ground-uplink power scope — RESOLVED (Pass 43): rejected at
       config load.** (2026-07-11 desk §4.6 run): the
       §10 power curve is applied only on the tx-node selector commit, so the

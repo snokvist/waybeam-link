@@ -123,9 +123,10 @@ rejected by §14 regardless.)
   soak passed; `229b` failover/failback works when the CU interface receives a
   full monitor reinitialization; `229b` return TX is a driver/device silent-TX
   failure and remains RX-only.
-- **UDP/IP cache verified (Pass 48):** a real independent monitor cache reduced
-  150‰ N=1-stress unrecoverable frames from 534 to 119. Before any monitor-radio
-  cache proposal, instrument cache RTT and revisit cache-vs-vehicle-ARQ
-  ordering with shared RF airtime included.
+- **UDP/IP cache timing/order verified (Pass 50):** first-reply/completion P95
+  was 2.845/2.910 ms. A targeted 3 ms first-NACK lead cut NACK packets 22.5%
+  and vehicle resends 21.3% in clean matched decoder runs. Any monitor-radio
+  cache proposal must re-derive this seed because replies then share RF
+  airtime.
 - Hardening follow-ups from PR-#15 review: radiotap FCS-flag check, own-TX
   loopback suppression (kernel ≥4.20 / BPF), moved-from asserts.

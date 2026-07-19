@@ -5,14 +5,17 @@
 // applies the §14.3 local-collection close rules, and issues bounded §3.11
 // CACHE_REQUESTs to eligible caches. Replies are validated against the
 // outstanding request (§13) before the caller merges the wrapped symbol into
-// the reassembler. Runs in parallel with the §6.4 NACK path (§14.3 rule 8).
+// the reassembler. The caller gives a successfully sent request a narrowly
+// bounded lead over that block's first §6.4 NACK (§14.3 rule 8).
 // Pure logic: time injected, transport lives in io.
 #pragma once
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <map>
+#include <optional>
 #include <vector>
 
 #include "wblink/frame_reassembler.h"
@@ -39,6 +42,12 @@ struct CacheControllerConfig {
     uint32_t status_timeout_ms = 1500;
 };
 
+struct CacheTimingStats {
+    uint64_t samples = 0;
+    uint32_t p95_us = 0;
+    uint32_t max_us = 0;
+};
+
 struct CacheRepairStats {
     uint64_t requests = 0;
     uint64_t replies = 0;
@@ -48,12 +57,18 @@ struct CacheRepairStats {
     uint64_t blocks_repaired = 0;  // via note_completed()
     uint64_t blocks_futile = 0;    // §14.3 rule 4
     uint64_t requests_suppressed = 0;  // no eligible cache at attempt time
+    uint64_t nack_graces_armed = 0;
+    uint64_t blocks_repaired_before_nack = 0;
     uint32_t caches_fresh = 0;         // gauge
+    CacheTimingStats request_to_first_reply;
+    CacheTimingStats request_to_completion;
 };
 
 // One encoded request ready to send; io resolves originator -> endpoint.
 struct CacheRequestOut {
     uint16_t cache_originator = 0;
+    uint32_t request_id = 0;
+    uint32_t block_id = 0;
     std::vector<uint8_t> frame;
 };
 
@@ -69,6 +84,11 @@ class CacheController {
     std::vector<CacheRequestOut> tick(uint64_t now_ms, const StreamKey& target,
                                       const RepairCandidate* cands, size_t n);
 
+    // Stamp only successfully submitted requests. This keeps local transport
+    // failures out of the §15.3 latency distribution.
+    void note_request_sent(uint32_t request_id, uint64_t now_us);
+    void note_nack_grace_armed() { ++stats_.nack_graces_armed; }
+
     enum class ReplyVerdict : uint8_t {
         kAccept,
         kUnknownRequest,  // request_id not outstanding (incl. late/expired)
@@ -81,14 +101,14 @@ class CacheController {
     // Validate one wrapped DATA symbol against the outstanding request. On
     // kAccept the caller pushes it into the reassembler.
     ReplyVerdict on_reply(uint16_t from_originator, uint32_t request_id,
-                          const DataView& wrapped);
+                          const DataView& wrapped, uint64_t now_us);
 
     // Attribution: the caller observed the block emit during a cache merge.
-    void note_completed(uint32_t block_id);
+    void note_completed(uint32_t block_id, uint64_t now_us,
+                        bool before_nack);
 
-    CacheRepairStats& stats() { return stats_; }
-    const CacheRepairStats& stats() const { return stats_; }
-    void reset_stats() { stats_ = {}; }
+    CacheRepairStats stats() const;
+    void reset_stats();
 
   private:
     struct Registry {
@@ -99,6 +119,8 @@ class CacheController {
         uint16_t cache_originator = 0;
         uint32_t block_id = 0;
         uint64_t issued_ms = 0;
+        std::optional<uint64_t> sent_us;
+        bool first_reply_seen = false;
         uint8_t allowance = 0;
         uint8_t accepted = 0;
         uint16_t k = 0;
@@ -112,7 +134,20 @@ class CacheController {
         uint8_t attempts = 0;
         uint8_t budget_used = 0;  // requested allowances (§14.3 rule 3)
         uint64_t last_request_ms = 0;
+        std::optional<uint64_t> first_request_us;
         std::vector<uint16_t> tried;  // caches already addressed
+    };
+
+    class TimingSeries {
+      public:
+        void observe(uint64_t delta_us);
+        CacheTimingStats snapshot() const;
+        void reset();
+
+      private:
+        uint64_t samples_ = 0;
+        uint32_t max_us_ = 0;
+        std::deque<uint32_t> recent_;
     };
 
     bool eligible(const Registry& r, const StreamKey& target,
@@ -126,6 +161,8 @@ class CacheController {
     std::map<uint16_t, std::vector<Registry>> registry_;
     std::map<uint32_t, BlockState> blocks_;
     std::map<uint32_t, Outstanding> outstanding_;
+    TimingSeries first_reply_timing_;
+    TimingSeries completion_timing_;
     uint32_t next_request_id_ = 1;
 };
 

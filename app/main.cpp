@@ -1654,6 +1654,15 @@ struct RxCore {
         engine_.complete_frame(stream_id, block_id, now, deliver);
     }
 
+    bool defer_first_nack(uint8_t stream_id, uint32_t block_id,
+                          uint64_t not_before_ms) {
+        return engine_.defer_first_nack(stream_id, block_id, not_before_ms);
+    }
+
+    bool block_had_nack(uint8_t stream_id, uint32_t block_id) const {
+        return engine_.block_had_nack(stream_id, block_id);
+    }
+
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
               const Inject& inject_report, const Inject& inject_nack,
               bool emit_nacks = true) {
@@ -2618,6 +2627,91 @@ int run_rx(const Loaded& l) {
         }
         urgent_ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
     };
+    // Service cache replies and issue fresh-cache requests before RxCore
+    // builds NACKs in this iteration. This ordering lets an accepted reply
+    // complete the block first, while a successfully sent request can arm the
+    // exact block's bounded first-NACK grace (§14.3 rule 8).
+    const auto service_cache_repair = [&](uint64_t service_ms) {
+        if (!cache_ctl) return;
+        uint8_t cbuf[kCacheReplyFixedSize + kDataHeaderSize +
+                     kMaxDataPayload];
+        CacheEndpoint from;
+        long rn;
+        while ((rn = cache_repair_sock->recv_one(cbuf, sizeof(cbuf),
+                                                 &from)) > 0) {
+            const Decoded cdec = decode(cbuf, static_cast<size_t>(rn));
+            if (const CacheStatus* st = std::get_if<CacheStatus>(&cdec)) {
+                const auto it = cache_endpoints.find(st->prefix.originator);
+                if (it != cache_endpoints.end() && it->second == from) {
+                    cache_ctl->on_status(*st, service_ms);
+                }
+                continue;
+            }
+            const CacheReplyView* rv = std::get_if<CacheReplyView>(&cdec);
+            if (rv == nullptr) continue;
+            const auto it = cache_endpoints.find(rv->prefix.originator);
+            if (it == cache_endpoints.end() || !(it->second == from)) {
+                continue;
+            }
+            const Decoded wdec = decode(rv->wrapped, rv->wrapped_len);
+            const DataView* wv = std::get_if<DataView>(&wdec);
+            if (wv == nullptr ||
+                wv->hdr.stream_id != l.cfg.cache.repair.stream_id) {
+                continue;
+            }
+            bool latched = false;
+            for (const StreamKey& k : rx.stream_keys()) {
+                latched |= k.stream_id == wv->hdr.stream_id &&
+                           k.originator == wv->hdr.prefix.originator &&
+                           k.session_id == wv->hdr.prefix.session_id;
+            }
+            if (!latched) continue;
+            const uint64_t reply_us = now_us();
+            if (cache_ctl->on_reply(rv->prefix.originator, rv->request_id,
+                                    *wv, reply_us) !=
+                CacheController::ReplyVerdict::kAccept) {
+                continue;
+            }
+            const bool emitted = cache_reasm->push(
+                wv->hdr.block_id, wv->hdr.data_flags, wv->payload,
+                wv->payload_len, service_ms,
+                [&](const uint8_t* f, size_t len) {
+                    cache_ring->write_frame(f, len);
+                },
+                /*air_path=*/false);
+            if (emitted) {
+                const bool before_nack = !rx.block_had_nack(
+                    l.cfg.cache.repair.stream_id, wv->hdr.block_id);
+                cache_ctl->note_completed(wv->hdr.block_id, reply_us,
+                                          before_nack);
+                rx.complete_frame(l.cfg.cache.repair.stream_id,
+                                  wv->hdr.block_id, service_ms, deliver);
+            }
+        }
+        for (const StreamKey& k : rx.stream_keys()) {
+            if (k.stream_id != l.cfg.cache.repair.stream_id) continue;
+            RepairCandidate cands[16];
+            const size_t cn = cache_reasm->repair_candidates(cands, 16);
+            for (CacheRequestOut& r :
+                 cache_ctl->tick(service_ms, k, cands, cn)) {
+                const auto it = cache_endpoints.find(r.cache_originator);
+                if (it == cache_endpoints.end() ||
+                    !cache_repair_sock->send_to(
+                        it->second, r.frame.data(), r.frame.size())) {
+                    continue;
+                }
+                cache_ctl->note_request_sent(r.request_id, now_us());
+                const uint32_t grace_ms =
+                    l.cfg.cache.repair.nack_grace_ms;
+                if (grace_ms != 0 && rx.defer_first_nack(
+                        l.cfg.cache.repair.stream_id, r.block_id,
+                        service_ms + grace_ms)) {
+                    cache_ctl->note_nack_grace_armed();
+                }
+            }
+            break;
+        }
+    };
     StatsEmitter emitter(true, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
     uint64_t next_stats = t0;
@@ -2804,6 +2898,7 @@ int run_rx(const Loaded& l) {
             ret_at_us.has_value() ||
             (repair_tail_fallback_us &&
              now_us_it >= *repair_tail_fallback_us);
+        service_cache_repair(now);
         rx.tick(now, deliver, inject_report, inject_nack,
                 !qg.enabled() || repair_tail_closed);
         air.value->heartbeat(l.cfg.node.originator, session, now);
@@ -2873,85 +2968,6 @@ int run_rx(const Loaded& l) {
                 }
             }
         }
-        // §14.3 aggregator: merge replies, register status, issue requests
-        // for blocks whose local collection closed below k.
-        if (cache_ctl) {
-            uint8_t cbuf[kCacheReplyFixedSize + kDataHeaderSize +
-                         kMaxDataPayload];
-            CacheEndpoint from;
-            long rn;
-            while ((rn = cache_repair_sock->recv_one(cbuf, sizeof(cbuf),
-                                                     &from)) > 0) {
-                const Decoded cdec = decode(cbuf, static_cast<size_t>(rn));
-                if (const CacheStatus* st = std::get_if<CacheStatus>(&cdec)) {
-                    // §13: status only from the configured cache endpoint.
-                    const auto it = cache_endpoints.find(st->prefix.originator);
-                    if (it != cache_endpoints.end() && it->second == from) {
-                        cache_ctl->on_status(*st, now);
-                    }
-                    continue;
-                }
-                const CacheReplyView* rv = std::get_if<CacheReplyView>(&cdec);
-                if (rv == nullptr) {
-                    continue;
-                }
-                const auto it = cache_endpoints.find(rv->prefix.originator);
-                if (it == cache_endpoints.end() || !(it->second == from)) {
-                    continue;  // §13: replies only from configured endpoints
-                }
-                // §3.11: the wrapped bytes revalidate as an ordinary DATA
-                // packet of the latched repair stream.
-                const Decoded wdec = decode(rv->wrapped, rv->wrapped_len);
-                const DataView* wv = std::get_if<DataView>(&wdec);
-                if (wv == nullptr ||
-                    wv->hdr.stream_id != l.cfg.cache.repair.stream_id) {
-                    continue;
-                }
-                bool latched = false;
-                for (const StreamKey& k : rx.stream_keys()) {
-                    latched |= k.stream_id == wv->hdr.stream_id &&
-                               k.originator == wv->hdr.prefix.originator &&
-                               k.session_id == wv->hdr.prefix.session_id;
-                }
-                if (!latched) {
-                    continue;
-                }
-                if (cache_ctl->on_reply(rv->prefix.originator, rv->request_id,
-                                        *wv) !=
-                    CacheController::ReplyVerdict::kAccept) {
-                    continue;
-                }
-                // §14.3: cache symbols feed the reassembler directly — never
-                // the §6.1/§6.2 per-adapter state.
-                const bool emitted = cache_reasm->push(
-                    wv->hdr.block_id, wv->hdr.data_flags, wv->payload,
-                    wv->payload_len, now,
-                    [&](const uint8_t* f, size_t len) {
-                        cache_ring->write_frame(f, len);
-                    },
-                    /*air_path=*/false);
-                if (emitted) {
-                    cache_ctl->note_completed(wv->hdr.block_id);
-                    rx.complete_frame(l.cfg.cache.repair.stream_id,
-                                      wv->hdr.block_id, now, deliver);
-                }
-            }
-            for (const StreamKey& k : rx.stream_keys()) {
-                if (k.stream_id != l.cfg.cache.repair.stream_id) {
-                    continue;
-                }
-                RepairCandidate cands[16];
-                const size_t cn = cache_reasm->repair_candidates(cands, 16);
-                for (CacheRequestOut& r : cache_ctl->tick(now, k, cands, cn)) {
-                    const auto it = cache_endpoints.find(r.cache_originator);
-                    if (it != cache_endpoints.end()) {
-                        cache_repair_sock->send_to(it->second, r.frame.data(),
-                                                   r.frame.size());
-                    }
-                }
-                break;
-            }
-        }
         std::vector<std::pair<uint8_t, JsccRepairFeedbackState>> feedback;
         feedback.reserve(shm_outs.size());
         for (const ShmOut& so : shm_outs) {
@@ -3015,7 +3031,7 @@ int run_rx(const Loaded& l) {
             // §15.3: cache blocks are emitted only when the role is enabled.
             CacheRepairStatsOut crs;
             if (cache_ctl) {
-                const CacheRepairStats& s = cache_ctl->stats();
+                const CacheRepairStats s = cache_ctl->stats();
                 crs.requests = s.requests;
                 crs.replies = s.replies;
                 crs.symbols_accepted = s.symbols_accepted;
@@ -3025,6 +3041,17 @@ int run_rx(const Loaded& l) {
                 crs.blocks_futile = s.blocks_futile;
                 crs.requests_suppressed = s.requests_suppressed;
                 crs.caches_fresh = s.caches_fresh;
+                crs.nack_graces_armed = s.nack_graces_armed;
+                crs.blocks_repaired_before_nack =
+                    s.blocks_repaired_before_nack;
+                crs.request_to_first_reply = {
+                    s.request_to_first_reply.samples,
+                    s.request_to_first_reply.p95_us,
+                    s.request_to_first_reply.max_us};
+                crs.request_to_completion = {
+                    s.request_to_completion.samples,
+                    s.request_to_completion.p95_us,
+                    s.request_to_completion.max_us};
             }
             CacheStoreStatsOut css;
             if (cache_store) {

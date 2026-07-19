@@ -298,6 +298,7 @@ struct CacheRepairCfg {
     uint32_t min_collect_ms = 4;
     uint32_t hard_close_ms = 8;
     uint32_t request_timeout_ms = 4;
+    uint32_t nack_grace_ms = 3;
     uint16_t repair_fraction_permille = 200;
     uint8_t absolute_symbol_limit = 8;
     uint8_t max_cache_attempts = 2;

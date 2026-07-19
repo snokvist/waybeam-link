@@ -287,6 +287,10 @@ int main() {
         cr.blocks_futile = 1;
         cr.requests_suppressed = 2;
         cr.caches_fresh = 2;
+        cr.nack_graces_armed = 8;
+        cr.blocks_repaired_before_nack = 6;
+        cr.request_to_first_reply = {10, 1200, 2400};
+        cr.request_to_completion = {7, 2300, 4100};
         s.cache_repair = cr;
         CacheStoreStatsOut cs;
         cs.requests_received = 12;
@@ -304,7 +308,12 @@ int main() {
             "\"symbols_accepted\":18,\"symbols_rejected\":0,"
             "\"blocks_closed_deficit\":9,\"blocks_repaired\":7,"
             "\"blocks_futile\":1,\"requests_suppressed\":2,"
-            "\"caches_fresh\":2}";
+            "\"caches_fresh\":2,\"nack_graces_armed\":8,"
+            "\"blocks_repaired_before_nack\":6,"
+            "\"request_to_first_reply\":{\"samples\":10,"
+            "\"p95_us\":1200,\"max_us\":2400},"
+            "\"request_to_completion\":{\"samples\":7,"
+            "\"p95_us\":2300,\"max_us\":4100}}";
         const char* want_store =
             "\"cache_store\":{\"requests_received\":12,"
             "\"requests_answered\":11,\"requests_rejected\":1,"

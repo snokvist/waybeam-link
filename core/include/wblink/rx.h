@@ -167,6 +167,12 @@ class RxEngine {
     void complete_frame(uint8_t local_stream_id, uint32_t block_id,
                         uint64_t now_ms, const Deliver& deliver);
 
+    // §14.3 cache ordering: delay only the first NACK for one exact block.
+    // Returns false when the stream/block is not live or a NACK already fired.
+    bool defer_first_nack(uint8_t local_stream_id, uint32_t block_id,
+                          uint64_t not_before_ms);
+    bool block_had_nack(uint8_t local_stream_id, uint32_t block_id) const;
+
     // Timers: dwell-ceiling gaps, deadline expiry, stall watchdog, idle
     // teardown. Call at a few-ms cadence.
     void tick(uint64_t now_ms, const Deliver& deliver);
@@ -196,6 +202,8 @@ class RxEngine {
         uint64_t deadline_ms = 0;
         bool arq = false;
         bool iframe_class = false;
+        uint64_t first_nack_not_before_ms = 0;
+        bool nack_attempted = false;
     };
     struct Gap {
         uint64_t first_missing_ms = 0;

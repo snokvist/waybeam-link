@@ -316,6 +316,14 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, c.requests_suppressed);
         out += ",\"caches_fresh\":";
         append_u64(out, c.caches_fresh);
+        out += ",\"nack_graces_armed\":";
+        append_u64(out, c.nack_graces_armed);
+        out += ",\"blocks_repaired_before_nack\":";
+        append_u64(out, c.blocks_repaired_before_nack);
+        out += ",\"request_to_first_reply\":";
+        append_timing(out, c.request_to_first_reply);
+        out += ",\"request_to_completion\":";
+        append_timing(out, c.request_to_completion);
         out += '}';
     }
     if (snap.cache_store) {

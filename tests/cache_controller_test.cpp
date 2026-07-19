@@ -209,31 +209,50 @@ int main() {
         CHECK_EQ_U(reqs.size(), 1);
         const Decoded dec = decode(reqs[0].frame.data(), reqs[0].frame.size());
         const uint32_t rid = std::get<CacheRequestView>(dec).hdr.request_id;
+        CHECK_EQ_U(reqs[0].request_id, rid);
+        cc.note_request_sent(rid, 110000);
 
         const auto ok = wrapped_source(10, 10, 2);
         const auto not_missing = wrapped_source(10, 10, 1);
         const auto wrong_block = wrapped_source(11, 10, 2);
 
-        CHECK(cc.on_reply(34, rid, view_of(ok)) ==
+        CHECK(cc.on_reply(34, rid, view_of(ok), 110100) ==
               CacheController::ReplyVerdict::kWrongCache);
-        CHECK(cc.on_reply(33, rid + 99, view_of(ok)) ==
+        CHECK(cc.on_reply(33, rid + 99, view_of(ok), 110200) ==
               CacheController::ReplyVerdict::kUnknownRequest);
-        CHECK(cc.on_reply(33, rid, view_of(wrong_block)) ==
+        CHECK(cc.on_reply(33, rid, view_of(wrong_block), 110300) ==
               CacheController::ReplyVerdict::kWrongBlock);
-        CHECK(cc.on_reply(33, rid, view_of(not_missing)) ==
+        CHECK(cc.on_reply(33, rid, view_of(not_missing), 110400) ==
               CacheController::ReplyVerdict::kNotRequested);
-        CHECK(cc.on_reply(33, rid, view_of(ok)) ==
+        CHECK(cc.on_reply(33, rid, view_of(ok), 111000) ==
               CacheController::ReplyVerdict::kAccept);
         const auto ok2 = wrapped_source(10, 10, 3);
-        CHECK(cc.on_reply(33, rid, view_of(ok2)) ==
+        CHECK(cc.on_reply(33, rid, view_of(ok2), 111200) ==
               CacheController::ReplyVerdict::kAccept);
         // Allowance (deficit 2) exhausted.
-        CHECK(cc.on_reply(33, rid, view_of(ok)) ==
+        CHECK(cc.on_reply(33, rid, view_of(ok), 111300) ==
               CacheController::ReplyVerdict::kOverAllowance);
-        cc.note_completed(10);
+        cc.note_nack_grace_armed();
+        cc.note_completed(10, 112500, true);
         CHECK_EQ_U(cc.stats().blocks_repaired, 1);
         CHECK_EQ_U(cc.stats().symbols_accepted, 2);
         CHECK_EQ_U(cc.stats().symbols_rejected, 5);
+        CHECK_EQ_U(cc.stats().nack_graces_armed, 1);
+        CHECK_EQ_U(cc.stats().blocks_repaired_before_nack, 1);
+        CHECK_EQ_U(cc.stats().request_to_first_reply.samples, 1);
+        CHECK_EQ_U(cc.stats().request_to_first_reply.p95_us, 1000);
+        CHECK_EQ_U(cc.stats().request_to_first_reply.max_us, 1000);
+        CHECK_EQ_U(cc.stats().request_to_completion.samples, 1);
+        CHECK_EQ_U(cc.stats().request_to_completion.p95_us, 2500);
+        CHECK_EQ_U(cc.stats().request_to_completion.max_us, 2500);
+        // Completion retires every request for the block; later replies are
+        // unknown instead of inflating accepted-symbol telemetry.
+        CHECK(cc.on_reply(33, rid, view_of(ok), 113000) ==
+              CacheController::ReplyVerdict::kUnknownRequest);
+
+        cc.reset_stats();
+        CHECK_EQ_U(cc.stats().request_to_first_reply.samples, 0);
+        CHECK_EQ_U(cc.stats().request_to_completion.samples, 0);
     }
 
     // --- FrameReassembler::repair_candidates -------------------------------

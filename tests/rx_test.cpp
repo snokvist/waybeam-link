@@ -192,6 +192,32 @@ int main() {
         CHECK_EQ_U(h.delivered.size(), 2);  // floor 2, then held seq 4
     }
 
+    // --- cache grace defers only the first NACK for the exact block ---------
+    {
+        Harness h;
+        h.latch();
+        h.feed(0, 4, 1, ARQ | EOB, 10);  // seq 3 is immediately eligible
+        CHECK(h.engine.defer_first_nack(0, 1, 13));
+        CHECK(!h.engine.block_had_nack(0, 1));
+        CHECK_EQ_U(h.engine.build_nacks(12).size(), 0);
+        CHECK_EQ_U(h.engine.build_nacks(13).size(), 1);
+        CHECK(h.engine.block_had_nack(0, 1));
+        // Once the first request fired, a later cache attempt cannot postpone
+        // its retry lane.
+        CHECK(!h.engine.defer_first_nack(0, 1, 100));
+        h.feed(0, 3, 1, ARQ | data_flags::kRetransmit, 14);
+        CHECK(h.engine.block_had_nack(0, 1));  // durable after gap removal
+    }
+    {
+        Harness h;
+        h.latch();
+        h.feed(0, 4, 1, ARQ | EOB, 10);
+        CHECK(h.engine.defer_first_nack(0, 1, 13));
+        h.engine.complete_frame(0, 1, 12, h.sink());
+        CHECK_EQ_U(h.engine.build_nacks(13).size(), 0);
+        CHECK(!h.engine.block_had_nack(0, 1));
+    }
+
     // --- §6.2-1: all live adapters advanced => lost immediately -------------
     {
         Harness h;

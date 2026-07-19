@@ -1758,15 +1758,23 @@ trigger; the trigger is an incomplete **merged** block after close.
    with silence (§3.11) at the cost of one bounded request. `newest_block`
    is diagnostic/lag telemetry only. Ranking among eligible caches: health,
    then status freshness, then config order.
-7. Repair stops the moment the block reaches `k` (the reassembler emits).
-8. **Ordering ruling (deliberate deviation from serial repair):** cache repair
-   runs **in parallel with** the §6.4 NACK path, not serialized ahead of it.
-   Rationale: the objective is latency-first (§9.0) and IP cache repair spends
-   no RF airtime, so the airtime argument for cache-before-vehicle ordering
-   does not bind; §5.3/§6.4/§12 stay untouched, duplicate arrivals are
-   absorbed by normal dedup, and redundant vehicle resends stay bounded by the
-   existing per-originator budget + hold-down. Revisit only if an RF cache
-   transport lands.
+7. Repair stops the moment the block reaches `k` (the reassembler emits), and
+   every outstanding request for that block is retired immediately. A later
+   reply is unknown and cannot inflate accepted-symbol telemetry.
+8. **Ordering ruling (bounded cache lead):** cache replies are serviced before
+   §6.4 NACK construction in each event-loop iteration. After a request is
+   successfully submitted to a rule-6-eligible fresh cache, only the first
+   NACK for that exact stream/block is held until
+   `request_send + nack_grace_ms`; cache completion during the hold suppresses
+   that NACK normally. The hold is clamped to the block deadline. It never
+   applies to another block/stream, a re-NACK, an ineligible/stale cache, or a
+   failed request send; normal ARQ resumes immediately at expiry. `0` disables
+   the lead and restores fully parallel ordering. The seed is 3 ms (validated
+   range 0..6 ms), derived from real monitor-RF collection plus localhost UDP
+   cache timing: first accepted reply P95 2.845 ms and cache completion P95
+   2.910 ms. This spends a bounded latency slice to avoid redundant vehicle
+   RF resends while retaining ARQ as the deadline-protected fallback. An RF
+   cache binding must re-derive the seed because it shares channel airtime.
 
 **Cache-node rules (§13 hardening):** a cache answers a request only when
 `target_cache` equals its own `originator` and the target stream is one it
@@ -1788,6 +1796,7 @@ originator cannot flush it.
 Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 `local_quiet_ms 2`, `min_collect_ms 4`, `hard_close_ms 8`,
 `request_timeout_ms 4`, `repair_fraction_permille 200`,
+`nack_grace_ms 3`,
 `absolute_symbol_limit 8`, `max_cache_attempts 2`, `reply_limit 4`,
 `health_floor_permille 800`, `status_timeout_ms 1500`,
 `status_interval_ms 500`, retention `blocks 96`, `max_requests_per_s 400`.
@@ -1896,7 +1905,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     "repair": { "enabled": true, "stream_id": 0, "listen": "0.0.0.0:5802",
       "caches": [ { "originator": 33, "endpoint": "192.168.1.33:5801" } ],
       "tail_grace_ms": 1, "local_quiet_ms": 2, "min_collect_ms": 4,
-      "hard_close_ms": 8, "request_timeout_ms": 4,
+      "hard_close_ms": 8, "request_timeout_ms": 4, "nack_grace_ms": 3,
       "repair_fraction_permille": 200, "absolute_symbol_limit": 8,
       "max_cache_attempts": 2, "reply_limit": 4,
       "health_floor_permille": 800, "status_timeout_ms": 1500 },
@@ -2114,7 +2123,12 @@ top-level object (absent when the role is off, like `stats.bind`):
 ```json
 "cache_repair": { "requests": 12, "replies": 11, "symbols_accepted": 18,
   "symbols_rejected": 0, "blocks_closed_deficit": 9, "blocks_repaired": 7,
-  "blocks_futile": 1, "requests_suppressed": 2, "caches_fresh": 2 },
+  "blocks_futile": 1, "requests_suppressed": 2, "caches_fresh": 2,
+  "nack_graces_armed": 10, "blocks_repaired_before_nack": 6,
+  "request_to_first_reply": { "samples": 11, "p95_us": 1800,
+    "max_us": 2400 },
+  "request_to_completion": { "samples": 7, "p95_us": 2600,
+    "max_us": 4100 } },
 "cache_store": { "requests_received": 12, "requests_answered": 11,
   "requests_rejected": 1, "symbols_sent": 18, "status_sent": 240,
   "blocks_held": 96, "health_permille": 971 }
@@ -2123,8 +2137,19 @@ top-level object (absent when the role is off, like `stats.bind`):
 `blocks_repaired` counts blocks that reached `k` during a cache-reply merge
 (completion attribution); `blocks_futile` counts §14.3 rule-4 skips;
 `requests_suppressed` counts eligibility failures (stale/unhealthy/no window);
+`nack_graces_armed` counts exact-block first-NACK holds successfully installed,
+and `blocks_repaired_before_nack` counts cache-attributed completions for which
+that block had emitted no NACK;
 `caches_fresh` and `blocks_held`/`health_permille` are gauges. Stats reset
-zeroes the counters and leaves the gauges live.
+zeroes the counters and leaves the gauges live. Cache timing uses the
+aggregator host's monotonic microsecond clock: `request_to_first_reply` starts
+only after a request is successfully submitted and ends at its first accepted
+reply; `request_to_completion` starts at the first successfully submitted
+request for a block and ends only when a cache-reply merge completes that
+block. `samples`/`max_us` are cumulative since reset and P95 is nearest-rank
+over the trailing 512 samples. Requests or blocks crossing a stats reset do
+not contribute partial intervals. No cross-host clock synchronization is
+implied.
 
 On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
 the exact cumulative §14.1 symbols emitted by `FrameFramer`;

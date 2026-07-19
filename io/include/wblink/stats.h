@@ -203,7 +203,11 @@ struct CacheRepairStatsOut {
     uint64_t blocks_repaired = 0;
     uint64_t blocks_futile = 0;
     uint64_t requests_suppressed = 0;
+    uint64_t nack_graces_armed = 0;
+    uint64_t blocks_repaired_before_nack = 0;
     uint32_t caches_fresh = 0;  // gauge
+    TimingMetricStats request_to_first_reply;
+    TimingMetricStats request_to_completion;
 };
 
 struct CacheStoreStatsOut {
