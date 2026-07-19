@@ -58,6 +58,15 @@ struct StreamStats {
     uint32_t loss_postdiv_prearq_milli = 0;
     uint64_t recovered_arq = 0;
     uint64_t recovered_fec = 0;
+    // Successfully delivered frame attribution. Unlike recovered_arq (packet
+    // sequence gaps) and recovered_fec (frames), the *_symbols fields share a
+    // symbol unit and distinguish retransmitted source from repair rows.
+    uint64_t fec_recovered_source_symbols = 0;
+    uint64_t arq_recovered_source_symbols = 0;
+    uint64_t arq_recovered_repair_symbols = 0;
+    uint64_t frames_with_arq = 0;
+    uint64_t frames_fec_only = 0;
+    uint64_t frames_fec_after_arq = 0;
     uint64_t frame_count = 0;
     uint64_t frame_bytes = 0;
     uint32_t frame_size_last = 0;

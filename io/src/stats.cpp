@@ -137,6 +137,18 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.recovered_arq);
         out += ",\"recovered_fec\":";
         append_u64(out, s.recovered_fec);
+        out += ",\"fec_recovered_source_symbols\":";
+        append_u64(out, s.fec_recovered_source_symbols);
+        out += ",\"arq_recovered_source_symbols\":";
+        append_u64(out, s.arq_recovered_source_symbols);
+        out += ",\"arq_recovered_repair_symbols\":";
+        append_u64(out, s.arq_recovered_repair_symbols);
+        out += ",\"frames_with_arq\":";
+        append_u64(out, s.frames_with_arq);
+        out += ",\"frames_fec_only\":";
+        append_u64(out, s.frames_fec_only);
+        out += ",\"frames_fec_after_arq\":";
+        append_u64(out, s.frames_fec_after_arq);
         out += ",\"frame_count\":";
         append_u64(out, s.frame_count);
         out += ",\"frame_bytes\":";

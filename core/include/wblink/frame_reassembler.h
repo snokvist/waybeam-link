@@ -37,6 +37,15 @@ struct FrameReassemblerStats {
     uint64_t frames_delivered = 0;
     uint64_t frames_fast = 0;      // all-sources, no decode
     uint64_t frames_fec = 0;       // recovered via FEC
+    // Recovery attribution for successfully delivered frames only. A symbol
+    // is counted once, when its block completes; duplicate retransmits do not
+    // inflate these counters.
+    uint64_t fec_recovered_source_symbols = 0;
+    uint64_t arq_recovered_source_symbols = 0;
+    uint64_t arq_recovered_repair_symbols = 0;
+    uint64_t frames_with_arq = 0;
+    uint64_t frames_fec_only = 0;
+    uint64_t frames_fec_after_arq = 0;
     uint64_t frames_superseded = 0;
     uint64_t frames_deadline = 0;
     uint64_t frames_unrecoverable = 0;  // finalized with < k, no way to decode
@@ -122,6 +131,11 @@ class FrameReassembler {
         std::map<uint16_t, std::vector<uint8_t>> sources;
         // repair_idx -> s coded bytes.
         std::map<uint8_t, std::vector<uint8_t>> repairs;
+        // Unique rows first admitted with the RETRANSMIT flag. These are kept
+        // separate from packet-sequence recovery so frame completion can
+        // attribute the exact source/repair rows that contributed.
+        std::set<uint16_t> arq_sources;
+        std::set<uint8_t> arq_repairs;
         // Air-only attribution for the §14.2 demand estimator. Cache symbols
         // still complete `sources`/`repairs`, but must remain losses here.
         std::set<uint16_t> air_sources;

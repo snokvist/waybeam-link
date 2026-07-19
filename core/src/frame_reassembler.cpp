@@ -72,6 +72,9 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
                                         payload + payload_len))
                 .second) {  // dup: no-op
             b.last_new_ms = now_ms;  // §14.3 quiet-timeout anchor
+            if ((flags & data_flags::kRetransmit) != 0) {
+                b.arq_repairs.insert(ridx);
+            }
         }
     } else {
         if (payload_len < kFecSourceSubheaderSize) {
@@ -121,6 +124,9 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
                                        payload + payload_len))
                 .second) {  // dup: no-op
             b.last_new_ms = now_ms;
+            if ((flags & data_flags::kRetransmit) != 0) {
+                b.arq_sources.insert(idx);
+            }
         }
     }
 
@@ -176,6 +182,8 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
         }
         emit(scratch_.data(), scratch_.size());
         observe_shadow(id, b);
+        stats_.arq_recovered_source_symbols += b.arq_sources.size();
+        stats_.frames_with_arq += !b.arq_sources.empty();
         ++stats_.frames_delivered;
         ++stats_.frames_fast;
         finalize(id);
@@ -205,6 +213,15 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
                 scratch_.resize(b.frame_len);  // trim last-symbol padding
                 emit(scratch_.data(), scratch_.size());
                 observe_shadow(id, b);
+                stats_.fec_recovered_source_symbols +=
+                    k - b.sources.size();
+                stats_.arq_recovered_source_symbols += b.arq_sources.size();
+                stats_.arq_recovered_repair_symbols += b.arq_repairs.size();
+                const bool used_arq =
+                    !b.arq_sources.empty() || !b.arq_repairs.empty();
+                stats_.frames_with_arq += used_arq;
+                stats_.frames_fec_after_arq += used_arq;
+                stats_.frames_fec_only += !used_arq;
                 ++stats_.frames_delivered;
                 ++stats_.frames_fec;
                 finalize(id);

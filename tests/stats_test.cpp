@@ -46,6 +46,12 @@ StatsSnapshot sample_snapshot() {
     st.loss_postdiv_prearq_milli = 6;
     st.recovered_arq = 220;
     st.recovered_fec = 0;
+    st.fec_recovered_source_symbols = 173;
+    st.arq_recovered_source_symbols = 201;
+    st.arq_recovered_repair_symbols = 19;
+    st.frames_with_arq = 187;
+    st.frames_fec_only = 91;
+    st.frames_fec_after_arq = 34;
     st.frame_count = 89571;
     st.frame_bytes = 5872391040;
     st.frame_size_last = 65432;
@@ -142,7 +148,11 @@ const char* kGolden =
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
     "\"loss_prediversity_milli\":41,"
     "\"loss_postdiv_prearq_milli\":6,\"recovered_arq\":220,"
-    "\"recovered_fec\":0,\"frame_count\":89571,"
+    "\"recovered_fec\":0,\"fec_recovered_source_symbols\":173,"
+    "\"arq_recovered_source_symbols\":201,"
+    "\"arq_recovered_repair_symbols\":19,\"frames_with_arq\":187,"
+    "\"frames_fec_only\":91,\"frames_fec_after_arq\":34,"
+    "\"frame_count\":89571,"
     "\"frame_bytes\":5872391040,\"frame_size_last\":65432,"
     "\"frame_size_min\":8120,\"frame_size_max\":241810,"
     "\"frame_interval_us\":11106,\"frame_jitter_us\":184,"

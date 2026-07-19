@@ -133,9 +133,137 @@ int main() {
         CHECK_EQ_U(got.size(), 1u);
         CHECK(got[0] == blob);
         CHECK_EQ_U(ra.stats().frames_fec, 1u);
+        CHECK_EQ_U(ra.stats().fec_recovered_source_symbols, 2u);
+        CHECK_EQ_U(ra.stats().arq_recovered_source_symbols, 0u);
+        CHECK_EQ_U(ra.stats().arq_recovered_repair_symbols, 0u);
+        CHECK_EQ_U(ra.stats().frames_with_arq, 0u);
+        CHECK_EQ_U(ra.stats().frames_fec_only, 1u);
+        CHECK_EQ_U(ra.stats().frames_fec_after_arq, 0u);
         CHECK_EQ_U(ra.stats().jscc_observed_repair_symbols, 2u);
         CHECK_EQ_U(ra.stats().jscc_repair_underpredicted_blocks, 1u);
         CHECK_EQ_U(ra.stats().jscc_repair_demand_censored_blocks, 0u);
+    }
+
+    // --- ARQ source attribution on the all-source fast path ---------------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kNone, 0, 0, 3));
+        const auto blob = make_frame(9000, /*idr=*/false, 22);
+        const auto syms = produce(ff, blob);
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+        };
+        CHECK(syms.size() > 2);
+        const Sym& missing = syms.front();
+        const Sym& delayed = syms[1];
+        for (size_t i = 2; i < syms.size(); ++i) {
+            const Sym& s = syms[i];
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                    1000, emit);
+        }
+        const uint8_t retransmit_flags = static_cast<uint8_t>(
+            missing.flags | data_flags::kRetransmit);
+        ra.push(missing.block_id, retransmit_flags, missing.payload.data(),
+                missing.payload.size(), 1001, emit);
+        ra.push(missing.block_id, retransmit_flags, missing.payload.data(),
+                missing.payload.size(), 1002, emit);  // duplicate: no count
+        CHECK_EQ_U(got.size(), 0u);
+        ra.push(delayed.block_id, delayed.flags, delayed.payload.data(),
+                delayed.payload.size(), 1003, emit);
+        CHECK_EQ_U(got.size(), 1u);
+        CHECK(got[0] == blob);
+        CHECK_EQ_U(ra.stats().frames_fast, 1u);
+        CHECK_EQ_U(ra.stats().arq_recovered_source_symbols, 1u);
+        CHECK_EQ_U(ra.stats().arq_recovered_repair_symbols, 0u);
+        CHECK_EQ_U(ra.stats().fec_recovered_source_symbols, 0u);
+        CHECK_EQ_U(ra.stats().frames_with_arq, 1u);
+        CHECK_EQ_U(ra.stats().frames_fec_only, 0u);
+        CHECK_EQ_U(ra.stats().frames_fec_after_arq, 0u);
+    }
+
+    // --- FEC completion using an ARQ-retransmitted repair row -------------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 300, 100, 3));
+        const auto blob = make_frame(9000, /*idr=*/true, 23);
+        const auto syms = produce(ff, blob);
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+        };
+        const Sym* repair = nullptr;
+        bool dropped_source = false;
+        for (const Sym& s : syms) {
+            if ((s.flags & data_flags::kFecRepair) != 0) {
+                if (repair == nullptr) repair = &s;
+                continue;
+            }
+            if (!dropped_source) {
+                dropped_source = true;
+                continue;
+            }
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                    1000, emit);
+        }
+        CHECK(repair != nullptr);
+        ra.push(repair->block_id,
+                static_cast<uint8_t>(repair->flags |
+                                     data_flags::kRetransmit),
+                repair->payload.data(), repair->payload.size(), 1001, emit);
+        CHECK_EQ_U(got.size(), 1u);
+        CHECK(got[0] == blob);
+        CHECK_EQ_U(ra.stats().frames_fec, 1u);
+        CHECK_EQ_U(ra.stats().fec_recovered_source_symbols, 1u);
+        CHECK_EQ_U(ra.stats().arq_recovered_source_symbols, 0u);
+        CHECK_EQ_U(ra.stats().arq_recovered_repair_symbols, 1u);
+        CHECK_EQ_U(ra.stats().frames_with_arq, 1u);
+        CHECK_EQ_U(ra.stats().frames_fec_only, 0u);
+        CHECK_EQ_U(ra.stats().frames_fec_after_arq, 1u);
+    }
+
+    // --- FEC completion after one source row arrives through ARQ ----------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 300, 100, 3));
+        const auto blob = make_frame(9000, /*idr=*/true, 24);
+        const auto syms = produce(ff, blob);
+        FrameReassembler ra(rc);
+        std::vector<std::vector<uint8_t>> got;
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+        };
+        std::vector<const Sym*> missing;
+        const Sym* repair = nullptr;
+        for (const Sym& s : syms) {
+            if ((s.flags & data_flags::kFecRepair) != 0) {
+                if (repair == nullptr) repair = &s;
+                continue;
+            }
+            if (missing.size() < 2) {
+                missing.push_back(&s);
+                continue;
+            }
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                    1000, emit);
+        }
+        CHECK_EQ_U(missing.size(), 2u);
+        CHECK(repair != nullptr);
+        ra.push(repair->block_id, repair->flags, repair->payload.data(),
+                repair->payload.size(), 1000, emit);
+        ra.push(missing[0]->block_id,
+                static_cast<uint8_t>(missing[0]->flags |
+                                     data_flags::kRetransmit),
+                missing[0]->payload.data(), missing[0]->payload.size(), 1001,
+                emit);
+        CHECK_EQ_U(got.size(), 1u);
+        CHECK(got[0] == blob);
+        CHECK_EQ_U(ra.stats().frames_fec, 1u);
+        CHECK_EQ_U(ra.stats().fec_recovered_source_symbols, 1u);
+        CHECK_EQ_U(ra.stats().arq_recovered_source_symbols, 1u);
+        CHECK_EQ_U(ra.stats().arq_recovered_repair_symbols, 0u);
+        CHECK_EQ_U(ra.stats().frames_with_arq, 1u);
+        CHECK_EQ_U(ra.stats().frames_fec_only, 0u);
+        CHECK_EQ_U(ra.stats().frames_fec_after_arq, 1u);
     }
 
     // --- reorder + duplication (diversity): repairs first, dupes ------------

@@ -1732,6 +1732,15 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 st->type = "RTP";
             }
             st->recovered_fec = fr.frames_fec;
+            st->fec_recovered_source_symbols =
+                fr.fec_recovered_source_symbols;
+            st->arq_recovered_source_symbols =
+                fr.arq_recovered_source_symbols;
+            st->arq_recovered_repair_symbols =
+                fr.arq_recovered_repair_symbols;
+            st->frames_with_arq = fr.frames_with_arq;
+            st->frames_fec_only = fr.frames_fec_only;
+            st->frames_fec_after_arq = fr.frames_fec_after_arq;
             st->frames_fast = fr.frames_fast;
             st->frames_unrecoverable = fr.frames_unrecoverable;
             st->malformed = fr.malformed;

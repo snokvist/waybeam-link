@@ -1887,6 +1887,11 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
     "loss_prediversity_milli": 41, "loss_postdiv_prearq_milli": 6,
     "recovered_arq": 220, "recovered_fec": 0,
+    "fec_recovered_source_symbols": 0,
+    "arq_recovered_source_symbols": 220,
+    "arq_recovered_repair_symbols": 0,
+    "frames_with_arq": 187, "frames_fec_only": 0,
+    "frames_fec_after_arq": 0,
     "frame_count": 89571, "frame_bytes": 5872391040,
     "frame_size_last": 65432, "frame_size_min": 8120,
     "frame_size_max": 241810, "frame_interval_us": 11106,
@@ -1973,6 +1978,20 @@ supersession / past their deadline. On a UDP (RTP/telemetry) stream the
 per-frame fields (`frames_fast`, `frames_unrecoverable`, `malformed`) stay 0.
 On frame-SHM ingress, `malformed` counts whole frames rejected by FrameFramer;
 RX-only reassembly outcome fields remain 0.
+
+Recovery-method comparison uses the successful-frame attribution counters, not
+`recovered_arq` versus `recovered_fec`: those legacy fields have different
+units (`recovered_arq` is packet-sequence gaps filled; `recovered_fec` is whole
+frames decoded). `fec_recovered_source_symbols` is the number of absent source
+rows reconstructed by successful FEC decodes. `arq_recovered_source_symbols`
+and `arq_recovered_repair_symbols` count unique rows first admitted with
+`RETRANSMIT` that contributed to a subsequently delivered frame; duplicates and
+rows belonging to lost frames do not count. `frames_with_arq` counts delivered
+frames that used at least one such source or repair row. `frames_fec_only` and
+`frames_fec_after_arq` partition `recovered_fec` into FEC decodes without and
+with contributing retransmitted rows, respectively. On the all-source fast
+path, queued repair rows do not contribute and therefore do not affect these
+counters. Stats reset clears all six attribution counters.
 
 The `jscc_*` fields are receiver-side, diagnostic-only shadow state from
 §14.2. `jscc_shadow_blocks` counts finalized blocks observed by the estimator;
