@@ -407,6 +407,12 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_bool(out, snap.link.venc_settling);
     out += ",\"venc_fps\":";
     append_u64(out, snap.link.venc_fps);
+    out += ",\"venc_p_frame_bytes\":";
+    append_u64(out, snap.link.venc_p_frame_bytes);
+    out += ",\"venc_p_frame_target_bytes\":";
+    append_u64(out, snap.link.venc_p_frame_target_bytes);
+    out += ",\"venc_fps_ladder_state\":";
+    append_escaped(out, snap.link.venc_fps_ladder_state);
     out += "}}\n";
 }
 

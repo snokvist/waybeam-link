@@ -561,15 +561,21 @@ int main() {
         CHECK(bool(r) && r.value->policy.arq.arq_max_fps == 0);
     }
 
-    // --- §9.11 fps ladder (Pass 39): parse + validation ---------------------
+    // --- §9.11 fps ladder (Pass 39, corrected Pass 53) ----------------------
     {
         auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
           "venc":{"enabled":true,"fps_ladder":{"enabled":true,
-            "min":60,"preferred":90,"max":144,"reduce_after_ms":1500}}})");
+            "min":60,"preferred":100,"max":144,
+            "min_p_frame_bytes":12000,"restore_hysteresis_bytes":1500,
+            "sample_timeout_ms":750,"reduce_after_ms":1500}}})");
         CHECK(bool(r));
         if (r) {
             CHECK(r.value->venc.fps_ladder.enabled);
-            CHECK_EQ_U(r.value->venc.fps_ladder.preferred, 90);
+            CHECK_EQ_U(r.value->venc.fps_ladder.preferred, 100);
+            CHECK_EQ_U(r.value->venc.fps_ladder.min_p_frame_bytes, 12000);
+            CHECK_EQ_U(r.value->venc.fps_ladder.restore_hysteresis_bytes,
+                       1500);
+            CHECK_EQ_U(r.value->venc.fps_ladder.sample_timeout_ms, 750);
             CHECK_EQ_U(r.value->venc.fps_ladder.reduce_after_ms, 1500);
             CHECK_EQ_U(r.value->venc.fps_ladder.restore_after_ms, 8000);
         }
@@ -581,6 +587,12 @@ int main() {
             "min":90,"preferred":60,"max":144}}})", "ladder members");
         expect_error(R"({"node":{"originator":9,"role":"tx"},
           "venc":{"fps_ladder":{"enabled":true}}})", "requires venc.enabled");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_ladder":{"enabled":true,
+            "min_p_frame_bytes":0}}})", "frame-size floor");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_ladder":{"enabled":true,
+            "sample_timeout_ms":0}}})", "frame-size floor");
     }
 
     // --- §14.3 cache config: parse, defaults, and validation ---------------

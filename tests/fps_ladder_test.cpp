@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// §9.11 FPS ladder (Pass 39): initial preferred command, distress-gated
-// reduction with dwell, slow restore, stale-feedback hold, envelope bounds.
+// §9.11 FPS ladder (Pass 39, corrected Pass 53): preserve useful P-frame
+// FEC block size, with stale/actuator holds and hysteretic slow restore.
 #include "wblink/fps_ladder.h"
+
+#include <string>
 
 #include "wbtest.h"
 
@@ -11,90 +13,113 @@ namespace {
 FpsLadderPolicy fast() {
     FpsLadderPolicy p;
     p.min_fps = 60;
-    p.preferred_fps = 90;
+    p.preferred_fps = 100;
+    p.min_p_frame_bytes = 10000;
+    p.restore_hysteresis_bytes = 1000;
+    p.sample_timeout_ms = 500;
     p.reduce_after_ms = 300;
     p.reduce_dwell_ms = 400;
     p.restore_after_ms = 800;
     p.settle_ms = 100;
-    p.report_timeout_ms = 500;
     return p;
+}
+
+void sample(FpsLadder& ladder, uint32_t bytes, uint64_t now_ms,
+            bool actuator_settling = false) {
+    ladder.note_p_frame(bytes, now_ms);
+    ladder.tick(now_ms, actuator_settling);
+}
+
+void drive_small_to_floor(FpsLadder& ladder) {
+    for (uint64_t t = 1100; t <= 2400; t += 100) {
+        sample(ladder, 8000, t);
+    }
 }
 }  // namespace
 
 int main() {
-    CHECK(fps_ladder_member(90));
+    CHECK(fps_ladder_member(100));
     CHECK(!fps_ladder_member(50));
 
-    // First tick commands preferred, then settles.
+    // First tick commands the preferred 100-fps low-latency mode.
     {
-        FpsLadder l(fast());
-        auto f = l.tick(1000, false);
-        CHECK(f && *f == 90);
-        CHECK(!l.tick(1050, false).has_value());  // settle freeze
+        FpsLadder ladder(fast());
+        const auto fps = ladder.tick(1000);
+        CHECK(fps && *fps == 100);
+        CHECK_EQ_U(ladder.current_fps(), 100);
+        CHECK_EQ_U(ladder.target_p_frame_bytes(), 10000);
+        CHECK(std::string(ladder.state()) == "SETTLE");
     }
 
-    // Reduce: floor + sustained distress, dwell-limited, never below min.
+    // Sustained undersized P frames step down adjacent rungs to the floor.
     {
-        FpsLadder l(fast());
-        l.tick(1000, false);
-        for (uint64_t t = 1100; t <= 4000; t += 100) {
-            l.note_report(100, t);  // 10% loss
-            const auto f = l.tick(t, /*at_floor=*/true);
-            if (f) {
-                // Steps must be adjacent ladder members, descending.
-                CHECK(*f == 75 || *f == 60);
-            }
-        }
-        CHECK_EQ_U(l.current_fps(), 60);  // clamped at min
-        // Still distressed: no further command below min.
-        l.note_report(100, 4100);
-        CHECK(!l.tick(4100, true).has_value());
+        FpsLadder ladder(fast());
+        ladder.tick(1000);
+        drive_small_to_floor(ladder);
+        CHECK_EQ_U(ladder.current_fps(), 60);
+        CHECK_EQ_U(ladder.observed_p_frame_bytes(), 8000);
+        sample(ladder, 8000, 2500);
+        CHECK(std::string(ladder.state()) == "FLOOR");
+        CHECK(!ladder.tick(2600).has_value());
     }
 
-    // Stale feedback holds: no reports => neither reduce nor restore.
+    // Missing or stale frame samples hold rather than changing cadence.
     {
-        FpsLadder l(fast());
-        l.tick(1000, false);
-        for (uint64_t t = 1200; t <= 3000; t += 100) {
-            CHECK(!l.tick(t, true).has_value());  // distress but no report
-        }
-        CHECK_EQ_U(l.current_fps(), 90);
+        FpsLadder ladder(fast());
+        ladder.tick(1000);
+        CHECK(!ladder.tick(1200).has_value());
+        CHECK(std::string(ladder.state()) == "STALE");
+        sample(ladder, 8000, 1300);
+        CHECK_EQ_U(ladder.observed_p_frame_bytes(), 8000);
+        CHECK(!ladder.tick(1900).has_value());
+        CHECK(std::string(ladder.state()) == "STALE");
+        CHECK_EQ_U(ladder.current_fps(), 100);
     }
 
-    // Restore: off-floor + low loss, slower than reduce, back to preferred.
+    // Large frames restore slowly only when the predicted next-rung size
+    // remains above the target plus hysteresis.
     {
-        FpsLadder l(fast());
-        l.tick(1000, false);
-        for (uint64_t t = 1200; t <= 4000; t += 100) {  // drive to 60
-            l.note_report(100, t);
-            l.tick(t, true);
+        FpsLadder ladder(fast());
+        ladder.tick(1000);
+        drive_small_to_floor(ladder);
+        for (uint64_t t = 2500; t <= 6500; t += 100) {
+            sample(ladder, 16000, t);
         }
-        CHECK_EQ_U(l.current_fps(), 60);
-        uint64_t first_restore = 0;
-        for (uint64_t t = 4100; t <= 9000; t += 100) {
-            l.note_report(0, t);
-            const auto f = l.tick(t, /*at_floor=*/false);
-            if (f && first_restore == 0) {
-                first_restore = t;
-                CHECK_EQ_U(*f, 75);
-            }
-        }
-        CHECK_EQ_U(l.current_fps(), 90);  // never above preferred
-        CHECK(first_restore >= 4100 + 700);  // restore_after gates the step
-        // Healthy forever: no command past preferred.
-        l.note_report(0, 9100);
-        CHECK(!l.tick(9100, false).has_value());
+        CHECK_EQ_U(ladder.current_fps(), 100);
+        sample(ladder, 16000, 6600);
+        CHECK(std::string(ladder.state()) == "HOLD");
+        CHECK(!ladder.tick(6700).has_value());
     }
 
-    // Moderate loss off-floor is neither distress nor healthy: hold.
+    // At 90 fps, 11.5 KB predicts only 10.35 KB at 100 fps: below the
+    // 11 KB restoration threshold, so the ladder remains at 90.
     {
-        FpsLadder l(fast());
-        l.tick(1000, false);
-        for (uint64_t t = 1200; t <= 4000; t += 100) {
-            l.note_report(10, t);  // between restore(5) and distress(20)
-            CHECK(!l.tick(t, false).has_value());
+        FpsLadder ladder(fast());
+        ladder.tick(1000);
+        for (uint64_t t = 1100; t <= 1400; t += 100) {
+            sample(ladder, 8000, t);
         }
-        CHECK_EQ_U(l.current_fps(), 90);
+        CHECK_EQ_U(ladder.current_fps(), 90);
+        for (uint64_t t = 1500; t <= 3000; t += 100) {
+            sample(ladder, 11500, t);
+        }
+        CHECK_EQ_U(ladder.current_fps(), 90);
+        CHECK(std::string(ladder.state()) == "HOLD");
+    }
+
+    // Encoder bitrate/cap settling clears accumulated evidence.
+    {
+        FpsLadder ladder(fast());
+        ladder.tick(1000);
+        sample(ladder, 8000, 1100);
+        sample(ladder, 8000, 1300, true);
+        CHECK(std::string(ladder.state()) == "ACTUATOR_SETTLE");
+        for (uint64_t t = 1400; t < 1700; t += 100) {
+            sample(ladder, 8000, t);
+            CHECK_EQ_U(ladder.current_fps(), 100);
+        }
+        sample(ladder, 8000, 1700);
+        CHECK_EQ_U(ladder.current_fps(), 90);
     }
 
     return wbtest_finish("fps_ladder_test");

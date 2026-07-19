@@ -191,6 +191,9 @@ struct LinkStats {
     uint64_t venc_failures = 0;
     bool venc_settling = false;
     uint16_t venc_fps = 0;  // §9.11 last commanded fps (0 = never)
+    uint32_t venc_p_frame_bytes = 0;  // §9.11 non-IDR payload EWMA
+    uint32_t venc_p_frame_target_bytes = 0;
+    std::string venc_fps_ladder_state = "DISABLED";
 };
 
 // §15.3 cache blocks — present only when the §14.3 role is enabled.

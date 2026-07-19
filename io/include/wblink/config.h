@@ -121,10 +121,11 @@ struct SelectPolicy {
 struct FpsLadderCfg {
     bool enabled = false;
     uint16_t min = 60;
-    uint16_t preferred = 90;
+    uint16_t preferred = 100;
     uint16_t max = 144;
-    uint16_t distress_milli = 20;
-    uint16_t restore_milli = 5;
+    uint32_t min_p_frame_bytes = 10000;
+    uint32_t restore_hysteresis_bytes = 1000;
+    uint32_t sample_timeout_ms = 500;
     uint32_t reduce_after_ms = 3000;
     uint32_t reduce_dwell_ms = 4000;
     uint32_t restore_after_ms = 8000;
@@ -139,7 +140,7 @@ struct VencCfg {
     bool recovery_enabled = false;  // rate-limited IDR requests (§3.9)
     // §9.6 Pass 37 horizon frame caps (maxIBytes/maxPBytes; §17 seeds).
     bool frame_caps = true;         // cap writes (gated by `enabled` too)
-    uint16_t fps_hint = 60;         // cadence fallback until measured
+    uint16_t fps_hint = 100;        // cadence fallback until measured
     uint16_t i_headroom_permille = 1000;
     uint16_t p_headroom_permille = 1000;
     uint32_t cap_ceiling_bytes = 196608;

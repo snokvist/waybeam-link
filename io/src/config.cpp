@@ -600,9 +600,12 @@ Result<Config> load_config_json(const std::string& json_text) {
                 lc.min = fl.value("min", lc.min);
                 lc.preferred = fl.value("preferred", lc.preferred);
                 lc.max = fl.value("max", lc.max);
-                lc.distress_milli =
-                    fl.value("distress_milli", lc.distress_milli);
-                lc.restore_milli = fl.value("restore_milli", lc.restore_milli);
+                lc.min_p_frame_bytes =
+                    fl.value("min_p_frame_bytes", lc.min_p_frame_bytes);
+                lc.restore_hysteresis_bytes = fl.value(
+                    "restore_hysteresis_bytes", lc.restore_hysteresis_bytes);
+                lc.sample_timeout_ms =
+                    fl.value("sample_timeout_ms", lc.sample_timeout_ms);
                 lc.reduce_after_ms =
                     fl.value("reduce_after_ms", lc.reduce_after_ms);
                 lc.reduce_dwell_ms =
@@ -618,6 +621,14 @@ Result<Config> load_config_json(const std::string& json_text) {
                         return Result<Config>::fail(
                             "venc.fps_ladder: min <= preferred <= max, all "
                             "ladder members (§9.11)");
+                    }
+                    if (lc.min_p_frame_bytes == 0 ||
+                        lc.sample_timeout_ms == 0 ||
+                        lc.restore_hysteresis_bytes >
+                            UINT32_MAX - lc.min_p_frame_bytes) {
+                        return Result<Config>::fail(
+                            "venc.fps_ladder: frame-size floor/timeout invalid "
+                            "(§9.11)");
                     }
                     if (!cfg.venc.enabled) {
                         return Result<Config>::fail(

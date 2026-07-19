@@ -1025,13 +1025,13 @@ struct TxCore {
             FpsLadderPolicy fp;
             fp.min_fps = lc.min;
             fp.preferred_fps = lc.preferred;
-            fp.distress_milli = lc.distress_milli;
-            fp.restore_milli = lc.restore_milli;
+            fp.min_p_frame_bytes = lc.min_p_frame_bytes;
+            fp.restore_hysteresis_bytes = lc.restore_hysteresis_bytes;
+            fp.sample_timeout_ms = lc.sample_timeout_ms;
             fp.reduce_after_ms = lc.reduce_after_ms;
             fp.reduce_dwell_ms = lc.reduce_dwell_ms;
             fp.restore_after_ms = lc.restore_after_ms;
             fp.settle_ms = lc.settle_ms;
-            fp.report_timeout_ms = cfg.policy.report_timeout_ms;
             fps_ladder_.emplace(fp);
         }
         // §10: one power curve per TX adapter with an authored map. The
@@ -1160,14 +1160,20 @@ struct TxCore {
                 cadence_start_ms_ = now;
             }
             ++cadence_frames_;
-            if (s.jscc_shadow && blob != nullptr && len >= kVencFrameMetaSize) {
+            VencFrameMeta meta;
+            const bool have_meta = read_frame_meta(blob, len, &meta);
+            const bool idr = have_meta && (meta.flags & kFrameFlagIdr) != 0;
+            if (fps_ladder_ && have_meta && !idr) {
+                fps_ladder_->note_p_frame(
+                    static_cast<uint32_t>(std::min<size_t>(
+                        len - kVencFrameMetaSize, UINT32_MAX)),
+                    now);
+            }
+            if (s.jscc_shadow && have_meta) {
                 const uint16_t symbol = s.frame_framer->symbol_size();
                 const size_t k_sz = std::max<size_t>(1, (len + symbol - 1) / symbol);
                 const uint16_t k = static_cast<uint16_t>(
                     std::min<size_t>(k_sz, UINT16_MAX));
-                VencFrameMeta meta;
-                read_frame_meta(blob, len, &meta);
-                const bool idr = (meta.flags & kFrameFlagIdr) != 0;
                 const size_t source_bytes =
                     len + static_cast<size_t>(k) *
                               (kDataHeaderSize + kFecSourceSubheaderSize);
@@ -1263,10 +1269,7 @@ struct TxCore {
                 return false;
             }
             ++reports_received_;
-            const bool fresh = selector_.on_report(*r, now);
-            if (fps_ladder_ && fresh) {  // §9.11 distress/restore evidence
-                fps_ladder_->note_report(r->loss_postdiv_prearq, now);
-            }
+            selector_.on_report(*r, now);
             return false;
         }
         if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
@@ -1354,12 +1357,10 @@ struct TxCore {
             cadence_frames_ = 0;
             cadence_start_ms_ = now;
         }
-        // §9.11 FPS ladder: reduce on radio-loop exhaustion, restore slowly.
+        // §9.11 FPS ladder: preserve measured P-frame FEC block size. Bitrate
+        // and cap transitions get first claim on the resulting frame evidence.
         if (fps_ladder_) {
-            const bool at_floor = table_ != nullptr &&
-                                  selector_.profile_id() ==
-                                      table_->floor_profile;
-            fps_ladder_->tick(now, at_floor);
+            fps_ladder_->tick(now, venc_.settling(now));
             // Re-offer the current target every tick. VencActuator dedupes a
             // successfully applied value and retries after transient HTTP or
             // shared-holdoff failures, so controller state cannot outrun venc.
@@ -1560,6 +1561,13 @@ struct TxCore {
         snap.link.venc_failures = venc_.failures();
         snap.link.venc_settling = venc_.settling(now);
         snap.link.venc_fps = venc_.commanded_fps();
+        if (fps_ladder_) {
+            snap.link.venc_p_frame_bytes =
+                fps_ladder_->observed_p_frame_bytes();
+            snap.link.venc_p_frame_target_bytes =
+                fps_ladder_->target_p_frame_bytes();
+            snap.link.venc_fps_ladder_state = fps_ladder_->state();
+        }
         for (const PowerAdapter& pa : power_) {
             if (pa.applied_qdb) {
                 snap.link.tx_power_qdb = *pa.applied_qdb;  // first TX adapter

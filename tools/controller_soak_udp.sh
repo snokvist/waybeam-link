@@ -10,8 +10,8 @@
 # Asserts at the end: clean SIGTERM exits on every node (ASan/LSan silent),
 # every stats line parses (schema stable across all controller states),
 # bounded venc writes (flash-wear proxy) with zero failures, byte-exact
-# delivery above a floor despite the outage, at least one fps reduction
-# under sustained exhaustion, and FULL recovery (fps back at preferred, rung
+# delivery above a floor despite the outage, frame-size-driven fps reduction
+# under sustained small frames, and FULL recovery (fps back at preferred, rung
 # off the floor) by the end. SOAK_MULT stretches every phase for long runs
 # (rig soaks); the default is a ~2.5 minute smoke soak.
 set -euo pipefail
@@ -22,7 +22,8 @@ LINK=${LINK:-"$BUILD/waybeam-link"}
 FEED=${FEED:-"$BUILD/frame_shm_feed"}
 BASE_PORT=${BASE_PORT:-25900}
 FPS=${FPS:-30}
-P_BYTES=${P_BYTES:-12000}
+SMALL_P_BYTES=${SMALL_P_BYTES:-7000}
+LARGE_P_BYTES=${LARGE_P_BYTES:-16000}
 SOAK_MULT=${SOAK_MULT:-1}
 MIN_DELIVERED_PCT=${MIN_DELIVERED_PCT:-55}
 MAX_VENC_PUSHES=${MAX_VENC_PUSHES:-200}
@@ -71,8 +72,9 @@ cat >"$TMP/tx.json" <<EOF
   "air": {"kind": "udp-broadcast", "tx": ["127.255.255.255:$AIRP"],
           "rx": ["0.0.0.0:$AIRP"], "pace_mbps": 50},
   "venc": {"host": "127.0.0.1:$VENCP", "enabled": true, "fps_hint": $FPS,
-           "fps_ladder": {"enabled": true, "min": 60, "preferred": 90,
-                          "max": 144}},
+           "fps_ladder": {"enabled": true, "min": 60, "preferred": 100,
+                          "max": 144, "min_p_frame_bytes": 10000,
+                          "restore_hysteresis_bytes": 1000}},
   "stats": {"hz": 5}
 }
 EOF
@@ -125,17 +127,21 @@ tx_pid=$!
 pids+=("$tx_pid")
 
 # Phase schedule (seconds x SOAK_MULT) and its total for the feeder.
-# Recovery is sized for two spec-seed ladder restores (8 s gate + settle
-# each) plus the §9.5 promote pacing; clean/recovery run at drop 0 — the
-# ladder's restore_milli (5) can never fire above the baseline loss, which
-# is itself a §17 calibration note: restore_milli must exceed the link's
-# clean delivered loss.
+# Recovery is sized for three spec-seed ladder restores (8 s gate + settle
+# each). The feeder independently changes P-frame size at the same phase
+# boundaries; loss still exercises selector, JSCC, ARQ, FEC, and cache paths.
 TOTAL_S=$((158 * SOAK_MULT))
 "$FEED" consume "$OUT_RING" 0 8000 $(( (TOTAL_S + 30) * 1000 )) \
     >"$TMP/consumer.log" 2>&1 &
 pids+=($!)
-"$FEED" produce "$IN_RING" $((TOTAL_S * FPS)) "$FPS" "$P_BYTES" "$FPS" \
-    >"$TMP/producer.log" 2>&1 &
+(
+    "$FEED" produce "$IN_RING" $((20 * SOAK_MULT * FPS)) "$FPS" \
+        "$LARGE_P_BYTES" "$FPS"
+    "$FEED" produce "$IN_RING" $((93 * SOAK_MULT * FPS)) "$FPS" \
+        "$SMALL_P_BYTES" "$FPS"
+    "$FEED" produce "$IN_RING" $((45 * SOAK_MULT * FPS)) "$FPS" \
+        "$LARGE_P_BYTES" "$FPS"
+) >"$TMP/producer.log" 2>&1 &
 pids+=($!)
 
 drop() {
@@ -202,7 +208,7 @@ cr = agg["cache_repair"]
 # Actuator health: bounded writes, zero failures, recovered state.
 assert link["venc_failures"] == 0, link
 assert link["venc_pushes"] <= max_pushes, link["venc_pushes"]
-assert link["venc_fps"] == 90, link
+assert link["venc_fps"] == 100, link
 assert link["profile"] > 0, link  # off the floor after recovery
 # The ladder reduced at least once under sustained exhaustion.
 fps_writes = []
@@ -210,8 +216,8 @@ for line in open(f"{tmp}/venc.jsonl", encoding="utf-8"):
     q = parse_qs(urlparse(json.loads(line)["path"]).query)
     if "video0.fps" in q:
         fps_writes.append(int(q["video0.fps"][0]))
-assert fps_writes and min(fps_writes) < 90, fps_writes
-assert fps_writes[-1] == 90, fps_writes
+assert fps_writes and min(fps_writes) < 100, fps_writes
+assert fps_writes[-1] == 100, fps_writes
 # Enforcement ran and never wedged the stream.
 assert txs["jscc_enforced_frames"] > 0, txs
 assert txs["delivered"] > 0, txs
@@ -228,7 +234,7 @@ assert frames >= need, f"delivered {frames} < {need}"
 
 print("soak: %ds, %d stats lines schema-clean | delivered %d/%d (%.0f%%) "
       "bad=0 | venc pushes=%d failures=0 fps=%s | enforced=%d "
-      "cache repaired=%d futile=%d | final rung=%d fps=90"
+      "cache repaired=%d futile=%d | final rung=%d fps=100"
       % (total_s, len(tx_rows) + len(agg_rows) + len(cache_rows),
          frames, total_s * fps, 100.0 * frames / (total_s * fps),
          link["venc_pushes"], fps_writes, txs["jscc_enforced_frames"],

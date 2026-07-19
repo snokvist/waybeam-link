@@ -131,6 +131,9 @@ StatsSnapshot sample_snapshot() {
     s.link.venc_failures = 0;
     s.link.venc_settling = false;
     s.link.venc_fps = 90;
+    s.link.venc_p_frame_bytes = 12345;
+    s.link.venc_p_frame_target_bytes = 10000;
+    s.link.venc_fps_ladder_state = "HOLD";
     return s;
 }
 
@@ -207,7 +210,9 @@ const char* kGolden =
     "\"csa_state\":\"IDLE\",\"venc_bitrate_kbps\":14000,"
     "\"venc_max_i_bytes\":70000,\"venc_max_p_bytes\":19444,"
     "\"venc_pushes\":6,\"venc_failures\":0,\"venc_settling\":false,"
-    "\"venc_fps\":90}}\n";
+    "\"venc_fps\":90,\"venc_p_frame_bytes\":12345,"
+    "\"venc_p_frame_target_bytes\":10000,"
+    "\"venc_fps_ladder_state\":\"HOLD\"}}\n";
 
 }  // namespace
 

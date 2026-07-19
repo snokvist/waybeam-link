@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
-# §9.11 Pass-39 FPS-ladder verification — UDP-air backend (§17 ordering:
+# §9.11 Pass-53 FPS-ladder verification — UDP-air backend (§17 ordering:
 # UDP first, then radio/kernel-monitor on the rig).
 #
-# Phases: clean (selector promotes; ladder holds preferred) -> heavy loss
-# (selector exhausts to the floor rung; ladder steps 90 -> 75 -> 60 with
-# dwell) -> clean (selector leaves the floor; ladder restores slowly to 90).
+# Phases: sufficiently large P frames (hold preferred) -> undersized P frames
+# (step 100 -> 90 -> 75 -> 60 with dwell) -> large P frames (predictive,
+# hysteretic restore to 100). Link loss is deliberately absent: frame size,
+# not selector state or bitrate inference, is the §9.11 control signal.
 # The fake venc records every video0.fps write; the checker asserts the
 # envelope, adjacency, dwell spacing, write-on-change, and the final
 # recovery to preferred — and that caps writes follow fps changes (§9.11
@@ -17,9 +18,9 @@ BUILD=${BUILD:-"$ROOT/build/dev"}
 LINK=${LINK:-"$BUILD/waybeam-link"}
 FEED=${FEED:-"$BUILD/frame_shm_feed"}
 BASE_PORT=${BASE_PORT:-25500}
-DROP=${DROP:-250}
-FPS=${FPS:-30}
-P_BYTES=${P_BYTES:-12000}
+FPS=${FPS:-100}
+SMALL_P_BYTES=${SMALL_P_BYTES:-7000}
+LARGE_P_BYTES=${LARGE_P_BYTES:-16000}
 
 if [[ ! -x "$LINK" || ! -x "$FEED" ]]; then
     echo "bench binaries missing under $BUILD" >&2
@@ -49,8 +50,11 @@ trap cleanup EXIT INT TERM
 
 TABLE="$ROOT/profiles/table.example.json"
 SELECT='{"mcs_settle_s": 0.5, "promote_dwell_s": 0.3, "down_cooldown_s": 0.2,
-         "bitrate_lead_s": 0.2, "mcs_up_grace_s": 0.1}'
-LADDER='{"enabled": true, "min": 60, "preferred": 90, "max": 144,
+         "bitrate_lead_s": 0.2, "mcs_up_grace_s": 0.1,
+         "min_profile": 5, "max_profile": 5}'
+LADDER='{"enabled": true, "min": 60, "preferred": 100, "max": 144,
+         "min_p_frame_bytes": 10000, "restore_hysteresis_bytes": 1000,
+         "sample_timeout_ms": 500,
          "reduce_after_ms": 1200, "reduce_dwell_ms": 1500,
          "restore_after_ms": 2500, "settle_ms": 500}'
 cat >"$TMP/tx.json" <<EOF
@@ -97,19 +101,14 @@ tx_pid=$!
 pids+=("$tx_pid")
 "$FEED" consume "$OUT_RING" 0 5000 70000 >"$TMP/consumer.log" 2>&1 &
 pids+=($!)
-"$FEED" produce "$IN_RING" $((44 * FPS)) "$FPS" "$P_BYTES" "$FPS" \
-    >"$TMP/producer.log" 2>&1 &
-pids+=($!)
-
-ramp() {
-    curl -s -o /dev/null -X POST "http://127.0.0.1:$CTRL/api/v1/bench/rx-drop" \
-        -H 'Content-Type: application/json' -d "{\"permille\": $1}" || true
+feed_phase() {
+    local seconds=$1
+    local bytes=$2
+    "$FEED" produce "$IN_RING" $((seconds * FPS)) "$FPS" "$bytes" "$FPS"
 }
-sleep 8                 # A: clean — selector promotes, ladder holds 90
-ramp "$DROP"
-sleep 14                # B: exhausted at the floor — reductions fire
-ramp 0
-sleep 20                # C: clean — slow restore back to preferred
+feed_phase 6 "$LARGE_P_BYTES" >"$TMP/producer.log" 2>&1
+feed_phase 12 "$SMALL_P_BYTES" >>"$TMP/producer.log" 2>&1
+feed_phase 16 "$LARGE_P_BYTES" >>"$TMP/producer.log" 2>&1
 kill -TERM "$tx_pid" 2>/dev/null || true
 wait "$tx_pid" 2>/dev/null || true
 
@@ -130,18 +129,19 @@ for line in open(sys.argv[1], encoding="utf-8"):
 
 seq = [f for _, f in fps_writes]
 assert seq, "no fps writes at all"
-assert seq[0] == 90, f"first command must be preferred: {seq}"
-assert all(f in (60, 75, 90) for f in seq), f"envelope violated: {seq}"
+assert seq[0] == 100, f"first command must be preferred: {seq}"
+assert all(f in (60, 75, 90, 100) for f in seq), f"envelope violated: {seq}"
 assert all(a != b for a, b in zip(seq, seq[1:])), f"duplicate write: {seq}"
 assert 60 in seq, f"never reached min under exhaustion: {seq}"
-assert seq[-1] == 90, f"did not restore to preferred: {seq}"
+assert seq[-1] == 100, f"did not restore to preferred: {seq}"
 lowest = seq.index(60)
-assert seq[:lowest + 1] == [90, 75, 60], f"reduction not stepwise: {seq}"
-assert seq[lowest:] == [60, 75, 90], f"restore not stepwise: {seq}"
+assert seq[:lowest + 1] == [100, 90, 75, 60], f"reduction not stepwise: {seq}"
+assert seq[lowest:] == [60, 75, 90, 100], f"restore not stepwise: {seq}"
 # Dwell: consecutive reductions at least reduce_dwell (1.5 s) apart; restores
 # at least restore_after (2.5 s) after the previous change.
 times = [t for t, _ in fps_writes]
 assert times[2] - times[1] >= 1.4, f"reduce dwell violated: {times}"
+assert times[3] - times[2] >= 1.4, f"reduce dwell violated: {times}"
 assert times[lowest + 1] - times[lowest] >= 2.4, f"restore gate violated: {times}"
 # §9.11 cap coupling: every fps change is followed by a caps write.
 for t, _ in fps_writes:
@@ -150,9 +150,10 @@ for t, _ in fps_writes:
 
 rows = [json.loads(l) for l in open(sys.argv[2], encoding="utf-8") if l.strip()]
 link = rows[-1]["link"]
-assert link["venc_fps"] == 90, link
+assert link["venc_fps"] == 100, link
+assert link["venc_p_frame_target_bytes"] == 10000, link
 assert link["venc_failures"] == int(sys.argv[3]), link
-print("fps ladder: %s (dwell ok, caps coupled, restored to preferred)"
+print("fps ladder: %s (frame-size driven, dwell ok, caps coupled)"
       % seq)
 PY
 echo "fps ladder UDP bench: PASS"
