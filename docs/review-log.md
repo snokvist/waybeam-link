@@ -1335,6 +1335,34 @@ P-frame size supplies positive evidence. The v1 ceiling remains `preferred`;
 nominal, configuration, and observability), §9.6/15.2 (`fps_hint` seed 100),
 and §17 (frame-size-driven calibration knobs and harness).
 
+## Pass 54 — Frame-size FPS implementation and UDP verification (2026-07-19)
+
+The Pass 53 ruling is implemented at frame-SHM ingress. Non-IDR Annex-B bytes
+feed the ladder EWMA; the 8-byte metadata prefix and IDR frames are excluded.
+The controller now holds during stale input or venc bitrate/cap settling,
+clears pre-step evidence, predicts the next-rung frame size for restoration,
+and exports the observed EWMA, target, and state in link stats. The default
+cadence hint and preferred ladder mode are both 100 fps.
+
+The focused UDP-air bench drove independent 16 KB / 7 KB / 16 KB P-frame
+phases with a pinned PHY profile. It observed the exact write-on-change
+sequence `[100, 90, 75, 60, 75, 90, 100]`, adjacent-rung dwell compliance,
+zero venc failures, and cap writes coupled to each FPS transition. This proves
+the ladder responds to encoded frame size without radio loss or selector-floor
+state as a trigger.
+
+The full 158 s all-controller soak repeated the same ladder sequence while
+simultaneously exercising JSCC enforcement, selector transitions, FEC/ARQ,
+and UDP cache repair across clean, marginal, burst, fade, interference, outage,
+and recovery phases. Results: 2,372 schema-clean stats lines, 3,035/4,740
+frames delivered (64%) with zero byte-integrity errors, 2,987 JSCC-enforced
+frames, 149 cache-repaired blocks, 138 bounded venc pushes with zero failures,
+and full recovery to profile 7 / 100 fps. All 43 dev sanitizer suites passed;
+the SSC338Q cross-build also completed successfully.
+
+**Verified:** §9.11 frame-size control and observability on UDP-air. The next
+gate is real venc/radio actuation with direct `venc_frame_out` visual cadence.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
