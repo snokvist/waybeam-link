@@ -154,6 +154,23 @@ struct ReturnStats {
     uint64_t unicast_fallback = 0;
 };
 
+struct TimingMetricStats {
+    uint64_t samples = 0;
+    uint32_t p95_us = 0;
+    uint32_t max_us = 0;
+};
+
+// Host-local phase timing. Cross-host values are deliberately composed only
+// when the same host observes both endpoints (ground sees NACK TX + resend RX;
+// vehicle sees NACK RX + resend submission), so no clock sync is implied.
+struct ArqTimingStats {
+    TimingMetricStats eob_to_nack_build;
+    TimingMetricStats nack_build_to_inject;
+    TimingMetricStats nack_inject_to_retransmit;
+    TimingMetricStats nack_build_to_retransmit;
+    TimingMetricStats nack_receive_to_resend;
+};
+
 struct LinkStats {
     uint16_t target_originator = 0;
     uint32_t target_session = 0;
@@ -208,6 +225,7 @@ struct StatsSnapshot {
     std::optional<CacheRepairStatsOut> cache_repair;
     std::optional<CacheStoreStatsOut> cache_store;
     ReturnStats ret;
+    ArqTimingStats arq_timing;
     LinkStats link;
 };
 

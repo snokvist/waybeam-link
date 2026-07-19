@@ -191,6 +191,12 @@ const char* kGolden =
     "\"fec_oversize_frames\":0,\"idr_frames\":17,\"arq_frames\":68342,"
     "\"arq_cutoff_frames\":0,"
     "\"decode_errors\":0,\"active_profile\":4,\"table_version\":178}],"
+    "\"arq_timing\":{"
+    "\"eob_to_nack_build\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
+    "\"nack_build_to_inject\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
+    "\"nack_inject_to_retransmit\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
+    "\"nack_build_to_retransmit\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
+    "\"nack_receive_to_resend\":{\"samples\":0,\"p95_us\":0,\"max_us\":0}},"
     "\"return\":{\"reports_expected\":10,\"reports_received\":9,"
     "\"reports_rejected\":0,"
     "\"return_window_hits\":7,\"return_window_misses\":2,"
@@ -236,6 +242,7 @@ int main() {
         format_stats_line(s, out);
         CHECK(out.find("\"adapters\":[]") != std::string::npos);
         CHECK(out.find("\"streams\":[]") != std::string::npos);
+        CHECK(out.find("\"arq_timing\":{") != std::string::npos);
         CHECK(out.find("\"return\":{") != std::string::npos);
         CHECK(out.find("\"link\":{") != std::string::npos);
         CHECK(out.back() == '\n');

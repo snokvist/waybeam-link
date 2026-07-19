@@ -466,22 +466,37 @@ size_t RadioAir::inject(const uint8_t* frame, size_t len) {
     return 0;
 }
 
+size_t RadioAir::inject_resend(const uint8_t* frame, size_t len) {
+    Impl& im = *impl_;
+    Impl::Adapter& tx = *im.adapters[im.tx_idx];
+    im.tx_buf.resize(kDot11TxUrgentPrefixLen + len);
+    dot11_tx_prefix_urgent(im.tx_buf.data(), im.cfg.stamp_net_id,
+                           im.cfg.originator, static_cast<uint8_t>(im.tx_idx),
+                           im.seq++);
+    std::memcpy(im.tx_buf.data() + kDot11TxUrgentPrefixLen, frame, len);
+    ++tx.tx_submitted;
+    if (tx.dev->send_packet(im.tx_buf.data(), im.tx_buf.size())) return 1;
+    ++tx.tx_failed;
+    return 0;
+}
+
 size_t RadioAir::inject_return(uint16_t dest_originator, const uint8_t* frame,
-                               size_t len) {
+                               size_t len, bool urgent) {
     Impl& im = *impl_;
     uint8_t sa[6];
     if (!im.cfg.unicast_returns) {
-        return inject(frame, len);
+        return urgent ? inject_resend(frame, len) : inject(frame, len);
     }
     if (!im.lookup_sa(dest_originator, sa)) {
         ++im.ret_unicast_fallback;  // no SA heard yet — broadcast (§3.0)
-        return inject(frame, len);
+        return urgent ? inject_resend(frame, len) : inject(frame, len);
     }
     Impl::Adapter& tx = *im.adapters[im.tx_idx];
     im.tx_buf.resize(kDot11TxUnicastPrefixLen + len);
     dot11_tx_prefix_unicast(im.tx_buf.data(), sa, im.cfg.stamp_net_id,
                             im.cfg.originator,
-                            static_cast<uint8_t>(im.tx_idx), im.seq++);
+                            static_cast<uint8_t>(im.tx_idx), im.seq++,
+                            urgent ? kUrgentTid : 0);
     std::memcpy(im.tx_buf.data() + kDot11TxUnicastPrefixLen, frame, len);
     ++tx.tx_submitted;
     ++im.ret_unicast_sent;

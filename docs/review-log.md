@@ -995,6 +995,45 @@ the normative `maxI≥maxP` cap invariant executable by lowering P when needed.
 
 **Amended:** §3.5, §3.11, §9.6, §14.2, §14.3, §15.2 and the follow-up register.
 
+## Pass 46 — monitor ARQ priority and phase-timing gate (2026-07-19)
+
+The first N=2 monitor runs exposed a long retry tail rather than an RF airtime
+limit. Monitor mode has no live TSF read, so host-delayed EOB arrival was being
+delayed by the quiet-gap midpoint a second time; NACKs also shared a FIFO with
+periodic reports, vehicle radio readiness followed an unbounded SHM drain, and
+only UDP-air implemented the §16.3 priority lane.
+
+The corrected path sends monitor NACKs immediately after repair-tail/FEC close,
+keeps reports in a separate normal queue, services return-radio readiness before
+live ingress, bounds SHM work to one frame per ring/iteration, drains accepted
+resends in the NACK callback, and uses QoS TID 6 for monitor/devourer NACKs and
+retransmits. The default re-NACK step is now 6 ms. Host-local microsecond phase
+telemetry separates EOB→build, build→submission, ground submission→retransmit
+arrival, combined build→arrival, and vehicle receipt→resend submission.
+
+Guarded channel-161/HT20 verification used the standard `/usr/bin/waybeam`
+producer, MCS 5, two ground monitor receivers, and an independent synthetic
+100‰ receive drop on each ground adapter to force measurable residual loss:
+
+- 10% configured FEC: 600/600 valid frames, zero unrecoverable; FEC recovered
+  340 source symbols and ARQ recovered 5 source symbols across 5 frames.
+  NACK-build→retransmit P95/max was 2.510 ms; vehicle
+  NACK-receipt→resend-submission P95/max was 315 µs.
+- 33% configured FEC: 600/600 valid frames, zero unrecoverable and zero ARQ;
+  5,164 repair symbols versus 1,840 at 10% (2.8× repair traffic).
+- Final-binary zero-FEC ARQ stress: 43 retransmitted symbols; combined
+  NACK-build→retransmit P95 2.114 ms and max 4.164 ms, while vehicle
+  receipt→submission P95/max was 190/273 µs. All 43 RTT samples stayed below
+  the 6 ms target (stream RTT P95/max 3/4 ms).
+
+This establishes the code/turnaround portion of the <6 ms ARQ gate and supports
+10% as the present N=2 operating point, with ARQ as residual repair. The drop
+was synthetic and independent, so real spatial correlation/range and the
+devourer backend remain follow-up RF tests. The vehicle config and
+`S95waybeam` AP service were restored after both runs.
+
+**Amended:** §3.0, §6.4, §7.2–§7.4, §15.3, §16.3 and §17 gate 3.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

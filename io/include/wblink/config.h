@@ -172,7 +172,7 @@ struct RxCfgPolicy {
     uint8_t admit_n = 3;               // §2
     uint32_t admit_window_ms = 1000;   // §2
     uint8_t renack_attempts = 3;       // §6.4
-    uint32_t renack_backoff_ms = 15;   // §6.4
+    uint32_t renack_backoff_ms = 6;    // §6.4
     uint32_t idle_teardown_ms = 5000;  // §2
     uint32_t fwd_clamp_pkts = 256;     // §6.6 seq clamp
     uint32_t clamp_resync_ms = 500;    // §6.6 sustained-clamp resync window

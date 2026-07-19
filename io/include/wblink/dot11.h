@@ -27,6 +27,9 @@ inline constexpr size_t kDot11QosHdrLen = 26;  // + 2-byte QoS Control
 inline constexpr size_t kDot11TxPrefixLen = kRadiotapTxLen + kDot11HdrLen;
 inline constexpr size_t kDot11TxUnicastPrefixLen =
     kRadiotapTxLen + kDot11QosHdrLen;
+inline constexpr size_t kDot11TxUrgentPrefixLen =
+    kRadiotapTxLen + kDot11QosHdrLen;
+inline constexpr uint8_t kUrgentTid = 6;  // 802.11e voice access category
 // §3.0: monitor RX hands up the MPDU with the chip-validated 4-byte FCS
 // appended; the radio backend strips this trailer before dot11_parse.
 inline constexpr size_t kFcsLen = 4;
@@ -67,7 +70,7 @@ inline void dot11_hdr24(uint8_t* h, uint8_t net_id, uint16_t originator,
 // Writes JUST the 26-byte Pass-12 unicast QoS-Data header into h (no radiotap).
 inline void dot11_hdr_qos26(uint8_t* h, const uint8_t dest[6], uint8_t net_id,
                             uint16_t originator, uint8_t adapter_idx,
-                            uint16_t seq) {
+                            uint16_t seq, uint8_t tid = 0) {
     h[0] = kDot11QosFrameControl0;
     h[1] = 0x00;
     h[2] = 0;  // duration
@@ -82,7 +85,7 @@ inline void dot11_hdr_qos26(uint8_t* h, const uint8_t dest[6], uint8_t net_id,
     std::memcpy(h + 16, kWbBssid, 6);  // addr3 BSSID = "VBLK" tag
     h[22] = static_cast<uint8_t>((seq << 4) & 0xff);  // seq ctl, fragment 0
     h[23] = static_cast<uint8_t>(seq >> 4);
-    h[24] = 0x00;  // QoS Control: TID 0, Normal ACK policy
+    h[24] = static_cast<uint8_t>(tid & 0x0f);  // Normal ACK policy
     h[25] = 0x00;
 }
 
@@ -102,11 +105,25 @@ inline size_t dot11_tx_prefix(uint8_t* out, uint8_t net_id,
 // kDot11TxUnicastPrefixLen bytes.
 inline size_t dot11_tx_prefix_unicast(uint8_t* out, const uint8_t dest[6],
                                       uint8_t net_id, uint16_t originator,
-                                      uint8_t adapter_idx, uint16_t seq) {
+                                      uint8_t adapter_idx, uint16_t seq,
+                                      uint8_t tid = 0) {
     std::memcpy(out, kRadiotapTxAck, kRadiotapTxLen);
     dot11_hdr_qos26(out + kRadiotapTxLen, dest, net_id, originator, adapter_idx,
-                    seq);
+                    seq, tid);
     return kDot11TxUnicastPrefixLen;
+}
+
+// Priority lane for NACKs and retransmissions: broadcast/no-ACK QoS Data with
+// TID 6, which maps to the voice access category on monitor/devourer paths.
+inline size_t dot11_tx_prefix_urgent(uint8_t* out, uint8_t net_id,
+                                     uint16_t originator,
+                                     uint8_t adapter_idx, uint16_t seq) {
+    static constexpr uint8_t kBroadcast[6] = {0xff, 0xff, 0xff,
+                                               0xff, 0xff, 0xff};
+    std::memcpy(out, kRadiotapTx, kRadiotapTxLen);
+    dot11_hdr_qos26(out + kRadiotapTxLen, kBroadcast, net_id, originator,
+                    adapter_idx, seq, kUrgentTid);
+    return kDot11TxUrgentPrefixLen;
 }
 
 struct Dot11Rx {

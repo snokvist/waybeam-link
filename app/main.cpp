@@ -9,6 +9,7 @@
 #include <poll.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <csignal>
 #include <cstdlib>
 #include <cstdio>
@@ -18,6 +19,7 @@
 #include <memory>
 #include <map>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -77,6 +79,172 @@ uint64_t now_us() {
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
 }
+
+class ArqTimingTracker {
+  public:
+    void note_eob(uint64_t at_us) { last_eob_us_ = at_us; }
+
+    void note_nack_built(const uint8_t* frame, size_t len, uint64_t at_us) {
+        const Decoded dec = decode(frame, len);
+        const NackView* n = std::get_if<NackView>(&dec);
+        if (n == nullptr) return;
+        if (last_eob_us_ && at_us >= *last_eob_us_) {
+            eob_to_build_.observe(at_us - *last_eob_us_);
+        }
+        for_each_seq(*n, [&](const Key& k) { built_[k] = at_us; });
+        trim(built_);
+    }
+
+    void note_nack_injected(const uint8_t* frame, size_t len,
+                            uint64_t at_us) {
+        const Decoded dec = decode(frame, len);
+        const NackView* n = std::get_if<NackView>(&dec);
+        if (n == nullptr) return;
+        bool sampled = false;
+        for_each_seq(*n, [&](const Key& k) {
+            const auto it = built_.find(k);
+            if (!sampled && it != built_.end() && at_us >= it->second) {
+                build_to_inject_.observe(at_us - it->second);
+                sampled = true;
+            }
+            injected_[k] = at_us;
+        });
+        trim(injected_);
+    }
+
+    void note_retransmit_arrived(const DataView& v, uint64_t at_us) {
+        if ((v.hdr.data_flags & data_flags::kRetransmit) == 0) return;
+        const Key k = key(v.hdr.prefix.originator, v.hdr.prefix.session_id,
+                          v.hdr.stream_id, v.hdr.seq);
+        if (const auto it = injected_.find(k);
+            it != injected_.end() && at_us >= it->second) {
+            inject_to_retransmit_.observe(at_us - it->second);
+            injected_.erase(it);
+        }
+        if (const auto it = built_.find(k);
+            it != built_.end() && at_us >= it->second) {
+            build_to_retransmit_.observe(at_us - it->second);
+            built_.erase(it);
+        }
+    }
+
+    void note_nack_received(const uint8_t* frame, size_t len,
+                            uint64_t at_us) {
+        const Decoded dec = decode(frame, len);
+        const NackView* n = std::get_if<NackView>(&dec);
+        if (n == nullptr) return;
+        for_each_seq(*n, [&](const Key& k) { received_[k] = at_us; });
+        trim(received_);
+    }
+
+    void note_resend_submitted(const uint8_t* frame, size_t len,
+                               uint64_t at_us) {
+        const Decoded dec = decode(frame, len);
+        const DataView* v = std::get_if<DataView>(&dec);
+        if (v == nullptr ||
+            (v->hdr.data_flags & data_flags::kRetransmit) == 0) return;
+        const Key k = key(v->hdr.prefix.originator,
+                          v->hdr.prefix.session_id, v->hdr.stream_id,
+                          v->hdr.seq);
+        const auto it = received_.find(k);
+        if (it != received_.end() && at_us >= it->second) {
+            receive_to_resend_.observe(at_us - it->second);
+            received_.erase(it);
+        }
+    }
+
+    ArqTimingStats snapshot() const {
+        ArqTimingStats out;
+        out.eob_to_nack_build = eob_to_build_.snapshot();
+        out.nack_build_to_inject = build_to_inject_.snapshot();
+        out.nack_inject_to_retransmit = inject_to_retransmit_.snapshot();
+        out.nack_build_to_retransmit = build_to_retransmit_.snapshot();
+        out.nack_receive_to_resend = receive_to_resend_.snapshot();
+        return out;
+    }
+
+    void reset() {
+        eob_to_build_.reset();
+        build_to_inject_.reset();
+        inject_to_retransmit_.reset();
+        build_to_retransmit_.reset();
+        receive_to_resend_.reset();
+        built_.clear();
+        injected_.clear();
+        received_.clear();
+        last_eob_us_.reset();
+    }
+
+  private:
+    class Series {
+      public:
+        void observe(uint64_t delta) {
+            const uint32_t us = static_cast<uint32_t>(
+                std::min<uint64_t>(delta, UINT32_MAX));
+            ++samples_;
+            max_ = std::max(max_, us);
+            recent_.push_back(us);
+            if (recent_.size() > 512) recent_.pop_front();
+        }
+        TimingMetricStats snapshot() const {
+            TimingMetricStats out{samples_, 0, max_};
+            if (recent_.empty()) return out;
+            std::vector<uint32_t> sorted(recent_.begin(), recent_.end());
+            std::sort(sorted.begin(), sorted.end());
+            const size_t rank = (sorted.size() * 95 + 99) / 100;
+            out.p95_us = sorted[rank - 1];
+            return out;
+        }
+        void reset() {
+            samples_ = 0;
+            max_ = 0;
+            recent_.clear();
+        }
+      private:
+        uint64_t samples_ = 0;
+        uint32_t max_ = 0;
+        std::deque<uint32_t> recent_;
+    };
+
+    struct Key {
+        uint16_t originator;
+        uint32_t session;
+        uint8_t stream_id;
+        uint32_t seq;
+        bool operator<(const Key& other) const {
+            return std::tie(originator, session, stream_id, seq) <
+                   std::tie(other.originator, other.session, other.stream_id,
+                            other.seq);
+        }
+    };
+    static Key key(uint16_t originator, uint32_t session, uint8_t stream_id,
+                   uint32_t seq) {
+        return Key{originator, session, stream_id, seq};
+    }
+    template <class F>
+    static void for_each_seq(const NackView& n, const F& fn) {
+        for (unsigned i = 0; i < static_cast<unsigned>(n.bitmap_len) * 8;
+             ++i) {
+            if ((n.bitmap[i / 8] & (1u << (i % 8))) != 0) {
+                fn(key(n.hdr.target_originator, n.hdr.target_session,
+                       n.hdr.target_stream_id, n.hdr.base_seq + i));
+            }
+        }
+    }
+    static void trim(std::map<Key, uint64_t>& m) {
+        while (m.size() > 4096) m.erase(m.begin());
+    }
+
+    Series eob_to_build_;
+    Series build_to_inject_;
+    Series inject_to_retransmit_;
+    Series build_to_retransmit_;
+    Series receive_to_resend_;
+    std::map<Key, uint64_t> built_;
+    std::map<Key, uint64_t> injected_;
+    std::map<Key, uint64_t> received_;
+    std::optional<uint64_t> last_eob_us_;
+};
 
 // Bench-only, bounded packet-event trace. The wire remains the source of truth:
 // this observer decodes existing frames and never feeds decisions back in.
@@ -498,11 +666,11 @@ struct AirBackend {
     size_t inject_resend(const uint8_t* f, size_t n) {
         size_t sent = 0;
         if (mon) {
-            sent = mon->inject(f, n);
+            sent = mon->inject_resend(f, n);
         } else {
 #if WBLINK_RADIO
             if (radio) {
-                sent = radio->inject(f, n);
+                sent = radio->inject_resend(f, n);
             } else
 #endif
             {
@@ -524,14 +692,15 @@ struct AirBackend {
     // Returns (NACK/LINK_REPORT) carry their target so the radio backend
     // can address them as §3.0 unicast when return.unicast is on; the udp
     // dev backend has no L2 addressing and ignores the target.
-    size_t inject_return(uint16_t target, const uint8_t* f, size_t n) {
+    size_t inject_return(uint16_t target, const uint8_t* f, size_t n,
+                         bool urgent = false) {
         size_t sent = 0;
         if (mon) {
-            sent = mon->inject_return(target, f, n);
+            sent = mon->inject_return(target, f, n, urgent);
         } else {
 #if WBLINK_RADIO
             if (radio) {
-                sent = radio->inject_return(target, f, n);
+                sent = radio->inject_return(target, f, n, urgent);
             } else
 #endif
             {
@@ -1045,58 +1214,58 @@ struct TxCore {
 
     // Air packets heard back (uplink): NACKs feed the scheduler, LINK_REPORTs
     // feed the §9 selector.
-    void on_air(const uint8_t* d, size_t n, uint64_t now) {
+    bool on_air(const uint8_t* d, size_t n, uint64_t now) {
         const Decoded dec = decode(d, n);
         if (const JsccFeedback* f = std::get_if<JsccFeedback>(&dec)) {
             if (f->target_originator != originator_ ||
                 f->target_session != session_ ||
                 (preferred_originator_ != 0 &&
                  f->prefix.originator != preferred_originator_)) {
-                return;
+                return false;
             }
             for (Stream& s : streams_) {
                 if (s.stream_id == f->target_stream_id && s.jscc_shadow) {
                     s.jscc_shadow->observe_feedback(*f, now);
-                    return;
+                    return false;
                 }
             }
-            return;
+            return false;
         }
         if (const NackView* nack = std::get_if<NackView>(&dec)) {
             if (nack->hdr.target_originator != originator_ ||
                 nack->hdr.target_session != session_) {
-                return;
+                return false;
             }
             for (Stream& s : streams_) {
                 if (s.stream_id == nack->hdr.target_stream_id) {
                     s.sched.on_nack(*nack, s.ring, now);
-                    return;
+                    return true;
                 }
             }
-            return;
+            return false;
         }
         if (const LinkReport* r = std::get_if<LinkReport>(&dec)) {
             if (r->target_originator != originator_ ||
                 r->target_session != session_) {
-                return;
+                return false;
             }
             // §3.5 acceptance filter (Pass 41): preferred/latched reporters
             // only — BEFORE the selector and the §9.11 ladder consume it.
             if (!report_gate_.accept(r->prefix.originator,
                                      r->prefix.session_id, now)) {
-                return;
+                return false;
             }
             ++reports_received_;
             const bool fresh = selector_.on_report(*r, now);
             if (fps_ladder_ && fresh) {  // §9.11 distress/restore evidence
                 fps_ladder_->note_report(r->loss_postdiv_prearq, now);
             }
-            return;
+            return false;
         }
         if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
             if (r->target_originator != originator_ ||
                 r->target_session != session_) {
-                return;
+                return false;
             }
             for (const Stream& s : streams_) {
                 if (s.stream_id == r->target_stream_id &&
@@ -1106,9 +1275,19 @@ struct TxCore {
                                  "venc: decoder recovery stream=%u requester=%u %s\n",
                                  r->target_stream_id, r->prefix.originator,
                                  ok ? "accepted" : "failed");
-                    return;
+                    return false;
                 }
             }
+        }
+        return false;
+    }
+
+    void drain_resends(uint64_t now, const Inject& inject_resend) {
+        for (Stream& s : streams_) {
+            s.ring.evict(now);
+            s.sched.drain(s.ring, now, [&](const uint8_t* f, size_t l) {
+                inject_resend(f, l);
+            });
         }
     }
 
@@ -1234,12 +1413,7 @@ struct TxCore {
                 break;  // single video stream (§9.6)
             }
         }
-        for (Stream& s : streams_) {
-            s.ring.evict(now);
-            s.sched.drain(s.ring, now, [&](const uint8_t* f, size_t l) {
-                (inject_resend ? inject_resend : inject)(f, l);
-            });
-        }
+        drain_resends(now, inject_resend ? inject_resend : inject);
     }
 
     void set_pressure(bool on, uint64_t now) {  // §9.9 gauge (step 9+ feeds it)
@@ -1474,7 +1648,8 @@ struct RxCore {
     }
 
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
-              const Inject& inject_nack, bool emit_nacks = true) {
+              const Inject& inject_report, const Inject& inject_nack,
+              bool emit_nacks = true) {
         engine_.tick(now, deliver);
         // §7.3: LINK_REPORTs ride the same uplink as NACKs.
         for (LinkReport r : reporter_.build(engine_, now)) {
@@ -1483,7 +1658,7 @@ struct RxCore {
             r.prefix.session_id = session_;
             uint8_t frame[kLinkReportSize];
             if (encode_link_report(r, frame, sizeof(frame)) > 0) {
-                inject_nack(frame, sizeof(frame), r.target_originator);
+                inject_report(frame, sizeof(frame), r.target_originator);
             }
         }
         if (!emit_nacks) {
@@ -1695,7 +1870,8 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                     shm_stats = nullptr,
                 const CacheRepairStatsOut* cache_repair = nullptr,
                 const CacheStoreStatsOut* cache_store = nullptr,
-                StatsSnapshot* out_snap = nullptr) {
+                StatsSnapshot* out_snap = nullptr,
+                const ArqTimingStats* arq_timing = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -1800,6 +1976,9 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     if (cache_store != nullptr) {
         snap.cache_store = *cache_store;
     }
+    if (arq_timing != nullptr) {
+        snap.arq_timing = *arq_timing;
+    }
     if (out_snap != nullptr) {
         *out_snap = snap;  // §15.5: GET /health reads the freshest snapshot
     }
@@ -1903,6 +2082,7 @@ int run_tx(const Loaded& l) {
         uint8_t stream_id;
         std::string name;
         std::unique_ptr<FrameShmRing> ring;  // null until attached
+        bool pending = false;
     };
     std::vector<ShmIn> shm_ins;
     bool have_udp_ins = false;
@@ -1914,7 +2094,7 @@ int run_tx(const Loaded& l) {
             have_udp_ins = true;
             continue;
         }
-        ShmIn si{s.stream_id, s.bind.name, nullptr};
+        ShmIn si{s.stream_id, s.bind.name, nullptr, false};
         auto r = FrameShmRing::attach(s.bind.name);
         if (r) {
             si.ring = std::move(*r.value);
@@ -1944,6 +2124,7 @@ int run_tx(const Loaded& l) {
     // override degrades to §7.1 under load.
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::vector<uint8_t>> held;
+    ArqTimingTracker arq_timing;
     uint64_t now_us_it = now_us();
     const auto send_raw = [&](const uint8_t* f, size_t n) {
         air.value->inject(f, n);
@@ -1962,6 +2143,7 @@ int run_tx(const Loaded& l) {
     };
     const TxCore::Inject inject_resend = [&](const uint8_t* f, size_t n) {
         air.value->inject_resend(f, n);
+        arq_timing.note_resend_submitted(f, n, now_us());
     };
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
     // retunes the (single) radio at the TSF-anchored T_switch.
@@ -2012,6 +2194,7 @@ int run_tx(const Loaded& l) {
         };
         h.reset_stats = [&] {
             tx.reset_stats();
+            arq_timing.reset();
             for (ShmIn& si : shm_ins) {
                 if (si.ring) si.ring->reset_stats();
             }
@@ -2022,6 +2205,39 @@ int run_tx(const Loaded& l) {
     }
     std::fprintf(stderr, "tx: session=%u, running%s\n", session,
                  qg.enabled() ? " (quiet-gap pacing)" : "");
+    const auto service_air = [&](uint64_t service_now) {
+        const uint64_t service_us = now_us();
+        air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
+                                    size_t n) {
+            const Decoded dec = decode(d, n);
+            discovery.observe(dec, service_now);
+            if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
+                if (!air.value->supports_csa()) return;
+                if (csa.on_csa(*c, service_us,
+                               air.value->read_tsf(meta.adapter_id),
+                               static_cast<uint32_t>(meta.tsf_us),
+                               std::nullopt)) {
+                    tx.csa_freeze(service_now + static_cast<uint64_t>(
+                                                   l.cfg.policy.csa.settle_s *
+                                                   1000));
+                    tx.set_csa_armed(true);
+                    std::fprintf(stderr,
+                                 "csa: armed -> %u MHz (nonce %u, dt %u ms)\n",
+                                 c->target_chan, c->csa_nonce,
+                                 c->dt_to_switch_ms);
+                }
+                return;
+            }
+            if (!std::holds_alternative<DecodeError>(dec)) {
+                csa.note_valid_rx(service_us);
+            }
+            if (tx.on_air(d, n, service_now)) {
+                arq_timing.note_nack_received(d, n, service_us);
+                // A valid NACK bypasses the normal tick and live-video path.
+                tx.drain_resends(service_now, inject_resend);
+            }
+        });
+    };
     while (g_stop == 0) {
         // One timestamp per iteration: every callback and the tick share it,
         // so the time injected into the core never steps backward between
@@ -2029,6 +2245,9 @@ int run_tx(const Loaded& l) {
         // tick's captured now, and u64 "now - stamp" arithmetic underflows).
         const uint64_t now = now_ms();
         now_us_it = now_us();
+        // Return-radio readiness is always serviced before video ingress or a
+        // held-live flush. This is the vehicle's ARQ priority boundary.
+        service_air(now);
         if (now >= next_shm_identity_check_ms) {
             for (ShmIn& si : shm_ins) {
                 if (si.ring && !si.ring->backing_object_current()) {
@@ -2037,6 +2256,7 @@ int run_tx(const Loaded& l) {
                                  "reattaching\n",
                                  si.name.c_str());
                     si.ring.reset();
+                    si.pending = false;
                 }
             }
             next_shm_identity_check_ms = now + 250;
@@ -2064,90 +2284,69 @@ int run_tx(const Loaded& l) {
                 }
                 if (auto r = FrameShmRing::attach(si.name)) {
                     si.ring = std::move(*r.value);
+                    si.pending = false;
                     std::fprintf(stderr, "tx: frame-shm '%s' attached\n",
                                  si.name.c_str());
                 }
             }
             next_shm_attach_ms = now + 500;
         }
-        // Union the frame-shm consumer eventfds into the ingress wait. shm_fds
-        // lists only attached rings, in order; drain_shm(j) maps index j back.
-        std::vector<int> shm_fds;
+        // Air readiness comes first in the unified wait. SHM readiness only
+        // marks a ring pending; at most one frame per ring is consumed below,
+        // preventing a producer burst from monopolising the vehicle loop.
+        std::vector<int> ready_fds = air.value->wait_fds();
+        const size_t air_fd_count = ready_fds.size();
         for (const ShmIn& si : shm_ins) {
             if (si.ring) {
-                shm_fds.push_back(si.ring->event_fd());
+                ready_fds.push_back(si.ring->event_fd());
             }
         }
-        const size_t shm_fd_count = shm_fds.size();
-        const std::vector<int> air_fds = air.value->wait_fds();
-        shm_fds.insert(shm_fds.end(), air_fds.begin(), air_fds.end());
-        const auto drain_shm = [&](size_t j) {
-            if (j >= shm_fd_count) return;  // air readiness; drained below
+        const auto on_ready = [&](size_t j) {
+            if (j < air_fd_count) {
+                service_air(now_ms());
+                return;
+            }
+            const size_t want = j - air_fd_count;
             size_t k = 0;
             for (ShmIn& si : shm_ins) {
-                if (!si.ring) {
-                    continue;
-                }
-                if (k++ != j) {
-                    continue;
-                }
+                if (!si.ring) continue;
+                if (k++ != want) continue;
                 si.ring->drain_event();
-                for (;;) {
-                    const long got =
-                        si.ring->read_frame(frame_buf.data(), frame_buf.size());
-                    if (got <= 0) {
-                        break;
-                    }
-                    tx.on_frame(si.stream_id, frame_buf.data(),
-                                static_cast<size_t>(got), now, inject);
-                }
+                si.pending = true;
                 return;
             }
         };
         // Held frames need µs-scale reactivity — don't sleep in poll then.
-        const int in_timeout = held.empty() && !air.value->tx_pending() ? 2 : 0;
+        bool shm_pending = false;
+        for (const ShmIn& si : shm_ins) shm_pending |= si.pending;
+        const int in_timeout =
+            held.empty() && !air.value->tx_pending() && !shm_pending ? 2 : 0;
         bindings.value->poll_once(
             in_timeout,
             [&](const IngressEvent& ev) {
                 tx.on_ingress(ev.stream_id, ev.data, ev.len, now, inject);
             },
-            shm_fds, drain_shm);
+            ready_fds, on_ready);
         // Nothing to wait on yet (no UDP ingress and every frame-shm producer
         // still down): poll_once returned instantly — pace to avoid a busy spin
         // while waiting for the producer to come up.
-        if (!have_udp_ins && shm_fds.empty() && in_timeout > 0) {
+        if (!have_udp_ins && ready_fds.empty() && in_timeout > 0) {
             ::poll(nullptr, 0, in_timeout);
         }
         const uint64_t service_now = now_ms();
-        air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
-                                    size_t n) {
-            const Decoded dec = decode(d, n);
-            discovery.observe(dec, service_now);
-            if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
-                if (!air.value->supports_csa()) {
-                    return;
-                }
-                // §11.2: anchor on this adapter's TSF; the follower manages
-                // its own issuer latch (MAC-valid bootstrap, §11.4).
-                if (csa.on_csa(*c, now_us_it,
-                               air.value->read_tsf(meta.adapter_id),
-                               static_cast<uint32_t>(meta.tsf_us),
-                               std::nullopt)) {
-                    tx.csa_freeze(now + static_cast<uint64_t>(
-                                            l.cfg.policy.csa.settle_s * 1000));
-                    tx.set_csa_armed(true);
-                    std::fprintf(stderr,
-                                 "csa: armed -> %u MHz (nonce %u, dt %u ms)\n",
-                                 c->target_chan, c->csa_nonce,
-                                 c->dt_to_switch_ms);
-                }
-                return;
+        service_air(service_now);
+        for (ShmIn& si : shm_ins) {
+            if (!si.ring || !si.pending) continue;
+            const long got =
+                si.ring->read_frame(frame_buf.data(), frame_buf.size());
+            if (got <= 0) {
+                si.pending = false;
+                continue;
             }
-            if (!std::holds_alternative<DecodeError>(dec)) {
-                csa.note_valid_rx(now_us_it);  // §11.5 verify/rendezvous feed
-            }
-            tx.on_air(d, n, service_now);
-        });
+            tx.on_frame(si.stream_id, frame_buf.data(),
+                        static_cast<size_t>(got), service_now, inject);
+        }
+        now_us_it = now_us();
         const CsaAction ca = csa.tick(now_us_it);
         if (ca.kind != CsaAction::Kind::kNone) {
             tx.set_csa_armed(false);  // switching now — the ACK window is over
@@ -2175,9 +2374,10 @@ int run_tx(const Loaded& l) {
                     shm_stats.emplace_back(si.stream_id, si.ring->stats());
                 }
             }
+            const ArqTimingStats timing = arq_timing.snapshot();
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
                        csa.state_str(), 0, 0, wedge.wedged(), nullptr,
-                       &shm_stats, nullptr, nullptr, &last_snap);
+                       &shm_stats, nullptr, nullptr, &last_snap, &timing);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -2365,8 +2565,11 @@ int run_rx(const Loaded& l) {
     // middle of the craft's quiet gap, anchored on the EOB's receive-TSF.
     // Disabled (default) they inject immediately — §7.1 baseline.
     QuietGap qg(quietgap_policy(l.cfg));
-    std::deque<std::pair<std::vector<uint8_t>, uint16_t>> ret_held;
+    std::deque<std::pair<std::vector<uint8_t>, uint16_t>> urgent_ret_held;
+    std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_ret_held;
     std::optional<uint64_t> ret_at_us;
+    bool ret_tsf_anchored = false;
+    std::optional<uint64_t> report_fallback_us;
     // If the repair-tail EOB itself is lost, silence after the last received
     // DATA symbol is the only close signal available. Keep a rolling host-
     // time fallback at the return-window midpoint so ARQ cannot remain
@@ -2376,13 +2579,36 @@ int run_rx(const Loaded& l) {
     uint32_t ret_window_misses = 0;
     uint64_t tsf_fallbacks = 0;
     uint64_t now_us_it = now_us();
-    const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n,
-                                           uint16_t target) {
+    ArqTimingTracker arq_timing;
+    const auto send_return = [&](uint16_t target, const uint8_t* f, size_t n,
+                                 bool urgent) {
+        if (urgent) arq_timing.note_nack_injected(f, n, now_us());
+        air.value->inject_return(target, f, n, urgent);
+    };
+    const RxCore::Inject inject_report = [&](const uint8_t* f, size_t n,
+                                             uint16_t target) {
         if (!qg.enabled()) {
-            air.value->inject_return(target, f, n);
+            send_return(target, f, n, false);
             return;
         }
-        ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
+        report_ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
+        if (!report_fallback_us) {
+            // Prefer the next EOB midpoint. If video/EOB disappears entirely,
+            // degrade to opportunistic return after one report period.
+            report_fallback_us = now_us() + 100000;
+        }
+    };
+    const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n,
+                                           uint16_t target) {
+        arq_timing.note_nack_built(f, n, now_us());
+        if (!qg.enabled() || !ret_tsf_anchored) {
+            // Monitor mode cannot read live TSF. By the time the repair-tail
+            // close is observed, host arrival already includes USB delay;
+            // adding the quiet-gap midpoint again only makes ARQ later.
+            send_return(target, f, n, true);
+            return;
+        }
+        urgent_ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
     };
     StatsEmitter emitter(true, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
@@ -2461,6 +2687,7 @@ int run_rx(const Loaded& l) {
             ret_window_hits = 0;
             ret_window_misses = 0;
             tsf_fallbacks = 0;
+            arq_timing.reset();
         };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (rx)\n",
@@ -2475,24 +2702,37 @@ int run_rx(const Loaded& l) {
         const uint64_t now = now_ms();
         now_us_it = now_us();
         deliver_now = now;  // the deliver lambda's clock for reassembler pushes
-        // Fire the coalesced return window. No deadline (no EOB heard yet)
-        // means send immediately — never sit on a return.
-        if (!ret_held.empty() &&
-            (!ret_at_us || now_us_it >= *ret_at_us)) {
-            for (const auto& [f, target] : ret_held) {
-                air.value->inject_return(target, f.data(), f.size());
+        // Fire the coalesced return window. Reports prefer an EOB midpoint and
+        // degrade to opportunistic return only after the bounded fallback.
+        const bool have_returns =
+            !urgent_ret_held.empty() || !report_ret_held.empty();
+        const bool return_deadline_due =
+            ret_at_us && now_us_it >= *ret_at_us;
+        const bool report_fallback_due =
+            !ret_at_us && report_fallback_us &&
+            now_us_it >= *report_fallback_us;
+        if (return_deadline_due || report_fallback_due) {
+            for (const auto& [f, target] : urgent_ret_held) {
+                send_return(target, f.data(), f.size(), true);
+            }
+            for (const auto& [f, target] : report_ret_held) {
+                send_return(target, f.data(), f.size(), false);
             }
             // §7.2 observability: a batch fired on a TSF-anchored window
             // deadline is a hit; one sent blind (no EOB heard) is a miss.
-            if (ret_at_us) {
+            if (ret_at_us && have_returns) {
                 ++ret_window_hits;
             } else if (qg.enabled()) {
                 ++ret_window_misses;
             }
-            ret_held.clear();
+            urgent_ret_held.clear();
+            report_ret_held.clear();
             ret_at_us.reset();
+            report_fallback_us.reset();
+            ret_tsf_anchored = false;
         }
-        const int air_timeout = ret_held.empty() ? 2 : 0;
+        const int air_timeout =
+            urgent_ret_held.empty() && report_ret_held.empty() ? 2 : 0;
         air.value->poll_once(air_timeout, [&](const AirRxMeta& meta,
                                               const uint8_t* d, size_t n) {
             // udp-air carries no real RSSI; fall back to the loopback
@@ -2517,6 +2757,8 @@ int run_rx(const Loaded& l) {
                 return;
             }
             if (const DataView* v = std::get_if<DataView>(&dec)) {
+                arq_timing.note_retransmit_arrived(*v, now_us_it);
+                if (frame_is_eob(d, n)) arq_timing.note_eob(now_us_it);
                 if (qg.enabled()) {
                     repair_tail_fallback_us =
                         qg.return_deadline(now_us_it, 0, std::nullopt);
@@ -2538,6 +2780,7 @@ int run_rx(const Loaded& l) {
                 // Anchor on the SAME adapter's TSF (clocks never cross
                 // adapters); a failed read falls back to host arrival.
                 const auto tsf_now = air.value->read_tsf(meta.adapter_id);
+                ret_tsf_anchored = tsf_now.has_value();
                 if (!tsf_now) {
                     ++tsf_fallbacks;
                 }
@@ -2553,7 +2796,7 @@ int run_rx(const Loaded& l) {
             ret_at_us.has_value() ||
             (repair_tail_fallback_us &&
              now_us_it >= *repair_tail_fallback_us);
-        rx.tick(now, deliver, inject_nack,
+        rx.tick(now, deliver, inject_report, inject_nack,
                 !qg.enabled() || repair_tail_closed);
         air.value->heartbeat(l.cfg.node.originator, session, now);
         // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
@@ -2785,6 +3028,7 @@ int run_rx(const Loaded& l) {
                 css.blocks_held = s.blocks_held;
                 css.health_permille = s.health_permille;
             }
+            const ArqTimingStats timing = arq_timing.snapshot();
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
@@ -2792,7 +3036,7 @@ int run_rx(const Loaded& l) {
                        ret_window_hits, ret_window_misses, wedge.wedged(),
                        &frame_stats, &shm_stats,
                        cache_ctl ? &crs : nullptr,
-                       cache_store ? &css : nullptr, &last_snap);
+                       cache_store ? &css : nullptr, &last_snap, &timing);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -2941,7 +3185,7 @@ int run_loopback(const Loaded& l) {
             tx.on_ingress(ev.stream_id, ev.data, ev.len, loop_now, inject);
         });
         tx.tick(loop_now, inject);
-        rx.tick(loop_now, deliver, inject_nack);
+        rx.tick(loop_now, deliver, inject_nack, inject_nack);
         if (control) {
             control->service(loop_now);
         }

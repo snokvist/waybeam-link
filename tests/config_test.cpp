@@ -134,6 +134,7 @@ int main() {
             CHECK_EQ_U(c.policy.select.demote_milli, 20);
             CHECK(c.policy.select.ewma_alpha == 0.3);
             CHECK_EQ_U(c.policy.arq.holddown_ms, 20);
+            CHECK_EQ_U(c.policy.rx.renack_backoff_ms, 6);
             CHECK_EQ_U(c.policy.rx.clamp_resync_ms, 500);  // §6.6 seed
             CHECK_EQ_U(c.policy.ret.guard_us, 300);
             CHECK(!c.policy.ret.quiet_gap);   // §7.1 baseline ships default

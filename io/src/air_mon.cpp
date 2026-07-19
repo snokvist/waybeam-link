@@ -241,7 +241,7 @@ struct MonAir::Impl {
     }
 
     void rx_loop(Adapter* a, uint8_t adapter_id);
-    size_t send_frame(const uint8_t* payload, size_t len);
+    size_t send_frame(const uint8_t* payload, size_t len, bool urgent = false);
 };
 
 void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
@@ -320,17 +320,30 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
     }
 }
 
-size_t MonAir::Impl::send_frame(const uint8_t* payload, size_t len) {
+size_t MonAir::Impl::send_frame(const uint8_t* payload, size_t len,
+                                bool urgent) {
     Adapter* a = adapters[tx_idx].get();
-    tx_buf.resize(kMonRadiotapHtLen + kDot11HdrLen + len);
+    const size_t hdr_len = urgent ? kDot11QosHdrLen : kDot11HdrLen;
+    tx_buf.resize(kMonRadiotapHtLen + hdr_len + len);
     uint8_t* p = tx_buf.data();
     mon_radiotap_ht(p, mcs, sgi, bw);
-    dot11_hdr24(p + kMonRadiotapHtLen, cfg.stamp_net_id, cfg.originator,
-                static_cast<uint8_t>(tx_idx), seq);
+    if (urgent) {
+        static constexpr uint8_t kBroadcast[6] = {0xff, 0xff, 0xff,
+                                                   0xff, 0xff, 0xff};
+        dot11_hdr_qos26(p + kMonRadiotapHtLen, kBroadcast,
+                        cfg.stamp_net_id, cfg.originator,
+                        static_cast<uint8_t>(tx_idx), seq, kUrgentTid);
+    } else {
+        dot11_hdr24(p + kMonRadiotapHtLen, cfg.stamp_net_id, cfg.originator,
+                    static_cast<uint8_t>(tx_idx), seq);
+    }
     ++seq;
     if (len > 0) {
-        std::memcpy(p + kMonRadiotapHtLen + kDot11HdrLen, payload, len);
+        std::memcpy(p + kMonRadiotapHtLen + hdr_len, payload, len);
     }
+    const int priority = urgent ? kUrgentTid : 0;
+    (void)::setsockopt(a->fd, SOL_SOCKET, SO_PRIORITY, &priority,
+                       sizeof(priority));
     const ssize_t w = ::send(a->fd, tx_buf.data(), tx_buf.size(), 0);
     if (w < 0 || static_cast<size_t>(w) != tx_buf.size()) {
         tx_failed.fetch_add(1, std::memory_order_relaxed);
@@ -441,11 +454,15 @@ size_t MonAir::inject(const uint8_t* frame, size_t len) {
     return impl_->send_frame(frame, len);
 }
 
+size_t MonAir::inject_resend(const uint8_t* frame, size_t len) {
+    return impl_->send_frame(frame, len, true);
+}
+
 size_t MonAir::inject_return(uint16_t dest_originator, const uint8_t* frame,
-                             size_t len) {
+                             size_t len, bool urgent) {
     (void)dest_originator;  // monitor: no HW ACK responder → broadcast
     impl_->unicast_fallback.fetch_add(1, std::memory_order_relaxed);
-    return impl_->send_frame(frame, len);
+    return impl_->send_frame(frame, len, urgent);
 }
 
 void MonAir::return_counters(uint64_t& unicast_sent,

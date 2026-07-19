@@ -51,12 +51,13 @@ class MonAir {
     // Send one wire packet on the TX adapter (§3.0 + radiotap MCS added here).
     // Returns 1 when submitted, 0 on failure.
     size_t inject(const uint8_t* frame, size_t len);
+    size_t inject_resend(const uint8_t* frame, size_t len);
 
     // Return (NACK/LINK_REPORT) toward dest_originator. Monitor injection has
     // no hardware ACK responder, so this is a plain broadcast inject() (the
     // ground filters by originator); counted as a unicast fallback for §15.3.
     size_t inject_return(uint16_t dest_originator, const uint8_t* frame,
-                         size_t len);
+                         size_t len, bool urgent = false);
     void return_counters(uint64_t& unicast_sent,
                          uint64_t& unicast_fallback) const;
 

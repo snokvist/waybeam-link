@@ -345,6 +345,14 @@ int BindingSet::poll_once(int timeout_ms,
         return errno == EINTR ? 0 : -1;
     }
     int delivered = 0;
+    // Extra readiness includes the vehicle's return-radio eventfd. Dispatch it
+    // before draining ingress sockets so an ARQ request cannot sit behind a
+    // burst of live video datagrams.
+    for (size_t j = 0; j < extra_fds.size(); ++j) {
+        if ((fds[ins_.size() + j].revents & POLLIN) != 0) {
+            on_extra(j);
+        }
+    }
     for (size_t idx = 0; idx < ins_.size(); ++idx) {
         if ((fds[idx].revents & POLLIN) == 0) {
             continue;
@@ -357,11 +365,6 @@ int BindingSet::poll_once(int timeout_ms,
             cb(IngressEvent{ins_[idx].stream_id, buf_.data(),
                             static_cast<size_t>(n)});
             ++delivered;
-        }
-    }
-    for (size_t j = 0; j < extra_fds.size(); ++j) {
-        if ((fds[ins_.size() + j].revents & POLLIN) != 0) {
-            on_extra(j);
         }
     }
     return delivered;

@@ -187,7 +187,7 @@ returns (**NACK / LINK_REPORT only** — CSA campaign copies stay broadcast,
 | Frame Control | `0x88 0x00` — QoS-Data, ToDS=0 FromDS=0 |
 | addr1 (RA) | the target craft's §3.0 SA **as last heard** (latched per originator from accepted frames — exact match with the MACID the craft's ACK responder armed, adapter-idx byte included) |
 | addr2 (SA) / addr3 | own §3.0 SA / `"VBLK"` BSSID, unchanged |
-| QoS Control | `0x00 0x00` — TID 0, Normal ACK policy |
+| QoS Control | `0x00 0x00` for normal reports; TID 6 for urgent NACKs; Normal ACK policy |
 | radiotap | the same rate-less prefix with `TX_FLAGS = 0` (the frame *expects* an ACK) |
 
 The injecting chip hardware-retransmits an unACKed unicast frame (devourer
@@ -210,6 +210,14 @@ consequences:
   adapters never arm.
 - Downlink DATA stays broadcast unconditionally (Pass 8 rejected hardware
   ARQ for the video path; the §1 no-MAC-ARQ invariant stands there).
+
+**Urgent ARQ lane.** NACKs and DATA packets carrying `RETRANSMIT=1` use
+QoS-Data TID 6 so monitor/devourer injection can select the voice access
+category; the monitor socket also sets `SO_PRIORITY=6`. When the destination is
+broadcast, radiotap keeps `NOACK`; an enabled unicast-return NACK keeps the
+hardware-ACK radiotap above. Live DATA and LINK_REPORT traffic remain TID 0 / the
+ordinary Data shape. This changes only 802.11 encapsulation, never the waybeam
+wire packet inside it.
 
 ### 3.1 Common prefix (all packet types) — 11 bytes
 
@@ -806,8 +814,8 @@ not RTP packets.)
   indefinitely.
 - Send via the **designated uplink TX adapter**; its RX blind spot while
   transmitting is covered by the diversity siblings (ground half-duplex is free).
-- Re-NACK: bounded retries with backoff; stop on RETRANSMIT receipt or on
-  deadline/supersession.
+- Re-NACK: bounded retries with a default 6 ms per-attempt backoff; stop on
+  RETRANSMIT receipt or on deadline/supersession.
 
 ### 6.5 Adapter liveness watchdog (anti-phantom-diversity)
 An adapter delivering **zero** frames for `stall_timeout` (seed 200 ms) while
@@ -883,6 +891,11 @@ receive. The mechanism, using only RX-local hardware TSF (no clock crossing):
   known real limitation is a **40 MHz-bandwidth bug** → run the craft at **20 MHz**,
   which also matches the intra-band fast-retune path in §11.) The exact settle time
   is measured at §17 gate 4. Seeds: `guard_us = 300`, `return_window_us = 2000`.
+- A backend without a live TSF read (kernel monitor mode) MUST NOT add the
+  midpoint delay to a NACK after the repair-tail EOB has already arrived through
+  the host/USB path: it submits that NACK immediately after FEC close. Periodic
+  LINK_REPORTs remain normal-priority and wait for the next EOB midpoint; if no
+  EOB arrives for 100 ms, they degrade to §7.1 opportunistic return.
 
 **Crossover (state it, don't hide it):** at high fps + saturated bitrate the idle
 gap shrinks below `return_window_us` and the contract degrades to §7.1
@@ -905,10 +918,12 @@ against plain broadcast returns is a §17 bench slot.
   step change (RSSI-floor breach, loss spike), to cut reaction latency.
 
 ### 7.4 Self-congestion guard
-Retransmit < live priority; airtime cap as a hard downlink fraction; resend
-attempt cap; per-interval bound. A burst needing more than a few repairs is past
-saving — let RTP concealment eat it. The uplink is a **pluggable transport** so a
-dedicated backchannel could replace it later without touching the core.
+Once authorized, a retransmit has queue priority over live video (802.11e TID 6
+on monitor/devourer and the dedicated resend queue on UDP-air), but the airtime
+cap remains a hard downlink fraction, with an attempt cap and per-interval bound.
+A burst needing more than a few repairs is past saving — let RTP concealment eat
+it. The uplink is a **pluggable transport** so a dedicated backchannel could
+replace it later without touching the core.
 
 ---
 
@@ -1947,6 +1962,12 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "fec_oversize_frames": 0, "idr_frames": 17, "arq_frames": 68342,
     "arq_cutoff_frames": 0,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
+  "arq_timing": {
+    "eob_to_nack_build": { "samples": 18, "p95_us": 820, "max_us": 901 },
+    "nack_build_to_inject": { "samples": 18, "p95_us": 4, "max_us": 7 },
+    "nack_inject_to_retransmit": { "samples": 18, "p95_us": 2510, "max_us": 3100 },
+    "nack_build_to_retransmit": { "samples": 18, "p95_us": 2514, "max_us": 3107 },
+    "nack_receive_to_resend": { "samples": 18, "p95_us": 315, "max_us": 402 } },
   "return": { "reports_expected": 10, "reports_received": 9,
     "reports_rejected": 0,
     "return_window_hits": 7, "return_window_misses": 2,
@@ -1974,6 +1995,11 @@ the radio backend).
 `uniq`/`diversity` are the §17 gate-2 estimator inputs; the `nack_rtt_*` /
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.
+The top-level `arq_timing` phase metrics are microsecond-domain, cumulative
+sample count/max plus a bounded trailing-window P95. Ground populates
+EOB→NACK-build, NACK-build→submission, submission→retransmit-arrival, and the
+combined build→arrival; the vehicle populates NACK-receipt→resend-submission.
+Each metric is host-local and therefore makes no cross-host clock assumption.
 
 On a **`frame-shm` binding**, `frame_count` and `frame_bytes` count successful
 whole-frame transfers at the local SHM boundary: consumer `read_frame()` on TX

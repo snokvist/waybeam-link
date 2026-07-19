@@ -45,7 +45,7 @@ struct RxPolicy {
     uint8_t admit_n = 3;               // §2 N_admit
     uint32_t admit_window_ms = 1000;   // §2 T_admit
     uint8_t renack_attempts = 3;       // §6.4 bounded retries
-    uint32_t renack_backoff_ms = 15;   // per-attempt backoff step
+    uint32_t renack_backoff_ms = 6;    // per-attempt backoff step
     uint32_t idle_teardown_ms = 5000;  // §2 implicit teardown
     // §6.6 escape hatch: a stream whose packets are ALL clamp-rejected for
     // this long is desynced by a real outage (the TX ran ahead more than

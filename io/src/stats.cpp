@@ -55,6 +55,16 @@ void append_hist(std::string& out, const std::array<uint64_t, 8>& h) {
     out += ']';
 }
 
+void append_timing(std::string& out, const TimingMetricStats& t) {
+    out += "{\"samples\":";
+    append_u64(out, t.samples);
+    out += ",\"p95_us\":";
+    append_u64(out, t.p95_us);
+    out += ",\"max_us\":";
+    append_u64(out, t.max_us);
+    out += '}';
+}
+
 }  // namespace
 
 void format_stats_line(const StatsSnapshot& snap, std::string& out) {
@@ -326,6 +336,18 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, c.health_permille);
         out += '}';
     }
+
+    out += ",\"arq_timing\":{\"eob_to_nack_build\":";
+    append_timing(out, snap.arq_timing.eob_to_nack_build);
+    out += ",\"nack_build_to_inject\":";
+    append_timing(out, snap.arq_timing.nack_build_to_inject);
+    out += ",\"nack_inject_to_retransmit\":";
+    append_timing(out, snap.arq_timing.nack_inject_to_retransmit);
+    out += ",\"nack_build_to_retransmit\":";
+    append_timing(out, snap.arq_timing.nack_build_to_retransmit);
+    out += ",\"nack_receive_to_resend\":";
+    append_timing(out, snap.arq_timing.nack_receive_to_resend);
+    out += '}';
 
     out += ",\"return\":{\"reports_expected\":";
     append_u64(out, snap.ret.reports_expected);
