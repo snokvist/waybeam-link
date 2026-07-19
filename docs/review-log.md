@@ -1381,6 +1381,25 @@ LINK_REPORT.
 
 **Amended:** §3.10 (reporter-session cache identity and reboot behavior).
 
+## Pass 56 — Authored kernel-monitor airtime service model (2026-07-19)
+
+After the Pass 55 fix, monitor-radio feedback became fresh and RTT-ready, but
+JSCC correctly remained in `airtime_unavailable`: only paced UDP had an
+authored serialization model. Enabling enforcement by silently borrowing the
+encoder bitrate or raw PHY rate would be optimistic and violates the fallback
+contract.
+
+Kernel-monitor may now opt into an explicit effective-service calibration.
+The model multiplies the locally commanded HT20 MCS/GI rate by
+`air.airtime_efficiency_permille`; zero (the default) preserves fallback. It
+includes known MPDU overhead and available socket-outbound bytes, while the
+priority resend estimate excludes the live queue. The MCS3/SGI stationary rig
+carried the 15–20 Mbit/s target inside a 28.9 Mbit/s PHY envelope, supporting a
+conservative initial 600-permille test value. This is a rig calibration, not a
+new universal constant.
+
+**Amended:** §14.2 (kernel-monitor airtime input and fail-safe configuration).
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

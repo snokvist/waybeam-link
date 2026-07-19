@@ -1660,6 +1660,20 @@ Unknown transport airtime or incomplete feedback makes the decision invalid and
 selects §14.1 fallback; the implementation must not manufacture a PHY rate,
 RTT, deadline, or guard.
 
+For `kernel-monitor`, the commanded HT20 MCS/GI is a TX-local fact, but Linux
+does not expose a reliable per-frame RF departure timestamp. An authored
+`air.airtime_efficiency_permille` (range 1–1000, default **0/off**) may therefore
+enable a conservative service-rate model:
+`service_kbps = HT20_PHY_kbps(mcs, gi) * efficiency_permille / 1000`.
+The estimate includes the current wire bytes, per-MPDU 802.11/FCS bytes, and
+any socket outbound bytes reported by `SIOCOUTQ`; `include_pending=false` keeps
+the deadline-priority resend estimate independent of the live queue. A zero or
+invalid efficiency keeps `airtime_unavailable` fallback. This value is an
+empirical transport-efficiency calibration, not the profile airtime budget and
+not permission to infer one from the other. The initial monitor rig seed is
+**600 permille**, matching the measured MCS3/SGI service envelope; deployments
+must re-derive it under their driver, contention, and aggregation behavior.
+
 Shadow configuration is optional and disabled when absent:
 
 ```json
