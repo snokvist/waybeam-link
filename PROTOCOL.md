@@ -1090,7 +1090,8 @@ bitrate, riding the same §9.5 transition moments:
   (frame count over a ~1 s window; the §15.3 last-gap `frame_interval_us`
   is batch-drain-skewed and unsuitable), **snapped to the nearest ladder
   fps** `{30, 45, 60, 75, 90, 100, 120, 144}` so cadence jitter cannot
-  churn the caps; `venc.fps_hint` (seed 60) until measured.
+  churn the caps; `venc.fps_hint` (seed 100, matching the preferred low-latency
+  mode) until measured.
 - `budget_bps` — the active rung's §9.5 derived bitrate target (already net
   of airtime fraction, table FEC overhead, and control/telemetry reserves).
 - `maxP = budget_bps · frame_period_us / 8·10⁶ · 1000/(1000 + p_rate‰) ·
@@ -1880,7 +1881,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   "control": { "bind": "0.0.0.0:8091" },
   "venc": { "host": "127.0.0.1:80", "enabled": false,
             "recovery_enabled": true,
-            "frame_caps": true, "fps_hint": 60,
+            "frame_caps": true, "fps_hint": 100,
             "i_headroom_permille": 1000, "p_headroom_permille": 1000,
             "cap_ceiling_bytes": 196608, "settle_ms": 750 }
 }
@@ -2363,8 +2364,8 @@ local-ingress polling interval.
 | EWMA α, `mcs_settle_s` | §9 smoothing/settle | no-FEC loss spikiness |
 | `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
 | cache close timers (`tail_grace_ms`/`local_quiet_ms`/`min_collect_ms`/`hard_close_ms`) | §14.3 local-collection close | loss-position sweep at target fps on the Ethernet bench; close must beat next-block supersession with round-trip margin |
-| frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, loss-driven transitions — operator sequencing 2026-07-16), then the radio/kernel-monitor backends on the rig |
-| FPS ladder timers (`reduce_after/reduce_dwell/restore_after/settle_ms`, `distress/restore_milli`) | §9.11 last-resort loop | UDP-air ladder harness first; flight calibration per the design doc §13.3 dwell table |
+| frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, profile transitions — operator sequencing 2026-07-16), then the radio/kernel-monitor backends on the rig |
+| FPS ladder frame floor/hysteresis/timers (`min_p_frame_bytes`, `restore_hysteresis_bytes`, `sample_timeout_ms`, `reduce_after/reduce_dwell/restore_after/settle_ms`) | §9.11 frame-size-preservation loop | UDP-air frame-size ladder harness first; flight calibration against direct frame-SHM cadence and visual output |
 | `arq_max_fps` | §4.1 high-cadence ARQ cutoff | operator comfort floor 10 ms (2026-07-16); re-derive against gate-3 recovery latency at high fps |
 
 **Bench gates (must pass before the dependent design is trusted):**

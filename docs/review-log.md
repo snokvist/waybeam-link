@@ -1332,7 +1332,8 @@ P-frame size supplies positive evidence. The v1 ceiling remains `preferred`;
 `max` stays forward-reserved.
 
 **Amended:** §9.11 (intent, measurement, reduce/restore predicates, 100 fps
-nominal, configuration, and observability).
+nominal, configuration, and observability), §9.6/15.2 (`fps_hint` seed 100),
+and §17 (frame-size-driven calibration knobs and harness).
 
 ## Open questions for the next pass
 
