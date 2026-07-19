@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>  // strtoull
@@ -30,6 +31,7 @@ namespace wblink {
 namespace {
 constexpr size_t kRxQueueCap = 512;
 constexpr size_t kRxBufLen = 4096;
+constexpr auto kTxProgressPoll = std::chrono::milliseconds(100);
 
 inline uint32_t xorshift32(uint32_t& s) {
     s ^= s << 13;
@@ -43,6 +45,18 @@ uint64_t read_iface_rx_packets(const std::string& ifname) {
         "/sys/class/net/" + ifname + "/statistics/rx_packets";
     FILE* f = std::fopen(path.c_str(), "r");
     if (!f) return 0;
+    char buf[32];
+    const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    buf[n] = '\0';
+    return std::strtoull(buf, nullptr, 10);
+}
+
+std::optional<uint64_t> read_iface_tx_packets(const std::string& ifname) {
+    const std::string path =
+        "/sys/class/net/" + ifname + "/statistics/tx_packets";
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return std::nullopt;
     char buf[32];
     const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
     std::fclose(f);
@@ -225,6 +239,9 @@ struct MonAir::Impl {
     std::atomic<uint64_t> tx_submitted{0};
     std::atomic<uint64_t> tx_failed{0};
     std::atomic<uint64_t> unicast_fallback{0};
+    std::chrono::steady_clock::time_point next_tx_progress_poll{};
+    uint64_t tx_progress_cached = 0;
+    bool tx_progress_available = false;
 
     ~Impl() {
         running.store(false, std::memory_order_relaxed);
@@ -469,6 +486,23 @@ void MonAir::return_counters(uint64_t& unicast_sent,
                              uint64_t& unicast_fallback) const {
     unicast_sent = 0;
     unicast_fallback = impl_->unicast_fallback.load(std::memory_order_relaxed);
+}
+
+void MonAir::tx_progress_counters(uint64_t& submitted,
+                                  uint64_t& completed) const {
+    submitted = impl_->tx_submitted.load(std::memory_order_relaxed);
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= impl_->next_tx_progress_poll) {
+        const auto v = read_iface_tx_packets(
+            impl_->adapters[impl_->tx_idx]->ifname);
+        impl_->tx_progress_available = v.has_value();
+        if (v) impl_->tx_progress_cached = *v;
+        impl_->next_tx_progress_poll = now + kTxProgressPoll;
+    }
+    // A missing sysfs surface must fail open: mirror submissions so the
+    // absence-only watchdog cannot manufacture a wedge verdict.
+    completed = impl_->tx_progress_available ? impl_->tx_progress_cached
+                                             : submitted;
 }
 
 int MonAir::poll_once(int timeout_ms, const RxCb& cb) {

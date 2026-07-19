@@ -61,6 +61,11 @@ class MonAir {
     void return_counters(uint64_t& unicast_sent,
                          uint64_t& unicast_fallback) const;
 
+    // §9.10 monitor TX-progress source: send() proves submission, while the
+    // Linux netdev tx_packets counter proves driver transmission progress.
+    // Both counters are cumulative.
+    void tx_progress_counters(uint64_t& submitted, uint64_t& completed) const;
+
     // Deliver queued RX frames (§3.0 payloads, header stripped); blocks up to
     // timeout_ms when the queue is empty. Returns frames delivered.
     int poll_once(int timeout_ms, const RxCb& cb);

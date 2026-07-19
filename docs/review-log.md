@@ -1168,6 +1168,16 @@ kernel-monitor; only `tx_wedged` consumes the netdev progress internally.
 
 **Amended:** §9.10 and §15.3. Code follows separately.
 
+Implementation reuses `TxWedge` unchanged at the policy/state-machine level.
+`MonAir` supplies cumulative `(tx_submitted, netdev tx_packets)` while
+devourer continues to supply `(tx_submitted, CCX tx_reports)`. Native build and
+43/43 tests passed; the SSC338Q cross-build passed. The real same-session A/B
+then produced the required verdict: silent `229b` reached 77 submissions and
+`tx_wedged=true` after one window, while healthy `2308` reached 77 submissions
+and stayed false. `tx_reports` remained zero on both monitor adapters.
+Evidence:
+`artifacts/pr26-monitor-diversity-20260719/stationary-txwedge-fix-final/`.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

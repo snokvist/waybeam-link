@@ -905,13 +905,13 @@ struct AirBackend {
                 as.kernel_drop = c.kernel_dropped;
                 as.bpf_filtered = c.bpf_filtered;
                 as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
-                // No CCX tx.report on monitor injection; wedge watchdog off.
+                // No CCX tx.report on monitor injection. The §9.10 verdict
+                // instead uses netdev tx_packets progress internally.
                 as.tx_reports = 0;
                 as.tx_report_fails = 0;
-                as.tx_wedged = false;
+                as.tx_wedged = c.tx && tx_wedged;
                 snap.adapters.push_back(std::move(as));
             }
-            (void)tx_wedged;
             return;
         }
 #if WBLINK_RADIO
@@ -957,9 +957,16 @@ struct AirBackend {
 #endif
     }
 
-    // TX adapter's cumulative (tx_submitted, tx_reports) for the §9.10
-    // watchdog; nullopt on the udp dev backend (no CCX reports to watch).
-    std::optional<std::pair<uint64_t, uint64_t>> tx_report_counters() const {
+    // TX adapter's cumulative (submitted, completion-progress) counters for
+    // §9.10: netdev tx_packets on monitor, CCX reports on devourer. nullopt on
+    // UDP, which has no independent completion surface.
+    std::optional<std::pair<uint64_t, uint64_t>> tx_progress_counters() const {
+        if (mon) {
+            uint64_t s = 0;
+            uint64_t p = 0;
+            mon->tx_progress_counters(s, p);
+            return std::make_pair(s, p);
+        }
 #if WBLINK_RADIO
         if (radio) {
             uint64_t s = 0;
@@ -2356,12 +2363,13 @@ int run_tx(const Loaded& l) {
         }
         tx.tick(service_now, inject, inject_resend);
         air.value->heartbeat(l.cfg.node.originator, session, service_now);
-        if (const auto trc = air.value->tx_report_counters()) {
+        if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
-                        ? "air: TX WEDGE — submissions advancing, zero CCX "
-                          "reports over the window (§9.10)\n"
-                        : "air: tx wedge cleared — CCX reports resumed\n");
+                        ? "air: TX WEDGE — submissions advancing, zero "
+                          "backend TX progress over the window (§9.10)\n"
+                        : "air: tx wedge cleared — backend TX progress "
+                          "resumed\n");
             }
         }
         if (control) {
@@ -2982,12 +2990,13 @@ int run_rx(const Loaded& l) {
         if (fa.kind != CsaAction::Kind::kNone) {
             air.value->retune_all(fa.chan_mhz, fa.bw, fa.fast);
         }
-        if (const auto trc = air.value->tx_report_counters()) {
+        if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
-                        ? "air: TX WEDGE — submissions advancing, zero CCX "
-                          "reports over the window (§9.10)\n"
-                        : "air: tx wedge cleared — CCX reports resumed\n");
+                        ? "air: TX WEDGE — submissions advancing, zero "
+                          "backend TX progress over the window (§9.10)\n"
+                        : "air: tx wedge cleared — backend TX progress "
+                          "resumed\n");
             }
         }
         if (control) {
