@@ -29,7 +29,9 @@ high-cadence ARQ cutoff — both Pass 40), then R-A, then reassess.
 | — | `229b` return-TX diagnosis | **RESOLVED + observable (Pass 48/49):** AF_PACKET `send()` succeeds but netdev TX counters do not advance and no RF is emitted; keep RX-only. Kernel-monitor now uses netdev TX progress for `tx_wedged` (real A/B: `229b=true`, `2308=false`) |
 | — | Independent ARQ cache | **UDP/IP VERIFIED (Pass 48):** real monitor cache + 150‰ N=1 aggregator stress reduced unrecoverable frames 534→119 (−77.7%) with zero rejected replies. Resend load stayed ~0.92/frame because cache + ARQ are parallel |
 | — | Cache timing/ordering evidence | **DONE (Pass 50):** real P95 first reply/completion 2.845/2.910 ms; a targeted 3 ms first-NACK grace cut NACK packets 22.5% and vehicle resends 21.3% in clean 1,800-frame A/B runs. Default 3 ms, range 0..6, exact block + first NACK only |
-| — | Remaining rig verification | After the stationary sequence, run radio/kernel-monitor coverage for the controller/cache harnesses (`cache_repair` / `actuation` / `jscc_enforce` / `fps_ladder` / `cache_offload`) and the controller soak |
+| — | Controller/cache regression rerun | **DONE (Pass 52):** both cache modes, cache-offload parity invariant, actuation, JSCC enforcement, FPS ladder, and the 158 s all-controller soak pass on the final code |
+| — | Kernel-monitor actuation | **DONE (Pass 52):** intended 8812EU TX→8812CU RX path with host fake-venc; profile 5 clean and 5→3→5 loss/recovery, zero actuator failures. Residual-load ARQ P95 5.195 ms; forced 200‰ load saturates the vehicle resend queue at 16.039 ms P95 |
+| — | Remaining rig verification | Cache repair and actuation now have real kernel-monitor coverage. JSCC enforce/FPS ladder still need radio-backend runs; FPS validation must either actuate a volatile venc endpoint or keep the physical source inside every tested rung's capacity |
 | — | venc PR #181 housekeeping | OPEN — VERSION/HISTORY bump (merge-order dependent vs #178/#179), Star6E IDR-failure return code, old-SDK soft-enforcement log line |
 
 Full problem statements and recommendations: `review-log.md` "Open

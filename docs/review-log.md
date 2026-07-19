@@ -1261,6 +1261,55 @@ ARQ-assisted frames. The operator reported perfect visual cadence. The small
 clean ARQ sample measured 3.78 ms P95 NACK-build→retransmit, below the 6 ms
 usefulness target; it is a clean-path confirmation, not a loaded-tail claim.
 
+## Pass 52 — controller regressions and kernel-monitor actuation (2026-07-19)
+
+All latest-code UDP controller gates were rerun after the cache ordering and
+SHM-access changes:
+
+- Cache-only and combined cache+vehicle-ARQ delivered byte-exact output at
+  150‰ loss (280/300 and 278/300 frames respectively).
+- Cache parity-offload stayed invariant: repair/source ratio 0.429 both with
+  and without the cache, while the cache path remained active.
+- The actuation checker accepted 47 formula-exact writes across eight rungs;
+  JSCC enforcement exercised 230 valid/enforced frames, 175 deadline discards,
+  and the feedback-stale fallback; the FPS ladder produced
+  `90→75→60→75→90` with dwell and cap coupling intact.
+- The 158 s all-controller soak exited every process cleanly, parsed 2,372
+  schema-valid stats rows, delivered 3,031/4,740 byte-exact frames through its
+  outage schedule, made 131 venc pushes with zero failures, enforced 3,019
+  frames, repaired 196 blocks from cache, and restored rung 7 / 90 fps.
+
+Kernel-monitor actuation was then verified without exposing the vehicle venc
+API to controller-cadence writes. Vehicle HTTP actuation went over Ethernet to
+a host fake-venc endpoint, while video and feedback used the physical 8812EU
+TX→8812CU RX monitor link. Because the real encoder remained at 8,192 kbps, the
+valid fake-actuator envelope was profiles 3..5; a preliminary 0..5 attempt was
+discarded because fake demotion claimed 3,804 kbps without actually reducing
+the source, violating §9.5's bitrate-before-MCS premise and overloading MCS0.
+
+In the valid bounded run, a 15.45 s clean window held profile 5: 1,390 source
+frames and 1,388 SHM frames, zero unrecoverable/ring drops, 14 FEC-only frames,
+one ARQ-assisted frame, fresh reports, zero steady-state venc writes, and zero
+actuation failures. NACK-build→retransmit P95 was 5.195 ms across 17 samples,
+inside the 6 ms usefulness target.
+
+A 200‰ ground synthetic-loss phase demoted 5→3 while reports stayed fresh. In
+10.45 s it generated 496 NACKs and 1,153 vehicle resends; 338 frames used FEC,
+184 used ARQ, and 251 remained unrecoverable. Ground NACK-build→inject stayed
+56 us P95, but build→retransmit rose to 22.809 ms and the vehicle's local
+NACK-receive→resend rose to 16.039 ms. This is ARQ-queue saturation when ARQ is
+forced to be the primary repair layer, not RF propagation delay. It confirms
+the operational rule: diversity/FEC/cache must remove bulk loss before ARQ;
+the <6 ms gate applies at residual load, not an artificial 20% ARQ workload.
+
+Returning to the clean receiver restored profile 5, fresh reports, and a final
+10.25 s zero-unrecoverable/zero-ring-drop window with no steady actuator writes.
+The vehicle was then restored to its original config hash and AP service.
+
+Evidence:
+
+- `artifacts/pr26-monitor-diversity-20260719/controller-monitor-bounded/`
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
