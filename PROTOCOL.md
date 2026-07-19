@@ -1150,23 +1150,30 @@ reactive-demote (rule 1)** (don't blame RF for encoder overshoot), does **not**
 suppress RSSI rules (2,3), and after `pressure_escape_s` climbs to drain the ring
 (rule 4).
 
-### 9.10 TX-wedge watchdog (CCX-report liveness)
+### 9.10 TX-wedge watchdog (backend TX-progress liveness)
 
 The §6.5 watchdog is RX-side; this is its TX-side sibling, run by any node
 whose TX adapter is a radio (§3.0). The failure mode is real and observed:
 the RTL88x2 USB TX wedge — bulk-OUT keeps accepting frames (`tx_submitted`
 advances) while nothing airs, and only a physical re-plug recovers the chip.
 
-**Trigger — report absence, never report deficit (Pass 11).** The per-frame
-CCX TX-status reports (Pass 8) are lossy under load *by design*: the step-11
-bench measured healthy report return rates of 100% at ≤500 pps falling to
-~25% at 4500 pps, so any deficit threshold misfires exactly when the link is
-busiest. A healthy chip returned *some* reports at every measured load. The
-detector therefore evaluates one verdict per `wedge_window_ms` (seed 1000)
-from the `(tx_submitted, tx_reports)` counter deltas:
+**Trigger — progress absence, never progress deficit (Pass 11; monitor
+extension Pass 49).** Devourer uses per-frame CCX TX-status reports (Pass 8).
+Those reports are lossy under load *by design*: the step-11 bench measured
+healthy report return rates of 100% at ≤500 pps falling to ~25% at 4500 pps,
+so any deficit threshold misfires exactly when the link is busiest. A healthy
+chip returned *some* reports at every measured load. Kernel-monitor has no CCX
+surface; it uses the TX adapter's monotonic Linux netdev `tx_packets` counter
+as the completion-progress signal. This catches a measured CU failure where
+AF_PACKET `send()` returned success 915 times while `tx_packets` did not move
+and no RF frame aired.
 
-- `Δtx_reports > 0` → not wedged (any report proves the TX path alive);
-- `Δtx_reports == 0` and `Δtx_submitted >= wedge_min_submits` (seed 8) →
+The detector evaluates one verdict per `wedge_window_ms` (seed 1000) from the
+backend's `(tx_submitted, tx_progress)` counter deltas (`tx_progress` = CCX
+reports on devourer, netdev TX packets on kernel-monitor):
+
+- `Δtx_progress > 0` → not wedged (any completion proves the TX path alive);
+- `Δtx_progress == 0` and `Δtx_submitted >= wedge_min_submits` (seed 8) →
   **wedged**;
 - too few submissions to judge → hold the previous verdict (an idle TX is
   not evidence either way).
@@ -1990,8 +1997,10 @@ venc's `/set` is synchronous). Zero/false on nodes without `venc.enabled`.
 §7.2 optimisation's health directly, and `adapter_stalled` + the
 `loss_prediversity` vs `loss_postdiv_prearq` pair expose phantom diversity and the
 ρ decorrelation gauge — the two field-failure modes the design most fears.
-`tx_wedged` is the §9.10 CCX-liveness verdict (TX adapter only, meaningful on
-the radio backend).
+`tx_wedged` is the §9.10 backend-progress verdict (TX adapter only): CCX
+TX-status progress on devourer and Linux netdev `tx_packets` progress on
+kernel-monitor. `tx_reports` itself remains CCX-only and stays 0 on monitor;
+the monitor netdev counter is used internally rather than mislabelled as CCX.
 `uniq`/`diversity` are the §17 gate-2 estimator inputs; the `nack_rtt_*` /
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.

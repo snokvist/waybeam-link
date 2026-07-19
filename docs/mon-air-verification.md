@@ -1,4 +1,4 @@
-# Kernel-monitor backend + core verification (2026-07-11)
+# Kernel-monitor backend + core verification (2026-07-11; updated 2026-07-19)
 
 Bench report for the `kernel-monitor` air backend (`MonAir`, PR #15) and the
 core ARQ/broadcast verification it enabled. Companion to `docs/step11-bench.md`.
@@ -53,6 +53,36 @@ monitor; desk = 2-way diversity ground (CU uplink + EU div). Real craft → desk
 Whole chain proven: vehicle craft → kernel monitor TX → desk diversity RX →
 merge → stream egress.
 
+### Gate 2 — physical N=2 walk fade (RF-proven, PASS)
+
+The deferred vehicle-range test ran on channel 161/HT20 with the standard
+`/usr/bin/waybeam` producer, MCS5, 10% GF(256) RLC on both frame classes, and
+two ground monitor receivers. `wlx40a5ef2f2308` was the designated return TX;
+`wlx40a5ef2f229b` was RX-only. The guarded measurement window was 179.4 s:
+
+| measure | result |
+|---|---:|
+| transmitted / completed frames | 5,378 / 3,491 |
+| pre-diversity / post-diversity-pre-ARQ loss | 86‰ / 24‰ |
+| FEC / ARQ recovered source symbols | 599 / 52 |
+| partially observed unrecoverable frames | 232 |
+| both-receiver blackout | 45.7 s total; 37.1 s longest continuous |
+| scheduled return reports received | 1,438 / 1,461 (98.4%) |
+
+Diversity removed about 72% of the aggregate pre-diversity loss, and FEC
+accounted for 92% of explicit source-symbol recovery once diversity was
+exhausted. That is the intended recovery order: diversity primary, light FEC
+for the residual, and ARQ as the last opportunistic repair. At the range edge,
+however, `2308` was the sole receiving path for 14.0 s while `229b` was sole for
+only 0.6 s. The paths therefore help materially but are not independent or
+balanced at the tail.
+
+The 37.1 s interval with no packets on either adapter is the expected
+same-site correlated-fade limit: 33% static parity would spend airtime without
+repairing it, and ARQ cannot cross the same absent channel. The measured
+operating ruling is 10% base FEC for N=2 monitor mode; an adaptive 15–20% edge
+range may be evaluated, but static 33% is not justified by this result.
+
 ### Gate 3 — NACK→RETRANSMIT round-trip (RF-proven, PASS)
 Live vehicle→desk link, all-IDR feed (every loss is ARQ-class), 15% synthetic
 ground loss to force gaps. Ground NACKs over RF → craft resends (802) → ground
@@ -87,11 +117,15 @@ rejected by §14 regardless.)
 
 ## Remaining
 
-- **Gate 2 (the FEC verdict)** — operator-coordinated real fades (walk /
-  body-block / bank) to measure the P95 cross-adapter ρ on the physical link,
-  which drops into the sweep above → the binary no-FEC vs GF(256) RLC decision.
-  Setup is staged: craft at MCS0 baseline, desk diversity ground ready.
 - **Gate 4** — return-window fit + adaptive-loop stability under a saturating
   injector (quiet-gap vs opportunistic; §9.8 damped step pair).
+- **Stationary sequence complete (Pass 48):** 9,000-frame N=2 decoder/EOS
+  soak passed; `229b` failover/failback works when the CU interface receives a
+  full monitor reinitialization; `229b` return TX is a driver/device silent-TX
+  failure and remains RX-only.
+- **UDP/IP cache verified (Pass 48):** a real independent monitor cache reduced
+  150‰ N=1-stress unrecoverable frames from 534 to 119. Before any monitor-radio
+  cache proposal, instrument cache RTT and revisit cache-vs-vehicle-ARQ
+  ordering with shared RF airtime included.
 - Hardening follow-ups from PR-#15 review: radiotap FCS-flag check, own-TX
   loopback suppression (kernel ≥4.20 / BPF), moved-from asserts.

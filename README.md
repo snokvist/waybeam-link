@@ -28,10 +28,12 @@ coordinated **follow-me channel switch** — built on OpenIPC **devourer** for r
 > stripped before parse); gate 1 **PASSED** (injector + monitor siblings mix
 > in one process, both chip families, per-frame CCX `tx.report` live); gate 3
 > **PASSED** (NACK→RETRANSMIT recovery P90 ≤4 ms at 65% airtime, well inside
-> the 40 ms I-frame deadline; ARQ ceases past saturation by design); gate 2
-> machinery is validated and **desk-partial** (single-adapter synthetic fade
-> behaves textbook-independent; the correlated-fade verdict is deferred to
-> vehicle range testing); gate 4 observables are live (return-window
+> the 40 ms I-frame deadline; ARQ ceases past saturation by design); gate 2 is
+> **RF-proven by a real MCS5 walk fade**: N=2 reduced 86‰ pre-diversity loss to
+> 24‰ post-diversity loss, then 10% GF(256) FEC recovered 599 source symbols
+> versus 52 by ARQ. A 37.1 s whole-link blackout confirmed that neither FEC nor
+> same-channel ARQ can repair the correlated SNR-edge tail. Gate 4 observables
+> are live (return-window
 > paced-hit ratio 97%→77% across load). See `docs/step11-bench.md` for the
 > full bench report and the remaining-work plan. Try it without hardware:
 > `./build/dev/waybeam-link loopback -c examples/config.loopback.sample.json`

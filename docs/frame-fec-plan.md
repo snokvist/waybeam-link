@@ -9,9 +9,10 @@
 > recovery, k+r≤256 cap) not generic random RLC; the repair subheader grew to
 > **11 bytes** (u16 `window_len` + u32 `frame_len`); source symbols carry a
 > **4-byte self-describing subheader** (k, index); the DATA payload budget is
-> **profile-driven (adaptive MTU)**, not fixed 1424. FEC **rates** remain
-> provisional pending the §17 gate-2 ρ verdict. Sections below are the original
-> planning text, kept for provenance.
+> **profile-driven (adaptive MTU)**, not fixed 1424. The §17 gate-2 vehicle
+> walk now supports a 100/100-per-mille N=2 monitor campaign profile; the
+> normative adaptive seeds remain independently configurable. Sections below
+> are the original planning text, kept for provenance.
 
 Plan for frame-sized FEC block emissions with ARQ fallback for small frames.
 This document was a planning artifact — the PROTOCOL.md amendment and code
@@ -30,10 +31,11 @@ The current pipeline:
    no-fragmentation invariant) and injects it over the air.
 3. The **Framer** (§5.1) infers block (frame) boundaries by parsing RTP marker
    bits and timestamps — indirect knowledge of frame boundaries.
-4. **FEC is deferred** per §14, bench-gated on cross-adapter loss correlation
-   rho (§17 gate 2). The bench (`docs/step11-bench.md` §2) validated the
-   gate-2 machinery on synthetic loss and desk-partial real fade; the real-fade
-   vehicle verdict (§4.1) is pending.
+4. **FEC was gated** per §14 on cross-adapter loss correlation rho (§17 gate
+   2). The physical MCS5/N=2 vehicle walk completed 2026-07-19: diversity
+   reduced 86‰ pre-diversity loss to 24‰ post-diversity loss, 10% GF(256) FEC
+   recovered 599 source symbols, and ARQ recovered 52. Light FEC is therefore
+   retained for the residual correlated tail; static 33% is not justified.
 
 ### Why change
 
@@ -124,9 +126,10 @@ Three regimes, selected per frame:
 | P-frame, k > `fec_min_k` | r = ceil(k * `fec_p_rate`) | Seed `fec_p_rate` 0.10-0.15 (10-15% overhead). P-frames are expendable (supersession, §6.2); light parity covers the short-burst gap diversity misses. |
 | IDR frame | r = ceil(k * `fec_i_rate`) | Seed `fec_i_rate` 0.25-0.30 (25-30% overhead). IDR loss is catastrophic (entire GOP lost until next IDR); heavier parity justified. |
 
-The seeds are provisional — the actual rates will be derived from the §17
-gate-2 real-fade rho measurement and bench-validated against the gate-3
-deadline budget.
+The 2026-07-19 real-fade measurement establishes 10% as the current N=2
+monitor campaign base rate. A future enforcing controller may test 15–20% at
+the edge. This does not make 33% a useful static rate: the dominant physical
+failure was a 37.1 s all-receiver blackout that parity cannot cross.
 
 ---
 
@@ -376,11 +379,14 @@ spec-first commit per project law.
       depends on whether the waybeam decoder can consume SHM. If yes, Option A
       is strictly better. If the Android path needs RTP, Option B is a
       compatibility shim, not the primary path.
-- [ ] **FEC rate seeds after gate-2 vehicle verdict:** the i_rate/p_rate seeds
-      above (250/100 per-mille) are provisional. The real-fade rho measurement
-      (§4.1) will inform whether these are too conservative (wasting airtime) or
-      too aggressive (insufficient recovery). The seeds may also differ per
-      operating point / MCS.
+- [x] **FEC operating point after gate-2 vehicle verdict:** the physical N=2
+      MCS5 walk used 100/100 per-mille. It delivered the intended recovery
+      order (diversity, then 599 FEC versus 52 ARQ source-symbol recoveries),
+      while the 37.1 s joint blackout showed why static 33% cannot solve the
+      edge. Keep 10% as the monitor campaign base; evaluate 15–20% only as an
+      adaptive edge action. The normative 250/100 seeds remain configurable
+      for importance-weighted production policy rather than being silently
+      rewritten by this campaign result.
 - [ ] **Repair symbol scheduling vs live priority:** §14 says parity is
       live-priority (budgeted from encoder bitrate). With frame-aligned FEC,
       repair symbols for the current frame are emitted immediately after the

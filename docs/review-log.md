@@ -1034,6 +1034,140 @@ devourer backend remain follow-up RF tests. The vehicle config and
 
 **Amended:** §3.0, §6.4, §7.2–§7.4, §15.3, §16.3 and §17 gate 3.
 
+## Pass 47 — physical N=2 walk fade closes gate 2 (2026-07-19)
+
+A guarded 179.4 s vehicle walk exercised the final SSC338Q binary through the
+real kernel-monitor path on channel 161/HT20. The standard `/usr/bin/waybeam`
+producer ran at MCS5 with 10% GF(256) RLC. Ground used two monitor receivers:
+`wlx40a5ef2f229b` RX-only and `wlx40a5ef2f2308` as RX plus the designated
+return transmitter.
+
+- The vehicle transmitted 5,378 frames and ground completed 3,491. Aggregate
+  pre-diversity loss was 86‰ and post-diversity/pre-ARQ loss 24‰, so the second
+  path removed about 72% of otherwise-lost symbols.
+- FEC recovered 599 source symbols; ARQ recovered 52. Thus FEC supplied 92% of
+  explicit post-diversity source-symbol recovery, leaving ARQ in its intended
+  last-resort role. There were 232 partially observed unrecoverable frames.
+- Both ground receivers were silent for 45.7 s total, including a 37.1 s
+  continuous blackout. `2308` alone carried 14.0 s of marginal reception;
+  `229b` alone carried only 0.6 s. Diversity is useful but becomes correlated
+  and asymmetric at the range edge.
+- Of the return reports scheduled after the measurement reset, 1,438/1,461
+  (98.4%) reached the vehicle. NACK build→radio submission P95 was 608 µs and
+  vehicle receipt→resend submission P95 was 926 µs. Full
+  build→retransmission P95 rose to 6.525 ms at the RF cliff (core RTT P95 5 ms,
+  max 8 ms), versus the earlier 2–3 ms stationary result. The local priority
+  lane remains sub-millisecond; the edge tail is RF availability.
+- The SHM trace had no PTS regression, malformed frame, ring overflow, or
+  protocol decode error. Because the validator was terminated during guarded
+  cleanup rather than allowed to reach EOS, the next stationary soak must
+  obtain the explicit decoder EOS verdict.
+
+Ruling: keep 10% as the N=2 monitor base rate. An adaptive 15–20% edge range
+may be evaluated, but static 33% is not justified: it costs 2.8× the repair
+traffic seen at 10% in Pass 46 and cannot repair the measured whole-site
+blackout. Stationary follow-up order is (1) long N=2/MCS5/FEC10 decode soak,
+(2) controlled receiver disable/re-enable, (3) diagnose the `229b` return-TX
+failure, and (4) independent ARQ-cache verification over UDP/IP before any
+monitor-radio cache proposal.
+
+No protocol amendment: this pass supplies the real-RF evidence required by
+§17 gate 2 and selects an operating point within the existing §14 mechanism.
+Raw local evidence is retained under
+`artifacts/pr26-monitor-diversity-20260719/realrf-walkfade-n2-fec10/`.
+
+## Pass 48 — stationary soak, failover, return-TX isolation, and IP cache (2026-07-19)
+
+The post-walk stationary sequence used the same final SSC338Q binary,
+channel 161/HT20, MCS5, 10% GF(256), and the vehicle's current standard
+`/usr/bin/waybeam` producer (90 fps in the restored operator configuration).
+
+**N=2 soak.** The explicit decoder gate completed 9,000/9,000 frames including
+101 IDRs with `bad_meta=0`, `bad_annexb=0`, `pts_regress=0`, and `decode=ok`.
+At the consumer boundary there were no SHM/kernel drops, malformed packets,
+adapter stalls, or wedges. FEC recovered 123 source symbols and ARQ 10; six
+incomplete frames were superseded without upsetting the decoder. Core NACK RTT
+P95/max was 5/5 ms. The apparent SHM-full count in the later shutdown snapshot
+was created only after the finite validator exited while the producer remained
+live; the boundary snapshot is the measurement.
+
+**Receiver failover/failback.** Administratively disabling RX-only `229b`
+made the liveness watchdog mark it stalled while `2308` continued both video
+RX and return TX without a restart. The expected N=1 penalty appeared (19–21‰
+post-diversity loss, heavy FEC/ARQ use). A bare `ip link up` left the CU driver
+`NO-CARRIER`, at −100 dBm TX power, and packet-silent. Reapplying the complete
+monitor sequence (down → monitor type → up → MTU/channel) restored RX;
+waybeam-link cleared `adapter_stalled` automatically. A post-rejoin 900-frame
+decoder run passed with both adapters receiving, nine FEC source recoveries,
+zero ARQ, and zero new unrecoverable frames.
+
+**`229b` return-TX isolation.** With `229b` designated TX, 915 AF_PACKET sends
+returned success and `tx_failed` stayed zero, but Linux `tx_packets/tx_bytes`
+remained exactly 1,854/114,691, the adjacent `2308` captured zero stamped
+returns, and the vehicle RX counter stayed zero. The same-session `2308`
+control advanced netdev counters by 200 packets/12,600 bytes, was captured by
+`229b` (20 captured, 39 filter hits), and reached the vehicle (272 RX frames;
+103/146 scheduled reports received during the sampled window). This is below
+the waybeam wire/core: keep `229b` RX-only. Kernel-monitor still needs an
+honest silent-TX/wedge gauge because successful `send()` alone cannot detect
+this driver/device failure.
+
+**Independent cache over UDP/IP, real RF collection.** A clean `229b` monitor
+process acted as cache node 33 while the `2308` aggregator took a deterministic
+150‰ post-radio receive drop. Cache status/request/reply used localhost UDP/IP;
+vehicle ARQ remained live in parallel as §14.3 specifies. At the finite
+consumer boundary the cache accepted 1,715 symbols, repaired 774 blocks,
+rejected zero replies, and reported 992‰ health. The matched no-cache control
+used the same radio/drop seed and nearly identical receiver windows:
+
+| 150‰ N=1 stress | cache over UDP/IP | no cache |
+|---|---:|---:|
+| completed receiver frames in snapshot | 4,318 | 4,339 |
+| FEC-recovered source symbols | 3,587 | 3,516 |
+| ARQ-recovered source symbols | 1,010 | 1,645 |
+| unrecoverable/superseded frames | **119** | **534** |
+| vehicle resends / transmitted frames | 4,147 / 4,536 | 4,461 / 4,864 |
+| full NACK-build→retransmit P95 | 21.751 ms | 19.977 ms |
+
+Both finite consumers completed 4,500 byte-clean decoded frames. Cache reduced
+unrecoverable frames by 77.7%, proving the real monitor-receiver → UDP/IP cache
+→ aggregator path. It did not materially reduce resend load (0.914 versus
+0.917 resend/frame), because cache requests and vehicle NACKs deliberately run
+in parallel. The 20 ms ARQ tail is the forced 15% N=1 overload regime, not the
+stationary N=2 operating point.
+
+Ruling: UDP/IP cache transport is verified. Do not infer that the reserved RF
+cache binding is ready: it would consume shared airtime and invalidates the
+v1 parallel-ordering rationale. Before proposing it, add cache request/reply
+latency telemetry and decide from measurement whether a fresh-cache-only,
+strictly bounded grace before the first vehicle NACK is worth the latency.
+
+No protocol amendment in this pass. Evidence is retained under:
+
+- `artifacts/pr26-monitor-diversity-20260719/stationary-soak-n2-mcs5-fec10/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-failover-229b/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-returntx-229b-diagnosis/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-cache-udpip-realrf/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-cache-control-realrf/`
+
+## Pass 49 — kernel-monitor silent-TX observability ruling (2026-07-19)
+
+Pass 48 proved that AF_PACKET submission success is not a TX-liveness signal:
+`229b` accepted 915 sends while its netdev TX counters remained frozen and no
+adjacent receiver or vehicle observed a frame. Kernel-monitor nevertheless
+hardcoded `tx_wedged=false`; the existing §9.10 watchdog was devourer-only
+because its progress source was CCX TX reports.
+
+Ruling: reuse the existing absence-only watchdog and its seeds, substituting
+the TX interface's monotonic Linux `tx_packets` counter as kernel-monitor's
+completion-progress source. Any progress clears the verdict; zero progress
+with at least `wedge_min_submits` during a full window sets it. The action stays
+observability-only—no automatic role swap, USB reset, or adaptation coupling.
+The public `tx_reports` field remains honestly CCX-only and stays zero on
+kernel-monitor; only `tx_wedged` consumes the netdev progress internally.
+
+**Amended:** §9.10 and §15.3. Code follows separately.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
