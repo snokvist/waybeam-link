@@ -36,6 +36,7 @@ struct MonAirCfg {
     std::optional<uint8_t> filter_net_id;  // RX enforces only when configured
     uint16_t originator = 0;               // stamped in SA; own frames dropped
     uint16_t rx_drop_permille = 0;         // bench-only synthetic RX loss
+    uint16_t airtime_efficiency_permille = 0;  // §14.2; 0 = unavailable
 };
 
 class MonAir {
@@ -65,6 +66,11 @@ class MonAir {
     // Linux netdev tx_packets counter proves driver transmission progress.
     // Both counters are cumulative.
     void tx_progress_counters(uint64_t& submitted, uint64_t& completed) const;
+
+    // §14.2 effective HT20 serialization time. include_pending adds socket
+    // outbound bytes when the kernel exposes them; zero calibration = unknown.
+    std::optional<uint32_t> estimate_airtime_us(size_t bytes,
+                                                bool include_pending) const;
 
     // Deliver queued RX frames (§3.0 payloads, header stripped); blocks up to
     // timeout_ms when the queue is empty. Returns frames delivered.

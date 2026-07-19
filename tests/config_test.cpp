@@ -217,7 +217,8 @@ int main() {
     {
         auto r = load_config_json(R"({
           "node": {"originator": 7, "role": "rx", "net_id": 2},
-          "air": {"kind": "kernel-monitor", "rx_drop_permille": 30},
+          "air": {"kind": "kernel-monitor", "rx_drop_permille": 30,
+                  "airtime_efficiency_permille": 600},
           "adapters": [
             {"name": "uplink", "ifname": "wlan0", "role": "tx", "channel": 5805},
             {"name": "div0", "ifname": "wlx01", "role": "rx", "channel": 5805}
@@ -227,6 +228,7 @@ int main() {
             const Config& c = *r.value;
             CHECK(c.air.kind == AirCfg::Kind::kMonitor);
             CHECK_EQ_U(c.air.rx_drop_permille, 30);
+            CHECK_EQ_U(c.air.airtime_efficiency_permille, 600);
             CHECK_EQ_U(c.adapters.size(), 2);
             CHECK(c.adapters[0].ifname == "wlan0");
             CHECK(c.adapters[0].role == Role::kTx);
@@ -297,6 +299,12 @@ int main() {
                  "exactly one");
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "air":{"kind":"udp","pace_mbps":20}})", "only valid");
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "air":{"kind":"kernel-monitor",
+             "airtime_efficiency_permille":1001}})", "0..1000");
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "air":{"kind":"udp","airtime_efficiency_permille":600}})",
+                 "only valid");
     // duplicate stream_id.
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "streams":[

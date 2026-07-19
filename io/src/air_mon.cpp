@@ -8,8 +8,11 @@
 #include <net/if.h>           // if_nametoindex
 #include <sys/socket.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/time.h>  // struct timeval (SO_RCVTIMEO)
 #include <unistd.h>    // close
+
+#include <linux/sockios.h>
 
 #include <atomic>
 #include <cerrno>
@@ -24,7 +27,9 @@
 #include <vector>
 
 #include "wblink/dot11.h"
+#include "wblink/airtime.h"
 #include "wblink/radiotap.h"
+#include "wblink/types.h"
 
 namespace wblink {
 
@@ -532,6 +537,28 @@ int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
 int MonAir::wait_fd() const { return impl_->ready_fd; }
 
 size_t MonAir::rx_adapters() const { return impl_->adapters.size(); }
+
+std::optional<uint32_t> MonAir::estimate_airtime_us(
+    size_t bytes, bool include_pending) const {
+    if (impl_->cfg.airtime_efficiency_permille == 0) return std::nullopt;
+    uint64_t total = bytes;
+    if (include_pending) {
+        int pending = 0;
+        const int fd = impl_->adapters[impl_->tx_idx]->fd;
+        if (::ioctl(fd, SIOCOUTQ, &pending) == 0 && pending > 0) {
+            total += static_cast<uint32_t>(pending);
+        }
+    }
+    // Input bytes are Waybeam wire packets. Account for one 802.11 header +
+    // FCS per standard-rung-sized MPDU; service efficiency owns preamble,
+    // contention, driver aggregation, and other measured transport effects.
+    const uint64_t packets =
+        (total + kDefaultMaxPayload - 1u) / kDefaultMaxPayload;
+    total += packets * (kDot11HdrLen + kFcsLen);
+    return ht20_service_time_us(
+        static_cast<size_t>(std::min<uint64_t>(total, SIZE_MAX)), impl_->mcs,
+        impl_->sgi, impl_->cfg.airtime_efficiency_permille);
+}
 
 void MonAir::set_tx_mode(uint8_t mcs, bool sgi) {
     impl_->mcs = mcs;

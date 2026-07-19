@@ -645,6 +645,15 @@ Result<Config> load_config_json(const std::string& json_text) {
             const std::string kind = a.value("kind", std::string("udp"));
             cfg.air.rx_drop_permille = static_cast<uint16_t>(
                 std::min(1000, std::max(0, a.value("rx_drop_permille", 0))));
+            const uint32_t airtime_efficiency = a.value(
+                "airtime_efficiency_permille",
+                uint32_t{cfg.air.airtime_efficiency_permille});
+            if (airtime_efficiency > 1000) {
+                return Result<Config>::fail(
+                    "air: airtime_efficiency_permille must be 0..1000");
+            }
+            cfg.air.airtime_efficiency_permille =
+                static_cast<uint16_t>(airtime_efficiency);
             cfg.air.wedge_window_ms =
                 a.value("wedge_window_ms", cfg.air.wedge_window_ms);
             cfg.air.wedge_min_submits =
@@ -679,6 +688,12 @@ Result<Config> load_config_json(const std::string& json_text) {
                 return Result<Config>::fail(
                     "air: kind \"" + kind +
                     "\" unknown (udp | udp-broadcast | radio | kernel-monitor)");
+            }
+            if (cfg.air.kind != AirCfg::Kind::kMonitor &&
+                cfg.air.airtime_efficiency_permille != 0) {
+                return Result<Config>::fail(
+                    "air: airtime_efficiency_permille is only valid for "
+                    "kernel-monitor");
             }
         }
 

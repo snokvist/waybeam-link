@@ -244,6 +244,9 @@ struct AirCfg {
     // permille of filter-passed frames, independently per adapter (gate-2/3
     // exercise without physical fades). 0 = off (the shipping default).
     uint16_t rx_drop_permille = 0;
+    // §14.2 kernel-monitor effective serialization calibration. Zero keeps
+    // transport airtime unknown and JSCC in authored fixed-policy fallback.
+    uint16_t airtime_efficiency_permille = 0;
     // §9.10 TX-wedge watchdog (radio backend, §17 seeds). window 0 disables.
     uint32_t wedge_window_ms = 1000;
     uint32_t wedge_min_submits = 8;

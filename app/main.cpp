@@ -609,6 +609,8 @@ struct AirBackend {
             mc.filter_net_id = cfg.node.net_id;
             mc.originator = cfg.node.originator;
             mc.rx_drop_permille = cfg.air.rx_drop_permille;
+            mc.airtime_efficiency_permille =
+                cfg.air.airtime_efficiency_permille;
             auto a = MonAir::create(mc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
@@ -843,6 +845,9 @@ struct AirBackend {
     bool tx_pending() const { return udp && udp->tx_pending(); }
     std::optional<uint32_t> estimate_airtime_us(size_t bytes,
                                                 bool include_pending) const {
+        if (mon) {
+            return mon->estimate_airtime_us(bytes, include_pending);
+        }
         if (!udp) return std::nullopt;
         return udp->estimate_airtime_us(bytes, include_pending);
     }
