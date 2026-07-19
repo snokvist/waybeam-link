@@ -1207,7 +1207,6 @@ decoded windows:
 | decoder result | 1,800 clean | 1,800 clean | pass/pass |
 | NACK packets | 623 | 483 | **−22.5%** |
 | vehicle resends | 1,779 | 1,400 | **−21.3%** |
-| cache completions before any block NACK | 22 | 146 | **+124** |
 | deadline drops | 0 | 0 | unchanged |
 | unrecoverable/superseded | 22 | 37 | not paired |
 
@@ -1216,6 +1215,11 @@ traffic changes which subsequent packets consume the deterministic synthetic
 drop RNG, so the runs do not lose identical source symbols. Clean decode and
 zero deadline drops establish that the bounded lead remains functional; the
 NACK/resend counters directly establish the RF-work reduction.
+
+The final bookkeeping audit made `blocks_repaired_before_nack` durable at
+block scope even after individual gaps are filled. Its final semantics are
+unit-tested; the earlier hardware samples used gap-local history and are
+therefore deliberately not quoted here.
 
 Evidence:
 
