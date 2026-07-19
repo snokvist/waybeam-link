@@ -1400,6 +1400,49 @@ new universal constant.
 
 **Amended:** §14.2 (kernel-monitor airtime input and fail-safe configuration).
 
+## Pass 57 — Monitor JSCC enforcement and real-venc FPS ladder (2026-07-19)
+
+The vehicle ran the SSC338Q cross-build on its 8812EU monitor interface; ground
+used the 2308 CU for return TX and 229b CU as the second diversity RX. The
+opposite return assignment immediately reproduced the known 229b TX-wedge
+state, so all accepted measurements use the healthy swapped assignment.
+
+**Real venc FPS ladder.** With a 200-permille N=1 synthetic receive loss phase,
+the selector held profile 0 / 3,804 kbit/s. Live venc writes produced the exact
+adjacent sequence `[100, 90, 75, 60]`; at the floor the measured P-frame EWMA
+was 7,828 B and venc reported 60 fps with `maxPBytes=7,203`. Replacing that
+receiver with clean N=2 promoted to profile 3 / 17,236 kbit/s. The same running
+TX then restored `[60, 75, 90, 100]`; final P-frame EWMA was 20,270 B,
+`maxPBytes=19,586`, ladder state `HOLD`, and venc itself reported 100 fps.
+The complete command sequence was `[100, 90, 75, 60, 75, 90, 100]` with zero
+HTTP failures; the final 61.6 s clean N=2 receiver session recorded one
+unrecoverable frame and neither adapter wedged.
+
+**Monitor JSCC enforcement.** A 600-permille authored monitor service model at
+profile 3 made the previously missing transport input explicit. Under the N=1
+200-permille calibration phase, the final TX snapshot contained 8,457 valid and
+enforced decisions versus 51 cold-start fallbacks, zero JSCC discards, fresh
+feedback, 6,000 us measured RTT, 7,190 us source service, 667 us resend
+service, five selected parity symbols, and ARQ eligible with 10,810 us
+remaining after source transmission. The stable reason was
+`fec_capacity_limited`, truthfully reporting predicted demand of six symbols
+against the configured five-symbol cap.
+
+Restarting the active ground receiver reset its feedback epoch from 346 to
+152. With TX left running, decisions remained valid and enforced count grew
+from 3,111 to 6,683, proving the Pass 55 reporter-session reset on real radio;
+the old permanent `feedback_stale` lockout did not recur.
+
+After both tests, the vehicle was restored byte-for-byte to config SHA256
+`3636ad2b...`, normal `/usr/bin/waybeam` through `S95waybeam`, and AP channel
+149/40 MHz. The verified Pass 56 `waybeam-link` binary remains deployed at
+SHA256 `b9b0fd93...`; all bench processes were stopped.
+
+**Verified:** JSCC per-frame enforcement and the frame-size-driven 100 fps
+ladder on kernel-monitor radio. The next visual/RF work should use clean N=2
+and residual natural loss; the 200-permille N=1 phase was deliberately a
+controller-input calibration, not a quality target.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
