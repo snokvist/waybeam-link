@@ -1310,6 +1310,30 @@ Evidence:
 
 - `artifacts/pr26-monitor-diversity-20260719/controller-monitor-bounded/`
 
+## Pass 53 — FPS ladder preserves frame-aligned FEC block size (2026-07-19)
+
+Operator correction: FPS is not a direct last-resort response to selector-floor
+loss. The selector first chooses a bitrate that fits the PHY. If the resulting
+encoded P frames become too small for useful frame-aligned FEC blocks, the FPS
+ladder lowers cadence while retaining the bitrate target, increasing bytes,
+source symbols, and absolute repair symbols per frame. The nominal/preferred
+low-latency mode is 100 fps.
+
+The live `video0.maxIBytes` and `video0.maxPBytes` fields are fully wired, but
+they are ceilings rather than guarantees of realized frame size. Therefore the
+closed-loop input is measured non-IDR Annex-B size at frame-SHM ingress; IDRs
+are excluded. The initial seeds are a 10,000-byte floor, 1,000-byte restoration
+hysteresis applied to the next-rung size prediction, and the existing slow
+reduce/restore dwell. Stale samples and active bitrate/cap settling hold.
+
+This replaces Pass 39's floor-rung/loss trigger. Cap coupling remains: every
+FPS step immediately re-derives the live I/P ceilings, but only observed
+P-frame size supplies positive evidence. The v1 ceiling remains `preferred`;
+`max` stays forward-reserved.
+
+**Amended:** §9.11 (intent, measurement, reduce/restore predicates, 100 fps
+nominal, configuration, and observability).
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

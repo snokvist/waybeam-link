@@ -1187,51 +1187,67 @@ adaptation (or an automatic USB reset) is deferred until the detector itself
 passes bench validation: silent across a healthy 500–4500 pps sweep, fires
 within one window of an induced wedge (§17 knob table).
 
-### 9.11 FPS ladder (Pass 39 — last-resort operating-mode change)
+### 9.11 FPS ladder (Pass 39, corrected Pass 53 — frame-size preservation)
 
 FPS is the slowest, most user-visible actuator (a change costs ~0.5–1 s and a
-visible cadence discontinuity), so it sits OUTSIDE the §9.1 cascade as its
-own loop with much larger hysteresis: MCS/power moves in milliseconds,
-bitrate in ~0.5 s, FPS only when everything else is exhausted. Opt-in
-(`venc.fps_ladder.enabled`, default false; requires `venc.enabled` — the
-ladder writes `video0.fps`).
+visible cadence discontinuity), so it sits OUTSIDE the §9.1 cascade as its own
+loop with much larger hysteresis. The §9 selector first holds encoder bitrate
+inside the PHY budget. The FPS ladder then preserves a useful frame-aligned FEC
+block size: if the measured encoded P frames become too small, fewer frames per
+second at the same bitrate give each frame more bytes/source symbols and hence
+more absolute repair symbols at the configured FEC ratio. `maxIBytes` and
+`maxPBytes` remain live ceilings, not promises that the encoder will fill a
+frame to that size. Opt-in (`venc.fps_ladder.enabled`, default false; requires
+`venc.enabled` — the ladder writes `video0.fps`).
 
 - **Ladder:** the discrete §9.6 set `{30, 45, 60, 75, 90, 100, 120, 144}`
   clipped to the configured envelope. v1 operates in `[min, preferred]`:
-  `preferred` is the recovery target (the operating point the user asked
-  for); `max` is accepted in config for forward compatibility but v1 never
-  commands above `preferred`. On start the ladder commands `preferred` once
-  (aligning the encoder to the envelope).
-- **Reduce** (toward `min`) when the radio loop is exhausted: the selector
-  sits at the **floor rung** AND the smoothed report loss stays ≥
-  `distress_milli` (seed = the §9.1 `demote_milli`) for `reduce_after_ms`
-  (seed 3000), rate-limited by `reduce_dwell_ms` (seed 4000) between steps.
-  One rung of the ladder per step, never past `min`.
-- **Restore** (toward `preferred`) only on sustained positive evidence: the
-  selector is OFF the floor rung and smoothed loss ≤ `restore_milli` (seed
-  5) for `restore_after_ms` (seed 8000) — deliberately much slower than
-  reduction (§9.7 flap logic applies in spirit: each fps flap is a visible
-  stutter).
-- **Stale feedback holds.** No fresh LINK_REPORT within the report timeout
-  ⇒ the ladder neither reduces nor restores — §9.8 already fails the RUNG
-  toward degradation on silence; an fps change needs positive evidence.
+  `preferred` is the recovery target and nominal low-latency operating point
+  (seed **100 fps**); `max` is accepted in config for forward compatibility but
+  v1 never commands above `preferred`. On start the ladder commands `preferred`
+  once (aligning the encoder to the envelope).
+- **Measurement:** each non-IDR frame at frame-SHM ingress contributes its
+  Annex-B payload bytes (the 8-byte `VencFrameMeta` prefix is excluded) to a
+  fixed EWMA. IDRs are excluded because their deliberately larger size would
+  falsely prove that the steady P-frame block is healthy.
+- **Reduce** (toward `min`) when the measured P-frame EWMA remains below
+  `min_p_frame_bytes` (seed **10000**) for `reduce_after_ms` (seed 3000),
+  rate-limited by `reduce_dwell_ms` (seed 4000) between steps. One neighboring
+  ladder rung per step, never past `min`.
+- **Restore** (toward `preferred`) only when the current EWMA predicts that the
+  next-higher rung remains healthy at the same byte rate:
+  `predicted_up = ewma_bytes * current_fps / next_fps`. It must remain at least
+  `min_p_frame_bytes + restore_hysteresis_bytes` (hysteresis seed **1000**) for
+  `restore_after_ms` (seed 8000). Restoration is deliberately slower than
+  reduction because every FPS flap is visible.
+- **Stale/transition hold.** No P-frame sample within `sample_timeout_ms` (seed
+  500), or an active venc bitrate/cap settling window, clears accumulated
+  reduce/restore evidence and commands no FPS change. Radio loss and selector
+  floor state are not direct FPS triggers; they affect the ladder indirectly
+  through the PHY-safe bitrate target and resulting encoded frame size.
 - **Settling:** after a command the ladder freezes for `settle_ms`
-  (seed 1500; venc's live fps apply + IDR recovery is ~0.5–1 s).
+  (seed 1500; venc's live fps apply + IDR recovery is ~0.5–1 s), discards the
+  pre-change EWMA, and waits for new P-frame evidence.
 - **Cap coupling:** while the ladder is enabled, the §9.6 cap cadence input
   is the **commanded ladder fps** (authoritative immediately), not the
-  measured cadence — the measurement lags a change by ~1 s and would brief
-  the caps wrong across every transition.
+  measured cadence. Both live `maxIBytes`/`maxPBytes` ceilings are recomputed
+  after every FPS step; observed P-frame size, not the derived ceiling, closes
+  the ladder loop.
 - All values are §17 RE-DERIVE seeds; emergency reduction (bypassing dwell
   on persistent deadline misses) is deferred until bench data motivates it.
 
 ```json
-"venc": { "fps_ladder": { "enabled": true, "min": 60, "preferred": 90,
-  "max": 144, "reduce_after_ms": 3000, "reduce_dwell_ms": 4000,
+"venc": { "fps_ladder": { "enabled": true, "min": 60, "preferred": 100,
+  "max": 144, "min_p_frame_bytes": 10000,
+  "restore_hysteresis_bytes": 1000, "sample_timeout_ms": 500,
+  "reduce_after_ms": 3000, "reduce_dwell_ms": 4000,
   "restore_after_ms": 8000, "settle_ms": 1500 } }
 ```
 
 `min ≤ preferred ≤ max`, and each must be a ladder member. §15.3 exposes the
-last commanded fps as link `venc_fps` (0 = never commanded).
+last commanded fps as link `venc_fps` (0 = never commanded), the rounded EWMA
+as `venc_p_frame_bytes`, the configured floor as
+`venc_p_frame_target_bytes`, and the ladder state as `venc_fps_ladder_state`.
 
 ---
 
