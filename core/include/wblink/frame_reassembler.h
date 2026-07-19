@@ -97,7 +97,10 @@ class FrameReassembler {
 
     // Feed one deduped DATA symbol of this stream. is_repair from
     // data_flags & FEC_REPAIR; eob from data_flags & END_OF_BLOCK.
-    void push(uint32_t block_id, uint8_t flags, const uint8_t* payload,
+    // Returns true exactly when this symbol completes and emits the block.
+    // Callers use that edge to retire any packet-level ARQ still pending for
+    // a frame which FEC has already made whole.
+    bool push(uint32_t block_id, uint8_t flags, const uint8_t* payload,
               size_t payload_len, uint64_t now_ms, const Emit& emit,
               bool air_path = true);
 

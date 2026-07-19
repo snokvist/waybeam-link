@@ -137,7 +137,8 @@ Reuses the §14 wire form already spec'd in PROTOCOL.md:
 ### 4.1 Source symbols
 
 Normal DATA packets. Payload = chunk of frame data. `data_flags.FEC_REPAIR`
-**not** set. The last source symbol in the block has `END_OF_BLOCK` set.
+**not** set. With no repair rows the last source symbol has `END_OF_BLOCK` set;
+otherwise the flag moves to the final repair row so block close follows parity.
 
 All packets in a frame share the same `block_id`.
 

@@ -91,6 +91,16 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
                  : (pframe_arq ? data_flags::kPframeArq : 0)) |
         extra_flags_);
 
+    uint16_t r = repair_count(k, is_idr);
+    // §14.2 rule 1: a valid enforced decision replaces the fixed rate, still
+    // GF(256)-clamped and still subject to the min_k ARQ-only rule.
+    if (ov_parity && cfg_.fec.scheme == FecScheme::kRlc256 &&
+        k > cfg_.fec.min_k) {
+        const uint32_t cap =
+            k < kFecMaxSymbols ? kFecMaxSymbols - k : 0;
+        r = static_cast<uint16_t>(std::min<uint32_t>(*ov_parity, cap));
+    }
+
     ++stats_.frames;
     if (is_idr) {
         ++stats_.idr_frames;
@@ -102,7 +112,8 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
         ++stats_.arq_cutoff_frames;
     }
 
-    // --- source symbols: k DATA packets, EOB on the last, tail unpadded (§5.1a).
+    // --- source symbols: k DATA packets, tail unpadded (§5.1a). EOB closes
+    // the whole FEC block, so with parity it moves to the final repair row.
     // Payload = [4-B source subheader (k, i)][chunk].
     src_payload_.resize(kFecSourceSubheaderSize + s);
     for (uint16_t i = 0; i < k; ++i) {
@@ -121,7 +132,8 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
         hdr.seq = next_seq_++;
         hdr.block_id = block_id;
         hdr.data_flags = static_cast<uint8_t>(
-            base_flags | (i == k - 1 ? data_flags::kEndOfBlock : 0));
+            base_flags |
+            (r == 0 && i == k - 1 ? data_flags::kEndOfBlock : 0));
         hdr.active_profile = active_profile_;
         hdr.table_version = table_version_;
         const size_t fl = encode_data(hdr, src_payload_.data(),
@@ -134,15 +146,6 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     }
 
     // --- repair symbols (§14.1), source-first already done above ---
-    uint16_t r = repair_count(k, is_idr);
-    // §14.2 rule 1: a valid enforced decision replaces the fixed rate, still
-    // GF(256)-clamped and still subject to the min_k ARQ-only rule.
-    if (ov_parity && cfg_.fec.scheme == FecScheme::kRlc256 &&
-        k > cfg_.fec.min_k) {
-        const uint32_t cap =
-            k < kFecMaxSymbols ? kFecMaxSymbols - k : 0;
-        r = static_cast<uint16_t>(std::min<uint32_t>(*ov_parity, cap));
-    }
     if (r == 0) {
         return true;
     }
@@ -174,7 +177,9 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
         hdr.stream_type = cfg_.stream_type;
         hdr.seq = next_seq_++;
         hdr.block_id = block_id;
-        hdr.data_flags = static_cast<uint8_t>(base_flags | data_flags::kFecRepair);
+        hdr.data_flags = static_cast<uint8_t>(
+            base_flags | data_flags::kFecRepair |
+            (j == r - 1 ? data_flags::kEndOfBlock : 0));
         hdr.active_profile = active_profile_;
         hdr.table_version = table_version_;
         const size_t fl =

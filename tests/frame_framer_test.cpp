@@ -157,6 +157,10 @@ int main() {
         for (Sym& sy : h.sent) (sy.is_repair() ? rep : src).push_back(&sy);
         CHECK_EQ_U(src.size(), k);
         CHECK_EQ_U(rep.size(), r);
+        size_t eob_count = 0;
+        for (const Sym* sy : src) {
+            eob_count += sy->eob();
+        }
         for (uint16_t j = 0; j < r; ++j) {
             const uint8_t* sub = rep[j]->payload.data();
             CHECK_EQ_U(sub[kFecOffRepairIdx], j);
@@ -164,7 +168,11 @@ int main() {
             CHECK_EQ_U(be32_read(sub + kFecOffWindowBaseSeq), 0u);
             CHECK_EQ_U(be32_read(sub + kFecOffFrameLen), blob.size());
             CHECK_EQ_U(rep[j]->payload.size(), kFecRepairSubheaderSize + s);
+            CHECK_EQ_U(rep[j]->eob(), j == r - 1);
+            eob_count += rep[j]->eob();
         }
+        // Quiet-gap close follows the repair tail, not the last source.
+        CHECK_EQ_U(eob_count, 1);
 
         // Drop 2 source symbols; recover from surviving sources + 2 repairs.
         RlcDecoder dec(k, s);

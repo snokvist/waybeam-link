@@ -1460,15 +1460,21 @@ struct RxCore {
     }
 
     void on_air(uint8_t adapter, const uint8_t* d, size_t n, uint64_t now,
-                const RxEngine::Deliver& deliver, int8_t rssi = 0) {
+                const RxEngine::Deliver& deliver, int8_t rssi = 0,
+                const RxEngine::EarlyDeliver& early_deliver = {}) {
         const Decoded dec = decode(d, n);
         if (const DataView* v = std::get_if<DataView>(&dec)) {
-            engine_.on_data(adapter, *v, now, deliver, rssi);
+            engine_.on_data(adapter, *v, now, deliver, rssi, early_deliver);
         }
     }
 
+    void complete_frame(uint8_t stream_id, uint32_t block_id, uint64_t now,
+                        const RxEngine::Deliver& deliver) {
+        engine_.complete_frame(stream_id, block_id, now, deliver);
+    }
+
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
-              const Inject& inject_nack) {
+              const Inject& inject_nack, bool emit_nacks = true) {
         engine_.tick(now, deliver);
         // §7.3: LINK_REPORTs ride the same uplink as NACKs.
         for (LinkReport r : reporter_.build(engine_, now)) {
@@ -1479,6 +1485,9 @@ struct RxCore {
             if (encode_link_report(r, frame, sizeof(frame)) > 0) {
                 inject_nack(frame, sizeof(frame), r.target_originator);
             }
+        }
+        if (!emit_nacks) {
+            return;
         }
         for (const NackRequest& req : engine_.build_nacks(now)) {
             NackHeader hdr;
@@ -2335,6 +2344,22 @@ int run_rx(const Loaded& l) {
             out->send(d, n);
         }
     };
+    const RxEngine::EarlyDeliver early_deliver =
+        [&](uint8_t sid, uint32_t block_id, uint8_t flags,
+            const uint8_t* d, size_t n) -> RxEngine::EarlyDeliverResult {
+        for (ShmOut& so : shm_outs) {
+            if (so.stream_id != sid) {
+                continue;
+            }
+            const bool complete = so.reasm->push(
+                block_id, flags, d, n, deliver_now,
+                [&](const uint8_t* f, size_t len) {
+                    so.ring->write_frame(f, len);
+                });
+            return RxEngine::EarlyDeliverResult{/*handled=*/true, complete};
+        }
+        return {};
+    };
 
     // §7.2 ground side: returns (NACK/LINK_REPORT) coalesce and fire at the
     // middle of the craft's quiet gap, anchored on the EOB's receive-TSF.
@@ -2342,6 +2367,11 @@ int run_rx(const Loaded& l) {
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> ret_held;
     std::optional<uint64_t> ret_at_us;
+    // If the repair-tail EOB itself is lost, silence after the last received
+    // DATA symbol is the only close signal available. Keep a rolling host-
+    // time fallback at the return-window midpoint so ARQ cannot remain
+    // suppressed forever waiting for an EOB that will never arrive.
+    std::optional<uint64_t> repair_tail_fallback_us;
     uint32_t ret_window_hits = 0;
     uint32_t ret_window_misses = 0;
     uint64_t tsf_fallbacks = 0;
@@ -2487,6 +2517,10 @@ int run_rx(const Loaded& l) {
                 return;
             }
             if (const DataView* v = std::get_if<DataView>(&dec)) {
+                if (qg.enabled()) {
+                    repair_tail_fallback_us =
+                        qg.return_deadline(now_us_it, 0, std::nullopt);
+                }
                 if ((v->hdr.data_flags & data_flags::kCsaArmed) != 0) {
                     issuer.note_craft_armed(now_us_it);  // §11.6 implicit ACK
                 }
@@ -2498,7 +2532,8 @@ int run_rx(const Loaded& l) {
             if (!std::holds_alternative<DecodeError>(dec)) {
                 follower.note_valid_rx(now_us_it);
             }
-            rx.on_air(meta.adapter_id, d, n, now, deliver, rssi);
+            rx.on_air(meta.adapter_id, d, n, now, deliver, rssi,
+                      early_deliver);
             if (qg.enabled() && frame_is_eob(d, n)) {
                 // Anchor on the SAME adapter's TSF (clocks never cross
                 // adapters); a failed read falls back to host arrival.
@@ -2508,9 +2543,18 @@ int run_rx(const Loaded& l) {
                 }
                 ret_at_us = qg.return_deadline(
                     now_us_it, static_cast<uint32_t>(meta.tsf_us), tsf_now);
+                repair_tail_fallback_us.reset();
             }
         });
-        rx.tick(now, deliver, inject_nack);
+        // With quiet-gap pacing, construct NACKs only after the repair-tail
+        // EOB has closed local FEC collection. LINK_REPORT generation remains
+        // periodic and may queue before that close.
+        const bool repair_tail_closed =
+            ret_at_us.has_value() ||
+            (repair_tail_fallback_us &&
+             now_us_it >= *repair_tail_fallback_us);
+        rx.tick(now, deliver, inject_nack,
+                !qg.enabled() || repair_tail_closed);
         air.value->heartbeat(l.cfg.node.originator, session, now);
         // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
         // so a stalled block never wedges frame-shm egress.
@@ -2628,16 +2672,17 @@ int run_rx(const Loaded& l) {
                 }
                 // §14.3: cache symbols feed the reassembler directly — never
                 // the §6.1/§6.2 per-adapter state.
-                bool emitted = false;
-                cache_reasm->push(wv->hdr.block_id, wv->hdr.data_flags,
-                                  wv->payload, wv->payload_len, now,
-                                  [&](const uint8_t* f, size_t len) {
-                                      cache_ring->write_frame(f, len);
-                                      emitted = true;
-                                  },
-                                  /*air_path=*/false);
+                const bool emitted = cache_reasm->push(
+                    wv->hdr.block_id, wv->hdr.data_flags, wv->payload,
+                    wv->payload_len, now,
+                    [&](const uint8_t* f, size_t len) {
+                        cache_ring->write_frame(f, len);
+                    },
+                    /*air_path=*/false);
                 if (emitted) {
                     cache_ctl->note_completed(wv->hdr.block_id);
+                    rx.complete_frame(l.cfg.cache.repair.stream_id,
+                                      wv->hdr.block_id, now, deliver);
                 }
             }
             for (const StreamKey& k : rx.stream_keys()) {

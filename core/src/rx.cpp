@@ -2,6 +2,7 @@
 #include "wblink/rx.h"
 
 #include <algorithm>
+#include <iterator>
 
 #include "wblink/clamp.h"
 
@@ -170,7 +171,8 @@ RxEngine::Stream* RxEngine::try_latch(const DataView& v, uint64_t now_ms) {
 }
 
 void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
-                       const Deliver& deliver, int8_t rssi) {
+                       const Deliver& deliver, int8_t rssi,
+                       const EarlyDeliver& early_deliver) {
     Adapter& a = adapters_[adapter_id];
     a.last_rx_ms = now_ms;
     ++a.rx;
@@ -240,6 +242,7 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
         s->held.clear();
         s->gaps.clear();
         s->blocks.clear();
+        s->completed_blocks.clear();
         s->adapter_last_seq.clear();
         // fall through: this packet is accepted under the new floor
     }
@@ -314,11 +317,38 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
     if (v.payload_len > 0) {
         h.payload.assign(v.payload, v.payload + v.payload_len);
     }
-    s->held.emplace(v.hdr.seq, std::move(h));
+    auto [held_it, inserted] = s->held.emplace(v.hdr.seq, std::move(h));
+    (void)inserted;  // uniqueness was established before constructing Held
 
     note_gaps(*s, now_ms);
+    if (early_deliver) {
+        const EarlyDeliverResult early = early_deliver(
+            s->local_stream_id, v.hdr.block_id, v.hdr.data_flags,
+            v.payload, v.payload_len);
+        held_it->second.delivered_early = early.handled;
+        if (early.handled) {
+            ++s->counters.delivered;
+        }
+        if (early.block_complete) {
+            mark_frame_complete(*s, v.hdr.block_id);
+        }
+    }
     evaluate_gaps(*s, now_ms);
     advance_cursor(*s, now_ms, deliver);
+}
+
+void RxEngine::complete_frame(uint8_t local_stream_id, uint32_t block_id,
+                              uint64_t now_ms, const Deliver& deliver) {
+    for (auto& [key, s] : streams_) {
+        (void)key;
+        if (s.local_stream_id != local_stream_id) {
+            continue;
+        }
+        mark_frame_complete(s, block_id);
+        evaluate_gaps(s, now_ms);
+        advance_cursor(s, now_ms, deliver);
+        return;
+    }
 }
 
 void RxEngine::note_adapter_seq(Stream& s, uint8_t adapter_id, uint32_t seq) {
@@ -360,7 +390,56 @@ void RxEngine::note_gaps(Stream& s, uint64_t now_ms) {
         if (s.held.count(m) == 0 && s.gaps.count(m) == 0) {
             Gap g;
             g.first_missing_ms = now_ms;
+            if (const auto block = gap_block(s, m);
+                block && s.completed_blocks.count(*block) != 0) {
+                g.fec_satisfied = true;
+            }
             s.gaps.emplace(m, g);
+        }
+    }
+}
+
+std::optional<uint32_t> RxEngine::gap_block(const Stream& s,
+                                            uint32_t seq) const {
+    const auto upper = s.held.lower_bound(seq);
+    const auto lower = upper == s.held.begin() ? s.held.end()
+                                                : std::prev(upper);
+    if (upper != s.held.end() && upper->first == seq) {
+        return upper->second.block_id;
+    }
+    if (upper != s.held.end() && lower != s.held.end()) {
+        if (upper->second.block_id == lower->second.block_id) {
+            return upper->second.block_id;
+        }
+        // EOB now closes the repair tail. A gap after a received EOB belongs
+        // to the following block; otherwise it is the preceding block's tail.
+        return (lower->second.flags & data_flags::kEndOfBlock) != 0
+                   ? upper->second.block_id
+                   : lower->second.block_id;
+    }
+    if (upper != s.held.end()) {
+        return upper->second.block_id;
+    }
+    if (lower != s.held.end()) {
+        return lower->second.block_id;
+    }
+    return std::nullopt;
+}
+
+void RxEngine::mark_frame_complete(Stream& s, uint32_t block_id) {
+    s.completed_blocks.insert(block_id);
+    // Keep only a tiny recent watermark set; the plausible-forward window is
+    // four blocks and a completed block older than that cannot acquire a new
+    // in-window gap.
+    while (s.completed_blocks.size() >
+           static_cast<size_t>(policy_.fwd_clamp_blocks + 2)) {
+        s.completed_blocks.erase(s.completed_blocks.begin());
+    }
+    for (auto& [seq, gap] : s.gaps) {
+        const auto owner = gap_block(s, seq);
+        if (owner && *owner == block_id) {
+            gap.fec_satisfied = true;
+            gap.nack_eligible = false;
         }
     }
 }
@@ -368,6 +447,10 @@ void RxEngine::note_gaps(Stream& s, uint64_t now_ms) {
 void RxEngine::evaluate_gaps(Stream& s, uint64_t now_ms) {
     const std::optional<uint32_t> min_live = min_live_adapter_seq(s, now_ms);
     for (auto& [m, g] : s.gaps) {
+        if (g.fec_satisfied) {
+            g.nack_eligible = false;
+            continue;
+        }
         // §6.2-2 supersession: the nearest received seq above bounds the
         // gap's block from above; if even that is older than the newest
         // block, the gap's block is superseded. best-effort streams skip
@@ -423,9 +506,12 @@ void RxEngine::advance_cursor(Stream& s, uint64_t now_ms,
                               const Deliver& deliver) {
     while (s.cursor <= s.max_seq) {
         if (const auto h = s.held.find(s.cursor); h != s.held.end()) {
-            deliver(s.local_stream_id, h->second.block_id, h->second.flags,
-                    h->second.payload.data(), h->second.payload.size());
-            ++s.counters.delivered;
+            if (!h->second.delivered_early) {
+                deliver(s.local_stream_id, h->second.block_id,
+                        h->second.flags, h->second.payload.data(),
+                        h->second.payload.size());
+                ++s.counters.delivered;
+            }
             s.last_delivered_block = h->second.block_id;
             s.held.erase(h);
             s.gaps.erase(s.cursor);
@@ -445,7 +531,9 @@ void RxEngine::advance_cursor(Stream& s, uint64_t now_ms,
         }
         Gap& g = git->second;
         bool skip = false;
-        if (g.superseded) {
+        if (g.fec_satisfied) {
+            skip = true;  // frame already emitted; no packet-level drop stat
+        } else if (g.superseded) {
             ++s.counters.dropped_superseded;
             skip = true;
         } else if (!s.best_effort) {
@@ -511,6 +599,7 @@ std::vector<NackRequest> RxEngine::build_nacks(uint64_t now_ms) {
         std::vector<uint32_t> due;
         for (auto& [m, g] : s.gaps) {
             if (g.declared_lost && g.nack_eligible && !g.superseded &&
+                !g.fec_satisfied &&
                 g.nack_attempts < policy_.renack_attempts &&
                 g.next_nack_ms <= now_ms) {
                 due.push_back(m);

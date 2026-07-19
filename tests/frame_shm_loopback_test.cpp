@@ -21,6 +21,7 @@
 #include "wblink/frame_framer.h"
 #include "wblink/frame_reassembler.h"
 #include "wblink/frame_shm_format.h"
+#include "wblink/rx.h"
 #include "wblink/wire.h"
 #include "wbtest.h"
 
@@ -45,6 +46,7 @@ std::vector<uint8_t> make_frame(size_t body, bool idr, uint8_t seed) {
 
 // A decoded DATA symbol, as the RX engine would hand it to Deliver.
 struct Pkt {
+    DataHeader hdr;
     uint32_t block_id;
     uint8_t flags;
     std::vector<uint8_t> payload;
@@ -69,6 +71,7 @@ std::vector<Pkt> frame_to_packets(FrameShmRing& prod, FrameShmRing& cons,
                         return;
                     }
                     Pkt p;
+                    p.hdr = v->hdr;
                     p.block_id = v->hdr.block_id;
                     p.flags = v->hdr.data_flags;
                     p.payload.assign(v->payload, v->payload + v->payload_len);
@@ -183,6 +186,78 @@ int main() {
         CHECK_EQ_U(ra.stats().frames_fast, expect_fast);
         CHECK_EQ_U(ra.stats().frames_fec, expect_fec);
         CHECK(expect_fec == 2 && expect_fast == 2);
+    }
+
+    // --- merged RX: repair-tail FEC retires the packet gap before ARQ ------
+    {
+        FrameFramerConfig fc;
+        fc.originator = 17;
+        fc.session_id = 0x01020304;
+        fc.stream_type = stream_type::kRtp;
+        fc.fec.scheme = FecScheme::kRlc256;
+        fc.fec.i_rate_permille = 500;
+        fc.fec.p_rate_permille = 500;
+        fc.fec.min_k = 3;
+        FrameFramer ff(fc);
+        ff.set_operating_point(0, 0, kDefaultMaxPayload);
+
+        FrameReassemblerConfig rc;
+        rc.deadline_ms = 50;
+        FrameReassembler ra(rc);
+
+        RxPolicy policy;
+        policy.admit_n = 1;
+        RxEngine rx(policy,
+                    {WantSpec{0, stream_type::kRtp, fc.originator}}, nullptr,
+                    std::nullopt);
+
+        auto blob = make_frame(9000, /*idr=*/true, 77);
+        auto pkts = frame_to_packets(ip, ic, ff, blob, 1500, rbuf);
+        CHECK(count_repairs(pkts) >= 1);
+
+        size_t sources = 0;
+        size_t ordered_deliveries = 0;
+        const RxEngine::Deliver ordered =
+            [&](uint8_t, uint32_t, uint8_t, const uint8_t*, size_t) {
+                ++ordered_deliveries;
+            };
+        const RxEngine::EarlyDeliver early =
+            [&](uint8_t, uint32_t block_id, uint8_t flags,
+                const uint8_t* data, size_t len) {
+                const bool complete = ra.push(
+                    block_id, flags, data, len, 1500,
+                    [&](const uint8_t* f, size_t n) { op.write_frame(f, n); });
+                return RxEngine::EarlyDeliverResult{true, complete};
+            };
+
+        uint64_t now = 1500;
+        for (const Pkt& p : pkts) {
+            const bool repair =
+                (p.flags & data_flags::kFecRepair) != 0;
+            if (!repair && sources++ == 1) {
+                continue;  // one real packet-sequence gap inside this block
+            }
+            DataView view;
+            view.hdr = p.hdr;
+            view.payload = p.payload.data();
+            view.payload_len = static_cast<uint16_t>(p.payload.size());
+            rx.on_data(0, view, now, ordered, 0, early);
+            rx.on_data(1, view, now, ordered, 0, early);  // diversity copy
+            ++now;
+        }
+
+        const long got = oc.read_frame(obuf.data(), obuf.size());
+        CHECK_EQ_U(static_cast<unsigned long long>(got), blob.size());
+        CHECK(got > 0 &&
+              std::memcmp(obuf.data(), blob.data(), blob.size()) == 0);
+        CHECK_EQ_U(ordered_deliveries, 0u);  // no second delivery on seq drain
+        CHECK_EQ_U(rx.build_nacks(now).size(), 0u);
+        const auto streams = rx.streams();
+        CHECK_EQ_U(streams.size(), 1u);
+        CHECK(streams.size() == 1 &&
+              streams[0].counters.lost_declared >= 1u);
+        CHECK(streams.size() == 1 && streams[0].counters.diversity >= 1u);
+        CHECK_EQ_U(ra.stats().frames_fec, 1u);
     }
 
     // --- beyond the repair budget: drop r+1 sources → nothing emitted -------

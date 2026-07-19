@@ -678,8 +678,9 @@ payload** — FrameFramer parses only the metadata prefix, never the NAL bytes.
    profile); a later frame may use a different `s` after a profile change —
    the wire is self-describing (§3.2).
 4. Emit the `k` source symbols as DATA packets in order (`FEC_REPAIR` unset),
-   `seq` monotonic across the whole block, `END_OF_BLOCK` on the last **source**
-   symbol. Each source DATA payload is a **4-byte source subheader**
+   with `seq` monotonic across the whole block. When `r = 0`, put
+   `END_OF_BLOCK` on the last source symbol. Each source DATA payload is a
+   **4-byte source subheader**
    (`window_len u16 = k`, `sym_index u16 = i`) followed by the chunk. The
    subheader makes every source symbol self-describing: RX reassembly (§6.3a)
    knows each symbol's index and the block's `k` without inferring them from
@@ -687,7 +688,8 @@ payload** — FrameFramer parses only the metadata prefix, never the NAL bytes.
    leading-loss run for a complete frame.
 5. Per the §14 adaptive policy, generate and emit `r` **repair symbols**
    (`FEC_REPAIR` set, 11-byte subheader §14) after the source symbols, same
-   `block_id`.
+   `block_id`. When `r > 0`, put `END_OF_BLOCK` on the final repair symbol so
+   the block-close/quiet-gap edge follows the complete parity tail.
 6. Push every emitted symbol into the resend ring (§5.2) as normal.
 
 Both subheaders are deducted from the rung `max_payload` when sizing the coded
@@ -731,6 +733,10 @@ jitter: URB timing, driver batching, scheduler), not propagation skew.
 ### 6.1 Ingest + dedup
 - Key each DATA packet on `(originator, session, stream, seq)`. First copy wins;
   later duplicates from other adapters are counted (→ `diversity`) and dropped.
+- For a `frame-shm` egress, feed that first copy directly to
+  `FrameReassembler` after dedup, without waiting for the generic packet `seq`
+  cursor. Source/repair equations are self-indexed and may arrive out of order;
+  packet ordering remains active only for loss, deadline, and ARQ accounting.
 - Maintain per-adapter "highest delivered seq" for the short-circuit below.
 
 ### 6.2 Gap detection with short-circuits (priority order)
@@ -749,7 +755,9 @@ A missing seq is declared **lost** as soon as *any* of:
    hit.
 
 ### 6.3 Delivery
-- Deliver in-order, best-effort, out the egress binding (§15) as untouched RTP.
+- Deliver UDP egress in-order, best-effort, as untouched RTP. Frame-SHM symbols
+  use the post-dedup early path in §6.1 and therefore cannot be head-of-line
+  blocked behind a missing packet sequence.
 - "Drop" = *stop recovering + advance cursor*, never withhold already-held
   packets; the decoder's jitter buffer discards genuine late arrivals.
 
@@ -768,6 +776,10 @@ frames instead of forwarding per-packet payloads:
 5. The egressed slot is **byte-identical** to the producer's original slot
    (§15.4) — the metadata prefix rides through transparently; the RX never
    parses the Annex-B payload.
+6. Successful fast/FEC completion marks the block packet-complete in the merged
+   RX engine. Every pending gap belonging to that block becomes FEC-satisfied,
+   advances without a packet-drop charge, and is excluded from all later NACK
+   construction. Cache-delivered completion uses the same edge.
 
 There is no completed-frame reorder buffer. On observing any packet from block
 `N`, every incomplete block older than `N` is finalized as superseded. Once
@@ -785,6 +797,13 @@ not RTP packets.)
 - For a lost seq that is `ARQ`- or `PFRAME_ARQ`-flagged, not superseded, within
   its class deadline: add to the pending SACK set. Coalesce into one bitmap per
   return window (§7), anchored at `base_seq`.
+- With quiet-gap pacing, construct the NACK bitmap only after the repair-tail
+  `END_OF_BLOCK` has closed local FEC collection. A block completed by FEC
+  before that edge contributes no NACK; ARQ is residual repair, not a race
+  against parity still in flight. If that final EOB is itself lost, a rolling
+  host-time fallback at the return-window midpoint after the most recently
+  received DATA symbol releases pending NACKs; EOB loss must not suppress ARQ
+  indefinitely.
 - Send via the **designated uplink TX adapter**; its RX blind spot while
   transmitting is covered by the diversity siblings (ground half-duplex is free).
 - Re-NACK: bounded retries with backoff; stop on RETRANSMIT receipt or on
@@ -1505,8 +1524,9 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
   (guaranteed by MDS). With < `k` after the block deadline / on supersession →
   frame lost (§6.2), no partial delivery.
 - **Emission order:** all `k` source symbols first (source-first delivers the
-  no-loss case without any FEC decode), `END_OF_BLOCK` on the last source
-  symbol, then the `r` repair symbols (same `block_id`).
+  no-loss case without any FEC decode), then the `r` repair symbols (same
+  `block_id`). `END_OF_BLOCK` is on the final repair when `r > 0`, otherwise on
+  the final source. Thus the TSF quiet gap begins only after parity is on air.
 - **Adaptive per-frame policy** (rates provisional, gate-2-derived):
 
   | condition | repair count | rationale |
