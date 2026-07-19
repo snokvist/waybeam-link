@@ -1363,6 +1363,24 @@ the SSC338Q cross-build also completed successfully.
 **Verified:** §9.11 frame-size control and observability on UDP-air. The next
 gate is real venc/radio actuation with direct `venc_frame_out` visual cadence.
 
+## Pass 55 — JSCC feedback epoch is reporter-session scoped (2026-07-19)
+
+The first monitor-radio enforcement run found a receiver-restart lockout. A
+ground restart correctly changed its common-prefix session and reset its
+per-reporter `feedback_epoch`, but TX compared the new epoch with the cached
+epoch from the previous receiver session. Every new feedback packet was then
+rejected as non-forward: LINK_REPORT and ARQ remained active while JSCC stayed
+in `feedback_stale` indefinitely.
+
+The wire contract already defines `feedback_epoch` as monotonic **per
+reporter**. The cache key is therefore reporter `(originator, session_id)`, not
+originator alone. An accepted reporter-session change replaces cached feedback
+before epoch comparison; replay protection remains unchanged within a session.
+JSCC feedback also passes the same preferred/first-latched reporter gate as
+LINK_REPORT.
+
+**Amended:** §3.10 (reporter-session cache identity and reboot behavior).
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

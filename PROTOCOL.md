@@ -493,8 +493,13 @@ latency.
 
 The receiver emits this packet at the existing report cadence after a matching
 frame-SHM stream has latched. It uses the same return injection, quiet-gap, and
-target filtering as NACK/LINK_REPORT. TX accepts it only for its own exact
-`(originator, session_id, stream_id)` and monotonic-forward `feedback_epoch`.
+reporter/target filtering as NACK/LINK_REPORT. TX accepts it only for its own
+exact `(originator, session_id, stream_id)`. The feedback cache is additionally
+keyed by reporter `(prefix.originator, prefix.session_id)`, and
+`feedback_epoch` is monotonic-forward only **within that reporter session**.
+When the accepted reporter reboots and its session changes, TX replaces the
+cached feedback before comparing the new session's epoch; an epoch reset across
+receiver boots must not leave the JSCC controller permanently stale.
 The packet is measurement-only: receipt updates a bounded cache and can never
 directly alter FEC, ARQ, discard, MCS, or encoder state.
 
