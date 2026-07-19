@@ -1008,7 +1008,6 @@ struct TxCore {
     TxCore(const Config& cfg, uint32_t session, const ProfileTable* table,
            uint8_t table_version)
         : originator_(cfg.node.originator),
-          preferred_originator_(cfg.node.preferred_originator),
           session_(session),
           table_version_(table_version),
           table_(table),
@@ -1016,6 +1015,9 @@ struct TxCore {
           venc_(cfg.venc),
           venc_knobs_(cfg.venc),
           arq_max_fps_(cfg.policy.arq.arq_max_fps),
+          feedback_gate_(ReportGatePolicy{
+              cfg.node.preferred_originator,
+              cfg.policy.report_timeout_ms * 4}),
           report_gate_(ReportGatePolicy{
               cfg.node.preferred_originator,
               cfg.policy.report_timeout_ms * 4}) {
@@ -1232,8 +1234,8 @@ struct TxCore {
         if (const JsccFeedback* f = std::get_if<JsccFeedback>(&dec)) {
             if (f->target_originator != originator_ ||
                 f->target_session != session_ ||
-                (preferred_originator_ != 0 &&
-                 f->prefix.originator != preferred_originator_)) {
+                !feedback_gate_.accept(f->prefix.originator,
+                                       f->prefix.session_id, now)) {
                 return false;
             }
             for (Stream& s : streams_) {
@@ -1596,7 +1598,6 @@ struct TxCore {
         estimate_airtime;
 
     uint16_t originator_;
-    uint16_t preferred_originator_ = 0;
     uint32_t session_;
     uint8_t table_version_;
     const ProfileTable* table_;
@@ -1606,6 +1607,7 @@ struct TxCore {
     std::optional<FpsLadder> fps_ladder_;  // §9.11 (Pass 39)
     uint16_t arq_max_fps_ = 100;           // §4.1 Pass 40 cutoff
     bool arq_fps_suppressed_ = false;
+    ReportGate feedback_gate_;             // §3.10 Pass 55
     ReportGate report_gate_;               // §3.5 Pass 41
     uint64_t frame_cadence_us_ = 0; // windowed ingress cadence estimate
     uint64_t cadence_start_ms_ = 0;

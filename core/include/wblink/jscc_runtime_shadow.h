@@ -49,7 +49,8 @@ class JsccRuntimeShadow {
   public:
     explicit JsccRuntimeShadow(const JsccRuntimeShadowConfig& cfg) : cfg_(cfg) {}
 
-    // Caller validates target identity. Replayed/non-forward epochs are ignored.
+    // Caller validates reporter/target identity. Epochs are monotonic within
+    // one reporter session; a receiver reboot starts a new epoch domain.
     bool observe_feedback(const JsccFeedback& feedback, uint64_t now_ms);
     JsccShadowResult evaluate(const JsccShadowFrameInput& frame) const;
     void reset();
