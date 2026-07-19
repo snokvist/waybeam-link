@@ -21,6 +21,9 @@ enum class PacketType : uint8_t {
     kCsa = 0x5,
     kRecoveryRequest = 0x6,
     kJsccFeedback = 0x7,
+    kCacheStatus = 0x8,
+    kCacheRequest = 0x9,
+    kCacheReply = 0xA,
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -53,6 +56,15 @@ inline constexpr size_t kHeartbeatSize = 11;
 inline constexpr size_t kCsaSize = 32;
 inline constexpr size_t kRecoveryRequestSize = 18;
 inline constexpr size_t kJsccFeedbackSize = 37;
+inline constexpr size_t kCacheStatusSize = 29;
+inline constexpr size_t kCacheRequestFixedSize = 32;
+inline constexpr size_t kCacheReplyFixedSize = 17;
+
+// §3.11 CACHE_STATUS capability_flags bits.
+namespace cache_capability {
+inline constexpr uint8_t kIpTransport = 0x01;
+inline constexpr uint8_t kKnownMask = kIpTransport;
+}  // namespace cache_capability
 
 namespace jscc_feedback_flags {
 inline constexpr uint8_t kRepairReady = 0x01;
@@ -78,6 +90,10 @@ inline constexpr size_t kFecOffRepairIdx = 0;
 inline constexpr size_t kFecOffWindowLen = 1;
 inline constexpr size_t kFecOffWindowBaseSeq = 3;
 inline constexpr size_t kFecOffFrameLen = 7;
+// Profile validation requires max_payload >= DATA header + 32 bytes. After
+// the repair subheader this leaves at least 21 coded/source bytes.
+inline constexpr uint16_t kMinFrameSymbolSize =
+    32 - kFecRepairSubheaderSize;
 
 // §5.1a — frame-shm SOURCE symbols carry a 4-byte self-describing subheader
 // (window_len u16 @0 = k, sym_index u16 @2 = i) before the chunk, so RX

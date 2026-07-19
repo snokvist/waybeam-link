@@ -187,7 +187,7 @@ returns (**NACK / LINK_REPORT only** — CSA campaign copies stay broadcast,
 | Frame Control | `0x88 0x00` — QoS-Data, ToDS=0 FromDS=0 |
 | addr1 (RA) | the target craft's §3.0 SA **as last heard** (latched per originator from accepted frames — exact match with the MACID the craft's ACK responder armed, adapter-idx byte included) |
 | addr2 (SA) / addr3 | own §3.0 SA / `"VBLK"` BSSID, unchanged |
-| QoS Control | `0x00 0x00` — TID 0, Normal ACK policy |
+| QoS Control | `0x00 0x00` for normal reports; TID 6 for urgent NACKs; Normal ACK policy |
 | radiotap | the same rate-less prefix with `TX_FLAGS = 0` (the frame *expects* an ACK) |
 
 The injecting chip hardware-retransmits an unACKed unicast frame (devourer
@@ -211,6 +211,14 @@ consequences:
 - Downlink DATA stays broadcast unconditionally (Pass 8 rejected hardware
   ARQ for the video path; the §1 no-MAC-ARQ invariant stands there).
 
+**Urgent ARQ lane.** NACKs and DATA packets carrying `RETRANSMIT=1` use
+QoS-Data TID 6 so monitor/devourer injection can select the voice access
+category; the monitor socket also sets `SO_PRIORITY=6`. When the destination is
+broadcast, radiotap keeps `NOACK`; an enabled unicast-return NACK keeps the
+hardware-ACK radiotap above. Live DATA and LINK_REPORT traffic remain TID 0 / the
+ordinary Data shape. This changes only 802.11 encapsulation, never the waybeam
+wire packet inside it.
+
 ### 3.1 Common prefix (all packet types) — 11 bytes
 
 | off | size | field | notes |
@@ -222,9 +230,11 @@ consequences:
 | 7 | 4 | `session_id` | sender boot nonce |
 
 **Packet types** (low nibble): `0x1 DATA · 0x2 NACK · 0x3 LINK_REPORT ·
-0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK`. 7 of 16 used; the version nibble will not ship 16
-wire-incompatible revisions, so there is no type-budget scarcity. Future types
-(e.g. a dedicated FEC-repair type, §14) take free slots.
+0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK ·
+0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY`. 10 of 16 used; the
+version nibble will not ship 16 wire-incompatible revisions, so there is no
+type-budget scarcity. Future types (e.g. a dedicated FEC-repair type, §14)
+take free slots.
 
 **Common prefix describes the SENDER.** Control packets (NACK, LINK_REPORT) name
 the stream they concern via a **target descriptor** in their body (§3.3, §3.5) —
@@ -337,6 +347,17 @@ table can therefore never make an older/mismatched client misbehave.
   and cross-checks plausibility (reported loss vs TX-observed NACK behaviour).
   Conflicting concurrent reports for one target ⇒ **fail toward degradation**
   (§9.8), never toward the optimistic one.
+  **Enforcement point (Pass 41):** the filter runs at TX ingest, BEFORE the
+  §9 selector and the §9.11 fps ladder consume the report. With
+  `preferred_originator` configured, only that originator passes (its
+  session follows reboots). Without it, the first reporter latches; the
+  latch follows a same-originator session change (reboot, §2) and
+  **re-latches to the next reporter only after `relatch_ms` of silence**
+  (seed 4 × `report_timeout_ms`). Rejected reports are counted
+  (§15.3 `reports_rejected`); the plausibility cross-check remains §17
+  future work. An accepted session/source transition starts a new selector
+  epoch and smoothing domain; state from the previous reporter MUST NOT make
+  the newly accepted identity look stale.
 
 ### 3.6 `table_version` — content hash, not a counter
 
@@ -472,8 +493,13 @@ latency.
 
 The receiver emits this packet at the existing report cadence after a matching
 frame-SHM stream has latched. It uses the same return injection, quiet-gap, and
-target filtering as NACK/LINK_REPORT. TX accepts it only for its own exact
-`(originator, session_id, stream_id)` and monotonic-forward `feedback_epoch`.
+reporter/target filtering as NACK/LINK_REPORT. TX accepts it only for its own
+exact `(originator, session_id, stream_id)`. The feedback cache is additionally
+keyed by reporter `(prefix.originator, prefix.session_id)`, and
+`feedback_epoch` is monotonic-forward only **within that reporter session**.
+When the accepted reporter reboots and its session changes, TX replaces the
+cached feedback before comparing the new session's epoch; an epoch reset across
+receiver boots must not leave the JSCC controller permanently stale.
 The packet is measurement-only: receipt updates a bounded cache and can never
 directly alter FEC, ARQ, discard, MCS, or encoder state.
 
@@ -482,6 +508,76 @@ bits are set and its age is within the configured shadow timeout. Missing,
 invalid, stale, wrong-session, or replayed feedback selects the configured
 §14.1 fixed policy and reports the specific fallback state. It must never be
 silently replaced by zero loss or zero RTT.
+
+### 3.11 Cache packets (types `0x8`–`0xA`) — spatial cache repair (§14.3)
+
+Three fixed-schema packets for the §14.3 Cache Controller. In v1 they travel
+**only over the UDP/IP cache sockets (§14.3, §15.2)**, never injected on the
+air path, but they carry the standard §3.1 header so a later RF binding needs
+no re-numbering. The common prefix names the **sender** (aggregator or cache
+node); the body names the **target stream** through the same target descriptor
+as NACK/LINK_REPORT (§3.1 two-identity split). A cache node is an ordinary
+waybeam-link node: its cache identity IS its `originator` (§2), and its
+`session_id` is its own per-boot nonce.
+
+#### CACHE_STATUS (type `0x8`) — 29 bytes
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | sender = the cache node |
+| 11 | 2 | `target_originator` | TX node whose stream is cached |
+| 13 | 4 | `target_session` | exact TX boot/session nonce as latched |
+| 17 | 1 | `target_stream_id` | |
+| 18 | 4 | `oldest_block` | oldest `block_id` still retained |
+| 22 | 4 | `newest_block` | newest `block_id` retained |
+| 26 | 2 | `rx_health_permille` | 0–1000; rolling mean unique/`k` over the retention window |
+| 28 | 1 | `capability_flags` | bit 0 = IP transport (always set in v1); other bits MUST be 0 |
+
+Sent to each configured aggregator endpoint every `status_interval_ms` per
+tracked stream **with a non-empty retention window** — an empty window is
+silence, not a zero-filled status. Aggregators retain status independently per
+cache and target stream identity; one tracked stream MUST NOT overwrite
+another's eligibility state. `rx_health_permille > 1000` is a decode error.
+
+#### CACHE_REQUEST (type `0x9`) — 32 bytes fixed + two bitmaps
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | sender = the aggregator |
+| 11 | 2 | `target_originator` | stream's TX node |
+| 13 | 4 | `target_session` | |
+| 17 | 1 | `target_stream_id` | |
+| 18 | 2 | `target_cache` | `originator` of the ONE cache addressed |
+| 20 | 4 | `request_id` | monotonic per aggregator boot |
+| 24 | 4 | `block_id` | block being repaired |
+| 28 | 2 | `window_len` | `k` (1–256), from the block's subheaders (§5.1a/§14.1) |
+| 30 | 1 | `max_symbols` | ≥1; reply symbol allowance for this request |
+| 31 | 1 | `repair_have_len` | bytes of the second bitmap (≤32) |
+| 32 | ⌈k/8⌉ | `missing_sources` | bit *i* set ⇒ source symbol *i* absent from the merged block |
+| 32+⌈k/8⌉ | var | `repair_have` | bit *r* set ⇒ repair symbol `repair_idx` *r* ALREADY held |
+
+Total length MUST equal `32 + ⌈k/8⌉ + repair_have_len`. It is sent only after
+the §14.3 local-collection phase closes below `k`. `max_symbols` is bounded by
+the FEC deficit, the per-request `reply_limit`, and the remaining §14.3
+per-block symbol cap.
+
+#### CACHE_REPLY (type `0xA`) — 17 bytes fixed + one wrapped DATA packet
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | sender = the answering cache |
+| 11 | 4 | `request_id` | echoed from the request |
+| 15 | 2 | `wrapped_len` | ≥ 26 |
+| 17 | var | `wrapped` | ONE verbatim §3.2 DATA packet (header + subheader + chunk) as heard on the air |
+
+One symbol per reply datagram; several reply datagrams may share a
+`request_id`. The wrapped bytes are the cache's stored **original wire
+packet**, unmodified — the aggregator revalidates it through the normal §3.1/
+§3.2 decode before merging, so a cache cannot hand the reassembler anything a
+radio could not have. Reply selection at the cache: requested missing sources
+first (ascending index), then held repair symbols whose `repair_idx` bit is
+clear in `repair_have` (ascending), stopping at `max_symbols`. A cache holding
+none of the useful symbols stays silent.
 
 ---
 
@@ -536,6 +632,18 @@ the existing classifier. `PFRAME_ARQ` is a measurement/coverage mechanism, not
 permission to extend latency or to actuate adaptive FEC. A receiver that does
 not understand bit 5 ignores it and therefore fails safe as IDR-only ARQ.
 
+**High-cadence ARQ cutoff (Pass 40, operator-ruled).** Above `arq_max_fps`
+(config `policy.arq.arq_max_fps`, seed **100**; 0 disables the cutoff) the
+frame period drops below ~10 ms — the lowest comfortable recovery window:
+§6.3a zero-block retention finalizes an incomplete block the moment the next
+frame arrives, so at 101–144 fps even the I-frame class has under 10 ms of
+usable repair time at the receiver. While the operating cadence (the §9.6
+cadence input, ladder-snapped) exceeds the cutoff, the frame-SHM TX stamps
+**neither `ARQ` nor `PFRAME_ARQ`**, and §14.2 treats those frames as not
+ARQ-capable. Suppressed classifications are counted
+(§15.3 `arq_cutoff_frames`). Above the cutoff, recovery is FEC + diversity +
+§14.3 cache repair only.
+
 **Deadline coupling:** `ARQ`-important blocks carry a longer retransmit deadline
 than best-effort blocks (a slightly-late I-frame still rescues its GOP).
 
@@ -583,8 +691,9 @@ payload** — FrameFramer parses only the metadata prefix, never the NAL bytes.
    profile); a later frame may use a different `s` after a profile change —
    the wire is self-describing (§3.2).
 4. Emit the `k` source symbols as DATA packets in order (`FEC_REPAIR` unset),
-   `seq` monotonic across the whole block, `END_OF_BLOCK` on the last **source**
-   symbol. Each source DATA payload is a **4-byte source subheader**
+   with `seq` monotonic across the whole block. When `r = 0`, put
+   `END_OF_BLOCK` on the last source symbol. Each source DATA payload is a
+   **4-byte source subheader**
    (`window_len u16 = k`, `sym_index u16 = i`) followed by the chunk. The
    subheader makes every source symbol self-describing: RX reassembly (§6.3a)
    knows each symbol's index and the block's `k` without inferring them from
@@ -592,7 +701,8 @@ payload** — FrameFramer parses only the metadata prefix, never the NAL bytes.
    leading-loss run for a complete frame.
 5. Per the §14 adaptive policy, generate and emit `r` **repair symbols**
    (`FEC_REPAIR` set, 11-byte subheader §14) after the source symbols, same
-   `block_id`.
+   `block_id`. When `r > 0`, put `END_OF_BLOCK` on the final repair symbol so
+   the block-close/quiet-gap edge follows the complete parity tail.
 6. Push every emitted symbol into the resend ring (§5.2) as normal.
 
 Both subheaders are deducted from the rung `max_payload` when sizing the coded
@@ -636,6 +746,10 @@ jitter: URB timing, driver batching, scheduler), not propagation skew.
 ### 6.1 Ingest + dedup
 - Key each DATA packet on `(originator, session, stream, seq)`. First copy wins;
   later duplicates from other adapters are counted (→ `diversity`) and dropped.
+- For a `frame-shm` egress, feed that first copy directly to
+  `FrameReassembler` after dedup, without waiting for the generic packet `seq`
+  cursor. Source/repair equations are self-indexed and may arrive out of order;
+  packet ordering remains active only for loss, deadline, and ARQ accounting.
 - Maintain per-adapter "highest delivered seq" for the short-circuit below.
 
 ### 6.2 Gap detection with short-circuits (priority order)
@@ -654,7 +768,9 @@ A missing seq is declared **lost** as soon as *any* of:
    hit.
 
 ### 6.3 Delivery
-- Deliver in-order, best-effort, out the egress binding (§15) as untouched RTP.
+- Deliver UDP egress in-order, best-effort, as untouched RTP. Frame-SHM symbols
+  use the post-dedup early path in §6.1 and therefore cannot be head-of-line
+  blocked behind a missing packet sequence.
 - "Drop" = *stop recovering + advance cursor*, never withhold already-held
   packets; the decoder's jitter buffer discards genuine late arrivals.
 
@@ -673,6 +789,10 @@ frames instead of forwarding per-packet payloads:
 5. The egressed slot is **byte-identical** to the producer's original slot
    (§15.4) — the metadata prefix rides through transparently; the RX never
    parses the Annex-B payload.
+6. Successful fast/FEC completion marks the block packet-complete in the merged
+   RX engine. Every pending gap belonging to that block becomes FEC-satisfied,
+   advances without a packet-drop charge, and is excluded from all later NACK
+   construction. Cache-delivered completion uses the same edge.
 
 There is no completed-frame reorder buffer. On observing any packet from block
 `N`, every incomplete block older than `N` is finalized as superseded. Once
@@ -690,10 +810,17 @@ not RTP packets.)
 - For a lost seq that is `ARQ`- or `PFRAME_ARQ`-flagged, not superseded, within
   its class deadline: add to the pending SACK set. Coalesce into one bitmap per
   return window (§7), anchored at `base_seq`.
+- With quiet-gap pacing, construct the NACK bitmap only after the repair-tail
+  `END_OF_BLOCK` has closed local FEC collection. A block completed by FEC
+  before that edge contributes no NACK; ARQ is residual repair, not a race
+  against parity still in flight. If that final EOB is itself lost, a rolling
+  host-time fallback at the return-window midpoint after the most recently
+  received DATA symbol releases pending NACKs; EOB loss must not suppress ARQ
+  indefinitely.
 - Send via the **designated uplink TX adapter**; its RX blind spot while
   transmitting is covered by the diversity siblings (ground half-duplex is free).
-- Re-NACK: bounded retries with backoff; stop on RETRANSMIT receipt or on
-  deadline/supersession.
+- Re-NACK: bounded retries with a default 6 ms per-attempt backoff; stop on
+  RETRANSMIT receipt or on deadline/supersession.
 
 ### 6.5 Adapter liveness watchdog (anti-phantom-diversity)
 An adapter delivering **zero** frames for `stall_timeout` (seed 200 ms) while
@@ -769,6 +896,11 @@ receive. The mechanism, using only RX-local hardware TSF (no clock crossing):
   known real limitation is a **40 MHz-bandwidth bug** → run the craft at **20 MHz**,
   which also matches the intra-band fast-retune path in §11.) The exact settle time
   is measured at §17 gate 4. Seeds: `guard_us = 300`, `return_window_us = 2000`.
+- A backend without a live TSF read (kernel monitor mode) MUST NOT add the
+  midpoint delay to a NACK after the repair-tail EOB has already arrived through
+  the host/USB path: it submits that NACK immediately after FEC close. Periodic
+  LINK_REPORTs remain normal-priority and wait for the next EOB midpoint; if no
+  EOB arrives for 100 ms, they degrade to §7.1 opportunistic return.
 
 **Crossover (state it, don't hide it):** at high fps + saturated bitrate the idle
 gap shrinks below `return_window_us` and the contract degrades to §7.1
@@ -791,10 +923,12 @@ against plain broadcast returns is a §17 bench slot.
   step change (RSSI-floor breach, loss spike), to cut reaction latency.
 
 ### 7.4 Self-congestion guard
-Retransmit < live priority; airtime cap as a hard downlink fraction; resend
-attempt cap; per-interval bound. A burst needing more than a few repairs is past
-saving — let RTP concealment eat it. The uplink is a **pluggable transport** so a
-dedicated backchannel could replace it later without touching the core.
+Once authorized, a retransmit has queue priority over live video (802.11e TID 6
+on monitor/devourer and the dedicated resend queue on UDP-air), but the airtime
+cap remains a hard downlink fraction, with an attempt cap and per-interval bound.
+A burst needing more than a few repairs is past saving — let RTP concealment eat
+it. The uplink is a **pluggable transport** so a dedicated backchannel could
+replace it later without touching the core.
 
 ---
 
@@ -927,6 +1061,7 @@ Live HTTP, `MUT_LIVE`, sub-ms, no reinit:
 
 ```
 GET /api/v1/set?video0.bitrate=<kbps>          Host 127.0.0.1:80
+GET /api/v1/set?video0.maxIBytes=<B>&video0.maxPBytes=<B>   # one live group
 GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
 ```
 
@@ -934,7 +1069,8 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
   `bitrate_min` is a policy floor ≥ 1000.
 - **Single bitrate authority (deployment rule, not a flag):** venc's API is
   last-writer-wins with no arbitration. waybeam-link MUST be the only writer of
-  `video0.bitrate`: if waybeam-hub is present set its `venc.bitrate_enabled=false`
+  `video0.bitrate` (and, with frame caps enabled, of `video0.maxIBytes`/
+  `maxPBytes`): if waybeam-hub is present set its `venc.bitrate_enabled=false`
   (that flag lives in hub `mod_venc`, not venc); do not run wfb_ng
   `link_controller` — waybeam-link replaces it.
 - **Write only on change (flash wear):** every `/set` persists to
@@ -943,6 +1079,49 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
 - **Low-bitrate coupling (optional):** at floor profiles the SVC-T preset
   oscillates fps; waybeam-link MAY command `video0.resilience=racing` at the low
   end (coarse, hysteretic — `resilience` is heavier than a bitrate tweak).
+
+**Per-frame size caps — horizon actuation (Pass 37).** With `venc.enabled`
+and a frame-shm ingress stream, waybeam-link additionally commands venc's
+per-frame ceilings (`maxIBytes`/`maxPBytes`, FRAMEBITS_FIRST) so a burst
+frame can never be encoded larger than the active rung can carry inside its
+deadline. **A per-frame budget channel is ruled OUT OF SCOPE** (operator,
+2026-07-16): venc control is HTTP with persist-on-set, and Salsify-style
+next-frame commands would need a new transport. The caps are therefore
+**horizon caps** — pure functions of slow inputs, recomputed only when an
+input changes and pushed under the same write-on-change/holdoff rules as
+bitrate, riding the same §9.5 transition moments:
+
+- `frame_period_us` — a **windowed frames-per-ingress-second estimate**
+  (frame count over a ~1 s window; the §15.3 last-gap `frame_interval_us`
+  is batch-drain-skewed and unsuitable), **snapped to the nearest ladder
+  fps** `{30, 45, 60, 75, 90, 100, 120, 144}` so cadence jitter cannot
+  churn the caps; `venc.fps_hint` (seed 100, matching the preferred low-latency
+  mode) until measured.
+- `budget_bps` — the active rung's §9.5 derived bitrate target (already net
+  of airtime fraction, table FEC overhead, and control/telemetry reserves).
+- `maxP = budget_bps · frame_period_us / 8·10⁶ · 1000/(1000 + p_rate‰) ·
+  p_headroom‰/1000` — the deadline-safe P ceiling: one frame period of rung
+  budget, net of the stream's §14.1 P parity.
+- `maxI = budget_bps · arq_deadline_iframe_ms / 8000 · 1000/(1000 + i_rate‰)
+  · i_headroom‰/1000` — the I-class recoverable window (§4.1/§8), net of I
+  parity: an I-frame is sized to what ARQ/FEC can still rescue, not to one
+  frame period.
+- Clamps: `maxI ≥ maxP`; if the I-class deadline/FEC ceiling is tighter than
+  the independently derived P cap, lower `maxP` to `maxI` (never raise I past
+  its recoverable ceiling). Both are floored at venc's own 4096-byte cap floor
+  (never command sub-floor) and ceilinged at
+  `min(cap_ceiling_bytes, s·⌊256000/(1000 + rate‰)⌋)` — the §14.1
+  GF(256) eligibility bound at the rung's symbol size `s`.
+- Headroom seeds 1000 ‰ (= exactly the deadline-safe ceiling); all seeds
+  §17 RE-DERIVE. `venc.frame_caps=false` disables cap writes while keeping
+  bitrate authority.
+
+The doc-level actuator model (commanded / effective / pending): venc applies
+a 2xx `/set` synchronously, so **commanded = applied** at HTTP success; the
+encoder *output* settles over ~0.5–0.75 s. §15.3 exposes the commanded
+values plus `venc_settling` (true within `venc.settle_ms`, seed 750, of the
+last accepted change) so consumers can distinguish a pending transition
+from steady state without a second wire field.
 
 ### 9.7 Flap avoidance (three layers)
 - **Soft reentry:** re-promoting into a just-demoted rung within
@@ -977,23 +1156,30 @@ reactive-demote (rule 1)** (don't blame RF for encoder overshoot), does **not**
 suppress RSSI rules (2,3), and after `pressure_escape_s` climbs to drain the ring
 (rule 4).
 
-### 9.10 TX-wedge watchdog (CCX-report liveness)
+### 9.10 TX-wedge watchdog (backend TX-progress liveness)
 
 The §6.5 watchdog is RX-side; this is its TX-side sibling, run by any node
 whose TX adapter is a radio (§3.0). The failure mode is real and observed:
 the RTL88x2 USB TX wedge — bulk-OUT keeps accepting frames (`tx_submitted`
 advances) while nothing airs, and only a physical re-plug recovers the chip.
 
-**Trigger — report absence, never report deficit (Pass 11).** The per-frame
-CCX TX-status reports (Pass 8) are lossy under load *by design*: the step-11
-bench measured healthy report return rates of 100% at ≤500 pps falling to
-~25% at 4500 pps, so any deficit threshold misfires exactly when the link is
-busiest. A healthy chip returned *some* reports at every measured load. The
-detector therefore evaluates one verdict per `wedge_window_ms` (seed 1000)
-from the `(tx_submitted, tx_reports)` counter deltas:
+**Trigger — progress absence, never progress deficit (Pass 11; monitor
+extension Pass 49).** Devourer uses per-frame CCX TX-status reports (Pass 8).
+Those reports are lossy under load *by design*: the step-11 bench measured
+healthy report return rates of 100% at ≤500 pps falling to ~25% at 4500 pps,
+so any deficit threshold misfires exactly when the link is busiest. A healthy
+chip returned *some* reports at every measured load. Kernel-monitor has no CCX
+surface; it uses the TX adapter's monotonic Linux netdev `tx_packets` counter
+as the completion-progress signal. This catches a measured CU failure where
+AF_PACKET `send()` returned success 915 times while `tx_packets` did not move
+and no RF frame aired.
 
-- `Δtx_reports > 0` → not wedged (any report proves the TX path alive);
-- `Δtx_reports == 0` and `Δtx_submitted >= wedge_min_submits` (seed 8) →
+The detector evaluates one verdict per `wedge_window_ms` (seed 1000) from the
+backend's `(tx_submitted, tx_progress)` counter deltas (`tx_progress` = CCX
+reports on devourer, netdev TX packets on kernel-monitor):
+
+- `Δtx_progress > 0` → not wedged (any completion proves the TX path alive);
+- `Δtx_progress == 0` and `Δtx_submitted >= wedge_min_submits` (seed 8) →
   **wedged**;
 - too few submissions to judge → hold the previous verdict (an idle TX is
   not evidence either way).
@@ -1006,6 +1192,68 @@ recovery requires a physical re-plug regardless. Coupling the detector into
 adaptation (or an automatic USB reset) is deferred until the detector itself
 passes bench validation: silent across a healthy 500–4500 pps sweep, fires
 within one window of an induced wedge (§17 knob table).
+
+### 9.11 FPS ladder (Pass 39, corrected Pass 53 — frame-size preservation)
+
+FPS is the slowest, most user-visible actuator (a change costs ~0.5–1 s and a
+visible cadence discontinuity), so it sits OUTSIDE the §9.1 cascade as its own
+loop with much larger hysteresis. The §9 selector first holds encoder bitrate
+inside the PHY budget. The FPS ladder then preserves a useful frame-aligned FEC
+block size: if the measured encoded P frames become too small, fewer frames per
+second at the same bitrate give each frame more bytes/source symbols and hence
+more absolute repair symbols at the configured FEC ratio. `maxIBytes` and
+`maxPBytes` remain live ceilings, not promises that the encoder will fill a
+frame to that size. Opt-in (`venc.fps_ladder.enabled`, default false; requires
+`venc.enabled` — the ladder writes `video0.fps`).
+
+- **Ladder:** the discrete §9.6 set `{30, 45, 60, 75, 90, 100, 120, 144}`
+  clipped to the configured envelope. v1 operates in `[min, preferred]`:
+  `preferred` is the recovery target and nominal low-latency operating point
+  (seed **100 fps**); `max` is accepted in config for forward compatibility but
+  v1 never commands above `preferred`. On start the ladder commands `preferred`
+  once (aligning the encoder to the envelope).
+- **Measurement:** each non-IDR frame at frame-SHM ingress contributes its
+  Annex-B payload bytes (the 8-byte `VencFrameMeta` prefix is excluded) to a
+  fixed EWMA. IDRs are excluded because their deliberately larger size would
+  falsely prove that the steady P-frame block is healthy.
+- **Reduce** (toward `min`) when the measured P-frame EWMA remains below
+  `min_p_frame_bytes` (seed **10000**) for `reduce_after_ms` (seed 3000),
+  rate-limited by `reduce_dwell_ms` (seed 4000) between steps. One neighboring
+  ladder rung per step, never past `min`.
+- **Restore** (toward `preferred`) only when the current EWMA predicts that the
+  next-higher rung remains healthy at the same byte rate:
+  `predicted_up = ewma_bytes * current_fps / next_fps`. It must remain at least
+  `min_p_frame_bytes + restore_hysteresis_bytes` (hysteresis seed **1000**) for
+  `restore_after_ms` (seed 8000). Restoration is deliberately slower than
+  reduction because every FPS flap is visible.
+- **Stale/transition hold.** No P-frame sample within `sample_timeout_ms` (seed
+  500), or an active venc bitrate/cap settling window, clears accumulated
+  reduce/restore evidence and commands no FPS change. Radio loss and selector
+  floor state are not direct FPS triggers; they affect the ladder indirectly
+  through the PHY-safe bitrate target and resulting encoded frame size.
+- **Settling:** after a command the ladder freezes for `settle_ms`
+  (seed 1500; venc's live fps apply + IDR recovery is ~0.5–1 s), discards the
+  pre-change EWMA, and waits for new P-frame evidence.
+- **Cap coupling:** while the ladder is enabled, the §9.6 cap cadence input
+  is the **commanded ladder fps** (authoritative immediately), not the
+  measured cadence. Both live `maxIBytes`/`maxPBytes` ceilings are recomputed
+  after every FPS step; observed P-frame size, not the derived ceiling, closes
+  the ladder loop.
+- All values are §17 RE-DERIVE seeds; emergency reduction (bypassing dwell
+  on persistent deadline misses) is deferred until bench data motivates it.
+
+```json
+"venc": { "fps_ladder": { "enabled": true, "min": 60, "preferred": 100,
+  "max": 144, "min_p_frame_bytes": 10000,
+  "restore_hysteresis_bytes": 1000, "sample_timeout_ms": 500,
+  "reduce_after_ms": 3000, "reduce_dwell_ms": 4000,
+  "restore_after_ms": 8000, "settle_ms": 1500 } }
+```
+
+`min ≤ preferred ≤ max`, and each must be a ladder member. §15.3 exposes the
+last commanded fps as link `venc_fps` (0 = never commanded), the rounded EWMA
+as `venc_p_frame_bytes`, the configured floor as
+`venc_p_frame_target_bytes`, and the ladder state as `venc_fps_ladder_state`.
 
 ---
 
@@ -1034,6 +1282,11 @@ stock Realtek `PHY_REG_PG.txt` power-by-rate format (`docs/groundwork.md §14`).
   in the `PHY_REG_PG.txt` row format, holding the **absolute** `qdb` values. The
   controller resolves `(this adapter, profile.mcs, profile.tx_power_level)` → an
   absolute `SetTxPowerOffsetQdb` value and applies it to that adapter's device.
+  **The resolve runs only in the tx-node selector commit (Pass 43):** a
+  `power_map` on an **rx-node** adapter (including the designated uplink)
+  would be silently loaded and never applied, so config load REJECTS it —
+  explicit beats silent. Ground-uplink power control, if gate 4 shows return
+  margin problems, is a separate future ruling.
 - **Level→absolute law (Pass-6 ruling):** the authored per-MCS curve **IS
   level 4** (the baseline intent). The controller computes
   `absolute_qdb = curve[mcs] + (tx_power_level − 4) × 8 qdb` (one level step =
@@ -1216,6 +1469,9 @@ data-path crypto, or heavy state. Threats and mitigations:
 | **Forged optimistic LINK_REPORT** (defeats "never fail optimistic") | accept only from latched/preferred `(originator,session)`; plausibility cross-check; conflicting reports ⇒ fail toward degradation | 3.5, 9.8 |
 | Replayed control frames (NACK/report) | monotonic wrap-aware discipline on `seq`, `report_epoch` (u32), `csa_nonce` | 3.5, 11.4 |
 | **Forged CSA → fleet blackout** (CRITICAL) | **4-byte HMAC on CSA only** + nonce anti-replay + channel allowlist + rate-limit + config-pinned home-channel | 11.4 |
+| Forged CACHE_REQUEST → cache amplification (≤48 B request elicits up to `reply_limit` full symbols) | exact-`target_cache` match + per-requester rate cap + `request_id` dedup window + per-request symbol clamp; v1 IP-only keeps it off the air entirely | 3.11, 14.3 |
+| Forged CACHE_REPLY → junk symbol injection | accepted only for an outstanding `request_id`, from the addressed cache, for requested symbols, within allowance; wrapped packet revalidated via full §3.1/§3.2 decode + latched stream key (no worse than direct DATA injection, which is the accepted §13 posture) | 3.11, 14.3 |
+| Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
 
 The CSA MAC is the sole cryptographic element and touches only the rare
 channel-switch control action, never the bandwidth-carrying data path. Key
@@ -1312,8 +1568,9 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
   (guaranteed by MDS). With < `k` after the block deadline / on supersession →
   frame lost (§6.2), no partial delivery.
 - **Emission order:** all `k` source symbols first (source-first delivers the
-  no-loss case without any FEC decode), `END_OF_BLOCK` on the last source
-  symbol, then the `r` repair symbols (same `block_id`).
+  no-loss case without any FEC decode), then the `r` repair symbols (same
+  `block_id`). `END_OF_BLOCK` is on the final repair when `r > 0`, otherwise on
+  the final source. Thus the TSF quiet gap begins only after parity is on air.
 - **Adaptive per-frame policy** (rates provisional, gate-2-derived):
 
   | condition | repair count | rationale |
@@ -1382,6 +1639,18 @@ block. It requires 20 samples and uses a 100-permille cold-start rate. This
 candidate is also shadow-only and does not supersede the original source-loss
 telemetry.
 
+**Air-only attribution is load-bearing against §14.3 parity offload (Pass 45,
+correcting the Pass 42 inference).** Cache symbols merge into the same decode
+state, but source/repair arrivals retain separate air-path attribution for the
+estimator. A source supplied only by a cache remains an air-path loss, and a
+cache repair does not advance `repairs_emitted_so_far`. The trailing-120
+maximum with censored lower bounds therefore sees the same air demand whether
+or not cache repair completes the block. The Pass 42 loss sweep remains a
+useful system check, but was not a structural proof: futile high-deficit blocks
+kept the maximum high while an all-cache-completable distribution could drain
+it to zero. Changes to attribution or estimator shape REQUIRE both
+`tools/cache_offload_bench.sh` and the deterministic 120-block regression.
+
 The next Ethernet stage may run the pure decision on TX as a **non-enforcing
 runtime shadow**. It consumes fresh §3.10 feedback plus TX-local facts: exact
 frame `k`, metadata-derived ARQ class, the active profile deadline, configured
@@ -1390,6 +1659,20 @@ authored ARQ guard. Every input and the stable §14.2 reason are observable.
 Unknown transport airtime or incomplete feedback makes the decision invalid and
 selects §14.1 fallback; the implementation must not manufacture a PHY rate,
 RTT, deadline, or guard.
+
+For `kernel-monitor`, the commanded HT20 MCS/GI is a TX-local fact, but Linux
+does not expose a reliable per-frame RF departure timestamp. An authored
+`air.airtime_efficiency_permille` (range 1–1000, default **0/off**) may therefore
+enable a conservative service-rate model:
+`service_kbps = HT20_PHY_kbps(mcs, gi) * efficiency_permille / 1000`.
+The estimate includes the current wire bytes, per-MPDU 802.11/FCS bytes, and
+any socket outbound bytes reported by `SIOCOUTQ`; `include_pending=false` keeps
+the deadline-priority resend estimate independent of the live queue. A zero or
+invalid efficiency keeps `airtime_unavailable` fallback. This value is an
+empirical transport-efficiency calibration, not the profile airtime budget and
+not permission to infer one from the other. The initial monitor rig seed is
+**600 permille**, matching the measured MCS3/SGI service envelope; deployments
+must re-derive it under their driver, contention, and aggregation behavior.
 
 Shadow configuration is optional and disabled when absent:
 
@@ -1405,8 +1688,154 @@ Shadow configuration is optional and disabled when absent:
 
 All five values are operator-authored measurement inputs. There are no hidden
 optimistic defaults. The cap is converted per frame and then clamped by the
-GF(256) limit; it is independent of the active fixed §14.1 rate. This block
-authorizes observation only, not adaptive transmission.
+GF(256) limit; it is independent of the active fixed §14.1 rate. Without
+`enforce`, this block authorizes observation only.
+
+**Enforcement (Pass 38, opt-in).** `"enforce": true` inside `jscc_shadow`
+turns the per-frame decision from reported to ACTUATING, with per-frame
+fail-safe — every rule below applies to one frame and resets on the next:
+
+1. **Parity:** a VALID decision's `parity_symbols` replaces the fixed §14.1
+   `repair_count` for that frame, still hard-clamped by GF(256) capacity
+   (`k + r ≤ 256`) and still subject to the §14.1 `min_k` ARQ-only rule.
+   Any named fallback (missing/stale feedback, unready estimator, missing
+   airtime or deadline) selects the fixed §14.1 rate for that frame — an
+   invalid decision can never zero out authored protection.
+2. **Deadline discard:** a VALID decision with `discard=true`
+   (`deadline_unreachable`) drops the frame at TX before spending airtime —
+   the transient-overload guard: a visible frame drop is preferred over
+   queueing stale video behind newer frames. A fallback frame always
+   transmits; missing data never fails toward dropping.
+3. **ARQ gate:** a VALID decision with `arq_eligible=false` clears
+   **`PFRAME_ARQ` only** for that frame (suppressing NACKs that cannot be
+   serviced in-deadline). The IDR `ARQ` bit is never removed — I-frame
+   importance outlives one frame timing window, and the §5.3 deadline gate
+   already bounds late resends.
+
+**Flip criteria (operator guidance, not code):** enable `enforce` only after
+a shadow soak on the same link class shows `jscc_valid_decisions ≥ 99%` of
+`jscc_decision_frames`, `jscc_repair_underpredicted_blocks` growing at
+< 1% of shadow blocks, and RTT readiness held throughout — measured on the
+UDP-air harness first (§17 verification order), then radio/kernel-monitor
+on the rig. Enforcement telemetry is additive (§15.3):
+`jscc_enforced_frames` (valid decisions actuated) and
+`jscc_discarded_frames` (rule-2 drops).
+
+### 14.3 Spatial cache repair (Cache Controller — v1 IP transport only)
+
+Per-adapter diversity (§6) cannot decorrelate a whole-site fade — the §17
+gate-2 ρ→1 tail is exactly the case where every co-located adapter fades
+together. A **cache** is a spatially separated waybeam-link RX node that
+latches the same stream, retains the last `blocks` blocks of raw heard
+symbols, and answers bounded repair requests from an **aggregator** (a
+frame-shm egress RX node, §6.3a). Cache repair is a third repair source next
+to diversity and vehicle ARQ; like ARQ it is opportunistic and **not
+load-bearing** (§1) — when budgets or deadlines don't fit, the block drops
+exactly as it does today.
+
+**Transport (v1 ruling):** cache traffic runs over dedicated **UDP/IP
+sockets** (Ethernet, fibre, or a routed side-link between ground sites) with
+**operator-provisioned static endpoints** (§15.2) — no on-air discovery, no
+RF injection. It therefore consumes zero Waybeam RF airtime and adds no new
+on-air attack surface. An RF cache binding (addressed injection on the shared
+channel) is reserved — the §3.11 formats are transport-agnostic — but is NOT
+part of v1 and is not implemented before the §17 gate-2 vehicle verdict.
+
+**Identity + merge (rulings):** symbols keep the §2/§6.1 merge identity
+`(originator, session, stream, block_id, symbol index)`; the repair source is
+metadata, never a second decode path. Cache-delivered symbols feed the §6.3a
+reassembler **directly** — they bypass §6.1/§6.2 per-adapter dedup, gap
+detection, and the §3.7 loss estimators (a cache is not an adapter and must
+not inflate `diversity`/`adapters` or perturb pre-diversity loss). Merging is
+idempotent by symbol index, and the §6.3a finalized watermark stands: **a late
+reply never reopens an emitted or dropped block.**
+
+**Repair window (ruling):** §6.3a zero-block retention is unchanged. The
+repair window for block `B` ends at the earliest of its §8 deadline or the
+arrival of any packet of a newer block (supersession). This is the one-frame
+default; a longer playout-buffer variant is **rejected** (latency-first, §9.0).
+
+**Local-collection close.** Cache repair for block `B` may begin only when the
+merged local block is still `< k` unique symbols AND the earliest of the
+following has passed (all RX-local wall-clock, ms granularity, evaluated at
+event-loop cadence; seeds RE-DERIVE §17):
+
+1. `END_OF_BLOCK` seen + `tail_grace_ms` (the tail proves the burst ended);
+2. `max(first_symbol + min_collect_ms, last_new_symbol + local_quiet_ms)` —
+   the `min_collect_ms` floor keeps a long run of missing middle symbols from
+   being mistaken for end-of-burst;
+3. `first_symbol + hard_close_ms` (delayed traffic must not extend collection).
+
+A block with zero received symbols is undiscoverable inside the one-frame
+window (§6.2) and is never cache-repaired. A gap on one adapter is never a
+trigger; the trigger is an incomplete **merged** block after close.
+
+**Decision rules (per block, aggregator side):**
+
+1. The aggregator is the only cache-request authority; caches never initiate.
+2. Only the cache named by `target_cache` may answer a request.
+3. Per-block transmitted-symbol cap:
+   `cap = min(⌈k · repair_fraction⌉, absolute_symbol_limit)`, counting
+   **requested allowances** (the aggregator cannot observe symbols lost on the
+   IP path; counting requests is the conservative side).
+4. `deficit = k − unique`. `deficit > cap` ⇒ the block is futile for cache
+   repair: no request is sent (vehicle ARQ is unaffected, rule 8).
+5. At most `max_cache_attempts` caches are addressed per block, sequentially:
+   the next attempt fires only if the deficit survives `request_timeout_ms`,
+   and its `missing_sources`/`repair_have` bitmaps are recomputed from the
+   current merged state.
+6. Eligibility: status fresh (`≤ status_timeout_ms`), same
+   `(target_originator, target_session, target_stream_id)` as the latched
+   stream, `rx_health_permille ≥ health_floor_permille`, and
+   `oldest_block ≤ block_id` — the **newest** bound is deliberately NOT
+   enforced: a status snapshot is up to one `status_interval_ms` stale, so
+   the newest blocks (exactly the ones needing repair) always lie beyond the
+   last reported `newest_block`; a cache that truly lacks the block answers
+   with silence (§3.11) at the cost of one bounded request. `newest_block`
+   is diagnostic/lag telemetry only. Ranking among eligible caches: health,
+   then status freshness, then config order.
+7. Repair stops the moment the block reaches `k` (the reassembler emits), and
+   every outstanding request for that block is retired immediately. A later
+   reply is unknown and cannot inflate accepted-symbol telemetry.
+8. **Ordering ruling (bounded cache lead):** cache replies are serviced before
+   §6.4 NACK construction in each event-loop iteration. After a request is
+   successfully submitted to a rule-6-eligible fresh cache, only the first
+   NACK for that exact stream/block is held until
+   `request_send + nack_grace_ms`; cache completion during the hold suppresses
+   that NACK normally. The hold is clamped to the block deadline. It never
+   applies to another block/stream, a re-NACK, an ineligible/stale cache, or a
+   failed request send; normal ARQ resumes immediately at expiry. `0` disables
+   the lead and restores fully parallel ordering. The seed is 3 ms (validated
+   range 0..6 ms), derived from real monitor-RF collection plus localhost UDP
+   cache timing: first accepted reply P95 2.845 ms and cache completion P95
+   2.910 ms. This spends a bounded latency slice to avoid redundant vehicle
+   RF resends while retaining ARQ as the deadline-protected fallback. An RF
+   cache binding must re-derive the seed because it shares channel airtime.
+
+**Cache-node rules (§13 hardening):** a cache answers a request only when
+`target_cache` equals its own `originator` and the target stream is one it
+tracks with the block in window; duplicate `request_id`s from the same
+requester boot identity `(originator, session_id)` inside the dedup window are
+ignored; per-requester requests are
+rate-limited (`max_requests_per_s`); the aggregate reply for one request never
+exceeds `min(max_symbols, reply_limit)`. The aggregator accepts a CACHE_REPLY
+only for an outstanding `request_id` it issued, only from the addressed cache,
+only for the requested block, only for symbols it asked for (a missing source,
+or a repair not marked held), and only up to the request's allowance; the
+wrapped packet must pass the full §3.1/§3.2 decode and match the latched
+stream key. CACHE_STATUS is accepted only from configured cache endpoints.
+For each stored `stream_id`, the cache accepts only `node.preferred_originator`
+when configured; otherwise the first sender latches until restart. A new
+session from that same originator replaces the retained window, but a different
+originator cannot flush it.
+
+Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
+`local_quiet_ms 2`, `min_collect_ms 4`, `hard_close_ms 8`,
+`request_timeout_ms 4`, `repair_fraction_permille 200`,
+`nack_grace_ms 3`,
+`absolute_symbol_limit 8`, `max_cache_attempts 2`, `reply_limit 4`,
+`health_floor_permille 800`, `status_timeout_ms 1500`,
+`status_interval_ms 500`, retention `blocks 96`, `max_requests_per_s 400`.
 
 ---
 
@@ -1424,6 +1853,10 @@ authorizes observation only, not adaptive transmission.
   never both. Enforced at config load.
 - Control packets (NACK/LINK_REPORT/CSA) never touch a binding — the core consumes
   them.
+- The §14.3 **cache sockets** (`cache.repair.listen` / `cache.store.listen`)
+  are control-plane UDP sockets like the §15.5 REST bind — they carry only
+  §3.11 packets and count against **neither** the ≤4-UDP stream pool nor the
+  shm pool.
 
 ### 15.2 Config (JSON)
 ```json
@@ -1466,7 +1899,10 @@ authorizes observation only, not adaptive transmission.
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
   "control": { "bind": "0.0.0.0:8091" },
   "venc": { "host": "127.0.0.1:80", "enabled": false,
-            "recovery_enabled": true }
+            "recovery_enabled": true,
+            "frame_caps": true, "fps_hint": 100,
+            "i_headroom_permille": 1000, "p_headroom_permille": 1000,
+            "cap_ceiling_bytes": 196608, "settle_ms": 750 }
 }
 ```
 - RX nodes use `"dir":"out"` streams (UDP `send` targets) and `role:"rx"` adapters
@@ -1491,11 +1927,35 @@ authorizes observation only, not adaptive transmission.
   (default) or the opt-in `"all-frames"` experiment from §4.1.
 - A frame-SHM ingress may additionally carry the optional `jscc_shadow` block
   from §14.2. It is rejected on UDP streams. Absence keeps only the fixed §14.1
-  path and emits no controller decision shadow.
+  path and emits no controller decision shadow. `"enforce": true` inside the
+  block activates §14.2 enforcement (Pass 38); default false = shadow-only.
+  Enforcement requires that stream's `fec.scheme` to be `"rlc256"`.
 - `venc.enabled` authorizes the §9.6 bitrate actuator and therefore requires
   single-writer ownership. `venc.recovery_enabled` independently authorizes
   only §3.9 decoder-recovery IDR requests. Neither permission is implied by the
   other, and both default false.
+- The §14.3 Cache Controller is configured by an optional top-level `cache`
+  object; both roles default off and a node may run either or both:
+  ```json
+  "cache": {
+    "repair": { "enabled": true, "stream_id": 0, "listen": "0.0.0.0:5802",
+      "caches": [ { "originator": 33, "endpoint": "192.168.1.33:5801" } ],
+      "tail_grace_ms": 1, "local_quiet_ms": 2, "min_collect_ms": 4,
+      "hard_close_ms": 8, "request_timeout_ms": 4, "nack_grace_ms": 3,
+      "repair_fraction_permille": 200, "absolute_symbol_limit": 8,
+      "max_cache_attempts": 2, "reply_limit": 4,
+      "health_floor_permille": 800, "status_timeout_ms": 1500 },
+    "store": { "enabled": true, "listen": "0.0.0.0:5801",
+      "stream_ids": [0], "blocks": 96, "reply_limit": 4,
+      "status_to": ["192.168.1.9:5802"], "status_interval_ms": 500,
+      "max_requests_per_s": 400 }
+  }
+  ```
+  `repair.enabled` requires a non-empty `caches` list and `listen`;
+  `repair.stream_id` must name a `frame-shm` egress stream. `store.enabled`
+  requires `listen`; `status_to` lists the aggregator endpoints (empty =
+  answer requests but send no status — such a store is never eligible under
+  §14.3 rule 6). Every value is a §17-overridable seed.
 
 ### 15.3 Streaming stats (newline-delimited JSON)
 Emitted at `stats.hz` to stdout and/or the stats binding. Fields map 1:1 to the
@@ -1514,6 +1974,11 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
     "loss_prediversity_milli": 41, "loss_postdiv_prearq_milli": 6,
     "recovered_arq": 220, "recovered_fec": 0,
+    "fec_recovered_source_symbols": 0,
+    "arq_recovered_source_symbols": 220,
+    "arq_recovered_repair_symbols": 0,
+    "frames_with_arq": 187, "frames_fec_only": 0,
+    "frames_fec_after_arq": 0,
     "frame_count": 89571, "frame_bytes": 5872391040,
     "frame_size_last": 65432, "frame_size_min": 8120,
     "frame_size_max": 241810, "frame_interval_us": 11106,
@@ -1538,6 +2003,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "jscc_output_remaining_us": 11457,
     "jscc_output_arq_eligible": true, "jscc_output_discard": false,
     "jscc_feedback_epoch": 1821, "jscc_feedback_age_ms": 42,
+    "jscc_enforced_frames": 0, "jscc_discarded_frames": 0,
     "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
@@ -1546,24 +2012,48 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "resends_sent": 230, "double_send_suppressed": 5,
     "source_symbols_sent": 4120300, "repair_symbols_sent": 358944,
     "fec_oversize_frames": 0, "idr_frames": 17, "arq_frames": 68342,
+    "arq_cutoff_frames": 0,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
+  "arq_timing": {
+    "eob_to_nack_build": { "samples": 18, "p95_us": 820, "max_us": 901 },
+    "nack_build_to_inject": { "samples": 18, "p95_us": 4, "max_us": 7 },
+    "nack_inject_to_retransmit": { "samples": 18, "p95_us": 2510, "max_us": 3100 },
+    "nack_build_to_retransmit": { "samples": 18, "p95_us": 2514, "max_us": 3107 },
+    "nack_receive_to_resend": { "samples": 18, "p95_us": 315, "max_us": 402 } },
   "return": { "reports_expected": 10, "reports_received": 9,
+    "reports_rejected": 0,
     "return_window_hits": 7, "return_window_misses": 2,
     "unicast_sent": 0, "unicast_fallback": 0 },
   "link": { "target_originator": 9, "target_session": 183726,
     "profile": 4, "mcs": 4, "tx_power_qdb": 1800,
     "report_epoch": 1822, "report_age_ms": 40,
-    "state": "HOLD", "flap_freeze": false, "csa_state": "IDLE" } }
+    "state": "HOLD", "flap_freeze": false, "csa_state": "IDLE",
+    "venc_bitrate_kbps": 14000, "venc_max_i_bytes": 70000,
+    "venc_max_p_bytes": 19444, "venc_pushes": 6, "venc_failures": 0,
+    "venc_settling": false, "venc_fps": 90 } }
 ```
+The `venc_*` link fields are the §9.6 actuator state: the last COMMANDED
+bitrate and frame caps (0 = never pushed), cumulative pushes/failures, and
+`venc_settling` — true within `venc.settle_ms` of the last accepted change
+(the doc-model "pending transition"; commanded = applied at HTTP 2xx since
+venc's `/set` is synchronous). Zero/false on nodes without `venc.enabled`.
+
 `return_window_hits/misses` (TX-side) and `reports_expected/received` expose the
 §7.2 optimisation's health directly, and `adapter_stalled` + the
 `loss_prediversity` vs `loss_postdiv_prearq` pair expose phantom diversity and the
 ρ decorrelation gauge — the two field-failure modes the design most fears.
-`tx_wedged` is the §9.10 CCX-liveness verdict (TX adapter only, meaningful on
-the radio backend).
+`tx_wedged` is the §9.10 backend-progress verdict (TX adapter only): CCX
+TX-status progress on devourer and Linux netdev `tx_packets` progress on
+kernel-monitor. `tx_reports` itself remains CCX-only and stays 0 on monitor;
+the monitor netdev counter is used internally rather than mislabelled as CCX.
 `uniq`/`diversity` are the §17 gate-2 estimator inputs; the `nack_rtt_*` /
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.
+The top-level `arq_timing` phase metrics are microsecond-domain, cumulative
+sample count/max plus a bounded trailing-window P95. Ground populates
+EOB→NACK-build, NACK-build→submission, submission→retransmit-arrival, and the
+combined build→arrival; the vehicle populates NACK-receipt→resend-submission.
+Each metric is host-local and therefore makes no cross-host clock assumption.
 
 On a **`frame-shm` binding**, `frame_count` and `frame_bytes` count successful
 whole-frame transfers at the local SHM boundary: consumer `read_frame()` on TX
@@ -1588,6 +2078,20 @@ supersession / past their deadline. On a UDP (RTP/telemetry) stream the
 per-frame fields (`frames_fast`, `frames_unrecoverable`, `malformed`) stay 0.
 On frame-SHM ingress, `malformed` counts whole frames rejected by FrameFramer;
 RX-only reassembly outcome fields remain 0.
+
+Recovery-method comparison uses the successful-frame attribution counters, not
+`recovered_arq` versus `recovered_fec`: those legacy fields have different
+units (`recovered_arq` is packet-sequence gaps filled; `recovered_fec` is whole
+frames decoded). `fec_recovered_source_symbols` is the number of absent source
+rows reconstructed by successful FEC decodes. `arq_recovered_source_symbols`
+and `arq_recovered_repair_symbols` count unique rows first admitted with
+`RETRANSMIT` that contributed to a subsequently delivered frame; duplicates and
+rows belonging to lost frames do not count. `frames_with_arq` counts delivered
+frames that used at least one such source or repair row. `frames_fec_only` and
+`frames_fec_after_arq` partition `recovered_fec` into FEC decodes without and
+with contributing retransmitted rows, respectively. On the all-source fast
+path, queued repair rows do not contribute and therefore do not affect these
+counters. Stats reset clears all six attribution counters.
 
 The `jscc_*` fields are receiver-side, diagnostic-only shadow state from
 §14.2. `jscc_shadow_blocks` counts finalized blocks observed by the estimator;
@@ -1649,6 +2153,40 @@ efficacy, **not** an exact filter-drop count. It is 0 on the `RadioAir` and
 `UdpAir` backends, where the BPF pre-filter does not apply. The §3.0
 `dot11_parse()` userspace check remains the correctness gate regardless.
 
+A node with a §14.3 cache role enabled additionally emits the matching
+top-level object (absent when the role is off, like `stats.bind`):
+
+```json
+"cache_repair": { "requests": 12, "replies": 11, "symbols_accepted": 18,
+  "symbols_rejected": 0, "blocks_closed_deficit": 9, "blocks_repaired": 7,
+  "blocks_futile": 1, "requests_suppressed": 2, "caches_fresh": 2,
+  "nack_graces_armed": 10, "blocks_repaired_before_nack": 6,
+  "request_to_first_reply": { "samples": 11, "p95_us": 1800,
+    "max_us": 2400 },
+  "request_to_completion": { "samples": 7, "p95_us": 2600,
+    "max_us": 4100 } },
+"cache_store": { "requests_received": 12, "requests_answered": 11,
+  "requests_rejected": 1, "symbols_sent": 18, "status_sent": 240,
+  "blocks_held": 96, "health_permille": 971 }
+```
+
+`blocks_repaired` counts blocks that reached `k` during a cache-reply merge
+(completion attribution); `blocks_futile` counts §14.3 rule-4 skips;
+`requests_suppressed` counts eligibility failures (stale/unhealthy/no window);
+`nack_graces_armed` counts exact-block first-NACK holds successfully installed,
+and `blocks_repaired_before_nack` counts cache-attributed completions for which
+that block had emitted no NACK;
+`caches_fresh` and `blocks_held`/`health_permille` are gauges. Stats reset
+zeroes the counters and leaves the gauges live. Cache timing uses the
+aggregator host's monotonic microsecond clock: `request_to_first_reply` starts
+only after a request is successfully submitted and ends at its first accepted
+reply; `request_to_completion` starts at the first successfully submitted
+request for a block and ends only when a cache-reply merge completes that
+block. `samples`/`max_us` are cumulative since reset and P95 is nearest-rank
+over the trailing 512 samples. Requests or blocks crossing a stats reset do
+not contribute partial intervals. No cross-host clock synchronization is
+implied.
+
 On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
 the exact cumulative §14.1 symbols emitted by `FrameFramer`;
 `fec_oversize_frames` counts frames sent source-only because `k+r` exceeded
@@ -1671,7 +2209,12 @@ and reads only the 8-byte metadata prefix.
 single consumer), lock-free, futex consumer-wake. Header magic `0x5646524D`
 ("VFRM"), version 1; default geometry 16 slots × 512 KB (~8 MB). Free-running
 `write_idx`/`read_idx`; on a full ring the producer **drops and keeps running**
-(never blocks). All fields native-endian (same-host only).
+(never blocks). A waybeam-link egress producer sets the object mode to `0666`
+after creation, independent of its process umask, so an unprivileged local
+viewer can attach to a ring created by a privileged monitor-radio process.
+The consumer needs read/write access because it owns `read_idx` and
+`consumer_waiting`; read-only attachment is not compatible with this SPSC ABI.
+All fields native-endian (same-host only).
 
 **Slot payload** = 8-byte `VencFrameMeta` prefix + Annex-B frame bytes (NAL start
 codes preserved):
@@ -1680,8 +2223,9 @@ codes preserved):
 |---|---|---|---|
 | 0 | 4 | `pts` | u32; encoder capture timestamp (SDK units), truncated |
 | 4 | 1 | `codec` | u8; `0x01` = H.265 (only value emitted) |
-| 5 | 1 | `flags` | u8; bit 0 = IDR frame; other bits reserved 0 |
-| 6 | 2 | `reserved` | u16; must be 0 |
+| 5 | 1 | `flags` | u8; bit 0 = IDR, bit 1 = GDR active, bit 2 = SVC-T enhancement layer; other bits reserved 0 |
+| 6 | 1 | `gdr_pos` | u8; zero-based GDR cycle position, 0 when inactive |
+| 7 | 1 | `gdr_len` | u8; GDR cycle length, 0 when inactive; when active `gdr_pos < gdr_len` |
 | 8 | N | frame | raw Annex-B (start codes + NAL units) |
 
 The whole `[VencFrameMeta][Annex-B]` blob is the FrameFramer source-blob (§5.1a);
@@ -1838,6 +2382,10 @@ local-ingress polling interval.
 | `guard_us` / `return_window_us` | §7.2 quiet gap | craft TX→RX settle + ground turnaround + return airtime |
 | EWMA α, `mcs_settle_s` | §9 smoothing/settle | no-FEC loss spikiness |
 | `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
+| cache close timers (`tail_grace_ms`/`local_quiet_ms`/`min_collect_ms`/`hard_close_ms`) | §14.3 local-collection close | loss-position sweep at target fps on the Ethernet bench; close must beat next-block supersession with round-trip margin |
+| frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, profile transitions — operator sequencing 2026-07-16), then the radio/kernel-monitor backends on the rig |
+| FPS ladder frame floor/hysteresis/timers (`min_p_frame_bytes`, `restore_hysteresis_bytes`, `sample_timeout_ms`, `reduce_after/reduce_dwell/restore_after/settle_ms`) | §9.11 frame-size-preservation loop | UDP-air frame-size ladder harness first; flight calibration against direct frame-SHM cadence and visual output |
+| `arq_max_fps` | §4.1 high-cadence ARQ cutoff | operator comfort floor 10 ms (2026-07-16); re-derive against gate-3 recovery latency at high fps |
 
 **Bench gates (must pass before the dependent design is trusted):**
 
@@ -1876,6 +2424,12 @@ local-ingress polling interval.
   prevented). The CSA MAC (§11.4) is the sole exception.
 - No TDMA; no per-packet frequency hopping; no time sync (TSF is the only shared
   anchor); no IP/ARP/AP/STA semantics on the wire.
+- **Dynamic 20/40 MHz channel width — v1 is fleet-wide 20 MHz (operator
+  ruling, Pass 40).** The craft is pinned by the 8812EU 40 MHz bug (§7.2),
+  width is a fleet property under same-channel diversity (§1), and measured
+  monitor-mode retunes (§11.2) rule out an "instant" width actuator. 40 MHz
+  returns, if ever, as a CSA-shaped campaign behind a hardware verdict
+  (review-log register R-D).
 - The craft has one radio — its return-reception is best-effort by physics (§7).
 - No importance beyond the single `ARQ` bit (I-vs-P granularity).
 - Correlated fades that beat diversity also beat ARQ (both ride the same faded

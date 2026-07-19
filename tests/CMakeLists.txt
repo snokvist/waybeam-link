@@ -19,6 +19,11 @@ add_wb_test(gf256_test)
 add_wb_test(rlc_test)
 add_wb_test(frame_framer_test)
 add_wb_test(frame_reassembler_test)
+add_wb_test(cache_store_test)
+add_wb_test(cache_controller_test)
+add_wb_test(frame_caps_test)
+add_wb_test(fps_ladder_test)
+add_wb_test(report_gate_test)
 add_wb_test(jscc_controller_test)
 add_wb_test(jscc_loss_estimator_test)
 add_wb_test(jscc_runtime_shadow_test)
@@ -56,6 +61,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME link_monitor_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/link_monitor_test.py)
+    add_test(NAME plan_matrix_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/plan_matrix_test.py)
     add_test(NAME jscc_replay_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/jscc_replay_test.py)

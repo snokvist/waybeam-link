@@ -20,14 +20,18 @@ TSF-dependent gates.
    on wfb_ng at **20 MHz** — its 40 MHz bug is out of scope, run the craft at
    20 MHz). *Hardware-required.*
 
-2. **Cross-adapter loss correlation ρ** — the whole "diversity primary, ARQ
-   non-load-bearing, no FEC" thesis rests on per-adapter losses being decorrelated.
+2. **Cross-adapter loss correlation ρ — MEASURED 2026-07-19.** The whole
+   "diversity primary, ARQ non-load-bearing" thesis rests on per-adapter losses
+   being decorrelated.
    Compute ρ as a **windowed P95** (not a one-shot mean — ρ is attitude/geometry
    dependent; a banking turn is the operative ρ→1 transient) from the per-adapter
    `uniq`/`diversity`/`adapters` counters, under the synthetic injector and in a
    real fade. **Gate:** low enough that post-diversity delivered loss ≪
    single-adapter loss. If the P95 tail is high, FEC (§14, GF(256) — not XOR)
-   becomes justified. *Real-RF geometry required.*
+   becomes justified. *Result:* a physical N=2/MCS5 walk reduced 86‰
+   pre-diversity loss to 24‰ post-diversity loss; 10% GF(256) recovered 599
+   source symbols versus 52 by ARQ. A 37.1 s joint blackout bounds what
+   same-channel recovery can do. Keep 10% base FEC; do not use static 33%.
 
 3. **NACK → RETRANSMIT round-trip latency (P90)** — ARQ's value is recovering the
    short correlated-fade band *within deadline*. Measure issued-NACK →
@@ -79,14 +83,16 @@ TSF-dependent gates.
     (c) [DONE] Standalone GF(256) Cauchy-RS MDS codec (`core/gf256.cpp`,
         `core/rlc.cpp`) — unit-tested (533k+536 checks). ARM SSC338Q build
         clean; the on-target latency bench-at-k is still TODO.
-    (d) [DONE, rates provisional] Frame-aligned FEC integrated TX+RX
-        (loopback test proves recovery); `i_rate`/`p_rate` seeds pending the
-        gate-2 ρ verdict below. Pass 15 (PR #17).
+    (d) [DONE, RF operating point measured] Frame-aligned FEC integrated TX+RX
+        (loopback test proves recovery); the 2026-07-19 N=2 walk supports a
+        100/100-per-mille monitor campaign profile. The normative adaptive
+        250/100 seeds remain separately configurable. Pass 15 (PR #17),
+        measured Pass 47.
 
-    **Gated on:**
-    - Step 11 §4.1 real-fade gate-2 verdict (vehicle deploy) — the rho
-      measurement decides whether FEC is justified at all, and informs the
-      rate seeds (`i_rate_permille`, `p_rate_permille`).
+    **Gate complete:**
+    - Step 11 §4.1 real-fade gate-2 verdict (vehicle deploy) — light GF(256)
+      FEC is justified; 10% is the measured N=2 base profile, while static
+      33% is rejected for the correlated-blackout tail.
     - Sub-step (a) in `waybeam_venc` — waybeam-link cannot consume SHM frames
       until waybeam produces them.
     - Sub-step (b) validated before (c)/(d) — the SHM ingress pipeline must

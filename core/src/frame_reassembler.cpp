@@ -19,13 +19,20 @@ inline int32_t bid_diff(uint32_t a, uint32_t b) {
 }
 }  // namespace
 
-void FrameReassembler::push(uint32_t block_id, uint8_t flags,
+bool FrameReassembler::push(uint32_t block_id, uint8_t flags,
                             const uint8_t* payload, size_t payload_len,
-                            uint64_t now_ms, const Emit& emit) {
+                            uint64_t now_ms, const Emit& emit,
+                            bool air_path) {
     // Drop late/duplicate symbols for already-finalized blocks.
     if (have_finalized_ && bid_diff(block_id, finalized_upto_) <= 0) {
-        return;
+        return false;
     }
+
+    bool emitted = false;
+    const Emit tracked_emit = [&](const uint8_t* frame, size_t len) {
+        emitted = true;
+        emit(frame, len);
+    };
 
     const bool is_repair = (flags & data_flags::kFecRepair) != 0;
     const bool eob = (flags & data_flags::kEndOfBlock) != 0;
@@ -41,41 +48,61 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
     if (is_repair) {
         if (payload_len <= kFecRepairSubheaderSize) {
             ++stats_.malformed;
-            return;
+            return false;
         }
         const uint16_t k = be16_read(payload + kFecOffWindowLen);
         const uint32_t flen = be32_read(payload + kFecOffFrameLen);
         const uint8_t ridx = payload[kFecOffRepairIdx];
         const size_t coded = payload_len - kFecRepairSubheaderSize;  // = s
-        if (k == 0 || flen < kVencFrameMetaSize ||
+        if (k == 0 || k > kFecMaxSymbols || flen < kVencFrameMetaSize ||
             flen > cfg_.max_frame_bytes || coded == 0 ||
             coded > kMaxDataPayload ||
-            static_cast<uint16_t>(k + ridx) >= kFecMaxSymbols) {
+            static_cast<uint32_t>(k) + ridx >= kFecMaxSymbols) {
             ++stats_.malformed;
-            return;
+            return false;
         }
         if ((b.k != 0 && b.k != k) ||
             (b.frame_len != 0 && b.frame_len != flen) ||
             (b.s != 0 && b.s != coded)) {
             ++stats_.malformed;
-            return;
+            return false;
         }
         b.k = k;
         b.frame_len = flen;
         b.s = static_cast<uint16_t>(coded);
-        b.repairs.emplace(ridx, std::vector<uint8_t>(
-                                    payload + kFecRepairSubheaderSize,
-                                    payload + payload_len));  // dup: no-op
+        if (air_path) {
+            b.air_repairs.insert(ridx);
+        }
+        if (eob && !b.have_eob) {
+            b.have_eob = true;
+            b.eob_ms = now_ms;  // complete repair-tail close anchor
+        }
+        if (b.repairs.emplace(ridx, std::vector<uint8_t>(
+                                        payload + kFecRepairSubheaderSize,
+                                        payload + payload_len))
+                .second) {  // dup: no-op
+            b.last_new_ms = now_ms;  // §14.3 quiet-timeout anchor
+            if ((flags & data_flags::kRetransmit) != 0) {
+                b.arq_repairs.insert(ridx);
+            }
+        }
     } else {
         if (payload_len < kFecSourceSubheaderSize) {
             ++stats_.malformed;
-            return;
+            return false;
         }
         const uint16_t k = be16_read(payload + kFecSrcOffWindowLen);
         const uint16_t idx = be16_read(payload + kFecSrcOffSymIndex);
-        if (k == 0 || idx >= k || (b.k != 0 && b.k != k)) {
+        // k+r is GF(256)-bounded, but §14.1 explicitly sends a block with
+        // k>256 source-only. Bound even a last-symbol-first packet by the
+        // minimum symbol geometry that FrameFramer can produce (21 bytes).
+        const uint64_t min_frame_len =
+            k > 1 ? static_cast<uint64_t>(k - 1) * kMinFrameSymbolSize + 1
+                  : 1;
+        if (k == 0 || idx >= k || min_frame_len > cfg_.max_frame_bytes ||
+            (b.k != 0 && b.k != k)) {
             ++stats_.malformed;
-            return;
+            return false;
         }
         b.k = k;
         const size_t clen = payload_len - kFecSourceSubheaderSize;
@@ -83,25 +110,41 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
             (b.s != 0 && ((idx != k - 1 && clen != b.s) ||
                           (idx == k - 1 && clen > b.s)))) {
             ++stats_.malformed;
-            return;
+            return false;
         }
         // A non-last source symbol carries the full coded size s (§5.1a).
         if (idx != k - 1 && b.s == 0) {
             b.s = static_cast<uint16_t>(clen);
         }
-        if (eob) {
-            b.have_eob = true;
+        if (k > 1 && b.s > 0 &&
+            static_cast<uint64_t>(k - 1) * b.s + 1 >
+                cfg_.max_frame_bytes) {
+            ++stats_.malformed;
+            return false;
         }
-        b.sources.emplace(idx, std::vector<uint8_t>(
-                                   payload + kFecSourceSubheaderSize,
-                                   payload + payload_len));  // dup: no-op
+        if (eob && !b.have_eob) {
+            b.have_eob = true;
+            b.eob_ms = now_ms;  // §14.3 tail-grace anchor
+        }
+        if (air_path) {
+            b.air_sources.insert(idx);
+        }
+        if (b.sources.emplace(idx, std::vector<uint8_t>(
+                                       payload + kFecSourceSubheaderSize,
+                                       payload + payload_len))
+                .second) {  // dup: no-op
+            b.last_new_ms = now_ms;
+            if ((flags & data_flags::kRetransmit) != 0) {
+                b.arq_sources.insert(idx);
+            }
+        }
     }
 
     // §6.2 supersession: newer block advances the window.
     if (!have_highest_ || bid_diff(block_id, highest_block_) > 0) {
         highest_block_ = block_id;
         have_highest_ = true;
-        supersede(highest_block_, emit);
+        supersede(highest_block_, tracked_emit);
         it = blocks_.find(block_id);  // supersede() never drops the newest
     }
 
@@ -115,9 +158,11 @@ void FrameReassembler::push(uint32_t block_id, uint8_t flags,
         it->second.shadow_armed = true;
     }
 
-    if (it != blocks_.end() && try_complete(block_id, it->second, emit)) {
+    if (it != blocks_.end() &&
+        try_complete(block_id, it->second, tracked_emit)) {
         blocks_.erase(it);
     }
+    return emitted;
 }
 
 bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
@@ -128,12 +173,29 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
 
     // (1) Fast path — all k source symbols present: concatenate, no decode.
     if (b.sources.size() == k) {
+        size_t frame_len = 0;
+        for (const auto& kv : b.sources) {
+            if (kv.second.size() > cfg_.max_frame_bytes - frame_len) {
+                ++stats_.malformed;
+                finalize(id);
+                return true;
+            }
+            frame_len += kv.second.size();
+        }
+        if (frame_len < kVencFrameMetaSize) {
+            ++stats_.malformed;
+            finalize(id);
+            return true;
+        }
         scratch_.clear();
+        scratch_.reserve(frame_len);
         for (const auto& kv : b.sources) {  // ordered 0..k-1
             scratch_.insert(scratch_.end(), kv.second.begin(), kv.second.end());
         }
         emit(scratch_.data(), scratch_.size());
         observe_shadow(id, b);
+        stats_.arq_recovered_source_symbols += b.arq_sources.size();
+        stats_.frames_with_arq += !b.arq_sources.empty();
         ++stats_.frames_delivered;
         ++stats_.frames_fast;
         finalize(id);
@@ -163,6 +225,15 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
                 scratch_.resize(b.frame_len);  // trim last-symbol padding
                 emit(scratch_.data(), scratch_.size());
                 observe_shadow(id, b);
+                stats_.fec_recovered_source_symbols +=
+                    k - b.sources.size();
+                stats_.arq_recovered_source_symbols += b.arq_sources.size();
+                stats_.arq_recovered_repair_symbols += b.arq_repairs.size();
+                const bool used_arq =
+                    !b.arq_sources.empty() || !b.arq_repairs.empty();
+                stats_.frames_with_arq += used_arq;
+                stats_.frames_fec_after_arq += used_arq;
+                stats_.frames_fec_only += !used_arq;
                 ++stats_.frames_delivered;
                 ++stats_.frames_fec;
                 finalize(id);
@@ -215,10 +286,10 @@ void FrameReassembler::observe_shadow(uint32_t id, Block& b) {
         return;
     }
     const uint16_t observed = static_cast<uint16_t>(
-        b.k - std::min<size_t>(b.sources.size(), b.k));
-    const uint16_t repairs_seen = static_cast<uint16_t>(b.repairs.size());
-    const uint16_t emitted_so_far = b.repairs.empty()
-        ? 0 : static_cast<uint16_t>(b.repairs.rbegin()->first + 1);
+        b.k - std::min<size_t>(b.air_sources.size(), b.k));
+    const uint16_t repairs_seen = static_cast<uint16_t>(b.air_repairs.size());
+    const uint16_t emitted_so_far = b.air_repairs.empty()
+        ? 0 : static_cast<uint16_t>(*b.air_repairs.rbegin() + 1);
     const bool demand_censored = repairs_seen < observed;
     const uint16_t repair_demand = demand_censored
         ? static_cast<uint16_t>(std::min<uint32_t>(
@@ -242,6 +313,43 @@ void FrameReassembler::observe_shadow(uint32_t id, Block& b) {
     latest_observed_block_ = id;
     have_observed_block_ = true;
     b.shadow_armed = false;
+}
+
+size_t FrameReassembler::repair_candidates(RepairCandidate* out,
+                                           size_t cap) const {
+    size_t n = 0;
+    for (const auto& [id, b] : blocks_) {
+        if (n >= cap) {
+            break;
+        }
+        // Only blocks whose k is known and that still sit below k unique
+        // symbols are candidates (§14.3 local-collection close applies to an
+        // incomplete MERGED block; complete blocks were erased on emit).
+        const size_t unique = b.sources.size() + b.repairs.size();
+        if (b.k == 0 || b.k > kFecMaxSymbols || unique >= b.k) {
+            continue;
+        }
+        RepairCandidate& c = out[n++];
+        c = RepairCandidate{};
+        c.block_id = id;
+        c.k = b.k;
+        c.unique = static_cast<uint16_t>(unique);
+        c.have_eob = b.have_eob;
+        c.first_ms = b.first_ms;
+        c.last_new_ms = b.last_new_ms;
+        c.eob_ms = b.eob_ms;
+        for (uint16_t i = 0; i < b.k; ++i) {
+            if (b.sources.find(i) == b.sources.end()) {
+                c.missing_sources[i / 8] |=
+                    static_cast<uint8_t>(1u << (i % 8));
+            }
+        }
+        for (const auto& kv : b.repairs) {
+            c.have_repairs[kv.first / 8] |=
+                static_cast<uint8_t>(1u << (kv.first % 8));
+        }
+    }
+    return n;
 }
 
 JsccRepairFeedbackState FrameReassembler::jscc_feedback() const {

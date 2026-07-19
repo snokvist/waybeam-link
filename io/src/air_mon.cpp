@@ -8,11 +8,15 @@
 #include <net/if.h>           // if_nametoindex
 #include <sys/socket.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/time.h>  // struct timeval (SO_RCVTIMEO)
 #include <unistd.h>    // close
 
+#include <linux/sockios.h>
+
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>  // strtoull
@@ -23,13 +27,16 @@
 #include <vector>
 
 #include "wblink/dot11.h"
+#include "wblink/airtime.h"
 #include "wblink/radiotap.h"
+#include "wblink/types.h"
 
 namespace wblink {
 
 namespace {
 constexpr size_t kRxQueueCap = 512;
 constexpr size_t kRxBufLen = 4096;
+constexpr auto kTxProgressPoll = std::chrono::milliseconds(100);
 
 inline uint32_t xorshift32(uint32_t& s) {
     s ^= s << 13;
@@ -43,6 +50,18 @@ uint64_t read_iface_rx_packets(const std::string& ifname) {
         "/sys/class/net/" + ifname + "/statistics/rx_packets";
     FILE* f = std::fopen(path.c_str(), "r");
     if (!f) return 0;
+    char buf[32];
+    const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    buf[n] = '\0';
+    return std::strtoull(buf, nullptr, 10);
+}
+
+std::optional<uint64_t> read_iface_tx_packets(const std::string& ifname) {
+    const std::string path =
+        "/sys/class/net/" + ifname + "/statistics/tx_packets";
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return std::nullopt;
     char buf[32];
     const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
     std::fclose(f);
@@ -225,6 +244,9 @@ struct MonAir::Impl {
     std::atomic<uint64_t> tx_submitted{0};
     std::atomic<uint64_t> tx_failed{0};
     std::atomic<uint64_t> unicast_fallback{0};
+    std::chrono::steady_clock::time_point next_tx_progress_poll{};
+    uint64_t tx_progress_cached = 0;
+    bool tx_progress_available = false;
 
     ~Impl() {
         running.store(false, std::memory_order_relaxed);
@@ -241,7 +263,7 @@ struct MonAir::Impl {
     }
 
     void rx_loop(Adapter* a, uint8_t adapter_id);
-    size_t send_frame(const uint8_t* payload, size_t len);
+    size_t send_frame(const uint8_t* payload, size_t len, bool urgent = false);
 };
 
 void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
@@ -320,17 +342,30 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
     }
 }
 
-size_t MonAir::Impl::send_frame(const uint8_t* payload, size_t len) {
+size_t MonAir::Impl::send_frame(const uint8_t* payload, size_t len,
+                                bool urgent) {
     Adapter* a = adapters[tx_idx].get();
-    tx_buf.resize(kMonRadiotapHtLen + kDot11HdrLen + len);
+    const size_t hdr_len = urgent ? kDot11QosHdrLen : kDot11HdrLen;
+    tx_buf.resize(kMonRadiotapHtLen + hdr_len + len);
     uint8_t* p = tx_buf.data();
     mon_radiotap_ht(p, mcs, sgi, bw);
-    dot11_hdr24(p + kMonRadiotapHtLen, cfg.stamp_net_id, cfg.originator,
-                static_cast<uint8_t>(tx_idx), seq);
+    if (urgent) {
+        static constexpr uint8_t kBroadcast[6] = {0xff, 0xff, 0xff,
+                                                   0xff, 0xff, 0xff};
+        dot11_hdr_qos26(p + kMonRadiotapHtLen, kBroadcast,
+                        cfg.stamp_net_id, cfg.originator,
+                        static_cast<uint8_t>(tx_idx), seq, kUrgentTid);
+    } else {
+        dot11_hdr24(p + kMonRadiotapHtLen, cfg.stamp_net_id, cfg.originator,
+                    static_cast<uint8_t>(tx_idx), seq);
+    }
     ++seq;
     if (len > 0) {
-        std::memcpy(p + kMonRadiotapHtLen + kDot11HdrLen, payload, len);
+        std::memcpy(p + kMonRadiotapHtLen + hdr_len, payload, len);
     }
+    const int priority = urgent ? kUrgentTid : 0;
+    (void)::setsockopt(a->fd, SOL_SOCKET, SO_PRIORITY, &priority,
+                       sizeof(priority));
     const ssize_t w = ::send(a->fd, tx_buf.data(), tx_buf.size(), 0);
     if (w < 0 || static_cast<size_t>(w) != tx_buf.size()) {
         tx_failed.fetch_add(1, std::memory_order_relaxed);
@@ -441,17 +476,38 @@ size_t MonAir::inject(const uint8_t* frame, size_t len) {
     return impl_->send_frame(frame, len);
 }
 
+size_t MonAir::inject_resend(const uint8_t* frame, size_t len) {
+    return impl_->send_frame(frame, len, true);
+}
+
 size_t MonAir::inject_return(uint16_t dest_originator, const uint8_t* frame,
-                             size_t len) {
+                             size_t len, bool urgent) {
     (void)dest_originator;  // monitor: no HW ACK responder → broadcast
     impl_->unicast_fallback.fetch_add(1, std::memory_order_relaxed);
-    return impl_->send_frame(frame, len);
+    return impl_->send_frame(frame, len, urgent);
 }
 
 void MonAir::return_counters(uint64_t& unicast_sent,
                              uint64_t& unicast_fallback) const {
     unicast_sent = 0;
     unicast_fallback = impl_->unicast_fallback.load(std::memory_order_relaxed);
+}
+
+void MonAir::tx_progress_counters(uint64_t& submitted,
+                                  uint64_t& completed) const {
+    submitted = impl_->tx_submitted.load(std::memory_order_relaxed);
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= impl_->next_tx_progress_poll) {
+        const auto v = read_iface_tx_packets(
+            impl_->adapters[impl_->tx_idx]->ifname);
+        impl_->tx_progress_available = v.has_value();
+        if (v) impl_->tx_progress_cached = *v;
+        impl_->next_tx_progress_poll = now + kTxProgressPoll;
+    }
+    // A missing sysfs surface must fail open: mirror submissions so the
+    // absence-only watchdog cannot manufacture a wedge verdict.
+    completed = impl_->tx_progress_available ? impl_->tx_progress_cached
+                                             : submitted;
 }
 
 int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
@@ -481,6 +537,28 @@ int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
 int MonAir::wait_fd() const { return impl_->ready_fd; }
 
 size_t MonAir::rx_adapters() const { return impl_->adapters.size(); }
+
+std::optional<uint32_t> MonAir::estimate_airtime_us(
+    size_t bytes, bool include_pending) const {
+    if (impl_->cfg.airtime_efficiency_permille == 0) return std::nullopt;
+    uint64_t total = bytes;
+    if (include_pending) {
+        int pending = 0;
+        const int fd = impl_->adapters[impl_->tx_idx]->fd;
+        if (::ioctl(fd, SIOCOUTQ, &pending) == 0 && pending > 0) {
+            total += static_cast<uint32_t>(pending);
+        }
+    }
+    // Input bytes are Waybeam wire packets. Account for one 802.11 header +
+    // FCS per standard-rung-sized MPDU; service efficiency owns preamble,
+    // contention, driver aggregation, and other measured transport effects.
+    const uint64_t packets =
+        (total + kDefaultMaxPayload - 1u) / kDefaultMaxPayload;
+    total += packets * (kDot11HdrLen + kFcsLen);
+    return ht20_service_time_us(
+        static_cast<size_t>(std::min<uint64_t>(total, SIZE_MAX)), impl_->mcs,
+        impl_->sgi, impl_->cfg.airtime_efficiency_permille);
+}
 
 void MonAir::set_tx_mode(uint8_t mcs, bool sgi) {
     impl_->mcs = mcs;

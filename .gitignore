@@ -20,3 +20,4 @@ __pycache__/
 /scratch/
 /artifacts/
 /*.local
+__pycache__/

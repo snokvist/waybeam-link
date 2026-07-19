@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// §9.10 TX-wedge watchdog: fires only on report ABSENCE while submissions
-// advance; a report deficit (the saturated-load norm) never trips it; idle
-// windows hold the previous verdict; disabled = transparent.
+// §9.10 TX-wedge watchdog: fires only on completion-progress ABSENCE while
+// submissions advance; a progress deficit never trips it; idle windows hold
+// the previous verdict; disabled = transparent. Completion is CCX on
+// devourer and netdev tx_packets on kernel-monitor.
 #include "wblink/txwedge.h"
 
 #include "wbtest.h"

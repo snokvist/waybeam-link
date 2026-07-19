@@ -157,6 +157,10 @@ int main() {
         for (Sym& sy : h.sent) (sy.is_repair() ? rep : src).push_back(&sy);
         CHECK_EQ_U(src.size(), k);
         CHECK_EQ_U(rep.size(), r);
+        size_t eob_count = 0;
+        for (const Sym* sy : src) {
+            eob_count += sy->eob();
+        }
         for (uint16_t j = 0; j < r; ++j) {
             const uint8_t* sub = rep[j]->payload.data();
             CHECK_EQ_U(sub[kFecOffRepairIdx], j);
@@ -164,7 +168,11 @@ int main() {
             CHECK_EQ_U(be32_read(sub + kFecOffWindowBaseSeq), 0u);
             CHECK_EQ_U(be32_read(sub + kFecOffFrameLen), blob.size());
             CHECK_EQ_U(rep[j]->payload.size(), kFecRepairSubheaderSize + s);
+            CHECK_EQ_U(rep[j]->eob(), j == r - 1);
+            eob_count += rep[j]->eob();
         }
+        // Quiet-gap close follows the repair tail, not the last source.
+        CHECK_EQ_U(eob_count, 1);
 
         // Drop 2 source symbols; recover from surviving sources + 2 repairs.
         RlcDecoder dec(k, s);
@@ -235,6 +243,83 @@ int main() {
         h.feed(tiny);
         CHECK_EQ_U(h.sent.size(), 0u);
         CHECK_EQ_U(h.framer.stats().malformed_frame, 1u);
+    }
+
+    // --- §14.2 enforcement override (Pass 38): one-shot, clamped -----------
+    {
+        FrameFecConfig fec;
+        fec.scheme = FecScheme::kRlc256;
+        fec.i_rate_permille = 250;
+        fec.p_rate_permille = 100;
+        Harness h(fec, FrameArqMode::kAllFrames);
+        const uint16_t s = h.framer.symbol_size();
+        auto blob = make_frame(4 * s, /*idr=*/false, 9);  // k = 5 > min_k
+        // Override: zero parity + PFRAME_ARQ cleared for this frame only.
+        h.framer.set_next_frame_override(0, /*allow_pframe_arq=*/false);
+        h.feed(blob);
+        size_t repairs = 0;
+        for (const Sym& sy : h.sent) {
+            repairs += sy.is_repair() ? 1 : 0;
+            CHECK((sy.hdr.data_flags & data_flags::kPframeArq) == 0);
+        }
+        CHECK_EQ_U(repairs, 0u);
+        // The override was consumed: the next frame is back on §14.1 fixed
+        // rates (ceil(5*0.1) = 1 repair) with PFRAME_ARQ restored.
+        h.sent.clear();
+        h.feed(blob);
+        repairs = 0;
+        bool parq = false;
+        for (const Sym& sy : h.sent) {
+            repairs += sy.is_repair() ? 1 : 0;
+            parq |= (sy.hdr.data_flags & data_flags::kPframeArq) != 0;
+        }
+        CHECK_EQ_U(repairs, 1u);
+        CHECK(parq);
+        // A huge override clamps to the GF(256) capacity (256 - k).
+        h.sent.clear();
+        h.framer.set_next_frame_override(1000, true);
+        h.feed(blob);
+        repairs = 0;
+        for (const Sym& sy : h.sent) repairs += sy.is_repair() ? 1 : 0;
+        const uint16_t k = static_cast<uint16_t>((blob.size() + s - 1) / s);
+        CHECK_EQ_U(repairs, 256u - k);
+        // The min_k ARQ-only rule survives enforcement: k <= min_k ignores
+        // the parity override entirely.
+        Harness small(fec, FrameArqMode::kIdrOnly);
+        small.framer.set_next_frame_override(8, true);
+        small.feed(make_frame(100, false, 10));  // k = 1 <= min_k 3
+        for (const Sym& sy : small.sent) CHECK(!sy.is_repair());
+    }
+
+    // --- §4.1 Pass 40 high-cadence ARQ cutoff --------------------------------
+    {
+        Harness h({}, FrameArqMode::kAllFrames);
+        h.framer.set_arq_suppressed(true);
+        h.feed(make_frame(3000, /*idr=*/true, 11));
+        h.feed(make_frame(3000, /*idr=*/false, 12));
+        for (const Sym& sy : h.sent) {
+            CHECK((sy.hdr.data_flags &
+                   (data_flags::kArq | data_flags::kPframeArq)) == 0);
+        }
+        CHECK_EQ_U(h.framer.stats().arq_frames, 0u);
+        CHECK_EQ_U(h.framer.stats().arq_cutoff_frames, 2u);
+        CHECK_EQ_U(h.framer.stats().idr_frames, 1u);
+        // Cadence drops back below the cutoff: stamping resumes (sticky off).
+        h.framer.set_arq_suppressed(false);
+        h.sent.clear();
+        h.feed(make_frame(3000, /*idr=*/true, 13));
+        bool arq = false;
+        for (const Sym& sy : h.sent) {
+            arq |= (sy.hdr.data_flags & data_flags::kArq) != 0;
+        }
+        CHECK(arq);
+        CHECK_EQ_U(h.framer.stats().arq_frames, 1u);
+        CHECK_EQ_U(h.framer.stats().arq_cutoff_frames, 2u);
+        // idr-only mode: a suppressed P frame is not counted (not ARQ-class).
+        Harness p({}, FrameArqMode::kIdrOnly);
+        p.framer.set_arq_suppressed(true);
+        p.feed(make_frame(3000, /*idr=*/false, 14));
+        CHECK_EQ_U(p.framer.stats().arq_cutoff_frames, 0u);
     }
 
     return wbtest_finish("frame_framer_test");

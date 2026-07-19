@@ -22,6 +22,7 @@ int main() {
     CHECK(out.fallback == JsccShadowFallback::kFeedbackMissing);
 
     JsccFeedback fb;
+    fb.prefix = {9, 17, 1001};
     fb.feedback_epoch = 7;
     fb.repair_demand_permille = 125;
     fb.rtt_p95_us = 2000;
@@ -56,6 +57,17 @@ int main() {
     out = shadow.evaluate(frame);
     CHECK(!out.valid);
     CHECK(out.fallback == JsccShadowFallback::kFeedbackStale);
+
+    // Epoch monotonicity is scoped to the reporter session. A receiver reboot
+    // starts again at a low epoch and must immediately replace stale cache.
+    fb.prefix.session_id = 2002;
+    fb.feedback_epoch = 1;
+    CHECK(shadow.observe_feedback(fb, 1500));
+    frame.now_ms = 1500;
+    out = shadow.evaluate(frame);
+    CHECK(out.valid);
+    CHECK_EQ_U(out.feedback_epoch, 1);
+    CHECK(!shadow.observe_feedback(fb, 1501));  // replay in new session
 
     shadow.reset();
     CHECK(!shadow.evaluate(frame).valid);

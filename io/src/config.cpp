@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "wblink/config.h"
 
+#include "wblink/fps_ladder.h"  // §9.11 ladder-membership validation
+
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -160,6 +162,16 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             ac.bw = static_cast<uint8_t>(bw);
             ac.power_map = a.value("power_map", std::string{});
+            // §10.2 Pass 43: the power resolve runs only in the tx-node
+            // selector commit — an rx-node power_map would be silently
+            // loaded and never applied. Explicit beats silent.
+            if (cfg.node.role == Role::kRx && !ac.power_map.empty()) {
+                return Result<Config>::fail(
+                    "adapter " + ac.name +
+                    ": power_map on an rx node is never applied (§10.2) — "
+                    "remove it (ground-uplink power control is a future "
+                    "ruling)");
+            }
             if (a.contains("max_power_qdb")) {
                 ac.max_power_qdb = a.at("max_power_qdb").get<int32_t>();
             }
@@ -266,6 +278,7 @@ Result<Config> load_config_json(const std::string& json_text) {
                 jc.feedback_timeout_ms =
                     js.at("feedback_timeout_ms").get<uint32_t>();
                 jc.min_rtt_samples = js.at("min_rtt_samples").get<uint16_t>();
+                jc.enforce = js.value("enforce", jc.enforce);
                 if (jc.fec_floor_permille > jc.fec_cap_permille ||
                     jc.fec_cap_permille > 4000) {
                     return Result<Config>::fail(
@@ -276,6 +289,11 @@ Result<Config> load_config_json(const std::string& json_text) {
                     return Result<Config>::fail(
                         "stream " + std::to_string(sid) +
                         ": jscc_shadow timeout and min_rtt_samples must be positive");
+                }
+                if (jc.enforce && sc.fec.scheme != FecScheme::kRlc256) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": jscc_shadow.enforce requires fec.scheme=rlc256");
                 }
                 sc.jscc_shadow = jc;
             }
@@ -379,6 +397,7 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pa.value("budget_floor_bytes", arq.budget_floor_bytes);
                 arq.max_block_pkts =
                     pa.value("max_block_pkts", arq.max_block_pkts);
+                arq.arq_max_fps = pa.value("arq_max_fps", arq.arq_max_fps);
             }
             if (p.contains("rx")) {
                 const json& pr = p.at("rx");
@@ -458,6 +477,100 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.control.bind = c.value("bind", std::string());
         }
 
+        // cache (§14.3 spatial cache repair; both roles default off)
+        if (j.contains("cache")) {
+            const json& c = j.at("cache");
+            if (c.contains("repair")) {
+                const json& r = c.at("repair");
+                CacheRepairCfg& cr = cfg.cache.repair;
+                cr.enabled = r.value("enabled", cr.enabled);
+                cr.stream_id = r.value("stream_id", cr.stream_id);
+                cr.listen = r.value("listen", cr.listen);
+                for (const json& e : r.value("caches", json::array())) {
+                    CacheEndpointCfg ep;
+                    ep.originator = e.at("originator").get<uint16_t>();
+                    ep.endpoint = e.at("endpoint").get<std::string>();
+                    cr.caches.push_back(std::move(ep));
+                }
+                cr.tail_grace_ms = r.value("tail_grace_ms", cr.tail_grace_ms);
+                cr.local_quiet_ms =
+                    r.value("local_quiet_ms", cr.local_quiet_ms);
+                cr.min_collect_ms =
+                    r.value("min_collect_ms", cr.min_collect_ms);
+                cr.hard_close_ms = r.value("hard_close_ms", cr.hard_close_ms);
+                cr.request_timeout_ms =
+                    r.value("request_timeout_ms", cr.request_timeout_ms);
+                cr.nack_grace_ms =
+                    r.value("nack_grace_ms", cr.nack_grace_ms);
+                cr.repair_fraction_permille = r.value(
+                    "repair_fraction_permille", cr.repair_fraction_permille);
+                cr.absolute_symbol_limit = r.value("absolute_symbol_limit",
+                                                   cr.absolute_symbol_limit);
+                cr.max_cache_attempts =
+                    r.value("max_cache_attempts", cr.max_cache_attempts);
+                cr.reply_limit = r.value("reply_limit", cr.reply_limit);
+                cr.health_floor_permille = r.value("health_floor_permille",
+                                                   cr.health_floor_permille);
+                cr.status_timeout_ms =
+                    r.value("status_timeout_ms", cr.status_timeout_ms);
+                if (cr.enabled) {
+                    if (cr.caches.empty() || cr.listen.empty()) {
+                        return Result<Config>::fail(
+                            "cache.repair: enabled requires a non-empty "
+                            "caches list and a listen address (§15.2)");
+                    }
+                    bool frame_shm_out = false;
+                    for (const StreamCfg& s : cfg.streams) {
+                        frame_shm_out |= s.stream_id == cr.stream_id &&
+                                         s.dir == Dir::kOut &&
+                                         s.bind.kind == BindKind::kFrameShm;
+                    }
+                    if (!frame_shm_out) {
+                        return Result<Config>::fail(
+                            "cache.repair: stream_id must name a frame-shm "
+                            "egress stream (§15.2)");
+                    }
+                    if (cr.repair_fraction_permille > 1000) {
+                        return Result<Config>::fail(
+                            "cache.repair: repair_fraction_permille is 0..1000");
+                    }
+                    if (cr.nack_grace_ms > 6) {
+                        return Result<Config>::fail(
+                            "cache.repair: nack_grace_ms is 0..6");
+                    }
+                }
+            }
+            if (c.contains("store")) {
+                const json& s = c.at("store");
+                CacheStoreCfg& cs = cfg.cache.store;
+                cs.enabled = s.value("enabled", cs.enabled);
+                cs.listen = s.value("listen", cs.listen);
+                for (const json& id : s.value("stream_ids", json::array())) {
+                    cs.stream_ids.push_back(id.get<uint8_t>());
+                }
+                cs.blocks = s.value("blocks", cs.blocks);
+                cs.reply_limit = s.value("reply_limit", cs.reply_limit);
+                for (const json& t : s.value("status_to", json::array())) {
+                    cs.status_to.push_back(t.get<std::string>());
+                }
+                cs.status_interval_ms =
+                    s.value("status_interval_ms", cs.status_interval_ms);
+                cs.max_requests_per_s =
+                    s.value("max_requests_per_s", cs.max_requests_per_s);
+                if (cs.enabled) {
+                    if (cs.listen.empty() || cs.stream_ids.empty()) {
+                        return Result<Config>::fail(
+                            "cache.store: enabled requires a listen address "
+                            "and stream_ids (§15.2)");
+                    }
+                    if (cs.blocks == 0) {
+                        return Result<Config>::fail(
+                            "cache.store: blocks must be >= 1");
+                    }
+                }
+            }
+        }
+
         // venc (§9.6 encoder actuation; disabled default for dev/bench)
         if (j.contains("venc")) {
             const json& v = j.at("venc");
@@ -465,6 +578,64 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.venc.enabled = v.value("enabled", cfg.venc.enabled);
             cfg.venc.recovery_enabled =
                 v.value("recovery_enabled", cfg.venc.recovery_enabled);
+            cfg.venc.frame_caps = v.value("frame_caps", cfg.venc.frame_caps);
+            cfg.venc.fps_hint = v.value("fps_hint", cfg.venc.fps_hint);
+            cfg.venc.i_headroom_permille = v.value(
+                "i_headroom_permille", cfg.venc.i_headroom_permille);
+            cfg.venc.p_headroom_permille = v.value(
+                "p_headroom_permille", cfg.venc.p_headroom_permille);
+            cfg.venc.cap_ceiling_bytes =
+                v.value("cap_ceiling_bytes", cfg.venc.cap_ceiling_bytes);
+            cfg.venc.settle_ms = v.value("settle_ms", cfg.venc.settle_ms);
+            if (cfg.venc.fps_hint == 0 ||
+                cfg.venc.i_headroom_permille > 1000 ||
+                cfg.venc.p_headroom_permille > 1000) {
+                return Result<Config>::fail(
+                    "venc: fps_hint must be >= 1 and headrooms 0..1000");
+            }
+            if (v.contains("fps_ladder")) {
+                const json& fl = v.at("fps_ladder");
+                FpsLadderCfg& lc = cfg.venc.fps_ladder;
+                lc.enabled = fl.value("enabled", lc.enabled);
+                lc.min = fl.value("min", lc.min);
+                lc.preferred = fl.value("preferred", lc.preferred);
+                lc.max = fl.value("max", lc.max);
+                lc.min_p_frame_bytes =
+                    fl.value("min_p_frame_bytes", lc.min_p_frame_bytes);
+                lc.restore_hysteresis_bytes = fl.value(
+                    "restore_hysteresis_bytes", lc.restore_hysteresis_bytes);
+                lc.sample_timeout_ms =
+                    fl.value("sample_timeout_ms", lc.sample_timeout_ms);
+                lc.reduce_after_ms =
+                    fl.value("reduce_after_ms", lc.reduce_after_ms);
+                lc.reduce_dwell_ms =
+                    fl.value("reduce_dwell_ms", lc.reduce_dwell_ms);
+                lc.restore_after_ms =
+                    fl.value("restore_after_ms", lc.restore_after_ms);
+                lc.settle_ms = fl.value("settle_ms", lc.settle_ms);
+                if (lc.enabled) {
+                    if (!fps_ladder_member(lc.min) ||
+                        !fps_ladder_member(lc.preferred) ||
+                        !fps_ladder_member(lc.max) ||
+                        lc.min > lc.preferred || lc.preferred > lc.max) {
+                        return Result<Config>::fail(
+                            "venc.fps_ladder: min <= preferred <= max, all "
+                            "ladder members (§9.11)");
+                    }
+                    if (lc.min_p_frame_bytes == 0 ||
+                        lc.sample_timeout_ms == 0 ||
+                        lc.restore_hysteresis_bytes >
+                            UINT32_MAX - lc.min_p_frame_bytes) {
+                        return Result<Config>::fail(
+                            "venc.fps_ladder: frame-size floor/timeout invalid "
+                            "(§9.11)");
+                    }
+                    if (!cfg.venc.enabled) {
+                        return Result<Config>::fail(
+                            "venc.fps_ladder: requires venc.enabled (§9.11)");
+                    }
+                }
+            }
         }
 
         // air ("udp" = dev backend, not §15; "radio" = devourer, §3.0 —
@@ -474,6 +645,15 @@ Result<Config> load_config_json(const std::string& json_text) {
             const std::string kind = a.value("kind", std::string("udp"));
             cfg.air.rx_drop_permille = static_cast<uint16_t>(
                 std::min(1000, std::max(0, a.value("rx_drop_permille", 0))));
+            const uint32_t airtime_efficiency = a.value(
+                "airtime_efficiency_permille",
+                uint32_t{cfg.air.airtime_efficiency_permille});
+            if (airtime_efficiency > 1000) {
+                return Result<Config>::fail(
+                    "air: airtime_efficiency_permille must be 0..1000");
+            }
+            cfg.air.airtime_efficiency_permille =
+                static_cast<uint16_t>(airtime_efficiency);
             cfg.air.wedge_window_ms =
                 a.value("wedge_window_ms", cfg.air.wedge_window_ms);
             cfg.air.wedge_min_submits =
@@ -508,6 +688,12 @@ Result<Config> load_config_json(const std::string& json_text) {
                 return Result<Config>::fail(
                     "air: kind \"" + kind +
                     "\" unknown (udp | udp-broadcast | radio | kernel-monitor)");
+            }
+            if (cfg.air.kind != AirCfg::Kind::kMonitor &&
+                cfg.air.airtime_efficiency_permille != 0) {
+                return Result<Config>::fail(
+                    "air: airtime_efficiency_permille is only valid for "
+                    "kernel-monitor");
             }
         }
 

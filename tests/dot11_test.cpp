@@ -138,6 +138,18 @@ int main() {
         CHECK(!dot11_parse(f.data(), kDot11QosHdrLen + 1).has_value());
     }
 
+    // --- urgent ARQ lane: QoS TID 6, broadcast and NOACK -------------------
+    {
+        uint8_t buf[kDot11TxUrgentPrefixLen];
+        CHECK_EQ_U(dot11_tx_prefix_urgent(buf, 5, 0x1234, 2, 0x0abc),
+                   kDot11TxUrgentPrefixLen);
+        CHECK_EQ_U(buf[8], 0x08);  // radiotap NOACK
+        const uint8_t* h = buf + kRadiotapTxLen;
+        CHECK_EQ_U(h[0], 0x88);
+        for (int i = 4; i < 10; ++i) CHECK_EQ_U(h[i], 0xff);
+        CHECK_EQ_U(h[24] & 0x0f, kUrgentTid);
+    }
+
     // --- rejections ----------------------------------------------------------
     {
         auto f = mpdu_of(0, 1, 0, 0, kPay);

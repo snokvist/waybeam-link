@@ -43,6 +43,7 @@ struct JsccShadowCfg {
     uint32_t arq_guard_us = 0;
     uint32_t feedback_timeout_ms = 0;
     uint16_t min_rtt_samples = 0;
+    bool enforce = false;  // §14.2 Pass 38: actuate valid decisions
 };
 
 struct NodeCfg {
@@ -114,12 +115,37 @@ struct SelectPolicy {
     uint8_t max_profile = 255;  // 255 = unpinned
 };
 
+// §9.11 FPS ladder (Pass 39; requires venc.enabled). Values must be §9.6
+// ladder members with min <= preferred <= max; v1 commands within
+// [min, preferred].
+struct FpsLadderCfg {
+    bool enabled = false;
+    uint16_t min = 60;
+    uint16_t preferred = 100;
+    uint16_t max = 144;
+    uint32_t min_p_frame_bytes = 10000;
+    uint32_t restore_hysteresis_bytes = 1000;
+    uint32_t sample_timeout_ms = 500;
+    uint32_t reduce_after_ms = 3000;
+    uint32_t reduce_dwell_ms = 4000;
+    uint32_t restore_after_ms = 8000;
+    uint32_t settle_ms = 1500;
+};
+
 // §9.6 venc bitrate actuation. Disabled by default: dev/bench runs have no
 // encoder; on the craft this is the ONLY writer of video0.bitrate.
 struct VencCfg {
     std::string host = "127.0.0.1:80";
     bool enabled = false;           // bitrate writes (§9.6)
     bool recovery_enabled = false;  // rate-limited IDR requests (§3.9)
+    // §9.6 Pass 37 horizon frame caps (maxIBytes/maxPBytes; §17 seeds).
+    bool frame_caps = true;         // cap writes (gated by `enabled` too)
+    uint16_t fps_hint = 100;        // cadence fallback until measured
+    uint16_t i_headroom_permille = 1000;
+    uint16_t p_headroom_permille = 1000;
+    uint32_t cap_ceiling_bytes = 196608;
+    uint32_t settle_ms = 750;       // encoder-output settling window
+    FpsLadderCfg fps_ladder;        // §9.11 (Pass 39)
 };
 
 struct ArqPolicy {
@@ -136,6 +162,8 @@ struct ArqPolicy {
     uint32_t budget_interval_ms = 100;
     uint32_t budget_floor_bytes = 4096;
     uint32_t max_block_pkts = 64;  // §13 bitmap sanity clamp
+    // §4.1 Pass 40: no ARQ class above this cadence (0 = no cutoff).
+    uint16_t arq_max_fps = 100;
 };
 
 // §6 RX-side knobs (all §17-overridable seeds).
@@ -145,7 +173,7 @@ struct RxCfgPolicy {
     uint8_t admit_n = 3;               // §2
     uint32_t admit_window_ms = 1000;   // §2
     uint8_t renack_attempts = 3;       // §6.4
-    uint32_t renack_backoff_ms = 15;   // §6.4
+    uint32_t renack_backoff_ms = 6;    // §6.4
     uint32_t idle_teardown_ms = 5000;  // §2
     uint32_t fwd_clamp_pkts = 256;     // §6.6 seq clamp
     uint32_t clamp_resync_ms = 500;    // §6.6 sustained-clamp resync window
@@ -216,6 +244,9 @@ struct AirCfg {
     // permille of filter-passed frames, independently per adapter (gate-2/3
     // exercise without physical fades). 0 = off (the shipping default).
     uint16_t rx_drop_permille = 0;
+    // §14.2 kernel-monitor effective serialization calibration. Zero keeps
+    // transport airtime unknown and JSCC in authored fixed-policy fallback.
+    uint16_t airtime_efficiency_permille = 0;
     // §9.10 TX-wedge watchdog (radio backend, §17 seeds). window 0 disables.
     uint32_t wedge_window_ms = 1000;
     uint32_t wedge_min_submits = 8;
@@ -256,6 +287,44 @@ struct ControlCfg {
     std::string bind;  // "" = disabled
 };
 
+// §14.3 Cache Controller (both roles default off; all values §17 seeds).
+struct CacheEndpointCfg {
+    uint16_t originator = 0;
+    std::string endpoint;  // "host:port"
+};
+struct CacheRepairCfg {
+    bool enabled = false;
+    uint8_t stream_id = 0;  // must name a frame-shm egress stream
+    std::string listen;     // reply/status RX socket
+    std::vector<CacheEndpointCfg> caches;
+    uint32_t tail_grace_ms = 1;
+    uint32_t local_quiet_ms = 2;
+    uint32_t min_collect_ms = 4;
+    uint32_t hard_close_ms = 8;
+    uint32_t request_timeout_ms = 4;
+    uint32_t nack_grace_ms = 3;
+    uint16_t repair_fraction_permille = 200;
+    uint8_t absolute_symbol_limit = 8;
+    uint8_t max_cache_attempts = 2;
+    uint8_t reply_limit = 4;
+    uint16_t health_floor_permille = 800;
+    uint32_t status_timeout_ms = 1500;
+};
+struct CacheStoreCfg {
+    bool enabled = false;
+    std::string listen;
+    std::vector<uint8_t> stream_ids;
+    uint16_t blocks = 96;
+    uint8_t reply_limit = 4;
+    std::vector<std::string> status_to;  // aggregator endpoints
+    uint32_t status_interval_ms = 500;
+    uint16_t max_requests_per_s = 400;
+};
+struct CacheCfg {
+    CacheRepairCfg repair;
+    CacheStoreCfg store;
+};
+
 struct Config {
     NodeCfg node;
     std::string profile_table_path;
@@ -264,6 +333,7 @@ struct Config {
     Policy policy;
     StatsCfg stats;
     ControlCfg control;    // §15.5 REST control plane (off unless bind set)
+    CacheCfg cache;        // §14.3 cache repair/store (off by default)
     VencCfg venc;          // §9.6 encoder actuation
     AirCfg air;            // dev backend; empty until devourer lands
     LoopbackCfg loopback;  // loopback-mode loss injection

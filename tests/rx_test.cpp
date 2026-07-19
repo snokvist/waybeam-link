@@ -38,7 +38,8 @@ struct Harness {
 
     // Feed a DATA packet with 1-byte payload = low byte of seq.
     void feed(uint8_t adapter, uint32_t seq, uint32_t block, uint8_t flags,
-              uint64_t now, uint8_t table_version = kTv) {
+              uint64_t now, uint8_t table_version = kTv,
+              const RxEngine::EarlyDeliver& early_deliver = {}) {
         DataHeader h;
         h.prefix = {kTxOrig, 0, kTxSession};
         h.stream_id = 0;
@@ -53,7 +54,7 @@ struct Harness {
         v.hdr = h;
         v.payload = &payload;
         v.payload_len = 1;
-        engine.on_data(adapter, v, now, sink());
+        engine.on_data(adapter, v, now, sink(), 0, early_deliver);
     }
 
     // Latch quickly: 3 packets within the admission window. Note §2
@@ -148,6 +149,73 @@ int main() {
         for (size_t i = 0; i < h.delivered.size(); ++i) {
             CHECK_EQ_U(h.delivered[i].second[0], i + 2);
         }
+    }
+
+    // --- frame-SHM symbols bypass packet ordering after diversity dedup -----
+    {
+        Harness h;
+        h.latch();
+        std::vector<uint32_t> early_seq;
+        const RxEngine::EarlyDeliver early =
+            [&](uint8_t, uint32_t, uint8_t, const uint8_t* d,
+                size_t) -> RxEngine::EarlyDeliverResult {
+            early_seq.push_back(*d);
+            return {/*handled=*/true, /*block_complete=*/true};
+        };
+        // seq 3 is absent, but seq 4 reaches the equation-oriented consumer
+        // immediately and declares block 1 complete before NACK construction.
+        h.feed(0, 4, 1, ARQ | EOB, 10, kTv, early);
+        h.feed(1, 4, 1, ARQ | EOB, 11, kTv, early);  // diversity duplicate
+        CHECK_EQ_U(early_seq.size(), 1);
+        CHECK_EQ_U(early_seq[0], 4);
+        CHECK_EQ_U(h.counters().diversity, 1);
+        CHECK_EQ_U(h.counters().lost_declared, 0);
+        CHECK_EQ_U(h.engine.build_nacks(12).size(), 0);
+        // Ordered payload delivery did not duplicate the early symbol.
+        CHECK_EQ_U(h.delivered.size(), 1);  // admission floor only
+        CHECK_EQ_U(h.counters().delivered, 2);  // floor + early seq 4
+        CHECK_EQ_U(h.counters().dropped_deadline, 0);
+        CHECK_EQ_U(h.counters().dropped_superseded, 0);
+    }
+
+    // --- a cache/FEC completion edge retires an already-declared gap --------
+    {
+        Harness h;
+        h.latch();
+        h.feed(0, 4, 1, ARQ | EOB, 10);  // seq 3 declared lost
+        CHECK_EQ_U(h.counters().lost_declared, 1);
+        h.engine.complete_frame(0, 1, 11, h.sink());
+        CHECK_EQ_U(h.engine.build_nacks(12).size(), 0);
+        CHECK_EQ_U(h.counters().dropped_deadline, 0);
+        CHECK_EQ_U(h.counters().dropped_superseded, 0);
+        // The satisfied hole no longer holds the generic cursor.
+        CHECK_EQ_U(h.delivered.size(), 2);  // floor 2, then held seq 4
+    }
+
+    // --- cache grace defers only the first NACK for the exact block ---------
+    {
+        Harness h;
+        h.latch();
+        h.feed(0, 4, 1, ARQ | EOB, 10);  // seq 3 is immediately eligible
+        CHECK(h.engine.defer_first_nack(0, 1, 13));
+        CHECK(!h.engine.block_had_nack(0, 1));
+        CHECK_EQ_U(h.engine.build_nacks(12).size(), 0);
+        CHECK_EQ_U(h.engine.build_nacks(13).size(), 1);
+        CHECK(h.engine.block_had_nack(0, 1));
+        // Once the first request fired, a later cache attempt cannot postpone
+        // its retry lane.
+        CHECK(!h.engine.defer_first_nack(0, 1, 100));
+        h.feed(0, 3, 1, ARQ | data_flags::kRetransmit, 14);
+        CHECK(h.engine.block_had_nack(0, 1));  // durable after gap removal
+    }
+    {
+        Harness h;
+        h.latch();
+        h.feed(0, 4, 1, ARQ | EOB, 10);
+        CHECK(h.engine.defer_first_nack(0, 1, 13));
+        h.engine.complete_frame(0, 1, 12, h.sink());
+        CHECK_EQ_U(h.engine.build_nacks(13).size(), 0);
+        CHECK(!h.engine.block_had_nack(0, 1));
     }
 
     // --- §6.2-1: all live adapters advanced => lost immediately -------------

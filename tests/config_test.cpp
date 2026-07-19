@@ -134,6 +134,7 @@ int main() {
             CHECK_EQ_U(c.policy.select.demote_milli, 20);
             CHECK(c.policy.select.ewma_alpha == 0.3);
             CHECK_EQ_U(c.policy.arq.holddown_ms, 20);
+            CHECK_EQ_U(c.policy.rx.renack_backoff_ms, 6);
             CHECK_EQ_U(c.policy.rx.clamp_resync_ms, 500);  // §6.6 seed
             CHECK_EQ_U(c.policy.ret.guard_us, 300);
             CHECK(!c.policy.ret.quiet_gap);   // §7.1 baseline ships default
@@ -216,7 +217,8 @@ int main() {
     {
         auto r = load_config_json(R"({
           "node": {"originator": 7, "role": "rx", "net_id": 2},
-          "air": {"kind": "kernel-monitor", "rx_drop_permille": 30},
+          "air": {"kind": "kernel-monitor", "rx_drop_permille": 30,
+                  "airtime_efficiency_permille": 600},
           "adapters": [
             {"name": "uplink", "ifname": "wlan0", "role": "tx", "channel": 5805},
             {"name": "div0", "ifname": "wlx01", "role": "rx", "channel": 5805}
@@ -226,6 +228,7 @@ int main() {
             const Config& c = *r.value;
             CHECK(c.air.kind == AirCfg::Kind::kMonitor);
             CHECK_EQ_U(c.air.rx_drop_permille, 30);
+            CHECK_EQ_U(c.air.airtime_efficiency_permille, 600);
             CHECK_EQ_U(c.adapters.size(), 2);
             CHECK(c.adapters[0].ifname == "wlan0");
             CHECK(c.adapters[0].role == Role::kTx);
@@ -261,6 +264,16 @@ int main() {
         "bind":{"kind":"udp","listen":"127.0.0.1:1"},
         "fec":{"scheme":"rlc256"}}]})",
                  "frame-shm binding");
+    // Enforcing JSCC parity is not a partial mode: it requires the RLC
+    // encoder that can apply the per-frame repair override.
+    expect_error(R"({"node":{"originator":1,"role":"tx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"frame-shm","name":"venc_frame"},
+        "fec":{"scheme":"none"},
+        "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
+          "arq_guard_us":500,"feedback_timeout_ms":500,
+          "min_rtt_samples":20,"enforce":true}}]})",
+                 "requires fec.scheme=rlc256");
     // §3.0 net_id is one byte.
     expect_error(R"({"node":{"originator":1,"role":"rx","net_id":256}})",
                  "net_id");
@@ -286,6 +299,12 @@ int main() {
                  "exactly one");
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "air":{"kind":"udp","pace_mbps":20}})", "only valid");
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "air":{"kind":"kernel-monitor",
+             "airtime_efficiency_permille":1001}})", "0..1000");
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "air":{"kind":"udp","airtime_efficiency_permille":600}})",
+                 "only valid");
     // duplicate stream_id.
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "streams":[
@@ -491,6 +510,158 @@ int main() {
           "floor_profile":0})");
         CHECK(!t);
     }
+
+    // --- §14.2 enforce flag (Pass 38): parse + default off -----------------
+    {
+        auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "fec":{"scheme":"rlc256"},
+            "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
+              "arq_guard_us":500,"feedback_timeout_ms":500,
+              "min_rtt_samples":5,"enforce":true}}]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->streams[0].jscc_shadow.has_value());
+            CHECK(r.value->streams[0].jscc_shadow->enforce);
+        }
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+            "bind":{"kind":"frame-shm","name":"venc_frame"},
+            "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
+              "arq_guard_us":500,"feedback_timeout_ms":500,
+              "min_rtt_samples":5}}]})");
+        CHECK(bool(d) && !d.value->streams[0].jscc_shadow->enforce);
+    }
+
+    // --- §9.6 venc frame-cap knobs (Pass 37): defaults + validation --------
+    {
+        auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_hint":90,
+                  "cap_ceiling_bytes":150000,"settle_ms":500}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->venc.frame_caps);  // default on
+            CHECK_EQ_U(r.value->venc.fps_hint, 90);
+            CHECK_EQ_U(r.value->venc.i_headroom_permille, 1000);
+            CHECK_EQ_U(r.value->venc.p_headroom_permille, 1000);
+            CHECK_EQ_U(r.value->venc.cap_ceiling_bytes, 150000);
+            CHECK_EQ_U(r.value->venc.settle_ms, 500);
+        }
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_hint":0}})", "fps_hint");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"i_headroom_permille":1200}})", "headrooms");
+    }
+
+    // --- §10.2 Pass 43: power_map on an rx node is rejected -----------------
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "adapters":[{"name":"wlan1","bus":"1-1.2","role":"tx","channel":5805,
+                   "power_map":"/etc/waybeam-link/power.wlan1.txt"}]})",
+        "never applied");
+
+    // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------
+    {
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"tx"}})");
+        CHECK(bool(d) && d.value->policy.arq.arq_max_fps == 100);
+        auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "policy":{"arq":{"arq_max_fps":0}}})");
+        CHECK(bool(r) && r.value->policy.arq.arq_max_fps == 0);
+    }
+
+    // --- §9.11 fps ladder (Pass 39, corrected Pass 53) ----------------------
+    {
+        auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_ladder":{"enabled":true,
+            "min":60,"preferred":100,"max":144,
+            "min_p_frame_bytes":12000,"restore_hysteresis_bytes":1500,
+            "sample_timeout_ms":750,"reduce_after_ms":1500}}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->venc.fps_ladder.enabled);
+            CHECK_EQ_U(r.value->venc.fps_ladder.preferred, 100);
+            CHECK_EQ_U(r.value->venc.fps_ladder.min_p_frame_bytes, 12000);
+            CHECK_EQ_U(r.value->venc.fps_ladder.restore_hysteresis_bytes,
+                       1500);
+            CHECK_EQ_U(r.value->venc.fps_ladder.sample_timeout_ms, 750);
+            CHECK_EQ_U(r.value->venc.fps_ladder.reduce_after_ms, 1500);
+            CHECK_EQ_U(r.value->venc.fps_ladder.restore_after_ms, 8000);
+        }
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_ladder":{"enabled":true,
+            "min":50,"preferred":90,"max":144}}})", "ladder members");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_ladder":{"enabled":true,
+            "min":90,"preferred":60,"max":144}}})", "ladder members");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"fps_ladder":{"enabled":true}}})", "requires venc.enabled");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_ladder":{"enabled":true,
+            "min_p_frame_bytes":0}}})", "frame-size floor");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"fps_ladder":{"enabled":true,
+            "sample_timeout_ms":0}}})", "frame-size floor");
+    }
+
+    // --- §14.3 cache config: parse, defaults, and validation ---------------
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 9, "role": "rx"},
+          "streams": [
+            {"stream_id": 0, "stream_type": "RTP", "dir": "out",
+             "bind": {"kind": "frame-shm", "name": "venc_out"}}],
+          "cache": {
+            "repair": {"enabled": true, "stream_id": 0,
+                       "listen": "127.0.0.1:5802",
+                       "caches": [{"originator": 33,
+                                   "endpoint": "127.0.0.1:5801"}]},
+            "store": {"enabled": true, "listen": "127.0.0.1:5801",
+                      "stream_ids": [0],
+                      "status_to": ["127.0.0.1:5802"]}}})");
+        CHECK(bool(r));
+        if (r) {
+            const Config& c = *r.value;
+            CHECK(c.cache.repair.enabled);
+            CHECK_EQ_U(c.cache.repair.caches.size(), 1);
+            CHECK_EQ_U(c.cache.repair.caches[0].originator, 33);
+            // §14.3 seeds survive an unconfigured field.
+            CHECK_EQ_U(c.cache.repair.local_quiet_ms, 2);
+            CHECK_EQ_U(c.cache.repair.hard_close_ms, 8);
+            CHECK_EQ_U(c.cache.repair.repair_fraction_permille, 200);
+            CHECK_EQ_U(c.cache.repair.max_cache_attempts, 2);
+            CHECK_EQ_U(c.cache.repair.health_floor_permille, 800);
+            CHECK_EQ_U(c.cache.repair.nack_grace_ms, 3);
+            CHECK(c.cache.store.enabled);
+            CHECK_EQ_U(c.cache.store.blocks, 96);
+            CHECK_EQ_U(c.cache.store.max_requests_per_s, 400);
+            CHECK_EQ_U(c.cache.store.status_interval_ms, 500);
+        }
+        // Both roles default off.
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
+        CHECK(bool(d) && !d.value->cache.repair.enabled &&
+              !d.value->cache.store.enabled);
+    }
+    // repair.enabled requires caches + listen, and a frame-shm egress stream.
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "cache":{"repair":{"enabled":true,"listen":"127.0.0.1:5802"}}})",
+        "caches");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
+                  "bind":{"kind":"udp","send":"127.0.0.1:5700"}}],
+      "cache":{"repair":{"enabled":true,"listen":"127.0.0.1:5802",
+        "caches":[{"originator":33,"endpoint":"127.0.0.1:5801"}]}}})",
+        "frame-shm");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
+                  "bind":{"kind":"frame-shm","name":"venc_out"}}],
+      "cache":{"repair":{"enabled":true,"stream_id":0,
+        "listen":"127.0.0.1:5802","nack_grace_ms":7,
+        "caches":[{"originator":33,"endpoint":"127.0.0.1:5801"}]}}})",
+        "nack_grace_ms");
+    // store.enabled requires listen + stream_ids.
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "cache":{"store":{"enabled":true,"listen":"127.0.0.1:5801"}}})",
+        "stream_ids");
 
     return wbtest_finish("config_test");
 }

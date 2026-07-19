@@ -72,10 +72,64 @@ bool VencActuator::set_bitrate(uint32_t kbps, uint64_t now_ms) {
         http_get("/api/v1/set?video0.bitrate=" + std::to_string(kbps));
     if (ok) {
         last_ = kbps;
+        last_change_ms_ = now_ms;  // §9.6 settling window anchor
     } else {
         ++failures_;
         no_retry_until_ms_ = now_ms + 500;
         // last_ stays unset/stale so a later tick retries the push.
+    }
+    return ok;
+}
+
+bool VencActuator::set_max_frame_size(uint32_t max_i_bytes,
+                                      uint32_t max_p_bytes, uint64_t now_ms) {
+    if (!cfg_.enabled || !cfg_.frame_caps) {
+        return true;
+    }
+    if (max_i_bytes == 0 && max_p_bytes == 0) {
+        return true;  // §9.6: insufficient cap inputs — leave venc alone
+    }
+    if (last_caps_ && last_caps_->first == max_i_bytes &&
+        last_caps_->second == max_p_bytes) {
+        return true;  // §9.6 write-on-change: flash wear
+    }
+    if (now_ms < no_retry_until_ms_) {
+        return false;
+    }
+    ++pushes_;
+    const bool ok = http_get("/api/v1/set?video0.maxIBytes=" +
+                             std::to_string(max_i_bytes) +
+                             "&video0.maxPBytes=" +
+                             std::to_string(max_p_bytes));
+    if (ok) {
+        last_caps_ = {max_i_bytes, max_p_bytes};
+        last_change_ms_ = now_ms;
+    } else {
+        ++failures_;
+        no_retry_until_ms_ = now_ms + 500;
+    }
+    return ok;
+}
+
+bool VencActuator::set_fps(uint16_t fps, uint64_t now_ms) {
+    if (!cfg_.enabled || fps == 0) {
+        return true;
+    }
+    if (last_fps_ && *last_fps_ == fps) {
+        return true;  // §9.6 write-on-change: flash wear
+    }
+    if (now_ms < no_retry_until_ms_) {
+        return false;
+    }
+    ++pushes_;
+    const bool ok =
+        http_get("/api/v1/set?video0.fps=" + std::to_string(fps));
+    if (ok) {
+        last_fps_ = fps;
+        last_change_ms_ = now_ms;
+    } else {
+        ++failures_;
+        no_retry_until_ms_ = now_ms + 500;
     }
     return ok;
 }

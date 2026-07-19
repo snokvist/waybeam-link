@@ -171,7 +171,7 @@ Injector + monitor siblings mixed in one process, both chip families:
 Residual unknown from `docs/build-order.md` gate 1 ("injector + monitors mix")
 is closed for both Jaguar1 and Jaguar3.
 
-### Gate 2 — machinery **VALIDATED** (synthetic); real-fade verdict **desk-partial**
+### Gate 2 — **PASSED** (synthetic accounting + physical vehicle walk fade)
 
 Synthetic, 60 s @ `rx_drop_permille=150` on both ground adapters: measured
 15.3%/14.0% per-adapter, joint post-diversity **2.10%** vs independence-product
@@ -183,13 +183,16 @@ Desk-partial real-fade: hand-fade at pinned MCS7 on one ground adapter →
 **0.3%**, joint **0.22%** vs **0.21%** independence — ρ ≈ **−0.07**, textbook
 diversity behaviour.
 
-**Why this is only desk-partial, not the gate-2 verdict:** craft-side fades
-decorrelate at desk range because the ground receivers sit **35–45 dB over
-sensitivity** (RSSI −30…−42 dBm measured) while a hand only costs 10–15 dB —
-only the margin-poorest adapter ever fades. The correlated-fade tail that §14
-cares about (the whole-link fade a banking turn produces) needs **real range**
-to appear at all. The gate-2 verdict (no-FEC vs GF(256) RLC) is therefore
-**deferred to the vehicle deploy** (§4.1).
+The missing vehicle-range sample was completed 2026-07-19 using kernel monitor
+mode, channel 161/HT20, MCS5, N=2 ground receive, and 10% GF(256) RLC. Across
+179.4 s, pre-diversity loss was 86‰ and post-diversity/pre-ARQ loss was 24‰;
+FEC recovered 599 source symbols and ARQ 52. There were 45.7 s with neither
+receiver delivering a packet, including a 37.1 s continuous blackout. This
+closes the gate in favor of light GF(256) FEC: diversity remained the primary
+recovery mechanism, FEC dominated residual repair, and ARQ remained a backup.
+Static 33% FEC cannot repair the measured whole-site blackout and is not the
+base operating point; retain 10%, with 15–20% reserved for a future adaptive
+edge experiment.
 
 Incidental: commanded TX-power floor (`power_map` all-1-dBm →
 `applied qdb=-20` confirmed in link stats) barely moved received RSSI on the
@@ -295,32 +298,26 @@ Each item below is independently startable once its stated prerequisite PR
 has merged. None require re-reading this whole document — jump to the
 subsection.
 
-### 4.1 Real-fade gate-2 verdict (the premise-critical one)
+### 4.1 Real-fade gate-2 verdict — **COMPLETED 2026-07-19**
 
-**Why:** §2 above proved the gate-2 *machinery* correct but could not produce
-a real correlated-fade sample — desk range gives the ground receivers too
-much margin (35–45 dB) for anything but the single poorest adapter to fade.
-The whole "diversity primary, no FEC" thesis (PROTOCOL.md §14, §1 invariants)
-rests on this measurement.
+The physical walk result is recorded in §2 and
+`docs/mon-air-verification.md`: N=2 removed about 72% of pre-diversity loss,
+10% GF(256) supplied 92% of explicit post-diversity source-symbol recovery,
+and ARQ supplied the remaining 8%. The 37.1 s joint blackout establishes the
+correlated tail that neither more same-channel parity nor ARQ can cross.
 
-**Method:**
-- Deploy to the star6e bench vehicle, `root@192.168.1.201`, RTL8812EU
-  (`DEVOURER_JAGUAR3_8822E` already compiled in). 8812EU RX+TX is field-proven
-  on wfb_ng at 20 MHz — **stay at 20 MHz**, the 40 MHz bug is out of scope
-  (§1 ruling-3 physics, `docs/build-order.md` "non-negotiable operational
-  rules").
-- Cross-build: `cmake --build --preset ssc338q`, deploy the binary + configs
-  to `.201`.
-- Generate real distance/orientation fades on the craft antenna (walk-out,
-  body-blocking, banking-turn simulation) instead of a hand at the ground end.
-- Analyze with `tools/gate2_rho.py`; the estimator is windowed joint-P95 vs
-  single-adapter-P95 (PROTOCOL.md §17 gate 2).
+The immediate stationary follow-up is not another FEC-rate sweep. Run a long
+N=2/MCS5/FEC10 soak for decoder/adapter stability, exercise one receiver at a
+time, diagnose the `229b` return-TX failure, then verify the independent ARQ
+cache on UDP/IP.
 
-**Success criteria / decision:** if the correlated-fade P95 tail keeps joint
-loss ≪ single-adapter loss, §14 stays `fec_scheme: none`. If the tail is high,
-FEC becomes justified — and per the Pass 3 ruling, the only real choice is
-**GF(256) RLC**, never XOR (XOR only recovers what diversity already handles
-and fails the burst that would motivate FEC in the first place).
+**Completed (Pass 48):** the 9,000-frame N=2 soak and explicit decoder EOS
+passed; RX failover/failback passed with a required full CU monitor
+reinitialization; `229b` silent return TX was isolated below AF_PACKET; and a
+real independent monitor cache using UDP/IP repair reduced the matched 150‰
+N=1-stress unrecoverable count from 534 to 119. Cache and vehicle ARQ remain
+parallel, so RF resend load was unchanged; cache timing/ordering evidence is
+the prerequisite to any RF cache proposal.
 
 ### 4.2 Gate-4 seed re-derivation
 

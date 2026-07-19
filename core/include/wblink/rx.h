@@ -45,7 +45,7 @@ struct RxPolicy {
     uint8_t admit_n = 3;               // §2 N_admit
     uint32_t admit_window_ms = 1000;   // §2 T_admit
     uint8_t renack_attempts = 3;       // §6.4 bounded retries
-    uint32_t renack_backoff_ms = 15;   // per-attempt backoff step
+    uint32_t renack_backoff_ms = 6;    // per-attempt backoff step
     uint32_t idle_teardown_ms = 5000;  // §2 implicit teardown
     // §6.6 escape hatch: a stream whose packets are ALL clamp-rejected for
     // this long is desynced by a real outage (the TX ran ahead more than
@@ -136,6 +136,17 @@ class RxEngine {
                                        uint32_t block_id, uint8_t data_flags,
                                        const uint8_t* payload, size_t len)>;
 
+    struct EarlyDeliverResult {
+        bool handled = false;        // symbol consumed outside seq ordering
+        bool block_complete = false; // that symbol completed the frame block
+    };
+    // Frame-SHM reassembly is equation-oriented, not packet-order-oriented:
+    // feed each first-admitted symbol immediately after diversity dedup while
+    // RxEngine retains the wire sequence for loss/ARQ accounting.
+    using EarlyDeliver = std::function<EarlyDeliverResult(
+        uint8_t local_stream_id, uint32_t block_id, uint8_t data_flags,
+        const uint8_t* payload, size_t len)>;
+
     // local_table_version: this node's §3.6 hash; packets carrying a
     // different table_version drop to the best-effort profile (§3.4).
     // nullopt disables the check (no local table — dev/bench).
@@ -147,7 +158,20 @@ class RxEngine {
     // packet and any it unblocks) happen synchronously via deliver. rssi is
     // the receive RSSI in dBm (AirRxMeta), 0 = unknown (§7.3 report input).
     void on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
-                 const Deliver& deliver, int8_t rssi = 0);
+                 const Deliver& deliver, int8_t rssi = 0,
+                 const EarlyDeliver& early_deliver = {});
+
+    // A frame-SHM/cache reassembler completed this block. Retire every
+    // packet gap attributable to it so queued/later ARQ cannot repair an
+    // already-complete frame, and advance the generic sequence cursor.
+    void complete_frame(uint8_t local_stream_id, uint32_t block_id,
+                        uint64_t now_ms, const Deliver& deliver);
+
+    // §14.3 cache ordering: delay only the first NACK for one exact block.
+    // Returns false when the stream/block is not live or a NACK already fired.
+    bool defer_first_nack(uint8_t local_stream_id, uint32_t block_id,
+                          uint64_t not_before_ms);
+    bool block_had_nack(uint8_t local_stream_id, uint32_t block_id) const;
 
     // Timers: dwell-ceiling gaps, deadline expiry, stall watchdog, idle
     // teardown. Call at a few-ms cadence.
@@ -171,17 +195,21 @@ class RxEngine {
         std::vector<uint8_t> payload;
         uint32_t block_id = 0;
         uint8_t flags = 0;
+        bool delivered_early = false;
     };
     struct BlockInfo {
         uint64_t first_seen_ms = 0;
         uint64_t deadline_ms = 0;
         bool arq = false;
         bool iframe_class = false;
+        uint64_t first_nack_not_before_ms = 0;
+        bool nack_attempted = false;
     };
     struct Gap {
         uint64_t first_missing_ms = 0;
         bool declared_lost = false;
         bool superseded = false;  // §6.2-2: lost AND not NACKed
+        bool fec_satisfied = false;  // completed frame needs no packet repair
         uint8_t nack_attempts = 0;
         uint64_t next_nack_ms = 0;
         bool nack_eligible = false;
@@ -211,6 +239,7 @@ class RxEngine {
         std::map<uint32_t, Held> held;
         std::map<uint32_t, BlockInfo> blocks;
         std::map<uint32_t, Gap> gaps;
+        std::set<uint32_t> completed_blocks;
         // §6.1 per-adapter highest seq FOR THIS STREAM (the §6.2-1 fast path
         // must not mix streams sharing an adapter).
         std::map<uint8_t, uint32_t> adapter_last_seq;
@@ -244,6 +273,8 @@ class RxEngine {
     void note_adapter_seq(Stream& s, uint8_t adapter_id, uint32_t seq);
     void evaluate_gaps(Stream& s, uint64_t now_ms);
     void advance_cursor(Stream& s, uint64_t now_ms, const Deliver& deliver);
+    std::optional<uint32_t> gap_block(const Stream& s, uint32_t seq) const;
+    void mark_frame_complete(Stream& s, uint32_t block_id);
     Stream* try_latch(const DataView& v, uint64_t now_ms);
 
     RxPolicy policy_;

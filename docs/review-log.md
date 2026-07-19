@@ -726,7 +726,228 @@ authoritative, and `arq_frames` makes the experiment auditable.
 (classification, deadline, and resend semantics); §15.2/§15.3 (configuration
 and telemetry). Code follows separately.
 
-## Pass 36 — kernel BPF pre-filter efficacy gauge (2026-07-18)
+## Pass 36 — §3.11/§14.3 spatial cache repair, v1 IP transport (2026-07-16)
+
+Co-located adapters cannot decorrelate a whole-site fade; the gate-2 ρ→1 tail
+is precisely where diversity and ARQ fail together (§18). The operator adopted
+the Cache Controller V3.1 concept (external design doc + reference harness)
+as a spec extension, with these rulings pinned against V3.1 where waybeam-link
+constraints bind:
+
+1. **v1 transport is UDP/IP only** (Ethernet/routed side-link between ground
+   sites), operator-provisioned static endpoints, no on-air discovery. The RF
+   cache binding is reserved but deferred until after the gate-2 vehicle
+   verdict — the §3.11 formats are transport-agnostic so RF later costs no
+   re-numbering.
+2. **A cache is an ordinary waybeam-link node**: cache identity = `originator`,
+   epoch = the target's `session_id`; §3.11 bodies reuse the NACK/LINK_REPORT
+   target-descriptor split. No new identity space.
+3. **CACHE_REPLY wraps verbatim §3.2 DATA packets** (one per datagram). The
+   aggregator revalidates through the normal decode; a cache cannot inject
+   anything a radio could not, and no second decode path exists.
+4. **Cache symbols feed the §6.3a reassembler directly**, bypassing §6.1/§6.2
+   per-adapter state and the §3.7 estimators — a cache is not an adapter and
+   must not inflate `diversity` or perturb pre-diversity loss.
+5. **Zero-block retention stands**; the repair window ends at next-block
+   arrival or the §8 deadline. V3.1's longer-playout-buffer variant rejected.
+6. **Cache repair runs in parallel with vehicle ARQ**, deviating from V3.1's
+   serial cache-before-vehicle order: IP repair spends no RF airtime, so the
+   airtime argument does not bind, and latency-first (§9.0) argues against
+   delaying the measured 1 ms Ethernet / 2–4 ms RF NACK loop behind a cache
+   phase. §5.3/§6.4/§12 are untouched; dedup + existing budgets absorb the
+   redundancy. Revisit only with an RF cache transport.
+7. **Local close is implementable, not airtime-modeled**: earliest of
+   EOB+`tail_grace_ms`, quiet timeout floored by `min_collect_ms`, or
+   `hard_close_ms` — ms-granularity seeds, all §17 RE-DERIVE (V3.1's
+   µs-precision expected-burst-end anchor is unimplementable at the current
+   event-loop cadence and adds no safety the floor doesn't).
+8. **Budgets count requested allowances** (IP loss is unobservable at the
+   aggregator; requests are the conservative ledger): per-block cap
+   `min(⌈k·fraction⌉, absolute_limit)`, futility skip above it (cache phase
+   only — vehicle ARQ unaffected), ≤2 sequential attempts, per-request
+   `reply_limit`.
+9. **§13 additions**: request amplification (rate cap + `request_id` dedup +
+   exact-target match), reply forgery (outstanding-request + subset +
+   allowance + full revalidation), status poisoning (static endpoints only).
+
+**Amended:** §3.1 (types 0x8–0xA), §3.11 (wire formats), §13 (three rows),
+§14.3 (controller rules + seeds), §15.1 (cache sockets are control-plane),
+§15.2 (`cache` config), §15.3 (`cache_repair`/`cache_store` stats), §17 (close
+timer knob row). Code follows separately in the same PR.
+
+**In-pass correction (first Ethernet bench, same unmerged PR):** rule 6
+originally required `block_id ≤ newest_block`. The bench showed that bound
+suppresses most legitimate requests — a status snapshot is one interval
+stale, so the blocks needing repair are always past the last reported
+`newest_block` (72 of 86 closed-deficit blocks suppressed in the first run).
+Eligibility now enforces only the `oldest_block` bound; `newest_block` is
+lag telemetry. This matches the reference harness, which filtered on the
+oldest bound alone.
+
+## Pass 37 — §9.6 actuation contract v2: horizon frame caps (2026-07-16)
+
+The FPV frame-size/radio adaptation design doc (operator-supplied) asks for
+Salsify-style control: the encoder is told a maximum size for the next frame.
+The venc side landed the actuator (`maxIBytes`/`maxPBytes` + FRAMEBITS_FIRST,
+venc PR #181 + clamp fix). Rulings for the link side:
+
+1. **A per-frame budget channel is OUT OF SCOPE** (operator). venc control is
+   HTTP with persist-on-set; per-frame commands would need a new transport.
+   The way around it: caps are pure functions of SLOW inputs (rung budget,
+   snapped frame cadence, I-frame deadline, FEC rates), so recomputing them
+   only when an input changes loses nothing a per-frame channel would win —
+   the per-frame *enforcement* already lives inside venc's rate controller.
+2. **Cap formulas** (§9.6): maxP = one frame period of rung budget net of P
+   parity; maxI = the I-class recoverable deadline (§4.1/§8) of rung budget
+   net of I parity — an I-frame is sized to what ARQ/FEC can still rescue.
+   Cadence is the measured frame-shm interval snapped to the ladder fps set
+   (jitter must not churn caps); headrooms seed 1000‰, RE-DERIVE.
+3. **Caps ride the §9.5 transition** under the same write-on-change/holdoff
+   discipline as bitrate; `venc.frame_caps=false` opts out without giving up
+   bitrate authority. Ceiling = min(configured ceiling, §14.1 GF(256)
+   eligibility at the rung symbol size).
+4. **Actuator-state telemetry** (§15.3): commanded bitrate/caps + pushes/
+   failures + `venc_settling` (within `venc.settle_ms` of the last accepted
+   change) — the design doc's commanded/effective/pending model collapsed to
+   one boolean because venc's `/set` applies synchronously.
+5. **Verification order** (operator): a full actuation harness on the
+   UDP-air backend FIRST (fake venc endpoint, loss-driven rung transitions),
+   before the radio and kernel-monitor backends are verified on the rig.
+
+**Amended:** §9.6 (horizon caps + actuator model), §15.2 (`venc` knobs),
+§15.3 (link `venc_*` fields), §17 (knob row + UDP-first note). Code follows
+separately in the same PR.
+
+## Pass 38 — §14.2 enforcement gate: shadow becomes actuating (2026-07-16)
+
+The Pass 24–35 shadow program existed to justify exactly this flip with
+data. The operator's controller design (frame-size/radio adaptation doc) and
+the agreed sequencing make §14.2 the per-frame inner loop of the JSCC
+controller; horizon caps (Pass 37) bound what the encoder may produce, and
+this pass makes the per-frame protection decision live. Rulings:
+
+1. **Opt-in and per-frame fail-safe.** `jscc_shadow.enforce=true` actuates a
+   VALID decision's parity/discard/ARQ outputs for that one frame; any named
+   fallback selects the fixed §14.1 rate for that frame. Missing data can
+   therefore never zero out authored protection, and disabling the flag
+   restores pure shadow with no other behavior change.
+2. **Discard only on a valid decision** (`deadline_unreachable`): the
+   transient-overload guard drops the frame at TX rather than queueing stale
+   video. A fallback frame always transmits.
+3. **The ARQ gate touches `PFRAME_ARQ` only.** The IDR `ARQ` bit is never
+   removed by per-frame timing — importance outlives one window and §5.3
+   already deadline-gates resends.
+4. **Flip criteria stated as shadow telemetry** (≥99% valid decisions,
+   <1% repair underprediction, RTT readiness held), verified UDP-first per
+   the §17 ordering.
+
+**Amended:** §14.2 (enforcement rules + flip criteria), §15.2 (`enforce`
+flag), §15.3 (`jscc_enforced_frames`/`jscc_discarded_frames`). Code follows
+separately in the same PR.
+
+## Pass 39 — §9.11 FPS ladder (2026-07-16)
+
+Third step of the controller sequencing: FPS as the last-resort actuator,
+outside the §9.1 cascade. Rulings:
+
+1. **Envelope semantics:** v1 operates in `[min, preferred]`; `preferred` is
+   the recovery target and v1 never commands above it (`max` reserved for a
+   future ruling on above-preferred cadence). Values must be §9.6 ladder
+   members.
+2. **Reduce trigger is radio-loop exhaustion**, made measurable: floor rung
+   held AND smoothed report loss ≥ `distress_milli` for `reduce_after_ms` —
+   "the cascade has nothing left", not any single bad frame or FEC block.
+3. **Asymmetric hysteresis** per the design doc: restore needs off-floor +
+   low loss for ~2.7× the reduce window, plus per-step dwell and a settle
+   freeze after each command.
+4. **Stale feedback holds** — the rung fail-safe (§9.8) owns degradation on
+   silence; an fps stutter requires positive evidence.
+5. **Cap coupling:** the commanded ladder fps becomes the §9.6 cadence input
+   while the ladder is enabled — measurement lags a change by ~1 s and would
+   brief the caps wrong across every transition.
+
+**Amended:** §9.11 (new section), §15.2 (`venc.fps_ladder`), §15.3 (link
+`venc_fps`), §17 (knob row). Code follows separately in the same PR.
+
+## Pass 40 — 20 MHz lock + high-cadence ARQ cutoff (2026-07-16)
+
+Two operator rulings from the pending register (see `docs/followup-plan.md`
+for the working order):
+
+1. **R-D resolved: v1 is fleet-wide 20 MHz.** Dynamic 20/40 width is out of
+   scope for this version; 40 MHz is revisited later, and only as a
+   CSA-shaped campaign behind a hardware verdict for the deployed chips.
+   Recorded in §18; no code change (nothing implemented 40 MHz-dynamically).
+2. **No ARQ above 100 fps (101–144).** Operator: "10 ms is the lowest
+   comfortable window." Architecturally consistent: §6.3a zero retention
+   supersedes an incomplete block at next-frame arrival, so above 100 fps
+   even the I-frame class has <10 ms of usable receiver-side repair time.
+   The frame-SHM TX stamps neither `ARQ` nor `PFRAME_ARQ` while the §9.6
+   cadence input exceeds `policy.arq.arq_max_fps` (seed 100; 0 disables),
+   §14.2 marks those frames not ARQ-capable, and `arq_cutoff_frames` counts
+   the suppressions. Above the cutoff, recovery is FEC + diversity + cache.
+
+**Amended:** §4.1 (cutoff), §15.3 (`arq_cutoff_frames`), §17 (knob row),
+§18 (width lock). Code follows separately in the same PR.
+
+## Pass 41 — §3.5 acceptance filter enforced at TX ingest (R-A) (2026-07-16)
+
+The register's R-A gap: §3.5 rules the acceptance filter, but the TX event
+loop forwarded any target-matching LINK_REPORT to the selector — and since
+Pass 39 to the fps ladder. Pinned enforcement semantics:
+
+1. Filter at ingest, before selector AND ladder consume the report.
+2. `preferred_originator` configured ⇒ only that originator passes; its
+   session follows reboots (§2 per-boot nonce of the same tail number).
+3. Unconfigured ⇒ first-latcher per target; a same-originator session change
+   follows immediately (reboot), a DIFFERENT originator takes the latch only
+   after `relatch_ms` of latched-reporter silence (seed 4 ×
+   `report_timeout_ms` — the §9.8 watchdog fires first, so the fail-safe
+   still owns the gap).
+4. Rejections counted (`reports_rejected`); the §3.5 plausibility
+   cross-check stays future bench work.
+
+**Amended:** §3.5 (enforcement point + relatch seed), §15.3
+(`reports_rejected`). Code follows separately in the same PR.
+
+## Pass 42 — R-B resolved by measurement: no parity offload (2026-07-16)
+
+The feared §14.2 × §14.3 loop — cache-completed blocks masking air loss,
+feedback demand dropping, the enforcing TX under-protecting — does NOT
+materialize. `tools/cache_offload_bench.sh` (enforce ON, cache OFF vs ON at
+identical loss, paced udp-broadcast):
+
+| drop | parity ratio OFF | parity ratio ON | cache repaired |
+|---:|---:|---:|---:|
+| 150 ‰ | 0.426 | 0.421 (−1 %) | 35 |
+| 80 ‰ | 0.301 | 0.259 (−14 %) | 8 |
+| 50 ‰ | 0.207 | 0.234 (+13 %) | 8 |
+
+The gap flips sign across runs — noise, not offload. The structural reason
+is pinned in §14.2: the demand estimator is a trailing-window MAXIMUM with
+censored lower bounds, and the blocks that set the max are exactly the ones
+the cache cannot complete (deficit beyond the §14.3 cap ⇒ censored high
+samples). Cache masking of shallow blocks therefore cannot pull TX
+protection down. No code change; the bench stays as the regression guard,
+and any future estimator-shape change must re-run it (adopting air-only
+observation only if the offload then appears).
+
+**Amended:** §14.2 (immunity property pinned + re-check requirement).
+
+## Pass 43 — §10 rx-node power_map rejected at config load (2026-07-16)
+
+The register's §10 item: the power resolve runs only in the tx-node selector
+commit, so a `power_map` on an rx-node adapter (including the ground's
+designated uplink TX adapter) was silently loaded and never applied — a
+2026-07-11 desk run swept it as a no-op. Ruling: config load rejects it with
+an explanatory error; explicit beats silent. Bringing the ground return
+uplink under real power control remains a separate future ruling, taken only
+if gate 4 shows return-margin problems.
+
+**Amended:** §10.2 (enforcement note). Code follows separately in the same
+PR.
+
+## Pass 44 — kernel BPF pre-filter efficacy gauge (2026-07-18)
 
 The kernel-monitor backend attaches a classic BPF program (`SO_ATTACH_FILTER`)
 to each adapter socket that mirrors the §3.0 RX filter's cheapest checks
@@ -748,6 +969,480 @@ coarse gauge, not an exact count. It is 0 on `RadioAir`/`UdpAir` (BPF N/A).
 **Amended:** §15.3 (the `bpf_filtered` derived-estimate field and the 1:1-mapping
 exception). Code follows separately.
 
+## Pass 45 — full PR accuracy audit corrections (2026-07-18)
+
+A spec-to-implementation audit before radio/multi-node testing found three
+false-ready paths despite the green UDP/device matrix:
+
+1. The malformed-`k` hardening incorrectly applied the GF(256) `k≤256` bound
+   to source-only frames, contradicting §14.1's explicit oversized-block
+   fallback. Repair/cache bitmaps remain bounded, while source-only reassembly
+   now accepts the full wire `u16` range subject to producer geometry and the
+   configured frame-size ceiling.
+2. Pass 41's gate followed reporter reboot/re-latch, but Selector retained its
+   independent first-wins source and epoch. Accepted identity transitions now
+   reset the selector epoch/smoothing domain; replay rejection also gates the
+   FPS ladder.
+3. Pass 42's max-with-censoring argument was not structural. A deterministic
+   all-cache-completable window drove demand from 100‰ to zero because cache
+   sources were counted as air arrivals. Reassembly now tracks air attribution
+   separately from unified decode state, and the regression holds demand at
+   100‰ across cache completion.
+
+The same pass scopes cache status per target stream, cache request dedup per
+aggregator boot identity, rejects JSCC enforcement without `rlc256`, and makes
+the normative `maxI≥maxP` cap invariant executable by lowering P when needed.
+
+**Amended:** §3.5, §3.11, §9.6, §14.2, §14.3, §15.2 and the follow-up register.
+
+## Pass 46 — monitor ARQ priority and phase-timing gate (2026-07-19)
+
+The first N=2 monitor runs exposed a long retry tail rather than an RF airtime
+limit. Monitor mode has no live TSF read, so host-delayed EOB arrival was being
+delayed by the quiet-gap midpoint a second time; NACKs also shared a FIFO with
+periodic reports, vehicle radio readiness followed an unbounded SHM drain, and
+only UDP-air implemented the §16.3 priority lane.
+
+The corrected path sends monitor NACKs immediately after repair-tail/FEC close,
+keeps reports in a separate normal queue, services return-radio readiness before
+live ingress, bounds SHM work to one frame per ring/iteration, drains accepted
+resends in the NACK callback, and uses QoS TID 6 for monitor/devourer NACKs and
+retransmits. The default re-NACK step is now 6 ms. Host-local microsecond phase
+telemetry separates EOB→build, build→submission, ground submission→retransmit
+arrival, combined build→arrival, and vehicle receipt→resend submission.
+
+Guarded channel-161/HT20 verification used the standard `/usr/bin/waybeam`
+producer, MCS 5, two ground monitor receivers, and an independent synthetic
+100‰ receive drop on each ground adapter to force measurable residual loss:
+
+- 10% configured FEC: 600/600 valid frames, zero unrecoverable; FEC recovered
+  340 source symbols and ARQ recovered 5 source symbols across 5 frames.
+  NACK-build→retransmit P95/max was 2.510 ms; vehicle
+  NACK-receipt→resend-submission P95/max was 315 µs.
+- 33% configured FEC: 600/600 valid frames, zero unrecoverable and zero ARQ;
+  5,164 repair symbols versus 1,840 at 10% (2.8× repair traffic).
+- Final-binary zero-FEC ARQ stress: 43 retransmitted symbols; combined
+  NACK-build→retransmit P95 2.114 ms and max 4.164 ms, while vehicle
+  receipt→submission P95/max was 190/273 µs. All 43 RTT samples stayed below
+  the 6 ms target (stream RTT P95/max 3/4 ms).
+
+This establishes the code/turnaround portion of the <6 ms ARQ gate and supports
+10% as the present N=2 operating point, with ARQ as residual repair. The drop
+was synthetic and independent, so real spatial correlation/range and the
+devourer backend remain follow-up RF tests. The vehicle config and
+`S95waybeam` AP service were restored after both runs.
+
+**Amended:** §3.0, §6.4, §7.2–§7.4, §15.3, §16.3 and §17 gate 3.
+
+## Pass 47 — physical N=2 walk fade closes gate 2 (2026-07-19)
+
+A guarded 179.4 s vehicle walk exercised the final SSC338Q binary through the
+real kernel-monitor path on channel 161/HT20. The standard `/usr/bin/waybeam`
+producer ran at MCS5 with 10% GF(256) RLC. Ground used two monitor receivers:
+`wlx40a5ef2f229b` RX-only and `wlx40a5ef2f2308` as RX plus the designated
+return transmitter.
+
+- The vehicle transmitted 5,378 frames and ground completed 3,491. Aggregate
+  pre-diversity loss was 86‰ and post-diversity/pre-ARQ loss 24‰, so the second
+  path removed about 72% of otherwise-lost symbols.
+- FEC recovered 599 source symbols; ARQ recovered 52. Thus FEC supplied 92% of
+  explicit post-diversity source-symbol recovery, leaving ARQ in its intended
+  last-resort role. There were 232 partially observed unrecoverable frames.
+- Both ground receivers were silent for 45.7 s total, including a 37.1 s
+  continuous blackout. `2308` alone carried 14.0 s of marginal reception;
+  `229b` alone carried only 0.6 s. Diversity is useful but becomes correlated
+  and asymmetric at the range edge.
+- Of the return reports scheduled after the measurement reset, 1,438/1,461
+  (98.4%) reached the vehicle. NACK build→radio submission P95 was 608 µs and
+  vehicle receipt→resend submission P95 was 926 µs. Full
+  build→retransmission P95 rose to 6.525 ms at the RF cliff (core RTT P95 5 ms,
+  max 8 ms), versus the earlier 2–3 ms stationary result. The local priority
+  lane remains sub-millisecond; the edge tail is RF availability.
+- The SHM trace had no PTS regression, malformed frame, ring overflow, or
+  protocol decode error. Because the validator was terminated during guarded
+  cleanup rather than allowed to reach EOS, the next stationary soak must
+  obtain the explicit decoder EOS verdict.
+
+Ruling: keep 10% as the N=2 monitor base rate. An adaptive 15–20% edge range
+may be evaluated, but static 33% is not justified: it costs 2.8× the repair
+traffic seen at 10% in Pass 46 and cannot repair the measured whole-site
+blackout. Stationary follow-up order is (1) long N=2/MCS5/FEC10 decode soak,
+(2) controlled receiver disable/re-enable, (3) diagnose the `229b` return-TX
+failure, and (4) independent ARQ-cache verification over UDP/IP before any
+monitor-radio cache proposal.
+
+No protocol amendment: this pass supplies the real-RF evidence required by
+§17 gate 2 and selects an operating point within the existing §14 mechanism.
+Raw local evidence is retained under
+`artifacts/pr26-monitor-diversity-20260719/realrf-walkfade-n2-fec10/`.
+
+## Pass 48 — stationary soak, failover, return-TX isolation, and IP cache (2026-07-19)
+
+The post-walk stationary sequence used the same final SSC338Q binary,
+channel 161/HT20, MCS5, 10% GF(256), and the vehicle's current standard
+`/usr/bin/waybeam` producer (90 fps in the restored operator configuration).
+
+**N=2 soak.** The explicit decoder gate completed 9,000/9,000 frames including
+101 IDRs with `bad_meta=0`, `bad_annexb=0`, `pts_regress=0`, and `decode=ok`.
+At the consumer boundary there were no SHM/kernel drops, malformed packets,
+adapter stalls, or wedges. FEC recovered 123 source symbols and ARQ 10; six
+incomplete frames were superseded without upsetting the decoder. Core NACK RTT
+P95/max was 5/5 ms. The apparent SHM-full count in the later shutdown snapshot
+was created only after the finite validator exited while the producer remained
+live; the boundary snapshot is the measurement.
+
+**Receiver failover/failback.** Administratively disabling RX-only `229b`
+made the liveness watchdog mark it stalled while `2308` continued both video
+RX and return TX without a restart. The expected N=1 penalty appeared (19–21‰
+post-diversity loss, heavy FEC/ARQ use). A bare `ip link up` left the CU driver
+`NO-CARRIER`, at −100 dBm TX power, and packet-silent. Reapplying the complete
+monitor sequence (down → monitor type → up → MTU/channel) restored RX;
+waybeam-link cleared `adapter_stalled` automatically. A post-rejoin 900-frame
+decoder run passed with both adapters receiving, nine FEC source recoveries,
+zero ARQ, and zero new unrecoverable frames.
+
+**`229b` return-TX isolation.** With `229b` designated TX, 915 AF_PACKET sends
+returned success and `tx_failed` stayed zero, but Linux `tx_packets/tx_bytes`
+remained exactly 1,854/114,691, the adjacent `2308` captured zero stamped
+returns, and the vehicle RX counter stayed zero. The same-session `2308`
+control advanced netdev counters by 200 packets/12,600 bytes, was captured by
+`229b` (20 captured, 39 filter hits), and reached the vehicle (272 RX frames;
+103/146 scheduled reports received during the sampled window). This is below
+the waybeam wire/core: keep `229b` RX-only. Kernel-monitor still needs an
+honest silent-TX/wedge gauge because successful `send()` alone cannot detect
+this driver/device failure.
+
+**Independent cache over UDP/IP, real RF collection.** A clean `229b` monitor
+process acted as cache node 33 while the `2308` aggregator took a deterministic
+150‰ post-radio receive drop. Cache status/request/reply used localhost UDP/IP;
+vehicle ARQ remained live in parallel as §14.3 specifies. At the finite
+consumer boundary the cache accepted 1,715 symbols, repaired 774 blocks,
+rejected zero replies, and reported 992‰ health. The matched no-cache control
+used the same radio/drop seed and nearly identical receiver windows:
+
+| 150‰ N=1 stress | cache over UDP/IP | no cache |
+|---|---:|---:|
+| completed receiver frames in snapshot | 4,318 | 4,339 |
+| FEC-recovered source symbols | 3,587 | 3,516 |
+| ARQ-recovered source symbols | 1,010 | 1,645 |
+| unrecoverable/superseded frames | **119** | **534** |
+| vehicle resends / transmitted frames | 4,147 / 4,536 | 4,461 / 4,864 |
+| full NACK-build→retransmit P95 | 21.751 ms | 19.977 ms |
+
+Both finite consumers completed 4,500 byte-clean decoded frames. Cache reduced
+unrecoverable frames by 77.7%, proving the real monitor-receiver → UDP/IP cache
+→ aggregator path. It did not materially reduce resend load (0.914 versus
+0.917 resend/frame), because cache requests and vehicle NACKs deliberately run
+in parallel. The 20 ms ARQ tail is the forced 15% N=1 overload regime, not the
+stationary N=2 operating point.
+
+Ruling: UDP/IP cache transport is verified. Do not infer that the reserved RF
+cache binding is ready: it would consume shared airtime and invalidates the
+v1 parallel-ordering rationale. Before proposing it, add cache request/reply
+latency telemetry and decide from measurement whether a fresh-cache-only,
+strictly bounded grace before the first vehicle NACK is worth the latency.
+
+No protocol amendment in this pass. Evidence is retained under:
+
+- `artifacts/pr26-monitor-diversity-20260719/stationary-soak-n2-mcs5-fec10/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-failover-229b/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-returntx-229b-diagnosis/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-cache-udpip-realrf/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-cache-control-realrf/`
+
+## Pass 49 — kernel-monitor silent-TX observability ruling (2026-07-19)
+
+Pass 48 proved that AF_PACKET submission success is not a TX-liveness signal:
+`229b` accepted 915 sends while its netdev TX counters remained frozen and no
+adjacent receiver or vehicle observed a frame. Kernel-monitor nevertheless
+hardcoded `tx_wedged=false`; the existing §9.10 watchdog was devourer-only
+because its progress source was CCX TX reports.
+
+Ruling: reuse the existing absence-only watchdog and its seeds, substituting
+the TX interface's monotonic Linux `tx_packets` counter as kernel-monitor's
+completion-progress source. Any progress clears the verdict; zero progress
+with at least `wedge_min_submits` during a full window sets it. The action stays
+observability-only—no automatic role swap, USB reset, or adaptation coupling.
+The public `tx_reports` field remains honestly CCX-only and stays zero on
+kernel-monitor; only `tx_wedged` consumes the netdev progress internally.
+
+**Amended:** §9.10 and §15.3. Code follows separately.
+
+Implementation reuses `TxWedge` unchanged at the policy/state-machine level.
+`MonAir` supplies cumulative `(tx_submitted, netdev tx_packets)` while
+devourer continues to supply `(tx_submitted, CCX tx_reports)`. Native build and
+43/43 tests passed; the SSC338Q cross-build passed. The real same-session A/B
+then produced the required verdict: silent `229b` reached 77 submissions and
+`tx_wedged=true` after one window, while healthy `2308` reached 77 submissions
+and stayed false. `tx_reports` remained zero on both monitor adapters.
+Evidence:
+`artifacts/pr26-monitor-diversity-20260719/stationary-txwedge-fix-final/`.
+
+## Pass 50 — cache timing and bounded first-NACK lead (2026-07-19)
+
+The aggregator now measures successful request submission→first accepted
+reply and first request→cache-attributed block completion with its local
+monotonic microsecond clock. Both publish cumulative sample/max values and a
+trailing-512 nearest-rank P95. Completion also retires all requests for the
+block, so later replies are rejected rather than inflating acceptance counts.
+
+Real monitor-RF collection with the independent `229b` cache and localhost
+UDP/IP control path measured 300 first replies and 195 completions in the
+clean decoder window: P95 was 2.845 ms and 2.910 ms respectively (max 4.577
+ms and 3.414 ms). The consumer decoded 900/900 frames with 11 IDRs, clean
+metadata/Annex-B/PTS, and EOS. A longer timing-only sample agreed: first-reply
+P95 2.828 ms across 1,404 samples and completion P95 2.792 ms across 878.
+
+That evidence sets a 3 ms default (`nack_grace_ms`, validated 0..6; zero
+restores parallel ordering). Cache replies and new requests are serviced
+before NACK construction. Only a successfully sent request to an eligible
+fresh cache can defer the exact block's first NACK; the hold is deadline-
+clamped and cannot affect another stream/block or any re-NACK.
+
+The matched 150‰ N=1 real-RF A/B used a warm-up drain and two 1,800-frame
+decoded windows:
+
+| metric | grace 0 ms | grace 3 ms | change |
+|---|---:|---:|---:|
+| decoder result | 1,800 clean | 1,800 clean | pass/pass |
+| NACK packets | 623 | 483 | **−22.5%** |
+| vehicle resends | 1,779 | 1,400 | **−21.3%** |
+| deadline drops | 0 | 0 | unchanged |
+| unrecoverable/superseded | 22 | 37 | not paired |
+
+The last row is deliberately not used as an A/B verdict: changing resend
+traffic changes which subsequent packets consume the deterministic synthetic
+drop RNG, so the runs do not lose identical source symbols. Clean decode and
+zero deadline drops establish that the bounded lead remains functional; the
+NACK/resend counters directly establish the RF-work reduction.
+
+The final bookkeeping audit made `blocks_repaired_before_nack` durable at
+block scope even after individual gaps are filled. Its final semantics are
+unit-tested; the earlier hardware samples used gap-local history and are
+therefore deliberately not quoted here.
+
+Evidence:
+
+- `artifacts/pr26-monitor-diversity-20260719/stationary-cache-timing-realrf-decode/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-cache-grace0-realrf/`
+- `artifacts/pr26-monitor-diversity-20260719/stationary-cache-grace3-realrf/`
+
+## Pass 51 — unprivileged frame-SHM egress attachment (2026-07-19)
+
+The normal ground deployment runs waybeam-link as root because the
+kernel-monitor backend requires raw packet access, while the local video viewer
+runs as the desktop user. The previous producer mode `0600` therefore made the
+otherwise-compatible `venc_frame_out` ring inaccessible without a manual
+permission change.
+
+Operator ruling: a waybeam-link frame-SHM egress producer publishes its POSIX
+SHM object as mode `0666`, explicitly applied after creation so the producer's
+umask cannot narrow it. Although the payload is described as viewer-readable,
+the SPSC consumer must also update `read_idx` and `consumer_waiting`, so this ABI
+cannot support a read-only consumer mapping. The ring remains same-host,
+single-consumer, and producer-owned; no wire-format or layout change is made.
+
+**Amended:** §15.4 (egress object access mode and consumer write requirement).
+
+Implementation verification covered the real privilege split, not only the
+unit test. A root kernel-monitor RX created `/venc_frame_out` as `0666`; the
+already-running unprivileged radeon-vrx process attached directly and drained
+it without a helper or manual permission change. The restrictive-umask unit
+test, all 43 native sanitizer suites, and the SSC338Q cross-build also passed.
+
+The live visual check separated stress behavior from egress behavior. With the
+intentional 150‰ N=1 post-radio drop, a matched 10.4 s interval produced 89.93
+fps at the vehicle but only 89.10 fps at ground, with ten unrecoverable frames
+and visible jitter/artifacts; SHM itself had zero full/bad-slot deltas. After
+restarting only the ground aggregator without synthetic loss, a 15.3 s interval
+measured 89.97 fps at the vehicle and 89.94 fps at SHM egress, zero
+unrecoverable frames, zero SHM full/bad-slot drops, 18 FEC-only frames, and two
+ARQ-assisted frames. The operator reported perfect visual cadence. The small
+clean ARQ sample measured 3.78 ms P95 NACK-build→retransmit, below the 6 ms
+usefulness target; it is a clean-path confirmation, not a loaded-tail claim.
+
+## Pass 52 — controller regressions and kernel-monitor actuation (2026-07-19)
+
+All latest-code UDP controller gates were rerun after the cache ordering and
+SHM-access changes:
+
+- Cache-only and combined cache+vehicle-ARQ delivered byte-exact output at
+  150‰ loss (280/300 and 278/300 frames respectively).
+- Cache parity-offload stayed invariant: repair/source ratio 0.429 both with
+  and without the cache, while the cache path remained active.
+- The actuation checker accepted 47 formula-exact writes across eight rungs;
+  JSCC enforcement exercised 230 valid/enforced frames, 175 deadline discards,
+  and the feedback-stale fallback; the FPS ladder produced
+  `90→75→60→75→90` with dwell and cap coupling intact.
+- The 158 s all-controller soak exited every process cleanly, parsed 2,372
+  schema-valid stats rows, delivered 3,031/4,740 byte-exact frames through its
+  outage schedule, made 131 venc pushes with zero failures, enforced 3,019
+  frames, repaired 196 blocks from cache, and restored rung 7 / 90 fps.
+
+Kernel-monitor actuation was then verified without exposing the vehicle venc
+API to controller-cadence writes. Vehicle HTTP actuation went over Ethernet to
+a host fake-venc endpoint, while video and feedback used the physical 8812EU
+TX→8812CU RX monitor link. Because the real encoder remained at 8,192 kbps, the
+valid fake-actuator envelope was profiles 3..5; a preliminary 0..5 attempt was
+discarded because fake demotion claimed 3,804 kbps without actually reducing
+the source, violating §9.5's bitrate-before-MCS premise and overloading MCS0.
+
+In the valid bounded run, a 15.45 s clean window held profile 5: 1,390 source
+frames and 1,388 SHM frames, zero unrecoverable/ring drops, 14 FEC-only frames,
+one ARQ-assisted frame, fresh reports, zero steady-state venc writes, and zero
+actuation failures. NACK-build→retransmit P95 was 5.195 ms across 17 samples,
+inside the 6 ms usefulness target.
+
+A 200‰ ground synthetic-loss phase demoted 5→3 while reports stayed fresh. In
+10.45 s it generated 496 NACKs and 1,153 vehicle resends; 338 frames used FEC,
+184 used ARQ, and 251 remained unrecoverable. Ground NACK-build→inject stayed
+56 us P95, but build→retransmit rose to 22.809 ms and the vehicle's local
+NACK-receive→resend rose to 16.039 ms. This is ARQ-queue saturation when ARQ is
+forced to be the primary repair layer, not RF propagation delay. It confirms
+the operational rule: diversity/FEC/cache must remove bulk loss before ARQ;
+the <6 ms gate applies at residual load, not an artificial 20% ARQ workload.
+
+Returning to the clean receiver restored profile 5, fresh reports, and a final
+10.25 s zero-unrecoverable/zero-ring-drop window with no steady actuator writes.
+The vehicle was then restored to its original config hash and AP service.
+
+Evidence:
+
+- `artifacts/pr26-monitor-diversity-20260719/controller-monitor-bounded/`
+
+## Pass 53 — FPS ladder preserves frame-aligned FEC block size (2026-07-19)
+
+Operator correction: FPS is not a direct last-resort response to selector-floor
+loss. The selector first chooses a bitrate that fits the PHY. If the resulting
+encoded P frames become too small for useful frame-aligned FEC blocks, the FPS
+ladder lowers cadence while retaining the bitrate target, increasing bytes,
+source symbols, and absolute repair symbols per frame. The nominal/preferred
+low-latency mode is 100 fps.
+
+The live `video0.maxIBytes` and `video0.maxPBytes` fields are fully wired, but
+they are ceilings rather than guarantees of realized frame size. Therefore the
+closed-loop input is measured non-IDR Annex-B size at frame-SHM ingress; IDRs
+are excluded. The initial seeds are a 10,000-byte floor, 1,000-byte restoration
+hysteresis applied to the next-rung size prediction, and the existing slow
+reduce/restore dwell. Stale samples and active bitrate/cap settling hold.
+
+This replaces Pass 39's floor-rung/loss trigger. Cap coupling remains: every
+FPS step immediately re-derives the live I/P ceilings, but only observed
+P-frame size supplies positive evidence. The v1 ceiling remains `preferred`;
+`max` stays forward-reserved.
+
+**Amended:** §9.11 (intent, measurement, reduce/restore predicates, 100 fps
+nominal, configuration, and observability), §9.6/15.2 (`fps_hint` seed 100),
+and §17 (frame-size-driven calibration knobs and harness).
+
+## Pass 54 — Frame-size FPS implementation and UDP verification (2026-07-19)
+
+The Pass 53 ruling is implemented at frame-SHM ingress. Non-IDR Annex-B bytes
+feed the ladder EWMA; the 8-byte metadata prefix and IDR frames are excluded.
+The controller now holds during stale input or venc bitrate/cap settling,
+clears pre-step evidence, predicts the next-rung frame size for restoration,
+and exports the observed EWMA, target, and state in link stats. The default
+cadence hint and preferred ladder mode are both 100 fps.
+
+The focused UDP-air bench drove independent 16 KB / 7 KB / 16 KB P-frame
+phases with a pinned PHY profile. It observed the exact write-on-change
+sequence `[100, 90, 75, 60, 75, 90, 100]`, adjacent-rung dwell compliance,
+zero venc failures, and cap writes coupled to each FPS transition. This proves
+the ladder responds to encoded frame size without radio loss or selector-floor
+state as a trigger.
+
+The full 158 s all-controller soak repeated the same ladder sequence while
+simultaneously exercising JSCC enforcement, selector transitions, FEC/ARQ,
+and UDP cache repair across clean, marginal, burst, fade, interference, outage,
+and recovery phases. Results: 2,372 schema-clean stats lines, 3,035/4,740
+frames delivered (64%) with zero byte-integrity errors, 2,987 JSCC-enforced
+frames, 149 cache-repaired blocks, 138 bounded venc pushes with zero failures,
+and full recovery to profile 7 / 100 fps. All 43 dev sanitizer suites passed;
+the SSC338Q cross-build also completed successfully.
+
+**Verified:** §9.11 frame-size control and observability on UDP-air. The next
+gate is real venc/radio actuation with direct `venc_frame_out` visual cadence.
+
+## Pass 55 — JSCC feedback epoch is reporter-session scoped (2026-07-19)
+
+The first monitor-radio enforcement run found a receiver-restart lockout. A
+ground restart correctly changed its common-prefix session and reset its
+per-reporter `feedback_epoch`, but TX compared the new epoch with the cached
+epoch from the previous receiver session. Every new feedback packet was then
+rejected as non-forward: LINK_REPORT and ARQ remained active while JSCC stayed
+in `feedback_stale` indefinitely.
+
+The wire contract already defines `feedback_epoch` as monotonic **per
+reporter**. The cache key is therefore reporter `(originator, session_id)`, not
+originator alone. An accepted reporter-session change replaces cached feedback
+before epoch comparison; replay protection remains unchanged within a session.
+JSCC feedback also passes the same preferred/first-latched reporter gate as
+LINK_REPORT.
+
+**Amended:** §3.10 (reporter-session cache identity and reboot behavior).
+
+## Pass 56 — Authored kernel-monitor airtime service model (2026-07-19)
+
+After the Pass 55 fix, monitor-radio feedback became fresh and RTT-ready, but
+JSCC correctly remained in `airtime_unavailable`: only paced UDP had an
+authored serialization model. Enabling enforcement by silently borrowing the
+encoder bitrate or raw PHY rate would be optimistic and violates the fallback
+contract.
+
+Kernel-monitor may now opt into an explicit effective-service calibration.
+The model multiplies the locally commanded HT20 MCS/GI rate by
+`air.airtime_efficiency_permille`; zero (the default) preserves fallback. It
+includes known MPDU overhead and available socket-outbound bytes, while the
+priority resend estimate excludes the live queue. The MCS3/SGI stationary rig
+carried the 15–20 Mbit/s target inside a 28.9 Mbit/s PHY envelope, supporting a
+conservative initial 600-permille test value. This is a rig calibration, not a
+new universal constant.
+
+**Amended:** §14.2 (kernel-monitor airtime input and fail-safe configuration).
+
+## Pass 57 — Monitor JSCC enforcement and real-venc FPS ladder (2026-07-19)
+
+The vehicle ran the SSC338Q cross-build on its 8812EU monitor interface; ground
+used the 2308 CU for return TX and 229b CU as the second diversity RX. The
+opposite return assignment immediately reproduced the known 229b TX-wedge
+state, so all accepted measurements use the healthy swapped assignment.
+
+**Real venc FPS ladder.** With a 200-permille N=1 synthetic receive loss phase,
+the selector held profile 0 / 3,804 kbit/s. Live venc writes produced the exact
+adjacent sequence `[100, 90, 75, 60]`; at the floor the measured P-frame EWMA
+was 7,828 B and venc reported 60 fps with `maxPBytes=7,203`. Replacing that
+receiver with clean N=2 promoted to profile 3 / 17,236 kbit/s. The same running
+TX then restored `[60, 75, 90, 100]`; final P-frame EWMA was 20,270 B,
+`maxPBytes=19,586`, ladder state `HOLD`, and venc itself reported 100 fps.
+The complete command sequence was `[100, 90, 75, 60, 75, 90, 100]` with zero
+HTTP failures; the final 61.6 s clean N=2 receiver session recorded one
+unrecoverable frame and neither adapter wedged.
+
+**Monitor JSCC enforcement.** A 600-permille authored monitor service model at
+profile 3 made the previously missing transport input explicit. Under the N=1
+200-permille calibration phase, the final TX snapshot contained 8,457 valid and
+enforced decisions versus 51 cold-start fallbacks, zero JSCC discards, fresh
+feedback, 6,000 us measured RTT, 7,190 us source service, 667 us resend
+service, five selected parity symbols, and ARQ eligible with 10,810 us
+remaining after source transmission. The stable reason was
+`fec_capacity_limited`, truthfully reporting predicted demand of six symbols
+against the configured five-symbol cap.
+
+Restarting the active ground receiver reset its feedback epoch from 346 to
+152. With TX left running, decisions remained valid and enforced count grew
+from 3,111 to 6,683, proving the Pass 55 reporter-session reset on real radio;
+the old permanent `feedback_stale` lockout did not recur.
+
+After both tests, the vehicle was restored byte-for-byte to config SHA256
+`3636ad2b...`, normal `/usr/bin/waybeam` through `S95waybeam`, and AP channel
+149/40 MHz. The verified Pass 56 `waybeam-link` binary remains deployed at
+SHA256 `b9b0fd93...`; all bench processes were stopped.
+
+**Verified:** JSCC per-frame enforcement and the frame-size-driven 100 fps
+ladder on kernel-monitor radio. The next visual/RF work should use clean N=2
+and residual natural loss; the 200-permille N=1 phase was deliberately a
+controller-input calibration, not a quality target.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
@@ -755,16 +1450,83 @@ exception). Code follows separately.
       exact per-socket count via `PACKET_STATISTICS`/`tp_drops` and drop the §16.2
       1:1 exception. Deferred until a bench shows the estimate is inadequate.
 
-- [ ] **Ruling 3 is FIXED, not revisitable** — vehicle is permanently single-adapter;
+Standing constraints (not revisitable):
+
+- [ ] **Ruling 3 is FIXED** — vehicle is permanently single-adapter;
       diversity is ground-RX-only. Craft return path is best-effort by physics; the
       quiet-gap fit + floor-oscillation damping are **resolved empirically at gate 4**,
       not designed further on paper.
 - [ ] Run the four bench gates (gate 1 now RX-proven; gate 4 return-window-fit is the one
-      that gates the craft return path under single-adapter).
-- [ ] **§10 ground-uplink power scope** (surfaced by the 2026-07-11 desk §4.6 run): the
-      §10 power curve is applied only on the tx-node selector commit, so the ground's
-      designated uplink TX adapter (role tx) transmits returns at devourer's efuse-default
-      power regardless of any `power_map` — sweeping it is a no-op. Decide: bring the ground
-      return uplink under power-curve control, or reject/ignore a `power_map` on an rx-node
-      uplink (currently it's silently loaded but never applied). Not a spec ruling yet —
-      raised for the next pass.
+      that gates the craft return path under single-adapter). The Pass 36–39 UDP
+      harnesses (`cache_repair`/`actuation`/`jscc_enforce`/`fps_ladder`) re-run
+      against the radio and kernel-monitor backends as part of the same rig
+      campaign (§17 UDP-first ruling, 2026-07-16).
+
+Pending operator rulings, with recommendations (2026-07-16 register):
+
+- [x] **R-A — RESOLVED (Pass 41, integration corrected Pass 45).** Preferred/
+      first-latched filtering runs before selector and FPS ladder; accepted
+      reboot/re-latch identities reset selector epoch/smoothing state.
+- [x] **R-B — RESOLVED (Pass 45 correction).** Unified cache decode now keeps
+      explicit air-only attribution for the repair-demand estimator, verified
+      by both the combined bench and an all-cache-completable 120-block guard.
+- [x] **R-C — MEASURED (2026-07-16), zero retention stands.** 150 ‰ sweep:
+      repair success 100 % @90 fps, 82 % @120, 62 % @144; unrecoverable
+      5.7/5.3/8.9 %. Latency-first keeps the pin; revisit only on 144 fps
+      cache-primary flight data (Pass 40 makes the cache the sole repair
+      path above 100 fps).
+      Zero-block retention ends cache repair at next-block arrival; at
+      120 fps the post-close window is ~2–5 ms. *Recommendation:* keep zero
+      retention as pinned; run the Ethernet cache bench at a 90/120/144 fps
+      sweep, and only if a material fraction of cache replies lose the
+      supersession race, add an OPT-IN per-stream `max_blocks_ahead=1`
+      (+1 frame latency) for cache-enabled streams. Prior: unnecessary at
+      ≤90 fps.
+- [x] **R-D — RULED (Pass 40): v1 locked to fleet-wide 20 MHz.** The design
+      doc's "2–5 ms invisible switch" does not survive this stack: the craft
+      is pinned 20 MHz (8812EU 40 MHz bug, §7.2), width is a FLEET property
+      under same-channel diversity (§1) so a change is CSA-shaped (§11
+      already carries `target_bw`), and measured monitor-mode retunes run to
+      ~277 ms cross-band (§11.2). *Recommendation:* no per-link width
+      actuator. If capacity beyond MCS7@20 MHz is ever needed, design it as
+      a CSA campaign parameter, gated on (a) a hardware verdict for the
+      deployed chips under injection at 40 MHz, (b) measured retune times,
+      (c) a gate-4-class bench. Until then width stays a deployment choice
+      (the matrix tool already models both).
+- [ ] **R-E: venc volatile writes (flash wear at controller cadence).**
+      Every venc `/set` persists to `/etc/waybeam.json`; write-on-change
+      helps, but bitrate+caps+fps transitions on an oscillating link still
+      wear flash. *Recommendation (venc-repo change):* add a volatile apply
+      (e.g. `persist=false`) to the /set contract; waybeam-link then uses
+      volatile sets for controller-driven fields plus a rare persisted
+      baseline. Wants doing before long-duration flight soaks.
+- [x] **R-F — CLOSED (operator ruling 2026-07-16): not load-bearing here.**
+      Everything late is dropped BEFORE the SHM egress boundary (§6.3a
+      supersession, §8 deadlines, Pass 38 TX discard) and those outcomes are
+      already §15.3 telemetry; beyond the ring the link can neither see nor
+      act except by dropping, which it already does. Reopen only if
+      rig/flight shows consumer-side latency the existing counters cannot
+      explain. The §9.11 emergency-reduction deferral stands.
+- [x] **R-G — CLOSED with R-F** (needed R-F's evidence). `max` stays a
+      reserved config field; §9.11 v1 semantics unchanged.
+- [ ] **R-H: RF cache transport ordering — defer until proposed.** Pass 50
+      gives the UDP/IP cache a measured 3 ms first-NACK lead. An RF cache
+      reply spends shared airtime, so the grace and priority lane must be
+      re-derived for that binding. Formats are transport-agnostic; do not
+      assume the UDP/IP seed transfers unchanged.
+- [x] **§10 ground-uplink power scope — RESOLVED (Pass 43): rejected at
+      config load.** (2026-07-11 desk §4.6 run): the
+      §10 power curve is applied only on the tx-node selector commit, so the
+      ground's designated uplink TX adapter transmits returns at devourer's
+      efuse-default power regardless of any `power_map` — sweeping it is a
+      no-op. *Recommendation:* config-load warning/rejection for a
+      `power_map` on an rx-node uplink now (explicit beats silent); bring
+      the return uplink under power control only if gate 4 shows return
+      margin problems.
+- [ ] **JSCC enforcement production flip (per link class, rig data).** The
+      Pass 38 criteria (≥99% valid decisions, <1% repair underprediction,
+      RTT readiness held) are UDP-proven; the flip itself should follow a
+      radio-backend shadow soak during the gate campaigns.
+      *Recommendation:* flip P-frames first (`arq_mode all-frames` +
+      `enforce`), confirm discard behavior visually on the bench before any
+      flight use.

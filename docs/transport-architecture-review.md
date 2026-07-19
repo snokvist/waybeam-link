@@ -112,8 +112,9 @@ delivers the original datagram to `UdpEgress`.
 The encoder publishes `[VencFrameMeta][Annex-B AU]` into the SPSC ring. TX copies
 one slot into its reusable buffer; `FrameFramer` atomically fragments the frame,
 emits source then repair symbols, and copies each encoded packet into the resend
-ring. RX performs packet admission/dedup/order first, then `FrameReassembler`
-copies symbol payloads by block. Completion is all-source concatenation or
+ring. RX performs packet admission/dedup first, feeds frame-SHM symbols directly
+to `FrameReassembler`, and retains packet ordering only for loss/ARQ accounting.
+The reassembler copies symbol payloads by block. Completion is all-source concatenation or
 Cauchy-RS decode into scratch storage. The callback synchronously copies the
 whole frame into an egress SHM slot. Partial frames are never published.
 

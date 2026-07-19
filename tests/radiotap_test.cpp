@@ -3,6 +3,7 @@
 // radiotap.h): the HT-MCS TX header builder and the RX parser that extracts
 // RSSI + TSFT and reports the header length to strip before dot11_parse.
 #include "wblink/radiotap.h"
+#include "wblink/airtime.h"
 
 #include <cstdint>
 #include <vector>
@@ -131,6 +132,20 @@ void test_rx_malformed() {
     CHECK_EQ_U(r->hdr_len, 8);
 }
 
+void test_ht20_service_time() {
+    // 1000 B at MCS0/LGI 6.5 Mbps = ceil(8,000,000 / 6500) us.
+    auto us = ht20_service_time_us(1000, 0, false, 1000);
+    CHECK(us.has_value());
+    CHECK_EQ_U(*us, 1231);
+    // MCS3/SGI is conservatively floored to 28,888 kbps, then a measured
+    // 600-permille service calibration yields 17,332 kbps.
+    us = ht20_service_time_us(1424, 3, true, 600);
+    CHECK(us.has_value());
+    CHECK_EQ_U(*us, 658);
+    CHECK(!ht20_service_time_us(1000, 8, false, 600).has_value());
+    CHECK(!ht20_service_time_us(1000, 3, true, 0).has_value());
+}
+
 }  // namespace
 
 int main() {
@@ -138,5 +153,6 @@ int main() {
     test_rx_parse();
     test_rx_strip_then_dot11();
     test_rx_malformed();
+    test_ht20_service_time();
     return wbtest_finish("radiotap_test");
 }

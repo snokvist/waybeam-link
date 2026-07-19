@@ -19,8 +19,12 @@ uint16_t rate_symbols(uint16_t rate, uint16_t k) {
 
 bool JsccRuntimeShadow::observe_feedback(const JsccFeedback& feedback,
                                          uint64_t now_ms) {
-    if (feedback_ && !forward_u32(feedback.feedback_epoch,
-                                  feedback_->feedback_epoch)) {
+    const bool same_reporter_session =
+        feedback_ &&
+        feedback.prefix.originator == feedback_->prefix.originator &&
+        feedback.prefix.session_id == feedback_->prefix.session_id;
+    if (same_reporter_session &&
+        !forward_u32(feedback.feedback_epoch, feedback_->feedback_epoch)) {
         return false;
     }
     feedback_ = feedback;

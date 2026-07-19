@@ -9,6 +9,7 @@
 #include <poll.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <csignal>
 #include <cstdlib>
 #include <cstdio>
@@ -18,15 +19,21 @@
 #include <memory>
 #include <map>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "wblink/air_udp.h"
 #include "wblink/binding.h"
+#include "wblink/cache_controller.h"
+#include "wblink/cache_store.h"
+#include "wblink/cache_udp.h"
 #include "wblink/config.h"
 #include "wblink/control_server.h"
 #include "wblink/csa.h"
 #include "wblink/endian.h"
+#include "wblink/fps_ladder.h"
+#include "wblink/frame_caps.h"
 #include "wblink/frame_framer.h"
 #include "wblink/frame_reassembler.h"
 #include "wblink/frame_shm.h"
@@ -37,6 +44,7 @@
 #include "wblink/power.h"
 #include "wblink/power_file.h"
 #include "wblink/quietgap.h"
+#include "wblink/report_gate.h"
 #include "wblink/reporter.h"
 #include "wblink/ring.h"
 #include "wblink/rx.h"
@@ -71,6 +79,172 @@ uint64_t now_us() {
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
 }
+
+class ArqTimingTracker {
+  public:
+    void note_eob(uint64_t at_us) { last_eob_us_ = at_us; }
+
+    void note_nack_built(const uint8_t* frame, size_t len, uint64_t at_us) {
+        const Decoded dec = decode(frame, len);
+        const NackView* n = std::get_if<NackView>(&dec);
+        if (n == nullptr) return;
+        if (last_eob_us_ && at_us >= *last_eob_us_) {
+            eob_to_build_.observe(at_us - *last_eob_us_);
+        }
+        for_each_seq(*n, [&](const Key& k) { built_[k] = at_us; });
+        trim(built_);
+    }
+
+    void note_nack_injected(const uint8_t* frame, size_t len,
+                            uint64_t at_us) {
+        const Decoded dec = decode(frame, len);
+        const NackView* n = std::get_if<NackView>(&dec);
+        if (n == nullptr) return;
+        bool sampled = false;
+        for_each_seq(*n, [&](const Key& k) {
+            const auto it = built_.find(k);
+            if (!sampled && it != built_.end() && at_us >= it->second) {
+                build_to_inject_.observe(at_us - it->second);
+                sampled = true;
+            }
+            injected_[k] = at_us;
+        });
+        trim(injected_);
+    }
+
+    void note_retransmit_arrived(const DataView& v, uint64_t at_us) {
+        if ((v.hdr.data_flags & data_flags::kRetransmit) == 0) return;
+        const Key k = key(v.hdr.prefix.originator, v.hdr.prefix.session_id,
+                          v.hdr.stream_id, v.hdr.seq);
+        if (const auto it = injected_.find(k);
+            it != injected_.end() && at_us >= it->second) {
+            inject_to_retransmit_.observe(at_us - it->second);
+            injected_.erase(it);
+        }
+        if (const auto it = built_.find(k);
+            it != built_.end() && at_us >= it->second) {
+            build_to_retransmit_.observe(at_us - it->second);
+            built_.erase(it);
+        }
+    }
+
+    void note_nack_received(const uint8_t* frame, size_t len,
+                            uint64_t at_us) {
+        const Decoded dec = decode(frame, len);
+        const NackView* n = std::get_if<NackView>(&dec);
+        if (n == nullptr) return;
+        for_each_seq(*n, [&](const Key& k) { received_[k] = at_us; });
+        trim(received_);
+    }
+
+    void note_resend_submitted(const uint8_t* frame, size_t len,
+                               uint64_t at_us) {
+        const Decoded dec = decode(frame, len);
+        const DataView* v = std::get_if<DataView>(&dec);
+        if (v == nullptr ||
+            (v->hdr.data_flags & data_flags::kRetransmit) == 0) return;
+        const Key k = key(v->hdr.prefix.originator,
+                          v->hdr.prefix.session_id, v->hdr.stream_id,
+                          v->hdr.seq);
+        const auto it = received_.find(k);
+        if (it != received_.end() && at_us >= it->second) {
+            receive_to_resend_.observe(at_us - it->second);
+            received_.erase(it);
+        }
+    }
+
+    ArqTimingStats snapshot() const {
+        ArqTimingStats out;
+        out.eob_to_nack_build = eob_to_build_.snapshot();
+        out.nack_build_to_inject = build_to_inject_.snapshot();
+        out.nack_inject_to_retransmit = inject_to_retransmit_.snapshot();
+        out.nack_build_to_retransmit = build_to_retransmit_.snapshot();
+        out.nack_receive_to_resend = receive_to_resend_.snapshot();
+        return out;
+    }
+
+    void reset() {
+        eob_to_build_.reset();
+        build_to_inject_.reset();
+        inject_to_retransmit_.reset();
+        build_to_retransmit_.reset();
+        receive_to_resend_.reset();
+        built_.clear();
+        injected_.clear();
+        received_.clear();
+        last_eob_us_.reset();
+    }
+
+  private:
+    class Series {
+      public:
+        void observe(uint64_t delta) {
+            const uint32_t us = static_cast<uint32_t>(
+                std::min<uint64_t>(delta, UINT32_MAX));
+            ++samples_;
+            max_ = std::max(max_, us);
+            recent_.push_back(us);
+            if (recent_.size() > 512) recent_.pop_front();
+        }
+        TimingMetricStats snapshot() const {
+            TimingMetricStats out{samples_, 0, max_};
+            if (recent_.empty()) return out;
+            std::vector<uint32_t> sorted(recent_.begin(), recent_.end());
+            std::sort(sorted.begin(), sorted.end());
+            const size_t rank = (sorted.size() * 95 + 99) / 100;
+            out.p95_us = sorted[rank - 1];
+            return out;
+        }
+        void reset() {
+            samples_ = 0;
+            max_ = 0;
+            recent_.clear();
+        }
+      private:
+        uint64_t samples_ = 0;
+        uint32_t max_ = 0;
+        std::deque<uint32_t> recent_;
+    };
+
+    struct Key {
+        uint16_t originator;
+        uint32_t session;
+        uint8_t stream_id;
+        uint32_t seq;
+        bool operator<(const Key& other) const {
+            return std::tie(originator, session, stream_id, seq) <
+                   std::tie(other.originator, other.session, other.stream_id,
+                            other.seq);
+        }
+    };
+    static Key key(uint16_t originator, uint32_t session, uint8_t stream_id,
+                   uint32_t seq) {
+        return Key{originator, session, stream_id, seq};
+    }
+    template <class F>
+    static void for_each_seq(const NackView& n, const F& fn) {
+        for (unsigned i = 0; i < static_cast<unsigned>(n.bitmap_len) * 8;
+             ++i) {
+            if ((n.bitmap[i / 8] & (1u << (i % 8))) != 0) {
+                fn(key(n.hdr.target_originator, n.hdr.target_session,
+                       n.hdr.target_stream_id, n.hdr.base_seq + i));
+            }
+        }
+    }
+    static void trim(std::map<Key, uint64_t>& m) {
+        while (m.size() > 4096) m.erase(m.begin());
+    }
+
+    Series eob_to_build_;
+    Series build_to_inject_;
+    Series inject_to_retransmit_;
+    Series build_to_retransmit_;
+    Series receive_to_resend_;
+    std::map<Key, uint64_t> built_;
+    std::map<Key, uint64_t> injected_;
+    std::map<Key, uint64_t> received_;
+    std::optional<uint64_t> last_eob_us_;
+};
 
 // Bench-only, bounded packet-event trace. The wire remains the source of truth:
 // this observer decodes existing frames and never feeds decisions back in.
@@ -435,6 +609,8 @@ struct AirBackend {
             mc.filter_net_id = cfg.node.net_id;
             mc.originator = cfg.node.originator;
             mc.rx_drop_permille = cfg.air.rx_drop_permille;
+            mc.airtime_efficiency_permille =
+                cfg.air.airtime_efficiency_permille;
             auto a = MonAir::create(mc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
@@ -492,11 +668,11 @@ struct AirBackend {
     size_t inject_resend(const uint8_t* f, size_t n) {
         size_t sent = 0;
         if (mon) {
-            sent = mon->inject(f, n);
+            sent = mon->inject_resend(f, n);
         } else {
 #if WBLINK_RADIO
             if (radio) {
-                sent = radio->inject(f, n);
+                sent = radio->inject_resend(f, n);
             } else
 #endif
             {
@@ -518,14 +694,15 @@ struct AirBackend {
     // Returns (NACK/LINK_REPORT) carry their target so the radio backend
     // can address them as §3.0 unicast when return.unicast is on; the udp
     // dev backend has no L2 addressing and ignores the target.
-    size_t inject_return(uint16_t target, const uint8_t* f, size_t n) {
+    size_t inject_return(uint16_t target, const uint8_t* f, size_t n,
+                         bool urgent = false) {
         size_t sent = 0;
         if (mon) {
-            sent = mon->inject_return(target, f, n);
+            sent = mon->inject_return(target, f, n, urgent);
         } else {
 #if WBLINK_RADIO
             if (radio) {
-                sent = radio->inject_return(target, f, n);
+                sent = radio->inject_return(target, f, n, urgent);
             } else
 #endif
             {
@@ -668,6 +845,9 @@ struct AirBackend {
     bool tx_pending() const { return udp && udp->tx_pending(); }
     std::optional<uint32_t> estimate_airtime_us(size_t bytes,
                                                 bool include_pending) const {
+        if (mon) {
+            return mon->estimate_airtime_us(bytes, include_pending);
+        }
         if (!udp) return std::nullopt;
         return udp->estimate_airtime_us(bytes, include_pending);
     }
@@ -730,13 +910,13 @@ struct AirBackend {
                 as.kernel_drop = c.kernel_dropped;
                 as.bpf_filtered = c.bpf_filtered;
                 as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
-                // No CCX tx.report on monitor injection; wedge watchdog off.
+                // No CCX tx.report on monitor injection. The §9.10 verdict
+                // instead uses netdev tx_packets progress internally.
                 as.tx_reports = 0;
                 as.tx_report_fails = 0;
-                as.tx_wedged = false;
+                as.tx_wedged = c.tx && tx_wedged;
                 snap.adapters.push_back(std::move(as));
             }
-            (void)tx_wedged;
             return;
         }
 #if WBLINK_RADIO
@@ -782,9 +962,16 @@ struct AirBackend {
 #endif
     }
 
-    // TX adapter's cumulative (tx_submitted, tx_reports) for the §9.10
-    // watchdog; nullopt on the udp dev backend (no CCX reports to watch).
-    std::optional<std::pair<uint64_t, uint64_t>> tx_report_counters() const {
+    // TX adapter's cumulative (submitted, completion-progress) counters for
+    // §9.10: netdev tx_packets on monitor, CCX reports on devourer. nullopt on
+    // UDP, which has no independent completion surface.
+    std::optional<std::pair<uint64_t, uint64_t>> tx_progress_counters() const {
+        if (mon) {
+            uint64_t s = 0;
+            uint64_t p = 0;
+            mon->tx_progress_counters(s, p);
+            return std::make_pair(s, p);
+        }
 #if WBLINK_RADIO
         if (radio) {
             uint64_t s = 0;
@@ -817,17 +1004,43 @@ struct TxCore {
         uint64_t jscc_decision_frames = 0;
         uint64_t jscc_valid_decisions = 0;
         uint64_t jscc_fallback_decisions = 0;
+        // §14.2 enforcement (Pass 38).
+        bool jscc_enforce = false;
+        uint64_t jscc_enforced_frames = 0;
+        uint64_t jscc_discarded_frames = 0;
     };
 
     TxCore(const Config& cfg, uint32_t session, const ProfileTable* table,
            uint8_t table_version)
         : originator_(cfg.node.originator),
-          preferred_originator_(cfg.node.preferred_originator),
           session_(session),
           table_version_(table_version),
           table_(table),
           selector_(selector_policy(cfg), table),
-          venc_(cfg.venc) {
+          venc_(cfg.venc),
+          venc_knobs_(cfg.venc),
+          arq_max_fps_(cfg.policy.arq.arq_max_fps),
+          feedback_gate_(ReportGatePolicy{
+              cfg.node.preferred_originator,
+              cfg.policy.report_timeout_ms * 4}),
+          report_gate_(ReportGatePolicy{
+              cfg.node.preferred_originator,
+              cfg.policy.report_timeout_ms * 4}) {
+        // §9.11 FPS ladder (Pass 39) — config validated it requires venc.
+        if (cfg.venc.enabled && cfg.venc.fps_ladder.enabled) {
+            const FpsLadderCfg& lc = cfg.venc.fps_ladder;
+            FpsLadderPolicy fp;
+            fp.min_fps = lc.min;
+            fp.preferred_fps = lc.preferred;
+            fp.min_p_frame_bytes = lc.min_p_frame_bytes;
+            fp.restore_hysteresis_bytes = lc.restore_hysteresis_bytes;
+            fp.sample_timeout_ms = lc.sample_timeout_ms;
+            fp.reduce_after_ms = lc.reduce_after_ms;
+            fp.reduce_dwell_ms = lc.reduce_dwell_ms;
+            fp.restore_after_ms = lc.restore_after_ms;
+            fp.settle_ms = lc.settle_ms;
+            fps_ladder_.emplace(fp);
+        }
         // §10: one power curve per TX adapter with an authored map. The
         // resolve happens at profile commit; the radio backend applies it
         // (apply_power hook), otherwise it stays a logged intent.
@@ -878,6 +1091,7 @@ struct TxCore {
                         jc.fec_floor_permille, jc.fec_cap_permille,
                         jc.arq_guard_us, jc.feedback_timeout_ms,
                         jc.min_rtt_samples});
+                    st.jscc_enforce = jc.enforce;  // §14.2 Pass 38
                 }
             } else {
                 FramerConfig fc;
@@ -947,14 +1161,26 @@ struct TxCore {
             if (s.stream_id != stream_id || !s.frame_framer) {
                 continue;
             }
-            if (s.jscc_shadow && blob != nullptr && len >= kVencFrameMetaSize) {
+            // §9.6 cadence: windowed frame count (the ring's last-gap
+            // interval collapses under batch drains and cannot be used).
+            if (cadence_start_ms_ == 0) {
+                cadence_start_ms_ = now;
+            }
+            ++cadence_frames_;
+            VencFrameMeta meta;
+            const bool have_meta = read_frame_meta(blob, len, &meta);
+            const bool idr = have_meta && (meta.flags & kFrameFlagIdr) != 0;
+            if (fps_ladder_ && have_meta && !idr) {
+                fps_ladder_->note_p_frame(
+                    static_cast<uint32_t>(std::min<size_t>(
+                        len - kVencFrameMetaSize, UINT32_MAX)),
+                    now);
+            }
+            if (s.jscc_shadow && have_meta) {
                 const uint16_t symbol = s.frame_framer->symbol_size();
                 const size_t k_sz = std::max<size_t>(1, (len + symbol - 1) / symbol);
                 const uint16_t k = static_cast<uint16_t>(
                     std::min<size_t>(k_sz, UINT16_MAX));
-                VencFrameMeta meta;
-                read_frame_meta(blob, len, &meta);
-                const bool idr = (meta.flags & kFrameFlagIdr) != 0;
                 const size_t source_bytes =
                     len + static_cast<size_t>(k) *
                               (kDataHeaderSize + kFecSourceSubheaderSize);
@@ -964,7 +1190,9 @@ struct TxCore {
                 input.source_k = k;
                 input.deadline_us = frame_deadline_us(idr);
                 input.arq_capable =
-                    idr || s.frame_framer->arq_mode() == FrameArqMode::kAllFrames;
+                    (idr ||
+                     s.frame_framer->arq_mode() == FrameArqMode::kAllFrames) &&
+                    !arq_fps_suppressed_;  // §4.1 Pass 40 cutoff
                 input.now_ms = now;
                 if (estimate_airtime) {
                     input.source_tx_remaining_us =
@@ -978,6 +1206,18 @@ struct TxCore {
                     ++s.jscc_valid_decisions;
                 } else {
                     ++s.jscc_fallback_decisions;
+                }
+                // §14.2 enforcement (Pass 38): a VALID decision actuates for
+                // this one frame; any fallback keeps the fixed §14.1 path.
+                if (s.jscc_enforce && s.jscc_latest.valid) {
+                    if (s.jscc_latest.decision.discard) {
+                        ++s.jscc_discarded_frames;  // rule 2: drop, not queue
+                        return;
+                    }
+                    s.frame_framer->set_next_frame_override(
+                        s.jscc_latest.decision.parity_symbols,
+                        s.jscc_latest.decision.arq_eligible);
+                    ++s.jscc_enforced_frames;
                 }
             }
             s.frame_framer->on_frame(
@@ -994,49 +1234,55 @@ struct TxCore {
 
     // Air packets heard back (uplink): NACKs feed the scheduler, LINK_REPORTs
     // feed the §9 selector.
-    void on_air(const uint8_t* d, size_t n, uint64_t now) {
+    bool on_air(const uint8_t* d, size_t n, uint64_t now) {
         const Decoded dec = decode(d, n);
         if (const JsccFeedback* f = std::get_if<JsccFeedback>(&dec)) {
             if (f->target_originator != originator_ ||
                 f->target_session != session_ ||
-                (preferred_originator_ != 0 &&
-                 f->prefix.originator != preferred_originator_)) {
-                return;
+                !feedback_gate_.accept(f->prefix.originator,
+                                       f->prefix.session_id, now)) {
+                return false;
             }
             for (Stream& s : streams_) {
                 if (s.stream_id == f->target_stream_id && s.jscc_shadow) {
                     s.jscc_shadow->observe_feedback(*f, now);
-                    return;
+                    return false;
                 }
             }
-            return;
+            return false;
         }
         if (const NackView* nack = std::get_if<NackView>(&dec)) {
             if (nack->hdr.target_originator != originator_ ||
                 nack->hdr.target_session != session_) {
-                return;
+                return false;
             }
             for (Stream& s : streams_) {
                 if (s.stream_id == nack->hdr.target_stream_id) {
                     s.sched.on_nack(*nack, s.ring, now);
-                    return;
+                    return true;
                 }
             }
-            return;
+            return false;
         }
         if (const LinkReport* r = std::get_if<LinkReport>(&dec)) {
             if (r->target_originator != originator_ ||
                 r->target_session != session_) {
-                return;
+                return false;
+            }
+            // §3.5 acceptance filter (Pass 41): preferred/latched reporters
+            // only — BEFORE the selector and the §9.11 ladder consume it.
+            if (!report_gate_.accept(r->prefix.originator,
+                                     r->prefix.session_id, now)) {
+                return false;
             }
             ++reports_received_;
             selector_.on_report(*r, now);
-            return;
+            return false;
         }
         if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
             if (r->target_originator != originator_ ||
                 r->target_session != session_) {
-                return;
+                return false;
             }
             for (const Stream& s : streams_) {
                 if (s.stream_id == r->target_stream_id &&
@@ -1046,9 +1292,19 @@ struct TxCore {
                                  "venc: decoder recovery stream=%u requester=%u %s\n",
                                  r->target_stream_id, r->prefix.originator,
                                  ok ? "accepted" : "failed");
-                    return;
+                    return false;
                 }
             }
+        }
+        return false;
+    }
+
+    void drain_resends(uint64_t now, const Inject& inject_resend) {
+        for (Stream& s : streams_) {
+            s.ring.evict(now);
+            s.sched.drain(s.ring, now, [&](const uint8_t* f, size_t l) {
+                inject_resend(f, l);
+            });
         }
     }
 
@@ -1100,17 +1356,85 @@ struct TxCore {
         if (selector_.bitrate_kbps() > 0) {
             venc_.set_bitrate(selector_.bitrate_kbps(), now);
         }
-        for (Stream& s : streams_) {
-            s.ring.evict(now);
-            s.sched.drain(s.ring, now, [&](const uint8_t* f, size_t l) {
-                (inject_resend ? inject_resend : inject)(f, l);
-            });
+        // §9.6 cadence estimate: frames over a ~1 s window.
+        if (cadence_start_ms_ != 0 && now >= cadence_start_ms_ + 1000) {
+            frame_cadence_us_ = cadence_frames_ > 0
+                ? (now - cadence_start_ms_) * 1000ull / cadence_frames_
+                : 0;
+            cadence_frames_ = 0;
+            cadence_start_ms_ = now;
         }
+        // §9.11 FPS ladder: preserve measured P-frame FEC block size. Bitrate
+        // and cap transitions get first claim on the resulting frame evidence.
+        if (fps_ladder_) {
+            fps_ladder_->tick(now, venc_.settling(now));
+            // Re-offer the current target every tick. VencActuator dedupes a
+            // successfully applied value and retries after transient HTTP or
+            // shared-holdoff failures, so controller state cannot outrun venc.
+            venc_.set_fps(fps_ladder_->current_fps(), now);
+        }
+        // §4.1 Pass 40 high-cadence ARQ cutoff, driven by the same cadence
+        // input the §9.6 caps use (ladder-commanded, else measured, else
+        // hint). Sticky on the framers until the cadence drops back.
+        {
+            const uint32_t snapped = snap_frame_period_us(
+                fps_ladder_ && fps_ladder_->current_fps() > 0
+                    ? 1000000ull / fps_ladder_->current_fps()
+                    : (frame_cadence_us_ != 0
+                           ? frame_cadence_us_
+                           : 1000000ull / venc_knobs_.fps_hint));
+            arq_fps_suppressed_ = arq_max_fps_ != 0 && snapped != 0 &&
+                                  snapped < 1000000u / arq_max_fps_;
+            for (Stream& s : streams_) {
+                if (s.frame_framer) {
+                    s.frame_framer->set_arq_suppressed(arq_fps_suppressed_);
+                }
+            }
+        }
+        // §9.6 Pass 37 horizon caps: recomputed from slow inputs (rung
+        // budget, ladder-snapped cadence, I deadline, live §14.1 rates);
+        // write-on-change makes the steady state a no-op.
+        if (venc_.frame_caps_enabled() && selector_.bitrate_kbps() > 0) {
+            for (Stream& s : streams_) {
+                if (!s.frame_framer) {
+                    continue;  // caps apply to frame-shm ingress only (§9.6)
+                }
+                FrameCapInputs in;
+                in.budget_kbps = selector_.bitrate_kbps();
+                // §9.11: while the ladder runs, the COMMANDED fps is the
+                // authoritative cadence — measurement lags a change by ~1 s.
+                in.frame_period_us = snap_frame_period_us(
+                    fps_ladder_ && fps_ladder_->current_fps() > 0
+                        ? 1000000ull / fps_ladder_->current_fps()
+                        : (frame_cadence_us_ != 0
+                               ? frame_cadence_us_
+                               : 1000000ull / venc_knobs_.fps_hint));
+                in.iframe_deadline_ms = static_cast<uint16_t>(
+                    frame_deadline_us(true) / 1000u);
+                const FrameFecConfig& fec = s.frame_framer->fec();
+                if (fec.scheme != FecScheme::kNone) {
+                    in.i_rate_permille = fec.i_rate_permille;
+                    in.p_rate_permille = fec.p_rate_permille;
+                }
+                in.symbol_size = static_cast<uint16_t>(
+                    max_payload_for(selector_.profile_id()) -
+                    kDataHeaderSize - kFecRepairSubheaderSize);
+                in.ceiling_bytes = venc_knobs_.cap_ceiling_bytes;
+                in.i_headroom_permille = venc_knobs_.i_headroom_permille;
+                in.p_headroom_permille = venc_knobs_.p_headroom_permille;
+                const FrameCaps caps = derive_frame_caps(in);
+                venc_.set_max_frame_size(caps.max_i_bytes, caps.max_p_bytes,
+                                         now);
+                break;  // single video stream (§9.6)
+            }
+        }
+        drain_resends(now, inject_resend ? inject_resend : inject);
     }
 
     void set_pressure(bool on, uint64_t now) {  // §9.9 gauge (step 9+ feeds it)
         selector_.set_pressure(on, now);
     }
+
 
     // §11.3: freeze the cascade + pause the watchdog across the CSA blackout.
     void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
@@ -1190,6 +1514,8 @@ struct TxCore {
                     s.frame_framer->stats().fec_oversize_k;
                 st.idr_frames = s.frame_framer->stats().idr_frames;
                 st.arq_frames = s.frame_framer->stats().arq_frames;
+                st.arq_cutoff_frames =
+                    s.frame_framer->stats().arq_cutoff_frames;
             }
             if (s.jscc_shadow) {
                 const JsccShadowResult& js = s.jscc_latest;
@@ -1217,6 +1543,8 @@ struct TxCore {
                 st.jscc_output_discard = js.decision.discard;
                 st.jscc_feedback_epoch = js.feedback_epoch;
                 st.jscc_feedback_age_ms = js.feedback_age_ms;
+                st.jscc_enforced_frames = s.jscc_enforced_frames;
+                st.jscc_discarded_frames = s.jscc_discarded_frames;
             }
             st.resends_sent = s.sched.counters().resends_sent;
             st.double_send_suppressed =
@@ -1232,6 +1560,21 @@ struct TxCore {
             static_cast<uint32_t>(selector_.report_age_ms(now));
         snap.link.state = selector_.state();
         snap.link.flap_freeze = selector_.flap_frozen(now);
+        // §9.6 actuator state (Pass 37).
+        snap.link.venc_bitrate_kbps = venc_.commanded_bitrate_kbps();
+        snap.link.venc_max_i_bytes = venc_.commanded_max_i_bytes();
+        snap.link.venc_max_p_bytes = venc_.commanded_max_p_bytes();
+        snap.link.venc_pushes = venc_.pushes();
+        snap.link.venc_failures = venc_.failures();
+        snap.link.venc_settling = venc_.settling(now);
+        snap.link.venc_fps = venc_.commanded_fps();
+        if (fps_ladder_) {
+            snap.link.venc_p_frame_bytes =
+                fps_ladder_->observed_p_frame_bytes();
+            snap.link.venc_p_frame_target_bytes =
+                fps_ladder_->target_p_frame_bytes();
+            snap.link.venc_fps_ladder_state = fps_ladder_->state();
+        }
         for (const PowerAdapter& pa : power_) {
             if (pa.applied_qdb) {
                 snap.link.tx_power_qdb = *pa.applied_qdb;  // first TX adapter
@@ -1242,6 +1585,7 @@ struct TxCore {
         // reports it SENT; we know how many arrived.
         snap.ret.reports_expected = selector_.report_epoch();
         snap.ret.reports_received = reports_received_;
+        snap.ret.reports_rejected = report_gate_.rejected();  // §3.5 Pass 41
     }
 
     struct PowerAdapter {
@@ -1259,12 +1603,20 @@ struct TxCore {
         estimate_airtime;
 
     uint16_t originator_;
-    uint16_t preferred_originator_ = 0;
     uint32_t session_;
     uint8_t table_version_;
     const ProfileTable* table_;
     Selector selector_;
     VencActuator venc_;
+    VencCfg venc_knobs_;            // §9.6 cap knobs (Pass 37)
+    std::optional<FpsLadder> fps_ladder_;  // §9.11 (Pass 39)
+    uint16_t arq_max_fps_ = 100;           // §4.1 Pass 40 cutoff
+    bool arq_fps_suppressed_ = false;
+    ReportGate feedback_gate_;             // §3.10 Pass 55
+    ReportGate report_gate_;               // §3.5 Pass 41
+    uint64_t frame_cadence_us_ = 0; // windowed ingress cadence estimate
+    uint64_t cadence_start_ms_ = 0;
+    uint32_t cadence_frames_ = 0;
     std::vector<PowerAdapter> power_;
     uint32_t reports_received_ = 0;
     std::vector<Stream> streams_;
@@ -1304,15 +1656,31 @@ struct RxCore {
     }
 
     void on_air(uint8_t adapter, const uint8_t* d, size_t n, uint64_t now,
-                const RxEngine::Deliver& deliver, int8_t rssi = 0) {
+                const RxEngine::Deliver& deliver, int8_t rssi = 0,
+                const RxEngine::EarlyDeliver& early_deliver = {}) {
         const Decoded dec = decode(d, n);
         if (const DataView* v = std::get_if<DataView>(&dec)) {
-            engine_.on_data(adapter, *v, now, deliver, rssi);
+            engine_.on_data(adapter, *v, now, deliver, rssi, early_deliver);
         }
     }
 
+    void complete_frame(uint8_t stream_id, uint32_t block_id, uint64_t now,
+                        const RxEngine::Deliver& deliver) {
+        engine_.complete_frame(stream_id, block_id, now, deliver);
+    }
+
+    bool defer_first_nack(uint8_t stream_id, uint32_t block_id,
+                          uint64_t not_before_ms) {
+        return engine_.defer_first_nack(stream_id, block_id, not_before_ms);
+    }
+
+    bool block_had_nack(uint8_t stream_id, uint32_t block_id) const {
+        return engine_.block_had_nack(stream_id, block_id);
+    }
+
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
-              const Inject& inject_nack) {
+              const Inject& inject_report, const Inject& inject_nack,
+              bool emit_nacks = true) {
         engine_.tick(now, deliver);
         // §7.3: LINK_REPORTs ride the same uplink as NACKs.
         for (LinkReport r : reporter_.build(engine_, now)) {
@@ -1321,8 +1689,11 @@ struct RxCore {
             r.prefix.session_id = session_;
             uint8_t frame[kLinkReportSize];
             if (encode_link_report(r, frame, sizeof(frame)) > 0) {
-                inject_nack(frame, sizeof(frame), r.target_originator);
+                inject_report(frame, sizeof(frame), r.target_originator);
             }
+        }
+        if (!emit_nacks) {
+            return;
         }
         for (const NackRequest& req : engine_.build_nacks(now)) {
             NackHeader hdr;
@@ -1528,7 +1899,10 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                     frame_stats = nullptr,
                 const std::vector<std::pair<uint8_t, FrameShmRing::Stats>>*
                     shm_stats = nullptr,
-                StatsSnapshot* out_snap = nullptr) {
+                const CacheRepairStatsOut* cache_repair = nullptr,
+                const CacheStoreStatsOut* cache_store = nullptr,
+                StatsSnapshot* out_snap = nullptr,
+                const ArqTimingStats* arq_timing = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -1574,6 +1948,15 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 st->type = "RTP";
             }
             st->recovered_fec = fr.frames_fec;
+            st->fec_recovered_source_symbols =
+                fr.fec_recovered_source_symbols;
+            st->arq_recovered_source_symbols =
+                fr.arq_recovered_source_symbols;
+            st->arq_recovered_repair_symbols =
+                fr.arq_recovered_repair_symbols;
+            st->frames_with_arq = fr.frames_with_arq;
+            st->frames_fec_only = fr.frames_fec_only;
+            st->frames_fec_after_arq = fr.frames_fec_after_arq;
             st->frames_fast = fr.frames_fast;
             st->frames_unrecoverable = fr.frames_unrecoverable;
             st->malformed = fr.malformed;
@@ -1616,6 +1999,16 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 }
             }
         }
+    }
+    // §15.3: cache blocks present only when the §14.3 role is enabled.
+    if (cache_repair != nullptr) {
+        snap.cache_repair = *cache_repair;
+    }
+    if (cache_store != nullptr) {
+        snap.cache_store = *cache_store;
+    }
+    if (arq_timing != nullptr) {
+        snap.arq_timing = *arq_timing;
     }
     if (out_snap != nullptr) {
         *out_snap = snap;  // §15.5: GET /health reads the freshest snapshot
@@ -1720,6 +2113,7 @@ int run_tx(const Loaded& l) {
         uint8_t stream_id;
         std::string name;
         std::unique_ptr<FrameShmRing> ring;  // null until attached
+        bool pending = false;
     };
     std::vector<ShmIn> shm_ins;
     bool have_udp_ins = false;
@@ -1731,7 +2125,7 @@ int run_tx(const Loaded& l) {
             have_udp_ins = true;
             continue;
         }
-        ShmIn si{s.stream_id, s.bind.name, nullptr};
+        ShmIn si{s.stream_id, s.bind.name, nullptr, false};
         auto r = FrameShmRing::attach(s.bind.name);
         if (r) {
             si.ring = std::move(*r.value);
@@ -1761,6 +2155,7 @@ int run_tx(const Loaded& l) {
     // override degrades to §7.1 under load.
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::vector<uint8_t>> held;
+    ArqTimingTracker arq_timing;
     uint64_t now_us_it = now_us();
     const auto send_raw = [&](const uint8_t* f, size_t n) {
         air.value->inject(f, n);
@@ -1779,6 +2174,7 @@ int run_tx(const Loaded& l) {
     };
     const TxCore::Inject inject_resend = [&](const uint8_t* f, size_t n) {
         air.value->inject_resend(f, n);
+        arq_timing.note_resend_submitted(f, n, now_us());
     };
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
     // retunes the (single) radio at the TSF-anchored T_switch.
@@ -1829,6 +2225,7 @@ int run_tx(const Loaded& l) {
         };
         h.reset_stats = [&] {
             tx.reset_stats();
+            arq_timing.reset();
             for (ShmIn& si : shm_ins) {
                 if (si.ring) si.ring->reset_stats();
             }
@@ -1839,6 +2236,39 @@ int run_tx(const Loaded& l) {
     }
     std::fprintf(stderr, "tx: session=%u, running%s\n", session,
                  qg.enabled() ? " (quiet-gap pacing)" : "");
+    const auto service_air = [&](uint64_t service_now) {
+        const uint64_t service_us = now_us();
+        air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
+                                    size_t n) {
+            const Decoded dec = decode(d, n);
+            discovery.observe(dec, service_now);
+            if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
+                if (!air.value->supports_csa()) return;
+                if (csa.on_csa(*c, service_us,
+                               air.value->read_tsf(meta.adapter_id),
+                               static_cast<uint32_t>(meta.tsf_us),
+                               std::nullopt)) {
+                    tx.csa_freeze(service_now + static_cast<uint64_t>(
+                                                   l.cfg.policy.csa.settle_s *
+                                                   1000));
+                    tx.set_csa_armed(true);
+                    std::fprintf(stderr,
+                                 "csa: armed -> %u MHz (nonce %u, dt %u ms)\n",
+                                 c->target_chan, c->csa_nonce,
+                                 c->dt_to_switch_ms);
+                }
+                return;
+            }
+            if (!std::holds_alternative<DecodeError>(dec)) {
+                csa.note_valid_rx(service_us);
+            }
+            if (tx.on_air(d, n, service_now)) {
+                arq_timing.note_nack_received(d, n, service_us);
+                // A valid NACK bypasses the normal tick and live-video path.
+                tx.drain_resends(service_now, inject_resend);
+            }
+        });
+    };
     while (g_stop == 0) {
         // One timestamp per iteration: every callback and the tick share it,
         // so the time injected into the core never steps backward between
@@ -1846,6 +2276,9 @@ int run_tx(const Loaded& l) {
         // tick's captured now, and u64 "now - stamp" arithmetic underflows).
         const uint64_t now = now_ms();
         now_us_it = now_us();
+        // Return-radio readiness is always serviced before video ingress or a
+        // held-live flush. This is the vehicle's ARQ priority boundary.
+        service_air(now);
         if (now >= next_shm_identity_check_ms) {
             for (ShmIn& si : shm_ins) {
                 if (si.ring && !si.ring->backing_object_current()) {
@@ -1854,6 +2287,7 @@ int run_tx(const Loaded& l) {
                                  "reattaching\n",
                                  si.name.c_str());
                     si.ring.reset();
+                    si.pending = false;
                 }
             }
             next_shm_identity_check_ms = now + 250;
@@ -1881,90 +2315,69 @@ int run_tx(const Loaded& l) {
                 }
                 if (auto r = FrameShmRing::attach(si.name)) {
                     si.ring = std::move(*r.value);
+                    si.pending = false;
                     std::fprintf(stderr, "tx: frame-shm '%s' attached\n",
                                  si.name.c_str());
                 }
             }
             next_shm_attach_ms = now + 500;
         }
-        // Union the frame-shm consumer eventfds into the ingress wait. shm_fds
-        // lists only attached rings, in order; drain_shm(j) maps index j back.
-        std::vector<int> shm_fds;
+        // Air readiness comes first in the unified wait. SHM readiness only
+        // marks a ring pending; at most one frame per ring is consumed below,
+        // preventing a producer burst from monopolising the vehicle loop.
+        std::vector<int> ready_fds = air.value->wait_fds();
+        const size_t air_fd_count = ready_fds.size();
         for (const ShmIn& si : shm_ins) {
             if (si.ring) {
-                shm_fds.push_back(si.ring->event_fd());
+                ready_fds.push_back(si.ring->event_fd());
             }
         }
-        const size_t shm_fd_count = shm_fds.size();
-        const std::vector<int> air_fds = air.value->wait_fds();
-        shm_fds.insert(shm_fds.end(), air_fds.begin(), air_fds.end());
-        const auto drain_shm = [&](size_t j) {
-            if (j >= shm_fd_count) return;  // air readiness; drained below
+        const auto on_ready = [&](size_t j) {
+            if (j < air_fd_count) {
+                service_air(now_ms());
+                return;
+            }
+            const size_t want = j - air_fd_count;
             size_t k = 0;
             for (ShmIn& si : shm_ins) {
-                if (!si.ring) {
-                    continue;
-                }
-                if (k++ != j) {
-                    continue;
-                }
+                if (!si.ring) continue;
+                if (k++ != want) continue;
                 si.ring->drain_event();
-                for (;;) {
-                    const long got =
-                        si.ring->read_frame(frame_buf.data(), frame_buf.size());
-                    if (got <= 0) {
-                        break;
-                    }
-                    tx.on_frame(si.stream_id, frame_buf.data(),
-                                static_cast<size_t>(got), now, inject);
-                }
+                si.pending = true;
                 return;
             }
         };
         // Held frames need µs-scale reactivity — don't sleep in poll then.
-        const int in_timeout = held.empty() && !air.value->tx_pending() ? 2 : 0;
+        bool shm_pending = false;
+        for (const ShmIn& si : shm_ins) shm_pending |= si.pending;
+        const int in_timeout =
+            held.empty() && !air.value->tx_pending() && !shm_pending ? 2 : 0;
         bindings.value->poll_once(
             in_timeout,
             [&](const IngressEvent& ev) {
                 tx.on_ingress(ev.stream_id, ev.data, ev.len, now, inject);
             },
-            shm_fds, drain_shm);
+            ready_fds, on_ready);
         // Nothing to wait on yet (no UDP ingress and every frame-shm producer
         // still down): poll_once returned instantly — pace to avoid a busy spin
         // while waiting for the producer to come up.
-        if (!have_udp_ins && shm_fds.empty() && in_timeout > 0) {
+        if (!have_udp_ins && ready_fds.empty() && in_timeout > 0) {
             ::poll(nullptr, 0, in_timeout);
         }
         const uint64_t service_now = now_ms();
-        air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
-                                    size_t n) {
-            const Decoded dec = decode(d, n);
-            discovery.observe(dec, service_now);
-            if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
-                if (!air.value->supports_csa()) {
-                    return;
-                }
-                // §11.2: anchor on this adapter's TSF; the follower manages
-                // its own issuer latch (MAC-valid bootstrap, §11.4).
-                if (csa.on_csa(*c, now_us_it,
-                               air.value->read_tsf(meta.adapter_id),
-                               static_cast<uint32_t>(meta.tsf_us),
-                               std::nullopt)) {
-                    tx.csa_freeze(now + static_cast<uint64_t>(
-                                            l.cfg.policy.csa.settle_s * 1000));
-                    tx.set_csa_armed(true);
-                    std::fprintf(stderr,
-                                 "csa: armed -> %u MHz (nonce %u, dt %u ms)\n",
-                                 c->target_chan, c->csa_nonce,
-                                 c->dt_to_switch_ms);
-                }
-                return;
+        service_air(service_now);
+        for (ShmIn& si : shm_ins) {
+            if (!si.ring || !si.pending) continue;
+            const long got =
+                si.ring->read_frame(frame_buf.data(), frame_buf.size());
+            if (got <= 0) {
+                si.pending = false;
+                continue;
             }
-            if (!std::holds_alternative<DecodeError>(dec)) {
-                csa.note_valid_rx(now_us_it);  // §11.5 verify/rendezvous feed
-            }
-            tx.on_air(d, n, service_now);
-        });
+            tx.on_frame(si.stream_id, frame_buf.data(),
+                        static_cast<size_t>(got), service_now, inject);
+        }
+        now_us_it = now_us();
         const CsaAction ca = csa.tick(now_us_it);
         if (ca.kind != CsaAction::Kind::kNone) {
             tx.set_csa_armed(false);  // switching now — the ACK window is over
@@ -1974,12 +2387,13 @@ int run_tx(const Loaded& l) {
         }
         tx.tick(service_now, inject, inject_resend);
         air.value->heartbeat(l.cfg.node.originator, session, service_now);
-        if (const auto trc = air.value->tx_report_counters()) {
+        if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
-                        ? "air: TX WEDGE — submissions advancing, zero CCX "
-                          "reports over the window (§9.10)\n"
-                        : "air: tx wedge cleared — CCX reports resumed\n");
+                        ? "air: TX WEDGE — submissions advancing, zero "
+                          "backend TX progress over the window (§9.10)\n"
+                        : "air: tx wedge cleared — backend TX progress "
+                          "resumed\n");
             }
         }
         if (control) {
@@ -1992,9 +2406,10 @@ int run_tx(const Loaded& l) {
                     shm_stats.emplace_back(si.stream_id, si.ring->stats());
                 }
             }
+            const ArqTimingStats timing = arq_timing.snapshot();
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
                        csa.state_str(), 0, 0, wedge.wedged(), nullptr,
-                       &shm_stats, &last_snap);
+                       &shm_stats, nullptr, nullptr, &last_snap, &timing);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -2059,6 +2474,92 @@ int run_rx(const Loaded& l) {
     }
     uint64_t deliver_now = now_ms();
 
+    // §14.3 cache roles (v1 IP transport; both optional, either or both).
+    std::unique_ptr<CacheController> cache_ctl;
+    std::unique_ptr<CacheUdp> cache_repair_sock;
+    std::map<uint16_t, CacheEndpoint> cache_endpoints;  // originator -> ep
+    FrameReassembler* cache_reasm = nullptr;
+    FrameShmRing* cache_ring = nullptr;
+    if (l.cfg.cache.repair.enabled) {
+        const CacheRepairCfg& cr = l.cfg.cache.repair;
+        for (const CacheEndpointCfg& e : cr.caches) {
+            auto ep = CacheUdp::resolve(e.endpoint);
+            if (!ep) {
+                std::fprintf(stderr, "cache.repair '%s': %s\n",
+                             e.endpoint.c_str(), ep.error.c_str());
+                return 1;
+            }
+            cache_endpoints.emplace(e.originator, *ep.value);
+        }
+        auto sock = CacheUdp::open(cr.listen);
+        if (!sock) {
+            std::fprintf(stderr, "cache.repair listen: %s\n",
+                         sock.error.c_str());
+            return 1;
+        }
+        cache_repair_sock =
+            std::make_unique<CacheUdp>(std::move(*sock.value));
+        CacheControllerConfig cc;
+        cc.self_originator = l.cfg.node.originator;
+        cc.self_session = session;
+        for (const CacheEndpointCfg& e : cr.caches) {
+            cc.caches.push_back(e.originator);
+        }
+        cc.tail_grace_ms = cr.tail_grace_ms;
+        cc.local_quiet_ms = cr.local_quiet_ms;
+        cc.min_collect_ms = cr.min_collect_ms;
+        cc.hard_close_ms = cr.hard_close_ms;
+        cc.request_timeout_ms = cr.request_timeout_ms;
+        cc.repair_fraction_permille = cr.repair_fraction_permille;
+        cc.absolute_symbol_limit = cr.absolute_symbol_limit;
+        cc.max_cache_attempts = cr.max_cache_attempts;
+        cc.reply_limit = cr.reply_limit;
+        cc.health_floor_permille = cr.health_floor_permille;
+        cc.status_timeout_ms = cr.status_timeout_ms;
+        cache_ctl = std::make_unique<CacheController>(cc);
+        for (ShmOut& so : shm_outs) {  // config validated the stream exists
+            if (so.stream_id == cr.stream_id) {
+                cache_reasm = so.reasm.get();
+                cache_ring = so.ring.get();
+            }
+        }
+        std::fprintf(stderr, "rx: cache repair on stream %u (%zu caches)\n",
+                     cr.stream_id, cr.caches.size());
+    }
+    std::unique_ptr<CacheStore> cache_store;
+    std::unique_ptr<CacheUdp> cache_store_sock;
+    std::vector<CacheEndpoint> cache_status_to;
+    uint64_t next_cache_status_ms = 0;
+    if (l.cfg.cache.store.enabled) {
+        const CacheStoreCfg& cs = l.cfg.cache.store;
+        auto sock = CacheUdp::open(cs.listen);
+        if (!sock) {
+            std::fprintf(stderr, "cache.store listen: %s\n",
+                         sock.error.c_str());
+            return 1;
+        }
+        cache_store_sock = std::make_unique<CacheUdp>(std::move(*sock.value));
+        for (const std::string& t : cs.status_to) {
+            auto ep = CacheUdp::resolve(t);
+            if (!ep) {
+                std::fprintf(stderr, "cache.store status_to '%s': %s\n",
+                             t.c_str(), ep.error.c_str());
+                return 1;
+            }
+            cache_status_to.push_back(*ep.value);
+        }
+        CacheStoreConfig sc;
+        sc.self_originator = l.cfg.node.originator;
+        sc.target_originator = l.cfg.node.preferred_originator;
+        sc.stream_ids = cs.stream_ids;
+        sc.blocks = cs.blocks;
+        sc.reply_limit = cs.reply_limit;
+        sc.max_requests_per_s = cs.max_requests_per_s;
+        cache_store = std::make_unique<CacheStore>(sc);
+        std::fprintf(stderr, "rx: cache store on '%s' (%zu streams)\n",
+                     cs.listen.c_str(), cs.stream_ids.size());
+    }
+
     const RxEngine::Deliver deliver = [&](uint8_t sid, uint32_t block_id,
                                           uint8_t flags, const uint8_t* d,
                                           size_t n) {
@@ -2075,24 +2576,156 @@ int run_rx(const Loaded& l) {
             out->send(d, n);
         }
     };
+    const RxEngine::EarlyDeliver early_deliver =
+        [&](uint8_t sid, uint32_t block_id, uint8_t flags,
+            const uint8_t* d, size_t n) -> RxEngine::EarlyDeliverResult {
+        for (ShmOut& so : shm_outs) {
+            if (so.stream_id != sid) {
+                continue;
+            }
+            const bool complete = so.reasm->push(
+                block_id, flags, d, n, deliver_now,
+                [&](const uint8_t* f, size_t len) {
+                    so.ring->write_frame(f, len);
+                });
+            return RxEngine::EarlyDeliverResult{/*handled=*/true, complete};
+        }
+        return {};
+    };
 
     // §7.2 ground side: returns (NACK/LINK_REPORT) coalesce and fire at the
     // middle of the craft's quiet gap, anchored on the EOB's receive-TSF.
     // Disabled (default) they inject immediately — §7.1 baseline.
     QuietGap qg(quietgap_policy(l.cfg));
-    std::deque<std::pair<std::vector<uint8_t>, uint16_t>> ret_held;
+    std::deque<std::pair<std::vector<uint8_t>, uint16_t>> urgent_ret_held;
+    std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_ret_held;
     std::optional<uint64_t> ret_at_us;
+    bool ret_tsf_anchored = false;
+    std::optional<uint64_t> report_fallback_us;
+    // If the repair-tail EOB itself is lost, silence after the last received
+    // DATA symbol is the only close signal available. Keep a rolling host-
+    // time fallback at the return-window midpoint so ARQ cannot remain
+    // suppressed forever waiting for an EOB that will never arrive.
+    std::optional<uint64_t> repair_tail_fallback_us;
     uint32_t ret_window_hits = 0;
     uint32_t ret_window_misses = 0;
     uint64_t tsf_fallbacks = 0;
     uint64_t now_us_it = now_us();
-    const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n,
-                                           uint16_t target) {
+    ArqTimingTracker arq_timing;
+    const auto send_return = [&](uint16_t target, const uint8_t* f, size_t n,
+                                 bool urgent) {
+        if (urgent) arq_timing.note_nack_injected(f, n, now_us());
+        air.value->inject_return(target, f, n, urgent);
+    };
+    const RxCore::Inject inject_report = [&](const uint8_t* f, size_t n,
+                                             uint16_t target) {
         if (!qg.enabled()) {
-            air.value->inject_return(target, f, n);
+            send_return(target, f, n, false);
             return;
         }
-        ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
+        report_ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
+        if (!report_fallback_us) {
+            // Prefer the next EOB midpoint. If video/EOB disappears entirely,
+            // degrade to opportunistic return after one report period.
+            report_fallback_us = now_us() + 100000;
+        }
+    };
+    const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n,
+                                           uint16_t target) {
+        arq_timing.note_nack_built(f, n, now_us());
+        if (!qg.enabled() || !ret_tsf_anchored) {
+            // Monitor mode cannot read live TSF. By the time the repair-tail
+            // close is observed, host arrival already includes USB delay;
+            // adding the quiet-gap midpoint again only makes ARQ later.
+            send_return(target, f, n, true);
+            return;
+        }
+        urgent_ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
+    };
+    // Service cache replies and issue fresh-cache requests before RxCore
+    // builds NACKs in this iteration. This ordering lets an accepted reply
+    // complete the block first, while a successfully sent request can arm the
+    // exact block's bounded first-NACK grace (§14.3 rule 8).
+    const auto service_cache_repair = [&](uint64_t service_ms) {
+        if (!cache_ctl) return;
+        uint8_t cbuf[kCacheReplyFixedSize + kDataHeaderSize +
+                     kMaxDataPayload];
+        CacheEndpoint from;
+        long rn;
+        while ((rn = cache_repair_sock->recv_one(cbuf, sizeof(cbuf),
+                                                 &from)) > 0) {
+            const Decoded cdec = decode(cbuf, static_cast<size_t>(rn));
+            if (const CacheStatus* st = std::get_if<CacheStatus>(&cdec)) {
+                const auto it = cache_endpoints.find(st->prefix.originator);
+                if (it != cache_endpoints.end() && it->second == from) {
+                    cache_ctl->on_status(*st, service_ms);
+                }
+                continue;
+            }
+            const CacheReplyView* rv = std::get_if<CacheReplyView>(&cdec);
+            if (rv == nullptr) continue;
+            const auto it = cache_endpoints.find(rv->prefix.originator);
+            if (it == cache_endpoints.end() || !(it->second == from)) {
+                continue;
+            }
+            const Decoded wdec = decode(rv->wrapped, rv->wrapped_len);
+            const DataView* wv = std::get_if<DataView>(&wdec);
+            if (wv == nullptr ||
+                wv->hdr.stream_id != l.cfg.cache.repair.stream_id) {
+                continue;
+            }
+            bool latched = false;
+            for (const StreamKey& k : rx.stream_keys()) {
+                latched |= k.stream_id == wv->hdr.stream_id &&
+                           k.originator == wv->hdr.prefix.originator &&
+                           k.session_id == wv->hdr.prefix.session_id;
+            }
+            if (!latched) continue;
+            const uint64_t reply_us = now_us();
+            if (cache_ctl->on_reply(rv->prefix.originator, rv->request_id,
+                                    *wv, reply_us) !=
+                CacheController::ReplyVerdict::kAccept) {
+                continue;
+            }
+            const bool emitted = cache_reasm->push(
+                wv->hdr.block_id, wv->hdr.data_flags, wv->payload,
+                wv->payload_len, service_ms,
+                [&](const uint8_t* f, size_t len) {
+                    cache_ring->write_frame(f, len);
+                },
+                /*air_path=*/false);
+            if (emitted) {
+                const bool before_nack = !rx.block_had_nack(
+                    l.cfg.cache.repair.stream_id, wv->hdr.block_id);
+                cache_ctl->note_completed(wv->hdr.block_id, reply_us,
+                                          before_nack);
+                rx.complete_frame(l.cfg.cache.repair.stream_id,
+                                  wv->hdr.block_id, service_ms, deliver);
+            }
+        }
+        for (const StreamKey& k : rx.stream_keys()) {
+            if (k.stream_id != l.cfg.cache.repair.stream_id) continue;
+            RepairCandidate cands[16];
+            const size_t cn = cache_reasm->repair_candidates(cands, 16);
+            for (CacheRequestOut& r :
+                 cache_ctl->tick(service_ms, k, cands, cn)) {
+                const auto it = cache_endpoints.find(r.cache_originator);
+                if (it == cache_endpoints.end() ||
+                    !cache_repair_sock->send_to(
+                        it->second, r.frame.data(), r.frame.size())) {
+                    continue;
+                }
+                cache_ctl->note_request_sent(r.request_id, now_us());
+                const uint32_t grace_ms =
+                    l.cfg.cache.repair.nack_grace_ms;
+                if (grace_ms != 0 && rx.defer_first_nack(
+                        l.cfg.cache.repair.stream_id, r.block_id,
+                        service_ms + grace_ms)) {
+                    cache_ctl->note_nack_grace_armed();
+                }
+            }
+            break;
+        }
     };
     StatsEmitter emitter(true, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
@@ -2162,9 +2795,16 @@ int run_rx(const Loaded& l) {
                 so.reasm->reset_stats();
                 so.ring->reset_stats();
             }
+            if (cache_ctl) {
+                cache_ctl->reset_stats();
+            }
+            if (cache_store) {
+                cache_store->reset_stats();
+            }
             ret_window_hits = 0;
             ret_window_misses = 0;
             tsf_fallbacks = 0;
+            arq_timing.reset();
         };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (rx)\n",
@@ -2179,24 +2819,37 @@ int run_rx(const Loaded& l) {
         const uint64_t now = now_ms();
         now_us_it = now_us();
         deliver_now = now;  // the deliver lambda's clock for reassembler pushes
-        // Fire the coalesced return window. No deadline (no EOB heard yet)
-        // means send immediately — never sit on a return.
-        if (!ret_held.empty() &&
-            (!ret_at_us || now_us_it >= *ret_at_us)) {
-            for (const auto& [f, target] : ret_held) {
-                air.value->inject_return(target, f.data(), f.size());
+        // Fire the coalesced return window. Reports prefer an EOB midpoint and
+        // degrade to opportunistic return only after the bounded fallback.
+        const bool have_returns =
+            !urgent_ret_held.empty() || !report_ret_held.empty();
+        const bool return_deadline_due =
+            ret_at_us && now_us_it >= *ret_at_us;
+        const bool report_fallback_due =
+            !ret_at_us && report_fallback_us &&
+            now_us_it >= *report_fallback_us;
+        if (return_deadline_due || report_fallback_due) {
+            for (const auto& [f, target] : urgent_ret_held) {
+                send_return(target, f.data(), f.size(), true);
+            }
+            for (const auto& [f, target] : report_ret_held) {
+                send_return(target, f.data(), f.size(), false);
             }
             // §7.2 observability: a batch fired on a TSF-anchored window
             // deadline is a hit; one sent blind (no EOB heard) is a miss.
-            if (ret_at_us) {
+            if (ret_at_us && have_returns) {
                 ++ret_window_hits;
             } else if (qg.enabled()) {
                 ++ret_window_misses;
             }
-            ret_held.clear();
+            urgent_ret_held.clear();
+            report_ret_held.clear();
             ret_at_us.reset();
+            report_fallback_us.reset();
+            ret_tsf_anchored = false;
         }
-        const int air_timeout = ret_held.empty() ? 2 : 0;
+        const int air_timeout =
+            urgent_ret_held.empty() && report_ret_held.empty() ? 2 : 0;
         air.value->poll_once(air_timeout, [&](const AirRxMeta& meta,
                                               const uint8_t* d, size_t n) {
             // udp-air carries no real RSSI; fall back to the loopback
@@ -2221,27 +2874,48 @@ int run_rx(const Loaded& l) {
                 return;
             }
             if (const DataView* v = std::get_if<DataView>(&dec)) {
+                arq_timing.note_retransmit_arrived(*v, now_us_it);
+                if (frame_is_eob(d, n)) arq_timing.note_eob(now_us_it);
+                if (qg.enabled()) {
+                    repair_tail_fallback_us =
+                        qg.return_deadline(now_us_it, 0, std::nullopt);
+                }
                 if ((v->hdr.data_flags & data_flags::kCsaArmed) != 0) {
                     issuer.note_craft_armed(now_us_it);  // §11.6 implicit ACK
                 }
                 issuer.note_craft_video(now_us_it);
+                if (cache_store) {  // §14.3: retain the verbatim wire packet
+                    cache_store->note_data(*v, d, n);
+                }
             }
             if (!std::holds_alternative<DecodeError>(dec)) {
                 follower.note_valid_rx(now_us_it);
             }
-            rx.on_air(meta.adapter_id, d, n, now, deliver, rssi);
+            rx.on_air(meta.adapter_id, d, n, now, deliver, rssi,
+                      early_deliver);
             if (qg.enabled() && frame_is_eob(d, n)) {
                 // Anchor on the SAME adapter's TSF (clocks never cross
                 // adapters); a failed read falls back to host arrival.
                 const auto tsf_now = air.value->read_tsf(meta.adapter_id);
+                ret_tsf_anchored = tsf_now.has_value();
                 if (!tsf_now) {
                     ++tsf_fallbacks;
                 }
                 ret_at_us = qg.return_deadline(
                     now_us_it, static_cast<uint32_t>(meta.tsf_us), tsf_now);
+                repair_tail_fallback_us.reset();
             }
         });
-        rx.tick(now, deliver, inject_nack);
+        // With quiet-gap pacing, construct NACKs only after the repair-tail
+        // EOB has closed local FEC collection. LINK_REPORT generation remains
+        // periodic and may queue before that close.
+        const bool repair_tail_closed =
+            ret_at_us.has_value() ||
+            (repair_tail_fallback_us &&
+             now_us_it >= *repair_tail_fallback_us);
+        service_cache_repair(now);
+        rx.tick(now, deliver, inject_report, inject_nack,
+                !qg.enabled() || repair_tail_closed);
         air.value->heartbeat(l.cfg.node.originator, session, now);
         // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
         // so a stalled block never wedges frame-shm egress.
@@ -2249,6 +2923,65 @@ int run_rx(const Loaded& l) {
             so.reasm->tick(now, [&](const uint8_t* f, size_t len) {
                 so.ring->write_frame(f, len);
             });
+        }
+        // §14.3 cache store: answer requests + push periodic status.
+        if (cache_store) {
+            uint8_t cbuf[512];
+            CacheEndpoint from;
+            long rn;
+            while ((rn = cache_store_sock->recv_one(cbuf, sizeof(cbuf),
+                                                    &from)) > 0) {
+                const Decoded cdec = decode(cbuf, static_cast<size_t>(rn));
+                const CacheRequestView* rq =
+                    std::get_if<CacheRequestView>(&cdec);
+                if (rq == nullptr) {
+                    continue;
+                }
+                std::vector<const std::vector<uint8_t>*> pkts;
+                if (cache_store->answer(*rq, now, pkts) !=
+                    CacheStore::Verdict::kAnswered) {
+                    continue;
+                }
+                for (const std::vector<uint8_t>* p : pkts) {
+                    uint8_t rbuf[kCacheReplyFixedSize + kDataHeaderSize +
+                                 kMaxDataPayload];
+                    const size_t sz = encode_cache_reply(
+                        CommonPrefix{l.cfg.node.originator,
+                                     rq->hdr.prefix.originator, session},
+                        rq->hdr.request_id, p->data(),
+                        static_cast<uint16_t>(p->size()), rbuf, sizeof(rbuf));
+                    if (sz > 0) {
+                        cache_store_sock->send_to(from, rbuf, sz);
+                    }
+                }
+            }
+            if (now >= next_cache_status_ms && !cache_status_to.empty()) {
+                next_cache_status_ms =
+                    now + l.cfg.cache.store.status_interval_ms;
+                for (const CacheStore::StatusEntry& se :
+                     cache_store->status()) {
+                    CacheStatus cs;
+                    cs.prefix = CommonPrefix{l.cfg.node.originator, 0,
+                                             session};
+                    cs.target_originator = se.key.originator;
+                    cs.target_session = se.key.session_id;
+                    cs.target_stream_id = se.stream_id;
+                    cs.oldest_block = se.oldest_block;
+                    cs.newest_block = se.newest_block;
+                    cs.rx_health_permille = se.rx_health_permille;
+                    cs.capability_flags = cache_capability::kIpTransport;
+                    uint8_t sbuf[kCacheStatusSize];
+                    if (encode_cache_status(cs, sbuf, sizeof(sbuf)) == 0) {
+                        continue;
+                    }
+                    for (const CacheEndpoint& to : cache_status_to) {
+                        if (cache_store_sock->send_to(to, sbuf,
+                                                      kCacheStatusSize)) {
+                            ++cache_store->stats().status_sent;
+                        }
+                    }
+                }
+            }
         }
         std::vector<std::pair<uint8_t, JsccRepairFeedbackState>> feedback;
         feedback.reserve(shm_outs.size());
@@ -2288,12 +3021,13 @@ int run_rx(const Loaded& l) {
         if (fa.kind != CsaAction::Kind::kNone) {
             air.value->retune_all(fa.chan_mhz, fa.bw, fa.fast);
         }
-        if (const auto trc = air.value->tx_report_counters()) {
+        if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
-                        ? "air: TX WEDGE — submissions advancing, zero CCX "
-                          "reports over the window (§9.10)\n"
-                        : "air: tx wedge cleared — CCX reports resumed\n");
+                        ? "air: TX WEDGE — submissions advancing, zero "
+                          "backend TX progress over the window (§9.10)\n"
+                        : "air: tx wedge cleared — backend TX progress "
+                          "resumed\n");
             }
         }
         if (control) {
@@ -2309,12 +3043,51 @@ int run_rx(const Loaded& l) {
                 frame_stats.emplace_back(so.stream_id, so.reasm->stats());
                 shm_stats.emplace_back(so.stream_id, so.ring->stats());
             }
+            // §15.3: cache blocks are emitted only when the role is enabled.
+            CacheRepairStatsOut crs;
+            if (cache_ctl) {
+                const CacheRepairStats s = cache_ctl->stats();
+                crs.requests = s.requests;
+                crs.replies = s.replies;
+                crs.symbols_accepted = s.symbols_accepted;
+                crs.symbols_rejected = s.symbols_rejected;
+                crs.blocks_closed_deficit = s.blocks_closed_deficit;
+                crs.blocks_repaired = s.blocks_repaired;
+                crs.blocks_futile = s.blocks_futile;
+                crs.requests_suppressed = s.requests_suppressed;
+                crs.caches_fresh = s.caches_fresh;
+                crs.nack_graces_armed = s.nack_graces_armed;
+                crs.blocks_repaired_before_nack =
+                    s.blocks_repaired_before_nack;
+                crs.request_to_first_reply = {
+                    s.request_to_first_reply.samples,
+                    s.request_to_first_reply.p95_us,
+                    s.request_to_first_reply.max_us};
+                crs.request_to_completion = {
+                    s.request_to_completion.samples,
+                    s.request_to_completion.p95_us,
+                    s.request_to_completion.max_us};
+            }
+            CacheStoreStatsOut css;
+            if (cache_store) {
+                const CacheStoreStats& s = cache_store->stats();
+                css.requests_received = s.requests_received;
+                css.requests_answered = s.requests_answered;
+                css.requests_rejected = s.requests_rejected;
+                css.symbols_sent = s.symbols_sent;
+                css.status_sent = s.status_sent;
+                css.blocks_held = s.blocks_held;
+                css.health_permille = s.health_permille;
+            }
+            const ArqTimingStats timing = arq_timing.snapshot();
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
                                        : follower.state_str(),
                        ret_window_hits, ret_window_misses, wedge.wedged(),
-                       &frame_stats, &shm_stats, &last_snap);
+                       &frame_stats, &shm_stats,
+                       cache_ctl ? &crs : nullptr,
+                       cache_store ? &css : nullptr, &last_snap, &timing);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -2463,13 +3236,14 @@ int run_loopback(const Loaded& l) {
             tx.on_ingress(ev.stream_id, ev.data, ev.len, loop_now, inject);
         });
         tx.tick(loop_now, inject);
-        rx.tick(loop_now, deliver, inject_nack);
+        rx.tick(loop_now, deliver, inject_nack, inject_nack);
         if (control) {
             control->service(loop_now);
         }
         if (stats_period != 0 && loop_now >= next_stats) {
             emit_stats(emitter, l, session, t0, &tx, &rx, nullptr, 0, nullptr,
-                       0, 0, false, nullptr, nullptr, &last_snap);
+                       0, 0, false, nullptr, nullptr, nullptr, nullptr,
+                       &last_snap);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }

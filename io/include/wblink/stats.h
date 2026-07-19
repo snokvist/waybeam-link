@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -57,6 +58,15 @@ struct StreamStats {
     uint32_t loss_postdiv_prearq_milli = 0;
     uint64_t recovered_arq = 0;
     uint64_t recovered_fec = 0;
+    // Successfully delivered frame attribution. Unlike recovered_arq (packet
+    // sequence gaps) and recovered_fec (frames), the *_symbols fields share a
+    // symbol unit and distinguish retransmitted source from repair rows.
+    uint64_t fec_recovered_source_symbols = 0;
+    uint64_t arq_recovered_source_symbols = 0;
+    uint64_t arq_recovered_repair_symbols = 0;
+    uint64_t frames_with_arq = 0;
+    uint64_t frames_fec_only = 0;
+    uint64_t frames_fec_after_arq = 0;
     uint64_t frame_count = 0;
     uint64_t frame_bytes = 0;
     uint32_t frame_size_last = 0;
@@ -100,6 +110,9 @@ struct StreamStats {
     bool jscc_output_discard = false;
     uint32_t jscc_feedback_epoch = 0;
     uint32_t jscc_feedback_age_ms = 0;
+    // §14.2 enforcement (Pass 38): actuated valid decisions + rule-2 drops.
+    uint64_t jscc_enforced_frames = 0;
+    uint64_t jscc_discarded_frames = 0;
     uint64_t shm_full_drops = 0;
     uint64_t shm_oversize_drops = 0;
     uint64_t shm_bad_slots = 0;
@@ -123,6 +136,7 @@ struct StreamStats {
     uint64_t fec_oversize_frames = 0;
     uint64_t idr_frames = 0;
     uint64_t arq_frames = 0;
+    uint64_t arq_cutoff_frames = 0;  // §4.1 Pass 40 cadence suppression
     uint64_t decode_errors = 0;
     uint8_t active_profile = 0;
     uint8_t table_version = 0;
@@ -131,12 +145,30 @@ struct StreamStats {
 struct ReturnStats {
     uint32_t reports_expected = 0;
     uint32_t reports_received = 0;
+    uint64_t reports_rejected = 0;  // §3.5 Pass 41 acceptance filter
     uint32_t return_window_hits = 0;
     uint32_t return_window_misses = 0;
     // §3.0 Pass 12 unicast returns: sent unicast vs fell back to broadcast
     // (no SA latched for the target yet).
     uint64_t unicast_sent = 0;
     uint64_t unicast_fallback = 0;
+};
+
+struct TimingMetricStats {
+    uint64_t samples = 0;
+    uint32_t p95_us = 0;
+    uint32_t max_us = 0;
+};
+
+// Host-local phase timing. Cross-host values are deliberately composed only
+// when the same host observes both endpoints (ground sees NACK TX + resend RX;
+// vehicle sees NACK RX + resend submission), so no clock sync is implied.
+struct ArqTimingStats {
+    TimingMetricStats eob_to_nack_build;
+    TimingMetricStats nack_build_to_inject;
+    TimingMetricStats nack_inject_to_retransmit;
+    TimingMetricStats nack_build_to_retransmit;
+    TimingMetricStats nack_receive_to_resend;
 };
 
 struct LinkStats {
@@ -150,6 +182,45 @@ struct LinkStats {
     std::string state = "HOLD";
     bool flap_freeze = false;
     std::string csa_state = "IDLE";
+    // §9.6 actuator state (Pass 37): last COMMANDED values (0 = never
+    // pushed) + the settling window; zero/false without venc.enabled.
+    uint32_t venc_bitrate_kbps = 0;
+    uint32_t venc_max_i_bytes = 0;
+    uint32_t venc_max_p_bytes = 0;
+    uint64_t venc_pushes = 0;
+    uint64_t venc_failures = 0;
+    bool venc_settling = false;
+    uint16_t venc_fps = 0;  // §9.11 last commanded fps (0 = never)
+    uint32_t venc_p_frame_bytes = 0;  // §9.11 non-IDR payload EWMA
+    uint32_t venc_p_frame_target_bytes = 0;
+    std::string venc_fps_ladder_state = "DISABLED";
+};
+
+// §15.3 cache blocks — present only when the §14.3 role is enabled.
+struct CacheRepairStatsOut {
+    uint64_t requests = 0;
+    uint64_t replies = 0;
+    uint64_t symbols_accepted = 0;
+    uint64_t symbols_rejected = 0;
+    uint64_t blocks_closed_deficit = 0;
+    uint64_t blocks_repaired = 0;
+    uint64_t blocks_futile = 0;
+    uint64_t requests_suppressed = 0;
+    uint64_t nack_graces_armed = 0;
+    uint64_t blocks_repaired_before_nack = 0;
+    uint32_t caches_fresh = 0;  // gauge
+    TimingMetricStats request_to_first_reply;
+    TimingMetricStats request_to_completion;
+};
+
+struct CacheStoreStatsOut {
+    uint64_t requests_received = 0;
+    uint64_t requests_answered = 0;
+    uint64_t requests_rejected = 0;
+    uint64_t symbols_sent = 0;
+    uint64_t status_sent = 0;
+    uint32_t blocks_held = 0;      // gauge
+    uint16_t health_permille = 0;  // gauge
 };
 
 struct StatsSnapshot {
@@ -158,7 +229,10 @@ struct StatsSnapshot {
     uint32_t session = 0;
     std::vector<AdapterStats> adapters;
     std::vector<StreamStats> streams;
+    std::optional<CacheRepairStatsOut> cache_repair;
+    std::optional<CacheStoreStatsOut> cache_store;
     ReturnStats ret;
+    ArqTimingStats arq_timing;
     LinkStats link;
 };
 

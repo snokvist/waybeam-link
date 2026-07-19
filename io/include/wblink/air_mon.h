@@ -36,6 +36,7 @@ struct MonAirCfg {
     std::optional<uint8_t> filter_net_id;  // RX enforces only when configured
     uint16_t originator = 0;               // stamped in SA; own frames dropped
     uint16_t rx_drop_permille = 0;         // bench-only synthetic RX loss
+    uint16_t airtime_efficiency_permille = 0;  // §14.2; 0 = unavailable
 };
 
 class MonAir {
@@ -51,14 +52,25 @@ class MonAir {
     // Send one wire packet on the TX adapter (§3.0 + radiotap MCS added here).
     // Returns 1 when submitted, 0 on failure.
     size_t inject(const uint8_t* frame, size_t len);
+    size_t inject_resend(const uint8_t* frame, size_t len);
 
     // Return (NACK/LINK_REPORT) toward dest_originator. Monitor injection has
     // no hardware ACK responder, so this is a plain broadcast inject() (the
     // ground filters by originator); counted as a unicast fallback for §15.3.
     size_t inject_return(uint16_t dest_originator, const uint8_t* frame,
-                         size_t len);
+                         size_t len, bool urgent = false);
     void return_counters(uint64_t& unicast_sent,
                          uint64_t& unicast_fallback) const;
+
+    // §9.10 monitor TX-progress source: send() proves submission, while the
+    // Linux netdev tx_packets counter proves driver transmission progress.
+    // Both counters are cumulative.
+    void tx_progress_counters(uint64_t& submitted, uint64_t& completed) const;
+
+    // §14.2 effective HT20 serialization time. include_pending adds socket
+    // outbound bytes when the kernel exposes them; zero calibration = unknown.
+    std::optional<uint32_t> estimate_airtime_us(size_t bytes,
+                                                bool include_pending) const;
 
     // Deliver queued RX frames (§3.0 payloads, header stripped); blocks up to
     // timeout_ms when the queue is empty. Returns frames delivered.

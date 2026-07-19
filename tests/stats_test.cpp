@@ -46,6 +46,12 @@ StatsSnapshot sample_snapshot() {
     st.loss_postdiv_prearq_milli = 6;
     st.recovered_arq = 220;
     st.recovered_fec = 0;
+    st.fec_recovered_source_symbols = 173;
+    st.arq_recovered_source_symbols = 201;
+    st.arq_recovered_repair_symbols = 19;
+    st.frames_with_arq = 187;
+    st.frames_fec_only = 91;
+    st.frames_fec_after_arq = 34;
     st.frame_count = 89571;
     st.frame_bytes = 5872391040;
     st.frame_size_last = 65432;
@@ -107,7 +113,7 @@ StatsSnapshot sample_snapshot() {
     st.active_profile = 4;
     st.table_version = 178;
     s.streams.push_back(st);
-    s.ret = ReturnStats{10, 9, 7, 2};
+    s.ret = ReturnStats{10, 9, 0, 7, 2};
     s.link.target_originator = 9;
     s.link.target_session = 183726;
     s.link.profile = 4;
@@ -118,6 +124,16 @@ StatsSnapshot sample_snapshot() {
     s.link.state = "HOLD";
     s.link.flap_freeze = false;
     s.link.csa_state = "IDLE";
+    s.link.venc_bitrate_kbps = 14000;
+    s.link.venc_max_i_bytes = 70000;
+    s.link.venc_max_p_bytes = 19444;
+    s.link.venc_pushes = 6;
+    s.link.venc_failures = 0;
+    s.link.venc_settling = false;
+    s.link.venc_fps = 90;
+    s.link.venc_p_frame_bytes = 12345;
+    s.link.venc_p_frame_target_bytes = 10000;
+    s.link.venc_fps_ladder_state = "HOLD";
     return s;
 }
 
@@ -135,7 +151,11 @@ const char* kGolden =
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
     "\"loss_prediversity_milli\":41,"
     "\"loss_postdiv_prearq_milli\":6,\"recovered_arq\":220,"
-    "\"recovered_fec\":0,\"frame_count\":89571,"
+    "\"recovered_fec\":0,\"fec_recovered_source_symbols\":173,"
+    "\"arq_recovered_source_symbols\":201,"
+    "\"arq_recovered_repair_symbols\":19,\"frames_with_arq\":187,"
+    "\"frames_fec_only\":91,\"frames_fec_after_arq\":34,"
+    "\"frame_count\":89571,"
     "\"frame_bytes\":5872391040,\"frame_size_last\":65432,"
     "\"frame_size_min\":8120,\"frame_size_max\":241810,"
     "\"frame_interval_us\":11106,\"frame_jitter_us\":184,"
@@ -161,6 +181,7 @@ const char* kGolden =
     "\"jscc_output_remaining_us\":11457,"
     "\"jscc_output_arq_eligible\":true,\"jscc_output_discard\":false,"
     "\"jscc_feedback_epoch\":1821,\"jscc_feedback_age_ms\":42,"
+    "\"jscc_enforced_frames\":0,\"jscc_discarded_frames\":0,"
     "\"shm_full_drops\":0,\"shm_oversize_drops\":0,"
     "\"shm_bad_slots\":0,\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"
@@ -171,14 +192,27 @@ const char* kGolden =
     "\"resends_sent\":230,\"double_send_suppressed\":5,"
     "\"source_symbols_sent\":4120300,\"repair_symbols_sent\":358944,"
     "\"fec_oversize_frames\":0,\"idr_frames\":17,\"arq_frames\":68342,"
+    "\"arq_cutoff_frames\":0,"
     "\"decode_errors\":0,\"active_profile\":4,\"table_version\":178}],"
+    "\"arq_timing\":{"
+    "\"eob_to_nack_build\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
+    "\"nack_build_to_inject\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
+    "\"nack_inject_to_retransmit\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
+    "\"nack_build_to_retransmit\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
+    "\"nack_receive_to_resend\":{\"samples\":0,\"p95_us\":0,\"max_us\":0}},"
     "\"return\":{\"reports_expected\":10,\"reports_received\":9,"
+    "\"reports_rejected\":0,"
     "\"return_window_hits\":7,\"return_window_misses\":2,"
     "\"unicast_sent\":0,\"unicast_fallback\":0},"
     "\"link\":{\"target_originator\":9,\"target_session\":183726,"
     "\"profile\":4,\"mcs\":4,\"tx_power_qdb\":1800,\"report_epoch\":1822,"
     "\"report_age_ms\":40,\"state\":\"HOLD\",\"flap_freeze\":false,"
-    "\"csa_state\":\"IDLE\"}}\n";
+    "\"csa_state\":\"IDLE\",\"venc_bitrate_kbps\":14000,"
+    "\"venc_max_i_bytes\":70000,\"venc_max_p_bytes\":19444,"
+    "\"venc_pushes\":6,\"venc_failures\":0,\"venc_settling\":false,"
+    "\"venc_fps\":90,\"venc_p_frame_bytes\":12345,"
+    "\"venc_p_frame_target_bytes\":10000,"
+    "\"venc_fps_ladder_state\":\"HOLD\"}}\n";
 
 }  // namespace
 
@@ -213,6 +247,7 @@ int main() {
         format_stats_line(s, out);
         CHECK(out.find("\"adapters\":[]") != std::string::npos);
         CHECK(out.find("\"streams\":[]") != std::string::npos);
+        CHECK(out.find("\"arq_timing\":{") != std::string::npos);
         CHECK(out.find("\"return\":{") != std::string::npos);
         CHECK(out.find("\"link\":{") != std::string::npos);
         CHECK(out.back() == '\n');
@@ -237,6 +272,63 @@ int main() {
         CHECK_EQ_U(static_cast<unsigned long long>(n), golden_len);
         CHECK(n >= 0 && static_cast<size_t>(n) == golden_len &&
               std::memcmp(buf, kGolden, golden_len) == 0);
+    }
+
+    // §15.3 cache blocks: absent by default, exact shape when enabled,
+    // placed between the streams array and the return block.
+    {
+        StatsSnapshot s;
+        std::string out;
+        format_stats_line(s, out);
+        CHECK(out.find("cache_repair") == std::string::npos);
+        CHECK(out.find("cache_store") == std::string::npos);
+
+        CacheRepairStatsOut cr;
+        cr.requests = 12;
+        cr.replies = 11;
+        cr.symbols_accepted = 18;
+        cr.blocks_closed_deficit = 9;
+        cr.blocks_repaired = 7;
+        cr.blocks_futile = 1;
+        cr.requests_suppressed = 2;
+        cr.caches_fresh = 2;
+        cr.nack_graces_armed = 8;
+        cr.blocks_repaired_before_nack = 6;
+        cr.request_to_first_reply = {10, 1200, 2400};
+        cr.request_to_completion = {7, 2300, 4100};
+        s.cache_repair = cr;
+        CacheStoreStatsOut cs;
+        cs.requests_received = 12;
+        cs.requests_answered = 11;
+        cs.requests_rejected = 1;
+        cs.symbols_sent = 18;
+        cs.status_sent = 240;
+        cs.blocks_held = 96;
+        cs.health_permille = 971;
+        s.cache_store = cs;
+        out.clear();
+        format_stats_line(s, out);
+        const char* want_repair =
+            "\"cache_repair\":{\"requests\":12,\"replies\":11,"
+            "\"symbols_accepted\":18,\"symbols_rejected\":0,"
+            "\"blocks_closed_deficit\":9,\"blocks_repaired\":7,"
+            "\"blocks_futile\":1,\"requests_suppressed\":2,"
+            "\"caches_fresh\":2,\"nack_graces_armed\":8,"
+            "\"blocks_repaired_before_nack\":6,"
+            "\"request_to_first_reply\":{\"samples\":10,"
+            "\"p95_us\":1200,\"max_us\":2400},"
+            "\"request_to_completion\":{\"samples\":7,"
+            "\"p95_us\":2300,\"max_us\":4100}}";
+        const char* want_store =
+            "\"cache_store\":{\"requests_received\":12,"
+            "\"requests_answered\":11,\"requests_rejected\":1,"
+            "\"symbols_sent\":18,\"status_sent\":240,\"blocks_held\":96,"
+            "\"health_permille\":971}";
+        CHECK(out.find(want_repair) != std::string::npos);
+        CHECK(out.find(want_store) != std::string::npos);
+        CHECK(out.find("\"streams\"") < out.find("\"cache_repair\""));
+        CHECK(out.find("\"cache_repair\"") < out.find("\"cache_store\""));
+        CHECK(out.find("\"cache_store\"") < out.find("\"return\""));
     }
 
     return wbtest_finish("stats_test");

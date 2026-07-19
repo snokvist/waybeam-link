@@ -5,8 +5,10 @@
 // without hanging — proven by returning cleanly under the dev preset's ASan).
 #include "wblink/frame_shm.h"
 
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 #include <cstring>
 #include <string>
@@ -25,6 +27,7 @@ const char* kOversize = "/wblink-frame-shm-test-oversize";
 const char* kEvent = "/wblink-frame-shm-test-event";
 const char* kMissing = "/wblink-frame-shm-test-missing";
 const char* kRestart = "/wblink-frame-shm-test-restart";
+const char* kPermissions = "/wblink-frame-shm-test-permissions";
 
 std::vector<uint8_t> pattern(size_t len, uint8_t seed) {
     std::vector<uint8_t> v(len);
@@ -39,8 +42,25 @@ std::vector<uint8_t> pattern(size_t len, uint8_t seed) {
 int main() {
     // Defensive: clear any stale objects up front (ENOENT is fine).
     for (const char* n :
-         {kRoundTrip, kFull, kOversize, kEvent, kMissing, kRestart}) {
+         {kRoundTrip, kFull, kOversize, kEvent, kMissing, kRestart,
+          kPermissions}) {
         ::shm_unlink(n);
+    }
+
+    // --- egress access: public mode is explicit, not narrowed by umask -----
+    {
+        const mode_t previous_umask = ::umask(0077);
+        auto prod = FrameShmRing::create(kPermissions, 2, 128);
+        ::umask(previous_umask);
+        CHECK(bool(prod));
+        const int fd = ::shm_open(kPermissions, O_RDWR, 0);
+        CHECK(fd >= 0);
+        if (fd >= 0) {
+            struct stat st{};
+            CHECK(::fstat(fd, &st) == 0);
+            CHECK_EQ_U(st.st_mode & 0777, 0666);
+            ::close(fd);
+        }
     }
 
     // --- producer restart: stale mapping detected, fresh attach resumes ------

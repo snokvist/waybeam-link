@@ -23,10 +23,10 @@
 //  - §9.9: local pressure suppresses the loss rule only; sustained pressure
 //    with clean RF escapes upward one rung per down_cooldown.
 //
-// v0 report-source rule: the selector adopts the FIRST report source
-// (prefix originator) and ignores others; the §12 first-latcher/preferred
-// arbitration governs whom the scheduler repairs — feedback source
-// selection beyond first-wins is a v1 concern (single ground RX today).
+// Report source identity is pre-filtered by ReportGate (§3.5 Pass 41). The
+// selector tracks the accepted (originator, session) so a reporter reboot or
+// silence-based re-latch resets epoch/smoothing state instead of looking like
+// a replay from the previous identity.
 //
 // Pure tick-driven: time injected, actions returned for the caller to
 // actuate (framer operating point, scheduler budgets, venc HTTP, adapter
@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <deque>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "wblink/table.h"
@@ -103,7 +104,10 @@ class Selector {
     // selector starts at floor_profile and works upward — fail-safe start.
     Selector(const SelectorPolicy& policy, const ProfileTable* table);
 
-    void on_report(const LinkReport& r, uint64_t now_ms);
+    // Returns false only for a non-forward epoch within the current accepted
+    // reporter identity. Caller uses this to keep downstream consumers from
+    // treating a replay as fresh evidence.
+    bool on_report(const LinkReport& r, uint64_t now_ms);
     void set_pressure(bool on, uint64_t now_ms);  // §9.9 gauge
     SelectorActions tick(uint64_t now_ms);
 
@@ -162,7 +166,7 @@ class Selector {
     uint32_t bitrate_kbps_ = 0;
 
     // Report intake (§9.8 watchdog + smoothing).
-    std::optional<uint16_t> report_source_;  // first-wins (v0)
+    std::optional<std::pair<uint16_t, uint32_t>> report_source_;
     uint32_t last_epoch_ = 0;
     uint64_t last_report_ms_ = 0;
     bool have_report_ = false;

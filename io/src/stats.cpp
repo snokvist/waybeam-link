@@ -55,6 +55,16 @@ void append_hist(std::string& out, const std::array<uint64_t, 8>& h) {
     out += ']';
 }
 
+void append_timing(std::string& out, const TimingMetricStats& t) {
+    out += "{\"samples\":";
+    append_u64(out, t.samples);
+    out += ",\"p95_us\":";
+    append_u64(out, t.p95_us);
+    out += ",\"max_us\":";
+    append_u64(out, t.max_us);
+    out += '}';
+}
+
 }  // namespace
 
 void format_stats_line(const StatsSnapshot& snap, std::string& out) {
@@ -137,6 +147,18 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.recovered_arq);
         out += ",\"recovered_fec\":";
         append_u64(out, s.recovered_fec);
+        out += ",\"fec_recovered_source_symbols\":";
+        append_u64(out, s.fec_recovered_source_symbols);
+        out += ",\"arq_recovered_source_symbols\":";
+        append_u64(out, s.arq_recovered_source_symbols);
+        out += ",\"arq_recovered_repair_symbols\":";
+        append_u64(out, s.arq_recovered_repair_symbols);
+        out += ",\"frames_with_arq\":";
+        append_u64(out, s.frames_with_arq);
+        out += ",\"frames_fec_only\":";
+        append_u64(out, s.frames_fec_only);
+        out += ",\"frames_fec_after_arq\":";
+        append_u64(out, s.frames_fec_after_arq);
         out += ",\"frame_count\":";
         append_u64(out, s.frame_count);
         out += ",\"frame_bytes\":";
@@ -219,6 +241,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.jscc_feedback_epoch);
         out += ",\"jscc_feedback_age_ms\":";
         append_u64(out, s.jscc_feedback_age_ms);
+        out += ",\"jscc_enforced_frames\":";
+        append_u64(out, s.jscc_enforced_frames);
+        out += ",\"jscc_discarded_frames\":";
+        append_u64(out, s.jscc_discarded_frames);
         out += ",\"shm_full_drops\":";
         append_u64(out, s.shm_full_drops);
         out += ",\"shm_oversize_drops\":";
@@ -257,6 +283,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.idr_frames);
         out += ",\"arq_frames\":";
         append_u64(out, s.arq_frames);
+        out += ",\"arq_cutoff_frames\":";
+        append_u64(out, s.arq_cutoff_frames);
         out += ",\"decode_errors\":";
         append_u64(out, s.decode_errors);
         out += ",\"active_profile\":";
@@ -267,10 +295,74 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     }
     out += ']';
 
+    // §15.3: cache blocks appear only when the §14.3 role is enabled.
+    if (snap.cache_repair) {
+        const CacheRepairStatsOut& c = *snap.cache_repair;
+        out += ",\"cache_repair\":{\"requests\":";
+        append_u64(out, c.requests);
+        out += ",\"replies\":";
+        append_u64(out, c.replies);
+        out += ",\"symbols_accepted\":";
+        append_u64(out, c.symbols_accepted);
+        out += ",\"symbols_rejected\":";
+        append_u64(out, c.symbols_rejected);
+        out += ",\"blocks_closed_deficit\":";
+        append_u64(out, c.blocks_closed_deficit);
+        out += ",\"blocks_repaired\":";
+        append_u64(out, c.blocks_repaired);
+        out += ",\"blocks_futile\":";
+        append_u64(out, c.blocks_futile);
+        out += ",\"requests_suppressed\":";
+        append_u64(out, c.requests_suppressed);
+        out += ",\"caches_fresh\":";
+        append_u64(out, c.caches_fresh);
+        out += ",\"nack_graces_armed\":";
+        append_u64(out, c.nack_graces_armed);
+        out += ",\"blocks_repaired_before_nack\":";
+        append_u64(out, c.blocks_repaired_before_nack);
+        out += ",\"request_to_first_reply\":";
+        append_timing(out, c.request_to_first_reply);
+        out += ",\"request_to_completion\":";
+        append_timing(out, c.request_to_completion);
+        out += '}';
+    }
+    if (snap.cache_store) {
+        const CacheStoreStatsOut& c = *snap.cache_store;
+        out += ",\"cache_store\":{\"requests_received\":";
+        append_u64(out, c.requests_received);
+        out += ",\"requests_answered\":";
+        append_u64(out, c.requests_answered);
+        out += ",\"requests_rejected\":";
+        append_u64(out, c.requests_rejected);
+        out += ",\"symbols_sent\":";
+        append_u64(out, c.symbols_sent);
+        out += ",\"status_sent\":";
+        append_u64(out, c.status_sent);
+        out += ",\"blocks_held\":";
+        append_u64(out, c.blocks_held);
+        out += ",\"health_permille\":";
+        append_u64(out, c.health_permille);
+        out += '}';
+    }
+
+    out += ",\"arq_timing\":{\"eob_to_nack_build\":";
+    append_timing(out, snap.arq_timing.eob_to_nack_build);
+    out += ",\"nack_build_to_inject\":";
+    append_timing(out, snap.arq_timing.nack_build_to_inject);
+    out += ",\"nack_inject_to_retransmit\":";
+    append_timing(out, snap.arq_timing.nack_inject_to_retransmit);
+    out += ",\"nack_build_to_retransmit\":";
+    append_timing(out, snap.arq_timing.nack_build_to_retransmit);
+    out += ",\"nack_receive_to_resend\":";
+    append_timing(out, snap.arq_timing.nack_receive_to_resend);
+    out += '}';
+
     out += ",\"return\":{\"reports_expected\":";
     append_u64(out, snap.ret.reports_expected);
     out += ",\"reports_received\":";
     append_u64(out, snap.ret.reports_received);
+    out += ",\"reports_rejected\":";
+    append_u64(out, snap.ret.reports_rejected);
     out += ",\"return_window_hits\":";
     append_u64(out, snap.ret.return_window_hits);
     out += ",\"return_window_misses\":";
@@ -301,6 +393,26 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_bool(out, snap.link.flap_freeze);
     out += ",\"csa_state\":";
     append_escaped(out, snap.link.csa_state);
+    out += ",\"venc_bitrate_kbps\":";
+    append_u64(out, snap.link.venc_bitrate_kbps);
+    out += ",\"venc_max_i_bytes\":";
+    append_u64(out, snap.link.venc_max_i_bytes);
+    out += ",\"venc_max_p_bytes\":";
+    append_u64(out, snap.link.venc_max_p_bytes);
+    out += ",\"venc_pushes\":";
+    append_u64(out, snap.link.venc_pushes);
+    out += ",\"venc_failures\":";
+    append_u64(out, snap.link.venc_failures);
+    out += ",\"venc_settling\":";
+    append_bool(out, snap.link.venc_settling);
+    out += ",\"venc_fps\":";
+    append_u64(out, snap.link.venc_fps);
+    out += ",\"venc_p_frame_bytes\":";
+    append_u64(out, snap.link.venc_p_frame_bytes);
+    out += ",\"venc_p_frame_target_bytes\":";
+    append_u64(out, snap.link.venc_p_frame_target_bytes);
+    out += ",\"venc_fps_ladder_state\":";
+    append_escaped(out, snap.link.venc_fps_ladder_state);
     out += "}}\n";
 }
 

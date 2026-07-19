@@ -66,6 +66,8 @@ add_library(wblink_core STATIC
     core/src/framer.cpp
     core/src/frame_framer.cpp
     core/src/frame_reassembler.cpp
+    core/src/cache_store.cpp
+    core/src/cache_controller.cpp
     core/src/jscc_controller.cpp
     core/src/jscc_loss_estimator.cpp
     core/src/jscc_runtime_shadow.cpp
@@ -83,6 +85,7 @@ target_compile_options(wblink_core PRIVATE ${WBLINK_WARNINGS})
 add_library(wblink_io STATIC
     io/src/config.cpp
     io/src/udp.cpp
+    io/src/cache_udp.cpp
     io/src/frame_shm.cpp
     io/src/stats.cpp
     io/src/air_udp.cpp
@@ -129,6 +132,15 @@ if(NOT CMAKE_CROSSCOMPILING AND EXISTS "/usr/bin/pkg-config")
         target_link_libraries(frame_shm_gst_bench PRIVATE
             wblink_io ${WBLINK_GST_LIBS})
     endif()
+endif()
+
+# Synthetic frame-SHM bench endpoint (deterministic pattern producer +
+# verifying consumer) — no GStreamer, so it runs on any dev host. Used by
+# tools/cache_repair_bench.sh.
+if(NOT CMAKE_CROSSCOMPILING)
+    add_executable(frame_shm_feed tools/frame_shm_feed.cpp)
+    target_compile_options(frame_shm_feed PRIVATE ${WBLINK_WARNINGS})
+    target_link_libraries(frame_shm_feed PRIVATE wblink_io)
 endif()
 
 if(WBLINK_BUILD_TESTS)

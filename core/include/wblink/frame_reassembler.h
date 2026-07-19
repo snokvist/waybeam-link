@@ -14,10 +14,12 @@
 // from seq gaps. Pure logic: time injected, emission is a callback, no I/O.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <vector>
 
 #include "wblink/types.h"
@@ -35,6 +37,15 @@ struct FrameReassemblerStats {
     uint64_t frames_delivered = 0;
     uint64_t frames_fast = 0;      // all-sources, no decode
     uint64_t frames_fec = 0;       // recovered via FEC
+    // Recovery attribution for successfully delivered frames only. A symbol
+    // is counted once, when its block completes; duplicate retransmits do not
+    // inflate these counters.
+    uint64_t fec_recovered_source_symbols = 0;
+    uint64_t arq_recovered_source_symbols = 0;
+    uint64_t arq_recovered_repair_symbols = 0;
+    uint64_t frames_with_arq = 0;
+    uint64_t frames_fec_only = 0;
+    uint64_t frames_fec_after_arq = 0;
     uint64_t frames_superseded = 0;
     uint64_t frames_deadline = 0;
     uint64_t frames_unrecoverable = 0;  // finalized with < k, no way to decode
@@ -60,6 +71,22 @@ struct JsccRepairFeedbackState {
     bool have_observation = false;
 };
 
+// §14.3 view of one open (incomplete, unfinalized) block, consumed by the
+// CacheController's close/deficit logic. Bitmaps are index-per-bit over the
+// §3.11 spaces: missing_sources bit i => source i absent (i < k);
+// have_repairs bit r => repair_idx r held.
+struct RepairCandidate {
+    uint32_t block_id = 0;
+    uint16_t k = 0;
+    uint16_t unique = 0;  // distinct symbols held (sources + repairs)
+    bool have_eob = false;
+    uint64_t first_ms = 0;
+    uint64_t last_new_ms = 0;
+    uint64_t eob_ms = 0;  // valid iff have_eob
+    std::array<uint8_t, 32> missing_sources{};
+    std::array<uint8_t, 32> have_repairs{};
+};
+
 class FrameReassembler {
   public:
     // emit(frame, len): one whole [VencFrameMeta][Annex-B] blob, valid only
@@ -70,14 +97,22 @@ class FrameReassembler {
 
     // Feed one deduped DATA symbol of this stream. is_repair from
     // data_flags & FEC_REPAIR; eob from data_flags & END_OF_BLOCK.
-    void push(uint32_t block_id, uint8_t flags, const uint8_t* payload,
-              size_t payload_len, uint64_t now_ms, const Emit& emit);
+    // Returns true exactly when this symbol completes and emits the block.
+    // Callers use that edge to retire any packet-level ARQ still pending for
+    // a frame which FEC has already made whole.
+    bool push(uint32_t block_id, uint8_t flags, const uint8_t* payload,
+              size_t payload_len, uint64_t now_ms, const Emit& emit,
+              bool air_path = true);
 
     // Drop blocks past their deadline (§8). Call from the RX tick.
     void tick(uint64_t now_ms, const Emit& emit);
 
     const FrameReassemblerStats& stats() const { return stats_; }
     JsccRepairFeedbackState jscc_feedback() const;
+
+    // §14.3: snapshot every open block with a known k that is still below k
+    // unique symbols. Returns the number written (<= cap).
+    size_t repair_candidates(RepairCandidate* out, size_t cap) const;
 
     // §15.5 stats/reset: zero the cumulative counters (in-flight blocks and
     // the finalized watermark are untouched).
@@ -89,6 +124,8 @@ class FrameReassembler {
         uint16_t s = 0;           // coded symbol size (from repair, or full chunk)
         uint32_t frame_len = 0;   // total blob length (from repair; 0 = unknown)
         uint64_t first_ms = 0;
+        uint64_t last_new_ms = 0;  // §14.3 quiet-timeout anchor
+        uint64_t eob_ms = 0;       // §14.3 tail-grace anchor (valid iff have_eob)
         bool have_eob = false;
         bool shadow_armed = false;
         uint16_t shadow_prediction = 0;
@@ -97,6 +134,15 @@ class FrameReassembler {
         std::map<uint16_t, std::vector<uint8_t>> sources;
         // repair_idx -> s coded bytes.
         std::map<uint8_t, std::vector<uint8_t>> repairs;
+        // Unique rows first admitted with the RETRANSMIT flag. These are kept
+        // separate from packet-sequence recovery so frame completion can
+        // attribute the exact source/repair rows that contributed.
+        std::set<uint16_t> arq_sources;
+        std::set<uint8_t> arq_repairs;
+        // Air-only attribution for the §14.2 demand estimator. Cache symbols
+        // still complete `sources`/`repairs`, but must remain losses here.
+        std::set<uint16_t> air_sources;
+        std::set<uint8_t> air_repairs;
     };
 
     // Try to finalize block b (id): emit if complete, return true if finalized
