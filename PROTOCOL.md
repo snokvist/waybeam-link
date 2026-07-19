@@ -2173,7 +2173,12 @@ and reads only the 8-byte metadata prefix.
 single consumer), lock-free, futex consumer-wake. Header magic `0x5646524D`
 ("VFRM"), version 1; default geometry 16 slots × 512 KB (~8 MB). Free-running
 `write_idx`/`read_idx`; on a full ring the producer **drops and keeps running**
-(never blocks). All fields native-endian (same-host only).
+(never blocks). A waybeam-link egress producer sets the object mode to `0666`
+after creation, independent of its process umask, so an unprivileged local
+viewer can attach to a ring created by a privileged monitor-radio process.
+The consumer needs read/write access because it owns `read_idx` and
+`consumer_waiting`; read-only attachment is not compatible with this SPSC ABI.
+All fields native-endian (same-host only).
 
 **Slot payload** = 8-byte `VencFrameMeta` prefix + Annex-B frame bytes (NAL start
 codes preserved):

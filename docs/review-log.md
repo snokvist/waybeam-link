@@ -1227,6 +1227,23 @@ Evidence:
 - `artifacts/pr26-monitor-diversity-20260719/stationary-cache-grace0-realrf/`
 - `artifacts/pr26-monitor-diversity-20260719/stationary-cache-grace3-realrf/`
 
+## Pass 51 — unprivileged frame-SHM egress attachment (2026-07-19)
+
+The normal ground deployment runs waybeam-link as root because the
+kernel-monitor backend requires raw packet access, while the local video viewer
+runs as the desktop user. The previous producer mode `0600` therefore made the
+otherwise-compatible `venc_frame_out` ring inaccessible without a manual
+permission change.
+
+Operator ruling: a waybeam-link frame-SHM egress producer publishes its POSIX
+SHM object as mode `0666`, explicitly applied after creation so the producer's
+umask cannot narrow it. Although the payload is described as viewer-readable,
+the SPSC consumer must also update `read_idx` and `consumer_waiting`, so this ABI
+cannot support a read-only consumer mapping. The ring remains same-host,
+single-consumer, and producer-owned; no wire-format or layout change is made.
+
+**Amended:** §15.4 (egress object access mode and consumer write requirement).
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
