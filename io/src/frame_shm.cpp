@@ -21,6 +21,7 @@ namespace {
 using R = Result<std::unique_ptr<FrameShmRing>>;
 
 constexpr uint32_t kReaderTimeoutNs = 100 * 1000 * 1000;  // 100 ms observe-stop tick
+constexpr mode_t kEgressMode = 0666;
 
 std::string normalize_name(const std::string& name) {
     if (!name.empty() && name.front() == '/') {
@@ -107,10 +108,21 @@ R FrameShmRing::create(const std::string& name, uint32_t slots,
 
     // Clear any stale object so the O_EXCL open below is authoritative.
     ::shm_unlink(shm_name.c_str());
-    const int fd = ::shm_open(shm_name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+    const int fd =
+        ::shm_open(shm_name.c_str(), O_CREAT | O_EXCL | O_RDWR, kEgressMode);
     if (fd < 0) {
         return R::fail("frame_shm create: shm_open('" + shm_name + "'): " +
                        std::strerror(errno));
+    }
+    // The monitor-radio process commonly runs as root while its local viewer
+    // does not. The consumer owns read_idx/consumer_waiting, so the SPSC ABI
+    // requires a writable mapping. Apply the public mode after creation so a
+    // restrictive service umask cannot narrow it (§15.4).
+    if (::fchmod(fd, kEgressMode) != 0) {
+        const std::string e = std::strerror(errno);
+        ::close(fd);
+        ::shm_unlink(shm_name.c_str());
+        return R::fail("frame_shm create: fchmod: " + e);
     }
     if (::ftruncate(fd, static_cast<off_t>(total)) != 0) {
         const std::string e = std::strerror(errno);

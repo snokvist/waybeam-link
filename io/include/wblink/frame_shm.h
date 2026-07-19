@@ -31,9 +31,10 @@ class FrameShmRing {
     FrameShmRing(const FrameShmRing&) = delete;
     FrameShmRing& operator=(const FrameShmRing&) = delete;
 
-    // Producer: shm_unlink any stale name, shm_open O_CREAT|O_EXCL, ftruncate,
-    // mmap, zero, fill the immutable config header, then publish init_complete
-    // with a release store. `name` without a leading '/' gets one.
+    // Producer: shm_unlink any stale name, shm_open O_CREAT|O_EXCL, publish as
+    // mode 0666 (the consumer writes its SPSC indices), ftruncate, mmap, zero,
+    // fill the immutable config header, then publish init_complete with a
+    // release store. `name` without a leading '/' gets one.
     static Result<std::unique_ptr<FrameShmRing>> create(
         const std::string& name,
         uint32_t slots = kFrameRingDefaultSlots,
