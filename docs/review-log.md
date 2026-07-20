@@ -1626,6 +1626,34 @@ Implementation-only for the code side (backend `tx_index()` accessor; scout swee
 and claim pre-step rewired); the wording rulings amend §15.2 (scout adapter is the
 uplink) and §15.5a (sweep-roams-uplink, claim-retunes-all). No wire change.
 
+## Pass 65 — Scout survey is scout-adapter-only; a failed claim rolls back to rest (2026-07-20)
+
+On-device verification of Pass 64 (two-adapter ground) surfaced two multi-adapter
+interactions the single-adapter design never exercised. Operator rulings
+(2026-07-20):
+
+- **The scout survey (occupancy + candidates) is derived from the scout adapter's
+  frames only.** A diversity RX adapter parked on the resting channel hears the
+  claimed/idle craft during *every* dwell, so aggregating all adapters recorded the
+  craft as a candidate on every swept channel (with a bogus `chan`) and inflated
+  occupancy. `ScoutEngine::on_frame` now ignores frames whose `adapter_id` is not
+  the scout (uplink) adapter — the survey reflects the channel the scout is actually
+  tuned to. Single-adapter grounds are unchanged (the scout adapter is the only one).
+- **A failed claim rolls all adapters + the net_id stamp/filter back to the resting
+  state, and the scout returns *all* adapters to rest on completion.** Pass 64 left
+  an aborted claim's adapters on the craft's channel ("positioned for retry"); that
+  left a diversity ear stranded off the resting channel, and the scout's rest only
+  moved the uplink, so a re-scout could split the ears. Superseded: an aborted claim
+  now retunes every adapter back to the ground's operating channel (its configured
+  channel, or the last committed target) and restores the resting net_id; the scout
+  returns every adapter to that channel when a sweep ends or is stopped. The
+  operating channel is tracked at runtime (updated on a successful §11.6 commit).
+
+This supersedes the Pass 64 §15.5a "aborted campaign leaves every adapter on the
+craft's channel" wording. Implementation-only otherwise (scout gains a retune-all
+hook + scout-adapter index; run_rx tracks the operating channel and rolls back on
+abort). No wire change.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

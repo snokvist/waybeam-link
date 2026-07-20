@@ -2428,7 +2428,11 @@ supported (§15.2 `scout`).
   claim. During a sweep the scout adapter ignores its `net_id` filter (hears all
   net_ids). On a two-adapter ground the diversity RX adapters stay on the resting
   channel, so an active link there survives the sweep; a single-adapter ground has
-  no spare ear and drops any active link while scouting.
+  no spare ear and drops any active link while scouting. **The survey (per-channel
+  occupancy and candidates) is derived from the scout adapter's frames only**: a
+  diversity ear parked on the resting channel hears the craft during every dwell, so
+  counting its frames would attribute the craft to every swept channel and inflate
+  occupancy. Frames from non-scout adapters are excluded from the survey.
 - **Candidate** = `{originator, net_id, session, claimed, claimed_by, chan,
   psk_known}`. `psk_known` is a bool reporting whether the ground holds a usable
   CSA key for the craft: the **cached announced token** (the ground caches the
@@ -2459,11 +2463,14 @@ supported (§15.2 `scout`).
   already moves all adapters lands them together), `POST`-equivalent a §11 CSA to
   the chosen `target_chan` (or the emptiest allowlisted channel) keyed with the
   craft's `psk` (announced §11.4a, or configured secret), and confirm the §11.6
-  `CSA_ARMED` ACK. An aborted or reverted campaign leaves every adapter together on
-  the craft's channel — positioned for an explicit retry, not split across
-  channels. Post-claim the ground holds the target channel and does **not**
-  auto-rescout on link loss (matching §11.5 hold-until-reboot); re-scout is an
-  explicit action.
+  `CSA_ARMED` ACK. A **failed** campaign (no `CSA_ARMED`) rolls every adapter and
+  the net_id stamp/filter back to the resting state — the ground's operating
+  channel (its configured channel, or the last committed target, tracked at
+  runtime) — so a failed claim is a clean no-op rather than leaving a diversity ear
+  stranded off the resting channel. Likewise the scout returns *all* adapters to the
+  resting channel when a sweep ends or is stopped. On success the ground holds the
+  target channel and does **not** auto-rescout on link loss (matching §11.5
+  hold-until-reboot); re-scout is an explicit action.
 
 ---
 
