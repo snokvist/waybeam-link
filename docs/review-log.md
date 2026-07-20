@@ -1551,6 +1551,27 @@ ship an inert config knob (operator-ruled), **`psk_announce` is removed**:
 sentence added), §15.2 (config example + `csa.psk` note; `node.psk_announce`
 removed). No wire change — ANNOUNCE bytes and `flags` semantics are unchanged.
 
+## Pass 62 — ANNOUNCE subsumes HEARTBEAT; discovery is an ANNOUNCE presence source (2026-07-20)
+
+On-device bring-up of the Pass 58 emit (craft on ch161, ground monitor capture)
+showed the always-on ANNOUNCE fully suppresses the craft's HEARTBEAT: ANNOUNCE's
+inject resets the same §3.8 one-second quiet interval, so an idle announcing craft
+emits **only** ANNOUNCE (0 HEARTBEAT observed at 2 Hz). Since ANNOUNCE carries the
+same `(originator, session_id)` presence as HEARTBEAT — and more (claim state,
+token) — this is correct behaviour, not a regression (operator-ruled 2026-07-20:
+**ANNOUNCE supersedes HEARTBEAT**). Two reconciliations:
+
+- **§3.8 quiet-interval reset list** now includes ANNOUNCE, so a craft announcing
+  at ≥1 Hz never separately emits HEARTBEAT. HEARTBEAT's wire format and its role
+  for non-announcing nodes (grounds, quiet rx) are unchanged.
+- **§15.5 passive discovery** accepts ANNOUNCE as a node-presence source alongside
+  HEARTBEAT/DATA (otherwise an idle craft would vanish from `/discovery`). ANNOUNCE
+  senders additionally contribute advisory `claimed`/`claimed_by` to their node
+  record; the token is never surfaced (§15 redaction).
+
+**Amended:** §3.8 (reset list), §3.12 (HEARTBEAT-unchanged bullet reworded), §15.5
+(`/discovery` `nodes[]` source + claim fields). No wire change.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

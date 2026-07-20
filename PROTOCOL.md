@@ -426,9 +426,12 @@ discovered by. It carries no stream fields — HEARTBEAT never creates or refres
 
 **Emission cadence (operator-ruled 2026-07-12):** every node emits HEARTBEAT at
 **1 Hz while otherwise quiet**. Any successfully submitted DATA, NACK,
-LINK_REPORT, CSA, or HEARTBEAT resets the one-second quiet interval, so active
-traffic suppresses redundant keepalives. HEARTBEAT uses the node's current
-`originator` and per-boot `session_id`, with broadcast destination `0`.
+LINK_REPORT, CSA, ANNOUNCE, or HEARTBEAT resets the one-second quiet interval, so
+active traffic suppresses redundant keepalives. HEARTBEAT uses the node's current
+`originator` and per-boot `session_id`, with broadcast destination `0`. A craft
+that continuously emits ANNOUNCE (§3.12) at ≥1 Hz therefore **never separately
+emits HEARTBEAT** — ANNOUNCE subsumes it as the presence beacon (Pass 62); the
+HEARTBEAT path still serves non-announcing nodes (grounds, quiet rx).
 
 ### 3.9 RECOVERY_REQUEST packet (type `0x6`) — 18 bytes
 
@@ -603,8 +606,10 @@ re-claim in place after the binding releases (§11.5a).
   receiver can read it; takeover resistance comes from the §11.4a command-source
   **binding**, not from the token's confidentiality. A configured `csa.psk`
   selects secret mode: `psk_present=0` (16 zero bytes), a genuine secret (§11.4a).
-- HEARTBEAT (§3.8) is unchanged and remains exactly 11 bytes; ANNOUNCE never
+- HEARTBEAT (§3.8) wire format is unchanged (exactly 11 bytes); ANNOUNCE never
   creates or refreshes per-stream RX state (like HEARTBEAT, it is node-scoped).
+  Because ANNOUNCE resets the §3.8 quiet interval, a continuously-announcing craft
+  **subsumes** its own HEARTBEAT — it emits ANNOUNCE only, not both (Pass 62).
 - **Redaction:** the `psk` field is the same secret as `csa.psk`; nodes MUST NOT
   print it to stats/logs (the §15 config-dump `"(set, redacted)"` invariant
   extends to any ANNOUNCE observability path).
@@ -2363,11 +2368,13 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/stats/stream` | `text/event-stream`; one §15.3 object per `stats.hz` tick |
 | `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]`, `build` |
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
-| `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/DATA observations |
+| `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |
 | `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[]}` (§15.5a; ground/rx node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
-`{originator,session,last_seen_ms}` for HEARTBEAT or DATA senders. `streams[]`
+`{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
+ANNOUNCE (§3.12) senders additionally carry advisory `claimed`/`claimed_by` and a
+`psk_present` bool (the token itself is never surfaced, §15 redaction). `streams[]`
 contains DATA-derived candidates and active latches as
 `{originator,session,stream_id,stream_type,packet_count,first_seen_ms,last_seen_ms,latched}`.
 Times are monotonic node-local millisecond stamps and are comparable only within
