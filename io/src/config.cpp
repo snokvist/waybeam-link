@@ -133,7 +133,6 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             cfg.node.net_id = static_cast<uint8_t>(nid);
         }
-        cfg.node.psk_announce = n.value("psk_announce", cfg.node.psk_announce);
 
         if (j.contains("profile_table")) {
             cfg.profile_table_path = j.at("profile_table").get<std::string>();

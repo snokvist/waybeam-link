@@ -53,9 +53,6 @@ struct NodeCfg {
     // §3.0 L2 partition tag. TX always stamps it (absent ⇒ stamps 0); the
     // RX filter enforces equality only when it is configured.
     std::optional<uint8_t> net_id;
-    // §11.4a: true (default) auto-generates + ANNOUNCEs a session pairing token
-    // when csa.psk is unset; false keeps an operator secret off the air.
-    bool psk_announce = true;
 };
 
 struct AdapterCfg {

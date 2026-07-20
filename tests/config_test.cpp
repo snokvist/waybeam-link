@@ -16,8 +16,7 @@ namespace {
 
 // The §15.2 sample (psk included; craft/ground shape).
 const char* kSample = R"({
-  "node":  { "originator": 17, "role": "tx", "preferred_originator": 9,
-             "psk_announce": false },
+  "node":  { "originator": 17, "role": "tx", "preferred_originator": 9 },
   "profile_table": "/etc/waybeam-link/profiles.json",
   "adapters": [
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
@@ -85,7 +84,6 @@ int main() {
             CHECK_EQ_U(c.node.originator, 17);
             CHECK(c.node.role == Role::kTx);
             CHECK_EQ_U(c.node.preferred_originator, 9);
-            CHECK(!c.node.psk_announce);
             CHECK_EQ_U(c.scout.dwell_ms, 250);
             CHECK_EQ_U(c.scout.channels.size(), 2);
             CHECK(c.profile_table_path == "/etc/waybeam-link/profiles.json");
