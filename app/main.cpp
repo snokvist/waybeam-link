@@ -375,16 +375,29 @@ class DiscoveryCatalog {
     void observe(const Decoded& dec, uint64_t now) {
         const CommonPrefix* p = nullptr;
         const DataView* data = std::get_if<DataView>(&dec);
+        const Announce* an = nullptr;
         if (data != nullptr) {
             p = &data->hdr.prefix;
         } else if (const Heartbeat* hb = std::get_if<Heartbeat>(&dec)) {
             p = &hb->prefix;
+        } else if ((an = std::get_if<Announce>(&dec)) != nullptr) {
+            p = &an->prefix;  // §15.5 presence source (Pass 62)
         } else {
             return;
         }
         const uint64_t nk = (static_cast<uint64_t>(p->originator) << 32) |
                             p->session_id;
-        nodes_[nk] = Node{p->originator, p->session_id, now};
+        Node& n = nodes_[nk];  // update-in-place keeps prior ANNOUNCE fields
+        n.originator = p->originator;
+        n.session = p->session_id;
+        n.last_seen_ms = now;
+        if (an != nullptr) {
+            n.announced = true;
+            n.claimed = (an->flags & announce_flags::kClaimed) != 0;
+            n.claimed_by = an->claimed_by;
+            n.psk_present = (an->flags & announce_flags::kPskPresent) != 0;
+            // The 16-byte token is never recorded (§15 redaction).
+        }
         if (data != nullptr) {
             const uint64_t sk = (nk << 8) | data->hdr.stream_id;
             Stream& s = streams_[sk];
@@ -411,7 +424,14 @@ class DiscoveryCatalog {
             comma = true;
             out += "{\"originator\":" + std::to_string(n.originator) +
                    ",\"session\":" + std::to_string(n.session) +
-                   ",\"last_seen_ms\":" + std::to_string(n.last_seen_ms) + "}";
+                   ",\"last_seen_ms\":" + std::to_string(n.last_seen_ms);
+            if (n.announced) {  // §15.5 ANNOUNCE claim view (Pass 62; no token)
+                out += ",\"claimed\":" + std::string(n.claimed ? "true" : "false") +
+                       ",\"claimed_by\":" + std::to_string(n.claimed_by) +
+                       ",\"psk_present\":" +
+                       std::string(n.psk_present ? "true" : "false");
+            }
+            out += "}";
         }
         out += "],\"streams\":[";
         comma = false;
@@ -444,6 +464,10 @@ class DiscoveryCatalog {
         uint16_t originator = 0;
         uint32_t session = 0;
         uint64_t last_seen_ms = 0;
+        bool announced = false;  // §3.12 ANNOUNCE seen (Pass 62)
+        bool claimed = false;
+        uint16_t claimed_by = 0;
+        bool psk_present = false;
     };
     struct Stream {
         uint16_t originator = 0;
