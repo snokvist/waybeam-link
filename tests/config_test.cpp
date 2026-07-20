@@ -16,7 +16,8 @@ namespace {
 
 // The §15.2 sample (psk included; craft/ground shape).
 const char* kSample = R"({
-  "node":  { "originator": 17, "role": "tx", "preferred_originator": 9 },
+  "node":  { "originator": 17, "role": "tx", "preferred_originator": 9,
+             "psk_announce": false },
   "profile_table": "/etc/waybeam-link/profiles.json",
   "adapters": [
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
@@ -49,7 +50,8 @@ const char* kSample = R"({
                 "home_chan": 5745,
                 "channel_allowlist": [5745, 5805, 5825] }
   },
-  "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } }
+  "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
+  "scout": { "dwell_ms": 250, "channels": [5745, 5825] }
 })";
 
 bool expect_error(const std::string& json, const char* needle) {
@@ -83,6 +85,9 @@ int main() {
             CHECK_EQ_U(c.node.originator, 17);
             CHECK(c.node.role == Role::kTx);
             CHECK_EQ_U(c.node.preferred_originator, 9);
+            CHECK(!c.node.psk_announce);
+            CHECK_EQ_U(c.scout.dwell_ms, 250);
+            CHECK_EQ_U(c.scout.channels.size(), 2);
             CHECK(c.profile_table_path == "/etc/waybeam-link/profiles.json");
 
             CHECK_EQ_U(c.adapters.size(), 2);

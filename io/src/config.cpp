@@ -133,6 +133,7 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             cfg.node.net_id = static_cast<uint8_t>(nid);
         }
+        cfg.node.psk_announce = n.value("psk_announce", cfg.node.psk_announce);
 
         if (j.contains("profile_table")) {
             cfg.profile_table_path = j.at("profile_table").get<std::string>();
@@ -477,6 +478,17 @@ Result<Config> load_config_json(const std::string& json_text) {
         if (j.contains("control")) {
             const json& c = j.at("control");
             cfg.control.bind = c.value("bind", std::string());
+        }
+
+        // scout (§15.5a ground channel searcher)
+        if (j.contains("scout")) {
+            const json& sc = j.at("scout");
+            cfg.scout.dwell_ms = sc.value("dwell_ms", cfg.scout.dwell_ms);
+            if (sc.contains("channels") && !sc.at("channels").is_null()) {
+                for (const json& ch : sc.at("channels")) {
+                    cfg.scout.channels.push_back(ch.get<uint16_t>());
+                }
+            }
         }
 
         // cache (§14.3 spatial cache repair; both roles default off)

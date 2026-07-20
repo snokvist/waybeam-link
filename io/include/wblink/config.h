@@ -53,6 +53,9 @@ struct NodeCfg {
     // §3.0 L2 partition tag. TX always stamps it (absent ⇒ stamps 0); the
     // RX filter enforces equality only when it is configured.
     std::optional<uint8_t> net_id;
+    // §11.4a: true (default) auto-generates + ANNOUNCEs a session pairing token
+    // when csa.psk is unset; false keeps an operator secret off the air.
+    bool psk_announce = true;
 };
 
 struct AdapterCfg {
@@ -288,6 +291,13 @@ struct ControlCfg {
     std::string bind;  // "" = disabled
 };
 
+// §15.5a ground scout (channel searcher). channels empty ⇒ sweep the
+// csa.channel_allowlist. All values §17-overridable seeds.
+struct ScoutCfg {
+    uint32_t dwell_ms = 300;
+    std::vector<uint16_t> channels;
+};
+
 // §14.3 Cache Controller (both roles default off; all values §17 seeds).
 struct CacheEndpointCfg {
     uint16_t originator = 0;
@@ -334,6 +344,7 @@ struct Config {
     Policy policy;
     StatsCfg stats;
     ControlCfg control;    // §15.5 REST control plane (off unless bind set)
+    ScoutCfg scout;        // §15.5a ground scout (channel searcher)
     CacheCfg cache;        // §14.3 cache repair/store (off by default)
     VencCfg venc;          // §9.6 encoder actuation
     AirCfg air;            // dev backend; empty until devourer lands
