@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <csignal>
 #include <cstdlib>
 #include <cstdio>
@@ -506,6 +507,25 @@ uint32_t session_nonce() {
     return static_cast<uint32_t>(now_ms()) | 1u;  // degraded fallback
 }
 
+// §11.4a: per-boot 16-byte announced pairing token P (io/app entropy; the pure
+// core layer stays RNG-free and only verifies against a supplied key). Used as
+// the craft's CSA HMAC key AND advertised in ANNOUNCE (§3.12) when no operator
+// csa.psk is configured (announced mode).
+std::array<uint8_t, kAnnouncePskSize> announce_token() {
+    std::array<uint8_t, kAnnouncePskSize> t{};
+    if (FILE* f = std::fopen("/dev/urandom", "rb")) {
+        const size_t got = std::fread(t.data(), 1, t.size(), f);
+        std::fclose(f);
+        if (got == t.size()) return t;
+    }
+    // Degraded fallback: never key with all-zero. Mix the boot clock.
+    const uint64_t ms = now_ms();
+    for (size_t i = 0; i < t.size(); ++i) {
+        t[i] = static_cast<uint8_t>((ms >> ((i % 8) * 8)) ^ (i * 0x9du)) | 1u;
+    }
+    return t;
+}
+
 SchedulerPolicy scheduler_policy(const Config& cfg) {
     SchedulerPolicy p;
     p.holddown_ms = cfg.policy.arq.holddown_ms;
@@ -585,6 +605,7 @@ struct AirBackend {
     std::optional<RadioAir> radio;
 #endif
     uint64_t last_tx_ms = 0;
+    uint64_t last_announce_ms = 0;  // §3.12 ANNOUNCE cadence (own timer)
 
     static Result<AirBackend> create(const Config& cfg) {
         AirBackend b;
@@ -724,6 +745,39 @@ struct AirBackend {
         hb.prefix.session_id = session;
         uint8_t frame[kHeartbeatSize];
         if (encode_heartbeat(hb, frame, sizeof(frame)) == sizeof(frame)) {
+            inject(frame, sizeof(frame));
+        }
+    }
+
+    // §3.12 pairing beacon. Unlike heartbeat this is NOT suppressed by active
+    // DATA — it is the craft's continuous claim/token advertisement, emitted at
+    // ~2 Hz in both claimed and unclaimed states so a rebooted ground can
+    // re-learn the token and re-claim in place (§11.5a). psk_present selects
+    // announced (token in psk) vs secret (all-zero) mode; claimed/claimed_by
+    // come from the follower's §11.5a binding.
+    void announce(uint16_t originator, uint32_t session, uint64_t now,
+                  const uint8_t* token, bool psk_present, bool claimed,
+                  uint16_t claimed_by) {
+        static constexpr uint64_t kAnnounceIntervalMs = 500;  // §3.12 1–2 Hz
+        if (now < last_announce_ms ||
+            now - last_announce_ms < kAnnounceIntervalMs) {
+            return;
+        }
+        last_announce_ms = now;
+        Announce a;
+        a.prefix.originator = originator;
+        a.prefix.session_id = session;  // destination = 0 (§3.12)
+        a.flags = 0;
+        if (claimed) {
+            a.flags |= announce_flags::kClaimed;
+            a.claimed_by = claimed_by;
+        }
+        if (psk_present) {
+            a.flags |= announce_flags::kPskPresent;
+            std::memcpy(a.psk, token, kAnnouncePskSize);
+        }  // else psk stays all-zero (secret mode)
+        uint8_t frame[kAnnounceSize];
+        if (encode_announce(a, frame, sizeof(frame)) == sizeof(frame)) {
             inject(frame, sizeof(frame));
         }
     }
@@ -2091,6 +2145,11 @@ int run_tx(const Loaded& l) {
         return 1;
     }
     const uint32_t session = session_nonce();
+    // §11.4a key provenance: csa.psk configured ⇒ secret (token off the air);
+    // absent ⇒ announced (the per-boot token is both the CSA key and the
+    // advertised ANNOUNCE psk). Pass 61: presence is the sole selector.
+    const std::array<uint8_t, kAnnouncePskSize> token = announce_token();
+    const bool psk_announced = l.cfg.policy.csa.psk.empty();
     DiscoveryCatalog discovery;
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv);
     tx.estimate_airtime = [&](size_t bytes, bool include_pending) {
@@ -2176,8 +2235,14 @@ int run_tx(const Loaded& l) {
         arq_timing.note_resend_submitted(f, n, now_us());
     };
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
-    // retunes the (single) radio at the TSF-anchored T_switch.
-    CsaFollower csa(csa_params(l.cfg));
+    // retunes the (single) radio at the TSF-anchored T_switch. In announced
+    // mode (§11.4a) it verifies CSA against the per-boot token; in secret mode
+    // csa_params already keyed it from csa.psk.
+    CsaParams follower_params = csa_params(l.cfg);
+    if (psk_announced) {
+        follower_params.psk.assign(token.begin(), token.end());
+    }
+    CsaFollower csa(follower_params);
     // §9.10 TX-wedge watchdog over the TX adapter's CCX-report counters.
     TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
                                 l.cfg.air.wedge_min_submits});
@@ -2388,6 +2453,12 @@ int run_tx(const Loaded& l) {
         }
         tx.tick(service_now, inject, inject_resend);
         air.value->heartbeat(l.cfg.node.originator, session, service_now);
+        {
+            const std::optional<uint16_t> latched = csa.latched_issuer();
+            air.value->announce(l.cfg.node.originator, session, service_now,
+                                token.data(), psk_announced,
+                                latched.has_value(), latched.value_or(0));
+        }
         if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
