@@ -610,9 +610,13 @@ re-claim in place after the binding releases (§11.5a).
   creates or refreshes per-stream RX state (like HEARTBEAT, it is node-scoped).
   Because ANNOUNCE resets the §3.8 quiet interval, a continuously-announcing craft
   **subsumes** its own HEARTBEAT — it emits ANNOUNCE only, not both (Pass 62).
-- **Redaction:** the `psk` field is the same secret as `csa.psk`; nodes MUST NOT
-  print it to stats/logs (the §15 config-dump `"(set, redacted)"` invariant
-  extends to any ANNOUNCE observability path).
+- **Redaction (relaxed, Pass 63):** the ANNOUNCE `psk` with `psk_present=1` is the
+  *announced session token* — public by construction (on the air, per-boot rotated
+  on the craft), so it MAY be surfaced, logged, and cached; the ground caches it to
+  key its §11 CSA (§15.5a). Only the operator-provisioned `csa.psk` secret stays
+  redacted (the §15 config-dump `"(set, redacted)"` invariant). Secret mode never
+  carries the secret in ANNOUNCE (16 zero bytes), so the ANNOUNCE `psk` field is
+  never sensitive in either mode.
 
 ---
 
@@ -2374,7 +2378,8 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
 ANNOUNCE (§3.12) senders additionally carry advisory `claimed`/`claimed_by` and a
-`psk_present` bool (the token itself is never surfaced, §15 redaction). `streams[]`
+`psk_present` bool (the announced token is public and may also be surfaced, Pass 63;
+`/discovery` reports the bool, the claim path uses the cached token). `streams[]`
 contains DATA-derived candidates and active latches as
 `{originator,session,stream_id,stream_type,packet_count,first_seen_ms,last_seen_ms,latched}`.
 Times are monotonic node-local millisecond stamps and are comparable only within
@@ -2421,9 +2426,12 @@ supported (§15.2 `scout`).
   net_ids); a single-adapter ground therefore drops any active link while
   scouting.
 - **Candidate** = `{originator, net_id, session, claimed, claimed_by, chan,
-  psk_known}`. `psk_known` is a bool — the ANNOUNCE `psk` (§3.12) is never echoed
-  (the §15 redaction invariant). Ownership is *proven by connecting*, not read
-  from the beacon: a MAC-valid CSA the craft follows is the proof.
+  psk_known}`. `psk_known` is a bool reporting whether the ground holds a usable
+  CSA key for the craft: the **cached announced token** (the ground caches the
+  ANNOUNCE `psk` from every beacon, Pass 63) or a configured `csa.psk` secret. The
+  token is public and may be surfaced, but ownership is still *proven by
+  connecting*, not read from the beacon: a MAC-valid CSA the craft follows is the
+  proof.
 - **Per-channel occupancy** is reported as a record whose field set is a superset
   aligned with the Realtek "Advanced Channel Scanning" survey so a future
   hardware backend is a field-fill, not a reshape. v1 fills only the

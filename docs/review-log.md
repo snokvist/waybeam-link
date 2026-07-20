@@ -1572,6 +1572,34 @@ token) — this is correct behaviour, not a regression (operator-ruled 2026-07-2
 **Amended:** §3.8 (reset list), §3.12 (HEARTBEAT-unchanged bullet reworded), §15.5
 (`/discovery` `nodes[]` source + claim fields). No wire change.
 
+## Pass 63 — The announced token is public: cache/log/surface, don't redact (2026-07-20)
+
+Building the ground claim path (§15.5a) raised how the ground obtains the CSA key
+in announced mode. Operator ruling (2026-07-20): **the ground caches the token
+from every received ANNOUNCE and applies the matching one at link time**, and the
+token is **no longer redacted** — it is on the air by construction and per-boot
+rotated on the craft, so logging/surfacing it leaks nothing an RF-adjacent
+listener doesn't already have. Redaction now scopes to the *operator secret* only:
+
+- The ANNOUNCE `psk` with `psk_present=1` is the announced session token — public;
+  it MAY be surfaced, logged, and cached (the ground does exactly this to key its
+  §11 CSA). The prior "never echoed / MUST NOT print" language is withdrawn for it.
+- The operator-provisioned `csa.psk` (secret mode) stays redacted (the §15
+  config-dump `"(set, redacted)"` invariant is unchanged). It is never carried in
+  ANNOUNCE (secret mode sends 16 zero bytes), so the ANNOUNCE `psk` field is never
+  sensitive in either mode.
+- The ground keys its `CsaIssuer` from the cached token (announced) or the
+  configured `csa.psk` (secret); `psk_known` reports whether a usable key exists.
+
+Also settled for the same feature (code-only, no wire/spec change): scout
+candidates carry `net_id` (already parsed in `Dot11Rx`, surfaced via `AirRxMeta`);
+monitor channel retune is implemented via `iw`/nl80211 (the ssc338q SDK lacks
+libnl-3, so `iw dev … set freq` is the portable path), lifting the code-comment
+"CSA/scout over monitor deferred" — §11.5/§15.5a already assume retune works.
+
+**Amended:** §3.12 (redaction bullet), §15.5 (`/discovery` token note), §15.5a
+(candidate `psk_known`/token-cache wording). No wire change.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
