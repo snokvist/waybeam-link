@@ -448,8 +448,10 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pc.value("verify_timeout_ms", csa.verify_timeout_ms);
                 csa.min_interval_s = pc.value("min_interval_s", csa.min_interval_s);
                 csa.ack_timeout_ms = pc.value("ack_timeout_ms", csa.ack_timeout_ms);
-                csa.rendezvous_timeout_s =
-                    pc.value("rendezvous_timeout_s", csa.rendezvous_timeout_s);
+                csa.bind_release_s =
+                    pc.value("bind_release_s", csa.bind_release_s);
+                csa.persist_channel =
+                    pc.value("persist_channel", csa.persist_channel);
                 csa.home_chan = pc.value("home_chan", csa.home_chan);
                 if (pc.contains("channel_allowlist")) {
                     for (const json& c : pc.at("channel_allowlist")) {

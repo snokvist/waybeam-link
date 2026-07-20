@@ -45,7 +45,8 @@ const char* kSample = R"({
     "csa":    { "psk": "hunter2",
                 "settle_s": 3.0, "verify_timeout_ms": 150,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
-                "rendezvous_timeout_s": 5, "home_chan": 5745,
+                "bind_release_s": 90, "persist_channel": true,
+                "home_chan": 5745,
                 "channel_allowlist": [5745, 5805, 5825] }
   },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } }
@@ -110,6 +111,8 @@ int main() {
             CHECK_EQ_U(c.policy.ret.return_window_us, 2000);
             CHECK(c.policy.csa.psk == "hunter2");
             CHECK_EQ_U(c.policy.csa.home_chan, 5745);
+            CHECK_EQ_U(c.policy.csa.bind_release_s, 90);
+            CHECK(c.policy.csa.persist_channel);
             CHECK_EQ_U(c.policy.csa.channel_allowlist.size(), 3);
 
             CHECK(c.stats.bind.has_value());

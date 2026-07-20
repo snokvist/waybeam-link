@@ -79,6 +79,7 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     last_applied_[key] = pkt.csa_nonce;
     last_accept_us_ = now_us;
     latched_ = pkt.prefix.originator;
+    last_bound_rx_us_ = now_us;  // §11.5a: start the binding-freshness clock
     campaign_ = pkt;
     const uint64_t dt_us = static_cast<uint64_t>(pkt.dt_to_switch_ms) * 1000;
     uint64_t elapsed = 0;
@@ -93,20 +94,14 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     return true;
 }
 
-void CsaFollower::note_valid_rx(uint64_t now_us) {
-    have_traffic_ = true;
-    last_rx_us_ = now_us;
-    switch (state_) {
-        case State::kVerify:
-            state_ = State::kCommitted;
-            break;
-        case State::kCommitted:
-        case State::kReverted:
-        case State::kHome:
-            state_ = State::kIdle;  // link re-established, campaign closed
-            break;
-        default:
-            break;
+void CsaFollower::note_valid_rx(uint64_t now_us, uint16_t from_originator) {
+    if (state_ == State::kVerify) {
+        state_ = State::kCommitted;  // §11.5 valid traffic confirms the switch
+    }
+    // §11.5a: any packet the craft accepts from the bound issuer refreshes the
+    // command-source binding (CSA / NACK / LINK_REPORT / HEARTBEAT alike).
+    if (latched_ && from_originator == *latched_) {
+        last_bound_rx_us_ = now_us;
     }
 }
 
@@ -129,42 +124,29 @@ CsaAction CsaFollower::tick(uint64_t now_us) {
             break;
         case State::kVerify:
             if (now_us >= verify_deadline_us_) {
+                // §11.5 jump-failed backout: the retune landed on a dead
+                // channel — revert to prev_chan, drop the incomplete claim,
+                // return to IDLE. No mid-flight rendezvous (Pass 59).
                 a.kind = CsaAction::Kind::kRevert;
                 a.chan_mhz = campaign_.prev_chan;
                 a.bw = campaign_.prev_bw;
                 a.fast = campaign_.retune_class == 0;
                 a.power_intent = campaign_.power_intent;
-                rendezvous_deadline_us_ =
-                    now_us +
-                    static_cast<uint64_t>(policy_.rendezvous_timeout_ms) *
-                        1000;
-                state_ = State::kReverted;
-            }
-            break;
-        case State::kReverted:
-            if (now_us >= rendezvous_deadline_us_ && policy_.home_chan != 0) {
-                a.kind = CsaAction::Kind::kHome;
-                a.chan_mhz = policy_.home_chan;
-                a.bw = 0;  // home rendezvous is always 20 MHz (§1)
-                a.power_intent = campaign_.power_intent;
-                state_ = State::kHome;
-            }
-            break;
-        case State::kIdle:
-            // §11.5 long path: a node that never saw the CSA loses the link
-            // and falls back to the config rendezvous channel.
-            if (have_traffic_ && policy_.home_chan != 0 &&
-                now_us - last_rx_us_ >
-                    static_cast<uint64_t>(policy_.rendezvous_timeout_ms) *
-                        1000) {
-                a.kind = CsaAction::Kind::kHome;
-                a.chan_mhz = policy_.home_chan;
-                a.bw = 0;
-                state_ = State::kHome;
+                latched_ = std::nullopt;
+                state_ = State::kIdle;
             }
             break;
         case State::kCommitted:
-        case State::kHome:
+            // §11.5a: hold the channel until reboot. Release only the binding
+            // after bind_release_ms of silence from the bound issuer — no
+            // channel change; the craft re-opens for in-place re-claim.
+            if (latched_ &&
+                now_us - last_bound_rx_us_ >
+                    static_cast<uint64_t>(policy_.bind_release_ms) * 1000) {
+                latched_ = std::nullopt;
+            }
+            break;
+        case State::kIdle:
             break;
     }
     return a;
@@ -180,10 +162,6 @@ const char* CsaFollower::state_str() const {
             return "VERIFY";
         case State::kCommitted:
             return "COMMITTED";
-        case State::kReverted:
-            return "REVERTED";
-        case State::kHome:
-            return "HOME";
     }
     return "?";
 }

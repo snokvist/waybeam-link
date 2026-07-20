@@ -481,8 +481,7 @@ CsaParams csa_params(const Config& cfg) {
     p.verify_timeout_ms = c.verify_timeout_ms;
     p.min_interval_ms = c.min_interval_s * 1000;
     p.ack_timeout_ms = c.ack_timeout_ms;
-    p.rendezvous_timeout_ms = c.rendezvous_timeout_s * 1000;
-    p.home_chan = c.home_chan;
+    p.bind_release_ms = c.bind_release_s * 1000;
     p.allowlist = c.channel_allowlist;
     return p;
 }
@@ -2260,7 +2259,9 @@ int run_tx(const Loaded& l) {
                 return;
             }
             if (!std::holds_alternative<DecodeError>(dec)) {
-                csa.note_valid_rx(service_us);
+                // §11.5a: pass the sender (common-prefix originator @3) so the
+                // follower can refresh the binding on the bound issuer's traffic.
+                csa.note_valid_rx(service_us, be16_read(d + 3));
             }
             if (tx.on_air(d, n, service_now)) {
                 arq_timing.note_nack_received(d, n, service_us);
@@ -2889,7 +2890,7 @@ int run_rx(const Loaded& l) {
                 }
             }
             if (!std::holds_alternative<DecodeError>(dec)) {
-                follower.note_valid_rx(now_us_it);
+                follower.note_valid_rx(now_us_it, be16_read(d + 3));
             }
             rx.on_air(meta.adapter_id, d, n, now, deliver, rssi,
                       early_deliver);

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // §11 CSA engine tests: follower validation (MAC / replay / issuer lock /
 // allowlist / rate-limit), TSF anchoring incl. u32 wrap, the §11.5 state
-// machine (verify-revert, rendezvous home, link-loss long path), the §11.6
-// issuer (decrementing-dt copies, commit-after-armed, ack-timeout abort,
-// revert-on-no-video), and the §11.3 selector freeze pause.
+// machine (jump-failed revert, hold-until-reboot, §11.5a binding release +
+// in-place re-claim), the §11.6 issuer (decrementing-dt copies,
+// commit-after-armed, ack-timeout abort, revert-on-no-video), and the §11.3
+// selector freeze pause.
 #include "wblink/csa.h"
 
 #include <string_view>
@@ -20,7 +21,6 @@ CsaParams policy_with_psk() {
     CsaParams p;
     p.psk = {'s', 'e', 'c', 'r', 'e', 't'};
     p.allowlist = {5745, 5805, 5825};
-    p.home_chan = 5745;
     return p;
 }
 
@@ -133,12 +133,17 @@ int main() {
         CHECK_EQ_U(f.freeze_until_us(), 3'000'000);  // settle_ms default
         CHECK_EQ_U(f.tick(150'000).kind,
                    static_cast<unsigned>(CsaAction::Kind::kRetune));
-        f.note_valid_rx(200'000);
+        f.note_valid_rx(200'000, 9);  // ground (bound issuer) heard
         CHECK(!f.armed());
+        CHECK(std::string_view(f.state_str()) == "COMMITTED");
+        // §11.5 hold-until-reboot: COMMITTED never auto-reverts, however long.
+        CHECK_EQ_U(f.tick(200'000 + 3'600'000'000ull).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
         CHECK(std::string_view(f.state_str()) == "COMMITTED");
     }
     {
-        // No traffic ⇒ revert at t_revert_ms, then rendezvous home.
+        // §11.5 jump-failed backout: no traffic ⇒ revert to prev_chan and
+        // return to IDLE (no mid-flight rendezvous); the claim is dropped.
         CsaFollower f(pol);
         CHECK(f.on_csa(make_csa(pol, 1, 5825, 150), 0, std::nullopt, 0,
                        std::nullopt));
@@ -147,22 +152,46 @@ int main() {
         const auto rv = f.tick(150'000 + 150'000);  // wire t_revert_ms = 150
         CHECK_EQ_U(rv.kind, static_cast<unsigned>(CsaAction::Kind::kRevert));
         CHECK_EQ_U(rv.chan_mhz, 5805);  // prev_chan
-        const auto hm = f.tick(300'000 + 5'000'000);  // rendezvous_timeout
-        CHECK_EQ_U(hm.kind, static_cast<unsigned>(CsaAction::Kind::kHome));
-        CHECK_EQ_U(hm.chan_mhz, 5745);
-        // Traffic on home closes the campaign.
-        f.note_valid_rx(6'000'000);
         CHECK(std::string_view(f.state_str()) == "IDLE");
+        CHECK(!f.latched_issuer().has_value());
     }
     {
-        // Long path: node that never saw a CSA loses the link > rendezvous
-        // timeout ⇒ home. Requires prior traffic (no false trigger at boot).
+        // §11.5a binding release: after bind_release_ms (default 90 s) of
+        // silence from the bound issuer the binding drops with NO channel
+        // change (stays COMMITTED), re-opening the craft for in-place re-claim.
         CsaFollower f(pol);
-        CHECK_EQ_U(f.tick(10'000'000).kind,
+        CHECK(f.on_csa(make_csa(pol, 1, 5745, 150), 0, std::nullopt, 0,
+                       std::nullopt));
+        CHECK_EQ_U(f.tick(150'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kRetune));
+        f.note_valid_rx(200'000, 9);
+        CHECK(f.latched_issuer().has_value());
+        const uint64_t rel = 200'000 + 90'000'000ull;  // last_bound + 90 s
+        CHECK_EQ_U(f.tick(rel).kind,  // exactly at the boundary: still bound
                    static_cast<unsigned>(CsaAction::Kind::kNone));
-        f.note_valid_rx(10'000'000);
-        const auto a = f.tick(10'000'000 + 5'000'001);
-        CHECK_EQ_U(a.kind, static_cast<unsigned>(CsaAction::Kind::kHome));
+        CHECK(f.latched_issuer().has_value());
+        CHECK_EQ_U(f.tick(rel + 2).kind,  // past it: released, no channel change
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        CHECK(!f.latched_issuer().has_value());
+        CHECK(std::string_view(f.state_str()) == "COMMITTED");
+        // A fresh issuer (different originator) can now re-claim in place.
+        CsaPacket c2;
+        c2.prefix = {11, 0, 999};
+        c2.csa_nonce = 1;
+        c2.csa_seq = 5;
+        c2.target_chan = 5825;
+        c2.target_bw = 0;
+        c2.retune_class = 0;
+        c2.dt_to_switch_ms = 150;
+        c2.t_revert_ms = 150;
+        c2.prev_chan = 5745;
+        c2.prev_bw = 0;
+        c2.power_intent = 4;
+        uint8_t b2[32];
+        CHECK_EQ_U(encode_csa(c2, b2, sizeof(b2)), 32);
+        c2.csa_mac = csa_mac(pol.psk.data(), pol.psk.size(), b2);
+        CHECK(f.on_csa(c2, rel + 3, std::nullopt, 0, std::nullopt));
+        CHECK_EQ_U(*f.latched_issuer(), 11);
     }
 
     // --- §11.6 issuer -------------------------------------------------------

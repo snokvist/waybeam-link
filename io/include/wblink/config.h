@@ -204,8 +204,9 @@ struct CsaPolicy {
     uint32_t verify_timeout_ms = 150;
     uint32_t min_interval_s = 5;
     uint32_t ack_timeout_ms = 1000;
-    uint32_t rendezvous_timeout_s = 5;
-    uint16_t home_chan = 0;  // config-pinned rendezvous (§11.1)
+    uint32_t bind_release_s = 90;    // §11.5a command-source binding release
+    bool persist_channel = false;    // §11.5 boot onto last-committed channel
+    uint16_t home_chan = 0;  // config-pinned power-on default (§11.1, §11.5)
     std::vector<uint16_t> channel_allowlist;
 };
 
