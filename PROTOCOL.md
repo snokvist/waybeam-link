@@ -2439,7 +2439,11 @@ supported (§15.2 `scout`).
   ANNOUNCE `psk` from every beacon, Pass 63) or a configured `csa.psk` secret. The
   token is public and may be surfaced, but ownership is still *proven by
   connecting*, not read from the beacon: a MAC-valid CSA the craft follows is the
-  proof.
+  proof. When a craft appears on more than one swept channel — a retune-settling
+  artifact where the scout adapter drains frames buffered from the previous channel
+  into the next dwell — its `chan` is the swept channel it was **heard on with the
+  most frames** (the true channel is heard for the whole dwell; a leak is a handful
+  of frames), so the claim retunes to the right channel regardless of scan order.
 - **Per-channel occupancy** is reported as a record whose field set is a superset
   aligned with the Realtek "Advanced Channel Scanning" survey so a future
   hardware backend is a field-fill, not a reshape. v1 fills only the

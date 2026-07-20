@@ -1654,6 +1654,29 @@ craft's channel" wording. Implementation-only otherwise (scout gains a retune-al
 hook + scout-adapter index; run_rx tracks the operating channel and rolls back on
 abort). No wire change.
 
+## Pass 66 — A candidate's channel is where it was heard most, not last (2026-07-20)
+
+Verifying Pass 65 exposed a residual survey artifact independent of the multi-adapter
+work: on a channel change the scout adapter drains frames buffered from the *previous*
+channel into the first part of the new dwell (kernel socket + the io/ RX deque), so a
+craft can be recorded on an adjacent swept channel it isn't on. `candidate_for` took
+the *last* channel a craft appeared on, which a settling leak can make wrong depending
+on scan order.
+
+Operator ruling (2026-07-20): **a candidate's channel is the swept channel it was
+heard on with the most frames, not the last.** The craft's true channel is heard for
+the entire dwell (hundreds of DATA frames, or every ANNOUNCE), while a settling leak is
+a handful of buffered frames — so max-frame-count is robust regardless of scan order.
+Rejected the alternatives (time-based settle-guard, post-retune queue flush,
+channel-generation stamping): all chase *occupancy* accuracy at the cost of dwell time
+or io/ RX-path changes, whereas the only decision that must be correct — the channel a
+claim retunes to — is fixed by evidence-weighting alone. Occupancy stays best-effort v1
+(a small airtime bump on an adjacent channel is tolerated); a settle-guard/flush can be
+revisited if occupancy precision is ever needed.
+
+Amends §15.5a (candidate `chan` selection). Implementation-only: `ScoutEngine` counts
+frames per originator per channel and `candidate_for` returns the max. No wire change.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
