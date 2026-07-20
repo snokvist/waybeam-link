@@ -533,16 +533,22 @@ class DiscoveryCatalog {
 class ScoutEngine {
   public:
     struct Hooks {
-        std::function<bool(uint16_t chan_mhz, uint8_t bw)> retune;
+        std::function<bool(uint16_t chan_mhz, uint8_t bw)> retune;  // scout adapter
+        std::function<void(uint16_t chan_mhz, uint8_t bw)> retune_all;  // all ears
         std::function<void(std::optional<uint8_t> net_id)> set_filter;
         std::function<bool(uint16_t originator)> psk_known;
     };
     ScoutEngine(Hooks h, uint8_t bw, uint16_t rest_chan,
-                std::optional<uint8_t> rest_filter)
+                std::optional<uint8_t> rest_filter, size_t scout_adapter)
         : h_(std::move(h)),
           bw_(bw),
           rest_chan_(rest_chan),
-          rest_filter_(rest_filter) {}
+          rest_filter_(rest_filter),
+          scout_adapter_(scout_adapter) {}
+
+    // §15.5a (Pass 65): update the channel a sweep returns all ears to — the
+    // ground's current operating channel (config default, or a committed target).
+    void set_rest_chan(uint16_t chan) { rest_chan_ = chan; }
 
     bool scanning() const { return phase_ == Phase::kScanning; }
 
@@ -570,7 +576,13 @@ class ScoutEngine {
     // Feed one decoded RX frame (raw wire bytes d/n for length + originator).
     void on_frame(const AirRxMeta& meta, const Decoded& dec, const uint8_t* d,
                   size_t n) {
-        if (phase_ != Phase::kScanning || n < kHeartbeatSize) return;
+        // §15.5a (Pass 65): survey only the scout adapter's frames — a diversity
+        // ear parked on the resting channel would otherwise smear the craft across
+        // every swept channel and inflate occupancy.
+        if (phase_ != Phase::kScanning || meta.adapter_id != scout_adapter_ ||
+            n < kHeartbeatSize) {
+            return;
+        }
         const uint16_t originator = be16_read(d + 3);  // §3.1 prefix offset
         ++accum_.frames;
         // §15.5a wifi_util: decodable-frame airtime estimate. Conservative MCS0
@@ -752,14 +764,16 @@ class ScoutEngine {
     }
     void rest() {
         phase_ = Phase::kIdle;
-        h_.set_filter(rest_filter_);  // restore the narrow net_id filter
-        h_.retune(rest_chan_, bw_);   // return to the resting channel
+        h_.set_filter(rest_filter_);     // restore the narrow net_id filter
+        h_.retune_all(rest_chan_, bw_);  // §15.5a (Pass 65): return ALL ears to
+                                         // rest — heals any prior claim split.
     }
 
     Hooks h_;
     uint8_t bw_;
     uint16_t rest_chan_;
     std::optional<uint8_t> rest_filter_;
+    size_t scout_adapter_;
     Phase phase_ = Phase::kIdle;
     std::vector<uint16_t> channels_;
     uint32_t dwell_ms_ = 300;
@@ -3138,6 +3152,10 @@ int run_rx(const Loaded& l) {
     const uint16_t op_chan =
         l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
     const uint8_t op_bw = l.cfg.adapters.empty() ? 20 : l.cfg.adapters[0].bw;
+    // §15.5a (Pass 65): the ground's current operating channel — the config
+    // default until a claim commits, then the committed target. The scout returns
+    // all ears here, and a failed claim rolls back here.
+    uint16_t operating_chan = op_chan;
     // §15.5a scout (Pass 64). Roams the uplink (role:"tx") adapter only — the
     // diversity RX adapters hold the resting channel — and widens the net_id
     // filter during a sweep; psk_known reports a usable CSA key (configured
@@ -3148,6 +3166,9 @@ int run_rx(const Loaded& l) {
             [&, scout_idx](uint16_t ch, uint8_t bw) {
                 return air.value->retune_one(scout_idx, ch, bw, false);
             },
+            [&](uint16_t ch, uint8_t bw) {
+                air.value->retune_all(ch, bw, false);
+            },
             [&](std::optional<uint8_t> nid) {
                 air.value->set_filter_net_id(nid);
             },
@@ -3156,7 +3177,7 @@ int run_rx(const Loaded& l) {
                        discovery.token_for(orig).has_value();
             },
         },
-        op_bw, op_chan, l.cfg.node.net_id);
+        op_bw, op_chan, l.cfg.node.net_id, scout_idx);
     // §15.5 REST control plane. RX/ground node owns the CSA trigger (replaces
     // the removed stdin trigger); profile/fec are TX-only knobs → null → 409.
     StatsSnapshot last_snap;
@@ -3239,6 +3260,7 @@ int run_rx(const Loaded& l) {
             std::vector<uint16_t> ch = chans;
             if (ch.empty()) ch = l.cfg.scout.channels;
             if (ch.empty()) ch = l.cfg.policy.csa.channel_allowlist;
+            scout.set_rest_chan(operating_chan);  // §15.5a (Pass 65): return here
             return scout.start(ch, dwell ? dwell : l.cfg.scout.dwell_ms,
                                now_ms());
         };
@@ -3481,16 +3503,30 @@ int run_rx(const Loaded& l) {
                 break;
             }
             case CsaIssuer::IssuerAction::Kind::kCommit:
-            case CsaIssuer::IssuerAction::Kind::kRevert:
                 air.value->retune_all(ia.chan_mhz, ia.bw, ia.fast);
-                std::fprintf(stderr, "csa: %s -> %u MHz\n",
-                             ia.kind == CsaIssuer::IssuerAction::Kind::kCommit
-                                 ? "commit"
-                                 : "revert",
-                             ia.chan_mhz);
+                operating_chan = ia.chan_mhz;  // §15.5a: ground now operates here;
+                                               // keep the claim's net_id bound.
+                std::fprintf(stderr, "csa: commit -> %u MHz\n", ia.chan_mhz);
+                break;
+            case CsaIssuer::IssuerAction::Kind::kRevert:
+                // §11.6 post-commit backout: detach from the craft — return the
+                // net_id stamp/filter to the resting value (§15.5a Pass 65).
+                air.value->retune_all(ia.chan_mhz, ia.bw, ia.fast);
+                operating_chan = ia.chan_mhz;
+                air.value->set_stamp_net_id(l.cfg.node.net_id.value_or(0));
+                air.value->set_filter_net_id(l.cfg.node.net_id);
+                std::fprintf(stderr, "csa: revert -> %u MHz\n", ia.chan_mhz);
                 break;
             case CsaIssuer::IssuerAction::Kind::kAbort:
-                std::fprintf(stderr, "csa: aborted (no CSA_ARMED)\n");
+                // §15.5a (Pass 65): a failed claim (no CSA_ARMED) rolls every ear
+                // and the net_id stamp/filter back to the resting state, so it's a
+                // clean no-op rather than stranding a diversity ear on the craft.
+                air.value->retune_all(operating_chan, op_bw, false);
+                air.value->set_stamp_net_id(l.cfg.node.net_id.value_or(0));
+                air.value->set_filter_net_id(l.cfg.node.net_id);
+                std::fprintf(stderr,
+                             "csa: aborted (no CSA_ARMED) -> resting %u MHz\n",
+                             operating_chan);
                 break;
             case CsaIssuer::IssuerAction::Kind::kNone:
                 break;
