@@ -2024,8 +2024,11 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 - `scout` (ground/rx node, §15.5) configures the channel searcher: `dwell_ms`
   (per-channel listen, **300 ms** — a video-active craft is seen off DATA within
   a few hundred ms) and `channels` (`null` = sweep `csa.channel_allowlist`). A
-  single-adapter ground scouts by retuning its one tx adapter (mode-exclusive
-  with an active link); a two-adapter ground dedicates a scout adapter.
+  the **`role:"tx"` uplink adapter is the scout** (resolved as the backend's tx
+  adapter, not assumed to be config index 0): a sweep roams the uplink while the
+  diversity RX adapters hold the resting channel. A single-adapter ground has no
+  spare ear, so its sweep is mode-exclusive with an active link; a two-adapter
+  ground keeps hearing the resting channel on its diversity ear while it scouts.
 - A **`frame-shm` stream** carries its own per-stream `fec` block (§14.1):
   ```json
   { "stream_id": 0, "stream_type": "RTP", "dir": "in",
@@ -2417,14 +2420,15 @@ optionally, CSA-claim one (§11) — the inverse of the §11.5 follower. One swe
 engine backs two entry points; single- and dual-adapter grounds are both
 supported (§15.2 `scout`).
 
-- **Sweep + discovery.** `scout/start` retunes the scout adapter across
-  `channels` (or `csa.channel_allowlist`), dwelling `dwell_ms` per channel and
-  aggregating the §15.5 passive-discovery view. For claim, the first heard
+- **Sweep + discovery.** `scout/start` retunes the **uplink (`role:"tx"`) adapter**
+  across `channels` (or `csa.channel_allowlist`), dwelling `dwell_ms` per channel
+  and aggregating the §15.5 passive-discovery view. For claim, the first heard
   candidate suffices — the §2 admission count (`N_admit`/`T_admit`) is the
   anti-flood gate for the *latch picker*, not a barrier to a deliberate operator
   claim. During a sweep the scout adapter ignores its `net_id` filter (hears all
-  net_ids); a single-adapter ground therefore drops any active link while
-  scouting.
+  net_ids). On a two-adapter ground the diversity RX adapters stay on the resting
+  channel, so an active link there survives the sweep; a single-adapter ground has
+  no spare ear and drops any active link while scouting.
 - **Candidate** = `{originator, net_id, session, claimed, claimed_by, chan,
   psk_known}`. `psk_known` is a bool reporting whether the ground holds a usable
   CSA key for the craft: the **cached announced token** (the ground caches the
@@ -2449,11 +2453,15 @@ supported (§15.2 `scout`).
 
   The candidate craft's own traffic is excluded from its channel's counts.
 - **Quick-connect / claim.** `scout/quickconnect` (or `mode:"quickconnect"` with a
-  `target`) claims a craft: set `stamp`+`filter` net_id to the craft's, ensure the
-  tx adapter is on the craft's current channel, `POST`-equivalent a §11 CSA to the
-  chosen `target_chan` (or the emptiest allowlisted channel) keyed with the
+  `target`) claims a craft: set `stamp`+`filter` net_id to the craft's, retune
+  **all** link adapters onto the craft's current channel (not just the uplink — so
+  every diversity ear hears the campaign, and the §11.6 intra-process commit that
+  already moves all adapters lands them together), `POST`-equivalent a §11 CSA to
+  the chosen `target_chan` (or the emptiest allowlisted channel) keyed with the
   craft's `psk` (announced §11.4a, or configured secret), and confirm the §11.6
-  `CSA_ARMED` ACK. Post-claim the ground holds the channel and does **not**
+  `CSA_ARMED` ACK. An aborted or reverted campaign leaves every adapter together on
+  the craft's channel — positioned for an explicit retry, not split across
+  channels. Post-claim the ground holds the target channel and does **not**
   auto-rescout on link loss (matching §11.5 hold-until-reboot); re-scout is an
   explicit action.
 

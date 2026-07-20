@@ -1600,6 +1600,32 @@ libnl-3, so `iw dev … set freq` is the portable path), lifting the code-commen
 **Amended:** §3.12 (redaction bullet), §15.5 (`/discovery` token note), §15.5a
 (candidate `psk_known`/token-cache wording). No wire change.
 
+## Pass 64 — Multi-adapter ground scout: the uplink roams, a claim moves every ear (2026-07-20)
+
+Bringing up a two-adapter ground (one uplink + one diversity RX) exposed that the
+scout/claim path was single-adapter only: the sweep and the claim's get-onto-the-
+craft pre-step both retuned adapter index 0, and the §15.2 wording ("a two-adapter
+ground dedicates a scout adapter") never said *which* adapter. Two operator rulings
+(2026-07-20):
+
+- **The uplink (`role:"tx"`) adapter is the scout.** A sweep roams the tx adapter
+  only; the diversity RX adapters hold the resting channel, so a multi-adapter
+  ground keeps hearing an active link on that channel while it scouts (a
+  single-adapter ground has no spare ear and still drops the link for the sweep,
+  unchanged). "The tx adapter" is resolved from the backend (`tx_index()`), not
+  assumed to be config index 0 — the sample config lists it first, but the code no
+  longer depends on that.
+- **A claim retunes every link adapter, not just the uplink.** The quickconnect
+  pre-step now moves all adapters onto the craft's current channel (so every
+  diversity ear hears the campaign and the §11.6 commit), matching the existing
+  intra-process commit/revert which already retunes all adapters (§11.6). An
+  aborted or reverted campaign therefore leaves every adapter together on the
+  craft's channel — positioned for an explicit retry, not split across channels.
+
+Implementation-only for the code side (backend `tx_index()` accessor; scout sweep
+and claim pre-step rewired); the wording rulings amend §15.2 (scout adapter is the
+uplink) and §15.5a (sweep-roams-uplink, claim-retunes-all). No wire change.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
