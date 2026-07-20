@@ -1435,23 +1435,47 @@ applied** — there is no unauthenticated-CSA mode for craft/ground.
 ### 11.5 State machine (follower)
 ```
 IDLE ──valid+MAC'd CSA──▶ ARMED ──T_switch──▶ retune + ReApplyTxPower ──▶ VERIFY
-        (adaptive freeze on,                                               │
-         watchdog paused)                          valid traffic ≤150 ms──┤
-        │                                                                 ▼
-        │  stale / bad-MAC / replay → drop, stay IDLE            COMMITTED (freeze
-        │                                                        lifts after csa_settle_s)
-        ▼                                                                 │ no valid
-  (never saw CSA)                                                         ▼ traffic
-        └────────────────── link lost > rendezvous_timeout ──▶ REVERT → prev_chan
-                            (5 s)                              (ReApplyTxPower)
-                                    │                                     │
-                                    ▼ prev_chan also dead                 │
-                            retune HOME_CHAN (config), passive listen ◀───┘
+ (on home_chan or       (adaptive freeze on,                               │
+  persisted chan;        watchdog paused)          valid traffic ≤150 ms───┤
+  power-on default)                                                        ▼
+        ▲  stale / bad-MAC / replay → drop, stay IDLE            COMMITTED ─── HOLD
+        │                                                        (bound §11.5a;   until
+        │  no valid traffic ≤verify_timeout_ms (JUMP FAILED)     freeze lifts     reboot
+        └────────────── REVERT → prev_chan, back to IDLE ◀──┐    after csa_settle_s)
+                        (jump-failed backout ONLY)          └──────── (never mid-flight)
 ```
-- **Short auto-revert:** switched but no valid traffic within `verify_timeout_ms`
-  (**150 ms**, bench median 85 ms + margin) → revert to `prev_chan`.
-- **Long rendezvous:** never saw the CSA, or lost link `rendezvous_timeout` (5 s)
-  after revert → retune to config `home_chan` and listen.
+- **Jump-failed backout (kept):** in VERIFY, no valid traffic within
+  `verify_timeout_ms` (**150 ms**, bench median 85 ms + margin) → revert to
+  `prev_chan` and return to IDLE. This is the **only** automatic revert; it
+  protects a switch that landed on a dead channel.
+- **COMMITTED holds until reboot (Pass 59).** Once committed the craft keeps the
+  channel through arbitrarily long command-source outages — a ground commonly
+  runs a weaker TX than the craft and may be unheard for >60 s. The former
+  mid-flight `rendezvous_timeout → home` revert is **removed**. The §9.8 adaptive
+  fail-safe still applies but changes only bitrate, never channel.
+- **`home_chan` is a power-on default only**, no longer a mid-flight rendezvous:
+  a craft holding any channel stays findable via the §15.5 scout sweep. With
+  `persist_channel` (§15.2) the craft instead boots onto its last-committed
+  channel; claim/bind state (§11.5a) always resets on boot regardless.
+
+### 11.5a Command-source binding lifecycle (claim / hold / release)
+An accepted CSA (§11.4) both switches the channel and **binds** its issuer as the
+craft's command source — the §11.4 "currently-latched command source." This
+binding *is* the claim, and it governs who may switch the craft next:
+- **Sticky through link loss.** While bound, a CSA from any *other* issuer is
+  rejected regardless of key knowledge (this, not token confidentiality, is what
+  resists casual mid-flight takeover, §11.4a). The binding is NOT dropped on
+  telemetry loss.
+- **Release after `bind_release_s` (90 s) of command-source silence.** If the
+  bound issuer sends nothing the craft accepts (CSA or accepted return traffic)
+  for `bind_release_s`, the binding releases: the craft re-opens for claim and
+  continues ANNOUNCE with its `psk`. **Release changes no channel** — the craft
+  stays put; only claim eligibility re-opens. This lets a rebooted or returned
+  ground re-claim the craft *in place* (the orphan case: ground reboots while the
+  craft holds its channel).
+- **Reboot resets claim/bind state**; the craft returns to `home_chan` (or the
+  persisted channel) and announces unclaimed.
+- ANNOUNCE `claimed`/`claimed_by` (§3.12) reflect this state (advisory only).
 
 ### 11.6 Ground-commits-after-craft-ACK (strand-proof, exploits ground-leads)
 Ground leading + the craft→ground downlink being the **strong, diversity-received
@@ -1942,11 +1966,11 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     "fec":    { "scheme": "none", "overhead_frac": 0.0 },
     "return": { "guard_us": 300, "return_window_us": 2000,
                 "unicast": false },
-    "csa":    { "psk": "<operator-provisioned; craft+ground only>",
+    "csa":    { "psk": "<optional; auto-generated + announced when absent, §11.4a>",
                 "settle_s": 3.0, "verify_timeout_ms": 150,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
-                "rendezvous_timeout_s": 5, "home_chan": 5745,
-                "channel_allowlist": [5745, 5805, 5825] }
+                "bind_release_s": 90, "persist_channel": false,
+                "home_chan": 5805, "channel_allowlist": [5745, 5805, 5825] }
   },
   "air":   { "kind": "radio", "ack_responder": false,
              "wedge_window_ms": 1000, "wedge_min_submits": 8 },
@@ -1975,6 +1999,10 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   (§13). `stamp` and `filter` net_id may diverge at runtime — a ground filters
   wide while scouting and narrows to a claimed craft's `net_id`, stamping that
   same value on its uplink so a strictly-filtering craft hears it (§15.5 scout).
+- `csa.bind_release_s` (**90 s**) is the command-source binding release timeout
+  (§11.5a); `csa.persist_channel` (default `false`) boots the craft onto its
+  last-committed channel instead of `home_chan`. The former `rendezvous_timeout_s`
+  is **removed** — COMMITTED now holds until reboot (§11.5, Pass 59).
 - A **`frame-shm` stream** carries its own per-stream `fec` block (§14.1):
   ```json
   { "stream_id": 0, "stream_type": "RTP", "dir": "in",

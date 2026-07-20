@@ -1474,6 +1474,35 @@ so an accepted CSA can never leave the craft's allowlist. The token inherits the
 (forged-ANNOUNCE row), §15.2 (`node.net_id` auto, `node.psk_announce`, optional
 `csa.psk`).
 
+## Pass 59 — CSA follower holds until reboot; command-source binding lifecycle (2026-07-20)
+
+Field asymmetry drove this: a ground commonly runs a weaker TX than the craft,
+so the craft can lose accepted ground telemetry for long stretches (>60 s). The
+prior §11.5 `rendezvous_timeout` (5 s) would revert a healthy, committed link to
+`home_chan` mid-flight — exactly the spurious channel-hop we must not do.
+(Operator-ruled 2026-07-20; see `docs/scout-design.md`.)
+
+COMMITTED is now **terminal until reboot**: the mid-flight `rendezvous_timeout →
+home` revert is removed. The `verify_timeout_ms` (150 ms) revert is **kept** but
+scoped to its real job — a *jump that landed on a dead channel* backs out to
+`prev_chan`; it is not a mid-flight watchdog. `home_chan` is demoted to a
+power-on default (the §15.5 scout sweeps all channels, so a craft holding any
+channel stays findable), with an optional `persist_channel` to boot onto the
+last-committed channel instead.
+
+New §11.5a **command-source binding lifecycle**: an accepted CSA binds its issuer
+as the craft's command source (this *is* the claim). The binding is sticky
+through link loss and resists other issuers regardless of key knowledge — this,
+not token confidentiality (§11.4a), is the takeover defence. It releases only
+after `bind_release_s` (**90 s**) of command-source silence, and **release changes
+no channel** — the craft stays put and merely re-opens for claim (continues
+ANNOUNCE), so a rebooted/returned ground re-claims in place (the orphan case).
+Reboot always resets claim/bind state.
+
+**Amended:** §11.5 (state machine, hold-until-reboot), §11.5a (new), §15.2
+(`csa.bind_release_s`, `csa.persist_channel`; `rendezvous_timeout_s` removed;
+example `home_chan` 5805).
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
