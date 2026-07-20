@@ -1214,6 +1214,14 @@ struct AirBackend {
     void set_stamp_net_id(uint8_t net_id) {
         if (mon) mon->set_stamp_net_id(net_id);
     }
+    // §15.5a scout (Pass 64): index of the uplink adapter the sweep roams. Only
+    // the kernel-monitor backend has a resolvable tx adapter here; the radio/udp
+    // dev backends scout index 0 (their tx is conventionally first, and udp is a
+    // logged-intent no-op anyway).
+    size_t tx_index() const {
+        if (mon) return mon->tx_index();
+        return 0;
+    }
     bool retune_one(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
         if (mon) return mon->retune(adapter, chan_mhz, bw, fast);
 #if WBLINK_RADIO
@@ -3130,13 +3138,15 @@ int run_rx(const Loaded& l) {
     const uint16_t op_chan =
         l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
     const uint8_t op_bw = l.cfg.adapters.empty() ? 20 : l.cfg.adapters[0].bw;
-    // §15.5a scout. Retunes adapter 0 (the scout adapter on a single-adapter
-    // ground) and widens the net_id filter during a sweep; psk_known reports a
-    // usable CSA key (configured secret, or a cached announced token, Pass 63).
+    // §15.5a scout (Pass 64). Roams the uplink (role:"tx") adapter only — the
+    // diversity RX adapters hold the resting channel — and widens the net_id
+    // filter during a sweep; psk_known reports a usable CSA key (configured
+    // secret, or a cached announced token, Pass 63).
+    const size_t scout_idx = air.value->tx_index();
     ScoutEngine scout(
         ScoutEngine::Hooks{
-            [&](uint16_t ch, uint8_t bw) {
-                return air.value->retune_one(0, ch, bw, false);
+            [&, scout_idx](uint16_t ch, uint8_t bw) {
+                return air.value->retune_one(scout_idx, ch, bw, false);
             },
             [&](std::optional<uint8_t> nid) {
                 air.value->set_filter_net_id(nid);
@@ -3198,8 +3208,11 @@ int run_rx(const Loaded& l) {
             // the craft accepts it, narrow our filter to hear only that craft.
             air.value->set_stamp_net_id(cand->net_id);
             air.value->set_filter_net_id(cand->net_id);
-            // Be on the craft's current channel so it hears the CSA copies.
-            air.value->retune_one(0, cand->chan, op_bw, false);
+            // §15.5a (Pass 64): move ALL link adapters onto the craft's current
+            // channel — not just the uplink — so every diversity ear hears the
+            // copies and the §11.6 commit lands them together. An aborted campaign
+            // leaves them here, co-channel with the craft, positioned for retry.
+            air.value->retune_all(cand->chan, op_bw, false);
             uint16_t target = static_cast<uint16_t>(target_chan_i);
             if (target == 0) {
                 target =
