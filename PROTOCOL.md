@@ -1976,6 +1976,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
              "wedge_window_ms": 1000, "wedge_min_submits": 8 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
   "control": { "bind": "0.0.0.0:8091" },
+  "scout": { "dwell_ms": 300, "channels": null },
   "venc": { "host": "127.0.0.1:80", "enabled": false,
             "recovery_enabled": true,
             "frame_caps": true, "fps_hint": 100,
@@ -2003,6 +2004,11 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   (§11.5a); `csa.persist_channel` (default `false`) boots the craft onto its
   last-committed channel instead of `home_chan`. The former `rendezvous_timeout_s`
   is **removed** — COMMITTED now holds until reboot (§11.5, Pass 59).
+- `scout` (ground/rx node, §15.5) configures the channel searcher: `dwell_ms`
+  (per-channel listen, **300 ms** — a video-active craft is seen off DATA within
+  a few hundred ms) and `channels` (`null` = sweep `csa.channel_allowlist`). A
+  single-adapter ground scouts by retuning its one tx adapter (mode-exclusive
+  with an active link); a two-adapter ground dedicates a scout adapter.
 - A **`frame-shm` stream** carries its own per-stream `fec` block (§14.1):
   ```json
   { "stream_id": 0, "stream_type": "RTP", "dir": "in",
@@ -2350,6 +2356,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]`, `build` |
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
 | `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/DATA observations |
+| `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[]}` (§15.5a; ground/rx node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT or DATA senders. `streams[]`
@@ -2372,13 +2379,60 @@ otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
 | `POST /api/v1/bench/rx-drop` | `{ "permille": 0 }` | UDP-air bench RX only: retune independent synthetic loss per listener (0–1000); 409 on RF backends |
+| `POST /api/v1/scout/start` | `{ "channels":[…]?, "dwell_ms":??, "mode":"list"\|"quickconnect", "target":{"originator":N}? }` | begin a channel sweep (§15.5a; ground/rx node) |
+| `POST /api/v1/scout/stop` | `{}` | end the sweep and hold the current channel |
+| `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto `target_chan` (or the emptiest allowlisted channel) |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and
 `fec` on the TX, and `bench/rx-drop` only on UDP-air RX. An endpoint invoked in a mode where it does not apply returns
 **409**; an unknown path **404**; a malformed or oversize body **400**. The
 write knobs are exactly the §9/§11/§14 levers that were previously boot-time
 JSON only; the profile pin is the operating-point (MCS + bitrate) lever, since
-a profile bundles rate/power/MTU per §9.3.
+a profile bundles rate/power/MTU per §9.3. The `scout/*` endpoints (§15.5a) act
+only on a ground/rx node and **409** elsewhere.
+
+### 15.5a Ground scout (channel searcher)
+A ground-side finder that sweeps channels to discover parked/flying craft and,
+optionally, CSA-claim one (§11) — the inverse of the §11.5 follower. One sweep
+engine backs two entry points; single- and dual-adapter grounds are both
+supported (§15.2 `scout`).
+
+- **Sweep + discovery.** `scout/start` retunes the scout adapter across
+  `channels` (or `csa.channel_allowlist`), dwelling `dwell_ms` per channel and
+  aggregating the §15.5 passive-discovery view. For claim, the first heard
+  candidate suffices — the §2 admission count (`N_admit`/`T_admit`) is the
+  anti-flood gate for the *latch picker*, not a barrier to a deliberate operator
+  claim. During a sweep the scout adapter ignores its `net_id` filter (hears all
+  net_ids); a single-adapter ground therefore drops any active link while
+  scouting.
+- **Candidate** = `{originator, net_id, session, claimed, claimed_by, chan,
+  psk_known}`. `psk_known` is a bool — the ANNOUNCE `psk` (§3.12) is never echoed
+  (the §15 redaction invariant). Ownership is *proven by connecting*, not read
+  from the beacon: a MAC-valid CSA the craft follows is the proof.
+- **Per-channel occupancy** is reported as a record whose field set is a superset
+  aligned with the Realtek "Advanced Channel Scanning" survey so a future
+  hardware backend is a field-fill, not a reshape. v1 fills only the
+  packet-derivable fields from monitor RX over the dwell; units are **per-mille**
+  and **dBm**:
+
+  | field | v1 source | later (hardware ACS) |
+  |---|---|---|
+  | `wifi_util_permille` | decodable-frame airtime estimate | CLM Wi-Fi portion |
+  | `util_permille` | = `wifi_util` (Wi-Fi only in v1) | total incl. non-Wi-Fi |
+  | `interference_util_permille` | `null` (unmeasurable from packets) | CLM−Wi-Fi |
+  | `noise_dbm` | RSSI-floor proxy (idle/min `DBM_ANTSIGNAL`) | NHM true noise floor |
+  | `bss_count` | distinct BSSID/SA transmitters heard | ACS BSS count |
+  | `quality_permille` / `availability_permille` | derived from the above | ACS direct |
+
+  The candidate craft's own traffic is excluded from its channel's counts.
+- **Quick-connect / claim.** `scout/quickconnect` (or `mode:"quickconnect"` with a
+  `target`) claims a craft: set `stamp`+`filter` net_id to the craft's, ensure the
+  tx adapter is on the craft's current channel, `POST`-equivalent a §11 CSA to the
+  chosen `target_chan` (or the emptiest allowlisted channel) keyed with the
+  craft's `psk` (announced §11.4a, or configured secret), and confirm the §11.6
+  `CSA_ARMED` ACK. Post-claim the ground holds the channel and does **not**
+  auto-rescout on link loss (matching §11.5 hold-until-reboot); re-scout is an
+  explicit action.
 
 ---
 

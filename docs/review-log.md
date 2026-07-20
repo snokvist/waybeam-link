@@ -1503,6 +1503,34 @@ Reboot always resets claim/bind state.
 (`csa.bind_release_s`, `csa.persist_channel`; `rendezvous_timeout_s` removed;
 example `home_chan` 5805).
 
+## Pass 60 — Ground scout, channel occupancy, and channel persistence (2026-07-20)
+
+The claim/hold model (Passes 58–59) needs a finder on the other end: a ground
+that sweeps channels, lists discovered craft with per-channel occupancy, and can
+CSA-claim one — the inverse of the §11.5 follower. This is an io/app feature over
+the existing §15.5 passive discovery and §11 CSA primitives; **no additional wire
+change**. (Operator-ruled 2026-07-20; see `docs/scout-design.md`.)
+
+New §15.5a defines one sweep engine with two entry points (list / quickconnect),
+control-plane endpoints `scout/{start,stop,results,quickconnect}` (ground/rx
+only, 409 elsewhere), and the §15.2 `scout` config (`dwell_ms` 300, `channels`
+null = allowlist). A claim needs only the first heard candidate — the §2
+admission count is anti-flood for the latch picker, not a barrier to a deliberate
+operator claim. During a sweep the scout adapter ignores its `net_id` filter; a
+single-adapter ground drops any active link while scouting.
+
+Ownership is **proven by connecting**, not read from the beacon: `psk_known` is a
+bool and the ANNOUNCE token is never echoed (§15 redaction). Per-channel
+occupancy is reported as a superset **aligned with the Realtek "Advanced Channel
+Scanning" survey** (`libc0607/rtl88x2eu-20230815`: quality/availability/
+utilization/Wi-Fi-util/interference-util/noise dBm/BSS count); v1 fills only the
+packet-derivable fields (Wi-Fi utilization, RSSI-floor noise proxy, transmitter
+count) so a later hardware-ACS backend is a field-fill, not a reshape. Persistence
+(`csa.persist_channel`, Pass 59) is surfaced here as the boot-channel choice.
+
+**Amended:** §15.2 (`scout` block), §15.5 (Read/Write endpoint rows), §15.5a
+(new).
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
