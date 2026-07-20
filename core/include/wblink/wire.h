@@ -162,6 +162,17 @@ struct CacheReplyView {
     uint16_t wrapped_len = 0;
 };
 
+// §3.12 ANNOUNCE (type 0xB, fixed 30 bytes) — a craft's pairing beacon.
+// Unauthenticated advertisement (no MAC); the psk is a rendezvous token, not a
+// secret (§11.4a). Node-scoped like HEARTBEAT: never creates per-stream state.
+struct Announce {
+    CommonPrefix prefix;
+    uint8_t flags = 0;         // §3.12: kClaimed, kPskPresent
+    uint16_t claimed_by = 0;   // originator of the binding ground, else 0 (advisory)
+    uint8_t psk[kAnnouncePskSize] = {};  // token when kPskPresent, else all-zero
+    friend bool operator==(const Announce&, const Announce&) = default;
+};
+
 // §11.1 CSA (fixed 32 bytes). csa_mac is carried opaque here; HMAC
 // computation/verification is the CSA engine's job (§11.4, build step 10).
 struct CsaPacket {
@@ -194,7 +205,7 @@ enum class DecodeError : uint8_t {
 using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
                              Heartbeat, CsaPacket, RecoveryRequest,
                              JsccFeedback, CacheStatus, CacheRequestView,
-                             CacheReplyView>;
+                             CacheReplyView, Announce>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -209,6 +220,7 @@ size_t encode_nack(const NackHeader& hdr, const uint8_t* bitmap,
 size_t encode_link_report(const LinkReport& pkt, uint8_t* out, size_t cap);
 size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap);
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap);
+size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap);
 size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,
                                size_t cap);
 size_t encode_jscc_feedback(const JsccFeedback& pkt, uint8_t* out, size_t cap);

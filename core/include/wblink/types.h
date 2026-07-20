@@ -24,6 +24,7 @@ enum class PacketType : uint8_t {
     kCacheStatus = 0x8,
     kCacheRequest = 0x9,
     kCacheReply = 0xA,
+    kAnnounce = 0xB,  // §3.12 craft pairing beacon
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -45,6 +46,16 @@ inline constexpr uint8_t kCsaArmed = 0x10;
 inline constexpr uint8_t kPframeArq = 0x20;
 }  // namespace data_flags
 
+// §3.12 ANNOUNCE flags. Unknown bits are a decode error (like cache flags).
+namespace announce_flags {
+inline constexpr uint8_t kClaimed = 0x01;      // craft is bound to a command source
+inline constexpr uint8_t kPskPresent = 0x02;   // the 16-byte token is populated
+inline constexpr uint8_t kKnownMask = kClaimed | kPskPresent;
+}  // namespace announce_flags
+
+// §3.12/§11.4a — session pairing token width (also the CSA HMAC key when auto).
+inline constexpr size_t kAnnouncePskSize = 16;
+
 enum class FrameArqMode : uint8_t { kIdrOnly, kAllFrames };
 
 // Exact wire sizes (§3.1–3.8, §11.1).
@@ -59,6 +70,7 @@ inline constexpr size_t kJsccFeedbackSize = 37;
 inline constexpr size_t kCacheStatusSize = 29;
 inline constexpr size_t kCacheRequestFixedSize = 32;
 inline constexpr size_t kCacheReplyFixedSize = 17;
+inline constexpr size_t kAnnounceSize = 30;  // §3.12: 11 prefix + 1 + 2 + 16
 
 // §3.11 CACHE_STATUS capability_flags bits.
 namespace cache_capability {

@@ -209,5 +209,39 @@ int main() {
         }
     }
 
+    // §3.12 ANNOUNCE round-trip (30 bytes; flags limited to known bits).
+    for (int i = 0; i < kIters; ++i) {
+        Announce a;
+        a.prefix = random_prefix(rng);
+        a.flags = static_cast<uint8_t>(rng.u8() & announce_flags::kKnownMask);
+        a.claimed_by = rng.u16();
+        for (uint8_t& b : a.psk) {
+            b = rng.u8();
+        }
+        const size_t n = encode_announce(a, buf, sizeof(buf));
+        CHECK_EQ_U(n, kAnnounceSize);
+        const Decoded d = decode(buf, n);
+        const Announce* v = std::get_if<Announce>(&d);
+        CHECK(v != nullptr);
+        if (v != nullptr) {
+            CHECK(*v == a);
+        }
+    }
+
+    // §3.12: reserved flag bits and wrong length are decode errors.
+    {
+        Announce a;
+        a.prefix = random_prefix(rng);
+        a.flags = 0x04;  // reserved bit set
+        const size_t n = encode_announce(a, buf, sizeof(buf));
+        CHECK_EQ_U(n, kAnnounceSize);
+        const Decoded bad_flags = decode(buf, n);
+        const Decoded short_len = decode(buf, kAnnounceSize - 1);
+        const Decoded long_len = decode(buf, kAnnounceSize + 1);
+        CHECK(std::get_if<DecodeError>(&bad_flags) != nullptr);
+        CHECK(std::get_if<DecodeError>(&short_len) != nullptr);
+        CHECK(std::get_if<DecodeError>(&long_len) != nullptr);
+    }
+
     return wbtest_finish("wire_roundtrip_test");
 }
