@@ -228,6 +228,7 @@ struct MonAir::Impl {
         uint8_t adapter = 0;
         int8_t rssi = -128;
         uint32_t tsfl = 0;
+        uint8_t net_id = 0;  // §15.5a candidate/occupancy attribution
         std::vector<uint8_t> data;
     };
     struct Adapter {
@@ -358,6 +359,7 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
         f.adapter = adapter_id;
         f.rssi = rssi;
         f.tsfl = rt->tsf_us ? static_cast<uint32_t>(*rt->tsf_us) : 0u;
+        f.net_id = d->net_id;
         f.data.assign(d->payload, d->payload + d->payload_len);
         a->rx_frames.fetch_add(1, std::memory_order_relaxed);
         {
@@ -568,6 +570,7 @@ int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
         meta.adapter_id = f.adapter;
         meta.rssi = f.rssi;
         meta.tsf_us = f.tsfl;
+        meta.net_id = f.net_id;
         cb(meta, f.data.data(), f.data.size());
         ++delivered;
     }

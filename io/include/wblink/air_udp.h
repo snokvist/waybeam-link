@@ -25,6 +25,7 @@ struct AirRxMeta {
     uint8_t adapter_id = 0;
     int8_t rssi = 0;      // synthetic on udp-air
     uint64_t tsf_us = 0;  // synthetic on udp-air (loopback has no TSF, §16)
+    uint8_t net_id = 0;   // §3.0 L2 tag from the frame SA (0 on udp/loopback)
 };
 
 class UdpAir {

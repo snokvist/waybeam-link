@@ -372,7 +372,7 @@ class PacketEventTrace {
 // Pass 17: bounded, observational catalog. It never feeds latch decisions.
 class DiscoveryCatalog {
   public:
-    void observe(const Decoded& dec, uint64_t now) {
+    void observe(const Decoded& dec, uint64_t now, uint8_t net_id = 0) {
         const CommonPrefix* p = nullptr;
         const DataView* data = std::get_if<DataView>(&dec);
         const Announce* an = nullptr;
@@ -390,13 +390,17 @@ class DiscoveryCatalog {
         Node& n = nodes_[nk];  // update-in-place keeps prior ANNOUNCE fields
         n.originator = p->originator;
         n.session = p->session_id;
+        n.net_id = net_id;
         n.last_seen_ms = now;
         if (an != nullptr) {
             n.announced = true;
             n.claimed = (an->flags & announce_flags::kClaimed) != 0;
             n.claimed_by = an->claimed_by;
             n.psk_present = (an->flags & announce_flags::kPskPresent) != 0;
-            // The 16-byte token is never recorded (§15 redaction).
+            if (n.psk_present) {  // Pass 63: announced token is public — cache it
+                std::memcpy(n.token.data(), an->psk, kAnnouncePskSize);
+                n.have_token = true;
+            }
         }
         if (data != nullptr) {
             const uint64_t sk = (nk << 8) | data->hdr.stream_id;
@@ -424,6 +428,7 @@ class DiscoveryCatalog {
             comma = true;
             out += "{\"originator\":" + std::to_string(n.originator) +
                    ",\"session\":" + std::to_string(n.session) +
+                   ",\"net_id\":" + std::to_string(n.net_id) +
                    ",\"last_seen_ms\":" + std::to_string(n.last_seen_ms);
             if (n.announced) {  // §15.5 ANNOUNCE claim view (Pass 62; no token)
                 out += ",\"claimed\":" + std::string(n.claimed ? "true" : "false") +
@@ -459,15 +464,35 @@ class DiscoveryCatalog {
         return out;
     }
 
+    // Pass 63: the announced token cached from a craft's ANNOUNCE, for keying a
+    // CSA claim (§15.5a). Returns the most-recently-seen token for `originator`.
+    std::optional<std::array<uint8_t, kAnnouncePskSize>> token_for(
+        uint16_t originator) const {
+        std::optional<std::array<uint8_t, kAnnouncePskSize>> best;
+        uint64_t best_seen = 0;
+        for (const auto& [key, n] : nodes_) {
+            (void)key;
+            if (n.originator == originator && n.have_token &&
+                n.last_seen_ms >= best_seen) {
+                best = n.token;
+                best_seen = n.last_seen_ms;
+            }
+        }
+        return best;
+    }
+
   private:
     struct Node {
         uint16_t originator = 0;
         uint32_t session = 0;
+        uint8_t net_id = 0;
         uint64_t last_seen_ms = 0;
         bool announced = false;  // §3.12 ANNOUNCE seen (Pass 62)
         bool claimed = false;
         uint16_t claimed_by = 0;
         bool psk_present = false;
+        bool have_token = false;  // Pass 63: cached announced token (public)
+        std::array<uint8_t, kAnnouncePskSize> token{};
     };
     struct Stream {
         uint16_t originator = 0;
@@ -2329,7 +2354,7 @@ int run_tx(const Loaded& l) {
         air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
                                     size_t n) {
             const Decoded dec = decode(d, n);
-            discovery.observe(dec, service_now);
+            discovery.observe(dec, service_now, meta.net_id);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
                 if (!air.value->supports_csa()) return;
                 if (csa.on_csa(*c, service_us,
@@ -2955,7 +2980,7 @@ int run_rx(const Loaded& l) {
                 meta.rssi != 0 ? meta.rssi : l.cfg.loopback.rssi_dbm;
             // §11 taps (cheap header decode; DATA still flows to the engine).
             const Decoded dec = decode(d, n);
-            discovery.observe(dec, now);
+            discovery.observe(dec, now, meta.net_id);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
                 if (!air.value->supports_csa()) {
                     return;
