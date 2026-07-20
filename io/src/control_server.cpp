@@ -374,6 +374,14 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         if (!h_.scout_stop) return na();
         return done(h_.scout_stop());
     }
+    if (path == "/api/v1/scout/quickconnect") {
+        if (!h_.scout_quickconnect) return na();
+        if (!j.contains("originator")) {
+            return reply(400, "Bad Request", json_err("originator required"));
+        }
+        return done(h_.scout_quickconnect(j.value("originator", -1),
+                                          j.value("target_chan", 0)));
+    }
     if (path == "/api/v1/link/profile") {
         if (!h_.profile) return na();
         if (!j.contains("min") || !j.contains("max")) {

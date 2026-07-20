@@ -110,6 +110,14 @@ class CsaIssuer {
   public:
     explicit CsaIssuer(const CsaParams& policy);
 
+    // §15.5a claim re-key: swap the CSA PSK (a cached announced token per §11.4a,
+    // or the configured secret) between campaigns. Rejected while a campaign is
+    // active so an in-flight campaign keeps a single key across its copies. The
+    // monotonic nonce carries across re-keys, so one long-lived issuer safely
+    // commands different crafts in turn (each craft anti-replays on the issuer's
+    // originator/session, §11.4). Returns false if a campaign is active.
+    bool set_psk(std::vector<uint8_t> psk);
+
     // Begin a campaign. prev_chan/prev_bw = the CURRENT operating channel
     // (the revert target); power_intent = the current §9 profile power level.
     // false = rejected (campaign active, no PSK, rate-limit, allowlist).

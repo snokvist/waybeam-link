@@ -47,6 +47,9 @@ struct ControlHandlers {
                               int target_originator)>
         scout_start;
     std::function<std::string()> scout_stop;
+    // §15.5a claim: quickconnect to a scouted craft by originator. target_chan 0
+    // → the engine picks the emptiest allowlisted channel. null hook → 409.
+    std::function<std::string(int originator, int target_chan)> scout_quickconnect;
     std::function<std::string(int stream_id)> video_recover;
     std::function<std::string(int permille)> bench_rx_drop;
 };

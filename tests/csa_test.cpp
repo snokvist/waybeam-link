@@ -264,6 +264,41 @@ int main() {
         const auto b = is.tick(10'000'000);
         CHECK_EQ_U(b.pkt.csa_nonce, 2);
     }
+    {
+        // §15.5a claim re-key: an announced-mode issuer (no configured secret)
+        // cannot issue until keyed with a craft's token; re-keying is idle-only
+        // and the monotonic nonce carries across keys so one issuer commands
+        // different crafts in turn, each copy MAC-valid under the current key.
+        CsaParams announced = pol;
+        announced.psk.clear();  // announced mode: no configured secret
+        CsaIssuer is(announced);
+        CHECK(!is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));  // no key
+        const std::vector<uint8_t> token_a = {'A', 'A', 'A', 'A'};
+        CHECK(is.set_psk(token_a));
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        CHECK(!is.set_psk({'Z'}));  // never swap the key mid-campaign
+        const auto a0 = is.tick(0);
+        CHECK_EQ_U(a0.pkt.csa_nonce, 1);
+        uint8_t buf_a[32];
+        CHECK_EQ_U(encode_csa(a0.pkt, buf_a, sizeof(buf_a)), 32);
+        CHECK_EQ_U(csa_mac(token_a.data(), token_a.size(), buf_a),
+                   a0.pkt.csa_mac);
+        // Drain the copies and abort (no CSA_ARMED) back to idle.
+        for (int i = 1; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        CHECK_EQ_U(is.tick(1'000'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kAbort));
+        // Re-key to a different craft's token, claim onto another channel: the
+        // nonce is strictly greater (2) and copies MAC under the new key.
+        const std::vector<uint8_t> token_b = {'B', 'B', 'B', 'B', 'B'};
+        CHECK(is.set_psk(token_b));
+        CHECK(is.start({9, 0, 1234}, 5825, 0, 0, 5745, 0, 4, 6'000'000));
+        const auto b0 = is.tick(6'000'000);
+        CHECK_EQ_U(b0.pkt.csa_nonce, 2);
+        uint8_t buf_b[32];
+        CHECK_EQ_U(encode_csa(b0.pkt, buf_b, sizeof(buf_b)), 32);
+        CHECK_EQ_U(csa_mac(token_b.data(), token_b.size(), buf_b),
+                   b0.pkt.csa_mac);
+    }
 
     return wbtest_finish("csa_test");
 }

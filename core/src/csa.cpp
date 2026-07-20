@@ -170,6 +170,14 @@ const char* CsaFollower::state_str() const {
 
 CsaIssuer::CsaIssuer(const CsaParams& policy) : policy_(policy) {}
 
+bool CsaIssuer::set_psk(std::vector<uint8_t> psk) {
+    if (state_ != State::kIdle) {
+        return false;  // never swap the key mid-campaign (§15.5a re-key)
+    }
+    policy_.psk = std::move(psk);
+    return true;
+}
+
 bool CsaIssuer::start(const CommonPrefix& prefix, uint16_t target_chan_mhz,
                       uint8_t target_bw, uint8_t retune_class,
                       uint16_t prev_chan_mhz, uint8_t prev_bw,

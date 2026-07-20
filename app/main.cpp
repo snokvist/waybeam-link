@@ -649,6 +649,46 @@ class ScoutEngine {
         return out;
     }
 
+    // §15.5a claim support: what a quickconnect needs about a scouted craft.
+    struct Claim {
+        uint16_t chan = 0;      // the channel it was last heard on
+        uint8_t net_id = 0;     // §3.0 L2 tag to stamp/filter after the claim
+        uint32_t session = 0;
+        bool psk_known = false; // a usable CSA key is held (token or secret)
+    };
+    // Most-recent candidate for `originator` across the last sweep, or nullopt if
+    // it was never scouted (a claim requires a prior scout to learn its channel).
+    std::optional<Claim> candidate_for(uint16_t originator) const {
+        std::optional<Claim> found;
+        for (const auto& r : results_) {
+            for (const auto& c : r.candidates) {
+                if (c.originator == originator) {
+                    found = Claim{c.chan, c.net_id, c.session, c.psk_known};
+                }
+            }
+        }
+        return found;
+    }
+    // Emptiest allowlisted channel by measured wifi_util (lowest wins), skipping
+    // `except` (the craft's current channel). 0 if no occupancy for any allowed
+    // channel (caller then falls back to an explicit target).
+    uint16_t emptiest(const std::vector<uint16_t>& allowlist,
+                      uint16_t except) const {
+        uint16_t best = 0;
+        uint32_t best_util = 1001;  // > any per-mille
+        for (const uint16_t ch : allowlist) {
+            if (ch == except) continue;
+            for (const auto& r : results_) {
+                if (r.chan != ch) continue;
+                if (r.occ.wifi_util_permille < best_util) {
+                    best_util = r.occ.wifi_util_permille;
+                    best = ch;
+                }
+            }
+        }
+        return best;
+    }
+
   private:
     enum class Phase { kIdle, kScanning };
     struct Occupancy {
@@ -3130,10 +3170,59 @@ int run_rx(const Loaded& l) {
             return discovery.json(now_ms(), rx.stream_keys());
         };
         h.scout_results = [&] { return scout.results_json(); };
+        // §15.5a claim: CSA-grab a scouted craft. Re-keys the issuer with the
+        // craft's key (configured secret, or the cached announced token §11.4a),
+        // binds the link to its net_id, moves onto its channel to be heard, then
+        // issues a §11 campaign to target_chan (0 → the emptiest allowlisted
+        // channel). The loop's issuer.tick drives the copies/commit; post-claim
+        // the net_id stamp/filter and channel hold until an explicit re-scout.
+        auto do_claim = [&](int originator_i, int target_chan_i) -> std::string {
+            if (!air.value->supports_csa()) {
+                return "CSA unsupported by this backend";
+            }
+            if (originator_i < 0 || originator_i > 0xFFFF) {
+                return "invalid originator";
+            }
+            const uint16_t orig = static_cast<uint16_t>(originator_i);
+            const auto cand = scout.candidate_for(orig);
+            if (!cand) return "unknown craft (run a scout first)";
+            // Configured secret wins; else the cached announced token (§11.4a).
+            std::vector<uint8_t> key = cparams.psk;
+            if (key.empty()) {
+                const auto tok = discovery.token_for(orig);
+                if (!tok) return "no CSA key for craft (no cached token)";
+                key.assign(tok->begin(), tok->end());
+            }
+            if (!issuer.set_psk(key)) return "claim busy (campaign active)";
+            // §15.5a: bind the link to the craft's net_id — stamp our uplink so
+            // the craft accepts it, narrow our filter to hear only that craft.
+            air.value->set_stamp_net_id(cand->net_id);
+            air.value->set_filter_net_id(cand->net_id);
+            // Be on the craft's current channel so it hears the CSA copies.
+            air.value->retune_one(0, cand->chan, op_bw, false);
+            uint16_t target = static_cast<uint16_t>(target_chan_i);
+            if (target == 0) {
+                target =
+                    scout.emptiest(l.cfg.policy.csa.channel_allowlist, cand->chan);
+            }
+            if (target == 0) return "no target channel (specify target_chan)";
+            // retune_class 1 (500 ms dt budget) gives the craft slack for the iw
+            // shell-out retune before its §11.5 verify timeout. bw code 0 = 20 MHz
+            // (v1 single-width, matching the /csa trigger).
+            const CommonPrefix pre{l.cfg.node.originator, 0, session};
+            if (!issuer.start(pre, target, 0, 1, cand->chan, 0, 4, now_us_it)) {
+                return "rejected (active campaign or rate-limit)";
+            }
+            std::fprintf(stderr, "csa: claim originator=%u net_id=%u %u->%u MHz\n",
+                         orig, cand->net_id, cand->chan, target);
+            return "";
+        };
         h.scout_start = [&](const std::vector<uint16_t>& chans, uint32_t dwell,
                             const std::string& mode, int target) -> std::string {
-            (void)mode;    // §15.5a quickconnect/claim: next chunk
-            (void)target;
+            if (mode == "quickconnect") {
+                if (target < 0) return "quickconnect requires target.originator";
+                return do_claim(target, 0);  // start-form picks emptiest channel
+            }
             std::vector<uint16_t> ch = chans;
             if (ch.empty()) ch = l.cfg.scout.channels;
             if (ch.empty()) ch = l.cfg.policy.csa.channel_allowlist;
@@ -3144,6 +3233,7 @@ int run_rx(const Loaded& l) {
             scout.stop();
             return "";
         };
+        h.scout_quickconnect = do_claim;
         h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
             if (!air.value->supports_csa()) {
                 return "CSA unsupported by kernel-monitor backend";
