@@ -594,6 +594,7 @@ class ScoutEngine {
             accum_.min_rssi = meta.rssi;
         }
         accum_.transmitters.insert(originator);
+        ++accum_.frames_by_orig[originator];  // §15.5a (Pass 66): evidence weight
         if (const Announce* an = std::get_if<Announce>(&dec)) {
             Candidate& c = accum_.candidates[originator];
             c.originator = originator;
@@ -663,18 +664,24 @@ class ScoutEngine {
 
     // §15.5a claim support: what a quickconnect needs about a scouted craft.
     struct Claim {
-        uint16_t chan = 0;      // the channel it was last heard on
+        uint16_t chan = 0;      // the channel it was heard on most (§15.5a Pass 66)
         uint8_t net_id = 0;     // §3.0 L2 tag to stamp/filter after the claim
         uint32_t session = 0;
         bool psk_known = false; // a usable CSA key is held (token or secret)
     };
-    // Most-recent candidate for `originator` across the last sweep, or nullopt if
-    // it was never scouted (a claim requires a prior scout to learn its channel).
+    // Best candidate for `originator` across the last sweep — the channel it was
+    // heard on most (§15.5a Pass 66) — or nullopt if it was never scouted (a claim
+    // requires a prior scout to learn its channel).
     std::optional<Claim> candidate_for(uint16_t originator) const {
+        // §15.5a (Pass 66): pick the swept channel the craft was heard on with the
+        // most frames — robust to a retune-settling leak onto an adjacent channel.
+        // >= keeps the last channel on a tie (matches the pre-Pass-66 behaviour).
         std::optional<Claim> found;
+        uint64_t best_frames = 0;
         for (const auto& r : results_) {
             for (const auto& c : r.candidates) {
-                if (c.originator == originator) {
+                if (c.originator == originator && c.frames >= best_frames) {
+                    best_frames = c.frames;
                     found = Claim{c.chan, c.net_id, c.session, c.psk_known};
                 }
             }
@@ -720,6 +727,7 @@ class ScoutEngine {
         uint16_t claimed_by = 0;
         bool psk_known = false;
         uint16_t chan = 0;
+        uint64_t frames = 0;  // §15.5a (Pass 66): heard-most channel wins the claim
     };
     struct ChannelResult {
         uint16_t chan = 0;
@@ -732,6 +740,7 @@ class ScoutEngine {
         int min_rssi = 0;
         std::set<uint16_t> transmitters;
         std::map<uint16_t, Candidate> candidates;
+        std::map<uint16_t, uint64_t> frames_by_orig;  // §15.5a (Pass 66)
     };
 
     void enter_channel(uint64_t now_ms) {
@@ -757,7 +766,7 @@ class ScoutEngine {
             r.occ.noise_dbm = accum_.min_rssi;
         }
         for (auto& [k, c] : accum_.candidates) {
-            (void)k;
+            c.frames = accum_.frames_by_orig[k];  // §15.5a (Pass 66) evidence
             r.candidates.push_back(c);
         }
         results_.push_back(std::move(r));
