@@ -10,7 +10,8 @@
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>  // struct timeval (SO_RCVTIMEO)
-#include <unistd.h>    // close
+#include <sys/wait.h>  // waitpid (retune via iw)
+#include <unistd.h>    // close, fork, execvp, _exit
 
 #include <linux/sockios.h>
 
@@ -195,6 +196,29 @@ void attach_bpf_filter(int fd, std::optional<uint8_t> net_id,
                      "(non-fatal, userspace filter still active)\n",
                      ifname, std::strerror(errno));
     }
+}
+
+// §11.5/§15.5a channel retune over a monitor netdev. The ssc338q SDK ships the
+// kernel nl80211 UAPI but not libnl-3, so we drive the stable `iw` CLI (present
+// on the target) rather than hand-roll genl: `iw dev <if> set freq <mhz>
+// <width>` changes the wiphy channel without a down/up, so the RX threads keep
+// their sockets. fork/exec is async-signal-safe here (only snprintf pre-fork,
+// then execvp/_exit in the child).
+bool iw_set_freq(const std::string& ifname, uint16_t mhz, uint8_t bw) {
+    const char* width = (bw >= 40) ? "HT40+" : "HT20";
+    char freq[8];
+    std::snprintf(freq, sizeof(freq), "%u", static_cast<unsigned>(mhz));
+    const char* argv[] = {"iw",  "dev",  ifname.c_str(), "set",
+                          "freq", freq,  width,          nullptr};
+    const pid_t pid = ::fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        ::execvp("iw", const_cast<char* const*>(argv));
+        _exit(127);  // iw not on PATH
+    }
+    int status = 0;
+    if (::waitpid(pid, &status, 0) < 0) return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 }  // namespace
@@ -611,13 +635,15 @@ std::optional<uint64_t> MonAir::read_tsf(size_t adapter) {
 }
 
 bool MonAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
-    (void)adapter;
-    (void)bw;
-    (void)fast;
-    std::fprintf(stderr,
-                 "kernel-monitor: retune -> %u MHz requested (CSA over monitor "
-                 "deferred; channel fixed at bring-up)\n",
-                 chan_mhz);
+    (void)fast;  // §11.5a fast-path is a devourer optimization; iw is one-shot
+    if (adapter >= impl_->adapters.size()) return false;
+    const std::string& ifname = impl_->adapters[adapter]->ifname;
+    if (!iw_set_freq(ifname, chan_mhz, bw)) {
+        std::fprintf(stderr, "kernel-monitor: iw set freq %u (%u MHz bw) on %s "
+                             "failed\n",
+                     chan_mhz, bw, ifname.c_str());
+        return false;
+    }
     return true;
 }
 
