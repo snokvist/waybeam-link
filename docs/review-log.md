@@ -1443,6 +1443,37 @@ ladder on kernel-monitor radio. The next visual/RF work should use clean N=2
 and residual natural loss; the 200-permille N=1 phase was deliberately a
 controller-input calibration, not a quality target.
 
+## Pass 58 — Session pairing token + ANNOUNCE packet (2026-07-20)
+
+Multi-vehicle channel-sharing and a ground "scout" want zero-config rendezvous:
+a ground should find a parked craft and CSA-claim it without pre-shared keys,
+while co-located craft stay separable. Two identity axes already exist —
+`originator` (§2) and the L2 `net_id` (§3.0); this pass adds the pairing
+credential and the beacon that carries it. (See `docs/scout-design.md` for the
+full flow; operator-ruled 2026-07-20.)
+
+New packet type `0xB` **ANNOUNCE** (§3.12), fixed 30 bytes: common prefix +
+`flags` (`claimed`, `psk_present`) + advisory `claimed_by` + a 16-byte session
+pairing token. It is emitted at 1–2 Hz whether claimed or not (so a rebooted
+ground can re-learn the token and re-claim in place, §11.5a/Pass 59) and is
+**unauthenticated** — an advertisement, not a control action. A forged ANNOUNCE
+only wastes one claim attempt because the elicited CSA still fails the §11.4 MAC.
+
+CSA key provenance is split (§11.4a) with **HMAC always applied** — the earlier
+"psk=none / skip-HMAC" idea is withdrawn. Default `psk_announce=true`: absent
+`csa.psk` ⇒ the craft auto-generates a 16-byte token at boot (io/app entropy;
+`core` stays RNG/clock-free and only verifies) and announces it. The announced
+token is a **rendezvous credential, not a secret** — deliberate takeover is
+bounded by the §11.5a binding, not token confidentiality. `psk_announce=false`
+keeps an operator secret off the air (`psk_present=0`) and restores genuine
+authentication. Nonce/allowlist/rate-limit guards are unchanged in both modes,
+so an accepted CSA can never leave the craft's allowlist. The token inherits the
+`csa.psk` redaction invariant (§3.12, §15.2).
+
+**Amended:** §3.1 (type registry, 11/16), §3.12 (new), §11.4a (new), §13
+(forged-ANNOUNCE row), §15.2 (`node.net_id` auto, `node.psk_announce`, optional
+`csa.psk`).
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

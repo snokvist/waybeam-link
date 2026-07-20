@@ -231,10 +231,10 @@ wire packet inside it.
 
 **Packet types** (low nibble): `0x1 DATA · 0x2 NACK · 0x3 LINK_REPORT ·
 0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK ·
-0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY`. 10 of 16 used; the
-version nibble will not ship 16 wire-incompatible revisions, so there is no
-type-budget scarcity. Future types (e.g. a dedicated FEC-repair type, §14)
-take free slots.
+0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY · 0xB ANNOUNCE`. 11 of
+16 used; the version nibble will not ship 16 wire-incompatible revisions, so
+there is no type-budget scarcity. Future types (e.g. a dedicated FEC-repair
+type, §14) take free slots.
 
 **Common prefix describes the SENDER.** Control packets (NACK, LINK_REPORT) name
 the stream they concern via a **target descriptor** in their body (§3.3, §3.5) —
@@ -578,6 +578,36 @@ radio could not have. Reply selection at the cache: requested missing sources
 first (ascending index), then held repair symbols whose `repair_idx` bit is
 clear in `repair_have` (ascending), stopping at `max_symbols`. A cache holding
 none of the useful symbols stays silent.
+
+### 3.12 ANNOUNCE packet (type `0xB`) — 30 bytes
+
+A craft's **pairing beacon**: it advertises presence, claim state, and the
+session **pairing token** so a ground can rendezvous and CSA-claim it with no
+pre-shared config (§11.4a). Emitted at **1–2 Hz whenever unclaimed OR claimed**
+(unlike HEARTBEAT it is *not* suppressed by active DATA) — continued emission
+while claimed is what lets a rebooted ground re-learn the token and re-claim in
+place after the binding releases (§11.5a).
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | §3.1 — sender = the craft; `destination` = `0` |
+| 11 | 1 | `flags` | bit0 `claimed`; bit1 `psk_present`; bits 2–7 reserved (0) |
+| 12 | 2 | `claimed_by` | `originator` of the binding ground, else `0` (advisory: UI/courtesy, not enforced) |
+| 14 | 16 | `psk` | the session pairing token when `psk_present=1`; **all-zero** when `psk_present=0` (secret mode, `psk_announce=false`, §11.4a) |
+
+- **Unauthenticated by design.** ANNOUNCE is an advertisement, not a control
+  action: it carries no MAC. A forged ANNOUNCE with a bogus `psk` only wastes one
+  claim attempt — the resulting CSA fails the craft's §11.4 MAC check and no
+  claim occurs. This matches the §13 posture (see the added row).
+- **`psk` is a token, not a secret.** In the default announced mode any RF-adjacent
+  receiver can read it; takeover resistance comes from the §11.4a command-source
+  **binding**, not from the token's confidentiality. `psk_announce=false` keeps
+  `psk_present=0` (16 zero bytes) and restores a genuine secret (§11.4a).
+- HEARTBEAT (§3.8) is unchanged and remains exactly 11 bytes; ANNOUNCE never
+  creates or refreshes per-stream RX state (like HEARTBEAT, it is node-scoped).
+- **Redaction:** the `psk` field is the same secret as `csa.psk`; nodes MUST NOT
+  print it to stats/logs (the §15 config-dump `"(set, redacted)"` invariant
+  extends to any ANNOUNCE observability path).
 
 ---
 
@@ -1380,6 +1410,28 @@ the data path — it is authenticated:
   binding for the issuer (bootstrap before the craft has cached the ground
   session).
 
+### 11.4a Key provenance — announced session token vs. operator secret
+The `csa_psk` HMAC key (§11.4) comes from one of two sources; **HMAC is always
+applied** — there is no unauthenticated-CSA mode for craft/ground.
+- **Announced session token (default, `psk_announce=true`).** When no operator
+  `csa.psk` is configured, the craft **auto-generates a 16-byte token `P` at
+  boot** (io/app entropy, alongside `session_id`; the pure `core` layer stays
+  RNG/clock-free and merely *verifies* against a supplied key) and advertises it
+  in ANNOUNCE (§3.12, `psk_present=1`). A ground learns `P` off the air and keys
+  its CSA HMAC with it. This is **zero-config pairing**: the token is a
+  rendezvous credential, readable by anyone RF-adjacent, **not a secret**. It
+  raises the bar only against accidental cross-talk and a ground that never heard
+  the beacon; deliberate takeover is bounded instead by the §11.5a binding.
+- **Operator secret (`psk_announce=false`).** `csa.psk` is operator-provisioned
+  to craft + ground (the classic §11.4 posture) and **never announced**
+  (ANNOUNCE carries `psk_present=0`, 16 zero bytes). This restores genuine
+  cryptographic authentication of the switch. The binding rules (§11.5a) are
+  identical in both modes.
+- **All other §11.4 acceptance guards are unchanged in both modes** — nonce
+  monotonicity per `(originator, session)`, `target_chan ∈ channel_allowlist`,
+  and the `csa_min_interval_s` rate-limit still hold. An accepted CSA can never
+  send a craft off its configured allowlist, whatever the key source.
+
 ### 11.5 State machine (follower)
 ```
 IDLE ──valid+MAC'd CSA──▶ ARMED ──T_switch──▶ retune + ReApplyTxPower ──▶ VERIFY
@@ -1469,6 +1521,7 @@ data-path crypto, or heavy state. Threats and mitigations:
 | **Forged optimistic LINK_REPORT** (defeats "never fail optimistic") | accept only from latched/preferred `(originator,session)`; plausibility cross-check; conflicting reports ⇒ fail toward degradation | 3.5, 9.8 |
 | Replayed control frames (NACK/report) | monotonic wrap-aware discipline on `seq`, `report_epoch` (u32), `csa_nonce` | 3.5, 11.4 |
 | **Forged CSA → fleet blackout** (CRITICAL) | **4-byte HMAC on CSA only** + nonce anti-replay + channel allowlist + rate-limit + config-pinned home-channel | 11.4 |
+| Forged ANNOUNCE → bogus pairing token / false claim state | ANNOUNCE is unauthenticated advertisement; a wrong `psk` only wastes one claim attempt (the elicited CSA fails the craft's §11.4 MAC); `claimed_by` is advisory-only; takeover still bounded by the §11.5a binding | 3.12, 11.4a |
 | Forged CACHE_REQUEST → cache amplification (≤48 B request elicits up to `reply_limit` full symbols) | exact-`target_cache` match + per-requester rate cap + `request_id` dedup window + per-request symbol clamp; v1 IP-only keeps it off the air entirely | 3.11, 14.3 |
 | Forged CACHE_REPLY → junk symbol injection | accepted only for an outstanding `request_id`, from the addressed cache, for requested symbols, within allowance; wrapped packet revalidated via full §3.1/§3.2 decode + latched stream key (no worse than direct DATA injection, which is the accepted §13 posture) | 3.11, 14.3 |
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
@@ -1861,7 +1914,8 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 ### 15.2 Config (JSON)
 ```json
 {
-  "node":  { "originator": 17, "role": "tx", "preferred_originator": 9 },
+  "node":  { "originator": 17, "role": "tx", "preferred_originator": 9,
+             "net_id": null, "psk_announce": true },
   "profile_table": "/etc/waybeam-link/profiles.json",
   "adapters": [
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
@@ -1911,7 +1965,16 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 - Every policy constant is overridable → bench re-derivation (§9, §17) is config,
   not recompile.
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
-  stats and logs.
+  stats and logs. It is now **optional**: absent + `node.psk_announce=true`
+  (default) selects the auto-generated announced session token (§11.4a); present
+  is the operator secret, and `node.psk_announce=false` keeps that secret off the
+  air (§3.12, §11.4a). Redaction covers the ANNOUNCE `psk` field too.
+- `node.net_id` (§3.0) is `0..255`, or `null`/absent to **auto-assign** (low byte
+  of `originator`, or a random `1..255`); `0` is the unassigned default. It is an
+  L2 RX partition (co-located systems / channel sharing), **not** access control
+  (§13). `stamp` and `filter` net_id may diverge at runtime — a ground filters
+  wide while scouting and narrows to a claimed craft's `net_id`, stamping that
+  same value on its uplink so a strictly-filtering craft hears it (§15.5 scout).
 - A **`frame-shm` stream** carries its own per-stream `fec` block (§14.1):
   ```json
   { "stream_id": 0, "stream_type": "RTP", "dir": "in",

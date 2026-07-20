@@ -154,12 +154,27 @@ One sweep engine, two entry points; single- and dual-adapter both supported.
   ms off DATA; for quick-connect, act on the **first** candidate rather than
   waiting for the §2 admission count (that admission gate is anti-flood for the
   latch picker, not needed when the operator is deliberately claiming).
-- **Occupancy** per channel = a simple busy metric from monitor RX (all frames,
-  not just waybeam): frames/s and/or RSSI floor over the dwell, normalized to a
-  `busy_permille`. Rough, WiFi-only, not a spectrum analyzer — enough to rank
-  "emptiest allowlisted channel." **Exclude the candidate craft's own traffic**
-  from the busy count so its home-channel video doesn't make its own channel look
-  occupied.
+- **Occupancy** per channel is reported as a record whose field set is a
+  **superset aligned with the Realtek "Advanced Channel Scanning" (ACS) survey**
+  (`/proc/net/rtl88x2eu/<if>/{acs,chan_info}` in the `libc0607/rtl88x2eu-20230815`
+  fork: Quality/Availability/Utilization/WiFi-Util/Interference-Util/Noise dBm/
+  BSS-count, raw CLM%/NHM%/noise/ITF). v1 fills only the **packet-derivable**
+  fields from monitor RX over the dwell; the interference/total-utilization/
+  quality fields stay reserved so a later hardware-ACS backend is a field-fill,
+  not a reshape. Units are project-standard **per-mille** (ACS `%`→‰) and **dBm**.
+
+  | field | v1 source | later (hardware ACS) |
+  |---|---|---|
+  | `wifi_util_permille` | decodable-frame airtime estimate over dwell | CLM Wi-Fi portion |
+  | `util_permille` | = `wifi_util` (Wi-Fi only in v1) | total incl. non-Wi-Fi |
+  | `interference_util_permille` | `null` (unmeasurable from packets) | CLM−Wi-Fi |
+  | `noise_dbm` | RSSI-floor proxy (idle/min DBM_ANTSIGNAL) | NHM true noise floor |
+  | `bss_count` | distinct BSSID/SA transmitters heard | ACS BSS count |
+  | `quality_permille` / `availability_permille` | derived from the above | ACS direct |
+
+  Rough and Wi-Fi-only in v1, enough to rank "emptiest allowlisted channel."
+  **Exclude the candidate craft's own traffic** from these counts so its
+  home-channel video doesn't make its own channel look occupied.
 - **Two entry points:**
   - *List* — sweep, aggregate, return candidates + occupancy; operator chooses.
   - *Quick-connect* — sweep until the first (or a named) owned candidate, then
@@ -219,7 +234,7 @@ Control plane (§15.5), acts on the ground/rx node:
 | Method + path | Body | Effect |
 |---|---|---|
 | `POST /api/v1/scout/start` | `{ "channels":[...]?, "dwell_ms":?, "mode":"list"\|"quickconnect", "target":{"originator":?}? }` | begin a sweep |
-| `GET /api/v1/scout/results` | — | `{ scanning, current_chan, channels:[{chan,busy_permille,nodes:[…]}], candidates:[{originator,net_id,session,claimed,claimed_by,chan,psk_known}] }` |
+| `GET /api/v1/scout/results` | — | `{ scanning, current_chan, channels:[{chan, occupancy:{wifi_util_permille,util_permille,interference_util_permille,noise_dbm,bss_count,quality_permille,availability_permille}, nodes:[…]}], candidates:[{originator,net_id,session,claimed,claimed_by,chan,psk_known}] }` |
 | `POST /api/v1/scout/stop` | `{}` | end the sweep |
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto the given (or emptiest allowlisted) channel |
 
@@ -227,18 +242,18 @@ Control plane (§15.5), acts on the ground/rx node:
 
 ---
 
-## 9. Open decisions needing an explicit yes/no (before any PROTOCOL.md edit)
+## 9. Open decisions — RESOLVED (operator ruling 2026-07-20)
 
-1. **ANNOUNCE = new packet type `0xB`, fixed 30 bytes** with the §4 field set
-   (`flags`, `claimed_by`, 16-byte `psk`)? Or trim `claimed_by` / go
-   variable-length?
-2. **16-byte auto `P`** generated at boot in io/app (core stays RNG-free)? OK?
-3. **ANNOUNCE cadence 1–2 Hz, emitted always** (claimed included) so re-claim in
-   place works? OK?
-4. **Occupancy metric = normalized all-frame count over the dwell** (rough,
-   WiFi-only)? Good enough, or do you want RSSI-floor folded in?
-5. Config key names above (`psk_announce`, `bind_release_s`, `persist_channel`,
-   `scout.dwell_ms`) — accept as spelled?
+1. **ANNOUNCE = type `0xB`, fixed 30 bytes** with `flags` + `claimed_by` +
+   16-byte `psk` — **approved as specified.**
+2. **16-byte auto `P`, generated in io/app** (core stays RNG-free) — **approved.**
+3. **Cadence 1–2 Hz, emitted always** (claimed included) — **approved.**
+4. **Occupancy folds in all metrics** and mirrors the Realtek ACS survey field
+   set (§6) so the future hardware "Advanced Channel Scanning" backend
+   (`libc0607/rtl88x2eu-20230815`) is a field-fill; v1 does a packet occupancy
+   scan only — **approved.**
+5. **Config key names** (`psk_announce`, `bind_release_s`, `persist_channel`,
+   `scout.dwell_ms`) — **approved as spelled.**
 
 ---
 
