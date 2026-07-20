@@ -1531,6 +1531,26 @@ count) so a later hardware-ACS backend is a field-fill, not a reshape. Persisten
 **Amended:** §15.2 (`scout` block), §15.5 (Read/Write endpoint rows), §15.5a
 (new).
 
+## Pass 61 — Key-provenance mode is a pure function of `csa.psk` presence (2026-07-20)
+
+Implementing the Pass 58 ANNOUNCE emit forced the four `psk_announce` × `csa.psk`
+combinations to resolve. Two operator rulings (2026-07-20): a configured `csa.psk`
+**always wins → secret mode** (even under the `psk_announce=true` default); and
+`psk_announce=false` with **no** `csa.psk` **falls back to the announced token**
+(never fails to boot). Together these make the mode a pure function of `csa.psk`
+presence — `psk_announce` no longer gates anything in any combination. Rather than
+ship an inert config knob (operator-ruled), **`psk_announce` is removed**:
+
+- **Selector:** `csa.psk` configured ⇒ secret (`psk_present=0`, key = `csa.psk`);
+  absent ⇒ announced (`psk_present=1`, key = the auto-generated 16-byte `P`).
+  There is no separate toggle.
+- The `node.psk_announce` field (added in the Pass 60 config plumbing) is deleted
+  from `NodeCfg`, the parser, and `config_test`; `docs/scout-design.md` follows.
+
+**Amended:** §3.12 (`psk` note), §11.4a (mode selection reworded, selector
+sentence added), §15.2 (config example + `csa.psk` note; `node.psk_announce`
+removed). No wire change — ANNOUNCE bytes and `flags` semantics are unchanged.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

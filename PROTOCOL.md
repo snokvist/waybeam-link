@@ -593,7 +593,7 @@ re-claim in place after the binding releases (§11.5a).
 | 0 | 11 | *common* | §3.1 — sender = the craft; `destination` = `0` |
 | 11 | 1 | `flags` | bit0 `claimed`; bit1 `psk_present`; bits 2–7 reserved (0) |
 | 12 | 2 | `claimed_by` | `originator` of the binding ground, else `0` (advisory: UI/courtesy, not enforced) |
-| 14 | 16 | `psk` | the session pairing token when `psk_present=1`; **all-zero** when `psk_present=0` (secret mode, `psk_announce=false`, §11.4a) |
+| 14 | 16 | `psk` | the session pairing token when `psk_present=1`; **all-zero** when `psk_present=0` (secret mode, `csa.psk` configured, §11.4a) |
 
 - **Unauthenticated by design.** ANNOUNCE is an advertisement, not a control
   action: it carries no MAC. A forged ANNOUNCE with a bogus `psk` only wastes one
@@ -601,8 +601,8 @@ re-claim in place after the binding releases (§11.5a).
   claim occurs. This matches the §13 posture (see the added row).
 - **`psk` is a token, not a secret.** In the default announced mode any RF-adjacent
   receiver can read it; takeover resistance comes from the §11.4a command-source
-  **binding**, not from the token's confidentiality. `psk_announce=false` keeps
-  `psk_present=0` (16 zero bytes) and restores a genuine secret (§11.4a).
+  **binding**, not from the token's confidentiality. A configured `csa.psk`
+  selects secret mode: `psk_present=0` (16 zero bytes), a genuine secret (§11.4a).
 - HEARTBEAT (§3.8) is unchanged and remains exactly 11 bytes; ANNOUNCE never
   creates or refreshes per-stream RX state (like HEARTBEAT, it is node-scoped).
 - **Redaction:** the `psk` field is the same secret as `csa.psk`; nodes MUST NOT
@@ -1412,21 +1412,23 @@ the data path — it is authenticated:
 
 ### 11.4a Key provenance — announced session token vs. operator secret
 The `csa_psk` HMAC key (§11.4) comes from one of two sources; **HMAC is always
-applied** — there is no unauthenticated-CSA mode for craft/ground.
-- **Announced session token (default, `psk_announce=true`).** When no operator
-  `csa.psk` is configured, the craft **auto-generates a 16-byte token `P` at
-  boot** (io/app entropy, alongside `session_id`; the pure `core` layer stays
-  RNG/clock-free and merely *verifies* against a supplied key) and advertises it
-  in ANNOUNCE (§3.12, `psk_present=1`). A ground learns `P` off the air and keys
-  its CSA HMAC with it. This is **zero-config pairing**: the token is a
-  rendezvous credential, readable by anyone RF-adjacent, **not a secret**. It
-  raises the bar only against accidental cross-talk and a ground that never heard
-  the beacon; deliberate takeover is bounded instead by the §11.5a binding.
-- **Operator secret (`psk_announce=false`).** `csa.psk` is operator-provisioned
-  to craft + ground (the classic §11.4 posture) and **never announced**
-  (ANNOUNCE carries `psk_present=0`, 16 zero bytes). This restores genuine
-  cryptographic authentication of the switch. The binding rules (§11.5a) are
-  identical in both modes.
+applied** — there is no unauthenticated-CSA mode for craft/ground. **The source
+is selected solely by whether `csa.psk` is configured** — present ⇒ secret,
+absent ⇒ announced token (Pass 61). There is no separate mode toggle.
+- **Announced session token (default — no `csa.psk` configured).** The craft
+  **auto-generates a 16-byte token `P` at boot** (io/app entropy, alongside
+  `session_id`; the pure `core` layer stays RNG/clock-free and merely *verifies*
+  against a supplied key) and advertises it in ANNOUNCE (§3.12, `psk_present=1`).
+  A ground learns `P` off the air and keys its CSA HMAC with it. This is
+  **zero-config pairing**: the token is a rendezvous credential, readable by
+  anyone RF-adjacent, **not a secret**. It raises the bar only against accidental
+  cross-talk and a ground that never heard the beacon; deliberate takeover is
+  bounded instead by the §11.5a binding.
+- **Operator secret (`csa.psk` configured).** A provisioned `csa.psk` (on craft +
+  ground, the classic §11.4 posture) selects secret mode and is **never
+  announced** (ANNOUNCE carries `psk_present=0`, 16 zero bytes). This restores
+  genuine cryptographic authentication of the switch. The binding rules (§11.5a)
+  are identical in both modes.
 - **All other §11.4 acceptance guards are unchanged in both modes** — nonce
   monotonicity per `(originator, session)`, `target_chan ∈ channel_allowlist`,
   and the `csa_min_interval_s` rate-limit still hold. An accepted CSA can never
@@ -1945,7 +1947,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 ```json
 {
   "node":  { "originator": 17, "role": "tx", "preferred_originator": 9,
-             "net_id": null, "psk_announce": true },
+             "net_id": null },
   "profile_table": "/etc/waybeam-link/profiles.json",
   "adapters": [
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
@@ -1996,10 +1998,10 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 - Every policy constant is overridable → bench re-derivation (§9, §17) is config,
   not recompile.
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
-  stats and logs. It is now **optional**: absent + `node.psk_announce=true`
-  (default) selects the auto-generated announced session token (§11.4a); present
-  is the operator secret, and `node.psk_announce=false` keeps that secret off the
-  air (§3.12, §11.4a). Redaction covers the ANNOUNCE `psk` field too.
+  stats and logs. It is **optional** and is the **sole** key-provenance selector
+  (§11.4a, Pass 61): absent selects the auto-generated announced session token
+  (`psk_present=1`); present is the operator secret (`psk_present=0`, kept off the
+  air). Redaction covers the ANNOUNCE `psk` field too.
 - `node.net_id` (§3.0) is `0..255`, or `null`/absent to **auto-assign** (low byte
   of `originator`, or a random `1..255`); `0` is the unassigned default. It is an
   L2 RX partition (co-located systems / channel sharing), **not** access control

@@ -116,13 +116,12 @@ RF range — it is a rendezvous/pairing token, not a secret.** The real defence
 against casual mid-flight takeover is the **command-source binding**, not the
 psk. HMAC stays always-on so the secret mode is a pure config flip.
 
-- **`csa.psk` optional.** Absent + `psk_announce=true` (default) → the node
+- **`csa.psk` optional — the sole mode selector (Pass 61).** Absent → the node
   auto-generates a 16-byte `P` at boot (io/app RNG, same path as `session_id`;
-  core stays clock/RNG-free) and announces it. Present → operator secret.
-- **`psk_announce` (default `true`).** `false` = advanced/secure: `P` is the
-  config secret, **never** announced (`psk_present=0`), and the ground must have
-  it pre-shared. This restores real cryptographic security; the binding rules
-  below are identical.
+  core stays clock/RNG-free) and announces it (`psk_present=1`). Present →
+  operator secret: `csa.psk` is the config secret, **never** announced
+  (`psk_present=0`), and the ground must have it pre-shared. This restores real
+  cryptographic security; the binding rules below are identical.
 - **Binding lifecycle:**
   - First accepted CSA (MAC-valid, allowlisted, nonce-fresh) **binds** its issuer
     as the craft's command source and enters COMMITTED (§11.5).
@@ -217,7 +216,7 @@ One sweep engine, two entry points; single- and dual-adapter both supported.
 Config (§15.2), all §17-overridable seeds:
 
 ```json
-"node":  { "originator": 17, "net_id": null, "psk_announce": true },
+"node":  { "originator": 17, "net_id": null },
 "policy": { "csa": {
     "home_chan": 5805, "channel_allowlist": [5745, 5805, 5825],
     "bind_release_s": 90, "persist_channel": false
@@ -225,9 +224,9 @@ Config (§15.2), all §17-overridable seeds:
 "scout": { "dwell_ms": 300, "channels": null }   // null channels = allowlist
 ```
 
-- `node.net_id: null` → auto-assign (§2). `csa.psk` absent → auto `P` when
-  `psk_announce`. `csa.psk` present → secret; set `psk_announce:false` to keep it
-  off the air. `csa.psk` stays redacted in every dump/stat (existing invariant).
+- `node.net_id: null` → auto-assign (§2). `csa.psk` absent → auto `P`, announced;
+  present → operator secret, off the air (Pass 61: `csa.psk` presence is the whole
+  selector). `csa.psk` stays redacted in every dump/stat (existing invariant).
 
 Control plane (§15.5), acts on the ground/rx node:
 
@@ -252,17 +251,18 @@ Control plane (§15.5), acts on the ground/rx node:
    set (§6) so the future hardware "Advanced Channel Scanning" backend
    (`libc0607/rtl88x2eu-20230815`) is a field-fill; v1 does a packet occupancy
    scan only — **approved.**
-5. **Config key names** (`psk_announce`, `bind_release_s`, `persist_channel`,
-   `scout.dwell_ms`) — **approved as spelled.**
+5. **Config key names** (`bind_release_s`, `persist_channel`, `scout.dwell_ms`)
+   — **approved as spelled.** (`psk_announce` was later removed — Pass 61 makes
+   `csa.psk` presence the sole mode selector.)
 
 ---
 
 ## 10. Proposed Pass entries (draft — appended to review-log.md on approval)
 
 - **Pass 58 — Session pairing token + ANNOUNCE packet.** Adds packet type `0xB`
-  (§3, §4 here), the auto-generated announced `P` default, `psk_announce`, and
-  HMAC-always-on. Amends §3.1 (type registry), §11.4 (key provenance; announced
-  vs secret), §15.2 (config).
+  (§3, §4 here), the auto-generated announced `P` default, and HMAC-always-on.
+  Amends §3.1 (type registry), §11.4 (key provenance; announced vs secret), §15.2
+  (config). (Mode selection later simplified to `csa.psk`-presence-only — Pass 61.)
 - **Pass 59 — CSA follower holds until reboot; command-source binding
   lifecycle.** Removes the mid-flight `rendezvous_timeout → home` revert, keeps
   the `verify_timeout` jump-backout, defines sticky binding with a 90 s
