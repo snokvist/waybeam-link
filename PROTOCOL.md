@@ -583,10 +583,10 @@ none of the useful symbols stays silent.
 
 A craft's **pairing beacon**: it advertises presence, claim state, and the
 session **pairing token** so a ground can rendezvous and CSA-claim it with no
-pre-shared config (§11.4a). Emitted at **1–2 Hz whenever unclaimed OR claimed**
-(unlike HEARTBEAT it is *not* suppressed by active DATA) — continued emission
-while claimed is what lets a rebooted ground re-learn the token and re-claim in
-place after the binding releases (§11.5a).
+pre-shared config (§11.4a). Emitted at **1–2 Hz in both claimed and unclaimed
+states** (unlike HEARTBEAT it is *not* suppressed by active DATA) — continued
+emission while claimed is what lets a rebooted ground re-learn the token and
+re-claim in place after the binding releases (§11.5a).
 
 | off | size | field | notes |
 |---|---:|---|---|
@@ -1434,16 +1434,17 @@ applied** — there is no unauthenticated-CSA mode for craft/ground.
 
 ### 11.5 State machine (follower)
 ```
-IDLE ──valid+MAC'd CSA──▶ ARMED ──T_switch──▶ retune + ReApplyTxPower ──▶ VERIFY
- (on home_chan or       (adaptive freeze on,                               │
-  persisted chan;        watchdog paused)          valid traffic ≤150 ms───┤
-  power-on default)                                                        ▼
-        ▲  stale / bad-MAC / replay → drop, stay IDLE            COMMITTED ─── HOLD
-        │                                                        (bound §11.5a;   until
-        │  no valid traffic ≤verify_timeout_ms (JUMP FAILED)     freeze lifts     reboot
-        └────────────── REVERT → prev_chan, back to IDLE ◀──┐    after csa_settle_s)
-                        (jump-failed backout ONLY)          └──────── (never mid-flight)
+IDLE ─valid+MAC'd CSA─▶ ARMED ─T_switch─▶ retune+ReApplyTxPower ─▶ VERIFY
+ (home_chan or         (adaptive freeze on,                          │
+  persisted chan,       watchdog paused)                             ├─ valid traffic
+  power-on default)                                                  │  ≤verify_timeout_ms ─▶ COMMITTED
+   ▲ stale/bad-MAC/replay → drop, stay IDLE                          │                        (bound §11.5a;
+   └─ REVERT → prev_chan ◀─ no valid traffic (JUMP-FAILED backout) ◀─┘                         HOLD until reboot;
+      then back to IDLE                                                                         freeze lifts after
+                                                                                                csa_settle_s)
 ```
+COMMITTED is terminal until reboot — it has no automatic outgoing edge (no
+mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
 - **Jump-failed backout (kept):** in VERIFY, no valid traffic within
   `verify_timeout_ms` (**150 ms**, bench median 85 ms + margin) → revert to
   `prev_chan` and return to IDLE. This is the **only** automatic revert; it
@@ -1462,14 +1463,19 @@ IDLE ──valid+MAC'd CSA──▶ ARMED ──T_switch──▶ retune + ReApp
 An accepted CSA (§11.4) both switches the channel and **binds** its issuer as the
 craft's command source — the §11.4 "currently-latched command source." This
 binding *is* the claim, and it governs who may switch the craft next:
+- **Bootstrap (first claim).** When the craft is unclaimed there is no bound
+  source yet; the first MAC-valid CSA is accepted and binds its issuer (§11.4
+  bootstrap note). Thereafter the binding is required.
 - **Sticky through link loss.** While bound, a CSA from any *other* issuer is
   rejected regardless of key knowledge (this, not token confidentiality, is what
   resists casual mid-flight takeover, §11.4a). The binding is NOT dropped on
   telemetry loss.
-- **Release after `bind_release_s` (90 s) of command-source silence.** If the
-  bound issuer sends nothing the craft accepts (CSA or accepted return traffic)
-  for `bind_release_s`, the binding releases: the craft re-opens for claim and
-  continues ANNOUNCE with its `psk`. **Release changes no channel** — the craft
+- **Release after `bind_release_s` (90 s) of command-source silence.** The
+  binding stays fresh while the craft accepts **any** packet from the bound
+  issuer — CSA, NACK, LINK_REPORT, or its 1 Hz HEARTBEAT (§3.8); the ground's
+  keepalive alone holds it. Only after `bind_release_s` with nothing heard from
+  that issuer does the binding release: the craft flips its ANNOUNCE back to
+  unclaimed and re-opens for claim. **Release changes no channel** — the craft
   stays put; only claim eligibility re-opens. This lets a rebooted or returned
   ground re-claim the craft *in place* (the orphan case: ground reboots while the
   craft holds its channel).
