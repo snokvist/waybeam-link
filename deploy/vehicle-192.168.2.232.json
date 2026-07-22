@@ -1,0 +1,62 @@
+{
+  "_comment": "Vehicle: RTL8812EU kernel-monitor TX/RX on 5805/HT20; conservative MCS3 with 30% IDR / 20% P-frame RLC for first flight tests.",
+  "node": {
+    "originator": 17,
+    "role": "tx",
+    "preferred_originator": 9,
+    "net_id": 0
+  },
+  "profile_table": "/etc/waybeam-link/table.example.json",
+  "adapters": [
+    {
+      "name": "eu-craft",
+      "ifname": "wlan0",
+      "role": "tx",
+      "channel": 5805,
+      "bw": 20
+    }
+  ],
+  "streams": [
+    {
+      "stream_id": 0,
+      "stream_type": "RTP",
+      "dir": "in",
+      "bind": {
+        "kind": "frame-shm",
+        "name": "venc_frame"
+      },
+      "arq_mode": "idr-only",
+      "fec": {
+        "scheme": "rlc256",
+        "i_rate_permille": 300,
+        "p_rate_permille": 200,
+        "min_k": 3
+      }
+    }
+  ],
+  "air": {
+    "kind": "kernel-monitor"
+  },
+  "policy": {
+    "select": {
+      "min_profile": 3,
+      "max_profile": 3
+    },
+    "return": {
+      "quiet_gap": true,
+      "guard_us": 300,
+      "return_window_us": 2000
+    }
+  },
+  "venc": {
+    "host": "127.0.0.1:80",
+    "enabled": false,
+    "recovery_enabled": true
+  },
+  "control": {
+    "bind": "127.0.0.1:8091"
+  },
+  "stats": {
+    "hz": 1
+  }
+}

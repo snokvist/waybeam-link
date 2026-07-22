@@ -98,6 +98,7 @@ uint64_t RxEngine::block_deadline(const Stream& s, uint64_t first_seen_ms,
 RxEngine::Stream* RxEngine::try_latch(const DataView& v, uint64_t now_ms) {
     // Find an unsatisfied want matching this tuple.
     const WantSpec* want = nullptr;
+    std::optional<uint64_t> replace_key;
     for (const WantSpec& w : wants_) {
         if (w.stream_type != v.hdr.stream_type) {
             continue;
@@ -105,12 +106,27 @@ RxEngine::Stream* RxEngine::try_latch(const DataView& v, uint64_t now_ms) {
         if (w.originator && *w.originator != v.hdr.prefix.originator) {
             continue;
         }
-        bool taken = false;
+        const Stream* incumbent = nullptr;
+        uint64_t incumbent_key = 0;
         for (const auto& [key, s] : streams_) {
-            taken = taken || s.local_stream_id == w.local_stream_id;
+            if (s.local_stream_id == w.local_stream_id) {
+                incumbent = &s;
+                incumbent_key = key;
+                break;
+            }
         }
-        if (!taken) {
+        if (incumbent == nullptr) {
             want = &w;
+            break;
+        }
+        // A sender reboot creates a new session for the same physical
+        // originator. Admit it while the old tuple remains live, then replace
+        // the incumbent atomically; do not give a different originator this
+        // immediate-preemption path.
+        if (incumbent->key.originator == v.hdr.prefix.originator &&
+            incumbent->key.session_id != v.hdr.prefix.session_id) {
+            want = &w;
+            replace_key = incumbent_key;
             break;
         }
     }
@@ -155,6 +171,10 @@ RxEngine::Stream* RxEngine::try_latch(const DataView& v, uint64_t now_ms) {
         return nullptr;
     }
     discovery_.erase(cit);
+
+    if (replace_key) {
+        streams_.erase(*replace_key);
+    }
 
     // Latch (§2): adopt the first-seen seq as the startup floor.
     Stream s;
@@ -323,8 +343,8 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
     note_gaps(*s, now_ms);
     if (early_deliver) {
         const EarlyDeliverResult early = early_deliver(
-            s->local_stream_id, v.hdr.block_id, v.hdr.data_flags,
-            v.payload, v.payload_len);
+            s->key, s->local_stream_id, v.hdr.block_id,
+            v.hdr.data_flags, v.payload, v.payload_len);
         held_it->second.delivered_early = early.handled;
         if (early.handled) {
             ++s->counters.delivered;

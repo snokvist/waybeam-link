@@ -39,9 +39,10 @@ struct Harness {
     // Feed a DATA packet with 1-byte payload = low byte of seq.
     void feed(uint8_t adapter, uint32_t seq, uint32_t block, uint8_t flags,
               uint64_t now, uint8_t table_version = kTv,
-              const RxEngine::EarlyDeliver& early_deliver = {}) {
+              const RxEngine::EarlyDeliver& early_deliver = {},
+              uint32_t session = kTxSession) {
         DataHeader h;
-        h.prefix = {kTxOrig, 0, kTxSession};
+        h.prefix = {kTxOrig, 0, session};
         h.stream_id = 0;
         h.stream_type = stream_type::kRtp;
         h.seq = seq;
@@ -151,13 +152,35 @@ int main() {
         }
     }
 
+    // --- same-originator reboot replaces the session after admission -------
+    {
+        Harness h;
+        h.latch();
+        constexpr uint32_t reboot_session = 0x55667788;
+        std::vector<uint32_t> observed_sessions;
+        const RxEngine::EarlyDeliver early =
+            [&](const StreamKey& source, uint8_t, uint32_t, uint8_t,
+                const uint8_t*, size_t) -> RxEngine::EarlyDeliverResult {
+            observed_sessions.push_back(source.session_id);
+            return {/*handled=*/true, /*block_complete=*/true};
+        };
+        h.feed(0, 0, 0, 0, 10, kTv, early, reboot_session);
+        h.feed(0, 1, 0, 0, 11, kTv, early, reboot_session);
+        CHECK_EQ_U(h.engine.streams()[0].key.session_id, kTxSession);
+        h.feed(0, 2, 0, EOB, 12, kTv, early, reboot_session);
+        CHECK_EQ_U(h.engine.streams().size(), 1u);
+        CHECK_EQ_U(h.engine.streams()[0].key.session_id, reboot_session);
+        CHECK_EQ_U(observed_sessions.size(), 1u);
+        CHECK_EQ_U(observed_sessions[0], reboot_session);
+    }
+
     // --- frame-SHM symbols bypass packet ordering after diversity dedup -----
     {
         Harness h;
         h.latch();
         std::vector<uint32_t> early_seq;
         const RxEngine::EarlyDeliver early =
-            [&](uint8_t, uint32_t, uint8_t, const uint8_t* d,
+            [&](const StreamKey&, uint8_t, uint32_t, uint8_t, const uint8_t* d,
                 size_t) -> RxEngine::EarlyDeliverResult {
             early_seq.push_back(*d);
             return {/*handled=*/true, /*block_complete=*/true};

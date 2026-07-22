@@ -291,6 +291,11 @@ NACK/LINK_REPORT returns):
 "air": { "kind": "kernel-monitor" }
 ```
 
+A dedicated `cache.store` node with no media streams is the one exception to
+the designated-uplink rule: all of its monitor adapters may be `role:"rx"`.
+Such a node is RF receive-only; cache status, requests, and replies use its
+configured UDP/IP endpoints.
+
 **(b) UDP sim** — mirror the TX targets:
 
 ```json
