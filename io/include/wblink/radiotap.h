@@ -54,6 +54,7 @@ struct RadiotapRx {
     size_t hdr_len = 0;              // bytes to strip before the 802.11 MPDU
     std::optional<int8_t> rssi_dbm;  // IEEE80211_RADIOTAP_DBM_ANTSIGNAL
     std::optional<uint64_t> tsf_us;  // IEEE80211_RADIOTAP_TSFT (MAC time, µs)
+    bool fcs_at_end = false;          // FLAGS bit 0x10: MPDU includes 4-byte FCS
 };
 
 // Parse the leading radiotap header. nullopt only when the framing is
@@ -123,6 +124,8 @@ inline std::optional<RadiotapRx> radiotap_parse(const uint8_t* buf,
                      << (8 * i);
             }
             r.tsf_us = t;
+        } else if (bit == 1) {  // FLAGS: bit 4 means FCS is included at end
+            r.fcs_at_end = (buf[off] & 0x10u) != 0;
         } else if (bit == 5) {  // DBM_ANTSIGNAL: s8 dBm
             r.rssi_dbm = static_cast<int8_t>(buf[off]);
         }

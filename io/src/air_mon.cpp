@@ -334,12 +334,13 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
         }
         const size_t len = static_cast<size_t>(n);
         const auto rt = radiotap_parse(buf.data(), len);
-        if (!rt || rt->hdr_len + kFcsLen > len) {
+        const size_t fcs_len = rt && rt->fcs_at_end ? kFcsLen : 0;
+        if (!rt || rt->hdr_len + fcs_len > len) {
             a->rx_filtered.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
         const uint8_t* mpdu = buf.data() + rt->hdr_len;
-        const size_t mpdu_len = len - rt->hdr_len - kFcsLen;  // strip FCS
+        const size_t mpdu_len = len - rt->hdr_len - fcs_len;
         const auto d = dot11_parse(mpdu, mpdu_len, filter_opt());
         if (!d || d->originator == cfg.originator) {
             a->rx_filtered.fetch_add(1, std::memory_order_relaxed);

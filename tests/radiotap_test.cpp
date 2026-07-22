@@ -17,7 +17,8 @@ namespace {
 
 // Build a realistic monitor-RX radiotap header carrying TSFT, FLAGS, RATE,
 // CHANNEL, DBM_ANTSIGNAL, ANTENNA (present mask 0x82F) — 24 bytes total.
-std::vector<uint8_t> make_rx_radiotap(uint64_t tsf, int8_t rssi) {
+std::vector<uint8_t> make_rx_radiotap(uint64_t tsf, int8_t rssi,
+                                      bool fcs_at_end = false) {
     std::vector<uint8_t> h(24, 0);
     h[0] = 0x00;  // version
     h[1] = 0x00;  // pad
@@ -34,7 +35,7 @@ std::vector<uint8_t> make_rx_radiotap(uint64_t tsf, int8_t rssi) {
         h[8 + static_cast<size_t>(i)] =
             static_cast<uint8_t>((tsf >> (8 * i)) & 0xff);
     }
-    h[16] = 0x00;                          // FLAGS
+    h[16] = fcs_at_end ? 0x10 : 0x00;      // FLAGS: FCS-at-end
     h[17] = 0x0c;                          // RATE
     h[18] = 0x6c;                          // CHANNEL freq lo (5180 & 0xff)
     h[19] = 0x14;                          // CHANNEL freq hi (5180 >> 8)
@@ -84,11 +85,17 @@ void test_rx_parse() {
     CHECK_EQ_U(*r->tsf_us, tsf);
     CHECK(r->rssi_dbm.has_value());
     CHECK(*r->rssi_dbm == rssi);
+    CHECK(!r->fcs_at_end);
+
+    rt = make_rx_radiotap(tsf, rssi, /*fcs_at_end=*/true);
+    r = radiotap_parse(rt.data(), rt.size());
+    CHECK(r.has_value());
+    CHECK(r->fcs_at_end);
 }
 
 void test_rx_strip_then_dot11() {
     // radiotap(24) + §3.0 header(24) + magic(2) + payload + FCS(4).
-    auto frame = make_rx_radiotap(42, -60);
+    auto frame = make_rx_radiotap(42, -60, /*fcs_at_end=*/true);
     std::vector<uint8_t> mpdu(kDot11HdrLen, 0);
     dot11_hdr24(mpdu.data(), /*net_id=*/0, /*orig=*/0x1234, /*adapter=*/0,
                 /*seq=*/9);
@@ -105,13 +112,25 @@ void test_rx_strip_then_dot11() {
     auto r = radiotap_parse(frame.data(), frame.size());
     CHECK(r.has_value());
     const size_t rlen = r->hdr_len;
-    CHECK(rlen + kFcsLen < frame.size());
+    const size_t fcs_len = r->fcs_at_end ? kFcsLen : 0;
+    CHECK(rlen + fcs_len < frame.size());
     const uint8_t* body = frame.data() + rlen;
-    const size_t body_len = frame.size() - rlen - kFcsLen;
+    const size_t body_len = frame.size() - rlen - fcs_len;
     auto d = dot11_parse(body, body_len, std::nullopt);
     CHECK(d.has_value());
     CHECK_EQ_U(d->originator, 0x1234);
     CHECK_EQ_U(d->payload_len, 5);  // magic(2) + 3 payload bytes
+
+    // Drivers such as mt7921 may omit the FCS and clear the radiotap flag.
+    auto no_fcs = make_rx_radiotap(42, -60);
+    no_fcs.insert(no_fcs.end(), mpdu.begin(), mpdu.end());
+    r = radiotap_parse(no_fcs.data(), no_fcs.size());
+    CHECK(r.has_value());
+    CHECK(!r->fcs_at_end);
+    body = no_fcs.data() + r->hdr_len;
+    d = dot11_parse(body, no_fcs.size() - r->hdr_len, std::nullopt);
+    CHECK(d.has_value());
+    CHECK_EQ_U(d->payload_len, 5);
 }
 
 void test_rx_malformed() {
