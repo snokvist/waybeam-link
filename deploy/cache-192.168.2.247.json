@@ -33,7 +33,10 @@
       "stream_ids": [0],
       "blocks": 96,
       "reply_limit": 4,
-      "status_to": ["192.168.2.242:5802"],
+      "status_to": [
+        "192.168.2.242:5802",
+        "192.168.2.199:5802"
+      ],
       "status_interval_ms": 500,
       "max_requests_per_s": 400
     }

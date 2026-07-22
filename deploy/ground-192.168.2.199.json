@@ -38,6 +38,31 @@
       "return_window_us": 2000
     }
   },
+  "cache": {
+    "repair": {
+      "enabled": true,
+      "stream_id": 0,
+      "listen": "192.168.2.199:5802",
+      "caches": [
+        {
+          "originator": 33,
+          "endpoint": "192.168.2.247:5801"
+        }
+      ],
+      "tail_grace_ms": 1,
+      "local_quiet_ms": 2,
+      "min_collect_ms": 4,
+      "hard_close_ms": 8,
+      "request_timeout_ms": 4,
+      "nack_grace_ms": 0,
+      "repair_fraction_permille": 200,
+      "absolute_symbol_limit": 8,
+      "max_cache_attempts": 2,
+      "reply_limit": 4,
+      "health_floor_permille": 800,
+      "status_timeout_ms": 1500
+    }
+  },
   "control": {
     "bind": "127.0.0.1:8092"
   },
