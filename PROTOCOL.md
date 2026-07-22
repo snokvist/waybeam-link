@@ -1968,10 +1968,12 @@ wrapped packet must pass the full §3.1/§3.2 decode and match the latched
 stream key. CACHE_STATUS is accepted only from configured cache endpoints.
 For each stored `stream_id`, a statically configured cache initially accepts
 only `node.preferred_originator` when non-zero; otherwise the first sender
-latches. An accepted CACHE_ASSIGN replaces that target and clears every
-retained window. A new vehicle session under the same assigned originator
-replaces its retained window without another assignment, while a different
-originator cannot flush it.
+latches. An accepted CACHE_ASSIGN replaces that target. When the assigned
+originator changes, the cache clears every retained window; a duplicate
+assignment or a channel move for the same originator preserves the current
+window. A new vehicle session under the same assigned originator replaces its
+retained window without another assignment, while a different originator
+cannot flush it.
 
 Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 `local_quiet_ms 2`, `min_collect_ms 4`, `hard_close_ms 8`,
