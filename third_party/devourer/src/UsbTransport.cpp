@@ -2,11 +2,13 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
 #include "Event.h"
 #include "UsbDeviceLock.h"
+#include "UsbOpen.h"
 
 namespace devourer {
 
@@ -34,9 +36,10 @@ extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
 
 UsbTransport::UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                            libusb_context *ctx,
-                           std::shared_ptr<devourer::UsbDeviceLock> usb_lock)
+                           std::shared_ptr<devourer::UsbDeviceLock> usb_lock,
+                           bool rx_zerocopy)
     : _dev_handle{dev_handle}, _ctx{ctx}, _logger{std::move(logger)},
-      _usb_lock{std::move(usb_lock)} {
+      _rx_zerocopy{rx_zerocopy}, _usb_lock{std::move(usb_lock)} {
   libusb_device_descriptor desc{};
   if (libusb_get_device_descriptor(libusb_get_device(_dev_handle), &desc) ==
       LIBUSB_SUCCESS) {
@@ -44,8 +47,26 @@ UsbTransport::UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
     _info.pid = desc.idProduct;
     _logger->info("USB device {:04x}:{:04x}", _info.vid, _info.pid);
   }
+  // Endpoint addresses are not stable across Realtek USB variants. In
+  // particular, RTL8822BU/"RTL8812BU" is composite: interfaces 0 and 1 are
+  // Bluetooth, while Wi-Fi uses interface 2 with bulk IN endpoint 0x84 rather
+  // than the 0x81 used by RTL8812AU. Discovering the active bulk interface is
+  // therefore required before firmware download, RX, or TX can work.
   discover_endpoints();
   _info.valid = true;
+}
+
+UsbTransport::~UsbTransport() {
+  /* Drain any async-TX completions still in flight so their transfers are
+   * freed (transfer_callback runs here, on THIS thread) before the device
+   * handle / context are torn down. We reap in the caller's thread, never a
+   * background pump, so there is no thread racing the caller-owned
+   * libusb_exit. A bounded loop so a genuinely dead endpoint can't hang
+   * teardown. */
+  for (int i = 0; i < 50 && _tx_inflight.load() > 0; ++i) {
+    struct timeval tv {0, 20000};
+    libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
+  }
 }
 
 bool UsbTransport::write_bytes(uint16_t reg_num, const uint8_t *ptr, size_t n) {
@@ -60,10 +81,32 @@ void UsbTransport::rx_loop(
     const std::function<bool()> &should_stop) {
   AsyncRxShared sh{&on_data, &should_stop};
   std::vector<libusb_transfer *> xfers;
-  std::vector<std::vector<uint8_t>> bufs(n_urbs,
-                                         std::vector<uint8_t>(buf_size));
+  /* Zerocopy RX ring: allocate each URB buffer from kernel DMA memory
+   * (libusb_dev_mem_alloc = USBDEVFS_ALLOC on Linux) so the bulk-IN DMAs a
+   * frame straight into this mmap'd buffer and usbfs skips the copy-to-user on
+   * reap. dev_mem_alloc returns NULL on backends/HCDs that don't support it (or
+   * when disabled) — fall back per-buffer to a heap allocation, the historical
+   * copy-on-reap path. Buffers outlive every in-flight transfer (freed only
+   * after the drain below), so the mmap'd memory is never released under a live
+   * URB. */
+  std::vector<uint8_t *> bufs(n_urbs, nullptr);
+  std::vector<bool> is_devmem(n_urbs, false);
+  int zc = 0;
   for (int i = 0; i < n_urbs; i++) {
+    if (_rx_zerocopy) {
+      bufs[i] = libusb_dev_mem_alloc(_dev_handle, buf_size);
+      if (bufs[i]) {
+        is_devmem[i] = true;
+        ++zc;
+      }
+    }
+    if (!bufs[i])
+      bufs[i] = static_cast<uint8_t *>(malloc(buf_size));
+    if (!bufs[i])
+      continue; /* both allocs failed — skip this URB */
     libusb_transfer *t = libusb_alloc_transfer(0);
+    if (!t)
+      continue; /* buffer freed in the by-kind sweep below */
     /* timeout=0 (infinite): a persistent RX ring — each URB stays posted until
      * a frame arrives (COMPLETED), the queue is torn down (CANCELLED, below),
      * or the device errors. This is the kernel rtw88 RX-URB idiom. A finite
@@ -73,7 +116,7 @@ void UsbTransport::rx_loop(
      * information (RX is healthy; bulk-IN is simply idle) and can bloat a long
      * capture's stderr. The devourer_rx_cb resubmit-on-TIMED_OUT branch is kept
      * as a defensive no-op should a backend still surface a timeout. */
-    libusb_fill_bulk_transfer(t, _dev_handle, _info.bulk_in_ep, bufs[i].data(),
+    libusb_fill_bulk_transfer(t, _dev_handle, _info.bulk_in_ep, bufs[i],
                               buf_size, devourer_rx_cb, &sh, 0);
     if (libusb_submit_transfer(t) == 0) {
       xfers.push_back(t);
@@ -82,7 +125,8 @@ void UsbTransport::rx_loop(
       libusb_free_transfer(t);
     }
   }
-  _logger->info("RX: async queue of {} URBs submitted", sh.active.load());
+  _logger->info("RX: async queue of {} URBs submitted ({} zerocopy DMA, {} heap)",
+                sh.active.load(), zc, n_urbs - zc);
   while (!should_stop() && sh.active > 0) {
     struct timeval tv {0, 100000};
     libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
@@ -95,6 +139,16 @@ void UsbTransport::rx_loop(
   }
   for (auto *t : xfers)
     libusb_free_transfer(t);
+  /* All URBs are drained (sh.active == 0) — no transfer references a buffer, so
+   * releasing the ring is safe. Free each by the way it was allocated. */
+  for (int i = 0; i < n_urbs; i++) {
+    if (!bufs[i])
+      continue;
+    if (is_devmem[i])
+      libusb_dev_mem_free(_dev_handle, bufs[i], buf_size);
+    else
+      free(bufs[i]);
+  }
 }
 
 int UsbTransport::rx_raw(uint8_t *buf, int len, int timeout_ms) {
@@ -141,16 +195,26 @@ void UsbTransport::discover_endpoints() {
       continue;
     }
 
-    if (!config->bNumInterfaces) {
-      continue;
+    // Do not assume config->interface[0]. Composite adapters expose Bluetooth
+    // first; reuse the interface selected before the caller claimed the device.
+    const libusb_interface_descriptor *interface_desc = nullptr;
+    const int wifi_interface = find_wifi_interface(_dev_handle);
+    for (uint8_t interface_index = 0;
+         interface_index < config->bNumInterfaces && interface_desc == nullptr;
+         interface_index++) {
+      const libusb_interface *interface = &config->interface[interface_index];
+      if (interface->num_altsetting == 0)
+        continue;
+      const libusb_interface_descriptor *candidate = &interface->altsetting[0];
+      if (candidate->bInterfaceNumber == wifi_interface)
+        interface_desc = candidate;
     }
-    const libusb_interface *interface = &config->interface[0];
 
-    if (!interface->altsetting) {
+    if (interface_desc == nullptr) {
+      libusb_free_config_descriptor(config);
       continue;
     }
-    const libusb_interface_descriptor *interface_desc =
-        &interface->altsetting[0];
+    _logger->info("selected USB interface {}", interface_desc->bInterfaceNumber);
 
     bool found_bulk_in = false;
     for (uint8_t j = 0; j < interface_desc->bNumEndpoints; j++) {
@@ -209,12 +273,14 @@ void UsbTransport::transfer_callback(struct libusb_transfer *transfer) {
     DVR_DEBUG(self->_logger, "Packet sent successfully, length: {}",
               transfer->length);
   } else {
-    /* Flag the bulk-OUT as possibly halted so the next tx_async (on the TX
-     * thread) re-clear_halts it before the following frame. */
-    self->_tx_wedged.store(true, std::memory_order_relaxed);
-    /* Async completion failure — the real drop for the async TX path. A
-     * TIMED_OUT status is the FIFO-full back-pressure (congestion); anything
-     * else is a hard error. Record the negated status as the rc. */
+    /* Re-clear_halt ONLY on a genuine endpoint STALL — the rare mid-stream
+     * hardware stall (e.g. NDP generation on some xhci hosts) the wedge path
+     * exists for. TX transfers use an infinite timeout, so a spurious
+     * TIMED_OUT should not occur, and treating every non-OK completion as a
+     * wedge would fire a ~ms clear_halt control transfer per hiccup — a
+     * clear_halt storm — now that completions are actually reaped. */
+    if (transfer->status == LIBUSB_TRANSFER_STALL)
+      self->_tx_wedged.store(true, std::memory_order_relaxed);
     self->_tx_failed.fetch_add(1, std::memory_order_relaxed);
     self->_tx_last_rc.store(-transfer->status, std::memory_order_relaxed);
     self->_tx_last_timeout.store(
@@ -222,17 +288,39 @@ void UsbTransport::transfer_callback(struct libusb_transfer *transfer) {
         std::memory_order_relaxed);
     self->_logger->error("Failed to send packet, status: {}, actual length: {}",
                          transfer->status, transfer->actual_length);
-    /* machine-readable mirror of the failure (tests/regress.py keys on it) */
     devourer::Ev(self->_logger->events(), "tx.fail")
         .f("status", (long long)transfer->status)
         .f("actual_len", transfer->actual_length)
         .f("timeout", transfer->status == LIBUSB_TRANSFER_TIMED_OUT);
   }
+  self->_tx_inflight.fetch_sub(1, std::memory_order_relaxed);
   libusb_free_transfer(transfer);
 }
 
 bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
                             unsigned timeout_ms) {
+  /* Reap completed async-TX transfers before submitting the next one — in the
+   * caller's own thread, so there is no background pump to race libusb
+   * teardown. A non-blocking handle_events (timeout 0) processes every ready
+   * completion, freeing those transfers and draining the kernel URB queue so
+   * this submit doesn't fail with a full queue. This is what the vendor driver
+   * gets for free from the kernel USB core; without it the queue fills, submits
+   * fail, and TX collapses (issue #240). If the in-flight depth is already high
+   * (a fast caller outrunning the air), block briefly to reap — bounded
+   * backpressure that also caps latency. */
+  {
+    struct timeval zero {0, 0};
+    libusb_handle_events_timeout_completed(_ctx, &zero, nullptr);
+    /* Soft cap: keep at most kMaxInflight transfers pending. Beyond it, wait
+     * for completions rather than pile onto the kernel queue. */
+    constexpr int kMaxInflight = 256;
+    while (_tx_inflight.load(std::memory_order_relaxed) >= kMaxInflight) {
+      struct timeval tv {0, 2000};
+      if (libusb_handle_events_timeout_completed(_ctx, &tv, nullptr) != 0)
+        break; /* don't spin forever on a libusb error */
+    }
+  }
+
   libusb_transfer *transfer = libusb_alloc_transfer(0);
   if (!transfer) {
     _logger->error("Failed to allocate transfer");
@@ -286,9 +374,15 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
                   fwhw_txq, mcufwdl, hci_susp);
   }
 
+  /* Infinite timeout (0), like the persistent-ring RX URBs: a TX transfer
+   * waits until the chip accepts it — natural backpressure, not a drop — and
+   * it matches the pre-reaping behaviour (nothing enforced timeouts before).
+   * Over-submission is bounded by the in-flight soft cap above, not by
+   * dropping frames on a timer. `timeout_ms` is kept for the sync path. */
+  (void)timeout_ms;
   libusb_fill_bulk_transfer(transfer, _dev_handle, tx_ep, packet, length,
                             &UsbTransport::transfer_callback, (void *)this,
-                            timeout_ms);
+                            /*timeout=*/0);
   /* Upstream OOT (rtl8814a/usb/rtl8814au_xmit.c) sets URB_ZERO_PACKET on
    * every TX URB. libusb equivalent: LIBUSB_TRANSFER_ADD_ZERO_PACKET.
    * Without it the chip's SuperSpeed bulk OUT controller can wait
@@ -301,6 +395,7 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
   _tx_submitted.fetch_add(1, std::memory_order_relaxed);
   int rc = libusb_submit_transfer(transfer);
   if (rc == LIBUSB_SUCCESS) {
+    _tx_inflight.fetch_add(1, std::memory_order_relaxed);
     DVR_DEBUG(_logger, "Packet sent successfully, length: {}", length);
     return true;
   }

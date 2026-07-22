@@ -1,12 +1,13 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
-#include <cstdlib>
 #include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,10 +32,12 @@
 #endif
 
 #include "BfReportDetect.h"
-#include "caps_event.h"
 #include "ChannelFreq.h"
+#include "HopSchedule.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
+#include "TxPower.h" /* txpkt_pwr_db_for_step — DEVOURER_TX_PKT_OFSET fan-out */
+#include "caps_event.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -57,30 +60,31 @@
 
 #define USB_VENDOR_ID 0x0bda
 
-/* Known USB product IDs for the Realtek Jaguar family — same set as the RX
- * demo (examples/rx/main.cpp). */
-static constexpr uint16_t kRealtekProductIds[] = {
-    0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
-    0xb812, 0xb82c, /* RTL8822BU (Jaguar2); OEM VIDs via DEVOURER_VID/PID */
-    0xc82c, 0xc82e, 0xc812, /* RTL8822CU/8812CU (Jaguar3 CU) */
-    0x881a, 0x881b, 0x881c, 0xa81a, /* RTL8812EU (Jaguar3 EU; a81a = BL-M8812EU2) */
-    0xe822, 0xa82a, /* RTL8822EU (Jaguar3 EU) */
-};
+  /* Known USB product IDs for the Realtek Jaguar family — same set as the RX
+   * demo (examples/rx/main.cpp). */
+  static constexpr uint16_t kRealtekProductIds[] = {
+      0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
+      0xb812, 0xb82c, /* RTL8822BU (Jaguar2); OEM VIDs via DEVOURER_VID/PID */
+      0xc82c, 0xc82e, 0xc812,         /* RTL8822CU/8812CU (Jaguar3 CU) */
+      0x881a, 0x881b, 0x881c, 0xa81a, /* RTL8812EU (Jaguar3 EU; a81a =
+                                         BL-M8812EU2) */
+      0xe822, 0xa82a,                 /* RTL8822EU (Jaguar3 EU) */
+  };
 
-/* Event sink for the demo's own JSONL emissions (packetProcessor is a free
- * function) — points at the main() Logger's sink, set before InitWrite(). */
-static devourer::EventSink *g_ev = nullptr;
+  /* Event sink for the demo's own JSONL emissions (packetProcessor is a free
+   * function) — points at the main() Logger's sink, set before InitWrite(). */
+  static devourer::EventSink *g_ev = nullptr;
 
-/* Process-start reference for the init.timing events (see src/InitTimer.h).
- * stage=txdemo.first_tx_submit is the end-to-end "ready to TX" mark:
- * exec → first bulk-OUT submitted. */
-static const std::chrono::steady_clock::time_point g_proc_start =
-    std::chrono::steady_clock::now();
-static long long ms_since_start() {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-             std::chrono::steady_clock::now() - g_proc_start)
-      .count();
-}
+  /* Process-start reference for the init.timing events (see src/InitTimer.h).
+   * stage=txdemo.first_tx_submit is the end-to-end "ready to TX" mark:
+   * exec → first bulk-OUT submitted. */
+  static const std::chrono::steady_clock::time_point g_proc_start =
+      std::chrono::steady_clock::now();
+  static long long ms_since_start() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - g_proc_start)
+        .count();
+  }
 
 /* Build a radiotap header carrying CHANNEL (freq) + TX_FLAGS, then append the
  * 802.11 body. The library reads the CHANNEL field and FastRetunes per packet. */
@@ -245,31 +249,54 @@ int main(int argc, char **argv) {
       const auto want_bus =
           static_cast<uint8_t>(std::strtoul(bus_env, nullptr, 0));
       const char *port_env = std::getenv("DEVOURER_USB_PORT");
-      libusb_device **list = nullptr;
-      ssize_t n = libusb_get_device_list(context, &list);
-      for (ssize_t i = 0; i < n && handle == NULL; ++i) {
-        libusb_device_descriptor dd{};
-        if (libusb_get_device_descriptor(list[i], &dd) != 0) continue;
-        if (dd.idVendor != target_vid) continue;
-        if (target_pid != 0 && dd.idProduct != target_pid) continue;
-        if (libusb_get_bus_number(list[i]) != want_bus) continue;
-        if (port_env != nullptr) {
-          uint8_t ports[8];
-          int pc = libusb_get_port_numbers(list[i], ports, sizeof(ports));
-          std::string path;
-          for (int p = 0; p < pc; ++p)
-            path += (path.empty() ? "" : ".") + std::to_string(ports[p]);
-          if (path != port_env) continue;
+      /* A named socket is EXPECTED to hold the device — but the previous
+       * session's close/kill leaves the chip re-enumerating (firmware reload
+       * through ROM, sometimes via the ZeroCD id) for several seconds. Poll
+       * bounded instead of failing on the first empty scan. */
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(15);
+      bool waited = false;
+      do {
+        libusb_device **list = nullptr;
+        ssize_t n = libusb_get_device_list(context, &list);
+        for (ssize_t i = 0; i < n && handle == NULL; ++i) {
+          libusb_device_descriptor dd{};
+          if (libusb_get_device_descriptor(list[i], &dd) != 0) continue;
+          if (dd.idVendor != target_vid) continue;
+          if (target_pid != 0 && dd.idProduct != target_pid) continue;
+          if (libusb_get_bus_number(list[i]) != want_bus) continue;
+          if (port_env != nullptr) {
+            uint8_t ports[8];
+            int pc = libusb_get_port_numbers(list[i], ports, sizeof(ports));
+            std::string path;
+            for (int p = 0; p < pc; ++p)
+              path += (path.empty() ? "" : ".") + std::to_string(ports[p]);
+            if (path != port_env) continue;
+          }
+          if (libusb_open(list[i], &handle) == 0)
+            logger->info("Opened device {:04x}:{:04x} on bus {} port {}",
+                         dd.idVendor, dd.idProduct, want_bus,
+                         port_env ? port_env : "(any)");
         }
-        if (libusb_open(list[i], &handle) == 0)
-          logger->info("Opened device {:04x}:{:04x} on bus {} port {}",
-                       dd.idVendor, dd.idProduct, want_bus,
-                       port_env ? port_env : "(any)");
-      }
-      if (list != nullptr) libusb_free_device_list(list, 1);
-      if (handle == NULL)
+        if (list != nullptr) libusb_free_device_list(list, 1);
+        if (handle != NULL) break;
+        if (!waited) {
+          logger->warn("DEVOURER_USB_BUS={} PORT={} matched no device — "
+                       "waiting for it to (re-)enumerate",
+                       want_bus, port_env ? port_env : "(any)");
+          waited = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      } while (std::chrono::steady_clock::now() < deadline);
+      /* Topology selection is strict: falling through to the VID:PID loop
+       * here would silently open a DIFFERENT adapter sharing the id (the
+       * exact ambiguity DEVOURER_USB_BUS exists to resolve) — fail instead. */
+      if (handle == NULL) {
         logger->error("DEVOURER_USB_BUS={} PORT={} matched no device", want_bus,
                       port_env ? port_env : "(any)");
+        libusb_exit(context);
+        return 1;
+      }
     }
 
     for (uint16_t pid : kRealtekProductIds) {
@@ -313,14 +340,16 @@ int main(int argc, char **argv) {
      * bail here before the reset, so it can't re-enumerate the adapter out from
      * under the owner. Reset skipped in termux_mode (forked child shares the
      * fd) and for DEVOURER_SKIP_RESET (warm pickup). */
-    rc = devourer::claim_interface_then_reset(
-        handle, 0, logger,
+    /* Reopen variant: recovers in place when the reset re-enumerates the
+     * device (warm Kestrel firmware-drop through ROM / ZeroCD). */
+    rc = devourer::claim_interface_reset_reopen(context, handle, logger,
         !termux_mode && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
     devourer::Ev(*g_ev, "init.timing")
         .f("stage", "txdemo.usb_reset")
         .f("ms", ms_since_start());
     if (rc != 0) {
-      libusb_close(handle);
+      if (handle != nullptr)
+        libusb_close(handle);
       libusb_exit(context);
       return 1;
     }
@@ -496,9 +525,10 @@ int main(int argc, char **argv) {
   uint8_t init_offset = 0;
   if (const char *e = std::getenv("DEVOURER_HOP_BW")) {
     int mhz = std::atoi(e);
-    init_width = mhz == 80 ? CHANNEL_WIDTH_80
-               : mhz == 40 ? CHANNEL_WIDTH_40
-                           : CHANNEL_WIDTH_20;
+    init_width = mhz == 160 ? CHANNEL_WIDTH_160
+               : mhz == 80  ? CHANNEL_WIDTH_80
+               : mhz == 40  ? CHANNEL_WIDTH_40
+                            : CHANNEL_WIDTH_20;
     if (init_width != CHANNEL_WIDTH_20)
       init_offset = 1; /* HT40+ by default */
     if (const char *o = std::getenv("DEVOURER_HOP_OFFSET"))
@@ -520,14 +550,68 @@ int main(int argc, char **argv) {
   if (const char *p = std::getenv("DEVOURER_TX_PWR"))
     rtlDevice->SetTxPower(static_cast<uint8_t>(std::strtol(p, nullptr, 0)));
 
-  /* DEVOURER_TX_PKT_OFSET=N — (Jaguar2 8822B/8821C) default per-packet
-   * TXPWR_OFSET LUT step written into every TX descriptor: 0=none, 1=-3dB,
-   * 2=-7dB, 3=-11dB, 4=+3dB, 5=+6dB. The measurement driver for the descriptor
-   * per-packet power lever (tests/txpkt_pwr_ofset_onair.sh). */
-#if defined(DEVOURER_HAVE_JAGUAR2)
+  /* DEVOURER_TX_PWR_OFFSET_QDB=N — quarter-dB offset relative to the
+   * efuse-calibrated per-rate/per-path default (SetTxPowerOffsetQdb).
+   * Unlike DEVOURER_TX_PWR (flat: both paths forced to ONE index, per-rate
+   * diffs zeroed) this PRESERVES the per-path trim and by-rate shape —
+   * e.g. -44 on an 8822e shifts both OFDM refs down 11 dB while keeping
+   * the path-A/path-B calibration spread. Recorded now, applied at
+   * bring-up. */
+  if (const char *p = std::getenv("DEVOURER_TX_PWR_OFFSET_QDB"))
+    rtlDevice->SetTxPowerOffsetQdb(
+        static_cast<int>(std::strtol(p, nullptr, 0)));
+
+  /* DEVOURER_TX_PKT_OFSET=N — default per-packet TX-power LUT step written
+   * into every TX descriptor: 0=none, 1=-3dB, 2=-7dB, 3=-11dB, 4=+3dB,
+   * 5=+6dB. One env var, four families: Jaguar2 8822B/8821C
+   * (descriptor TXPWR_OFSET, on-air-confirmed), Jaguar1 8814A (dword5
+   * [30:28], same LUT), Jaguar3 8822C/8822E (the step's nominal dB is
+   * mapped onto a programmable 0x1e70 offset bank), and Kestrel 8852B/8852C
+   * (no descriptor field — the nominal dB rides the session fixed-dBm
+   * offset, which a radiotap DBM_TX_POWER still overrides per frame). The
+   * measurement driver for tests/txpkt_pwr_ofset_onair.sh. */
   if (const char *p = std::getenv("DEVOURER_TX_PKT_OFSET")) {
+    const uint8_t step = static_cast<uint8_t>(std::strtol(p, nullptr, 0));
+#if defined(DEVOURER_HAVE_JAGUAR2)
     if (jag2)
-      jag2->SetTxPacketPowerStep(static_cast<uint8_t>(std::strtol(p, nullptr, 0)));
+      jag2->SetTxPacketPowerStep(step);
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR1)
+    if (jag)
+      jag->SetTxPacketPowerStep(step);
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
+    if (jag3)
+      jag3->SetTxPacketPowerOffsetQdb(4 *
+                                      devourer::txpkt_pwr_db_for_step(step));
+#endif
+    if (rtlDevice->GetAdapterCaps().generation ==
+        devourer::ChipGeneration::Kestrel)
+      rtlDevice->SetTxPowerOffsetQdb(4 *
+                                     devourer::txpkt_pwr_db_for_step(step));
+    (void)step;
+  }
+
+  /* DEVOURER_TX_PKT_PWR_QDB=N — Jaguar3-only fine-grained per-packet power
+   * default in quarter-dB (the bank mechanism is continuous, unlike the LUT
+   * families). Overrides DEVOURER_TX_PKT_OFSET's mapped value when both are
+   * set. */
+#if defined(DEVOURER_HAVE_JAGUAR3)
+  if (const char *p = std::getenv("DEVOURER_TX_PKT_PWR_QDB")) {
+    if (jag3)
+      jag3->SetTxPacketPowerOffsetQdb(
+          static_cast<int>(std::strtol(p, nullptr, 0)));
+  }
+#endif
+
+  /* DEVOURER_TX_FAST_PWR_QDB=N — Jaguar1 fast global BB-swing power offset
+   * (FastSetTxPowerOffsetQdb): 0.5 dB steps, -12..+2 dB, 1-4 BB writes.
+   * Per-burst, NOT per-packet — the compensating lever for the 8812A/8821A,
+   * whose descriptors have no per-frame power field. */
+#if defined(DEVOURER_HAVE_JAGUAR1)
+  if (const char *p = std::getenv("DEVOURER_TX_FAST_PWR_QDB")) {
+    if (jag)
+      jag->FastSetTxPowerOffsetQdb(static_cast<int>(std::strtol(p, nullptr, 0)));
   }
 #endif
 
@@ -560,10 +644,16 @@ int main(int argc, char **argv) {
     }
   }
 
+  /* DEVOURER_BAND=6 -> 6 GHz (WiFi 6E, RTL8852C tri-band); band can't be
+   * inferred from the channel number (6G/5G channel numbers collide). */
+  uint8_t tx_band = 0;
+  if (const char *b = std::getenv("DEVOURER_BAND"))
+    tx_band = static_cast<uint8_t>(std::atoi(b));
   rtlDevice->InitWrite(SelectedChannel{
       .Channel = static_cast<uint8_t>(channel),
       .ChannelOffset = init_offset,
-      .ChannelWidth = init_width});
+      .ChannelWidth = init_width,
+      .Band = tx_band});
 
   write_sentinel(0xBEEF, "post-init/pre-TX");
   devourer::Ev(*g_ev, "init.timing")
@@ -861,6 +951,8 @@ int main(int argc, char **argv) {
   std::vector<int> hop_channels;
   long hop_dwell = 50;
   long hop_rounds = 0;
+  long hop_slot_ms = 0;
+  std::optional<devourer::HopSchedule> hop_schedule;
   /* 0 = full SetMonitorChannel; 1 = FastRetune (cached RF writes, fastest);
    * 2 = FastRetune without the RF cache (sw_chnl only, for A/B measurement). */
   const int hop_fast =
@@ -879,6 +971,21 @@ int main(int argc, char **argv) {
       hop_dwell = std::strtol(e, nullptr, 0);
       if (hop_dwell < 1) hop_dwell = 1;
     }
+    if (const char *e = std::getenv("DEVOURER_HOP_SLOT_MS")) {
+      hop_slot_ms = std::strtol(e, nullptr, 0);
+      if (hop_slot_ms < 1)
+        throw std::invalid_argument("DEVOURER_HOP_SLOT_MS must be positive");
+      if (std::getenv("DEVOURER_HOP_DWELL_FRAMES"))
+        throw std::invalid_argument(
+            "hop slot and frame dwell are mutually exclusive");
+    }
+    if (const char *seed = std::getenv("DEVOURER_HOP_SEED"))
+      hop_schedule.emplace(devourer::HopSchedule::parse_seed(seed));
+    else if (hop_slot_ms > 0)
+      // Slot-mode sequential hopping still goes through a (keyless) schedule so
+      // it emits the sync marker a lockstep RX needs — same channels[slot % n]
+      // order as before, now trackable. Frame-dwell hopping is unchanged.
+      hop_schedule.emplace(devourer::HopSchedule::sequential());
     if (const char *e = std::getenv("DEVOURER_HOP_ROUNDS")) {
       hop_rounds = std::strtol(e, nullptr, 0);
       if (hop_rounds < 0) hop_rounds = 0;
@@ -978,6 +1085,9 @@ int main(int argc, char **argv) {
   long frames_in_dwell = 0;
   const long total_dwells =
       hop_rounds > 0 ? hop_rounds * static_cast<long>(hop_channels.size()) : 0;
+  const auto hop_start = std::chrono::steady_clock::now();
+  const uint32_t hop_epoch = static_cast<uint32_t>(
+      std::chrono::high_resolution_clock::now().time_since_epoch().count());
 
   long tx_count = 0;
   long consec_fail = 0;
@@ -1073,58 +1183,6 @@ int main(int argc, char **argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
-  /* DEVOURER_BB_OVERRIDE="18e8=00708000,41e8=009e0000,..." — one-shot raw BB
-   * register override applied AFTER all bring-up/SetTxMode/SetTxPower (so it
-   * wins), just before the send loop. `reg=hexbytes` where hexbytes are the
-   * EXACT on-wire data bytes (usbmon order — no byte-swap), 1/2/4 bytes. Used
-   * to test whether forcing devourer's TX-path registers to the vendor kernel's
-   * captured end-state values recovers high-MCS TX (8822e MCS4+ investigation).
-   * Each write is read back (bmRequestType 0xC0) and logged for verification. */
-  /* DEVOURER_BB_DUMP="18e8,41e8" — read+log these BB regs right before the send
-   * loop (final bring-up state), to see whether an in-code fix survived to TX. */
-  if (const char *dp = std::getenv("DEVOURER_BB_DUMP")) {
-    std::string spec(dp); size_t pos = 0;
-    while (pos < spec.size()) {
-      size_t comma = spec.find_first_of(",;", pos);
-      std::string tok = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-      pos = (comma == std::string::npos) ? spec.size() : comma + 1;
-      if (tok.empty()) continue;
-      uint16_t reg = static_cast<uint16_t>(std::strtol(tok.c_str(), nullptr, 16));
-      unsigned char rb[4] = {0, 0, 0, 0};
-      int rrc = libusb_control_transfer(handle, 0xC0, 5, reg, 0, rb, 4, 500);
-      logger->info("BB_DUMP 0x{:04x} = {:02x}{:02x}{:02x}{:02x} (rrc={})",
-                   reg, rb[0], rb[1], rb[2], rb[3], rrc);
-    }
-  }
-
-  if (const char *ov = std::getenv("DEVOURER_BB_OVERRIDE")) {
-    std::string spec(ov);
-    size_t pos = 0;
-    while (pos < spec.size()) {
-      size_t comma = spec.find_first_of(",;", pos);
-      std::string tok = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-      pos = (comma == std::string::npos) ? spec.size() : comma + 1;
-      size_t eq = tok.find('=');
-      if (eq == std::string::npos) continue;
-      uint16_t reg = static_cast<uint16_t>(std::strtol(tok.substr(0, eq).c_str(), nullptr, 16));
-      std::string hx = tok.substr(eq + 1);
-      unsigned char bytes[4] = {0, 0, 0, 0};
-      int nb = 0;
-      for (size_t i = 0; i + 1 < hx.size() && nb < 4; i += 2)
-        bytes[nb++] = static_cast<unsigned char>(std::strtol(hx.substr(i, 2).c_str(), nullptr, 16));
-      int wrc = libusb_control_transfer(handle, 0x40, 5, reg, 0, bytes, nb, 500);
-      unsigned char rb[4] = {0, 0, 0, 0};
-      int rrc = libusb_control_transfer(handle, 0xC0, 5, reg, 0, rb, nb, 500);
-      char wbuf[16] = {0}, rbuf[16] = {0};
-      for (int i = 0; i < nb; i++) {
-        std::snprintf(wbuf + i * 2, 3, "%02x", bytes[i]);
-        std::snprintf(rbuf + i * 2, 3, "%02x", rb[i]);
-      }
-      logger->info("BB_OVERRIDE 0x{:04x} <= {} (wrc={}) readback={} (rrc={})",
-                   reg, wbuf, wrc, rbuf, rrc);
-    }
-  }
-
   while (!g_devourer_should_stop) {
     if (tx_count == 0) {
       devourer::Ev(*g_ev, "init.timing")
@@ -1154,10 +1212,21 @@ int main(int argc, char **argv) {
     /* Retune at each dwell boundary. The first iteration (frames_in_dwell==0,
      * dwell_no==-1) selects the first hop channel; SetMonitorChannel
      * early-returns if it equals the InitWrite channel. */
-    if (!hop_channels.empty() && frames_in_dwell == 0) {
-      ++dwell_no;
+    uint64_t desired_slot =
+        hop_slot_ms > 0
+            ? static_cast<uint64_t>(
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - hop_start)
+                      .count() /
+                  hop_slot_ms)
+            : static_cast<uint64_t>(dwell_no + (frames_in_dwell == 0 ? 1 : 0));
+    if (!hop_channels.empty() &&
+        ((hop_slot_ms > 0 && desired_slot != static_cast<uint64_t>(dwell_no)) ||
+         (hop_slot_ms == 0 && frames_in_dwell == 0))) {
+      dwell_no = static_cast<long>(desired_slot);
       if (total_dwells > 0 && dwell_no >= total_dwells) break;
-      int ch = hop_channels[dwell_no % hop_channels.size()];
+      int ch = hop_schedule ? hop_schedule->channel(desired_slot, hop_channels)
+                            : hop_channels[desired_slot % hop_channels.size()];
       auto sw0 = std::chrono::steady_clock::now();
       const char *mode = nullptr;
       if (hop_radiotap) {
@@ -1189,14 +1258,35 @@ int main(int argc, char **argv) {
       {
         devourer::Ev ev(*g_ev, "hop.dwell");
         ev.f("dwell", dwell_no)
+            .f("slot", (unsigned long long)desired_slot)
             .f("round", dwell_no / static_cast<long>(hop_channels.size()))
             .f("channel", ch)
             .f("frame", tx_count)
             .f("switch_us", switch_us)
             .f("t_ms", ms_since_start());
+        if (hop_schedule)
+          ev.hexf("seed_fp", hop_schedule->fingerprint(), 8);
         if (mode != nullptr)
           ev.f("mode", mode);
       }
+    }
+    if (hop_schedule && hop_slot_ms > 0) {
+      auto old = devourer::HopSyncMarker::encode({});
+      if (tx_buf.size() >= old.size() &&
+          tx_buf[tx_buf.size() - old.size()] == 221 &&
+          tx_buf[tx_buf.size() - old.size() + 5] == 0x48)
+        tx_buf.resize(tx_buf.size() - old.size());
+      const auto now = std::chrono::steady_clock::now();
+      const uint64_t us = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(now - hop_start)
+              .count());
+      devourer::HopSyncMarker marker{
+          hop_schedule->fingerprint(), hop_epoch,
+          static_cast<uint32_t>(us %
+                                (static_cast<uint64_t>(hop_slot_ms) * 1000)),
+          us / (static_cast<uint64_t>(hop_slot_ms) * 1000)};
+      auto wire = devourer::HopSyncMarker::encode(marker);
+      tx_buf.insert(tx_buf.end(), wire.begin(), wire.end());
     }
     if (stbc_toggle) {
       devourer::TxMode m = tx_mode_base;
@@ -1264,7 +1354,8 @@ int main(int argc, char **argv) {
       rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
       ++tx_count;
     }
-    if (!hop_channels.empty() && ++frames_in_dwell >= hop_dwell)
+    if (!hop_channels.empty() && hop_slot_ms == 0 &&
+        ++frames_in_dwell >= hop_dwell)
       frames_in_dwell = 0;
     if (tx_count <= 10 || tx_count % 500 == 0) {
       devourer::Ev(*g_ev, "tx.frame").f("n", tx_count).f("rc", rc);
@@ -1326,6 +1417,19 @@ int main(int argc, char **argv) {
   for (auto &th : tx_aux)
     if (th.joinable())
       th.join();
+
+  { /* Final TX-submission tally — the periodic tx.stats above emits only
+     * every 500 frames, so a short run would otherwise never report its true
+     * count (test scripts read the last tx.stats as the frames-sent
+     * denominator). */
+    auto ts = rtlDevice->GetTxStats();
+    devourer::Ev(*g_ev, "tx.stats")
+        .f("submitted", (unsigned long long)ts.submitted)
+        .f("failed", (unsigned long long)ts.failed)
+        .f("was_timeout", ts.last_was_timeout ? 1 : 0)
+        .f("last_rc", ts.last_error_rc)
+        .f("final", 1);
+  }
 
   /* Bounded hop mode (DEVOURER_HOP_ROUNDS>0) reaches here when its rounds
    * complete; the signal and back-off paths also fall through. */

@@ -25,6 +25,12 @@ option(DEVOURER_JAGUAR2_8822B "RTL8822BU (Jaguar2, rtl8822b, 2T2R USB)"         
 option(DEVOURER_JAGUAR2_8821C "RTL8811CU / 8821CU (Jaguar2, rtl8821c, 1T1R)"    ON)
 option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          ON)
 option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
+# Kestrel — the Wi-Fi 6 / 802.11ax generation (Realtek "G6 phl" architecture,
+# vendor trees reference/rtl8852bu + reference/rtl8852cu): monitor RX, TX
+# injection and channel/BW on-air validated on both chips (see
+# src/kestrel/CLAUDE.md).
+option(DEVOURER_KESTREL_8852B "RTL8852BU / 8832BU (Kestrel 11ax, G6)"           ON)
+option(DEVOURER_KESTREL_8852C "RTL8852CU / 8832CU (Kestrel 11ax, G6)"           ON)
 # PCIe transport (vfio-pci). Linux-only. The transport implements the HalMAC-
 # generation (Jaguar2/3) 88xx buffer-descriptor DMA rings; the RTL8821CE is
 # the only chip with a PCIe bring-up implemented + hardware-validated so far,
@@ -69,12 +75,18 @@ if(DEVOURER_JAGUAR3_8822C OR DEVOURER_JAGUAR3_8822E)
 else()
     set(DEVOURER_JAGUAR3 OFF)
 endif()
-if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3_8822C
-   AND NOT DEVOURER_JAGUAR3_8822E)
+# Convenience: the shared Kestrel HAL compiles when either variant is on.
+if(DEVOURER_KESTREL_8852B OR DEVOURER_KESTREL_8852C)
+    set(DEVOURER_KESTREL ON)
+else()
+    set(DEVOURER_KESTREL OFF)
+endif()
+if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3
+   AND NOT DEVOURER_KESTREL)
     message(FATAL_ERROR
         "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
         "DEVOURER_JAGUAR2_8822B / DEVOURER_JAGUAR2_8821C / DEVOURER_JAGUAR3_8822C "
-        "/ DEVOURER_JAGUAR3_8822E.")
+        "/ DEVOURER_JAGUAR3_8822E / DEVOURER_KESTREL_8852B / DEVOURER_KESTREL_8852C.")
 endif()
 if(DEVOURER_PCIE)
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -105,6 +117,8 @@ add_library(devourer
     hal/basic_types.h
     hal/hal_com_reg.h
     src/ieee80211_radiotap.h
+    src/HalmacCfgParam.cpp
+    src/HalmacCfgParam.h
     src/ParsedRadioPacket.cpp
     src/Radiotap.c
     src/RadiotapBuilder.cpp
@@ -134,12 +148,33 @@ add_library(devourer
     src/LinkHealth.cpp
     src/LinkHealth.h
     src/RxQuality.h
+    src/chanmig/ChannelScore.cpp
+    src/chanmig/ChannelScore.h
+    src/chanmig/MigGate.cpp
+    src/chanmig/MigGate.h
+    src/chanmig/ChannelDef.h
+    src/chanmig/ActiveLink.h
+    src/chanmig/EvidenceStore.h
+    src/chanmig/ScanPlan.h
+    src/chanmig/SurveyRecord.h
+    src/chanmig/SurveyJsonl.h
+    src/chanmig/JsonlLite.h
+    src/chanmig/MigTypes.h
+    src/chanmig/MigWire.h
+    src/chanmig/MigConfig.h
+    src/chanmig/MigClock.h
+    src/chanmig/MigProposer.h
+    src/chanmig/MigResponder.h
     src/IRtlDevice.h
     src/SignalStop.cpp
     src/SignalStop.h
     src/WiFiDriver.cpp
     src/WiFiDriver.h
     src/registry_priv.h
+    # LA-mode (phydm logic-analyzer) IQ capture — one implementation serves
+    # all three generations (LaRegs carries the per-chip parameters).
+    src/LaCapture.cpp
+    src/LaCapture.h
     # phydm check_positive table walker — shared by Jaguar1 and Jaguar2
     # (both use the older addr/value + check_positive table format).
     src/PhyTableLoader.cpp
@@ -266,6 +301,7 @@ if(DEVOURER_JAGUAR3)
         src/jaguar3/HalmacJaguar3MacInit.cpp src/jaguar3/HalmacJaguar3MacInit.h
         src/jaguar3/HalmacJaguar3Regs.h
         src/jaguar3/RadioManagementJaguar3.cpp src/jaguar3/RadioManagementJaguar3.h
+        src/jaguar3/PhydmRuntimeJaguar3.cpp src/jaguar3/PhydmRuntimeJaguar3.h
         src/jaguar3/FrameParserJaguar3.h
         src/jaguar3/PhyTableLoaderJaguar3.cpp src/jaguar3/PhyTableLoaderJaguar3.h
         src/jaguar3/Phy8822cTables.cpp
@@ -290,6 +326,133 @@ if(DEVOURER_JAGUAR3_8822E)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR3_8822E=1)
 endif()
 
+# --- Kestrel (Wi-Fi 6 / 802.11ax: RTL8852BU / RTL8852CU) ---
+# Fourth generation, ported from the vendor "G6 phl" trees (reference/
+# rtl8852bu, reference/rtl8852cu): mac_ax MAC/FW plane, halbb PHY tables,
+# halrf calibration. Dispatched PID-first in WiFiDriver (the 0x00FC byte is
+# R_AX_SYS_CHIPINFO on this silicon — see src/kestrel/ChipVariant.h). Shared
+# core below; per-variant firmware blobs + tables live in their variant
+# blocks.
+if(DEVOURER_KESTREL)
+    target_sources(devourer PRIVATE
+        src/kestrel/ChipVariant.h
+        src/kestrel/KestrelUsbIds.h
+        src/kestrel/MacRegAx.h
+        src/kestrel/HalKestrel.cpp src/kestrel/HalKestrel.h
+        src/kestrel/KestrelFw.cpp src/kestrel/KestrelFw.h
+        src/kestrel/KestrelFwSched.cpp
+        src/kestrel/KestrelLe.h
+        src/kestrel/RtlKestrelDevice.cpp src/kestrel/RtlKestrelDevice.h)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_KESTREL=1)
+endif()
+
+if(DEVOURER_KESTREL_8852B)
+    target_sources(devourer PRIVATE
+        # Generated by tools/extract_8852b_fw.py (two NICCE images, cut-selected
+        # at runtime: CBV -> u2, CCV+ -> u3). Consumed by KestrelFw.
+        hal/hal8852b_fw.c hal/hal8852b_fw.h)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_KESTREL_8852B=1)
+endif()
+
+if(DEVOURER_KESTREL_8852C)
+    target_sources(devourer PRIVATE
+        # Generated by tools/extract_8852c_fw.py (two NIC images, cut-selected
+        # at runtime: CAV -> u1, CBV+ -> u2).
+        hal/hal8852c_fw.c hal/hal8852c_fw.h)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_KESTREL_8852C=1)
+endif()
+
+# Vendored halbb/halrf G6 planes — Realtek's baseband + RF-calibration C
+# compiled VERBATIM behind a thin shim (hal/halbb/hal_headers_le.h supplies a
+# minimal PHL surface) + a C glue layer (kestrel_halbb_glue.h /
+# kestrel_halrf_glue.h), instead of hand-transcribed C++. One chip-agnostic
+# core (vendored from reference/rtl8852cu by tools/vendor_hal{bb,rf}_8852c.sh)
+# carries the vendor's own per-chip runtime dispatch; the per-chip backends
+# (halbb_8852b/halrf_8852b from reference/rtl8852bu, halbb_8852c/halrf_8852c
+# from reference/rtl8852cu) join it per the DEVOURER_KESTREL_* options. All
+# compilers: the vendor C is portable (audited: no GNU-only constructs); the
+# dead-code stripping is -ffunction-sections/--gc-sections on GNU/Clang and
+# /Gy + /OPT:REF on MSVC.
+if(DEVOURER_KESTREL)
+    if(MSVC)
+        set(_kestrel_vendor_cflags /W0 /Gy)
+    else()
+        set(_kestrel_vendor_cflags -w -ffunction-sections -fdata-sections)
+    endif()
+
+    file(GLOB KESTREL_HALBB_C "${CMAKE_CURRENT_SOURCE_DIR}/hal/halbb/g6/vendor/*.c")
+    file(GLOB KESTREL_HALRF_C "${CMAKE_CURRENT_SOURCE_DIR}/hal/halrf/g6/vendor/*.c")
+    if(DEVOURER_KESTREL_8852B)
+        file(GLOB _halbb_8852b "${CMAKE_CURRENT_SOURCE_DIR}/hal/halbb/g6/vendor/halbb_8852b/*.c")
+        file(GLOB _halrf_8852b "${CMAKE_CURRENT_SOURCE_DIR}/hal/halrf/g6/vendor/halrf_8852b/*.c")
+        list(APPEND KESTREL_HALBB_C ${_halbb_8852b})
+        list(APPEND KESTREL_HALRF_C ${_halrf_8852b})
+        list(APPEND _kestrel_halbb_defs CONFIG_RTL8852B=1 BB_8852B_SUPPORT=1)
+        list(APPEND _kestrel_halrf_defs CONFIG_RTL8852B=1 RF_8852B_SUPPORT=1)
+    endif()
+    if(DEVOURER_KESTREL_8852C)
+        file(GLOB _halbb_8852c "${CMAKE_CURRENT_SOURCE_DIR}/hal/halbb/g6/vendor/halbb_8852c/*.c")
+        file(GLOB _halrf_8852c "${CMAKE_CURRENT_SOURCE_DIR}/hal/halrf/g6/vendor/halrf_8852c/*.c")
+        list(APPEND KESTREL_HALBB_C ${_halbb_8852c})
+        list(APPEND KESTREL_HALRF_C ${_halrf_8852c})
+        list(APPEND _kestrel_halbb_defs CONFIG_RTL8852C=1 BB_8852C_SUPPORT=1)
+        list(APPEND _kestrel_halrf_defs CONFIG_RTL8852C=1 RF_8852C_SUPPORT=1)
+    endif()
+
+    add_library(kestrel_halbb OBJECT
+        ${KESTREL_HALBB_C}
+        hal/halbb/g6/kestrel_halbb_glue.c
+        hal/halbb/g6/kestrel_halbb_helpers.c)
+    set_target_properties(kestrel_halbb PROPERTIES C_STANDARD 11
+        POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(kestrel_halbb PRIVATE
+        hal/halbb hal/halbb/g6
+        hal/halbb/g6/vendor
+        hal/halbb/g6/vendor/halbb_8852b hal/halbb/g6/vendor/halbb_8852c)
+    # HALBB_DBCC_SUPPORT / HALBB_FW_OFLD_SUPPORT / HALBB_DBG_TRACE_SUPPORT are
+    # #ifdef-tested in the vendor code, so being OFF means staying UNDEFINED —
+    # a `=0` define still compiles the feature branches in (with fw-offload
+    # compiled in, the 8852B BBCR writer routes every table write through the
+    # fwofld wrapper and applies nothing).
+    target_compile_definitions(kestrel_halbb PRIVATE
+        ${_kestrel_halbb_defs}
+        PLATFOM_IS_LITTLE_ENDIAN=1)
+    target_compile_options(kestrel_halbb PRIVATE ${_kestrel_vendor_cflags})
+    target_sources(devourer PRIVATE $<TARGET_OBJECTS:kestrel_halbb>)
+    # C++ side includes only kestrel_halbb_glue.h (opaque handle + bridge).
+    target_include_directories(devourer PRIVATE hal/halbb/g6)
+    # Strip unreferenced vendored sections at link. ld64 (macOS) spells it
+    # -dead_strip; MSVC's /OPT:REF is implied in Release via /Gy.
+    if(APPLE)
+        target_link_options(devourer INTERFACE -Wl,-dead_strip)
+    elseif(NOT MSVC)
+        target_link_options(devourer INTERFACE -Wl,--gc-sections)
+    endif()
+
+    # Vendored halrf-G6 RF calibrations (DACK / RX-DCK / IQK / LCK-RCK / efuse
+    # trim + TSSI-DE load), compiled VERBATIM behind the SAME shim
+    # (hal/halrf/hal_headers_le.h just reuses the halbb one + the bridge's
+    # RF-register plane). Driven via kestrel_halrf_glue.h.
+    add_library(kestrel_halrf OBJECT
+        ${KESTREL_HALRF_C}
+        hal/halrf/g6/kestrel_halrf_glue.c
+        hal/halrf/g6/kestrel_halrf_helpers.c)
+    set_target_properties(kestrel_halrf PROPERTIES C_STANDARD 11
+        POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(kestrel_halrf PRIVATE
+        hal/halrf hal/halbb hal/halbb/g6
+        hal/halrf/g6/vendor
+        hal/halrf/g6/vendor/halrf_8852b hal/halrf/g6/vendor/halrf_8852c
+        hal/halbb/g6/vendor
+        hal/halbb/g6/vendor/halbb_8852b hal/halbb/g6/vendor/halbb_8852c)
+    target_compile_definitions(kestrel_halrf PRIVATE
+        ${_kestrel_halrf_defs} PLATFOM_IS_LITTLE_ENDIAN=1
+        KESTREL_HALRF_PRESENT=1)
+    target_compile_options(kestrel_halrf PRIVATE ${_kestrel_vendor_cflags})
+    target_sources(devourer PRIVATE $<TARGET_OBJECTS:kestrel_halrf>)
+    target_include_directories(devourer PRIVATE hal/halrf/g6)
+endif()
+
 
 # pcieprobe — staged PCIe bring-up driver for the RTL8821CE milestones
 # (chip-id/MMIO sanity -> power-on + EFUSE -> firmware DLFW). rxdemo's
@@ -302,6 +465,16 @@ if(DEVOURER_PCIE)
     target_link_libraries(pcieprobe PUBLIC devourer)
 endif()
 
+# kestrelprobe — staged USB bring-up prober for the Kestrel (RTL8852B/C):
+# AX identity (die-id/cut) -> power-on + EFUSE -> firmware download, the
+# pcieprobe sibling. Validates each layer before the demos use it.
+if(DEVOURER_KESTREL)
+    add_executable(kestrelprobe
+        examples/kestrelprobe/main.cpp
+    )
+    target_link_libraries(kestrelprobe PUBLIC devourer PRIVATE PkgConfig::libusb)
+endif()
+
 # reglat — register round-trip latency microbench (USB ctrl-xfer vs PCIe MMIO).
 # Times RtlAdapter::rtw_read32; the PCIe path compiles only with DEVOURER_PCIE
 # (inherited via the devourer PUBLIC DEVOURER_HAVE_PCIE define). See its header.
@@ -311,6 +484,7 @@ target_link_libraries(reglat PUBLIC devourer PRIVATE PkgConfig::libusb)
 add_executable(rxdemo
     examples/rx/main.cpp
     examples/common/env_config.cpp
+    examples/common/usb_select.cpp
 )
 target_link_libraries(rxdemo PUBLIC devourer)
 target_include_directories(rxdemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
@@ -321,6 +495,17 @@ add_executable(txdemo
 )
 target_link_libraries(txdemo PUBLIC devourer PRIVATE PkgConfig::libusb)
 target_include_directories(txdemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+
+# dwell-1 A/B injection over the firmware channel switch (issue #272 data
+# plane): one admitted data-frame opportunity per wall-clock slot, with
+# bounded admission so a frame for context A can never air on B.
+add_executable(dwelltx
+    examples/dwelltx/main.cpp
+    examples/common/env_config.cpp
+    examples/common/usb_select.cpp
+)
+target_link_libraries(dwelltx PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(dwelltx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 # Pre-modulator subcarrier PoC: transmits PSDU bytes shaped by
 # tools/precoder/encode_subcarriers.py so chosen OFDM data subcarriers carry
@@ -418,6 +603,30 @@ target_include_directories(sense PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/co
 # enumerate and init green but read stochastic EFUSE garbage / never boot the
 # MCU (the #205 failure mode). Pure CLI; exit code carries the verdict. See
 # docs/adapter-doctor.md.
+# chanmig — the coordinated channel-migration endpoint (ground proposes /
+# drone commits). Duplex RX+TX on one adapter, the pure Mig* state machines
+# driving an authenticated control protocol over own 802.11 frames.
+add_executable(chanmig
+    examples/chanmig/main.cpp
+    examples/common/env_config.cpp
+    examples/common/usb_select.cpp
+)
+target_link_libraries(chanmig PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(chanmig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+
+# chanscout — the passive second-adapter ground spectrum scout (adaptive
+# channel migration): plan-driven candidate dwells with counter-hygiene
+# discard barriers, emitting versioned survey.dwell / scout.health JSONL
+# while a separate primary receiver owns the video channel. Pure logic in
+# src/chanmig/ (selftested); this binary is the device I/O shell.
+add_executable(chanscout
+    examples/chanscout/main.cpp
+    examples/common/env_config.cpp
+    examples/common/usb_select.cpp
+)
+target_link_libraries(chanscout PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(chanscout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+
 add_executable(doctor
     examples/doctor/main.cpp
 )
@@ -453,6 +662,71 @@ add_executable(ToneMaskSelftest
 target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
+
+# Headless guard for the active idle-noise-floor math (src/NoiseFloorMath.h): the
+# phydm sign/pwdb helpers the Jaguar1 0x0FA0 debug-port measurement uses. Pure
+# math, header-only.
+add_executable(NoiseFloorMathSelftest tests/noise_floor_math_selftest.cpp)
+target_include_directories(NoiseFloorMathSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_test(NAME noise_floor_math COMMAND NoiseFloorMathSelftest)
+
+# Headless round-trip guard for the 802.11ax HE TX radiotap path
+# (src/RadiotapBuilder.cpp build_he + the shared Radiotap.c field-23 size entry
+# + src/ieee80211_radiotap.h HE masks): parse an HE spec -> build -> iterate ->
+# decode, mirroring the Kestrel send_packet HE parser. Generation-neutral core.
+add_executable(HeRadiotapSelftest
+    tests/he_radiotap_selftest.cpp
+)
+target_link_libraries(HeRadiotapSelftest PRIVATE devourer)
+target_include_directories(HeRadiotapSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_test(NAME he_radiotap COMMAND HeRadiotapSelftest)
+
+# Headless round-trip guard for the 802.11ax Trigger frame path (src/TriggerTwt.h
+# build_basic_trigger + he_ru_alloc, src/TriggerParse.h parse_trigger): build ->
+# parse a Basic Trigger, RU-allocation golden vectors. Generation-neutral (the
+# fw F2P encoders are guarded separately below); the on-air half (witness decode
+# of an fw-aired trigger) is tier-A validation.
+add_executable(TriggerParseSelftest tests/trigger_parse_selftest.cpp)
+target_compile_features(TriggerParseSelftest PRIVATE cxx_std_20)
+target_include_directories(TriggerParseSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME trigger_parse COMMAND TriggerParseSelftest)
+
+# Headless guard for the Kestrel (11ax) RX descriptor parser
+# (src/kestrel/FrameParserKestrel.h): rxd field extraction + aggregate walk
+# (on-air decode is hardware-validated out-of-band). Compiled only when a
+# Kestrel variant is built (the header is under a compiled group).
+if(DEVOURER_KESTREL)
+    add_executable(KestrelRxParseSelftest tests/kestrel_rxparse_selftest.cpp)
+    target_link_libraries(KestrelRxParseSelftest PRIVATE devourer)
+    target_include_directories(KestrelRxParseSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME kestrel_rxparse COMMAND KestrelRxParseSelftest)
+
+    add_executable(KestrelTxReportSelftest tests/kestrel_txreport_selftest.cpp)
+    target_link_libraries(KestrelTxReportSelftest PRIVATE devourer)
+    target_include_directories(KestrelTxReportSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME kestrel_txreport COMMAND KestrelTxReportSelftest)
+
+    # Golden-bytes guard for the trigger-UL + TWT H2C content encoders
+    # (src/kestrel/SchedEncode.h): each config's emitted LE dwords vs the
+    # hand-computed vendor SET_WORD layout (F2P v0/v1, TWT, UL_FIXINFO).
+    add_executable(KestrelSchedSelftest tests/kestrel_sched_selftest.cpp)
+    target_compile_features(KestrelSchedSelftest PRIVATE cxx_std_20)
+    target_include_directories(KestrelSchedSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME kestrel_sched COMMAND KestrelSchedSelftest)
+endif()
+
+add_executable(RadiotapTxFlagsSelftest tests/radiotap_txflags_selftest.cpp)
+target_compile_features(RadiotapTxFlagsSelftest PRIVATE cxx_std_20)
+target_link_libraries(RadiotapTxFlagsSelftest PRIVATE devourer)
+add_test(NAME radiotap_txflags COMMAND RadiotapTxFlagsSelftest)
 
 # Headless guard for the burst-TDMA example's pure logic (examples/tdma/tdma.h):
 # the TsfClock host<->TSF least-squares fit, the frame-tag round-trip, and the
@@ -502,6 +776,10 @@ add_executable(SweepSpecSelftest
 target_link_libraries(SweepSpecSelftest PRIVATE devourer)
 
 add_test(NAME sweep_spec_math COMMAND SweepSpecSelftest)
+
+add_executable(HopScheduleSelftest tests/hop_schedule_selftest.cpp)
+target_link_libraries(HopScheduleSelftest PRIVATE devourer)
+add_test(NAME hop_schedule_math COMMAND HopScheduleSelftest)
 
 # Headless guard for the TX-power offset quantization (src/TxPower.h) — the
 # qdB->index-step rounding/clamping behind SetTxPowerOffsetQdb, so a rounding
@@ -564,6 +842,17 @@ target_link_libraries(AdapterCapsSelftest PRIVATE devourer)
 
 add_test(NAME adapter_caps_derive COMMAND AdapterCapsSelftest)
 
+# Headless guard for the per-UE RX attribution seed (src/cell/UeRxAttribution.h)
+# — TA extraction over the addr2-carrying frame types, the per-TA windowed
+# aggregate folding, drain semantics, and the bounded-table eviction accounting
+# the M1 UeRegistry will build on.
+add_executable(UeRxAttributionSelftest
+    tests/ue_rx_attribution_selftest.cpp
+)
+target_link_libraries(UeRxAttributionSelftest PRIVATE devourer)
+
+add_test(NAME ue_rx_attribution_derive COMMAND UeRxAttributionSelftest)
+
 # Headless guard for the TsfSync one-way time-distribution fit (src/TsfSync.h):
 # skew/offset recovery from beacon {egress, arrival} TSF pairs, clock
 # translation, the local 32-bit TSF wrap, and the Packet::TxEgressTsf pick.
@@ -585,6 +874,18 @@ if(DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
     target_include_directories(TxPktPwrSelftest PRIVATE src)
     add_test(NAME txpkt_pwr_quant COMMAND TxPktPwrSelftest)
 endif()
+
+# Headless guard for the Jaguar3 per-packet power-bank planner (the
+# TxPktPwrBanks.h LRU/encode policy) + the descriptor bit positions of
+# TXPWR_OFSET_TYPE (8822C, incl. the bit30 ANTSEL_EN_V1 hazard) and the 8814A
+# TX_POWER_OFFSET. The planner header is HAL-agnostic; the descriptor parts
+# self-gate on the DEVOURER_HAVE_JAGUAR1/3 defines the library exports.
+add_executable(TxPktBankSelftest
+    tests/txpkt_bank_selftest.cpp
+)
+target_link_libraries(TxPktBankSelftest PRIVATE devourer)
+target_include_directories(TxPktBankSelftest PRIVATE src)
+add_test(NAME txpkt_bank_policy COMMAND TxPktBankSelftest)
 
 # Headless guard for the USB TX-aggregation URB packing (src/TxAggPlan.h) —
 # block alignment, the never-a-bulk-multiple boundary shim, the OQT
@@ -609,6 +910,68 @@ target_link_libraries(BfReportDecodeSelftest PRIVATE devourer)
 
 add_test(NAME bf_report_decode COMMAND BfReportDecodeSelftest)
 
+# Headless guards for the adaptive-channel-migration data model (src/chanmig/):
+# ChannelDef grid legality + the scan-plan grammar; the pure dwell scheduler
+# (coverage, revisit priority, starvation, round advancement); and the
+# evidence-store fold path (counter wrap, staleness, width coverage, mixed
+# calibration domains) + the survey.dwell JSONL round-trip + the JsonlLite
+# event-line scanner. A regression here surfaces as a silently-wrong channel
+# ranking on-air, so it fails `ctest` instead.
+add_executable(ChanDefSelftest tests/chan_def_selftest.cpp)
+target_link_libraries(ChanDefSelftest PRIVATE devourer)
+add_test(NAME chan_def_grid COMMAND ChanDefSelftest)
+
+add_executable(ScanPlanSelftest tests/scan_plan_selftest.cpp)
+target_link_libraries(ScanPlanSelftest PRIVATE devourer)
+add_test(NAME scan_plan_policy COMMAND ScanPlanSelftest)
+
+add_executable(SurveyAggSelftest tests/survey_agg_selftest.cpp)
+target_link_libraries(SurveyAggSelftest PRIVATE devourer)
+add_test(NAME survey_aggregate COMMAND SurveyAggSelftest)
+
+# The #277 gate: the RecommendEngine's two-leg policy over the issue's ten
+# offline scenarios (recommend / hold-healthy / weak!=congestion / saturation
+# / broad-degradation / overlap ordering / burst no-flap / stale / cooldown /
+# scout-down) plus age/cooldown/tie-break/generation/policy-hash edges.
+add_executable(ChanScoreSelftest tests/chan_score_selftest.cpp)
+target_link_libraries(ChanScoreSelftest PRIVATE devourer)
+add_test(NAME chan_score_policy COMMAND ChanScoreSelftest)
+
+# The #278 wire gate: known-answer bytes + MAC for every migration message,
+# the tamper/truncation sweeps, header rejects, the 96-byte bound, and the
+# ReplayWindow epoch/generation/nonce rules — so the authenticated control
+# protocol's encoding and key derivation can never silently drift.
+add_executable(ChanMigWireSelftest tests/chanmig_wire_selftest.cpp)
+target_link_libraries(ChanMigWireSelftest PRIVATE devourer)
+add_test(NAME chanmig_wire_kat COMMAND ChanMigWireSelftest)
+
+# The #278 convergence gate: the proposer + responder pure state machines
+# coupled through a drop/duplicate/reorder/delay LinkSim, driving the failure
+# matrix — every row must converge both endpoints to a shared channel in
+# {source,target,rescue}, never a lasting split-brain.
+add_executable(ChanMigProtoSelftest tests/chanmig_proto_selftest.cpp)
+target_link_libraries(ChanMigProtoSelftest PRIVATE devourer)
+add_test(NAME chanmig_proto_matrix COMMAND ChanMigProtoSelftest)
+
+# PeerClock: skew recovery + residual-percentile-derived activation guard.
+add_executable(ChanMigClockSelftest tests/chanmig_clock_selftest.cpp)
+target_link_libraries(ChanMigClockSelftest PRIVATE devourer)
+add_test(NAME chanmig_clock_math COMMAND ChanMigClockSelftest)
+
+# The #279 gate: the conservative autonomous-migration policy over the issue's
+# 13-scenario matrix (interferer appears/persists/leaves, burst, herding, rank
+# alternation, all-degrade, out-of-range, saturation, scout-stall, recover-
+# pre-commit, dest-occupied, cap-exhaustion) + mode/operator overrides + the
+# determinism guarantee (every scenario decided twice, identically).
+add_executable(ChanMigGateSelftest tests/chanmig_gate_selftest.cpp)
+target_link_libraries(ChanMigGateSelftest PRIVATE devourer)
+add_test(NAME chanmig_gate_policy COMMAND ChanMigGateSelftest)
+
+# ChanMigReplay: replay a recorded gate-input trace through the SHIPPING
+# MigGate policy (no re-implementation), for the #279 shadow / metrics runs.
+add_executable(ChanMigReplay tests/chanmig_replay_main.cpp)
+target_link_libraries(ChanMigReplay PRIVATE devourer)
+
 # Headless guard for the per-tone interference localizer's detection +
 # frequency-mapping math (tests/rx_tone_localize.py). Pure Python, no hardware:
 # synthetic psi-variance spikes / SNR notches must localize to the right tone
@@ -620,6 +983,16 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/rx_tone_localize.py --self-test
     )
+
+    # Headless guard for the LA-capture CSI math (tools/la_csi.py): synthetic
+    # L-LTF through a known 2-tap channel + CFO + AWGN must locate, correct,
+    # and recover |H(k)| with correlation > 0.99. Skips (77) without numpy.
+    add_test(
+        NAME la_csi_math
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/la_csi.py --selftest
+    )
+    set_tests_properties(la_csi_math PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # --- selftest aggregate ----------------------------------------------------

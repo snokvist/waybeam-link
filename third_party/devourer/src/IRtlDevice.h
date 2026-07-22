@@ -13,6 +13,8 @@
 #include "RxSense.h"
 #include "SelectedChannel.h"
 #include "ThermalStatus.h"
+#include "Sounding.h"
+#include "TriggerTwt.h"
 #include "TxCaps.h"
 #include "TxMode.h"
 #include "TxPower.h"
@@ -230,6 +232,70 @@ public:
   virtual void ClearAmpduMode() {}
   virtual devourer::AmpduMode GetAmpduMode() { return {}; }
 
+  /* 802.11ax trigger-based UL + TWT (src/TriggerTwt.h) — the standards-native
+   * scheduled, contention-free UL access. Kestrel (RTL8852) only: the AP airs
+   * an HE Trigger frame that grants each STA a resource unit and a start time
+   * (SIFS after the trigger), and the STA MAC fires its UL-OFDMA TX at that
+   * instant in hardware. Every method returns false where unsupported (the
+   * Jaguar generations have no HE trigger/TWT firmware surface). */
+
+  /* Air one HE Basic Trigger (UL-OFDMA grant) via the firmware F2P command. */
+  virtual bool SendTrigger(const devourer::TriggerConfig & /*cfg*/) {
+    return false;
+  }
+
+  /* Create/modify a TWT agreement (wake window, interval, absolute target-wake
+   * TSF); TeardownTwt deletes it. The AP owns the timetable. */
+  virtual bool ConfigureTwt(const devourer::TwtConfig & /*cfg*/) { return false; }
+  virtual bool TeardownTwt(const devourer::TwtConfig & /*cfg*/) { return false; }
+  /* Bind/unbind a STA (macid) to a TWT config (add/del/terminate/...). */
+  virtual bool TwtBindSta(const devourer::TwtStaAct & /*act*/) { return false; }
+
+  /* Program the fw-autonomous trigger cadence inside a TWT service period
+   * (TWT-OFDMA). Returns false where the fw lacks the (non-canonical) command —
+   * ConfigureUlOfdma is the canonical fallback. */
+  virtual bool ConfigureTwtOfdma(const devourer::TwtOfdmaConfig & /*cfg*/) {
+    return false;
+  }
+
+  /* Program the production UL-OFDMA scheduler table (UL_FIXINFO). With
+   * mode=tf_periodic the fw airs Triggers autonomously at the configured
+   * interval — the transport-independent scheduled-UL primitive. */
+  virtual bool ConfigureUlOfdma(const devourer::UlOfdmaConfig & /*cfg*/) {
+    return false;
+  }
+
+  /* Register an associated peer STA (a scheduled-UL client): its macid + ADDR_CAM
+   * so a Trigger's per-user grant scores against it. `peer_mac` is the STA's
+   * address, `addr_cam_idx` must be unique per peer. The AP-side companion to
+   * SendTrigger/ConfigureUlOfdma for the end-to-end UL path. Returns false where
+   * unsupported. */
+  virtual bool RegisterPeerSta(const uint8_t /*peer_mac*/[6], uint8_t /*macid*/,
+                               uint8_t /*addr_cam_idx*/) {
+    return false;
+  }
+
+  /* Register an associated HE STA (macid) as a beamformee to sound: program its
+   * per-STA CSI/bf params (nc/nr/ng/cb/cs) + the sounding-status/CSI-buffer maps
+   * so a BFRP to it solicits a decodable compressed-beamforming report. The
+   * AP-side companion to StartSounding. Returns false where unsupported. */
+  virtual bool RegisterBeamformee(const uint8_t /*peer_mac*/[6], uint8_t /*macid*/,
+                                  uint8_t /*addr_cam_idx*/,
+                                  const devourer::StaBfCaps & /*bf*/) {
+    return false;
+  }
+
+  /* Drive one HE sounding: hand the fw the NDPA -> NDP -> BFRP descriptor set (a
+   * BFRP is an 802.11ax Trigger-frame variant) to build and air, soliciting the
+   * beamformee's report as a hardware-scheduled HE TB PPDU (RxAtrib.ppdu_type ==
+   * 10). Measured: the shipped client NIC firmware accepts the H2C but does not
+   * air the sequence (the fw sounding-transmit engine is AP-firmware-only) — the
+   * path that actually airs a Trigger on this firmware is host-injection
+   * (SendTrigger). Returns false where unsupported. See docs/he-trigger-ul.md. */
+  virtual bool StartSounding(const devourer::SoundingConfig & /*cfg*/) {
+    return false;
+  }
+
   /* Batch TX: submit `count` frames (each buffer = radiotap header + 802.11
    * MPDU, the send_packet contract) in one call. With USB TX aggregation
    * enabled (DeviceConfig tx.usb_agg_max > 0) the USB generations pack
@@ -279,20 +345,60 @@ public:
    * MPDU (a leading radiotap header, if present, is stripped); addr2/addr3 set
    * the port MAC/BSSID. `interval_tu` is the beacon interval in TU (1 TU =
    * 1024 µs). One call suffices — the hardware beacons indefinitely. Implemented
-   * on Jaguar2/3 (HalMAC reserved-page download); returns false where unsupported
-   * (Jaguar1 has no reserved-page path). See docs/time-distribution.md. */
+   * on all three generations (Jaguar2/3: HalMAC reserved-page download;
+   * Jaguar1 incl. the 8814A: the pre-HalMAC BCNQ-boundary store bracket —
+   * note the 8814A's stored beacon airs with the 802.11 sequence pinned at 0,
+   * kernel rtw88 parity). See docs/time-distribution.md. */
   virtual bool StartBeacon(const uint8_t *beacon, size_t len,
                            int interval_tu) {
     (void)beacon; (void)len; (void)interval_tu;
     return false;
   }
 
-  /* Disable / restore the MAC EDCCA energy-detect gate (the vendor dis_cca
-   * recipe). With EDCCA off the MAC does not defer TX to carrier-sense, so a
-   * TBTT beacon airs exactly on schedule instead of after a CSMA backoff — the
-   * lever that collapses the hardware-beacon downlink residual to sub-µs on a
-   * shared channel (the master owns the channel). Also DEVOURER_DIS_CCA at
-   * construction. No-op where unimplemented. */
+  /* Replace the ACTIVE beacon's content in place — the dynamic-grant delivery
+   * primitive (a scheduled MAC carries its DCI-style grant map in the beacon
+   * body). Same buffer contract as StartBeacon (a leading radiotap header is
+   * stripped; the raw 802.11 MPDU lands in the reserved page); the beacon
+   * interval, TBTT phase and port identity are NOT touched — changing
+   * addr2/addr3 mid-flight is unsupported (the port registers keep the
+   * StartBeacon identity). Requires an active StartBeacon; returns false
+   * otherwise. Rides the same reserved-page re-download the TBTT steers use,
+   * so the cost bound is the steer's: at most one skipped beacon per update
+   * while the valid latch re-arms, and the swap is NOT atomic versus TBTT (a
+   * beacon airing during the download may still carry the previous content).
+   * Measured per-generation skip/latency numbers: docs/scheduled-mac.md. */
+  virtual bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
+    (void)beacon; (void)len;
+    return false;
+  }
+
+  /* Stop the hardware beacon: EN_BCN_FUNCTION off + net_type back to No Link.
+   * The chip beacons AUTONOMOUSLY once StartBeacon arms it — killing the host
+   * process does NOT silence it (bench-bitten: a killed probe's beacon kept
+   * airing and contaminated the next test's witness) — so any beaconing
+   * session that ends without a device power-cycle must call this. Idempotent;
+   * returns false when no beacon was active. */
+  virtual bool StopBeacon() { return false; }
+
+  /* Disable / restore the MAC carrier-sense gate that defers TX — both primary
+   * CCA (0x520[14], carrier-sense of a decodable preamble) and EDCCA (0x520[15],
+   * energy detect). With it off the MAC does not defer TX to a busy channel, so
+   * injected/beacon TX punches through co-channel traffic instead of backing off:
+   * a TBTT beacon airs exactly on schedule (the sub-µs hardware-beacon downlink,
+   * master-owns-the-channel), and host-injected data holds its rate through a
+   * co-channel transmitter. Measured on-air (Jaguar3, 8822EU/8812CU): monitor
+   * injection otherwise defers ~40-60% to a co-channel 802.11 flooder; clearing
+   * the gate recovers ~1.5-2.2x, back to ~90% of the unimpeded rate
+   * (tests/dis_cca_tx_onair.sh). The energy bit [15] alone is null
+   * against a decodable preamble — the primary-CCA bit [14] is what recovers the
+   * inject path. This is the MAC-gate only; the vendor's BB CCA-off writes are
+   * NOT applied (they deafen the RX). Also DEVOURER_DIS_CCA at construction.
+   * Implemented on Jaguar2/3 and Kestrel (the AX R_AX_CCA_CFG_0 all-CCA-EN field —
+   * on Kestrel injection is already CCA-off by default via sch_tx_en, so this is a
+   * runtime toggle rather than the deferral fix it is on Jaguar); a DELIBERATE
+   * no-op on Jaguar1, whose baseband EDCCA is already disabled by its init table
+   * (0x8A4 = 0x7F7F7F7F) and whose hardware-beacon downlink measures ~0.34 µs RMS
+   * on a crowded channel with no MAC-side gate. */
   virtual void SetCcaMode(bool disabled) { (void)disabled; }
 
   /* Shift the next hardware beacon TBTT by `microseconds` (>0 = later/retard,
@@ -306,9 +412,13 @@ public:
    * microsecond). Requires an active StartBeacon. BLOCKS the caller ~one beacon
    * interval (the tweaked interval must latch and fire once before restore).
    * Returns the actual applied shift in µs (TU-quantized); 0 if no active beacon
-   * or |microseconds| < 512. Jaguar3 only in practice: the Jaguar2 8822B beacon
-   * engine drops the beacon on any TBTT re-latch (bench-proven), so J2 refuses
-   * (returns 0) rather than silently kill it. Base is a no-op. */
+   * or |microseconds| < 512. Jaguar3 and Jaguar2: the J2 beacon engine loses its
+   * bcn-valid latch on any TBTT re-latch (bench-proven), so the J2 path follows
+   * the steer with a reserved-page re-download of the retained beacon — one
+   * skipped beacon per correction. On Jaguar1 the interval tweak is inert
+   * (bench-proven on the 8821AU), so the TU-quantized shift rides the fine
+   * TSF-toggle mechanism instead — which also moves the reported TSF, unlike
+   * J2/J3. Base is a no-op. */
   virtual int32_t AdjustBeaconTiming(int32_t microseconds) {
     (void)microseconds;
     return 0;
@@ -324,12 +434,50 @@ public:
    * same amount, which is the intended behaviour for a UE advancing its own
    * timebase. The USB read→write latency adds a sub-ms offset (~0.5–1.2 ms) that
    * a closed timing-advance loop absorbs — the *resolution* is microseconds.
-   * Requires an active StartBeacon; returns the applied shift in µs. Jaguar3 only:
-   * the Jaguar2 beacon engine survives neither the beacon-function toggle nor the
-   * interval tweak (both drop the beacon), so J2 refuses (returns 0). Base is a
+   * Requires an active StartBeacon; returns the applied shift in µs. All three
+   * generations: the J2 and J1 beacon engines drop their bcn-valid latch on the
+   * toggle, so those paths re-download the retained reserved-page beacon after
+   * the re-latch — one skipped beacon per correction. The 8814A additionally
+   * pulses DUAL_TSF_RST (its TBTT counter free-runs across the toggle), which
+   * re-derives the grid ABSOLUTELY from the shifted TSF — each steer also
+   * cancels accumulated drift, so the TBTT ends up TSF-locked. Base is a
    * no-op. */
   virtual int32_t AdjustBeaconTimingFine(int32_t microseconds) {
     (void)microseconds;
+    return 0;
+  }
+
+  /* TSF-PRESERVING µs-fine TBTT actuator: pin the beacon TBTT so it fires at
+   * TSF % interval == offset_us, WITHOUT disturbing the reported TSF.
+   * AdjustBeaconTimingFine necessarily jumps the TSF (the TBTT re-derives from
+   * a shifted TSF), which corrupts any controller whose phase estimate is a
+   * fit against this port's TSF (ref = a·tsf + b — every steer breaks the
+   * slope, and a high-authority loop chases the corrupted estimate into a
+   * limit cycle; bench-observed on the 8821CE AP↔PTP loop). This variant does
+   * the same shift + re-latch, then immediately writes the TSF back onto its
+   * original timeline — a bare TSF write does not move the TBTT (bench-proven),
+   * so the steered TBTT phase survives while the clock the loop reads stays
+   * continuous. The residual TSF discontinuity is one register-write latency:
+   * ~µs over PCIe MMIO, ~0.5–1 ms over USB (so on USB this only pays off for
+   * steers larger than that).
+   *
+   * ABSOLUTE semantics (unlike the incremental AdjustBeaconTimingFine): each
+   * call re-pins the TBTT to the TSF grid, so consecutive calls don't
+   * accumulate, and a PTP-disciplined TSF drags the pinned TBTT with it
+   * between corrections — the fit-free discipline pattern. Requires an active
+   * StartBeacon; returns the applied offset (normalized into the beacon
+   * period), 0 if no active beacon.
+   *
+   * Per generation (all bench-proven): Jaguar2 — full support, ~10 µs TSF
+   * disturbance over PCIe MMIO (8821CE; the AP↔PTP loop holds ~±1 µs with
+   * it). Jaguar3 — full support over USB (~0.5–1.5 ms restore-write
+   * disturbance; still far below a fine steer's full-magnitude jump).
+   * Jaguar1 — offset 0 only (arm/re-derive): its TBTT is hardware-locked to
+   * the TSF grid, so a nonzero TSF-preserving pin cannot hold (refused); the
+   * flip side is that steering/disciplining the J1 TSF steers the TBTT with
+   * it in hardware, no actuator needed. Base is a no-op. */
+  virtual int32_t PinBeaconTbtt(int32_t offset_us) {
+    (void)offset_us;
     return 0;
   }
 

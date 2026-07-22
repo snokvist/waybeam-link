@@ -31,7 +31,9 @@ class UsbTransport final : public IRtlTransport {
 public:
   UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                libusb_context *ctx = nullptr,
-               std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr);
+               std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr,
+               bool rx_zerocopy = true);
+  ~UsbTransport() override;
 
   bool is_usb() const override { return true; }
 
@@ -41,6 +43,26 @@ public:
   bool write8(uint16_t reg, uint8_t v) override { return ctrl_write(reg, v); }
   bool write16(uint16_t reg, uint16_t v) override { return ctrl_write(reg, v); }
   bool write32(uint16_t reg, uint32_t v) override { return ctrl_write(reg, v); }
+  bool write32_wide(uint32_t addr, uint32_t v) override {
+    /* Realtek USB register addressing: wValue = addr[15:0], wIndex =
+     * addr[31:16]. Lets the BB/RF window (addr + 0x10000) reach wIndex=1
+     * instead of colliding with the MAC/system space at wIndex=0. */
+    return libusb_control_transfer(
+               _dev_handle, REALTEK_USB_VENQT_WRITE, 5,
+               static_cast<uint16_t>(addr & 0xFFFF),
+               static_cast<uint16_t>(addr >> 16), (uint8_t *)&v, sizeof(v),
+               USB_TIMEOUT) == static_cast<int>(sizeof(v));
+  }
+  uint32_t read32_wide(uint32_t addr) override {
+    uint32_t data = 0;
+    if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5,
+                                static_cast<uint16_t>(addr & 0xFFFF),
+                                static_cast<uint16_t>(addr >> 16),
+                                (uint8_t *)&data, sizeof(data),
+                                USB_TIMEOUT) == static_cast<int>(sizeof(data)))
+      return data;
+    return 0xFFFFFFFFu; /* INVALID_RF_DATA-style sentinel on a failed read */
+  }
   bool write_bytes(uint16_t reg, const uint8_t *p, size_t n) override;
 
   bool tx_async(uint8_t ep, uint8_t *buf, size_t len,
@@ -80,6 +102,23 @@ private:
   std::atomic<uint64_t> _tx_failed{0};
   std::atomic<int> _tx_last_rc{0};
   std::atomic<bool> _tx_last_timeout{false};
+
+  /* Async-TX completions must be reaped by libusb_handle_events or the kernel
+   * URB queue fills, submits start failing, and TX throughput collapses (the
+   * Jaguar1 issue #240: its send path is tx_async and a TX-only session has no
+   * other event pump). We reap in the CALLER's thread — each tx_async drains
+   * completed transfers before submitting the next — rather than a background
+   * pump thread, which would race the caller-owned libusb teardown (an earlier
+   * attempt crashed on a usbi_mutex assertion). _tx_inflight tracks
+   * submitted-but-not-yet-reaped transfers so the destructor can drain them
+   * before the device handle / context go away, and so a soft cap can throttle
+   * over-submission. */
+  std::atomic<int> _tx_inflight{0};
+
+  /* Allocate the async RX ring from kernel DMA memory (dev_mem_alloc) for a
+   * zerocopy bulk-IN path; falls back to heap buffers per-URB when the alloc is
+   * unsupported. See rx_loop and DeviceConfig::Usb::rx_zerocopy. */
+  bool _rx_zerocopy = true;
 
   /* Exclusive per-adapter USB lock (UsbDeviceLock.h), held for the transport
    * lifetime; released when the device (and thus the transport) dies. */

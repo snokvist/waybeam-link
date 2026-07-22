@@ -78,6 +78,9 @@ class MonAir {
     int wait_fd() const;
 
     size_t rx_adapters() const;
+    // §15.5a scout: index of the designated `role:"tx"` uplink adapter — the one
+    // the scout roams during a sweep (Pass 64). Not assumed to be 0.
+    size_t tx_index() const;
 
     // --- control plane (main thread only) --------------------------------
     // Committed operating point → stamped into each frame's radiotap MCS.

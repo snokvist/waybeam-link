@@ -580,6 +580,7 @@ int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
 int MonAir::wait_fd() const { return impl_->ready_fd; }
 
 size_t MonAir::rx_adapters() const { return impl_->adapters.size(); }
+size_t MonAir::tx_index() const { return impl_->tx_idx; }  // §15.5a scout (Pass 64)
 
 std::optional<uint32_t> MonAir::estimate_airtime_us(
     size_t bytes, bool include_pending) const {

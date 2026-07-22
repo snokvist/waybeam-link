@@ -107,6 +107,28 @@ with only local safety overrides (thermal back-off, a max-range failsafe when
 feedback is lost). This is the same "ground decides" stance the OpenIPC world
 uses; the difference is purely the cost function it optimizes.
 
+**The model proposes; measurement disposes.** A single SNR reading plus a link
+model is a *counterfactual* about every rate not currently flying, and on real
+hardware the counterfactual can be wrong — receiver quirks, multipath,
+interference, amplifier distortion and calibration error are all rate-specific.
+So a small, deterministic share of frames (a few percent) flies the rates
+adjacent to the selected one with everything else held fixed, and both ends
+derive which frames those were from the sequence number alone — no signalling.
+The receiver then holds *measured* per-rate delivery with honest small-sample
+confidence bounds — for the adjacent candidates from the probes, and for the
+selected rate itself from the main stream, whose evidence is free and arrives
+at full frame rate. The evidence corrects the model in the safe direction
+only: a faster rate is entered only once its measured lower bound clears what
+the FEC needs; a candidate whose upper bound cannot is barred outright; and a
+selected rate whose own measured delivery stays condemned is abandoned and
+barred even while the model still believes in it — the escape hatch for the
+failures no SNR reading shows (interference, a miscalibrated table), and what
+makes the deliberately model-trusted first pick safe to keep fast. Emergencies
+keep trusting the model, because escaping a failing rate must never wait for
+samples. The trade is deliberate: a mis-modelled rate can no longer trap the
+controller, at the cost of slower, evidence-paced promotions and the probes'
+small airtime, both priced in the same energy ledger as everything else.
+
 **Re-finding each other.** When the command uplink drops, the drone falls to a
 robust failsafe and then to a low-duty listen on a known channel; the
 mains-powered ground station beacons for it quickly. The duty cycle is
@@ -247,9 +269,9 @@ below the point where enhancement is gone.
 - **The command uplink is abstracted.** There is no real RC radio in the repo, so
   uplink loss is simulated to exercise the failsafe and rendezvous; a real uplink
   drops into the same watchdog input.
-- **On-air scalable video is not yet adaptive.** Each temporal layer can already
-  fly at its own modulation on air; the closed loop that retunes the per-layer
-  ladder live is validated in software and is the next on-air integration step.
+- **Live ladder retuning is validated in simulation, not on air.** Each temporal
+  layer already flies at its own modulation on air; the closed loop that retunes
+  the per-layer ladder live runs in the linklab simulation.
 
 ## References
 

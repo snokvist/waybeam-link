@@ -133,13 +133,24 @@ def main() -> int:
         present = {c: v for c, v in present.items() if c.upper() in want}
     print(f"# chips: {', '.join(present)}  | MCS{args.mcs}/{args.bw}MHz/{args.size}B\n")
 
-    # Pre-flight rail-sag guard (CLAUDE.md defence #1): the bus-powered hub rail
+    # Pre-flight rail-sag guard: the bus-powered hub rail
     # can brown out the 5 GHz PA, collapsing on-air power while 2.4 GHz still
     # works — making every 5 GHz number untrustworthy. Check the known-good
     # control adapter first so a sagging rail is flagged loudly instead of
     # mis-read as a per-chip 5 GHz deficit.
     if not args.skip_rail_check:
         rc = subprocess.run(["bash", str(HERE / "rail_check.sh")])
+        if rc.returncode == 2:
+            # rail_check's ground arbitration: the control airs strongly (the
+            # ground hears it) but the B210 reads low — the SDR itself is in
+            # its degraded-read mode, so EVERY duty number this session is
+            # unreliable. Abort rather than emit a garbage table.
+            print("\n" + "!" * 70)
+            print("!! SDR DEGRADED — the B210's readings can't be trusted this session")
+            print("!! (the ground hears the control at strong RSSI while the SDR reads")
+            print("!! low). Reset/reseat the B210 or power-cycle its port, then re-run.")
+            print("!" * 70 + "\n")
+            return 2
         if rc.returncode != 0:
             print("\n" + "!" * 70)
             print("!! RAIL SAG DETECTED — 5 GHz duty numbers below are NOT trustworthy.")

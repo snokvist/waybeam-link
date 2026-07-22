@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include "logger.h"
 #include "IRtlDevice.h"
@@ -18,6 +19,7 @@
 #include "HalmacJaguar2Fw.h"
 #include "ChipVariant.h"
 #include "Jaguar2Calibration.h"
+#include "LaCapture.h"
 
 /* RtlJaguar2Device is the orchestrator for the Realtek "Jaguar2" 802.11ac family
  * — RTL8822BU (chip 8822B, 2T2R, USB). It is the Jaguar2 sibling of
@@ -84,11 +86,23 @@ public:
   uint64_t ReadTsf() override;
   void WriteTsf(uint64_t tsf) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  /* In-place beacon content swap (IRtlDevice contract): retain the new MPDU +
+   * ride the steer re-download; interval/TBTT/port identity untouched. */
+  bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;
+  bool StopBeacon() override;
   /* Disable/restore the MAC EDCCA gate (BIT_DIS_EDCCA 0x520[15] + EDCCA-mask
    * 0x524[11] — HalMAC-common with J3) so a TBTT beacon airs on schedule. */
   void SetCcaMode(bool disabled) override;
+  /* Beacon-TBTT steering (IRtlDevice contract). The J2 engine loses the
+   * bcn-valid latch on ANY TBTT re-latch (bench-proven on the 8812BU), so both
+   * actuators steer then re-download the retained reserved-page beacon to
+   * re-arm the latch — one skipped beacon per correction. */
   int32_t AdjustBeaconTiming(int32_t microseconds) override;
   int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
+  /* TSF-preserving absolute TBTT pin (IRtlDevice contract): steer via the
+   * shift + re-latch, then write the TSF back onto its original timeline so
+   * a controller fitting against this port's TSF sees a continuous clock. */
+  int32_t PinBeaconTbtt(int32_t offset_us) override;
   void Stop() override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;
@@ -177,6 +191,14 @@ public:
     return _fw.boot_status();
   }
 
+  /* Research helper: one-shot LA-mode (phydm logic-analyzer) IQ capture into
+   * the TX packet buffer — 8822B (128 KB window) / 8821C (32 KB, LA clock
+   * gated off on cut A like the vendor). Lazy-constructs the shared
+   * LaCapture with this variant's register map. Blocking; see LaCapture.h
+   * for the brick-risk caveats and the TX-quiesced contract. */
+  devourer::LaResult la_capture(const devourer::LaParams &p);
+  bool la_capture_wedged() const { return _la && _la->is_wedged(); }
+
 private:
   /* Golden-init replay (DEVOURER_REPLAY_WSEQ) — applied at the end of both
    * Init and InitWrite (see the definition for semantics). */
@@ -201,6 +223,8 @@ private:
   int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */
   devourer::CfoTracker _cfo; /* closed-loop CFO tracker (DEVOURER_CFO_TRACK) */
   jaguar2::HalJaguar2 _hal;
+  /* Lazy LA-mode capture helper (la_capture). */
+  std::unique_ptr<devourer::LaCapture> _la;
   jaguar2::HalmacJaguar2MacInit _macinit;
   jaguar2::HalmacJaguar2Fw _fw;
   SelectedChannel _channel{};
@@ -269,6 +293,23 @@ private:
   std::atomic<bool> _pwrtrack_stop{false};
   void start_pwrtrack();
   void stop_pwrtrack();
+
+  /* Beacon retained for the TBTT-steer re-download (AdjustBeaconTiming*): the
+   * J2 engine loses the bcn-valid latch on any TBTT re-latch and does not keep
+   * the reserved-page bytes, so the steer path re-downloads this copy to
+   * re-arm it. Guarded by _reg_mu (written in StartBeacon, read in the
+   * steer actuators). _bcn_interval_tu = 0 means no active beacon. */
+  std::vector<uint8_t> _bcn_mpdu;
+  int _bcn_interval_tu = 0;
+  /* TBTT-grid offset vs the TSF, in µs: TBTT fires at TSF % period == this.
+   * 0 after StartBeacon and after every fine steer (the EN_BCN_FUNCTION
+   * re-latch re-derives the grid from the TSF); each coarse interval-tweak
+   * steer moves the grid by its applied shift without moving the TSF, so the
+   * coarse path's TBTT phase-alignment must subtract it. Guarded by _reg_mu. */
+  int64_t _tbtt_off_us = 0;
+  /* Re-download _bcn_mpdu to the reserved page (re-arms the bcn-valid latch
+   * after a TBTT re-latch). Caller holds _reg_mu. */
+  bool redownload_beacon_locked();
 
   /* StartRxLoop stop request (StopRxLoop). volatile (not atomic) to match the
    * signal-flag pattern used across the library (g_devourer_should_stop). */

@@ -1600,6 +1600,83 @@ libnl-3, so `iw dev … set freq` is the portable path), lifting the code-commen
 **Amended:** §3.12 (redaction bullet), §15.5 (`/discovery` token note), §15.5a
 (candidate `psk_known`/token-cache wording). No wire change.
 
+## Pass 64 — Multi-adapter ground scout: the uplink roams, a claim moves every ear (2026-07-20)
+
+Bringing up a two-adapter ground (one uplink + one diversity RX) exposed that the
+scout/claim path was single-adapter only: the sweep and the claim's get-onto-the-
+craft pre-step both retuned adapter index 0, and the §15.2 wording ("a two-adapter
+ground dedicates a scout adapter") never said *which* adapter. Two operator rulings
+(2026-07-20):
+
+- **The uplink (`role:"tx"`) adapter is the scout.** A sweep roams the tx adapter
+  only; the diversity RX adapters hold the resting channel, so a multi-adapter
+  ground keeps hearing an active link on that channel while it scouts (a
+  single-adapter ground has no spare ear and still drops the link for the sweep,
+  unchanged). "The tx adapter" is resolved from the backend (`tx_index()`), not
+  assumed to be config index 0 — the sample config lists it first, but the code no
+  longer depends on that.
+- **A claim retunes every link adapter, not just the uplink.** The quickconnect
+  pre-step now moves all adapters onto the craft's current channel (so every
+  diversity ear hears the campaign and the §11.6 commit), matching the existing
+  intra-process commit/revert which already retunes all adapters (§11.6). An
+  aborted or reverted campaign therefore leaves every adapter together on the
+  craft's channel — positioned for an explicit retry, not split across channels.
+
+Implementation-only for the code side (backend `tx_index()` accessor; scout sweep
+and claim pre-step rewired); the wording rulings amend §15.2 (scout adapter is the
+uplink) and §15.5a (sweep-roams-uplink, claim-retunes-all). No wire change.
+
+## Pass 65 — Scout survey is scout-adapter-only; a failed claim rolls back to rest (2026-07-20)
+
+On-device verification of Pass 64 (two-adapter ground) surfaced two multi-adapter
+interactions the single-adapter design never exercised. Operator rulings
+(2026-07-20):
+
+- **The scout survey (occupancy + candidates) is derived from the scout adapter's
+  frames only.** A diversity RX adapter parked on the resting channel hears the
+  claimed/idle craft during *every* dwell, so aggregating all adapters recorded the
+  craft as a candidate on every swept channel (with a bogus `chan`) and inflated
+  occupancy. `ScoutEngine::on_frame` now ignores frames whose `adapter_id` is not
+  the scout (uplink) adapter — the survey reflects the channel the scout is actually
+  tuned to. Single-adapter grounds are unchanged (the scout adapter is the only one).
+- **A failed claim rolls all adapters + the net_id stamp/filter back to the resting
+  state, and the scout returns *all* adapters to rest on completion.** Pass 64 left
+  an aborted claim's adapters on the craft's channel ("positioned for retry"); that
+  left a diversity ear stranded off the resting channel, and the scout's rest only
+  moved the uplink, so a re-scout could split the ears. Superseded: an aborted claim
+  now retunes every adapter back to the ground's operating channel (its configured
+  channel, or the last committed target) and restores the resting net_id; the scout
+  returns every adapter to that channel when a sweep ends or is stopped. The
+  operating channel is tracked at runtime (updated on a successful §11.6 commit).
+
+This supersedes the Pass 64 §15.5a "aborted campaign leaves every adapter on the
+craft's channel" wording. Implementation-only otherwise (scout gains a retune-all
+hook + scout-adapter index; run_rx tracks the operating channel and rolls back on
+abort). No wire change.
+
+## Pass 66 — A candidate's channel is where it was heard most, not last (2026-07-20)
+
+Verifying Pass 65 exposed a residual survey artifact independent of the multi-adapter
+work: on a channel change the scout adapter drains frames buffered from the *previous*
+channel into the first part of the new dwell (kernel socket + the io/ RX deque), so a
+craft can be recorded on an adjacent swept channel it isn't on. `candidate_for` took
+the *last* channel a craft appeared on, which a settling leak can make wrong depending
+on scan order.
+
+Operator ruling (2026-07-20): **a candidate's channel is the swept channel it was
+heard on with the most frames, not the last.** The craft's true channel is heard for
+the entire dwell (hundreds of DATA frames, or every ANNOUNCE), while a settling leak is
+a handful of buffered frames — so max-frame-count is robust regardless of scan order.
+Rejected the alternatives (time-based settle-guard, post-retune queue flush,
+channel-generation stamping): all chase *occupancy* accuracy at the cost of dwell time
+or io/ RX-path changes, whereas the only decision that must be correct — the channel a
+claim retunes to — is fixed by evidence-weighting alone. Occupancy stays best-effort v1
+(a small airtime bump on an adjacent channel is tolerated); a settle-guard/flush can be
+revisited if occupancy precision is ever needed.
+
+Amends §15.5a (candidate `chan` selection). Implementation-only: `ScoutEngine` counts
+frames per originator per channel and `candidate_for` returns the max. No wire change.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

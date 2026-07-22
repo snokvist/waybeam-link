@@ -9,9 +9,11 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include "logger.h"
 #include "BbDbgportReader.h"
+#include "LaCapture.h"
 #include "HalModule.h"
 #include "IRtlDevice.h"
 #include "SelectedChannel.h"
@@ -56,6 +58,9 @@ class RtlJaguarDevice : public IRtlDevice {
   /* A-MPDU TX mode (SetAmpduMode). Read lock-free in the TX descriptor path
    * (same pattern as _tx_mode_default). */
   devourer::AmpduMode _ampdu;
+  /* Default per-packet TX-power LUT step — 8814A only (dword5 [30:28]);
+   * see SetTxPacketPowerStep. */
+  std::atomic<uint8_t> _tx_pkt_pwr_step{0};
 
   /* CW single-tone (StartCwTone/StopCwTone) saved state for a clean restore:
    * the pre-tone RF 0x00 and four BB dwords — RFE-pinmux words on 8812/8821
@@ -128,6 +133,24 @@ public:
   int SetTxPowerOffsetQdb(int qdb) override;
   void SetTxPowerIndexOverride(int idx) override;
   bool ReApplyTxPower() override;
+  /* Per-packet TX-power offset default — 8814A ONLY (its dword5 [30:28]
+   * descriptor LUT at the 8822B TXPWR_OFSET position: 0=none 1=-3 2=-7
+   * 3=-11 4=+3 5=+6 dB; see FrameParser.h). Stamped into every TX
+   * descriptor; a radiotap DBM_TX_POWER field overrides per packet (dB
+   * delta quantized to the LUT, devourer::txpkt_pwr_step_for_db). Warns and
+   * stays inert on 8812/8821 — their descriptor has no such field (rate
+   * selection is their only per-packet power lever). */
+  void SetTxPacketPowerStep(uint8_t step);
+  /* Fast global TX-power offset via the BB-swing digital scaler — the lean
+   * Jaguar1 power lever: 1-4 BB writes (~0.5 dB steps, -12..+2
+   * dB) vs the 30-50+ write TXAGC rewrite of SetTxPowerOffsetQdb. Per-burst,
+   * NOT per-packet (the 8812A/8821A descriptor has no power field — this is
+   * the closest those chips have). Composes with SetTxPowerOffsetQdb (a
+   * separate hardware stage: digital IQ scaling after the TXAGC index) and
+   * with the 8812A thermal tracker (folded post-clamp, survives its ticks).
+   * EVM caveat above 0 dB: positive digital swing eats DAC headroom, capped
+   * at +2 dB (the vendor thermal bound). Returns the applied qdB. */
+  int FastSetTxPowerOffsetQdb(int qdb);
   int SetXtalCap(int cap) override;
   int GetXtalCap() override { return _xtal_cap; }
   devourer::TxPowerState GetTxPowerState() override;
@@ -223,11 +246,31 @@ public:
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
 
-  /* EXPERIMENTAL (idea 6 spike): load a beacon into the beacon queue and enable
-   * the MAC beacon function so the chip auto-transmits it at each TBTT — a
-   * hardware-timed, host-jitter-free TX. Returns false if unsupported.
-   * `interval_tu` is the beacon interval in TU (1024 µs). */
-  bool StartBeacon(const uint8_t* beacon, size_t len, int interval_tu);
+  /* Hardware-timed beacon (IRtlDevice contract): download the beacon MPDU to
+   * the reserved page at the BCNQ boundary (the vendor rtl8812_download_rsvd_page
+   * bracket: CR+1 SW-beacon-DMA, beacon function off, 0x422[6] cleared so the
+   * QSEL-beacon bulk-OUT is stored instead of aired, BCN_VALID 0x20A[0] W1C +
+   * poll) and enable the TBTT engine. All four chips: the 8814A uses its own
+   * valid latch (0x0204[15] with the head held at the BCNQ boundary) and its
+   * stored beacon airs with the hardware sequence pinned at 0 (kernel rtw88
+   * parity). `interval_tu` is the beacon interval in TU (1024 µs). */
+  bool StartBeacon(const uint8_t* beacon, size_t len, int interval_tu) override;
+  /* In-place beacon content swap (IRtlDevice contract): retain the new MPDU +
+   * a fresh BCNQ-boundary store; interval/TBTT/port identity untouched. */
+  bool UpdateBeaconPayload(const uint8_t* beacon, size_t len) override;
+  bool StopBeacon() override;
+  /* Beacon-TBTT steering (IRtlDevice contract) — the Jaguar2 steer-then-
+   * re-download pattern: re-download the retained MPDU after the re-latch to
+   * re-arm the bcn-valid latch. */
+  int32_t AdjustBeaconTiming(int32_t microseconds) override;
+  int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
+  /* TSF-preserving TBTT arm (IRtlDevice contract, J1 subset): the J1 TBTT is
+   * hardware-locked to the TSF grid (bench: a pinned nonzero offset never
+   * holds — the phase follows the restored TSF), so only offset 0 is
+   * supported (the arm/igniter StartBeacon uses); nonzero refuses. Steering
+   * the J1 TSF steers the TBTT with it in hardware — a disciplined master
+   * needs no actuator here. */
+  int32_t PinBeaconTbtt(int32_t offset_us) override;
 
   /* Runtime RX-chain selection — the adaptive-link spatial-diversity lever
    * (the read/write superset of the DEVOURER_RX_PATHS env knob). Writes the
@@ -245,6 +288,16 @@ public:
    * -1 = never set (chip at the table default, all paths). */
   void SetRxPathMask(uint8_t mask);
   int GetRxPathMask();
+
+  /* Active idle-noise-floor CAL (8812A/8821A only). The vendor
+   * odm_inband_noise_monitor_ac debug-port path stops CK320/CK88 and resets
+   * BB/PMAC/CCK, which wedges a live bulk-IN RX DMA — so it MUST run RX-idle.
+   * Called at bring-up (before StartRxLoop); result cached and surfaced via
+   * GetRxEnergy. Left invalid on the 8814A (different vendor path) and when
+   * DEVOURER_RX_NOISE_FLOOR is off. */
+  void measure_idle_noise_floor();
+  int8_t _abs_noise_floor = 0;
+  bool _abs_nf_valid = false;
 
   bool should_stop = false;
 
@@ -291,6 +344,14 @@ public:
   uint32_t read_bb_dbgport(uint32_t selector);
   bool bb_dbgport_wedged() const;
 
+  /* Research helper: one-shot LA-mode (phydm logic-analyzer) IQ capture
+   * into the TX packet buffer — vendor-supported on the 8814A only
+   * (64 KB window at 0x30000); on 8812A/8821A this is a probe with the
+   * 8814A map (no LA block on those dies — expect poll_timeout). See
+   * LaCapture.h for the brick-risk caveats and the TX-quiesced contract. */
+  devourer::LaResult la_capture(const devourer::LaParams &p);
+  bool la_capture_wedged() const { return _la && _la->is_wedged(); }
+
 private:
   void StartWithMonitorMode(SelectedChannel selectedChannel);
   bool NetDevOpen(SelectedChannel selectedChannel);
@@ -303,6 +364,18 @@ private:
    * the send_packets URB packer. */
   size_t build_tx_block(const uint8_t *packet, size_t length, uint8_t *out,
                         uint8_t pkt_offset);
+
+  /* Beacon retained for the TBTT-steer re-download (AdjustBeaconTiming*),
+   * mirroring RtlJaguar2Device: re-latching the TBTT drops the bcn-valid
+   * latch, so the steer path re-downloads this copy. _bcn_interval_tu = 0
+   * means no active beacon. (No TBTT-grid offset member here: the J1 coarse
+   * steer rides the fine mechanism, which keeps the grid TSF-derived.) */
+  std::vector<uint8_t> _bcn_mpdu;
+  int _bcn_interval_tu = 0;
+  /* Download `mpdu` to the reserved page at the BCNQ boundary via the vendor
+   * rtl8812_download_rsvd_page bracket; polls BCN_VALID (0x20A[0]). Leaves
+   * BCN_CTRL as it found it. */
+  bool download_rsvd_beacon(const uint8_t *mpdu, size_t mpdu_len);
 
   std::array<std::atomic<uint32_t>, 5> _qd_snap{};
   std::thread _qd_thread;
@@ -329,6 +402,8 @@ private:
   std::atomic<uint32_t> _therm_snap{0};
 
   std::unique_ptr<devourer::BbDbgportReader> _bb_dbgport;
+  /* Lazy LA-mode capture helper (la_capture). */
+  std::unique_ptr<devourer::LaCapture> _la;
 };
 
 /* Backwards-compatibility alias. External callers using the old name still

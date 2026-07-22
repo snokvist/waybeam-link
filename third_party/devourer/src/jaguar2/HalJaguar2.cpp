@@ -399,7 +399,9 @@ void HalJaguar2::rf_write(uint8_t path, uint32_t addr, uint32_t value) {
   std::this_thread::sleep_for(std::chrono::microseconds(1));
 }
 
-void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
+void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type,
+                                        devourer::HalmacCfgParam *cfg,
+                                        bool offload_rf) {
   JaguarPhyContext ctx{};
   ctx.cut_version = _ver.cut;
   ctx.support_interface = 0x02; /* ODM_ITRF_USB */
@@ -418,25 +420,56 @@ void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
    * init_rf_reg (radioa, radiob) -> POST. */
   phydm_pre_post_setting(/*post=*/false);
 
-  auto bb = [this](uint32_t a, uint32_t v) { bb_write(a, v); };
+  /* BB/AGC sink: batch through the firmware register offload when armed; a
+   * delay pseudo-address (0xf9..0xfe) forces a flush then runs the host delay,
+   * and once the offload transport errors we fall back to a direct write. */
+  auto bb = [this, cfg](uint32_t a, uint32_t v) {
+    if (cfg && cfg->ok()) {
+      if (a >= 0xf9 && a <= 0xfe) {
+        cfg->flush();
+        bb_write(a, v);
+        return;
+      }
+      cfg->bb_write(static_cast<uint16_t>(a), v);
+      return;
+    }
+    bb_write(a, v);
+  };
   const auto phy_reg = _tables->phy_reg();
   const auto agc_tab = _tables->agc_tab();
-  _logger->info("Jaguar2: applying BB phy_reg ({} words) + agc_tab ({} words)",
-                phy_reg.len, agc_tab.len);
+  _logger->info("Jaguar2: applying BB phy_reg ({} words) + agc_tab ({} words){}",
+                phy_reg.len, agc_tab.len, cfg ? " [fw-offload]" : "");
   PhyTableLoader::Load(phy_reg.data, phy_reg.len, ctx, bb);
   PhyTableLoader::Load(agc_tab.data, agc_tab.len, ctx, bb);
+  if (cfg)
+    cfg->flush(); /* land all BB/AGC before the RF walk starts */
 
+  auto rf = [this, cfg, offload_rf](uint8_t path, uint32_t a, uint32_t v) {
+    if (offload_rf && cfg && cfg->ok()) {
+      if (a == 0xfe || a == 0xffe) {
+        cfg->flush();
+        rf_write(path, a, v);
+        return;
+      }
+      cfg->rf_write(path, static_cast<uint8_t>(a & 0xff), v);
+      return;
+    }
+    rf_write(path, a, v);
+  };
   const auto radioa = _tables->radioa();
   const auto radiob = _tables->radiob();
-  _logger->info("Jaguar2: applying RF radioa ({} words) + radiob ({} words)",
-                radioa.len, radiob.len);
+  _logger->info("Jaguar2: applying RF radioa ({} words) + radiob ({} words){}",
+                radioa.len, radiob.len,
+                (cfg && offload_rf) ? " [fw-offload]" : "");
   PhyTableLoader::Load(radioa.data, radioa.len, ctx,
-                       [this](uint32_t a, uint32_t v) { rf_write(0, a, v); });
+                       [&rf](uint32_t a, uint32_t v) { rf(0, a, v); });
   /* 1T1R chips (8821C) supply no radiob table (path A only) — skip the path-B
    * RF walk rather than feed the loader a null table. */
   if (radiob.len)
     PhyTableLoader::Load(radiob.data, radiob.len, ctx,
-                         [this](uint32_t a, uint32_t v) { rf_write(1, a, v); });
+                         [&rf](uint32_t a, uint32_t v) { rf(1, a, v); });
+  if (cfg)
+    cfg->flush(); /* drain any RF batch (and the BB remainder on !offload_rf) */
 
   phydm_pre_post_setting(/*post=*/true);
 
@@ -827,6 +860,7 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _last_rf_be = -1;
   _last_df18 = -1;
   _last_cck_key = -1;
+  _fw_sw_pending = 0; /* the full set supersedes any in-flight fw switch */
 
   /* Extended-synth channels (below-band 15..35 / above 177, freq =
    * 5000 + 5*ch up to ch 253): the RF tunes them, but the power tables and
@@ -1270,15 +1304,117 @@ bool HalJaguar2::fast_set_bandwidth(uint8_t bw) {
   return true;
 }
 
+void HalJaguar2::send_h2c_raw(uint32_t msg, uint32_t msg_ext) {
+  const uint8_t box = _h2c_box & 0x3;
+  const uint16_t box_reg = static_cast<uint16_t>(0x1d0 + box * 4);
+  const uint16_t box_ex_reg = static_cast<uint16_t>(0x1f0 + box * 4);
+  for (int i = 0; i < 30; ++i) { /* mirrors the vendor's 100 µs × N poll */
+    if (((_device.rtw_read8(0x1cc) >> box) & 0x1) == 0)
+      break;
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+  _device.rtw_write32(box_ex_reg, msg_ext); /* ext first, msg triggers */
+  _device.rtw_write32(box_reg, msg);
+  _h2c_box = static_cast<uint8_t>((_h2c_box + 1) & 0x3);
+}
+
+bool HalJaguar2::fw_channel_switch(uint8_t central, uint8_t pri_ch_idx,
+                                   uint8_t bw) {
+  /* Payload (hal_com_h2c.h SET_H2CCMD_SINGLE_CH_SWITCH_V2_*): b0 = central
+   * channel, b1[3:0] = primary-ch idx, b1[7:4] = bw, b2[1] = IQK_UPDATE_EN
+   * (the vendor sets IQK only — PWR_IDX_UPDATE stays 0, so the firmware does
+   * not touch TXAGC and the software power shadow stays truthful).
+   *
+   * Fire-and-confirm-later: the submit returns immediately — polling RF18
+   * here measurably STRETCHES the switch (the PI reads contend with the
+   * firmware's own RF-bus writes; on-air dead time tripled vs the deferred
+   * scheme), and the vendor's C2H completion needs a live RX drain devourer
+   * can't assume. The *previous* switch is corroborated at the next hop via
+   * fw_switch_confirm(), by which point a dwell has passed. */
+  const uint32_t msg = 0x1du | (static_cast<uint32_t>(central) << 8) |
+                       (static_cast<uint32_t>((pri_ch_idx & 0xf) |
+                                              ((bw & 0xf) << 4))
+                        << 16) |
+                       (0x02u << 24);
+  send_h2c_raw(msg, 0);
+  _fw_sw_pending = central;
+  /* The firmware rewrites RF18 (and band/AGC state) under the sw caches. */
+  _cw_primed = false;
+  return true;
+}
+
+bool HalJaguar2::fw_switch_confirm() {
+  if (!_fw_sw_pending)
+    return true;
+  const uint8_t want = _fw_sw_pending;
+  _fw_sw_pending = 0;
+  const uint32_t rf18 = rf_read(0, 0x18);
+  if ((rf18 & 0xff) == want) {
+    _rf18_cache = rf18; /* doubles as the compose-cache RF18 re-prime */
+    return true;
+  }
+  _logger->warn("Jaguar2: fw channel switch to central {} never landed "
+                "(RF18=0x{:05x}) — resyncing via the full path",
+                want, rf18);
+  return false;
+}
+
 bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
                              uint8_t primary_ch_idx, bool cache_rf) {
   if (_last_tuned_ch == 0)
     return false; /* never tuned — unknown band, cold BW/band state */
   const bool cur_2g = _last_tuned_ch <= 14;
-  if (cur_2g != (channel <= 14))
-    return false; /* band change needs RFE pins / band block — full path only */
+  const bool band_change = cur_2g != (channel <= 14);
   if (channel == _last_tuned_ch)
     return true; /* no-op hop */
+
+  /* Firmware fast path (DEVOURER_FASTRETUNE_FW): hand the whole retune to
+   * the firmware via H2C 0x1D instead of the composed register sequence
+   * below. Both Jaguar2 dies expose it — the H2C submit (HMEBOX) and the
+   * RF18-channel confirm are variant-generic, and the vendor 8821C firmware
+   * carries the same SINGLE_CHANNELSWITCH_V2 offload as the 8822B's
+   * (on-air-validated) one. Mode 2 additionally accepts band changes — the
+   * firmware reprograms the band block itself (bench-measured ~2 ms
+   * cross-band, docs/experiments/kernel-channel-switch-offload.md) — which the software
+   * path cannot. 20/40 MHz only (the 80 MHz primary-idx pairing stays on the
+   * sw path). */
+  if (_cfg.tuning.fastretune_fw > 0 &&
+      (!band_change || _cfg.tuning.fastretune_fw >= 2) &&
+      (bw == 0 /*20*/ || bw == 1 /*40*/)) {
+    devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j2fw",
+                           channel);
+    /* Corroborate the PREVIOUS fw switch before issuing the next (a dwell
+     * has passed — one cheap RF18 read). A miss falls through to the full
+     * path so software state and hardware resync. */
+    if (!fw_switch_confirm())
+      return false;
+    prof.mark("confirm");
+    const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
+    /* get_pri_ch_id encoding: 20 MHz -> 0; 40 MHz upper -> 1, lower -> 2. */
+    uint8_t pri = 0;
+    if (bw == 1)
+      pri = (primary_ch_idx == 2 /*HAL_PRIME_CHNL_OFFSET_UPPER*/) ? 1 : 2;
+    fw_channel_switch(cch, pri, bw);
+    prof.mark("fw");
+    if (band_change) {
+      /* The firmware rewrote the band-keyed state under the sw caches —
+       * invalidate them all; the next sw hop re-primes. */
+      _last_agc_bucket = -1;
+      _last_fc = 0xffffffff;
+      _last_rf_be = -1;
+      _last_df18 = -1;
+      _last_cck_key = -1;
+    }
+    _last_tuned_ch = channel;
+    DVR_DEBUG(_logger, "Jaguar2: fw fast retune -> ch {} (central {})",
+              channel, cch);
+    /* No canary here: the switch is still executing in firmware — a dump
+     * would read mid-transition state (and disturb the RF bus). */
+    return true;
+  }
+
+  if (band_change)
+    return false; /* band change needs RFE pins / band block — full path only */
 
   devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j2",
                          channel);
@@ -2286,6 +2422,9 @@ void HalJaguar2::enable_rx() {
   _device.rtw_write16(0x0100, 0x06FF);
   /* Promiscuous RX for monitor: the vendor monitor RCR (hal_com.c:
    * RCR_AAP|APM|AM|AB|APWRMGT|APP_PHYST_RXFF|APP_MIC|APP_ICV = 0x7000002F)
+   * plus APP_FCS (BIT31) = 0xF000002F. Jaguar1 already uses RCR_APPFCS and
+   * Jaguar3 has BIT31 in RCR 0xF410400F; this parity makes Packet::Data carry
+   * the trailing FCS on every Realtek generation.
    * WITHOUT the legacy "accept" trio at bits 11/12/13. On this MAC generation
    * those are NOT the Jaguar1 ADF/ACF/AMF accept bits — rtw88 reg.h names
    * BIT(11) BIT_TA_BCN (TA-gated beacon accept) and BIT(12)
@@ -2298,7 +2437,7 @@ void HalJaguar2::enable_rx() {
    * (rtw88's own default RCR never sets them). Injected canonical-SA beacons
    * passed even WITH the bits set, which is how regress.py stayed green while
    * every real AP's beacons were silently dropped. */
-  uint32_t rcr = 0x7000002Fu;
+  uint32_t rcr = 0xF000002Fu;
   /* 8821C: drop APP_PHYST_RXFF (BIT28). The 8821C appends a 32-byte PHY-status
    * block before each RX frame in the RXFF, but its RX descriptor reports
    * drv_info_size=0 (unlike the 8822B, which counts it) — so the shared parser

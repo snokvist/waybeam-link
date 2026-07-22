@@ -1,9 +1,10 @@
-# Scout, claim, and channel-hold — design (pre-implementation)
+# Scout, claim, and channel-hold — implemented design
 
-Status: **awaiting operator sign-off.** No code, no `PROTOCOL.md` edit, and no
-`review-log.md` Pass entry is committed until the wire format and the open
-decisions in §9 are approved. This doc is the proposal; the law (`CLAUDE.md`)
-requires spec amendments commit first, each as a numbered Pass, before code.
+Status: **implemented through Pass 66.** Passes 58–63 (ANNOUNCE, claim/hold,
+scout, discovery, key provenance, and quickconnect) landed in PR #29. Passes
+64–66 are the two-adapter on-device hardening on the current feature branch.
+`PROTOCOL.md` is normative; this document preserves the design narrative and
+implementation history.
 
 Goal: an easy, robust way to **find** a vehicle across channels and **CSA-jump**
 it to an uncrowded channel — closer to analog-FPV simplicity than to an
@@ -83,12 +84,12 @@ DATA. Heartbeat stays 1 Hz as a pure keepalive.
 
 ---
 
-## 4. ANNOUNCE packet (proposed type `0xB`) — the pairing beacon
+## 4. ANNOUNCE packet (type `0xB`) — the pairing beacon
 
 HEARTBEAT is fixed 11 bytes with no body (§3.8 ruling), so the pairing token
 needs its own packet type. `0xB` is the next free type (11 of 16 used).
 
-**Proposed fixed 30-byte layout:**
+**Fixed 30-byte layout:**
 
 | off | size | field | notes |
 |---|---|---|---|
@@ -181,10 +182,18 @@ One sweep engine, two entry points; single- and dual-adapter both supported.
     `filter` net_id → ensure the tx adapter is on the craft's current channel →
     `POST csa(X)` with the craft's `P` → confirm the §11.6 `CSA_ARMED` ACK.
 - **Single-adapter** ground: scout is mode-exclusive — sweeping retunes the one
-  tx adapter, so any active link drops while scouting, and the CSA must be issued
-  while parked on the craft's channel. **Two-adapter** ground: dedicate a scout
-  adapter (the §15.2 "scout on a different channel" note already anticipates
-  this) and keep the link on the other.
+  uplink adapter, so any active link drops while scouting, and the CSA must be
+  issued while parked on the craft's channel. **Two-adapter** ground: the
+  `role:"tx"` uplink is the scout; diversity RX adapters remain on the resting
+  channel and preserve an active link there (Pass 64).
+- **Survey attribution:** only frames received by the scout/uplink adapter
+  contribute occupancy and candidates. Resting diversity ears are excluded so
+  they cannot smear one craft across every swept channel (Pass 65).
+- **Candidate channel:** when buffered frames leak across a retune boundary, a
+  craft's `chan` is the channel where it was heard most, not last (Pass 66).
+- **Return/rollback:** sweep stop/completion returns all adapters to the resting
+  channel. A failed claim also restores every adapter and the resting `net_id`
+  stamp/filter; a successful claim moves every ear together (Passes 64–65).
 - Post-claim, the ground does **not** auto-rescout on link loss (matches
   "hold until reboot"); re-scout is an explicit operator action.
 
@@ -237,11 +246,13 @@ Control plane (§15.5), acts on the ground/rx node:
 | `POST /api/v1/scout/stop` | `{}` | end the sweep |
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto the given (or emptiest allowlisted) channel |
 
-`psk` is never echoed by `scout/results` — `psk_known` is a bool.
+The current `scout/results` candidate shape reports `psk_known`, not the cached
+token itself. The announced token is nevertheless public and may be surfaced
+(Pass 63); the operator-provisioned `csa.psk` remains secret and redacted.
 
 ---
 
-## 9. Open decisions — RESOLVED (operator ruling 2026-07-20)
+## 9. Original open decisions — RESOLVED (operator ruling 2026-07-20)
 
 1. **ANNOUNCE = type `0xB`, fixed 30 bytes** with `flags` + `claimed_by` +
    16-byte `psk` — **approved as specified.**
@@ -257,7 +268,7 @@ Control plane (§15.5), acts on the ground/rx node:
 
 ---
 
-## 10. Proposed Pass entries (draft — appended to review-log.md on approval)
+## 10. Pass history
 
 - **Pass 58 — Session pairing token + ANNOUNCE packet.** Adds packet type `0xB`
   (§3, §4 here), the auto-generated announced `P` default, and HMAC-always-on.
@@ -272,13 +283,33 @@ Control plane (§15.5), acts on the ground/rx node:
 - **Pass 60 — Ground scout, channel occupancy, and channel persistence.** The
   sweep engine, occupancy metric, and control-plane endpoints. Amends §15.2
   (`scout`) and §15.5 (endpoints); io/app feature, no additional wire change.
+- **Pass 61 — Key provenance from `csa.psk` presence.** Removed the inert
+  `psk_announce` toggle: configured `csa.psk` selects secret mode; absence
+  selects the announced token.
+- **Pass 62 — ANNOUNCE subsumes HEARTBEAT.** ANNOUNCE is a discovery presence
+  source and resets the same quiet interval; announcing craft need not emit a
+  redundant HEARTBEAT.
+- **Pass 63 — Announced token is public.** Ground caches it for claims and may
+  surface it; only the configured operator secret remains redacted.
+- **Pass 64 — Multi-adapter scout ownership.** The uplink roams during a sweep;
+  claim moves every adapter together.
+- **Pass 65 — Survey isolation and clean rollback.** Only scout-adapter frames
+  feed the survey; sweep completion and failed claims restore all ears and the
+  resting `net_id` state.
+- **Pass 66 — Evidence-weighted candidate channel.** A craft's claim channel is
+  where it was heard most, preventing adjacent-channel settling leakage from
+  winning by scan order.
 
-## 11. Implementation order (deferred until §9 sign-off)
+## 11. Implementation status
 
-1. Pass 58/59/60 spec commits (one each), then review-log entries.
-2. core: ANNOUNCE codec + CSA binding-lifecycle state (unit-tested, clock
-   injected).
-3. io/app: auto-`P` + net_id auto, runtime stamp/filter decouple, §11.5 hold,
-   optional persistence.
-4. io/app: scout engine + occupancy + control-plane endpoints.
-5. `dev` gate green (ASan+UBSan), `ssc338q` compile clean, then bench.
+1. Passes 58–66 are recorded in `docs/review-log.md`; every spec amendment
+   preceded its implementation commit.
+2. Core ANNOUNCE codec and CSA binding lifecycle are implemented and unit-tested
+   with injected time.
+3. Runtime token generation, stamp/filter decoupling, channel hold, and optional
+   persistence are implemented in io/app.
+4. Scout sweep, occupancy, list/quickconnect endpoints, multi-adapter retune,
+   rollback, and heard-most channel selection are implemented.
+5. The native merge gate is 43/43 and the SSC338Q cross-build is clean. Passes
+   64–66 came from two-adapter on-device verification; range-sensitive gate-4
+   and real-TSF CSA timing remain separate hardware follow-ups.

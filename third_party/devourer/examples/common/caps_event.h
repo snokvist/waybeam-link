@@ -20,13 +20,14 @@ inline void emit_adapter_caps(EventSink &sink, IRtlDevice *dev) {
   const AdapterCaps c = dev->GetAdapterCaps();
 
   /* Supported channel widths as an MHz int array (kBw* -> MHz). */
-  int bw[5];
+  int bw[6];
   int nbw = 0;
   if (c.bw_mask & kBw5) bw[nbw++] = 5;
   if (c.bw_mask & kBw10) bw[nbw++] = 10;
   if (c.bw_mask & kBw20) bw[nbw++] = 20;
   if (c.bw_mask & kBw40) bw[nbw++] = 40;
   if (c.bw_mask & kBw80) bw[nbw++] = 80;
+  if (c.bw_mask & kBw160) bw[nbw++] = 160;
 
   Ev ev(sink, "adapter.caps");
   ev.f("supported", c.supported ? 1 : 0)
@@ -63,9 +64,20 @@ inline void emit_adapter_caps(EventSink &sink, IRtlDevice *dev) {
   band("char_2g4", c.characterized_2g4);
   band("char_5g", c.characterized_5g);
 
+  /* FEC RX truth table (ldpc above is the TX side, TxCaps.ldpc_ok). */
+  ev.f("ldpc_rx_ht", c.ldpc_rx_ht ? 1 : 0)
+      .f("ldpc_rx_vht", c.ldpc_rx_vht ? 1 : 0)
+      .f("ldpc_rx_flag", c.ldpc_rx_flag ? 1 : 0);
+
   ev.f("per_pkt_txpwr", c.per_packet_txpower ? 1 : 0)
+      .f("per_pkt_txpwr_steps", c.per_pkt_txpwr_steps)
+      .f("per_pkt_txpwr_step_qdb", c.per_pkt_txpwr_step_qdb)
+      .f("per_pkt_txpwr_min_qdb", c.per_pkt_txpwr_min_qdb)
+      .f("per_pkt_txpwr_max_qdb", c.per_pkt_txpwr_max_qdb)
+      .f("per_pkt_txpwr_measured", c.per_pkt_txpwr_measured ? 1 : 0)
       .f("narrowband", c.narrowband_ok ? 1 : 0)
       .f("fastretune", c.fastretune_ok ? 1 : 0)
+      .f("he_er_su", c.he_er_su_ok ? 1 : 0)
       .f("per_chain_rssi", c.per_chain_rssi ? 1 : 0)
       .f("hw_rx_tsf", c.hw_rx_timestamp ? 1 : 0)
       .f("hw_beacon_txtsf", c.hw_beacon_txtsf ? 1 : 0)

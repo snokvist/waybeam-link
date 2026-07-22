@@ -82,11 +82,28 @@ uint32_t Halrf8822c::rf_read(uint8_t path, uint16_t addr, uint32_t mask) {
   return bb_get(direct, mask & RFREG_MASK);
 }
 
-/* config_phydm_direct_write_rf_reg_8822c: RF write via the same window. */
+/* config_phydm_write_rf_reg_8822c: RF reg 0x0 (the mode register) canNOT be
+ * written through the direct 0x3c00/0x4c00 window — the kernel routes it
+ * through the legacy FON write port 0x1808 (A) / 0x4108 (B), addr in [27:20],
+ * data in [19:0] (same split as the 8822e, where the direct-window write was
+ * hardware-observed to silently no-op). Every other register goes through the
+ * direct window (config_phydm_direct_write_rf_reg_8822c). */
 void Halrf8822c::rf_write(uint8_t path, uint16_t addr, uint32_t mask,
                              uint32_t val) {
+  mask &= RFREG_MASK;
+  if ((addr & 0xff) == 0x0) {
+    uint32_t data = val;
+    if (mask != RFREG_MASK) {
+      uint32_t orig = rf_read(path, addr, RFREG_MASK);
+      data = (orig & ~mask) | ((val << mask_shift(mask)) & mask);
+    }
+    uint32_t data_and_addr =
+        (((addr & 0xffu) << 20) | (data & 0x000fffffu)) & 0x0fffffffu;
+    _device.rtw_write32(path & 1 ? 0x4108 : 0x1808, data_and_addr);
+    return;
+  }
   uint16_t direct = static_cast<uint16_t>(RF_WIN[path & 1] + ((addr & 0xff) << 2));
-  bb_set(direct, mask & RFREG_MASK, val);
+  bb_set(direct, mask, val);
 }
 
 /* _iqk_nctl_8822c — load the IQK calibration-engine microcode (generated table
@@ -102,7 +119,11 @@ void Halrf8822c::nctl() {
   }
 }
 
-/* _iqk_backup_mac_bb_8822c / _iqk_backup_rf_8822c */
+/* _iqk_backup_mac_bb_8822c / _iqk_backup_rf_8822c.
+ * NB: the list includes 0x1e70 FULL-DWORD — its [31:16] are the per-packet
+ * TX-power offset banks (TxPktPwrBanks.h). Save/restore is benign today
+ * because IQK runs at bring-up only (before banks are programmed); a future
+ * RUNTIME re-cal restoring a stale 0x1e70 must re-apply the banks after. */
 void Halrf8822c::backup_mac_bb(uint32_t *mac, uint32_t *bb) {
   static const uint16_t macreg[MAC_REG_NUM_8822C] = {0x520, 0x1c, 0x70};
   static const uint16_t bbreg[BB_REG_NUM_8822C] = {

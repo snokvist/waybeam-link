@@ -55,7 +55,10 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.rx.path_spec = e;
   if (env_long("DEVOURER_RX_URBS", &v))
     cfg.rx.urbs = static_cast<int>(v);
+  if (env_long("DEVOURER_RX_URB_BYTES", &v))
+    cfg.rx.urb_bytes = static_cast<int>(v);
   cfg.rx.phy_status_8821c = !env_flag("DEVOURER_8821C_NO_PHYST");
+  cfg.rx.abs_noise_floor = env_flag("DEVOURER_RX_NOISE_FLOOR");
   if (env_long("DEVOURER_IGI", &v))
     cfg.rx.igi = static_cast<uint8_t>(v & 0x7f);
   if (const char *e = env_str("DEVOURER_ACK_RESPONDER"))
@@ -113,6 +116,16 @@ devourer::DeviceConfig devourer_config_from_env() {
   if (const char *e = env_str("DEVOURER_THERMAL_TRACK"))
     cfg.tuning.thermal_track = std::strcmp(e, "0") != 0;
   cfg.tuning.disable_cca = env_flag("DEVOURER_DIS_CCA");
+  if (env_long("DEVOURER_FASTRETUNE_FW", &v) && v >= 0)
+    cfg.tuning.fastretune_fw = static_cast<int>(v);
+  if (env_long("DEVOURER_KFR_OFLD", &v) && v >= 0)
+    cfg.tuning.kestrel_fastretune_ofld = static_cast<int>(v);
+  if (env_long("DEVOURER_FW_TABLE_OFLD", &v) && v >= 0)
+    cfg.tuning.fw_table_offload = static_cast<int>(v);
+  /* Jaguar3 per-packet power-bank step size (qdB per 0x1e70 offset-index
+   * step; default 4 = 1 dB) — bench slope-calibration override. */
+  if (env_long("DEVOURER_TXPKT_STEP_QDB", &v) && v > 0)
+    cfg.tuning.txpkt_step_qdb = static_cast<int>(v);
   if (env_long("DEVOURER_RFE", &v))
     cfg.tuning.rfe_type = static_cast<uint8_t>(v);
   if (env_long("DEVOURER_NB_DAC", &v))
@@ -139,6 +152,16 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.tuning.fwdl_8814 = devourer::Fwdl8814Path::Rtw88;
   if (env_long("DEVOURER_8814_FWDL_CHUNK", &v))
     cfg.tuning.fwdl_8814_chunk = static_cast<uint32_t>(v);
+  if (const char *e = env_str("DEVOURER_DPDT_MODE")) {
+    if (str_ieq(e, "legacy"))
+      cfg.tuning.dpdt_8822e = devourer::Dpdt8822eMode::Legacy;
+    else if (str_ieq(e, "bit24"))
+      cfg.tuning.dpdt_8822e = devourer::Dpdt8822eMode::Bit24;
+    else if (str_ieq(e, "skip"))
+      cfg.tuning.dpdt_8822e = devourer::Dpdt8822eMode::Skip;
+    else
+      cfg.tuning.dpdt_8822e = devourer::Dpdt8822eMode::EfemPinmux;
+  }
 
   /* ---- debug ---- */
   cfg.debug.dump_canary = env_flag("DEVOURER_DUMP_CANARY");
@@ -146,6 +169,9 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.debug.efuse_dump = env_flag("DEVOURER_EFUSE_DUMP");
   cfg.debug.log_writes = env_flag("DEVOURER_LOG_WRITES");
   cfg.debug.log_txpwr = env_flag("DEVOURER_LOG_TXPWR");
+  cfg.debug.kestrel_fw_log = env_flag("DEVOURER_KESTREL_FWLOG");
+  cfg.debug.kestrel_cca_on = env_flag("DEVOURER_KESTREL_CCA_ON");
+  cfg.debug.kestrel_trigger_f2p = env_flag("DEVOURER_KESTREL_TRIGGER_F2P");
   if (const char *e = env_str("DEVOURER_REPLAY_WSEQ"))
     cfg.debug.replay_wseq = e;
   if (env_long("DEVOURER_TX_QSEL", &v))
@@ -171,6 +197,8 @@ devourer::DeviceConfig devourer_config_from_env() {
   /* ---- usb ---- */
   if (const char *e = env_str("TMPDIR"); e && *e)
     cfg.usb.lock_dir = e;
+  if (env_str("DEVOURER_RX_ZEROCOPY")) /* default true; =0 forces the heap path */
+    cfg.usb.rx_zerocopy = env_flag("DEVOURER_RX_ZEROCOPY");
 
   return cfg;
 }

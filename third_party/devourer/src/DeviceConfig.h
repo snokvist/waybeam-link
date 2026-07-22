@@ -55,6 +55,16 @@ enum class Fwdl8814Path : uint8_t {
   Rtw88,         /* legacy rtw88-mimic sequence (A/B fallback) */
 };
 
+/* 8822E DPDT antenna-transfer-switch routing (board A/B). */
+enum class Dpdt8822eMode : uint8_t {
+  EfemPinmux, /* kernel _efem_pinmux_config port — DPDT under HW TX/RX
+                 control, both RX chains live (default) */
+  Legacy,     /* improvised b5a6df7 static write: 0x4c[24] set, [22] clear
+                 (TX-favoring, RX chain B antenna-less) */
+  Bit24,      /* 0x4c[24] only (halmac WL_DPDT_SEL bit alone) */
+  Skip,       /* leave the DPDT/pin-mux untouched */
+};
+
 struct DeviceConfig {
   /* ---- RX ------------------------------------------------------------- */
   struct Rx {
@@ -82,10 +92,27 @@ struct DeviceConfig {
     /* env: DEVOURER_RX_URBS — Jaguar1 async bulk-IN URB queue depth
      * (default 8, clamped to >= 1). */
     std::optional<int> urbs;
+    /* env: DEVOURER_RX_URB_BYTES — per-URB bulk-IN buffer size on the 11ac
+     * generations (default 16384, clamped to >= 4096). Keep it at 16 KB unless
+     * you also raise the device-side RX aggregation thresholds: some MediaTek
+     * Android xhci hosts never complete a bulk-IN read larger than 16 KB
+     * (LIBUSB_ERROR_TIMEOUT forever, zero RX — OpenIPC/PixelPilot#6, fixed by
+     * #19, regressed by the #213 transport split), and the device-side
+     * aggregation caps (J1 0x3/4KB-pages, J2/J3 0x3) mean a bigger URB never
+     * fills past 16 KB anyway. Kestrel ignores this knob: the 8852C RXAGG
+     * LEN_TH is ~20 KB and its ring must hold a full aggregate (32 KB). */
+    std::optional<int> urb_bytes;
     /* env: DEVOURER_8821C_NO_PHYST (inverted) — 8821C: prepend the 32-byte
      * PHY-status to RX frames (per-frame RSSI/SNR/EVM). Disable only for the
      * leanest possible RX path. */
     bool phy_status_8821c = true;
+    /* env: DEVOURER_RX_NOISE_FLOOR — opt-in active/frame-free ABSOLUTE noise
+     * floor (dBm) in GetRxEnergy/GetRxQuality (RxEnergy.abs_noise_floor_dbm).
+     * OFF by default: the vendor idle-noise measurement adds ~10 ms of USB
+     * round-trips. Jaguar2 measures it live (wedge-free HW idle-noise report);
+     * Jaguar1 8812A/8821A measure it RX-idle (a CAL bracket); Jaguar3 and others
+     * leave it invalid (no vendor path). */
+    bool abs_noise_floor = false;
     /* env: DEVOURER_IGI — Jaguar2 fixed initial-gain index override, 7 bits
      * (unset = 0x40, the FA-rate-validated default). */
     std::optional<uint8_t> igi;
@@ -189,9 +216,49 @@ struct DeviceConfig {
      * MIX_MODE swing compensation (0xc94/0xe94 TXAGC + 0xc1c/0xe1c BB scale)
      * so on-air power holds flat as the PA heats over a sustained TX link. */
     bool thermal_track = true;
-    /* env: DEVOURER_DIS_CCA — Jaguar3 EDCCA-disable at bring-up (before the
-     * coex thread starts). Runtime equivalent: SetCcaMode. */
+    /* env: DEVOURER_FASTRETUNE_FW — FastRetune firmware fast path (H2C 0x1D
+     * SINGLE_CHANNELSWITCH_V2, the switch the vendor drivers gate behind
+     * rtw_ch_switch_offload) on the Jaguar2 dies (8822B, 8821C) and the
+     * Jaguar3 dies (8822C, 8822E): 0 = off (software compose path), 1 = firmware switch for
+     * intra-band 20/40 MHz hops, 2 = additionally accept cross-band hops
+     * (the firmware reprograms the band block; TXAGC baseline stays the
+     * bring-up band's — active power knobs re-fold). Bench + protocol:
+     * docs/experiments/kernel-channel-switch-offload.md. */
+    int fastretune_fw = 0;
+    /* env: DEVOURER_KFR_OFLD — Kestrel FastRetune firmware IO-offload (mac_ax
+     * fwofld.c): batch the whole same-sub-band hop (RF18/0xcf channel set + BB
+     * reset + fixed TX power) into ONE FW_OFLD/CMD_OFLD_REG H2C the on-chip fw
+     * replays, collapsing ~20 USB register round-trips into one bulk-OUT
+     * (~9 ms -> ~0.15 ms host-side). Default 1 (on); 0 forces the direct
+     * write-only path (self-paces the ~1.5 ms RF synth settle instead of
+     * returning before it). No rtw89 firmware channel-switch H2C exists, so
+     * this offloads the raw register writes, not a fw switch primitive. The
+     * hop returns before the synth settles — the caller honours a ~1.5 ms
+     * settle before TX (the demos' admission window). 8852B only. */
+    int kestrel_fastretune_ofld = 1;
+    /* env: DEVOURER_FW_TABLE_OFLD — Jaguar2 init-time firmware register
+     * IO-offload (HalMAC cfg_param): route the static BB/AGC/RF phy-table write
+     * stream through one FW_OFFLOAD/CFG_PARAM H2C per ~160-command batch that
+     * the firmware replays on-chip, collapsing the per-init USB register control
+     * transfers into a handful of bulk transfers. Bit flags: 1 = BB + AGC
+     * tables, 2 = also the RF radio tables (RF_W, routed through the firmware's
+     * RF write path). 0 = off (direct writes, byte-identical to before). Default
+     * 0 — init is higher blast-radius than a hop. Jaguar3 (8822C/E) is a
+     * follow-up: the fw replays cfg_param but lazily, and its rsvd-page download
+     * stalls per batch. */
+    int fw_table_offload = 0;
+    /* env: DEVOURER_DIS_CCA — Jaguar2/3 MAC carrier-sense disable at bring-up
+     * (primary CCA 0x520[14] + EDCCA [15]): injected/beacon TX stops deferring to
+     * a busy channel and punches through co-channel traffic. Runtime equivalent:
+     * SetCcaMode. Default-on on the streamtx FPV downlink. */
     bool disable_cca = false;
+    /* env: DEVOURER_TXPKT_STEP_QDB — Jaguar3 per-packet power-bank step size
+     * in quarter-dB: the dB weight of one 0x1e70 offset-index step
+     * (SetTxPacketPowerOffsetQdb / radiotap DBM_TX_POWER).
+     * Default 4 (= 1 dB), the vendor-stated step for the 22C class ("each
+     * tx_pwr_ofst step will be 1dB", phydm.h bb_ram block); override for
+     * bench slope calibration (tests/txpkt_pwr_ofset_onair.sh). */
+    int txpkt_step_qdb = 4;
     /* env: DEVOURER_RFE — Jaguar2 RFE type override (antenna/LNA switch
      * variant; unset = efuse, blank efuse falls back per vendor). */
     std::optional<uint8_t> rfe_type;
@@ -227,6 +294,11 @@ struct DeviceConfig {
      * site; out-of-range values are ignored). */
     Fwdl8814Path fwdl_8814 = Fwdl8814Path::KernelBracket;
     std::optional<uint32_t> fwdl_8814_chunk;
+    /* env: DEVOURER_DPDT_MODE=efem|legacy|bit24|skip — 8822E DPDT
+     * antenna-transfer-switch routing for board A/B. Default (efem) ports the
+     * kernel eFEM pin-mux so the DPDT follows TX/RX in hardware (both RX chains
+     * live); the others are the pre-fix static routes. See docs/8822e-quirks.md. */
+    Dpdt8822eMode dpdt_8822e = Dpdt8822eMode::EfemPinmux;
   } tuning;
 
   /* ---- Diagnostics output --------------------------------------------- */
@@ -275,6 +347,21 @@ struct DeviceConfig {
      * for a BlockAck no monitor-mode receiver sends — rty=0 airs each
      * aggregate exactly once (the broadcast/no-ack flavor). */
     std::optional<uint8_t> tx_ampdu_rty;
+    /* env: DEVOURER_KESTREL_FWLOG — Kestrel diagnostic: route the firmware log
+     * to C2H packets in InitWrite (mac_fw_log_cfg output=C2H). A decisive probe
+     * of whether async packet-C2H (rpkt_type=10) reaches the host at all. */
+    bool kestrel_fw_log = false;
+    /* env: DEVOURER_KESTREL_CCA_ON — Kestrel experiment: leave the CMAC CCA
+     * medium-busy gates enabled (carrier-sense TX) instead of clearing them,
+     * to test whether the ported RX-DCK calibration fixed the perpetual-busy. */
+    bool kestrel_cca_on = false;
+    /* env: DEVOURER_KESTREL_TRIGGER_F2P — force SendTrigger down the fw F2P_TEST
+     * command instead of host-injecting the raw Basic Trigger through the mgmt
+     * TX path. F2P is an MP-only entry the shipped client fw silently drops (it
+     * airs nothing on-air), so the default (false) host-injects a real Basic
+     * Trigger frame that actually leaves the antenna. Set true only to reproduce
+     * the F2P no-op for comparison. */
+    bool kestrel_trigger_f2p = false;
   } debug;
 
   /* ---- USB / process environment -------------------------------------- */
@@ -282,6 +369,13 @@ struct DeviceConfig {
     /* env: TMPDIR — directory for the
      * devourer-usb-*.lock files. Empty = "/tmp". */
     std::string lock_dir;
+    /* env: DEVOURER_RX_ZEROCOPY — allocate the async RX ring from kernel DMA
+     * memory (libusb_dev_mem_alloc / USBDEVFS_ALLOC) so incoming frames DMA
+     * straight into the userspace buffer, eliminating the per-URB usbfs copy on
+     * reap. Linux + capable HCD only; the alloc falls back to heap buffers (the
+     * historical copy-on-reap path) when unsupported, so leaving it on is safe.
+     * 1 = on (default), 0 = force the heap path. */
+    bool rx_zerocopy = true;
   } usb;
 
   /* ---- PCIe (DEVOURER_PCIE builds; see src/PcieTransport.h) ------------ */

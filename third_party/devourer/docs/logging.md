@@ -77,7 +77,7 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | ev | emitter | fields |
 |---|---|---|
 | `init.timing` | L (`src/InitTimer.h`) + demos | stage ("scope.stage", e.g. "demo.first_rx_frame", "txdemo.first_tx_submit"), ms |
-| `adapter.caps` | RX, TX, doctor, txpower (`examples/common/caps_event.h`) | supported, chip, names, chip_id "0x..", gen, variant, transport, tx_chains, rx_chains, n_ss, stbc, ldpc, sgi, bw_max, bw[] (MHz), txpwr_max, txpwr_step_qdb, txpwr_step_measured, txpwr_min_qdb, txpwr_max_qdb, tune_2g4[]\|null, tune_5g[]\|null, char_2g4[]\|null, char_5g[]\|null, per_pkt_txpwr, narrowband, fastretune, per_chain_rssi |
+| `adapter.caps` | RX, TX, doctor, txpower (`examples/common/caps_event.h`) | supported, chip, names, chip_id "0x..", gen, variant, transport, tx_chains, rx_chains, n_ss, stbc, ldpc, sgi, bw_max, bw[] (MHz), txpwr_max, txpwr_step_qdb, txpwr_step_measured, txpwr_min_qdb, txpwr_max_qdb, tune_2g4[]\|null, tune_5g[]\|null, char_2g4[]\|null, char_5g[]\|null, ldpc_rx_ht, ldpc_rx_vht, ldpc_rx_flag, per_pkt_txpwr, narrowband, fastretune, he_er_su, per_chain_rssi |
 | `debug.wreg` | L (`DEVOURER_LOG_WRITES`) | addr "0x0nnn", width, val "0x…" |
 | `hop.prof` | L (`DEVOURER_HOP_PROF`) | gen, ch, `<stage>_us`…, total_us |
 | `tx.fail` | L (send failure; regress.py keys on it) | {status, actual_len, timeout} or {rc, timeout} |
@@ -86,17 +86,17 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | ev | emitter | fields |
 |---|---|---|
 | `rx.pkt` | RX | n, len (first 10 + every 100th frame) |
-| `rx.frame` | RX (`DEVOURER_STREAM_OUT`), duplex | rate, len, crc, icv, rssi[2], evm[2], snr[2], seq, tsfl, bw, stbc, ldpc, sgi, paggr, ppdu, fc1 (FC flags byte; bit3 = 802.11 RETRY), body hex; `tx_tsf` (sender's hardware egress TSF) on beacons/probe-responses only |
+| `rx.frame` | RX (`DEVOURER_STREAM_OUT`), duplex | rate, len, crc, icv, rssi[2], evm[2], snr[2], seq, tsfl, bw, stbc, ldpc, sgi, paggr, ppdu, fc1 (FC flags byte; bit3 = 802.11 RETRY), sa hex, body hex; `tx_tsf` (sender's hardware egress TSF) on beacons/probe-responses only. SA gate: canonical-SA with `DEVOURER_RX_AGG_SA` unset; when set, that filter ("canon"/mac/"any") selects the stream instead |
 | `rx.body` | RX (`DEVOURER_DUMP_BODY`) | rate, rssi[2], evm[2], snr[2], crc, len, body hex |
 | `rx.corrupt` | RX (`DEVOURER_RX_DUMP_ALL`) | len, crc, icv, rate, bw, stbc, ldpc, sgi, rssi[2], evm[2], snr[2] |
-| `rx.txhit` | RX, TX | hits, total_rx, len, seq, paggr, ppdu — canonical-SA (57:42:75:05:d6:00) matcher |
+| `rx.txhit` | RX, TX | hits, total_rx, len, seq, paggr, ppdu, rate, bw, stbc, ldpc, ppdu_type — canonical-SA (57:42:75:05:d6:00) matcher; rate/ldpc prove what encoding was decoded (8814A reports ldpc=0 always — no HW indicator); ppdu_type is the AX RXD format nibble (7=HE_SU, 8=HE_ERSU; 255 on pre-AX chips) |
 | `rx.count` | TX (its RX thread) | total, len |
 | `rx.path` | RX (`DEVOURER_RX_ALLPATHS`) | seq, rssi[4], snr[4], evm[4] |
 | `rx.path_mask` | L (toggle spec) | t, mask "0xNN" |
 | `rx.scrambler` | RX (`DEVOURER_DUMP_SCRAMBLER`) | seed "0xNN", rate, hits, len |
-| `rx.energy` | RX (`DEVOURER_RX_ENERGY_MS` / sweep) | t, [ch], cca_ofdm\|null, cca_cck\|null, fa_ofdm\|null, fa_cck\|null, igi\|null, [retune_us], frames, rssi_mean, rssi_max, snr_mean, snr_min, evm_mean |
+| `rx.energy` | RX (`DEVOURER_RX_ENERGY_MS` / sweep) | t, [ch], cca_ofdm\|null, cca_cck\|null, fa_ofdm\|null, fa_cck\|null, igi\|null, abs_noise_floor_dbm\|null, [retune_us], frames, frames_ldpc, frames_stbc, crc_err, icv_err, rssi_mean, rssi_max, snr_mean, snr_min, evm_mean — crc/icv nonzero only under `DEVOURER_RX_KEEP_CORRUPTED` (the parser drops failed frames otherwise) |
 | `rx.nhm` | RX | [ch], peak, busy, dur, hist[12] |
-| `rx.quality` | RX (`DEVOURER_RXQUALITY`) | verdict, frames, rssi_mean_dbm, rssi_max_dbm, snr_mean_db, snr_min_db, evm_db\|null, noise_floor_dbm\|null, igi |
+| `rx.quality` | RX (`DEVOURER_RXQUALITY`) | verdict, frames, rssi_mean_dbm, rssi_max_dbm, snr_mean_db, snr_min_db, evm_db\|null, noise_floor_dbm\|null, abs_noise_floor_dbm\|null, igi |
 | `adapter.rxpaths` | RX (`DEVOURER_RXQUALITY`) | active_mask "0xNN", n_active, n_chains, frames, rssi_dbm[] — GetActiveRxPaths live per-chain activity (the caps rx_chains companion) |
 | `link.health` | RX (`DEVOURER_LINKHEALTH`) | verdict, rssi_dbm, snr_db, evm_db\|null, frames, fa_ofdm\|null, igi\|null, [igi_floor], [igi_ceil], cause, fix |
 | `fw.c2h` | RX, duplex (`DEVOURER_TX_STATUS`) | len, bytes hex |
@@ -127,6 +127,32 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 |---|---|---|
 | `hop.dwell` | TX, duplex | dwell, round, channel, frame, switch_us, t_ms, [mode] |
 | `hop.done` | TX, duplex | frames, dwells |
+
+### Channel migration (chanscout — docs/adaptive-channel-migration.md)
+| ev | emitter | fields |
+|---|---|---|
+| `scout.id` | chanscout | t, role, usb_id "vvvv:pppp", bus, port, usb_speed, chip, gen, scout_id "0x…" (calibration-domain key), [note] |
+| `scout.plan` | chanscout | t, v, plan "0x…" (immutable plan hash), epoch_unix_ms (one realtime sample for offline stream alignment), dwell_ms, settle_ms, backup_ms, bg_ms, fullwidth_ms, max_age_ms, n_candidates, spec |
+| `scout.cand` | chanscout | i, chan (canonical "band:primary/width[u\|l]"), center_mhz, backup, no_ir, dfs, bins[] |
+| `survey.dwell` | chanscout (`src/chanmig/SurveyJsonl.h` owns the schema) | v, seq, chan, round, plan "0x…", start_ms, end_ms, retune_us, settle_ms, observe_ms, cca_ofdm\|null, cca_cck, fa_ofdm, fa_cck, igi\|null, nhm_busy\|null, nhm_peak, nhm_dur, nhm[12], frames, rssi_mean, rssi_max, snr_mean, snr_min, evm_mean\|null, dvr_frames, dvr_air_us, oth_air_us (canonical-SA vs foreign decoded-airtime split), flags (validity bitmask), scout_id "0x…", agen |
+| `scout.health` | chanscout | t, state (ok\|degraded\|wedged\|fatal), reason (retune_fail\|energy_read_fail\|rx_stalled\|usb_congested\|thermal\|stale_survey\|plan_error), detail — emitted on state transitions only |
+| `channel.recommend` | chanscout (`DEVOURER_SCOUT_ADVISE`) | t, v, gen "0x…", plan "0x…", policy "0x…", from, to, reason (RecommendBetterCandidate), active_verdict, active_domain, impaired_windows, score, conf, occ, rounds, obs_ms, text — advisory only, retunes nothing |
+| `channel.hold` | chanscout (`DEVOURER_SCOUT_ADVISE`) | same envelope as recommend (no to/score), reason (HoldActiveHealthy\|HoldImpairmentNotPersistent\|HoldImpairmentNotChannel\|HoldBroadDegradation\|HoldCooldown\|HoldPrimaryTelemetryStale\|HoldNoQualifiedCandidate\|HoldImprovementMargin\|HoldScoutUnhealthy), text = the counterfactual |
+| `channel.ranking` | chanscout (`DEVOURER_SCOUT_ADVISE`) | t, gen "0x…", n, c0..cN ("chan q=<0\|1> score occ rej") — the full per-candidate ranking, so a dashboard renders the counterfactual from the log alone |
+| `channel.reject` | chanscout (`DEVOURER_SCOUT_ADVISE`) | t, gen "0x…", chan, reason (Rej*), occ, age_ms, rounds |
+| `migrate.id` | chanmig | t, role (ground\|drone), chip, source, link "0x…", epoch "0x…" |
+| `migrate.state` | chanmig | t, role, code (MigState value) — one per state transition |
+| `migrate.retune` | chanmig | t, role, chan — a retune executed at activation / follow / recovery |
+| `migrate.op` | chanmig (ground) | t, cmd — an operator command echoed for audit (stdin is local) |
+| `migrate.status` | chanmig (ground) | t, state, chan, clock_ready, resid_p99_us — on the `status` operator command |
+| `migrate.done` | chanmig | t, role, code (0=confirmed on new, 1=held/rolled-back to old, 2=rescue) |
+| `migrate.gate_notify` | chanmig | t, role, result (0=confirmed, 1=rolledback) — for the #279 automation gate |
+| `migrate.drop` | chanmig (`DEVOURER_MIG_DROP`/`_DROP_RX`) | dir (tx\|rx), type — a deterministic fault-injection drop |
+| `migrate.gate` | chanmig (ground, `DEVOURER_MIG_MODE`) | t, mode, verdict (0=hold,1=propose,2=abort,3=rollback), reason (GATE reason string) — the #279 automation gate decision |
+| `migrate.shadow` | chanmig (`DEVOURER_MIG_SHADOW`) | t, to, gen — a gate Propose recorded but NOT actuated (shadow-actuation ladder rung) |
+| `migrate.probe` | chanmig (drone, `DEVOURER_MIG_PROBE`) | t, busy, valid — a variant-B pre-commit probe's measured destination occupancy |
+| `migrate.validation` | chanmig (ground) | t, chan, method (0=checks,1=probe,2=probation,3=scout), result (0=accept,1=veto,2=unknown), reason, nhm_busy, valid — the drone's TargetValidation, reporting-only |
+| `migrate.disagree` | chanmig (ground) | t, chan, ground_view, drone_view — the drone vetoed a target the ground's scout called clean (asymmetric-interference diagnostic) |
 
 ### Beamforming / CSI
 | ev | emitter | fields |
