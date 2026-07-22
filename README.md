@@ -22,7 +22,10 @@ coordinated **follow-me channel switch** — built on OpenIPC **devourer** for r
 > freeze; ground trigger = `POST /api/v1/csa`, §15.5), plus the **ground scout
 > + quickconnect path** (§15.5a: ANNOUNCE discovery, channel sweep, token-keyed
 > claim, multi-adapter uplink scouting with all-ear retune/rollback, and
-> heard-most candidate-channel selection) — are implemented and tested
+> heard-most candidate-channel selection), plus **receiver-owned Ethernet cache
+> following** (claim commit replaces the RX sender subscription and repeatedly
+> assigns the same vehicle/channel/net-id tuple to the receiver's cache until
+> matching status proves readiness) — are implemented and tested
 > (`ctest --preset dev`, ASan+UBSan; SSC338Q cross-verified via
 > `cmake --preset ssc338q`).
 > Step 11 (field bring-up + the §17 bench gates) has **run** on the x86 bench
@@ -295,6 +298,10 @@ A dedicated `cache.store` node with no media streams is the one exception to
 the designated-uplink rule: all of its monitor adapters may be `role:"rx"`.
 Such a node is RF receive-only; cache status, requests, and replies use its
 configured UDP/IP endpoints.
+For production MVP it is linked to one receiver with
+`cache.store.controller`; that receiver is the only vehicle-selection authority.
+The cache never scouts or chooses a vehicle and accepts CACHE_ASSIGN only from
+the configured receiver originator and exact UDP source endpoint.
 
 **(b) UDP sim** — mirror the TX targets:
 

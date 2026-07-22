@@ -70,6 +70,7 @@ add_library(wblink_core STATIC
     core/src/frame_reassembler.cpp
     core/src/cache_store.cpp
     core/src/cache_controller.cpp
+    core/src/cache_assignment.cpp
     core/src/jscc_controller.cpp
     core/src/jscc_loss_estimator.cpp
     core/src/jscc_runtime_shadow.cpp

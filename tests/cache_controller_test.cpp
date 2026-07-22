@@ -122,6 +122,11 @@ int main() {
         }
         CHECK_EQ_U(cc.stats().blocks_closed_deficit, 1);
         CHECK_EQ_U(cc.stats().caches_fresh, 1);
+        CHECK(cc.has_fresh_target(33, 17, 104));
+        CHECK(!cc.has_fresh_target(34, 17, 104));
+        cc.reset_link();
+        CHECK(!cc.has_fresh_target(33, 17, 104));
+        CHECK_EQ_U(cc.stats().caches_fresh, 0);
     }
     {
         // Tail grace closes before the quiet floor.

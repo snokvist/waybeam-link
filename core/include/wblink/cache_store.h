@@ -77,6 +77,11 @@ class CacheStore {
     // One entry per tracked stream with a non-empty window (§3.11).
     std::vector<StatusEntry> status() const;
 
+    // §14.3 Pass 67: receiver-owned cache assignment. A changed target clears
+    // the prior vehicle's retained and requester state before new admission.
+    void assign_target(uint16_t originator);
+    uint16_t target_originator() const { return cfg_.target_originator; }
+
     CacheStoreStats& stats() { return stats_; }
     const CacheStoreStats& stats() const { return stats_; }
     void reset_stats();

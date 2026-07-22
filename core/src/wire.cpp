@@ -249,6 +249,26 @@ Decoded decode_announce(const uint8_t* buf, size_t len) {
     return a;
 }
 
+Decoded decode_cache_assign(const uint8_t* buf, size_t len) {
+    if (len != kCacheAssignSize) {
+        return len < kCacheAssignSize ? DecodeError::kTruncated
+                                      : DecodeError::kLengthMismatch;
+    }
+    CacheAssign a;
+    a.prefix = decode_prefix(buf);
+    a.target_cache = be16_read(buf + 11);
+    a.target_originator = be16_read(buf + 13);
+    a.assignment_epoch = be32_read(buf + 15);
+    a.target_chan = be16_read(buf + 19);
+    a.target_bw = buf[21];
+    a.target_net_id = buf[22];
+    if (a.target_cache == 0 || a.target_originator == 0 ||
+        a.target_chan == 0 || a.target_bw > 2) {
+        return DecodeError::kInvalidField;
+    }
+    return a;
+}
+
 }  // namespace
 
 Decoded decode(const uint8_t* buf, size_t len) {
@@ -288,6 +308,8 @@ Decoded decode(const uint8_t* buf, size_t len) {
             return decode_cache_reply(buf, len);
         case PacketType::kAnnounce:
             return decode_announce(buf, len);
+        case PacketType::kCacheAssign:
+            return decode_cache_assign(buf, len);
         default:
             return DecodeError::kUnknownType;
     }
@@ -372,6 +394,22 @@ size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap) {
     be16_write(out + 12, pkt.claimed_by);
     std::memcpy(out + 14, pkt.psk, kAnnouncePskSize);
     return kAnnounceSize;
+}
+
+size_t encode_cache_assign(const CacheAssign& pkt, uint8_t* out, size_t cap) {
+    if (out == nullptr || cap < kCacheAssignSize || pkt.target_cache == 0 ||
+        pkt.target_originator == 0 || pkt.target_chan == 0 ||
+        pkt.target_bw > 2) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kCacheAssign, out);
+    be16_write(out + 11, pkt.target_cache);
+    be16_write(out + 13, pkt.target_originator);
+    be32_write(out + 15, pkt.assignment_epoch);
+    be16_write(out + 19, pkt.target_chan);
+    out[21] = pkt.target_bw;
+    out[22] = pkt.target_net_id;
+    return kCacheAssignSize;
 }
 
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap) {

@@ -173,6 +173,19 @@ struct Announce {
     friend bool operator==(const Announce&, const Announce&) = default;
 };
 
+// §3.13 CACHE_ASSIGN (fixed 23 bytes) — Ethernet-only receiver→cache
+// selection command. target_bw uses the §11 encoding (0/1/2).
+struct CacheAssign {
+    CommonPrefix prefix;
+    uint16_t target_cache = 0;
+    uint16_t target_originator = 0;
+    uint32_t assignment_epoch = 0;
+    uint16_t target_chan = 0;
+    uint8_t target_bw = 0;
+    uint8_t target_net_id = 0;
+    friend bool operator==(const CacheAssign&, const CacheAssign&) = default;
+};
+
 // §11.1 CSA (fixed 32 bytes). csa_mac is carried opaque here; HMAC
 // computation/verification is the CSA engine's job (§11.4, build step 10).
 struct CsaPacket {
@@ -195,7 +208,7 @@ enum class DecodeError : uint8_t {
     kTooShort,        // shorter than the common prefix
     kBadMagic,        // first two bytes are not 0x57 0x42
     kBadVersion,      // version nibble != 0
-    kUnknownType,     // type nibble not in {1..7}
+    kUnknownType,     // type nibble is not registered in §3.1
     kTruncated,       // shorter than the type's fixed header
     kLengthMismatch,  // buffer length disagrees with the declared/fixed size
     kInvalidField,    // reserved bits or structurally invalid fixed field
@@ -205,7 +218,7 @@ enum class DecodeError : uint8_t {
 using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
                              Heartbeat, CsaPacket, RecoveryRequest,
                              JsccFeedback, CacheStatus, CacheRequestView,
-                             CacheReplyView, Announce>;
+                             CacheReplyView, Announce, CacheAssign>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -221,6 +234,7 @@ size_t encode_link_report(const LinkReport& pkt, uint8_t* out, size_t cap);
 size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap);
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap);
 size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap);
+size_t encode_cache_assign(const CacheAssign& pkt, uint8_t* out, size_t cap);
 size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,
                                size_t cap);
 size_t encode_jscc_feedback(const JsccFeedback& pkt, uint8_t* out, size_t cap);

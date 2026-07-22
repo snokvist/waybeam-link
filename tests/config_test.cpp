@@ -622,6 +622,8 @@ int main() {
                        "caches": [{"originator": 33,
                                    "endpoint": "127.0.0.1:5801"}]},
             "store": {"enabled": true, "listen": "127.0.0.1:5801",
+                      "controller": {"originator": 9,
+                                     "endpoint": "127.0.0.1:5802"},
                       "stream_ids": [0],
                       "status_to": ["127.0.0.1:5802"]}}})");
         CHECK(bool(r));
@@ -637,10 +639,13 @@ int main() {
             CHECK_EQ_U(c.cache.repair.max_cache_attempts, 2);
             CHECK_EQ_U(c.cache.repair.health_floor_permille, 800);
             CHECK_EQ_U(c.cache.repair.nack_grace_ms, 3);
+            CHECK_EQ_U(c.cache.repair.assignment_interval_ms, 500);
             CHECK(c.cache.store.enabled);
             CHECK_EQ_U(c.cache.store.blocks, 96);
             CHECK_EQ_U(c.cache.store.max_requests_per_s, 400);
             CHECK_EQ_U(c.cache.store.status_interval_ms, 500);
+            CHECK(c.cache.store.controller.has_value());
+            CHECK_EQ_U(c.cache.store.controller->originator, 9);
         }
         // Both roles default off.
         auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
@@ -664,10 +669,21 @@ int main() {
         "listen":"127.0.0.1:5802","nack_grace_ms":7,
         "caches":[{"originator":33,"endpoint":"127.0.0.1:5801"}]}}})",
         "nack_grace_ms");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
+                  "bind":{"kind":"frame-shm","name":"venc_out"}}],
+      "cache":{"repair":{"enabled":true,"stream_id":0,
+        "listen":"127.0.0.1:5802","assignment_interval_ms":0,
+        "caches":[{"originator":33,"endpoint":"127.0.0.1:5801"}]}}})",
+        "assignment_interval_ms");
     // store.enabled requires listen + stream_ids.
     expect_error(R"({"node":{"originator":9,"role":"rx"},
       "cache":{"store":{"enabled":true,"listen":"127.0.0.1:5801"}}})",
         "stream_ids");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "cache":{"store":{"enabled":true,"listen":"127.0.0.1:5801",
+        "stream_ids":[0],"controller":{"originator":0,
+        "endpoint":"127.0.0.1:5802"}}}})", "controller");
 
     return wbtest_finish("config_test");
 }

@@ -190,6 +190,11 @@ class RxEngine {
     // RSSI EWMA and the discovery table are untouched — observability only.
     void reset_stats();
 
+    // §15.5a Pass 67: replace every output want's sender pin and tear down
+    // the previous subscription. Normal admission gates the new tuple.
+    void select_originator(uint16_t originator);
+    std::optional<uint16_t> selected_originator() const;
+
   private:
     struct Held {
         std::vector<uint8_t> payload;

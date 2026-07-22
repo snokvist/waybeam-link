@@ -109,6 +109,10 @@ class CacheController {
 
     CacheRepairStats stats() const;
     void reset_stats();
+    void reset_link();
+    bool has_fresh_target(uint16_t cache_originator,
+                          uint16_t target_originator,
+                          uint64_t now_ms) const;
 
   private:
     struct Registry {

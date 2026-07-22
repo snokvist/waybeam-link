@@ -101,6 +101,12 @@ int main() {
             "{\"nodes\":[{\"originator\":17,\"session\":3,"
             "\"last_seen_ms\":9}],\"streams\":[]}");
     };
+    h.selection_json = [] {
+        return std::string("{\"state\":\"committed\",\"originator\":17}");
+    };
+    h.cache_assignment_json = [] {
+        return std::string("{\"controller\":9,\"target_originator\":17}");
+    };
     h.profile = [&](int mn, int mx) -> std::string {
         if (mx != 255 && mn > mx) return "min>max";
         pin_min = mn;
@@ -150,6 +156,18 @@ int main() {
             roundtrip(s, port, "GET /api/v1/discovery HTTP/1.0\r\n\r\n");
         CHECK_EQ_U(status_of(r), 200);
         CHECK(body_of(r).find("\"originator\":17") != std::string::npos);
+    }
+    {
+        const std::string r = roundtrip(
+            s, port, "GET /api/v1/link/selection HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"originator\":17") != std::string::npos);
+    }
+    {
+        const std::string r = roundtrip(
+            s, port, "GET /api/v1/cache/assignment HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"controller\":9") != std::string::npos);
     }
     // Query string is stripped.
     {

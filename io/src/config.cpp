@@ -526,6 +526,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                                                    cr.health_floor_permille);
                 cr.status_timeout_ms =
                     r.value("status_timeout_ms", cr.status_timeout_ms);
+                cr.assignment_interval_ms = r.value(
+                    "assignment_interval_ms", cr.assignment_interval_ms);
                 if (cr.enabled) {
                     if (cr.caches.empty() || cr.listen.empty()) {
                         return Result<Config>::fail(
@@ -551,6 +553,10 @@ Result<Config> load_config_json(const std::string& json_text) {
                         return Result<Config>::fail(
                             "cache.repair: nack_grace_ms is 0..6");
                     }
+                    if (cr.assignment_interval_ms == 0) {
+                        return Result<Config>::fail(
+                            "cache.repair: assignment_interval_ms must be >= 1");
+                    }
                 }
             }
             if (c.contains("store")) {
@@ -570,6 +576,13 @@ Result<Config> load_config_json(const std::string& json_text) {
                     s.value("status_interval_ms", cs.status_interval_ms);
                 cs.max_requests_per_s =
                     s.value("max_requests_per_s", cs.max_requests_per_s);
+                if (s.contains("controller")) {
+                    const json& ctl = s.at("controller");
+                    CacheEndpointCfg ep;
+                    ep.originator = ctl.value("originator", uint16_t{0});
+                    ep.endpoint = ctl.value("endpoint", std::string());
+                    cs.controller = std::move(ep);
+                }
                 if (cs.enabled) {
                     if (cs.listen.empty() || cs.stream_ids.empty()) {
                         return Result<Config>::fail(
@@ -579,6 +592,13 @@ Result<Config> load_config_json(const std::string& json_text) {
                     if (cs.blocks == 0) {
                         return Result<Config>::fail(
                             "cache.store: blocks must be >= 1");
+                    }
+                    if (cs.controller &&
+                        (cs.controller->originator == 0 ||
+                         cs.controller->endpoint.empty())) {
+                        return Result<Config>::fail(
+                            "cache.store: controller requires non-zero "
+                            "originator and endpoint");
                     }
                 }
             }

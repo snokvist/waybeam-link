@@ -25,6 +25,7 @@ enum class PacketType : uint8_t {
     kCacheRequest = 0x9,
     kCacheReply = 0xA,
     kAnnounce = 0xB,  // §3.12 craft pairing beacon
+    kCacheAssign = 0xC,  // §3.13 receiver-owned cache following
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -71,6 +72,7 @@ inline constexpr size_t kCacheStatusSize = 29;
 inline constexpr size_t kCacheRequestFixedSize = 32;
 inline constexpr size_t kCacheReplyFixedSize = 17;
 inline constexpr size_t kAnnounceSize = 30;  // §3.12: 11 prefix + 1 + 2 + 16
+inline constexpr size_t kCacheAssignSize = 23;
 
 // §3.11 CACHE_STATUS capability_flags bits.
 namespace cache_capability {

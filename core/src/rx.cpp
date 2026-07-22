@@ -784,4 +784,28 @@ void RxEngine::reset_stats() {
     }
 }
 
+void RxEngine::select_originator(uint16_t originator) {
+    if (originator == 0) return;
+    bool changed = false;
+    for (WantSpec& want : wants_) {
+        if (!want.originator || *want.originator != originator) {
+            want.originator = originator;
+            changed = true;
+        }
+    }
+    if (!changed) return;
+    streams_.clear();
+    discovery_.clear();
+}
+
+std::optional<uint16_t> RxEngine::selected_originator() const {
+    std::optional<uint16_t> selected;
+    for (const WantSpec& want : wants_) {
+        if (!want.originator) return std::nullopt;
+        if (selected && *selected != *want.originator) return std::nullopt;
+        selected = want.originator;
+    }
+    return selected;
+}
+
 }  // namespace wblink

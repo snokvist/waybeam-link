@@ -243,5 +243,32 @@ int main() {
         CHECK(std::get_if<DecodeError>(&long_len) != nullptr);
     }
 
+    // §3.13 CACHE_ASSIGN round-trip and structural clamps.
+    for (int i = 0; i < kIters; ++i) {
+        CacheAssign a;
+        a.prefix = random_prefix(rng);
+        a.target_cache = static_cast<uint16_t>(rng.u16() | 1u);
+        a.target_originator = static_cast<uint16_t>(rng.u16() | 1u);
+        a.assignment_epoch = rng.u32();
+        a.target_chan = static_cast<uint16_t>(rng.u16() | 1u);
+        a.target_bw = static_cast<uint8_t>(rng.range(0, 2));
+        a.target_net_id = rng.u8();
+        const size_t n = encode_cache_assign(a, buf, sizeof(buf));
+        CHECK_EQ_U(n, kCacheAssignSize);
+        const Decoded d = decode(buf, n);
+        const CacheAssign* v = std::get_if<CacheAssign>(&d);
+        CHECK(v != nullptr);
+        if (v != nullptr) CHECK(*v == a);
+    }
+    {
+        CacheAssign a;
+        a.prefix = random_prefix(rng);
+        a.target_cache = 33;
+        a.target_originator = 17;
+        a.target_chan = 5805;
+        a.target_bw = 3;
+        CHECK_EQ_U(encode_cache_assign(a, buf, sizeof(buf)), 0);
+    }
+
     return wbtest_finish("wire_roundtrip_test");
 }
