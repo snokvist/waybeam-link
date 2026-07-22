@@ -231,7 +231,8 @@ wire packet inside it.
 
 **Packet types** (low nibble): `0x1 DATA · 0x2 NACK · 0x3 LINK_REPORT ·
 0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK ·
-0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY · 0xB ANNOUNCE`. 11 of
+0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY · 0xB ANNOUNCE ·
+0xC CACHE_ASSIGN`. 12 of
 16 used; the version nibble will not ship 16 wire-incompatible revisions, so
 there is no type-budget scarcity. Future types (e.g. a dedicated FEC-repair
 type, §14) take free slots.
@@ -617,6 +618,39 @@ re-claim in place after the binding releases (§11.5a).
   redacted (the §15 config-dump `"(set, redacted)"` invariant). Secret mode never
   carries the secret in ANNOUNCE (16 zero bytes), so the ANNOUNCE `psk` field is
   never sensitive in either mode.
+
+### 3.13 CACHE_ASSIGN packet (type `0xC`) — 23 bytes
+
+Receiver-to-cache ownership and tuning command for the §14.3 Ethernet cache.
+It travels **only over the configured UDP/IP cache socket**, never over the air.
+The receiver that owns the cache is the sender; the cache and selected vehicle
+are separate identities in the body.
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | sender = owning receiver; `destination` = cache originator |
+| 11 | 2 | `target_cache` | must equal the assigned cache's originator |
+| 13 | 2 | `target_originator` | selected vehicle; MUST be non-zero |
+| 15 | 4 | `assignment_epoch` | monotonic within the receiver session |
+| 19 | 2 | `target_chan` | center frequency MHz; must be cache-allowlisted |
+| 21 | 1 | `target_bw` | §11 encoding: 0=20, 1=40, 2=80 MHz |
+| 22 | 1 | `target_net_id` | §3.0 filter value for the selected vehicle |
+
+The command is idempotent. A cache accepts it only from its statically
+configured controller `(originator, UDP source endpoint)`, only when both
+destination fields name that cache, and only when `(controller_session,
+assignment_epoch)` is newer than the last applied command. An exact duplicate
+is a no-op so the receiver may retry until matching CACHE_STATUS proves the
+cache is receiving the selected vehicle. A controller session change starts a
+fresh epoch domain; an older session cannot retake the cache after the new
+session has been observed.
+
+On acceptance the cache retunes all of its local ears, applies
+`target_net_id`, changes its store target to `target_originator`, and clears the
+previous vehicle's retained symbols before admitting the new vehicle. Failure
+to retune leaves the logical store assignment unchanged and produces no
+matching status. CACHE_ASSIGN never changes another receiver and never causes
+a cache to select a vehicle by RF discovery.
 
 ---
 
@@ -1566,6 +1600,7 @@ data-path crypto, or heavy state. Threats and mitigations:
 | Forged CACHE_REQUEST → cache amplification (≤48 B request elicits up to `reply_limit` full symbols) | exact-`target_cache` match + per-requester rate cap + `request_id` dedup window + per-request symbol clamp; v1 IP-only keeps it off the air entirely | 3.11, 14.3 |
 | Forged CACHE_REPLY → junk symbol injection | accepted only for an outstanding `request_id`, from the addressed cache, for requested symbols, within allowance; wrapped packet revalidated via full §3.1/§3.2 decode + latched stream key (no worse than direct DATA injection, which is the accepted §13 posture) | 3.11, 14.3 |
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
+| Forged/stale CACHE_ASSIGN → cache retune or cross-vehicle window | accept only the configured controller originator **and UDP source endpoint**, exact cache destination, allowlisted channel, and monotonic controller-session epoch; clear the old window only after a successful retune | 3.13, 14.3 |
 
 The CSA MAC is the sole cryptographic element and touches only the rare
 channel-switch control action, never the bandwidth-carrying data path. Key
@@ -1835,6 +1870,19 @@ on-air attack surface. An RF cache binding (addressed injection on the shared
 channel) is reserved — the §3.11 formats are transport-agnostic — but is NOT
 part of v1 and is not implemented before the §17 gate-2 vehicle verdict.
 
+**Ownership + vehicle following (MVP ruling):** a cache belongs to one
+statically configured receiver/controller. The receiver is the only component
+that discovers and pairs with a vehicle (§15.5a). When its claim commits, it
+atomically changes its local RX target and repeatedly sends §3.13 CACHE_ASSIGN
+to its cache; startup does the same for a statically configured target. The
+cache does not scout, choose among vehicles, or infer ownership from RF CSA.
+It follows the receiver's committed `(vehicle originator, channel, bandwidth,
+net_id)` and clears the prior vehicle window. Matching CACHE_STATUS is the
+receiver's readiness proof and naturally re-drives assignment after a cache
+restart or outage. One receiver + its cache is the production-v1 topology;
+multi-receiver cache arbitration and simultaneous multi-vehicle caching are
+out of scope.
+
 **Identity + merge (rulings):** symbols keep the §2/§6.1 merge identity
 `(originator, session, stream, block_id, symbol index)`; the repair source is
 metadata, never a second decode path. Cache-delivered symbols feed the §6.3a
@@ -1918,9 +1966,11 @@ only for the requested block, only for symbols it asked for (a missing source,
 or a repair not marked held), and only up to the request's allowance; the
 wrapped packet must pass the full §3.1/§3.2 decode and match the latched
 stream key. CACHE_STATUS is accepted only from configured cache endpoints.
-For each stored `stream_id`, the cache accepts only `node.preferred_originator`
-when configured; otherwise the first sender latches until restart. A new
-session from that same originator replaces the retained window, but a different
+For each stored `stream_id`, a statically configured cache initially accepts
+only `node.preferred_originator` when non-zero; otherwise the first sender
+latches. An accepted CACHE_ASSIGN replaces that target and clears every
+retained window. A new vehicle session under the same assigned originator
+replaces its retained window without another assignment, while a different
 originator cannot flush it.
 
 Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
@@ -1929,7 +1979,8 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 `nack_grace_ms 3`,
 `absolute_symbol_limit 8`, `max_cache_attempts 2`, `reply_limit 4`,
 `health_floor_permille 800`, `status_timeout_ms 1500`,
-`status_interval_ms 500`, retention `blocks 96`, `max_requests_per_s 400`.
+`status_interval_ms 500`, `assignment_interval_ms 500`, retention `blocks 96`,
+`max_requests_per_s 400`.
 
 ---
 
@@ -1949,7 +2000,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   them.
 - The §14.3 **cache sockets** (`cache.repair.listen` / `cache.store.listen`)
   are control-plane UDP sockets like the §15.5 REST bind — they carry only
-  §3.11 packets and count against **neither** the ≤4-UDP stream pool nor the
+  §3.11/§3.13 packets and count against **neither** the ≤4-UDP stream pool nor the
   shm pool.
 
 ### 15.2 Config (JSON)
@@ -2061,16 +2112,22 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
       "hard_close_ms": 8, "request_timeout_ms": 4, "nack_grace_ms": 3,
       "repair_fraction_permille": 200, "absolute_symbol_limit": 8,
       "max_cache_attempts": 2, "reply_limit": 4,
-      "health_floor_permille": 800, "status_timeout_ms": 1500 },
+      "health_floor_permille": 800, "status_timeout_ms": 1500,
+      "assignment_interval_ms": 500 },
     "store": { "enabled": true, "listen": "0.0.0.0:5801",
+      "controller": { "originator": 9, "endpoint": "192.168.1.9:5802" },
       "stream_ids": [0], "blocks": 96, "reply_limit": 4,
       "status_to": ["192.168.1.9:5802"], "status_interval_ms": 500,
       "max_requests_per_s": 400 }
   }
   ```
   `repair.enabled` requires a non-empty `caches` list and `listen`;
-  `repair.stream_id` must name a `frame-shm` egress stream. `store.enabled`
-  requires `listen`; `status_to` lists the aggregator endpoints (empty =
+  `repair.stream_id` must name a `frame-shm` egress stream.
+  `assignment_interval_ms` is the retry cadence until a matching fresh
+  CACHE_STATUS is observed. `store.enabled` requires `listen`; optional
+  `store.controller` enables receiver-owned following and requires both a
+  non-zero controller originator and its exact cache-UDP source endpoint.
+  `status_to` lists the aggregator endpoints (empty =
   answer requests but send no status — such a store is never eligible under
   §14.3 rule 6). Every value is a §17-overridable seed.
 
@@ -2377,6 +2434,8 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
 | `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |
 | `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[]}` (§15.5a; ground/rx node) |
+| `GET /api/v1/link/selection` | receiver's configured/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
+| `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -2475,6 +2534,14 @@ supported (§15.2 `scout`).
   resting channel when a sweep ends or is stopped. On success the ground holds the
   target channel and does **not** auto-rescout on link loss (matching §11.5
   hold-until-reboot); re-scout is an explicit action.
+- **Selection commit + cache follow.** A claim is not a media subscription until
+  the issuer commits. At commit, the ground replaces every configured output
+  stream's sender pin with the selected vehicle, tears down the old RX/reassembly
+  and cache-controller block state, and starts §3.13 assignment retries for its
+  configured cache(s). If issuer verification reverts, the previous selection
+  tuple and cache assignment are restored. Cache readiness is true only after a
+  fresh CACHE_STATUS for the selected vehicle; video reception itself never waits
+  on the optional cache.
 
 ---
 
