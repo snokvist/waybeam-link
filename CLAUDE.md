@@ -19,9 +19,6 @@ link layer, and a follow-me channel switch. Standalone repo, not a submodule of
   anything spec-adjacent, to pick up the reasoning, not just the verdict.
 - **Never commit to main.** Feature branch (`impl/`, `fix/`, `docs/`) → PR →
   squash-merge, and merge only on the operator's explicit word.
-- Commit trailer: check `git log -3 --format=%B` for the trailer currently in
-  use (as of this writing, `Co-Authored-By: Claude Opus 4.8 (1M context)
-  <noreply@anthropic.com>`) and reuse it verbatim — don't invent your own.
 - **Never edit vendored code under `third_party/`** (devourer, libusb-cmake).
   Portability/build issues are fixed from our CMake only (see the
   `pkgconf-libusb.sh` shim and the per-target `WBLINK_WARNINGS` pattern in
