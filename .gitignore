@@ -21,3 +21,6 @@ __pycache__/
 /artifacts/
 /*.local
 __pycache__/
+
+# Serena MCP local tooling
+.serena/
