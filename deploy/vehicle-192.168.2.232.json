@@ -46,6 +46,10 @@
       "quiet_gap": true,
       "guard_us": 300,
       "return_window_us": 2000
+    },
+    "csa": {
+      "home_chan": 5805,
+      "channel_allowlist": [5745, 5805, 5825]
     }
   },
   "venc": {

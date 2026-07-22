@@ -26,10 +26,20 @@
   "air": {
     "kind": "kernel-monitor"
   },
+  "policy": {
+    "csa": {
+      "home_chan": 5805,
+      "channel_allowlist": [5745, 5805, 5825]
+    }
+  },
   "cache": {
     "store": {
       "enabled": true,
       "listen": "192.168.2.247:5801",
+      "controller": {
+        "originator": 9,
+        "endpoint": "192.168.2.242:5802"
+      },
       "stream_ids": [0],
       "blocks": 96,
       "reply_limit": 4,
