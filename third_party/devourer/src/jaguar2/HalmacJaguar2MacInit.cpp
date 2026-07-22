@@ -440,6 +440,28 @@ bool HalmacJaguar2MacInit::send_h2c_pkt(const uint8_t pkt[32]) {
   return got == static_cast<int>(sizeof(frame));
 }
 
+uint16_t HalmacJaguar2MacInit::cfg_param_page() const {
+  /* The rsvd pages stack up from the boundary: DRV(16) at the bottom, then the
+   * H2C-extra-info block — so the cfg_param buffer page is boundary + DRV_NUM. */
+  return static_cast<uint16_t>(_rsvd_boundary + RSVD_PG_DRV_NUM);
+}
+
+uint16_t HalmacJaguar2MacInit::cfg_param_loc() const { return RSVD_PG_DRV_NUM; }
+
+void HalmacJaguar2MacInit::wait_h2c_drained(uint32_t timeout_ms) {
+  /* HEAD advances as packets enter the H2C queue, READ_ADDR as the FW consumes
+   * them (get_h2c_buf_free_space_88xx). Equal pointers = the trigger was read;
+   * a short settle then covers the on-chip register replay before the caller
+   * overwrites the extra-info page for the next batch. */
+  for (uint32_t i = 0; i < timeout_ms; ++i) {
+    const uint32_t head = _device.rtw_read32(REG_H2C_HEAD) & 0x3ffff;
+    const uint32_t rd = _device.rtw_read32(REG_H2C_READ_ADDR) & 0x3ffff;
+    if (head == rd)
+      break;
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+}
+
 bool HalmacJaguar2MacInit::send_fw_general_info(uint8_t rfe_type, bool r2t2r,
                                                 uint8_t cut_ver,
                                                 uint8_t package_type) {
@@ -684,8 +706,13 @@ void HalmacJaguar2MacInit::init_usb_cfg() {
   _device.rtw_write8(REG_TXDMA_PQ_MAP, agg_enable);
   _device.rtw_write8(kRxdmaAggPgTh + 3, dma_usb_agg);
   const uint8_t ss = (_device.rtw_read8(REG_SYS_CFG2 + 3) == 0x20);
+  /* Agg page threshold 0x03 (4 KB pages -> ≤12 KB aggregates), down from the
+   * halmac default 0x05 (20 KB): the RX ring posts 16 KB URBs (MediaTek
+   * Android hosts can't complete larger bulk-IN reads — OpenIPC/PixelPilot#6,
+   * DeviceConfig::Rx::urb_bytes) and an aggregate must never span two URBs or
+   * the next_offset walk breaks. Mirrors floppyhammer's Jaguar1 fix (#19). */
   _device.rtw_write16(kRxdmaAggPgTh,
-                      static_cast<uint16_t>(0x05 | ((ss ? 0x0A : 0x20) << 8)));
+                      static_cast<uint16_t>(0x03 | ((ss ? 0x0A : 0x20) << 8)));
   _logger->info("Jaguar2: init_usb_cfg (RXDMA_MODE=0x{:02x}, RX-agg EN)", v);
 }
 

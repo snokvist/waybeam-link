@@ -90,7 +90,13 @@ static std::vector<uint8_t> mgmt_hdr(uint8_t fc, const uint8_t* sta) {
 static void append_ies(std::vector<uint8_t>& m, bool ssid) {
   if (ssid) { m.insert(m.end(), {0x00,(uint8_t)strlen(kSsid)});
     m.insert(m.end(), kSsid, kSsid+strlen(kSsid)); }
-  m.insert(m.end(), {0x01,0x08,0x82,0x84,0x8b,0x96,0x24,0x30,0x48,0x6c});
+  // Band-correct Supported Rates: CCK+OFDM on 2.4 GHz, OFDM-only on 5 GHz. CCK
+  // basic rates (1/2/5.5/11) do not exist on 5 GHz — advertising them makes a
+  // 5 GHz station skip the BSS ("rate sets do not match"), so no association.
+  if (g_chan <= 14)
+    m.insert(m.end(), {0x01,0x08,0x82,0x84,0x8b,0x96,0x24,0x30,0x48,0x6c});
+  else
+    m.insert(m.end(), {0x01,0x08,0x8c,0x12,0x98,0x24,0xb0,0x48,0x60,0x6c});
   m.insert(m.end(), {0x03,0x01,g_chan});
   m.insert(m.end(), kRsn, kRsn+sizeof(kRsn));           // RSN IE -> advertise WPA2
 }
@@ -392,7 +398,7 @@ int main(int argc, char** argv) {
   auto* h = libusb_open_device_with_vid_pid(ctx, vid, pid);
   if (!h) { fprintf(stderr, "open %04x:%04x fail\n", vid, pid); return 1; }
   std::shared_ptr<devourer::UsbDeviceLock> lk;
-  if (devourer::claim_interface_then_reset(h, 0, logger, true, lk) != 0) return 1;
+  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lk) != 0) return 1;
   WiFiDriver wifi(logger);
   auto dev = wifi.CreateRtlDevice(h, ctx, lk, devourer_config_from_env());
   g_dev = dev.get(); if (!g_dev) return 1;

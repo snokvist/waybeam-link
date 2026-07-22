@@ -160,7 +160,7 @@ per-cell stdout/stderr logs end up at `/tmp/devourer-regress-last/`.
 - `--tx-pid 0xNNNN` / `--rx-pid 0xNNNN` — pick specific DUTs (defaults to
   the first two auto-detected)
 - `--no-baseline-abort` — run all 4 cells even if kernel-kernel fails
-  (useful when one chipset has no working kernel driver on this rig)
+  (useful when one chipset has no working kernel driver on the host)
 - `--no-rf-reset` — skip the per-cell USB port-level authorize-cycle.
   Default behaviour is to deauthorize / reauthorize each DUT's USB port
   before every cell, forcing a true chip-power cycle. Required because
@@ -268,6 +268,23 @@ sudo python3 tests/regress.py --encoding-matrix \
     --vm-name devourer-testrig --vm-ssh <user>@<VM-IP>
 ```
 
+`--modes` restricts the driver-mode rows to a comma list of `txside:rxside`
+entries — LDPC/STBC truth-table runs want `--modes devourer:devourer`, since
+the kernel-TX rows are never authoritative for those bits (the kernel driver
+strips them; see the caveat below) and the kernel rows double the runtime:
+
+```bash
+sudo python3 tests/regress.py --encoding-matrix --modes devourer:devourer \
+    --tx-pid 0x8812 --rx-pid 0x012d --channel 6 --duration 8
+```
+
+Each devourer-RX cell's `rx.txhit` events carry the received frame's
+`rate`/`bw`/`stbc`/`ldpc` so a pass proves the encoding actually flew (a pass
+with `ldpc:0` means the TX fell back to BCC, not that the RX decoded LDPC).
+Exception: the RTL8814AU reports `ldpc:0` even on LDPC frames it decoded —
+the chip has no per-frame LDPC indicator (`AdapterCaps.ldpc_rx_flag=0`);
+judge its RX by hit count, its TX by the paired 8812AU's flag.
+
 Encoding combos iterated by default — 6 cells per driver mode × 4 driver
 modes = 24 cells total per run:
 
@@ -323,6 +340,28 @@ The `d/k` and `d/d` rows are not affected by the kernel-TX caveat —
 chip's bulk-OUT buffer, so the `DEVOURER_TX_*` env vars are ground
 truth for what flies on devourer TX.
 
+### `ldpc_waterfall.sh`: measured LDPC coding gain
+
+Traces delivery-vs-TX-power waterfalls for the same MCS with BCC vs LDPC
+coding and reads the horizontal shift = coding gain in dB. The emitter steps
+a flat TXAGC index per point (`DEVOURER_TX_PWR`, 0.5 dB/step Jaguar1/2,
+0.25 dB Jaguar3); the ground counts canonical-SA FCS-clean frames per
+`rx.energy` window (`DEVOURER_RX_AGG_SA=canon`); PER denominators come from
+the emitter's exact final `tx.stats`.
+
+```bash
+sudo tests/ldpc_waterfall.sh --emit-pid 0x8812 --ground-pid 0x012d \
+    --ground-vid 0x2357 --channel 6 --rate MCS7 --pwr-start 22 --pwr-stop 52
+python3 tests/ldpc_waterfall.py /tmp/devourer-ldpc-waterfall/points.jsonl \
+    --step-qdb 2 --thresholds 0.1,0.5
+```
+
+Sweep the noise-limited rising edge — at high index near-field, both curves
+distort (the BCC MCS7 curve rolls over and dies while LDPC keeps decoding;
+compare curves only on the rising edge). Bench-measured on an 8812AU→8822BU
+pair at MCS7/20 MHz: **+3.0 dB LDPC gain at the 10%-delivery crossing**, and
+in the saturation regime LDPC delivered ~80% where BCC delivered 0–19%.
+
 ## Supported DUTs
 
 Listed in `SUPPORTED_DUTS` at the top of `regress.py`. Extend the dict
@@ -362,3 +401,33 @@ to add new chipsets — the rest of the script is chipset-agnostic.
   the full story — chip behaviour can differ per band. Run 2.4GHz
   (`--channel 6`) plus at least one 5GHz channel (`--channel 36` /
   `--channel 100`) before calling a configuration good.
+
+## Kestrel (RTL8852BU / RTL8832CU) suite
+
+The 11ax generation has its own `kestrel_*` on-air scripts (regress.py covers
+it as a DUT too, but these exercise Kestrel-specific surfaces). All expect the
+adapters cold (`uhubctl` VBUS-cycle; the in-tree rtw89 modules must be
+temp-blacklisted — they auto-probe and warm-initialize the chip at every
+enumeration, masking cold-boot behavior):
+
+- `kestrel_rx_smoke.sh` — ambient monitor-RX decode per channel (VBUS-cycles
+  first).
+- `kestrel_tx_sdr.sh`, `kestrel_narrowband_sdr.sh`, `kestrel_streamtx_sdr.sh`
+  — B210 SDR duty / occupied-bandwidth measurements of the TX path.
+- `kestrel_tx_onair.sh`, `kestrel_inject_sanity.sh`, `kestrel_bw_rx.sh` —
+  two-adapter TX→RX decode, per-bandwidth.
+- `kestrel_he_onair.sh`, `kestrel_two_radio_he.sh` — HE-rate on-air witness
+  (the two-radio variant needs no vendor kernel module).
+- `kestrel_beacon_onair.sh`, `kestrel_txreport_onair.sh` — MAC-plane canaries
+  (HW beacon engine, TX-report C2H).
+- `kestrel_8832cu_*` — the 8832CU family: `rx`, `tx_sdr`, `tx_matrix`
+  (rate×bw duty matrix), `evm`/`evm_stream` (8812AU-monitor TX-EVM; `TX_ID`
+  env retargets the DUT), `6g_txrx` (6 GHz TX+RX), `6g160_txrx` (the
+  documented 6G-160 TX limitation witness), `ab`/`kernel_rx_ab` (vendor-ko
+  A/B ground truth).
+- `kestrel_vendor_ko_smoke.sh`, `kestrel_vendor_rx_check.sh`,
+  `kestrel_env_calibrate.sh` — kernel-driver ground-truth harnesses.
+- `kestrel_txpwr_sweep.sh` — TXAGC dBm sweep vs SDR duty.
+- `kestrel_fwlog_c2h_probe.sh` — exercises the `debug.kestrel_fw_log` knob.
+- Selftests (`ctest`): `kestrel_rxparse_selftest.cpp`,
+  `kestrel_txreport_selftest.cpp`.

@@ -1,13 +1,14 @@
 # devourer
 
-**The Realtek 11ac driver that simply devours its competitors.**
+**The Realtek Wi-Fi driver that simply devours its competitors.**
 
-Devourer is a userspace Wi-Fi driver for Realtek's 802.11ac USB adapters —
+Devourer is a userspace Wi-Fi driver for Realtek's 802.11ac and 802.11ax
+USB adapters —
 the cheap, everywhere-available dongles that power most long-range FPV video
 links. It talks to the chip directly over libusb: no kernel module, no DKMS
 tree to patch every time your kernel updates, no root filesystem to taint.
 Build one static library, link it, and you have raw monitor-mode RX and
-packet injection on three generations of Realtek silicon, from a single API.
+packet injection on four generations of Realtek silicon, from a single API.
 
 It is the [OpenIPC](https://openipc.org) project's driver of choice for
 long-range digital video links.
@@ -19,7 +20,10 @@ long-range digital video links.
   — including platforms the vendor drivers never supported.
 - **Faster on-air than the kernel driver.** Ready-to-receive and
   ready-to-transmit come up quicker than the vendor `.ko` on every supported
-  chip ([numbers](docs/startup-time.md)).
+  chip, and raw injection skips the kernel networking stack the vendor driver
+  drags every frame through (mac80211 → cfg80211 → qdisc → skb → driver xmit) —
+  so it sustains the same channel occupancy at 3–4× less host CPU, which matters
+  most on an embedded transmitter ([numbers](docs/performance-tuning.md)).
 - **Per-packet control.** Every injected frame carries its own radiotap
   header: rate, bandwidth, guard interval, coding, STBC — even TX power and
   channel — can change frame by frame. That turns one dongle into an
@@ -33,7 +37,7 @@ long-range digital video links.
   vendor never gave narrowband — half/quarter the bandwidth, more range from
   the same power ([how](docs/narrowband.md)).
 - **Hardware time, for coordinating radios.** Every received frame is stamped
-  with the chip's microsecond MAC clock (TSF) on all three generations, and the
+  with the chip's microsecond MAC clock (TSF) on every generation, and the
   64-bit timer reads back directly — the primitive multi-radio setups need.
   Independent receivers correlate their clocks to sub-microsecond, and a
   time-division burst schedule locks to a transmitter ~25× tighter than the host
@@ -53,28 +57,34 @@ long-range digital video links.
   magic inside the library.
 
 New to low-level RF? Start with the [visual RF primer](docs/rf-primer.md) —
-eight short animations that make the rest click.
+eight short animations that make the rest click. Its sibling, the
+[visual driver primer](docs/driver-primer.md), does the same for the silicon
+and vendor-driver vocabulary (firmware, efuse, DMAC/CMAC, halbb/halrf, IQK…).
 
 ## Supported hardware
 
 Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 20 MHz) per band:
 
-| Part                          | RF / streams      | 2.4 GHz (ch6) | UNII-1 (ch36) | UNII-2/3 (ch149) | Notes                                       |
-| ----------------------------- | ----------------- | ------------- | ------------- | ---------------- | ------------------------------------------- |
-| **RTL8812AU**                 | 2T2R              | 56            | 52            | 52               | [CHANEVE CHW50L](https://www.aliexpress.com/item/4000762461362.html) (`0bda:8812`). 5/10 MHz capable |
-| **RTL8811AU**                 | 1T1R              | —             | —             | —                | 1T1R cut of 8812 silicon; rides the 8812 code path. Not benchmarked. 5/10 MHz capable |
-| **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | `0bda:8813`; tested on COMFAST CF-938AC and CF-960AC — antenna builds differ in realised [RX diversity](docs/measuring-spatial-diversity.md). 5/10 MHz capable |
-| **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | TP-Link Archer T2U Plus (`2357:0120`) |
-| **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | TP-Link Archer T3U (`2357:012d`). 5/10 MHz capable |
-| **RTL8812BU**                 | 1T1R + BT         | —             | —             | —                | 1T1R cut of 8822B silicon; rides the 8822BU code path. Not benchmarked |
-| **RTL8811CU**                 | 1T1R + BT         | 36            | 29            | 28               | COMFAST CF-811AC (`0bda:c811`). 5/10 MHz capable |
-| **RTL8821CU**                 | 1T1R + BT         | —             | —             | —                | rides the 8811CU (8821C) code path. 5/10 MHz capable |
-| **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | LB-LINK WDN1300H (`0bda:c812`). 5/10 MHz capable |
-| **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`). 5/10 MHz capable |
-| **RTL8812EU**                 | 2T2R              | 8             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable |
-| **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked. 5/10 MHz capable |
-| **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
+| Part                          | RF / streams      | 2.4 GHz (ch6) | UNII-1 (ch36) | UNII-2/3 (ch149) | 6 GHz (ch5) | Notes                                       |
+| ----------------------------- | ----------------- | ------------- | ------------- | ---------------- | ---------------- | ------------------------------------------- |
+| **RTL8812AU**                 | 2T2R              | 56            | 52            | 52               | —                | [CHANEVE CHW50L](https://www.aliexpress.com/item/4000762461362.html) (`0bda:8812`). 5/10 MHz capable |
+| **RTL8811AU**                 | 1T1R              | —             | —             | —                | —                | 1T1R cut of 8812 silicon; rides the 8812 code path. Not benchmarked. 5/10 MHz capable |
+| **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | —                | `0bda:8813`; tested on COMFAST CF-938AC and CF-960AC — antenna builds differ in realised [RX diversity](docs/measuring-spatial-diversity.md). 5/10 MHz capable |
+| **RTL8821AU**                 | 1T1R + BT         | 54            | 32            | 28               | —                | TP-Link Archer T2U Plus (`2357:0120`) |
+| **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | —                | TP-Link Archer T3U (`2357:012d`). 5/10 MHz capable |
+| **RTL8812BU**                 | 1T1R + BT         | —             | —             | —                | —                | 1T1R cut of 8822B silicon; rides the 8822BU code path. Not benchmarked. 5/10 MHz capable |
+| **RTL8811CU**                 | 1T1R + BT         | 36            | 29            | 28               | —                | COMFAST CF-811AC (`0bda:c811`). 5/10 MHz capable |
+| **RTL8821CU**                 | 1T1R + BT         | —             | —             | —                | —                | rides the 8811CU (8821C) code path. 5/10 MHz capable |
+| **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | —                | LB-LINK WDN1300H (`0bda:c812`). 5/10 MHz capable |
+| **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | —                | not benchmarked (`0bda:c82c`). 5/10 MHz capable |
+| **RTL8812EU**                 | 2T2R              | ‡             | 51            | 47               | —                | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable. ‡ 2.4 GHz TX airs energy but no receiver decodes it — the vendor kernel driver behaves identically on this module ([quirks](docs/8822e-quirks.md)) |
+| **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | —                | not benchmarked. 5/10 MHz capable |
+| **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
+| **RTL8852BU** (11ax)          | 2T2R + BT         | 43            | 36            | 33               | —          | TP-Link Archer TX20U Nano (`35bc:0108`); Wi-Fi 6, dual-band. 5/10 MHz capable; HE ER SU + DCM extended range |
+| **RTL8832BU** (11ax)          | 2T2R              | —             | —             | —                | —          | Wi-Fi-only SKU of the 8852B die; rides the 8852BU code path. Not benchmarked. 5/10 MHz capable; HE ER SU + DCM extended range |
+| **RTL8832CU** (11ax)          | 2T2R + BT         | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band (2.4/5/6 GHz). 5/10 and 160 MHz capable; HE ER SU + DCM extended range. Host-push injection over USB 2.0 (~50% duty ceiling); [6G TX+RX validated](tests/kestrel_8832cu_6g_txrx.sh) |
+| **RTL8852CU** (11ax)          | 2T2R + BT         | —             | —             | —                | —          | "8852" branding of the same 8852C die; rides the 8832CU code path. Not benchmarked. 5/10 and 160 MHz capable; HE ER SU + DCM extended range |
 
 `†` = works on-air but the reading varies run-to-run (bracketed = best clean
 reading).
@@ -85,8 +95,17 @@ a chip already near the PHY ceiling — it raises *goodput* (delivered payload)
 ~30% at MCS7/20 by amortizing per-frame overhead, which an occupancy metric
 can't show. See [aggregation & hardware ACK](docs/aggregation.md).
 
-Out of scope: the pre-HalMAC PCIe parts (RTL8812AE/8821AE) and the 11ax
-"Kestrel" generation — same branding, different bus or baseband.
+Out of scope: the pre-HalMAC PCIe parts (RTL8812AE/8821AE). The 11ax
+"Kestrel" generation (RTL8852BU / RTL8852CU, a fourth HAL under `src/kestrel/`,
+vendor references `reference/rtl8852bu` + `reference/rtl8852cu`) has RX, TX, and
+channel/bandwidth (5/10/20/40/80 MHz on both dies, 160 MHz on the 8852C)
+on-air validated — and the tri-band **RTL8832CU** adds 6 GHz (WiFi 6E),
+benchmarked above at ~5 GHz-parity throughput. The BB/RF plane is Realtek's own
+halbb/halrf C compiled verbatim (register tables, per-channel config, DACK/
+RX-DCK, plus IQK on the 8852C); TSSI/DPK on both dies and IQK on the 8852B are
+gated off with on-air evidence — they degrade TX under the fixed-power model.
+The 8852A-family (e.g. RTL8832AU) stays out of scope — its only vendor driver
+is a frozen 2021 drop.
 
 > Heads up — some Realtek sticks ship in "ZeroCD" mode and first enumerate as
 > a USB flash drive holding a Windows installer (`0bda:1a2b` is the canonical
@@ -132,7 +151,11 @@ the `env:` tags in [`src/DeviceConfig.h`](src/DeviceConfig.h).
 | `streamtx` / `duplex` | stdin-driven TX / full-duplex packet link |
 | `svctx` | per-video-layer rate ladders (unequal error protection) |
 | `txpower` | runtime TX-power API walkthrough |
+| `tdma` | TSF-slotted burst TDMA (narrowband ↔ wide on one channel) |
+| `timesync` | over-the-air clock distribution (master / slave / UE roles) |
 | `sense` | Wi-Fi motion sensing from beamforming reports |
+| `doctor` | adapter-health triage → HEALTHY / SUSPECT / FAILING |
+| `pcieprobe` | PCIe transport bring-up validation, layer by layer |
 | `precoder` | OFDM subcarrier shaping proof-of-concept |
 
 All chips compile in by default; per-chip CMake options (`DEVOURER_JAGUAR1`,
@@ -174,30 +197,59 @@ auto dev = driver.CreateRtlDevice(handle, ctx, lock, cfg);
 Anything that changes mid-session is a runtime setter on the device:
 `SetTxMode`, `SetTxPowerOffsetQdb`, `SetRxPathMask`, `FastRetune`, ...
 The device class is chosen automatically from the chip behind the handle;
-one `IRtlDevice` interface covers all three generations.
+one `IRtlDevice` interface covers all four generations.
 
 ## Going deeper
 
+**Primers** — start here:
+
 - [Visual RF primer](docs/rf-primer.md) — animated intro to the concepts
   behind everything below.
+- [Visual driver primer](docs/driver-primer.md) — animated intro to the chip
+  and vendor-driver machinery: registers, efuse, firmware, MAC, PHY tables,
+  calibration, coexistence.
+
+**Link engineering:**
+
 - [Adaptive link](docs/adaptive-link.md) — the energy-minimizing video-link
-  controller design, and [its validation](docs/adaptive-link-validation.md).
+  controller design, [its validation](docs/adaptive-link-validation.md), and
+  the [building blocks](docs/adaptive-link-building-blocks.md): what each knob
+  (power, rate, bandwidth, hopping) measurably buys.
 - [Fused FEC](docs/fused-fec.md) — the cross-layer error-protection stack:
   per-layer PHY rates, corrupt-frame salvage, outer erasure code.
+- [Aggregation & hardware ACK](docs/aggregation.md) — USB TX aggregation,
+  per-frame CCX TX-status reports, 802.11 A-MPDU (`SetAmpduMode`, +30% on-air
+  goodput), and the hardware ACK/BlockAck responder for reliable-unicast links.
+- [wfb-ng tuning](docs/wfb-ng-tuning.md) — the most efficient wfb-ng
+  configuration, and the SDR-measured devourer-vs-wfb-ng TX comparison.
+
+**Spectrum agility:**
+
 - [Frequency hopping](docs/frequency-hopping.md) — how per-packet hopping
-  works and what it costs on each chip.
+  works and what it costs on each chip, including the 8822B/C/E firmware
+  channel-switch fast path (`DEVOURER_FASTRETUNE_FW`).
+- [Kernel channel-switch baseline](docs/experiments/kernel-channel-switch-baseline.md) +
+  [firmware offload](docs/experiments/kernel-channel-switch-offload.md) +
+  [MCC/FCS](docs/experiments/mcc-fcs-investigation.md) +
+  [dwell-1 A/B injection](docs/experiments/dwell1-ab-injection.md) +
+  [N-channel hopping](docs/experiments/n-channel-hopping.md) — how the standard
+  Linux/Realtek drivers retune measured against devourer, where the chip
+  firmware's own H2C 0x1D switch beats them, and a two-context per-slot data
+  plane with zero wrong-channel over 100 k slots.
+- [FHSS](docs/fhss.md) — the anti-jam design article: keyed SipHash hop
+  schedules, slot-locked lockstep RX, and
+  [jammer resilience](docs/jammer-resilience.md) — measured delivery against
+  parked and following jammers, and where a follower breaks.
 - [Narrowband](docs/narrowband.md) — 5/10 MHz channels across all three
   generations: the baseband re-clock, the per-chip register machinery, and the
   walls (RF re-latch edges, per-die clock coupling, the 5 MHz/5 GHz CFO limit).
-- [Startup time](docs/startup-time.md) — devourer vs. kernel driver,
-  measured on every supported chip.
-- [Adapter doctor](docs/adapter-doctor.md) — dying-dongle triage: EFUSE
-  read-stability, firmware-boot and RX-smoke probes with a
-  HEALTHY / SUSPECT / FAILING verdict.
-- [Spectrum sensing](docs/rx-spectrum-sensing.md),
-  [spatial diversity](docs/measuring-spatial-diversity.md),
-  [bench testing near-field](docs/bench-testing-near-field.md) — measurement
-  guides for the built-in radio instrumentation.
+- [Spectrum sensing](docs/rx-spectrum-sensing.md) — RX energy sweeps down to
+  5 MHz bins: a coarse per-bin H(f) from the dongle itself.
+- [Pseudo preamble puncturing](docs/pseudo-preamble-puncturing.md) — how close
+  per-tone RX masks/notches get to using a wide channel with a dirty slice.
+
+**Timing & coordination:**
+
 - [Time distribution](docs/time-distribution.md) — LTE-eNB-style over-the-air
   clock distribution off the hardware beacon TSF: sub-µs downlink, TSF adoption,
   µs-fine TBTT steering and a converging closed-loop uplink timing advance.
@@ -207,9 +259,36 @@ one `IRtlDevice` interface covers all three generations.
 - [AP mode](docs/ap-mode.md) — devourer as an infrastructure access point a real
   Linux station associates with: beacon → probe/auth/assoc → DHCP/ARP/ICMP → ping,
   open or WPA2-PSK (4-way handshake + software CCMP), validated against rtw88.
-- [Aggregation & hardware ACK](docs/aggregation.md) — USB TX aggregation,
-  per-frame CCX TX-status reports, 802.11 A-MPDU (`SetAmpduMode`, +30% on-air
-  goodput), and the hardware ACK/BlockAck responder for reliable-unicast links.
+- [Scheduled MAC](docs/scheduled-mac.md) — four measured contracts under a slot
+  scheduler: submit→air guard time, dynamic beacon grants, hardware ACK/TxReport,
+  per-UE RX attribution.
+- [Multi-AP cellular](docs/multi-ap-cellular.md) — what the shared clock
+  enables: coordinated cells, make-before-break handover, roaming robot UEs.
+
+**Measurement & instrumentation:**
+
+- [LA-mode IQ capture](docs/la-capture.md) — raw complex baseband into the TX
+  packet buffer; per-tone H(k)/CSI offline, from the dongle alone.
+- [Spatial diversity](docs/measuring-spatial-diversity.md),
+  [bench testing near-field](docs/bench-testing-near-field.md) — measurement
+  guides for the built-in radio instrumentation.
+- [Beamforming self-sounding](docs/beamforming-self-sounding.md) — per-subcarrier
+  CSI from two adapters via the VHT sounding exchange; and its sibling
+  [victim sensing](docs/beamforming-victim-sensing.md) — motion sensing from
+  captured beamforming reports.
+- [Adapter doctor](docs/adapter-doctor.md) — dying-dongle triage: EFUSE
+  read-stability, firmware-boot and RX-smoke probes with a
+  HEALTHY / SUSPECT / FAILING verdict.
+- [Performance](docs/performance-tuning.md) — devourer vs. kernel driver on
+  startup time, on-air throughput, and host CPU (3–4× lower); the TX
+  submission modes and the tuning levers, with the methodology.
+
+**Chip specifics & internals:**
+
+- [8822E quirks](docs/8822e-quirks.md) — the RTL8812EU/8822EU definitive
+  quirks list: what the chip needs, what devourer does, the reproducers.
+- [Logging](docs/logging.md) — the two-plane output schema: JSONL machine
+  events on stdout, human diagnostics on stderr.
 
 ## Testing
 

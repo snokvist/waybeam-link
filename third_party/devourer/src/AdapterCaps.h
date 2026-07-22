@@ -33,7 +33,13 @@
 
 namespace devourer {
 
-enum class ChipGeneration : uint8_t { Unknown = 0, Jaguar1, Jaguar2, Jaguar3 };
+enum class ChipGeneration : uint8_t {
+  Unknown = 0,
+  Jaguar1,
+  Jaguar2,
+  Jaguar3,
+  Kestrel /* Wi-Fi 6 / 802.11ax (RTL8852BU/8852CU) */
+};
 
 inline const char *generation_name(ChipGeneration g) {
   switch (g) {
@@ -43,6 +49,8 @@ inline const char *generation_name(ChipGeneration g) {
     return "jaguar2";
   case ChipGeneration::Jaguar3:
     return "jaguar3";
+  case ChipGeneration::Kestrel:
+    return "kestrel";
   default:
     return "unknown";
   }
@@ -56,6 +64,7 @@ constexpr uint8_t kBw10 = 1u << 1;
 constexpr uint8_t kBw20 = 1u << 2;
 constexpr uint8_t kBw40 = 1u << 3;
 constexpr uint8_t kBw80 = 1u << 4;
+constexpr uint8_t kBw160 = 1u << 5;
 
 /* J1 does 20/40/80; J2 and J3 add the 5/10 MHz narrowband re-clock (J2 packs
  * the ADC/DAC clock word into 0x8ac, J3 into 0x9b0/0x9b4 — same RF-stays-20MHz
@@ -64,7 +73,11 @@ constexpr uint8_t kBw80 = 1u << 4;
  * only dead enum values). Pure; unit-tested in tests/adapter_caps_selftest.cpp. */
 inline uint8_t bw_mask_for_generation(ChipGeneration g) {
   const uint8_t ac = kBw20 | kBw40 | kBw80;
-  return g == ChipGeneration::Jaguar1 ? ac
+  /* Kestrel (11ax): 5/10 MHz is the BB small-BW field on both dies (vendor
+   * bw_sup declares BW_CAP_5M|10M); 160 MHz is 8852C-only (rtl8852c_halinit.c
+   * bw_sup has BW_CAP_160M, rtl8852b_halinit.c tops at 80) and is OR'd in by
+   * the device layer per variant. */
+  return g == ChipGeneration::Jaguar1  ? ac
          : g == ChipGeneration::Unknown ? 0
                                         : (ac | kBw5 | kBw10);
 }
@@ -111,24 +124,79 @@ struct AdapterCaps {
   BandRange tune_2g4, tune_5g;            /* synthesizer-tunable spans */
   BandRange characterized_2g4, characterized_5g; /* txpwr-table-backed spans */
 
+  /* --- FEC RX (bench-derived truth table — deliberately NOT the vendor
+   * driver's HAL_DEF_RX_LDPC, which is 2013-era interop-advertisement policy:
+   * all-false on Jaguar1 while the 8812A baseband demonstrably decodes LDPC
+   * on-air. The TX side lives in TxCaps.ldpc_ok. HT and VHT are separate
+   * decoder paths in silicon, so the flags split: the RTL8821A field failure
+   * ("PixelPilot can't RX LDPC from Eachine Sphere Link") is VHT-only. --- */
+  bool ldpc_rx_ht = false;  /* baseband decodes LDPC-coded HT PPDUs */
+  bool ldpc_rx_vht = false; /* baseband decodes LDPC-coded VHT PPDUs */
+  /* Per-frame LDPC *reporting*: RxAtrib.ldpc is populated (RX-descriptor bit
+   * on the 8812A die, PHY-status byte7[5] on Jaguar2/3). False on the 8814A —
+   * it decodes LDPC fine but the vendor wired no per-frame indicator (rxdesc
+   * offsets 16/20 unparsed, and the Jaguar1 phy_status_rpt has no ldpc bit). */
+  bool ldpc_rx_flag = false;
+
   /* --- feature flags --- */
-  bool per_packet_txpower = false; /* Jaguar2 descriptor TXPWR_OFSET LUT only */
+  /* Per-packet TX power: a per-frame power trim driven by radiotap
+   * DBM_TX_POWER (dB delta vs the calibrated table / session base) or a
+   * session default. Three hardware shapes:
+   *   - Jaguar2 (8822B/8821C) + 8814A: a fixed 6-rung LUT in the descriptor
+   *     ({0,-3,-7,-11,+3,+6} dB) — per_pkt_txpwr_steps = 6, step_qdb = 0.
+   *   - Jaguar3 (8822C/8822E): a 2-bit bank selector; the banks are
+   *     programmable 7-bit signed offsets (0x1e70) in per_pkt_txpwr_step_qdb
+   *     units (nominally 4 = 1 dB), 2 concurrent non-zero levels —
+   *     per_pkt_txpwr_steps = 0 (continuous), min/max give the travel.
+   *   - Kestrel (8852B/8852C): no descriptor field; the fixed-dBm BB target
+   *     is rewritten between frames on value change (2 RMWs, free while
+   *     constant; global, so HW beacons follow) — per_pkt_txpwr_steps = 0,
+   *     step_qdb = 1 (0.25 dB).
+   * per_pkt_txpwr_measured stays false until the family's path has been
+   * proven to move on-air power (tests/txpkt_pwr_ofset_onair.sh) — the
+   * honest flag for a vendor-defined-but-unvalidated field (the 8814A
+   * today). */
+  bool per_packet_txpower = false;
+  uint8_t per_pkt_txpwr_steps = 0;    /* 6 = LUT rungs; 0 = continuous qdb */
+  uint8_t per_pkt_txpwr_step_qdb = 0; /* Jaguar3 bank step (qdB); 0 for LUT */
+  int16_t per_pkt_txpwr_min_qdb = 0;  /* most negative per-packet trim */
+  int16_t per_pkt_txpwr_max_qdb = 0;  /* most positive per-packet trim */
+  bool per_pkt_txpwr_measured = false; /* on-air-confirmed for this family */
   bool narrowband_ok = false;      /* 5/10 MHz re-clock (Jaguar2/Jaguar3) */
   uint8_t xtal_cap_max = 0;        /* crystal-cap trim range top (0 = no trim;
                                     * 0x3f on Jaguar1/2, 0x7f on Jaguar3) */
   uint8_t xtal_cap_default = 0;    /* efuse/default crystal-cap code */
   bool fastretune_ok = false;      /* lean FastRetune override exists */
+  /* HE ER SU (802.11ax extended range, Kestrel only): TX airs the ER SU PPDU
+   * per-packet via radiotap-HE FORMAT=EXT_SU (242-tone RU MCS0-2; 106-tone RU
+   * MCS0 via a BW_RU_ALLOC of 106) plus HE DCM, and RX classifies the format
+   * in RxAtrib.ppdu_type (7=HE_SU, 8=HE_ERSU). Pre-AX generations have no ER
+   * equivalent. */
+  bool he_er_su_ok = false;
   bool per_chain_rssi = false;     /* frame parser fills per-chain rssi (>=2ch) */
   /* Hardware timing. hw_rx_timestamp: every received frame is stamped with the
    * MAC's microsecond TSF at receive (RxPacket.RxAtrib.tsfl) — true on all
    * generations. hw_beacon_txtsf: this adapter, as a transmitter, inserts its
    * live hardware TSF into the beacons it airs at the instant of transmission
    * (a genuine sub-µs TX-egress timestamp a receiver reads via
-   * Packet::TxEgressTsf) — requires the hardware beacon function (StartBeacon),
-   * so Jaguar2/Jaguar3 only. Together they are the primitives for one-way
+   * Packet::TxEgressTsf) — rides the hardware beacon function (StartBeacon);
+   * true on all generations. Together they are the primitives for one-way
    * hardware time distribution (see TsfSync). */
   bool hw_rx_timestamp = false;
   bool hw_beacon_txtsf = false;
+  /* 802.11ax scheduled UL (Kestrel/RTL8852 only). trigger_ul_ok: the adapter
+   * can air an HE Trigger frame (UL-OFDMA grant) and program the fw UL-OFDMA
+   * scheduler (SendTrigger / ConfigureUlOfdma). twt_ok: the fw exposes the TWT
+   * agreement surface (ConfigureTwt / TwtBindSta). Pre-AX generations have no
+   * trigger/TWT firmware surface. */
+  bool trigger_ul_ok = false;
+  bool twt_ok = false;
+  /* sounding_ok: the adapter exposes the HE sounding command surface (NDPA ->
+   * NDP -> BFRP via StartSounding / RegisterBeamformee). NB the shipped client
+   * NIC firmware accepts SET_SND_PARA but does not air the sequence (the fw
+   * sounding-transmit engine is AP-firmware-only, like the MP-only F2P path);
+   * host-injected SendTrigger is what puts a Trigger on the air. */
+  bool sounding_ok = false;
 };
 
 inline void set_standard_freq_ranges(AdapterCaps &c) {

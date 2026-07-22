@@ -42,7 +42,11 @@ struct rx_pkt_attrib
      * the chip's TSF against its own wall clock. Populated by
      * FrameParser; surfaced through examples/rx/main.cpp's rx.frame event. */
     uint32_t tsfl;
-    uint8_t data_rate;
+    /* AX/VHT datarate code is 9-bit (HT 0x80+, VHT 0x100+, HE 0x180+), so a
+     * uint8_t truncates the format bits — VHT2SS+ and every HE rate collapse
+     * onto an HT/legacy code. Kept 16-bit so the reported RX rate is truthful
+     * (needed to identify HE frames when a Kestrel acts as an HE monitor). */
+    uint16_t data_rate;
     uint8_t bw;
     uint8_t stbc;
     uint8_t ldpc;
@@ -73,12 +77,24 @@ struct rx_pkt_attrib
      * only an aggregate's first subframe carries a PHY status). */
     bool paggr = false;
     uint8_t ppdu_cnt = 0;
+    /* RX PPDU format classification (AX RX-descriptor dword1[3:0], Kestrel
+     * only): 0/1=CCK 2=OFDM 3=HT 5/6=VHT 7=HE_SU 8=HE_ERSU 9=HE_MU 10=HE_TB.
+     * The proof a received frame really was the HE ER SU extended-range
+     * format. 0xff on pre-AX generations (their descriptors carry no such
+     * field). */
+    uint8_t ppdu_type = 0xff;
     RX_PACKET_TYPE pkt_rpt_type;
 };
 
 struct Packet
 {
     rx_pkt_attrib RxAtrib;
+    /* Full 802.11 frame including the trailing FCS. Every Realtek RX parser
+     * follows this contract; consumers remove the FCS at their protocol
+     * boundary rather than making the frame length chip-specific. Retaining it
+     * also lets DEVOURER_RX_KEEP_CORRUPTED and fused-FEC salvage inspect a
+     * failed frame, while tools/bf_report_decode.py trims the trailing four
+     * bytes when decoding beamforming reports. */
     std::span<uint8_t> Data;
 
     /* The transmitter's hardware TX-egress TSF, when the frame carries one.

@@ -15,6 +15,7 @@
 
 #include "AckResponder.h"
 #include "RadiotapPeek.h"
+#include "RadiotapTxFlags.h" /* HT MCS field decoder (LDPC/STBC) */
 #include "TxAggPlan.h"
 #include "TxReport.h"
 
@@ -128,8 +129,40 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
     _macinit.send_fw_general_info(rfe, r2t2r, _hal.chip_version().cut, pkg);
   }
 
-  _hal.apply_bb_rf_agc_tables(rfe);
-  _logger->info("RtlJaguar2Device: PHY tables applied");
+  /* Optional firmware register IO-offload of the static BB/AGC/RF phy tables
+   * (DEVOURER_FW_TABLE_OFLD): batch the write stream through HalMAC cfg_param so
+   * the fw replays it on-chip — collapses the ~5700–9200 per-init USB register
+   * transfers into a handful of bulk transfers. Falls back to a direct re-apply
+   * (idempotent) if the transport errors. */
+  const int ofld = _cfg.tuning.fw_table_offload;
+  if (ofld && _device.is_usb()) {
+    devourer::HalmacCfgParam::Transport tp;
+    tp.dl_rsvd_page = [this](uint16_t pg, const uint8_t *b, uint32_t l) {
+      return _fw.download_rsvd_page(pg, b, l, /*beacon_desc=*/false);
+    };
+    tp.send_h2c_pkt = [this](const uint8_t pkt[32]) {
+      return _macinit.h2c_pkt(pkt);
+    };
+    tp.next_seq = [this]() { return _macinit.next_h2c_seq(); };
+    tp.settle = [this]() { _macinit.wait_h2c_drained(); };
+    tp.verify_read = [this](uint16_t a) { return _device.rtw_read32(a); };
+    tp.cfg_pg_addr = _macinit.cfg_param_page();
+    tp.cfg_loc = _macinit.cfg_param_loc();
+    devourer::HalmacCfgParam cfg(tp, _logger);
+    _hal.apply_bb_rf_agc_tables(rfe, &cfg, /*offload_rf=*/(ofld & 2) != 0);
+    if (!cfg.ok()) {
+      _logger->warn("RtlJaguar2Device: fw table offload failed — re-applying "
+                    "tables direct");
+      _hal.apply_bb_rf_agc_tables(rfe);
+    } else {
+      _logger->info("RtlJaguar2Device: PHY tables applied via fw offload "
+                    "({} commands)",
+                    cfg.total());
+    }
+  } else {
+    _hal.apply_bb_rf_agc_tables(rfe);
+    _logger->info("RtlJaguar2Device: PHY tables applied");
+  }
 
   /* halrf kfree init: read the PPG efuse trims and apply the PA-bias RF LUT
    * correction (write-only LUT state — the 0x3f sequence visible in the
@@ -205,6 +238,12 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
                         channel.ChannelOffset);
   }
   _brought_up = true;
+
+  /* DEVOURER_DIS_CCA — disable the MAC carrier-sense gate at bring-up (as
+   * Jaguar3 does) so injected/beacon TX punches through a busy channel instead
+   * of deferring. Runtime equivalent: SetCcaMode. */
+  if (_cfg.tuning.disable_cca)
+    SetCcaMode(true);
 
   /* DEVOURER_XTAL_CAP — apply the crystal-cap trim once the AFE is up
    * (issue #217, the narrowband CFO lever). */
@@ -555,7 +594,14 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
       off += f.next_offset;
     }
   };
-  _device.bulk_read_async_loop(32 * 1024, 8, on_data, [this]() -> bool {
+  /* ≤16 KB per URB — some MediaTek Android xhci hosts never complete larger
+   * bulk-IN reads (OpenIPC/PixelPilot#6; see DeviceConfig::Rx::urb_bytes).
+   * Paired with the ≤16 KB agg threshold in HalmacJaguar2MacInit::init_usb_cfg
+   * so an aggregate never spans two URBs and breaks the next_offset walk. */
+  int rx_urb_bytes = _cfg.rx.urb_bytes.value_or(16 * 1024);
+  if (rx_urb_bytes < 4096)
+    rx_urb_bytes = 4096;
+  _device.bulk_read_async_loop(rx_urb_bytes, 8, on_data, [this]() -> bool {
     return _rx_stop || g_devourer_should_stop;
   });
   stop_dig();
@@ -806,9 +852,17 @@ void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
     return;
   /* Serialize against the thermal-track tick's RF-window read. */
   std::lock_guard<std::mutex> lk(_reg_mu);
+  const bool band_change = (_channel.Channel <= 14) != (channel <= 14);
   if (_hal.fast_retune(channel, static_cast<uint8_t>(_channel.ChannelWidth),
                        _channel.ChannelOffset, cache_rf)) {
     _channel.Channel = channel;
+    /* Only the fw fast path (DEVOURER_FASTRETUNE_FW=2) accepts a band
+     * change; the firmware retunes the chip but TXAGC folding is host-side —
+     * re-fold active power knobs against the new band's table (the same
+     * gating SetMonitorChannel applies). */
+    if (band_change && _brought_up &&
+        (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0))
+      apply_tx_power_current();
     return;
   }
   /* Fast path declined (band change / never tuned) — full channel set at the
@@ -862,6 +916,58 @@ RxEnergy RtlJaguar2Device::GetRxEnergy() {
         _device.phy_set_bb_reg(a, m, v);
       },
       e);
+
+  /* DEVOURER_RX_NOISE_FLOOR — active/frame-free absolute floor. The
+   * vendor phydm_idle_noise_measure_ac: the BB maintains an idle-time power
+   * report at 0x0FF0 (path-A [7:0], path-B [15:8], sval = byte>>1); freeze it
+   * (0x9E4[30]=1) for a clean read, then noise = -110 + IGI(0xC50/0xE50) + mean.
+   * Wedge-free: no clock-stop and no BB/PMAC/CCK reset (unlike the 8812A/8821A
+   * debug-port path), so it runs safely under live RX. Serialized on _reg_mu.
+   *
+   * BEST-EFFORT on the tested 8812BU (1x1 8822B cut): the report is only rarely
+   * populated in devourer's monitor bring-up — most reads return the 0x80/0x00
+   * "no idle sample" sentinels. Investigated: there is no vendor
+   * enable step for it (the report is HW-automatic and the vendor runs the
+   * measurement from a full associated init, not monitor mode); the sentinel
+   * rate is channel-independent, oversampling barely helps, and pausing DIG
+   * (fixing IGI) makes it worse. So this oversamples and GUARDS: 0x80/0x00 bytes
+   * are dropped and >=3 live samples in a plausible band are required, else
+   * valid_noise_floor stays false (never a fake dBm) — accuracy over valid-rate.
+   * When it does read, it cross-matches the Jaguar1 floor within a few dB on the
+   * same channel. A 2T2R 8822BU or a fuller init may populate it reliably. */
+  if (_cfg.rx.abs_noise_floor) {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    const int paths = _hal.chip_version().rf_2t2r ? 2 : 1;
+    int sum[2] = {0, 0}, cnt[2] = {0, 0};
+    bool any_nonzero = false;
+    for (int s = 0; s < 48; ++s) {
+      _device.phy_set_bb_reg(0x09E4, 1u << 30, 1); /* freeze idle-power report */
+      const uint32_t tmp = _device.rtw_read<uint32_t>(0x0FF0);
+      _device.phy_set_bb_reg(0x09E4, 1u << 30, 0); /* resume 5-us updates */
+      for (int p = 0; p < paths; ++p) {
+        const uint8_t byte = (tmp >> (8 * p)) & 0xff;
+        if (byte == 0x80 || byte == 0x00) /* "no idle sample" sentinels */
+          continue;
+        any_nonzero = true;
+        sum[p] += static_cast<int8_t>(byte) >> 1;
+        ++cnt[p];
+      }
+    }
+    const bool ok = any_nonzero && cnt[0] >= 3 && (paths == 1 || cnt[1] >= 3);
+    if (ok) {
+      int noise = -110 + (_device.rtw_read8(0x0C50) & 0x7f) + sum[0] / cnt[0];
+      if (paths == 2)
+        noise = (noise + (-110 + (_device.rtw_read8(0x0E50) & 0x7f) +
+                          sum[1] / cnt[1])) /
+                2;
+      if (noise <= -70 && noise >= -105) { /* plausible idle-floor band; a read
+                                              outside it is interference or a bad
+                                              report sample, not the idle floor */
+        e.abs_noise_floor_dbm = static_cast<int8_t>(noise);
+        e.valid_noise_floor = true;
+      }
+    }
+  }
   return e;
 }
 
@@ -977,7 +1083,20 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
                            ? 0x20
                            : (_hal.efuse_logical_byte(0xB9) & 0x3f);
   c.fastretune_ok = true;
-  c.per_packet_txpower = true; /* TX descriptor TXPWR_OFSET LUT — Jaguar2 only */
+  /* TX descriptor TXPWR_OFSET LUT — on-air-confirmed: the RSSI sweep tracks
+   * the vendor 0/-3/-7/-11/+3/+6 dB rungs (tests/txpkt_pwr_ofset_onair.sh). */
+  c.per_packet_txpower = true;
+  c.per_pkt_txpwr_steps = 6;
+  c.per_pkt_txpwr_min_qdb = -44; /* -11 dB LUT floor */
+  c.per_pkt_txpwr_max_qdb = 24;  /* +6 dB LUT top */
+  c.per_pkt_txpwr_measured = true;
+  /* LDPC RX: both variants decode HT+VHT LDPC (bench: encoding-matrix
+   * devourer↔devourer cells at full delivery, 8822BU cross-checked reporting
+   * ldpc=1) and report it per-frame from PHY-status byte7[5]
+   * (parse_phy_sts_jgr2). */
+  c.ldpc_rx_ht = true;
+  c.ldpc_rx_vht = true;
+  c.ldpc_rx_flag = true;
   devourer::set_standard_freq_ranges(c);
 
   if (_variant == jaguar2::ChipVariant::C8821C) {
@@ -1009,6 +1128,26 @@ devourer::EfuseStability RtlJaguar2Device::ProbeEfuseStability(int reads) {
       "efuse-stability: reads={} mismatched={} invalid_id={} id=0x{:04x}",
       st.reads, st.mismatched_reads, st.invalid_id_reads, st.eeprom_id);
   return st;
+}
+
+devourer::LaResult RtlJaguar2Device::la_capture(const devourer::LaParams &p) {
+  if (!_la) {
+    devourer::LaRegs regs = (_variant == jaguar2::ChipVariant::C8821C)
+                                ? devourer::la_regs_8821c()
+                                : devourer::la_regs_8822b();
+    if (_variant == jaguar2::ChipVariant::C8821C &&
+        _hal.chip_version().cut == 0) {
+      /* Vendor phydm_la_clk_en skips the LA clock on 8821C cut A; without
+       * it the engine may never complete — expect a poll timeout. */
+      regs.needs_la_clk = false;
+      _logger->warn("la_capture: 8821C cut A — LA clock bit unavailable, "
+                    "capture may time out");
+    }
+    _la = std::make_unique<devourer::LaCapture>(_device, _logger, regs);
+  }
+  /* Serialize against the calibration/thermal register windows. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  return _la->run(p);
 }
 
 devourer::ThermalStatus RtlJaguar2Device::GetThermalStatus() {
@@ -1194,17 +1333,16 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
       radiotap_pkt_pwr_db = static_cast<int8_t>(*it.this_arg);
       break;
     case IEEE80211_RADIOTAP_MCS: {
-      uint8_t mcs_flags = it.this_arg[1];
-      if ((mcs_flags & IEEE80211_RADIOTAP_MCS_BW_MASK) ==
-          IEEE80211_RADIOTAP_MCS_BW_40)
+      const devourer::RadiotapMcsField m =
+          devourer::decode_radiotap_mcs_field(it.this_arg);
+      if (m.bw40)
         bwidth = CHANNEL_WIDTH_40;
-      sgi = (mcs_flags & 0x04) ? 1 : 0;
-      if (it.this_arg[0] & IEEE80211_RADIOTAP_MCS_HAVE_MCS) {
-        uint8_t idx = it.this_arg[2];
-        if (idx <= 31) {
-          fixed_rate = MGN_MCS0 + idx;
-          rate_from_radiotap = true;
-        }
+      sgi = m.sgi;
+      ldpc = m.ldpc;
+      stbc = m.stbc;
+      if (m.have_mcs) {
+        fixed_rate = MGN_MCS0 + m.mcs;
+        rate_from_radiotap = true;
       }
     } break;
     case IEEE80211_RADIOTAP_VHT: {
@@ -1408,46 +1546,226 @@ bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
   _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 3) | (1u << 4));
   uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
   _device.rtw_write<uint32_t>(0x0420, txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
+  /* Retain the MPDU + interval for the TBTT-steer re-download
+   * (AdjustBeaconTiming*): the J2 engine loses the bcn-valid latch on any
+   * re-latch and the hardware does not keep the reserved-page bytes. */
+  _bcn_mpdu.assign(mpdu, mpdu + mpdu_len);
+  _bcn_interval_tu = interval_tu > 0 ? interval_tu : 100;
+  _tbtt_off_us = 0;  // fresh beacon function: TBTT grid at TSF % period == 0
   _logger->info("beacon(J2): beacon@rsvd_boundary, net_type->AP, BCN_CTRL=0x18, "
                 "EN_BCNQ_DL (interval {} TU)", interval_tu);
   return true;
 }
 
-int32_t RtlJaguar2Device::AdjustBeaconTiming(int32_t microseconds) {
-  (void)microseconds;
-  /* Beacon-TBTT STEERING IS NOT SUPPORTED ON JAGUAR2. Both mechanisms that work
-   * on Jaguar3 drop the beacon on the 8822B engine (bench-proven on the 8812BU,
-   * the beacon stops airing after the tweak): the one-shot REG_BCN_INTERVAL
-   * (0x0554) tweak AND the EN_BCN_FUNCTION-toggle + TSF-shift both lose the
-   * bcn-valid latch, and J2 does not retain the beacon bytes to re-download and
-   * re-assert it. So refuse rather than silently kill the beacon. (A fix would
-   * store the beacon bytes in StartBeacon and re-download after the tweak — the
-   * Jaguar3 store-bytes path — but that needs its own hardware validation.) The
-   * downlink (StartBeacon + SetCcaMode) is unaffected; only the uplink-TA
-   * actuator is J3-only. */
-  static bool warned = false;
-  if (!warned) {
-    warned = true;
-    _logger->warn("beacon(J2): TBTT steering not supported (8822B beacon engine "
-                  "drops the beacon on a TBTT re-latch) — uplink-TA is Jaguar3-only");
+/* Re-download the retained reserved-page beacon to re-arm the bcn-valid latch.
+ * The J2 beacon engine loses the latch on ANY TBTT re-latch (bench-proven on
+ * the 8812BU: the beacon stops airing after both the one-shot interval tweak
+ * and the EN_BCN_FUNCTION toggle), and the hardware does not keep the
+ * reserved-page bytes — but the driver does (StartBeacon). So every steer is
+ * "re-latch, then re-download": the TBTT re-derives from the steered timebase
+ * and the fresh download re-asserts the valid latch (its poll is the success
+ * signal). Costs one skipped beacon per correction. Caller holds _reg_mu. */
+bool RtlJaguar2Device::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_mpdu.empty()) {
+    _logger->error("beacon(J2): UpdateBeaconPayload without an active beacon");
+    return false;
   }
-  return 0;
+  /* Same buffer contract as StartBeacon: strip a leading radiotap header. */
+  size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
+  if (rt > len) rt = 0;
+  _bcn_mpdu.assign(beacon + rt, beacon + len);
+  /* The steer re-download path, with new content: the fresh rsvd-page store
+   * replaces the TBTT engine's buffer and re-arms the valid latch (its poll is
+   * the success signal). Interval/TBTT/port identity untouched. */
+  return redownload_beacon_locked();
+}
+
+bool RtlJaguar2Device::StopBeacon() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_mpdu.empty())
+    return false;
+  /* EN_BCN_FUNCTION off (keep DIS_TSF_UDT), beacon-queue download off,
+   * net_type back to No Link — the StartBeacon enables, reversed. */
+  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 4));
+  uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
+  _device.rtw_write<uint32_t>(0x0420, txq & ~(1u << 22) /* BIT_EN_BCNQ_DL */);
+  uint8_t nt = _device.rtw_read8(0x0102);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~0x03u));
+  _bcn_mpdu.clear();
+  _bcn_interval_tu = 0;
+  _logger->info("beacon(J2): stopped (EN_BCN off, EN_BCNQ_DL off, net_type->NoLink)");
+  return true;
+}
+
+bool RtlJaguar2Device::redownload_beacon_locked() {
+  if (_bcn_mpdu.empty())
+    return false;
+  if (!_fw.download_rsvd_page(_fw.rsvd_boundary(), _bcn_mpdu.data(),
+                              static_cast<uint32_t>(_bcn_mpdu.size()))) {
+    _logger->error("beacon(J2): TBTT-steer rsvd-page re-download failed — "
+                   "beacon may have stopped airing");
+    return false;
+  }
+  return true;
+}
+
+int32_t RtlJaguar2Device::AdjustBeaconTiming(int32_t microseconds) {
+  int nominal;
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    nominal = _bcn_interval_tu;
+  }
+  if (nominal <= 0) return 0;  // no active beacon
+  /* Round to whole TU (REG_BCN_INTERVAL is integer TU); sign follows the request
+   * (>0 = later/retard => longer one-shot interval, <0 = earlier/advance). */
+  int delta_tu = (microseconds >= 0 ? microseconds + 512 : microseconds - 512) / 1024;
+  if (delta_tu == 0) return 0;  // below 1-TU resolution
+  int one = nominal + delta_tu;
+  if (one < 1) {  // can't shorten below one TU
+    one = 1;
+    delta_tu = one - nominal;
+  }
+  /* Latch one interval at the tweaked length; after exactly one TBTT fires
+   * under it the phase has advanced/retarded by delta_tu TU, then restore
+   * nominal (the J3 mechanism). On J2 the tweak drops the bcn-valid latch, so
+   * follow the restore with the reserved-page re-download.
+   *
+   * The interval register latches at a TBTT, so the shift count = the number
+   * of TBTTs between the tweak-latch and the restore-latch — a fixed sleep
+   * races with the beacon phase (bench-caught on the 8821CE: an advance whose
+   * write+restore land inside one period is a silent no-op; one held past two
+   * shortened periods double-shifts). Phase-align off the TSF instead (TBTT
+   * fires at TSF % interval == 0): read the in-period position, write the
+   * tweak, then time the restore to land mid-way into the FIRST tweaked
+   * interval — the restore latches at that interval's closing TBTT, so exactly
+   * one fires under the tweak. Positions are measured against the TBTT grid
+   * (TSF % period == _tbtt_off_us — prior coarse steers move the grid off the
+   * TSF). Serialize register access on _reg_mu but release it across the
+   * waits so the coex/thermal tick isn't starved. */
+  const int64_t period_us = static_cast<int64_t>(nominal) * 1024;
+  auto grid_pos = [&]() {  // in-period position vs the TBTT grid; under _reg_mu
+    uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+    uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+    int64_t p = static_cast<int64_t>(((static_cast<uint64_t>(hi) << 32) | lo) %
+                                     static_cast<uint64_t>(period_us));
+    return ((p - _tbtt_off_us) % period_us + period_us) % period_us;
+  };
+  int64_t pos;
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    pos = grid_pos();
+  }
+  /* Keep the tweak write clear of the next TBTT (so the latching TBTT is
+   * unambiguous even against register/sleep jitter). */
+  if (pos > period_us - 20000)
+    std::this_thread::sleep_for(
+        std::chrono::microseconds(period_us - pos + 5000));
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    pos = grid_pos();
+    _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */, static_cast<uint16_t>(one));
+  }
+  /* latch TBTT in (period - pos) µs; restore mid-first-tweaked-interval. */
+  std::this_thread::sleep_for(std::chrono::microseconds(
+      (period_us - pos) + static_cast<int64_t>(one) * 512));
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _device.rtw_write16(0x0554, static_cast<uint16_t>(nominal));
+    _tbtt_off_us = ((_tbtt_off_us + static_cast<int64_t>(delta_tu) * 1024) %
+                        period_us + period_us) % period_us;
+    if (!redownload_beacon_locked())
+      return 0;
+  }
+  _logger->info("beacon(J2): TBTT shift {} TU ({} us) via one-shot interval "
+                "{}->{}->{} TU + rsvd-page re-download",
+                delta_tu, delta_tu * 1024, nominal, one, nominal);
+  return delta_tu * 1024;
 }
 
 int32_t RtlJaguar2Device::AdjustBeaconTimingFine(int32_t microseconds) {
-  return AdjustBeaconTiming(microseconds);  // both unsupported on J2 (beacon drops)
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_interval_tu <= 0) return 0;  // no active beacon
+  /* Same mechanism as J3: a bare TSF write with the beacon function running
+   * leaves the TBTT latched, so toggle the beacon function off, shift the
+   * port-0 TSF, toggle on — the TBTT counter re-derives from the shifted TSF
+   * at microsecond resolution (TBTT fires at TSF % interval, so subtracting
+   * `microseconds` advances (<0) / retards (>0) the next boundary by that many
+   * µs). On J2 the toggle drops the bcn-valid latch, so re-download the
+   * reserved-page beacon afterwards to re-arm it. */
+  uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+  uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+  uint64_t tsf = (static_cast<uint64_t>(hi) << 32) | lo;
+  uint64_t nt = tsf - static_cast<uint64_t>(static_cast<int64_t>(microseconds));
+  uint8_t bc = _device.rtw_read8(0x0550 /* REG_BCN_CTRL */);
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc & ~(1u << 3)));  // clear EN_BCN_FUNCTION
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(nt));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(nt >> 32));
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc | (1u << 3)));   // set EN_BCN_FUNCTION
+  _tbtt_off_us = 0;  // the re-latch re-derives the TBTT grid from the TSF
+  if (!redownload_beacon_locked())
+    return 0;
+  _logger->info("beacon(J2): fine TBTT shift {} us (TSF toggle + rsvd-page "
+                "re-download)", microseconds);
+  return microseconds;
+}
+
+int32_t RtlJaguar2Device::PinBeaconTbtt(int32_t offset_us) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_interval_tu <= 0) return 0;  // no active beacon
+  const int64_t period_us = static_cast<int64_t>(_bcn_interval_tu) * 1024;
+  const int64_t off =
+      ((static_cast<int64_t>(offset_us) % period_us) + period_us) % period_us;
+  /* Same shift + re-latch as AdjustBeaconTimingFine — the TBTT re-derives
+   * from (TSF - off), i.e. it will fire when TSF % period == off — followed
+   * IMMEDIATELY by a TSF restore write: a bare TSF write does not move the
+   * TBTT (bench-proven), so the pinned phase survives while the reported TSF
+   * returns to its original timeline. The residual discontinuity is one
+   * register-write latency (~µs over PCIe MMIO). Keep the off-timeline window
+   * minimal: restore before the reserved-page re-download. */
+  auto read_tsf = [&]() {
+    uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+    uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+    if (_device.rtw_read<uint32_t>(0x0564) != hi) {
+      hi = _device.rtw_read<uint32_t>(0x0564);
+      lo = _device.rtw_read<uint32_t>(0x0560);
+    }
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+  };
+  uint64_t nt = read_tsf() - static_cast<uint64_t>(off);
+  uint8_t bc = _device.rtw_read8(0x0550 /* REG_BCN_CTRL */);
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc & ~(1u << 3)));
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(nt));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(nt >> 32));
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc | (1u << 3)));  // re-latch
+  uint64_t back = read_tsf() + static_cast<uint64_t>(off);  // original timeline
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(back));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(back >> 32));
+  /* The J2 engine dropped its bcn-valid latch on the re-latch — re-arm it. */
+  if (!redownload_beacon_locked())
+    return 0;
+  /* The TBTT grid now sits at TSF % period == off (vs the restored TSF) —
+   * record it for the coarse path's phase alignment. */
+  _tbtt_off_us = off;
+  _logger->info("beacon(J2): TBTT pinned to TSF%%interval == {} us "
+                "(TSF-preserving; requested {})", (long long)off, offset_us);
+  return static_cast<int32_t>(off);
 }
 
 void RtlJaguar2Device::SetCcaMode(bool disabled) {
   std::lock_guard<std::mutex> lk(_reg_mu);
+  /* Both MAC carrier-sense bits in REG_TX_PTCL_CTRL: primary CCA 0x520[14] +
+   * EDCCA [15], plus EDCCA_MSK_COUNTDOWN 0x524[11]. The primary-CCA bit is the
+   * one that stops TX deferring to a co-channel transmitter; 0x520
+   * is the same HalMAC layout as the on-air-validated Jaguar3. */
   uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);
   uint32_t v524 = _device.rtw_read<uint32_t>(0x0524);
-  if (disabled) { v520 |= (1u << 15); v524 &= ~(1u << 11); }
-  else          { v520 &= ~(1u << 15); v524 |= (1u << 11); }
+  if (disabled) { v520 |= (1u << 15) | (1u << 14); v524 &= ~(1u << 11); }
+  else          { v520 &= ~((1u << 15) | (1u << 14)); v524 |= (1u << 11); }
   _device.rtw_write<uint32_t>(0x0520, v520);
   _device.rtw_write<uint32_t>(0x0524, v524);
-  _logger->info("Jaguar2: MAC EDCCA {}", disabled ? "DISABLED (dis_cca)"
-                                                  : "enabled (default)");
+  _logger->info("Jaguar2: MAC carrier-sense {}",
+                disabled ? "DISABLED (dis_cca: CCA+EDCCA)" : "enabled (default)");
 }
 
 uint64_t RtlJaguar2Device::ReadTsf() {
