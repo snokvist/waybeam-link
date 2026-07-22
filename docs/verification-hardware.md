@@ -83,8 +83,9 @@ to judge the AU cache path.
    ```
 
    Both `mt-cache` and `au-cache` RX counters must increase. Expect
-   `blocks_held: 96`, `health_permille: 1000`, and `requests_rejected: 0` once
-   the feed has settled.
+   `blocks_held: 96`, `requests_rejected: 0`, and health at or above the
+   configured `health_floor_permille` (800). Healthy short windows are normally
+   near 1000 but can fluctuate slightly as block coverage changes.
 
 4. Read both ground counters:
 
