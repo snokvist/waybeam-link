@@ -232,7 +232,7 @@ wire packet inside it.
 **Packet types** (low nibble): `0x1 DATA · 0x2 NACK · 0x3 LINK_REPORT ·
 0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK ·
 0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY · 0xB ANNOUNCE ·
-0xC CACHE_ASSIGN`. 12 of
+0xC CACHE_ASSIGN · 0xD VEHICLE_CMD`. 13 of
 16 used; the version nibble will not ship 16 wire-incompatible revisions, so
 there is no type-budget scarcity. Future types (e.g. a dedicated FEC-repair
 type, §14) take free slots.
@@ -652,6 +652,30 @@ to retune leaves the logical store assignment unchanged and produces no
 matching status. CACHE_ASSIGN never changes another receiver and never causes
 a cache to select a vehicle by RF discovery.
 
+### 3.14 VEHICLE_CMD packet (type `0xD`) — 23 bytes
+
+A ground→craft **runtime command** riding the §11 machinery: the same HMAC key
+(§11.4a provenance), the same nonce discipline, the same command-source binding
+(§11.5a). Semantics, command registry, and campaign/ACK behaviour are in §11.7.
+The craft's ACK is the **same packet echoed back** (`cmd_flags` bit 0), re-MAC'd
+under its own common prefix.
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | §3.1 — sender = issuing ground (command) or craft (echo) |
+| 11 | 4 | `cmd_nonce` | u32; strictly increasing per `(originator, session)` — its own counter, **not** shared with `csa_nonce` |
+| 15 | 1 | `cmd_seq` | copy counter N..1 within the campaign (diagnostics only — no timing resolution, unlike §11.1) |
+| 16 | 1 | `cmd_flags` | bit0 `ACK` (craft→ground echo); bit1 `REJECTED` (echo only — valid but unapplicable command, §11.7); bits 2–7 reserved (0) |
+| 17 | 1 | `cmd_id` | command registry (§11.7) |
+| 18 | 1 | `cmd_arg` | boolean or enum value; **`0..4` only** — every command is enable/disable or an enum of at most 5 choices (operator ruling, Pass 68); any other value is invalid |
+| 19 | 4 | `cmd_mac` | `trunc(HMAC(csa_psk, bytes[0..18]), 4)` — the §11.4 primitive verbatim (HMAC-SHA-256, leftmost 4 bytes, big-endian) |
+
+VEHICLE_CMD is broadcast over the air in the pinned §3.0 frame like CSA
+campaign copies (ordinary Data shape, TID 0 — commands are not
+latency-critical). Spectators ignore the type entirely: it carries no
+channel/fleet state to follow, and the §11.7 bound-issuer guard means only the
+addressed craft ever acts on one.
+
 ---
 
 ## 4. Block model and profiles
@@ -894,6 +918,12 @@ not RTP packets.)
   transmitting is covered by the diversity siblings (ground half-duplex is free).
 - Re-NACK: bounded retries with a default 6 ms per-attempt backoff; stop on
   RETRANSMIT receipt or on deadline/supersession.
+- **RX-local emission gate:** `POST /api/v1/arq` (§15.5) disables/enables NACK
+  construction on this node only — a unilateral receiver mute needing no craft
+  cooperation. Disabled ⇒ build no NACKs (and arm no §14.3 nack-graces);
+  incoming RETRANSMITs are still accepted, cache repair requests are unaffected.
+  Distinct from the vehicle-side `ARQ` command (§11.7), which turns repair off
+  at the source for every receiver.
 
 ### 6.5 Adapter liveness watchdog (anti-phantom-diversity)
 An adapter delivering **zero** frames for `stall_timeout` (seed 200 ms) while
@@ -1549,6 +1579,62 @@ Because a forged `CSA_ARMED` (unauthenticated DATA flag) could make ground commi
 to a switch the real craft won't follow, the **issuer revert-on-no-video is the
 backstop** for that case: no craft video on the new channel → ground returns.
 
+### 11.7 Remote vehicle commands (VEHICLE_CMD, type `0xD`)
+
+The over-air lever for the craft's runtime toggles — the §9/§5 knobs that were
+previously craft-boot-config only, now settable from the bound ground without a
+reboot. Deliberately narrow (operator ruling, Pass 68): **every command is an
+enable/disable or an enum of at most 5 choices** — no free-form numerics ride
+this channel. Wire format is §3.14; everything below is behaviour.
+
+**Command registry (v1):**
+
+| `cmd_id` | name | `cmd_arg` | semantics |
+|---|---|---|---|
+| `0x01` | `ARQ` | 0=off, 1=on | **off:** the craft TX stamps no `ARQ`/`PFRAME_ARQ` flags on future DATA and serves no incoming NACKs. Receivers then generate no NACKs by construction (§6.4 NACKs only flagged seqs) and the §14.3 nack-grace machinery never arms — no uplink or cache churn for a knob receivers were never told about. FEC repair symbols (§14.1, forward) and §3.9 decoder recovery are **unaffected**. **on:** restores the boot-configured behaviour (per-stream `arq_mode`, §4.1) |
+| `0x02` | `SELECTOR` | 0=run, 1=freeze | **freeze:** §9.7 `min==max` pin at the rung active at acceptance — a select-and-hold of the current operating point. **run:** restores the boot-config `[min, max]` envelope. This command and §15.5 `POST /api/v1/link/profile` drive the *same* §9.7 lever; last writer wins |
+| `0x03` | `FPS_LADDER` | 0=off, 1=on | **off:** the §9.11 loop stops issuing FPS commands; the current fps holds where it is (no snap to `preferred` — least surprise). **on:** re-enables the loop with cleared evidence, as after a §9.11 settle. On a craft without `venc.fps_ladder` configured, either arg is echoed `REJECTED` |
+| `0x04`–`0x1F` | *reserved* | — | v2 venc commands (fps select, resolution, framing) — reserved, not specified |
+
+**Acceptance (craft)** — the §11.4 guard set minus the channel clauses:
+`cmd_mac` verifies (same key provenance as CSA, §11.4a) AND `cmd_nonce >
+last_applied[(originator, session)]` AND the issuer **is the currently-bound
+command source (§11.5a)** AND no command accepted within `cmd.min_interval_ms`
+(seed **250 ms**). Two deliberate differences from CSA:
+
+- **No bootstrap.** A VEHICLE_CMD never establishes the binding — only an
+  accepted CSA claims a craft (§11.5a). An unbound craft, or a command from a
+  non-bound issuer, is a **silent drop** (no `REJECTED` echo — echoing to an
+  unbound sender would be a probe oracle). Like any packet from the bound
+  issuer, an accepted command refreshes the §11.5a binding freshness.
+- **Duplicate-nonce re-echo (idempotent retry).** `cmd_nonce == last_applied`
+  ⇒ do **not** re-apply, but **do** re-echo — a retried campaign means the
+  ground lost the echo, not that the command failed (the §3.13 CACHE_ASSIGN
+  idempotency pattern). `cmd_nonce < last_applied` ⇒ silent drop.
+
+A command that passes all guards but cannot apply — unknown `cmd_id` (forward
+compatibility), `cmd_arg` out of the command's range, or an unconfigured
+actuator — consumes the nonce and is echoed with `REJECTED` set: the ground
+learns "understood, won't do" instead of retrying into silence.
+
+**Campaign + ACK (ground issuer).** `POST /api/v1/vehicle/command` (§15.5)
+allocates the next `cmd_nonce` and sends `cmd.copies` (seed **3**) copies at
+`cmd.copy_interval_ms` (seed **20 ms**) — copies dedupe by nonce. The craft
+echoes the accepted (or rejected) command `cmd.echo_copies` (seed **2**) times
+on the diversity-received downlink. No matching echo within
+`cmd.ack_timeout_ms` (seed **1000 ms**, = `csa_ack_timeout`'s reasoning) ⇒
+re-send the **same nonce**, up to `cmd.retry_cap` (seed **3**) campaigns total,
+then surface `timeout`. Campaign state is polled, never awaited — the §15.5
+loop never blocks.
+
+**Volatility.** Command state is **craft-session-scoped**: a reboot resets all
+commands to boot config (alongside the §11.5a claim reset). It survives
+binding *release* and channel moves — a returned ground re-claims a craft that
+still has ARQ off, and reads that state from stats, not from memory. Applied
+command state is surfaced in §15.3 (link-level `cmd_arq`,
+`cmd_selector_frozen`, `cmd_fps_ladder`, `cmd_last_nonce`) and the issuer's
+campaign state as `vcmd_state`.
+
 ---
 
 ## 12. Multi-receiver semi-anarchy & ARQ arbitration
@@ -1601,6 +1687,7 @@ data-path crypto, or heavy state. Threats and mitigations:
 | Forged CACHE_REPLY → junk symbol injection | accepted only for an outstanding `request_id`, from the addressed cache, for requested symbols, within allowance; wrapped packet revalidated via full §3.1/§3.2 decode + latched stream key (no worse than direct DATA injection, which is the accepted §13 posture) | 3.11, 14.3 |
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
 | Forged/stale CACHE_ASSIGN → cache retune or cross-vehicle window | accept only the configured controller originator **and UDP source endpoint**, exact cache destination, allowlisted channel, and monotonic controller-session epoch; clear the old window only after a successful retune | 3.13, 14.3 |
+| Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets — never channel or power | 3.14, 11.7 |
 
 The CSA MAC is the sole cryptographic element and touches only the rare
 channel-switch control action, never the bandwidth-carrying data path. Key
@@ -2040,7 +2127,10 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
                 "settle_s": 3.0, "verify_timeout_ms": 150,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
                 "bind_release_s": 90, "persist_channel": false,
-                "home_chan": 5805, "channel_allowlist": [5745, 5805, 5825] }
+                "home_chan": 5805, "channel_allowlist": [5745, 5805, 5825] },
+    "cmd":    { "copies": 3, "copy_interval_ms": 20, "echo_copies": 2,
+                "ack_timeout_ms": 1000, "retry_cap": 3,
+                "min_interval_ms": 250 }
   },
   "air":   { "kind": "radio", "ack_responder": false,
              "wedge_window_ms": 1000, "wedge_min_submits": 8 },
@@ -2074,6 +2164,10 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   (§11.5a); `csa.persist_channel` (default `false`) boots the craft onto its
   last-committed channel instead of `home_chan`. The former `rendezvous_timeout_s`
   is **removed** — COMMITTED now holds until reboot (§11.5, Pass 59).
+- `policy.cmd` seeds the §11.7 VEHICLE_CMD campaign (issuer side:
+  `copies`/`copy_interval_ms`/`ack_timeout_ms`/`retry_cap`; craft side:
+  `echo_copies`/`min_interval_ms`). All §17 RE-DERIVE seeds. The channel shares
+  `csa.psk`/the announced token (§11.4a) — there is no separate command key.
 - `scout` (ground/rx node, §15.5) configures the channel searcher: `dwell_ms`
   (per-channel listen, **300 ms** — a video-active craft is seen off DATA within
   a few hundred ms) and `channels` (`null` = sweep `csa.channel_allowlist`). A
@@ -2438,6 +2532,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[]}` (§15.5a; ground/rx node) |
 | `GET /api/v1/link/selection` | receiver's configured/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
+| `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `pending`\|`acked`\|`rejected`\|`timeout` (issuer/ground node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -2466,6 +2561,8 @@ otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
 | `POST /api/v1/scout/start` | `{ "channels":[…]?, "dwell_ms":??, "mode":"list"\|"quickconnect", "target":{"originator":N}? }` | begin a channel sweep (§15.5a; ground/rx node) |
 | `POST /api/v1/scout/stop` | `{}` | end the sweep and hold the current channel |
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto `target_chan` (or the emptiest allowlisted channel) |
+| `POST /api/v1/vehicle/command` | `{ "cmd": "arq"\|"selector"\|"fps_ladder", "arg": 0..4 }` | start a §11.7 command campaign toward the bound craft; returns `{ok, nonce}` immediately, poll the GET for the outcome (issuer/ground node) |
+| `POST /api/v1/arq` | `{ "enabled": true\|false }` | RX-local NACK-emission gate (§6.4) — this node only, the craft is untouched (rx node) |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and
 `fec` on the TX, and `bench/rx-drop` only on UDP-air RX. An endpoint invoked in a mode where it does not apply returns
@@ -2473,7 +2570,9 @@ Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and
 write knobs are exactly the §9/§11/§14 levers that were previously boot-time
 JSON only; the profile pin is the operating-point (MCS + bitrate) lever, since
 a profile bundles rate/power/MTU per §9.3. The `scout/*` endpoints (§15.5a) act
-only on a ground/rx node and **409** elsewhere.
+only on a ground/rx node and **409** elsewhere. `vehicle/command` likewise acts
+only on the issuer/ground node (and **409**s with an unbound craft — a campaign
+toward nobody is refused up front, not timed out); `arq` acts on any rx node.
 
 ### 15.5a Ground scout (channel searcher)
 A ground-side finder that sweeps channels to discover parked/flying craft and,

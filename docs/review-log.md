@@ -1714,6 +1714,62 @@ This adds packet type `0xC` (§3.13), amends §14.3 cache ownership, §15.2 conf
 and §15.5a claim commit semantics. The cache-control packet stays on the
 Ethernet cache socket and is never RF-injected.
 
+## Pass 68 — Remote vehicle commands ride the CSA trust machinery (2026-07-22, PROPOSED — awaiting operator ruling)
+
+The ground-station MVP needs runtime toggles for craft-side knobs that are
+boot-config only (ARQ, selector adaptation, FPS ladder) — the hub's ADAPTIVE
+menu has no lever to pull. Prior operator rulings framing this pass
+(2026-07-22): the channel rides the §11 CSA path and its HMAC PSK machinery;
+**every command is an enable/disable or an enum of at most 5 choices** — no
+free-form numerics; v1 commands are ARQ on/off, MCS-adaptation
+freeze/unfreeze, FPS-ladder on/off, with venc set-commands reserved for v2; a
+ground-local ARQ-off REST endpoint ships alongside.
+
+Proposed design (each point is a decision the operator should confirm or
+overrule):
+
+- **New packet type `0xD` VEHICLE_CMD (§3.14), 23 bytes**, reusing §11
+  wholesale: the §11.4 HMAC primitive and §11.4a key provenance (no separate
+  command key), a dedicated `cmd_nonce` counter (NOT shared with `csa_nonce` —
+  interleaved CSA and command campaigns must not invalidate each other), and
+  the §11.5a binding as the authorization: **bound-issuer-only, no bootstrap**.
+  Unlike CSA, a command can never establish a claim; unbound/non-bound senders
+  get a silent drop (an echo would be a probe oracle).
+- **ACK = the craft echoes the packet back** (`cmd_flags` bit0), re-MAC'd,
+  on the strong diversity-received downlink — chosen over a `CSA_ARMED`-style
+  DATA flag because a flag cannot carry *which* nonce/command it acknowledges,
+  and over a separate ACK type because the echo is free and self-describing.
+  `REJECTED` (bit1) distinguishes "understood, won't do" (unknown `cmd_id`,
+  bad arg, unconfigured actuator) from silence.
+- **Idempotent retry via duplicate-nonce re-echo** (the §3.13 CACHE_ASSIGN
+  pattern): `cmd_nonce == last_applied` re-echoes without re-applying — a
+  retried campaign means a lost echo, not a failed command.
+- **Campaign shape:** 3 copies @ 20 ms; echo 2 copies; `ack_timeout_ms` 1000
+  (csa_ack_timeout's reasoning); `retry_cap` 3 campaigns on the same nonce,
+  then `timeout`. Craft-side rate limit `min_interval_ms` 250 (commands are
+  mild, unlike the 5 s CSA limit — a menu should feel responsive). All §17
+  RE-DERIVE seeds under `policy.cmd`.
+- **v1 semantics:** `ARQ off` clears `ARQ`/`PFRAME_ARQ` stamping AND NACK
+  service — receivers then never NACK by construction (§6.4) and cache
+  nack-graces never arm; FEC and §3.9 recovery unaffected. `SELECTOR freeze`
+  = the existing §9.7 `min==max` pin at the current rung (same lever as
+  §15.5 `/link/profile`, last writer wins); `run` restores the boot envelope.
+  `FPS_LADDER off` stops the §9.11 loop where it is (no snap to `preferred`);
+  `on` re-enables with cleared evidence. All command state is
+  **craft-session-volatile** (reboot restores boot config; survives binding
+  release and channel moves — a re-claiming ground reads state from §15.3,
+  not memory).
+- **REST (§15.5):** `POST /api/v1/vehicle/command` on the issuer (409 when
+  unbound or elsewhere), polled via `GET /api/v1/vehicle/command`
+  (`pending|acked|rejected|timeout`); `POST /api/v1/arq` = RX-local NACK
+  emission gate (§6.4), unilateral, craft untouched.
+- **§13 row:** forged VEHICLE_CMD worst case is bounded to reboot-resettable
+  settings — never channel or power.
+
+Adds §3.14 and §11.7, amends §3.1 (registry, 13 of 16), §6.4, §13, §15.2
+(`policy.cmd`), §15.5. Spec-only; implementation follows in the same PR after
+the ruling.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
