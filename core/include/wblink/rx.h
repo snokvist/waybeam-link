@@ -144,8 +144,8 @@ class RxEngine {
     // feed each first-admitted symbol immediately after diversity dedup while
     // RxEngine retains the wire sequence for loss/ARQ accounting.
     using EarlyDeliver = std::function<EarlyDeliverResult(
-        uint8_t local_stream_id, uint32_t block_id, uint8_t data_flags,
-        const uint8_t* payload, size_t len)>;
+        const StreamKey& source, uint8_t local_stream_id, uint32_t block_id,
+        uint8_t data_flags, const uint8_t* payload, size_t len)>;
 
     // local_table_version: this node's §3.6 hash; packets carrying a
     // different table_version drop to the best-effort profile (§3.4).

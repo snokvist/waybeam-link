@@ -118,6 +118,10 @@ class FrameReassembler {
     // the finalized watermark are untouched).
     void reset_stats();
 
+    // A sender session namespaces block IDs. Clear the old session's block
+    // watermark and in-flight equations before accepting a new one.
+    void reset_stream();
+
   private:
     struct Block {
         uint16_t k = 0;           // symbol count (from any subheader); 0 = unknown

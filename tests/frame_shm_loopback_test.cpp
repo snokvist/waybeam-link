@@ -222,7 +222,7 @@ int main() {
                 ++ordered_deliveries;
             };
         const RxEngine::EarlyDeliver early =
-            [&](uint8_t, uint32_t block_id, uint8_t flags,
+            [&](const StreamKey&, uint8_t, uint32_t block_id, uint8_t flags,
                 const uint8_t* data, size_t len) {
                 const bool complete = ra.push(
                     block_id, flags, data, len, 1500,

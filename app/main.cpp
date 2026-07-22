@@ -945,6 +945,11 @@ struct AirBackend {
         if (cfg.air.kind == AirCfg::Kind::kMonitor) {
             MonAirCfg mc;
             mc.adapters = cfg.adapters;
+            // A dedicated cache with no media streams receives DATA over RF
+            // and returns CACHE_STATUS/REQUEST/REPLY over Ethernet. It must
+            // not manufacture RF traffic merely to satisfy the normal ground
+            // uplink invariant.
+            mc.allow_rx_only = cfg.cache.store.enabled && cfg.streams.empty();
             mc.stamp_net_id = cfg.node.net_id.value_or(0);
             mc.filter_net_id = cfg.node.net_id;
             mc.originator = cfg.node.originator;
@@ -1057,6 +1062,7 @@ struct AirBackend {
     }
 
     void heartbeat(uint16_t originator, uint32_t session, uint64_t now) {
+        if (mon && !mon->has_tx()) return;
         if (now < last_tx_ms || now - last_tx_ms < 1000) {
             return;
         }
@@ -2858,6 +2864,7 @@ int run_rx(const Loaded& l) {
         uint8_t stream_id;
         std::unique_ptr<FrameShmRing> ring;
         std::unique_ptr<FrameReassembler> reasm;
+        std::optional<StreamKey> source;
     };
     std::vector<ShmOut> shm_outs;
     for (const StreamCfg& s : l.cfg.streams) {
@@ -2884,7 +2891,8 @@ int run_rx(const Loaded& l) {
         std::fprintf(stderr, "rx: frame-shm egress '%s' created\n",
                      s.bind.name.c_str());
         shm_outs.push_back(ShmOut{s.stream_id, std::move(*r.value),
-                                  std::make_unique<FrameReassembler>(frc)});
+                                  std::make_unique<FrameReassembler>(frc),
+                                  std::nullopt});
     }
     uint64_t deliver_now = now_ms();
 
@@ -2991,11 +2999,16 @@ int run_rx(const Loaded& l) {
         }
     };
     const RxEngine::EarlyDeliver early_deliver =
-        [&](uint8_t sid, uint32_t block_id, uint8_t flags,
-            const uint8_t* d, size_t n) -> RxEngine::EarlyDeliverResult {
+        [&](const StreamKey& source, uint8_t sid, uint32_t block_id,
+            uint8_t flags, const uint8_t* d,
+            size_t n) -> RxEngine::EarlyDeliverResult {
         for (ShmOut& so : shm_outs) {
             if (so.stream_id != sid) {
                 continue;
+            }
+            if (!so.source || !(*so.source == source)) {
+                so.reasm->reset_stream();
+                so.source = source;
             }
             const bool complete = so.reasm->push(
                 block_id, flags, d, n, deliver_now,

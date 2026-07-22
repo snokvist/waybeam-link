@@ -539,6 +539,20 @@ int main() {
         ra.reset_stats();
         CHECK_EQ_U(ra.stats().jscc_shadow_blocks, 0u);
         CHECK_EQ_U(ra.stats().jscc_underpredicted_blocks, 0u);
+
+        // A transmitter restart creates a new session and restarts block IDs.
+        // Clearing the stream state must admit block zero again instead of
+        // rejecting it behind the previous session's finalized watermark.
+        ra.reset_stream();
+        FrameFramer rebooted(framer_cfg(FecScheme::kNone, 0, 0, 3));
+        auto reboot_blob = make_frame(6200, /*idr=*/true, 32);
+        for (const Sym& s : produce(rebooted, reboot_blob)) {
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                    1003, emit);
+        }
+        CHECK_EQ_U(got.size(), 2u);
+        CHECK(got[1] == reboot_blob);
+        CHECK_EQ_U(ra.stats().frames_delivered, 1u);
     }
 
     return wbtest_finish("frame_reassembler_test");

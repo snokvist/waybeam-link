@@ -1,0 +1,72 @@
+{
+  "_comment": "RK3566 ground decoder validation: RTL8812CU monitor-mode receiver with frame-SHM egress. Originator 10 keeps the x86 ground (9) authoritative.",
+  "node": {
+    "originator": 10,
+    "role": "rx",
+    "preferred_originator": 17,
+    "net_id": 0
+  },
+  "profile_table": "/etc/waybeam-link/table.example.json",
+  "adapters": [
+    {
+      "name": "cu-rk-ground",
+      "ifname": "wlx40a5ef2f229b",
+      "role": "tx",
+      "channel": 5805,
+      "bw": 20
+    }
+  ],
+  "streams": [
+    {
+      "stream_id": 0,
+      "stream_type": "RTP",
+      "dir": "out",
+      "originator": 17,
+      "bind": {
+        "kind": "frame-shm",
+        "name": "venc_frame_out"
+      }
+    }
+  ],
+  "air": {
+    "kind": "kernel-monitor"
+  },
+  "policy": {
+    "return": {
+      "quiet_gap": true,
+      "guard_us": 300,
+      "return_window_us": 2000
+    }
+  },
+  "cache": {
+    "repair": {
+      "enabled": true,
+      "stream_id": 0,
+      "listen": "192.168.2.199:5802",
+      "caches": [
+        {
+          "originator": 33,
+          "endpoint": "192.168.2.247:5801"
+        }
+      ],
+      "tail_grace_ms": 1,
+      "local_quiet_ms": 2,
+      "min_collect_ms": 4,
+      "hard_close_ms": 8,
+      "request_timeout_ms": 4,
+      "nack_grace_ms": 0,
+      "repair_fraction_permille": 200,
+      "absolute_symbol_limit": 8,
+      "max_cache_attempts": 2,
+      "reply_limit": 4,
+      "health_floor_permille": 800,
+      "status_timeout_ms": 1500
+    }
+  },
+  "control": {
+    "bind": "127.0.0.1:8092"
+  },
+  "stats": {
+    "hz": 1
+  }
+}

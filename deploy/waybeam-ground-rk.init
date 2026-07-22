@@ -1,0 +1,34 @@
+#!/bin/sh
+
+DAEMON="waybeam-link"
+CONFIG="/etc/waybeam-link/ground.json"
+IFACE="wlx40a5ef2f229b"
+PIDFILE="/var/run/waybeam-link.pid"
+LOGFILE="/var/log/waybeam-link.log"
+
+start() {
+	if [ ! -e "/sys/class/net/$IFACE" ]; then
+		echo "$DAEMON: interface $IFACE is unavailable"
+		return 1
+	fi
+	/usr/local/libexec/waybeam-mon-up "$IFACE" 161 HT20 || return 1
+	/usr/bin/$DAEMON rx -c "$CONFIG" --check || return 1
+	echo -n "Starting $DAEMON: "
+	start-stop-daemon -S -b -m -p "$PIDFILE" -O "$LOGFILE" \
+		-x /usr/bin/$DAEMON -- rx -c "$CONFIG"
+	echo "OK"
+}
+
+stop() {
+	echo -n "Stopping $DAEMON: "
+	start-stop-daemon -K -q -p "$PIDFILE"
+	rm -f "$PIDFILE"
+	echo "OK"
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; sleep 1; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

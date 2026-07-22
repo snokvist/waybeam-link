@@ -31,7 +31,12 @@
 namespace wblink {
 
 struct MonAirCfg {
-    std::vector<AdapterCfg> adapters;  // each carries ifname; exactly one kTx
+    // Each carries ifname; exactly one kTx unless allow_rx_only is set.
+    std::vector<AdapterCfg> adapters;
+    // A store-only Ethernet repair cache needs an RF ear but has no reason to
+    // inject on air. Keep this opt-in so ordinary ground/craft configs still
+    // fail closed when their designated uplink is missing.
+    bool allow_rx_only = false;
     uint8_t stamp_net_id = 0;          // §3.0 SA net_id (TX always stamps)
     std::optional<uint8_t> filter_net_id;  // RX enforces only when configured
     uint16_t originator = 0;               // stamped in SA; own frames dropped
@@ -78,6 +83,7 @@ class MonAir {
     int wait_fd() const;
 
     size_t rx_adapters() const;
+    bool has_tx() const;
     // §15.5a scout: index of the designated `role:"tx"` uplink adapter — the one
     // the scout roams during a sweep (Pass 64). Not assumed to be 0.
     size_t tx_index() const;

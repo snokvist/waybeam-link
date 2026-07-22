@@ -379,6 +379,20 @@ void FrameReassembler::reset_stats() {
     }
 }
 
+void FrameReassembler::reset_stream() {
+    stats_ = {};
+    blocks_.clear();
+    highest_block_ = 0;
+    have_highest_ = false;
+    finalized_upto_ = 0;
+    have_finalized_ = false;
+    scratch_.clear();
+    loss_estimator_.reset();
+    repair_estimator_.reset();
+    latest_observed_block_ = 0;
+    have_observed_block_ = false;
+}
+
 void FrameReassembler::finalize(uint32_t id) {
     if (!have_finalized_ || bid_diff(id, finalized_upto_) > 0) {
         finalized_upto_ = id;

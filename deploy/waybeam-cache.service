@@ -1,0 +1,24 @@
+[Unit]
+Description=Waybeam Ethernet ARQ cache
+Wants=network-online.target
+After=network-online.target systemd-modules-load.service
+# Late PCI/USB enumeration must not permanently suppress the unit.  Failed
+# interface waits are retried by Restart=on-failure without start-rate limits.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=WAYBEAM_IFACE_WAIT_SECONDS=30
+ExecStartPre=/usr/local/libexec/waybeam-wait-ifaces wlp3s0 wlx200db0c4a76a
+ExecStartPre=/usr/local/libexec/waybeam-mon-up wlp3s0 161 HT20
+ExecStartPre=/usr/local/libexec/waybeam-mon-up wlx200db0c4a76a 161 HT20
+ExecStart=/usr/local/bin/waybeam-link rx -c /etc/waybeam-link/cache.json
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

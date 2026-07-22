@@ -1,0 +1,50 @@
+{
+  "_comment": "Dedicated Ethernet ARQ cache: MT7921e and RTL8812AU receive Waybeam DATA on 5805/HT20; cache status and repairs travel only over Ethernet.",
+  "node": {
+    "originator": 33,
+    "role": "rx",
+    "preferred_originator": 17,
+    "net_id": 0
+  },
+  "adapters": [
+    {
+      "name": "mt-cache",
+      "ifname": "wlp3s0",
+      "role": "rx",
+      "channel": 5805,
+      "bw": 20
+    },
+    {
+      "name": "au-cache",
+      "ifname": "wlx200db0c4a76a",
+      "role": "rx",
+      "channel": 5805,
+      "bw": 20
+    }
+  ],
+  "streams": [],
+  "air": {
+    "kind": "kernel-monitor"
+  },
+  "cache": {
+    "store": {
+      "enabled": true,
+      "listen": "192.168.2.247:5801",
+      "stream_ids": [0],
+      "blocks": 96,
+      "reply_limit": 4,
+      "status_to": [
+        "192.168.2.242:5802",
+        "192.168.2.199:5802"
+      ],
+      "status_interval_ms": 500,
+      "max_requests_per_s": 400
+    }
+  },
+  "control": {
+    "bind": "127.0.0.1:8091"
+  },
+  "stats": {
+    "hz": 1
+  }
+}

@@ -250,6 +250,7 @@ struct MonAir::Impl {
     MonAirCfg cfg;
     std::vector<std::unique_ptr<Adapter>> adapters;
     size_t tx_idx = 0;
+    bool has_tx = false;
 
     // §15.5a runtime net_id roles. stamp is TX-only (main thread). filter is
     // read on every RX thread → atomic; -1 encodes "no filter" (hear any).
@@ -333,12 +334,13 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
         }
         const size_t len = static_cast<size_t>(n);
         const auto rt = radiotap_parse(buf.data(), len);
-        if (!rt || rt->hdr_len + kFcsLen > len) {
+        const size_t fcs_len = rt && rt->fcs_at_end ? kFcsLen : 0;
+        if (!rt || rt->hdr_len + fcs_len > len) {
             a->rx_filtered.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
         const uint8_t* mpdu = buf.data() + rt->hdr_len;
-        const size_t mpdu_len = len - rt->hdr_len - kFcsLen;  // strip FCS
+        const size_t mpdu_len = len - rt->hdr_len - fcs_len;
         const auto d = dot11_parse(mpdu, mpdu_len, filter_opt());
         if (!d || d->originator == cfg.originator) {
             a->rx_filtered.fetch_add(1, std::memory_order_relaxed);
@@ -381,6 +383,7 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
 
 size_t MonAir::Impl::send_frame(const uint8_t* payload, size_t len,
                                 bool urgent) {
+    if (!has_tx) return 0;
     Adapter* a = adapters[tx_idx].get();
     const size_t hdr_len = urgent ? kDot11QosHdrLen : kDot11HdrLen;
     tx_buf.resize(kMonRadiotapHtLen + hdr_len + len);
@@ -492,14 +495,16 @@ Result<MonAir> MonAir::create(const MonAirCfg& cfg) {
         }
         if (a->tx) {
             impl->tx_idx = i;
+            impl->has_tx = true;
             impl->bw = ac.bw;
             ++tx_count;
         }
         impl->adapters.push_back(std::move(a));
     }
-    if (tx_count != 1) {
+    if (tx_count > 1 || (tx_count == 0 && !cfg.allow_rx_only)) {
         return Result<MonAir>::fail(
-            "kernel-monitor: need exactly one role=tx adapter (the uplink)");
+            "kernel-monitor: need exactly one role=tx adapter (the uplink), "
+            "unless this is an explicitly RX-only cache");
     }
 
     for (size_t i = 0; i < impl->adapters.size(); ++i) {
@@ -538,6 +543,10 @@ void MonAir::return_counters(uint64_t& unicast_sent,
 void MonAir::tx_progress_counters(uint64_t& submitted,
                                   uint64_t& completed) const {
     submitted = impl_->tx_submitted.load(std::memory_order_relaxed);
+    if (!impl_->has_tx) {
+        completed = 0;
+        return;
+    }
     const auto now = std::chrono::steady_clock::now();
     if (now >= impl_->next_tx_progress_poll) {
         const auto v = read_iface_tx_packets(
@@ -580,10 +589,12 @@ int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
 int MonAir::wait_fd() const { return impl_->ready_fd; }
 
 size_t MonAir::rx_adapters() const { return impl_->adapters.size(); }
+bool MonAir::has_tx() const { return impl_->has_tx; }
 size_t MonAir::tx_index() const { return impl_->tx_idx; }  // §15.5a scout (Pass 64)
 
 std::optional<uint32_t> MonAir::estimate_airtime_us(
     size_t bytes, bool include_pending) const {
+    if (!impl_->has_tx) return std::nullopt;
     if (impl_->cfg.airtime_efficiency_permille == 0) return std::nullopt;
     uint64_t total = bytes;
     if (include_pending) {
