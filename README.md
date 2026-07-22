@@ -17,10 +17,13 @@ coordinated **follow-me channel switch** — built on OpenIPC **devourer** for r
 > pinned encapsulation (`air.kind: "radio"`, per-adapter RX threads, real
 > RSSI/TSF, `SetTxMode` + `SetTxPowerOffsetQdb` at profile commit) with the
 > §7.2 TSF quiet-gap pacer, and the **follow-me CSA** (§11: HMAC-SHA-256'd
-> campaigns, craft follower with TSF-anchored switch + auto-revert + home
-> rendezvous, ground issuer with commit-after-CSA_ARMED, §11.3 selector
-> freeze; ground trigger = `POST /api/v1/csa`, §15.5) — are implemented and
-> tested (`ctest --preset dev`, ASan+UBSan; SSC338Q cross-verified via
+> campaigns, craft follower with TSF-anchored switch + jump-failed backout +
+> committed channel hold, ground issuer with commit-after-CSA_ARMED, §11.3 selector
+> freeze; ground trigger = `POST /api/v1/csa`, §15.5), plus the **ground scout
+> + quickconnect path** (§15.5a: ANNOUNCE discovery, channel sweep, token-keyed
+> claim, multi-adapter uplink scouting with all-ear retune/rollback, and
+> heard-most candidate-channel selection) — are implemented and tested
+> (`ctest --preset dev`, ASan+UBSan; SSC338Q cross-verified via
 > `cmake --preset ssc338q`).
 > Step 11 (field bring-up + the §17 bench gates) has **run** on the x86 bench
 > (2× RTL8812CU + 1× RTL8812AU): the §3.0 on-air encapsulation is
@@ -33,8 +36,9 @@ coordinated **follow-me channel switch** — built on OpenIPC **devourer** for r
 > 24‰ post-diversity loss, then 10% GF(256) FEC recovered 599 source symbols
 > versus 52 by ARQ. A 37.1 s whole-link blackout confirmed that neither FEC nor
 > same-channel ARQ can repair the correlated SNR-edge tail. Gate 4 observables
-> are live (return-window
-> paced-hit ratio 97%→77% across load). See `docs/step11-bench.md` for the
+> and the clean desk A/B are live: the 300/2000 µs guard/window seeds stand,
+> while range-sensitive return-path and adaptive-loop stability remain to be
+> validated. See `docs/step11-bench.md` for the
 > full bench report and the remaining-work plan. Try it without hardware:
 > `./build/dev/waybeam-link loopback -c examples/config.loopback.sample.json`
 > or the two-process udp-air pair (`examples/config.air-{tx,rx}.sample.json`);

@@ -229,7 +229,7 @@ become NACK-eligible — gate-3 sample counts are inherently modest at any load.
 The population that matters is the RETRANSMIT-recovered subset, not raw loss
 count.
 
-### Gate 4 — observables **live**, seeds **not yet re-derived**
+### Gate 4 — observables **live**, desk seeds **re-derived**; range validation remains
 
 Return-window paced-hit-vs-miss counters (§7.2), real 60 fps EOB cadence:
 
@@ -329,15 +329,16 @@ muted at desk range (craft hears returns while TXing at RSSI −24). Guard/windo
 sweep (guard 300, 3000 pps): hit ratio PEAKS at the seed window (1000→89.3%,
 **2000→91.4%**, 3000→89.6%); delivered% window-insensitive at desk range (~95.6%).
 **Seeds 300/2000 STAND** — near-optimal among swept values; residual load-degradation
-vs §2's 97%@500pps is single-radio contention, not knob mis-tuning. Range-sensitive
-re-derivation (where returns are marginal) deferred to §4.1.
+vs §2's 97%@500pps is single-radio contention, not knob mis-tuning. The desk result
+does not close range-sensitive return-path or adaptive-loop stability; those remain
+the real-RF gate-4 follow-up.
 
-**Why:** `guard_us` (seed 300), `return_window_us` (seed 2000), and the §9.8
-fail-safe seeds are wfb_ng-derived placeholders (`docs/groundwork.md`) pending
-bench re-derivation; the quiet-gap A/B in §2 is confounded by a USB event and
-needs a clean repeat.
+**Original rationale:** `guard_us` (seed 300), `return_window_us` (seed 2000),
+and the §9.8 fail-safe seeds were wfb_ng-derived placeholders
+(`docs/groundwork.md`); the quiet-gap A/B in §2 was confounded by a USB event
+and needed a clean repeat.
 
-**Method:**
+**Desk method used:**
 - Re-run several 3000 pps quiet-gap ON/OFF pairs on the x86 bench (no
   vehicle needed — this is desk-measurable) without a mid-run adapter fault;
   use the runner skeleton in §1.2.
@@ -348,9 +349,10 @@ needs a clean repeat.
   seed needs re-deriving from the observed cross-adapter delivery-jitter
   histogram (PROTOCOL.md §17 knob table).
 
-**Success criteria:** a clean ON vs OFF pair with no confound, plus a
-`guard_us`/`return_window_us` pair that keeps the gate-4 hit ratio flat (not
-degrading) up to the 3000 pps operating point identified in gate 3.
+**Desk success criteria (met):** a clean ON vs OFF pair with no confound, plus
+a `guard_us`/`return_window_us` pair that keeps the gate-4 hit ratio flat (not
+degrading) up to the 3000 pps operating point identified in gate 3. This does
+not replace the remaining range-sensitive real-RF validation above.
 
 ### 4.3 CSA on real TSF
 
@@ -358,11 +360,12 @@ degrading) up to the 3000 pps operating point identified in gate 3.
 derived on paper against wfb_ng precedent, not measured against this radio's
 actual hardware TSF latch behaviour.
 
-**Method:** ground-triggered CSA campaign via stdin `csa <mhz> [class]`
-(PROTOCOL.md §11 build-order Pass 8 note); measure actual retune + re-acquire
-time per class (0 = fast intra-band `FastRetune`, seeded ~0.5–2.5 ms; 1 =
-cross-band full `SetMonitorChannel`, seeded up to ~277 ms on 8812AU) against
-the `dt_to_switch_ms` campaign-span assumption (§11.2).
+**Method:** ground-triggered CSA campaign via
+`POST /api/v1/csa {"mhz":5805,"class":0}` (the old stdin trigger was removed
+in Pass 16); measure actual retune + re-acquire time per class (0 = fast
+intra-band `FastRetune`, seeded ~0.5–2.5 ms; 1 = cross-band full
+`SetMonitorChannel`, seeded up to ~277 ms on 8812AU) against the
+`dt_to_switch_ms` campaign-span assumption (§11.2).
 
 **Success criteria:** measured retune time stays under the seeded
 `dt_to_switch_ms` budget for its class with margin; if not, the class 0/1
