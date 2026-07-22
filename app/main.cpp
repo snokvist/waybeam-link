@@ -28,6 +28,7 @@
 #include "wblink/air_udp.h"
 #include "wblink/binding.h"
 #include "wblink/cache_controller.h"
+#include "wblink/cache_assignment.h"
 #include "wblink/cache_store.h"
 #include "wblink/cache_udp.h"
 #include "wblink/config.h"
@@ -549,6 +550,9 @@ class ScoutEngine {
     // §15.5a (Pass 65): update the channel a sweep returns all ears to — the
     // ground's current operating channel (config default, or a committed target).
     void set_rest_chan(uint16_t chan) { rest_chan_ = chan; }
+    void set_rest_filter(std::optional<uint8_t> net_id) {
+        rest_filter_ = net_id;
+    }
 
     bool scanning() const { return phase_ == Phase::kScanning; }
 
@@ -805,6 +809,15 @@ CsaParams csa_params(const Config& cfg) {
     p.bind_release_ms = c.bind_release_s * 1000;
     p.allowlist = c.channel_allowlist;
     return p;
+}
+
+uint8_t bw_code(uint8_t width_mhz) {
+    return width_mhz >= 80 ? 2 : width_mhz >= 40 ? 1 : 0;
+}
+
+bool channel_allowed(const std::vector<uint16_t>& allowlist, uint16_t chan) {
+    return std::find(allowlist.begin(), allowlist.end(), chan) !=
+           allowlist.end();
 }
 
 // §7.2: the pacer keys off END_OF_BLOCK frames in both directions.
@@ -1186,30 +1199,38 @@ struct AirBackend {
     // T_switch (a straggler follows because a sibling heard the CSA). On the
     // udp dev backend the retune is a logged intent — the CSA state machines
     // stay exercisable end-to-end without radios.
-    void retune_all(uint16_t chan_mhz, uint8_t bw, bool fast) {
+    bool retune_all(uint16_t chan_mhz, uint8_t bw, bool fast) {
         if (mon) {
+            const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
+                                          : bw;
+            bool ok = true;
             for (size_t i = 0; i < mon->rx_adapters(); ++i) {
-                mon->retune(i, chan_mhz, bw, fast);
-                mon->reapply_tx_power(i);
+                const bool tuned = mon->retune(i, chan_mhz, width, fast);
+                ok = tuned && ok;
+                if (tuned) mon->reapply_tx_power(i);
             }
-            return;
+            return ok;
         }
 #if WBLINK_RADIO
         if (radio) {
+            const uint8_t code = bw > 2 ? bw_code(bw) : bw;
+            bool ok = true;
             for (size_t i = 0; i < radio->rx_adapters(); ++i) {
-                if (!radio->retune(i, chan_mhz, bw, fast)) {
+                if (!radio->retune(i, chan_mhz, code, fast)) {
+                    ok = false;
                     std::fprintf(stderr, "csa: adapter %zu retune to %u MHz "
                                          "failed\n",
                                  i, chan_mhz);
                 }
                 radio->reapply_tx_power(i);  // §11.2 post-retune TXAGC
             }
-            return;
+            return ok;
         }
 #endif
         std::fprintf(stderr, "csa: retune -> %u MHz bw=%u%s (udp backend, "
                              "intent only)\n",
                      chan_mhz, bw, fast ? " fast" : "");
+        return true;
     }
     bool is_radio() const {
         if (mon) {
@@ -1252,9 +1273,14 @@ struct AirBackend {
         return 0;
     }
     bool retune_one(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
-        if (mon) return mon->retune(adapter, chan_mhz, bw, fast);
+        if (mon) {
+            const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
+                                          : bw;
+            return mon->retune(adapter, chan_mhz, width, fast);
+        }
 #if WBLINK_RADIO
-        if (radio) return radio->retune(adapter, chan_mhz, bw, fast);
+        if (radio) return radio->retune(adapter, chan_mhz,
+                                        bw > 2 ? bw_code(bw) : bw, fast);
 #endif
         return true;  // udp: logged intent
     }
@@ -2208,6 +2234,16 @@ struct RxCore {
     // so the caller resets those; here we zero the RX engine's counters.
     void reset_stats() { engine_.reset_stats(); }
 
+    void select_originator(uint16_t originator) {
+        engine_.select_originator(originator);
+        reporter_.reset_link();
+        next_feedback_ms_ = 0;
+    }
+
+    std::optional<uint16_t> selected_originator() const {
+        return engine_.selected_originator();
+    }
+
     std::string request_recovery(int local_stream_id, const Inject& inject) {
         std::optional<RxStreamInfo> selected;
         for (const RxStreamInfo& info : engine_.streams()) {
@@ -2856,6 +2892,24 @@ int run_rx(const Loaded& l) {
     DiscoveryCatalog discovery;
     RxCore rx(l.cfg, session, l.have_table ? &l.table : nullptr,
               l.have_table ? std::optional<uint8_t>(l.tv) : std::nullopt);
+    const uint16_t op_chan =
+        l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
+    const uint8_t op_bw_mhz =
+        l.cfg.adapters.empty() ? 20 : l.cfg.adapters[0].bw;
+
+    struct LinkSelection {
+        uint16_t originator = 0;
+        uint16_t chan = 0;
+        uint8_t bw = 0;  // §11 width code
+        uint8_t net_id = 0;
+    };
+    LinkSelection active_selection{rx.selected_originator().value_or(0),
+                                   op_chan, bw_code(op_bw_mhz),
+                                   l.cfg.node.net_id.value_or(0)};
+    std::optional<LinkSelection> pending_selection;
+    std::optional<LinkSelection> previous_selection;
+    std::string selection_state = "configured";
+    std::string previous_selection_state = selection_state;
 
     // §15.4 frame-shm egress: one producer ring + a §6.3a reassembler per
     // frame-shm out-stream. deliver_now carries the loop's per-iteration clock
@@ -2951,6 +3005,8 @@ int run_rx(const Loaded& l) {
     std::unique_ptr<CacheStore> cache_store;
     std::unique_ptr<CacheUdp> cache_store_sock;
     std::vector<CacheEndpoint> cache_status_to;
+    std::optional<CacheEndpoint> cache_controller_endpoint;
+    std::unique_ptr<CacheAssignmentGate> cache_assignment_gate;
     uint64_t next_cache_status_ms = 0;
     if (l.cfg.cache.store.enabled) {
         const CacheStoreCfg& cs = l.cfg.cache.store;
@@ -2978,9 +3034,38 @@ int run_rx(const Loaded& l) {
         sc.reply_limit = cs.reply_limit;
         sc.max_requests_per_s = cs.max_requests_per_s;
         cache_store = std::make_unique<CacheStore>(sc);
+        if (cs.controller) {
+            auto ep = CacheUdp::resolve(cs.controller->endpoint);
+            if (!ep) {
+                std::fprintf(stderr, "cache.store controller '%s': %s\n",
+                             cs.controller->endpoint.c_str(), ep.error.c_str());
+                return 1;
+            }
+            cache_controller_endpoint = *ep.value;
+            cache_assignment_gate = std::make_unique<CacheAssignmentGate>(
+                l.cfg.node.originator, cs.controller->originator);
+        }
         std::fprintf(stderr, "rx: cache store on '%s' (%zu streams)\n",
                      cs.listen.c_str(), cs.stream_ids.size());
     }
+
+    uint32_t cache_assignment_epoch = 0;
+    uint64_t next_cache_assignment_ms = 0;
+    std::optional<CacheAssign> desired_cache_assignment;
+    const auto assign_caches = [&](const LinkSelection& selected) {
+        if (!cache_ctl || selected.originator == 0) return;
+        cache_ctl->reset_link();
+        desired_cache_assignment.emplace();
+        CacheAssign& a = *desired_cache_assignment;
+        a.prefix = {l.cfg.node.originator, 0, session};
+        a.target_originator = selected.originator;
+        a.assignment_epoch = ++cache_assignment_epoch;
+        a.target_chan = selected.chan;
+        a.target_bw = selected.bw;
+        a.target_net_id = selected.net_id;
+        next_cache_assignment_ms = 0;
+    };
+    assign_caches(active_selection);  // startup/restart healing (§14.3 Pass 67)
 
     const RxEngine::Deliver deliver = [&](uint8_t sid, uint32_t block_id,
                                           uint8_t flags, const uint8_t* d,
@@ -3018,6 +3103,15 @@ int run_rx(const Loaded& l) {
             return RxEngine::EarlyDeliverResult{/*handled=*/true, complete};
         }
         return {};
+    };
+    const auto apply_selection = [&](const LinkSelection& selected) {
+        rx.select_originator(selected.originator);
+        for (ShmOut& so : shm_outs) {
+            so.reasm->reset_stream();
+            so.source.reset();
+        }
+        active_selection = selected;
+        assign_caches(selected);
     };
 
     // §7.2 ground side: returns (NACK/LINK_REPORT) coalesce and fire at the
@@ -3075,6 +3169,27 @@ int run_rx(const Loaded& l) {
     // exact block's bounded first-NACK grace (§14.3 rule 8).
     const auto service_cache_repair = [&](uint64_t service_ms) {
         if (!cache_ctl) return;
+        if (desired_cache_assignment &&
+            service_ms >= next_cache_assignment_ms) {
+            next_cache_assignment_ms =
+                service_ms + l.cfg.cache.repair.assignment_interval_ms;
+            for (const auto& [cache_originator, endpoint] : cache_endpoints) {
+                if (cache_ctl->has_fresh_target(
+                        cache_originator,
+                        desired_cache_assignment->target_originator,
+                        service_ms)) {
+                    continue;
+                }
+                CacheAssign a = *desired_cache_assignment;
+                a.prefix.destination = cache_originator;
+                a.target_cache = cache_originator;
+                uint8_t abuf[kCacheAssignSize];
+                if (encode_cache_assign(a, abuf, sizeof(abuf)) ==
+                    sizeof(abuf)) {
+                    cache_repair_sock->send_to(endpoint, abuf, sizeof(abuf));
+                }
+            }
+        }
         uint8_t cbuf[kCacheReplyFixedSize + kDataHeaderSize +
                      kMaxDataPayload];
         CacheEndpoint from;
@@ -3171,9 +3286,6 @@ int run_rx(const Loaded& l) {
     // CCX-liveness watchdog as the craft's radio.
     TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
                                 l.cfg.air.wedge_min_submits});
-    const uint16_t op_chan =
-        l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
-    const uint8_t op_bw = l.cfg.adapters.empty() ? 20 : l.cfg.adapters[0].bw;
     // §15.5a (Pass 65): the ground's current operating channel — the config
     // default until a claim commits, then the committed target. The scout returns
     // all ears here, and a failed claim rolls back here.
@@ -3199,7 +3311,7 @@ int run_rx(const Loaded& l) {
                        discovery.token_for(orig).has_value();
             },
         },
-        op_bw, op_chan, l.cfg.node.net_id, scout_idx);
+        op_bw_mhz, op_chan, l.cfg.node.net_id, scout_idx);
     // §15.5 REST control plane. RX/ground node owns the CSA trigger (replaces
     // the removed stdin trigger); profile/fec are TX-only knobs → null → 409.
     StatsSnapshot last_snap;
@@ -3223,6 +3335,67 @@ int run_rx(const Loaded& l) {
             return discovery.json(now_ms(), rx.stream_keys());
         };
         h.scout_results = [&] { return scout.results_json(); };
+        h.selection_json = [&] {
+            const uint64_t at = now_ms();
+            size_t following = 0;
+            if (cache_ctl) {
+                for (const auto& [orig, ep] : cache_endpoints) {
+                    (void)ep;
+                    following += cache_ctl->has_fresh_target(
+                                     orig, active_selection.originator, at)
+                                     ? 1u
+                                     : 0u;
+                }
+            }
+            std::string out = "{\"state\":\"" + selection_state +
+                              "\",\"originator\":" +
+                              std::to_string(active_selection.originator) +
+                              ",\"channel\":" +
+                              std::to_string(active_selection.chan) +
+                              ",\"bw\":" +
+                              std::to_string(active_selection.bw) +
+                              ",\"net_id\":" +
+                              std::to_string(active_selection.net_id) +
+                              ",\"caches_configured\":" +
+                              std::to_string(cache_endpoints.size()) +
+                              ",\"caches_following\":" +
+                              std::to_string(following);
+            if (pending_selection) {
+                out += ",\"pending_originator\":" +
+                       std::to_string(pending_selection->originator) +
+                       ",\"pending_channel\":" +
+                       std::to_string(pending_selection->chan);
+            }
+            return out + "}";
+        };
+        if (cache_store) {
+            h.cache_assignment_json = [&] {
+                std::string out = "{\"controller\":";
+                if (l.cfg.cache.store.controller) {
+                    out += std::to_string(
+                        l.cfg.cache.store.controller->originator);
+                } else {
+                    out += "null";
+                }
+                out += ",\"target_originator\":" +
+                       std::to_string(cache_store->target_originator());
+                if (cache_assignment_gate &&
+                    cache_assignment_gate->current()) {
+                    const CacheAssign& a =
+                        *cache_assignment_gate->current();
+                    out += ",\"controller_session\":" +
+                           std::to_string(a.prefix.session_id) +
+                           ",\"assignment_epoch\":" +
+                           std::to_string(a.assignment_epoch) +
+                           ",\"channel\":" +
+                           std::to_string(a.target_chan) +
+                           ",\"bw\":" + std::to_string(a.target_bw) +
+                           ",\"net_id\":" +
+                           std::to_string(a.target_net_id);
+                }
+                return out + "}";
+            };
+        }
         // §15.5a claim: CSA-grab a scouted craft. Re-keys the issuer with the
         // craft's key (configured secret, or the cached announced token §11.4a),
         // binds the link to its net_id, moves onto its channel to be heard, then
@@ -3233,7 +3406,7 @@ int run_rx(const Loaded& l) {
             if (!air.value->supports_csa()) {
                 return "CSA unsupported by this backend";
             }
-            if (originator_i < 0 || originator_i > 0xFFFF) {
+            if (originator_i <= 0 || originator_i > 0xFFFF) {
                 return "invalid originator";
             }
             const uint16_t orig = static_cast<uint16_t>(originator_i);
@@ -3247,62 +3420,86 @@ int run_rx(const Loaded& l) {
                 key.assign(tok->begin(), tok->end());
             }
             if (!issuer.set_psk(key)) return "claim busy (campaign active)";
-            // §15.5a: bind the link to the craft's net_id — stamp our uplink so
-            // the craft accepts it, narrow our filter to hear only that craft.
-            air.value->set_stamp_net_id(cand->net_id);
-            air.value->set_filter_net_id(cand->net_id);
-            // §15.5a (Pass 64): move ALL link adapters onto the craft's current
-            // channel — not just the uplink — so every diversity ear hears the
-            // copies and the §11.6 commit lands them together. An aborted campaign
-            // leaves them here, co-channel with the craft, positioned for retry.
-            air.value->retune_all(cand->chan, op_bw, false);
             uint16_t target = static_cast<uint16_t>(target_chan_i);
             if (target == 0) {
                 target =
                     scout.emptiest(l.cfg.policy.csa.channel_allowlist, cand->chan);
             }
             if (target == 0) return "no target channel (specify target_chan)";
+            // §15.5a: bind the link to the craft's net_id and move all ears onto
+            // its current channel so the campaign and CSA_ARMED return are heard.
+            air.value->set_stamp_net_id(cand->net_id);
+            air.value->set_filter_net_id(cand->net_id);
+            if (!air.value->retune_all(cand->chan, op_bw_mhz, false)) {
+                air.value->set_stamp_net_id(active_selection.net_id);
+                air.value->set_filter_net_id(active_selection.net_id);
+                air.value->retune_all(active_selection.chan, op_bw_mhz, false);
+                return "failed to retune onto craft channel";
+            }
             // retune_class 1 (500 ms dt budget) gives the craft slack for the iw
             // shell-out retune before its §11.5 verify timeout. bw code 0 = 20 MHz
             // (v1 single-width, matching the /csa trigger).
             const CommonPrefix pre{l.cfg.node.originator, 0, session};
             if (!issuer.start(pre, target, 0, 1, cand->chan, 0, 4, now_us_it)) {
+                air.value->retune_all(active_selection.chan, op_bw_mhz, false);
+                air.value->set_stamp_net_id(active_selection.net_id);
+                air.value->set_filter_net_id(active_selection.net_id);
                 return "rejected (active campaign or rate-limit)";
             }
+            previous_selection = active_selection;
+            previous_selection_state = selection_state;
+            pending_selection = LinkSelection{orig, target, 0, cand->net_id};
+            selection_state = "claiming";
             std::fprintf(stderr, "csa: claim originator=%u net_id=%u %u->%u MHz\n",
                          orig, cand->net_id, cand->chan, target);
             return "";
         };
-        h.scout_start = [&](const std::vector<uint16_t>& chans, uint32_t dwell,
-                            const std::string& mode, int target) -> std::string {
-            if (mode == "quickconnect") {
-                if (target < 0) return "quickconnect requires target.originator";
-                return do_claim(target, 0);  // start-form picks emptiest channel
-            }
-            std::vector<uint16_t> ch = chans;
-            if (ch.empty()) ch = l.cfg.scout.channels;
-            if (ch.empty()) ch = l.cfg.policy.csa.channel_allowlist;
-            scout.set_rest_chan(operating_chan);  // §15.5a (Pass 65): return here
-            return scout.start(ch, dwell ? dwell : l.cfg.scout.dwell_ms,
-                               now_ms());
-        };
-        h.scout_stop = [&]() -> std::string {
-            scout.stop();
-            return "";
-        };
-        h.scout_quickconnect = do_claim;
-        h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
-            if (!air.value->supports_csa()) {
-                return "CSA unsupported by kernel-monitor backend";
-            }
-            const CommonPrefix pre{l.cfg.node.originator, 0, session};
-            if (issuer.start(pre, static_cast<uint16_t>(mhz), 0,
-                             static_cast<uint8_t>(klass != 0), op_chan, 0, 4,
-                             now_us_it)) {
+        // A controlled cache is a follower of its receiver.  It must not expose
+        // an independent scout/claim/CSA control surface that could split it
+        // from the receiver's committed selection.
+        if (!cache_assignment_gate) {
+            h.scout_start = [&](const std::vector<uint16_t>& chans,
+                                uint32_t dwell, const std::string& mode,
+                                int target) -> std::string {
+                if (mode == "quickconnect") {
+                    if (target < 0) {
+                        return "quickconnect requires target.originator";
+                    }
+                    return do_claim(target, 0);  // pick the emptiest channel
+                }
+                std::vector<uint16_t> ch = chans;
+                if (ch.empty()) ch = l.cfg.scout.channels;
+                if (ch.empty()) ch = l.cfg.policy.csa.channel_allowlist;
+                scout.set_rest_chan(operating_chan);  // return here after dwell
+                scout.set_rest_filter(active_selection.net_id);
+                return scout.start(ch, dwell ? dwell : l.cfg.scout.dwell_ms,
+                                   now_ms());
+            };
+            h.scout_stop = [&]() -> std::string {
+                scout.stop();
                 return "";
-            }
-            return "rejected (active campaign, PSK, allowlist, or rate-limit)";
-        };
+            };
+            h.scout_quickconnect = do_claim;
+            h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
+                if (!air.value->supports_csa()) {
+                    return "CSA unsupported by kernel-monitor backend";
+                }
+                const CommonPrefix pre{l.cfg.node.originator, 0, session};
+                if (issuer.start(pre, static_cast<uint16_t>(mhz), 0,
+                                 static_cast<uint8_t>(klass != 0),
+                                 operating_chan, active_selection.bw, 4,
+                                 now_us_it)) {
+                    previous_selection = active_selection;
+                    previous_selection_state = selection_state;
+                    pending_selection = active_selection;
+                    pending_selection->chan = static_cast<uint16_t>(mhz);
+                    pending_selection->bw = 0;
+                    selection_state = "claiming";
+                    return "";
+                }
+                return "rejected (active campaign, PSK, allowlist, or rate-limit)";
+            };
+        }
         h.video_recover = [&](int stream_id) {
             return rx.request_recovery(stream_id, inject_nack);
         };
@@ -3385,6 +3582,9 @@ int run_rx(const Loaded& l) {
             discovery.observe(dec, now, meta.net_id);
             scout.on_frame(meta, dec, d, n);  // §15.5a sweep aggregation
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
+                // Pass 67: a receiver-owned cache follows only its controller's
+                // Ethernet assignment, never an RF spectator campaign.
+                if (cache_assignment_gate) return;
                 if (!air.value->supports_csa()) {
                     return;
                 }
@@ -3408,6 +3608,11 @@ int run_rx(const Loaded& l) {
                     issuer.note_craft_armed(now_us_it);  // §11.6 implicit ACK
                 }
                 issuer.note_craft_video(now_us_it);
+                if (selection_state == "verifying" && !issuer.active()) {
+                    selection_state = "committed";
+                    pending_selection.reset();
+                    previous_selection.reset();
+                }
                 if (cache_store) {  // §14.3: retain the verbatim wire packet
                     cache_store->note_data(*v, d, n);
                 }
@@ -3456,6 +3661,39 @@ int run_rx(const Loaded& l) {
             while ((rn = cache_store_sock->recv_one(cbuf, sizeof(cbuf),
                                                     &from)) > 0) {
                 const Decoded cdec = decode(cbuf, static_cast<size_t>(rn));
+                if (const CacheAssign* ca =
+                        std::get_if<CacheAssign>(&cdec)) {
+                    if (!cache_assignment_gate || !cache_controller_endpoint ||
+                        !(from == *cache_controller_endpoint)) {
+                        continue;
+                    }
+                    const CacheAssignmentGate::Verdict verdict =
+                        cache_assignment_gate->evaluate(*ca);
+                    if (verdict == CacheAssignmentGate::Verdict::kDuplicate) {
+                        continue;
+                    }
+                    if (verdict != CacheAssignmentGate::Verdict::kApply ||
+                        !channel_allowed(l.cfg.policy.csa.channel_allowlist,
+                                         ca->target_chan)) {
+                        continue;
+                    }
+                    if (!air.value->retune_all(ca->target_chan, ca->target_bw,
+                                               false)) {
+                        std::fprintf(stderr,
+                                     "cache: assignment retune to %u failed\n",
+                                     ca->target_chan);
+                        continue;
+                    }
+                    air.value->set_filter_net_id(ca->target_net_id);
+                    cache_store->assign_target(ca->target_originator);
+                    cache_assignment_gate->commit(*ca);
+                    std::fprintf(stderr,
+                                 "cache: receiver %u assigned vehicle %u "
+                                 "channel %u net_id %u\n",
+                                 ca->prefix.originator, ca->target_originator,
+                                 ca->target_chan, ca->target_net_id);
+                    continue;
+                }
                 const CacheRequestView* rq =
                     std::get_if<CacheRequestView>(&cdec);
                 if (rq == nullptr) {
@@ -3526,26 +3764,46 @@ int run_rx(const Loaded& l) {
             }
             case CsaIssuer::IssuerAction::Kind::kCommit:
                 air.value->retune_all(ia.chan_mhz, ia.bw, ia.fast);
-                operating_chan = ia.chan_mhz;  // §15.5a: ground now operates here;
-                                               // keep the claim's net_id bound.
+                operating_chan = ia.chan_mhz;
+                if (pending_selection) {
+                    apply_selection(*pending_selection);
+                    scout.set_rest_chan(active_selection.chan);
+                    scout.set_rest_filter(active_selection.net_id);
+                    selection_state = "verifying";
+                }
                 std::fprintf(stderr, "csa: commit -> %u MHz\n", ia.chan_mhz);
                 break;
             case CsaIssuer::IssuerAction::Kind::kRevert:
-                // §11.6 post-commit backout: detach from the craft — return the
-                // net_id stamp/filter to the resting value (§15.5a Pass 65).
-                air.value->retune_all(ia.chan_mhz, ia.bw, ia.fast);
-                operating_chan = ia.chan_mhz;
-                air.value->set_stamp_net_id(l.cfg.node.net_id.value_or(0));
-                air.value->set_filter_net_id(l.cfg.node.net_id);
-                std::fprintf(stderr, "csa: revert -> %u MHz\n", ia.chan_mhz);
+                // Pass 67: the craft reverts to the campaign's prev_chan; this
+                // receiver restores its prior vehicle tuple, which may be on a
+                // different channel when switching between vehicles.
+                if (previous_selection) {
+                    air.value->retune_all(previous_selection->chan,
+                                          previous_selection->bw, ia.fast);
+                    air.value->set_stamp_net_id(previous_selection->net_id);
+                    air.value->set_filter_net_id(previous_selection->net_id);
+                    apply_selection(*previous_selection);
+                    operating_chan = previous_selection->chan;
+                    selection_state = previous_selection_state;
+                    scout.set_rest_chan(active_selection.chan);
+                    scout.set_rest_filter(active_selection.net_id);
+                }
+                pending_selection.reset();
+                previous_selection.reset();
+                std::fprintf(stderr, "csa: selection reverted -> %u MHz\n",
+                             operating_chan);
                 break;
             case CsaIssuer::IssuerAction::Kind::kAbort:
                 // §15.5a (Pass 65): a failed claim (no CSA_ARMED) rolls every ear
                 // and the net_id stamp/filter back to the resting state, so it's a
                 // clean no-op rather than stranding a diversity ear on the craft.
-                air.value->retune_all(operating_chan, op_bw, false);
-                air.value->set_stamp_net_id(l.cfg.node.net_id.value_or(0));
-                air.value->set_filter_net_id(l.cfg.node.net_id);
+                air.value->retune_all(active_selection.chan, op_bw_mhz, false);
+                air.value->set_stamp_net_id(active_selection.net_id);
+                air.value->set_filter_net_id(active_selection.net_id);
+                operating_chan = active_selection.chan;
+                selection_state = previous_selection_state;
+                pending_selection.reset();
+                previous_selection.reset();
                 std::fprintf(stderr,
                              "csa: aborted (no CSA_ARMED) -> resting %u MHz\n",
                              operating_chan);

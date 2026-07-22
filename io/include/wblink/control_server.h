@@ -31,6 +31,8 @@ struct ControlHandlers {
     std::function<std::string()> discovery_json;
     // §15.5a ground scout state (GET); null → 503 like the other reads.
     std::function<std::string()> scout_results;
+    std::function<std::string()> selection_json;
+    std::function<std::string()> cache_assignment_json;
 
     // Writes — return "" on success, else a short error string (→ HTTP 400).
     // A null hook means the endpoint does not apply to this mode (→ HTTP 409).

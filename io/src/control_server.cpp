@@ -300,6 +300,20 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             }
             return reply(200, "OK", h_.scout_results());
         }
+        if (path == "/api/v1/link/selection") {
+            if (!h_.selection_json) {
+                return reply(409, "Conflict",
+                             json_err("selection not available in this mode"));
+            }
+            return reply(200, "OK", h_.selection_json());
+        }
+        if (path == "/api/v1/cache/assignment") {
+            if (!h_.cache_assignment_json) {
+                return reply(409, "Conflict",
+                             json_err("cache assignment not available"));
+            }
+            return reply(200, "OK", h_.cache_assignment_json());
+        }
         if (path == "/api/v1/stats/stream") {
             const std::string hdr =
                 "HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n"

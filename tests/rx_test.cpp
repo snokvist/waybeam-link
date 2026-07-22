@@ -40,9 +40,10 @@ struct Harness {
     void feed(uint8_t adapter, uint32_t seq, uint32_t block, uint8_t flags,
               uint64_t now, uint8_t table_version = kTv,
               const RxEngine::EarlyDeliver& early_deliver = {},
-              uint32_t session = kTxSession) {
+              uint32_t session = kTxSession,
+              uint16_t originator = kTxOrig) {
         DataHeader h;
-        h.prefix = {kTxOrig, 0, session};
+        h.prefix = {originator, 0, session};
         h.stream_id = 0;
         h.stream_type = stream_type::kRtp;
         h.seq = seq;
@@ -83,6 +84,24 @@ constexpr uint8_t PARQ = data_flags::kPframeArq;
 }  // namespace
 
 int main() {
+    // --- Pass 67 live vehicle selection tears down the prior latch ----------
+    {
+        Harness h;
+        h.latch();
+        CHECK(h.engine.selected_originator() == kTxOrig);
+        h.engine.select_originator(18);
+        CHECK_EQ_U(h.engine.streams().size(), 0);
+        CHECK(h.engine.selected_originator() == 18);
+        // Old vehicle is rejected; the new vehicle passes normal N=3 admission.
+        h.feed(0, 3, 1, 0, 10);
+        CHECK_EQ_U(h.engine.streams().size(), 0);
+        h.feed(0, 0, 0, 0, 11, kTv, {}, 55, 18);
+        h.feed(0, 1, 0, 0, 12, kTv, {}, 55, 18);
+        h.feed(0, 2, 0, 0, 13, kTv, {}, 55, 18);
+        CHECK_EQ_U(h.engine.streams().size(), 1);
+        CHECK_EQ_U(h.engine.streams()[0].key.originator, 18);
+    }
+
     // --- admission control + latch + startup floor --------------------------
     {
         Harness h;

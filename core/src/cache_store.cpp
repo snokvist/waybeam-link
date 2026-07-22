@@ -15,6 +15,15 @@ inline bool bit_set(const uint8_t* bm, size_t len, uint16_t i) {
 }
 }  // namespace
 
+void CacheStore::assign_target(uint16_t originator) {
+    if (originator == 0 || originator == cfg_.target_originator) return;
+    cfg_.target_originator = originator;
+    streams_.clear();
+    requesters_.clear();
+    stats_.blocks_held = 0;
+    stats_.health_permille = 0;
+}
+
 bool CacheStore::tracked(uint8_t stream_id) const {
     return std::find(cfg_.stream_ids.begin(), cfg_.stream_ids.end(),
                      stream_id) != cfg_.stream_ids.end();

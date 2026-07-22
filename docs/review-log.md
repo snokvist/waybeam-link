@@ -1677,6 +1677,43 @@ revisited if occupancy precision is ever needed.
 Amends §15.5a (candidate `chan` selection). Implementation-only: `ScoutEngine` counts
 frames per originator per channel and `candidate_for` returns the max. No wire change.
 
+## Pass 67 — Receiver-owned vehicle selection and cache following (2026-07-22)
+
+The first complete production topology is one vehicle, one receiver, and one
+Ethernet ARQ cache. Review of the implemented scout showed three independent
+states: quick-connect moved the RF channel/net_id, RX stream wants remained
+pinned to their boot-configured originator, and the cache remained pinned to
+its own `node.preferred_originator`. A generic RX-side CSA spectator could also
+move another receiver or cache without changing either pin, creating a partial
+switch rather than a usable link.
+
+Operator rulings (2026-07-22):
+
+- **The receiver owns the cache.** The cache is statically linked to exactly one
+  controller receiver. The receiver discovers/pairs with the vehicle and assigns
+  its committed vehicle tuple to the cache; the cache never discovers or chooses
+  a vehicle independently. Multi-receiver cache arbitration and simultaneous
+  multi-vehicle storage are outside the production MVP.
+- **Claim commit is the subscription boundary.** On issuer commit the receiver
+  changes the local RX sender pin, clears old stream/reassembly/cache-controller
+  state, and begins cache-follow retries. Issuer verification revert restores
+  the previous tuple. A claim that never commits changes neither subscription
+  nor cache assignment.
+- **Cache following is explicit and restart-healing.** A new Ethernet-only
+  CACHE_ASSIGN packet carries vehicle originator/channel/bandwidth/net_id and a
+  per-controller-session epoch. The cache accepts it only from the configured
+  controller originator and exact UDP endpoint, retunes before changing the
+  logical store target, and clears the old vehicle window. The receiver retries
+  until fresh matching CACHE_STATUS proves readiness; it also assigns its static
+  startup selection, healing cache restarts without another vehicle claim.
+- **Cache availability never gates video.** Pairing/selection succeeds when the
+  vehicle campaign succeeds. An absent cache is observable and retried, while
+  RF video and vehicle ARQ continue normally.
+
+This adds packet type `0xC` (§3.13), amends §14.3 cache ownership, §15.2 config,
+and §15.5a claim commit semantics. The cache-control packet stays on the
+Ethernet cache socket and is never RF-injected.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

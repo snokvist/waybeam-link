@@ -317,6 +317,7 @@ struct CacheRepairCfg {
     uint8_t reply_limit = 4;
     uint16_t health_floor_permille = 800;
     uint32_t status_timeout_ms = 1500;
+    uint32_t assignment_interval_ms = 500;
 };
 struct CacheStoreCfg {
     bool enabled = false;
@@ -327,6 +328,9 @@ struct CacheStoreCfg {
     std::vector<std::string> status_to;  // aggregator endpoints
     uint32_t status_interval_ms = 500;
     uint16_t max_requests_per_s = 400;
+    // Pass 67: optional single owning receiver. Its endpoint is the exact
+    // source address of CACHE_ASSIGN datagrams (normally repair.listen).
+    std::optional<CacheEndpointCfg> controller;
 };
 struct CacheCfg {
     CacheRepairCfg repair;

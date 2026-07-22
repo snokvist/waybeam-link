@@ -37,6 +37,7 @@ class Reporter {
     std::vector<LinkReport> build(const RxEngine& engine, uint64_t now_ms);
 
     uint32_t epoch() const { return epoch_; }
+    void reset_link() { last_.clear(); }
 
   private:
     struct Snap {

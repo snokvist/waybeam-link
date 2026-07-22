@@ -44,6 +44,35 @@ void check_bytes(const uint8_t* got, const uint8_t* want, size_t n) {
 int main() {
     uint8_t buf[2048];
 
+    // ---- CACHE_ASSIGN (§3.13): fixed 23 B -------------------------------
+    {
+        CacheAssign a;
+        a.prefix = {0x0009, 0x0021, 0xAABBCCDD};
+        a.target_cache = 0x0021;
+        a.target_originator = 0x0012;
+        a.assignment_epoch = 7;
+        a.target_chan = 5805;
+        a.target_bw = 0;
+        a.target_net_id = 3;
+        const uint8_t want[] = {
+            0x57, 0x42, 0x0C,        // magic, version, CACHE_ASSIGN
+            0x00, 0x09,              // owning receiver
+            0x00, 0x21,              // destination cache
+            0xAA, 0xBB, 0xCC, 0xDD,  // receiver session
+            0x00, 0x21,              // target_cache
+            0x00, 0x12,              // target vehicle originator
+            0x00, 0x00, 0x00, 0x07,  // assignment_epoch
+            0x16, 0xAD,              // target channel 5805
+            0x00,                    // target_bw 20 MHz
+            0x03,                    // target net_id
+        };
+        CHECK_EQ_U(sizeof(want), kCacheAssignSize);
+        CHECK_EQ_U(encode_cache_assign(a, buf, sizeof(buf)), sizeof(want));
+        check_bytes(buf, want, sizeof(want));
+        const Decoded d = decode(want, sizeof(want));
+        if (const CacheAssign* v = expect<CacheAssign>(d)) CHECK(*v == a);
+    }
+
     // ---- DATA (§3.2): 26 B header + 4 B payload ---------------------------
     {
         DataHeader h;

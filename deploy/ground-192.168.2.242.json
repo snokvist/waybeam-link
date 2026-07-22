@@ -43,7 +43,15 @@
       "quiet_gap": true,
       "guard_us": 300,
       "return_window_us": 2000
+    },
+    "csa": {
+      "home_chan": 5805,
+      "channel_allowlist": [5745, 5805, 5825]
     }
+  },
+  "scout": {
+    "dwell_ms": 300,
+    "channels": [5745, 5805, 5825]
   },
   "cache": {
     "repair": {
@@ -67,7 +75,8 @@
       "max_cache_attempts": 2,
       "reply_limit": 4,
       "health_floor_permille": 800,
-      "status_timeout_ms": 1500
+      "status_timeout_ms": 1500,
+      "assignment_interval_ms": 500
     }
   },
   "control": {

@@ -226,6 +226,24 @@ int main() {
     CHECK_EQ_U(st[0].oldest_block, 11);
     CHECK_EQ_U(st[0].newest_block, 12);
 
+    // Pass 67 assignment clears the old vehicle window and rejects it after
+    // retargeting; an exact repeated assignment is harmless.
+    store.assign_target(18);
+    CHECK_EQ_U(store.target_originator(), 18);
+    CHECK_EQ_U(store.status().size(), 0);
+    feed(store, make_source(17, 42, 3, 20, 3, 0, 16));
+    CHECK_EQ_U(store.status().size(), 0);
+    feed(store, make_source(18, 50, 3, 20, 3, 0, 16));
+    CHECK_EQ_U(store.status().size(), 1);
+    store.assign_target(18);
+    CHECK_EQ_U(store.status().size(), 1);
+
+    // Restore the original target for the request/retention cases below.
+    store.assign_target(17);
+    feed(store, make_source(17, 42, 3, 11, 3, 0, 16));
+    feed(store, make_source(17, 42, 3, 11, 3, 1, 16));
+    feed(store, make_source(17, 42, 3, 11, 3, 2, 16, true));
+
     // --- answer: subsetting + §13 limits -----------------------------------
     CacheRequestHeader req;
     req.prefix = CommonPrefix{9, 33, 77};

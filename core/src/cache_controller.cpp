@@ -68,6 +68,20 @@ void CacheController::on_status(const CacheStatus& st, uint64_t now_ms) {
     r.last_seen_ms = now_ms;
 }
 
+bool CacheController::has_fresh_target(uint16_t cache_originator,
+                                       uint16_t target_originator,
+                                       uint64_t now_ms) const {
+    const auto it = registry_.find(cache_originator);
+    if (it == registry_.end()) return false;
+    for (const Registry& r : it->second) {
+        if (r.status.target_originator == target_originator &&
+            now_ms - r.last_seen_ms <= cfg_.status_timeout_ms) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool CacheController::eligible(const Registry& r, const StreamKey& target,
                                uint32_t block_id, uint64_t now_ms) const {
     if (now_ms - r.last_seen_ms > cfg_.status_timeout_ms) {
@@ -387,6 +401,13 @@ void CacheController::reset_stats() {
         (void)id;
         b.first_request_us.reset();
     }
+}
+
+void CacheController::reset_link() {
+    registry_.clear();
+    blocks_.clear();
+    outstanding_.clear();
+    stats_.caches_fresh = 0;
 }
 
 }  // namespace wblink
