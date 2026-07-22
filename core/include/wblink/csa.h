@@ -7,8 +7,10 @@
 //  - CsaFollower (craft + spectators): validates campaigns (§11.4 MAC /
 //    anti-replay / allowlist / rate-limit), anchors T_switch on the hardware
 //    TSF of the received copy (§11.2, u32 wrap-safe, host-arrival fallback),
-//    and walks IDLE → ARMED → retune → VERIFY → COMMITTED with the §11.5
-//    auto-revert + home-channel rendezvous.
+//    and walks IDLE → ARMED → retune → VERIFY → COMMITTED. COMMITTED holds
+//    until reboot (§11.5, Pass 59): the only backout is the VERIFY→prev_chan
+//    jump-failed revert; the §11.5a command-source binding releases after
+//    bind_release_ms of issuer silence with no channel change.
 //  - CsaIssuer (ground): N=5 decrementing-dt copies @ 20 ms, MAC'd; commits
 //    its own retune only after the craft's CSA_ARMED flag (§11.6), aborts on
 //    ack timeout, reverts on no craft video after commit.
@@ -36,14 +38,13 @@ struct CsaParams {
     uint32_t verify_timeout_ms = 150;   // §11.5 default; wire t_revert_ms wins
     uint32_t min_interval_ms = 5000;    // §11.4 rate-limit
     uint32_t ack_timeout_ms = 1000;     // §11.6 CSA_ARMED wait
-    uint32_t rendezvous_timeout_ms = 5000;
-    uint16_t home_chan = 0;  // MHz; 0 = no home-channel rendezvous
+    uint32_t bind_release_ms = 90000;   // §11.5a command-source binding release
     std::vector<uint16_t> allowlist;  // MHz; empty = reject all (fail-closed)
 };
 
 // What the caller must do to a radio right now. kNone otherwise.
 struct CsaAction {
-    enum class Kind : uint8_t { kNone, kRetune, kRevert, kHome };
+    enum class Kind : uint8_t { kNone, kRetune, kRevert };
     Kind kind = Kind::kNone;
     uint16_t chan_mhz = 0;
     uint8_t bw = 0;           // §11.1 encoding: 0=20 1=40 2=80
@@ -67,7 +68,10 @@ class CsaFollower {
                 std::optional<uint16_t> latched_issuer);
 
     // Any structurally valid waybeam-link traffic arrived (post-§3.0-filter).
-    void note_valid_rx(uint64_t now_us);
+    // `from_originator` is the sender in the frame's common prefix: traffic
+    // from the bound issuer refreshes the §11.5a binding; any valid traffic
+    // confirms a pending switch (VERIFY → COMMITTED).
+    void note_valid_rx(uint64_t now_us, uint16_t from_originator);
 
     CsaAction tick(uint64_t now_us);
 
@@ -82,9 +86,7 @@ class CsaFollower {
         kIdle,       // no campaign
         kArmed,      // accepted, waiting for T_switch
         kVerify,     // retuned, waiting for valid traffic
-        kCommitted,  // traffic seen on the new channel
-        kReverted,   // verify failed, back on prev_chan, rendezvous running
-        kHome,       // passive listen on home_chan
+        kCommitted,  // traffic seen on the new channel — holds until reboot
     };
 
     CsaParams policy_;
@@ -98,17 +100,23 @@ class CsaFollower {
     CsaPacket campaign_{};
     uint64_t switch_at_us_ = 0;
     uint64_t verify_deadline_us_ = 0;
-    uint64_t rendezvous_deadline_us_ = 0;
     uint64_t freeze_until_us_ = 0;
 
-    // Link-loss rendezvous (§11.5 long path) — armed once traffic is seen.
-    bool have_traffic_ = false;
-    uint64_t last_rx_us_ = 0;
+    // §11.5a binding freshness: last time the bound issuer was heard.
+    uint64_t last_bound_rx_us_ = 0;
 };
 
 class CsaIssuer {
   public:
     explicit CsaIssuer(const CsaParams& policy);
+
+    // §15.5a claim re-key: swap the CSA PSK (a cached announced token per §11.4a,
+    // or the configured secret) between campaigns. Rejected while a campaign is
+    // active so an in-flight campaign keeps a single key across its copies. The
+    // monotonic nonce carries across re-keys, so one long-lived issuer safely
+    // commands different crafts in turn (each craft anti-replays on the issuer's
+    // originator/session, §11.4). Returns false if a campaign is active.
+    bool set_psk(std::vector<uint8_t> psk);
 
     // Begin a campaign. prev_chan/prev_bw = the CURRENT operating channel
     // (the revert target); power_intent = the current §9 profile power level.

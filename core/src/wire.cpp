@@ -232,6 +232,23 @@ Decoded decode_cache_reply(const uint8_t* buf, size_t len) {
     return v;
 }
 
+Decoded decode_announce(const uint8_t* buf, size_t len) {
+    if (len != kAnnounceSize) {  // §3.12: exactly 30 bytes
+        return len < kAnnounceSize ? DecodeError::kTruncated
+                                   : DecodeError::kLengthMismatch;
+    }
+    const uint8_t flags = buf[11];
+    if ((flags & ~announce_flags::kKnownMask) != 0) {
+        return DecodeError::kInvalidField;  // reserved bits must be 0
+    }
+    Announce a;
+    a.prefix = decode_prefix(buf);
+    a.flags = flags;
+    a.claimed_by = be16_read(buf + 12);
+    std::memcpy(a.psk, buf + 14, kAnnouncePskSize);
+    return a;
+}
+
 }  // namespace
 
 Decoded decode(const uint8_t* buf, size_t len) {
@@ -269,6 +286,8 @@ Decoded decode(const uint8_t* buf, size_t len) {
             return decode_cache_request(buf, len);
         case PacketType::kCacheReply:
             return decode_cache_reply(buf, len);
+        case PacketType::kAnnounce:
+            return decode_announce(buf, len);
         default:
             return DecodeError::kUnknownType;
     }
@@ -342,6 +361,17 @@ size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap) {
     }
     encode_prefix(pkt.prefix, PacketType::kHeartbeat, out);
     return kHeartbeatSize;
+}
+
+size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap) {
+    if (out == nullptr || cap < kAnnounceSize) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kAnnounce, out);
+    out[11] = pkt.flags;
+    be16_write(out + 12, pkt.claimed_by);
+    std::memcpy(out + 14, pkt.psk, kAnnouncePskSize);
+    return kAnnounceSize;
 }
 
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap) {

@@ -293,6 +293,13 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
                          h_.discovery_json ? h_.discovery_json()
                                            : "{\"nodes\":[],\"streams\":[]}");
         }
+        if (path == "/api/v1/scout/results") {
+            if (!h_.scout_results) {
+                return reply(409, "Conflict",
+                             json_err("scout not available in this mode"));
+            }
+            return reply(200, "OK", h_.scout_results());
+        }
         if (path == "/api/v1/stats/stream") {
             const std::string hdr =
                 "HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -343,6 +350,37 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             return reply(400, "Bad Request", json_err("mhz required"));
         }
         return done(h_.csa(mhz, klass));
+    }
+    if (path == "/api/v1/scout/start") {
+        if (!h_.scout_start) return na();
+        std::vector<uint16_t> channels;
+        if (j.contains("channels") && j["channels"].is_array()) {
+            for (const auto& e : j["channels"]) {
+                if (e.is_number_unsigned()) {
+                    channels.push_back(static_cast<uint16_t>(
+                        e.get<unsigned>()));
+                }
+            }
+        }
+        const uint32_t dwell = j.value("dwell_ms", 0u);
+        const std::string mode = j.value("mode", std::string("list"));
+        int target = -1;
+        if (j.contains("target") && j["target"].is_object()) {
+            target = j["target"].value("originator", -1);
+        }
+        return done(h_.scout_start(channels, dwell, mode, target));
+    }
+    if (path == "/api/v1/scout/stop") {
+        if (!h_.scout_stop) return na();
+        return done(h_.scout_stop());
+    }
+    if (path == "/api/v1/scout/quickconnect") {
+        if (!h_.scout_quickconnect) return na();
+        if (!j.contains("originator")) {
+            return reply(400, "Bad Request", json_err("originator required"));
+        }
+        return done(h_.scout_quickconnect(j.value("originator", -1),
+                                          j.value("target_chan", 0)));
     }
     if (path == "/api/v1/link/profile") {
         if (!h_.profile) return na();

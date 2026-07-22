@@ -1443,6 +1443,163 @@ ladder on kernel-monitor radio. The next visual/RF work should use clean N=2
 and residual natural loss; the 200-permille N=1 phase was deliberately a
 controller-input calibration, not a quality target.
 
+## Pass 58 — Session pairing token + ANNOUNCE packet (2026-07-20)
+
+Multi-vehicle channel-sharing and a ground "scout" want zero-config rendezvous:
+a ground should find a parked craft and CSA-claim it without pre-shared keys,
+while co-located craft stay separable. Two identity axes already exist —
+`originator` (§2) and the L2 `net_id` (§3.0); this pass adds the pairing
+credential and the beacon that carries it. (See `docs/scout-design.md` for the
+full flow; operator-ruled 2026-07-20.)
+
+New packet type `0xB` **ANNOUNCE** (§3.12), fixed 30 bytes: common prefix +
+`flags` (`claimed`, `psk_present`) + advisory `claimed_by` + a 16-byte session
+pairing token. It is emitted at 1–2 Hz whether claimed or not (so a rebooted
+ground can re-learn the token and re-claim in place, §11.5a/Pass 59) and is
+**unauthenticated** — an advertisement, not a control action. A forged ANNOUNCE
+only wastes one claim attempt because the elicited CSA still fails the §11.4 MAC.
+
+CSA key provenance is split (§11.4a) with **HMAC always applied** — the earlier
+"psk=none / skip-HMAC" idea is withdrawn. Default `psk_announce=true`: absent
+`csa.psk` ⇒ the craft auto-generates a 16-byte token at boot (io/app entropy;
+`core` stays RNG/clock-free and only verifies) and announces it. The announced
+token is a **rendezvous credential, not a secret** — deliberate takeover is
+bounded by the §11.5a binding, not token confidentiality. `psk_announce=false`
+keeps an operator secret off the air (`psk_present=0`) and restores genuine
+authentication. Nonce/allowlist/rate-limit guards are unchanged in both modes,
+so an accepted CSA can never leave the craft's allowlist. The token inherits the
+`csa.psk` redaction invariant (§3.12, §15.2).
+
+**Amended:** §3.1 (type registry, 11/16), §3.12 (new), §11.4a (new), §13
+(forged-ANNOUNCE row), §15.2 (`node.net_id` auto, `node.psk_announce`, optional
+`csa.psk`).
+
+## Pass 59 — CSA follower holds until reboot; command-source binding lifecycle (2026-07-20)
+
+Field asymmetry drove this: a ground commonly runs a weaker TX than the craft,
+so the craft can lose accepted ground telemetry for long stretches (>60 s). The
+prior §11.5 `rendezvous_timeout` (5 s) would revert a healthy, committed link to
+`home_chan` mid-flight — exactly the spurious channel-hop we must not do.
+(Operator-ruled 2026-07-20; see `docs/scout-design.md`.)
+
+COMMITTED is now **terminal until reboot**: the mid-flight `rendezvous_timeout →
+home` revert is removed. The `verify_timeout_ms` (150 ms) revert is **kept** but
+scoped to its real job — a *jump that landed on a dead channel* backs out to
+`prev_chan`; it is not a mid-flight watchdog. `home_chan` is demoted to a
+power-on default (the §15.5 scout sweeps all channels, so a craft holding any
+channel stays findable), with an optional `persist_channel` to boot onto the
+last-committed channel instead.
+
+New §11.5a **command-source binding lifecycle**: an accepted CSA binds its issuer
+as the craft's command source (this *is* the claim). The binding is sticky
+through link loss and resists other issuers regardless of key knowledge — this,
+not token confidentiality (§11.4a), is the takeover defence. It releases only
+after `bind_release_s` (**90 s**) of command-source silence, and **release changes
+no channel** — the craft stays put and merely re-opens for claim (continues
+ANNOUNCE), so a rebooted/returned ground re-claims in place (the orphan case).
+Reboot always resets claim/bind state.
+
+**Amended:** §11.5 (state machine, hold-until-reboot), §11.5a (new), §15.2
+(`csa.bind_release_s`, `csa.persist_channel`; `rendezvous_timeout_s` removed;
+example `home_chan` 5805).
+
+## Pass 60 — Ground scout, channel occupancy, and channel persistence (2026-07-20)
+
+The claim/hold model (Passes 58–59) needs a finder on the other end: a ground
+that sweeps channels, lists discovered craft with per-channel occupancy, and can
+CSA-claim one — the inverse of the §11.5 follower. This is an io/app feature over
+the existing §15.5 passive discovery and §11 CSA primitives; **no additional wire
+change**. (Operator-ruled 2026-07-20; see `docs/scout-design.md`.)
+
+New §15.5a defines one sweep engine with two entry points (list / quickconnect),
+control-plane endpoints `scout/{start,stop,results,quickconnect}` (ground/rx
+only, 409 elsewhere), and the §15.2 `scout` config (`dwell_ms` 300, `channels`
+null = allowlist). A claim needs only the first heard candidate — the §2
+admission count is anti-flood for the latch picker, not a barrier to a deliberate
+operator claim. During a sweep the scout adapter ignores its `net_id` filter; a
+single-adapter ground drops any active link while scouting.
+
+Ownership is **proven by connecting**, not read from the beacon: `psk_known` is a
+bool and the ANNOUNCE token is never echoed (§15 redaction). Per-channel
+occupancy is reported as a superset **aligned with the Realtek "Advanced Channel
+Scanning" survey** (`libc0607/rtl88x2eu-20230815`: quality/availability/
+utilization/Wi-Fi-util/interference-util/noise dBm/BSS count); v1 fills only the
+packet-derivable fields (Wi-Fi utilization, RSSI-floor noise proxy, transmitter
+count) so a later hardware-ACS backend is a field-fill, not a reshape. Persistence
+(`csa.persist_channel`, Pass 59) is surfaced here as the boot-channel choice.
+
+**Amended:** §15.2 (`scout` block), §15.5 (Read/Write endpoint rows), §15.5a
+(new).
+
+## Pass 61 — Key-provenance mode is a pure function of `csa.psk` presence (2026-07-20)
+
+Implementing the Pass 58 ANNOUNCE emit forced the four `psk_announce` × `csa.psk`
+combinations to resolve. Two operator rulings (2026-07-20): a configured `csa.psk`
+**always wins → secret mode** (even under the `psk_announce=true` default); and
+`psk_announce=false` with **no** `csa.psk` **falls back to the announced token**
+(never fails to boot). Together these make the mode a pure function of `csa.psk`
+presence — `psk_announce` no longer gates anything in any combination. Rather than
+ship an inert config knob (operator-ruled), **`psk_announce` is removed**:
+
+- **Selector:** `csa.psk` configured ⇒ secret (`psk_present=0`, key = `csa.psk`);
+  absent ⇒ announced (`psk_present=1`, key = the auto-generated 16-byte `P`).
+  There is no separate toggle.
+- The `node.psk_announce` field (added in the Pass 60 config plumbing) is deleted
+  from `NodeCfg`, the parser, and `config_test`; `docs/scout-design.md` follows.
+
+**Amended:** §3.12 (`psk` note), §11.4a (mode selection reworded, selector
+sentence added), §15.2 (config example + `csa.psk` note; `node.psk_announce`
+removed). No wire change — ANNOUNCE bytes and `flags` semantics are unchanged.
+
+## Pass 62 — ANNOUNCE subsumes HEARTBEAT; discovery is an ANNOUNCE presence source (2026-07-20)
+
+On-device bring-up of the Pass 58 emit (craft on ch161, ground monitor capture)
+showed the always-on ANNOUNCE fully suppresses the craft's HEARTBEAT: ANNOUNCE's
+inject resets the same §3.8 one-second quiet interval, so an idle announcing craft
+emits **only** ANNOUNCE (0 HEARTBEAT observed at 2 Hz). Since ANNOUNCE carries the
+same `(originator, session_id)` presence as HEARTBEAT — and more (claim state,
+token) — this is correct behaviour, not a regression (operator-ruled 2026-07-20:
+**ANNOUNCE supersedes HEARTBEAT**). Two reconciliations:
+
+- **§3.8 quiet-interval reset list** now includes ANNOUNCE, so a craft announcing
+  at ≥1 Hz never separately emits HEARTBEAT. HEARTBEAT's wire format and its role
+  for non-announcing nodes (grounds, quiet rx) are unchanged.
+- **§15.5 passive discovery** accepts ANNOUNCE as a node-presence source alongside
+  HEARTBEAT/DATA (otherwise an idle craft would vanish from `/discovery`). ANNOUNCE
+  senders additionally contribute advisory `claimed`/`claimed_by` to their node
+  record; the token is never surfaced (§15 redaction).
+
+**Amended:** §3.8 (reset list), §3.12 (HEARTBEAT-unchanged bullet reworded), §15.5
+(`/discovery` `nodes[]` source + claim fields). No wire change.
+
+## Pass 63 — The announced token is public: cache/log/surface, don't redact (2026-07-20)
+
+Building the ground claim path (§15.5a) raised how the ground obtains the CSA key
+in announced mode. Operator ruling (2026-07-20): **the ground caches the token
+from every received ANNOUNCE and applies the matching one at link time**, and the
+token is **no longer redacted** — it is on the air by construction and per-boot
+rotated on the craft, so logging/surfacing it leaks nothing an RF-adjacent
+listener doesn't already have. Redaction now scopes to the *operator secret* only:
+
+- The ANNOUNCE `psk` with `psk_present=1` is the announced session token — public;
+  it MAY be surfaced, logged, and cached (the ground does exactly this to key its
+  §11 CSA). The prior "never echoed / MUST NOT print" language is withdrawn for it.
+- The operator-provisioned `csa.psk` (secret mode) stays redacted (the §15
+  config-dump `"(set, redacted)"` invariant is unchanged). It is never carried in
+  ANNOUNCE (secret mode sends 16 zero bytes), so the ANNOUNCE `psk` field is never
+  sensitive in either mode.
+- The ground keys its `CsaIssuer` from the cached token (announced) or the
+  configured `csa.psk` (secret); `psk_known` reports whether a usable key exists.
+
+Also settled for the same feature (code-only, no wire/spec change): scout
+candidates carry `net_id` (already parsed in `Dot11Rx`, surfaced via `AirRxMeta`);
+monitor channel retune is implemented via `iw`/nl80211 (the ssc338q SDK lacks
+libnl-3, so `iw dev … set freq` is the portable path), lifting the code-comment
+"CSA/scout over monitor deferred" — §11.5/§15.5a already assume retune works.
+
+**Amended:** §3.12 (redaction bullet), §15.5 (`/discovery` token note), §15.5a
+(candidate `psk_known`/token-cache wording). No wire change.
+
 ## Open questions for the next pass
 
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves

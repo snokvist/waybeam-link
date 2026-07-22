@@ -204,8 +204,9 @@ struct CsaPolicy {
     uint32_t verify_timeout_ms = 150;
     uint32_t min_interval_s = 5;
     uint32_t ack_timeout_ms = 1000;
-    uint32_t rendezvous_timeout_s = 5;
-    uint16_t home_chan = 0;  // config-pinned rendezvous (§11.1)
+    uint32_t bind_release_s = 90;    // §11.5a command-source binding release
+    bool persist_channel = false;    // §11.5 boot onto last-committed channel
+    uint16_t home_chan = 0;  // config-pinned power-on default (§11.1, §11.5)
     std::vector<uint16_t> channel_allowlist;
 };
 
@@ -287,6 +288,13 @@ struct ControlCfg {
     std::string bind;  // "" = disabled
 };
 
+// §15.5a ground scout (channel searcher). channels empty ⇒ sweep the
+// csa.channel_allowlist. All values §17-overridable seeds.
+struct ScoutCfg {
+    uint32_t dwell_ms = 300;
+    std::vector<uint16_t> channels;
+};
+
 // §14.3 Cache Controller (both roles default off; all values §17 seeds).
 struct CacheEndpointCfg {
     uint16_t originator = 0;
@@ -333,6 +341,7 @@ struct Config {
     Policy policy;
     StatsCfg stats;
     ControlCfg control;    // §15.5 REST control plane (off unless bind set)
+    ScoutCfg scout;        // §15.5a ground scout (channel searcher)
     CacheCfg cache;        // §14.3 cache repair/store (off by default)
     VencCfg venc;          // §9.6 encoder actuation
     AirCfg air;            // dev backend; empty until devourer lands

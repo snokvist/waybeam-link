@@ -231,10 +231,10 @@ wire packet inside it.
 
 **Packet types** (low nibble): `0x1 DATA · 0x2 NACK · 0x3 LINK_REPORT ·
 0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK ·
-0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY`. 10 of 16 used; the
-version nibble will not ship 16 wire-incompatible revisions, so there is no
-type-budget scarcity. Future types (e.g. a dedicated FEC-repair type, §14)
-take free slots.
+0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY · 0xB ANNOUNCE`. 11 of
+16 used; the version nibble will not ship 16 wire-incompatible revisions, so
+there is no type-budget scarcity. Future types (e.g. a dedicated FEC-repair
+type, §14) take free slots.
 
 **Common prefix describes the SENDER.** Control packets (NACK, LINK_REPORT) name
 the stream they concern via a **target descriptor** in their body (§3.3, §3.5) —
@@ -426,9 +426,12 @@ discovered by. It carries no stream fields — HEARTBEAT never creates or refres
 
 **Emission cadence (operator-ruled 2026-07-12):** every node emits HEARTBEAT at
 **1 Hz while otherwise quiet**. Any successfully submitted DATA, NACK,
-LINK_REPORT, CSA, or HEARTBEAT resets the one-second quiet interval, so active
-traffic suppresses redundant keepalives. HEARTBEAT uses the node's current
-`originator` and per-boot `session_id`, with broadcast destination `0`.
+LINK_REPORT, CSA, ANNOUNCE, or HEARTBEAT resets the one-second quiet interval, so
+active traffic suppresses redundant keepalives. HEARTBEAT uses the node's current
+`originator` and per-boot `session_id`, with broadcast destination `0`. A craft
+that continuously emits ANNOUNCE (§3.12) at ≥1 Hz therefore **never separately
+emits HEARTBEAT** — ANNOUNCE subsumes it as the presence beacon (Pass 62); the
+HEARTBEAT path still serves non-announcing nodes (grounds, quiet rx).
 
 ### 3.9 RECOVERY_REQUEST packet (type `0x6`) — 18 bytes
 
@@ -578,6 +581,42 @@ radio could not have. Reply selection at the cache: requested missing sources
 first (ascending index), then held repair symbols whose `repair_idx` bit is
 clear in `repair_have` (ascending), stopping at `max_symbols`. A cache holding
 none of the useful symbols stays silent.
+
+### 3.12 ANNOUNCE packet (type `0xB`) — 30 bytes
+
+A craft's **pairing beacon**: it advertises presence, claim state, and the
+session **pairing token** so a ground can rendezvous and CSA-claim it with no
+pre-shared config (§11.4a). Emitted at **1–2 Hz in both claimed and unclaimed
+states** (unlike HEARTBEAT it is *not* suppressed by active DATA) — continued
+emission while claimed is what lets a rebooted ground re-learn the token and
+re-claim in place after the binding releases (§11.5a).
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | §3.1 — sender = the craft; `destination` = `0` |
+| 11 | 1 | `flags` | bit0 `claimed`; bit1 `psk_present`; bits 2–7 reserved (0) |
+| 12 | 2 | `claimed_by` | `originator` of the binding ground, else `0` (advisory: UI/courtesy, not enforced) |
+| 14 | 16 | `psk` | the session pairing token when `psk_present=1`; **all-zero** when `psk_present=0` (secret mode, `csa.psk` configured, §11.4a) |
+
+- **Unauthenticated by design.** ANNOUNCE is an advertisement, not a control
+  action: it carries no MAC. A forged ANNOUNCE with a bogus `psk` only wastes one
+  claim attempt — the resulting CSA fails the craft's §11.4 MAC check and no
+  claim occurs. This matches the §13 posture (see the added row).
+- **`psk` is a token, not a secret.** In the default announced mode any RF-adjacent
+  receiver can read it; takeover resistance comes from the §11.4a command-source
+  **binding**, not from the token's confidentiality. A configured `csa.psk`
+  selects secret mode: `psk_present=0` (16 zero bytes), a genuine secret (§11.4a).
+- HEARTBEAT (§3.8) wire format is unchanged (exactly 11 bytes); ANNOUNCE never
+  creates or refreshes per-stream RX state (like HEARTBEAT, it is node-scoped).
+  Because ANNOUNCE resets the §3.8 quiet interval, a continuously-announcing craft
+  **subsumes** its own HEARTBEAT — it emits ANNOUNCE only, not both (Pass 62).
+- **Redaction (relaxed, Pass 63):** the ANNOUNCE `psk` with `psk_present=1` is the
+  *announced session token* — public by construction (on the air, per-boot rotated
+  on the craft), so it MAY be surfaced, logged, and cached; the ground caches it to
+  key its §11 CSA (§15.5a). Only the operator-provisioned `csa.psk` secret stays
+  redacted (the §15 config-dump `"(set, redacted)"` invariant). Secret mode never
+  carries the secret in ANNOUNCE (16 zero bytes), so the ANNOUNCE `psk` field is
+  never sensitive in either mode.
 
 ---
 
@@ -1380,26 +1419,80 @@ the data path — it is authenticated:
   binding for the issuer (bootstrap before the craft has cached the ground
   session).
 
+### 11.4a Key provenance — announced session token vs. operator secret
+The `csa_psk` HMAC key (§11.4) comes from one of two sources; **HMAC is always
+applied** — there is no unauthenticated-CSA mode for craft/ground. **The source
+is selected solely by whether `csa.psk` is configured** — present ⇒ secret,
+absent ⇒ announced token (Pass 61). There is no separate mode toggle.
+- **Announced session token (default — no `csa.psk` configured).** The craft
+  **auto-generates a 16-byte token `P` at boot** (io/app entropy, alongside
+  `session_id`; the pure `core` layer stays RNG/clock-free and merely *verifies*
+  against a supplied key) and advertises it in ANNOUNCE (§3.12, `psk_present=1`).
+  A ground learns `P` off the air and keys its CSA HMAC with it. This is
+  **zero-config pairing**: the token is a rendezvous credential, readable by
+  anyone RF-adjacent, **not a secret**. It raises the bar only against accidental
+  cross-talk and a ground that never heard the beacon; deliberate takeover is
+  bounded instead by the §11.5a binding.
+- **Operator secret (`csa.psk` configured).** A provisioned `csa.psk` (on craft +
+  ground, the classic §11.4 posture) selects secret mode and is **never
+  announced** (ANNOUNCE carries `psk_present=0`, 16 zero bytes). This restores
+  genuine cryptographic authentication of the switch. The binding rules (§11.5a)
+  are identical in both modes.
+- **All other §11.4 acceptance guards are unchanged in both modes** — nonce
+  monotonicity per `(originator, session)`, `target_chan ∈ channel_allowlist`,
+  and the `csa_min_interval_s` rate-limit still hold. An accepted CSA can never
+  send a craft off its configured allowlist, whatever the key source.
+
 ### 11.5 State machine (follower)
 ```
-IDLE ──valid+MAC'd CSA──▶ ARMED ──T_switch──▶ retune + ReApplyTxPower ──▶ VERIFY
-        (adaptive freeze on,                                               │
-         watchdog paused)                          valid traffic ≤150 ms──┤
-        │                                                                 ▼
-        │  stale / bad-MAC / replay → drop, stay IDLE            COMMITTED (freeze
-        │                                                        lifts after csa_settle_s)
-        ▼                                                                 │ no valid
-  (never saw CSA)                                                         ▼ traffic
-        └────────────────── link lost > rendezvous_timeout ──▶ REVERT → prev_chan
-                            (5 s)                              (ReApplyTxPower)
-                                    │                                     │
-                                    ▼ prev_chan also dead                 │
-                            retune HOME_CHAN (config), passive listen ◀───┘
+IDLE ─valid+MAC'd CSA─▶ ARMED ─T_switch─▶ retune+ReApplyTxPower ─▶ VERIFY
+ (home_chan or         (adaptive freeze on,                          │
+  persisted chan,       watchdog paused)                             ├─ valid traffic
+  power-on default)                                                  │  ≤verify_timeout_ms ─▶ COMMITTED
+   ▲ stale/bad-MAC/replay → drop, stay IDLE                          │                        (bound §11.5a;
+   └─ REVERT → prev_chan ◀─ no valid traffic (JUMP-FAILED backout) ◀─┘                         HOLD until reboot;
+      then back to IDLE                                                                         freeze lifts after
+                                                                                                csa_settle_s)
 ```
-- **Short auto-revert:** switched but no valid traffic within `verify_timeout_ms`
-  (**150 ms**, bench median 85 ms + margin) → revert to `prev_chan`.
-- **Long rendezvous:** never saw the CSA, or lost link `rendezvous_timeout` (5 s)
-  after revert → retune to config `home_chan` and listen.
+COMMITTED is terminal until reboot — it has no automatic outgoing edge (no
+mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
+- **Jump-failed backout (kept):** in VERIFY, no valid traffic within
+  `verify_timeout_ms` (**150 ms**, bench median 85 ms + margin) → revert to
+  `prev_chan` and return to IDLE. This is the **only** automatic revert; it
+  protects a switch that landed on a dead channel.
+- **COMMITTED holds until reboot (Pass 59).** Once committed the craft keeps the
+  channel through arbitrarily long command-source outages — a ground commonly
+  runs a weaker TX than the craft and may be unheard for >60 s. The former
+  mid-flight `rendezvous_timeout → home` revert is **removed**. The §9.8 adaptive
+  fail-safe still applies but changes only bitrate, never channel.
+- **`home_chan` is a power-on default only**, no longer a mid-flight rendezvous:
+  a craft holding any channel stays findable via the §15.5 scout sweep. With
+  `persist_channel` (§15.2) the craft instead boots onto its last-committed
+  channel; claim/bind state (§11.5a) always resets on boot regardless.
+
+### 11.5a Command-source binding lifecycle (claim / hold / release)
+An accepted CSA (§11.4) both switches the channel and **binds** its issuer as the
+craft's command source — the §11.4 "currently-latched command source." This
+binding *is* the claim, and it governs who may switch the craft next:
+- **Bootstrap (first claim).** When the craft is unclaimed there is no bound
+  source yet; the first MAC-valid CSA is accepted and binds its issuer (§11.4
+  bootstrap note). Thereafter the binding is required.
+- **Sticky through link loss.** While bound, a CSA from any *other* issuer is
+  rejected regardless of key knowledge (this, not token confidentiality, is what
+  resists casual mid-flight takeover, §11.4a). The binding is NOT dropped on
+  telemetry loss.
+- **Release after `bind_release_s` (90 s) of command-source silence.** The
+  binding stays fresh while the craft accepts **any** packet from the bound
+  issuer — CSA, NACK, LINK_REPORT, or its 1 Hz HEARTBEAT (§3.8); the ground's
+  keepalive alone holds it. Only after `bind_release_s` with nothing heard from
+  that issuer does the binding release: the craft flips its ANNOUNCE back to
+  unclaimed and re-opens for claim. **Release changes no channel** — the craft
+  stays put; only claim eligibility re-opens. This lets a rebooted or returned
+  ground re-claim the craft *in place* (the orphan case: ground reboots while the
+  craft holds its channel).
+- **Reboot resets claim/bind state**; the craft returns to `home_chan` (or the
+  persisted channel) and announces unclaimed.
+- ANNOUNCE `claimed`/`claimed_by` (§3.12) reflect this state (advisory only).
 
 ### 11.6 Ground-commits-after-craft-ACK (strand-proof, exploits ground-leads)
 Ground leading + the craft→ground downlink being the **strong, diversity-received
@@ -1469,6 +1562,7 @@ data-path crypto, or heavy state. Threats and mitigations:
 | **Forged optimistic LINK_REPORT** (defeats "never fail optimistic") | accept only from latched/preferred `(originator,session)`; plausibility cross-check; conflicting reports ⇒ fail toward degradation | 3.5, 9.8 |
 | Replayed control frames (NACK/report) | monotonic wrap-aware discipline on `seq`, `report_epoch` (u32), `csa_nonce` | 3.5, 11.4 |
 | **Forged CSA → fleet blackout** (CRITICAL) | **4-byte HMAC on CSA only** + nonce anti-replay + channel allowlist + rate-limit + config-pinned home-channel | 11.4 |
+| Forged ANNOUNCE → bogus pairing token / false claim state | ANNOUNCE is unauthenticated advertisement; a wrong `psk` only wastes one claim attempt (the elicited CSA fails the craft's §11.4 MAC); `claimed_by` is advisory-only; takeover still bounded by the §11.5a binding | 3.12, 11.4a |
 | Forged CACHE_REQUEST → cache amplification (≤48 B request elicits up to `reply_limit` full symbols) | exact-`target_cache` match + per-requester rate cap + `request_id` dedup window + per-request symbol clamp; v1 IP-only keeps it off the air entirely | 3.11, 14.3 |
 | Forged CACHE_REPLY → junk symbol injection | accepted only for an outstanding `request_id`, from the addressed cache, for requested symbols, within allowance; wrapped packet revalidated via full §3.1/§3.2 decode + latched stream key (no worse than direct DATA injection, which is the accepted §13 posture) | 3.11, 14.3 |
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
@@ -1861,7 +1955,8 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 ### 15.2 Config (JSON)
 ```json
 {
-  "node":  { "originator": 17, "role": "tx", "preferred_originator": 9 },
+  "node":  { "originator": 17, "role": "tx", "preferred_originator": 9,
+             "net_id": null },
   "profile_table": "/etc/waybeam-link/profiles.json",
   "adapters": [
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
@@ -1888,16 +1983,17 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     "fec":    { "scheme": "none", "overhead_frac": 0.0 },
     "return": { "guard_us": 300, "return_window_us": 2000,
                 "unicast": false },
-    "csa":    { "psk": "<operator-provisioned; craft+ground only>",
+    "csa":    { "psk": "<optional; auto-generated + announced when absent, §11.4a>",
                 "settle_s": 3.0, "verify_timeout_ms": 150,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
-                "rendezvous_timeout_s": 5, "home_chan": 5745,
-                "channel_allowlist": [5745, 5805, 5825] }
+                "bind_release_s": 90, "persist_channel": false,
+                "home_chan": 5805, "channel_allowlist": [5745, 5805, 5825] }
   },
   "air":   { "kind": "radio", "ack_responder": false,
              "wedge_window_ms": 1000, "wedge_min_submits": 8 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
   "control": { "bind": "0.0.0.0:8091" },
+  "scout": { "dwell_ms": 300, "channels": null },
   "venc": { "host": "127.0.0.1:80", "enabled": false,
             "recovery_enabled": true,
             "frame_caps": true, "fps_hint": 100,
@@ -1911,7 +2007,25 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 - Every policy constant is overridable → bench re-derivation (§9, §17) is config,
   not recompile.
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
-  stats and logs.
+  stats and logs. It is **optional** and is the **sole** key-provenance selector
+  (§11.4a, Pass 61): absent selects the auto-generated announced session token
+  (`psk_present=1`); present is the operator secret (`psk_present=0`, kept off the
+  air). Redaction covers the ANNOUNCE `psk` field too.
+- `node.net_id` (§3.0) is `0..255`, or `null`/absent to **auto-assign** (low byte
+  of `originator`, or a random `1..255`); `0` is the unassigned default. It is an
+  L2 RX partition (co-located systems / channel sharing), **not** access control
+  (§13). `stamp` and `filter` net_id may diverge at runtime — a ground filters
+  wide while scouting and narrows to a claimed craft's `net_id`, stamping that
+  same value on its uplink so a strictly-filtering craft hears it (§15.5 scout).
+- `csa.bind_release_s` (**90 s**) is the command-source binding release timeout
+  (§11.5a); `csa.persist_channel` (default `false`) boots the craft onto its
+  last-committed channel instead of `home_chan`. The former `rendezvous_timeout_s`
+  is **removed** — COMMITTED now holds until reboot (§11.5, Pass 59).
+- `scout` (ground/rx node, §15.5) configures the channel searcher: `dwell_ms`
+  (per-channel listen, **300 ms** — a video-active craft is seen off DATA within
+  a few hundred ms) and `channels` (`null` = sweep `csa.channel_allowlist`). A
+  single-adapter ground scouts by retuning its one tx adapter (mode-exclusive
+  with an active link); a two-adapter ground dedicates a scout adapter.
 - A **`frame-shm` stream** carries its own per-stream `fec` block (§14.1):
   ```json
   { "stream_id": 0, "stream_type": "RTP", "dir": "in",
@@ -2258,10 +2372,14 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/stats/stream` | `text/event-stream`; one §15.3 object per `stats.hz` tick |
 | `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]`, `build` |
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
-| `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/DATA observations |
+| `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |
+| `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[]}` (§15.5a; ground/rx node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
-`{originator,session,last_seen_ms}` for HEARTBEAT or DATA senders. `streams[]`
+`{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
+ANNOUNCE (§3.12) senders additionally carry advisory `claimed`/`claimed_by` and a
+`psk_present` bool (the announced token is public and may also be surfaced, Pass 63;
+`/discovery` reports the bool, the claim path uses the cached token). `streams[]`
 contains DATA-derived candidates and active latches as
 `{originator,session,stream_id,stream_type,packet_count,first_seen_ms,last_seen_ms,latched}`.
 Times are monotonic node-local millisecond stamps and are comparable only within
@@ -2281,13 +2399,63 @@ otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
 | `POST /api/v1/bench/rx-drop` | `{ "permille": 0 }` | UDP-air bench RX only: retune independent synthetic loss per listener (0–1000); 409 on RF backends |
+| `POST /api/v1/scout/start` | `{ "channels":[…]?, "dwell_ms":??, "mode":"list"\|"quickconnect", "target":{"originator":N}? }` | begin a channel sweep (§15.5a; ground/rx node) |
+| `POST /api/v1/scout/stop` | `{}` | end the sweep and hold the current channel |
+| `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto `target_chan` (or the emptiest allowlisted channel) |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and
 `fec` on the TX, and `bench/rx-drop` only on UDP-air RX. An endpoint invoked in a mode where it does not apply returns
 **409**; an unknown path **404**; a malformed or oversize body **400**. The
 write knobs are exactly the §9/§11/§14 levers that were previously boot-time
 JSON only; the profile pin is the operating-point (MCS + bitrate) lever, since
-a profile bundles rate/power/MTU per §9.3.
+a profile bundles rate/power/MTU per §9.3. The `scout/*` endpoints (§15.5a) act
+only on a ground/rx node and **409** elsewhere.
+
+### 15.5a Ground scout (channel searcher)
+A ground-side finder that sweeps channels to discover parked/flying craft and,
+optionally, CSA-claim one (§11) — the inverse of the §11.5 follower. One sweep
+engine backs two entry points; single- and dual-adapter grounds are both
+supported (§15.2 `scout`).
+
+- **Sweep + discovery.** `scout/start` retunes the scout adapter across
+  `channels` (or `csa.channel_allowlist`), dwelling `dwell_ms` per channel and
+  aggregating the §15.5 passive-discovery view. For claim, the first heard
+  candidate suffices — the §2 admission count (`N_admit`/`T_admit`) is the
+  anti-flood gate for the *latch picker*, not a barrier to a deliberate operator
+  claim. During a sweep the scout adapter ignores its `net_id` filter (hears all
+  net_ids); a single-adapter ground therefore drops any active link while
+  scouting.
+- **Candidate** = `{originator, net_id, session, claimed, claimed_by, chan,
+  psk_known}`. `psk_known` is a bool reporting whether the ground holds a usable
+  CSA key for the craft: the **cached announced token** (the ground caches the
+  ANNOUNCE `psk` from every beacon, Pass 63) or a configured `csa.psk` secret. The
+  token is public and may be surfaced, but ownership is still *proven by
+  connecting*, not read from the beacon: a MAC-valid CSA the craft follows is the
+  proof.
+- **Per-channel occupancy** is reported as a record whose field set is a superset
+  aligned with the Realtek "Advanced Channel Scanning" survey so a future
+  hardware backend is a field-fill, not a reshape. v1 fills only the
+  packet-derivable fields from monitor RX over the dwell; units are **per-mille**
+  and **dBm**:
+
+  | field | v1 source | later (hardware ACS) |
+  |---|---|---|
+  | `wifi_util_permille` | decodable-frame airtime estimate | CLM Wi-Fi portion |
+  | `util_permille` | = `wifi_util` (Wi-Fi only in v1) | total incl. non-Wi-Fi |
+  | `interference_util_permille` | `null` (unmeasurable from packets) | CLM−Wi-Fi |
+  | `noise_dbm` | RSSI-floor proxy (idle/min `DBM_ANTSIGNAL`) | NHM true noise floor |
+  | `bss_count` | distinct BSSID/SA transmitters heard | ACS BSS count |
+  | `quality_permille` / `availability_permille` | derived from the above | ACS direct |
+
+  The candidate craft's own traffic is excluded from its channel's counts.
+- **Quick-connect / claim.** `scout/quickconnect` (or `mode:"quickconnect"` with a
+  `target`) claims a craft: set `stamp`+`filter` net_id to the craft's, ensure the
+  tx adapter is on the craft's current channel, `POST`-equivalent a §11 CSA to the
+  chosen `target_chan` (or the emptiest allowlisted channel) keyed with the
+  craft's `psk` (announced §11.4a, or configured secret), and confirm the §11.6
+  `CSA_ARMED` ACK. Post-claim the ground holds the channel and does **not**
+  auto-rescout on link loss (matching §11.5 hold-until-reboot); re-scout is an
+  explicit action.
 
 ---
 

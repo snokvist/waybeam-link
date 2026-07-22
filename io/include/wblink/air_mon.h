@@ -82,6 +82,13 @@ class MonAir {
     // --- control plane (main thread only) --------------------------------
     // Committed operating point → stamped into each frame's radiotap MCS.
     void set_tx_mode(uint8_t mcs, bool sgi);
+    // §15.5a scout: decouple the two net_id roles at runtime. The scout widens
+    // the RX filter to hear all net_ids during a sweep, then narrows it to the
+    // claimed craft's net_id post-lock; the stamp follows so return traffic
+    // (NACK/CSA) lands inside the craft's filter. set_filter_net_id re-attaches
+    // the §3.0 BPF pre-filter (nullopt = waybeam-shape only, any net_id).
+    void set_stamp_net_id(uint8_t net_id);
+    void set_filter_net_id(std::optional<uint8_t> net_id);
     // §10.4 power: the 8812eu per-rate TXAGC curve owns power (rtw_tx_pwr_by_rate
     // =1; nl80211 txpower is set once at monitor bring-up). Logged intent here;
     // returns the requested qdb.
@@ -89,8 +96,10 @@ class MonAir {
     // Monitor netdevs expose no per-adapter TSF read → always nullopt (caller
     // falls back to host time, §7.2).
     std::optional<uint64_t> read_tsf(size_t adapter);
-    // §11 CSA over monitor is deferred — logged intent, channel is fixed at
-    // bring-up. Returns true so retune_all doesn't spam.
+    // §11.5/§15.5a channel retune: drives `iw dev <if> set freq` (the ssc338q
+    // SDK lacks libnl-3). Changes the wiphy channel without a down/up, so RX
+    // sockets survive. Returns false if the iw call fails. Serves both the CSA
+    // follower switch and the scout sweep.
     bool retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast);
     bool reapply_tx_power(size_t adapter);
 

@@ -10,7 +10,8 @@
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>  // struct timeval (SO_RCVTIMEO)
-#include <unistd.h>    // close
+#include <sys/wait.h>  // waitpid (retune via iw)
+#include <unistd.h>    // close, fork, execvp, _exit
 
 #include <linux/sockios.h>
 
@@ -197,6 +198,29 @@ void attach_bpf_filter(int fd, std::optional<uint8_t> net_id,
     }
 }
 
+// §11.5/§15.5a channel retune over a monitor netdev. The ssc338q SDK ships the
+// kernel nl80211 UAPI but not libnl-3, so we drive the stable `iw` CLI (present
+// on the target) rather than hand-roll genl: `iw dev <if> set freq <mhz>
+// <width>` changes the wiphy channel without a down/up, so the RX threads keep
+// their sockets. fork/exec is async-signal-safe here (only snprintf pre-fork,
+// then execvp/_exit in the child).
+bool iw_set_freq(const std::string& ifname, uint16_t mhz, uint8_t bw) {
+    const char* width = (bw >= 40) ? "HT40+" : "HT20";
+    char freq[8];
+    std::snprintf(freq, sizeof(freq), "%u", static_cast<unsigned>(mhz));
+    const char* argv[] = {"iw",  "dev",  ifname.c_str(), "set",
+                          "freq", freq,  width,          nullptr};
+    const pid_t pid = ::fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        ::execvp("iw", const_cast<char* const*>(argv));
+        _exit(127);  // iw not on PATH
+    }
+    int status = 0;
+    if (::waitpid(pid, &status, 0) < 0) return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 }  // namespace
 
 struct MonAir::Impl {
@@ -204,6 +228,7 @@ struct MonAir::Impl {
         uint8_t adapter = 0;
         int8_t rssi = -128;
         uint32_t tsfl = 0;
+        uint8_t net_id = 0;  // §15.5a candidate/occupancy attribution
         std::vector<uint8_t> data;
     };
     struct Adapter {
@@ -225,6 +250,17 @@ struct MonAir::Impl {
     MonAirCfg cfg;
     std::vector<std::unique_ptr<Adapter>> adapters;
     size_t tx_idx = 0;
+
+    // §15.5a runtime net_id roles. stamp is TX-only (main thread). filter is
+    // read on every RX thread → atomic; -1 encodes "no filter" (hear any).
+    uint8_t stamp_net_id = 0;
+    std::atomic<int16_t> filter_net_id{-1};
+
+    std::optional<uint8_t> filter_opt() const {
+        const int16_t v = filter_net_id.load(std::memory_order_relaxed);
+        return v < 0 ? std::nullopt
+                     : std::optional<uint8_t>(static_cast<uint8_t>(v));
+    }
 
     std::mutex mu;
     std::condition_variable cv;
@@ -303,7 +339,7 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
         }
         const uint8_t* mpdu = buf.data() + rt->hdr_len;
         const size_t mpdu_len = len - rt->hdr_len - kFcsLen;  // strip FCS
-        const auto d = dot11_parse(mpdu, mpdu_len, cfg.filter_net_id);
+        const auto d = dot11_parse(mpdu, mpdu_len, filter_opt());
         if (!d || d->originator == cfg.originator) {
             a->rx_filtered.fetch_add(1, std::memory_order_relaxed);
             continue;  // not ours, or our own injected frame looped back
@@ -323,6 +359,7 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
         f.adapter = adapter_id;
         f.rssi = rssi;
         f.tsfl = rt->tsf_us ? static_cast<uint32_t>(*rt->tsf_us) : 0u;
+        f.net_id = d->net_id;
         f.data.assign(d->payload, d->payload + d->payload_len);
         a->rx_frames.fetch_add(1, std::memory_order_relaxed);
         {
@@ -353,10 +390,10 @@ size_t MonAir::Impl::send_frame(const uint8_t* payload, size_t len,
         static constexpr uint8_t kBroadcast[6] = {0xff, 0xff, 0xff,
                                                    0xff, 0xff, 0xff};
         dot11_hdr_qos26(p + kMonRadiotapHtLen, kBroadcast,
-                        cfg.stamp_net_id, cfg.originator,
+                        stamp_net_id, cfg.originator,
                         static_cast<uint8_t>(tx_idx), seq, kUrgentTid);
     } else {
-        dot11_hdr24(p + kMonRadiotapHtLen, cfg.stamp_net_id, cfg.originator,
+        dot11_hdr24(p + kMonRadiotapHtLen, stamp_net_id, cfg.originator,
                     static_cast<uint8_t>(tx_idx), seq);
     }
     ++seq;
@@ -387,6 +424,11 @@ Result<MonAir> MonAir::create(const MonAirCfg& cfg) {
     }
     auto impl = std::make_unique<Impl>();
     impl->cfg = cfg;
+    impl->stamp_net_id = cfg.stamp_net_id;
+    impl->filter_net_id.store(
+        cfg.filter_net_id ? static_cast<int16_t>(*cfg.filter_net_id)
+                          : static_cast<int16_t>(-1),
+        std::memory_order_relaxed);
     impl->ready_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (impl->ready_fd < 0) {
         return Result<MonAir>::fail(std::string("kernel-monitor: eventfd: ") +
@@ -528,6 +570,7 @@ int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
         meta.adapter_id = f.adapter;
         meta.rssi = f.rssi;
         meta.tsf_us = f.tsfl;
+        meta.net_id = f.net_id;
         cb(meta, f.data.data(), f.data.size());
         ++delivered;
     }
@@ -565,6 +608,23 @@ void MonAir::set_tx_mode(uint8_t mcs, bool sgi) {
     impl_->sgi = sgi;
 }
 
+void MonAir::set_stamp_net_id(uint8_t net_id) {
+    impl_->stamp_net_id = net_id;  // TX main-thread only
+}
+
+void MonAir::set_filter_net_id(std::optional<uint8_t> net_id) {
+    impl_->filter_net_id.store(
+        net_id ? static_cast<int16_t>(*net_id) : static_cast<int16_t>(-1),
+        std::memory_order_relaxed);
+    // Re-attach the §3.0 kernel pre-filter to match: nullopt keeps the
+    // waybeam-shape filter but drops the net_id equality test (hears all
+    // net_ids), a value re-adds it. SO_ATTACH_FILTER replaces atomically, so
+    // the RX threads never see a filter-less window.
+    for (auto& a : impl_->adapters) {
+        attach_bpf_filter(a->fd, net_id, a->ifname.c_str());
+    }
+}
+
 int MonAir::set_power_qdb(size_t adapter, int32_t qdb) {
     (void)adapter;
     // The 8812eu per-rate TXAGC curve owns power (rtw_tx_pwr_by_rate=1); the
@@ -578,13 +638,15 @@ std::optional<uint64_t> MonAir::read_tsf(size_t adapter) {
 }
 
 bool MonAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
-    (void)adapter;
-    (void)bw;
-    (void)fast;
-    std::fprintf(stderr,
-                 "kernel-monitor: retune -> %u MHz requested (CSA over monitor "
-                 "deferred; channel fixed at bring-up)\n",
-                 chan_mhz);
+    (void)fast;  // §11.5a fast-path is a devourer optimization; iw is one-shot
+    if (adapter >= impl_->adapters.size()) return false;
+    const std::string& ifname = impl_->adapters[adapter]->ifname;
+    if (!iw_set_freq(ifname, chan_mhz, bw)) {
+        std::fprintf(stderr, "kernel-monitor: iw set freq %u (%u MHz bw) on %s "
+                             "failed\n",
+                     chan_mhz, bw, ifname.c_str());
+        return false;
+    }
     return true;
 }
 

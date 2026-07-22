@@ -29,6 +29,8 @@ struct ControlHandlers {
     std::function<std::string()> info_json;
     std::function<std::string()> health_json;
     std::function<std::string()> discovery_json;
+    // §15.5a ground scout state (GET); null → 503 like the other reads.
+    std::function<std::string()> scout_results;
 
     // Writes — return "" on success, else a short error string (→ HTTP 400).
     // A null hook means the endpoint does not apply to this mode (→ HTTP 409).
@@ -38,6 +40,16 @@ struct ControlHandlers {
                               int min_k)>
         fec;
     std::function<void()> reset_stats;  // side-effect only; always 200
+    // §15.5a scout writes (ground/rx only; null → 409). start takes the parsed
+    // sweep request; empty channels → the engine substitutes the allowlist.
+    std::function<std::string(const std::vector<uint16_t>& channels,
+                              uint32_t dwell_ms, const std::string& mode,
+                              int target_originator)>
+        scout_start;
+    std::function<std::string()> scout_stop;
+    // §15.5a claim: quickconnect to a scouted craft by originator. target_chan 0
+    // → the engine picks the emptiest allowlisted channel. null hook → 409.
+    std::function<std::string(int originator, int target_chan)> scout_quickconnect;
     std::function<std::string(int stream_id)> video_recover;
     std::function<std::string(int permille)> bench_rx_drop;
 };

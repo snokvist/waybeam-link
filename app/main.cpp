@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <csignal>
 #include <cstdlib>
 #include <cstdio>
@@ -18,6 +19,7 @@
 #include <deque>
 #include <memory>
 #include <map>
+#include <set>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -52,6 +54,7 @@
 #include "wblink/selector.h"
 #include "wblink/stats.h"
 #include "wblink/table.h"
+#include "wblink/airtime.h"
 #include "wblink/txwedge.h"
 #include "wblink/venc.h"
 #include "wblink/air_mon.h"
@@ -371,19 +374,36 @@ class PacketEventTrace {
 // Pass 17: bounded, observational catalog. It never feeds latch decisions.
 class DiscoveryCatalog {
   public:
-    void observe(const Decoded& dec, uint64_t now) {
+    void observe(const Decoded& dec, uint64_t now, uint8_t net_id = 0) {
         const CommonPrefix* p = nullptr;
         const DataView* data = std::get_if<DataView>(&dec);
+        const Announce* an = nullptr;
         if (data != nullptr) {
             p = &data->hdr.prefix;
         } else if (const Heartbeat* hb = std::get_if<Heartbeat>(&dec)) {
             p = &hb->prefix;
+        } else if ((an = std::get_if<Announce>(&dec)) != nullptr) {
+            p = &an->prefix;  // §15.5 presence source (Pass 62)
         } else {
             return;
         }
         const uint64_t nk = (static_cast<uint64_t>(p->originator) << 32) |
                             p->session_id;
-        nodes_[nk] = Node{p->originator, p->session_id, now};
+        Node& n = nodes_[nk];  // update-in-place keeps prior ANNOUNCE fields
+        n.originator = p->originator;
+        n.session = p->session_id;
+        n.net_id = net_id;
+        n.last_seen_ms = now;
+        if (an != nullptr) {
+            n.announced = true;
+            n.claimed = (an->flags & announce_flags::kClaimed) != 0;
+            n.claimed_by = an->claimed_by;
+            n.psk_present = (an->flags & announce_flags::kPskPresent) != 0;
+            if (n.psk_present) {  // Pass 63: announced token is public — cache it
+                std::memcpy(n.token.data(), an->psk, kAnnouncePskSize);
+                n.have_token = true;
+            }
+        }
         if (data != nullptr) {
             const uint64_t sk = (nk << 8) | data->hdr.stream_id;
             Stream& s = streams_[sk];
@@ -410,7 +430,15 @@ class DiscoveryCatalog {
             comma = true;
             out += "{\"originator\":" + std::to_string(n.originator) +
                    ",\"session\":" + std::to_string(n.session) +
-                   ",\"last_seen_ms\":" + std::to_string(n.last_seen_ms) + "}";
+                   ",\"net_id\":" + std::to_string(n.net_id) +
+                   ",\"last_seen_ms\":" + std::to_string(n.last_seen_ms);
+            if (n.announced) {  // §15.5 ANNOUNCE claim view (Pass 62; no token)
+                out += ",\"claimed\":" + std::string(n.claimed ? "true" : "false") +
+                       ",\"claimed_by\":" + std::to_string(n.claimed_by) +
+                       ",\"psk_present\":" +
+                       std::string(n.psk_present ? "true" : "false");
+            }
+            out += "}";
         }
         out += "],\"streams\":[";
         comma = false;
@@ -438,11 +466,35 @@ class DiscoveryCatalog {
         return out;
     }
 
+    // Pass 63: the announced token cached from a craft's ANNOUNCE, for keying a
+    // CSA claim (§15.5a). Returns the most-recently-seen token for `originator`.
+    std::optional<std::array<uint8_t, kAnnouncePskSize>> token_for(
+        uint16_t originator) const {
+        std::optional<std::array<uint8_t, kAnnouncePskSize>> best;
+        uint64_t best_seen = 0;
+        for (const auto& [key, n] : nodes_) {
+            (void)key;
+            if (n.originator == originator && n.have_token &&
+                n.last_seen_ms >= best_seen) {
+                best = n.token;
+                best_seen = n.last_seen_ms;
+            }
+        }
+        return best;
+    }
+
   private:
     struct Node {
         uint16_t originator = 0;
         uint32_t session = 0;
+        uint8_t net_id = 0;
         uint64_t last_seen_ms = 0;
+        bool announced = false;  // §3.12 ANNOUNCE seen (Pass 62)
+        bool claimed = false;
+        uint16_t claimed_by = 0;
+        bool psk_present = false;
+        bool have_token = false;  // Pass 63: cached announced token (public)
+        std::array<uint8_t, kAnnouncePskSize> token{};
     };
     struct Stream {
         uint16_t originator = 0;
@@ -471,6 +523,252 @@ class DiscoveryCatalog {
     std::map<uint64_t, Stream> streams_;
 };
 
+// §15.5a ground scout: one sweep engine. Retunes the scout adapter across a
+// channel list, dwelling on each to aggregate the delivered-frame stream into
+// per-channel candidates + an occupancy record (ACS-superset; v1 fills only the
+// packet-derivable fields). During a sweep the RX filter is widened to hear all
+// net_ids; on completion it returns to the resting channel/filter. Runs on the
+// single-threaded event loop — no locks. The claim path (quickconnect) is layered
+// on top and keys a CsaIssuer from the cached announced token.
+class ScoutEngine {
+  public:
+    struct Hooks {
+        std::function<bool(uint16_t chan_mhz, uint8_t bw)> retune;
+        std::function<void(std::optional<uint8_t> net_id)> set_filter;
+        std::function<bool(uint16_t originator)> psk_known;
+    };
+    ScoutEngine(Hooks h, uint8_t bw, uint16_t rest_chan,
+                std::optional<uint8_t> rest_filter)
+        : h_(std::move(h)),
+          bw_(bw),
+          rest_chan_(rest_chan),
+          rest_filter_(rest_filter) {}
+
+    bool scanning() const { return phase_ == Phase::kScanning; }
+
+    // Begin a sweep across `channels` (caller substitutes the allowlist when the
+    // request omits them). Returns "" on success or a short error.
+    std::string start(std::vector<uint16_t> channels, uint32_t dwell_ms,
+                      uint64_t now_ms) {
+        if (channels.empty()) return "no channels to scan";
+        channels_ = std::move(channels);
+        dwell_ms_ = dwell_ms ? dwell_ms : 300;
+        results_.clear();
+        chan_idx_ = 0;
+        phase_ = Phase::kScanning;
+        h_.set_filter(std::nullopt);  // §15.5a: hear all net_ids during a sweep
+        enter_channel(now_ms);
+        return "";
+    }
+
+    void stop() {
+        if (phase_ == Phase::kIdle) return;
+        finalize_current();
+        rest();
+    }
+
+    // Feed one decoded RX frame (raw wire bytes d/n for length + originator).
+    void on_frame(const AirRxMeta& meta, const Decoded& dec, const uint8_t* d,
+                  size_t n) {
+        if (phase_ != Phase::kScanning || n < kHeartbeatSize) return;
+        const uint16_t originator = be16_read(d + 3);  // §3.1 prefix offset
+        ++accum_.frames;
+        // §15.5a wifi_util: decodable-frame airtime estimate. Conservative MCS0
+        // long-GI, raw PHY; +28 B for the 802.11 header/FCS not in the payload.
+        if (const auto us = ht20_service_time_us(n + 28, 0, false, 1000)) {
+            accum_.airtime_us += *us;
+        }
+        if (meta.rssi != 0 && meta.rssi < accum_.min_rssi) {
+            accum_.min_rssi = meta.rssi;
+        }
+        accum_.transmitters.insert(originator);
+        if (const Announce* an = std::get_if<Announce>(&dec)) {
+            Candidate& c = accum_.candidates[originator];
+            c.originator = originator;
+            c.net_id = meta.net_id;
+            c.session = an->prefix.session_id;
+            c.claimed = (an->flags & announce_flags::kClaimed) != 0;
+            c.claimed_by = an->claimed_by;
+            c.psk_known = (an->flags & announce_flags::kPskPresent) != 0 &&
+                          h_.psk_known(originator);
+            c.chan = channels_[chan_idx_];
+        }
+    }
+
+    // Advance the sweep when the current dwell elapses.
+    void tick(uint64_t now_ms) {
+        if (phase_ != Phase::kScanning || now_ms < dwell_deadline_ms_) return;
+        finalize_current();
+        if (++chan_idx_ >= channels_.size()) {
+            rest();  // sweep complete
+            return;
+        }
+        enter_channel(now_ms);
+    }
+
+    std::string results_json() const {
+        std::string out = "{\"scanning\":";
+        out += scanning() ? "true" : "false";
+        out += ",\"current_chan\":";
+        out += (scanning() && chan_idx_ < channels_.size())
+                   ? std::to_string(channels_[chan_idx_])
+                   : "null";
+        out += ",\"channels\":[";
+        bool comma = false;
+        for (const auto& r : results_) {
+            if (comma) out += ',';
+            comma = true;
+            const Occupancy& o = r.occ;
+            out += "{\"chan\":" + std::to_string(r.chan) +
+                   ",\"occupancy\":{\"wifi_util_permille\":" +
+                   std::to_string(o.wifi_util_permille) +
+                   ",\"util_permille\":" + std::to_string(o.util_permille) +
+                   ",\"interference_util_permille\":null,\"noise_dbm\":" +
+                   (o.have_noise ? std::to_string(o.noise_dbm) : "null") +
+                   ",\"bss_count\":" + std::to_string(o.bss_count) +
+                   ",\"quality_permille\":" + std::to_string(o.quality_permille) +
+                   ",\"availability_permille\":" +
+                   std::to_string(o.availability_permille) + "}}";
+        }
+        out += "],\"candidates\":[";
+        comma = false;
+        for (const auto& r : results_) {
+            for (const auto& c : r.candidates) {
+                if (comma) out += ',';
+                comma = true;
+                out += "{\"originator\":" + std::to_string(c.originator) +
+                       ",\"net_id\":" + std::to_string(c.net_id) +
+                       ",\"session\":" + std::to_string(c.session) +
+                       ",\"claimed\":" + (c.claimed ? "true" : "false") +
+                       ",\"claimed_by\":" + std::to_string(c.claimed_by) +
+                       ",\"chan\":" + std::to_string(c.chan) +
+                       ",\"psk_known\":" + (c.psk_known ? "true" : "false") + "}";
+            }
+        }
+        out += "]}";
+        return out;
+    }
+
+    // §15.5a claim support: what a quickconnect needs about a scouted craft.
+    struct Claim {
+        uint16_t chan = 0;      // the channel it was last heard on
+        uint8_t net_id = 0;     // §3.0 L2 tag to stamp/filter after the claim
+        uint32_t session = 0;
+        bool psk_known = false; // a usable CSA key is held (token or secret)
+    };
+    // Most-recent candidate for `originator` across the last sweep, or nullopt if
+    // it was never scouted (a claim requires a prior scout to learn its channel).
+    std::optional<Claim> candidate_for(uint16_t originator) const {
+        std::optional<Claim> found;
+        for (const auto& r : results_) {
+            for (const auto& c : r.candidates) {
+                if (c.originator == originator) {
+                    found = Claim{c.chan, c.net_id, c.session, c.psk_known};
+                }
+            }
+        }
+        return found;
+    }
+    // Emptiest allowlisted channel by measured wifi_util (lowest wins), skipping
+    // `except` (the craft's current channel). 0 if no occupancy for any allowed
+    // channel (caller then falls back to an explicit target).
+    uint16_t emptiest(const std::vector<uint16_t>& allowlist,
+                      uint16_t except) const {
+        uint16_t best = 0;
+        uint32_t best_util = 1001;  // > any per-mille
+        for (const uint16_t ch : allowlist) {
+            if (ch == except) continue;
+            for (const auto& r : results_) {
+                if (r.chan != ch) continue;
+                if (r.occ.wifi_util_permille < best_util) {
+                    best_util = r.occ.wifi_util_permille;
+                    best = ch;
+                }
+            }
+        }
+        return best;
+    }
+
+  private:
+    enum class Phase { kIdle, kScanning };
+    struct Occupancy {
+        uint16_t wifi_util_permille = 0;
+        uint16_t util_permille = 0;
+        bool have_noise = false;
+        int noise_dbm = 0;
+        uint16_t bss_count = 0;
+        uint16_t quality_permille = 0;
+        uint16_t availability_permille = 0;
+    };
+    struct Candidate {
+        uint16_t originator = 0;
+        uint8_t net_id = 0;
+        uint32_t session = 0;
+        bool claimed = false;
+        uint16_t claimed_by = 0;
+        bool psk_known = false;
+        uint16_t chan = 0;
+    };
+    struct ChannelResult {
+        uint16_t chan = 0;
+        Occupancy occ;
+        std::vector<Candidate> candidates;
+    };
+    struct Accum {
+        uint64_t frames = 0;
+        uint64_t airtime_us = 0;
+        int min_rssi = 0;
+        std::set<uint16_t> transmitters;
+        std::map<uint16_t, Candidate> candidates;
+    };
+
+    void enter_channel(uint64_t now_ms) {
+        accum_ = Accum{};
+        h_.retune(channels_[chan_idx_], bw_);
+        dwell_deadline_ms_ = now_ms + dwell_ms_;
+    }
+    void finalize_current() {
+        ChannelResult r;
+        r.chan = channels_[chan_idx_];
+        const uint64_t dwell_us = static_cast<uint64_t>(dwell_ms_) * 1000u;
+        const uint32_t util =
+            dwell_us ? static_cast<uint32_t>(std::min<uint64_t>(
+                           1000u, accum_.airtime_us * 1000u / dwell_us))
+                     : 0u;
+        r.occ.wifi_util_permille = static_cast<uint16_t>(util);
+        r.occ.util_permille = static_cast<uint16_t>(util);  // v1: Wi-Fi only
+        r.occ.bss_count = static_cast<uint16_t>(accum_.transmitters.size());
+        r.occ.availability_permille = static_cast<uint16_t>(1000u - util);
+        r.occ.quality_permille = r.occ.availability_permille;  // v1 proxy
+        if (accum_.frames > 0) {
+            r.occ.have_noise = true;
+            r.occ.noise_dbm = accum_.min_rssi;
+        }
+        for (auto& [k, c] : accum_.candidates) {
+            (void)k;
+            r.candidates.push_back(c);
+        }
+        results_.push_back(std::move(r));
+    }
+    void rest() {
+        phase_ = Phase::kIdle;
+        h_.set_filter(rest_filter_);  // restore the narrow net_id filter
+        h_.retune(rest_chan_, bw_);   // return to the resting channel
+    }
+
+    Hooks h_;
+    uint8_t bw_;
+    uint16_t rest_chan_;
+    std::optional<uint8_t> rest_filter_;
+    Phase phase_ = Phase::kIdle;
+    std::vector<uint16_t> channels_;
+    uint32_t dwell_ms_ = 300;
+    size_t chan_idx_ = 0;
+    uint64_t dwell_deadline_ms_ = 0;
+    Accum accum_;
+    std::vector<ChannelResult> results_;
+};
+
 // §15.2 policy.csa → the core engine's parameter block (string PSK to raw
 // bytes, seconds to ms).
 CsaParams csa_params(const Config& cfg) {
@@ -481,8 +779,7 @@ CsaParams csa_params(const Config& cfg) {
     p.verify_timeout_ms = c.verify_timeout_ms;
     p.min_interval_ms = c.min_interval_s * 1000;
     p.ack_timeout_ms = c.ack_timeout_ms;
-    p.rendezvous_timeout_ms = c.rendezvous_timeout_s * 1000;
-    p.home_chan = c.home_chan;
+    p.bind_release_ms = c.bind_release_s * 1000;
     p.allowlist = c.channel_allowlist;
     return p;
 }
@@ -505,6 +802,25 @@ uint32_t session_nonce() {
         }
     }
     return static_cast<uint32_t>(now_ms()) | 1u;  // degraded fallback
+}
+
+// §11.4a: per-boot 16-byte announced pairing token P (io/app entropy; the pure
+// core layer stays RNG-free and only verifies against a supplied key). Used as
+// the craft's CSA HMAC key AND advertised in ANNOUNCE (§3.12) when no operator
+// csa.psk is configured (announced mode).
+std::array<uint8_t, kAnnouncePskSize> announce_token() {
+    std::array<uint8_t, kAnnouncePskSize> t{};
+    if (FILE* f = std::fopen("/dev/urandom", "rb")) {
+        const size_t got = std::fread(t.data(), 1, t.size(), f);
+        std::fclose(f);
+        if (got == t.size()) return t;
+    }
+    // Degraded fallback: never key with all-zero. Mix the boot clock.
+    const uint64_t ms = now_ms();
+    for (size_t i = 0; i < t.size(); ++i) {
+        t[i] = static_cast<uint8_t>((ms >> ((i % 8) * 8)) ^ (i * 0x9du)) | 1u;
+    }
+    return t;
 }
 
 SchedulerPolicy scheduler_policy(const Config& cfg) {
@@ -586,6 +902,7 @@ struct AirBackend {
     std::optional<RadioAir> radio;
 #endif
     uint64_t last_tx_ms = 0;
+    uint64_t last_announce_ms = 0;  // §3.12 ANNOUNCE cadence (own timer)
 
     static Result<AirBackend> create(const Config& cfg) {
         AirBackend b;
@@ -729,6 +1046,39 @@ struct AirBackend {
         }
     }
 
+    // §3.12 pairing beacon. Unlike heartbeat this is NOT suppressed by active
+    // DATA — it is the craft's continuous claim/token advertisement, emitted at
+    // ~2 Hz in both claimed and unclaimed states so a rebooted ground can
+    // re-learn the token and re-claim in place (§11.5a). psk_present selects
+    // announced (token in psk) vs secret (all-zero) mode; claimed/claimed_by
+    // come from the follower's §11.5a binding.
+    void announce(uint16_t originator, uint32_t session, uint64_t now,
+                  const uint8_t* token, bool psk_present, bool claimed,
+                  uint16_t claimed_by) {
+        static constexpr uint64_t kAnnounceIntervalMs = 500;  // §3.12 1–2 Hz
+        if (now < last_announce_ms ||
+            now - last_announce_ms < kAnnounceIntervalMs) {
+            return;
+        }
+        last_announce_ms = now;
+        Announce a;
+        a.prefix.originator = originator;
+        a.prefix.session_id = session;  // destination = 0 (§3.12)
+        a.flags = 0;
+        if (claimed) {
+            a.flags |= announce_flags::kClaimed;
+            a.claimed_by = claimed_by;
+        }
+        if (psk_present) {
+            a.flags |= announce_flags::kPskPresent;
+            std::memcpy(a.psk, token, kAnnouncePskSize);
+        }  // else psk stays all-zero (secret mode)
+        uint8_t frame[kAnnounceSize];
+        if (encode_announce(a, frame, sizeof(frame)) == sizeof(frame)) {
+            inject(frame, sizeof(frame));
+        }
+    }
+
     int poll_once(int timeout_ms, const UdpAir::RxCb& cb) {
         if (mon) {
             return mon->poll_once(timeout_ms, cb);
@@ -852,10 +1202,24 @@ struct AirBackend {
         return udp->estimate_airtime_us(bytes, include_pending);
     }
     bool supports_csa() const {
-        // UDP intentionally exercises CSA state without a physical retune.
-        // Kernel-monitor cannot retune yet and must fail closed: pretending a
-        // switch succeeded can strand the node while its interface stays put.
-        return !mon.has_value();
+        // UDP exercises CSA state without a physical retune; kernel-monitor now
+        // retunes via iw (Pass 63); the radio backend via devourer. All real.
+        return true;
+    }
+    // §15.5a scout: widen/narrow the RX net_id filter at runtime (monitor only;
+    // no-op elsewhere) and retune a single adapter (the scout adapter).
+    void set_filter_net_id(std::optional<uint8_t> net_id) {
+        if (mon) mon->set_filter_net_id(net_id);
+    }
+    void set_stamp_net_id(uint8_t net_id) {
+        if (mon) mon->set_stamp_net_id(net_id);
+    }
+    bool retune_one(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
+        if (mon) return mon->retune(adapter, chan_mhz, bw, fast);
+#if WBLINK_RADIO
+        if (radio) return radio->retune(adapter, chan_mhz, bw, fast);
+#endif
+        return true;  // udp: logged intent
     }
     bool set_udp_rx_drop(int permille) {
         if (!udp || permille < 0 || permille > 1000) {
@@ -2092,6 +2456,11 @@ int run_tx(const Loaded& l) {
         return 1;
     }
     const uint32_t session = session_nonce();
+    // §11.4a key provenance: csa.psk configured ⇒ secret (token off the air);
+    // absent ⇒ announced (the per-boot token is both the CSA key and the
+    // advertised ANNOUNCE psk). Pass 61: presence is the sole selector.
+    const std::array<uint8_t, kAnnouncePskSize> token = announce_token();
+    const bool psk_announced = l.cfg.policy.csa.psk.empty();
     DiscoveryCatalog discovery;
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv);
     tx.estimate_airtime = [&](size_t bytes, bool include_pending) {
@@ -2177,8 +2546,14 @@ int run_tx(const Loaded& l) {
         arq_timing.note_resend_submitted(f, n, now_us());
     };
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
-    // retunes the (single) radio at the TSF-anchored T_switch.
-    CsaFollower csa(csa_params(l.cfg));
+    // retunes the (single) radio at the TSF-anchored T_switch. In announced
+    // mode (§11.4a) it verifies CSA against the per-boot token; in secret mode
+    // csa_params already keyed it from csa.psk.
+    CsaParams follower_params = csa_params(l.cfg);
+    if (psk_announced) {
+        follower_params.psk.assign(token.begin(), token.end());
+    }
+    CsaFollower csa(follower_params);
     // §9.10 TX-wedge watchdog over the TX adapter's CCX-report counters.
     TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
                                 l.cfg.air.wedge_min_submits});
@@ -2241,7 +2616,7 @@ int run_tx(const Loaded& l) {
         air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
                                     size_t n) {
             const Decoded dec = decode(d, n);
-            discovery.observe(dec, service_now);
+            discovery.observe(dec, service_now, meta.net_id);
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
                 if (!air.value->supports_csa()) return;
                 if (csa.on_csa(*c, service_us,
@@ -2260,7 +2635,9 @@ int run_tx(const Loaded& l) {
                 return;
             }
             if (!std::holds_alternative<DecodeError>(dec)) {
-                csa.note_valid_rx(service_us);
+                // §11.5a: pass the sender (common-prefix originator @3) so the
+                // follower can refresh the binding on the bound issuer's traffic.
+                csa.note_valid_rx(service_us, be16_read(d + 3));
             }
             if (tx.on_air(d, n, service_now)) {
                 arq_timing.note_nack_received(d, n, service_us);
@@ -2387,6 +2764,12 @@ int run_tx(const Loaded& l) {
         }
         tx.tick(service_now, inject, inject_resend);
         air.value->heartbeat(l.cfg.node.originator, session, service_now);
+        {
+            const std::optional<uint16_t> latched = csa.latched_issuer();
+            air.value->announce(l.cfg.node.originator, session, service_now,
+                                token.data(), psk_announced,
+                                latched.has_value(), latched.value_or(0));
+        }
         if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
@@ -2746,6 +3129,24 @@ int run_rx(const Loaded& l) {
                                 l.cfg.air.wedge_min_submits});
     const uint16_t op_chan =
         l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
+    const uint8_t op_bw = l.cfg.adapters.empty() ? 20 : l.cfg.adapters[0].bw;
+    // §15.5a scout. Retunes adapter 0 (the scout adapter on a single-adapter
+    // ground) and widens the net_id filter during a sweep; psk_known reports a
+    // usable CSA key (configured secret, or a cached announced token, Pass 63).
+    ScoutEngine scout(
+        ScoutEngine::Hooks{
+            [&](uint16_t ch, uint8_t bw) {
+                return air.value->retune_one(0, ch, bw, false);
+            },
+            [&](std::optional<uint8_t> nid) {
+                air.value->set_filter_net_id(nid);
+            },
+            [&](uint16_t orig) {
+                return !l.cfg.policy.csa.psk.empty() ||
+                       discovery.token_for(orig).has_value();
+            },
+        },
+        op_bw, op_chan, l.cfg.node.net_id);
     // §15.5 REST control plane. RX/ground node owns the CSA trigger (replaces
     // the removed stdin trigger); profile/fec are TX-only knobs → null → 409.
     StatsSnapshot last_snap;
@@ -2768,6 +3169,71 @@ int run_rx(const Loaded& l) {
         h.discovery_json = [&] {
             return discovery.json(now_ms(), rx.stream_keys());
         };
+        h.scout_results = [&] { return scout.results_json(); };
+        // §15.5a claim: CSA-grab a scouted craft. Re-keys the issuer with the
+        // craft's key (configured secret, or the cached announced token §11.4a),
+        // binds the link to its net_id, moves onto its channel to be heard, then
+        // issues a §11 campaign to target_chan (0 → the emptiest allowlisted
+        // channel). The loop's issuer.tick drives the copies/commit; post-claim
+        // the net_id stamp/filter and channel hold until an explicit re-scout.
+        auto do_claim = [&](int originator_i, int target_chan_i) -> std::string {
+            if (!air.value->supports_csa()) {
+                return "CSA unsupported by this backend";
+            }
+            if (originator_i < 0 || originator_i > 0xFFFF) {
+                return "invalid originator";
+            }
+            const uint16_t orig = static_cast<uint16_t>(originator_i);
+            const auto cand = scout.candidate_for(orig);
+            if (!cand) return "unknown craft (run a scout first)";
+            // Configured secret wins; else the cached announced token (§11.4a).
+            std::vector<uint8_t> key = cparams.psk;
+            if (key.empty()) {
+                const auto tok = discovery.token_for(orig);
+                if (!tok) return "no CSA key for craft (no cached token)";
+                key.assign(tok->begin(), tok->end());
+            }
+            if (!issuer.set_psk(key)) return "claim busy (campaign active)";
+            // §15.5a: bind the link to the craft's net_id — stamp our uplink so
+            // the craft accepts it, narrow our filter to hear only that craft.
+            air.value->set_stamp_net_id(cand->net_id);
+            air.value->set_filter_net_id(cand->net_id);
+            // Be on the craft's current channel so it hears the CSA copies.
+            air.value->retune_one(0, cand->chan, op_bw, false);
+            uint16_t target = static_cast<uint16_t>(target_chan_i);
+            if (target == 0) {
+                target =
+                    scout.emptiest(l.cfg.policy.csa.channel_allowlist, cand->chan);
+            }
+            if (target == 0) return "no target channel (specify target_chan)";
+            // retune_class 1 (500 ms dt budget) gives the craft slack for the iw
+            // shell-out retune before its §11.5 verify timeout. bw code 0 = 20 MHz
+            // (v1 single-width, matching the /csa trigger).
+            const CommonPrefix pre{l.cfg.node.originator, 0, session};
+            if (!issuer.start(pre, target, 0, 1, cand->chan, 0, 4, now_us_it)) {
+                return "rejected (active campaign or rate-limit)";
+            }
+            std::fprintf(stderr, "csa: claim originator=%u net_id=%u %u->%u MHz\n",
+                         orig, cand->net_id, cand->chan, target);
+            return "";
+        };
+        h.scout_start = [&](const std::vector<uint16_t>& chans, uint32_t dwell,
+                            const std::string& mode, int target) -> std::string {
+            if (mode == "quickconnect") {
+                if (target < 0) return "quickconnect requires target.originator";
+                return do_claim(target, 0);  // start-form picks emptiest channel
+            }
+            std::vector<uint16_t> ch = chans;
+            if (ch.empty()) ch = l.cfg.scout.channels;
+            if (ch.empty()) ch = l.cfg.policy.csa.channel_allowlist;
+            return scout.start(ch, dwell ? dwell : l.cfg.scout.dwell_ms,
+                               now_ms());
+        };
+        h.scout_stop = [&]() -> std::string {
+            scout.stop();
+            return "";
+        };
+        h.scout_quickconnect = do_claim;
         h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
             if (!air.value->supports_csa()) {
                 return "CSA unsupported by kernel-monitor backend";
@@ -2859,7 +3325,8 @@ int run_rx(const Loaded& l) {
                 meta.rssi != 0 ? meta.rssi : l.cfg.loopback.rssi_dbm;
             // §11 taps (cheap header decode; DATA still flows to the engine).
             const Decoded dec = decode(d, n);
-            discovery.observe(dec, now);
+            discovery.observe(dec, now, meta.net_id);
+            scout.on_frame(meta, dec, d, n);  // §15.5a sweep aggregation
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
                 if (!air.value->supports_csa()) {
                     return;
@@ -2889,7 +3356,7 @@ int run_rx(const Loaded& l) {
                 }
             }
             if (!std::holds_alternative<DecodeError>(dec)) {
-                follower.note_valid_rx(now_us_it);
+                follower.note_valid_rx(now_us_it, be16_read(d + 3));
             }
             rx.on_air(meta.adapter_id, d, n, now, deliver, rssi,
                       early_deliver);
@@ -3021,6 +3488,7 @@ int run_rx(const Loaded& l) {
         if (fa.kind != CsaAction::Kind::kNone) {
             air.value->retune_all(fa.chan_mhz, fa.bw, fa.fast);
         }
+        scout.tick(now);  // §15.5a advance the sweep when a dwell elapses
         if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
