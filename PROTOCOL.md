@@ -662,12 +662,12 @@ under its own common prefix.
 
 | off | size | field | notes |
 |---|---:|---|---|
-| 0 | 11 | *common* | §3.1 — sender = issuing ground (command) or craft (echo) |
-| 11 | 4 | `cmd_nonce` | u32; strictly increasing per `(originator, session)` — its own counter, **not** shared with `csa_nonce` |
-| 15 | 1 | `cmd_seq` | copy counter N..1 within the campaign (diagnostics only — no timing resolution, unlike §11.1) |
-| 16 | 1 | `cmd_flags` | bit0 `ACK` (craft→ground echo); bit1 `REJECTED` (echo only — valid but unapplicable command, §11.7); bits 2–7 reserved (0) |
-| 17 | 1 | `cmd_id` | command registry (§11.7) |
-| 18 | 1 | `cmd_arg` | boolean or enum value; **`0..4` only** — every command is enable/disable or an enum of at most 5 choices (operator ruling, Pass 68); any other value is invalid |
+| 0 | 11 | *common* | §3.1 — sender = issuing ground (command) or craft (echo); `destination` = the counterpart's originator in both directions |
+| 11 | 4 | `cmd_nonce` | u32 — the **issuer's** campaign id, echoed unchanged (the invariant below applies to the issuer's domain only). Initialised to a **random 32-bit value per issuer session**, then strictly increasing per issuer `(originator, session)` — its own counter, **not** shared with `csa_nonce`. The random start defeats cross-session echo replay: a rebooted issuer's nonces cannot collide with a recorded echo from its previous session |
+| 15 | 1 | `cmd_seq` | copy counter N..1 within the campaign / echo burst (diagnostics only — no timing resolution, unlike §11.1) |
+| 16 | 1 | `cmd_flags` | bit0 `ACK` — set on **every** echo, applied and rejected alike; bit1 `REJECTED` — additionally set on the echo of a valid-but-unapplicable command (§11.7); bits 2–7 reserved (0, decode error otherwise) |
+| 17 | 1 | `cmd_id` | command registry (§11.7); unknown values are structurally valid (the craft answers `REJECTED`, forward compatibility) |
+| 18 | 1 | `cmd_arg` | boolean or enum value; **`0..4` only** — every command is enable/disable or an enum of at most 5 choices (operator ruling, Pass 68). A value `>4` is a **structural decode error** (silent drop, no nonce consumed); a structurally valid arg outside a known command's range is consumed and echoed `REJECTED` (§11.7) |
 | 19 | 4 | `cmd_mac` | `trunc(HMAC(csa_psk, bytes[0..18]), 4)` — the §11.4 primitive verbatim (HMAC-SHA-256, leftmost 4 bytes, big-endian) |
 
 VEHICLE_CMD is broadcast over the air in the pinned §3.0 frame like CSA
@@ -1591,9 +1591,9 @@ this channel. Wire format is §3.14; everything below is behaviour.
 
 | `cmd_id` | name | `cmd_arg` | semantics |
 |---|---|---|---|
-| `0x01` | `ARQ` | 0=off, 1=on | **off:** the craft TX stamps no `ARQ`/`PFRAME_ARQ` flags on future DATA and serves no incoming NACKs. Receivers then generate no NACKs by construction (§6.4 NACKs only flagged seqs) and the §14.3 nack-grace machinery never arms — no uplink or cache churn for a knob receivers were never told about. FEC repair symbols (§14.1, forward) and §3.9 decoder recovery are **unaffected**. **on:** restores the boot-configured behaviour (per-stream `arq_mode`, §4.1) |
-| `0x02` | `SELECTOR` | 0=run, 1=freeze | **freeze:** §9.7 `min==max` pin at the rung active at acceptance — a select-and-hold of the current operating point. **run:** restores the boot-config `[min, max]` envelope. This command and §15.5 `POST /api/v1/link/profile` drive the *same* §9.7 lever; last writer wins |
-| `0x03` | `FPS_LADDER` | 0=off, 1=on | **off:** the §9.11 loop stops issuing FPS commands; the current fps holds where it is (no snap to `preferred` — least surprise). **on:** re-enables the loop with cleared evidence, as after a §9.11 settle. On a craft without `venc.fps_ladder` configured, either arg is echoed `REJECTED` |
+| `0x01` | `ARQ` | 0=off, 1=on | **off:** the craft TX stamps no `ARQ`/`PFRAME_ARQ` flags on future DATA and serves no incoming NACKs. Receivers then generate no NACKs by construction (§6.4 NACKs only flagged seqs) and the §14.3 nack-grace machinery stops arming — after already-stamped in-flight blocks drain (one deadline window), no uplink or cache churn for a knob receivers were never told about. FEC repair symbols (§14.1, forward) and §3.9 decoder recovery are **unaffected**. **on:** restores the boot-configured behaviour (per-stream `arq_mode`, §4.1); on a craft whose boot config flags nothing, `on` is an acked no-op, not `REJECTED` |
+| `0x02` | `SELECTOR` | 0=run, 1=freeze | **freeze:** §9.7 `min==max` pin — a select-and-hold of the current operating point. **run:** restores the boot-config `[min, max]` envelope. Either direction takes effect at the **next selector evaluation**; during the §11.3 CSA freeze that is when the freeze lifts, and the pinned rung is sampled *then* (never mid-blackout). This command and §15.5 `POST /api/v1/link/profile` drive the *same* §9.7 lever; last writer wins |
+| `0x03` | `FPS_LADDER` | 0=off, 1=on | **off:** the §9.11 loop stops issuing FPS commands; the current fps holds where it is (no snap to `preferred` — least surprise). **on:** re-enables the loop with cleared evidence, as after a §9.11 settle. "Configured" = the ladder ran at boot (`venc.enabled` + `venc.fps_ladder.enabled`, §9.11 opt-in); on any other craft either arg is echoed `REJECTED` — the command toggles a running loop, it cannot conjure one |
 | `0x04`–`0x1F` | *reserved* | — | v2 venc commands (fps select, resolution, framing) — reserved, not specified |
 
 **Acceptance (craft)** — the §11.4 guard set minus the channel clauses:
@@ -1605,35 +1605,63 @@ command source (§11.5a)** AND no command accepted within `cmd.min_interval_ms`
 - **No bootstrap.** A VEHICLE_CMD never establishes the binding — only an
   accepted CSA claims a craft (§11.5a). An unbound craft, or a command from a
   non-bound issuer, is a **silent drop** (no `REJECTED` echo — echoing to an
-  unbound sender would be a probe oracle). Like any packet from the bound
-  issuer, an accepted command refreshes the §11.5a binding freshness.
-- **Duplicate-nonce re-echo (idempotent retry).** `cmd_nonce == last_applied`
-  ⇒ do **not** re-apply, but **do** re-echo — a retried campaign means the
+  unbound sender would be a probe oracle). The binding identity is the
+  issuer's **originator** (the §11.5a latch), so a rebooted ground commands
+  its craft immediately — the fresh session simply opens a fresh nonce
+  domain. Like any packet from the bound issuer, an accepted command
+  refreshes the §11.5a binding freshness.
+- **Duplicate-nonce re-echo (idempotent retry).** The craft retains, per
+  issuer `(originator, session)`, the last consumed
+  `(cmd_nonce, cmd_id, cmd_arg, rejected)` tuple. A packet matching that
+  stored tuple exactly ⇒ do **not** re-apply, but **do** re-echo **the stored
+  tuple** (never the incoming packet's fields) — a retried campaign means the
   ground lost the echo, not that the command failed (the §3.13 CACHE_ASSIGN
-  idempotency pattern). `cmd_nonce < last_applied` ⇒ silent drop.
+  idempotency pattern). The re-echo path applies the **full guard set minus
+  the nonce-monotonicity clause** (MAC + bound issuer still required — a
+  replayed command from a non-bound sender must not elicit echoes), and emits
+  **at most one echo burst per nonce per `cmd.min_interval_ms`** (campaign
+  copies arrive `cmd.copy_interval_ms` apart and would otherwise each
+  re-trigger the burst). A duplicate-nonce packet whose `cmd_id` or `cmd_arg`
+  **differs** from the stored tuple, or any `cmd_nonce <` the stored one, is
+  a silent drop.
 
 A command that passes all guards but cannot apply — unknown `cmd_id` (forward
-compatibility), `cmd_arg` out of the command's range, or an unconfigured
-actuator — consumes the nonce and is echoed with `REJECTED` set: the ground
-learns "understood, won't do" instead of retrying into silence.
+compatibility), a structurally valid `cmd_arg` outside the command's range, or
+an unconfigured actuator — consumes the nonce and is echoed with `REJECTED`
+set: the ground learns "understood, won't do" instead of retrying into
+silence.
 
 **Campaign + ACK (ground issuer).** `POST /api/v1/vehicle/command` (§15.5)
 allocates the next `cmd_nonce` and sends `cmd.copies` (seed **3**) copies at
 `cmd.copy_interval_ms` (seed **20 ms**) — copies dedupe by nonce. The craft
 echoes the accepted (or rejected) command `cmd.echo_copies` (seed **2**) times
-on the diversity-received downlink. No matching echo within
-`cmd.ack_timeout_ms` (seed **1000 ms**, = `csa_ack_timeout`'s reasoning) ⇒
-re-send the **same nonce**, up to `cmd.retry_cap` (seed **3**) campaigns total,
-then surface `timeout`. Campaign state is polled, never awaited — the §15.5
-loop never blocks.
+on the diversity-received downlink. **Echo acceptance (issuer):** an echo is
+accepted only if its `cmd_mac` verifies under the campaign key, `ACK` is set,
+the sender originator is the campaign's bound craft, and
+`cmd_nonce`/`cmd_id`/`cmd_arg` all equal the in-flight campaign's; anything
+else is ignored. In announced-token mode the key is public (§11.4a), so a
+forged echo *can* misreport an outcome — the bound is the §13 row (settings a
+reboot resets, never channel/power), and the operator's recourse is re-issuing
+the idempotent command; this is the §11.6 `CSA_ARMED` honesty posture. No
+accepted echo within `cmd.ack_timeout_ms` (seed **1000 ms**, =
+`csa_ack_timeout`'s reasoning) of the last copy ⇒ re-send the **same nonce**,
+up to `cmd.retry_cap` (seed **3**) campaigns total, then surface `timeout`.
+The issuer paces campaign starts at least
+`cmd.min_interval_ms + cmd.copy_interval_ms` apart so a fresh campaign's first
+copy always clears the craft-side accept limit. Campaign state is polled,
+never awaited — the §15.5 loop never blocks; a `POST` while a campaign is
+pending is refused **409**.
 
 **Volatility.** Command state is **craft-session-scoped**: a reboot resets all
 commands to boot config (alongside the §11.5a claim reset). It survives
-binding *release* and channel moves — a returned ground re-claims a craft that
-still has ARQ off, and reads that state from stats, not from memory. Applied
-command state is surfaced in §15.3 (link-level `cmd_arq`,
-`cmd_selector_frozen`, `cmd_fps_ladder`, `cmd_last_nonce`) and the issuer's
-campaign state as `vcmd_state`.
+binding *release* and channel moves. There is no over-air state readback: a
+returned or rebooted ground **re-establishes known state by re-issuing the
+idempotent commands**, not by querying. Applied command state is surfaced
+craft-locally in §15.3 (link-level `cmd_arq`, `cmd_selector_frozen`,
+`cmd_fps_ladder`, and `cmd_last_nonce` — the last consumed nonce from the
+currently/last bound issuer) and the issuer's campaign state as the §15.5
+`GET /api/v1/vehicle/command` object (`vcmd_state` in the issuer's §15.3
+stats is the same value).
 
 ---
 
@@ -2300,13 +2328,25 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "state": "HOLD", "flap_freeze": false, "csa_state": "IDLE",
     "venc_bitrate_kbps": 14000, "venc_max_i_bytes": 70000,
     "venc_max_p_bytes": 19444, "venc_pushes": 6, "venc_failures": 0,
-    "venc_settling": false, "venc_fps": 90 } }
+    "venc_settling": false, "venc_fps": 90,
+    "cmd_arq": true, "cmd_selector_frozen": false,
+    "cmd_fps_ladder": true, "cmd_last_nonce": 0,
+    "vcmd_state": "idle", "vcmd_nonce": 0, "arq_rx_enabled": true } }
 ```
 The `venc_*` link fields are the §9.6 actuator state: the last COMMANDED
 bitrate and frame caps (0 = never pushed), cumulative pushes/failures, and
 `venc_settling` — true within `venc.settle_ms` of the last accepted change
 (the doc-model "pending transition"; commanded = applied at HTTP 2xx since
 venc's `/set` is synchronous). Zero/false on nodes without `venc.enabled`.
+
+The `cmd_*` / `vcmd_*` / `arq_rx_enabled` link fields are the §11.7 command
+surface, emitted on every node with role-neutral defaults: `cmd_arq`,
+`cmd_selector_frozen`, `cmd_fps_ladder` are the craft's currently applied
+command state (boot values until a command lands; `cmd_fps_ladder` is false
+when the ladder is unconfigured), `cmd_last_nonce` is the last consumed nonce
+from the currently/last bound issuer (0 = never), `vcmd_state`/`vcmd_nonce`
+mirror the issuer's §15.5 `GET /api/v1/vehicle/command` object, and
+`arq_rx_enabled` is the node's §6.4 NACK-emission gate (`POST /api/v1/arq`).
 
 `return_window_hits/misses` (TX-side) and `reports_expected/received` expose the
 §7.2 optimisation's health directly, and `adapter_stalled` + the
@@ -2532,7 +2572,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[]}` (§15.5a; ground/rx node) |
 | `GET /api/v1/link/selection` | receiver's configured/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
-| `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `pending`\|`acked`\|`rejected`\|`timeout` (issuer/ground node) |
+| `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -2571,8 +2611,12 @@ write knobs are exactly the §9/§11/§14 levers that were previously boot-time
 JSON only; the profile pin is the operating-point (MCS + bitrate) lever, since
 a profile bundles rate/power/MTU per §9.3. The `scout/*` endpoints (§15.5a) act
 only on a ground/rx node and **409** elsewhere. `vehicle/command` likewise acts
-only on the issuer/ground node (and **409**s with an unbound craft — a campaign
-toward nobody is refused up front, not timed out); `arq` acts on any rx node.
+only on the issuer/ground node, and **409**s while a campaign is pending or
+with an unbound craft — a campaign toward nobody is refused up front, not
+timed out. "Bound", issuer-side, is the issuer's own committed selection (a
+§15.5a claim or `/csa` campaign committed this session, §11.7); the craft-side
+binding is authoritative, so a stale belief surfaces as `timeout`, never as a
+misdirected command. `arq` acts on any rx node.
 
 ### 15.5a Ground scout (channel searcher)
 A ground-side finder that sweeps channels to discover parked/flying craft and,

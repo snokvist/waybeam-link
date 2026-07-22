@@ -1767,8 +1767,49 @@ overrule):
   settings — never channel or power.
 
 Adds §3.14 and §11.7, amends §3.1 (registry, 13 of 16), §6.4, §13, §15.2
-(`policy.cmd`), §15.5. Spec-only; implementation follows in the same PR after
-the ruling.
+(`policy.cmd`), §15.3 (`cmd_*`/`vcmd_*`/`arq_rx_enabled` link fields), §15.5.
+Spec-only; implementation follows in the same PR after the ruling.
+
+**Review hardening (2026-07-22, adversarial pass on the draft).** An
+independent review of the draft found the wire arithmetic sound but the
+echo/acceptance semantics under-specified. Resolutions folded into the same
+sections, still under the same pending ruling:
+
+- **Echo acceptance is now explicit (was: "matching echo", undefined).** The
+  issuer accepts an echo only on MAC + `ACK` + bound-craft sender + exact
+  nonce/cmd/arg match. Token-mode honesty note added: a forged echo can
+  misreport an outcome; the bound is the §13 row and the recourse is
+  re-issuing the idempotent command (the §11.6 `CSA_ARMED` posture).
+- **Duplicate re-echo echoes the STORED tuple, never the incoming packet** —
+  the craft retains `(nonce, cmd_id, cmd_arg, rejected)` per issuer domain; a
+  same-nonce packet with different fields is a silent drop (else a buggy or
+  malicious retry could mint an ACK for a command never applied). The re-echo
+  path keeps the full guard set minus nonce monotonicity, and bursts at most
+  once per nonce per `min_interval_ms`.
+- **`cmd_nonce` starts at a random 32-bit value per issuer session** —
+  a rebooted issuer restarting at 1 would let a recorded session-A echo
+  satisfy session-B's first campaign (false "acked"). Random start kills the
+  cross-session replay for free; the craft guard was already per-domain.
+- **No over-air state readback.** The draft's "ground reads craft state from
+  stats" claimed a wire path that does not exist; replaced with the honest
+  mechanism — a re-claiming ground re-issues the idempotent commands. The
+  `cmd_*` fields are craft-local §15.3 observability (§15.3 now actually
+  amended; the draft referenced fields it never added).
+- **Binding identity pinned to the issuer's originator** (the §11.5a latch as
+  implemented): a rebooted ground commands its craft immediately in a fresh
+  nonce domain, no 90 s dead window. The issuer-side "bound" predicate behind
+  the REST 409 is its own committed selection this session; craft-side truth
+  surfaces as `timeout`.
+- **Smaller gaps closed:** `GET /vehicle/command` gains `idle`; `POST` 409s
+  while a campaign is pending; issuer paces starts by
+  `min_interval + copy_interval` so consecutive menu commands don't eat the
+  craft rate-limit; `cmd_arg > 4` is a structural decode error vs. in-range
+  invalid = consumed + `REJECTED` (was ambiguous across §3.14/§11.7);
+  `FPS_LADDER` "configured" = ladder ran at boot; `ARQ on` over an all-off
+  boot config is an acked no-op; `SELECTOR` lands at the next selector
+  evaluation, i.e. after any §11.3 freeze; every echo sets `ACK` (`REJECTED`
+  is additive); the ARQ-off "no NACKs" claim is bounded by in-flight flagged
+  blocks draining (one deadline window).
 
 ## Open questions for the next pass
 
