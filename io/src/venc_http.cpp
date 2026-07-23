@@ -67,21 +67,42 @@ bool VencActuator::http_get(const std::string& path) {
     return status >= 200 && status < 300;
 }
 
-// §9.6 volatile-first (Pass 73): try /api/v1/live/set; a 404 (pre-live venc)
-// latches the persisting-/set fallback for the process lifetime and re-sends
-// the push that drew it, so no actuation is lost.
-bool VencActuator::push_set(const std::string& query) {
-    if (!live_fallback_) {
+// §9.6 volatile-first (Pass 73): try /api/v1/live/set; on 404 re-send the
+// push on the persisting /set so no actuation is lost. A 404 can be
+// TRANSIENT — venc's httpd binds seconds before its routes register during
+// pipeline bring-up/respawn — so the fallback latches only when the /set
+// re-send actually succeeds (both failing = venc restarting, retry later),
+// and a latched fallback re-probes the volatile route every 10 min so a
+// venc upgrade heals without a link restart.
+bool VencActuator::push_set(const std::string& query, uint64_t now_ms) {
+    const bool probe = !live_fallback_ || now_ms >= live_reprobe_ms_;
+    if (probe) {
         const int status = http_get_status("/api/v1/live/set?" + query);
-        if (status != 404) {
-            return status >= 200 && status < 300;
+        if (status >= 200 && status < 300) {
+            if (live_fallback_) {
+                live_fallback_ = false;
+                std::fprintf(stderr, "venc: /api/v1/live/set available — "
+                                     "volatile path restored\n");
+            }
+            return true;
         }
-        live_fallback_ = true;
-        std::fprintf(stderr,
-                     "venc: /api/v1/live/set unsupported (pre-live venc) — "
-                     "falling back to persisting /api/v1/set\n");
+        if (status != 404) {
+            return false;  // transport/5xx: no latch, holdoff retries
+        }
+    } else {
+        return http_get("/api/v1/set?" + query);
     }
-    return http_get("/api/v1/set?" + query);
+    const bool ok = http_get("/api/v1/set?" + query);
+    if (ok) {
+        if (!live_fallback_) {
+            live_fallback_ = true;
+            std::fprintf(stderr,
+                         "venc: /api/v1/live/set unsupported (pre-live venc) "
+                         "— falling back to persisting /api/v1/set\n");
+        }
+        live_reprobe_ms_ = now_ms + kLiveReprobeMs;
+    }
+    return ok;
 }
 
 bool VencActuator::set_bitrate(uint32_t kbps, uint64_t now_ms) {
@@ -95,7 +116,7 @@ bool VencActuator::set_bitrate(uint32_t kbps, uint64_t now_ms) {
         return false;  // failure hold-off; the caller re-offers next tick
     }
     ++pushes_;
-    const bool ok = push_set("video0.bitrate=" + std::to_string(kbps));
+    const bool ok = push_set("video0.bitrate=" + std::to_string(kbps), now_ms);
     if (ok) {
         last_ = kbps;
         last_change_ms_ = now_ms;  // §9.6 settling window anchor
@@ -124,7 +145,9 @@ bool VencActuator::set_max_frame_size(uint32_t max_i_bytes,
     }
     ++pushes_;
     const bool ok = push_set("video0.maxIBytes=" + std::to_string(max_i_bytes) +
-                             "&video0.maxPBytes=" + std::to_string(max_p_bytes));
+                                 "&video0.maxPBytes=" +
+                                 std::to_string(max_p_bytes),
+                             now_ms);
     if (ok) {
         last_caps_ = {max_i_bytes, max_p_bytes};
         last_change_ms_ = now_ms;
@@ -146,7 +169,7 @@ bool VencActuator::set_fps(uint16_t fps, uint64_t now_ms) {
         return false;
     }
     ++pushes_;
-    const bool ok = push_set("video0.fps=" + std::to_string(fps));
+    const bool ok = push_set("video0.fps=" + std::to_string(fps), now_ms);
     if (ok) {
         last_fps_ = fps;
         last_change_ms_ = now_ms;

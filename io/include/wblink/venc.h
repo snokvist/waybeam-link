@@ -5,8 +5,12 @@
 // timeouts here so a wedged encoder cannot stall the event loop for long).
 //
 // VOLATILE-FIRST (§9.6 Pass 73): every push targets /api/v1/live/set (no
-// flash write); the first 404 latches a one-shot per-process fallback to the
-// persisting /api/v1/set (pre-live venc) and re-sends the push that drew it.
+// flash write); a 404 re-sends the push on the persisting /api/v1/set
+// (pre-live venc). The fallback latches only when that /set re-send
+// succeeds — venc 404s everything for seconds while its pipeline brings up
+// (httpd binds before routes register), and a permanent latch off one
+// transient 404 silently reintroduces the flash wear this exists to stop —
+// and a latched fallback re-probes /live/set every 10 min so it heals.
 // WRITE-ON-CHANGE stays load-bearing (§9.6): flash wear on the fallback
 // path, pointless HTTP churn on the live path. set_bitrate() is a no-op
 // when the target equals the last pushed value.
@@ -74,10 +78,17 @@ class VencActuator {
   private:
     bool http_get(const std::string& path);
     int http_get_status(const std::string& path);  // HTTP code; 0 = transport
-    bool push_set(const std::string& query);       // §9.6 volatile-first
+    // §9.6 volatile-first push with self-healing /set fallback (Pass 73).
+    bool push_set(const std::string& query, uint64_t now_ms);
+
+    // A latched fallback re-probes /live/set at this cadence: a venc
+    // upgrade (or a transient bring-up 404 wrongly read as pre-live) heals
+    // without a link restart.
+    static constexpr uint64_t kLiveReprobeMs = 600000;  // 10 min
 
     VencCfg cfg_;
     bool live_fallback_ = false;
+    uint64_t live_reprobe_ms_ = 0;
     std::optional<uint32_t> last_;
     std::optional<std::pair<uint32_t, uint32_t>> last_caps_;
     std::optional<uint16_t> last_fps_;

@@ -92,20 +92,41 @@ int main() {
         CHECK_EQ_U(act.failures(), 0);
     }
 
-    // A pre-live venc: 404 latches the fallback and the same push is re-sent
-    // on /set (no lost actuation); later pushes skip the volatile attempt.
+    // A pre-live venc: 404 + successful /set re-send latches the fallback
+    // (no lost actuation); later pushes skip the volatile attempt until the
+    // 10-min re-probe, which heals when /live/set starts answering.
     {
-        ScriptedVenc venc({404, 200, 200});
+        ScriptedVenc venc({404, 200, 200, 200});
         VencActuator act(cfg_for(venc.port()));
         CHECK(act.set_bitrate(8192, 1000));
         CHECK(act.live_fallback());
         CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
         CHECK(act.set_fps(60, 2000));
+        CHECK(act.live_fallback());
+        // Past the re-probe window the volatile route is tried again and a
+        // 2xx clears the latch.
+        CHECK(act.set_fps(90, 1000 + 600000));
+        CHECK(!act.live_fallback());
         const auto& p = venc.paths();
-        CHECK_EQ_U(p.size(), 3);
+        CHECK_EQ_U(p.size(), 4);
         CHECK(p[0] == "/api/v1/live/set?video0.bitrate=8192");
         CHECK(p[1] == "/api/v1/set?video0.bitrate=8192");
         CHECK(p[2] == "/api/v1/set?video0.fps=60");
+        CHECK(p[3] == "/api/v1/live/set?video0.fps=90");
+    }
+
+    // A transient 404 (venc bring-up: httpd bound, routes not yet
+    // registered — /set 404s too) must NOT latch the fallback.
+    {
+        ScriptedVenc venc({404, 404, 200});
+        VencActuator act(cfg_for(venc.port()));
+        CHECK(!act.set_bitrate(8192, 1000));
+        CHECK(!act.live_fallback());
+        CHECK(act.set_bitrate(8192, 2000));  // past holdoff: volatile again
+        CHECK(!act.live_fallback());
+        const auto& p = venc.paths();
+        CHECK_EQ_U(p.size(), 3);
+        CHECK(p[2] == "/api/v1/live/set?video0.bitrate=8192");
     }
 
     // A non-404 failure on the volatile path does NOT latch the fallback:
