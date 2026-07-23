@@ -1890,11 +1890,61 @@ Option C (a larger `verify_timeout_ms`) was NOT taken — the window stays
   video success is latched and the campaign closes, success or revert, only
   at the deadline (`kSuccess` / `kRevert`). Cost: ≤ ~8 extra 32-byte frames
   per campaign. The §15.5 `selection_state` flip to `committed` accordingly
-  moves from first-craft-video to the campaign close, ~150–500 ms later —
-  observability only, no behavior depends on the earlier flip.
+  moves from first-craft-video to the campaign close, ~150–500 ms later.
+  (Correction, review pass 2: the flip is NOT purely observability — the
+  `vehicle_command` 409 gate and the claim-busy `set_psk` rejection key on
+  it/`active()`, so REST commands are refused for the tail duration. All
+  transient and retryable; accepted.)
+- **Adversarial review pass 2 (2026-07-23, operator-directed) — two
+  confirmed HIGHs fixed, one MEDIUM implemented, one design gap raised:**
+  - **H1 (fixed):** the issuer's verify deadline was computed at the tick
+    that *emitted* kCommit — but the engine cannot tick during the app's
+    blocking serialized retunes, so "landing" was really "commit tick" and
+    a slow-enough multi-adapter retune (3 ears × 65–117 ms, class 0) would
+    open the window already expired: instant kRevert, zero beacons — the
+    exact pre-Pass-69 failure re-introduced. The two-adapter bench passed
+    only because 180 ms < the 300 ms class-0 budget. Deadline (and first
+    beacon) now computed lazily at the first tick IN kVerify, which is
+    landing by construction. §11.6 now defines "landing" normatively.
+  - **H2 (fixed):** `video_seen_` could latch before T_switch — the craft
+    cannot legitimately be on the target yet, so any such frame is a stale
+    ear (failed per-adapter retune keeps hearing the craft on the old
+    channel) or RF bleed — producing a false `kSuccess` that discards the
+    revert state and defeats both the failed-retune recovery and the
+    forged-`CSA_ARMED` backstop. `note_craft_video` now ignores anything
+    before `T_switch`, and a failed commit retune abandons the campaign
+    outright (`note_commit_failed` + restore previous selection) instead
+    of verifying with untrusted ears. §11.6 amended accordingly.
+  - **M1 (implemented):** the §11.6 flush MUST was MonAir-only; RadioAir
+    (devourer bench backend) now carries the same generation-stamped
+    flush (its reachable backlog is the process queue — devourer's USB
+    pipeline depth is ~ms and out of scope, like driver-internal buffers
+    on MonAir).
+  - **L2 (hardened):** the MonAir drain loop now survives EINTR and
+    zero-length reads.
+  - Tests added: late-landing window (H1), pre-T_switch video ignored
+    (H2), commit-retune-failure abandon, beacon leaves the §11.4
+    rate-limit anchor untouched, spectator (empty-PSK) beacon confirm.
 
 ## Open questions for the next pass
 
+- [ ] **Asymmetric confirm split on a mid-campaign feed stall (Pass 69
+      review pass 2, M2).** The craft's confirm signal is issuer presence
+      (the beacon — guaranteed), but the issuer's confirm is craft *video*
+      only. If the craft's RTP feed stalls after `CSA_ARMED` (a TX node
+      sends nothing without a feed), the craft confirms on a beacon and
+      COMMITs (terminal until reboot) while the issuer reverts on no-video
+      → ground on `prev_chan`, craft on `target_chan` until a re-scout/
+      re-claim (recoverable; binding releases after 90 s). Pre-Pass-69 both
+      sides reverted and reconverged. Counting the craft's unauthenticated
+      HEARTBEAT/ANNOUNCE as issuer-side confirmation would close it but
+      weakens the forged-`CSA_ARMED` backstop (those frames are forgeable).
+      Options: (a) accept + document (the window is one campaign, ~650 ms,
+      and a real craft venc always feeds); (b) issuer counts any
+      MAC-checkable craft frame (none exists today — would need an
+      authenticated craft beacon); (c) craft delays COMMIT until it hears
+      non-beacon issuer traffic (weakens the guaranteed-confirm just
+      ruled). Recommendation: (a). Needs an operator ruling.
 - [x] **RESOLVED (Pass 69, ruled A+B+D 2026-07-23)** — see the Pass 69 entry;
       original analysis kept below for the record.
       **Cross-channel claim rendezvous gap (root cause PROVEN 2026-07-23,

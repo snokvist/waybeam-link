@@ -1605,7 +1605,21 @@ direction** lets us make the strand class *never happen* rather than recover aft
   `prev_chan` (an issuer abandoning a failed campaign is not "unasked revert").
   The deadline anchors at **`max(T_switch, landing) + verify_timeout_ms`**
   (Pass 69): pre-positioning must not shrink the window in which the craft can
-  legitimately show up — the craft does not move before T_switch.
+  legitimately show up — the craft does not move before T_switch. **"Landing"
+  is the first engine tick after the commit retunes complete** — the engine
+  cannot observe time during a blocking retune, so the deadline (and the first
+  beacon) MUST be computed at that tick, never at the tick that emitted the
+  commit (else a slow multi-adapter retune can consume the whole window before
+  it opens — the exact pre-Pass-69 failure re-introduced).
+- **Video-verify counts nothing before T_switch (Pass 69, review pass 2):**
+  the craft does not move before T_switch, so a "craft video" frame observed
+  earlier is by definition old-channel traffic — a stale ear (e.g. a
+  per-adapter retune failure), RF bleed, or residue — and MUST NOT satisfy
+  the issuer's video-verify. A **failed commit retune abandons the campaign
+  outright** (restore the previous selection and ears, campaign dead): an
+  issuer that cannot trust the position of all its ears must not verify with
+  them. The craft that armed reverts on its own verify timeout and
+  reconverges on `prev_chan` — the §11.5 recovery this backstop exists for.
 - **Issuer verify hygiene (Pass 69):** on the commit retune the issuer MUST
   discard RX backlog captured before the retune completed (kernel socket and
   process queues), so video-verify counts only traffic actually received on
