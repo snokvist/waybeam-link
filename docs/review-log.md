@@ -1884,6 +1884,14 @@ Option C (a larger `verify_timeout_ms`) was NOT taken — the window stays
   beacon tail running until T_switch + t_revert_ms regardless of early
   video-verify success. Not implemented — needs an operator ruling if
   wanted.
+- **Beacon tail RULED (operator, 2026-07-23, same day):** the observation
+  above is accepted — the issuer keeps beaconing until its verify deadline
+  (= the close of the craft's window) regardless of early video-verify;
+  video success is latched and the campaign closes, success or revert, only
+  at the deadline (`kSuccess` / `kRevert`). Cost: ≤ ~8 extra 32-byte frames
+  per campaign. The §15.5 `selection_state` flip to `committed` accordingly
+  moves from first-craft-video to the campaign close, ~150–500 ms later —
+  observability only, no behavior depends on the earlier flip.
 
 ## Open questions for the next pass
 
