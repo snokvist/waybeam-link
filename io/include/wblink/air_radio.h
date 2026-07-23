@@ -90,6 +90,11 @@ class RadioAir {
     bool retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast);
     // §10.4/§11.2: re-program TX power at the current channel post-retune.
     bool reapply_tx_power(size_t adapter);
+    // §11.6 verify hygiene (Pass 69): discard the process-queue RX backlog
+    // captured before a retune completed, so post-retune consumers only see
+    // frames from the new channel. devourer's internal USB pipeline is below
+    // this boundary (same posture as driver buffers on kernel-monitor).
+    void flush_rx();
 
     struct AdapterCounters {
         std::string name;

@@ -319,7 +319,13 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
         // poll_once.
         const uint32_t gen = flush_gen.load(std::memory_order_acquire);
         if (gen != a->seen_gen) {
-            while (::recv(a->fd, buf.data(), buf.size(), MSG_DONTWAIT) > 0) {}
+            for (;;) {
+                const ssize_t r =
+                    ::recv(a->fd, buf.data(), buf.size(), MSG_DONTWAIT);
+                if (r > 0) continue;                       // discard backlog
+                if (r < 0 && errno == EINTR) continue;     // retry
+                break;  // 0 or EAGAIN/other: drained
+            }
             a->seen_gen = gen;
             continue;  // reload gen — flushes may stack
         }

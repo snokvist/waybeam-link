@@ -1260,6 +1260,9 @@ struct AirBackend {
                 }
                 radio->reapply_tx_power(i);  // §11.2 post-retune TXAGC
             }
+            // Pass 69 §11.6 verify hygiene: pre-retune backlog is
+            // old-channel residue — it must never satisfy a video-verify.
+            radio->flush_rx();
             return ok;
         }
 #endif
@@ -3987,9 +3990,31 @@ int run_rx(const Loaded& l) {
             }
             case CsaIssuer::IssuerAction::Kind::kCommit:
                 if (!air.value->retune_all(ia.chan_mhz, ia.bw, ia.fast)) {
+                    // §11.6 review pass 2: an issuer that cannot trust the
+                    // position of its ears must not verify with them —
+                    // abandon the campaign; the armed craft reverts on its
+                    // own verify timeout and reconverges on prev_chan.
                     std::fprintf(stderr, "csa: commit retune to %u MHz "
-                                         "FAILED\n",
-                                 ia.chan_mhz);  // Pass 69: never silent
+                                         "FAILED — campaign abandoned\n",
+                                 ia.chan_mhz);
+                    issuer.note_commit_failed();
+                    if (previous_selection) {
+                        air.value->retune_all(previous_selection->chan,
+                                              previous_selection->bw,
+                                              ia.fast);
+                        air.value->set_stamp_net_id(
+                            previous_selection->net_id);
+                        air.value->set_filter_net_id(
+                            previous_selection->net_id);
+                        apply_selection(*previous_selection);
+                        operating_chan = previous_selection->chan;
+                        selection_state = previous_selection_state;
+                        scout.set_rest_chan(active_selection.chan);
+                        scout.set_rest_filter(active_selection.net_id);
+                    }
+                    pending_selection.reset();
+                    previous_selection.reset();
+                    break;
                 }
                 operating_chan = ia.chan_mhz;
                 if (pending_selection) {
