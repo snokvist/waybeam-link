@@ -111,6 +111,13 @@ class MonAir {
     // follower switch and the scout sweep.
     bool retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast);
     bool reapply_tx_power(size_t adapter);
+    // §11.6 issuer verify hygiene (Pass 69): discard RX backlog captured
+    // before a retune completed — kernel socket buffers and the process
+    // queue — so post-retune consumers only see frames actually received on
+    // the new channel (the Pass 66 stale-drain artifact must not satisfy a
+    // video-verify). Called after retune_all; a handful of genuinely fresh
+    // frames may be discarded with the backlog, which the data path absorbs.
+    void flush_rx();
 
     struct AdapterCounters {
         std::string name;

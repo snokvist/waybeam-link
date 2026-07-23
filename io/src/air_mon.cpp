@@ -229,6 +229,7 @@ struct MonAir::Impl {
         int8_t rssi = -128;
         uint32_t tsfl = 0;
         uint8_t net_id = 0;  // §15.5a candidate/occupancy attribution
+        uint32_t gen = 0;    // flush generation at recv time (Pass 69)
         std::vector<uint8_t> data;
     };
     struct Adapter {
@@ -245,6 +246,7 @@ struct MonAir::Impl {
         uint32_t kernel_drop_last = 0;  // RX thread only
         uint32_t rng = 1;
         uint64_t iface_rx_baseline = 0;  // sysfs rx_packets at socket open
+        uint32_t seen_gen = 0;           // RX thread only (Pass 69 flush)
     };
 
     MonAirCfg cfg;
@@ -268,6 +270,10 @@ struct MonAir::Impl {
     std::deque<RxFrame> queue;
     std::atomic<bool> running{true};
     int ready_fd = -1;
+    // Pass 69 flush generation: bumped by flush_rx(); RX threads drain their
+    // socket backlog on a bump and stamp frames with the generation loaded
+    // BEFORE the recv, so poll_once can drop anything captured pre-flush.
+    std::atomic<uint32_t> flush_gen{0};
 
     // TX state — main thread only.
     uint16_t seq = 0;
@@ -306,6 +312,23 @@ struct MonAir::Impl {
 void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
     std::vector<uint8_t> buf(kRxBufLen);
     while (running.load(std::memory_order_relaxed)) {
+        // Pass 69: on a flush-generation bump, drain the kernel socket
+        // backlog (frames captured on the pre-retune channel) before
+        // resuming. The generation is loaded BEFORE the blocking recv so a
+        // frame that raced the bump carries the stale gen and is dropped at
+        // poll_once.
+        const uint32_t gen = flush_gen.load(std::memory_order_acquire);
+        if (gen != a->seen_gen) {
+            for (;;) {
+                const ssize_t r =
+                    ::recv(a->fd, buf.data(), buf.size(), MSG_DONTWAIT);
+                if (r > 0) continue;                       // discard backlog
+                if (r < 0 && errno == EINTR) continue;     // retry
+                break;  // 0 or EAGAIN/other: drained
+            }
+            a->seen_gen = gen;
+            continue;  // reload gen — flushes may stack
+        }
         iovec iov{};
         iov.iov_base = buf.data();
         iov.iov_len = buf.size();
@@ -362,6 +385,7 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
         f.rssi = rssi;
         f.tsfl = rt->tsf_us ? static_cast<uint32_t>(*rt->tsf_us) : 0u;
         f.net_id = d->net_id;
+        f.gen = gen;  // Pass 69: pre-recv generation, see loop top
         f.data.assign(d->payload, d->payload + d->payload_len);
         a->rx_frames.fetch_add(1, std::memory_order_relaxed);
         {
@@ -574,7 +598,12 @@ int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
         local.swap(impl_->queue);
     }
     int delivered = 0;
+    const uint32_t cur_gen =
+        impl_->flush_gen.load(std::memory_order_acquire);
     for (const auto& f : local) {
+        if (f.gen != cur_gen) {
+            continue;  // Pass 69: captured before the last flush_rx()
+        }
         AirRxMeta meta;
         meta.adapter_id = f.adapter;
         meta.rssi = f.rssi;
@@ -665,6 +694,16 @@ bool MonAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
 bool MonAir::reapply_tx_power(size_t adapter) {
     (void)adapter;
     return true;
+}
+
+void MonAir::flush_rx() {
+    // Pass 69 §11.6 verify hygiene. Bump first so any frame the RX threads
+    // are mid-enqueueing carries a stale generation, then clear the process
+    // queue; each RX thread drains its own kernel socket on noticing the
+    // bump (rx_loop top).
+    impl_->flush_gen.fetch_add(1, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    impl_->queue.clear();
 }
 
 MonAir::AdapterCounters MonAir::counters(size_t adapter) const {

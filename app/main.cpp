@@ -1242,6 +1242,9 @@ struct AirBackend {
                 ok = tuned && ok;
                 if (tuned) mon->reapply_tx_power(i);
             }
+            // Pass 69 §11.6 verify hygiene: pre-retune backlog is
+            // old-channel residue — it must never satisfy a video-verify.
+            mon->flush_rx();
             return ok;
         }
 #if WBLINK_RADIO
@@ -1257,6 +1260,9 @@ struct AirBackend {
                 }
                 radio->reapply_tx_power(i);  // §11.2 post-retune TXAGC
             }
+            // Pass 69 §11.6 verify hygiene: pre-retune backlog is
+            // old-channel residue — it must never satisfy a video-verify.
+            radio->flush_rx();
             return ok;
         }
 #endif
@@ -2970,7 +2976,10 @@ int run_tx(const Loaded& l) {
         const CsaAction ca = csa.tick(now_us_it);
         if (ca.kind != CsaAction::Kind::kNone) {
             tx.set_csa_armed(false);  // switching now — the ACK window is over
-            air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast);
+            if (!air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast)) {
+                std::fprintf(stderr, "csa: retune to %u MHz FAILED\n",
+                             ca.chan_mhz);  // Pass 69: never silent
+            }
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
                          ca.chan_mhz);
         }
@@ -3818,12 +3827,10 @@ int run_rx(const Loaded& l) {
                 if ((v->hdr.data_flags & data_flags::kCsaArmed) != 0) {
                     issuer.note_craft_armed(now_us_it);  // §11.6 implicit ACK
                 }
+                // §11.6 beacon tail: success is latched here; the campaign
+                // (and the selection_state flip) closes at the deadline via
+                // the kSuccess action below.
                 issuer.note_craft_video(now_us_it);
-                if (selection_state == "verifying" && !issuer.active()) {
-                    selection_state = "committed";
-                    pending_selection.reset();
-                    previous_selection.reset();
-                }
                 if (cache_store) {  // §14.3: retain the verbatim wire packet
                     cache_store->note_data(*v, d, n);
                 }
@@ -3982,7 +3989,33 @@ int run_rx(const Loaded& l) {
                 break;
             }
             case CsaIssuer::IssuerAction::Kind::kCommit:
-                air.value->retune_all(ia.chan_mhz, ia.bw, ia.fast);
+                if (!air.value->retune_all(ia.chan_mhz, ia.bw, ia.fast)) {
+                    // §11.6 review pass 2: an issuer that cannot trust the
+                    // position of its ears must not verify with them —
+                    // abandon the campaign; the armed craft reverts on its
+                    // own verify timeout and reconverges on prev_chan.
+                    std::fprintf(stderr, "csa: commit retune to %u MHz "
+                                         "FAILED — campaign abandoned\n",
+                                 ia.chan_mhz);
+                    issuer.note_commit_failed();
+                    if (previous_selection) {
+                        air.value->retune_all(previous_selection->chan,
+                                              previous_selection->bw,
+                                              ia.fast);
+                        air.value->set_stamp_net_id(
+                            previous_selection->net_id);
+                        air.value->set_filter_net_id(
+                            previous_selection->net_id);
+                        apply_selection(*previous_selection);
+                        operating_chan = previous_selection->chan;
+                        selection_state = previous_selection_state;
+                        scout.set_rest_chan(active_selection.chan);
+                        scout.set_rest_filter(active_selection.net_id);
+                    }
+                    pending_selection.reset();
+                    previous_selection.reset();
+                    break;
+                }
                 operating_chan = ia.chan_mhz;
                 if (pending_selection) {
                     apply_selection(*pending_selection);
@@ -3992,13 +4025,38 @@ int run_rx(const Loaded& l) {
                 }
                 std::fprintf(stderr, "csa: commit -> %u MHz\n", ia.chan_mhz);
                 break;
+            case CsaIssuer::IssuerAction::Kind::kSendBeacon: {
+                // §11.6 rendezvous beacon (Pass 69) — campaign timing, never
+                // quiet-gap-held, same as the copies.
+                uint8_t frame[32];
+                if (encode_csa(ia.pkt, frame, sizeof(frame)) == 32) {
+                    air.value->inject(frame, 32);
+                }
+                break;
+            }
+            case CsaIssuer::IssuerAction::Kind::kSuccess:
+                // §11.6 beacon tail complete: craft video was seen inside the
+                // window and the campaign closed at the deadline.
+                if (selection_state == "verifying") {
+                    selection_state = "committed";
+                }
+                pending_selection.reset();
+                previous_selection.reset();
+                std::fprintf(stderr, "csa: campaign confirmed -> %u MHz\n",
+                             operating_chan);
+                break;
             case CsaIssuer::IssuerAction::Kind::kRevert:
                 // Pass 67: the craft reverts to the campaign's prev_chan; this
                 // receiver restores its prior vehicle tuple, which may be on a
                 // different channel when switching between vehicles.
                 if (previous_selection) {
-                    air.value->retune_all(previous_selection->chan,
-                                          previous_selection->bw, ia.fast);
+                    if (!air.value->retune_all(previous_selection->chan,
+                                               previous_selection->bw,
+                                               ia.fast)) {
+                        std::fprintf(stderr, "csa: revert retune to %u MHz "
+                                             "FAILED\n",
+                                     previous_selection->chan);
+                    }
                     air.value->set_stamp_net_id(previous_selection->net_id);
                     air.value->set_filter_net_id(previous_selection->net_id);
                     apply_selection(*previous_selection);
@@ -4016,7 +4074,12 @@ int run_rx(const Loaded& l) {
                 // §15.5a (Pass 65): a failed claim (no CSA_ARMED) rolls every ear
                 // and the net_id stamp/filter back to the resting state, so it's a
                 // clean no-op rather than stranding a diversity ear on the craft.
-                air.value->retune_all(active_selection.chan, op_bw_mhz, false);
+                if (!air.value->retune_all(active_selection.chan, op_bw_mhz,
+                                           false)) {
+                    std::fprintf(stderr, "csa: abort retune to %u MHz "
+                                         "FAILED\n",
+                                 active_selection.chan);  // Pass 69
+                }
                 air.value->set_stamp_net_id(active_selection.net_id);
                 air.value->set_filter_net_id(active_selection.net_id);
                 operating_chan = active_selection.chan;

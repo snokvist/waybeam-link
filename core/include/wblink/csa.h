@@ -12,8 +12,10 @@
 //    jump-failed revert; the §11.5a command-source binding releases after
 //    bind_release_ms of issuer silence with no channel change.
 //  - CsaIssuer (ground): N=5 decrementing-dt copies @ 20 ms, MAC'd; commits
-//    its own retune only after the craft's CSA_ARMED flag (§11.6), aborts on
-//    ack timeout, reverts on no craft video after commit.
+//    its own retune immediately on the craft's CSA_ARMED flag (§11.6
+//    pre-position, Pass 69), then re-injects the campaign as zero-dt
+//    rendezvous beacons until it hears craft video; aborts on ack timeout,
+//    reverts on no craft video by max(T_switch, landing) + verify_timeout.
 //
 // Neither touches a radio: they emit Actions the app maps onto RadioAir
 // (FastRetune / SetMonitorChannel + ReApplyTxPower) — or onto nothing, for
@@ -127,16 +129,24 @@ class CsaIssuer {
 
     // Craft's CSA_ARMED data flag observed (from the latched craft).
     void note_craft_armed(uint64_t now_us);
-    // Valid craft video/data seen (only meaningful in VERIFY, after commit).
+    // Valid craft video/data seen (only meaningful in VERIFY, after commit;
+    // ignored before T_switch — the craft cannot be on the target yet,
+    // §11.6 review pass 2).
     void note_craft_video(uint64_t now_us);
+    // The app's commit retune failed — abandon the campaign rather than
+    // verify with untrusted ears (§11.6 review pass 2). The armed craft
+    // reverts on its own verify timeout.
+    void note_commit_failed();
 
     struct IssuerAction {
         enum class Kind : uint8_t {
             kNone,
-            kSendCopy,  // inject pkt (already MAC'd)
-            kCommit,    // retune own adapters to chan/bw
-            kRevert,    // retune own adapters back to prev
-            kAbort,     // no CSA_ARMED — stay, campaign dead
+            kSendCopy,    // inject pkt (already MAC'd)
+            kCommit,      // retune own adapters to chan/bw
+            kSendBeacon,  // §11.6 rendezvous beacon (already MAC'd, dt=0)
+            kSuccess,     // campaign confirmed at the deadline (beacon tail)
+            kRevert,      // retune own adapters back to prev
+            kAbort,       // no CSA_ARMED — stay, campaign dead
         };
         Kind kind = Kind::kNone;
         CsaPacket pkt{};
@@ -173,7 +183,10 @@ class CsaIssuer {
     uint64_t started_us_ = 0;
     uint64_t switch_at_us_ = 0;
     uint64_t verify_deadline_us_ = 0;
+    uint64_t next_beacon_us_ = 0;  // §11.6 rendezvous beacon cadence
     bool armed_seen_ = false;
+    bool video_seen_ = false;  // latched in VERIFY; campaign closes at the
+                               // deadline either way (§11.6 beacon tail)
 };
 
 }  // namespace wblink

@@ -1824,9 +1824,141 @@ sections, still under the same pending ruling:
   is additive); the ARQ-off "no NACKs" claim is bounded by in-flight flagged
   blocks draining (one deadline window).
 
+## Pass 69 — CSA cross-channel rendezvous: pre-position + beacon (ruled 2026-07-23)
+
+**Operator ruling (2026-07-23): options A + B + D from the open question
+below; spec amendment first, then implementation, then rig verification.**
+Option C (a larger `verify_timeout_ms`) was NOT taken — the window stays
+150 ms; the margins are now structural, not padded.
+
+- **A — issuer pre-positions (§11.6).** The issuer commits (retunes all its
+  ears to `target_chan`) immediately upon seeing `CSA_ARMED`, not at
+  T_switch. After the copies are out and the craft has ACKed, the issuer has
+  no further business on the old channel. With class-1 dt = 500 ms and the
+  ACK arriving ~60–100 ms into the campaign, the issuer now lands ~250–350 ms
+  before the craft moves, instead of 117–184 ms after.
+- **B — rendezvous beacon (§11.1/§11.4/§11.5/§11.6).** From landing until
+  video-verify success or deadline, the issuer re-injects the accepted
+  campaign packet with `csa_seq = 0`, `dt_to_switch_ms = 0`, MAC recomputed,
+  at the §11.2 copy spacing. `dt = 0` is now a normative §11.4 accept guard
+  (never arms), which makes the beacon un-forgeable-into-an-arm by
+  construction. The craft's VERIFY confirms on the first beacon matching the
+  armed campaign's `(originator, session, csa_nonce)`; in every other state a
+  zero-dt CSA is dropped with no side effects (no §11.5a binding refresh — a
+  recorded beacon must not hold the binding alive). New §13 row.
+- **Deadline anchor (§11.6).** Issuer revert-on-no-video deadline =
+  `max(T_switch, landing) + verify_timeout_ms` — pre-positioning must not
+  shrink the window in which the craft can legitimately appear (it does not
+  move before T_switch). Previously the deadline was anchored at the commit
+  tick and had already lapsed inside the blocking retune (the observed
+  false-commit-or-revert coin flip).
+- **D — io hygiene.** (i) On the commit retune the issuer flushes RX backlog
+  captured before the retune completed (kernel socket + process queues), so
+  video-verify counts only genuine `target_chan` traffic — closes the Pass 66
+  stale-drain false commit on the issuer side. (ii) `retune_all` failures are
+  logged at every call site (they were silently ignored). The "parallel/
+  async retunes" half of D was NOT implemented: with pre-positioning the
+  landing latency is no longer on the critical path, and threading the
+  retunes would buy nothing but complexity.
+- **Timeline after the fix (measured driver costs, class 1):** claim t0 →
+  copies t0..t0+80 ms → `CSA_ARMED` ~t0+100 ms → issuer lands ≤t0+300 ms,
+  beacons every copy-spacing → craft retunes at t0+500 ms (+~30 ms set-freq)
+  → first beacon heard within one spacing → COMMITTED ~t0+550 ms; issuer
+  hears craft video ~t0+540 ms → COMMITTED. Both margins >100 ms against a
+  150 ms window.
+- **HARDWARE-VERIFIED 2026-07-23** on the x86 ground (EU uplink + CU
+  diversity) + SSC338Q craft + Ethernet cache rig. Five cross-channel moves
+  committed on all three nodes with video flowing and the cache following
+  each epoch: quickconnect 5805→5825 (class 1: claim→landing 265 ms, beacons
+  at 20 ms spacing bridging the craft's arrival), `/csa` 5825→5745 and
+  5745→5805 (class 0, dt 126/147 ms), and menu-path (`/menu/exec`) jumps
+  5805→5825→5805 on the final clean build. Same-channel claims and the
+  Pass 65 abort-rollback (4× — stale-candidate claims on the wrong channel
+  abort cleanly, link undisturbed) also exercised. **One observation raised
+  for a possible hardening ruling:** the issuer stops beaconing on
+  `note_craft_video`, which fires the instant the craft lands — in every
+  verified move the craft's confirm actually rode the ground's first
+  post-arrival report inside the window, never a beacon. Robust in practice
+  (pre-positioning keeps the issuer present with a warm report path), but
+  the "guaranteed signal in the craft's window" would be literal only with a
+  beacon tail running until T_switch + t_revert_ms regardless of early
+  video-verify success. Not implemented — needs an operator ruling if
+  wanted.
+- **Beacon tail RULED (operator, 2026-07-23, same day):** the observation
+  above is accepted — the issuer keeps beaconing until its verify deadline
+  (= the close of the craft's window) regardless of early video-verify;
+  video success is latched and the campaign closes, success or revert, only
+  at the deadline (`kSuccess` / `kRevert`). Cost: ≤ ~8 extra 32-byte frames
+  per campaign. The §15.5 `selection_state` flip to `committed` accordingly
+  moves from first-craft-video to the campaign close, ~150–500 ms later.
+  (Correction, review pass 2: the flip is NOT purely observability — the
+  `vehicle_command` 409 gate and the claim-busy `set_psk` rejection key on
+  it/`active()`, so REST commands are refused for the tail duration. All
+  transient and retryable; accepted.)
+- **Adversarial review pass 2 (2026-07-23, operator-directed) — two
+  confirmed HIGHs fixed, one MEDIUM implemented, one design gap raised:**
+  - **H1 (fixed):** the issuer's verify deadline was computed at the tick
+    that *emitted* kCommit — but the engine cannot tick during the app's
+    blocking serialized retunes, so "landing" was really "commit tick" and
+    a slow-enough multi-adapter retune (3 ears × 65–117 ms, class 0) would
+    open the window already expired: instant kRevert, zero beacons — the
+    exact pre-Pass-69 failure re-introduced. The two-adapter bench passed
+    only because 180 ms < the 300 ms class-0 budget. Deadline (and first
+    beacon) now computed lazily at the first tick IN kVerify, which is
+    landing by construction. §11.6 now defines "landing" normatively.
+  - **H2 (fixed):** `video_seen_` could latch before T_switch — the craft
+    cannot legitimately be on the target yet, so any such frame is a stale
+    ear (failed per-adapter retune keeps hearing the craft on the old
+    channel) or RF bleed — producing a false `kSuccess` that discards the
+    revert state and defeats both the failed-retune recovery and the
+    forged-`CSA_ARMED` backstop. `note_craft_video` now ignores anything
+    before `T_switch`, and a failed commit retune abandons the campaign
+    outright (`note_commit_failed` + restore previous selection) instead
+    of verifying with untrusted ears. §11.6 amended accordingly.
+  - **M1 (implemented):** the §11.6 flush MUST was MonAir-only; RadioAir
+    (devourer bench backend) now carries the same generation-stamped
+    flush (its reachable backlog is the process queue — devourer's USB
+    pipeline depth is ~ms and out of scope, like driver-internal buffers
+    on MonAir).
+  - **L2 (hardened):** the MonAir drain loop now survives EINTR and
+    zero-length reads.
+  - Tests added: late-landing window (H1), pre-T_switch video ignored
+    (H2), commit-retune-failure abandon, beacon leaves the §11.4
+    rate-limit anchor untouched, spectator (empty-PSK) beacon confirm.
+  - **H1b (found by the post-review verification sweep, fixed):** the
+    FOLLOWER had the same anchor defect as H1 — its verify deadline was
+    set at the tick that ordered its retune, so the craft's own blocking
+    `iw` set-freq (+ any post-retune RX dead-time) burned the window from
+    the inside. On a class-0 campaign (150 ms dt) the craft's window
+    closed ~40 ms after the issuer's landing; a 5825→5745 `/csa` jump
+    reverted+unbound the craft while the issuer (legitimately hearing the
+    craft's verify-window video on-target, post-T_switch) confirmed — a
+    strand the pre-review build dodged only by racing. §11.5 now opens
+    the follower window at its landing, mirroring §11.6. Verified by
+    repeated class-0 jumps in the final sweep.
+
 ## Open questions for the next pass
 
-- [ ] **Cross-channel claim rendezvous gap (root cause PROVEN 2026-07-23,
+- [ ] **Asymmetric confirm split on a mid-campaign feed stall (Pass 69
+      review pass 2, M2).** The craft's confirm signal is issuer presence
+      (the beacon — guaranteed), but the issuer's confirm is craft *video*
+      only. If the craft's RTP feed stalls after `CSA_ARMED` (a TX node
+      sends nothing without a feed), the craft confirms on a beacon and
+      COMMITs (terminal until reboot) while the issuer reverts on no-video
+      → ground on `prev_chan`, craft on `target_chan` until a re-scout/
+      re-claim (recoverable; binding releases after 90 s). Pre-Pass-69 both
+      sides reverted and reconverged. Counting the craft's unauthenticated
+      HEARTBEAT/ANNOUNCE as issuer-side confirmation would close it but
+      weakens the forged-`CSA_ARMED` backstop (those frames are forgeable).
+      Options: (a) accept + document (the window is one campaign, ~650 ms,
+      and a real craft venc always feeds); (b) issuer counts any
+      MAC-checkable craft frame (none exists today — would need an
+      authenticated craft beacon); (c) craft delays COMMIT until it hears
+      non-beacon issuer traffic (weakens the guaranteed-confirm just
+      ruled). Recommendation: (a). Needs an operator ruling.
+- [x] **RESOLVED (Pass 69, ruled A+B+D 2026-07-23)** — see the Pass 69 entry;
+      original analysis kept below for the record.
+      **Cross-channel claim rendezvous gap (root cause PROVEN 2026-07-23,
       instrumented rerun after Pass 68; supersedes the earlier retune-latency
       wording — the operator's "iw is 5–10 ms" objection was correct).**
       A timestamping `iw` interposer on both ends showed, per T_switch-anchored

@@ -56,6 +56,21 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     if (lock && *lock != pkt.prefix.originator) {
         return false;
     }
+    // §11.6 rendezvous beacon (Pass 69): dt == 0 never arms. A MAC-valid
+    // copy of the currently armed campaign confirms a pending VERIFY exactly
+    // like valid traffic; in any other state it is a silent drop with no
+    // side effects (no §11.5a binding refresh — a recorded beacon must not
+    // hold the binding alive).
+    if (pkt.dt_to_switch_ms == 0) {
+        if (state_ == State::kVerify &&
+            pkt.prefix.originator == campaign_.prefix.originator &&
+            pkt.prefix.session_id == campaign_.prefix.session_id &&
+            pkt.csa_nonce == campaign_.csa_nonce) {
+            state_ = State::kCommitted;
+            last_bound_rx_us_ = now_us;
+        }
+        return false;
+    }
     const auto key = std::make_pair(pkt.prefix.originator,
                                     pkt.prefix.session_id);
     const auto it = last_applied_.find(key);
@@ -68,9 +83,6 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     if (last_accept_us_ != 0 &&
         now_us - last_accept_us_ <
             static_cast<uint64_t>(policy_.min_interval_ms) * 1000) {
-        return false;
-    }
-    if (pkt.dt_to_switch_ms == 0) {
         return false;
     }
 
@@ -115,14 +127,21 @@ CsaAction CsaFollower::tick(uint64_t now_us) {
                 a.bw = campaign_.target_bw;
                 a.fast = campaign_.retune_class == 0;
                 a.power_intent = campaign_.power_intent;
-                const uint32_t vt = campaign_.t_revert_ms != 0
-                                        ? campaign_.t_revert_ms
-                                        : policy_.verify_timeout_ms;
-                verify_deadline_us_ = now_us + static_cast<uint64_t>(vt) * 1000;
+                // §11.5 (Pass 69 H1b): the verify window opens at LANDING —
+                // the first tick after the blocking retune — computed lazily
+                // in kVerify (0 = not yet landed), so the retune itself
+                // cannot burn the window from the inside.
+                verify_deadline_us_ = 0;
                 state_ = State::kVerify;
             }
             break;
         case State::kVerify:
+            if (verify_deadline_us_ == 0) {
+                const uint32_t vt = campaign_.t_revert_ms != 0
+                                        ? campaign_.t_revert_ms
+                                        : policy_.verify_timeout_ms;
+                verify_deadline_us_ = now_us + static_cast<uint64_t>(vt) * 1000;
+            }
             if (now_us >= verify_deadline_us_) {
                 // §11.5 jump-failed backout: the retune landed on a dead
                 // channel — revert to prev_chan, drop the incomplete claim,
@@ -212,6 +231,7 @@ bool CsaIssuer::start(const CommonPrefix& prefix, uint16_t target_chan_mhz,
     copies_left_ = kCopies;
     next_copy_us_ = now_us;
     armed_seen_ = false;
+    video_seen_ = false;
     state_ = State::kAnnounce;
     return true;
 }
@@ -222,9 +242,25 @@ void CsaIssuer::note_craft_armed(uint64_t) {
     }
 }
 
-void CsaIssuer::note_craft_video(uint64_t) {
+void CsaIssuer::note_craft_video(uint64_t now_us) {
+    // §11.6 review pass 2: nothing before T_switch can be legitimate craft
+    // video on the target — the craft does not move until then; an earlier
+    // frame is a stale ear (failed per-adapter retune) or RF bleed and must
+    // not satisfy the backstop.
+    if (state_ == State::kVerify && now_us >= switch_at_us_) {
+        // §11.6 beacon tail: success is latched, not acted on — the beacons
+        // keep blanketing the craft's verify window and the campaign closes
+        // at the deadline (kSuccess), never early.
+        video_seen_ = true;
+    }
+}
+
+void CsaIssuer::note_commit_failed() {
+    // §11.6 review pass 2: a failed commit retune means the issuer cannot
+    // trust the position of its ears — abandon the campaign rather than
+    // verify with them. The armed craft reverts on its own verify timeout.
     if (state_ == State::kVerify) {
-        state_ = State::kIdle;  // campaign succeeded
+        state_ = State::kIdle;
     }
 }
 
@@ -250,29 +286,47 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
             }
             break;
         case State::kAwaitAck:
-            // §11.6: commit only after CSA_ARMED, at T_switch. No flag by
-            // ack_timeout → abort and stay (the craft that DID arm reverts on
-            // its own verify timeout and reconverges on prev_chan).
-            if (armed_seen_ && now_us >= switch_at_us_) {
+            // §11.6 pre-position (Pass 69): commit immediately on CSA_ARMED —
+            // the copies are out, the craft has ACKed, there is no further
+            // business on the old channel. Waiting for T_switch made both
+            // retunes simultaneous and the issuer unhearable inside the
+            // craft's verify window. No flag by ack_timeout → abort and stay
+            // (the craft that DID arm reverts on its own verify timeout and
+            // reconverges on prev_chan).
+            if (armed_seen_) {
                 a.kind = IssuerAction::Kind::kCommit;
                 a.chan_mhz = tmpl_.target_chan;
                 a.bw = tmpl_.target_bw;
                 a.fast = tmpl_.retune_class == 0;
                 a.power_intent = tmpl_.power_intent;
-                verify_deadline_us_ =
-                    now_us +
-                    static_cast<uint64_t>(policy_.verify_timeout_ms) * 1000;
+                // §11.6: the deadline anchors at max(T_switch, landing), and
+                // "landing" is the first tick IN kVerify — the engine cannot
+                // observe time during the app's blocking retunes, so it is
+                // computed lazily there (0 = not yet landed), never here.
+                verify_deadline_us_ = 0;
                 state_ = State::kVerify;
-            } else if (!armed_seen_ &&
-                       now_us - started_us_ >=
-                           static_cast<uint64_t>(policy_.ack_timeout_ms) *
-                               1000) {
+            } else if (now_us - started_us_ >=
+                       static_cast<uint64_t>(policy_.ack_timeout_ms) * 1000) {
                 a.kind = IssuerAction::Kind::kAbort;
                 state_ = State::kIdle;
             }
             break;
         case State::kVerify:
+            if (verify_deadline_us_ == 0) {
+                // §11.6 landing: the first tick after the app's blocking
+                // commit retunes — the deadline and beacon cadence open here.
+                verify_deadline_us_ =
+                    (now_us > switch_at_us_ ? now_us : switch_at_us_) +
+                    static_cast<uint64_t>(policy_.verify_timeout_ms) * 1000;
+                next_beacon_us_ = now_us;
+            }
             if (now_us >= verify_deadline_us_) {
+                if (video_seen_) {
+                    // §11.6 beacon tail complete — campaign succeeded.
+                    a.kind = IssuerAction::Kind::kSuccess;
+                    state_ = State::kIdle;
+                    break;
+                }
                 // Issuer revert-on-no-video (§11.6 backstop, also covers a
                 // forged CSA_ARMED making us commit to a ghost).
                 a.kind = IssuerAction::Kind::kRevert;
@@ -281,6 +335,20 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
                 a.fast = tmpl_.retune_class == 0;
                 a.power_intent = tmpl_.power_intent;
                 state_ = State::kIdle;
+            } else if (now_us >= next_beacon_us_) {
+                // §11.6 rendezvous beacon (Pass 69): re-inject the accepted
+                // campaign with csa_seq = 0 and dt = 0 (never arms, §11.4) at
+                // copy spacing until the craft's video confirms the switch —
+                // the guaranteed issuer-present signal inside the craft's
+                // verify window.
+                a.kind = IssuerAction::Kind::kSendBeacon;
+                a.pkt = tmpl_;
+                a.pkt.csa_seq = 0;
+                a.pkt.dt_to_switch_ms = 0;
+                if (const auto m = mac_of(a.pkt, policy_.psk)) {
+                    a.pkt.csa_mac = *m;
+                }
+                next_beacon_us_ = now_us + kCopySpacingUs;
             }
             break;
         case State::kIdle:
