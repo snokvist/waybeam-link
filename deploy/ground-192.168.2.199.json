@@ -39,18 +39,34 @@
     },
     "csa": {
       "home_chan": 5805,
-      "channel_allowlist": [5180, 5220, 5745, 5765, 5785, 5805, 5825]
+      "channel_allowlist": [
+        5180,
+        5220,
+        5745,
+        5765,
+        5785,
+        5805,
+        5825
+      ]
     }
   },
   "scout": {
     "dwell_ms": 300,
-    "channels": [5180, 5220, 5745, 5765, 5785, 5805, 5825]
+    "channels": [
+      5180,
+      5220,
+      5745,
+      5765,
+      5785,
+      5805,
+      5825
+    ]
   },
   "cache": {
     "repair": {
       "enabled": true,
       "stream_id": 0,
-      "listen": "192.168.2.199:5802",
+      "listen": "0.0.0.0:5802",
       "caches": [
         {
           "originator": 33,

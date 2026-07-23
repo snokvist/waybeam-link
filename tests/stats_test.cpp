@@ -140,6 +140,9 @@ StatsSnapshot sample_snapshot() {
     s.link.cmd_selector_frozen = false;
     s.link.cmd_fps_ladder = true;
     s.link.cmd_last_nonce = 3054418130;
+    s.link.cmd_fps_select = 2;
+    s.link.cmd_resolution_select = 0;
+    s.link.cmd_framing_select = 0;
     s.link.vcmd_state = "acked";
     s.link.vcmd_nonce = 3054418130;
     s.link.arq_rx_enabled = false;
@@ -224,6 +227,8 @@ const char* kGolden =
     "\"venc_fps_ladder_state\":\"HOLD\","
     "\"cmd_arq\":true,\"cmd_selector_frozen\":false,"
     "\"cmd_fps_ladder\":true,\"cmd_last_nonce\":3054418130,"
+    "\"cmd_fps_select\":2,\"cmd_resolution_select\":0,"
+    "\"cmd_framing_select\":0,"
     "\"vcmd_state\":\"acked\",\"vcmd_nonce\":3054418130,"
     "\"arq_rx_enabled\":false}}\n";
 

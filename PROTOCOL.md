@@ -1671,7 +1671,20 @@ this channel. Wire format is §3.14; everything below is behaviour.
 | `0x01` | `ARQ` | 0=off, 1=on | **off:** the craft TX stamps no `ARQ`/`PFRAME_ARQ` flags on future DATA and serves no incoming NACKs. Receivers then generate no NACKs by construction (§6.4 NACKs only flagged seqs) and the §14.3 nack-grace machinery stops arming — after already-stamped in-flight blocks drain (one deadline window), no uplink or cache churn for a knob receivers were never told about. FEC repair symbols (§14.1, forward) and §3.9 decoder recovery are **unaffected**. **on:** restores the boot-configured behaviour (per-stream `arq_mode`, §4.1); on a craft whose boot config flags nothing, `on` is an acked no-op, not `REJECTED` |
 | `0x02` | `SELECTOR` | 0=run, 1=freeze | **freeze:** §9.7 `min==max` pin — a select-and-hold of the current operating point. **run:** restores the boot-config `[min, max]` envelope. Either direction takes effect at the **next selector evaluation**; during the §11.3 CSA freeze that is when the freeze lifts, and the pinned rung is sampled *then* (never mid-blackout). This command and §15.5 `POST /api/v1/link/profile` drive the *same* §9.7 lever; last writer wins |
 | `0x03` | `FPS_LADDER` | 0=off, 1=on | **off:** the §9.11 loop stops issuing FPS commands; the current fps holds where it is (no snap to `preferred` — least surprise). **on:** re-enables the loop with cleared evidence, as after a §9.11 settle. "Configured" = the ladder ran at boot (`venc.enabled` + `venc.fps_ladder.enabled`, §9.11 opt-in); on any other craft either arg is echoed `REJECTED` — the command toggles a running loop, it cannot conjure one |
-| `0x04`–`0x1F` | *reserved* | — | v2 venc commands (fps select, resolution, framing) — reserved, not specified |
+| `0x04` | `FPS_SELECT` | preset index 0..4 | Sets encoder fps to `venc.command_presets.fps[arg]` through the §9.6/§9.11 actuator (write-on-change; venc requests an IDR after a real change). `REJECTED` when: the preset list is unconfigured or `arg` ≥ its length, `venc.enabled` is false, **or the §9.11 ladder is currently enabled** (`cmd_fps_ladder` true — the ladder owns `video0.fps`; issue `FPS_LADDER` off first — Pass 71 ruling, no implicit ladder stop). A selection updates a configured-but-disabled ladder's current-rung model, so a later `FPS_LADDER` on resumes from the selected rung, not a stale one. While no ladder is running, the selected fps is the §9.11 cap-coupling cadence input (authoritative immediately, same rule as a ladder command) |
+| `0x05` | `RESOLUTION` | preset index 0..4 | Sets encoder resolution to `venc.command_presets.resolution[arg]` (a venc `video0.size` string, e.g. `"1280x720"`). `REJECTED` when the preset list is unconfigured, `arg` ≥ its length, `venc.enabled` is false, or the actuation path is not yet implemented (staged, Pass 71 — the venc-side knob is a venc-repo dependency) |
+| `0x06` | `FRAMING` | preset index 0..4 | Sets encoder framing mode to `venc.command_presets.framing[arg]` (a venc `video0.framing` string). Same `REJECTED` set as `RESOLUTION` (staged, Pass 71) |
+| `0x07`–`0x1F` | *reserved* | — | not specified |
+
+**v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
+encoder value spaces via **config preset-indexing**: the craft's
+`venc.command_presets` object (§15.2) names up to 5 deployment-chosen values
+per command, and `cmd_arg` indexes that list. `fps` entries must be §9.11
+ladder members (the cap-coupling cadence machinery assumes ladder rungs);
+`resolution`/`framing` entries are opaque venc strings. The ground learns the
+preset lists from deployment config, never over the air; an index with no
+configured entry is consumed + `REJECTED` (the unconfigured-actuator pattern
+below). No venc-specific values are baked into this spec.
 
 **Acceptance (craft)** — the §11.4 guard set minus the channel clauses:
 `cmd_mac` verifies (same key provenance as CSA, §11.4a) AND `cmd_nonce >
@@ -1736,9 +1749,23 @@ returned or rebooted ground **re-establishes known state by re-issuing the
 idempotent commands**, not by querying. Applied command state is surfaced
 craft-locally in §15.3 (link-level `cmd_arq`, `cmd_selector_frozen`,
 `cmd_fps_ladder`, and `cmd_last_nonce` — the last consumed nonce from the
-currently/last bound issuer) and the issuer's campaign state as the §15.5
-`GET /api/v1/vehicle/command` object (`vcmd_state` in the issuer's §15.3
-stats is the same value).
+currently/last bound issuer; v2 adds `cmd_fps_select`,
+`cmd_resolution_select`, `cmd_framing_select`) and the issuer's campaign
+state as the §15.5 `GET /api/v1/vehicle/command` object (`vcmd_state` in the
+issuer's §15.3 stats is the same value).
+
+**Persistence exception for venc-class commands (Pass 71 ruling).** Commands
+`0x04`+ actuate through venc's persist-on-set contract (Pass 37): the
+**encoder effect survives reboot**, unlike the v1 toggles. The volatility
+contract above covers the *link-side* command state only — the §15.3 `cmd_*`
+fields do reset with the craft session (after a reboot the encoder runs the
+persisted preset while `cmd_fps_select` reads 0, and a boot-configured §9.11
+ladder re-takes `video0.fps` at start regardless). This asymmetry is
+deliberate: a v2 preset is a discrete operator action from a deployment
+allowlist, not controller churn, so the flash-wear concern (review-log R-E)
+stays scoped to the high-cadence §9.6/§9.11 writes. If venc grows a volatile
+apply (the R-E recommendation), controller-driven writes should adopt it;
+command-driven presets stay persisted.
 
 ---
 
@@ -1793,7 +1820,7 @@ data-path crypto, or heavy state. Threats and mitigations:
 | Forged CACHE_REPLY → junk symbol injection | accepted only for an outstanding `request_id`, from the addressed cache, for requested symbols, within allowance; wrapped packet revalidated via full §3.1/§3.2 decode + latched stream key (no worse than direct DATA injection, which is the accepted §13 posture) | 3.11, 14.3 |
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
 | Forged/stale CACHE_ASSIGN → cache retune or cross-vehicle window | accept only the configured controller originator **and UDP source endpoint**, exact cache destination, allowlisted channel, and monotonic controller-session epoch; clear the old window only after a successful retune | 3.13, 14.3 |
-| Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets — never channel or power | 3.14, 11.7 |
+| Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung / venc preset) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets (v1 toggles) or an encoder preset from the operator's own deployment allowlist (v2, actuator-persisted — Pass 71) — never channel or power | 3.14, 11.7 |
 
 The CSA MAC is the sole cryptographic element and touches only the rare
 channel-switch control action, never the bandwidth-carrying data path. Key
@@ -2304,6 +2331,16 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   single-writer ownership. `venc.recovery_enabled` independently authorizes
   only §3.9 decoder-recovery IDR requests. Neither permission is implied by the
   other, and both default false.
+- `venc.command_presets` (craft, optional) names the §11.7 v2 preset lists —
+  up to **5 entries each** (config-load reject beyond that, matching the
+  Pass 68 `cmd_arg` bound), `fps` entries must be §9.11 ladder members:
+  ```json
+  "venc": { "command_presets": { "fps": [30, 60, 90],
+    "resolution": ["1280x720", "1920x1080"], "framing": ["off", "crop"] } }
+  ```
+  An absent object or list simply leaves that command `REJECTED` (§11.7).
+  Presets are deployment data — the issuing ground's operator UI reads them
+  from its own deploy config, not over the air.
 - The §14.3 Cache Controller is configured by an optional top-level `cache`
   object; both roles default off and a node may run either or both:
   ```json
@@ -2409,6 +2446,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "venc_settling": false, "venc_fps": 90,
     "cmd_arq": true, "cmd_selector_frozen": false,
     "cmd_fps_ladder": true, "cmd_last_nonce": 0,
+    "cmd_fps_select": 0, "cmd_resolution_select": 0, "cmd_framing_select": 0,
     "vcmd_state": "idle", "vcmd_nonce": 0, "arq_rx_enabled": true } }
 ```
 The `venc_*` link fields are the §9.6 actuator state: the last COMMANDED
@@ -2421,7 +2459,10 @@ The `cmd_*` / `vcmd_*` / `arq_rx_enabled` link fields are the §11.7 command
 surface, emitted on every node with role-neutral defaults: `cmd_arq`,
 `cmd_selector_frozen`, `cmd_fps_ladder` are the craft's currently applied
 command state (boot values until a command lands; `cmd_fps_ladder` is false
-when the ladder is unconfigured), `cmd_last_nonce` is the last consumed nonce
+when the ladder is unconfigured), the v2 `cmd_*_select` fields are the
+**1-based preset index** applied this craft session (0 = none — venc may
+still be running a preset persisted in an earlier session, §11.7),
+`cmd_last_nonce` is the last consumed nonce
 from the currently/last bound issuer (0 = never), `vcmd_state`/`vcmd_nonce`
 mirror the issuer's §15.5 `GET /api/v1/vehicle/command` object, and
 `arq_rx_enabled` is the node's §6.4 NACK-emission gate (`POST /api/v1/arq`).
@@ -2679,7 +2720,7 @@ otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
 | `POST /api/v1/scout/start` | `{ "channels":[…]?, "dwell_ms":??, "mode":"list"\|"quickconnect", "target":{"originator":N}? }` | begin a channel sweep (§15.5a; ground/rx node) |
 | `POST /api/v1/scout/stop` | `{}` | end the sweep and hold the current channel |
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto `target_chan` (or the emptiest allowlisted channel) |
-| `POST /api/v1/vehicle/command` | `{ "cmd": "arq"\|"selector"\|"fps_ladder", "arg": 0..4 }` | start a §11.7 command campaign toward the bound craft; returns `{ok, nonce}` immediately, poll the GET for the outcome (issuer/ground node) |
+| `POST /api/v1/vehicle/command` | `{ "cmd": "arq"\|"selector"\|"fps_ladder"\|"fps_select"\|"resolution"\|"framing", "arg": 0..4 }` | start a §11.7 command campaign toward the bound craft; returns `{ok, nonce}` immediately, poll the GET for the outcome (issuer/ground node) |
 | `POST /api/v1/arq` | `{ "enabled": true\|false }` | RX-local NACK-emission gate (§6.4) — this node only, the craft is untouched (rx node) |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and

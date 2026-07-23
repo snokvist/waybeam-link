@@ -55,7 +55,8 @@
   "venc": {
     "host": "127.0.0.1:80",
     "enabled": false,
-    "recovery_enabled": true
+    "recovery_enabled": true,
+    "command_presets": { "fps": [30, 60, 90] }
   },
   "control": {
     "bind": "127.0.0.1:8091"

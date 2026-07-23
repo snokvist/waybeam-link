@@ -618,6 +618,32 @@ int main() {
             "sample_timeout_ms":0}}})", "frame-size floor");
     }
 
+    // --- §11.7 v2 command presets (Pass 71) --------------------------------
+    {
+        auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"command_presets":{
+            "fps":[30,60,90],"resolution":["1280x720","1920x1080"],
+            "framing":["off","crop"]}}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK_EQ_U(r.value->venc.preset_fps.size(), 3);
+            CHECK_EQ_U(r.value->venc.preset_fps[1], 60);
+            CHECK_EQ_U(r.value->venc.preset_resolution.size(), 2);
+            CHECK(r.value->venc.preset_resolution[0] == "1280x720");
+            CHECK_EQ_U(r.value->venc.preset_framing.size(), 2);
+        }
+        // Absent object leaves every list empty (command REJECTED, §11.7).
+        auto d = load_config_json(
+            R"({"node":{"originator":9,"role":"tx"},"venc":{"enabled":true}})");
+        CHECK(bool(d) && d.value->venc.preset_fps.empty());
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"command_presets":{
+            "fps":[30,45,60,75,90,100]}}})", "at most 5");
+        expect_error(R"({"node":{"originator":9,"role":"tx"},
+          "venc":{"enabled":true,"command_presets":{"fps":[50]}}})",
+          "ladder members");
+    }
+
     // --- §14.3 cache config: parse, defaults, and validation ---------------
     {
         auto r = load_config_json(R"({

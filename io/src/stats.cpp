@@ -421,6 +421,12 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_bool(out, snap.link.cmd_fps_ladder);
     out += ",\"cmd_last_nonce\":";
     append_u64(out, snap.link.cmd_last_nonce);
+    out += ",\"cmd_fps_select\":";
+    append_u64(out, snap.link.cmd_fps_select);
+    out += ",\"cmd_resolution_select\":";
+    append_u64(out, snap.link.cmd_resolution_select);
+    out += ",\"cmd_framing_select\":";
+    append_u64(out, snap.link.cmd_framing_select);
     out += ",\"vcmd_state\":";
     append_escaped(out, snap.link.vcmd_state);
     out += ",\"vcmd_nonce\":";

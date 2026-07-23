@@ -146,6 +146,10 @@ struct VencCfg {
     uint32_t cap_ceiling_bytes = 196608;
     uint32_t settle_ms = 750;       // encoder-output settling window
     FpsLadderCfg fps_ladder;        // §9.11 (Pass 39)
+    // §11.7 v2 command presets (Pass 71): ≤5 entries each, cmd_arg indexes.
+    std::vector<uint16_t> preset_fps;            // §9.11 ladder members
+    std::vector<std::string> preset_resolution;  // venc video0.size strings
+    std::vector<std::string> preset_framing;     // venc video0.framing strings
 };
 
 struct ArqPolicy {

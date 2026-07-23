@@ -15,7 +15,7 @@ link layer, and a follow-me channel switch. Standalone repo, not a submodule of
 - **Spec amendments commit FIRST**, as their own commit; code implementing the
   ruling follows in the same PR, as a separate commit.
 - **Every spec ruling gets a numbered Pass entry in `docs/review-log.md`.**
-  Currently at Pass 66 — read the last two or three passes before touching
+  Currently at Pass 71 — read the last two or three passes before touching
   anything spec-adjacent, to pick up the reasoning, not just the verdict.
 - **Never commit to main.** Feature branch (`impl/`, `fix/`, `docs/`) → PR →
   squash-merge, and merge only on the operator's explicit word.

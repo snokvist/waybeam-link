@@ -199,6 +199,11 @@ struct LinkStats {
     bool cmd_selector_frozen = false;  // craft: applied SELECTOR command
     bool cmd_fps_ladder = false;       // craft: ladder running (unconfigured = false)
     uint32_t cmd_last_nonce = 0;       // craft: last consumed nonce (0 = never)
+    // §11.7 v2 (Pass 71): applied preset, 1-based index (0 = none this
+    // craft session — venc may still run a preset persisted earlier).
+    uint8_t cmd_fps_select = 0;
+    uint8_t cmd_resolution_select = 0;  // staged
+    uint8_t cmd_framing_select = 0;     // staged
     std::string vcmd_state = "idle";   // issuer: §15.5 GET campaign state
     uint32_t vcmd_nonce = 0;           // issuer: last campaign nonce
     bool arq_rx_enabled = true;        // rx: §6.4 NACK-emission gate

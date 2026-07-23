@@ -1954,6 +1954,54 @@ stopped feeding — a failed link by definition; recovery is the standard
 re-scout/quickconnect. Spec: accepted-asymmetry paragraph added to §11.6
 (after the forged-`CSA_ARMED` backstop). No code change.
 
+## Pass 71 — §11.7 v2 venc commands: preset-indexing, ladder exclusivity, documented persistence (ruled 2026-07-23)
+
+**Operator rulings (2026-07-23), four questions raised when v2 was scoped:**
+
+1. **fps select vs the §9.11 ladder: REJECTED while the ladder runs.** A
+   `FPS_SELECT` arriving while `cmd_fps_ladder` is true is consumed +
+   `REJECTED`; the issuer must send `FPS_LADDER` off (`0x03`) first. No
+   implicit ladder stop — that would change state the issuer didn't command
+   and cannot read back (Pass 68: no over-air readback). Single-owner
+   semantics for `video0.fps` are preserved. A selection made while a
+   configured ladder is *off* updates the ladder's current-rung model so a
+   later re-enable resumes from the selected rung (least surprise).
+2. **Arg encoding: config preset-indexing.** The Pass 68 ≤5-choice bound vs
+   the 8-rung ladder (and open-ended resolution/framing spaces) is resolved
+   by `venc.command_presets` — up to 5 deployment-chosen values per command,
+   `cmd_arg` indexes the list, unset index ⇒ consumed + `REJECTED`. Uniform
+   across all three commands, no venc values baked into the spec, and the
+   ground reads presets from deployment config, never over the air. `fps`
+   presets must be §9.11 ladder members (cap-coupling assumes rungs).
+   Rejected alternatives: fixed spec enums (can't cover the ladder, freezes
+   venc strings into the wire spec); envelope-relative positions (fps-only —
+   resolution/framing would need a second encoding anyway).
+3. **Persistence: documented, not fought.** Venc's persist-on-set contract
+   (Pass 37) means a v2 command's encoder effect survives reboot, in tension
+   with §11.7 volatility and the §13 "settings a reboot resets" bound. Ruled:
+   **document the asymmetry** — §11.7 gains a persistence-exception
+   paragraph, the §13 row now bounds the v2 worst case to "an encoder preset
+   from the operator's own deployment allowlist — never channel or power".
+   Forged-command exposure is already gated by HMAC + bound-issuer; the
+   alternatives (venc no-persist variant = R-E's recommendation, or
+   boot-baseline restore machinery) add a venc-repo dependency or new
+   failure modes for a benign property. R-E stays open for the
+   *controller-cadence* flash-wear concern; command-driven presets stay
+   persisted even if R-E lands.
+4. **Scope: all three commands spec'd now, implementation staged.**
+   `FPS_SELECT` (`0x04`) is implemented immediately (reuses the §9.11
+   `set_fps` actuator); `RESOLUTION` (`0x05`) and `FRAMING` (`0x06`) are
+   fully specified but answer `REJECTED` until the venc-side HTTP knobs
+   exist (venc-repo dependency) — the unconfigured-actuator pattern makes
+   staging spec-legal with zero drift.
+
+Spec: §11.7 registry rows `0x04`–`0x06` + preset-encoding paragraph +
+persistence exception; §3.14 untouched (no version field needed — unknown-id
+forward compatibility carries v2); §15.2 `venc.command_presets`; §15.3
+`cmd_fps_select`/`cmd_resolution_select`/`cmd_framing_select` (1-based
+applied index, 0 = none this session); §15.5 name enum extended; §13 row
+amended. New link stats fields ⇒ stats golden updated in the same PR.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
