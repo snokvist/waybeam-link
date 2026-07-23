@@ -150,7 +150,14 @@ int main() {
                        std::nullopt));
         CHECK_EQ_U(f.tick(150'000).kind,
                    static_cast<unsigned>(CsaAction::Kind::kRetune));
-        const auto rv = f.tick(150'000 + 150'000);  // wire t_revert_ms = 150
+        // Pass 69 H1b: the window opens at LANDING (first post-retune tick),
+        // not at the tick that ordered the retune. Landing at 180 ms →
+        // revert at 180 + t_revert(150) ms, not 300 ms.
+        CHECK_EQ_U(f.tick(180'000).kind,  // landing: window opens
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        CHECK_EQ_U(f.tick(329'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        const auto rv = f.tick(330'000);  // wire t_revert_ms = 150 from landing
         CHECK_EQ_U(rv.kind, static_cast<unsigned>(CsaAction::Kind::kRevert));
         CHECK_EQ_U(rv.chan_mhz, 5805);  // prev_chan
         CHECK(std::string_view(f.state_str()) == "IDLE");
