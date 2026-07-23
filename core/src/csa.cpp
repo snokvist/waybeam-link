@@ -235,12 +235,25 @@ void CsaIssuer::note_craft_armed(uint64_t) {
     }
 }
 
-void CsaIssuer::note_craft_video(uint64_t) {
-    if (state_ == State::kVerify) {
+void CsaIssuer::note_craft_video(uint64_t now_us) {
+    // §11.6 review pass 2: nothing before T_switch can be legitimate craft
+    // video on the target — the craft does not move until then; an earlier
+    // frame is a stale ear (failed per-adapter retune) or RF bleed and must
+    // not satisfy the backstop.
+    if (state_ == State::kVerify && now_us >= switch_at_us_) {
         // §11.6 beacon tail: success is latched, not acted on — the beacons
         // keep blanketing the craft's verify window and the campaign closes
         // at the deadline (kSuccess), never early.
         video_seen_ = true;
+    }
+}
+
+void CsaIssuer::note_commit_failed() {
+    // §11.6 review pass 2: a failed commit retune means the issuer cannot
+    // trust the position of its ears — abandon the campaign rather than
+    // verify with them. The armed craft reverts on its own verify timeout.
+    if (state_ == State::kVerify) {
+        state_ = State::kIdle;
     }
 }
 
@@ -279,12 +292,11 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
                 a.bw = tmpl_.target_bw;
                 a.fast = tmpl_.retune_class == 0;
                 a.power_intent = tmpl_.power_intent;
-                // §11.6 deadline anchor: the craft does not move before
-                // T_switch — pre-positioning must not shrink its window.
-                verify_deadline_us_ =
-                    (now_us > switch_at_us_ ? now_us : switch_at_us_) +
-                    static_cast<uint64_t>(policy_.verify_timeout_ms) * 1000;
-                next_beacon_us_ = now_us;  // beacons start once landed
+                // §11.6: the deadline anchors at max(T_switch, landing), and
+                // "landing" is the first tick IN kVerify — the engine cannot
+                // observe time during the app's blocking retunes, so it is
+                // computed lazily there (0 = not yet landed), never here.
+                verify_deadline_us_ = 0;
                 state_ = State::kVerify;
             } else if (now_us - started_us_ >=
                        static_cast<uint64_t>(policy_.ack_timeout_ms) * 1000) {
@@ -293,6 +305,14 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
             }
             break;
         case State::kVerify:
+            if (verify_deadline_us_ == 0) {
+                // §11.6 landing: the first tick after the app's blocking
+                // commit retunes — the deadline and beacon cadence open here.
+                verify_deadline_us_ =
+                    (now_us > switch_at_us_ ? now_us : switch_at_us_) +
+                    static_cast<uint64_t>(policy_.verify_timeout_ms) * 1000;
+                next_beacon_us_ = now_us;
+            }
             if (now_us >= verify_deadline_us_) {
                 if (video_seen_) {
                     // §11.6 beacon tail complete — campaign succeeded.

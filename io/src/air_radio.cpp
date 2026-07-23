@@ -65,6 +65,7 @@ struct RxFrame {
     uint8_t adapter;
     int8_t rssi;
     uint32_t tsfl;
+    uint32_t gen;               // flush generation at RX time (Pass 69)
     std::vector<uint8_t> data;  // §3.0 payload (802.11 header stripped)
 };
 
@@ -127,6 +128,11 @@ struct RadioAir::Impl {
     std::condition_variable cv;
     std::deque<RxFrame> queue;
     int ready_fd = -1;
+    // Pass 69 §11.6 verify hygiene: bumped by flush_rx(); frames are stamped
+    // at callback entry so anything captured before a flush is droppable at
+    // poll_once. devourer's internal USB pipeline (~ms deep) is below this
+    // boundary, like driver-internal buffers on the kernel-monitor backend.
+    std::atomic<uint32_t> flush_gen{0};
 
     // §3.0 Pass 12: last-heard SA per originator (RX threads write, the
     // main-thread inject_return reads). Tiny linear table — the fleet has
@@ -263,6 +269,7 @@ struct RadioAir::Impl {
         f.adapter = adapter_id;
         f.rssi = rssi;
         f.tsfl = p.RxAtrib.tsfl;
+        f.gen = flush_gen.load(std::memory_order_acquire);  // Pass 69
         f.data.assign(d->payload, d->payload + d->payload_len);
         {
             std::lock_guard<std::mutex> lk(mu);
@@ -526,14 +533,28 @@ int RadioAir::poll_once(int timeout_ms, const RxCb& cb) {
         }
         local.swap(im.queue);
     }
+    int delivered = 0;
+    const uint32_t cur_gen = im.flush_gen.load(std::memory_order_acquire);
     for (const RxFrame& f : local) {
+        if (f.gen != cur_gen) {
+            continue;  // Pass 69: captured before the last flush_rx()
+        }
         AirRxMeta meta;
         meta.adapter_id = f.adapter;
         meta.rssi = f.rssi;
         meta.tsf_us = f.tsfl;
         cb(meta, f.data.data(), f.data.size());
+        ++delivered;
     }
-    return static_cast<int>(local.size());
+    return delivered;
+}
+
+void RadioAir::flush_rx() {
+    // Pass 69 §11.6 verify hygiene — see Impl::flush_gen. Bump first so a
+    // frame mid-enqueue carries a stale generation, then clear the queue.
+    impl_->flush_gen.fetch_add(1, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    impl_->queue.clear();
 }
 
 int RadioAir::wait_fd() const { return impl_->ready_fd; }

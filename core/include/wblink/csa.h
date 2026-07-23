@@ -129,8 +129,14 @@ class CsaIssuer {
 
     // Craft's CSA_ARMED data flag observed (from the latched craft).
     void note_craft_armed(uint64_t now_us);
-    // Valid craft video/data seen (only meaningful in VERIFY, after commit).
+    // Valid craft video/data seen (only meaningful in VERIFY, after commit;
+    // ignored before T_switch — the craft cannot be on the target yet,
+    // §11.6 review pass 2).
     void note_craft_video(uint64_t now_us);
+    // The app's commit retune failed — abandon the campaign rather than
+    // verify with untrusted ears (§11.6 review pass 2). The armed craft
+    // reverts on its own verify timeout.
+    void note_commit_failed();
 
     struct IssuerAction {
         enum class Kind : uint8_t {
