@@ -47,7 +47,10 @@ const char* kSample = R"({
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
                 "bind_release_s": 90, "persist_channel": true,
                 "home_chan": 5745,
-                "channel_allowlist": [5745, 5805, 5825] }
+                "channel_allowlist": [5745, 5805, 5825] },
+    "cmd":    { "copies": 4, "copy_interval_ms": 25, "echo_copies": 3,
+                "ack_timeout_ms": 800, "retry_cap": 2,
+                "min_interval_ms": 300 }
   },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
   "scout": { "dwell_ms": 250, "channels": [5745, 5825] }
@@ -117,6 +120,12 @@ int main() {
             CHECK_EQ_U(c.policy.csa.bind_release_s, 90);
             CHECK(c.policy.csa.persist_channel);
             CHECK_EQ_U(c.policy.csa.channel_allowlist.size(), 3);
+            CHECK_EQ_U(c.policy.cmd.copies, 4);
+            CHECK_EQ_U(c.policy.cmd.copy_interval_ms, 25);
+            CHECK_EQ_U(c.policy.cmd.echo_copies, 3);
+            CHECK_EQ_U(c.policy.cmd.ack_timeout_ms, 800);
+            CHECK_EQ_U(c.policy.cmd.retry_cap, 2);
+            CHECK_EQ_U(c.policy.cmd.min_interval_ms, 300);
 
             CHECK(c.stats.bind.has_value());
             CHECK(c.stats.bind->send == "127.0.0.1:9110");

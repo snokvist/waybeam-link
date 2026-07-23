@@ -124,6 +124,17 @@ class FpsLadder {
         return std::nullopt;
     }
 
+    // §11.7 FPS_LADDER on: re-enter the loop as after a settle — accumulated
+    // evidence and pre-pause frame sizes are no longer causal.
+    void resume(uint64_t now_ms) {
+        settle_until_ms_ = now_ms + p_.settle_ms;
+        clear_evidence();
+        have_sample_ = false;
+        ewma_bytes_ = 0.0;
+        last_sample_ms_ = 0;
+        state_ = "SETTLE";
+    }
+
     uint16_t current_fps() const { return current_; }
     uint32_t observed_p_frame_bytes() const {
         return have_sample_ ? static_cast<uint32_t>(ewma_bytes_ + 0.5) : 0;

@@ -34,6 +34,7 @@
 #include "wblink/config.h"
 #include "wblink/control_server.h"
 #include "wblink/csa.h"
+#include "wblink/vehicle_cmd.h"
 #include "wblink/endian.h"
 #include "wblink/fps_ladder.h"
 #include "wblink/frame_caps.h"
@@ -811,6 +812,38 @@ CsaParams csa_params(const Config& cfg) {
     return p;
 }
 
+// §15.2 policy.cmd → the §11.7 engine parameter block. The key follows the
+// §11.4a CSA provenance (secret here; announced token keyed by the caller).
+VcmdParams vcmd_params(const Config& cfg) {
+    const CmdPolicy& c = cfg.policy.cmd;
+    VcmdParams p;
+    p.psk.assign(cfg.policy.csa.psk.begin(), cfg.policy.csa.psk.end());
+    p.copies = static_cast<uint8_t>(c.copies);
+    p.copy_interval_ms = c.copy_interval_ms;
+    p.echo_copies = static_cast<uint8_t>(c.echo_copies);
+    p.ack_timeout_ms = c.ack_timeout_ms;
+    p.retry_cap = static_cast<uint8_t>(c.retry_cap);
+    p.min_interval_ms = c.min_interval_ms;
+    return p;
+}
+
+// §15.5 vehicle/command REST names ↔ §11.7 registry ids.
+uint8_t vcmd_id_for(const std::string& name) {
+    if (name == "arq") return vcmd_id::kArq;
+    if (name == "selector") return vcmd_id::kSelector;
+    if (name == "fps_ladder") return vcmd_id::kFpsLadder;
+    return 0;
+}
+
+const char* vcmd_name_for(uint8_t id) {
+    switch (id) {
+        case vcmd_id::kArq: return "arq";
+        case vcmd_id::kSelector: return "selector";
+        case vcmd_id::kFpsLadder: return "fps_ladder";
+    }
+    return "";
+}
+
 uint8_t bw_code(uint8_t width_mhz) {
     return width_mhz >= 80 ? 2 : width_mhz >= 40 ? 1 : 0;
 }
@@ -1447,6 +1480,8 @@ struct TxCore {
           venc_(cfg.venc),
           venc_knobs_(cfg.venc),
           arq_max_fps_(cfg.policy.arq.arq_max_fps),
+          boot_min_profile_(cfg.policy.select.min_profile),
+          boot_max_profile_(cfg.policy.select.max_profile),
           feedback_gate_(ReportGatePolicy{
               cfg.node.preferred_originator,
               cfg.policy.report_timeout_ms * 4}),
@@ -1683,6 +1718,9 @@ struct TxCore {
                 nack->hdr.target_session != session_) {
                 return false;
             }
+            if (!cmd_arq_enabled_) {
+                return false;  // §11.7 ARQ off: serve no NACKs
+            }
             for (Stream& s : streams_) {
                 if (s.stream_id == nack->hdr.target_stream_id) {
                     s.sched.on_nack(*nack, s.ring, now);
@@ -1793,7 +1831,9 @@ struct TxCore {
         }
         // §9.11 FPS ladder: preserve measured P-frame FEC block size. Bitrate
         // and cap transitions get first claim on the resulting frame evidence.
-        if (fps_ladder_) {
+        // §11.7 FPS_LADDER off: the loop stops issuing commands and the fps
+        // holds where it is (current_fps stays the cadence input below).
+        if (fps_ladder_ && cmd_fps_enabled_) {
             fps_ladder_->tick(now, venc_.settling(now));
             // Re-offer the current target every tick. VencActuator dedupes a
             // successfully applied value and retries after transient HTTP or
@@ -1900,6 +1940,56 @@ struct TxCore {
         }
         return false;
     }
+    // §11.7 remote command actuation (VcmdCraft::Apply). false = REJECTED —
+    // unknown cmd_id, out-of-range arg, or unconfigured actuator.
+    bool apply_command(uint8_t cmd_id, uint8_t arg, uint64_t now) {
+        switch (cmd_id) {
+            case vcmd_id::kArq:
+                if (arg > 1) return false;
+                cmd_arq_enabled_ = arg != 0;
+                for (Stream& s : streams_) {
+                    if (s.framer) {
+                        s.framer->set_arq_enabled(cmd_arq_enabled_);
+                    }
+                    if (s.frame_framer) {
+                        s.frame_framer->set_arq_enabled(cmd_arq_enabled_);
+                    }
+                }
+                return true;  // all-off boot config ⇒ acked no-op (§11.7)
+            case vcmd_id::kSelector:
+                if (arg > 1) return false;
+                cmd_selector_frozen_ = arg != 0;
+                // §11.7: the pin lands at the next evaluate() — during a
+                // §11.3 freeze the rung cannot move, so sampling now equals
+                // sampling at freeze-lift.
+                if (cmd_selector_frozen_) {
+                    const uint8_t p = selector_.profile_id();
+                    selector_.set_profile_pin(p, p);
+                } else {
+                    selector_.set_profile_pin(boot_min_profile_,
+                                              boot_max_profile_);
+                }
+                return true;
+            case vcmd_id::kFpsLadder:
+                if (arg > 1) return false;
+                if (!fps_ladder_) {
+                    return false;  // §11.7: the ladder did not run at boot
+                }
+                if (arg != 0 && !cmd_fps_enabled_) {
+                    fps_ladder_->resume(now);  // §9.11 settle semantics
+                }
+                cmd_fps_enabled_ = arg != 0;
+                return true;
+            default:
+                return false;
+        }
+    }
+    bool cmd_arq_enabled() const { return cmd_arq_enabled_; }
+    bool cmd_selector_frozen() const { return cmd_selector_frozen_; }
+    bool cmd_fps_ladder() const {
+        return fps_ladder_.has_value() && cmd_fps_enabled_;
+    }
+
     void reset_stats() {
         for (Stream& s : streams_) {
             if (s.framer) {
@@ -1995,6 +2085,9 @@ struct TxCore {
         snap.link.venc_failures = venc_.failures();
         snap.link.venc_settling = venc_.settling(now);
         snap.link.venc_fps = venc_.commanded_fps();
+        snap.link.cmd_arq = cmd_arq_enabled_;
+        snap.link.cmd_selector_frozen = cmd_selector_frozen_;
+        snap.link.cmd_fps_ladder = cmd_fps_ladder();
         if (fps_ladder_) {
             snap.link.venc_p_frame_bytes =
                 fps_ladder_->observed_p_frame_bytes();
@@ -2039,6 +2132,12 @@ struct TxCore {
     std::optional<FpsLadder> fps_ladder_;  // §9.11 (Pass 39)
     uint16_t arq_max_fps_ = 100;           // §4.1 Pass 40 cutoff
     bool arq_fps_suppressed_ = false;
+    // §11.7 remote command state (craft-session-volatile).
+    bool cmd_arq_enabled_ = true;
+    bool cmd_selector_frozen_ = false;
+    bool cmd_fps_enabled_ = true;
+    uint8_t boot_min_profile_ = 0;   // §9.7 boot envelope for SELECTOR run
+    uint8_t boot_max_profile_ = 255;
     ReportGate feedback_gate_;             // §3.10 Pass 55
     ReportGate report_gate_;               // §3.5 Pass 41
     uint64_t frame_cadence_us_ = 0; // windowed ingress cadence estimate
@@ -2324,6 +2423,15 @@ int load_all(const std::string& config_path, Loaded& out) {
     return 0;
 }
 
+// §11.7/§15.3 command-surface fields not owned by Tx/RxCore (the engines
+// live in the mode loops): craft nonce, issuer campaign state, rx ARQ gate.
+struct VcmdStatsFill {
+    uint32_t cmd_last_nonce = 0;       // craft
+    const char* vcmd_state = nullptr;  // issuer (null = not an issuer)
+    uint32_t vcmd_nonce = 0;
+    bool arq_rx_enabled = true;        // rx gate
+};
+
 void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 uint64_t t0, const TxCore* tx, const RxCore* rx,
                 const AirBackend* air = nullptr,
@@ -2339,7 +2447,8 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 const CacheRepairStatsOut* cache_repair = nullptr,
                 const CacheStoreStatsOut* cache_store = nullptr,
                 StatsSnapshot* out_snap = nullptr,
-                const ArqTimingStats* arq_timing = nullptr) {
+                const ArqTimingStats* arq_timing = nullptr,
+                const VcmdStatsFill* vcmd = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -2357,6 +2466,14 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     }
     if (tx != nullptr) {
         tx->fill_stats(snap, now);
+    }
+    if (vcmd != nullptr) {
+        snap.link.cmd_last_nonce = vcmd->cmd_last_nonce;
+        if (vcmd->vcmd_state != nullptr) {
+            snap.link.vcmd_state = vcmd->vcmd_state;
+            snap.link.vcmd_nonce = vcmd->vcmd_nonce;
+        }
+        snap.link.arq_rx_enabled = vcmd->arq_rx_enabled;
     }
     // Air adapters first so RxCore::fill_stats can merge its per-adapter
     // liveness view into them by index (radio backend; no-op on udp).
@@ -2627,6 +2744,16 @@ int run_tx(const Loaded& l) {
         follower_params.psk.assign(token.begin(), token.end());
     }
     CsaFollower csa(follower_params);
+    // §11.7 craft command engine: same key provenance as the CSA follower.
+    VcmdParams craft_cmd_params = vcmd_params(l.cfg);
+    if (psk_announced) {
+        craft_cmd_params.psk.assign(token.begin(), token.end());
+    }
+    VcmdCraft craft_cmd(craft_cmd_params,
+                        CommonPrefix{l.cfg.node.originator, 0, session});
+    const VcmdCraft::Apply apply_cmd = [&](uint8_t id, uint8_t arg) {
+        return tx.apply_command(id, arg, now_ms());
+    };
     // §9.10 TX-wedge watchdog over the TX adapter's CCX-report counters.
     TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
                                 l.cfg.air.wedge_min_submits});
@@ -2711,6 +2838,18 @@ int run_tx(const Loaded& l) {
                 // §11.5a: pass the sender (common-prefix originator @3) so the
                 // follower can refresh the binding on the bound issuer's traffic.
                 csa.note_valid_rx(service_us, be16_read(d + 3));
+            }
+            if (const VehicleCmd* vc = std::get_if<VehicleCmd>(&dec)) {
+                // §11.7: bound-issuer-only; the engine handles MAC / nonce /
+                // duplicate re-echo / REJECTED, tx.apply_command actuates.
+                if (craft_cmd.on_cmd(*vc, service_us, csa.latched_issuer(),
+                                     apply_cmd)) {
+                    std::fprintf(stderr,
+                                 "vcmd: applied %s=%u (nonce %u, from %u)\n",
+                                 vcmd_name_for(vc->cmd_id), vc->cmd_arg,
+                                 vc->cmd_nonce, vc->prefix.originator);
+                }
+                return;
             }
             if (tx.on_air(d, n, service_now)) {
                 arq_timing.note_nack_received(d, n, service_us);
@@ -2835,6 +2974,13 @@ int run_tx(const Loaded& l) {
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
                          ca.chan_mhz);
         }
+        // §11.7 echo burst — the craft's diversity-carried command ACK.
+        while (const auto echo = craft_cmd.tick(now_us_it)) {
+            uint8_t ef[kVehicleCmdSize];
+            if (encode_vehicle_cmd(*echo, ef, sizeof(ef)) == sizeof(ef)) {
+                air.value->inject(ef, sizeof(ef));
+            }
+        }
         tx.tick(service_now, inject, inject_resend);
         air.value->heartbeat(l.cfg.node.originator, session, service_now);
         {
@@ -2863,9 +3009,12 @@ int run_tx(const Loaded& l) {
                 }
             }
             const ArqTimingStats timing = arq_timing.snapshot();
+            const VcmdStatsFill vfill{craft_cmd.last_nonce(), nullptr, 0,
+                                      true};
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
                        csa.state_str(), 0, 0, wedge.wedged(), nullptr,
-                       &shm_stats, nullptr, nullptr, &last_snap, &timing);
+                       &shm_stats, nullptr, nullptr, &last_snap, &timing,
+                       &vfill);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
@@ -3282,6 +3431,12 @@ int run_rx(const Loaded& l) {
     const CsaParams cparams = csa_params(l.cfg);
     CsaIssuer issuer(cparams);
     CsaFollower follower(cparams);
+    // §11.7 command issuer. Keyed like the CSA issuer (configured secret now;
+    // a claim re-keys both with the craft's announced token). The nonce
+    // domain starts random per session (§3.14 cross-session echo replay).
+    VcmdIssuer vissuer(vcmd_params(l.cfg));
+    vissuer.seed_nonce(session_nonce());
+    bool arq_rx_enabled = true;  // §6.4 emission gate (POST /api/v1/arq)
     // §9.10: the ground's designated uplink TX adapter gets the same
     // CCX-liveness watchdog as the craft's radio.
     TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
@@ -3420,6 +3575,9 @@ int run_rx(const Loaded& l) {
                 key.assign(tok->begin(), tok->end());
             }
             if (!issuer.set_psk(key)) return "claim busy (campaign active)";
+            if (!vissuer.set_psk(key)) {
+                return "claim busy (command campaign active)";
+            }
             uint16_t target = static_cast<uint16_t>(target_chan_i);
             if (target == 0) {
                 target =
@@ -3480,6 +3638,50 @@ int run_rx(const Loaded& l) {
                 return "";
             };
             h.scout_quickconnect = do_claim;
+            // §11.7 command campaign toward the bound craft (§15.5).
+            h.vehicle_command_json = [&] {
+                return std::string("{\"nonce\":") +
+                       std::to_string(vissuer.nonce()) + ",\"cmd\":\"" +
+                       vcmd_name_for(vissuer.cmd_id()) +
+                       "\",\"arg\":" + std::to_string(vissuer.cmd_arg()) +
+                       ",\"state\":\"" + vissuer.state_str() + "\"}";
+            };
+            h.vehicle_command = [&](const std::string& cmd, int arg)
+                -> std::pair<int, std::string> {
+                const uint8_t id = vcmd_id_for(cmd);
+                if (id == 0) {
+                    return {400, "{\"ok\":false,\"error\":\"unknown cmd\"}"};
+                }
+                if (arg < 0 || arg > kVcmdMaxArg) {
+                    return {400,
+                            "{\"ok\":false,\"error\":\"arg must be 0..4\"}"};
+                }
+                // §11.7/§15.5: refused up front, not timed out — a campaign
+                // needs a craft this session committed to (claim or /csa).
+                if (selection_state != "committed" ||
+                    active_selection.originator == 0) {
+                    return {409,
+                            "{\"ok\":false,\"error\":\"no bound craft "
+                            "(claim first)\"}"};
+                }
+                if (vissuer.active()) {
+                    return {409,
+                            "{\"ok\":false,\"error\":\"campaign pending\"}"};
+                }
+                if (!vissuer.start(
+                        CommonPrefix{l.cfg.node.originator, 0, session},
+                        active_selection.originator, id,
+                        static_cast<uint8_t>(arg), now_us_it)) {
+                    return {409,
+                            "{\"ok\":false,\"error\":\"rejected (rate-limit "
+                            "or no key)\"}"};
+                }
+                std::fprintf(stderr, "vcmd: campaign %s=%d nonce=%u -> %u\n",
+                             cmd.c_str(), arg, vissuer.nonce(),
+                             active_selection.originator);
+                return {200, "{\"ok\":true,\"nonce\":" +
+                                 std::to_string(vissuer.nonce()) + "}"};
+            };
             h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
                 if (!air.value->supports_csa()) {
                     return "CSA unsupported by kernel-monitor backend";
@@ -3502,6 +3704,15 @@ int run_rx(const Loaded& l) {
         }
         h.video_recover = [&](int stream_id) {
             return rx.request_recovery(stream_id, inject_nack);
+        };
+        // §6.4 RX-local NACK-emission gate — this node only (§15.5).
+        h.arq_enable = [&](bool enabled) -> std::string {
+            if (arq_rx_enabled != enabled) {
+                std::fprintf(stderr, "arq: rx NACK emission %s\n",
+                             enabled ? "enabled" : "disabled");
+            }
+            arq_rx_enabled = enabled;
+            return "";
         };
         if (air.value->udp) {
             h.bench_rx_drop = [&](int permille) -> std::string {
@@ -3620,6 +3831,12 @@ int run_rx(const Loaded& l) {
             if (!std::holds_alternative<DecodeError>(dec)) {
                 follower.note_valid_rx(now_us_it, be16_read(d + 3));
             }
+            if (const VehicleCmd* vc = std::get_if<VehicleCmd>(&dec)) {
+                if ((vc->cmd_flags & vcmd_flags::kAck) != 0) {
+                    vissuer.on_echo(*vc, now_us_it);  // §11.7 craft echo
+                }
+                return;  // a ground never acts on a command
+            }
             rx.on_air(meta.adapter_id, d, n, now, deliver, rssi,
                       early_deliver);
             if (qg.enabled() && frame_is_eob(d, n)) {
@@ -3643,8 +3860,10 @@ int run_rx(const Loaded& l) {
             (repair_tail_fallback_us &&
              now_us_it >= *repair_tail_fallback_us);
         service_cache_repair(now);
+        // §6.4 RX-local emission gate (§15.5 POST /api/v1/arq) composes with
+        // the quiet-gap repair-tail hold.
         rx.tick(now, deliver, inject_report, inject_nack,
-                !qg.enabled() || repair_tail_closed);
+                arq_rx_enabled && (!qg.enabled() || repair_tail_closed));
         air.value->heartbeat(l.cfg.node.originator, session, now);
         // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
         // so a stalled block never wedges frame-shm egress.
@@ -3811,6 +4030,17 @@ int run_rx(const Loaded& l) {
             case CsaIssuer::IssuerAction::Kind::kNone:
                 break;
         }
+        // §11.7 command campaign copies ride the same uplink as CSA copies.
+        {
+            const VcmdIssuer::Action va = vissuer.tick(now_us_it);
+            if (va.kind == VcmdIssuer::Action::Kind::kSendCopy) {
+                uint8_t frame[kVehicleCmdSize];
+                if (encode_vehicle_cmd(va.pkt, frame, sizeof(frame)) ==
+                    sizeof(frame)) {
+                    air.value->inject(frame, sizeof(frame));
+                }
+            }
+        }
         // Spectator follower actions (PSK-less RX nodes; a ground issuer's
         // follower stays IDLE for its own campaigns — own frames are dropped).
         const CsaAction fa = follower.tick(now_us_it);
@@ -3877,6 +4107,8 @@ int run_rx(const Loaded& l) {
                 css.health_permille = s.health_permille;
             }
             const ArqTimingStats timing = arq_timing.snapshot();
+            const VcmdStatsFill vfill{0, vissuer.state_str(),
+                                      vissuer.nonce(), arq_rx_enabled};
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
@@ -3884,7 +4116,8 @@ int run_rx(const Loaded& l) {
                        ret_window_hits, ret_window_misses, wedge.wedged(),
                        &frame_stats, &shm_stats,
                        cache_ctl ? &crs : nullptr,
-                       cache_store ? &css : nullptr, &last_snap, &timing);
+                       cache_store ? &css : nullptr, &last_snap, &timing,
+                       &vfill);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }

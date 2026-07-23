@@ -79,6 +79,10 @@ class Framer {
     // §11.6 CSA_ARMED (the craft's implicit, diversity-carried campaign ACK).
     void set_extra_flags(uint8_t f) { extra_flags_ = f; }
 
+    // §11.7 ARQ command: off ⇒ stamp no ARQ flag (receivers then never NACK,
+    // §6.4); on restores the boot-configured classifier behaviour.
+    void set_arq_enabled(bool on) { arq_enabled_ = on; }
+
     // Returns false iff the datagram was dropped (oversize).
     bool on_datagram(const uint8_t* data, size_t len, uint64_t now_ms,
                      const Emit& emit);
@@ -96,6 +100,7 @@ class Framer {
     uint8_t active_profile_ = 0;
     uint8_t table_version_ = 0;
     uint8_t extra_flags_ = 0;
+    bool arq_enabled_ = true;  // §11.7 ARQ command
 
     uint32_t next_seq_ = 0;
     uint32_t block_id_ = 0;

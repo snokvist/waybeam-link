@@ -73,6 +73,35 @@ int main() {
         if (const CacheAssign* v = expect<CacheAssign>(d)) CHECK(*v == a);
     }
 
+    // ---- VEHICLE_CMD (§3.14): fixed 23 B --------------------------------
+    {
+        VehicleCmd c;
+        c.prefix = {0x0009, 0x0011, 0xAABBCCDD};
+        c.cmd_nonce = 0x01020304;
+        c.cmd_seq = 3;
+        c.cmd_flags = 0;
+        c.cmd_id = vcmd_id::kArq;
+        c.cmd_arg = 1;
+        c.cmd_mac = 0xDEADBEEF;
+        const uint8_t want[] = {
+            0x57, 0x42, 0x0D,        // magic, version, VEHICLE_CMD
+            0x00, 0x09,              // issuing ground
+            0x00, 0x11,              // destination craft
+            0xAA, 0xBB, 0xCC, 0xDD,  // issuer session
+            0x01, 0x02, 0x03, 0x04,  // cmd_nonce
+            0x03,                    // cmd_seq (copy 3)
+            0x00,                    // cmd_flags (command, not echo)
+            0x01,                    // cmd_id ARQ
+            0x01,                    // cmd_arg on
+            0xDE, 0xAD, 0xBE, 0xEF,  // cmd_mac
+        };
+        CHECK_EQ_U(sizeof(want), kVehicleCmdSize);
+        CHECK_EQ_U(encode_vehicle_cmd(c, buf, sizeof(buf)), sizeof(want));
+        check_bytes(buf, want, sizeof(want));
+        const Decoded d = decode(want, sizeof(want));
+        if (const VehicleCmd* v = expect<VehicleCmd>(d)) CHECK(*v == c);
+    }
+
     // ---- DATA (§3.2): 26 B header + 4 B payload ---------------------------
     {
         DataHeader h;

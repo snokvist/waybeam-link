@@ -413,6 +413,20 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.venc_p_frame_target_bytes);
     out += ",\"venc_fps_ladder_state\":";
     append_escaped(out, snap.link.venc_fps_ladder_state);
+    out += ",\"cmd_arq\":";
+    append_bool(out, snap.link.cmd_arq);
+    out += ",\"cmd_selector_frozen\":";
+    append_bool(out, snap.link.cmd_selector_frozen);
+    out += ",\"cmd_fps_ladder\":";
+    append_bool(out, snap.link.cmd_fps_ladder);
+    out += ",\"cmd_last_nonce\":";
+    append_u64(out, snap.link.cmd_last_nonce);
+    out += ",\"vcmd_state\":";
+    append_escaped(out, snap.link.vcmd_state);
+    out += ",\"vcmd_nonce\":";
+    append_u64(out, snap.link.vcmd_nonce);
+    out += ",\"arq_rx_enabled\":";
+    append_bool(out, snap.link.arq_rx_enabled);
     out += "}}\n";
 }
 

@@ -82,10 +82,10 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     // for this frame. The IDR ARQ bit is only ever removed by the cutoff.
     const bool arq_class =
         is_idr || cfg_.arq_mode == FrameArqMode::kAllFrames;
-    const bool idr_arq = is_idr && !arq_suppressed_;
+    const bool idr_arq = is_idr && !arq_suppressed_ && arq_enabled_;
     const bool pframe_arq = !is_idr &&
                             cfg_.arq_mode == FrameArqMode::kAllFrames &&
-                            ov_allow_parq && !arq_suppressed_;
+                            ov_allow_parq && !arq_suppressed_ && arq_enabled_;
     const uint8_t base_flags = static_cast<uint8_t>(
         (idr_arq ? data_flags::kArq
                  : (pframe_arq ? data_flags::kPframeArq : 0)) |

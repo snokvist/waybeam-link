@@ -134,6 +134,15 @@ StatsSnapshot sample_snapshot() {
     s.link.venc_p_frame_bytes = 12345;
     s.link.venc_p_frame_target_bytes = 10000;
     s.link.venc_fps_ladder_state = "HOLD";
+    // §11.7 command surface (§15.3): craft applied state, issuer campaign,
+    // rx NACK-emission gate.
+    s.link.cmd_arq = true;
+    s.link.cmd_selector_frozen = false;
+    s.link.cmd_fps_ladder = true;
+    s.link.cmd_last_nonce = 3054418130;
+    s.link.vcmd_state = "acked";
+    s.link.vcmd_nonce = 3054418130;
+    s.link.arq_rx_enabled = false;
     return s;
 }
 
@@ -212,7 +221,11 @@ const char* kGolden =
     "\"venc_pushes\":6,\"venc_failures\":0,\"venc_settling\":false,"
     "\"venc_fps\":90,\"venc_p_frame_bytes\":12345,"
     "\"venc_p_frame_target_bytes\":10000,"
-    "\"venc_fps_ladder_state\":\"HOLD\"}}\n";
+    "\"venc_fps_ladder_state\":\"HOLD\","
+    "\"cmd_arq\":true,\"cmd_selector_frozen\":false,"
+    "\"cmd_fps_ladder\":true,\"cmd_last_nonce\":3054418130,"
+    "\"vcmd_state\":\"acked\",\"vcmd_nonce\":3054418130,"
+    "\"arq_rx_enabled\":false}}\n";
 
 }  // namespace
 

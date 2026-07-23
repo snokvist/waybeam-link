@@ -186,6 +186,21 @@ struct CacheAssign {
     friend bool operator==(const CacheAssign&, const CacheAssign&) = default;
 };
 
+// §3.14 VEHICLE_CMD (fixed 23 bytes) — ground→craft runtime command riding
+// the §11 machinery; the craft's ACK is the same packet echoed back with
+// vcmd_flags::kAck, re-MAC'd under its own prefix. cmd_mac is carried opaque
+// here; HMAC computation/verification is the §11.7 engine's job.
+struct VehicleCmd {
+    CommonPrefix prefix;
+    uint32_t cmd_nonce = 0;
+    uint8_t cmd_seq = 0;    // copy counter N..1 (diagnostics only)
+    uint8_t cmd_flags = 0;  // vcmd_flags
+    uint8_t cmd_id = 0;
+    uint8_t cmd_arg = 0;    // 0..kVcmdMaxArg (§3.14, Pass 68)
+    uint32_t cmd_mac = 0;
+    friend bool operator==(const VehicleCmd&, const VehicleCmd&) = default;
+};
+
 // §11.1 CSA (fixed 32 bytes). csa_mac is carried opaque here; HMAC
 // computation/verification is the CSA engine's job (§11.4, build step 10).
 struct CsaPacket {
@@ -218,7 +233,7 @@ enum class DecodeError : uint8_t {
 using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
                              Heartbeat, CsaPacket, RecoveryRequest,
                              JsccFeedback, CacheStatus, CacheRequestView,
-                             CacheReplyView, Announce, CacheAssign>;
+                             CacheReplyView, Announce, CacheAssign, VehicleCmd>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -233,6 +248,7 @@ size_t encode_nack(const NackHeader& hdr, const uint8_t* bitmap,
 size_t encode_link_report(const LinkReport& pkt, uint8_t* out, size_t cap);
 size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap);
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap);
+size_t encode_vehicle_cmd(const VehicleCmd& pkt, uint8_t* out, size_t cap);
 size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap);
 size_t encode_cache_assign(const CacheAssign& pkt, uint8_t* out, size_t cap);
 size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,

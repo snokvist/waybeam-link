@@ -194,6 +194,14 @@ struct LinkStats {
     uint32_t venc_p_frame_bytes = 0;  // §9.11 non-IDR payload EWMA
     uint32_t venc_p_frame_target_bytes = 0;
     std::string venc_fps_ladder_state = "DISABLED";
+    // §11.7 command surface — role-neutral defaults on every node (§15.3).
+    bool cmd_arq = true;               // craft: applied ARQ command state
+    bool cmd_selector_frozen = false;  // craft: applied SELECTOR command
+    bool cmd_fps_ladder = false;       // craft: ladder running (unconfigured = false)
+    uint32_t cmd_last_nonce = 0;       // craft: last consumed nonce (0 = never)
+    std::string vcmd_state = "idle";   // issuer: §15.5 GET campaign state
+    uint32_t vcmd_nonce = 0;           // issuer: last campaign nonce
+    bool arq_rx_enabled = true;        // rx: §6.4 NACK-emission gate
 };
 
 // §15.3 cache blocks — present only when the §14.3 role is enabled.

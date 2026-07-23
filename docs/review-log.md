@@ -1714,8 +1714,150 @@ This adds packet type `0xC` (§3.13), amends §14.3 cache ownership, §15.2 conf
 and §15.5a claim commit semantics. The cache-control packet stays on the
 Ethernet cache socket and is never RF-injected.
 
+## Pass 68 — Remote vehicle commands ride the CSA trust machinery (2026-07-22, ruled; hardware-verified 2026-07-23)
+
+**Operator ruling (2026-07-22): approved as proposed, conditional on an
+adversarial review before deployment.** The review ran, its resolutions are
+folded into the sections below, and the implementation was verified on the
+production rig (vehicle 17 / x86 ground 9, channel 161): quickconnect claim →
+`ARQ off` acked over RF with `arq_frames` frozen while IDRs kept flowing →
+`ARQ on` restore → `SELECTOR` freeze/run pinning and releasing profile 3 →
+`FPS_LADDER on` echoed `REJECTED` (venc disabled on the craft, the intended
+unconfigured-actuator path) → 409 with an unbound craft → ground-local
+`POST /api/v1/arq` gate observable in §15.3. Random-seeded nonces confirmed
+on the wire. Incidental find: the deployed craft config had drifted (no `csa`
+block ⇒ fail-closed empty allowlist rejecting every campaign); re-synced from
+`deploy/vehicle-192.168.2.232.json`.
+
+The ground-station MVP needs runtime toggles for craft-side knobs that are
+boot-config only (ARQ, selector adaptation, FPS ladder) — the hub's ADAPTIVE
+menu has no lever to pull. Prior operator rulings framing this pass
+(2026-07-22): the channel rides the §11 CSA path and its HMAC PSK machinery;
+**every command is an enable/disable or an enum of at most 5 choices** — no
+free-form numerics; v1 commands are ARQ on/off, MCS-adaptation
+freeze/unfreeze, FPS-ladder on/off, with venc set-commands reserved for v2; a
+ground-local ARQ-off REST endpoint ships alongside.
+
+Proposed design (each point is a decision the operator should confirm or
+overrule):
+
+- **New packet type `0xD` VEHICLE_CMD (§3.14), 23 bytes**, reusing §11
+  wholesale: the §11.4 HMAC primitive and §11.4a key provenance (no separate
+  command key), a dedicated `cmd_nonce` counter (NOT shared with `csa_nonce` —
+  interleaved CSA and command campaigns must not invalidate each other), and
+  the §11.5a binding as the authorization: **bound-issuer-only, no bootstrap**.
+  Unlike CSA, a command can never establish a claim; unbound/non-bound senders
+  get a silent drop (an echo would be a probe oracle).
+- **ACK = the craft echoes the packet back** (`cmd_flags` bit0), re-MAC'd,
+  on the strong diversity-received downlink — chosen over a `CSA_ARMED`-style
+  DATA flag because a flag cannot carry *which* nonce/command it acknowledges,
+  and over a separate ACK type because the echo is free and self-describing.
+  `REJECTED` (bit1) distinguishes "understood, won't do" (unknown `cmd_id`,
+  bad arg, unconfigured actuator) from silence.
+- **Idempotent retry via duplicate-nonce re-echo** (the §3.13 CACHE_ASSIGN
+  pattern): `cmd_nonce == last_applied` re-echoes without re-applying — a
+  retried campaign means a lost echo, not a failed command.
+- **Campaign shape:** 3 copies @ 20 ms; echo 2 copies; `ack_timeout_ms` 1000
+  (csa_ack_timeout's reasoning); `retry_cap` 3 campaigns on the same nonce,
+  then `timeout`. Craft-side rate limit `min_interval_ms` 250 (commands are
+  mild, unlike the 5 s CSA limit — a menu should feel responsive). All §17
+  RE-DERIVE seeds under `policy.cmd`.
+- **v1 semantics:** `ARQ off` clears `ARQ`/`PFRAME_ARQ` stamping AND NACK
+  service — receivers then never NACK by construction (§6.4) and cache
+  nack-graces never arm; FEC and §3.9 recovery unaffected. `SELECTOR freeze`
+  = the existing §9.7 `min==max` pin at the current rung (same lever as
+  §15.5 `/link/profile`, last writer wins); `run` restores the boot envelope.
+  `FPS_LADDER off` stops the §9.11 loop where it is (no snap to `preferred`);
+  `on` re-enables with cleared evidence. All command state is
+  **craft-session-volatile** (reboot restores boot config; survives binding
+  release and channel moves — a re-claiming ground reads state from §15.3,
+  not memory).
+- **REST (§15.5):** `POST /api/v1/vehicle/command` on the issuer (409 when
+  unbound or elsewhere), polled via `GET /api/v1/vehicle/command`
+  (`pending|acked|rejected|timeout`); `POST /api/v1/arq` = RX-local NACK
+  emission gate (§6.4), unilateral, craft untouched.
+- **§13 row:** forged VEHICLE_CMD worst case is bounded to reboot-resettable
+  settings — never channel or power.
+
+Adds §3.14 and §11.7, amends §3.1 (registry, 13 of 16), §6.4, §13, §15.2
+(`policy.cmd`), §15.3 (`cmd_*`/`vcmd_*`/`arq_rx_enabled` link fields), §15.5.
+Spec-only; implementation follows in the same PR after the ruling.
+
+**Review hardening (2026-07-22, adversarial pass on the draft).** An
+independent review of the draft found the wire arithmetic sound but the
+echo/acceptance semantics under-specified. Resolutions folded into the same
+sections, still under the same pending ruling:
+
+- **Echo acceptance is now explicit (was: "matching echo", undefined).** The
+  issuer accepts an echo only on MAC + `ACK` + bound-craft sender + exact
+  nonce/cmd/arg match. Token-mode honesty note added: a forged echo can
+  misreport an outcome; the bound is the §13 row and the recourse is
+  re-issuing the idempotent command (the §11.6 `CSA_ARMED` posture).
+- **Duplicate re-echo echoes the STORED tuple, never the incoming packet** —
+  the craft retains `(nonce, cmd_id, cmd_arg, rejected)` per issuer domain; a
+  same-nonce packet with different fields is a silent drop (else a buggy or
+  malicious retry could mint an ACK for a command never applied). The re-echo
+  path keeps the full guard set minus nonce monotonicity, and bursts at most
+  once per nonce per `min_interval_ms`.
+- **`cmd_nonce` starts at a random 32-bit value per issuer session** —
+  a rebooted issuer restarting at 1 would let a recorded session-A echo
+  satisfy session-B's first campaign (false "acked"). Random start kills the
+  cross-session replay for free; the craft guard was already per-domain.
+- **No over-air state readback.** The draft's "ground reads craft state from
+  stats" claimed a wire path that does not exist; replaced with the honest
+  mechanism — a re-claiming ground re-issues the idempotent commands. The
+  `cmd_*` fields are craft-local §15.3 observability (§15.3 now actually
+  amended; the draft referenced fields it never added).
+- **Binding identity pinned to the issuer's originator** (the §11.5a latch as
+  implemented): a rebooted ground commands its craft immediately in a fresh
+  nonce domain, no 90 s dead window. The issuer-side "bound" predicate behind
+  the REST 409 is its own committed selection this session; craft-side truth
+  surfaces as `timeout`.
+- **Smaller gaps closed:** `GET /vehicle/command` gains `idle`; `POST` 409s
+  while a campaign is pending; issuer paces starts by
+  `min_interval + copy_interval` so consecutive menu commands don't eat the
+  craft rate-limit; `cmd_arg > 4` is a structural decode error vs. in-range
+  invalid = consumed + `REJECTED` (was ambiguous across §3.14/§11.7);
+  `FPS_LADDER` "configured" = ladder ran at boot; `ARQ on` over an all-off
+  boot config is an acked no-op; `SELECTOR` lands at the next selector
+  evaluation, i.e. after any §11.3 freeze; every echo sets `ACK` (`REJECTED`
+  is additive); the ARQ-off "no NACKs" claim is bounded by in-flight flagged
+  blocks draining (one deadline window).
+
 ## Open questions for the next pass
 
+- [ ] **Cross-channel claim rendezvous gap (root cause PROVEN 2026-07-23,
+      instrumented rerun after Pass 68; supersedes the earlier retune-latency
+      wording — the operator's "iw is 5–10 ms" objection was correct).**
+      A timestamping `iw` interposer on both ends showed, per T_switch-anchored
+      timeline: the `iw`/nl80211 shell-out itself is ~1.5 ms; the *vendor
+      drivers' cross-channel set-freq* is the real cost (rtl88x2eu x86
+      **117 ms**, rtl88x2cu **65 ms**, craft 8812eu-on-SSC338Q **30 ms**), and
+      same-channel set-freq is free (why every same-channel claim works).
+      Mechanism, deterministic not probabilistic: §11.6 has the issuer begin
+      its own retune AT T_switch — the same instant as the craft — serialized
+      per adapter and blocking the event loop (ground lands EU T+117 ms,
+      CU T+184 ms). The craft lands at T+30 ms and listens until its
+      `t_revert_ms` = 150 ms deadline, but the issuer transmits NOTHING on the
+      target until its report machinery wakes (craft EOB + 10 Hz reporter +
+      §7.2 return window), so the craft cannot possibly confirm and reverts +
+      unbinds. Meanwhile the ~30 ms EU-landing overlap still carries genuine
+      craft video (~1000 pkt/s), which satisfies `note_craft_video` — the
+      issuer commits (its own 150 ms verify deadline had already lapsed inside
+      the blocking retune; Pass 66 stale-buffer drain is a second false-commit
+      path). Asymmetric strand every time. Fix options needing an operator
+      ruling (spec §11.6/§11.5): (A) issuer pre-positions — retune to target
+      as soon as all copies are out and CSA_ARMED is seen, instead of waiting
+      for T_switch; (B) issuer transmits immediately on landing — inject a few
+      authenticated issuer-present frames (e.g. forced LINK_REPORTs, campaign
+      timing, quiet-gap-exempt) so the craft's `note_valid_rx` can confirm;
+      (C) larger `verify_timeout_ms`/`t_revert_ms` for kernel-monitor rigs
+      (needs ≥ ~400 ms to cover measured worst case); (D) io-level hygiene —
+      parallel/async retunes, flush stale RX queues at the commit retune, log
+      `retune_all` failures. Recommended combination: A + B (+ D flush), with
+      C only as margin. Same-channel claims remain safe and verified; the hub
+      menu's "connect best" pins `target_chan` to the craft's current channel
+      until this is ruled and fixed.
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
       too noisy in bench (concurrent sniffers, multi-socket rigs), replace it with an
       exact per-socket count via `PACKET_STATISTICS`/`tp_drops` and drop the §16.2

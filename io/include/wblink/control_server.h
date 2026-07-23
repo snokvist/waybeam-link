@@ -16,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "wblink/config.h"  // Result<T>
@@ -33,6 +34,8 @@ struct ControlHandlers {
     std::function<std::string()> scout_results;
     std::function<std::string()> selection_json;
     std::function<std::string()> cache_assignment_json;
+    // §11.7 issuer campaign state (GET; issuer/ground only, null → 409).
+    std::function<std::string()> vehicle_command_json;
 
     // Writes — return "" on success, else a short error string (→ HTTP 400).
     // A null hook means the endpoint does not apply to this mode (→ HTTP 409).
@@ -54,6 +57,14 @@ struct ControlHandlers {
     std::function<std::string(int originator, int target_chan)> scout_quickconnect;
     std::function<std::string(int stream_id)> video_recover;
     std::function<std::string(int permille)> bench_rx_drop;
+    // §11.7 vehicle command (issuer/ground only; null → 409). Returns the
+    // full HTTP outcome: {200, {"ok":true,"nonce":N}} on start, {409, …}
+    // while a campaign is pending or with no bound craft, {400, …} on a bad
+    // cmd/arg — the campaign itself is polled via vehicle_command_json.
+    std::function<std::pair<int, std::string>(const std::string& cmd, int arg)>
+        vehicle_command;
+    // §6.4 RX-local NACK-emission gate (rx only; null → 409).
+    std::function<std::string(bool enabled)> arq_enable;
 };
 
 class ControlServer {
