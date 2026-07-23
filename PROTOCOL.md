@@ -1432,7 +1432,7 @@ absolute switch time), folded into the wire model and hardened.
 | 16 | 2 | `target_chan` | center freq MHz (band-agnostic) |
 | 18 | 1 | `target_bw` | 0=20, 1=40, 2=80 |
 | 19 | 1 | `retune_class` | 0 = fast intra-band, 1 = cross-band |
-| 20 | 2 | `dt_to_switch_ms` | **decrements across copies** → one absolute T_switch |
+| 20 | 2 | `dt_to_switch_ms` | **decrements across copies** → one absolute T_switch; `0` never arms — it marks the §11.6 rendezvous beacon |
 | 22 | 2 | `t_revert_ms` | follower auto-revert budget |
 | 24 | 2 | `prev_chan` | revert target |
 | 26 | 1 | `prev_bw` | |
@@ -1476,7 +1476,9 @@ the data path — it is authenticated:
 - **Anti-replay:** accept only if `csa_mac` verifies AND `csa_nonce >
   last_applied[(originator,session)]` AND the issuer is the currently-latched
   command source AND `target_chan` ∈ the node's config **channel allowlist** AND
-  no CSA accepted within `csa_min_interval_s` (**5 s** rate-limit).
+  no CSA accepted within `csa_min_interval_s` (**5 s** rate-limit) AND
+  `dt_to_switch_ms > 0` — a zero-dt packet is a §11.6 rendezvous beacon and
+  never arms a campaign (Pass 69).
 - **`csa_psk` trust boundary = craft + ground only** (§15). Spectators may follow
   CSAs **unauthenticated** — their divergence is self-harm only (they strand
   themselves, not the fleet). A MAC-valid CSA MAY *establish* the craft's session
@@ -1524,6 +1526,15 @@ mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
   `verify_timeout_ms` (**150 ms**, bench median 85 ms + margin) → revert to
   `prev_chan` and return to IDLE. This is the **only** automatic revert; it
   protects a switch that landed on a dead channel.
+- **Rendezvous-beacon confirmation (Pass 69):** in VERIFY, a MAC-valid CSA
+  whose `(originator, session_id, csa_nonce)` equal the armed campaign's and
+  whose `dt_to_switch_ms = 0` (the issuer's §11.6 beacon, `csa_seq` 0)
+  confirms the switch exactly like valid traffic → COMMITTED. In any other
+  state a zero-dt CSA is dropped with **no side effects**: it never arms
+  (§11.4) and does not refresh the §11.5a binding — a recorded beacon must
+  not be able to hold the binding alive (replay hygiene; a beacon replayed
+  during the VERIFY it belongs to merely completes the switch the bound
+  issuer already commanded).
 - **COMMITTED holds until reboot (Pass 59).** Once committed the craft keeps the
   channel through arbitrarily long command-source outages — a ground commonly
   runs a weaker TX than the craft and may be unheard for >60 s. The former
@@ -1565,15 +1576,42 @@ direction** lets us make the strand class *never happen* rather than recover aft
 - The craft, on accepting the campaign, sets **`data_flags.CSA_ARMED`** on its
   outgoing video packets (§3.2 bit 4) — an implicit, diversity-carried ACK that it
   will follow the current campaign.
-- **Ground commits (switches its own RX) only after it sees `CSA_ARMED`** from the
-  craft. If it does not within `csa_ack_timeout` (**1 s**), ground **aborts the
-  campaign and stays** on the current channel — no strand.
+- **Ground pre-positions: it commits (switches its own RX) immediately upon
+  seeing `CSA_ARMED`** from the craft — not at T_switch (Pass 69). Once the
+  campaign copies are out and the craft has ACKed, the issuer has no further
+  business on the old channel; retuning at T_switch itself made the two
+  retunes simultaneous, and with measured kernel-monitor cross-channel
+  set-freq costs of 30–117 ms per adapter (serialized), the issuer landed
+  after the craft's verify window was nearly spent, having transmitted
+  nothing the craft could hear — a deterministic strand (proven 2026-07-23).
+  If `CSA_ARMED` is not seen within `csa_ack_timeout` (**1 s**), ground
+  **aborts the campaign and stays** on the current channel — no strand.
+- **Rendezvous beacon (Pass 69):** from landing on `target_chan` until its
+  video-verify succeeds or its deadline expires, the issuer re-injects the
+  accepted campaign packet at the §11.2 copy spacing with `csa_seq = 0` and
+  `dt_to_switch_ms = 0`, `csa_mac` recomputed over the beacon bytes. The
+  craft's §11.5 VERIFY confirms on the first matching beacon; every other
+  receiver drops zero-dt CSAs without effect. This gives the craft a
+  guaranteed issuer-present signal inside its verify window instead of
+  waiting for the report path (craft EOB + 10 Hz reporter + §7.2 return
+  window) to wake.
 - **Issuer revert-on-no-video:** if ground did commit (craft ACKed) but then sees
-  no craft video on `target_chan` within `verify_timeout_ms`, ground reverts to
+  no craft video on `target_chan` within its verify deadline, ground reverts to
   `prev_chan` (an issuer abandoning a failed campaign is not "unasked revert").
+  The deadline anchors at **`max(T_switch, landing) + verify_timeout_ms`**
+  (Pass 69): pre-positioning must not shrink the window in which the craft can
+  legitimately show up — the craft does not move before T_switch.
+- **Issuer verify hygiene (Pass 69):** on the commit retune the issuer MUST
+  discard RX backlog captured before the retune completed (kernel socket and
+  process queues), so video-verify counts only traffic actually received on
+  `target_chan` — old-channel residue draining after the retune must not
+  satisfy the backstop (the Pass 66 stale-buffer artifact, observed as a
+  false commit on the bench). Retune failures are logged; a failed commit
+  retune leaves the revert path as the recovery.
 - **Intra-process atomic switch (ground fleet):** if the ground *process* accepted
-  the CSA (any adapter heard it), it fires all local `FastRetune` calls at
-  T_switch — a straggler adapter follows because a sibling heard it.
+  the CSA (any adapter heard it), it fires all local `FastRetune` calls
+  together at its commit point — a straggler adapter follows because a
+  sibling heard it.
 
 Because a forged `CSA_ARMED` (unauthenticated DATA flag) could make ground commit
 to a switch the real craft won't follow, the **issuer revert-on-no-video is the
@@ -1710,6 +1748,7 @@ data-path crypto, or heavy state. Threats and mitigations:
 | **Forged optimistic LINK_REPORT** (defeats "never fail optimistic") | accept only from latched/preferred `(originator,session)`; plausibility cross-check; conflicting reports ⇒ fail toward degradation | 3.5, 9.8 |
 | Replayed control frames (NACK/report) | monotonic wrap-aware discipline on `seq`, `report_epoch` (u32), `csa_nonce` | 3.5, 11.4 |
 | **Forged CSA → fleet blackout** (CRITICAL) | **4-byte HMAC on CSA only** + nonce anti-replay + channel allowlist + rate-limit + config-pinned home-channel | 11.4 |
+| Replayed rendezvous beacon (zero-dt CSA) | never arms (`dt = 0` fails §11.4 accept) and never refreshes the §11.5a binding; effective only during the VERIFY of its own campaign, where it merely completes the switch the bound issuer already commanded | 11.5, 11.6 |
 | Forged ANNOUNCE → bogus pairing token / false claim state | ANNOUNCE is unauthenticated advertisement; a wrong `psk` only wastes one claim attempt (the elicited CSA fails the craft's §11.4 MAC); `claimed_by` is advisory-only; takeover still bounded by the §11.5a binding | 3.12, 11.4a |
 | Forged CACHE_REQUEST → cache amplification (≤48 B request elicits up to `reply_limit` full symbols) | exact-`target_cache` match + per-requester rate cap + `request_id` dedup window + per-request symbol clamp; v1 IP-only keeps it off the air entirely | 3.11, 14.3 |
 | Forged CACHE_REPLY → junk symbol injection | accepted only for an outstanding `request_id`, from the addressed cache, for requested symbols, within allowance; wrapped packet revalidated via full §3.1/§3.2 decode + latched stream key (no worse than direct DATA injection, which is the accepted §13 posture) | 3.11, 14.3 |

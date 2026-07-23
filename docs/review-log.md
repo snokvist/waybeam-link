@@ -1824,9 +1824,54 @@ sections, still under the same pending ruling:
   is additive); the ARQ-off "no NACKs" claim is bounded by in-flight flagged
   blocks draining (one deadline window).
 
+## Pass 69 — CSA cross-channel rendezvous: pre-position + beacon (ruled 2026-07-23)
+
+**Operator ruling (2026-07-23): options A + B + D from the open question
+below; spec amendment first, then implementation, then rig verification.**
+Option C (a larger `verify_timeout_ms`) was NOT taken — the window stays
+150 ms; the margins are now structural, not padded.
+
+- **A — issuer pre-positions (§11.6).** The issuer commits (retunes all its
+  ears to `target_chan`) immediately upon seeing `CSA_ARMED`, not at
+  T_switch. After the copies are out and the craft has ACKed, the issuer has
+  no further business on the old channel. With class-1 dt = 500 ms and the
+  ACK arriving ~60–100 ms into the campaign, the issuer now lands ~250–350 ms
+  before the craft moves, instead of 117–184 ms after.
+- **B — rendezvous beacon (§11.1/§11.4/§11.5/§11.6).** From landing until
+  video-verify success or deadline, the issuer re-injects the accepted
+  campaign packet with `csa_seq = 0`, `dt_to_switch_ms = 0`, MAC recomputed,
+  at the §11.2 copy spacing. `dt = 0` is now a normative §11.4 accept guard
+  (never arms), which makes the beacon un-forgeable-into-an-arm by
+  construction. The craft's VERIFY confirms on the first beacon matching the
+  armed campaign's `(originator, session, csa_nonce)`; in every other state a
+  zero-dt CSA is dropped with no side effects (no §11.5a binding refresh — a
+  recorded beacon must not hold the binding alive). New §13 row.
+- **Deadline anchor (§11.6).** Issuer revert-on-no-video deadline =
+  `max(T_switch, landing) + verify_timeout_ms` — pre-positioning must not
+  shrink the window in which the craft can legitimately appear (it does not
+  move before T_switch). Previously the deadline was anchored at the commit
+  tick and had already lapsed inside the blocking retune (the observed
+  false-commit-or-revert coin flip).
+- **D — io hygiene.** (i) On the commit retune the issuer flushes RX backlog
+  captured before the retune completed (kernel socket + process queues), so
+  video-verify counts only genuine `target_chan` traffic — closes the Pass 66
+  stale-drain false commit on the issuer side. (ii) `retune_all` failures are
+  logged at every call site (they were silently ignored). The "parallel/
+  async retunes" half of D was NOT implemented: with pre-positioning the
+  landing latency is no longer on the critical path, and threading the
+  retunes would buy nothing but complexity.
+- **Timeline after the fix (measured driver costs, class 1):** claim t0 →
+  copies t0..t0+80 ms → `CSA_ARMED` ~t0+100 ms → issuer lands ≤t0+300 ms,
+  beacons every copy-spacing → craft retunes at t0+500 ms (+~30 ms set-freq)
+  → first beacon heard within one spacing → COMMITTED ~t0+550 ms; issuer
+  hears craft video ~t0+540 ms → COMMITTED. Both margins >100 ms against a
+  150 ms window.
+
 ## Open questions for the next pass
 
-- [ ] **Cross-channel claim rendezvous gap (root cause PROVEN 2026-07-23,
+- [x] **RESOLVED (Pass 69, ruled A+B+D 2026-07-23)** — see the Pass 69 entry;
+      original analysis kept below for the record.
+      **Cross-channel claim rendezvous gap (root cause PROVEN 2026-07-23,
       instrumented rerun after Pass 68; supersedes the earlier retune-latency
       wording — the operator's "iw is 5–10 ms" objection was correct).**
       A timestamping `iw` interposer on both ends showed, per T_switch-anchored
