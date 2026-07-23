@@ -7,20 +7,22 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "wblink/binding.h"
 
 namespace wblink {
 
-bool VencActuator::http_get(const std::string& path) {
+int VencActuator::http_get_status(const std::string& path) {
     const auto hp = split_host_port(cfg_.host);
     if (!hp) {
-        return false;
+        return 0;
     }
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        return false;
+        return 0;
     }
     timeval tv{};
     tv.tv_usec = 200 * 1000;  // 200 ms connect/send/recv budget
@@ -32,29 +34,75 @@ bool VencActuator::http_get(const std::string& path) {
     addr.sin_port = htons(hp.value->second);
     if (::inet_pton(AF_INET, hp.value->first.c_str(), &addr.sin_addr) != 1) {
         ::close(fd);
-        return false;  // venc lives at a literal IP (127.0.0.1); no DNS here
+        return 0;  // venc lives at a literal IP (127.0.0.1); no DNS here
     }
     if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         ::close(fd);
-        return false;
+        return 0;
     }
     const std::string req = "GET " + path + " HTTP/1.0\r\nHost: " +
                             cfg_.host + "\r\n\r\n";
     if (::send(fd, req.data(), req.size(), 0) !=
         static_cast<ssize_t>(req.size())) {
         ::close(fd);
-        return false;
+        return 0;
     }
     char buf[128];
     const ssize_t n = ::recv(fd, buf, sizeof(buf) - 1, 0);
     ::close(fd);
     if (n <= 0) {
-        return false;
+        return 0;
     }
     buf[n] = '\0';
-    // "HTTP/1.x 2xx ..." — anything else is a failure.
+    // "HTTP/1.x <code> ..." — return the code (0 on a garbled line).
     const char* sp = std::strchr(buf, ' ');
-    return sp != nullptr && sp[1] == '2';
+    if (sp == nullptr || sp[1] < '1' || sp[1] > '9') {
+        return 0;
+    }
+    return std::atoi(sp + 1);
+}
+
+bool VencActuator::http_get(const std::string& path) {
+    const int status = http_get_status(path);
+    return status >= 200 && status < 300;
+}
+
+// §9.6 volatile-first (Pass 73): try /api/v1/live/set; on 404 re-send the
+// push on the persisting /set so no actuation is lost. A 404 can be
+// TRANSIENT — venc's httpd binds seconds before its routes register during
+// pipeline bring-up/respawn — so the fallback latches only when the /set
+// re-send actually succeeds (both failing = venc restarting, retry later),
+// and a latched fallback re-probes the volatile route every 10 min so a
+// venc upgrade heals without a link restart.
+bool VencActuator::push_set(const std::string& query, uint64_t now_ms) {
+    const bool probe = !live_fallback_ || now_ms >= live_reprobe_ms_;
+    if (probe) {
+        const int status = http_get_status("/api/v1/live/set?" + query);
+        if (status >= 200 && status < 300) {
+            if (live_fallback_) {
+                live_fallback_ = false;
+                std::fprintf(stderr, "venc: /api/v1/live/set available — "
+                                     "volatile path restored\n");
+            }
+            return true;
+        }
+        if (status != 404) {
+            return false;  // transport/5xx: no latch, holdoff retries
+        }
+    } else {
+        return http_get("/api/v1/set?" + query);
+    }
+    const bool ok = http_get("/api/v1/set?" + query);
+    if (ok) {
+        if (!live_fallback_) {
+            live_fallback_ = true;
+            std::fprintf(stderr,
+                         "venc: /api/v1/live/set unsupported (pre-live venc) "
+                         "— falling back to persisting /api/v1/set\n");
+        }
+        live_reprobe_ms_ = now_ms + kLiveReprobeMs;
+    }
+    return ok;
 }
 
 bool VencActuator::set_bitrate(uint32_t kbps, uint64_t now_ms) {
@@ -62,14 +110,13 @@ bool VencActuator::set_bitrate(uint32_t kbps, uint64_t now_ms) {
         return true;
     }
     if (last_ && *last_ == kbps) {
-        return true;  // §9.6 write-on-change: flash wear
+        return true;  // §9.6 write-on-change
     }
     if (now_ms < no_retry_until_ms_) {
         return false;  // failure hold-off; the caller re-offers next tick
     }
     ++pushes_;
-    const bool ok =
-        http_get("/api/v1/set?video0.bitrate=" + std::to_string(kbps));
+    const bool ok = push_set("video0.bitrate=" + std::to_string(kbps), now_ms);
     if (ok) {
         last_ = kbps;
         last_change_ms_ = now_ms;  // §9.6 settling window anchor
@@ -91,16 +138,16 @@ bool VencActuator::set_max_frame_size(uint32_t max_i_bytes,
     }
     if (last_caps_ && last_caps_->first == max_i_bytes &&
         last_caps_->second == max_p_bytes) {
-        return true;  // §9.6 write-on-change: flash wear
+        return true;  // §9.6 write-on-change
     }
     if (now_ms < no_retry_until_ms_) {
         return false;
     }
     ++pushes_;
-    const bool ok = http_get("/api/v1/set?video0.maxIBytes=" +
-                             std::to_string(max_i_bytes) +
-                             "&video0.maxPBytes=" +
-                             std::to_string(max_p_bytes));
+    const bool ok = push_set("video0.maxIBytes=" + std::to_string(max_i_bytes) +
+                                 "&video0.maxPBytes=" +
+                                 std::to_string(max_p_bytes),
+                             now_ms);
     if (ok) {
         last_caps_ = {max_i_bytes, max_p_bytes};
         last_change_ms_ = now_ms;
@@ -116,14 +163,13 @@ bool VencActuator::set_fps(uint16_t fps, uint64_t now_ms) {
         return true;
     }
     if (last_fps_ && *last_fps_ == fps) {
-        return true;  // §9.6 write-on-change: flash wear
+        return true;  // §9.6 write-on-change
     }
     if (now_ms < no_retry_until_ms_) {
         return false;
     }
     ++pushes_;
-    const bool ok =
-        http_get("/api/v1/set?video0.fps=" + std::to_string(fps));
+    const bool ok = push_set("video0.fps=" + std::to_string(fps), now_ms);
     if (ok) {
         last_fps_ = fps;
         last_change_ms_ = now_ms;

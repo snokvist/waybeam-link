@@ -2002,6 +2002,79 @@ forward compatibility carries v2); §15.2 `venc.command_presets`; §15.3
 applied index, 0 = none this session); §15.5 name enum extended; §13 row
 amended. New link stats fields ⇒ stats golden updated in the same PR.
 
+## Pass 72 — scout candidate-resolving dwell extension (ruled 2026-07-23)
+
+**Problem (operator, 2026-07-23): discovery takes a variable 1–4 sweeps —
+bad UX.** Root cause is arithmetic, not flakiness: a *candidate* requires an
+ANNOUNCE decode (DATA marks the channel occupied but names no claimable
+craft — the §15.2 "seen off DATA" rationale was imprecise), and the craft
+announces every 500 ms (§3.12 permits ≥1 Hz) while the scout dwells 300 ms —
+p≈0.6 of catching an ANNOUNCE per visit to the craft's channel.
+
+**Ruling: adaptive dwell extension.** Base `dwell_ms` unchanged (300 ms —
+empty channels stay fast); when a dwell elapses with decodable waybeam frames
+heard but no candidate resolved, the dwell extends until the first ANNOUNCE
+decodes, bounded at `dwell_ms` + 1200 ms total (≥ one worst-case 1 Hz
+announce period + margin; two periods at the reference 2 Hz cadence). The
+extension ends at the first resolved candidate; occupancy switches to the
+actual elapsed dwell as its airtime denominator so extension doesn't skew
+`wifi_util_permille`. Rejected alternatives: flat `dwell_ms` ≥ 1100 ms
+(deterministic but every sweep pays 7 × 1.1 s on empty air); hub-side
+auto-retry (hides, not fixes, the variance — still probabilistic per sweep);
+faster announce cadence (spends craft airtime forever to speed a rare
+discovery event, and 2 Hz is already the §3.12 fast edge).
+
+Spec: §15.5a new dwell-extension bullet; §15.2 `scout.dwell_ms` bullet
+re-worded (base dwell + corrected rationale). Known accepted edge: a channel
+carrying only non-announcing waybeam traffic (another ground's uplink, no
+craft) burns the full extension once per sweep.
+
+## Pass 73 — venc volatile actuation: /api/v1/live/set, all link writes live-only (ruled 2026-07-23, closes R-E)
+
+**Problem (operator, 2026-07-23):** venc persists every value-changing `/set`
+to `/etc/waybeam.json`; adaptive operation (§9.5 rung moves → §9.6
+bitrate/caps, §9.11 ladder fps) can write hundreds of times per flight —
+flash wear (R-E). Persisting adaptive transients is also semantically wrong:
+a craft should not boot into its last emergency rung.
+
+**Rulings (three questions, operator 2026-07-23):**
+
+1. **API shape: new venc endpoint `/api/v1/live/set`** — same field set as
+   `/set`, applies to the running config, never saves. Old venc builds 404
+   the unknown route, so waybeam-link self-detects: a 404 re-sends the push
+   on `/set` (no lost actuation), and the fallback **latches only when that
+   `/set` re-send succeeds**, re-probing `/live/set` at most every 10 min
+   thereafter. The latch condition was hardened during bench verify
+   (2026-07-23): venc's httpd binds seconds before its routes register at
+   pipeline bring-up/respawn, and the first-cut latch-on-any-404 wrongly
+   latched during a venc restart — silently reintroducing persist-on-set
+   until the next link restart (caught as unexplained `Config saved` lines
+   correlating with commands). Rejected: `persist=0` param on `/set` — old
+   builds 400 unknown params as "unknown config field", which would need a
+   fleet config flag instead of self-detection. Venc-side: `live/set`
+   serves MUT_LIVE fields only (bitrate, caps, fps — everything waybeam-link
+   actuates); restart-class fields are rejected there because a respawn
+   reloads from disk, which would silently discard a volatile value.
+   Revisit when RESOLUTION/FRAMING (§11.7 v2 staged) unstage.
+2. **Policy: ALL waybeam-link venc writes go volatile** — controller-driven
+   §9.6/§9.11 AND operator §11.7 v2 commands. Supersedes the Pass 71
+   command-persistence exception: encoder effect now matches §11.7
+   volatility (reboot = boot config), matching the `cmd_*_select`
+   session-reset semantics, and removes the restore-venc-after-bench chore.
+   Rejected: adaptive-only volatile (keeps the Pass 71 asymmetry and the
+   bench chore for a persistence nobody relies on — re-establishment after
+   reboot is by re-issuing idempotent commands, §11.7).
+3. **Persistence is an operator act only**: venc's own UI/config `/set`
+   path keeps persist-on-set; waybeam-link never writes it.
+
+Spec: §9.6 endpoint block + volatile-first bullet (write-on-change bullet
+retained, re-scoped); §9.6 Pass 37 rationale sentence annotated; §11.7
+persistence paragraph replaced (Pass 71 asymmetry now only the documented
+pre-live-venc fallback mode); §13 forged-VEHICLE_CMD bound re-worded; §15.3
+`venc_*`/`cmd_*_select` notes updated. R-E closed. Venc-repo change lands as
+its own PR in waybeam_venc (persist flag threaded through the set pipeline +
+route registration; identical response shapes).
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
@@ -2105,7 +2178,13 @@ Pending operator rulings, with recommendations (2026-07-16 register):
       deployed chips under injection at 40 MHz, (b) measured retune times,
       (c) a gate-4-class bench. Until then width stays a deployment choice
       (the matrix tool already models both).
-- [ ] **R-E: venc volatile writes (flash wear at controller cadence).**
+- [x] **R-E — CLOSED (Pass 73, ruled 2026-07-23).** Venc grew
+      `/api/v1/live/set` (volatile apply, MUT_LIVE fields only); ALL
+      waybeam-link actuation — controller-driven §9.6/§9.11 writes AND §11.7
+      v2 commands — now goes volatile, with a self-healing 404 fallback to
+      the persisting `/set` for pre-live venc builds. No persisted baseline
+      write: persistence is exclusively an operator act via venc's own UI.
+      Original analysis kept below for the record.
       Every venc `/set` persists to `/etc/waybeam.json`; write-on-change
       helps, but bitrate+caps+fps transitions on an oscillating link still
       wear flash. *Recommendation (venc-repo change):* add a volatile apply
