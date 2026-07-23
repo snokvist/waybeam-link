@@ -2527,7 +2527,8 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 const CacheStoreStatsOut* cache_store = nullptr,
                 StatsSnapshot* out_snap = nullptr,
                 const ArqTimingStats* arq_timing = nullptr,
-                const VcmdStatsFill* vcmd = nullptr) {
+                const VcmdStatsFill* vcmd = nullptr,
+                uint16_t channel_mhz = 0) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -2543,6 +2544,7 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     if (csa_state != nullptr) {
         snap.link.csa_state = csa_state;
     }
+    snap.link.channel_mhz = channel_mhz;  // §11 current operating channel (0 = not tracked)
     if (tx != nullptr) {
         tx->fill_stats(snap, now);
     }
@@ -4272,7 +4274,7 @@ int run_rx(const Loaded& l) {
                        &frame_stats, &shm_stats,
                        cache_ctl ? &crs : nullptr,
                        cache_store ? &css : nullptr, &last_snap, &timing,
-                       &vfill);
+                       &vfill, operating_chan);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
