@@ -46,12 +46,12 @@
     },
     "csa": {
       "home_chan": 5805,
-      "channel_allowlist": [5745, 5805, 5825]
+      "channel_allowlist": [5180, 5220, 5745, 5765, 5785, 5805, 5825]
     }
   },
   "scout": {
     "dwell_ms": 300,
-    "channels": [5745, 5805, 5825]
+    "channels": [5180, 5220, 5745, 5765, 5785, 5805, 5825]
   },
   "cache": {
     "repair": {
