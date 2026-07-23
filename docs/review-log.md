@@ -1826,6 +1826,21 @@ sections, still under the same pending ruling:
 
 ## Open questions for the next pass
 
+- [ ] **Cross-channel claim verify race on kernel-monitor grounds (observed
+      2026-07-23, Pass 68 rig work).** A quickconnect that MOVES the fleet
+      (5805→5825) stranded ground-on-target / craft-reverted-to-prev: the
+      craft's §11.5 verify window (`t_revert_ms` = 150 ms, seeded from the
+      devourer FastRetune bench) expired before the ground's two sequential
+      `iw` shell-out retunes brought its uplink back up, so the craft heard
+      nothing, reverted, and dropped the binding — while the ground, having
+      seen the craft's brief target-channel video burst inside its own verify
+      window, left VERIFY and committed (the §11.6 revert-on-no-video
+      backstop no longer armed). Same-channel claims never race. The §17
+      RE-DERIVE posture suggests a larger `csa.verify_timeout_ms` (carried as
+      the campaign's `t_revert_ms`) for kernel-monitor deployments —
+      ~500–1000 ms — and/or the ground issuer holding its VERIFY state until
+      video is *sustained*, not first-seen. Needs an operator ruling on the
+      seed vs. the state-machine fix.
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
       too noisy in bench (concurrent sniffers, multi-socket rigs), replace it with an
       exact per-socket count via `PACKET_STATISTICS`/`tp_drops` and drop the §16.2
