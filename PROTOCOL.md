@@ -1525,7 +1525,13 @@ mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
 - **Jump-failed backout (kept):** in VERIFY, no valid traffic within
   `verify_timeout_ms` (**150 ms**, bench median 85 ms + margin) → revert to
   `prev_chan` and return to IDLE. This is the **only** automatic revert; it
-  protects a switch that landed on a dead channel.
+  protects a switch that landed on a dead channel. **The window opens at the
+  follower's landing** — the first engine tick after its blocking retune
+  completes — mirroring the §11.6 issuer definition (Pass 69, review
+  pass 2): anchoring it at the tick that *ordered* the retune lets the
+  retune itself (and any post-retune RX dead-time) consume the window, which
+  on a class-0 campaign leaves too little listening time to hear the
+  issuer's beacons.
 - **Rendezvous-beacon confirmation (Pass 69):** in VERIFY, a MAC-valid CSA
   whose `(originator, session_id, csa_nonce)` equal the armed campaign's and
   whose `dt_to_switch_ms = 0` (the issuer's §11.6 beacon, `csa_seq` 0)
