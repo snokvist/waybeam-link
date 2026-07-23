@@ -1642,6 +1642,20 @@ Because a forged `CSA_ARMED` (unauthenticated DATA flag) could make ground commi
 to a switch the real craft won't follow, the **issuer revert-on-no-video is the
 backstop** for that case: no craft video on the new channel → ground returns.
 
+**Accepted asymmetry — craft feed stall during a campaign (Pass 70 ruling):**
+the two ends confirm on different evidence — the craft on the issuer's §11.6
+rendezvous beacon (guaranteed present), the issuer on craft *video* only. If
+the craft's input feed stalls after `CSA_ARMED` (a TX node emits nothing
+without a feed, §16), the craft COMMITs on beacons while the issuer reverts on
+no-video: ground on `prev_chan`, craft on `target_chan`, until an explicit
+re-scout + re-claim (§15.5a; the §11.5a binding self-releases after
+`bind_release`). This split is **accepted, not fixed**: counting the craft's
+unauthenticated HEARTBEAT/ANNOUNCE as issuer-side confirmation would hollow
+out the forged-`CSA_ARMED` backstop above, and delaying the craft's COMMIT
+past the beacon would reopen the §11.6 rendezvous gap the beacon closed. The
+exposure is one campaign window on a craft whose encoder stopped feeding —
+already a failed link by definition.
+
 ### 11.7 Remote vehicle commands (VEHICLE_CMD, type `0xD`)
 
 The over-air lever for the craft's runtime toggles — the §9/§5 knobs that were
