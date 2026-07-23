@@ -2041,9 +2041,15 @@ a craft should not boot into its last emergency rung.
 
 1. **API shape: new venc endpoint `/api/v1/live/set`** — same field set as
    `/set`, applies to the running config, never saves. Old venc builds 404
-   the unknown route, so waybeam-link self-detects: first 404 latches a
-   per-process fallback to `/set` (the 404'd push is re-sent — no lost
-   actuation) and logs once. Rejected: `persist=0` param on `/set` — old
+   the unknown route, so waybeam-link self-detects: a 404 re-sends the push
+   on `/set` (no lost actuation), and the fallback **latches only when that
+   `/set` re-send succeeds**, re-probing `/live/set` at most every 10 min
+   thereafter. The latch condition was hardened during bench verify
+   (2026-07-23): venc's httpd binds seconds before its routes register at
+   pipeline bring-up/respawn, and the first-cut latch-on-any-404 wrongly
+   latched during a venc restart — silently reintroducing persist-on-set
+   until the next link restart (caught as unexplained `Config saved` lines
+   correlating with commands). Rejected: `persist=0` param on `/set` — old
    builds 400 unknown params as "unknown config field", which would need a
    fleet config flag instead of self-detection. Venc-side: `live/set`
    serves MUT_LIVE fields only (bitrate, caps, fps — everything waybeam-link
@@ -2175,8 +2181,8 @@ Pending operator rulings, with recommendations (2026-07-16 register):
 - [x] **R-E — CLOSED (Pass 73, ruled 2026-07-23).** Venc grew
       `/api/v1/live/set` (volatile apply, MUT_LIVE fields only); ALL
       waybeam-link actuation — controller-driven §9.6/§9.11 writes AND §11.7
-      v2 commands — now goes volatile, with a one-shot 404 fallback to the
-      persisting `/set` for pre-live venc builds. No persisted baseline
+      v2 commands — now goes volatile, with a self-healing 404 fallback to
+      the persisting `/set` for pre-live venc builds. No persisted baseline
       write: persistence is exclusively an operator act via venc's own UI.
       Original analysis kept below for the record.
       Every venc `/set` persists to `/etc/waybeam.json`; write-on-change

@@ -1180,11 +1180,16 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
 - **Volatile-first actuation (Pass 73; closes review-log R-E):** every
   waybeam-link push targets `/api/v1/live/set` — the same field set as `/set`,
   applied to the running encoder, **never written to `/etc/waybeam.json`**.
-  On the first 404 (a pre-live venc) the actuator latches a per-process
-  fallback to the persisting `/api/v1/set` and logs once; the push that drew
-  the 404 is re-sent on the fallback path so no actuation is lost. Persistence
-  of encoder settings is exclusively an operator act through venc's own
-  UI/config — never a link-side write.
+  On a 404 the push is re-sent on the persisting `/api/v1/set` so no
+  actuation is lost. A 404 is **not proof of a pre-live venc**: venc's httpd
+  binds seconds before its routes register during pipeline bring-up/respawn
+  (bench-observed, 2026-07-23), so the fallback latches only when the `/set`
+  re-send actually **succeeds** (both failing = venc restarting; the holdoff
+  retries), and a latched fallback re-probes `/live/set` at most every
+  10 min — a venc upgrade or a wrongly-read transient 404 heals without a
+  link restart. Latch and heal each log once. Persistence of encoder
+  settings is exclusively an operator act through venc's own UI/config —
+  never a link-side write.
 - **Write only on change:** push bitrate only when the target actually
   changes, never at the 10 Hz report rate. Load-bearing for flash wear on the
   fallback path (every `/set` persists), and still the discipline on the live
