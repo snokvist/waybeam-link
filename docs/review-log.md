@@ -1925,6 +1925,17 @@ Option C (a larger `verify_timeout_ms`) was NOT taken — the window stays
   - Tests added: late-landing window (H1), pre-T_switch video ignored
     (H2), commit-retune-failure abandon, beacon leaves the §11.4
     rate-limit anchor untouched, spectator (empty-PSK) beacon confirm.
+  - **H1b (found by the post-review verification sweep, fixed):** the
+    FOLLOWER had the same anchor defect as H1 — its verify deadline was
+    set at the tick that ordered its retune, so the craft's own blocking
+    `iw` set-freq (+ any post-retune RX dead-time) burned the window from
+    the inside. On a class-0 campaign (150 ms dt) the craft's window
+    closed ~40 ms after the issuer's landing; a 5825→5745 `/csa` jump
+    reverted+unbound the craft while the issuer (legitimately hearing the
+    craft's verify-window video on-target, post-T_switch) confirmed — a
+    strand the pre-review build dodged only by racing. §11.5 now opens
+    the follower window at its landing, mirroring §11.6. Verified by
+    repeated class-0 jumps in the final sweep.
 
 ## Open questions for the next pass
 
