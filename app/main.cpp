@@ -3824,12 +3824,10 @@ int run_rx(const Loaded& l) {
                 if ((v->hdr.data_flags & data_flags::kCsaArmed) != 0) {
                     issuer.note_craft_armed(now_us_it);  // §11.6 implicit ACK
                 }
+                // §11.6 beacon tail: success is latched here; the campaign
+                // (and the selection_state flip) closes at the deadline via
+                // the kSuccess action below.
                 issuer.note_craft_video(now_us_it);
-                if (selection_state == "verifying" && !issuer.active()) {
-                    selection_state = "committed";
-                    pending_selection.reset();
-                    previous_selection.reset();
-                }
                 if (cache_store) {  // §14.3: retain the verbatim wire packet
                     cache_store->note_data(*v, d, n);
                 }
@@ -4011,6 +4009,17 @@ int run_rx(const Loaded& l) {
                 }
                 break;
             }
+            case CsaIssuer::IssuerAction::Kind::kSuccess:
+                // §11.6 beacon tail complete: craft video was seen inside the
+                // window and the campaign closed at the deadline.
+                if (selection_state == "verifying") {
+                    selection_state = "committed";
+                }
+                pending_selection.reset();
+                previous_selection.reset();
+                std::fprintf(stderr, "csa: campaign confirmed -> %u MHz\n",
+                             operating_chan);
+                break;
             case CsaIssuer::IssuerAction::Kind::kRevert:
                 // Pass 67: the craft reverts to the campaign's prev_chan; this
                 // receiver restores its prior vehicle tuple, which may be on a

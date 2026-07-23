@@ -224,6 +224,7 @@ bool CsaIssuer::start(const CommonPrefix& prefix, uint16_t target_chan_mhz,
     copies_left_ = kCopies;
     next_copy_us_ = now_us;
     armed_seen_ = false;
+    video_seen_ = false;
     state_ = State::kAnnounce;
     return true;
 }
@@ -236,7 +237,10 @@ void CsaIssuer::note_craft_armed(uint64_t) {
 
 void CsaIssuer::note_craft_video(uint64_t) {
     if (state_ == State::kVerify) {
-        state_ = State::kIdle;  // campaign succeeded
+        // §11.6 beacon tail: success is latched, not acted on — the beacons
+        // keep blanketing the craft's verify window and the campaign closes
+        // at the deadline (kSuccess), never early.
+        video_seen_ = true;
     }
 }
 
@@ -290,6 +294,12 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
             break;
         case State::kVerify:
             if (now_us >= verify_deadline_us_) {
+                if (video_seen_) {
+                    // §11.6 beacon tail complete — campaign succeeded.
+                    a.kind = IssuerAction::Kind::kSuccess;
+                    state_ = State::kIdle;
+                    break;
+                }
                 // Issuer revert-on-no-video (§11.6 backstop, also covers a
                 // forged CSA_ARMED making us commit to a ghost).
                 a.kind = IssuerAction::Kind::kRevert;
