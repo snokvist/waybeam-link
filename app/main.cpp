@@ -572,9 +572,9 @@ class ScoutEngine {
         return "";
     }
 
-    void stop() {
+    void stop(uint64_t now_ms) {
         if (phase_ == Phase::kIdle) return;
-        finalize_current();
+        finalize_current(now_ms);
         rest();
     }
 
@@ -613,10 +613,22 @@ class ScoutEngine {
         }
     }
 
-    // Advance the sweep when the current dwell elapses.
+    // Advance the sweep when the current dwell elapses. §15.5a (Pass 72): a
+    // dwell that heard waybeam frames but resolved no ANNOUNCE candidate yet
+    // extends once (up to dwell_ms + kExtendMs total) — the announce cadence
+    // (§3.12 ≥1 Hz) can exceed a short base dwell. An extension ends at the
+    // first resolved candidate.
     void tick(uint64_t now_ms) {
-        if (phase_ != Phase::kScanning || now_ms < dwell_deadline_ms_) return;
-        finalize_current();
+        if (phase_ != Phase::kScanning) return;
+        if (now_ms < dwell_deadline_ms_) {
+            if (!extended_ || accum_.candidates.empty()) return;
+        } else if (!extended_ && accum_.frames > 0 &&
+                   accum_.candidates.empty()) {
+            extended_ = true;
+            dwell_deadline_ms_ = entered_ms_ + dwell_ms_ + kExtendMs;
+            return;
+        }
+        finalize_current(now_ms);
         if (++chan_idx_ >= channels_.size()) {
             rest();  // sweep complete
             return;
@@ -751,12 +763,19 @@ class ScoutEngine {
     void enter_channel(uint64_t now_ms) {
         accum_ = Accum{};
         h_.retune(channels_[chan_idx_], bw_);
+        entered_ms_ = now_ms;
+        extended_ = false;
         dwell_deadline_ms_ = now_ms + dwell_ms_;
     }
-    void finalize_current() {
+    void finalize_current(uint64_t now_ms) {
         ChannelResult r;
         r.chan = channels_[chan_idx_];
-        const uint64_t dwell_us = static_cast<uint64_t>(dwell_ms_) * 1000u;
+        // §15.5a (Pass 72): the actual elapsed dwell is the airtime
+        // denominator — an extended (or early-resolved) dwell must not skew
+        // wifi_util_permille.
+        const uint64_t elapsed_ms =
+            now_ms > entered_ms_ ? now_ms - entered_ms_ : dwell_ms_;
+        const uint64_t dwell_us = elapsed_ms * 1000u;
         const uint32_t util =
             dwell_us ? static_cast<uint32_t>(std::min<uint64_t>(
                            1000u, accum_.airtime_us * 1000u / dwell_us))
@@ -793,6 +812,11 @@ class ScoutEngine {
     uint32_t dwell_ms_ = 300;
     size_t chan_idx_ = 0;
     uint64_t dwell_deadline_ms_ = 0;
+    // §15.5a (Pass 72): extension budget past the base dwell — one full
+    // worst-case 1 Hz announce period (§3.12) plus margin.
+    static constexpr uint64_t kExtendMs = 1200;
+    uint64_t entered_ms_ = 0;
+    bool extended_ = false;
     Accum accum_;
     std::vector<ChannelResult> results_;
 };
@@ -3688,7 +3712,7 @@ int run_rx(const Loaded& l) {
                                    now_ms());
             };
             h.scout_stop = [&]() -> std::string {
-                scout.stop();
+                scout.stop(now_ms());
                 return "";
             };
             h.scout_quickconnect = do_claim;
