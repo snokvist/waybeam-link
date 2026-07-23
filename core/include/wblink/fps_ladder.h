@@ -135,6 +135,10 @@ class FpsLadder {
         state_ = "SETTLE";
     }
 
+    // §11.7 FPS_SELECT while the loop is off (Pass 71): adopt the externally
+    // commanded rung so a later resume() continues from it, not a stale one.
+    void note_external_fps(uint16_t fps) { current_ = fps; }
+
     uint16_t current_fps() const { return current_; }
     uint32_t observed_p_frame_bytes() const {
         return have_sample_ ? static_cast<uint32_t>(ewma_bytes_ + 0.5) : 0;

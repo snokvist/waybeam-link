@@ -832,6 +832,9 @@ uint8_t vcmd_id_for(const std::string& name) {
     if (name == "arq") return vcmd_id::kArq;
     if (name == "selector") return vcmd_id::kSelector;
     if (name == "fps_ladder") return vcmd_id::kFpsLadder;
+    if (name == "fps_select") return vcmd_id::kFpsSelect;
+    if (name == "resolution") return vcmd_id::kResolution;
+    if (name == "framing") return vcmd_id::kFraming;
     return 0;
 }
 
@@ -840,6 +843,9 @@ const char* vcmd_name_for(uint8_t id) {
         case vcmd_id::kArq: return "arq";
         case vcmd_id::kSelector: return "selector";
         case vcmd_id::kFpsLadder: return "fps_ladder";
+        case vcmd_id::kFpsSelect: return "fps_select";
+        case vcmd_id::kResolution: return "resolution";
+        case vcmd_id::kFraming: return "framing";
     }
     return "";
 }
@@ -1845,17 +1851,17 @@ struct TxCore {
             // successfully applied value and retries after transient HTTP or
             // shared-holdoff failures, so controller state cannot outrun venc.
             venc_.set_fps(fps_ladder_->current_fps(), now);
+        } else if (cmd_fps_select_hz_ != 0) {
+            // §11.7 FPS_SELECT (Pass 71): same re-offer discipline while no
+            // ladder runs, so a transient HTTP failure cannot lose a one-shot
+            // command. Cleared when FPS_LADDER on takes back ownership.
+            venc_.set_fps(cmd_fps_select_hz_, now);
         }
         // §4.1 Pass 40 high-cadence ARQ cutoff, driven by the same cadence
         // input the §9.6 caps use (ladder-commanded, else measured, else
         // hint). Sticky on the framers until the cadence drops back.
         {
-            const uint32_t snapped = snap_frame_period_us(
-                fps_ladder_ && fps_ladder_->current_fps() > 0
-                    ? 1000000ull / fps_ladder_->current_fps()
-                    : (frame_cadence_us_ != 0
-                           ? frame_cadence_us_
-                           : 1000000ull / venc_knobs_.fps_hint));
+            const uint32_t snapped = snap_frame_period_us(cadence_period_us());
             arq_fps_suppressed_ = arq_max_fps_ != 0 && snapped != 0 &&
                                   snapped < 1000000u / arq_max_fps_;
             for (Stream& s : streams_) {
@@ -1876,12 +1882,7 @@ struct TxCore {
                 in.budget_kbps = selector_.bitrate_kbps();
                 // §9.11: while the ladder runs, the COMMANDED fps is the
                 // authoritative cadence — measurement lags a change by ~1 s.
-                in.frame_period_us = snap_frame_period_us(
-                    fps_ladder_ && fps_ladder_->current_fps() > 0
-                        ? 1000000ull / fps_ladder_->current_fps()
-                        : (frame_cadence_us_ != 0
-                               ? frame_cadence_us_
-                               : 1000000ull / venc_knobs_.fps_hint));
+                in.frame_period_us = snap_frame_period_us(cadence_period_us());
                 in.iframe_deadline_ms = static_cast<uint16_t>(
                     frame_deadline_us(true) / 1000u);
                 const FrameFecConfig& fec = s.frame_framer->fec();
@@ -1946,6 +1947,19 @@ struct TxCore {
         }
         return false;
     }
+    // §9.6/§9.11 cadence input: ladder-commanded, else §11.7 FPS_SELECT
+    // (Pass 71 — authoritative immediately, same rule as a ladder command),
+    // else measured, else hint.
+    uint64_t cadence_period_us() const {
+        if (fps_ladder_ && fps_ladder_->current_fps() > 0) {
+            return 1000000ull / fps_ladder_->current_fps();
+        }
+        if (cmd_fps_select_hz_ != 0) {
+            return 1000000ull / cmd_fps_select_hz_;
+        }
+        return frame_cadence_us_ != 0 ? frame_cadence_us_
+                                      : 1000000ull / venc_knobs_.fps_hint;
+    }
     // §11.7 remote command actuation (VcmdCraft::Apply). false = REJECTED —
     // unknown cmd_id, out-of-range arg, or unconfigured actuator.
     bool apply_command(uint8_t cmd_id, uint8_t arg, uint64_t now) {
@@ -1983,9 +1997,33 @@ struct TxCore {
                 }
                 if (arg != 0 && !cmd_fps_enabled_) {
                     fps_ladder_->resume(now);  // §9.11 settle semantics
+                    // §11.7 (Pass 71): the ladder takes back video0.fps; a
+                    // later ladder-off holds fps where the ladder left it.
+                    cmd_fps_select_hz_ = 0;
                 }
                 cmd_fps_enabled_ = arg != 0;
                 return true;
+            case vcmd_id::kFpsSelect: {
+                // §11.7 v2 (Pass 71): preset-indexed; REJECTED while the
+                // §9.11 ladder owns video0.fps (issue FPS_LADDER off first).
+                if (!venc_.enabled()) return false;
+                if (arg >= venc_knobs_.preset_fps.size()) return false;
+                if (cmd_fps_ladder()) return false;
+                const uint16_t fps = venc_knobs_.preset_fps[arg];
+                venc_.set_fps(fps, now);
+                if (fps_ladder_) {
+                    // A disabled ladder resumes from the selected rung.
+                    fps_ladder_->note_external_fps(fps);
+                }
+                cmd_fps_select_hz_ = fps;
+                cmd_fps_select_ = static_cast<uint8_t>(arg + 1);
+                return true;
+            }
+            case vcmd_id::kResolution:
+            case vcmd_id::kFraming:
+                // §11.7 v2 staged (Pass 71): specified, but the venc-side
+                // knobs do not exist yet — unconfigured-actuator REJECTED.
+                return false;
             default:
                 return false;
         }
@@ -2094,6 +2132,9 @@ struct TxCore {
         snap.link.cmd_arq = cmd_arq_enabled_;
         snap.link.cmd_selector_frozen = cmd_selector_frozen_;
         snap.link.cmd_fps_ladder = cmd_fps_ladder();
+        snap.link.cmd_fps_select = cmd_fps_select_;
+        // cmd_resolution_select / cmd_framing_select stay 0 until the venc
+        // knobs exist (§11.7 staged, Pass 71).
         if (fps_ladder_) {
             snap.link.venc_p_frame_bytes =
                 fps_ladder_->observed_p_frame_bytes();
@@ -2141,6 +2182,10 @@ struct TxCore {
     // §11.7 remote command state (craft-session-volatile).
     bool cmd_arq_enabled_ = true;
     bool cmd_selector_frozen_ = false;
+    // §11.7 v2 FPS_SELECT (Pass 71): stats index (1-based, 0 = none this
+    // session) and the re-offer target (cleared when the ladder resumes).
+    uint8_t cmd_fps_select_ = 0;
+    uint16_t cmd_fps_select_hz_ = 0;
     bool cmd_fps_enabled_ = true;
     uint8_t boot_min_profile_ = 0;   // §9.7 boot envelope for SELECTOR run
     uint8_t boot_max_profile_ = 255;

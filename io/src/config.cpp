@@ -682,6 +682,38 @@ Result<Config> load_config_json(const std::string& json_text) {
                     }
                 }
             }
+            // §11.7 v2 command presets (Pass 71): at most 5 entries per list
+            // (the Pass 68 cmd_arg 0..4 bound); fps entries must be §9.11
+            // ladder members (cap coupling assumes rungs).
+            if (v.contains("command_presets")) {
+                const json& cp = v.at("command_presets");
+                if (cp.contains("fps")) {
+                    cfg.venc.preset_fps =
+                        cp.at("fps").get<std::vector<uint16_t>>();
+                }
+                if (cp.contains("resolution")) {
+                    cfg.venc.preset_resolution =
+                        cp.at("resolution").get<std::vector<std::string>>();
+                }
+                if (cp.contains("framing")) {
+                    cfg.venc.preset_framing =
+                        cp.at("framing").get<std::vector<std::string>>();
+                }
+                if (cfg.venc.preset_fps.size() > 5 ||
+                    cfg.venc.preset_resolution.size() > 5 ||
+                    cfg.venc.preset_framing.size() > 5) {
+                    return Result<Config>::fail(
+                        "venc.command_presets: at most 5 entries per list "
+                        "(§11.7)");
+                }
+                for (const uint16_t f : cfg.venc.preset_fps) {
+                    if (!fps_ladder_member(f)) {
+                        return Result<Config>::fail(
+                            "venc.command_presets.fps: entries must be §9.11 "
+                            "ladder members");
+                    }
+                }
+            }
         }
 
         // air ("udp" = dev backend, not §15; "radio" = devourer, §3.0 —

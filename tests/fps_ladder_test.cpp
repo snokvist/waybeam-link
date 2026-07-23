@@ -122,5 +122,22 @@ int main() {
         CHECK_EQ_U(ladder.current_fps(), 90);
     }
 
+    // §11.7 FPS_SELECT sync (Pass 71): a disabled ladder adopts the external
+    // rung and resumes from it, then steps back inside [min, preferred].
+    {
+        FpsLadder ladder(fast());
+        ladder.tick(1000);
+        CHECK_EQ_U(ladder.current_fps(), 100);
+        ladder.note_external_fps(60);
+        CHECK_EQ_U(ladder.current_fps(), 60);
+        ladder.resume(2000);
+        CHECK(std::string(ladder.state()) == "SETTLE");
+        CHECK_EQ_U(ladder.current_fps(), 60);
+        // A selection above preferred is pulled back on the next restore
+        // step (step() clamps to [min_fps, preferred_fps]).
+        ladder.note_external_fps(120);
+        CHECK_EQ_U(ladder.current_fps(), 120);
+    }
+
     return wbtest_finish("fps_ladder_test");
 }

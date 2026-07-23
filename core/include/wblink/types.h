@@ -65,11 +65,14 @@ inline constexpr uint8_t kRejected = 0x02;  // echo only: understood, won't do
 inline constexpr uint8_t kKnownMask = kAck | kRejected;
 }  // namespace vcmd_flags
 
-// §11.7 command registry. 0x04–0x1F reserved for v2 venc commands.
+// §11.7 command registry. 0x07–0x1F reserved.
 namespace vcmd_id {
 inline constexpr uint8_t kArq = 0x01;        // arg 0=off 1=on
 inline constexpr uint8_t kSelector = 0x02;   // arg 0=run 1=freeze (§9.7 pin)
 inline constexpr uint8_t kFpsLadder = 0x03;  // arg 0=off 1=on (§9.11)
+inline constexpr uint8_t kFpsSelect = 0x04;   // arg = preset index (Pass 71)
+inline constexpr uint8_t kResolution = 0x05;  // arg = preset index (staged)
+inline constexpr uint8_t kFraming = 0x06;     // arg = preset index (staged)
 }  // namespace vcmd_id
 
 // §3.14 — every command is enable/disable or a ≤5-choice enum (Pass 68).
