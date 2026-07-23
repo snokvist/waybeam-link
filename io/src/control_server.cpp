@@ -314,6 +314,14 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             }
             return reply(200, "OK", h_.cache_assignment_json());
         }
+        if (path == "/api/v1/vehicle/command") {
+            if (!h_.vehicle_command_json) {
+                return reply(409, "Conflict",
+                             json_err("vehicle command not available in this "
+                                      "mode"));
+            }
+            return reply(200, "OK", h_.vehicle_command_json());
+        }
         if (path == "/api/v1/stats/stream") {
             const std::string hdr =
                 "HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -426,6 +434,26 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             return reply(400, "Bad Request", json_err("permille required"));
         }
         return done(h_.bench_rx_drop(j.value("permille", -1)));
+    }
+    if (path == "/api/v1/vehicle/command") {
+        if (!h_.vehicle_command) return na();
+        const std::string cmd = j.value("cmd", std::string());
+        if (cmd.empty() || !j.contains("arg")) {
+            return reply(400, "Bad Request", json_err("cmd and arg required"));
+        }
+        const auto [code, jbody] = h_.vehicle_command(cmd, j.value("arg", -1));
+        return reply(code,
+                     code == 200 ? "OK"
+                                 : (code == 409 ? "Conflict" : "Bad Request"),
+                     jbody);
+    }
+    if (path == "/api/v1/arq") {
+        if (!h_.arq_enable) return na();
+        if (!j.contains("enabled") || !j["enabled"].is_boolean()) {
+            return reply(400, "Bad Request",
+                         json_err("enabled (bool) required"));
+        }
+        return done(h_.arq_enable(j.value("enabled", true)));
     }
     return reply(404, "Not Found", json_err("unknown path"));
 }

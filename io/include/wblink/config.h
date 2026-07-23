@@ -210,6 +210,16 @@ struct CsaPolicy {
     std::vector<uint16_t> channel_allowlist;
 };
 
+// §15.2 policy.cmd — the §11.7 VEHICLE_CMD campaign seeds (§17 RE-DERIVE).
+struct CmdPolicy {
+    uint32_t copies = 3;
+    uint32_t copy_interval_ms = 20;
+    uint32_t echo_copies = 2;
+    uint32_t ack_timeout_ms = 1000;
+    uint32_t retry_cap = 3;
+    uint32_t min_interval_ms = 250;
+};
+
 struct Policy {
     double report_hz = 10.0;
     uint32_t report_timeout_ms = 500;
@@ -219,6 +229,7 @@ struct Policy {
     FecPolicy fec;
     ReturnPolicy ret;  // JSON key "return" (C++ keyword)
     CsaPolicy csa;
+    CmdPolicy cmd;
 };
 
 // Air backends. "udp" is dev tooling (one UDP socket = one virtual adapter,

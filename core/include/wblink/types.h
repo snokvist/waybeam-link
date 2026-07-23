@@ -26,6 +26,7 @@ enum class PacketType : uint8_t {
     kCacheReply = 0xA,
     kAnnounce = 0xB,  // §3.12 craft pairing beacon
     kCacheAssign = 0xC,  // §3.13 receiver-owned cache following
+    kVehicleCmd = 0xD,  // §3.14 remote vehicle command (rides §11 machinery)
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -57,6 +58,23 @@ inline constexpr uint8_t kKnownMask = kClaimed | kPskPresent;
 // §3.12/§11.4a — session pairing token width (also the CSA HMAC key when auto).
 inline constexpr size_t kAnnouncePskSize = 16;
 
+// §3.14 VEHICLE_CMD cmd_flags bits. Unknown bits are a decode error.
+namespace vcmd_flags {
+inline constexpr uint8_t kAck = 0x01;       // craft→ground echo
+inline constexpr uint8_t kRejected = 0x02;  // echo only: understood, won't do
+inline constexpr uint8_t kKnownMask = kAck | kRejected;
+}  // namespace vcmd_flags
+
+// §11.7 command registry. 0x04–0x1F reserved for v2 venc commands.
+namespace vcmd_id {
+inline constexpr uint8_t kArq = 0x01;        // arg 0=off 1=on
+inline constexpr uint8_t kSelector = 0x02;   // arg 0=run 1=freeze (§9.7 pin)
+inline constexpr uint8_t kFpsLadder = 0x03;  // arg 0=off 1=on (§9.11)
+}  // namespace vcmd_id
+
+// §3.14 — every command is enable/disable or a ≤5-choice enum (Pass 68).
+inline constexpr uint8_t kVcmdMaxArg = 4;
+
 enum class FrameArqMode : uint8_t { kIdrOnly, kAllFrames };
 
 // Exact wire sizes (§3.1–3.8, §11.1).
@@ -73,6 +91,7 @@ inline constexpr size_t kCacheRequestFixedSize = 32;
 inline constexpr size_t kCacheReplyFixedSize = 17;
 inline constexpr size_t kAnnounceSize = 30;  // §3.12: 11 prefix + 1 + 2 + 16
 inline constexpr size_t kCacheAssignSize = 23;
+inline constexpr size_t kVehicleCmdSize = 23;  // §3.14: MAC covers bytes 0..18
 
 // §3.11 CACHE_STATUS capability_flags bits.
 namespace cache_capability {

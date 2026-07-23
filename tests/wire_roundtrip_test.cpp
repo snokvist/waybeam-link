@@ -270,5 +270,48 @@ int main() {
         CHECK_EQ_U(encode_cache_assign(a, buf, sizeof(buf)), 0);
     }
 
+    // §3.14 VEHICLE_CMD round-trip and structural clamps.
+    for (int i = 0; i < kIters; ++i) {
+        VehicleCmd c;
+        c.prefix = random_prefix(rng);
+        c.cmd_nonce = rng.u32();
+        c.cmd_seq = rng.u8();
+        c.cmd_flags = static_cast<uint8_t>(rng.range(0, 3));  // known bits
+        c.cmd_id = rng.u8();  // unknown ids are structurally valid (§3.14)
+        c.cmd_arg = static_cast<uint8_t>(rng.range(0, kVcmdMaxArg));
+        c.cmd_mac = rng.u32();
+        const size_t n = encode_vehicle_cmd(c, buf, sizeof(buf));
+        CHECK_EQ_U(n, kVehicleCmdSize);
+        const Decoded d = decode(buf, n);
+        const VehicleCmd* v = std::get_if<VehicleCmd>(&d);
+        CHECK(v != nullptr);
+        if (v != nullptr) CHECK(*v == c);
+    }
+    {
+        // cmd_arg > 4 and reserved cmd_flags bits are structural errors, on
+        // encode and decode alike (§3.14).
+        VehicleCmd c;
+        c.prefix = random_prefix(rng);
+        c.cmd_arg = kVcmdMaxArg + 1;
+        CHECK_EQ_U(encode_vehicle_cmd(c, buf, sizeof(buf)), 0);
+        c.cmd_arg = 0;
+        c.cmd_flags = 0x04;
+        CHECK_EQ_U(encode_vehicle_cmd(c, buf, sizeof(buf)), 0);
+        c.cmd_flags = vcmd_flags::kAck;
+        CHECK_EQ_U(encode_vehicle_cmd(c, buf, sizeof(buf)), kVehicleCmdSize);
+        buf[18] = kVcmdMaxArg + 1;  // cmd_arg on the wire
+        const Decoded bad_arg = decode(buf, kVehicleCmdSize);
+        CHECK(std::get_if<DecodeError>(&bad_arg) != nullptr);
+        buf[18] = 0;
+        buf[16] = 0x80;  // reserved flag bit
+        const Decoded bad_flags = decode(buf, kVehicleCmdSize);
+        CHECK(std::get_if<DecodeError>(&bad_flags) != nullptr);
+        buf[16] = 0;
+        const Decoded short_len = decode(buf, kVehicleCmdSize - 1);
+        const Decoded long_len = decode(buf, kVehicleCmdSize + 1);
+        CHECK(std::get_if<DecodeError>(&short_len) != nullptr);
+        CHECK(std::get_if<DecodeError>(&long_len) != nullptr);
+    }
+
     return wbtest_finish("wire_roundtrip_test");
 }

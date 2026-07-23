@@ -459,6 +459,19 @@ Result<Config> load_config_json(const std::string& json_text) {
                     }
                 }
             }
+            if (p.contains("cmd")) {
+                const json& pm = p.at("cmd");
+                CmdPolicy& cmd = cfg.policy.cmd;
+                cmd.copies = pm.value("copies", cmd.copies);
+                cmd.copy_interval_ms =
+                    pm.value("copy_interval_ms", cmd.copy_interval_ms);
+                cmd.echo_copies = pm.value("echo_copies", cmd.echo_copies);
+                cmd.ack_timeout_ms =
+                    pm.value("ack_timeout_ms", cmd.ack_timeout_ms);
+                cmd.retry_cap = pm.value("retry_cap", cmd.retry_cap);
+                cmd.min_interval_ms =
+                    pm.value("min_interval_ms", cmd.min_interval_ms);
+            }
         }
 
         // stats

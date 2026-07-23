@@ -121,6 +121,11 @@ class FrameFramer {
     // Sticky, driven from the TX cadence estimate each tick.
     void set_arq_suppressed(bool on) { arq_suppressed_ = on; }
 
+    // §11.7 ARQ command — an independent cause from the Pass 40 cutoff so
+    // off/on composes with (never clears) the cadence suppression. Off ⇒
+    // neither ARQ nor PFRAME_ARQ is stamped; on restores boot behaviour.
+    void set_arq_enabled(bool on) { arq_enabled_ = on; }
+
   private:
     // r for a frame of k symbols per the §14.1 adaptive policy; 0 if FEC off,
     // ARQ-only (k <= min_k), or the k+r>256 cap trips (records fec_oversize_k).
@@ -138,6 +143,7 @@ class FrameFramer {
     std::optional<uint16_t> override_parity_;  // §14.2 one-shot (Pass 38)
     bool override_allow_parq_ = true;
     bool arq_suppressed_ = false;  // §4.1 Pass 40 (sticky)
+    bool arq_enabled_ = true;      // §11.7 ARQ command
 
     // Reusable scratch (amortised across frames): zero-padded source symbols
     // (k*s) for the repair computation, and one encode buffer.

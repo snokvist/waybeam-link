@@ -269,6 +269,31 @@ Decoded decode_cache_assign(const uint8_t* buf, size_t len) {
     return a;
 }
 
+Decoded decode_vehicle_cmd(const uint8_t* buf, size_t len) {
+    if (len != kVehicleCmdSize) {
+        return len < kVehicleCmdSize ? DecodeError::kTruncated
+                                     : DecodeError::kLengthMismatch;
+    }
+    const uint8_t flags = buf[16];
+    if ((flags & ~vcmd_flags::kKnownMask) != 0) {
+        return DecodeError::kInvalidField;  // reserved bits must be 0
+    }
+    VehicleCmd c;
+    c.prefix = decode_prefix(buf);
+    c.cmd_nonce = be32_read(buf + 11);
+    c.cmd_seq = buf[15];
+    c.cmd_flags = flags;
+    c.cmd_id = buf[17];
+    c.cmd_arg = buf[18];
+    c.cmd_mac = be32_read(buf + 19);
+    // §3.14: cmd_arg is structurally 0..4 (Pass 68); an unknown cmd_id is NOT
+    // a decode error — the §11.7 craft engine answers it with REJECTED.
+    if (c.cmd_arg > kVcmdMaxArg) {
+        return DecodeError::kInvalidField;
+    }
+    return c;
+}
+
 }  // namespace
 
 Decoded decode(const uint8_t* buf, size_t len) {
@@ -310,6 +335,8 @@ Decoded decode(const uint8_t* buf, size_t len) {
             return decode_announce(buf, len);
         case PacketType::kCacheAssign:
             return decode_cache_assign(buf, len);
+        case PacketType::kVehicleCmd:
+            return decode_vehicle_cmd(buf, len);
         default:
             return DecodeError::kUnknownType;
     }
@@ -410,6 +437,22 @@ size_t encode_cache_assign(const CacheAssign& pkt, uint8_t* out, size_t cap) {
     out[21] = pkt.target_bw;
     out[22] = pkt.target_net_id;
     return kCacheAssignSize;
+}
+
+size_t encode_vehicle_cmd(const VehicleCmd& pkt, uint8_t* out, size_t cap) {
+    if (out == nullptr || cap < kVehicleCmdSize ||
+        (pkt.cmd_flags & ~vcmd_flags::kKnownMask) != 0 ||
+        pkt.cmd_arg > kVcmdMaxArg) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kVehicleCmd, out);
+    be32_write(out + 11, pkt.cmd_nonce);
+    out[15] = pkt.cmd_seq;
+    out[16] = pkt.cmd_flags;
+    out[17] = pkt.cmd_id;
+    out[18] = pkt.cmd_arg;
+    be32_write(out + 19, pkt.cmd_mac);
+    return kVehicleCmdSize;
 }
 
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap) {

@@ -130,6 +130,32 @@ int main() {
         bench_drop = permille;
         return "";
     };
+    // §11.7 vehicle command: typed {code, body} outcome + campaign GET.
+    std::string vcmd_last_cmd;
+    int vcmd_last_arg = -1;
+    bool vcmd_bound = true;
+    h.vehicle_command_json = [] {
+        return std::string(
+            "{\"nonce\":42,\"cmd\":\"arq\",\"arg\":0,\"state\":\"acked\"}");
+    };
+    h.vehicle_command = [&](const std::string& cmd, int arg)
+        -> std::pair<int, std::string> {
+        if (cmd != "arq" && cmd != "selector" && cmd != "fps_ladder") {
+            return {400, "{\"ok\":false,\"error\":\"unknown cmd\"}"};
+        }
+        if (!vcmd_bound) {
+            return {409, "{\"ok\":false,\"error\":\"no bound craft\"}"};
+        }
+        vcmd_last_cmd = cmd;
+        vcmd_last_arg = arg;
+        return {200, "{\"ok\":true,\"nonce\":42}"};
+    };
+    // §6.4 RX-local NACK-emission gate.
+    int arq_state = -1;
+    h.arq_enable = [&](bool enabled) -> std::string {
+        arq_state = enabled ? 1 : 0;
+        return "";
+    };
     // h.csa intentionally left null → endpoint must 409.
     s.set_handlers(std::move(h));
 
@@ -286,6 +312,63 @@ int main() {
         const std::string body = "{\"permille\":1001}";
         const std::string req =
             "POST /api/v1/bench/rx-drop HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    // §11.7 vehicle command: GET state, POST round-trip incl. the typed
+    // 409/400 outcomes, missing fields, and the §6.4 arq gate.
+    {
+        const std::string r = roundtrip(
+            s, port, "GET /api/v1/vehicle/command HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"state\":\"acked\"") != std::string::npos);
+    }
+    {
+        const std::string body = "{\"cmd\":\"arq\",\"arg\":0}";
+        const std::string req =
+            "POST /api/v1/vehicle/command HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        const std::string r = roundtrip(s, port, req);
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"nonce\":42") != std::string::npos);
+        CHECK(vcmd_last_cmd == "arq");
+        CHECK_EQ_U(vcmd_last_arg, 0);
+    }
+    {
+        const std::string body = "{\"cmd\":\"warp\",\"arg\":1}";
+        const std::string req =
+            "POST /api/v1/vehicle/command HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    {
+        vcmd_bound = false;  // handler's 409 (unbound / pending) rides through
+        const std::string body = "{\"cmd\":\"selector\",\"arg\":1}";
+        const std::string req =
+            "POST /api/v1/vehicle/command HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 409);
+        vcmd_bound = true;
+    }
+    {
+        const std::string body = "{\"cmd\":\"arq\"}";  // arg required
+        const std::string req =
+            "POST /api/v1/vehicle/command HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    {
+        const std::string body = "{\"enabled\":false}";
+        const std::string req =
+            "POST /api/v1/arq HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(arq_state, 0);
+    }
+    {
+        const std::string body = "{\"enabled\":1}";  // must be a bool
+        const std::string req =
+            "POST /api/v1/arq HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }
