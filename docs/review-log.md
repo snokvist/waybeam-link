@@ -1937,9 +1937,28 @@ Option C (a larger `verify_timeout_ms`) was NOT taken — the window stays
     the follower window at its landing, mirroring §11.6. Verified by
     repeated class-0 jumps in the final sweep.
 
+## Pass 70 — M2 feed-stall confirm asymmetry: accepted + documented (ruled 2026-07-23)
+
+**Operator ruling (2026-07-23): option (a) — accept and document.** The
+Pass 69 design gives the two campaign ends different confirm evidence (craft:
+rendezvous beacon; issuer: craft video). A craft input-feed stall between
+`CSA_ARMED` and the verify deadline therefore splits the fleet — craft
+COMMITs on `target_chan`, issuer reverts to `prev_chan` — until an explicit
+re-scout + re-claim (§15.5a; §11.5a binding self-releases). Alternatives were
+rejected because each weakens a ruled protection: (b) issuer counting craft
+HEARTBEAT/ANNOUNCE hollows out the forged-`CSA_ARMED` revert-on-no-video
+backstop (those frames are unauthenticated); (c) craft delaying COMMIT past
+the beacon reopens the §11.6 rendezvous gap Pass 69 closed. Exposure: one
+campaign window (~the verify timeout) on a craft whose encoder already
+stopped feeding — a failed link by definition; recovery is the standard
+re-scout/quickconnect. Spec: accepted-asymmetry paragraph added to §11.6
+(after the forged-`CSA_ARMED` backstop). No code change.
+
 ## Open questions for the next pass
 
-- [ ] **Asymmetric confirm split on a mid-campaign feed stall (Pass 69
+- [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
+      Pass 70 entry; original analysis kept below for the record.
+      **Asymmetric confirm split on a mid-campaign feed stall (Pass 69
       review pass 2, M2).** The craft's confirm signal is issuer presence
       (the beacon — guaranteed), but the issuer's confirm is craft *video*
       only. If the craft's RTP feed stalls after `CSA_ARMED` (a TX node
