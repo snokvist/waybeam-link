@@ -2155,6 +2155,41 @@ bitrate, and forfeits the higher rung's link robustness).
 Spec: §9.6 `venc.max_bitrate_kbps` bullet (encoder ceiling on the §9.5 derived
 target); §15.2 venc config note. Wired as `SelectorPolicy.max_bitrate_kbps`.
 
+## Pass 76 — §15.3 link stats gains `channel` (operating RF center MHz) (ruled 2026-07-23)
+
+_(Renumbered from Pass 74 → 76 on 2026-07-24: this ruling was authored in a
+parallel session dated 2026-07-23 but merged after Passes 74/75 landed, so it
+takes the next free number. Ruling content unchanged.)_
+
+**Problem (operator, 2026-07-23):** the ground station's OSD needs to show
+which channel the link is on and whether a §11 follow-me switch is in flight.
+`csa_state` was already in the §15.3 `link` block (so "switch ongoing" was
+observable), but the current operating channel was **not** in the stats stream
+at all — it lived only in the `/api/v1/info` config dump (`adapters[].channel`,
+static) and the scout's `/api/v1/scout/results` (`current_chan`). A consumer
+that already scrapes `/api/v1/stats` would have to add a second, differently-
+shaped scrape just to render the channel next to the CSA state.
+
+**Ruling (operator 2026-07-23):** add a single `channel` field (uint16, RF
+center MHz) to the §15.3 `link` block, immediately after `csa_state` (the two
+are the follow-me pair). Semantics:
+
+- It is the **rx node's live committed channel** — sourced from the rx loop's
+  `operating_chan`, which is seeded from `adapters[0].channel_mhz` and updated
+  as §11 CSA campaigns commit (`app/main.cpp`). This is the authoritative
+  runtime value, not the static config, so it stays correct across switches.
+- `channel` is `0` on nodes that do not track a runtime operating channel
+  (tx / loopback emit_stats call sites pass 0). The ground station runs the rx
+  loop, so the node a hub scrapes reports the real channel.
+- No new endpoint, no second scrape: `csa_state` + `channel` together answer
+  "which channel, and is a switch in flight" from the one stats line.
+
+Rejected alternatives: (a) surfacing the per-adapter config channel from
+`/api/v1/info` — static, goes stale the moment CSA commits; (b) a hub-side
+second scrape of scout `current_chan` — scout is a distinct subsystem and not
+always active. The golden §15.3 schema test (`tests/stats_test.cpp`) is updated
+in lockstep (fixed field order is contract).
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the

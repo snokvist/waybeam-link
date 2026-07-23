@@ -2481,6 +2481,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "profile": 4, "mcs": 4, "tx_power_qdb": 1800,
     "report_epoch": 1822, "report_age_ms": 40,
     "state": "HOLD", "flap_freeze": false, "csa_state": "IDLE",
+    "channel": 5805,
     "venc_bitrate_kbps": 14000, "venc_max_i_bytes": 70000,
     "venc_max_p_bytes": 19444, "venc_pushes": 6, "venc_failures": 0,
     "venc_settling": false, "venc_fps": 90,
@@ -2489,6 +2490,14 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "cmd_fps_select": 0, "cmd_resolution_select": 0, "cmd_framing_select": 0,
     "vcmd_state": "idle", "vcmd_nonce": 0, "arq_rx_enabled": true } }
 ```
+`csa_state` is the §11 follow-me state machine string (issuer states when a
+switch campaign is active, otherwise the follower's), and `channel` is the
+current RF operating channel (center MHz): the rx node's live committed
+channel, updated as §11 CSA campaigns commit. `channel` is `0` on nodes that
+do not track a runtime operating channel (tx/loopback); together the pair lets
+a ground consumer show which channel the link is on and whether a switch is in
+flight without scraping `/api/v1/info`.
+
 The `venc_*` link fields are the §9.6 actuator state: the last COMMANDED
 bitrate and frame caps (0 = never pushed), cumulative pushes/failures, and
 `venc_settling` — true within `venc.settle_ms` of the last accepted change
