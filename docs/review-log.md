@@ -1714,7 +1714,20 @@ This adds packet type `0xC` (§3.13), amends §14.3 cache ownership, §15.2 conf
 and §15.5a claim commit semantics. The cache-control packet stays on the
 Ethernet cache socket and is never RF-injected.
 
-## Pass 68 — Remote vehicle commands ride the CSA trust machinery (2026-07-22, PROPOSED — awaiting operator ruling)
+## Pass 68 — Remote vehicle commands ride the CSA trust machinery (2026-07-22, ruled; hardware-verified 2026-07-23)
+
+**Operator ruling (2026-07-22): approved as proposed, conditional on an
+adversarial review before deployment.** The review ran, its resolutions are
+folded into the sections below, and the implementation was verified on the
+production rig (vehicle 17 / x86 ground 9, channel 161): quickconnect claim →
+`ARQ off` acked over RF with `arq_frames` frozen while IDRs kept flowing →
+`ARQ on` restore → `SELECTOR` freeze/run pinning and releasing profile 3 →
+`FPS_LADDER on` echoed `REJECTED` (venc disabled on the craft, the intended
+unconfigured-actuator path) → 409 with an unbound craft → ground-local
+`POST /api/v1/arq` gate observable in §15.3. Random-seeded nonces confirmed
+on the wire. Incidental find: the deployed craft config had drifted (no `csa`
+block ⇒ fail-closed empty allowlist rejecting every campaign); re-synced from
+`deploy/vehicle-192.168.2.232.json`.
 
 The ground-station MVP needs runtime toggles for craft-side knobs that are
 boot-config only (ARQ, selector adaptation, FPS ladder) — the hub's ADAPTIVE
