@@ -1163,8 +1163,9 @@ MCS and bitrate never move together:
 Live HTTP, `MUT_LIVE`, sub-ms, no reinit:
 
 ```
-GET /api/v1/set?video0.bitrate=<kbps>          Host 127.0.0.1:80
-GET /api/v1/set?video0.maxIBytes=<B>&video0.maxPBytes=<B>   # one live group
+GET /api/v1/live/set?video0.bitrate=<kbps>     Host 127.0.0.1:80  # volatile (Pass 73)
+GET /api/v1/live/set?video0.maxIBytes=<B>&video0.maxPBytes=<B>    # one live group
+GET /api/v1/set?…                              # persisting fallback (pre-live venc)
 GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
 ```
 
@@ -1176,9 +1177,18 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
   `maxPBytes`): if waybeam-hub is present set its `venc.bitrate_enabled=false`
   (that flag lives in hub `mod_venc`, not venc); do not run wfb_ng
   `link_controller` — waybeam-link replaces it.
-- **Write only on change (flash wear):** every `/set` persists to
-  `/etc/waybeam.json`; push bitrate only when the target actually changes, never
-  at the 10 Hz report rate.
+- **Volatile-first actuation (Pass 73; closes review-log R-E):** every
+  waybeam-link push targets `/api/v1/live/set` — the same field set as `/set`,
+  applied to the running encoder, **never written to `/etc/waybeam.json`**.
+  On the first 404 (a pre-live venc) the actuator latches a per-process
+  fallback to the persisting `/api/v1/set` and logs once; the push that drew
+  the 404 is re-sent on the fallback path so no actuation is lost. Persistence
+  of encoder settings is exclusively an operator act through venc's own
+  UI/config — never a link-side write.
+- **Write only on change:** push bitrate only when the target actually
+  changes, never at the 10 Hz report rate. Load-bearing for flash wear on the
+  fallback path (every `/set` persists), and still the discipline on the live
+  path (no reason to churn HTTP per report tick).
 - **Low-bitrate coupling (optional):** at floor profiles the SVC-T preset
   oscillates fps; waybeam-link MAY command `video0.resilience=racing` at the low
   end (coarse, hysteretic — `resilience` is heavier than a bitrate tweak).
@@ -1188,7 +1198,8 @@ and a frame-shm ingress stream, waybeam-link additionally commands venc's
 per-frame ceilings (`maxIBytes`/`maxPBytes`, FRAMEBITS_FIRST) so a burst
 frame can never be encoded larger than the active rung can carry inside its
 deadline. **A per-frame budget channel is ruled OUT OF SCOPE** (operator,
-2026-07-16): venc control is HTTP with persist-on-set, and Salsify-style
+2026-07-16): venc control is HTTP (persist-on-set at ruling time; volatile
+since Pass 73 — the transport argument stands either way), and Salsify-style
 next-frame commands would need a new transport. The caps are therefore
 **horizon caps** — pure functions of slow inputs, recomputed only when an
 input changes and pushed under the same write-on-change/holdoff rules as
@@ -1754,18 +1765,16 @@ currently/last bound issuer; v2 adds `cmd_fps_select`,
 state as the §15.5 `GET /api/v1/vehicle/command` object (`vcmd_state` in the
 issuer's §15.3 stats is the same value).
 
-**Persistence exception for venc-class commands (Pass 71 ruling).** Commands
-`0x04`+ actuate through venc's persist-on-set contract (Pass 37): the
-**encoder effect survives reboot**, unlike the v1 toggles. The volatility
-contract above covers the *link-side* command state only — the §15.3 `cmd_*`
-fields do reset with the craft session (after a reboot the encoder runs the
-persisted preset while `cmd_fps_select` reads 0, and a boot-configured §9.11
-ladder re-takes `video0.fps` at start regardless). This asymmetry is
-deliberate: a v2 preset is a discrete operator action from a deployment
-allowlist, not controller churn, so the flash-wear concern (review-log R-E)
-stays scoped to the high-cadence §9.6/§9.11 writes. If venc grows a volatile
-apply (the R-E recommendation), controller-driven writes should adopt it;
-command-driven presets stay persisted.
+**Volatile venc actuation (Pass 73, superseding the Pass 71 persistence
+exception).** Commands `0x04`+ actuate through the §9.6 volatile path
+(`/api/v1/live/set`): the encoder effect now matches the volatility contract
+above — a craft reboot resets the link-side `cmd_*` fields *and* the encoder
+to boot config alike, and a boot-configured §9.11 ladder re-takes
+`video0.fps` at start regardless. On a **pre-live venc** (the §9.6 404
+fallback) the Pass 71 asymmetry reappears — the encoder effect persists while
+`cmd_*_select` resets — which stays spec-legal during upgrade windows; the
+§13 bound covers it. Persistence of encoder settings is an explicit operator
+act via venc's own UI/config, never a command side effect.
 
 ---
 
@@ -1820,7 +1829,7 @@ data-path crypto, or heavy state. Threats and mitigations:
 | Forged CACHE_REPLY → junk symbol injection | accepted only for an outstanding `request_id`, from the addressed cache, for requested symbols, within allowance; wrapped packet revalidated via full §3.1/§3.2 decode + latched stream key (no worse than direct DATA injection, which is the accepted §13 posture) | 3.11, 14.3 |
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
 | Forged/stale CACHE_ASSIGN → cache retune or cross-vehicle window | accept only the configured controller originator **and UDP source endpoint**, exact cache destination, allowlisted channel, and monotonic controller-session epoch; clear the old window only after a successful retune | 3.13, 14.3 |
-| Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung / venc preset) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets (v1 toggles) or an encoder preset from the operator's own deployment allowlist (v2, actuator-persisted — Pass 71) — never channel or power | 3.14, 11.7 |
+| Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung / venc preset) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets (v1 toggles) or an encoder preset from the operator's own deployment allowlist (v2, volatile — Pass 73; persists only on a pre-live venc fallback) — never channel or power | 3.14, 11.7 |
 
 The CSA MAC is the sole cryptographic element and touches only the rare
 channel-switch control action, never the bandwidth-carrying data path. Key
@@ -2302,8 +2311,9 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   `echo_copies`/`min_interval_ms`). All §17 RE-DERIVE seeds. The channel shares
   `csa.psk`/the announced token (§11.4a) — there is no separate command key.
 - `scout` (ground/rx node, §15.5) configures the channel searcher: `dwell_ms`
-  (per-channel listen, **300 ms** — a video-active craft is seen off DATA within
-  a few hundred ms) and `channels` (`null` = sweep `csa.channel_allowlist`). A
+  (base per-channel listen, **300 ms**; an occupied channel auto-extends until
+  its first ANNOUNCE candidate resolves, §15.5a Pass 72) and `channels`
+  (`null` = sweep `csa.channel_allowlist`). A
   the **`role:"tx"` uplink adapter is the scout** (resolved as the backend's tx
   adapter, not assumed to be config index 0): a sweep roams the uplink while the
   diversity RX adapters hold the resting channel. A single-adapter ground has no
@@ -2453,15 +2463,17 @@ The `venc_*` link fields are the §9.6 actuator state: the last COMMANDED
 bitrate and frame caps (0 = never pushed), cumulative pushes/failures, and
 `venc_settling` — true within `venc.settle_ms` of the last accepted change
 (the doc-model "pending transition"; commanded = applied at HTTP 2xx since
-venc's `/set` is synchronous). Zero/false on nodes without `venc.enabled`.
+venc's `/live/set` — and the `/set` fallback — is synchronous). Zero/false on
+nodes without `venc.enabled`.
 
 The `cmd_*` / `vcmd_*` / `arq_rx_enabled` link fields are the §11.7 command
 surface, emitted on every node with role-neutral defaults: `cmd_arq`,
 `cmd_selector_frozen`, `cmd_fps_ladder` are the craft's currently applied
 command state (boot values until a command lands; `cmd_fps_ladder` is false
 when the ladder is unconfigured), the v2 `cmd_*_select` fields are the
-**1-based preset index** applied this craft session (0 = none — venc may
-still be running a preset persisted in an earlier session, §11.7),
+**1-based preset index** applied this craft session (0 = none — only a
+pre-live venc, §9.6 fallback, may still run a preset persisted in an earlier
+session, §11.7),
 `cmd_last_nonce` is the last consumed nonce
 from the currently/last bound issuer (0 = never), `vcmd_state`/`vcmd_nonce`
 mirror the issuer's §15.5 `GET /api/v1/vehicle/command` object, and
@@ -2756,6 +2768,23 @@ supported (§15.2 `scout`).
   diversity ear parked on the resting channel hears the craft during every dwell, so
   counting its frames would attribute the craft to every swept channel and inflate
   occupancy. Frames from non-scout adapters are excluded from the survey.
+- **Candidate-resolving dwell extension (Pass 72).** A *candidate* requires an
+  ANNOUNCE decode — DATA alone marks a channel occupied but names no claimable
+  craft — and the §3.12 announce cadence (≥1 Hz) can exceed a short dwell: a
+  300 ms dwell hears a 2 Hz announcer with only p≈0.6 per visit, so discovery
+  took a variable 1–4 sweeps. When a dwell elapses with decodable waybeam
+  frames heard on the channel but **no candidate resolved yet**, the scout
+  extends that channel's dwell until the first ANNOUNCE decodes, bounded at
+  **`dwell_ms` + 1200 ms** total (one full worst-case 1 Hz announce period
+  plus margin). Channels with no decodable waybeam traffic advance at the base
+  dwell — a sweep stays fast on empty air while an occupied channel resolves
+  deterministically in one visit. The extension ends at the first resolved
+  candidate (additional co-channel craft are caught by later sweeps or a
+  larger configured `dwell_ms`); a channel carrying only non-announcing
+  waybeam traffic (another ground's uplink, no craft) burns the full extension
+  once per sweep — bounded and rare. Occupancy math uses the **actual elapsed
+  dwell** as its airtime denominator, so an extended dwell does not inflate or
+  deflate `wifi_util_permille`.
 - **Candidate** = `{originator, net_id, session, claimed, claimed_by, chan,
   psk_known}`. `psk_known` is a bool reporting whether the ground holds a usable
   CSA key for the craft: the **cached announced token** (the ground caches the
