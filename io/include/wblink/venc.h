@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // waybeam-link io: §9.6 venc bitrate actuator — blocking HTTP/1.0 GET
-// `/api/v1/set?video0.bitrate=<kbps>` over a plain POSIX TCP socket to the
-// same-SoC encoder (MUT_LIVE, sub-ms server side; ~200 ms socket timeouts
-// here so a wedged encoder cannot stall the event loop for long).
+// `/api/v1/live/set?video0.bitrate=<kbps>` over a plain POSIX TCP socket to
+// the same-SoC encoder (MUT_LIVE, sub-ms server side; ~200 ms socket
+// timeouts here so a wedged encoder cannot stall the event loop for long).
 //
-// WRITE-ON-CHANGE is load-bearing (§9.6): every /set persists to
-// /etc/waybeam.json — pushing at the 10 Hz report rate would wear flash.
-// set_bitrate() is a no-op when the target equals the last pushed value.
+// VOLATILE-FIRST (§9.6 Pass 73): every push targets /api/v1/live/set (no
+// flash write); the first 404 latches a one-shot per-process fallback to the
+// persisting /api/v1/set (pre-live venc) and re-sends the push that drew it.
+// WRITE-ON-CHANGE stays load-bearing (§9.6): flash wear on the fallback
+// path, pointless HTTP churn on the live path. set_bitrate() is a no-op
+// when the target equals the last pushed value.
 //
 // Failures are counted, never fatal: the transport must keep flying on a
 // stuck encoder API (the §9.8 fail-safe handles the rest).
@@ -65,11 +68,16 @@ class VencActuator {
         return last_change_ms_ != 0 &&
                now_ms < last_change_ms_ + cfg_.settle_ms;
     }
+    // §9.6 Pass 73: true once a 404 latched the persisting-/set fallback.
+    bool live_fallback() const { return live_fallback_; }
 
   private:
     bool http_get(const std::string& path);
+    int http_get_status(const std::string& path);  // HTTP code; 0 = transport
+    bool push_set(const std::string& query);       // §9.6 volatile-first
 
     VencCfg cfg_;
+    bool live_fallback_ = false;
     std::optional<uint32_t> last_;
     std::optional<std::pair<uint32_t, uint32_t>> last_caps_;
     std::optional<uint16_t> last_fps_;

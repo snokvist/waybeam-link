@@ -54,6 +54,7 @@ add_wb_test(frame_shm_loopback_test wblink_io)
 add_wb_test(power_test wblink_io)
 add_wb_test(stats_test wblink_io)
 add_wb_test(control_server_test wblink_io)
+add_wb_test(venc_actuator_test wblink_io)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
