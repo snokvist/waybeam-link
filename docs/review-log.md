@@ -1866,6 +1866,24 @@ Option C (a larger `verify_timeout_ms`) was NOT taken — the window stays
   → first beacon heard within one spacing → COMMITTED ~t0+550 ms; issuer
   hears craft video ~t0+540 ms → COMMITTED. Both margins >100 ms against a
   150 ms window.
+- **HARDWARE-VERIFIED 2026-07-23** on the x86 ground (EU uplink + CU
+  diversity) + SSC338Q craft + Ethernet cache rig. Five cross-channel moves
+  committed on all three nodes with video flowing and the cache following
+  each epoch: quickconnect 5805→5825 (class 1: claim→landing 265 ms, beacons
+  at 20 ms spacing bridging the craft's arrival), `/csa` 5825→5745 and
+  5745→5805 (class 0, dt 126/147 ms), and menu-path (`/menu/exec`) jumps
+  5805→5825→5805 on the final clean build. Same-channel claims and the
+  Pass 65 abort-rollback (4× — stale-candidate claims on the wrong channel
+  abort cleanly, link undisturbed) also exercised. **One observation raised
+  for a possible hardening ruling:** the issuer stops beaconing on
+  `note_craft_video`, which fires the instant the craft lands — in every
+  verified move the craft's confirm actually rode the ground's first
+  post-arrival report inside the window, never a beacon. Robust in practice
+  (pre-positioning keeps the issuer present with a warm report path), but
+  the "guaranteed signal in the craft's window" would be literal only with a
+  beacon tail running until T_switch + t_revert_ms regardless of early
+  video-verify success. Not implemented — needs an operator ruling if
+  wanted.
 
 ## Open questions for the next pass
 
