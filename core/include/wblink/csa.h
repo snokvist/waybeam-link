@@ -138,6 +138,7 @@ class CsaIssuer {
             kSendCopy,    // inject pkt (already MAC'd)
             kCommit,      // retune own adapters to chan/bw
             kSendBeacon,  // §11.6 rendezvous beacon (already MAC'd, dt=0)
+            kSuccess,     // campaign confirmed at the deadline (beacon tail)
             kRevert,      // retune own adapters back to prev
             kAbort,       // no CSA_ARMED — stay, campaign dead
         };
@@ -178,6 +179,8 @@ class CsaIssuer {
     uint64_t verify_deadline_us_ = 0;
     uint64_t next_beacon_us_ = 0;  // §11.6 rendezvous beacon cadence
     bool armed_seen_ = false;
+    bool video_seen_ = false;  // latched in VERIFY; campaign closes at the
+                               // deadline either way (§11.6 beacon tail)
 };
 
 }  // namespace wblink

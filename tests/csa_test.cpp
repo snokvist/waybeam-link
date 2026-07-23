@@ -245,10 +245,21 @@ int main() {
         CHECK_EQ_U(is.tick(121'500).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
-        // Craft video arrives → campaign closed, beacons stop.
+        // Craft video arrives → success LATCHED, but the beacon tail keeps
+        // blanketing the craft's verify window (§11.6 beacon tail).
         is.note_craft_video(200'000);
+        CHECK(is.active());
+        CHECK_EQ_U(is.tick(221'500).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSendBeacon));
+        // Campaign closes at the deadline (T_switch 150 ms + verify 150 ms)
+        // with kSuccess, then goes quiet.
+        const auto s = is.tick(300'000);
+        CHECK_EQ_U(s.kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSuccess));
         CHECK(!is.active());
-        CHECK_EQ_U(is.tick(200'500).kind,
+        CHECK_EQ_U(is.tick(300'500).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kNone));
     }
     {
