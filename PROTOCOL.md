@@ -1586,15 +1586,20 @@ direction** lets us make the strand class *never happen* rather than recover aft
   nothing the craft could hear — a deterministic strand (proven 2026-07-23).
   If `CSA_ARMED` is not seen within `csa_ack_timeout` (**1 s**), ground
   **aborts the campaign and stays** on the current channel — no strand.
-- **Rendezvous beacon (Pass 69):** from landing on `target_chan` until its
-  video-verify succeeds or its deadline expires, the issuer re-injects the
-  accepted campaign packet at the §11.2 copy spacing with `csa_seq = 0` and
-  `dt_to_switch_ms = 0`, `csa_mac` recomputed over the beacon bytes. The
-  craft's §11.5 VERIFY confirms on the first matching beacon; every other
-  receiver drops zero-dt CSAs without effect. This gives the craft a
-  guaranteed issuer-present signal inside its verify window instead of
-  waiting for the report path (craft EOB + 10 Hz reporter + §7.2 return
-  window) to wake.
+- **Rendezvous beacon (Pass 69, tail ruled 2026-07-23):** from landing on
+  `target_chan` until its verify deadline (below) — which is also the close
+  of the craft's verify window — the issuer re-injects the accepted campaign
+  packet at the §11.2 copy spacing with `csa_seq = 0` and
+  `dt_to_switch_ms = 0`, `csa_mac` recomputed over the beacon bytes. An
+  early video-verify success is **recorded but does not stop the beacons**:
+  the beacon is the craft's guaranteed confirm signal and must blanket the
+  craft's whole window. (Bench-verified: video-verify fires the instant the
+  craft lands — exactly when the craft starts listening — so stopping on
+  first video would silence the beacon at its moment of use and leave the
+  craft's confirm to report-path timing.) The campaign closes — success or
+  revert — only at the deadline. The craft's §11.5 VERIFY confirms on the
+  first matching beacon; every other receiver drops zero-dt CSAs without
+  effect.
 - **Issuer revert-on-no-video:** if ground did commit (craft ACKed) but then sees
   no craft video on `target_chan` within its verify deadline, ground reverts to
   `prev_chan` (an issuer abandoning a failed campaign is not "unasked revert").
