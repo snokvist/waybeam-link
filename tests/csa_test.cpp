@@ -2,8 +2,9 @@
 // §11 CSA engine tests: follower validation (MAC / replay / issuer lock /
 // allowlist / rate-limit), TSF anchoring incl. u32 wrap, the §11.5 state
 // machine (jump-failed revert, hold-until-reboot, §11.5a binding release +
-// in-place re-claim), the §11.6 issuer (decrementing-dt copies,
-// commit-after-armed, ack-timeout abort, revert-on-no-video), and the §11.3
+// in-place re-claim), the §11.6 issuer (decrementing-dt copies, Pass 69
+// pre-position commit-on-armed + rendezvous beacons, ack-timeout abort,
+// revert-on-no-video at the T_switch-anchored deadline), and the §11.3
 // selector freeze pause.
 #include "wblink/csa.h"
 
@@ -218,17 +219,37 @@ int main() {
             CHECK_EQ_U(csa_mac(pol.psk.data(), pol.psk.size(), buf),
                        a.pkt.csa_mac);
         }
-        // Craft armed → commit at T_switch (150 ms for class 0).
+        // Craft armed → commit IMMEDIATELY (§11.6 pre-position, Pass 69) —
+        // not at T_switch.
         is.note_craft_armed(100'000);
-        CHECK_EQ_U(is.tick(149'000).kind,
-                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kNone));
-        const auto c = is.tick(150'000);
+        const auto c = is.tick(101'000);
         CHECK_EQ_U(c.kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
         CHECK_EQ_U(c.chan_mhz, 5745);
-        // Craft video arrives → campaign closed.
+        // Landed → rendezvous beacons at copy spacing: csa_seq 0, dt 0,
+        // MAC-valid under the campaign key (§11.6, Pass 69).
+        const auto b0 = is.tick(101'500);
+        CHECK_EQ_U(b0.kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSendBeacon));
+        CHECK_EQ_U(b0.pkt.csa_seq, 0);
+        CHECK_EQ_U(b0.pkt.dt_to_switch_ms, 0);
+        CHECK_EQ_U(b0.pkt.csa_nonce, 1);
+        uint8_t bbuf[32];
+        CHECK_EQ_U(encode_csa(b0.pkt, bbuf, sizeof(bbuf)), 32);
+        CHECK_EQ_U(csa_mac(pol.psk.data(), pol.psk.size(), bbuf),
+                   b0.pkt.csa_mac);
+        // Spaced, not spammed: nothing for the next copy interval.
+        CHECK_EQ_U(is.tick(111'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kNone));
+        CHECK_EQ_U(is.tick(121'500).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSendBeacon));
+        // Craft video arrives → campaign closed, beacons stop.
         is.note_craft_video(200'000);
         CHECK(!is.active());
+        CHECK_EQ_U(is.tick(200'500).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kNone));
     }
     {
         // No CSA_ARMED ⇒ abort at ack_timeout, never commits.
@@ -252,8 +273,14 @@ int main() {
             is.tick(static_cast<uint64_t>(i) * 20'000);
         }
         is.note_craft_armed(100'000);
-        CHECK_EQ_U(is.tick(150'000).kind,
+        CHECK_EQ_U(is.tick(100'000).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+        // §11.6 deadline anchor: the craft does not move before T_switch
+        // (150 ms, class 0), so the no-video deadline is T_switch +
+        // verify_timeout even though the commit landed early.
+        CHECK_EQ_U(is.tick(150'000 + 149'000).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSendBeacon));
         const auto a = is.tick(150'000 + 150'000);
         CHECK_EQ_U(a.kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
@@ -298,6 +325,84 @@ int main() {
         CHECK_EQ_U(encode_csa(b0.pkt, buf_b, sizeof(buf_b)), 32);
         CHECK_EQ_U(csa_mac(token_b.data(), token_b.size(), buf_b),
                    b0.pkt.csa_mac);
+    }
+
+    // --- §11.6 rendezvous beacon at the follower (Pass 69) ------------------
+    {
+        // A beacon = the campaign packet with csa_seq 0 and dt 0, re-MAC'd.
+        const auto make_beacon = [&](uint32_t nonce, uint16_t chan) {
+            CsaPacket b = make_csa(pol, nonce, chan, 1);
+            b.csa_seq = 0;
+            b.dt_to_switch_ms = 0;
+            uint8_t buf[32];
+            CHECK_EQ_U(encode_csa(b, buf, sizeof(buf)), 32);
+            b.csa_mac = csa_mac(pol.psk.data(), pol.psk.size(), buf);
+            return b;
+        };
+        // In VERIFY, a matching beacon confirms → COMMITTED.
+        CsaFollower f(pol);
+        CHECK(f.on_csa(make_csa(pol, 1, 5745, 150), 0, std::nullopt, 0,
+                       std::nullopt));
+        CHECK_EQ_U(f.tick(150'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kRetune));
+        // Wrong nonce: stays VERIFY.
+        CHECK(!f.on_csa(make_beacon(7, 5745), 160'000, std::nullopt, 0,
+                        std::nullopt));
+        CHECK(std::string_view(f.state_str()) == "VERIFY");
+        // Bad MAC: stays VERIFY.
+        CsaPacket forged = make_beacon(1, 5745);
+        forged.csa_mac ^= 1;
+        CHECK(!f.on_csa(forged, 165'000, std::nullopt, 0, std::nullopt));
+        CHECK(std::string_view(f.state_str()) == "VERIFY");
+        // Matching beacon: confirms (on_csa still returns false — it is not
+        // a campaign acceptance and must not log/arm).
+        CHECK(!f.on_csa(make_beacon(1, 5745), 170'000, std::nullopt, 0,
+                        std::nullopt));
+        CHECK(std::string_view(f.state_str()) == "COMMITTED");
+        // No revert at the old verify deadline — the switch is confirmed.
+        CHECK_EQ_U(f.tick(300'001).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+    }
+    {
+        // A beacon never arms from IDLE (dt = 0 fails §11.4 accept) and does
+        // not latch.
+        CsaFollower f(pol);
+        CHECK(!f.on_csa(make_csa(pol, 1, 5745, 0), 1000, std::nullopt, 0,
+                        std::nullopt));
+        CHECK(std::string_view(f.state_str()) == "IDLE");
+        CHECK(!f.latched_issuer().has_value());
+    }
+    {
+        // In ARMED a beacon is a no-op: the follower still switches at
+        // T_switch, and in COMMITTED a beacon does NOT refresh the §11.5a
+        // binding (a recorded beacon must not hold the binding alive).
+        const auto make_beacon = [&](uint32_t nonce, uint16_t chan) {
+            CsaPacket b = make_csa(pol, nonce, chan, 1);
+            b.csa_seq = 0;
+            b.dt_to_switch_ms = 0;
+            uint8_t buf[32];
+            CHECK_EQ_U(encode_csa(b, buf, sizeof(buf)), 32);
+            b.csa_mac = csa_mac(pol.psk.data(), pol.psk.size(), buf);
+            return b;
+        };
+        CsaFollower f(pol);
+        CHECK(f.on_csa(make_csa(pol, 1, 5745, 150), 0, std::nullopt, 0,
+                       std::nullopt));
+        CHECK(!f.on_csa(make_beacon(1, 5745), 1000, std::nullopt, 0,
+                        std::nullopt));
+        CHECK(f.armed());  // still ARMED, still switches on time
+        CHECK_EQ_U(f.tick(150'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kRetune));
+        f.note_valid_rx(200'000, 9);  // committed; binding fresh at 200 ms
+        CHECK(std::string_view(f.state_str()) == "COMMITTED");
+        // Beacon mid-hold: must NOT refresh the binding...
+        CHECK(!f.on_csa(make_beacon(1, 5745), 60'000'000, std::nullopt, 0,
+                        std::nullopt));
+        // ...so release still fires at 200 ms + bind_release_ms.
+        const uint64_t rel = 200'000 + 90'000'000ull;
+        f.tick(rel + 2);
+        CHECK(!f.latched_issuer().has_value());
+        CHECK(std::string_view(f.state_str()) == "COMMITTED");
     }
 
     return wbtest_finish("csa_test");

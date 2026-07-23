@@ -56,6 +56,21 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     if (lock && *lock != pkt.prefix.originator) {
         return false;
     }
+    // §11.6 rendezvous beacon (Pass 69): dt == 0 never arms. A MAC-valid
+    // copy of the currently armed campaign confirms a pending VERIFY exactly
+    // like valid traffic; in any other state it is a silent drop with no
+    // side effects (no §11.5a binding refresh — a recorded beacon must not
+    // hold the binding alive).
+    if (pkt.dt_to_switch_ms == 0) {
+        if (state_ == State::kVerify &&
+            pkt.prefix.originator == campaign_.prefix.originator &&
+            pkt.prefix.session_id == campaign_.prefix.session_id &&
+            pkt.csa_nonce == campaign_.csa_nonce) {
+            state_ = State::kCommitted;
+            last_bound_rx_us_ = now_us;
+        }
+        return false;
+    }
     const auto key = std::make_pair(pkt.prefix.originator,
                                     pkt.prefix.session_id);
     const auto it = last_applied_.find(key);
@@ -68,9 +83,6 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     if (last_accept_us_ != 0 &&
         now_us - last_accept_us_ <
             static_cast<uint64_t>(policy_.min_interval_ms) * 1000) {
-        return false;
-    }
-    if (pkt.dt_to_switch_ms == 0) {
         return false;
     }
 
@@ -250,23 +262,28 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
             }
             break;
         case State::kAwaitAck:
-            // §11.6: commit only after CSA_ARMED, at T_switch. No flag by
-            // ack_timeout → abort and stay (the craft that DID arm reverts on
-            // its own verify timeout and reconverges on prev_chan).
-            if (armed_seen_ && now_us >= switch_at_us_) {
+            // §11.6 pre-position (Pass 69): commit immediately on CSA_ARMED —
+            // the copies are out, the craft has ACKed, there is no further
+            // business on the old channel. Waiting for T_switch made both
+            // retunes simultaneous and the issuer unhearable inside the
+            // craft's verify window. No flag by ack_timeout → abort and stay
+            // (the craft that DID arm reverts on its own verify timeout and
+            // reconverges on prev_chan).
+            if (armed_seen_) {
                 a.kind = IssuerAction::Kind::kCommit;
                 a.chan_mhz = tmpl_.target_chan;
                 a.bw = tmpl_.target_bw;
                 a.fast = tmpl_.retune_class == 0;
                 a.power_intent = tmpl_.power_intent;
+                // §11.6 deadline anchor: the craft does not move before
+                // T_switch — pre-positioning must not shrink its window.
                 verify_deadline_us_ =
-                    now_us +
+                    (now_us > switch_at_us_ ? now_us : switch_at_us_) +
                     static_cast<uint64_t>(policy_.verify_timeout_ms) * 1000;
+                next_beacon_us_ = now_us;  // beacons start once landed
                 state_ = State::kVerify;
-            } else if (!armed_seen_ &&
-                       now_us - started_us_ >=
-                           static_cast<uint64_t>(policy_.ack_timeout_ms) *
-                               1000) {
+            } else if (now_us - started_us_ >=
+                       static_cast<uint64_t>(policy_.ack_timeout_ms) * 1000) {
                 a.kind = IssuerAction::Kind::kAbort;
                 state_ = State::kIdle;
             }
@@ -281,6 +298,20 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
                 a.fast = tmpl_.retune_class == 0;
                 a.power_intent = tmpl_.power_intent;
                 state_ = State::kIdle;
+            } else if (now_us >= next_beacon_us_) {
+                // §11.6 rendezvous beacon (Pass 69): re-inject the accepted
+                // campaign with csa_seq = 0 and dt = 0 (never arms, §11.4) at
+                // copy spacing until the craft's video confirms the switch —
+                // the guaranteed issuer-present signal inside the craft's
+                // verify window.
+                a.kind = IssuerAction::Kind::kSendBeacon;
+                a.pkt = tmpl_;
+                a.pkt.csa_seq = 0;
+                a.pkt.dt_to_switch_ms = 0;
+                if (const auto m = mac_of(a.pkt, policy_.psk)) {
+                    a.pkt.csa_mac = *m;
+                }
+                next_beacon_us_ = now_us + kCopySpacingUs;
             }
             break;
         case State::kIdle:
