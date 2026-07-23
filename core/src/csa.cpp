@@ -127,14 +127,21 @@ CsaAction CsaFollower::tick(uint64_t now_us) {
                 a.bw = campaign_.target_bw;
                 a.fast = campaign_.retune_class == 0;
                 a.power_intent = campaign_.power_intent;
-                const uint32_t vt = campaign_.t_revert_ms != 0
-                                        ? campaign_.t_revert_ms
-                                        : policy_.verify_timeout_ms;
-                verify_deadline_us_ = now_us + static_cast<uint64_t>(vt) * 1000;
+                // §11.5 (Pass 69 H1b): the verify window opens at LANDING —
+                // the first tick after the blocking retune — computed lazily
+                // in kVerify (0 = not yet landed), so the retune itself
+                // cannot burn the window from the inside.
+                verify_deadline_us_ = 0;
                 state_ = State::kVerify;
             }
             break;
         case State::kVerify:
+            if (verify_deadline_us_ == 0) {
+                const uint32_t vt = campaign_.t_revert_ms != 0
+                                        ? campaign_.t_revert_ms
+                                        : policy_.verify_timeout_ms;
+                verify_deadline_us_ = now_us + static_cast<uint64_t>(vt) * 1000;
+            }
             if (now_us >= verify_deadline_us_) {
                 // §11.5 jump-failed backout: the retune landed on a dead
                 // channel — revert to prev_chan, drop the incomplete claim,
