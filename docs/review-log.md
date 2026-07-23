@@ -1826,21 +1826,38 @@ sections, still under the same pending ruling:
 
 ## Open questions for the next pass
 
-- [ ] **Cross-channel claim verify race on kernel-monitor grounds (observed
-      2026-07-23, Pass 68 rig work).** A quickconnect that MOVES the fleet
-      (5805→5825) stranded ground-on-target / craft-reverted-to-prev: the
-      craft's §11.5 verify window (`t_revert_ms` = 150 ms, seeded from the
-      devourer FastRetune bench) expired before the ground's two sequential
-      `iw` shell-out retunes brought its uplink back up, so the craft heard
-      nothing, reverted, and dropped the binding — while the ground, having
-      seen the craft's brief target-channel video burst inside its own verify
-      window, left VERIFY and committed (the §11.6 revert-on-no-video
-      backstop no longer armed). Same-channel claims never race. The §17
-      RE-DERIVE posture suggests a larger `csa.verify_timeout_ms` (carried as
-      the campaign's `t_revert_ms`) for kernel-monitor deployments —
-      ~500–1000 ms — and/or the ground issuer holding its VERIFY state until
-      video is *sustained*, not first-seen. Needs an operator ruling on the
-      seed vs. the state-machine fix.
+- [ ] **Cross-channel claim rendezvous gap (root cause PROVEN 2026-07-23,
+      instrumented rerun after Pass 68; supersedes the earlier retune-latency
+      wording — the operator's "iw is 5–10 ms" objection was correct).**
+      A timestamping `iw` interposer on both ends showed, per T_switch-anchored
+      timeline: the `iw`/nl80211 shell-out itself is ~1.5 ms; the *vendor
+      drivers' cross-channel set-freq* is the real cost (rtl88x2eu x86
+      **117 ms**, rtl88x2cu **65 ms**, craft 8812eu-on-SSC338Q **30 ms**), and
+      same-channel set-freq is free (why every same-channel claim works).
+      Mechanism, deterministic not probabilistic: §11.6 has the issuer begin
+      its own retune AT T_switch — the same instant as the craft — serialized
+      per adapter and blocking the event loop (ground lands EU T+117 ms,
+      CU T+184 ms). The craft lands at T+30 ms and listens until its
+      `t_revert_ms` = 150 ms deadline, but the issuer transmits NOTHING on the
+      target until its report machinery wakes (craft EOB + 10 Hz reporter +
+      §7.2 return window), so the craft cannot possibly confirm and reverts +
+      unbinds. Meanwhile the ~30 ms EU-landing overlap still carries genuine
+      craft video (~1000 pkt/s), which satisfies `note_craft_video` — the
+      issuer commits (its own 150 ms verify deadline had already lapsed inside
+      the blocking retune; Pass 66 stale-buffer drain is a second false-commit
+      path). Asymmetric strand every time. Fix options needing an operator
+      ruling (spec §11.6/§11.5): (A) issuer pre-positions — retune to target
+      as soon as all copies are out and CSA_ARMED is seen, instead of waiting
+      for T_switch; (B) issuer transmits immediately on landing — inject a few
+      authenticated issuer-present frames (e.g. forced LINK_REPORTs, campaign
+      timing, quiet-gap-exempt) so the craft's `note_valid_rx` can confirm;
+      (C) larger `verify_timeout_ms`/`t_revert_ms` for kernel-monitor rigs
+      (needs ≥ ~400 ms to cover measured worst case); (D) io-level hygiene —
+      parallel/async retunes, flush stale RX queues at the commit retune, log
+      `retune_all` failures. Recommended combination: A + B (+ D flush), with
+      C only as margin. Same-channel claims remain safe and verified; the hub
+      menu's "connect best" pins `target_chan` to the craft's current channel
+      until this is ruled and fixed.
 - [ ] **`bpf_filtered` precision follow-up** — if the coarse sysfs estimate proves
       too noisy in bench (concurrent sniffers, multi-socket rigs), replace it with an
       exact per-socket count via `PACKET_STATISTICS`/`tp_drops` and drop the §16.2
