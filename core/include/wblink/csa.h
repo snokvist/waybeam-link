@@ -203,6 +203,17 @@ class CsaIssuer {
 
     static constexpr uint8_t kCopies = 5;
     static constexpr uint32_t kCopySpacingUs = 20000;  // §11.2
+    // §11.2 (Pass 90 addendum): stop emitting copies once less than this
+    // remains before T_switch. A copy accepted very late leaves the craft too
+    // little time to advertise CSA_ARMED on the OLD channel before it departs
+    // — the issuer never gets the ack it needs to pre-position, and the jump
+    // is uncoordinated. Pre-Pass-90 the fixed 5-copy burst ended at 80 ms of a
+    // 150 ms budget so this could not arise; running copies to T_switch
+    // created it. Bench 2026-07-24: eight accepted campaigns at dt 465/470/
+    // 146/140/109/107/106 ms all committed; the single dt=23 ms acceptance was
+    // the only revert. 50 ms is ~7 craft frames at the measured ~7.4 ms frame
+    // interval, so the ack survives several lost frames.
+    static constexpr uint32_t kCopyCutoffUs = 50000;
 
     CsaParams policy_;
     State state_ = State::kIdle;

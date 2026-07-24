@@ -650,19 +650,36 @@ int main() {
         // old fixed 5-copy burst spanned 80 ms and then went silent for the
         // rest of ack_timeout, losing the campaign if the craft (RX-deaf while
         // transmitting) heard none of the five.
+        // retune_class 1 (dt0 = 500 ms) is where the extension has room. At
+        // class 0 the 150 ms budget minus the 50 ms ack-lead cutoff leaves
+        // only the original burst — there, gap scheduling is what carries
+        // delivery, not extra copies.
         CsaIssuer is(pol);
-        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 1, 5805, 0, 4, 0));
         int copies = 0;
-        // T_switch is 150 ms out for retune_class 0. Walk to just before it.
-        for (uint64_t t = 0; t < 149'000; t += 1000) {
+        for (uint64_t t = 0; t < 499'000; t += 1000) {
             if (is.tick(t).kind == CsaIssuer::IssuerAction::Kind::kSendCopy) {
                 ++copies;
             }
         }
-        // 20 ms spacing across ~150 ms — far more than the 5 that used to be
-        // the entire campaign.
         CHECK(copies > 5);
         CHECK(is.active());
+    }
+    {
+        // Pass 90 addendum: no copy inside the last kCopyCutoffUs before
+        // T_switch. A craft accepting that late cannot get CSA_ARMED back to
+        // the issuer before it departs — bench-observed as the only revert in
+        // eight campaigns (dt 23 ms).
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        uint64_t last_copy_us = 0;
+        for (uint64_t t = 0; t < 150'000; t += 1000) {
+            if (is.tick(t).kind == CsaIssuer::IssuerAction::Kind::kSendCopy) {
+                last_copy_us = t;
+            }
+        }
+        CHECK(last_copy_us > 0);
+        CHECK(last_copy_us <= 100'000);  // T_switch 150 ms - 50 ms cutoff
     }
     {
         // Pass 90: the ACK stops the retransmission — it is
@@ -701,6 +718,11 @@ int main() {
         CHECK(is.restamp_copy(copy, 30'000));
         CHECK_EQ_U(copy.dt_to_switch_ms, dt_at_stamp - 30u);
         CHECK(copy.csa_mac != mac_at_stamp);  // the MAC covers dt
+        // Pass 90 addendum: inside the ack-lead cutoff (50 ms before
+        // T_switch) a copy is refused — an accepting craft could not get
+        // CSA_ARMED back to the issuer before departing. dt0 is 150 ms, so
+        // 110 ms leaves only 40 ms.
+        CHECK(!is.restamp_copy(copy, 110'000));
         // Past T_switch there is nothing truthful left to say — drop, never
         // send stale.
         CHECK(!is.restamp_copy(copy, 150'001));

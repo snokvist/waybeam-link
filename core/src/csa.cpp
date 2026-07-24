@@ -281,7 +281,11 @@ bool CsaIssuer::restamp_copy(CsaPacket& pkt, uint64_t now_us) const {
     // of dt-hold places its switch that much late — desynchronising the exact
     // instant the campaign exists to agree on. Past T_switch there is nothing
     // truthful left to say: drop it rather than send it stale.
-    if (now_us >= switch_at_us_) {
+    // Same cutoff as emission (§11.2 Pass 90 addendum): the gap hold can push
+    // a copy that was legal when produced past the ack-lead deadline, and a
+    // copy is only worth sending if an accepting craft can still get
+    // CSA_ARMED back before it departs.
+    if (switch_at_us_ <= now_us + kCopyCutoffUs) {
         return false;
     }
     // The held copy must still belong to the campaign whose T_switch we are
@@ -333,7 +337,11 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
     IssuerAction a;
     switch (state_) {
         case State::kAnnounce:
-            if (now_us >= next_copy_us_) {
+            // §11.2 (Pass 90 addendum): never emit a copy so close to T_switch
+            // that an accepting craft cannot get CSA_ARMED back to the issuer
+            // before it leaves the old channel.
+            if (now_us >= next_copy_us_ &&
+                switch_at_us_ > now_us + kCopyCutoffUs) {
                 a.kind = IssuerAction::Kind::kSendCopy;
                 a.pkt = tmpl_;
                 a.pkt.csa_seq = copies_left_;
@@ -353,7 +361,7 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
             // retransmit-until-acked. Checked before the ACK/timeout arms so a
             // due copy is not dropped on the tick that also commits — commit
             // wins next tick, one copy later, which is harmless.
-            if (!armed_seen_ && now_us < switch_at_us_ &&
+            if (!armed_seen_ && switch_at_us_ > now_us + kCopyCutoffUs &&
                 now_us >= next_copy_us_) {
                 a.kind = IssuerAction::Kind::kSendCopy;
                 a.pkt = tmpl_;

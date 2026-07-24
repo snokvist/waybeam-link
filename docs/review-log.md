@@ -2703,6 +2703,32 @@ copy is as correct as a prompt one.
 500 ms window are unaffected and still required. Pass 89 made failure *safe*
 (both ends stay together); Pass 90 makes it *rare*.
 
+**Addendum — ack-lead cutoff (found by re-soaking the merge candidate).**
+The first Pass 90 implementation ran copies right up to T_switch, which the
+pre-Pass-90 code could never do (its burst ended at 80 ms of a 150 ms budget).
+Re-soaking after a late review fix produced one failure in six, and the craft
+log named the cause exactly: eight accepted campaigns at dt 465 / 470 / 146 /
+140 / 109 / 107 / 106 ms all committed, and the **only** revert was a
+**dt = 23 ms** acceptance. A craft accepting that late has ~3 frames to
+advertise `CSA_ARMED` before leaving the old channel, so the issuer cannot
+reliably pre-position and the jump is uncoordinated.
+
+Ruling: **no copy inside the last 50 ms before T_switch**, applied to emission
+and to the quiet-gap re-stamp alike (a hold can push a legal copy past the
+deadline). 50 ms ≈ 7 craft frames at the measured ~7.4 ms interval.
+
+This forces an honest correction to the pass's own framing: at **class 0** the
+150 ms budget minus the cutoff leaves room for little more than the original
+burst, so the measured delivery gain there comes from **quiet-gap scheduling**,
+not from extra copies. The retransmission has real room only at class 1. The
+tests were retargeted accordingly rather than left asserting a benefit that
+class 0 does not actually get.
+
+Two process notes, both worth repeating: the RX-liveness hypothesis was
+refuted by measurement before being built, and this cutoff defect was caught
+only because the candidate was re-soaked *after* a late code change — the
+earlier 20/20 no longer covered the code being merged.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the

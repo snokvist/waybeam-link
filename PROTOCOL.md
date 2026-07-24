@@ -1590,6 +1590,24 @@ static rendezvous channel cannot be redirected by a forged/accepted campaign.
   absolute T_switch at the instant that copy is transmitted, so all copies —
   however late — resolve to the same absolute instant.
 
+  **Ack-lead cutoff: no copy inside the last 50 ms before T_switch
+  (Pass 90 addendum).** A copy accepted very late leaves the craft too little
+  time to advertise `CSA_ARMED` on the **old** channel before it departs, so
+  the issuer never gets the ack it needs to pre-position (§11.6) and the jump
+  is uncoordinated. This could not arise before Pass 90 — the fixed burst
+  ended at 80 ms of a 150 ms budget — and running copies to T_switch created
+  it. Bench 2026-07-24: eight accepted campaigns at dt 465 / 470 / 146 / 140 /
+  109 / 107 / 106 ms all committed, and the single **dt = 23 ms** acceptance
+  was the only revert. 50 ms is ~7 craft frames at the measured ~7.4 ms frame
+  interval, so the ack survives several lost frames. The cutoff applies to
+  emission **and** to the quiet-gap re-stamp below, since a gap hold can push
+  a copy that was legal when produced past the deadline.
+
+  Consequence worth stating plainly: at **class 0** the 150 ms budget minus
+  this cutoff leaves room for little more than the original burst, so at that
+  class the delivery gain comes from quiet-gap scheduling, not from extra
+  copies. The retransmission has real room only at **class 1** (500 ms).
+
   **Superseded: the fixed N=5 burst.** Five copies at 20 ms spacing is an 80 ms
   window, after which the issuer went silent for the remainder of a 1 s
   `csa_ack_timeout`. A craft that heard none of the five lost the campaign
