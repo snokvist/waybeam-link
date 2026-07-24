@@ -2575,7 +2575,12 @@ are traceable to it:
 - **`waybeam-ground.service` gated on `ConditionPathExists`**, which makes systemd
   *skip* rather than fail the unit, so `Restart=on-failure` never applied — late
   USB enumeration meant no ground receiver, silently, with no retry.
-- **No respawn on craft or RK ground.** A process death in the air was terminal.
+- **No respawn on craft or RK ground.** A craft process death in the air was
+  terminal — there is no second link. Both inits gained a supervisor loop
+  (start → wait → respawn with a 2 s backoff, ended by an explicit stop flag so
+  `stop` cannot race a respawn); the RK init also gained a bounded interface
+  wait, the same late-enumeration failure as the systemd unit. Both verified in
+  a sandbox: start, induced crash → respawn, clean stop with zero leftovers.
 - **`nack_grace_ms: 0`** in both deploy configs, discarding the Pass 50 measured
   default of 3 ms (−22.5% NACK packets, −21.3% vehicle resends).
 - **`.199` carried `role: "tx"` on `wlx40a5ef2f229b`**, the adapter Pass 48/49

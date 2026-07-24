@@ -4,29 +4,66 @@ DAEMON="waybeam-link"
 CONFIG="/etc/waybeam-link/ground.json"
 IFACE="wlx40a5ef2f229b"
 PIDFILE="/var/run/waybeam-link.pid"
+SUPFILE="/var/run/waybeam-link-sup.pid"
+STOPFILE="/var/run/waybeam-link.stop"
 LOGFILE="/var/log/waybeam-link.log"
+IFACE_WAIT=30
+
+# Respawn supervisor: a bare start-stop-daemon leaves a process death
+# unrecovered until someone notices the display is black.
+supervise() {
+	while [ ! -f "$STOPFILE" ]; do
+		/usr/bin/$DAEMON rx -c "$CONFIG" >>"$LOGFILE" 2>&1 </dev/null &
+		echo $! > "$PIDFILE"
+		wait $!
+		[ -f "$STOPFILE" ] && break
+		echo "$DAEMON exited -- respawning in 2s" >> "$LOGFILE"
+		sleep 2
+	done
+	rm -f "$PIDFILE"
+}
 
 start() {
+	# Late USB enumeration must not permanently suppress the node.
+	i=0
+	while [ ! -e "/sys/class/net/$IFACE" ] && [ "$i" -lt "$IFACE_WAIT" ]; do
+		sleep 1
+		i=$((i + 1))
+	done
 	if [ ! -e "/sys/class/net/$IFACE" ]; then
-		echo "$DAEMON: interface $IFACE is unavailable"
+		echo "$DAEMON: interface $IFACE is unavailable after ${IFACE_WAIT}s"
 		return 1
 	fi
 	/usr/local/libexec/waybeam-mon-up "$IFACE" 161 HT20 || return 1
 	/usr/bin/$DAEMON rx -c "$CONFIG" --check || return 1
 	echo -n "Starting $DAEMON: "
-	start-stop-daemon -S -b -m -p "$PIDFILE" -O "$LOGFILE" \
-		-x /usr/bin/$DAEMON -- rx -c "$CONFIG"
+	rm -f "$STOPFILE"
+	setsid "$0" __supervise >/dev/null 2>&1 </dev/null &
+	echo $! > "$SUPFILE"
 	echo "OK"
 }
 
 stop() {
 	echo -n "Stopping $DAEMON: "
-	start-stop-daemon -K -q -p "$PIDFILE"
-	rm -f "$PIDFILE"
+	# Order matters: flag + supervisor first, or it respawns what we kill.
+	# Kill the daemon by pidfile directly — start-stop-daemon -K matches on
+	# the pidfile process only, which the supervisor now owns indirectly.
+	touch "$STOPFILE"
+	[ -f "$SUPFILE" ] && kill -TERM "$(cat "$SUPFILE" 2>/dev/null)" 2>/dev/null
+	[ -f "$PIDFILE" ] && kill -TERM "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+	i=0
+	while [ "$i" -lt 8 ]; do
+		[ -f "$PIDFILE" ] || break
+		kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null || break
+		sleep 1
+		i=$((i + 1))
+	done
+	rm -f "$PIDFILE" "$SUPFILE"
 	echo "OK"
 }
 
 case "$1" in
+	__supervise) supervise ;;
 	start) start ;;
 	stop) stop ;;
 	restart|reload) stop; sleep 1; start ;;

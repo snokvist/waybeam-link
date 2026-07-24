@@ -1,8 +1,9 @@
 {
-  "_comment": "RK3566 ground decoder validation: RTL8812CU monitor-mode receiver with frame-SHM egress. Originator 10 keeps the x86 ground (9) authoritative.",
+  "_comment": "RK3566 ground decoder: passive §2/§13 spectator (Pass 74) — display-only, no uplink. 229b is RX-only per the Pass 48/49 silent-transmitter ruling; as role tx it was either a dead return path or a second uncoordinated uplink colliding with .242 in the craft's single §7.2 EOB listen gap. Originator 10 keeps the x86 ground (9) authoritative.",
   "node": {
     "originator": 10,
     "role": "rx",
+    "spectator": true,
     "preferred_originator": 17,
     "net_id": 0
   },
@@ -11,7 +12,7 @@
     {
       "name": "cu-rk-ground",
       "ifname": "wlx40a5ef2f229b",
-      "role": "tx",
+      "role": "rx",
       "channel": 5805,
       "bw": 20
     }
@@ -87,7 +88,7 @@
       "min_collect_ms": 4,
       "hard_close_ms": 8,
       "request_timeout_ms": 4,
-      "nack_grace_ms": 0,
+      "nack_grace_ms": 3,
       "repair_fraction_permille": 200,
       "absolute_symbol_limit": 8,
       "max_cache_attempts": 2,
