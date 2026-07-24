@@ -460,6 +460,19 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pc.value("verify_timeout_ms", csa.verify_timeout_ms);
                 csa.rx_liveness_ms =
                     pc.value("rx_liveness_ms", csa.rx_liveness_ms);
+                // §15.2 (Pass 92): the §11.6 RX-liveness guard exists to catch
+                // a half-applied retune. A verify window that outlives it lets
+                // a full monitor re-init fire in the middle of a switch that
+                // is still pending — the guard would be firing on a radio that
+                // is merely waiting, not deaf. Ordering is a config invariant,
+                // not a runtime tie-break.
+                if (csa.rx_liveness_ms != 0 &&
+                    csa.verify_timeout_ms >= csa.rx_liveness_ms) {
+                    return Result<Config>::fail(
+                        "policy.csa.verify_timeout_ms must be < "
+                        "rx_liveness_ms (§11.6 guard fires mid-switch "
+                        "otherwise)");
+                }
                 csa.min_interval_s = pc.value("min_interval_s", csa.min_interval_s);
                 csa.ack_timeout_ms = pc.value("ack_timeout_ms", csa.ack_timeout_ms);
                 csa.bind_release_s =

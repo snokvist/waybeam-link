@@ -34,6 +34,14 @@
 
 namespace wblink {
 
+// §11.5 verify-window seed. SINGLE SOURCE OF TRUTH (Pass 92): io/config.h
+// defaults policy.csa.verify_timeout_ms from this constant, because
+// csa_params() copies the config value over the engine default
+// unconditionally — a second literal there silently wins. It did, for the
+// whole of Pass 89: the ruling raised this default to 500 and every binary
+// kept running the config's 150.
+inline constexpr uint32_t kCsaVerifyTimeoutMsDefault = 500;
+
 // §15.2 policy.csa — all times ms except the channel fields (MHz).
 struct CsaParams {
     std::vector<uint8_t> psk;  // §11.4a key; empty = fault unless spectator
@@ -45,9 +53,10 @@ struct CsaParams {
     uint32_t settle_ms = 3000;          // §11.3 adaptive freeze
     // §11.5 ceiling; t_revert_ms may only shorten. Pass 89: 150 -> 500. The old
     // value was a median + margin; the follower reverts on the TAIL of the
-    // issuer's landing delay, measured max 143 ms over 8 hops against a 150 ms
-    // window. 500 is ~3.5x that max and sits inside the 750 ms RX-liveness guard.
-    uint32_t verify_timeout_ms = 500;
+    // issuer's landing delay. Re-measured over 27 hops (Pass 92) with the
+    // window opened to 3000 ms so nothing reverted: max 132.8 ms, so 500 is
+    // 3.8x — and inside the 750 ms RX-liveness guard, which §15.2 now enforces.
+    uint32_t verify_timeout_ms = kCsaVerifyTimeoutMsDefault;
     uint32_t min_interval_ms = 5000;    // §11.4 rate-limit
     uint32_t ack_timeout_ms = 1000;     // §11.6 CSA_ARMED wait
     uint32_t bind_release_ms = 90000;   // §11.5a command-source binding release
@@ -154,7 +163,9 @@ class CsaIssuer {
     // §11.6 review pass 2). `craft_armed` = the frame's CSA_ARMED flag: a SET
     // bit means the craft arrived but has not committed, and MUST NOT satisfy
     // video-verify (§11.6 Pass 89) — the craft transmits throughout its own
-    // VERIFY window and may still revert.
+    // VERIFY window and may still revert. That same SET frame IS the craft's
+    // landing as the issuer can observe it, and re-anchors the verify deadline
+    // once (§11.6 Pass 92).
     void note_craft_video(uint64_t now_us, bool craft_armed);
     // §11.2 (Pass 90): re-stamp a copy that was held for the craft's §7.2
     // quiet gap, at the instant it actually goes on air — dt_to_switch_ms
@@ -234,6 +245,9 @@ class CsaIssuer {
     bool armed_seen_ = false;
     bool video_seen_ = false;  // latched in VERIFY; campaign closes at the
                                // deadline either way (§11.6 beacon tail)
+    // §11.6 (Pass 92): the deadline re-anchors on the craft's observed landing
+    // exactly once per campaign — a later ARMED frame must not extend it again.
+    bool landing_seen_ = false;
 };
 
 }  // namespace wblink

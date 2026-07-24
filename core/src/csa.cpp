@@ -254,6 +254,7 @@ bool CsaIssuer::start(const CommonPrefix& prefix, uint16_t target_chan_mhz,
     next_copy_us_ = now_us;
     armed_seen_ = false;
     video_seen_ = false;
+    landing_seen_ = false;  // §11.6 Pass 92: one re-anchor per campaign
     state_ = State::kAnnounce;
     return true;
 }
@@ -313,6 +314,18 @@ void CsaIssuer::note_craft_video(uint64_t now_us, bool craft_armed) {
     // channel the craft has left (observed 2026-07-24: issuer confirmed 5745
     // while the craft reverted to 5805). The CLEARED bit is the commit proof.
     if (craft_armed) {
+        // §11.6 (Pass 92): but that same frame IS the craft's landing, and the
+        // follower's §11.5 window runs from ITS landing while this one runs
+        // from T_switch — so without re-anchoring the issuer stops beaconing a
+        // full craft-retune-cost (measured median 48.7 / max 67.9 ms over 27
+        // hops) before the craft gives up. Re-anchor once: a later ARMED frame
+        // must not extend the window again.
+        if (state_ == State::kVerify && now_us >= switch_at_us_ &&
+            !landing_seen_) {
+            landing_seen_ = true;
+            verify_deadline_us_ =
+                now_us + static_cast<uint64_t>(policy_.verify_timeout_ms) * 1000;
+        }
         return;
     }
     // §11.6 review pass 2: nothing before T_switch can be legitimate craft

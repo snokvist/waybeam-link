@@ -610,11 +610,13 @@ int main() {
         is.tick(200'000);  // landing; deadline = max(300, 200) + 150 = 450
         // Craft is present on the target AFTER T_switch — so the pre-T_switch
         // gate is not what rejects these — but still deciding: armed bit SET.
+        // Pass 92: the FIRST of these is the craft's observed landing and
+        // re-anchors the deadline to 310 + 150 = 460 ms (was 450).
         is.note_craft_video(310'000, true);
         is.note_craft_video(400'000, true);
         // Deadline: no commit proof was ever seen, so the issuer must REVERT
         // and follow the craft back rather than declare success.
-        CHECK_EQ_U(is.tick(450'001).kind,
+        CHECK_EQ_U(is.tick(460'001).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
         CHECK(!is.active());
     }
@@ -628,11 +630,103 @@ int main() {
         CHECK_EQ_U(is.tick(101'000).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
         is.tick(200'000);
-        is.note_craft_video(310'000, true);   // still deciding
+        is.note_craft_video(310'000, true);   // still deciding (Pass 92:
+                                              // landing -> deadline 460)
         is.note_craft_video(340'000, false);  // committed — the proof
-        CHECK_EQ_U(is.tick(450'001).kind,
+        CHECK_EQ_U(is.tick(460'001).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSuccess));
+    }
+    {
+        // Pass 92: the issuer's verify deadline RE-ANCHORS on the craft's
+        // observed landing — the first CSA_ARMED-set frame on target_chan
+        // after T_switch. Without it the issuer measures its window from
+        // T_switch while the follower measures the same budget from ITS
+        // landing, so the issuer stops beaconing a full craft-retune-cost
+        // (bench: median 48.7, max 67.9 ms) before the craft gives up.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        CHECK_EQ_U(is.tick(101'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+        is.tick(200'000);  // landing; pre-Pass-92 deadline = 300 + 150 = 450
+        // The craft lands 80 ms after T_switch and says so (armed bit still
+        // set — it has arrived, not committed).
+        is.note_craft_video(380'000, true);
+        // Pre-Pass-92 this reverted here, abandoning a craft whose own window
+        // runs to 380 + 150 = 530 ms. Post-Pass-92 it is still blanketing that
+        // window with beacons — the craft's guaranteed confirm signal.
+        CHECK_EQ_U(is.tick(450'001).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSendBeacon));
+        CHECK(is.active());
+        // Commit proof inside the re-anchored window.
+        is.note_craft_video(470'000, false);
+        CHECK_EQ_U(is.tick(530'001).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSuccess));
+    }
+    {
+        // Pass 92: ONE re-anchor per campaign. A craft that keeps advertising
+        // CSA_ARMED must not be able to walk the issuer's deadline forward
+        // indefinitely — the window is bounded by the craft's landing, not by
+        // its most recent frame.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        is.tick(101'000);
+        is.tick(200'000);
+        is.note_craft_video(380'000, true);  // landing -> deadline 530
+        is.note_craft_video(500'000, true);  // must NOT push it to 650
+        is.note_craft_video(520'000, true);
+        CHECK_EQ_U(is.tick(530'001).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+        CHECK(!is.active());
+    }
+    {
+        // Pass 92: the re-anchor inherits the §11.6 review-pass-2 gate — a
+        // craft frame BEFORE T_switch is old-channel traffic or a stale ear by
+        // definition, and must not move the deadline any more than it may
+        // satisfy video-verify.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        is.tick(101'000);
+        is.tick(200'000);
+        is.note_craft_video(250'000, true);  // before T_switch (300 ms)
+        // Had it re-anchored, the deadline would be 250 + 150 = 400 ms; the
+        // issuer must still be beaconing there, and close at the Pass 69
+        // deadline of 450.
+        CHECK_EQ_U(is.tick(400'001).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSendBeacon));
+        CHECK_EQ_U(is.tick(450'001).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+    }
+    {
+        // Pass 92: a campaign the craft never reaches leaves the deadline
+        // exactly where Pass 69 put it — no ARMED frame, no re-anchor.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        is.tick(101'000);
+        is.tick(200'000);
+        CHECK_EQ_U(is.tick(449'999).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSendBeacon));
+        CHECK_EQ_U(is.tick(450'001).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+    }
+    {
+        // Pass 92: the seed the ENGINE ships. Pass 89 ruled 500 ms; the value
+        // that actually runs comes from §15.2 (config_test pins that it is
+        // derived from this constant, not restated).
+        CHECK_EQ_U(kCsaVerifyTimeoutMsDefault, 500u);
+        CHECK_EQ_U(CsaParams{}.verify_timeout_ms, 500u);
     }
     {
         // Pass 89: campaign_active() spans ARMED and VERIFY and drops on
