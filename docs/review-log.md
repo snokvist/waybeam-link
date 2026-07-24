@@ -2297,6 +2297,42 @@ gains `report_redundancy`. Wired as `frame_is_paced_eob()` at the craft
 pacer and ground anchor, `ReturnPolicy::report_redundancy`, and the
 ground-side repeat queue.
 
+## Pass 79 — LINK_REPORT is video-stream-only (§7.3): per-stream loss must not steer selection (ruled 2026-07-24)
+
+**Problem (bench, found by the Pass 78 benchmark):** with the return path
+healthy (67% unique reports heard, ages p90 175 ms, zero watchdog trips) the
+selector STILL flapped — instant 5→1 rung drops with perfectly fresh reports,
+one every ~10–40 s, immediately re-climbing. Root cause is pre-existing and
+merely exposed by Pass 77 audio: `Reporter::build()` emits **one LINK_REPORT
+per latched stream** (audio included) and the §3.5 gate filters by originator
+only, so the audio stream's report feeds `Selector::on_report`. The
+denominators make a low-rate stream's loss fraction explosive: a ~100 ms
+report period holds ~5 audio datagrams, so ONE lost audio packet reports
+200‰ against `demote_milli = 20` — while the identical RF burst is ~3‰ on
+video. Measured ~1.5‰ audio loss at 50 pps ⇒ one such event every ~13 s,
+matching the drop cadence exactly. Latent for ANY non-video stream (a
+TELEMETRY stream reports the same way); the bench never ran one over RF
+before audio.
+
+**Ruling (operator 2026-07-24):** selection feedback keys on the RTP video
+stream only.
+
+1. **Reporter emits LINK_REPORTs for RTP streams only.** Fix at the source:
+   halves report airtime back to pre-audio, keeps the §9.8 epoch counter
+   meaningful (every epoch is a selector-relevant report).
+2. **TX-side defensive filter:** a report whose `target_stream_id` is not one
+   of the node's RTP streams is ignored before the gate/selector — a new
+   craft stays stable against an old ground during mixed-version windows.
+3. Non-video loss remains observable in the RX's local §15.3 stream stats;
+   it just no longer steers the link. If a future consumer wants remote
+   non-video loss telemetry, that is a new field/type, not a selector input.
+
+**Also ruled (operator):** re-verify on a second channel (149 / 5745 MHz) to
+exclude channel/antenna effects from the benchmark conclusions.
+
+Spec: §7.3 video-stream-reports-only bullet. Wired in `Reporter::build()`
+(skip non-RTP streams) and the craft report intake (stream-id filter).
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the

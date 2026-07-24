@@ -1048,6 +1048,14 @@ against plain broadcast returns is a §17 bench slot.
   window, rate-limited by the global per-seq hold-down (§5.3).
 - **LINK_REPORT:** periodic **10 Hz** floor (bench-gated) **+ immediate** on a
   step change (RSSI-floor breach, loss spike), to cut reaction latency.
+- **Video-stream reports only (Pass 79):** LINK_REPORT is emitted for **RTP
+  streams only**, and a TX ignores a report whose `target_stream_id` is not
+  one of its RTP streams (defense for mixed-version fleets). The §9 selector's
+  feedback channel is the paced video stream; a low-rate stream's per-stream
+  loss fraction is statistically explosive (one lost 50 Hz audio datagram in a
+  100 ms report period reads as 200‰ against a 20‰ demote threshold — the
+  measured instant top-to-floor rung drops every ~13 s) and MUST NOT steer
+  selection. Non-video loss stays visible in local §15.3 stats.
 
 ### 7.4 Self-congestion guard
 Once authorized, a retransmit has queue priority over live video (802.11e TID 6
