@@ -977,6 +977,7 @@ SelectorPolicy selector_policy(const Config& cfg) {
     p.flap_freeze_ms = s_to_ms(s.flap_freeze_s);
     p.min_profile = s.min_profile;
     p.max_profile = s.max_profile;
+    p.max_bitrate_kbps = cfg.venc.max_bitrate_kbps;  // §9.6 Pass 75 ceiling
     p.report_timeout_ms = cfg.policy.report_timeout_ms;
     p.failsafe_hold_ms = s_to_ms(s.failsafe_hold_s);
     p.failsafe_step_ms = s_to_ms(s.failsafe_step_s);

@@ -138,6 +138,9 @@ struct VencCfg {
     std::string host = "127.0.0.1:80";
     bool enabled = false;           // bitrate writes (§9.6)
     bool recovery_enabled = false;  // rate-limited IDR requests (§3.9)
+    // §9.6 Pass 75 encoder-capability ceiling: clamp the §9.5-derived bitrate
+    // to min(derived, this). 0 = unlimited. Must be >= 1000 if set.
+    uint32_t max_bitrate_kbps = 0;
     // §9.6 Pass 37 horizon frame caps (maxIBytes/maxPBytes; §17 seeds).
     bool frame_caps = true;         // cap writes (gated by `enabled` too)
     uint16_t fps_hint = 100;        // cadence fallback until measured

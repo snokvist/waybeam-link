@@ -37,6 +37,11 @@ uint32_t derive_bitrate_kbps(const Profile& p) {
     return static_cast<uint32_t>(std::max<uint64_t>(kbps, p.bitrate_min_kbps));
 }
 
+// §9.6 Pass 75: encoder-capability ceiling on the §9.5 derived target.
+uint32_t clamp_bitrate_kbps(uint32_t derived_kbps, uint32_t max_kbps) {
+    return (max_kbps != 0 && derived_kbps > max_kbps) ? max_kbps : derived_kbps;
+}
+
 Selector::Selector(const SelectorPolicy& policy, const ProfileTable* table)
     : policy_(policy), table_(table) {
     const size_t n = ladder_size();
@@ -218,7 +223,8 @@ void Selector::start_demote(size_t target, uint64_t now_ms,
     phase_deadline_ms_ = now_ms + policy_.bitrate_lead_ms;
     state_ = "DEMOTE";
     // §9.5: bitrate LEADS the downward move.
-    const uint32_t br = derive_bitrate_kbps(table_->profiles[target]);
+    const uint32_t br = clamp_bitrate_kbps(
+        derive_bitrate_kbps(table_->profiles[target]), policy_.max_bitrate_kbps);
     if (br != bitrate_kbps_) {
         bitrate_kbps_ = br;
         a.bitrate_kbps = br;
@@ -363,7 +369,8 @@ SelectorActions Selector::tick(uint64_t now_ms) {
             last_change_ms_ = now_ms;
             const Profile& p = table_->profiles[rung_];
             a.commit = ProfileCommit{p.id, p.mcs, p.gi, p.tx_power_level};
-            bitrate_kbps_ = derive_bitrate_kbps(p);
+            bitrate_kbps_ =
+                clamp_bitrate_kbps(derive_bitrate_kbps(p), policy_.max_bitrate_kbps);
             a.bitrate_kbps = bitrate_kbps_;
             state_ = "HOLD";
             return a;
@@ -380,8 +387,9 @@ SelectorActions Selector::tick(uint64_t now_ms) {
         case Phase::kMcsGrace:
             if (now_ms >= phase_deadline_ms_) {
                 phase_ = Phase::kIdle;
-                const uint32_t br =
-                    derive_bitrate_kbps(table_->profiles[rung_]);
+                const uint32_t br = clamp_bitrate_kbps(
+                    derive_bitrate_kbps(table_->profiles[rung_]),
+                    policy_.max_bitrate_kbps);
                 if (br != bitrate_kbps_) {
                     bitrate_kbps_ = br;
                     a.bitrate_kbps = br;

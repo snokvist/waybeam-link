@@ -74,6 +74,7 @@ struct SelectorPolicy {
     uint32_t flap_freeze_ms = 10000;
     uint8_t min_profile = 0;    // §9.7 pin (indexes into the ladder by id)
     uint8_t max_profile = 255;  // 255 = unpinned top
+    uint32_t max_bitrate_kbps = 0;  // §9.6 Pass 75 encoder ceiling; 0 = off
     // §9.8 (gate-4 seeds)
     uint32_t report_timeout_ms = 500;
     uint32_t failsafe_hold_ms = 1000;
@@ -97,6 +98,11 @@ struct SelectorActions {
 
 // §9.5 budget law (Pass-6): derived per-rung bitrate target, integer only.
 uint32_t derive_bitrate_kbps(const Profile& p);
+
+// §9.6 Pass 75: clamp a derived bitrate to an encoder-capability ceiling
+// (`max_kbps` 0 = unlimited). Rung-independent — applied to every derived
+// target before actuation/reporting/cap coupling.
+uint32_t clamp_bitrate_kbps(uint32_t derived_kbps, uint32_t max_kbps);
 
 class Selector {
   public:

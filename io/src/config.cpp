@@ -624,6 +624,14 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.venc.enabled = v.value("enabled", cfg.venc.enabled);
             cfg.venc.recovery_enabled =
                 v.value("recovery_enabled", cfg.venc.recovery_enabled);
+            cfg.venc.max_bitrate_kbps =
+                v.value("max_bitrate_kbps", cfg.venc.max_bitrate_kbps);
+            if (cfg.venc.max_bitrate_kbps != 0 &&
+                cfg.venc.max_bitrate_kbps < 1000) {
+                return Result<Config>::fail(
+                    "venc: max_bitrate_kbps must be 0 (unlimited) or >= 1000 "
+                    "(§9.6 venc hard floor, Pass 75)");
+            }
             cfg.venc.frame_caps = v.value("frame_caps", cfg.venc.frame_caps);
             cfg.venc.fps_hint = v.value("fps_hint", cfg.venc.fps_hint);
             cfg.venc.i_headroom_permille = v.value(
