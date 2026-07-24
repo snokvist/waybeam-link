@@ -1689,6 +1689,20 @@ direction** lets us make the strand class *never happen* rather than recover aft
   satisfy the backstop (the Pass 66 stale-buffer artifact, observed as a
   false commit on the bench). Retune failures are logged; a failed commit
   retune leaves the revert path as the recovery.
+- **Craft post-retune RX-liveness guard (Pass 80, kernel-monitor):** an
+  in-place `iw set freq` on the RTL88x2 family can half-apply — TX keeps
+  airing on the new channel while the RX chain goes deaf (observed on the
+  bench: rx counter frozen through a 4-minute FAILSAFE, fleet stranded
+  because a deaf craft cannot hear the return-CSA). After ANY §11 retune
+  (commit or revert) the craft arms an RX-liveness deadline
+  (`csa.rx_liveness_ms`, seed **750**, `0` disables): the issuer's zero-dt
+  rendezvous beacons blanket the verify window, so a craft that hears
+  **nothing** for the full deadline treats the retune as half-applied and
+  performs **one** full monitor re-init on the adapter (link down → monitor
+  type → link up → set freq — the bring-up sequence), then continues the
+  §11.5 machine unchanged. The recovery is one-shot per retune, loud in the
+  log, and never reorders the state machine — it only restores the radio the
+  machine already assumes it has.
 - **Intra-process atomic switch (ground fleet):** if the ground *process* accepted
   the CSA (any adapter heard it), it fires all local `FastRetune` calls
   together at its commit point — a straggler adapter follows because a
@@ -2312,6 +2326,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
                 "unicast": false, "report_redundancy": 2 },
     "csa":    { "psk": "<optional; auto-generated + announced when absent, §11.4a>",
                 "settle_s": 3.0, "verify_timeout_ms": 150,
+                "rx_liveness_ms": 750,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
                 "bind_release_s": 90, "persist_channel": false,
                 "home_chan": 5805, "channel_allowlist": [5745, 5805, 5825] },

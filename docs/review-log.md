@@ -2333,6 +2333,45 @@ exclude channel/antenna effects from the benchmark conclusions.
 Spec: §7.3 video-stream-reports-only bullet. Wired in `Reporter::build()`
 (skip non-RTP streams) and the craft report intake (stream-id filter).
 
+## Pass 80 — craft post-retune RX-liveness guard (§11.6): CSA must not strand the fleet (ruled 2026-07-24)
+
+**Problem (bench, found during the Pass 79 cross-channel verification):** a
+§11 CSA 5805→5745 left the craft 8812EU **half-retuned**: TX kept airing on
+5745 (both grounds decoded ~100 fps for minutes) while the RX chain went
+completely deaf (adapter rx counter frozen, zero reports for 4+ minutes,
+§9.8 FAILSAFE at the floor) and `iw` later showed the radio back on the
+origin channel. A deaf craft cannot hear the return-CSA, so the fleet was
+**stranded** on 5745 until an operator-side craft link restart (full monitor
+bring-up) recovered it. A restart-based native bring-up on the same channel
+is flawless — the trigger is specifically the in-place `iw set freq` retune
+path on the RTL88x2 family (same family as the known ground-side EU
+txpower/reinit quirk). Note the earlier fleet-sanity CSA round trip
+succeeded, so the wedge is intermittent — worse for follow-me in flight,
+and the §17 motivation for the 10× soak below.
+
+**Ruling (operator 2026-07-24, "10x csa retune verification run with the
+liveness check"):** adopt the craft post-retune RX-liveness guard:
+
+1. After ANY §11 retune (commit or revert) the craft records its adapter RX
+   counter and arms `csa.rx_liveness_ms` (seed **750 ms**, `0` disables;
+   RE-DERIVE §17). The issuer's zero-dt rendezvous beacons blanket the
+   verify window, so total silence for the deadline ⇒ half-applied retune.
+2. Recovery is **one** full monitor re-init of the adapter (link down →
+   monitor type → link up → `iw set freq` — exactly the bring-up sequence),
+   loud in the log, one-shot per retune. The §11.5 machine is untouched —
+   the guard only restores the radio the machine already assumes it has.
+3. Scope: kernel-monitor backend (where the wedge is observed); the devourer
+   backend keeps its own §11.5a fast-retune path and is out of scope until
+   it exhibits the failure.
+4. Verification bar: a **10× alternating CSA soak** (5805↔5745) with per-hop
+   checks — selection committed, craft RX advancing, report age fresh,
+   video on both receivers, audio stream advancing — plus recovery-fire
+   count from the craft log.
+
+Spec: §11.6 guard bullet; §15.2 `csa.rx_liveness_ms`. Wired as
+`MonAir::recover()` (bring-up sequence via forked `ip`/`iw`) + the craft
+CSA-action hook in `app/main.cpp`.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
