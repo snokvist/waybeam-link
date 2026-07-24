@@ -172,6 +172,105 @@ Fix direction: cap iterations per poll pass (~64) and let the loop breathe.
 The `csa_psk` redaction boundary itself holds — but that is irrelevant when the
 issuer's own API is open to the LAN. Listed on `ROADMAP.md` as planned.
 
+### B8 — A CSA hop can strand the craft while the ground reports success — BLOCKER
+
+Found on hardware 2026-07-24, hop 4 of the Pass 80 soak (see C1). **Not a
+regression from the Passes 81–88 PR**: the two sides' windows are equal at the
+deployed config, so the Pass 86 `min()` is a no-op here.
+
+The two ends of a §11 campaign confirm on *different evidence*:
+
+- The **craft** (`core/src/csa.cpp:151-174`) opens its verify window at its own
+  landing and reaches `kCommitted` only by **hearing the ground** — valid
+  traffic or a §11.6 beacon — within `verify_timeout_ms`.
+- The **ground** (`core/src/csa.cpp:333-346`) opens its window at
+  `max(now, switch_at_us_)` and declares `kSuccess` on `video_seen_` alone.
+
+But the craft transmits video throughout its VERIFY window, *before* it has
+decided to stay. So a ground whose `iw` retune lands late still harvests that
+pre-revert video, logs `csa: campaign confirmed`, and holds the new channel —
+while the craft's window expires unheard and it reverts to `prev_chan`.
+`video_seen_` is not proof the craft committed; there is no "craft COMMITTED"
+signal anywhere in the issuer's confirm path.
+
+Observed, with both `verify_timeout_ms` at the 150 ms default (neither deployed
+config overrides it):
+
+```
+craft : csa: armed -> 5745 MHz (nonce 14, dt 149 ms)
+        csa: VERIFY -> 5745 MHz
+        csa: IDLE -> 5805 MHz                     <- reverted
+ground: csa: commit -> 5745 MHz
+        csa: campaign confirmed -> 5745 MHz       <- stayed
+```
+
+Result: ground on 5745, craft on 5805, ground believing the fleet is fine.
+Recovery took an operator re-scout plus re-claim. Hops 1–3 passed at 1.0 s
+commit; this is a marginal-timing race, which is exactly why it survived 21
+campaigns earlier the same day.
+
+The craft's own §11.6 Pass 80 guard worked correctly on the way back
+(`RX SILENT 750 ms after retune to 5805 MHz — half-applied retune, monitor
+re-init` → `RX-liveness recovery on wlan0 -> 5805 MHz ok`), so the craft never
+went deaf. The defect is purely the confirm asymmetry.
+
+**This is a spec question, not an implementation choice** — §11.6's success
+criterion is what needs the ruling, so it is the operator's call, not mine.
+Candidate directions, all needing a ruling:
+
+- require a positive craft-side commit indication before `kSuccess`;
+- have the ground adopt the craft's revert (it can see the craft reappear on
+  `prev_chan`) rather than holding a channel the craft left;
+- widen `verify_timeout_ms` on both ends so the ground's shell-out retune fits
+  inside the craft's window with margin — mitigation, not a fix.
+
+Until ruled on, a channel switch can strand the aircraft on the old channel
+with the ground station reporting success.
+
+### B9 — A craft reboot silently disables CSA on a claimed ground — BLOCKER
+
+Also found on hardware 2026-07-24, and also **pre-existing** — reproduced on
+both the pre-PR craft binary and the Pass-88 build.
+
+`POST /api/v1/csa` returns `{"ok":true}`; the ground logs
+`csa: aborted (no CSA_ARMED)`; the craft's `csa_state` never leaves `IDLE`. The
+link is otherwise perfect — video and audio delivering, `report_age_ms 0`, no
+stalled adapter. Channel switching is simply dead, with no error anywhere.
+
+In announced-token mode (`csa_psk` unset — how the fleet is deployed) the
+issuer's key is set in exactly one place: `do_claim`
+(`app/main.cpp:3802-3809`), from `discovery.token_for(orig)`. The
+`POST /api/v1/csa` handler (`app/main.cpp:3916`) never re-keys. The craft
+regenerates its announced token every boot, so after a craft reboot the ground
+signs with the previous boot's token, the §11.4 MAC check fails, and
+`CsaFollower::on_csa` returns false at `core/src/csa.cpp:60` — a silent drop by
+design, no counter, no log. `issuer.start()` only rejects an *empty* key, so a
+stale-but-present key sails through and the handler reports success.
+
+The §3.12 comment at `app/main.cpp:1174-1179` already states the intent — "a
+rebooted ground can re-learn the token and re-claim in place". The re-learn
+happens; the re-key does not.
+
+A second defect surfaced in the same sequence: `do_claim` takes the craft's
+channel from `scout.candidate_for(orig)` rather than live discovery, so a claim
+against a stale candidate retunes the ground's ears to the craft's *old*
+channel and then aborts. The rollback is clean (no strand), but nothing tells
+the operator that a re-scout is what is missing.
+
+Needs, in priority order:
+
+1. A §15.3 counter for MAC-rejected CSA copies, so an abort is diagnosable.
+   §11.4 makes rejection deliberately silent to deny an oracle, so whether to
+   expose this is an operator ruling.
+2. The ground should detect that its cached token no longer matches the craft's
+   live ANNOUNCE, and either re-key or fail the campaign with a real error
+   instead of `{"ok":true}`.
+3. `do_claim` should prefer live discovery for the craft's current channel, or
+   fail with "stale candidate, re-scout".
+
+Interim operating procedure: **after any craft reboot, re-scout and re-claim
+before relying on channel switching.**
+
 ---
 
 ## C. Verification still owed
@@ -186,6 +285,25 @@ is **intermittent**, so a single successful hop proves nothing.
 Must be re-run against the **corrected** `MonAir::recover()` — the pre-Pass-88
 sequence omitted `otherbss` and `txpower auto` and could "recover" a radio that
 was still deaf or mute.
+
+**Run 2026-07-24 against the Pass-88 craft build: 3/4 hops, then stopped.**
+Hops 1–3 passed every check (commit 1.0 s, craft RX advancing, `report_age_ms 0`,
+video and audio advancing). Hop 4 stranded the fleet — see **B8**. The soak
+driver halted on the failure rather than continuing, which is the correct
+behaviour but means hops 5–10 were never attempted.
+
+Two things the run did establish:
+
+- The corrected `MonAir::recover()` **works**. Hop 4's return retune landed
+  half-applied and the guard caught it:
+  `RX SILENT 750 ms after retune to 5805 MHz — half-applied retune, monitor
+  re-init` → `RX-liveness recovery on wlan0 -> 5805 MHz ok`. The craft never
+  went deaf. That is the specific thing Pass 80 exists to guard, and it held.
+- The Passes 81–88 PR introduces **no CSA regression** — the pre-existing
+  failures in B8 and B9 both reproduce on the older craft binary.
+
+Pass 80 remains **UNMET** (the bar is 10/10) and cannot be met until B8 is
+ruled on: any long alternating soak will eventually hit the same race.
 
 ### C2 — Gate 4 range validation — SHOULD-FIX
 
