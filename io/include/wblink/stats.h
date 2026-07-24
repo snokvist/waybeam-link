@@ -182,6 +182,10 @@ struct LinkStats {
     std::string state = "HOLD";
     bool flap_freeze = false;
     std::string csa_state = "IDLE";
+    // §11 follow-me: current RF operating channel (center MHz). 0 when the node
+    // does not track a runtime channel (tx/loopback); the rx node reports its
+    // live committed channel so ground consumers can show where the link is.
+    uint16_t channel_mhz = 0;
     // §9.6 actuator state (Pass 37): last COMMANDED values (0 = never
     // pushed) + the settling window; zero/false without venc.enabled.
     uint32_t venc_bitrate_kbps = 0;

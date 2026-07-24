@@ -393,6 +393,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_bool(out, snap.link.flap_freeze);
     out += ",\"csa_state\":";
     append_escaped(out, snap.link.csa_state);
+    out += ",\"channel\":";
+    append_u64(out, snap.link.channel_mhz);
     out += ",\"venc_bitrate_kbps\":";
     append_u64(out, snap.link.venc_bitrate_kbps);
     out += ",\"venc_max_i_bytes\":";
