@@ -760,16 +760,26 @@ The IMX335 has no 4:3 mode above 60 fps, so **4:3 has no Latency-Low row**.
 Independent of encode resolution (§13: the ISP downscales), so this is chosen
 per *row*, not per cell.
 
-| fps | IMX335 (16:9) | IMX335 (4:3) | IMX415 (16:9) |
-|---|---|---|---|
-| 30 | mode 2 · 2560×1440 | mode 0 · 2560×1920 | idx 0 · 3840×2160 · **100 % FOV** |
-| 60 | mode 2 · 2560×1440 | mode 1 · 2560×1920 | idx 2 · 2816×1584 · 73 % w |
-| 100 | mode 3 · 2176×1224 | — | idx 6 · 1728×972 binned · 81 % area |
+**Scope (operator, 2026-07-24): IMX335 only, sensor modes 0 / 1 / 3.** Aspect
+ratio comes from cropping / re-encoding rather than from separate sensor modes,
+and is out of scope for now. IMX415 is deferred.
 
-On the IMX335 one sensor mode covers both 30 and 60, so within 16:9 those two
-rows differ by a live fps change only. Moving the Low-latency row from 100 to
-90 fps would put all three rows on mode 2 and make the entire latency axis
-live — the surviving half of the §6 argument.
+| fps | `sensor.mode` | capture | FOV |
+|---|---|---|---|
+| 30 | **0** | 2560×1920 (4:3) | full sensor readout |
+| 60 | **1** | 2560×1920 (4:3) | full sensor readout |
+| 100 | **3** | 2176×1224 (16:9) | natively 16:9, already cropped at the sensor |
+
+Taking modes 0/1 rather than mode 2 (2560×1440) for the 30/60 rows buys 480
+extra rows of sensor readout — the full 4:3 frame — at no cost, since encode
+resolution is independent anyway.
+
+**The resulting asymmetry:** 30 and 60 fps read the whole sensor, so a 16:9
+encode there is a vertical crop and 4:3 output is free. At 100 fps the only
+available mode is already 16:9. So there is genuinely *more FOV available* at
+30/60 than at 100 — one more thing the latency axis buys, beyond cadence.
+
+The 90-vs-100 question (§6) is unaffected by this choice and still open.
 
 ### 16.6 The tenth mode: variable-fps
 
@@ -785,4 +795,10 @@ the way down. Offer it as *"maximum range, no recording."*
 - §12's `fec_overhead_frac` fix. Without it every bitrate here is ~18 % too
   optimistic and the floor cells do not actually clear 0.04.
 
-Both are still PROPOSED, pending operator sign-off.
+**Both landed in this PR** as **Pass 94** and **Pass 95** (operator, 2026-07-24:
+*"in the scope of this PR i would say they land and we try out the model"*).
+See `docs/review-log.md`. Pass 95 moves `table_version` **0x41 → 0xD1**, so
+craft and ground must be redeployed together.
+
+The nine profiles are in `profiles/modes/` — one JSON per cell, applied by
+setting the fields and restarting, per the operator's chosen mechanism.
