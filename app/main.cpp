@@ -890,6 +890,18 @@ bool frame_is_eob(const uint8_t* f, size_t n) {
     return v != nullptr && (v->hdr.data_flags & data_flags::kEndOfBlock) != 0;
 }
 
+// §7.2 Pass 78 paced-stream semantics: only the RTP video stream's EOBs open
+// craft listen windows / re-anchor ground returns. A non-video datagram is a
+// one-datagram block whose EOB must not re-arm the gap (50 Hz audio EOBs
+// re-arming mid-flush is the measured rung-flapping failure).
+bool frame_is_paced_eob(const uint8_t* f, size_t n) {
+    const Decoded dec = decode(f, n);
+    const DataView* v = std::get_if<DataView>(&dec);
+    return v != nullptr &&
+           (v->hdr.data_flags & data_flags::kEndOfBlock) != 0 &&
+           v->hdr.stream_type == stream_type::kRtp;
+}
+
 // §2: random per-boot session nonce.
 uint32_t session_nonce() {
     uint32_t nonce = 0;
@@ -1780,8 +1792,12 @@ struct TxCore {
                                      r->prefix.session_id, now)) {
                 return false;
             }
-            ++reports_received_;
-            selector_.on_report(*r, now);
+            // Pass 78: count selector-fresh epochs only — redundant copies
+            // (return.report_redundancy) and replays must not inflate the
+            // §15.3 heard-ratio.
+            if (selector_.on_report(*r, now)) {
+                ++reports_received_;
+            }
             return false;
         }
         if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
@@ -2799,7 +2815,9 @@ int run_tx(const Loaded& l) {
     uint64_t now_us_it = now_us();
     const auto send_raw = [&](const uint8_t* f, size_t n) {
         air.value->inject(f, n);
-        if (qg.enabled() && frame_is_eob(f, n)) {
+        // Pass 78: only video EOBs open a listen window; a held audio
+        // datagram flushing here must not re-arm the gap on the rest.
+        if (qg.enabled() && frame_is_paced_eob(f, n)) {
             qg.note_eob_sent(now_us_it);
         }
     };
@@ -3353,6 +3371,10 @@ int run_rx(const Loaded& l) {
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> urgent_ret_held;
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_ret_held;
+    // §7.2 Pass 78: anchored report batches re-fire once at the NEXT return
+    // window (spread across two listen gaps; a blind fallback batch is not
+    // repeated). Byte-identical copies — the TX epoch filter dedups.
+    std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_repeat_held;
     std::optional<uint64_t> ret_at_us;
     bool ret_tsf_anchored = false;
     std::optional<uint64_t> report_fallback_us;
@@ -3866,8 +3888,17 @@ int run_rx(const Loaded& l) {
             for (const auto& [f, target] : urgent_ret_held) {
                 send_return(target, f.data(), f.size(), true);
             }
+            // Pass 78: last window's anchored reports repeat here, before
+            // the fresh batch so epochs stay monotonic at the receiver.
+            for (const auto& [f, target] : report_repeat_held) {
+                send_return(target, f.data(), f.size(), false);
+            }
+            report_repeat_held.clear();
             for (const auto& [f, target] : report_ret_held) {
                 send_return(target, f.data(), f.size(), false);
+                if (ret_at_us && l.cfg.policy.ret.report_redundancy > 1) {
+                    report_repeat_held.emplace_back(f, target);
+                }
             }
             // §7.2 observability: a batch fired on a TSF-anchored window
             // deadline is a hit; one sent blind (no EOB heard) is a miss.
@@ -3940,9 +3971,11 @@ int run_rx(const Loaded& l) {
             }
             rx.on_air(meta.adapter_id, d, n, now, deliver, rssi,
                       early_deliver);
-            if (qg.enabled() && frame_is_eob(d, n)) {
+            if (qg.enabled() && frame_is_paced_eob(d, n)) {
                 // Anchor on the SAME adapter's TSF (clocks never cross
                 // adapters); a failed read falls back to host arrival.
+                // Pass 78: audio EOBs don't re-anchor — the craft's gap
+                // keys on the same video EOB this side heard.
                 const auto tsf_now = air.value->read_tsf(meta.adapter_id);
                 ret_tsf_anchored = tsf_now.has_value();
                 if (!tsf_now) {

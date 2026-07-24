@@ -205,6 +205,9 @@ struct ReturnPolicy {
     // target's latched SA (ground half of the gate-4 A/B; craft half is
     // air.ack_responder). Off = pinned broadcast returns.
     bool unicast = false;
+    // §7.2 Pass 78: anchored LINK_REPORT batches repeat once at the next
+    // return window (spread across two listen gaps). 1 disables.
+    uint32_t report_redundancy = 2;
 };
 
 struct CsaPolicy {
