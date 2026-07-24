@@ -2888,6 +2888,62 @@ same event.
 
 
 
+### Pass 93 — §15.2 unknown config keys are load errors; three latent knobs
+
+**Trigger.** Pre-flight audit tier 0 (`docs/preflight-open-issues.md` sections
+D and E) — the "no-brainer" bucket. Four of the items turned out to share one
+shape: a knob or guarantee that was *documented* but not *wired*.
+
+**Rulings.**
+
+- **§15.2: an unrecognised config key is a load error.** The loader validated
+  values but never key *names*, so `"min_profle": 1` in a flight config loaded
+  silently on the default and `--check` reported success. Keys beginning with
+  `_` stay accepted (the §9.3 table already ships several as comments).
+  Verified against every config in `deploy/` and `examples/` plus the three
+  live flight configs (craft `.232`, ground `.242`, RK `.199`) — all pass. It
+  immediately caught three shipped samples still carrying
+  `rendezvous_timeout_s`, removed by Pass 59; those are cleaned in the same
+  commit. Coverage is the top level, `node`, `adapters[]`, `streams[]`, every
+  `policy.*` block, `stats`, `control`, `scout`, `venc`, `venc.fps_ladder`,
+  `venc.command_presets`, `air`, `cache`, `cache.repair` and `cache.store`.
+  `loopback`, the per-stream `fec`/`jscc_shadow` blocks and the §9.3 profile
+  table are **not** covered yet — bench-only or separately validated surfaces.
+- **§15.2: `stats.hz` must be 0 or `0 < hz <= 1000`.** The emit period is
+  `(uint64)(1000.0 / hz)`, so 2000 truncated to a 0 ms period and the caller's
+  non-zero guard then disabled stats completely. A node asked for more stats
+  must not answer by emitting none.
+
+**Fixes carried with them (no spec change).**
+
+- **`csa_psk` could reach stderr.** `json::parse_error::what()` embeds the
+  offending input (`last read: '...'`), so a syntax error near
+  `policy.csa.psk` echoed part of the secret. This was the only output path
+  not honouring the §15.2 redaction rule — every other one was already clean.
+  Now reports byte offset and exception id only. The regression test asserts
+  the secret's text is absent from the error string, and it **fails on
+  unfixed source** with the secret present, which is what a leak looks like.
+- **`return.skip_backlog` was dead.** `quietgap_policy()` never copied it out
+  of the config, so the `QuietGapPolicy` header default of 32 always applied.
+  §7.2 now records that any pre-Pass-93 re-derivation of this seed measured 32
+  whatever the config said. Caveat on coverage: the config side is tested, but
+  the copy itself lives in `app/main.cpp` and is not reachable from a unit
+  test — verified by inspection only.
+- **`/api/v1/info` did not escape strings.** Adapter names and the control
+  bind string are operator-supplied and were interpolated raw into JSON; a
+  name containing a quote produced malformed output. Now escaped, mirroring
+  `append_escaped()` in `io/src/stats.cpp`.
+- **RECOVERY_REQUEST logging is rate-limited.** stderr is unbuffered and the
+  line fires from the air RX dispatch, so a looping ground became one
+  `write()` syscall per packet on the flight loop. One line per second now,
+  carrying the suppressed count.
+
+**Doc drift corrected in the same pass** (audit section D): `CLAUDE.md` suite
+count and the "sends nothing without an RTP feed" claim, `ROADMAP.md` Passes
+64–66, `deploy/README.md` rung/power/boot statements, and
+`docs/transport-architecture-review.md` kernel-monitor CSA claims superseded
+by Passes 49, 69 and 80.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the

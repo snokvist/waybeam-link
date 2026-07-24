@@ -1073,6 +1073,14 @@ airtime-critical override fired, and the craft then transmitted through its
 own listen windows — episodic multi-report deaf spells, §9.8 watchdog trips,
 and full-range rung flapping that vanish with audio off.)
 
+**Backlog override (`return.skip_backlog`, seed 32):** once this many frames
+are held waiting for a gap the pacer stops holding and transmits through the
+listen window — losing returns beats losing video. Pass 93 note: the knob was
+specified here and present in the config struct, but the config→policy copy
+never carried it, so the engine default always won and setting it did nothing.
+Any §17 re-derivation of this seed before Pass 93 measured 32 regardless of
+what the config said.
+
 **Report redundancy (Pass 78):** `return.report_redundancy` (seed **2**, `1`
 disables; RE-DERIVE §17). Each LINK_REPORT batch fired on a TSF-anchored
 window is retained and re-sent once at the **next** return window — spread
@@ -2633,6 +2641,17 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   re-acquires a hopped craft by **re-scout**. The flag fails closed: without it a
   streams node still requires its uplink, so an ordinary ground is never silently
   downgraded to no-ARQ.
+- **An unrecognised key is a load error (Pass 93).** The loader validates key
+  *names* as well as values: any key it does not know, at any level it checks,
+  fails the load with `"<path>: unknown key \"<key>\""`. Silently ignoring
+  unknown keys meant a misspelt knob (`min_profle`) ran on its default and
+  `--check` reported success — a flight config could carry a typo through
+  pre-flight. Keys beginning with `_` are the comment convention (the §9.3
+  table ships several) and are always accepted.
+- `stats.hz` MUST be `0` (off) or `0 < hz <= 1000`. The emit period is computed
+  as `(uint64)(1000.0 / hz)`, so any higher value truncates to 0 ms and the
+  caller's non-zero guard disables stats entirely — a node asked for *more*
+  stats must never respond by emitting none (Pass 93).
 - Every policy constant is overridable → bench re-derivation (§9, §17) is config,
   not recompile.
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
