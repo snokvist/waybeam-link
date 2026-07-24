@@ -1786,6 +1786,20 @@ struct TxCore {
                 r->target_session != session_) {
                 return false;
             }
+            // §7.3 Pass 79: selection feedback keys on RTP streams only.
+            // Defensive against a pre-79 ground still reporting non-video
+            // streams (mixed-version fleet).
+            bool video_stream = false;
+            for (const Stream& s : streams_) {
+                if (s.stream_id == r->target_stream_id &&
+                    s.stream_type == stream_type::kRtp) {
+                    video_stream = true;
+                    break;
+                }
+            }
+            if (!video_stream) {
+                return false;
+            }
             // §3.5 acceptance filter (Pass 41): preferred/latched reporters
             // only — BEFORE the selector and the §9.11 ladder consume it.
             if (!report_gate_.accept(r->prefix.originator,

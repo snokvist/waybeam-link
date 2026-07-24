@@ -39,6 +39,12 @@ std::vector<LinkReport> Reporter::build(const RxEngine& engine,
     const uint8_t live = engine.live_adapter_count();
 
     for (const RxStreamInfo& s : engine.streams()) {
+        // §7.3 Pass 79: reports are the §9 selector's feedback channel and
+        // are emitted for RTP streams only — a low-rate stream's per-stream
+        // loss fraction must not steer selection.
+        if (s.stream_type != stream_type::kRtp) {
+            continue;
+        }
         Snap& prev = last_[pack(s.key)];
         const uint64_t d_uniq = s.counters.uniq - prev.uniq;
         const uint64_t d_lost = s.counters.lost_declared - prev.lost;
