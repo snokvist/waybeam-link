@@ -271,6 +271,39 @@ Needs, in priority order:
 Interim operating procedure: **after any craft reboot, re-scout and re-claim
 before relying on channel switching.**
 
+### B10 — A following RX node reports its startup channel forever — SHOULD-FIX
+
+Reported from the field 2026-07-24: the `.199` ground's OSD shows
+`CH5805 CSA:COMMITTED` and never updates when it follows a channel switch. The
+x86 ground at `.242` updates correctly.
+
+`.242` is correct only because it is the **issuer**. On an RX node the follower
+path retunes the radio and updates nothing else (`app/main.cpp:4342-4345`):
+
+```cpp
+const CsaAction fa = follower.tick(now_us_it);
+if (fa.kind != CsaAction::Kind::kNone) {
+    air.value->retune_all(fa.chan_mhz, fa.bw, fa.fast);   // radio moves...
+}                                                         // ...operating_chan does not
+```
+
+`operating_chan` is assigned in exactly one place — `operating_chan = ia.chan_mhz`
+at `app/main.cpp:4252`, inside the **IssuerAction** switch — and it is what feeds
+`link.channel` into §15.3 at `app/main.cpp:4416`. So any node that *follows* a
+campaign rather than issuing one keeps reporting the channel it booted on. The
+follow itself works: the radio moves and video keeps flowing. Only the report
+is wrong.
+
+The sticky `CSA:COMMITTED` is a separate and largely intended effect — §11.5a
+holds the follower in `kCommitted` until reboot, so the field is accurate but
+uninformative. The channel number is the actual defect.
+
+Fix is a one-liner (mirror the issuer's assignment on the follower branch), but
+it is deliberately **not** folded into the Passes 81–88 PR: `link.channel` is
+Pass 76 §15.3 surface with a golden-tested schema, and this compounds with
+**B8** — during a split, a follower's own display cannot tell the operator where
+it actually is. Both want settling together.
+
 ---
 
 ## C. Verification still owed
