@@ -123,6 +123,11 @@ Result<Config> load_config_json(const std::string& json_text) {
         auto role = parse_role(n.at("role").get<std::string>(), "node");
         if (!role) return Result<Config>::fail(role.error);
         cfg.node.role = *role.value;
+        cfg.node.spectator = n.value("spectator", false);
+        if (cfg.node.spectator && cfg.node.role != Role::kRx) {
+            return Result<Config>::fail(
+                "node: spectator requires role \"rx\" (§2 passive RX, Pass 74)");
+        }
         if (n.contains("preferred_originator")) {
             cfg.node.preferred_originator = n.at("preferred_originator").get<uint16_t>();
         }

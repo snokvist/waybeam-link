@@ -1025,8 +1025,11 @@ struct AirBackend {
             // A dedicated cache with no media streams receives DATA over RF
             // and returns CACHE_STATUS/REQUEST/REPLY over Ethernet. It must
             // not manufacture RF traffic merely to satisfy the normal ground
-            // uplink invariant.
-            mc.allow_rx_only = cfg.cache.store.enabled && cfg.streams.empty();
+            // uplink invariant. A §2/§13 passive spectator (Pass 74) is the
+            // other uplink-free node: a display receiver with no return path.
+            mc.allow_rx_only =
+                (cfg.cache.store.enabled && cfg.streams.empty()) ||
+                cfg.node.spectator;
             mc.stamp_net_id = cfg.node.net_id.value_or(0);
             mc.filter_net_id = cfg.node.net_id;
             mc.originator = cfg.node.originator;
@@ -3637,15 +3640,34 @@ int run_rx(const Loaded& l) {
         // channel). The loop's issuer.tick drives the copies/commit; post-claim
         // the net_id stamp/filter and channel hold until an explicit re-scout.
         auto do_claim = [&](int originator_i, int target_chan_i) -> std::string {
-            if (!air.value->supports_csa()) {
-                return "CSA unsupported by this backend";
-            }
             if (originator_i <= 0 || originator_i > 0xFFFF) {
                 return "invalid originator";
             }
             const uint16_t orig = static_cast<uint16_t>(originator_i);
             const auto cand = scout.candidate_for(orig);
             if (!cand) return "unknown craft (run a scout first)";
+            // §2/§13 passive spectator (Pass 74): no uplink for a §11 issuer
+            // campaign, so "select" is a passive tune. Retune all ears onto the
+            // scouted feed's channel + net_id; §2 first-latch /
+            // preferred_originator picks up the stream. csa_psk stays
+            // craft+ground; a CSA move is recovered by re-scout, not followed.
+            if (l.cfg.node.spectator) {
+                air.value->set_stamp_net_id(cand->net_id);
+                air.value->set_filter_net_id(cand->net_id);
+                if (!air.value->retune_all(cand->chan, op_bw_mhz, false)) {
+                    return "failed to tune onto feed channel";
+                }
+                active_selection =
+                    LinkSelection{orig, cand->chan, 0, cand->net_id};
+                selection_state = "tuned";
+                std::fprintf(
+                    stderr, "spectator: tuned originator=%u net_id=%u %u MHz\n",
+                    orig, cand->net_id, cand->chan);
+                return "";
+            }
+            if (!air.value->supports_csa()) {
+                return "CSA unsupported by this backend";
+            }
             // Configured secret wins; else the cached announced token (§11.4a).
             std::vector<uint8_t> key = cparams.psk;
             if (key.empty()) {
