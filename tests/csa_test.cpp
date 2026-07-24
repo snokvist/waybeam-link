@@ -22,6 +22,10 @@ CsaParams policy_with_psk() {
     CsaParams p;
     p.psk = {'s', 'e', 'c', 'r', 'e', 't'};
     p.allowlist = {5745, 5805, 5825};
+    // Pass 89 raised the default 150 -> 500 ms. The window-arithmetic cases
+    // below were written against 150 and their timing is not what they test,
+    // so pin it here; the new default is asserted on its own below.
+    p.verify_timeout_ms = 150;
     return p;
 }
 
@@ -279,7 +283,7 @@ int main() {
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
         // Craft video arrives → success LATCHED, but the beacon tail keeps
         // blanketing the craft's verify window (§11.6 beacon tail).
-        is.note_craft_video(200'000);
+        is.note_craft_video(200'000, false);  // Pass 89: committed craft
         CHECK(is.active());
         CHECK_EQ_U(is.tick(221'500).kind,
                    static_cast<unsigned>(
@@ -388,7 +392,7 @@ int main() {
         CHECK_EQ_U(is.tick(450'000).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
-        is.note_craft_video(460'000);
+        is.note_craft_video(460'000, false);  // Pass 89: committed craft
         CHECK_EQ_U(is.tick(450'000 + 150'000).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSuccess));
@@ -404,7 +408,7 @@ int main() {
         CHECK_EQ_U(is.tick(101'000).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
         is.tick(101'500);                 // landing: window opens (300 ms)
-        is.note_craft_video(120'000);     // BEFORE T_switch (150 ms): ignored
+        is.note_craft_video(120'000, false);  // BEFORE T_switch (150 ms): ignored
         const auto a = is.tick(300'000);
         CHECK_EQ_U(a.kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
@@ -578,6 +582,67 @@ int main() {
         f.tick(180'000);                  // landing
         CHECK_EQ_U(f.tick(230'000).kind,  // 180 + 50, the issuer's tighter budget
                    static_cast<unsigned>(CsaAction::Kind::kRevert));
+    }
+    {
+        // Pass 89: the §11.5 default is 500 ms, not the old median-derived
+        // 150. Measured max issuer-landing delay was 143 ms — the old window
+        // had 4.7% margin and stranded the fleet when it was exceeded.
+        const CsaParams def;
+        CHECK_EQ_U(def.verify_timeout_ms, 500u);
+    }
+    {
+        // Pass 89 regression — the hop-4 fleet split of 2026-07-24.
+        // A craft that ARRIVED on target_chan but has not COMMITTED still
+        // transmits, with CSA_ARMED set. That must NOT satisfy video-verify:
+        // the craft may still revert, and an issuer that confirms on it holds
+        // a channel the craft has left.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        CHECK_EQ_U(is.tick(101'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+        is.tick(200'000);  // landing: window opens, deadline 200 + 150
+        // Craft is present on the target, still deciding — armed bit SET.
+        is.note_craft_video(210'000, true);
+        is.note_craft_video(300'000, true);
+        // Deadline: no commit proof was ever seen, so the issuer must REVERT
+        // and follow the craft back rather than declare success.
+        CHECK_EQ_U(is.tick(350'001).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+        CHECK(!is.active());
+    }
+    {
+        // Pass 89: the same campaign, but the craft commits (clears the bit)
+        // inside the window → success, exactly as before the ruling.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        CHECK_EQ_U(is.tick(101'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+        is.tick(200'000);
+        is.note_craft_video(210'000, true);   // still deciding
+        is.note_craft_video(240'000, false);  // committed — the proof
+        CHECK_EQ_U(is.tick(350'001).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSuccess));
+    }
+    {
+        // Pass 89: campaign_active() spans ARMED and VERIFY and drops on
+        // COMMITTED — it is what drives the craft's CSA_ARMED wire bit.
+        CsaFollower f(pol);
+        CHECK(!f.campaign_active());
+        CsaPacket c = make_csa(pol, 1, 5745, 150);
+        c.csa_mac = mac_for(pol, c);
+        CHECK(f.on_csa(c, 0, std::nullopt, 0, std::nullopt));
+        CHECK(f.campaign_active());  // ARMED
+        f.tick(150'000);             // retune -> VERIFY
+        CHECK(f.campaign_active());
+        f.tick(180'000);  // landing
+        CHECK(f.campaign_active());
+        f.note_valid_rx(200'000, 9);  // heard the issuer -> COMMITTED
+        CHECK(!f.campaign_active());
     }
 
     return wbtest_finish("csa_test");

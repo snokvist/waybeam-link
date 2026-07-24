@@ -42,7 +42,11 @@ struct CsaParams {
     // not unauthenticated, and must fail closed.
     bool allow_unauthenticated = false;
     uint32_t settle_ms = 3000;          // §11.3 adaptive freeze
-    uint32_t verify_timeout_ms = 150;   // §11.5 ceiling; t_revert_ms may only shorten
+    // §11.5 ceiling; t_revert_ms may only shorten. Pass 89: 150 -> 500. The old
+    // value was a median + margin; the follower reverts on the TAIL of the
+    // issuer's landing delay, measured max 143 ms over 8 hops against a 150 ms
+    // window. 500 is ~3.5x that max and sits inside the 750 ms RX-liveness guard.
+    uint32_t verify_timeout_ms = 500;
     uint32_t min_interval_ms = 5000;    // §11.4 rate-limit
     uint32_t ack_timeout_ms = 1000;     // §11.6 CSA_ARMED wait
     uint32_t bind_release_ms = 90000;   // §11.5a command-source binding release
@@ -83,6 +87,13 @@ class CsaFollower {
     CsaAction tick(uint64_t now_us);
 
     bool armed() const { return state_ == State::kArmed; }  // §11.6 data flag
+    // §11.6/§3.2 bit 4 (Pass 89): CSA_ARMED spans the WHOLE campaign — set on
+    // accept, cleared only on COMMITTED. Its clearing on target_chan is the
+    // craft's commit proof; clearing it at the switch (as before Pass 89) made
+    // "arrived, still deciding" indistinguishable from "committed" to the issuer.
+    bool campaign_active() const {
+        return state_ == State::kArmed || state_ == State::kVerify;
+    }
     uint64_t freeze_until_us() const { return freeze_until_us_; }  // §11.3
     // The issuer this follower latched onto (established by a MAC-valid CSA).
     std::optional<uint16_t> latched_issuer() const { return latched_; }
@@ -139,8 +150,11 @@ class CsaIssuer {
     void note_craft_armed(uint64_t now_us);
     // Valid craft video/data seen (only meaningful in VERIFY, after commit;
     // ignored before T_switch — the craft cannot be on the target yet,
-    // §11.6 review pass 2).
-    void note_craft_video(uint64_t now_us);
+    // §11.6 review pass 2). `craft_armed` = the frame's CSA_ARMED flag: a SET
+    // bit means the craft arrived but has not committed, and MUST NOT satisfy
+    // video-verify (§11.6 Pass 89) — the craft transmits throughout its own
+    // VERIFY window and may still revert.
+    void note_craft_video(uint64_t now_us, bool craft_armed);
     // The app's commit retune failed — abandon the campaign rather than
     // verify with untrusted ears (§11.6 review pass 2). The armed craft
     // reverts on its own verify timeout.

@@ -2924,6 +2924,7 @@ int run_tx(const Loaded& l) {
     CsaFollower csa(follower_params);
     // §11.6 Pass 80 post-retune RX-liveness guard state (one-shot).
     std::optional<uint64_t> csa_liveness_deadline_ms;
+    bool csa_armed_flag = false;  // §11.6 Pass 89: mirrors csa.campaign_active()
     uint64_t csa_liveness_rx_baseline = 0;
     uint16_t csa_liveness_chan = 0;
     uint8_t csa_liveness_bw = 0;
@@ -3009,7 +3010,9 @@ int run_tx(const Loaded& l) {
                     tx.csa_freeze(service_now + static_cast<uint64_t>(
                                                    l.cfg.policy.csa.settle_s *
                                                    1000));
-                    tx.set_csa_armed(true);
+                    // Pass 89: the flag is owned by the campaign_active()
+                    // edge check on the loop body — one writer, so the
+                    // clearing edge cannot be missed.
                     std::fprintf(stderr,
                                  "csa: armed -> %u MHz (nonce %u, dt %u ms)\n",
                                  c->target_chan, c->csa_nonce,
@@ -3150,9 +3153,19 @@ int run_tx(const Loaded& l) {
                         static_cast<size_t>(got), service_now, inject);
         }
         now_us_it = now_us();
+        // §3.2 bit 4 / §11.6 (Pass 89): CSA_ARMED tracks the whole campaign —
+        // set on accept, cleared on COMMITTED (or on the §11.5 revert back to
+        // IDLE). Driven from follower state rather than pinned at the accept
+        // and switch sites, so the bit is cleared by whichever edge resolves
+        // the campaign. Edge-triggered: set_csa_armed walks every stream's
+        // framer, so it must not run per iteration.
+        if (const bool want_armed = csa.campaign_active();
+            want_armed != csa_armed_flag) {
+            csa_armed_flag = want_armed;
+            tx.set_csa_armed(want_armed);
+        }
         const CsaAction ca = csa.tick(now_us_it);
         if (ca.kind != CsaAction::Kind::kNone) {
-            tx.set_csa_armed(false);  // switching now — the ACK window is over
             if (!air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast)) {
                 std::fprintf(stderr, "csa: retune to %u MHz FAILED\n",
                              ca.chan_mhz);  // Pass 69: never silent
@@ -4055,13 +4068,17 @@ int run_rx(const Loaded& l) {
                     repair_tail_fallback_us =
                         qg.return_deadline(now_us_it, 0, std::nullopt);
                 }
-                if ((v->hdr.data_flags & data_flags::kCsaArmed) != 0) {
+                const bool craft_armed =
+                    (v->hdr.data_flags & data_flags::kCsaArmed) != 0;
+                if (craft_armed) {
                     issuer.note_craft_armed(now_us_it);  // §11.6 implicit ACK
                 }
                 // §11.6 beacon tail: success is latched here; the campaign
                 // (and the selection_state flip) closes at the deadline via
-                // the kSuccess action below.
-                issuer.note_craft_video(now_us_it);
+                // the kSuccess action below. Pass 89: only a CSA_ARMED-CLEAR
+                // frame counts — the craft clears the bit on COMMITTED, so
+                // its absence is the commit proof.
+                issuer.note_craft_video(now_us_it, craft_armed);
                 if (cache_store) {  // §14.3: retain the verbatim wire packet
                     cache_store->note_data(*v, d, n);
                 }

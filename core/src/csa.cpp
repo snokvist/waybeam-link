@@ -261,7 +261,16 @@ void CsaIssuer::note_craft_armed(uint64_t) {
     }
 }
 
-void CsaIssuer::note_craft_video(uint64_t now_us) {
+void CsaIssuer::note_craft_video(uint64_t now_us, bool craft_armed) {
+    // §11.6 (Pass 89): a CSA_ARMED-set frame on target_chan proves the craft
+    // ARRIVED, not that it STAYED — the craft transmits throughout its own
+    // §11.5 VERIFY window, before deciding, and may still revert. Latching on
+    // it lets the issuer confirm a campaign the craft abandons, holding a
+    // channel the craft has left (observed 2026-07-24: issuer confirmed 5745
+    // while the craft reverted to 5805). The CLEARED bit is the commit proof.
+    if (craft_armed) {
+        return;
+    }
     // §11.6 review pass 2: nothing before T_switch can be legitimate craft
     // video on the target — the craft does not move until then; an earlier
     // frame is a stale ear (failed per-adapter retune) or RF bleed and must
