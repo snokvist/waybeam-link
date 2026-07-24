@@ -40,7 +40,26 @@ Two later refinements from the operator:
 
 ---
 
-## 2. Measured: the per-rung block-size ceiling
+## 1a. RETRACTED by measurement, 2026-07-24 — read §11–§15 first
+
+Sections 2, 6 and 7 below were written before the block target was derived.
+The derivation (§11) shows the premise was wrong, so the conclusions built on
+it do not hold. They are kept for provenance, marked, and superseded:
+
+- **§2's "static fps forces the MCS floor" is RETRACTED.** It assumed a
+  ~10 kB minimum frame. There is no such requirement once §14.1's `min_k`
+  gate is fixed (§11). fps is *not* the range axis.
+- **§7's "derive the 10 kB block target" is ANSWERED, and the answer is that
+  there is no useful block target** (§11.4).
+- **§6's 100-vs-90 fps trade is unchanged in its FOV/sensor-mode arguments but
+  loses its "whole extra rung of range" argument**, which came from §2.
+
+What replaces them: the binding constraint is **bits per pixel**, not block
+size (§14). Three separate defects were found on the way (§11, §12, §13).
+
+---
+
+## 2. ~~Measured: the per-rung block-size ceiling~~ (RETRACTED — see §1a)
 
 §9.5 derives the video bitrate per rung. §9.11's block target is
 `min_p_frame_bytes` (seed **10000**, never §17-derived — see §7).
@@ -326,3 +345,301 @@ several rungs at once.
 static scene it will not, and then frames are small at *any* fps, so no cadence
 reduction produces a big block. Below that point the right lever is FEC parity,
 not fps.
+
+---
+
+## 11. DERIVED (§17): the block target — and why there isn't one
+
+The §17 derivation §9.11 has always owed. Run two ways that agree:
+
+- **Offline**, driving the real `FrameFramer` (§5.1a) and `FrameReassembler`
+  (§6.3a) over Bernoulli packet loss — the same `ceil()` `repair_count`, the
+  same `min_k` gate, the same GF(256) decode the craft runs. Not a model.
+- **On hardware**, craft `.232` pinned MCS5 with `venc.enabled: false`, ground
+  `air.rx_drop_permille: 141` per adapter giving a measured **2.1–2.3 %
+  effective post-diversity loss**, venc at 98.7 fps / 1280×720, bitrate swept
+  to walk k from 2 to 15.
+
+### 11.1 Root cause of B11: `min_k` removes ALL protection, not just FEC
+
+`core/src/frame_framer.cpp:30`
+
+```cpp
+if (k <= cfg_.fec.min_k) {
+    return 0;  // ARQ-only at small k
+}
+```
+
+The craft runs `min_k: 3` **and** `arq_mode: "idr-only"`. So every P-frame of
+≤ 3 symbols (≤ 3 × 1387 = **4161 B**) is emitted with **no FEC and no ARQ**.
+
+§14.1's table states the rationale explicitly:
+
+> `k ≤ fec.min_k` (seed 3) | `r = 0` (ARQ-only) | at k=3 one repair = 33 %
+> overhead; **NACK→RETRANSMIT recovers within deadline** (§17 gate 3).
+
+That justification is conditioned on an ARQ fallback which P-frames do not
+have under `arq_mode: idr-only` — which is both the craft's deployed setting
+and the §4.1 default for the P class. The rule is unconditional; its
+justification is not.
+
+This is B11. At MCS0 the derived bitrate divided by the frame rate lands
+frames squarely under 4161 B, and they go out bare.
+
+### 11.2 Offline: the cliff, and the sawtooth above it
+
+Unrecoverable-frame rate vs frame size, `min_k: 3`, `p_rate: 200‰`,
+`arq_mode: idr-only`, s = 1387 B, N = 20000 frames per point:
+
+| bytes | k | r | p=0.5 % | p=1 % | p=2 % | p=5 % | p=10 % |
+|---|---|---|---|---|---|---|---|
+| 1500–2500 | 2 | 0 | 0.900 % | 1.890 % | 3.880 % | 9.595 % | 18.830 % |
+| 3000–4000 | 3 | 0 | 1.380 % | 2.800 % | **5.785 %** | 13.975 % | 26.905 % |
+| 4200–5000 | 4 | 1 | 0.025 % | 0.115 % | **0.340 %** | 2.070 % | 7.850 % |
+| 5600 | 5 | 1 | 0.040 % | 0.160 % | 0.565 % | 3.120 % | 10.955 % |
+| 7000 | 6 | 2 | 0.000 % | 0.005 % | 0.055 % | 0.495 % | 3.830 % |
+| 12000 | 9 | 2 | 0.000 % | 0.000 % | 0.100 % | 1.405 % | 8.740 % |
+| 30000 | 22 | 5 | 0.000 % | 0.000 % | 0.000 % | 0.185 % | 4.695 % |
+
+Two features:
+
+1. **A 17× cliff at exactly one byte.** 4161 B → 4162 B takes p=2 % loss from
+   5.785 % to 0.340 %. That is the `min_k` gate, nothing else.
+2. **Above the cliff the curve is a decreasing sawtooth, not monotone.** k=5
+   (0.565 %) is worse than k=4 (0.340 %) because `ceil(k × 0.2)` gives both
+   r=1 while k=5 has one more symbol to lose. Local maxima recur at k=5, 10,
+   15. So "bigger blocks are safer" is only true on average.
+
+### 11.3 Hardware: `min_k` 3 → 1, A/B on the live link
+
+`min_k` is retunable live via `POST /api/v1/fec`, so each bitrate point was
+measured twice back-to-back on the same link. Loss is ground-side
+`frames_unrecoverable / (frames_unrecoverable + delivered)` — single-source,
+no cross-host window skew (see §11.5). 35 s per arm.
+
+| cmd kbps | B/frame | k | min_k=3 loss | fec_rec | min_k=1 loss | fec_rec |
+|---|---|---|---|---|---|---|
+| 1600 | 2065 | 2 | 0.463 % | 30 | **0.000 %** | 77 |
+| 2200 | 2834 | 3 | 0.808 % | 69 | **0.172 %** | 182 |
+| 2800 | 3579 | 3 | 0.228 % | 116 | **0.143 %** | 226 |
+| 3400 | 4363 | 4 | 0.345 % | 190 | **0.029 %** | 277 |
+| 3900 | 4994 | 4 | 0.516 % | 189 | **0.428 %** | 284 |
+| 5000 | 6434 | 5 | 0.656 % | 290 | **0.171 %** | 371 |
+| 6100 | 7849 | 6 | 0.457 % | 376 | **0.171 %** | 474 |
+| 8300 | 10649 | 8 | 0.144 % | 629 | **0.029 %** | 604 |
+| 10500 | 13444 | 10 | **0.000 %** | 731 | 0.057 % | 844 |
+| 16000 | 20484 | 15 | 0.314 % | 1145 | **0.029 %** | 1151 |
+
+**Mean 0.393 % → 0.123 %, a 3.2× reduction. Better at 9 of 10 points; the one
+exception is 0.000 % vs 0.057 %, both at the noise floor.** Worst point
+0.808 % → 0.428 %.
+
+Note the improvement persists at k ≥ 4, where `min_k: 3` should already be
+applying parity. That is because **B/frame is a mean and the operative
+quantity is the distribution**: real P-frames vary enough that a tail of every
+operating point falls under the gate. Re-running the offline sweep with a
+realistic spread (cv = 0.6) reproduces the ratio structure — 4.7× at k=2
+decaying to 2.0× at k=12 — against the hardware's 3.2× mean.
+
+### 11.4 The answer: there is no useful block target
+
+With the gate at `min_k: 1`, every measured frame size from 2065 B upward sits
+at or below 0.43 % unrecoverable at 2.3 % packet loss, with no cliff and no
+size below which protection collapses. **`min_p_frame_bytes = 10000` is not a
+requirement the FEC layer imposes.** §9.11's §17 RE-DERIVE seed can be retired
+rather than re-derived.
+
+The consequence for this document is structural: §2 derived the whole range
+axis from a 10 kB minimum frame. With that gone, **fps does not force an MCS
+floor**, `(low latency, high range)` is not an empty cell, and the two
+user-facing axes do not collapse. What actually binds is §14.
+
+### 11.5 Measurement-validity finding: `frames_unrecoverable` has a blind spot
+
+Establishing which RX counter to trust, offline, at p=2 %:
+
+| bytes | k | true loss | `frames_unrecoverable` | `frames_superseded` |
+|---|---|---|---|---|
+| 1000 | 1 | 1.930 % | **0.000 %** | 0.000 % |
+| 2000 | 2 | 3.880 % | 3.840 % | 3.840 % |
+| 3000 | 3 | 5.785 % | 5.780 % | 5.780 % |
+| 5600 | 5 | 0.565 % | 0.565 % | 0.565 % |
+| 20000 | 15 | 0.020 % | 0.020 % | 0.020 % |
+
+- **Exact for k ≥ 2** — safe to use, and the B11 3.34 % figure stands.
+- **Blind at k = 1**: a frame whose only symbol is lost never opens a block, so
+  the reassembler never learns it existed. Reported 0.000 % against a true
+  1.930 %.
+- **`frames_superseded` is a duplicate of the same event**, not an independent
+  outcome. Summing the two double-counts.
+
+### 11.6 PROPOSED RULING (needs operator sign-off)
+
+The principled fix follows §14.1's own stated rationale: **the `k ≤ min_k`
+ARQ-only branch must be conditioned on the frame actually being ARQ-eligible.**
+
+```cpp
+// §14.1: r = 0 at small k is justified only where ARQ can recover the frame
+// (§17 gate 3). Under arq_mode idr-only a P-frame has no ARQ, so the branch
+// would leave it with no protection at all.
+if (k <= cfg_.fec.min_k && frame_has_arq) {
+    return 0;
+}
+```
+
+Alternative, weaker, config-only: set `min_k: 1` on the craft. Measured 3.2×
+and needs no code, but leaves the spec's unconditional rule in place for any
+other deployment.
+
+---
+
+## 12. Defect: parity airtime is not budgeted (§9.3 / §9.5)
+
+`core/src/selector.cpp:31` debits `fec_overhead_permille` from the derived
+bitrate. **`profiles/table.example.json` ships `fec_overhead_frac: 0.0` on all
+eight rungs**, while `craft.json` runs `"scheme": "rlc256"` at 200 ‰ P / 300 ‰
+IDR. So §9.5 derives the video bitrate as if there were no parity, and the
+framer then adds parity on top.
+
+Measured live on the craft at MCS5: 183 672 repair / 847 295 source symbols =
+**21.7 % by symbol count, 22.2 % by wire bytes**. The hardware sweep saw
+8.8–29.1 % depending on k. As a fraction of *capacity* — which is what
+§9.5's `× (1 − fec_overhead_frac)` expects — that is **≈ 180 ‰**.
+
+`docs/findings-pass3.md:286` called this exactly: *"If FEC is adopted it must
+be budgeted, not bolted on."* FEC was adopted; it was bolted on.
+
+Corrected §9.5 derived bitrate (25000 kbps `venc.max_bitrate_kbps` clamp):
+
+| rung | MCS | GI | table today (fec=0) | corrected (fec=180‰) | delta |
+|---|---|---|---|---|---|
+| 0 | 0 | long | 3804 | **3102** | −18.5 % |
+| 1 | 1 | long | 7704 | **6300** | −18.2 % |
+| 2 | 2 | short | 12903 | **10563** | −18.1 % |
+| 3 | 3 | short | 17236 | **14116** | −18.1 % |
+| 4 | 4 | short | 25000 (clamped) | **21223** | −15.1 % |
+| 5 | 5 | short | 25000 (clamped) | 25000 | 0 % |
+
+Every rung bitrate quoted anywhere in this document before today was ~18 %
+too high. Note the clamp stops binding at rung 4.
+
+**PROPOSED RULING (needs operator sign-off):** `fec_overhead_frac` must be
+non-zero on any rung whose stream runs `fec_scheme: rlc256`. Whether it is
+authored per-rung in the §9.3 table or derived at runtime from the configured
+`p_rate`/`i_rate` is the open design choice — a static table value cannot
+track the `ceil()` inflation at small k, which the sweep measured at up to
+29 %.
+
+---
+
+## 13. Bench traps found today (each cost real time)
+
+- **venc's live fps actuation silently no-ops after a craft reboot.**
+  `GET /api/v1/live/set?video0.fps=100` returns `{"ok":true}`,
+  `GET /api/v1/get?video0.fps` echoes 100, and the sensor keeps delivering
+  **30**. Bouncing through another value does not fix it; nor does restarting
+  venc (`S95waybeam`). It needs a **sensor mode reinit** (operator). Since the
+  whole matrix treats fps as the one live in-flight lever, *always verify fps
+  by measuring the delivered frame rate ground-side*, never by reading it back.
+- **The encoder is scene-limited, so delivered ≠ commanded.** At 30 fps /
+  1280×720 with `video0.bitrate = 25000` the craft delivered **7657 kbps**.
+  §4's "the encoder fills 25 Mbps at every fps" holds only for a scene that
+  demands it; on a static bench it does not. Quote commanded bitrate and
+  measure delivered separately.
+- **Cross-host counter deltas are useless at this precision.** Comparing craft
+  `frame_count` against ground `frame_count` over an ssh hop gave ±2 % window
+  skew — larger than the effect — and produced negative loss rates. Use
+  single-source ground-side counters (§11.5).
+- **The cache repair path is inert.** With `caches_configured: 1` and
+  `caches_following: 1`, `arq_recovered_source_symbols` and
+  `arq_recovered_repair_symbols` were both **0** for the whole session, so it
+  did not contaminate these measurements. Worth its own look: at 100 fps the
+  §14.3 `hard_close_ms: 8` budget is shorter than a frame interval.
+- **Encode resolution is independent of sensor mode.** The craft runs sensor
+  mode 3 (2176×1224, 100 fps) encoding to 1280×720 — the ISP downscales. So
+  FOV and encode detail are **separate knobs**, and "widest FOV" does not
+  force a large encode. This considerably simplifies the matrix.
+
+---
+
+## 14. What actually binds: bits per pixel
+
+With the block-size floor gone (§11.4), the constraint on a (rung, fps,
+resolution) cell is whether the resulting bpp is watchable. From the corrected
+§12 bitrates:
+
+**1280×720 (921 600 px)**
+
+| rung | kbps | 30 fps | 60 fps | 90 fps | 100 fps |
+|---|---|---|---|---|---|
+| 0 | 3102 | 0.112 | 0.056 | 0.037 | 0.034 |
+| 1 | 6300 | 0.228 | 0.114 | 0.076 | 0.068 |
+| 2 | 10563 | 0.382 | 0.191 | 0.127 | 0.115 |
+| 3 | 14116 | 0.511 | 0.255 | 0.170 | 0.153 |
+| 4 | 21223 | 0.768 | 0.384 | 0.256 | 0.230 |
+| 5 | 25000 | 0.904 | 0.452 | 0.301 | 0.271 |
+
+**1920×1080 (2 073 600 px)**
+
+| rung | kbps | 30 fps | 60 fps | 90 fps | 100 fps |
+|---|---|---|---|---|---|
+| 0 | 3102 | 0.050 | 0.025 | 0.017 | 0.015 |
+| 1 | 6300 | 0.101 | 0.051 | 0.034 | 0.030 |
+| 2 | 10563 | 0.170 | 0.085 | 0.057 | 0.051 |
+| 3 | 14116 | 0.227 | 0.113 | 0.076 | 0.068 |
+| 4 | 21223 | 0.341 | 0.171 | 0.114 | 0.102 |
+| 5 | 25000 | 0.402 | 0.201 | 0.134 | 0.121 |
+
+**960×540 (518 400 px)**
+
+| rung | kbps | 30 fps | 60 fps | 90 fps | 100 fps |
+|---|---|---|---|---|---|
+| 0 | 3102 | 0.199 | 0.100 | 0.066 | 0.060 |
+| 1 | 6300 | 0.405 | 0.203 | 0.135 | 0.122 |
+| 2 | 10563 | 0.679 | 0.340 | 0.226 | 0.204 |
+| 5 | 25000 | 1.608 | 0.804 | 0.536 | 0.482 |
+
+This is the matrix's real shape, and it reproduces the operator's intuition
+correctly — but inverted from §4's first reading. It is not that low
+resolutions cannot absorb high bitrates; it is that **a cell is viable when
+bpp clears a floor**, so at a low rung you must spend the budget on fewer
+pixels or fewer frames.
+
+**The one number still missing is that bpp floor**, and it is irreducibly
+subjective — it needs the operator's eyes, not a counter. §15 sets up that
+test.
+
+---
+
+## 15. Next: the bpp floor (operator judgement required)
+
+Everything above is objective and settled. The matrix cannot be finalised
+without one ruling that no instrument can supply: **the lowest bits/pixel that
+still looks acceptable in flight**, and whether that floor differs for a
+"low latency" user (who tolerates softness for cadence) versus a "high
+quality" user.
+
+Proposed procedure, on the controlled bench already built:
+
+1. Craft pinned, `venc.enabled: false`, no synthetic loss.
+2. For each of 960×540 / 1280×720 / 1920×1080 (`video0.size` is
+   `restart_required` — one venc restart per resolution), hold fps at 30, 60
+   and 100 and step `video0.bitrate` down until the operator calls it.
+3. Record the bpp at the call, not the bitrate — bpp is what transfers across
+   resolutions.
+
+That yields one floor (or three, if it turns out to be latency-dependent), and
+the 3×3 matrix falls out of the §14 tables directly: for each cell, pick the
+largest resolution whose bpp at that cell's lowest allowed rung clears the
+floor, and the widest-FOV sensor mode that supports the cell's fps.
+
+### Still open from earlier sections
+
+- **100 vs 90 fps** (§6) — the FOV and sensor-mode arguments stand; the "extra
+  rung of range" argument is withdrawn with §2.
+- **IMX415 hardware confirmation** (§8 item 4) — the §3 table is still read
+  from driver source, not from hardware.
+- **§9.11 ladder** (§10) — the four defects there are unaffected by today's
+  work, but the *motivation* changes: with no block-size floor, the ladder is
+  no longer needed for protection. It becomes purely a quality lever, and the
+  variable-fps mode is its only remaining hard requirement.
