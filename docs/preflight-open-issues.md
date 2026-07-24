@@ -358,6 +358,13 @@ to `floor_profile` **unclamped by the §9.7 pin**. The deployed vehicle runs
 MCS0 is still dumped onto it, at the worst possible moment, and gets 3 % broken
 frames as its "safe" mode.
 
+> **MOVED 2026-07-24 → PR #53 (`docs/venc-mode-matrix.md`).** The fix outgrew
+> this entry: it needs a user-facing operating-mode model, not a constant.
+> Everything measured since — the per-rung block ceiling, static-fps→MCS-floor
+> derivation, both sensor mode tables, the encoder-does-not-clip-at-low-fps
+> result, and the §9.11 ladder review — lives there. This entry stays as the
+> record of the defect that started it. **Still a BLOCKER; still unfixed.**
+
 **Operator ruling 2026-07-24 — cause and direction.** The PA-overdrive
 confound is **rejected**: the cause is the undersized FEC blocks with no
 protection, as the packet arithmetic above shows. The fix direction is to
@@ -390,6 +397,32 @@ so the next reader does not re-derive it.
 Interacts directly with **A3** (whether a §9.7 pin should yield to the §9.8
 fail-safe): this is the first hard evidence that where the fail-safe *lands*
 matters as much as whether it fires.
+
+---
+
+## Audit status, 2026-07-24
+
+Where each bucket stands, so the next session does not re-derive the order.
+
+- **Tier 0 (no-brainers) — DONE**, PR #52 (Pass 93): unknown config keys are
+  now load errors (caught three shipped samples still carrying
+  `rendezvous_timeout_s`), `stats.hz` bounded, a `csa_psk` leak through
+  `json::parse_error::what()` closed, `return.skip_backlog` wired up (it had
+  never been copied out of the config), `/api/v1/info` string escaping, and
+  RECOVERY_REQUEST log rate-limiting. All section-D doc drift corrected.
+- **B11 / MCS0 — MOVED to PR #53**, see the note on that entry.
+- **Tier 1 (low effort, high win) — NOT STARTED.** In priority order: **B10**
+  (follower never updates `operating_chan`; one line, and it is the `.199` OSD
+  bug), **B9 items 2–3** (re-key the issuer when the cached token goes stale;
+  `do_claim` should use live discovery instead of the stale scout candidate),
+  the unbounded CSA TSF-elapsed clamp from section E, **B6** (cap UDP drain
+  loops), **B5** (size the frame-SHM buffer from ring geometry), **B3** (mark a
+  dead RX adapter), and the partial **B1** mitigation (move the venc push below
+  `csa.tick()` and give `request_idr` the shared holdoff).
+- **Tier 2 — scoped but not started.** B1 full fix, B2, B4, B7, A3. The
+  operator's steer was "just do it" once tier 1 is done.
+- **Tier 3 / C-series** — verification campaigns needing bench and flight time,
+  plus A1/A2 which need operator decisions rather than code.
 
 ---
 
