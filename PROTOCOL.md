@@ -1642,8 +1642,27 @@ static rendezvous channel cannot be redirected by a forged/accepted campaign.
   `target_tsf = rx_tsfl + dt_to_switch_ms·1000` (µs) — TSF, not host clock, so no
   host-jitter smear (re-derive the bench's 0–5 ms precision against TSF).
 - `dt_to_switch_ms` (copy 1) ≥ campaign span + max retune for the class + margin:
-  **class 0 (fast intra-band, `FastRetune`, ~0.5–2.5 ms) ⇒ 150 ms**; **class 1
+  **class 0 (fast intra-band, `FastRetune`, ~0.5–2.5 ms) ⇒ 300 ms**; **class 1
   (cross-band, full `SetMonitorChannel`, up to ~277 ms on 8812AU) ⇒ 500 ms**.
+
+  **Class 0 widened 150 → 300 ms (Pass 91, operator-ruled 2026-07-24).** The
+  budget is no longer sized only by the retune it precedes: since Pass 90 it
+  must simultaneously hold (a) a copy window long enough to deliver a campaign
+  to a craft that is RX-deaf while transmitting, and (b) the 50 ms ack-lead
+  cutoff before T_switch. At 150 ms those two are in direct conflict — the
+  cutoff leaves a 100 ms copy window, barely more than the pre-Pass-90 burst
+  that was measured losing ~1 campaign in 5. 300 ms leaves a 250 ms window
+  (~12 gap-scheduled copies) with the ack lead intact.
+
+  Raising class 0 rather than issuing class-1 campaigns is deliberate: class 1
+  was tried and is **not** equivalent. Its 500 ms budget makes the issuer
+  pre-position ~490 ms before T_switch, where it sits on the target seeing no
+  craft video while its deadline — `max(T_switch, landing) + verify_timeout` —
+  leaves the craft only `verify_timeout` after T_switch to finish a retune
+  this section budgets at up to 277 ms, hear the issuer, commit, and emit a
+  `CSA_ARMED`-clear frame. Bench 2026-07-24: the craft reached COMMITTED on
+  the target while the issuer reverted — the inverse of the §11.6 split
+  Pass 89 closed.
 - On entering COMMITTED after any retune, every transmitting adapter calls
   **`ReApplyTxPower()`** (§10.4) — `FastRetune` skips TXAGC re-apply.
 

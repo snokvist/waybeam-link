@@ -2755,6 +2755,42 @@ budget holds both a full copy window and the 50 ms ack lead, instead of
 forcing a choice between them. That is a §11.2 constant and therefore not
 picked here.
 
+### Pass 91 — §11.2 class-0 dt budget 150 → 300 ms
+
+**Ruling (operator, 2026-07-24)**, resolving the open question Pass 90 left.
+
+Pass 90 changed what the class-0 budget has to pay for. It used to size only
+the retune it precedes (`FastRetune`, ~0.5–2.5 ms — 150 ms was almost all
+margin). It must now hold two things at once:
+
+- a **copy window** long enough to deliver a campaign to a craft that is
+  RX-deaf while transmitting (the Pass 90 root cause), and
+- the **50 ms ack-lead cutoff** before T_switch (the Pass 90 addendum), so a
+  late acceptance still leaves the craft time to get `CSA_ARMED` back to the
+  issuer before it departs.
+
+At 150 ms these conflict: the cutoff leaves a 100 ms copy window, barely more
+than the pre-Pass-90 burst that measured ~1 campaign lost in 5. The bench
+showed the conflict directly — 20/20 with copies running to T_switch and no
+ack lead, then 1/2 with the ack lead added at the same budget.
+
+**300 ms leaves a 250 ms copy window (~12 gap-scheduled copies) with the ack
+lead intact.** Both requirements are satisfied at once instead of traded.
+
+**Why not just issue class-1 campaigns.** Tried on the bench and rejected:
+class 1's 500 ms budget makes the issuer pre-position ~490 ms before T_switch,
+where it sits on the target seeing no craft video while its deadline —
+`max(T_switch, landing) + verify_timeout` — leaves the craft only
+`verify_timeout` after T_switch to finish a retune §11.2 budgets at up to
+277 ms, hear the issuer, commit, and emit a `CSA_ARMED`-clear frame. Observed:
+craft COMMITTED on 5805 while the issuer reverted to 5745 — the inverse of the
+split Pass 89 closed. A longer budget is not automatically a safer one; the
+issuer's pre-position window grows with it.
+
+**Cost.** A class-0 campaign now takes 300 ms rather than 150 ms from trigger
+to switch. That is dead time on the old channel, not an outage, and it buys
+the delivery margin the whole §11 path depends on.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
