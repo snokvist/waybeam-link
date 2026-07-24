@@ -1767,7 +1767,26 @@ mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
 
   The latency is dominated by the issuer's own landing delay — the craft lands
   first and waits — so this budget must be re-measured, not assumed, whenever
-  the issuer's adapter count or retune path changes. This is the **only** automatic revert; it
+  the issuer's adapter count or retune path changes.
+
+  **Pass 92 (2026-07-24): 500 ms is now the value a node actually runs.** The
+  Pass 89 ruling changed the engine's own default but not the §15.2 config
+  default, which the config layer copies over it unconditionally — so every
+  binary built between Pass 89 and Pass 92 ran a **150 ms** window regardless,
+  and every soak that "verified" 500 ms measured 150. `verify_timeout_ms` has
+  exactly one seed value; a config default that restates the number rather than
+  deriving it is a defect, not a convenience.
+
+  Re-measured over 27 alternating 5805↔5745 hops with both windows opened to
+  3000 ms so nothing reverted: craft landing → heard the issuer ran min 7.7 /
+  median 33.8 / p90 83.7 / **max 132.8 ms**. 500 ms is 3.8× that max, and still
+  inside the 750 ms RX-liveness guard.
+
+  **`verify_timeout_ms` MUST be less than `rx_liveness_ms`** when the latter is
+  enabled (§11.6), and config validation rejects a config where it is not. The
+  guard exists to catch a half-applied retune; a verify window that outlives it
+  lets a full monitor re-init fire in the middle of a switch that is still
+  pending. This is the **only** automatic revert; it
   protects a switch that landed on a dead channel. **The window opens at the
   follower's landing** — the first engine tick after its blocking retune
   completes — mirroring the §11.6 issuer definition (Pass 69, review
@@ -1871,6 +1890,29 @@ direction** lets us make the strand class *never happen* rather than recover aft
   beacon) MUST be computed at that tick, never at the tick that emitted the
   commit (else a slow multi-adapter retune can consume the whole window before
   it opens — the exact pre-Pass-69 failure re-introduced).
+
+  **The deadline re-anchors once on the observed craft landing (Pass 92).** On
+  the first `CSA_ARMED`-**set** craft frame received on `target_chan` after
+  T_switch — which is the craft's landing as the issuer can observe it — the
+  issuer MUST recompute its deadline as `that frame + verify_timeout_ms`. One
+  re-anchor per campaign; a later ARMED frame does not extend it again.
+
+  Without this the two ends measure the same budget from different events. The
+  follower's window opens at **its** landing (§11.5), which is T_switch plus its
+  retune cost; the issuer's opens at T_switch, and the issuer pre-positions so
+  it has usually landed well before that. The issuer therefore stops beaconing
+  and reverts a full craft-retune-cost **before** the craft gives up, and the
+  tail of the craft's window has no issuer on air to hear. Measured over 27
+  hops (2026-07-24): craft retune cost median 48.7 / max 67.9 ms, so the issuer
+  was abandoning the craft that much early on every campaign.
+
+  Re-anchoring needs no new constant and self-calibrates across radios: both
+  ends run `verify_timeout_ms` from the craft's landing, and the issuer's
+  deadline lands microseconds *after* the follower's (it observes the landing
+  one frame late), which is the correct order — the craft goes home first and
+  the issuer follows. If no ARMED frame ever arrives the deadline stays at
+  `max(T_switch, landing) + verify_timeout_ms` and the campaign reverts, as
+  before.
 - **Video-verify requires a COMMITTED craft, not merely a present one
   (Pass 89, ruled 2026-07-24).** Craft video on `target_chan` proves the craft
   *arrived*; it does not prove the craft *stayed*. The craft transmits
@@ -1891,13 +1933,17 @@ direction** lets us make the strand class *never happen* rather than recover aft
   the switch. The ARM-ack use is unaffected: the issuer latches `armed_seen_`
   before T_switch and the bit merely persists past it.
 
-  **No asymmetric window sizing is required.** The craft's commit is *caused
-  by* the issuer's arrival, so `issuer_landing ≈ craft_landing + A`; the craft
-  clears `CSA_ARMED` microseconds after the issuer lands, and the issuer
-  observes it at the very start of its own window rather than racing it
-  (measured: issuer→first-craft-video ≤ 1.2 ms across 8 hops, with the issuer's
-  deadline anchored at `now` on every one). Equal `verify_timeout_ms` on both
-  ends is sufficient and correct.
+  ~~**No asymmetric window sizing is required.**~~ **Retracted by Pass 92.**
+  The Pass 89 measurement behind this paragraph timed the issuer's first craft
+  *video* frame (≤ 1.2 ms across 8 hops) — but that was a `CSA_ARMED`-**set**
+  frame, and this very ruling then made such a frame insufficient. The evidence
+  was collected under the semantics the ruling replaced. Under the commit-proof
+  rule the issuer waits for the `CSA_ARMED`-**clear** frame, which cannot arrive
+  before the craft has landed, heard the issuer and committed: measured at
+  median 115.6 / p90 145.2 / **max 196.9 ms** after T_switch over 27 hops. The
+  asymmetry is real. Equal `verify_timeout_ms` on both ends is still correct —
+  but only once both ends anchor it on the same event, which is what the Pass 92
+  re-anchor above establishes.
 
 - **Video-verify counts nothing before T_switch (Pass 69, review pass 2):**
   the craft does not move before T_switch, so a "craft video" frame observed

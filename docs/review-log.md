@@ -2791,6 +2791,103 @@ issuer's pre-position window grows with it.
 to switch. That is dead time on the old channel, not an outage, and it buys
 the delivery margin the whole §11 path depends on.
 
+### Pass 92 — §11.5/§11.6 the verify window: a shadowed default and a mis-anchored deadline
+
+**Trigger.** After Passes 89–91 the Pass 80 soak still failed roughly one hop in
+three or four, always the same way and always *safely*: the craft armed,
+switched, heard nothing inside its window, reverted, and the ground followed it
+back. Delivery was demonstrably fixed (the craft armed on every campaign, min
+accepted `dt` 235 ms), so the remaining fault was in the verify phase.
+
+Pass 89 had sized `verify_timeout_ms` from eight hops (median 66, max 143 ms)
+and flagged that as thin. It was thin — but it was not the fault.
+
+**Defect 1 — the 500 ms window was never running.** `CsaParams::verify_timeout_ms`
+(core) and `CsaPolicy::verify_timeout_ms` (§15.2 config) both carried a literal
+default, and `csa_params()` copies the config value over the engine's
+unconditionally. Pass 89 raised only the core literal. **Every binary built
+between Pass 89 and Pass 92 ran a 150 ms window**, and every soak that believed
+it was verifying 500 ms was measuring 150. The Pass 89 sizing analysis was
+correct and had simply never reached a radio.
+
+One knob, two seed values, one of which silently wins: the config default now
+derives from the engine's (`kCsaVerifyTimeoutMsDefault`) rather than restating
+it, so the drift cannot recur.
+
+**Defect 2 — the two ends measure the same budget from different events.**
+Both windows are `verify_timeout_ms` long, but:
+
+- the **follower's** opens at *its* landing (§11.5, Pass 69 H1b) — T_switch plus
+  its own retune cost;
+- the **issuer's** opens at `max(T_switch, its own landing)`, and §11.6
+  pre-positioning means it has usually landed *before* T_switch.
+
+So the issuer stops beaconing, gives up and reverts a full craft-retune-cost
+before the craft does. The tail of the craft's window has no issuer on air.
+
+**Measurement.** Both engines instrumented on `bench/csa-verify-window`, both
+windows opened to 3000 ms and `rx_liveness_ms` disabled so nothing reverted and
+nothing was rescued. 27 alternating 5805↔5745 hops, desk range, `release`
+builds, craft `.232` / ground `.242`:
+
+| quantity (ms) | min | median | p90 | max |
+|---|---|---|---|---|
+| craft tick lateness at T_switch | 0.0 | 1.6 | 8.6 | 20.4 |
+| craft retune cost (T_switch → landing) | 34.8 | 48.7 | 57.3 | 67.9 |
+| **A** — craft landing → heard the issuer | 7.7 | 33.8 | 83.7 | **132.8** |
+| issuer landing, before T_switch | −2.0 | 37.4 | 39.0 | 234.7 |
+| issuer: T_switch → craft ARMED frame (craft landing, observed) | 11.4 | 44.7 | 54.5 | 70.5 |
+| **issuer: T_switch → craft CLEAR frame** (commit proof) | 76.7 | **115.6** | **145.2** | **196.9** |
+| issuer: craft landing → craft CLEAR frame | 30.9 | 72.6 | 120.2 | 151.7 |
+
+The bolded row is the quantity the issuer's real 150 ms window had to cover.
+Median 115.6 passes; p90 145.2 is on the line; max 196.9 fails. That *is* the
+observed failure rate, and it explains why the failures were roughly one in
+three rather than rare.
+
+Two incidental confirmations, both consistent with the Pass 90 root cause: the
+craft heard **0–2** ground frames during an entire ~250 ms ARMED window (it is
+RX-deaf while transmitting), and 10 of 27 campaigns were confirmed by a
+rendezvous beacon rather than ordinary return traffic — the beacon is doing
+real work, not decorating.
+
+**Rulings.**
+
+- §11.5: the Pass 89 **500 ms** stands, now sourced from a single
+  `kCsaVerifyTimeoutMsDefault` that the §15.2 config default derives from.
+  Against the re-measured A (max 132.8) that is 3.8×.
+- §11.6: the issuer's verify deadline **re-anchors once** on the first
+  `CSA_ARMED`-set craft frame on `target_chan` after T_switch — the craft's
+  landing as the issuer can observe it. Both ends then run the same budget from
+  the same event. Against the re-anchored quantity (craft landing → clear
+  frame, max 151.7) 500 ms is 3.3×.
+- §15.2: `verify_timeout_ms` **must be less than** `rx_liveness_ms` when the
+  guard is enabled; config load rejects otherwise. A verify window that outlives
+  the RX-liveness deadline lets a monitor re-init fire mid-switch.
+
+**Why re-anchoring rather than a landing-allowance constant.** The alternative
+was `issuer_deadline = max(T_switch, landing) + verify_timeout_ms +
+kLandingAllowance`, which needs a bench-derived number for the craft's retune
+cost — a fourth constant of exactly the kind this Pass exists to clean up, and
+one that would go stale on different craft hardware. Re-anchoring removes a
+number instead of adding one, and self-calibrates.
+
+**Ordering property (preserved).** The issuer observes the craft's landing one
+frame *after* it happens, so the issuer's deadline sits microseconds after the
+follower's. On a failed campaign the craft reverts first and the issuer follows
+— the Pass 89 safety property, unchanged. There is no interval in which the
+issuer has abandoned a craft that is still listening.
+
+**Retraction.** Pass 89's "no asymmetric window sizing is required" is
+withdrawn (§11.6 marked). Its supporting measurement — issuer → first craft
+video ≤ 1.2 ms — timed a `CSA_ARMED`-*set* frame, under the semantics that same
+ruling then replaced. Under the commit-proof rule the issuer must wait for the
+*clear* frame, which arrives median 115.6 ms after T_switch. The asymmetry is
+real; equal windows are still correct, but only once both ends anchor on the
+same event.
+
+
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
