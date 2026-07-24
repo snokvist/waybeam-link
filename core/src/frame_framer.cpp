@@ -22,12 +22,19 @@ uint16_t FrameFramer::symbol_size() const {
     return s > 0 ? static_cast<uint16_t>(s) : 1;
 }
 
-uint16_t FrameFramer::repair_count(uint16_t k, bool is_idr) {
+uint16_t FrameFramer::repair_count(uint16_t k, bool is_idr, bool arq_eligible) {
     // §14.1 adaptive policy.
     if (cfg_.fec.scheme != FecScheme::kRlc256) {
         return 0;
     }
-    if (k <= cfg_.fec.min_k) {
+    // §14.1 (Pass 94): the min_k gate is an OPTIMISATION — don't spend parity
+    // where ARQ will recover the frame anyway — so it holds only where that
+    // ARQ exists. Under arq_mode idr-only a P-frame has none, and an
+    // unconditional gate handed it neither FEC nor ARQ. That was B11: at the
+    // §9.8 floor rung, derived_bitrate/fps lands frames under min_k*s and they
+    // shipped bare. Above the §4.1 cadence cutoff nothing is eligible and the
+    // gate is inert for every class.
+    if (k <= cfg_.fec.min_k && arq_eligible) {
         return 0;  // ARQ-only at small k
     }
     const uint32_t rate =
@@ -91,11 +98,14 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
                  : (pframe_arq ? data_flags::kPframeArq : 0)) |
         extra_flags_);
 
-    uint16_t r = repair_count(k, is_idr);
+    uint16_t r = repair_count(k, is_idr, idr_arq || pframe_arq);
     // §14.2 rule 1: a valid enforced decision replaces the fixed rate, still
     // GF(256)-clamped and still subject to the min_k ARQ-only rule.
+    // §14.2 rule 1 keeps the override "subject to the §14.1 min_k ARQ-only
+    // rule", so it inherits Pass 94's condition: the gate blocks the override
+    // only where ARQ could have carried the frame instead.
     if (ov_parity && cfg_.fec.scheme == FecScheme::kRlc256 &&
-        k > cfg_.fec.min_k) {
+        (k > cfg_.fec.min_k || !(idr_arq || pframe_arq))) {
         const uint32_t cap =
             k < kFecMaxSymbols ? kFecMaxSymbols - k : 0;
         r = static_cast<uint16_t>(std::min<uint32_t>(*ov_parity, cap));

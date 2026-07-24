@@ -129,7 +129,8 @@ class FrameFramer {
   private:
     // r for a frame of k symbols per the §14.1 adaptive policy; 0 if FEC off,
     // ARQ-only (k <= min_k), or the k+r>256 cap trips (records fec_oversize_k).
-    uint16_t repair_count(uint16_t k, bool is_idr);
+    // §14.1: arq_eligible gates the min_k ARQ-only rule (Pass 94).
+    uint16_t repair_count(uint16_t k, bool is_idr, bool arq_eligible);
 
     FrameFramerConfig cfg_;
     FrameFramerStats stats_;

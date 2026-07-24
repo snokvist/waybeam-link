@@ -536,7 +536,11 @@ int main() {
     // --- profile table -------------------------------------------------------
     {
         // The repo's example table must load and reproduce the golden hash
-        // 0x2B (cross-validates llround scaling against table_hash_test).
+        // (cross-validates llround scaling against table_hash_test). Moved
+        // 0x41 -> 0xD1 by Pass 95: fec_overhead_permille is inside the §3.6
+        // CRC-8 content hash, so budgeting parity airtime is a fleet-wide
+        // lockstep change — both ends must redeploy together or they do not
+        // agree on the table.
         auto t = load_profile_table(std::string(WBLINK_SOURCE_DIR) +
                                     "/profiles/table.example.json");
         CHECK(bool(t));
@@ -544,7 +548,9 @@ int main() {
             CHECK_EQ_U(t.value->profiles.size(), 8);
             CHECK_EQ_U(t.value->floor_profile, 0);
             CHECK_EQ_U(t.value->profiles[0].airtime_budget_permille, 600);
-            CHECK_EQ_U(table_version(*t.value), 0x41);  // §9.3 max_payload field
+            CHECK_EQ_U(t.value->profiles[0].fec_overhead_permille, 250);
+            CHECK_EQ_U(t.value->profiles[5].fec_overhead_permille, 180);
+            CHECK_EQ_U(table_version(*t.value), 0xD1);  // Pass 95 (was 0x41)
         }
     }
     {
