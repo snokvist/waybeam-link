@@ -335,8 +335,29 @@ Two things the run did establish:
 - The Passes 81–88 PR introduces **no CSA regression** — the pre-existing
   failures in B8 and B9 both reproduce on the older craft binary.
 
-Pass 80 remains **UNMET** (the bar is 10/10) and cannot be met until B8 is
-ruled on: any long alternating soak will eventually hit the same race.
+**MET 2026-07-24 on the Pass 90 build: 10/10, repeated — 20/20 total.** Every
+hop committed in 1.0 s with craft RX advancing, video and audio advancing,
+`report_age_ms 0` and **zero** recovery fires. It took three rulings to get there, and the order
+matters for anyone reading this later:
+
+- **Pass 89** made failure *safe*. Before it, a hop that the craft abandoned
+  left the ground holding the new channel and logging `campaign confirmed`
+  (B8). After it, both ends revert together.
+- **Pass 90** made failure *rare*. The residual ~1-in-5 hop failure was not a
+  retune problem at all — the craft was never receiving the campaign. Copies
+  now repeat until the craft ACKs and ride the §7.2 quiet gap.
+
+An intermediate hypothesis — that the issuer needed the craft's own
+RX-liveness guard — was **tested and refuted** before being acted on; see
+Pass 90 in `docs/review-log.md`. Sampling both ground adapters at 20 Hz
+through a failing hop showed them completely static, so there was no retune
+to recover.
+
+On the strength of this result: at the pre-Pass-90 failure rate a clean 10/10
+would occur by chance about 11% of the time, so one run was not sufficient
+evidence and the soak was repeated — 20/20 consecutive is ~1%. The earlier
+soaks are the control: the identical driver against the pre-Pass-90 binaries
+failed at hop 4, twice.
 
 ### C2 — Gate 4 range validation — SHOULD-FIX
 
