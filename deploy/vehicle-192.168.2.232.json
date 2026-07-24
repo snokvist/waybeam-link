@@ -38,6 +38,7 @@
     "kind": "kernel-monitor"
   },
   "policy": {
+    "report_timeout_ms": 750,
     "select": {
       "min_profile": 1,
       "max_profile": 5
