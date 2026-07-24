@@ -483,6 +483,20 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cmd.ack_timeout_ms =
                     pm.value("ack_timeout_ms", cmd.ack_timeout_ms);
                 cmd.retry_cap = pm.value("retry_cap", cmd.retry_cap);
+                // Both narrow to uint8_t in vcmd_params() and are decremented
+                // pre-test, so 0 wraps to 255: a 3-copy command becomes a
+                // 256-copy transmit storm. Range-check where the value is
+                // still wide.
+                if (cmd.copies < 1 || cmd.copies > 255) {
+                    return Result<Config>::fail(
+                        "policy.cmd.copies must be in [1,255] (§11.7), got " +
+                        std::to_string(cmd.copies));
+                }
+                if (cmd.retry_cap < 1 || cmd.retry_cap > 255) {
+                    return Result<Config>::fail(
+                        "policy.cmd.retry_cap must be in [1,255] (§11.7), got " +
+                        std::to_string(cmd.retry_cap));
+                }
                 cmd.min_interval_ms =
                     pm.value("min_interval_ms", cmd.min_interval_ms);
             }

@@ -1385,9 +1385,15 @@ MCS1–5 in normal flight and still descends to MCS0 on lost feedback. Clamping 
 fail-safe by the adaptation envelope means an operator cannot tune airtime
 efficiency without silently removing the most robust rung from the one path that
 runs when the link is worst and the craft is furthest away — the exact "never fail
-optimistic" violation this section opens by forbidding. The §9.7 pin is not
-consulted during `FAILSAFE`; it resumes governing on the first fresh
-`report_epoch`.
+optimistic" violation this section opens by forbidding.
+
+**Scope:** this governs the `min_profile < max_profile` envelope only. An explicit
+§9.7 **`min==max` pin still freezes adaptation outright**, `FAILSAFE` included —
+that is the pin's documented purpose (bench / known-bad-link) and it is an
+operator-initiated state, not a tuning side effect. Whether a pin *should* yield
+to the fail-safe on lost feedback is a **separate open question** (a pin held at a
+high rung through a real fade is fail-optimistic by the same argument above); it
+is deliberately not decided here.
 
 ### 9.9 Backpressure coupling (local, TX-side)
 The venc output-queue fill is a local TX signal, not an RX report. It **suppresses

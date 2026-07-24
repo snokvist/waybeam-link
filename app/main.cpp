@@ -833,6 +833,10 @@ CsaParams csa_params(const Config& cfg) {
     p.ack_timeout_ms = c.ack_timeout_ms;
     p.bind_release_ms = c.bind_release_s * 1000;
     p.allowlist = c.channel_allowlist;
+    // §11.4a (Pass 85): only a passive spectator may follow an unauthenticated
+    // CSA. Craft/ground with an empty key are FAULTED, not unauthenticated,
+    // and fail closed — the permission rides the role, never an empty buffer.
+    p.allow_unauthenticated = cfg.node.spectator;
     return p;
 }
 
@@ -2471,7 +2475,13 @@ struct RxCore {
 
     // §15.5 stats/reset. The frame-shm reassemblers live in run_rx (ShmOut),
     // so the caller resets those; here we zero the RX engine's counters.
-    void reset_stats() { engine_.reset_stats(); }
+    // §3.5: the reporter's loss window deltas are taken against the engine's
+    // counters, so resetting one without the other underflows the next
+    // LINK_REPORT to 0 permille — failing OPTIMISTIC, which §3.5 forbids.
+    void reset_stats() {
+        engine_.reset_stats();
+        reporter_.reset_link();
+    }
 
     void select_originator(uint16_t originator) {
         engine_.select_originator(originator);
@@ -2559,6 +2569,30 @@ int load_all(const std::string& config_path, Loaded& out) {
         std::fprintf(stderr,
                      "profile table: %zu profiles, table_version=0x%02X\n",
                      out.table.profiles.size(), out.tv);
+        // §9.7 (Pass 83): min/max_profile are profile IDs. An id absent from
+        // the table is a config error, not a silent clamp onto a neighbouring
+        // rung — the operator asked for an operating envelope that this table
+        // cannot express. 255 is the documented "unpinned top" sentinel.
+        const SelectPolicy& sel = out.cfg.policy.select;
+        const auto has_id = [&out](uint8_t id) {
+            for (const Profile& p : out.table.profiles) {
+                if (p.id == id) return true;
+            }
+            return false;
+        };
+        const std::pair<const char*, uint8_t> pins[] = {
+            {"min_profile", sel.min_profile},
+            {"max_profile", sel.max_profile}};
+        for (const auto& [name, id] : pins) {
+            if (id != 255 && !has_id(id)) {
+                std::fprintf(stderr,
+                             "config error: policy.select.%s = %u is not a "
+                             "profile id in %s (§9.7 ids, not indices)\n",
+                             name, static_cast<unsigned>(id),
+                             out.cfg.profile_table_path.c_str());
+                return 1;
+            }
+        }
     }
     return 0;
 }
@@ -4593,6 +4627,10 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // A venc restart across our HTTP send, or a log reader exiting on the
+    // §15.3 stdout NDJSON, must not take the flight process down with it.
+    // Every write path checks its own return value.
+    std::signal(SIGPIPE, SIG_IGN);
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 

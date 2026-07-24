@@ -42,7 +42,9 @@ int VencActuator::http_get_status(const std::string& path) {
     }
     const std::string req = "GET " + path + " HTTP/1.0\r\nHost: " +
                             cfg_.host + "\r\n\r\n";
-    if (::send(fd, req.data(), req.size(), 0) !=
+    // MSG_NOSIGNAL: a venc that died between connect() and send() RSTs the
+    // socket; without this the SIGPIPE default action kills the link process.
+    if (::send(fd, req.data(), req.size(), MSG_NOSIGNAL) !=
         static_cast<ssize_t>(req.size())) {
         ::close(fd);
         return 0;

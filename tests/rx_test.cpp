@@ -579,5 +579,46 @@ int main() {
         CHECK_EQ_U(h.counters().resyncs, 1);
     }
 
+    // §2.1/§6.6 Pass 81: a u32 seq wrap must not enumerate the sequence
+    // space. Latching at the top of the range walks the cursor across
+    // 0xFFFFFFFF; before the fix the next packet spun ~4.29e9 iterations
+    // inserting a Gap node each time (hang + OOM off four packets).
+    {
+        Harness h;
+        h.feed(0, 0xFFFFFFFD, 0, 0, 1000);  // admission
+        h.feed(0, 0xFFFFFFFE, 0, 0, 1001);  // admission
+        h.feed(0, 0xFFFFFFFF, 0, 0, 1002);  // startup floor + delivered
+        CHECK_EQ_U(h.counters().delivered, 1);
+        // Cursor has now wrapped to 0. This packet must return promptly and
+        // be treated as a §2.1 desync re-floor, not a 4-billion-gap walk.
+        h.feed(0, 0, 1, 0, 1003);
+        CHECK_EQ_U(h.counters().resyncs, 1);
+        // ...and the stream keeps working under the new floor.
+        h.feed(0, 1, 1, 0, 1004);
+        h.feed(0, 2, 1, 0, 1005);
+        CHECK(h.counters().delivered >= 2);
+    }
+
+    // §3.4 Pass 87: best-effort must keep ratcheting max_block. Before the
+    // fix max_block froze at the latch value, so fwd_clamp_blocks blocks
+    // later every packet clamp-rejected and the 500 ms resync flushed the
+    // stream — forever. Drive many blocks with a mismatched table_version.
+    {
+        RxPolicy p;
+        p.clamp_resync_ms = 500;
+        Harness h(p);
+        h.latch(1000);
+        uint64_t t = 1010;
+        for (uint32_t blk = 1; blk <= 40; ++blk, t += 33) {
+            h.feed(0, 2 + blk, blk, 0, t, 0x99);  // 0x99 != kTv -> best-effort
+        }
+        CHECK(h.counters().table_mismatch > 0);  // fallback did engage
+        // The whole point of §3.4: degrade gracefully. No clamp storm, no
+        // state flush, and every packet delivered in order.
+        CHECK_EQ_U(h.counters().clamp_rejected, 0);
+        CHECK_EQ_U(h.counters().resyncs, 0);
+        CHECK_EQ_U(h.counters().delivered, 41);  // floor + 40 blocks
+    }
+
     return wbtest_finish("rx_test");
 }

@@ -25,6 +25,13 @@ CsaParams policy_with_psk() {
     return p;
 }
 
+// Re-MAC after mutating a packet's fields (the MAC covers bytes 0..27).
+uint32_t mac_for(const CsaParams& pol, const CsaPacket& c) {
+    uint8_t buf[32];
+    CHECK_EQ_U(encode_csa(c, buf, sizeof(buf)), 32);
+    return csa_mac(pol.psk.data(), pol.psk.size(), buf);
+}
+
 CsaPacket make_csa(const CsaParams& pol, uint32_t nonce, uint16_t chan,
                    uint16_t dt_ms) {
     CsaPacket c;
@@ -88,14 +95,32 @@ int main() {
         CHECK(f.on_csa(make_csa(pol, 2, 5825, 150), 6'000'000, std::nullopt,
                        0, std::nullopt));
     }
-    // Spectator (empty PSK) follows unauthenticated (§11.4).
+    // Spectator follows unauthenticated (§11.4a) — but ONLY because the role
+    // says so, not because the key is empty (Pass 85).
     {
         CsaParams spec = pol;
         spec.psk.clear();
+        spec.allow_unauthenticated = true;  // §15.2 node.spectator
         CsaFollower f(spec);
         CsaPacket c = make_csa(pol, 1, 5745, 150);
         c.csa_mac = 0;  // no MAC at all
         CHECK(f.on_csa(c, 1000, std::nullopt, 0, std::nullopt));
+        CHECK_EQ_U(f.unauth_rejected(), 0);
+    }
+    // §11.4a Pass 85: a craft/ground with an EMPTY key is faulted, not
+    // unauthenticated — it must fail closed. Before the fix an empty psk
+    // silently accepted any forged CSA inside the allowlist, retuning a craft
+    // off-channel mid-flight on a missed ANNOUNCE or a config typo.
+    {
+        CsaParams craft = pol;
+        craft.psk.clear();  // token generation failed / ANNOUNCE not yet heard
+        craft.allow_unauthenticated = false;  // craft or ground, not spectator
+        CsaFollower f(craft);
+        CsaPacket c = make_csa(pol, 1, 5745, 150);
+        c.csa_mac = 0;
+        CHECK(!f.on_csa(c, 1000, std::nullopt, 0, std::nullopt));
+        CHECK_EQ_U(f.unauth_rejected(), 1);
+        CHECK(std::string_view(f.state_str()) == "IDLE");
     }
 
     // --- §11.2 TSF anchor ---------------------------------------------------
@@ -507,6 +532,7 @@ int main() {
         // unauthenticated-follow posture — self-harm only.
         CsaParams spol;
         spol.allowlist = {5745, 5805, 5825};
+        spol.allow_unauthenticated = true;  // §15.2 node.spectator (Pass 85)
         CsaFollower f(spol);
         CsaPacket c = make_csa(pol, 1, 5745, 150);  // MAC irrelevant
         CHECK(f.on_csa(c, 0, std::nullopt, 0, std::nullopt));
@@ -516,6 +542,42 @@ int main() {
         b.dt_to_switch_ms = 0;
         CHECK(!f.on_csa(b, 160'000, std::nullopt, 0, std::nullopt));
         CHECK(std::string_view(f.state_str()) == "COMMITTED");
+    }
+
+    // §11.5 Pass 86: t_revert_ms may SHORTEN the VERIFY window, never lengthen
+    // it. Before the fix a u16 taken verbatim stranded the follower on a dead
+    // channel for its full value — up to 65 s.
+    {
+        CsaParams pol2 = pol;
+        pol2.verify_timeout_ms = 150;
+        CsaFollower f(pol2);
+        CsaPacket c = make_csa(pol, 1, 5745, 150);
+        c.t_revert_ms = 65535;  // hostile (or simply wrong) issuer
+        c.csa_mac = mac_for(pol, c);
+        CHECK(f.on_csa(c, 0, std::nullopt, 0, std::nullopt));
+        CHECK_EQ_U(f.tick(150'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kRetune));
+        CHECK_EQ_U(f.tick(180'000).kind,  // landing: window opens
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        // Clamped to the LOCAL 150 ms, so revert at 180+150 — not 180+65535.
+        CHECK_EQ_U(f.tick(329'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        CHECK_EQ_U(f.tick(330'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kRevert));
+    }
+    // ...and the issuer CAN still shorten it.
+    {
+        CsaParams pol2 = pol;
+        pol2.verify_timeout_ms = 150;
+        CsaFollower f(pol2);
+        CsaPacket c = make_csa(pol, 1, 5745, 150);
+        c.t_revert_ms = 50;
+        c.csa_mac = mac_for(pol, c);
+        CHECK(f.on_csa(c, 0, std::nullopt, 0, std::nullopt));
+        f.tick(150'000);                  // retune
+        f.tick(180'000);                  // landing
+        CHECK_EQ_U(f.tick(230'000).kind,  // 180 + 50, the issuer's tighter budget
+                   static_cast<unsigned>(CsaAction::Kind::kRevert));
     }
 
     return wbtest_finish("csa_test");

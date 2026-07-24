@@ -35,9 +35,14 @@ namespace wblink {
 
 // §15.2 policy.csa — all times ms except the channel fields (MHz).
 struct CsaParams {
-    std::vector<uint8_t> psk;  // empty = spectator (unauthenticated follow)
+    std::vector<uint8_t> psk;  // §11.4a key; empty = fault unless spectator
+    // §11.4a (Pass 85): permission to follow an unauthenticated CSA is a ROLE
+    // property (§15.2 node.spectator), carried explicitly. It is deliberately
+    // NOT inferred from an empty psk: craft/ground with no key are faulted,
+    // not unauthenticated, and must fail closed.
+    bool allow_unauthenticated = false;
     uint32_t settle_ms = 3000;          // §11.3 adaptive freeze
-    uint32_t verify_timeout_ms = 150;   // §11.5 default; wire t_revert_ms wins
+    uint32_t verify_timeout_ms = 150;   // §11.5 ceiling; t_revert_ms may only shorten
     uint32_t min_interval_ms = 5000;    // §11.4 rate-limit
     uint32_t ack_timeout_ms = 1000;     // §11.6 CSA_ARMED wait
     uint32_t bind_release_ms = 90000;   // §11.5a command-source binding release
@@ -81,6 +86,8 @@ class CsaFollower {
     uint64_t freeze_until_us() const { return freeze_until_us_; }  // §11.3
     // The issuer this follower latched onto (established by a MAC-valid CSA).
     std::optional<uint16_t> latched_issuer() const { return latched_; }
+    // §11.4a fail-closed rejections (empty key, non-spectator).
+    uint64_t unauth_rejected() const { return unauth_rejected_; }
     const char* state_str() const;
 
   private:
@@ -94,6 +101,7 @@ class CsaFollower {
     CsaParams policy_;
     State state_ = State::kIdle;
     std::optional<uint16_t> latched_;
+    uint64_t unauth_rejected_ = 0;
     // §11.4 anti-replay: last accepted nonce per (originator, session).
     std::map<std::pair<uint16_t, uint32_t>, uint32_t> last_applied_;
     uint64_t last_accept_us_ = 0;  // rate-limit anchor (0 = never)

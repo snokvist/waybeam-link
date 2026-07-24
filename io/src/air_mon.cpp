@@ -712,14 +712,28 @@ bool MonAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t bw) {
     const std::string& ifname = impl_->adapters[adapter]->ifname;
     const char* ifc = ifname.c_str();
     const char* down[] = {"ip", "link", "set", ifc, "down", nullptr};
-    const char* mon[] = {"iw", "dev", ifc, "set", "type", "monitor", nullptr};
+    // `set monitor otherbss` is what admits foreign-BSS frames on Realtek —
+    // without it the RX can come back "up" and still deliver no waybeam DATA.
+    // mon-up.sh falls back to `set type monitor` on drivers that reject it.
+    const char* mon[] = {"iw", "dev", ifc, "set", "monitor", "otherbss",
+                         nullptr};
+    const char* mon_fb[] = {"iw", "dev", ifc, "set", "type", "monitor",
+                            nullptr};
     const char* up[] = {"ip", "link", "set", ifc, "up", nullptr};
     const char* mtu[] = {"ip", "link", "set", ifc, "mtu", "4052", nullptr};
+    // Pass 48: a bare `ip link up` on the EU/CU leaves txpower at -100 dBm and
+    // the radio packet-silent. mon-up.sh hands power back to the driver's
+    // per-rate TXAGC curve; recovery must do the same or it restores a mute
+    // radio that reads as healthy.
+    const char* txp[] = {"iw", "dev", ifc, "set", "txpower", "auto", nullptr};
     bool ok = run_cli(down);
-    ok = run_cli(mon) && ok;
+    if (!run_cli(mon)) {
+        ok = run_cli(mon_fb) && ok;
+    }
     ok = run_cli(up) && ok;
     run_cli(mtu);  // best-effort, as in mon-up.sh
     ok = iw_set_freq(ifname, chan_mhz, bw) && ok;
+    run_cli(txp);  // best-effort, as in mon-up.sh
     std::fprintf(stderr,
                  "kernel-monitor: RX-liveness recovery on %s -> %u MHz %s\n",
                  ifc, chan_mhz, ok ? "ok" : "FAILED");

@@ -2,6 +2,8 @@
 // waybeam-link core: CSA engines (PROTOCOL.md §11) — see csa.h.
 #include "wblink/csa.h"
 
+#include <algorithm>
+
 #include "wblink/hmac_sha256.h"
 
 namespace wblink {
@@ -42,7 +44,18 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
                          std::optional<uint16_t> latched_issuer) {
     // §11.4 validation order, cheapest structural checks last so a forged
     // packet costs one HMAC at most.
-    if (!policy_.psk.empty()) {
+    // §11.4a (Pass 85): an absent key is a FAULT, not a mode. For craft/ground
+    // both sources are exhaustive (secret configured, or announced token
+    // self-generated at boot), so an empty key means a missed ANNOUNCE, a
+    // config typo or failed token generation — fail closed. Only a §15.2
+    // spectator may follow unauthenticated, and that permission is carried
+    // explicitly by role: never inferred from an empty key.
+    if (policy_.psk.empty()) {
+        if (!policy_.allow_unauthenticated) {
+            ++unauth_rejected_;
+            return false;
+        }
+    } else {
         const auto want = mac_of(pkt, policy_.psk);
         if (!want || *want != pkt.csa_mac) {
             return false;
@@ -137,9 +150,15 @@ CsaAction CsaFollower::tick(uint64_t now_us) {
             break;
         case State::kVerify:
             if (verify_deadline_us_ == 0) {
-                const uint32_t vt = campaign_.t_revert_ms != 0
-                                        ? campaign_.t_revert_ms
-                                        : policy_.verify_timeout_ms;
+                // §11.5 (Pass 86): the issuer may SHORTEN the window, never
+                // lengthen it. t_revert_ms is u16 — taken unclamped, one frame
+                // strands a follower 65 s on a channel it cannot hear. How
+                // long a node is willing to be deaf is the node's decision.
+                const uint32_t vt =
+                    std::min(campaign_.t_revert_ms != 0
+                                 ? campaign_.t_revert_ms
+                                 : policy_.verify_timeout_ms,
+                             policy_.verify_timeout_ms);
                 verify_deadline_us_ = now_us + static_cast<uint64_t>(vt) * 1000;
             }
             if (now_us >= verify_deadline_us_) {

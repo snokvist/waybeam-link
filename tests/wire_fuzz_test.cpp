@@ -187,5 +187,30 @@ int main() {
         }
     }
 
+    // §3.2 absolute payload ceiling, enforced on decode. The length-consistency
+    // check above passes for any self-consistent datagram, so without this a
+    // 60 KB udp-broadcast frame decodes cleanly and lands in RX heap.
+    {
+        std::vector<uint8_t> big(kDataHeaderSize + 60000, 0);
+        big[0] = 'W';
+        big[1] = 'B';
+        big[2] = 1;   // version
+        big[3] = 0;   // type DATA
+        big[24] = static_cast<uint8_t>(60000 >> 8);  // payload_len BE
+        big[25] = static_cast<uint8_t>(60000 & 0xFF);
+        const Decoded d = decode(big.data(), big.size());
+        CHECK(std::holds_alternative<DecodeError>(d));
+        // ...and exactly at the ceiling it is still a length/field question,
+        // never a crash (ASan/UBSan are the real assertion here).
+        std::vector<uint8_t> ok(kDataHeaderSize + kMaxDataPayload, 0);
+        ok[0] = 'W';
+        ok[1] = 'B';
+        ok[2] = 1;
+        ok[3] = 0;
+        ok[24] = static_cast<uint8_t>(kMaxDataPayload >> 8);
+        ok[25] = static_cast<uint8_t>(kMaxDataPayload & 0xFF);
+        (void)decode(ok.data(), ok.size());
+    }
+
     return wbtest_finish("wire_fuzz_test");
 }
