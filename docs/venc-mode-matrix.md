@@ -1,8 +1,10 @@
 # The operating-mode matrix — user-facing modes over §9 rungs
 
-**Status: DESIGN IN PROGRESS.** No spec amendment and no code yet. This file
-collects the operator's product intent, the measurements taken so far, and the
-questions still open. It exists so the work survives a context boundary.
+**Status: LANDED (Pass 94 + Pass 95), model not yet flown.** The two defects
+this work uncovered are fixed in spec and code on this branch, and the nine
+operating modes are in `profiles/modes/`. What has *not* happened is a flight
+or a bench soak of the modes themselves, and the 0.04 bpp floor they are built
+on is an educated guess (§16.1), not a measurement.
 
 Started 2026-07-24, out of the **B11** finding in
 `docs/preflight-open-issues.md`: the §9.8 fail-safe floor rung (MCS0) delivers
@@ -516,17 +518,18 @@ be budgeted, not bolted on."* FEC was adopted; it was bolted on.
 
 Corrected §9.5 derived bitrate (25000 kbps `venc.max_bitrate_kbps` clamp):
 
-| rung | MCS | GI | table today (fec=0) | corrected (fec=180‰) | delta |
+| rung | MCS | GI | table before (fec=0) | **Pass 95 (graduated)** | delta |
 |---|---|---|---|---|---|
-| 0 | 0 | long | 3804 | **3102** | −18.5 % |
-| 1 | 1 | long | 7704 | **6300** | −18.2 % |
-| 2 | 2 | short | 12903 | **10563** | −18.1 % |
-| 3 | 3 | short | 17236 | **14116** | −18.1 % |
-| 4 | 4 | short | 25000 (clamped) | **21223** | −15.1 % |
-| 5 | 5 | short | 25000 (clamped) | 25000 | 0 % |
+| 0 | 0 | long | 3804 | **2829** (250‰) | −25.6 % |
+| 1 | 1 | long | 7704 | **5754** (250‰) | −25.3 % |
+| 2 | 2 | short | 12903 | **10303** (200‰) | −20.2 % |
+| 3 | 3 | short | 17236 | **13769** (200‰) | −20.1 % |
+| 4 | 4 | short | 25000 (clamped) | **21223** (180‰) | −15.1 % |
+| 5 | 5 | short | 25000 (clamped) | 25000 (180‰) | 0 % |
 
-Every rung bitrate quoted anywhere in this document before today was ~18 %
-too high. Note the clamp stops binding at rung 4.
+Read back from the shipped table via `derive_bitrate_kbps()`, not estimated.
+Every rung bitrate quoted anywhere in this document before today was too high,
+by 15–26 %. Note the `venc.max_bitrate_kbps` clamp stops binding at rung 4.
 
 **PROPOSED RULING (needs operator sign-off):** `fec_overhead_frac` must be
 non-zero on any rung whose stream runs `fec_scheme: rlc256`. Whether it is
@@ -577,10 +580,10 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 
 | rung | kbps | 30 fps | 60 fps | 90 fps | 100 fps |
 |---|---|---|---|---|---|
-| 0 | 3102 | 0.112 | 0.056 | 0.037 | 0.034 |
-| 1 | 6300 | 0.228 | 0.114 | 0.076 | 0.068 |
-| 2 | 10563 | 0.382 | 0.191 | 0.127 | 0.115 |
-| 3 | 14116 | 0.511 | 0.255 | 0.170 | 0.153 |
+| 0 | 2829 | 0.102 | 0.051 | 0.034 | 0.031 |
+| 1 | 5754 | 0.208 | 0.104 | 0.069 | 0.062 |
+| 2 | 10303 | 0.373 | 0.186 | 0.124 | 0.112 |
+| 3 | 13769 | 0.498 | 0.249 | 0.166 | 0.149 |
 | 4 | 21223 | 0.768 | 0.384 | 0.256 | 0.230 |
 | 5 | 25000 | 0.904 | 0.452 | 0.301 | 0.271 |
 
@@ -588,10 +591,10 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 
 | rung | kbps | 30 fps | 60 fps | 90 fps | 100 fps |
 |---|---|---|---|---|---|
-| 0 | 3102 | 0.050 | 0.025 | 0.017 | 0.015 |
-| 1 | 6300 | 0.101 | 0.051 | 0.034 | 0.030 |
-| 2 | 10563 | 0.170 | 0.085 | 0.057 | 0.051 |
-| 3 | 14116 | 0.227 | 0.113 | 0.076 | 0.068 |
+| 0 | 2829 | 0.045 | 0.023 | 0.015 | 0.014 |
+| 1 | 5754 | 0.092 | 0.046 | 0.031 | 0.028 |
+| 2 | 10303 | 0.166 | 0.083 | 0.055 | 0.050 |
+| 3 | 13769 | 0.221 | 0.111 | 0.074 | 0.066 |
 | 4 | 21223 | 0.341 | 0.171 | 0.114 | 0.102 |
 | 5 | 25000 | 0.402 | 0.201 | 0.134 | 0.121 |
 
@@ -599,9 +602,11 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 
 | rung | kbps | 30 fps | 60 fps | 90 fps | 100 fps |
 |---|---|---|---|---|---|
-| 0 | 3102 | 0.199 | 0.100 | 0.066 | 0.060 |
-| 1 | 6300 | 0.405 | 0.203 | 0.135 | 0.122 |
-| 2 | 10563 | 0.679 | 0.340 | 0.226 | 0.204 |
+| 0 | 2829 | 0.182 | 0.091 | 0.061 | 0.055 |
+| 1 | 5754 | 0.370 | 0.185 | 0.123 | 0.111 |
+| 2 | 10303 | 0.662 | 0.331 | 0.221 | 0.199 |
+| 3 | 13769 | 0.885 | 0.443 | 0.295 | 0.266 |
+| 4 | 21223 | 1.365 | 0.682 | 0.455 | 0.409 |
 | 5 | 25000 | 1.608 | 0.804 | 0.536 | 0.482 |
 
 This is the matrix's real shape, and it reproduces the operator's intuition
@@ -736,9 +741,17 @@ its top rung.
 
 | | **Range High** (MCS 0–2) | **Range Medium** (MCS 1–4) | **Range Low** (MCS 2–5) |
 |---|---|---|---|
-| **Latency Low** (100 fps) | 960×540 · 0.060→0.204 | 1600×900 · 0.044→0.147 | 1920×1080 · 0.051→0.121 |
-| **Latency Medium** (60 fps) | 1280×720 · 0.056→0.191 | 1920×1080 · 0.051→0.171 | 1920×1080 · 0.085→0.201 |
-| **Latency High** (30 fps) | 1920×1080 · 0.050→0.170 | 1920×1080 · 0.101→0.341 | 1920×1080 · 0.170→0.402 |
+| **Latency Low** (100 fps) | 960×540 · 0.055→0.199 | 1280×720 · 0.062→0.230 | 1920×1080 · 0.050→0.121 |
+| **Latency Medium** (60 fps) | 1280×720 · 0.051→0.186 | 1920×1080 · 0.046→0.171 | 1920×1080 · 0.083→0.201 |
+| **Latency High** (30 fps) | 1920×1080 · 0.046→0.166 | 1920×1080 · 0.093→0.341 | 1920×1080 · 0.166→0.402 |
+
+Rung bitrates are §9.5-derived from the **Pass 95 table** (`table_version`
+0xD1) — 2829 / 5754 / 10303 / 13769 / 21223 / 25000 kbps — not from the flat
+180 ‰ estimate used while the matrix was being drafted. The graduated
+overhead makes rungs 0–3 lower than that estimate, which moved exactly one
+cell: **(Latency Low, Range Medium) 1600×900 → 1280×720**, because 1600×900
+lands at 0.0400 bpp, under the floor by 0.1 %. That is a coin-flip on a
+guessed floor; if 0.04 moves up at all, the cell goes back to 1600×900.
 
 Every cell clears the floor at its worst rung and 0.12+ at its best. The
 diagonal reads exactly as intended: trading latency for range costs pixels,
