@@ -2729,6 +2729,32 @@ refuted by measurement before being built, and this cutoff defect was caught
 only because the candidate was re-soaked *after* a late code change — the
 earlier 20/20 no longer covered the code being merged.
 
+**Status: the cutoff is NOT yet validated, and Pass 80 must be re-run before
+this merges.** Stated plainly because the numbers above are easy to misread:
+
+- The **20/20** result belongs to commit `d00ca67` (Pass 90 implementation,
+  class 0, no cutoff). It is a real result for that build and nothing else.
+- With the cutoff, class 0 gave **1/2** before the run was stopped. Two hops
+  is not evidence either way, but it is certainly not confirmation.
+- The cutoff shrinks the class-0 copy window from 0–150 ms to 0–100 ms, so it
+  trades the late-accept hazard for fewer delivery opportunities. At a 150 ms
+  budget these two requirements are in direct conflict and 150 ms cannot
+  satisfy both.
+
+**Class 1 is not the workaround.** Tried on the bench (2/3) and it introduced a
+*new* split, the inverse of B8: the issuer pre-positions ~490 ms before
+T_switch, sits on the target seeing no craft video, and its deadline —
+`max(T_switch, landing) + verify_timeout` — gives the craft only 500 ms after
+T_switch to finish a class-1 retune that §11.2 itself budgets at up to 277 ms,
+hear the issuer, commit, and emit a CSA_ARMED-clear frame. Observed: craft
+COMMITTED on 5805 while the issuer reverted to 5745.
+
+**Open question for the next pass — needs an operator ruling.** The likely
+resolution is to widen the **class-0 dt budget** (150 ms → ~300 ms) so one
+budget holds both a full copy window and the 50 ms ack lead, instead of
+forcing a choice between them. That is a §11.2 constant and therefore not
+picked here.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
