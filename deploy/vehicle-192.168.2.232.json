@@ -1,5 +1,5 @@
 {
-  "_comment": "Vehicle: RTL8812EU kernel-monitor TX/RX on 5805/HT20; conservative MCS3 with 30% IDR / 20% P-frame RLC for first flight tests.",
+  "_comment": "Vehicle: RTL8812EU kernel-monitor TX/RX on 5805/HT20; adaptive MCS1-5 with venc-owned bitrate follow (§9.6), 30% IDR / 20% P-frame RLC, FPS_SELECT {30,60,90,100} over a 100fps base.",
   "node": {
     "originator": 17,
     "role": "tx",
@@ -39,8 +39,8 @@
   },
   "policy": {
     "select": {
-      "min_profile": 3,
-      "max_profile": 3
+      "min_profile": 1,
+      "max_profile": 5
     },
     "return": {
       "quiet_gap": true,
@@ -54,9 +54,9 @@
   },
   "venc": {
     "host": "127.0.0.1:80",
-    "enabled": false,
+    "enabled": true,
     "recovery_enabled": true,
-    "command_presets": { "fps": [30, 60, 90] }
+    "command_presets": { "fps": [30, 60, 90, 100] }
   },
   "control": {
     "bind": "127.0.0.1:8091"
