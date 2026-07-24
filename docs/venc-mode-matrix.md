@@ -57,6 +57,11 @@ it do not hold. They are kept for provenance, marked, and superseded:
 What replaces them: the binding constraint is **bits per pixel**, not block
 size (§14). Three separate defects were found on the way (§11, §12, §13).
 
+**The structure that replaces §2's is in §16.0** — two axes in (latency, range),
+resolution derived. §2's collapse of the two axes into one does not survive,
+because the fps↔range coupling is now soft (costs pixels) rather than hard
+(forbids the cell).
+
 ---
 
 ## 2. ~~Measured: the per-rung block-size ceiling~~ (RETRACTED — see §1a)
@@ -651,6 +656,52 @@ floor, and the widest-FOV sensor mode that supports the cell's fps.
 Operator asked for a call rather than another measurement round. Here it is.
 Everything below is arithmetic on §12's corrected rung bitrates plus one
 judgement call.
+
+### 16.0 The load-bearing structure — read this before the tables
+
+Two axes in, one quantity derived:
+
+```
+  latency  ──┐
+             ├──>  resolution / FOV   (the derived variable)
+  range    ──┘
+```
+
+**fps and MCS band are the inputs. Resolution is the output.** Resolution is
+not a third user choice and not a second axis — it is where the tension
+between the two axes goes.
+
+The mechanism, stated once:
+
+> A cell must clear a **bpp floor at its lowest allowed rung.**
+> `bpp = kbps / (fps × pixels)`. Range fixes the numerator (the floor rung's
+> bitrate), latency fixes one factor of the denominator (fps), so the only
+> free variable left is **pixels**.
+
+That is the whole design. Everything in §16.3–§16.5 is this identity
+evaluated.
+
+**How this differs from §2 (retracted).** §2 had fps coupled to range
+*hard* — a 10 kB minimum block meant 100 fps could not reach rung 0 **at any
+resolution**, so `(low latency, high range)` was an **empty cell** and the two
+axes collapsed into one. §2 then concluded the second axis "has to become
+resolution/FOV".
+
+With the block floor gone (§11.4) that coupling is **soft**: fps still trades
+against range, but it now trades *through resolution* rather than forbidding
+the combination. So:
+
+- **No cell is empty.** `(low latency, high range)` exists — it is 960×540.
+  It costs pixels, not viability.
+- **Latency and range are genuinely independent inputs again**, which is what
+  the operator asked for in the first place.
+- **Resolution/FOV is therefore not an axis.** Promoting it to one would
+  over-determine the system: pick all three and you are specifying bpp
+  directly, which is the number the controller exists to manage.
+
+The soft coupling is still visible and still load-bearing — read any row of
+§16.3 left to right, or any column top to bottom, and resolution moves. That
+movement *is* the trade. It is just no longer allowed to reach zero.
 
 ### 16.1 The judgement call
 
