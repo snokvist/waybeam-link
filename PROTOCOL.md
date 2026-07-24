@@ -104,7 +104,9 @@ Three orthogonal identities, never conflated:
 - **Discovery / latch:** an RX in monitor mode passively enumerates
   `(originator, session_id, stream_id, stream_type)` tuples on the channel. It
   routes/subscribes by type ("all telemetry") or by a specific instance without
-  parsing payload, then latches. No handshake, no association. **All per-stream
+  parsing payload, then latches. No handshake, no association — a receiver needs
+  **no uplink** to do this: a passive **spectator** (§15.2 `node.spectator`,
+  Pass 74) delivers by FEC + diversity alone, the analog-video model. **All per-stream
   RX state — the discovery cache, the startup floor, delivery cursors, deadline
   and supersession state — is keyed by the full `(originator, session_id,
   stream_id)`.** (`originator` is *additive* to `session_id`: two nodes may
@@ -2302,6 +2304,18 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 - RX nodes use `"dir":"out"` streams (UDP `send` targets) and `role:"rx"` adapters
   (diversity = same `channel`; a scout may sit on a different channel on another
   adapter).
+- `node.spectator` (default `false`, §2/§13 spectator RX, Pass 74) opts a display
+  node into **passive, uplink-free reception** — the analog-video model. A
+  spectator may run with **zero `role:"tx"` adapters**: it delivers by FEC +
+  diversity only, generates **no ARQ / NACK / LINK_REPORT** (return and §3.9
+  recovery paths no-op with no tx adapter), scouts by roaming index 0 (above),
+  and **selects a feed by a passive tune** — quickconnect retunes all ears to the
+  scouted feed's channel/`net_id` and §2 first-latch / `preferred_originator`
+  picks up the stream, with **no §11 claim** (the `csa_psk` trust boundary stays
+  craft + ground). A spectator does **not** follow CSA channel moves; it
+  re-acquires a hopped craft by **re-scout**. The flag fails closed: without it a
+  streams node still requires its uplink, so an ordinary ground is never silently
+  downgraded to no-ARQ.
 - Every policy constant is overridable → bench re-derivation (§9, §17) is config,
   not recompile.
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
@@ -2332,6 +2346,9 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   diversity RX adapters hold the resting channel. A single-adapter ground has no
   spare ear, so its sweep is mode-exclusive with an active link; a two-adapter
   ground keeps hearing the resting channel on its diversity ear while it scouts.
+  A **passive spectator** (`node.spectator`, below) has no tx adapter, so the
+  scout falls back to config **index 0** — its sole / first RX ear — and a
+  single-adapter spectator's sweep is likewise mode-exclusive with its view.
 - A **`frame-shm` stream** carries its own per-stream `fec` block (§14.1):
   ```json
   { "stream_id": 0, "stream_type": "RTP", "dir": "in",

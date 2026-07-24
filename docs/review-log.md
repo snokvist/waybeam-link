@@ -2075,6 +2075,54 @@ pre-live-venc fallback mode); §13 forged-VEHICLE_CMD bound re-worded; §15.3
 its own PR in waybeam_venc (persist flag threaded through the set pipeline +
 route registration; identical response shapes).
 
+## Pass 74 — Passive spectator RX (analog-video model): no-uplink display node (ruled 2026-07-24)
+
+**Problem (operator, 2026-07-24):** the kernel-monitor backend requires
+exactly one `role:"tx"` uplink adapter for any node with delivery streams —
+only a store-cache with *no* streams is exempt (`allow_rx_only =
+cache.store.enabled && streams.empty()`). This refuses a **passive display
+receiver**: a node that just tunes in and watches a broadcast the way an
+analog FPV monitor does. Yet §2 (passive latch, "no handshake, no
+association") and §13.x ("multi-host spectator/DVR … any node RX + *optionally*
+NACK") already sanction exactly this — TX is optional for a receiver. The
+backend invariant was over-broad; unencrypted waybeam-link is meant to be
+analog-video-like, and passive RX is core MVP, not an add-on.
+
+**Ruling (operator 2026-07-24):** a node opts into passive-spectator via
+`node.spectator: true` (fail-closed: without the flag a streams node with no
+uplink still errors, so an ordinary ground that lost its uplink is not
+silently downgraded). A spectator:
+
+1. **Runs with zero `role:"tx"` adapters** — passive display, **FEC +
+   diversity best-effort, NO ARQ / NACK / LINK_REPORT** (the §6/§9 return and
+   §3.9 recovery paths already no-op with no tx adapter — `inject`/
+   `inject_return` are guarded on `has_tx`). This is the analog-like tradeoff:
+   a lost frame is a lost frame.
+2. **Scouts by roaming the backend tx adapter when present, else config
+   index 0** (its sole / first RX adapter). A single-adapter spectator's sweep
+   is mode-exclusive with its view — the analog "channel search" — as §15.2
+   already notes for a single-adapter ground.
+3. **Selects a feed by a passive tune + latch, never a §11 claim.**
+   quickconnect on a spectator retunes all ears to the scouted feed's channel
+   and net_id; §2 first-latch / `preferred_originator` picks up the stream. No
+   issuer campaign — a spectator has no uplink for one, and the `csa_psk`
+   trust boundary stays craft + ground.
+4. **Does not follow CSA channel moves** (no `csa_psk` to validate a
+   campaign). Recovery from a craft channel-hop is a **re-scout** — the
+   spectator re-acquires by discovery, not by following.
+
+**Rejected:** auto-detecting spectator from "zero tx adapters" (silently drops
+ARQ on a real ground that merely misconfigured its uplink — the opt-in flag
+fails closed); unauthenticated CSA-follow for spectators (would let any node
+yank every spectator across channels — re-scout is safe and needs no secret).
+
+Spec: §2 passive-latch note (spectator = the no-uplink case); §15.2
+`node.spectator` bullet + scout-adapter resolution reworded (tx adapter, else
+config index 0); §15.5 select = passive tune for a spectator. Known accepted
+edge: multiple feeds on one channel — a spectator first-latches one; explicit
+per-originator select among co-channel feeds is deferred (config
+`preferred_originator` pins one meanwhile).
+
 ## Pass 75 — venc encoder-capability bitrate ceiling (§9.6, ruled 2026-07-24)
 
 **Problem (operator, 2026-07-24):** the §9.5 per-rung derived bitrate has only
