@@ -172,7 +172,7 @@ Fix direction: cap iterations per poll pass (~64) and let the loop breathe.
 The `csa_psk` redaction boundary itself holds — but that is irrelevant when the
 issuer's own API is open to the LAN. Listed on `ROADMAP.md` as planned.
 
-### B8 — A CSA hop can strand the craft while the ground reports success — BLOCKER
+### B8 — A CSA hop can strand the craft while the ground reports success — FIXED (Pass 89)
 
 Found on hardware 2026-07-24, hop 4 of the Pass 80 soak (see C1). **Not a
 regression from the Passes 81–88 PR**: the two sides' windows are equal at the
@@ -192,6 +192,16 @@ pre-revert video, logs `csa: campaign confirmed`, and holds the new channel —
 while the craft's window expires unheard and it reverts to `prev_chan`.
 `video_seen_` is not proof the craft committed; there is no "craft COMMITTED"
 signal anywhere in the issuer's confirm path.
+
+Fixed by **Pass 89** (`CSA_ARMED` spans the campaign; the issuer latches
+video-verify only on an ARMED-*clear* craft frame) and re-anchored by **Pass 92**
+so both ends measure the window from the same event. Verified: 21 campaigns
+across the two Pass 80 runs, 0 splits.
+
+Note for the archaeology below — "the 150 ms default (neither deployed config
+overrides it)" was more literally true than it read at the time: the §15.2
+default was *also* 150 and silently overrode the engine's, which is Pass 92's
+first defect.
 
 Observed, with both `verify_timeout_ms` at the 150 ms default (neither deployed
 config overrides it):
@@ -308,7 +318,7 @@ it actually is. Both want settling together.
 
 ## C. Verification still owed
 
-### C1 — Pass 80 10× alternating CSA soak — BLOCKER until run
+### C1 — Pass 80 10× alternating CSA soak — MET
 
 `docs/review-log.md` Pass 80 requires it and no doc records the run. It guards
 the worst in-flight scenario: craft TX moves, RX goes deaf, the craft cannot hear
@@ -335,16 +345,21 @@ Two things the run did establish:
 - The Passes 81–88 PR introduces **no CSA regression** — the pre-existing
   failures in B8 and B9 both reproduce on the older craft binary.
 
-**Run 2026-07-24: 20/20 on the Pass 90 implementation commit — but NOT yet met
-on the branch head.** See the Pass 90 addendum in `docs/review-log.md`: a
-late-accept hazard found by re-soaking forced a copy-emission cutoff, and the
-20/20 predates it. Pass 80 must be re-run on whatever is finally merged. The
-20/20 detail below stands as a result for that commit only.
+**MET 2026-07-24: 20/20 on the branch head (`impl: Pass 92`, ground
+`dbb229b3…` / craft `75e0ea1d…`).** Two independent 10-hop runs, both clean.
+Every hop committed in 1.0 s with craft RX advancing, video and audio
+advancing, `report_age_ms 0` and **zero** recovery fires. Across the two runs:
+21 campaigns armed, 21 reached VERIFY, **0 follower reverts, 0 issuer reverts,
+0 RX-liveness recovery fires**.
 
-Every
-hop committed in 1.0 s with craft RX advancing, video and audio advancing,
-`report_age_ms 0` and **zero** recovery fires. It took three rulings to get there, and the order
-matters for anyone reading this later:
+This supersedes an earlier 20/20 recorded against the Pass 90 implementation
+commit (`d00ca67`), which two later code changes invalidated. The rule that
+produced this correction is worth keeping: **any code change invalidates the
+previous soak.** Both re-soaks that followed found a real defect the previous
+"passing" run had not exercised.
+
+It took four rulings to get here, and the order matters for anyone reading
+this later:
 
 - **Pass 89** made failure *safe*. Before it, a hop that the craft abandoned
   left the ground holding the new channel and logging `campaign confirmed`
@@ -352,6 +367,14 @@ matters for anyone reading this later:
 - **Pass 90** made failure *rare*. The residual ~1-in-5 hop failure was not a
   retune problem at all — the craft was never receiving the campaign. Copies
   now repeat until the craft ACKs and ride the §7.2 quiet gap.
+- **Pass 92** made it *not happen*. The stubborn ~1-in-3 residue was two
+  separate faults wearing one symptom. First, the 500 ms verify window Pass 89
+  ruled had never reached a binary — the §15.2 config default restated 150 and
+  is copied over the engine's, so every "500 ms" soak since Pass 89 had in fact
+  measured 150. Second, the two ends anchored the same budget on different
+  events: the follower from its own landing, the issuer from T_switch, so the
+  issuer abandoned the craft a full craft-retune-cost early. Re-measured over
+  27 instrumented hops; see Pass 92 in `docs/review-log.md` for the table.
 
 An intermediate hypothesis — that the issuer needed the craft's own
 RX-liveness guard — was **tested and refuted** before being acted on; see
@@ -359,11 +382,11 @@ Pass 90 in `docs/review-log.md`. Sampling both ground adapters at 20 Hz
 through a failing hop showed them completely static, so there was no retune
 to recover.
 
-On the strength of this result: at the pre-Pass-90 failure rate a clean 10/10
+On the strength of this result: at the historical failure rate a clean 10/10
 would occur by chance about 11% of the time, so one run was not sufficient
 evidence and the soak was repeated — 20/20 consecutive is ~1%. The earlier
-soaks are the control: the identical driver against the pre-Pass-90 binaries
-failed at hop 4, twice.
+soaks are the control: the identical driver failed at hop 4 twice against the
+pre-Pass-90 binaries, and at hop 3 against the Pass 91 binary.
 
 ### C2 — Gate 4 range validation — SHOULD-FIX
 
