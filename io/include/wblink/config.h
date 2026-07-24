@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "wblink/csa.h"
 #include "wblink/nal.h"
 #include "wblink/table.h"
 #include "wblink/types.h"
@@ -215,9 +216,15 @@ struct CsaPolicy {
     // in stats, logs, or dump_config_summary().
     std::string psk;
     double settle_s = 3.0;
-    uint32_t verify_timeout_ms = 150;
+    // §11.5 (Pass 92): DERIVED, never a second literal. csa_params() copies
+    // this over the engine's own default unconditionally, so restating the
+    // number here silently overrides core — which is exactly how Pass 89's
+    // 150 -> 500 ruling failed to reach a single running binary.
+    uint32_t verify_timeout_ms = kCsaVerifyTimeoutMsDefault;
     // §11.6 Pass 80: post-retune RX-liveness deadline (0 disables). Silence
-    // for this long after a CSA retune => one full monitor re-init.
+    // for this long after a CSA retune => one full monitor re-init. §15.2
+    // (Pass 92): MUST exceed verify_timeout_ms — a verify window that outlives
+    // this guard lets a monitor re-init fire mid-switch. Enforced at load.
     uint32_t rx_liveness_ms = 750;
     uint32_t min_interval_s = 5;
     uint32_t ack_timeout_ms = 1000;

@@ -98,7 +98,7 @@ Three orthogonal identities, never conflated:
 | `session_id` | u32 | Random per-boot nonce **of the sender**. Namespaces that originator's seq/block spaces and doubles as a reboot/anti-replay epoch. |
 | `stream_id` | u8 | Instance index; disambiguates multiple streams from one originator. |
 | `stream_type` | u8 | Semantic kind → selects the profile (§3.4, §4). |
-| `seq` | u32 | Monotonic per `(originator, session, stream)`. Global order + dedup key. No wrap within a flight → plain integer comparison. |
+| `seq` | u32 | Monotonic per `(originator, session, stream)`. Global order + dedup key. No wrap within a flight → plain integer comparison (but see §2.1 — this is a property of a *legitimate* sender, never a memory-safety premise). |
 | `block_id` | u32 | Monotonic per `(originator, session, stream)`. One block = one RTP frame. |
 
 - **Discovery / latch:** an RX in monitor mode passively enumerates
@@ -121,6 +121,31 @@ Three orthogonal identities, never conflated:
   never NACKs below it (no back-filling history on join).
 - **Teardown:** implicit. Nothing heard for a session within an idle timeout →
   RX drops its state. No explicit close on the wire.
+
+### 2.1 Scope of the no-wrap assertion (Pass 81)
+
+The `seq`/`block_id` no-wrap property above describes what a **legitimate**
+sender emits: at the §9.3 ceiling rates a u32 counter cannot exhaust within any
+plausible flight, so §6.6 may compare with plain integer arithmetic and refuse
+modular comparison (which would make a forged far-*backward* seq look
+forward-plausible and reopen the video-flush hole §6.6 exists to close).
+
+**It is NOT a bound on the values RX can be made to hold.** The §2 startup floor
+adopts a first-seen `seq` from the air, and the §6.6 sustained-clamp resync
+adopts a fresh floor after an outage; both let a remote party place the cursor
+anywhere in u32, including within a few packets of `0xFFFFFFFF`. Therefore:
+
+- **No RX loop bound, allocation size, or buffer index may be derived from the
+  no-wrap assertion.** Any such bound must hold independently — in practice
+  against `fwd_clamp_pkts`/`fwd_clamp_blocks`, which are config-bounded — so that
+  it survives even when every sequence-space invariant is violated at once.
+- **A cursor that wraps past `max_seq` is a desync, not a sequence.** RX MUST
+  re-floor with §2 startup-floor semantics (identical handling to the §6.6
+  sustained-clamp resync) and count it in the §15 stats.
+
+Rationale: the clamp is named the load-bearing injection defence (§13). A defence
+whose failure mode is unbounded allocation is not load-bearing. Correctness may
+rest on the assertion; liveness and memory safety may not.
 
 ---
 
@@ -267,7 +292,7 @@ split is what lets any node send control traffic about any other node's stream.
 | 1 | `ARQ` | important/IDR retransmit class with I-frame deadline |
 | 2 | `RETRANSMIT` | this packet is itself a resend (stats/diagnostics) |
 | 3 | `FEC_REPAIR` | packet is a FEC repair symbol (§14; an 11-byte subheader precedes payload) |
-| 4 | `CSA_ARMED` | **craft→ground ARM ack** — craft has accepted the in-flight CSA campaign and will follow (§11.6) |
+| 4 | `CSA_ARMED` | **craft→ground campaign-in-progress** — set on accepting a CSA campaign, cleared only on reaching COMMITTED (Pass 89). Serves as the ARM ack before T_switch; its *clearing* on `target_chan` is the craft's commit proof for §11.6 video-verify |
 | 5 | `PFRAME_ARQ` | opt-in P-frame retransmit eligibility; retains the P-frame deadline |
 | 6–7 | reserved | 0 |
 
@@ -323,6 +348,15 @@ its own local profile table (§3.6)**, MUST treat that stream under the
 **best-effort default profile** — deliver by diversity, never NACK, no
 supersession/deadline/adaptive logic — and raise a stat. A new type or a diverged
 table can therefore never make an older/mismatched client misbehave.
+
+**Best-effort suspends profile logic, never §6.6 clamp state (Pass 87).**
+`max_block` and the delivery cursor are *clamp* state, not profile state, and MUST
+keep ratcheting in best-effort — only the `BlockInfo` deadline/supersession
+bookkeeping is suspended. Freezing `max_block` here reproduces, by another route,
+the exact failure §6.6 documents for a delivered-block reference: the clamp
+rejects everything `fwd_clamp_blocks` later, the sustained-clamp resync flushes
+all stream state, and the pair repeats indefinitely — turning the *graceful*
+degradation this rule promises into a worse outcome than no fallback at all.
 
 ### 3.5 LINK_REPORT packet (type `0x3`, RX→TX) — 39 bytes
 
@@ -383,18 +417,29 @@ collisions.
 
 - `count` u8 — number of profiles;
 - for each profile, **sorted ascending by `id`** (duplicate `id`s are a config
-  error), the fields in this exact order, big-endian, 25 bytes per profile:
+  error), the fields in this exact order, big-endian, **27 bytes per profile**:
   `id` u8 · `mcs` u8 · `gi` u8 (0=long, 1=short) · `tx_power_level` u8 ·
   `airtime_budget_permille` u16 · `fec_scheme` u8 (0=none, 1=rlc256,
   2=rlc256_iframe, 3=tetrys_reactive) · `fec_overhead_permille` u16 ·
   `arq_deadline_iframe_ms` u16 · `arq_deadline_pframe_ms` u16 ·
-  `bitrate_min_kbps` u32 · `reserve_control_bps` u32 · `reserve_telemetry_bps` u32;
+  `bitrate_min_kbps` u32 · `reserve_control_bps` u32 ·
+  `reserve_telemetry_bps` u32 · `max_payload` u16;
 - `floor_profile` u8.
 
 Fractional JSON fields (`airtime_budget_frac`, `fec_overhead_frac`) are scaled to
 integer per-mille with `llround(frac × 1000)` before hashing. The hash is thus
 invariant to JSON formatting, key order, and comments, and changes on any semantic
 change to any profile field.
+
+**Amendment (Pass 82).** `max_payload` u16 at offset 25 was appended when §9.3
+gained the field; the original 2026-07-10 ruling amended §3.2/§9.3 but not this
+section, leaving the wire hash undocumented for four months. `max_payload` is a
+semantic profile field, and the invariant stated immediately above — the hash
+changes on any semantic change to any profile field — *requires* its inclusion.
+The serialization was corrected here to match the shipped implementation
+(`kCanonicalProfileSize = 27`); the implementation was not changed, because
+rotating `table_version` across a deployed fleet would drop every node to §3.4
+best-effort for no benefit.
 
 ### 3.7 The `loss_postdiv_prearq` semantics (do not confuse with wfb_ng)
 
@@ -955,6 +1000,14 @@ wording):
   `max_block` costs an attacker one accepted in-clamp packet per `+K` step —
   that bounded creep is the accepted residual of this defence.
 
+**Bounded gap enumeration (Pass 81).** Noting missing seqs between the cursor
+and the newest heard `seq` MUST be bounded by `fwd_clamp_pkts` **unconditionally**
+— not by the clamp's `max_seq - cursor` invariant, which §2.1 forbids relying on
+for a loop bound. A cursor that has wrapped past `max_seq` (`max_seq < cursor`
+under plain comparison) is a §2.1 desync: re-floor with startup-floor semantics
+and count it as `resyncs`. Without both halves, four chosen packets walk the
+cursor across `0xFFFFFFFF` and the enumeration runs the full u32 space.
+
 **Sustained-clamp resync (escape hatch).** If *every* packet of a latched
 stream clamp-rejects continuously for `clamp_resync_ms` (seed 500 ms), the
 stream is desynced by a real outage (the TX ran further ahead than the clamp
@@ -1296,6 +1349,16 @@ from steady state without a second wire field.
   select-and-hold, not a freeze-in-place. (Config-time pins already land there via
   the boot clamp; the runtime path clamps in `evaluate()` on the next tick.)
 
+**`min_profile` / `max_profile` are profile `id`s, not ladder indices
+(Pass 83).** They are resolved against the §3.6 table the same way
+`floor_profile` is: by `id`, independent of the order profiles appear in the
+JSON. A configured `id` that is not present in the table is a **config error**
+(reject at load with the offending value named) — never a silent clamp to a
+neighbouring rung. `{"max": 255}` unpins by saturating above the highest present
+`id`, unchanged. Rationale: `floor_profile` already carried id semantics in the
+same struct, operators author these as MCS-bearing ids, and an id survives a
+table reordering that an index does not.
+
 ### 9.8 Fail-safe on lost feedback
 TX runs a `report_epoch` watchdog. No fresh, monotonic-forward epoch within
 `report_timeout_ms` (**~500 ms**) ⇒ **fail toward degradation**: hold, then step
@@ -1308,6 +1371,29 @@ floor-oscillation limit cycle (§17 gate 4). The craft additionally runs
 `TxStats.last_was_timeout` = local FIFO backpressure, venc queue fill) — noting
 these are *local* and cannot see a remote fade, so they conservatively bias toward
 degradation, not toward holding a high rung.
+
+**The descent target is `floor_profile`, NOT the §9.7 `min_profile` pin
+(Pass 84).** The two knobs answer different questions and MUST NOT be conflated:
+
+| knob | question | applies |
+|---|---|---|
+| §9.7 `min_profile` | how low may the selector *choose* to go while it can see feedback? | adaptation envelope |
+| §3.6 `floor_profile` | where does the link go when feedback is **gone**? | safety floor |
+
+A craft with `min_profile: 1` and `floor_profile: 0` therefore adapts within
+MCS1–5 in normal flight and still descends to MCS0 on lost feedback. Clamping the
+fail-safe by the adaptation envelope means an operator cannot tune airtime
+efficiency without silently removing the most robust rung from the one path that
+runs when the link is worst and the craft is furthest away — the exact "never fail
+optimistic" violation this section opens by forbidding.
+
+**Scope:** this governs the `min_profile < max_profile` envelope only. An explicit
+§9.7 **`min==max` pin still freezes adaptation outright**, `FAILSAFE` included —
+that is the pin's documented purpose (bench / known-bad-link) and it is an
+operator-initiated state, not a tuning side effect. Whether a pin *should* yield
+to the fail-safe on lost feedback is a **separate open question** (a pin held at a
+high rung through a real fade is fail-optimistic by the same argument above); it
+is deliberately not decided here.
 
 ### 9.9 Backpressure coupling (local, TX-side)
 The venc output-queue fill is a local TX signal, not an RX report. It **suppresses
@@ -1499,14 +1585,84 @@ absolute switch time), folded into the wire model and hardened.
 static rendezvous channel cannot be redirected by a forged/accepted campaign.
 
 ### 11.2 Timing + retune budget
-- **N=5 copies @ 20 ms** (100 ms campaign). Each copy's `dt_to_switch_ms`
-  decrements so all resolve to the same absolute instant.
+- **Copies @ 20 ms, repeated until the craft ACKs or T_switch arrives
+  (Pass 90).** Each copy's `dt_to_switch_ms` is stamped from the campaign's
+  absolute T_switch at the instant that copy is transmitted, so all copies —
+  however late — resolve to the same absolute instant.
+
+  **Ack-lead cutoff: no copy inside the last 50 ms before T_switch
+  (Pass 90 addendum).** A copy accepted very late leaves the craft too little
+  time to advertise `CSA_ARMED` on the **old** channel before it departs, so
+  the issuer never gets the ack it needs to pre-position (§11.6) and the jump
+  is uncoordinated. This could not arise before Pass 90 — the fixed burst
+  ended at 80 ms of a 150 ms budget — and running copies to T_switch created
+  it. Bench 2026-07-24: eight accepted campaigns at dt 465 / 470 / 146 / 140 /
+  109 / 107 / 106 ms all committed, and the single **dt = 23 ms** acceptance
+  was the only revert. 50 ms is ~7 craft frames at the measured ~7.4 ms frame
+  interval, so the ack survives several lost frames. The cutoff applies to
+  emission **and** to the quiet-gap re-stamp below, since a gap hold can push
+  a copy that was legal when produced past the deadline.
+
+  Consequence worth stating plainly: at **class 0** the 150 ms budget minus
+  this cutoff leaves room for little more than the original burst, so at that
+  class the delivery gain comes from quiet-gap scheduling, not from extra
+  copies. The retransmission has real room only at **class 1** (500 ms).
+
+  **Superseded: the fixed N=5 burst.** Five copies at 20 ms spacing is an 80 ms
+  window, after which the issuer went silent for the remainder of a 1 s
+  `csa_ack_timeout`. A craft that heard none of the five lost the campaign
+  with ~1 s of usable airtime unspent. The craft is a single-radio node and is
+  RX-deaf while transmitting (§7.2), so campaign delivery is probabilistic and
+  an 80 ms exposure is simply too short: measured on hardware 2026-07-24, ~1
+  hop in 5 failed with the craft never calling `on_csa` at all — the campaign
+  was never received. `CSA_ARMED` (§11.6) is the ACK that stops the
+  retransmission, so this is retransmit-until-acked, not an unbounded burst.
+
+- **Copies are released in the craft's §7.2 quiet gap (Pass 90).** The issuer
+  previously injected campaign copies immediately and deliberately outside the
+  quiet-gap scheduler ("campaign timing: never quiet-gap-held"). That exempted
+  the one message the whole campaign depends on from the mechanism that makes
+  delivery to a duty-cycle-limited craft work: LINK_REPORTs, which ARE
+  gap-scheduled, arrive at essentially the rate they are sent, while blind
+  campaign copies measured ~73% per-copy delivery.
+
+  **A held copy MUST be re-stamped at the instant it goes on air** —
+  `dt_to_switch_ms` recomputed from the absolute T_switch and `csa_mac`
+  recomputed over the new bytes. `dt_to_switch_ms` is relative to the copy's
+  own transmission and the follower anchors on that copy's **receive** TSF, so
+  releasing a pre-stamped copy after a hold of Δ would place the follower's
+  T_switch Δ late — desynchronising the very instant the campaign exists to
+  agree on. A copy that cannot be re-stamped before T_switch is dropped, not
+  sent stale.
+
+  The original exemption predates `dt_to_switch_ms` being computed per copy;
+  with per-copy stamping a gap-delayed copy is exactly as correct as a prompt
+  one, so the exemption no longer buys anything.
 - A follower anchors on the **hardware TSF of the copy it received**:
   `target_tsf = rx_tsfl + dt_to_switch_ms·1000` (µs) — TSF, not host clock, so no
   host-jitter smear (re-derive the bench's 0–5 ms precision against TSF).
 - `dt_to_switch_ms` (copy 1) ≥ campaign span + max retune for the class + margin:
-  **class 0 (fast intra-band, `FastRetune`, ~0.5–2.5 ms) ⇒ 150 ms**; **class 1
+  **class 0 (fast intra-band, `FastRetune`, ~0.5–2.5 ms) ⇒ 300 ms**; **class 1
   (cross-band, full `SetMonitorChannel`, up to ~277 ms on 8812AU) ⇒ 500 ms**.
+
+  **Class 0 widened 150 → 300 ms (Pass 91, operator-ruled 2026-07-24).** The
+  budget is no longer sized only by the retune it precedes: since Pass 90 it
+  must simultaneously hold (a) a copy window long enough to deliver a campaign
+  to a craft that is RX-deaf while transmitting, and (b) the 50 ms ack-lead
+  cutoff before T_switch. At 150 ms those two are in direct conflict — the
+  cutoff leaves a 100 ms copy window, barely more than the pre-Pass-90 burst
+  that was measured losing ~1 campaign in 5. 300 ms leaves a 250 ms window
+  (~12 gap-scheduled copies) with the ack lead intact.
+
+  Raising class 0 rather than issuing class-1 campaigns is deliberate: class 1
+  was tried and is **not** equivalent. Its 500 ms budget makes the issuer
+  pre-position ~490 ms before T_switch, where it sits on the target seeing no
+  craft video while its deadline — `max(T_switch, landing) + verify_timeout` —
+  leaves the craft only `verify_timeout` after T_switch to finish a retune
+  this section budgets at up to 277 ms, hear the issuer, commit, and emit a
+  `CSA_ARMED`-clear frame. Bench 2026-07-24: the craft reached COMMITTED on
+  the target while the issuer reverted — the inverse of the §11.6 split
+  Pass 89 closed.
 - On entering COMMITTED after any retune, every transmitting adapter calls
   **`ReApplyTxPower()`** (§10.4) — `FastRetune` skips TXAGC re-apply.
 
@@ -1565,6 +1721,21 @@ absent ⇒ announced token (Pass 61). There is no separate mode toggle.
   and the `csa_min_interval_s` rate-limit still hold. An accepted CSA can never
   send a craft off its configured allowlist, whatever the key source.
 
+**An absent key is a fault, not a mode (Pass 85).** The two sources above are
+exhaustive for craft/ground: secret mode is configured, announced mode is
+self-generated at boot. A craft or ground holding an **empty** CSA key is
+therefore always a bug — a missed ANNOUNCE, a config typo, or a failed token
+generation — and MUST **fail closed**: reject the CSA, count it, and stay put.
+Following it would mean an unauthenticated-CSA mode for craft/ground, which the
+opening sentence of this section forbids.
+
+The permission to follow unauthenticated belongs to the **role**, not to the
+emptiness of a buffer. Implementations MUST carry it as an explicit policy input
+(true only for a §15.2 `node.spectator`, Pass 74), never infer it from a
+zero-length key: a security posture that is a side effect of an empty container
+is one refactor away from silently inverting, and gives craft, ground and
+spectator the same code path with three different intended outcomes.
+
 ### 11.5 State machine (follower)
 ```
 IDLE ─valid+MAC'd CSA─▶ ARMED ─T_switch─▶ retune+ReApplyTxPower ─▶ VERIFY
@@ -1579,8 +1750,43 @@ IDLE ─valid+MAC'd CSA─▶ ARMED ─T_switch─▶ retune+ReApplyTxPower ─�
 COMMITTED is terminal until reboot — it has no automatic outgoing edge (no
 mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
 - **Jump-failed backout (kept):** in VERIFY, no valid traffic within
-  `verify_timeout_ms` (**150 ms**, bench median 85 ms + margin) → revert to
-  `prev_chan` and return to IDLE. This is the **only** automatic revert; it
+  `verify_timeout_ms` (**500 ms** — see the Pass 89 sizing note below) → revert
+  to `prev_chan` and return to IDLE.
+
+  **Sizing (Pass 89, measured 2026-07-24).** The former 150 ms was derived from
+  a *median* ("bench median 85 ms + margin"), which is the wrong statistic: the
+  quantity being bounded is how long after the craft's landing the issuer's
+  first hearable transmission arrives, and the craft reverts on that
+  distribution's **tail**. Instrumented over 8 alternating 5805↔5745 hops at
+  desk range, that latency measured 45.5 / 49.8 / 57.6 / 58.6 / 73.1 / 76.2 /
+  79.0 / **143.0** ms — median 66 ms, but a max of 143.0 ms against a 150 ms
+  window, i.e. **4.7% margin**. One hop of an earlier soak exceeded it and
+  stranded the fleet (§11.6 Pass 89 note). 500 ms is ~3.5× the measured max and
+  sits inside the §11.6 RX-liveness guard (750 ms), so a genuinely deaf radio is
+  still caught by the mechanism built for it rather than by this timeout.
+
+  The latency is dominated by the issuer's own landing delay — the craft lands
+  first and waits — so this budget must be re-measured, not assumed, whenever
+  the issuer's adapter count or retune path changes.
+
+  **Pass 92 (2026-07-24): 500 ms is now the value a node actually runs.** The
+  Pass 89 ruling changed the engine's own default but not the §15.2 config
+  default, which the config layer copies over it unconditionally — so every
+  binary built between Pass 89 and Pass 92 ran a **150 ms** window regardless,
+  and every soak that "verified" 500 ms measured 150. `verify_timeout_ms` has
+  exactly one seed value; a config default that restates the number rather than
+  deriving it is a defect, not a convenience.
+
+  Re-measured over 27 alternating 5805↔5745 hops with both windows opened to
+  3000 ms so nothing reverted: craft landing → heard the issuer ran min 7.7 /
+  median 33.8 / p90 83.7 / **max 132.8 ms**. 500 ms is 3.8× that max, and still
+  inside the 750 ms RX-liveness guard.
+
+  **`verify_timeout_ms` MUST be less than `rx_liveness_ms`** when the latter is
+  enabled (§11.6), and config validation rejects a config where it is not. The
+  guard exists to catch a half-applied retune; a verify window that outlives it
+  lets a full monitor re-init fire in the middle of a switch that is still
+  pending. This is the **only** automatic revert; it
   protects a switch that landed on a dead channel. **The window opens at the
   follower's landing** — the first engine tick after its blocking retune
   completes — mirroring the §11.6 issuer definition (Pass 69, review
@@ -1588,6 +1794,17 @@ mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
   retune itself (and any post-retune RX dead-time) consume the window, which
   on a class-0 campaign leaves too little listening time to hear the
   issuer's beacons.
+- **Precedence: the issuer may shorten the window, never lengthen it
+  (Pass 86).** The wire's `t_revert_ms` (§11.1) is the issuer's *advisory*
+  follower auto-revert budget; `verify_timeout_ms` is the node's own config.
+  The effective window is
+  `min(t_revert_ms > 0 ? t_revert_ms : verify_timeout_ms, verify_timeout_ms)` —
+  i.e. an issuer that knows its campaign is fast may tighten the fleet's revert,
+  but can never extend how long a follower sits on a channel it cannot hear.
+  `t_revert_ms` is u16; taking it unclamped lets a single frame strand a follower
+  for 65 s on a dead channel, and until Pass 85 lands, an empty-key node accepts
+  that frame from anyone. How long a node is willing to be deaf is the node's
+  decision, not the issuer's.
 - **Rendezvous-beacon confirmation (Pass 69):** in VERIFY, a MAC-valid CSA
   whose `(originator, session_id, csa_nonce)` equal the armed campaign's and
   whose `dt_to_switch_ms = 0` (the issuer's §11.6 beacon, `csa_seq` 0)
@@ -1673,6 +1890,61 @@ direction** lets us make the strand class *never happen* rather than recover aft
   beacon) MUST be computed at that tick, never at the tick that emitted the
   commit (else a slow multi-adapter retune can consume the whole window before
   it opens — the exact pre-Pass-69 failure re-introduced).
+
+  **The deadline re-anchors once on the observed craft landing (Pass 92).** On
+  the first `CSA_ARMED`-**set** craft frame received on `target_chan` after
+  T_switch — which is the craft's landing as the issuer can observe it — the
+  issuer MUST recompute its deadline as `that frame + verify_timeout_ms`. One
+  re-anchor per campaign; a later ARMED frame does not extend it again.
+
+  Without this the two ends measure the same budget from different events. The
+  follower's window opens at **its** landing (§11.5), which is T_switch plus its
+  retune cost; the issuer's opens at T_switch, and the issuer pre-positions so
+  it has usually landed well before that. The issuer therefore stops beaconing
+  and reverts a full craft-retune-cost **before** the craft gives up, and the
+  tail of the craft's window has no issuer on air to hear. Measured over 27
+  hops (2026-07-24): craft retune cost median 48.7 / max 67.9 ms, so the issuer
+  was abandoning the craft that much early on every campaign.
+
+  Re-anchoring needs no new constant and self-calibrates across radios: both
+  ends run `verify_timeout_ms` from the craft's landing, and the issuer's
+  deadline lands microseconds *after* the follower's (it observes the landing
+  one frame late), which is the correct order — the craft goes home first and
+  the issuer follows. If no ARMED frame ever arrives the deadline stays at
+  `max(T_switch, landing) + verify_timeout_ms` and the campaign reverts, as
+  before.
+- **Video-verify requires a COMMITTED craft, not merely a present one
+  (Pass 89, ruled 2026-07-24).** Craft video on `target_chan` proves the craft
+  *arrived*; it does not prove the craft *stayed*. The craft transmits
+  throughout its own §11.5 VERIFY window — before it has decided — so an issuer
+  that latches on any craft frame can declare success on evidence produced by a
+  craft that then reverts. Observed on hardware: issuer logged
+  `campaign confirmed -> 5745` while the craft reverted to 5805, splitting the
+  fleet with the ground reporting success.
+
+  Therefore: **`CSA_ARMED` stays asserted for the whole campaign — set on
+  accept, cleared only on reaching COMMITTED** — and the issuer's video-verify
+  MUST latch only on a craft DATA frame received on `target_chan` after
+  T_switch **with `CSA_ARMED` clear**. That frame is the craft's commit proof.
+  An `CSA_ARMED`-set frame on `target_chan` means "arrived, still deciding" and
+  MUST NOT satisfy video-verify.
+
+  This changes `CSA_ARMED`'s lifetime (§3.2 bit 4), which previously cleared at
+  the switch. The ARM-ack use is unaffected: the issuer latches `armed_seen_`
+  before T_switch and the bit merely persists past it.
+
+  ~~**No asymmetric window sizing is required.**~~ **Retracted by Pass 92.**
+  The Pass 89 measurement behind this paragraph timed the issuer's first craft
+  *video* frame (≤ 1.2 ms across 8 hops) — but that was a `CSA_ARMED`-**set**
+  frame, and this very ruling then made such a frame insufficient. The evidence
+  was collected under the semantics the ruling replaced. Under the commit-proof
+  rule the issuer waits for the `CSA_ARMED`-**clear** frame, which cannot arrive
+  before the craft has landed, heard the issuer and committed: measured at
+  median 115.6 / p90 145.2 / **max 196.9 ms** after T_switch over 27 hops. The
+  asymmetry is real. Equal `verify_timeout_ms` on both ends is still correct —
+  but only once both ends anchor it on the same event, which is what the Pass 92
+  re-anchor above establishes.
+
 - **Video-verify counts nothing before T_switch (Pass 69, review pass 2):**
   the craft does not move before T_switch, so a "craft video" frame observed
   earlier is by definition old-channel traffic — a stale ear (e.g. a
@@ -2325,7 +2597,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     "return": { "guard_us": 300, "return_window_us": 2000,
                 "unicast": false, "report_redundancy": 2 },
     "csa":    { "psk": "<optional; auto-generated + announced when absent, §11.4a>",
-                "settle_s": 3.0, "verify_timeout_ms": 150,
+                "settle_s": 3.0, "verify_timeout_ms": 500,
                 "rx_liveness_ms": 750,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
                 "bind_release_s": 90, "persist_channel": false,

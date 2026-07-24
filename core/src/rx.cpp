@@ -317,6 +317,13 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
     auto& als = s->adapter_last_seq[adapter_id];
     als = std::max(als, v.hdr.seq);
 
+    // §3.4 (Pass 87): max_block is §6.6 CLAMP state, not profile state — it
+    // ratchets in best-effort too. Freezing it here reproduces, by another
+    // route, the delivered-block-reference failure §6.6 documents: the block
+    // clamp rejects everything fwd_clamp_blocks later, the sustained-clamp
+    // resync flushes the stream, and the pair repeats forever.
+    s->max_block = std::max(s->max_block, v.hdr.block_id);
+
     if (!s->best_effort) {
         BlockInfo& b = s->blocks[v.hdr.block_id];
         if (b.first_seen_ms == 0) {
@@ -328,7 +335,6 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
         b.iframe_class =
             b.iframe_class || (v.hdr.data_flags & data_flags::kArq) != 0;
         b.deadline_ms = block_deadline(*s, b.first_seen_ms, b.iframe_class);
-        s->max_block = std::max(s->max_block, v.hdr.block_id);
     }
 
     Held h;
@@ -442,8 +448,18 @@ void RxEngine::note_adapter_seq(Stream& s, uint8_t adapter_id, uint32_t seq) {
 }
 
 void RxEngine::note_gaps(Stream& s, uint64_t now_ms) {
-    // Bounded by the §6.6 clamp: max_seq - cursor <= fwd_clamp_pkts.
-    for (uint32_t m = s.cursor; m < s.max_seq; ++m) {
+    // §2.1/§6.6 (Pass 81): the enumeration bound is fwd_clamp_pkts,
+    // UNCONDITIONALLY — never `max_seq - cursor`. That distance reads
+    // 0xFFFFFFFF both in the normal all-delivered state (cursor == max_seq+1)
+    // and after a u32 wrap, so a plain `m < max_seq` loop enumerates the whole
+    // sequence space in the latter. The clamp keeps the legitimate span
+    // <= fwd_clamp_pkts; anything wider is not an outstanding gap.
+    const uint32_t span = s.max_seq - s.cursor;  // modular forward distance
+    if (span > policy_.fwd_clamp_pkts) {
+        return;
+    }
+    for (uint32_t n = 0; n < span; ++n) {
+        const uint32_t m = s.cursor + n;
         if (s.held.count(m) == 0 && s.gaps.count(m) == 0) {
             Gap g;
             g.first_missing_ms = now_ms;
@@ -565,6 +581,22 @@ void RxEngine::evaluate_gaps(Stream& s, uint64_t now_ms) {
     }
 }
 
+// §2.1 (Pass 81): a cursor that wraps past 0xFFFFFFFF is a desync, not a
+// sequence — max_seq can no longer ratchet and the stream would run gapless
+// and NACK-less forever. Re-floor with §2 startup-floor semantics, exactly as
+// the §6.6 sustained-clamp resync does, and count it the same way.
+void RxEngine::refloor_on_wrap(Stream& s) {
+    ++s.counters.resyncs;
+    s.max_seq = s.cursor;
+    s.max_block = s.last_delivered_block;
+    s.held.clear();
+    s.gaps.clear();
+    s.blocks.clear();
+    s.completed_blocks.clear();
+    s.adapter_last_seq.clear();
+    s.first_clamp_ms = 0;
+}
+
 void RxEngine::advance_cursor(Stream& s, uint64_t now_ms,
                               const Deliver& deliver) {
     while (s.cursor <= s.max_seq) {
@@ -578,7 +610,10 @@ void RxEngine::advance_cursor(Stream& s, uint64_t now_ms,
             s.last_delivered_block = h->second.block_id;
             s.held.erase(h);
             s.gaps.erase(s.cursor);
-            ++s.cursor;
+            if (++s.cursor == 0) {  // §2.1 wrap
+                refloor_on_wrap(s);
+                return;
+            }
             // Prune block info older than what we can still reference.
             while (!s.blocks.empty() &&
                    s.blocks.begin()->first < s.last_delivered_block) {
@@ -624,7 +659,10 @@ void RxEngine::advance_cursor(Stream& s, uint64_t now_ms,
             break;
         }
         s.gaps.erase(git);
-        ++s.cursor;
+        if (++s.cursor == 0) {  // §2.1 wrap
+            refloor_on_wrap(s);
+            return;
+        }
     }
 }
 

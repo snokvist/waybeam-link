@@ -150,7 +150,8 @@ class Selector {
     enum class Phase : uint8_t { kBoot, kIdle, kBitrateLead, kMcsGrace };
 
     size_t ladder_size() const;
-    size_t clamp_rung(size_t r) const;  // min/max_profile pins
+    size_t clamp_rung(size_t r) const;  // min/max_profile pins (profile IDs)
+    size_t rung_of_id(uint8_t id, size_t fallback) const;  // §9.7 id -> rung
     size_t floor_rung() const;
     size_t max_prob_rung() const;
     bool rssi_guard_active() const;

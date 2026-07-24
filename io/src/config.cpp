@@ -460,6 +460,19 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pc.value("verify_timeout_ms", csa.verify_timeout_ms);
                 csa.rx_liveness_ms =
                     pc.value("rx_liveness_ms", csa.rx_liveness_ms);
+                // §15.2 (Pass 92): the §11.6 RX-liveness guard exists to catch
+                // a half-applied retune. A verify window that outlives it lets
+                // a full monitor re-init fire in the middle of a switch that
+                // is still pending — the guard would be firing on a radio that
+                // is merely waiting, not deaf. Ordering is a config invariant,
+                // not a runtime tie-break.
+                if (csa.rx_liveness_ms != 0 &&
+                    csa.verify_timeout_ms >= csa.rx_liveness_ms) {
+                    return Result<Config>::fail(
+                        "policy.csa.verify_timeout_ms must be < "
+                        "rx_liveness_ms (§11.6 guard fires mid-switch "
+                        "otherwise)");
+                }
                 csa.min_interval_s = pc.value("min_interval_s", csa.min_interval_s);
                 csa.ack_timeout_ms = pc.value("ack_timeout_ms", csa.ack_timeout_ms);
                 csa.bind_release_s =
@@ -483,6 +496,20 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cmd.ack_timeout_ms =
                     pm.value("ack_timeout_ms", cmd.ack_timeout_ms);
                 cmd.retry_cap = pm.value("retry_cap", cmd.retry_cap);
+                // Both narrow to uint8_t in vcmd_params() and are decremented
+                // pre-test, so 0 wraps to 255: a 3-copy command becomes a
+                // 256-copy transmit storm. Range-check where the value is
+                // still wide.
+                if (cmd.copies < 1 || cmd.copies > 255) {
+                    return Result<Config>::fail(
+                        "policy.cmd.copies must be in [1,255] (§11.7), got " +
+                        std::to_string(cmd.copies));
+                }
+                if (cmd.retry_cap < 1 || cmd.retry_cap > 255) {
+                    return Result<Config>::fail(
+                        "policy.cmd.retry_cap must be in [1,255] (§11.7), got " +
+                        std::to_string(cmd.retry_cap));
+                }
                 cmd.min_interval_ms =
                     pm.value("min_interval_ms", cmd.min_interval_ms);
             }

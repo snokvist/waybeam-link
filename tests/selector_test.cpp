@@ -443,5 +443,58 @@ int main() {
         CHECK_EQ_U(h.sel.profile_id(), before);
     }
 
+    // §9.8 Pass 84: the fail-safe descends to floor_profile, UNCLAMPED by the
+    // §9.7 min_profile pin. The deployed vehicle runs min 1 / max 5 (an airtime
+    // choice); before the fix that silently also removed MCS0 — the table's
+    // floor — from the lost-feedback path.
+    {
+        SelectorPolicy p;
+        p.mcs_settle_ms = 0;
+        p.min_profile = 1;  // adaptation envelope: never CHOOSE MCS0...
+        p.max_profile = 5;
+        Harness h(p);       // ...but floor_profile is 0 (make_table)
+        h.boot(0);
+        // Climb off the floor on healthy reports so there is somewhere to fall.
+        uint64_t t = 0;
+        for (; t <= 20000; t += 100) {
+            h.report(t, -35, 0);
+            (void)h.sel.tick(t);
+        }
+        CHECK(h.sel.profile_id() > 1);
+        // Feedback stops entirely: hold, then damped descent all the way down.
+        for (; t <= 60000; t += 100) {
+            (void)h.sel.tick(t);
+        }
+        CHECK(std::string_view(h.sel.state()) == "FAILSAFE");
+        CHECK_EQ_U(h.sel.profile_id(), 0);  // floor_profile, not min_profile
+    }
+    // §9.7 Pass 83: min/max_profile are profile IDs, not ladder indices. A
+    // table whose ids do not equal their positions must still pin correctly.
+    {
+        SelectorPolicy p;
+        p.mcs_settle_ms = 0;
+        p.min_profile = 20;  // id 20 == index 0
+        p.max_profile = 20;
+        Harness h(p);
+        h.table.profiles.clear();
+        for (uint8_t i = 0; i < 3; ++i) {  // ids 20,21,22 — offset from index
+            Profile pr;
+            pr.id = static_cast<uint8_t>(20 + i);
+            pr.mcs = i;
+            pr.gi = GuardInterval::kLong;
+            pr.tx_power_level = 4;
+            pr.airtime_budget_permille = 600;
+            pr.arq_deadline_iframe_ms = 80;
+            pr.arq_deadline_pframe_ms = 25;
+            pr.bitrate_min_kbps = 2200;
+            h.table.profiles.push_back(pr);
+        }
+        h.table.floor_profile = 20;
+        h.boot(0);
+        (void)h.sel.tick(100);
+        CHECK(std::string_view(h.sel.state()) == "PINNED");
+        CHECK_EQ_U(h.sel.profile_id(), 20);  // the id, not profiles[20]
+    }
+
     return wbtest_finish("selector_test");
 }

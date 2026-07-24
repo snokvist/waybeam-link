@@ -2,6 +2,8 @@
 // waybeam-link core: CSA engines (PROTOCOL.md §11) — see csa.h.
 #include "wblink/csa.h"
 
+#include <algorithm>
+
 #include "wblink/hmac_sha256.h"
 
 namespace wblink {
@@ -42,7 +44,18 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
                          std::optional<uint16_t> latched_issuer) {
     // §11.4 validation order, cheapest structural checks last so a forged
     // packet costs one HMAC at most.
-    if (!policy_.psk.empty()) {
+    // §11.4a (Pass 85): an absent key is a FAULT, not a mode. For craft/ground
+    // both sources are exhaustive (secret configured, or announced token
+    // self-generated at boot), so an empty key means a missed ANNOUNCE, a
+    // config typo or failed token generation — fail closed. Only a §15.2
+    // spectator may follow unauthenticated, and that permission is carried
+    // explicitly by role: never inferred from an empty key.
+    if (policy_.psk.empty()) {
+        if (!policy_.allow_unauthenticated) {
+            ++unauth_rejected_;
+            return false;
+        }
+    } else {
         const auto want = mac_of(pkt, policy_.psk);
         if (!want || *want != pkt.csa_mac) {
             return false;
@@ -137,9 +150,15 @@ CsaAction CsaFollower::tick(uint64_t now_us) {
             break;
         case State::kVerify:
             if (verify_deadline_us_ == 0) {
-                const uint32_t vt = campaign_.t_revert_ms != 0
-                                        ? campaign_.t_revert_ms
-                                        : policy_.verify_timeout_ms;
+                // §11.5 (Pass 86): the issuer may SHORTEN the window, never
+                // lengthen it. t_revert_ms is u16 — taken unclamped, one frame
+                // strands a follower 65 s on a channel it cannot hear. How
+                // long a node is willing to be deaf is the node's decision.
+                const uint32_t vt =
+                    std::min(campaign_.t_revert_ms != 0
+                                 ? campaign_.t_revert_ms
+                                 : policy_.verify_timeout_ms,
+                             policy_.verify_timeout_ms);
                 verify_deadline_us_ = now_us + static_cast<uint64_t>(vt) * 1000;
             }
             if (now_us >= verify_deadline_us_) {
@@ -225,13 +244,17 @@ bool CsaIssuer::start(const CommonPrefix& prefix, uint16_t target_chan_mhz,
     tmpl_.prev_bw = prev_bw;
     tmpl_.power_intent = power_intent;
     // §11.2 dt budget: campaign span + max retune for the class + margin.
-    const uint32_t dt0_ms = retune_class == 0 ? 150 : 500;
+    // §11.2 (Pass 91): class 0 is 300 ms, not 150. The budget must hold both
+    // the copy window and the 50 ms ack-lead cutoff; at 150 ms those conflict
+    // and the window collapses to roughly the pre-Pass-90 burst.
+    const uint32_t dt0_ms = retune_class == 0 ? 300 : 500;
     started_us_ = now_us;
     switch_at_us_ = now_us + static_cast<uint64_t>(dt0_ms) * 1000;
     copies_left_ = kCopies;
     next_copy_us_ = now_us;
     armed_seen_ = false;
     video_seen_ = false;
+    landing_seen_ = false;  // §11.6 Pass 92: one re-anchor per campaign
     state_ = State::kAnnounce;
     return true;
 }
@@ -242,7 +265,69 @@ void CsaIssuer::note_craft_armed(uint64_t) {
     }
 }
 
-void CsaIssuer::note_craft_video(uint64_t now_us) {
+void CsaIssuer::stamp_copy(CsaPacket& pkt, uint64_t now_us) const {
+    // §11.2: dt is relative to THIS copy's transmission, derived from the
+    // campaign's absolute T_switch, so every copy — first or last — resolves
+    // to the same instant. Clamped to >= 1: dt == 0 marks a §11.6 beacon.
+    const uint64_t left_us =
+        switch_at_us_ > now_us ? switch_at_us_ - now_us : 1000;
+    pkt.dt_to_switch_ms =
+        static_cast<uint16_t>(left_us / 1000 == 0 ? 1 : left_us / 1000);
+    if (const auto m = mac_of(pkt, policy_.psk)) {
+        pkt.csa_mac = *m;  // the MAC covers dt — restamp implies re-MAC
+    }
+}
+
+bool CsaIssuer::restamp_copy(CsaPacket& pkt, uint64_t now_us) const {
+    // §11.2 (Pass 90): a copy held for the craft's §7.2 quiet gap must be
+    // re-stamped at the instant it goes on air. The follower anchors T_switch
+    // on the copy's RECEIVE TSF, so a pre-stamped copy released after a hold
+    // of dt-hold places its switch that much late — desynchronising the exact
+    // instant the campaign exists to agree on. Past T_switch there is nothing
+    // truthful left to say: drop it rather than send it stale.
+    // Same cutoff as emission (§11.2 Pass 90 addendum): the gap hold can push
+    // a copy that was legal when produced past the ack-lead deadline, and a
+    // copy is only worth sending if an accepting craft can still get
+    // CSA_ARMED back before it departs.
+    if (switch_at_us_ <= now_us + kCopyCutoffUs) {
+        return false;
+    }
+    // The held copy must still belong to the campaign whose T_switch we are
+    // about to stamp onto it. A copy held across a campaign boundary would
+    // otherwise be re-stamped with the NEW campaign's dt while carrying the
+    // OLD target_chan and nonce — and re-MAC'd, so it would validate. A craft
+    // that missed the old campaign would then follow it to the wrong channel.
+    // Unreachable at the default 5 s min_interval, but min_interval_s is
+    // operator-settable and this is the injection path.
+    if (state_ == State::kIdle || pkt.csa_nonce != tmpl_.csa_nonce) {
+        return false;
+    }
+    stamp_copy(pkt, now_us);
+    return true;
+}
+
+void CsaIssuer::note_craft_video(uint64_t now_us, bool craft_armed) {
+    // §11.6 (Pass 89): a CSA_ARMED-set frame on target_chan proves the craft
+    // ARRIVED, not that it STAYED — the craft transmits throughout its own
+    // §11.5 VERIFY window, before deciding, and may still revert. Latching on
+    // it lets the issuer confirm a campaign the craft abandons, holding a
+    // channel the craft has left (observed 2026-07-24: issuer confirmed 5745
+    // while the craft reverted to 5805). The CLEARED bit is the commit proof.
+    if (craft_armed) {
+        // §11.6 (Pass 92): but that same frame IS the craft's landing, and the
+        // follower's §11.5 window runs from ITS landing while this one runs
+        // from T_switch — so without re-anchoring the issuer stops beaconing a
+        // full craft-retune-cost (measured median 48.7 / max 67.9 ms over 27
+        // hops) before the craft gives up. Re-anchor once: a later ARMED frame
+        // must not extend the window again.
+        if (state_ == State::kVerify && now_us >= switch_at_us_ &&
+            !landing_seen_) {
+            landing_seen_ = true;
+            verify_deadline_us_ =
+                now_us + static_cast<uint64_t>(policy_.verify_timeout_ms) * 1000;
+        }
+        return;
+    }
     // §11.6 review pass 2: nothing before T_switch can be legitimate craft
     // video on the target — the craft does not move until then; an earlier
     // frame is a stale ear (failed per-adapter retune) or RF bleed and must
@@ -268,17 +353,15 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
     IssuerAction a;
     switch (state_) {
         case State::kAnnounce:
-            if (now_us >= next_copy_us_) {
+            // §11.2 (Pass 90 addendum): never emit a copy so close to T_switch
+            // that an accepting craft cannot get CSA_ARMED back to the issuer
+            // before it leaves the old channel.
+            if (now_us >= next_copy_us_ &&
+                switch_at_us_ > now_us + kCopyCutoffUs) {
                 a.kind = IssuerAction::Kind::kSendCopy;
                 a.pkt = tmpl_;
                 a.pkt.csa_seq = copies_left_;
-                const uint64_t left_us =
-                    switch_at_us_ > now_us ? switch_at_us_ - now_us : 1000;
-                a.pkt.dt_to_switch_ms = static_cast<uint16_t>(
-                    left_us / 1000 == 0 ? 1 : left_us / 1000);
-                if (const auto m = mac_of(a.pkt, policy_.psk)) {
-                    a.pkt.csa_mac = *m;
-                }
+                stamp_copy(a.pkt, now_us);
                 next_copy_us_ = now_us + kCopySpacingUs;
                 if (--copies_left_ == 0) {
                     state_ = State::kAwaitAck;
@@ -286,6 +369,23 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
             }
             break;
         case State::kAwaitAck:
+            // §11.2 (Pass 90): keep re-sending copies until the craft ACKs or
+            // T_switch arrives. The old fixed 5-copy burst spanned 80 ms and
+            // then went silent for the rest of ack_timeout; a craft that heard
+            // none of the five lost the campaign with ~1 s of airtime unspent.
+            // The ACK below is the stop condition, so this is
+            // retransmit-until-acked. Checked before the ACK/timeout arms so a
+            // due copy is not dropped on the tick that also commits — commit
+            // wins next tick, one copy later, which is harmless.
+            if (!armed_seen_ && switch_at_us_ > now_us + kCopyCutoffUs &&
+                now_us >= next_copy_us_) {
+                a.kind = IssuerAction::Kind::kSendCopy;
+                a.pkt = tmpl_;
+                a.pkt.csa_seq = 0;  // §11.1: repeats past the initial burst
+                stamp_copy(a.pkt, now_us);
+                next_copy_us_ = now_us + kCopySpacingUs;
+                break;
+            }
             // §11.6 pre-position (Pass 69): commit immediately on CSA_ARMED —
             // the copies are out, the craft has ACKed, there is no further
             // business on the old channel. Waiting for T_switch made both

@@ -22,7 +22,18 @@ CsaParams policy_with_psk() {
     CsaParams p;
     p.psk = {'s', 'e', 'c', 'r', 'e', 't'};
     p.allowlist = {5745, 5805, 5825};
+    // Pass 89 raised the default 150 -> 500 ms. The window-arithmetic cases
+    // below were written against 150 and their timing is not what they test,
+    // so pin it here; the new default is asserted on its own below.
+    p.verify_timeout_ms = 150;
     return p;
+}
+
+// Re-MAC after mutating a packet's fields (the MAC covers bytes 0..27).
+uint32_t mac_for(const CsaParams& pol, const CsaPacket& c) {
+    uint8_t buf[32];
+    CHECK_EQ_U(encode_csa(c, buf, sizeof(buf)), 32);
+    return csa_mac(pol.psk.data(), pol.psk.size(), buf);
 }
 
 CsaPacket make_csa(const CsaParams& pol, uint32_t nonce, uint16_t chan,
@@ -88,14 +99,32 @@ int main() {
         CHECK(f.on_csa(make_csa(pol, 2, 5825, 150), 6'000'000, std::nullopt,
                        0, std::nullopt));
     }
-    // Spectator (empty PSK) follows unauthenticated (§11.4).
+    // Spectator follows unauthenticated (§11.4a) — but ONLY because the role
+    // says so, not because the key is empty (Pass 85).
     {
         CsaParams spec = pol;
         spec.psk.clear();
+        spec.allow_unauthenticated = true;  // §15.2 node.spectator
         CsaFollower f(spec);
         CsaPacket c = make_csa(pol, 1, 5745, 150);
         c.csa_mac = 0;  // no MAC at all
         CHECK(f.on_csa(c, 1000, std::nullopt, 0, std::nullopt));
+        CHECK_EQ_U(f.unauth_rejected(), 0);
+    }
+    // §11.4a Pass 85: a craft/ground with an EMPTY key is faulted, not
+    // unauthenticated — it must fail closed. Before the fix an empty psk
+    // silently accepted any forged CSA inside the allowlist, retuning a craft
+    // off-channel mid-flight on a missed ANNOUNCE or a config typo.
+    {
+        CsaParams craft = pol;
+        craft.psk.clear();  // token generation failed / ANNOUNCE not yet heard
+        craft.allow_unauthenticated = false;  // craft or ground, not spectator
+        CsaFollower f(craft);
+        CsaPacket c = make_csa(pol, 1, 5745, 150);
+        c.csa_mac = 0;
+        CHECK(!f.on_csa(c, 1000, std::nullopt, 0, std::nullopt));
+        CHECK_EQ_U(f.unauth_rejected(), 1);
+        CHECK(std::string_view(f.state_str()) == "IDLE");
     }
 
     // --- §11.2 TSF anchor ---------------------------------------------------
@@ -210,7 +239,7 @@ int main() {
         CHECK(is.start(pre, 5745, 0, 0, 5805, 0, 4, 0));
         CHECK(!is.start(pre, 5745, 0, 0, 5805, 0, 4, 0));  // already active
         // 5 copies, csa_seq 5..1, dt decrementing toward one T_switch.
-        uint16_t last_dt = 200;
+        uint16_t last_dt = 301;  // dt0 = 300 ms for class 0 (§11.2 Pass 91)
         for (int i = 0; i < 5; ++i) {
             const auto a = is.tick(static_cast<uint64_t>(i) * 20'000);
             CHECK_EQ_U(a.kind,
@@ -254,19 +283,21 @@ int main() {
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
         // Craft video arrives → success LATCHED, but the beacon tail keeps
         // blanketing the craft's verify window (§11.6 beacon tail).
-        is.note_craft_video(200'000);
+        // After T_switch (300 ms, §11.2 Pass 91) — earlier video is ignored
+        // as old-channel residue.
+        is.note_craft_video(310'000, false);  // Pass 89: committed craft
         CHECK(is.active());
-        CHECK_EQ_U(is.tick(221'500).kind,
+        CHECK_EQ_U(is.tick(321'500).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
-        // Campaign closes at the deadline (T_switch 150 ms + verify 150 ms)
+        // Campaign closes at the deadline (T_switch 300 ms + verify 150 ms)
         // with kSuccess, then goes quiet.
-        const auto s = is.tick(300'000);
+        const auto s = is.tick(450'000);
         CHECK_EQ_U(s.kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSuccess));
         CHECK(!is.active());
-        CHECK_EQ_U(is.tick(300'500).kind,
+        CHECK_EQ_U(is.tick(450'500).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kNone));
     }
     {
@@ -295,14 +326,15 @@ int main() {
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
         // Landing (first kVerify tick) right after the commit: the §11.6
         // deadline anchors at max(T_switch, landing) + verify_timeout =
-        // 150 + 150 ms — the craft does not move before T_switch.
+        // 300 + 150 ms (§11.2 Pass 91) — the craft does not move before
+        // T_switch.
         CHECK_EQ_U(is.tick(100'500).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
-        CHECK_EQ_U(is.tick(150'000 + 149'000).kind,
+        CHECK_EQ_U(is.tick(300'000 + 149'000).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
-        const auto a = is.tick(150'000 + 150'000);
+        const auto a = is.tick(300'000 + 150'000);
         CHECK_EQ_U(a.kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
         CHECK_EQ_U(a.chan_mhz, 5805);
@@ -363,7 +395,7 @@ int main() {
         CHECK_EQ_U(is.tick(450'000).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
-        is.note_craft_video(460'000);
+        is.note_craft_video(460'000, false);  // Pass 89: committed craft
         CHECK_EQ_U(is.tick(450'000 + 150'000).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSuccess));
@@ -378,9 +410,11 @@ int main() {
         is.note_craft_armed(100'000);
         CHECK_EQ_U(is.tick(101'000).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
-        is.tick(101'500);                 // landing: window opens (300 ms)
-        is.note_craft_video(120'000);     // BEFORE T_switch (150 ms): ignored
-        const auto a = is.tick(300'000);
+        is.tick(101'500);                 // landing: window opens
+        is.note_craft_video(120'000, false);  // BEFORE T_switch (300 ms, §11.2
+                                              // Pass 91): ignored
+        // Deadline = max(T_switch, landing) + verify_timeout = 300 + 150.
+        const auto a = is.tick(450'001);
         CHECK_EQ_U(a.kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
         CHECK(!is.active());
@@ -507,6 +541,7 @@ int main() {
         // unauthenticated-follow posture — self-harm only.
         CsaParams spol;
         spol.allowlist = {5745, 5805, 5825};
+        spol.allow_unauthenticated = true;  // §15.2 node.spectator (Pass 85)
         CsaFollower f(spol);
         CsaPacket c = make_csa(pol, 1, 5745, 150);  // MAC irrelevant
         CHECK(f.on_csa(c, 0, std::nullopt, 0, std::nullopt));
@@ -516,6 +551,332 @@ int main() {
         b.dt_to_switch_ms = 0;
         CHECK(!f.on_csa(b, 160'000, std::nullopt, 0, std::nullopt));
         CHECK(std::string_view(f.state_str()) == "COMMITTED");
+    }
+
+    // §11.5 Pass 86: t_revert_ms may SHORTEN the VERIFY window, never lengthen
+    // it. Before the fix a u16 taken verbatim stranded the follower on a dead
+    // channel for its full value — up to 65 s.
+    {
+        CsaParams pol2 = pol;
+        pol2.verify_timeout_ms = 150;
+        CsaFollower f(pol2);
+        CsaPacket c = make_csa(pol, 1, 5745, 150);
+        c.t_revert_ms = 65535;  // hostile (or simply wrong) issuer
+        c.csa_mac = mac_for(pol, c);
+        CHECK(f.on_csa(c, 0, std::nullopt, 0, std::nullopt));
+        CHECK_EQ_U(f.tick(150'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kRetune));
+        CHECK_EQ_U(f.tick(180'000).kind,  // landing: window opens
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        // Clamped to the LOCAL 150 ms, so revert at 180+150 — not 180+65535.
+        CHECK_EQ_U(f.tick(329'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        CHECK_EQ_U(f.tick(330'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kRevert));
+    }
+    // ...and the issuer CAN still shorten it.
+    {
+        CsaParams pol2 = pol;
+        pol2.verify_timeout_ms = 150;
+        CsaFollower f(pol2);
+        CsaPacket c = make_csa(pol, 1, 5745, 150);
+        c.t_revert_ms = 50;
+        c.csa_mac = mac_for(pol, c);
+        CHECK(f.on_csa(c, 0, std::nullopt, 0, std::nullopt));
+        f.tick(150'000);                  // retune
+        f.tick(180'000);                  // landing
+        CHECK_EQ_U(f.tick(230'000).kind,  // 180 + 50, the issuer's tighter budget
+                   static_cast<unsigned>(CsaAction::Kind::kRevert));
+    }
+    {
+        // Pass 89: the §11.5 default is 500 ms, not the old median-derived
+        // 150. Measured max issuer-landing delay was 143 ms — the old window
+        // had 4.7% margin and stranded the fleet when it was exceeded.
+        const CsaParams def;
+        CHECK_EQ_U(def.verify_timeout_ms, 500u);
+    }
+    {
+        // Pass 89 regression — the hop-4 fleet split of 2026-07-24.
+        // A craft that ARRIVED on target_chan but has not COMMITTED still
+        // transmits, with CSA_ARMED set. That must NOT satisfy video-verify:
+        // the craft may still revert, and an issuer that confirms on it holds
+        // a channel the craft has left.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        CHECK_EQ_U(is.tick(101'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+        is.tick(200'000);  // landing; deadline = max(300, 200) + 150 = 450
+        // Craft is present on the target AFTER T_switch — so the pre-T_switch
+        // gate is not what rejects these — but still deciding: armed bit SET.
+        // Pass 92: the FIRST of these is the craft's observed landing and
+        // re-anchors the deadline to 310 + 150 = 460 ms (was 450).
+        is.note_craft_video(310'000, true);
+        is.note_craft_video(400'000, true);
+        // Deadline: no commit proof was ever seen, so the issuer must REVERT
+        // and follow the craft back rather than declare success.
+        CHECK_EQ_U(is.tick(460'001).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+        CHECK(!is.active());
+    }
+    {
+        // Pass 89: the same campaign, but the craft commits (clears the bit)
+        // inside the window → success, exactly as before the ruling.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        CHECK_EQ_U(is.tick(101'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+        is.tick(200'000);
+        is.note_craft_video(310'000, true);   // still deciding (Pass 92:
+                                              // landing -> deadline 460)
+        is.note_craft_video(340'000, false);  // committed — the proof
+        CHECK_EQ_U(is.tick(460'001).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSuccess));
+    }
+    {
+        // Pass 92: the issuer's verify deadline RE-ANCHORS on the craft's
+        // observed landing — the first CSA_ARMED-set frame on target_chan
+        // after T_switch. Without it the issuer measures its window from
+        // T_switch while the follower measures the same budget from ITS
+        // landing, so the issuer stops beaconing a full craft-retune-cost
+        // (bench: median 48.7, max 67.9 ms) before the craft gives up.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        CHECK_EQ_U(is.tick(101'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+        is.tick(200'000);  // landing; pre-Pass-92 deadline = 300 + 150 = 450
+        // The craft lands 80 ms after T_switch and says so (armed bit still
+        // set — it has arrived, not committed).
+        is.note_craft_video(380'000, true);
+        // Pre-Pass-92 this reverted here, abandoning a craft whose own window
+        // runs to 380 + 150 = 530 ms. Post-Pass-92 it is still blanketing that
+        // window with beacons — the craft's guaranteed confirm signal.
+        CHECK_EQ_U(is.tick(450'001).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSendBeacon));
+        CHECK(is.active());
+        // Commit proof inside the re-anchored window.
+        is.note_craft_video(470'000, false);
+        CHECK_EQ_U(is.tick(530'001).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSuccess));
+    }
+    {
+        // Pass 92: ONE re-anchor per campaign. A craft that keeps advertising
+        // CSA_ARMED must not be able to walk the issuer's deadline forward
+        // indefinitely — the window is bounded by the craft's landing, not by
+        // its most recent frame.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        is.tick(101'000);
+        is.tick(200'000);
+        is.note_craft_video(380'000, true);  // landing -> deadline 530
+        is.note_craft_video(500'000, true);  // must NOT push it to 650
+        is.note_craft_video(520'000, true);
+        CHECK_EQ_U(is.tick(530'001).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+        CHECK(!is.active());
+    }
+    {
+        // Pass 92: the re-anchor inherits the §11.6 review-pass-2 gate — a
+        // craft frame BEFORE T_switch is old-channel traffic or a stale ear by
+        // definition, and must not move the deadline any more than it may
+        // satisfy video-verify.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        is.tick(101'000);
+        is.tick(200'000);
+        is.note_craft_video(250'000, true);  // before T_switch (300 ms)
+        // Had it re-anchored, the deadline would be 250 + 150 = 400 ms; the
+        // issuer must still be beaconing there, and close at the Pass 69
+        // deadline of 450.
+        CHECK_EQ_U(is.tick(400'001).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSendBeacon));
+        CHECK_EQ_U(is.tick(450'001).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+    }
+    {
+        // Pass 92: a campaign the craft never reaches leaves the deadline
+        // exactly where Pass 69 put it — no ARMED frame, no re-anchor.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+        is.note_craft_armed(100'000);
+        is.tick(101'000);
+        is.tick(200'000);
+        CHECK_EQ_U(is.tick(449'999).kind,
+                   static_cast<unsigned>(
+                       CsaIssuer::IssuerAction::Kind::kSendBeacon));
+        CHECK_EQ_U(is.tick(450'001).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+    }
+    {
+        // Pass 92: the seed the ENGINE ships. Pass 89 ruled 500 ms; the value
+        // that actually runs comes from §15.2 (config_test pins that it is
+        // derived from this constant, not restated).
+        CHECK_EQ_U(kCsaVerifyTimeoutMsDefault, 500u);
+        CHECK_EQ_U(CsaParams{}.verify_timeout_ms, 500u);
+    }
+    {
+        // Pass 89: campaign_active() spans ARMED and VERIFY and drops on
+        // COMMITTED — it is what drives the craft's CSA_ARMED wire bit.
+        CsaFollower f(pol);
+        CHECK(!f.campaign_active());
+        CsaPacket c = make_csa(pol, 1, 5745, 150);
+        c.csa_mac = mac_for(pol, c);
+        CHECK(f.on_csa(c, 0, std::nullopt, 0, std::nullopt));
+        CHECK(f.campaign_active());  // ARMED
+        f.tick(150'000);             // retune -> VERIFY
+        CHECK(f.campaign_active());
+        f.tick(180'000);  // landing
+        CHECK(f.campaign_active());
+        f.note_valid_rx(200'000, 9);  // heard the issuer -> COMMITTED
+        CHECK(!f.campaign_active());
+    }
+
+    {
+        // Pass 90: copies repeat past the initial burst until T_switch. The
+        // old fixed 5-copy burst spanned 80 ms and then went silent for the
+        // rest of ack_timeout, losing the campaign if the craft (RX-deaf while
+        // transmitting) heard none of the five.
+        // retune_class 1 (dt0 = 500 ms) is where the extension has room. At
+        // class 0 the 150 ms budget minus the 50 ms ack-lead cutoff leaves
+        // only the original burst — there, gap scheduling is what carries
+        // delivery, not extra copies.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 1, 5805, 0, 4, 0));
+        int copies = 0;
+        for (uint64_t t = 0; t < 499'000; t += 1000) {
+            if (is.tick(t).kind == CsaIssuer::IssuerAction::Kind::kSendCopy) {
+                ++copies;
+            }
+        }
+        CHECK(copies > 5);
+        CHECK(is.active());
+    }
+    {
+        // Pass 90 addendum: no copy inside the last kCopyCutoffUs before
+        // T_switch. A craft accepting that late cannot get CSA_ARMED back to
+        // the issuer before it departs — bench-observed as the only revert in
+        // eight campaigns (dt 23 ms).
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        uint64_t last_copy_us = 0;
+        int copies = 0;
+        for (uint64_t t = 0; t < 300'000; t += 1000) {
+            if (is.tick(t).kind == CsaIssuer::IssuerAction::Kind::kSendCopy) {
+                last_copy_us = t;
+                ++copies;
+            }
+        }
+        CHECK(last_copy_us > 0);
+        CHECK(last_copy_us <= 250'000);  // T_switch 300 ms - 50 ms cutoff
+        // §11.2 Pass 91: the point of widening class 0 to 300 ms is that the
+        // copy window and the ack lead both fit. A 250 ms window at 20 ms
+        // spacing is ~12 copies — at the old 150 ms budget the cutoff left
+        // 5, i.e. no better than the burst that lost ~1 campaign in 5.
+        CHECK(copies > 10);
+    }
+    {
+        // Pass 90: the ACK stops the retransmission — it is
+        // retransmit-until-acked, not an unbounded burst.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (uint64_t t = 0; t < 100'000; t += 1000) is.tick(t);
+        is.note_craft_armed(100'000);
+        // Next tick commits rather than emitting another copy.
+        CHECK_EQ_U(is.tick(101'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+        int after = 0;
+        for (uint64_t t = 102'000; t < 149'000; t += 1000) {
+            if (is.tick(t).kind == CsaIssuer::IssuerAction::Kind::kSendCopy) {
+                ++after;
+            }
+        }
+        CHECK_EQ_U(static_cast<unsigned>(after), 0u);
+    }
+    {
+        // Pass 90: a copy held for the quiet gap is re-stamped at release —
+        // dt shrinks to match the delay, so every copy still resolves to the
+        // same absolute T_switch. A pre-stamped release would put the
+        // follower's switch late by the hold time.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        CsaPacket copy{};
+        for (uint64_t t = 0; t < 5'000; t += 1000) {
+            const auto a = is.tick(t);
+            if (a.kind == CsaIssuer::IssuerAction::Kind::kSendCopy) copy = a.pkt;
+        }
+        const uint16_t dt_at_stamp = copy.dt_to_switch_ms;
+        const uint32_t mac_at_stamp = copy.csa_mac;
+        CHECK(dt_at_stamp > 0);
+        // Held 30 ms for the gap, then released.
+        CHECK(is.restamp_copy(copy, 30'000));
+        CHECK_EQ_U(copy.dt_to_switch_ms, dt_at_stamp - 30u);
+        CHECK(copy.csa_mac != mac_at_stamp);  // the MAC covers dt
+        // Pass 90 addendum: inside the ack-lead cutoff (50 ms before
+        // T_switch) a copy is refused — an accepting craft could not get
+        // CSA_ARMED back to the issuer before departing. dt0 is 300 ms
+        // (Pass 91), so 260 ms leaves only 40 ms.
+        CHECK(!is.restamp_copy(copy, 260'000));
+        // Past T_switch there is nothing truthful left to say — drop, never
+        // send stale.
+        CHECK(!is.restamp_copy(copy, 300'001));
+    }
+    {
+        // Pass 90: a re-stamped copy is still MAC-valid to a follower — the
+        // re-MAC must cover the NEW dt, not merely be copied forward.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        CsaPacket copy{};
+        for (uint64_t t = 0; t < 5'000; t += 1000) {
+            const auto a = is.tick(t);
+            if (a.kind == CsaIssuer::IssuerAction::Kind::kSendCopy) copy = a.pkt;
+        }
+        CHECK(is.restamp_copy(copy, 40'000));
+        CsaFollower f(pol);
+        CHECK(f.on_csa(copy, 0, std::nullopt, 0, std::nullopt));
+        CHECK(f.campaign_active());
+    }
+    {
+        // Pass 90 review: a copy held across a campaign boundary must NOT be
+        // re-stamped. It carries the OLD target_chan and nonce; stamping the
+        // NEW campaign's dt onto it and re-MACing would produce a packet that
+        // validates and sends a craft that missed the old campaign to the
+        // wrong channel.
+        CsaParams p = pol;
+        p.min_interval_ms = 0;  // operator-settable; default 5 s hides this
+        CsaIssuer is(p);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        CsaPacket old_copy{};
+        for (uint64_t t = 0; t < 5'000; t += 1000) {
+            const auto a = is.tick(t);
+            if (a.kind == CsaIssuer::IssuerAction::Kind::kSendCopy) {
+                old_copy = a.pkt;
+            }
+        }
+        CHECK_EQ_U(old_copy.target_chan, 5745);
+        // Campaign 1 dies on the ack timeout, campaign 2 goes to a DIFFERENT
+        // channel.
+        for (uint64_t t = 5'000; t <= 1'100'000; t += 10'000) is.tick(t);
+        CHECK(!is.active());
+        CHECK(is.start({9, 0, 1234}, 5825, 0, 0, 5805, 0, 4, 1'200'000));
+        // The stale copy is refused outright, not silently re-aimed.
+        CHECK(!is.restamp_copy(old_copy, 1'210'000));
+        // An idle issuer refuses too.
+        CsaIssuer idle(p);
+        CHECK(!idle.restamp_copy(old_copy, 1000));
     }
 
     return wbtest_finish("csa_test");

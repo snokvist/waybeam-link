@@ -11,7 +11,8 @@
 //    until reboot (§11.5, Pass 59): the only backout is the VERIFY→prev_chan
 //    jump-failed revert; the §11.5a command-source binding releases after
 //    bind_release_ms of issuer silence with no channel change.
-//  - CsaIssuer (ground): N=5 decrementing-dt copies @ 20 ms, MAC'd; commits
+//  - CsaIssuer (ground): dt-stamped copies @ 20 ms repeated until the craft's
+//    CSA_ARMED ack or T_switch (§11.2, Pass 90), each MAC'd; commits
 //    its own retune immediately on the craft's CSA_ARMED flag (§11.6
 //    pre-position, Pass 69), then re-injects the campaign as zero-dt
 //    rendezvous beacons until it hears craft video; aborts on ack timeout,
@@ -33,11 +34,29 @@
 
 namespace wblink {
 
+// §11.5 verify-window seed. SINGLE SOURCE OF TRUTH (Pass 92): io/config.h
+// defaults policy.csa.verify_timeout_ms from this constant, because
+// csa_params() copies the config value over the engine default
+// unconditionally — a second literal there silently wins. It did, for the
+// whole of Pass 89: the ruling raised this default to 500 and every binary
+// kept running the config's 150.
+inline constexpr uint32_t kCsaVerifyTimeoutMsDefault = 500;
+
 // §15.2 policy.csa — all times ms except the channel fields (MHz).
 struct CsaParams {
-    std::vector<uint8_t> psk;  // empty = spectator (unauthenticated follow)
+    std::vector<uint8_t> psk;  // §11.4a key; empty = fault unless spectator
+    // §11.4a (Pass 85): permission to follow an unauthenticated CSA is a ROLE
+    // property (§15.2 node.spectator), carried explicitly. It is deliberately
+    // NOT inferred from an empty psk: craft/ground with no key are faulted,
+    // not unauthenticated, and must fail closed.
+    bool allow_unauthenticated = false;
     uint32_t settle_ms = 3000;          // §11.3 adaptive freeze
-    uint32_t verify_timeout_ms = 150;   // §11.5 default; wire t_revert_ms wins
+    // §11.5 ceiling; t_revert_ms may only shorten. Pass 89: 150 -> 500. The old
+    // value was a median + margin; the follower reverts on the TAIL of the
+    // issuer's landing delay. Re-measured over 27 hops (Pass 92) with the
+    // window opened to 3000 ms so nothing reverted: max 132.8 ms, so 500 is
+    // 3.8x — and inside the 750 ms RX-liveness guard, which §15.2 now enforces.
+    uint32_t verify_timeout_ms = kCsaVerifyTimeoutMsDefault;
     uint32_t min_interval_ms = 5000;    // §11.4 rate-limit
     uint32_t ack_timeout_ms = 1000;     // §11.6 CSA_ARMED wait
     uint32_t bind_release_ms = 90000;   // §11.5a command-source binding release
@@ -78,9 +97,18 @@ class CsaFollower {
     CsaAction tick(uint64_t now_us);
 
     bool armed() const { return state_ == State::kArmed; }  // §11.6 data flag
+    // §11.6/§3.2 bit 4 (Pass 89): CSA_ARMED spans the WHOLE campaign — set on
+    // accept, cleared only on COMMITTED. Its clearing on target_chan is the
+    // craft's commit proof; clearing it at the switch (as before Pass 89) made
+    // "arrived, still deciding" indistinguishable from "committed" to the issuer.
+    bool campaign_active() const {
+        return state_ == State::kArmed || state_ == State::kVerify;
+    }
     uint64_t freeze_until_us() const { return freeze_until_us_; }  // §11.3
     // The issuer this follower latched onto (established by a MAC-valid CSA).
     std::optional<uint16_t> latched_issuer() const { return latched_; }
+    // §11.4a fail-closed rejections (empty key, non-spectator).
+    uint64_t unauth_rejected() const { return unauth_rejected_; }
     const char* state_str() const;
 
   private:
@@ -94,6 +122,7 @@ class CsaFollower {
     CsaParams policy_;
     State state_ = State::kIdle;
     std::optional<uint16_t> latched_;
+    uint64_t unauth_rejected_ = 0;
     // §11.4 anti-replay: last accepted nonce per (originator, session).
     std::map<std::pair<uint16_t, uint32_t>, uint32_t> last_applied_;
     uint64_t last_accept_us_ = 0;  // rate-limit anchor (0 = never)
@@ -131,8 +160,21 @@ class CsaIssuer {
     void note_craft_armed(uint64_t now_us);
     // Valid craft video/data seen (only meaningful in VERIFY, after commit;
     // ignored before T_switch — the craft cannot be on the target yet,
-    // §11.6 review pass 2).
-    void note_craft_video(uint64_t now_us);
+    // §11.6 review pass 2). `craft_armed` = the frame's CSA_ARMED flag: a SET
+    // bit means the craft arrived but has not committed, and MUST NOT satisfy
+    // video-verify (§11.6 Pass 89) — the craft transmits throughout its own
+    // VERIFY window and may still revert. That same SET frame IS the craft's
+    // landing as the issuer can observe it, and re-anchors the verify deadline
+    // once (§11.6 Pass 92).
+    void note_craft_video(uint64_t now_us, bool craft_armed);
+    // §11.2 (Pass 90): re-stamp a copy that was held for the craft's §7.2
+    // quiet gap, at the instant it actually goes on air — dt_to_switch_ms
+    // recomputed from the absolute T_switch and csa_mac recomputed over it.
+    // Returns false once T_switch has passed: the copy is then dropped, never
+    // transmitted stale (a stale dt would place the follower's switch late by
+    // the hold time, since it anchors on the copy's receive TSF).
+    bool restamp_copy(CsaPacket& pkt, uint64_t now_us) const;
+
     // The app's commit retune failed — abandon the campaign rather than
     // verify with untrusted ears (§11.6 review pass 2). The armed craft
     // reverts on its own verify timeout.
@@ -141,7 +183,8 @@ class CsaIssuer {
     struct IssuerAction {
         enum class Kind : uint8_t {
             kNone,
-            kSendCopy,    // inject pkt (already MAC'd)
+            kSendCopy,    // inject pkt; MAC'd for NOW, so a copy
+                          // held for the §7.2 gap must be restamp_copy()'d
             kCommit,      // retune own adapters to chan/bw
             kSendBeacon,  // §11.6 rendezvous beacon (already MAC'd, dt=0)
             kSuccess,     // campaign confirmed at the deadline (beacon tail)
@@ -164,12 +207,24 @@ class CsaIssuer {
     enum class State : uint8_t {
         kIdle,
         kAnnounce,  // copies still going out
-        kAwaitAck,  // copies done, waiting for CSA_ARMED / T_switch
+        kAwaitAck,  // initial burst out; copies still repeat here
+                    // until CSA_ARMED / T_switch (§11.2 Pass 90)
         kVerify,    // committed, waiting for craft video
     };
 
     static constexpr uint8_t kCopies = 5;
     static constexpr uint32_t kCopySpacingUs = 20000;  // §11.2
+    // §11.2 (Pass 90 addendum): stop emitting copies once less than this
+    // remains before T_switch. A copy accepted very late leaves the craft too
+    // little time to advertise CSA_ARMED on the OLD channel before it departs
+    // — the issuer never gets the ack it needs to pre-position, and the jump
+    // is uncoordinated. Pre-Pass-90 the fixed 5-copy burst ended at 80 ms of a
+    // 150 ms budget so this could not arise; running copies to T_switch
+    // created it. Bench 2026-07-24: eight accepted campaigns at dt 465/470/
+    // 146/140/109/107/106 ms all committed; the single dt=23 ms acceptance was
+    // the only revert. 50 ms is ~7 craft frames at the measured ~7.4 ms frame
+    // interval, so the ack survives several lost frames.
+    static constexpr uint32_t kCopyCutoffUs = 50000;
 
     CsaParams policy_;
     State state_ = State::kIdle;
@@ -184,9 +239,15 @@ class CsaIssuer {
     uint64_t switch_at_us_ = 0;
     uint64_t verify_deadline_us_ = 0;
     uint64_t next_beacon_us_ = 0;  // §11.6 rendezvous beacon cadence
+    // §11.2: stamp dt_to_switch_ms from the absolute T_switch and re-MAC.
+    void stamp_copy(CsaPacket& pkt, uint64_t now_us) const;
+
     bool armed_seen_ = false;
     bool video_seen_ = false;  // latched in VERIFY; campaign closes at the
                                // deadline either way (§11.6 beacon tail)
+    // §11.6 (Pass 92): the deadline re-anchors on the craft's observed landing
+    // exactly once per campaign — a later ARMED frame must not extend it again.
+    bool landing_seen_ = false;
 };
 
 }  // namespace wblink

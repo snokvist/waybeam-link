@@ -78,7 +78,7 @@
       "min_collect_ms": 4,
       "hard_close_ms": 8,
       "request_timeout_ms": 4,
-      "nack_grace_ms": 0,
+      "nack_grace_ms": 3,
       "repair_fraction_permille": 200,
       "absolute_symbol_limit": 8,
       "max_cache_attempts": 2,

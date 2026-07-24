@@ -6,7 +6,7 @@ Current four-node kernel-monitor verification topology:
 |---|---|---|---|
 | Vehicle | `192.168.2.232` | RTL8812EU TX/RX, channel 161 HT20 | `vehicle-waybeam-link.init`, `vehicle-192.168.2.232.json` |
 | x86 ground | `192.168.2.242` | RTL8812EU return TX/RX + RTL8812CU RX | `waybeam-ground.service`, `ground-192.168.2.242.json` |
-| RK3566 ground | `192.168.2.199` | RTL8812CU RX/return TX, frame-SHM to MPP/DRM | `waybeam-ground-rk.init`, `ground-192.168.2.199.json` |
+| RK3566 ground | `192.168.2.199` | RTL8812CU **passive spectator** (Pass 74) — RX only, no uplink; frame-SHM to MPP/DRM | `waybeam-ground-rk.init`, `ground-192.168.2.199.json` |
 | Cache | `192.168.2.247` | MT7921 + RTL8812AU receive-only | `waybeam-cache.service`, `cache-192.168.2.247.json` |
 
 The cache belongs to the x86 ground receiver (originator 9). That receiver owns

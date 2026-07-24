@@ -1,15 +1,20 @@
 [Unit]
 Description=Waybeam FPV ground receiver
 Wants=network-online.target
-After=network-online.target
-ConditionPathExists=/sys/class/net/wlx84fc1450bcde
-ConditionPathExists=/sys/class/net/wlx40a5ef2f2308
+After=network-online.target systemd-modules-load.service
+# NOT ConditionPathExists: a failed condition makes systemd SKIP the unit,
+# which is not a failure, so Restart=on-failure never applies and nothing
+# retries — late USB enumeration meant no ground receiver, silently. Wait
+# for the interfaces instead, and let the restart loop cover a slow bus.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=WAYBEAM_IFACE_WAIT_SECONDS=30
 ExecStartPre=/usr/sbin/rfkill unblock wifi
+ExecStartPre=/usr/local/libexec/waybeam-wait-ifaces wlx84fc1450bcde wlx40a5ef2f2308
 ExecStartPre=/usr/local/libexec/waybeam-mon-up wlx84fc1450bcde 161 HT20
 ExecStartPre=/usr/local/libexec/waybeam-mon-up wlx40a5ef2f2308 161 HT20
 ExecStart=/usr/local/bin/waybeam-link rx -c /etc/waybeam-link/ground.json

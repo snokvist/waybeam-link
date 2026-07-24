@@ -278,6 +278,7 @@ class RxEngine {
     void note_adapter_seq(Stream& s, uint8_t adapter_id, uint32_t seq);
     void evaluate_gaps(Stream& s, uint64_t now_ms);
     void advance_cursor(Stream& s, uint64_t now_ms, const Deliver& deliver);
+    void refloor_on_wrap(Stream& s);  // §2.1 u32 cursor wrap = desync
     std::optional<uint32_t> gap_block(const Stream& s, uint32_t seq) const;
     void mark_frame_complete(Stream& s, uint32_t block_id);
     Stream* try_latch(const DataView& v, uint64_t now_ms);

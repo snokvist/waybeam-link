@@ -24,3 +24,6 @@ __pycache__/
 
 # Serena MCP local tooling
 .serena/
+
+# Session bench scratch — never commit binaries or captured configs here.
+scratchpad/

@@ -6,6 +6,7 @@
 #include "wblink/table.h"
 
 #include <cstdio>
+#include <cstring>
 
 #include "wblink/crc8.h"
 #include "wbtest.h"
@@ -56,7 +57,7 @@ ProfileTable example_table() {
 int main() {
     const ProfileTable table = example_table();
 
-    // Canonical size: count + 8*25 + floor.
+    // Canonical size: count + 8*27 + floor (§3.6, 27 bytes/profile — Pass 82).
     const auto canon = canonical_serialize(table);
     CHECK_EQ_U(canon.size(), 2 + 8 * kCanonicalProfileSize);
     CHECK_EQ_U(canon[0], 8);                  // count
@@ -145,6 +146,54 @@ int main() {
         CHECK_EQ_U(c.size(), 2);
         const uint8_t expect[2] = {0x00, 0x00};
         CHECK_EQ_U(table_version(empty), crc8_dvbs2(expect, 2));
+    }
+
+    // §3.6 Pass 82: cross-check the SPEC, not just ourselves. The golden hash
+    // above pins the implementation against itself, so a spec/code divergence
+    // (which is exactly what Pass 82 found: §3.6 documented 25 bytes while the
+    // code hashed 27) is invisible to it by construction. Here the byte layout
+    // is hand-built straight from the §3.6 field list and compared.
+    {
+        ProfileTable t;
+        Profile p;
+        p.id = 0x11;
+        p.mcs = 0x22;
+        p.gi = GuardInterval::kShort;  // 1
+        p.tx_power_level = 0x44;
+        p.airtime_budget_permille = 0x5566;
+        p.fec_scheme = FecScheme::kNone;  // 0
+        p.fec_overhead_permille = 0x7788;
+        p.arq_deadline_iframe_ms = 0x99AA;
+        p.arq_deadline_pframe_ms = 0xBBCC;
+        p.bitrate_min_kbps = 0xDDEEFF00;
+        p.reserve_control_bps = 0x11223344;
+        p.reserve_telemetry_bps = 0x55667788;
+        p.max_payload = 0x99AA;
+        t.profiles.push_back(p);
+        t.floor_profile = 0x0F;
+
+        // count u8 | 27 bytes big-endian, §3.6 order | floor_profile u8
+        const uint8_t spec[] = {
+            0x01,                                      // count
+            0x11,                                      // id
+            0x22,                                      // mcs
+            0x01,                                      // gi (short)
+            0x44,                                      // tx_power_level
+            0x55, 0x66,                                // airtime_budget_permille
+            0x00,                                      // fec_scheme (none)
+            0x77, 0x88,                                // fec_overhead_permille
+            0x99, 0xAA,                                // arq_deadline_iframe_ms
+            0xBB, 0xCC,                                // arq_deadline_pframe_ms
+            0xDD, 0xEE, 0xFF, 0x00,                    // bitrate_min_kbps
+            0x11, 0x22, 0x33, 0x44,                    // reserve_control_bps
+            0x55, 0x66, 0x77, 0x88,                    // reserve_telemetry_bps
+            0x99, 0xAA,                                // max_payload (Pass 82)
+            0x0F,                                      // floor_profile
+        };
+        const auto got = canonical_serialize(t);
+        CHECK_EQ_U(got.size(), sizeof(spec));  // 1 + 27 + 1
+        CHECK_EQ_U(std::memcmp(got.data(), spec, sizeof(spec)), 0);
+        CHECK_EQ_U(table_version(t), crc8_dvbs2(spec, sizeof(spec)));
     }
 
     return wbtest_finish("table_hash_test");

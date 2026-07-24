@@ -34,6 +34,13 @@ Decoded decode_data(const uint8_t* buf, size_t len) {
     if (len != kDataHeaderSize + payload_len) {
         return DecodeError::kLengthMismatch;
     }
+    // §3.2 absolute ceiling, enforced on the RX side too: this is the only
+    // check between an off-air datagram and an RxEngine held-packet copy, and
+    // the udp-broadcast backend (§16.3) accepts datagrams far above the air
+    // MTU. Without it a forger holds fwd_clamp_pkts × 60 KB of RX heap.
+    if (payload_len > kMaxDataPayload) {
+        return DecodeError::kInvalidField;
+    }
     DataView v;
     v.hdr.prefix = decode_prefix(buf);
     v.hdr.stream_id = buf[11];

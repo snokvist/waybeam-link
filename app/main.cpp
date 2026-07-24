@@ -833,6 +833,10 @@ CsaParams csa_params(const Config& cfg) {
     p.ack_timeout_ms = c.ack_timeout_ms;
     p.bind_release_ms = c.bind_release_s * 1000;
     p.allowlist = c.channel_allowlist;
+    // §11.4a (Pass 85): only a passive spectator may follow an unauthenticated
+    // CSA. Craft/ground with an empty key are FAULTED, not unauthenticated,
+    // and fail closed — the permission rides the role, never an empty buffer.
+    p.allow_unauthenticated = cfg.node.spectator;
     return p;
 }
 
@@ -2471,7 +2475,13 @@ struct RxCore {
 
     // §15.5 stats/reset. The frame-shm reassemblers live in run_rx (ShmOut),
     // so the caller resets those; here we zero the RX engine's counters.
-    void reset_stats() { engine_.reset_stats(); }
+    // §3.5: the reporter's loss window deltas are taken against the engine's
+    // counters, so resetting one without the other underflows the next
+    // LINK_REPORT to 0 permille — failing OPTIMISTIC, which §3.5 forbids.
+    void reset_stats() {
+        engine_.reset_stats();
+        reporter_.reset_link();
+    }
 
     void select_originator(uint16_t originator) {
         engine_.select_originator(originator);
@@ -2559,6 +2569,30 @@ int load_all(const std::string& config_path, Loaded& out) {
         std::fprintf(stderr,
                      "profile table: %zu profiles, table_version=0x%02X\n",
                      out.table.profiles.size(), out.tv);
+        // §9.7 (Pass 83): min/max_profile are profile IDs. An id absent from
+        // the table is a config error, not a silent clamp onto a neighbouring
+        // rung — the operator asked for an operating envelope that this table
+        // cannot express. 255 is the documented "unpinned top" sentinel.
+        const SelectPolicy& sel = out.cfg.policy.select;
+        const auto has_id = [&out](uint8_t id) {
+            for (const Profile& p : out.table.profiles) {
+                if (p.id == id) return true;
+            }
+            return false;
+        };
+        const std::pair<const char*, uint8_t> pins[] = {
+            {"min_profile", sel.min_profile},
+            {"max_profile", sel.max_profile}};
+        for (const auto& [name, id] : pins) {
+            if (id != 255 && !has_id(id)) {
+                std::fprintf(stderr,
+                             "config error: policy.select.%s = %u is not a "
+                             "profile id in %s (§9.7 ids, not indices)\n",
+                             name, static_cast<unsigned>(id),
+                             out.cfg.profile_table_path.c_str());
+                return 1;
+            }
+        }
     }
     return 0;
 }
@@ -2890,6 +2924,7 @@ int run_tx(const Loaded& l) {
     CsaFollower csa(follower_params);
     // §11.6 Pass 80 post-retune RX-liveness guard state (one-shot).
     std::optional<uint64_t> csa_liveness_deadline_ms;
+    bool csa_armed_flag = false;  // §11.6 Pass 89: mirrors csa.campaign_active()
     uint64_t csa_liveness_rx_baseline = 0;
     uint16_t csa_liveness_chan = 0;
     uint8_t csa_liveness_bw = 0;
@@ -2975,7 +3010,9 @@ int run_tx(const Loaded& l) {
                     tx.csa_freeze(service_now + static_cast<uint64_t>(
                                                    l.cfg.policy.csa.settle_s *
                                                    1000));
-                    tx.set_csa_armed(true);
+                    // Pass 89: the flag is owned by the campaign_active()
+                    // edge check on the loop body — one writer, so the
+                    // clearing edge cannot be missed.
                     std::fprintf(stderr,
                                  "csa: armed -> %u MHz (nonce %u, dt %u ms)\n",
                                  c->target_chan, c->csa_nonce,
@@ -3116,9 +3153,19 @@ int run_tx(const Loaded& l) {
                         static_cast<size_t>(got), service_now, inject);
         }
         now_us_it = now_us();
+        // §3.2 bit 4 / §11.6 (Pass 89): CSA_ARMED tracks the whole campaign —
+        // set on accept, cleared on COMMITTED (or on the §11.5 revert back to
+        // IDLE). Driven from follower state rather than pinned at the accept
+        // and switch sites, so the bit is cleared by whichever edge resolves
+        // the campaign. Edge-triggered: set_csa_armed walks every stream's
+        // framer, so it must not run per iteration.
+        if (const bool want_armed = csa.campaign_active();
+            want_armed != csa_armed_flag) {
+            csa_armed_flag = want_armed;
+            tx.set_csa_armed(want_armed);
+        }
         const CsaAction ca = csa.tick(now_us_it);
         if (ca.kind != CsaAction::Kind::kNone) {
-            tx.set_csa_armed(false);  // switching now — the ACK window is over
             if (!air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast)) {
                 std::fprintf(stderr, "csa: retune to %u MHz FAILED\n",
                              ca.chan_mhz);  // Pass 69: never silent
@@ -3448,6 +3495,12 @@ int run_rx(const Loaded& l) {
     // repeated). Byte-identical copies — the TX epoch filter dedups.
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_repeat_held;
     std::optional<uint64_t> ret_at_us;
+    // §11.2 (Pass 90): the campaign copy awaiting the craft's quiet gap, held
+    // decoded so it can be re-stamped at the instant it goes on air. At most
+    // one is outstanding — copies are paced at kCopySpacingUs and the gap
+    // recurs far faster, so a newer copy simply supersedes an unsent one.
+    std::optional<CsaPacket> csa_copy_held;
+    std::optional<uint64_t> csa_copy_fallback_us;
     bool ret_tsf_anchored = false;
     std::optional<uint64_t> report_fallback_us;
     // If the repair-tail EOB itself is lost, silence after the last received
@@ -3956,6 +4009,22 @@ int run_rx(const Loaded& l) {
         const bool report_fallback_due =
             !ret_at_us && report_fallback_us &&
             now_us_it >= *report_fallback_us;
+        // §11.2 (Pass 90): release the held campaign copy on the same window
+        // the returns use, or on its own blind fallback if EOB has stopped.
+        // Re-stamped at this instant; dropped outright once T_switch has
+        // passed rather than transmitted with a stale dt.
+        if (csa_copy_held &&
+            (return_deadline_due ||
+             (csa_copy_fallback_us && now_us_it >= *csa_copy_fallback_us))) {
+            if (issuer.restamp_copy(*csa_copy_held, now_us_it)) {
+                uint8_t frame[32];
+                if (encode_csa(*csa_copy_held, frame, sizeof(frame)) == 32) {
+                    air.value->inject(frame, 32);
+                }
+            }
+            csa_copy_held.reset();
+            csa_copy_fallback_us.reset();
+        }
         if (return_deadline_due || report_fallback_due) {
             for (const auto& [f, target] : urgent_ret_held) {
                 send_return(target, f.data(), f.size(), true);
@@ -4021,13 +4090,17 @@ int run_rx(const Loaded& l) {
                     repair_tail_fallback_us =
                         qg.return_deadline(now_us_it, 0, std::nullopt);
                 }
-                if ((v->hdr.data_flags & data_flags::kCsaArmed) != 0) {
+                const bool craft_armed =
+                    (v->hdr.data_flags & data_flags::kCsaArmed) != 0;
+                if (craft_armed) {
                     issuer.note_craft_armed(now_us_it);  // §11.6 implicit ACK
                 }
                 // §11.6 beacon tail: success is latched here; the campaign
                 // (and the selection_state flip) closes at the deadline via
-                // the kSuccess action below.
-                issuer.note_craft_video(now_us_it);
+                // the kSuccess action below. Pass 89: only a CSA_ARMED-CLEAR
+                // frame counts — the craft clears the bit on COMMITTED, so
+                // its absence is the commit proof.
+                issuer.note_craft_video(now_us_it, craft_armed);
                 if (cache_store) {  // §14.3: retain the verbatim wire packet
                     cache_store->note_data(*v, d, n);
                 }
@@ -4181,10 +4254,30 @@ int run_rx(const Loaded& l) {
         const CsaIssuer::IssuerAction ia = issuer.tick(now_us_it);
         switch (ia.kind) {
             case CsaIssuer::IssuerAction::Kind::kSendCopy: {
+                // §11.2 (Pass 90): campaign copies ride the craft's §7.2 quiet
+                // gap like every other ground->craft message. Injecting them
+                // blind exempted the one message the campaign depends on from
+                // the mechanism that makes delivery to a single-radio,
+                // RX-deaf-while-transmitting craft work (~73% per-copy vs
+                // gap-scheduled reports arriving at the rate they are sent).
+                // Held as a decoded packet, NOT encoded bytes: it is
+                // re-stamped and re-MAC'd at release, since dt is relative to
+                // the copy's own transmission.
+                if (qg.enabled()) {
+                    csa_copy_held = ia.pkt;
+                    if (!csa_copy_fallback_us) {
+                        // If video/EOB stops entirely there is no gap to aim
+                        // at; degrade to a prompt send rather than lose the
+                        // campaign. One copy spacing, matching the report
+                        // path's own blind-fallback posture.
+                        csa_copy_fallback_us = now_us_it + 20000;
+                    }
+                    break;
+                }
                 uint8_t frame[32];
                 if (encode_csa(ia.pkt, frame, sizeof(frame)) == 32) {
-                    air.value->inject(frame, 32);  // campaign timing: never
-                }                                  // quiet-gap-held
+                    air.value->inject(frame, 32);
+                }
                 break;
             }
             case CsaIssuer::IssuerAction::Kind::kCommit:
@@ -4593,6 +4686,10 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // A venc restart across our HTTP send, or a log reader exiting on the
+    // §15.3 stdout NDJSON, must not take the flight process down with it.
+    // Every write path checks its own return value.
+    std::signal(SIGPIPE, SIG_IGN);
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 

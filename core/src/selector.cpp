@@ -58,13 +58,27 @@ size_t Selector::ladder_size() const {
     return table_ != nullptr ? table_->profiles.size() : 0;
 }
 
+// §9.7 (Pass 83): min_profile/max_profile are profile IDs, resolved like
+// floor_profile — never raw ladder indices. An id absent from the table is a
+// config error (rejected at load); here we saturate so {"max": 255} still
+// unpins and a runtime re-pin can never land out of range.
+size_t Selector::rung_of_id(uint8_t id, size_t fallback) const {
+    const size_t n = ladder_size();
+    for (size_t i = 0; i < n; ++i) {
+        if (table_->profiles[i].id == id) {
+            return i;
+        }
+    }
+    return fallback;
+}
+
 size_t Selector::clamp_rung(size_t r) const {
     const size_t n = ladder_size();
     if (n == 0) {
         return 0;
     }
-    size_t lo = std::min<size_t>(policy_.min_profile, n - 1);
-    size_t hi = std::min<size_t>(policy_.max_profile, n - 1);
+    size_t lo = rung_of_id(policy_.min_profile, 0);
+    size_t hi = rung_of_id(policy_.max_profile, n - 1);
     if (lo > hi) {
         lo = hi;
     }
@@ -285,7 +299,13 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
             policy_.report_timeout_ms + policy_.failsafe_hold_ms) {
             return;  // hold phase
         }
-        const size_t floor = clamp_rung(floor_rung());
+        // §9.8 (Pass 84): the descent target is floor_profile, NOT the §9.7
+        // pin. min_profile is an adaptation envelope (how low the selector may
+        // CHOOSE to go while it can see feedback); floor_profile is the safety
+        // floor (where the link goes when feedback is GONE). Clamping here let
+        // a `min_profile: 1` airtime choice silently remove MCS0 from the one
+        // path that runs when the link is worst — "never fail optimistic".
+        const size_t floor = floor_rung();
         if (rung_ > floor && now_ms >= failsafe_next_step_ms_) {
             failsafe_next_step_ms_ = now_ms + policy_.failsafe_step_ms;
             start_demote(rung_ - 1, now_ms, a);

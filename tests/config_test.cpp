@@ -317,6 +317,34 @@ int main() {
           "arq_guard_us":500,"feedback_timeout_ms":500,
           "min_rtt_samples":20,"enforce":true}}]})",
                  "requires fec.scheme=rlc256");
+    // §11.5/§15.2 (Pass 92): the shipped verify window is DERIVED from the
+    // engine seed, never restated here. Pass 89 raised the engine default to
+    // 500 ms and this default kept saying 150 — and csa_params() copies this
+    // one over the engine's, so no binary ever ran the ruled value.
+    {
+        auto r = load_config_json(R"({"node":{"originator":1,"role":"rx"}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK_EQ_U(r.value->policy.csa.verify_timeout_ms,
+                       kCsaVerifyTimeoutMsDefault);
+            CHECK_EQ_U(r.value->policy.csa.verify_timeout_ms, 500u);
+        }
+    }
+    // §15.2 (Pass 92): the §11.6 RX-liveness guard must outlast the verify
+    // window, or a monitor re-init fires in the middle of a pending switch.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "policy":{"csa":{"verify_timeout_ms":800,"rx_liveness_ms":750}}})",
+                 "verify_timeout_ms");
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "policy":{"csa":{"verify_timeout_ms":750,"rx_liveness_ms":750}}})",
+                 "verify_timeout_ms");
+    // rx_liveness_ms = 0 disables the guard, so the ordering rule is moot.
+    {
+        auto r = load_config_json(R"({"node":{"originator":1,"role":"rx"},
+          "policy":{"csa":{"verify_timeout_ms":3000,"rx_liveness_ms":0}}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->policy.csa.verify_timeout_ms, 3000u);
+    }
     // §3.0 net_id is one byte.
     expect_error(R"({"node":{"originator":1,"role":"rx","net_id":256}})",
                  "net_id");
