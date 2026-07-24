@@ -3495,6 +3495,12 @@ int run_rx(const Loaded& l) {
     // repeated). Byte-identical copies — the TX epoch filter dedups.
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_repeat_held;
     std::optional<uint64_t> ret_at_us;
+    // §11.2 (Pass 90): the campaign copy awaiting the craft's quiet gap, held
+    // decoded so it can be re-stamped at the instant it goes on air. At most
+    // one is outstanding — copies are paced at kCopySpacingUs and the gap
+    // recurs far faster, so a newer copy simply supersedes an unsent one.
+    std::optional<CsaPacket> csa_copy_held;
+    std::optional<uint64_t> csa_copy_fallback_us;
     bool ret_tsf_anchored = false;
     std::optional<uint64_t> report_fallback_us;
     // If the repair-tail EOB itself is lost, silence after the last received
@@ -4003,6 +4009,22 @@ int run_rx(const Loaded& l) {
         const bool report_fallback_due =
             !ret_at_us && report_fallback_us &&
             now_us_it >= *report_fallback_us;
+        // §11.2 (Pass 90): release the held campaign copy on the same window
+        // the returns use, or on its own blind fallback if EOB has stopped.
+        // Re-stamped at this instant; dropped outright once T_switch has
+        // passed rather than transmitted with a stale dt.
+        if (csa_copy_held &&
+            (return_deadline_due ||
+             (csa_copy_fallback_us && now_us_it >= *csa_copy_fallback_us))) {
+            if (issuer.restamp_copy(*csa_copy_held, now_us_it)) {
+                uint8_t frame[32];
+                if (encode_csa(*csa_copy_held, frame, sizeof(frame)) == 32) {
+                    air.value->inject(frame, 32);
+                }
+            }
+            csa_copy_held.reset();
+            csa_copy_fallback_us.reset();
+        }
         if (return_deadline_due || report_fallback_due) {
             for (const auto& [f, target] : urgent_ret_held) {
                 send_return(target, f.data(), f.size(), true);
@@ -4232,10 +4254,30 @@ int run_rx(const Loaded& l) {
         const CsaIssuer::IssuerAction ia = issuer.tick(now_us_it);
         switch (ia.kind) {
             case CsaIssuer::IssuerAction::Kind::kSendCopy: {
+                // §11.2 (Pass 90): campaign copies ride the craft's §7.2 quiet
+                // gap like every other ground->craft message. Injecting them
+                // blind exempted the one message the campaign depends on from
+                // the mechanism that makes delivery to a single-radio,
+                // RX-deaf-while-transmitting craft work (~73% per-copy vs
+                // gap-scheduled reports arriving at the rate they are sent).
+                // Held as a decoded packet, NOT encoded bytes: it is
+                // re-stamped and re-MAC'd at release, since dt is relative to
+                // the copy's own transmission.
+                if (qg.enabled()) {
+                    csa_copy_held = ia.pkt;
+                    if (!csa_copy_fallback_us) {
+                        // If video/EOB stops entirely there is no gap to aim
+                        // at; degrade to a prompt send rather than lose the
+                        // campaign. One copy spacing, matching the report
+                        // path's own blind-fallback posture.
+                        csa_copy_fallback_us = now_us_it + 20000;
+                    }
+                    break;
+                }
                 uint8_t frame[32];
                 if (encode_csa(ia.pkt, frame, sizeof(frame)) == 32) {
-                    air.value->inject(frame, 32);  // campaign timing: never
-                }                                  // quiet-gap-held
+                    air.value->inject(frame, 32);
+                }
                 break;
             }
             case CsaIssuer::IssuerAction::Kind::kCommit:

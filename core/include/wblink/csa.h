@@ -155,6 +155,14 @@ class CsaIssuer {
     // video-verify (§11.6 Pass 89) — the craft transmits throughout its own
     // VERIFY window and may still revert.
     void note_craft_video(uint64_t now_us, bool craft_armed);
+    // §11.2 (Pass 90): re-stamp a copy that was held for the craft's §7.2
+    // quiet gap, at the instant it actually goes on air — dt_to_switch_ms
+    // recomputed from the absolute T_switch and csa_mac recomputed over it.
+    // Returns false once T_switch has passed: the copy is then dropped, never
+    // transmitted stale (a stale dt would place the follower's switch late by
+    // the hold time, since it anchors on the copy's receive TSF).
+    bool restamp_copy(CsaPacket& pkt, uint64_t now_us) const;
+
     // The app's commit retune failed — abandon the campaign rather than
     // verify with untrusted ears (§11.6 review pass 2). The armed craft
     // reverts on its own verify timeout.
@@ -206,6 +214,9 @@ class CsaIssuer {
     uint64_t switch_at_us_ = 0;
     uint64_t verify_deadline_us_ = 0;
     uint64_t next_beacon_us_ = 0;  // §11.6 rendezvous beacon cadence
+    // §11.2: stamp dt_to_switch_ms from the absolute T_switch and re-MAC.
+    void stamp_copy(CsaPacket& pkt, uint64_t now_us) const;
+
     bool armed_seen_ = false;
     bool video_seen_ = false;  // latched in VERIFY; campaign closes at the
                                // deadline either way (§11.6 beacon tail)

@@ -645,5 +645,81 @@ int main() {
         CHECK(!f.campaign_active());
     }
 
+    {
+        // Pass 90: copies repeat past the initial burst until T_switch. The
+        // old fixed 5-copy burst spanned 80 ms and then went silent for the
+        // rest of ack_timeout, losing the campaign if the craft (RX-deaf while
+        // transmitting) heard none of the five.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        int copies = 0;
+        // T_switch is 150 ms out for retune_class 0. Walk to just before it.
+        for (uint64_t t = 0; t < 149'000; t += 1000) {
+            if (is.tick(t).kind == CsaIssuer::IssuerAction::Kind::kSendCopy) {
+                ++copies;
+            }
+        }
+        // 20 ms spacing across ~150 ms — far more than the 5 that used to be
+        // the entire campaign.
+        CHECK(copies > 5);
+        CHECK(is.active());
+    }
+    {
+        // Pass 90: the ACK stops the retransmission — it is
+        // retransmit-until-acked, not an unbounded burst.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (uint64_t t = 0; t < 100'000; t += 1000) is.tick(t);
+        is.note_craft_armed(100'000);
+        // Next tick commits rather than emitting another copy.
+        CHECK_EQ_U(is.tick(101'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+        int after = 0;
+        for (uint64_t t = 102'000; t < 149'000; t += 1000) {
+            if (is.tick(t).kind == CsaIssuer::IssuerAction::Kind::kSendCopy) {
+                ++after;
+            }
+        }
+        CHECK_EQ_U(static_cast<unsigned>(after), 0u);
+    }
+    {
+        // Pass 90: a copy held for the quiet gap is re-stamped at release —
+        // dt shrinks to match the delay, so every copy still resolves to the
+        // same absolute T_switch. A pre-stamped release would put the
+        // follower's switch late by the hold time.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        CsaPacket copy{};
+        for (uint64_t t = 0; t < 5'000; t += 1000) {
+            const auto a = is.tick(t);
+            if (a.kind == CsaIssuer::IssuerAction::Kind::kSendCopy) copy = a.pkt;
+        }
+        const uint16_t dt_at_stamp = copy.dt_to_switch_ms;
+        const uint32_t mac_at_stamp = copy.csa_mac;
+        CHECK(dt_at_stamp > 0);
+        // Held 30 ms for the gap, then released.
+        CHECK(is.restamp_copy(copy, 30'000));
+        CHECK_EQ_U(copy.dt_to_switch_ms, dt_at_stamp - 30u);
+        CHECK(copy.csa_mac != mac_at_stamp);  // the MAC covers dt
+        // Past T_switch there is nothing truthful left to say — drop, never
+        // send stale.
+        CHECK(!is.restamp_copy(copy, 150'001));
+    }
+    {
+        // Pass 90: a re-stamped copy is still MAC-valid to a follower — the
+        // re-MAC must cover the NEW dt, not merely be copied forward.
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        CsaPacket copy{};
+        for (uint64_t t = 0; t < 5'000; t += 1000) {
+            const auto a = is.tick(t);
+            if (a.kind == CsaIssuer::IssuerAction::Kind::kSendCopy) copy = a.pkt;
+        }
+        CHECK(is.restamp_copy(copy, 40'000));
+        CsaFollower f(pol);
+        CHECK(f.on_csa(copy, 0, std::nullopt, 0, std::nullopt));
+        CHECK(f.campaign_active());
+    }
+
     return wbtest_finish("csa_test");
 }
