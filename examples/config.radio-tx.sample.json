@@ -27,6 +27,16 @@
         "kind": "udp",
         "listen": "127.0.0.1:5600"
       }
+    },
+    {
+      "_comment": "Opus/RTP audio from the local encoder (waybeam_venc outgoing.audioPort, default 5601), 50 Hz. Best-effort, non-ARQ (§3.4 AUDIO); carried opaque like video.",
+      "stream_id": 1,
+      "stream_type": "AUDIO",
+      "dir": "in",
+      "bind": {
+        "kind": "udp",
+        "listen": "127.0.0.1:5601"
+      }
     }
   ],
   "air": {
