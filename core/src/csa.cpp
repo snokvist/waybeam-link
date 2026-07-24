@@ -244,7 +244,10 @@ bool CsaIssuer::start(const CommonPrefix& prefix, uint16_t target_chan_mhz,
     tmpl_.prev_bw = prev_bw;
     tmpl_.power_intent = power_intent;
     // §11.2 dt budget: campaign span + max retune for the class + margin.
-    const uint32_t dt0_ms = retune_class == 0 ? 150 : 500;
+    // §11.2 (Pass 91): class 0 is 300 ms, not 150. The budget must hold both
+    // the copy window and the 50 ms ack-lead cutoff; at 150 ms those conflict
+    // and the window collapses to roughly the pre-Pass-90 burst.
+    const uint32_t dt0_ms = retune_class == 0 ? 300 : 500;
     started_us_ = now_us;
     switch_at_us_ = now_us + static_cast<uint64_t>(dt0_ms) * 1000;
     copies_left_ = kCopies;

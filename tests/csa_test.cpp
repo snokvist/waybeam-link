@@ -239,7 +239,7 @@ int main() {
         CHECK(is.start(pre, 5745, 0, 0, 5805, 0, 4, 0));
         CHECK(!is.start(pre, 5745, 0, 0, 5805, 0, 4, 0));  // already active
         // 5 copies, csa_seq 5..1, dt decrementing toward one T_switch.
-        uint16_t last_dt = 200;
+        uint16_t last_dt = 301;  // dt0 = 300 ms for class 0 (§11.2 Pass 91)
         for (int i = 0; i < 5; ++i) {
             const auto a = is.tick(static_cast<uint64_t>(i) * 20'000);
             CHECK_EQ_U(a.kind,
@@ -283,19 +283,21 @@ int main() {
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
         // Craft video arrives → success LATCHED, but the beacon tail keeps
         // blanketing the craft's verify window (§11.6 beacon tail).
-        is.note_craft_video(200'000, false);  // Pass 89: committed craft
+        // After T_switch (300 ms, §11.2 Pass 91) — earlier video is ignored
+        // as old-channel residue.
+        is.note_craft_video(310'000, false);  // Pass 89: committed craft
         CHECK(is.active());
-        CHECK_EQ_U(is.tick(221'500).kind,
+        CHECK_EQ_U(is.tick(321'500).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
-        // Campaign closes at the deadline (T_switch 150 ms + verify 150 ms)
+        // Campaign closes at the deadline (T_switch 300 ms + verify 150 ms)
         // with kSuccess, then goes quiet.
-        const auto s = is.tick(300'000);
+        const auto s = is.tick(450'000);
         CHECK_EQ_U(s.kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSuccess));
         CHECK(!is.active());
-        CHECK_EQ_U(is.tick(300'500).kind,
+        CHECK_EQ_U(is.tick(450'500).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kNone));
     }
     {
@@ -324,14 +326,15 @@ int main() {
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
         // Landing (first kVerify tick) right after the commit: the §11.6
         // deadline anchors at max(T_switch, landing) + verify_timeout =
-        // 150 + 150 ms — the craft does not move before T_switch.
+        // 300 + 150 ms (§11.2 Pass 91) — the craft does not move before
+        // T_switch.
         CHECK_EQ_U(is.tick(100'500).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
-        CHECK_EQ_U(is.tick(150'000 + 149'000).kind,
+        CHECK_EQ_U(is.tick(300'000 + 149'000).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
-        const auto a = is.tick(150'000 + 150'000);
+        const auto a = is.tick(300'000 + 150'000);
         CHECK_EQ_U(a.kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
         CHECK_EQ_U(a.chan_mhz, 5805);
@@ -407,9 +410,11 @@ int main() {
         is.note_craft_armed(100'000);
         CHECK_EQ_U(is.tick(101'000).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
-        is.tick(101'500);                 // landing: window opens (300 ms)
-        is.note_craft_video(120'000, false);  // BEFORE T_switch (150 ms): ignored
-        const auto a = is.tick(300'000);
+        is.tick(101'500);                 // landing: window opens
+        is.note_craft_video(120'000, false);  // BEFORE T_switch (300 ms, §11.2
+                                              // Pass 91): ignored
+        // Deadline = max(T_switch, landing) + verify_timeout = 300 + 150.
+        const auto a = is.tick(450'001);
         CHECK_EQ_U(a.kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
         CHECK(!is.active());
@@ -602,13 +607,14 @@ int main() {
         is.note_craft_armed(100'000);
         CHECK_EQ_U(is.tick(101'000).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
-        is.tick(200'000);  // landing: window opens, deadline 200 + 150
-        // Craft is present on the target, still deciding — armed bit SET.
-        is.note_craft_video(210'000, true);
-        is.note_craft_video(300'000, true);
+        is.tick(200'000);  // landing; deadline = max(300, 200) + 150 = 450
+        // Craft is present on the target AFTER T_switch — so the pre-T_switch
+        // gate is not what rejects these — but still deciding: armed bit SET.
+        is.note_craft_video(310'000, true);
+        is.note_craft_video(400'000, true);
         // Deadline: no commit proof was ever seen, so the issuer must REVERT
         // and follow the craft back rather than declare success.
-        CHECK_EQ_U(is.tick(350'001).kind,
+        CHECK_EQ_U(is.tick(450'001).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
         CHECK(!is.active());
     }
@@ -622,9 +628,9 @@ int main() {
         CHECK_EQ_U(is.tick(101'000).kind,
                    static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
         is.tick(200'000);
-        is.note_craft_video(210'000, true);   // still deciding
-        is.note_craft_video(240'000, false);  // committed — the proof
-        CHECK_EQ_U(is.tick(350'001).kind,
+        is.note_craft_video(310'000, true);   // still deciding
+        is.note_craft_video(340'000, false);  // committed — the proof
+        CHECK_EQ_U(is.tick(450'001).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSuccess));
     }
@@ -673,13 +679,20 @@ int main() {
         CsaIssuer is(pol);
         CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
         uint64_t last_copy_us = 0;
-        for (uint64_t t = 0; t < 150'000; t += 1000) {
+        int copies = 0;
+        for (uint64_t t = 0; t < 300'000; t += 1000) {
             if (is.tick(t).kind == CsaIssuer::IssuerAction::Kind::kSendCopy) {
                 last_copy_us = t;
+                ++copies;
             }
         }
         CHECK(last_copy_us > 0);
-        CHECK(last_copy_us <= 100'000);  // T_switch 150 ms - 50 ms cutoff
+        CHECK(last_copy_us <= 250'000);  // T_switch 300 ms - 50 ms cutoff
+        // §11.2 Pass 91: the point of widening class 0 to 300 ms is that the
+        // copy window and the ack lead both fit. A 250 ms window at 20 ms
+        // spacing is ~12 copies — at the old 150 ms budget the cutoff left
+        // 5, i.e. no better than the burst that lost ~1 campaign in 5.
+        CHECK(copies > 10);
     }
     {
         // Pass 90: the ACK stops the retransmission — it is
@@ -720,12 +733,12 @@ int main() {
         CHECK(copy.csa_mac != mac_at_stamp);  // the MAC covers dt
         // Pass 90 addendum: inside the ack-lead cutoff (50 ms before
         // T_switch) a copy is refused — an accepting craft could not get
-        // CSA_ARMED back to the issuer before departing. dt0 is 150 ms, so
-        // 110 ms leaves only 40 ms.
-        CHECK(!is.restamp_copy(copy, 110'000));
+        // CSA_ARMED back to the issuer before departing. dt0 is 300 ms
+        // (Pass 91), so 260 ms leaves only 40 ms.
+        CHECK(!is.restamp_copy(copy, 260'000));
         // Past T_switch there is nothing truthful left to say — drop, never
         // send stale.
-        CHECK(!is.restamp_copy(copy, 150'001));
+        CHECK(!is.restamp_copy(copy, 300'001));
     }
     {
         // Pass 90: a re-stamped copy is still MAC-valid to a follower — the
