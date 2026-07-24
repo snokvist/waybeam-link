@@ -1202,7 +1202,9 @@ profile[i] = {
   arq_deadline_ms[class],  // per §4.1 importance; I-frame class longer
   reserve_bps[stream_type],// guaranteed floor for CONTROL / TELEMETRY
   bitrate_min_kbps,        // policy floor ≥ venc hard floor 1000 (§9.6)
-  fec_scheme, fec_overhead_frac,  // §14; scheme=none in the base table
+  fec_scheme, fec_overhead_frac,  // §14; MUST be > 0 wherever rlc256 runs
+                           //   (§9.5 Pass 95) — parity airtime is debited
+                           //   here and nowhere else
 }
 ```
 
@@ -1243,6 +1245,26 @@ MCS and bitrate never move together:
   20 MHz, long GI): `{6500, 13000, 19500, 26000, 39000, 52000, 58500, 65000}`
   for MCS0–7; short GI = ×10/9. No separate per-rung bitrate field exists —
   the table's airtime fraction IS the bitrate policy.
+- **`fec_overhead_frac` MUST be non-zero on any rung whose streams run
+  `fec_scheme: rlc256` (Pass 95).** The term above is the only place parity
+  airtime is debited, and §14.1 adds `r` repair symbols *on top of* the video
+  bitrate this expression yields. A rung that carries FEC while declaring
+  `fec_overhead_frac: 0.0` therefore over-derives its encoder target by the
+  full parity ratio, and the link runs oversubscribed by that much — measured
+  **22 % of source bytes** live on the craft at MCS5 (183 672 repair /
+  847 295 source symbols).
+- **It is not one number.** `r = ceil(k · rate)` inflates the ratio as `k`
+  falls, and `k = frame_bytes / s` falls with the rung. Measured across a
+  bitrate sweep: **8.8 % of source at k≈19, 29.1 % at k≈4**. Low rungs run
+  small frames and so need the *largest* overhead budget — which is exactly
+  where under-budgeting hurts most. Authored per-rung values MUST therefore be
+  monotonically non-increasing with rung index. A future revision may derive
+  the term at runtime from the framer's own source/repair counters; that is a
+  closed loop (bitrate → frame size → k → overhead → bitrate) and is out of
+  scope here.
+- **Changing `fec_overhead_frac` changes `table_version`** — the field is
+  inside the §3.6 CRC-8 content hash — so it is a fleet-wide lockstep change,
+  never a single-node edit.
 
 ### 9.6 Encoder actuation (venc, same SoC)
 Live HTTP, `MUT_LIVE`, sub-ms, no reinit:
@@ -2264,9 +2286,28 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
 
   | condition | repair count | rationale |
   |---|---|---|
-  | `k ≤ fec.min_k` (seed 3) | `r = 0` (ARQ-only) | at k=3 one repair = 33% overhead; NACK→RETRANSMIT recovers within deadline (§17 gate 3). |
+  | `k ≤ fec.min_k` (seed 3) **AND the frame is ARQ-eligible** | `r = 0` (ARQ-only) | at k=3 one repair = 33% overhead; NACK→RETRANSMIT recovers within deadline (§17 gate 3). |
   | P-frame, `k > min_k` | `r = ceil(k · p_rate)`, seed `p_rate` 0.10 | P-frames are expendable (supersession §6.2); light parity for the short burst diversity misses. |
   | IDR frame | `r = ceil(k · i_rate)`, seed `i_rate` 0.25 | IDR loss is catastrophic (whole GOP until next IDR); heavier parity justified. |
+
+- **The `min_k` gate is conditional (Pass 94).** `r = 0` at small `k` is an
+  *optimisation* — do not spend parity where ARQ will recover the frame anyway
+  — and it is sound only where that ARQ actually exists. A frame is
+  **ARQ-eligible** when it would carry `ARQ` or `PFRAME_ARQ` (§5.1a): an IDR
+  under any `arq_mode`, or a P-frame under `arq_mode: all-frames`, and in both
+  cases only while ARQ is enabled and not §4.1-cadence-suppressed. A P-frame
+  under `arq_mode: idr-only` is **not** ARQ-eligible, so the gate MUST NOT
+  apply to it — otherwise the branch grants neither FEC nor ARQ and the frame
+  ships bare. Above the §4.1 cadence cutoff nothing is ARQ-eligible and the
+  gate is inert for every class.
+
+  Measured (`docs/venc-mode-matrix.md` §11): with the gate unconditional, at
+  2.3 % post-diversity loss the unrecoverable-frame rate is a **17× cliff** at
+  `k = min_k` — 5.785 % just below versus 0.340 % just above, offline at
+  p = 2 %. On the live link, removing the hole is a **3.2× mean reduction**
+  (0.393 % → 0.123 %), better at 9 of 10 operating points. This is the B11
+  MCS0 failure: `derived_bitrate / fps` at the floor rung lands frames under
+  `min_k · s`, and under `idr-only` they go out unprotected.
 
 - **Priority:** a frame's repair symbols are that frame's **live data**, emitted
   immediately after its source symbols at the same live priority (§5.3), *not*

@@ -3034,3 +3034,104 @@ Pending operator rulings, with recommendations (2026-07-16 register):
       *Recommendation:* flip P-frames first (`arq_mode all-frames` +
       `enforce`), confirm discard behavior visually on the bench before any
       flight use.
+
+---
+
+### Pass 94 — §14.1 the `min_k` ARQ-only gate must be conditioned on ARQ eligibility
+
+**Problem (derived 2026-07-24, out of B11).** `FrameFramer::repair_count()`
+returns `r = 0` unconditionally for `k ≤ fec.min_k`. §14.1's own rationale for
+that branch is *"NACK→RETRANSMIT recovers within deadline (§17 gate 3)"* — it
+is an optimisation that trades parity for ARQ. But the branch never checked
+whether the frame *has* ARQ. Under `arq_mode: idr-only` — the craft's deployed
+setting and the §4.1 default for the P class — a P-frame has none, so the
+branch grants neither FEC nor ARQ and the frame ships bare.
+
+With `min_k: 3` and `s = 1387 B`, that is every P-frame under **4161 B**. At
+the §9.8 fail-safe floor rung, `derived_bitrate / fps` lands squarely there.
+This is B11.
+
+**Evidence.** Two independent derivations that agree; full tables in
+`docs/venc-mode-matrix.md` §11.
+
+- *Offline*, driving the real `FrameFramer` and `FrameReassembler` over
+  Bernoulli loss — same `ceil()`, same gate, same GF(256) decode. A **17×
+  cliff at one byte**: at p = 2 %, 4161 B → 5.785 % unrecoverable, 4162 B →
+  0.340 %. Above the cliff the curve is a decreasing *sawtooth*, not monotone
+  (k=5 is worse than k=4: `ceil(k·0.2)` gives both r=1 while k=5 has one more
+  symbol to lose), with local maxima recurring at k = 5, 10, 15.
+- *On hardware*, craft pinned MCS5, `venc.enabled: false`, ground
+  `air.rx_drop_permille: 141` per adapter giving a measured 2.1–2.3 %
+  effective post-diversity loss, 98.7 fps, bitrate swept to walk k = 2…15.
+  `min_k` 3 → 1 via the live `POST /api/v1/fec`, both arms back-to-back on the
+  same link: **mean 0.393 % → 0.123 %, a 3.2× reduction, better at 9 of 10
+  points** (the exception is 0.000 % vs 0.057 %, both at the noise floor).
+
+The improvement persists at k ≥ 4 where the gate should not bite, because
+`B/frame` is a *mean* and the operative quantity is the distribution: real
+P-frames vary enough that a tail of every operating point falls under the
+gate. Re-running offline with a realistic spread (cv = 0.6) reproduces the
+ratio structure — 4.7× at k=2 decaying to 2.0× at k=12 — against the
+hardware's 3.2× mean.
+
+**Ruling (operator 2026-07-24, "in the scope of this PR i would say they land
+and we try out the model").** Condition the gate on ARQ eligibility rather than
+lowering `min_k`. A frame is ARQ-eligible when it would carry `ARQ` or
+`PFRAME_ARQ` (§5.1a); above the §4.1 cadence cutoff nothing is, and the gate
+goes inert for every class. This keeps `min_k` doing the job it was designed
+for — don't spend parity where ARQ covers it — and stops it being a protection
+hole. It subsumes the `min_k: 1` config workaround and is strictly better.
+
+Spec: §14.1 policy table + a new conditional-gate bullet.
+
+**Consequence beyond the fix.** With the gate closed there is no frame size
+below which protection collapses, so §9.11's `min_p_frame_bytes` (seed 10000,
+a standing §17 RE-DERIVE) can be **retired rather than derived** — the §17
+derivation it always owed returns "no useful block target". That in turn
+retracts the mode-matrix range axis built on it: fps does *not* force an MCS
+floor, and the binding constraint is bits per pixel instead
+(`docs/venc-mode-matrix.md` §16.0).
+
+---
+
+### Pass 95 — §9.5 `fec_overhead_frac` MUST be non-zero wherever `rlc256` runs
+
+**Problem (found alongside Pass 94).** `core/src/selector.cpp:31` debits
+`fec_overhead_permille` from the §9.5 derived bitrate — the only place parity
+airtime is accounted for. `profiles/table.example.json` ships
+`fec_overhead_frac: 0.0` on **all eight rungs**, while `craft.json` runs
+`"scheme": "rlc256"` at 200 ‰ P / 300 ‰ IDR. So §9.5 derives the encoder
+target as if there were no parity, and §14.1 then adds parity on top of it.
+
+`docs/findings-pass3.md:286` called this exactly: *"If FEC is adopted it must
+be budgeted, not bolted on."* FEC was adopted; it was bolted on.
+
+**Evidence.** Measured live on the craft at MCS5: 183 672 repair / 847 295
+source symbols = **21.7 % by symbol count, 22.2 % by wire bytes** — ≈ 180 ‰ of
+capacity. Across the hardware bitrate sweep the ratio ran **8.8 % of source at
+k≈19 up to 29.1 % at k≈4**, because `r = ceil(k · rate)` inflates as `k` falls
+and `k` falls with the rung. Corrected §9.5 bitrates are ~18 % below the
+shipped table's on every rung (rung 0: 3804 → 3102), and the
+`venc.max_bitrate_kbps` clamp stops binding at rung 4.
+
+**Ruling (operator 2026-07-24).** Non-zero, and **graduated, not flat** — a
+flat value under-budgets the low rungs, which is precisely where the parity
+ratio is highest and where B11 bites. Authored values MUST be monotonically
+non-increasing with rung index. Seeded from the measurement:
+
+| rungs | `fec_overhead_frac` | operating k |
+|---|---|---|
+| 0–1 | 0.25 | k ≈ 2–4, `ceil()` inflation worst |
+| 2–3 | 0.20 | k ≈ 5–10 |
+| 4–7 | 0.18 | k ≫ 10, approaches the 200 ‰ `p_rate` asymptote |
+
+Runtime derivation from the framer's own source/repair counters is the better
+long-term answer and is explicitly **out of scope**: it closes a loop
+(bitrate → frame size → k → overhead → bitrate) that wants its own bench.
+
+**Fleet consequence.** `fec_overhead_permille` is inside the §3.6 CRC-8
+content hash (`core/src/table.cpp:42`), so this moves `table_version` off
+**0x41**. Both ends must be redeployed together; a mismatched pair does not
+agree on the table. The pin in `tests/table_hash_test.cpp` moves with it.
+
+Spec: §9.3 field comment + two §9.5 bullets.
