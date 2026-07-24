@@ -1317,6 +1317,37 @@ struct AirBackend {
                      chan_mhz, bw, fast ? " fast" : "");
         return true;
     }
+    // §11.6 Pass 80: total RX frames across adapters (liveness baseline) and
+    // the one-shot full monitor re-init recovery (kernel-monitor only).
+    uint64_t rx_frames_total() const {
+        uint64_t total = 0;
+        if (mon) {
+            for (size_t i = 0; i < mon->rx_adapters(); ++i) {
+                total += mon->counters(i).rx_frames;
+            }
+        }
+#if WBLINK_RADIO
+        if (radio) {
+            for (size_t i = 0; i < radio->rx_adapters(); ++i) {
+                total += radio->counters(i).rx_frames;
+            }
+        }
+#endif
+        return total;
+    }
+    bool recover_all(uint16_t chan_mhz, uint8_t bw) {
+        if (mon) {
+            const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
+                                          : bw;
+            bool ok = true;
+            for (size_t i = 0; i < mon->rx_adapters(); ++i) {
+                ok = mon->recover(i, chan_mhz, width) && ok;
+            }
+            mon->flush_rx();
+            return ok;
+        }
+        return false;  // §11.6 Pass 80: devourer/udp out of scope
+    }
     bool is_radio() const {
         if (mon) {
             return true;
@@ -2857,6 +2888,11 @@ int run_tx(const Loaded& l) {
         follower_params.psk.assign(token.begin(), token.end());
     }
     CsaFollower csa(follower_params);
+    // §11.6 Pass 80 post-retune RX-liveness guard state (one-shot).
+    std::optional<uint64_t> csa_liveness_deadline_ms;
+    uint64_t csa_liveness_rx_baseline = 0;
+    uint16_t csa_liveness_chan = 0;
+    uint8_t csa_liveness_bw = 0;
     // §11.7 craft command engine: same key provenance as the CSA follower.
     VcmdParams craft_cmd_params = vcmd_params(l.cfg);
     if (psk_announced) {
@@ -3089,6 +3125,28 @@ int run_tx(const Loaded& l) {
             }
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
                          ca.chan_mhz);
+            // §11.6 Pass 80: arm the post-retune RX-liveness guard. The
+            // issuer's beacons blanket the verify window, so total silence
+            // for the deadline means the in-place retune half-applied.
+            if (l.cfg.policy.csa.rx_liveness_ms > 0) {
+                csa_liveness_deadline_ms =
+                    now + l.cfg.policy.csa.rx_liveness_ms;
+                csa_liveness_rx_baseline = air.value->rx_frames_total();
+                csa_liveness_chan = ca.chan_mhz;
+                csa_liveness_bw = ca.bw;
+            }
+        }
+        if (csa_liveness_deadline_ms && now >= *csa_liveness_deadline_ms) {
+            if (air.value->rx_frames_total() == csa_liveness_rx_baseline) {
+                std::fprintf(stderr,
+                             "csa: RX SILENT %u ms after retune to %u MHz — "
+                             "half-applied retune, monitor re-init (§11.6 "
+                             "Pass 80)\n",
+                             l.cfg.policy.csa.rx_liveness_ms,
+                             csa_liveness_chan);
+                air.value->recover_all(csa_liveness_chan, csa_liveness_bw);
+            }
+            csa_liveness_deadline_ms.reset();  // one-shot per retune
         }
         // §11.7 echo burst — the craft's diversity-carried command ACK.
         while (const auto echo = craft_cmd.tick(now_us_it)) {

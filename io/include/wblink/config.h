@@ -216,6 +216,9 @@ struct CsaPolicy {
     std::string psk;
     double settle_s = 3.0;
     uint32_t verify_timeout_ms = 150;
+    // §11.6 Pass 80: post-retune RX-liveness deadline (0 disables). Silence
+    // for this long after a CSA retune => one full monitor re-init.
+    uint32_t rx_liveness_ms = 750;
     uint32_t min_interval_s = 5;
     uint32_t ack_timeout_ms = 1000;
     uint32_t bind_release_s = 90;    // §11.5a command-source binding release

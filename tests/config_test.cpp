@@ -155,6 +155,7 @@ int main() {
             CHECK_EQ_U(c.policy.ret.guard_us, 300);
             CHECK(!c.policy.ret.quiet_gap);   // §7.1 baseline ships default
             CHECK_EQ_U(c.policy.ret.report_redundancy, 2);  // Pass 78 seed
+            CHECK_EQ_U(c.policy.csa.rx_liveness_ms, 750);   // Pass 80 seed
             CHECK(!c.node.net_id.has_value());  // §3.0: accept-any when absent
             CHECK(c.policy.csa.psk.empty());  // spectator: no psk
             CHECK(c.stats.hz == 1.0);

@@ -221,6 +221,19 @@ bool iw_set_freq(const std::string& ifname, uint16_t mhz, uint8_t bw) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+// Pass 80: one forked CLI step of the monitor bring-up sequence.
+bool run_cli(const char* const argv[]) {
+    const pid_t pid = ::fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        ::execvp(argv[0], const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    int status = 0;
+    if (::waitpid(pid, &status, 0) < 0) return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 }  // namespace
 
 struct MonAir::Impl {
@@ -689,6 +702,28 @@ bool MonAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
         return false;
     }
     return true;
+}
+
+bool MonAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t bw) {
+    // §11.6 Pass 80: the RTL88x2 in-place retune can half-apply (TX airs on
+    // the new channel, RX deaf). Full bring-up sequence — mirrors mon-up.sh;
+    // AF_PACKET RX sockets are ifindex-bound and survive the down/up.
+    if (adapter >= impl_->adapters.size()) return false;
+    const std::string& ifname = impl_->adapters[adapter]->ifname;
+    const char* ifc = ifname.c_str();
+    const char* down[] = {"ip", "link", "set", ifc, "down", nullptr};
+    const char* mon[] = {"iw", "dev", ifc, "set", "type", "monitor", nullptr};
+    const char* up[] = {"ip", "link", "set", ifc, "up", nullptr};
+    const char* mtu[] = {"ip", "link", "set", ifc, "mtu", "4052", nullptr};
+    bool ok = run_cli(down);
+    ok = run_cli(mon) && ok;
+    ok = run_cli(up) && ok;
+    run_cli(mtu);  // best-effort, as in mon-up.sh
+    ok = iw_set_freq(ifname, chan_mhz, bw) && ok;
+    std::fprintf(stderr,
+                 "kernel-monitor: RX-liveness recovery on %s -> %u MHz %s\n",
+                 ifc, chan_mhz, ok ? "ok" : "FAILED");
+    return ok;
 }
 
 bool MonAir::reapply_tx_power(size_t adapter) {
