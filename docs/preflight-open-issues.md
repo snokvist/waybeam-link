@@ -358,25 +358,34 @@ to `floor_profile` **unclamped by the §9.7 pin**. The deployed vehicle runs
 MCS0 is still dumped onto it, at the worst possible moment, and gets 3 % broken
 frames as its "safe" mode.
 
-**Levers, cheapest first — none of these are ruled yet:**
+**Operator ruling 2026-07-24 — cause and direction.** The PA-overdrive
+confound is **rejected**: the cause is the undersized FEC blocks with no
+protection, as the packet arithmetic above shows. The fix direction is to
+**use the §9.11 fps ladder, down to 30 fps**, so the floor rung encodes frames
+large enough to carry meaningful parity.
 
-1. **Drop fps at the floor rung.** Highest leverage and it is data, not code: at
-   30 fps the same 3804 kbps gives ~16 kB frames ≈ 11 packets, which parity can
-   actually protect. Constraint to check first: the §9.11 ladder is DISABLED on
-   the craft, and `kFpsLadder` is a fixed core constant, so an arbitrary fps
-   subset is not config-expressible today.
-2. **Give profile 0 a real parity floor.** `fec_scheme` / `fec_overhead_frac`
-   are per-profile §9.3 table fields and profile 0 carries `none` / `0.0`.
-   Costs airtime the rung can least afford — needs measurement, not a guess.
-3. **Reconsider the floor rung itself.** MCS1 measured clean in the same
-   session. If MCS0 cannot be made viable, `floor_profile: 0` is a *worse*
-   fail-safe than `floor_profile: 1`.
+That makes the work, in order:
 
-**Caveats before any ruling.** Desk range, one channel, one craft, one 38 s
-window. One confound is untested: profile 0 specifies `tx_power_level: 4` — the
-highest index in the table — against level 2 at MCS5, so part of the excess raw
-loss may be near-field overdrive rather than an inherent MCS0 property.
-Separate that before deciding, ideally by re-running the comparison at range.
+1. **Drive the fps ladder at the floor rung, down to 30 fps.** At 30 fps the
+   same 3804 kbps gives ~16 kB frames ≈ 11 packets, which parity can actually
+   protect. Constraint to resolve first: the ladder is DISABLED on the craft
+   today, and `kFpsLadder` is a fixed core constant
+   `{30,45,60,75,90,100,120,144}` — so 30 fps *is* expressible, but coupling
+   the rung to the ladder rung is not something §9.11 does yet. Expect a spec
+   ruling on how §9.8/§9.5 and §9.11 compose.
+2. **Then re-measure, and only then decide on parity.** `fec_scheme` /
+   `fec_overhead_frac` are per-profile §9.3 table fields and profile 0 carries
+   `none` / `0.0`. Bigger frames may make demand-driven JSCC parity sufficient
+   on its own; adding a fixed floor costs airtime the rung can least afford.
+3. **Keep `floor_profile: 0` under review.** MCS1 measured clean in the same
+   session. If the ladder does not make MCS0 viable, a floor of 1 is the
+   better fail-safe.
+
+**Caveats.** Desk range, one channel, one craft, one 38 s window — the
+re-measurement after the ladder change should widen that. The `tx_power_level`
+difference (4 at profile 0 vs 2 at MCS5) was raised as a possible near-field
+overdrive confound and **ruled out by the operator**; it is recorded here only
+so the next reader does not re-derive it.
 
 Interacts directly with **A3** (whether a §9.7 pin should yield to the §9.8
 fail-safe): this is the first hard evidence that where the fail-safe *lands*
