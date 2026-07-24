@@ -314,6 +314,74 @@ Pass 76 §15.3 surface with a golden-tested schema, and this compounds with
 **B8** — during a split, a follower's own display cannot tell the operator where
 it actually is. Both want settling together.
 
+### B11 — The §9.8 fail-safe floor rung (MCS0) is not viable — BLOCKER
+
+Reported by the operator 2026-07-24 ("choppy, lossy, lots of defects" whenever
+the link ends up in fallback) and measured the same day.
+
+**Measurement.** Craft pinned to the floor rung (`select.min_profile =
+max_profile = 0`), desk range, RSSI −28…−33 dBm, 5805 MHz, ground `.242`:
+
+| 38 s window | MCS0 (floor rung) | control: adaptive MCS1–5 |
+|---|---|---|
+| frames encoded | 3711 (97.0 fps) | 99.8 fps |
+| **frames unrecoverable** | **124 → 3.34%** | **0 → 0.00%** |
+| one broken frame every | 0.31 s | — |
+| loss pre-diversity | 18 ‰ | 14 ‰ |
+| loss post-diversity | 14 ‰ | 7 ‰ |
+
+Both runs are the same rig, same session, minutes apart. At −28 dBm MCS0 has
+enormous SNR margin, so this is **not** RF marginality — the most robust
+modulation in the table delivers the worst video by a wide margin.
+
+**Mechanism.** The rung changes the *bitrate*, not the *frame rate*:
+
+- §9.5 derives **3804 kbps** for profile 0 (6500 kbps HT20 LGI × 0.60 airtime −
+  96 kbps reserve), and the craft keeps encoding ~97 fps.
+- 3804 kbps ÷ 97 fps ≈ 39 kbit ≈ 4.9 kB per frame. Measured `frame_size_last`
+  ran 1507–2544 bytes — i.e. roughly **two packets per video frame**.
+- At the observed 18 ‰ per-packet loss, P(a two-packet frame is damaged) =
+  1 − (1 − 0.018)² ≈ **3.6 %**, against **3.34 %** observed. The arithmetic
+  accounts for essentially the whole effect.
+- A two-packet block has no repair headroom. `fec_scheme: "none"` in the §9.3
+  table means parity is JSCC-demand-driven only, so diversity is the sole
+  defence — and 18 ‰ → 14 ‰ says that loss is largely correlated.
+
+So the floor rung fails for a structural reason, not a radio one: it shrinks
+frames until a single lost packet destroys one, while leaving nothing to repair
+them with.
+
+**Why this matters more than the numbers suggest.** The fail-safe is entered
+exactly when feedback is already lost — and Pass 84 ruled that the descent goes
+to `floor_profile` **unclamped by the §9.7 pin**. The deployed vehicle runs
+`min_profile 1 / max_profile 5`, so a craft whose operator deliberately excluded
+MCS0 is still dumped onto it, at the worst possible moment, and gets 3 % broken
+frames as its "safe" mode.
+
+**Levers, cheapest first — none of these are ruled yet:**
+
+1. **Drop fps at the floor rung.** Highest leverage and it is data, not code: at
+   30 fps the same 3804 kbps gives ~16 kB frames ≈ 11 packets, which parity can
+   actually protect. Constraint to check first: the §9.11 ladder is DISABLED on
+   the craft, and `kFpsLadder` is a fixed core constant, so an arbitrary fps
+   subset is not config-expressible today.
+2. **Give profile 0 a real parity floor.** `fec_scheme` / `fec_overhead_frac`
+   are per-profile §9.3 table fields and profile 0 carries `none` / `0.0`.
+   Costs airtime the rung can least afford — needs measurement, not a guess.
+3. **Reconsider the floor rung itself.** MCS1 measured clean in the same
+   session. If MCS0 cannot be made viable, `floor_profile: 0` is a *worse*
+   fail-safe than `floor_profile: 1`.
+
+**Caveats before any ruling.** Desk range, one channel, one craft, one 38 s
+window. One confound is untested: profile 0 specifies `tx_power_level: 4` — the
+highest index in the table — against level 2 at MCS5, so part of the excess raw
+loss may be near-field overdrive rather than an inherent MCS0 property.
+Separate that before deciding, ideally by re-running the comparison at range.
+
+Interacts directly with **A3** (whether a §9.7 pin should yield to the §9.8
+fail-safe): this is the first hard evidence that where the fail-safe *lands*
+matters as much as whether it fires.
+
 ---
 
 ## C. Verification still owed
