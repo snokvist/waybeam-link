@@ -643,3 +643,95 @@ floor, and the widest-FOV sensor mode that supports the cell's fps.
   work, but the *motivation* changes: with no block-size floor, the ladder is
   no longer needed for protection. It becomes purely a quality lever, and the
   variable-fps mode is its only remaining hard requirement.
+
+---
+
+## 16. THE MATRIX (educated guess, 2026-07-24)
+
+Operator asked for a call rather than another measurement round. Here it is.
+Everything below is arithmetic on §12's corrected rung bitrates plus one
+judgement call.
+
+### 16.1 The judgement call
+
+**Floor: 0.04 bpp at the cell's lowest allowed rung. Nominal: ≥ 0.10 bpp at
+its top rung.**
+
+The lowest rung is the *emergency fallback*, so the right target there is
+"degraded but flyable", not "good" — H.265 at ~0.04 bpp on high-motion FPV is
+soft and blocks up on motion but holds shape and horizon. For calibration:
+HDZero runs ~0.075–0.15 bpp at 720p90, DJI O3 ~0.20–0.32 at 1080p60. 0.04 is
+deliberately below both, because it is a floor and not a design point.
+
+This is the one number in this document that was guessed rather than measured.
+If it is wrong, every cell moves together and the structure survives — rerun
+§15 and re-derive.
+
+### 16.2 Axes
+
+| axis | user sees | derives |
+|---|---|---|
+| **Latency** Low / Medium / High | responsiveness | fps **100 / 60 / 30** |
+| **Range** High / Medium / Low | how far before it degrades | MCS band **0–2 / 1–4 / 2–5** |
+| **Aspect** 16:9 / 4:3 | picture shape | which sensor modes are eligible |
+
+Range sets the *lowest* rung the link may fall to, which is what actually
+determines usable distance. The band's top rung is the nominal operating point.
+
+### 16.3 16:9 — the primary matrix
+
+Cells show encode resolution and the bpp range from the band's lowest rung to
+its top rung.
+
+| | **Range High** (MCS 0–2) | **Range Medium** (MCS 1–4) | **Range Low** (MCS 2–5) |
+|---|---|---|---|
+| **Latency Low** (100 fps) | 960×540 · 0.060→0.204 | 1600×900 · 0.044→0.147 | 1920×1080 · 0.051→0.121 |
+| **Latency Medium** (60 fps) | 1280×720 · 0.056→0.191 | 1920×1080 · 0.051→0.171 | 1920×1080 · 0.085→0.201 |
+| **Latency High** (30 fps) | 1920×1080 · 0.050→0.170 | 1920×1080 · 0.101→0.341 | 1920×1080 · 0.170→0.402 |
+
+Every cell clears the floor at its worst rung and 0.12+ at its best. The
+diagonal reads exactly as intended: trading latency for range costs pixels,
+and 1080p is reachable from every range band if you accept 30 fps.
+
+### 16.4 4:3 — two rows, not three
+
+The IMX335 has no 4:3 mode above 60 fps, so **4:3 has no Latency-Low row**.
+
+| | **Range High** | **Range Medium** | **Range Low** |
+|---|---|---|---|
+| **Latency Medium** (60 fps) | 1280×960 · 0.042→0.143 | 1440×1080 · 0.068→0.227 | 1440×1080 · 0.113→0.268 |
+| **Latency High** (30 fps) | 1440×1080 · 0.066→0.226 | 1440×1080 · 0.135→0.455 | 1440×1080 · 0.226→0.536 |
+
+`1280×960 · 0.042` is the tightest cell in the design.
+
+### 16.5 Sensor mode — widest FOV that supports the row's fps
+
+Independent of encode resolution (§13: the ISP downscales), so this is chosen
+per *row*, not per cell.
+
+| fps | IMX335 (16:9) | IMX335 (4:3) | IMX415 (16:9) |
+|---|---|---|---|
+| 30 | mode 2 · 2560×1440 | mode 0 · 2560×1920 | idx 0 · 3840×2160 · **100 % FOV** |
+| 60 | mode 2 · 2560×1440 | mode 1 · 2560×1920 | idx 2 · 2816×1584 · 73 % w |
+| 100 | mode 3 · 2176×1224 | — | idx 6 · 1728×972 binned · 81 % area |
+
+On the IMX335 one sensor mode covers both 30 and 60, so within 16:9 those two
+rows differ by a live fps change only. Moving the Low-latency row from 100 to
+90 fps would put all three rows on mode 2 and make the entire latency axis
+live — the surviving half of the §6 argument.
+
+### 16.6 The tenth mode: variable-fps
+
+One extra mode outside the matrix, explicitly **not record-friendly**:
+1280×720, fps free to float 30–100, MCS band 0–5. It is the only configuration
+that spans the full link envelope, because it can trade cadence for rung all
+the way down. Offer it as *"maximum range, no recording."*
+
+### 16.7 What this depends on
+
+- §11's `min_k` fix. Without it the Range-High column is unsafe at its floor
+  rung, which is exactly the B11 failure.
+- §12's `fec_overhead_frac` fix. Without it every bitrate here is ~18 % too
+  optimistic and the floor cells do not actually clear 0.04.
+
+Both are still PROPOSED, pending operator sign-off.
