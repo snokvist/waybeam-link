@@ -1171,6 +1171,14 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
 
 - **Units kbps**, hard range **1000–200000** (venc-enforced; default 8192).
   `bitrate_min` is a policy floor ≥ 1000.
+- **Encoder-capability ceiling (`venc.max_bitrate_kbps`, default 0 =
+  unlimited; Pass 75):** the §9.5-derived per-rung bitrate is clamped to
+  `min(derived, max_bitrate_kbps)` before actuation, `venc_bitrate_kbps`
+  reporting, and cap coupling — a hard limit for what the SoC encoder +
+  pipeline can sustain, **independent of the rung**. The selector still climbs
+  MCS for link robustness; above the rung where `derived == ceiling` the extra
+  PHY capacity is airtime margin, not video bits. Must be ≥ 1000 (rejected at
+  load otherwise) and should exceed the table `bitrate_min_kbps` to bind.
 - **Single bitrate authority (deployment rule, not a flag):** venc's API is
   last-writer-wins with no arbitration. waybeam-link MUST be the only writer of
   `video0.bitrate` (and, with frame caps enabled, of `video0.maxIBytes`/

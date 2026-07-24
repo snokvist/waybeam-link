@@ -2075,6 +2075,38 @@ pre-live-venc fallback mode); §13 forged-VEHICLE_CMD bound re-worded; §15.3
 its own PR in waybeam_venc (persist flag threaded through the set pipeline +
 route registration; identical response shapes).
 
+## Pass 75 — venc encoder-capability bitrate ceiling (§9.6, ruled 2026-07-24)
+
+**Problem (operator, 2026-07-24):** the §9.5 per-rung derived bitrate has only
+a **floor** (`bitrate_min_kbps`) — no ceiling. On a strong link the top rungs
+derive well above what the SoC encoder + pipeline can sustain (on the seed
+table at 600‰ airtime: MCS4 ≈ 25.9 Mbps, MCS5 ≈ 34.6 Mbps), and waybeam-link
+as the sole §9.6 authority will command it. An SSC338Q-class SoC cannot
+sustain much beyond ~25 Mbps of encode + framing + injection. Capping airtime
+would also work but conflates two different limits (channel occupancy vs CPU);
+the operator ruled 65 % PHY airtime is fine and the real constraint is encoder
+CPU.
+
+**Ruling (operator 2026-07-24):** add `venc.max_bitrate_kbps` (default `0` =
+unlimited), an **encoder-capability ceiling** independent of the rung. The
+§9.5-derived bitrate is clamped to `min(derived, max_bitrate_kbps)` before
+§9.6 actuation, `venc_bitrate_kbps` reporting, and §9.6/§9.11 cap coupling —
+so everything downstream sees one clamped value. Rung-independent: the
+selector still climbs MCS for link robustness, but above the rung where
+`derived == ceiling` the extra PHY capacity becomes airtime margin, not video
+bits (MCS4 and MCS5 both command 25 000 at a 25 Mbps ceiling). The ceiling
+must be ≥ the venc hard floor 1000 (rejected at config load otherwise) and
+should exceed the table's `bitrate_min_kbps` to be meaningful; it never lowers
+the per-profile floor below its own value in normal (`max ≥ floor`) configs.
+
+**Rejected:** lowering the table `airtime_budget_frac` to cap the top rung
+(operator wants 65 % PHY; and it's a fleet-wide table-hash change conflating
+occupancy with CPU); a `max_profile` cap (blunt — bounds the rung, not the
+bitrate, and forfeits the higher rung's link robustness).
+
+Spec: §9.6 `venc.max_bitrate_kbps` bullet (encoder ceiling on the §9.5 derived
+target); §15.2 venc config note. Wired as `SelectorPolicy.max_bitrate_kbps`.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
