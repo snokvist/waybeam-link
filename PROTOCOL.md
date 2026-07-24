@@ -98,7 +98,7 @@ Three orthogonal identities, never conflated:
 | `session_id` | u32 | Random per-boot nonce **of the sender**. Namespaces that originator's seq/block spaces and doubles as a reboot/anti-replay epoch. |
 | `stream_id` | u8 | Instance index; disambiguates multiple streams from one originator. |
 | `stream_type` | u8 | Semantic kind → selects the profile (§3.4, §4). |
-| `seq` | u32 | Monotonic per `(originator, session, stream)`. Global order + dedup key. No wrap within a flight → plain integer comparison. |
+| `seq` | u32 | Monotonic per `(originator, session, stream)`. Global order + dedup key. No wrap within a flight → plain integer comparison (but see §2.1 — this is a property of a *legitimate* sender, never a memory-safety premise). |
 | `block_id` | u32 | Monotonic per `(originator, session, stream)`. One block = one RTP frame. |
 
 - **Discovery / latch:** an RX in monitor mode passively enumerates
@@ -121,6 +121,31 @@ Three orthogonal identities, never conflated:
   never NACKs below it (no back-filling history on join).
 - **Teardown:** implicit. Nothing heard for a session within an idle timeout →
   RX drops its state. No explicit close on the wire.
+
+### 2.1 Scope of the no-wrap assertion (Pass 81)
+
+The `seq`/`block_id` no-wrap property above describes what a **legitimate**
+sender emits: at the §9.3 ceiling rates a u32 counter cannot exhaust within any
+plausible flight, so §6.6 may compare with plain integer arithmetic and refuse
+modular comparison (which would make a forged far-*backward* seq look
+forward-plausible and reopen the video-flush hole §6.6 exists to close).
+
+**It is NOT a bound on the values RX can be made to hold.** The §2 startup floor
+adopts a first-seen `seq` from the air, and the §6.6 sustained-clamp resync
+adopts a fresh floor after an outage; both let a remote party place the cursor
+anywhere in u32, including within a few packets of `0xFFFFFFFF`. Therefore:
+
+- **No RX loop bound, allocation size, or buffer index may be derived from the
+  no-wrap assertion.** Any such bound must hold independently — in practice
+  against `fwd_clamp_pkts`/`fwd_clamp_blocks`, which are config-bounded — so that
+  it survives even when every sequence-space invariant is violated at once.
+- **A cursor that wraps past `max_seq` is a desync, not a sequence.** RX MUST
+  re-floor with §2 startup-floor semantics (identical handling to the §6.6
+  sustained-clamp resync) and count it in the §15 stats.
+
+Rationale: the clamp is named the load-bearing injection defence (§13). A defence
+whose failure mode is unbounded allocation is not load-bearing. Correctness may
+rest on the assertion; liveness and memory safety may not.
 
 ---
 
@@ -324,6 +349,15 @@ its own local profile table (§3.6)**, MUST treat that stream under the
 supersession/deadline/adaptive logic — and raise a stat. A new type or a diverged
 table can therefore never make an older/mismatched client misbehave.
 
+**Best-effort suspends profile logic, never §6.6 clamp state (Pass 87).**
+`max_block` and the delivery cursor are *clamp* state, not profile state, and MUST
+keep ratcheting in best-effort — only the `BlockInfo` deadline/supersession
+bookkeeping is suspended. Freezing `max_block` here reproduces, by another route,
+the exact failure §6.6 documents for a delivered-block reference: the clamp
+rejects everything `fwd_clamp_blocks` later, the sustained-clamp resync flushes
+all stream state, and the pair repeats indefinitely — turning the *graceful*
+degradation this rule promises into a worse outcome than no fallback at all.
+
 ### 3.5 LINK_REPORT packet (type `0x3`, RX→TX) — 39 bytes
 
 | off | size | field | notes |
@@ -383,18 +417,29 @@ collisions.
 
 - `count` u8 — number of profiles;
 - for each profile, **sorted ascending by `id`** (duplicate `id`s are a config
-  error), the fields in this exact order, big-endian, 25 bytes per profile:
+  error), the fields in this exact order, big-endian, **27 bytes per profile**:
   `id` u8 · `mcs` u8 · `gi` u8 (0=long, 1=short) · `tx_power_level` u8 ·
   `airtime_budget_permille` u16 · `fec_scheme` u8 (0=none, 1=rlc256,
   2=rlc256_iframe, 3=tetrys_reactive) · `fec_overhead_permille` u16 ·
   `arq_deadline_iframe_ms` u16 · `arq_deadline_pframe_ms` u16 ·
-  `bitrate_min_kbps` u32 · `reserve_control_bps` u32 · `reserve_telemetry_bps` u32;
+  `bitrate_min_kbps` u32 · `reserve_control_bps` u32 ·
+  `reserve_telemetry_bps` u32 · `max_payload` u16;
 - `floor_profile` u8.
 
 Fractional JSON fields (`airtime_budget_frac`, `fec_overhead_frac`) are scaled to
 integer per-mille with `llround(frac × 1000)` before hashing. The hash is thus
 invariant to JSON formatting, key order, and comments, and changes on any semantic
 change to any profile field.
+
+**Amendment (Pass 82).** `max_payload` u16 at offset 25 was appended when §9.3
+gained the field; the original 2026-07-10 ruling amended §3.2/§9.3 but not this
+section, leaving the wire hash undocumented for four months. `max_payload` is a
+semantic profile field, and the invariant stated immediately above — the hash
+changes on any semantic change to any profile field — *requires* its inclusion.
+The serialization was corrected here to match the shipped implementation
+(`kCanonicalProfileSize = 27`); the implementation was not changed, because
+rotating `table_version` across a deployed fleet would drop every node to §3.4
+best-effort for no benefit.
 
 ### 3.7 The `loss_postdiv_prearq` semantics (do not confuse with wfb_ng)
 
@@ -955,6 +1000,14 @@ wording):
   `max_block` costs an attacker one accepted in-clamp packet per `+K` step —
   that bounded creep is the accepted residual of this defence.
 
+**Bounded gap enumeration (Pass 81).** Noting missing seqs between the cursor
+and the newest heard `seq` MUST be bounded by `fwd_clamp_pkts` **unconditionally**
+— not by the clamp's `max_seq - cursor` invariant, which §2.1 forbids relying on
+for a loop bound. A cursor that has wrapped past `max_seq` (`max_seq < cursor`
+under plain comparison) is a §2.1 desync: re-floor with startup-floor semantics
+and count it as `resyncs`. Without both halves, four chosen packets walk the
+cursor across `0xFFFFFFFF` and the enumeration runs the full u32 space.
+
 **Sustained-clamp resync (escape hatch).** If *every* packet of a latched
 stream clamp-rejects continuously for `clamp_resync_ms` (seed 500 ms), the
 stream is desynced by a real outage (the TX ran further ahead than the clamp
@@ -1296,6 +1349,16 @@ from steady state without a second wire field.
   select-and-hold, not a freeze-in-place. (Config-time pins already land there via
   the boot clamp; the runtime path clamps in `evaluate()` on the next tick.)
 
+**`min_profile` / `max_profile` are profile `id`s, not ladder indices
+(Pass 83).** They are resolved against the §3.6 table the same way
+`floor_profile` is: by `id`, independent of the order profiles appear in the
+JSON. A configured `id` that is not present in the table is a **config error**
+(reject at load with the offending value named) — never a silent clamp to a
+neighbouring rung. `{"max": 255}` unpins by saturating above the highest present
+`id`, unchanged. Rationale: `floor_profile` already carried id semantics in the
+same struct, operators author these as MCS-bearing ids, and an id survives a
+table reordering that an index does not.
+
 ### 9.8 Fail-safe on lost feedback
 TX runs a `report_epoch` watchdog. No fresh, monotonic-forward epoch within
 `report_timeout_ms` (**~500 ms**) ⇒ **fail toward degradation**: hold, then step
@@ -1308,6 +1371,23 @@ floor-oscillation limit cycle (§17 gate 4). The craft additionally runs
 `TxStats.last_was_timeout` = local FIFO backpressure, venc queue fill) — noting
 these are *local* and cannot see a remote fade, so they conservatively bias toward
 degradation, not toward holding a high rung.
+
+**The descent target is `floor_profile`, NOT the §9.7 `min_profile` pin
+(Pass 84).** The two knobs answer different questions and MUST NOT be conflated:
+
+| knob | question | applies |
+|---|---|---|
+| §9.7 `min_profile` | how low may the selector *choose* to go while it can see feedback? | adaptation envelope |
+| §3.6 `floor_profile` | where does the link go when feedback is **gone**? | safety floor |
+
+A craft with `min_profile: 1` and `floor_profile: 0` therefore adapts within
+MCS1–5 in normal flight and still descends to MCS0 on lost feedback. Clamping the
+fail-safe by the adaptation envelope means an operator cannot tune airtime
+efficiency without silently removing the most robust rung from the one path that
+runs when the link is worst and the craft is furthest away — the exact "never fail
+optimistic" violation this section opens by forbidding. The §9.7 pin is not
+consulted during `FAILSAFE`; it resumes governing on the first fresh
+`report_epoch`.
 
 ### 9.9 Backpressure coupling (local, TX-side)
 The venc output-queue fill is a local TX signal, not an RX report. It **suppresses
@@ -1565,6 +1645,21 @@ absent ⇒ announced token (Pass 61). There is no separate mode toggle.
   and the `csa_min_interval_s` rate-limit still hold. An accepted CSA can never
   send a craft off its configured allowlist, whatever the key source.
 
+**An absent key is a fault, not a mode (Pass 85).** The two sources above are
+exhaustive for craft/ground: secret mode is configured, announced mode is
+self-generated at boot. A craft or ground holding an **empty** CSA key is
+therefore always a bug — a missed ANNOUNCE, a config typo, or a failed token
+generation — and MUST **fail closed**: reject the CSA, count it, and stay put.
+Following it would mean an unauthenticated-CSA mode for craft/ground, which the
+opening sentence of this section forbids.
+
+The permission to follow unauthenticated belongs to the **role**, not to the
+emptiness of a buffer. Implementations MUST carry it as an explicit policy input
+(true only for a §15.2 `node.spectator`, Pass 74), never infer it from a
+zero-length key: a security posture that is a side effect of an empty container
+is one refactor away from silently inverting, and gives craft, ground and
+spectator the same code path with three different intended outcomes.
+
 ### 11.5 State machine (follower)
 ```
 IDLE ─valid+MAC'd CSA─▶ ARMED ─T_switch─▶ retune+ReApplyTxPower ─▶ VERIFY
@@ -1588,6 +1683,17 @@ mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
   retune itself (and any post-retune RX dead-time) consume the window, which
   on a class-0 campaign leaves too little listening time to hear the
   issuer's beacons.
+- **Precedence: the issuer may shorten the window, never lengthen it
+  (Pass 86).** The wire's `t_revert_ms` (§11.1) is the issuer's *advisory*
+  follower auto-revert budget; `verify_timeout_ms` is the node's own config.
+  The effective window is
+  `min(t_revert_ms > 0 ? t_revert_ms : verify_timeout_ms, verify_timeout_ms)` —
+  i.e. an issuer that knows its campaign is fast may tighten the fleet's revert,
+  but can never extend how long a follower sits on a channel it cannot hear.
+  `t_revert_ms` is u16; taking it unclamped lets a single frame strand a follower
+  for 65 s on a dead channel, and until Pass 85 lands, an empty-key node accepts
+  that frame from anyone. How long a node is willing to be deaf is the node's
+  decision, not the issuer's.
 - **Rendezvous-beacon confirmation (Pass 69):** in VERIFY, a MAC-valid CSA
   whose `(originator, session_id, csa_nonce)` equal the armed campaign's and
   whose `dt_to_switch_ms = 0` (the issuer's §11.6 beacon, `csa_seq` 0)

@@ -2372,6 +2372,218 @@ Spec: §11.6 guard bullet; §15.2 `csa.rx_liveness_ms`. Wired as
 `MonAir::recover()` (bring-up sequence via forked `ip`/`iw`) + the craft
 CSA-action hook in `app/main.cpp`.
 
+## Pass 81 — §2.1/§6.6: the no-wrap assertion is not a memory-safety premise (ruled 2026-07-24)
+
+**Problem (pre-flight audit 2026-07-24, reproduced):** `RxEngine::note_gaps`
+bounded its enumeration loop on the §6.6 clamp invariant
+(`max_seq - cursor <= fwd_clamp_pkts`), which does not survive the u32 `seq`
+wrap. `advance_cursor` does a bare `++s.cursor`, and `plausible_forward()`
+deliberately has no modular arithmetic and treats every backward candidate as
+plausible, so nothing stops the cursor crossing `0xFFFFFFFF` while `max_seq`
+stays behind it. **Four chosen packets** (`0xFFFFFFFD/FE/FF`, then `0x0`) —
+satisfying §2 admission on the attacker's own invented tuple, no jamming, no
+prior state — then run the loop over the full u32 space allocating a `Gap` node
+per iteration: the ground's video pipeline hangs and OOMs. Also reachable
+against an already-latched stream via the §6.6 sustained-clamp resync escape.
+
+**Ruling (operator 2026-07-24, "i agree with all"):** §2's no-wrap property
+describes a *legitimate* sender's counter and is a valid basis for **correctness**
+(plain integer comparison in §6.6). It is **not** a bound on what values RX can be
+made to hold — the §2 startup floor and the §6.6 resync both adopt a floor from
+the air. Therefore no RX loop bound, allocation size or buffer index may derive
+from it; such bounds must hold independently, against the config-bounded
+`fwd_clamp_pkts`/`fwd_clamp_blocks`. A cursor that wraps past `max_seq` is a
+desync and re-floors with §2 startup-floor semantics, counted as `resyncs`.
+
+**Explicitly NOT adopted:** switching `plausible_forward()` to modular
+arithmetic. The existing comment's reasoning stands — modular comparison makes a
+forged far-*backward* seq look forward-plausible and reopens the video-flush hole
+§6.6 exists to close. Bound the loop; keep the clamp non-modular.
+
+Spec: new §2.1; §6.6 bounded-gap-enumeration bullet. Wired as an unconditional
+`fwd_clamp_pkts` cap in `RxEngine::note_gaps()` plus a wrap re-floor in
+`RxEngine::on_data()`. Test debt closed alongside: there was no adversarial
+harness on `RxEngine::on_data` at all (`wire_fuzz_test` stops at `decode()`),
+which is why this survived the full 46-suite gate.
+
+## Pass 82 — §3.6 canonical serialization is 27 bytes, not 25 (ruled 2026-07-24)
+
+**Problem:** §3.6 normatively pins the `table_version` hash input at "25 bytes
+per profile", ending at `reserve_telemetry_bps`. The shipped implementation
+hashes **27** — `max_payload` u16 appended at offset 25
+(`kCanonicalProfileSize = 27`). The §9.3 `max_payload` ruling amended §3.2/§9.3
+but not §3.6, where the hash is normatively defined, leaving the wire hash
+undocumented. Any implementation written against §3.6 v1 computes a different
+byte for the same table → permanent §3.4 best-effort on both ends → Pass 87.
+
+**Ruling (operator 2026-07-24):** amend the **spec** to 27 bytes; the
+implementation is correct and does not change. `max_payload` is a semantic
+profile field, and §3.6's own stated invariant — the hash changes on any semantic
+change to any profile field — requires its inclusion. Rotating `table_version`
+across the deployed fleet (craft `.232`, grounds `.242`/`.199`) would drop every
+node to §3.4 best-effort for no benefit.
+
+**Follow-up (test debt):** `tests/table_hash_test.cpp` pins `0x41` for the
+example table, which locks in the *implementation*, not the *spec* — this class
+of divergence is invisible to CI by construction. A hand-serialized fixture
+derived from the §3.6 byte layout, with its expected CRC-8, now cross-checks the
+two.
+
+Spec: §3.6 field list + amendment note. No code change.
+
+## Pass 83 — §9.7 `min_profile`/`max_profile` are profile ids (ruled 2026-07-24)
+
+**Problem:** `SelectorPolicy` documented these as "indexes into the ladder by id"
+— self-contradictory — and `Selector::clamp_rung()` used them as raw indices into
+`table_->profiles` in **file order**, while `floor_profile` in the same struct
+resolves by `id`. §9.7 never defined the pin's semantics; code picked silently.
+Invisible today only because `profiles/table.example.json` happens to have
+`id == index == mcs` for 0–7 ascending.
+
+**Ruling (operator 2026-07-24):** they are profile **ids**, resolved like
+`floor_profile`, independent of JSON order. A configured id absent from the table
+is a config error rejected at load with the offending value named — never a
+silent clamp to a neighbouring rung. `{"max": 255}` still unpins by saturating
+above the highest present id.
+
+Rationale: `floor_profile` already carried id semantics in the same struct;
+operators author these as MCS-bearing ids (the vehicle's "MCS1-5"); an id
+survives a table reordering that an index does not. **Blast radius on the
+deployed fleet: none** — the shipped table resolves identically under both
+readings, which is exactly why it was fixed now rather than after someone
+authors a table with a gap, a non-zero base, or out-of-order entries.
+
+Spec: §9.7 pin-semantics paragraph. Wired in `Selector::clamp_rung()` +
+config-load validation.
+
+## Pass 84 — §9.8 fail-safe descends to `floor_profile`, unclamped by the §9.7 pin (ruled 2026-07-24)
+
+**Problem:** the §9.8 lost-feedback descent target ran through `clamp_rung()`, so
+`min_profile` bounded it. The vehicle config's deliberate `min_profile: 1`
+(#47, adaptive MCS1-5 — a sound airtime choice) therefore *also* removed MCS0,
+the table's `floor_profile`, from the fail-safe. The most robust rung was
+unavailable on the one path that runs when the link is worst and the craft is
+furthest away.
+
+**Ruling (operator 2026-07-24):** separate the two concepts. §9.7 `min_profile`
+is an **adaptation envelope** — how low the selector may *choose* to go while it
+can see feedback. §3.6 `floor_profile` is a **safety floor** — where the link goes
+when feedback is *gone*. The pin is not consulted during `FAILSAFE`; it resumes
+governing on the first fresh `report_epoch`. A craft with `min_profile: 1` /
+`floor_profile: 0` thus adapts within MCS1–5 and still descends to MCS0 on lost
+feedback.
+
+Conflating them means an operator cannot tune airtime efficiency without silently
+weakening the fail-safe — the "never fail optimistic" violation §9.8 opens by
+forbidding. Rejected alternative: setting `min_profile: 0` on the vehicle, which
+fixes this flight and leaves the coupling as a trap for the next config.
+
+Spec: §9.8 descent-target table. Wired as an unclamped `floor_profile` target in
+`Selector::evaluate()`'s failsafe branch.
+
+## Pass 85 — §11.4a an absent CSA key is a fault, not a mode (ruled 2026-07-24)
+
+**Problem:** §11.4a states "HMAC is always applied — there is no
+unauthenticated-CSA mode for craft/ground", but `CsaFollower::verify()` made the
+MAC check conditional on `!policy_.psk.empty()`. `CsaFollower` cannot distinguish
+craft/ground from spectator, so an empty key silently meant *accept any CSA whose
+target is in my allowlist*. A craft whose announced token failed to populate — a
+missed ANNOUNCE, a config typo, the degraded-entropy path — retunes off-channel
+on a forged frame mid-flight. `VcmdCraft::on_cmd()` already fails closed on the
+same condition; the two disagreed.
+
+**Ruling (operator 2026-07-24):** for craft/ground both key sources are
+exhaustive (secret configured, or announced token self-generated at boot), so an
+empty key is always a bug and MUST fail closed — reject, count, stay put. The
+permission to follow unauthenticated belongs to the **role** and MUST be an
+explicit policy input (`allow_unauthenticated`, true only for a §15.2
+`node.spectator`, Pass 74), never inferred from a zero-length key: a security
+posture that is a side effect of an empty container is one refactor away from
+silently inverting, and gave craft, ground and spectator one code path with three
+different intended outcomes.
+
+Spec: §11.4a absent-key paragraph. Wired as `CsaPolicy::allow_unauthenticated`
+(default **false**) + `node.spectator` config wiring + a `csa_unauth_rejected`
+counter.
+
+## Pass 86 — §11.5 `t_revert_ms` may shorten the VERIFY window, never lengthen it (ruled 2026-07-24)
+
+**Problem:** the follower's VERIFY window preferred the wire's
+`campaign_.t_revert_ms` when non-zero, falling back to the node-local
+`verify_timeout_ms`. §11.5 specifies the local 150 ms and §11.1 calls the wire
+field the "follower auto-revert budget"; precedence was undefined. The field is
+u16, so one frame setting 65535 strands a follower **65 s** on a dead channel —
+and until Pass 85, an empty-key node accepts that frame from anyone.
+
+**Ruling (operator 2026-07-24):** the effective window is
+`min(t_revert_ms > 0 ? t_revert_ms : verify_timeout_ms, verify_timeout_ms)`. An
+issuer that knows its campaign is fast may tighten the fleet's revert; it can
+never extend how long a follower sits on a channel it cannot hear. How long a
+node is willing to be deaf is the node's own decision.
+
+Spec: §11.5 precedence bullet. Wired in `CsaFollower`'s VERIFY deadline.
+
+## Pass 87 — §3.4 best-effort must keep ratcheting `max_block` (ruled 2026-07-24)
+
+**Problem (pre-flight audit, reproduced):** `RxEngine::on_data()` updated
+`s->max_block` only inside `if (!s->best_effort)`, while the §6.6 block clamp
+reads it unconditionally. Once best-effort latched on a `table_version` mismatch
+(sticky, never cleared), `max_block` froze; `fwd_clamp_blocks` (4) blocks later
+every packet clamp-rejected until the 500 ms resync escape fired and flushed all
+held/gap/block state — then repeated forever. Measured over 200 blocks at 30 fps:
+`delivered=50/200, clamp_rejected=160, resyncs=9`. §3.4 promises "deliver by
+diversity" as a *graceful* degradation; instead the single most likely field
+misconfiguration — a profile-table skew, exactly what `table_version` exists to
+detect — turned a healthy link into ~7 fps of shredded video.
+
+**Ruling (operator 2026-07-24):** `max_block` (and `last_delivered_block`) are
+§6.6 clamp state, not §3.4 profile state, and ratchet unconditionally. Only the
+`BlockInfo` deadline/supersession bookkeeping belongs inside the best-effort
+guard. This is the same failure §6.6 already documents for a delivered-block
+reference ("freezes during the fade and then clamp-rejects the entire recovering
+stream forever") — best-effort reintroduced it by a different route.
+
+`tests/rx_test.cpp` covered best-effort with `block_id = 1` on every packet, so
+the freeze was invisible; multi-block best-effort coverage added.
+
+Spec: §3.4 clamp-state note. Wired in `RxEngine::on_data()`.
+
+## Pass 88 — deployment hardening carried with the above (no spec change)
+
+Not rulings — unambiguous defects found in the same audit, recorded so the fixes
+are traceable to it:
+
+- **`SIGPIPE` was never ignored.** `main()` installed SIGINT/SIGTERM only, and
+  `MSG_NOSIGNAL` appeared exactly once in the tree (`control_server.cpp`). A venc
+  restart across the `venc_http` `send()`, or a log reader exiting on the §15.3
+  stdout NDJSON, terminated the flight process. Now `SIG_IGN` at startup +
+  `MSG_NOSIGNAL` on the venc send.
+- **`MonAir::recover()` did not mirror `mon-up.sh`** despite saying so: it omitted
+  `iw set monitor otherbss` (foreign-BSS admission) and `iw set txpower auto` —
+  precisely the two steps the known RTL88x2 quirks depend on, including the
+  ground-side EU `-100 dBm`-after-reinit case (Pass 48). The Pass 80 guard could
+  therefore "recover" a radio that was still deaf or mute. Sequence corrected;
+  a post-recovery liveness re-check now runs rather than one-shot-and-hope.
+- **`decode_data()` enforced no `kMaxDataPayload` ceiling** — checked on TX
+  ingress and in FEC subheaders, never on the RX decode path.
+- **`RxCore::reset_stats()` never called `reporter_.reset_link()`**, so the §3.5
+  LINK_REPORT loss window underflowed to 0‰ for one window after
+  `POST /api/v1/stats/reset` — the optimistic direction §3.5 forbids.
+- **`cmd.copies` / `cmd.retry_cap` were unvalidated `uint8_t`**: `0` underflowed
+  through `--` to 255, turning a 3-copy VEHICLE_CMD into a 256-copy transmit
+  storm.
+- **`waybeam-ground.service` gated on `ConditionPathExists`**, which makes systemd
+  *skip* rather than fail the unit, so `Restart=on-failure` never applied — late
+  USB enumeration meant no ground receiver, silently, with no retry.
+- **No respawn on craft or RK ground.** A process death in the air was terminal.
+- **`nack_grace_ms: 0`** in both deploy configs, discarding the Pass 50 measured
+  default of 3 ms (−22.5% NACK packets, −21.3% vehicle resends).
+- **`.199` carried `role: "tx"` on `wlx40a5ef2f229b`**, the adapter Pass 48/49
+  isolated as a silent transmitter and ruled RX-only — either a dead return path
+  or a second uncoordinated uplink colliding with `.242` in the craft's single
+  §7.2 EOB listen gap. Set to `node.spectator: true`, the flag Pass 74 created
+  for this node shape and which was unused anywhere in `deploy/`.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
