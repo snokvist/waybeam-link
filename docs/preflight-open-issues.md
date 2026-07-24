@@ -335,7 +335,13 @@ Two things the run did establish:
 - The Passes 81–88 PR introduces **no CSA regression** — the pre-existing
   failures in B8 and B9 both reproduce on the older craft binary.
 
-**MET 2026-07-24 on the Pass 90 build: 10/10, repeated — 20/20 total.** Every
+**Run 2026-07-24: 20/20 on the Pass 90 implementation commit — but NOT yet met
+on the branch head.** See the Pass 90 addendum in `docs/review-log.md`: a
+late-accept hazard found by re-soaking forced a copy-emission cutoff, and the
+20/20 predates it. Pass 80 must be re-run on whatever is finally merged. The
+20/20 detail below stands as a result for that commit only.
+
+Every
 hop committed in 1.0 s with craft RX advancing, video and audio advancing,
 `report_age_ms 0` and **zero** recovery fires. It took three rulings to get there, and the order
 matters for anyone reading this later:
