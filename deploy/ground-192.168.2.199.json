@@ -26,6 +26,15 @@
         "kind": "frame-shm",
         "name": "venc_frame_out"
       }
+    },
+    {
+      "stream_id": 1,
+      "stream_type": "AUDIO",
+      "dir": "out",
+      "bind": {
+        "kind": "udp",
+        "send": "127.0.0.1:5601"
+      }
     }
   ],
   "air": {

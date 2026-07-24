@@ -32,6 +32,15 @@
         "p_rate_permille": 200,
         "min_k": 3
       }
+    },
+    {
+      "stream_id": 1,
+      "stream_type": "AUDIO",
+      "dir": "in",
+      "bind": {
+        "kind": "udp",
+        "listen": "127.0.0.1:5601"
+      }
     }
   ],
   "air": {
