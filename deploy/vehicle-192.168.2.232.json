@@ -57,6 +57,7 @@
     "host": "127.0.0.1:80",
     "enabled": true,
     "recovery_enabled": true,
+    "max_bitrate_kbps": 25000,
     "command_presets": { "fps": [30, 60, 90, 100] }
   },
   "control": {
