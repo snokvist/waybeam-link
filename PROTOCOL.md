@@ -1008,6 +1008,27 @@ receive. The mechanism, using only RX-local hardware TSF (no clock crossing):
   LINK_REPORTs remain normal-priority and wait for the next EOB midpoint; if no
   EOB arrives for 100 ms, they degrade to §7.1 opportunistic return.
 
+**Paced-stream semantics (Pass 78):** EOB pacing and return anchoring key on
+the **RTP video stream only**. A non-video stream's `END_OF_BLOCK` (every
+AUDIO/TELEMETRY datagram is a one-datagram block, §3.4) neither opens a craft
+listen window nor re-anchors a pending ground return. Non-video injection
+remains **gated** by an open gap exactly like video — held datagrams flush
+back-to-back after the window — so audio never transmits into a listen window
+but also never re-arms one. (Measured failure without this: 50 Hz audio EOBs
+re-armed the gap mid-flush, inflated the held backlog until the
+airtime-critical override fired, and the craft then transmitted through its
+own listen windows — episodic multi-report deaf spells, §9.8 watchdog trips,
+and full-range rung flapping that vanish with audio off.)
+
+**Report redundancy (Pass 78):** `return.report_redundancy` (seed **2**, `1`
+disables; RE-DERIVE §17). Each LINK_REPORT batch fired on a TSF-anchored
+window is retained and re-sent once at the **next** return window — spread
+across two craft listen gaps, never back-to-back inside one (deafness is
+correlated within a window). Blind fallback batches (no EOB anchor) are not
+repeated. The repeat is byte-identical (same epoch); the TX side counts
+`reports_received` only for **selector-fresh epochs**, so duplicates and
+replays no longer inflate the §15.3 heard-ratio.
+
 **Crossover (state it, don't hide it):** at high fps + saturated bitrate the idle
 gap shrinks below `return_window_us` and the contract degrades to §7.1
 best-effort. This optimisation, its window fit, and whether the damped adaptive
@@ -2280,7 +2301,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
                 "fwd_clamp_blocks": 4 },
     "fec":    { "scheme": "none", "overhead_frac": 0.0 },
     "return": { "guard_us": 300, "return_window_us": 2000,
-                "unicast": false },
+                "unicast": false, "report_redundancy": 2 },
     "csa":    { "psk": "<optional; auto-generated + announced when absent, §11.4a>",
                 "settle_s": 3.0, "verify_timeout_ms": 150,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,

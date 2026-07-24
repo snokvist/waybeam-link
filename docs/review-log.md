@@ -2246,6 +2246,57 @@ Spec: §3.4 `0x04 AUDIO` row. Wired as `stream_type::kAudio` + the `"AUDIO"`
 config token; example `config.radio-tx/rx.sample.json` gain a second UDP stream
 on `127.0.0.1:5601` (matching waybeam_venc's default `audioPort`).
 
+## Pass 78 — §7.2 paced-stream EOB semantics + LINK_REPORT redundancy (ruled 2026-07-24)
+
+**Problem (bench, 2026-07-24, measured on the rig at MCS5/25 Mbps/100 fps
+with the Pass 77 AUDIO stream live):** with 50 Hz audio flowing the adaptive
+link never holds — full-range rung flapping (8–24 profile changes per ~3 min,
+excursions to MCS1, §9.8 watchdog trips in some phase alignments) — while the
+identical link with audio off sits pinned at MCS5 with zero changes. A/B
+report-heard ratio barely moves (≈40–48% both ways); the damage is episodic
+multi-report deaf spells. Root cause, two code sites:
+
+1. **Craft** (`send_raw` → `note_eob_sent`): every EOB — and every 20 ms
+   audio datagram is a one-datagram block with EOB — re-armed the §7.2 quiet
+   gap, including *mid-flush*. Held video stalled behind each audio EOB, the
+   backlog inflated until the `skip_backlog` airtime-critical override fired,
+   and the craft then transmitted straight through its own listen windows —
+   deaf at exactly the midpoints the ground aims for. The 50 vs 100 Hz phase
+   drift makes it episodic, not constant.
+2. **Ground** (rx loop EOB anchor): the pending return deadline was
+   re-anchored on *every* EOB heard, audio included, so the report aim-point
+   churned with audio's unrelated cadence.
+
+**Ruling (operator 2026-07-24): A + B, both adopted.**
+
+- **A — paced-stream semantics:** EOB pacing/anchoring keys on the RTP video
+  stream ONLY. Non-video EOBs neither open craft listen windows nor re-anchor
+  ground returns. Non-video injection stays *gated* by an open gap (held
+  datagrams flush back-to-back after the window) — audio never transmits into
+  a listen window, and never re-arms one. This restores the pre-audio pacing
+  contract exactly; audio rides between gaps at a ≤`window_us` queueing cost,
+  irrelevant at 50 Hz.
+- **B — report redundancy:** `return.report_redundancy` (seed 2, 1 disables;
+  RE-DERIVE §17). An anchored LINK_REPORT batch is re-sent once at the *next*
+  return window — spread across two listen gaps, never back-to-back within
+  one (deafness is correlated inside a window). Blind fallback batches are
+  not repeated. TX-side `reports_received` now counts only selector-fresh
+  epochs so duplicates/replays cannot inflate the §15.3 heard-ratio (this is
+  a deliberate stats-semantics tightening).
+- **C — hardware-ACKed unicast returns (Pass 12)** stays a §17 gate-4 slot
+  and is confirmed **devourer-gated**: kernel monitor can send unicast
+  QoS-Data but cannot arm the craft-side ACK responder, so the full hybrid
+  needs the devourer backend on the craft.
+
+**Also noted (baseline, pre-existing):** even audio-off, only ~45% of ground
+reports are heard at 100 fps/MCS5 — the §7.2 crossover the spec already
+flags. B mitigates; C is the structural fix candidate.
+
+Spec: §7.2 paced-stream + report-redundancy paragraphs; §15.2 `return`
+gains `report_redundancy`. Wired as `frame_is_paced_eob()` at the craft
+pacer and ground anchor, `ReturnPolicy::report_redundancy`, and the
+ground-side repeat queue.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
