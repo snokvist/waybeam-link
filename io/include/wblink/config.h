@@ -49,6 +49,10 @@ struct JsccShadowCfg {
 struct NodeCfg {
     uint16_t originator = 0;
     Role role = Role::kRx;
+    // §2/§13 passive spectator (Pass 74): a display node with no uplink —
+    // FEC+diversity best-effort, no ARQ/returns, passive tune+latch, re-scout
+    // on CSA move. Permits zero role:"tx" adapters. Fail-closed opt-in.
+    bool spectator = false;
     uint16_t preferred_originator = 0;  // §12 preemption; 0 = none
     // §3.0 L2 partition tag. TX always stamps it (absent ⇒ stamps 0); the
     // RX filter enforces equality only when it is configured.

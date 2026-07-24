@@ -86,6 +86,7 @@ int main() {
             const Config& c = *r.value;
             CHECK_EQ_U(c.node.originator, 17);
             CHECK(c.node.role == Role::kTx);
+            CHECK(!c.node.spectator);  // §2 Pass 74: default off
             CHECK_EQ_U(c.node.preferred_originator, 9);
             CHECK_EQ_U(c.scout.dwell_ms, 250);
             CHECK_EQ_U(c.scout.channels.size(), 2);
@@ -279,6 +280,23 @@ int main() {
         "bind":{"kind":"udp","listen":"127.0.0.1:1"},
         "fec":{"scheme":"rlc256"}}]})",
                  "frame-shm binding");
+    // §2 Pass 74: node.spectator requires role "rx" (a tx node has an uplink).
+    expect_error(R"({"node":{"originator":1,"role":"tx","spectator":true}})",
+                 "spectator requires role");
+    // §2 Pass 74: a passive spectator (rx, spectator, frame-shm delivery, no tx
+    // adapter) parses — the backend's allow_rx_only is what the flag gates.
+    {
+        auto r = load_config_json(R"({
+          "node":{"originator":9,"role":"rx","spectator":true,
+                  "preferred_originator":17},
+          "adapters":[{"name":"rx0","ifname":"wlan0","role":"rx",
+                       "channel":5805,"bw":20}],
+          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
+                      "bind":{"kind":"frame-shm","name":"venc_frame"}}],
+          "air":{"kind":"kernel-monitor"}})");
+        CHECK(bool(r));
+        if (r) CHECK(r.value->node.spectator);
+    }
     // Enforcing JSCC parity is not a partial mode: it requires the RLC
     // encoder that can apply the per-frame repair override.
     expect_error(R"({"node":{"originator":1,"role":"tx"},
