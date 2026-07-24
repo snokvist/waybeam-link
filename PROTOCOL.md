@@ -292,7 +292,7 @@ split is what lets any node send control traffic about any other node's stream.
 | 1 | `ARQ` | important/IDR retransmit class with I-frame deadline |
 | 2 | `RETRANSMIT` | this packet is itself a resend (stats/diagnostics) |
 | 3 | `FEC_REPAIR` | packet is a FEC repair symbol (§14; an 11-byte subheader precedes payload) |
-| 4 | `CSA_ARMED` | **craft→ground ARM ack** — craft has accepted the in-flight CSA campaign and will follow (§11.6) |
+| 4 | `CSA_ARMED` | **craft→ground campaign-in-progress** — set on accepting a CSA campaign, cleared only on reaching COMMITTED (Pass 89). Serves as the ARM ack before T_switch; its *clearing* on `target_chan` is the craft's commit proof for §11.6 video-verify |
 | 5 | `PFRAME_ARQ` | opt-in P-frame retransmit eligibility; retains the P-frame deadline |
 | 6–7 | reserved | 0 |
 
@@ -1680,8 +1680,24 @@ IDLE ─valid+MAC'd CSA─▶ ARMED ─T_switch─▶ retune+ReApplyTxPower ─�
 COMMITTED is terminal until reboot — it has no automatic outgoing edge (no
 mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
 - **Jump-failed backout (kept):** in VERIFY, no valid traffic within
-  `verify_timeout_ms` (**150 ms**, bench median 85 ms + margin) → revert to
-  `prev_chan` and return to IDLE. This is the **only** automatic revert; it
+  `verify_timeout_ms` (**500 ms** — see the Pass 89 sizing note below) → revert
+  to `prev_chan` and return to IDLE.
+
+  **Sizing (Pass 89, measured 2026-07-24).** The former 150 ms was derived from
+  a *median* ("bench median 85 ms + margin"), which is the wrong statistic: the
+  quantity being bounded is how long after the craft's landing the issuer's
+  first hearable transmission arrives, and the craft reverts on that
+  distribution's **tail**. Instrumented over 8 alternating 5805↔5745 hops at
+  desk range, that latency measured 45.5 / 49.8 / 57.6 / 58.6 / 73.1 / 76.2 /
+  79.0 / **143.0** ms — median 66 ms, but a max of 143.0 ms against a 150 ms
+  window, i.e. **4.7% margin**. One hop of an earlier soak exceeded it and
+  stranded the fleet (§11.6 Pass 89 note). 500 ms is ~3.5× the measured max and
+  sits inside the §11.6 RX-liveness guard (750 ms), so a genuinely deaf radio is
+  still caught by the mechanism built for it rather than by this timeout.
+
+  The latency is dominated by the issuer's own landing delay — the craft lands
+  first and waits — so this budget must be re-measured, not assumed, whenever
+  the issuer's adapter count or retune path changes. This is the **only** automatic revert; it
   protects a switch that landed on a dead channel. **The window opens at the
   follower's landing** — the first engine tick after its blocking retune
   completes — mirroring the §11.6 issuer definition (Pass 69, review
@@ -1785,6 +1801,34 @@ direction** lets us make the strand class *never happen* rather than recover aft
   beacon) MUST be computed at that tick, never at the tick that emitted the
   commit (else a slow multi-adapter retune can consume the whole window before
   it opens — the exact pre-Pass-69 failure re-introduced).
+- **Video-verify requires a COMMITTED craft, not merely a present one
+  (Pass 89, ruled 2026-07-24).** Craft video on `target_chan` proves the craft
+  *arrived*; it does not prove the craft *stayed*. The craft transmits
+  throughout its own §11.5 VERIFY window — before it has decided — so an issuer
+  that latches on any craft frame can declare success on evidence produced by a
+  craft that then reverts. Observed on hardware: issuer logged
+  `campaign confirmed -> 5745` while the craft reverted to 5805, splitting the
+  fleet with the ground reporting success.
+
+  Therefore: **`CSA_ARMED` stays asserted for the whole campaign — set on
+  accept, cleared only on reaching COMMITTED** — and the issuer's video-verify
+  MUST latch only on a craft DATA frame received on `target_chan` after
+  T_switch **with `CSA_ARMED` clear**. That frame is the craft's commit proof.
+  An `CSA_ARMED`-set frame on `target_chan` means "arrived, still deciding" and
+  MUST NOT satisfy video-verify.
+
+  This changes `CSA_ARMED`'s lifetime (§3.2 bit 4), which previously cleared at
+  the switch. The ARM-ack use is unaffected: the issuer latches `armed_seen_`
+  before T_switch and the bit merely persists past it.
+
+  **No asymmetric window sizing is required.** The craft's commit is *caused
+  by* the issuer's arrival, so `issuer_landing ≈ craft_landing + A`; the craft
+  clears `CSA_ARMED` microseconds after the issuer lands, and the issuer
+  observes it at the very start of its own window rather than racing it
+  (measured: issuer→first-craft-video ≤ 1.2 ms across 8 hops, with the issuer's
+  deadline anchored at `now` on every one). Equal `verify_timeout_ms` on both
+  ends is sufficient and correct.
+
 - **Video-verify counts nothing before T_switch (Pass 69, review pass 2):**
   the craft does not move before T_switch, so a "craft video" frame observed
   earlier is by definition old-channel traffic — a stale ear (e.g. a
@@ -2437,7 +2481,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     "return": { "guard_us": 300, "return_window_us": 2000,
                 "unicast": false, "report_redundancy": 2 },
     "csa":    { "psk": "<optional; auto-generated + announced when absent, §11.4a>",
-                "settle_s": 3.0, "verify_timeout_ms": 150,
+                "settle_s": 3.0, "verify_timeout_ms": 500,
                 "rx_liveness_ms": 750,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
                 "bind_release_s": 90, "persist_channel": false,

@@ -2589,6 +2589,63 @@ are traceable to it:
   §7.2 EOB listen gap. Set to `node.spectator: true`, the flag Pass 74 created
   for this node shape and which was unused anywhere in `deploy/`.
 
+### Pass 89 — §11.6 video-verify requires a COMMITTED craft; §11.5 window re-sized on the tail
+
+**Trigger.** Hop 4 of the first Pass 80 soak (2026-07-24) split the fleet: the
+issuer logged `csa: campaign confirmed -> 5745 MHz` while the craft logged
+`csa: IDLE -> 5805 MHz`. Ground held the new channel, craft reverted to the old
+one, and the ground reported success. Recovery needed an operator re-scout plus
+re-claim — impossible airborne. Reproduced on the pre-Passes-81–88 binary, so
+pre-existing, not a regression.
+
+**Diagnosis.** The two ends confirmed on different evidence. The craft
+(`CsaFollower`) commits only on hearing the issuer within its §11.5 window. The
+issuer (`CsaIssuer`) declared success on `video_seen_` — *any* craft DATA on
+`target_chan` after T_switch. But the craft transmits throughout its own VERIFY
+window, before deciding, and `CSA_ARMED` was cleared at the switch
+(`app/main.cpp:3155`, "the ACK window is over"), so committed video and
+still-deciding video were byte-identical to the issuer.
+
+**Measurement (the operator asked for numbers before a ruling).** Both ends were
+instrumented on a bench branch and run with a 3000 ms window so nothing
+reverted, over 8 alternating 5805↔5745 hops:
+
+- **A** — craft landing → heard the issuer (ms): 45.5, 49.8, 57.6, 58.6, 73.1,
+  76.2, 79.0, **143.0**. Median 66, max **143.0**.
+- **B** — issuer landing → first craft video (ms): ≤ **1.2** on every hop, with
+  the issuer's deadline anchored at `now` (never `switch_at`) on all 8.
+
+Two conclusions fell out:
+
+1. The 150 ms `verify_timeout_ms` was sized from a *median* ("bench median
+   85 ms + margin"). The craft reverts on the **tail**. Max 143.0 vs a 150 ms
+   window is 4.7% margin — the config was marginal on its own terms, before any
+   fix. → **500 ms**, ~3.5× measured max, inside the 750 ms RX-liveness guard.
+2. B ≈ 0 means the **craft lands first and waits**; the craft's commit is
+   *caused by* the issuer's arrival, so `issuer_landing ≈ craft_landing + A`.
+   The craft's commit signal therefore appears at the very start of the
+   issuer's window, not in a race with its end. This **retracts** the concern
+   raised when the directions were first put to the operator — that requiring a
+   craft-commit signal could invert the race and needed asymmetric window
+   sizing. It does not. Equal windows are correct.
+
+**Rulings.**
+
+- §11.6: video-verify MUST latch only on a craft DATA frame on `target_chan`
+  after T_switch **with `CSA_ARMED` clear**. A set bit means "arrived, still
+  deciding" and does not satisfy verify.
+- §3.2 bit 4: `CSA_ARMED` lifetime extends to the whole campaign — set on
+  accept, cleared on reaching COMMITTED. The pre-T_switch ARM-ack use is
+  unaffected; the issuer latches `armed_seen_` before the switch and the bit
+  simply persists past it.
+- §11.5: `verify_timeout_ms` default 150 → **500 ms**, on both ends. Re-measure
+  whenever the issuer's adapter count or retune path changes, since A is
+  dominated by the issuer's landing delay.
+
+**Failure mode after the fix.** A campaign the craft does not confirm ends with
+*both* ends reverting to `prev_chan`, instead of the ground holding a channel
+the craft has left. Recoverable in the air.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the
