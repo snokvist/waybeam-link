@@ -11,7 +11,8 @@
 //    until reboot (§11.5, Pass 59): the only backout is the VERIFY→prev_chan
 //    jump-failed revert; the §11.5a command-source binding releases after
 //    bind_release_ms of issuer silence with no channel change.
-//  - CsaIssuer (ground): N=5 decrementing-dt copies @ 20 ms, MAC'd; commits
+//  - CsaIssuer (ground): dt-stamped copies @ 20 ms repeated until the craft's
+//    CSA_ARMED ack or T_switch (§11.2, Pass 90), each MAC'd; commits
 //    its own retune immediately on the craft's CSA_ARMED flag (§11.6
 //    pre-position, Pass 69), then re-injects the campaign as zero-dt
 //    rendezvous beacons until it hears craft video; aborts on ack timeout,
@@ -171,7 +172,8 @@ class CsaIssuer {
     struct IssuerAction {
         enum class Kind : uint8_t {
             kNone,
-            kSendCopy,    // inject pkt (already MAC'd)
+            kSendCopy,    // inject pkt; MAC'd for NOW, so a copy
+                          // held for the §7.2 gap must be restamp_copy()'d
             kCommit,      // retune own adapters to chan/bw
             kSendBeacon,  // §11.6 rendezvous beacon (already MAC'd, dt=0)
             kSuccess,     // campaign confirmed at the deadline (beacon tail)
@@ -194,7 +196,8 @@ class CsaIssuer {
     enum class State : uint8_t {
         kIdle,
         kAnnounce,  // copies still going out
-        kAwaitAck,  // copies done, waiting for CSA_ARMED / T_switch
+        kAwaitAck,  // initial burst out; copies still repeat here
+                    // until CSA_ARMED / T_switch (§11.2 Pass 90)
         kVerify,    // committed, waiting for craft video
     };
 

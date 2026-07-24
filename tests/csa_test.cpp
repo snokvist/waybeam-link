@@ -720,6 +720,35 @@ int main() {
         CHECK(f.on_csa(copy, 0, std::nullopt, 0, std::nullopt));
         CHECK(f.campaign_active());
     }
+    {
+        // Pass 90 review: a copy held across a campaign boundary must NOT be
+        // re-stamped. It carries the OLD target_chan and nonce; stamping the
+        // NEW campaign's dt onto it and re-MACing would produce a packet that
+        // validates and sends a craft that missed the old campaign to the
+        // wrong channel.
+        CsaParams p = pol;
+        p.min_interval_ms = 0;  // operator-settable; default 5 s hides this
+        CsaIssuer is(p);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        CsaPacket old_copy{};
+        for (uint64_t t = 0; t < 5'000; t += 1000) {
+            const auto a = is.tick(t);
+            if (a.kind == CsaIssuer::IssuerAction::Kind::kSendCopy) {
+                old_copy = a.pkt;
+            }
+        }
+        CHECK_EQ_U(old_copy.target_chan, 5745);
+        // Campaign 1 dies on the ack timeout, campaign 2 goes to a DIFFERENT
+        // channel.
+        for (uint64_t t = 5'000; t <= 1'100'000; t += 10'000) is.tick(t);
+        CHECK(!is.active());
+        CHECK(is.start({9, 0, 1234}, 5825, 0, 0, 5805, 0, 4, 1'200'000));
+        // The stale copy is refused outright, not silently re-aimed.
+        CHECK(!is.restamp_copy(old_copy, 1'210'000));
+        // An idle issuer refuses too.
+        CsaIssuer idle(p);
+        CHECK(!idle.restamp_copy(old_copy, 1000));
+    }
 
     return wbtest_finish("csa_test");
 }

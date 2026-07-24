@@ -284,6 +284,16 @@ bool CsaIssuer::restamp_copy(CsaPacket& pkt, uint64_t now_us) const {
     if (now_us >= switch_at_us_) {
         return false;
     }
+    // The held copy must still belong to the campaign whose T_switch we are
+    // about to stamp onto it. A copy held across a campaign boundary would
+    // otherwise be re-stamped with the NEW campaign's dt while carrying the
+    // OLD target_chan and nonce — and re-MAC'd, so it would validate. A craft
+    // that missed the old campaign would then follow it to the wrong channel.
+    // Unreachable at the default 5 s min_interval, but min_interval_s is
+    // operator-settable and this is the injection path.
+    if (state_ == State::kIdle || pkt.csa_nonce != tmpl_.csa_nonce) {
+        return false;
+    }
     stamp_copy(pkt, now_us);
     return true;
 }
