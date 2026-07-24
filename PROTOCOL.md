@@ -313,6 +313,7 @@ is k≈370 source symbols at 1400 B but only k≈132 at 3967 B.
 | `0x01` | RTP | RTP profile | video; NAL classifier applies (§4.1) |
 | `0x02` | TELEMETRY | best-effort / app-defined | MAVLink/MSP-style small packets |
 | `0x03` | CONTROL | app-defined | RC / command (uplink) |
+| `0x04` | AUDIO | best-effort / app-defined | Opus/RTP (or app-framed) audio; one-datagram-one-block, best-effort — never ARQ-classified (§4, §5.3) |
 | `0x10–0xEF` | user | build-defined | experimental / vendor |
 | `0xF0–0xFF` | reserved | — | |
 

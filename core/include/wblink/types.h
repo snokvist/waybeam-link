@@ -36,6 +36,7 @@ inline constexpr uint8_t kUnknown = 0x00;
 inline constexpr uint8_t kRtp = 0x01;
 inline constexpr uint8_t kTelemetry = 0x02;
 inline constexpr uint8_t kControl = 0x03;
+inline constexpr uint8_t kAudio = 0x04;  // §3.4 Opus/RTP audio; best-effort, non-ARQ
 }  // namespace stream_type
 
 // §3.2 data_flags bits.

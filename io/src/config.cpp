@@ -48,9 +48,10 @@ Result<uint8_t> parse_stream_type(const json& j, const char* where) {
     if (s == "RTP") return Result<uint8_t>::ok(stream_type::kRtp);
     if (s == "TELEMETRY") return Result<uint8_t>::ok(stream_type::kTelemetry);
     if (s == "CONTROL") return Result<uint8_t>::ok(stream_type::kControl);
+    if (s == "AUDIO") return Result<uint8_t>::ok(stream_type::kAudio);
     return Result<uint8_t>::fail(std::string(where) +
                                  ": unknown stream_type \"" + s +
-                                 "\" (use RTP/TELEMETRY/CONTROL/UNKNOWN or a number)");
+                                 "\" (use RTP/TELEMETRY/CONTROL/AUDIO/UNKNOWN or a number)");
 }
 
 Result<FecScheme> parse_fec_scheme(const std::string& s, const char* where) {

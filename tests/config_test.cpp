@@ -372,6 +372,14 @@ int main() {
       "streams":[{"stream_id":0,"stream_type":"VIDEO","dir":"in",
         "bind":{"kind":"udp","listen":"127.0.0.1:1"}}]})",
                  "stream_type");
+    // §3.4 AUDIO stream type parses (Pass 77).
+    {
+      auto r = load_config_json(R"({"node":{"originator":1,"role":"tx"},
+        "streams":[{"stream_id":1,"stream_type":"AUDIO","dir":"in",
+          "bind":{"kind":"udp","listen":"127.0.0.1:5601"}}]})");
+      CHECK(bool(r));
+      if (r) CHECK_EQ_U(r.value->streams[0].stream_type, stream_type::kAudio);
+    }
     // classifier on a non-RTP stream (§4.1: RTP-profile-only).
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "streams":[{"stream_id":0,"stream_type":"TELEMETRY","dir":"in",

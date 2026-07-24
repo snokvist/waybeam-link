@@ -38,6 +38,16 @@
         "kind": "udp",
         "send": "127.0.0.1:5600"
       }
+    },
+    {
+      "_comment": "Delivered Opus/RTP audio to the local decoder/player on 5601 (§3.4 AUDIO). RX latches the want by stream_type; keep it distinct from TELEMETRY.",
+      "stream_id": 1,
+      "stream_type": "AUDIO",
+      "dir": "out",
+      "bind": {
+        "kind": "udp",
+        "send": "127.0.0.1:5601"
+      }
     }
   ],
   "air": {

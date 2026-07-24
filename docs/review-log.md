@@ -2189,6 +2189,62 @@ Rejected alternatives: (a) surfacing the per-adapter config channel from
 second scrape of scout `current_chan` — scout is a distinct subsystem and not
 always active. The golden §15.3 schema test (`tests/stats_test.cpp`) is updated
 in lockstep (fixed field order is contract).
+## Pass 77 — AUDIO stream type (§3.4): vehicle→ground Opus carriage (ruled 2026-07-24)
+
+_(Renumbered from Pass 76 → 77 on 2026-07-24: authored in a parallel session
+before Pass 76 (link.channel) merged; takes the next free number. Ruling
+content unchanged.)_
+
+**Problem (operator, 2026-07-24):** the vehicle already produces audio —
+waybeam_venc captures + Opus-encodes at **50 Hz** (20 ms frames, RFC 7587,
+`src/star6e_audio.c`) and emits them to a dedicated UDP port that, in the
+co-located topology, already lands on `127.0.0.1`. There was no way to carry
+that stream vehicle→ground over the link. The transport is already
+stream-generic (multiplexes by §3.4 `stream_type`; the §15.2 sample runs RTP +
+TELEMETRY side by side today), so the only gap was a registry name — but adding
+one is a §3.4 amendment, and how audio should be carried (reliability class,
+which type value) is a ruling, not an inference.
+
+**Ruling (operator 2026-07-24):**
+
+1. **`0x04 AUDIO` is a canonical stream type**, not a vendor `0x10–0xEF` value.
+   Audio is first-class MVP media alongside RTP/TELEMETRY/CONTROL and deserves a
+   named config token (`"AUDIO"`) and a stable registry slot, not a per-build
+   number. Carried **opaque** end-to-end exactly like RTP — the core never
+   parses Opus/RTP.
+2. **ARQ stays OFF for audio (best-effort, diversity-only).** Audio takes the
+   existing non-RTP framer path: one ingress datagram = one block, `END_OF_BLOCK`
+   set, `ARQ=0` (no NAL/size classifier). Rationale: Opus PLC conceals an
+   occasional dropped 20 ms frame, per-adapter diversity is the redundancy
+   (§1), and keeping 50 blocks/s of audio **out of the §5.3 resend airtime
+   budget** protects the I-frame ARQ pool it would otherwise compete with. FEC
+   is the lever if audio ever needs hardening, not ARQ.
+3. **No core/framer/scheduler change.** The wire codec treats `stream_type` as
+   an opaque u8 and RX latches wants by `stream_type` (`core/src/rx.cpp`); the
+   whole change is the registry name (`stream_type::kAudio` in
+   `core/include/wblink/types.h`, `"AUDIO"` in `io/src/config.cpp`
+   `parse_stream_type`) plus example configs. A distinct type value is
+   **load-bearing**: RX out-stream wants are matched by `stream_type`, so reusing
+   `TELEMETRY` would collide the audio and telemetry egress wants.
+
+**Quiet-gap interaction (accepted, bench-observe not redesign).** A non-RTP
+stream sets `END_OF_BLOCK` on every datagram, so an always-on 50 Hz audio stream
+adds **~50 §7.2 listen windows/s** interleaved with video's EOB pacing on the
+single-radio craft. The operator accepts this — 50 pps is expected to sit inside
+the headroom, and the pacer already skips the gap when the next block is
+airtime-critical. Flagged as a §17 gate-4 observation (does audio-EOB pacing
+measurably erode video airtime or perturb the return-window fit), **not** a
+redesign; revisit only if the rig shows it.
+
+**Rejected:** reusing `TELEMETRY` (RX want-matching keys on `stream_type` —
+audio and telemetry egress would collide); a vendor `0x10+` value (audio is core
+media, wants a named token and a stable slot); ARQ-on audio (competes with
+I-frames for the §5.3 resend airtime; a lost 20 ms frame is PLC-concealable and
+past-deadline before a repair would land at 50 Hz).
+
+Spec: §3.4 `0x04 AUDIO` row. Wired as `stream_type::kAudio` + the `"AUDIO"`
+config token; example `config.radio-tx/rx.sample.json` gain a second UDP stream
+on `127.0.0.1:5601` (matching waybeam_venc's default `audioPort`).
 
 ## Open questions for the next pass
 
