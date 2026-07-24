@@ -388,6 +388,27 @@ evidence and the soak was repeated — 20/20 consecutive is ~1%. The earlier
 soaks are the control: the identical driver failed at hop 4 twice against the
 pre-Pass-90 binaries, and at hop 3 against the Pass 91 binary.
 
+### B11 — Craft spontaneously reboots on the bench — BLOCKER
+
+Observed again 2026-07-24, immediately after the Pass 80 soak completed: the
+craft went to `uptime 0 min` with no operator action. Prior sightings this
+week: craft ×1, RK3566 ground ×2. Nothing in the link logs precedes it — the
+last lines are a normal CSA commit, then the shm producer disappears
+(`tx: frame-shm 'venc_frame' producer replaced`) because the whole userland
+restarted.
+
+The symptom chain, for whoever debugs it next: link `report_age_ms` climbs, the
+craft selector descends to `FAILSAFE`, `venc_fps` reads 0 and the craft's
+`delivered` counter freezes while the ground still hears its telemetry — the
+craft is up and transmitting but has no video source. That reads like a link
+fault and is not one; check `uptime` on the craft first.
+
+Cause unknown — candidates are power/brownout under TX load, a SigmaStar
+watchdog, and the venc actuation path. Needs isolation before flight: an
+uncommanded reboot in the air is a total loss of the aircraft, and the
+post-reboot craft comes up on the **installed** `/usr/bin/waybeam-link` with a
+fresh session token, so it is also silently unclaimed (B9).
+
 ### C2 — Gate 4 range validation — SHOULD-FIX
 
 `docs/step11-bench.md`: the 300/2000 µs seeds are desk-validated only;
