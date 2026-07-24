@@ -345,6 +345,66 @@ int main() {
         CHECK(bool(r));
         if (r) CHECK_EQ_U(r.value->policy.csa.verify_timeout_ms, 3000u);
     }
+    // §15.2 (Pass 93): unknown keys are typos, not extension points. Values
+    // were validated but names never were, so a misspelt knob loaded silently
+    // on its default and --check reported success.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "policy":{"select":{"min_profle":1}}})",
+                 "unknown key");
+    expect_error(R"({"node":{"originator":1,"role":"rx"},"polcy":{}})",
+                 "unknown key");
+    expect_error(R"({"node":{"originator":1,"role":"rx","originater":2}})",
+                 "unknown key");
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "policy":{"csa":{"rendezvous_timeout_s":5}}})",
+                 "unknown key");
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "adapters":[{"name":"a","ifname":"w0","role":"rx","channel":5805,
+                   "chanel":5745}]})",
+                 "unknown key");
+    // '_'-prefixed keys are the established comment convention (the §9.3 table
+    // ships several) and must stay accepted.
+    {
+        auto r = load_config_json(R"({"_comment":"hi",
+          "node":{"originator":1,"role":"rx","_note":"x"},
+          "policy":{"select":{"_why":"bench","min_profile":1}}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->policy.select.min_profile, 1);
+    }
+    // §15.3 (Pass 93): hz above 1000 truncated the emit interval to 0 ms and
+    // silently disabled stats — a node asked for more stats must not emit none.
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "stats":{"hz":2000}})",
+                 "stats.hz");
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "stats":{"hz":-1}})",
+                 "stats.hz");
+    {
+        auto r = load_config_json(R"({"node":{"originator":1,"role":"rx"},
+          "stats":{"hz":1000}})");
+        CHECK(bool(r));
+    }
+    // §7.2 (Pass 93): skip_backlog was documented but never copied out of the
+    // config, so the QuietGapPolicy header default always won.
+    {
+        auto r = load_config_json(R"({"node":{"originator":1,"role":"rx"},
+          "policy":{"return":{"skip_backlog":8}}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->policy.ret.skip_backlog, 8);
+    }
+    expect_error(R"({"node":{"originator":1,"role":"rx"},
+      "policy":{"return":{"skip_backlog":0}}})",
+                 "skip_backlog");
+    // §15.2 secret handling: a syntax error near policy.csa.psk must not echo
+    // the input back. nlohmann's what() embeds "last read: '...'"; ours does not.
+    {
+        auto r = load_config_json(
+            R"({"node":{"originator":1,"role":"rx"},)"
+            R"("policy":{"csa":{"psk":"SUPERSECRETVALUE)");
+        CHECK(!bool(r));
+        CHECK(r.error.find("SUPERSECRET") == std::string::npos);
+        CHECK(r.error.find("byte") != std::string::npos);
+    }
     // §3.0 net_id is one byte.
     expect_error(R"({"node":{"originator":1,"role":"rx","net_id":256}})",
                  "net_id");

@@ -19,8 +19,9 @@ RF-inserted cache replies are not implemented in this deployment.
 The RK3566 remains a useful second-view test receiver. It may consume repair
 status for the same vehicle, but it does not own or retarget the cache.
 
-The vehicle uses whole-frame `venc_frame` SHM input, profile/MCS 3, 30% IDR
-RLC, and 20% P-frame RLC. Both grounds write `venc_frame_out`; the RK3566
+The vehicle uses whole-frame `venc_frame` SHM input, **adaptive MCS1–5**
+(`select.min_profile 1 / max_profile 5` since #47 — it was pinned at 3), 30%
+IDR RLC, and 20% P-frame RLC. Both grounds write `venc_frame_out`; the RK3566
 ground feeds it to `waybeam_hub` for MPP/DRM display.
 
 See [the verification hardware reference](../docs/verification-hardware.md)
@@ -29,8 +30,10 @@ behavior, and the reusable test checklist.
 
 ## Operation
 
-Ground and cache services are enabled at boot. The vehicle link is deliberately
-not linked into `rcS` until the flight checklist below is complete:
+Ground and cache services are enabled at boot. The vehicle link is **also
+boot-enabled** since 2026-07-23 — `/etc/init.d/S96waybeam-link` on the craft,
+starting after `S95waybeam` (venc, which feeds `venc_frame`). That init script
+lives on the device, not in this repo. To drive it by hand:
 
 ```sh
 ssh root@192.168.2.232 '/etc/init.d/waybeam-link start'
@@ -73,7 +76,7 @@ the configured 500 ms retry cadence.
 - Keep the cache controller endpoint paired with receiver originator 9 and
   `192.168.2.242:5802`; changing either requires updating both deployments.
 - Make the SHM viewer persistent or start it explicitly before every test.
-- Verify channel 161 and the configured 27 dBm vehicle TX power are permitted
+- Verify channel 161 is permitted
   at the test site.
 - Perform a props-off power-cycle/restart test, then an antenna-separated
   walking/range test with packet loss, unrecoverable frames, driver drops,

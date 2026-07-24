@@ -209,6 +209,12 @@ struct ReturnPolicy {
     // §7.2 Pass 78: anchored LINK_REPORT batches repeat once at the next
     // return window (spread across two listen gaps). 1 disables.
     uint32_t report_redundancy = 2;
+    // §7.2 backlog override: once this many frames are held waiting for a gap,
+    // the pacer stops holding and transmits through the listen window — losing
+    // returns beats losing video. Was unreachable until Pass 93: quietgap_policy
+    // never copied it, so the QuietGapPolicy header default always won and the
+    // knob documented here did nothing.
+    uint32_t skip_backlog = 32;
 };
 
 struct CsaPolicy {

@@ -25,10 +25,13 @@ and several observability gaps need resolution before unattended deployment.
    `MonAir::retune()` logs that retuning is deferred and returns `true`.
    `AirBackend::retune_all()` ignores that semantic distinction and the CSA
    state machine proceeds. A control request can therefore make protocol state
-   say COMMITTED while the interface remains on its original channel. Until an
-   nl80211 retune is implemented, CSA must be rejected/disabled for this
-   backend rather than acknowledged. This branch now rejects local CSA control
-   and ignores received campaigns on kernel-monitor; real retune remains absent.
+   say COMMITTED while the interface remains on its original channel.
+
+   **Superseded (Passes 49, 69, 80).** Kernel-monitor CSA is implemented and
+   flying: `MonAir` retunes for real, Pass 69 added the issuer pre-position and
+   rendezvous beacons, and Pass 80 added the post-retune RX-liveness guard with
+   a monitor re-init fallback — so this backend now has wedge detection too.
+   The text below is kept as the record of why those passes exist.
 
 2. **Frame-SHM producer restart stranded an attached consumer (ingress fixed).**
    `FrameShmRing::create()` unlinks and recreates the name. Existing mappings

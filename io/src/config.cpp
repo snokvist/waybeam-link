@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <optional>
 #include <set>
 #include <sstream>
 
@@ -70,6 +71,35 @@ Result<uint16_t> frac_to_permille(double frac, const char* where) {
     return Result<uint16_t>::ok(static_cast<uint16_t>(std::llround(frac * 1000.0)));
 }
 
+// §15.2 (Pass 93): an unrecognised key is a TYPO, not an extension point.
+// Values were validated but key names never were, so `"min_profle": 1` in a
+// flight config loaded silently on defaults and `--check` reported success.
+// Keys beginning with '_' are the established comment convention (the §9.3
+// table ships several) and are always accepted.
+std::optional<std::string> unknown_key(const json& o, const char* path,
+                                       std::initializer_list<const char*> known) {
+    if (!o.is_object()) {
+        return std::nullopt;
+    }
+    for (const auto& item : o.items()) {
+        const std::string& k = item.key();
+        if (!k.empty() && k.front() == '_') {
+            continue;
+        }
+        bool found = false;
+        for (const char* n : known) {
+            if (k == n) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return std::string(path) + ": unknown key \"" + k + "\"";
+        }
+    }
+    return std::nullopt;
+}
+
 Result<BindCfg> parse_bind(const json& j, Dir dir, const char* where) {
     BindCfg b;
     const std::string kind = j.at("kind").get<std::string>();
@@ -112,14 +142,33 @@ Result<Config> load_config_json(const std::string& json_text) {
     json j;
     try {
         j = json::parse(json_text);
+    } catch (const json::parse_error& e) {
+        // §15.2 secret handling: parse_error::what() embeds the offending
+        // input ("last read: '...'"), so a syntax error near policy.csa.psk
+        // echoes part of the secret to stderr — the one output path that was
+        // not honouring the redaction rule. Report the position only.
+        return Result<Config>::fail("JSON parse error at byte " +
+                                    std::to_string(e.byte) + " (nlohmann id " +
+                                    std::to_string(e.id) + ")");
     } catch (const json::exception& e) {
-        return Result<Config>::fail(std::string("JSON parse error: ") + e.what());
+        return Result<Config>::fail("JSON error (nlohmann id " +
+                                    std::to_string(e.id) + ")");
     }
 
     Config cfg;
     try {
+        if (auto e = unknown_key(j, "<root>",
+                                 {"node", "adapters", "streams", "policy",
+                                  "stats", "control", "scout", "cache", "venc",
+                                  "air", "loopback", "profile_table"})) {
+            return Result<Config>::fail(*e);
+        }
         // node
         const json& n = j.at("node");
+                if (auto e = unknown_key(n, "node",
+                                          {"originator", "role", "spectator", "preferred_originator", "net_id"})) {
+                    return Result<Config>::fail(*e);
+                }
         cfg.node.originator = n.at("originator").get<uint16_t>();
         auto role = parse_role(n.at("role").get<std::string>(), "node");
         if (!role) return Result<Config>::fail(role.error);
@@ -147,6 +196,12 @@ Result<Config> load_config_json(const std::string& json_text) {
         // adapters
         std::set<std::string> adapter_names;
         for (const json& a : j.value("adapters", json::array())) {
+            if (auto e = unknown_key(a, "adapters[]",
+                                     {"name", "bus", "ifname", "role",
+                                      "channel", "bw", "power_map",
+                                      "max_power_qdb"})) {
+                return Result<Config>::fail(*e);
+            }
             AdapterCfg ac;
             ac.name = a.at("name").get<std::string>();
             if (ac.name.empty()) {
@@ -189,6 +244,12 @@ Result<Config> load_config_json(const std::string& json_text) {
         size_t udp_bindings = 0;
         size_t shm_bindings = 0;
         for (const json& s : j.value("streams", json::array())) {
+            if (auto e = unknown_key(s, "streams[]",
+                                     {"stream_id", "stream_type", "dir",
+                                      "classifier", "bind", "fec", "arq_mode",
+                                      "jscc_shadow", "originator"})) {
+                return Result<Config>::fail(*e);
+            }
             StreamCfg sc;
             const uint64_t sid = s.at("stream_id").get<uint64_t>();
             if (sid > 0xFF) {
@@ -319,11 +380,19 @@ Result<Config> load_config_json(const std::string& json_text) {
         // policy — every absent key keeps its spec-seed default.
         if (j.contains("policy")) {
             const json& p = j.at("policy");
+                if (auto e = unknown_key(p, "policy",
+                                          {"select", "arq", "rx", "fec", "return", "csa", "cmd", "report_hz", "report_timeout_ms"})) {
+                    return Result<Config>::fail(*e);
+                }
             cfg.policy.report_hz = p.value("report_hz", cfg.policy.report_hz);
             cfg.policy.report_timeout_ms =
                 p.value("report_timeout_ms", cfg.policy.report_timeout_ms);
             if (p.contains("select")) {
                 const json& ps = p.at("select");
+                if (auto e = unknown_key(ps, "policy.select",
+                                          {"demote_milli", "rssi_floor_dbm", "rssi_fade_db_per_s", "rssi_fade_arm_dbm", "promote_rssi_hyst_db", "promote_dwell_s", "mcs_settle_s", "down_cooldown_s", "ewma_alpha", "min_profile", "max_profile", "failsafe_hold_s", "failsafe_step_s", "flap_freeze_count", "flap_freeze_s", "flap_freeze_window_s", "mcs_up_grace_s", "pressure_escape_s", "reentry_backoff_s", "reentry_dwell_s", "bitrate_lead_s", "rung_rssi_floor_dbm"})) {
+                    return Result<Config>::fail(*e);
+                }
                 SelectPolicy& sel = cfg.policy.select;
                 sel.demote_milli = ps.value("demote_milli", sel.demote_milli);
                 sel.rssi_floor_dbm = ps.value("rssi_floor_dbm", sel.rssi_floor_dbm);
@@ -380,6 +449,10 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (p.contains("arq")) {
                 const json& pa = p.at("arq");
+                if (auto e = unknown_key(pa, "policy.arq",
+                                          {"airtime_frac", "arq_max_fps", "attempt_cap", "budget_floor_bytes", "budget_interval_ms", "classifier_size_threshold", "fwd_clamp_blocks", "holddown_ms", "max_block_pkts", "min_recoverable_ms", "release_timeout_ms", "ring_byte_budget", "ring_window_ms"})) {
+                    return Result<Config>::fail(*e);
+                }
                 ArqPolicy& arq = cfg.policy.arq;
                 arq.airtime_frac = pa.value("airtime_frac", arq.airtime_frac);
                 arq.attempt_cap = pa.value("attempt_cap", arq.attempt_cap);
@@ -407,6 +480,10 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (p.contains("rx")) {
                 const json& pr = p.at("rx");
+                if (auto e = unknown_key(pr, "policy.rx",
+                                          {"admit_n", "admit_window_ms", "clamp_resync_ms", "dwell_ceiling_ms", "fwd_clamp_pkts", "idle_teardown_ms", "renack_attempts", "renack_backoff_ms", "stall_timeout_ms"})) {
+                    return Result<Config>::fail(*e);
+                }
                 RxCfgPolicy& rx = cfg.policy.rx;
                 rx.stall_timeout_ms =
                     pr.value("stall_timeout_ms", rx.stall_timeout_ms);
@@ -428,6 +505,10 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (p.contains("fec")) {
                 const json& pf = p.at("fec");
+                if (auto e = unknown_key(pf, "policy.fec",
+                                          {"scheme", "overhead_frac"})) {
+                    return Result<Config>::fail(*e);
+                }
                 auto scheme = parse_fec_scheme(pf.value("scheme", std::string("none")),
                                                "policy.fec");
                 if (!scheme) return Result<Config>::fail(scheme.error);
@@ -437,6 +518,10 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (p.contains("return")) {
                 const json& pr = p.at("return");
+                if (auto e = unknown_key(pr, "policy.return",
+                                          {"quiet_gap", "guard_us", "return_window_us", "unicast", "report_redundancy", "skip_backlog"})) {
+                    return Result<Config>::fail(*e);
+                }
                 cfg.policy.ret.quiet_gap =
                     pr.value("quiet_gap", cfg.policy.ret.quiet_gap);
                 cfg.policy.ret.guard_us = pr.value("guard_us", cfg.policy.ret.guard_us);
@@ -450,9 +535,20 @@ Result<Config> load_config_json(const std::string& json_text) {
                     return Result<Config>::fail(
                         "policy.return.report_redundancy: must be >= 1");
                 }
+                cfg.policy.ret.skip_backlog =
+                    pr.value("skip_backlog", cfg.policy.ret.skip_backlog);
+                if (cfg.policy.ret.skip_backlog == 0) {
+                    return Result<Config>::fail(
+                        "policy.return.skip_backlog: must be >= 1 (0 would "
+                        "hold every frame forever)");
+                }
             }
             if (p.contains("csa")) {
                 const json& pc = p.at("csa");
+                if (auto e = unknown_key(pc, "policy.csa",
+                                          {"psk", "settle_s", "verify_timeout_ms", "rx_liveness_ms", "min_interval_s", "ack_timeout_ms", "bind_release_s", "persist_channel", "home_chan", "channel_allowlist"})) {
+                    return Result<Config>::fail(*e);
+                }
                 CsaPolicy& csa = cfg.policy.csa;
                 csa.psk = pc.value("psk", csa.psk);
                 csa.settle_s = pc.value("settle_s", csa.settle_s);
@@ -488,6 +584,10 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (p.contains("cmd")) {
                 const json& pm = p.at("cmd");
+                if (auto e = unknown_key(pm, "policy.cmd",
+                                          {"copies", "copy_interval_ms", "echo_copies", "ack_timeout_ms", "retry_cap", "min_interval_ms"})) {
+                    return Result<Config>::fail(*e);
+                }
                 CmdPolicy& cmd = cfg.policy.cmd;
                 cmd.copies = pm.value("copies", cmd.copies);
                 cmd.copy_interval_ms =
@@ -518,7 +618,21 @@ Result<Config> load_config_json(const std::string& json_text) {
         // stats
         if (j.contains("stats")) {
             const json& st = j.at("stats");
+                if (auto e = unknown_key(st, "stats",
+                                          {"hz", "bind"})) {
+                    return Result<Config>::fail(*e);
+                }
             cfg.stats.hz = st.value("hz", cfg.stats.hz);
+            // §15.3: the emit interval is computed as (uint64)(1000.0 / hz), so
+            // any hz above 1000 truncates to a 0 ms period and the caller's
+            // `interval != 0` guard silently disables stats entirely. Rejecting
+            // is the honest answer: a node that was asked for more stats must
+            // not respond by emitting none.
+            if (cfg.stats.hz < 0.0 || cfg.stats.hz > 1000.0) {
+                return Result<Config>::fail(
+                    "stats.hz: must be 0 (off) or 0<hz<=1000; above 1000 the "
+                    "emit interval truncates to 0 ms and disables stats");
+            }
             if (st.contains("bind")) {
                 auto bind = parse_bind(st.at("bind"), Dir::kOut, "stats");
                 if (!bind) return Result<Config>::fail(bind.error);
@@ -530,12 +644,19 @@ Result<Config> load_config_json(const std::string& json_text) {
         // control (§15.5 REST control plane; off unless a bind is given)
         if (j.contains("control")) {
             const json& c = j.at("control");
+            if (auto e = unknown_key(c, "control", {"bind"})) {
+                return Result<Config>::fail(*e);
+            }
             cfg.control.bind = c.value("bind", std::string());
         }
 
         // scout (§15.5a ground channel searcher)
         if (j.contains("scout")) {
             const json& sc = j.at("scout");
+                if (auto e = unknown_key(sc, "scout",
+                                          {"dwell_ms", "channels"})) {
+                    return Result<Config>::fail(*e);
+                }
             cfg.scout.dwell_ms = sc.value("dwell_ms", cfg.scout.dwell_ms);
             if (sc.contains("channels") && !sc.at("channels").is_null()) {
                 for (const json& ch : sc.at("channels")) {
@@ -547,8 +668,25 @@ Result<Config> load_config_json(const std::string& json_text) {
         // cache (§14.3 spatial cache repair; both roles default off)
         if (j.contains("cache")) {
             const json& c = j.at("cache");
+            if (auto e = unknown_key(c, "cache", {"repair", "store"})) {
+                return Result<Config>::fail(*e);
+            }
             if (c.contains("repair")) {
                 const json& r = c.at("repair");
+                if (auto e = unknown_key(r, "cache.repair",
+                                         {"enabled", "listen", "caches",
+                                          "stream_id", "nack_grace_ms",
+                                          "min_collect_ms", "local_quiet_ms",
+                                          "request_timeout_ms", "reply_limit",
+                                          "hard_close_ms", "tail_grace_ms",
+                                          "status_timeout_ms",
+                                          "max_cache_attempts",
+                                          "health_floor_permille",
+                                          "absolute_symbol_limit",
+                                          "assignment_interval_ms",
+                                          "repair_fraction_permille"})) {
+                    return Result<Config>::fail(*e);
+                }
                 CacheRepairCfg& cr = cfg.cache.repair;
                 cr.enabled = r.value("enabled", cr.enabled);
                 cr.stream_id = r.value("stream_id", cr.stream_id);
@@ -615,6 +753,14 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (c.contains("store")) {
                 const json& s = c.at("store");
+                if (auto e = unknown_key(s, "cache.store",
+                                         {"enabled", "listen", "blocks",
+                                          "stream_ids", "reply_limit",
+                                          "max_requests_per_s", "status_to",
+                                          "status_interval_ms",
+                                          "controller"})) {
+                    return Result<Config>::fail(*e);
+                }
                 CacheStoreCfg& cs = cfg.cache.store;
                 cs.enabled = s.value("enabled", cs.enabled);
                 cs.listen = s.value("listen", cs.listen);
@@ -661,6 +807,12 @@ Result<Config> load_config_json(const std::string& json_text) {
         // venc (§9.6 encoder actuation; disabled default for dev/bench)
         if (j.contains("venc")) {
             const json& v = j.at("venc");
+                if (auto e = unknown_key(v, "venc",
+                                          {"host", "enabled", "recovery_enabled", "max_bitrate_kbps", "cap_ceiling_bytes", "settle_ms", "fps_hint", "fps_ladder", "frame_caps", "command_presets",
+                                      "i_headroom_permille",
+                                      "p_headroom_permille"})) {
+                    return Result<Config>::fail(*e);
+                }
             cfg.venc.host = v.value("host", cfg.venc.host);
             cfg.venc.enabled = v.value("enabled", cfg.venc.enabled);
             cfg.venc.recovery_enabled =
@@ -690,6 +842,11 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (v.contains("fps_ladder")) {
                 const json& fl = v.at("fps_ladder");
+                if (auto e = unknown_key(fl, "venc.fps_ladder",
+                                          {"enabled", "min", "max", "preferred", "min_p_frame_bytes", "reduce_after_ms", "reduce_dwell_ms", "restore_after_ms", "sample_timeout_ms", "settle_ms",
+                                      "restore_hysteresis_bytes"})) {
+                    return Result<Config>::fail(*e);
+                }
                 FpsLadderCfg& lc = cfg.venc.fps_ladder;
                 lc.enabled = fl.value("enabled", lc.enabled);
                 lc.min = fl.value("min", lc.min);
@@ -736,6 +893,10 @@ Result<Config> load_config_json(const std::string& json_text) {
             // ladder members (cap coupling assumes rungs).
             if (v.contains("command_presets")) {
                 const json& cp = v.at("command_presets");
+                if (auto e = unknown_key(cp, "venc.command_presets",
+                                          {"fps", "framing", "resolution"})) {
+                    return Result<Config>::fail(*e);
+                }
                 if (cp.contains("fps")) {
                     cfg.venc.preset_fps =
                         cp.at("fps").get<std::vector<uint16_t>>();
@@ -769,6 +930,11 @@ Result<Config> load_config_json(const std::string& json_text) {
         // radio adapters come from the top-level adapters array)
         if (j.contains("air")) {
             const json& a = j.at("air");
+                if (auto e = unknown_key(a, "air",
+                                          {"kind", "tx", "rx", "pace_mbps", "ack_responder", "rx_drop_permille", "wedge_min_submits", "wedge_window_ms",
+                                      "airtime_efficiency_permille"})) {
+                    return Result<Config>::fail(*e);
+                }
             const std::string kind = a.value("kind", std::string("udp"));
             cfg.air.rx_drop_permille = static_cast<uint16_t>(
                 std::min(1000, std::max(0, a.value("rx_drop_permille", 0))));
@@ -890,8 +1056,15 @@ Result<ProfileTable> load_profile_table_json(const std::string& json_text) {
     json j;
     try {
         j = json::parse(json_text);
+    } catch (const json::parse_error& e) {
+        // Same redaction rule as the config loader: never echo the input.
+        return Result<ProfileTable>::fail("profile table: JSON parse error at "
+                                          "byte " + std::to_string(e.byte) +
+                                          " (nlohmann id " +
+                                          std::to_string(e.id) + ")");
     } catch (const json::exception& e) {
-        return Result<ProfileTable>::fail(std::string("JSON parse error: ") + e.what());
+        return Result<ProfileTable>::fail("profile table: JSON error (nlohmann "
+                                          "id " + std::to_string(e.id) + ")");
     }
 
     ProfileTable table;

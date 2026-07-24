@@ -65,7 +65,6 @@
       "verify_timeout_ms": 150,
       "min_interval_s": 5,
       "ack_timeout_ms": 1000,
-      "rendezvous_timeout_s": 5,
       "home_chan": 5745,
       "channel_allowlist": [
         5745,

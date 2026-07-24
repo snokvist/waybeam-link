@@ -26,8 +26,7 @@
     "fec":    { "scheme": "none", "overhead_frac": 0.0 },
     "return": { "guard_us": 300, "return_window_us": 2000 },
     "csa":    { "settle_s": 3.0, "verify_timeout_ms": 150,
-                "min_interval_s": 5, "ack_timeout_ms": 1000,
-                "rendezvous_timeout_s": 5, "home_chan": 5745,
+                "min_interval_s": 5, "ack_timeout_ms": 1000, "home_chan": 5745,
                 "channel_allowlist": [5745, 5805, 5825] }
   },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },

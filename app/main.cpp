@@ -1006,6 +1006,7 @@ QuietGapPolicy quietgap_policy(const Config& cfg) {
     p.enabled = cfg.policy.ret.quiet_gap;
     p.guard_us = cfg.policy.ret.guard_us;
     p.window_us = cfg.policy.ret.return_window_us;
+    p.skip_backlog = cfg.policy.ret.skip_backlog;  // Pass 93: was never copied
     return p;
 }
 
@@ -1858,10 +1859,23 @@ struct TxCore {
                 if (s.stream_id == r->target_stream_id &&
                     s.stream_type == stream_type::kRtp) {
                     const bool ok = venc_.request_idr(now);
-                    std::fprintf(stderr,
-                                 "venc: decoder recovery stream=%u requester=%u %s\n",
-                                 r->target_stream_id, r->prefix.originator,
-                                 ok ? "accepted" : "failed");
+                    // Rate-limited: stderr is unbuffered, so a looping ground
+                    // turns one RECOVERY_REQUEST per packet into one write()
+                    // syscall per packet on the flight loop. One line per
+                    // second carries the same information.
+                    if (now - last_recovery_log_ms_ >= 1000 ||
+                        last_recovery_log_ms_ == 0) {
+                        std::fprintf(stderr,
+                                     "venc: decoder recovery stream=%u "
+                                     "requester=%u %s (%llu since last log)\n",
+                                     r->target_stream_id, r->prefix.originator,
+                                     ok ? "accepted" : "failed",
+                                     static_cast<unsigned long long>(
+                                         recovery_requests_ - last_recovery_logged_));
+                        last_recovery_log_ms_ = now;
+                        last_recovery_logged_ = recovery_requests_;
+                    }
+                    ++recovery_requests_;
                     return false;
                 }
             }
@@ -2289,6 +2303,11 @@ struct TxCore {
     uint32_t cadence_frames_ = 0;
     std::vector<PowerAdapter> power_;
     uint32_t reports_received_ = 0;
+    // §15.5 recovery-request logging is rate-limited (Pass 93): stderr is
+    // unbuffered and this fires from the air RX dispatch.
+    uint64_t recovery_requests_ = 0;
+    uint64_t last_recovery_logged_ = 0;
+    uint64_t last_recovery_log_ms_ = 0;
     std::vector<Stream> streams_;
 };
 
@@ -2748,6 +2767,35 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
 
 // §15.5 GET /info — static identity. Hand-built (no json dep in app/); the
 // field values are numeric or house-controlled strings (no escaping needed).
+// §15.5: adapter names and the control bind string are operator-supplied and
+// land inside JSON string literals. A name containing a quote or a backslash
+// produced malformed /api/v1/info output; escape at every interpolation point
+// rather than trusting the config. Mirrors append_escaped() in io/src/stats.cpp.
+std::string json_escaped(const std::string& in) {
+    std::string out;
+    out.reserve(in.size() + 2);
+    for (const char c : in) {
+        switch (c) {
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char esc[8];
+                    std::snprintf(esc, sizeof(esc), "\\u%04x",
+                                  static_cast<unsigned>(c) & 0xFF);
+                    out += esc;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
 std::string build_info_json(const Loaded& l, uint32_t session,
                             const char* role) {
     std::string s = "{\"role\":\"";
@@ -2772,11 +2820,11 @@ std::string build_info_json(const Loaded& l, uint32_t session,
     for (const AdapterCfg& a : l.cfg.adapters) {
         if (!first) s += ',';
         first = false;
-        s += "{\"name\":\"" + a.name + "\",\"role\":\"";
+        s += "{\"name\":\"" + json_escaped(a.name) + "\",\"role\":\"";
         s += (a.role == Role::kTx ? "tx" : "rx");
         s += "\",\"channel\":" + std::to_string(a.channel_mhz) + "}";
     }
-    s += "],\"control\":\"" + l.cfg.control.bind + "\"}";
+    s += "],\"control\":\"" + json_escaped(l.cfg.control.bind) + "\"}";
     return s;
 }
 

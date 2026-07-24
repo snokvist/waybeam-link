@@ -7,14 +7,13 @@ numbered `docs/review-log.md` Pass; this file only tracks *intent*.
 
 ## Active
 
-- [ ] **Land multi-adapter scout hardening (Passes 64–66).** The Passes 58–63
-  scout/claim foundation landed in PR #29. Two-adapter on-device verification
-  then fixed three decision-critical details on the current feature branch:
-  the uplink is the roaming scout while diversity ears hold the resting
-  channel; a claim/abort/stop retunes or rolls back every adapter together; and
-  candidate channels are selected by heard-most frame count so retune-settling
-  leakage cannot send a claim to the adjacent channel. Native and SSC338Q gates
-  are green; review and land the rebased branch next.
+- [x] **Multi-adapter scout hardening (Passes 64–66) — MERGED.** The Passes
+  58–63 scout/claim foundation landed in PR #29; two-adapter on-device
+  verification then fixed three decision-critical details: the uplink is the
+  roaming scout while diversity ears hold the resting channel; a
+  claim/abort/stop retunes or rolls back every adapter together; and candidate
+  channels are selected by heard-most frame count so retune-settling leakage
+  cannot send a claim to the adjacent channel.
 - [ ] **Register control-plane ports in the coordination port registry.**
   Add `:8091` (REST control, PROTOCOL.md §15.5), `:8099` (fleet-monitor
   HTTP/SSE), `:9110` (stats NDJSON egress default) to
