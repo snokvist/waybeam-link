@@ -109,6 +109,14 @@ int main() {
         CHECK_EQ_U(derive_bitrate_kbps(tiny), 2200);
     }
 
+    // --- §9.6 Pass 75: encoder-capability ceiling clamp ----------------------
+    {
+        CHECK_EQ_U(clamp_bitrate_kbps(34570, 25000), 25000);  // over → capped
+        CHECK_EQ_U(clamp_bitrate_kbps(12903, 25000), 12903);  // under → intact
+        CHECK_EQ_U(clamp_bitrate_kbps(25000, 25000), 25000);  // at the ceiling
+        CHECK_EQ_U(clamp_bitrate_kbps(34570, 0), 34570);      // 0 = unlimited
+    }
+
     // --- §10 power resolve (level offset + ceiling) --------------------------
     {
         PowerCurve c;
