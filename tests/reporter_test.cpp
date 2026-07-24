@@ -95,5 +95,40 @@ int main() {
     CHECK(r3[0].uniq >= 5);
     CHECK(r3[0].diversity >= 2);
 
+    // §7.3 Pass 79: reports are emitted for RTP streams only — a latched
+    // AUDIO stream must not produce one (its per-stream loss fraction would
+    // otherwise steer the §9 selector).
+    {
+        RxEngine e2(RxPolicy{},
+                    {WantSpec{0, stream_type::kRtp, kTxOrig},
+                     WantSpec{1, stream_type::kAudio, kTxOrig}},
+                    nullptr, std::nullopt);
+        Reporter rep2(ReporterPolicy{100}, std::nullopt);
+        auto feed2 = [&](uint8_t sid, uint8_t stype, uint32_t seq) {
+            DataHeader hh;
+            hh.prefix = {kTxOrig, 0, kTxSession};
+            hh.stream_id = sid;
+            hh.stream_type = stype;
+            hh.seq = seq;
+            hh.block_id = seq;
+            hh.data_flags = data_flags::kEndOfBlock;
+            const uint8_t payload = 0;
+            DataView v;
+            v.hdr = hh;
+            v.payload = &payload;
+            v.payload_len = 1;
+            e2.on_data(0, v, 0,
+                       [](uint8_t, uint32_t, uint8_t, const uint8_t*, size_t) {},
+                       -50);
+        };
+        for (uint32_t q = 0; q < 3; ++q) {
+            feed2(0, stream_type::kRtp, q);
+            feed2(1, stream_type::kAudio, q);
+        }
+        auto ra = rep2.build(e2, 10);
+        CHECK_EQ_U(ra.size(), 1);
+        CHECK_EQ_U(ra[0].target_stream_id, 0);
+    }
+
     return wbtest_finish("reporter_test");
 }

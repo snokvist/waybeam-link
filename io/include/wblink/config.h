@@ -205,6 +205,9 @@ struct ReturnPolicy {
     // target's latched SA (ground half of the gate-4 A/B; craft half is
     // air.ack_responder). Off = pinned broadcast returns.
     bool unicast = false;
+    // §7.2 Pass 78: anchored LINK_REPORT batches repeat once at the next
+    // return window (spread across two listen gaps). 1 disables.
+    uint32_t report_redundancy = 2;
 };
 
 struct CsaPolicy {
@@ -213,6 +216,9 @@ struct CsaPolicy {
     std::string psk;
     double settle_s = 3.0;
     uint32_t verify_timeout_ms = 150;
+    // §11.6 Pass 80: post-retune RX-liveness deadline (0 disables). Silence
+    // for this long after a CSA retune => one full monitor re-init.
+    uint32_t rx_liveness_ms = 750;
     uint32_t min_interval_s = 5;
     uint32_t ack_timeout_ms = 1000;
     uint32_t bind_release_s = 90;    // §11.5a command-source binding release

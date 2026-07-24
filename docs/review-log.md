@@ -2246,6 +2246,132 @@ Spec: §3.4 `0x04 AUDIO` row. Wired as `stream_type::kAudio` + the `"AUDIO"`
 config token; example `config.radio-tx/rx.sample.json` gain a second UDP stream
 on `127.0.0.1:5601` (matching waybeam_venc's default `audioPort`).
 
+## Pass 78 — §7.2 paced-stream EOB semantics + LINK_REPORT redundancy (ruled 2026-07-24)
+
+**Problem (bench, 2026-07-24, measured on the rig at MCS5/25 Mbps/100 fps
+with the Pass 77 AUDIO stream live):** with 50 Hz audio flowing the adaptive
+link never holds — full-range rung flapping (8–24 profile changes per ~3 min,
+excursions to MCS1, §9.8 watchdog trips in some phase alignments) — while the
+identical link with audio off sits pinned at MCS5 with zero changes. A/B
+report-heard ratio barely moves (≈40–48% both ways); the damage is episodic
+multi-report deaf spells. Root cause, two code sites:
+
+1. **Craft** (`send_raw` → `note_eob_sent`): every EOB — and every 20 ms
+   audio datagram is a one-datagram block with EOB — re-armed the §7.2 quiet
+   gap, including *mid-flush*. Held video stalled behind each audio EOB, the
+   backlog inflated until the `skip_backlog` airtime-critical override fired,
+   and the craft then transmitted straight through its own listen windows —
+   deaf at exactly the midpoints the ground aims for. The 50 vs 100 Hz phase
+   drift makes it episodic, not constant.
+2. **Ground** (rx loop EOB anchor): the pending return deadline was
+   re-anchored on *every* EOB heard, audio included, so the report aim-point
+   churned with audio's unrelated cadence.
+
+**Ruling (operator 2026-07-24): A + B, both adopted.**
+
+- **A — paced-stream semantics:** EOB pacing/anchoring keys on the RTP video
+  stream ONLY. Non-video EOBs neither open craft listen windows nor re-anchor
+  ground returns. Non-video injection stays *gated* by an open gap (held
+  datagrams flush back-to-back after the window) — audio never transmits into
+  a listen window, and never re-arms one. This restores the pre-audio pacing
+  contract exactly; audio rides between gaps at a ≤`window_us` queueing cost,
+  irrelevant at 50 Hz.
+- **B — report redundancy:** `return.report_redundancy` (seed 2, 1 disables;
+  RE-DERIVE §17). An anchored LINK_REPORT batch is re-sent once at the *next*
+  return window — spread across two listen gaps, never back-to-back within
+  one (deafness is correlated inside a window). Blind fallback batches are
+  not repeated. TX-side `reports_received` now counts only selector-fresh
+  epochs so duplicates/replays cannot inflate the §15.3 heard-ratio (this is
+  a deliberate stats-semantics tightening).
+- **C — hardware-ACKed unicast returns (Pass 12)** stays a §17 gate-4 slot
+  and is confirmed **devourer-gated**: kernel monitor can send unicast
+  QoS-Data but cannot arm the craft-side ACK responder, so the full hybrid
+  needs the devourer backend on the craft.
+
+**Also noted (baseline, pre-existing):** even audio-off, only ~45% of ground
+reports are heard at 100 fps/MCS5 — the §7.2 crossover the spec already
+flags. B mitigates; C is the structural fix candidate.
+
+Spec: §7.2 paced-stream + report-redundancy paragraphs; §15.2 `return`
+gains `report_redundancy`. Wired as `frame_is_paced_eob()` at the craft
+pacer and ground anchor, `ReturnPolicy::report_redundancy`, and the
+ground-side repeat queue.
+
+## Pass 79 — LINK_REPORT is video-stream-only (§7.3): per-stream loss must not steer selection (ruled 2026-07-24)
+
+**Problem (bench, found by the Pass 78 benchmark):** with the return path
+healthy (67% unique reports heard, ages p90 175 ms, zero watchdog trips) the
+selector STILL flapped — instant 5→1 rung drops with perfectly fresh reports,
+one every ~10–40 s, immediately re-climbing. Root cause is pre-existing and
+merely exposed by Pass 77 audio: `Reporter::build()` emits **one LINK_REPORT
+per latched stream** (audio included) and the §3.5 gate filters by originator
+only, so the audio stream's report feeds `Selector::on_report`. The
+denominators make a low-rate stream's loss fraction explosive: a ~100 ms
+report period holds ~5 audio datagrams, so ONE lost audio packet reports
+200‰ against `demote_milli = 20` — while the identical RF burst is ~3‰ on
+video. Measured ~1.5‰ audio loss at 50 pps ⇒ one such event every ~13 s,
+matching the drop cadence exactly. Latent for ANY non-video stream (a
+TELEMETRY stream reports the same way); the bench never ran one over RF
+before audio.
+
+**Ruling (operator 2026-07-24):** selection feedback keys on the RTP video
+stream only.
+
+1. **Reporter emits LINK_REPORTs for RTP streams only.** Fix at the source:
+   halves report airtime back to pre-audio, keeps the §9.8 epoch counter
+   meaningful (every epoch is a selector-relevant report).
+2. **TX-side defensive filter:** a report whose `target_stream_id` is not one
+   of the node's RTP streams is ignored before the gate/selector — a new
+   craft stays stable against an old ground during mixed-version windows.
+3. Non-video loss remains observable in the RX's local §15.3 stream stats;
+   it just no longer steers the link. If a future consumer wants remote
+   non-video loss telemetry, that is a new field/type, not a selector input.
+
+**Also ruled (operator):** re-verify on a second channel (149 / 5745 MHz) to
+exclude channel/antenna effects from the benchmark conclusions.
+
+Spec: §7.3 video-stream-reports-only bullet. Wired in `Reporter::build()`
+(skip non-RTP streams) and the craft report intake (stream-id filter).
+
+## Pass 80 — craft post-retune RX-liveness guard (§11.6): CSA must not strand the fleet (ruled 2026-07-24)
+
+**Problem (bench, found during the Pass 79 cross-channel verification):** a
+§11 CSA 5805→5745 left the craft 8812EU **half-retuned**: TX kept airing on
+5745 (both grounds decoded ~100 fps for minutes) while the RX chain went
+completely deaf (adapter rx counter frozen, zero reports for 4+ minutes,
+§9.8 FAILSAFE at the floor) and `iw` later showed the radio back on the
+origin channel. A deaf craft cannot hear the return-CSA, so the fleet was
+**stranded** on 5745 until an operator-side craft link restart (full monitor
+bring-up) recovered it. A restart-based native bring-up on the same channel
+is flawless — the trigger is specifically the in-place `iw set freq` retune
+path on the RTL88x2 family (same family as the known ground-side EU
+txpower/reinit quirk). Note the earlier fleet-sanity CSA round trip
+succeeded, so the wedge is intermittent — worse for follow-me in flight,
+and the §17 motivation for the 10× soak below.
+
+**Ruling (operator 2026-07-24, "10x csa retune verification run with the
+liveness check"):** adopt the craft post-retune RX-liveness guard:
+
+1. After ANY §11 retune (commit or revert) the craft records its adapter RX
+   counter and arms `csa.rx_liveness_ms` (seed **750 ms**, `0` disables;
+   RE-DERIVE §17). The issuer's zero-dt rendezvous beacons blanket the
+   verify window, so total silence for the deadline ⇒ half-applied retune.
+2. Recovery is **one** full monitor re-init of the adapter (link down →
+   monitor type → link up → `iw set freq` — exactly the bring-up sequence),
+   loud in the log, one-shot per retune. The §11.5 machine is untouched —
+   the guard only restores the radio the machine already assumes it has.
+3. Scope: kernel-monitor backend (where the wedge is observed); the devourer
+   backend keeps its own §11.5a fast-retune path and is out of scope until
+   it exhibits the failure.
+4. Verification bar: a **10× alternating CSA soak** (5805↔5745) with per-hop
+   checks — selection committed, craft RX advancing, report age fresh,
+   video on both receivers, audio stream advancing — plus recovery-fire
+   count from the craft log.
+
+Spec: §11.6 guard bullet; §15.2 `csa.rx_liveness_ms`. Wired as
+`MonAir::recover()` (bring-up sequence via forked `ip`/`iw`) + the craft
+CSA-action hook in `app/main.cpp`.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the

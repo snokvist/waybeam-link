@@ -1008,6 +1008,27 @@ receive. The mechanism, using only RX-local hardware TSF (no clock crossing):
   LINK_REPORTs remain normal-priority and wait for the next EOB midpoint; if no
   EOB arrives for 100 ms, they degrade to §7.1 opportunistic return.
 
+**Paced-stream semantics (Pass 78):** EOB pacing and return anchoring key on
+the **RTP video stream only**. A non-video stream's `END_OF_BLOCK` (every
+AUDIO/TELEMETRY datagram is a one-datagram block, §3.4) neither opens a craft
+listen window nor re-anchors a pending ground return. Non-video injection
+remains **gated** by an open gap exactly like video — held datagrams flush
+back-to-back after the window — so audio never transmits into a listen window
+but also never re-arms one. (Measured failure without this: 50 Hz audio EOBs
+re-armed the gap mid-flush, inflated the held backlog until the
+airtime-critical override fired, and the craft then transmitted through its
+own listen windows — episodic multi-report deaf spells, §9.8 watchdog trips,
+and full-range rung flapping that vanish with audio off.)
+
+**Report redundancy (Pass 78):** `return.report_redundancy` (seed **2**, `1`
+disables; RE-DERIVE §17). Each LINK_REPORT batch fired on a TSF-anchored
+window is retained and re-sent once at the **next** return window — spread
+across two craft listen gaps, never back-to-back inside one (deafness is
+correlated within a window). Blind fallback batches (no EOB anchor) are not
+repeated. The repeat is byte-identical (same epoch); the TX side counts
+`reports_received` only for **selector-fresh epochs**, so duplicates and
+replays no longer inflate the §15.3 heard-ratio.
+
 **Crossover (state it, don't hide it):** at high fps + saturated bitrate the idle
 gap shrinks below `return_window_us` and the contract degrades to §7.1
 best-effort. This optimisation, its window fit, and whether the damped adaptive
@@ -1027,6 +1048,14 @@ against plain broadcast returns is a §17 bench slot.
   window, rate-limited by the global per-seq hold-down (§5.3).
 - **LINK_REPORT:** periodic **10 Hz** floor (bench-gated) **+ immediate** on a
   step change (RSSI-floor breach, loss spike), to cut reaction latency.
+- **Video-stream reports only (Pass 79):** LINK_REPORT is emitted for **RTP
+  streams only**, and a TX ignores a report whose `target_stream_id` is not
+  one of its RTP streams (defense for mixed-version fleets). The §9 selector's
+  feedback channel is the paced video stream; a low-rate stream's per-stream
+  loss fraction is statistically explosive (one lost 50 Hz audio datagram in a
+  100 ms report period reads as 200‰ against a 20‰ demote threshold — the
+  measured instant top-to-floor rung drops every ~13 s) and MUST NOT steer
+  selection. Non-video loss stays visible in local §15.3 stats.
 
 ### 7.4 Self-congestion guard
 Once authorized, a retransmit has queue priority over live video (802.11e TID 6
@@ -1660,6 +1689,20 @@ direction** lets us make the strand class *never happen* rather than recover aft
   satisfy the backstop (the Pass 66 stale-buffer artifact, observed as a
   false commit on the bench). Retune failures are logged; a failed commit
   retune leaves the revert path as the recovery.
+- **Craft post-retune RX-liveness guard (Pass 80, kernel-monitor):** an
+  in-place `iw set freq` on the RTL88x2 family can half-apply — TX keeps
+  airing on the new channel while the RX chain goes deaf (observed on the
+  bench: rx counter frozen through a 4-minute FAILSAFE, fleet stranded
+  because a deaf craft cannot hear the return-CSA). After ANY §11 retune
+  (commit or revert) the craft arms an RX-liveness deadline
+  (`csa.rx_liveness_ms`, seed **750**, `0` disables): the issuer's zero-dt
+  rendezvous beacons blanket the verify window, so a craft that hears
+  **nothing** for the full deadline treats the retune as half-applied and
+  performs **one** full monitor re-init on the adapter (link down → monitor
+  type → link up → set freq — the bring-up sequence), then continues the
+  §11.5 machine unchanged. The recovery is one-shot per retune, loud in the
+  log, and never reorders the state machine — it only restores the radio the
+  machine already assumes it has.
 - **Intra-process atomic switch (ground fleet):** if the ground *process* accepted
   the CSA (any adapter heard it), it fires all local `FastRetune` calls
   together at its commit point — a straggler adapter follows because a
@@ -2280,9 +2323,10 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
                 "fwd_clamp_blocks": 4 },
     "fec":    { "scheme": "none", "overhead_frac": 0.0 },
     "return": { "guard_us": 300, "return_window_us": 2000,
-                "unicast": false },
+                "unicast": false, "report_redundancy": 2 },
     "csa":    { "psk": "<optional; auto-generated + announced when absent, §11.4a>",
                 "settle_s": 3.0, "verify_timeout_ms": 150,
+                "rx_liveness_ms": 750,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
                 "bind_release_s": 90, "persist_channel": false,
                 "home_chan": 5805, "channel_allowlist": [5745, 5805, 5825] },

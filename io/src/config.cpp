@@ -444,6 +444,12 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pr.value("return_window_us", cfg.policy.ret.return_window_us);
                 cfg.policy.ret.unicast =
                     pr.value("unicast", cfg.policy.ret.unicast);
+                cfg.policy.ret.report_redundancy = pr.value(
+                    "report_redundancy", cfg.policy.ret.report_redundancy);
+                if (cfg.policy.ret.report_redundancy < 1) {
+                    return Result<Config>::fail(
+                        "policy.return.report_redundancy: must be >= 1");
+                }
             }
             if (p.contains("csa")) {
                 const json& pc = p.at("csa");
@@ -452,6 +458,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 csa.settle_s = pc.value("settle_s", csa.settle_s);
                 csa.verify_timeout_ms =
                     pc.value("verify_timeout_ms", csa.verify_timeout_ms);
+                csa.rx_liveness_ms =
+                    pc.value("rx_liveness_ms", csa.rx_liveness_ms);
                 csa.min_interval_s = pc.value("min_interval_s", csa.min_interval_s);
                 csa.ack_timeout_ms = pc.value("ack_timeout_ms", csa.ack_timeout_ms);
                 csa.bind_release_s =

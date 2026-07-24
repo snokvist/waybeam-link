@@ -154,6 +154,8 @@ int main() {
             CHECK_EQ_U(c.policy.rx.clamp_resync_ms, 500);  // §6.6 seed
             CHECK_EQ_U(c.policy.ret.guard_us, 300);
             CHECK(!c.policy.ret.quiet_gap);   // §7.1 baseline ships default
+            CHECK_EQ_U(c.policy.ret.report_redundancy, 2);  // Pass 78 seed
+            CHECK_EQ_U(c.policy.csa.rx_liveness_ms, 750);   // Pass 80 seed
             CHECK(!c.node.net_id.has_value());  // §3.0: accept-any when absent
             CHECK(c.policy.csa.psk.empty());  // spectator: no psk
             CHECK(c.stats.hz == 1.0);
@@ -169,7 +171,8 @@ int main() {
                   "wedge_min_submits": 4, "ack_responder": true},
           "policy": {"return": {"quiet_gap": true, "guard_us": 400,
                                 "return_window_us": 1500,
-                                "unicast": true}}})");
+                                "unicast": true,
+                                "report_redundancy": 1}}})");
         CHECK(bool(r));
         if (r) {
             const Config& c = *r.value;
@@ -183,7 +186,14 @@ int main() {
             CHECK_EQ_U(c.policy.ret.guard_us, 400);
             CHECK_EQ_U(c.policy.ret.return_window_us, 1500);
             CHECK(c.policy.ret.unicast);
+            CHECK_EQ_U(c.policy.ret.report_redundancy, 1);  // Pass 78
         }
+    }
+    // Pass 78: report_redundancy 0 is invalid (1 disables).
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "policy":{"return":{"report_redundancy": 0}}})",
+                     "report_redundancy");
     }
     // §9.10 wedge knobs + Pass-12 hybrid halves default off / to seeds.
     {

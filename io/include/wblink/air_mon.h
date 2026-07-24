@@ -110,6 +110,11 @@ class MonAir {
     // sockets survive. Returns false if the iw call fails. Serves both the CSA
     // follower switch and the scout sweep.
     bool retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast);
+    // §11.6 Pass 80 RX-liveness recovery: full monitor re-init of one adapter
+    // (link down → monitor type → link up → MTU → set freq — the bring-up
+    // sequence). For the RTL88x2 half-applied in-place retune (TX airs, RX
+    // deaf). RX sockets are bound by ifindex and survive the down/up.
+    bool recover(size_t adapter, uint16_t chan_mhz, uint8_t bw);
     bool reapply_tx_power(size_t adapter);
     // §11.6 issuer verify hygiene (Pass 69): discard RX backlog captured
     // before a retune completed — kernel socket buffers and the process

@@ -890,6 +890,18 @@ bool frame_is_eob(const uint8_t* f, size_t n) {
     return v != nullptr && (v->hdr.data_flags & data_flags::kEndOfBlock) != 0;
 }
 
+// §7.2 Pass 78 paced-stream semantics: only the RTP video stream's EOBs open
+// craft listen windows / re-anchor ground returns. A non-video datagram is a
+// one-datagram block whose EOB must not re-arm the gap (50 Hz audio EOBs
+// re-arming mid-flush is the measured rung-flapping failure).
+bool frame_is_paced_eob(const uint8_t* f, size_t n) {
+    const Decoded dec = decode(f, n);
+    const DataView* v = std::get_if<DataView>(&dec);
+    return v != nullptr &&
+           (v->hdr.data_flags & data_flags::kEndOfBlock) != 0 &&
+           v->hdr.stream_type == stream_type::kRtp;
+}
+
 // §2: random per-boot session nonce.
 uint32_t session_nonce() {
     uint32_t nonce = 0;
@@ -1304,6 +1316,37 @@ struct AirBackend {
                              "intent only)\n",
                      chan_mhz, bw, fast ? " fast" : "");
         return true;
+    }
+    // §11.6 Pass 80: total RX frames across adapters (liveness baseline) and
+    // the one-shot full monitor re-init recovery (kernel-monitor only).
+    uint64_t rx_frames_total() const {
+        uint64_t total = 0;
+        if (mon) {
+            for (size_t i = 0; i < mon->rx_adapters(); ++i) {
+                total += mon->counters(i).rx_frames;
+            }
+        }
+#if WBLINK_RADIO
+        if (radio) {
+            for (size_t i = 0; i < radio->rx_adapters(); ++i) {
+                total += radio->counters(i).rx_frames;
+            }
+        }
+#endif
+        return total;
+    }
+    bool recover_all(uint16_t chan_mhz, uint8_t bw) {
+        if (mon) {
+            const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
+                                          : bw;
+            bool ok = true;
+            for (size_t i = 0; i < mon->rx_adapters(); ++i) {
+                ok = mon->recover(i, chan_mhz, width) && ok;
+            }
+            mon->flush_rx();
+            return ok;
+        }
+        return false;  // §11.6 Pass 80: devourer/udp out of scope
     }
     bool is_radio() const {
         if (mon) {
@@ -1774,14 +1817,32 @@ struct TxCore {
                 r->target_session != session_) {
                 return false;
             }
+            // §7.3 Pass 79: selection feedback keys on RTP streams only.
+            // Defensive against a pre-79 ground still reporting non-video
+            // streams (mixed-version fleet).
+            bool video_stream = false;
+            for (const Stream& s : streams_) {
+                if (s.stream_id == r->target_stream_id &&
+                    s.stream_type == stream_type::kRtp) {
+                    video_stream = true;
+                    break;
+                }
+            }
+            if (!video_stream) {
+                return false;
+            }
             // §3.5 acceptance filter (Pass 41): preferred/latched reporters
             // only — BEFORE the selector and the §9.11 ladder consume it.
             if (!report_gate_.accept(r->prefix.originator,
                                      r->prefix.session_id, now)) {
                 return false;
             }
-            ++reports_received_;
-            selector_.on_report(*r, now);
+            // Pass 78: count selector-fresh epochs only — redundant copies
+            // (return.report_redundancy) and replays must not inflate the
+            // §15.3 heard-ratio.
+            if (selector_.on_report(*r, now)) {
+                ++reports_received_;
+            }
             return false;
         }
         if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
@@ -2799,7 +2860,9 @@ int run_tx(const Loaded& l) {
     uint64_t now_us_it = now_us();
     const auto send_raw = [&](const uint8_t* f, size_t n) {
         air.value->inject(f, n);
-        if (qg.enabled() && frame_is_eob(f, n)) {
+        // Pass 78: only video EOBs open a listen window; a held audio
+        // datagram flushing here must not re-arm the gap on the rest.
+        if (qg.enabled() && frame_is_paced_eob(f, n)) {
             qg.note_eob_sent(now_us_it);
         }
     };
@@ -2825,6 +2888,11 @@ int run_tx(const Loaded& l) {
         follower_params.psk.assign(token.begin(), token.end());
     }
     CsaFollower csa(follower_params);
+    // §11.6 Pass 80 post-retune RX-liveness guard state (one-shot).
+    std::optional<uint64_t> csa_liveness_deadline_ms;
+    uint64_t csa_liveness_rx_baseline = 0;
+    uint16_t csa_liveness_chan = 0;
+    uint8_t csa_liveness_bw = 0;
     // §11.7 craft command engine: same key provenance as the CSA follower.
     VcmdParams craft_cmd_params = vcmd_params(l.cfg);
     if (psk_announced) {
@@ -3057,6 +3125,28 @@ int run_tx(const Loaded& l) {
             }
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
                          ca.chan_mhz);
+            // §11.6 Pass 80: arm the post-retune RX-liveness guard. The
+            // issuer's beacons blanket the verify window, so total silence
+            // for the deadline means the in-place retune half-applied.
+            if (l.cfg.policy.csa.rx_liveness_ms > 0) {
+                csa_liveness_deadline_ms =
+                    now + l.cfg.policy.csa.rx_liveness_ms;
+                csa_liveness_rx_baseline = air.value->rx_frames_total();
+                csa_liveness_chan = ca.chan_mhz;
+                csa_liveness_bw = ca.bw;
+            }
+        }
+        if (csa_liveness_deadline_ms && now >= *csa_liveness_deadline_ms) {
+            if (air.value->rx_frames_total() == csa_liveness_rx_baseline) {
+                std::fprintf(stderr,
+                             "csa: RX SILENT %u ms after retune to %u MHz — "
+                             "half-applied retune, monitor re-init (§11.6 "
+                             "Pass 80)\n",
+                             l.cfg.policy.csa.rx_liveness_ms,
+                             csa_liveness_chan);
+                air.value->recover_all(csa_liveness_chan, csa_liveness_bw);
+            }
+            csa_liveness_deadline_ms.reset();  // one-shot per retune
         }
         // §11.7 echo burst — the craft's diversity-carried command ACK.
         while (const auto echo = craft_cmd.tick(now_us_it)) {
@@ -3353,6 +3443,10 @@ int run_rx(const Loaded& l) {
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> urgent_ret_held;
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_ret_held;
+    // §7.2 Pass 78: anchored report batches re-fire once at the NEXT return
+    // window (spread across two listen gaps; a blind fallback batch is not
+    // repeated). Byte-identical copies — the TX epoch filter dedups.
+    std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_repeat_held;
     std::optional<uint64_t> ret_at_us;
     bool ret_tsf_anchored = false;
     std::optional<uint64_t> report_fallback_us;
@@ -3866,8 +3960,17 @@ int run_rx(const Loaded& l) {
             for (const auto& [f, target] : urgent_ret_held) {
                 send_return(target, f.data(), f.size(), true);
             }
+            // Pass 78: last window's anchored reports repeat here, before
+            // the fresh batch so epochs stay monotonic at the receiver.
+            for (const auto& [f, target] : report_repeat_held) {
+                send_return(target, f.data(), f.size(), false);
+            }
+            report_repeat_held.clear();
             for (const auto& [f, target] : report_ret_held) {
                 send_return(target, f.data(), f.size(), false);
+                if (ret_at_us && l.cfg.policy.ret.report_redundancy > 1) {
+                    report_repeat_held.emplace_back(f, target);
+                }
             }
             // §7.2 observability: a batch fired on a TSF-anchored window
             // deadline is a hit; one sent blind (no EOB heard) is a miss.
@@ -3940,9 +4043,11 @@ int run_rx(const Loaded& l) {
             }
             rx.on_air(meta.adapter_id, d, n, now, deliver, rssi,
                       early_deliver);
-            if (qg.enabled() && frame_is_eob(d, n)) {
+            if (qg.enabled() && frame_is_paced_eob(d, n)) {
                 // Anchor on the SAME adapter's TSF (clocks never cross
                 // adapters); a failed read falls back to host arrival.
+                // Pass 78: audio EOBs don't re-anchor — the craft's gap
+                // keys on the same video EOB this side heard.
                 const auto tsf_now = air.value->read_tsf(meta.adapter_id);
                 ret_tsf_anchored = tsf_now.has_value();
                 if (!tsf_now) {
