@@ -2646,6 +2646,63 @@ Two conclusions fell out:
 *both* ends reverting to `prev_chan`, instead of the ground holding a channel
 the craft has left. Recoverable in the air.
 
+### Pass 90 — §11.2 campaign copies: retransmit-until-ACK, released in the quiet gap
+
+**Trigger.** After Pass 89 removed the fleet-split failure mode, hops still
+failed intermittently (~1 in 5) on the bench. Pass 89's own hypothesis — that
+the issuer needed the craft's §11.6 RX-liveness guard — was **tested and
+refuted**, twice over:
+
+1. *Timing.* `rx_liveness_ms` is 750 ms, armed at the retune, while the issuer
+   pre-positions (commits before T_switch, Pass 69) and the craft's window is
+   500 ms from its own landing. A ground-side guard could not fire until
+   ≥250 ms after the craft had already reverted.
+2. *Mechanism.* Sampling both ground adapters at 20 Hz through a failing hop
+   showed channel and txpower **completely static** — `5805/19.00` and
+   `5805/25.00` throughout. The issuer never retuned, because it never reached
+   `kCommit`. There was no half-applied retune and no deaf radio to recover.
+
+**Diagnosis.** Every rejection path in `CsaFollower::on_csa` was instrumented.
+On the failing hop the craft logged *nothing* — not a rejection, not an accept.
+`on_csa` was never called: the campaign was never received.
+
+Measured from the craft's own counters over 188.6 s: rx ≈ **15.1 frames/s**
+against tx ≈ **2901 frames/s**. Single radio, RX-deaf while transmitting
+(§7.2). A campaign was `kCopies = 5` at `kCopySpacingUs = 20000` — an **80 ms**
+burst — after which `kAwaitAck` sent nothing further for the remainder of a 1 s
+`ack_timeout`. Taking the observed ~20% hop-failure rate as ~27% per-copy loss,
+that is entirely consistent with five blind copies inside one 80 ms window.
+
+The decisive asymmetry: LINK_REPORTs are **gap-scheduled** (`report_ret_held`,
+released at the TSF-anchored return deadline) and arrive at essentially the
+rate they are sent — `report_hz` 10 against 15.1 rx/s total. CSA copies were
+explicitly excluded, with the comment *"campaign timing: never
+quiet-gap-held"* (`app/main.cpp:4237`). The one message the campaign depends on
+was the only one denied the mechanism that makes delivery to this craft work.
+
+**Operator ruling (2026-07-24).** Do both:
+
+- §11.2: copies repeat at the copy spacing **until `CSA_ARMED` or T_switch**,
+  rather than a fixed burst of five. `CSA_ARMED` is already the ACK, so this is
+  retransmit-until-acked with a natural stop condition — no new wire state.
+- §11.2: copies are **released in the craft's §7.2 quiet gap**, like every
+  other ground→craft message.
+
+**Consequence that had to be ruled with it.** `dt_to_switch_ms` is relative to
+the copy's own transmission and the follower anchors on that copy's *receive*
+TSF, so a copy held for the gap MUST have `dt_to_switch_ms` and `csa_mac`
+recomputed at the instant of transmission. Releasing a pre-stamped copy would
+put the follower's T_switch late by the hold time — desynchronising the exact
+instant the campaign exists to agree on. A copy that cannot be re-stamped
+before T_switch is dropped rather than sent stale.
+
+The original exemption predates per-copy `dt` stamping; with it, a gap-delayed
+copy is as correct as a prompt one.
+
+**Scope.** This is delivery, not semantics: Pass 89's commit-proof rule and the
+500 ms window are unaffected and still required. Pass 89 made failure *safe*
+(both ends stay together); Pass 90 makes it *rare*.
+
 ## Open questions for the next pass
 
 - [x] **RESOLVED (Pass 70, ruled accept+document 2026-07-23)** — see the

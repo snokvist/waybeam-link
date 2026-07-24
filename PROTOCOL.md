@@ -1585,8 +1585,41 @@ absolute switch time), folded into the wire model and hardened.
 static rendezvous channel cannot be redirected by a forged/accepted campaign.
 
 ### 11.2 Timing + retune budget
-- **N=5 copies @ 20 ms** (100 ms campaign). Each copy's `dt_to_switch_ms`
-  decrements so all resolve to the same absolute instant.
+- **Copies @ 20 ms, repeated until the craft ACKs or T_switch arrives
+  (Pass 90).** Each copy's `dt_to_switch_ms` is stamped from the campaign's
+  absolute T_switch at the instant that copy is transmitted, so all copies —
+  however late — resolve to the same absolute instant.
+
+  **Superseded: the fixed N=5 burst.** Five copies at 20 ms spacing is an 80 ms
+  window, after which the issuer went silent for the remainder of a 1 s
+  `csa_ack_timeout`. A craft that heard none of the five lost the campaign
+  with ~1 s of usable airtime unspent. The craft is a single-radio node and is
+  RX-deaf while transmitting (§7.2), so campaign delivery is probabilistic and
+  an 80 ms exposure is simply too short: measured on hardware 2026-07-24, ~1
+  hop in 5 failed with the craft never calling `on_csa` at all — the campaign
+  was never received. `CSA_ARMED` (§11.6) is the ACK that stops the
+  retransmission, so this is retransmit-until-acked, not an unbounded burst.
+
+- **Copies are released in the craft's §7.2 quiet gap (Pass 90).** The issuer
+  previously injected campaign copies immediately and deliberately outside the
+  quiet-gap scheduler ("campaign timing: never quiet-gap-held"). That exempted
+  the one message the whole campaign depends on from the mechanism that makes
+  delivery to a duty-cycle-limited craft work: LINK_REPORTs, which ARE
+  gap-scheduled, arrive at essentially the rate they are sent, while blind
+  campaign copies measured ~73% per-copy delivery.
+
+  **A held copy MUST be re-stamped at the instant it goes on air** —
+  `dt_to_switch_ms` recomputed from the absolute T_switch and `csa_mac`
+  recomputed over the new bytes. `dt_to_switch_ms` is relative to the copy's
+  own transmission and the follower anchors on that copy's **receive** TSF, so
+  releasing a pre-stamped copy after a hold of Δ would place the follower's
+  T_switch Δ late — desynchronising the very instant the campaign exists to
+  agree on. A copy that cannot be re-stamped before T_switch is dropped, not
+  sent stale.
+
+  The original exemption predates `dt_to_switch_ms` being computed per copy;
+  with per-copy stamping a gap-delayed copy is exactly as correct as a prompt
+  one, so the exemption no longer buys anything.
 - A follower anchors on the **hardware TSF of the copy it received**:
   `target_tsf = rx_tsfl + dt_to_switch_ms·1000` (µs) — TSF, not host clock, so no
   host-jitter smear (re-derive the bench's 0–5 ms precision against TSF).
