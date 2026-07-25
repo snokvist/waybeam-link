@@ -19,7 +19,19 @@ understood. **NICE-TO-HAVE** = cleanup.
 > the B1 partial mitigation** — each marked inline. What remains open there is a
 > golden-schema counters. **Ruling (2026-07-25):** the B3 dead-adapter flag
 > `rx_dead` was approved and landed (Pass 101); the B9 item-1 MAC-reject counter
-> and the E TSF-clamp counter were **declined**. Tier 2 is untouched.
+> and the E TSF-clamp counter were **declined**.
+>
+> **Tier-2 partial, 2026-07-25.** Landed this pass: **A3 reframed → Pass 102**
+> (the §9.8 fail-safe now floors at `max(min_profile, floor_profile)` — a mode
+> band never fades below its verified lowest rung; supersedes Pass 84, and the
+> min==max pin holds for free, so the earlier "pin yields" direction is
+> withdrawn); **B1 full** (non-blocking venc HTTP state machine — poll()-driven,
+> the flight loop can no longer block on a wedged venc); **A2** (`stats.stdout`
+> knob, off in the deployed craft config); **A1** + all of **section D**
+> (docs); **B2** (bounded CLI wait + `sigaction` no-`SA_RESTART` — the flight
+> loop can no longer hang on a wedged `iw`/`ip`). Still open in Tier 2: **B4**
+> (uncaught devourer throws), **B7** (unauth control plane bound 0.0.0.0 in a
+> sample).
 
 ---
 
@@ -40,6 +52,12 @@ verify.
 `deploy/README.md` "Before flight" does not mention it; it should once a
 decision is made.
 
+> **DONE (operator ruling 2026-07-25): stay announced-token, document it.** No
+> secret is provisioned; `deploy/README.md` "Before flight" now spells out
+> announced-token mode, the §11.5a sticky binding as the only takeover defence,
+> the option to provision a shared `csa.psk` (fails closed on mismatch, Pass
+> 85), and the re-scout-after-reboot procedure. No behaviour change.
+
 ### A2 — Craft logging fills a RAM-backed filesystem — SHOULD-FIX
 
 `deploy/vehicle-waybeam-link.init` sends stdout (the §15.3 NDJSON) and stderr
@@ -58,6 +76,30 @@ operator consumes the stream:
 On `.242`/`.199` the same stream goes to journald at `stats.hz: 5`
 (~20 KB/s ≈ 70 MB/h) for data nobody reads — the hub scrapes REST `:8092`.
 
+> **DONE (operator ruling 2026-07-25): a config knob, on for troubleshooting,
+> off for production.** New `stats.stdout` (bool, default **true** — the
+> documented bench/dev stream). Setting it `false` silences the §15.3 stdout
+> NDJSON while leaving the REST/SSE stats plane (§15.5, `last_line()`)
+> untouched, so the hub keeps scraping and an operator can still `curl` the
+> node's `/api/v1/stats` on demand — only the unrotated /tmp (craft) / journald
+> (ground) growth stops. Wired: `StatsCfg.to_stdout` → the three
+> `StatsEmitter(to_stdout, …)` constructions. The deployed craft config
+> (`deploy/vehicle-192.168.2.232.json`) now ships `stats.stdout: false`; the
+> ground configs (`.242` systemd, `.199` buildroot — outside this repo) should
+> set it too. Test in `config_test`.
+
+> **HARDWARE-VERIFIED 2026-07-25** (PR #55, `#55` build on craft `.232` +
+> ground `.242`, all MonAir). **Pass 102:** craft pinned to a `min 1/max 5`
+> band, ground stopped to kill feedback — the selector descended MCS5→4→2→1
+> and **held at MCS1 (min_profile) through 27 s of lost feedback**, never
+> reaching MCS0; ground restart recovered it to MCS5. **B1:** 56 venc pushes,
+> **0 failures** across the run, and two CSA hops (5805↔5745) committed clean
+> with the craft following (rx advancing on every committed channel) — the
+> loop never stalled on venc. **A2:** `/tmp/waybeam-link.log` held at **0
+> bytes** with `stats.stdout: false` while the craft's REST `/api/v1/stats`
+> served full data throughout. Fleet restored to baseline (craft mode 0-2,
+> both nodes on the #55 build).
+
 ### A3 — Should a §9.7 `min==max` pin yield to the §9.8 fail-safe? — needs a ruling
 
 Raised and deliberately left open in §9.8 by Pass 84. The PINNED branch
@@ -73,8 +115,15 @@ vehicle (`min 1 / max 5`) is unaffected either way.
 
 > **Update (Pass 100, PR #53).** The `min < max` *range re-pin* now snaps a
 > stranded rung into `[min,max]` (down-clamp unconditional; up-clamp defers to
-> §9.8 on stale feedback). The `min == max` PINNED-vs-fail-safe question above
-> is still open — Tier 2.
+> §9.8 on stale feedback).
+>
+> **RESOLVED (Pass 102, 2026-07-25).** Reframed by the operator around the mode
+> harness: the real fix is that the §9.8 fail-safe descent floors at
+> `max(min_profile, floor_profile)`, so **no** mode fades below its band's
+> verified lowest rung (the deployed `min 1/max 5` craft fades to MCS1, not
+> MCS0; a Range-Low band to MCS2). This supersedes Pass 84. The `min == max`
+> pin then holds through a fade with no special case — its band floor is the
+> pin — so the original "should the pin yield?" question dissolves.
 
 ---
 
@@ -112,9 +161,28 @@ holdoff.
 > satisfied. `VencActuator::request_idr` now honours the shared
 > `no_retry_until_ms_` hold-off and sets it on failure (`venc_http.cpp`), so a
 > wedged venc is no longer re-poked (~600 ms blocking) from the air-RX dispatch
-> path. The full non-blocking state machine (B1 proper) stays Tier 2.
+> path.
+>
+> **B1 proper DONE (2026-07-25).** The actuator is now non-blocking: the setters
+> record the desired value and a poll()-driven connect/send/recv state machine
+> (zero-timeout poll() per step, hard 500 ms per-transaction wall deadline)
+> spends only microseconds per loop iteration. A wedged-but-accepting venc can
+> no longer stall the flight loop, csa.tick(), ARQ service or the §7.2 quiet
+> gap. The Pass 73 volatile-first fallback, write-on-change, holdoff, IDR rate
+> gate and every §15.3 counter are preserved; test rewritten to pump poll().
 
-### B2 — `fork()` + `execvp()` + untimed `waitpid()` on the flight loop — BLOCKER
+### B2 — `fork()` + `execvp()` + untimed `waitpid()` on the flight loop — BLOCKER — **DONE (PR #55)**
+
+**Fixed.** `wait_bounded()` in `io/src/air_mon.cpp` replaces both untimed
+`waitpid(pid,&status,0)` calls: it polls `waitpid(WNOHANG)` up to a 2 s deadline
+(`kCliWaitDeadline`, 5 ms poll), then `SIGKILL`s and reaps — a wedged `iw`/`ip`
+child can no longer hang the flight loop, and a timed-out retune reports failure
+like any other. `SIGINT`/`SIGTERM` moved from `std::signal` (glibc BSD
+`SA_RESTART`) to `sigaction` with `sa_flags = 0` in `app/main.cpp`, so a shutdown
+signal interrupts blocking flight-loop syscalls with `EINTR` instead of
+restarting them; every blocking path (air_mon `recv`/`recvmsg`, the bounded CLI
+wait) already handles `EINTR`. Pure impl — no PROTOCOL/§15.3 change. Original
+report below.
 
 `io/src/air_mon.cpp` `iw_set_freq()` and `run_cli()` both do
 `waitpid(pid, &status, 0)` with **no timeout**, called synchronously from the
@@ -488,8 +556,13 @@ Where each bucket stands, so the next session does not re-derive the order.
   first), and the **B3 `rx_dead` flag** (Pass 101, operator-approved). Ruling
   2026-07-25 **declined** the other two golden-schema counters: B9 item 1
   (MAC-reject counter) and the E TSF-clamp counter — both stay unimplemented.
-- **Tier 2 — scoped but not started.** B1 full fix, B2, B4, B7, A3. The
-  operator's steer was "just do it" once tier 1 is done.
+- **Tier 2 — partly landed 2026-07-25.** DONE: **A3** (reframed to Pass 102 —
+  the §9.8 fail-safe floors at `max(min_profile, floor_profile)`, superseding
+  Pass 84), **B1 full** (non-blocking venc state machine), **A2** (`stats.stdout`
+  knob), **B2** (bounded CLI wait via `wait_bounded()` + `sigaction` without
+  `SA_RESTART` — no more flight-loop hang on a wedged `iw`/`ip`). STILL OPEN:
+  **B4** (uncaught devourer exceptions), **B7** (unauth control plane bound
+  0.0.0.0 in a sample).
 - **Tier 3 / C-series** — verification campaigns needing bench and flight time,
   plus A1/A2 which need operator decisions rather than code.
 
@@ -603,6 +676,14 @@ walk is also the missing gate-4 range sample (C2).
 ---
 
 ## D. Doc drift found during the audit — NICE-TO-HAVE
+
+> **DONE 2026-07-25.** All items below corrected: `deploy/README.md`
+> (adaptive MCS 1–5, S96 autostart, TX-power-not-enforced note), `ROADMAP.md`
+> (Passes 64–66 marked landed), `docs/transport-architecture-review.md`
+> (kernel-monitor CSA + wedge detection now implemented, Passes 49/69/80),
+> `CLAUDE.md` (46 suites; HEARTBEAT/ANNOUNCE fire without a feed), and the
+> stale `rendezvous_timeout_s` key removed from the three sample configs and
+> `docs/step11-bench.md`.
 
 - `deploy/README.md`: "profile/MCS 3" — the vehicle config has been adaptive
   `min 1 / max 5` since #47.

@@ -508,16 +508,18 @@ int main() {
         CHECK_EQ_U(h.sel.profile_id(), before);
     }
 
-    // §9.8 Pass 84: the fail-safe descends to floor_profile, UNCLAMPED by the
-    // §9.7 min_profile pin. The deployed vehicle runs min 1 / max 5 (an airtime
-    // choice); before the fix that silently also removed MCS0 — the table's
-    // floor — from the lost-feedback path.
+    // §9.8 Pass 102 (supersedes Pass 84): the fail-safe floors at
+    // max(min_profile, floor_profile), NOT the table floor_profile below the
+    // band. The deployed vehicle runs min 1 / max 5; under the mode harness
+    // min_profile is the band's verified lowest rung, so a lost-feedback fade
+    // lands on MCS1, never MCS0 (floor_profile 0 no longer drags it below the
+    // band — "don't let the mode mechanics fight each other").
     {
         SelectorPolicy p;
         p.mcs_settle_ms = 0;
-        p.min_profile = 1;  // adaptation envelope: never CHOOSE MCS0...
+        p.min_profile = 1;  // Range band floor == verified lowest rung...
         p.max_profile = 5;
-        Harness h(p);       // ...but floor_profile is 0 (make_table)
+        Harness h(p);       // ...floor_profile is 0 (make_table) but cannot win
         h.boot(0);
         // Climb off the floor on healthy reports so there is somewhere to fall.
         uint64_t t = 0;
@@ -526,12 +528,58 @@ int main() {
             (void)h.sel.tick(t);
         }
         CHECK(h.sel.profile_id() > 1);
-        // Feedback stops entirely: hold, then damped descent all the way down.
+        // Feedback stops entirely: hold, then damped descent — but only to the
+        // band floor, not below it.
         for (; t <= 60000; t += 100) {
             (void)h.sel.tick(t);
         }
         CHECK(std::string_view(h.sel.state()) == "FAILSAFE");
-        CHECK_EQ_U(h.sel.profile_id(), 0);  // floor_profile, not min_profile
+        CHECK_EQ_U(h.sel.profile_id(), 1);  // min_profile band floor, not MCS0
+    }
+    // §9.8 Pass 102: a Range-Low band (MCS 2-5) fades no lower than MCS2 — the
+    // rung its resolution/fps were co-designed for. floor_profile 0 is ignored
+    // below the band.
+    {
+        SelectorPolicy p;
+        p.mcs_settle_ms = 0;
+        p.min_profile = 2;
+        p.max_profile = 5;
+        Harness h(p);
+        h.boot(0);
+        uint64_t t = 0;
+        for (; t <= 20000; t += 100) {
+            h.report(t, -35, 0);
+            (void)h.sel.tick(t);
+        }
+        CHECK(h.sel.profile_id() > 2);
+        for (; t <= 60000; t += 100) {
+            (void)h.sel.tick(t);
+        }
+        CHECK(std::string_view(h.sel.state()) == "FAILSAFE");
+        CHECK_EQ_U(h.sel.profile_id(), 2);  // band floor, never below
+    }
+    // §9.8 Pass 102: floor_profile ABOVE min_profile still binds — max() lets
+    // the table absolute floor RAISE the fail-safe floor, never lower it. Band
+    // 0-5 but floor_profile 2: the fade stops at MCS2.
+    {
+        SelectorPolicy p;
+        p.mcs_settle_ms = 0;
+        p.min_profile = 0;
+        p.max_profile = 5;
+        Harness h(p);
+        h.table.floor_profile = 2;  // absolute floor above the band minimum
+        h.boot(0);
+        uint64_t t = 0;
+        for (; t <= 20000; t += 100) {
+            h.report(t, -35, 0);
+            (void)h.sel.tick(t);
+        }
+        CHECK(h.sel.profile_id() > 2);
+        for (; t <= 60000; t += 100) {
+            (void)h.sel.tick(t);
+        }
+        CHECK(std::string_view(h.sel.state()) == "FAILSAFE");
+        CHECK_EQ_U(h.sel.profile_id(), 2);  // floor_profile raises the floor
     }
     // §9.7 Pass 83: min/max_profile are profile IDs, not ladder indices. A
     // table whose ids do not equal their positions must still pin correctly.

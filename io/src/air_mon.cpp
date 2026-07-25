@@ -11,6 +11,7 @@
 #include <sys/ioctl.h>
 #include <sys/time.h>  // struct timeval (SO_RCVTIMEO)
 #include <sys/wait.h>  // waitpid (retune via iw)
+#include <csignal>     // kill, SIGKILL (B2 bounded CLI wait)
 #include <unistd.h>    // close, fork, execvp, _exit
 
 #include <linux/sockios.h>
@@ -198,6 +199,36 @@ void attach_bpf_filter(int fd, std::optional<uint8_t> net_id,
     }
 }
 
+// B2 (pre-flight audit): a forked CLI child sits on the flight loop — CSA
+// retune/revert via iw_set_freq(), monitor re-bring-up via run_cli() in
+// MonAir::recover(). `iw`/`ip` normally return in well under 100 ms, but a
+// driver deadlock on a wedged USB adapter can hang the underlying syscall
+// indefinitely; an untimed waitpid() would then wedge the whole flight process
+// (and with glibc SA_RESTART a SIGTERM aimed at it would just restart the
+// wait). Bound it: poll WNOHANG up to kCliWaitDeadline, then SIGKILL and reap.
+// Returns the child's exit status via *status; false if the child was killed on
+// the deadline or the reap failed.
+constexpr auto kCliWaitPoll = std::chrono::milliseconds(5);
+constexpr auto kCliWaitDeadline = std::chrono::milliseconds(2000);
+
+bool wait_bounded(pid_t pid, int* status) {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (;;) {
+        const pid_t r = ::waitpid(pid, status, WNOHANG);
+        if (r == pid) return true;  // reaped normally
+        if (r < 0) {
+            if (errno == EINTR) continue;  // interrupted (no SA_RESTART) — retry
+            return false;                  // ECHILD or other terminal error
+        }
+        if (std::chrono::steady_clock::now() - t0 >= kCliWaitDeadline) {
+            ::kill(pid, SIGKILL);  // unblockable — the blocking reap below is bounded
+            ::waitpid(pid, status, 0);
+            return false;  // a timed-out retune is a failed retune
+        }
+        std::this_thread::sleep_for(kCliWaitPoll);  // r == 0: child still running
+    }
+}
+
 // §11.5/§15.5a channel retune over a monitor netdev. The ssc338q SDK ships the
 // kernel nl80211 UAPI but not libnl-3, so we drive the stable `iw` CLI (present
 // on the target) rather than hand-roll genl: `iw dev <if> set freq <mhz>
@@ -217,7 +248,7 @@ bool iw_set_freq(const std::string& ifname, uint16_t mhz, uint8_t bw) {
         _exit(127);  // iw not on PATH
     }
     int status = 0;
-    if (::waitpid(pid, &status, 0) < 0) return false;
+    if (!wait_bounded(pid, &status)) return false;
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
@@ -230,7 +261,7 @@ bool run_cli(const char* const argv[]) {
         _exit(127);
     }
     int status = 0;
-    if (::waitpid(pid, &status, 0) < 0) return false;
+    if (!wait_bounded(pid, &status)) return false;
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 

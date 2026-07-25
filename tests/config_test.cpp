@@ -160,6 +160,17 @@ int main() {
             CHECK(c.policy.csa.psk.empty());  // spectator: no psk
             CHECK(c.stats.hz == 1.0);
             CHECK(!c.stats.bind.has_value());
+            CHECK(c.stats.to_stdout);  // A2: default on (bench/dev stream)
+        }
+    }
+
+    // --- A2: stats.stdout gates the §15.3 stdout NDJSON (production quiet) --
+    {
+        auto r = load_config_json(
+            R"({"node":{"originator":9,"role":"rx"},"stats":{"stdout":false}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(!r.value->stats.to_stdout);
         }
     }
 

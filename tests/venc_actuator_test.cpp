@@ -2,8 +2,10 @@
 // §9.6 venc actuator, volatile-first (Pass 73): pushes target
 // /api/v1/live/set; the first 404 latches a one-shot per-process fallback to
 // the persisting /api/v1/set and re-sends the push that drew it. Non-404
-// failures must NOT latch the fallback. Driven against a scripted one-shot
-// HTTP server on a real loopback socket.
+// failures must NOT latch the fallback. B1: the actuator is non-blocking —
+// setters record the desired value and poll() drives the HTTP; the harness
+// pumps poll() to quiescence at a fixed clock. Driven against a scripted
+// one-shot HTTP server on a real loopback socket.
 #include "wblink/venc.h"
 
 #include <arpa/inet.h>
@@ -79,15 +81,30 @@ VencCfg cfg_for(uint16_t port) {
     return cfg;
 }
 
+// Drive the non-blocking state machine to quiescence at a fixed clock: keep
+// polling until an idle actuator stays idle across a poll (nothing pending to
+// start — the 404 fallback chain restarts within one poll, so this drains it).
+void pump(VencActuator& act, uint64_t now_ms) {
+    for (int i = 0; i < 2000; ++i) {
+        const bool was_busy = act.busy();
+        act.poll(now_ms);
+        if (!was_busy && !act.busy()) {
+            return;
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
-    // A live-capable venc: one push, one request, on the volatile path.
+    // A live-capable venc: one push on the volatile path.
     {
         ScriptedVenc venc({200});
         VencActuator act(cfg_for(venc.port()));
-        CHECK(act.set_bitrate(8192, 1000));
+        act.set_bitrate(8192);
+        pump(act, 1000);
         CHECK(!act.live_fallback());
+        CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
         CHECK_EQ_U(act.pushes(), 1);
         CHECK_EQ_U(act.failures(), 0);
     }
@@ -98,14 +115,18 @@ int main() {
     {
         ScriptedVenc venc({404, 200, 200, 200});
         VencActuator act(cfg_for(venc.port()));
-        CHECK(act.set_bitrate(8192, 1000));
+        act.set_bitrate(8192);
+        pump(act, 1000);
         CHECK(act.live_fallback());
         CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
-        CHECK(act.set_fps(60, 2000));
+        CHECK_EQ_U(act.pushes(), 1);  // one logical push, even with the 404 chain
+        act.set_fps(60);
+        pump(act, 2000);
         CHECK(act.live_fallback());
         // Past the re-probe window the volatile route is tried again and a
         // 2xx clears the latch.
-        CHECK(act.set_fps(90, 1000 + 600000));
+        act.set_fps(90);
+        pump(act, 1000 + 600000);
         CHECK(!act.live_fallback());
         const auto& p = venc.paths();
         CHECK_EQ_U(p.size(), 4);
@@ -116,14 +137,20 @@ int main() {
     }
 
     // A transient 404 (venc bring-up: httpd bound, routes not yet
-    // registered — /set 404s too) must NOT latch the fallback.
+    // registered — /set 404s too) must NOT latch the fallback, and must not
+    // commit the value.
     {
         ScriptedVenc venc({404, 404, 200});
         VencActuator act(cfg_for(venc.port()));
-        CHECK(!act.set_bitrate(8192, 1000));
+        act.set_bitrate(8192);
+        pump(act, 1000);
         CHECK(!act.live_fallback());
-        CHECK(act.set_bitrate(8192, 2000));  // past holdoff: volatile again
+        CHECK_EQ_U(act.commanded_bitrate_kbps(), 0);  // both failed: uncommitted
+        CHECK_EQ_U(act.failures(), 1);
+        act.set_bitrate(8192);
+        pump(act, 2000);  // past holdoff: volatile again
         CHECK(!act.live_fallback());
+        CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
         const auto& p = venc.paths();
         CHECK_EQ_U(p.size(), 3);
         CHECK(p[2] == "/api/v1/live/set?video0.bitrate=8192");
@@ -134,13 +161,36 @@ int main() {
     {
         ScriptedVenc venc({500, 200});
         VencActuator act(cfg_for(venc.port()));
-        CHECK(!act.set_bitrate(8192, 1000));
+        act.set_bitrate(8192);
+        pump(act, 1000);
         CHECK(!act.live_fallback());
         CHECK_EQ_U(act.failures(), 1);
-        CHECK(act.set_bitrate(8192, 2000));  // past the holdoff
+        CHECK_EQ_U(act.commanded_bitrate_kbps(), 0);
+        act.set_bitrate(8192);
+        pump(act, 2000);  // past the holdoff
+        CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
         const auto& p = venc.paths();
         CHECK_EQ_U(p.size(), 2);
         CHECK(p[1] == "/api/v1/live/set?video0.bitrate=8192");
+    }
+
+    // request_idr: queued only when recovery is enabled and outside the 1 s
+    // rate gate; the send happens in poll(). A 2xx counts no failure.
+    {
+        ScriptedVenc venc({200});
+        VencCfg c = cfg_for(venc.port());
+        c.recovery_enabled = true;
+        VencActuator act(c);
+        CHECK(act.request_idr(1000));  // queued
+        pump(act, 1000);               // sends; arms the 1 s rate gate
+        CHECK_EQ_U(act.idr_requests(), 1);
+        CHECK_EQ_U(act.idr_failures(), 0);
+        CHECK(act.request_idr(1200));  // inside the gate: true, not re-queued
+        pump(act, 1200);
+        CHECK_EQ_U(act.idr_requests(), 1);  // no second send
+        const auto& p = venc.paths();
+        CHECK_EQ_U(p.size(), 1);
+        CHECK(p[0] == "/request/idr");
     }
 
     return wbtest_finish("venc_actuator_test");

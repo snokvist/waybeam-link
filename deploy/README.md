@@ -19,9 +19,10 @@ RF-inserted cache replies are not implemented in this deployment.
 The RK3566 remains a useful second-view test receiver. It may consume repair
 status for the same vehicle, but it does not own or retarget the cache.
 
-The vehicle uses whole-frame `venc_frame` SHM input, profile/MCS 3, 30% IDR
-RLC, and 20% P-frame RLC. Both grounds write `venc_frame_out`; the RK3566
-ground feeds it to `waybeam_hub` for MPP/DRM display.
+The vehicle uses whole-frame `venc_frame` SHM input, adaptive MCS 1–5
+(`select.min_profile 1 / max_profile 5`, since #47), 30% IDR RLC, and 20%
+P-frame RLC. Both grounds write `venc_frame_out`; the RK3566 ground feeds it
+to `waybeam_hub` for MPP/DRM display.
 
 See [the verification hardware reference](../docs/verification-hardware.md)
 for exact hardware, drivers, originators, FCS handling requirements, cold-boot
@@ -29,8 +30,10 @@ behavior, and the reusable test checklist.
 
 ## Operation
 
-Ground and cache services are enabled at boot. The vehicle link is deliberately
-not linked into `rcS` until the flight checklist below is complete:
+Ground and cache services are enabled at boot. The vehicle now also autostarts
+`waybeam-link` at boot via `S96waybeam-link` (the craft rootfs init script,
+which lives outside this repo). Complete the flight checklist below before
+relying on it; drive it manually with:
 
 ```sh
 ssh root@192.168.2.232 '/etc/init.d/waybeam-link start'
@@ -73,8 +76,19 @@ the configured 500 ms retry cadence.
 - Keep the cache controller endpoint paired with receiver originator 9 and
   `192.168.2.242:5802`; changing either requires updating both deployments.
 - Make the SHM viewer persistent or start it explicitly before every test.
-- Verify channel 161 and the configured 27 dBm vehicle TX power are permitted
-  at the test site.
+- Verify channel 161 is permitted at the test site. NOTE: the vehicle TX power
+  is **not** configured or enforced by waybeam-link — the config sets no power,
+  kernel-monitor power actuation is a documented no-op, and `mon-up.sh` sets
+  `txpower auto`. Any regulatory power limit must be met at the adapter/driver,
+  not assumed from this repo.
+- CSA key mode: no deploy config sets `csa.psk`, so the fleet runs
+  **announced-token mode** (Pass 61/63) — the per-boot CSA token is public on
+  the ANNOUNCE beacon, and the only takeover defence is the §11.5a sticky
+  binding (90 s release after the claiming ground goes silent). For a stronger
+  guarantee, provision a shared `csa.psk` secret on the craft **and** every
+  ground together (a mismatch fails closed, Pass 85). After any craft reboot,
+  re-scout and re-claim before relying on channel switching (the token
+  regenerates each boot).
 - Perform a props-off power-cycle/restart test, then an antenna-separated
   walking/range test with packet loss, unrecoverable frames, driver drops,
   temperature, and end-to-end latency observed.
