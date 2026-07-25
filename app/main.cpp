@@ -1920,11 +1920,11 @@ struct TxCore {
             for (const Stream& s : streams_) {
                 if (s.stream_id == r->target_stream_id &&
                     s.stream_type == stream_type::kRtp) {
-                    const bool ok = venc_.request_idr(now);
+                    const bool queued = venc_.request_idr(now);
                     std::fprintf(stderr,
                                  "venc: decoder recovery stream=%u requester=%u %s\n",
                                  r->target_stream_id, r->prefix.originator,
-                                 ok ? "accepted" : "failed");
+                                 queued ? "requested" : "suppressed");
                     return false;
                 }
             }
@@ -1983,11 +1983,15 @@ struct TxCore {
                 }
             }
         }
+        // B1: advance the non-blocking venc HTTP state machine once per loop
+        // iteration (never blocks). The setters below only record the desired
+        // value; this drives the actual connect/send/recv.
+        venc_.poll(now);
         // Push the CURRENT target every tick: write-on-change (§9.6) makes
         // this a no-op normally, and a failed push (encoder briefly down)
         // retries next tick instead of waiting for the next rung change.
         if (selector_.bitrate_kbps() > 0) {
-            venc_.set_bitrate(selector_.bitrate_kbps(), now);
+            venc_.set_bitrate(selector_.bitrate_kbps());
         }
         // §9.6 cadence estimate: frames over a ~1 s window.
         if (cadence_start_ms_ != 0 && now >= cadence_start_ms_ + 1000) {
@@ -2006,12 +2010,12 @@ struct TxCore {
             // Re-offer the current target every tick. VencActuator dedupes a
             // successfully applied value and retries after transient HTTP or
             // shared-holdoff failures, so controller state cannot outrun venc.
-            venc_.set_fps(fps_ladder_->current_fps(), now);
+            venc_.set_fps(fps_ladder_->current_fps());
         } else if (cmd_fps_select_hz_ != 0) {
             // §11.7 FPS_SELECT (Pass 71): same re-offer discipline while no
             // ladder runs, so a transient HTTP failure cannot lose a one-shot
             // command. Cleared when FPS_LADDER on takes back ownership.
-            venc_.set_fps(cmd_fps_select_hz_, now);
+            venc_.set_fps(cmd_fps_select_hz_);
         }
         // §4.1 Pass 40 high-cadence ARQ cutoff, driven by the same cadence
         // input the §9.6 caps use (ladder-commanded, else measured, else
@@ -2053,8 +2057,7 @@ struct TxCore {
                 in.i_headroom_permille = venc_knobs_.i_headroom_permille;
                 in.p_headroom_permille = venc_knobs_.p_headroom_permille;
                 const FrameCaps caps = derive_frame_caps(in);
-                venc_.set_max_frame_size(caps.max_i_bytes, caps.max_p_bytes,
-                                         now);
+                venc_.set_max_frame_size(caps.max_i_bytes, caps.max_p_bytes);
                 break;  // single video stream (§9.6)
             }
         }
@@ -2166,7 +2169,7 @@ struct TxCore {
                 if (arg >= venc_knobs_.preset_fps.size()) return false;
                 if (cmd_fps_ladder()) return false;
                 const uint16_t fps = venc_knobs_.preset_fps[arg];
-                venc_.set_fps(fps, now);
+                venc_.set_fps(fps);
                 if (fps_ladder_) {
                     // A disabled ladder resumes from the selected rung.
                     fps_ladder_->note_external_fps(fps);
