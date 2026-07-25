@@ -2943,7 +2943,7 @@ int run_tx(const Loaded& l) {
     uint64_t next_shm_attach_ms = 0;
     uint64_t next_shm_identity_check_ms = 0;
 
-    StatsEmitter emitter(true, bindings.value->stats_egress());
+    StatsEmitter emitter(l.cfg.stats.to_stdout, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
     uint64_t next_stats = t0;
     const uint64_t stats_period =
@@ -3772,7 +3772,7 @@ int run_rx(const Loaded& l) {
             break;
         }
     };
-    StatsEmitter emitter(true, bindings.value->stats_egress());
+    StatsEmitter emitter(l.cfg.stats.to_stdout, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
     uint64_t next_stats = t0;
     const uint64_t stats_period =
@@ -4715,7 +4715,7 @@ int run_loopback(const Loaded& l) {
         }
     };
 
-    StatsEmitter emitter(true, bindings.value->stats_egress());
+    StatsEmitter emitter(l.cfg.stats.to_stdout, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
     uint64_t next_stats = t0;
     const uint64_t stats_period =

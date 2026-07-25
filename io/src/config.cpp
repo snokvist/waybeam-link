@@ -521,6 +521,7 @@ Result<Config> load_config_json(const std::string& json_text) {
         if (j.contains("stats")) {
             const json& st = j.at("stats");
             cfg.stats.hz = st.value("hz", cfg.stats.hz);
+            cfg.stats.to_stdout = st.value("stdout", cfg.stats.to_stdout);
             if (st.contains("bind")) {
                 auto bind = parse_bind(st.at("bind"), Dir::kOut, "stats");
                 if (!bind) return Result<Config>::fail(bind.error);
@@ -1034,8 +1035,12 @@ std::string dump_config_summary(const Config& cfg) {
        << " fwd_clamp_blocks=" << cfg.policy.arq.fwd_clamp_blocks
        << " csa_psk=" << (cfg.policy.csa.psk.empty() ? "(unset)" : "(set, redacted)")
        << "\n";
-    ss << "stats: hz=" << cfg.stats.hz << " -> "
-       << (cfg.stats.bind ? cfg.stats.bind->send : std::string("stdout only"))
+    ss << "stats: hz=" << cfg.stats.hz
+       << " stdout=" << (cfg.stats.to_stdout ? "on" : "off")
+       << " -> "
+       << (cfg.stats.bind ? cfg.stats.bind->send
+                          : std::string(cfg.stats.to_stdout ? "stdout only"
+                                                            : "(no sink)"))
        << "\n";
     return ss.str();
 }

@@ -58,6 +58,18 @@ operator consumes the stream:
 On `.242`/`.199` the same stream goes to journald at `stats.hz: 5`
 (~20 KB/s ≈ 70 MB/h) for data nobody reads — the hub scrapes REST `:8092`.
 
+> **DONE (operator ruling 2026-07-25): a config knob, on for troubleshooting,
+> off for production.** New `stats.stdout` (bool, default **true** — the
+> documented bench/dev stream). Setting it `false` silences the §15.3 stdout
+> NDJSON while leaving the REST/SSE stats plane (§15.5, `last_line()`)
+> untouched, so the hub keeps scraping and an operator can still `curl` the
+> node's `/api/v1/stats` on demand — only the unrotated /tmp (craft) / journald
+> (ground) growth stops. Wired: `StatsCfg.to_stdout` → the three
+> `StatsEmitter(to_stdout, …)` constructions. The deployed craft config
+> (`deploy/vehicle-192.168.2.232.json`) now ships `stats.stdout: false`; the
+> ground configs (`.242` systemd, `.199` buildroot — outside this repo) should
+> set it too. Test in `config_test`.
+
 ### A3 — Should a §9.7 `min==max` pin yield to the §9.8 fail-safe? — needs a ruling
 
 Raised and deliberately left open in §9.8 by Pass 84. The PINNED branch

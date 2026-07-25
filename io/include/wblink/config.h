@@ -327,6 +327,12 @@ struct LoopbackCfg {
 struct StatsCfg {
     double hz = 1.0;
     std::optional<BindCfg> bind;  // egress only
+    // §15.3 stdout NDJSON. Default true (the documented bench/dev stream). Set
+    // false on production nodes to stop the unrotated /tmp (craft) or journald
+    // (ground) growth — the REST/SSE stats plane (§15.5) is unaffected, so the
+    // hub keeps scraping while the raw stream is silenced. A troubleshooting
+    // toggle: flip it true when a node needs the on-box stream again.
+    bool to_stdout = true;
 };
 
 // §15.5 REST control plane. Empty bind = server off (default). "addr:port";
