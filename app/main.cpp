@@ -4873,8 +4873,18 @@ int main(int argc, char** argv) {
     // §15.3 stdout NDJSON, must not take the flight process down with it.
     // Every write path checks its own return value.
     std::signal(SIGPIPE, SIG_IGN);
-    std::signal(SIGINT, on_signal);
-    std::signal(SIGTERM, on_signal);
+    // B2 (pre-flight audit): install SIGINT/SIGTERM WITHOUT SA_RESTART. glibc's
+    // std::signal() defaults to BSD semantics (SA_RESTART set), which restarts a
+    // blocking flight-loop syscall instead of interrupting it — so a shutdown
+    // signal could be swallowed. Every blocking path already handles EINTR
+    // (air_mon recv/recvmsg, the bounded CLI wait), so with SA_RESTART cleared
+    // the loop observes g_stop promptly on teardown.
+    struct sigaction sa{};
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  // no SA_RESTART
+    ::sigaction(SIGINT, &sa, nullptr);
+    ::sigaction(SIGTERM, &sa, nullptr);
 
     if (mode == "tx") {
         return run_tx(l);

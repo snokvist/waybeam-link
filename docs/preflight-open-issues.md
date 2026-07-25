@@ -28,9 +28,10 @@ understood. **NICE-TO-HAVE** = cleanup.
 > withdrawn); **B1 full** (non-blocking venc HTTP state machine — poll()-driven,
 > the flight loop can no longer block on a wedged venc); **A2** (`stats.stdout`
 > knob, off in the deployed craft config); **A1** + all of **section D**
-> (docs). Still open in Tier 2: **B2** (untimed waitpid on the flight loop),
-> **B4** (uncaught devourer throws), **B7** (unauth control plane bound
-> 0.0.0.0 in a sample).
+> (docs); **B2** (bounded CLI wait + `sigaction` no-`SA_RESTART` — the flight
+> loop can no longer hang on a wedged `iw`/`ip`). Still open in Tier 2: **B4**
+> (uncaught devourer throws), **B7** (unauth control plane bound 0.0.0.0 in a
+> sample).
 
 ---
 
@@ -170,7 +171,18 @@ holdoff.
 > gap. The Pass 73 volatile-first fallback, write-on-change, holdoff, IDR rate
 > gate and every §15.3 counter are preserved; test rewritten to pump poll().
 
-### B2 — `fork()` + `execvp()` + untimed `waitpid()` on the flight loop — BLOCKER
+### B2 — `fork()` + `execvp()` + untimed `waitpid()` on the flight loop — BLOCKER — **DONE (PR #55)**
+
+**Fixed.** `wait_bounded()` in `io/src/air_mon.cpp` replaces both untimed
+`waitpid(pid,&status,0)` calls: it polls `waitpid(WNOHANG)` up to a 2 s deadline
+(`kCliWaitDeadline`, 5 ms poll), then `SIGKILL`s and reaps — a wedged `iw`/`ip`
+child can no longer hang the flight loop, and a timed-out retune reports failure
+like any other. `SIGINT`/`SIGTERM` moved from `std::signal` (glibc BSD
+`SA_RESTART`) to `sigaction` with `sa_flags = 0` in `app/main.cpp`, so a shutdown
+signal interrupts blocking flight-loop syscalls with `EINTR` instead of
+restarting them; every blocking path (air_mon `recv`/`recvmsg`, the bounded CLI
+wait) already handles `EINTR`. Pure impl — no PROTOCOL/§15.3 change. Original
+report below.
 
 `io/src/air_mon.cpp` `iw_set_freq()` and `run_cli()` both do
 `waitpid(pid, &status, 0)` with **no timeout**, called synchronously from the
@@ -547,7 +559,8 @@ Where each bucket stands, so the next session does not re-derive the order.
 - **Tier 2 — partly landed 2026-07-25.** DONE: **A3** (reframed to Pass 102 —
   the §9.8 fail-safe floors at `max(min_profile, floor_profile)`, superseding
   Pass 84), **B1 full** (non-blocking venc state machine), **A2** (`stats.stdout`
-  knob). STILL OPEN: **B2** (untimed waitpid on the flight loop + SA_RESTART),
+  knob), **B2** (bounded CLI wait via `wait_bounded()` + `sigaction` without
+  `SA_RESTART` — no more flight-loop hang on a wedged `iw`/`ip`). STILL OPEN:
   **B4** (uncaught devourer exceptions), **B7** (unauth control plane bound
   0.0.0.0 in a sample).
 - **Tier 3 / C-series** — verification campaigns needing bench and flight time,
