@@ -204,6 +204,7 @@ int main() {
         fec.scheme = FecScheme::kRlc256;
         fec.p_rate_permille = 100;
         fec.min_k = 3;
+        fec.min_r = 0;  // isolate the rate formula from the Pass 98 floor
         Harness h(fec);
         const uint16_t s = h.framer.symbol_size();
         auto blob = make_frame(10000, /*idr=*/false, 6);
@@ -251,6 +252,7 @@ int main() {
         fec.scheme = FecScheme::kRlc256;
         fec.i_rate_permille = 250;
         fec.p_rate_permille = 100;
+        fec.min_r = 0;  // isolate override / fixed-rate r from the Pass 98 floor
         Harness h(fec, FrameArqMode::kAllFrames);
         const uint16_t s = h.framer.symbol_size();
         auto blob = make_frame(4 * s, /*idr=*/false, 9);  // k = 5 > min_k
@@ -283,12 +285,103 @@ int main() {
         for (const Sym& sy : h.sent) repairs += sy.is_repair() ? 1 : 0;
         const uint16_t k = static_cast<uint16_t>((blob.size() + s - 1) / s);
         CHECK_EQ_U(repairs, 256u - k);
-        // The min_k ARQ-only rule survives enforcement: k <= min_k ignores
-        // the parity override entirely.
+        // The min_k ARQ-only rule survives enforcement (§14.2 rule 1) — but
+        // per Pass 94 only for an ARQ-eligible frame. An IDR under idr-only is
+        // eligible, so k <= min_k still ignores the parity override entirely.
         Harness small(fec, FrameArqMode::kIdrOnly);
         small.framer.set_next_frame_override(8, true);
-        small.feed(make_frame(100, false, 10));  // k = 1 <= min_k 3
+        small.feed(make_frame(100, /*idr=*/true, 10));  // k = 1 <= min_k 3
         for (const Sym& sy : small.sent) CHECK(!sy.is_repair());
+        // ...and the Pass 94 case: the same small frame as a P-frame under
+        // idr-only has no ARQ to fall back on, so the gate must NOT block the
+        // override. Before Pass 94 this frame shipped bare — that was B11.
+        Harness bare(fec, FrameArqMode::kIdrOnly);
+        bare.framer.set_next_frame_override(2, true);
+        bare.feed(make_frame(100, /*idr=*/false, 10));  // k = 1 <= min_k 3
+        size_t bare_repairs = 0;
+        for (const Sym& sy : bare.sent) bare_repairs += sy.is_repair() ? 1 : 0;
+        CHECK_EQ_U(bare_repairs, 2u);
+    }
+
+    // --- §14.1 Pass 94: the min_k gate is conditional on ARQ eligibility ----
+    {
+        FrameFecConfig fec;
+        fec.scheme = FecScheme::kRlc256;
+        fec.i_rate_permille = 300;
+        fec.p_rate_permille = 200;
+        fec.min_k = 3;
+        fec.min_r = 0;  // isolate the rate-derived r from the Pass 98 floor
+
+        // A small P-frame under idr-only: NOT ARQ-eligible, so it gets parity
+        // rather than nothing. r = ceil(3 * 0.2) = 1.
+        Harness p(fec, FrameArqMode::kIdrOnly);
+        const uint16_t s = p.framer.symbol_size();
+        p.feed(make_frame(3 * s - 8, /*idr=*/false, 20));  // k = 3 == min_k
+        size_t repairs = 0;
+        for (const Sym& sy : p.sent) repairs += sy.is_repair() ? 1 : 0;
+        CHECK_EQ_U(repairs, 1u);
+
+        // The same frame under all-frames IS ARQ-eligible, so the gate holds
+        // and the optimisation still applies: no parity, ARQ carries it.
+        Harness a(fec, FrameArqMode::kAllFrames);
+        a.feed(make_frame(3 * s - 8, /*idr=*/false, 21));
+        for (const Sym& sy : a.sent) CHECK(!sy.is_repair());
+
+        // A small IDR is ARQ-eligible under either mode: gate holds.
+        Harness i(fec, FrameArqMode::kIdrOnly);
+        i.feed(make_frame(3 * s - 8, /*idr=*/true, 22));
+        for (const Sym& sy : i.sent) CHECK(!sy.is_repair());
+
+        // §4.1 cadence cutoff removes ARQ from every class, so the gate goes
+        // inert and even an IDR gets parity. r = ceil(3 * 0.3) = 1.
+        Harness c(fec, FrameArqMode::kAllFrames);
+        c.framer.set_arq_suppressed(true);
+        c.feed(make_frame(3 * s - 8, /*idr=*/true, 23));
+        repairs = 0;
+        for (const Sym& sy : c.sent) repairs += sy.is_repair() ? 1 : 0;
+        CHECK_EQ_U(repairs, 1u);
+
+        // Above min_k nothing changes: the gate was never in play.
+        Harness big(fec, FrameArqMode::kAllFrames);
+        big.feed(make_frame(5 * s - 8, /*idr=*/false, 24));  // k = 5 > min_k
+        repairs = 0;
+        for (const Sym& sy : big.sent) repairs += sy.is_repair() ? 1 : 0;
+        CHECK_EQ_U(repairs, 1u);  // ceil(5 * 0.2)
+    }
+
+    // --- §14.1 Pass 98: minimum repair floor -------------------------------
+    {
+        FrameFecConfig fec;
+        fec.scheme = FecScheme::kRlc256;
+        fec.i_rate_permille = 300;
+        fec.p_rate_permille = 200;
+        fec.min_k = 3;
+        fec.min_r = 2;
+        auto rcount = [&](size_t body, bool idr, FrameArqMode mode) {
+            Harness h(fec, mode);
+            h.feed(make_frame(body, idr, 30));
+            size_t r = 0;
+            for (const Sym& sy : h.sent) r += sy.is_repair() ? 1 : 0;
+            return r;
+        };
+        const uint16_t s = Harness(fec).framer.symbol_size();
+        // k=1 P-frame under idr-only: ceil(1*0.2)=1, floored to min_r=2 — the
+        // only lever for k=1, since ceil(1*rate)=1 for any rate <= 1000.
+        CHECK_EQ_U(rcount(1 * s - 8, false, FrameArqMode::kIdrOnly), 2u);
+        // k=3: ceil(3*0.2)=1 -> floored to 2.
+        CHECK_EQ_U(rcount(3 * s - 8, false, FrameArqMode::kIdrOnly), 2u);
+        // Large frame: ceil(20*0.2)=4 already exceeds the floor, so unchanged.
+        CHECK_EQ_U(rcount(20 * s - 8, false, FrameArqMode::kIdrOnly), 4u);
+        // The floor never resurrects an ARQ-covered small frame (min_k gate
+        // still returns 0 first) or a P_rate=0 stream.
+        Harness gated(fec, FrameArqMode::kAllFrames);  // k<=min_k IS arq here
+        gated.feed(make_frame(2 * s - 8, false, 31));
+        for (const Sym& sy : gated.sent) CHECK(!sy.is_repair());
+        FrameFecConfig off = fec;
+        off.p_rate_permille = 0;  // P-FEC disabled: floor must not force it on
+        Harness disabled(off, FrameArqMode::kIdrOnly);
+        disabled.feed(make_frame(3 * s - 8, false, 32));
+        for (const Sym& sy : disabled.sent) CHECK(!sy.is_repair());
     }
 
     // --- §4.1 Pass 40 high-cadence ARQ cutoff --------------------------------

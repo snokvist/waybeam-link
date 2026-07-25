@@ -29,7 +29,13 @@ Profile example_profile(uint8_t id) {
     p.tx_power_level = kPower[id];
     p.airtime_budget_permille = 600;  // 0.60
     p.fec_scheme = FecScheme::kNone;
-    p.fec_overhead_permille = 0;
+    // Pass 95: graduated parity budget, monotonically non-increasing with rung
+    // (r = ceil(k*rate) inflates as k falls, and k falls with the rung). Must
+    // stay identical to profiles/table.example.json — config_test pins the
+    // same hash off the shipped file, which is what makes this a cross-check.
+    static constexpr uint16_t kFecOverhead[] = {250, 250, 200, 200,
+                                                180, 180, 180, 180};
+    p.fec_overhead_permille = kFecOverhead[id];
     p.arq_deadline_iframe_ms = kIframe[id];
     p.arq_deadline_pframe_ms = kPframe[id];
     p.bitrate_min_kbps = 2200;
@@ -41,7 +47,7 @@ Profile example_profile(uint8_t id) {
 // Pinned golden hash of the example table. Every vendored copy of the codec
 // (e.g. Waybeam-android :wifi) must reproduce this value for this table;
 // recompute only on a deliberate §3.6 canonical-form revision.
-constexpr uint8_t kGoldenExampleHash = 0x41;  // recomputed after §9.3 max_payload field
+constexpr uint8_t kGoldenExampleHash = 0xD1;  // Pass 95 fec_overhead_permille (was 0x41)
 
 ProfileTable example_table() {
     ProfileTable t;

@@ -79,7 +79,7 @@ std::string body_of(const std::string& resp) {
 int main() {
     // Captured knob state, mutated by the handlers.
     int pin_min = -1, pin_max = -1;
-    int fec_sid = -1, fec_i = -1, fec_p = -1, fec_k = -1;
+    int fec_sid = -1, fec_i = -1, fec_p = -1, fec_k = -1, fec_r = -1;
     bool fec_ok = true;
     int reset_calls = 0;
     int recovery_stream = -2;
@@ -113,11 +113,12 @@ int main() {
         pin_max = mx;
         return "";
     };
-    h.fec = [&](int sid, int ip, int pp, int mk) -> std::string {
+    h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
         fec_sid = sid;
         fec_i = ip;
         fec_p = pp;
         fec_k = mk;
+        fec_r = mr;
         return fec_ok ? "" : "no frame-shm stream with that id";
     };
     h.reset_stats = [&] { ++reset_calls; };
@@ -154,6 +155,22 @@ int main() {
     int arq_state = -1;
     h.arq_enable = [&](bool enabled) -> std::string {
         arq_state = enabled ? 1 : 0;
+        return "";
+    };
+    // §15.5 operating-mode selection (Pass 96).
+    std::string mode_state = "boot-mode";
+    h.mode_get = [&]() -> std::string {
+        return "{\"active\":\"" + mode_state + "\",\"apply_configured\":true}";
+    };
+    h.mode_set = [&](const std::string& name) -> std::string {
+        if (name == "reject-me") return "not a known mode";
+        mode_state = name;
+        return "";
+    };
+    // §9.11 craft-local FPS-ladder toggle (Pass 99).
+    int fps_ladder_state = -1;
+    h.link_fps = [&](bool ladder_on) -> std::string {
+        fps_ladder_state = ladder_on ? 1 : 0;
         return "";
     };
     // h.csa intentionally left null → endpoint must 409.
@@ -240,7 +257,8 @@ int main() {
     // fec round-trip.
     {
         const std::string body =
-            "{\"stream_id\":0,\"i_permille\":300,\"p_permille\":120,\"min_k\":4}";
+            "{\"stream_id\":0,\"i_permille\":300,\"p_permille\":120,\"min_k\":4,"
+            "\"min_r\":3}";
         const std::string req =
             "POST /api/v1/fec HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
@@ -249,6 +267,17 @@ int main() {
         CHECK_EQ_U(fec_i, 300);
         CHECK_EQ_U(fec_p, 120);
         CHECK_EQ_U(fec_k, 4);
+        CHECK_EQ_U(fec_r, 3);
+    }
+    // fec min_r defaults to 2 when the body omits it.
+    {
+        const std::string body =
+            "{\"stream_id\":0,\"i_permille\":300,\"p_permille\":200,\"min_k\":3}";
+        const std::string req =
+            "POST /api/v1/fec HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(fec_r, 2);
     }
     // fec handler rejects → 400.
     {
@@ -369,6 +398,68 @@ int main() {
         const std::string body = "{\"enabled\":1}";  // must be a bool
         const std::string req =
             "POST /api/v1/arq HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    // §9.11 craft-local FPS-ladder toggle (Pass 99).
+    {  // ladder on → 200, handler sees true.
+        const std::string body = "{\"ladder\":true}";
+        const std::string req =
+            "POST /api/v1/link/fps HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(fps_ladder_state, 1);
+    }
+    {  // ladder off → 200, handler sees false.
+        const std::string body = "{\"ladder\":false}";
+        const std::string req =
+            "POST /api/v1/link/fps HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(fps_ladder_state, 0);
+    }
+    {  // missing ladder → 400.
+        const std::string body = "{}";
+        const std::string req =
+            "POST /api/v1/link/fps HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    {  // non-bool ladder → 400.
+        const std::string body = "{\"ladder\":1}";
+        const std::string req =
+            "POST /api/v1/link/fps HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    // §15.5 operating-mode selection (Pass 96).
+    {
+        const std::string r =
+            roundtrip(s, port, "GET /api/v1/mode HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"active\":\"boot-mode\"") != std::string::npos);
+    }
+    {  // a valid apply → 200, and the label updates.
+        const std::string body = "{\"name\":\"imx335-60fps-medrange\"}";
+        const std::string req =
+            "POST /api/v1/mode HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        const std::string r =
+            roundtrip(s, port, "GET /api/v1/mode HTTP/1.0\r\n\r\n");
+        CHECK(body_of(r).find("imx335-60fps-medrange") != std::string::npos);
+    }
+    {  // missing name → 400.
+        const std::string body = "{}";
+        const std::string req =
+            "POST /api/v1/mode HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    {  // handler-level rejection → 400 with the error string.
+        const std::string body = "{\"name\":\"reject-me\"}";
+        const std::string req =
+            "POST /api/v1/mode HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }

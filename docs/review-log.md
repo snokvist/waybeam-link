@@ -3034,3 +3034,359 @@ Pending operator rulings, with recommendations (2026-07-16 register):
       *Recommendation:* flip P-frames first (`arq_mode all-frames` +
       `enforce`), confirm discard behavior visually on the bench before any
       flight use.
+
+---
+
+### Pass 94 — §14.1 the `min_k` ARQ-only gate must be conditioned on ARQ eligibility
+
+**Problem (derived 2026-07-24, out of B11).** `FrameFramer::repair_count()`
+returns `r = 0` unconditionally for `k ≤ fec.min_k`. §14.1's own rationale for
+that branch is *"NACK→RETRANSMIT recovers within deadline (§17 gate 3)"* — it
+is an optimisation that trades parity for ARQ. But the branch never checked
+whether the frame *has* ARQ. Under `arq_mode: idr-only` — the craft's deployed
+setting and the §4.1 default for the P class — a P-frame has none, so the
+branch grants neither FEC nor ARQ and the frame ships bare.
+
+With `min_k: 3` and `s = 1387 B`, that is every P-frame under **4161 B**. At
+the §9.8 fail-safe floor rung, `derived_bitrate / fps` lands squarely there.
+This is B11.
+
+**Evidence.** Two independent derivations that agree; full tables in
+`docs/venc-mode-matrix.md` §11.
+
+- *Offline*, driving the real `FrameFramer` and `FrameReassembler` over
+  Bernoulli loss — same `ceil()`, same gate, same GF(256) decode. A **17×
+  cliff at one byte**: at p = 2 %, 4161 B → 5.785 % unrecoverable, 4162 B →
+  0.340 %. Above the cliff the curve is a decreasing *sawtooth*, not monotone
+  (k=5 is worse than k=4: `ceil(k·0.2)` gives both r=1 while k=5 has one more
+  symbol to lose), with local maxima recurring at k = 5, 10, 15.
+- *On hardware*, craft pinned MCS5, `venc.enabled: false`, ground
+  `air.rx_drop_permille: 141` per adapter giving a measured 2.1–2.3 %
+  effective post-diversity loss, 98.7 fps, bitrate swept to walk k = 2…15.
+  `min_k` 3 → 1 via the live `POST /api/v1/fec`, both arms back-to-back on the
+  same link: **mean 0.393 % → 0.123 %, a 3.2× reduction, better at 9 of 10
+  points** (the exception is 0.000 % vs 0.057 %, both at the noise floor).
+
+The improvement persists at k ≥ 4 where the gate should not bite, because
+`B/frame` is a *mean* and the operative quantity is the distribution: real
+P-frames vary enough that a tail of every operating point falls under the
+gate. Re-running offline with a realistic spread (cv = 0.6) reproduces the
+ratio structure — 4.7× at k=2 decaying to 2.0× at k=12 — against the
+hardware's 3.2× mean.
+
+**Ruling (operator 2026-07-24, "in the scope of this PR i would say they land
+and we try out the model").** Condition the gate on ARQ eligibility rather than
+lowering `min_k`. A frame is ARQ-eligible when it would carry `ARQ` or
+`PFRAME_ARQ` (§5.1a); above the §4.1 cadence cutoff nothing is, and the gate
+goes inert for every class. This keeps `min_k` doing the job it was designed
+for — don't spend parity where ARQ covers it — and stops it being a protection
+hole. It subsumes the `min_k: 1` config workaround and is strictly better.
+
+Spec: §14.1 policy table + a new conditional-gate bullet.
+
+**Consequence beyond the fix.** With the gate closed there is no frame size
+below which protection collapses, so §9.11's `min_p_frame_bytes` (seed 10000,
+a standing §17 RE-DERIVE) can be **retired rather than derived** — the §17
+derivation it always owed returns "no useful block target". That in turn
+retracts the mode-matrix range axis built on it: fps does *not* force an MCS
+floor, and the binding constraint is bits per pixel instead
+(`docs/venc-mode-matrix.md` §16.0).
+
+---
+
+### Pass 95 — §9.5 `fec_overhead_frac` MUST be non-zero wherever `rlc256` runs
+
+**Problem (found alongside Pass 94).** `core/src/selector.cpp:31` debits
+`fec_overhead_permille` from the §9.5 derived bitrate — the only place parity
+airtime is accounted for. `profiles/table.example.json` ships
+`fec_overhead_frac: 0.0` on **all eight rungs**, while `craft.json` runs
+`"scheme": "rlc256"` at 200 ‰ P / 300 ‰ IDR. So §9.5 derives the encoder
+target as if there were no parity, and §14.1 then adds parity on top of it.
+
+`docs/findings-pass3.md:286` called this exactly: *"If FEC is adopted it must
+be budgeted, not bolted on."* FEC was adopted; it was bolted on.
+
+**Evidence.** Measured live on the craft at MCS5: 183 672 repair / 847 295
+source symbols = **21.7 % by symbol count, 22.2 % by wire bytes** — ≈ 180 ‰ of
+capacity. Across the hardware bitrate sweep the ratio ran **8.8 % of source at
+k≈19 up to 29.1 % at k≈4**, because `r = ceil(k · rate)` inflates as `k` falls
+and `k` falls with the rung. Corrected §9.5 bitrates are ~18 % below the
+shipped table's on every rung (rung 0: 3804 → 3102), and the
+`venc.max_bitrate_kbps` clamp stops binding at rung 4.
+
+**Ruling (operator 2026-07-24).** Non-zero, and **graduated, not flat** — a
+flat value under-budgets the low rungs, which is precisely where the parity
+ratio is highest and where B11 bites. Authored values MUST be monotonically
+non-increasing with rung index. Seeded from the measurement:
+
+| rungs | `fec_overhead_frac` | operating k |
+|---|---|---|
+| 0–1 | 0.25 | k ≈ 2–4, `ceil()` inflation worst |
+| 2–3 | 0.20 | k ≈ 5–10 |
+| 4–7 | 0.18 | k ≫ 10, approaches the 200 ‰ `p_rate` asymptote |
+
+Runtime derivation from the framer's own source/repair counters is the better
+long-term answer and is explicitly **out of scope**: it closes a loop
+(bitrate → frame size → k → overhead → bitrate) that wants its own bench.
+
+**Fleet consequence.** `fec_overhead_permille` is inside the §3.6 CRC-8
+content hash (`core/src/table.cpp:42`), so this moves `table_version` off
+**0x41**. Both ends must be redeployed together; a mismatched pair does not
+agree on the table. The pin in `tests/table_hash_test.cpp` moves with it.
+
+Spec: §9.3 field comment + two §9.5 bullets.
+
+---
+
+### Pass 96 — §15.5 `POST /api/v1/mode`: the link owns the user-facing operating mode
+
+**Context.** `docs/venc-mode-matrix.md` §16 defines nine user-facing operating
+modes (three fps × three range bands) over the IMX335. The user picks latency
+and range in the hub menu and never sees a frame size, MCS rung or fps number;
+everything else is derived. The open question was *where the mode lives* — the
+operator's ruling: *"the call for each mode should be api reachable from
+waybeam-link … so user can change mode from the waybeam_hub menu but link still
+owns the mode setting."*
+
+**Ruling (operator 2026-07-25).** The link is the control authority for the
+operating mode. A new `POST /api/v1/mode {name}` is the single entry point the
+hub calls; `GET /api/v1/mode` returns the active label. The link owns the label
+(persisted as `venc.active_mode`, restored at boot).
+
+**Why it is the one non-MUT_LIVE write.** A mode bundles three venc fields
+(`sensor.mode`, `video0.size` — both `restart_required` — and `video0.fps`)
+with the §9.7 range pin. Sensor mode and resolution cannot be applied in-loop,
+so the link does not try: it forks a **detached** on-craft applier
+(`venc.mode_apply_cmd`) that persists both configs and restarts venc. Two
+properties made this safe to add to the flight binary:
+
+- **The range pin is applied *live*** by the applier through the existing
+  `POST /api/v1/link/profile`, so the **link and CSA never restart** — no
+  §15.5a re-pair (issue B9), only a brief video drop from the venc restart.
+  This is why the mode change is not a link restart despite touching
+  restart_required venc fields.
+- **The fork is injection-proof and non-blocking.** The name is charset-limited
+  to `[A-Za-z0-9._-]` and passed as **argv, never a shell**; the applier is
+  double-forked + `setsid` so the grandchild reparents to init (no zombie,
+  nothing to wait on, flight loop never blocks). Precedent: `RadioAir` already
+  forks `execvp("iw", …)` for channel retunes.
+
+**Single source of truth.** The matrix lives only in `profiles/modes/*.json`
+(deployed to `/etc/waybeam-link/modes/`). The applier reads the five fields
+from `modes/<name>.json`; the link does not duplicate the matrix, it only holds
+the active label and forks. So the link stays generic and the nine JSON files
+are authoritative.
+
+Spec: §15.5 read + write tables, the MUT_LIVE-exception note, and the
+`POST /api/v1/mode` paragraph. Wired as `ControlHandlers::mode_get`/`mode_set`,
+`VencCfg::active_mode`/`mode_apply_cmd`, `spawn_mode_applier()`, and
+`deploy/modes/apply-mode.sh` + nine wrappers. Applying a mode is the operator's
+chosen mechanism: set the JSON fields via `json_cli`, restart venc.
+
+---
+
+### Pass 97 — §9.7 the `min==max` pin snap must re-derive the rung bitrate
+
+**Found on hardware (2026-07-25), running the MCS0 mode test.** With the craft
+live-pinned to MCS0 (`POST /api/v1/link/profile {min:0,max:0}`), the ground
+delivered **1.2 fps at 98.4 % unrecoverable** — at −12 dBm, so not RF. Root
+cause: the craft kept commanding **10303 kbps into a 2829 kbps MCS0 link**, a
+3.6× oversubscription; frames could not clear the airtime and missed deadline.
+
+`Selector::evaluate()`'s §9.7 PINNED branch (`core/src/selector.cpp`) set
+`a.commit` (profile/MCS/GI/power) when the pinned rung changed, but never set
+`a.bitrate_kbps` / `bitrate_kbps_`. `kBoot` and `start_demote` both re-derive
+the bitrate with the commit; the live-pin snap forgot to. So venc stayed at
+whatever rung the selector last derived (here rung 2's 10303) while the MCS
+dropped to 0.
+
+**This is distinct from B11.** B11 (Pass 94) was the FEC gap on small frames,
+and the same MCS0 test confirmed it is fixed: at MCS0 with the bitrate corrected
+to 2829, the craft emitted **34.8 % parity** on k≈3 frames and the ground
+delivered **99.8 fps at 0.20 % unrecoverable** — versus the 3.34 % B11 baseline.
+Two separate MCS0 failures with one symptom ("MCS0 is unusable"); Pass 94 fixed
+the FEC one, Pass 97 fixes the bitrate one.
+
+**Scope of the bug.** The band-pinned matrix modes (`min < max`, e.g. 0–2) do
+**not** hit this branch — they adapt within the band via demote/promote, which
+re-derive correctly. The §9.8 fail-safe descent likewise uses `start_demote`.
+Only a live `min==max` pin to a rung other than the current one was affected:
+bench pins, and any future single-rung "lock" mode.
+
+**Fix.** The PINNED snap re-derives `clamp_bitrate_kbps(derive_bitrate_kbps(p))`
+alongside the commit, direction-agnostic (covers a pin up as well). Regression:
+`selector_test` now asserts the pin emits the target rung's bitrate, down and up.
+
+Spec: §9.7 pin-scope paragraph. No table change — `table_version` unaffected,
+so this is a binary-only (craft TX) redeploy, not a lockstep one.
+
+---
+
+### Pass 98 — §14.1 minimum repair floor `min_r` (small-frame burst protection)
+
+**Motivation (operator, 2026-07-25, out of the MCS0 test).** MCS0 works after
+Pass 94 + 97 but is choppier than large-frame operating points. Root cause is
+not more packet loss (MCS0 is the *most* robust modulation) but that small
+frames convert each lost packet into a lost *frame* far more often: at the seed
+`p_rate` 200 ‰, `r = ceil(k·0.2)` yields **r = 1 for every k ≤ 4**, so a small
+P-frame is a single loss from death, and `ceil(1·rate) = 1` for any rate ≤ 1000,
+so a bumped rate cannot help k = 1 at all.
+
+**Ruling (operator).** Add a minimum repair floor, and treat it as a general
+burst-protection win, not an MCS0 patch. `r = max(ceil(k·rate), min_r)`, seed
+`min_r = 2`.
+
+**Why a floor rather than a rate bump.** Both were on the table. A global
+`p_rate` bump costs airtime at *every* rung — including the high rungs where
+frames are large and loss is already ~0, wasting video bitrate — and still
+cannot reach k = 1. The floor adds symbols *only* to small frames (which are
+small in absolute bytes), never lowers the rate-derived count on large frames,
+and is the only lever for k = 1. So the floor strictly dominates a rate bump
+for this problem, and `p_rate` stays 200 ‰.
+
+**Measured (offline, real `FrameFramer`/`FrameReassembler`, 2 % loss).**
+
+| frame | k | r=ceil (was) | with min_r=2 | unrec was → now |
+|---|---|---|---|---|
+| ≤700 B | 1 | 1 | 2 | ~1.9 % → 0.005 % |
+| 1500 B | 2 | 1 | 2 | 0.128 % → 0.000 % |
+| 2800 B | 3 | 1 | 2 | 0.233 % → 0.015 % |
+| 5600 B | 5 | 1 | 2 | 0.595 % → 0.025 % |
+| ~28 KB | 20 | 4 | 4 | unchanged (ceil dominates) |
+
+**Bounds and interactions.** The floor applies only after the §14.1 `min_k`
+ARQ-only gate (Pass 94) has passed and only when the class rate is non-zero, so
+it never resurrects an ARQ-covered small frame nor forces FEC onto a disabled
+class. It sits under the GF(256) `k + r ≤ 256` cap. `min_r = 0` restores the
+pure rate formula.
+
+**Not a table change.** `min_r` is per-stream FEC config (`streams[].fec.min_r`,
+live via `POST /api/v1/fec`), not the §9.3 profile table — `table_version`
+unaffected, craft-only (TX) binary redeploy.
+
+Spec: §14.1 policy bullets, the config example, and the `/api/v1/fec` row.
+Wired through `FrameFecConfig::min_r`, `set_fec_rates`, `StreamFecCfg::min_r`,
+and the control-plane `fec` handler (fifth arg).
+
+---
+
+## Pass 99 — §9.11/§11.7 fps behaviour is a mode property; craft-local ladder toggle (2026-07-25)
+
+**Context.** PR #53 makes fps a user-facing mode axis (§16,
+`docs/venc-mode-matrix.md`): nine static-fps modes (recordable, CFR) plus one
+variable-fps mode (§16.6 — 1280×720, fps free 30–100, MCS band 0–5, *"maximum
+range, no recording"*). The variable mode **is** the §9.11 ladder running; the
+nine static modes are the ladder held still. Operator ruling (2026-07-25):
+*"this is now just down to a mode policy selection … all the modes have static
+FPS selections, except the special VARIABLE FPS mode"*, and *"I agree with
+(2a)"* — the link stays the **sole owner** of fps behaviour; mode-select pokes
+it **locally**, no ground round-trip.
+
+**Problem.** Two gaps blocked shipping the variable mode as a *switchable* mode:
+
+1. **Construct-gating.** §9.11 instantiated the ladder object only when
+   `venc.fps_ladder.enabled` was true at boot, and `FPS_LADDER on` (§11.7
+   `0x03`) is documented to *toggle a running loop, it cannot conjure one* — so a
+   craft that booted static could never become variable without a **link
+   restart**, and a link restart drops CSA (B9 re-pair). Switching modes must
+   never restart the link.
+2. **No craft-local lever.** The only on/off path was the §11.7 VEHICLE_CMD
+   campaign, which is issuer→craft over the air. The Pass 96 mode mechanism is
+   craft-local (hub → `POST /api/v1/mode` → forked applier). There was no
+   craft-local way for the applier to set the ladder state.
+
+**Ruling (operator, option (2a)).**
+
+- **Decouple construct from run.** The ladder object is instantiated whenever
+  `venc.enabled` (it is a cheap POD controller). `venc.fps_ladder.enabled` now
+  sets only the **boot run-state** (`TxCore::cmd_fps_enabled_`), not whether the
+  object exists. `FPS_LADDER on`/`off` therefore works in **both** directions on
+  any venc craft, with no link restart and no B9. "Configured" in the §11.7
+  `0x03` row now means `venc.enabled`, not `fps_ladder.enabled`.
+- **Add a craft-local toggle.** New `POST /api/v1/link/fps {"ladder": bool}`
+  (§15.5, TX/craft only, null hook → 409). It routes through the *same* §11.7
+  `apply_command(FPS_LADDER, …)` transition as the over-air path, so local and
+  remote are identical (same `resume()` settle semantics, same select-clear).
+  **MUT_LIVE** — no restart.
+- **fps behaviour becomes a mode field.** Each mode JSON gains
+  `link.policy.fps_mode` (`"static"` default | `"variable"`). `apply-mode.sh`
+  reads it: static → `POST … {"ladder":false}` **before** the venc restart that
+  pins `video0.fps`; variable → `POST … {"ladder":true}` **after** the venc
+  restart. The ladder span (`min`/`preferred`) stays a fleet constant in
+  `craft.json` (`venc.fps_ladder`, seed `min 30`, `preferred 100`) — per-mode
+  spans are a construct-time parameter and are deferred.
+
+**Why the boot run-state still lives in config.** After a reboot the link must
+reproduce the persisted mode without the applier re-running. `apply-mode.sh`
+persists `venc.fps_ladder.enabled` alongside the venc fields, so a variable-mode
+craft boots variable and a static-mode craft boots static; the construct-always
+change only makes the *runtime* transition restart-free.
+
+**Ordering matters in the applier.** Static path turns the ladder **off first**
+so the loop stops commanding `video0.fps`, *then* restarts venc at the pinned
+fps — otherwise a still-running ladder would fight the restart. Variable path
+restarts venc (to seed `preferred`) *then* turns the ladder **on**, so the
+ladder resumes from a known rung with cleared evidence.
+
+**Recording caveat (design doc §16.6).** The variable mode is VFR — it breaks
+CFR muxers, and with `resilience=range` the GDR intra-refresh period is
+frame-indexed, so a moving fps stretches/compresses the refresh interval. The
+variable mode is **live-view only**; a time-based (not frame-indexed) refresh
+for it is noted as follow-up.
+
+**Not a table change.** Everything here is per-craft link config + a live
+control toggle. `table_version` unaffected; **craft-only (TX) binary redeploy**
+— ground is untouched.
+
+Spec: §9.11 (instantiate-vs-run split), §11.7 `0x03` row ("Configured" =
+`venc.enabled`), §15.5 (`POST /api/v1/link/fps` row + MUT_LIVE note). Wired
+through `TxCore::apply_command` (unchanged transition), the always-construct
+change in the `TxCore` ctor + `cmd_fps_enabled_` boot-init, `ControlHandlers::
+link_fps`, `apply-mode.sh`, and `link.policy.fps_mode` in the mode JSONs.
+
+---
+
+## Pass 100 — §9.7 range re-pin clamps into [min,max] immediately (2026-07-25)
+
+**Context.** Verifying the Pass 99 mode workflow on the craft, switching from a
+high-band mode (`imx335-30fps-lowrange`, band 2-5, sitting at MCS5) to a
+low-band mode (`imx335-100fps-highrange`, band 0-2) left the craft at **MCS5 for
+30 s+** on the pristine bench link. The applier persisted `max_profile: 2` and
+applied the live pin, and promotion was correctly capped at `max` — but the
+selector never demoted DOWN to the new ceiling because a clean link produces no
+loss/§9.8 demote trigger.
+
+**Spec gap.** §9.7 states a `min==max` pin **snaps** the operating point in
+either direction, but is **silent on the range case** (`min < max`) when a
+runtime re-pin lowers `max` below the current rung. `evaluate()` handled
+`lo == hi` (snap) and then fell through to the adaptation rules, which only
+demote on a trigger. So the envelope's `max` was a soft ceiling on the way down.
+
+**Ruling (operator).** Extend the §9.7 snap to the range case: a runtime re-pin
+whose new envelope **excludes** the current rung clamps the operating point INTO
+`[min, max]` on the next `evaluate()`.
+- **Down-clamp** (current `> max`): unconditional — it is a demote, always safe,
+  and is the case that bit. Commits MCS **and** bitrate together (the Pass 97
+  discipline), so no oversubscription.
+- **Up-clamp** (current `< min`): a promotion, so it **defers to §9.8 while
+  feedback is stale** — a raised `min` must not pull the rung UP on a lost link
+  ("never fail optimistic"; §9.8/Pass 84 deliberately keeps `floor_profile`
+  below `min_profile` as the safety floor). It fires only with fresh feedback.
+
+**Why immediate matters.** "High range" is a user picking robustness *because
+they are about to need it* (flying far). Waiting for the first loss to demote
+defeats the point — by then the high MCS may already be a black screen at range.
+
+**Mechanics.** New block in `Selector::evaluate()` right after the `lo == hi`
+PINNED branch, before the §9.8 failsafe check. Direct snap (`rung_ = target`,
+`last_change_ms_ = now_ms`, commit + bitrate, `state_ = "REPIN"`, return),
+mirroring the PINNED branch — the pin overrides adaptation, no flap bookkeeping.
+`evaluate()` runs only in the `kIdle` phase, so there is never an in-flight
+transition to race.
+
+**Not a table change, not Pass 99.** Pure §9/§9.7 selector logic in `core/`;
+`table_version` unaffected, craft-only (TX) redeploy. Independent of the fps
+ladder — it just happened to surface while exercising the mode workflow.
+
+Spec: §9.7 (new range-clamp bullet). Wired through `Selector::evaluate()`; test
+in `selector_test` (down-clamp snaps; up-clamp gated on feedback).

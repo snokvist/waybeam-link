@@ -1202,7 +1202,9 @@ profile[i] = {
   arq_deadline_ms[class],  // per §4.1 importance; I-frame class longer
   reserve_bps[stream_type],// guaranteed floor for CONTROL / TELEMETRY
   bitrate_min_kbps,        // policy floor ≥ venc hard floor 1000 (§9.6)
-  fec_scheme, fec_overhead_frac,  // §14; scheme=none in the base table
+  fec_scheme, fec_overhead_frac,  // §14; MUST be > 0 wherever rlc256 runs
+                           //   (§9.5 Pass 95) — parity airtime is debited
+                           //   here and nowhere else
 }
 ```
 
@@ -1243,6 +1245,26 @@ MCS and bitrate never move together:
   20 MHz, long GI): `{6500, 13000, 19500, 26000, 39000, 52000, 58500, 65000}`
   for MCS0–7; short GI = ×10/9. No separate per-rung bitrate field exists —
   the table's airtime fraction IS the bitrate policy.
+- **`fec_overhead_frac` MUST be non-zero on any rung whose streams run
+  `fec_scheme: rlc256` (Pass 95).** The term above is the only place parity
+  airtime is debited, and §14.1 adds `r` repair symbols *on top of* the video
+  bitrate this expression yields. A rung that carries FEC while declaring
+  `fec_overhead_frac: 0.0` therefore over-derives its encoder target by the
+  full parity ratio, and the link runs oversubscribed by that much — measured
+  **22 % of source bytes** live on the craft at MCS5 (183 672 repair /
+  847 295 source symbols).
+- **It is not one number.** `r = ceil(k · rate)` inflates the ratio as `k`
+  falls, and `k = frame_bytes / s` falls with the rung. Measured across a
+  bitrate sweep: **8.8 % of source at k≈19, 29.1 % at k≈4**. Low rungs run
+  small frames and so need the *largest* overhead budget — which is exactly
+  where under-budgeting hurts most. Authored per-rung values MUST therefore be
+  monotonically non-increasing with rung index. A future revision may derive
+  the term at runtime from the framer's own source/repair counters; that is a
+  closed loop (bitrate → frame size → k → overhead → bitrate) and is out of
+  scope here.
+- **Changing `fec_overhead_frac` changes `table_version`** — the field is
+  inside the §3.6 CRC-8 content hash — so it is a fleet-wide lockstep change,
+  never a single-node edit.
 
 ### 9.6 Encoder actuation (venc, same SoC)
 Live HTTP, `MUT_LIVE`, sub-ms, no reinit:
@@ -1348,6 +1370,19 @@ from steady state without a second wire field.
   the operating point to that rung immediately, in either direction — it is a
   select-and-hold, not a freeze-in-place. (Config-time pins already land there via
   the boot clamp; the runtime path clamps in `evaluate()` on the next tick.)
+- **Range re-pin clamp (`min < max`, Pass 100):** a runtime re-pin whose new
+  envelope **excludes** the current rung snaps the operating point INTO
+  `[min, max]` on the next `evaluate()` — the range analogue of the `min==max`
+  snap. A **down-clamp** (current `> max`) is unconditional: it is a demote,
+  always safe, and commits MCS + bitrate together (§9.5, Pass 97). An
+  **up-clamp** (current `< min`) is a promotion and therefore **defers to §9.8
+  while feedback is stale** — a raised `min` never pulls the rung UP on a lost
+  link (`never fail optimistic`; §9.8/Pass 84 keeps `floor_profile` below
+  `min_profile` as the safety floor), so it fires only with fresh feedback.
+  Rationale: without this, lowering `max` below the current rung waited for a
+  loss/§9.8 demote trigger that never arrives on a clean link, so a high-range
+  mode (§16 of `docs/venc-mode-matrix.md`) left the craft at a high MCS until the
+  first loss burst — the operator picks "high range" *before* needing it.
 
 **`min_profile` / `max_profile` are profile `id`s, not ladder indices
 (Pass 83).** They are resolved against the §3.6 table the same way
@@ -1390,7 +1425,12 @@ optimistic" violation this section opens by forbidding.
 **Scope:** this governs the `min_profile < max_profile` envelope only. An explicit
 §9.7 **`min==max` pin still freezes adaptation outright**, `FAILSAFE` included —
 that is the pin's documented purpose (bench / known-bad-link) and it is an
-operator-initiated state, not a tuning side effect. Whether a pin *should* yield
+operator-initiated state, not a tuning side effect. **The pin snap re-derives the
+rung's §9.5 bitrate together with the MCS commit (Pass 97)** — a pin is a §9.5
+operating-point change like any demote/promote, so venc must be re-targeted to
+the pinned rung's rate. Committing the MCS alone leaves venc at the prior rung's
+bitrate; a downward pin to MCS0 then oversubscribes the link (measured ~3.6× →
+~98 % unrecoverable on hardware). Whether a pin *should* yield
 to the fail-safe on lost feedback is a **separate open question** (a pin held at a
 high rung through a real fade is fail-optimistic by the same argument above); it
 is deliberately not decided here.
@@ -1448,8 +1488,20 @@ block size: if the measured encoded P frames become too small, fewer frames per
 second at the same bitrate give each frame more bytes/source symbols and hence
 more absolute repair symbols at the configured FEC ratio. `maxIBytes` and
 `maxPBytes` remain live ceilings, not promises that the encoder will fill a
-frame to that size. Opt-in (`venc.fps_ladder.enabled`, default false; requires
-`venc.enabled` — the ladder writes `video0.fps`).
+frame to that size.
+
+**Instantiate vs. run (Pass 99).** The ladder object is **instantiated whenever
+`venc.enabled`** — it is a cheap controller and its mere existence commands
+nothing. `venc.fps_ladder.enabled` (default false) sets only the **boot
+run-state**: whether the loop is issuing FPS commands at start-up. Because the
+object always exists on a venc craft, `FPS_LADDER on`/`off` (§11.7 `0x03`)
+toggles the loop **in both directions at runtime with no link restart** (so no
+§11.3 CSA re-pair) — a craft that booted static can become variable and back.
+This is what lets fps behaviour be a user-facing *mode* property
+(`docs/venc-mode-matrix.md` §16.6): the nine static-fps modes are the ladder
+held off; the variable-fps mode is the ladder run on. The span (`min`/
+`preferred`) is read at instantiation and is a per-craft constant; per-mode
+spans are deferred.
 
 - **Ladder:** the discrete §9.6 set `{30, 45, 60, 75, 90, 100, 120, 144}`
   clipped to the configured envelope. v1 operates in `[min, preferred]`:
@@ -2012,7 +2064,7 @@ this channel. Wire format is §3.14; everything below is behaviour.
 |---|---|---|---|
 | `0x01` | `ARQ` | 0=off, 1=on | **off:** the craft TX stamps no `ARQ`/`PFRAME_ARQ` flags on future DATA and serves no incoming NACKs. Receivers then generate no NACKs by construction (§6.4 NACKs only flagged seqs) and the §14.3 nack-grace machinery stops arming — after already-stamped in-flight blocks drain (one deadline window), no uplink or cache churn for a knob receivers were never told about. FEC repair symbols (§14.1, forward) and §3.9 decoder recovery are **unaffected**. **on:** restores the boot-configured behaviour (per-stream `arq_mode`, §4.1); on a craft whose boot config flags nothing, `on` is an acked no-op, not `REJECTED` |
 | `0x02` | `SELECTOR` | 0=run, 1=freeze | **freeze:** §9.7 `min==max` pin — a select-and-hold of the current operating point. **run:** restores the boot-config `[min, max]` envelope. Either direction takes effect at the **next selector evaluation**; during the §11.3 CSA freeze that is when the freeze lifts, and the pinned rung is sampled *then* (never mid-blackout). This command and §15.5 `POST /api/v1/link/profile` drive the *same* §9.7 lever; last writer wins |
-| `0x03` | `FPS_LADDER` | 0=off, 1=on | **off:** the §9.11 loop stops issuing FPS commands; the current fps holds where it is (no snap to `preferred` — least surprise). **on:** re-enables the loop with cleared evidence, as after a §9.11 settle. "Configured" = the ladder ran at boot (`venc.enabled` + `venc.fps_ladder.enabled`, §9.11 opt-in); on any other craft either arg is echoed `REJECTED` — the command toggles a running loop, it cannot conjure one |
+| `0x03` | `FPS_LADDER` | 0=off, 1=on | **off:** the §9.11 loop stops issuing FPS commands; the current fps holds where it is (no snap to `preferred` — least surprise). **on:** re-enables the loop with cleared evidence, as after a §9.11 settle. "Configured" = `venc.enabled` (Pass 99: the ladder object is instantiated on every venc craft, so this toggles freely both ways with no link restart; `venc.fps_ladder.enabled` sets only the *boot* run-state). On a non-venc craft either arg is echoed `REJECTED` — the command needs an actuator, it cannot conjure one. The craft-local `POST /api/v1/link/fps` (§15.5) drives this *same* lever |
 | `0x04` | `FPS_SELECT` | preset index 0..4 | Sets encoder fps to `venc.command_presets.fps[arg]` through the §9.6/§9.11 actuator (write-on-change; venc requests an IDR after a real change). `REJECTED` when: the preset list is unconfigured or `arg` ≥ its length, `venc.enabled` is false, **or the §9.11 ladder is currently enabled** (`cmd_fps_ladder` true — the ladder owns `video0.fps`; issue `FPS_LADDER` off first — Pass 71 ruling, no implicit ladder stop). A selection updates a configured-but-disabled ladder's current-rung model, so a later `FPS_LADDER` on resumes from the selected rung, not a stale one. While no ladder is running, the selected fps is the §9.11 cap-coupling cadence input (authoritative immediately, same rule as a ladder command) |
 | `0x05` | `RESOLUTION` | preset index 0..4 | Sets encoder resolution to `venc.command_presets.resolution[arg]` (a venc `video0.size` string, e.g. `"1280x720"`). `REJECTED` when the preset list is unconfigured, `arg` ≥ its length, `venc.enabled` is false, or the actuation path is not yet implemented (staged, Pass 71 — the venc-side knob is a venc-repo dependency) |
 | `0x06` | `FRAMING` | preset index 0..4 | Sets encoder framing mode to `venc.command_presets.framing[arg]` (a venc `video0.framing` string). Same `REJECTED` set as `RESOLUTION` (staged, Pass 71) |
@@ -2264,10 +2316,42 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
 
   | condition | repair count | rationale |
   |---|---|---|
-  | `k ≤ fec.min_k` (seed 3) | `r = 0` (ARQ-only) | at k=3 one repair = 33% overhead; NACK→RETRANSMIT recovers within deadline (§17 gate 3). |
+  | `k ≤ fec.min_k` (seed 3) **AND the frame is ARQ-eligible** | `r = 0` (ARQ-only) | at k=3 one repair = 33% overhead; NACK→RETRANSMIT recovers within deadline (§17 gate 3). |
   | P-frame, `k > min_k` | `r = ceil(k · p_rate)`, seed `p_rate` 0.10 | P-frames are expendable (supersession §6.2); light parity for the short burst diversity misses. |
   | IDR frame | `r = ceil(k · i_rate)`, seed `i_rate` 0.25 | IDR loss is catastrophic (whole GOP until next IDR); heavier parity justified. |
 
+- **The `min_k` gate is conditional (Pass 94).** `r = 0` at small `k` is an
+  *optimisation* — do not spend parity where ARQ will recover the frame anyway
+  — and it is sound only where that ARQ actually exists. A frame is
+  **ARQ-eligible** when it would carry `ARQ` or `PFRAME_ARQ` (§5.1a): an IDR
+  under any `arq_mode`, or a P-frame under `arq_mode: all-frames`, and in both
+  cases only while ARQ is enabled and not §4.1-cadence-suppressed. A P-frame
+  under `arq_mode: idr-only` is **not** ARQ-eligible, so the gate MUST NOT
+  apply to it — otherwise the branch grants neither FEC nor ARQ and the frame
+  ships bare. Above the §4.1 cadence cutoff nothing is ARQ-eligible and the
+  gate is inert for every class.
+
+  Measured (`docs/venc-mode-matrix.md` §11): with the gate unconditional, at
+  2.3 % post-diversity loss the unrecoverable-frame rate is a **17× cliff** at
+  `k = min_k` — 5.785 % just below versus 0.340 % just above, offline at
+  p = 2 %. On the live link, removing the hole is a **3.2× mean reduction**
+  (0.393 % → 0.123 %), better at 9 of 10 operating points. This is the B11
+  MCS0 failure: `derived_bitrate / fps` at the floor rung lands frames under
+  `min_k · s`, and under `idr-only` they go out unprotected.
+
+- **Minimum repair floor `min_r` (Pass 98, seed 2).** A frame that is FEC'd —
+  past the `min_k` gate with a non-zero rate — gets `r = max(ceil(k·rate),
+  min_r)` repair symbols. `ceil(k·rate)` gives **r = 1 for every k ≤ 4** at the
+  seed 200 ‰ P-rate, so a small frame is one loss from death; and `ceil(1·rate)
+  = 1` for *any* rate ≤ 1000 ‰, so the floor is the **only** lever for k = 1.
+  The floor never lowers the rate-derived count (large frames keep
+  `ceil(k·rate)`), never overrides the `min_k` ARQ-only gate, and never forces
+  FEC onto a `rate = 0` class. It is airtime-cheap by construction: it adds
+  symbols only to small frames, which are small. Measured (offline, real
+  framer, 2 % loss): `min_r = 2` takes k=3 from 0.233 % → 0.015 % unrecoverable
+  and k=1 from ~1.9 % → 0.005 %. This is general burst-loss protection, not
+  MCS0-specific, but it is what makes the small-frame MCS0 corner usable until
+  the §9.11 fps ladder stops pairing MCS0 with 100 fps at all.
 - **Priority:** a frame's repair symbols are that frame's **live data**, emitted
   immediately after its source symbols at the same live priority (§5.3), *not*
   demoted to retransmit priority.
@@ -2672,7 +2756,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     "bind": { "kind": "frame-shm", "name": "venc_frame" },
     "arq_mode": "idr-only",
     "fec": { "scheme": "rlc256", "i_rate_permille": 250,
-             "p_rate_permille": 100, "min_k": 3 } }
+             "p_rate_permille": 100, "min_k": 3, "min_r": 2 } }
   ```
   `scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
   `"rlc256"` enables §14.1. Rates are integer per-mille (project convention). On
@@ -2826,7 +2910,8 @@ The `cmd_*` / `vcmd_*` / `arq_rx_enabled` link fields are the §11.7 command
 surface, emitted on every node with role-neutral defaults: `cmd_arq`,
 `cmd_selector_frozen`, `cmd_fps_ladder` are the craft's currently applied
 command state (boot values until a command lands; `cmd_fps_ladder` is false
-when the ladder is unconfigured), the v2 `cmd_*_select` fields are the
+when the ladder is not *running* — no venc actuator, or the loop booted/toggled
+off per Pass 99), the v2 `cmd_*_select` fields are the
 **1-based preset index** applied this craft session (0 = none — only a
 pre-live venc, §9.6 fallback, may still run a preset persisted in an earlier
 session, §11.7),
@@ -3060,6 +3145,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/link/selection` | receiver's configured/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
+| `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -3075,13 +3161,15 @@ after the existing discovery/idle windows; the endpoint does not alter latch
 selection or admission state.
 
 **Write** (live; `200 { "ok": true, … }` on success, `4xx { "ok": false, "error": "…" }`
-otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
+otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart — **with
+the single exception of `POST /api/v1/mode`** (§16, Pass 96), whose venc portion
+is `restart_required` and so is applied out-of-loop by a forked applier:
 
 | Method + path | Body | Effect |
 |---|---|---|
 | `POST /api/v1/csa` | `{ "mhz": 5805, "class": 0 }` | start a §11 CSA campaign (issuer/ground node) |
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
-| `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3 }` | retune a `frame-shm` stream's §14.1 FEC rates (TX node) |
+| `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node) |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
 | `POST /api/v1/bench/rx-drop` | `{ "permille": 0 }` | UDP-air bench RX only: retune independent synthetic loss per listener (0–1000); 409 on RF backends |
@@ -3090,10 +3178,28 @@ otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto `target_chan` (or the emptiest allowlisted channel) |
 | `POST /api/v1/vehicle/command` | `{ "cmd": "arq"\|"selector"\|"fps_ladder"\|"fps_select"\|"resolution"\|"framing", "arg": 0..4 }` | start a §11.7 command campaign toward the bound craft; returns `{ok, nonce}` immediately, poll the GET for the outcome (issuer/ground node) |
 | `POST /api/v1/arq` | `{ "enabled": true\|false }` | RX-local NACK-emission gate (§6.4) — this node only, the craft is untouched (rx node) |
+| `POST /api/v1/link/fps` | `{ "ladder": true\|false }` | §9.11 ladder toggle (Pass 99); `true` = variable fps (the loop runs), `false` = static (the loop stops, fps holds). Routes through the same §11.7 `FPS_LADDER` transition as the over-air path; **MUT_LIVE**, no restart. `409` off a venc/TX node (TX/craft node) |
+| `POST /api/v1/mode` | `{ "name": "imx335-100fps-highrange" }` | select a user-facing operating mode (§16 of `docs/venc-mode-matrix.md`). **Not MUT_LIVE** — see below (TX/craft node) |
 
-Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and
-`fec` on the TX, and `bench/rx-drop` only on UDP-air RX. An endpoint invoked in a mode where it does not apply returns
-**409**; an unknown path **404**; a malformed or oversize body **400**. The
+Endpoints act only where meaningful — `csa` on the issuer, `link/profile`,
+`fec`, `link/fps` and `mode` on the TX, and `bench/rx-drop` only on UDP-air RX.
+An endpoint invoked in a mode where it does not apply returns
+**409**; an unknown path **404**; a malformed or oversize body **400**.
+
+**`POST /api/v1/mode` (§16, Pass 96)** is the user-facing operating-mode
+selector, and the one write that is not purely in-loop. A "mode" bundles three
+venc fields (`sensor.mode`, `video0.size` — both `restart_required` — and
+`video0.fps`) with the §9.7 range pin, all held in one `modes/<name>.json`
+(single source of truth). Because sensor mode and resolution need a venc
+restart, the link does not apply them itself: it validates the name (charset
+`[A-Za-z0-9._-]`, so it cannot inject), sets its active-mode label
+optimistically, and forks a **detached** on-craft applier
+(`venc.mode_apply_cmd`) passed the name as **argv, never a shell**. The applier
+persists both configs and restarts venc; the range pin it applies **live**
+through `POST /api/v1/link/profile`, so the **link and CSA never restart** and
+no §15.5a re-pair is needed — only video briefly drops. The link is the control
+authority: the hub POSTs here and the link owns the label, restored at boot
+from `venc.active_mode`. `409` if no applier is configured or off a TX node. The
 write knobs are exactly the §9/§11/§14 levers that were previously boot-time
 JSON only; the profile pin is the operating-point (MCS + bitrate) lever, since
 a profile bundles rate/power/MTU per §9.3. The `scout/*` endpoints (§15.5a) act

@@ -32,6 +32,12 @@ struct FrameFecConfig {
     uint16_t i_rate_permille = 250;  // IDR repair overhead
     uint16_t p_rate_permille = 100;  // P-frame repair overhead
     uint16_t min_k = 3;              // k <= min_k => ARQ-only (r = 0)
+    // §14.1 (Pass 98) minimum repair floor: a FEC'd frame gets at least this
+    // many repair symbols, so small frames are not left on r = ceil(k·rate)=1
+    // (one loss from death). `ceil(1·rate)=1` for any rate ≤ 1000‰, so the
+    // floor is the ONLY lever for k=1. Airtime-cheap: small frames are small,
+    // and it never lowers the rate-derived r on large frames.
+    uint16_t min_r = 2;
 };
 
 struct FrameFramerConfig {
@@ -82,10 +88,11 @@ class FrameFramer {
     // construction (rlc256 vs none is structural); only the per-mille repair
     // overheads and the ARQ-only threshold move. Effective on the next frame.
     void set_fec_rates(uint16_t i_permille, uint16_t p_permille,
-                       uint16_t min_k) {
+                       uint16_t min_k, uint16_t min_r) {
         cfg_.fec.i_rate_permille = i_permille;
         cfg_.fec.p_rate_permille = p_permille;
         cfg_.fec.min_k = min_k;
+        cfg_.fec.min_r = min_r;
     }
     const FrameFecConfig& fec() const { return cfg_.fec; }
     FrameArqMode arq_mode() const { return cfg_.arq_mode; }
@@ -129,7 +136,8 @@ class FrameFramer {
   private:
     // r for a frame of k symbols per the §14.1 adaptive policy; 0 if FEC off,
     // ARQ-only (k <= min_k), or the k+r>256 cap trips (records fec_oversize_k).
-    uint16_t repair_count(uint16_t k, bool is_idr);
+    // §14.1: arq_eligible gates the min_k ARQ-only rule (Pass 94).
+    uint16_t repair_count(uint16_t k, bool is_idr, bool arq_eligible);
 
     FrameFramerConfig cfg_;
     FrameFramerStats stats_;

@@ -35,6 +35,10 @@ endif()
 
 set(CMAKE_C_COMPILER   "${WBLINK_SSC338Q_TOOLCHAIN}/bin/arm-openipc-linux-gnueabihf-gcc")
 set(CMAKE_CXX_COMPILER "${WBLINK_SSC338Q_TOOLCHAIN}/bin/arm-openipc-linux-gnueabihf-g++")
+# The SSC338Q target roots on a ~5.7 MB overlay, so the shipped binary is
+# stripped at build time (CMakeLists POST_BUILD). An unstripped waybeam-link is
+# ~2.9 MB — a second copy will not fit alongside the running one.
+set(CMAKE_STRIP "${WBLINK_SSC338Q_TOOLCHAIN}/bin/arm-openipc-linux-gnueabihf-strip")
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)

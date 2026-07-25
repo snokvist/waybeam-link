@@ -7,10 +7,12 @@
 // (craft follower / ground issuer, triggered via POST /api/v1/csa), and the
 // §15.5 REST control plane (stats + live knobs; stdin CSA trigger is gone).
 #include <poll.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <csignal>
 #include <cstdlib>
 #include <cstdio>
@@ -70,6 +72,42 @@ using namespace wblink;
 
 volatile std::sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
+
+// §15.5 (Pass 96): fork a detached operating-mode applier. Applying a mode
+// restarts venc (sensor.mode/video0.size are restart_required), which takes
+// seconds, so this must NOT block the flight loop — double-fork so the
+// grandchild is reparented to init (no zombie, nothing to wait on) and execl
+// with argv (never a shell) so the charset-validated name cannot inject.
+// Precedent: RadioAir already forks execvp('iw', …) for channel retunes.
+bool spawn_mode_applier(const std::string& cmd, const std::string& name) {
+    const pid_t pid = ::fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        ::setsid();  // detach from the flight process's session
+        const pid_t pid2 = ::fork();
+        if (pid2 == 0) {
+            // Close inherited fds (the §15.5 control listen socket, UDP
+            // bindings, frame-shm, …) before exec so neither the applier nor
+            // the venc it restarts (S95) inherits them. A leaked control-listen
+            // fd pins 8091, and the link then cannot rebind it on its next
+            // restart — found on hardware while verifying Pass 100.
+            const long maxfd = ::sysconf(_SC_OPEN_MAX);
+            const int top = (maxfd > 0 && maxfd < 1 << 20)
+                                ? static_cast<int>(maxfd)
+                                : 4096;
+            for (int fd = 3; fd < top; ++fd) {
+                ::close(fd);
+            }
+            ::execl(cmd.c_str(), cmd.c_str(), name.c_str(),
+                    static_cast<char*>(nullptr));
+            _exit(127);  // applier not executable
+        }
+        _exit(0);  // intermediate child exits immediately; grandchild orphaned
+    }
+    int status = 0;
+    ::waitpid(pid, &status, 0);  // instant: the intermediate child just exited
+    return true;
+}
 
 uint64_t now_ms() {
     return static_cast<uint64_t>(
@@ -1575,8 +1613,13 @@ struct TxCore {
           report_gate_(ReportGatePolicy{
               cfg.node.preferred_originator,
               cfg.policy.report_timeout_ms * 4}) {
-        // §9.11 FPS ladder (Pass 39) — config validated it requires venc.
-        if (cfg.venc.enabled && cfg.venc.fps_ladder.enabled) {
+        // §9.11 FPS ladder (Pass 39; instantiate-vs-run split Pass 99). The
+        // object is instantiated on every venc craft — its existence commands
+        // nothing. `fps_ladder.enabled` sets only the BOOT run-state
+        // (cmd_fps_enabled_), so FPS_LADDER on/off (§11.7 0x03 / the craft-local
+        // POST /api/v1/link/fps) toggles the loop both ways at runtime with no
+        // link restart — which is what makes the variable-fps mode switchable.
+        if (cfg.venc.enabled) {
             const FpsLadderCfg& lc = cfg.venc.fps_ladder;
             FpsLadderPolicy fp;
             fp.min_fps = lc.min;
@@ -1589,6 +1632,7 @@ struct TxCore {
             fp.restore_after_ms = lc.restore_after_ms;
             fp.settle_ms = lc.settle_ms;
             fps_ladder_.emplace(fp);
+            cmd_fps_enabled_ = lc.enabled;  // static mode boots the loop off
         }
         // §10: one power curve per TX adapter with an authored map. The
         // resolve happens at profile commit; the radio backend applies it
@@ -1631,6 +1675,7 @@ struct TxCore {
                 fc.fec.i_rate_permille = s.fec.i_rate_permille;
                 fc.fec.p_rate_permille = s.fec.p_rate_permille;
                 fc.fec.min_k = s.fec.min_k;
+                fc.fec.min_r = s.fec.min_r;
                 st.frame_framer.emplace(fc);
                 st.frame_framer->set_operating_point(0, table_version,
                                                      max_payload_for(0));
@@ -2027,7 +2072,7 @@ struct TxCore {
     // §14.1 live FEC-rate retune for a frame-shm stream. Returns false if the
     // stream_id is unknown or is not a frame-shm (FrameFramer) stream.
     bool set_stream_fec(uint8_t stream_id, uint16_t i_permille,
-                        uint16_t p_permille, uint16_t min_k) {
+                        uint16_t p_permille, uint16_t min_k, uint16_t min_r) {
         for (Stream& s : streams_) {
             if (s.stream_id != stream_id) {
                 continue;
@@ -2035,7 +2080,7 @@ struct TxCore {
             if (!s.frame_framer) {
                 return false;  // udp stream: no per-stream FEC (§15.2)
             }
-            s.frame_framer->set_fec_rates(i_permille, p_permille, min_k);
+            s.frame_framer->set_fec_rates(i_permille, p_permille, min_k, min_r);
             return true;
         }
         return false;
@@ -2928,6 +2973,8 @@ int run_tx(const Loaded& l) {
     uint64_t csa_liveness_rx_baseline = 0;
     uint16_t csa_liveness_chan = 0;
     uint8_t csa_liveness_bw = 0;
+    // §15.5 operating-mode label (Pass 96): restored at boot, set on accept.
+    std::string active_mode = l.cfg.venc.active_mode;
     // §11.7 craft command engine: same key provenance as the CSA follower.
     VcmdParams craft_cmd_params = vcmd_params(l.cfg);
     if (psk_announced) {
@@ -2971,14 +3018,16 @@ int run_tx(const Loaded& l) {
                                static_cast<uint8_t>(mx));
             return "";
         };
-        h.fec = [&](int sid, int ip, int pp, int mk) -> std::string {
+        h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
-            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1)
-                return "bad fec rates (0..4000 permille, min_k>=1)";
+            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
+                mr < 0 || mr > 255)
+                return "bad fec rates (0..4000 permille, min_k>=1, min_r 0..255)";
             return tx.set_stream_fec(static_cast<uint8_t>(sid),
                                      static_cast<uint16_t>(ip),
                                      static_cast<uint16_t>(pp),
-                                     static_cast<uint16_t>(mk))
+                                     static_cast<uint16_t>(mk),
+                                     static_cast<uint16_t>(mr))
                        ? ""
                        : "no frame-shm stream with that id";
         };
@@ -2988,6 +3037,48 @@ int run_tx(const Loaded& l) {
             for (ShmIn& si : shm_ins) {
                 if (si.ring) si.ring->reset_stats();
             }
+        };
+        // §15.5 craft-local FPS-ladder toggle (Pass 99). Routes through the
+        // exact §11.7 FPS_LADDER transition the over-air path uses, so local
+        // and remote toggles are identical. false → static (loop off), true →
+        // variable (loop on). REJECTED (→ 400) on a craft with no venc actuator.
+        h.link_fps = [&](bool ladder_on) -> std::string {
+            return tx.apply_command(vcmd_id::kFpsLadder, ladder_on ? 1 : 0,
+                                    now_ms())
+                       ? ""
+                       : "fps ladder unavailable (no venc actuator on this node)";
+        };
+        // §15.5 operating-mode selection (Pass 96). The link is the control
+        // authority: the hub POSTs a mode name here, the link records it and
+        // forks the on-craft applier, which persists the venc + link config
+        // (docs/venc-mode-matrix.md §16) and restarts venc. The range pin is
+        // applied live by the applier through /api/v1/link/profile, so the
+        // link and CSA never restart. active_mode is the label, restored from
+        // config at boot and set optimistically on accept.
+        h.mode_get = [&]() -> std::string {
+            std::string s = "{\"active\":\"" + active_mode + "\"";
+            s += ",\"apply_configured\":";
+            s += l.cfg.venc.mode_apply_cmd.empty() ? "false" : "true";
+            s += "}";
+            return s;
+        };
+        h.mode_set = [&](const std::string& name) -> std::string {
+            if (l.cfg.venc.mode_apply_cmd.empty()) {
+                return "no venc.mode_apply_cmd configured on this node";
+            }
+            for (char c : name) {
+                if (!(std::isalnum(static_cast<unsigned char>(c)) ||
+                      c == '-' || c == '_' || c == '.')) {
+                    return "mode name: only [A-Za-z0-9._-] allowed";
+                }
+            }
+            if (!spawn_mode_applier(l.cfg.venc.mode_apply_cmd, name)) {
+                return "failed to launch mode applier";
+            }
+            active_mode = name;  // optimistic; the applier is authoritative
+            std::fprintf(stderr, "mode: applying \"%s\" via %s\n", name.c_str(),
+                         l.cfg.venc.mode_apply_cmd.c_str());
+            return "";
         };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (tx)\n",
@@ -4569,6 +4660,7 @@ int run_loopback(const Loaded& l) {
     // §15.5 REST control plane on the bench: tx knobs (profile/fec) + reset
     // (both sides). CSA is a no-op with synthetic air → left null → 409.
     StatsSnapshot last_snap;
+    std::string loop_active_mode = l.cfg.venc.active_mode;  // §15.5 Pass 96
     std::unique_ptr<ControlServer> control;
     if (!l.cfg.control.bind.empty()) {
         auto cs = ControlServer::create(l.cfg.control.bind);
@@ -4593,20 +4685,47 @@ int run_loopback(const Loaded& l) {
                                static_cast<uint8_t>(mx));
             return "";
         };
-        h.fec = [&](int sid, int ip, int pp, int mk) -> std::string {
+        h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
-            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1)
-                return "bad fec rates (0..4000 permille, min_k>=1)";
+            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
+                mr < 0 || mr > 255)
+                return "bad fec rates (0..4000 permille, min_k>=1, min_r 0..255)";
             return tx.set_stream_fec(static_cast<uint8_t>(sid),
                                      static_cast<uint16_t>(ip),
                                      static_cast<uint16_t>(pp),
-                                     static_cast<uint16_t>(mk))
+                                     static_cast<uint16_t>(mk),
+                                     static_cast<uint16_t>(mr))
                        ? ""
                        : "no frame-shm stream with that id";
         };
         h.reset_stats = [&] {
             tx.reset_stats();
             rx.reset_stats();
+        };
+        // §15.5 operating-mode selection (Pass 96) — same as tx, so the bench
+        // can exercise it. See the tx block for the full contract.
+        h.mode_get = [&]() -> std::string {
+            std::string s = "{\"active\":\"" + loop_active_mode + "\"";
+            s += ",\"apply_configured\":";
+            s += l.cfg.venc.mode_apply_cmd.empty() ? "false" : "true";
+            s += "}";
+            return s;
+        };
+        h.mode_set = [&](const std::string& name) -> std::string {
+            if (l.cfg.venc.mode_apply_cmd.empty()) {
+                return "no venc.mode_apply_cmd configured on this node";
+            }
+            for (char c : name) {
+                if (!(std::isalnum(static_cast<unsigned char>(c)) ||
+                      c == '-' || c == '_' || c == '.')) {
+                    return "mode name: only [A-Za-z0-9._-] allowed";
+                }
+            }
+            if (!spawn_mode_applier(l.cfg.venc.mode_apply_cmd, name)) {
+                return "failed to launch mode applier";
+            }
+            loop_active_mode = name;
+            return "";
         };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (loopback)\n",

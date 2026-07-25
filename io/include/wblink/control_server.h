@@ -42,7 +42,7 @@ struct ControlHandlers {
     std::function<std::string(uint32_t mhz, uint32_t klass)> csa;
     std::function<std::string(int min_profile, int max_profile)> profile;
     std::function<std::string(int stream_id, int i_permille, int p_permille,
-                              int min_k)>
+                              int min_k, int min_r)>
         fec;
     std::function<void()> reset_stats;  // side-effect only; always 200
     // §15.5a scout writes (ground/rx only; null → 409). start takes the parsed
@@ -65,6 +65,16 @@ struct ControlHandlers {
         vehicle_command;
     // §6.4 RX-local NACK-emission gate (rx only; null → 409).
     std::function<std::string(bool enabled)> arq_enable;
+    // §9.11 craft-local FPS-ladder toggle (Pass 99; tx/craft only, null → 409).
+    // true = variable fps (ladder runs), false = static (ladder holds). Routes
+    // through the same §11.7 transition as the over-air FPS_LADDER command.
+    std::function<std::string(bool ladder_on)> link_fps;
+    // §15.5 operating-mode selection (Pass 96; tx/craft only, null → 409).
+    // mode_get returns the JSON body for GET /api/v1/mode. mode_set applies a
+    // named mode (docs/venc-mode-matrix.md §16): "" on success, else a short
+    // error string (→ 400). The link owns the active mode; the hub calls here.
+    std::function<std::string()> mode_get;
+    std::function<std::string(const std::string& name)> mode_set;
 };
 
 class ControlServer {
