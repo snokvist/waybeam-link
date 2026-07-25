@@ -3166,6 +3166,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
 | `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
+| `GET /api/v1/modes` | `{active, apply_configured, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist so a menu need not hardcode them (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -3244,6 +3245,22 @@ timed out. "Bound", issuer-side, is the issuer's own committed selection (a
 §15.5a claim or `/csa` campaign committed this session, §11.7); the craft-side
 binding is authoritative, so a stale belief surfaces as `timeout`, never as a
 misdirected command. `arq` acts on any rx node.
+
+**`GET /api/v1/modes` (Pass 104)** enumerates the operating-mode **catalog** so a
+menu (the hub) need not carry its own copy of the mode list. The link reads each
+`modes/<name>.json` under `venc.modes_dir` — defaulting to the directory holding
+`mode_apply_cmd`, since the §16 layout keeps the applier and the mode files
+together, so a deployed craft exposes the catalog with no extra config — and
+returns one object per mode with its user-facing facts: `fps` (the latency axis),
+`mcs_min`/`mcs_max` (the §9.7 range band), `resolution` (`video0.size`) and
+`fps_mode` (`static`/`variable`, §9.11), plus the `active` label. The wire carries
+the raw facts, **not UI vocabulary** — the caller renders the latency×range grid
+and any "High/Med/Low" range labels. Malformed or partial mode files are skipped,
+never fatal; the list is name-sorted for a stable menu. It **409**s off a TX node
+like the rest of the mode surface; on a craft whose `modes_dir` is unset or
+unreadable it returns an empty `modes[]` (a misconfigured craft, distinct from the
+409 of a non-TX node). Read-only — enumerating never touches venc or the link, so
+it is safe to poll.
 
 ### 15.5a Ground scout (channel searcher)
 A ground-side finder that sweeps channels to discover parked/flying craft and,

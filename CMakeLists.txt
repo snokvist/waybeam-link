@@ -96,7 +96,8 @@ add_library(wblink_io STATIC
     io/src/air_mon.cpp
     io/src/power_file.cpp
     io/src/venc_http.cpp
-    io/src/control_server.cpp)
+    io/src/control_server.cpp
+    io/src/modes.cpp)
 target_include_directories(wblink_io PUBLIC io/include)
 target_include_directories(wblink_io SYSTEM PRIVATE third_party)
 target_compile_options(wblink_io PRIVATE ${WBLINK_WARNINGS})

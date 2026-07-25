@@ -55,6 +55,11 @@ add_wb_test(power_test wblink_io)
 add_wb_test(stats_test wblink_io)
 add_wb_test(control_server_test wblink_io)
 add_wb_test(venc_actuator_test wblink_io)
+add_wb_test(modes_test wblink_io)
+# modes_test parses the catalog JSON to verify sort order + fields; give it the
+# vendored nlohmann header (wblink_io keeps its third_party include PRIVATE).
+target_include_directories(modes_test SYSTEM PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)

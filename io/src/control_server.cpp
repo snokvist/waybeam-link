@@ -330,6 +330,14 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             }
             return reply(200, "OK", h_.mode_get());
         }
+        if (path == "/api/v1/modes") {  // §15.5 Pass 104
+            if (!h_.modes_list) {
+                return reply(409, "Conflict",
+                             json_err("mode selection not available in this "
+                                      "mode"));
+            }
+            return reply(200, "OK", h_.modes_list());
+        }
         if (path == "/api/v1/stats/stream") {
             const std::string hdr =
                 "HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n"

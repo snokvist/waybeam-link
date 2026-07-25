@@ -79,6 +79,9 @@ struct ControlHandlers {
     // error string (→ 400). The link owns the active mode; the hub calls here.
     std::function<std::string()> mode_get;
     std::function<std::string(const std::string& name)> mode_set;
+    // §15.5 Pass 104: modes_list returns the JSON body for GET /api/v1/modes —
+    // the operating-mode catalog (tx/craft only, null → 409).
+    std::function<std::string()> modes_list;
 };
 
 class ControlServer {
