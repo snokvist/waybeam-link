@@ -30,7 +30,7 @@ link layer, and a follow-me channel switch. Standalone repo, not a submodule of
 ## Build & test
 
 ```
-cmake --build --preset dev && ctest --preset dev   # merge gate: 43 suites, ASan+UBSan
+cmake --build --preset dev && ctest --preset dev   # merge gate: 46 suites, ASan+UBSan
 cmake --build --preset ssc338q                      # ARMv7 cross (SigmaStar target)
 ```
 
@@ -69,8 +69,10 @@ Each of these cost real debugging time during bring-up — don't rediscover them
 - The binary needs the repo root as cwd (loads `profiles/` by relative path).
 - Stats are NDJSON on stdout at `stats.hz` (schema = PROTOCOL.md §15.3,
   golden-tested — don't hand-edit the schema without updating the golden file).
-- A TX node sends **nothing** without an RTP feed on its input binding — there
-  is no idle heartbeat. Use `tools/rtp_feed.py` to drive one.
+- A TX node sends no **video/return** traffic without an RTP feed on its input
+  binding, so drive one with `tools/rtp_feed.py`. (It is not fully idle: the
+  1 Hz HEARTBEAT and 2 Hz ANNOUNCE fire regardless — but the Pass 70 issuer
+  video-confirm still needs a real feed.)
 - `RadioAir` requires **exactly one** `role:"tx"` adapter per process (it's
   duplex — that adapter also RXes). Monitor RX delivers the MPDU with the
   chip-validated 4-byte FCS appended — already stripped/handled in `RadioAir`;

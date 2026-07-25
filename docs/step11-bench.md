@@ -65,7 +65,7 @@ stand alone):
     "csa": {
       "psk": "CHANGE-ME-craft-and-ground-only",
       "settle_s": 3.0, "verify_timeout_ms": 150, "min_interval_s": 5,
-      "ack_timeout_ms": 1000, "rendezvous_timeout_s": 5,
+      "ack_timeout_ms": 1000,
       "home_chan": 5745, "channel_allowlist": [5745, 5805, 5825]
     }
   },
@@ -100,7 +100,7 @@ curve.
     "csa": {
       "psk": "CHANGE-ME-craft-and-ground-only",
       "settle_s": 3.0, "verify_timeout_ms": 150, "min_interval_s": 5,
-      "ack_timeout_ms": 1000, "rendezvous_timeout_s": 5,
+      "ack_timeout_ms": 1000,
       "home_chan": 5745, "channel_allowlist": [5745, 5805, 5825]
     }
   },

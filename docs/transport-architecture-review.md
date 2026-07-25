@@ -24,11 +24,13 @@ and several observability gaps need resolution before unattended deployment.
 1. **Kernel-monitor CSA reported success without retuning (fixed fail-closed).**
    `MonAir::retune()` logs that retuning is deferred and returns `true`.
    `AirBackend::retune_all()` ignores that semantic distinction and the CSA
-   state machine proceeds. A control request can therefore make protocol state
-   say COMMITTED while the interface remains on its original channel. Until an
-   nl80211 retune is implemented, CSA must be rejected/disabled for this
-   backend rather than acknowledged. This branch now rejects local CSA control
-   and ignores received campaigns on kernel-monitor; real retune remains absent.
+   state machine proceeds. A control request could therefore make protocol
+   state say COMMITTED while the interface remained on its original channel.
+   **SUPERSEDED (Passes 49, 69, 80):** kernel-monitor now performs a real `iw`
+   retune with a §11.6 RX-liveness guard (a half-applied retune is detected and
+   the monitor re-initialised), so CSA is fully implemented on this backend and
+   soak-validated (20/20, `docs/preflight-open-issues.md` C1). The paragraph
+   below is kept for provenance.
 
 2. **Frame-SHM producer restart stranded an attached consumer (ingress fixed).**
    `FrameShmRing::create()` unlinks and recreates the name. Existing mappings
@@ -132,8 +134,8 @@ problem is cross-process producer replacement, not in-process buffer ownership.
 | MCS actuation | No-op | Per-packet radiotap | Device `SetTxMode` |
 | Power actuation | No-op | Logged/no-op | Device TX power offset |
 | Return unicast/HW ACK | No | Broadcast fallback | Supported with SA latch |
-| TX report/wedge detection | No | No | CCX reports |
-| CSA retune | Intent only by approved scope | Not implemented; now rejected | Implemented |
+| TX report/wedge detection | No | netdev `tx_packets` (§9.10, Pass 49) | CCX reports |
+| CSA retune | Intent only by approved scope | Implemented (`iw` + §11.6 guard, Passes 49/69/80) | Implemented |
 | Synthetic uniform loss | Yes | Yes | Yes |
 | RX/TX/drop adapter stats | Yes after this review | Yes | Yes after this review |
 

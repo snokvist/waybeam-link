@@ -19,7 +19,18 @@ understood. **NICE-TO-HAVE** = cleanup.
 > the B1 partial mitigation** — each marked inline. What remains open there is a
 > golden-schema counters. **Ruling (2026-07-25):** the B3 dead-adapter flag
 > `rx_dead` was approved and landed (Pass 101); the B9 item-1 MAC-reject counter
-> and the E TSF-clamp counter were **declined**. Tier 2 is untouched.
+> and the E TSF-clamp counter were **declined**.
+>
+> **Tier-2 partial, 2026-07-25.** Landed this pass: **A3 reframed → Pass 102**
+> (the §9.8 fail-safe now floors at `max(min_profile, floor_profile)` — a mode
+> band never fades below its verified lowest rung; supersedes Pass 84, and the
+> min==max pin holds for free, so the earlier "pin yields" direction is
+> withdrawn); **B1 full** (non-blocking venc HTTP state machine — poll()-driven,
+> the flight loop can no longer block on a wedged venc); **A2** (`stats.stdout`
+> knob, off in the deployed craft config); **A1** + all of **section D**
+> (docs). Still open in Tier 2: **B2** (untimed waitpid on the flight loop),
+> **B4** (uncaught devourer throws), **B7** (unauth control plane bound
+> 0.0.0.0 in a sample).
 
 ---
 
@@ -39,6 +50,12 @@ verify.
 
 `deploy/README.md` "Before flight" does not mention it; it should once a
 decision is made.
+
+> **DONE (operator ruling 2026-07-25): stay announced-token, document it.** No
+> secret is provisioned; `deploy/README.md` "Before flight" now spells out
+> announced-token mode, the §11.5a sticky binding as the only takeover defence,
+> the option to provision a shared `csa.psk` (fails closed on mismatch, Pass
+> 85), and the re-scout-after-reboot procedure. No behaviour change.
 
 ### A2 — Craft logging fills a RAM-backed filesystem — SHOULD-FIX
 
@@ -85,8 +102,15 @@ vehicle (`min 1 / max 5`) is unaffected either way.
 
 > **Update (Pass 100, PR #53).** The `min < max` *range re-pin* now snaps a
 > stranded rung into `[min,max]` (down-clamp unconditional; up-clamp defers to
-> §9.8 on stale feedback). The `min == max` PINNED-vs-fail-safe question above
-> is still open — Tier 2.
+> §9.8 on stale feedback).
+>
+> **RESOLVED (Pass 102, 2026-07-25).** Reframed by the operator around the mode
+> harness: the real fix is that the §9.8 fail-safe descent floors at
+> `max(min_profile, floor_profile)`, so **no** mode fades below its band's
+> verified lowest rung (the deployed `min 1/max 5` craft fades to MCS1, not
+> MCS0; a Range-Low band to MCS2). This supersedes Pass 84. The `min == max`
+> pin then holds through a fade with no special case — its band floor is the
+> pin — so the original "should the pin yield?" question dissolves.
 
 ---
 
@@ -124,7 +148,15 @@ holdoff.
 > satisfied. `VencActuator::request_idr` now honours the shared
 > `no_retry_until_ms_` hold-off and sets it on failure (`venc_http.cpp`), so a
 > wedged venc is no longer re-poked (~600 ms blocking) from the air-RX dispatch
-> path. The full non-blocking state machine (B1 proper) stays Tier 2.
+> path.
+>
+> **B1 proper DONE (2026-07-25).** The actuator is now non-blocking: the setters
+> record the desired value and a poll()-driven connect/send/recv state machine
+> (zero-timeout poll() per step, hard 500 ms per-transaction wall deadline)
+> spends only microseconds per loop iteration. A wedged-but-accepting venc can
+> no longer stall the flight loop, csa.tick(), ARQ service or the §7.2 quiet
+> gap. The Pass 73 volatile-first fallback, write-on-change, holdoff, IDR rate
+> gate and every §15.3 counter are preserved; test rewritten to pump poll().
 
 ### B2 — `fork()` + `execvp()` + untimed `waitpid()` on the flight loop — BLOCKER
 
@@ -500,8 +532,12 @@ Where each bucket stands, so the next session does not re-derive the order.
   first), and the **B3 `rx_dead` flag** (Pass 101, operator-approved). Ruling
   2026-07-25 **declined** the other two golden-schema counters: B9 item 1
   (MAC-reject counter) and the E TSF-clamp counter — both stay unimplemented.
-- **Tier 2 — scoped but not started.** B1 full fix, B2, B4, B7, A3. The
-  operator's steer was "just do it" once tier 1 is done.
+- **Tier 2 — partly landed 2026-07-25.** DONE: **A3** (reframed to Pass 102 —
+  the §9.8 fail-safe floors at `max(min_profile, floor_profile)`, superseding
+  Pass 84), **B1 full** (non-blocking venc state machine), **A2** (`stats.stdout`
+  knob). STILL OPEN: **B2** (untimed waitpid on the flight loop + SA_RESTART),
+  **B4** (uncaught devourer exceptions), **B7** (unauth control plane bound
+  0.0.0.0 in a sample).
 - **Tier 3 / C-series** — verification campaigns needing bench and flight time,
   plus A1/A2 which need operator decisions rather than code.
 
@@ -615,6 +651,14 @@ walk is also the missing gate-4 range sample (C2).
 ---
 
 ## D. Doc drift found during the audit — NICE-TO-HAVE
+
+> **DONE 2026-07-25.** All items below corrected: `deploy/README.md`
+> (adaptive MCS 1–5, S96 autostart, TX-power-not-enforced note), `ROADMAP.md`
+> (Passes 64–66 marked landed), `docs/transport-architecture-review.md`
+> (kernel-monitor CSA + wedge detection now implemented, Passes 49/69/80),
+> `CLAUDE.md` (46 suites; HEARTBEAT/ANNOUNCE fire without a feed), and the
+> stale `rendezvous_timeout_s` key removed from the three sample configs and
+> `docs/step11-bench.md`.
 
 - `deploy/README.md`: "profile/MCS 3" — the vehicle config has been adaptive
   `min 1 / max 5` since #47.
