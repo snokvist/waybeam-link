@@ -189,12 +189,20 @@ bool VencActuator::request_idr(uint64_t now_ms) {
     if (now_ms < next_idr_ms_) {
         return true;
     }
+    if (now_ms < no_retry_until_ms_) {
+        // B1: honour the shared post-failure hold-off. request_idr runs on the
+        // air-RX dispatch path that also drives csa.tick(); a wedged venc must
+        // not be re-poked here (a blocking ~600 ms) just because it has its own
+        // idr gate — the failed set_bitrate already knows it is unreachable.
+        return false;
+    }
     next_idr_ms_ = now_ms + 1000;
     ++idr_requests_;
     if (http_get("/request/idr")) {
         return true;
     }
     ++idr_failures_;
+    no_retry_until_ms_ = now_ms + 500;  // B1: shared with set_bitrate/set_fps
     return false;
 }
 

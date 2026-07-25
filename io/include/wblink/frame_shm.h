@@ -60,6 +60,11 @@ class FrameShmRing {
     void drain_event();                          // read() the eventfd after servicing
     bool is_consumer() const { return is_consumer_; }
 
+    // B5: the producer's declared max frame size. A consumer must size its
+    // read buffer to at least this, or read_frame() rejects (never advancing)
+    // any frame larger than the buffer and wedges the ring forever.
+    uint32_t slot_data_size() const { return slot_data_size_; }
+
     // False when the producer cleared init_complete or unlinked/recreated the
     // name behind this consumer's existing mapping.
     bool backing_object_current() const;
@@ -105,6 +110,7 @@ class FrameShmRing {
     uint64_t last_frame_us_ = 0;
     uint64_t previous_interval_us_ = 0;
     uint64_t jitter_q4_us_ = 0;
+    bool warned_undersized_ = false;  // B5: log the buf-too-small wedge once
 };
 
 }  // namespace wblink

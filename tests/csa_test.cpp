@@ -153,6 +153,19 @@ int main() {
         CHECK_EQ_U(f.tick(at).kind,
                    static_cast<unsigned>(CsaAction::Kind::kRetune));
     }
+    {
+        // §11.2 clamp (E): a garbage/reset TSF delta ≥ dt_us is discarded, so
+        // the switch still fires at the full nominal dt (150 ms) instead of
+        // collapsing switch_at to now and retuning early, ahead of the issuer.
+        CsaFollower f(pol);
+        const uint64_t tsf_now = 500'000;  // elapsed = 500 ms > dt_us = 150 ms
+        CHECK(f.on_csa(make_csa(pol, 1, 5745, 150), 1'000'000, tsf_now,
+                       /*rx_tsfl=*/0, std::nullopt));
+        CHECK_EQ_U(f.tick(1'000'000 + 149'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        CHECK_EQ_U(f.tick(1'000'000 + 150'000).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kRetune));
+    }
 
     // --- §11.5 follower walk ------------------------------------------------
     {

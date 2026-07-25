@@ -137,6 +137,21 @@ int main() {
             CHECK_EQ_U(c.stats().frame_size_min, 0);
             CHECK_EQ_U(c.stats().frame_interval_us, 0);
             CHECK_EQ_U(c.stats().frame_jitter_us, 0);
+
+            // B5: slot_data_size() lets a consumer size its buffer so a full
+            // slot never trips the reject-without-advance wedge. An undersized
+            // buffer rejects (-1, no advance); a buffer sized to slot_data_size
+            // then reads the SAME frame — the read index never moved.
+            CHECK_EQ_U(c.slot_data_size(), slot_size);
+            CHECK(p.write_frame(frames[4].data(), slot_size));  // slot_size frame
+            std::vector<uint8_t> small(slot_size - 1);
+            CHECK_EQ_U(static_cast<long long>(
+                           c.read_frame(small.data(), small.size())),
+                       -1);
+            std::vector<uint8_t> fit(c.slot_data_size());
+            CHECK_EQ_U(static_cast<unsigned long long>(
+                           c.read_frame(fit.data(), fit.size())),
+                       slot_size);
         }
     }
 

@@ -19,6 +19,12 @@ namespace {
 
 constexpr int kUdpReceiveBufferBytes = 4 * 1024 * 1024;
 
+// B6: cap datagrams drained per fd per poll pass. The ingress sockets carry no
+// source filter (reject_originator defaults off), so an unbounded drain lets any
+// host that can reach the RTP port hold the flight loop inside recv_one. A cap
+// lets the loop breathe — ready data simply re-fires poll on the next pass.
+constexpr int kMaxDrainPerFd = 64;
+
 void close_fd(int& fd) {
     if (fd >= 0) {
         ::close(fd);
@@ -308,8 +314,8 @@ int BindingSet::poll_once(int timeout_ms,
             continue;
         }
         // Drain: per-fd receive order is preserved; devourer-style fairness
-        // across fds is irrelevant at <=4 ingress sockets.
-        for (;;) {
+        // across fds is irrelevant at <=4 ingress sockets. B6: bounded.
+        for (int drained = 0; drained < kMaxDrainPerFd; ++drained) {
             const long n = ins_[idx].sock.recv_one(buf_.data(), buf_.size());
             if (n <= 0) {
                 break;
@@ -357,7 +363,7 @@ int BindingSet::poll_once(int timeout_ms,
         if ((fds[idx].revents & POLLIN) == 0) {
             continue;
         }
-        for (;;) {
+        for (int drained = 0; drained < kMaxDrainPerFd; ++drained) {  // B6
             const long n = ins_[idx].sock.recv_one(buf_.data(), buf_.size());
             if (n <= 0) {
                 break;

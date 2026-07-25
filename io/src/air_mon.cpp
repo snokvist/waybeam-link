@@ -353,7 +353,15 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
         msg.msg_controllen = sizeof(control);
         const ssize_t n = ::recvmsg(a->fd, &msg, 0);
         if (n <= 0) {
-            continue;  // SO_RCVTIMEO / EINTR → re-check running
+            // EAGAIN (SO_RCVTIMEO idle) / EINTR are the normal idle path — just
+            // re-check running. A hard error (a wedged or removed USB device
+            // returns immediately) would otherwise spin this thread hot with no
+            // backoff; B3: throttle it so a dead ear cannot burn a core.
+            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+                errno != EINTR) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            continue;
         }
         for (cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr;
              cmsg = CMSG_NXTHDR(&msg, cmsg)) {

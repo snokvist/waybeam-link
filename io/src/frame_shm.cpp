@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 
@@ -360,9 +361,17 @@ long FrameShmRing::read_frame(uint8_t* buf, size_t cap) {
         return -1;
     }
     if (len > cap) {
-        // Caller buffer too small — don't advance; caller retries with a bigger
-        // buffer. Counted as a bad slot for visibility.
+        // B5: caller buffer too small — don't advance; caller must retry with a
+        // buffer sized to slot_data_size(). Counted as a bad slot, and logged
+        // once so this ring-wedging misconfiguration is not silent.
         ++stats_.bad_slots;
+        if (!warned_undersized_) {
+            warned_undersized_ = true;
+            std::fprintf(stderr,
+                         "frame_shm: read buffer %zu < frame %u — ingress "
+                         "stalled; size the buffer to slot_data_size (%u)\n",
+                         cap, len, slot_data_size_);
+        }
         return -1;
     }
     if (len > 0) {
