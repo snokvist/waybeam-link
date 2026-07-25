@@ -3135,3 +3135,50 @@ content hash (`core/src/table.cpp:42`), so this moves `table_version` off
 agree on the table. The pin in `tests/table_hash_test.cpp` moves with it.
 
 Spec: §9.3 field comment + two §9.5 bullets.
+
+---
+
+### Pass 96 — §15.5 `POST /api/v1/mode`: the link owns the user-facing operating mode
+
+**Context.** `docs/venc-mode-matrix.md` §16 defines nine user-facing operating
+modes (three fps × three range bands) over the IMX335. The user picks latency
+and range in the hub menu and never sees a frame size, MCS rung or fps number;
+everything else is derived. The open question was *where the mode lives* — the
+operator's ruling: *"the call for each mode should be api reachable from
+waybeam-link … so user can change mode from the waybeam_hub menu but link still
+owns the mode setting."*
+
+**Ruling (operator 2026-07-25).** The link is the control authority for the
+operating mode. A new `POST /api/v1/mode {name}` is the single entry point the
+hub calls; `GET /api/v1/mode` returns the active label. The link owns the label
+(persisted as `venc.active_mode`, restored at boot).
+
+**Why it is the one non-MUT_LIVE write.** A mode bundles three venc fields
+(`sensor.mode`, `video0.size` — both `restart_required` — and `video0.fps`)
+with the §9.7 range pin. Sensor mode and resolution cannot be applied in-loop,
+so the link does not try: it forks a **detached** on-craft applier
+(`venc.mode_apply_cmd`) that persists both configs and restarts venc. Two
+properties made this safe to add to the flight binary:
+
+- **The range pin is applied *live*** by the applier through the existing
+  `POST /api/v1/link/profile`, so the **link and CSA never restart** — no
+  §15.5a re-pair (issue B9), only a brief video drop from the venc restart.
+  This is why the mode change is not a link restart despite touching
+  restart_required venc fields.
+- **The fork is injection-proof and non-blocking.** The name is charset-limited
+  to `[A-Za-z0-9._-]` and passed as **argv, never a shell**; the applier is
+  double-forked + `setsid` so the grandchild reparents to init (no zombie,
+  nothing to wait on, flight loop never blocks). Precedent: `RadioAir` already
+  forks `execvp("iw", …)` for channel retunes.
+
+**Single source of truth.** The matrix lives only in `profiles/modes/*.json`
+(deployed to `/etc/waybeam-link/modes/`). The applier reads the five fields
+from `modes/<name>.json`; the link does not duplicate the matrix, it only holds
+the active label and forks. So the link stays generic and the nine JSON files
+are authoritative.
+
+Spec: §15.5 read + write tables, the MUT_LIVE-exception note, and the
+`POST /api/v1/mode` paragraph. Wired as `ControlHandlers::mode_get`/`mode_set`,
+`VencCfg::active_mode`/`mode_apply_cmd`, `spawn_mode_applier()`, and
+`deploy/modes/apply-mode.sh` + nine wrappers. Applying a mode is the operator's
+chosen mechanism: set the JSON fields via `json_cli`, restart venc.

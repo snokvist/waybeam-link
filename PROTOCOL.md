@@ -3101,6 +3101,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/link/selection` | receiver's configured/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
+| `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -3116,7 +3117,9 @@ after the existing discovery/idle windows; the endpoint does not alter latch
 selection or admission state.
 
 **Write** (live; `200 { "ok": true, … }` on success, `4xx { "ok": false, "error": "…" }`
-otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
+otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart — **with
+the single exception of `POST /api/v1/mode`** (§16, Pass 96), whose venc portion
+is `restart_required` and so is applied out-of-loop by a forked applier:
 
 | Method + path | Body | Effect |
 |---|---|---|
@@ -3131,10 +3134,26 @@ otherwise). Every write is **MUT_LIVE** — applied in-loop, no restart:
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto `target_chan` (or the emptiest allowlisted channel) |
 | `POST /api/v1/vehicle/command` | `{ "cmd": "arq"\|"selector"\|"fps_ladder"\|"fps_select"\|"resolution"\|"framing", "arg": 0..4 }` | start a §11.7 command campaign toward the bound craft; returns `{ok, nonce}` immediately, poll the GET for the outcome (issuer/ground node) |
 | `POST /api/v1/arq` | `{ "enabled": true\|false }` | RX-local NACK-emission gate (§6.4) — this node only, the craft is untouched (rx node) |
+| `POST /api/v1/mode` | `{ "name": "imx335-100fps-highrange" }` | select a user-facing operating mode (§16 of `docs/venc-mode-matrix.md`). **Not MUT_LIVE** — see below (TX/craft node) |
 
-Endpoints act only where meaningful — `csa` on the issuer, `link/profile` and
-`fec` on the TX, and `bench/rx-drop` only on UDP-air RX. An endpoint invoked in a mode where it does not apply returns
-**409**; an unknown path **404**; a malformed or oversize body **400**. The
+Endpoints act only where meaningful — `csa` on the issuer, `link/profile`,
+`fec` and `mode` on the TX, and `bench/rx-drop` only on UDP-air RX. An endpoint invoked in a mode where it does not apply returns
+**409**; an unknown path **404**; a malformed or oversize body **400**.
+
+**`POST /api/v1/mode` (§16, Pass 96)** is the user-facing operating-mode
+selector, and the one write that is not purely in-loop. A "mode" bundles three
+venc fields (`sensor.mode`, `video0.size` — both `restart_required` — and
+`video0.fps`) with the §9.7 range pin, all held in one `modes/<name>.json`
+(single source of truth). Because sensor mode and resolution need a venc
+restart, the link does not apply them itself: it validates the name (charset
+`[A-Za-z0-9._-]`, so it cannot inject), sets its active-mode label
+optimistically, and forks a **detached** on-craft applier
+(`venc.mode_apply_cmd`) passed the name as **argv, never a shell**. The applier
+persists both configs and restarts venc; the range pin it applies **live**
+through `POST /api/v1/link/profile`, so the **link and CSA never restart** and
+no §15.5a re-pair is needed — only video briefly drops. The link is the control
+authority: the hub POSTs here and the link owns the label, restored at boot
+from `venc.active_mode`. `409` if no applier is configured or off a TX node. The
 write knobs are exactly the §9/§11/§14 levers that were previously boot-time
 JSON only; the profile pin is the operating-point (MCS + bitrate) lever, since
 a profile bundles rate/power/MTU per §9.3. The `scout/*` endpoints (§15.5a) act
