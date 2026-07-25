@@ -340,13 +340,17 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
             policy_.report_timeout_ms + policy_.failsafe_hold_ms) {
             return;  // hold phase
         }
-        // §9.8 (Pass 84): the descent target is floor_profile, NOT the §9.7
-        // pin. min_profile is an adaptation envelope (how low the selector may
-        // CHOOSE to go while it can see feedback); floor_profile is the safety
-        // floor (where the link goes when feedback is GONE). Clamping here let
-        // a `min_profile: 1` airtime choice silently remove MCS0 from the one
-        // path that runs when the link is worst — "never fail optimistic".
-        const size_t floor = floor_rung();
+        // §9.8 (Pass 102, supersedes Pass 84): the descent floors at
+        // max(min_profile, floor_profile), NOT the table floor_profile alone.
+        // Under the mode harness (docs/venc-mode-matrix.md §16) min_profile
+        // (`lo`) is the Range band's lowest rung, and the mode's resolution +
+        // fps are co-designed so the §16.1 bpp floor is cleared at exactly that
+        // rung and no lower. Descending below it lands on a rung the mode never
+        // verified — a bpp violation, the "mode mechanics fighting each other"
+        // case. floor_profile stays the absolute floor and still binds when it
+        // sits ABOVE min_profile. (A min==max pin never reaches here — the
+        // PINNED branch returns above; its band floor is the pin regardless.)
+        const size_t floor = std::max(lo, floor_rung());
         if (rung_ > floor && now_ms >= failsafe_next_step_ms_) {
             failsafe_next_step_ms_ = now_ms + policy_.failsafe_step_ms;
             start_demote(rung_ - 1, now_ms, a);
