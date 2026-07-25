@@ -17,8 +17,9 @@ understood. **NICE-TO-HAVE** = cleanup.
 > (20/20 CSA soak). The **Tier-1 pass** (this doc's landing) fixed **B10, B9
 > items 2–3, B6, B5, the E TSF-elapsed clamp, the B3 monitor-spin throttle, and
 > the B1 partial mitigation** — each marked inline. What remains open there is a
-> handful of §15.3 golden-schema counters (B9 item 1, the E clamp counter, the
-> B3 dead-adapter flag), batched for an operator ruling, plus all of Tier 2.
+> golden-schema counters. **Ruling (2026-07-25):** the B3 dead-adapter flag
+> `rx_dead` was approved and landed (Pass 101); the B9 item-1 MAC-reject counter
+> and the E TSF-clamp counter were **declined**. Tier 2 is untouched.
 
 ---
 
@@ -152,8 +153,10 @@ With diversity, this stays hidden until the *second* adapter dies.
 > non-timeout error (a wedged/removed USB device), so a dead ear cannot burn a
 > core. A dead RX thread also already surfaces via the §6.5 stall watchdog
 > (`adapter_stalled`) within `stall_timeout_ms` plus the existing "rx loop died"
-> stderr line. The remaining piece — a dedicated §15.3 flag that distinguishes
-> *dead* from *quiet* — is a golden-schema add, batched for a ruling.
+> stderr line. **The dead-vs-quiet §15.3 flag `rx_dead` is now DONE (Pass 101):**
+> the `RadioAir` RX thread sets it on exception exit; kernel-monitor leaves it
+> false (no thread-exit death path). Observability only — §6.5 exclusion still
+> keys on the stall verdict.
 
 ### B4 — Exceptions from the radio backend can terminate the process — SHOULD-FIX
 
@@ -482,9 +485,9 @@ Where each bucket stands, so the next session does not re-derive the order.
   UDP + cache drain loops), **B5** (size the frame-SHM buffer from ring
   geometry), the **B3** monitor-spin throttle, and the partial **B1** mitigation
   (`request_idr` shares the venc hold-off; the loop already orders `csa.tick()`
-  first). Deferred to an operator ruling (each a §15.3 golden-schema add): B9
-  item 1 (MAC-reject counter), the E TSF-clamp counter, and the B3 dead-vs-quiet
-  adapter flag.
+  first), and the **B3 `rx_dead` flag** (Pass 101, operator-approved). Ruling
+  2026-07-25 **declined** the other two golden-schema counters: B9 item 1
+  (MAC-reject counter) and the E TSF-clamp counter — both stay unimplemented.
 - **Tier 2 — scoped but not started.** B1 full fix, B2, B4, B7, A3. The
   operator's steer was "just do it" once tier 1 is done.
 - **Tier 3 / C-series** — verification campaigns needing bench and flight time,

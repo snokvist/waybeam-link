@@ -1540,6 +1540,7 @@ struct AirBackend {
             as.tx_reports = c.tx_reports;
             as.tx_report_fails = c.tx_report_fails;
             as.tx_wedged = c.tx && tx_wedged;
+            as.rx_dead = c.rx_dead;  // §15.3 Pass 101 (RadioAir only)
             snap.adapters.push_back(std::move(as));
         }
 #else
