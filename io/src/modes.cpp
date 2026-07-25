@@ -60,10 +60,11 @@ bool parse_mode(const std::string& path, const std::string& name,
     return true;
 }
 
-}  // namespace
-
-std::string modes_catalog_json(const std::string& dir, const std::string& active,
-                               bool apply_configured) {
+// Enumerate + parse + name-sort the modes under `dir`. The single ordering
+// authority: both the GET /api/v1/modes catalog and the §11.7 MODE index→name
+// map read from this, so a malformed file skipped here is skipped for both and
+// the ordinals never drift (Pass 104/105).
+std::vector<ModeRow> collect_modes(const std::string& dir) {
     std::vector<ModeRow> modes;
     if (!dir.empty()) {
         if (DIR* d = ::opendir(dir.c_str())) {
@@ -82,7 +83,14 @@ std::string modes_catalog_json(const std::string& dir, const std::string& active
     // Name-sorted for a stable menu (readdir order is filesystem-defined).
     std::sort(modes.begin(), modes.end(),
               [](const ModeRow& a, const ModeRow& b) { return a.name < b.name; });
+    return modes;
+}
 
+}  // namespace
+
+std::string modes_catalog_json(const std::string& dir, const std::string& active,
+                               bool apply_configured) {
+    const std::vector<ModeRow> modes = collect_modes(dir);
     nlohmann::json out;
     out["active"] = active;
     out["apply_configured"] = apply_configured;
@@ -96,6 +104,12 @@ std::string modes_catalog_json(const std::string& dir, const std::string& active
                                 {"fps_mode", m.fps_mode}});
     }
     return out.dump();
+}
+
+std::string mode_name_at(const std::string& dir, size_t index) {
+    const std::vector<ModeRow> modes = collect_modes(dir);
+    if (index >= modes.size()) return "";  // §11.7 range error → REJECTED
+    return modes[index].name;
 }
 
 }  // namespace wblink

@@ -930,6 +930,7 @@ uint8_t vcmd_id_for(const std::string& name) {
     if (name == "fps_select") return vcmd_id::kFpsSelect;
     if (name == "resolution") return vcmd_id::kResolution;
     if (name == "framing") return vcmd_id::kFraming;
+    if (name == "mode") return vcmd_id::kMode;  // §11.7 Pass 105
     return 0;
 }
 
@@ -941,6 +942,7 @@ const char* vcmd_name_for(uint8_t id) {
         case vcmd_id::kFpsSelect: return "fps_select";
         case vcmd_id::kResolution: return "resolution";
         case vcmd_id::kFraming: return "framing";
+        case vcmd_id::kMode: return "mode";  // §11.7 Pass 105
     }
     return "";
 }
@@ -3020,6 +3022,25 @@ int run_tx(const Loaded& l) {
     VcmdCraft craft_cmd(craft_cmd_params,
                         CommonPrefix{l.cfg.node.originator, 0, session});
     const VcmdCraft::Apply apply_cmd = [&](uint8_t id, uint8_t arg) {
+        if (id == vcmd_id::kMode) {
+            // §11.7 0x07 MODE (Pass 105): arg indexes the name-sorted §15.5
+            // catalog. Resolve against the SAME enumeration GET /api/v1/modes
+            // is built from, then fork the §16 applier — the identical path
+            // POST /api/v1/mode takes (Pass 103 self-reassert heals the venc
+            // restart). REJECTED (return false) on a non-actuating node or an
+            // index past the catalog end.
+            if (l.cfg.venc.mode_apply_cmd.empty()) return false;
+            const std::string name =
+                mode_name_at(mode_catalog_dir(l.cfg.venc), arg);
+            if (name.empty()) return false;  // arg ≥ catalog length
+            if (!spawn_mode_applier(l.cfg.venc.mode_apply_cmd, name)) {
+                return false;
+            }
+            active_mode = name;  // optimistic; the applier is authoritative
+            std::fprintf(stderr, "vcmd: MODE[%u] -> %s (applier %s)\n", arg,
+                         name.c_str(), l.cfg.venc.mode_apply_cmd.c_str());
+            return true;
+        }
         return tx.apply_command(id, arg, now_ms());
     };
     // §9.10 TX-wedge watchdog over the TX adapter's CCX-report counters.
@@ -4070,9 +4091,14 @@ int run_rx(const Loaded& l) {
                 if (id == 0) {
                     return {400, "{\"ok\":false,\"error\":\"unknown cmd\"}"};
                 }
-                if (arg < 0 || arg > kVcmdMaxArg) {
+                // §11.7/§3.14: MODE (Pass 105) rides the full u8 — the catalog
+                // lives on the craft, so an over-range index is the craft's
+                // REJECTED to give, not a local 400. Every other command is
+                // capped at 0..4 (Pass 68).
+                const int arg_max = (id == vcmd_id::kMode) ? 255 : kVcmdMaxArg;
+                if (arg < 0 || arg > arg_max) {
                     return {400,
-                            "{\"ok\":false,\"error\":\"arg must be 0..4\"}"};
+                            "{\"ok\":false,\"error\":\"arg out of range\"}"};
                 }
                 // §11.7/§15.5: refused up front, not timed out — a campaign
                 // needs a craft this session committed to (claim or /csa).

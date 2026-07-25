@@ -66,7 +66,7 @@ inline constexpr uint8_t kRejected = 0x02;  // echo only: understood, won't do
 inline constexpr uint8_t kKnownMask = kAck | kRejected;
 }  // namespace vcmd_flags
 
-// §11.7 command registry. 0x07–0x1F reserved.
+// §11.7 command registry. 0x08–0x1F reserved.
 namespace vcmd_id {
 inline constexpr uint8_t kArq = 0x01;        // arg 0=off 1=on
 inline constexpr uint8_t kSelector = 0x02;   // arg 0=run 1=freeze (§9.7 pin)
@@ -74,10 +74,17 @@ inline constexpr uint8_t kFpsLadder = 0x03;  // arg 0=off 1=on (§9.11)
 inline constexpr uint8_t kFpsSelect = 0x04;   // arg = preset index (Pass 71)
 inline constexpr uint8_t kResolution = 0x05;  // arg = preset index (staged)
 inline constexpr uint8_t kFraming = 0x06;     // arg = preset index (staged)
+inline constexpr uint8_t kMode = 0x07;        // arg = §15.5 catalog index (P105)
 }  // namespace vcmd_id
 
-// §3.14 — every command is enable/disable or a ≤5-choice enum (Pass 68).
+// §3.14 — every command is enable/disable or a ≤5-choice enum (Pass 68), EXCEPT
+// 0x07 MODE, whose arg indexes the open-ended §15.5 catalog and rides the full
+// u8 (Pass 105). The structural cap below is thus cmd_id-dependent: it gates
+// every command but MODE. Helper keeps the exception in one place.
 inline constexpr uint8_t kVcmdMaxArg = 4;
+inline constexpr bool vcmd_arg_in_wire_range(uint8_t cmd_id, uint8_t cmd_arg) {
+    return cmd_id == vcmd_id::kMode || cmd_arg <= kVcmdMaxArg;
+}
 
 enum class FrameArqMode : uint8_t { kIdrOnly, kAllFrames };
 

@@ -228,6 +228,19 @@ craft. NB: this is the **link** control plane on `:8091`; majestic's own `GET
 /api/v1/modes` on `:80` (§4 above) is the *sensor*-mode list — same path, a
 different service and a different meaning.
 
+**Selecting a mode from the ground — §11.7 `0x07` MODE (Pass 105).** A local
+`POST /api/v1/mode` only reaches a craft on the operator's own LAN; from the
+*ground* the selection must ride the PSK-guarded RF uplink like every other
+vehicle command — an unauthenticated HTTP POST to the craft's network-facing hub
+would be a mode-change hole. So MODE joins the §11.7 registry: the ground reads
+the catalog over management HTTP (above), picks an index into the name-sorted
+list, and issues `POST /api/v1/vehicle/command {cmd:"mode", arg:<index>}`; the
+craft resolves the index against the *same* enumeration `GET /api/v1/modes` is
+built from and forks the §16 applier — the identical path `POST /api/v1/mode`
+takes, so the Pass 103 self-reassert heals the restart either way. MODE is the
+one §11.7 command with a full-`u8` arg (§3.14) because the catalog is open-ended;
+it is craft-session volatile (reboot → boot mode) and pre-flight (venc restart).
+
 ---
 
 ## 6. Open: 100 fps vs 90 fps

@@ -196,7 +196,8 @@ struct VehicleCmd {
     uint8_t cmd_seq = 0;    // copy counter N..1 (diagnostics only)
     uint8_t cmd_flags = 0;  // vcmd_flags
     uint8_t cmd_id = 0;
-    uint8_t cmd_arg = 0;    // 0..kVcmdMaxArg (§3.14, Pass 68)
+    uint8_t cmd_arg = 0;    // 0..kVcmdMaxArg (§3.14 Pass 68); full u8 for
+                            // cmd_id kMode (§15.5 catalog index, Pass 105)
     uint32_t cmd_mac = 0;
     friend bool operator==(const VehicleCmd&, const VehicleCmd&) = default;
 };
