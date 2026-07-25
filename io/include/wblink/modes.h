@@ -23,6 +23,14 @@ namespace wblink {
 std::string modes_catalog_json(const std::string& dir, const std::string& active,
                                bool apply_configured);
 
+// §11.7 0x07 MODE (Pass 105): resolve a catalog index to its mode name. `index`
+// is an ordinal into the SAME name-sorted, malformed-skipped enumeration
+// modes_catalog_json() is built from, so a ground that picked the index from
+// GET /api/v1/modes and the craft that applies it agree on which mode it is.
+// Returns "" when `index` is past the catalog end (a §11.7 range-error REJECTED)
+// or `dir` is empty/unreadable.
+std::string mode_name_at(const std::string& dir, size_t index);
+
 }  // namespace wblink
 
 #endif  // WBLINK_MODES_H

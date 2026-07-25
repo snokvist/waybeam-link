@@ -194,6 +194,35 @@ int main() {
         CHECK_EQ_U(static_cast<unsigned>(applied), 0u);
     }
 
+    // --- craft MODE (Pass 105): a wide arg reaches Apply untouched ----------
+    {
+        // The core does not clamp MODE; the app-level Apply maps the index and
+        // REJECTs an over-range one. Verify the >4 arg survives on_cmd, and a
+        // rejecting Apply produces a REJECTED echo carrying that same wide arg.
+        VcmdCraft craft(pol, craft_self);
+        uint64_t now = 1'000'000;
+        uint8_t seen_id = 0, seen_arg = 0;
+        const VcmdCraft::Apply capture = [&](uint8_t id, uint8_t arg) {
+            seen_id = id;
+            seen_arg = arg;
+            return arg < 10;  // stand-in for "index within catalog"
+        };
+        VehicleCmd in_range = make_cmd(pol, 7, vcmd_id::kMode, 9);
+        CHECK(craft.on_cmd(in_range, now, bound, capture));  // applied
+        CHECK_EQ_U(static_cast<unsigned>(seen_id), vcmd_id::kMode);
+        CHECK_EQ_U(static_cast<unsigned>(seen_arg), 9u);
+        drain_echoes(craft, now, pol);
+        now += static_cast<uint64_t>(pol.min_interval_ms + 1) * 1000;
+        VehicleCmd over = make_cmd(pol, 8, vcmd_id::kMode, 200);
+        CHECK(!craft.on_cmd(over, now, bound, capture));  // out of range
+        CHECK_EQ_U(static_cast<unsigned>(seen_arg), 200u);
+        auto echoes = drain_echoes(craft, now, pol);
+        CHECK_EQ_U(echoes.size(), pol.echo_copies);
+        CHECK(echoes[0].cmd_flags ==
+              (vcmd_flags::kAck | vcmd_flags::kRejected));
+        CHECK_EQ_U(static_cast<unsigned>(echoes[0].cmd_arg), 200u);
+    }
+
     // --- issuer campaign ----------------------------------------------------
     {
         VcmdIssuer issuer(pol);
@@ -209,6 +238,15 @@ int main() {
                             now));
         CHECK(!issuer.start({kGround, 0, kGroundSession}, kCraftOrig,
                             vcmd_id::kArq, kVcmdMaxArg + 1, now));
+        // §11.7 Pass 105: a wide arg the ≤5 bound refuses is accepted for MODE
+        // and still refused for any other command (the cmd_id-dependent gate).
+        {
+            VcmdIssuer modei(pol);
+            CHECK(!modei.start({kGround, 0, kGroundSession}, kCraftOrig,
+                               vcmd_id::kFpsSelect, 9, now));
+            CHECK(modei.start({kGround, 0, kGroundSession}, kCraftOrig,
+                              vcmd_id::kMode, 9, now));
+        }
 
         CHECK(issuer.start({kGround, 0, kGroundSession}, kCraftOrig,
                            vcmd_id::kArq, 0, now));

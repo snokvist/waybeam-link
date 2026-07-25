@@ -115,6 +115,23 @@ int main() {
         CHECK(out["modes"][1].at("fps_mode").get<std::string>() == "static");
     }
 
+    // §11.7 0x07 MODE (Pass 105): mode_name_at indexes the SAME name-sorted,
+    // malformed-skipped enumeration the catalog is built from — so a ground
+    // that picked ordinal i from GET /api/v1/modes and the craft that applies
+    // it resolve to the same mode. An index past the end (and an empty/bad dir)
+    // yields "" → the §11.7 range-error REJECTED.
+    {
+        const auto out = nlohmann::json::parse(modes_catalog_json(d, "", true));
+        const auto& m = out.at("modes");
+        CHECK_EQ_U(m.size(), 3);
+        for (size_t i = 0; i < m.size(); ++i) {
+            CHECK(mode_name_at(d, i) == m[i].at("name").get<std::string>());
+        }
+        CHECK(mode_name_at(d, m.size()).empty());  // one past the end
+        CHECK(mode_name_at("", 0).empty());
+        CHECK(mode_name_at(d + "/does-not-exist", 0).empty());
+    }
+
     // Cleanup.
     ::unlink((d + "/imx335-100fps-highrange.json").c_str());
     ::unlink((d + "/imx335-variable.json").c_str());

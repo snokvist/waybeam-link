@@ -293,9 +293,11 @@ Decoded decode_vehicle_cmd(const uint8_t* buf, size_t len) {
     c.cmd_id = buf[17];
     c.cmd_arg = buf[18];
     c.cmd_mac = be32_read(buf + 19);
-    // §3.14: cmd_arg is structurally 0..4 (Pass 68); an unknown cmd_id is NOT
-    // a decode error — the §11.7 craft engine answers it with REJECTED.
-    if (c.cmd_arg > kVcmdMaxArg) {
+    // §3.14: cmd_arg is structurally 0..4 (Pass 68) for every command but 0x07
+    // MODE, whose arg indexes the open-ended §15.5 catalog and rides the full
+    // u8 (Pass 105). An unknown cmd_id is NOT a decode error — the §11.7 craft
+    // engine answers it with REJECTED.
+    if (!vcmd_arg_in_wire_range(c.cmd_id, c.cmd_arg)) {
         return DecodeError::kInvalidField;
     }
     return c;
@@ -449,7 +451,7 @@ size_t encode_cache_assign(const CacheAssign& pkt, uint8_t* out, size_t cap) {
 size_t encode_vehicle_cmd(const VehicleCmd& pkt, uint8_t* out, size_t cap) {
     if (out == nullptr || cap < kVehicleCmdSize ||
         (pkt.cmd_flags & ~vcmd_flags::kKnownMask) != 0 ||
-        pkt.cmd_arg > kVcmdMaxArg) {
+        !vcmd_arg_in_wire_range(pkt.cmd_id, pkt.cmd_arg)) {  // §3.14/P105
         return 0;
     }
     encode_prefix(pkt.prefix, PacketType::kVehicleCmd, out);
