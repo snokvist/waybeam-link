@@ -42,7 +42,7 @@ struct ControlHandlers {
     std::function<std::string(uint32_t mhz, uint32_t klass)> csa;
     std::function<std::string(int min_profile, int max_profile)> profile;
     std::function<std::string(int stream_id, int i_permille, int p_permille,
-                              int min_k)>
+                              int min_k, int min_r)>
         fec;
     std::function<void()> reset_stats;  // side-effect only; always 200
     // §15.5a scout writes (ground/rx only; null → 409). start takes the parsed

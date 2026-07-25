@@ -79,7 +79,7 @@ std::string body_of(const std::string& resp) {
 int main() {
     // Captured knob state, mutated by the handlers.
     int pin_min = -1, pin_max = -1;
-    int fec_sid = -1, fec_i = -1, fec_p = -1, fec_k = -1;
+    int fec_sid = -1, fec_i = -1, fec_p = -1, fec_k = -1, fec_r = -1;
     bool fec_ok = true;
     int reset_calls = 0;
     int recovery_stream = -2;
@@ -113,11 +113,12 @@ int main() {
         pin_max = mx;
         return "";
     };
-    h.fec = [&](int sid, int ip, int pp, int mk) -> std::string {
+    h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
         fec_sid = sid;
         fec_i = ip;
         fec_p = pp;
         fec_k = mk;
+        fec_r = mr;
         return fec_ok ? "" : "no frame-shm stream with that id";
     };
     h.reset_stats = [&] { ++reset_calls; };
@@ -250,7 +251,8 @@ int main() {
     // fec round-trip.
     {
         const std::string body =
-            "{\"stream_id\":0,\"i_permille\":300,\"p_permille\":120,\"min_k\":4}";
+            "{\"stream_id\":0,\"i_permille\":300,\"p_permille\":120,\"min_k\":4,"
+            "\"min_r\":3}";
         const std::string req =
             "POST /api/v1/fec HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
@@ -259,6 +261,17 @@ int main() {
         CHECK_EQ_U(fec_i, 300);
         CHECK_EQ_U(fec_p, 120);
         CHECK_EQ_U(fec_k, 4);
+        CHECK_EQ_U(fec_r, 3);
+    }
+    // fec min_r defaults to 2 when the body omits it.
+    {
+        const std::string body =
+            "{\"stream_id\":0,\"i_permille\":300,\"p_permille\":200,\"min_k\":3}";
+        const std::string req =
+            "POST /api/v1/fec HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(fec_r, 2);
     }
     // fec handler rejects → 400.
     {

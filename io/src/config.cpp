@@ -265,6 +265,7 @@ Result<Config> load_config_json(const std::string& json_text) {
                 sc.fec.i_rate_permille = f.value("i_rate_permille", uint16_t{250});
                 sc.fec.p_rate_permille = f.value("p_rate_permille", uint16_t{100});
                 sc.fec.min_k = f.value("min_k", uint16_t{3});
+                sc.fec.min_r = f.value("min_r", uint16_t{2});
                 if (sc.fec.scheme != FecScheme::kNone && sc.bind.kind != BindKind::kFrameShm) {
                     return Result<Config>::fail(
                         "stream " + std::to_string(sid) +

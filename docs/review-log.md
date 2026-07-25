@@ -3219,3 +3219,51 @@ alongside the commit, direction-agnostic (covers a pin up as well). Regression:
 
 Spec: §9.7 pin-scope paragraph. No table change — `table_version` unaffected,
 so this is a binary-only (craft TX) redeploy, not a lockstep one.
+
+---
+
+### Pass 98 — §14.1 minimum repair floor `min_r` (small-frame burst protection)
+
+**Motivation (operator, 2026-07-25, out of the MCS0 test).** MCS0 works after
+Pass 94 + 97 but is choppier than large-frame operating points. Root cause is
+not more packet loss (MCS0 is the *most* robust modulation) but that small
+frames convert each lost packet into a lost *frame* far more often: at the seed
+`p_rate` 200 ‰, `r = ceil(k·0.2)` yields **r = 1 for every k ≤ 4**, so a small
+P-frame is a single loss from death, and `ceil(1·rate) = 1` for any rate ≤ 1000,
+so a bumped rate cannot help k = 1 at all.
+
+**Ruling (operator).** Add a minimum repair floor, and treat it as a general
+burst-protection win, not an MCS0 patch. `r = max(ceil(k·rate), min_r)`, seed
+`min_r = 2`.
+
+**Why a floor rather than a rate bump.** Both were on the table. A global
+`p_rate` bump costs airtime at *every* rung — including the high rungs where
+frames are large and loss is already ~0, wasting video bitrate — and still
+cannot reach k = 1. The floor adds symbols *only* to small frames (which are
+small in absolute bytes), never lowers the rate-derived count on large frames,
+and is the only lever for k = 1. So the floor strictly dominates a rate bump
+for this problem, and `p_rate` stays 200 ‰.
+
+**Measured (offline, real `FrameFramer`/`FrameReassembler`, 2 % loss).**
+
+| frame | k | r=ceil (was) | with min_r=2 | unrec was → now |
+|---|---|---|---|---|
+| ≤700 B | 1 | 1 | 2 | ~1.9 % → 0.005 % |
+| 1500 B | 2 | 1 | 2 | 0.128 % → 0.000 % |
+| 2800 B | 3 | 1 | 2 | 0.233 % → 0.015 % |
+| 5600 B | 5 | 1 | 2 | 0.595 % → 0.025 % |
+| ~28 KB | 20 | 4 | 4 | unchanged (ceil dominates) |
+
+**Bounds and interactions.** The floor applies only after the §14.1 `min_k`
+ARQ-only gate (Pass 94) has passed and only when the class rate is non-zero, so
+it never resurrects an ARQ-covered small frame nor forces FEC onto a disabled
+class. It sits under the GF(256) `k + r ≤ 256` cap. `min_r = 0` restores the
+pure rate formula.
+
+**Not a table change.** `min_r` is per-stream FEC config (`streams[].fec.min_r`,
+live via `POST /api/v1/fec`), not the §9.3 profile table — `table_version`
+unaffected, craft-only (TX) binary redeploy.
+
+Spec: §14.1 policy bullets, the config example, and the `/api/v1/fec` row.
+Wired through `FrameFecConfig::min_r`, `set_fec_rates`, `StreamFecCfg::min_r`,
+and the control-plane `fec` handler (fifth arg).

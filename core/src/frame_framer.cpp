@@ -42,7 +42,13 @@ uint16_t FrameFramer::repair_count(uint16_t k, bool is_idr, bool arq_eligible) {
     if (rate == 0) {
         return 0;
     }
-    const uint32_t r = (static_cast<uint32_t>(k) * rate + 999u) / 1000u;  // ceil
+    uint32_t r = (static_cast<uint32_t>(k) * rate + 999u) / 1000u;  // ceil
+    // §14.1 (Pass 98) minimum repair floor: never fewer than min_r symbols on
+    // a FEC'd frame, so a small frame is not left one loss from death. Never
+    // lowers the rate-derived r (large frames keep ceil(k·rate)).
+    if (r < cfg_.fec.min_r) {
+        r = cfg_.fec.min_r;
+    }
     if (r == 0) {
         return 0;
     }

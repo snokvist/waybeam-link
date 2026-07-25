@@ -36,6 +36,7 @@ struct StreamFecCfg {
     uint16_t i_rate_permille = 250;
     uint16_t p_rate_permille = 100;
     uint16_t min_k = 3;
+    uint16_t min_r = 2;  // §14.1 (Pass 98) minimum repair floor per FEC'd frame
 };
 
 struct JsccShadowCfg {

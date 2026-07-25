@@ -425,7 +425,8 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             return reply(400, "Bad Request", json_err("stream_id required"));
         }
         return done(h_.fec(j.value("stream_id", 0), j.value("i_permille", 250),
-                           j.value("p_permille", 100), j.value("min_k", 3)));
+                           j.value("p_permille", 100), j.value("min_k", 3),
+                           j.value("min_r", 2)));
     }
     if (path == "/api/v1/stats/reset") {
         if (!h_.reset_stats) return na();

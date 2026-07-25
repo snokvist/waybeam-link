@@ -204,6 +204,7 @@ int main() {
         fec.scheme = FecScheme::kRlc256;
         fec.p_rate_permille = 100;
         fec.min_k = 3;
+        fec.min_r = 0;  // isolate the rate formula from the Pass 98 floor
         Harness h(fec);
         const uint16_t s = h.framer.symbol_size();
         auto blob = make_frame(10000, /*idr=*/false, 6);
@@ -251,6 +252,7 @@ int main() {
         fec.scheme = FecScheme::kRlc256;
         fec.i_rate_permille = 250;
         fec.p_rate_permille = 100;
+        fec.min_r = 0;  // isolate override / fixed-rate r from the Pass 98 floor
         Harness h(fec, FrameArqMode::kAllFrames);
         const uint16_t s = h.framer.symbol_size();
         auto blob = make_frame(4 * s, /*idr=*/false, 9);  // k = 5 > min_k
@@ -308,6 +310,7 @@ int main() {
         fec.i_rate_permille = 300;
         fec.p_rate_permille = 200;
         fec.min_k = 3;
+        fec.min_r = 0;  // isolate the rate-derived r from the Pass 98 floor
 
         // A small P-frame under idr-only: NOT ARQ-eligible, so it gets parity
         // rather than nothing. r = ceil(3 * 0.2) = 1.
@@ -344,6 +347,41 @@ int main() {
         repairs = 0;
         for (const Sym& sy : big.sent) repairs += sy.is_repair() ? 1 : 0;
         CHECK_EQ_U(repairs, 1u);  // ceil(5 * 0.2)
+    }
+
+    // --- §14.1 Pass 98: minimum repair floor -------------------------------
+    {
+        FrameFecConfig fec;
+        fec.scheme = FecScheme::kRlc256;
+        fec.i_rate_permille = 300;
+        fec.p_rate_permille = 200;
+        fec.min_k = 3;
+        fec.min_r = 2;
+        auto rcount = [&](size_t body, bool idr, FrameArqMode mode) {
+            Harness h(fec, mode);
+            h.feed(make_frame(body, idr, 30));
+            size_t r = 0;
+            for (const Sym& sy : h.sent) r += sy.is_repair() ? 1 : 0;
+            return r;
+        };
+        const uint16_t s = Harness(fec).framer.symbol_size();
+        // k=1 P-frame under idr-only: ceil(1*0.2)=1, floored to min_r=2 — the
+        // only lever for k=1, since ceil(1*rate)=1 for any rate <= 1000.
+        CHECK_EQ_U(rcount(1 * s - 8, false, FrameArqMode::kIdrOnly), 2u);
+        // k=3: ceil(3*0.2)=1 -> floored to 2.
+        CHECK_EQ_U(rcount(3 * s - 8, false, FrameArqMode::kIdrOnly), 2u);
+        // Large frame: ceil(20*0.2)=4 already exceeds the floor, so unchanged.
+        CHECK_EQ_U(rcount(20 * s - 8, false, FrameArqMode::kIdrOnly), 4u);
+        // The floor never resurrects an ARQ-covered small frame (min_k gate
+        // still returns 0 first) or a P_rate=0 stream.
+        Harness gated(fec, FrameArqMode::kAllFrames);  // k<=min_k IS arq here
+        gated.feed(make_frame(2 * s - 8, false, 31));
+        for (const Sym& sy : gated.sent) CHECK(!sy.is_repair());
+        FrameFecConfig off = fec;
+        off.p_rate_permille = 0;  // P-FEC disabled: floor must not force it on
+        Harness disabled(off, FrameArqMode::kIdrOnly);
+        disabled.feed(make_frame(3 * s - 8, false, 32));
+        for (const Sym& sy : disabled.sent) CHECK(!sy.is_repair());
     }
 
     // --- §4.1 Pass 40 high-cadence ARQ cutoff --------------------------------

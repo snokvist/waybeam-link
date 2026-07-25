@@ -2314,6 +2314,19 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
   MCS0 failure: `derived_bitrate / fps` at the floor rung lands frames under
   `min_k · s`, and under `idr-only` they go out unprotected.
 
+- **Minimum repair floor `min_r` (Pass 98, seed 2).** A frame that is FEC'd —
+  past the `min_k` gate with a non-zero rate — gets `r = max(ceil(k·rate),
+  min_r)` repair symbols. `ceil(k·rate)` gives **r = 1 for every k ≤ 4** at the
+  seed 200 ‰ P-rate, so a small frame is one loss from death; and `ceil(1·rate)
+  = 1` for *any* rate ≤ 1000 ‰, so the floor is the **only** lever for k = 1.
+  The floor never lowers the rate-derived count (large frames keep
+  `ceil(k·rate)`), never overrides the `min_k` ARQ-only gate, and never forces
+  FEC onto a `rate = 0` class. It is airtime-cheap by construction: it adds
+  symbols only to small frames, which are small. Measured (offline, real
+  framer, 2 % loss): `min_r = 2` takes k=3 from 0.233 % → 0.015 % unrecoverable
+  and k=1 from ~1.9 % → 0.005 %. This is general burst-loss protection, not
+  MCS0-specific, but it is what makes the small-frame MCS0 corner usable until
+  the §9.11 fps ladder stops pairing MCS0 with 100 fps at all.
 - **Priority:** a frame's repair symbols are that frame's **live data**, emitted
   immediately after its source symbols at the same live priority (§5.3), *not*
   demoted to retransmit priority.
@@ -2718,7 +2731,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     "bind": { "kind": "frame-shm", "name": "venc_frame" },
     "arq_mode": "idr-only",
     "fec": { "scheme": "rlc256", "i_rate_permille": 250,
-             "p_rate_permille": 100, "min_k": 3 } }
+             "p_rate_permille": 100, "min_k": 3, "min_r": 2 } }
   ```
   `scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
   `"rlc256"` enables §14.1. Rates are integer per-mille (project convention). On
@@ -3130,7 +3143,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 |---|---|---|
 | `POST /api/v1/csa` | `{ "mhz": 5805, "class": 0 }` | start a §11 CSA campaign (issuer/ground node) |
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
-| `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3 }` | retune a `frame-shm` stream's §14.1 FEC rates (TX node) |
+| `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node) |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
 | `POST /api/v1/bench/rx-drop` | `{ "permille": 0 }` | UDP-air bench RX only: retune independent synthetic loss per listener (0–1000); 409 on RF backends |

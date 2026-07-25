@@ -1657,6 +1657,7 @@ struct TxCore {
                 fc.fec.i_rate_permille = s.fec.i_rate_permille;
                 fc.fec.p_rate_permille = s.fec.p_rate_permille;
                 fc.fec.min_k = s.fec.min_k;
+                fc.fec.min_r = s.fec.min_r;
                 st.frame_framer.emplace(fc);
                 st.frame_framer->set_operating_point(0, table_version,
                                                      max_payload_for(0));
@@ -2053,7 +2054,7 @@ struct TxCore {
     // §14.1 live FEC-rate retune for a frame-shm stream. Returns false if the
     // stream_id is unknown or is not a frame-shm (FrameFramer) stream.
     bool set_stream_fec(uint8_t stream_id, uint16_t i_permille,
-                        uint16_t p_permille, uint16_t min_k) {
+                        uint16_t p_permille, uint16_t min_k, uint16_t min_r) {
         for (Stream& s : streams_) {
             if (s.stream_id != stream_id) {
                 continue;
@@ -2061,7 +2062,7 @@ struct TxCore {
             if (!s.frame_framer) {
                 return false;  // udp stream: no per-stream FEC (§15.2)
             }
-            s.frame_framer->set_fec_rates(i_permille, p_permille, min_k);
+            s.frame_framer->set_fec_rates(i_permille, p_permille, min_k, min_r);
             return true;
         }
         return false;
@@ -2999,14 +3000,16 @@ int run_tx(const Loaded& l) {
                                static_cast<uint8_t>(mx));
             return "";
         };
-        h.fec = [&](int sid, int ip, int pp, int mk) -> std::string {
+        h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
-            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1)
-                return "bad fec rates (0..4000 permille, min_k>=1)";
+            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
+                mr < 0 || mr > 255)
+                return "bad fec rates (0..4000 permille, min_k>=1, min_r 0..255)";
             return tx.set_stream_fec(static_cast<uint8_t>(sid),
                                      static_cast<uint16_t>(ip),
                                      static_cast<uint16_t>(pp),
-                                     static_cast<uint16_t>(mk))
+                                     static_cast<uint16_t>(mk),
+                                     static_cast<uint16_t>(mr))
                        ? ""
                        : "no frame-shm stream with that id";
         };
@@ -4654,14 +4657,16 @@ int run_loopback(const Loaded& l) {
                                static_cast<uint8_t>(mx));
             return "";
         };
-        h.fec = [&](int sid, int ip, int pp, int mk) -> std::string {
+        h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
-            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1)
-                return "bad fec rates (0..4000 permille, min_k>=1)";
+            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
+                mr < 0 || mr > 255)
+                return "bad fec rates (0..4000 permille, min_k>=1, min_r 0..255)";
             return tx.set_stream_fec(static_cast<uint8_t>(sid),
                                      static_cast<uint16_t>(ip),
                                      static_cast<uint16_t>(pp),
-                                     static_cast<uint16_t>(mk))
+                                     static_cast<uint16_t>(mk),
+                                     static_cast<uint16_t>(mr))
                        ? ""
                        : "no frame-shm stream with that id";
         };
