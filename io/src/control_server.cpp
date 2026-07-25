@@ -464,6 +464,14 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         }
         return done(h_.arq_enable(j.value("enabled", true)));
     }
+    if (path == "/api/v1/link/fps") {
+        if (!h_.link_fps) return na();
+        if (!j.contains("ladder") || !j["ladder"].is_boolean()) {
+            return reply(400, "Bad Request",
+                         json_err("ladder (bool) required"));
+        }
+        return done(h_.link_fps(j.value("ladder", false)));
+    }
     if (path == "/api/v1/mode") {
         if (!h_.mode_set) return na();
         const std::string name = j.value("name", std::string());

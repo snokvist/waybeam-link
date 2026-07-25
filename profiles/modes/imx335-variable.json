@@ -1,0 +1,24 @@
+{
+  "_mode": "Variable fps / maximum range (docs/venc-mode-matrix.md §16.6)",
+  "_derivation": "The tenth mode, outside the matrix and NOT record-friendly. 1280x720, MCS band 0-5 (the full link envelope), fps free to float 30-100 via the §9.11 ladder (Pass 39/99). It spans the whole envelope because it trades cadence for rung all the way down: as the selector drops the MCS and the derived bitrate, P-frames shrink and the ladder lowers fps to keep each frame's FEC block useful. bpp is self-correcting — at MCS0 (2829 kbps) the ladder settles low fps so bpp stays well above the 0.04 floor. video0.fps below is only the boot seed; the ladder owns it once running.",
+  "_apply": "fps_mode=variable makes apply-mode.sh turn the §9.11 ladder ON (live, via POST /api/v1/link/fps) AFTER the venc restart, and persist venc.fps_ladder.enabled=true so a reboot boots variable. The ladder span (min 30 / preferred 100) is a per-craft constant in craft.json (venc.fps_ladder). VFR + GDR intra-refresh => live-view only, do not record.",
+  "venc": {
+    "sensor": {
+      "mode": 3
+    },
+    "video0": {
+      "fps": 100,
+      "size": "1280x720",
+      "resilience": "range"
+    }
+  },
+  "link": {
+    "policy": {
+      "select": {
+        "min_profile": 0,
+        "max_profile": 5
+      },
+      "fps_mode": "variable"
+    }
+  }
+}

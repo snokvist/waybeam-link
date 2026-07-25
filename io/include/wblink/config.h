@@ -123,9 +123,11 @@ struct SelectPolicy {
 
 // §9.11 FPS ladder (Pass 39; requires venc.enabled). Values must be §9.6
 // ladder members with min <= preferred <= max; v1 commands within
-// [min, preferred].
+// [min, preferred]. Pass 99: the ladder object is instantiated on every
+// venc craft (construct != run); `enabled` sets only the BOOT run-state, so
+// FPS_LADDER on/off toggles the loop at runtime with no link restart.
 struct FpsLadderCfg {
-    bool enabled = false;
+    bool enabled = false;  // boot run-state (not construct-gate; Pass 99)
     uint16_t min = 60;
     uint16_t preferred = 100;
     uint16_t max = 144;

@@ -17,7 +17,8 @@
       "select": {
         "min_profile": 1,
         "max_profile": 4
-      }
+      },
+      "fps_mode": "static"
     }
   }
 }

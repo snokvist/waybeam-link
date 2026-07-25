@@ -1601,8 +1601,13 @@ struct TxCore {
           report_gate_(ReportGatePolicy{
               cfg.node.preferred_originator,
               cfg.policy.report_timeout_ms * 4}) {
-        // §9.11 FPS ladder (Pass 39) — config validated it requires venc.
-        if (cfg.venc.enabled && cfg.venc.fps_ladder.enabled) {
+        // §9.11 FPS ladder (Pass 39; instantiate-vs-run split Pass 99). The
+        // object is instantiated on every venc craft — its existence commands
+        // nothing. `fps_ladder.enabled` sets only the BOOT run-state
+        // (cmd_fps_enabled_), so FPS_LADDER on/off (§11.7 0x03 / the craft-local
+        // POST /api/v1/link/fps) toggles the loop both ways at runtime with no
+        // link restart — which is what makes the variable-fps mode switchable.
+        if (cfg.venc.enabled) {
             const FpsLadderCfg& lc = cfg.venc.fps_ladder;
             FpsLadderPolicy fp;
             fp.min_fps = lc.min;
@@ -1615,6 +1620,7 @@ struct TxCore {
             fp.restore_after_ms = lc.restore_after_ms;
             fp.settle_ms = lc.settle_ms;
             fps_ladder_.emplace(fp);
+            cmd_fps_enabled_ = lc.enabled;  // static mode boots the loop off
         }
         // §10: one power curve per TX adapter with an authored map. The
         // resolve happens at profile commit; the radio backend applies it
@@ -3019,6 +3025,16 @@ int run_tx(const Loaded& l) {
             for (ShmIn& si : shm_ins) {
                 if (si.ring) si.ring->reset_stats();
             }
+        };
+        // §15.5 craft-local FPS-ladder toggle (Pass 99). Routes through the
+        // exact §11.7 FPS_LADDER transition the over-air path uses, so local
+        // and remote toggles are identical. false → static (loop off), true →
+        // variable (loop on). REJECTED (→ 400) on a craft with no venc actuator.
+        h.link_fps = [&](bool ladder_on) -> std::string {
+            return tx.apply_command(vcmd_id::kFpsLadder, ladder_on ? 1 : 0,
+                                    now_ms())
+                       ? ""
+                       : "fps ladder unavailable (no venc actuator on this node)";
         };
         // §15.5 operating-mode selection (Pass 96). The link is the control
         // authority: the hub POSTs a mode name here, the link records it and

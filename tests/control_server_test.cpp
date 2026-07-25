@@ -167,6 +167,12 @@ int main() {
         mode_state = name;
         return "";
     };
+    // §9.11 craft-local FPS-ladder toggle (Pass 99).
+    int fps_ladder_state = -1;
+    h.link_fps = [&](bool ladder_on) -> std::string {
+        fps_ladder_state = ladder_on ? 1 : 0;
+        return "";
+    };
     // h.csa intentionally left null → endpoint must 409.
     s.set_handlers(std::move(h));
 
@@ -392,6 +398,37 @@ int main() {
         const std::string body = "{\"enabled\":1}";  // must be a bool
         const std::string req =
             "POST /api/v1/arq HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    // §9.11 craft-local FPS-ladder toggle (Pass 99).
+    {  // ladder on → 200, handler sees true.
+        const std::string body = "{\"ladder\":true}";
+        const std::string req =
+            "POST /api/v1/link/fps HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(fps_ladder_state, 1);
+    }
+    {  // ladder off → 200, handler sees false.
+        const std::string body = "{\"ladder\":false}";
+        const std::string req =
+            "POST /api/v1/link/fps HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(fps_ladder_state, 0);
+    }
+    {  // missing ladder → 400.
+        const std::string body = "{}";
+        const std::string req =
+            "POST /api/v1/link/fps HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    {  // non-bool ladder → 400.
+        const std::string body = "{\"ladder\":1}";
+        const std::string req =
+            "POST /api/v1/link/fps HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }

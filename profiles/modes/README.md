@@ -36,6 +36,21 @@ smaller size is taken. Raise the floor at all and that cell becomes 1600×900.
 bpp is quoted worst rung → best rung. Every cell clears 0.04 at its floor and
 0.12+ at its top.
 
+## The tenth mode: variable-fps (`imx335-variable.json`)
+
+Outside the matrix and **not record-friendly**: 1280×720, MCS 0–5, fps free to
+float 30–100 via the §9.11 ladder (Pass 39/99). The only configuration that
+spans the full link envelope — it trades cadence for rung all the way down. VFR
+plus GDR intra-refresh means **live-view only, do not record**. See
+`docs/venc-mode-matrix.md` §16.6.
+
+Each mode carries `link.policy.fps_mode` (`static` default | `variable`): the
+nine matrix modes are `static` (fps pinned, the §9.11 ladder held off);
+`imx335-variable` is `variable` (the ladder runs). `apply-mode.sh` toggles the
+ladder **live** through `POST /api/v1/link/fps` — **no link restart, no B9
+re-pair** — so switching to/from the variable mode is a runtime change (only the
+sensor.mode/size of a *different* mode still needs a venc restart).
+
 ## Sensor modes
 
 Chosen per **row**, not per cell — the ISP downscales, so encode resolution
@@ -80,7 +95,8 @@ the floor cells do not actually clear 0.04.
 
 ## Not covered yet
 
-- **The variable-fps mode** — 1280×720, fps floating 30–100, MCS 0–5,
-  explicitly not record-friendly. The only configuration that spans the full
-  link envelope. Needs the §9.11 ladder rework first (§10).
+- **Per-mode ladder spans / differential resilience** — the variable mode's
+  ladder span (min 30 / preferred 100) is a per-craft `craft.json` constant, not
+  a mode field, because it is read at ladder-construct time. Differential
+  resilience per mode is likewise deferred.
 - **IMX415**, and aspect-ratio handling.
