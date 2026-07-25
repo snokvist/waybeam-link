@@ -4029,9 +4029,14 @@ int run_rx(const Loaded& l) {
         // an independent scout/claim/CSA control surface that could split it
         // from the receiver's committed selection.
         if (!cache_assignment_gate) {
-            h.scout_start = [&](const std::vector<uint16_t>& chans,
-                                uint32_t dwell, const std::string& mode,
-                                int target) -> std::string {
+            // Capture do_claim BY VALUE: it is a block-local lambda, but the
+            // handlers outlive this block (moved into `control`, invoked from
+            // the event loop below), so a by-reference capture would dangle —
+            // a stack-use-after-scope on the first quickconnect. scout_quickconnect
+            // already copies it (assignment below); scout_start must too.
+            h.scout_start = [&, do_claim](const std::vector<uint16_t>& chans,
+                                          uint32_t dwell, const std::string& mode,
+                                          int target) -> std::string {
                 if (mode == "quickconnect") {
                     if (target < 0) {
                         return "quickconnect requires target.originator";
