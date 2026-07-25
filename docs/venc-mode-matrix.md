@@ -801,6 +801,27 @@ One extra mode outside the matrix, explicitly **not record-friendly**:
 that spans the full link envelope, because it can trade cadence for rung all
 the way down. Offer it as *"maximum range, no recording."*
 
+**How it is wired (Pass 99).** fps behaviour is a mode field:
+`link.policy.fps_mode` ∈ `{"static","variable"}` (default `"static"`). The nine
+matrix modes are `"static"` — the §9.11 ladder held off, `video0.fps` pinned by
+the mode; `imx335-variable` is `"variable"` — the ladder run on, `video0.fps`
+free to float 30–100. `apply-mode.sh` reads the field and toggles the ladder
+through the craft-local `POST /api/v1/link/fps {"ladder": bool}` endpoint (Pass
+99, §15.5), which routes through the same §11.7 `FPS_LADDER` transition the
+ground uses — **no link restart, no CSA re-pair**. The ladder span
+(`min 30`/`preferred 100`) is a per-craft constant in `craft.json`
+(`venc.fps_ladder`); the ladder object is now instantiated on every venc craft
+(construct ≠ run, §9.11), so the toggle works both ways at runtime. For a reboot
+to reproduce the mode, `apply-mode.sh` also persists `venc.fps_ladder.enabled`
+as the boot run-state.
+
+**Why "not record-friendly" is a hard property, not a caution.** The mode is
+VFR: a moving fps breaks CFR muxers/recorders, and — because these modes run
+`resilience=range` (GDR intra-refresh) — the refresh period is frame-indexed, so
+a changing fps stretches/compresses the refresh interval. Live-view only. A
+time-based (not frame-indexed) refresh for the variable mode is a follow-up, not
+a v1 requirement.
+
 ### 16.7 What this depends on
 
 - §11's `min_k` fix. Without it the Range-High column is unsafe at its floor

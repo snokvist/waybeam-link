@@ -1475,8 +1475,20 @@ block size: if the measured encoded P frames become too small, fewer frames per
 second at the same bitrate give each frame more bytes/source symbols and hence
 more absolute repair symbols at the configured FEC ratio. `maxIBytes` and
 `maxPBytes` remain live ceilings, not promises that the encoder will fill a
-frame to that size. Opt-in (`venc.fps_ladder.enabled`, default false; requires
-`venc.enabled` — the ladder writes `video0.fps`).
+frame to that size.
+
+**Instantiate vs. run (Pass 99).** The ladder object is **instantiated whenever
+`venc.enabled`** — it is a cheap controller and its mere existence commands
+nothing. `venc.fps_ladder.enabled` (default false) sets only the **boot
+run-state**: whether the loop is issuing FPS commands at start-up. Because the
+object always exists on a venc craft, `FPS_LADDER on`/`off` (§11.7 `0x03`)
+toggles the loop **in both directions at runtime with no link restart** (so no
+§11.3 CSA re-pair) — a craft that booted static can become variable and back.
+This is what lets fps behaviour be a user-facing *mode* property
+(`docs/venc-mode-matrix.md` §16.6): the nine static-fps modes are the ladder
+held off; the variable-fps mode is the ladder run on. The span (`min`/
+`preferred`) is read at instantiation and is a per-craft constant; per-mode
+spans are deferred.
 
 - **Ladder:** the discrete §9.6 set `{30, 45, 60, 75, 90, 100, 120, 144}`
   clipped to the configured envelope. v1 operates in `[min, preferred]`:
@@ -2039,7 +2051,7 @@ this channel. Wire format is §3.14; everything below is behaviour.
 |---|---|---|---|
 | `0x01` | `ARQ` | 0=off, 1=on | **off:** the craft TX stamps no `ARQ`/`PFRAME_ARQ` flags on future DATA and serves no incoming NACKs. Receivers then generate no NACKs by construction (§6.4 NACKs only flagged seqs) and the §14.3 nack-grace machinery stops arming — after already-stamped in-flight blocks drain (one deadline window), no uplink or cache churn for a knob receivers were never told about. FEC repair symbols (§14.1, forward) and §3.9 decoder recovery are **unaffected**. **on:** restores the boot-configured behaviour (per-stream `arq_mode`, §4.1); on a craft whose boot config flags nothing, `on` is an acked no-op, not `REJECTED` |
 | `0x02` | `SELECTOR` | 0=run, 1=freeze | **freeze:** §9.7 `min==max` pin — a select-and-hold of the current operating point. **run:** restores the boot-config `[min, max]` envelope. Either direction takes effect at the **next selector evaluation**; during the §11.3 CSA freeze that is when the freeze lifts, and the pinned rung is sampled *then* (never mid-blackout). This command and §15.5 `POST /api/v1/link/profile` drive the *same* §9.7 lever; last writer wins |
-| `0x03` | `FPS_LADDER` | 0=off, 1=on | **off:** the §9.11 loop stops issuing FPS commands; the current fps holds where it is (no snap to `preferred` — least surprise). **on:** re-enables the loop with cleared evidence, as after a §9.11 settle. "Configured" = the ladder ran at boot (`venc.enabled` + `venc.fps_ladder.enabled`, §9.11 opt-in); on any other craft either arg is echoed `REJECTED` — the command toggles a running loop, it cannot conjure one |
+| `0x03` | `FPS_LADDER` | 0=off, 1=on | **off:** the §9.11 loop stops issuing FPS commands; the current fps holds where it is (no snap to `preferred` — least surprise). **on:** re-enables the loop with cleared evidence, as after a §9.11 settle. "Configured" = `venc.enabled` (Pass 99: the ladder object is instantiated on every venc craft, so this toggles freely both ways with no link restart; `venc.fps_ladder.enabled` sets only the *boot* run-state). On a non-venc craft either arg is echoed `REJECTED` — the command needs an actuator, it cannot conjure one. The craft-local `POST /api/v1/link/fps` (§15.5) drives this *same* lever |
 | `0x04` | `FPS_SELECT` | preset index 0..4 | Sets encoder fps to `venc.command_presets.fps[arg]` through the §9.6/§9.11 actuator (write-on-change; venc requests an IDR after a real change). `REJECTED` when: the preset list is unconfigured or `arg` ≥ its length, `venc.enabled` is false, **or the §9.11 ladder is currently enabled** (`cmd_fps_ladder` true — the ladder owns `video0.fps`; issue `FPS_LADDER` off first — Pass 71 ruling, no implicit ladder stop). A selection updates a configured-but-disabled ladder's current-rung model, so a later `FPS_LADDER` on resumes from the selected rung, not a stale one. While no ladder is running, the selected fps is the §9.11 cap-coupling cadence input (authoritative immediately, same rule as a ladder command) |
 | `0x05` | `RESOLUTION` | preset index 0..4 | Sets encoder resolution to `venc.command_presets.resolution[arg]` (a venc `video0.size` string, e.g. `"1280x720"`). `REJECTED` when the preset list is unconfigured, `arg` ≥ its length, `venc.enabled` is false, or the actuation path is not yet implemented (staged, Pass 71 — the venc-side knob is a venc-repo dependency) |
 | `0x06` | `FRAMING` | preset index 0..4 | Sets encoder framing mode to `venc.command_presets.framing[arg]` (a venc `video0.framing` string). Same `REJECTED` set as `RESOLUTION` (staged, Pass 71) |
@@ -2885,7 +2897,8 @@ The `cmd_*` / `vcmd_*` / `arq_rx_enabled` link fields are the §11.7 command
 surface, emitted on every node with role-neutral defaults: `cmd_arq`,
 `cmd_selector_frozen`, `cmd_fps_ladder` are the craft's currently applied
 command state (boot values until a command lands; `cmd_fps_ladder` is false
-when the ladder is unconfigured), the v2 `cmd_*_select` fields are the
+when the ladder is not *running* — no venc actuator, or the loop booted/toggled
+off per Pass 99), the v2 `cmd_*_select` fields are the
 **1-based preset index** applied this craft session (0 = none — only a
 pre-live venc, §9.6 fallback, may still run a preset persisted in an earlier
 session, §11.7),
@@ -3152,10 +3165,12 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto `target_chan` (or the emptiest allowlisted channel) |
 | `POST /api/v1/vehicle/command` | `{ "cmd": "arq"\|"selector"\|"fps_ladder"\|"fps_select"\|"resolution"\|"framing", "arg": 0..4 }` | start a §11.7 command campaign toward the bound craft; returns `{ok, nonce}` immediately, poll the GET for the outcome (issuer/ground node) |
 | `POST /api/v1/arq` | `{ "enabled": true\|false }` | RX-local NACK-emission gate (§6.4) — this node only, the craft is untouched (rx node) |
+| `POST /api/v1/link/fps` | `{ "ladder": true\|false }` | §9.11 ladder toggle (Pass 99); `true` = variable fps (the loop runs), `false` = static (the loop stops, fps holds). Routes through the same §11.7 `FPS_LADDER` transition as the over-air path; **MUT_LIVE**, no restart. `409` off a venc/TX node (TX/craft node) |
 | `POST /api/v1/mode` | `{ "name": "imx335-100fps-highrange" }` | select a user-facing operating mode (§16 of `docs/venc-mode-matrix.md`). **Not MUT_LIVE** — see below (TX/craft node) |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile`,
-`fec` and `mode` on the TX, and `bench/rx-drop` only on UDP-air RX. An endpoint invoked in a mode where it does not apply returns
+`fec`, `link/fps` and `mode` on the TX, and `bench/rx-drop` only on UDP-air RX.
+An endpoint invoked in a mode where it does not apply returns
 **409**; an unknown path **404**; a malformed or oversize body **400**.
 
 **`POST /api/v1/mode` (§16, Pass 96)** is the user-facing operating-mode

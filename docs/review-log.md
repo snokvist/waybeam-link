@@ -3267,3 +3267,79 @@ unaffected, craft-only (TX) binary redeploy.
 Spec: §14.1 policy bullets, the config example, and the `/api/v1/fec` row.
 Wired through `FrameFecConfig::min_r`, `set_fec_rates`, `StreamFecCfg::min_r`,
 and the control-plane `fec` handler (fifth arg).
+
+---
+
+## Pass 99 — §9.11/§11.7 fps behaviour is a mode property; craft-local ladder toggle (2026-07-25)
+
+**Context.** PR #53 makes fps a user-facing mode axis (§16,
+`docs/venc-mode-matrix.md`): nine static-fps modes (recordable, CFR) plus one
+variable-fps mode (§16.6 — 1280×720, fps free 30–100, MCS band 0–5, *"maximum
+range, no recording"*). The variable mode **is** the §9.11 ladder running; the
+nine static modes are the ladder held still. Operator ruling (2026-07-25):
+*"this is now just down to a mode policy selection … all the modes have static
+FPS selections, except the special VARIABLE FPS mode"*, and *"I agree with
+(2a)"* — the link stays the **sole owner** of fps behaviour; mode-select pokes
+it **locally**, no ground round-trip.
+
+**Problem.** Two gaps blocked shipping the variable mode as a *switchable* mode:
+
+1. **Construct-gating.** §9.11 instantiated the ladder object only when
+   `venc.fps_ladder.enabled` was true at boot, and `FPS_LADDER on` (§11.7
+   `0x03`) is documented to *toggle a running loop, it cannot conjure one* — so a
+   craft that booted static could never become variable without a **link
+   restart**, and a link restart drops CSA (B9 re-pair). Switching modes must
+   never restart the link.
+2. **No craft-local lever.** The only on/off path was the §11.7 VEHICLE_CMD
+   campaign, which is issuer→craft over the air. The Pass 96 mode mechanism is
+   craft-local (hub → `POST /api/v1/mode` → forked applier). There was no
+   craft-local way for the applier to set the ladder state.
+
+**Ruling (operator, option (2a)).**
+
+- **Decouple construct from run.** The ladder object is instantiated whenever
+  `venc.enabled` (it is a cheap POD controller). `venc.fps_ladder.enabled` now
+  sets only the **boot run-state** (`TxCore::cmd_fps_enabled_`), not whether the
+  object exists. `FPS_LADDER on`/`off` therefore works in **both** directions on
+  any venc craft, with no link restart and no B9. "Configured" in the §11.7
+  `0x03` row now means `venc.enabled`, not `fps_ladder.enabled`.
+- **Add a craft-local toggle.** New `POST /api/v1/link/fps {"ladder": bool}`
+  (§15.5, TX/craft only, null hook → 409). It routes through the *same* §11.7
+  `apply_command(FPS_LADDER, …)` transition as the over-air path, so local and
+  remote are identical (same `resume()` settle semantics, same select-clear).
+  **MUT_LIVE** — no restart.
+- **fps behaviour becomes a mode field.** Each mode JSON gains
+  `link.policy.fps_mode` (`"static"` default | `"variable"`). `apply-mode.sh`
+  reads it: static → `POST … {"ladder":false}` **before** the venc restart that
+  pins `video0.fps`; variable → `POST … {"ladder":true}` **after** the venc
+  restart. The ladder span (`min`/`preferred`) stays a fleet constant in
+  `craft.json` (`venc.fps_ladder`, seed `min 30`, `preferred 100`) — per-mode
+  spans are a construct-time parameter and are deferred.
+
+**Why the boot run-state still lives in config.** After a reboot the link must
+reproduce the persisted mode without the applier re-running. `apply-mode.sh`
+persists `venc.fps_ladder.enabled` alongside the venc fields, so a variable-mode
+craft boots variable and a static-mode craft boots static; the construct-always
+change only makes the *runtime* transition restart-free.
+
+**Ordering matters in the applier.** Static path turns the ladder **off first**
+so the loop stops commanding `video0.fps`, *then* restarts venc at the pinned
+fps — otherwise a still-running ladder would fight the restart. Variable path
+restarts venc (to seed `preferred`) *then* turns the ladder **on**, so the
+ladder resumes from a known rung with cleared evidence.
+
+**Recording caveat (design doc §16.6).** The variable mode is VFR — it breaks
+CFR muxers, and with `resilience=range` the GDR intra-refresh period is
+frame-indexed, so a moving fps stretches/compresses the refresh interval. The
+variable mode is **live-view only**; a time-based (not frame-indexed) refresh
+for it is noted as follow-up.
+
+**Not a table change.** Everything here is per-craft link config + a live
+control toggle. `table_version` unaffected; **craft-only (TX) binary redeploy**
+— ground is untouched.
+
+Spec: §9.11 (instantiate-vs-run split), §11.7 `0x03` row ("Configured" =
+`venc.enabled`), §15.5 (`POST /api/v1/link/fps` row + MUT_LIVE note). Wired
+through `TxCore::apply_command` (unchanged transition), the always-construct
+change in the `TxCore` ctor + `cmd_fps_enabled_` boot-init, `ControlHandlers::
+link_fps`, `apply-mode.sh`, and `link.policy.fps_mode` in the mode JSONs.
