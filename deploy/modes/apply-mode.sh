@@ -40,6 +40,7 @@ get() { "$JSON_CLI" -g "$1" -i "$MODE_JSON" --raw 2>/dev/null; }
 SENSOR_MODE=$(get .venc.sensor.mode)
 FPS=$(get .venc.video0.fps)
 SIZE=$(get .venc.video0.size)
+RESILIENCE=$(get .venc.video0.resilience)   # GDR intra-refresh vs GOP; optional
 MINP=$(get .link.policy.select.min_profile)
 MAXP=$(get .link.policy.select.max_profile)
 
@@ -47,7 +48,7 @@ for v in "$SENSOR_MODE" "$FPS" "$SIZE" "$MINP" "$MAXP"; do
   [ -n "$v" ] || { echo "apply-mode: $MODE_JSON missing a field" >&2; exit 2; }
 done
 
-echo "apply-mode: $NAME -> sensor.mode=$SENSOR_MODE video0=${SIZE}@${FPS} MCS ${MINP}-${MAXP}"
+echo "apply-mode: $NAME -> sensor.mode=$SENSOR_MODE video0=${SIZE}@${FPS} resilience=${RESILIENCE:-default} MCS ${MINP}-${MAXP}"
 
 # 1) Range pin, LIVE through the link (no restart). Best-effort: if the link is
 #    down this is a no-op and the persisted pin below takes effect on next start.
@@ -62,10 +63,11 @@ curl -sS --max-time 4 -X POST "http://$LINK_CTRL/api/v1/link/profile" \
 "$JSON_CLI" -s .policy.select.max_profile "$MAXP" -i "$LINK_CFG"
 "$JSON_CLI" -s .venc.active_mode "\"$NAME\"" -i "$LINK_CFG"
 
-# 3) Persist the venc fields. sensor.mode and video0.size are restart_required.
+# 3) Persist the venc fields. sensor.mode/size/resilience are restart_required.
 "$JSON_CLI" -s .sensor.mode "$SENSOR_MODE" -i "$VENC_CFG"
 "$JSON_CLI" -s .video0.size "\"$SIZE\"" -i "$VENC_CFG"
 "$JSON_CLI" -s .video0.fps "$FPS" -i "$VENC_CFG"
+[ -n "$RESILIENCE" ] && "$JSON_CLI" -s .video0.resilience "\"$RESILIENCE\"" -i "$VENC_CFG"
 
 # 4) Restart venc so sensor.mode/size take effect. The link keeps running and
 #    re-acquires the new video stream; it owns bitrate/fps live from here.

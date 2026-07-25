@@ -8,7 +8,8 @@
     },
     "video0": {
       "fps": 100,
-      "size": "1280x720"
+      "size": "1280x720",
+      "resilience": "range"
     }
   },
   "link": {

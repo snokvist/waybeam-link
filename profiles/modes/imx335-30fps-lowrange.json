@@ -8,7 +8,8 @@
     },
     "video0": {
       "fps": 30,
-      "size": "1920x1080"
+      "size": "1920x1080",
+      "resilience": "range"
     }
   },
   "link": {
