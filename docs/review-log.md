@@ -3519,3 +3519,46 @@ Spec: §15.5 (new Write-table row + the §16 applier paragraph gains the
 stranding-gap explanation). Wired through `VencActuator::invalidate()` +
 `venc_actuator_test`; verified on the fleet with the new mode harness
 (`tools/mode_harness.py`) red→green.
+
+## Pass 104 — §15.5 `GET /api/v1/modes`: the operating-mode catalog (2026-07-25)
+
+**Context.** Wiring the waybeam-hub mode menu onto the link's control plane, the
+first gap: the link exposes `POST /api/v1/mode` (apply) and `GET /api/v1/mode`
+(the *active* label) but **no way to enumerate the selectable modes**. `GET
+/api/v1/modes` returned `unknown path`. The 10 modes exist only as
+`modes/imx335-*.json` files on the craft, so a menu had to either read those
+files itself or ship a hardcoded catalog — both drift from the craft the moment
+a mode is added or its parameters change.
+
+**Ruling (operator).** Add `GET /api/v1/modes` to the link and keep the link the
+**single source of truth** for which modes exist and their parameters; the hub
+renders, it does not catalog. Raised as an explicit gap before implementing (the
+two rejected alternatives — hub-side catalog, or the hub reading craft files
+directly — both re-introduce the drift the mode matrix was built to avoid).
+
+**Shape.** `{active, apply_configured, modes:[{name, fps, resolution, mcs_min,
+mcs_max, fps_mode}]}`. Per-mode facts come straight from each mode file
+(`.venc.video0.fps`/`.size`, `.link.policy.select.min_profile`/`max_profile`,
+`.link.policy.fps_mode`), so the wire is the raw latency/range/resolution facts,
+**not** UI vocabulary — the caller maps `mcs_min`/`mcs_max` to any "High/Med/Low"
+label and lays out the latency×range grid. `resolution` is the derived §16
+resolution (`video0.size`). Name-sorted; malformed/partial files skipped, never
+fatal.
+
+**Where the modes live.** New `venc.modes_dir`. When unset it defaults to the
+directory containing `mode_apply_cmd` (the §16 layout co-locates the applier and
+the mode files), so an already-deployed craft serves the catalog with no config
+change. Off a TX node the endpoint **409**s (like `/api/v1/mode`); on a craft
+with no readable dir it returns an empty `modes[]` — a misconfigured craft is
+distinguishable from a wrong-node 409.
+
+**Mechanics.** New io helper `modes_catalog_json(dir, active, apply_configured)`
+(POSIX `dirent` enumerate + nlohmann parse — no `std::filesystem`, to stay clean
+on the ARMv7 cross toolchain); `h.modes_list` hook + a `control_server` route
+mirroring `/api/v1/mode`; wired on both the TX and loopback control paths. Pure
+add — no `table_version` bump, read-only, craft-only (TX) surface. New unit
+`modes_test` (valid + partial + non-JSON dir entries → catalog).
+
+Spec: §15.5 (new Read-table row + a catalog paragraph after the `POST
+/api/v1/mode` discussion). First step of the hub mode-menu integration; the
+ground→craft transport (craft-local hub proxy) is a separate, later piece.

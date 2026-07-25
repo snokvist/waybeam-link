@@ -217,6 +217,17 @@ its next tick. **The one supported entry is `POST /api/v1/mode`** (the hub), whi
 forks the applier; running `apply-mode.sh` by hand is bench-only (it self-reasserts
 either way). Verified end-to-end by `tools/mode_harness.py`.
 
+**Enumerating the catalog — `GET /api/v1/modes` (§15.5 Pass 104).** A menu (the
+hub) reads the selectable modes from the **link**, not from a copy of its own:
+the link enumerates `venc.modes_dir` (defaulting to the directory holding
+`mode_apply_cmd`) and returns `{active, apply_configured, modes:[{name, fps,
+resolution, mcs_min, mcs_max, fps_mode}]}` — the raw latency/range/resolution
+facts of every mode file, name-sorted, so the caller lays out the grid and picks
+its own "High/Med/Low" labels. This keeps the mode list single-sourced on the
+craft. NB: this is the **link** control plane on `:8091`; majestic's own `GET
+/api/v1/modes` on `:80` (§4 above) is the *sensor*-mode list — same path, a
+different service and a different meaning.
+
 ---
 
 ## 6. Open: 100 fps vs 90 fps
