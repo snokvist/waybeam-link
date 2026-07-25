@@ -86,6 +86,18 @@ bool spawn_mode_applier(const std::string& cmd, const std::string& name) {
         ::setsid();  // detach from the flight process's session
         const pid_t pid2 = ::fork();
         if (pid2 == 0) {
+            // Close inherited fds (the §15.5 control listen socket, UDP
+            // bindings, frame-shm, …) before exec so neither the applier nor
+            // the venc it restarts (S95) inherits them. A leaked control-listen
+            // fd pins 8091, and the link then cannot rebind it on its next
+            // restart — found on hardware while verifying Pass 100.
+            const long maxfd = ::sysconf(_SC_OPEN_MAX);
+            const int top = (maxfd > 0 && maxfd < 1 << 20)
+                                ? static_cast<int>(maxfd)
+                                : 4096;
+            for (int fd = 3; fd < top; ++fd) {
+                ::close(fd);
+            }
             ::execl(cmd.c_str(), cmd.c_str(), name.c_str(),
                     static_cast<char*>(nullptr));
             _exit(127);  // applier not executable
