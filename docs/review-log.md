@@ -3343,3 +3343,50 @@ Spec: §9.11 (instantiate-vs-run split), §11.7 `0x03` row ("Configured" =
 through `TxCore::apply_command` (unchanged transition), the always-construct
 change in the `TxCore` ctor + `cmd_fps_enabled_` boot-init, `ControlHandlers::
 link_fps`, `apply-mode.sh`, and `link.policy.fps_mode` in the mode JSONs.
+
+---
+
+## Pass 100 — §9.7 range re-pin clamps into [min,max] immediately (2026-07-25)
+
+**Context.** Verifying the Pass 99 mode workflow on the craft, switching from a
+high-band mode (`imx335-30fps-lowrange`, band 2-5, sitting at MCS5) to a
+low-band mode (`imx335-100fps-highrange`, band 0-2) left the craft at **MCS5 for
+30 s+** on the pristine bench link. The applier persisted `max_profile: 2` and
+applied the live pin, and promotion was correctly capped at `max` — but the
+selector never demoted DOWN to the new ceiling because a clean link produces no
+loss/§9.8 demote trigger.
+
+**Spec gap.** §9.7 states a `min==max` pin **snaps** the operating point in
+either direction, but is **silent on the range case** (`min < max`) when a
+runtime re-pin lowers `max` below the current rung. `evaluate()` handled
+`lo == hi` (snap) and then fell through to the adaptation rules, which only
+demote on a trigger. So the envelope's `max` was a soft ceiling on the way down.
+
+**Ruling (operator).** Extend the §9.7 snap to the range case: a runtime re-pin
+whose new envelope **excludes** the current rung clamps the operating point INTO
+`[min, max]` on the next `evaluate()`.
+- **Down-clamp** (current `> max`): unconditional — it is a demote, always safe,
+  and is the case that bit. Commits MCS **and** bitrate together (the Pass 97
+  discipline), so no oversubscription.
+- **Up-clamp** (current `< min`): a promotion, so it **defers to §9.8 while
+  feedback is stale** — a raised `min` must not pull the rung UP on a lost link
+  ("never fail optimistic"; §9.8/Pass 84 deliberately keeps `floor_profile`
+  below `min_profile` as the safety floor). It fires only with fresh feedback.
+
+**Why immediate matters.** "High range" is a user picking robustness *because
+they are about to need it* (flying far). Waiting for the first loss to demote
+defeats the point — by then the high MCS may already be a black screen at range.
+
+**Mechanics.** New block in `Selector::evaluate()` right after the `lo == hi`
+PINNED branch, before the §9.8 failsafe check. Direct snap (`rung_ = target`,
+`last_change_ms_ = now_ms`, commit + bitrate, `state_ = "REPIN"`, return),
+mirroring the PINNED branch — the pin overrides adaptation, no flap bookkeeping.
+`evaluate()` runs only in the `kIdle` phase, so there is never an in-flight
+transition to race.
+
+**Not a table change, not Pass 99.** Pure §9/§9.7 selector logic in `core/`;
+`table_version` unaffected, craft-only (TX) redeploy. Independent of the fps
+ladder — it just happened to surface while exercising the mode workflow.
+
+Spec: §9.7 (new range-clamp bullet). Wired through `Selector::evaluate()`; test
+in `selector_test` (down-clamp snaps; up-clamp gated on feedback).

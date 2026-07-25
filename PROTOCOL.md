@@ -1370,6 +1370,19 @@ from steady state without a second wire field.
   the operating point to that rung immediately, in either direction — it is a
   select-and-hold, not a freeze-in-place. (Config-time pins already land there via
   the boot clamp; the runtime path clamps in `evaluate()` on the next tick.)
+- **Range re-pin clamp (`min < max`, Pass 100):** a runtime re-pin whose new
+  envelope **excludes** the current rung snaps the operating point INTO
+  `[min, max]` on the next `evaluate()` — the range analogue of the `min==max`
+  snap. A **down-clamp** (current `> max`) is unconditional: it is a demote,
+  always safe, and commits MCS + bitrate together (§9.5, Pass 97). An
+  **up-clamp** (current `< min`) is a promotion and therefore **defers to §9.8
+  while feedback is stale** — a raised `min` never pulls the rung UP on a lost
+  link (`never fail optimistic`; §9.8/Pass 84 keeps `floor_profile` below
+  `min_profile` as the safety floor), so it fires only with fresh feedback.
+  Rationale: without this, lowering `max` below the current rung waited for a
+  loss/§9.8 demote trigger that never arrives on a clean link, so a high-range
+  mode (§16 of `docs/venc-mode-matrix.md`) left the craft at a high MCS until the
+  first loss burst — the operator picks "high range" *before* needing it.
 
 **`min_profile` / `max_profile` are profile `id`s, not ladder indices
 (Pass 83).** They are resolved against the §3.6 table the same way
