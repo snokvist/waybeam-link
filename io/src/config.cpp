@@ -3,6 +3,7 @@
 
 #include "wblink/fps_ladder.h"  // §9.11 ladder-membership validation
 
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -761,6 +762,20 @@ Result<Config> load_config_json(const std::string& json_text) {
                             "venc.command_presets.fps: entries must be §9.11 "
                             "ladder members");
                     }
+                }
+            }
+            // §15.5 operating-mode selection (Pass 96).
+            cfg.venc.active_mode = v.value("active_mode", cfg.venc.active_mode);
+            cfg.venc.mode_apply_cmd =
+                v.value("mode_apply_cmd", cfg.venc.mode_apply_cmd);
+            // The mode name is passed to a forked applier as argv (never a
+            // shell), but keep it to a filesystem-safe charset so it also names
+            // a modes/<name>.json without surprises.
+            for (char c : cfg.venc.active_mode) {
+                if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' ||
+                      c == '_' || c == '.')) {
+                    return Result<Config>::fail(
+                        "venc.active_mode: only [A-Za-z0-9._-] allowed");
                 }
             }
         }

@@ -322,6 +322,14 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             }
             return reply(200, "OK", h_.vehicle_command_json());
         }
+        if (path == "/api/v1/mode") {
+            if (!h_.mode_get) {
+                return reply(409, "Conflict",
+                             json_err("mode selection not available in this "
+                                      "mode"));
+            }
+            return reply(200, "OK", h_.mode_get());
+        }
         if (path == "/api/v1/stats/stream") {
             const std::string hdr =
                 "HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -454,6 +462,14 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
                          json_err("enabled (bool) required"));
         }
         return done(h_.arq_enable(j.value("enabled", true)));
+    }
+    if (path == "/api/v1/mode") {
+        if (!h_.mode_set) return na();
+        const std::string name = j.value("name", std::string());
+        if (name.empty()) {
+            return reply(400, "Bad Request", json_err("name required"));
+        }
+        return done(h_.mode_set(name));
     }
     return reply(404, "Not Found", json_err("unknown path"));
 }

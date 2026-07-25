@@ -7,10 +7,12 @@
 // (craft follower / ground issuer, triggered via POST /api/v1/csa), and the
 // §15.5 REST control plane (stats + live knobs; stdin CSA trigger is gone).
 #include <poll.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <csignal>
 #include <cstdlib>
 #include <cstdio>
@@ -70,6 +72,30 @@ using namespace wblink;
 
 volatile std::sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
+
+// §15.5 (Pass 96): fork a detached operating-mode applier. Applying a mode
+// restarts venc (sensor.mode/video0.size are restart_required), which takes
+// seconds, so this must NOT block the flight loop — double-fork so the
+// grandchild is reparented to init (no zombie, nothing to wait on) and execl
+// with argv (never a shell) so the charset-validated name cannot inject.
+// Precedent: RadioAir already forks execvp('iw', …) for channel retunes.
+bool spawn_mode_applier(const std::string& cmd, const std::string& name) {
+    const pid_t pid = ::fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        ::setsid();  // detach from the flight process's session
+        const pid_t pid2 = ::fork();
+        if (pid2 == 0) {
+            ::execl(cmd.c_str(), cmd.c_str(), name.c_str(),
+                    static_cast<char*>(nullptr));
+            _exit(127);  // applier not executable
+        }
+        _exit(0);  // intermediate child exits immediately; grandchild orphaned
+    }
+    int status = 0;
+    ::waitpid(pid, &status, 0);  // instant: the intermediate child just exited
+    return true;
+}
 
 uint64_t now_ms() {
     return static_cast<uint64_t>(
@@ -2928,6 +2954,8 @@ int run_tx(const Loaded& l) {
     uint64_t csa_liveness_rx_baseline = 0;
     uint16_t csa_liveness_chan = 0;
     uint8_t csa_liveness_bw = 0;
+    // §15.5 operating-mode label (Pass 96): restored at boot, set on accept.
+    std::string active_mode = l.cfg.venc.active_mode;
     // §11.7 craft command engine: same key provenance as the CSA follower.
     VcmdParams craft_cmd_params = vcmd_params(l.cfg);
     if (psk_announced) {
@@ -2988,6 +3016,38 @@ int run_tx(const Loaded& l) {
             for (ShmIn& si : shm_ins) {
                 if (si.ring) si.ring->reset_stats();
             }
+        };
+        // §15.5 operating-mode selection (Pass 96). The link is the control
+        // authority: the hub POSTs a mode name here, the link records it and
+        // forks the on-craft applier, which persists the venc + link config
+        // (docs/venc-mode-matrix.md §16) and restarts venc. The range pin is
+        // applied live by the applier through /api/v1/link/profile, so the
+        // link and CSA never restart. active_mode is the label, restored from
+        // config at boot and set optimistically on accept.
+        h.mode_get = [&]() -> std::string {
+            std::string s = "{\"active\":\"" + active_mode + "\"";
+            s += ",\"apply_configured\":";
+            s += l.cfg.venc.mode_apply_cmd.empty() ? "false" : "true";
+            s += "}";
+            return s;
+        };
+        h.mode_set = [&](const std::string& name) -> std::string {
+            if (l.cfg.venc.mode_apply_cmd.empty()) {
+                return "no venc.mode_apply_cmd configured on this node";
+            }
+            for (char c : name) {
+                if (!(std::isalnum(static_cast<unsigned char>(c)) ||
+                      c == '-' || c == '_' || c == '.')) {
+                    return "mode name: only [A-Za-z0-9._-] allowed";
+                }
+            }
+            if (!spawn_mode_applier(l.cfg.venc.mode_apply_cmd, name)) {
+                return "failed to launch mode applier";
+            }
+            active_mode = name;  // optimistic; the applier is authoritative
+            std::fprintf(stderr, "mode: applying \"%s\" via %s\n", name.c_str(),
+                         l.cfg.venc.mode_apply_cmd.c_str());
+            return "";
         };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (tx)\n",
@@ -4569,6 +4629,7 @@ int run_loopback(const Loaded& l) {
     // §15.5 REST control plane on the bench: tx knobs (profile/fec) + reset
     // (both sides). CSA is a no-op with synthetic air → left null → 409.
     StatsSnapshot last_snap;
+    std::string loop_active_mode = l.cfg.venc.active_mode;  // §15.5 Pass 96
     std::unique_ptr<ControlServer> control;
     if (!l.cfg.control.bind.empty()) {
         auto cs = ControlServer::create(l.cfg.control.bind);
@@ -4607,6 +4668,31 @@ int run_loopback(const Loaded& l) {
         h.reset_stats = [&] {
             tx.reset_stats();
             rx.reset_stats();
+        };
+        // §15.5 operating-mode selection (Pass 96) — same as tx, so the bench
+        // can exercise it. See the tx block for the full contract.
+        h.mode_get = [&]() -> std::string {
+            std::string s = "{\"active\":\"" + loop_active_mode + "\"";
+            s += ",\"apply_configured\":";
+            s += l.cfg.venc.mode_apply_cmd.empty() ? "false" : "true";
+            s += "}";
+            return s;
+        };
+        h.mode_set = [&](const std::string& name) -> std::string {
+            if (l.cfg.venc.mode_apply_cmd.empty()) {
+                return "no venc.mode_apply_cmd configured on this node";
+            }
+            for (char c : name) {
+                if (!(std::isalnum(static_cast<unsigned char>(c)) ||
+                      c == '-' || c == '_' || c == '.')) {
+                    return "mode name: only [A-Za-z0-9._-] allowed";
+                }
+            }
+            if (!spawn_mode_applier(l.cfg.venc.mode_apply_cmd, name)) {
+                return "failed to launch mode applier";
+            }
+            loop_active_mode = name;
+            return "";
         };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (loopback)\n",

@@ -156,6 +156,16 @@ int main() {
         arq_state = enabled ? 1 : 0;
         return "";
     };
+    // §15.5 operating-mode selection (Pass 96).
+    std::string mode_state = "boot-mode";
+    h.mode_get = [&]() -> std::string {
+        return "{\"active\":\"" + mode_state + "\",\"apply_configured\":true}";
+    };
+    h.mode_set = [&](const std::string& name) -> std::string {
+        if (name == "reject-me") return "not a known mode";
+        mode_state = name;
+        return "";
+    };
     // h.csa intentionally left null → endpoint must 409.
     s.set_handlers(std::move(h));
 
@@ -369,6 +379,37 @@ int main() {
         const std::string body = "{\"enabled\":1}";  // must be a bool
         const std::string req =
             "POST /api/v1/arq HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    // §15.5 operating-mode selection (Pass 96).
+    {
+        const std::string r =
+            roundtrip(s, port, "GET /api/v1/mode HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"active\":\"boot-mode\"") != std::string::npos);
+    }
+    {  // a valid apply → 200, and the label updates.
+        const std::string body = "{\"name\":\"imx335-60fps-medrange\"}";
+        const std::string req =
+            "POST /api/v1/mode HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        const std::string r =
+            roundtrip(s, port, "GET /api/v1/mode HTTP/1.0\r\n\r\n");
+        CHECK(body_of(r).find("imx335-60fps-medrange") != std::string::npos);
+    }
+    {  // missing name → 400.
+        const std::string body = "{}";
+        const std::string req =
+            "POST /api/v1/mode HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    {  // handler-level rejection → 400 with the error string.
+        const std::string body = "{\"name\":\"reject-me\"}";
+        const std::string req =
+            "POST /api/v1/mode HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }

@@ -65,6 +65,12 @@ struct ControlHandlers {
         vehicle_command;
     // §6.4 RX-local NACK-emission gate (rx only; null → 409).
     std::function<std::string(bool enabled)> arq_enable;
+    // §15.5 operating-mode selection (Pass 96; tx/craft only, null → 409).
+    // mode_get returns the JSON body for GET /api/v1/mode. mode_set applies a
+    // named mode (docs/venc-mode-matrix.md §16): "" on success, else a short
+    // error string (→ 400). The link owns the active mode; the hub calls here.
+    std::function<std::string()> mode_get;
+    std::function<std::string(const std::string& name)> mode_set;
 };
 
 class ControlServer {

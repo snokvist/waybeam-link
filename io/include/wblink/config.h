@@ -158,6 +158,15 @@ struct VencCfg {
     std::vector<uint16_t> preset_fps;            // §9.11 ladder members
     std::vector<std::string> preset_resolution;  // venc video0.size strings
     std::vector<std::string> preset_framing;     // venc video0.framing strings
+    // §15.5 operating-mode selection (Pass 96). The link is the control
+    // authority for the user-facing mode (docs/venc-mode-matrix.md §16): the
+    // hub POSTs a mode name here and the link owns it. `active_mode` is the
+    // label restored at boot; `mode_apply_cmd`, when set, is the on-craft
+    // applier the mode endpoint forks (sensor.mode/video0.size are venc
+    // restart_required, so applying a mode is a script + venc restart — the
+    // range pin itself is applied live and never restarts the link/CSA).
+    std::string active_mode;     // e.g. "imx335-100fps-highrange"; "" = unset
+    std::string mode_apply_cmd;  // e.g. "/etc/waybeam-link/modes/apply-mode.sh"
 };
 
 struct ArqPolicy {
