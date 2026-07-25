@@ -298,12 +298,18 @@ int main() {
         // Apply a runtime pin and drain any in-flight promote/bitrate phase so
         // evaluate() (which only runs in kIdle) actually sees the pin. Returns
         // the profile committed while landing on the pin (0xFF if none seen).
+        // Capture the bitrate emitted alongside the pin commit: the pinned
+        // rung's rate MUST move with it (else venc stays at the prior rung's
+        // rate — measured as a ~3.6x MCS0 oversubscription on hardware).
+        uint32_t pin_bitrate = 0;
         auto repin_to = [&](uint8_t rung, uint64_t t0) -> uint8_t {
             h.sel.set_profile_pin(rung, rung);
             uint8_t committed = 0xFF;
+            pin_bitrate = 0;
             for (uint64_t t = t0; t < t0 + 500; t += 10) {
                 const SelectorActions a = h.sel.tick(t);
                 if (a.commit) committed = a.commit->profile_id;
+                if (a.bitrate_kbps) pin_bitrate = *a.bitrate_kbps;
                 if (h.sel.profile_id() == rung &&
                     std::string_view(h.sel.state()) == "PINNED") {
                     break;
@@ -312,13 +318,17 @@ int main() {
             return committed;
         };
 
-        // Re-pin DOWN at runtime: must jump to the pinned rung, not freeze.
+        // Re-pin DOWN at runtime: must jump to the pinned rung, not freeze,
+        // AND re-derive the bitrate to that rung.
         CHECK_EQ_U(repin_to(1, 8100), 1);
         CHECK_EQ_U(h.sel.profile_id(), 1);
         CHECK(std::string_view(h.sel.state()) == "PINNED");
-        // Re-pin UP: the pin overrides adaptation in either direction.
+        CHECK_EQ_U(pin_bitrate, derive_bitrate_kbps(h.table.profiles[1]));
+        // Re-pin UP: the pin overrides adaptation in either direction, and the
+        // bitrate follows up too.
         CHECK_EQ_U(repin_to(6, 8600), 6);
         CHECK_EQ_U(h.sel.profile_id(), 6);
+        CHECK_EQ_U(pin_bitrate, derive_bitrate_kbps(h.table.profiles[6]));
         // Idempotent: re-evaluating an already-satisfied pin emits no commit.
         const SelectorActions same = h.sel.tick(9200);
         CHECK(!same.commit.has_value());

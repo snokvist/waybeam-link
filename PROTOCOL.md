@@ -1412,7 +1412,12 @@ optimistic" violation this section opens by forbidding.
 **Scope:** this governs the `min_profile < max_profile` envelope only. An explicit
 §9.7 **`min==max` pin still freezes adaptation outright**, `FAILSAFE` included —
 that is the pin's documented purpose (bench / known-bad-link) and it is an
-operator-initiated state, not a tuning side effect. Whether a pin *should* yield
+operator-initiated state, not a tuning side effect. **The pin snap re-derives the
+rung's §9.5 bitrate together with the MCS commit (Pass 97)** — a pin is a §9.5
+operating-point change like any demote/promote, so venc must be re-targeted to
+the pinned rung's rate. Committing the MCS alone leaves venc at the prior rung's
+bitrate; a downward pin to MCS0 then oversubscribes the link (measured ~3.6× →
+~98 % unrecoverable on hardware). Whether a pin *should* yield
 to the fail-safe on lost feedback is a **separate open question** (a pin held at a
 high rung through a real fade is fail-optimistic by the same argument above); it
 is deliberately not decided here.

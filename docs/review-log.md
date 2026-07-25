@@ -3182,3 +3182,40 @@ Spec: §15.5 read + write tables, the MUT_LIVE-exception note, and the
 `VencCfg::active_mode`/`mode_apply_cmd`, `spawn_mode_applier()`, and
 `deploy/modes/apply-mode.sh` + nine wrappers. Applying a mode is the operator's
 chosen mechanism: set the JSON fields via `json_cli`, restart venc.
+
+---
+
+### Pass 97 — §9.7 the `min==max` pin snap must re-derive the rung bitrate
+
+**Found on hardware (2026-07-25), running the MCS0 mode test.** With the craft
+live-pinned to MCS0 (`POST /api/v1/link/profile {min:0,max:0}`), the ground
+delivered **1.2 fps at 98.4 % unrecoverable** — at −12 dBm, so not RF. Root
+cause: the craft kept commanding **10303 kbps into a 2829 kbps MCS0 link**, a
+3.6× oversubscription; frames could not clear the airtime and missed deadline.
+
+`Selector::evaluate()`'s §9.7 PINNED branch (`core/src/selector.cpp`) set
+`a.commit` (profile/MCS/GI/power) when the pinned rung changed, but never set
+`a.bitrate_kbps` / `bitrate_kbps_`. `kBoot` and `start_demote` both re-derive
+the bitrate with the commit; the live-pin snap forgot to. So venc stayed at
+whatever rung the selector last derived (here rung 2's 10303) while the MCS
+dropped to 0.
+
+**This is distinct from B11.** B11 (Pass 94) was the FEC gap on small frames,
+and the same MCS0 test confirmed it is fixed: at MCS0 with the bitrate corrected
+to 2829, the craft emitted **34.8 % parity** on k≈3 frames and the ground
+delivered **99.8 fps at 0.20 % unrecoverable** — versus the 3.34 % B11 baseline.
+Two separate MCS0 failures with one symptom ("MCS0 is unusable"); Pass 94 fixed
+the FEC one, Pass 97 fixes the bitrate one.
+
+**Scope of the bug.** The band-pinned matrix modes (`min < max`, e.g. 0–2) do
+**not** hit this branch — they adapt within the band via demote/promote, which
+re-derive correctly. The §9.8 fail-safe descent likewise uses `start_demote`.
+Only a live `min==max` pin to a rung other than the current one was affected:
+bench pins, and any future single-rung "lock" mode.
+
+**Fix.** The PINNED snap re-derives `clamp_bitrate_kbps(derive_bitrate_kbps(p))`
+alongside the commit, direction-agnostic (covers a pin up as well). Regression:
+`selector_test` now asserts the pin emits the target rung's bitrate, down and up.
+
+Spec: §9.7 pin-scope paragraph. No table change — `table_version` unaffected,
+so this is a binary-only (craft TX) redeploy, not a lockstep one.

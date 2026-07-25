@@ -287,6 +287,18 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
             last_change_ms_ = now_ms;
             const Profile& p = table_->profiles[lo];
             a.commit = ProfileCommit{p.id, p.mcs, p.gi, p.tx_power_level};
+            // §9.5: the pinned rung's bitrate must move WITH the commit, as
+            // kBoot and start_demote both do. Committing the MCS alone left
+            // venc at the prior rung's rate — a downward pin to MCS0 then
+            // oversubscribed the link ~3.6x and delivered ~98% unrecoverable
+            // (measured on hardware). The pin is direction-agnostic, so this
+            // covers a pin up as well.
+            const uint32_t br = clamp_bitrate_kbps(
+                derive_bitrate_kbps(p), policy_.max_bitrate_kbps);
+            if (br != bitrate_kbps_) {
+                bitrate_kbps_ = br;
+                a.bitrate_kbps = br;
+            }
         }
         return;
     }
