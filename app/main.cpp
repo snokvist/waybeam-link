@@ -35,6 +35,7 @@
 #include "wblink/cache_udp.h"
 #include "wblink/config.h"
 #include "wblink/control_server.h"
+#include "wblink/modes.h"
 #include "wblink/csa.h"
 #include "wblink/vehicle_cmd.h"
 #include "wblink/endian.h"
@@ -72,6 +73,17 @@ using namespace wblink;
 
 volatile std::sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
+
+// §15.5 Pass 104: where GET /api/v1/modes enumerates from. Explicit
+// venc.modes_dir wins; otherwise derive it from mode_apply_cmd's directory (the
+// §16 layout co-locates the applier and the modes/<name>.json files), so a
+// deployed craft serves the catalog with no extra config. "" when neither set.
+std::string mode_catalog_dir(const wblink::VencCfg& venc) {
+    if (!venc.modes_dir.empty()) return venc.modes_dir;
+    const auto slash = venc.mode_apply_cmd.find_last_of('/');
+    if (slash != std::string::npos) return venc.mode_apply_cmd.substr(0, slash);
+    return {};
+}
 
 // §15.5 (Pass 96): fork a detached operating-mode applier. Applying a mode
 // restarts venc (sensor.mode/video0.size are restart_required), which takes
@@ -3114,6 +3126,12 @@ int run_tx(const Loaded& l) {
                          l.cfg.venc.mode_apply_cmd.c_str());
             return "";
         };
+        // §15.5 Pass 104: GET /api/v1/modes — the catalog. modes_dir defaults to
+        // the directory holding mode_apply_cmd (§16 co-locates them).
+        h.modes_list = [&, modes_dir = mode_catalog_dir(l.cfg.venc)]() {
+            return modes_catalog_json(modes_dir, active_mode,
+                                      !l.cfg.venc.mode_apply_cmd.empty());
+        };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (tx)\n",
                      l.cfg.control.bind.c_str());
@@ -4803,6 +4821,10 @@ int run_loopback(const Loaded& l) {
             }
             loop_active_mode = name;
             return "";
+        };
+        h.modes_list = [&, modes_dir = mode_catalog_dir(l.cfg.venc)]() {
+            return modes_catalog_json(modes_dir, loop_active_mode,
+                                      !l.cfg.venc.mode_apply_cmd.empty());
         };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (loopback)\n",

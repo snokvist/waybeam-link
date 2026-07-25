@@ -170,6 +170,11 @@ struct VencCfg {
     // range pin itself is applied live and never restarts the link/CSA).
     std::string active_mode;     // e.g. "imx335-100fps-highrange"; "" = unset
     std::string mode_apply_cmd;  // e.g. "/etc/waybeam-link/modes/apply-mode.sh"
+    // §15.5 Pass 104: directory the mode catalog (GET /api/v1/modes) is
+    // enumerated from. Empty = derive it from `mode_apply_cmd`'s directory (the
+    // §16 layout co-locates the applier and the mode files), so a deployed
+    // craft serves the catalog with no extra config.
+    std::string modes_dir;
 };
 
 struct ArqPolicy {

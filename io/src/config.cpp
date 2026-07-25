@@ -770,6 +770,9 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.venc.active_mode = v.value("active_mode", cfg.venc.active_mode);
             cfg.venc.mode_apply_cmd =
                 v.value("mode_apply_cmd", cfg.venc.mode_apply_cmd);
+            // §15.5 Pass 104: modes_dir for GET /api/v1/modes. Empty here is
+            // resolved to mode_apply_cmd's directory at wiring time.
+            cfg.venc.modes_dir = v.value("modes_dir", cfg.venc.modes_dir);
             // The mode name is passed to a forked applier as argv (never a
             // shell), but keep it to a filesystem-safe charset so it also names
             // a modes/<name>.json without surprises.
