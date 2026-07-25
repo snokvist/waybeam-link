@@ -87,6 +87,18 @@ On `.242`/`.199` the same stream goes to journald at `stats.hz: 5`
 > ground configs (`.242` systemd, `.199` buildroot — outside this repo) should
 > set it too. Test in `config_test`.
 
+> **HARDWARE-VERIFIED 2026-07-25** (PR #55, `#55` build on craft `.232` +
+> ground `.242`, all MonAir). **Pass 102:** craft pinned to a `min 1/max 5`
+> band, ground stopped to kill feedback — the selector descended MCS5→4→2→1
+> and **held at MCS1 (min_profile) through 27 s of lost feedback**, never
+> reaching MCS0; ground restart recovered it to MCS5. **B1:** 56 venc pushes,
+> **0 failures** across the run, and two CSA hops (5805↔5745) committed clean
+> with the craft following (rx advancing on every committed channel) — the
+> loop never stalled on venc. **A2:** `/tmp/waybeam-link.log` held at **0
+> bytes** with `stats.stdout: false` while the craft's REST `/api/v1/stats`
+> served full data throughout. Fleet restored to baseline (craft mode 0-2,
+> both nodes on the #55 build).
+
 ### A3 — Should a §9.7 `min==max` pin yield to the §9.8 fail-safe? — needs a ruling
 
 Raised and deliberately left open in §9.8 by Pass 84. The PINNED branch
