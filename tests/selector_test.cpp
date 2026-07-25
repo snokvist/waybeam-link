@@ -339,6 +339,61 @@ int main() {
         CHECK(std::string_view(h.sel.state()) != "PINNED");
     }
 
+    // --- §9.7 range re-pin clamp (Pass 100) ----------------------------------
+    // DOWN-CLAMP: a range whose max is below the current rung snaps DOWN to max
+    // immediately, even on a clean link (no loss/§9.8 trigger). Runs before the
+    // failsafe check, so it needs no fresh feedback.
+    {
+        Harness h;
+        h.boot();
+        (void)h.run(0, 8000, -30, 0);          // climb high on a strong link
+        CHECK(h.sel.profile_id() > 2);
+        h.sel.set_profile_pin(0, 2);           // envelope excludes current
+        uint8_t committed = 0xFF;
+        uint32_t clamp_br = 0;
+        for (uint64_t t = 8010; t < 8300; t += 10) {
+            const SelectorActions a = h.sel.tick(t);  // no reports: pre-failsafe
+            if (a.commit) committed = a.commit->profile_id;
+            if (a.bitrate_kbps) clamp_br = *a.bitrate_kbps;
+            if (h.sel.profile_id() == 2 &&
+                std::string_view(h.sel.state()) == "REPIN") {
+                break;
+            }
+        }
+        CHECK_EQ_U(committed, 2);
+        CHECK_EQ_U(h.sel.profile_id(), 2);          // snapped to hi, not stuck
+        CHECK(std::string_view(h.sel.state()) == "REPIN");
+        CHECK_EQ_U(clamp_br, derive_bitrate_kbps(h.table.profiles[2]));
+    }
+    // UP-CLAMP with fresh feedback: a range whose min is above the current rung
+    // snaps UP to min — a promotion, allowed only because feedback is fresh.
+    {
+        Harness h;
+        h.boot();
+        h.sel.set_profile_pin(0, 0);           // sit at the floor
+        (void)h.run(0, 2000, -30, 0);
+        CHECK_EQ_U(h.sel.profile_id(), 0);
+        h.sel.set_profile_pin(4, 6);           // raise the floor above current
+        h.report(2001, -30, 0);                // keep feedback fresh
+        const SelectorActions a = h.sel.tick(2001);
+        CHECK(a.commit && a.commit->profile_id == 4);
+        CHECK_EQ_U(h.sel.profile_id(), 4);          // snapped up to lo
+        CHECK(std::string_view(h.sel.state()) == "REPIN");
+    }
+    // UP-CLAMP deferred under stale feedback: a raised min must NOT pull the
+    // rung UP on a lost link (§9.8 "never fail optimistic"). It stays put.
+    {
+        Harness h;
+        h.boot();
+        h.sel.set_profile_pin(0, 0);
+        (void)h.run(0, 2000, -30, 0);
+        CHECK_EQ_U(h.sel.profile_id(), 0);
+        h.sel.set_profile_pin(4, 6);           // raise floor, then let feedback rot
+        const SelectorActions a = h.sel.tick(3000);  // > report_timeout stale
+        CHECK(!(a.commit && a.commit->profile_id == 4));  // no up-clamp
+        CHECK(h.sel.profile_id() != 4);             // did not promote on stale
+    }
+
     // --- §9.8 fail-safe: hold, then damped descent; stale never promotes -----
     {
         SelectorPolicy p;

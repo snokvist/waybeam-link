@@ -303,6 +303,35 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
         return;
     }
 
+    // §9.7 range re-pin clamp (Pass 100): a runtime re-pin to a range whose new
+    // envelope EXCLUDES the current rung snaps the operating point INTO [lo, hi]
+    // — the range analogue of the min==max snap above. A down-clamp (rung_ > hi)
+    // is a demote and unconditional. An up-clamp (rung_ < lo) is a promotion, so
+    // it defers to §9.8 while feedback is stale ("never fail optimistic": a
+    // raised min_profile must not pull the rung UP on a lost link — §9.8/Pass 84
+    // keeps floor_profile below min_profile as the safety floor). Without this a
+    // lowered max waited for a loss/§9.8 demote trigger that never comes on a
+    // clean link, so a high-range mode held a high MCS until the first loss.
+    // evaluate() runs only in kIdle, so there is no in-flight transition to race.
+    if (rung_ > hi ||
+        (rung_ < lo && have_report_ &&
+         report_age_ms(now_ms) <= policy_.report_timeout_ms)) {
+        const size_t target = (rung_ > hi) ? hi : lo;
+        rung_ = target;
+        last_change_ms_ = now_ms;
+        const Profile& p = table_->profiles[target];
+        a.commit = ProfileCommit{p.id, p.mcs, p.gi, p.tx_power_level};
+        // §9.5 (Pass 97): commit MCS + bitrate together, never MCS alone.
+        const uint32_t br =
+            clamp_bitrate_kbps(derive_bitrate_kbps(p), policy_.max_bitrate_kbps);
+        if (br != bitrate_kbps_) {
+            bitrate_kbps_ = br;
+            a.bitrate_kbps = br;
+        }
+        state_ = "REPIN";
+        return;
+    }
+
     // §9.8 fail-safe: stale feedback ⇒ hold, then damped descent to floor.
     if (!have_report_ ||
         report_age_ms(now_ms) > policy_.report_timeout_ms) {

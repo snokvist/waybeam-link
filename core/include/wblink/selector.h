@@ -129,7 +129,9 @@ class Selector {
 
     // §9.7 live profile pin (control plane §15.5). Clamps the operating-point
     // ladder to [min, max] by profile id; min==max freezes, max==255 unpins.
-    // The next evaluate() honours it via clamp_rung() — no restart.
+    // The next evaluate() honours it via clamp_rung() — no restart. Pass 100: a
+    // range re-pin whose envelope excludes the current rung SNAPS into [min,max]
+    // (down-clamp unconditional; up-clamp defers to §9.8 on stale feedback).
     void set_profile_pin(uint8_t min_profile, uint8_t max_profile) {
         policy_.min_profile = min_profile;
         policy_.max_profile = max_profile;
