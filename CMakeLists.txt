@@ -114,6 +114,15 @@ add_executable(waybeam-link app/main.cpp)
 target_compile_options(waybeam-link PRIVATE ${WBLINK_WARNINGS})
 target_link_libraries(waybeam-link PRIVATE wblink_io)
 
+# Strip the shipped binary on cross builds — the SSC338Q craft roots on a
+# ~5.7 MB overlay where an unstripped ~2.9 MB binary barely fits (and a second
+# copy does not). Native builds stay unstripped so the bench keeps its symbols.
+if(CMAKE_CROSSCOMPILING AND CMAKE_STRIP)
+    add_custom_command(TARGET waybeam-link POST_BUILD
+        COMMAND "${CMAKE_STRIP}" "$<TARGET_FILE:waybeam-link>"
+        COMMENT "Stripping waybeam-link (cross build; small target rootfs)")
+endif()
+
 # Native-only real-video bench. Keep GStreamer out of the target binary and
 # cross build; the tool still uses the production FrameShmRing implementation.
 if(NOT CMAKE_CROSSCOMPILING AND EXISTS "/usr/bin/pkg-config")
