@@ -3200,6 +3200,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/arq` | `{ "enabled": true\|false }` | RX-local NACK-emission gate (§6.4) — this node only, the craft is untouched (rx node) |
 | `POST /api/v1/link/fps` | `{ "ladder": true\|false }` | §9.11 ladder toggle (Pass 99); `true` = variable fps (the loop runs), `false` = static (the loop stops, fps holds). Routes through the same §11.7 `FPS_LADDER` transition as the over-air path; **MUT_LIVE**, no restart. `409` off a venc/TX node (TX/craft node) |
 | `POST /api/v1/mode` | `{ "name": "imx335-100fps-highrange" }` | select a user-facing operating mode (§16 of `docs/venc-mode-matrix.md`). **Not MUT_LIVE** — see below (TX/craft node) |
+| `POST /api/v1/venc/reassert` | `{}` | drop the §9.6 venc-actuator write-on-change cache so the next tick re-asserts bitrate + frame-caps + fps onto the encoder. Called by the §16 applier **after** it restarts venc; closes the stranded-bitrate gap a restart would otherwise leave (Pass 103, TX/craft node) |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile`,
 `fec`, `link/fps` and `mode` on the TX, and `bench/rx-drop` only on UDP-air RX.
@@ -3219,7 +3220,20 @@ persists both configs and restarts venc; the range pin it applies **live**
 through `POST /api/v1/link/profile`, so the **link and CSA never restart** and
 no §15.5a re-pair is needed — only video briefly drops. The link is the control
 authority: the hub POSTs here and the link owns the label, restored at boot
-from `venc.active_mode`. `409` if no applier is configured or off a TX node. The
+from `venc.active_mode`.
+
+The venc restart discards the encoder's **live (volatile §9.6)** bitrate, frame
+caps and fps — the values the link pushed via `/api/v1/live/set`, which the
+fresh encoder boots without. The §9.6 write-on-change actuator believes the
+encoder still holds them, so it would **not re-push**; the encoder is then
+stranded at its persisted-config bitrate. This bites hardest on a **same-band
+mode switch** (only fps/resolution change, so the range pin — and thus the §9.5
+derived bitrate — is unchanged, giving the actuator nothing it thinks is new to
+send). To close the gap the applier's **final step** POSTs
+`/api/v1/venc/reassert` (Pass 103), which drops the actuator cache so the next
+tick re-asserts the operating point onto the fresh encoder. `POST /api/v1/mode`
+is the one supported mode-apply entry; the on-craft applier is what it forks
+(runnable by hand only for bench work — it self-reasserts either way). `409` if no applier is configured or off a TX node. The
 write knobs are exactly the §9/§11/§14 levers that were previously boot-time
 JSON only; the profile pin is the operating-point (MCS + bitrate) lever, since
 a profile bundles rate/power/MTU per §9.3. The `scout/*` endpoints (§15.5a) act

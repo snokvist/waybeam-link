@@ -67,6 +67,18 @@ class VencActuator {
     // outcome is asynchronous — poll() sends it and counts idr_failures.
     bool request_idr(uint64_t now_ms);
 
+    // §15.5 Pass 103: a venc restart (the §16 mode applier) discards the
+    // encoder's live/volatile bitrate/caps/fps but leaves this actuator's
+    // write-on-change cache intact, so the setters would see want_==last_ and
+    // never re-push — the encoder is stranded at its persisted config. Called
+    // AFTER the restart (POST /api/v1/venc/reassert), this drops the cache so
+    // the next poll() re-asserts every commanded value onto the fresh encoder.
+    // want_* (the desired targets) are untouched; last_* are cleared so they
+    // read as pending. The volatile path is re-probed fresh (a fallback latch
+    // from before the restart no longer applies) and the retry holdoff is
+    // cleared so re-assertion is not delayed a further window.
+    void invalidate();
+
     uint64_t pushes() const { return pushes_; }
     uint64_t failures() const { return failures_; }
     uint64_t idr_requests() const { return idr_requests_; }

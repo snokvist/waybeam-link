@@ -2090,6 +2090,10 @@ struct TxCore {
     void set_profile_pin(uint8_t min_profile, uint8_t max_profile) {
         selector_.set_profile_pin(min_profile, max_profile);
     }
+    // §15.5 Pass 103: forget the venc actuator's write-on-change cache so the
+    // next tick re-asserts bitrate/caps/fps — called after an out-of-loop venc
+    // restart (the §16 mode applier) which the actuator cannot otherwise see.
+    void reassert_venc() { venc_.invalidate(); }
     // §14.1 live FEC-rate retune for a frame-shm stream. Returns false if the
     // stream_id is unknown or is not a frame-shm (FrameFramer) stream.
     bool set_stream_fec(uint8_t stream_id, uint16_t i_permille,
@@ -3058,6 +3062,15 @@ int run_tx(const Loaded& l) {
             for (ShmIn& si : shm_ins) {
                 if (si.ring) si.ring->reset_stats();
             }
+        };
+        // §15.5 Pass 103: the §16 mode applier POSTs this after restarting venc
+        // so the link re-asserts bitrate/caps/fps onto the fresh encoder (a
+        // restart discards the encoder's live state; write-on-change would
+        // otherwise never re-push). Side-effect only.
+        h.venc_reassert = [&] {
+            tx.reassert_venc();
+            std::fprintf(stderr, "venc: reassert — actuator cache dropped, "
+                                 "re-asserting on next tick\n");
         };
         // §15.5 craft-local FPS-ladder toggle (Pass 99). Routes through the
         // exact §11.7 FPS_LADDER transition the over-air path uses, so local

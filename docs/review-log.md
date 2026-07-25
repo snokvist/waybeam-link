@@ -3476,3 +3476,46 @@ Spec: §9.8 (rewritten descent-floor section + table). Wired through
 `Selector::evaluate()`; `selector_test` updated (`min 1/max 5` now floors at MCS1,
 new Range-Low band-floor case) — the min==max pin tests are unchanged and still
 pass.
+
+## Pass 103 — §15.5 `POST /api/v1/venc/reassert`: mode-switch bitrate stranding (2026-07-25)
+
+**Symptom (operator, on hardware).** Applying `imx335-60fps-highrange` by hand
+left venc at a near-zero bitrate — heavy pixelation — even though the link
+reported a healthy commanded bitrate. The craft baseline was already a Range-High
+`0-2` mode and the applied mode is also `0-2`, so the pin never changed.
+
+**Root cause.** The §9.6 venc actuator drives bitrate over the **volatile**
+`/api/v1/live/set` path (Pass 73) with **write-on-change**: a setter is a no-op
+when the target equals the last *successfully pushed* value (`last_`). A mode
+apply restarts venc (`sensor.mode`/`video0.size` are `restart_required`). The
+fresh encoder boots at its **persisted** `video0.bitrate` — the live value died
+with the old process — but the actuator's `last_` still holds the pre-restart
+value, so it believes the encoder is already correct and **never re-pushes**. The
+encoder is stranded at whatever stale/low bitrate is on flash. Same for
+`last_caps_`/`last_fps_`. It bites hardest on a **same-band switch** (only
+fps/resolution change, pin and derived bitrate unchanged → nothing the actuator
+thinks is new), which is exactly the operator's case. Both entry paths were
+affected — the hand-run applier *and* `POST /api/v1/mode` (which forks the same
+applier and did not invalidate the actuator).
+
+**Ruling.** A venc restart is a cache-invalidation event for the link's actuator.
+The §16 applier's **final step** (after the venc restart) POSTs a new §15.5
+endpoint `POST /api/v1/venc/reassert`, which drops the actuator's write-on-change
+cache (`last_`/`last_caps_`/`last_fps_`) and re-probes the volatile path, so the
+next tick re-asserts bitrate + frame-caps + fps onto the fresh encoder. The
+endpoint is MUT_LIVE (it only clears in-loop cache; the re-push rides the normal
+per-tick reconcile, which already tolerates the encoder 404ing during bring-up,
+Pass 73). `POST /api/v1/mode` is affirmed as the **one supported** mode-apply
+entry; the on-craft applier is what it forks and self-reasserts, so a hand-run
+(bench-only) heals too.
+
+**Mechanics.** `VencActuator::invalidate()` (io) resets the three `last_*`,
+clears `live_fallback_`/reprobe, and clears the retry holdoff. `tx.reassert_venc()`
++ `h.venc_reassert` + a `control_server` route expose it; `apply-mode.sh` gains
+the notify curl as its last step plus a bench-only banner. Pure add otherwise —
+no `table_version` bump, craft-only (TX) redeploy.
+
+Spec: §15.5 (new Write-table row + the §16 applier paragraph gains the
+stranding-gap explanation). Wired through `VencActuator::invalidate()` +
+`venc_actuator_test`; verified on the fleet with the new mode harness
+(`tools/mode_harness.py`) red→green.

@@ -433,6 +433,11 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         h_.reset_stats();
         return done("");
     }
+    if (path == "/api/v1/venc/reassert") {  // §15.5 Pass 103
+        if (!h_.venc_reassert) return na();
+        h_.venc_reassert();
+        return done("");
+    }
     if (path == "/api/v1/video/recover") {
         if (!h_.video_recover) return na();
         return done(h_.video_recover(j.value("stream_id", -1)));
