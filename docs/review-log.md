@@ -3425,3 +3425,54 @@ per-adapter object — grouped with the other liveness verdict. Golden schema
 Spec: §6.5 (heuristic-vs-definitive paragraph), §15.3 (sample + field). Wired:
 `AdapterStats.rx_dead` → `stats.cpp` emit; `RadioAir::Impl::Adapter` atomic set in
 the RX-thread catch → `AdapterCounters.rx_dead` → `main.cpp` radio mapping.
+
+## Pass 102 — §9.8 fail-safe floors at `min_profile`, not below it (2026-07-25, supersedes Pass 84)
+
+**Context.** Pre-flight audit item **A3** (`docs/preflight-open-issues.md`) asked
+whether a §9.7 `min==max` pin should yield to the §9.8 fail-safe. Working it with
+the operator reframed the question around the **operating-mode harness** landed in
+PR #53 (`docs/venc-mode-matrix.md` §16): the user-facing **Range** axis is exactly
+`select.min_profile`/`max_profile` — High = MCS 0-2, Medium = 1-4, Low = 2-5 (the
+nine `profiles/modes/*.json`) — and each mode's resolution + fps are co-designed so
+the §16.1 bpp floor is cleared **at the band's lowest rung and no lower**.
+
+**The defect this exposed.** `floor_profile` is a table-global constant (`0` in
+`table.example.json`), so **every** mode's §9.8 fail-safe descends to MCS0 (Pass
+84: descent target is `floor_profile`, *unclamped* by `min_profile`). A Range-Low
+mode (band 2-5, co-designed at e.g. 1920×1080/100 fps) fading to MCS0 blows its
+bpp floor — a blocked-up screen — and the deployed `min 1 / max 5` craft gets
+dumped to MCS0 on any lost-feedback fade. The operator's words: *"we don't want
+the mode mechanics fighting each other."*
+
+**Ruling (operator).** The §9.8 fail-safe descends no lower than
+**`max(min_profile, floor_profile)`**. In the mode harness `min_profile` is the
+band's **verified operating floor**, not an airtime-efficiency knob, so pushing
+below it lands on a rung the mode never verified. `floor_profile` remains the
+table's **absolute** floor and still binds when it sits *above* `min_profile`
+(`max(...)`), but it can no longer drag the fail-safe *below* the mode band.
+
+**This supersedes Pass 84**, and deliberately so — it reverses that ruling's
+*premise*, not its values. Pass 84 read `min_profile` as a pure airtime envelope
+and drove the fail-safe past it to keep MCS0 (the most robust rung) available on
+the worst-case path. B11 + the mode harness make `min_profile` a co-designed
+floor, so below it is no longer "more robust" — it is a bpp violation. Still
+"never fail optimistic": the fail-safe only ever degrades on lost feedback, now to
+the mode's verified floor instead of past it.
+
+**The `min==max` pin falls out, no special case.** A pin's band floor *is* the pin
+(`min == max`), so `max(min_profile, floor_profile)` never sits below it — the pin
+freezes adaptation outright, `FAILSAFE` included, exactly as PR #53 (Pass 97)
+leaves it (the PINNED branch still returns before the fail-safe and re-derives the
+rung's §9.5 bitrate on snap). So A3's original "should the pin yield?" question
+dissolves: the general rule holds it. **The earlier A3 direction (pin yields to a
+sub-pin fail-safe) is withdrawn** in favour of this.
+
+**Mechanics.** One line in `Selector::evaluate()`: the §9.8 descent floor
+`floor_rung()` → `std::max(lo, floor_rung())`, where `lo = clamp_rung(0)` is
+already the `min_profile` rung. No table change, craft-only (TX) redeploy, no
+`table_version` bump. Independent of the fps ladder.
+
+Spec: §9.8 (rewritten descent-floor section + table). Wired through
+`Selector::evaluate()`; `selector_test` updated (`min 1/max 5` now floors at MCS1,
+new Range-Low band-floor case) — the min==max pin tests are unchanged and still
+pass.

@@ -1386,8 +1386,8 @@ from steady state without a second wire field.
   always safe, and commits MCS + bitrate together (§9.5, Pass 97). An
   **up-clamp** (current `< min`) is a promotion and therefore **defers to §9.8
   while feedback is stale** — a raised `min` never pulls the rung UP on a lost
-  link (`never fail optimistic`; §9.8/Pass 84 keeps `floor_profile` below
-  `min_profile` as the safety floor), so it fires only with fresh feedback.
+  link (`never fail optimistic`; on lost feedback §9.8/Pass 102 floors the fail-safe
+  *at* `min_profile`, not above it), so it fires only with fresh feedback.
   Rationale: without this, lowering `max` below the current rung waited for a
   loss/§9.8 demote trigger that never arrives on a clean link, so a high-range
   mode (§16 of `docs/venc-mode-matrix.md`) left the craft at a high MCS until the
@@ -1416,33 +1416,44 @@ floor-oscillation limit cycle (§17 gate 4). The craft additionally runs
 these are *local* and cannot see a remote fade, so they conservatively bias toward
 degradation, not toward holding a high rung.
 
-**The descent target is `floor_profile`, NOT the §9.7 `min_profile` pin
-(Pass 84).** The two knobs answer different questions and MUST NOT be conflated:
+**The descent floors at `min_profile`, NOT below it (Pass 102, supersedes
+Pass 84).** Under the operating-mode harness (`docs/venc-mode-matrix.md` §16) the
+**Range** axis sets `min_profile` as the band's lowest rung (High = MCS 0–2,
+Medium = 1–4, Low = 2–5), and each mode's resolution + fps are co-designed so the
+§16.1 bits-per-pixel floor is cleared **at exactly that rung and no lower**. So
+`min_profile` is not an airtime-efficiency knob — it is the mode's *verified
+operating floor*. The fail-safe therefore descends no lower than
+**`max(min_profile, floor_profile)`**:
 
-| knob | question | applies |
+| knob | question | role in the fail-safe |
 |---|---|---|
-| §9.7 `min_profile` | how low may the selector *choose* to go while it can see feedback? | adaptation envelope |
-| §3.6 `floor_profile` | where does the link go when feedback is **gone**? | safety floor |
+| §9.7 `min_profile` | the mode band's lowest **verified** rung | the descent floor (mode-owned) |
+| §3.6 `floor_profile` | the table's **absolute** floor | *raises* the floor above `min_profile`; never lowers it |
 
-A craft with `min_profile: 1` and `floor_profile: 0` therefore adapts within
-MCS1–5 in normal flight and still descends to MCS0 on lost feedback. Clamping the
-fail-safe by the adaptation envelope means an operator cannot tune airtime
-efficiency without silently removing the most robust rung from the one path that
-runs when the link is worst and the craft is furthest away — the exact "never fail
-optimistic" violation this section opens by forbidding.
+Descending *below* `min_profile` on lost feedback lands the link on a rung the
+mode was never co-designed for: at a Range-Low mode's resolution/fps, MCS0's bpp
+is a blocked-up screen, not a safer picture. That is the "mode mechanics fighting
+each other" case, and it is forbidden. **This reverses Pass 84's premise, not its
+values:** Pass 84 read `min_profile` as a pure airtime envelope and drove the
+fail-safe *past* it to `floor_profile` (MCS0) to keep the most robust rung
+available on the worst-case path. The mode harness makes `min_profile` a
+co-designed floor, so below it is no longer "more robust" — it is a bpp violation.
+`floor_profile` stays the table's absolute floor and still binds when it sits
+*above* `min_profile`.
 
-**Scope:** this governs the `min_profile < max_profile` envelope only. An explicit
-§9.7 **`min==max` pin still freezes adaptation outright**, `FAILSAFE` included —
-that is the pin's documented purpose (bench / known-bad-link) and it is an
-operator-initiated state, not a tuning side effect. **The pin snap re-derives the
-rung's §9.5 bitrate together with the MCS commit (Pass 97)** — a pin is a §9.5
-operating-point change like any demote/promote, so venc must be re-targeted to
-the pinned rung's rate. Committing the MCS alone leaves venc at the prior rung's
-bitrate; a downward pin to MCS0 then oversubscribes the link (measured ~3.6× →
-~98 % unrecoverable on hardware). Whether a pin *should* yield
-to the fail-safe on lost feedback is a **separate open question** (a pin held at a
-high rung through a real fade is fail-optimistic by the same argument above); it
-is deliberately not decided here.
+**Still "never fail optimistic":** the fail-safe only ever *degrades* on lost
+feedback and never promotes; it now degrades to the mode's verified floor instead
+of past it.
+
+**The §9.7 `min==max` pin follows from this rule, not as a special case.** A pin's
+band floor *is* the pin (`min == max`), so `max(min_profile, floor_profile)` never
+sits below it and the fail-safe can never descend past it — the pin freezes
+adaptation outright, `FAILSAFE` included, which is its documented purpose (bench /
+known-bad-link). **The pin snap re-derives the rung's §9.5 bitrate together with
+the MCS commit (Pass 97)** — a pin is a §9.5 operating-point change like any
+demote/promote, so venc must be re-targeted to the pinned rung's rate. Committing
+the MCS alone leaves venc at the prior rung's bitrate; a downward pin to MCS0 then
+oversubscribes the link (measured ~3.6× → ~98 % unrecoverable on hardware).
 
 ### 9.9 Backpressure coupling (local, TX-side)
 The venc output-queue fill is a local TX signal, not an RX report. It **suppresses
