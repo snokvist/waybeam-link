@@ -159,7 +159,7 @@ const char* kGolden =
     "\"drop\":3,\"filtered\":0,\"kernel_drop\":0,\"bpf_filtered\":0,\"tsf_fallback\":1,"
     "\"tx_reports\":40,"
     "\"tx_report_fails\":2,"
-    "\"adapter_stalled\":false,\"tx_wedged\":false}],"
+    "\"adapter_stalled\":false,\"rx_dead\":false,\"tx_wedged\":false}],"
     "\"streams\":[{\"stream_id\":0,\"type\":\"RTP\",\"seq\":90233,"
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
     "\"loss_prediversity_milli\":41,"

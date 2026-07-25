@@ -982,6 +982,15 @@ otherwise inflate the redundancy the TX trusts, making it ride a higher-MCS /
 lower-power point on phantom diversity → real delivered loss spikes. The stall is
 surfaced as `adapter_stalled` in the stats (§15).
 
+`adapter_stalled` is a heuristic — zero frames for `stall_timeout` — and a quiet
+channel trips it identically to a dead ear. A backend that *knows* an RX loop has
+terminated (the devourer `RadioAir` per-adapter RX thread exiting on a USB
+exception) additionally raises `rx_dead` (§15.3), a definitive death signal an
+OSD/hub can distinguish from a merely quiet adapter. Backends without a
+thread-exit death path (kernel-monitor) leave it `false` and rely on the stall
+watchdog. `rx_dead` is observability only; the §6.5 exclusion still keys on the
+stall verdict.
+
 ### 6.6 Plausible-forward clamp (load-bearing injection defence, §13)
 RX rejects any DATA `seq`/`block_id` or NACK `base_seq` that jumps implausibly
 far ahead. Real monotonic traffic never jumps by millions; this single check
@@ -2823,7 +2832,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
     "drop": 0, "filtered": 0, "kernel_drop": 0, "bpf_filtered": 0, "tsf_fallback": 0,
     "tx_reports": 531, "tx_report_fails": 0,
-    "adapter_stalled": false, "tx_wedged": false } ],
+    "adapter_stalled": false, "rx_dead": false, "tx_wedged": false } ],
   "streams": [ { "stream_id": 0, "type": "RTP",
     "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
     "loss_prediversity_milli": 41, "loss_postdiv_prearq_milli": 6,

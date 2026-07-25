@@ -111,6 +111,13 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     if (tsf_now_us) {
         elapsed = static_cast<uint32_t>(static_cast<uint32_t>(*tsf_now_us) -
                                         rx_tsfl_us);
+        // A fresh copy's air+host transit is sub-ms and can never legitimately
+        // exceed the copy's own remaining window (dt_us). A larger value is a
+        // reset/garbage TSF delta — discard it, else it collapses switch_at_us_
+        // to now_us and retunes up to dt early, ahead of the issuer (§11.2).
+        if (elapsed > dt_us) {
+            elapsed = 0;
+        }
     }
     switch_at_us_ = now_us + (dt_us > elapsed ? dt_us - elapsed : 0);
     freeze_until_us_ =

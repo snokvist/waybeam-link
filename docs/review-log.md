@@ -3390,3 +3390,38 @@ ladder — it just happened to surface while exercising the mode workflow.
 
 Spec: §9.7 (new range-clamp bullet). Wired through `Selector::evaluate()`; test
 in `selector_test` (down-clamp snaps; up-clamp gated on feedback).
+
+## Pass 101 — §15.3 `rx_dead`: dead RX adapter distinguished from a quiet one (2026-07-25)
+
+**Context.** Pre-flight audit item **B3** (`docs/preflight-open-issues.md`): a
+dead RX adapter is silent. The devourer `RadioAir` per-adapter RX thread catches
+a USB exception, prints one stderr line, and exits — after which `rx_frames`
+merely stops advancing, which is **indistinguishable from a quiet channel**. With
+diversity this stays hidden until the *second* ear dies. The §6.5 `adapter_stalled`
+watchdog fires on the zero-frame heuristic, but it too cannot tell a dead ear from
+a quiet one.
+
+**Ruling (operator).** Add a per-adapter §15.3 boolean `rx_dead` — a *definitive*
+RX-loop-terminated signal — alongside `adapter_stalled`. (The two sibling B3/E
+counters raised in the same batch — a §11.4 MAC-reject count and a TSF-clamp count
+— were **declined**; only this flag was approved.)
+
+**Semantics.**
+- `rx_dead = true` only when a backend *knows* an RX loop has terminated. The
+  `RadioAir` RX thread sets a per-adapter atomic in its exception handler; the
+  §15.3 emit reads it. This is the ground-diversity backend, which is exactly
+  where B3's "second adapter dies" scenario lives.
+- Kernel-monitor (`MonAir`) has no thread-exit death path — its recv loop
+  persists (now throttled on hard errors, B1/B3 Tier-1) — so it leaves `rx_dead`
+  `false` and relies on the §6.5 stall watchdog.
+- Observability **only**: the §6.5 phantom-diversity exclusion still keys on the
+  stall verdict, not on `rx_dead`. Nothing in the selector or RX fast path reads
+  it; it exists for the OSD/hub to surface a hard failure.
+
+**Placement.** Emitted between `adapter_stalled` and `tx_wedged` in the
+per-adapter object — grouped with the other liveness verdict. Golden schema
+(`stats_test`) and the §15.3 sample updated in lockstep.
+
+Spec: §6.5 (heuristic-vs-definitive paragraph), §15.3 (sample + field). Wired:
+`AdapterStats.rx_dead` → `stats.cpp` emit; `RadioAir::Impl::Adapter` atomic set in
+the RX-thread catch → `AdapterCounters.rx_dead` → `main.cpp` radio mapping.

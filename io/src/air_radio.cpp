@@ -86,6 +86,7 @@ struct RadioAir::Impl {
         std::atomic<uint64_t> rx_filtered{0};
         std::atomic<uint64_t> rx_dropped{0};
         std::atomic<int8_t> rssi_last{-128};
+        std::atomic<bool> rx_dead{false};  // §15.3 Pass 101: RX loop exited
         uint64_t tx_submitted = 0;  // main-thread only
         uint64_t tx_failed = 0;
         // Bench-only synthetic-drop PRNG (RX-thread only; xorshift32).
@@ -426,6 +427,10 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                     imp->on_packet(*adp, id, p);
                 });
             } catch (const std::exception& e) {
+                // §15.3 Pass 101: a definitive death (vs the §6.5 stall
+                // heuristic a quiet channel also trips). Set before the log so
+                // a stats read racing the exit still sees the ear as dead.
+                adp->rx_dead.store(true, std::memory_order_relaxed);
                 std::fprintf(stderr, "radio: rx loop \"%s\" died: %s\n",
                              adp->name.c_str(), e.what());
             }
@@ -643,6 +648,7 @@ RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {
     c.rx_frames = a.rx_frames.load(std::memory_order_relaxed);
     c.rx_filtered = a.rx_filtered.load(std::memory_order_relaxed);
     c.rx_dropped = a.rx_dropped.load(std::memory_order_relaxed);
+    c.rx_dead = a.rx_dead.load(std::memory_order_relaxed);
     c.rssi_last = a.rssi_last.load(std::memory_order_relaxed);
     c.tx_submitted = a.tx_submitted;
     c.tx_failed = a.tx_failed;

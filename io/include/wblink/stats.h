@@ -40,7 +40,8 @@ struct AdapterStats {
     // stalling while tx_submitted advances = the TX-wedge signal.
     uint64_t tx_reports = 0;
     uint64_t tx_report_fails = 0;
-    bool adapter_stalled = false;  // §6.5 liveness watchdog verdict
+    bool adapter_stalled = false;  // §6.5 liveness watchdog verdict (heuristic)
+    bool rx_dead = false;          // §15.3 Pass 101: RX loop terminated (definitive)
     bool tx_wedged = false;        // §9.10 CCX-liveness verdict (TX adapter)
 };
 

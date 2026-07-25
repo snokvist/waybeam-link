@@ -523,6 +523,23 @@ class DiscoveryCatalog {
         return best;
     }
 
+    // §15.5a claim staleness (B9): the session `originator` most recently
+    // announced. A craft picks a fresh session_id each boot, so a scout
+    // candidate whose session differs from the live one predates a reboot —
+    // its cached channel is stale. nullopt if the craft was never seen.
+    std::optional<uint32_t> session_for(uint16_t originator) const {
+        std::optional<uint32_t> best;
+        uint64_t best_seen = 0;
+        for (const auto& [key, n] : nodes_) {
+            (void)key;
+            if (n.originator == originator && n.last_seen_ms >= best_seen) {
+                best = n.session;
+                best_seen = n.last_seen_ms;
+            }
+        }
+        return best;
+    }
+
   private:
     struct Node {
         uint16_t originator = 0;
@@ -1523,6 +1540,7 @@ struct AirBackend {
             as.tx_reports = c.tx_reports;
             as.tx_report_fails = c.tx_report_fails;
             as.tx_wedged = c.tx && tx_wedged;
+            as.rx_dead = c.rx_dead;  // §15.3 Pass 101 (RadioAir only)
             snap.adapters.push_back(std::move(as));
         }
 #else
@@ -3234,6 +3252,13 @@ int run_tx(const Loaded& l) {
         service_air(service_now);
         for (ShmIn& si : shm_ins) {
             if (!si.ring || !si.pending) continue;
+            // B5: match the buffer to the producer's declared slot size (grows
+            // at most once per larger geometry, including a producer swap). An
+            // undersized buffer makes read_frame reject-without-advancing and
+            // stalls video ingress for the rest of the flight.
+            if (frame_buf.size() < si.ring->slot_data_size()) {
+                frame_buf.resize(si.ring->slot_data_size());
+            }
             const long got =
                 si.ring->read_frame(frame_buf.data(), frame_buf.size());
             if (got <= 0) {
@@ -3665,8 +3690,12 @@ int run_rx(const Loaded& l) {
                      kMaxDataPayload];
         CacheEndpoint from;
         long rn;
-        while ((rn = cache_repair_sock->recv_one(cbuf, sizeof(cbuf),
-                                                 &from)) > 0) {
+        // B6: bounded drain — an unbounded cache-reply socket lets any reachable
+        // host hold the flight loop here; ready data re-fires the next pass.
+        for (int cdrained = 0;
+             cdrained < 64 &&
+             (rn = cache_repair_sock->recv_one(cbuf, sizeof(cbuf), &from)) > 0;
+             ++cdrained) {
             const Decoded cdec = decode(cbuf, static_cast<size_t>(rn));
             if (const CacheStatus* st = std::get_if<CacheStatus>(&cdec)) {
                 const auto it = cache_endpoints.find(st->prefix.originator);
@@ -3886,6 +3915,15 @@ int run_rx(const Loaded& l) {
             const uint16_t orig = static_cast<uint16_t>(originator_i);
             const auto cand = scout.candidate_for(orig);
             if (!cand) return "unknown craft (run a scout first)";
+            // §15.5a / B9: a scout candidate that predates a craft reboot points
+            // at the craft's OLD channel — the claim would retune there and then
+            // abort (no CSA_ARMED) with no hint to the operator. If the craft has
+            // announced a different session more recently than the scout saw it,
+            // the candidate is stale; demand a re-scout instead of a silent abort.
+            const auto live_sess = discovery.session_for(orig);
+            if (live_sess && *live_sess != cand->session) {
+                return "stale candidate (craft rebooted since scout) — re-scout";
+            }
             // §2/§13 passive spectator (Pass 74): no uplink for a §11 issuer
             // campaign, so "select" is a passive tune. Retune all ears onto the
             // scouted feed's channel + net_id; §2 first-latch /
@@ -4026,6 +4064,23 @@ int run_rx(const Loaded& l) {
             h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
                 if (!air.value->supports_csa()) {
                     return "CSA unsupported by kernel-monitor backend";
+                }
+                // §15.5a / B9: re-key from the craft's LIVE announced token
+                // before every campaign. do_claim keyed the issuer once, but the
+                // craft regenerates its token each boot — a reboot since the
+                // claim leaves that key stale and the craft silently drops the
+                // §11.4 MAC, so the switch dies with a bare {"ok":true}. The
+                // configured-secret path is stable; skip it there.
+                if (cparams.psk.empty()) {
+                    const auto tok =
+                        discovery.token_for(active_selection.originator);
+                    if (!tok) {
+                        return "no live CSA key for craft (rebooted? re-scout)";
+                    }
+                    std::vector<uint8_t> key(tok->begin(), tok->end());
+                    if (!issuer.set_psk(key)) {
+                        return "claim busy (campaign active)";
+                    }
                 }
                 const CommonPrefix pre{l.cfg.node.originator, 0, session};
                 if (issuer.start(pre, static_cast<uint16_t>(mhz), 0,
@@ -4247,8 +4302,12 @@ int run_rx(const Loaded& l) {
             uint8_t cbuf[512];
             CacheEndpoint from;
             long rn;
-            while ((rn = cache_store_sock->recv_one(cbuf, sizeof(cbuf),
-                                                    &from)) > 0) {
+            // B6: bounded drain (see the cache-repair loop above).
+            for (int cdrained = 0;
+                 cdrained < 64 &&
+                 (rn = cache_store_sock->recv_one(cbuf, sizeof(cbuf), &from)) >
+                     0;
+                 ++cdrained) {
                 const Decoded cdec = decode(cbuf, static_cast<size_t>(rn));
                 if (const CacheAssign* ca =
                         std::get_if<CacheAssign>(&cdec)) {
@@ -4492,6 +4551,8 @@ int run_rx(const Loaded& l) {
         const CsaAction fa = follower.tick(now_us_it);
         if (fa.kind != CsaAction::Kind::kNone) {
             air.value->retune_all(fa.chan_mhz, fa.bw, fa.fast);
+            operating_chan = fa.chan_mhz;  // §15.3 link.channel tracks a
+                                           // followed retune (not boot chan)
         }
         scout.tick(now);  // §15.5a advance the sweep when a dwell elapses
         if (const auto trc = air.value->tx_progress_counters()) {
