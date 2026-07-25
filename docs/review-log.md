@@ -3562,3 +3562,68 @@ add — no `table_version` bump, read-only, craft-only (TX) surface. New unit
 Spec: §15.5 (new Read-table row + a catalog paragraph after the `POST
 /api/v1/mode` discussion). First step of the hub mode-menu integration; the
 ground→craft transport (craft-local hub proxy) is a separate, later piece.
+
+## Pass 105 — §11.7 `0x07` MODE: over-air operating-mode select (2026-07-25)
+
+**Context.** The hub mode menu (Pass 104 gave it the catalog) needs a way for the
+**ground** to actually apply a mode on a bound craft. `POST /api/v1/mode` (§15.5)
+exists but is loopback/LAN-local to the craft — issuing it from the ground would
+mean an unauthenticated HTTP POST to the craft's network-facing hub `:8060`, a
+mode-change hole anyone on the RF-adjacent LAN could drive. The operator ruling:
+the apply must ride the **PSK-guarded RF uplink** like every other vehicle
+command (§11.7), not HTTP.
+
+**The gap that had to be raised (not inferred).** The natural encoding — `cmd_arg`
+= index into the name-sorted §15.5 catalog — collides with §3.14's hard
+`cmd_arg` `0..4` structural cap (Pass 68: "no free-form numerics"), enforced in
+the wire codec on **both encode and decode** (`>4` = structural decode error,
+silent drop). The catalog already has **10** `imx335-*.json` modes, so an index
+of 5..9 cannot ride the wire at all. "Index the catalog, no wire change" is not
+achievable for 10 modes. Raised to the operator with three options: (A) widen the
+wire for MODE, (B) a ≤5 `command_presets.mode` subset (v2 pattern, zero wire
+change, caps at 5), (C) curate the catalog down to ≤5.
+
+**Ruling (operator).** **Widen the wire for MODE (option A).** `cmd_arg` is
+physically a `u8`; the byte layout is unchanged, but the structural gate becomes
+`cmd_id`-dependent: `0x07` MODE decodes/encodes the full `0..255`, while
+`0x01`–`0x06` (and unknown ids) keep the `0..4` cap and the `>4`-is-a-decode-error
+rule. This overturns the Pass 68 ≤5-choice bound **for MODE only** — justified
+because a mode is still *one* enum choice, just over an inherently open-ended set
+that is already enumerable and single-sourced on the craft (`GET /api/v1/modes`).
+The two other roads were rejected: the preset subset (B) would make half the
+modes unreachable and re-introduce a config list the ground must learn separately
+from the catalog it already reads; catalog curation (C) throws away modes.
+
+**Semantics.** `0x07 MODE`, `cmd_arg` = index into the **name-sorted** catalog
+(the exact `GET /api/v1/modes` order). The craft resolves the index against the
+*same* enumeration+sort `modes_catalog_json` is built from, so ground and craft
+agree on which ordinal is which mode with no mode identity crossing the air —
+only its position. Apply forks the §16 applier (`venc.mode_apply_cmd`), the
+identical path `POST /api/v1/mode` takes (so the Pass 103 self-reassert heals the
+venc restart either way). `REJECTED` when the craft has no `mode_apply_cmd` (not
+a mode-actuating node) or `arg` ≥ the catalog length (index past the end — a
+range error, consumed + echoed, not a structural drop). Craft-session volatile
+like all §11.7 state (reboot restores the boot `active_mode`); a mode restarts
+venc and re-bands the §9.7 selector envelope, so it is a **pre-flight** action —
+never a channel or power change (the §13 bound holds).
+
+**Mechanics.** `vcmd_id::kMode = 0x07` (core). The `cmd_arg > kVcmdMaxArg` gate is
+relaxed to `cmd_id != kMode && cmd_arg > kVcmdMaxArg` in the three enforcement
+sites — `wire.cpp` decode + encode, and `VcmdIssuer::start` (core). New io helper
+`mode_name_at(dir, index)` shares the enumeration+filter+name-sort with
+`modes_catalog_json` (refactored a common `collect_modes(dir)`), so the craft's
+index→name map is byte-for-byte the catalog's ordering. `app/main.cpp`: the
+`apply_cmd` lambda intercepts `kMode` (catalog lookup → `spawn_mode_applier` →
+optimistic `active_mode` update), `vcmd_id_for`/`vcmd_name_for` gain `"mode"`,
+and the ground `POST /api/v1/vehicle/command` route allows `arg` `0..255` for
+`cmd:"mode"` (the ground can't range-check locally — the catalog is on the craft
+— so an over-range index is the craft's `REJECTED` to give). Tests: `wire_test`
+(MODE wide-arg round-trip; non-MODE `>4` still a decode error), `vehicle_cmd_test`
+(issuer accepts a wide MODE arg; craft applies/REJECTs by range), `modes_test`
+(`mode_name_at` ordering matches the catalog). Craft-only (TX) + ground-issuer
+change; no `table_version` bump (VEHICLE_CMD is not a §7 table).
+
+Spec: §3.14 (`cmd_arg` row — the `cmd_id`-dependent structural gate), §11.7
+(intro caveat, the `0x07 MODE` registry row, the "MODE takes the other road"
+paragraph), §13 (the forged-VEHICLE_CMD row extended to mode switches). Second
+step of the hub mode-menu integration; the hub-side proxy + WebUI menu follow.

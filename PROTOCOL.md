@@ -715,7 +715,7 @@ under its own common prefix.
 | 15 | 1 | `cmd_seq` | copy counter N..1 within the campaign / echo burst (diagnostics only — no timing resolution, unlike §11.1) |
 | 16 | 1 | `cmd_flags` | bit0 `ACK` — set on **every** echo, applied and rejected alike; bit1 `REJECTED` — additionally set on the echo of a valid-but-unapplicable command (§11.7); bits 2–7 reserved (0, decode error otherwise) |
 | 17 | 1 | `cmd_id` | command registry (§11.7); unknown values are structurally valid (the craft answers `REJECTED`, forward compatibility) |
-| 18 | 1 | `cmd_arg` | boolean or enum value; **`0..4` only** — every command is enable/disable or an enum of at most 5 choices (operator ruling, Pass 68). A value `>4` is a **structural decode error** (silent drop, no nonce consumed); a structurally valid arg outside a known command's range is consumed and echoed `REJECTED` (§11.7) |
+| 18 | 1 | `cmd_arg` | boolean or enum value. For `cmd_id` `0x01`–`0x06` and unknown ids: **`0..4` only** — every such command is enable/disable or an enum of at most 5 choices (operator ruling, Pass 68); a value `>4` is a **structural decode error** (silent drop, no nonce consumed). **Exception — `0x07` MODE (Pass 105):** the full **`0..255`** decodes structurally, because MODE indexes the §15.5 mode catalog (`GET /api/v1/modes`), which is inherently open-ended and already exceeds 5 entries. In both cases a structurally valid arg outside the *command's* range (a `>4` on `0x01`–`0x06` cannot reach here; a MODE index past the catalog end can) is consumed and echoed `REJECTED` (§11.7). The structural gate is thus `cmd_id`-dependent: MODE widens it, no other command may without its own amendment |
 | 19 | 4 | `cmd_mac` | `trunc(HMAC(csa_psk, bytes[0..18]), 4)` — the §11.4 primitive verbatim (HMAC-SHA-256, leftmost 4 bytes, big-endian) |
 
 VEHICLE_CMD is broadcast over the air in the pinned §3.0 frame like CSA
@@ -2076,7 +2076,12 @@ The over-air lever for the craft's runtime toggles — the §9/§5 knobs that we
 previously craft-boot-config only, now settable from the bound ground without a
 reboot. Deliberately narrow (operator ruling, Pass 68): **every command is an
 enable/disable or an enum of at most 5 choices** — no free-form numerics ride
-this channel. Wire format is §3.14; everything below is behaviour.
+this channel. The **sole exception is `0x07` MODE** (operator ruling, Pass 105):
+selecting an operating mode (§16) is a single-index choice over the §15.5 catalog
+whose length is inherently open-ended (10+ modes today), so MODE alone carries a
+full-`u8` `cmd_arg` (§3.14). It is still one enum choice, not a free-form numeric
+— the widening is the enum's *cardinality*, not its kind. Wire format is §3.14;
+everything below is behaviour.
 
 **Command registry (v1):**
 
@@ -2088,7 +2093,8 @@ this channel. Wire format is §3.14; everything below is behaviour.
 | `0x04` | `FPS_SELECT` | preset index 0..4 | Sets encoder fps to `venc.command_presets.fps[arg]` through the §9.6/§9.11 actuator (write-on-change; venc requests an IDR after a real change). `REJECTED` when: the preset list is unconfigured or `arg` ≥ its length, `venc.enabled` is false, **or the §9.11 ladder is currently enabled** (`cmd_fps_ladder` true — the ladder owns `video0.fps`; issue `FPS_LADDER` off first — Pass 71 ruling, no implicit ladder stop). A selection updates a configured-but-disabled ladder's current-rung model, so a later `FPS_LADDER` on resumes from the selected rung, not a stale one. While no ladder is running, the selected fps is the §9.11 cap-coupling cadence input (authoritative immediately, same rule as a ladder command) |
 | `0x05` | `RESOLUTION` | preset index 0..4 | Sets encoder resolution to `venc.command_presets.resolution[arg]` (a venc `video0.size` string, e.g. `"1280x720"`). `REJECTED` when the preset list is unconfigured, `arg` ≥ its length, `venc.enabled` is false, or the actuation path is not yet implemented (staged, Pass 71 — the venc-side knob is a venc-repo dependency) |
 | `0x06` | `FRAMING` | preset index 0..4 | Sets encoder framing mode to `venc.command_presets.framing[arg]` (a venc `video0.framing` string). Same `REJECTED` set as `RESOLUTION` (staged, Pass 71) |
-| `0x07`–`0x1F` | *reserved* | — | not specified |
+| `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
+| `0x08`–`0x1F` | *reserved* | — | not specified |
 
 **v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
 encoder value spaces via **config preset-indexing**: the craft's
@@ -2099,6 +2105,17 @@ ladder members (the cap-coupling cadence machinery assumes ladder rungs);
 preset lists from deployment config, never over the air; an index with no
 configured entry is consumed + `REJECTED` (the unconfigured-actuator pattern
 below). No venc-specific values are baked into this spec.
+
+**MODE (Pass 105) takes the other road.** Where `0x04`–`0x06` fit an open-ended
+value space *into* the ≤5 bound (a config-curated preset list), MODE instead
+**widens the bound** (§3.14 `cmd_arg` `0..255` for `0x07` only) and indexes the
+*whole* §15.5 catalog directly — no `command_presets` entry, no curation. The
+two encodings answer different needs: the venc presets pin a handful of live
+encoder values the operator pre-selects; MODE selects among complete operating
+points (§16) whose set is already enumerable and single-sourced on the craft
+(`GET /api/v1/modes`). The ground reads that catalog over management HTTP and
+sends the chosen index; the craft resolves the index against the *same* sorted
+enumeration, so no mode identity crosses the air — only its ordinal.
 
 **Acceptance (craft)** — the §11.4 guard set minus the channel clauses:
 `cmd_mac` verifies (same key provenance as CSA, §11.4a) AND `cmd_nonce >
@@ -2232,7 +2249,7 @@ data-path crypto, or heavy state. Threats and mitigations:
 | Forged CACHE_REPLY → junk symbol injection | accepted only for an outstanding `request_id`, from the addressed cache, for requested symbols, within allowance; wrapped packet revalidated via full §3.1/§3.2 decode + latched stream key (no worse than direct DATA injection, which is the accepted §13 posture) | 3.11, 14.3 |
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
 | Forged/stale CACHE_ASSIGN → cache retune or cross-vehicle window | accept only the configured controller originator **and UDP source endpoint**, exact cache destination, allowlisted channel, and monotonic controller-session epoch; clear the old window only after a successful retune | 3.13, 14.3 |
-| Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung / venc preset) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets (v1 toggles) or an encoder preset from the operator's own deployment allowlist (v2, volatile — Pass 73; persists only on a pre-live venc fallback) — never channel or power | 3.14, 11.7 |
+| Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung / venc preset / mode switch) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets (v1 toggles) or an encoder preset from the operator's own deployment allowlist (v2, volatile — Pass 73; persists only on a pre-live venc fallback), or an operating mode from the craft's own `modes/` set (Pass 105, volatile — reboot restores boot `active_mode`; a mode restarts venc + re-bands the §9.7 selector but touches no channel/power) — never channel or power | 3.14, 11.7 |
 
 The CSA MAC is the sole cryptographic element and touches only the rare
 channel-switch control action, never the bandwidth-carrying data path. Key
