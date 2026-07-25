@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -84,12 +85,22 @@ VencCfg cfg_for(uint16_t port) {
 // Drive the non-blocking state machine to quiescence at a fixed clock: keep
 // polling until an idle actuator stays idle across a poll (nothing pending to
 // start — the 404 fallback chain restarts within one poll, so this drains it).
+// While a transaction is in flight, YIELD real wall-time between polls: poll()
+// uses a 0 ms timeout, so a tight spin can exhaust its budget before the kernel
+// finishes the loopback connect or the scripted server accepts/answers, leaving
+// the transaction wedged mid-flight (and then ScriptedVenc's join() deadlocks
+// on the accept it never got). The production loop has real work between polls;
+// the sleep restores that here. Bounded at ~5 s so a genuinely stuck actuator
+// still fails fast rather than hanging.
 void pump(VencActuator& act, uint64_t now_ms) {
-    for (int i = 0; i < 2000; ++i) {
+    for (int i = 0; i < 100000; ++i) {
         const bool was_busy = act.busy();
         act.poll(now_ms);
         if (!was_busy && !act.busy()) {
             return;
+        }
+        if (act.busy()) {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
         }
     }
 }
@@ -191,6 +202,53 @@ int main() {
         const auto& p = venc.paths();
         CHECK_EQ_U(p.size(), 1);
         CHECK(p[0] == "/request/idr");
+    }
+
+    // §15.5 Pass 103 invalidate(): a venc restart strands the encoder because
+    // write-on-change suppresses re-pushing the SAME value. invalidate() drops
+    // the cache so the identical target is re-asserted onto the fresh encoder.
+    {
+        ScriptedVenc venc({200, 200});  // first push, then the re-assert
+        VencActuator act(cfg_for(venc.port()));
+        act.set_bitrate(8192);
+        pump(act, 1000);
+        CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
+        CHECK_EQ_U(act.pushes(), 1);
+        // Same value again = write-on-change no-op: nothing re-pushed. This is
+        // exactly what strands venc after a restart.
+        act.set_bitrate(8192);
+        pump(act, 1100);
+        CHECK_EQ_U(act.pushes(), 1);
+        // The restart happened: invalidate, then re-offer the identical value.
+        act.invalidate();
+        CHECK_EQ_U(act.commanded_bitrate_kbps(), 0);  // cache dropped
+        act.set_bitrate(8192);
+        pump(act, 1200);
+        CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);  // re-asserted
+        CHECK_EQ_U(act.pushes(), 2);
+        const auto& p = venc.paths();
+        CHECK_EQ_U(p.size(), 2);
+        CHECK(p[0] == "/api/v1/live/set?video0.bitrate=8192");
+        CHECK(p[1] == "/api/v1/live/set?video0.bitrate=8192");
+    }
+
+    // invalidate() also re-probes the volatile path: a fallback latched before
+    // the restart must not skip /live/set on the fresh (possibly upgraded)
+    // encoder.
+    {
+        ScriptedVenc venc({404, 200, 200});
+        VencActuator act(cfg_for(venc.port()));
+        act.set_bitrate(8192);
+        pump(act, 1000);
+        CHECK(act.live_fallback());
+        act.invalidate();
+        CHECK(!act.live_fallback());  // latch cleared
+        act.set_bitrate(8192);
+        pump(act, 2000);
+        CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
+        const auto& p = venc.paths();
+        CHECK_EQ_U(p.size(), 3);
+        CHECK(p[2] == "/api/v1/live/set?video0.bitrate=8192");  // volatile retried
     }
 
     return wbtest_finish("venc_actuator_test");

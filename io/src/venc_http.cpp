@@ -59,6 +59,24 @@ bool VencActuator::request_idr(uint64_t now_ms) {
     return true;
 }
 
+void VencActuator::invalidate() {
+    // §15.5 Pass 103: forget everything we believe the encoder holds. A venc
+    // restart (the §16 mode applier) wiped its live/volatile state, so drop any
+    // transaction in flight to the now-dead process and clear the
+    // write-on-change cache. want_* (the desired targets) stay; with last_*
+    // empty the next poll() re-asserts bitrate + caps + fps onto the fresh
+    // encoder. Re-probe the volatile path (a pre-restart fallback latch no
+    // longer applies) and clear the retry hold-off so re-assertion is prompt.
+    close_conn();
+    last_.reset();
+    last_caps_.reset();
+    last_fps_.reset();
+    last_change_ms_ = 0;
+    live_fallback_ = false;
+    live_reprobe_ms_ = 0;
+    no_retry_until_ms_ = 0;
+}
+
 // ---- non-blocking transaction engine ---------------------------------------
 
 int VencActuator::parse_status(const char* buf, size_t len) {

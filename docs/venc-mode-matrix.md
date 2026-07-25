@@ -205,6 +205,18 @@ resolutions, which requires a venc restart per point (`video0.size` is
 the MCS rung. A mode change mid-flight would mean a venc restart and a video
 outage, so the matrix must be selected before launch.
 
+**The restart strands the live bitrate — the applier re-asserts it (§15.5 Pass
+103).** `video0.bitrate` is *live* (volatile `/api/v1/live/set`), so the restart
+that applies `video0.size`/`sensor.mode` also **discards** the bitrate/caps/fps
+the link had pushed; the fresh encoder boots at its persisted config value. The
+link's §9.6 write-on-change actuator believes the encoder still holds the live
+value and would not re-push — worst on a **same-band switch** (only fps/resolution
+change, so the pin and derived bitrate are unchanged). `apply-mode.sh`'s final
+step POSTs `/api/v1/venc/reassert`, dropping that cache so the link re-asserts on
+its next tick. **The one supported entry is `POST /api/v1/mode`** (the hub), which
+forks the applier; running `apply-mode.sh` by hand is bench-only (it self-reasserts
+either way). Verified end-to-end by `tools/mode_harness.py`.
+
 ---
 
 ## 6. Open: 100 fps vs 90 fps

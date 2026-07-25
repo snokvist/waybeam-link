@@ -1,7 +1,12 @@
 #!/bin/sh
 # apply-mode.sh <mode-name> — apply one operating mode (docs/venc-mode-matrix.md
 # §16) on the craft. This is the on-craft applier that waybeam-link forks when
-# the hub POSTs /api/v1/mode (Pass 96); it can also be run by hand.
+# the hub POSTs /api/v1/mode (Pass 96).
+#
+# SUPPORTED ENTRY IS `POST /api/v1/mode` (the hub / control plane), NOT this
+# script. Running it by hand is BENCH-ONLY: it works (it self-reasserts the
+# encoder against the link at the end, step 6, Pass 103), but the link owns the
+# active-mode label and the production flow goes through /api/v1/mode.
 #
 # What a "mode" is: three venc fields (sensor.mode, video0.size, video0.fps —
 # sensor.mode and video0.size are restart_required) plus the link range pin
@@ -104,5 +109,18 @@ fi
 if [ "$FPS_MODE" = "variable" ]; then
   link_fps true
 fi
+
+# 6) Re-assert the encoder against the link (§15.5 Pass 103). The venc restart
+#    in step 4 discarded the encoder's LIVE bitrate/caps/fps; the link's
+#    write-on-change actuator still believes it holds them and would NOT
+#    re-push, stranding the fresh encoder at its persisted-config bitrate
+#    (worst on a same-band switch, where the pin — and so the derived bitrate —
+#    did not change). This POST drops that cache so the link re-asserts on its
+#    next tick. Best-effort: if the link is down the persisted config already
+#    reproduces the mode on next start.
+curl -sS --max-time 4 -X POST "http://$LINK_CTRL/api/v1/venc/reassert" \
+  -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 \
+  && echo "apply-mode: link re-asserted encoder" \
+  || echo "apply-mode: WARN venc/reassert not applied (link down?)" >&2
 
 echo "apply-mode: $NAME applied"

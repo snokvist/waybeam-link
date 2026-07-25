@@ -45,6 +45,10 @@ struct ControlHandlers {
                               int min_k, int min_r)>
         fec;
     std::function<void()> reset_stats;  // side-effect only; always 200
+    // §15.5 Pass 103: drop the venc actuator's write-on-change cache so the
+    // next tick re-asserts bitrate/caps/fps after an out-of-loop venc restart
+    // (the §16 mode applier POSTs this). Side-effect only; always 200.
+    std::function<void()> venc_reassert;
     // §15.5a scout writes (ground/rx only; null → 409). start takes the parsed
     // sweep request; empty channels → the engine substitutes the allowlist.
     std::function<std::string(const std::vector<uint16_t>& channels,
