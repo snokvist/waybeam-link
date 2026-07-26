@@ -3746,3 +3746,51 @@ per Pass 104.
 **Not deployed to the craft.** Pass 106 is RX-side and a no-op for TX, and the
 craft overlay has ~1.5 MB free against a 2.6 MB binary — the swap is a brick
 risk with no behavioural gain. The craft stays on its current build.
+
+## Pass 107 — §15.3 frame-SHM ingress backpressure is not observable (2026-07-26)
+
+**The defect.** `StreamStats::shm_full_drops` was filled unconditionally from
+`FrameShmRing::Stats::full_drops`, but that counter is only ever incremented in
+`write_frame()` — the **producer** path. On a `tx` node the frame-SHM binding is
+an *ingress* ring that we attach to as a consumer, so the field was structurally
+incapable of being non-zero. It nevertheless shipped in every stats line and on
+the `:8099` dashboard, named exactly as though it monitored the condition an
+operator most wants to see on the vehicle: venc dropping whole frames because
+our drain is too slow. Same for `shm_oversize_drops`.
+
+This is worse than a missing metric. A hardcoded zero under a plausible name is
+read as evidence, and the venc producer's drops break the H.265 reference chain
+— the failure it appeared to rule out is precisely the one that was invisible.
+
+**Why it cannot be fixed by reading harder.** venc_frame_ring is SPSC and its
+`full_drops`/`oversize_drops` live in the producer's process-local
+`venc_frame_ring_t.stats`, not in the §15.4 shared header. There is nothing in
+the mapping to read. The prose in §15.3 was already careful here — it said only
+`shm_bad_slots` comes from the consumer ring on ingress — but it stated it as a
+sourcing note rather than as a prohibition, and the code did not follow it.
+
+**Ruling.** §15.3 now carries an explicit per-direction observability table and
+the sentence a future reader needs: a reader MUST NOT interpret
+`shm_full_drops == 0` on an ingress stream as "the producer is not dropping".
+Ingress gets a counter that is real today, with no producer change and no ABI
+change: **`shm_ring_full`**, incremented in `read_frame()` whenever the consumer
+observes `write_idx - read_idx == slot_count`.
+
+It is deliberately not called a drop count. It is a *leading* indicator — at
+that instant the producer's next write is dropped unless our read frees the slot
+first — so it can read non-zero while the producer has dropped nothing. That
+asymmetry is the honest one to have: it over-warns rather than under-warns, and
+under-warning is what this pass exists to stop.
+
+**Alternative considered and deferred:** carve the producer's true `full_drops`
+into the 52 free bytes of the venc_frame_ring header's producer-owned cache line
+(offsets 76+), which is offset-compatible with every existing consumer. That is
+a cross-repo change owned by
+`waybeam-coordination/specs/cross/2026-07-26-shm-egress-backpressure/` and
+requires a venc release; this pass is the part that needs no coordination. When
+that lands, `shm_full_drops` becomes real on ingress and the table in §15.3 is
+updated — `shm_ring_full` stays, because a full ring matters whether or not the
+producer chose to drop.
+
+**Scope.** Egress is untouched and stays correct: on a `rx` node we create the
+ring, so all three producer counters are real there.
