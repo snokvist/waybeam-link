@@ -28,6 +28,8 @@ const char* kEvent = "/wblink-frame-shm-test-event";
 const char* kMissing = "/wblink-frame-shm-test-missing";
 const char* kRestart = "/wblink-frame-shm-test-restart";
 const char* kPermissions = "/wblink-frame-shm-test-permissions";
+const char* kHealth = "/wblink-frame-shm-test-health";
+const char* kDrain = "/wblink-frame-shm-test-drain";
 
 std::vector<uint8_t> pattern(size_t len, uint8_t seed) {
     std::vector<uint8_t> v(len);
@@ -37,13 +39,48 @@ std::vector<uint8_t> pattern(size_t len, uint8_t seed) {
     return v;
 }
 
+bool write_health(const char* name, uint32_t magic, uint64_t full_drops,
+                  uint16_t throttle_permille) {
+    const int fd = ::shm_open(name, O_RDWR, 0);
+    if (fd < 0) {
+        return false;
+    }
+    void* mapped =
+        ::mmap(nullptr, kFrameRingHeaderSize, PROT_READ | PROT_WRITE, MAP_SHARED,
+               fd, 0);
+    ::close(fd);
+    if (mapped == MAP_FAILED) {
+        return false;
+    }
+    auto* header = static_cast<uint8_t*>(mapped);
+    __atomic_store_n(
+        reinterpret_cast<uint64_t*>(header + kFrHdrFullDrops), full_drops,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        reinterpret_cast<uint16_t*>(header + kFrHdrThrottlePermille),
+        throttle_permille, __ATOMIC_RELAXED);
+    // Publish the marker last, matching the producer extension contract.
+    __atomic_store_n(reinterpret_cast<uint32_t*>(header + kFrHdrHealthMagic),
+                     magic, __ATOMIC_RELEASE);
+    return ::munmap(mapped, kFrameRingHeaderSize) == 0;
+}
+
 }  // namespace
 
 int main() {
+    // Pass 109 ABI pins: version and total header size remain unchanged.
+    CHECK_EQ_U(kFrameRingHeaderSize, 192);
+    CHECK_EQ_U(kFrameRingVersion, 1);
+    CHECK_EQ_U(kFrHdrHealthMagic, 76);
+    CHECK_EQ_U(kFrHdrFullDrops, 80);
+    CHECK_EQ_U(kFrHdrThrottlePermille, 88);
+    CHECK_EQ_U(kFrameHealthMagic, 0x56484C54u);
+    CHECK_EQ_U(kFrameShmIngressDrainBudget, 4);
+
     // Defensive: clear any stale objects up front (ENOENT is fine).
     for (const char* n :
          {kRoundTrip, kFull, kOversize, kEvent, kMissing, kRestart,
-          kPermissions}) {
+          kPermissions, kHealth, kDrain}) {
         ::shm_unlink(n);
     }
 
@@ -102,6 +139,7 @@ int main() {
             FrameShmRing& c = **cons.value;
             CHECK(!p.is_consumer());
             CHECK(c.is_consumer());
+            CHECK(!c.stats().health_valid);  // legacy/waybeam-link producer
             CHECK_EQ_U(p.event_fd() < 0, 1);   // producer has no eventfd
             CHECK(c.event_fd() >= 0);
 
@@ -219,6 +257,90 @@ int main() {
 
             c.reset_stats();
             CHECK_EQ_U(c.stats().ring_full, 0);
+        }
+    }
+
+    // --- optional producer health: attach/reset/restart baseline semantics ---
+    {
+        auto prod = FrameShmRing::create(kHealth, 4, 4096);
+        CHECK(bool(prod));
+        CHECK(write_health(kHealth, kFrameHealthMagic, 100, 750));
+        auto cons = FrameShmRing::attach(kHealth);
+        CHECK(bool(cons));
+        if (prod && cons) {
+            FrameShmRing& p = **prod.value;
+            FrameShmRing& c = **cons.value;
+            auto hs = c.stats();
+            CHECK(hs.health_valid);
+            CHECK_EQ_U(hs.full_drops, 0);  // attach baseline, not lifetime total
+            CHECK_EQ_U(hs.throttle_permille, 750);
+
+            CHECK(write_health(kHealth, kFrameHealthMagic, 103, 700));
+            hs = c.stats();
+            CHECK(hs.health_valid);
+            CHECK_EQ_U(hs.full_drops, 3);
+            CHECK_EQ_U(hs.throttle_permille, 700);
+
+            c.reset_stats();
+            CHECK_EQ_U(c.stats().full_drops, 0);
+            CHECK(write_health(kHealth, kFrameHealthMagic, 105, 650));
+            CHECK_EQ_U(c.stats().full_drops, 2);
+
+            // Counter rollback means producer restart/reset: rebaseline at zero
+            // delta, then continue from the new counter.
+            CHECK(write_health(kHealth, kFrameHealthMagic, 1, 1000));
+            CHECK_EQ_U(c.stats().full_drops, 0);
+            CHECK(write_health(kHealth, kFrameHealthMagic, 3, 1000));
+            CHECK_EQ_U(c.stats().full_drops, 2);
+
+            // Unknown/zero markers never reject or detach the consumer. Their
+            // bytes are unavailable, not a trustworthy zero.
+            CHECK(write_health(kHealth, 0x12345678u, 999, 250));
+            hs = c.stats();
+            CHECK(!hs.health_valid);
+            CHECK_EQ_U(hs.full_drops, 0);
+            CHECK_EQ_U(hs.throttle_permille, 0);
+            const uint8_t frame[] = {1, 2, 3, 4};
+            CHECK(p.write_frame(frame, sizeof(frame)));
+            uint8_t got[8]{};
+            CHECK_EQ_U(c.read_frame(got, sizeof(got)), sizeof(frame));
+
+            // If the valid extension appears later, the first observation is a
+            // new baseline rather than a lifetime spike.
+            CHECK(write_health(kHealth, kFrameHealthMagic, 200, 500));
+            CHECK_EQ_U(c.stats().full_drops, 0);
+            CHECK(write_health(kHealth, kFrameHealthMagic, 202, 500));
+            CHECK_EQ_U(c.stats().full_drops, 2);
+        }
+    }
+
+    // --- bounded ingress drain: four frames, pending work remains ------------
+    {
+        auto prod = FrameShmRing::create(kDrain, 8, 4096);
+        CHECK(bool(prod));
+        auto cons = FrameShmRing::attach(kDrain);
+        CHECK(bool(cons));
+        if (prod && cons) {
+            FrameShmRing& p = **prod.value;
+            FrameShmRing& c = **cons.value;
+            auto f = pattern(128, 11);
+            for (uint32_t i = 0; i < 8; ++i) {
+                CHECK(p.write_frame(f.data(), f.size()));
+            }
+            std::vector<uint8_t> buf(4096);
+            bool pending = true;
+            size_t drained = 0;
+            while (drained < kFrameShmIngressDrainBudget) {
+                const long got = c.read_frame(buf.data(), buf.size());
+                if (got <= 0) {
+                    pending = false;
+                    break;
+                }
+                ++drained;
+            }
+            CHECK_EQ_U(drained, 4);
+            CHECK(pending);
+            CHECK_EQ_U(c.read_frame(buf.data(), buf.size()), f.size());
         }
     }
 

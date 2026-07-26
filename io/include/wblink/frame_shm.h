@@ -25,6 +25,11 @@
 
 namespace wblink {
 
+// §15.4 Pass 109: service a bounded burst per main-loop iteration. Four frames
+// clear the observed frame-count bottleneck without allowing a busy producer to
+// monopolise air servicing.
+inline constexpr size_t kFrameShmIngressDrainBudget = 4;
+
 class FrameShmRing {
   public:
     ~FrameShmRing();
@@ -78,10 +83,10 @@ class FrameShmRing {
         uint32_t frame_size_max = 0;
         uint64_t frame_interval_us = 0;
         uint64_t frame_jitter_us = 0;
-        // PRODUCER-ONLY (write_frame). Structurally 0 on a ring we attached
-        // to as a consumer — the producer's drops live in its own process,
-        // not in the §15.4 shared header. See ring_full for the ingress
-        // signal, and §15.3 for why 0 here must not be read as "no drops".
+        // Producer-local on an egress ring. On ingress, this is the delta since
+        // attach/reset of the producer's shared counter when health_valid is
+        // true; it is unavailable (represented as 0 plus health_valid=false)
+        // for legacy producers.
         uint64_t full_drops = 0;
         uint64_t oversize_drops = 0;
         // CONSUMER-ONLY (read_frame).
@@ -91,8 +96,12 @@ class FrameShmRing {
         // dropped unless that read frees the slot first — so it can be
         // non-zero while the producer has dropped nothing.
         uint64_t ring_full = 0;
+        // §15.4 Pass 109 producer-health extension. These are meaningful only
+        // on an attached ingress ring with the exact "VHLT" marker.
+        bool health_valid = false;
+        uint16_t throttle_permille = 0;
     };
-    const Stats& stats() const { return stats_; }
+    Stats stats();
     void reset_stats();
 
   private:
@@ -121,6 +130,8 @@ class FrameShmRing {
     uint64_t previous_interval_us_ = 0;
     uint64_t jitter_q4_us_ = 0;
     bool warned_undersized_ = false;  // B5: log the buf-too-small wedge once
+    bool health_baseline_valid_ = false;
+    uint64_t health_full_drops_baseline_ = 0;
 };
 
 }  // namespace wblink

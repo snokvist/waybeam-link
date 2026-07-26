@@ -1208,6 +1208,12 @@ robustness is satisfied, never at its expense.
 Demotes rate-limited by `down_cooldown_s` (**0.2 s**), never waiting on dwell.
 EWMA α = **0.3** (RSSI/loss, RE-DERIVE), slope α = 0.5.
 
+**Pass 109 boundary:** producer health read from frame-SHM (§15.4) is
+observability-only. `full_drops` and `throttle_permille` do not feed this
+cascade, call `set_pressure`, or alter MCS, bitrate, FEC, FPS, pins, freezes, or
+flap state. A later operator ruling must define cadence and precedence before
+either field becomes selector evidence.
+
 ### 9.2 Max-probability fallback rung (Minstrel-derived, lightweight)
 Maintain **one** success-EWMA per rung, fed by `loss_postdiv_prearq`. The
 **max-probability rung** = highest recent delivery probability; under multi-rung
@@ -2928,8 +2934,9 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "jscc_output_arq_eligible": true, "jscc_output_discard": false,
     "jscc_feedback_epoch": 1821, "jscc_feedback_age_ms": 42,
     "jscc_enforced_frames": 0, "jscc_discarded_frames": 0,
-    "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
-    "shm_ring_full": 0,
+    "shm_health_valid": true, "shm_full_drops": 0,
+    "shm_throttle_permille": 1000, "shm_oversize_drops": 0,
+    "shm_bad_slots": 0, "shm_ring_full": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
@@ -3083,24 +3090,41 @@ histogram on RX. They describe the bounded trailing sample window used in
 §3.10; zero samples means the P95 is unavailable. Stats reset clears the RTT
 window and therefore clears JSCC RTT readiness.
 
-`shm_full_drops`, `shm_oversize_drops`, `shm_bad_slots`, and `shm_ring_full`
-expose local ring backpressure/ABI failures separately from air/frame-reassembly
-loss. They are 0 on UDP bindings.
+`shm_health_valid`, `shm_full_drops`, `shm_throttle_permille`,
+`shm_oversize_drops`, `shm_bad_slots`, and `shm_ring_full` expose ring
+backpressure/ABI health separately from air/frame-reassembly loss. They are
+false/0 on UDP bindings.
 
-The venc_frame_ring is SPSC and its drop counters are **producer-local** — they
-live in the producing process, not in the §15.4 shared header — so which of
-these are observable depends on which end of the ring this node owns:
+Since waybeam_venc 0.57.0, a frame-SHM producer may publish `VHLT` health in the
+§15.4 header. `shm_health_valid` is true only when that exact marker is present.
+On ingress, `shm_full_drops` is then the increase in the producer's lifetime
+counter since this consumer attached or last reset its stats; an absent marker
+leaves the stream attached indefinitely with `shm_health_valid=false` and
+`shm_full_drops=0`. `shm_throttle_permille` is the latest producer gauge while
+valid and 0 while unavailable. These fields are observations only (Pass 109);
+they cause no selector or actuator action.
+
+Stats reset rebases ingress `shm_full_drops` to the producer's current counter.
+A producer restart/replacement is a new attach and therefore a new baseline. A
+counter decrease on an otherwise live mapping also rebases rather than
+underflowing or manufacturing a large delta.
+
+Which SHM values are observable depends on which end of the ring this node
+owns:
 
 | Field | frame-SHM egress (we produce) | frame-SHM ingress (we consume) |
 |---|---|---|
-| `shm_full_drops` | producer ring — real | **not observable**, always 0 |
+| `shm_health_valid` | false (not a consumed producer header) | exact `VHLT` marker |
+| `shm_full_drops` | local producer counter — real | producer header delta when health valid; otherwise 0/unavailable |
+| `shm_throttle_permille` | 0 (not a consumed producer gauge) | producer header gauge when health valid; otherwise 0/unavailable |
 | `shm_oversize_drops` | producer ring — real | **not observable**, always 0 |
 | `shm_bad_slots` | 0 (producers never skip slots) | consumer ring — real |
 | `shm_ring_full` | 0 (producer counts drops instead) | consumer ring — real |
 
-A reader MUST NOT interpret `shm_full_drops == 0` on an ingress stream as
-"the producer is not dropping". The producer's drops are invisible to us there;
-`shm_ring_full` is the ingress backpressure signal.
+A reader MUST NOT interpret ingress `shm_full_drops == 0` without
+`shm_health_valid` as "the producer is not dropping". `shm_ring_full` remains
+independent leading evidence and stays visible whether or not the producer
+publishes health or has actually dropped a frame.
 
 `shm_ring_full` counts reads at which the consumer observed a **completely full**
 ring (`write_idx - read_idx == slot_count`). It is a leading indicator, not a
@@ -3190,6 +3214,30 @@ viewer can attach to a ring created by a privileged monitor-radio process.
 The consumer needs read/write access because it owns `read_idx` and
 `consumer_waiting`; read-only attachment is not compatible with this SPSC ABI.
 All fields native-endian (same-host only).
+
+Producer-owned health fields carved from the unchanged 192-byte header:
+
+| off | size | field | notes |
+|---|---|---|---|
+| 76 | 4 | `health_magic` | u32 `0x56484C54` (`"VHLT"`); any other value means health unavailable |
+| 80 | 8 | `full_drops` | u64 producer-lifetime full-ring drops |
+| 88 | 2 | `throttle_permille` | u16 producer clamp; 1000 unclamped |
+
+No attach validation depends on these fields. A consumer reads the counters
+only after seeing the exact marker and must tolerate a producer that leaves the
+marker zero forever. The marker is published last by a reporting producer,
+before its release-store of `init_complete`.
+
+This health is local to one SHM object; it is not part of `VencFrameMeta` and
+does not cross the radio. The current waybeam-link egress producer leaves
+`health_magic=0`, so ground consumers of `venc_frame_out` correctly see health
+as unavailable.
+
+On TX ingress, one event-loop iteration consumes at most **four** frames from
+each pending ring. Air readiness is serviced before this drain. If four frames
+are consumed without observing empty, the ring remains pending for the next
+iteration; the bound prevents a producer burst monopolising the vehicle loop
+while removing the old one-frame throughput ceiling.
 
 **Slot payload** = 8-byte `VencFrameMeta` prefix + Annex-B frame bytes (NAL start
 codes preserved):

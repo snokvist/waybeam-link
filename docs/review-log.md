@@ -3938,3 +3938,45 @@ Worth carrying into the ground menu work this pass came from: for the operator,
 "claim went stale because the craft rebooted" is indistinguishable from "command
 ignored" — both are a `timeout` against a link that looks perfectly healthy. The
 menu should show claim state, not just offer claim actions.
+
+## Pass 109 — §15.3/§15.4 producer health is observable, not control (2026-07-26)
+
+**Context.** Pass 107 removed a false ingress `shm_full_drops=0`: the only drop
+counter then available lived in this process and incremented only when
+waybeam-link produced an egress ring. `waybeam_venc` 0.57.0 now publishes three
+producer-owned fields in the previously padded header bytes: `health_magic`
+`"VHLT"` at 76, lifetime `full_drops` at 80, and `throttle_permille` at 88.
+Header size and version remain 192 and 1.
+
+**Ruling: availability is explicit.** A consumer accepts old producers forever.
+Only the exact `VHLT` marker makes health valid; zero or any unknown marker means
+"not reported", never "zero drops" or "unclamped". Stream stats gain
+`shm_health_valid` and `shm_throttle_permille`. Ingress `shm_full_drops` becomes
+the producer counter delta since attach or local stats reset. Reset and producer
+replacement establish a fresh baseline; a counter rollback rebases instead of
+underflowing.
+
+`shm_ring_full` remains. It is a consumer observation and a leading indicator:
+a ring may be seen full before the producer loses a frame, while a producer may
+drop between consumer samples. Neither field substitutes for the other.
+
+**Ruling: no control action.** Header health is observability-only in this pass.
+It does not enter the selector cascade, local-pressure gauge, bitrate actuator,
+FEC policy, or FPS ladder. "Drops/throttle imply an MCS demote" has unresolved
+cadence, precedence, settle, pin, CSA-freeze, and flap semantics; implementing
+one silently would violate the law. That decision is deliberately deferred.
+
+**Ruling: four-frame bounded drain.** The former one-frame-per-loop rule was the
+only remaining frame-count ceiling: if the vehicle loop ran below camera FPS,
+reducing encoded bytes could not stop an eight-slot ring filling in frames. TX
+now consumes at most four frames from each pending ring per loop. Air service
+still runs first, and a ring that exhausts the four-frame budget remains pending
+for the next iteration. Four clears half the venc ring in one visit without
+turning an arbitrary producer burst into an unbounded vehicle-loop stall.
+
+**Two-hop boundary.** Radeon-vrx and waybeam-hub consume waybeam-link RX's
+separate `venc_frame_out`, not venc's vehicle-side `venc_frame`. Health is not
+inside `VencFrameMeta` and therefore does not cross the radio. Current
+waybeam-link egress leaves `health_magic=0`; ground health publication and
+decoder stats are separate work. Their existing attach validators ignore bytes
+76–89 and need no compatibility change.

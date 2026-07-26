@@ -68,6 +68,10 @@ uint32_t atomic_load_u32(const uint8_t* base, size_t off, int order) {
     return __atomic_load_n(reinterpret_cast<const uint32_t*>(base + off), order);
 }
 
+uint16_t atomic_load_u16(const uint8_t* base, size_t off, int order) {
+    return __atomic_load_n(reinterpret_cast<const uint16_t*>(base + off), order);
+}
+
 void atomic_store_u32(uint8_t* base, size_t off, uint32_t v, int order) {
     __atomic_store_n(reinterpret_cast<uint32_t*>(base + off), v, order);
 }
@@ -249,6 +253,12 @@ R FrameShmRing::attach(const std::string& name) {
     ring->is_owner_ = false;
     ring->is_consumer_ = true;
     ring->event_fd_ = efd;
+    if (atomic_load_u32(b, kFrHdrHealthMagic, __ATOMIC_ACQUIRE) ==
+        kFrameHealthMagic) {
+        ring->health_full_drops_baseline_ =
+            atomic_load_u64(b, kFrHdrFullDrops, __ATOMIC_RELAXED);
+        ring->health_baseline_valid_ = true;
+    }
     ring->reader_ = std::thread([r = ring.get()] { r->reader_loop(); });
     return R::ok(std::move(ring));
 }
@@ -350,9 +360,9 @@ long FrameShmRing::read_frame(uint8_t* buf, size_t cap) {
     if (r == w) {
         return 0;  // empty
     }
-    // §15.3 Pass 107: the producer's full_drops is process-local and invisible
-    // from here, so a completely full ring is the only backpressure evidence
-    // an ingress node has. Sampled before the read, which frees the slot.
+    // §15.3 Pass 109: ring_full remains independent leading evidence even when
+    // producer health is available. Sample it before this read frees the slot;
+    // the producer may report no drop if the read wins the race.
     if (w - r >= slot_count_) {
         ++stats_.ring_full;
     }
@@ -422,11 +432,58 @@ void FrameShmRing::note_frame(size_t len) {
     last_frame_us_ = now;
 }
 
+FrameShmRing::Stats FrameShmRing::stats() {
+    Stats out = stats_;
+    if (!is_consumer_ || map_ == nullptr) {
+        return out;
+    }
+
+    // The extension is optional at version 1. Only the exact marker makes the
+    // following bytes meaningful; zero or unknown values remain attached and
+    // report unavailable forever without turning absence into a false zero.
+    if (atomic_load_u32(map_, kFrHdrHealthMagic, __ATOMIC_ACQUIRE) !=
+        kFrameHealthMagic) {
+        out.full_drops = 0;
+        out.health_valid = false;
+        out.throttle_permille = 0;
+        health_baseline_valid_ = false;
+        health_full_drops_baseline_ = 0;
+        return out;
+    }
+
+    const uint64_t full_drops =
+        atomic_load_u64(map_, kFrHdrFullDrops, __ATOMIC_RELAXED);
+    out.health_valid = true;
+    out.throttle_permille =
+        atomic_load_u16(map_, kFrHdrThrottlePermille, __ATOMIC_RELAXED);
+    if (!health_baseline_valid_ ||
+        full_drops < health_full_drops_baseline_) {
+        // A producer restart/counter reset rebases the public delta instead of
+        // underflowing into an enormous cumulative count.
+        health_full_drops_baseline_ = full_drops;
+        health_baseline_valid_ = true;
+        out.full_drops = 0;
+    } else {
+        out.full_drops = full_drops - health_full_drops_baseline_;
+    }
+    return out;
+}
+
 void FrameShmRing::reset_stats() {
     stats_ = {};
     last_frame_us_ = 0;
     previous_interval_us_ = 0;
     jitter_q4_us_ = 0;
+    if (is_consumer_ && map_ != nullptr &&
+        atomic_load_u32(map_, kFrHdrHealthMagic, __ATOMIC_ACQUIRE) ==
+            kFrameHealthMagic) {
+        health_full_drops_baseline_ =
+            atomic_load_u64(map_, kFrHdrFullDrops, __ATOMIC_RELAXED);
+        health_baseline_valid_ = true;
+    } else {
+        health_full_drops_baseline_ = 0;
+        health_baseline_valid_ = false;
+    }
 }
 
 // ---- eventfd drain --------------------------------------------------------
