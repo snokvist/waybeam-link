@@ -4037,3 +4037,58 @@ only a due cadence. It is inserted immediately before an already-transmitting
 live RTP DATA packet; idle video coalesces the latest state until the next slot.
 It never sends standalone, follows an EOB, re-arms the quiet gap, or extends the
 craft TX→RX guard. Observability does not buy its own radio turnaround.
+
+## Pass 111 — calibrate the per-rung local service boundary (2026-07-26)
+
+**Observed failure.** With the selector holding MCS5 at excellent RSSI, the
+encoder commanded the global 25 Mbps ceiling while the vehicle-side frame-SHM
+ring repeatedly filled and the venc throttle oscillated as low as 30–40%.
+Moving the whole fleet from the known-dirty 5220 MHz channel to 5805 MHz did not
+remove it. The selector and Pass 110 loss classifier were healthy: RF-rung
+viability and the local source-to-air service ceiling are separate limits.
+
+**Measurement.** The craft ran the production 1280×720, 100 fps, GOP 2 stream
+through frame-SHM, the shipped per-frame RLC overhead, quiet-gap pacer, and
+SSC338Q radio backend on HT20/5805. Each candidate waited for venc throttle
+recovery, then sampled at 5 Hz for 30 s; MCS5's accepted point also passed a
+60 s sample. A clean point held `shm_throttle_permille == 1000`, frame-SHM fill
+at no more than one of eight slots (12%), pressure false, and producer
+`shm_full_drops` unchanged. Any throttle excursion rejected the point even when
+the ring did not reach a full-drop event during the sample.
+
+| MCS | highest clean (kbps) | first rejected (kbps) | rejection evidence |
+|---:|---:|---:|---|
+| 0 | 4000 | 4500 | throttle 303‰, fill 75%, +1 full drop |
+| 1 | 7500 | 8000 | throttle 338‰, fill 100%, +26 full drops |
+| 2 | 11500 | 12000 | throttle 608‰, fill 75% |
+| 3 | 14500 | 15000 | throttle 640‰, fill 50% |
+| 4 | 19000 | 19500 | throttle 384‰, fill 87%, +3 full drops |
+| 5 | 23000 | 23500 | throttle 640‰, fill 62% |
+| 6 | 24500 | 25000 | throttle 640‰, fill 50% |
+| 7 | 26000 | 27000 | throttle 608‰, fill 62% |
+
+**Ruling.** Preserve an existing derived rate when it is already no more than
+95% of the clean boundary. Otherwise choose the greatest integer
+`airtime_budget_permille` whose §9.5 all-integer derivation does not exceed 95%
+of that boundary. The table moves from a flat 600‰ to
+`{600,600,600,600,510,463,438,418}` and derives
+`{2829,5754,10303,13769,18025,21839,23249,24658}` kbps. The 25 Mbps
+`venc.max_bitrate_kbps` remains as the independent encoder-capability ceiling;
+it is no longer asked to disguise per-rung transport limits.
+
+This amends, rather than erases, Pass 75. Pass 75 correctly separated the SoC
+ceiling from RF profile selection and rejected using one global airtime cut as
+a proxy for CPU. The new evidence is per-rung and comes from the complete local
+service path: MCS5, MCS6, and MCS7 fail at different rates. The table's
+per-rung airtime field is therefore being used for its intended wall-clock
+occupancy policy, while the rung-independent encoder ceiling remains intact.
+
+**Boundary.** This is a fleet seed measured on one SSC338Q/RTL88x2 craft at
+HT20, 100 fps, and the current framing/FEC/pacer implementation. It is not a
+claim about every adapter or channel. Re-calibrate after changing channel
+width, driver, framing/FEC, quiet-gap timing, camera cadence, or hardware class.
+Do not encode ordinary RF interference into this table: persistent or acute
+channel loss remains Pass 110 selector evidence.
+
+Changing the four airtime values changes the §3.6 table hash and requires a
+lockstep fleet redeploy.

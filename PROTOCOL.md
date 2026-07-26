@@ -1390,6 +1390,23 @@ MCS and bitrate never move together:
   20 MHz, long GI): `{6500, 13000, 19500, 26000, 39000, 52000, 58500, 65000}`
   for MCS0–7; short GI = ×10/9. No separate per-rung bitrate field exists —
   the table's airtime fraction IS the bitrate policy.
+- **Empirical airtime ceiling (Pass 111):** the PHY expression is a starting
+  model, not proof that the complete encode → frame-SHM → FEC → quiet-gap →
+  injection path sustains that rate. A rung is clean only when a steady
+  full-cadence source holds `shm_throttle_permille == 1000`, the frame-SHM ring
+  stays at its one-frame idle occupancy, and producer `shm_full_drops` does not
+  advance. Any throttle excursion is an overload verdict even if the short
+  sample records no full drop. The seed HT20/100-fps table was calibrated on
+  hardware at 5805 MHz: existing derived rates already below 95% of the highest
+  clean point are retained; oversubscribed rungs use the greatest integer
+  `airtime_budget_permille` whose derived rate is no more than 95% of that clean
+  point. This yields airtime permille
+  `{600,600,600,600,510,463,438,418}` and unclamped derived kbps
+  `{2829,5754,10303,13769,18025,21839,23249,24658}` for MCS0–7. These are fleet
+  seeds, not universal RF truth: re-measure after a channel width, driver,
+  framing/FEC, pacer, camera cadence, or hardware-class change. Ordinary
+  channel interference belongs to §9.1/§9.2; it must not be baked into this
+  local service-boundary calibration.
 - **`fec_overhead_frac` MUST be non-zero on any rung whose streams run
   `fec_scheme: rlc256` (Pass 95).** The term above is the only place parity
   airtime is debited, and §14.1 adds `r` repair symbols *on top of* the video
