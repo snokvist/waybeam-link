@@ -99,7 +99,9 @@ struct StreamCfg {
 // §9.1 cascade + §9.4/§9.5/§9.7/§9.8/§9.9 constants (seeds; RE-DERIVE per
 // §17). Mirrors core SelectorPolicy; the app maps seconds -> ms.
 struct SelectPolicy {
-    uint16_t demote_milli = 20;
+    // §17 re-derive, 2026-07-26 — see core/include/wblink/selector.h and
+    // docs/step11-bench.md §4.8.
+    uint16_t demote_milli = 45;
     int8_t rssi_floor_dbm = -85;
     double rssi_fade_db_per_s = 10.0;
     int8_t rssi_fade_arm_dbm = -65;

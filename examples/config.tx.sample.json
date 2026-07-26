@@ -16,7 +16,7 @@
   ],
   "policy": {
     "report_hz": 10, "report_timeout_ms": 500,
-    "select": { "demote_milli": 20, "rssi_floor_dbm": -85,
+    "select": { "demote_milli": 45, "rssi_floor_dbm": -85,
                 "rssi_fade_db_per_s": 10, "rssi_fade_arm_dbm": -65,
                 "promote_rssi_hyst_db": 6, "promote_dwell_s": 0.5,
                 "mcs_settle_s": 5.0, "down_cooldown_s": 0.2,

@@ -147,7 +147,7 @@ int main() {
             CHECK(c.node.role == Role::kRx);
             CHECK_EQ_U(c.node.preferred_originator, 0);
             CHECK_EQ_U(c.policy.report_timeout_ms, 500);
-            CHECK_EQ_U(c.policy.select.demote_milli, 20);
+            CHECK_EQ_U(c.policy.select.demote_milli, 45);  // §17 re-derive 2026-07-26
             CHECK(c.policy.select.ewma_alpha == 0.3);
             CHECK_EQ_U(c.policy.arq.holddown_ms, 20);
             CHECK_EQ_U(c.policy.rx.renack_backoff_ms, 6);

@@ -472,3 +472,33 @@ produces a corrected per-chip qdb→dB slope to feed back into
 
 **DONE 2026-07-11** — the §3 stack landed in order (see §3). The
 rebase-and-retarget rule stands for any future stack.
+
+### 4.8 `demote_milli` re-derived to 45 (field, craft `.232`, 2026-07-26)
+
+**DONE** — operator-reported "periodic fallback to MCS0 on adaptive mode,
+other modes look more stable" traced to a genuine loss ceiling at the top
+selector rung, not a bug. Live delta(seq)/delta(delivered) loss measured
+against craft profile: on 5220 MHz (DFS/UNII-2), MCS5 lost 2-4% of packets
+despite excellent RSSI (-26 to -29 dBm, far above the rung's -73 dBm floor) —
+promote is RSSI-margin-gated, not throughput-gated, so the selector kept
+climbing back to MCS5, hitting the same real loss, and demoting again. A/B on
+5805 MHz (non-DFS, UNII-3) at the same RSSI: 0.2-0.6% loss, zero demotes over
+20s — channel-specific interference/congestion, not a code defect.
+
+Per §17's own guidance for this exact knob ("raise until decode errors clear
+at target range"), `demote_milli` default raised 20 -> 45 (2% -> 4.5%) in
+`core/include/wblink/selector.h`, `io/include/wblink/config.h`,
+`examples/config.tx.sample.json`. Re-verified on 5220 MHz: zero demotes over
+30s held at profile 5, loss 1.0-2.4% (comfortably under the new threshold).
+This bench-close-range result has not been re-validated at real flight range,
+and only 5220 MHz was swept — 5180 MHz (also DFS, also in the default
+`channel_allowlist`) has not been individually A/B'd at the new threshold.
+
+**Open follow-up, not yet designed or scheduled:** the promote path is
+RSSI-only, so nothing currently stops the selector from re-climbing to a rung
+it has *just* been demoted off for real, sustained loss — raising
+`demote_milli` only widens the tolerance band, it doesn't change that
+dynamic. A temporary per-rung timeout/lockout after a loss-driven demote
+(hold the ceiling below the lossy rung for some cooldown before promote is
+allowed to re-attempt it) would close this gap. Not implemented; needs its
+own §9 cascade design + bench validation before it's more than an idea.
