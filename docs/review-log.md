@@ -3627,3 +3627,73 @@ Spec: §3.14 (`cmd_arg` row — the `cmd_id`-dependent structural gate), §11.7
 (intro caveat, the `0x07 MODE` registry row, the "MODE takes the other road"
 paragraph), §13 (the forged-VEHICLE_CMD row extended to mode switches). Second
 step of the hub mode-menu integration; the hub-side proxy + WebUI menu follow.
+
+## Pass 106 — §3.9 latch-triggered decoder recovery (2026-07-26)
+
+**Context.** A fresh cold start (craft + ground, both power-cycled) produced
+audio but no video. Every counter read healthy: the stream latched, the frame
+reassembler delivered, the `venc_frame_out` egress ring advanced. Manually
+writing `video0.bitrate=1000` restored the picture instantly. The reason it
+worked is that a *value-changing* live bitrate write rebinds the SigmaStar rate
+controller, which emits an IRAP as a side effect — the operator had accidentally
+requested a keyframe.
+
+**Root cause — two independent faults, one symptom.** First, the consumer:
+waybeam-hub's frame-SHM ingress hard-gates on `VFRM_FLAG_IDR` before it will
+push a single access unit into its decoder ("drop deltas until the first IDR so
+we never seed a decoder mid-GOP"). Under the §16 matrix modes, which all run
+`resilience=range`, that flag is **never set on any frame**, so the gate never
+opens and the decoder is starved — this was never a decoder-conformance problem,
+the decoders never received a byte. Second, the trigger: the hub already POSTs
+`/api/v1/video/recover` (§15.5), but only once, at ring **attach**. The ground
+link creates the egress ring at boot, before anything is latched, so that POST
+lands on `"no matching latched RTP stream"` and is never retried. Both faults
+had to be present; either alone is survivable.
+
+**Why the existing §3.9 wording did not cover it.** §3.9 already anticipated
+exactly this stream shape ("a GDR stream can carry VPS/SPS/PPS indefinitely
+without an IRAP picture"), but scoped emission to "a local decoder is newly
+attached or reset" — a condition the link **cannot observe**. That is the same
+wall Pass 22 hit: VFRM v1 has no consumer generation, and a consumer draining
+the ring with its display pipeline down looks identical to one that is decoding.
+The trigger was specified against a signal that does not exist at this layer, so
+in practice nothing ever fired it automatically.
+
+**Ruling (operator, 2026-07-26).** Add **fresh latch** as a §3.9 emission
+trigger, defaulting **on**. A first latch is the one bootstrap-relevant moment
+the link genuinely can detect, and on a GDR craft it is the only moment at which
+an IRAP is guaranteed absent from everything the consumer will ever see. Placed
+on the link rather than the hub deliberately: the link is the only component
+that knows when a stream latched, which is precisely what the hub's attach-time
+POST was racing. Default-on was ruled explicitly — the failure mode is silent
+(healthy counters, black screen), and the cost is one 18-byte return per latched
+stream against a TX gate that already rate-limits to one actuation per second.
+
+**Bounded, because the stop condition is unobservable.** §3.9's existing
+"repeated … if decoder output has not resumed" is unimplementable for the same
+reason the original trigger was. The repeat is therefore capped at 5 attempts at
+1 Hz, with one early exit the link *can* observe: on frame-SHM egress, an
+IRAP-flagged frame written to the egress ring means the consumer now has
+something to start from. On RTP egress the link does not parse the payload, so
+the attempt bound is the only stop. Without the bound, a craft with
+`venc.recovery_enabled` false would draw a return every second for the whole
+flight for a request it will never honour.
+
+**Scope note — this does not make the hub gate correct.** The link-side trigger
+fixes the cold-boot race, but a node with no uplink cannot use it at all: a §2
+passive spectator (Pass 74) emits no returns by construction, so for a spectator
+joining a GDR stream an IRAP will never arrive on request. The consumer-side
+bounded gate bypass in waybeam-hub is therefore not redundant with this pass —
+it is the only mechanism that class of node has. Both land together.
+
+**Mechanics.** New `node.recovery_on_latch` (default true, RX). `RxNode` tracks
+latched RTP `StreamKey`s and drives a small per-stream attempt schedule from the
+rx loop, reusing the existing `request_recovery` encode + designated-return
+inject path (so quiet-gap scheduling and the spectator no-op both come for
+free). No wire change, no `table_version` bump, no new §15.3 field — emissions
+log to stderr like the TX-side actuation does, keeping the stats golden file
+untouched.
+
+Spec: §3.9 (fresh-latch trigger paragraph + the bounded-repeat paragraph
+replacing the unobservable stop condition), §15.2 (`node.recovery_on_latch` and
+its independence from the craft-side `venc.recovery_enabled` permission).
