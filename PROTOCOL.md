@@ -1262,7 +1262,7 @@ resolved floor is actually MCS0.
 **Transition-reason registry** (stats and §3.15):
 `0 NONE/HOLD · 1 BOOT · 2 LOSS_EMERGENCY · 3 LOSS_PERSISTENT ·
 4 REPORT_TIMEOUT · 5 RSSI_FLOOR · 6 RSSI_FADE · 7 BACKPRESSURE ·
-8 PROMOTE · 9 REPIN · 10 CSA_RESET`.
+8 PROMOTE · 9 REPIN · 10 ENVIRONMENT_RESET`.
 
 **Pass 109 boundary:** producer health read from frame-SHM (§15.4) is
 observability-only. `full_drops` and `throttle_permille` do not feed this
