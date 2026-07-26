@@ -78,9 +78,19 @@ class FrameShmRing {
         uint32_t frame_size_max = 0;
         uint64_t frame_interval_us = 0;
         uint64_t frame_jitter_us = 0;
+        // PRODUCER-ONLY (write_frame). Structurally 0 on a ring we attached
+        // to as a consumer — the producer's drops live in its own process,
+        // not in the §15.4 shared header. See ring_full for the ingress
+        // signal, and §15.3 for why 0 here must not be read as "no drops".
         uint64_t full_drops = 0;
         uint64_t oversize_drops = 0;
+        // CONSUMER-ONLY (read_frame).
         uint64_t bad_slots = 0;
+        // §15.3 Pass 107, CONSUMER-ONLY: reads at which the ring was observed
+        // completely full. A leading indicator — the producer's next write is
+        // dropped unless that read frees the slot first — so it can be
+        // non-zero while the producer has dropped nothing.
+        uint64_t ring_full = 0;
     };
     const Stats& stats() const { return stats_; }
     void reset_stats();

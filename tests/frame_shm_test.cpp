@@ -175,6 +175,12 @@ int main() {
             CHECK_EQ_U(p.stats().full_drops, 1);
             CHECK_EQ_U(p.stats().writes, slots);
 
+            // §15.3 Pass 107: the consumer cannot see the producer's drop —
+            // full_drops is process-local — so a full ring is its only
+            // backpressure evidence. Nothing read yet, so nothing observed.
+            CHECK_EQ_U(c.stats().ring_full, 0);
+            CHECK_EQ_U(c.stats().full_drops, 0);
+
             // Drain exactly the frames that fit, in order.
             std::vector<uint8_t> buf(slot_size);
             for (uint32_t i = 0; i < slots; ++i) {
@@ -183,6 +189,36 @@ int main() {
                 CHECK(got >= 0 && std::memcmp(buf.data(), f.data(), f.size()) == 0);
             }
             CHECK_EQ_U(c.read_frame(buf.data(), buf.size()), 0);
+
+            // Exactly one read saw the ring full: the first. Each later read
+            // starts one slot down, so the counter must not keep climbing —
+            // that is what makes a sustained non-zero rate meaningful.
+            CHECK_EQ_U(c.stats().ring_full, 1);
+            // And the producer's drop stays invisible from this end. This is
+            // the assertion that pins Pass 107: a reader must not treat
+            // consumer-side full_drops == 0 as "the producer is not dropping".
+            CHECK_EQ_U(c.stats().full_drops, 0);
+            CHECK_EQ_U(p.stats().full_drops, 1);
+            // Egress semantics unchanged: the producer never observes
+            // ring_full, it counts the drop instead.
+            CHECK_EQ_U(p.stats().ring_full, 0);
+
+            // Refill to full and read once more: a second observation, so the
+            // counter tracks recurrence rather than latching.
+            for (uint32_t i = 0; i < slots; ++i) {
+                CHECK(p.write_frame(f.data(), f.size()));
+            }
+            long got = c.read_frame(buf.data(), buf.size());
+            CHECK_EQ_U(static_cast<unsigned long long>(got), f.size());
+            CHECK_EQ_U(c.stats().ring_full, 2);
+
+            // A read on a non-full ring must not count.
+            got = c.read_frame(buf.data(), buf.size());
+            CHECK_EQ_U(static_cast<unsigned long long>(got), f.size());
+            CHECK_EQ_U(c.stats().ring_full, 2);
+
+            c.reset_stats();
+            CHECK_EQ_U(c.stats().ring_full, 0);
         }
     }
 

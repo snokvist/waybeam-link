@@ -2927,6 +2927,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "jscc_feedback_epoch": 1821, "jscc_feedback_age_ms": 42,
     "jscc_enforced_frames": 0, "jscc_discarded_frames": 0,
     "shm_full_drops": 0, "shm_oversize_drops": 0, "shm_bad_slots": 0,
+    "shm_ring_full": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
@@ -3080,10 +3081,32 @@ histogram on RX. They describe the bounded trailing sample window used in
 §3.10; zero samples means the P95 is unavailable. Stats reset clears the RTT
 window and therefore clears JSCC RTT readiness.
 
-`shm_full_drops`, `shm_oversize_drops`, and `shm_bad_slots` expose local ring
-backpressure/ABI failures separately from air/frame-reassembly loss. They are 0
-on UDP bindings. On frame-SHM egress they come from the producer ring; on
-frame-SHM ingress `shm_bad_slots` comes from the consumer ring. Adapter
+`shm_full_drops`, `shm_oversize_drops`, `shm_bad_slots`, and `shm_ring_full`
+expose local ring backpressure/ABI failures separately from air/frame-reassembly
+loss. They are 0 on UDP bindings.
+
+The venc_frame_ring is SPSC and its drop counters are **producer-local** — they
+live in the producing process, not in the §15.4 shared header — so which of
+these are observable depends on which end of the ring this node owns:
+
+| Field | frame-SHM egress (we produce) | frame-SHM ingress (we consume) |
+|---|---|---|
+| `shm_full_drops` | producer ring — real | **not observable**, always 0 |
+| `shm_oversize_drops` | producer ring — real | **not observable**, always 0 |
+| `shm_bad_slots` | 0 (producers never skip slots) | consumer ring — real |
+| `shm_ring_full` | 0 (producer counts drops instead) | consumer ring — real |
+
+A reader MUST NOT interpret `shm_full_drops == 0` on an ingress stream as
+"the producer is not dropping". The producer's drops are invisible to us there;
+`shm_ring_full` is the ingress backpressure signal.
+
+`shm_ring_full` counts reads at which the consumer observed a **completely full**
+ring (`write_idx - read_idx == slot_count`). It is a leading indicator, not a
+drop count: at that instant the producer's next write is dropped unless this read
+frees the slot first. Sustained non-zero means the source is outrunning this
+node's drain and the producer is at or past the point of dropping whole frames.
+
+Adapter
 `kernel_drop` is the Linux socket's `SO_RXQ_OVFL` cumulative receive-queue loss
 (UDP/kernel socket backends; 0 where unavailable). It is distinct from `drop`,
 which remains backend/synthetic queue loss.

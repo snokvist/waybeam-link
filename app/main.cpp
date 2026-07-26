@@ -2862,9 +2862,14 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                     st.frame_size_max = ss.frame_size_max;
                     st.frame_interval_us = ss.frame_interval_us;
                     st.frame_jitter_us = ss.frame_jitter_us;
+                    // §15.3 Pass 107: full/oversize are producer-side, so
+                    // these carry real values only on egress (rx, where we
+                    // created the ring) and are definitionally 0 on ingress.
+                    // ring_full is the reverse — it is the ingress signal.
                     st.shm_full_drops = ss.full_drops;
                     st.shm_oversize_drops = ss.oversize_drops;
                     st.shm_bad_slots = ss.bad_slots;
+                    st.shm_ring_full = ss.ring_full;
                     break;
                 }
             }
