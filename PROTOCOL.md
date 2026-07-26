@@ -764,8 +764,8 @@ latest summary stays pending/coalesced until the next live video slot.
 | 14 | 1 | `ceiling_profile` | highest profile currently reachable without crossing a lockout |
 | 15 | 1 | `lockout_profile` | lowest currently blocking profile; `0xFF` when none |
 | 16 | 1 | `state_flags` | bit0 active; bit1 latched; bit2 pin/range conflict; bits 3–7 reserved |
-| 17 | 1 | `lockout_strikes` | saturating strike count for `lockout_profile` (0–4) |
-| 18 | 2 | `remaining_ms` | timed lockout remainder; 0 for none/latched |
+| 17 | 1 | `lockout_strikes` | saturating strike count for `lockout_profile`; default latch boundary 4 |
+| 18 | 2 | `remaining_ms` | timed lockout remainder, saturated at 65535; 0 for none/latched |
 | 20 | 1 | `transition_reason` | §9 reason registry below |
 | 21 | 2 | `loss_window_milli` | most recent accepted §3.5 raw 100 ms loss |
 | 23 | 1 | `lockout_active_mask` | bit *i* = ladder rung *i* is timed or latched |
@@ -1289,8 +1289,10 @@ Each ladder rung carries three small fields: a saturating strike count, a
 monotonic `blocked_until`, and a latched bit. A loss-driven demote charges only
 the **vacated rung where the evidence was observed**:
 
-- strikes 1–3 block that rung for `rung_lockout_s` (**30 s**);
-- strike 4 sets a latched lockout; timer expiry can never clear it;
+- with the default `rung_lockout_latch_count=4`, strikes 1–3 block that rung
+  for `rung_lockout_s` (**30 s**) and strike 4 sets a latched lockout;
+- a configured latch count changes that boundary, but never the semantics:
+  every lower strike is timed and reaching the count latches;
 - timed expiry re-opens the rung but retains its strike count;
 - a rung already locked is never double-charged by the same continuous event;
 - RSSI, stale-report, pressure, repin, and CSA transitions do not add strikes.

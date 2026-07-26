@@ -4011,6 +4011,9 @@ restart. Expiry retains strikes. The lowest blocked rung is an upward ceiling;
 promotion and pressure escape cannot skip it. The verified floor is never
 locked. Pins retain operator precedence and surface a conflict. No lockout
 initiates CSA; a latched state is an operator channel recommendation.
+Those values are the §17 seeds: when configured, every strike below
+`rung_lockout_latch_count` is timed and reaching the count latches. The compact
+wire summary saturates a longer timed remainder at its u16 maximum.
 
 **Ruling: environment reset is broad but scoped.** A real RF tuple/source
 change clears strikes, lockouts, per-rung loss evidence, and short RF/flap
