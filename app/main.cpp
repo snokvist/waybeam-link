@@ -51,6 +51,7 @@
 #include "wblink/power.h"
 #include "wblink/power_file.h"
 #include "wblink/quietgap.h"
+#include "wblink/recovery.h"
 #include "wblink/report_gate.h"
 #include "wblink/reporter.h"
 #include "wblink/ring.h"
@@ -2396,7 +2397,12 @@ struct RxCore {
           feedback_period_ms_(cfg.policy.report_hz > 0
                                   ? static_cast<uint32_t>(
                                         1000.0 / cfg.policy.report_hz)
-                                  : 0) {}
+                                  : 0),
+          // §3.9 Pass 106. A spectator (§2 Pass 74) has no uplink, so it never
+          // emits regardless of the knob — gated here rather than relying on
+          // the return inject to no-op, so it also stays quiet in the log.
+          recovery_on_latch_(cfg.node.recovery_on_latch &&
+                             !cfg.node.spectator) {}
 
     static std::vector<WantSpec> wants(const Config& cfg) {
         std::vector<WantSpec> out;
@@ -2606,6 +2612,53 @@ struct RxCore {
         return "";
     }
 
+    // §3.9 Pass 106: fresh latch is itself a decoder-bootstrap event. The link
+    // cannot see decoder readiness (VFRM v1 carries no consumer generation,
+    // §15.4) and a GDR craft emits no IRAP unasked, so the first latch is both
+    // the only moment we can detect and the only one at which an IRAP is
+    // guaranteed absent from everything the consumer will ever see. Bounded at
+    // kLatchRecoveryAttempts: the stop condition is unobservable on RTP egress,
+    // and a craft with venc.recovery_enabled false would otherwise draw a
+    // return every second for the whole flight.
+    void emit_latch_recovery(uint64_t now, const Inject& inject) {
+        if (!recovery_on_latch_) return;
+        // Called once per rx-loop iteration: reuse the scratch buffer so the
+        // steady state costs a scan and no allocation. due() likewise returns
+        // an empty vector (no allocation) on the overwhelmingly common tick
+        // where nothing is due.
+        latch_scratch_.clear();
+        for (const RxStreamInfo& info : engine_.streams()) {
+            if (info.stream_type != stream_type::kRtp) continue;
+            latch_scratch_.push_back(LatchStream{info.key, info.local_stream_id});
+        }
+        for (const StreamKey& key : latch_recovery_.due(latch_scratch_, now)) {
+            RecoveryRequest req;
+            req.prefix = {originator_, key.originator, session_};
+            req.target_originator = key.originator;
+            req.target_session = key.session_id;
+            req.target_stream_id = key.stream_id;
+            uint8_t frame[kRecoveryRequestSize];
+            if (encode_recovery_request(req, frame, sizeof(frame)) !=
+                sizeof(frame)) {
+                continue;
+            }
+            inject(frame, sizeof(frame), req.target_originator);
+            std::fprintf(stderr,
+                         "rx: latch recovery stream=%u origin=%u attempt %u/%u\n",
+                         key.stream_id, key.originator,
+                         unsigned(latch_recovery_.attempts(key)),
+                         unsigned(LatchRecovery::kAttempts));
+        }
+    }
+
+    // §3.9 Pass 106 early exit: an IRAP-flagged frame reaching a frame-SHM
+    // egress ring is the link's own observable proxy for "the consumer now has
+    // something to start from". RTP egress has no equivalent — there the
+    // attempt bound is the only stop.
+    void note_egress_irap(uint8_t local_stream_id) {
+        latch_recovery_.note_irap(local_stream_id);
+    }
+
     std::vector<StreamKey> stream_keys() const {
         std::vector<StreamKey> out;
         for (const RxStreamInfo& info : engine_.streams()) {
@@ -2621,6 +2674,9 @@ struct RxCore {
     uint32_t feedback_period_ms_ = 0;
     uint64_t next_feedback_ms_ = 0;
     uint32_t feedback_epoch_ = 0;
+    bool recovery_on_latch_ = false;
+    LatchRecovery latch_recovery_;
+    std::vector<LatchStream> latch_scratch_;  // reused; see emit_latch_recovery
 };
 
 // ---- shared setup -----------------------------------------------------------
@@ -3608,6 +3664,18 @@ int run_rx(const Loaded& l) {
     };
     assign_caches(active_selection);  // startup/restart healing (§14.3 Pass 67)
 
+    // §15.4 egress write + the §3.9 Pass 106 early exit: an IRAP reaching the
+    // ring means the consumer has a start point, so the latch-recovery schedule
+    // for that stream can stand down.
+    const auto write_egress = [&](FrameShmRing* ring, uint8_t stream_id,
+                                  const uint8_t* f, size_t len) {
+        ring->write_frame(f, len);
+        VencFrameMeta meta;
+        if (read_frame_meta(f, len, &meta) &&
+            (meta.flags & kFrameFlagIdr) != 0) {
+            rx.note_egress_irap(stream_id);
+        }
+    };
     const RxEngine::Deliver deliver = [&](uint8_t sid, uint32_t block_id,
                                           uint8_t flags, const uint8_t* d,
                                           size_t n) {
@@ -3615,7 +3683,7 @@ int run_rx(const Loaded& l) {
             if (so.stream_id == sid) {
                 so.reasm->push(block_id, flags, d, n, deliver_now,
                                [&](const uint8_t* f, size_t len) {
-                                   so.ring->write_frame(f, len);
+                                   write_egress(so.ring.get(), so.stream_id, f, len);
                                });
                 return;
             }
@@ -3639,7 +3707,7 @@ int run_rx(const Loaded& l) {
             const bool complete = so.reasm->push(
                 block_id, flags, d, n, deliver_now,
                 [&](const uint8_t* f, size_t len) {
-                    so.ring->write_frame(f, len);
+                    write_egress(so.ring.get(), so.stream_id, f, len);
                 });
             return RxEngine::EarlyDeliverResult{/*handled=*/true, complete};
         }
@@ -3788,7 +3856,10 @@ int run_rx(const Loaded& l) {
                 wv->hdr.block_id, wv->hdr.data_flags, wv->payload,
                 wv->payload_len, service_ms,
                 [&](const uint8_t* f, size_t len) {
-                    cache_ring->write_frame(f, len);
+                    // §14.3 repair lands in the same egress ring, so it can
+                    // also satisfy the §3.9 Pass 106 early exit.
+                    write_egress(cache_ring, l.cfg.cache.repair.stream_id, f,
+                                 len);
                 },
                 /*air_path=*/false);
             if (emitted) {
@@ -4359,9 +4430,11 @@ int run_rx(const Loaded& l) {
         // so a stalled block never wedges frame-shm egress.
         for (ShmOut& so : shm_outs) {
             so.reasm->tick(now, [&](const uint8_t* f, size_t len) {
-                so.ring->write_frame(f, len);
+                write_egress(so.ring.get(), so.stream_id, f, len);
             });
         }
+        // §3.9 Pass 106: bootstrap a decoder behind a freshly latched stream.
+        rx.emit_latch_recovery(now, inject_nack);
         // §14.3 cache store: answer requests + push periodic status.
         if (cache_store) {
             uint8_t cbuf[512];

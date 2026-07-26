@@ -55,6 +55,11 @@ struct NodeCfg {
     // FEC+diversity best-effort, no ARQ/returns, passive tune+latch, re-scout
     // on CSA move. Permits zero role:"tx" adapters. Fail-closed opt-in.
     bool spectator = false;
+    // §3.9 Pass 106: emit a RECOVERY_REQUEST when an RTP stream first latches.
+    // The link cannot observe decoder readiness, so a first latch is the only
+    // bootstrap-relevant moment it can detect. Default on — the failure it
+    // prevents is silent (healthy counters, black screen).
+    bool recovery_on_latch = true;
     uint16_t preferred_originator = 0;  // §12 preemption; 0 = none
     // §3.0 L2 partition tag. TX always stamps it (absent ⇒ stamps 0); the
     // RX filter enforces equality only when it is configured.

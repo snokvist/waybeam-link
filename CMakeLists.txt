@@ -80,7 +80,8 @@ add_library(wblink_core STATIC
     core/src/reporter.cpp
     core/src/selector.cpp
     core/src/csa.cpp
-    core/src/vehicle_cmd.cpp)
+    core/src/vehicle_cmd.cpp
+    core/src/recovery.cpp)
 target_include_directories(wblink_core PUBLIC core/include)
 target_compile_options(wblink_core PRIVATE ${WBLINK_WARNINGS})
 

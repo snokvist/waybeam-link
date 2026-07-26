@@ -130,6 +130,8 @@ Result<Config> load_config_json(const std::string& json_text) {
             return Result<Config>::fail(
                 "node: spectator requires role \"rx\" (§2 passive RX, Pass 74)");
         }
+        // §3.9 Pass 106 latch-triggered recovery (default on).
+        cfg.node.recovery_on_latch = n.value("recovery_on_latch", true);
         if (n.contains("preferred_originator")) {
             cfg.node.preferred_originator = n.at("preferred_originator").get<uint16_t>();
         }
