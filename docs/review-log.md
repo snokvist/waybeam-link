@@ -3697,3 +3697,52 @@ untouched.
 Spec: §3.9 (fresh-latch trigger paragraph + the bounded-repeat paragraph
 replacing the unobservable stop condition), §15.2 (`node.recovery_on_latch` and
 its independence from the craft-side `venc.recovery_enabled` permission).
+
+### Pass 106 addendum — bench verification (2026-07-26)
+
+Deployed to the live fleet (craft .232, x86 ground .242, RK3566 spectator .199)
+and measured. Three things the desk analysis had right, and one it had wrong.
+
+**The stream, measured.** A passive census of `/dev/shm/venc_frame_out` over
+120 s (11 996 frames) on `imx335-100fps-highrange`: **zero** `VFRM_FLAG_IDR`
+frames and **zero** IRAP NALs (16–23). `VFRM_FLAG_GDR` on 100 % of frames,
+`gdr_len=18` (~180 ms refresh at 100 fps), 20 % also `ENHANCE`. VPS/SPS/PPS
+repeat about every 2 s. **No SEI NALs at all**, so no `recovery_point` SEI —
+the clean "decoder honours the recovery point and starts mid-GDR by itself"
+path does not exist on this encoder. A consumer must be seeded on an IRAP or
+be forced to start dirty. This is Pass 22's observation, now quantified.
+
+**`/request/idr` works; §3.9 end-to-end is ~50 ms.** Ground
+`POST /api/v1/video/recover` → RF → craft → venc → IDR visible in the ground's
+egress ring measured **41–62 ms, mean 49 ms, 6/6** — one `flags=0x01` frame
+carrying NAL 19 `IDR_W_RADL` with `gdr_len=0`. The recovery mechanism was never
+broken; nothing was pulling it.
+
+**What the desk analysis got wrong: the §3.9 rate gate creates a consumer dead
+zone.** The one-actuation-per-second limit is correct as a defence against
+forged floods, but it interacts badly with a consumer that re-arms its own
+start-point gate. The link emits its latch request at t=0 and the IDR lands at
+t≈50 ms — *before* the hub has finished building its pipeline and attached.
+Attach skips to the ring's live edge (deliberately: draining a backlog into an
+appsink with `drop=TRUE` discards the seed frame anyway), so that IDR is
+stepped over. The consumer's own request then arrives inside the craft's 1 s
+window and is suppressed — `request_idr()` returns true without queueing — so
+the next obtainable IDR is ~1 s away. Any consumer-side timeout below one
+second therefore fires in the gap between the IDR it threw away and the one it
+is not yet allowed to ask for. The hub's bypass was retuned 500 → 1500 ms.
+Nothing in §3.9 changes: the rate gate is right, and the lesson is that the
+*consumer's* patience must exceed it. Recorded here because the next component
+to consume a §3.9-backed stream will hit exactly this.
+
+**Verified.** x86 ground cold start: 1 frame gated, 0 bypasses — seeded on a
+real IDR. RK3566 spectator: 151 frames gated (1.5 s), 1 bypass, 3 recover POSTs
+that cannot be answered because a spectator emits no returns (§2 Pass 74) — the
+node class for which the consumer-side bypass is the only mechanism, confirmed
+black-forever without it. Spectator emitted **zero** latch requests, per the
+construction-time gate. No regressions: both grounds' adapters, FEC, ARQ and
+audio nominal; craft `GET /api/v1/mode(s)` 200; RX-node `/api/v1/mode(s)` 409
+per Pass 104.
+
+**Not deployed to the craft.** Pass 106 is RX-side and a no-op for TX, and the
+craft overlay has ~1.5 MB free against a 2.6 MB binary — the swap is a brick
+risk with no behavioural gain. The craft stays on its current build.
