@@ -247,8 +247,12 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.jscc_enforced_frames);
         out += ",\"jscc_discarded_frames\":";
         append_u64(out, s.jscc_discarded_frames);
+        out += ",\"shm_health_valid\":";
+        append_bool(out, s.shm_health_valid);
         out += ",\"shm_full_drops\":";
         append_u64(out, s.shm_full_drops);
+        out += ",\"shm_throttle_permille\":";
+        append_u64(out, s.shm_throttle_permille);
         out += ",\"shm_oversize_drops\":";
         append_u64(out, s.shm_oversize_drops);
         out += ",\"shm_bad_slots\":";

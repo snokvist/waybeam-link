@@ -2876,11 +2876,13 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                     st.frame_size_max = ss.frame_size_max;
                     st.frame_interval_us = ss.frame_interval_us;
                     st.frame_jitter_us = ss.frame_jitter_us;
-                    // §15.3 Pass 107: full/oversize are producer-side, so
-                    // these carry real values only on egress (rx, where we
-                    // created the ring) and are definitionally 0 on ingress.
-                    // ring_full is the reverse — it is the ingress signal.
+                    // §15.3 Pass 109: ingress full_drops/throttle are published
+                    // only by a producer carrying the exact health marker.
+                    // Egress retains its local producer counters; ring_full
+                    // remains independent consumer-side evidence.
+                    st.shm_health_valid = ss.health_valid;
                     st.shm_full_drops = ss.full_drops;
+                    st.shm_throttle_permille = ss.throttle_permille;
                     st.shm_oversize_drops = ss.oversize_drops;
                     st.shm_bad_slots = ss.bad_slots;
                     st.shm_ring_full = ss.ring_full;
@@ -3337,8 +3339,8 @@ int run_tx(const Loaded& l) {
             next_shm_attach_ms = now + 500;
         }
         // Air readiness comes first in the unified wait. SHM readiness only
-        // marks a ring pending; at most one frame per ring is consumed below,
-        // preventing a producer burst from monopolising the vehicle loop.
+        // marks a ring pending; a small bounded burst per ring is consumed
+        // below without allowing a producer to monopolise the vehicle loop.
         std::vector<int> ready_fds = air.value->wait_fds();
         const size_t air_fd_count = ready_fds.size();
         for (const ShmIn& si : shm_ins) {
@@ -3389,14 +3391,20 @@ int run_tx(const Loaded& l) {
             if (frame_buf.size() < si.ring->slot_data_size()) {
                 frame_buf.resize(si.ring->slot_data_size());
             }
-            const long got =
-                si.ring->read_frame(frame_buf.data(), frame_buf.size());
-            if (got <= 0) {
-                si.pending = false;
-                continue;
+            size_t drained = 0;
+            while (drained < kFrameShmIngressDrainBudget) {
+                const long got =
+                    si.ring->read_frame(frame_buf.data(), frame_buf.size());
+                if (got <= 0) {
+                    si.pending = false;
+                    break;
+                }
+                tx.on_frame(si.stream_id, frame_buf.data(),
+                            static_cast<size_t>(got), service_now, inject);
+                ++drained;
             }
-            tx.on_frame(si.stream_id, frame_buf.data(),
-                        static_cast<size_t>(got), service_now, inject);
+            // If the budget was exhausted, leave pending set so the next main
+            // loop iteration continues draining without waiting for an edge.
         }
         now_us_it = now_us();
         // §3.2 bit 4 / §11.6 (Pass 89): CSA_ARMED tracks the whole campaign —

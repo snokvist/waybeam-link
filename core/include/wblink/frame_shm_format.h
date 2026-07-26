@@ -35,8 +35,12 @@ inline constexpr size_t kFrHdrEpoch = 20;          // u32
 inline constexpr size_t kFrHdrInitComplete = 24;   // u32 (1 once published)
 inline constexpr size_t kFrHdrWriteIdx = 64;       // u64 (producer, line 1)
 inline constexpr size_t kFrHdrFutexSeq = 72;       // u32
+inline constexpr size_t kFrHdrHealthMagic = 76;    // u32 ("VHLT" when valid)
+inline constexpr size_t kFrHdrFullDrops = 80;      // u64 (producer cumulative)
+inline constexpr size_t kFrHdrThrottlePermille = 88;  // u16 (250..1000)
 inline constexpr size_t kFrHdrReadIdx = 128;       // u64 (consumer, line 2)
 inline constexpr size_t kFrHdrConsumerWaiting = 136;  // u32
+inline constexpr uint32_t kFrameHealthMagic = 0x56484C54;  // "VHLT"
 
 // Per-slot layout: u32 length prefix + data[], stride aligned to 8 bytes.
 // data[] = [VencFrameMeta (8 B)][Annex-B frame bytes].
