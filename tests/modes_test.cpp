@@ -132,6 +132,42 @@ int main() {
         CHECK(mode_name_at(d + "/does-not-exist", 0).empty());
     }
 
+    // §15.5 catalog_fingerprint (Pass 108): pins the index→name mapping a
+    // no-IP ground has to hardcode. It covers the sorted NAMES only, so it
+    // moves when the mapping moves and holds when it does not.
+    {
+        const auto fp = [&](const std::string& dd) {
+            return nlohmann::json::parse(modes_catalog_json(dd, "", true))
+                .at("catalog_fingerprint")
+                .get<std::string>();
+        };
+        const std::string base = fp(d);
+        CHECK(base.rfind("3-", 0) == 0);  // "<count>-<hex32>"
+        CHECK_EQ_U(base.size(), 10);      // "3-" + 8 hex digits
+        // Stable across calls, and independent of the active label.
+        CHECK(fp(d) == base);
+        CHECK(nlohmann::json::parse(modes_catalog_json(d, "imx335-variable",
+                                                       false))
+                  .at("catalog_fingerprint")
+                  .get<std::string>() == base);
+        // Editing a mode file's CONTENTS leaves the mapping — and so the
+        // fingerprint — untouched: index i still resolves to the same name.
+        write_file(d + "/imx335-variable.json",
+                   mode_json(60, "1920x1080", 1, 4, "variable"));
+        CHECK(fp(d) == base);
+        // Adding a mode shifts later ordinals, so the fingerprint must move.
+        write_file(d + "/imx335-00fps-extra.json",
+                   mode_json(30, "640x360", 0, 1, "static"));
+        const std::string grown = fp(d);
+        CHECK(grown != base);
+        CHECK(grown.rfind("4-", 0) == 0);
+        // And removing it restores the original mapping exactly.
+        ::unlink((d + "/imx335-00fps-extra.json").c_str());
+        CHECK(fp(d) == base);
+        // An empty catalog still yields a well-formed fingerprint.
+        CHECK(fp("").rfind("0-", 0) == 0);
+    }
+
     // Cleanup.
     ::unlink((d + "/imx335-100fps-highrange.json").c_str());
     ::unlink((d + "/imx335-variable.json").c_str());

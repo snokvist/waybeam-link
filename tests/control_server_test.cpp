@@ -494,5 +494,75 @@ int main() {
         s.service(0);  // reap the closed stream conn
     }
 
+    // §11 CSA trigger with a LIVE handler (Pass 108). The hook returns
+    // (status, body) rather than an error string precisely so the two
+    // unbound-craft refusals can be told apart: "no craft selected" is a 409
+    // like every other unbound-craft path, while "selected but no cached key"
+    // stays a 400. Conflating them was what sent operators to re-scout a
+    // healthy link. Driven on a second server so the null-handler 409 above
+    // (endpoint not applicable in this mode) still stands.
+    {
+        auto srv2 = ControlServer::create("127.0.0.1:0");
+        CHECK(static_cast<bool>(srv2));
+        if (srv2) {
+            ControlServer& s2 = **srv2.value;
+            const uint16_t port2 = bound_port(s2.listen_fd());
+            CHECK(port2 != 0);
+
+            uint16_t selected = 0;   // 0 = nothing latched, no claim
+            bool have_key = false;
+            uint32_t csa_mhz = 0;
+            ControlHandlers h2;
+            h2.csa = [&](uint32_t mhz,
+                         uint32_t klass) -> std::pair<int, std::string> {
+                (void)klass;
+                if (selected == 0) {
+                    return {409,
+                            "{\"ok\":false,\"error\":\"no craft selected\"}"};
+                }
+                if (!have_key) {
+                    return {400,
+                            "{\"ok\":false,\"error\":\"no live CSA key\"}"};
+                }
+                csa_mhz = mhz;
+                return {200, "{\"ok\":true}"};
+            };
+            s2.set_handlers(std::move(h2));
+
+            const auto csa_post = [&](const char* body) {
+                const std::string b = body;
+                return roundtrip(s2, port2,
+                                 "POST /api/v1/csa HTTP/1.0\r\nContent-Length: " +
+                                     std::to_string(b.size()) + "\r\n\r\n" + b);
+            };
+
+            {  // nothing selected → 409, distinct from the keyless 400 below.
+                const std::string r = csa_post("{\"mhz\":5805}");
+                CHECK_EQ_U(status_of(r), 409);
+                CHECK(body_of(r).find("no craft selected") != std::string::npos);
+                CHECK_EQ_U(csa_mhz, 0u);
+            }
+            {  // a craft IS selected but no announced token is cached → 400.
+                selected = 17;
+                const std::string r = csa_post("{\"mhz\":5805}");
+                CHECK_EQ_U(status_of(r), 400);
+                CHECK(body_of(r).find("no live CSA key") != std::string::npos);
+                CHECK_EQ_U(csa_mhz, 0u);
+            }
+            {  // selected + keyed → the campaign starts.
+                have_key = true;
+                const std::string r = csa_post("{\"mhz\":5745}");
+                CHECK_EQ_U(status_of(r), 200);
+                CHECK(body_of(r).find("\"ok\":true") != std::string::npos);
+                CHECK_EQ_U(csa_mhz, 5745u);
+            }
+            {  // mhz is still validated ahead of the hook.
+                const std::string r = csa_post("{}");
+                CHECK_EQ_U(status_of(r), 400);
+                CHECK_EQ_U(csa_mhz, 5745u);  // hook not reached
+            }
+        }
+    }
+
     return wbtest_finish("control_server_test");
 }

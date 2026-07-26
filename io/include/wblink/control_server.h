@@ -39,7 +39,11 @@ struct ControlHandlers {
 
     // Writes — return "" on success, else a short error string (→ HTTP 400).
     // A null hook means the endpoint does not apply to this mode (→ HTTP 409).
-    std::function<std::string(uint32_t mhz, uint32_t klass)> csa;
+    // §11 CSA campaign trigger. Returns (status, full JSON body) like
+    // `vehicle_command` rather than an error string: Pass 108 needs to
+    // distinguish "no craft selected" (409, the same refusal every other
+    // unbound-craft path gives) from "selected but no key cached" (400).
+    std::function<std::pair<int, std::string>(uint32_t mhz, uint32_t klass)> csa;
     std::function<std::string(int min_profile, int max_profile)> profile;
     std::function<std::string(int stream_id, int i_permille, int p_permille,
                               int min_k, int min_r)>

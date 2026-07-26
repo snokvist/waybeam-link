@@ -387,7 +387,11 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         if (mhz == 0) {
             return reply(400, "Bad Request", json_err("mhz required"));
         }
-        return done(h_.csa(mhz, klass));
+        const auto [code, jbody] = h_.csa(mhz, klass);
+        return reply(code,
+                     code == 200 ? "OK"
+                                 : (code == 409 ? "Conflict" : "Bad Request"),
+                     jbody);
     }
     if (path == "/api/v1/scout/start") {
         if (!h_.scout_start) return na();

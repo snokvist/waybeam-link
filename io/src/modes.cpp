@@ -5,6 +5,8 @@
 #include <dirent.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -86,6 +88,25 @@ std::vector<ModeRow> collect_modes(const std::string& dir) {
     return modes;
 }
 
+// §15.5 Pass 108: "<count>-<hex32>", FNV-1a-32 over the name-sorted mode names
+// joined by '\n'. Names only, in catalog order — that is exactly what the §11.7
+// MODE index→name map depends on, so editing a mode file's *contents* leaves the
+// fingerprint stable by design.
+std::string catalog_fingerprint(const std::vector<ModeRow>& modes) {
+    uint32_t h = 2166136261u;  // FNV-1a-32 offset basis
+    const auto feed = [&h](char c) {
+        h ^= static_cast<uint8_t>(c);
+        h *= 16777619u;
+    };
+    for (size_t i = 0; i < modes.size(); ++i) {
+        if (i != 0) feed('\n');
+        for (const char c : modes[i].name) feed(c);
+    }
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%zu-%08x", modes.size(), h);
+    return buf;
+}
+
 }  // namespace
 
 std::string modes_catalog_json(const std::string& dir, const std::string& active,
@@ -94,6 +115,7 @@ std::string modes_catalog_json(const std::string& dir, const std::string& active
     nlohmann::json out;
     out["active"] = active;
     out["apply_configured"] = apply_configured;
+    out["catalog_fingerprint"] = catalog_fingerprint(modes);
     out["modes"] = nlohmann::json::array();
     for (const auto& m : modes) {
         out["modes"].push_back({{"name", m.name},

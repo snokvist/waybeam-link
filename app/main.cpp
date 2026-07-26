@@ -2583,6 +2583,20 @@ struct RxCore {
         return engine_.selected_originator();
     }
 
+    // §15.5 Pass 108: the originator this node is actually LATCHED to, as
+    // opposed to selected_originator()'s configured output-want pin (which is
+    // nullopt on the common ground that names no preferred_originator — the
+    // reason latch adoption cannot read it). nullopt when nothing is latched,
+    // or when latched streams disagree: an ambiguous binding is no binding.
+    std::optional<uint16_t> latched_originator() const {
+        std::optional<uint16_t> found;
+        for (const RxStreamInfo& info : engine_.streams()) {
+            if (found && *found != info.key.originator) return std::nullopt;
+            found = info.key.originator;
+        }
+        return found;
+    }
+
     std::string request_recovery(int local_stream_id, const Inject& inject) {
         std::optional<RxStreamInfo> selected;
         for (const RxStreamInfo& info : engine_.streams()) {
@@ -4177,16 +4191,44 @@ int run_rx(const Loaded& l) {
                             "{\"ok\":false,\"error\":\"arg out of range\"}"};
                 }
                 // §11.7/§15.5: refused up front, not timed out — a campaign
-                // needs a craft this session committed to (claim or /csa).
+                // needs a bound craft. Pass 108 deliberately does NOT admit a
+                // `latched` selection here, unlike /csa: §11.7 "no bootstrap"
+                // makes the craft silently drop commands from an issuer it has
+                // not accepted a CSA from, so sending on a latch alone returns
+                // 200 and then always times out (bench-confirmed). Name the
+                // remedy instead of pretending the command went anywhere.
                 if (selection_state != "committed" ||
                     active_selection.originator == 0) {
                     return {409,
-                            "{\"ok\":false,\"error\":\"no bound craft "
-                            "(claim first)\"}"};
+                            "{\"ok\":false,\"error\":\"craft not claimed — "
+                            "§11.7 commands need a CSA claim first "
+                            "(/api/v1/csa or scout/quickconnect)\"}"};
                 }
                 if (vissuer.active()) {
                     return {409,
                             "{\"ok\":false,\"error\":\"campaign pending\"}"};
+                }
+                // §15.5a / B9, Pass 108: re-key from the craft's LIVE announced
+                // token before every campaign, exactly as /csa does. Previously
+                // only do_claim ever keyed this issuer, so a craft reached by
+                // latch alone had no key at all and every command died as a bare
+                // "rate-limit or no key". The configured-secret path is stable;
+                // skip it there.
+                if (cparams.psk.empty()) {
+                    const auto tok =
+                        discovery.token_for(active_selection.originator);
+                    if (!tok) {
+                        return {400,
+                                "{\"ok\":false,\"error\":\"no live command key "
+                                "for craft (secret-mode, or not heard for "
+                                ">5 s)\"}"};
+                    }
+                    const std::vector<uint8_t> key(tok->begin(), tok->end());
+                    if (!vissuer.set_psk(key)) {
+                        return {409,
+                                "{\"ok\":false,\"error\":\"command issuer busy "
+                                "(campaign active)\"}"};
+                    }
                 }
                 if (!vissuer.start(
                         CommonPrefix{l.cfg.node.originator, 0, session},
@@ -4202,9 +4244,15 @@ int run_rx(const Loaded& l) {
                 return {200, "{\"ok\":true,\"nonce\":" +
                                  std::to_string(vissuer.nonce()) + "}"};
             };
-            h.csa = [&](uint32_t mhz, uint32_t klass) -> std::string {
+            h.csa = [&](uint32_t mhz,
+                        uint32_t klass) -> std::pair<int, std::string> {
+                const auto err = [](int code, const char* msg) {
+                    return std::pair<int, std::string>{
+                        code, std::string("{\"ok\":false,\"error\":\"") + msg +
+                                  "\"}"};
+                };
                 if (!air.value->supports_csa()) {
-                    return "CSA unsupported by kernel-monitor backend";
+                    return err(400, "CSA unsupported by kernel-monitor backend");
                 }
                 // §15.5a / B9: re-key from the craft's LIVE announced token
                 // before every campaign. do_claim keyed the issuer once, but the
@@ -4213,14 +4261,26 @@ int run_rx(const Loaded& l) {
                 // §11.4 MAC, so the switch dies with a bare {"ok":true}. The
                 // configured-secret path is stable; skip it there.
                 if (cparams.psk.empty()) {
+                    // Pass 108: two distinct refusals, previously conflated into
+                    // one "rebooted? re-scout" string that sent operators to
+                    // re-scout a healthy link. Nothing selected is a 409 like
+                    // every other unbound-craft refusal; selected-but-keyless
+                    // stays a 400.
+                    if (active_selection.originator == 0) {
+                        return err(409,
+                                   "no craft selected (nothing latched, no "
+                                   "claim)");
+                    }
                     const auto tok =
                         discovery.token_for(active_selection.originator);
                     if (!tok) {
-                        return "no live CSA key for craft (rebooted? re-scout)";
+                        return err(400,
+                                   "no live CSA key for craft (secret-mode, or "
+                                   "not heard for >5 s)");
                     }
                     std::vector<uint8_t> key(tok->begin(), tok->end());
                     if (!issuer.set_psk(key)) {
-                        return "claim busy (campaign active)";
+                        return err(409, "claim busy (campaign active)");
                     }
                 }
                 const CommonPrefix pre{l.cfg.node.originator, 0, session};
@@ -4234,9 +4294,11 @@ int run_rx(const Loaded& l) {
                     pending_selection->chan = static_cast<uint16_t>(mhz);
                     pending_selection->bw = 0;
                     selection_state = "claiming";
-                    return "";
+                    return std::pair<int, std::string>{200, "{\"ok\":true}"};
                 }
-                return "rejected (active campaign, PSK, allowlist, or rate-limit)";
+                return err(409,
+                           "rejected (active campaign, PSK, allowlist, or "
+                           "rate-limit)");
             };
         }
         h.video_recover = [&](int stream_id) {
@@ -4440,6 +4502,33 @@ int run_rx(const Loaded& l) {
         }
         // §3.9 Pass 106: bootstrap a decoder behind a freshly latched stream.
         rx.emit_latch_recovery(now, inject_nack);
+        // §15.5 Pass 108: a §2 latch binds. Until this ruling `active_selection`
+        // was written only by CSA campaign outcomes, so a ground that boots,
+        // hears its craft and latches sat at originator 0 for its whole uptime —
+        // and with it /csa (token_for(0)), every §11.7 command, and §14.3 cache
+        // assignment were dead. Adoption is one-way and one-shot (`configured`
+        // only), so it can never overwrite a deliberate claim. The tuple carries
+        // THIS node's channel/bw/net_id: a latch observes a craft, it does not
+        // discover a channel — only /csa and quickconnect move the link.
+        //
+        // Deliberately NOT apply_selection(): that re-pins the engine's output
+        // wants and resets every frame reassembler, which at latch would discard
+        // the §3.9 Pass 106 bootstrap IDR just requested. Adoption records the
+        // tuple and drives §14.3 assignment, nothing more.
+        if (selection_state == "configured") {
+            if (const auto latched = rx.latched_originator()) {
+                if (*latched != 0 && *latched != active_selection.originator) {
+                    active_selection.originator = *latched;
+                    active_selection.chan = static_cast<uint16_t>(operating_chan);
+                    assign_caches(active_selection);
+                    selection_state = "latched";
+                    std::fprintf(stderr,
+                                 "link: latched originator=%u (%u MHz) — "
+                                 "selection bound\n",
+                                 *latched, operating_chan);
+                }
+            }
+        }
         // §14.3 cache store: answer requests + push periodic status.
         if (cache_store) {
             uint8_t cbuf[512];
