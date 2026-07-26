@@ -497,6 +497,28 @@ without an IRAP picture, so parameter sets alone do not guarantee that a fresh
 decoder can display. The matching TX requests one IDR/CRA from its encoder and
 otherwise leaves the steady-state GDR policy unchanged.
 
+**A fresh latch is itself a bootstrap event.** The RX also emits this return
+when an RTP stream key first latches (§2), without waiting for a local decoder
+to announce itself. The link cannot observe decoder readiness: VFRM v1 carries
+no consumer generation (§15.4), and a consumer that drains the egress ring while
+its display pipeline is down is indistinguishable from one that is decoding — so
+"a local decoder is newly attached" is not a condition the link can detect on
+its own. A first latch is the one moment the link *can* detect at which no
+picture has yet reached any local consumer, and on a GDR craft it is the only
+moment at which an IRAP is guaranteed absent from everything that consumer will
+ever see. Emitting there costs one 18-byte return per latched stream and is
+absorbed by the TX's existing one-per-second actuation gate.
+
+The latch-triggered emission repeats at that same one-second cadence for a
+**bounded** number of attempts (5). On frame-SHM egress (§15.4) it stops early
+once an IRAP-flagged frame has been written to the egress ring — the link's own
+observable proxy for "the consumer now has something to start from". On RTP
+egress the link does not parse the payload, so the attempt bound is the only
+stop condition. The bound is required precisely because the stop condition is
+otherwise unobservable: a craft with `venc.recovery_enabled` false, or one whose
+encoder never honours the request, must not draw a return every second for the
+remainder of the flight.
+
 The TX accepts a request only when `target_originator` and `target_session`
 match itself and `target_stream_id` names a configured RTP ingress. Requests
 are rate-limited to one encoder actuation per second; duplicates and forged
@@ -2690,7 +2712,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 ```json
 {
   "node":  { "originator": 17, "role": "tx", "preferred_originator": 9,
-             "net_id": null },
+             "recovery_on_latch": true, "net_id": null },
   "profile_table": "/etc/waybeam-link/profiles.json",
   "adapters": [
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
@@ -2754,6 +2776,15 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   re-acquires a hopped craft by **re-scout**. The flag fails closed: without it a
   streams node still requires its uplink, so an ordinary ground is never silently
   downgraded to no-ARQ.
+- `node.recovery_on_latch` (RX, default **true**) governs the §3.9
+  latch-triggered emission. `false` restricts §3.9 to the explicit
+  `POST /api/v1/video/recover` trigger (§15.5), which stays available either
+  way. This is an RX-side *emission* policy and is independent of the craft-side
+  `venc.recovery_enabled` *permission* below — an RX that emits reaches a craft
+  that declines, and the request is simply dropped. It defaults **on** because
+  the failure it prevents is a silent one: the stream latches, the egress ring
+  fills, every counter reads healthy, and the display stays black until someone
+  notices. A spectator (above) emits nothing regardless, having no uplink.
 - Every policy constant is overridable → bench re-derivation (§9, §17) is config,
   not recompile.
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
