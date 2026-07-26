@@ -47,7 +47,11 @@ namespace wblink {
 
 struct SelectorPolicy {
     // §9.1 cascade (seeds; RE-DERIVE flags per spec).
-    uint16_t demote_milli = 20;
+    // §17: re-derived 2026-07-26 (bench, craft .232) — 20 demoted off the top
+    // rung on a real ~2-4% loss ceiling at excellent RSSI on a DFS channel
+    // (5220 MHz), well under any decode-error threshold; 45 held zero demotes
+    // over 30s at the same loss level. See docs/step11-bench.md §4.8.
+    uint16_t demote_milli = 45;
     int8_t rssi_floor_dbm = -85;
     double rssi_fade_db_per_s = 10.0;  // demote when slope <= -this
     int8_t rssi_fade_arm_dbm = -65;
