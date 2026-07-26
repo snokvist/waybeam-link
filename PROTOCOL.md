@@ -746,7 +746,7 @@ latency-critical). Spectators ignore the type entirely: it carries no
 channel/fleet state to follow, and the §11.7 bound-issuer guard means only the
 addressed craft ever acts on one.
 
-### 3.15 SELECTOR_STATE packet (type `0xE`) — 25 bytes
+### 3.15 SELECTOR_STATE packet (type `0xE`) — 32 bytes
 
 Craft→ground **advisory observability** for the §9 selector. The selector and
 its lockouts are craft-owned; a ground or OSD MUST display this state, never
@@ -770,6 +770,9 @@ latest summary stays pending/coalesced until the next live video slot.
 | 21 | 2 | `loss_window_milli` | most recent accepted §3.5 raw 100 ms loss |
 | 23 | 1 | `lockout_active_mask` | bit *i* = ladder rung *i* is timed or latched |
 | 24 | 1 | `lockout_latched_mask` | bit *i* = ladder rung *i* is latched |
+| 25 | 2 | `loss_ewma_milli` | selector loss EWMA, rounded to u16 |
+| 27 | 4 | `loss_uniq` | denominator of `loss_window_milli` |
+| 31 | 1 | `loss_score` | current active rung's leaky persistence score |
 
 `state_flags` active and latched describe the effective `lockout_profile`;
 latched implies active. Masks are ladder-index diagnostics, not profile IDs.

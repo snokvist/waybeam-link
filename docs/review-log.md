@@ -4017,7 +4017,7 @@ change clears strikes, lockouts, per-rung loss evidence, and short RF/flap
 smoothing. It preserves active profile/bitrate, the configured mode envelope,
 anti-replay state, and CSA freeze. A same-channel mode change does not reset.
 
-**Ruling: ground display consumes craft truth.** New 25-byte, 2 Hz
+**Ruling: ground display consumes craft truth.** New 32-byte, 2 Hz-due
 `SELECTOR_STATE` (type `0xE`) carries the effective ceiling, timed/latched state,
 remaining time, masks, last loss, and reason. A ground accepts it only from its
 latched RTP craft/session with a matching table and expires it after 1.5 s.
