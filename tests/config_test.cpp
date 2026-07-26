@@ -33,7 +33,10 @@ const char* kSample = R"({
   ],
   "policy": {
     "report_hz": 10, "report_timeout_ms": 500,
-    "select": { "demote_milli": 20, "rssi_floor_dbm": -85,
+    "select": { "demote_milli": 20, "emergency_loss_milli": 180,
+                "loss_min_uniq": 40, "loss_persist_score": 6,
+                "rung_lockout_s": 12.5, "rung_lockout_latch_count": 5,
+                "rssi_floor_dbm": -85,
                 "rssi_fade_db_per_s": 10, "rssi_fade_arm_dbm": -65,
                 "promote_rssi_hyst_db": 6, "promote_dwell_s": 0.5,
                 "mcs_settle_s": 5.0, "down_cooldown_s": 0.2,
@@ -111,6 +114,11 @@ int main() {
             CHECK(c.streams[1].classifier == RtpClassifier::kSize);
 
             CHECK_EQ_U(c.policy.select.demote_milli, 20);
+            CHECK_EQ_U(c.policy.select.emergency_loss_milli, 180);
+            CHECK_EQ_U(c.policy.select.loss_min_uniq, 40);
+            CHECK_EQ_U(c.policy.select.loss_persist_score, 6);
+            CHECK(c.policy.select.rung_lockout_s == 12.5);
+            CHECK_EQ_U(c.policy.select.rung_lockout_latch_count, 5);
             CHECK(c.policy.select.rssi_floor_dbm == -85);
             CHECK_EQ_U(c.policy.arq.fwd_clamp_blocks, 4);
             CHECK(c.policy.fec.scheme == FecScheme::kNone);
@@ -138,6 +146,24 @@ int main() {
         }
     }
 
+    // --- Pass 110 selector classifier/lockout boundaries ------------------
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"select":{"demote_milli":45,
+                          "emergency_loss_milli":45}}})",
+                 "demote_milli < emergency_loss_milli");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"select":{"loss_min_uniq":0}}})",
+                 "loss_min_uniq");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"select":{"loss_persist_score":256}}})",
+                 "integer widths");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"select":{"rung_lockout_latch_count":256}}})",
+                 "integer widths");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"select":{"rung_lockout_s":5000000}}})",
+                 "representable in milliseconds");
+
     // --- defaults: a minimal config keeps every spec seed ------------------
     {
         auto r = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
@@ -148,6 +174,11 @@ int main() {
             CHECK_EQ_U(c.node.preferred_originator, 0);
             CHECK_EQ_U(c.policy.report_timeout_ms, 500);
             CHECK_EQ_U(c.policy.select.demote_milli, 45);  // §17 re-derive 2026-07-26
+            CHECK_EQ_U(c.policy.select.emergency_loss_milli, 200);
+            CHECK_EQ_U(c.policy.select.loss_min_uniq, 32);
+            CHECK_EQ_U(c.policy.select.loss_persist_score, 5);
+            CHECK(c.policy.select.rung_lockout_s == 30.0);
+            CHECK_EQ_U(c.policy.select.rung_lockout_latch_count, 4);
             CHECK(c.policy.select.ewma_alpha == 0.3);
             CHECK_EQ_U(c.policy.arq.holddown_ms, 20);
             CHECK_EQ_U(c.policy.rx.renack_backoff_ms, 6);

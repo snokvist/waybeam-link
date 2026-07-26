@@ -341,5 +341,73 @@ int main() {
         }
     }
 
+    {
+        // §3.15 Pass 110 timed selector summary.
+        SelectorState s;
+        s.prefix = random_prefix(rng);
+        s.table_version = 0xB2;
+        s.active_profile = 4;
+        s.safe_floor_profile = 1;
+        s.ceiling_profile = 4;
+        s.lockout_profile = 5;
+        s.state_flags = selector_state_flags::kActive;
+        s.lockout_strikes = 2;
+        s.remaining_ms = 29999;
+        s.transition_reason = 3;
+        s.loss_window_milli = 57;
+        s.lockout_active_mask = 0x20;
+        s.loss_ewma_milli = 41;
+        s.loss_uniq = 214;
+        s.loss_score = 3;
+        const size_t n = encode_selector_state(s, buf, sizeof(buf));
+        CHECK_EQ_U(n, kSelectorStateSize);
+        const Decoded d = decode(buf, n);
+        const SelectorState* v = std::get_if<SelectorState>(&d);
+        CHECK(v != nullptr);
+        if (v != nullptr) CHECK(*v == s);
+
+        // Latched has no timer and its mask is a subset of active.
+        s.state_flags |= selector_state_flags::kLatched;
+        s.remaining_ms = 0;
+        s.lockout_latched_mask = 0x20;
+        CHECK_EQ_U(encode_selector_state(s, buf, sizeof(buf)),
+                   kSelectorStateSize);
+        const Decoded latched = decode(buf, kSelectorStateSize);
+        CHECK(std::get_if<SelectorState>(&latched) != nullptr);
+
+        // Reserved flags and a latched-without-active shape are rejected.
+        buf[16] = 0x80;
+        const Decoded bad_flags = decode(buf, kSelectorStateSize);
+        CHECK(std::get_if<DecodeError>(&bad_flags) != nullptr);
+        s.state_flags = selector_state_flags::kLatched;
+        CHECK_EQ_U(encode_selector_state(s, buf, sizeof(buf)), 0);
+
+        // Effective-state invariants: an active lock has a charged strike and
+        // active mask; latched/conflict cannot exist without an active lock.
+        s.state_flags = selector_state_flags::kActive;
+        s.remaining_ms = 1000;
+        s.lockout_latched_mask = 0;
+        s.lockout_strikes = 0;
+        CHECK_EQ_U(encode_selector_state(s, buf, sizeof(buf)), 0);
+        s.lockout_strikes = 1;
+        s.lockout_active_mask = 0;
+        CHECK_EQ_U(encode_selector_state(s, buf, sizeof(buf)), 0);
+        s.lockout_active_mask = 0x20;
+        s.state_flags = 0;
+        s.lockout_profile = 0xFF;
+        s.lockout_strikes = 0;
+        s.remaining_ms = 0;
+        CHECK_EQ_U(encode_selector_state(s, buf, sizeof(buf)), 0);
+        s.lockout_active_mask = 0;
+        s.state_flags = selector_state_flags::kConflict;
+        CHECK_EQ_U(encode_selector_state(s, buf, sizeof(buf)), 0);
+        s.state_flags =
+            selector_state_flags::kActive | selector_state_flags::kLatched;
+        s.lockout_profile = 5;
+        s.lockout_strikes = 1;
+        s.lockout_active_mask = 0x20;
+        CHECK_EQ_U(encode_selector_state(s, buf, sizeof(buf)), 0);
+    }
+
     return wbtest_finish("wire_roundtrip_test");
 }

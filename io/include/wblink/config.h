@@ -102,6 +102,11 @@ struct SelectPolicy {
     // §17 re-derive, 2026-07-26 — see core/include/wblink/selector.h and
     // docs/step11-bench.md §4.8.
     uint16_t demote_milli = 45;
+    uint16_t emergency_loss_milli = 200;  // §9.1 Pass 110
+    uint32_t loss_min_uniq = 32;
+    uint8_t loss_persist_score = 5;
+    double rung_lockout_s = 30.0;
+    uint8_t rung_lockout_latch_count = 4;
     int8_t rssi_floor_dbm = -85;
     double rssi_fade_db_per_s = 10.0;
     int8_t rssi_fade_arm_dbm = -65;

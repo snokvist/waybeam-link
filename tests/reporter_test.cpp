@@ -91,8 +91,9 @@ int main() {
     CHECK_EQ_U(r3[0].loss_postdiv_prearq, 0);
     CHECK_EQ_U(r3[0].report_epoch, 4);  // 4th emitting build
 
-    // uniq/diversity are cumulative gauges (§3.5).
-    CHECK(r3[0].uniq >= 5);
+    // Pass 110: uniq is the same interval denominator as the loss fraction;
+    // diversity remains the cumulative decorrelation gauge.
+    CHECK_EQ_U(r3[0].uniq, 2);
     CHECK(r3[0].diversity >= 2);
 
     // §7.3 Pass 79: reports are emitted for RTP streams only — a latched

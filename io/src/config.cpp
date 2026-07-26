@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <limits>
 #include <set>
 #include <sstream>
 
@@ -329,7 +330,63 @@ Result<Config> load_config_json(const std::string& json_text) {
             if (p.contains("select")) {
                 const json& ps = p.at("select");
                 SelectPolicy& sel = cfg.policy.select;
-                sel.demote_milli = ps.value("demote_milli", sel.demote_milli);
+                const uint64_t demote_milli = ps.value(
+                    "demote_milli", static_cast<uint64_t>(sel.demote_milli));
+                const uint64_t emergency_loss_milli =
+                    ps.value("emergency_loss_milli",
+                             static_cast<uint64_t>(
+                                 sel.emergency_loss_milli));
+                const uint64_t loss_min_uniq =
+                    ps.value("loss_min_uniq",
+                             static_cast<uint64_t>(sel.loss_min_uniq));
+                const uint64_t loss_persist_score =
+                    ps.value("loss_persist_score",
+                             static_cast<uint64_t>(sel.loss_persist_score));
+                sel.rung_lockout_s =
+                    ps.value("rung_lockout_s", sel.rung_lockout_s);
+                const uint64_t rung_lockout_latch_count =
+                    ps.value("rung_lockout_latch_count",
+                             static_cast<uint64_t>(
+                                 sel.rung_lockout_latch_count));
+                if (demote_milli > 1000 ||
+                    emergency_loss_milli > 1000 ||
+                    emergency_loss_milli <= demote_milli) {
+                    return Result<Config>::fail(
+                        "select: require demote_milli < "
+                        "emergency_loss_milli <= 1000");
+                }
+                if (loss_min_uniq == 0 ||
+                    loss_min_uniq > std::numeric_limits<uint32_t>::max() ||
+                    loss_persist_score == 0 ||
+                    loss_persist_score >
+                        std::numeric_limits<uint8_t>::max() ||
+                    rung_lockout_latch_count == 0 ||
+                    rung_lockout_latch_count >
+                        std::numeric_limits<uint8_t>::max()) {
+                    return Result<Config>::fail(
+                        "select: loss_min_uniq, loss_persist_score, "
+                        "and rung_lockout_latch_count must be positive "
+                        "and fit their wire/core integer widths");
+                }
+                const double max_lockout_s =
+                    static_cast<double>(
+                        std::numeric_limits<uint32_t>::max()) /
+                    1000.0;
+                if (!std::isfinite(sel.rung_lockout_s) ||
+                    sel.rung_lockout_s <= 0.0 ||
+                    sel.rung_lockout_s > max_lockout_s) {
+                    return Result<Config>::fail(
+                        "select: rung_lockout_s must be a positive finite "
+                        "duration representable in milliseconds");
+                }
+                sel.demote_milli = static_cast<uint16_t>(demote_milli);
+                sel.emergency_loss_milli =
+                    static_cast<uint16_t>(emergency_loss_milli);
+                sel.loss_min_uniq = static_cast<uint32_t>(loss_min_uniq);
+                sel.loss_persist_score =
+                    static_cast<uint8_t>(loss_persist_score);
+                sel.rung_lockout_latch_count =
+                    static_cast<uint8_t>(rung_lockout_latch_count);
                 sel.rssi_floor_dbm = ps.value("rssi_floor_dbm", sel.rssi_floor_dbm);
                 sel.rssi_fade_db_per_s =
                     ps.value("rssi_fade_db_per_s", sel.rssi_fade_db_per_s);

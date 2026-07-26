@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // §9 adaptive selector: cascade rules in isolation, §9.5 sequencing order,
-// settle suppression, §9.7 flap layers, §9.8 fail-safe, §9.9 pressure, §9.2
-// max-probability demote target, the Pass-6 derived-bitrate law, and the §10
-// power resolve. All fake time. Note demotes surface bitrate-first: the
+// Pass 110 loss classification/lockout, §9.7 flap layers, §9.8 fail-safe,
+// §9.9 pressure, the Pass-6 derived-bitrate law, and the §10 power resolve.
+// All fake time. Note demotes surface bitrate-first: the
 // profile commit lands bitrate_lead_ms (500) after the decision.
 #include "wblink/selector.h"
 
@@ -52,13 +52,16 @@ struct Harness {
         CHECK(a.bitrate_kbps.has_value());
     }
 
-    void report(uint64_t now, int8_t rssi, uint16_t loss_milli) {
+    void report(uint64_t now, int8_t rssi, uint16_t loss_milli,
+                uint32_t uniq = 100) {
         LinkReport r;
         r.prefix.originator = 9;
+        r.prefix.session_id = 1;
         r.report_epoch = ++epoch;
         r.rssi_best = rssi;
         r.rssi_mean = rssi;
         r.loss_postdiv_prearq = loss_milli;
+        r.uniq = uniq;
         r.adapters = 2;
         sel.on_report(r, now);
     }
@@ -162,33 +165,89 @@ int main() {
         CHECK(order_ok);  // §9.5 promote: bitrate lags every commit by grace
     }
 
-    // --- rule 1: reactive demote; bitrate LEADS the commit by bitrate_lead ---
+    // --- Pass 110 persistent loss: five windows, exactly one rung ------------
     {
         SelectorPolicy p;
-        p.mcs_settle_ms = 0;  // isolate rule 1 from settle
         Harness h(p);
         h.boot();
         (void)h.run(0, 6000, -40, 0);  // climb to the top and sit there
         const uint8_t before = h.sel.profile_id();
         CHECK_EQ_U(before, 7);
-        const auto log = h.run(6000, 7500, -40, 100);  // 10% delivered loss
-        CHECK(h.sel.profile_id() < before);
+        const auto log = h.run(6000, 6900, -40, 100);
+        CHECK_EQ_U(h.sel.profile_id(), before - 1);
         CHECK(!log.bitrates.empty());
         CHECK(!log.commits.empty());
-        // First action of the demote is the bitrate drop; the commit follows
-        // bitrate_lead_ms (500) later.
+        CHECK(h.sel.reason() == SelectorReason::kLossPersistent);
+        CHECK(std::string_view(selector_reason_name(h.sel.reason())) ==
+              "LOSS_PERSISTENT");
+        const SelectorLockout lock = h.sel.lockout(6900);
+        CHECK(lock.active && !lock.latched);
+        CHECK_EQ_U(lock.profile, before);
+        CHECK_EQ_U(lock.strikes, 1);
         CHECK(log.bitrates.front().first + 500 <= log.commits.front().first + 10);
     }
 
-    // --- settle suppresses rule 1; loss also gates promotes ------------------
+    // --- one moderate spike decays; it is neither persistent nor emergency --
     {
-        Harness h;  // default mcs_settle_ms = 5000
+        Harness h;
         h.boot();
         (void)h.run(0, 1000, -40, 0);
         const uint8_t before = h.sel.profile_id();
         CHECK(before >= 1);
-        (void)h.run(1000, 2500, -40, 500);  // huge loss inside settle
-        CHECK_EQ_U(h.sel.profile_id(), before);  // no demote (settle), no promote (loss)
+        h.report(1010, -40, 100);
+        (void)h.sel.tick(1010);
+        (void)h.run(1110, 1800, -40, 0);
+        CHECK(h.sel.profile_id() >= before);
+        CHECK_EQ_U(h.sel.lockout(1800).active_mask, 0);
+    }
+
+    // --- one acute qualified window bypasses settle/pressure to safe floor ---
+    {
+        Harness h;
+        h.boot();
+        (void)h.run(0, 6000, -40, 0);
+        CHECK_EQ_U(h.sel.profile_id(), 7);
+        h.sel.set_pressure(true, 6000);
+        h.report(6010, -40, 500, 100);
+        const SelectorActions lead = h.sel.tick(6010);
+        CHECK(lead.bitrate_kbps.has_value());
+        CHECK(!lead.commit.has_value());
+        CHECK(h.sel.reason() == SelectorReason::kLossEmergency);
+        const SelectorActions commit = h.sel.tick(6510);
+        CHECK(commit.commit && commit.commit->profile_id == 0);
+        CHECK_EQ_U(h.sel.profile_id(), 0);
+        const SelectorLockout lock = h.sel.lockout(6510);
+        CHECK(lock.active && lock.profile == 7);
+    }
+
+    // --- acute fail-safe resolves to the mode floor, not literal MCS0 --------
+    {
+        SelectorPolicy p;
+        p.min_profile = 2;
+        p.max_profile = 5;
+        Harness h(p);
+        h.boot();
+        CHECK_EQ_U(h.sel.safe_floor_profile(), 2);
+        (void)h.run(0, 5000, -35, 0);
+        CHECK_EQ_U(h.sel.profile_id(), 5);
+        h.report(5010, -35, 500);
+        (void)h.sel.tick(5010);
+        const SelectorActions commit = h.sel.tick(5510);
+        CHECK(commit.commit && commit.commit->profile_id == 2);
+        CHECK_EQ_U(h.sel.profile_id(), 2);
+    }
+
+    // --- high percentage without enough samples cannot emergency-demote -----
+    {
+        Harness h;
+        h.boot();
+        (void)h.run(0, 6000, -40, 0);
+        const uint8_t before = h.sel.profile_id();
+        h.report(6010, -40, 900, 3);
+        (void)h.sel.tick(6010);
+        (void)h.sel.tick(6600);
+        CHECK_EQ_U(h.sel.profile_id(), before);
+        CHECK_EQ_U(h.sel.lockout(6600).active_mask, 0);
     }
 
     // --- rule 2: RSSI floor demotes even inside settle ------------------------
@@ -233,8 +292,8 @@ int main() {
         int drops = 0;
         uint8_t last = h.sel.profile_id();
         while (t < 30000 && !h.sel.flap_frozen(t)) {
-            const bool losing = (t / 1000) % 2 == 1;  // alternate seconds
-            h.report(t, -40, losing ? 200 : 0);
+            const bool fading = (t / 1000) % 2 == 1;  // alternate seconds
+            h.report(t, fading ? -90 : -40, 0);
             (void)h.sel.tick(t);
             if (h.sel.profile_id() < last) {
                 ++drops;
@@ -260,7 +319,7 @@ int main() {
         (void)h.run(0, 2000, -40, 0);
         const uint8_t high = h.sel.profile_id();
         CHECK(high >= 2);
-        (void)h.run(2000, 2800, -40, 100);  // demote
+        (void)h.run(2000, 2800, -90, 0);    // RSSI demote (no §9.2 lockout)
         (void)h.run(2800, 3400, -40, 0);    // flush pending + decay loss EWMA
         const uint8_t low = h.sel.profile_id();
         CHECK(low < high);
@@ -427,6 +486,7 @@ int main() {
         // A replayed stale epoch never freshens the link.
         LinkReport stale;
         stale.prefix.originator = 9;
+        stale.prefix.session_id = 1;
         stale.report_epoch = 1;
         stale.rssi_mean = -30;
         h.sel.on_report(stale, t);
@@ -434,7 +494,7 @@ int main() {
         CHECK(std::string_view(h.sel.state()) == "FAILSAFE");
     }
 
-    // --- §9.9 pressure: suppresses rule 1 only; escape climbs ------------------
+    // --- §9.9 pressure suppresses persistent loss only; escape climbs --------
     {
         SelectorPolicy p;
         p.mcs_settle_ms = 0;
@@ -443,7 +503,7 @@ int main() {
         h.boot();
         const uint8_t base = h.sel.profile_id();
         h.sel.set_pressure(true, 0);
-        // Loss under pressure: rule 1 must NOT demote (encoder overshoot,
+        // Persistent loss under pressure must NOT demote (encoder overshoot,
         // §9.9)... and at the floor there is nothing to demote to anyway, so
         // run this from a raised start via the escape first.
         (void)h.run(0, 3000, -40, 0);  // escape climbs despite blocked rule 5
@@ -451,27 +511,122 @@ int main() {
         CHECK(up > base);
         h.sel.set_pressure(false, 3000);
         h.sel.set_pressure(true, 3000);
-        (void)h.run(3000, 3600, -40, 300);  // loss while pressured: no demote
+        (void)h.run(3000, 3600, -40, 100);  // moderate loss under pressure
         CHECK_EQ_U(h.sel.profile_id(), up);
         // An RSSI floor breach still demotes under pressure (rule 2).
-        (void)h.run(3600, 5600, -90, 300);
+        (void)h.run(3600, 5600, -90, 100);
         CHECK(h.sel.profile_id() < up);
     }
 
-    // --- §9.2: multi-rung stress demotes TOWARD the max-prob rung -------------
+    // --- §9.2 lockout gates promotion, expires, and retains strikes ----------
     {
         SelectorPolicy p;
-        p.mcs_settle_ms = 0;
-        p.rung_age_rate = 0.0;  // freeze priors so history dominates
+        p.rung_lockout_ms = 1000;
         Harness h(p);
         h.boot();
-        (void)h.run(0, 4500, -40, 0);  // climb; low rungs logged clean
+        (void)h.run(0, 6000, -40, 0);
         const uint8_t high = h.sel.profile_id();
-        CHECK(high >= 4);
-        // Heavy loss at the top: the demote target must jump several rungs
-        // toward the historically-clean region, not just high−1.
-        (void)h.run(4500, 6000, -40, 800);
-        CHECK(h.sel.profile_id() < high - 1);
+        CHECK_EQ_U(high, 7);
+        (void)h.run(6000, 6900, -40, 100);
+        CHECK_EQ_U(h.sel.profile_id(), 6);
+        CHECK(h.sel.lockout(6900).active);
+        // Strong clean RSSI cannot cross the active ceiling.
+        (void)h.run(6900, 7900, -30, 0);
+        CHECK_EQ_U(h.sel.profile_id(), 6);
+        // After expiry the rung is eligible again, but its strike is retained.
+        (void)h.run(8000, 9000, -30, 0);
+        CHECK_EQ_U(h.sel.profile_id(), 7);
+        CHECK_EQ_U(h.sel.lockout(9000).active_mask, 0);
+        CHECK_EQ_U(h.sel.loss_score(), 0);
+        // The old event did not rebuild evidence during the bitrate-lead
+        // phase. A recurrence starts from one new bad window, not score 5.
+        h.report(9010, -30, 100);
+        (void)h.sel.tick(9010);
+        CHECK_EQ_U(h.sel.profile_id(), 7);
+        CHECK_EQ_U(h.sel.loss_score(), 1);
+    }
+
+    // --- multiple bad rungs: the lowest lock is the no-skip ceiling ----------
+    {
+        SelectorPolicy p;
+        p.rung_lockout_ms = 10000;
+        Harness h(p);
+        h.boot();
+        (void)h.run(0, 6000, -40, 0);
+        CHECK_EQ_U(h.sel.profile_id(), 7);
+        for (uint64_t t = 6100; t <= 6500; t += 100) {
+            h.report(t, -40, 100);
+            (void)h.sel.tick(t);
+        }
+        (void)h.sel.tick(7000);  // commit 7 -> 6
+        CHECK_EQ_U(h.sel.profile_id(), 6);
+        for (uint64_t t = 7100; t <= 7500; t += 100) {
+            h.report(t, -40, 100);
+            (void)h.sel.tick(t);
+        }
+        (void)h.sel.tick(8000);  // commit 6 -> 5
+        CHECK_EQ_U(h.sel.profile_id(), 5);
+        const SelectorLockout lock = h.sel.lockout(8000);
+        CHECK_EQ_U(lock.profile, 6);
+        CHECK_EQ_U(lock.ceiling_profile, 5);
+        CHECK_EQ_U(lock.active_mask, 0xC0);
+
+        // An accepted reporter identity change clears channel-conditioned
+        // evidence and names the reset cause.
+        LinkReport fresh;
+        fresh.prefix.originator = 10;
+        fresh.prefix.session_id = 2;
+        fresh.report_epoch = 1;
+        fresh.rssi_best = -40;
+        fresh.rssi_mean = -40;
+        fresh.uniq = 100;
+        CHECK(h.sel.on_report(fresh, 8010));
+        CHECK_EQ_U(h.sel.lockout(8010).active_mask, 0);
+        CHECK(h.sel.reason() == SelectorReason::kEnvironmentReset);
+    }
+
+    // --- §9.2 fourth strike latches; RF tuple change clears all evidence -----
+    {
+        SelectorPolicy p;
+        p.rung_lockout_ms = 1000;
+        p.promote_dwell_ms = 0;
+        p.reentry_backoff_ms = 0;
+        p.reentry_dwell_ms = 0;
+        p.flap_freeze_count = 255;  // isolate rung latch from §9.7 freeze
+        Harness h(p);
+        h.boot();
+        CHECK(!h.sel.on_rf_environment(5220, 20, 0));  // baseline only
+        (void)h.run(0, 6000, -40, 0);
+        CHECK_EQ_U(h.sel.profile_id(), 7);
+        uint64_t t = 6000;
+        for (uint8_t strike = 1; strike <= 4; ++strike) {
+            (void)h.run(t, t + 900, -40, 100);
+            t += 900;
+            CHECK_EQ_U(h.sel.profile_id(), 6);
+            const SelectorLockout lock = h.sel.lockout(t);
+            CHECK_EQ_U(lock.strikes, strike);
+            CHECK_EQ_U(lock.latched, strike == 4);
+            if (strike < 4) {
+                // Let the short timer expire and promote back into rung 7.
+                (void)h.run(t + 600, t + 1400, -40, 0);
+                t += 1400;
+                CHECK_EQ_U(h.sel.profile_id(), 7);
+            }
+        }
+        const SelectorLockout latched = h.sel.lockout(t + 5000);
+        CHECK(latched.active && latched.latched);
+        CHECK_EQ_U(h.sel.profile_id(), 6);
+        // Same tuple and mode/range changes do not clear it.
+        CHECK(!h.sel.on_rf_environment(5220, 20, t + 5000));
+        CHECK(h.sel.lockout(t + 5000).latched);
+        h.sel.set_profile_pin(0, 6);
+        CHECK((h.sel.lockout(t + 5000).latched_mask & 0x80u) != 0);
+        h.sel.set_profile_pin(7, 7);
+        CHECK(h.sel.lockout(t + 5000).conflict);
+        // A successful channel change starts a clean environment.
+        CHECK(h.sel.on_rf_environment(5805, 20, t + 5001));
+        CHECK_EQ_U(h.sel.lockout(t + 5001).active_mask, 0);
+        CHECK(h.sel.reason() == SelectorReason::kEnvironmentReset);
     }
 
     // --- §11.3 CSA freeze: cascade halted, watchdog blackout excused ----------

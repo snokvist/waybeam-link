@@ -2,6 +2,7 @@
 #include "wblink/selector.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace wblink {
 
@@ -11,13 +12,35 @@ namespace {
 constexpr uint32_t kHt20LgiKbps[8] = {6500,  13000, 19500, 26000,
                                       39000, 52000, 58500, 65000};
 
-// §9.2 physics prior: lower MCS ⇒ higher delivery probability. Values only
-// need the ORDERING to be right — staleness degrades to the safe ranking.
-double physics_prior(size_t rung) {
-    return 0.99 - 0.06 * static_cast<double>(rung);
-}
-
 }  // namespace
+
+const char* selector_reason_name(SelectorReason reason) {
+    switch (reason) {
+        case SelectorReason::kNone:
+            return "NONE";
+        case SelectorReason::kBoot:
+            return "BOOT";
+        case SelectorReason::kLossEmergency:
+            return "LOSS_EMERGENCY";
+        case SelectorReason::kLossPersistent:
+            return "LOSS_PERSISTENT";
+        case SelectorReason::kReportTimeout:
+            return "REPORT_TIMEOUT";
+        case SelectorReason::kRssiFloor:
+            return "RSSI_FLOOR";
+        case SelectorReason::kRssiFade:
+            return "RSSI_FADE";
+        case SelectorReason::kBackpressure:
+            return "BACKPRESSURE";
+        case SelectorReason::kPromote:
+            return "PROMOTE";
+        case SelectorReason::kRepin:
+            return "REPIN";
+        case SelectorReason::kEnvironmentReset:
+            return "ENVIRONMENT_RESET";
+    }
+    return "NONE";
+}
 
 uint32_t derive_bitrate_kbps(const Profile& p) {
     if (p.mcs >= 8) {
@@ -45,13 +68,10 @@ uint32_t clamp_bitrate_kbps(uint32_t derived_kbps, uint32_t max_kbps) {
 Selector::Selector(const SelectorPolicy& policy, const ProfileTable* table)
     : policy_(policy), table_(table) {
     const size_t n = ladder_size();
-    rung_prob_.assign(n, 0.0);
-    for (size_t i = 0; i < n; ++i) {
-        rung_prob_[i] = physics_prior(i);
-    }
+    rung_loss_.resize(n);
     demoted_from_ms_.assign(n, 0);
     promoted_into_ms_.assign(n, 0);
-    rung_ = clamp_rung(floor_rung());  // §9.8: start at the safe floor
+    rung_ = safe_floor_rung();  // §9.8: start at the resolved safe floor
 }
 
 size_t Selector::ladder_size() const {
@@ -95,14 +115,36 @@ size_t Selector::floor_rung() const {
     return 0;
 }
 
-size_t Selector::max_prob_rung() const {
-    size_t best = 0;
-    for (size_t i = 1; i < rung_prob_.size(); ++i) {
-        if (rung_prob_[i] > rung_prob_[best]) {
-            best = i;
-        }
+size_t Selector::safe_floor_rung() const {
+    return std::max(clamp_rung(0), clamp_rung(floor_rung()));
+}
+
+bool Selector::rung_locked(size_t rung, uint64_t now_ms) const {
+    if (rung >= rung_loss_.size()) {
+        return false;
     }
-    return best;
+    const RungLossState& s = rung_loss_[rung];
+    return s.latched || now_ms < s.blocked_until_ms;
+}
+
+size_t Selector::lockout_ceiling_rung(uint64_t now_ms, size_t lo, size_t hi,
+                                      bool* conflict) const {
+    if (conflict != nullptr) {
+        *conflict = false;
+    }
+    for (size_t r = 0; r <= hi && r < rung_loss_.size(); ++r) {
+        if (!rung_locked(r, now_ms)) {
+            continue;
+        }
+        if (r <= lo) {
+            if (conflict != nullptr) {
+                *conflict = true;
+            }
+            return hi;  // operator envelope retains precedence
+        }
+        return r - 1;
+    }
+    return hi;
 }
 
 uint8_t Selector::profile_id() const {
@@ -113,6 +155,57 @@ uint8_t Selector::mcs() const {
 }
 uint8_t Selector::tx_power_level() const {
     return ladder_size() > 0 ? table_->profiles[rung_].tx_power_level : 0;
+}
+
+uint16_t Selector::loss_ewma_milli() const {
+    const double bounded = std::clamp(loss_ewma_milli_, 0.0, 1000.0);
+    return static_cast<uint16_t>(bounded + 0.5);
+}
+
+uint8_t Selector::loss_score() const {
+    return rung_ < rung_loss_.size() ? rung_loss_[rung_].score : 0;
+}
+
+uint8_t Selector::safe_floor_profile() const {
+    const size_t floor = safe_floor_rung();
+    return floor < ladder_size() ? table_->profiles[floor].id : 0;
+}
+
+SelectorLockout Selector::lockout(uint64_t now_ms) const {
+    SelectorLockout out;
+    const size_t n = std::min<size_t>(rung_loss_.size(), 8);
+    for (size_t r = 0; r < n; ++r) {
+        if (rung_locked(r, now_ms)) {
+            out.active_mask |= static_cast<uint8_t>(1u << r);
+        }
+        if (rung_loss_[r].latched) {
+            out.latched_mask |= static_cast<uint8_t>(1u << r);
+        }
+    }
+    if (ladder_size() == 0) {
+        return out;
+    }
+    const size_t lo = clamp_rung(0);
+    const size_t hi = clamp_rung(ladder_size() - 1);
+    bool conflict = false;
+    const size_t ceiling = lockout_ceiling_rung(now_ms, lo, hi, &conflict);
+    out.conflict = conflict;
+    out.ceiling_profile = table_->profiles[ceiling].id;
+    for (size_t r = 0; r <= hi && r < rung_loss_.size(); ++r) {
+        if (!rung_locked(r, now_ms)) {
+            continue;
+        }
+        out.active = true;
+        out.latched = rung_loss_[r].latched;
+        out.profile = table_->profiles[r].id;
+        out.strikes = rung_loss_[r].strikes;
+        if (!out.latched && rung_loss_[r].blocked_until_ms > now_ms) {
+            out.remaining_ms = static_cast<uint32_t>(std::min<uint64_t>(
+                rung_loss_[r].blocked_until_ms - now_ms, 0xFFFFFFFFull));
+        }
+        break;
+    }
+    return out;
 }
 
 uint64_t Selector::report_age_ms(uint64_t now_ms) const {
@@ -133,11 +226,14 @@ bool Selector::on_report(const LinkReport& r, uint64_t now_ms) {
     const std::pair<uint16_t, uint32_t> identity{r.prefix.originator,
                                                  r.prefix.session_id};
     if (!report_source_ || *report_source_ != identity) {
+        const bool changed = report_source_.has_value();
         report_source_ = identity;
         have_report_ = false;
         last_epoch_ = 0;
-        slope_ewma_ = 0.0;
-        fade_ticks_ = 0;
+        reset_environment_state(now_ms);
+        if (changed) {
+            reason_ = SelectorReason::kEnvironmentReset;
+        }
     }
     // §9.8: the watchdog wants monotonic-forward epochs; replays/stale
     // reordered reports never freshen the link.
@@ -148,11 +244,12 @@ bool Selector::on_report(const LinkReport& r, uint64_t now_ms) {
 
     const double rssi = static_cast<double>(r.rssi_mean);
     const double loss = static_cast<double>(r.loss_postdiv_prearq);
-    if (!have_report_) {
+    if (!have_smoothing_) {
         rssi_ewma_ = rssi;
         loss_ewma_milli_ = loss;
         prev_rssi_ = rssi;
         prev_report_ms_ = now_ms;
+        have_smoothing_ = true;
     } else {
         rssi_ewma_ += policy_.ewma_alpha * (rssi - rssi_ewma_);
         loss_ewma_milli_ += policy_.ewma_alpha * (loss - loss_ewma_milli_);
@@ -174,15 +271,24 @@ bool Selector::on_report(const LinkReport& r, uint64_t now_ms) {
     } else {
         fade_ticks_ = 0;
     }
-    // §9.2: feed the current rung's success EWMA, age the rest toward the
-    // physics prior.
-    for (size_t i = 0; i < rung_prob_.size(); ++i) {
-        if (i == rung_) {
-            rung_prob_[i] +=
-                policy_.ewma_alpha * ((1.0 - loss / 1000.0) - rung_prob_[i]);
-        } else {
-            rung_prob_[i] += policy_.rung_age_rate *
-                             (physics_prior(i) - rung_prob_[i]);
+
+    // Pass 110: raw 100 ms evidence, qualified by the interval denominator.
+    // The leaky score is per rung; an under-filled window changes nothing.
+    loss_window_milli_ = r.loss_postdiv_prearq;
+    loss_uniq_ = r.uniq;
+    loss_observed_rung_ = rung_;
+    emergency_pending_ =
+        r.uniq >= policy_.loss_min_uniq &&
+        r.loss_postdiv_prearq >= policy_.emergency_loss_milli;
+    if (rung_ < rung_loss_.size() && r.uniq >= policy_.loss_min_uniq &&
+        !rung_locked(rung_, now_ms)) {
+        RungLossState& rs = rung_loss_[rung_];
+        if (r.loss_postdiv_prearq >= policy_.demote_milli) {
+            if (rs.score < policy_.loss_persist_score) {
+                ++rs.score;
+            }
+        } else if (rs.score > 0) {
+            --rs.score;
         }
     }
     have_report_ = true;
@@ -191,11 +297,73 @@ bool Selector::on_report(const LinkReport& r, uint64_t now_ms) {
     return true;
 }
 
+bool Selector::on_rf_environment(uint16_t channel_mhz, uint8_t bw,
+                                 uint64_t now_ms) {
+    const std::pair<uint16_t, uint8_t> next{channel_mhz, bw};
+    if (!rf_environment_) {
+        rf_environment_ = next;
+        return false;
+    }
+    if (*rf_environment_ == next) {
+        return false;
+    }
+    rf_environment_ = next;
+    reset_environment_state(now_ms);
+    reason_ = SelectorReason::kEnvironmentReset;
+    return true;
+}
+
 void Selector::set_pressure(bool on, uint64_t now_ms) {
     if (on && !pressure_) {
         pressure_since_ms_ = now_ms;
     }
     pressure_ = on;
+}
+
+void Selector::reset_environment_state(uint64_t now_ms) {
+    for (RungLossState& rs : rung_loss_) {
+        rs = {};
+    }
+    loss_window_milli_ = 0;
+    loss_uniq_ = 0;
+    loss_observed_rung_ = rung_;
+    emergency_pending_ = false;
+    have_smoothing_ = false;
+    rssi_ewma_ = 0.0;
+    loss_ewma_milli_ = 0.0;
+    slope_ewma_ = 0.0;
+    prev_rssi_ = 0.0;
+    prev_report_ms_ = 0;
+    fade_ticks_ = 0;
+    demote_times_.clear();
+    freeze_until_ms_ = 0;
+    std::fill(demoted_from_ms_.begin(), demoted_from_ms_.end(), 0);
+    std::fill(promoted_into_ms_.begin(), promoted_into_ms_.end(), 0);
+    failsafe_next_step_ms_ = 0;
+    last_demote_ms_ = 0;
+    last_change_ms_ = now_ms;
+}
+
+void Selector::charge_lockout(size_t rung, uint64_t now_ms) {
+    if (rung >= rung_loss_.size() || rung <= safe_floor_rung() ||
+        rung_locked(rung, now_ms)) {
+        return;
+    }
+    RungLossState& rs = rung_loss_[rung];
+    if (rs.strikes < policy_.rung_lockout_latch_count) {
+        ++rs.strikes;
+    }
+    rs.score = 0;
+    if (rs.strikes >= policy_.rung_lockout_latch_count) {
+        rs.latched = true;
+        rs.blocked_until_ms = 0;
+    } else {
+        const uint64_t room = std::numeric_limits<uint64_t>::max() - now_ms;
+        rs.blocked_until_ms =
+            policy_.rung_lockout_ms > room
+                ? std::numeric_limits<uint64_t>::max()
+                : now_ms + policy_.rung_lockout_ms;
+    }
 }
 
 bool Selector::rssi_guard_active() const {
@@ -222,11 +390,14 @@ void Selector::note_demote_for_flap(uint64_t now_ms) {
 }
 
 void Selector::start_demote(size_t target, uint64_t now_ms,
-                            SelectorActions& a) {
+                            SelectorActions& a, SelectorReason reason,
+                            bool charge_rung) {
+    if (charge_rung) {
+        charge_lockout(rung_, now_ms);
+    }
     note_demote_for_flap(now_ms);
-    // §9.7 soft reentry marks the whole vacated span: a multi-rung jump
-    // (toward the max-prob rung, §9.2) leaves every rung above the target
-    // "just demoted from" — re-promoting into any of them is a reentry.
+    // §9.7 soft reentry marks the whole vacated span. Pass 110 permits a
+    // multi-rung span only for an acute move to the resolved safe floor.
     for (size_t r = target + 1; r <= rung_ && r < demoted_from_ms_.size();
          ++r) {
         demoted_from_ms_[r] = now_ms;
@@ -236,6 +407,7 @@ void Selector::start_demote(size_t target, uint64_t now_ms,
     phase_ = Phase::kBitrateLead;
     phase_deadline_ms_ = now_ms + policy_.bitrate_lead_ms;
     state_ = "DEMOTE";
+    reason_ = reason;
     // §9.5: bitrate LEADS the downward move.
     const uint32_t br = clamp_bitrate_kbps(
         derive_bitrate_kbps(table_->profiles[target]), policy_.max_bitrate_kbps);
@@ -246,11 +418,12 @@ void Selector::start_demote(size_t target, uint64_t now_ms,
 }
 
 void Selector::start_promote(size_t target, uint64_t now_ms,
-                             SelectorActions& a) {
+                             SelectorActions& a, SelectorReason reason) {
     pending_target_ = target;
     phase_ = Phase::kMcsGrace;
     phase_deadline_ms_ = now_ms + policy_.mcs_up_grace_ms;
     state_ = "PROMOTE";
+    reason_ = reason;
     promoted_into_ms_[target] = now_ms;
     // §9.5: MCS/power move first, bitrate lags.
     rung_ = target;
@@ -275,6 +448,7 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
     }
     const size_t lo = clamp_rung(0);
     const size_t hi = clamp_rung(ladder_size() - 1);
+    const size_t floor = safe_floor_rung();
     if (lo == hi) {
         state_ = "PINNED";  // §9.7 min==max
         // A runtime re-pin (set_profile_pin) must snap the operating point to
@@ -285,6 +459,7 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
         if (rung_ != lo) {
             rung_ = lo;
             last_change_ms_ = now_ms;
+            reason_ = SelectorReason::kRepin;
             const Profile& p = table_->profiles[lo];
             a.commit = ProfileCommit{p.id, p.mcs, p.gi, p.tx_power_level};
             // §9.5: the pinned rung's bitrate must move WITH the commit, as
@@ -329,6 +504,7 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
             a.bitrate_kbps = br;
         }
         state_ = "REPIN";
+        reason_ = SelectorReason::kRepin;
         return;
     }
 
@@ -350,54 +526,71 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
         // case. floor_profile stays the absolute floor and still binds when it
         // sits ABOVE min_profile. (A min==max pin never reaches here — the
         // PINNED branch returns above; its band floor is the pin regardless.)
-        const size_t floor = std::max(lo, floor_rung());
         if (rung_ > floor && now_ms >= failsafe_next_step_ms_) {
             failsafe_next_step_ms_ = now_ms + policy_.failsafe_step_ms;
-            start_demote(rung_ - 1, now_ms, a);
+            start_demote(rung_ - 1, now_ms, a,
+                          SelectorReason::kReportTimeout);
         }
         return;  // NEVER promote on stale feedback
     }
 
-    const bool settling =
-        now_ms - last_change_ms_ < policy_.mcs_settle_ms;
     const bool demote_ok =
         now_ms - last_demote_ms_ >= policy_.down_cooldown_ms;
 
-    // Rule 1 — reactive demote (suppressed while settling and under local
-    // pressure, §9.5/§9.9).
-    if (!settling && !pressure_ && demote_ok &&
-        loss_ewma_milli_ >= static_cast<double>(policy_.demote_milli) &&
-        rung_ > lo) {
-        // §9.2: demote TOWARD the max-probability rung.
-        const size_t maxp = clamp_rung(max_prob_rung());
-        const size_t target = std::max(lo, std::min(rung_ - 1, maxp));
-        start_demote(target, now_ms, a);
+    // Rule 1 — acute loss: one confidence-qualified raw report moves
+    // directly to the resolved safe floor. The event belongs to the rung on
+    // which it was observed; a completed concurrent demote invalidates it.
+    if (emergency_pending_) {
+        emergency_pending_ = false;
+        if (loss_observed_rung_ == rung_) {
+            reason_ = SelectorReason::kLossEmergency;
+            if (rung_ > floor) {
+                start_demote(floor, now_ms, a,
+                              SelectorReason::kLossEmergency, true);
+                return;
+            }
+        }
+    }
+    // Rule 2 — persistent moderate loss: leaky score, exactly one rung.
+    if (!pressure_ && demote_ok && loss_observed_rung_ == rung_ &&
+        rung_ < rung_loss_.size() &&
+        rung_loss_[rung_].score >= policy_.loss_persist_score &&
+        rung_ > floor) {
+        start_demote(rung_ - 1, now_ms, a,
+                      SelectorReason::kLossPersistent, true);
         return;
     }
-    // Rule 2 — RSSI floor.
-    if (demote_ok && rssi_ewma_ <= policy_.rssi_floor_dbm && rung_ > lo) {
-        start_demote(rung_ - 1, now_ms, a);
+    // Rule 3 — RSSI floor.
+    if (demote_ok && rssi_ewma_ <= policy_.rssi_floor_dbm && rung_ > floor) {
+        start_demote(rung_ - 1, now_ms, a, SelectorReason::kRssiFloor);
         return;
     }
-    // Rule 3 — RSSI fade.
-    if (demote_ok && fade_ticks_ >= policy_.fade_ticks && rung_ > lo) {
+    // Rule 4 — RSSI fade.
+    if (demote_ok && fade_ticks_ >= policy_.fade_ticks && rung_ > floor) {
         fade_ticks_ = 0;
-        start_demote(rung_ - 1, now_ms, a);
+        start_demote(rung_ - 1, now_ms, a, SelectorReason::kRssiFade);
         return;
     }
-    // Rule 4 — backpressure escape (clean RF, sustained pressure).
+    bool lockout_conflict = false;
+    const size_t ceiling =
+        lockout_ceiling_rung(now_ms, lo, hi, &lockout_conflict);
+    const size_t adaptive_hi = lockout_conflict ? hi : std::min(hi, ceiling);
+    // Rule 5 — backpressure escape (clean RF, sustained pressure).
     if (pressure_ && !rssi_guard_active() &&
         now_ms - pressure_since_ms_ >= policy_.pressure_escape_ms &&
-        now_ms - last_demote_ms_ >= policy_.down_cooldown_ms && rung_ < hi &&
+        now_ms - last_demote_ms_ >= policy_.down_cooldown_ms &&
+        rung_ < adaptive_hi &&
         !flap_frozen(now_ms)) {
         last_demote_ms_ = now_ms;  // reuse the cooldown as the climb pacer
-        start_promote(rung_ + 1, now_ms, a);
+        start_promote(rung_ + 1, now_ms, a,
+                      SelectorReason::kBackpressure);
         return;
     }
-    // Rule 5 — RSSI-margin promote (§9.4). Gated on clean delivered loss
+    // Rule 6 — RSSI-margin promote (§9.4). Gated on clean delivered loss
     // (§9.0 robustness-first: promoting while loss sits at the demote
-    // threshold — reachable when settle suppresses rule 1 — is never right).
-    if (rung_ < hi && !rssi_guard_active() && !flap_frozen(now_ms) &&
+    // threshold is never right).
+    if (rung_ < adaptive_hi && !rssi_guard_active() &&
+        !flap_frozen(now_ms) &&
         loss_ewma_milli_ < static_cast<double>(policy_.demote_milli)) {
         const size_t next = rung_ + 1;
         const size_t fi = std::min(next, policy_.rung_rssi_floor_dbm.size() - 1);
@@ -413,11 +606,11 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
         const uint64_t dwell = recent_demote ? policy_.reentry_dwell_ms
                                              : policy_.promote_dwell_ms;
         if (rssi_ewma_ >= need && now_ms - last_change_ms_ >= dwell) {
-            start_promote(next, now_ms, a);
+            start_promote(next, now_ms, a, SelectorReason::kPromote);
             return;
         }
     }
-    // Rule 6 — hold.
+    // Rule 7 — hold.
     state_ = flap_frozen(now_ms) ? "FREEZE" : "HOLD";
 }
 

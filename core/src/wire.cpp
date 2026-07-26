@@ -108,6 +108,60 @@ Decoded decode_heartbeat(const uint8_t* buf, size_t len) {
     return h;
 }
 
+bool selector_state_fields_valid(const SelectorState& s) {
+    const bool active =
+        (s.state_flags & selector_state_flags::kActive) != 0;
+    const bool latched =
+        (s.state_flags & selector_state_flags::kLatched) != 0;
+    const bool conflict =
+        (s.state_flags & selector_state_flags::kConflict) != 0;
+    if ((s.state_flags & ~selector_state_flags::kKnownMask) != 0 ||
+        ((latched || conflict) && !active) || s.transition_reason > 10 ||
+        s.loss_window_milli > 1000 || s.loss_ewma_milli > 1000 ||
+        (s.lockout_latched_mask & ~s.lockout_active_mask) != 0) {
+        return false;
+    }
+    if (!active) {
+        return s.lockout_profile == 0xFF && s.lockout_strikes == 0 &&
+               s.remaining_ms == 0 && s.lockout_active_mask == 0 &&
+               s.lockout_latched_mask == 0;
+    }
+    if (s.lockout_profile == 0xFF || s.lockout_strikes == 0 ||
+        s.lockout_active_mask == 0 ||
+        (latched && s.lockout_latched_mask == 0)) {
+        return false;
+    }
+    return latched ? s.remaining_ms == 0 : s.remaining_ms > 0;
+}
+
+Decoded decode_selector_state(const uint8_t* buf, size_t len) {
+    if (len < kSelectorStateSize) {
+        return DecodeError::kTruncated;
+    }
+    if (len != kSelectorStateSize) {
+        return DecodeError::kLengthMismatch;
+    }
+    SelectorState s;
+    s.prefix = decode_prefix(buf);
+    s.table_version = buf[11];
+    s.active_profile = buf[12];
+    s.safe_floor_profile = buf[13];
+    s.ceiling_profile = buf[14];
+    s.lockout_profile = buf[15];
+    s.state_flags = buf[16];
+    s.lockout_strikes = buf[17];
+    s.remaining_ms = be16_read(buf + 18);
+    s.transition_reason = buf[20];
+    s.loss_window_milli = be16_read(buf + 21);
+    s.lockout_active_mask = buf[23];
+    s.lockout_latched_mask = buf[24];
+    s.loss_ewma_milli = be16_read(buf + 25);
+    s.loss_uniq = be32_read(buf + 27);
+    s.loss_score = buf[31];
+    return selector_state_fields_valid(s) ? Decoded{s}
+                                          : Decoded{DecodeError::kInvalidField};
+}
+
 Decoded decode_csa(const uint8_t* buf, size_t len) {
     if (len < kCsaSize) {
         return DecodeError::kTruncated;
@@ -346,6 +400,8 @@ Decoded decode(const uint8_t* buf, size_t len) {
             return decode_cache_assign(buf, len);
         case PacketType::kVehicleCmd:
             return decode_vehicle_cmd(buf, len);
+        case PacketType::kSelectorState:
+            return decode_selector_state(buf, len);
         default:
             return DecodeError::kUnknownType;
     }
@@ -419,6 +475,31 @@ size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap) {
     }
     encode_prefix(pkt.prefix, PacketType::kHeartbeat, out);
     return kHeartbeatSize;
+}
+
+size_t encode_selector_state(const SelectorState& pkt, uint8_t* out,
+                             size_t cap) {
+    if (out == nullptr || cap < kSelectorStateSize ||
+        !selector_state_fields_valid(pkt)) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kSelectorState, out);
+    out[11] = pkt.table_version;
+    out[12] = pkt.active_profile;
+    out[13] = pkt.safe_floor_profile;
+    out[14] = pkt.ceiling_profile;
+    out[15] = pkt.lockout_profile;
+    out[16] = pkt.state_flags;
+    out[17] = pkt.lockout_strikes;
+    be16_write(out + 18, pkt.remaining_ms);
+    out[20] = pkt.transition_reason;
+    be16_write(out + 21, pkt.loss_window_milli);
+    out[23] = pkt.lockout_active_mask;
+    out[24] = pkt.lockout_latched_mask;
+    be16_write(out + 25, pkt.loss_ewma_milli);
+    be32_write(out + 27, pkt.loss_uniq);
+    out[31] = pkt.loss_score;
+    return kSelectorStateSize;
 }
 
 size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap) {

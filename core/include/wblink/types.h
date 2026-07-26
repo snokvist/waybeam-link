@@ -27,6 +27,7 @@ enum class PacketType : uint8_t {
     kAnnounce = 0xB,  // §3.12 craft pairing beacon
     kCacheAssign = 0xC,  // §3.13 receiver-owned cache following
     kVehicleCmd = 0xD,  // §3.14 remote vehicle command (rides §11 machinery)
+    kSelectorState = 0xE,  // §3.15 craft-owned adaptive state summary
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -103,6 +104,7 @@ inline constexpr size_t kCacheReplyFixedSize = 17;
 inline constexpr size_t kAnnounceSize = 30;  // §3.12: 11 prefix + 1 + 2 + 16
 inline constexpr size_t kCacheAssignSize = 23;
 inline constexpr size_t kVehicleCmdSize = 23;  // §3.14: MAC covers bytes 0..18
+inline constexpr size_t kSelectorStateSize = 32;
 
 // §3.11 CACHE_STATUS capability_flags bits.
 namespace cache_capability {
@@ -115,6 +117,13 @@ inline constexpr uint8_t kRepairReady = 0x01;
 inline constexpr uint8_t kRttReady = 0x02;
 inline constexpr uint8_t kKnownMask = kRepairReady | kRttReady;
 }  // namespace jscc_feedback_flags
+
+namespace selector_state_flags {
+inline constexpr uint8_t kActive = 0x01;
+inline constexpr uint8_t kLatched = 0x02;
+inline constexpr uint8_t kConflict = 0x04;
+inline constexpr uint8_t kKnownMask = kActive | kLatched | kConflict;
+}  // namespace selector_state_flags
 
 // §3.2 — absolute DATA payload ceiling for buffer sizing (Realtek jumbo/A-MSDU
 // rungs reach ~3967 B; 4096 caps it). The EFFECTIVE per-frame budget is

@@ -58,11 +58,13 @@
 #include "wblink/rx.h"
 #include "wblink/scheduler.h"
 #include "wblink/selector.h"
+#include "wblink/selector_state.h"
 #include "wblink/stats.h"
 #include "wblink/table.h"
 #include "wblink/airtime.h"
 #include "wblink/txwedge.h"
 #include "wblink/venc.h"
+#include "wblink/video_slot_cadence.h"
 #include "wblink/air_mon.h"
 #if WBLINK_RADIO
 #include "wblink/air_radio.h"
@@ -976,6 +978,13 @@ bool frame_is_paced_eob(const uint8_t* f, size_t n) {
            v->hdr.stream_type == stream_type::kRtp;
 }
 
+bool frame_is_live_rtp_data(const uint8_t* f, size_t n) {
+    const Decoded dec = decode(f, n);
+    const DataView* v = std::get_if<DataView>(&dec);
+    return v != nullptr && v->hdr.stream_type == stream_type::kRtp &&
+           (v->hdr.data_flags & data_flags::kRetransmit) == 0;
+}
+
 // §2: random per-boot session nonce.
 uint32_t session_nonce() {
     uint32_t nonce = 0;
@@ -1045,6 +1054,11 @@ SelectorPolicy selector_policy(const Config& cfg) {
     const SelectPolicy& s = cfg.policy.select;
     SelectorPolicy p;
     p.demote_milli = s.demote_milli;
+    p.emergency_loss_milli = s.emergency_loss_milli;
+    p.loss_min_uniq = s.loss_min_uniq;
+    p.loss_persist_score = s.loss_persist_score;
+    p.rung_lockout_ms = s_to_ms(s.rung_lockout_s);
+    p.rung_lockout_latch_count = s.rung_lockout_latch_count;
     p.rssi_floor_dbm = s.rssi_floor_dbm;
     p.rssi_fade_db_per_s = s.rssi_fade_db_per_s;
     p.rssi_fade_arm_dbm = s.rssi_fade_arm_dbm;
@@ -1734,6 +1748,13 @@ struct TxCore {
             }
             streams_.push_back(std::move(st));
         }
+        for (const AdapterCfg& a : cfg.adapters) {
+            if (a.role == Role::kTx) {
+                (void)selector_.on_rf_environment(a.channel_mhz,
+                                                  bw_code(a.bw), 0);
+                break;
+            }
+        }
     }
 
     // §5.1a MTU budget: the active rung's max_payload (profile 0 = floor at
@@ -2086,6 +2107,41 @@ struct TxCore {
 
     // §11.3: freeze the cascade + pause the watchdog across the CSA blackout.
     void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
+    void on_rf_environment(uint16_t channel_mhz, uint8_t bw,
+                           uint64_t now_ms) {
+        (void)selector_.on_rf_environment(channel_mhz, bw, now_ms);
+    }
+
+    SelectorState selector_state(uint64_t now_ms) const {
+        const SelectorLockout lock = selector_.lockout(now_ms);
+        SelectorState s;
+        s.prefix = {originator_, 0, session_};
+        s.table_version = table_version_;
+        s.active_profile = selector_.profile_id();
+        s.safe_floor_profile = selector_.safe_floor_profile();
+        s.ceiling_profile = lock.ceiling_profile;
+        s.lockout_profile = lock.profile;
+        if (lock.active) {
+            s.state_flags |= selector_state_flags::kActive;
+        }
+        if (lock.latched) {
+            s.state_flags |= selector_state_flags::kLatched;
+        }
+        if (lock.conflict) {
+            s.state_flags |= selector_state_flags::kConflict;
+        }
+        s.lockout_strikes = lock.active ? lock.strikes : 0;
+        s.remaining_ms = static_cast<uint16_t>(
+            std::min<uint32_t>(lock.remaining_ms, 0xFFFFu));
+        s.transition_reason = static_cast<uint8_t>(selector_.reason());
+        s.loss_window_milli = selector_.loss_window_milli();
+        s.lockout_active_mask = lock.active_mask;
+        s.lockout_latched_mask = lock.latched_mask;
+        s.loss_ewma_milli = selector_.loss_ewma_milli();
+        s.loss_uniq = selector_.loss_uniq();
+        s.loss_score = selector_.loss_score();
+        return s;
+    }
     // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
     void set_csa_armed(bool on) {
         const uint8_t f = on ? data_flags::kCsaArmed : 0;
@@ -2298,6 +2354,24 @@ struct TxCore {
         snap.link.report_age_ms =
             static_cast<uint32_t>(selector_.report_age_ms(now));
         snap.link.state = selector_.state();
+        snap.link.transition_reason =
+            selector_reason_name(selector_.reason());
+        snap.link.loss_window_milli = selector_.loss_window_milli();
+        snap.link.loss_ewma_milli = selector_.loss_ewma_milli();
+        snap.link.loss_uniq = selector_.loss_uniq();
+        snap.link.loss_score = selector_.loss_score();
+        snap.link.safe_floor_profile = selector_.safe_floor_profile();
+        snap.link.selector_state_valid = true;  // local selector authority
+        const SelectorLockout lock = selector_.lockout(now);
+        snap.link.lockout_active = lock.active;
+        snap.link.lockout_latched = lock.latched;
+        snap.link.lockout_profile = lock.profile;
+        snap.link.lockout_ceiling_profile = lock.ceiling_profile;
+        snap.link.lockout_remaining_ms = lock.remaining_ms;
+        snap.link.lockout_strikes = lock.strikes;
+        snap.link.lockout_active_mask = lock.active_mask;
+        snap.link.lockout_latched_mask = lock.latched_mask;
+        snap.link.lockout_conflict = lock.conflict;
         snap.link.flap_freeze = selector_.flap_frozen(now);
         // §9.6 actuator state (Pass 37).
         snap.link.venc_bitrate_kbps = venc_.commanded_bitrate_kbps();
@@ -2388,6 +2462,8 @@ struct RxCore {
            std::optional<uint8_t> table_version)
         : originator_(cfg.node.originator),
           session_(session),
+          table_(table),
+          local_table_version_(table_version),
           engine_(rx_policy(cfg), wants(cfg), table, table_version),
           reporter_(ReporterPolicy{cfg.policy.report_hz > 0
                                        ? static_cast<uint32_t>(
@@ -2421,6 +2497,19 @@ struct RxCore {
         const Decoded dec = decode(d, n);
         if (const DataView* v = std::get_if<DataView>(&dec)) {
             engine_.on_data(adapter, *v, now, deliver, rssi, early_deliver);
+            return;
+        }
+        if (const SelectorState* s = std::get_if<SelectorState>(&dec)) {
+            for (const RxStreamInfo& info : engine_.streams()) {
+                if (info.stream_type == stream_type::kRtp &&
+                    selector_state_admissible(
+                        *s, local_table_version_, info.key.originator,
+                        info.key.session_id)) {
+                    remote_selector_state_ = *s;
+                    remote_selector_state_ms_ = now;
+                    return;
+                }
+            }
         }
     }
 
@@ -2513,7 +2602,7 @@ struct RxCore {
         }
     }
 
-    void fill_stats(StatsSnapshot& snap) const {
+    void fill_stats(StatsSnapshot& snap, uint64_t now) const {
         for (const RxStreamInfo& info : engine_.streams()) {
             StreamStats st;
             st.stream_id = info.local_stream_id;
@@ -2561,6 +2650,56 @@ struct RxCore {
             as.adapter_stalled = a.stalled;
             snap.adapters.push_back(std::move(as));
         }
+        bool selector_source_current = false;
+        if (remote_selector_state_) {
+            for (const RxStreamInfo& info : engine_.streams()) {
+                if (info.stream_type == stream_type::kRtp &&
+                    selector_state_admissible(
+                        *remote_selector_state_, local_table_version_,
+                        info.key.originator, info.key.session_id)) {
+                    selector_source_current = true;
+                    break;
+                }
+            }
+        }
+        if (selector_source_current &&
+            selector_state_fresh(now, remote_selector_state_ms_)) {
+            const SelectorState& s = *remote_selector_state_;
+            const uint64_t age = now - remote_selector_state_ms_;
+            snap.link.profile = s.active_profile;
+            if (table_ != nullptr) {
+                for (const Profile& p : table_->profiles) {
+                    if (p.id == s.active_profile) {
+                        snap.link.mcs = p.mcs;
+                        break;
+                    }
+                }
+            }
+            snap.link.transition_reason = selector_reason_name(
+                static_cast<SelectorReason>(s.transition_reason));
+            snap.link.loss_window_milli = s.loss_window_milli;
+            snap.link.loss_ewma_milli = s.loss_ewma_milli;
+            snap.link.loss_uniq = s.loss_uniq;
+            snap.link.loss_score = s.loss_score;
+            snap.link.safe_floor_profile = s.safe_floor_profile;
+            snap.link.selector_state_valid = true;
+            snap.link.selector_state_age_ms = static_cast<uint32_t>(age);
+            snap.link.lockout_active =
+                (s.state_flags & selector_state_flags::kActive) != 0;
+            snap.link.lockout_latched =
+                (s.state_flags & selector_state_flags::kLatched) != 0;
+            snap.link.lockout_conflict =
+                (s.state_flags & selector_state_flags::kConflict) != 0;
+            snap.link.lockout_profile = s.lockout_profile;
+            snap.link.lockout_ceiling_profile = s.ceiling_profile;
+            snap.link.lockout_remaining_ms =
+                s.remaining_ms > age
+                    ? static_cast<uint32_t>(s.remaining_ms - age)
+                    : 0;
+            snap.link.lockout_strikes = s.lockout_strikes;
+            snap.link.lockout_active_mask = s.lockout_active_mask;
+            snap.link.lockout_latched_mask = s.lockout_latched_mask;
+        }
     }
 
     // §15.5 stats/reset. The frame-shm reassemblers live in run_rx (ShmOut),
@@ -2577,6 +2716,8 @@ struct RxCore {
         engine_.select_originator(originator);
         reporter_.reset_link();
         next_feedback_ms_ = 0;
+        remote_selector_state_.reset();
+        remote_selector_state_ms_ = 0;
     }
 
     std::optional<uint16_t> selected_originator() const {
@@ -2683,6 +2824,8 @@ struct RxCore {
 
     uint16_t originator_;
     uint32_t session_;
+    const ProfileTable* table_;
+    std::optional<uint8_t> local_table_version_;
     RxEngine engine_;
     Reporter reporter_;
     uint32_t feedback_period_ms_ = 0;
@@ -2691,6 +2834,8 @@ struct RxCore {
     bool recovery_on_latch_ = false;
     LatchRecovery latch_recovery_;
     std::vector<LatchStream> latch_scratch_;  // reused; see emit_latch_recovery
+    std::optional<SelectorState> remote_selector_state_;
+    uint64_t remote_selector_state_ms_ = 0;
 };
 
 // ---- shared setup -----------------------------------------------------------
@@ -2811,7 +2956,7 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
         air->fill_adapter_stats(snap, tsf_fallbacks, tx_wedged);
     }
     if (rx != nullptr) {
-        rx->fill_stats(snap);
+        rx->fill_stats(snap, now);
     }
     // §6.3a frame-shm egress: fold each reassembler's frame-level outcomes into
     // the matching stream (by stream_id). recovered_arq / delivered / loss stay
@@ -3053,7 +3198,24 @@ int run_tx(const Loaded& l) {
     std::deque<std::vector<uint8_t>> held;
     ArqTimingTracker arq_timing;
     uint64_t now_us_it = now_us();
+    VideoSlotCadence selector_state_cadence(500);
     const auto send_raw = [&](const uint8_t* f, size_t n) {
+        // Pass 110 operator boundary: the 2 Hz selector summary owns no TX
+        // opportunity. When due, prepend it inside an already-active live RTP
+        // slot; video still ends the slot and alone arms the §7.2 quiet gap.
+        const bool live_video_slot = frame_is_live_rtp_data(f, n);
+        if (live_video_slot) {
+            const uint64_t slot_ms = now_us_it / 1000;
+            if (selector_state_cadence.due(live_video_slot, slot_ms)) {
+                const SelectorState state = tx.selector_state(slot_ms);
+                uint8_t sf[kSelectorStateSize];
+                if (encode_selector_state(state, sf, sizeof(sf)) ==
+                        sizeof(sf) &&
+                    air.value->inject(sf, sizeof(sf)) == sizeof(sf)) {
+                    selector_state_cadence.note_sent(slot_ms);
+                }
+            }
+        }
         air.value->inject(f, n);
         // Pass 78: only video EOBs open a listen window; a held audio
         // datagram flushing here must not re-arm the gap on the rest.
@@ -3420,9 +3582,13 @@ int run_tx(const Loaded& l) {
         }
         const CsaAction ca = csa.tick(now_us_it);
         if (ca.kind != CsaAction::Kind::kNone) {
-            if (!air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast)) {
+            const bool retuned =
+                air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast);
+            if (!retuned) {
                 std::fprintf(stderr, "csa: retune to %u MHz FAILED\n",
                              ca.chan_mhz);  // Pass 69: never silent
+            } else {
+                tx.on_rf_environment(ca.chan_mhz, ca.bw, service_now);
             }
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
                          ca.chan_mhz);

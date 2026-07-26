@@ -6,8 +6,8 @@
 //
 // loss_postdiv_prearq is WINDOWED per report (delta of lost/uniq counters
 // since the previous report, in ‰) — the selector's reactive-demote reads
-// fresh loss, not a lifetime average. uniq/diversity stay cumulative as the
-// wire fields are u32 gauges (§3.5). report_epoch is monotonic per reporter.
+// fresh loss, not a lifetime average. `uniq` is the same interval denominator
+// (§3.5 Pass 110); diversity remains cumulative. report_epoch is monotonic.
 //
 // Like NACKs, the built reports carry only the target identity; the caller
 // stamps its own common prefix (originator/session) and encodes/injects.
