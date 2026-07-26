@@ -1,10 +1,8 @@
-# Per-rung MCS lockout after a loss-driven demote — plan (not designed, not scheduled)
+# Per-rung MCS lockout and loss-classification plan
 
-Status: **backlog placeholder.** This document exists so the idea survives
-until someone picks it up; it makes no ruling and proposes no config/wire
-change. Per `CLAUDE.md`'s law, any actual cascade change needs an operator
-ruling and a numbered `docs/review-log.md` Pass before code — this doc is the
-"raise it" step, not the ruling.
+Status: **operator-approved for implementation, Pass 110.** `PROTOCOL.md`
+§3.15/§9 is authoritative. This document retains the field context and records
+the staged implementation/verification plan.
 
 ## Background
 
@@ -73,45 +71,43 @@ conditions genuinely look different" — they're uniform dampers keyed on
 demote *frequency*, not on which rung or how far over threshold the loss
 was.
 
-## Proposed direction (sketch only — needs real design)
+## Adopted design
 
-A temporary lockout keyed to the specific rung a loss-driven demote (§9.1
-rule 1, not RSSI-floor/fade) just left, so promote's rung selection skips it
-until the lockout clears — independent of (or layered under) the existing
-flap-avoidance timers.
+- Raw confidence-qualified loss separates a one-window emergency from a
+  five-point leaky persistent score. EWMA remains observable but does not make
+  that classification.
+- Emergency loss moves to the mode/table-resolved floor. Persistent loss moves
+  exactly one rung. Both charge only the vacated rung.
+- Per-rung strike count + timeout + latch: 30 s for strikes 1–3, strike 4
+  latched until channel/bandwidth change, reporter session/source change, or
+  restart.
+- The lowest blocked rung is an upward ceiling; promotion and pressure escape
+  cannot skip it. Existing soft reentry/hard flap freeze remain independent.
+- Pins retain operator precedence and expose a conflict instead of being
+  silently weakened.
+- Craft authority crosses to ground in a 25-byte 2 Hz `SELECTOR_STATE`; the
+  ground hub displays the limit and never derives it from local loss.
 
-## Open questions this doc deliberately does not answer
+## Implementation stages
 
-1. **Cascade placement** — does this gate promote's target selection
-   (§9.4), or does it need to be its own cascade rule ahead of promote?
-2. **Scope** — per-rung state (an array parallel to `rung_rssi_floor_dbm`)
-   or just "the single most-recently-demoted rung"? The former handles a
-   link with multiple bad rungs; the latter is much less state.
-3. **Duration** — a fixed §17-style seed (bench-derived, config-overridable
-   like everything else in this cascade), or adaptive to how far over
-   `demote_milli` the triggering loss measurement was?
-4. **Decay/reset semantics** — plain timer expiry, N consecutive clean
-   reports at a lower rung, or cleared unconditionally on a CSA channel
-   move (a new channel has no reason to inherit the old one's lockout)?
-5. **Relationship to §9.2's max-probability rung** — that machinery already
-   ages per-rung success-EWMAs toward a physics prior and demotes *toward*
-   the max-probability rung under multi-rung stress. Is a lockout a
-   distinct mechanism, or does it belong as an extension of the §9.2
-   EWMA/aging state instead of new state?
-6. **Relationship to existing §9.7 layers** — does this replace hard
-   flap-freeze for the loss-driven case specifically, extend it (e.g.
-   flap-freeze duration scaled by rung-specific history), or coexist as an
-   independent, finer-grained layer? Simply re-deriving
-   `flap_freeze_count`/`flap_freeze_window_s`/`flap_freeze_s` (they are
-   §17 "measure, not design" seeds already) might close some of this gap
-   with zero new code — worth ruling out before designing anything new.
-7. **Observability** — if it exists, an operator needs to see it (§15.3
-   stats) — "rung 5 locked until Tms" — or a lockout that silently changes
-   selector behavior is a debugging trap for the next session that hits it.
+1. Codec, policy/config, selector state/reason observability, and correction of
+   LINK_REPORT `uniq` to the specified interval denominator.
+2. Emergency/persistent classifier, exact-one-rung persistent demotion,
+   lockout/latch, promotion gates, environmental reset.
+3. §15.3 local stats plus craft→ground `SELECTOR_STATE` mirroring and expiry.
+4. waybeam-hub semantic metric and ground flight OSD text:
+   timed `RF ≤M4 23s` (amber), latched `RF ≤M4 CHAN` (red).
+5. Host sanitizer tests, SSC338Q cross-build, hub tests/build, then device
+   validation on craft `.232`.
 
-## Not done
+## Device matrix
 
-No code. No config keys. No spec ruling. No Pass entry — this document is
-the pre-ruling backlog item, not the ruling itself. Pick a design (or decide
-retuning §9.7's existing seeds is sufficient and this isn't needed at all)
-before writing any of the above into PROTOCOL.md.
+- One high-loss window versus an under-filled/high-percentage window.
+- Sustained 4–6% and recurrent 2-bad/1-good windows.
+- One-rung persistent transition versus emergency-to-resolved-floor.
+- Resolved floors at MCS0/MCS1/MCS2 mode bands.
+- 30 s expiry, retained strikes, fourth-strike latch.
+- Same-channel mode change retains state; successful channel/bandwidth change
+  clears it; reconnect/session replacement clears it.
+- Promotion and backpressure escape stop at the effective ceiling.
+- Ground stats and OSD agree with craft stats; no automatic CSA is issued.

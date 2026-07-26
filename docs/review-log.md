@@ -3980,3 +3980,51 @@ inside `VencFrameMeta` and therefore does not cross the radio. Current
 waybeam-link egress leaves `health_magic=0`; ground health publication and
 decoder stats are separate work. Their existing attach validators ignore bytes
 76–89 and need no compatibility change.
+
+## Pass 110 — classify acute loss; lock recurrently bad MCS rungs (2026-07-26)
+
+**Observed failure.** On 5220 MHz the craft could hold excellent RSSI while a
+specific high rung sustained several percent packet loss. Raising
+`demote_milli` moved the threshold but did not change the loop: ordinary
+reactive loss selected §9.2's highest-probability lower rung—normally the
+physics-prior floor—then RSSI-only promotion retried the unsuitable rung.
+Continuous moderate loss therefore looked like an emergency floor event and
+the selector had no channel-conditioned memory.
+
+**Ruling: loss has two fresh-report classes.** A confidence-qualified raw
+100 ms window at 200‰ or above is `LOSS_EMERGENCY` and moves directly to the
+resolved safe floor. Moderate loss uses a per-rung leaky score (+1 bad, −1
+clean, unchanged below 32 unique packets); score 5 is `LOSS_PERSISTENT` and
+moves exactly one rung. The former max-probability multi-rung target is retired.
+EWMA remains useful smoothing/observability but cannot distinguish a spike from
+persistence. Emergency bypasses settle, pressure, and cooldown; §9.5 bitrate
+lead still binds. Persistent remains suppressed under local pressure.
+
+The floor is never the string "MCS0": it is
+`max(mode min_profile, table floor_profile)`. This same resolved floor now
+binds emergency, persistent, RSSI, and stale-feedback paths.
+
+**Ruling: per-rung lockout.** A loss-driven demote charges the rung where its
+evidence was observed. Strikes 1–3 block it for 30 s; strike 4 latches until a
+successful `(channel,bw)` change, accepted reporter session/source change, or
+restart. Expiry retains strikes. The lowest blocked rung is an upward ceiling;
+promotion and pressure escape cannot skip it. The verified floor is never
+locked. Pins retain operator precedence and surface a conflict. No lockout
+initiates CSA; a latched state is an operator channel recommendation.
+
+**Ruling: environment reset is broad but scoped.** A real RF tuple/source
+change clears strikes, lockouts, per-rung loss evidence, and short RF/flap
+smoothing. It preserves active profile/bitrate, the configured mode envelope,
+anti-replay state, and CSA freeze. A same-channel mode change does not reset.
+
+**Ruling: ground display consumes craft truth.** New 25-byte, 2 Hz
+`SELECTOR_STATE` (type `0xE`) carries the effective ceiling, timed/latched state,
+remaining time, masks, last loss, and reason. A ground accepts it only from its
+latched RTP craft/session with a matching table and expires it after 1.5 s.
+waybeam-hub renders a timed amber limit or latched red channel recommendation;
+it never reconstructs or actuates selector state.
+
+**Two existing spec/code gaps closed.** LINK_REPORT `uniq` is the interval
+denominator already specified at §3.5, not the lifetime RX counter. §7.3's
+never-implemented partial-window "immediate report" is removed: the 10 Hz
+window bounds reaction to 100 ms and preserves the sample-confidence law.
