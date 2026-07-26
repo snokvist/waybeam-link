@@ -253,6 +253,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.shm_oversize_drops);
         out += ",\"shm_bad_slots\":";
         append_u64(out, s.shm_bad_slots);
+        out += ",\"shm_ring_full\":";
+        append_u64(out, s.shm_ring_full);
         out += ",\"dropped_superseded\":";
         append_u64(out, s.dropped_superseded);
         out += ",\"dropped_deadline\":";

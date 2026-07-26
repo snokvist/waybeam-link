@@ -114,9 +114,13 @@ struct StreamStats {
     // §14.2 enforcement (Pass 38): actuated valid decisions + rule-2 drops.
     uint64_t jscc_enforced_frames = 0;
     uint64_t jscc_discarded_frames = 0;
+    // §15.3: frame-SHM ring counters. full/oversize are producer-side and are
+    // therefore always 0 on an ingress (consumer) stream — see Pass 107; use
+    // shm_ring_full there, never shm_full_drops == 0, to judge backpressure.
     uint64_t shm_full_drops = 0;
     uint64_t shm_oversize_drops = 0;
     uint64_t shm_bad_slots = 0;
+    uint64_t shm_ring_full = 0;
     uint64_t dropped_superseded = 0;
     uint64_t dropped_deadline = 0;
     uint64_t nacks_sent = 0;

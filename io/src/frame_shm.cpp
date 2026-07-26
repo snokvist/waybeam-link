@@ -350,6 +350,12 @@ long FrameShmRing::read_frame(uint8_t* buf, size_t cap) {
     if (r == w) {
         return 0;  // empty
     }
+    // §15.3 Pass 107: the producer's full_drops is process-local and invisible
+    // from here, so a completely full ring is the only backpressure evidence
+    // an ingress node has. Sampled before the read, which frees the slot.
+    if (w - r >= slot_count_) {
+        ++stats_.ring_full;
+    }
     const size_t slot = static_cast<size_t>(r & (slot_count_ - 1));
     const uint8_t* p = b + kFrameRingHeaderSize + slot * slot_stride_;
     uint32_t len;
