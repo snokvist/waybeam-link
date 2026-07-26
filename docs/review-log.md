@@ -3897,3 +3897,44 @@ index still resolves to the mode the ground meant.
 
 Considered and rejected: no fingerprint (drift undetectable), and carrying it
 over the air (a §3.12/§11.7 wire change, larger than this round warrants).
+
+### Pass 108 addendum — bench verification (2026-07-26)
+
+x86 ground, which had been sitting at `{"state":"configured","originator":0}`
+since boot with the craft (originator 17) decoding fine the whole time:
+
+| step | before | after |
+|---|---|---|
+| latch | `configured` / 0, indefinitely | `latched` / 17, plus `link: latched originator=17 (5805 MHz) — selection bound` |
+| `POST /api/v1/csa` | 400 "no live CSA key … re-scout" | **200**, campaign `committed` |
+| craft §11.5a binding | `claimed:false` | `claimed:true, claimed_by:9` |
+| `POST /api/v1/vehicle/command` | 409 "no bound craft" | **200 → `acked`**, all six ADAPTIVE commands |
+| craft-side applied state | — | `cmd_arq`/`cmd_selector_frozen`/`cmd_fps_ladder` set, `cmd_last_nonce` matching the issuer |
+
+**CSA round trip.** 5805 → 5785 → 5805, both legs issued from the freshly
+latched ground and both `committed`. Worth recording because it did **not** cost
+anything: all three grounds followed via §11.5 and held ~100 fps / 25 Mbps
+across both legs — the two non-issuing grounds were never stranded. Their
+`link/selection` views differ, and the difference is instructive: the one on a
+Pass 108 binary reports `committed 5785`, while the pre-108 one reports
+`configured 5805` with `csa_state: COMMITTED` — its RF layer followed, but its
+selection tuple could not record it. That is the same originator-0 blindness
+this pass removes, seen from the outside.
+
+**`catalog_fingerprint` on the craft.** `10-521a954c` for the shipped ten-mode
+catalog. Note the name sort interleaves the fps groups (100, 30, 60) — index 3
+is a 30 fps mode, not a 60 fps one — which is exactly the trap a hand-written
+ground copy falls into and the fingerprint exists to catch.
+
+**B9 staleness, re-confirmed end to end.** Swapping the craft binary restarts
+its link, which resets the §11.5a binding and picks a fresh session, while the
+ground keeps believing `committed`. A command issued on that stale belief
+returns `200` and then `timeout` — the craft-side binding is authoritative,
+exactly as §15.5 says. `POST /api/v1/csa` then re-keys from the craft's *new*
+announced token, re-claims (`claimed:true, claimed_by:9`), and the next command
+`acked`. No re-scout was needed at any point.
+
+Worth carrying into the ground menu work this pass came from: for the operator,
+"claim went stale because the craft rebooted" is indistinguishable from "command
+ignored" — both are a `timeout` against a link that looks perfectly healthy. The
+menu should show claim state, not just offer claim actions.
