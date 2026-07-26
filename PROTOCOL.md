@@ -750,8 +750,10 @@ addressed craft ever acts on one.
 
 Craft→ground **advisory observability** for the §9 selector. The selector and
 its lockouts are craft-owned; a ground or OSD MUST display this state, never
-reconstruct it from DATA loss/profile transitions. Emitted at **2 Hz** by an
-adaptive TX, independent of DATA cadence.
+reconstruct it from DATA loss/profile transitions. It becomes due at **2 Hz**
+but is emitted only **immediately before a live RTP DATA packet that is already
+going on air**. It is never a standalone craft TX event: if video is idle the
+latest summary stays pending/coalesced until the next live video slot.
 
 | off | size | field | notes |
 |---|---:|---|---|
@@ -780,6 +782,14 @@ unknown packet type and continue decoding DATA.
 The packet is unauthenticated because it is advisory only. Forging it can at
 most alter diagnostics for an already-spoofed craft identity; it cannot change
 MCS, bitrate, lockouts, pins, or channel.
+
+**Guard-cost boundary.** SELECTOR_STATE is inserted before the associated live
+video packet and that video packet retains ownership of the slot. In
+particular, the summary MUST NOT be emitted after an RTP EOB, open/re-arm a
+quiet gap, extend the craft's TX→RX guard, or run from a periodic standalone
+timer. This follows the existing §7.2 paced-video ownership law: observability
+may add a few bytes inside an active TX opportunity, never manufacture another
+one.
 
 ---
 

@@ -4028,3 +4028,9 @@ it never reconstructs or actuates selector state.
 denominator already specified at §3.5, not the lifetime RX counter. §7.3's
 never-implemented partial-window "immediate report" is removed: the 10 Hz
 window bounds reaction to 100 ms and preserves the sample-confidence law.
+
+**Addendum — no telemetry TX guard (operator).** The 2 Hz selector summary is
+only a due cadence. It is inserted immediately before an already-transmitting
+live RTP DATA packet; idle video coalesces the latest state until the next slot.
+It never sends standalone, follows an EOB, re-arms the quiet gap, or extends the
+craft TX→RX guard. Observability does not buy its own radio turnaround.
