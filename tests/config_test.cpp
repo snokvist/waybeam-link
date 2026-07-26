@@ -2,9 +2,10 @@
 // §15.2 config loader + §9.3 profile-table loader: the spec sample parses to
 // the expected structs, absent keys keep spec-seed defaults, and every §15.1
 // load-time rule rejects with a specific error. Also cross-validates the
-// file-based table loader against the golden 0x2B hash pinned in
+// file-based table loader against the golden hash pinned in
 // table_hash_test (proves the frac -> per-mille scaling path).
 #include "wblink/config.h"
+#include "wblink/selector.h"
 
 #include <string>
 
@@ -579,10 +580,9 @@ int main() {
     {
         // The repo's example table must load and reproduce the golden hash
         // (cross-validates llround scaling against table_hash_test). Moved
-        // 0x41 -> 0xD1 by Pass 95: fec_overhead_permille is inside the §3.6
-        // CRC-8 content hash, so budgeting parity airtime is a fleet-wide
-        // lockstep change — both ends must redeploy together or they do not
-        // agree on the table.
+        // Pass 111's calibrated per-rung airtime ceilings are inside the §3.6
+        // CRC-8 content hash, so both ends must redeploy together or they do
+        // not agree on the table.
         auto t = load_profile_table(std::string(WBLINK_SOURCE_DIR) +
                                     "/profiles/table.example.json");
         CHECK(bool(t));
@@ -590,9 +590,19 @@ int main() {
             CHECK_EQ_U(t.value->profiles.size(), 8);
             CHECK_EQ_U(t.value->floor_profile, 0);
             CHECK_EQ_U(t.value->profiles[0].airtime_budget_permille, 600);
+            CHECK_EQ_U(t.value->profiles[4].airtime_budget_permille, 510);
+            CHECK_EQ_U(t.value->profiles[5].airtime_budget_permille, 463);
+            CHECK_EQ_U(t.value->profiles[6].airtime_budget_permille, 438);
+            CHECK_EQ_U(t.value->profiles[7].airtime_budget_permille, 418);
             CHECK_EQ_U(t.value->profiles[0].fec_overhead_permille, 250);
             CHECK_EQ_U(t.value->profiles[5].fec_overhead_permille, 180);
-            CHECK_EQ_U(table_version(*t.value), 0xD1);  // Pass 95 (was 0x41)
+            static constexpr uint32_t kPass111Bitrates[] = {
+                2829, 5754, 10303, 13769, 18025, 21839, 23249, 24658};
+            for (size_t i = 0; i < t.value->profiles.size(); ++i) {
+                CHECK_EQ_U(derive_bitrate_kbps(t.value->profiles[i]),
+                           kPass111Bitrates[i]);
+            }
+            CHECK_EQ_U(table_version(*t.value), 0xBF);  // Pass 111 (was 0xD1)
         }
     }
     {

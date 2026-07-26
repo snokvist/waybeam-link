@@ -24,12 +24,12 @@ cell moves together and the structure survives.
 
 | | Range High (MCS 0–2) | Range Medium (MCS 1–4) | Range Low (MCS 2–5) |
 |---|---|---|---|
-| **Low latency** 100 fps | 960×540 · 0.055→0.199 | 1280×720 · 0.062→0.230 | 1920×1080 · 0.050→0.121 |
-| **Medium latency** 60 fps | 1280×720 · 0.051→0.186 | 1920×1080 · 0.046→0.171 | 1920×1080 · 0.083→0.201 |
-| **High latency** 30 fps | 1920×1080 · 0.046→0.166 | 1920×1080 · 0.093→0.341 | 1920×1080 · 0.166→0.402 |
+| **Low latency** 100 fps | 960×540 · 0.055→0.199 | 1280×720 · 0.062→0.196 | 1920×1080 · 0.050→0.105 |
+| **Medium latency** 60 fps | 1280×720 · 0.051→0.186 | 1920×1080 · 0.046→0.145 | 1920×1080 · 0.083→0.176 |
+| **High latency** 30 fps | 1920×1080 · 0.046→0.166 | 1920×1080 · 0.093→0.290 | 1920×1080 · 0.166→0.351 |
 
-Rung bitrates come from the Pass 95 table (`table_version` 0xD1): 2829 / 5754 /
-10303 / 13769 / 21223 / 25000 kbps. `(Low latency, Range Medium)` is the one
+Rung bitrates come from the Pass 111 table (`table_version` 0xBF): 2829 / 5754 /
+10303 / 13769 / 18025 / 21839 kbps. `(Low latency, Range Medium)` is the one
 knife-edge — 1600×900 lands at 0.0400 bpp, 0.1 % under the floor, so the
 smaller size is taken. Raise the floor at all and that cell becomes 1600×900.
 
