@@ -502,3 +502,4 @@ dynamic. A temporary per-rung timeout/lockout after a loss-driven demote
 (hold the ceiling below the lossy rung for some cooldown before promote is
 allowed to re-attempt it) would close this gap. Not implemented; needs its
 own §9 cascade design + bench validation before it's more than an idea.
+Tracked as a backlog placeholder in `docs/mcs-rung-lockout-plan.md`.
