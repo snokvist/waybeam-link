@@ -1,6 +1,6 @@
 # Per-rung MCS lockout and loss-classification plan
 
-Status: **operator-approved for implementation, Pass 110.** `PROTOCOL.md`
+Status: **implemented; core path hardware-verified, Pass 110.** `PROTOCOL.md`
 §3.15/§9 is authoritative. This document retains the field context and records
 the staged implementation/verification plan.
 
@@ -85,7 +85,7 @@ was.
   cannot skip it. Existing soft reentry/hard flap freeze remain independent.
 - Pins retain operator precedence and expose a conflict instead of being
   silently weakened.
-- Craft authority crosses to ground in a 25-byte 2 Hz `SELECTOR_STATE`; the
+- Craft authority crosses to ground in a 32-byte 2 Hz `SELECTOR_STATE`; the
   ground hub displays the limit and never derives it from local loss.
 
 ## Implementation stages
@@ -96,11 +96,29 @@ was.
    lockout/latch, promotion gates, environmental reset.
 3. §15.3 local stats plus craft→ground `SELECTOR_STATE` mirroring and expiry.
 4. waybeam-hub semantic metric and ground flight OSD text:
-   timed `RF ≤M4 23s` (amber), latched `RF ≤M4 CHAN` (red).
+   timed `RF ≤P4 23s` (amber), latched `RF ≤P4 CHAN` (red). The wire carries
+   profile IDs; it does not assume profile number equals MCS.
 5. Host sanitizer tests, SSC338Q cross-build, hub tests/build, then device
    validation on craft `.232`.
 
-## Device matrix
+## Verification outcome (2026-07-26)
+
+- Host: all 50 waybeam-link tests passed under ASan+UBSan; the release and
+  SSC338Q presets built successfully. waybeam-hub passed all 1,837 tests plus
+  its x86 OSD-render and ground builds.
+- Device-confirmed on craft `.232` and the x86 ground at 5220 MHz: a controlled
+  persistent-loss trigger locked one rung, demoted exactly one profile, crossed
+  the 32-byte selector state to ground, and rendered the matching timed warning
+  in the live hub OSD state. No automatic CSA was issued.
+- After restoring the production threshold byte-for-byte, craft and ground
+  returned to profile 5 with no lockout; selector state remained fresh and both
+  ground adapters continued advancing without a stall or TX wedge.
+- The timeout/retained-strike/fourth-strike latch, RF-tuple and reporter reset,
+  resolved-floor, pin-conflict, and idle-video/no-standalone-TX boundaries are
+  covered at code level by deterministic host tests. They were not all forced
+  through their complete progression on the live craft in this session.
+
+## Extended device matrix
 
 - One high-loss window versus an under-filled/high-percentage window.
 - Sustained 4–6% and recurrent 2-bad/1-good windows.
