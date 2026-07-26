@@ -360,9 +360,9 @@ long FrameShmRing::read_frame(uint8_t* buf, size_t cap) {
     if (r == w) {
         return 0;  // empty
     }
-    // §15.3 Pass 107: the producer's full_drops is process-local and invisible
-    // from here, so a completely full ring is the only backpressure evidence
-    // an ingress node has. Sampled before the read, which frees the slot.
+    // §15.3 Pass 109: ring_full remains independent leading evidence even when
+    // producer health is available. Sample it before this read frees the slot;
+    // the producer may report no drop if the read wins the race.
     if (w - r >= slot_count_) {
         ++stats_.ring_full;
     }
