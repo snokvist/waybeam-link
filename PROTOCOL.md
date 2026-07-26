@@ -2579,8 +2579,10 @@ that discovers and pairs with a vehicle (§15.5a). When its claim commits, it
 atomically changes its local RX target and repeatedly sends §3.13 CACHE_ASSIGN
 to its cache; startup does the same for a statically configured target. The
 cache does not scout, choose among vehicles, or infer ownership from RF CSA.
-It follows the receiver's committed `(vehicle originator, channel, bandwidth,
-net_id)` and clears the prior vehicle window. Matching CACHE_STATUS is the
+It follows the receiver's `latched` or committed `(vehicle originator, channel,
+bandwidth, net_id)` (§15.5 Pass 108 — before that ruling a ground that named no
+`preferred_originator` never left `configured`, so its cache stayed configured
+and never followed anything) and clears the prior vehicle window. Matching CACHE_STATUS is the
 receiver's readiness proof and naturally re-drives assignment after a cache
 restart or outage. One receiver + its cache is the production-v1 topology;
 multi-receiver cache arbitration and simultaneous multi-vehicle caching are
@@ -3233,11 +3235,11 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
 | `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |
 | `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[]}` (§15.5a; ground/rx node) |
-| `GET /api/v1/link/selection` | receiver's configured/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
+| `GET /api/v1/link/selection` | receiver's configured/latched/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
 | `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
-| `GET /api/v1/modes` | `{active, apply_configured, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist so a menu need not hardcode them (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
+| `GET /api/v1/modes` | `{active, apply_configured, catalog_fingerprint, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist. A ground with an IP path reads it here; one without must hardcode a copy, and pins `catalog_fingerprint` (Pass 108) to detect index drift (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -3312,10 +3314,62 @@ a profile bundles rate/power/MTU per §9.3. The `scout/*` endpoints (§15.5a) ac
 only on a ground/rx node and **409** elsewhere. `vehicle/command` likewise acts
 only on the issuer/ground node, and **409**s while a campaign is pending or
 with an unbound craft — a campaign toward nobody is refused up front, not
-timed out. "Bound", issuer-side, is the issuer's own committed selection (a
-§15.5a claim or `/csa` campaign committed this session, §11.7); the craft-side
-binding is authoritative, so a stale belief surfaces as `timeout`, never as a
-misdirected command. `arq` acts on any rx node.
+timed out. "Bound", issuer-side, is the issuer's own committed selection (a §15.5a claim or
+`/csa` campaign committed this session, §11.7); the craft-side binding is
+authoritative, so a stale belief surfaces as `timeout`, never as a misdirected
+command. A `latched` selection is deliberately **not** enough here, unlike for
+`/csa`: §11.7 "no bootstrap" makes the craft **silently drop** any command from
+an issuer it has not accepted a CSA from, so issuing on a latch would return
+`200` and then always `timeout`. The refusal names the remedy (`/csa` or
+`scout/quickconnect`) rather than pretending the command was sent. `arq` acts on
+any rx node.
+
+**A §2 latch binds the craft (Pass 108).** The receiver's selection tuple begins
+`configured` — the boot `preferred_originator`, or **no craft at all** on the
+common ground that names none. When the §2 latch picker selects an originator
+and the selection is still `configured`, the receiver **adopts** that originator
+into its selection tuple and the state becomes `latched`. A `latched` selection
+is a valid `/csa` target and a valid §14.3 cache-follow tuple.
+
+It is **not** a valid `vehicle/command` target, and that asymmetry is not an
+oversight: §11.7 "no bootstrap" says only an accepted CSA establishes the
+§11.5a command binding, and a command from a non-bound issuer is a *silent
+drop* (echoing to an unbound sender would be a probe oracle). A latch is
+therefore exactly enough to *claim* a craft and to follow it, and deliberately
+not enough to command one — the ground must first move it, which is what `/csa`
+and `scout/quickconnect` do. Bench-confirmed before this wording was settled: an
+issuer permitted to send on a latch alone returns `200` and then `timeout`,
+every time.
+
+Rationale and scope of the ruling:
+
+- The alternative — requiring a §15.5a claim — meant a ground that boots, hears
+  its craft, and latches had to *tear the working link down and re-form it*
+  purely to earn the right to send a command over a link that was already up.
+  Measured on the fleet before this ruling: every ground sat at
+  `{"state":"configured","originator":0}` indefinitely, so `/csa`, every §11.7
+  command, and §14.3 cache assignment were all unreachable in normal operation.
+- It grants no key the ground did not already hold. The §11.4a MAC key for both
+  campaign kinds is the craft's **announced token**, which Pass 63 rules public
+  and caches from every ANNOUNCE regardless of selection state; quickconnect
+  keys from that same cache. Adoption changes *which originator is looked up*,
+  not *what may be looked up*.
+- Ownership remains proven by connecting, never by listening (§15.5a): a
+  `latched` belief that is wrong still fails as a §11.6 `timeout` or a §11.7
+  `REJECTED`, because the craft validates the MAC and its own binding.
+- Adoption is **one-way and one-shot**: only `configured` → `latched`. A latch
+  never overwrites a `claiming`, `committed`, or already-`latched` tuple, so it
+  cannot steal a deliberate operator claim, and a §2 re-latch onto a different
+  craft after a claim does not silently redirect campaigns.
+- The adopted tuple carries the receiver's **own current** channel, bandwidth,
+  and net_id — a latch observes a craft, it does not discover a channel. Only
+  `/csa` and `scout/quickconnect` move the link.
+
+Two `/csa` refusals that this ruling separates were previously one string. `409
+no craft selected` means the selection tuple names nobody (nothing latched, no
+claim); `400 no live CSA key for craft` means a craft *is* selected but no
+announced token is cached for it (secret-mode craft, or one not heard for
+&gt;5 s). Conflating them sent operators to re-scout a link that was healthy.
 
 **`GET /api/v1/modes` (Pass 104)** enumerates the operating-mode **catalog** so a
 menu (the hub) need not carry its own copy of the mode list. The link reads each
@@ -3332,6 +3386,25 @@ like the rest of the mode surface; on a craft whose `modes_dir` is unset or
 unreadable it returns an empty `modes[]` (a misconfigured craft, distinct from the
 409 of a non-TX node). Read-only — enumerating never touches venc or the link, so
 it is safe to poll.
+
+**`catalog_fingerprint` (Pass 108).** The response also carries
+`catalog_fingerprint`: `"<count>-<hex32>"`, where `count` is `modes[].length` and
+the hex is FNV-1a-32 over the name-sorted mode names joined by `\n`. A ground
+that cannot reach the craft's REST port — the flight case, since the craft's
+control plane is loopback-bound — must carry its **own** copy of the catalog to
+render a menu, and §11.7 `0x07` MODE addresses that catalog **by index**. One
+mode file added or removed on the craft therefore shifts every later index and
+the ground silently applies the wrong mode. The fingerprint makes that drift
+*detectable*: a ground pins the fingerprint alongside its hardcoded copy, and
+whenever it does get an IP path to the craft (bench, pre-flight, a management
+LAN) a one-shot `GET /api/v1/modes` either confirms the pin or flags a mismatch.
+It is deliberately **not** carried over the air — the ground must still be able
+to drive modes with no IP path at all, so the hardcoded copy is authoritative in
+flight and the fingerprint is a pre-flight check, not a runtime gate. The hash
+covers only the **names**, in catalog order: that is exactly what the index
+mapping depends on. Editing a mode file's contents keeps the fingerprint stable
+by design — the index still resolves to the mode the ground meant, and the
+per-mode facts are the ground's to refresh when it syncs.
 
 ### 15.5a Ground scout (channel searcher)
 A ground-side finder that sweeps channels to discover parked/flying craft and,

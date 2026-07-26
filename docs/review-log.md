@@ -3794,3 +3794,106 @@ producer chose to drop.
 
 **Scope.** Egress is untouched and stays correct: on a `rx` node we create the
 ring, so all three producer counters are real there.
+## Pass 108 — §15.5 a §2 latch binds the craft; §15.5 mode `catalog_fingerprint` (2026-07-26)
+
+**Context.** A ground-menu audit began from one reported symptom: CHANNEL →
+"jump 5180" had *never* worked from the on-screen menu, returning `400 {"error":
+"no live CSA key for craft (rebooted? re-scout)"}`. The craft had not rebooted
+and a re-scout was not the fix.
+
+**Root cause.** `active_selection` is constructed once, at startup, from
+`rx.selected_originator().value_or(0)` — before any packet has arrived, so **0**,
+with `selection_state = "configured"`. Its only writer, `apply_selection()`, is
+called from exactly three sites, all inside CSA campaign outcome handling
+(commit and the two rollbacks). **A §2 latch never touches it.** A ground that
+boots, hears its craft, and latches is fully operational for video and telemetry
+while remaining `originator: 0` for its entire uptime.
+
+Everything gated on the selection tuple is therefore dead on such a ground:
+
+| surface | gate | result |
+|---|---|---|
+| `POST /api/v1/csa` | `discovery.token_for(active_selection.originator)` | `token_for(0)` → nullopt → 400 |
+| `POST /api/v1/vehicle/command` | `selection_state != "committed"` | 409 "no bound craft" |
+| §14.3 cache assignment | `assign_caches()` early-returns on `originator == 0` | cache configured, never follows |
+
+Measured on all three fleet grounds simultaneously, in normal operation:
+`{"state":"configured","originator":0,"channel":5805,"caches_configured":1,
+"caches_following":0}` — while each one's own `/api/v1/discovery` held the craft
+with a fresh cached token (`originator:17, psk_present:true`). The key was
+present the whole time; only the originator to look it up by was zero.
+
+The reachable-by-menu blast radius: all seven CHANNEL jumps, six of eight
+ADAPTIVE items, and the Pass 105 over-air MODE apply. The only way any of them
+worked was scout → quickconnect — tearing a healthy link down and re-forming it
+to earn the right to command over a link that was already up.
+
+**Ruling (operator, R1-a).** A §2 latch binds. When the latch picker selects an
+originator and the selection is still `configured`, the receiver adopts it and
+the state becomes `latched`; `latched` is a valid target for `/csa` and for
+§14.3 cache-follow.
+
+**Where the ruling stops, found on hardware.** The first implementation also
+admitted `latched` to `POST /api/v1/vehicle/command`. On the bench that returned
+`200` and then `timeout`, every time — because §11.7 already rules **"no
+bootstrap"**: only an accepted CSA establishes the §11.5a command binding, and a
+command from a non-bound issuer is a *silent drop* (echoing to an unbound sender
+would be a probe oracle). Existing law, not a new question, and the amendment as
+first drafted contradicted it. A latch is exactly enough to *claim* a craft and
+to follow it, and deliberately not enough to *command* one; the ground must move
+it first, which is what `/csa` and `scout/quickconnect` do. The refusal now names
+that remedy instead of issuing into silence.
+
+Consequence for the ground menu this pass came from: CHANNEL is fixed by the
+ruling, ADAPTIVE and over-air MODE are not — they need a claim, which is now
+reachable because `/csa` works. Making a latched craft commandable would mean
+amending §11.7's no-bootstrap clause and changing the craft side; that is a
+separate ruling with a real security argument behind the status quo, and is not
+taken here.
+
+Considered and rejected: *auto-claim on latch* (mutates the craft's
+`claimed_by` for what is a read-mostly link) and *an explicit "bind craft" menu
+item* (honest about the state machine, but leaves a manual step in front of
+every channel change — the operator interface this audit exists to fix).
+
+**Why this grants nothing new.** The §11.4a MAC key for both campaign kinds is
+the craft's *announced* token, ruled public in Pass 63 and cached from every
+ANNOUNCE irrespective of selection state — quickconnect keys from that same
+cache. Adoption changes which originator is looked up, not what may be looked
+up. Ownership is still proven by connecting (§15.5a): a wrong `latched` belief
+fails as a §11.6 `timeout` or §11.7 `REJECTED`, because the craft validates the
+MAC and its own binding.
+
+**Bounds of the adoption.** One-way and one-shot: `configured` → `latched` only.
+A latch never overwrites `claiming`, `committed`, or an existing `latched`
+tuple, so it cannot steal a deliberate claim and a §2 re-latch onto a different
+craft cannot silently redirect campaigns. The adopted tuple carries the
+receiver's own current channel/bw/net_id — a latch observes a craft, it does not
+discover a channel; only `/csa` and `scout/quickconnect` move the link.
+
+**Error-message split.** The one conflated string becomes two: `409 no craft
+selected` (the tuple names nobody) versus `400 no live CSA key for craft`
+(a craft is selected, no announced token cached — secret-mode craft, or one not
+heard for >5 s). The old wording sent operators to re-scout a healthy link.
+
+**§15.5 `catalog_fingerprint` (operator ruling, R2-a).** The same audit found
+the ground cannot enumerate the mode catalog at all: `GET /api/v1/modes` is
+TX-only, and the craft's control plane is loopback-bound, so in flight there is
+no IP path to it. A ground menu must therefore hardcode its own copy — and
+§11.7 `0x07` MODE addresses that catalog **by index**, so one mode file added or
+removed on the craft shifts every later index and the ground silently applies
+the wrong mode. (The live catalog sorts `100fps, 30fps, 60fps` — name order, not
+human order — which is itself a trap for a hand-written copy.)
+
+`GET /api/v1/modes` therefore gains `catalog_fingerprint`: `"<count>-<hex32>"`,
+FNV-1a-32 over the name-sorted mode names joined by `\n`. A ground pins it
+beside its hardcoded copy and re-checks whenever it *does* have an IP path.
+Deliberately **not** carried over the air: the ground must be able to drive
+modes with no IP path at all, so the hardcoded copy stays authoritative in
+flight and the fingerprint is a pre-flight check, not a runtime gate. The hash
+covers names only, in catalog order — exactly what the index mapping depends on.
+Editing a mode file's *contents* keeps the fingerprint stable by design: the
+index still resolves to the mode the ground meant.
+
+Considered and rejected: no fingerprint (drift undetectable), and carrying it
+over the air (a §3.12/§11.7 wire change, larger than this round warrants).
