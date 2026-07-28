@@ -90,6 +90,27 @@ struct Heartbeat {
     friend bool operator==(const Heartbeat&, const Heartbeat&) = default;
 };
 
+// §3.15 SELECTOR_STATE — craft-owned, ground-advisory summary.
+struct SelectorState {
+    CommonPrefix prefix;
+    uint8_t table_version = 0;
+    uint8_t active_profile = 0;
+    uint8_t safe_floor_profile = 0;
+    uint8_t ceiling_profile = 0;
+    uint8_t lockout_profile = 0xFF;
+    uint8_t state_flags = 0;
+    uint8_t lockout_strikes = 0;
+    uint16_t remaining_ms = 0;
+    uint8_t transition_reason = 0;
+    uint16_t loss_window_milli = 0;
+    uint8_t lockout_active_mask = 0;
+    uint8_t lockout_latched_mask = 0;
+    uint16_t loss_ewma_milli = 0;
+    uint32_t loss_uniq = 0;
+    uint8_t loss_score = 0;
+    friend bool operator==(const SelectorState&, const SelectorState&) = default;
+};
+
 // §3.9 RECOVERY_REQUEST — RX asks the exact TX session to bootstrap a stream.
 struct RecoveryRequest {
     CommonPrefix prefix;
@@ -234,7 +255,8 @@ enum class DecodeError : uint8_t {
 using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
                              Heartbeat, CsaPacket, RecoveryRequest,
                              JsccFeedback, CacheStatus, CacheRequestView,
-                             CacheReplyView, Announce, CacheAssign, VehicleCmd>;
+                             CacheReplyView, Announce, CacheAssign, VehicleCmd,
+                             SelectorState>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -248,6 +270,8 @@ size_t encode_nack(const NackHeader& hdr, const uint8_t* bitmap,
                    uint8_t bitmap_len, uint8_t* out, size_t cap);
 size_t encode_link_report(const LinkReport& pkt, uint8_t* out, size_t cap);
 size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap);
+size_t encode_selector_state(const SelectorState& pkt, uint8_t* out,
+                             size_t cap);
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap);
 size_t encode_vehicle_cmd(const VehicleCmd& pkt, uint8_t* out, size_t cap);
 size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap);

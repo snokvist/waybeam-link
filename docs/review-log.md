@@ -3980,3 +3980,172 @@ inside `VencFrameMeta` and therefore does not cross the radio. Current
 waybeam-link egress leaves `health_magic=0`; ground health publication and
 decoder stats are separate work. Their existing attach validators ignore bytes
 76–89 and need no compatibility change.
+
+## Pass 110 — classify acute loss; lock recurrently bad MCS rungs (2026-07-26)
+
+**Observed failure.** On 5220 MHz the craft could hold excellent RSSI while a
+specific high rung sustained several percent packet loss. Raising
+`demote_milli` moved the threshold but did not change the loop: ordinary
+reactive loss selected §9.2's highest-probability lower rung—normally the
+physics-prior floor—then RSSI-only promotion retried the unsuitable rung.
+Continuous moderate loss therefore looked like an emergency floor event and
+the selector had no channel-conditioned memory.
+
+**Ruling: loss has two fresh-report classes.** A confidence-qualified raw
+100 ms window at 200‰ or above is `LOSS_EMERGENCY` and moves directly to the
+resolved safe floor. Moderate loss uses a per-rung leaky score (+1 bad, −1
+clean, unchanged below 32 unique packets); score 5 is `LOSS_PERSISTENT` and
+moves exactly one rung. The former max-probability multi-rung target is retired.
+EWMA remains useful smoothing/observability but cannot distinguish a spike from
+persistence. Emergency bypasses settle, pressure, and cooldown; §9.5 bitrate
+lead still binds. Persistent remains suppressed under local pressure.
+
+The floor is never the string "MCS0": it is
+`max(mode min_profile, table floor_profile)`. This same resolved floor now
+binds emergency, persistent, RSSI, and stale-feedback paths.
+
+**Ruling: per-rung lockout.** A loss-driven demote charges the rung where its
+evidence was observed. Strikes 1–3 block it for 30 s; strike 4 latches until a
+successful `(channel,bw)` change, accepted reporter session/source change, or
+restart. Expiry retains strikes. The lowest blocked rung is an upward ceiling;
+promotion and pressure escape cannot skip it. The verified floor is never
+locked. Pins retain operator precedence and surface a conflict. No lockout
+initiates CSA; a latched state is an operator channel recommendation.
+Those values are the §17 seeds: when configured, every strike below
+`rung_lockout_latch_count` is timed and reaching the count latches. The compact
+wire summary saturates a longer timed remainder at its u16 maximum.
+
+**Ruling: environment reset is broad but scoped.** A real RF tuple/source
+change clears strikes, lockouts, per-rung loss evidence, and short RF/flap
+smoothing. It preserves active profile/bitrate, the configured mode envelope,
+anti-replay state, and CSA freeze. A same-channel mode change does not reset.
+
+**Ruling: ground display consumes craft truth.** New 32-byte, 2 Hz-due
+`SELECTOR_STATE` (type `0xE`) carries the effective ceiling, timed/latched state,
+remaining time, masks, last loss, and reason. A ground accepts it only from its
+latched RTP craft/session with a matching table and expires it after 1.5 s.
+waybeam-hub renders a timed amber limit or latched red channel recommendation;
+it never reconstructs or actuates selector state.
+
+**Two existing spec/code gaps closed.** LINK_REPORT `uniq` is the interval
+denominator already specified at §3.5, not the lifetime RX counter. §7.3's
+never-implemented partial-window "immediate report" is removed: the 10 Hz
+window bounds reaction to 100 ms and preserves the sample-confidence law.
+
+**Addendum — no telemetry TX guard (operator).** The 2 Hz selector summary is
+only a due cadence. It is inserted immediately before an already-transmitting
+live RTP DATA packet; idle video coalesces the latest state until the next slot.
+It never sends standalone, follows an EOB, re-arms the quiet gap, or extends the
+craft TX→RX guard. Observability does not buy its own radio turnaround.
+
+## Pass 111 — calibrate the per-rung local service boundary (2026-07-26)
+
+**Observed failure.** With the selector holding MCS5 at excellent RSSI, the
+encoder commanded the global 25 Mbps ceiling while the vehicle-side frame-SHM
+ring repeatedly filled and the venc throttle oscillated as low as 30–40%.
+Moving the whole fleet from the known-dirty 5220 MHz channel to 5805 MHz did not
+remove it. The selector and Pass 110 loss classifier were healthy: RF-rung
+viability and the local source-to-air service ceiling are separate limits.
+
+**Measurement.** The craft ran the production 1280×720, 100 fps, GOP 2 stream
+through frame-SHM, the shipped per-frame RLC overhead, quiet-gap pacer, and
+SSC338Q radio backend on HT20/5805. Each candidate waited for venc throttle
+recovery, then sampled at 5 Hz for 30 s; MCS5's accepted point also passed a
+60 s sample. A clean point held `shm_throttle_permille == 1000`, frame-SHM fill
+at no more than one of eight slots (12%), pressure false, and producer
+`shm_full_drops` unchanged. Any throttle excursion rejected the point even when
+the ring did not reach a full-drop event during the sample.
+
+| MCS | highest clean (kbps) | first rejected (kbps) | rejection evidence |
+|---:|---:|---:|---|
+| 0 | 4000 | 4500 | throttle 303‰, fill 75%, +1 full drop |
+| 1 | 7500 | 8000 | throttle 338‰, fill 100%, +26 full drops |
+| 2 | 11500 | 12000 | throttle 608‰, fill 75% |
+| 3 | 14500 | 15000 | throttle 640‰, fill 50% |
+| 4 | 19000 | 19500 | throttle 384‰, fill 87%, +3 full drops |
+| 5 | 23000 | 23500 | throttle 640‰, fill 62% |
+| 6 | 24500 | 25000 | throttle 640‰, fill 50% |
+| 7 | 26000 | 27000 | throttle 608‰, fill 62% |
+
+**Ruling.** Preserve an existing derived rate when it is already no more than
+95% of the clean boundary. Otherwise choose the greatest integer
+`airtime_budget_permille` whose §9.5 all-integer derivation does not exceed 95%
+of that boundary. The table moves from a flat 600‰ to
+`{600,600,600,600,510,463,438,418}` and derives
+`{2829,5754,10303,13769,18025,21839,23249,24658}` kbps. The 25 Mbps
+`venc.max_bitrate_kbps` remains as the independent encoder-capability ceiling;
+it is no longer asked to disguise per-rung transport limits.
+
+This amends, rather than erases, Pass 75. Pass 75 correctly separated the SoC
+ceiling from RF profile selection and rejected using one global airtime cut as
+a proxy for CPU. The new evidence is per-rung and comes from the complete local
+service path: MCS5, MCS6, and MCS7 fail at different rates. The table's
+per-rung airtime field is therefore being used for its intended wall-clock
+occupancy policy, while the rung-independent encoder ceiling remains intact.
+
+**Boundary.** This is a fleet seed measured on one SSC338Q/RTL88x2 craft at
+HT20, 100 fps, and the current framing/FEC/pacer implementation. It is not a
+claim about every adapter or channel. Re-calibrate after changing channel
+width, driver, framing/FEC, quiet-gap timing, camera cadence, or hardware class.
+Do not encode ordinary RF interference into this table: persistent or acute
+channel loss remains Pass 110 selector evidence.
+
+Changing the four airtime values changes the §3.6 table hash and requires a
+lockstep fleet redeploy.
+
+## Pass 112 — apply frame caps before bitrate (2026-07-28)
+
+**Observed failure.** The final MCS0 mode check used the production
+`imx335-100fps-highrange` shape: 1024×576, 100 fps, `resilience=range`, profile
+0 at 2829 kbps. The frame-SHM path was healthy (`throttle_permille=1000`, no
+pressure or producer drops) and the receiver delivered without deadline loss,
+but the encoder sometimes held only 300–850 kbps. Its configured bitrate still
+reported 2829 and the link's commanded caps reported I=21761/P=4096, so neither
+the source target nor backpressure telemetry explained the underfill.
+
+Lifting the P cap to 12000/16000 bytes changed output but did not reliably
+restore the target. Disabling caps live was worse (about 93 kbps), confirming
+that generic cap removal is not a safe Star6E repair. The decisive A/B kept the
+original I=21761/P=4096 tuple and changed only write order:
+
+- bitrate then caps: persistent underfill;
+- caps then a 2828→2829 bitrate re-apply: 2898 kbps measured over 10 s,
+  994/1000 expected frames, zero unrecoverable/deadline/supersession drops.
+
+The operator simultaneously confirmed that the displayed stream used its
+target bitrate and remained stable.
+
+**Ruling.** When bitrate and caps are pending together, apply caps first and
+bitrate last. On demotion, the tighter burst ceiling lands before the lower
+target. On promotion, the looser ceiling lands while the old lower bitrate
+still binds, then bitrate rises. The same order governs the full-tuple
+re-assert after a venc restart. This preserves write-on-change for independent
+updates and changes no wire field, table hash, or TX opportunity.
+
+**GOP boundary.** The same run separated recovery deadline from serialization
+cadence. With `resilience=off`, 45 fps and a 2 s GOP, roughly one deadline miss
+per GOP tracked 45–54 kB IDRs; the profile-0 80 ms I-class recovery deadline is
+not an 80 ms exclusive air slot. The shipped MCS0-capable modes use
+`resilience=range` (GDR), where an 85 s MCS0/100 fps soak delivered 8540 frames
+with zero deadline or supersession drops. MCS0 remains eligible for that
+authored GDR mode. Periodic-GOP safety must not be inferred from `maxIBytes`;
+Star6E was observed emitting complete Annex-B access units above the configured
+I ceiling, so that backend behavior remains separate venc work.
+
+**Post-implementation verification.** The Pass 112 SSC338Q binary
+(`md5 8d55ef4add3c0744e0288f8a2157858b`) was deployed on the same craft. A
+real profile-0 → profile-2 promotion applied I=59440/P=10731 before the 10303
+kbps target and delivered 10258.5 kbps over 15 s. The reverse profile-2 →
+profile-0 demotion applied I=21761/P=4096 before the 2829 kbps target and
+delivered 2801.3 kbps over 15 s. Both windows had zero unrecoverable,
+deadline, or supersession drops, no new producer drop after attach, SHM fill
+0%, pressure false, and `throttle_permille=1000`; the actuator reported zero
+failures. A preceding 30 s profile-0 soak delivered 2996 frames at 2785.9
+kbps with the same zero-drop result.
+
+All ten shipped mode files were also audited: every one explicitly selects
+`resilience:"range"`, including all modes whose `min_profile` is 0. No catalog
+change is required to keep periodic GOP IDRs out of the authored MCS0 path.
+
+Host verification: full ASan+UBSan build and 50/50 `ctest --preset dev`.
+Target verification: clean SSC338Q configure/build with the OpenIPC toolchain.

@@ -187,6 +187,23 @@ struct LinkStats {
     uint32_t report_epoch = 0;
     uint32_t report_age_ms = 0;
     std::string state = "HOLD";
+    std::string transition_reason = "NONE";
+    uint16_t loss_window_milli = 0;
+    uint16_t loss_ewma_milli = 0;
+    uint32_t loss_uniq = 0;
+    uint8_t loss_score = 0;
+    uint8_t safe_floor_profile = 0;
+    bool selector_state_valid = false;
+    uint32_t selector_state_age_ms = 0;
+    bool lockout_active = false;
+    bool lockout_latched = false;
+    uint8_t lockout_profile = 0xFF;
+    uint8_t lockout_ceiling_profile = 0;
+    uint32_t lockout_remaining_ms = 0;
+    uint8_t lockout_strikes = 0;
+    uint8_t lockout_active_mask = 0;
+    uint8_t lockout_latched_mask = 0;
+    bool lockout_conflict = false;
     bool flap_freeze = false;
     std::string csa_state = "IDLE";
     // §11 follow-me: current RF operating channel (center MHz). 0 when the node

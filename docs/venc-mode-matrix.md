@@ -552,20 +552,22 @@ Measured live on the craft at MCS5: 183 672 repair / 847 295 source symbols =
 `docs/findings-pass3.md:286` called this exactly: *"If FEC is adopted it must
 be budgeted, not bolted on."* FEC was adopted; it was bolted on.
 
-Corrected §9.5 derived bitrate (25000 kbps `venc.max_bitrate_kbps` clamp):
+Current §9.5 derived bitrate (25000 kbps `venc.max_bitrate_kbps` ceiling):
 
-| rung | MCS | GI | table before (fec=0) | **Pass 95 (graduated)** | delta |
-|---|---|---|---|---|---|
-| 0 | 0 | long | 3804 | **2829** (250‰) | −25.6 % |
-| 1 | 1 | long | 7704 | **5754** (250‰) | −25.3 % |
-| 2 | 2 | short | 12903 | **10303** (200‰) | −20.2 % |
-| 3 | 3 | short | 17236 | **13769** (200‰) | −20.1 % |
-| 4 | 4 | short | 25000 (clamped) | **21223** (180‰) | −15.1 % |
-| 5 | 5 | short | 25000 (clamped) | 25000 (180‰) | 0 % |
+| rung | MCS | GI | table before FEC budget | Pass 95 FEC budget | **Pass 111 calibrated** |
+|---|---|---|---:|---:|---:|
+| 0 | 0 | long | 3804 | 2829 (250‰ FEC) | **2829** (600‰ airtime) |
+| 1 | 1 | long | 7704 | 5754 (250‰ FEC) | **5754** (600‰ airtime) |
+| 2 | 2 | short | 12903 | 10303 (200‰ FEC) | **10303** (600‰ airtime) |
+| 3 | 3 | short | 17236 | 13769 (200‰ FEC) | **13769** (600‰ airtime) |
+| 4 | 4 | short | 25000 (clamped) | 21223 (180‰ FEC) | **18025** (510‰ airtime) |
+| 5 | 5 | short | 25000 (clamped) | 25000 (clamped) | **21839** (463‰ airtime) |
 
 Read back from the shipped table via `derive_bitrate_kbps()`, not estimated.
-Every rung bitrate quoted anywhere in this document before today was too high,
-by 15–26 %. Note the `venc.max_bitrate_kbps` clamp stops binding at rung 4.
+Pass 95 corrected parity accounting; Pass 111 retains its conservative lower
+rungs and lowers MCS4–5 to 95% of their measured clean local-service boundary.
+The independent `venc.max_bitrate_kbps` encoder ceiling no longer binds in this
+six-rung mode catalog.
 
 **PROPOSED RULING (needs operator sign-off):** `fec_overhead_frac` must be
 non-zero on any rung whose stream runs `fec_scheme: rlc256`. Whether it is
@@ -620,8 +622,8 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 | 1 | 5754 | 0.208 | 0.104 | 0.069 | 0.062 |
 | 2 | 10303 | 0.373 | 0.186 | 0.124 | 0.112 |
 | 3 | 13769 | 0.498 | 0.249 | 0.166 | 0.149 |
-| 4 | 21223 | 0.768 | 0.384 | 0.256 | 0.230 |
-| 5 | 25000 | 0.904 | 0.452 | 0.301 | 0.271 |
+| 4 | 18025 | 0.652 | 0.326 | 0.217 | 0.196 |
+| 5 | 21839 | 0.790 | 0.395 | 0.263 | 0.237 |
 
 **1920×1080 (2 073 600 px)**
 
@@ -631,8 +633,8 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 | 1 | 5754 | 0.092 | 0.046 | 0.031 | 0.028 |
 | 2 | 10303 | 0.166 | 0.083 | 0.055 | 0.050 |
 | 3 | 13769 | 0.221 | 0.111 | 0.074 | 0.066 |
-| 4 | 21223 | 0.341 | 0.171 | 0.114 | 0.102 |
-| 5 | 25000 | 0.402 | 0.201 | 0.134 | 0.121 |
+| 4 | 18025 | 0.290 | 0.145 | 0.097 | 0.087 |
+| 5 | 21839 | 0.351 | 0.176 | 0.117 | 0.105 |
 
 **960×540 (518 400 px)**
 
@@ -642,8 +644,8 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 | 1 | 5754 | 0.370 | 0.185 | 0.123 | 0.111 |
 | 2 | 10303 | 0.662 | 0.331 | 0.221 | 0.199 |
 | 3 | 13769 | 0.885 | 0.443 | 0.295 | 0.266 |
-| 4 | 21223 | 1.365 | 0.682 | 0.455 | 0.409 |
-| 5 | 25000 | 1.608 | 0.804 | 0.536 | 0.482 |
+| 4 | 18025 | 1.159 | 0.580 | 0.386 | 0.348 |
+| 5 | 21839 | 1.404 | 0.702 | 0.468 | 0.421 |
 
 This is the matrix's real shape, and it reproduces the operator's intuition
 correctly — but inverted from §4's first reading. It is not that low
@@ -777,17 +779,17 @@ its top rung.
 
 | | **Range High** (MCS 0–2) | **Range Medium** (MCS 1–4) | **Range Low** (MCS 2–5) |
 |---|---|---|---|
-| **Latency Low** (100 fps) | 960×540 · 0.055→0.199 | 1280×720 · 0.062→0.230 | 1920×1080 · 0.050→0.121 |
-| **Latency Medium** (60 fps) | 1280×720 · 0.051→0.186 | 1920×1080 · 0.046→0.171 | 1920×1080 · 0.083→0.201 |
-| **Latency High** (30 fps) | 1920×1080 · 0.046→0.166 | 1920×1080 · 0.093→0.341 | 1920×1080 · 0.166→0.402 |
+| **Latency Low** (100 fps) | 960×540 · 0.055→0.199 | 1280×720 · 0.062→0.196 | 1920×1080 · 0.050→0.105 |
+| **Latency Medium** (60 fps) | 1280×720 · 0.051→0.186 | 1920×1080 · 0.046→0.145 | 1920×1080 · 0.083→0.176 |
+| **Latency High** (30 fps) | 1920×1080 · 0.046→0.166 | 1920×1080 · 0.093→0.290 | 1920×1080 · 0.166→0.351 |
 
-Rung bitrates are §9.5-derived from the **Pass 95 table** (`table_version`
-0xD1) — 2829 / 5754 / 10303 / 13769 / 21223 / 25000 kbps — not from the flat
-180 ‰ estimate used while the matrix was being drafted. The graduated
-overhead makes rungs 0–3 lower than that estimate, which moved exactly one
-cell: **(Latency Low, Range Medium) 1600×900 → 1280×720**, because 1600×900
-lands at 0.0400 bpp, under the floor by 0.1 %. That is a coin-flip on a
-guessed floor; if 0.04 moves up at all, the cell goes back to 1600×900.
+Rung bitrates are §9.5-derived from the **Pass 111 table** (`table_version`
+0xBF) — 2829 / 5754 / 10303 / 13769 / 18025 / 21839 kbps. Pass 95's graduated
+FEC overhead remains in force; Pass 111 adds the measured local-service ceiling
+for MCS4–5. The floor rungs that choose each resolution are unchanged, so no
+mode changes size. **(Latency Low, Range Medium)** remains the knife edge:
+1600×900 lands at 0.0400 bpp, under the floor by 0.1 %. If the guessed 0.04
+floor moves up at all, the cell goes back to 1600×900.
 
 Every cell clears the floor at its worst rung and 0.12+ at its best. The
 diagonal reads exactly as intended: trading latency for range costs pixels,
@@ -867,8 +869,9 @@ a v1 requirement.
 
 **Both landed in this PR** as **Pass 94** and **Pass 95** (operator, 2026-07-24:
 *"in the scope of this PR i would say they land and we try out the model"*).
-See `docs/review-log.md`. Pass 95 moves `table_version` **0x41 → 0xD1**, so
-craft and ground must be redeployed together.
+See `docs/review-log.md`. Pass 95 moved `table_version` **0x41 → 0xD1**;
+Pass 111 moves it **0xD1 → 0xBF**. Each semantic table change requires a
+lockstep craft-and-ground redeploy.
 
 The nine profiles are in `profiles/modes/` — one JSON per cell, applied by
 setting the fields and restarting, per the operator's chosen mechanism.

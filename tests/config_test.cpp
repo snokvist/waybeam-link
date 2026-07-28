@@ -2,9 +2,10 @@
 // §15.2 config loader + §9.3 profile-table loader: the spec sample parses to
 // the expected structs, absent keys keep spec-seed defaults, and every §15.1
 // load-time rule rejects with a specific error. Also cross-validates the
-// file-based table loader against the golden 0x2B hash pinned in
+// file-based table loader against the golden hash pinned in
 // table_hash_test (proves the frac -> per-mille scaling path).
 #include "wblink/config.h"
+#include "wblink/selector.h"
 
 #include <string>
 
@@ -33,7 +34,10 @@ const char* kSample = R"({
   ],
   "policy": {
     "report_hz": 10, "report_timeout_ms": 500,
-    "select": { "demote_milli": 20, "rssi_floor_dbm": -85,
+    "select": { "demote_milli": 20, "emergency_loss_milli": 180,
+                "loss_min_uniq": 40, "loss_persist_score": 6,
+                "rung_lockout_s": 12.5, "rung_lockout_latch_count": 5,
+                "rssi_floor_dbm": -85,
                 "rssi_fade_db_per_s": 10, "rssi_fade_arm_dbm": -65,
                 "promote_rssi_hyst_db": 6, "promote_dwell_s": 0.5,
                 "mcs_settle_s": 5.0, "down_cooldown_s": 0.2,
@@ -111,6 +115,11 @@ int main() {
             CHECK(c.streams[1].classifier == RtpClassifier::kSize);
 
             CHECK_EQ_U(c.policy.select.demote_milli, 20);
+            CHECK_EQ_U(c.policy.select.emergency_loss_milli, 180);
+            CHECK_EQ_U(c.policy.select.loss_min_uniq, 40);
+            CHECK_EQ_U(c.policy.select.loss_persist_score, 6);
+            CHECK(c.policy.select.rung_lockout_s == 12.5);
+            CHECK_EQ_U(c.policy.select.rung_lockout_latch_count, 5);
             CHECK(c.policy.select.rssi_floor_dbm == -85);
             CHECK_EQ_U(c.policy.arq.fwd_clamp_blocks, 4);
             CHECK(c.policy.fec.scheme == FecScheme::kNone);
@@ -138,6 +147,24 @@ int main() {
         }
     }
 
+    // --- Pass 110 selector classifier/lockout boundaries ------------------
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"select":{"demote_milli":45,
+                          "emergency_loss_milli":45}}})",
+                 "demote_milli < emergency_loss_milli");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"select":{"loss_min_uniq":0}}})",
+                 "loss_min_uniq");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"select":{"loss_persist_score":256}}})",
+                 "integer widths");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"select":{"rung_lockout_latch_count":256}}})",
+                 "integer widths");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"select":{"rung_lockout_s":5000000}}})",
+                 "representable in milliseconds");
+
     // --- defaults: a minimal config keeps every spec seed ------------------
     {
         auto r = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
@@ -148,6 +175,11 @@ int main() {
             CHECK_EQ_U(c.node.preferred_originator, 0);
             CHECK_EQ_U(c.policy.report_timeout_ms, 500);
             CHECK_EQ_U(c.policy.select.demote_milli, 45);  // §17 re-derive 2026-07-26
+            CHECK_EQ_U(c.policy.select.emergency_loss_milli, 200);
+            CHECK_EQ_U(c.policy.select.loss_min_uniq, 32);
+            CHECK_EQ_U(c.policy.select.loss_persist_score, 5);
+            CHECK(c.policy.select.rung_lockout_s == 30.0);
+            CHECK_EQ_U(c.policy.select.rung_lockout_latch_count, 4);
             CHECK(c.policy.select.ewma_alpha == 0.3);
             CHECK_EQ_U(c.policy.arq.holddown_ms, 20);
             CHECK_EQ_U(c.policy.rx.renack_backoff_ms, 6);
@@ -548,10 +580,9 @@ int main() {
     {
         // The repo's example table must load and reproduce the golden hash
         // (cross-validates llround scaling against table_hash_test). Moved
-        // 0x41 -> 0xD1 by Pass 95: fec_overhead_permille is inside the §3.6
-        // CRC-8 content hash, so budgeting parity airtime is a fleet-wide
-        // lockstep change — both ends must redeploy together or they do not
-        // agree on the table.
+        // Pass 111's calibrated per-rung airtime ceilings are inside the §3.6
+        // CRC-8 content hash, so both ends must redeploy together or they do
+        // not agree on the table.
         auto t = load_profile_table(std::string(WBLINK_SOURCE_DIR) +
                                     "/profiles/table.example.json");
         CHECK(bool(t));
@@ -559,9 +590,19 @@ int main() {
             CHECK_EQ_U(t.value->profiles.size(), 8);
             CHECK_EQ_U(t.value->floor_profile, 0);
             CHECK_EQ_U(t.value->profiles[0].airtime_budget_permille, 600);
+            CHECK_EQ_U(t.value->profiles[4].airtime_budget_permille, 510);
+            CHECK_EQ_U(t.value->profiles[5].airtime_budget_permille, 463);
+            CHECK_EQ_U(t.value->profiles[6].airtime_budget_permille, 438);
+            CHECK_EQ_U(t.value->profiles[7].airtime_budget_permille, 418);
             CHECK_EQ_U(t.value->profiles[0].fec_overhead_permille, 250);
             CHECK_EQ_U(t.value->profiles[5].fec_overhead_permille, 180);
-            CHECK_EQ_U(table_version(*t.value), 0xD1);  // Pass 95 (was 0x41)
+            static constexpr uint32_t kPass111Bitrates[] = {
+                2829, 5754, 10303, 13769, 18025, 21839, 23249, 24658};
+            for (size_t i = 0; i < t.value->profiles.size(); ++i) {
+                CHECK_EQ_U(derive_bitrate_kbps(t.value->profiles[i]),
+                           kPass111Bitrates[i]);
+            }
+            CHECK_EQ_U(table_version(*t.value), 0xBF);  // Pass 111 (was 0xD1)
         }
     }
     {

@@ -119,20 +119,21 @@ std::string VencActuator::txn_query() const {
 }
 
 // Choose the next pending transaction from want_ vs last_. Returns false when
-// there is nothing to do. Priority: finish a 404 fallback chain, then bitrate
-// (oversubscription risk), caps, fps, idr.
+// there is nothing to do. Priority: finish a 404 fallback chain, then caps,
+// bitrate, fps, idr. §9.6 Pass 112: SigmaStar cap application perturbs RC, so
+// bitrate must be the final write when both are pending.
 bool VencActuator::select_pending(uint64_t now_ms) {
     if (chain_persist_) {
         return true;  // txn_* already holds the value that drew the 404
     }
-    if (want_bitrate_ && (!last_ || *want_bitrate_ != *last_)) {
-        txn_kind_ = TxnKind::kBitrate;
-        txn_bitrate_ = *want_bitrate_;
-        return true;
-    }
     if (want_caps_ && (!last_caps_ || *want_caps_ != *last_caps_)) {
         txn_kind_ = TxnKind::kCaps;
         txn_caps_ = *want_caps_;
+        return true;
+    }
+    if (want_bitrate_ && (!last_ || *want_bitrate_ != *last_)) {
+        txn_kind_ = TxnKind::kBitrate;
+        txn_bitrate_ = *want_bitrate_;
         return true;
     }
     if (want_fps_ && (!last_fps_ || *want_fps_ != *last_fps_)) {

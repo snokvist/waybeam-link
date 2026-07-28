@@ -259,7 +259,7 @@ wire packet inside it.
 **Packet types** (low nibble): `0x1 DATA · 0x2 NACK · 0x3 LINK_REPORT ·
 0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK ·
 0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY · 0xB ANNOUNCE ·
-0xC CACHE_ASSIGN · 0xD VEHICLE_CMD`. 13 of
+0xC CACHE_ASSIGN · 0xD VEHICLE_CMD · 0xE SELECTOR_STATE`. 14 of
 16 used; the version nibble will not ship 16 wire-incompatible revisions, so
 there is no type-budget scarcity. Future types (e.g. a dedicated FEC-repair
 type, §14) take free slots.
@@ -371,7 +371,7 @@ degradation this rule promises into a worse outcome than no fallback at all.
 | 23 | 1 | `rssi_best` | i8, dBm — best adapter |
 | 24 | 1 | `rssi_mean` | i8, dBm — fleet mean (TX derives slope from the series) |
 | 25 | 2 | `loss_postdiv_prearq` | u16, ‰ — **post-diversity, pre-ARQ** delivered loss (see §3.7) |
-| 27 | 4 | `uniq` | u32 — unique packets this interval (loss denominator) |
+| 27 | 4 | `uniq` | u32 — unique packets this interval (loss denominator), never the lifetime counter |
 | 31 | 4 | `diversity` | u32 — duplicate copies across adapters (decorrelation gauge) |
 | 35 | 1 | `adapters` | u8 — latched, *non-stalled* adapter count (§6.5) |
 | 36 | 2 | `probe_per` | u16, ‰ — promote-probe PER; `0xFFFF` = no probe |
@@ -745,6 +745,54 @@ campaign copies (ordinary Data shape, TID 0 — commands are not
 latency-critical). Spectators ignore the type entirely: it carries no
 channel/fleet state to follow, and the §11.7 bound-issuer guard means only the
 addressed craft ever acts on one.
+
+### 3.15 SELECTOR_STATE packet (type `0xE`) — 32 bytes
+
+Craft→ground **advisory observability** for the §9 selector. The selector and
+its lockouts are craft-owned; a ground or OSD MUST display this state, never
+reconstruct it from DATA loss/profile transitions. It becomes due at **2 Hz**
+but is emitted only **immediately before a live RTP DATA packet that is already
+going on air**. It is never a standalone craft TX event: if video is idle the
+latest summary stays pending/coalesced until the next live video slot.
+
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | §3.1 — sender = craft; `destination` = 0 |
+| 11 | 1 | `table_version` | §3.6 table used for all profile IDs below |
+| 12 | 1 | `active_profile` | currently committed §9.3 profile |
+| 13 | 1 | `safe_floor_profile` | resolved `max(min_profile, floor_profile)` |
+| 14 | 1 | `ceiling_profile` | highest profile currently reachable without crossing a lockout |
+| 15 | 1 | `lockout_profile` | lowest currently blocking profile; `0xFF` when none |
+| 16 | 1 | `state_flags` | bit0 active; bit1 latched; bit2 pin/range conflict; bits 3–7 reserved |
+| 17 | 1 | `lockout_strikes` | saturating strike count for `lockout_profile`; default latch boundary 4 |
+| 18 | 2 | `remaining_ms` | timed lockout remainder, saturated at 65535; 0 for none/latched |
+| 20 | 1 | `transition_reason` | §9 reason registry below |
+| 21 | 2 | `loss_window_milli` | most recent accepted §3.5 raw 100 ms loss |
+| 23 | 1 | `lockout_active_mask` | bit *i* = ladder rung *i* is timed or latched |
+| 24 | 1 | `lockout_latched_mask` | bit *i* = ladder rung *i* is latched |
+| 25 | 2 | `loss_ewma_milli` | selector loss EWMA, rounded to u16 |
+| 27 | 4 | `loss_uniq` | denominator of `loss_window_milli` |
+| 31 | 1 | `loss_score` | current active rung's leaky persistence score |
+
+`state_flags` active and latched describe the effective `lockout_profile`;
+latched implies active. Masks are ladder-index diagnostics, not profile IDs.
+An RX accepts the summary only from the currently latched RTP
+`(originator,session)` and only when `table_version` matches. It expires the
+summary after **1.5 s** without a refresh so a stopped/rebooted craft cannot
+leave a stale warning on the OSD. Mixed-version receivers safely ignore the
+unknown packet type and continue decoding DATA.
+
+The packet is unauthenticated because it is advisory only. Forging it can at
+most alter diagnostics for an already-spoofed craft identity; it cannot change
+MCS, bitrate, lockouts, pins, or channel.
+
+**Guard-cost boundary.** SELECTOR_STATE is inserted before the associated live
+video packet and that video packet retains ownership of the slot. In
+particular, the summary MUST NOT be emitted after an RTP EOB, open/re-arm a
+quiet gap, extend the craft's TX→RX guard, or run from a periodic standalone
+timer. This follows the existing §7.2 paced-video ownership law: observability
+may add a few bytes inside an active TX opportunity, never manufacture another
+one.
 
 ---
 
@@ -1130,8 +1178,11 @@ against plain broadcast returns is a §17 bench slot.
 ### 7.3 Cadence
 - **NACK:** event-driven on loss declaration, coalesced to one bitmap per return
   window, rate-limited by the global per-seq hold-down (§5.3).
-- **LINK_REPORT:** periodic **10 Hz** floor (bench-gated) **+ immediate** on a
-  step change (RSSI-floor breach, loss spike), to cut reaction latency.
+- **LINK_REPORT:** periodic **10 Hz** (bench-gated). Pass 110 removes the
+  never-implemented separate "immediate on step change" path: §9's acute-loss
+  classifier requires a confidence-qualified interval denominator, and a
+  partial-window early report is exactly the low-sample false emergency it must
+  reject. Reaction latency is bounded by the next nominal 100 ms report.
 - **Video-stream reports only (Pass 79):** LINK_REPORT is emitted for **RTP
   streams only**, and a TX ignores a report whose `target_stream_id` is not
   one of its RTP streams (defense for mixed-version fleets). The §9 selector's
@@ -1193,20 +1244,38 @@ robustness is satisfied, never at its expense.
   MCS↔bitrate transition (§9.5) atomic and local.
 
 **Decision law = rule cascade, first match wins:**
-1. **Reactive demote** — `smoothed(loss_postdiv_prearq) ≥ demote_milli`.
-   **Seed 20‰ (2%), RE-DERIVE.** (Not wfb_ng's 80‰: that was pre-FEC loss an FEC
-   layer then absorbed; there is no FEC here, so react ~4× earlier.) Suppressed
-   under local backpressure (§9.9).
-2. **RSSI-floor demote** — `smoothed_rssi ≤ rssi_floor_dbm` (**−85 dBm**). KEEP.
-3. **RSSI-fade demote** — `slope ≤ −rssi_fade_db_per_s` (**−10 dB/s**) AND
+1. **Acute-loss fail-safe** — one confidence-qualified raw report window at or
+   above `emergency_loss_milli` (**200‰**, `loss_min_uniq` **32**) demotes
+   directly to the resolved safe floor (§9.8). It bypasses settle, local
+   pressure, and the ordinary demote cooldown; §9.5 bitrate lead still applies.
+2. **Persistent-loss demote** — the current rung's leaky score reaches
+   `loss_persist_score` (**5**): qualified
+   `loss_postdiv_prearq ≥ demote_milli` adds one; qualified clean loss subtracts
+   one; an under-filled window changes nothing. Demote **exactly one rung** and
+   lock the vacated rung (§9.2). Suppressed under local backpressure (§9.9).
+3. **RSSI-floor demote** — `smoothed_rssi ≤ rssi_floor_dbm` (**−85 dBm**). KEEP.
+4. **RSSI-fade demote** — `slope ≤ −rssi_fade_db_per_s` (**−10 dB/s**) AND
    `rssi ≤ rssi_fade_arm_dbm` (**−65 dBm**) for 3 ticks. KEEP.
-4. **Backpressure escape** — sustained local pressure ≥ `pressure_escape_s`
+5. **Backpressure escape** — sustained local pressure ≥ `pressure_escape_s`
    (**2.0 s**) with clean RF ⇒ climb one rung per `down_cooldown_s` (anti-death-
    spiral). KEEP.
-5. **Promote** — the §9.4 path. 6. **Hold.**
+6. **Promote** — the §9.4 path, bounded by §9.2 lockout. 7. **Hold.**
 
-Demotes rate-limited by `down_cooldown_s` (**0.2 s**), never waiting on dwell.
-EWMA α = **0.3** (RSSI/loss, RE-DERIVE), slope α = 0.5.
+Ordinary demotes are rate-limited by `down_cooldown_s` (**0.2 s**), never
+waiting on promote dwell. EWMA α = **0.3** (RSSI/loss, observability and RSSI
+control), slope α = 0.5. Loss classification consumes the fresh raw 100 ms
+window and its `uniq` denominator; the EWMA alone MUST NOT classify a spike as
+persistent.
+
+Every automatic demote is bounded by the resolved safe floor
+`max(min_profile, floor_profile)` (§9.8), which can be MCS0, MCS1, MCS2, or
+another authored profile. "Fail-safe to MCS0" is valid only for a mode whose
+resolved floor is actually MCS0.
+
+**Transition-reason registry** (stats and §3.15):
+`0 NONE/HOLD · 1 BOOT · 2 LOSS_EMERGENCY · 3 LOSS_PERSISTENT ·
+4 REPORT_TIMEOUT · 5 RSSI_FLOOR · 6 RSSI_FADE · 7 BACKPRESSURE ·
+8 PROMOTE · 9 REPIN · 10 ENVIRONMENT_RESET`.
 
 **Pass 109 boundary:** producer health read from frame-SHM (§15.4) is
 observability-only. `full_drops` and `throttle_permille` do not feed this
@@ -1214,14 +1283,50 @@ cascade, call `set_pressure`, or alter MCS, bitrate, FEC, FPS, pins, freezes, or
 flap state. A later operator ruling must define cadence and precedence before
 either field becomes selector evidence.
 
-### 9.2 Max-probability fallback rung (Minstrel-derived, lightweight)
-Maintain **one** success-EWMA per rung, fed by `loss_postdiv_prearq`. The
-**max-probability rung** = highest recent delivery probability; under multi-rung
-stress the cascade demotes **toward it**, not blind `min−1`. Reject all Minstrel
-A-MPDU/aggregation/sampling machinery (no MAC-ACK referent under injection). Age
-unvisited-rung EWMAs toward a **physics prior** (lower MCS ⇒ higher delivery
-probability) so staleness degrades to the safe ordering, not an arbitrary pick.
-One EWMA per rung is the entire new state footprint.
+### 9.2 Per-rung loss lockout (Minstrel-inspired, no probing)
+
+Each ladder rung carries three small fields: a saturating strike count, a
+monotonic `blocked_until`, and a latched bit. A loss-driven demote charges only
+the **vacated rung where the evidence was observed**:
+
+- with the default `rung_lockout_latch_count=4`, strikes 1–3 block that rung
+  for `rung_lockout_s` (**30 s**) and strike 4 sets a latched lockout;
+- a configured latch count changes that boundary, but never the semantics:
+  every lower strike is timed and reaching the count latches;
+- timed expiry re-opens the rung but retains its strike count;
+- a rung already locked is never double-charged by the same continuous event;
+- RSSI, stale-report, pressure, repin, and CSA transitions do not add strikes.
+
+The lowest active/latched locked rung forms an **upward ceiling**. RSSI promote
+and backpressure escape may climb only to the rung immediately below it; they
+MUST NOT skip over a locked rung to try a higher one. Skipping would be an
+active probe, still deferred by §9.4. Multiple rungs can be locked
+simultaneously.
+
+An acute-loss demote charges the current rung once and moves to the resolved
+safe floor. Persistent loss charges the current rung once and moves exactly
+one rung down. The resolved safe floor itself is never locked: there is no
+verified lower operating point to select, so a loss event at the floor remains
+visible but cannot manufacture an impossible ceiling.
+
+**Environmental reset.** A successful change of the actual RF
+`(center_mhz,bw)` tuple, an accepted reporter source/session change, or process
+restart clears all strikes/lockouts and channel-conditioned loss/RSSI/fade/flap
+history. A same-channel mode or profile-range change does not. A channel change
+preserves the active profile/bitrate, configuration envelope, anti-replay
+state, and active CSA freeze; normal selection resumes after the freeze.
+Switching away and later back is a fresh environment, not a persistent
+per-channel database.
+
+An explicit `min==max` pin or range re-pin retains operator precedence. If it
+requires a locked rung, the selector obeys the pin and exposes
+`lockout_conflict`; it does not silently violate the mode's verified floor or
+the operator's choice. Lockout never initiates CSA: a latched warning recommends
+a channel change, and the operator decides.
+
+Pass 110 retires §9.2's former max-probability multi-rung target. Its physics
+prior made the lowest rung the usual winner, so ordinary threshold loss could
+jump directly to the floor—the failure mode this split exists to remove.
 
 ### 9.3 Profile table (pre-authored operating points)
 Static table shared both ends; the air carries only the `u8 active_profile` index
@@ -1254,7 +1359,8 @@ injection model has no such side stream, so that mechanism is **dropped for v0**
 
 - **v0 — RSSI-margin promote:** promote when `rssi ≥ next_rung_floor +
   rssi_floor_hyst_db` (**6 dB**) AND no RSSI guard active AND flap-freeze clear AND
-  `promote_dwell_s` (**0.5 s**) elapsed. Self-contained, no probe.
+  the §9.2 ceiling permits the next rung AND `promote_dwell_s` (**0.5 s**)
+  elapsed. Self-contained, no probe.
 - **`next_rung_floor` provenance (Pass-6 ruling):** per-rung RSSI floors are
   **node-local policy**, NOT part of the hashed §9.3 wire table — they encode
   this receiver's antenna/LNA reality, and adding them to the table would break
@@ -1273,7 +1379,9 @@ MCS and bitrate never move together:
 - **Promote — bitrate LAGS:** raise MCS first, hold bitrate `mcs_up_grace_s`
   (**0.25 s**), then raise it.
 - **Settle:** `mcs_settle_s` (**5.0 s**, RE-DERIVE — no-FEC loss is spikier)
-  suppresses further loss-loop reaction so a transition isn't read as a fade.
+  suppresses legacy EWMA reaction. Pass 110's confidence-qualified emergency
+  event and five-window persistent score bypass settle: the classifier itself
+  supplies the evidence that one transition artifact cannot.
 - **The "budget" (Pass-6 ruling — derived, not configured):** each rung's
   bitrate target is computed, all-integer, from the profile itself:
   `HT20 PHY rate(mcs, gi) × airtime_budget_permille/1000 ×
@@ -1282,6 +1390,23 @@ MCS and bitrate never move together:
   20 MHz, long GI): `{6500, 13000, 19500, 26000, 39000, 52000, 58500, 65000}`
   for MCS0–7; short GI = ×10/9. No separate per-rung bitrate field exists —
   the table's airtime fraction IS the bitrate policy.
+- **Empirical airtime ceiling (Pass 111):** the PHY expression is a starting
+  model, not proof that the complete encode → frame-SHM → FEC → quiet-gap →
+  injection path sustains that rate. A rung is clean only when a steady
+  full-cadence source holds `shm_throttle_permille == 1000`, the frame-SHM ring
+  stays at its one-frame idle occupancy, and producer `shm_full_drops` does not
+  advance. Any throttle excursion is an overload verdict even if the short
+  sample records no full drop. The seed HT20/100-fps table was calibrated on
+  hardware at 5805 MHz: existing derived rates already below 95% of the highest
+  clean point are retained; oversubscribed rungs use the greatest integer
+  `airtime_budget_permille` whose derived rate is no more than 95% of that clean
+  point. This yields airtime permille
+  `{600,600,600,600,510,463,438,418}` and unclamped derived kbps
+  `{2829,5754,10303,13769,18025,21839,23249,24658}` for MCS0–7. These are fleet
+  seeds, not universal RF truth: re-measure after a channel width, driver,
+  framing/FEC, pacer, camera cadence, or hardware-class change. Ordinary
+  channel interference belongs to §9.1/§9.2; it must not be baked into this
+  local service-boundary calibration.
 - **`fec_overhead_frac` MUST be non-zero on any rung whose streams run
   `fec_scheme: rlc256` (Pass 95).** The term above is the only place parity
   airtime is debited, and §14.1 adds `r` repair symbols *on top of* the video
@@ -1387,6 +1512,17 @@ bitrate, riding the same §9.5 transition moments:
   §17 RE-DERIVE. `venc.frame_caps=false` disables cap writes while keeping
   bitrate authority.
 
+**Coupled apply order (Pass 112).** When both a bitrate target and frame caps
+are pending, the actuator MUST apply `maxIBytes`/`maxPBytes` first and bitrate
+last. This ordering is safe in both directions: a demotion tightens the burst
+ceiling before lowering bitrate, while a promotion only loosens the ceiling
+under the old lower bitrate before raising the target. The final bitrate write
+is load-bearing on SigmaStar: applying RC parameters for the frame caps after a
+bitrate write can leave CBR persistently underfilling even though the configured
+bitrate, SHM throttle, and commanded cap values all report correctly. This rule
+also applies when §15.5 re-asserts the full tuple after a venc restart. A
+standalone bitrate or cap change still writes only the changed field.
+
 The doc-level actuator model (commanded / effective / pending): venc applies
 a 2xx `/set` synchronously, so **commanded = applied** at HTTP success; the
 encoder *output* settles over ~0.5–0.75 s. §15.3 exposes the commanded
@@ -1402,6 +1538,10 @@ from steady state without a second wire field.
   `flap_freeze_window_s` (**10 s**) pins the rung below for `flap_freeze_s`
   (**10 s**). Flap is *worse* without FEC (each flap = a visible glitch) → this is
   more valuable here, not less.
+- **Relationship to §9.2:** soft reentry and hard flap-freeze remain
+  short-horizon, cause-agnostic dampers. Rung lockout is independent,
+  loss-specific, and normally dominates their timing for a bad rung. A
+  non-loss demote never charges the lockout.
 - **`min==max` pin:** freezes adaptation at the pinned rung (bench /
   known-bad-link). A runtime re-pin (§15.5 `POST /api/v1/link/profile`) **snaps**
   the operating point to that rung immediately, in either direction — it is a
@@ -1431,7 +1571,7 @@ neighbouring rung. `{"max": 255}` unpins by saturating above the highest present
 same struct, operators author these as MCS-bearing ids, and an id survives a
 table reordering that an index does not.
 
-### 9.8 Fail-safe on lost feedback
+### 9.8 Fail-safe floors and lost feedback
 TX runs a `report_epoch` watchdog. No fresh, monotonic-forward epoch within
 `report_timeout_ms` (**~500 ms**) ⇒ **fail toward degradation**: hold, then step
 toward a safe floor profile. **Never fail optimistic** — a high MCS held on a lost
@@ -1472,6 +1612,13 @@ co-designed floor, so below it is no longer "more robust" — it is a bpp violat
 **Still "never fail optimistic":** the fail-safe only ever *degrades* on lost
 feedback and never promotes; it now degrades to the mode's verified floor instead
 of past it.
+
+This watchdog is **feedback-loss fail-safe**, distinct from §9.1
+`LOSS_EMERGENCY`: report silence descends one rung per `failsafe_step_s` after
+the hold and records `REPORT_TIMEOUT`, while a fresh confidence-qualified acute
+loss report demotes directly to the same resolved floor. Watchdog/RSSI demotes
+do not charge rung strikes because they do not prove that the vacated rung
+itself is persistently unsuitable.
 
 **The §9.7 `min==max` pin follows from this rule, not as a special case.** A pin's
 band floor *is* the pin (`min == max`), so `max(min_profile, floor_profile)` never
@@ -2737,7 +2884,10 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   ],
   "policy": {
     "report_hz": 10, "report_timeout_ms": 500,
-    "select": { "demote_milli": 20, "rssi_floor_dbm": -85,
+    "select": { "demote_milli": 45, "emergency_loss_milli": 200,
+                "loss_min_uniq": 32, "loss_persist_score": 5,
+                "rung_lockout_s": 30, "rung_lockout_latch_count": 4,
+                "rssi_floor_dbm": -85,
                 "rssi_fade_db_per_s": 10, "rssi_fade_arm_dbm": -65,
                 "promote_rssi_hyst_db": 6, "promote_dwell_s": 0.5,
                 "mcs_settle_s": 5.0, "down_cooldown_s": 0.2,
@@ -2959,7 +3109,16 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
   "link": { "target_originator": 9, "target_session": 183726,
     "profile": 4, "mcs": 4, "tx_power_qdb": 1800,
     "report_epoch": 1822, "report_age_ms": 40,
-    "state": "HOLD", "flap_freeze": false, "csa_state": "IDLE",
+    "state": "HOLD", "transition_reason": "LOSS_PERSISTENT",
+    "loss_window_milli": 12, "loss_ewma_milli": 18, "loss_uniq": 214,
+    "loss_score": 0, "safe_floor_profile": 0,
+    "selector_state_valid": true, "selector_state_age_ms": 0,
+    "lockout_active": true, "lockout_latched": false,
+    "lockout_profile": 5, "lockout_ceiling_profile": 4,
+    "lockout_remaining_ms": 23800, "lockout_strikes": 1,
+    "lockout_active_mask": 32, "lockout_latched_mask": 0,
+    "lockout_conflict": false,
+    "flap_freeze": false, "csa_state": "IDLE",
     "channel": 5805,
     "venc_bitrate_kbps": 14000, "venc_max_i_bytes": 70000,
     "venc_max_p_bytes": 19444, "venc_pushes": 6, "venc_failures": 0,
@@ -2983,6 +3142,14 @@ bitrate and frame caps (0 = never pushed), cumulative pushes/failures, and
 (the doc-model "pending transition"; commanded = applied at HTTP 2xx since
 venc's `/live/set` — and the `/set` fallback — is synchronous). Zero/false on
 nodes without `venc.enabled`.
+
+The selector/loss/lockout fields are authoritative on the craft TX and mirrored
+from fresh §3.15 state on an RX. `selector_state_valid=false` means no compatible
+summary has arrived within 1.5 s; consumers MUST suppress lockout UI rather than
+retain a stale warning. `lockout_profile=255` is the numeric no-lockout sentinel
+when `lockout_active=false`. `lockout_ceiling_profile` is the operator-facing
+limit; masks remain ladder-index diagnostics. A latched lockout has
+`lockout_remaining_ms=0` and stays active until an environmental reset.
 
 The `cmd_*` / `vcmd_*` / `arq_rx_enabled` link fields are the §11.7 command
 surface, emitted on every node with role-neutral defaults: `cmd_arq`,
@@ -3628,6 +3795,9 @@ local-ingress polling interval.
 | knob | meaning | how measured |
 |---|---|---|
 | `demote_milli` | reactive-demote on delivered loss | raise until decode errors clear at target range |
+| `emergency_loss_milli` / `loss_min_uniq` | one-window acute fail-safe threshold and confidence floor | synthetic single-window sweep, then hardware burst loss; no emergency on under-filled reports |
+| `loss_persist_score` | moderate-loss evidence required before one-rung demote | sustained/recurrent loss shapes at 10 Hz; one spike must decay without a lockout |
+| `rung_lockout_s` / `rung_lockout_latch_count` | bad-rung retry interval and permanent-within-environment strike count | shortened-timer unit/bench sweep, then 30 s device run and fourth-strike latch |
 | dwell ceiling | §6.2-3 backstop | cross-adapter delivery-jitter histogram |
 | retransmit airtime frac | resend cap vs downlink | raise until live-video jitter appears |
 | deadline budget (per class) | glass-to-glass minus pipeline | measured pipeline delay |

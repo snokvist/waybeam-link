@@ -82,6 +82,7 @@ int main() {
     auto r2 = h.reporter.build(h.engine, 240);
     CHECK_EQ_U(r2.size(), 1);
     CHECK(r2[0].loss_postdiv_prearq > 0);  // the window saw the loss
+    CHECK_EQ_U(r2[0].uniq, 3);  // two delivered + one declared lost
     // Next window is clean again: the loss must NOT stick (windowed, not
     // lifetime).
     h.feed(0, 6, 300, -50);
@@ -91,8 +92,9 @@ int main() {
     CHECK_EQ_U(r3[0].loss_postdiv_prearq, 0);
     CHECK_EQ_U(r3[0].report_epoch, 4);  // 4th emitting build
 
-    // uniq/diversity are cumulative gauges (§3.5).
-    CHECK(r3[0].uniq >= 5);
+    // Pass 110: uniq is the same interval denominator as the loss fraction;
+    // diversity remains the cumulative decorrelation gauge.
+    CHECK_EQ_U(r3[0].uniq, 2);
     CHECK(r3[0].diversity >= 2);
 
     // §7.3 Pass 79: reports are emitted for RTP streams only — a latched

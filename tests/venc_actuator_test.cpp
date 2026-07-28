@@ -120,6 +120,25 @@ int main() {
         CHECK_EQ_U(act.failures(), 0);
     }
 
+    // §9.6 Pass 112: coupled updates apply caps first and bitrate last.
+    // SigmaStar's cap apply perturbs RC state, so the reverse order can leave
+    // CBR persistently underfilling even though both writes return 2xx.
+    {
+        ScriptedVenc venc({200, 200});
+        VencActuator act(cfg_for(venc.port()));
+        act.set_bitrate(2829);
+        act.set_max_frame_size(21761, 4096);
+        pump(act, 1000);
+        CHECK_EQ_U(act.commanded_bitrate_kbps(), 2829);
+        CHECK_EQ_U(act.commanded_max_i_bytes(), 21761);
+        CHECK_EQ_U(act.commanded_max_p_bytes(), 4096);
+        const auto& p = venc.paths();
+        CHECK_EQ_U(p.size(), 2);
+        CHECK(p[0] ==
+              "/api/v1/live/set?video0.maxIBytes=21761&video0.maxPBytes=4096");
+        CHECK(p[1] == "/api/v1/live/set?video0.bitrate=2829");
+    }
+
     // A pre-live venc: 404 + successful /set re-send latches the fallback
     // (no lost actuation); later pushes skip the volatile attempt until the
     // 10-min re-probe, which heals when /live/set starts answering.

@@ -27,7 +27,11 @@ Profile example_profile(uint8_t id) {
     p.mcs = id;
     p.gi = id < 2 ? GuardInterval::kLong : GuardInterval::kShort;
     p.tx_power_level = kPower[id];
-    p.airtime_budget_permille = 600;  // 0.60
+    // Pass 111: retain the conservative lower rungs and cap MCS4-7 at 95% of
+    // their measured clean local-service boundary.
+    static constexpr uint16_t kAirtimeBudget[] = {600, 600, 600, 600,
+                                                  510, 463, 438, 418};
+    p.airtime_budget_permille = kAirtimeBudget[id];
     p.fec_scheme = FecScheme::kNone;
     // Pass 95: graduated parity budget, monotonically non-increasing with rung
     // (r = ceil(k*rate) inflates as k falls, and k falls with the rung). Must
@@ -47,7 +51,7 @@ Profile example_profile(uint8_t id) {
 // Pinned golden hash of the example table. Every vendored copy of the codec
 // (e.g. Waybeam-android :wifi) must reproduce this value for this table;
 // recompute only on a deliberate §3.6 canonical-form revision.
-constexpr uint8_t kGoldenExampleHash = 0xD1;  // Pass 95 fec_overhead_permille (was 0x41)
+constexpr uint8_t kGoldenExampleHash = 0xBF;  // Pass 111 calibrated airtime ceilings
 
 ProfileTable example_table() {
     ProfileTable t;
@@ -75,6 +79,10 @@ int main() {
     CHECK_EQ_U(canon[4], 4);
     CHECK_EQ_U(canon[5], 0x02);
     CHECK_EQ_U(canon[6], 0x58);
+    // MCS4 airtime bytes: profile 4 begins at 1 + 4*27; bytes 4-5 inside it
+    // are 0x01FE = 510 (Pass 111).
+    CHECK_EQ_U(canon[1 + 4 * kCanonicalProfileSize + 4], 0x01);
+    CHECK_EQ_U(canon[1 + 4 * kCanonicalProfileSize + 5], 0xFE);
 
     // Golden hash for the example table — pinned so every vendored copy of
     // the codec must reproduce it. (Recompute only on a deliberate §3.6 rev.)

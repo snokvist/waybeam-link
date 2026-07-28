@@ -1,6 +1,6 @@
 {
   "_mode": "High latency / Medium range (docs/venc-mode-matrix.md §16.3)",
-  "_derivation": "bpp = kbps/(fps*pixels). Floor rung 1 (5754 kbps) -> 0.0925 bpp; top rung 4 (21223 kbps) -> 0.341 bpp. Encode size is the largest on the ladder clearing the 0.04 bpp floor at rung 1. Rung bitrates are §9.5 derived from the Pass 95 table (table_version 0xD1), not estimated.",
+  "_derivation": "bpp = kbps/(fps*pixels). Floor rung 1 (5754 kbps) -> 0.0925 bpp; top rung 4 (18025 kbps) -> 0.290 bpp. Encode size is the largest on the ladder clearing the 0.04 bpp floor at rung 1. Rung bitrates are §9.5 derived from the Pass 111 table (table_version 0xBF), not estimated.",
   "_apply": "venc fields go to waybeam_venc (sensor.mode and video0.size are restart_required, so this is a pre-flight choice); link fields are merged into /etc/waybeam-link/craft.json. Restart venc (S95waybeam) then the link (S96waybeam-link), then re-scout + quickconnect — a craft restart leaves CSA silently dead otherwise (B9).",
   "venc": {
     "sensor": {

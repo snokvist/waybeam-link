@@ -122,6 +122,20 @@ StatsSnapshot sample_snapshot() {
     s.link.report_epoch = 1822;
     s.link.report_age_ms = 40;
     s.link.state = "HOLD";
+    s.link.transition_reason = "LOSS_PERSISTENT";
+    s.link.loss_window_milli = 48;
+    s.link.loss_ewma_milli = 36;
+    s.link.loss_uniq = 100;
+    s.link.loss_score = 5;
+    s.link.safe_floor_profile = 1;
+    s.link.selector_state_valid = true;
+    s.link.selector_state_age_ms = 75;
+    s.link.lockout_active = true;
+    s.link.lockout_profile = 5;
+    s.link.lockout_ceiling_profile = 4;
+    s.link.lockout_remaining_ms = 29925;
+    s.link.lockout_strikes = 2;
+    s.link.lockout_active_mask = 32;
     s.link.flap_freeze = false;
     s.link.csa_state = "IDLE";
     s.link.channel_mhz = 5805;
@@ -221,7 +235,16 @@ const char* kGolden =
     "\"unicast_sent\":0,\"unicast_fallback\":0},"
     "\"link\":{\"target_originator\":9,\"target_session\":183726,"
     "\"profile\":4,\"mcs\":4,\"tx_power_qdb\":1800,\"report_epoch\":1822,"
-    "\"report_age_ms\":40,\"state\":\"HOLD\",\"flap_freeze\":false,"
+    "\"report_age_ms\":40,\"state\":\"HOLD\","
+    "\"transition_reason\":\"LOSS_PERSISTENT\","
+    "\"loss_window_milli\":48,\"loss_ewma_milli\":36,\"loss_uniq\":100,"
+    "\"loss_score\":5,\"safe_floor_profile\":1,"
+    "\"selector_state_valid\":true,\"selector_state_age_ms\":75,"
+    "\"lockout_active\":true,\"lockout_latched\":false,"
+    "\"lockout_profile\":5,\"lockout_ceiling_profile\":4,"
+    "\"lockout_remaining_ms\":29925,\"lockout_strikes\":2,"
+    "\"lockout_active_mask\":32,\"lockout_latched_mask\":0,"
+    "\"lockout_conflict\":false,\"flap_freeze\":false,"
     "\"csa_state\":\"IDLE\",\"channel\":5805,\"venc_bitrate_kbps\":14000,"
     "\"venc_max_i_bytes\":70000,\"venc_max_p_bytes\":19444,"
     "\"venc_pushes\":6,\"venc_failures\":0,\"venc_settling\":false,"
@@ -284,7 +307,7 @@ int main() {
         StatsEmitter emitter(/*to_stdout=*/false, &*out.value);
         emitter.emit(sample_snapshot());
 
-        uint8_t buf[4096];
+        uint8_t buf[8192];
         long n = 0;
         for (int tries = 0; tries < 100 && n <= 0; ++tries) {
             n = in.value->recv_one(buf, sizeof(buf));
