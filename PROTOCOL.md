@@ -1512,6 +1512,17 @@ bitrate, riding the same §9.5 transition moments:
   §17 RE-DERIVE. `venc.frame_caps=false` disables cap writes while keeping
   bitrate authority.
 
+**Coupled apply order (Pass 112).** When both a bitrate target and frame caps
+are pending, the actuator MUST apply `maxIBytes`/`maxPBytes` first and bitrate
+last. This ordering is safe in both directions: a demotion tightens the burst
+ceiling before lowering bitrate, while a promotion only loosens the ceiling
+under the old lower bitrate before raising the target. The final bitrate write
+is load-bearing on SigmaStar: applying RC parameters for the frame caps after a
+bitrate write can leave CBR persistently underfilling even though the configured
+bitrate, SHM throttle, and commanded cap values all report correctly. This rule
+also applies when §15.5 re-asserts the full tuple after a venc restart. A
+standalone bitrate or cap change still writes only the changed field.
+
 The doc-level actuator model (commanded / effective / pending): venc applies
 a 2xx `/set` synchronously, so **commanded = applied** at HTTP success; the
 encoder *output* settles over ~0.5–0.75 s. §15.3 exposes the commanded

@@ -4092,3 +4092,42 @@ channel loss remains Pass 110 selector evidence.
 
 Changing the four airtime values changes the §3.6 table hash and requires a
 lockstep fleet redeploy.
+
+## Pass 112 — apply frame caps before bitrate (2026-07-28)
+
+**Observed failure.** The final MCS0 mode check used the production
+`imx335-100fps-highrange` shape: 1024×576, 100 fps, `resilience=range`, profile
+0 at 2829 kbps. The frame-SHM path was healthy (`throttle_permille=1000`, no
+pressure or producer drops) and the receiver delivered without deadline loss,
+but the encoder sometimes held only 300–850 kbps. Its configured bitrate still
+reported 2829 and the link's commanded caps reported I=21761/P=4096, so neither
+the source target nor backpressure telemetry explained the underfill.
+
+Lifting the P cap to 12000/16000 bytes changed output but did not reliably
+restore the target. Disabling caps live was worse (about 93 kbps), confirming
+that generic cap removal is not a safe Star6E repair. The decisive A/B kept the
+original I=21761/P=4096 tuple and changed only write order:
+
+- bitrate then caps: persistent underfill;
+- caps then a 2828→2829 bitrate re-apply: 2898 kbps measured over 10 s,
+  994/1000 expected frames, zero unrecoverable/deadline/supersession drops.
+
+The operator simultaneously confirmed that the displayed stream used its
+target bitrate and remained stable.
+
+**Ruling.** When bitrate and caps are pending together, apply caps first and
+bitrate last. On demotion, the tighter burst ceiling lands before the lower
+target. On promotion, the looser ceiling lands while the old lower bitrate
+still binds, then bitrate rises. The same order governs the full-tuple
+re-assert after a venc restart. This preserves write-on-change for independent
+updates and changes no wire field, table hash, or TX opportunity.
+
+**GOP boundary.** The same run separated recovery deadline from serialization
+cadence. With `resilience=off`, 45 fps and a 2 s GOP, roughly one deadline miss
+per GOP tracked 45–54 kB IDRs; the profile-0 80 ms I-class recovery deadline is
+not an 80 ms exclusive air slot. The shipped MCS0-capable modes use
+`resilience=range` (GDR), where an 85 s MCS0/100 fps soak delivered 8540 frames
+with zero deadline or supersession drops. MCS0 remains eligible for that
+authored GDR mode. Periodic-GOP safety must not be inferred from `maxIBytes`;
+Star6E was observed emitting complete Annex-B access units above the configured
+I ceiling, so that backend behavior remains separate venc work.
