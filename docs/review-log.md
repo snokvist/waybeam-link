@@ -4131,3 +4131,21 @@ with zero deadline or supersession drops. MCS0 remains eligible for that
 authored GDR mode. Periodic-GOP safety must not be inferred from `maxIBytes`;
 Star6E was observed emitting complete Annex-B access units above the configured
 I ceiling, so that backend behavior remains separate venc work.
+
+**Post-implementation verification.** The Pass 112 SSC338Q binary
+(`md5 8d55ef4add3c0744e0288f8a2157858b`) was deployed on the same craft. A
+real profile-0 → profile-2 promotion applied I=59440/P=10731 before the 10303
+kbps target and delivered 10258.5 kbps over 15 s. The reverse profile-2 →
+profile-0 demotion applied I=21761/P=4096 before the 2829 kbps target and
+delivered 2801.3 kbps over 15 s. Both windows had zero unrecoverable,
+deadline, or supersession drops, no new producer drop after attach, SHM fill
+0%, pressure false, and `throttle_permille=1000`; the actuator reported zero
+failures. A preceding 30 s profile-0 soak delivered 2996 frames at 2785.9
+kbps with the same zero-drop result.
+
+All ten shipped mode files were also audited: every one explicitly selects
+`resilience:"range"`, including all modes whose `min_profile` is 0. No catalog
+change is required to keep periodic GOP IDRs out of the authored MCS0 path.
+
+Host verification: full ASan+UBSan build and 50/50 `ctest --preset dev`.
+Target verification: clean SSC338Q configure/build with the OpenIPC toolchain.
