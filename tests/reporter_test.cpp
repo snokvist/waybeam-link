@@ -82,6 +82,7 @@ int main() {
     auto r2 = h.reporter.build(h.engine, 240);
     CHECK_EQ_U(r2.size(), 1);
     CHECK(r2[0].loss_postdiv_prearq > 0);  // the window saw the loss
+    CHECK_EQ_U(r2[0].uniq, 3);  // two delivered + one declared lost
     // Next window is clean again: the loss must NOT stick (windowed, not
     // lifetime).
     h.feed(0, 6, 300, -50);

@@ -3210,9 +3210,9 @@ int run_tx(const Loaded& l) {
                 const SelectorState state = tx.selector_state(slot_ms);
                 uint8_t sf[kSelectorStateSize];
                 if (encode_selector_state(state, sf, sizeof(sf)) ==
-                        sizeof(sf) &&
-                    air.value->inject(sf, sizeof(sf)) == sizeof(sf)) {
-                    selector_state_cadence.note_sent(slot_ms);
+                    sizeof(sf)) {
+                    (void)selector_state_cadence.note_submitted(
+                        air.value->inject(sf, sizeof(sf)), slot_ms);
                 }
             }
         }

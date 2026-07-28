@@ -66,7 +66,7 @@ std::vector<LinkReport> Reporter::build(const RxEngine& engine,
             denom == 0 ? static_cast<uint16_t>(0)
                        : static_cast<uint16_t>(d_lost * 1000 / denom);
         r.uniq = static_cast<uint32_t>(
-            std::min<uint64_t>(d_uniq, 0xFFFFFFFFull));
+            std::min<uint64_t>(denom, 0xFFFFFFFFull));
         r.diversity = static_cast<uint32_t>(s.counters.diversity);
         r.adapters = live;
         r.probe_per = kNoProbe;  // §9.4: no probe machinery in v0
