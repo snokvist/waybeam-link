@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -14,8 +15,14 @@
 #include <libusb.h>
 
 #include "BfReportDetect.h"
+#include "DeviceSession.h"
 #include "HopSchedule.h"
+#include "hopset/HopsetEvents.h"
+#include "hopset/HopsetFollower.h"
+#include "hopset/HopsetPolicy.h"
+#include "hopset/HopsetWire.h"
 #include "LaCapture.h"
+#include "RadiotapBuilder.h"
 #include "LinkHealth.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
@@ -82,10 +89,140 @@ static std::atomic<uint64_t> g_hop_marker_slot{0};
 static std::atomic<uint32_t> g_hop_epoch{0};
 static std::atomic<long long> g_hop_last_retune_us{0};
 static std::atomic<bool> g_hop_decode_pending{false};
+/* Adaptive hopset (DEVOURER_HOP_ADAPTIVE=1): the RX is a HopsetFollower.
+ * packetProcessor (RX thread) feeds it decoded v2 markers + authenticated
+ * control frames; the lockstep loop (main thread) ticks it and asks the
+ * AdaptiveScheduleView for the slot channel — one mutex covers the machine
+ * and the view. */
+static std::mutex g_hopset_mu;
+static std::unique_ptr<devourer::hopset::HopsetKeys> g_hopset_keys;
+static std::unique_ptr<devourer::hopset::HopsetFollower> g_hopset_fol;
+static std::unique_ptr<devourer::hopset::AdaptiveScheduleView> g_hopset_view;
+static std::atomic<uint64_t> g_hopset_now_slot{0};
+/* Receiver-driven exclusion (DEVOURER_HOP_POLICY=1): the policy scores every
+ * closed dwell and proposes mask changes; proposals leave over the air on
+ * this same claimed handle (one bring-up, RX loop + occasional control TX),
+ * which is the reserved low-rate feedback opportunity. */
+static std::unique_ptr<devourer::hopset::HopsetPolicy> g_hopset_policy;
+static IRtlDevice *g_hopset_dev = nullptr;
+static bool g_hopset_verbose_events = false;
+/* Per-dwell frame accounting, written lock-free from the RX worker and read
+ * by the hop loop when the slot closes. */
+static std::atomic<uint64_t> g_slot_acc_slot{UINT64_MAX};
+static std::atomic<uint32_t> g_slot_acc_frames{0}, g_slot_acc_crc{0};
+static std::atomic<int> g_slot_acc_rssi{0}, g_slot_acc_snr{0},
+    g_slot_acc_evm{0};
+static std::atomic<uint32_t> g_slot_dead_us{0};
 static long long steady_us() {
   return std::chrono::duration_cast<std::chrono::microseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
+}
+
+/* Which schedule round an absolute slot falls in, under the state the view
+ * currently holds (round length is the active-channel count). */
+static uint64_t hopset_round_of(
+    const devourer::hopset::AdaptiveScheduleView &v, uint64_t slot,
+    size_t n_base) {
+  const auto &st = v.state();
+  const size_t k =
+      st.generation == 0 ? n_base : devourer::hopset::popcount64(st.active_mask);
+  return k && slot >= st.activate_slot ? (slot - st.activate_slot) / k : 0;
+}
+
+/* Air one authenticated control frame: robust 6M radiotap + a broadcast
+ * probe-request header (canonical SA) + the HopsetWire bytes. The caller's
+ * payload stream is never touched — control rides its own MPDU. */
+/* Fault-injection lever: with the uplink muted this side still decodes and
+ * follows everything, it simply cannot answer. That is a genuine one-way
+ * outage — the shape the transmitter's failsafe exists for — and it cannot be
+ * produced by merely disabling the policy, because a receiver with nothing to
+ * propose still announces itself. */
+static bool g_hopset_mute = false;
+
+static void hopset_send(const devourer::hopset::HopsetMsg &m) {
+  if (!g_hopset_dev || !g_hopset_keys || g_hopset_mute)
+    return;
+  static const uint8_t sa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+  std::vector<uint8_t> frame =
+      devourer::build_stream_radiotap(devourer::parse_tx_mode_str("6M"));
+  uint8_t hdr[24] = {0x40, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
+                     0xff};
+  std::memcpy(hdr + 10, sa, 6);
+  std::memcpy(hdr + 16, sa, 6);
+  hdr[22] = 0x90;
+  hdr[23] = 0x00;
+  frame.insert(frame.end(), hdr, hdr + 24);
+  const auto body = devourer::hopset::hopset_encode(m, *g_hopset_keys);
+  frame.insert(frame.end(), body.begin(), body.end());
+  g_hopset_dev->send_packet(frame.data(), frame.size());
+  /* Every control frame this side airs is a slot it is NOT listening in — the
+   * receiver is half duplex like everything else. One event per FRAME is what
+   * makes that cost measurable rather than assumed: proposals retry and the
+   * status beacon repeats, so counting decisions would undercount airtime. */
+  devourer::Ev(*g_ev, "hopset.ctl")
+      .f("v", 1)
+      .f("role", "rx")
+      .f("type", m.type == devourer::hopset::HT_PROPOSAL   ? "proposal"
+                 : m.type == devourer::hopset::HT_COMMIT   ? "commit"
+                                                           : "status")
+      .f("gen", (unsigned long long)m.generation)
+      .f("bytes", (unsigned long long)frame.size())
+      .f("slot", (unsigned long long)g_hopset_now_slot.load());
+}
+
+/* Frames the follower wants aired, queued under g_hopset_mu and sent after it
+ * is released. send_packet is synchronous on the USB3 generations, so sending
+ * inside the lock would stall the RX worker — which needs the same lock for
+ * every decoded marker — for the whole bus round trip. That starves the
+ * lockstep loop precisely when it can least afford it. */
+static std::vector<devourer::hopset::HopsetMsg> g_hopset_outbox;
+
+/* Execute the follower's actions (caller holds g_hopset_mu). */
+static void hopset_route(
+    const std::vector<devourer::hopset::HopsetAction> &acts) {
+  for (const auto &a : acts) {
+    if (a.kind == devourer::hopset::HopsetAction::Activate) {
+      g_hopset_view->set_state(a.state);
+      if (g_hopset_policy)
+        g_hopset_policy->on_activation(a.state.active_mask,
+                                       g_hopset_now_slot.load());
+    } else if (a.kind == devourer::hopset::HopsetAction::SendControl) {
+      g_hopset_outbox.push_back(a.msg);
+    } else if (a.kind == devourer::hopset::HopsetAction::Event) {
+      /* a rejected or timed-out proposal releases the policy's latch — the
+       * pure machine only reports the outcome, the host owns the handshake */
+      if (g_hopset_policy &&
+          a.event == devourer::hopset::HopsetEvent::Reject)
+        g_hopset_policy->clear_outstanding(hopset_round_of(
+            *g_hopset_view, g_hopset_now_slot.load(),
+            g_hopset_view->base_size()));
+      devourer::hopset::emit_action(*g_ev, a, "rx", g_hopset_now_slot.load());
+    }
+  }
+}
+
+/* Air whatever the follower queued. Must be called with g_hopset_mu NOT
+ * held. */
+static void hopset_flush() {
+  std::vector<devourer::hopset::HopsetMsg> pending;
+  {
+    std::lock_guard<std::mutex> lk(g_hopset_mu);
+    pending.swap(g_hopset_outbox);
+  }
+  for (const auto &m : pending)
+    hopset_send(m);
+}
+
+
+/* Best-effort current absolute slot from the fitted marker anchor. */
+static uint64_t hopset_slot_now() {
+  const long long anchor = g_hop_anchor_us.load();
+  const long long now = steady_us();
+  if (anchor > 0 && now > anchor && g_hop_slot_us)
+    return static_cast<uint64_t>((now - anchor) /
+                                 static_cast<long long>(g_hop_slot_us));
+  return g_hop_marker_slot.load();
 }
 
 /* Process-start reference for the init.timing events (see src/InitTimer.h).
@@ -484,6 +621,42 @@ static bool agg_sa_match(const Packet &packet) {
          std::memcmp(packet.Data.data() + 10, g_agg_sa, 6) == 0;
 }
 
+/* DEVOURER_RX_SINK_SPIN_US: busy-spin this many microseconds at the top of
+ * every delivered frame in packetProcessor, modelling the inline consumer cost
+ * (in PixelPilot: wfb-ng FEC+AES+UDP, ~20-50 us/frame) that in the async ring
+ * delays the URB resubmit. packetProcessor runs once per aggregated MPDU, so
+ * this is a per-subframe cost — the same granularity the real consumer pays.
+ * 0/unset = off. */
+static const long g_rx_sink_spin_us = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_SPIN_US");
+  return e ? std::strtol(e, nullptr, 0) : 0L;
+}();
+
+/* DEVOURER_RX_SINK_STALL_MS / _EVERY: a PERIODIC consumer stall — every _EVERY
+ * frames, busy-spin _MS milliseconds — modelling an occasional hiccup (GC pause,
+ * scheduler preemption of the consumer) on a consumer that otherwise keeps up.
+ * This is the regime where moving the consumer off the pump thread (spsc-fat)
+ * matters: async/reorder consume on the pump, so a stall drains the ring and
+ * drops frames; spsc-fat keeps the pump re-arming and queues the backlog. */
+static const long g_rx_stall_ms = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_STALL_MS");
+  return e ? std::strtol(e, nullptr, 0) : 0L;
+}();
+static const long g_rx_stall_every = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_STALL_EVERY");
+  return e ? std::strtol(e, nullptr, 0) : 100L;
+}();
+
+/* DEVOURER_RX_PCTR: emit a lean rx.seq event (payload counter + tsfl + crc +
+ * aggregate markers) per SA-matched frame — the ground-truth per-frame delivery
+ * sequence for the RX-ring loss study. Deliberately lean (no body hex) so the
+ * emit cost does not itself perturb the pump thread it measures. The counter is
+ * the u32 txdemo stamps at the QoS-Data body start (MPDU offset 26). */
+static const bool g_rx_pctr = []() {
+  const char *e = std::getenv("DEVOURER_RX_PCTR");
+  return e != nullptr && std::strcmp(e, "0") != 0;
+}();
+
 /* Emit the frame-free NHM power histogram (IRtlDevice::GetRxEnergy fills it) as
  * a distinct rx.nhm event so it never disturbs the rx.energy
  * fields its consumers key on. `peak` = the fullest bucket (0 = quiet
@@ -548,6 +721,26 @@ static void packetProcessor(const Packet &packet) {
 
   ++g_rx_count;
 
+  /* Model the inline consumer cost that delays URB resubmit in the async ring
+   * (DEVOURER_RX_SINK_SPIN_US). This runs on the libusb pump thread — the very
+   * thread whose resubmit latency the rx.ring telemetry measures — so it
+   * reproduces the burst-starvation mechanism on a host with headroom to
+   * spare. */
+  if (g_rx_sink_spin_us > 0) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::microseconds(g_rx_sink_spin_us);
+    while (std::chrono::steady_clock::now() < deadline) {
+      /* busy-wait: a sleep would yield the pump thread and defeat the model */
+    }
+  }
+  if (g_rx_stall_ms > 0 && (g_rx_count % g_rx_stall_every) == 0) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(g_rx_stall_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+      /* periodic consumer hiccup */
+    }
+  }
+
   /* HE Trigger frame (802.11 control, FC=0x24) — aired in a legacy PPDU, so
    * even an 11ac witness captures the bytes. Decode + surface it as rx.trigger
    * so a monitor validates what an AX AP's F2P / UL_FIXINFO scheduler airs
@@ -571,12 +764,37 @@ static void packetProcessor(const Packet &packet) {
     return; /* a trigger is not a data/mgmt frame — nothing else to match */
   }
 
+  /* The sync marker's only integrity is the frame FCS — it is a plain vendor
+   * IE, unlike the authenticated control frames. So a frame the chip flagged
+   * must never reach it: under DEVOURER_RX_KEEP_CORRUPTED (which the salvage
+   * path needs, and which the FPV link runs with) a corrupted marker whose
+   * seed fingerprint happened to survive was decoded as a genuine generation
+   * change, and the follower dropped lockstep on it. */
   if (g_hop_schedule && packet.Data.size() >= 16 &&
+      !packet.RxAtrib.crc_err && !packet.RxAtrib.icv_err &&
       std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
+    /* Adaptive mode rides the v2 marker (v1 layout + generation/mask_fp);
+     * fixed mode stays on v1 — each decoder rejects the other version. */
     devourer::HopSyncMarker m;
-    if (devourer::HopSyncMarker::decode(packet.Data.data(), packet.Data.size(),
-                                        m) &&
-        m.fingerprint == g_hop_schedule->fingerprint() &&
+    bool have = false;
+    uint32_t mk_gen = 0, mk_maskfp = 0;
+    if (g_hopset_fol) {
+      devourer::hopset::HopSyncMarkerV2 m2;
+      if (devourer::hopset::HopSyncMarkerV2::decode(packet.Data.data(),
+                                                    packet.Data.size(), m2)) {
+        m.fingerprint = m2.fingerprint;
+        m.epoch = m2.epoch;
+        m.slot = m2.slot;
+        m.phase_us = m2.phase_us;
+        mk_gen = m2.generation;
+        mk_maskfp = m2.mask_fp;
+        have = true;
+      }
+    } else {
+      have = devourer::HopSyncMarker::decode(packet.Data.data(),
+                                             packet.Data.size(), m);
+    }
+    if (have && m.fingerprint == g_hop_schedule->fingerprint() &&
         m.phase_us < g_hop_slot_us) {
       const long long now = steady_us();
       const long long observed = now - static_cast<long long>(m.phase_us) -
@@ -596,12 +814,71 @@ static void packetProcessor(const Packet &packet) {
       g_hop_last_marker_us.store(now);
       g_hop_marker_slot.store(m.slot);
       g_hop_epoch.store(m.epoch);
-      if (g_hop_decode_pending.exchange(false))
+      if (g_hop_decode_pending.exchange(false)) {
+        const long long dead = now - g_hop_last_retune_us.load();
+        g_slot_dead_us.store(
+            static_cast<uint32_t>(dead > 0 && dead < 1000000 ? dead : 0));
         devourer::Ev(*g_ev, "hop.rx")
             .f("state", "decode")
             .f("slot", (unsigned long long)m.slot)
-            .f("dead_us", now - g_hop_last_retune_us.load());
+            .f("dead_us", dead);
+      }
+      if (g_hopset_fol) {
+        /* missed-transition tripwire: does the advertised (generation,
+         * mask fingerprint) match a state we hold (current or pending)? */
+        std::lock_guard<std::mutex> lk(g_hopset_mu);
+        const auto &cs = g_hopset_fol->state();
+        bool matches =
+            mk_gen == cs.generation &&
+            mk_maskfp == devourer::hopset::mask_fp(
+                             *g_hopset_keys, cs.generation, cs.active_mask);
+        if (!matches && g_hopset_fol->has_pending()) {
+          const auto &ps = g_hopset_fol->pending();
+          matches =
+              mk_gen == ps.generation &&
+              mk_maskfp == devourer::hopset::mask_fp(
+                               *g_hopset_keys, ps.generation, ps.active_mask);
+        }
+        hopset_route(g_hopset_fol->on_marker(mk_gen, matches, m.slot));
+      }
+      hopset_flush();
     }
+  }
+
+  /* Authenticated hopset control frames (probe-req header + HopsetWire bytes,
+   * canonical SA): commits and the authority's status beacon — the follower's
+   * adoption/recovery inputs. */
+  if (g_hopset_fol && packet.Data.size() > 24 + 16 &&
+      packet.Data[0] == 0x40 &&
+      std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
+    devourer::hopset::HopsetMsg hm;
+    if (devourer::hopset::hopset_decode(packet.Data.data() + 24,
+                                        packet.Data.size() - 24,
+                                        *g_hopset_keys, 0, hm) ==
+        devourer::hopset::HopsetReason::None) {
+      const uint64_t slot = hopset_slot_now();
+      std::lock_guard<std::mutex> lk(g_hopset_mu);
+      g_hopset_now_slot.store(slot);
+      if (hm.type == devourer::hopset::HT_COMMIT)
+        hopset_route(g_hopset_fol->on_commit(hm, slot));
+      else if (hm.type == devourer::hopset::HT_STATUS)
+        hopset_route(g_hopset_fol->on_status(hm, slot));
+    }
+    hopset_flush();
+  }
+
+  /* Per-dwell delivery accounting for the exclusion policy: count this
+   * transmitter's frames (and the corrupt ones, when the RX surfaces them)
+   * against the slot the hop loop is currently parked on. Lock-free — the
+   * loop drains it when the dwell closes. */
+  if (g_hopset_policy && packet.Data.size() >= 16 &&
+      std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
+    g_slot_acc_frames.fetch_add(1);
+    if (packet.RxAtrib.crc_err || packet.RxAtrib.icv_err)
+      g_slot_acc_crc.fetch_add(1);
+    g_slot_acc_rssi.fetch_add(packet.RxAtrib.rssi[0]);
+    g_slot_acc_snr.fetch_add(packet.RxAtrib.snr[0]);
+    g_slot_acc_evm.fetch_add(packet.RxAtrib.evm[0]);
   }
 
   /* Feed the rolling per-frame RSSI/SNR/EVM aggregate for DEVOURER_RX_ENERGY_MS
@@ -614,6 +891,32 @@ static void packetProcessor(const Packet &packet) {
                 packet.RxAtrib.evm[0], packet.RxAtrib.ldpc != 0,
                 packet.RxAtrib.stbc != 0, packet.RxAtrib.crc_err,
                 packet.RxAtrib.icv_err);
+  }
+
+  /* rx.seq — the ground-truth per-frame delivery sequence for the RX-ring loss
+   * study. pctr is the u32 txdemo stamps at the QoS-Data body start (MPDU
+   * offset 26); tsfl is the chip RX timestamp; paggr/ppdu are the aggregate
+   * structure the host-vs-RF loss discriminator keys on (a host FIFO overflow
+   * drops a whole aggregate; an RF loss drops individual frames). The SA gate
+   * follows DEVOURER_RX_AGG_SA when set, else the canonical txdemo SA. */
+  if (g_rx_pctr && packet.Data.size() >= 30) {
+    const bool seq_sa =
+        g_agg_sa_env
+            ? agg_sa_match(packet)
+            : (packet.Data.size() >= 16 &&
+               std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0);
+    if (seq_sa) {
+      uint32_t pctr;
+      std::memcpy(&pctr, packet.Data.data() + 26, 4);
+      devourer::Ev(*g_ev, "rx.seq")
+          .t() /* host monotonic ms — correlates a pctr gap with an rx.ring dip */
+          .f("pctr", (unsigned long long)pctr)
+          .f("tsfl", packet.RxAtrib.tsfl)
+          .f("seq", packet.RxAtrib.seq_num)
+          .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+          .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
+          .f("ppdu", packet.RxAtrib.ppdu_cnt);
+    }
   }
 
   if (g_rx_count == 1) {
@@ -857,9 +1160,16 @@ static void packetProcessor(const Packet &packet) {
   }
 }
 
-int main() {
+int main(int argc, char **argv) {
   libusb_context *ctx;
   int rc;
+
+  /* Termux/Android: argv[1] = numeric USB fd handed to us by the app that holds
+   * the USB-host permission (libusb can't enumerate /dev/bus/usb under an
+   * untrusted_app SELinux domain, so we wrap the pre-opened fd instead). Mirrors
+   * the TX demo. fd==0 -> normal VID/PID open on Linux/macOS. */
+  const long termux_fd = (argc >= 2) ? std::strtol(argv[1], nullptr, 0) : 0;
+  const bool termux_mode = (termux_fd > 0);
 
   auto logger = std::make_shared<Logger>();
   apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
@@ -869,6 +1179,12 @@ int main() {
   /* SIGINT/SIGTERM -> clean shutdown (Stop() below). Without this the harness's
    * `timeout` SIGTERM killed us mid-RX, leaving the chip's USB core hung. */
   install_devourer_signal_handlers();
+
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Declared before every thread below, so the threads are
+   * joined before the adapter is released. Each early return from here on
+   * unwinds whatever has been adopted so far. */
+  devourer::DeviceSession session{logger};
 
 #if defined(DEVOURER_HAVE_PCIE)
   /* DEVOURER_PCIE_BDF=0000:01:00.0 — drive a PCIe adapter (RTL8821CE) through
@@ -890,16 +1206,20 @@ int main() {
         .f("stage", "demo.open_device")
         .f("ms", ms_since_start());
     WiFiDriver wifi_driver(logger);
-    auto dev = wifi_driver.CreateRtlDevicePcie(std::move(transport),
-                                               devourer_config_from_env());
-    if (!dev) {
+    auto owned_device = wifi_driver.CreateRtlDevicePcie(
+        std::move(transport), devourer_config_from_env());
+    if (!owned_device) {
       logger->error("No driver for this PCIe chip in this build — exiting");
       return 1;
     }
+    /* The session owns the device from here: it is what guarantees the device
+     * (and its in-flight TX) dies before the transport behind it. */
+    session.adopt_device(std::move(owned_device));
+    IRtlDevice *const dev = session.device();
     devourer::Ev(*g_ev, "init.timing")
         .f("stage", "demo.create_device")
         .f("ms", ms_since_start());
-    devourer::emit_adapter_caps(*g_ev, dev.get());
+    devourer::emit_adapter_caps(*g_ev, dev);
     int pch = 36;
     if (const char *ch_env = std::getenv("DEVOURER_CHANNEL"))
       pch = std::atoi(ch_env);
@@ -925,7 +1245,7 @@ int main() {
         logger->error("DEVOURER_LA_CAPTURE: bad spec '{}'", g_la_spec);
         return 1;
       }
-      auto runner = la_runner_for(dev.get());
+      auto runner = la_runner_for(dev);
       if (!runner) {
         logger->error("DEVOURER_LA_CAPTURE: no LA support wired for this "
                       "generation yet");
@@ -964,10 +1284,20 @@ int main() {
   }
 #endif /* DEVOURER_HAVE_PCIE */
 
+  if (termux_mode) {
+    logger->info("Termux/Android mode: wrapping USB fd {}", termux_fd);
+    /* Both options are global (ctx==NULL) and must precede libusb_init: skip the
+     * device-discovery scan entirely, and take the weak-authority path that
+     * tolerates the app-sandboxed usbfs fd. */
+    libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+    libusb_set_option(NULL, LIBUSB_OPTION_WEAK_AUTHORITY);
+  }
+
   rc = libusb_init(&ctx);
   if (rc < 0) {
     return rc;
   }
+  session.adopt_context(ctx);
 
   /* libusb log level: WARNING by default. DEBUG is opt-in via
    * DEVOURER_USB_DEBUG=1 — it emits ~7 MB per 15s run (has filled /tmp and
@@ -980,13 +1310,22 @@ int main() {
                         ? LIBUSB_LOG_LEVEL_DEBUG
                         : LIBUSB_LOG_LEVEL_WARNING);
 
-  /* DEVOURER_PID / DEVOURER_VID / DEVOURER_USB_BUS / DEVOURER_USB_PORT device
-   * selection — shared with the other multi-adapter demos (usb_select.h). */
-  libusb_device_handle *dev_handle = open_selected_usb(
-      ctx, logger, kRealtekProductIds,
-      sizeof(kRealtekProductIds) / sizeof(kRealtekProductIds[0]));
+  libusb_device_handle *dev_handle = nullptr;
+  if (termux_mode) {
+    rc = libusb_wrap_sys_device(ctx, (intptr_t)termux_fd, &dev_handle);
+    if (rc != 0 || dev_handle == nullptr) {
+      logger->error("libusb_wrap_sys_device(fd={}) failed: {} ({})", termux_fd,
+                    libusb_error_name(rc), rc);
+      return 1;
+    }
+  } else {
+    /* DEVOURER_PID / DEVOURER_VID / DEVOURER_USB_BUS / DEVOURER_USB_PORT device
+     * selection — shared with the other multi-adapter demos (usb_select.h). */
+    dev_handle = open_selected_usb(
+        ctx, logger, kRealtekProductIds,
+        sizeof(kRealtekProductIds) / sizeof(kRealtekProductIds[0]));
+  }
   if (dev_handle == NULL) {
-    libusb_exit(ctx);
     return 1;
   }
 
@@ -1003,39 +1342,47 @@ int main() {
   /* Reopen variant: recovers in place when the reset re-enumerates the device
    * (a warm Kestrel drops its firmware back to ROM on reset — the handle goes
    * stale and the dongle may pass through its ZeroCD id before returning). */
+  /* Reset skipped in termux_mode: a wrapped app-owned fd can't be re-enumerated
+   * (a USB reset would orphan the handle the device-list scan can't re-find). */
   rc = devourer::claim_interface_reset_reopen(ctx, dev_handle, logger,
-      std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
+      !termux_mode && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "demo.usb_reset")
       .f("ms", ms_since_start());
   if (rc != 0) {
     /* BUSY => another process owns the adapter; any other error => open failed.
-     * Either way, exit cleanly rather than asserting. */
-    if (dev_handle != nullptr)
-      libusb_close(dev_handle);
-    libusb_exit(ctx);
+     * Either way, exit cleanly rather than asserting. The claim failed, so
+     * nothing owns the handle yet — hand it to the session purely so the
+     * unwind closes it. */
+    session.adopt_handle(dev_handle);
     return 1;
   }
+  session.adopt_handle(dev_handle);
+  session.adopt_lock(usb_lock);
 
   WiFiDriver wifi_driver(logger);
-  auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle, ctx, usb_lock,
-                                               devourer_config_from_env());
-  if (!rtlDevice) {
+  auto owned_device = wifi_driver.CreateRtlDevice(dev_handle, ctx, usb_lock,
+                                                  devourer_config_from_env());
+  if (!owned_device) {
     /* The factory returns null when the plugged chip's generation wasn't
      * compiled in (per-chip CMake options); it already logged which. */
     logger->error("No driver for this chip in this build — exiting");
     return 1;
   }
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const rtlDevice = session.device();
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "demo.create_device")
       .f("ms", ms_since_start());
-  devourer::emit_adapter_caps(*g_ev, rtlDevice.get());
+  devourer::emit_adapter_caps(*g_ev, rtlDevice);
   /* The BB-debug-port / queue-depth / thermal research helpers are Jaguar1-only,
    * so they live on RtlJaguarDevice rather than the IRtlDevice interface. The
    * whole block compiles out when Jaguar1 support isn't built; when it is, the
    * dynamic_cast yields nullptr for a Jaguar3 device, disabling them cleanly. */
 #if defined(DEVOURER_HAVE_JAGUAR1)
-  g_rtl_device = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
+  g_rtl_device = dynamic_cast<RtlJaguarDevice *>(rtlDevice);
   std::atomic<bool> qd_emitter_stop{false};
   std::thread qd_emitter;
   if (g_qd_poll_ms > 0 && g_rtl_device != nullptr) {
@@ -1107,7 +1454,7 @@ int main() {
   if (g_rx_energy_ms > 0) {
     logger->info("DEVOURER_RX_ENERGY_MS={} — starting RX energy telemetry",
                  g_rx_energy_ms);
-    IRtlDevice *dev = rtlDevice.get();
+    IRtlDevice *dev = rtlDevice;
     energy_emitter = std::thread([&energy_emitter_stop, dev]() {
       auto nap = [&](uint32_t ms) {
         for (uint32_t s = 0; s < ms && !energy_emitter_stop.load(); s += 50)
@@ -1115,7 +1462,7 @@ int main() {
       };
       nap(g_rx_energy_ms); /* let bring-up finish before the first read */
       while (!energy_emitter_stop.load()) {
-        RxEnergy e = dev->GetRxEnergy();
+        RxEnergy e = dev->GetRxEnergy(true);
         RxAgg agg;
         {
           std::lock_guard<std::mutex> lk(g_rxagg_mu);
@@ -1309,6 +1656,84 @@ int main() {
     g_hop_schedule = std::make_unique<devourer::HopSchedule>(
         seed ? devourer::HopSchedule(devourer::HopSchedule::parse_seed(seed))
              : devourer::HopSchedule::sequential());
+    if (std::getenv("DEVOURER_HOP_ADAPTIVE")) {
+      /* Adaptive follower — needs the keyed schedule (control MAC derives
+       * from the same seed) and a <=64-channel base. */
+      if (!seed)
+        throw std::invalid_argument(
+            "DEVOURER_HOP_ADAPTIVE needs DEVOURER_HOP_SEED");
+      if (hop_rx_channels.size() > devourer::hopset::kMaxBaseChannels)
+        throw std::invalid_argument("adaptive hopset caps the base at 64");
+      g_hopset_keys = std::make_unique<devourer::hopset::HopsetKeys>(
+          devourer::hopset::HopsetKeys::derive(
+              devourer::HopSchedule::parse_seed(seed)));
+      devourer::hopset::HopsetParams hp;
+      hp.n_base = hop_rx_channels.size();
+      /* Announce ourselves only when we are a participant that would speak
+       * anyway (the policy proposes); a pure follower stays silent so every
+       * slot it owns is spent listening. */
+      if (std::getenv("DEVOURER_HOP_POLICY"))
+        hp.follower_status_slots = 64;
+      if (const char *hb = std::getenv("DEVOURER_HOP_STATUS_SLOTS"))
+        hp.follower_status_slots = std::strtoull(hb, nullptr, 0);
+      std::vector<uint32_t> chlist(hop_rx_channels.begin(),
+                                   hop_rx_channels.end());
+      hp.base_fp = devourer::hopset::hopset_fp(*g_hopset_keys, chlist.data(),
+                                               chlist.size());
+      /* Keyed recovery probes: every N rounds one data opportunity is spent
+       * on an excluded channel so it can prove it recovered. Shared config —
+       * the transmitter derives the same placement from the same seed. */
+      unsigned probe_rounds = 8;
+      if (const char *pr = std::getenv("DEVOURER_HOP_PROBE_ROUNDS"))
+        probe_rounds = static_cast<unsigned>(std::strtoul(pr, nullptr, 0));
+      /* Receiver-driven exclusion. Without it the follower still tracks
+       * commits, it just never proposes one. */
+      if (std::getenv("DEVOURER_HOP_POLICY")) {
+        devourer::hopset::HopsetPolicyConfig pc;
+        auto envu = [](const char *n, uint32_t &dst) {
+          if (const char *e = std::getenv(n))
+            dst = static_cast<uint32_t>(std::strtoul(e, nullptr, 0));
+        };
+        auto envd = [](const char *n, double &dst) {
+          if (const char *e = std::getenv(n))
+            dst = std::strtod(e, nullptr);
+        };
+        envu("DEVOURER_HOP_POLICY_MIN_ROUNDS", pc.min_obs_rounds);
+        envu("DEVOURER_HOP_POLICY_IMPAIRED_ROUNDS", pc.impaired_rounds);
+        envd("DEVOURER_HOP_POLICY_EXCLUDE_DELIVERY", pc.exclude_delivery);
+        envd("DEVOURER_HOP_POLICY_HEALTHY_DELIVERY", pc.healthy_delivery);
+        envu("DEVOURER_HOP_POLICY_MIN_ACTIVE", pc.min_active);
+        envd("DEVOURER_HOP_POLICY_RESTORE_DELIVERY", pc.restore_delivery);
+        envu("DEVOURER_HOP_POLICY_RESTORE_PROBES", pc.restore_probes);
+        if (const char *e = std::getenv("DEVOURER_HOP_POLICY_COOLDOWN_ROUNDS"))
+          pc.update_cooldown_rounds = std::strtoull(e, nullptr, 0);
+        /* the hard floor is max(3, configured) — the policy applies it, the
+         * authority enforces its own copy */
+        if (pc.min_active < 3)
+          pc.min_active = 3;
+        if (hp.min_active < pc.min_active)
+          hp.min_active = pc.min_active;
+        g_hopset_policy = std::make_unique<devourer::hopset::HopsetPolicy>(
+            pc, hop_rx_channels.size());
+        if (const char *v = std::getenv("DEVOURER_HOP_POLICY_EVENTS"))
+          g_hopset_verbose_events = std::atoi(v) >= 2;
+        logger->info("DEVOURER_HOP_POLICY — receiver-driven exclusion armed "
+                     "(min_active={}, probe every {} rounds, policy 0x{:08x})",
+                     pc.min_active, probe_rounds, pc.policy_hash());
+      }
+      g_hopset_fol = std::make_unique<devourer::hopset::HopsetFollower>(
+          hp, static_cast<uint32_t>(std::random_device{}()));
+      g_hopset_view = std::make_unique<devourer::hopset::AdaptiveScheduleView>(
+          *g_hop_schedule, *g_hopset_keys, hop_rx_channels.size());
+      g_hopset_view->set_state(g_hopset_fol->state());
+      g_hopset_view->set_probe_period(probe_rounds);
+      g_hopset_dev = rtlDevice;
+      if (std::getenv("DEVOURER_HOP_MUTE")) {
+        g_hopset_mute = true;
+        logger->warn("DEVOURER_HOP_MUTE — uplink muted: this side follows but "
+                     "never answers");
+      }
+    }
     g_hop_slot_us = static_cast<uint64_t>(hop_rx_slot_ms) * 1000;
     long acquire_ms = hop_rx_slot_ms * 2;
     if (const char *a = std::getenv("DEVOURER_HOP_ACQUIRE_MS")) {
@@ -1316,7 +1741,7 @@ int main() {
       if (acquire_ms < 1)
         acquire_ms = 1;
     }
-    IRtlDevice *dev = rtlDevice.get();
+    IRtlDevice *dev = rtlDevice;
     SelectedChannel first{static_cast<uint8_t>(hop_rx_channels[0]), ch_offset,
                           width};
     std::thread rx([dev, first, &logger]() {
@@ -1342,7 +1767,20 @@ int main() {
         .f("channel", hop_rx_channels[0]);
     while (!g_devourer_should_stop) {
       const long long now = steady_us(), last = g_hop_last_marker_us.load();
-      if (last && now - last < static_cast<long long>(3 * g_hop_slot_us)) {
+      bool hopset_recovering = false;
+      if (g_hopset_fol) {
+        /* follower heartbeat: pending activation at the slot boundary; a
+         * Recovering follower falls back to the base-hopset acquire scan
+         * below until an authenticated commit/status re-syncs it */
+        std::lock_guard<std::mutex> lk(g_hopset_mu);
+        g_hopset_now_slot.store(hopset_slot_now());
+        hopset_route(g_hopset_fol->on_tick(g_hopset_now_slot.load()));
+        hopset_recovering = g_hopset_fol->fsm() ==
+                            devourer::hopset::HopsetFollower::State::Recovering;
+      }
+      hopset_flush();
+      if (!hopset_recovering && last &&
+          now - last < static_cast<long long>(3 * g_hop_slot_us)) {
         if (!tracking) {
           tracking = true;
           devourer::Ev(*g_ev, "hop.rx")
@@ -1356,18 +1794,84 @@ int main() {
           /* Phase correction may move the fitted boundary slightly forward.
            * Never follow that jitter backwards into a slot already visited. */
           if (tuned_slot == UINT64_MAX || slot > tuned_slot) {
-            int ch = g_hop_schedule->channel(slot, hop_rx_channels);
+            /* Close out the dwell we are leaving before retuning: whether
+             * the transmitter's marker arrived is this channel's score for
+             * the round, and the frame counters refine it into a ratio. */
+            if (g_hopset_policy && tuned_slot != UINT64_MAX) {
+              const bool decoded = !g_hop_decode_pending.load();
+              const uint32_t frames = g_slot_acc_frames.exchange(0);
+              const uint32_t crc = g_slot_acc_crc.exchange(0);
+              const int rssi_sum = g_slot_acc_rssi.exchange(0);
+              const int snr_sum = g_slot_acc_snr.exchange(0);
+              const int evm_sum = g_slot_acc_evm.exchange(0);
+              std::lock_guard<std::mutex> lk(g_hopset_mu);
+              const auto closed = g_hopset_view->slot_info(tuned_slot);
+              devourer::hopset::SlotObservation o;
+              o.slot = tuned_slot;
+              o.round = hopset_round_of(*g_hopset_view, tuned_slot,
+                                        hop_rx_channels.size());
+              o.base_index = static_cast<uint32_t>(closed.base_index);
+              o.is_probe = closed.is_probe;
+              o.decoded = decoded;
+              o.frames = frames;
+              o.crc_errs = crc;
+              o.dead_us = g_slot_dead_us.exchange(0);
+              if (frames) {
+                o.rssi = rssi_sum / static_cast<int>(frames);
+                o.snr = snr_sum / static_cast<int>(frames);
+                o.evm = evm_sum / static_cast<int>(frames);
+              }
+              g_hopset_policy->ingest(o);
+              if (closed.is_probe)
+                devourer::hopset::emit_probe(
+                    *g_ev, "rx", tuned_slot, o.round, o.base_index,
+                    hop_rx_channels[closed.base_index], decoded, frames);
+              /* A round just closed: let the policy speak, and if it wants a
+               * change, send the proposal now — right after the boundary is
+               * the reserved low-rate control opportunity. */
+              const uint64_t r_now = hopset_round_of(*g_hopset_view, slot,
+                                                     hop_rx_channels.size());
+              if (r_now != o.round) {
+                auto d = g_hopset_policy->decide(r_now);
+                if (d.kind != devourer::hopset::HopsetDecision::Kind::Hold ||
+                    g_hopset_verbose_events)
+                  devourer::hopset::emit_decision(*g_ev, d, slot, r_now,
+                                                  g_hopset_verbose_events);
+                if (d.kind != devourer::hopset::HopsetDecision::Kind::Hold)
+                  hopset_route(g_hopset_fol->propose(
+                      d.proposed_mask, d.observation_count, d.reason_bitmap,
+                      static_cast<uint32_t>(std::random_device{}()), slot));
+              }
+            }
+            hopset_flush();
+            int ch;
+            bool probe = false;
+            if (g_hopset_view) {
+              std::lock_guard<std::mutex> lk(g_hopset_mu);
+              const auto si = g_hopset_view->slot_info(slot);
+              ch = hop_rx_channels[si.base_index];
+              probe = si.is_probe;
+            } else {
+              ch = g_hop_schedule->channel(slot, hop_rx_channels);
+            }
             auto t0 = steady_us();
             dev->FastRetune(static_cast<uint8_t>(ch), true);
             auto done = steady_us();
             g_hop_last_retune_us.store(done);
             g_hop_decode_pending.store(true);
+            g_slot_acc_frames.store(0);
+            g_slot_acc_crc.store(0);
+            g_slot_acc_rssi.store(0);
+            g_slot_acc_snr.store(0);
+            g_slot_acc_evm.store(0);
             tuned_slot = slot;
-            devourer::Ev(*g_ev, "hop.rx")
-                .f("state", "retune")
+            devourer::Ev ev(*g_ev, "hop.rx");
+            ev.f("state", "retune")
                 .f("slot", (unsigned long long)slot)
                 .f("channel", ch)
                 .f("retune_us", done - t0);
+            if (probe)
+              ev.f("probe", true);
           }
         }
       } else {
@@ -1395,9 +1899,7 @@ int main() {
     if (rx.joinable())
       rx.join();
     dev->Stop();
-    libusb_release_interface(dev_handle, 0);
-    libusb_close(dev_handle);
-    libusb_exit(ctx);
+    session.close();
     return 0;
   }
 
@@ -1407,7 +1909,7 @@ int main() {
   if (!g_rx_sweep.empty()) {
     logger->info("DEVOURER_RX_SWEEP: {} bins, dwell {} ms — live spectrum map",
                  g_rx_sweep.size(), g_rx_sweep_dwell_ms);
-    IRtlDevice *dev = rtlDevice.get();
+    IRtlDevice *dev = rtlDevice;
     SelectedChannel first{static_cast<uint8_t>(g_rx_sweep[0]), ch_offset, width};
     std::thread rx([dev, first, &logger]() {
       try {
@@ -1451,7 +1953,7 @@ int main() {
       for (uint32_t s = 0; s < g_rx_sweep_dwell_ms && !g_devourer_should_stop;
            s += 50)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      RxEnergy e = dev->GetRxEnergy();
+      RxEnergy e = dev->GetRxEnergy(true);
       RxAgg agg;
       {
         std::lock_guard<std::mutex> lk(g_rxagg_mu);
@@ -1496,11 +1998,7 @@ int main() {
     if (rx.joinable())
       rx.join();
     dev->Stop();
-    rc = libusb_release_interface(dev_handle, 0);
-    if (rc != 0)
-      logger->info("libusb_release_interface rc={}", rc);
-    libusb_close(dev_handle);
-    libusb_exit(ctx);
+    session.close();
     return 0;
   }
 
@@ -1517,7 +2015,7 @@ int main() {
       logger->error("DEVOURER_LA_CAPTURE: bad spec '{}'", g_la_spec);
       return 1;
     }
-    auto runner = la_runner_for(rtlDevice.get());
+    auto runner = la_runner_for(rtlDevice);
     if (!runner) {
       logger->error("DEVOURER_LA_CAPTURE: no LA support wired for this "
                     "generation yet");
@@ -1562,12 +2060,10 @@ int main() {
    * the adapter re-enumerates instead of hanging its USB core. */
   rtlDevice->Stop();
 
-  rc = libusb_release_interface(dev_handle, 0);
-  assert(rc == 0);
-
-  libusb_close(dev_handle);
-
-  libusb_exit(ctx);
+  /* Device, then interface, handle and context (DeviceSession.h). Explicit
+   * only because the process has nothing left to do here — the destructor
+   * does exactly the same on every other exit path. */
+  session.close();
 
   return 0;
 }

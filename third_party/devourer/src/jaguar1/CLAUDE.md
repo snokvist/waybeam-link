@@ -37,6 +37,43 @@ methods), `RadioManagementModule` (channel/BW/TX power, up to 4 RF paths),
   8814A decodes LDPC but reports no per-frame flag (`ldpc_rx_flag=0`,
   `RxAtrib.ldpc` reads 0).
 
+## Teardown
+
+`RtlJaguarDevice::Stop()` and the destructor run `HalModule::rtw_hal_deinit()`:
+halt the MAC engines (`REG_CR`, `REG_RCR`), then the die's card-disable power
+sequence via the existing `HalPwrSeqCmdParsing` (`rtl8812_card_disable_flow` /
+`rtl8814A_` / `rtl8821A_`, dispatched exactly like `InitPowerOn` dispatches the
+enable flows). Both call sites are best-effort — a chip already off the bus
+makes the writes fail, which is fine on a teardown path.
+
+This is not tidiness: left in ACT the chip keeps its RF front end live
+indefinitely after the owning process exits, and an autonomously-airing beacon
+keeps transmitting. Justified on those grounds alone — **no performance claim is
+attached**, and the delivery recovery an earlier revision cited came from a
+ground station too marginal to support it (`docs/warm-tx-degradation.md`).
+`PowerOff()` clears `_macPwrCtrlOn` so a re-init on the same `HalModule` still
+runs the power-on sequence; `tuning.teardown_power_down=0` disables it, which a
+post-mortem needs since a powered-down chip reads back the CARDEMU fill.
+
+## TX power
+
+Every per-rate index funnels through one composer, `ComputeTxPowerIndex(path,
+rate, ntx)` — flat override, else the caller per-rate table, else the EFUSE
+walk — then `+ txpwr_offset_steps_`, clamped to the 6-bit rail. The register
+write is per rate on both ports (the 8812A/8821A `0xc20..0xc4c` fanout, the
+8814A packed `0x1998`), so a caller table (`SetTxPowerRateDiffs`) needs no
+write-path change and is sticky by construction: every channel-set re-runs the
+same walk.
+
+Its **anchor** is `GetTxPowerIndexBase(path, MGN_MCS7, 1SS, bw, ch)` — the
+EFUSE index of the section reference rate at the current channel and
+bandwidth, cached once per apply pass (4 lookups on a 4-path 8814A instead of
+one per rate). Resolution is the family's 0.5 dB step, so an odd qdB rounds.
+
+`FastSetTxPowerOffsetQdb` drives the BB-swing TxScale words, a global scaler
+DOWNSTREAM of the per-rate TXAGC table: it composes with a caller table but is
+rate-independent, so neither can implement the other.
+
 ## Per-packet TX power
 
 - **8814A**: the 3-bit descriptor `TXPWR_OFSET` LUT at the 8822B position

@@ -3,10 +3,11 @@
 devourer talks to a Wi-Fi radio at a very low level — subcarriers, constellations,
 gain control, the transmit and receive chains. If you're new to that machinery,
 the terms in the other docs (per-tone SNR, EVM, CCA, AGC, occupied bandwidth) can
-feel like jargon. This page is a picture book: ten short animations, each
+feel like jargon. This page is a picture book: fifteen short animations, each
 built in the DEVOURER live-monitor style, that show what the machinery actually
-looks like — from a single subcarrier all the way to a hopping, diversity-combined,
-bandwidth-hopping link. Read it top to bottom and the rest of the docs will click.
+looks like — from a single subcarrier all the way to a hopping,
+diversity-combined, multi-user link. Read it top to bottom and the rest of the
+docs will click.
 
 Everything here is grounded in what devourer measures — the constellation noise
 follows the textbook AWGN model, the spectrum levels are from a real USRP B210
@@ -56,6 +57,25 @@ through an **inverse FFT** that turns all those subcarriers into one time-domain
 OFDM symbol, given a **cyclic-prefix** guard (the tail copied to the front, so
 echoes off walls don't smear the next symbol), and finally up-converted and
 radiated. That last waveform is exactly what the spectrum analyzer below shows.
+
+![LDPC coding gain](img/ldpc_waterfall.gif)
+
+The second stage of that line — the **code** — is worth a picture of its own,
+because it is the one you get to choose per frame. 802.11 offers two: the older
+convolutional code (BCC) and **LDPC**. Sweep the transmit power down until the
+link falls over and plot delivery against power, and both curves drop off a
+cliff — that shape is why it's called a **waterfall**. The stronger code's cliff
+simply sits further left: at the 10 %-delivery crossing, about 3 dB further at
+MCS7/20 MHz on the bench. Three decibels of nothing but arithmetic — no extra
+power, no antenna, no lower rate.
+
+The catch is the other end. Coding only pays if the receiver decodes it, and on
+this hardware that is not uniform: the RTL8821A misses VHT-LDPC (HT is fine),
+and the RTL8814A decodes both but exposes no per-frame indicator, so you can't
+*see* it in the receive telemetry even though it worked. That table is
+bench-derived and deliberately not the vendor driver's advertised policy, which
+claims none of the 11ac parts can decode LDPC at all — a claim the 8812A
+disproves on air. Ask the device (`GetAdapterCaps`) rather than the datasheet.
 
 ## 4. On the air — a bare tone vs a modulated carrier
 
@@ -119,6 +139,55 @@ one channel then only clips the occasional hop that lands on it — every other 
 escapes. Done per-packet (`DEVOURER_HOP_*`), hopping doubles as a
 frequency-diversity interleaver for the outer FEC: losses are spread thin across
 frequencies instead of wiping out a run of packets on one.
+
+![Adaptive hopset — the jammed channel stops being scheduled](img/hopset_adapt.gif)
+
+Bounding the damage is not the same as avoiding it. Most interference is
+*furniture* — a fixed AP, a neighbouring video link, a microwave, a radar. It
+isn't trying to win; it's just sitting there, and it will still be sitting there
+in an hour. A hop set that keeps visiting its channel keeps paying for it, every
+round, forever. The **receiver** is the endpoint that has to decode, so its
+per-channel delivery is the authoritative evidence (energy
+readings only *classify* an impairment; a quiet channel with a dead link and a
+noisy one that still delivers are opposite decisions). It **proposes**; it never
+acts. The transmitter owns the schedule, and answers with an authenticated commit
+naming a **future** slot, repeated until that slot arrives — so both ends swap
+schedules together and a lost frame can't split them apart. Because the hop order
+is **keyed**, dropping a channel re-keys the permutation rather than leaving a
+readable gap in a pattern. And exclusion is not a ratchet: keyed **probes** go
+back and look — the round, the position and the channel all derived from the key,
+so recovery isn't itself a periodic target — and a channel that recovered comes
+back. Measured against a narrowband interferer parked on one member of a
+four-channel set: delivery 0.72 → 0.83, with the channel restored on its own once
+the interferer stopped.
+
+![Anti-herding — the schedule refuses to shrink past its floor](img/hopset_herding.gif)
+
+Now take the furniture away and put something *adversarial* there instead, and
+the picture above stops being the story — the one that replaces it ends with the
+link still bleeding, and that ending is the point. Two measurements say why.
+Against a **blind** parked jammer, a keyed hop order and a plainly sequential one
+deliver identically — secrecy buys nothing against something that isn't looking;
+it only earns its keep against an adversary that *reacts*. And against a jammer that
+**follows** — moving onto a still-active channel after every exclusion — the link
+does not get better. It gets *walked down*. And notice that every one of those
+exclusion requests is individually correct: the receiver really is losing that
+channel, and dropping it really would help, for about a dozen dwells. Granted
+without limit, that reasonable-looking sequence ends with the link parked on one
+frequency of the attacker's choosing, which is exactly where an adversary wants
+it. So an adaptive exclusion loop is itself an attack surface, and the shipped
+one is built timid on purpose: one channel per update, a mandatory gap between
+updates (a *refused* proposal spends it too, so bouncing proposals can't flood
+the control path), nothing acted on when the whole band degrades together, and a
+hard **floor** on how many channels stay active. When that floor is reached the
+next proposal is refused, however well-evidenced it is, and the link spends the
+rest of the flight bleeding across the channels it has left rather than being
+herded onto one. On the four-channel bench set the floor binds after a single
+exclusion, and that's the measured result: exclusion depth one, active set held
+at three, no collapse. It is a pass rather than a win, and the difference matters
+— the advantage here isn't that the link learns, it's that it learns without
+becoming teachable by an adversary. The protocol, the policy and the numbers are
+in [`fhss.md`](fhss.md).
 
 ## 9. Trading robustness for throughput in time — bandwidth TDMA
 
@@ -202,6 +271,73 @@ per-chip mechanics, and bench tables are in
 [`time-distribution.md`](time-distribution.md); the closed discipline loop is a
 runnable tool (`tests/pcie_ptp_beacon.cpp`).
 
+## 11. Many stations in one channel — OFDMA and the Trigger frame
+
+![802.11ax Trigger frames — built, aired, read back](img/he_ofdma_trigger.gif)
+
+Everything so far has assumed one transmitter at a time: stations contend, one
+wins, it gets the whole channel for the length of its frame. 802.11ax breaks
+that assumption in the frequency direction. The comb from section 1 is carved
+into **resource units** — 26, 52, 106 or 242 tones — and several stations can
+transmit *simultaneously*, each inside its own slice of the same 20 MHz.
+
+Sharing like that only works if somebody assigns the slices, so 11ax moves
+uplink scheduling into the MAC. The AP sends a **Trigger** frame whose per-user
+fields each name a station, the resource unit it may use, an MCS, and a target
+receive power. A compliant station that finds its identifier in a Trigger
+answers exactly one **SIFS** later — about 16 µs — inside the granted slice.
+Nobody contends, nobody backs off, and the uplink jitter that plagues ordinary
+Wi-Fi disappears. This is the standard's road to cellular-style scheduled
+access, and it's why a Wi-Fi 6 radio is interesting for a coordinated link and
+not just a faster one.
+
+The animation is what that machinery looks like from this side of it. You write
+a grant table — who, which resource unit, what MCS, how many spatial streams,
+what receive power to aim for — devourer builds the Trigger frame around it and
+transmits it on the Kestrel generation, and an independent monitor pulls every
+one of those parameters back off the air unchanged. Command in, frame out,
+parameters verified: that round trip is what makes the adapter useful as an
+**instrument** for 11ax work. You can put an arbitrary, exactly-specified
+Trigger on the air and watch what other equipment does with it — which is
+otherwise gear you rent.
+
+One boundary comes with it. The *reply* is hardware-timed: the receiving MAC
+has to arm a receive window at trigger + SIFS, and it only does that for a
+Trigger its own firmware scheduled. Frames injected from the host ride the
+ordinary transmit path, so a station gets a perfectly valid Trigger and no
+timing cue to answer it — and the shipped client firmware accepts the
+scheduling commands (trigger scheduler, TWT, sounding) without executing them.
+Generating the schedule is available; owning it needs firmware these parts
+don't carry. [`he-trigger-ul.md`](he-trigger-ul.md) has the API and the full
+account of which paths close.
+
+## 12. Reaching further — extended range and dual-carrier modulation
+
+![HE extended range — the range ladder](img/he_extended_range.gif)
+
+The same generation has a corner built for the opposite goal. **HE ER SU** is a
+20 MHz-only format that stacks three tricks, each worth roughly 3 dB and each
+paid for in rate.
+
+The first is acquisition. Before a receiver can decode anything it has to
+*find* the frame, and at long range the preamble fails before the payload does;
+ER SU repeats the signalling field so the preamble survives a weaker signal.
+The second is concentration: the 106-tone variant puts the same transmit power
+into half as many tones, so every tone that is still lit gets twice as much.
+The third is **DCM** — dual-carrier modulation — which sends every symbol twice
+on two tones far enough apart that a narrow fade can't take both copies. Notice
+which kind of gain each one is: the first two help you acquire, the last one
+helps you decode, and only the last one costs payload rate.
+
+Fully stacked at the lowest rate, the ladder buys roughly 8–10 dB over a plain
+HE frame. Compare that with the **narrowband** modes of section 9: re-clocking
+to 5 or 10 MHz is a bigger and more predictable win, about 3 dB per halving of
+the noise bandwidth, but it is *private* — both ends have to be running
+devourer. ER SU is smaller and weighted toward acquisition, and it
+interoperates with any 802.11ax device. Devourer at both ends? Use narrowband.
+Standard gear at the far end? This is the lever you have.
+[`he-extended-range.md`](he-extended-range.md) has the on-air matrix.
+
 ---
 
 ## Where to go next
@@ -220,6 +356,10 @@ With the machinery in hand, the rest reads straight:
 - [`adaptive-link-building-blocks.md`](adaptive-link-building-blocks.md) — the
   levers, sensors, and probes that turn all of the above into an adaptive link,
   and [`adaptive-link.md`](adaptive-link.md) — the objective they serve.
+- [`he-trigger-ul.md`](he-trigger-ul.md) and
+  [`he-extended-range.md`](he-extended-range.md) — the 802.11ax half from
+  sections 11 and 12: Trigger frames and the scheduling surface, the ER SU /
+  DCM range ladder and its measured on-air matrix.
 - [`narrowband.md`](narrowband.md) — the 5/10 MHz re-clock machinery, the cheap
   bandwidth switch, and the burst-TDMA example from section 9.
 - [`time-distribution.md`](time-distribution.md) — the full time-sync machinery

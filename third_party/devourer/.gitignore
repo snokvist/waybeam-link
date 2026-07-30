@@ -1,5 +1,7 @@
 compile_commands.json
 build
+# Out-of-tree build dirs: build-asan (DEVOURER_SANITIZE), per-config trees.
+build-*/
 .cache
 __pycache__/
 *.pyc
@@ -13,3 +15,7 @@ tests/chipid_probe
 # Local lab notes / Claude Code state (never commit)
 INVENTORY.md
 .claude/
+
+# Bench-local UHD radio selection (tests/uhd_select.py) — serials are
+# per-bench, never committed.
+tests/.uhd_args

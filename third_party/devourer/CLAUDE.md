@@ -1,10 +1,17 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with
-code in this repository. Per-generation deep facts (registers, descriptors,
-per-chip mechanisms) live in `src/{jaguar1,jaguar2,jaguar3,kestrel}/CLAUDE.md`,
-auto-loaded when working in that subtree — add new per-generation facts there,
-cross-cutting facts here.
+code in this repository. It holds **cross-cutting** facts only. Deep subtree
+facts live in nested `CLAUDE.md` files, auto-loaded when working there:
+`src/{jaguar1,jaguar2,jaguar3,kestrel}/` for per-generation registers,
+descriptors and per-chip mechanisms; `src/hopset/` for keyed FHSS and the
+adaptive hopset; `src/chanmig/` for channel migration. Add new facts to the
+narrowest file that covers them.
+
+Two standing rules for this file: never duplicate what a header already
+doc-comments (point at `src/DeviceConfig.h`, `src/TxPower.h`,
+`src/AdapterCaps.h` instead), and never quote a favourable measurement without
+its adversarial counterpart in the same breath.
 
 ## What this is
 
@@ -41,13 +48,11 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   the 0x00FC byte is not a chip-id on AX silicon. Blacklist rtw89 when
   testing: a kernel driver pre-initializing the chip masks the cold-boot
   path. On-air-validated: monitor RX (both dies, 2.4/5 GHz), TX injection
-  (legacy/HT/VHT/HE + HE ER SU/DCM extended range —
-  `docs/he-extended-range.md`), 5/10/20/40/80 MHz on both dies + 160 MHz on
-  the 8852C (the B die has no 160 MHz); 6 GHz TX tops out at 80 MHz (the
-  6G+160 TX-enable path is un-ported). TX power is a fixed BB dBm
-  (`DEVOURER_TX_PWR`, whole dBm on this family). The capstone is 11ax
-  trigger-based UL + TWT (issue #236); the 8852A-family (RTL8832AU) is
-  deliberately excluded. 8852C behavioural quirks: `docs/8852c-quirks.md`.
+  (legacy/HT/VHT/HE + HE ER SU/DCM — `docs/he-extended-range.md`),
+  5/10/20/40/80 MHz on both dies + 160 MHz on the 8852C only; 6 GHz TX tops
+  out at 80 MHz (the 6G+160 TX-enable path is un-ported). TX power is a fixed
+  BB dBm (`DEVOURER_TX_PWR`, whole dBm here). The 8852A-family (RTL8832AU) is
+  deliberately excluded. Quirks: `docs/8852c-quirks.md`.
 
 Naming traps: **RTL8821AU is Jaguar1** (not Jaguar2, despite the Jaguar2
 RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3);
@@ -57,23 +62,20 @@ table: README **Supported hardware**.
 
 **PCIe** (`DEVOURER_PCIE=ON`, Linux-only, default OFF): the RTL8821CE — the
 PCIe sibling of the 8821CU — rides the same Jaguar2 HAL through a vfio-pci
-transport (`src/PcieTransport.{h,cpp}`): registers are BAR2 MMIO (the same
-0x0000..0xFFFF space the USB vendor-control path addresses), TX/RX are the
-88xx buffer-descriptor DMA rings (rtw88 pci.{c,h} layout; TX = the data/MGMT
-BD rings behind the unchanged `send_packet`), RX completion polled by default
-(MSI+eventfd wakeups when available). USB and PCIe are independent transports
-behind `devourer::IRtlTransport` (`src/RtlTransport.h`); the bus-neutral
-`RtlAdapter` value type the HALs hold forwards to whichever it was built
+transport (`src/PcieTransport.{h,cpp}`: BAR2 MMIO registers over the same
+0x0000..0xFFFF space the USB vendor-control path addresses, 88xx
+buffer-descriptor DMA rings for TX/RX). USB and PCIe are independent
+transports behind `devourer::IRtlTransport` (`src/RtlTransport.h`); the
+bus-neutral `RtlAdapter` the HALs hold forwards to whichever it was built
 with. The few genuinely bus-specific bring-up steps gate on `is_usb()` (PCIe
 power-seq rows, PQ map, no USB RX-agg, no DLFW 512-pad) or ride `hci_setup()`
 (pre-power TRX ring programming, no-op on USB). Factory:
 `WiFiDriver::CreateRtlDevicePcie(PcieTransport::Open(bdf, logger))` — the
 caller owns vfio like it owns libusb. Demos: `DEVOURER_PCIE_BDF=0000:01:00.0`
-on rxdemo and txdemo; `pcieprobe <bdf> [id|power|fw]` validates the layers
-bottom-up. Bind/restore: `tests/pcie_vfio_bind.sh` (driver_override, not
-new_id — the in-tree rtw88 auto-probe race). Validation: `sudo python3
-tests/pcie_rx_smoke.py` against a vfio-bound 8821CE (rig specifics: local
-`INVENTORY.md`) — ambient beacons CRC-clean on ch 6 + 36.
+on rxdemo and txdemo; `pcieprobe <bdf>` validates the layers bottom-up.
+Bind/restore: `tests/pcie_vfio_bind.sh` — driver_override, **not** new_id,
+because of the in-tree rtw88 auto-probe race. Validation: `sudo python3
+tests/pcie_rx_smoke.py` against a vfio-bound 8821CE.
 
 ## Build
 
@@ -90,18 +92,32 @@ before running `tools/extract_*.py` or the hardware-testing kernel cells.
 
 Per-chip options, all default ON: `DEVOURER_JAGUAR1`, `DEVOURER_8814` (requires
 JAGUAR1), `DEVOURER_JAGUAR2_8822B`, `DEVOURER_JAGUAR2_8821C`,
-`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`. `DEVOURER_PCIE` (default
-OFF, Linux-only, requires JAGUAR2_8821C) adds the vfio-pci transport +
-`pcieprobe`; OFF builds are byte-identical to before it existed. Turning groups off drops
-their firmware blobs + PHY tables (an 8812AU-only `rxdemo` is ~1.0 MB vs
-~2.6 MB). Configure fails on no-chip-selected or 8814-without-JAGUAR1. Each
-group exports a PUBLIC `DEVOURER_HAVE_*` define; sites referencing a dropped
-group sit behind `#if defined(DEVOURER_HAVE_*)`, and the factory returns
-`nullptr` (logs) for a chip whose support isn't built.
+`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`, `DEVOURER_KESTREL_8852B`,
+`DEVOURER_KESTREL_8852C`. `DEVOURER_PCIE` (default OFF, Linux-only, requires
+JAGUAR2_8821C) adds the vfio-pci transport + `pcieprobe`; OFF builds are
+byte-identical to before it existed. Turning groups off drops their firmware
+blobs + PHY tables (an 8812AU-only `rxdemo` is ~1.6 MB vs ~6.3 MB all-on — the
+verbatim-vendored Kestrel halbb/halrf plane dominates the difference).
+Configure fails on no-chip-selected or 8814-without-JAGUAR1. Each group
+exports a PUBLIC `DEVOURER_HAVE_*` define; sites referencing a dropped group
+sit behind `#if defined(DEVOURER_HAVE_*)`, and the factory returns `nullptr`
+(logs) for a chip whose support isn't built.
+
+`DEVOURER_SANITIZE=address|address+undefined|thread` (default off) builds the
+library, demos and selftests instrumented; the vendored halbb/halrf C is
+exempted from UBSan (Realtek's sources are full of unaligned loads and signed
+shifts — noise we would never act on). MSVC has AddressSanitizer only and
+rejects the other values rather than silently degrading. The demos are worth
+running under it on hardware, not just `ctest`: the lifetime bugs it finds
+(teardown, in-flight URBs) need a real device —
+`tests/tx_teardown_asan.sh` (max-duty TX killed mid-flight, incl. a real
+VBUS-cut wedge) and `tests/teardown_gen_sanity.sh` (every plugged generation
+init + teardown).
 
 CI (`.github/workflows/cmake-multi-platform.yml`): GCC/Clang/MSVC ×
 Ubuntu/macOS/Windows matrix, a `build-mingw` job, a `build-configs` matrix over
-each per-chip subset, and `reject-bad-configs` for the invalid option combos.
+each per-chip subset, `build-sanitizers` (ASan+UBSan `ctest`), and
+`reject-bad-configs` for the invalid option combos.
 `ctest` runs in every job (headless selftests — math guards + the
 `stream_stdin_binary` framing round-trip). Hardware testing is out-of-band.
 
@@ -181,32 +197,34 @@ knobs are runtime setters on `IRtlDevice` (`SetTxMode`, `SetTxPowerOffsetQdb`,
 `SetTxPowerIndexOverride`, `SetRxPathMask`, `SetCcaMode`, `FastRetune`, ...).
 
 **Adapter capabilities**: `IRtlDevice::GetAdapterCaps()` (`src/AdapterCaps.h`)
-returns a static aggregate of chip identity (name / generation / variant /
-transport / chip-id), TX/RX chain counts, the composed `GetTxCaps` +
-`GetTxPowerCaps`, the supported channel-width set, per-band tunable +
-characterized frequency spans, and feature flags — resolved at construction,
-thread-safe, callable pre-`Init`; the demos emit it as the `adapter.caps`
-JSONL event. The `ldpc_rx_*` flags are the bench-derived LDPC RX truth table
-(deliberately NOT the vendor `HAL_DEF_RX_LDPC` interop-advertisement policy,
-which reads all-false on Jaguar1 while the 8812A demonstrably decodes LDPC):
-every supported chip decodes HT+VHT LDPC except the 8821A (VHT-LDPC RX
-broken, HT fine) and the 8814A reports no per-frame flag. LDPC TX is
-per-packet radiotap-driven on all generations (`TxCaps.ldpc_ok`);
-bench-measured coding gain ≈ +3 dB at the 10%-delivery crossing, MCS7/20 MHz
-(`tests/ldpc_waterfall.sh`) — prefer `/LDPC` on any link whose RX side can
-decode it. `GetActiveRxPaths()` is the live companion: a best-effort
-per-chain-RSSI estimate of which antennas actually carry signal (needs an RX
-loop + traffic). The 5 GHz synthesizer tunes past the UNII channels (extended
-range ~5080–6165 MHz, chan up to 253, `freq = 5000 + 5*chan`); out-of-band
-channels tune but their TX power / per-channel constants are extrapolated
-from the nearest characterized channel (one-shot `W` diagnostic). No
-regulatory enforcement — the caller owns compliance.
+aggregates chip identity, chain counts, the composed `GetTxCaps` +
+`GetTxPowerCaps`, channel widths, per-band tunable + characterized frequency
+spans, and feature flags — resolved at construction, thread-safe, callable
+pre-`Init`; the demos emit it as the `adapter.caps` JSONL event. Every flag is
+doc-commented at its declaration, including the bench-derived (not
+vendor-advertised) `ldpc_rx_*` and `vht_2g4_ok` truth tables and the three
+per-packet-TX-power hardware shapes — read the header, not a copy of it.
 
-**Env vars are the demos' interface**: `examples/common/env_config.{h,cpp}`
-maps every library-level `DEVOURER_*` var onto `DeviceConfig`, so the test
-scripts drive everything through env. For the per-var reference, read the
-`env:` tags in `DeviceConfig.h`; demo-local vars (device selection, timing)
-are parsed in each demo's own code. The ones needed daily:
+Two facts that live only here: LDPC TX is per-packet radiotap-driven on all
+generations (`TxCaps.ldpc_ok`) with bench-measured coding gain ≈ +3 dB at the
+10%-delivery crossing, MCS7/20 MHz (`tests/ldpc_waterfall.sh`) — prefer
+`/LDPC` on any link whose RX side can decode it. And `GetActiveRxPaths()` is
+the live companion to the static caps: a best-effort per-chain-RSSI estimate
+of which antennas actually carry signal (needs an RX loop + traffic).
+
+The 5 GHz synthesizer tunes past the UNII channels (extended range
+~5080–6165 MHz, chan up to 253, `freq = 5000 + 5*chan`); out-of-band channels
+tune but their TX power / per-channel constants are extrapolated from the
+nearest characterized channel (one-shot `W` diagnostic). No regulatory
+enforcement — the caller owns compliance.
+
+**Env vars are the demos' interface**: `examples/common/env_config.{h,cpp}` is
+the authoritative mapping of every library-level `DEVOURER_*` var onto
+`DeviceConfig`, so the test scripts drive everything through env. For the
+per-var reference read the `env:` tags in `DeviceConfig.h` — do not look for a
+second copy here. Demo-local vars (device selection, timing, telemetry
+cadence) have no `DeviceConfig` field and are parsed in each demo's own code;
+those are the ones listed below.
 
 - `DEVOURER_PID=0xNNNN` / `DEVOURER_VID=0xNNNN` — restrict the device-open
   loop (default VID `0x0bda`, all Realtek PIDs). `DEVOURER_USB_BUS=N` +
@@ -216,7 +234,10 @@ are parsed in each demo's own code. The ones needed daily:
 - `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC][/ER|/ER106][/DCM]` — TX
   mode for rate-less frames (`MCS7/40/SGI`, `VHT2SS_MCS3/80/LDPC`, `1M`...).
   Unset = 6M legacy. CCK rates are 2.4 GHz-only; `1M` buys ~9 dB link budget
-  over `6M`. `/ER`, `/ER106`, `/DCM` are HE-only (Kestrel): the HE ER SU
+  over `6M`. Rate resolution never reads the band, so `VHT*` rates air on
+  2.4 GHz too — the non-standard NitroQAM/TurboQAM extension, confirmed on the
+  dies whose `AdapterCaps.vht_2g4_ok` is set, peer-decode required and the
+  256-QAM MCS8/9 points still unmeasured (`docs/vht-on-2g4.md`). `/ER`, `/ER106`, `/DCM` are HE-only (Kestrel): the HE ER SU
   extended-range PPDU + dual-carrier modulation (`docs/he-extended-range.md`).
   The library itself is radiotap-driven — a frame carrying its own rate
   radiotap overrides the mode per-packet (ER SU = radiotap-HE FORMAT=EXT_SU).
@@ -229,8 +250,20 @@ are parsed in each demo's own code. The ones needed daily:
   `0` = max duty for heating experiments).
 - `DEVOURER_USB_DEBUG=1` — libusb DEBUG log level (~7 MB / 15 s, has filled
   `/tmp` mid-capture; adds 0.5–0.8 s to init).
+- `DEVOURER_THERMAL_POLL_MS=N` — emit `thermal` events from the RF 0x42 meter.
+  `raw` is 0..63 thermal units (~1.5–2 °C each, **not** absolute °C); `delta`
+  = raw − EFUSE baseline, and a rising delta is the early TX-degradation
+  warning.
+- `DEVOURER_LINKHEALTH=1` (rxdemo, needs `DEVOURER_RX_ENERGY_MS=N`) — classify
+  the RX sensor tuple via `src/LinkHealth.h`. **EVM, not SNR, is the
+  saturation tell**: strong RSSI + poor EVM means back power OFF, which is the
+  opposite of the weak-link response (`docs/bench-testing-near-field.md`).
+- `DEVOURER_LA_CAPTURE=<trig>/<rate>M/dma0/port:0x880` (rxdemo) — one-shot
+  LA-mode IQ capture to a `DVLA` file, offline per-tone H(k) via
+  `tools/la_csi.py`. Not on the 8812A/8821A (no LA block). Packing, per-chip
+  windows, trigger semantics and wedge risks: `docs/la-capture.md`.
 
-Knob-specific facts that aren't obvious from the field docs:
+Behavioural traps the per-field docs can't carry:
 
 - `DEVOURER_TX_WITH_RX=thread` (concurrent TX+RX on one claimed handle:
   `InitWrite` once, then `StartRxLoop` on a thread) must be set **before**
@@ -246,15 +279,15 @@ Knob-specific facts that aren't obvious from the field docs:
   `tests/mrc_mobility.py`). `DEVOURER_RX_ALLPATHS=1` emits per-chain
   RSSI/SNR/EVM as a separate `rx.path` event (C/D nonzero only on the
   8814AU).
-- `DEVOURER_RX_CSI_MASK` / `DEVOURER_RX_NBI` (RX per-tone equalizer mask /
-  narrowband notch, `src/ToneMask.h`) apply at RX-loop start and revert on a
-  channel switch. Measured: inert against a *jammed* slice (that loss is
-  pre-FCS sync/AGC, upstream of the equalizer) — they target in-band spurs on
-  decodable frames (`docs/pseudo-preamble-puncturing.md`).
-- `DEVOURER_RX_KEEP_CORRUPTED=1` passes FCS/ICV-failed frames up with
-  `crc_err`/`icv_err` set — the entry point for the fused-FEC salvage layer
-  (`docs/fused-fec.md`). Opt-in: a body with a corrupt tail is the worst-case
-  input for an IP-stack consumer that didn't ask for it.
+- `DEVOURER_RX_KEEP_CORRUPTED=1` is the entry point for the fused-FEC salvage
+  layer (`docs/fused-fec.md`), and stays opt-in for a reason: a body with a
+  corrupt tail is the worst-case input for an IP-stack consumer that didn't
+  ask for it.
+- `DEVOURER_RX_CSI_MASK` / `DEVOURER_RX_NBI` apply at RX-loop start and
+  **revert on a channel switch**. Measured inert against a *jammed* slice —
+  that loss is pre-FCS sync/AGC, upstream of the equalizer. They target
+  in-band spurs on otherwise decodable frames
+  (`docs/pseudo-preamble-puncturing.md`).
 - `DEVOURER_DIS_CCA=1` (Jaguar2/3, runtime `SetCcaMode`) disables the MAC
   carrier-sense gate — **both** primary CCA (`0x520[14]`) and EDCCA (`[15]`).
   The primary-CCA bit is the one that matters: monitor injection is not
@@ -266,45 +299,36 @@ Knob-specific facts that aren't obvious from the field docs:
   `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. Does NOT apply the
   vendor BB CCA-off writes (they deafen the RX). RX-decode side is a separate
   null (`tests/dis_cca_onair.sh`).
-- `DEVOURER_LA_CAPTURE=<trig>/<rate>M/dma0/port:0x880` (rxdemo) — one-shot
-  LA-mode IQ capture into the TX packet buffer (`src/LaCapture.h`): raw
-  complex baseband to a `DVLA` file, offline per-tone H(k) via
-  `tools/la_csi.py`. 8814A/8822B/8821C/8822C/8822E (+ 8821CE PCIe); the
-  8812A/8821A have no LA block. Sample packing, per-chip windows, trigger
-  semantics, validation scripts and wedge risks: `docs/la-capture.md`.
-- `DEVOURER_THERMAL_POLL_MS=N` emits `thermal` events from the RF 0x42 meter:
-  `raw` is 0..63 thermal units (~1.5–2 °C each, **not** absolute °C), `delta`
-  = raw − EFUSE baseline; a rising delta is the early TX-degradation warning.
-- `DEVOURER_LINKHEALTH=1` (rxdemo, needs `DEVOURER_RX_ENERGY_MS=N` — the RX
-  energy-window cadence in ms) classifies the RX sensor tuple into SATURATED
-  / INTERFERENCE / WEAK / MARGINAL / HEALTHY / NO_SIGNAL
-  (`src/LinkHealth.h`) — distinguishing near-field saturation (strong RSSI +
-  poor **EVM** — back OFF power) from a weak link (add power). EVM, not SNR,
-  is the saturation tell. `docs/bench-testing-near-field.md`.
 
-**Runtime TX power** (all generations — the adaptive-link power lever, see
-`src/TxPower.h`): `SetTxPowerOffsetQdb(qdb)` shifts power in quarter-dB
-relative to the efuse per-rate table (shape preserved until rates saturate at
-the rails; flags in `GetTxPowerState`); `SetTxPowerIndexOverride(idx)`
-forces/clears a flat index. Both apply live and stick across
-`SetMonitorChannel` (re-folded on the new channel) and `FastRetune` (never
-rewrites TXAGC). `GetTxPowerCaps` reports the family step: 0.5 dB Jaguar1/2,
-0.25 dB Jaguar3. Write-only TXAGC hardware (Jaguar2, the 8814A's packed port)
-reports the software shadow (`hw_readback=false`). `txpower`
-(examples/txpower/) is the reference consumer; register-level validation:
-`tests/txpwr_offset_regcheck.sh`.
+**Runtime TX power** — the adaptive-link power lever, three knobs on every
+generation: `SetTxPowerOffsetQdb` (relative, shape-preserving),
+`SetTxPowerIndexOverride` (flat absolute), `SetTxPowerRateDiffs` (replace the
+calibrated per-rate shape). The contract — how they compose, the MCS7-anchor
+semantics, family step sizes, the write-only-family `hw_readback=false`
+shadow, and Kestrel's software send-time fold — is documented at the
+declarations in `src/TxPower.h`; the per-chip mechanics are in each
+`src/<gen>/CLAUDE.md`. All three apply live and stick across
+`SetMonitorChannel` and `FastRetune`. None is regulatory-clamped: the
+operator owns compliance.
 
-**Per-packet TX power** (a radiotap `DBM_TX_POWER` dB-delta per frame, zero
-USB cost once armed; see the `per_pkt_txpwr_*` caps): Jaguar2 and the 8814A
-use a 3-bit descriptor `TXPWR_OFSET` hardware LUT (session default
-`SetTxPacketPowerStep`); Jaguar3 selects programmable BB offset banks via
-`TXPWR_OFSET_TYPE` (inert until programmed); Kestrel rewrites its fixed-dBm
-BB target between frames; the 8812AU/8821AU have no descriptor field — their
-compensating fast lever is `FastSetTxPowerOffsetQdb` (BB-swing). Full
-mechanisms: each `src/<gen>/CLAUDE.md`. Sweep harnesses:
-`tests/txpkt_pwr_ofset_onair.sh` (TX_PID/TX_VID select the DUT; Kestrel DUTs
-need `TX_PWR=14`-style dBm bases), `tests/txpkt_fastswing_onair.sh`,
-`tests/txpkt_hop_persist.sh`.
+`txpower` (`examples/txpower/`) is the reference consumer —
+`--rate-diffs cck,legacy,m0..m7|clear`, `--offset-start`/`--offset-stop`,
+`--flat`; `txdemo` maps the third knob as `DEVOURER_TX_RATE_DIFFS`. What each
+validation script actually proves matters on a write-only family:
+`tests/txpwr_offset_regcheck.sh` and `tests/txpwr_rate_diffs_regcheck.sh`
+check **register/shadow state management**, not radiated power —
+`tests/txpwr_rate_diffs_onair.sh` is the one that measures the antenna, per
+rate.
+
+**Per-packet TX power** — a radiotap `DBM_TX_POWER` dB-delta per frame, zero
+USB cost once armed. The three hardware shapes (Jaguar2 + 8814A descriptor
+LUT, Jaguar3 programmable BB banks, Kestrel fixed-dBm BB rewrite) are
+documented with the `per_pkt_txpwr_*` caps in `src/AdapterCaps.h`, and in
+full in each `src/<gen>/CLAUDE.md`. The 8812AU/8821AU have no descriptor field
+at all — their compensating fast lever is `FastSetTxPowerOffsetQdb`
+(BB-swing). Sweep harnesses: `tests/txpkt_pwr_ofset_onair.sh` (TX_PID/TX_VID
+select the DUT; Kestrel DUTs need `TX_PWR=14`-style dBm bases),
+`tests/txpkt_fastswing_onair.sh`, `tests/txpkt_hop_persist.sh`.
 
 Per-packet unequal error protection: `svctx` classifies stdin HEVC NALs by
 temporal layer and injects each at its ladder's rate
@@ -332,17 +356,12 @@ timing. Validation:
 full-vs-fast). Implementation + per-generation ports:
 `docs/frequency-hopping.md`.
 
-**Keyed FHSS + lockstep RX** (`src/HopSchedule.h`): `DEVOURER_HOP_SLOT_MS`
-selects monotonic wall-clock slots; `DEVOURER_HOP_SEED` (≤32 hex, a 128-bit
-key) replaces the public round-robin with a stateless SipHash-2-4
-Fisher-Yates permutation per round, so a receiver joins without RNG state. In
-slot mode the TX demos (`txdemo` beacon; `streamtx` own frame every
-`DEVOURER_HOP_SYNC_EVERY`, FEC PSDU untouched) emit a sync marker, and
-`rxdemo` hops in lockstep when
-`DEVOURER_HOP_CHANNELS`+`_SLOT_MS` are set (seed optional →
-keyed/sequential), emitting `hop.rx` acquire/track/retune events. Jammer
-resilience: `tests/run_jammer_resilience.sh` + `tests/sdr_follower_jammer.py`
-(B210 follower, reactive vs predictive). Article + results: `docs/fhss.md`,
+Above that primitive sits the **keyed FHSS / adaptive hopset** subsystem
+(`src/hopset/`, header-only and pure): keyed slot schedules and lockstep RX
+(`DEVOURER_HOP_SLOT_MS` + `DEVOURER_HOP_SEED`), a receiver-driven channel
+exclusion policy, and TX-side quiet-window sensing with endpoint fusion. Knob
+reference, policy thresholds, measured sensing constants and the on-air
+harnesses: `src/hopset/CLAUDE.md`. Article + results: `docs/fhss.md`,
 `docs/jammer-resilience.md`.
 
 `IRtlDevice::FastSetBandwidth(bw)` is the bandwidth analogue — a lean
@@ -359,46 +378,14 @@ recover a coarse per-bin H(f) — down to 5 MHz bins on Jaguar3
 ## Adaptive channel migration
 
 Slow, evidence-driven whole-link channel moves — the deliberate complement to
-per-slot FHSS. Pure caller-side logic under `src/chanmig/` (namespace
-`devourer::chanmig`, header-mostly, each ctest-covered; the library reads no
-env, the demos map it). Five composable layers:
-
-- **Scout** (`chanscout`): a second adapter passively surveys a candidate
-  plan (`DEVOURER_SCOUT_PLAN`) while the primary RX stays on the video
-  channel, emitting versioned `survey.dwell` records with a counter-hygiene
-  discard barrier (the FA/CCA counters are delta-on-read). Measures only;
-  retunes nothing but itself. Grid-legality
-  validation, **no regulatory DB** — the caller owns compliance.
-- **Scoring** (`ChannelScore`, `DEVOURER_SCOUT_ADVISE`): a pure two-leg
-  recommendation engine — the primary receiver's *delivery* is authoritative
-  on the active channel (scout energy there is confounded by wanted video),
-  the scout's occupancy on candidates — emitting explainable
-  `channel.recommend`/`hold`.
-- **Protocol** (`examples/chanmig --role ground|drone`): an authenticated
-  ground-proposes/drone-commits migration (SipHash-MAC'd wire codec
-  `MigWire.h`, pure `MigProposer`/`MigResponder` state machines, random
-  per-boot epochs). The drone arms
-  activation only after the ground echoes its nonce, and the ground follows
-  the drone's authoritative STATUS — every failure-matrix row converges
-  without split-brain. Control frames are their own canonical-SA 802.11
-  frames — video PSDUs are never touched.
-- **Automation** (`MigGate`, `DEVOURER_MIG_MODE=off|advisory|manual|automatic`,
-  default advisory): a pure, deterministic gate hedged with cooldown /
-  residency / per-channel backoff / move-cap / probation and an operator kill
-  switch.
-- **Drone-side validation**: legality/caps checks are the free product
-  default; the pre-commit probe (`DEVOURER_MIG_PROBE`) is opt-in research
-  (real outage cost); probation is the gate's.
-
-Validated headless (`chanmig_wire_kat`, `chanmig_proto_matrix` — a 14-row
-failure matrix + drop-every-message sweep, `chan_score_policy`,
-`chanmig_gate_policy`, `chanmig_clock_math`) and on-air
-(`tests/chanmig_endurance.sh`, `tests/chanscout_stress.sh`,
-`tests/chanmig_soak.sh`). Docs: `docs/adaptive-channel-migration.md`,
-`docs/channel-migration-protocol.md`, `docs/channel-migration-validation.md`.
-Near-field bench note: two adapters ~30 cm apart saturate the RX front end at
-full power (`link.health` SATURATED), so migration tests reduce TX power
-(`DEVOURER_TX_PWR=12`).
+per-slot FHSS. Pure caller-side logic under `src/chanmig/`: a passive scout on
+a second adapter (`chanscout`), a two-leg scoring engine, an authenticated
+ground-proposes / drone-commits protocol (`examples/chanmig --role
+ground|drone`), and a deterministic automation gate
+(`DEVOURER_MIG_MODE=off|advisory|manual|automatic`, default `advisory`).
+Control frames are their own 802.11 frames — video PSDUs are never touched,
+and there is no regulatory DB: the caller owns compliance. Layer detail,
+validation matrix and the near-field bench note: `src/chanmig/CLAUDE.md`.
 
 ## Hardware time, beacons, AP mode
 
@@ -407,8 +394,11 @@ MAC-latched `tsfl` RX timestamp — on all generations, µs-grade
 (`docs/time-distribution.md`, measured vs NTP/PTP: `docs/timing-accuracy.md`).
 `StartBeacon` loads a beacon into the MAC's reserved page and the chip
 auto-transmits at each TBTT with the live TSF stamped at the TX instant — the
-sub-µs downlink. The chip beacons **autonomously**: a session that ends
-without a power-cycle must call `StopBeacon()` or the beacon keeps airing.
+sub-µs downlink. The chip beacons **autonomously**, so `StopBeacon()` is what
+stops it mid-session; a session that ends via `Stop()` or destruction powers the
+chip down and takes the beacon with it (Jaguar1/Jaguar3 — Jaguar2 has no
+teardown power-down yet, so there it keeps airing until the adapter is
+re-enumerated).
 `UpdateBeaconPayload` swaps the airing content in place (frame-atomic on air,
 TBTT-quantized latency); `PinBeaconTbtt` steers the TBTT to an absolute TSF
 instant without corrupting the clock (Jaguar1: offset 0 only — its TBTT is
@@ -444,6 +434,16 @@ thin — `libusb_init`, device open, kernel-driver detach, and
 to the factory. `examples/rx/main.cpp` is the canonical boilerplate;
 `devourer::claim_interface_then_reset` (src/UsbOpen.h) is the recommended
 open path (advisory per-adapter lock before reset).
+
+Owning libusb means owning the **teardown order**: destroy the `IRtlDevice`
+first, then release the interface, close the handle, and only then
+`libusb_exit`. The device is what quiesces TX (`IRtlDevice::Stop`, and the
+destructor as a backstop: Jaguar1's async bulk-OUT URBs must be cancelled and
+reaped while the context still exists), so tearing libusb down first is a
+crash, not a leak — and only under enough TX load to keep URBs outstanding at
+exit. `examples/common/DeviceSession.h` is the demos' RAII holder for exactly
+that order; the transport logs a diagnostic naming this if it is destroyed
+with TX still in flight.
 
 **Chip identity is resolved at construction** from the `SYS_CFG2` chip-id +
 USB PID. `CreateRtlDevice` returns an `IRtlDevice` (`Init` = bring-up + RX
@@ -492,6 +492,34 @@ generators, never the output files.
   only helps when firmware state is intact.
 - **The chip retains state across soft re-init** — cold-bisect hardware
   problems with a VBUS power-cycle, not a re-run.
+- **Qualify the ground station before believing a delivery number.** Delivery is
+  a property of a *link*; a receiver whose modulation cliff sits at the rate
+  under test measures itself, not the transmitter, and swings between "fine" and
+  "zero" on a few dB of ambient while the robust rates stay pinned — which looks
+  exactly like a transmitter that degrades and recovers. Same TX, same channel,
+  minutes apart: a TP-Link Archer T3U (8822BU, **internal** antennas) ran
+  MCS3 97.8 / MCS4 98.3 / MCS5 79.1 / MCS6 49.0 / **MCS7 2.9**, while an
+  RTL8814AU (two **external** antennas) was flat at ~80% across the same ladder.
+  Both healthy — one just has less margin. `tests/ground_station_qualify.sh`
+  sweeps the ladder and refuses the pairing (exit 1) when the test rate is off
+  the flat part. Prefer external-antenna adapters as ground stations for
+  high-MCS work, and cross-check with a second, independent receiver.
+- **A single delivery probe is worth ±3 points, so small effects are not
+  findings.** Ten identical back-to-back MCS7/20 probes on an 8812AU (nothing
+  changed between them) gave sd 1.8 and a 5.7-point spread; the MCS1 control
+  over the same run held 98.0 ± 0.2. Anything under ~4 points needs repetition
+  before it means anything — several plausible-looking "decay curves" have
+  turned out to sit inside that band. `tests/probe_repeatability.sh` measures
+  the floor for a given pair; run it before believing a delivery difference.
+- **Do not attribute a rate ceiling to chip temperature without varying
+  temperature independently.** Delivery does correlate with the `thermal` meter
+  within a probe sequence, and that correlation is a trap: a sweep varying
+  *only* the power-off duration (identical reset every arm) found delivery
+  scattered 63–83% with no relation to off-time or temperature, and inside a
+  single uninterrupted session the meter stays pinned while delivery drifts.
+  Read the `thermal` event (`DEVOURER_THERMAL_POLL_MS`) beside a rate-ceiling
+  number by all means, but a power cycle changes chip state *and* temperature
+  together, so it can never separate them (`docs/warm-tx-degradation.md`).
 - **MediaTek Android hosts cap bulk-IN reads at 16 KB**: some MTK xhci/usbfs
   stacks (Dimensity 810, Helio G99, MT6765) never complete a larger bulk-IN
   transfer — `LIBUSB_ERROR_TIMEOUT` forever, zero RX with a green init

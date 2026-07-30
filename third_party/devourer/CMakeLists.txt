@@ -106,6 +106,53 @@ if(DEVOURER_PCIE)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# Sanitizers. Off by default; the value applies to the library, the examples
+# and the selftests alike, so `ctest` and an on-hardware demo run share one
+# instrumented build. The vendored halbb/halrf C is exempted from UBSan below
+# (unaligned loads / signed shifts are pervasive in Realtek's sources and are
+# not ours to fix).
+#   cmake -S . -B build-asan -DDEVOURER_SANITIZE=address+undefined
+# ---------------------------------------------------------------------------
+set(DEVOURER_SANITIZE "" CACHE STRING
+    "Sanitizer build: address, address+undefined, thread (empty = off)")
+set_property(CACHE DEVOURER_SANITIZE PROPERTY STRINGS
+    "" address address+undefined thread)
+if(NOT DEVOURER_SANITIZE STREQUAL "")
+    if(MSVC)
+        # MSVC ships AddressSanitizer only — no UBSan, no TSan, no LSan.
+        # Degrade loudly rather than silently building something weaker than
+        # the caller asked for.
+        if(NOT DEVOURER_SANITIZE STREQUAL "address")
+            message(FATAL_ERROR
+                "DEVOURER_SANITIZE=${DEVOURER_SANITIZE} is unsupported on MSVC — "
+                "it implements /fsanitize=address only. Use "
+                "-DDEVOURER_SANITIZE=address, or build with GCC/Clang for "
+                "undefined/thread.")
+        endif()
+        add_compile_options(/fsanitize=address)
+        # ASan is incompatible with the runtime checks and with incremental
+        # linking; both are on by default in Debug.
+        add_compile_options($<$<CONFIG:Debug>:/Oy->)
+        add_link_options(/INCREMENTAL:NO)
+    else()
+        if(DEVOURER_SANITIZE STREQUAL "address")
+            set(_devourer_san "address")
+        elseif(DEVOURER_SANITIZE STREQUAL "address+undefined")
+            set(_devourer_san "address,undefined")
+        elseif(DEVOURER_SANITIZE STREQUAL "thread")
+            set(_devourer_san "thread")
+        else()
+            message(FATAL_ERROR
+                "DEVOURER_SANITIZE=${DEVOURER_SANITIZE} — must be one of "
+                "address, address+undefined, thread (or empty).")
+        endif()
+        add_compile_options(-fsanitize=${_devourer_san} -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=${_devourer_san})
+    endif()
+    message(STATUS "devourer: sanitizer build (${DEVOURER_SANITIZE})")
+endif()
+
 # Find pkg-config and then use it to locate libusb.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(libusb REQUIRED IMPORTED_TARGET libusb-1.0)
@@ -165,6 +212,15 @@ add_library(devourer
     src/chanmig/MigClock.h
     src/chanmig/MigProposer.h
     src/chanmig/MigResponder.h
+    src/hopset/HopsetState.h
+    src/hopset/HopsetTypes.h
+    src/hopset/HopsetWire.h
+    src/hopset/HopsetAuthority.h
+    src/hopset/HopsetFollower.h
+    src/hopset/HopsetPolicy.h
+    src/hopset/HopsetSense.h
+    src/hopset/HopsetFusion.h
+    src/hopset/HopsetEvents.h
     src/IRtlDevice.h
     src/SignalStop.cpp
     src/SignalStop.h
@@ -192,6 +248,12 @@ endif()
 
 # Link devourer with libusb as found via pkg-config.
 target_link_libraries(devourer PUBLIC PkgConfig::libusb)
+
+# Android (Termux / NDK): the diagnostics plane routes to logcat via
+# __android_log_write (src/logger.h), which lives in the system `log` library.
+if(ANDROID)
+    target_link_libraries(devourer PUBLIC log)
+endif()
 
 target_include_directories(devourer PUBLIC hal)
 target_include_directories(devourer PUBLIC hal/phydm/rtl8814a)
@@ -378,6 +440,13 @@ if(DEVOURER_KESTREL)
         set(_kestrel_vendor_cflags /W0 /Gy)
     else()
         set(_kestrel_vendor_cflags -w -ffunction-sections -fdata-sections)
+        # Realtek's sources are full of unaligned loads, signed shifts and
+        # out-of-range enum stores. They are vendored verbatim (edit the
+        # extractors, never these files), so UBSan on them reports noise we
+        # would never act on and drowns the findings from our own code.
+        if(DEVOURER_SANITIZE MATCHES "undefined")
+            list(APPEND _kestrel_vendor_cflags -fno-sanitize=undefined)
+        endif()
     endif()
 
     file(GLOB KESTREL_HALBB_C "${CMAKE_CURRENT_SOURCE_DIR}/hal/halbb/g6/vendor/*.c")
@@ -473,6 +542,8 @@ if(DEVOURER_KESTREL)
         examples/kestrelprobe/main.cpp
     )
     target_link_libraries(kestrelprobe PUBLIC devourer PRIVATE PkgConfig::libusb)
+    # DeviceSession.h (shared teardown-order holder) lives in examples/common/.
+    target_include_directories(kestrelprobe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 endif()
 
 # reglat — register round-trip latency microbench (USB ctrl-xfer vs PCIe MMIO).
@@ -634,6 +705,16 @@ add_executable(doctor
 target_include_directories(doctor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 target_link_libraries(doctor PUBLIC devourer PRIVATE PkgConfig::libusb)
 
+# chipstate — read a chip's registers without touching it: no USB reset, no
+# bring-up, no calibration. The only way to inspect the state a previous
+# session left behind, since every other entry point reconfigures the chip on
+# the way in and destroys exactly that evidence.
+add_executable(chipstate
+    examples/chipstate/main.cpp
+)
+target_include_directories(chipstate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+target_link_libraries(chipstate PUBLIC devourer PRIVATE PkgConfig::libusb)
+
 # Headless regression guard for the binary-stdin framing shared by the two
 # stream demos above (examples/common/stream_stdin.h). No libusb, no radio — just the
 # set_stdin_binary() + read_exact() path, so a text-mode regression (e.g. the
@@ -662,6 +743,17 @@ add_executable(ToneMaskSelftest
 target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
+
+# Headless guard for the TX quiesce seam (IRtlTransport::quiesce_tx via
+# RtlAdapter): the explicit "stop TX and wait it out" call every device makes
+# before anything is released. UsbTransport's cancel/drain is validated on
+# hardware under ASan — the test header says what it does and does not cover.
+add_executable(TxQuiesceSelftest
+    tests/tx_quiesce_selftest.cpp
+)
+target_link_libraries(TxQuiesceSelftest PRIVATE devourer PkgConfig::libusb)
+
+add_test(NAME tx_quiesce_seam COMMAND TxQuiesceSelftest)
 
 # Headless guard for the active idle-noise-floor math (src/NoiseFloorMath.h): the
 # phydm sign/pwdb helpers the Jaguar1 0x0FA0 debug-port measurement uses. Pure
@@ -781,6 +873,55 @@ add_executable(HopScheduleSelftest tests/hop_schedule_selftest.cpp)
 target_link_libraries(HopScheduleSelftest PRIVATE devourer)
 add_test(NAME hop_schedule_math COMMAND HopScheduleSelftest)
 
+# Adaptive-hopset gates (src/hopset/): schedule derivation KATs + exact-once
+# masked coverage + stateless direct join; wire codec known-answer bytes, MAC
+# tamper/truncation sweeps, and replay rules; the authority/follower pure
+# machines through a lossy LinkSim failure matrix; and the process-level
+# synchronized-activation / missed-commit-recovery run.
+add_executable(HopsetScheduleSelftest tests/hopset_schedule_selftest.cpp)
+target_link_libraries(HopsetScheduleSelftest PRIVATE devourer)
+add_test(NAME hopset_schedule_math COMMAND HopsetScheduleSelftest)
+
+add_executable(HopsetWireSelftest tests/hopset_wire_selftest.cpp)
+target_link_libraries(HopsetWireSelftest PRIVATE devourer)
+add_test(NAME hopset_wire_kat COMMAND HopsetWireSelftest)
+
+add_executable(HopsetProtoSelftest tests/hopset_proto_selftest.cpp)
+target_link_libraries(HopsetProtoSelftest PRIVATE devourer)
+add_test(NAME hopset_proto_matrix COMMAND HopsetProtoSelftest)
+
+add_executable(HopsetActivationSelftest tests/hopset_activation_selftest.cpp)
+target_link_libraries(HopsetActivationSelftest PRIVATE devourer)
+add_test(NAME hopset_activation_sync COMMAND HopsetActivationSelftest)
+
+# Receiver-driven exclusion gates: keyed recovery-probe placement (KATs +
+# one-probe-per-window + inertness), the pure exclusion/restoration policy
+# over its threshold / hysteresis / anti-herding matrix, and the end-to-end
+# policy -> proposal -> commit -> activation -> probe -> restoration arc.
+add_executable(HopsetProbeSelftest tests/hopset_probe_selftest.cpp)
+target_link_libraries(HopsetProbeSelftest PRIVATE devourer)
+add_test(NAME hopset_probe_placement COMMAND HopsetProbeSelftest)
+
+add_executable(HopsetPolicySelftest tests/hopset_policy_selftest.cpp)
+target_link_libraries(HopsetPolicySelftest PRIVATE devourer)
+add_test(NAME hopset_policy_matrix COMMAND HopsetPolicySelftest)
+
+add_executable(HopsetAdaptiveE2eSelftest tests/hopset_adaptive_e2e_selftest.cpp)
+target_link_libraries(HopsetAdaptiveE2eSelftest PRIVATE devourer)
+add_test(NAME hopset_adaptive_e2e COMMAND HopsetAdaptiveE2eSelftest)
+
+# Transmitter-side sensing gates: the evidence classifier (admission, the
+# stricter thresholds, sensor-absent and pre/post separation, anti-herding
+# floors) and the endpoint-fusion policy (the veto's scope, failsafe gating,
+# mode precedence, conflict surfacing).
+add_executable(HopsetSenseSelftest tests/hopset_sense_selftest.cpp)
+target_link_libraries(HopsetSenseSelftest PRIVATE devourer)
+add_test(NAME hopset_sense_matrix COMMAND HopsetSenseSelftest)
+
+add_executable(HopsetFusionSelftest tests/hopset_fusion_selftest.cpp)
+target_link_libraries(HopsetFusionSelftest PRIVATE devourer)
+add_test(NAME hopset_fusion_policy COMMAND HopsetFusionSelftest)
+
 # Headless guard for the TX-power offset quantization (src/TxPower.h) — the
 # qdB->index-step rounding/clamping behind SetTxPowerOffsetQdb, so a rounding
 # regression fails `ctest` instead of only surfacing as a wrong on-air level.
@@ -790,6 +931,16 @@ add_executable(TxPowerQuantSelftest
 target_link_libraries(TxPowerQuantSelftest PRIVATE devourer)
 
 add_test(NAME txpower_quant_math COMMAND TxPowerQuantSelftest)
+
+# Headless guard for the per-rate TX-power diff packing (src/TxPower.h) — the
+# pack_rate_diff_word helper used to format 0x3a00-table entries, so a packing
+# regression fails `ctest` instead of only surfacing as wrong per-rate TXAGC.
+add_executable(RateDiffsSelftest
+    tests/rate_diffs_selftest.cpp
+)
+target_link_libraries(RateDiffsSelftest PRIVATE devourer)
+
+add_test(NAME rate_diffs COMMAND RateDiffsSelftest)
 
 # Headless guard for the link-health classifier (src/LinkHealth.h) — the
 # sensor-tuple -> verdict mapping behind <devourer-linkhealth>, with cases
@@ -993,6 +1144,17 @@ if(Python3_Interpreter_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/la_csi.py --selftest
     )
     set_tests_properties(la_csi_math PROPERTIES SKIP_RETURN_CODE 77)
+
+    # Headless guard for the 2.4 GHz-VHT waterfall's decode + crossing math
+    # (tests/nitroqam_waterfall.py). The DESC_RATE decode is what proves which
+    # modulation a frame actually arrived as, and a bench link that tops out
+    # below 256-QAM never produces a 256-QAM txhit, a legacy fallback, or a
+    # threshold crossing — so those paths need a headless case.
+    add_test(
+        NAME nitroqam_decode_math
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/nitroqam_waterfall.py --self-test
+    )
 endif()
 
 # --- selftest aggregate ----------------------------------------------------
