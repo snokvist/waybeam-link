@@ -36,6 +36,8 @@ struct ControlHandlers {
     std::function<std::string()> cache_assignment_json;
     // §11.7 issuer campaign state (GET; issuer/ground only, null → 409).
     std::function<std::string()> vehicle_command_json;
+    // §10.5 TX-power override-latch state (GET; TX node only, null → 409).
+    std::function<std::string()> tx_power_json;
 
     // Writes — return "" on success, else a short error string (→ HTTP 400).
     // A null hook means the endpoint does not apply to this mode (→ HTTP 409).
@@ -45,6 +47,9 @@ struct ControlHandlers {
     // unbound-craft path gives) from "selected but no key cached" (400).
     std::function<std::pair<int, std::string>(uint32_t mhz, uint32_t klass)> csa;
     std::function<std::string(int min_profile, int max_profile)> profile;
+    // §10.5 (Pass 114) TX-power override-latch: is_auto=true clears the
+    // latch (qdb ignored), else latch the absolute qdb on every tx adapter.
+    std::function<std::string(bool is_auto, int qdb)> tx_power_set;
     std::function<std::string(int stream_id, int i_permille, int p_permille,
                               int min_k, int min_r)>
         fec;

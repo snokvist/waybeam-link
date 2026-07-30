@@ -288,6 +288,13 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         if (path == "/api/v1/health") {
             return reply(200, "OK", h_.health_json ? h_.health_json() : "{}");
         }
+        if (path == "/api/v1/tx/power") {  // §10.5 Pass 114
+            if (!h_.tx_power_json) {
+                return reply(409, "Conflict",
+                             json_err("tx power not available in this mode"));
+            }
+            return reply(200, "OK", h_.tx_power_json());
+        }
         if (path == "/api/v1/discovery") {
             return reply(200, "OK",
                          h_.discovery_json ? h_.discovery_json()
@@ -430,6 +437,18 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             return reply(400, "Bad Request", json_err("min and max required"));
         }
         return done(h_.profile(j.value("min", 0), j.value("max", 255)));
+    }
+    if (path == "/api/v1/tx/power") {  // §10.5 Pass 114
+        if (!h_.tx_power_set) return na();
+        const bool has_qdb = j.contains("qdb") && j["qdb"].is_number_integer();
+        const bool has_auto = j.contains("auto") && j["auto"].is_boolean() &&
+                              j["auto"].get<bool>();
+        if (has_qdb == has_auto) {
+            return reply(400, "Bad Request",
+                         json_err("exactly one of qdb (int) / auto:true"));
+        }
+        return done(h_.tx_power_set(has_auto,
+                                    has_qdb ? j["qdb"].get<int>() : 0));
     }
     if (path == "/api/v1/fec") {
         if (!h_.fec) return na();

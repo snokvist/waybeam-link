@@ -719,10 +719,39 @@ void MonAir::set_filter_net_id(std::optional<uint8_t> net_id) {
 }
 
 int MonAir::set_power_qdb(size_t adapter, int32_t qdb) {
-    (void)adapter;
-    // The 8812eu per-rate TXAGC curve owns power (rtw_tx_pwr_by_rate=1); the
-    // monitor bring-up sets nl80211 txpower once. Logged intent only.
+    // §10.5 (Pass 114): the kernel-monitor actuator is nl80211 fixed power —
+    // `iw set txpower fixed <mBm>`, 1 qdb = 25 mBm. Bounded CLI like every
+    // other monitor control write; profile/override cadence only.
+    if (adapter >= impl_->adapters.size()) return 0;
+    const std::string& ifname = impl_->adapters[adapter]->ifname;
+    char mbm[16];
+    std::snprintf(mbm, sizeof(mbm), "%d", static_cast<int>(qdb) * 25);
+    const char* argv[] = {"iw",  "dev",     ifname.c_str(), "set",
+                          "txpower", "fixed", mbm,          nullptr};
+    if (!run_cli(argv)) {
+        std::fprintf(stderr,
+                     "kernel-monitor: iw set txpower fixed %s mBm on %s "
+                     "failed\n",
+                     mbm, ifname.c_str());
+        return 0;
+    }
+    std::fprintf(stderr, "kernel-monitor: %s txpower fixed %d qdb (%s mBm)\n",
+                 ifname.c_str(), qdb, mbm);
     return qdb;
+}
+
+bool MonAir::set_power_auto(size_t adapter) {
+    // §10.5 auto restore: hand power back to the driver default (the same
+    // `txpower auto` mon-up.sh / recover() issue — Pass 48: a fixed value
+    // left behind can read healthy while the per-rate TXAGC curve is bypassed).
+    if (adapter >= impl_->adapters.size()) return false;
+    const std::string& ifname = impl_->adapters[adapter]->ifname;
+    const char* argv[] = {"iw",      "dev",  ifname.c_str(), "set",
+                          "txpower", "auto", nullptr};
+    const bool ok = run_cli(argv);
+    std::fprintf(stderr, "kernel-monitor: %s txpower auto %s\n",
+                 ifname.c_str(), ok ? "ok" : "FAILED");
+    return ok;
 }
 
 std::optional<uint64_t> MonAir::read_tsf(size_t adapter) {

@@ -79,6 +79,7 @@ std::string body_of(const std::string& resp) {
 int main() {
     // Captured knob state, mutated by the handlers.
     int pin_min = -1, pin_max = -1;
+    int txp_auto = -1, txp_qdb = -1000;
     int fec_sid = -1, fec_i = -1, fec_p = -1, fec_k = -1, fec_r = -1;
     bool fec_ok = true;
     int reset_calls = 0;
@@ -112,6 +113,16 @@ int main() {
         pin_min = mn;
         pin_max = mx;
         return "";
+    };
+    // §10.5 tx/power override-latch hooks (Pass 114).
+    h.tx_power_set = [&](bool is_auto, int qdb) -> std::string {
+        txp_auto = is_auto ? 1 : 0;
+        txp_qdb = qdb;
+        return "";
+    };
+    h.tx_power_json = [&]() -> std::string {
+        return std::string(
+            "{\"override_active\":false,\"backend\":\"kernel-monitor\"}");
     };
     h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
         fec_sid = sid;
@@ -248,6 +259,53 @@ int main() {
         CHECK_EQ_U(status_of(r), 200);
         CHECK_EQ_U(pin_min, 3);
         CHECK_EQ_U(pin_max, 3);
+    }
+    // §10.5 tx/power: GET state, POST qdb latch, POST auto clear, body gates.
+    {
+        const std::string r =
+            roundtrip(s, port, "GET /api/v1/tx/power HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"override_active\":false") !=
+              std::string::npos);
+    }
+    {
+        const std::string body = "{\"qdb\":20}";
+        const std::string req =
+            "POST /api/v1/tx/power HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(txp_auto, 0);
+        CHECK_EQ_U(txp_qdb, 20);
+    }
+    {
+        const std::string body = "{\"auto\":true}";
+        const std::string req =
+            "POST /api/v1/tx/power HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(txp_auto, 1);
+    }
+    // Neither key, both keys, and auto:false-with-no-qdb → 400 before the hook.
+    {
+        const std::string body = "{}";
+        const std::string req =
+            "POST /api/v1/tx/power HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    {
+        const std::string body = "{\"qdb\":20,\"auto\":true}";
+        const std::string req =
+            "POST /api/v1/tx/power HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    {
+        const std::string body = "{\"auto\":false}";
+        const std::string req =
+            "POST /api/v1/tx/power HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }
     // profile validation error → 400 (min>max), handler ran but rejected.
     {

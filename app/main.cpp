@@ -1349,6 +1349,22 @@ struct AirBackend {
         (void)qdb;
 #endif
     }
+    // §10.5 auto restore: monitor → driver default (`txpower auto`); radio →
+    // offset 0 (undoes the latch; the §10.2 curve resolve re-applies on top
+    // when a curve is loaded). udp: logged intent, like set_power_qdb.
+    void set_power_auto(size_t adapter) {
+        if (mon) {
+            mon->set_power_auto(adapter);
+            return;
+        }
+#if WBLINK_RADIO
+        if (radio) {
+            radio->set_power_qdb(adapter, 0);
+        }
+#else
+        (void)adapter;
+#endif
+    }
     std::optional<uint64_t> read_tsf(uint8_t adapter) {
         if (mon) {
             return mon->read_tsf(adapter);
@@ -1564,6 +1580,7 @@ struct AirBackend {
             as.tx_submitted = c.tx_submitted;
             as.tx_failed = c.tx_failed;
             as.drop = c.rx_dropped;
+            as.filtered = c.rx_filtered;  // Pass 114 audit: was computed+dropped
             // Node-wide §7.2 TSF-read fallback count, surfaced once.
             as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
             as.tx_reports = c.tx_reports;
@@ -1682,11 +1699,18 @@ struct TxCore {
             cmd_fps_enabled_ = lc.enabled;  // static mode boots the loop off
         }
         // §10: one power curve per TX adapter with an authored map. The
-        // resolve happens at profile commit; the radio backend applies it
-        // (apply_power hook), otherwise it stays a logged intent.
+        // resolve happens at profile commit and actuates through the
+        // apply_power hook on both RF backends (§10.5); on the udp dev
+        // backend it stays a logged intent.
         for (size_t i = 0; i < cfg.adapters.size(); ++i) {
             const AdapterCfg& a = cfg.adapters[i];
-            if (a.role != Role::kTx || a.power_map.empty()) {
+            if (a.role != Role::kTx) {
+                continue;
+            }
+            // §10.5 override targets: EVERY tx adapter, curve or not.
+            power_targets_.push_back(
+                PowerTarget{a.name, i, a.max_power_qdb});
+            if (a.power_map.empty()) {
                 continue;
             }
             auto curve =
@@ -2000,23 +2024,15 @@ struct TxCore {
                            act.commit->gi == GuardInterval::kShort);
             }
             // ...and the §10 per-adapter power resolve, applied inside the
-            // same sequenced transition (real SetTxPowerOffsetQdb on the
-            // radio backend; a logged intent elsewhere).
-            for (PowerAdapter& pa : power_) {
-                const auto qdb =
-                    resolve_power_qdb(pa.curve, act.commit->mcs,
-                                      act.commit->tx_power_level, pa.ceiling);
-                if (qdb && (!pa.applied_qdb || *pa.applied_qdb != *qdb)) {
-                    pa.applied_qdb = *qdb;
-                    if (apply_power) {
-                        apply_power(pa.adapter_idx, *qdb);
-                    } else {
-                        std::fprintf(stderr,
-                                     "power: %s mcs=%u level=%u -> %d qdb\n",
-                                     pa.name.c_str(), act.commit->mcs,
-                                     act.commit->tx_power_level, *qdb);
-                    }
-                }
+            // same sequenced transition through the apply_power hook (both RF
+            // backends, §10.5; a logged intent on the udp dev backend). While
+            // the §10.5 override-latch is set, the resolve YIELDS — the
+            // latched value already sits on the hardware.
+            last_commit_mcs_ = act.commit->mcs;
+            last_commit_level_ = act.commit->tx_power_level;
+            if (!power_override_) {
+                resolve_and_apply_power(act.commit->mcs,
+                                        act.commit->tx_power_level);
             }
         }
         // B1: advance the non-blocking venc HTTP state machine once per loop
@@ -2394,10 +2410,16 @@ struct TxCore {
                 fps_ladder_->target_p_frame_bytes();
             snap.link.venc_fps_ladder_state = fps_ladder_->state();
         }
-        for (const PowerAdapter& pa : power_) {
-            if (pa.applied_qdb) {
-                snap.link.tx_power_qdb = *pa.applied_qdb;  // first TX adapter
-                break;
+        // §10.5: while the override-latch is set it IS the hardware value.
+        snap.link.tx_power_override = power_override_.has_value();
+        if (power_override_) {
+            snap.link.tx_power_qdb = *power_override_;
+        } else {
+            for (const PowerAdapter& pa : power_) {
+                if (pa.applied_qdb) {
+                    snap.link.tx_power_qdb = *pa.applied_qdb;  // first TX adapter
+                    break;
+                }
             }
         }
         // §7.3 return-path visibility: the RX's epoch counter says how many
@@ -2414,10 +2436,89 @@ struct TxCore {
         std::optional<int32_t> ceiling;
         std::optional<int32_t> applied_qdb;
     };
+    // §10.5 override targets: every role:"tx" adapter, curve or not.
+    struct PowerTarget {
+        std::string name;
+        size_t adapter_idx;
+        std::optional<int32_t> ceiling;  // §10.3 — the ONE clamp on overrides
+    };
 
-    // Radio-backend actuation hooks (§10.4); unset = logged intent.
+    // §10.4 curve resolve for the committed operating point, through the
+    // change-detection cache (apply only when the resolved value moves).
+    void resolve_and_apply_power(uint8_t mcs, uint8_t level) {
+        for (PowerAdapter& pa : power_) {
+            const auto qdb =
+                resolve_power_qdb(pa.curve, mcs, level, pa.ceiling);
+            if (qdb && (!pa.applied_qdb || *pa.applied_qdb != *qdb)) {
+                pa.applied_qdb = *qdb;
+                if (apply_power) {
+                    apply_power(pa.adapter_idx, *qdb);
+                } else {
+                    std::fprintf(stderr, "power: %s mcs=%u level=%u -> %d qdb\n",
+                                 pa.name.c_str(), mcs, level, *qdb);
+                }
+            }
+        }
+    }
+
+    // §10.5 (Pass 114) override-latch: latch an absolute qdb on every tx
+    // adapter; the §10.4 commit resolve yields until cleared. Ceiling-clamped
+    // per adapter (§10.3) — nothing else bounds it.
+    void set_power_override(int32_t qdb) {
+        power_override_ = qdb;
+        for (const PowerTarget& t : power_targets_) {
+            const int32_t v =
+                t.ceiling ? std::min(qdb, *t.ceiling) : qdb;
+            if (apply_power) {
+                apply_power(t.adapter_idx, v);
+            } else {
+                std::fprintf(stderr, "power: %s override -> %d qdb\n",
+                             t.name.c_str(), v);
+            }
+        }
+    }
+
+    // §10.5 auto: clear the latch with one forced immediate restore —
+    // apply_power_auto (backend default) first, then re-resolve the curve at
+    // the last committed operating point so a loaded power_map re-asserts
+    // without waiting for the next profile change.
+    void clear_power_override() {
+        power_override_.reset();
+        if (apply_power_auto) {
+            for (const PowerTarget& t : power_targets_) {
+                apply_power_auto(t.adapter_idx);
+            }
+        }
+        for (PowerAdapter& pa : power_) {
+            pa.applied_qdb.reset();  // force re-apply even at the same value
+        }
+        if (last_commit_mcs_) {
+            resolve_and_apply_power(*last_commit_mcs_, last_commit_level_);
+        }
+    }
+
+    // §10.5 re-assert after any event that may have reset hardware power (a
+    // §11 retune's TXAGC reset, a §11.6 monitor recovery's `txpower auto`).
+    void reassert_power() {
+        if (power_override_) {
+            set_power_override(*power_override_);
+            return;
+        }
+        for (PowerAdapter& pa : power_) {
+            if (pa.applied_qdb && apply_power) {
+                apply_power(pa.adapter_idx, *pa.applied_qdb);
+            }
+        }
+    }
+
+    std::optional<int32_t> power_override() const { return power_override_; }
+    bool has_power_targets() const { return !power_targets_.empty(); }
+
+    // Actuation hooks (§10.4/§10.5); unset = logged intent. apply_mode is
+    // radio-only by design (Pass 13: monitor carries MCS per-packet).
     std::function<void(uint8_t mcs, bool sgi)> apply_mode;
     std::function<void(size_t adapter_idx, int32_t qdb)> apply_power;
+    std::function<void(size_t adapter_idx)> apply_power_auto;
     std::function<std::optional<uint32_t>(size_t bytes, bool include_pending)>
         estimate_airtime;
 
@@ -2447,6 +2548,10 @@ struct TxCore {
     uint64_t cadence_start_ms_ = 0;
     uint32_t cadence_frames_ = 0;
     std::vector<PowerAdapter> power_;
+    std::vector<PowerTarget> power_targets_;      // §10.5 all tx adapters
+    std::optional<int32_t> power_override_;       // §10.5 latch (volatile)
+    std::optional<uint8_t> last_commit_mcs_;      // §10.5 clear-restore point
+    uint8_t last_commit_level_ = 4;
     uint32_t reports_received_ = 0;
     std::vector<Stream> streams_;
 };
@@ -3165,6 +3270,10 @@ int run_tx(const Loaded& l) {
         tx.apply_power = [&](size_t idx, int32_t qdb) {
             air.value->set_power_qdb(idx, qdb);
         };
+        // §10.5 auto restore (Pass 114): backend default power.
+        tx.apply_power_auto = [&](size_t idx) {
+            air.value->set_power_auto(idx);
+        };
     }
     // §15.4 frame-shm ingress: one consumer ring per frame-shm in-stream. The
     // venc producer may not be up yet, so a failed attach is not fatal — it
@@ -3348,6 +3457,36 @@ int run_tx(const Loaded& l) {
                                static_cast<uint8_t>(mx));
             return "";
         };
+        // §10.5 (Pass 114) TX-power override-latch: one endpoint, both RF
+        // backends (monitor iw-fixed / radio SetTxPowerOffsetQdb).
+        h.tx_power_set = [&](bool is_auto, int qdb) -> std::string {
+            if (!tx.has_power_targets())
+                return "no role:\"tx\" adapter on this node";
+            if (is_auto) {
+                tx.clear_power_override();
+                std::fprintf(stderr, "power: §10.5 override cleared (auto)\n");
+                return "";
+            }
+            if (qdb < -511 || qdb > 511)
+                return "qdb out of range (-511..511)";
+            tx.set_power_override(qdb);
+            return "";
+        };
+        h.tx_power_json = [&] {
+            const auto ov = tx.power_override();
+            std::string s = "{\"override_active\":";
+            s += ov ? "true" : "false";
+            if (ov) {
+                s += ",\"qdb\":";
+                s += std::to_string(*ov);
+            }
+            s += ",\"backend\":\"";
+            s += l.cfg.air.kind == AirCfg::Kind::kMonitor ? "kernel-monitor"
+                 : l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio"
+                                                          : "udp";
+            s += "\"}";
+            return s;
+        };
         h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
             if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
@@ -3439,6 +3578,7 @@ int run_tx(const Loaded& l) {
             if (!air.value->retune_all(chan, cur_bw, false)) {
                 return "retune failed";
             }
+            tx.reassert_power();  // §10.5: retune may reset TXAGC/nl80211
             const uint64_t now = now_ms();
             tx.on_rf_environment(chan, cur_bw, now);
             if (l.cfg.policy.csa.rx_liveness_ms > 0) {
@@ -3665,6 +3805,7 @@ int run_tx(const Loaded& l) {
                 std::fprintf(stderr, "csa: retune to %u MHz FAILED\n",
                              ca.chan_mhz);  // Pass 69: never silent
             } else {
+                tx.reassert_power();  // §10.5: retune may reset power
                 tx.on_rf_environment(ca.chan_mhz, ca.bw, service_now);
                 cur_chan = ca.chan_mhz;
                 cur_bw = ca.bw;
@@ -3691,6 +3832,9 @@ int run_tx(const Loaded& l) {
                              l.cfg.policy.csa.rx_liveness_ms,
                              csa_liveness_chan);
                 air.value->recover_all(csa_liveness_chan, csa_liveness_bw);
+                // §10.5: recovery ends in `txpower auto` (Pass 48) — put the
+                // latch / resolved curve value back.
+                tx.reassert_power();
             }
             csa_liveness_deadline_ms.reset();  // one-shot per retune
         }
