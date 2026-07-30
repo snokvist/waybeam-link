@@ -19,6 +19,25 @@
       }
     },
     {
+      "name": "x86-ground",
+      "displayName": "x86 ground release, all devourer chip families",
+      "binaryDir": "${sourceDir}/build/x86-ground",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WBLINK_DEVOURER_CHIPS": "all"
+      }
+    },
+    {
+      "name": "rk3566",
+      "displayName": "RK3566 ground cross (aarch64), all devourer chip families",
+      "binaryDir": "${sourceDir}/build/rk3566",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-rk3566.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WBLINK_DEVOURER_CHIPS": "all"
+      }
+    },
+    {
       "name": "ssc338q",
       "displayName": "SigmaStar SSC338Q cross (compile-only verify)",
       "binaryDir": "${sourceDir}/build/ssc338q",
@@ -26,12 +45,25 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "ssc338q-au",
+      "displayName": "SigmaStar SSC338Q cross, 8812AU-only (smallest vehicle binary)",
+      "binaryDir": "${sourceDir}/build/ssc338q-au",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-ssc338q.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WBLINK_DEVOURER_CHIPS": "au"
+      }
     }
   ],
   "buildPresets": [
     { "name": "dev", "configurePreset": "dev" },
     { "name": "release", "configurePreset": "release" },
-    { "name": "ssc338q", "configurePreset": "ssc338q" }
+    { "name": "x86-ground", "configurePreset": "x86-ground" },
+    { "name": "rk3566", "configurePreset": "rk3566" },
+    { "name": "ssc338q", "configurePreset": "ssc338q" },
+    { "name": "ssc338q-au", "configurePreset": "ssc338q-au" }
   ],
   "testPresets": [
     {
