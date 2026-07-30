@@ -100,8 +100,9 @@ class MonAir {
     void set_filter_net_id(std::optional<uint8_t> net_id);
     // §10.4/§10.5 power: nl80211 fixed power via a bounded `iw set txpower
     // fixed <qdb×25 mBm>` fork — the kernel-monitor leg of the backend
-    // actuation matrix (Pass 114). Returns the applied qdb, 0 on CLI failure.
-    int set_power_qdb(size_t adapter, int32_t qdb);
+    // actuation matrix (Pass 114). False on CLI failure — callers must not
+    // cache the value as applied (§10.5).
+    bool set_power_qdb(size_t adapter, int32_t qdb);
     // §10.5 auto restore: `iw set txpower auto` — hand power back to the
     // driver default / per-rate TXAGC curve (the mon-up.sh posture).
     bool set_power_auto(size_t adapter);

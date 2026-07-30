@@ -718,11 +718,11 @@ void MonAir::set_filter_net_id(std::optional<uint8_t> net_id) {
     }
 }
 
-int MonAir::set_power_qdb(size_t adapter, int32_t qdb) {
+bool MonAir::set_power_qdb(size_t adapter, int32_t qdb) {
     // §10.5 (Pass 114): the kernel-monitor actuator is nl80211 fixed power —
     // `iw set txpower fixed <mBm>`, 1 qdb = 25 mBm. Bounded CLI like every
     // other monitor control write; profile/override cadence only.
-    if (adapter >= impl_->adapters.size()) return 0;
+    if (adapter >= impl_->adapters.size()) return false;
     const std::string& ifname = impl_->adapters[adapter]->ifname;
     char mbm[16];
     std::snprintf(mbm, sizeof(mbm), "%d", static_cast<int>(qdb) * 25);
@@ -733,11 +733,11 @@ int MonAir::set_power_qdb(size_t adapter, int32_t qdb) {
                      "kernel-monitor: iw set txpower fixed %s mBm on %s "
                      "failed\n",
                      mbm, ifname.c_str());
-        return 0;
+        return false;
     }
     std::fprintf(stderr, "kernel-monitor: %s txpower fixed %d qdb (%s mBm)\n",
                  ifname.c_str(), qdb, mbm);
-    return qdb;
+    return true;
 }
 
 bool MonAir::set_power_auto(size_t adapter) {

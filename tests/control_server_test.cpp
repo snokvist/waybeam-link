@@ -307,6 +307,23 @@ int main() {
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }
+    // §10.5 wire-range on the wide type: 2^32+20 must 400, not wrap to 20.
+    {
+        txp_qdb = -1000;
+        const std::string body = "{\"qdb\":4294967316}";
+        const std::string req =
+            "POST /api/v1/tx/power HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+        CHECK_EQ_U(txp_qdb, -1000);  // hook never ran
+    }
+    {
+        const std::string body = "{\"qdb\":512}";
+        const std::string req =
+            "POST /api/v1/tx/power HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
     // profile validation error → 400 (min>max), handler ran but rejected.
     {
         const std::string body = "{\"min\":5,\"max\":2}";

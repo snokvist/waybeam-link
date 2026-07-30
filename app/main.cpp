@@ -1335,10 +1335,11 @@ struct AirBackend {
         (void)sgi;
 #endif
     }
-    void set_power_qdb(size_t adapter, int32_t qdb) {
+    // §10.5: false = the backend did NOT accept the value (callers must not
+    // cache it as applied). radio/udp writes are in-process — always accepted.
+    bool set_power_qdb(size_t adapter, int32_t qdb) {
         if (mon) {
-            mon->set_power_qdb(adapter, qdb);
-            return;
+            return mon->set_power_qdb(adapter, qdb);
         }
 #if WBLINK_RADIO
         if (radio) {
@@ -1348,6 +1349,7 @@ struct AirBackend {
         (void)adapter;
         (void)qdb;
 #endif
+        return true;
     }
     // §10.5 auto restore: monitor → driver default (`txpower auto`); radio →
     // offset 0 (undoes the latch; the §10.2 curve resolve re-applies on top
@@ -2450,13 +2452,16 @@ struct TxCore {
             const auto qdb =
                 resolve_power_qdb(pa.curve, mcs, level, pa.ceiling);
             if (qdb && (!pa.applied_qdb || *pa.applied_qdb != *qdb)) {
-                pa.applied_qdb = *qdb;
+                // §10.5: cache only what the backend accepted — a failed
+                // write retries at the next commit/re-assert.
+                bool ok = true;
                 if (apply_power) {
-                    apply_power(pa.adapter_idx, *qdb);
+                    ok = apply_power(pa.adapter_idx, *qdb);
                 } else {
                     std::fprintf(stderr, "power: %s mcs=%u level=%u -> %d qdb\n",
                                  pa.name.c_str(), mcs, level, *qdb);
                 }
+                if (ok) pa.applied_qdb = *qdb;
             }
         }
     }
@@ -2506,7 +2511,9 @@ struct TxCore {
         }
         for (PowerAdapter& pa : power_) {
             if (pa.applied_qdb && apply_power) {
-                apply_power(pa.adapter_idx, *pa.applied_qdb);
+                if (!apply_power(pa.adapter_idx, *pa.applied_qdb)) {
+                    pa.applied_qdb.reset();  // §10.5: retry at next commit
+                }
             }
         }
     }
@@ -2517,7 +2524,7 @@ struct TxCore {
     // Actuation hooks (§10.4/§10.5); unset = logged intent. apply_mode is
     // radio-only by design (Pass 13: monitor carries MCS per-packet).
     std::function<void(uint8_t mcs, bool sgi)> apply_mode;
-    std::function<void(size_t adapter_idx, int32_t qdb)> apply_power;
+    std::function<bool(size_t adapter_idx, int32_t qdb)> apply_power;
     std::function<void(size_t adapter_idx)> apply_power_auto;
     std::function<std::optional<uint32_t>(size_t bytes, bool include_pending)>
         estimate_airtime;
@@ -3268,7 +3275,7 @@ int run_tx(const Loaded& l) {
             air.value->set_tx_mode(mcs, sgi);
         };
         tx.apply_power = [&](size_t idx, int32_t qdb) {
-            air.value->set_power_qdb(idx, qdb);
+            return air.value->set_power_qdb(idx, qdb);
         };
         // §10.5 auto restore (Pass 114): backend default power.
         tx.apply_power_auto = [&](size_t idx) {
