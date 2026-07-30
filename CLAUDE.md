@@ -3,8 +3,17 @@
 A best-effort, latency-first broadcast video + telemetry link over monitor/
 injection WiFi (RTL8812AU/CU/EU via vendored OpenIPC devourer), with per-adapter
 RX diversity as primary redundancy, opt-in importance-gated ARQ, an adaptive
-link layer, and a follow-me channel switch. Standalone repo, not a submodule of
-`waybeam-coordination`. See `README.md` for the full pitch and current status.
+link layer, and a follow-me channel switch. See `README.md` for the full pitch
+and current status.
+
+**Registered as a `waybeam-coordination` submodule since 2026-07-30** (coord
+PR #126), tracking `main`. That repo owns the cross-repo view: the inventory
+card `repos/waybeam-link.md`, the roadmap `roadmaps/waybeam-link.md` (this repo
+no longer keeps its own — `ROADMAP.md` is a pointer stub), and the port registry
+`protocols/port-registry.md`, where `:8091` / `:8099` / `:9110` and bench-only
+`:5801`/`:5810` are recorded. This repo still owns its own spec: `PROTOCOL.md`
+is **not** a coordination `protocols/` file, and the over-air wire format is
+settled here, not there.
 
 ## The law
 
