@@ -55,6 +55,16 @@
         "CMAKE_BUILD_TYPE": "Release",
         "WBLINK_DEVOURER_CHIPS": "au"
       }
+    },
+    {
+      "name": "ssc338q-eu",
+      "displayName": "SigmaStar SSC338Q cross, 8812EU-only (smallest vehicle binary)",
+      "binaryDir": "${sourceDir}/build/ssc338q-eu",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-ssc338q.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WBLINK_DEVOURER_CHIPS": "eu"
+      }
     }
   ],
   "buildPresets": [
@@ -63,7 +73,8 @@
     { "name": "x86-ground", "configurePreset": "x86-ground" },
     { "name": "rk3566", "configurePreset": "rk3566" },
     { "name": "ssc338q", "configurePreset": "ssc338q" },
-    { "name": "ssc338q-au", "configurePreset": "ssc338q-au" }
+    { "name": "ssc338q-au", "configurePreset": "ssc338q-au" },
+    { "name": "ssc338q-eu", "configurePreset": "ssc338q-eu" }
   ],
   "testPresets": [
     {

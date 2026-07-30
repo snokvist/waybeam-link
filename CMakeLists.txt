@@ -47,31 +47,44 @@ if(WBLINK_RADIO)
     #                     (rtl8822e): exactly the adapters the fleet flies.
     #   au             — Jaguar1 only: smallest vehicle binary for
     #                     8812AU-equipped craft.
+    #   eu             — rtl8822e only: smallest vehicle binary for
+    #                     8812EU-equipped craft.
     #   all            — every USB family devourer supports (adds 8814AU,
     #                     Jaguar2 8822BU/8821CU, Kestrel 8852B/C 11ax) for
     #                     ground-side adapter tests. PCIe stays off.
     set(WBLINK_DEVOURER_CHIPS "fleet" CACHE STRING
-        "devourer chip families: fleet | au | all")
+        "devourer chip families: fleet | au | eu | all")
     if(WBLINK_DEVOURER_CHIPS STREQUAL "all")
-        set(_wblink_j3 ON)
+        set(_wblink_j1 ON)
+        set(_wblink_j3c ON)
+        set(_wblink_j3e ON)
         set(_wblink_extra ON)
     elseif(WBLINK_DEVOURER_CHIPS STREQUAL "au")
-        set(_wblink_j3 OFF)
+        set(_wblink_j1 ON)
+        set(_wblink_j3c OFF)
+        set(_wblink_j3e OFF)
+        set(_wblink_extra OFF)
+    elseif(WBLINK_DEVOURER_CHIPS STREQUAL "eu")
+        set(_wblink_j1 OFF)
+        set(_wblink_j3c OFF)
+        set(_wblink_j3e ON)
         set(_wblink_extra OFF)
     elseif(WBLINK_DEVOURER_CHIPS STREQUAL "fleet")
-        set(_wblink_j3 ON)
+        set(_wblink_j1 ON)
+        set(_wblink_j3c ON)
+        set(_wblink_j3e ON)
         set(_wblink_extra OFF)
     else()
         message(FATAL_ERROR
-            "WBLINK_DEVOURER_CHIPS must be fleet, au, or all (got "
+            "WBLINK_DEVOURER_CHIPS must be fleet, au, eu, or all (got "
             "'${WBLINK_DEVOURER_CHIPS}')")
     endif()
-    set(DEVOURER_JAGUAR1       ON              CACHE BOOL "" FORCE)
+    set(DEVOURER_JAGUAR1       ${_wblink_j1}   CACHE BOOL "" FORCE)
     set(DEVOURER_8814          ${_wblink_extra} CACHE BOOL "" FORCE)
     set(DEVOURER_JAGUAR2_8822B ${_wblink_extra} CACHE BOOL "" FORCE)
     set(DEVOURER_JAGUAR2_8821C ${_wblink_extra} CACHE BOOL "" FORCE)
-    set(DEVOURER_JAGUAR3_8822C ${_wblink_j3}    CACHE BOOL "" FORCE)
-    set(DEVOURER_JAGUAR3_8822E ${_wblink_j3}    CACHE BOOL "" FORCE)
+    set(DEVOURER_JAGUAR3_8822C ${_wblink_j3c}   CACHE BOOL "" FORCE)
+    set(DEVOURER_JAGUAR3_8822E ${_wblink_j3e}   CACHE BOOL "" FORCE)
     set(DEVOURER_KESTREL_8852B ${_wblink_extra} CACHE BOOL "" FORCE)
     set(DEVOURER_KESTREL_8852C ${_wblink_extra} CACHE BOOL "" FORCE)
     set(DEVOURER_PCIE          OFF             CACHE BOOL "" FORCE)

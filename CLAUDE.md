@@ -44,10 +44,10 @@ cmake --build --preset ssc338q                      # ARMv7 cross (SigmaStar tar
 ```
 
 Additional flavors (chip families via `WBLINK_DEVOURER_CHIPS` = fleet | au |
-all): `x86-ground` and `rk3566` (aarch64 ground cross) build with **all**
-devourer USB families for ground-side adapter tests; `ssc338q-au` is the
-8812AU-only vehicle variant (smallest binary for the ~5.7 MB overlay). The
-default `fleet` trio is 8812AU + 8812CU + 8812EU.
+eu | all): `x86-ground` and `rk3566` (aarch64 ground cross) build with
+**all** devourer USB families for ground-side adapter tests; `ssc338q-au` /
+`ssc338q-eu` are single-chip vehicle variants (smallest binary for the
+~5.7 MB overlay). The default `fleet` trio is 8812AU + 8812CU + 8812EU.
 
 `dev` is the gate for every PR. `ssc338q` is compile-only verification (no
 sanitizers, no run) but must stay green and warning-free for **our** targets
