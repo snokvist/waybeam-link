@@ -1810,18 +1810,26 @@ re-resolved away at the next §10.4 profile commit, so setting an override
 makes the §10.2 curve resolve **yield** until the override is cleared.
 
 - `{"qdb": <int>}` latches an **absolute** power on every `role:"tx"` adapter
-  of this node: applied immediately, and re-asserted at every point the
-  selector would have written power (profile commit; after a §11 retune, in
-  the same slot as the §10.4 `ReApplyTxPower`). The §10.3 `max_power_qdb`
-  ceiling — when configured — is the only clamp that also bounds the override;
-  there is no regulatory clamp (§10.3 posture unchanged).
+  of this node: applied immediately. While latched the §10.4 commit resolve
+  **yields** (a profile commit does not itself reset hardware power, so no
+  write happens there); the latch is **re-asserted** after every event that
+  can reset hardware power — a §11/§11.5 retune (the §10.4 `ReApplyTxPower`
+  slot) and a §11.6 recovery (which ends in `txpower auto`, Pass 48).
+  Accepted wire-range is `-511..511` qdb (400 outside — the actuator field
+  width, checked before any clamp). The §10.3 `max_power_qdb` ceiling — when
+  configured — is the only *clamp*: the hardware receives
+  `min(qdb, max_power_qdb)` per adapter, while `GET`/§15.3 report the latched
+  request value.
 - `{"auto": true}` clears the latch **and forces one immediate restore** (it
-  must not wait for the next profile change): on the radio backend the §10.2
-  curve resolve resumes (no curve loaded → a one-shot offset 0 undoes the
-  latch); on kernel-monitor the driver default is restored via
+  must not wait for the next profile change): on the radio backend a one-shot
+  offset 0 undoes the latch, then the §10.2 curve resolve resumes when a
+  curve is loaded; on kernel-monitor the driver default is restored via
   `txpower auto`, after which the curve resolve resumes if a curve is loaded.
 - `GET /api/v1/tx/power` reports `{override_active, qdb, backend}`; the §15.3
   `link` object gains `tx_power_override` (bool) beside `tx_power_qdb`.
+- A failed actuator write (the forked `iw` on kernel-monitor) is logged and
+  **not cached** as applied — the value is re-applied at the next commit
+  resolve or re-assert point instead of being silently believed on-hardware.
 
 **Backend actuation matrix.** The §10 model is backend-agnostic; only the
 actuator differs (the §3.0 rate split's power twin):
@@ -1830,6 +1838,7 @@ actuator differs (the §3.0 rate split's power twin):
 |---|---|---|
 | `radio` (devourer) | `SetTxPowerOffsetQdb(qdb)` (§10.4, unchanged) | resume curve resolve; offset 0 when no curve |
 | `kernel-monitor` | `iw dev <ifname> set txpower fixed <qdb×25 mBm>` (1 qdb = 25 mBm), forked with the §11.6 bounded-CLI deadline | `iw dev <ifname> set txpower auto` |
+| `udp` (dev bench) | logged intent only (no RF hardware) | logged intent only |
 
 Cadence law is unchanged: power moves at profile/override cadence only, never
 per frame. On kernel-monitor this also repairs the §10.4 gap where the commit
@@ -3161,7 +3170,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "return_window_hits": 7, "return_window_misses": 2,
     "unicast_sent": 0, "unicast_fallback": 0 },
   "link": { "target_originator": 9, "target_session": 183726,
-    "profile": 4, "mcs": 4, "tx_power_qdb": 1800,
+    "profile": 4, "mcs": 4, "tx_power_qdb": 1800, "tx_power_override": false,
     "report_epoch": 1822, "report_age_ms": 40,
     "state": "HOLD", "transition_reason": "LOSS_PERSISTENT",
     "loss_window_milli": 12, "loss_ewma_milli": 18, "loss_uniq": 214,
@@ -3509,7 +3518,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
 | `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
 | `GET /api/v1/modes` | `{active, apply_configured, catalog_fingerprint, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist. A ground with an IP path reads it here; one without must hardcode a copy, and pins `catalog_fingerprint` (Pass 108) to detect index drift (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
-| `GET /api/v1/tx/power` | `{override_active, qdb, backend}` — the §10.5 override-latch state; `qdb` is the latched absolute value (present only while `override_active`), `backend` ∈ `radio`\|`kernel-monitor` (TX node) |
+| `GET /api/v1/tx/power` | `{override_active, qdb, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`kernel-monitor`\|`udp` (TX node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -3533,7 +3542,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 |---|---|---|
 | `POST /api/v1/csa` | `{ "mhz": 5805, "class": 0 }` | start a §11 CSA campaign (issuer/ground node) |
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
-| `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto` — else 400 (TX node) |
+| `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (TX node) |
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node) |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |

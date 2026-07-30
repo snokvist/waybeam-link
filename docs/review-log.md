@@ -4228,3 +4228,18 @@ monitor 80 MHz retune width) are recorded as roadmap follow-ups, not this pass.
 (reboot restores config/curve behavior) and local-management HTTP only —
 same §13 posture as Pass 113. `apply_mode` stays radio-only (Pass 13: monitor
 carries MCS per-packet in radiotap); power is the one lever unified here.
+
+**Pre-merge review fixups (same PR, 2026-07-30).** Two reviewer findings
+tightened before merge: (1) `qdb` is now range-checked as a wide integer at
+the route (`-511..511`, 400 outside — the actuator field width; previously a
+64-bit JSON value narrowed to `int` *before* the range gate, so e.g. 2^32+20
+latched as 20); the range is now spec'd in §10.5/§15.5. (2) A failed actuator
+write (forked `iw`) is no longer cached as applied — the §10.4
+change-detection cache only records a value the backend accepted, so a
+transient `iw` failure retries at the next commit/re-assert instead of
+sticking silently (§10.5 bullet added). Spec wording aligned in the same
+edit: the latch *yields* at profile commit (nothing to re-write there) and
+re-asserts after retune/CSA/recovery; GET reports the latched request while
+the §10.3 ceiling clamps at the actuator; radio auto-restore issues one
+offset-0 write before the curve resolve resumes; `backend` may read `udp` on
+the dev bench (logged intent).
