@@ -58,6 +58,14 @@ class VcmdCraft {
     // Next echo copy to inject (already MAC'd), spaced copy_interval_ms.
     std::optional<VehicleCmd> tick(uint64_t now_us);
 
+    // §11.4a runtime pairing re-key (Pass 113): new pairing epoch — clears
+    // the anti-replay map and any pending echo burst.
+    void set_psk(std::vector<uint8_t> psk) {
+        policy_.psk = std::move(psk);
+        last_applied_.clear();
+        echoes_left_ = 0;
+    }
+
     uint32_t last_nonce() const { return last_.nonce; }
 
   private:

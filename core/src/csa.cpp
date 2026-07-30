@@ -197,6 +197,21 @@ CsaAction CsaFollower::tick(uint64_t now_us) {
     return a;
 }
 
+void CsaFollower::set_psk(std::vector<uint8_t> psk) {
+    policy_.psk = std::move(psk);
+    latched_ = std::nullopt;
+    last_applied_.clear();
+    campaign_ = CsaPacket{};
+    state_ = State::kIdle;
+}
+
+void CsaFollower::sync_channel(uint16_t chan_mhz) {
+    campaign_ = CsaPacket{};
+    campaign_.prev_chan = chan_mhz;
+    campaign_.target_chan = chan_mhz;
+    state_ = State::kIdle;
+}
+
 const char* CsaFollower::state_str() const {
     switch (state_) {
         case State::kIdle:

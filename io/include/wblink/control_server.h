@@ -86,6 +86,12 @@ struct ControlHandlers {
     // §15.5 Pass 104: modes_list returns the JSON body for GET /api/v1/modes —
     // the operating-mode catalog (tx/craft only, null → 409).
     std::function<std::string()> modes_list;
+    // §15.5 Pass 113 (tx/craft only, null → 409): local channel-set within
+    // the CSA allowlist ("" on success, error string → 400), and the §11.4a
+    // runtime pairing gate (false = open pairing / fresh announced token,
+    // true = locked / stop announcing).
+    std::function<std::string(int mhz)> channel_set;
+    std::function<std::string(bool enabled)> psk_enable;
 };
 
 class ControlServer {
