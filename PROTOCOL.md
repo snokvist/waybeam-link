@@ -1948,7 +1948,9 @@ the data path — it is authenticated:
 The `csa_psk` HMAC key (§11.4) comes from one of two sources; **HMAC is always
 applied** — there is no unauthenticated-CSA mode for craft/ground. **The source
 is selected solely by whether `csa.psk` is configured** — present ⇒ secret,
-absent ⇒ announced token (Pass 61). There is no separate mode toggle.
+absent ⇒ announced token (Pass 61). There is no separate *boot* mode
+toggle; a runtime pairing gate exists as a local management action (Pass 113,
+below).
 - **Announced session token (default — no `csa.psk` configured).** The craft
   **auto-generates a 16-byte token `P` at boot** (io/app entropy, alongside
   `session_id`; the pure `core` layer stays RNG/clock-free and merely *verifies*
@@ -1982,6 +1984,24 @@ emptiness of a buffer. Implementations MUST carry it as an explicit policy input
 zero-length key: a security posture that is a side effect of an empty container
 is one refactor away from silently inverting, and gives craft, ground and
 spectator the same code path with three different intended outcomes.
+
+**Runtime pairing control (Pass 113).** The craft exposes a local management
+action — §15.5 `POST /api/v1/psk {"enabled":bool}` — that gates pairing at
+runtime without adding a third key source:
+- `enabled=false` ("open pairing"): the craft generates a **fresh** session
+  token, re-keys its CSA/VCMD verifiers with it, drops the §11.5a binding and
+  all in-flight campaign + anti-replay state (a re-key is a new pairing
+  epoch), and resumes ANNOUNCE with `psk_present=1`. The first ground to hear
+  the beacon can claim, exactly as after an unconfigured boot.
+- `enabled=true` ("locked"): the craft keeps its **current** key but stops
+  announcing it (`psk_present=0`, 16 zero bytes). The bound ground keeps
+  working; a new ground can no longer learn the key off the air.
+
+The toggle is **craft-session volatile** (like all §11.7 state): a reboot
+restores the config-decided source — present `csa.psk` ⇒ secret, absent ⇒
+fresh announced token. The config remains the sole *boot-time* selector. It is
+a local management action (HTTP on the craft's control socket), never an
+over-air command: the over-air surface is unchanged.
 
 ### 11.5 State machine (follower)
 ```
@@ -3446,7 +3466,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 |---|---|
 | `GET /api/v1/stats` | the current §15.3 snapshot as one JSON object (no trailing newline) |
 | `GET /api/v1/stats/stream` | `text/event-stream`; one §15.3 object per `stats.hz` tick |
-| `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]`, `build` |
+| `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]`, `build`; on a TX/craft node also the live self state `channel`, `psk_announced`, `claimed`, `claimed_by` (Pass 113) |
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
 | `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |
 | `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[]}` (§15.5a; ground/rx node) |
@@ -3489,6 +3509,8 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/arq` | `{ "enabled": true\|false }` | RX-local NACK-emission gate (§6.4) — this node only, the craft is untouched (rx node) |
 | `POST /api/v1/link/fps` | `{ "ladder": true\|false }` | §9.11 ladder toggle (Pass 99); `true` = variable fps (the loop runs), `false` = static (the loop stops, fps holds). Routes through the same §11.7 `FPS_LADDER` transition as the over-air path; **MUT_LIVE**, no restart. `409` off a venc/TX node (TX/craft node) |
 | `POST /api/v1/mode` | `{ "name": "imx335-100fps-highrange" }` | select a user-facing operating mode (§16 of `docs/venc-mode-matrix.md`). **Not MUT_LIVE** — see below (TX/craft node) |
+| `POST /api/v1/channel` | `{ "mhz": 5805 }` | locally retune the craft to an **allowlisted** channel outside any §11 campaign: retunes all adapters, informs the §9 selector, arms the §11.6 RX-liveness guard, clears any in-flight CSA campaign and drops the §11.5a binding (the ground must re-scout). 400 off-allowlist; **volatile** — a reboot returns to the boot channel (Pass 113, TX/craft node) |
+| `POST /api/v1/psk` | `{ "enabled": true\|false }` | §11.4a runtime pairing gate: `false` = re-key with a fresh announced token + drop the §11.5a binding (open pairing), `true` = stop announcing the current key (locked). Craft-session volatile (Pass 113, TX/craft node) |
 | `POST /api/v1/venc/reassert` | `{}` | drop the §9.6 venc-actuator write-on-change cache so the next tick re-asserts bitrate + frame-caps + fps onto the encoder. Called by the §16 applier **after** it restarts venc; closes the stranded-bitrate gap a restart would otherwise leave (Pass 103, TX/craft node) |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile`,

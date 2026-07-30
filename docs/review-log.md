@@ -4149,3 +4149,39 @@ change is required to keep periodic GOP IDRs out of the authored MCS0 path.
 
 Host verification: full ASan+UBSan build and 50/50 `ctest --preset dev`.
 Target verification: clean SSC338Q configure/build with the OpenIPC toolchain.
+
+## Pass 113 — craft-local channel set + runtime pairing gate (2026-07-30)
+
+**Need.** The vehicle OSD menu (waybeam-hub, navigated with FC sticks over the
+new MSP DisplayPort mode) must let a pilot at the craft (a) move the craft to
+another allowlisted channel and (b) open or lock pairing so the first ground to
+hear the beacon can claim the craft — with no IP path to any ground. Neither
+action existed: CSA is issuer-only (`h.csa` deliberately null on TX), and
+§11.4a selected the key source solely from config with "no separate mode
+toggle".
+
+**Ruling (operator, 2026-07-30).** Two new TX-node §15.5 endpoints:
+
+- `POST /api/v1/channel {"mhz":N}` — local retune, gated on
+  `policy.csa.channel_allowlist` (400 off-list). Executes the same commit
+  sequence as a CSA switch (retune_all → selector `on_rf_environment` → §11.6
+  RX-liveness guard), then clears any in-flight campaign
+  (`CsaFollower::sync_channel`) and drops the §11.5a binding
+  (`release_binding`) — the ground must re-scout, and a stale
+  `kCommitted`/`prev_chan` from before a local retune must never drive a
+  revert. Volatile: reboot returns to the boot channel.
+- `POST /api/v1/psk {"enabled":bool}` — the §11.4a runtime pairing gate.
+  `false` = fresh token, re-key follower + vcmd verifiers (new pairing epoch:
+  binding, campaign, anti-replay all cleared), announce `psk_present=1`;
+  `true` = keep the current key, stop announcing it. Volatile; the config
+  remains the sole boot-time selector.
+
+Self state (`channel`, `psk_announced`, `claimed`, `claimed_by`) joins
+`GET /api/v1/info`, and the TX now reports its live channel in `/api/v1/stats`
+(`emit_stats` previously passed 0 on TX).
+
+**Boundary.** No wire change, no table-hash change, no persistence —
+`persist_channel`/`home_chan` remain dead config (explicitly out of scope).
+Both actions are local management HTTP on the craft's control socket, never
+over-air commands: an attacker who can reach that socket has already won,
+while the over-air surface is unchanged.
