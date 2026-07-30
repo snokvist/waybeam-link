@@ -98,10 +98,14 @@ class MonAir {
     // the §3.0 BPF pre-filter (nullopt = waybeam-shape only, any net_id).
     void set_stamp_net_id(uint8_t net_id);
     void set_filter_net_id(std::optional<uint8_t> net_id);
-    // §10.4 power: the 8812eu per-rate TXAGC curve owns power (rtw_tx_pwr_by_rate
-    // =1; nl80211 txpower is set once at monitor bring-up). Logged intent here;
-    // returns the requested qdb.
-    int set_power_qdb(size_t adapter, int32_t qdb);
+    // §10.4/§10.5 power: nl80211 fixed power via a bounded `iw set txpower
+    // fixed <qdb×25 mBm>` fork — the kernel-monitor leg of the backend
+    // actuation matrix (Pass 114). False on CLI failure — callers must not
+    // cache the value as applied (§10.5).
+    bool set_power_qdb(size_t adapter, int32_t qdb);
+    // §10.5 auto restore: `iw set txpower auto` — hand power back to the
+    // driver default / per-rate TXAGC curve (the mon-up.sh posture).
+    bool set_power_auto(size_t adapter);
     // Monitor netdevs expose no per-adapter TSF read → always nullopt (caller
     // falls back to host time, §7.2).
     std::optional<uint64_t> read_tsf(size_t adapter);

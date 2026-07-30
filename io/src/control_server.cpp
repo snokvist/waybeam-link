@@ -288,6 +288,13 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         if (path == "/api/v1/health") {
             return reply(200, "OK", h_.health_json ? h_.health_json() : "{}");
         }
+        if (path == "/api/v1/tx/power") {  // §10.5 Pass 114
+            if (!h_.tx_power_json) {
+                return reply(409, "Conflict",
+                             json_err("tx power not available in this mode"));
+            }
+            return reply(200, "OK", h_.tx_power_json());
+        }
         if (path == "/api/v1/discovery") {
             return reply(200, "OK",
                          h_.discovery_json ? h_.discovery_json()
@@ -430,6 +437,24 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             return reply(400, "Bad Request", json_err("min and max required"));
         }
         return done(h_.profile(j.value("min", 0), j.value("max", 255)));
+    }
+    if (path == "/api/v1/tx/power") {  // §10.5 Pass 114
+        if (!h_.tx_power_set) return na();
+        const bool has_qdb = j.contains("qdb") && j["qdb"].is_number_integer();
+        const bool has_auto = j.contains("auto") && j["auto"].is_boolean() &&
+                              j["auto"].get<bool>();
+        if (has_qdb == has_auto) {
+            return reply(400, "Bad Request",
+                         json_err("exactly one of qdb (int) / auto:true"));
+        }
+        // §10.5 wire-range, checked on the wide type BEFORE narrowing — a
+        // 64-bit JSON value must 400 here, not wrap into -511..511.
+        const int64_t qdb = has_qdb ? j["qdb"].get<int64_t>() : 0;
+        if (qdb < -511 || qdb > 511) {
+            return reply(400, "Bad Request",
+                         json_err("qdb out of range (-511..511)"));
+        }
+        return done(h_.tx_power_set(has_auto, static_cast<int>(qdb)));
     }
     if (path == "/api/v1/fec") {
         if (!h_.fec) return na();

@@ -391,6 +391,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.mcs);
     out += ",\"tx_power_qdb\":";
     append_i32(out, snap.link.tx_power_qdb);
+    out += ",\"tx_power_override\":";
+    out += snap.link.tx_power_override ? "true" : "false";
     out += ",\"report_epoch\":";
     append_u64(out, snap.link.report_epoch);
     out += ",\"report_age_ms\":";

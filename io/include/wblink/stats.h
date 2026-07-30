@@ -184,6 +184,7 @@ struct LinkStats {
     uint8_t profile = 0;
     uint8_t mcs = 0;
     int32_t tx_power_qdb = 0;
+    bool tx_power_override = false;  // §10.5 latch active (Pass 114)
     uint32_t report_epoch = 0;
     uint32_t report_age_ms = 0;
     std::string state = "HOLD";
