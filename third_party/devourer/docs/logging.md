@@ -77,7 +77,7 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | ev | emitter | fields |
 |---|---|---|
 | `init.timing` | L (`src/InitTimer.h`) + demos | stage ("scope.stage", e.g. "demo.first_rx_frame", "txdemo.first_tx_submit"), ms |
-| `adapter.caps` | RX, TX, doctor, txpower (`examples/common/caps_event.h`) | supported, chip, names, chip_id "0x..", gen, variant, transport, tx_chains, rx_chains, n_ss, stbc, ldpc, sgi, bw_max, bw[] (MHz), txpwr_max, txpwr_step_qdb, txpwr_step_measured, txpwr_min_qdb, txpwr_max_qdb, tune_2g4[]\|null, tune_5g[]\|null, char_2g4[]\|null, char_5g[]\|null, ldpc_rx_ht, ldpc_rx_vht, ldpc_rx_flag, per_pkt_txpwr, narrowband, fastretune, he_er_su, per_chain_rssi |
+| `adapter.caps` | RX, TX, doctor, txpower (`examples/common/caps_event.h`) | supported, chip, names, chip_id "0x..", gen, variant, transport, tx_chains, rx_chains, n_ss, stbc, ldpc, sgi, bw_max, bw[] (MHz), txpwr_max, txpwr_step_qdb, txpwr_step_measured, txpwr_min_qdb, txpwr_max_qdb, txpwr_rate_diffs, txpwr_rate_diffs_hw, txpwr_rate_diffs_measured, tune_2g4[]\|null, tune_5g[]\|null, char_2g4[]\|null, char_5g[]\|null, ldpc_rx_ht, ldpc_rx_vht, ldpc_rx_flag, per_pkt_txpwr, narrowband, fastretune, he_er_su, per_chain_rssi |
 | `debug.wreg` | L (`DEVOURER_LOG_WRITES`) | addr "0x0nnn", width, val "0x…" |
 | `hop.prof` | L (`DEVOURER_HOP_PROF`) | gen, ch, `<stage>_us`…, total_us |
 | `tx.fail` | L (send failure; regress.py keys on it) | {status, actual_len, timeout} or {rc, timeout} |
@@ -90,6 +90,8 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | `rx.body` | RX (`DEVOURER_DUMP_BODY`) | rate, rssi[2], evm[2], snr[2], crc, len, body hex |
 | `rx.corrupt` | RX (`DEVOURER_RX_DUMP_ALL`) | len, crc, icv, rate, bw, stbc, ldpc, sgi, rssi[2], evm[2], snr[2] |
 | `rx.txhit` | RX, TX | hits, total_rx, len, seq, paggr, ppdu, rate, bw, stbc, ldpc, ppdu_type — canonical-SA (57:42:75:05:d6:00) matcher; rate/ldpc prove what encoding was decoded (8814A reports ldpc=0 always — no HW indicator); ppdu_type is the AX RXD format nibble (7=HE_SU, 8=HE_ERSU; 255 on pre-AX chips) |
+| `rx.seq` | RX (`DEVOURER_RX_PCTR`) | pctr, tsfl, seq, crc, paggr, ppdu — the ground-truth per-frame delivery sequence for the RX-ring loss study: pctr is the u32 the txdemo QoS-Data path stamps at MPDU offset 26, so gaps in it are per-frame loss; paggr/ppdu carry the aggregate structure the host-vs-RF discriminator keys on. Lean by design (no body hex) so the emit can't perturb the pump thread. SA gate follows `DEVOURER_RX_AGG_SA`, else canonical SA |
+| `rx.ring` | L (`DEVOURER_RX_RING_MS`) | t, mode ("async"/"sync"), n_urbs, armed (URBs posted to the HCD and awaiting a frame — the depth that starves under a slow inline consumer), min_armed (low-water mark since the last emit), cb_max_us (worst inline-consume latency in the window), resubmit_fail, completions (cumulative URB callbacks), empties (cumulative callbacks that left the ring with zero posted URBs), pool_free (−1 = no host pool). The mechanism-proof telemetry: empties/completions is the host-starvation rate — near-0 under RF loss (the ring stays armed because frames don't arrive), high under host starvation (frames out-race resubmit and drain the ring). Counted in the callback, so robust to the pump-thread starvation that makes the periodic emit sparse |
 | `rx.count` | TX (its RX thread) | total, len |
 | `rx.path` | RX (`DEVOURER_RX_ALLPATHS`) | seq, rssi[4], snr[4], evm[4] |
 | `rx.path_mask` | L (toggle spec) | t, mask "0xNN" |
@@ -118,7 +120,7 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | `txpwr.set` | TX | index, t_ms |
 | `txpwr.readback` | TX | index, cck1m, ofdm6m, mcs7, rb |
 | `txpwr.state` | txpower | flat, offset_qdb, steps, satlo, sathi, cck, ofdm, mcs7, rb |
-| `txpwr.caps` | txpower | supported, max, step_qdb, step_measured, min_qdb, max_qdb |
+| `txpwr.caps` | txpower | supported, max, step_qdb, step_measured, min_qdb, max_qdb, rate_diffs, rate_diffs_hw (0 = software send-time fold), rate_diffs_measured |
 | `txpwr.offset` | txpower | requested, applied |
 | `thermal` | RX, TX, txpower | t, raw, baseline\|null, [delta], status |
 
@@ -127,6 +129,17 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 |---|---|---|
 | `hop.dwell` | TX, duplex | dwell, round, channel, frame, switch_us, t_ms, [mode] |
 | `hop.done` | TX, duplex | frames, dwells |
+| `hop.rx` | RX (lockstep, `DEVOURER_HOP_CHANNELS`+`_SLOT_MS`) | state (acquire\|track\|retune\|decode\|lost) + per-state fields: channel, slot, epoch, retune_us, dead_us |
+| `hopset.propose` | TX/RX (`DEVOURER_HOP_ADAPTIVE`) | t, v, role (tx\|rx), slot, gen, mask "0x…", obs, reasons "0x…" |
+| `hopset.commit` | TX/RX (`DEVOURER_HOP_ADAPTIVE`) | t, v, role, slot, gen, mask "0x…", activate_round, activate_slot — TX = commit issued, RX = commit adopted as pending |
+| `hopset.activate` | TX/RX (`DEVOURER_HOP_ADAPTIVE`) | same fields — the committed state swapped in at the boundary |
+| `hopset.reject` | TX/RX (`DEVOURER_HOP_ADAPTIVE`) | t, v, role, slot, reason (`hopset_reason_name`: bad_mac…timeout) |
+| `hopset.gen_mismatch` | RX (`DEVOURER_HOP_ADAPTIVE`) | t, v, role, slot, seen_gen, cur_gen, cur_mask "0x…" — a v2 marker advertised a state we don't hold |
+| `hopset.recover` | RX (`DEVOURER_HOP_ADAPTIVE`) | commit/activate fields — re-synchronized from an authenticated commit/status after a missed transition |
+| `hopset.sense` | TX (`DEVOURER_TX_SENSE`) | t, v, role, slot, round, gen, base_idx, ch, phase (pre\|post), probe, window_us (MEASURED, barrier-read-end→read-end), settle_us, read_us, valid_fa + cca_ofdm/cca_cck/fa_ofdm/fa_cck + cca_rate/fa_rate (per ms), valid_igi + igi, valid_nhm + nhm_busy/nhm_dur, flags "0x…" (`TxSenseFlag`), scored, occ — one quiet-window observation |
+| `hopset.decision` (TX) | TX (`DEVOURER_TX_SENSE`) | the RX envelope plus mode (rx\|veto\|either\|failsafe), origin (rx\|tx\|fused\|failsafe), kind (hold\|exclude\|restore\|delay), veto (`fusion_veto_name`: none\|tx_broad\|tx_alt_dirty\|tx_sensor_absent\|tx_insufficient), rx_wanted, tx_wanted, disagree, tx_valid, tx_target_occ/tx_band_min/tx_band_max, fb_age (rounds or "never"), fusion "0x…" — both endpoints' views on one line, so a log reader sees the argument and not just the conclusion |
+| `hopset.decision` | RX (`DEVOURER_HOP_POLICY`) | t, v, role, slot, round, kind (hold\|exclude\|restore), obs, policy "0x…" (config hash), then either hold (`hopset_hold_name`: insufficient_rounds\|cooldown\|proposal_outstanding\|no_impairment\|not_persistent\|broad_degradation\|no_healthy_alternative\|min_active_floor\|max_excluded_frac\|probe_hysteresis_pending) or mask "0x…" + reasons "0x…" (bit0 delivery_floor, 1 persistent, 2 healthy_alt, 3 crc_dominant, 4 energy_interference, 5 weak_signal, 6 sync_loss, 7 probe_recovery, 8 probe_evidence) + target; `DEVOURER_HOP_POLICY_EVENTS=2` adds holds and per-channel c0..cN ("on\|off d=<delivery> p=<probe delivery> v=<visits> imp=<impaired run>") |
+| `hopset.probe` | TX/RX (`DEVOURER_HOP_PROBE_ROUNDS`) | t, v, role, slot, round, base_idx, ch, delivered, frames — one keyed recovery-probe dwell on an excluded channel |
 
 ### Channel migration (chanscout — docs/adaptive-channel-migration.md)
 | ev | emitter | fields |

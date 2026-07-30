@@ -95,6 +95,12 @@ public:
    * once, then runs this on its own std::thread next to the TX loop. */
   void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
   void StopRxLoop() override { should_stop = true; }
+  /* Jaguar1's send path is the only asynchronous one in the tree, so its
+   * Stop() is TX quiesce and nothing else: cancel and reap the outstanding
+   * bulk-OUT URBs while the caller's libusb context is still up. Deliberately
+   * NOT a card-disable power sequence — this family has never run one, and
+   * adding it here would be an unvalidated change of on-the-wire behaviour. */
+  void Stop() override;
   void SetMonitorChannel(SelectedChannel channel) override;
   /* Lean frequency-hop retune: switches the RF channel only, skipping the
    * per-rate TX-power loop, bandwidth post-set, and thermal pwrtrk tick that
@@ -132,6 +138,12 @@ public:
   devourer::TxPowerCaps GetTxPowerCaps() override;
   int SetTxPowerOffsetQdb(int qdb) override;
   void SetTxPowerIndexOverride(int idx) override;
+  /* Caller-supplied per-rate power shape (src/TxPower.h): replaces the EFUSE
+   * per-rate walk, anchored on the HT MCS7 index and quantized to this
+   * family's 0.5 dB step. Carried by the same per-rate walk every channel-set
+   * runs, so it is sticky by construction; std::nullopt restores the walk. */
+  bool SetTxPowerRateDiffs(
+      const std::optional<devourer::TxRateDiffsQdb> &diffs) override;
   bool ReApplyTxPower() override;
   /* Per-packet TX-power offset default — 8814A ONLY (its dword5 [30:28]
    * descriptor LUT at the 8822B TXPWR_OFSET position: 0=none 1=-3 2=-7
@@ -199,12 +211,12 @@ public:
    * IGI noise-floor (0xC50), then resets the counters so the next call is a
    * fresh delta. The read side of the CW tone. NB: if DEVOURER_PHYDM_WATCHDOG is
    * also running it shares/steals these counters. */
-  RxEnergy GetRxEnergy() override;
+  RxEnergy GetRxEnergy(bool with_nhm) override;
 
   /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — subsumes
    * GetRxEnergy. Fed per decoded frame in the RX loop via _rxq. */
   devourer::RxQuality GetRxQuality() override {
-    return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy());
+    return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy(true));
   }
 
   /* Adapter-health probes (see src/AdapterHealth.h). The EFUSE probe re-runs
@@ -215,6 +227,8 @@ public:
   devourer::FwBootStatus GetFwBootStatus() override {
     return _halModule.GetFwBootStatus();
   }
+  /* Read-only canary dump, safe to call without Init — see IRtlDevice. */
+  void DumpChipState() override { _radioManagement->DumpCanary(); }
 
   /* Runtime TX-mode default. send_packet honours a frame's own radiotap rate
    * fields per-packet; when a frame's radiotap carries no rate, this mode

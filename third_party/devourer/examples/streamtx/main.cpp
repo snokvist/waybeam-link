@@ -67,7 +67,9 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
+#include "DeviceSession.h"
 #include "HopSchedule.h"
+#include "hopset/HopsetWire.h"
 #include "RadiotapBuilder.h"
 #include "RtlAdapter.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
@@ -150,11 +152,18 @@ int main(int argc, char **argv) {
   libusb_device_handle *handle = nullptr;
   int rc;
 
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Declared before every thread below, so the threads are
+   * joined before the adapter is released. Each early return from here on
+   * unwinds whatever has been adopted so far. */
+  devourer::DeviceSession session{logger};
+
   if (termux_fd > 0) {
     logger->info("Termux mode: wrapping fd {}", termux_fd);
     libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
     libusb_set_option(NULL, LIBUSB_OPTION_WEAK_AUTHORITY);
     libusb_init(&context);
+    session.adopt_context(context);
     rc = libusb_wrap_sys_device(context, (intptr_t)termux_fd, &handle);
     if (rc < 0) {
       logger->error("libusb_wrap_sys_device: {}", rc);
@@ -163,6 +172,7 @@ int main(int argc, char **argv) {
   } else {
     rc = libusb_init(&context);
     if (rc < 0) return rc;
+    session.adopt_context(context);
 
     uint16_t target_pid = 0;
     if (const char *pid_env = std::getenv("DEVOURER_PID")) {
@@ -186,7 +196,6 @@ int main(int argc, char **argv) {
     }
     if (handle == NULL) {
       logger->error("No supported device found under VID {:04x}", target_vid);
-      libusb_exit(context);
       return 1;
     }
   }
@@ -200,11 +209,13 @@ int main(int argc, char **argv) {
   rc = devourer::claim_interface_reset_reopen(context, handle, logger,
       termux_fd == 0 && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
   if (rc != 0) {
-    if (handle != nullptr)
-      libusb_close(handle);
-    libusb_exit(context);
+    /* The claim failed, so nothing owns the handle yet — hand it to the
+     * session purely so the unwind closes it. */
+    session.adopt_handle(handle);
     return 1;
   }
+  session.adopt_handle(handle);
+  session.adopt_lock(usb_lock);
 
   WiFiDriver wifi_driver{logger};
   auto stream_cfg = devourer_config_from_env();
@@ -215,13 +226,17 @@ int main(int argc, char **argv) {
    * it. Explicit DEVOURER_DIS_CCA=0 still forces standard carrier-sense back on. */
   if (std::getenv("DEVOURER_DIS_CCA") == nullptr)
     stream_cfg.tuning.disable_cca = true;
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
-                                               stream_cfg);
+  auto owned_device = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                                  stream_cfg);
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const rtlDevice = session.device();
   /* Jaguar1-only research features (TXAGC override, fast-retune hopping) aren't
    * on the IRtlDevice contract — downcast for them; jag is null on Jaguar3, and
    * the downcast plus its call sites compile out when Jaguar1 isn't built. */
 #if defined(DEVOURER_HAVE_JAGUAR1)
-  RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
+  RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice);
 #endif
 
   int channel = 6;
@@ -267,6 +282,8 @@ int main(int argc, char **argv) {
   std::vector<int> hop_channels;
   long hop_dwell = 1;
   long hop_slot_ms = 0;
+  bool hop_adaptive = false;
+  uint32_t hop_adaptive_maskfp = 0;
   std::optional<devourer::HopSchedule> hop_schedule;
   const int hop_fast = std::getenv("DEVOURER_HOP_FAST")
                            ? std::atoi(std::getenv("DEVOURER_HOP_FAST"))
@@ -303,6 +320,21 @@ int main(int argc, char **argv) {
       // Slot-mode sequential hopping rides the keyless schedule so it still
       // emits the lockstep sync marker (same channels[slot % n] order).
       hop_schedule.emplace(devourer::HopSchedule::sequential());
+    if (std::getenv("DEVOURER_HOP_ADAPTIVE")) {
+      /* Adaptive-follower compatibility: emit the v2 sync marker (v1 fields
+       * + generation/mask fingerprint) so an adaptive rxdemo tracks this
+       * stream. streamtx itself stays at generation 0 (full mask) — the
+       * commit authority (and its script lever) is txdemo's. */
+      if (!std::getenv("DEVOURER_HOP_SEED") || hop_slot_ms <= 0)
+        throw std::invalid_argument("DEVOURER_HOP_ADAPTIVE needs "
+                                    "DEVOURER_HOP_SEED and "
+                                    "DEVOURER_HOP_SLOT_MS");
+      hop_adaptive = true;
+      const auto keys = devourer::hopset::HopsetKeys::derive(
+          devourer::HopSchedule::parse_seed(std::getenv("DEVOURER_HOP_SEED")));
+      hop_adaptive_maskfp = devourer::hopset::mask_fp(
+          keys, 0, devourer::hopset::full_mask(hop_channels.size()));
+    }
     if (!hop_channels.empty()) {
       std::string list;
       for (size_t i = 0; i < hop_channels.size(); ++i)
@@ -331,33 +363,22 @@ int main(int argc, char **argv) {
       std::chrono::high_resolution_clock::now().time_since_epoch().count());
   std::vector<uint8_t> sync_buf;
   while (true) {
-    uint8_t len_bytes[4];
+    std::vector<uint8_t> psdu;
+    uint32_t len = 0;
     {
-      auto r = stream_stdin::read_exact(stdin, len_bytes, sizeof(len_bytes));
-      if (r == stream_stdin::ReadResult::Eof) break;  // clean stdin close
-      if (r == stream_stdin::ReadResult::Short) {
-        logger->error("short read on stdin len-prefix; record truncated");
-        std::exit(2);
-      }
-    }
-    uint32_t len = static_cast<uint32_t>(len_bytes[0])
-                 | (static_cast<uint32_t>(len_bytes[1]) << 8)
-                 | (static_cast<uint32_t>(len_bytes[2]) << 16)
-                 | (static_cast<uint32_t>(len_bytes[3]) << 24);
-    if (len == 0 || len > max_psdu) {
-      logger->error("PSDU length {} out of range (max {}); stopping", len,
-                    max_psdu);
-      break;
-    }
-    std::vector<uint8_t> psdu(len);
-    {
-      auto r = stream_stdin::read_exact(stdin, psdu.data(), len);
-      if (r == stream_stdin::ReadResult::Eof) {
+      const auto r = stream_stdin::read_record(stdin, psdu, max_psdu, &len);
+      if (r == stream_stdin::RecordResult::Eof) break;  // clean stdin close
+      if (r == stream_stdin::RecordResult::EofMidBody) {
         logger->warn("EOF mid-PSDU (expected {} bytes)", len);
         break;
       }
-      if (r == stream_stdin::ReadResult::Short) {
-        logger->error("short read mid-PSDU (expected {} bytes); record "
+      if (r == stream_stdin::RecordResult::BadLength) {
+        logger->error("PSDU length {} out of range (max {}); stopping", len,
+                      max_psdu);
+        break;
+      }
+      if (r != stream_stdin::RecordResult::Ok) {
+        logger->error("short read on stdin (expected {} bytes); record "
                       "truncated", len);
         std::exit(2);
       }
@@ -408,15 +429,28 @@ int main(int argc, char **argv) {
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - hop_start)
                 .count());
-        devourer::HopSyncMarker marker{hop_schedule->fingerprint(), hop_epoch,
-                                       static_cast<uint32_t>(us % slot_us),
-                                       us / slot_us};
-        auto wire = devourer::HopSyncMarker::encode(marker);
         sync_buf.clear();
         sync_buf.insert(sync_buf.end(), kStreamRadiotap.begin(),
                         kStreamRadiotap.end());
         sync_buf.insert(sync_buf.end(), dot11.begin(), dot11.end());
-        sync_buf.insert(sync_buf.end(), wire.begin(), wire.end());
+        if (hop_adaptive) {
+          devourer::hopset::HopSyncMarkerV2 marker;
+          marker.fingerprint = hop_schedule->fingerprint();
+          marker.epoch = hop_epoch;
+          marker.phase_us = static_cast<uint32_t>(us % slot_us);
+          marker.slot = us / slot_us;
+          marker.generation = 0;
+          marker.mask_fp = hop_adaptive_maskfp;
+          auto wire = devourer::hopset::HopSyncMarkerV2::encode(marker);
+          sync_buf.insert(sync_buf.end(), wire.begin(), wire.end());
+        } else {
+          devourer::HopSyncMarker marker{hop_schedule->fingerprint(),
+                                         hop_epoch,
+                                         static_cast<uint32_t>(us % slot_us),
+                                         us / slot_us};
+          auto wire = devourer::HopSyncMarker::encode(marker);
+          sync_buf.insert(sync_buf.end(), wire.begin(), wire.end());
+        }
         rtlDevice->send_packet(sync_buf.data(), sync_buf.size());
       }
     }
@@ -443,14 +477,9 @@ int main(int argc, char **argv) {
   }
 
   devourer::Ev(logger->events(), "stream.done").f("sent", tx_count);
-  // Destruct the device before tearing down libusb: on Jaguar1 the TX path is
-  // asynchronous, and closing the handle with transfers still in flight reaps
-  // completions against a freed handle (segfault, and the crash leaks the USB
-  // claim so the next run hits "adapter in use"). reset() runs the dtor, which
-  // drains outstanding transfers while the handle is still valid.
-  rtlDevice.reset();
-  libusb_release_interface(handle, 0);
-  libusb_close(handle);
-  libusb_exit(context);
+  /* Device, then interface, handle and context (DeviceSession.h). Explicit
+   * only because the process has nothing left to do here — the destructor
+   * does exactly the same on every other exit path. */
+  session.close();
   return 0;
 }

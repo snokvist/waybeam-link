@@ -99,6 +99,52 @@ probe on kernels 6.15+ (`failed to download firmware`, `error -22`), but
 - `iw`, `tcpdump`, `ip` on PATH
 - Passwordless `sudo`, or run directly as root
 
+### Adaptive-hopset validation (`hopset_adaptive_jammer.sh`)
+
+Three radios — a transmitting authority, a lockstep receiver running the
+exclusion policy, and a B210 interferer. `MODE` selects the scenario
+(`parked`, `sense`, `failsafe`, `herding`, `hidden`, `mirror`, `fusionmatrix`,
+`policycost`, `prepost`, `overhead`); the mode arms whatever it needs, so
+`MODE=sense` really does sense and `MODE=fusionmatrix` gives every row the same
+sensing windows.
+
+Two things about how it measures, because both changed what the numbers said:
+
+- Every mode reports **FEC delivery** — real RS-coded bodies from
+  `tools/precoder` through `DEVOURER_TX_STDIN`, decoded by the salvage path —
+  beside the marker-derived dwell proxy. `tests/fec_metrics.py` owns that
+  arithmetic and is shared with `jammer_resilience.py`; it also prints the
+  fraction of the window the receiver held lockstep, which is the number that
+  catches a receiver scoring 1.0 on the half of a window it was present for.
+- A measurement window opens only once the receiver reports tracking, and
+  closes against the transmitter's own body count at both instants. A window
+  that opens at process start is mostly chip bring-up and acquisition: one
+  70 s phase read 0.30 FEC delivery whose settled part ran at 0.90.
+
+`FEC=0` falls back to the proxy alone. The payload is generated once per size
+and cached in `/tmp`; it must outlast the longest phase, since looping it would
+re-use the outer code's block ids and the decoder would merge two passes into
+one block.
+
+### Choosing the SDR (benches with more than one radio)
+
+Every UHD tool here (`sdr_duty.py`, `sdr_interferer.py`, `hop_rx_probe.py`,
+`sdr_follower_jammer.py`, …) resolves its radio through `uhd_select.py`:
+an explicit `--args`, else `DEVOURER_UHD_ARGS`, else the untracked
+`tests/.uhd_args`, else the only device present. With two or more radios and
+no selection it **fails with the serial list** rather than picking one — B210
+variants share USB id `2500:0020`, so a silent pick means half your runs
+measure the wrong antenna and nothing in the log says so.
+
+Set it once per bench. Use the file, not the variable: nearly every harness
+invokes its SDR tool through `sudo`, which scrubs the environment.
+
+```sh
+uhd_find_devices                          # read off the serials
+echo serial=XXXXXXX > tests/.uhd_args     # survives sudo; gitignored
+python3 tests/uhd_select.py               # prints what would be opened
+```
+
 ### For local mode
 
 - Kernel driver(s) installed and `modprobe`-able for your DUTs (rtw88 or
@@ -361,6 +407,151 @@ distort (the BCC MCS7 curve rolls over and dies while LDPC keeps decoding;
 compare curves only on the rising edge). Bench-measured on an 8812AU→8822BU
 pair at MCS7/20 MHz: **+3.0 dB LDPC gain at the 10%-delivery crossing**, and
 in the saturation regime LDPC delivered ~80% where BCC delivered 0–19%.
+
+### `nitroqam_waterfall.sh`: VHT on the 2.4 GHz band
+
+VHT is a 5 GHz standard; airing it on 2.4 GHz is the vendor extension marketed
+as NitroQAM/TurboQAM. Same waterfall method as `ldpc_waterfall.sh` plus a
+**modulation gate**: every sampled `rx.txhit` is decoded back to a rate, so a
+cell that delivers frames which arrive as HT is reported as a fallback rather
+than as a pass.
+
+```bash
+sudo tests/nitroqam_waterfall.sh --emit-vid 0x0bda --emit-pid 0x8812 \
+    --ground-vid 0x2357 --ground-pid 0x012d --channel 6 --bw 20
+python3 tests/nitroqam_waterfall.py report \
+    /tmp/devourer-nitroqam-waterfall/points.jsonl
+```
+
+The power axis defaults to `--pwr-mode offset` (`SetTxPowerOffsetQdb`, which
+preserves the calibrated per-rate shape). Do not substitute the flat
+`DEVOURER_TX_PWR` index: it forces both paths to one level and zeroes the
+per-rate diffs, and measurably degrades the link — the same pair that reaches
+MCS4 at calibrated power tops out at MCS1 under a flat index.
+
+`nitroqam_waterfall.py --self-test` is the headless half, wired into `ctest` as
+`nitroqam_decode_math`: it covers the DESC_RATE decode and threshold-crossing
+math that a bench link topping out below 256-QAM never reaches on air.
+
+**Cold-cycle or measure nothing.** The harness VBUS-cycles both ends before
+every cell (`REGRESS_VBUS_MAP` + uhubctl) because high-order constellation TX
+degrades across warm re-inits: the same 8812AU delivered 0% at MCS7 warm and
+58% cold, same channel/power/gap, with no error logged anywhere. Without it a
+rate ceiling measures accumulated chip state, not the link.
+
+Measured: VHT confirmed on 2.4 GHz from an 8812AU, 8822BU and 8812CU, and
+**256-QAM (VHT1SS_MCS8) confirmed on the 8812AU**, modulation-verified by an
+8822BU peer. Note VHT MCS9 is illegal at 20 MHz for 1-2 streams — hardware
+emits MCS8 and the modulation gate catches it. Full results:
+`docs/vht-on-2g4.md`.
+
+### `nitroqam_kernel_ab.sh`: devourer vs the vendor driver, same dongle
+
+The control that decides whether a delivery wall is ours or the rig's: runs
+devourer and the vendor driver from `reference/rtl8812au` on the same adapter,
+interleaved per rate, judged by an AR9271 sniffer (different vendor's radio, no
+shared silicon or code).
+
+```bash
+sudo REGRESS_VBUS_MAP="0bda:8812=3-2.3.4,3" tests/nitroqam_kernel_ab.sh 6
+```
+
+Measured at the top of the HT ladder: devourer 58.2% vs vendor 64.3% at MCS7,
+61.7% vs 68.4% at MCS5 — on par, no devourer-side high-MCS defect. Do **not**
+substitute the in-tree `rtw88` for the vendor driver: it accepts frames on a
+monitor netdev and reports them injected while airing nothing decodable, which
+reads as a kernel-side failure at every rate.
+
+### `ground_station_qualify.sh`: is your receiver fit to measure this rate?
+
+Run before trusting any delivery number, and before believing any story about a
+transmitter. Sweeps the rate ladder on the ground station and refuses the pairing
+(exit 1) when the test rate is off the flat part of the curve.
+
+```bash
+sudo REGRESS_VBUS_MAP="0bda:8812=3-2.3.4,3;0bda:8813=4-2.3,2" \
+     GND_VID=0x0bda GND_PID=0x8813 tests/ground_station_qualify.sh MCS7/20
+```
+
+A receiver sitting on its cliff at the test rate measures **itself**, not the
+transmitter, and swings between fine and zero on a few dB of ambient while the
+robust rates stay pinned — indistinguishable from a transmitter that degrades and
+recovers. Same TX, same channel, minutes apart:
+
+| ground | MCS3 | MCS4 | MCS5 | MCS6 | MCS7 |
+| --- | --- | --- | --- | --- | --- |
+| Archer T3U (8822BU, **internal** antennas) | 97.8 | 98.3 | 79.1 | 49.0 | **2.9** |
+| RTL8814AU (two **external** antennas) | 80.6 | 80.2 | 80.8 | 80.6 | **80.4** |
+
+Both adapters are healthy. Prefer external-antenna adapters as ground stations
+for high-MCS work, and cross-check against a second independent receiver
+(`rx_vendor_ab.sh` runs the vendor driver on the *receive* side).
+
+### Warm-session TX degradation: four harnesses, and start with the first
+
+**`probe_repeatability.sh` — run this before believing any delivery
+difference.** N identical back-to-back probes with nothing changed between them,
+reporting the spread. On an 8812AU a single MCS7/20 probe has sd 1.8 and a
+5.7-point range (the MCS1 control: 98.0 ± 0.2), so **effects under ~4 points are
+not detectable one-shot**. Several plausible-looking decay curves in this
+investigation turned out to sit inside that band.
+
+```bash
+sudo REGRESS_VBUS_MAP="0bda:8812=3-2.3.4,3;2357:012d=10,2" \
+     tests/probe_repeatability.sh
+```
+
+`warm_tx_degradation_repro.sh` holds one ground receiver up for a whole run,
+then alternates probes with warm devourer sessions, recording delivery at a test
+and a control rate alongside the chip thermal meter and the receiver's RSSI/EVM.
+Two controls close it: an idle with no power cycle, and a VBUS cycle.
+`WARM_PWR=63 WARM_GAP=0` turns the warm sessions into max-power/max-duty
+heating.
+
+`thermal_offtime_sweep.sh` and `thermal_causation_probe.sh` exist to separate
+*cooling* from *state reset*, which no ordinary power-cycle experiment can do —
+the first varies only how long the chip stays powered down, the second measures
+delivery inside a single uninterrupted session where nothing but temperature can
+move. Both currently argue **against** a thermal explanation; the mechanism is
+open. Results and what did not survive testing: `docs/warm-tx-degradation.md`.
+
+Reading any of them: falling delivery with **flat RSSI** is signal quality;
+falling RSSI would be a transmitter losing power, a different bug.
+
+### `tx_teardown_asan.sh` / `teardown_gen_sanity.sh`: lifetime bugs on real hardware
+
+A sanitizer only sees what runs, and the interesting lifetime bugs live in the
+device/libusb teardown, which no headless test reaches. Both scripts want an
+ASan build:
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DDEVOURER_SANITIZE=address && cmake --build build-asan -j
+sudo -v && tests/tx_teardown_asan.sh            # Jaguar1 DUT, max-duty TX
+sudo -v && tests/teardown_gen_sanity.sh         # every plugged generation
+```
+
+`tx_teardown_asan.sh` floods at `DEVOURER_TX_GAP_US=0` and kills the demo
+mid-stream (`SIG=INT` for the other signal), because a saturated async TX queue
+at exit is the condition that exposes teardown ordering — a gap-2000 run drains
+between frames and looks clean either way. It also covers the aggregation URB
+(`DEVOURER_TX_USB_AGG`) and, given a hub with per-port power switching
+(`WEDGE_HUB`/`WEDGE_PORT`, uhubctl `ppps`), a real VBUS cut mid-flood: the
+quiesce must still return, and a `tx.quiesce_timeout` event in the log says it
+never drained. `BUILD=<dir>` points at another tree, which is how a fix is
+shown to fix something rather than asserted to.
+
+### `kestrel_prich_onair.sh`: Kestrel per-channel BB programming
+
+Counts delivered frames across the configurations that the vendored
+`halbb_ctrl_bw_ch` treats differently — 2.4 GHz CCK (its SCO threshold tables),
+20 MHz OFDM as the control, and RX at 40/80 MHz (the primary sub-band index).
+`KESTREL_TX=1` swaps the roles to check the transmit side, and `REF_ONLY=1`
+takes the Kestrel out of the path entirely, which is the first thing to run
+when a wide-bandwidth cell scores zero — the emitter's own channel width comes
+from `DEVOURER_HOP_BW`, not from the `/40` in `DEVOURER_TX_RATE` (that only
+fills the descriptor field), and getting that wrong zeroes a cell for reasons
+that have nothing to do with the DUT.
 
 ## Supported DUTs
 

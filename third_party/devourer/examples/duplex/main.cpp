@@ -61,6 +61,7 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
+#include "DeviceSession.h"
 #include "RxPacket.h"
 #include "RadiotapBuilder.h"
 #include "RtlAdapter.h"
@@ -195,25 +196,23 @@ static void tx_thread(TxArgs args) {
   long tx_count = 0;
 
   while (!args.should_stop->load()) {
-    uint8_t len_bytes[4];
-    if (stream_stdin::read_exact(stdin, len_bytes, sizeof(len_bytes)) !=
-        stream_stdin::ReadResult::Ok) {
+    // This demo reads the length itself rather than using read_record: its top
+    // bit escapes to a control TLV with its own, much smaller bound, so the
+    // length has to be inspected before the body may be read.
+    uint32_t len = 0;
+    if (stream_stdin::read_length(stdin, len) != stream_stdin::ReadResult::Ok) {
       // Clean EOF or short read — TX side done. RX keeps running.
       devourer::Ev(*g_ev, "stream.eof").f("tx_count", tx_count);
       break;
     }
-    uint32_t len = static_cast<uint32_t>(len_bytes[0])
-                 | (static_cast<uint32_t>(len_bytes[1]) << 8)
-                 | (static_cast<uint32_t>(len_bytes[2]) << 16)
-                 | (static_cast<uint32_t>(len_bytes[3]) << 24);
 
     // Control-opcode escape: top bit set -> the body is a control TLV (the
     // adaptive link's live knobs), not a PSDU. <op:u8><payload...>.
     if (len & 0x80000000u) {
       uint32_t clen = len & 0x7fffffffu;
       if (clen == 0 || clen > 256) break;
-      std::vector<uint8_t> ctl(clen);
-      if (stream_stdin::read_exact(stdin, ctl.data(), clen) !=
+      std::vector<uint8_t> ctl;
+      if (stream_stdin::read_body(stdin, ctl, clen) !=
           stream_stdin::ReadResult::Ok)
         break;
       uint8_t op = ctl[0];
@@ -240,8 +239,8 @@ static void tx_thread(TxArgs args) {
                          args.max_psdu);
       break;
     }
-    std::vector<uint8_t> psdu(len);
-    if (stream_stdin::read_exact(stdin, psdu.data(), len) !=
+    std::vector<uint8_t> psdu;
+    if (stream_stdin::read_body(stdin, psdu, len) !=
         stream_stdin::ReadResult::Ok) {
       /* EOF mid-PSDU: `bytes` = the expected PSDU length that was cut short. */
       devourer::Ev(*g_ev, "stream.eof").f("tx_count", tx_count).f("bytes", len);
@@ -298,10 +297,17 @@ int main(int argc, char **argv) {
   libusb_device_handle *handle = nullptr;
   int rc;
 
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Declared before the TX thread below, so that thread is
+   * joined before the adapter is released. Each early return from here on
+   * unwinds whatever has been adopted so far. */
+  devourer::DeviceSession session{logger};
+
   if (termux_fd > 0) {
     libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
     libusb_set_option(NULL, LIBUSB_OPTION_WEAK_AUTHORITY);
     libusb_init(&context);
+    session.adopt_context(context);
     rc = libusb_wrap_sys_device(context, (intptr_t)termux_fd, &handle);
     if (rc < 0) {
       logger->error("libusb_wrap_sys_device: {}", rc);
@@ -310,6 +316,7 @@ int main(int argc, char **argv) {
   } else {
     rc = libusb_init(&context);
     if (rc < 0) return rc;
+    session.adopt_context(context);
     /* Match rxdemo's libusb log level convention — WARNING by
      * default, DEVOURER_USB_DEBUG=1 opts into DEBUG. */
     libusb_set_option(context, LIBUSB_OPTION_LOG_LEVEL,
@@ -337,7 +344,6 @@ int main(int argc, char **argv) {
     }
     if (handle == NULL) {
       logger->error("No supported device found under VID {:04x}", target_vid);
-      libusb_exit(context);
       return 1;
     }
   }
@@ -346,17 +352,25 @@ int main(int argc, char **argv) {
    * guard — a second devourer on this adapter gets BUSY here and bails before
    * the reset, so it can't re-enumerate the adapter out from under the owner. */
   std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
-  rc = devourer::claim_interface_then_reset(handle, devourer::find_wifi_interface(handle), logger,
+  const int wifi_iface = devourer::find_wifi_interface(handle);
+  rc = devourer::claim_interface_then_reset(handle, wifi_iface, logger,
       termux_fd == 0 && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
   if (rc != 0) {
-    libusb_close(handle);
-    libusb_exit(context);
+    /* The claim failed, so nothing owns the handle yet — hand it to the
+     * session purely so the unwind closes it. */
+    session.adopt_handle(handle, wifi_iface);
     return 1;
   }
+  session.adopt_handle(handle, wifi_iface);
+  session.adopt_lock(usb_lock);
 
   WiFiDriver wifi_driver{logger};
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
-                                               devourer_config_from_env());
+  auto owned_device = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                                  devourer_config_from_env());
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const rtlDevice = session.device();
 
   int channel = 6;
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {
@@ -374,7 +388,7 @@ int main(int argc, char **argv) {
   // Spawn TX thread first; it'll block on stdin until our peer pushes a
   // length-prefixed PSDU. Then drop into Init() (the RX loop) in the main
   // thread.
-  TxArgs txa{rtlDevice.get(), interval_ms, max_psdu, &should_stop, logger};
+  TxArgs txa{rtlDevice, interval_ms, max_psdu, &should_stop, logger};
   std::thread tx{tx_thread, std::move(txa)};
 
   logger->info("duplex entering RX loop on ch {} — TX thread ready",
@@ -391,8 +405,9 @@ int main(int argc, char **argv) {
   // the TX thread).
   should_stop = true;
   if (tx.joinable()) tx.join();
-  libusb_release_interface(handle, 0);
-  libusb_close(handle);
-  libusb_exit(context);
+  /* Device, then interface, handle and context (DeviceSession.h). Explicit
+   * only because the process has nothing left to do here — the destructor
+   * does exactly the same on every other exit path. */
+  session.close();
   return 0;
 }

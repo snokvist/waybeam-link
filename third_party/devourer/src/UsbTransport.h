@@ -10,6 +10,8 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include <libusb.h>
 
@@ -32,7 +34,8 @@ public:
   UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                libusb_context *ctx = nullptr,
                std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr,
-               bool rx_zerocopy = true);
+               bool rx_zerocopy = true, RxMode rx_mode = RxMode::Async,
+               int pool_spare = 0, int ring_ms = 0);
   ~UsbTransport() override;
 
   bool is_usb() const override { return true; }
@@ -73,6 +76,7 @@ public:
                const std::function<bool()> &should_stop) override;
   int rx_raw(uint8_t *buf, int len, int timeout_ms) override;
   void clear_halt(uint8_t ep) override { libusb_clear_halt(_dev_handle, ep); }
+  void quiesce_tx() override;
 
   UsbLinkInfo usb_info() const override { return _info; }
   TxStats tx_stats() const override;
@@ -115,10 +119,35 @@ private:
    * over-submission. */
   std::atomic<int> _tx_inflight{0};
 
+  /* Submitted-but-not-yet-completed transfers, so quiesce_tx can cancel them
+   * by handle. transfer_callback removes its own entry, and it runs on
+   * whichever thread pumped the event — the submitting one, or another
+   * tx_async caller under DEVOURER_TX_THREADS. Never hold _tx_mu across a
+   * libusb_handle_events call: the callback re-enters and takes it. */
+  std::mutex _tx_mu;
+  std::vector<libusb_transfer *> _tx_live;
+
+  /* Latched by quiesce_tx. Refuses further submissions (and further event
+   * pumping) so nothing re-enters libusb once teardown has begun, and makes
+   * quiesce idempotent for the Stop()-then-destructor path. */
+  std::atomic<bool> _tx_shutdown{false};
+
   /* Allocate the async RX ring from kernel DMA memory (dev_mem_alloc) for a
    * zerocopy bulk-IN path; falls back to heap buffers per-URB when the alloc is
    * unsupported. See rx_loop and DeviceConfig::Usb::rx_zerocopy. */
   bool _rx_zerocopy = true;
+
+  /* RX-ring servicing strategy + buffer-pool depth + diagnostic telemetry
+   * cadence, from DeviceConfig::Rx. rx_loop reads these; the defaults preserve
+   * the historic inline async ring with no extra buffers and no telemetry. */
+  RxMode _rx_mode = RxMode::Async;
+  int _pool_spare = 0;
+  int _ring_ms = 0;
+
+  /* rx_loop helpers for the servicing strategies dispatched off _rx_mode. */
+  void rx_loop_sync(int buf_size,
+                    const std::function<void(const uint8_t *, int)> &on_data,
+                    const std::function<bool()> &should_stop);
 
   /* Exclusive per-adapter USB lock (UsbDeviceLock.h), held for the transport
    * lifetime; released when the device (and thus the transport) dies. */

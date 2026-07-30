@@ -381,6 +381,10 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
  * (exception path / caller that drops the device) — a joinable std::thread in
  * the destructor would otherwise std::terminate. Idempotent with Stop(). */
 RtlJaguar3Device::~RtlJaguar3Device() {
+  /* Inert on this generation (its send path is synchronous), but the invariant
+   * belongs to every device: nothing gets released while a transfer the
+   * transport still owns is outstanding. */
+  _device.quiesce_tx();
   /* Safety net: restore the chip if a CW tone is still armed (before the coex
    * thread is joined — StopCwTone serializes on _reg_mu with it). */
   StopCwTone();
@@ -1065,7 +1069,7 @@ void RtlJaguar3Device::StopContinuousTx() {
  * channel-busy signal (a CW tone spikes OFDM CCA); OFDM FA is the vendor sum of
  * the sub-counters. Read-then-reset for a per-call delta; serialized on _reg_mu
  * so it does not race the coex thread's register access. */
-RxEnergy RtlJaguar3Device::GetRxEnergy() {
+RxEnergy RtlJaguar3Device::GetRxEnergy(bool with_nhm) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   RxEnergy e;
   auto rd = [this](uint16_t addr) { return _device.rtw_read<uint32_t>(addr); };
@@ -1090,7 +1094,8 @@ RxEnergy RtlJaguar3Device::GetRxEnergy() {
    * ~2 ms measurement window before the FA-counter reset below (0x1eb4[25] also
    * clears BB HW counters). Holds _reg_mu across the short wait — tolerable at
    * the emitter's >=100 ms cadence vs the coex thread's ~2 s tick. */
-  devourer::read_nhm(
+  if (with_nhm)
+    devourer::read_nhm(
       devourer::nhm_regs_jgr3(), e.igi, rd,
       [this](uint16_t a, uint32_t m, uint32_t v) {
         _device.phy_set_bb_reg(a, m, v);
@@ -1288,11 +1293,16 @@ void RtlJaguar3Device::apply_tx_power_current(bool full) {
     const uint8_t rb = clamp127(static_cast<int>(_pwr_ref_b) + off);
     if (full || _diffs_zeroed) {
       /* Full apply: refs + the per-rate diff walk (also the path back from
-       * flat semantics, which zeroed the diffs). */
-      _radioManagement.apply_power_by_rate_8822e(_channel.Channel, ra, rb);
+       * flat semantics, which zeroed the diffs). Route through the
+       * caller-supplied diff table when SetTxPowerRateDiffs has one set;
+       * otherwise the default phy_reg_pg walk. */
+      if (_rate_diffs)
+        _radioManagement.apply_rate_diffs(ra, rb, *_rate_diffs);
+      else
+        _radioManagement.apply_power_by_rate_8822e(_channel.Channel, ra, rb);
       _diffs_zeroed = false;
     } else {
-      _radioManagement.apply_tx_power_refs_8822e(ra, rb);
+      _radioManagement.apply_tx_power_refs(ra, rb);
     }
     return;
   }
@@ -1300,9 +1310,20 @@ void RtlJaguar3Device::apply_tx_power_current(bool full) {
   /* 8822c (CU): preserve the flat reference the demo used to impose (40) so
    * the SDR-validated CU TX power is unchanged. The CU's efuse-calibrated
    * per-rate default is a follow-up; the offset shifts this reference. */
-  _radioManagement.set_tx_power_ref(
-      clamp127(static_cast<int>(JAGUAR3_TXPWR_REF_BASE_8822C) + off),
-      /*zero_diffs=*/!_diffs_zeroed);
+  const uint8_t rc = clamp127(static_cast<int>(JAGUAR3_TXPWR_REF_BASE_8822C) + off);
+  if (_rate_diffs) {
+    /* A caller table shapes the CU through the same TXAGC block the EU uses
+     * (set_tx_power_ref is the rtw8822c routine): the flat reference becomes
+     * the MCS7 anchor and the caller's qdB land in the 0x3a00 diff table. */
+    if (full || _diffs_zeroed) {
+      _radioManagement.apply_rate_diffs(rc, rc, *_rate_diffs);
+      _diffs_zeroed = false;
+    } else {
+      _radioManagement.apply_tx_power_refs(rc, rc);
+    }
+    return;
+  }
+  _radioManagement.set_tx_power_ref(rc, /*zero_diffs=*/!_diffs_zeroed);
   _diffs_zeroed = true;
 }
 
@@ -1321,6 +1342,16 @@ devourer::TxPowerCaps RtlJaguar3Device::GetTxPowerCaps() {
   caps.step_measured = _variant == jaguar3::ChipVariant::C8822C;
   caps.offset_min_qdb = -127;
   caps.offset_max_qdb = 127;
+  /* Both dies drive the same TXAGC reference + 0x3a00 per-rate diff block. */
+  caps.rate_diffs = true;
+  caps.rate_diffs_hw_table = true;
+  /* On-air (tests/txpwr_rate_diffs_onair.sh): the 8822CU reads -8.0 dB for a
+   * -32 qdB MCS0 trim (implied 0.25 dB/idx — the nominal step; the offset
+   * knob's 6-point fit gave 0.325, and one A/B point does not arbitrate
+   * between them). The 8822EU moves -9.0 dB but its ref->power transfer is
+   * TSSI-reshaped and non-linear, so its cell asserts sign only and the
+   * measured flag stays false there, exactly as step_measured does. */
+  caps.rate_diffs_measured = _variant == jaguar3::ChipVariant::C8822C;
   return caps;
 }
 
@@ -1357,6 +1388,25 @@ void RtlJaguar3Device::SetTxPowerIndexOverride(int idx) {
      * override zeroed the 8822E per-rate diffs). */
     apply_tx_power_current(/*full=*/idx < 0);
   }
+}
+
+bool RtlJaguar3Device::SetTxPowerRateDiffs(
+    const std::optional<devourer::TxRateDiffsQdb> &diffs) {
+  if (_cw_active) {
+    _logger->warn("SetTxPowerRateDiffs refused: CW tone active");
+    return false;
+  }
+  /* Clamp to the 7-bit two's-complement diff field's usable range [-64, 63]
+   * before storing. pack_rate_diff_word masks with & 0x7f, which would alias
+   * the sign of an over-range int8_t: a caller asking for -100 (a big cut)
+   * would land +28 (a power boost). Same guard the ref path applies against
+   * its own over-range wrap. */
+  const auto clamped = devourer::clamp_rate_diffs(diffs);
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  _rate_diffs = clamped;
+  if (_brought_up)
+    apply_tx_power_current(/*full=*/true); /* re-walk the table now */
+  return true;
 }
 
 bool RtlJaguar3Device::ReApplyTxPower() {
@@ -1523,6 +1573,11 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
     c.marketing_names = "RTL8812CU/RTL8822CU";
     c.chip_id = 0x13;
     c.variant = "C8822C";
+    /* 8812CU on air: VHT 1SS MCS0 and MCS4 on 2.4 GHz, every sampled frame
+     * decoded as the commanded VHT rate by an 8814AU peer. Not set for the
+     * 8822E above — its 2.4 GHz TX is undecodable under the vendor driver too
+     * (docs/8822e-quirks.md), which this flag would otherwise paper over. */
+    c.vht_2g4_ok = true;
   }
   return c;
 }
@@ -1561,17 +1616,43 @@ devourer::TxPowerState RtlJaguar3Device::GetTxPowerState() {
   s.offset_qdb = s.offset_steps; /* 1 qdB per step on Jaguar3 */
   s.saturated_low = _txpwr_sat_low;
   s.saturated_high = _txpwr_sat_high;
+  /* Under _reg_mu for a coherent snapshot vs the coex tick, and so the
+   * non-atomic _rate_diffs read below is race-free. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* rate_diffs_custom means "a table is configured" — knowable regardless of
+   * bring-up / CW state, so it's reported here rather than inside the readback
+   * block (a pre-bring-up or mid-CW snapshot with a table set must still see
+   * it flagged). */
+  s.rate_diffs_custom = _rate_diffs.has_value();
   if (_brought_up && !_cw_active) {
     /* Reference readback (the Jaguar3 TXAGC refs ARE readable): OFDM ref
      * 0x18e8[16:10]; MCS7 is the per-rate diff table's zero anchor, so it
-     * equals the OFDM ref; CCK ref 0x18a0[22:16]. Under _reg_mu for a
-     * coherent snapshot vs the coex tick. */
-    std::lock_guard<std::mutex> lk(_reg_mu);
+     * equals the OFDM ref; CCK ref 0x18a0[22:16]. */
     const uint32_t ofdm = (_device.rtw_read32(0x18e8) >> 10) & 0x7f;
-    s.ofdm_index = static_cast<int16_t>(ofdm);
-    s.mcs7_index = static_cast<int16_t>(ofdm);
-    s.cck_index =
-        static_cast<int16_t>((_device.rtw_read32(0x18a0) >> 16) & 0x7f);
+    const uint32_t cck =
+        (_device.rtw_read32(0x18a0) >> 16) & 0x7f;
+    if (_rate_diffs && s.flat_index < 0) {
+      /* A custom per-rate diff table is live (SetTxPowerRateDiffs) and
+       * no flat override is overriding it on the chip: the shared reference
+       * alone is no longer the effective index for any rate, so report
+       * ref + diff[rate] instead of the artifact where cck/ofdm/mcs7 all read
+       * equal to the reference. Clamp to the 7-bit TXAGC index range the same
+       * way the apply path does. */
+      auto clamp127 = [](int v) {
+        return static_cast<int16_t>(v < 0 ? 0 : (v > 127 ? 127 : v));
+      };
+      s.ofdm_index = clamp127(static_cast<int>(ofdm) + _rate_diffs->legacy);
+      s.mcs7_index = clamp127(static_cast<int>(ofdm) + _rate_diffs->mcs[7]);
+      s.cck_index = clamp127(static_cast<int>(cck) + _rate_diffs->cck);
+    } else {
+      /* Either no custom table configured, or a flat override is currently
+       * live: apply_tx_power_current's flat branch zeroes the chip's
+       * per-rate diffs while flat >= 0, so the registers already read the
+       * honest flat truth here — fall through to the plain summary. */
+      s.ofdm_index = static_cast<int16_t>(ofdm);
+      s.mcs7_index = static_cast<int16_t>(ofdm);
+      s.cck_index = static_cast<int16_t>(cck);
+    }
     s.hw_readback = true;
   }
   return s;

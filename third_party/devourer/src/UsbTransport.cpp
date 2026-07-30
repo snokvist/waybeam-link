@@ -1,9 +1,16 @@
 #include "UsbTransport.h"
 
+#include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "Event.h"
@@ -13,6 +20,19 @@
 namespace devourer {
 
 namespace {
+/* Saturating atomic min/max for the RX-ring telemetry — relaxed and
+ * best-effort (a rare lost update is acceptable for a diagnostic counter). */
+inline void atomic_min(std::atomic<int> &m, int v) {
+  int cur = m.load(std::memory_order_relaxed);
+  while (v < cur && !m.compare_exchange_weak(cur, v, std::memory_order_relaxed))
+    ;
+}
+inline void atomic_max(std::atomic<long long> &m, long long v) {
+  long long cur = m.load(std::memory_order_relaxed);
+  while (v > cur && !m.compare_exchange_weak(cur, v, std::memory_order_relaxed))
+    ;
+}
+
 /* Shared state for the async RX URB queue. */
 struct AsyncRxShared {
   const std::function<void(const uint8_t *, int)> *cb;
@@ -21,15 +41,196 @@ struct AsyncRxShared {
    * event pump and the TX event loop may run this callback, so `active` is
    * written from the pump thread while the loop below reads it. */
   std::atomic<int> active{0};
+
+  /* Diagnostic telemetry, populated only when `telemetry` (DEVOURER_RX_RING_MS
+   * > 0) — the default path pays nothing. `armed` is the count of URBs
+   * currently posted to the host controller and awaiting a frame: THIS is the
+   * depth that collapses when a slow inline consumer delays resubmit, and it is
+   * distinct from `active` (which counts URBs not yet permanently retired and
+   * so sits at ~n_urbs regardless of starvation). `min_armed` is the low-water
+   * mark since the last rx.ring emit; `cb_max_us` the worst inline-consume
+   * latency in the window; `resubmit_fail` cumulative wanted-but-failed
+   * resubmits. */
+  bool telemetry = false;
+  std::atomic<int> armed{0};
+  std::atomic<int> min_armed{0};
+  std::atomic<long long> cb_max_us{0};
+  std::atomic<unsigned long long> resubmit_fail{0};
+  /* completions = URB callbacks; empties = those that left the ring with zero
+   * URBs posted. empties/completions is the robust host-starvation rate: under
+   * RF loss frames rarely arrive so the ring stays armed (empties ~0); under
+   * host starvation frames arrive faster than resubmit so the ring drains to
+   * empty (empties high) — and unlike the poll-loop rx.ring emit, this is
+   * counted in the callback, so it survives the pump-thread starvation that
+   * makes the periodic telemetry sparse exactly when it matters. */
+  std::atomic<unsigned long long> completions{0};
+  std::atomic<unsigned long long> empties{0};
+
+  /* reorder-pool mode (RxMode::ReorderPool): a free-list of spare RX buffers.
+   * On completion the callback swaps a fresh buffer onto the wire and resubmits
+   * the URB BEFORE consuming the received one, so the ring stays armed through
+   * the slow inline consume — the fix for the burst-starvation of the default
+   * async ring. Zerocopy-safe by construction: the buffer being DMA'd is never
+   * the one being read. The mutex guards the free-list because the callback can
+   * run from the RX pump and, in co-running TX+RX, the TX pump. */
+  bool reorder = false;
+  int buf_size = 0;
+  std::mutex pool_mu;
+  std::vector<uint8_t *> free_bufs;
+
+  /* spsc-fat mode (RxMode::SpscFat): the pump callback only reaps + re-arms the
+   * URB (microseconds, never blocked) and hands the received buffer to a
+   * SEPARATE consumer thread over this queue; the consumer runs on_data and
+   * returns the buffer to the pool. This keeps the ring fully armed even while
+   * the consumer stalls or is preempted — converting a chip-FIFO overflow
+   * (dropped frames) into bounded host-queue backlog (delayed frames). The fix
+   * for a stalling/preempted CONSUMER, where reorder-pool can't help because it
+   * still consumes on the pump thread. */
+  bool spsc = false;
+  std::mutex queue_mu;
+  std::condition_variable queue_cv;
+  std::deque<std::pair<uint8_t *, int>> queue;
+  bool consumer_stop = false;
 };
+
+/* Run the caller's consumer, timing it for the rx.ring cb_max_us telemetry. */
+inline void rx_consume(AsyncRxShared *s, const uint8_t *buf, int len) {
+  if (len <= 0)
+    return;
+  if (s->telemetry) {
+    const auto t0 = std::chrono::steady_clock::now();
+    (*s->cb)(buf, len);
+    atomic_max(s->cb_max_us,
+               std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now() - t0)
+                   .count());
+  } else {
+    (*s->cb)(buf, len);
+  }
+}
+
 extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
   auto *s = static_cast<AsyncRxShared *>(t->user_data);
-  if (t->status == LIBUSB_TRANSFER_COMPLETED && t->actual_length > 0)
-    (*s->cb)(t->buffer, t->actual_length);
-  bool resubmit = !(*s->stop)() && (t->status == LIBUSB_TRANSFER_COMPLETED ||
-                                    t->status == LIBUSB_TRANSFER_TIMED_OUT);
-  if (resubmit && libusb_submit_transfer(t) == 0)
+  /* This URB just completed — it has left the wire until resubmitted. */
+  if (s->telemetry) {
+    const int a = s->armed.fetch_sub(1, std::memory_order_relaxed) - 1;
+    atomic_min(s->min_armed, a);
+    s->completions.fetch_add(1, std::memory_order_relaxed);
+    if (a <= 0)
+      s->empties.fetch_add(1, std::memory_order_relaxed);
+  }
+  const bool resubmit = !(*s->stop)() &&
+                        (t->status == LIBUSB_TRANSFER_COMPLETED ||
+                         t->status == LIBUSB_TRANSFER_TIMED_OUT);
+  const int rlen = t->status == LIBUSB_TRANSFER_COMPLETED ? t->actual_length : 0;
+
+  if (s->reorder) {
+    uint8_t *received = t->buffer;
+    uint8_t *fresh = nullptr;
+    if (resubmit) {
+      std::lock_guard<std::mutex> lk(s->pool_mu);
+      if (!s->free_bufs.empty()) {
+        fresh = s->free_bufs.back();
+        s->free_bufs.pop_back();
+      }
+    }
+    if (fresh) {
+      /* Re-arm the ring with a DIFFERENT buffer, then consume the received one
+       * — the ring is never idle during the slow consume. */
+      t->buffer = fresh;
+      t->length = s->buf_size;
+      if (libusb_submit_transfer(t) == 0) {
+        if (s->telemetry)
+          s->armed.fetch_add(1, std::memory_order_relaxed);
+        rx_consume(s, received, rlen);
+        std::lock_guard<std::mutex> lk(s->pool_mu);
+        s->free_bufs.push_back(received);
+        return;
+      }
+      /* submit failed — return the spare, restore, fall to the inline path. */
+      {
+        std::lock_guard<std::mutex> lk(s->pool_mu);
+        s->free_bufs.push_back(fresh);
+      }
+      t->buffer = received;
+      if (s->telemetry)
+        s->resubmit_fail.fetch_add(1, std::memory_order_relaxed);
+    }
+    /* Pool exhausted (consumer hopelessly behind), submit failed, or teardown:
+     * degrade to the inline consume-then-resubmit-same behaviour. */
+    rx_consume(s, received, rlen);
+    if (resubmit && libusb_submit_transfer(t) == 0) {
+      if (s->telemetry)
+        s->armed.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    if (resubmit && s->telemetry)
+      s->resubmit_fail.fetch_add(1, std::memory_order_relaxed);
+    s->active--;
     return;
+  }
+
+  if (s->spsc) {
+    uint8_t *received = t->buffer;
+    uint8_t *fresh = nullptr;
+    if (resubmit) {
+      std::lock_guard<std::mutex> lk(s->pool_mu);
+      if (!s->free_bufs.empty()) {
+        fresh = s->free_bufs.back();
+        s->free_bufs.pop_back();
+      }
+    }
+    if (fresh) {
+      /* Re-arm the ring with a fresh buffer, then hand the received one to the
+       * consumer thread — the pump never runs on_data, so it can re-arm in
+       * microseconds and the ring stays armed through any consumer stall. */
+      t->buffer = fresh;
+      t->length = s->buf_size;
+      if (libusb_submit_transfer(t) == 0) {
+        if (s->telemetry)
+          s->armed.fetch_add(1, std::memory_order_relaxed);
+        if (rlen > 0) {
+          std::lock_guard<std::mutex> lk(s->queue_mu);
+          s->queue.emplace_back(received, rlen);
+          s->queue_cv.notify_one();
+        } else { /* empty completion — nothing to consume, recycle the buffer */
+          std::lock_guard<std::mutex> lk(s->pool_mu);
+          s->free_bufs.push_back(received);
+        }
+        return;
+      }
+      {
+        std::lock_guard<std::mutex> lk(s->pool_mu);
+        s->free_bufs.push_back(fresh);
+      }
+      t->buffer = received;
+      if (s->telemetry)
+        s->resubmit_fail.fetch_add(1, std::memory_order_relaxed);
+    }
+    /* Pool exhausted (consumer hopelessly behind under sustained overload) or
+     * submit failed: preserve the pump's never-block invariant by re-arming
+     * with the received buffer and DROPPING this frame — a bounded loss, vs the
+     * cascade an inline consume would trigger. */
+    if (resubmit && libusb_submit_transfer(t) == 0) {
+      if (s->telemetry)
+        s->armed.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    if (resubmit && s->telemetry)
+      s->resubmit_fail.fetch_add(1, std::memory_order_relaxed);
+    s->active--;
+    return;
+  }
+
+  /* Default async ring: consume inline, then resubmit the same URB. */
+  rx_consume(s, t->buffer, rlen);
+  if (resubmit && libusb_submit_transfer(t) == 0) {
+    if (s->telemetry)
+      s->armed.fetch_add(1, std::memory_order_relaxed); /* back on the wire */
+    return;
+  }
+  if (resubmit && s->telemetry)
+    s->resubmit_fail.fetch_add(1, std::memory_order_relaxed);
   s->active--; /* not resubmitted -> this URB is done */
 }
 } // namespace
@@ -37,9 +238,11 @@ extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
 UsbTransport::UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                            libusb_context *ctx,
                            std::shared_ptr<devourer::UsbDeviceLock> usb_lock,
-                           bool rx_zerocopy)
+                           bool rx_zerocopy, RxMode rx_mode, int pool_spare,
+                           int ring_ms)
     : _dev_handle{dev_handle}, _ctx{ctx}, _logger{std::move(logger)},
-      _rx_zerocopy{rx_zerocopy}, _usb_lock{std::move(usb_lock)} {
+      _rx_zerocopy{rx_zerocopy}, _rx_mode{rx_mode}, _pool_spare{pool_spare},
+      _ring_ms{ring_ms}, _usb_lock{std::move(usb_lock)} {
   libusb_device_descriptor desc{};
   if (libusb_get_device_descriptor(libusb_get_device(_dev_handle), &desc) ==
       LIBUSB_SUCCESS) {
@@ -57,16 +260,20 @@ UsbTransport::UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
 }
 
 UsbTransport::~UsbTransport() {
-  /* Drain any async-TX completions still in flight so their transfers are
-   * freed (transfer_callback runs here, on THIS thread) before the device
-   * handle / context are torn down. We reap in the caller's thread, never a
-   * background pump, so there is no thread racing the caller-owned
-   * libusb_exit. A bounded loop so a genuinely dead endpoint can't hang
-   * teardown. */
-  for (int i = 0; i < 50 && _tx_inflight.load() > 0; ++i) {
-    struct timeval tv {0, 20000};
-    libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
-  }
+  /* Backstop only. The device's Stop()/destructor quiesces TX while every
+   * owner is alive, which is the path that makes teardown safe; reaching the
+   * transport destructor with transfers still in flight means the caller tore
+   * libusb down first, and by then _ctx may already be freed — pumping it is
+   * the SIGSEGV this diagnostic exists to name. The transport is shared_ptr-
+   * owned, so it is not guaranteed the device drops the last reference; hence
+   * the drain attempt stays. */
+  if (!_tx_shutdown.load(std::memory_order_acquire) &&
+      _tx_inflight.load(std::memory_order_acquire) > 0)
+    _logger->error("USB transport destroyed with TX in flight — the owner "
+                   "should quiesce (IRtlDevice::Stop) and release the device "
+                   "BEFORE libusb_close/libusb_exit; see the teardown order in "
+                   "examples/common/DeviceSession.h");
+  quiesce_tx();
 }
 
 bool UsbTransport::write_bytes(uint16_t reg_num, const uint8_t *ptr, size_t n) {
@@ -79,9 +286,27 @@ void UsbTransport::rx_loop(
     int buf_size, int n_urbs,
     const std::function<void(const uint8_t *, int)> &on_data,
     const std::function<bool()> &should_stop) {
+  if (_rx_mode == RxMode::Sync) {
+    rx_loop_sync(buf_size, on_data, should_stop);
+    return;
+  }
+  if (_rx_mode == RxMode::Decoupled)
+    _logger->warn("RX: mode {} not yet implemented — falling back to async ring",
+                  static_cast<int>(_rx_mode));
+  const bool reorder = _rx_mode == RxMode::ReorderPool;
+  const bool spsc = _rx_mode == RxMode::SpscFat;
   AsyncRxShared sh{&on_data, &should_stop};
+  sh.telemetry = _ring_ms > 0;
+  sh.reorder = reorder;
+  sh.spsc = spsc;
+  sh.buf_size = buf_size;
+  /* reorder-pool and spsc-fat post n_urbs URBs but allocate pool_spare extra
+   * buffers so a burst / stall backlog is absorbed in the host pool instead of
+   * overflowing the chip RX FIFO. Plain async has no spares. */
+  const int spare = (reorder || spsc) && _pool_spare > 0 ? _pool_spare : 0;
+  const int n_pool = n_urbs + spare;
   std::vector<libusb_transfer *> xfers;
-  /* Zerocopy RX ring: allocate each URB buffer from kernel DMA memory
+  /* Zerocopy RX ring: allocate each buffer from kernel DMA memory
    * (libusb_dev_mem_alloc = USBDEVFS_ALLOC on Linux) so the bulk-IN DMAs a
    * frame straight into this mmap'd buffer and usbfs skips the copy-to-user on
    * reap. dev_mem_alloc returns NULL on backends/HCDs that don't support it (or
@@ -89,10 +314,10 @@ void UsbTransport::rx_loop(
    * copy-on-reap path. Buffers outlive every in-flight transfer (freed only
    * after the drain below), so the mmap'd memory is never released under a live
    * URB. */
-  std::vector<uint8_t *> bufs(n_urbs, nullptr);
-  std::vector<bool> is_devmem(n_urbs, false);
+  std::vector<uint8_t *> bufs(n_pool, nullptr);
+  std::vector<bool> is_devmem(n_pool, false);
   int zc = 0;
-  for (int i = 0; i < n_urbs; i++) {
+  for (int i = 0; i < n_pool; i++) {
     if (_rx_zerocopy) {
       bufs[i] = libusb_dev_mem_alloc(_dev_handle, buf_size);
       if (bufs[i]) {
@@ -102,8 +327,16 @@ void UsbTransport::rx_loop(
     }
     if (!bufs[i])
       bufs[i] = static_cast<uint8_t *>(malloc(buf_size));
+  }
+  /* Hand the reorder spares (the pool tail) to the callback's free-list BEFORE
+   * submitting any URB, so an early completion (e.g. a co-running TX pump
+   * draining events) never races an unpopulated list. */
+  for (int i = n_urbs; i < n_pool; i++)
+    if (bufs[i])
+      sh.free_bufs.push_back(bufs[i]);
+  for (int i = 0; i < n_urbs; i++) {
     if (!bufs[i])
-      continue; /* both allocs failed — skip this URB */
+      continue; /* alloc failed — skip this URB (buffer freed in the sweep) */
     libusb_transfer *t = libusb_alloc_transfer(0);
     if (!t)
       continue; /* buffer freed in the by-kind sweep below */
@@ -125,11 +358,83 @@ void UsbTransport::rx_loop(
       libusb_free_transfer(t);
     }
   }
-  _logger->info("RX: async queue of {} URBs submitted ({} zerocopy DMA, {} heap)",
-                sh.active.load(), zc, n_urbs - zc);
+  _logger->info("RX: {} ring of {} URBs submitted (+{} spare, {} zerocopy DMA, "
+                "{} heap)",
+                spsc ? "spsc-fat" : reorder ? "reorder-pool" : "async",
+                sh.active.load(), static_cast<int>(sh.free_bufs.size()), zc,
+                n_pool - zc);
+  /* spsc-fat: the consumer thread. The pump callback only reaps + re-arms +
+   * enqueues; this thread drains the queue and runs on_data, returning each
+   * buffer to the pool. Joined at teardown after the URBs are drained. */
+  std::thread consumer;
+  if (spsc) {
+    consumer = std::thread([&sh]() {
+      for (;;) {
+        std::pair<uint8_t *, int> item;
+        {
+          std::unique_lock<std::mutex> lk(sh.queue_mu);
+          sh.queue_cv.wait(
+              lk, [&sh] { return !sh.queue.empty() || sh.consumer_stop; });
+          if (sh.queue.empty()) /* stop requested and drained */
+            return;
+          item = sh.queue.front();
+          sh.queue.pop_front();
+        }
+        rx_consume(&sh, item.first, item.second);
+        std::lock_guard<std::mutex> lk(sh.pool_mu);
+        sh.free_bufs.push_back(item.first);
+      }
+    });
+  }
+  if (sh.telemetry) {
+    /* Seed both the live depth and its low-water mark to the just-submitted URB
+     * count. min_armed{0} would otherwise pin the first window's low-water at 0
+     * (atomic_min only lowers), reporting a starvation that never happened; the
+     * store also wipes any transient recorded by a callback that fired between
+     * URB submission above and this seed. */
+    const int a0 = sh.active.load(std::memory_order_relaxed);
+    sh.armed.store(a0, std::memory_order_relaxed);
+    sh.min_armed.store(a0, std::memory_order_relaxed);
+  }
+  auto last_ring = std::chrono::steady_clock::now();
   while (!should_stop() && sh.active > 0) {
     struct timeval tv {0, 100000};
     libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
+    if (sh.telemetry) {
+      const auto now = std::chrono::steady_clock::now();
+      if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_ring)
+              .count() >= _ring_ms) {
+        last_ring = now;
+        const int a = sh.armed.load(std::memory_order_relaxed);
+        long long pool_free = -1; /* -1 = no host-side pool (plain async) */
+        long long qdepth = 0;
+        if (reorder || spsc) {
+          std::lock_guard<std::mutex> lk(sh.pool_mu);
+          pool_free = static_cast<long long>(sh.free_bufs.size());
+        }
+        if (spsc) {
+          std::lock_guard<std::mutex> lk(sh.queue_mu);
+          qdepth = static_cast<long long>(sh.queue.size());
+        }
+        Ev(_logger->events(), "rx.ring")
+            .t()
+            .f("mode",
+               spsc ? "spsc-fat" : reorder ? "reorder-pool" : "async")
+            .f("n_urbs", n_urbs)
+            .f("armed", a)
+            .f("min_armed", sh.min_armed.exchange(a, std::memory_order_relaxed))
+            .f("cb_max_us",
+               sh.cb_max_us.exchange(0, std::memory_order_relaxed))
+            .f("resubmit_fail", (unsigned long long)sh.resubmit_fail.load(
+                                    std::memory_order_relaxed))
+            .f("completions", (unsigned long long)sh.completions.load(
+                                  std::memory_order_relaxed))
+            .f("empties", (unsigned long long)sh.empties.load(
+                              std::memory_order_relaxed))
+            .f("pool_free", pool_free)
+            .f("qdepth", qdepth);
+      }
+    }
   }
   for (auto *t : xfers)
     libusb_cancel_transfer(t);
@@ -139,15 +444,81 @@ void UsbTransport::rx_loop(
   }
   for (auto *t : xfers)
     libusb_free_transfer(t);
-  /* All URBs are drained (sh.active == 0) — no transfer references a buffer, so
-   * releasing the ring is safe. Free each by the way it was allocated. */
-  for (int i = 0; i < n_urbs; i++) {
+  /* spsc-fat: stop and join the consumer before releasing the pool, so no
+   * on_data is in flight over a buffer we are about to free. */
+  if (spsc) {
+    {
+      std::lock_guard<std::mutex> lk(sh.queue_mu);
+      sh.consumer_stop = true;
+    }
+    sh.queue_cv.notify_all();
+    if (consumer.joinable())
+      consumer.join();
+  }
+  /* All URBs are drained (sh.active == 0) — no transfer references a buffer and
+   * the free-list is quiescent, so releasing the whole pool is safe. Ownership
+   * is `bufs` (every buffer, including the ones reorder swapped onto transfers
+   * or parked on the free-list); free each once, by the way it was allocated. */
+  for (int i = 0; i < n_pool; i++) {
     if (!bufs[i])
       continue;
     if (is_devmem[i])
       libusb_dev_mem_free(_dev_handle, bufs[i], buf_size);
     else
       free(bufs[i]);
+  }
+}
+
+void UsbTransport::rx_loop_sync(
+    int buf_size, const std::function<void(const uint8_t *, int)> &on_data,
+    const std::function<bool()> &should_stop) {
+  /* Legacy single-buffer blocking bulk-IN read — the pre-async-ring reference
+   * (floppyhammer-era model). There is no posted-URB ring: while on_data runs,
+   * nothing is armed on the wire, so this starves on consume latency rather
+   * than resubmit latency. Kept as an A/B baseline for the burst-starvation
+   * study; the 200 ms read timeout bounds should_stop() responsiveness on an
+   * idle channel. */
+  std::vector<uint8_t> buf(buf_size);
+  _logger->info("RX: synchronous blocking-read loop (buf {} B)", buf_size);
+  const bool telemetry = _ring_ms > 0;
+  auto last_ring = std::chrono::steady_clock::now();
+  long long cb_max_us = 0;
+  while (!should_stop()) {
+    int n = rx_raw(buf.data(), buf_size, 200);
+    if (n > 0) {
+      if (telemetry) {
+        const auto t0 = std::chrono::steady_clock::now();
+        on_data(buf.data(), n);
+        const long long us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - t0)
+                                 .count();
+        if (us > cb_max_us)
+          cb_max_us = us;
+      } else {
+        on_data(buf.data(), n);
+      }
+    } else if (n == LIBUSB_ERROR_NO_DEVICE) {
+      _logger->error("RX: device gone (sync read) — stopping");
+      break;
+    }
+    /* n == LIBUSB_ERROR_TIMEOUT (idle channel) or a transient error: loop. */
+    if (telemetry) {
+      const auto now = std::chrono::steady_clock::now();
+      if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_ring)
+              .count() >= _ring_ms) {
+        last_ring = now;
+        Ev(_logger->events(), "rx.ring")
+            .t()
+            .f("mode", "sync")
+            .f("n_urbs", 1)
+            .f("armed", 0) /* no ring: nothing armed while consuming */
+            .f("min_armed", 0)
+            .f("cb_max_us", cb_max_us)
+            .f("resubmit_fail", (unsigned long long)0)
+            .f("pool_free", -1);
+        cb_max_us = 0;
+      }
+    }
   }
 }
 
@@ -281,20 +652,81 @@ void UsbTransport::transfer_callback(struct libusb_transfer *transfer) {
      * clear_halt storm — now that completions are actually reaped. */
     if (transfer->status == LIBUSB_TRANSFER_STALL)
       self->_tx_wedged.store(true, std::memory_order_relaxed);
-    self->_tx_failed.fetch_add(1, std::memory_order_relaxed);
-    self->_tx_last_rc.store(-transfer->status, std::memory_order_relaxed);
-    self->_tx_last_timeout.store(
-        transfer->status == LIBUSB_TRANSFER_TIMED_OUT,
-        std::memory_order_relaxed);
-    self->_logger->error("Failed to send packet, status: {}, actual length: {}",
-                         transfer->status, transfer->actual_length);
-    devourer::Ev(self->_logger->events(), "tx.fail")
-        .f("status", (long long)transfer->status)
-        .f("actual_len", transfer->actual_length)
-        .f("timeout", transfer->status == LIBUSB_TRANSFER_TIMED_OUT);
+    /* A CANCELLED completion is quiesce_tx doing its job, not a failure —
+     * counting it would show phantom drops at the end of every session. */
+    if (transfer->status != LIBUSB_TRANSFER_CANCELLED) {
+      self->_tx_failed.fetch_add(1, std::memory_order_relaxed);
+      self->_tx_last_rc.store(-transfer->status, std::memory_order_relaxed);
+      self->_tx_last_timeout.store(
+          transfer->status == LIBUSB_TRANSFER_TIMED_OUT,
+          std::memory_order_relaxed);
+      self->_logger->error(
+          "Failed to send packet, status: {}, actual length: {}",
+          transfer->status, transfer->actual_length);
+      devourer::Ev(self->_logger->events(), "tx.fail")
+          .f("status", (long long)transfer->status)
+          .f("actual_len", transfer->actual_length)
+          .f("timeout", transfer->status == LIBUSB_TRANSFER_TIMED_OUT);
+    }
   }
-  self->_tx_inflight.fetch_sub(1, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lk(self->_tx_mu);
+    auto &live = self->_tx_live;
+    auto it = std::find(live.begin(), live.end(), transfer);
+    if (it != live.end())
+      live.erase(it);
+  }
+  /* The payload is transport-owned (allocated in tx_async) — free it with the
+   * allocator that made it, never libusb's LIBUSB_TRANSFER_FREE_BUFFER: on
+   * Windows a separately-linked libusb frees onto a different CRT heap. */
+  std::free(transfer->buffer);
   libusb_free_transfer(transfer);
+  /* Last, so a quiesce_tx loop that sees _tx_inflight == 0 knows every buffer
+   * and transfer is already freed and nothing more will touch this object. */
+  self->_tx_inflight.fetch_sub(1, std::memory_order_release);
+}
+
+/* Cancel + drain, called while the caller's libusb context is still alive.
+ * See IRtlTransport::quiesce_tx for the contract. */
+void UsbTransport::quiesce_tx() {
+  if (_tx_shutdown.exchange(true, std::memory_order_acq_rel))
+    return; /* already quiesced (Stop() then the destructor) */
+
+  /* Snapshot, then cancel outside the lock — libusb_cancel_transfer can
+   * complete the transfer inline, re-entering transfer_callback, which takes
+   * the same mutex. Cancellation is asynchronous: SUCCESS means "unlink
+   * submitted", so the drain below is what actually establishes quiescence.
+   * NOT_FOUND means the transfer already completed — its callback owns the
+   * bookkeeping, so there is nothing to do here. */
+  std::vector<libusb_transfer *> pending;
+  {
+    std::lock_guard<std::mutex> lk(_tx_mu);
+    pending = _tx_live;
+  }
+  for (auto *t : pending)
+    libusb_cancel_transfer(t);
+
+  /* Drain. Generous deadline: an unlink normally retires in microseconds (or
+   * instantly with NO_DEVICE once the adapter is unplugged), and hanging
+   * teardown forever is worse than reporting the anomaly. */
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (_tx_inflight.load(std::memory_order_acquire) > 0 &&
+         std::chrono::steady_clock::now() < deadline) {
+    struct timeval tv {0, 20000};
+    if (libusb_handle_events_timeout_completed(_ctx, &tv, nullptr) != 0)
+      break; /* context is gone or broken — nothing left to reap with */
+  }
+
+  const int residual = _tx_inflight.load(std::memory_order_acquire);
+  if (residual > 0) {
+    /* Proceeding means libusb_close will run with live transfers, which is
+     * undefined behaviour — so say so loudly rather than fail silently. */
+    _logger->error("TX quiesce timed out with {} transfer(s) still in flight — "
+                   "the USB close that follows is unsafe",
+                   residual);
+    devourer::Ev(_logger->events(), "tx.quiesce_timeout").f("inflight", residual);
+  }
 }
 
 bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
@@ -308,6 +740,11 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
    * fail, and TX collapses (issue #240). If the in-flight depth is already high
    * (a fast caller outrunning the air), block briefly to reap — bounded
    * backpressure that also caps latency. */
+  /* Refused before the pump below, so a late send can't re-enter libusb after
+   * teardown has begun. Counts as neither submitted nor failed: a frame handed
+   * to us after we were told to stop is not a drop. */
+  if (_tx_shutdown.load(std::memory_order_acquire))
+    return false;
   {
     struct timeval zero {0, 0};
     libusb_handle_events_timeout_completed(_ctx, &zero, nullptr);
@@ -326,6 +763,19 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
     _logger->error("Failed to allocate transfer");
     return false;
   }
+
+  /* The URB outlives this call by definition (that is what "async" buys), so
+   * it cannot reference the caller's buffer: every caller so far builds its
+   * frame in a local that dies on return. Copy into a transport-owned block,
+   * freed in transfer_callback. One memcpy per frame is far below the
+   * libusb_alloc_transfer above it and the kernel's own copy at submit. */
+  auto *payload = static_cast<uint8_t *>(std::malloc(length));
+  if (!payload) {
+    _logger->error("Failed to allocate TX payload ({} bytes)", length);
+    libusb_free_transfer(transfer);
+    return false;
+  }
+  std::memcpy(payload, packet, length);
 
   /* Recover a bulk-OUT that a prior async TX wedged (TIMED_OUT / stall). Only
    * the first send used to clear_halt; a mid-stream stall (e.g. hardware NDP
@@ -380,7 +830,7 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
    * Over-submission is bounded by the in-flight soft cap above, not by
    * dropping frames on a timer. `timeout_ms` is kept for the sync path. */
   (void)timeout_ms;
-  libusb_fill_bulk_transfer(transfer, _dev_handle, tx_ep, packet, length,
+  libusb_fill_bulk_transfer(transfer, _dev_handle, tx_ep, payload, length,
                             &UsbTransport::transfer_callback, (void *)this,
                             /*timeout=*/0);
   /* Upstream OOT (rtl8814a/usb/rtl8814au_xmit.c) sets URB_ZERO_PACKET on
@@ -393,12 +843,27 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
   /* Count the submission here; async completion (incl. TIMED_OUT) is counted
    * in transfer_callback, a submit error just below. */
   _tx_submitted.fetch_add(1, std::memory_order_relaxed);
+  /* Register and count BEFORE submitting: the completion can be delivered from
+   * another thread's pump the instant the URB is queued, and it must find its
+   * own entry to remove. */
+  {
+    std::lock_guard<std::mutex> lk(_tx_mu);
+    _tx_live.push_back(transfer);
+  }
+  _tx_inflight.fetch_add(1, std::memory_order_relaxed);
   int rc = libusb_submit_transfer(transfer);
   if (rc == LIBUSB_SUCCESS) {
-    _tx_inflight.fetch_add(1, std::memory_order_relaxed);
     DVR_DEBUG(_logger, "Packet sent successfully, length: {}", length);
     return true;
   }
+  /* Never submitted, so no callback will run — undo the bookkeeping here. */
+  {
+    std::lock_guard<std::mutex> lk(_tx_mu);
+    auto it = std::find(_tx_live.begin(), _tx_live.end(), transfer);
+    if (it != _tx_live.end())
+      _tx_live.erase(it);
+  }
+  _tx_inflight.fetch_sub(1, std::memory_order_relaxed);
   _tx_failed.fetch_add(1, std::memory_order_relaxed);
   _tx_last_rc.store(rc, std::memory_order_relaxed);
   _tx_last_timeout.store(rc == LIBUSB_ERROR_TIMEOUT, std::memory_order_relaxed);
@@ -406,6 +871,7 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
   devourer::Ev(_logger->events(), "tx.fail")
       .f("rc", rc)
       .f("timeout", rc == LIBUSB_ERROR_TIMEOUT);
+  std::free(payload);
   libusb_free_transfer(transfer);
   return false;
 }

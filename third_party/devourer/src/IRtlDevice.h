@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 #include "AdapterCaps.h"
 #include "AmpduMode.h"
@@ -138,6 +139,17 @@ public:
    * baseline. The primary knob — SetTxPower forwards here; a generation
    * without the API wired ignores it (caps.supported=false). */
   virtual void SetTxPowerIndexOverride(int idx) { (void)idx; }
+
+  /* Program caller-supplied per-rate TXAGC diffs (signed qdB vs the
+   * reference anchor) in place of the chip's default by-rate table.
+   * std::nullopt clears back to the default. Applies live; persists across
+   * SetMonitorChannel / FastRetune and override-set/clear (Runtime TX power
+   * family contract). Returns false where unsupported (everything except
+   * the 8822E). */
+  virtual bool SetTxPowerRateDiffs(const std::optional<devourer::TxRateDiffsQdb>& diffs) {
+    (void)diffs;
+    return false;
+  }
 
   /* Re-program the TX-power registers from the current knob state at the
    * CURRENT channel — the hook tests use to force a re-apply without moving
@@ -505,10 +517,17 @@ public:
   /* Frame-free RX energy / channel-busy snapshot (see RxSense.h) — the read side
    * of the DEVOURER_CW_TONE emitter, used for spectrum-sensing / interferer
    * detection. Reads the chip's phydm false-alarm + CCA counters, DIG/IGI, and
-   * (optionally) the NHM power histogram. FA/CCA counts are the delta since the
+   * (when asked) the NHM power histogram. FA/CCA counts are the delta since the
    * previous call. Default returns an all-invalid snapshot; each generation
-   * overrides with a real reader. */
-  virtual RxEnergy GetRxEnergy() { return {}; }
+   * overrides with a real reader.
+   *
+   * `with_nhm` is a cost decision, not a preference: the NHM read arms a ~2 ms
+   * measurement window and then polls a ready bit at 1 ms granularity
+   * (src/NhmReader.h), so it dominates the call — the scalar FA/CCA/IGI path is
+   * a handful of register reads. Pass false for the throwaway read that resets
+   * the delta counters before an observation window, and for any caller
+   * sampling faster than a few times a second. */
+  virtual RxEnergy GetRxEnergy(bool with_nhm) { (void)with_nhm; return {}; }
 
   /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — the
    * runtime feed a closed-loop adaptive-link controller reads instead of
@@ -540,6 +559,22 @@ public:
    * Init/InitWrite). On Jaguar1 a failed FW boot does not abort bring-up —
    * this is the only place the failure is visible to a caller. */
   virtual devourer::FwBootStatus GetFwBootStatus() { return {}; }
+
+  /* Dump the chip's canary register set (BB / MAC / per-path RF) to the
+   * diagnostic plane. Reads only — no writes, no calibration, no bring-up.
+   *
+   * The point is that it is callable on a device that has NOT been Init'ed, so
+   * a chip left in whatever state a previous session abandoned it in can be
+   * inspected AS IT IS. Every other path into this driver reconfigures the chip
+   * on the way in, which destroys exactly the evidence a state bug leaves
+   * behind. Pair it with an open that skips libusb_reset_device
+   * (claim_interface_then_reset's `do_reset=false`) — a USB reset re-runs the
+   * chip's own boot and is just as destructive.
+   *
+   * Output format matches DEVOURER_DUMP_CANARY, so two dumps diff directly with
+   * tests/canary_diff.py. Reading a powered-down chip yields garbage or throws;
+   * interpreting that is the caller's job. No-op where unsupported (default). */
+  virtual void DumpChipState() {}
 };
 
 #endif /* IRTL_DEVICE_H */

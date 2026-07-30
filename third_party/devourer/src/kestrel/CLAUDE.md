@@ -55,9 +55,15 @@ the halbb per-band LNA/TIA gain-error cache, without which 5 GHz is deaf), TX
 (mgmt injection — the OpenIPC video path via `streamtx`; legacy/HT/VHT/HE
 rates), channel/BW **5/10/20/40/80 MHz on both dies + 160 MHz on the 8852C**
 (the 8852B die has no 160 MHz — vendor bw_sup; caps report accordingly).
-40 MHz tunes to the block center (primary ±2); 80/160 MHz derive
-center/pri_ch from the channel plan (160 = an 8-wide block, center =
-block_start+14). **6 GHz TX tops out at 80 MHz**: the 6G 160 MHz TX does not
+40 MHz tunes to the block center (primary ±2); 80/160 MHz derive the center
+from the channel plan (160 = an 8-wide block, center = block_start+14).
+`halbb_ctrl_bw_ch`'s `pri_ch` argument is the primary **channel number**, not a
+sub-band index (vendor phl passes `rtw_chan_def::chan` through unchanged): the
+vendor derives the 0x4978[11:8] sub-band index from `pri_ch` vs `central_ch`,
+indexes the 2.4 GHz CCK SCO threshold tables with `pri_ch - 1`, and places the
+NBI spur notch from it. All three are RX-side — feeding it an index costs CCK
+reception and all >20 MHz reception while TX is unaffected, so an SDR duty
+check cannot see it (`tests/kestrel_prich_onair.sh`). **6 GHz TX tops out at 80 MHz**: the 6G 160 MHz TX does not
 radiate on the C8852C (the RF synth locks and RX-160 works, but the 6G+160
 TX-enable path is un-ported — B210-confirmed 0% duty vs 45% at 6G-80 / 40% at
 5G-160; a MAC TXAGC-max / RF-TX-path gap, not a chip limit — the vendor
@@ -148,6 +154,20 @@ between frames (2 BB RMWs on value change, free while constant; 0.25 dB
 steps, clamped to the 0..23 dBm PA window around the `DEVOURER_TX_PWR` base;
 global, so a HW beacon airing between frames follows the last-written level;
 a field-less frame restores the `SetTxPowerOffsetQdb` session offset).
+
+**Per-rate diffs** (`SetTxPowerRateDiffs`) ride that same rewrite, because no
+per-rate TXAGC table exists under the fixed-dBm model — this is the only family
+where `GetTxPowerCaps().rate_diffs_hw_table` is false. `send_packet` resolves
+the frame's own MGN rate to its diff and folds it into the target, so a
+fixed-rate stream writes once and then costs nothing while a rate ladder pays
+the 2-RMW rewrite at each change. There is no calibrated shape underneath, so
+"replace the shape" degenerates to "add to the flat session target". Two
+consequences, neither of them papered over: HE and VHT frames carry no diff (the
+caller struct is the CCK / legacy / 1SS-HT ladder), and the target is global, so
+a hardware-timed beacon airing between host frames inherits the last frame's
+rate diff rather than its own rate's. The table is stored as a flat
+`std::atomic<int8_t>[10]` so the TX path reads the one entry it needs without a
+lock — a swap can only split between frames, never within one.
 
 ## 8852C vs 8852B divergences
 

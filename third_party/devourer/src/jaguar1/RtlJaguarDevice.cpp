@@ -270,7 +270,7 @@ void RtlJaguarDevice::StopContinuousTx() {
  * (0xC50), then resets the counters (phydm_false_alarm_counter_reg_reset AC:
  * 0x9a4[17], 0xa2c[15], 0xb58[0]) so the next call sees only the delta. Same
  * register set PhydmWatchdog::ReadFaCountersAc uses. */
-RxEnergy RtlJaguarDevice::GetRxEnergy() {
+RxEnergy RtlJaguarDevice::GetRxEnergy(bool with_nhm) {
   RxEnergy e;
   auto bb = [this](uint16_t addr) {
     return _radioManagement->phy_query_bb_reg_public(addr, 0xFFFFFFFF);
@@ -292,8 +292,11 @@ RxEnergy RtlJaguarDevice::GetRxEnergy() {
   _device.phy_set_bb_reg(0x0B58, 1u << 0, 1);
   _device.phy_set_bb_reg(0x0B58, 1u << 0, 0);
 
-  /* NHM 12-bucket power histogram (frame-free, 11AC register map). */
-  devourer::read_nhm(
+  /* NHM 12-bucket power histogram (frame-free, 11AC register map). Skipped
+   * when the caller did not ask: it arms a ~2 ms window and polls at 1 ms
+   * granularity, which dwarfs the register reads above. */
+  if (with_nhm)
+    devourer::read_nhm(
       devourer::nhm_regs_11ac(), e.igi,
       [this](uint16_t a) { return _device.rtw_read<uint32_t>(a); },
       [this](uint16_t a, uint32_t m, uint32_t v) {
@@ -1534,6 +1537,16 @@ devourer::TxPowerCaps RtlJaguarDevice::GetTxPowerCaps() {
       _eepromManager->version_id.ICType != CHIP_8821;
   caps.offset_min_qdb = -126;
   caps.offset_max_qdb = 126;
+  /* Per-rate indices are computed in software and written per rate (the
+   * 8812A/8821A register fanout, the 8814A packed port), so a caller table
+   * replaces the EFUSE walk at no per-frame cost — at the family's 0.5 dB
+   * resolution, not the caller's qdB. */
+  caps.rate_diffs = true;
+  caps.rate_diffs_hw_table = true;
+  /* On-air (tests/txpwr_rate_diffs_onair.sh, MCS0-only -32 qdB trim against a
+   * ground-station RSSI reference): 8812AU -8.0 dB, 8814AU -8.0 dB, 8821AU
+   * -7.0 dB at 2.4 GHz vs -8.0 nominal, with 6M unmoved in every case. */
+  caps.rate_diffs_measured = true;
   return caps;
 }
 
@@ -1564,6 +1577,39 @@ void RtlJaguarDevice::SetTxPowerIndexOverride(int idx) {
   _radioManagement->SetTxPowerOverride(idx < 0 ? -1 : (idx > 63 ? 63 : idx));
   if (_brought_up)
     _radioManagement->ApplyTxPower();
+}
+
+bool RtlJaguarDevice::SetTxPowerRateDiffs(
+    const std::optional<devourer::TxRateDiffsQdb> &diffs) {
+  if (_cw_active) {
+    _logger->warn("SetTxPowerRateDiffs refused: CW tone active");
+    return false;
+  }
+  if (diffs && !_eepromManager->TxPowerInfoLoaded)
+    _logger->warn("SetTxPowerRateDiffs: EFUSE per-rate table not loaded — the "
+                  "caller shape anchors on the flat pre-EFUSE fallback, not a "
+                  "calibrated reference");
+  if (diffs && _eepromManager->version_id.ICType == CHIP_8821)
+    _logger->warn("SetTxPowerRateDiffs: the 8821A's 5 GHz chain ignores BB "
+                  "TXAGC (registers move, on-air power does not) — the shape "
+                  "is 2.4 GHz-only on this part");
+  _radioManagement->SetTxPowerRateDiffs(diffs);
+  if (diffs)
+    /* Report the APPLIED values: this family quantizes to 0.5 dB, so an odd
+     * qdB rounds and a table measured on a 0.25 dB part will not replay
+     * verbatim here. */
+    _logger->info("TX-power per-rate diffs set (cck {} legacy {} mcs0 {} "
+                  "mcs7 {} qdB -> {} {} {} {} index steps)",
+                  diffs->cck, diffs->legacy, diffs->mcs[0], diffs->mcs[7],
+                  devourer::rate_diff_steps(diffs->cck, 2),
+                  devourer::rate_diff_steps(diffs->legacy, 2),
+                  devourer::rate_diff_steps(diffs->mcs[0], 2),
+                  devourer::rate_diff_steps(diffs->mcs[7], 2));
+  else
+    _logger->info("TX-power per-rate diffs cleared (EFUSE walk restored)");
+  if (_brought_up)
+    _radioManagement->ApplyTxPower();
+  return true;
 }
 
 bool RtlJaguarDevice::ReApplyTxPower() {
@@ -1705,6 +1751,9 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
     c.ldpc_rx_ht = true;
     c.ldpc_rx_vht = true;
     c.ldpc_rx_flag = false;
+    /* Decodes 2.4 GHz VHT on the bench (it served as the ground station for
+     * the other dies' runs), but its own TX side is unmeasured there, and
+     * vht_2g4_ok is a transmit claim. */
     break;
   case CHIP_8821:
     c.chip_name = "RTL8821A";
@@ -1719,6 +1768,11 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
     c.ldpc_rx_ht = true;
     c.ldpc_rx_vht = true;
     c.ldpc_rx_flag = true;
+    /* 8812AU on air, cold-cycled: VHT 1SS up to MCS8 — 256-QAM — on 2.4 GHz,
+     * every sampled frame decoded as the commanded VHT rate by an 8822BU peer.
+     * The 8811A is the 1T1R cut of the same die on the same path, unmeasured
+     * on its own. */
+    c.vht_2g4_ok = true;
     if (_eepromManager->version_id.RFType == RF_TYPE_1T1R) {
       c.chip_name = "RTL8811A";
       c.marketing_names = "RTL8811AU/RTL8811AR";
@@ -1765,6 +1819,7 @@ devourer::TxPowerState RtlJaguarDevice::GetTxPowerState() {
         0, static_cast<uint8_t>(MGN_MCS7), 0);
     s.hw_readback = false;
   }
+  s.rate_diffs_custom = _radioManagement->HasTxPowerRateDiffs();
   return s;
 }
 
@@ -1801,7 +1856,43 @@ bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
   return true;
 }
 
+/* Clean shutdown — see IRtlDevice::Stop. Quiesce TX first so the de-init writes
+ * are not racing frames the transport still owns, then power the chip down.
+ *
+ * The power-down is the point: without it a Jaguar1 chip stays in ACT with its
+ * RF front end live for as long as the adapter is plugged in, long after the
+ * owning process has exited. That is wrong on its own terms, it is what every
+ * other generation already avoids (HalJaguar2::power_off,
+ * HalJaguar3::rtw_hal_deinit), and it is what makes a beacon loaded into the
+ * MAC's reserved page stop airing when the session ends instead of
+ * transmitting indefinitely.
+ *
+ * No performance claim is attached. An earlier revision cited a delivery
+ * recovery here; that measurement came from a ground station too marginal to
+ * support it (docs/warm-tx-degradation.md).
+ *
+ * Best-effort: a chip that already dropped off the bus makes the writes fail,
+ * which is fine on a teardown path. */
+void RtlJaguarDevice::Stop() {
+  _device.quiesce_tx();
+  if (!_cfg.tuning.teardown_power_down) {
+    _logger->info("Jaguar1: Stop() leaving the chip powered "
+                  "(tuning.teardown_power_down=0)");
+    return;
+  }
+  try {
+    _halModule.rtw_hal_deinit();
+  } catch (...) {
+    _logger->info("Jaguar1: Stop() de-init writes failed (chip already gone?)");
+  }
+}
+
 RtlJaguarDevice::~RtlJaguarDevice() {
+  /* First, before any member starts unwinding: the async bulk-OUT URBs point
+   * at transport-owned memory and complete on whichever thread pumps libusb,
+   * so nothing may be released while they are still live. Idempotent, so the
+   * usual Stop()-then-destroy path pays nothing here. */
+  _device.quiesce_tx();
   /* Safety net: if a CW tone is still armed (caller forgot StopCwTone), restore
    * the chip before teardown so it isn't left radiating a bare carrier. */
   StopCwTone();
@@ -1816,6 +1907,16 @@ RtlJaguarDevice::~RtlJaguarDevice() {
   _rxmask_stop.store(true);
   if (_rxmask_thread.joinable()) {
     _rxmask_thread.join();
+  }
+  /* Backstop for a caller that destroys without Stop(): power the chip down so
+   * it is not left in ACT indefinitely. After the thread joins, so nothing is
+   * still touching the chip. Harmless if Stop() already ran. */
+  if (_cfg.tuning.teardown_power_down) {
+    try {
+      _halModule.rtw_hal_deinit();
+    } catch (...) {
+      /* Teardown path — a chip that already left the bus is not an error. */
+    }
   }
 }
 

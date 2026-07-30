@@ -65,6 +65,20 @@ enum class Dpdt8822eMode : uint8_t {
   Skip,       /* leave the DPDT/pin-mux untouched */
 };
 
+/* USB RX-ring servicing strategy (UsbTransport::rx_loop). The default async
+ * ring runs the consumer inline on the libusb pump thread before resubmitting
+ * each URB, so a slow consumer under a burst can stall resubmit and collapse
+ * the armed-URB depth. The other modes trade that coupling off for A/B study:
+ * a blocking single-buffer reference, and two buffer-pool variants that re-arm
+ * the ring with a spare buffer before consuming the received one. */
+enum class RxMode : uint8_t {
+  Async,       /* current: consume inline, then resubmit the same URB */
+  Sync,        /* blocking single-buffer bulk-IN read loop (legacy reference) */
+  ReorderPool, /* swap a spare buffer onto the wire, resubmit, then consume */
+  SpscFat,     /* pool + SPSC hand-off to a consumer thread (deep absorption) */
+  Decoupled,   /* naive worker-thread hand-off (known-bad A/B control) */
+};
+
 struct DeviceConfig {
   /* ---- RX ------------------------------------------------------------- */
   struct Rx {
@@ -102,6 +116,20 @@ struct DeviceConfig {
      * fills past 16 KB anyway. Kestrel ignores this knob: the 8852C RXAGG
      * LEN_TH is ~20 KB and its ring must hold a full aggregate (32 KB). */
     std::optional<int> urb_bytes;
+    /* env: DEVOURER_RX_MODE — USB RX-ring servicing strategy (RxMode above).
+     * Default async = the current inline-consume-then-resubmit ring. The other
+     * modes are A/B / fix vehicles for the burst-starvation study. */
+    RxMode rx_mode = RxMode::Async;
+    /* env: DEVOURER_RX_POOL_SPARE — extra RX buffers beyond the URB count for
+     * the buffer-pool modes (ReorderPool/SpscFat): a deeper pool absorbs a
+     * burst backlog host-side instead of overflowing the chip RX FIFO. 0 =
+     * pool of exactly urbs buffers (no spare). Ignored by async/sync. */
+    int pool_spare = 0;
+    /* env: DEVOURER_RX_RING_MS — cadence (ms) for the diagnostic rx.ring
+     * telemetry event (armed-URB depth, min depth in the window, resubmit
+     * failures, max inline-consume latency). Unset/0 = no telemetry (the
+     * default RX path is then byte-for-byte unchanged). */
+    std::optional<int> ring_ms;
     /* env: DEVOURER_8821C_NO_PHYST (inverted) — 8821C: prepend the 32-byte
      * PHY-status to RX frames (per-frame RSSI/SNR/EVM). Disable only for the
      * leanest possible RX path. */
@@ -299,6 +327,17 @@ struct DeviceConfig {
      * kernel eFEM pin-mux so the DPDT follows TX/RX in hardware (both RX chains
      * live); the others are the pre-fix static routes. See docs/8822e-quirks.md. */
     Dpdt8822eMode dpdt_8822e = Dpdt8822eMode::EfemPinmux;
+
+    /* env: DEVOURER_TEARDOWN_POWER_DOWN=0|1 — Jaguar1: run the die's
+     * card-disable power sequence at Stop()/destruction (default on), instead
+     * of leaving the chip in ACT with its RF front end live indefinitely.
+     *
+     * Turning it OFF is what a post-mortem needs: a powered-down chip answers
+     * every register read with the CARDEMU fill (0xEA...), so the state a
+     * session left behind is only inspectable (examples/chipstate) while the
+     * chip is still up. It is also the A/B lever for measuring what the
+     * power-down is actually worth. */
+    bool teardown_power_down = true;
   } tuning;
 
   /* ---- Diagnostics output --------------------------------------------- */
