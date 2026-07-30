@@ -4185,3 +4185,46 @@ Self state (`channel`, `psk_announced`, `claimed`, `claimed_by`) joins
 Both actions are local management HTTP on the craft's control socket, never
 over-air commands: an attacker who can reach that socket has already won,
 while the over-air surface is unchanged.
+
+## Pass 114 — TX-power override-latch, one endpoint for both RF backends (2026-07-30)
+
+**Need.** The waybeam-hub vehicle menu drove TX power with raw
+`iw dev wlan0 set txpower` shell commands — kernel-monitor-only, invisible to
+waybeam-link's own §10 power resolve, and clobbered on every `mon-up` /
+profile commit. The operator direction (2026-07-30, after the devourer-master
+re-vendor A/B): power tables + ONE waybeam-link endpoint that behaves
+identically on `kernel-monitor` and `radio`, replacing the hub's `iw` calls.
+The roadmap knob had already been deferred from the §15.5 core write set
+precisely because a raw write fights the §10.4 commit-time resolve.
+
+**Ruling (operator, 2026-07-30).** New §10.5 + §15.5 rows:
+
+- `POST /api/v1/tx/power {"qdb":N}` — **override-latch**, absolute qdb across
+  every `role:"tx"` adapter: apply immediately, re-assert wherever the
+  selector would have written power (commit, post-retune), and make the §10.2
+  curve resolve yield while latched. `{"auto":true}` clears with one forced
+  immediate restore. `GET /api/v1/tx/power` + a §15.3 `link.tx_power_override`
+  bool expose the state. Exactly one of `qdb`/`auto` per request.
+- Absolute-qdb body (operator choice over a portable-level override): maps 1:1
+  to the hub presets and to `iw fixed/auto`, and needs no authored power_map
+  to be useful. The §10.3 `max_power_qdb` ceiling still bounds it; nothing
+  else does.
+- Backend matrix (§10.5): radio → `SetTxPowerOffsetQdb(qdb)`; kernel-monitor →
+  forked `iw set txpower fixed qdb×25 mBm` under the §11.6 bounded-CLI
+  deadline, `auto` → `txpower auto`. Cadence law unchanged (never per frame).
+
+**Parity repairs riding along (from the 2026-07-30 backend audit).**
+`MonAir::set_power_qdb` was a stub, and `tx.apply_power` was wired only
+`is_radio()` — the §10.4 commit resolve on kernel-monitor actuated nothing
+(logged-intent only). Both fixed: a loaded `power_map` now actuates on both RF
+backends through the same seam. Also fixed: the RadioAir stats branch computed
+`rx_filtered` and never assigned `as.filtered` (value dropped). The audit's
+remaining divergences (radio runtime net_id rebinding no-op — scout/pairing
+silently monitor-only; no radio airtime model → §14.2 JSCC dead there; the
+§11.6 recovery log printing on radio; `unicast_fallback` semantic split;
+monitor 80 MHz retune width) are recorded as roadmap follow-ups, not this pass.
+
+**Boundary.** No wire change, no table-hash change. The latch is volatile
+(reboot restores config/curve behavior) and local-management HTTP only —
+same §13 posture as Pass 113. `apply_mode` stays radio-only (Pass 13: monitor
+carries MCS per-packet in radiotap); power is the one lever unified here.

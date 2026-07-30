@@ -1802,6 +1802,40 @@ inside the §9.5 sequenced transition. After **any** devourer retune that resets
 TXAGC (a channel change, §11) call **`ReApplyTxPower()`** to re-assert the
 adapter's setting. Power is not a fast loop — profile-change cadence only.
 
+### 10.5 Runtime TX-power override-latch (Pass 114)
+
+The one runtime power write (`POST /api/v1/tx/power`, §15.5) is an
+**override-latch**, not a one-shot poke: a raw write would be silently
+re-resolved away at the next §10.4 profile commit, so setting an override
+makes the §10.2 curve resolve **yield** until the override is cleared.
+
+- `{"qdb": <int>}` latches an **absolute** power on every `role:"tx"` adapter
+  of this node: applied immediately, and re-asserted at every point the
+  selector would have written power (profile commit; after a §11 retune, in
+  the same slot as the §10.4 `ReApplyTxPower`). The §10.3 `max_power_qdb`
+  ceiling — when configured — is the only clamp that also bounds the override;
+  there is no regulatory clamp (§10.3 posture unchanged).
+- `{"auto": true}` clears the latch **and forces one immediate restore** (it
+  must not wait for the next profile change): on the radio backend the §10.2
+  curve resolve resumes (no curve loaded → a one-shot offset 0 undoes the
+  latch); on kernel-monitor the driver default is restored via
+  `txpower auto`, after which the curve resolve resumes if a curve is loaded.
+- `GET /api/v1/tx/power` reports `{override_active, qdb, backend}`; the §15.3
+  `link` object gains `tx_power_override` (bool) beside `tx_power_qdb`.
+
+**Backend actuation matrix.** The §10 model is backend-agnostic; only the
+actuator differs (the §3.0 rate split's power twin):
+
+| backend | fixed apply | auto restore |
+|---|---|---|
+| `radio` (devourer) | `SetTxPowerOffsetQdb(qdb)` (§10.4, unchanged) | resume curve resolve; offset 0 when no curve |
+| `kernel-monitor` | `iw dev <ifname> set txpower fixed <qdb×25 mBm>` (1 qdb = 25 mBm), forked with the §11.6 bounded-CLI deadline | `iw dev <ifname> set txpower auto` |
+
+Cadence law is unchanged: power moves at profile/override cadence only, never
+per frame. On kernel-monitor this also repairs the §10.4 gap where the commit
+resolve was a logged intent only — with this section, a loaded `power_map`
+actuates on **both** RF backends through the same `set_power_qdb` seam.
+
 ---
 
 ## 11. Follow-me channel switch (CSA)
@@ -3475,6 +3509,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
 | `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
 | `GET /api/v1/modes` | `{active, apply_configured, catalog_fingerprint, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist. A ground with an IP path reads it here; one without must hardcode a copy, and pins `catalog_fingerprint` (Pass 108) to detect index drift (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
+| `GET /api/v1/tx/power` | `{override_active, qdb, backend}` — the §10.5 override-latch state; `qdb` is the latched absolute value (present only while `override_active`), `backend` ∈ `radio`\|`kernel-monitor` (TX node) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -3498,6 +3533,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 |---|---|---|
 | `POST /api/v1/csa` | `{ "mhz": 5805, "class": 0 }` | start a §11 CSA campaign (issuer/ground node) |
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
+| `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto` — else 400 (TX node) |
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node) |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
