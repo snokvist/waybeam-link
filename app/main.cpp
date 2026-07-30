@@ -3052,10 +3052,19 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     emitter.emit(snap);
 }
 
+// §15.5 Pass 113: live TX self state appended to GET /info (channel, pairing
+// gate, §11.5a claim). Null on non-craft nodes.
+struct InfoSelfState {
+    uint16_t channel_mhz = 0;
+    bool psk_announced = false;
+    std::optional<uint16_t> claimed_by;
+};
+
 // §15.5 GET /info — static identity. Hand-built (no json dep in app/); the
 // field values are numeric or house-controlled strings (no escaping needed).
 std::string build_info_json(const Loaded& l, uint32_t session,
-                            const char* role) {
+                            const char* role,
+                            const InfoSelfState* self = nullptr) {
     std::string s = "{\"role\":\"";
     s += role;
     s += "\",\"node\":" + std::to_string(l.cfg.node.originator);
@@ -3082,7 +3091,16 @@ std::string build_info_json(const Loaded& l, uint32_t session,
         s += (a.role == Role::kTx ? "tx" : "rx");
         s += "\",\"channel\":" + std::to_string(a.channel_mhz) + "}";
     }
-    s += "],\"control\":\"" + l.cfg.control.bind + "\"}";
+    s += "]";
+    if (self != nullptr) {  // Pass 113 TX self state
+        s += ",\"channel\":" + std::to_string(self->channel_mhz);
+        s += ",\"psk_announced\":";
+        s += self->psk_announced ? "true" : "false";
+        s += ",\"claimed\":";
+        s += self->claimed_by ? "true" : "false";
+        s += ",\"claimed_by\":" + std::to_string(self->claimed_by.value_or(0));
+    }
+    s += ",\"control\":\"" + l.cfg.control.bind + "\"}";
     return s;
 }
 
@@ -3131,8 +3149,10 @@ int run_tx(const Loaded& l) {
     // §11.4a key provenance: csa.psk configured ⇒ secret (token off the air);
     // absent ⇒ announced (the per-boot token is both the CSA key and the
     // advertised ANNOUNCE psk). Pass 61: presence is the sole selector.
-    const std::array<uint8_t, kAnnouncePskSize> token = announce_token();
-    const bool psk_announced = l.cfg.policy.csa.psk.empty();
+    // Pass 113: runtime-mutable — the §11.4a pairing gate re-keys the token
+    // and flips announcement at runtime; the announce site reads per tick.
+    std::array<uint8_t, kAnnouncePskSize> token = announce_token();
+    bool psk_announced = l.cfg.policy.csa.psk.empty();
     DiscoveryCatalog discovery;
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv);
     tx.estimate_airtime = [&](size_t bytes, bool include_pending) {
@@ -3245,6 +3265,13 @@ int run_tx(const Loaded& l) {
         follower_params.psk.assign(token.begin(), token.end());
     }
     CsaFollower csa(follower_params);
+    // §15.5 Pass 113: the craft's live operating channel/width — boot values
+    // from the first adapter, updated by CSA commits and local channel-set.
+    uint16_t cur_chan =
+        l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
+    /* §11 width CODE (0/1/2), matching ca.bw from CSA commits. */
+    uint8_t cur_bw =
+        bw_code(l.cfg.adapters.empty() ? 20 : l.cfg.adapters[0].bw);
     // §11.6 Pass 80 post-retune RX-liveness guard state (one-shot).
     std::optional<uint64_t> csa_liveness_deadline_ms;
     bool csa_armed_flag = false;  // §11.6 Pass 89: mirrors csa.campaign_active()
@@ -3302,7 +3329,13 @@ int run_tx(const Loaded& l) {
             if (!s.empty() && s.back() == '\n') s.pop_back();
             return s;
         };
-        h.info_json = [&] { return build_info_json(l, session, "tx"); };
+        h.info_json = [&] {
+            InfoSelfState self;
+            self.channel_mhz = cur_chan;
+            self.psk_announced = psk_announced;
+            self.claimed_by = csa.latched_issuer();
+            return build_info_json(l, session, "tx", &self);
+        };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.discovery_json = [&] {
             return discovery.json(now_ms(), {});
@@ -3391,6 +3424,50 @@ int run_tx(const Loaded& l) {
         h.modes_list = [&, modes_dir = mode_catalog_dir(l.cfg.venc)]() {
             return modes_catalog_json(modes_dir, active_mode,
                                       !l.cfg.venc.mode_apply_cmd.empty());
+        };
+        // §15.5 Pass 113: craft-local channel set within the CSA allowlist.
+        // Same commit sequence as a CSA switch (retune → selector → §11.6
+        // liveness guard), then clears any in-flight campaign and drops the
+        // §11.5a binding — the ground must re-scout. Volatile.
+        h.channel_set = [&](int mhz) -> std::string {
+            if (mhz <= 0 ||
+                !channel_allowed(l.cfg.policy.csa.channel_allowlist,
+                                 static_cast<uint16_t>(mhz))) {
+                return "mhz not in channel_allowlist";
+            }
+            const uint16_t chan = static_cast<uint16_t>(mhz);
+            if (!air.value->retune_all(chan, cur_bw, false)) {
+                return "retune failed";
+            }
+            const uint64_t now = now_ms();
+            tx.on_rf_environment(chan, cur_bw, now);
+            if (l.cfg.policy.csa.rx_liveness_ms > 0) {
+                csa_liveness_deadline_ms = now + l.cfg.policy.csa.rx_liveness_ms;
+                csa_liveness_rx_baseline = air.value->rx_frames_total();
+                csa_liveness_chan = chan;
+                csa_liveness_bw = cur_bw;
+            }
+            csa.clear_campaign();
+            csa.release_binding();
+            cur_chan = chan;
+            std::fprintf(stderr, "channel: local retune -> %u MHz (Pass 113)\n",
+                         chan);
+            return "";
+        };
+        // §11.4a Pass 113 runtime pairing gate. false = fresh token + new
+        // pairing epoch (announce); true = keep the key, stop announcing.
+        h.psk_enable = [&](bool enabled) -> std::string {
+            if (!enabled) {
+                token = announce_token();
+                csa.set_psk({token.begin(), token.end()});
+                craft_cmd.set_psk({token.begin(), token.end()});
+                psk_announced = true;
+            } else {
+                psk_announced = false;
+            }
+            std::fprintf(stderr, "psk: pairing %s (Pass 113)\n",
+                         enabled ? "locked" : "open");
+            return "";
         };
         control->set_handlers(std::move(h));
         std::fprintf(stderr, "control: REST on %s (tx)\n",
@@ -3589,6 +3666,8 @@ int run_tx(const Loaded& l) {
                              ca.chan_mhz);  // Pass 69: never silent
             } else {
                 tx.on_rf_environment(ca.chan_mhz, ca.bw, service_now);
+                cur_chan = ca.chan_mhz;
+                cur_bw = ca.bw;
             }
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
                          ca.chan_mhz);
@@ -3655,7 +3734,7 @@ int run_tx(const Loaded& l) {
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
                        csa.state_str(), 0, 0, wedge.wedged(), nullptr,
                        &shm_stats, nullptr, nullptr, &last_snap, &timing,
-                       &vfill);
+                       &vfill, cur_chan);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }

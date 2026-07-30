@@ -173,6 +173,18 @@ int main() {
         fps_ladder_state = ladder_on ? 1 : 0;
         return "";
     };
+    // §15.5 Pass 113: craft-local channel set + runtime pairing gate.
+    int channel_state = 0;
+    h.channel_set = [&](int mhz) -> std::string {
+        if (mhz != 5805 && mhz != 5745) return "mhz not in channel_allowlist";
+        channel_state = mhz;
+        return "";
+    };
+    int psk_state = -1;
+    h.psk_enable = [&](bool enabled) -> std::string {
+        psk_state = enabled ? 1 : 0;
+        return "";
+    };
     // h.csa intentionally left null → endpoint must 409.
     s.set_handlers(std::move(h));
 
@@ -431,6 +443,53 @@ int main() {
             "POST /api/v1/link/fps HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    // §15.5 Pass 113: craft-local channel set.
+    {  // allowlisted channel → 200, handler sees it.
+        const std::string body = "{\"mhz\":5745}";
+        const std::string req =
+            "POST /api/v1/channel HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(channel_state, 5745);
+    }
+    {  // handler rejection (off-allowlist) rides through as 400.
+        const std::string body = "{\"mhz\":2412}";
+        const std::string req =
+            "POST /api/v1/channel HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+        CHECK_EQ_U(channel_state, 5745);  // unchanged
+    }
+    {  // missing mhz → 400.
+        const std::string req =
+            "POST /api/v1/channel HTTP/1.0\r\nContent-Length: 2\r\n\r\n{}";
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    // §11.4a Pass 113: runtime pairing gate.
+    {  // open pairing → 200, handler sees false.
+        const std::string body = "{\"enabled\":false}";
+        const std::string req =
+            "POST /api/v1/psk HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(psk_state, 0);
+    }
+    {  // lock → 200, handler sees true.
+        const std::string body = "{\"enabled\":true}";
+        const std::string req =
+            "POST /api/v1/psk HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK_EQ_U(psk_state, 1);
+    }
+    {  // non-bool enabled → 400.
+        const std::string body = "{\"enabled\":\"yes\"}";
+        const std::string req =
+            "POST /api/v1/psk HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+        CHECK_EQ_U(psk_state, 1);  // unchanged
     }
     // §15.5 operating-mode selection (Pass 96).
     {
