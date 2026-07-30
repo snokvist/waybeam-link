@@ -3269,7 +3269,9 @@ int run_tx(const Loaded& l) {
     // from the first adapter, updated by CSA commits and local channel-set.
     uint16_t cur_chan =
         l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
-    uint8_t cur_bw = l.cfg.adapters.empty() ? 20 : l.cfg.adapters[0].bw;
+    /* §11 width CODE (0/1/2), matching ca.bw from CSA commits. */
+    uint8_t cur_bw =
+        bw_code(l.cfg.adapters.empty() ? 20 : l.cfg.adapters[0].bw);
     // §11.6 Pass 80 post-retune RX-liveness guard state (one-shot).
     std::optional<uint64_t> csa_liveness_deadline_ms;
     bool csa_armed_flag = false;  // §11.6 Pass 89: mirrors csa.campaign_active()
@@ -3328,7 +3330,6 @@ int run_tx(const Loaded& l) {
             return s;
         };
         h.info_json = [&] {
-            // Pass 113: live self state for the vehicle-side menu.
             InfoSelfState self;
             self.channel_mhz = cur_chan;
             self.psk_announced = psk_announced;
@@ -3446,7 +3447,7 @@ int run_tx(const Loaded& l) {
                 csa_liveness_chan = chan;
                 csa_liveness_bw = cur_bw;
             }
-            csa.sync_channel(chan);
+            csa.clear_campaign();
             csa.release_binding();
             cur_chan = chan;
             std::fprintf(stderr, "channel: local retune -> %u MHz (Pass 113)\n",
@@ -3665,7 +3666,7 @@ int run_tx(const Loaded& l) {
                              ca.chan_mhz);  // Pass 69: never silent
             } else {
                 tx.on_rf_environment(ca.chan_mhz, ca.bw, service_now);
-                cur_chan = ca.chan_mhz;  // Pass 113 live-channel tracking
+                cur_chan = ca.chan_mhz;
                 cur_bw = ca.bw;
             }
             std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),

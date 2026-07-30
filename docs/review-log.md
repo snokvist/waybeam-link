@@ -4166,7 +4166,7 @@ toggle".
   `policy.csa.channel_allowlist` (400 off-list). Executes the same commit
   sequence as a CSA switch (retune_all → selector `on_rf_environment` → §11.6
   RX-liveness guard), then clears any in-flight campaign
-  (`CsaFollower::sync_channel`) and drops the §11.5a binding
+  (`CsaFollower::clear_campaign`) and drops the §11.5a binding
   (`release_binding`) — the ground must re-scout, and a stale
   `kCommitted`/`prev_chan` from before a local retune must never drive a
   revert. Volatile: reboot returns to the boot channel.

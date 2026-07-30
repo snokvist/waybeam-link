@@ -118,10 +118,11 @@ class CsaFollower {
     // §11.5a (Pass 113): drop the issuer binding without touching the channel.
     void release_binding() { latched_ = std::nullopt; }
     // §15.5 local channel-set (Pass 113): a locally commanded retune
-    // supersedes any in-flight campaign — the follower holds the new channel
-    // with nothing pending, so a stale campaign can never revert or commit
-    // against a pre-retune channel.
-    void sync_channel(uint16_t chan_mhz);
+    // supersedes any in-flight campaign — the follower goes idle with nothing
+    // pending, so a stale campaign can never revert or commit against a
+    // pre-retune channel. (The follower holds no channel state of its own;
+    // the next accepted CSA carries its own prev/target.)
+    void clear_campaign();
 
   private:
     enum class State : uint8_t {
