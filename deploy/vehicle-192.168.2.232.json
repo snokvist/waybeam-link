@@ -3,7 +3,7 @@
   "node": {
     "originator": 17,
     "role": "tx",
-    "preferred_originator": 9,
+    "preferred_originator": 0,
     "net_id": 0
   },
   "profile_table": "/etc/waybeam-link/table.example.json",

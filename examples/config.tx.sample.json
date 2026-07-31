@@ -1,6 +1,6 @@
 {
   "_comment": "PROTOCOL.md §15.2 sample, craft TX shape. Policy keys omitted here keep their spec-seed defaults; every constant is overridable (bench re-derive is config, not recompile).",
-  "node": { "originator": 17, "role": "tx", "preferred_originator": 9 },
+  "node": { "originator": 17, "role": "tx", "preferred_originator": 0 },
   "profile_table": "profiles/table.example.json",
   "adapters": [
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
