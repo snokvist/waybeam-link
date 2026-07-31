@@ -4386,6 +4386,19 @@ the field, clear → the legacy 32 without it. A receiver accepts both and rejec
 disagreement between the flag and the length, which is what makes the pairing
 self-checking rather than a convention.
 
+**It buys one direction only, and the other one is a real regression.** A new
+receiver reads either shape. A pre-bit3 receiver validates `len == 32`
+exactly, so a Pass-117 craft's 34-byte summary is dropped whole and that
+ground loses profile/MCS, lockout state and loss window — everything §3.15
+carries, not just the holder. Measured, not reasoned: old-TX→old-RX gives
+`selector_state_valid=true, profile/mcs 7/7`; new-TX→old-RX gives
+`false, 0/0`. §3.15 is advisory so no control path degrades and DATA is
+untouched, but the lockout warning going dark is not nothing. **Deploy order
+is receivers first, then crafts.** A new packet type would have been
+transparently ignorable instead, but it would need its own cadence and its own
+§7.2 guard-cost argument to carry one u16 that belongs, semantically, in the
+summary it annotates — the ordering constraint is the cheaper price.
+
 Bit3 is also what keeps the tri-state honest. "Not reported" and "no latch"
 are different answers and the losing-ground case is precisely where confusing
 them is expensive, so §15.3 emits `link.report_latch_known` beside

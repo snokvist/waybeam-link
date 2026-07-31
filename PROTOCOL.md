@@ -810,10 +810,17 @@ same quantity as §15.3 `return.report_latch_holder`, read from the same gate.
 **Length is flag-driven, not fixed.** A sender that carries the field sets
 `state_flags` bit3 and emits **34** bytes; one that does not clears bit3 and
 emits **32**. A receiver MUST accept both and MUST reject a packet whose
-length and bit3 disagree — that pairing is what keeps a legacy 32-byte summary
-decodable instead of failing length validation and taking the whole lockout
-display down with it. Bit3 clear therefore means *not reported*, which a
+length and bit3 disagree. Bit3 clear therefore means *not reported*, which a
 receiver MUST NOT render as "no latch"; only bit3 set with value 0 means that.
+
+**This is a one-way compatibility.** The flag lets a *new* receiver read an
+*old* craft's 32-byte summary. It does nothing for the reverse: a pre-bit3
+receiver validates `len == 32` exactly, so a 34-byte summary fails length
+validation and is dropped whole — that ground loses the craft's profile/MCS,
+lockout state and loss window, not merely the holder. §3.15 is advisory, so
+nothing on the control path degrades and DATA is untouched, but the lockout
+warning does go dark. **Upgrade receivers before crafts.** A new ground reads
+either shape; an old ground reads only the old one.
 
 The field is advisory like the rest of the packet: it names the holder, it
 does not confer or move authority. Authority moves only through §3.5
