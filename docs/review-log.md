@@ -4297,3 +4297,55 @@ JSCC feedback source may legitimately differ from the CSA issuer, and moving
 `feedback_gate_` will reject it. The common deployment has one ground as both,
 so this is deferred rather than designed around; `feedback_rejected` is what
 makes it visible instead of a silent degradation.
+
+## Pass 116 — ARQ lock follows the claim (2026-07-31)
+
+**Need.** Pass 115 made an accepted §11.4 CSA move the §3.5 report latch, and
+the operator ruling that followed ships crafts with `preferred_originator: 0`
+(the pin prevented a stuck latch only by making failover impossible, and it
+made Pass 115 inert). But `preferred_originator` was doing a second job on
+TX: §12 ARQ lock preemption (`scheduler.cpp:42-48`). Unpinning removed it, so
+the resend lock fell back to pure first-latcher with contested release — and
+that has the same stickiness as the report gate did. A bench station powered
+on first keeps NACKing, keeps refreshing `last_nack_ms_`, and never releases.
+
+The scenario is adversarial in the worst direction: a bench ground beside the
+craft has a good link and NACKs little; the flying ground at range NACKs a
+lot. Under budget pressure during a fade — exactly when ARQ earns its keep —
+the flying ground's retransmits queue behind the bench's. After Pass 115 the
+craft would also be reporting to one ground while repairing for another,
+which is the split "claiming a craft" was supposed to end.
+
+**Ruling (operator, 2026-07-31).** The CSA acceptance event moves the §12 lock
+on every stream, alongside the §3.5 latch. Two deliberate differences from
+Pass 115, both because the lock is a weaker thing than the gate:
+
+- **Soft transfer.** `force_lock()` sets the holder and does NOT touch
+  `last_nack_ms_`, so an actively-NACKing node reclaims through the existing
+  contested-release rule inside `release_timeout_ms` (500 ms). A holder that
+  is not NACKing has nothing to hold and the lock parks as usual. The report
+  latch pins; this one nudges. That is correct rather than a compromise: the
+  lock tracks who is *recovering*, the latch tracks who has *authority*.
+- **It stays a tiebreak, not an exclusion.** §12 already says the lock is a
+  tiebreak within the per-originator budget partition — a losing NACKer is
+  still served, merely ordered second. Nothing here makes it exclusive, so
+  the blast radius is bounded in a way the §3.5 discard is not. This is also
+  why NACK ingress stays ungated (Pass 115 boundary): arbitration lives at
+  the lock, and a second gate at ingress would be redundant.
+
+`preferred_originator` still outranks both, unchanged.
+
+**Observability.** `lock_holder` existed in `SchedulerCounters` and was read
+only by tests — an invisible arbitration state, the same defect Pass 115 fixed
+for the report latch. Now emitted per stream as §15.3
+`streams[].arq_lock_holder`.
+
+**Boundary.** No wire change, no table-hash change, no new endpoint, no
+persistence. Craft-local TX state only.
+
+**Known gap, carried from Pass 115.** A §14.3 cache node legitimately NACKs
+for its own recovery, and a claim now moves the lock away from it. The soft
+transfer defuses most of it — an actively-NACKing cache reclaims in
+`release_timeout_ms` — but unlike the §3.10 feedback case this one sits on a
+path that moves packets. Recorded rather than designed around; revisit if a
+cache deployment appears.
