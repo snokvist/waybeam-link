@@ -103,6 +103,7 @@ StatsSnapshot sample_snapshot() {
     st.arq_rec_hist = {0, 1, 6, 6, 3, 1, 1, 0};
     st.arq_rec_max_ms = 61;
     st.resends_sent = 230;
+    st.arq_lock_holder = 9;
     st.double_send_suppressed = 5;
     st.source_symbols_sent = 4120300;
     st.repair_symbols_sent = 358944;
@@ -222,7 +223,8 @@ const char* kGolden =
     "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
     "\"nack_rtt_samples\":24,\"nack_rtt_p95_us\":2000,"
     "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
-    "\"resends_sent\":230,\"double_send_suppressed\":5,"
+    "\"resends_sent\":230,\"arq_lock_holder\":9,"
+    "\"double_send_suppressed\":5,"
     "\"source_symbols_sent\":4120300,\"repair_symbols_sent\":358944,"
     "\"fec_oversize_frames\":0,\"idr_frames\":17,\"arq_frames\":68342,"
     "\"arq_cutoff_frames\":0,"

@@ -72,6 +72,24 @@ class ResendScheduler {
     // emitted frame already carries RETRANSMIT (§5.3).
     void drain(ResendRing& ring, uint64_t now_ms, const EmitResend& emit);
 
+    // §12 Pass 116: an accepted §11.4 CSA moves the lock to the claiming
+    // issuer, the same event that moves the §3.5 report latch. Deliberately
+    // SOFT — last_nack_ms_ is left alone, so an actively-NACKing node reclaims
+    // through the normal contested-release rule within release_timeout_ms. A
+    // holder that is not NACKing has nothing to hold. No-op under a configured
+    // preferred_originator, which preempts unconditionally anyway.
+    void force_lock(uint16_t originator) {
+        if (policy_.preferred_originator != 0 || originator == 0) return;
+        lock_holder_ = originator;
+        counters_.lock_holder = lock_holder_;
+    }
+    // Park the lock: the next NACKer takes it with no wait (§12 first-latcher).
+    void release_lock() {
+        if (policy_.preferred_originator != 0) return;
+        lock_holder_ = 0;
+        counters_.lock_holder = 0;
+    }
+
     const SchedulerCounters& counters() const { return counters_; }
 
     // §15.5 stats/reset: zero the cumulative counters (in-flight requests and

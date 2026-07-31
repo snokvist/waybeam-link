@@ -2133,10 +2133,19 @@ struct TxCore {
     void report_authority_set(uint16_t originator, uint64_t now_ms) {
         report_gate_.force_latch(originator, now_ms);
         feedback_gate_.force_latch(originator, now_ms);
+        // §12 Pass 116: repairs follow the claim too, per-stream — the
+        // scheduler owns one lock each. Soft: an actively-NACKing node
+        // reclaims via contested release, unlike the report latch.
+        for (Stream& s : streams_) {
+            s.sched.force_lock(originator);
+        }
     }
     void report_authority_clear() {
         report_gate_.clear_latch();
         feedback_gate_.clear_latch();
+        for (Stream& s : streams_) {
+            s.sched.release_lock();
+        }
     }
     bool report_authority_overridable() const {
         return report_gate_.overridable();
@@ -2376,6 +2385,7 @@ struct TxCore {
                 st.jscc_discarded_frames = s.jscc_discarded_frames;
             }
             st.resends_sent = s.sched.counters().resends_sent;
+            st.arq_lock_holder = s.sched.counters().lock_holder;
             st.double_send_suppressed =
                 s.sched.counters().holddown_suppressed;
             st.active_profile = selector_.profile_id();
