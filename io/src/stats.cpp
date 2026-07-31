@@ -279,6 +279,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.arq_rec_max_ms);
         out += ",\"resends_sent\":";
         append_u64(out, s.resends_sent);
+        out += ",\"arq_lock_holder\":";
+        append_u64(out, s.arq_lock_holder);
         out += ",\"double_send_suppressed\":";
         append_u64(out, s.double_send_suppressed);
         out += ",\"source_symbols_sent\":";

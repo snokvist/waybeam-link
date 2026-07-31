@@ -260,5 +260,57 @@ int main() {
         CHECK_EQ_U(sched.counters().lock_holder, kPilot);
     }
 
+    // --- §12 Pass 116: the claim moves the lock, softly --------------------
+    {
+        ResendRing ring(RingConfig{100000, 1 << 20});
+        push_frames(ring, 100, 50, 1000);
+        SchedulerPolicy p = base_policy();
+        p.preferred_originator = 0;  // unpinned craft (the shipping default)
+        p.attempt_cap = 100;
+        p.holddown_ms = 1;
+        ResendScheduler sched(p, nullptr);
+        std::vector<uint8_t> bm;
+        // A bench station latches first and keeps NACKing, so contested
+        // release never fires — the stickiness this pass exists to break.
+        sched.on_nack(make_nack(kSpectator, 100, bm, {0}), ring, 1001);
+        sched.on_nack(make_nack(kSpectator, 101, bm, {0}), ring, 1200);
+        sched.on_nack(make_nack(kSpectator2, 102, bm, {0}), ring, 1300);
+        CHECK_EQ_U(sched.counters().lock_holder, kSpectator);
+        // The claim takes it immediately, mid-activity.
+        sched.force_lock(kSpectator2);
+        CHECK_EQ_U(sched.counters().lock_holder, kSpectator2);
+        // SOFT: last_nack_ms_ was untouched, so the displaced node — still
+        // actively asking — reclaims via the normal contested rule once the
+        // new holder has been quiet for release_timeout_ms. This is the
+        // deliberate difference from the §3.5 latch, which pins.
+        sched.on_nack(make_nack(kSpectator, 103, bm, {0}), ring, 1900);
+        CHECK_EQ_U(sched.counters().lock_holder, kSpectator);
+        // release_lock parks it: the next NACKer takes it with no wait.
+        sched.release_lock();
+        CHECK_EQ_U(sched.counters().lock_holder, 0);
+        sched.on_nack(make_nack(kSpectator2, 104, bm, {0}), ring, 1901);
+        CHECK_EQ_U(sched.counters().lock_holder, kSpectator2);
+        // originator 0 is the parked sentinel — never a valid holder.
+        sched.force_lock(0);
+        CHECK_EQ_U(sched.counters().lock_holder, kSpectator2);
+    }
+
+    // Pinned craft: config outranks the claim, exactly as in §3.5.
+    {
+        ResendRing ring(RingConfig{100000, 1 << 20});
+        push_frames(ring, 100, 50, 1000);
+        SchedulerPolicy p = base_policy();  // preferred_originator = kPilot
+        p.attempt_cap = 100;
+        p.holddown_ms = 1;
+        ResendScheduler sched(p, nullptr);
+        std::vector<uint8_t> bm;
+        sched.on_nack(make_nack(kPilot, 100, bm, {0}), ring, 1001);
+        CHECK_EQ_U(sched.counters().lock_holder, kPilot);
+        sched.force_lock(kSpectator);  // refused
+        CHECK_EQ_U(sched.counters().lock_holder, kPilot);
+        sched.release_lock();          // refused
+        CHECK_EQ_U(sched.counters().lock_holder, kPilot);
+    }
+
     return wbtest_finish("scheduler_test");
 }

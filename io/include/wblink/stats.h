@@ -137,6 +137,9 @@ struct StreamStats {
     std::array<uint64_t, 8> arq_rec_hist{};
     uint64_t arq_rec_max_ms = 0;
     uint64_t resends_sent = 0;
+    // §12 Pass 116: current ARQ lock holder (0 = parked). Was tracked in
+    // SchedulerCounters but never emitted — an invisible arbitration state.
+    uint16_t arq_lock_holder = 0;
     uint64_t double_send_suppressed = 0;
     uint64_t source_symbols_sent = 0;
     uint64_t repair_symbols_sent = 0;

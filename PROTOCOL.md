@@ -2474,6 +2474,19 @@ Any node may view any stream and NACK it. The TX arbitrates who it *repairs*:
   requesting originator; the preferred node's share is fenced. The lock is a
   **tiebreak within the budget partition**, not a second exclusive mechanism —
   the two do not double-count.
+- **Claim transfer (Pass 116).** An accepted §11.4 CSA moves the lock to the
+  claiming issuer on every stream, the same event that moves the §3.5 report
+  latch — so "claiming a craft" names one ground for reports *and* repairs.
+  This restores dynamically what `preferred_originator` did statically, for
+  the crafts that now ship unpinned. Two deliberate differences from §3.5:
+  the transfer is **soft** — it sets the holder without touching the release
+  evidence, so an actively-NACKing node reclaims through the normal
+  contested-release rule within `release_timeout` — and it is a **tiebreak
+  move, not an exclusion**: a losing NACKer is still served, merely ordered
+  after the holder inside its own budget partition. A holder that is not
+  actually NACKing has nothing to hold; the lock parks as usual. With
+  `preferred_originator` configured the transfer is a **no-op** —
+  configuration outranks it, exactly as in §3.5.
 - Resends are **broadcast** (no unicast on this link), so a RETRANSMIT serves every
   receiver that needed it; a losing NACKer quiesces on RETRANSMIT receipt (§6.4).
 
@@ -3173,7 +3186,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "nacks_sent": 18,
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
-    "resends_sent": 230, "double_send_suppressed": 5,
+    "resends_sent": 230, "arq_lock_holder": 9, "double_send_suppressed": 5,
     "source_symbols_sent": 4120300, "repair_symbols_sent": 358944,
     "fec_oversize_frames": 0, "idr_frames": 17, "arq_frames": 68342,
     "arq_cutoff_frames": 0,
