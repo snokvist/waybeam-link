@@ -1103,12 +1103,21 @@ struct AirBackend {
 #endif
     uint64_t last_tx_ms = 0;
     uint64_t last_announce_ms = 0;  // §3.12 ANNOUNCE cadence (own timer)
-    // Live per-adapter channel, indexed like cfg.adapters. Seeded from config
-    // and updated wherever a retune actually succeeds — §15.5 /api/v1/info
+    // Live per-adapter channel, indexed like cfg.adapters. §15.5 /api/v1/info
     // reported the CONFIG channel before this, so every adapter still read its
     // boot channel after a CSA or a scout sweep. Per-adapter rather than one
     // backend-wide value because retune_one() moves a single ear (the scout
     // sweeps with the others left in place), so they genuinely diverge.
+    //
+    // Confidence differs by backend, deliberately not papered over:
+    //   kernel-monitor — confirmed: MonAir::retune reports iw_set_freq's result.
+    //   radio          — commanded: RadioAir::retune returns true unconditionally
+    //                    (devourer FastRetune/SetMonitorChannel are void), so
+    //                    this records intent, not confirmation.
+    //   udp dev        — logged intent, same as the retune itself.
+    // The seed is config intent on kernel-monitor: MonAir::create never applies
+    // channel_mhz, so before the first retune the card is on whatever mon-up
+    // left it. RadioAir does apply it at create.
     std::vector<uint16_t> chan_by_adapter;
 
     static Result<AirBackend> create(const Config& cfg) {
@@ -1405,7 +1414,7 @@ struct AirBackend {
                 ok = tuned && ok;
                 if (tuned) {
                     mon->reapply_tx_power(i);
-                    note_chan(i, chan_mhz);  // only what actually moved
+                    note_chan(i, chan_mhz);  // confirmed by iw_set_freq
                 }
             }
             // Pass 69 §11.6 verify hygiene: pre-retune backlog is
@@ -1442,6 +1451,11 @@ struct AirBackend {
         }
         return true;
     }
+    // Bounds-checked because the retune loops iterate the BACKEND's adapter
+    // count. That equals cfg.adapters.size() today (both backends build 1:1
+    // from cfg, all-or-fail), so the drop is unreachable — but any future
+    // adapter pre-filtering would silently reintroduce the stale-channel bug
+    // this exists to fix, so the check stays and this note with it.
     void note_chan(size_t adapter, uint16_t chan_mhz) {
         if (adapter < chan_by_adapter.size()) {
             chan_by_adapter[adapter] = chan_mhz;
