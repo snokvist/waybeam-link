@@ -212,6 +212,12 @@ struct LinkStats {
     uint8_t lockout_active_mask = 0;
     uint8_t lockout_latched_mask = 0;
     bool lockout_conflict = false;
+    // §3.15a/§15.3: the §3.5 latch holder as THIS node understands it — the
+    // local gate on a TX, the craft's §3.15 summary on an RX. `known` false
+    // means not reported (legacy craft, or no fresh summary) and is NOT the
+    // same answer as holder 0.
+    uint16_t report_latch_holder = 0;
+    bool report_latch_known = false;
     bool flap_freeze = false;
     std::string csa_state = "IDLE";
     // §11 follow-me: current RF operating channel (center MHz). 0 when the node

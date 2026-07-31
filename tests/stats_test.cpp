@@ -133,6 +133,8 @@ StatsSnapshot sample_snapshot() {
     s.link.loss_uniq = 100;
     s.link.loss_score = 5;
     s.link.safe_floor_profile = 1;
+    s.link.report_latch_holder = 9;   // §3.15a Pass 117
+    s.link.report_latch_known = true;
     s.link.selector_state_valid = true;
     s.link.selector_state_age_ms = 75;
     s.link.lockout_active = true;
@@ -247,6 +249,7 @@ const char* kGolden =
     "\"transition_reason\":\"LOSS_PERSISTENT\","
     "\"loss_window_milli\":48,\"loss_ewma_milli\":36,\"loss_uniq\":100,"
     "\"loss_score\":5,\"safe_floor_profile\":1,"
+    "\"report_latch_holder\":9,\"report_latch_known\":true,"
     "\"selector_state_valid\":true,\"selector_state_age_ms\":75,"
     "\"lockout_active\":true,\"lockout_latched\":false,"
     "\"lockout_profile\":5,\"lockout_ceiling_profile\":4,"

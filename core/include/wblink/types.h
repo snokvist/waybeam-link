@@ -104,7 +104,9 @@ inline constexpr size_t kCacheReplyFixedSize = 17;
 inline constexpr size_t kAnnounceSize = 30;  // §3.12: 11 prefix + 1 + 2 + 16
 inline constexpr size_t kCacheAssignSize = 23;
 inline constexpr size_t kVehicleCmdSize = 23;  // §3.14: MAC covers bytes 0..18
-inline constexpr size_t kSelectorStateSize = 32;
+// §3.15: 34 with the §3.15a holder (state_flags bit3), 32 without.
+inline constexpr size_t kSelectorStateSize = 34;
+inline constexpr size_t kSelectorStateLegacySize = 32;
 
 // §3.11 CACHE_STATUS capability_flags bits.
 namespace cache_capability {
@@ -122,7 +124,11 @@ namespace selector_state_flags {
 inline constexpr uint8_t kActive = 0x01;
 inline constexpr uint8_t kLatched = 0x02;
 inline constexpr uint8_t kConflict = 0x04;
-inline constexpr uint8_t kKnownMask = kActive | kLatched | kConflict;
+// §3.15a: the report_latch_holder field is present; also selects the wire
+// length (set = kSelectorStateSize, clear = kSelectorStateLegacySize).
+inline constexpr uint8_t kHolderPresent = 0x08;
+inline constexpr uint8_t kKnownMask =
+    kActive | kLatched | kConflict | kHolderPresent;
 }  // namespace selector_state_flags
 
 // §3.2 — absolute DATA payload ceiling for buffer sizing (Realtek jumbo/A-MSDU
