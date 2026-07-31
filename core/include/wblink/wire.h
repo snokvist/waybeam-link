@@ -108,6 +108,8 @@ struct SelectorState {
     uint16_t loss_ewma_milli = 0;
     uint32_t loss_uniq = 0;
     uint8_t loss_score = 0;
+    // §3.15a — meaningful only when state_flags has kHolderPresent.
+    uint16_t report_latch_holder = 0;
     friend bool operator==(const SelectorState&, const SelectorState&) = default;
 };
 

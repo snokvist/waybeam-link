@@ -2230,6 +2230,10 @@ struct TxCore {
         s.loss_ewma_milli = selector_.loss_ewma_milli();
         s.loss_uniq = selector_.loss_uniq();
         s.loss_score = selector_.loss_score();
+        // §3.15a Pass 117: name the §3.5 latch holder on air. This build
+        // always carries it, so bit3 is always set and the packet is 34 bytes.
+        s.state_flags |= selector_state_flags::kHolderPresent;
+        s.report_latch_holder = report_gate_.latched_originator();
         return s;
     }
     // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
@@ -2504,6 +2508,8 @@ struct TxCore {
         snap.ret.reports_rejected = report_gate_.rejected();  // §3.5 Pass 41
         snap.ret.feedback_rejected = feedback_gate_.rejected();   // Pass 115
         snap.ret.report_latch_holder = report_gate_.latched_originator();
+        snap.link.report_latch_holder = report_gate_.latched_originator();
+        snap.link.report_latch_known = true;   // local gate; always known here
     }
 
     struct PowerAdapter {
@@ -2869,6 +2875,13 @@ struct RxCore {
             snap.link.loss_uniq = s.loss_uniq;
             snap.link.loss_score = s.loss_score;
             snap.link.safe_floor_profile = s.safe_floor_profile;
+            // §3.15a: bit3 clear means the craft did not report it (legacy
+            // build) — distinct from "nobody holds the latch", which is bit3
+            // set with holder 0.
+            if ((s.state_flags & selector_state_flags::kHolderPresent) != 0) {
+                snap.link.report_latch_holder = s.report_latch_holder;
+                snap.link.report_latch_known = true;
+            }
             snap.link.selector_state_valid = true;
             snap.link.selector_state_age_ms = static_cast<uint32_t>(age);
             snap.link.lockout_active =

@@ -359,8 +359,9 @@ int main() {
         s.loss_ewma_milli = 41;
         s.loss_uniq = 214;
         s.loss_score = 3;
+        // bit3 clear -> the legacy 32-byte shape (§3.15a).
         const size_t n = encode_selector_state(s, buf, sizeof(buf));
-        CHECK_EQ_U(n, kSelectorStateSize);
+        CHECK_EQ_U(n, kSelectorStateLegacySize);
         const Decoded d = decode(buf, n);
         const SelectorState* v = std::get_if<SelectorState>(&d);
         CHECK(v != nullptr);
@@ -371,16 +372,60 @@ int main() {
         s.remaining_ms = 0;
         s.lockout_latched_mask = 0x20;
         CHECK_EQ_U(encode_selector_state(s, buf, sizeof(buf)),
-                   kSelectorStateSize);
-        const Decoded latched = decode(buf, kSelectorStateSize);
+                   kSelectorStateLegacySize);
+        const Decoded latched = decode(buf, kSelectorStateLegacySize);
         CHECK(std::get_if<SelectorState>(&latched) != nullptr);
 
         // Reserved flags and a latched-without-active shape are rejected.
         buf[16] = 0x80;
-        const Decoded bad_flags = decode(buf, kSelectorStateSize);
+        const Decoded bad_flags = decode(buf, kSelectorStateLegacySize);
         CHECK(std::get_if<DecodeError>(&bad_flags) != nullptr);
         s.state_flags = selector_state_flags::kLatched;
         CHECK_EQ_U(encode_selector_state(s, buf, sizeof(buf)), 0);
+
+        // §3.15a Pass 117: bit3 selects the length and carries the holder.
+        {
+            SelectorState h;
+            h.prefix = random_prefix(rng);
+            h.table_version = 0xB2;
+            h.active_profile = 4;
+            h.state_flags = selector_state_flags::kHolderPresent;
+            h.lockout_profile = 0xFF;
+            h.report_latch_holder = 0x2A11;
+            CHECK_EQ_U(encode_selector_state(h, buf, sizeof(buf)),
+                       kSelectorStateSize);
+            const Decoded dh = decode(buf, kSelectorStateSize);
+            const SelectorState* vh = std::get_if<SelectorState>(&dh);
+            CHECK(vh != nullptr);
+            if (vh != nullptr) CHECK(*vh == h);
+
+            // Flag and length must agree in BOTH directions: this pairing is
+            // what lets a legacy 32-byte summary decode instead of failing
+            // length validation, so a mismatch must not be tolerated.
+            const Decoded short_read = decode(buf, kSelectorStateLegacySize);
+            CHECK(std::get_if<DecodeError>(&short_read) != nullptr);
+            h.state_flags = 0;
+            h.report_latch_holder = 0;
+            CHECK_EQ_U(encode_selector_state(h, buf, sizeof(buf)),
+                       kSelectorStateLegacySize);
+            uint8_t wide[kSelectorStateSize] = {};
+            for (size_t i = 0; i < kSelectorStateLegacySize; i++) wide[i] = buf[i];
+            const Decoded wide_read = decode(wide, kSelectorStateSize);
+            CHECK(std::get_if<DecodeError>(&wide_read) != nullptr);
+
+            // A holder of 0 with bit3 SET is the real "nobody holds it".
+            h.state_flags = selector_state_flags::kHolderPresent;
+            CHECK_EQ_U(encode_selector_state(h, buf, sizeof(buf)),
+                       kSelectorStateSize);
+            const Decoded zero = decode(buf, kSelectorStateSize);
+            const SelectorState* vz = std::get_if<SelectorState>(&zero);
+            CHECK(vz != nullptr);
+            if (vz != nullptr) {
+                CHECK((vz->state_flags &
+                       selector_state_flags::kHolderPresent) != 0);
+                CHECK_EQ_U(vz->report_latch_holder, 0u);
+            }
+        }
 
         // Effective-state invariants: an active lock has a charged strike and
         // active mask; latched/conflict cannot exist without an active lock.

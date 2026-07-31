@@ -417,6 +417,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.loss_score);
     out += ",\"safe_floor_profile\":";
     append_u64(out, snap.link.safe_floor_profile);
+    out += ",\"report_latch_holder\":";
+    append_u64(out, snap.link.report_latch_holder);
+    out += ",\"report_latch_known\":";
+    append_bool(out, snap.link.report_latch_known);
     out += ",\"selector_state_valid\":";
     append_bool(out, snap.link.selector_state_valid);
     out += ",\"selector_state_age_ms\":";

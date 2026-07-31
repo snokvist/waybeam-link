@@ -135,10 +135,18 @@ bool selector_state_fields_valid(const SelectorState& s) {
 }
 
 Decoded decode_selector_state(const uint8_t* buf, size_t len) {
-    if (len < kSelectorStateSize) {
+    if (len < kSelectorStateLegacySize) {
         return DecodeError::kTruncated;
     }
-    if (len != kSelectorStateSize) {
+    // §3.15a: bit3 and the length must agree. Accepting both shapes is what
+    // keeps a legacy 32-byte summary decodable instead of dropping the whole
+    // lockout display on a mixed-version pair.
+    if (len != kSelectorStateSize && len != kSelectorStateLegacySize) {
+        return DecodeError::kLengthMismatch;
+    }
+    const bool holder_present =
+        (buf[16] & selector_state_flags::kHolderPresent) != 0;
+    if (holder_present != (len == kSelectorStateSize)) {
         return DecodeError::kLengthMismatch;
     }
     SelectorState s;
@@ -158,6 +166,9 @@ Decoded decode_selector_state(const uint8_t* buf, size_t len) {
     s.loss_ewma_milli = be16_read(buf + 25);
     s.loss_uniq = be32_read(buf + 27);
     s.loss_score = buf[31];
+    if (holder_present) {
+        s.report_latch_holder = be16_read(buf + 32);
+    }
     return selector_state_fields_valid(s) ? Decoded{s}
                                           : Decoded{DecodeError::kInvalidField};
 }
@@ -479,8 +490,11 @@ size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap) {
 
 size_t encode_selector_state(const SelectorState& pkt, uint8_t* out,
                              size_t cap) {
-    if (out == nullptr || cap < kSelectorStateSize ||
-        !selector_state_fields_valid(pkt)) {
+    const bool holder_present =
+        (pkt.state_flags & selector_state_flags::kHolderPresent) != 0;
+    const size_t size =
+        holder_present ? kSelectorStateSize : kSelectorStateLegacySize;
+    if (out == nullptr || cap < size || !selector_state_fields_valid(pkt)) {
         return 0;
     }
     encode_prefix(pkt.prefix, PacketType::kSelectorState, out);
@@ -499,7 +513,10 @@ size_t encode_selector_state(const SelectorState& pkt, uint8_t* out,
     be16_write(out + 25, pkt.loss_ewma_milli);
     be32_write(out + 27, pkt.loss_uniq);
     out[31] = pkt.loss_score;
-    return kSelectorStateSize;
+    if (holder_present) {
+        be16_write(out + 32, pkt.report_latch_holder);
+    }
+    return size;
 }
 
 size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap) {
