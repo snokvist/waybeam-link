@@ -154,10 +154,9 @@ rest on the assertion; liveness and memory safety may not.
 ### 3.0 On-air 802.11 encapsulation (the devourer boundary)
 
 Every waybeam-link packet rides as the frame body of a **pinned 802.11 data
-frame** injected through devourer (radiotap prefix rate-less `TX_FLAGS`-only;
-modulation comes from the adapter's committed `SetTxMode`, §9.5/§10.4). The
-MAC header is normative — all implementations must emit and filter exactly
-this shape (Pass-7 ruling):
+frame** (radiotap prefix carries the per-packet MCS, §3.0 rate mechanism
+below). The MAC header is normative — all implementations must emit and
+filter exactly this shape (Pass-7 ruling):
 
 | field | value |
 |---|---|
@@ -182,19 +181,44 @@ MPDU **with the 4-byte FCS appended** (devourer's monitor bring-up keeps
 at the driver boundary): receivers strip the trailer before the length-exact
 §3.1 parse. Bench-verified on 8812CU (step 11).
 
-**Backend-agnostic frame; two rate-carrying mechanisms (Pass 13).** The 802.11
-frame, SA filter, and FCS handling above are identical across air backends —
-only *how the PHY rate is selected* differs. The **devourer** backend uses the
-rate-less `TX_FLAGS`-only radiotap prefix and commits the rate out-of-band via
-`SetTxMode` (§9.5/§10.4). The **kernel-monitor** backend (`air.kind
-"kernel-monitor"`: AF_PACKET raw injection through the Linux driver in monitor
-mode, no devourer) has no such out-of-band control, so it carries the rate in a
-**per-packet radiotap MCS field** (13-byte HT radiotap: `TX_FLAGS | MCS`,
-`known = BW|MCS|GI|FEC|STBC`). RX radiotap is parsed for `DBM_ANTSIGNAL` (RSSI)
-and `TSFT` (the §7.2 per-adapter TSF); the monitor netdev exposes no
-per-adapter TSF *read*, so the craft/ground fall back to host time (§7.2). The
-on-air bytes a receiver sees are unchanged — either backend interoperates with
-either on the RX side.
+**Backend-agnostic frame; ONE rate-carrying mechanism (Pass 118; supersedes
+the Pass-13 two-mechanism split).** The 802.11 frame, SA filter, and FCS
+handling above are identical across air backends, and so is the way the PHY
+rate is selected: **both** backends prepend the **13-byte HT radiotap header
+carrying a per-packet MCS field** (`TX_FLAGS | MCS`, `known =
+BW|MCS|GI|FEC|STBC`). Radiotap is authoritative for the rate of the frame it
+prefixes.
+
+- **kernel-monitor** (`air.kind "kernel-monitor"`: AF_PACKET raw injection
+  through the Linux driver in monitor mode, no devourer) has no out-of-band
+  rate control, so radiotap is its only mechanism.
+- **devourer** honours the radiotap rate fields on every generation
+  (Jaguar1/2/3) and applies its `SetTxMode` default *only* to frames whose
+  radiotap carries no rate. A TX node MUST still commit `SetTxMode` in
+  lockstep at each §9.5 transition: it costs nothing on air (never consulted
+  while radiotap carries a rate) and it bounds the failure mode — a
+  malformed radiotap degrades to the committed operating point instead of
+  silently airing the whole link at the driver's legacy default.
+
+Radiotap is a local injection convention, not wire format: it is **not**
+transmitted, so this changes no on-air byte and is not a §3.1 version event.
+Pre-Pass-118 and post-Pass-118 nodes interoperate in both directions.
+
+The mechanism is per-packet; the *policy* in this pass is not. Every packet a
+node airs at a given moment carries the same MCS — the §9.3 rung the §9.5
+transition committed. Per-packet rate *divergence* (importance-gated rungs) is
+deliberately out of scope here and is gated on the §9.5 airtime-accounting and
+§9.2 loss-attribution work; see Pass 118's residual.
+
+**RX rate is observable (Pass 118).** RX radiotap is parsed for
+`DBM_ANTSIGNAL` (RSSI), `TSFT` (the §7.2 per-adapter TSF), and the **`MCS`
+field**; on devourer the same value comes from the RX descriptor's rate code.
+The monitor netdev exposes no per-adapter TSF *read*, so the craft/ground fall
+back to host time (§7.2). Received-MCS is **observation only** in this pass —
+it is surfaced in §15.3 and consumed by no control path. It is the denominator
+half of a per-MCS PER ladder; the numerator (attributing a sequence gap to the
+MCS the *missing* packet would have carried) is an open §9.2 question, not
+settled here.
 
 **RX filter** (in priority order, cheapest first): type/subtype == Data &&
 `SA[0..1] == 56:42` (&& `SA[2] == net_id` **when the node configures one**;
@@ -3177,6 +3201,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
     "drop": 0, "filtered": 0, "kernel_drop": 0, "bpf_filtered": 0, "tsf_fallback": 0,
     "tx_reports": 531, "tx_report_fails": 0,
+    "rx_mcs": [0, 0, 0, 0, 118, 10116, 0, 0], "rx_mcs_unknown": 0,
     "adapter_stalled": false, "rx_dead": false, "tx_wedged": false } ],
   "streams": [ { "stream_id": 0, "type": "RTP",
     "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
@@ -3457,6 +3482,16 @@ and any driver-level accounting skew — it is a coarse health gauge of pre-filt
 efficacy, **not** an exact filter-drop count. It is 0 on the `RadioAir` and
 `UdpAir` backends, where the BPF pre-filter does not apply. The §3.0
 `dot11_parse()` userspace check remains the correctness gate regardless.
+
+`rx_mcs` (Pass 118) is a fixed 8-element array — cumulative accepted frames
+per HT MCS index 0..7, the §9.3 ladder — and `rx_mcs_unknown` counts accepted
+frames whose rate the backend could not resolve to that range (radiotap with
+no `MCS` field, a non-HT rate code, or MCS > 7). The two together sum to `rx`.
+Both are **advisory observation** (§3.0 Pass 118): no control path reads them,
+and they are the denominator half of a per-MCS PER ladder whose numerator is
+not specified. The array is always present and always 8 elements, all-zero on
+`UdpAir` where there is no PHY rate to report — a consumer never branches on
+its length.
 
 A node with a §14.3 cache role enabled additionally emits the matching
 top-level object (absent when the role is off, like `stats.bind`):
