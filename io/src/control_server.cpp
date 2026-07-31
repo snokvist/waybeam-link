@@ -470,6 +470,27 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         h_.reset_stats();
         return done("");
     }
+    if (path == "/api/v1/reports/latch") {  // §15.5 Pass 115
+        if (!h_.reports_latch) return na();
+        const bool has_clear = j.contains("clear");
+        const bool has_orig = j.contains("originator");
+        // Exactly one: a request carrying both has no single meaning, and one
+        // carrying neither would silently no-op.
+        if (has_clear == has_orig) {
+            return reply(400, "Bad Request",
+                         json_err("exactly one of clear/originator required"));
+        }
+        if (has_clear && !j["clear"].is_boolean()) {
+            return reply(400, "Bad Request", json_err("clear must be bool"));
+        }
+        // {"clear":false} has no meaning here — the release is the only thing
+        // `clear` names, so reject it rather than falling through to the
+        // originator path and reporting a confusing range error.
+        if (has_clear && !j.value("clear", false)) {
+            return reply(400, "Bad Request", json_err("clear must be true"));
+        }
+        return done(h_.reports_latch(has_clear, j.value("originator", -1)));
+    }
     if (path == "/api/v1/venc/reassert") {  // §15.5 Pass 103
         if (!h_.venc_reassert) return na();
         h_.venc_reassert();
