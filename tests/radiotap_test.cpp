@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Unit tests for the kernel-monitor radiotap helpers (io/include/wblink/
-// radiotap.h): the HT-MCS TX header builder and the RX parser that extracts
-// RSSI + TSFT and reports the header length to strip before dot11_parse.
+// Unit tests for the shared radiotap helpers (io/include/wblink/radiotap.h):
+// the HT-MCS TX header builder both air backends now use (§3.0 Pass 118) and
+// the RX parser that extracts RSSI + TSFT + received MCS and reports the
+// header length to strip before dot11_parse.
 #include "wblink/radiotap.h"
 #include "wblink/airtime.h"
 
@@ -47,9 +48,9 @@ std::vector<uint8_t> make_rx_radiotap(uint64_t tsf, int8_t rssi,
 }
 
 void test_tx_ht_bytes() {
-    uint8_t b[kMonRadiotapHtLen];
-    const size_t n = mon_radiotap_ht(b, 7, /*sgi=*/false, /*bw=*/20);
-    CHECK_EQ_U(n, kMonRadiotapHtLen);
+    uint8_t b[kRadiotapTxHtLen];
+    const size_t n = radiotap_tx_ht(b, 7, /*sgi=*/false, /*bw=*/20);
+    CHECK_EQ_U(n, kRadiotapTxHtLen);
     // version/pad/len
     CHECK_EQ_U(b[0], 0x00);
     CHECK_EQ_U(b[1], 0x00);
@@ -69,9 +70,64 @@ void test_tx_ht_bytes() {
     CHECK_EQ_U(b[12], 7);     // MCS index
 
     // SGI + 40 MHz sets flags 0x04|0x01.
-    (void)mon_radiotap_ht(b, 5, /*sgi=*/true, /*bw=*/40);
+    (void)radiotap_tx_ht(b, 5, /*sgi=*/true, /*bw=*/40);
     CHECK_EQ_U(b[11], 0x05);
     CHECK_EQ_U(b[12], 5);
+
+    // Pass-12 unicast return: TX_FLAGS cleared so the frame solicits an ACK,
+    // while the MCS field is carried exactly as on the broadcast frame.
+    (void)radiotap_tx_ht(b, 3, /*sgi=*/false, /*bw=*/20, kTxFlagsAck);
+    CHECK_EQ_U(b[8], 0x00);
+    CHECK_EQ_U(b[9], 0x00);
+    CHECK_EQ_U(b[10], 0x37);
+    CHECK_EQ_U(b[12], 3);
+}
+
+// §15.3 Pass 118: an RX radiotap carrying TSFT|FLAGS|DBM_ANTSIGNAL|MCS.
+// MCS (bit 19) has align 1 / size 3 and follows the s8 DBM_ANTSIGNAL.
+std::vector<uint8_t> make_rx_radiotap_mcs(uint8_t known, uint8_t mcs) {
+    std::vector<uint8_t> h(8 + 8 + 1 + 1 + 3, 0);
+    h[2] = static_cast<uint8_t>(h.size());
+    const uint32_t present = (1u << 0) | (1u << 1) | (1u << 5) | (1u << 19);
+    h[4] = static_cast<uint8_t>(present & 0xff);
+    h[5] = static_cast<uint8_t>((present >> 8) & 0xff);
+    h[6] = static_cast<uint8_t>((present >> 16) & 0xff);
+    h[7] = static_cast<uint8_t>((present >> 24) & 0xff);
+    h[16] = 0x00;                            // FLAGS
+    h[17] = static_cast<uint8_t>(-61);       // DBM_ANTSIGNAL
+    h[18] = known;                           // MCS known
+    h[19] = 0x00;                            // MCS flags
+    h[20] = mcs;                             // MCS index
+    return h;
+}
+
+void test_rx_parse_mcs() {
+    // HAVE_MCS set → the index is reported.
+    auto rt = make_rx_radiotap_mcs(/*known=*/0x37, /*mcs=*/5);
+    auto r = radiotap_parse(rt.data(), rt.size());
+    CHECK(r.has_value());
+    CHECK(r->mcs.has_value());
+    CHECK_EQ_U(*r->mcs, 5);
+    CHECK(r->rssi_dbm.has_value());  // MCS parsing did not disturb the walk
+    CHECK(*r->rssi_dbm == -61);
+
+    // HAVE_MCS clear → the index byte is not meaningful, whatever it holds.
+    rt = make_rx_radiotap_mcs(/*known=*/0x35, /*mcs=*/5);
+    r = radiotap_parse(rt.data(), rt.size());
+    CHECK(r.has_value());
+    CHECK(!r->mcs.has_value());
+
+    // An MCS field past the HT range is rejected rather than truncated.
+    rt = make_rx_radiotap_mcs(/*known=*/0x37, /*mcs=*/40);
+    r = radiotap_parse(rt.data(), rt.size());
+    CHECK(r.has_value());
+    CHECK(!r->mcs.has_value());
+
+    // A header with no MCS field at all leaves it absent (the legacy shape).
+    auto plain = make_rx_radiotap(42, -60);
+    r = radiotap_parse(plain.data(), plain.size());
+    CHECK(r.has_value());
+    CHECK(!r->mcs.has_value());
 }
 
 void test_rx_parse() {
@@ -170,6 +226,7 @@ void test_ht20_service_time() {
 int main() {
     test_tx_ht_bytes();
     test_rx_parse();
+    test_rx_parse_mcs();
     test_rx_strip_then_dot11();
     test_rx_malformed();
     test_ht20_service_time();

@@ -1610,6 +1610,10 @@ struct AirBackend {
                 // instead uses netdev tx_packets progress internally.
                 as.tx_reports = 0;
                 as.tx_report_fails = 0;
+                for (size_t m = 0; m < kRxMcsBuckets; ++m) {
+                    as.rx_mcs[m] = c.rx_mcs[m];  // §15.3 Pass 118
+                }
+                as.rx_mcs_unknown = c.rx_mcs_unknown;
                 as.tx_wedged = c.tx && tx_wedged;
                 snap.adapters.push_back(std::move(as));
             }
@@ -1634,6 +1638,10 @@ struct AirBackend {
             as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
             as.tx_reports = c.tx_reports;
             as.tx_report_fails = c.tx_report_fails;
+            for (size_t m = 0; m < kRxMcsBuckets; ++m) {
+                as.rx_mcs[m] = c.rx_mcs[m];  // §15.3 Pass 118
+            }
+            as.rx_mcs_unknown = c.rx_mcs_unknown;
             as.tx_wedged = c.tx && tx_wedged;
             as.rx_dead = c.rx_dead;  // §15.3 Pass 101 (RadioAir only)
             snap.adapters.push_back(std::move(as));

@@ -271,6 +271,7 @@ struct MonAir::Impl {
     struct RxFrame {
         uint8_t adapter = 0;
         int8_t rssi = -128;
+        uint8_t rx_mcs = kRxMcsUnknown;  // §15.3 Pass 118
         uint32_t tsfl = 0;
         uint8_t net_id = 0;  // §15.5a candidate/occupancy attribution
         uint32_t gen = 0;    // flush generation at recv time (Pass 69)
@@ -284,6 +285,9 @@ struct MonAir::Impl {
         std::thread rx_thread;
         std::atomic<uint64_t> rx_frames{0};
         std::atomic<uint64_t> rx_filtered{0};
+        // §15.3 Pass 118 per-MCS accepted-frame histogram + unresolved bucket.
+        std::atomic<uint64_t> rx_mcs[kRxMcsBuckets] = {};
+        std::atomic<uint64_t> rx_mcs_unknown{0};
         std::atomic<uint64_t> rx_dropped{0};
         std::atomic<uint64_t> kernel_dropped{0};
         std::atomic<int> rssi_last{-128};
@@ -432,9 +436,19 @@ void MonAir::Impl::rx_loop(Adapter* a, uint8_t adapter_id) {
             rssi = *rt->rssi_dbm;
             a->rssi_last.store(rssi, std::memory_order_relaxed);
         }
+        // §15.3 Pass 118: the rate this frame arrived at. Absent MCS field,
+        // or an index past the §9.3 ladder, counts as unresolved.
+        const uint8_t rx_mcs =
+            rt->mcs && *rt->mcs < kRxMcsBuckets ? *rt->mcs : kRxMcsUnknown;
+        if (rx_mcs < kRxMcsBuckets) {
+            a->rx_mcs[rx_mcs].fetch_add(1, std::memory_order_relaxed);
+        } else {
+            a->rx_mcs_unknown.fetch_add(1, std::memory_order_relaxed);
+        }
         RxFrame f;
         f.adapter = adapter_id;
         f.rssi = rssi;
+        f.rx_mcs = rx_mcs;
         f.tsfl = rt->tsf_us ? static_cast<uint32_t>(*rt->tsf_us) : 0u;
         f.net_id = d->net_id;
         f.gen = gen;  // Pass 69: pre-recv generation, see loop top
@@ -462,22 +476,22 @@ size_t MonAir::Impl::send_frame(const uint8_t* payload, size_t len,
     if (!has_tx) return 0;
     Adapter* a = adapters[tx_idx].get();
     const size_t hdr_len = urgent ? kDot11QosHdrLen : kDot11HdrLen;
-    tx_buf.resize(kMonRadiotapHtLen + hdr_len + len);
+    tx_buf.resize(kRadiotapTxHtLen + hdr_len + len);
     uint8_t* p = tx_buf.data();
-    mon_radiotap_ht(p, mcs, sgi, bw);
+    radiotap_tx_ht(p, mcs, sgi, bw);
     if (urgent) {
         static constexpr uint8_t kBroadcast[6] = {0xff, 0xff, 0xff,
                                                    0xff, 0xff, 0xff};
-        dot11_hdr_qos26(p + kMonRadiotapHtLen, kBroadcast,
+        dot11_hdr_qos26(p + kRadiotapTxHtLen, kBroadcast,
                         stamp_net_id, cfg.originator,
                         static_cast<uint8_t>(tx_idx), seq, kUrgentTid);
     } else {
-        dot11_hdr24(p + kMonRadiotapHtLen, stamp_net_id, cfg.originator,
+        dot11_hdr24(p + kRadiotapTxHtLen, stamp_net_id, cfg.originator,
                     static_cast<uint8_t>(tx_idx), seq);
     }
     ++seq;
     if (len > 0) {
-        std::memcpy(p + kMonRadiotapHtLen + hdr_len, payload, len);
+        std::memcpy(p + kRadiotapTxHtLen + hdr_len, payload, len);
     }
     const int priority = urgent ? kUrgentTid : 0;
     (void)::setsockopt(a->fd, SOL_SOCKET, SO_PRIORITY, &priority,
@@ -659,6 +673,7 @@ int MonAir::poll_once(int timeout_ms, const RxCb& cb) {
         AirRxMeta meta;
         meta.adapter_id = f.adapter;
         meta.rssi = f.rssi;
+        meta.rx_mcs = f.rx_mcs;
         meta.tsf_us = f.tsfl;
         meta.net_id = f.net_id;
         cb(meta, f.data.data(), f.data.size());
@@ -843,6 +858,10 @@ MonAir::AdapterCounters MonAir::counters(size_t adapter) const {
     c.bpf_filtered = iface_delta > userspace ? iface_delta - userspace : 0;
     c.rssi_last =
         static_cast<int8_t>(a->rssi_last.load(std::memory_order_relaxed));
+    for (size_t i = 0; i < kRxMcsBuckets; ++i) {
+        c.rx_mcs[i] = a->rx_mcs[i].load(std::memory_order_relaxed);
+    }
+    c.rx_mcs_unknown = a->rx_mcs_unknown.load(std::memory_order_relaxed);
     if (a->tx) {
         c.tx_submitted = impl_->tx_submitted.load(std::memory_order_relaxed);
         c.tx_failed = impl_->tx_failed.load(std::memory_order_relaxed);

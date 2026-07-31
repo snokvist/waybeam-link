@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "wblink/binding.h"
+#include "wblink/radiotap.h"  // kRxMcsUnknown (AirRxMeta.rx_mcs)
 
 namespace wblink {
 
@@ -26,6 +27,7 @@ struct AirRxMeta {
     int8_t rssi = 0;      // synthetic on udp-air
     uint64_t tsf_us = 0;  // synthetic on udp-air (loopback has no TSF, §16)
     uint8_t net_id = 0;   // §3.0 L2 tag from the frame SA (0 on udp/loopback)
+    uint8_t rx_mcs = kRxMcsUnknown;  // always unknown on udp-air (no PHY)
 };
 
 class UdpAir {

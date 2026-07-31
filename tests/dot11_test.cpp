@@ -17,7 +17,7 @@ namespace {
 std::vector<uint8_t> mpdu_of(uint8_t net_id, uint16_t orig, uint8_t adapter,
                              uint16_t seq, const std::vector<uint8_t>& pay) {
     std::vector<uint8_t> f(kDot11TxPrefixLen + pay.size());
-    dot11_tx_prefix(f.data(), net_id, orig, adapter, seq);
+    dot11_tx_prefix(f.data(), TxRate{}, net_id, orig, adapter, seq);
     std::memcpy(f.data() + kDot11TxPrefixLen, pay.data(), pay.size());
     f.erase(f.begin(), f.begin() + kRadiotapTxLen);
     return f;
@@ -29,7 +29,8 @@ std::vector<uint8_t> mpdu_unicast_of(const uint8_t dest[6], uint8_t net_id,
                                      uint16_t seq,
                                      const std::vector<uint8_t>& pay) {
     std::vector<uint8_t> f(kDot11TxUnicastPrefixLen + pay.size());
-    dot11_tx_prefix_unicast(f.data(), dest, net_id, orig, adapter, seq);
+    dot11_tx_prefix_unicast(f.data(), TxRate{}, dest, net_id, orig, adapter,
+                            seq);
     std::memcpy(f.data() + kDot11TxUnicastPrefixLen, pay.data(), pay.size());
     f.erase(f.begin(), f.begin() + kRadiotapTxLen);
     return f;
@@ -43,13 +44,18 @@ int main() {
     // --- TX prefix byte layout (the normative §3.0 table) -------------------
     {
         uint8_t buf[kDot11TxPrefixLen];
-        const size_t n = dot11_tx_prefix(buf, 5, 0x1234, 2, 0x0abc);
+        const TxRate rate{/*mcs=*/6, /*sgi=*/true, /*bw=*/20};
+        const size_t n = dot11_tx_prefix(buf, rate, 5, 0x1234, 2, 0x0abc);
         CHECK_EQ_U(n, kDot11TxPrefixLen);
-        // Radiotap: version 0, len 10, present = TX_FLAGS, flags = NOACK.
+        // §3.0 Pass 118 radiotap: version 0, len 13, present =
+        // TX_FLAGS|MCS, tx_flags = NOACK, and the per-packet MCS.
         CHECK_EQ_U(buf[0], 0x00);
-        CHECK_EQ_U(buf[2], 0x0a);
-        CHECK_EQ_U(buf[5], 0x80);
-        CHECK_EQ_U(buf[8], 0x08);
+        CHECK_EQ_U(buf[2], 0x0d);
+        CHECK_EQ_U(buf[5], 0x80);   // present bit 15 (TX_FLAGS)
+        CHECK_EQ_U(buf[6], 0x08);   // present bit 19 (MCS)
+        CHECK_EQ_U(buf[8], 0x08);   // TX_FLAGS = NOACK
+        CHECK_EQ_U(buf[11], 0x04);  // MCS flags: short GI, 20 MHz
+        CHECK_EQ_U(buf[12], 6);     // MCS index
         const uint8_t* h = buf + kRadiotapTxLen;
         CHECK_EQ_U(h[0], 0x08);  // Data, not QoS
         CHECK_EQ_U(h[1], 0x00);  // ToDS=0 FromDS=0
@@ -91,7 +97,7 @@ int main() {
     {
         const uint8_t dest[6] = {0x56, 0x42, 0x05, 0x12, 0x34, 0x00};
         uint8_t buf[kDot11TxUnicastPrefixLen];
-        const size_t n = dot11_tx_prefix_unicast(buf, dest, 5, 0x1234, 2,
+        const size_t n = dot11_tx_prefix_unicast(buf, TxRate{}, dest, 5, 0x1234, 2,
                                                  0x0abc);
         CHECK_EQ_U(n, kDot11TxUnicastPrefixLen);
         // Radiotap: TX_FLAGS present but 0 — the frame EXPECTS an ACK.
@@ -141,7 +147,7 @@ int main() {
     // --- urgent ARQ lane: QoS TID 6, broadcast and NOACK -------------------
     {
         uint8_t buf[kDot11TxUrgentPrefixLen];
-        CHECK_EQ_U(dot11_tx_prefix_urgent(buf, 5, 0x1234, 2, 0x0abc),
+        CHECK_EQ_U(dot11_tx_prefix_urgent(buf, TxRate{}, 5, 0x1234, 2, 0x0abc),
                    kDot11TxUrgentPrefixLen);
         CHECK_EQ_U(buf[8], 0x08);  // radiotap NOACK
         const uint8_t* h = buf + kRadiotapTxLen;

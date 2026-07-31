@@ -114,6 +114,15 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, a.tx_reports);
         out += ",\"tx_report_fails\":";
         append_u64(out, a.tx_report_fails);
+        // §15.3 Pass 118: fixed 8-element array, always present — a consumer
+        // never branches on its length.
+        out += ",\"rx_mcs\":[";
+        for (size_t i = 0; i < kRxMcsBuckets; ++i) {
+            if (i != 0) out += ',';
+            append_u64(out, a.rx_mcs[i]);
+        }
+        out += "],\"rx_mcs_unknown\":";
+        append_u64(out, a.rx_mcs_unknown);
         out += ",\"adapter_stalled\":";
         append_bool(out, a.adapter_stalled);
         out += ",\"rx_dead\":";

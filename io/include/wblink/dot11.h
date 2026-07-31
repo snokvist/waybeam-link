@@ -10,18 +10,15 @@
 #include <cstring>
 #include <optional>
 
+#include "wblink/radiotap.h"  // radiotap_tx_ht — the one rate mechanism
+
 namespace wblink {
 
-// Rate-less radiotap prefix (version 0, len 10, present = TX_FLAGS only,
-// tx_flags = NOACK). The PHY rate comes from the adapter's committed
-// SetTxMode (§9.5/§10.4), never per-packet.
-inline constexpr uint8_t kRadiotapTx[10] = {0x00, 0x00, 0x0a, 0x00, 0x00,
-                                            0x80, 0x00, 0x00, 0x08, 0x00};
-// Same prefix with TX_FLAGS = 0 for the §3.0 unicast return (Pass 12): the
-// frame EXPECTS an ACK — retries are descriptor-driven in devourer.
-inline constexpr uint8_t kRadiotapTxAck[10] = {0x00, 0x00, 0x0a, 0x00, 0x00,
-                                               0x80, 0x00, 0x00, 0x00, 0x00};
-inline constexpr size_t kRadiotapTxLen = sizeof(kRadiotapTx);
+// §3.0 Pass 118: one rate-carrying mechanism for both air backends — the
+// 13-byte HT radiotap prefix carries the per-packet MCS. Devourer honours it
+// and consults its committed SetTxMode (§9.5/§10.4) only for frames whose
+// radiotap has no rate; the kernel-monitor backend has no other mechanism.
+inline constexpr size_t kRadiotapTxLen = kRadiotapTxHtLen;
 inline constexpr size_t kDot11HdrLen = 24;
 inline constexpr size_t kDot11QosHdrLen = 26;  // + 2-byte QoS Control
 inline constexpr size_t kDot11TxPrefixLen = kRadiotapTxLen + kDot11HdrLen;
@@ -34,6 +31,15 @@ inline constexpr uint8_t kUrgentTid = 6;  // 802.11e voice access category
 // appended; the radio backend strips this trailer before dot11_parse.
 inline constexpr size_t kFcsLen = 4;
 
+// The committed §9.5 operating point, stamped into every frame's radiotap.
+// One value per node today (§3.0 Pass 118: the mechanism is per-packet, the
+// policy is not) — a struct so importance-gated divergence stays one argument.
+struct TxRate {
+    uint8_t mcs = 0;
+    bool sgi = false;
+    uint8_t bw = 20;  // HT only: 20 or 40
+};
+
 // §3.0 pinned constants.
 inline constexpr uint8_t kDot11FrameControl0 = 0x08;  // Data, not QoS
 inline constexpr uint8_t kDot11FrameControl1 = 0x00;  // ToDS=0 FromDS=0
@@ -45,10 +51,11 @@ inline constexpr uint8_t kWbSaPrefix1 = 0x42;
 inline constexpr uint8_t kWbBssid[6] = {0x56, 0x42, 0x4c, 0x4b, 0x00, 0x00};
 
 // Writes JUST the pinned 24-byte broadcast Data header into h (no radiotap) —
-// the single source of the §3.0 header, shared by dot11_tx_prefix (devourer
-// path, 10-byte rate-less radiotap) and the kernel-monitor backend (which
-// prepends its own per-packet MCS radiotap, see radiotap.h). seq is the
-// injector-incremented sequence number (fragment 0).
+// the single source of the §3.0 header, shared by dot11_tx_prefix and the
+// kernel-monitor backend's own send path. seq is the injector-incremented
+// sequence number (fragment 0). NB devourer sets EN_HWSEQ in the TX
+// descriptor, so on that backend the chip restamps this field on air; no RX
+// path reads it (dot11_parse ignores bytes 22-23).
 inline void dot11_hdr24(uint8_t* h, uint8_t net_id, uint16_t originator,
                         uint8_t adapter_idx, uint16_t seq) {
     h[0] = kDot11FrameControl0;
@@ -91,10 +98,10 @@ inline void dot11_hdr_qos26(uint8_t* h, const uint8_t dest[6], uint8_t net_id,
 
 // Writes radiotap + the pinned 802.11 header into out (which must hold
 // kDot11TxPrefixLen bytes); the waybeam-link packet follows as the frame body.
-inline size_t dot11_tx_prefix(uint8_t* out, uint8_t net_id,
+inline size_t dot11_tx_prefix(uint8_t* out, const TxRate& rate, uint8_t net_id,
                               uint16_t originator, uint8_t adapter_idx,
                               uint16_t seq) {
-    std::memcpy(out, kRadiotapTx, kRadiotapTxLen);
+    radiotap_tx_ht(out, rate.mcs, rate.sgi, rate.bw, kTxFlagsNoAck);
     dot11_hdr24(out + kRadiotapTxLen, net_id, originator, adapter_idx, seq);
     return kDot11TxPrefixLen;
 }
@@ -103,11 +110,13 @@ inline size_t dot11_tx_prefix(uint8_t* out, uint8_t net_id,
 // QoS-Data header addressed to the target's latched SA. addr1's exact bytes
 // must match the MACID the target's ACK responder armed. out must hold
 // kDot11TxUnicastPrefixLen bytes.
-inline size_t dot11_tx_prefix_unicast(uint8_t* out, const uint8_t dest[6],
-                                      uint8_t net_id, uint16_t originator,
+inline size_t dot11_tx_prefix_unicast(uint8_t* out, const TxRate& rate,
+                                      const uint8_t dest[6], uint8_t net_id,
+                                      uint16_t originator,
                                       uint8_t adapter_idx, uint16_t seq,
                                       uint8_t tid = 0) {
-    std::memcpy(out, kRadiotapTxAck, kRadiotapTxLen);
+    // TX_FLAGS = 0, not NOACK: this frame expects a MAC ACK.
+    radiotap_tx_ht(out, rate.mcs, rate.sgi, rate.bw, kTxFlagsAck);
     dot11_hdr_qos26(out + kRadiotapTxLen, dest, net_id, originator, adapter_idx,
                     seq, tid);
     return kDot11TxUnicastPrefixLen;
@@ -115,12 +124,12 @@ inline size_t dot11_tx_prefix_unicast(uint8_t* out, const uint8_t dest[6],
 
 // Priority lane for NACKs and retransmissions: broadcast/no-ACK QoS Data with
 // TID 6, which maps to the voice access category on monitor/devourer paths.
-inline size_t dot11_tx_prefix_urgent(uint8_t* out, uint8_t net_id,
-                                     uint16_t originator,
+inline size_t dot11_tx_prefix_urgent(uint8_t* out, const TxRate& rate,
+                                     uint8_t net_id, uint16_t originator,
                                      uint8_t adapter_idx, uint16_t seq) {
     static constexpr uint8_t kBroadcast[6] = {0xff, 0xff, 0xff,
                                                0xff, 0xff, 0xff};
-    std::memcpy(out, kRadiotapTx, kRadiotapTxLen);
+    radiotap_tx_ht(out, rate.mcs, rate.sgi, rate.bw, kTxFlagsNoAck);
     dot11_hdr_qos26(out + kRadiotapTxLen, kBroadcast, net_id, originator,
                     adapter_idx, seq, kUrgentTid);
     return kDot11TxUrgentPrefixLen;

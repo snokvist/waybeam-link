@@ -33,6 +33,17 @@ StatsSnapshot sample_snapshot() {
     a.tsf_fallback = 1;
     a.tx_reports = 40;
     a.tx_report_fails = 2;
+    // §15.3 Pass 118: distinct per-bucket values so the golden pins ordering,
+    // not just the field's presence. Sums to rx (10234) with the unknowns.
+    a.rx_mcs[0] = 1;
+    a.rx_mcs[1] = 2;
+    a.rx_mcs[2] = 3;
+    a.rx_mcs[3] = 4;
+    a.rx_mcs[4] = 118;
+    a.rx_mcs[5] = 10099;
+    a.rx_mcs[6] = 5;
+    a.rx_mcs[7] = 0;
+    a.rx_mcs_unknown = 2;
     a.adapter_stalled = false;
     s.adapters.push_back(a);
     StreamStats st;
@@ -180,6 +191,7 @@ const char* kGolden =
     "\"drop\":3,\"filtered\":0,\"kernel_drop\":0,\"bpf_filtered\":0,\"tsf_fallback\":1,"
     "\"tx_reports\":40,"
     "\"tx_report_fails\":2,"
+    "\"rx_mcs\":[1,2,3,4,118,10099,5,0],\"rx_mcs_unknown\":2,"
     "\"adapter_stalled\":false,\"rx_dead\":false,\"tx_wedged\":false}],"
     "\"streams\":[{\"stream_id\":0,\"type\":\"RTP\",\"seq\":90233,"
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
