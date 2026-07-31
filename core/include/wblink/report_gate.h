@@ -43,7 +43,11 @@ class ReportGate {
         // A DIFFERENT originator takes the latch only after the latched
         // reporter has been silent for relatch_ms (the §9.8 watchdog fires
         // first, so the fail-safe owns the gap in between).
-        if (now_ms - last_ms_ > p_.relatch_ms) {
+        // Saturating: a now_ms that lands BEFORE last_ms_ (a caller sampling a
+        // fresh clock inside a callback, after the tick's now was captured)
+        // would underflow this u64 subtraction to ~2^64 and hand the latch to
+        // the first displaced reporter that speaks.
+        if (now_ms > last_ms_ && now_ms - last_ms_ > p_.relatch_ms) {
             latched_ = {originator, session};
             last_ms_ = now_ms;
             return true;
@@ -66,6 +70,9 @@ class ReportGate {
     // and take the latch straight back.
     void force_latch(uint16_t originator, uint64_t now_ms) {
         if (p_.preferred_originator != 0) return;
+        // 0 is the "no latch" sentinel in latched_originator(); latching to it
+        // would report as unlatched in the very stat added to expose this.
+        if (originator == 0) return;
         latched_ = {originator, 0};
         last_ms_ = now_ms;
     }

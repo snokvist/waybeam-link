@@ -403,9 +403,9 @@ degradation this rule promises into a worse outcome than no fallback at all.
   driven by the CSA *acceptance event*, not by the continued existence of the
   §11.5a binding: first-latcher and the `relatch_ms` silence rule are
   otherwise unchanged, so failover to a surviving reporter keeps its normal
-  timescale. The latch is forced to the issuer's originator with an unset
-  session, which the first accepted report from that originator fills in via
-  the same-originator rule above. With `preferred_originator` configured the
+  timescale. The latch is forced to the issuer's originator alone —
+  acceptance keys on originator, so no session need be known at transfer
+  time. With `preferred_originator` configured the
   transfer is a **no-op** — configuration outranks it. The current holder is
   exposed as §15.3 `report_latch_holder`, and `POST /api/v1/reports/latch`
   (§15.5) clears or forces it locally on the craft.
@@ -3575,7 +3575,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/mode` | `{ "name": "imx335-100fps-highrange" }` | select a user-facing operating mode (§16 of `docs/venc-mode-matrix.md`). **Not MUT_LIVE** — see below (TX/craft node) |
 | `POST /api/v1/channel` | `{ "mhz": 5805 }` | locally retune the craft to an **allowlisted** channel outside any §11 campaign: retunes all adapters, informs the §9 selector, arms the §11.6 RX-liveness guard, clears any in-flight CSA campaign and drops the §11.5a binding (the ground must re-scout). 400 off-allowlist; **volatile** — a reboot returns to the boot channel (Pass 113, TX/craft node) |
 | `POST /api/v1/psk` | `{ "enabled": true\|false }` | §11.4a runtime pairing gate: `false` = re-key with a fresh announced token + drop the §11.5a binding (open pairing), `true` = stop announcing the current key (locked). Craft-session volatile (Pass 113, TX/craft node) |
-| `POST /api/v1/reports/latch` | `{ "clear": true }` or `{ "originator": N }` | §3.5 report-authority override: `clear` releases the LINK_REPORT + JSCC_FEEDBACK latch so the next reporter takes it within `relatch_ms`; `originator` forces it to a specific node (bench). Exactly one of the two per request; 400 otherwise. A no-op returning 409 when `preferred_originator` is configured — config outranks the override. Volatile (Pass 115, TX/craft node) |
+| `POST /api/v1/reports/latch` | `{ "clear": true }` or `{ "originator": N }` | §3.5 report-authority override: `clear` releases the LINK_REPORT + JSCC_FEEDBACK latch so the next reporter takes it within `relatch_ms`; `originator` forces it to a specific node (bench). Exactly one of the two per request; 400 otherwise. Refused with 400 when `preferred_originator` is configured — config outranks the override, and the refusal is explicit rather than a silent no-op. Volatile (Pass 115, TX/craft node) |
 | `POST /api/v1/venc/reassert` | `{}` | drop the §9.6 venc-actuator write-on-change cache so the next tick re-asserts bitrate + frame-caps + fps onto the encoder. Called by the §16 applier **after** it restarts venc; closes the stranded-bitrate gap a restart would otherwise leave (Pass 103, TX/craft node) |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile`,

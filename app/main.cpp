@@ -3634,6 +3634,12 @@ int run_tx(const Loaded& l) {
             }
             csa.clear_campaign();
             csa.release_binding();
+            // §3.5 Pass 115: authority is released as one thing too. Dropping
+            // the binding while the report latch stays pinned to the departed
+            // issuer is precisely the split state the transfer exists to
+            // prevent — and it would NOT self-heal if that issuer keeps
+            // reporting, since its own traffic refreshes the silence timer.
+            tx.report_authority_clear();
             cur_chan = chan;
             std::fprintf(stderr, "channel: local retune -> %u MHz (Pass 113)\n",
                          chan);
@@ -3647,6 +3653,10 @@ int run_tx(const Loaded& l) {
                 csa.set_psk({token.begin(), token.end()});
                 craft_cmd.set_psk({token.begin(), token.end()});
                 psk_announced = true;
+                // §3.5 Pass 115: set_psk drops the §11.5a binding, so release
+                // report authority with it — a new pairing epoch must not
+                // leave the previous issuer still driving the selector.
+                tx.report_authority_clear();
             } else {
                 psk_announced = false;
             }
