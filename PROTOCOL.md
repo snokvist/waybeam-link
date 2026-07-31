@@ -765,7 +765,7 @@ latency-critical). Spectators ignore the type entirely: it carries no
 channel/fleet state to follow, and the §11.7 bound-issuer guard means only the
 addressed craft ever acts on one.
 
-### 3.15 SELECTOR_STATE packet (type `0xE`) — 32 bytes
+### 3.15 SELECTOR_STATE packet (type `0xE`) — 34 bytes (32 legacy)
 
 Craft→ground **advisory observability** for the §9 selector. The selector and
 its lockouts are craft-owned; a ground or OSD MUST display this state, never
@@ -782,7 +782,7 @@ latest summary stays pending/coalesced until the next live video slot.
 | 13 | 1 | `safe_floor_profile` | resolved `max(min_profile, floor_profile)` |
 | 14 | 1 | `ceiling_profile` | highest profile currently reachable without crossing a lockout |
 | 15 | 1 | `lockout_profile` | lowest currently blocking profile; `0xFF` when none |
-| 16 | 1 | `state_flags` | bit0 active; bit1 latched; bit2 pin/range conflict; bits 3–7 reserved |
+| 16 | 1 | `state_flags` | bit0 active; bit1 latched; bit2 pin/range conflict; bit3 holder-present (§3.15a); bits 4–7 reserved |
 | 17 | 1 | `lockout_strikes` | saturating strike count for `lockout_profile`; default latch boundary 4 |
 | 18 | 2 | `remaining_ms` | timed lockout remainder, saturated at 65535; 0 for none/latched |
 | 20 | 1 | `transition_reason` | §9 reason registry below |
@@ -792,6 +792,32 @@ latest summary stays pending/coalesced until the next live video slot.
 | 25 | 2 | `loss_ewma_milli` | selector loss EWMA, rounded to u16 |
 | 27 | 4 | `loss_uniq` | denominator of `loss_window_milli` |
 | 31 | 1 | `loss_score` | current active rung's leaky persistence score |
+| 32 | 2 | `report_latch_holder` | §3.15a — present only when `state_flags` bit3 is set |
+
+#### 3.15a `report_latch_holder` — who the craft is listening to
+
+The §3.5 report latch is craft-owned state, and before this field there was no
+carrier for it: a ground could read `reports_rejected` only by reaching the
+craft over IP, which does not exist in flight. A ground that has *lost* the
+latch is therefore the one node that cannot find out — its LINK_REPORTs are
+discarded, the craft adapts to somebody else, and the symptom on the losing
+ground is an unexplained link. This field closes that, on the packet that
+already exists for craft→ground advisory observability.
+
+Value is the current §3.5 latch originator, or **0 for no latch**. It is the
+same quantity as §15.3 `return.report_latch_holder`, read from the same gate.
+
+**Length is flag-driven, not fixed.** A sender that carries the field sets
+`state_flags` bit3 and emits **34** bytes; one that does not clears bit3 and
+emits **32**. A receiver MUST accept both and MUST reject a packet whose
+length and bit3 disagree — that pairing is what keeps a legacy 32-byte summary
+decodable instead of failing length validation and taking the whole lockout
+display down with it. Bit3 clear therefore means *not reported*, which a
+receiver MUST NOT render as "no latch"; only bit3 set with value 0 means that.
+
+The field is advisory like the rest of the packet: it names the holder, it
+does not confer or move authority. Authority moves only through §3.5
+first-latcher/relatch and the §11.4 CSA transfer (Pass 115).
 
 `state_flags` active and latched describe the effective `lockout_profile`;
 latched implies active. Masks are ladder-index diagnostics, not profile IDs.
@@ -3207,6 +3233,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "state": "HOLD", "transition_reason": "LOSS_PERSISTENT",
     "loss_window_milli": 12, "loss_ewma_milli": 18, "loss_uniq": 214,
     "loss_score": 0, "safe_floor_profile": 0,
+    "report_latch_holder": 9, "report_latch_known": true,
     "selector_state_valid": true, "selector_state_age_ms": 0,
     "lockout_active": true, "lockout_latched": false,
     "lockout_profile": 5, "lockout_ceiling_profile": 4,
@@ -3245,6 +3272,16 @@ retain a stale warning. `lockout_profile=255` is the numeric no-lockout sentinel
 when `lockout_active=false`. `lockout_ceiling_profile` is the operator-facing
 limit; masks remain ladder-index diagnostics. A latched lockout has
 `lockout_remaining_ms=0` and stays active until an environmental reset.
+
+`link.report_latch_holder` is the §3.5 latch holder **as this node
+understands it**, and is emitted on every role so one key answers the question
+everywhere. On a TX it is the local gate, identical to
+`return.report_latch_holder`. On an RX it comes from the §3.15a field of the
+craft's own summary, and is therefore subject to that packet's admissibility
+and 1.5 s freshness rules like the rest of the block.
+`report_latch_known=false` means *not reported* — a legacy craft, or no fresh
+summary — and MUST NOT be shown as "no latch"; `report_latch_known=true` with
+`report_latch_holder=0` is what says nobody holds it.
 
 The `cmd_*` / `vcmd_*` / `arq_rx_enabled` link fields are the §11.7 command
 surface, emitted on every node with role-neutral defaults: `cmd_arq`,

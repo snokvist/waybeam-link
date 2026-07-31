@@ -4349,3 +4349,58 @@ transfer defuses most of it — an actively-NACKing cache reclaims in
 `release_timeout_ms` — but unlike the §3.10 feedback case this one sits on a
 path that moves packets. Recorded rather than designed around; revisit if a
 cache deployment appears.
+
+---
+
+## Pass 117 — the craft names its report holder on air (2026-07-31)
+
+**Need.** Passes 115/116 made authority *transferable* and *countable*, and
+`return.report_latch_holder` made it readable — on the craft. The ground still
+could not see it. `ReportGate` runs at TX ingest, so on an RX the field is
+present-but-zero by schema convention (Pass 115, Q4), and no packet carried it
+craft→ground. The one node that most needs the answer is the ground that has
+*lost* the latch: its LINK_REPORTs are discarded, the craft adapts to somebody
+else, and the local symptom is an unexplained link with every local counter
+looking healthy. Reaching the craft over IP answers it on a bench and nowhere
+else — which is the wrong half, because the sticky-latch failure is a flying
+failure.
+
+waybeam-hub hit this implementing the ground status card: the plan assumed the
+holder would ride the existing §15.3 stats stream the hub already ingests, and
+on a ground that stream can only ever report 0. Rendering it would have printed
+"no latch" over exactly the failure the card exists to expose.
+
+**Ruling (operator, 2026-07-31).** §3.15 SELECTOR_STATE carries the holder.
+That packet is already craft→ground advisory observability, already accepted
+only from the latched RTP `(originator,session)` with a matching
+`table_version`, already expires after 1.5 s so a rebooted craft leaves no
+stale claim on screen, and is already emitted inside an existing live video
+slot under the Pass 110 guard-cost boundary. Every property the holder needs
+was built for the lockout summary; none of it is new cost.
+
+**Length is flag-driven.** A fixed +2 bytes would have made every legacy
+32-byte summary fail `len != kSelectorStateSize` and drop, taking the working
+lockout display down on any mixed-version pair to add a field. So
+`state_flags` bit3 (`kHolderPresent`) selects the length: set → 34 bytes with
+the field, clear → the legacy 32 without it. A receiver accepts both and rejects
+disagreement between the flag and the length, which is what makes the pairing
+self-checking rather than a convention.
+
+Bit3 is also what keeps the tri-state honest. "Not reported" and "no latch"
+are different answers and the losing-ground case is precisely where confusing
+them is expensive, so §15.3 emits `link.report_latch_known` beside
+`link.report_latch_holder` rather than overloading 0. `link.` is deliberate:
+on a TX it mirrors the local gate, on an RX it carries the craft's, so a
+consumer reads one key on both roles instead of branching on role.
+
+**Boundary.** Advisory only — the field names the holder, it never moves
+authority; §3.5 first-latcher/relatch and the §11.4 transfer remain the only
+ways the latch moves. No table-hash change (the profile table is untouched),
+no new endpoint, no persistence, no change to the 2 Hz cadence or the slot it
+rides in.
+
+**Residual.** A legacy craft reports `report_latch_known=false` forever, so a
+new ground shows "unknown" against an old craft rather than the answer. That
+is the intended degradation and the reason the flag exists, but it does mean
+the diagnostic only works once the craft side is updated — the ground alone is
+not enough.
