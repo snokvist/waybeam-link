@@ -1103,9 +1103,29 @@ struct AirBackend {
 #endif
     uint64_t last_tx_ms = 0;
     uint64_t last_announce_ms = 0;  // §3.12 ANNOUNCE cadence (own timer)
+    // Live per-adapter channel, indexed like cfg.adapters. §15.5 /api/v1/info
+    // reported the CONFIG channel before this, so every adapter still read its
+    // boot channel after a CSA or a scout sweep. Per-adapter rather than one
+    // backend-wide value because retune_one() moves a single ear (the scout
+    // sweeps with the others left in place), so they genuinely diverge.
+    //
+    // Confidence differs by backend, deliberately not papered over:
+    //   kernel-monitor — confirmed: MonAir::retune reports iw_set_freq's result.
+    //   radio          — commanded: RadioAir::retune returns true unconditionally
+    //                    (devourer FastRetune/SetMonitorChannel are void), so
+    //                    this records intent, not confirmation.
+    //   udp dev        — logged intent, same as the retune itself.
+    // The seed is config intent on kernel-monitor: MonAir::create never applies
+    // channel_mhz, so before the first retune the card is on whatever mon-up
+    // left it. RadioAir does apply it at create.
+    std::vector<uint16_t> chan_by_adapter;
 
     static Result<AirBackend> create(const Config& cfg) {
         AirBackend b;
+        b.chan_by_adapter.reserve(cfg.adapters.size());
+        for (const AdapterCfg& a : cfg.adapters) {
+            b.chan_by_adapter.push_back(a.channel_mhz);
+        }
         if (cfg.air.kind == AirCfg::Kind::kUdp ||
             cfg.air.kind == AirCfg::Kind::kUdpBroadcast) {
             AirUdpCfg uc = cfg.air.udp;
@@ -1392,7 +1412,10 @@ struct AirBackend {
             for (size_t i = 0; i < mon->rx_adapters(); ++i) {
                 const bool tuned = mon->retune(i, chan_mhz, width, fast);
                 ok = tuned && ok;
-                if (tuned) mon->reapply_tx_power(i);
+                if (tuned) {
+                    mon->reapply_tx_power(i);
+                    note_chan(i, chan_mhz);  // confirmed by iw_set_freq
+                }
             }
             // Pass 69 §11.6 verify hygiene: pre-retune backlog is
             // old-channel residue — it must never satisfy a video-verify.
@@ -1409,6 +1432,8 @@ struct AirBackend {
                     std::fprintf(stderr, "csa: adapter %zu retune to %u MHz "
                                          "failed\n",
                                  i, chan_mhz);
+                } else {
+                    note_chan(i, chan_mhz);
                 }
                 radio->reapply_tx_power(i);  // §11.2 post-retune TXAGC
             }
@@ -1421,7 +1446,20 @@ struct AirBackend {
         std::fprintf(stderr, "csa: retune -> %u MHz bw=%u%s (udp backend, "
                              "intent only)\n",
                      chan_mhz, bw, fast ? " fast" : "");
+        for (size_t i = 0; i < chan_by_adapter.size(); ++i) {
+            note_chan(i, chan_mhz);  // dev backend: follow the logged intent
+        }
         return true;
+    }
+    // Bounds-checked because the retune loops iterate the BACKEND's adapter
+    // count. That equals cfg.adapters.size() today (both backends build 1:1
+    // from cfg, all-or-fail), so the drop is unreachable — but any future
+    // adapter pre-filtering would silently reintroduce the stale-channel bug
+    // this exists to fix, so the check stays and this note with it.
+    void note_chan(size_t adapter, uint16_t chan_mhz) {
+        if (adapter < chan_by_adapter.size()) {
+            chan_by_adapter[adapter] = chan_mhz;
+        }
     }
     // §11.6 Pass 80: total RX frames across adapters (liveness baseline) and
     // the one-shot full monitor re-init recovery (kernel-monitor only).
@@ -1447,7 +1485,9 @@ struct AirBackend {
                                           : bw;
             bool ok = true;
             for (size_t i = 0; i < mon->rx_adapters(); ++i) {
-                ok = mon->recover(i, chan_mhz, width) && ok;
+                const bool up = mon->recover(i, chan_mhz, width);
+                if (up) note_chan(i, chan_mhz);
+                ok = up && ok;
             }
             mon->flush_rx();
             return ok;
@@ -1498,12 +1538,19 @@ struct AirBackend {
         if (mon) {
             const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
                                           : bw;
-            return mon->retune(adapter, chan_mhz, width, fast);
+            const bool tuned = mon->retune(adapter, chan_mhz, width, fast);
+            if (tuned) note_chan(adapter, chan_mhz);
+            return tuned;
         }
 #if WBLINK_RADIO
-        if (radio) return radio->retune(adapter, chan_mhz,
-                                        bw > 2 ? bw_code(bw) : bw, fast);
+        if (radio) {
+            const bool tuned = radio->retune(adapter, chan_mhz,
+                                             bw > 2 ? bw_code(bw) : bw, fast);
+            if (tuned) note_chan(adapter, chan_mhz);
+            return tuned;
+        }
 #endif
+        note_chan(adapter, chan_mhz);
         return true;  // udp: logged intent
     }
     bool set_udp_rx_drop(int permille) {
@@ -3204,7 +3251,8 @@ struct InfoSelfState {
 // field values are numeric or house-controlled strings (no escaping needed).
 std::string build_info_json(const Loaded& l, uint32_t session,
                             const char* role,
-                            const InfoSelfState* self = nullptr) {
+                            const InfoSelfState* self = nullptr,
+                            const AirBackend* air = nullptr) {
     std::string s = "{\"role\":\"";
     s += role;
     s += "\",\"node\":" + std::to_string(l.cfg.node.originator);
@@ -3224,12 +3272,22 @@ std::string build_info_json(const Loaded& l, uint32_t session,
     }
     s += "],\"adapters\":[";
     first = true;
-    for (const AdapterCfg& a : l.cfg.adapters) {
+    for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+        const AdapterCfg& a = l.cfg.adapters[i];
         if (!first) s += ',';
         first = false;
+        // Live channel, not the boot config: a CSA switch, a craft-local
+        // retune (§15.5 Pass 113) or a scout sweep all move adapters without
+        // touching cfg. On the ground this is the ONLY channel in the object —
+        // there is no top-level `channel` outside the TX self-state — so a
+        // stale value here is the whole answer, not a detail.
+        const uint16_t chan =
+            (air != nullptr && i < air->chan_by_adapter.size())
+                ? air->chan_by_adapter[i]
+                : a.channel_mhz;
         s += "{\"name\":\"" + a.name + "\",\"role\":\"";
         s += (a.role == Role::kTx ? "tx" : "rx");
-        s += "\",\"channel\":" + std::to_string(a.channel_mhz) + "}";
+        s += "\",\"channel\":" + std::to_string(chan) + "}";
     }
     s += "]";
     if (self != nullptr) {  // Pass 113 TX self state
@@ -3478,7 +3536,8 @@ int run_tx(const Loaded& l) {
             self.channel_mhz = cur_chan;
             self.psk_announced = psk_announced;
             self.claimed_by = csa.latched_issuer();
-            return build_info_json(l, session, "tx", &self);
+            return build_info_json(l, session, "tx", &self,
+                                   air.value ? &*air.value : nullptr);
         };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.discovery_json = [&] {
@@ -4447,7 +4506,10 @@ int run_rx(const Loaded& l) {
             if (!s.empty() && s.back() == '\n') s.pop_back();
             return s;
         };
-        h.info_json = [&] { return build_info_json(l, session, "rx"); };
+        h.info_json = [&] {
+            return build_info_json(l, session, "rx", nullptr,
+                                   air.value ? &*air.value : nullptr);
+        };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.discovery_json = [&] {
             return discovery.json(now_ms(), rx.stream_keys());
@@ -5435,7 +5497,11 @@ int run_loopback(const Loaded& l) {
             if (!s.empty() && s.back() == '\n') s.pop_back();
             return s;
         };
-        h.info_json = [&] { return build_info_json(l, session, "loopback"); };
+        h.info_json = [&] {
+            // loopback has no AirBackend — nothing retunes, so the config
+            // channel is the live channel.
+            return build_info_json(l, session, "loopback");
+        };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.profile = [&](int mn, int mx) -> std::string {
             if (mn < 0 || mn > 255 || mx < 0 || mx > 255)
