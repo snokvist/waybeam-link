@@ -4243,3 +4243,57 @@ re-asserts after retune/CSA/recovery; GET reports the latched request while
 the §10.3 ceiling clamps at the actuator; radio auto-restore issues one
 offset-0 write before the curve resolve resumes; `backend` may read `udp` on
 the dev bench (logged intent).
+
+## Pass 115 — report authority follows the claim (2026-07-31)
+
+**Need.** `ReportGate` (§3.5 Pass 41) is first-latcher, and it is sticky in the
+wrong direction: a bench station powered on first and reporting continuously
+never falls silent, so its latch never ages out, the flying ground's reports
+are rejected for its whole uptime, and the craft's §9 selector adapts to a
+receiver sitting on a desk. `preferred_originator` fixes it — but only at
+config time, which means an edit and a restart on the craft to correct a
+mistake made on the ground. There was no runtime lever, and no way to even see
+the condition: `reports_rejected` was counted but the *holder* was never
+exposed, so the symptom read as "the link adapts oddly".
+
+**Ruling (operator, 2026-07-31, via coordination spec
+`specs/cross/2026-07-31-report-latch-authority/`).** An accepted §11.4 CSA
+transfers the §3.5 latch to that issuer, immediately, on both gates.
+
+- **The trigger is the acceptance *event*, not the §11.5a binding.** This
+  distinction is the whole ruling. An earlier design gated steady-state report
+  acceptance on `CsaFollower::latched_` and would have been dead code:
+  `do_claim()` is reachable only from `POST /api/v1/csa` and
+  `scout/quickconnect`, so a ground that boots, latches and receives never
+  issues a CSA and never sets that binding at all. Worse, bounding failover on
+  `bind_release_s` (90 s) instead of `relatch_ms` (2 s) would have been a 45x
+  regression on dual-ground takeover. Using the event keeps first-latcher and
+  the silence rule untouched.
+- **Both gates move together.** `feedback_gate_` (§3.10) and `report_gate_`
+  (§3.5) are one authority. Moving only LINK_REPORT would leave JSCC feedback
+  flowing from the displaced ground — a partial fix that presents as working.
+- **Originator-only latch.** `latched_issuer()` carries no session, so the
+  forced latch sets `{originator, 0}` and the first accepted report fills the
+  session in through the existing same-originator reboot path. Carrying a
+  session through from the CSA would be redundant and could stall if the
+  reporter's session differs.
+- **`preferred_originator` outranks it.** Configured pinning makes both the
+  CSA transfer and the new endpoint no-ops (the endpoint answers 409). A
+  partial effect here would be worse than no feature — it would look like the
+  override worked.
+- New §15.5 row `POST /api/v1/reports/latch {"clear":true}` /
+  `{"originator":N}`, and §15.3 `return.report_latch_holder` +
+  `return.feedback_rejected`.
+
+**Boundary.** No wire change, no table-hash change, no persistence. The
+endpoint is local management HTTP on the craft's control socket, same §13
+posture as Pass 113/114. The NACK path is deliberately **not** in scope: it
+carries no `ReportGate` today (only `target_originator`/`target_session`
+matching at ingest), so gating it would be a new restriction on the ARQ path
+rather than an extension of this one — raised to the operator separately.
+
+**Known gap.** In a §14.3 cache or multi-originator diversity topology the
+JSCC feedback source may legitimately differ from the CSA issuer, and moving
+`feedback_gate_` will reject it. The common deployment has one ground as both,
+so this is deferred rather than designed around; `feedback_rejected` is what
+makes it visible instead of a silent degradation.
