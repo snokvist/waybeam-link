@@ -470,6 +470,42 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         h_.reset_stats();
         return done("");
     }
+    if (path == "/api/v1/reports/latch") {  // §15.5 Pass 115
+        if (!h_.reports_latch) return na();
+        const bool has_clear = j.contains("clear");
+        const bool has_orig = j.contains("originator");
+        // Exactly one: a request carrying both has no single meaning, and one
+        // carrying neither would silently no-op.
+        if (has_clear == has_orig) {
+            return reply(400, "Bad Request",
+                         json_err("exactly one of clear/originator required"));
+        }
+        if (has_clear && !j["clear"].is_boolean()) {
+            return reply(400, "Bad Request", json_err("clear must be bool"));
+        }
+        // {"clear":false} has no meaning here — the release is the only thing
+        // `clear` names, so reject it rather than falling through to the
+        // originator path and reporting a confusing range error.
+        if (has_clear && !j.value("clear", false)) {
+            return reply(400, "Bad Request", json_err("clear must be true"));
+        }
+        // Type-guard before any get<>: a string or null "originator" throws
+        // json::type_error, and nothing above this server catches — the throw
+        // would unwind out of main and take the link down over one bad POST.
+        if (has_orig && !j["originator"].is_number_integer()) {
+            return reply(400, "Bad Request",
+                         json_err("originator must be an integer"));
+        }
+        // Range on the WIDE type before narrowing, same reason as §10.5 above:
+        // value<int> static-casts, so 2^32+8 would wrap to a legal 8 and pass
+        // a check written against int.
+        const int64_t orig = has_orig ? j["originator"].get<int64_t>() : 0;
+        if (has_orig && (orig <= 0 || orig > 0xFFFF)) {
+            return reply(400, "Bad Request",
+                         json_err("originator out of range (1..65535)"));
+        }
+        return done(h_.reports_latch(has_clear, static_cast<int>(orig)));
+    }
     if (path == "/api/v1/venc/reassert") {  // §15.5 Pass 103
         if (!h_.venc_reassert) return na();
         h_.venc_reassert();

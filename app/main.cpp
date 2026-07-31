@@ -2125,6 +2125,22 @@ struct TxCore {
 
     // §11.3: freeze the cascade + pause the watchdog across the CSA blackout.
     void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
+
+    // §3.5 Pass 115: report authority is ONE authority across both return
+    // gates. These wrap the pair deliberately — moving report_gate_ alone
+    // would leave §3.10 JSCC feedback flowing from the displaced ground,
+    // which presents as a working fix. Keep the two calls together.
+    void report_authority_set(uint16_t originator, uint64_t now_ms) {
+        report_gate_.force_latch(originator, now_ms);
+        feedback_gate_.force_latch(originator, now_ms);
+    }
+    void report_authority_clear() {
+        report_gate_.clear_latch();
+        feedback_gate_.clear_latch();
+    }
+    bool report_authority_overridable() const {
+        return report_gate_.overridable();
+    }
     void on_rf_environment(uint16_t channel_mhz, uint8_t bw,
                            uint64_t now_ms) {
         (void)selector_.on_rf_environment(channel_mhz, bw, now_ms);
@@ -2429,6 +2445,8 @@ struct TxCore {
         snap.ret.reports_expected = selector_.report_epoch();
         snap.ret.reports_received = reports_received_;
         snap.ret.reports_rejected = report_gate_.rejected();  // §3.5 Pass 41
+        snap.ret.feedback_rejected = feedback_gate_.rejected();   // Pass 115
+        snap.ret.report_latch_holder = report_gate_.latched_originator();
     }
 
     struct PowerAdapter {
@@ -3514,6 +3532,26 @@ int run_tx(const Loaded& l) {
                 if (si.ring) si.ring->reset_stats();
             }
         };
+        // §15.5 Pass 115: §3.5 report-authority override. `clear` frees a
+        // stuck latch (a bench ground that never falls silent never ages out),
+        // so the next reporter takes it within relatch_ms. A configured
+        // preferred_originator outranks both forms — refused, not silently
+        // ignored, so the operator learns why nothing happened.
+        h.reports_latch = [&](bool clear, int originator) -> std::string {
+            if (!tx.report_authority_overridable()) {
+                return "preferred_originator is configured; override refused";
+            }
+            if (clear) {
+                tx.report_authority_clear();
+                return "";
+            }
+            if (originator <= 0 || originator > 0xFFFF) {
+                return "originator out of range";
+            }
+            tx.report_authority_set(static_cast<uint16_t>(originator),
+                                    now_ms());
+            return "";
+        };
         // §15.5 Pass 103: the §16 mode applier POSTs this after restarting venc
         // so the link re-asserts bitrate/caps/fps onto the fresh encoder (a
         // restart discards the encoder's live state; write-on-change would
@@ -3596,6 +3634,12 @@ int run_tx(const Loaded& l) {
             }
             csa.clear_campaign();
             csa.release_binding();
+            // §3.5 Pass 115: authority is released as one thing too. Dropping
+            // the binding while the report latch stays pinned to the departed
+            // issuer is precisely the split state the transfer exists to
+            // prevent — and it would NOT self-heal if that issuer keeps
+            // reporting, since its own traffic refreshes the silence timer.
+            tx.report_authority_clear();
             cur_chan = chan;
             std::fprintf(stderr, "channel: local retune -> %u MHz (Pass 113)\n",
                          chan);
@@ -3609,6 +3653,10 @@ int run_tx(const Loaded& l) {
                 csa.set_psk({token.begin(), token.end()});
                 craft_cmd.set_psk({token.begin(), token.end()});
                 psk_announced = true;
+                // §3.5 Pass 115: set_psk drops the §11.5a binding, so release
+                // report authority with it — a new pairing epoch must not
+                // leave the previous issuer still driving the selector.
+                tx.report_authority_clear();
             } else {
                 psk_announced = false;
             }
@@ -3637,6 +3685,11 @@ int run_tx(const Loaded& l) {
                     tx.csa_freeze(service_now + static_cast<uint64_t>(
                                                    l.cfg.policy.csa.settle_s *
                                                    1000));
+                    // §3.5 Pass 115: the claim takes report authority too, so
+                    // command and reports can never name different grounds.
+                    // Driven by the acceptance EVENT — the §11.5a binding is
+                    // not consulted here and never forms on a passive ground.
+                    tx.report_authority_set(c->prefix.originator, service_now);
                     // Pass 89: the flag is owned by the campaign_active()
                     // edge check on the loop body — one writer, so the
                     // clearing edge cannot be missed.

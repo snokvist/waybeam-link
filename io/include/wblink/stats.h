@@ -152,7 +152,11 @@ struct StreamStats {
 struct ReturnStats {
     uint32_t reports_expected = 0;
     uint32_t reports_received = 0;
-    uint64_t reports_rejected = 0;  // §3.5 Pass 41 acceptance filter
+    uint64_t reports_rejected = 0;   // §3.5 Pass 41 acceptance filter
+    uint64_t feedback_rejected = 0;  // §3.10 gate, same filter (Pass 115)
+    // §3.5 Pass 115: current report-authority holder, 0 = no latch. TX-only;
+    // 0 on ground/loopback like every other role-specific field here.
+    uint16_t report_latch_holder = 0;
     uint32_t return_window_hits = 0;
     uint32_t return_window_misses = 0;
     // §3.0 Pass 12 unicast returns: sent unicast vs fell back to broadcast

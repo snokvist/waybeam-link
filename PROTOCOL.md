@@ -396,6 +396,19 @@ degradation this rule promises into a worse outcome than no fallback at all.
   future work. An accepted session/source transition starts a new selector
   epoch and smoothing domain; state from the previous reporter MUST NOT make
   the newly accepted identity look stale.
+  **Authority transfer (Pass 115).** An accepted §11.4 CSA additionally
+  transfers the latch to that issuer, immediately and without waiting for
+  `relatch_ms` — claiming a craft takes report authority as well as command
+  authority, so the two can never name different grounds. The transfer is
+  driven by the CSA *acceptance event*, not by the continued existence of the
+  §11.5a binding: first-latcher and the `relatch_ms` silence rule are
+  otherwise unchanged, so failover to a surviving reporter keeps its normal
+  timescale. The latch is forced to the issuer's originator alone —
+  acceptance keys on originator, so no session need be known at transfer
+  time. With `preferred_originator` configured the
+  transfer is a **no-op** — configuration outranks it. The current holder is
+  exposed as §15.3 `report_latch_holder`, and `POST /api/v1/reports/latch`
+  (§15.5) clears or forces it locally on the craft.
 
 ### 3.6 `table_version` — content hash, not a counter
 
@@ -567,7 +580,13 @@ latency.
 
 The receiver emits this packet at the existing report cadence after a matching
 frame-SHM stream has latched. It uses the same return injection, quiet-gap, and
-reporter/target filtering as NACK/LINK_REPORT. TX accepts it only for its own
+reporter/target filtering as NACK/LINK_REPORT — including the §3.5 Pass 115
+CSA authority transfer, which moves this packet's gate together with the
+LINK_REPORT gate so a claimed craft never measures one ground while being
+commanded by another. In a §14.3 cache or multi-originator diversity topology
+the feedback source may legitimately differ from the CSA issuer; that case is
+not yet accommodated and is detectable as a rising §15.3
+`feedback_rejected`. TX accepts it only for its own
 exact `(originator, session_id, stream_id)`. The feedback cache is additionally
 keyed by reporter `(prefix.originator, prefix.session_id)`, and
 `feedback_epoch` is monotonic-forward only **within that reporter session**.
@@ -3166,7 +3185,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "nack_build_to_retransmit": { "samples": 18, "p95_us": 2514, "max_us": 3107 },
     "nack_receive_to_resend": { "samples": 18, "p95_us": 315, "max_us": 402 } },
   "return": { "reports_expected": 10, "reports_received": 9,
-    "reports_rejected": 0,
+    "reports_rejected": 0, "feedback_rejected": 0, "report_latch_holder": 9,
     "return_window_hits": 7, "return_window_misses": 2,
     "unicast_sent": 0, "unicast_fallback": 0 },
   "link": { "target_originator": 9, "target_session": 183726,
@@ -3556,6 +3575,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/mode` | `{ "name": "imx335-100fps-highrange" }` | select a user-facing operating mode (§16 of `docs/venc-mode-matrix.md`). **Not MUT_LIVE** — see below (TX/craft node) |
 | `POST /api/v1/channel` | `{ "mhz": 5805 }` | locally retune the craft to an **allowlisted** channel outside any §11 campaign: retunes all adapters, informs the §9 selector, arms the §11.6 RX-liveness guard, clears any in-flight CSA campaign and drops the §11.5a binding (the ground must re-scout). 400 off-allowlist; **volatile** — a reboot returns to the boot channel (Pass 113, TX/craft node) |
 | `POST /api/v1/psk` | `{ "enabled": true\|false }` | §11.4a runtime pairing gate: `false` = re-key with a fresh announced token + drop the §11.5a binding (open pairing), `true` = stop announcing the current key (locked). Craft-session volatile (Pass 113, TX/craft node) |
+| `POST /api/v1/reports/latch` | `{ "clear": true }` or `{ "originator": N }` | §3.5 report-authority override: `clear` releases the LINK_REPORT + JSCC_FEEDBACK latch so the next reporter takes it within `relatch_ms`; `originator` forces it to a specific node (bench). Exactly one of the two per request; 400 otherwise. Refused with 400 when `preferred_originator` is configured — config outranks the override, and the refusal is explicit rather than a silent no-op. Volatile (Pass 115, TX/craft node) |
 | `POST /api/v1/venc/reassert` | `{}` | drop the §9.6 venc-actuator write-on-change cache so the next tick re-asserts bitrate + frame-caps + fps onto the encoder. Called by the §16 applier **after** it restarts venc; closes the stranded-bitrate gap a restart would otherwise leave (Pass 103, TX/craft node) |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile`,

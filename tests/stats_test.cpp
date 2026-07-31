@@ -113,7 +113,10 @@ StatsSnapshot sample_snapshot() {
     st.active_profile = 4;
     st.table_version = 178;
     s.streams.push_back(st);
-    s.ret = ReturnStats{10, 9, 0, 7, 2};
+    // expected, received, reports_rejected, feedback_rejected,
+    // report_latch_holder, window hits, window misses (§3.5 Pass 115 added
+    // the middle two — this is positional, so it must move with the struct).
+    s.ret = ReturnStats{10, 9, 0, 0, 9, 7, 2};
     s.link.target_originator = 9;
     s.link.target_session = 183726;
     s.link.profile = 4;
@@ -231,7 +234,8 @@ const char* kGolden =
     "\"nack_build_to_retransmit\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
     "\"nack_receive_to_resend\":{\"samples\":0,\"p95_us\":0,\"max_us\":0}},"
     "\"return\":{\"reports_expected\":10,\"reports_received\":9,"
-    "\"reports_rejected\":0,"
+    "\"reports_rejected\":0,\"feedback_rejected\":0,"
+    "\"report_latch_holder\":9,"
     "\"return_window_hits\":7,\"return_window_misses\":2,"
     "\"unicast_sent\":0,\"unicast_fallback\":0},"
     "\"link\":{\"target_originator\":9,\"target_session\":183726,"

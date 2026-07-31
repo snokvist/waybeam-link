@@ -80,6 +80,7 @@ int main() {
     // Captured knob state, mutated by the handlers.
     int pin_min = -1, pin_max = -1;
     int txp_auto = -1, txp_qdb = -1000;
+    int latch_calls = 0, latch_clear = -1, latch_orig = -1;
     int fec_sid = -1, fec_i = -1, fec_p = -1, fec_k = -1, fec_r = -1;
     bool fec_ok = true;
     int reset_calls = 0;
@@ -133,6 +134,13 @@ int main() {
         return fec_ok ? "" : "no frame-shm stream with that id";
     };
     h.reset_stats = [&] { ++reset_calls; };
+    // §3.5 Pass 115 report-authority override.
+    h.reports_latch = [&](bool clear, int originator) -> std::string {
+        ++latch_calls;
+        latch_clear = clear ? 1 : 0;
+        latch_orig = originator;
+        return "";
+    };
     h.video_recover = [&](int stream_id) -> std::string {
         recovery_stream = stream_id;
         return stream_id < 0 ? "no matching latched RTP stream" : "";
@@ -259,6 +267,40 @@ int main() {
         CHECK_EQ_U(status_of(r), 200);
         CHECK_EQ_U(pin_min, 3);
         CHECK_EQ_U(pin_max, 3);
+    }
+    // §3.5 Pass 115 /api/v1/reports/latch. The malformed-body cases are the
+    // point: a non-integer originator threw json::type_error out of an
+    // uncaught dispatch (killing the daemon over one POST), and a 64-bit
+    // value narrowed into range before the bounds check saw it.
+    {
+        const auto post = [&](const std::string& body) {
+            return roundtrip(s, port,
+                             "POST /api/v1/reports/latch HTTP/1.0\r\n"
+                             "Content-Length: " +
+                                 std::to_string(body.size()) + "\r\n\r\n" +
+                                 body);
+        };
+        CHECK_EQ_U(status_of(post("{\"clear\":true}")), 200);
+        CHECK_EQ_U(latch_clear, 1);
+        CHECK_EQ_U(status_of(post("{\"originator\":42}")), 200);
+        CHECK_EQ_U(latch_clear, 0);
+        CHECK_EQ_U(latch_orig, 42);
+        const int calls_before = latch_calls;
+        // Exactly-one gate, and clear:false has no meaning.
+        CHECK_EQ_U(status_of(post("{}")), 400);
+        CHECK_EQ_U(status_of(post("{\"clear\":true,\"originator\":5}")), 400);
+        CHECK_EQ_U(status_of(post("{\"clear\":false}")), 400);
+        CHECK_EQ_U(status_of(post("{\"clear\":1}")), 400);
+        // Type confusion: these must 400, not throw.
+        CHECK_EQ_U(status_of(post("{\"originator\":\"5\"}")), 400);
+        CHECK_EQ_U(status_of(post("{\"originator\":null}")), 400);
+        CHECK_EQ_U(status_of(post("{\"originator\":1.5}")), 400);
+        // Wide value that would wrap to a legal 8 if narrowed first.
+        CHECK_EQ_U(status_of(post("{\"originator\":4294967304}")), 400);
+        CHECK_EQ_U(status_of(post("{\"originator\":0}")), 400);
+        CHECK_EQ_U(status_of(post("{\"originator\":65536}")), 400);
+        CHECK_EQ_U(status_of(post("{\"originator\":-1}")), 400);
+        CHECK_EQ_U(latch_calls, calls_before);  // hook never reached
     }
     // §10.5 tx/power: GET state, POST qdb latch, POST auto clear, body gates.
     {

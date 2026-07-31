@@ -97,6 +97,11 @@ struct ControlHandlers {
     // true = locked / stop announcing).
     std::function<std::string(int mhz)> channel_set;
     std::function<std::string(bool enabled)> psk_enable;
+    // §15.5 Pass 115 (tx/craft only, null → 409): §3.5 report-authority
+    // override. clear = release the LINK_REPORT + JSCC_FEEDBACK latch so the
+    // next reporter takes it within relatch_ms; otherwise force it to
+    // `originator`. Returns "" on success, else a short error string (→ 400).
+    std::function<std::string(bool clear, int originator)> reports_latch;
 };
 
 class ControlServer {
