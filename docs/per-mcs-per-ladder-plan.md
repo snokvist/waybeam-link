@@ -350,3 +350,68 @@ From `docs/step11-bench.md` §4.10 — do not lose these:
   floor (`rssi_dbm − snr_db`). Devourer-only, so out of scope while symmetry
   is the constraint — but this is the first thing to revisit if the backend
   moves fully to devourer.
+
+---
+
+## 6. Findings (2026-08-01 bench session — Part A + B1 executed)
+
+Rig: craft `.232` (SSC338Q, 8812EU) ↔ ground `.242` (x86, EU `0bda:a81a`
+bus 1-1 + CU `0bda:c812` bus 5-1), ch 5805/HT20, 1 dBm floor. Full Part A
+numbers recorded in `docs/step11-bench.md` §4.9.
+
+### Part A — PASS (A6 not run)
+
+A0 clean; A1 confirmed **positively** including the sharp variant (throwaway
+diag build, `SetTxMode` pinned MCS0 vs radiotap rung 7 → receiver bucketed
+~22k @7, zero @0 — radiotap wins on Jaguar3); A2 zero everywhere; A3 held on
+every snapshot; A4 both directions; A5 no movement. A6 skipped: the operating
+ground is MonAir, no Jaguar1 in config. Pass 118 is hardware-verified.
+
+### Part B1 — capability table, and the exit criterion FIRED
+
+| Path | chip / driver | flag accepted | bad-FCS delivered |
+|---|---|---|---|
+| kernel-monitor | CU `rtl88x2cu` | `otherbss fcsfail` ✅, `fcsfail` ✅ (rc 0) | **NO** — 0 in 126k frames across 5805 / 5180 / 2412 (busy 2.4 incl.) |
+| kernel-monitor | EU `rtl88x2eu` | ✅ (rc 0) | inconclusive — EU heard only ~40 ambient 2.4 frames in 30 s (weak 2.4 RX); 0 bad-FCS observed |
+| devourer | CU — enumerates **Jaguar3** | `rx.keep_corrupted` set in scratch build | **NO** — 0 corrupted in ~22k ambient frames |
+| devourer | Jaguar1 / Jaguar2 | — | untested: no such hardware on the desk (AU unplugged) |
+
+Control observations: the FLAGS radiotap field is present on 100% of
+delivered frames with `fcs_at_end` set, so the `F_BADFCS` bit path exists
+and the zero is a real zero, not a parsing miss.
+
+**B1c resolved (comment vs register): the register wins.** `keep_corrupted`
+is plumbed in `jaguar1/RadioManagementModule.cpp` and
+`jaguar2/HalJaguar2.cpp:2573` only; Jaguar3 ignores the flag entirely and
+`monitor_rx_cfg` writes RCR `0xF410400F | (1<<28)` — ACRC32 (BIT8) and AICV
+(BIT9) both clear, contradicting the block comment at
+`jaguar3/HalJaguar3.cpp:463`. Not patched locally (vendored); this is an
+upstream report: (a) the comment misdocuments the RCR value, (b)
+`rx.keep_corrupted` silently no-ops on Jaguar3.
+
+**Consequence: STOP per the B1 exit criterion.** Neither backend can deliver
+bad-FCS frames on the fleet-default chips today. The symmetry argument in §2
+holds *by standard* but fails *by implementation* — the standard defines
+`F_BADFCS`, and neither the out-of-tree kernel drivers nor devourer Jaguar3
+deliver the frames that would carry it. B2/B3/B4 not started. RSSI-validity
+on bad-FCS frames (§B3 early check) is unobservable for the same reason.
+
+### What unblocks Pass 119, if the operator wants it
+
+1. **Upstream devourer change** (smallest lever): make Jaguar3
+   `monitor_rx_cfg` honour `rx.keep_corrupted` (set BIT8|BIT9 when
+   requested). Whether the 8822C-family firmware then actually forwards
+   CRC-failed MPDUs to the host is the follow-up empirical question — the
+   RCR bits are necessary, not proven sufficient.
+2. Out-of-tree kernel-driver `fcsfail` support would open the monitor path,
+   but that tree is not ours either.
+3. Alternatively, re-scope the numerator: the sequence-gap inference Pass 118
+   originally recorded (with its known promoted-burst blind spot), or accept
+   a devourer-only ladder once EVM/`snr[4]` become available after a full
+   backend move — both are §4-style operator decisions.
+
+### §4 rulings — now needed only if an unblock path is chosen
+
+The five §4 questions stand, but none is actionable until bad-FCS delivery
+exists on at least one symmetric path. Raised to the operator with this
+report rather than resolved here.
