@@ -4774,6 +4774,23 @@ frame, and it does not recreate a block rejected because configured `min_r`
 would make `k+r > 256`. Regression cases cover High-mode `k=10,min_k=10`
 under all-frame ARQ and `k=10,min_r=255`; both remain source-only.
 
+**Reviewed-binary hardware A/B (2026-08-01).** Commit `691ff36` ran on the
+SSC338Q craft against the x86 ground at profile/MCS 5 and a commanded
+21,839 kbps encoder rate. Each arm was a matched 20 s `/proc` process-CPU and
+counter-delta sample; delivered video remained approximately 23.7 Mb/s.
+
+| tier | budget | craft CPU (one core) | source+repair pkt/s | all air submits/s | mean k+r | guard frames | FEC recovered | unrecoverable / decode / oversize / TX fail |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Default | 1424 | 29.80% | 2687 | 2744 | 20.39+4.69 | 0 | 302 | 0 / 0 / 0 / 0 |
+| Medium | 2048 | 25.60% | 1949 | 2006 | 14.20+3.97 | 1673 | 195 | 0 / 0 / 0 / 0 |
+| High | 3072 | 24.25% | 1466 | 1522 | 9.70+4.00 | 2138 | 163 | 0 / 0 / 0 / 0 |
+
+High therefore removed 45.4% of DATA packet submissions and 5.55 percentage
+points of vehicle CPU versus Default while preserving an approximately
+four-erasure block depth. The original 1000--1200 packet/s target is met by
+source symbols alone (1038/s), but not by total DATA after the repair-depth
+guard (1466/s); that is the explicit CPU/robustness trade-off adopted above.
+
 **Review addendum.** Two authority seams are part of the same merge gate. The
 craft resets MTU to Default on every newly accepted authenticated CSA campaign,
 not only when `latched_issuer` changes: a rebooted ground may reuse the same
