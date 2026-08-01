@@ -3471,9 +3471,13 @@ fingerprint mismatches the live hardware (the artifact is then NOT applied,
 of the current selector source (Pass 121 addendum 6 — this is how a
 ground WebUI shows calibration progress with no IP path to the craft):
 state/rung from byte 0 and fingerprint from byte 1 while `state_flags`
-bit4 is set, holding the last received word while the selector source
-stays fresh. `calib_stale` is craft-local knowledge and stays `false` on
-a ground node.
+bit4 is set. The mirror is **sticky**: it holds the last received word
+across RF gaps rather than reverting to idle — calibration's own wall
+probes black out the link (addendum 4), so a freshness-gated mirror
+flickers "idle" mid-run (observed live) and would mislead a consumer;
+the word is eventually consistent by construction (the craft airs it
+continuously, including the terminal done/failed states). `calib_stale`
+is craft-local knowledge and stays `false` on a ground node.
 
 `return_window_hits/misses` (TX-side) and `reports_expected/received` expose the
 §7.2 optimisation's health directly, and `adapter_stalled` + the
