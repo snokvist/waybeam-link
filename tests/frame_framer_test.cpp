@@ -125,6 +125,32 @@ int main() {
     }
 
     // --- min_k gate: k <= min_k => ARQ-only, r = 0 --------------------------
+    // --- §9.3a negotiated ceiling intersects the profile ceiling ------------
+    {
+        Harness h;
+        h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
+        // Boot/default remains compatibility-sized despite a High profile.
+        CHECK_EQ_U(h.framer.effective_packet_budget(), kDefaultMaxPayload);
+        CHECK_EQ_U(h.framer.symbol_size(), 1424u - 26u - 11u);
+        h.framer.set_negotiated_packet_budget(mtu_tier::kMediumBudget);
+        CHECK_EQ_U(h.framer.effective_packet_budget(), 2048u);
+        CHECK_EQ_U(h.framer.symbol_size(), 2048u - 26u - 11u);
+        h.feed(make_frame(6000, true, 33));
+        for (const Sym& sy : h.sent) {
+            CHECK(sy.payload.size() + kDataHeaderSize <= 2048u);
+        }
+        h.sent.clear();
+        h.framer.set_negotiated_packet_budget(mtu_tier::kHighBudget);
+        CHECK_EQ_U(h.framer.effective_packet_budget(), 3072u);
+        h.feed(make_frame(6000, true, 34));
+        for (const Sym& sy : h.sent) {
+            CHECK(sy.payload.size() + kDataHeaderSize <= 3072u);
+        }
+        // A lower profile remains authoritative even after High is accepted.
+        h.framer.set_operating_point(2, 0x80, kDefaultMaxPayload);
+        CHECK_EQ_U(h.framer.effective_packet_budget(), kDefaultMaxPayload);
+    }
+
     {
         FrameFecConfig fec;
         fec.scheme = FecScheme::kRlc256;

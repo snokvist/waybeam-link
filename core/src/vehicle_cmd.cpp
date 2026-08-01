@@ -162,24 +162,25 @@ bool VcmdIssuer::start(const CommonPrefix& prefix, uint16_t target_originator,
     return true;
 }
 
-void VcmdIssuer::on_echo(const VehicleCmd& pkt, uint64_t now_us) {
+bool VcmdIssuer::on_echo(const VehicleCmd& pkt, uint64_t now_us) {
     (void)now_us;
     if (state_ != State::kSending && state_ != State::kAwaitEcho) {
-        return;  // stale/duplicate echo after a terminal state
+        return false;  // stale/duplicate echo after a terminal state
     }
     if ((pkt.cmd_flags & vcmd_flags::kAck) == 0 ||
         pkt.prefix.originator != target_ ||
         pkt.cmd_nonce != tmpl_.cmd_nonce || pkt.cmd_id != tmpl_.cmd_id ||
         pkt.cmd_arg != tmpl_.cmd_arg) {
-        return;
+        return false;
     }
     // A forged un-MAC'd echo must not fake an applied command (§13 row).
     const auto want = mac_of(pkt, policy_.psk);
     if (!want || *want != pkt.cmd_mac) {
-        return;
+        return false;
     }
     state_ = (pkt.cmd_flags & vcmd_flags::kRejected) != 0 ? State::kRejected
                                                           : State::kAcked;
+    return true;
 }
 
 VcmdIssuer::Action VcmdIssuer::tick(uint64_t now_us) {

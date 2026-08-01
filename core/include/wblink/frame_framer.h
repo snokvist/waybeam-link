@@ -78,7 +78,18 @@ class FrameFramer {
                              uint16_t max_payload) {
         active_profile_ = active_profile;
         table_version_ = table_version;
-        max_payload_ = max_payload;
+        profile_max_payload_ = max_payload;
+    }
+
+    // §9.3a: claimed-ground ceiling, applied by on_frame() at the next block
+    // boundary because one on_frame call emits one complete block.
+    void set_negotiated_packet_budget(uint16_t budget) {
+        negotiated_packet_budget_ = budget;
+    }
+    uint16_t effective_packet_budget() const {
+        return profile_max_payload_ < negotiated_packet_budget_
+                   ? profile_max_payload_
+                   : negotiated_packet_budget_;
     }
 
     // §11.6 CSA_ARMED etc. — OR'd into every outgoing DATA header while set.
@@ -144,7 +155,8 @@ class FrameFramer {
     uint8_t active_profile_ = 0;
     uint8_t table_version_ = 0;
     uint8_t extra_flags_ = 0;
-    uint16_t max_payload_ = kDefaultMaxPayload;
+    uint16_t profile_max_payload_ = kDefaultMaxPayload;
+    uint16_t negotiated_packet_budget_ = kDefaultMaxPayload;
 
     uint32_t next_seq_ = 0;
     uint32_t block_id_ = 0;

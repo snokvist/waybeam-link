@@ -18,6 +18,7 @@
 
 #include "wblink/binding.h"
 #include "wblink/radiotap.h"  // kRxMcsBuckets (§15.3 Pass 118 histogram)
+#include "wblink/types.h"
 
 namespace wblink {
 
@@ -255,6 +256,11 @@ struct LinkStats {
     std::string vcmd_state = "idle";   // issuer: §15.5 GET campaign state
     uint32_t vcmd_nonce = 0;           // issuer: last campaign nonce
     bool arq_rx_enabled = true;        // rx: §6.4 NACK-emission gate
+    // §9.3a Pass 122 complete-DATA-packet budgets (bytes).
+    std::string mtu_mode = "default";  // ground preference; "remote" on craft
+    uint16_t mtu_requested = kDefaultMaxPayload;
+    uint16_t mtu_effective = kDefaultMaxPayload;
+    uint16_t mtu_supported = kDefaultMaxPayload;
     // §10.6 (Pass 120) calibration surface — mirrors the §3.15 word.
     std::string calib_state = "idle";  // idle|running|done|failed
     uint8_t calib_rung = 0;            // meaningful while running

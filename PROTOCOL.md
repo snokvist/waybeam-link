@@ -953,8 +953,8 @@ than best-effort blocks (a slightly-late I-frame still rescues its GOP).
 
 **No fragmentation (invariant, UDP/RTP ingress).** On a UDP/RTP-ingested stream
 each ingress datagram MUST fit one MPDU payload. Configure the encoder's RTP
-payloader `mtu` at or under the active profile's `max_payload` budget (§9.3;
-standard rungs ~1400, jumbo rungs up to ~3960). H.264/H.265 payloaders already
+payloader `mtu` at or under the effective §9.3a packet budget (standard rungs
+~1400, v1 High 3072 including the DATA header). H.264/H.265 payloaders already
 fragment NALs to MTU — this is a config assertion, not new code. A runtime
 datagram larger than the payload budget is **dropped with a stat**
 (`oversize_ingress`), never silently truncated.

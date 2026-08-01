@@ -170,6 +170,21 @@ int main() {
         vcmd_last_arg = arg;
         return {200, "{\"ok\":true,\"nonce\":42}"};
     };
+    std::string mtu_mode = "default";
+    h.link_mtu_json = [&] {
+        return "{\"mode\":\"" + mtu_mode +
+               "\",\"requested\":1424,\"effective\":1424,"
+               "\"supported\":3072}";
+    };
+    h.link_mtu = [&](const std::string& mode)
+        -> std::pair<int, std::string> {
+        if (mode != "default" && mode != "medium" && mode != "high" &&
+            mode != "auto") {
+            return {400, "{\"ok\":false,\"error\":\"bad mode\"}"};
+        }
+        mtu_mode = mode;
+        return {200, "{\"ok\":true}"};
+    };
     // §6.4 RX-local NACK-emission gate.
     int arq_state = -1;
     h.arq_enable = [&](bool enabled) -> std::string {
@@ -480,6 +495,25 @@ int main() {
             s, port, "GET /api/v1/vehicle/command HTTP/1.0\r\n\r\n");
         CHECK_EQ_U(status_of(r), 200);
         CHECK(body_of(r).find("\"state\":\"acked\"") != std::string::npos);
+    }
+    {  // §9.3a MTU preference GET/POST and typed validation.
+        const std::string r = roundtrip(
+            s, port, "GET /api/v1/link/mtu HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"supported\":3072") != std::string::npos);
+        const std::string body = "{\"mode\":\"auto\"}";
+        const std::string req =
+            "POST /api/v1/link/mtu HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK(mtu_mode == "auto");
+    }
+    {
+        const std::string body = "{\"mode\":7}";
+        const std::string req =
+            "POST /api/v1/link/mtu HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }
     {
         const std::string body = "{\"cmd\":\"arq\",\"arg\":0}";

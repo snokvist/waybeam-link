@@ -216,6 +216,11 @@ int main() {
                    static_cast<unsigned>(CsaAction::Kind::kRetune));
         f.note_valid_rx(200'000, 9);
         CHECK(f.latched_issuer().has_value());
+        // A caller that samples its loop clock immediately before RX stamps a
+        // packet must not turn the tiny timestamp regression into a u64 age.
+        CHECK_EQ_U(f.tick(199'999).kind,
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        CHECK(f.latched_issuer().has_value());
         const uint64_t rel = 200'000 + 90'000'000ull;  // last_bound + 90 s
         CHECK_EQ_U(f.tick(rel).kind,  // exactly at the boundary: still bound
                    static_cast<unsigned>(CsaAction::Kind::kNone));

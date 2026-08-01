@@ -784,7 +784,7 @@ its top rung.
 | **Latency High** (30 fps) | 1920×1080 · 0.046→0.166 | 1920×1080 · 0.093→0.290 | 1920×1080 · 0.166→0.351 |
 
 Rung bitrates are §9.5-derived from the **Pass 111 table** (`table_version`
-0xBF) — 2829 / 5754 / 10303 / 13769 / 18025 / 21839 kbps. Pass 95's graduated
+0x80 after Pass 122) — 2829 / 5754 / 10303 / 13769 / 18025 / 21839 kbps. Pass 95's graduated
 FEC overhead remains in force; Pass 111 adds the measured local-service ceiling
 for MCS4–5. The floor rungs that choose each resolution are unchanged, so no
 mode changes size. **(Latency Low, Range Medium)** remains the knife edge:
@@ -870,7 +870,8 @@ a v1 requirement.
 **Both landed in this PR** as **Pass 94** and **Pass 95** (operator, 2026-07-24:
 *"in the scope of this PR i would say they land and we try out the model"*).
 See `docs/review-log.md`. Pass 95 moved `table_version` **0x41 → 0xD1**;
-Pass 111 moves it **0xD1 → 0xBF**. Each semantic table change requires a
+Pass 111 moved it **0xD1 → 0xBF**; Pass 122's negotiated packet ceilings move
+it **0xBF → 0x80**. Each semantic table change requires a
 lockstep craft-and-ground redeploy.
 
 The nine profiles are in `profiles/modes/` — one JSON per cell, applied by

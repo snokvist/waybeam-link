@@ -179,6 +179,10 @@ StatsSnapshot sample_snapshot() {
     s.link.vcmd_state = "acked";
     s.link.vcmd_nonce = 3054418130;
     s.link.arq_rx_enabled = false;
+    s.link.mtu_mode = "auto";
+    s.link.mtu_requested = 3072;
+    s.link.mtu_effective = 2048;
+    s.link.mtu_supported = 3072;
     // §10.6 Pass 120: distinct values so the golden pins the calib mirror.
     s.link.calib_state = "running";
     s.link.calib_rung = 5;
@@ -285,6 +289,8 @@ const char* kGolden =
     "\"cmd_framing_select\":0,"
     "\"vcmd_state\":\"acked\",\"vcmd_nonce\":3054418130,"
     "\"arq_rx_enabled\":false,"
+    "\"mtu_mode\":\"auto\",\"mtu_requested\":3072,"
+    "\"mtu_effective\":2048,\"mtu_supported\":3072,"
     "\"calib_state\":\"running\",\"calib_rung\":5,"
     "\"calib_fingerprint\":191,\"calib_stale\":true}}\n";
 

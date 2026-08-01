@@ -498,6 +498,14 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.vcmd_nonce);
     out += ",\"arq_rx_enabled\":";
     append_bool(out, snap.link.arq_rx_enabled);
+    out += ",\"mtu_mode\":";
+    append_escaped(out, snap.link.mtu_mode);
+    out += ",\"mtu_requested\":";
+    append_u64(out, snap.link.mtu_requested);
+    out += ",\"mtu_effective\":";
+    append_u64(out, snap.link.mtu_effective);
+    out += ",\"mtu_supported\":";
+    append_u64(out, snap.link.mtu_supported);
     // §10.6 Pass 120 calibration mirror.
     out += ",\"calib_state\":";
     append_escaped(out, snap.link.calib_state);

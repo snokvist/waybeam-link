@@ -16,7 +16,7 @@ uint16_t FrameFramer::symbol_size() const {
     // §5.1a: s = max_payload - 26 (header) - 11 (repair subheader), so source
     // and repair symbols are the same size and both fit one MPDU. Config
     // guarantees max_payload >= kDataHeaderSize + 32, so s >= 21.
-    const int s = static_cast<int>(max_payload_) -
+    const int s = static_cast<int>(effective_packet_budget()) -
                   static_cast<int>(kDataHeaderSize) -
                   static_cast<int>(kFecRepairSubheaderSize);
     return s > 0 ? static_cast<uint16_t>(s) : 1;
