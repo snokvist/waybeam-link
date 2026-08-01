@@ -3466,7 +3466,14 @@ The `calib_*` fields (Pass 120) mirror the §10.6 calibration word:
 while running), `calib_fingerprint` (CRC-8 of the persisted artifact, 0 =
 none), and `calib_stale` — true when a persisted artifact's pairing
 fingerprint mismatches the live hardware (the artifact is then NOT applied,
-§10.6).
+§10.6). On a **craft/tx node** the source is the local calibrator; on a
+**ground/rx node** the source is the **received** §3.15 calibration word
+of the current selector source (Pass 121 addendum 6 — this is how a
+ground WebUI shows calibration progress with no IP path to the craft):
+state/rung from byte 0 and fingerprint from byte 1 while `state_flags`
+bit4 is set, holding the last received word while the selector source
+stays fresh. `calib_stale` is craft-local knowledge and stays `false` on
+a ground node.
 
 `return_window_hits/misses` (TX-side) and `reports_expected/received` expose the
 §7.2 optimisation's health directly, and `adapter_stalled` + the

@@ -4642,3 +4642,11 @@ Ruling: a blackout during VERIFY is a verify failure of total severity —
 take the addendum-2 bounded step-down (shared 3-descent budget, clock
 re-armed per descent) instead of aborting. Abort remains for no-floor /
 exhausted descents / truly dead ground.
+
+**Pass 121 addendum 6 (2026-08-01).** §15.3 clarified: on a ground/rx
+node the `calib_*` stats fields mirror the RECEIVED §3.15 calibration
+word of the current selector source (state/rung from byte 0, fingerprint
+from byte 1, while bit4 is set and the source is fresh) — the ground
+WebUI's only view of calibration progress when the craft has no IP path.
+`calib_stale` is craft-local and stays false on ground. Prerequisite for
+the waybeam-hub vehicle-menu calibrate button.
