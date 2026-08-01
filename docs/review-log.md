@@ -4601,3 +4601,10 @@ rung) plus spec text. §15.2 gains `seek_step_qdb`/`cap_rise_db`/
 `rssi_guard_dbm`; the retired band keys are ignored. The §10.2 level
 compensation stays: a tiered rung resolving below its own maximum is
 headroom, not error.
+
+**Pass 121 addendum (same day, operator).** First live seek run (bench
+distance, fp 0xE8): rungs 4-7 found genuine loss walls (17-21 dBm), but
+rungs 0-3 were stopped by the −20 rssi_guard, not by loss — a guard
+artifact 2 dB short of the radio's true maximum. Operator ruling: the
+guard is a token backstop, not a placement mechanism — default moves
+−20 → **−6**; the loss wall is the intended limiter at every rung.

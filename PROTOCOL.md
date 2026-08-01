@@ -1950,9 +1950,11 @@ ramp that reaches `max_qdb` clean places there. The wall's bracketing
 RSSIs **are** the rung's overload-ceiling record — there is no separate
 ceiling phase. If a rung's first probe is already past the loss wall the
 ramp descends until clean (floor `min_qdb`). A `rssi_guard_dbm` sanity
-bound (default −20) stops the ramp when reports land above it — beyond
-that the measurement sits inside the overload regime and adds no
-information. The loop evaluates **post-diversity** loss (what LINK_REPORT
+bound (default −6, Pass 121 addendum — the first live run showed −20
+clamped the low rungs 2 dB short of their true maximum) stops the ramp
+when reports land above it; it is a token backstop against RX front-end
+abuse, not a placement mechanism — the loss wall is the intended limiter
+at every rung. The loop evaluates **post-diversity** loss (what LINK_REPORT
 carries); at the placement and at the cliff this agrees with per-adapter
 wire PER (measured: adapters fail together in overload).
 
@@ -3208,7 +3210,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 - `policy.calibration` (craft/tx node, §10.6, Pass 120; seek keys
   Pass 121) seeds the calibration loop; all defaults are the
   bench-validated values: `loss_ok_milli` (15), `loss_bad_milli` (50),
-  `seek_step_qdb` (16), `cap_rise_db` (1), `rssi_guard_dbm` (−20),
+  `seek_step_qdb` (16), `cap_rise_db` (1), `rssi_guard_dbm` (−6),
   `min_qdb`/`max_qdb` (4/108), `settle_ms` (800), `probe_dwell_ms`
   (1200), `verify_dwell_ms` (2500), `report_loss_abort_ms` (3000),
   `hard_cap_ms` (600000),
