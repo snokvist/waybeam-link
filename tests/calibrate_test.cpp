@@ -40,6 +40,19 @@ struct Channel {
     // clean through a probe dwell, bad partway into a verify dwell.
     int8_t flaky_above = 127;
     mutable int hot = 0;
+    // One-dwell RSSI noise glitch (addendum 3): the first dwell at
+    // glitch_qdb reads 3 dB low — 7 samples = settle(2) + probe(5) at
+    // the fast_params cadence — then reads true. A confirmation dwell
+    // sees the real value.
+    int32_t glitch_qdb = -1;
+    mutable int glitch_left = 7;
+    int8_t rssi_sample() const {
+        if (qdb == glitch_qdb && glitch_left > 0) {
+            --glitch_left;
+            return static_cast<int8_t>(rssi() - 3);
+        }
+        return rssi();
+    }
     uint16_t loss(uint8_t rung) const {
         const int8_t r = rssi();
         if (r >= ceil[rung]) return 900;
@@ -63,8 +76,8 @@ struct Rig {
         while (now < until_ms) {
             now += 100;
             if (feed_reports && now % 100 == 0) {
-                cal.on_report(ch.rssi(), ch.loss(pinned == 255 ? 0 : pinned),
-                              300, now);
+                cal.on_report(ch.rssi_sample(),
+                              ch.loss(pinned == 255 ? 0 : pinned), 300, now);
             }
             const CalibActions a = cal.tick(now);
             if (a.pin_rung) pinned = *a.pin_rung;
@@ -162,6 +175,21 @@ void test_verify_backoff() {
     CHECK(a.ceilings[0].first_bad_rssi == -29);
 }
 
+void test_cap_confirm_rejects_noise() {
+    // Addendum 3: one noisy dwell at 68 qdb reads 3 dB low — without the
+    // confirmation re-dwell this is a false cap wall (the 10-run
+    // campaign's 8 dB MCS7 flip). The confirm dwell reads true and the
+    // ramp must continue to the genuine limit.
+    Rig r(fast_params());
+    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
+    r.ch.glitch_qdb = 68;
+    CHECK(r.cal.start(r.now));
+    r.run(r.now + 590000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    // Rung 0 ramps clean to max_qdb despite the glitch.
+    CHECK(r.cal.artifact().placement_qdb[0] == 108);
+}
+
 void test_report_loss_abort() {
     Rig r(fast_params());
     CHECK(r.cal.start(r.now));
@@ -243,6 +271,7 @@ int main() {
     test_full_run_and_artifact();
     test_cap_wall();
     test_verify_backoff();
+    test_cap_confirm_rejects_noise();
     test_report_loss_abort();
     test_hard_cap();
     test_abort_cmd();

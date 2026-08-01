@@ -96,6 +96,7 @@ class Calibrator {
         qdb_ = p_.min_qdb;  // Pass 121: rung 0 ramps from the floor
         last_clean_.reset();
         verify_descents_ = 0;
+        cap_confirm_ = false;
         enter_rung_ = true;
         phase_ = Phase::kSeek;
         dwell_start_ms_ = 0;  // set when the pin/power action is emitted
@@ -175,10 +176,18 @@ class Calibrator {
                 c.last_clean_rssi = static_cast<int8_t>(std::lround(rssi));
                 // Cap wall: an upward ≥2 dB commanded step that the report
                 // RSSI did not follow — delivered power stopped tracking.
+                // Addendum 3: confirm with one repeat dwell — in the TXAGC
+                // compression knee a one-off deficit is dwell noise.
                 if (last_clean_ && qdb_ - last_clean_->qdb >= 8 &&
                     rssi - last_clean_->rssi < p_.cap_rise_db) {
+                    if (!cap_confirm_) {
+                        cap_confirm_ = true;
+                        begin_dwell(now_ms, p_.probe_dwell_ms);
+                        return a;  // re-dwell at the same power
+                    }
                     return place(a, now_ms, last_clean_->qdb);
                 }
+                cap_confirm_ = false;
                 last_clean_ = Probe{qdb_, rssi};
                 if (rssi > p_.rssi_guard_dbm || qdb_ >= p_.max_qdb) {
                     return place(a, now_ms, qdb_);  // guard / cap-clean
@@ -267,6 +276,7 @@ class Calibrator {
         qdb_ = std::max(p_.min_qdb, placement_qdb_ - p_.seek_step_qdb);
         last_clean_.reset();
         verify_descents_ = 0;
+        cap_confirm_ = false;
         phase_ = Phase::kSeek;
         a.pin_rung = rung_;
         a.set_qdb = qdb_;
@@ -310,6 +320,7 @@ class Calibrator {
     int32_t placement_qdb_ = 0;
     std::optional<Probe> last_clean_;
     bool enter_rung_ = true;
+    bool cap_confirm_ = false;
     bool restore_pending_ = false;
     bool artifact_pending_ = false;
     Phase phase_ = Phase::kSeek;
