@@ -4631,3 +4631,14 @@ last_clean, re-arm the report clock, proceed to verify. Once per rung;
 blackout at safe power / during verify / recurring on the rung still
 aborts. The report-loss abort remains the outer safety net for a truly
 dead ground.
+
+**Pass 121 addendum 5 (same day, autonomous campaign).** v3 campaign
+(addenda 3+4): 8/10 done, spreads collapsed — rungs 0-5 and 7 now ZERO
+spread across runs (rung 7 settles honestly at 15 dBm; the v1 23s were
+the noise, not the 15s). The 2 remaining failures were both rung 6 (the
+one marginal rung left): seek blackout → retreat → verify at the retreat
+placement blacks out again → abort, because verify had no retreat path.
+Ruling: a blackout during VERIFY is a verify failure of total severity —
+take the addendum-2 bounded step-down (shared 3-descent budget, clock
+re-armed per descent) instead of aborting. Abort remains for no-floor /
+exhausted descents / truly dead ground.

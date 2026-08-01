@@ -1993,8 +1993,13 @@ feedback channel itself collapses; measured: 3/5 campaign runs aborted
 at rung 7 once the confirmation dwell stretched wall exposure past the
 3 s clock): the loop books the overload bracket, retreats to the last
 clean power, re-arms the report clock, and proceeds to verify — once per
-rung; a blackout at safe power, during verify, or recurring on the same
-rung aborts as before. Every exit — done, `CALIBRATE abort`,
+rung. A blackout **during verify** is a verify failure of total severity
+(Pass 121 addendum 5): it takes the addendum-2 bounded step-down (shared
+3-descent budget, clock re-armed per descent) instead of aborting —
+measured: retreat placements at a marginal rung can still black out
+under sustained exposure, and aborting there threw away a recoverable
+run. The abort remains for a blackout with no clean floor, exhausted
+descents, or a truly dead ground. Every exit — done, `CALIBRATE abort`,
 report-loss, hard cap, process death — converges on the same restore order:
 **power first** (a probe may sit on a rung's ceiling), then the boot
 `[min_profile, max_profile]` window, then the §10.4 resolve re-places the
