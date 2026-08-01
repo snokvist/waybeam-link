@@ -504,7 +504,7 @@ allowed to re-attempt it) would close this gap. Not implemented; needs its
 own §9 cascade design + bench validation before it's more than an idea.
 Tracked as a backlog placeholder in `docs/mcs-rung-lockout-plan.md`.
 
-### 4.9 Pass 118 per-packet radiotap MCS — **CODE COMPLETE, BENCH PENDING**
+### 4.9 Pass 118 per-packet radiotap MCS — **BENCH VERIFIED 2026-08-01**
 
 **Intent.** Retire the Pass-13 two-mechanism split so both air backends carry
 the PHY rate the same way (13-byte HT radiotap, per-packet MCS field), and
@@ -578,6 +578,49 @@ alone will populate the histogram but far too slowly to read.
    but this pass rebuilt the unicast prefix, so re-confirm `unicast_sent` vs
    `unicast_fallback` behaves as it did before. See the open Jaguar1 `BMC`
    question in §4.10 below.
+
+#### Bench results (2026-08-01, craft .232 SSC338Q/8812EU ↔ ground .242 x86 EU+CU, ch 5805/HT20, 1 dBm floor)
+
+- **A0 `ssc338q`** — green, zero warnings (OpenIPC toolchain via
+  `WBLINK_SSC338Q_TOOLCHAIN`; the cmake sibling-checkout default does not
+  resolve in a coordination-submodule layout). Dev gate re-run at merge:
+  50/50, ASan+UBSan; dashboard 12/12.
+- **A1 PASS, positively.** Kernel-monitor: pinning 2→5 moved the ground
+  histogram mass in lockstep (delta `[0,0,396,0,0,43756,0,0]`, residual =
+  pre-transition frames). Devourer (`air.kind:"radio"`, EU on bus 1-1):
+  2→5→7 tracked interval-to-interval on both ground adapters. **Sharp
+  variant run** — throwaway diag build committing `SetTxMode` at MCS0 while
+  radiotap carried the rung: at pin 7 the receiver counted ~22k frames in
+  bucket 7 and **zero** at bucket 0 on both adapters. Radiotap is
+  authoritative on Jaguar3; the lockstep fallback was never consulted.
+- **A2 PASS** — `rx_mcs_unknown` = 0 everywhere, all backends, all runs
+  (including the craft's own MonAir RX of the ground uplink: 445/445 at
+  MCS0). The rtl88x2eu/rtl88x2cu monitor drivers emit a parseable radiotap
+  MCS field on every accepted frame.
+- **A3 PASS** — `sum(rx_mcs)+rx_mcs_unknown == rx` held on every snapshot
+  sampled across both backends, both adapters, all rungs.
+- **A4 PASS both directions** — Pass-118 craft ↔ pre-118 ground and
+  pre-118 craft ↔ Pass-118 ground: video unaffected (loss_post 4–5‰, same
+  as the 5‰ baseline), old node emits no `rx_mcs`, new ground resolves the
+  old craft's frames (`unknown` 0).
+- **A5 PASS** — loss_post 3–6‰ at MCS2 across old/old, new/new and mixed;
+  delivered rates unchanged. No airtime movement.
+- **A6 NOT RUN** — the operating ground is MonAir (EU uplink + CU
+  diversity); no Jaguar1 in the config and unicast return is a RadioAir
+  path. Needs a devourer ground bring-up; carried in §4.10.
+
+**§4.10 PER-numerator follow-up: measured, and it is closed on this fleet.**
+The Pass-119 B1 capability probe (see `docs/per-mcs-per-ladder-plan.md`
+findings) found **no path that delivers bad-FCS frames to userspace** on the
+fleet-default chips: rtl88x2cu accepts `fcsfail` (both `otherbss fcsfail`
+and alone, rc 0) but delivered 0 bad-FCS in 126k frames across 5805/5180/
+2412 including busy residential 2.4 GHz (FLAGS field present on 100% of
+frames, so the bit path exists); devourer `rx.keep_corrupted` is plumbed
+Jaguar1/Jaguar2 only, and Jaguar3's `monitor_rx_cfg` writes RCR
+`0xF410400F` with ACRC32/AICV **clear** — its own comment claims otherwise
+— with 0 corrupted deliveries in ~22k ambient frames when the flag was
+requested. The CRC-error numerator is blocked pending upstream/driver work,
+on both backends.
 
 #### 4.10 Follow-ups this pass opened
 
