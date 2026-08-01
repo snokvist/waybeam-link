@@ -1477,7 +1477,11 @@ count for that frame MUST be at least
 `ceil(16 * configured_class_rate_permille / 1000)`, in addition to the
 configured `fec.min_r` floor. This lower bound applies after either the fixed
 policy or a §14.2 enforced override selects parity; zero configured class rate
-adds no protection. It therefore supplies the same erasure depth the configured
+adds no protection. The §14.1 ARQ-only `k <= fec.min_k` gate has higher
+precedence and MUST NOT be overridden. If the requested floor cannot satisfy
+the absolute `k+r <= 256` codec limit, the existing §14.1 source-only fallback
+also has higher precedence and the guard MUST NOT recreate parity. It therefore
+supplies the same erasure depth the configured
 rate would have produced at `k=16` without fragmenting the same data into extra
 source packets. FEC-disabled streams and genuinely small frames that already
 have `k < 16` at Default are unchanged. Implementations count frames where the

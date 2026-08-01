@@ -4768,6 +4768,12 @@ zero-rate classes are unchanged. Count actuations in `mtu_fec_guard_frames`.
 This preserves most of the packet/CPU gain while providing greater erasure
 robustness than the literal source-symbol clamp.
 
+**Merge-review addendum.** Pass 124 is subordinate to two existing §14.1
+hard gates. It does not resurrect parity for an ARQ-eligible `k <= min_k`
+frame, and it does not recreate a block rejected because configured `min_r`
+would make `k+r > 256`. Regression cases cover High-mode `k=10,min_k=10`
+under all-frame ARQ and `k=10,min_r=255`; both remain source-only.
+
 **Review addendum.** Two authority seams are part of the same merge gate. The
 craft resets MTU to Default on every newly accepted authenticated CSA campaign,
 not only when `latched_issuer` changes: a rebooted ground may reuse the same

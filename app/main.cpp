@@ -2450,6 +2450,7 @@ struct TxCore {
         (void)apply_command(vcmd_id::kMtuTier, mtu_tier::kDefault, 0);
     }
     uint16_t mtu_effective() const {
+        // max_payload_for() is already the profile/negotiated intersection.
         return max_payload_for(selector_.profile_id());
     }
     uint16_t mtu_requested() const { return negotiated_packet_budget_; }

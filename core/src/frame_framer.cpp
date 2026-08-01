@@ -128,11 +128,17 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     if (jumbo_fec_guard) {
         const uint32_t rate =
             is_idr ? cfg_.fec.i_rate_permille : cfg_.fec.p_rate_permille;
+        const bool arq_only =
+            k <= cfg_.fec.min_k && (idr_arq || pframe_arq);
+        const uint32_t cap = kFecMaxSymbols - k;
         const uint16_t guard_r = static_cast<uint16_t>(std::max<uint32_t>(
             cfg_.fec.min_r,
             (mtu_tier::kFecProtectionK * rate + 999u) / 1000u));
-        if (rate != 0 && r < guard_r) {
-            r = guard_r;  // k<16, so k+r remains far below the GF(256) cap
+        // The guard is subordinate to §14.1's ARQ-only min_k gate and its
+        // absolute GF(256) capacity check. In particular, do not resurrect a
+        // block which repair_count() rejected because min_r was impossible.
+        if (rate != 0 && !arq_only && guard_r <= cap && r < guard_r) {
+            r = guard_r;
             ++stats_.mtu_fec_guard_frames;
         }
     }

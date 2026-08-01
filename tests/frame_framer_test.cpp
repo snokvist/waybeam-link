@@ -287,6 +287,46 @@ int main() {
         CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames, 0u);
     }
 
+    // The jumbo guard cannot override the ARQ-only min_k gate. This remains
+    // source-only even though Default sizing would have produced k >= 16.
+    {
+        FrameFecConfig fec;
+        fec.scheme = FecScheme::kRlc256;
+        fec.p_rate_permille = 200;
+        fec.min_k = 10;
+        fec.min_r = 2;
+        Harness h(fec, FrameArqMode::kAllFrames);
+        h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
+        h.framer.set_negotiated_packet_budget(mtu_tier::kHighBudget);
+        h.feed(make_frame(30000 - kVencFrameMetaSize, false, 61));
+        CHECK_EQ_U(source_count(h.sent), 10u);
+        CHECK_EQ_U(h.framer.stats().repair_symbols, 0u);
+        CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames, 0u);
+        for (const Sym& sym : h.sent) {
+            CHECK(!sym.is_repair());
+            CHECK((sym.hdr.data_flags & data_flags::kPframeArq) != 0);
+        }
+    }
+
+    // An impossible min_r remains the existing §14.1 source-only fallback;
+    // Pass 124 must not recreate an invalid k+r > 256 block after rejection.
+    {
+        FrameFecConfig fec;
+        fec.scheme = FecScheme::kRlc256;
+        fec.p_rate_permille = 200;
+        fec.min_k = 3;
+        fec.min_r = 255;
+        Harness h(fec);
+        h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
+        h.framer.set_negotiated_packet_budget(mtu_tier::kHighBudget);
+        h.feed(make_frame(30000 - kVencFrameMetaSize, false, 62));
+        CHECK_EQ_U(source_count(h.sent), 10u);
+        CHECK_EQ_U(h.framer.stats().repair_symbols, 0u);
+        CHECK_EQ_U(h.framer.stats().fec_oversize_k, 1u);
+        CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames, 0u);
+        CHECK_EQ_U(h.sent.size(), 10u);
+    }
+
     {
         FrameFecConfig fec;
         fec.scheme = FecScheme::kRlc256;
