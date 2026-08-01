@@ -111,6 +111,10 @@ class RadioAir {
         // drop — always 0 for broadcast, meaningful for unicast uplink).
         uint64_t tx_reports = 0;
         uint64_t tx_report_fails = 0;
+        // §15.3 Pass 118: accepted frames per HT MCS 0..7, plus the frames
+        // whose rate the backend could not resolve. Sums to rx_frames.
+        uint64_t rx_mcs[kRxMcsBuckets] = {};
+        uint64_t rx_mcs_unknown = 0;
         bool rx_dead = false;  // §15.3 Pass 101: RX thread exited (definitive)
     };
     AdapterCounters counters(size_t adapter) const;

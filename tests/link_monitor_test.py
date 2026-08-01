@@ -54,6 +54,24 @@ class DashboardSchemaTest(unittest.TestCase):
         for field in ("drop", "filtered", "kernel_drop"):
             self.assertIn(f"a.{field}", HTML)
 
+    def test_per_mcs_histogram_is_rendered(self):
+        # §15.3 Pass 118 buckets reach the dashboard...
+        for field in ("rx_mcs", "rx_mcs_unknown"):
+            self.assertIn(f"a.{field}", HTML)
+        # ...and the histogram is matched to the same adapter across
+        # snapshots, so the per-interval delta is not cross-adapter noise.
+        self.assertIn("find(p=>p.name===a.name)", HTML)
+
+    def test_per_mcs_histogram_degrades_on_legacy_node(self):
+        # A pre-Pass-118 node sends no rx_mcs; the panel must render nothing
+        # rather than an empty 8-bucket chart implying zero frames received.
+        self.assertIn('!Array.isArray(h)||h.length!==8)return ""', HTML)
+
+    def test_per_mcs_histogram_is_marked_advisory(self):
+        # The selector does not read these buckets; the dashboard must not
+        # imply they drive adaptation.
+        self.assertIn("does not read it", HTML)
+
     def test_stream_rate_matches_by_identity(self):
         self.assertIn("find(p=>p.stream_id===s.stream_id)", HTML)
 

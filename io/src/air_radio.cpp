@@ -64,10 +64,21 @@ std::string usb_path_of(libusb_device* dev) {
 struct RxFrame {
     uint8_t adapter;
     int8_t rssi;
+    uint8_t rx_mcs;             // §15.3 Pass 118, kRxMcsUnknown if unresolved
     uint32_t tsfl;
     uint32_t gen;               // flush generation at RX time (Pass 69)
     std::vector<uint8_t> data;  // §3.0 payload (802.11 header stripped)
 };
+
+// Realtek RX descriptor rate code -> HT MCS index. hal_com.h pins
+// DESC_RATEMCS0 = 0x0c (0..3 CCK, 4..11 legacy OFDM, 12.. HT), so anything
+// below 12 or above the §9.3 ladder is reported unresolved (§15.3).
+inline uint8_t desc_rate_to_mcs(uint16_t code) {
+    constexpr uint16_t kDescRateMcs0 = 0x0c;
+    if (code < kDescRateMcs0) return kRxMcsUnknown;
+    const uint16_t mcs = static_cast<uint16_t>(code - kDescRateMcs0);
+    return mcs < kRxMcsBuckets ? static_cast<uint8_t>(mcs) : kRxMcsUnknown;
+}
 
 }  // namespace
 
@@ -87,6 +98,9 @@ struct RadioAir::Impl {
         std::atomic<uint64_t> rx_dropped{0};
         std::atomic<int8_t> rssi_last{-128};
         std::atomic<bool> rx_dead{false};  // §15.3 Pass 101: RX loop exited
+        // §15.3 Pass 118 per-MCS accepted-frame histogram + unresolved bucket.
+        std::atomic<uint64_t> rx_mcs[kRxMcsBuckets] = {};
+        std::atomic<uint64_t> rx_mcs_unknown{0};
         uint64_t tx_submitted = 0;  // main-thread only
         uint64_t tx_failed = 0;
         // Bench-only synthetic-drop PRNG (RX-thread only; xorshift32).
@@ -98,6 +112,9 @@ struct RadioAir::Impl {
     std::vector<std::unique_ptr<Adapter>> adapters;
     size_t tx_idx = 0;
     uint16_t seq = 0;
+    // §3.0 Pass 118: the committed operating point, stamped into every
+    // frame's radiotap. set_tx_mode keeps SetTxMode in lockstep with it.
+    TxRate rate;
     std::vector<uint8_t> tx_buf;
 
     // devourer's machine-event sink (Logger::events()) defaults to stdout,
@@ -266,9 +283,16 @@ struct RadioAir::Impl {
         if (cfg.unicast_returns) {
             latch_sa(*d);
         }
+        const uint8_t rx_mcs = desc_rate_to_mcs(p.RxAtrib.data_rate);
+        if (rx_mcs < kRxMcsBuckets) {
+            a.rx_mcs[rx_mcs].fetch_add(1, std::memory_order_relaxed);
+        } else {
+            a.rx_mcs_unknown.fetch_add(1, std::memory_order_relaxed);
+        }
         RxFrame f;
         f.adapter = adapter_id;
         f.rssi = rssi;
+        f.rx_mcs = rx_mcs;
         f.tsfl = p.RxAtrib.tsfl;
         f.gen = flush_gen.load(std::memory_order_acquire);  // Pass 69
         f.data.assign(d->payload, d->payload + d->payload_len);
@@ -467,8 +491,9 @@ size_t RadioAir::inject(const uint8_t* frame, size_t len) {
     Impl& im = *impl_;
     Impl::Adapter& tx = *im.adapters[im.tx_idx];
     im.tx_buf.resize(kDot11TxPrefixLen + len);
-    dot11_tx_prefix(im.tx_buf.data(), im.cfg.stamp_net_id, im.cfg.originator,
-                    static_cast<uint8_t>(im.tx_idx), im.seq++);
+    dot11_tx_prefix(im.tx_buf.data(), im.rate, im.cfg.stamp_net_id,
+                    im.cfg.originator, static_cast<uint8_t>(im.tx_idx),
+                    im.seq++);
     std::memcpy(im.tx_buf.data() + kDot11TxPrefixLen, frame, len);
     ++tx.tx_submitted;
     if (tx.dev->send_packet(im.tx_buf.data(), im.tx_buf.size())) {
@@ -482,7 +507,7 @@ size_t RadioAir::inject_resend(const uint8_t* frame, size_t len) {
     Impl& im = *impl_;
     Impl::Adapter& tx = *im.adapters[im.tx_idx];
     im.tx_buf.resize(kDot11TxUrgentPrefixLen + len);
-    dot11_tx_prefix_urgent(im.tx_buf.data(), im.cfg.stamp_net_id,
+    dot11_tx_prefix_urgent(im.tx_buf.data(), im.rate, im.cfg.stamp_net_id,
                            im.cfg.originator, static_cast<uint8_t>(im.tx_idx),
                            im.seq++);
     std::memcpy(im.tx_buf.data() + kDot11TxUrgentPrefixLen, frame, len);
@@ -505,8 +530,8 @@ size_t RadioAir::inject_return(uint16_t dest_originator, const uint8_t* frame,
     }
     Impl::Adapter& tx = *im.adapters[im.tx_idx];
     im.tx_buf.resize(kDot11TxUnicastPrefixLen + len);
-    dot11_tx_prefix_unicast(im.tx_buf.data(), sa, im.cfg.stamp_net_id,
-                            im.cfg.originator,
+    dot11_tx_prefix_unicast(im.tx_buf.data(), im.rate, sa,
+                            im.cfg.stamp_net_id, im.cfg.originator,
                             static_cast<uint8_t>(im.tx_idx), im.seq++,
                             urgent ? kUrgentTid : 0);
     std::memcpy(im.tx_buf.data() + kDot11TxUnicastPrefixLen, frame, len);
@@ -547,6 +572,7 @@ int RadioAir::poll_once(int timeout_ms, const RxCb& cb) {
         AirRxMeta meta;
         meta.adapter_id = f.adapter;
         meta.rssi = f.rssi;
+        meta.rx_mcs = f.rx_mcs;
         meta.tsf_us = f.tsfl;
         cb(meta, f.data.data(), f.data.size());
         ++delivered;
@@ -567,6 +593,16 @@ int RadioAir::wait_fd() const { return impl_->ready_fd; }
 size_t RadioAir::rx_adapters() const { return impl_->adapters.size(); }
 
 void RadioAir::set_tx_mode(uint8_t mcs, bool sgi) {
+    // §3.0 Pass 118: radiotap is authoritative — this is what every injected
+    // frame now carries.
+    impl_->rate.mcs = mcs;
+    impl_->rate.sgi = sgi;
+    impl_->rate.bw = 20;  // §1 craft constraint: HT20 only in v0
+    // ...and SetTxMode stays committed in lockstep as the fallback-only
+    // default. Devourer consults it solely for frames whose radiotap carries
+    // no rate, so it never fires on a healthy path; what it buys is that a
+    // malformed prefix degrades to the committed operating point instead of
+    // silently airing the link at the driver's legacy 6M default.
     devourer::TxMode m;
     m.mode = devourer::TxMode::Mode::HT;
     m.ht_mcs = mcs;
@@ -652,6 +688,10 @@ RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {
     c.rssi_last = a.rssi_last.load(std::memory_order_relaxed);
     c.tx_submitted = a.tx_submitted;
     c.tx_failed = a.tx_failed;
+    for (size_t i = 0; i < kRxMcsBuckets; ++i) {
+        c.rx_mcs[i] = a.rx_mcs[i].load(std::memory_order_relaxed);
+    }
+    c.rx_mcs_unknown = a.rx_mcs_unknown.load(std::memory_order_relaxed);
     if (a.tx) {  // reports only exist for the injecting adapter's frames
         c.tx_reports = impl_->tx_reports.load(std::memory_order_relaxed);
         c.tx_report_fails =

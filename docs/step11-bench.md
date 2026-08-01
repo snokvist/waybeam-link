@@ -503,3 +503,122 @@ dynamic. A temporary per-rung timeout/lockout after a loss-driven demote
 allowed to re-attempt it) would close this gap. Not implemented; needs its
 own §9 cascade design + bench validation before it's more than an idea.
 Tracked as a backlog placeholder in `docs/mcs-rung-lockout-plan.md`.
+
+### 4.9 Pass 118 per-packet radiotap MCS — **CODE COMPLETE, BENCH PENDING**
+
+**Intent.** Retire the Pass-13 two-mechanism split so both air backends carry
+the PHY rate the same way (13-byte HT radiotap, per-packet MCS field), and
+start measuring the rate frames actually arrive at. The second half is the
+point: `rx_mcs[8]` + `rx_mcs_unknown` per adapter (§15.3) is the *denominator*
+of a per-MCS PER ladder, and it costs no wire change because the rate is
+already recoverable at both receivers — radiotap bit 19 on kernel-monitor,
+`RxPacket.data_rate` on devourer. That makes the eventual PER ladder a §9
+change, not a §3 version bump, so it never needs a fleet lockstep redeploy.
+
+Nothing adaptive consumes it yet. §9.1/§9.2 demote/promote still run on the
+existing loss window and RSSI margin, unchanged.
+
+**Why it is safe to bench standalone.** Radiotap is injection-local and never
+transmitted, so no on-air byte moved and pre-/post-Pass-118 nodes interoperate
+in both directions. `SetTxMode` is still committed in lockstep at each §9.5
+transition (fallback-only — devourer consults it solely for frames whose
+radiotap carries no rate), so the failure mode of a malformed prefix is the
+committed operating point, not the driver's legacy 6M default.
+
+**What the dev gate already proves.** 50/50 suites, ASan+UBSan, no warnings:
+the 13-byte prefix byte layout for broadcast (NOACK) and the Pass-12 unicast
+return (TX_FLAGS clear, MCS still carried); RX MCS extraction gated on
+`HAVE_MCS`, rejecting an out-of-range index and an absent field; the §15.3
+golden pinned with distinct per-bucket values so array *ordering* is covered,
+not just the field's presence. The `ssc338q` cross-build was **not** run — the
+SigmaStar toolchain is absent from the dev container. Header-and-io only, no
+new dependencies, but unverified. Run it before merge.
+
+#### Bench plan
+
+Standard two-process rig from §1 (craft `role:"tx"`, ground diversity pair),
+`tools/rtp_feed.py` driving a real feed — the 1 Hz HEARTBEAT / 2 Hz ANNOUNCE
+alone will populate the histogram but far too slowly to read.
+
+1. **The radiotap rate is honoured on the devourer path.** The whole point of
+   the change, and the one thing the unit tests cannot show. On the ground
+   card's per-MCS panel (`tools/link_monitor.html`, "Link & adapters"), the
+   populated bucket must match the craft's committed rung. Drive a rung change
+   (§9.5 transition, or pin via `min_profile`/`max_profile`) and the mass must
+   move with it, interval to interval.
+
+   **This test is booby-trapped and must be run deliberately.** `SetTxMode` is
+   still committed in lockstep, so if devourer were ignoring our radiotap
+   entirely the link would *still* air the correct rate and every counter would
+   stay green. Confirm positively: the histogram tracks a rung change, and it
+   tracks it on the devourer backend specifically, not only on kernel-monitor.
+   A sharper variant if there is doubt — inject with radiotap MCS deliberately
+   disagreeing with the last `SetTxMode` commit and confirm the *radiotap* wins
+   at the receiver. That is a throwaway diagnostic build, not a config knob.
+
+2. **`rx_mcs_unknown` stays at zero** against a conforming peer on both
+   backends. Non-zero means the rate did not resolve: on kernel-monitor a
+   missing/!HAVE_MCS radiotap field, on devourer a rate code outside
+   `DESC_RATEMCS0..+7`. Either is a real finding about the driver, not noise.
+
+3. **The buckets sum to `rx`** on every adapter, every snapshot. Cheap
+   invariant, catches a miscount at the accept boundary.
+
+4. **Backward interop, both directions.** A Pass-118 craft against a
+   pre-Pass-118 ground and the reverse. Video must be unaffected in both — the
+   old node simply reports no `rx_mcs` and the dashboard renders no panel for
+   it (covered by a dashboard test, but worth seeing once on real hardware).
+
+5. **No airtime regression.** The prefix grew 10 → 13 bytes, which is host-side
+   only and never aired, so §14.2 estimates and measured throughput must be
+   unchanged. If they move, something is wrong with the buffer sizing rather
+   than the radio.
+
+6. **8812AU (Jaguar1) unicast return still ACKs.** Not caused by this change,
+   but this pass rebuilt the unicast prefix, so re-confirm `unicast_sent` vs
+   `unicast_fallback` behaves as it did before. See the open Jaguar1 `BMC`
+   question in §4.10 below.
+
+#### 4.10 Follow-ups this pass opened
+
+**The PER numerator is available and is not a sequence-gap inference.** Pass
+118 left the numerator open, reasoning that a sequence gap cannot carry the
+MCS the missing packet would have been aired at. That framing missed a cheaper
+source: `DEVOURER_RX_KEEP_CORRUPTED` (`DeviceConfig.h:85`, Jaguar1 + Jaguar2)
+passes FCS-failed frames to the host with `crc_err` set — and the *same* RX
+descriptor carries `data_rate`. A CRC-errored frame is therefore a measured
+loss at a known MCS, with no inference at all.
+
+Two honest limits before anyone plans around it. A corrupted frame's payload
+is untrustworthy, and the §3.0 SA filter reads bytes that may themselves be
+corrupted — so CRC-error attribution is biased toward *lightly* damaged
+frames and undercounts the badly damaged ones, which is precisely the tail
+that matters near a rung's cliff. And the flag is Jaguar1/Jaguar2 per its own
+comment; Jaguar3 (8812CU/EU, the fleet default) needs checking before this is
+assumed fleet-wide. Bench-measure the bias against known synthetic loss
+(`air.rx_drop_permille`) before trusting the ratio.
+
+**Other RX metadata devourer already parses and we discard.**
+`rx_pkt_attrib` (`RxPacket.h`) carries per-path `snr[4]` and `evm[4]`, plus
+`cfo_tail`; `GetRxQuality()` fuses them into a windowed snapshot with a
+passive noise floor (`rssi_dbm - snr_db`). We surface `rssi` only. EVM is the
+modulation-quality quantity that actually determines whether a given MCS
+decodes, which is a far more principled promote gate than the RSSI margin
+§9.4 uses today — and §4.8 is a recorded instance of RSSI-gated promote
+climbing straight back into a rung with a real 2-4% loss floor at -26 dBm.
+Worth scoping as its own pass.
+
+**Jaguar1 `BMC` hardcode (vendored, not ours to patch).** Jaguar3 derives the
+descriptor `BMC` bit from addr1's I/G bit (`RtlJaguar3Device.cpp:1981`);
+Jaguar1 hardcodes it to 1 (`RtlJaguarDevice.cpp:1156`) outside the NDPA path.
+If that reading is right, the Pass-12 unicast return is descriptor-marked
+broadcast on 8812AU, which would undercut its hardware ACK. Bench question,
+then an upstream report — never a local edit under `third_party/`.
+
+**Upstream NOACK.** OpenIPC/devourer PR #334 makes Jaguar3 honour
+`RADIOTAP_F_TX_NOACK`. In our vendored pin the flag is decorative (parsed into
+an unused local on Jaguar1, not parsed at all on Jaguar2/3); what actually
+suppresses ACK/retry on our broadcast frames is the broadcast DA. If #334
+lands, verify it is *gated* on the radiotap flag as its reviewer asked —
+applied unconditionally it would zero `RTS_DATA_RTY_LMT` on all frames and
+kill the Pass-12 unicast return's descriptor-driven retries.

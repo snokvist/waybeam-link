@@ -6,7 +6,7 @@
 // SOCK_RAW, exactly like wfb-ng. Pure POSIX → compiled unconditionally (a
 // devourer-free build still has a real RF path).
 //
-//   inject()    — mon_radiotap_ht(MCS) + the §3.0 dot11 header + wire packet,
+//   inject()    — radiotap_tx_ht(MCS) + the §3.0 dot11 header + wire packet,
 //                 send() on the TX adapter's raw socket (rate is per-packet in
 //                 the radiotap MCS field, not an out-of-band SetTxMode).
 //   poll_once() — drain frames the per-adapter RX threads queued (radiotap
@@ -139,6 +139,10 @@ class MonAir {
         int8_t rssi_last = -128;
         uint64_t tx_submitted = 0;
         uint64_t tx_failed = 0;
+        // §15.3 Pass 118: accepted frames per HT MCS 0..7, plus the frames
+        // whose rate the backend could not resolve. Sums to rx_frames.
+        uint64_t rx_mcs[kRxMcsBuckets] = {};
+        uint64_t rx_mcs_unknown = 0;
     };
     AdapterCounters counters(size_t adapter) const;
 

@@ -4417,3 +4417,85 @@ new ground shows "unknown" against an old craft rather than the answer. That
 is the intended degradation and the reason the flag exists, but it does mean
 the diagnostic only works once the craft side is updated — the ground alone is
 not enough.
+
+## Pass 118 — one rate mechanism, and the rate we received (2026-07-31)
+
+**Question.** OpenIPC/devourer PR #334 (honour `RADIOTAP_F_TX_NOACK` on
+Jaguar3) prompted an audit of what our radiotap actually does on the devourer
+path. Two findings, and they point the same way.
+
+First, our NOACK bit has never done anything through devourer.
+`IEEE80211_RADIOTAP_F_TX_NOACK` appears exactly once in the vendored tree —
+the constant's own definition. Jaguar1 parses TX_FLAGS into a local
+(`RtlJaguarDevice.cpp:951`) and never reads it; Jaguar2/3 do not parse the
+field at all. What actually suppresses ACK and retry on our broadcast frames
+is the §3.0 broadcast DA driving `BMC=1` in the descriptor, not the flag we
+set. The flag was decorative.
+
+Second — the useful half — devourer already honours a **per-packet radiotap
+MCS** on all three generations (`decode_radiotap_mcs_field`, shared by
+`RtlJaguarDevice.cpp:969` / `RtlJaguar2Device.cpp:1389` /
+`RtlJaguar3Device.cpp:1870`), and `TxMode` is documented as the default
+"applied when a frame's radiotap carries no rate" (`src/TxMode.h:6-11`). The
+capability the kernel-monitor backend was built around has been available on
+the devourer path the whole time; Pass 13 split the two backends on a
+constraint that no longer holds.
+
+**Ruling (operator, 2026-07-31).** Converge. Both backends prepend the
+13-byte HT radiotap with the per-packet MCS field; the Pass-13 two-mechanism
+split is retired. `SetTxMode` is **kept**, committed in lockstep at each §9.5
+transition, as a fallback-only default.
+
+Keeping it is not redundancy for its own sake. Devourer consults `TxMode`
+only for frames whose radiotap carries no rate, so on a healthy path it is
+never read and costs nothing on air. What it buys is the failure mode: a
+malformed radiotap prefix would otherwise drop the entire link to the
+driver's legacy default (MGN 6M) silently, at full airtime cost, with every
+local counter healthy. With the commit retained it degrades to the operating
+point we last chose. One source of truth for the rate, one bounded way to be
+wrong about it.
+
+**This changes no on-air byte.** Radiotap is an injection-local convention,
+never transmitted. Pre- and post-Pass-118 nodes interoperate in both
+directions, there is no §3.1 version event, and no table hash moves. That is
+what makes it safe to land ahead of the multi-rung work rather than inside
+it — the mechanism can be benched on its own.
+
+**Mechanism is per-packet; policy is not.** Every packet still carries the
+rung the §9.5 transition committed. This pass deliberately does not introduce
+per-packet rate divergence.
+
+**The RX half is the reason to do it now.** Threading the received MCS up
+from both backends — radiotap bit 19 on kernel-monitor, `RxPacket.data_rate`
+(`DESC_RATEMCS0 = 0x0c`, so `mcs = code - 12`) on devourer — costs one field
+on `AirRxMeta` and needs **no wire change**, because the rate a frame was
+aired at is already recoverable at the receiver on both paths. §15.3 gains a
+per-adapter `rx_mcs[8]` histogram plus `rx_mcs_unknown`, summing to `rx`.
+
+That matters more than it looks. It means a per-MCS PER ladder — the thing
+that would let adaptation act on measured per-rate degradation instead of
+RSSI as a proxy — is a §9 change and not a §3 wire-version bump, so it never
+needs a fleet lockstep redeploy. And because the selector already moves
+between rungs over time, samples start accumulating immediately, before any
+dual-rung capability exists.
+
+**Boundary.** `rx_mcs` is advisory: no control path reads it, the selector is
+untouched, and §9.1/§9.2 demote/promote still run on the existing loss window
+and RSSI margin exactly as before.
+
+**Residual — two, both deliberate.**
+
+The PER ladder has a denominator and no numerator. `rx_mcs` counts frames we
+*received* per MCS; PER needs the frames we *didn't*, and a sequence gap does
+not carry the MCS the missing packet would have been aired at. It can be
+inferred from the surrounding frames, but the inference is exactly wrong in
+the case that matters — a burst lost at a rung we just promoted to. Left open
+as a §9.2 question rather than guessed at here.
+
+Time-separated samples are confounded. Until per-packet rate divergence
+exists, per-MCS statistics compare rungs measured at different *times*, so
+channel drift is baked into any ladder derived from them. Simultaneous
+dual-rung transmission is what removes the confound, and that is gated on
+§9.5 having a mixed-rate airtime model at all — the derived-bitrate math and
+`airtime_budget_frac` assume one service rate, and `ht20_service_time_us()`
+takes a single `mcs`. Nothing here is a step toward assuming otherwise.
