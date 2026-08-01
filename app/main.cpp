@@ -936,6 +936,7 @@ uint8_t vcmd_id_for(const std::string& name) {
     if (name == "resolution") return vcmd_id::kResolution;
     if (name == "framing") return vcmd_id::kFraming;
     if (name == "mode") return vcmd_id::kMode;  // §11.7 Pass 105
+    if (name == "calibrate") return vcmd_id::kCalibrate;  // §10.6 Pass 120
     return 0;
 }
 
@@ -948,6 +949,7 @@ const char* vcmd_name_for(uint8_t id) {
         case vcmd_id::kResolution: return "resolution";
         case vcmd_id::kFraming: return "framing";
         case vcmd_id::kMode: return "mode";  // §11.7 Pass 105
+        case vcmd_id::kCalibrate: return "calibrate";  // §10.6 Pass 120
     }
     return "";
 }

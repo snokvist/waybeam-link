@@ -287,7 +287,7 @@ struct CalibrationPolicy {
     int probe_dwell_ms = 8000;
     int verify_dwell_ms = 15000;
     int report_loss_abort_ms = 3000;
-    int hard_cap_ms = 240000;
+    int hard_cap_ms = 1200000;
     std::string artifact_dir = "/etc/waybeam-link/calibration";
 };
 

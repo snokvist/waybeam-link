@@ -41,7 +41,7 @@ struct CalibrateParams {
     uint32_t probe_dwell_ms = 8000;
     uint32_t verify_dwell_ms = 15000;
     uint32_t report_loss_abort_ms = 3000;
-    uint32_t hard_cap_ms = 240000;
+    uint32_t hard_cap_ms = 1200000;
     uint8_t steer_tries = 4;
     // The §9.3 table's tx_power_level per MCS — the authored curve is the
     // level-4 baseline, so placements are compensated per §10.2.
