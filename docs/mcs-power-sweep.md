@@ -191,3 +191,42 @@ active. Interesting detail: MCS4 at 23 dBm survives (15‰) where MCS5 at the
 3. The §9.4 proposal above stands unchanged — tiering places the operating
    point; the banded gate + per-rung PER memory is what notices when the
    placement is wrong (range closes, curve mis-authored, different antenna).
+
+## Results — 2026-08-01, third session: live per-packet MCS mixing (devourer)
+
+Question: can individual packets be injected at different MCS, live, in the
+full running stack? Scratch build (never committed): `RadioAir::inject`
+round-robins the per-packet radiotap MCS over a fixed set while `SetTxMode`
+stays at the committed rung (5) and live video flows.
+
+**Mechanism: yes, cleanly.** Wide span {2,5,7}, 30 s dwells, ~70k frames:
+all three ground buckets filled at exactly ⅓ each (23160/21928/22862 vs
+23317 expected), zero leakage into other buckets, `rx_mcs_unknown` 0. The
+chip airs each frame at its own descriptor rate with no visible switching
+cost at 3.5k fps alternation.
+
+**Per-rate PER is compositional.** Each rate in the mix showed the PER it
+would have shown aired alone under the same conditions — confirmed by an
+immediate single-rung MCS5 control (stock binary, same bring-up): mixed
+MCS5 28–94‰ vs single-rung MCS5 39–100‰, while MCS2 stayed at 6–7‰ in the
+same dwells. The narrow-span {4,5,6} run reproduced the same shape (MCS4
+7–9‰, MCS5/6 elevated). No mixing-specific penalty was observed at either
+span; ±1-rung restriction is NOT required by the mechanism.
+
+Two riders that matter for using this:
+
+1. **The mix inherits each rate's own ceiling.** Elevated MCS5/6 loss in
+   these dwells was the overload edge, not switching — the runs landed at
+   −22..−27 dBm RSSI. A mixed set must sit inside the *intersection* of its
+   members' safe RSSI windows, which is exactly the operator's "mid-sized
+   TX power" rule; at −30 dBm the full {2,5,7} span was compositional.
+2. **Devourer's default TXAGC varies between bring-ups** — RSSI moved from
+   −30/−36 (previous session) to −22/−27 (this one) with no config change,
+   ~6 dB. Per-packet mixing (and single-rung operation, for that matter)
+   wants an authored §10.2 curve rather than the bring-up default, or the
+   operating point wanders toward a ceiling.
+
+Also observed both sessions: MCS5 runs lossier than MCS7 at the same power
+on this 8812EU — per-rung ceilings are not monotonic in rate order (echoes
+the MCS4-survives-where-MCS5-dies row above). Worth keeping in mind when a
+future selector assumes rung order = quality order near the top.
