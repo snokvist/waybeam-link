@@ -49,6 +49,18 @@
   .state-FAILSAFE{color:var(--bad)}.flag{padding:1px 5px;border-radius:4px;background:#40201f;color:#ff9d96;font:700 10px var(--mono)}
   [data-tip]{cursor:help;text-decoration:underline dotted #67717d;text-underline-offset:3px}
   .chart-wrap{height:180px;padding:6px 0}.chart-wrap canvas{width:100%;height:100%;display:block}
+  .mcs{display:grid;grid-template-columns:repeat(9,1fr);gap:3px;align-items:end;height:56px;margin-top:5px}
+  /* Baseline tick per column so an empty bucket reads as a measured zero
+     rather than as a bucket the panel simply did not draw. */
+  .mcs .bucket{display:flex;align-items:flex-end;height:100%;min-width:0;
+    background:linear-gradient(to top,var(--line) 0,var(--line) 1px,transparent 1px)}
+  .mcs .bar{width:100%;min-height:1px;border-radius:2px 2px 0 0;background:var(--cyan)}
+  .mcs .bucket.live .bar{background:var(--accent)}.mcs .bucket.unres .bar{background:var(--warn)}
+  .mcs .bucket.zero .bar{background:#30363d}
+  .mcs-x{display:grid;grid-template-columns:repeat(9,1fr);gap:3px;margin-top:3px;
+    color:var(--dim);font:10px var(--mono);text-align:center}
+  .mcs-x span.live{color:var(--accent);font-weight:700}.mcs-x span.unres{color:var(--warn)}
+  .mcs-cap{margin-top:5px;color:var(--dim);font:10px var(--mono)}
   .legend{display:flex;flex-wrap:wrap;gap:12px;color:var(--dim);font-size:10px}.key:before{content:"";display:inline-block;width:9px;height:2px;margin-right:5px;vertical-align:middle;background:var(--key)}
   .notice{padding:8px;border-left:3px solid var(--warn);background:#2a2415;color:var(--dim)}
   .empty{grid-column:1/-1;padding:50px;color:var(--dim);text-align:center}footer{padding:9px 16px;color:var(--dim);font-size:11px;border-top:1px solid var(--line)}
@@ -82,7 +94,9 @@ const tips={
  shmHealth:"Ingress producer-health extension marker. Unavailable is expected with a legacy producer and is not equivalent to zero drops",shmFull:"Complete frames dropped because the SHM ring was full. On ingress this is the producer counter delta since attach/reset when health is valid",shmThrottle:"Ingress producer bitrate clamp in permille. 1000 is unclamped; unavailable with a legacy producer",shmBig:"Egress only: frames too large for a SHM slot. n/a on ingress",shmBad:"Ingress only: corrupt SHM slots or consumer buffers too small",shmRingFull:"Ingress only: reads that found the ring completely full. This remains useful even when the producer reports no drop",
  nack:"NACK requests sent",rtt:"Largest observed NACK-to-retransmit round trip",recovery:"Largest first-NACK-to-recovery time",unique:"Unique packets accepted",
  diversity:"Duplicate packet copies observed across adapters",returnReports:"Feedback reports received / expected",window:"Return transmissions inside / outside the scheduled return window",
- unicast:"Return frames sent as unicast / broadcast fallback"};
+ unicast:"Return frames sent as unicast / broadcast fallback",
+ rxMcs:"Frames accepted by this adapter, bucketed by the HT MCS they arrived at (\u00a715.3). Advisory observation \u2014 the adaptive selector does not read it.",
+ rxMcsUnknown:"Accepted frames whose PHY rate could not be resolved to MCS 0-7: no radiotap MCS field, a non-HT rate code, or an index past the ladder"};
 Object.assign(tips,{sourceSymbols:"Source symbols emitted by frame-SHM TX fragmentation",repairSymbols:"Fixed-policy FEC repair symbols actually emitted",fecOversize:"Frames sent without FEC because k plus requested repairs exceeded GF(256) capacity",idrFrames:"Input frames whose VFRM metadata carried the IDR flag",arqFrames:"Frames stamped retransmit-eligible by the configured ARQ mode"});
 Object.assign(tips,{frameCount:"Whole frames successfully transferred at this local SHM boundary",frameBytes:"Total bytes in successful whole-frame SHM transfers",frameLast:"Most recent whole-frame SHM payload size",frameRange:"Minimum and maximum successful frame sizes since start or reset",frameMean:"Mean successful frame size since start or reset",frameInterval:"Host-monotonic time between the two latest whole-frame transfers",frameJitter:"Smoothed variation between successive whole-frame arrival intervals (1/16 EWMA)"});
 Object.assign(tips,{jsccBlocks:"Finalized RX blocks observed by the diagnostic loss estimator",jsccPredicted:"Source-symbol losses predicted before the latest block was observed",jsccObserved:"Actual post-diversity source-symbol losses in the latest finalized block",jsccUnder:"Blocks whose observed source-symbol loss exceeded the prior prediction",jsccParity:"Cumulative hypothetical parity selected by shadow prediction; active FEC is unchanged"});
@@ -100,10 +114,39 @@ function pushHistory(st,snap){const prev=st.last,dt=prev?(snap.t_ms-prev.t_ms)/1
     fec:delta(s.recovered_fec,p?.recovered_fec,dt)||0,arq:delta(s.recovered_arq,p?.recovered_arq,dt)||0,drops:delta((s.frames_unrecoverable||0)+(s.dropped_deadline||0)+(s.shm_full_drops||0),p?(p.frames_unrecoverable||0)+(p.dropped_deadline||0)+(p.shm_full_drops||0):null,dt)||0,age:snap.link?.report_age_ms||0,
     size:(s.frame_size_last||0)/1024,interval:(s.frame_interval_us||0)/1000,jitter:(s.frame_jitter_us||0)/1000});
     st.history=st.history.filter(x=>Date.now()-x.t<300000).slice(-600)} st.last=snap}
-function adaptersPane(snap){const rows=(snap.adapters||[]).map(a=>`<div class="row-card"><div class="row-head"><strong>${esc(a.name)}</strong>${a.tx_wedged?'<span class="flag">TX WEDGED</span>':''}${a.adapter_stalled?'<span class="flag">STALLED</span>':''}</div><div class="metric-grid">
+// §15.3 Pass 118 per-MCS received-frame histogram. Buckets 0..7 are the §9.3
+// ladder, the 9th is rx_mcs_unknown. Absent on a pre-Pass-118 node, which
+// renders nothing rather than an empty chart. Shows the frames arriving in
+// the latest interval when any moved, else the lifetime distribution — a
+// long-lived process would otherwise show only where the link has been, not
+// where it is. The highlighted bucket is link.mcs (on an RX card that is the
+// craft's rung from §3.15, so it should match where the frames land).
+function mcsHistogram(st,a,prev,link){
+ const h=a.rx_mcs;if(!Array.isArray(h)||h.length!==8)return "";
+ const life=[...h,a.rx_mcs_unknown||0],total=life.reduce((x,y)=>x+y,0);
+ const ph=Array.isArray(prev?.rx_mcs)&&prev.rx_mcs.length===8?[...prev.rx_mcs,prev.rx_mcs_unknown||0]:null;
+ let d=ph?life.map((v,i)=>Math.max(0,v-ph[i])):null;
+ // Hold the last interval that actually moved, the way deliveryRates holds
+ // the last computed rate: renderCard runs on tab clicks and tooltip
+ // unlocks too, and those re-render the SAME snapshot, so the raw delta is
+ // all-zero and the panel would silently flip back to the lifetime view.
+ if(d&&d.some(v=>v>0))st.mcsDeltas.set(a.name,d);else d=st.mcsDeltas.get(a.name)||null;
+ const moving=!!d,show=moving?d:life,max=Math.max(1,...show),live=link?.mcs;
+ const bars=show.map((v,i)=>{const unres=i===8,cls=(!unres&&i===live?" live":"")+(unres?" unres":"")+(v?"":" zero");
+  const name=unres?"unresolved rate":`MCS ${i}`;
+  return `<div class="bucket${cls}" title="${name}: ${life[i]} frames total${moving?`, ${d[i]} this interval`:""}"><div class="bar" style="height:${v?Math.max(3,Math.round(100*v/max)):0}%"></div></div>`}).join("");
+ const labels=[0,1,2,3,4,5,6,7,"?"].map((n,i)=>`<span class="${i===8?"unres":i===live?"live":""}">${n}</span>`).join("");
+ const top=life.indexOf(Math.max(...life));
+ const cap=total?`${fmt(total)} frames · ${life[8]?`${pct(Math.round(1000*life[8]/total))} unresolved · `:""}mostly ${top===8?"unresolved":`MCS ${top}`}${live!=null?` · selector reports MCS ${live}`:""}`
+   :"no frames received yet";
+ return `<div class="section"><div class="section-title"${tip("rxMcs")}>Received MCS ${moving?"(this interval)":"(lifetime)"}</div>
+  <div class="mcs">${bars}</div><div class="mcs-x">${labels}</div><div class="mcs-cap">${esc(cap)}</div></div>`}
+function adaptersPane(st,snap){const link=snap.link||{};const rows=(snap.adapters||[]).map(a=>{
+ const prev=st?.prev?.adapters?.find(p=>p.name===a.name);
+ return `<div class="row-card"><div class="row-head"><strong>${esc(a.name)}</strong>${a.tx_wedged?'<span class="flag">TX WEDGED</span>':''}${a.adapter_stalled?'<span class="flag">STALLED</span>':''}</div><div class="metric-grid">
   ${metric("RSSI best / mean",`${a.rssi_best||0} / ${a.rssi_mean||0}`,"rssi","dBm")}${metric("SNR",a.snr||0,"snr","dB")}${metric("Noise",a.noise||0,"noise","dBm")}
   ${metric("Received",fmt(a.rx),"rx")}${metric("Diversity duplicates",fmt(a.dup),"dup")}${metric("TX submitted",fmt(a.tx_submitted),"tx")}${metric("TX failed",fmt(a.tx_failed),"txFail","",a.tx_failed?"bad":"")}
-  ${metric("Queue drops",fmt(a.drop),"queueDrop","",a.drop?"bad":"")}${metric("Kernel drops",fmt(a.kernel_drop),"kernelDrop","",a.kernel_drop?"bad":"")}${metric("Filtered",fmt(a.filtered),"filtered")}${metric("TX reports",fmt(a.tx_reports),"reports")}</div></div>`).join("");
+  ${metric("Queue drops",fmt(a.drop),"queueDrop","",a.drop?"bad":"")}${metric("Kernel drops",fmt(a.kernel_drop),"kernelDrop","",a.kernel_drop?"bad":"")}${metric("Filtered",fmt(a.filtered),"filtered")}${metric("TX reports",fmt(a.tx_reports),"reports")}${metric("Unresolved RX rate",fmt(a.rx_mcs_unknown),"rxMcsUnknown")}</div>${mcsHistogram(st,a,prev,link)}</div>`}).join("");
   return rows||'<div class="notice">This process has no configured air adapters.</div>'}
 function streamsPane(st,snap,dt){return (snap.streams||[]).map(s=>{const p=streamPrev(st,s),d=delta(s.delivered,p?.delivered,dt),lp=s.loss_prediversity_milli||0,la=s.loss_postdiv_prearq_milli||0;
  if(d!=null)st.deliveryRates.set(s.stream_id,d);const heldRate=st.deliveryRates.get(s.stream_id);
@@ -137,11 +180,11 @@ function renderCard(st,force=false){if(st.locked&&!force){st.pending=true;return
  <div class="section"><div class="section-title">Return path</div><div class="metric-grid">${metric("Reports received / expected",`${fmt(ret.reports_received)}/${fmt(ret.reports_expected)}`,"returnReports")}${metric("Window hit / miss",`${fmt(ret.return_window_hits)}/${fmt(ret.return_window_misses)}`,"window")}${metric("Unicast / fallback",`${fmt(ret.unicast_sent)}/${fmt(ret.unicast_fallback)}`,"unicast")}</div></div>`;
  const roleText=rec.role==="loopback"?"TX+RX":rec.role;st.el.className="card"+(age>4000?" stale":"");st.el.innerHTML=`<div class="chead"><span class="role ${rec.role==='?'?'q':esc(rec.role)}" title="Observed adapter traffic direction; the stats schema does not report configured process mode">${esc(roleText)}</span><span class="identity"><span class="cname">${esc(rec.label||rec.src)}</span><span class="cid">${esc(rec.src)} · node ${snap.node} · session ${snap.session}</span></span><span class="dot ${age<1500?'ok':age<4000?'warn':'bad'}"></span><span class="age">${(age/1000).toFixed(1)}s</span></div>
  <nav class="tabs" aria-label="Metrics"><button class="tab ${tab==='overview'?'active':''}" data-tab="overview">Overview</button><button class="tab ${tab==='link'?'active':''}" data-tab="link">Link & adapters</button><button class="tab ${tab==='streams'?'active':''}" data-tab="streams">Streams</button><button class="tab ${tab==='frames'?'active':''}" data-tab="frames">Frame & SHM</button><button class="tab ${tab==='trends'?'active':''}" data-tab="trends">Trends</button></nav><div class="body">
- <section class="pane ${tab==='overview'?'active':''}" data-pane="overview">${overview}</section><section class="pane ${tab==='link'?'active':''}" data-pane="link"><div class="metric-grid">${metric("Selector state",`<span class="state state-${esc(link.state||'?')}">${esc(link.state||"?")}</span>`,"state")}${metric("Profile",link.profile??"-","profile")}${metric("MCS",link.mcs??"-","mcs")}${metric("TX power",dbm,"power","dBm")}${metric("Flap protection",link.flap_freeze?"FROZEN":"clear","flap")}${metric("Channel switch",esc(link.csa_state||"IDLE"),"csa")}</div><div class="section"><div class="section-title">Air interfaces</div><div class="row-list">${adaptersPane(snap)}</div></div></section>
+ <section class="pane ${tab==='overview'?'active':''}" data-pane="overview">${overview}</section><section class="pane ${tab==='link'?'active':''}" data-pane="link"><div class="metric-grid">${metric("Selector state",`<span class="state state-${esc(link.state||'?')}">${esc(link.state||"?")}</span>`,"state")}${metric("Profile",link.profile??"-","profile")}${metric("MCS",link.mcs??"-","mcs")}${metric("TX power",dbm,"power","dBm")}${metric("Flap protection",link.flap_freeze?"FROZEN":"clear","flap")}${metric("Channel switch",esc(link.csa_state||"IDLE"),"csa")}</div><div class="section"><div class="section-title">Air interfaces</div><div class="row-list">${adaptersPane(st,snap)}</div></div></section>
  <section class="pane ${tab==='streams'?'active':''}" data-pane="streams"><div class="row-list">${streamsPane(st,snap,dt)}</div></section><section class="pane ${tab==='frames'?'active':''}" data-pane="frames"><div class="row-list">${framesPane(snap)}</div></section><section class="pane ${tab==='trends'?'active':''}" data-pane="trends">${trendsPane(key)}</section></div>`;
  st.el.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{selectedTabs.set(key,b.dataset.tab);st.locked=false;st.lockReason="";renderCard(st,true)});if(tab==="trends")st.el.querySelectorAll("canvas").forEach(c=>drawChart(c,st.history,c.dataset.chart));st.prev=snap}
 function render(){let n=0;for(const st of instances.values()){n++;renderCard(st)}countEl.textContent=`${n} ${n===1?'instance':'instances'}`;empty.style.display=n?"none":"block"}
-function upsert(rec){for(const[k,old]of instances){if(k!==rec.key&&old.rec?.src===rec.src&&old.rec?.snap?.node===rec.snap?.node){old.el.remove();instances.delete(k);selectedTabs.delete(k)}}let st=instances.get(rec.key);if(!st){const el=document.createElement("article");grid.appendChild(el);st={el,history:[],last:null,prev:null,deliveryRates:new Map(),locked:false,lockReason:"",pending:false};
+function upsert(rec){for(const[k,old]of instances){if(k!==rec.key&&old.rec?.src===rec.src&&old.rec?.snap?.node===rec.snap?.node){old.el.remove();instances.delete(k);selectedTabs.delete(k)}}let st=instances.get(rec.key);if(!st){const el=document.createElement("article");grid.appendChild(el);st={el,history:[],last:null,prev:null,deliveryRates:new Map(),mcsDeltas:new Map(),locked:false,lockReason:"",pending:false};
   el.addEventListener("pointerover",e=>{if(e.target.closest("[data-tip]")){st.locked=true;st.lockReason="tooltip"}});
   el.addEventListener("pointerout",e=>{const t=e.target.closest("[data-tip]");if(t&&!t.contains(e.relatedTarget))unlock(st,"tooltip")});
   el.addEventListener("pointerdown",e=>{if(e.target.closest(".tab")){st.locked=true;st.lockReason="tab"}});
