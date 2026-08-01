@@ -4559,3 +4559,45 @@ receiver-referenced ceilings transfer regardless.
 selector's thresholds, §9.4's gate, or the channel. The per-rung ceiling
 table it persists is the *input* a future banded promote gate would
 consume — that gate is its own pass, not this one.
+
+## Pass 121 — calibration max-power seek (2026-08-01)
+
+**Trigger.** The first field run of the Pass 120 loop (craft 17, 50 m,
+live over RF) failed in a way the bench could not show: ground RSSI sat
+at −78…−85 for the whole run while the steer commanded power upward —
+an RF power cap latched below the commanded values ("RF CAP P0",
+operator-observed on-device), so the delivered power never followed and
+the target band (−32 ± 3) was unreachable regardless. Every rung would
+have "placed" at a commanded qdb the radio never emitted. The run was
+aborted over RF; no artifact was written (aborted runs never persist —
+the envelope held exactly as specced).
+
+**Ruling (operator direction).** Retire the target-band steer. The loop
+now seeks the **maximum power that does not break the link**, per rung:
+ramp upward in `seek_step_qdb` steps and stop at the first of two walls —
+the **loss wall** (report loss > `loss_bad_milli`: overload or break) or
+the **cap wall** (a commanded step of ≥ 2 dB moves report `rssi_mean` by
+< `cap_rise_db`: delivered power stopped following commanded power).
+Placement = one step below the wall; the wall's bracketing RSSIs ARE the
+overload-ceiling record, so the separate CEILING phase is deleted, not
+moved. A `rssi_guard_dbm` (−20) sanity bound keeps a too-close run out
+of the pure-overload regime. First-probe-already-bad descends until
+clean (floor `min_qdb`).
+
+**What this buys.**
+- The curve becomes "max deliverable clean power per rung" — maximal
+  link budget at range by construction, instead of "whatever landed at
+  −32 on the bench that day".
+- Commanded-vs-delivered divergence is *detected* (cap wall), not
+  recorded as fiction.
+- The calibration distance requirement collapses from a 50–100 m walk
+  to **near-bench, 2–10 m** — far enough that upper-rung overload
+  ceilings sit above the cap wall, close enough for a desk.
+
+**Unchanged.** Artifact shape, store, CRC-8 fingerprint, STALE gate,
+boot auto-load, §3.15 word, VCMD 0x08 semantics, the R4 restore order,
+and both abort clocks — this is an engine-phase change (SEEK→VERIFY per
+rung) plus spec text. §15.2 gains `seek_step_qdb`/`cap_rise_db`/
+`rssi_guard_dbm`; the retired band keys are ignored. The §10.2 level
+compensation stays: a tiered rung resolving below its own maximum is
+headroom, not error.

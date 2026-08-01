@@ -1934,17 +1934,38 @@ uplink bytes and no bulk transfer**: the artifact is born on the node that
 consumes it. Trigger and abort are §11.7 `CALIBRATE` (bound-issuer + PSK +
 nonce — the claim gate is the existing one).
 
-**Procedure.** For each rung in the §9.3 ladder: pin the rung (§9.7
-`min==max`), steer the TX adapter's power via `set_power_qdb` until the
-report `rssi_mean` lands in the target band (default −32 ± 3 dBm; config
-§15.2 `calibration.*`), verify report loss at the placement over a dwell,
-then probe upward in fixed steps until report loss crosses the bad
-threshold or the power cap — the bracketing RSSIs are the rung's **overload
-ceiling**. The loop steers on **post-diversity** loss (what LINK_REPORT
+**Procedure (Pass 121 — max-power seek; supersedes the Pass 120
+target-band steer).** For each rung in the §9.3 ladder: pin the rung (§9.7
+`min==max`), then ramp the TX adapter's power via `set_power_qdb` upward
+in `seek_step_qdb` steps (rung 0 from `min_qdb`; later rungs from one step
+below the previous rung's placement), evaluating each probe dwell against
+two walls. The **loss wall**: report loss crosses `loss_bad_milli` —
+overload or link break. The **cap wall**: a commanded step of ≥ 2 dB moves
+report `rssi_mean` by less than `cap_rise_db` — delivered power has
+stopped following commanded power (driver/regulatory caps latch silently;
+the artifact must never record commanded qdb the radio did not emit —
+observed live as the RF-cap event that voided the 50 m Pass 120 run).
+Placement = the last clean, responsive probe (one step below the wall); a
+ramp that reaches `max_qdb` clean places there. The wall's bracketing
+RSSIs **are** the rung's overload-ceiling record — there is no separate
+ceiling phase. If a rung's first probe is already past the loss wall the
+ramp descends until clean (floor `min_qdb`). A `rssi_guard_dbm` sanity
+bound (default −20) stops the ramp when reports land above it — beyond
+that the measurement sits inside the overload regime and adds no
+information. The loop evaluates **post-diversity** loss (what LINK_REPORT
 carries); at the placement and at the cliff this agrees with per-adapter
-wire PER (measured: adapters fail together in overload). Perform at
-**50–100 m craft–ground separation** for a flight-representative placement;
-a bench-range run validates tooling, never a flight curve.
+wire PER (measured: adapters fail together in overload).
+
+**Why not a target band (Pass 120, retired).** Steering to a fixed RSSI
+band bakes the calibration distance into the method: at range the band is
+unreachable, so every rung steers to the cap and the placement carries no
+information — and under a silent power cap the recorded qdb is fiction
+(both observed in the 50 m run). Max-power seek authors the **maximum
+deliverable clean power per rung** — maximal link budget at range by
+construction — and collapses the distance requirement to **near-bench
+(2–10 m)**: far enough that the upper rungs' overload ceilings sit above
+the cap wall, close enough for a desk. A 50–100 m walk is no longer part
+of the procedure.
 
 **Safety envelope (R4, Pass 120).** While running: the selector is frozen
 (the loop owns the pin); the channel is never touched; total runtime is
@@ -1981,10 +2002,12 @@ Failure *reason* and the full report are management-HTTP only (§15.5
 `GET /api/v1/calibration`). §15.3 `link` mirrors the word
 (`calib_state`, `calib_rung`, `calib_fingerprint`, `calib_stale`).
 
-**Forward validity.** The artifact's content is receiver-referenced
-(placement RSSI targets + per-rung ceilings), so it survives a backend move
-to devourer per-packet TX power unchanged — per-packet power is a finer
-actuator for the same targets, and per-rate diffs absorb chip-cal skew.
+**Forward validity.** The curve is actuator-referenced (max clean
+commanded power, verified delivered via the cap wall) and the ceilings are
+receiver-referenced (RSSI brackets), so the artifact survives a backend
+move to devourer per-packet TX power unchanged — per-packet power is a
+finer actuator for the same per-rung maxima, and per-rate diffs absorb
+chip-cal skew.
 
 ---
 
@@ -2473,7 +2496,7 @@ everything below is behaviour.
 | `0x05` | `RESOLUTION` | preset index 0..4 | Sets encoder resolution to `venc.command_presets.resolution[arg]` (a venc `video0.size` string, e.g. `"1280x720"`). `REJECTED` when the preset list is unconfigured, `arg` ≥ its length, `venc.enabled` is false, or the actuation path is not yet implemented (staged, Pass 71 — the venc-side knob is a venc-repo dependency) |
 | `0x06` | `FRAMING` | preset index 0..4 | Sets encoder framing mode to `venc.command_presets.framing[arg]` (a venc `video0.framing` string). Same `REJECTED` set as `RESOLUTION` (staged, Pass 71) |
 | `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
-| `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the loop is blind without LINK_REPORTs). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen — video quality degrades during; the operator chooses the moment (recommended: a hover at 50–100 m, §10.6) |
+| `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the loop is blind without LINK_REPORTs). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen — video quality degrades during; the operator chooses the moment (recommended: near-bench 2–10 m separation, §10.6 Pass 121) |
 | `0x09`–`0x1F` | *reserved* | — | not specified |
 
 **v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
@@ -3182,14 +3205,16 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   `copies`/`copy_interval_ms`/`ack_timeout_ms`/`retry_cap`; craft side:
   `echo_copies`/`min_interval_ms`). All §17 RE-DERIVE seeds. The channel shares
   `csa.psk`/the announced token (§11.4a) — there is no separate command key.
-- `policy.calibration` (craft/tx node, §10.6, Pass 120) seeds the
-  calibration loop; all defaults are the bench-validated values:
-  `target_rssi_dbm` (−32), `rssi_tol_db` (3), `loss_ok_milli` (15),
-  `loss_bad_milli` (50), `ceil_step_qdb` (16), `min_qdb`/`max_qdb`
-  (4/108), `settle_ms` (800), `probe_dwell_ms` (1200),
-  `verify_dwell_ms` (2500), `report_loss_abort_ms` (3000),
+- `policy.calibration` (craft/tx node, §10.6, Pass 120; seek keys
+  Pass 121) seeds the calibration loop; all defaults are the
+  bench-validated values: `loss_ok_milli` (15), `loss_bad_milli` (50),
+  `seek_step_qdb` (16), `cap_rise_db` (1), `rssi_guard_dbm` (−20),
+  `min_qdb`/`max_qdb` (4/108), `settle_ms` (800), `probe_dwell_ms`
+  (1200), `verify_dwell_ms` (2500), `report_loss_abort_ms` (3000),
   `hard_cap_ms` (600000),
-  `artifact_dir` ("/etc/waybeam-link/calibration").
+  `artifact_dir` ("/etc/waybeam-link/calibration"). The Pass 120
+  target-band keys (`target_rssi_dbm`, `rssi_tol_db`, `ceil_step_qdb`)
+  are retired and ignored.
   Dwells are short by design: the live video IS the measurement traffic
   (thousands of loss samples per second), so a dwell needs only TXAGC
   settle plus a couple of report windows — a full 8-rung run is ~2 min.
