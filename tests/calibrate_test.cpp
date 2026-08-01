@@ -24,18 +24,19 @@ int g_fail = 0;
 
 using namespace wblink;
 
-// The bench-measured channel: rssi ≈ -41 + 0.85*dBm, and each rung has an
-// overload ceiling RSSI above which loss goes to ~1000‰.
+// The bench-measured channel: rssi ≈ -41 + 0.85*dBm off the DELIVERED
+// power (cap_qdb models the silently-latched RF cap of Pass 121), and
+// each rung has an overload ceiling RSSI above which loss goes to ~1000‰.
 struct Channel {
     int32_t qdb = 0;
+    int32_t cap_qdb = 10000;  // default: no cap
+    std::array<int8_t, 8> ceil{127, 127, 127, -24, -24, -27, -30, -30};
     int8_t rssi() const {
-        return static_cast<int8_t>(-41 + 0.85 * (qdb / 4.0));
+        return static_cast<int8_t>(-41 +
+                                   0.85 * (std::min(qdb, cap_qdb) / 4.0));
     }
     uint16_t loss(uint8_t rung) const {
-        // Reachable within the model's power range (cap ≈ -18 dBm RSSI).
-        static constexpr int8_t kCeil[8] = {127, 127, 127, -19, -19,
-                                            -22, -26, -26};
-        return rssi() >= kCeil[rung] ? 900 : 5;
+        return rssi() >= ceil[rung] ? 900 : 5;
     }
 };
 
@@ -88,16 +89,21 @@ void test_full_run_and_artifact() {
     CHECK(r.restores == 1);
     CHECK(r.artifacts == 1);
     const CalibArtifact& a = r.cal.artifact();
+    // Pass 121 max-power seek against the model: rungs 0-2 ramp until the
+    // rssi_guard (-20) stops them; rungs 3-7 stop one step below their
+    // loss wall. Rung 3's first probe (from rung 2's placement - one
+    // step) is already past its wall, exercising the descend path.
+    static constexpr int32_t kWant[8] = {100, 100, 100, 68, 68, 52, 36, 36};
     for (int m = 0; m < 8; ++m) {
-        // Placement steered into the band around -32.
-        CHECK(a.placement_rssi[m] >= -36 && a.placement_rssi[m] <= -28);
+        CHECK(a.placement_qdb[m] == kWant[m]);
         CHECK(a.placement_loss_milli[m] <= 15);
         // §10.2 level compensation baked into the curve.
         CHECK(a.curve_qdb[m] ==
               a.placement_qdb[m] -
                   (int32_t(CalibrateParams{}.levels[m]) - 4) * 8);
     }
-    // Rungs with a model ceiling found it; MCS0-2 are cap-clean.
+    // Rungs with a model ceiling found it during the ramp; MCS0-2 are
+    // guard-stopped with no bad probe.
     CHECK(!a.ceilings[0].has_bad);
     CHECK(!a.ceilings[2].has_bad);
     for (int m = 3; m < 8; ++m) {
@@ -106,6 +112,23 @@ void test_full_run_and_artifact() {
     }
     // §3.15 word: done state, artifact hash is the app's business.
     CHECK((r.cal.word() & 0x03) == 2);
+}
+
+void test_cap_wall() {
+    // A silently-latched RF cap (the Pass 121 trigger): delivered power
+    // stops following commanded power at 13 dBm. No rung ever shows loss,
+    // yet every placement must land on the cap, not the commanded cap-max.
+    Rig r(fast_params());
+    r.ch.cap_qdb = 52;
+    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
+    CHECK(r.cal.start(r.now));
+    r.run(r.now + 590000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    const CalibArtifact& a = r.cal.artifact();
+    for (int m = 0; m < 8; ++m) {
+        CHECK(a.placement_qdb[m] == 52);
+        CHECK(!a.ceilings[m].has_bad);  // cap wall, not overload
+    }
 }
 
 void test_report_loss_abort() {
@@ -187,6 +210,7 @@ void test_selector_state_calib_word() {
 int main() {
     test_selector_state_calib_word();
     test_full_run_and_artifact();
+    test_cap_wall();
     test_report_loss_abort();
     test_hard_cap();
     test_abort_cmd();

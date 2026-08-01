@@ -2394,11 +2394,11 @@ struct TxCore {
     }
     void init_calibration(const CalibrationPolicy& c) {
         CalibrateParams p;
-        p.target_rssi_dbm = c.target_rssi_dbm;
-        p.rssi_tol_db = c.rssi_tol_db;
         p.loss_ok_milli = static_cast<uint16_t>(c.loss_ok_milli);
         p.loss_bad_milli = static_cast<uint16_t>(c.loss_bad_milli);
-        p.ceil_step_qdb = c.ceil_step_qdb;
+        p.seek_step_qdb = c.seek_step_qdb;
+        p.cap_rise_db = c.cap_rise_db;
+        p.rssi_guard_dbm = c.rssi_guard_dbm;
         p.min_qdb = c.min_qdb;
         p.max_qdb = c.max_qdb;
         p.settle_ms = static_cast<uint32_t>(c.settle_ms);

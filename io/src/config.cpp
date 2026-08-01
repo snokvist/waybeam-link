@@ -550,13 +550,15 @@ Result<Config> load_config_json(const std::string& json_text) {
             if (p.contains("calibration")) {  // §10.6 Pass 120
                 const json& pk = p.at("calibration");
                 CalibrationPolicy& cal = cfg.policy.calibration;
-                cal.target_rssi_dbm =
-                    pk.value("target_rssi_dbm", cal.target_rssi_dbm);
-                cal.rssi_tol_db = pk.value("rssi_tol_db", cal.rssi_tol_db);
+                // Pass 121: the Pass 120 band keys (target_rssi_dbm,
+                // rssi_tol_db, ceil_step_qdb) are retired and ignored.
                 cal.loss_ok_milli = pk.value("loss_ok_milli", cal.loss_ok_milli);
                 cal.loss_bad_milli =
                     pk.value("loss_bad_milli", cal.loss_bad_milli);
-                cal.ceil_step_qdb = pk.value("ceil_step_qdb", cal.ceil_step_qdb);
+                cal.seek_step_qdb = pk.value("seek_step_qdb", cal.seek_step_qdb);
+                cal.cap_rise_db = pk.value("cap_rise_db", cal.cap_rise_db);
+                cal.rssi_guard_dbm =
+                    pk.value("rssi_guard_dbm", cal.rssi_guard_dbm);
                 cal.min_qdb = pk.value("min_qdb", cal.min_qdb);
                 cal.max_qdb = pk.value("max_qdb", cal.max_qdb);
                 cal.settle_ms = pk.value("settle_ms", cal.settle_ms);

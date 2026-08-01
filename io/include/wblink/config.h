@@ -276,11 +276,11 @@ struct CmdPolicy {
 // §10.6 (Pass 120) craft-resident calibration seeds — mirrors
 // core CalibrateParams plus the artifact directory.
 struct CalibrationPolicy {
-    int target_rssi_dbm = -32;
-    int rssi_tol_db = 3;
     int loss_ok_milli = 15;
     int loss_bad_milli = 50;
-    int ceil_step_qdb = 16;
+    int seek_step_qdb = 16;  // Pass 121 max-power seek
+    int cap_rise_db = 1;
+    int rssi_guard_dbm = -20;
     int min_qdb = 4;
     int max_qdb = 108;
     int settle_ms = 800;

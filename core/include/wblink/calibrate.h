@@ -7,11 +7,15 @@
 // here touches a radio, a file, or a clock — app/ actuates through the §9.7
 // pin and §10.5 set_power_qdb seams and persists the artifact (io/).
 //
-// Per rung: STEER (probe-dwell, adjust power via a live qdb→RSSI slope fit
-// until report rssi_mean lands in the target band) → VERIFY (longer dwell,
-// record placement loss) → CEILING (step power up until report loss crosses
-// loss_bad_milli or the cap; the bracketing RSSIs are the rung's overload
-// ceiling) → back off to the placement, next rung.
+// Per rung (Pass 121 max-power seek): SEEK — ramp power upward in
+// seek_step_qdb steps until the first wall: loss wall (report loss >
+// loss_bad_milli), cap wall (a ≥2 dB commanded step moves rssi_mean by
+// < cap_rise_db — delivered power stopped following commanded), the
+// rssi_guard_dbm overload bound, or max_qdb. Placement = the last clean,
+// responsive probe; the wall's bracketing RSSIs ARE the overload-ceiling
+// record. Then VERIFY (longer dwell, record placement loss) → next rung,
+// starting one step below this placement. A first probe already past the
+// loss wall descends until clean (floor min_qdb).
 //
 // §10.6 safety envelope: report-loss abort (no accepted report for
 // report_loss_abort_ms), hard cap, and a single-shot `restore` action on
@@ -30,11 +34,11 @@
 namespace wblink {
 
 struct CalibrateParams {
-    int target_rssi_dbm = -32;  // §15.2 policy.calibration seeds
-    int rssi_tol_db = 3;
-    uint16_t loss_ok_milli = 15;
+    uint16_t loss_ok_milli = 15;  // §15.2 policy.calibration seeds
     uint16_t loss_bad_milli = 50;
-    int32_t ceil_step_qdb = 16;  // 4 dB per ceiling probe
+    int32_t seek_step_qdb = 16;  // 4 dB per seek probe (Pass 121)
+    int cap_rise_db = 1;         // < this rise on a ≥2 dB step = cap wall
+    int rssi_guard_dbm = -20;    // overload-regime sanity bound
     int32_t min_qdb = 4;         // 1 dBm
     int32_t max_qdb = 108;       // 27 dBm
     uint32_t settle_ms = 800;    // TXAGC settle + one report window
@@ -42,7 +46,6 @@ struct CalibrateParams {
     uint32_t verify_dwell_ms = 2500;
     uint32_t report_loss_abort_ms = 3000;
     uint32_t hard_cap_ms = 600000;
-    uint8_t steer_tries = 4;
     // The §9.3 table's tx_power_level per MCS — the authored curve is the
     // level-4 baseline, so placements are compensated per §10.2.
     std::array<uint8_t, 8> levels{4, 4, 3, 3, 2, 2, 1, 1};
@@ -90,12 +93,10 @@ class Calibrator {
         fail_reason_ = nullptr;
         artifact_ = {};
         rung_ = 0;
-        qdb_ = (p_.min_qdb + p_.max_qdb) / 2;
-        slope_ = 0.85;
-        prev_probe_.reset();
+        qdb_ = p_.min_qdb;  // Pass 121: rung 0 ramps from the floor
+        last_clean_.reset();
         enter_rung_ = true;
-        tries_ = 0;
-        phase_ = Phase::kSteer;
+        phase_ = Phase::kSeek;
         dwell_start_ms_ = 0;  // set when the pin/power action is emitted
         return true;
     }
@@ -151,31 +152,37 @@ class Calibrator {
         const uint16_t loss = loss_w_ ? static_cast<uint16_t>(
             std::min<uint64_t>(1000, loss_sum_ / loss_w_)) : 0;
         switch (phase_) {
-            case Phase::kSteer: {
-                if (prev_probe_ && prev_probe_->qdb != qdb_ &&
-                    rssi != prev_probe_->rssi) {
-                    const double d_dbm = (qdb_ - prev_probe_->qdb) / 4.0;
-                    slope_ = std::clamp(
-                        (rssi - prev_probe_->rssi) / d_dbm, 0.3, 2.0);
-                }
-                prev_probe_ = Probe{qdb_, rssi};
-                const double err = p_.target_rssi_dbm - rssi;
-                ++tries_;
-                if (std::abs(err) <= p_.rssi_tol_db ||
-                    tries_ >= p_.steer_tries) {
-                    phase_ = Phase::kVerify;
-                    begin_dwell(now_ms, p_.verify_dwell_ms);
+            case Phase::kSeek: {
+                auto& c = artifact_.ceilings[rung_];
+                if (loss > p_.loss_bad_milli) {  // loss wall
+                    if (!c.has_bad) {
+                        c.has_bad = true;
+                        c.first_bad_rssi =
+                            static_cast<int8_t>(std::lround(rssi));
+                    }
+                    if (last_clean_) {
+                        return place(a, now_ms, last_clean_->qdb);
+                    }
+                    if (qdb_ <= p_.min_qdb) {  // floor still bad: record it
+                        return place(a, now_ms, p_.min_qdb);
+                    }
+                    qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
+                    a.set_qdb = qdb_;
+                    begin_dwell(now_ms, p_.probe_dwell_ms);
                     return a;
                 }
-                const int32_t next = std::clamp<int32_t>(
-                    qdb_ + static_cast<int32_t>(err / slope_ * 4.0),
-                    p_.min_qdb, p_.max_qdb);
-                if (next == qdb_) {  // power-limited: accept the placement
-                    phase_ = Phase::kVerify;
-                    begin_dwell(now_ms, p_.verify_dwell_ms);
-                    return a;
+                c.last_clean_rssi = static_cast<int8_t>(std::lround(rssi));
+                // Cap wall: an upward ≥2 dB commanded step that the report
+                // RSSI did not follow — delivered power stopped tracking.
+                if (last_clean_ && qdb_ - last_clean_->qdb >= 8 &&
+                    rssi - last_clean_->rssi < p_.cap_rise_db) {
+                    return place(a, now_ms, last_clean_->qdb);
                 }
-                qdb_ = next;
+                last_clean_ = Probe{qdb_, rssi};
+                if (rssi > p_.rssi_guard_dbm || qdb_ >= p_.max_qdb) {
+                    return place(a, now_ms, qdb_);  // guard / cap-clean
+                }
+                qdb_ = std::min(p_.max_qdb, qdb_ + p_.seek_step_qdb);
                 a.set_qdb = qdb_;
                 begin_dwell(now_ms, p_.probe_dwell_ms);
                 return a;
@@ -186,12 +193,8 @@ class Calibrator {
                     static_cast<int8_t>(std::lround(rssi));
                 artifact_.placement_loss_milli[rung_] = loss;
                 placement_qdb_ = qdb_;
-                phase_ = Phase::kCeil;
-                ceil_qdb_ = qdb_;
-                return step_ceiling(a, now_ms, /*record=*/false, rssi, loss);
+                return next_rung(a, now_ms);
             }
-            case Phase::kCeil:
-                return step_ceiling(a, now_ms, /*record=*/true, rssi, loss);
         }
         return a;
     }
@@ -208,7 +211,7 @@ class Calibrator {
     }
 
   private:
-    enum class Phase : uint8_t { kSteer, kVerify, kCeil };
+    enum class Phase : uint8_t { kSeek, kVerify };
     struct Probe { int32_t qdb; double rssi; };
 
     void begin_dwell(uint64_t now_ms, uint32_t dwell_ms) {
@@ -217,35 +220,17 @@ class Calibrator {
         rssi_sum_ = 0; rssi_n_ = 0; loss_sum_ = 0; loss_w_ = 0;
     }
 
-    // One ceiling evaluation step. record=false on the first call (entering
-    // the phase from VERIFY — the verify dwell is the placement, not a
-    // probe). Emits the next probe power or advances to the next rung.
-    CalibActions step_ceiling(CalibActions a, uint64_t now_ms, bool record,
-                              double rssi, uint16_t loss) {
-        auto& c = artifact_.ceilings[rung_];
-        if (record) {
-            if (loss > p_.loss_bad_milli) {
-                c.has_bad = true;
-                c.first_bad_rssi = static_cast<int8_t>(std::lround(rssi));
-                return next_rung(a, now_ms);
-            }
-            c.last_clean_rssi = static_cast<int8_t>(std::lround(rssi));
-        } else {
-            c.last_clean_rssi = static_cast<int8_t>(std::lround(rssi));
-            (void)loss;
-        }
-        if (ceil_qdb_ >= p_.max_qdb) {
-            return next_rung(a, now_ms);  // cap-clean: no ceiling found
-        }
-        ceil_qdb_ = std::min(p_.max_qdb, ceil_qdb_ + p_.ceil_step_qdb);
-        a.set_qdb = ceil_qdb_;
-        begin_dwell(now_ms, p_.probe_dwell_ms);
+    // Seek hit a wall (or the cap/guard): drop to the placement power and
+    // enter the VERIFY dwell there.
+    CalibActions place(CalibActions a, uint64_t now_ms, int32_t qdb) {
+        qdb_ = qdb;
+        a.set_qdb = qdb_;
+        phase_ = Phase::kVerify;
+        begin_dwell(now_ms, p_.verify_dwell_ms);
         return a;
     }
 
     CalibActions next_rung(CalibActions a, uint64_t now_ms) {
-        // Back off the edge before anything else airs at this rung.
-        a.set_qdb = placement_qdb_;
         if (rung_ >= 7) {
             for (size_t m = 0; m < 8; ++m) {
                 artifact_.curve_qdb[m] =
@@ -259,11 +244,13 @@ class Calibrator {
             return a;
         }
         ++rung_;
-        qdb_ = placement_qdb_;  // neighbor rung placement starts nearby
-        tries_ = 0;
-        prev_probe_.reset();
-        phase_ = Phase::kSteer;
+        // Neighbor rungs' walls sit near each other: ramp from one step
+        // below the previous placement, not from the floor.
+        qdb_ = std::max(p_.min_qdb, placement_qdb_ - p_.seek_step_qdb);
+        last_clean_.reset();
+        phase_ = Phase::kSeek;
         a.pin_rung = rung_;
+        a.set_qdb = qdb_;
         begin_dwell(now_ms, p_.probe_dwell_ms);
         return a;
     }
@@ -299,16 +286,13 @@ class Calibrator {
     uint64_t loss_sum_ = 0;
     uint64_t loss_w_ = 0;
     uint8_t rung_ = 0;
-    uint8_t tries_ = 0;
     int32_t qdb_ = 0;
     int32_t placement_qdb_ = 0;
-    int32_t ceil_qdb_ = 0;
-    double slope_ = 0.85;
-    std::optional<Probe> prev_probe_;
+    std::optional<Probe> last_clean_;
     bool enter_rung_ = true;
     bool restore_pending_ = false;
     bool artifact_pending_ = false;
-    Phase phase_ = Phase::kSteer;
+    Phase phase_ = Phase::kSeek;
 };
 
 }  // namespace wblink
