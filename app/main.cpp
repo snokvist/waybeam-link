@@ -2739,9 +2739,24 @@ struct TxCore {
                 selector_.set_profile_pin(boot_min_profile_,
                                           boot_max_profile_);
             }
-            if (last_commit_mcs_ && !power_override_) {
-                resolve_and_apply_power(*last_commit_mcs_,
-                                        last_commit_level_);
+            if (power_override_) {
+                // §10.5: the latch owns power — re-assert it (probes wrote
+                // past it, so "skip the resolve" alone strands the last
+                // probe value on the hardware).
+                set_power_override(*power_override_);
+            } else if (has_power_curve()) {
+                if (last_commit_mcs_) {
+                    resolve_and_apply_power(*last_commit_mcs_,
+                                            last_commit_level_);
+                }
+            } else {
+                // No curve and no override (a failed first-ever run): no
+                // in-process authority knows the pre-run power. Leave the
+                // last probe value but say so loudly.
+                std::fprintf(stderr,
+                             "calibrate: restore has no power authority "
+                             "(no curve, no override) — TX power left at "
+                             "the last probe value\n");
             }
             std::fprintf(stderr, "calibrate: %s%s%s\n",
                          calibrator_->state() == CalibState::kDone

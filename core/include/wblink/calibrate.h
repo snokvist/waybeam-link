@@ -90,6 +90,10 @@ class Calibrator {
         state_ = CalibState::kRunning;
         started_ms_ = now_ms;
         last_report_ms_ = now_ms;  // armed; the 3 s clock runs from start
+        // An abort whose restore was not yet drained (abort → start between
+        // ticks) must not fire that restore mid-new-run.
+        restore_pending_ = false;
+        artifact_pending_ = false;
         fail_reason_ = nullptr;
         artifact_ = {};
         rung_ = 0;
@@ -180,7 +184,9 @@ class Calibrator {
         // dwell carries no evidence either way: hold at this power and let
         // the report clocks arbitrate (addendum 4 retreat, or abort).
         if (rssi_n_ == 0) {
-            begin_dwell(now_ms, p_.probe_dwell_ms);
+            begin_dwell(now_ms, phase_ == Phase::kVerify
+                                    ? p_.verify_dwell_ms
+                                    : p_.probe_dwell_ms);
             return a;
         }
         const double rssi = double(rssi_sum_) / rssi_n_;

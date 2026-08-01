@@ -277,6 +277,11 @@ void test_abort_cmd() {
     CHECK(!r.cal.tick(r.now + 200).restore);
     // A failed run can be restarted.
     CHECK(r.cal.start(r.now + 300));
+    // Abort → start with NO tick in between: the undrained restore must
+    // not fire mid-new-run.
+    CHECK(r.cal.abort(r.now + 400));
+    CHECK(r.cal.start(r.now + 500));
+    CHECK(!r.cal.tick(r.now + 600).restore);
 }
 
 void test_selector_state_calib_word() {
