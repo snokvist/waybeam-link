@@ -4672,6 +4672,33 @@ clamped. Profiles remain the coarse packet-rate policy and should target
 1000–1200 total DATA packets/s; FEC stays one frame per block and does not pad or
 merge frames to force an arbitrary 20–30 symbols.
 
-**Verification status.** Protocol-level only at amendment time. Host tests,
-cross-builds, and RTL8812EU/CU RF verification at 3072 are required by the
-implementation pass before this feature is called device-confirmed.
+**Verification status — device-confirmed (same day).** The implementation pass
+completed the 51-test host suite, SSC338Q/RK3566/x86 release builds, and the Hub
+2080-test suite. It was deployed lockstep with table version `0x80` to an
+SSC338Q + RTL8812EU craft, x86 ground with RTL8812EU uplink + RTL8812CU
+diversity, and an RK3566 + RTL8812CU spectator. Every active monitor netdev
+reported MTU 4052; ground Automatic resolved High, the authenticated command
+ACKed, and both issuer and craft reported 3072. The spectator exposed read-only
+capability state and rejected negotiation with HTTP 409 as required. Both x86
+and RK Hub menus exposed Default/Medium/High/Automatic.
+
+Matched 15 s RF samples used profile/MCS 5, a 21839 kb/s encoder target, and
+about 23.5 Mb/s delivered video. Vehicle CPU is process CPU from `/proc` at
+`CLK_TCK=100` (`perf` is not installed on the craft):
+
+| mode | budget | vehicle CPU | source + repair pps | all air submits/s | source + repair symbols/block | delivered | FEC recovered | unrecoverable |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Default | 1424 | 28.1% of one core | 2627 | 2684 | 20.41 + 4.35 | 23.39 Mb/s | 138 | 0 |
+| Medium | 2048 | 24.6% of one core | 1804 | 1860 | 14.12 + 3.01 | 23.53 Mb/s | 127 | 0 |
+| High | 3072 | 21.3% of one core | 1263 | 1319 | 9.95 + 2.00 | 23.52 Mb/s | 126 | 1 |
+
+High reduced link-process CPU by 24.2% relative and air submissions by 50.8%
+without decode errors. A longer High/Automatic observation accumulated 11514
+delivered frame-blocks, 806 FEC-recovered frames, one unrecoverable frame, zero
+decode errors, zero craft FEC-oversize frames, zero SHM-full drops, and no radio
+TX failure/wedge. The observed 1263 source+repair pps is close to, but slightly
+above, the 1000–1200 policy aim; reaching the strict band would require either a
+larger-than-v1 tier or less repair, so robustness remains preferred. The normal
+flight mode and its profile range were restored after the benchmark; Automatic
+remains selected, so the profile ceiling keeps low-rate profiles at 1424 and
+admits 3072 automatically when a jumbo-capable high-rate profile is active.
