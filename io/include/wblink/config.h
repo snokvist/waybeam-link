@@ -283,11 +283,11 @@ struct CalibrationPolicy {
     int ceil_step_qdb = 16;
     int min_qdb = 4;
     int max_qdb = 108;
-    int settle_ms = 4000;
-    int probe_dwell_ms = 8000;
-    int verify_dwell_ms = 15000;
+    int settle_ms = 800;
+    int probe_dwell_ms = 1200;
+    int verify_dwell_ms = 2500;
     int report_loss_abort_ms = 3000;
-    int hard_cap_ms = 1200000;
+    int hard_cap_ms = 600000;
     std::string artifact_dir = "/etc/waybeam-link/calibration";
 };
 

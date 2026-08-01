@@ -1948,8 +1948,8 @@ a bench-range run validates tooling, never a flight curve.
 
 **Safety envelope (R4, Pass 120).** While running: the selector is frozen
 (the loop owns the pin); the channel is never touched; total runtime is
-hard-capped (default 1200 s — a full 8-rung run at the default dwells is
-~10–15 min; the cap is a runaway backstop, not the expected duration). Every exit — done, `CALIBRATE abort`,
+hard-capped (default 600 s — a full 8-rung run at the default dwells is
+~2 min; the cap is a runaway backstop, not the expected duration). Every exit — done, `CALIBRATE abort`,
 report-loss, hard cap, process death — converges on the same restore order:
 **power first** (a probe may sit on a rung's ceiling), then the boot
 `[min_profile, max_profile]` window, then the §10.4 resolve re-places the
@@ -2473,7 +2473,7 @@ everything below is behaviour.
 | `0x05` | `RESOLUTION` | preset index 0..4 | Sets encoder resolution to `venc.command_presets.resolution[arg]` (a venc `video0.size` string, e.g. `"1280x720"`). `REJECTED` when the preset list is unconfigured, `arg` ≥ its length, `venc.enabled` is false, or the actuation path is not yet implemented (staged, Pass 71 — the venc-side knob is a venc-repo dependency) |
 | `0x06` | `FRAMING` | preset index 0..4 | Sets encoder framing mode to `venc.command_presets.framing[arg]` (a venc `video0.framing` string). Same `REJECTED` set as `RESOLUTION` (staged, Pass 71) |
 | `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
-| `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the loop is blind without LINK_REPORTs). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~10–15 min at default dwells (§10.6 hard cap 20 min) with the selector frozen — video quality degrades during; the operator chooses the moment (recommended: a hover at 50–100 m, §10.6) |
+| `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the loop is blind without LINK_REPORTs). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen — video quality degrades during; the operator chooses the moment (recommended: a hover at 50–100 m, §10.6) |
 | `0x09`–`0x1F` | *reserved* | — | not specified |
 
 **v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
@@ -3186,10 +3186,14 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   calibration loop; all defaults are the bench-validated values:
   `target_rssi_dbm` (−32), `rssi_tol_db` (3), `loss_ok_milli` (15),
   `loss_bad_milli` (50), `ceil_step_qdb` (16), `min_qdb`/`max_qdb`
-  (4/108), `probe_dwell_ms` (8000), `verify_dwell_ms` (15000),
-  `report_loss_abort_ms` (3000), `hard_cap_ms` (1200000),
+  (4/108), `settle_ms` (800), `probe_dwell_ms` (1200),
+  `verify_dwell_ms` (2500), `report_loss_abort_ms` (3000),
+  `hard_cap_ms` (600000),
   `artifact_dir` ("/etc/waybeam-link/calibration").
-- `scout` (ground/rx node, §15.5) configures the channel searcher:- `scout` (ground/rx node, §15.5) configures the channel searcher: `dwell_ms`
+  Dwells are short by design: the live video IS the measurement traffic
+  (thousands of loss samples per second), so a dwell needs only TXAGC
+  settle plus a couple of report windows — a full 8-rung run is ~2 min.
+- `scout` (ground/rx node, §15.5) configures the channel searcher: `dwell_ms`
   (base per-channel listen, **300 ms**; an occupied channel auto-extends until
   its first ANNOUNCE candidate resolves, §15.5a Pass 72) and `channels`
   (`null` = sweep `csa.channel_allowlist`). A

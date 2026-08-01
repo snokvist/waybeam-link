@@ -3631,11 +3631,13 @@ int run_tx(const Loaded& l) {
             const uint64_t slot_ms = now_us_it / 1000;
             if (selector_state_cadence.due(live_video_slot, slot_ms)) {
                 const SelectorState state = tx.selector_state(slot_ms);
-                uint8_t sf[kSelectorStateSize];
-                if (encode_selector_state(state, sf, sizeof(sf)) ==
-                    sizeof(sf)) {
+                // §10.6 Pass 120: the calib word makes this 36 bytes; the
+                // encoder returns the actual size for whichever flags are set.
+                uint8_t sf[kSelectorStateCalibSize];
+                const size_t sn = encode_selector_state(state, sf, sizeof(sf));
+                if (sn != 0) {
                     (void)selector_state_cadence.note_submitted(
-                        air.value->inject(sf, sizeof(sf)), slot_ms);
+                        air.value->inject(sf, sn), slot_ms);
                 }
             }
         }

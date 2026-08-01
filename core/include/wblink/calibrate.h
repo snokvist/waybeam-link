@@ -37,11 +37,11 @@ struct CalibrateParams {
     int32_t ceil_step_qdb = 16;  // 4 dB per ceiling probe
     int32_t min_qdb = 4;         // 1 dBm
     int32_t max_qdb = 108;       // 27 dBm
-    uint32_t settle_ms = 4000;   // ignore reports after a pin/power change
-    uint32_t probe_dwell_ms = 8000;
-    uint32_t verify_dwell_ms = 15000;
+    uint32_t settle_ms = 800;    // TXAGC settle + one report window
+    uint32_t probe_dwell_ms = 1200;
+    uint32_t verify_dwell_ms = 2500;
     uint32_t report_loss_abort_ms = 3000;
-    uint32_t hard_cap_ms = 1200000;
+    uint32_t hard_cap_ms = 600000;
     uint8_t steer_tries = 4;
     // The §9.3 table's tx_power_level per MCS — the authored curve is the
     // level-4 baseline, so placements are compensated per §10.2.
