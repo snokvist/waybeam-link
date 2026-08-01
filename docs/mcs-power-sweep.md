@@ -230,3 +230,65 @@ Also observed both sessions: MCS5 runs lossier than MCS7 at the same power
 on this 8812EU — per-rung ceilings are not monotonic in rate order (echoes
 the MCS4-survives-where-MCS5-dies row above). Worth keeping in mind when a
 future selector assumes rung order = quality order near the top.
+
+## Results — 2026-08-01, fourth session: closed-loop calibration (`tools/curve_author.py`)
+
+The "calibration feature" loop, validated end to end on the live rig
+(kernel-monitor craft): **calibrate → author → apply → acceptance-sweep**.
+
+`curve_author.py` pins each rung, steers craft TX power until the
+ground-reported RSSI lands in a target band (−32±3 — closed-loop, because
+open-loop dBm is untrustworthy: devourer bring-up TXAGC wanders ~6 dB),
+verifies wire PER at the placement, then probes upward for the rung's
+overload ceiling. Output: a §10.2 curve (level-4 baseline, compensated for
+the profile table's `tx_power_level` so the runtime resolve reproduces the
+placement) + a per-rung ceiling report (the future §9.4 banded-gate input).
+
+Run on the .232 8812EU at bench range: **all 8 rungs placed at 3 dBm /
+−33 RSSI, PER 0–11‰** — artifacts in `docs/data/curve-232eu-bench-20260801.*`.
+
+Measured ceilings (last-clean → first-bad RSSI, PER>50‰ threshold):
+
+| rung | ceiling bracket | note |
+|---|---|---|
+| MCS0–2 | clean to cap (−12) | no ceiling reachable at 27 dBm |
+| MCS3 | −15 → −12 (606‰) | |
+| MCS4 | −15 (36‰) → −12 (1000‰) | |
+| MCS5 | −18 (14‰) → −15 (997‰) | |
+| MCS6 | −22 (17‰) → −18 (52‰) | |
+| MCS7 | −22 (17‰) → −18 (170‰) | |
+
+**Acceptance sweep** (curve deployed as `power_map`, `--powers auto`, all 8
+rungs): resolve landed every rung at the calibrated 3 dBm, **PER 1–13‰
+across the entire ladder** — including MCS1/3/6 which the earlier sweeps
+skipped. Calibrate-once → always-apply works with zero runtime changes.
+
+**The MCS5 question, resolved: keep it.** On the kernel-monitor path,
+mid-band MCS5 is clean (3‰ at placement) and its ceiling (−15) is *higher*
+than MCS6/7's (−18). The hot-MCS5 anomaly from sessions 1–3 appeared only
+on the **devourer** path — consistent with per-rate TXAGC skew in the chip
+cal, which devourer's `SetTxPowerRateDiffs` exists to correct. Conclusion:
+don't drop MCS5 from mode catalogs; fix its per-rate power when the
+backend moves, and let per-device calibration data make the call per craft.
+
+### Productizing — operator direction (2026-08-01)
+
+- **Calibration as a feature**: integrate the loop into waybeam-link proper
+  (it already owns every primitive: profile pin, §10.5 power override, both
+  ends' stats), triggered from the waybeam-hub vehicle menu over the
+  existing REST surface. Run once per craft/ground pairing; persist curve +
+  ceiling report with the deploy config; **re-run when the pairing changes**
+  (craft adapter, ground adapter set, antennas). The artifact should carry a
+  pairing fingerprint (craft MAC/chip + ground adapter set + band) and the
+  runtime should surface CALIBRATION STALE when the live pairing mismatches
+  — detect drift, never guess (the mode-catalog fingerprint pattern).
+- **Perform calibration at ~50–100 m craft–ground separation** for a
+  flight-representative placement; the bench run above validates the loop,
+  not a flight curve. The receiver-referenced ceilings transfer across
+  range; the placement power is what the range realism buys.
+- **Devourer forward-validity**: the artifact is receiver-referenced
+  (placement RSSI band + per-rung ceilings), so it survives the backend
+  move unchanged — per-packet TX power just becomes a finer actuator for
+  hitting the same targets, and per-rate diffs absorb chip-cal skew.
+- Spec-first: the integrated feature needs a Pass (§10.2 authoring
+  procedure + calibration-state surfacing in §15.3) before code lands.
