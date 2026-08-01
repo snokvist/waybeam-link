@@ -4767,3 +4767,11 @@ the fixed or enforced §14.2 decision. Small frames, FEC-disabled streams, and
 zero-rate classes are unchanged. Count actuations in `mtu_fec_guard_frames`.
 This preserves most of the packet/CPU gain while providing greater erasure
 robustness than the literal source-symbol clamp.
+
+**Review addendum.** Two authority seams are part of the same merge gate. The
+craft resets MTU to Default on every newly accepted authenticated CSA campaign,
+not only when `latched_issuer` changes: a rebooted ground may reuse the same
+numeric originator while changing session and adapter capability. The generic
+`POST /vehicle/command` rejects `mtu_tier`; only the typed `/link/mtu` path and
+its internal post-claim reissue may start it, preserving local capability
+validation and preference bookkeeping.

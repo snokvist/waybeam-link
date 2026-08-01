@@ -1451,7 +1451,11 @@ ground resolves it to the minimum supported concrete tier across every active
 local injection adapter, treating an unknown capability as Default, then sends
 tier 0, 1, or 2. v1's supported Realtek injection backends declare High.
 
-The craft boots and becomes unbound at Default. An accepted §11.7 `MTU_TIER`
+The craft boots and becomes unbound at Default. It also resets to Default as
+soon as it accepts every new authenticated CSA claim, before that campaign's
+VERIFY window and even when the new claimant reuses the previous numeric
+originator; the committed ground reissues its preference after claim success.
+An accepted §11.7 `MTU_TIER`
 command changes `negotiated_packet_budget` at the **next frame/block boundary**;
 the current block remains byte-homogeneous. The framer starts with the ceiling:
 
@@ -3886,7 +3890,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/scout/start` | `{ "channels":[…]?, "dwell_ms":??, "mode":"list"\|"quickconnect", "target":{"originator":N}? }` | begin a channel sweep (§15.5a; ground/rx node) |
 | `POST /api/v1/scout/stop` | `{}` | end the sweep and hold the current channel |
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto `target_chan` (or the emptiest allowlisted channel) |
-| `POST /api/v1/vehicle/command` | `{ "cmd": "arq"\|"selector"\|"fps_ladder"\|"fps_select"\|"resolution"\|"framing"\|"mtu_tier", "arg": 0..4 }` | start a §11.7 command campaign toward the bound craft; returns `{ok, nonce}` immediately, poll the GET for the outcome (issuer/ground node) |
+| `POST /api/v1/vehicle/command` | `{ "cmd": "arq"\|"selector"\|"fps_ladder"\|"fps_select"\|"resolution"\|"framing", "arg": 0..4 }` | start a §11.7 command campaign toward the bound craft; returns `{ok, nonce}` immediately, poll the GET for the outcome (issuer/ground node). Commands with typed local safety/state, currently `MTU_TIER`, are rejected here and use their typed endpoint only |
 | `POST /api/v1/link/mtu` | `{ "mode": "default"\|"medium"\|"high"\|"auto" }` | set the ground-local §9.3a preference, resolve it, and start `MTU_TIER` immediately when a craft is bound; the preference is reissued after each successful claim. Returns 409 on a non-issuer node or while another command campaign is pending (issuer/ground node) |
 | `POST /api/v1/arq` | `{ "enabled": true\|false }` | RX-local NACK-emission gate (§6.4) — this node only, the craft is untouched (rx node) |
 | `POST /api/v1/link/fps` | `{ "ladder": true\|false }` | §9.11 ladder toggle (Pass 99); `true` = variable fps (the loop runs), `false` = static (the loop stops, fps holds). Routes through the same §11.7 `FPS_LADDER` transition as the over-air path; **MUT_LIVE**, no restart. `409` off a venc/TX node (TX/craft node) |
