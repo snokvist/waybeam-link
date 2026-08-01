@@ -3546,6 +3546,9 @@ int run_tx(const Loaded& l) {
             break;
         }
     }
+    // The last persisted artifact (boot-loaded or written this session) —
+    // GET /api/v1/calibration must never report a fingerprint with no body.
+    std::optional<CalibArtifact> last_artifact;
     tx.on_calib_artifact = [&](const CalibArtifact& art) {
         const std::string ident =
             calib_tx_adapter ? calib_identity(*calib_tx_adapter) : "udp";
@@ -3556,6 +3559,7 @@ int run_tx(const Loaded& l) {
                          l.cfg.policy.calibration.artifact_dir.c_str());
             return;
         }
+        last_artifact = art;
         PowerCurve c;
         for (size_t m = 0; m < 8; ++m) c.qdb[m] = art.curve_qdb[m];
         c.valid = true;
@@ -3578,6 +3582,7 @@ int run_tx(const Loaded& l) {
                              stored.value->fingerprint, ident.c_str());
             }
             tx.calib_fingerprint_ = stored.value->fingerprint;
+            last_artifact = stored.value->artifact;  // §15.5 GET surface
         } else {
             tx.calib_stale_ = true;  // §10.6: surface, never apply
             std::fprintf(stderr,
@@ -3818,6 +3823,9 @@ int run_tx(const Loaded& l) {
                     art = &tx.calibrator_->artifact();
                 }
             }
+            // The last persisted artifact serves whenever the current run
+            // has none to offer (boot-loaded, or a later run failed).
+            if (art == nullptr && last_artifact) art = &*last_artifact;
             return calib_store_json(st, rung, tx.calib_fingerprint_,
                                     tx.calib_stale_, reason, art);
         };
