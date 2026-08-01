@@ -67,6 +67,14 @@ def tx_total(stats):
     return sum(a.get("tx_submitted", 0) for a in stats.get("adapters", []))
 
 
+def craft_iw_dbm(host, ifname):
+    try:
+        out = sh_craft(host, f"iw dev {ifname} info | grep txpower")
+        return out.split("txpower")[1].strip().split()[0]
+    except Exception:  # noqa: BLE001 - observability only
+        return None
+
+
 def dwell_row(args, rung, dbm):
     c0, g0 = craft_stats(args.craft), ground_stats(args.ground)
     time.sleep(args.dwell)
@@ -74,7 +82,10 @@ def dwell_row(args, rung, dbm):
 
     tx_d = tx_total(c1) - tx_total(c0)
     row = {"rung": rung, "tx_dbm": dbm, "dwell_s": args.dwell,
-           "tx_frames": tx_d, "adapters": [], "streams": []}
+           "tx_frames": tx_d, "adapters": [], "streams": [],
+           "craft_link": {
+               "tx_power_qdb": c1.get("link", {}).get("tx_power_qdb"),
+               "iw_dbm": craft_iw_dbm(args.craft, args.ifname)}}
     prev = {a["name"]: a for a in g0.get("adapters", [])}
     for a in g1.get("adapters", []):
         p = prev.get(a["name"])
@@ -112,8 +123,9 @@ def fmt_row(row):
         f"{a['name']}: PER {a['per_milli'] if a['per_milli'] is not None else '?'}‰ "
         f"rssi {a['rssi_mean']} rx {a['rx_frames']}"
         for a in row["adapters"])
-    return (f"rung {row['rung']} @ {row['tx_dbm']:>2} dBm  "
-            f"tx {row['tx_frames']:>6}  {ads}")
+    pwr = (f"{row['tx_dbm']:>2} dBm" if row["tx_dbm"] != "auto" else
+           f"auto({row['craft_link'].get('iw_dbm')} dBm)")
+    return f"rung {row['rung']} @ {pwr}  tx {row['tx_frames']:>6}  {ads}"
 
 
 def main():
@@ -134,7 +146,10 @@ def main():
     args = ap.parse_args()
 
     rungs = [int(x) for x in args.rungs.split(",")]
-    powers = [int(x) for x in args.powers.split(",")]
+    # "auto" = don't touch txpower; the craft's own §10.2 curve resolve (or
+    # whatever is on the hardware) IS the power axis. One dwell per rung.
+    powers = ([("auto")] if args.powers == "auto" else
+              [int(x) for x in args.powers.split(",")])
     rlo, rhi = (int(x) for x in args.restore_profile.split(","))
 
     rows = []
@@ -143,7 +158,8 @@ def main():
             for rung in rungs:
                 craft_pin(args.craft, rung, rung)
                 for dbm in powers:
-                    craft_txpower(args.craft, args.ifname, dbm)
+                    if dbm != "auto":
+                        craft_txpower(args.craft, args.ifname, dbm)
                     time.sleep(args.settle)
                     row = dwell_row(args, rung, dbm)
                     rows.append(row)

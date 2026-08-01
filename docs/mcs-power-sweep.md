@@ -133,3 +133,61 @@ signal. Recovery after the sweep was immediate and clean on restore.
 5. **Re-run the sweep with the fleet `power_map` tiering active** to
    confirm shipped configs stay clear of the cliff at realistic ranges —
    this run bypassed tiering deliberately by forcing `iw` power.
+
+## Results — 2026-08-01, second session: §10.2 tiering active
+
+First finding before any dwell ran: **the operating vehicle config has no
+`power_map`, so the auto-table's power tiering never actuates on it.** The
+§9.3 table carries per-rung `tx_power_level` intent (4/4/3/3/2/2/1/1), but
+without a node-local §10.2 curve the commit resolve is a no-op — the craft
+airs every rung at whatever `iw` power was last set. The tiering the table
+is "calibrated" around is designed, implemented (verified below), and
+**not deployed**.
+
+With a curve loaded (`power_map` on the craft adapter; PHY_REG_PG-subset
+file, flat baseline B across MCS0–7), the resolve actuates exactly as
+specced — hardware stepped B−0/−2/−4/−6 dB with the committed rung
+(level 4→1). One dwell per rung, `--powers auto`:
+
+**Baseline 20 dBm** (curve authored clear of the cliff):
+
+| rung | applied | RSSI (eu) | PER eu/cu |
+|---|---|---|---|
+| MCS0 | 20 dBm | −23 | 14/12‰ |
+| MCS2 | 18 dBm | −25 | 8/5‰ |
+| MCS4 | 16 dBm | −27 | 4/5‰ |
+| MCS5 | 16 dBm | −27 | 3/3‰ |
+| MCS7 | 14 dBm | −30 | 6/2‰ |
+
+Every rung clean — a correctly authored curve + tiering places the whole
+ladder inside the safe RSSI band. The mechanism works.
+
+**Baseline 27 dBm** (the `txpower auto` driver default — what an uncurved
+node effectively flies at, minus the tiering it doesn't get):
+
+| rung | applied | RSSI (eu) | PER eu/cu |
+|---|---|---|---|
+| MCS0 | 27 dBm | −19 | 11/9‰ |
+| MCS2 | 25 dBm | −19 | 10/12‰ |
+| MCS4 | 23 dBm | −20 | 15/7‰ |
+| MCS5 | 23 dBm | −21 | **995/980‰** |
+| MCS7 | 21 dBm | −22 | **987/925‰** |
+
+The −6 dB level ladder cannot out-run a ~5 dB-wide cliff from a hot
+baseline: MCS5/7 are effectively dead at close range even with tiering
+active. Interesting detail: MCS4 at 23 dBm survives (15‰) where MCS5 at the
+*same power* is dead — the per-rung overload ceilings really are per-rung.
+
+### Consequences
+
+1. **Deploy gap to close:** vehicles need a `power_map` authored per
+   adapter class, or the table's calibration is fiction on kernel-monitor
+   nodes. (Bench craft: none was configured; the devourer A/B bench earlier
+   used one, which is where the "calibrated" impression came from.)
+2. **Authoring rule the sweep gives you:** pick the baseline so every rung's
+   landing RSSI at *minimum operating range* stays below its overload
+   ceiling (here: ≈ −25 dBm for MCS5/7). The sweep tool measures both
+   sides of that inequality directly.
+3. The §9.4 proposal above stands unchanged — tiering places the operating
+   point; the banded gate + per-rung PER memory is what notices when the
+   placement is wrong (range closes, curve mis-authored, different antenna).
