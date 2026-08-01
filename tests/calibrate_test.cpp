@@ -69,13 +69,16 @@ struct Rig {
     uint64_t now = 1000;
     int restores = 0;
     int artifacts = 0;
+    // Addendum 4: above this commanded power the feedback channel itself
+    // collapses — no reports are delivered at all.
+    int32_t blackout_above = 1 << 30;
 
     explicit Rig(const CalibrateParams& p) : cal(p) {}
 
     void run(uint64_t until_ms, bool feed_reports = true) {
         while (now < until_ms) {
             now += 100;
-            if (feed_reports && now % 100 == 0) {
+            if (feed_reports && ch.qdb <= blackout_above && now % 100 == 0) {
                 cal.on_report(ch.rssi_sample(),
                               ch.loss(pinned == 255 ? 0 : pinned), 300, now);
             }
@@ -190,6 +193,25 @@ void test_cap_confirm_rejects_noise() {
     CHECK(r.cal.artifact().placement_qdb[0] == 108);
 }
 
+void test_blackout_retreat() {
+    // Addendum 4: probing above 52 qdb kills the feedback channel (total
+    // overload — the v2 campaign's rung-7 report_loss aborts). The loop
+    // must book the wall, retreat to the last clean power, and finish.
+    Rig r(fast_params());
+    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
+    r.blackout_above = 52;
+    CHECK(r.cal.start(r.now));
+    r.run(r.now + 590000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    CHECK(r.restores == 1);
+    const CalibArtifact& a = r.cal.artifact();
+    for (int m = 0; m < 8; ++m) {
+        CHECK(a.placement_qdb[m] == 52);
+        CHECK(a.ceilings[m].has_bad);  // blackout booked as the bracket
+        CHECK(a.placement_loss_milli[m] <= 15);
+    }
+}
+
 void test_report_loss_abort() {
     Rig r(fast_params());
     CHECK(r.cal.start(r.now));
@@ -272,6 +294,7 @@ int main() {
     test_cap_wall();
     test_verify_backoff();
     test_cap_confirm_rejects_noise();
+    test_blackout_retreat();
     test_report_loss_abort();
     test_hard_cap();
     test_abort_cmd();

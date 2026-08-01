@@ -97,6 +97,7 @@ class Calibrator {
         last_clean_.reset();
         verify_descents_ = 0;
         cap_confirm_ = false;
+        blackout_used_ = false;
         enter_rung_ = true;
         phase_ = Phase::kSeek;
         dwell_start_ms_ = 0;  // set when the pin/power action is emitted
@@ -134,6 +135,22 @@ class Calibrator {
             return a;
         }
         if (now_ms - last_report_ms_ > p_.report_loss_abort_ms) {
+            // Addendum 4: a blackout while probing above the rung's last
+            // clean power is wall evidence (total overload kills the
+            // feedback channel itself) — retreat once, don't abort.
+            if (phase_ == Phase::kSeek && last_clean_ &&
+                qdb_ > last_clean_->qdb && !blackout_used_) {
+                blackout_used_ = true;
+                auto& c = artifact_.ceilings[rung_];
+                if (!c.has_bad) {
+                    c.has_bad = true;
+                    c.first_bad_rssi = static_cast<int8_t>(std::lround(
+                        rssi_n_ ? double(rssi_sum_) / rssi_n_
+                                : last_clean_->rssi));
+                }
+                last_report_ms_ = now_ms;  // re-arm at the safe power
+                return place(a, now_ms, last_clean_->qdb);
+            }
             finish(CalibState::kFailed, "report_loss", now_ms);
             a.restore = take_restore_();
             return a;
@@ -148,9 +165,14 @@ class Calibrator {
         if (dwell_start_ms_ == 0 || now_ms < dwell_end_ms_) {
             return a;
         }
-        // Dwell complete — evaluate with whatever samples arrived (the
-        // report-loss guard bounds "no samples at all").
-        const double rssi = rssi_n_ ? double(rssi_sum_) / rssi_n_ : -128.0;
+        // Dwell complete — evaluate with whatever samples arrived. A blank
+        // dwell carries no evidence either way: hold at this power and let
+        // the report clocks arbitrate (addendum 4 retreat, or abort).
+        if (rssi_n_ == 0) {
+            begin_dwell(now_ms, p_.probe_dwell_ms);
+            return a;
+        }
+        const double rssi = double(rssi_sum_) / rssi_n_;
         const uint16_t loss = loss_w_ ? static_cast<uint16_t>(
             std::min<uint64_t>(1000, loss_sum_ / loss_w_)) : 0;
         switch (phase_) {
@@ -277,6 +299,7 @@ class Calibrator {
         last_clean_.reset();
         verify_descents_ = 0;
         cap_confirm_ = false;
+        blackout_used_ = false;
         phase_ = Phase::kSeek;
         a.pin_rung = rung_;
         a.set_qdb = qdb_;
@@ -321,6 +344,7 @@ class Calibrator {
     std::optional<Probe> last_clean_;
     bool enter_rung_ = true;
     bool cap_confirm_ = false;
+    bool blackout_used_ = false;
     bool restore_pending_ = false;
     bool artifact_pending_ = false;
     Phase phase_ = Phase::kSeek;
