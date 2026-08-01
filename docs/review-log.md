@@ -4618,3 +4618,16 @@ Ruling: **verify enforces loss_ok_milli** — on failure, step down one
 seek_step_qdb and re-verify, bounded at 3 descents; a still-failing
 floor is recorded with its measured loss (the artifact never lies).
 Verify loss above loss_bad_milli also records the overload bracket.
+
+**Pass 121 addendum 4 (same day, autonomous campaign).** The addendum-3
+verification campaign failed 3/5 runs — all `report_loss`, all at rung 7.
+Mechanism: at a wall probe near total overload the feedback channel
+itself collapses (ground hears nothing, reports stop); a bad probe held
+~2 s in v1 (just under the 3 s abort), and the confirmation dwell
+doubled wall exposure past it. Ruling: a report blackout while probing
+ABOVE the rung's last clean power is the strongest possible wall
+evidence (loss = total), not a failure — book the bracket, retreat to
+last_clean, re-arm the report clock, proceed to verify. Once per rung;
+blackout at safe power / during verify / recurring on the rung still
+aborts. The report-loss abort remains the outer safety net for a truly
+dead ground.

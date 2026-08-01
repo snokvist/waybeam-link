@@ -1986,7 +1986,15 @@ of the procedure.
 **Safety envelope (R4, Pass 120).** While running: the selector is frozen
 (the loop owns the pin); the channel is never touched; total runtime is
 hard-capped (default 600 s — a full 8-rung run at the default dwells is
-~2 min; the cap is a runaway backstop, not the expected duration). Every exit — done, `CALIBRATE abort`,
+~2 min; the cap is a runaway backstop, not the expected duration). A
+report blackout **while probing above the rung's last clean power** is
+wall evidence, not failure (Pass 121 addendum 4 — at total overload the
+feedback channel itself collapses; measured: 3/5 campaign runs aborted
+at rung 7 once the confirmation dwell stretched wall exposure past the
+3 s clock): the loop books the overload bracket, retreats to the last
+clean power, re-arms the report clock, and proceeds to verify — once per
+rung; a blackout at safe power, during verify, or recurring on the same
+rung aborts as before. Every exit — done, `CALIBRATE abort`,
 report-loss, hard cap, process death — converges on the same restore order:
 **power first** (a probe may sit on a rung's ceiling), then the boot
 `[min_profile, max_profile]` window, then the §10.4 resolve re-places the
