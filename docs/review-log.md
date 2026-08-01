@@ -4499,3 +4499,63 @@ dual-rung transmission is what removes the confound, and that is gated on
 §9.5 having a mixed-rate airtime model at all — the derived-bitrate math and
 `airtime_budget_frac` assume one service rate, and `ht20_service_time_us()`
 takes a single `mcs`. Nothing here is a step toward assuming otherwise.
+
+## Pass 120 — craft-resident link calibration (2026-08-01)
+
+**Question.** The bench sessions on PR #81 validated a closed-loop
+calibration (place every rung in a target RSSI band, measure per-rung
+overload ceilings, author the §10.2 curve, acceptance-sweep clean across
+the whole ladder) — driven over IP from the desk. The fleet needs it in the
+field, where the craft has no IP path. How does the loop run, and how does
+the artifact reach the craft?
+
+**Ruling (operator, 2026-08-01 — R1–R5 adopted as recommended).** It
+doesn't reach the craft; it is born there. The §3.5 LINK_REPORT already
+carries the complete feedback set (`rssi_best`/`rssi_mean`,
+`loss_postdiv_prearq`, `uniq`) at report cadence, so the loop moves
+craft-side and steers against what the ground reports hearing. No bulk
+data crosses the air — which §11.7's narrow-channel law would have
+forbidden anyway. The ground contributes exactly a claim-gated trigger and
+a display.
+
+- **R1 — registry.** `0x08 CALIBRATE {0=abort, 1=start}`, no further args
+  (nobody speculates a dry-run). `start` REJECTED when already running,
+  no power actuator, or no latched reporter — the last is load-bearing:
+  the loop is blind without reports. Gating is the existing §11.7
+  bound-issuer + PSK HMAC + nonce machinery, unchanged.
+- **R2 — persistence.** The MODE precedent, split the same way: run state
+  stays craft-session volatile; the *artifact* (curve + ceiling report +
+  pairing fingerprint, ~1 KB) persists in `/etc/waybeam-link/calibration/`
+  (atomic write, single last-good copy) and auto-loads as the TX adapter's
+  `power_map` on boot **only when the fingerprint's craft-adapter identity
+  matches the live adapter**. Mismatch ⇒ boot with no curve + surface
+  CALIBRATION STALE. A curve calibrated for other hardware is never
+  silently applied.
+- **R3 — observability.** The §3.15 32→34 `report_latch_holder` extension
+  pattern is the sanctioned mechanism: bytes 34–35, `state_flags` bit4,
+  {state, rung} + CRC-8 artifact hash (§3.6 idiom). Failure reasons and
+  the full report are management-HTTP only (`GET /api/v1/calibration`).
+- **R4 — restore.** Every exit path converges on power-first restore
+  (a probe may sit on a rung's ceiling), then the boot selector window,
+  then the §10.4 resolve. Report-loss abort at 3 s (not the §9 report
+  timeout — dwell-edge gaps must not thrash it); hard cap 240 s. §9.8
+  fail-toward-degradation throughout.
+- **R5 — placement.** The loop is a pure time-injected state machine in
+  `core/` (the selector/CSA shape): inputs are report samples and ticks,
+  outputs are pin/power/artifact actions. `io/` supplies actuation through
+  seams that all exist (§10.5 `set_power_qdb`, §9.7 pin, file sink). The
+  Android `:wifi` consumer vendors `core/` whole, so a phone ground
+  inherits calibration display for free.
+
+**Field-vs-bench fidelity, stated.** The field loop steers on
+post-diversity loss (what reports carry); the bench tool used per-adapter
+wire PER. They agree at the placement ("clean here") and at the cliff
+(adapters fail together — measured, PR #81). Per-adapter fidelity remains
+a bench-mode capability. Calibrate at 50–100 m separation (operator
+direction): placement power is what range realism buys; the
+receiver-referenced ceilings transfer regardless.
+
+**Boundary.** Calibration writes the §10.2 curve; it does not touch the
+selector's thresholds, §9.4's gate, or the channel. The per-rung ceiling
+table it persists is the *input* a future banded promote gate would
+consume — that gate is its own pass, not this one.

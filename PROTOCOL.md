@@ -789,7 +789,7 @@ latency-critical). Spectators ignore the type entirely: it carries no
 channel/fleet state to follow, and the §11.7 bound-issuer guard means only the
 addressed craft ever acts on one.
 
-### 3.15 SELECTOR_STATE packet (type `0xE`) — 34 bytes (32 legacy)
+### 3.15 SELECTOR_STATE packet (type `0xE`) — 36 bytes (34/32 legacy)
 
 Craft→ground **advisory observability** for the §9 selector. The selector and
 its lockouts are craft-owned; a ground or OSD MUST display this state, never
@@ -806,7 +806,7 @@ latest summary stays pending/coalesced until the next live video slot.
 | 13 | 1 | `safe_floor_profile` | resolved `max(min_profile, floor_profile)` |
 | 14 | 1 | `ceiling_profile` | highest profile currently reachable without crossing a lockout |
 | 15 | 1 | `lockout_profile` | lowest currently blocking profile; `0xFF` when none |
-| 16 | 1 | `state_flags` | bit0 active; bit1 latched; bit2 pin/range conflict; bit3 holder-present (§3.15a); bits 4–7 reserved |
+| 16 | 1 | `state_flags` | bit0 active; bit1 latched; bit2 pin/range conflict; bit3 holder-present (§3.15a); bit4 calibration-word present (§10.6, Pass 120); bits 5–7 reserved |
 | 17 | 1 | `lockout_strikes` | saturating strike count for `lockout_profile`; default latch boundary 4 |
 | 18 | 2 | `remaining_ms` | timed lockout remainder, saturated at 65535; 0 for none/latched |
 | 20 | 1 | `transition_reason` | §9 reason registry below |
@@ -817,6 +817,7 @@ latest summary stays pending/coalesced until the next live video slot.
 | 27 | 4 | `loss_uniq` | denominator of `loss_window_milli` |
 | 31 | 1 | `loss_score` | current active rung's leaky persistence score |
 | 32 | 2 | `report_latch_holder` | §3.15a — present only when `state_flags` bit3 is set |
+| 34 | 2 | `calibration_word` | §10.6 (Pass 120) — present only when `state_flags` bit4 is set. Byte 0: bits 0–1 state {0 idle, 1 running, 2 done-ok, 3 failed}, bits 2–4 current rung, bits 5–7 reserved-zero. Byte 1: CRC-8 hash of the persisted artifact (§3.6 idiom), `0x00` = no artifact. When bit4 is set bit3 MUST also be set (fields append in order; a calibrating craft always has a latched reporter) |
 
 #### 3.15a `report_latch_holder` — who the craft is listening to
 
@@ -1921,6 +1922,69 @@ per frame. On kernel-monitor this also repairs the §10.4 gap where the commit
 resolve was a logged intent only — with this section, a loaded `power_map`
 actuates on **both** RF backends through the same `set_power_qdb` seam.
 
+### 10.6 Craft-resident link calibration (Pass 120)
+
+Authoring the §10.2 curve in the field, where the craft has no IP path. The
+loop that measured per-rung placements and overload ceilings on the bench
+(`tools/curve_author.py`, `docs/mcs-power-sweep.md`) runs **on the craft**,
+steering against what the ground reports hearing — the §3.5 LINK_REPORT
+already carries the complete feedback set (`rssi_best`/`rssi_mean`,
+`loss_postdiv_prearq`, `uniq`) at report cadence, so calibration adds **no
+uplink bytes and no bulk transfer**: the artifact is born on the node that
+consumes it. Trigger and abort are §11.7 `CALIBRATE` (bound-issuer + PSK +
+nonce — the claim gate is the existing one).
+
+**Procedure.** For each rung in the §9.3 ladder: pin the rung (§9.7
+`min==max`), steer the TX adapter's power via `set_power_qdb` until the
+report `rssi_mean` lands in the target band (default −32 ± 3 dBm; config
+§15.2 `calibration.*`), verify report loss at the placement over a dwell,
+then probe upward in fixed steps until report loss crosses the bad
+threshold or the power cap — the bracketing RSSIs are the rung's **overload
+ceiling**. The loop steers on **post-diversity** loss (what LINK_REPORT
+carries); at the placement and at the cliff this agrees with per-adapter
+wire PER (measured: adapters fail together in overload). Perform at
+**50–100 m craft–ground separation** for a flight-representative placement;
+a bench-range run validates tooling, never a flight curve.
+
+**Safety envelope (R4, Pass 120).** While running: the selector is frozen
+(the loop owns the pin); the channel is never touched; total runtime is
+hard-capped (default 240 s). Every exit — done, `CALIBRATE abort`,
+report-loss, hard cap, process death — converges on the same restore order:
+**power first** (a probe may sit on a rung's ceiling), then the boot
+`[min_profile, max_profile]` window, then the §10.4 resolve re-places the
+committed rung. Report-loss abort fires after **3 s without an accepted
+report** (not the §9 report timeout — dwell-edge gaps must not thrash it).
+§9.8 fail-toward-degradation applies throughout.
+
+**Artifact + persistence (R2, Pass 120 — the volatility exception).** The
+run's product is a curve (level-4 baseline per §10.2, compensated for the
+table's `tx_power_level` so the runtime resolve reproduces each placement)
+plus a report (per-rung placement power/RSSI/loss and ceiling brackets —
+the §9.4 banded-gate input) plus a **pairing fingerprint** (craft adapter
+identity, reporting `(originator)` and adapter count observed during the
+run, band, placement RSSI band, timestamp). Unlike all other §11.7 state,
+the artifact **persists** (`/etc/waybeam-link/calibration/`, atomic write,
+single last-good copy) and **auto-loads as the TX adapter's `power_map` on
+boot — only when the fingerprint's craft-adapter identity matches the live
+adapter**. On mismatch the node boots with no curve and surfaces
+CALIBRATION STALE (§15.3) — a curve calibrated for different hardware is
+never silently applied. Re-run on any pairing change (craft adapter, ground
+adapter set, antennas).
+
+**Observability.** §3.15 carries a 2-byte calibration word (bytes 34–35,
+`state_flags` bit4 — the `report_latch_holder` extension pattern): byte 0 =
+bits 0–1 state {0 none/idle, 1 running, 2 done-ok, 3 failed}, bits 2–4
+current rung, bits 5–7 reserved-zero; byte 1 = CRC-8 content hash of the
+persisted artifact's canonical serialization (§3.6 idiom), `0x00` = none.
+Failure *reason* and the full report are management-HTTP only (§15.5
+`GET /api/v1/calibration`). §15.3 `link` mirrors the word
+(`calib_state`, `calib_rung`, `calib_fingerprint`, `calib_stale`).
+
+**Forward validity.** The artifact's content is receiver-referenced
+(placement RSSI targets + per-rung ceilings), so it survives a backend move
+to devourer per-packet TX power unchanged — per-packet power is a finer
+actuator for the same targets, and per-rate diffs absorb chip-cal skew.
+
 ---
 
 ## 11. Follow-me channel switch (CSA)
@@ -2408,7 +2472,8 @@ everything below is behaviour.
 | `0x05` | `RESOLUTION` | preset index 0..4 | Sets encoder resolution to `venc.command_presets.resolution[arg]` (a venc `video0.size` string, e.g. `"1280x720"`). `REJECTED` when the preset list is unconfigured, `arg` ≥ its length, `venc.enabled` is false, or the actuation path is not yet implemented (staged, Pass 71 — the venc-side knob is a venc-repo dependency) |
 | `0x06` | `FRAMING` | preset index 0..4 | Sets encoder framing mode to `venc.command_presets.framing[arg]` (a venc `video0.framing` string). Same `REJECTED` set as `RESOLUTION` (staged, Pass 71) |
 | `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
-| `0x08`–`0x1F` | *reserved* | — | not specified |
+| `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the loop is blind without LINK_REPORTs). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for up to §10.6's hard cap (~4 min) with the selector frozen — video quality degrades during; the operator chooses the moment (recommended: a hover at 50–100 m, §10.6) |
+| `0x09`–`0x1F` | *reserved* | — | not specified |
 
 **v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
 encoder value spaces via **config preset-indexing**: the craft's
@@ -3116,7 +3181,14 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   `copies`/`copy_interval_ms`/`ack_timeout_ms`/`retry_cap`; craft side:
   `echo_copies`/`min_interval_ms`). All §17 RE-DERIVE seeds. The channel shares
   `csa.psk`/the announced token (§11.4a) — there is no separate command key.
-- `scout` (ground/rx node, §15.5) configures the channel searcher: `dwell_ms`
+- `policy.calibration` (craft/tx node, §10.6, Pass 120) seeds the
+  calibration loop; all defaults are the bench-validated values:
+  `target_rssi_dbm` (−32), `rssi_tol_db` (3), `loss_ok_milli` (15),
+  `loss_bad_milli` (50), `ceil_step_qdb` (16), `min_qdb`/`max_qdb`
+  (4/108), `probe_dwell_ms` (8000), `verify_dwell_ms` (15000),
+  `report_loss_abort_ms` (3000), `hard_cap_ms` (240000),
+  `artifact_dir` ("/etc/waybeam-link/calibration").
+- `scout` (ground/rx node, §15.5) configures the channel searcher:- `scout` (ground/rx node, §15.5) configures the channel searcher: `dwell_ms`
   (base per-channel listen, **300 ms**; an occupied channel auto-extends until
   its first ANNOUNCE candidate resolves, §15.5a Pass 72) and `channels`
   (`null` = sweep `csa.channel_allowlist`). A
@@ -3280,7 +3352,9 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "cmd_arq": true, "cmd_selector_frozen": false,
     "cmd_fps_ladder": true, "cmd_last_nonce": 0,
     "cmd_fps_select": 0, "cmd_resolution_select": 0, "cmd_framing_select": 0,
-    "vcmd_state": "idle", "vcmd_nonce": 0, "arq_rx_enabled": true } }
+    "vcmd_state": "idle", "vcmd_nonce": 0, "arq_rx_enabled": true,
+    "calib_state": "idle", "calib_rung": 0, "calib_fingerprint": 0,
+    "calib_stale": false } }
 ```
 `csa_state` is the §11 follow-me state machine string (issuer states when a
 switch campaign is active, otherwise the follower's), and `channel` is the
@@ -3328,6 +3402,12 @@ session, §11.7),
 from the currently/last bound issuer (0 = never), `vcmd_state`/`vcmd_nonce`
 mirror the issuer's §15.5 `GET /api/v1/vehicle/command` object, and
 `arq_rx_enabled` is the node's §6.4 NACK-emission gate (`POST /api/v1/arq`).
+The `calib_*` fields (Pass 120) mirror the §10.6 calibration word:
+`calib_state` {"idle","running","done","failed"}, `calib_rung` (meaningful
+while running), `calib_fingerprint` (CRC-8 of the persisted artifact, 0 =
+none), and `calib_stale` — true when a persisted artifact's pairing
+fingerprint mismatches the live hardware (the artifact is then NOT applied,
+§10.6).
 
 `return_window_hits/misses` (TX-side) and `reports_expected/received` expose the
 §7.2 optimisation's health directly, and `adapter_stalled` + the
@@ -3628,6 +3708,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
 | `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
+| `GET /api/v1/calibration` | §10.6 (Pass 120) calibration surface: `{state, rung, fingerprint, stale, artifact:{curve_qdb:[8], ceilings:[{rung, last_clean_rssi, first_bad_rssi}], placement_rssi, fingerprint_detail, t_unix} | null, fail_reason}` — the full report the §3.15 word summarizes; TX/craft node, management HTTP only |
 | `GET /api/v1/modes` | `{active, apply_configured, catalog_fingerprint, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist. A ground with an IP path reads it here; one without must hardcode a copy, and pins `catalog_fingerprint` (Pass 108) to detect index drift (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
 | `GET /api/v1/tx/power` | `{override_active, qdb, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`kernel-monitor`\|`udp` (TX node) |
 
