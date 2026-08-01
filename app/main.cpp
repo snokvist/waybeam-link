@@ -3021,6 +3021,16 @@ struct RxCore {
                 snap.link.report_latch_holder = s.report_latch_holder;
                 snap.link.report_latch_known = true;
             }
+            // §15.3 (Pass 121 addendum 6): ground mirrors the received
+            // §3.15 calibration word — the WebUI's only progress view
+            // when the craft has no IP path. calib_stale is craft-local.
+            if ((s.state_flags & selector_state_flags::kCalibPresent) != 0) {
+                static const char* const kCalibNames[4] = {
+                    "idle", "running", "done", "failed"};
+                snap.link.calib_state = kCalibNames[s.calib_word & 0x03u];
+                snap.link.calib_rung = (s.calib_word >> 2) & 0x07u;
+                snap.link.calib_fingerprint = s.calib_fingerprint;
+            }
             snap.link.selector_state_valid = true;
             snap.link.selector_state_age_ms = static_cast<uint32_t>(age);
             snap.link.lockout_active =
