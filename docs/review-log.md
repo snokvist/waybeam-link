@@ -4703,7 +4703,7 @@ flight mode and its profile range were restored after the benchmark; Automatic
 remains selected, so the profile ceiling keeps low-rate profiles at 1424 and
 admits 3072 automatically when a jumbo-capable high-rate profile is active.
 
-## Pass 123 — jumbo source-symbol floor (2026-08-01)
+## Pass 123 — jumbo source-symbol floor (2026-08-01; superseded by Pass 124)
 
 **Trigger.** The Pass 122 hardware comparison achieved its CPU and packet-rate
 goal at High, but a 100 fps P-frame averaged only 9.95 source symbols plus two
@@ -4732,3 +4732,38 @@ readiness requires the complete host suite, all three target builds, a minimum
 ten-case targeted matrix around integer boundaries and tier/profile
 intersections, an independent full-diff review, and a repeated high-bitrate
 hardware comparison.
+
+## Pass 124 — repair-depth guard replaces source refragmentation (2026-08-01)
+
+**Review question.** Is 16 the right source-symbol floor, or is another number
+more suitable? Deterministic MDS properties and synthetic loss simulation show
+that source count is the wrong actuator. Pass 123's measured benefit came from
+the 20% policy crossing `ceil(16 * 0.20) = 4` repairs, not from `k=16` itself.
+
+At the measured 100 fps operating point, the candidate blocks were simulated
+under independent loss and a two-state Gilbert-Elliott burst process (80% loss
+in the bad state, 0.2% in the good state, 2% stationary loss, four-packet mean
+bad run; 1,000,000 blocks). Results:
+
+| policy | block | DATA packets/s | iid failure at 5% | burst failure |
+|---|---:|---:|---:|---:|
+| Pass 122 High | 10+2 | 1268 | 1.9568% | 3.3685% |
+| literal source floor | 16+4 | 2114 | 0.2574% | 2.5069% |
+| High + equivalent repair depth | 10+4 | 1480 | 0.0427% | 1.6679% |
+
+For the same four correctable erasures, `10+4` is both shorter and more robust
+than `16+4`; the literal floor transmits six extra independently lossy source
+packets and predicts roughly 25.6% vehicle CPU versus 22.4% for `10+4` from the
+Pass 122 hardware slope. Floors 12/15 stop at three repairs; floor 20 adds four
+source packets without a fifth repair; floor 21 reaches five repairs but
+restores/exceeds Default packet load. Thus **16 remains the correct policy
+threshold, but not a fragmentation target**.
+
+**Ruling.** Supersede Pass 123's refragmentation. Keep the negotiated jumbo
+symbol size. When jumbo produces `k < 16` for a frame that Default would have
+encoded with `k >= 16`, raise final parity to at least the configured class
+rate evaluated at `k=16` (four under the deployed 20% P-frame policy), after
+the fixed or enforced §14.2 decision. Small frames, FEC-disabled streams, and
+zero-rate classes are unchanged. Count actuations in `mtu_fec_guard_frames`.
+This preserves most of the packet/CPU gain while providing greater erasure
+robustness than the literal source-symbol clamp.

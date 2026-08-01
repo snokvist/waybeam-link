@@ -1459,40 +1459,34 @@ the current block remains byte-homogeneous. The framer starts with the ceiling:
 min(active_profile.max_payload, negotiated_packet_budget)
 ```
 
-Before fragmenting each frame on a stream whose `fec.scheme` is `rlc256`, the
-framer MUST apply a **16-source-symbol jumbo guard**. FEC-disabled streams use
-the ceiling unchanged: shrinking their symbols cannot improve recovery. Let
-`B` be that ceiling, `H = 26 + 11` bytes of DATA/repair overhead,
-`s_ceiling = B - H`, and `s_default = min(s_ceiling, 1424 - H)`. For frame
-blob length `L` (including `VencFrameMeta`), use:
+Before fragmenting each frame, use `s = B - 26 - 11` and
+`k = ceil(frame_len / s)` exactly as §5.1a. A stream whose `fec.scheme` is
+`rlc256` MUST then apply the **16-equivalent protection guard**. Compute the
+source count the same frame would have had on the Default path:
 
 ```
-s_guard = floor((L - 1) / (16 - 1))
-s = min(s_ceiling, max(s_default, s_guard))
-guarded_packet_budget = s + H
-k = ceil(L / s)
+k_default = ceil(frame_len / min(s, 1424 - 26 - 11))
 ```
 
-The integer `L - 1` form is load-bearing: it is the largest symbol size that
-still yields `k >= 16`. The Default-sized lower bound means the guard never
-creates packets smaller than the compatibility path merely to inflate `k`.
-Consequently, whenever Default would produce at least 16 source symbols,
-Medium/High MUST also produce at least 16; a genuinely small frame that already
-has `k < 16` at Default remains unchanged. The guard is evaluated once per
-frame, so all symbols in a block remain byte-homogeneous. Implementations count
-FEC frames whose jumbo ceiling was reduced as `mtu_floor_clamped_frames`
-(§15.3).
+When jumbo sizing gives `k < 16` while `k_default >= 16`, the final repair
+count for that frame MUST be at least
+`ceil(16 * configured_class_rate_permille / 1000)`, in addition to the
+configured `fec.min_r` floor. This lower bound applies after either the fixed
+policy or a §14.2 enforced override selects parity; zero configured class rate
+adds no protection. It therefore supplies the same erasure depth the configured
+rate would have produced at `k=16` without fragmenting the same data into extra
+source packets. FEC-disabled streams and genuinely small frames that already
+have `k < 16` at Default are unchanged. Implementations count frames where the
+guard raises parity as `mtu_fec_guard_frames` (§15.3).
 
 Thus the profile table remains the RF/CPU policy ceiling and the ground tier is
 the receiver-fleet safety ceiling. Standard/low-rate profiles may retain 1424;
 high-rate profiles should use 2048 or 3072 to keep total emitted DATA packet
 rate (source plus FEC repair) near **1000–1200 packets/s** where practical.
 Packet rate is a soft table-authoring target, not a second runtime controller.
-One encoded frame remains one FEC block (§14). The jumbo guard holds eligible
-frames at 16 source symbols; larger frames naturally produce more. Implementations
-MUST NOT pad or merge frames, nor shrink below the Default symbol size, merely
-to manufacture a larger block; symbol count is bounded by frame size, latency,
-the compatibility packet floor, and the `k+r ≤ 256` codec limit.
+One encoded frame remains one FEC block (§14). Implementations MUST NOT pad,
+merge, or refragment a frame merely to manufacture a larger `k`; the protection
+guard acts on repair depth and the `k+r ≤ 256` codec limit remains absolute.
 
 ### 9.4 Promote path (v0 = RSSI-margin; active probe deferred)
 wfb_ng promoted only after a boundary probe on a **separate wfb stream**; the
@@ -3446,7 +3440,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
     "resends_sent": 230, "arq_lock_holder": 9, "double_send_suppressed": 5,
     "source_symbols_sent": 4120300, "repair_symbols_sent": 358944,
-    "fec_oversize_frames": 0, "mtu_floor_clamped_frames": 1234,
+    "fec_oversize_frames": 0, "mtu_fec_guard_frames": 1234,
     "idr_frames": 17, "arq_frames": 68342,
     "arq_cutoff_frames": 0,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
@@ -3757,8 +3751,8 @@ implied.
 On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
 the exact cumulative §14.1 symbols emitted by `FrameFramer`;
 `fec_oversize_frames` counts frames sent source-only because `k+r` exceeded
-GF(256) capacity; `mtu_floor_clamped_frames` counts RLC-FEC frames for which
-§9.3a's 16-source-symbol guard reduced a Medium/High ceiling; `idr_frames` counts
+GF(256) capacity; `mtu_fec_guard_frames` counts RLC-FEC frames for which
+§9.3a's 16-equivalent guard raised repair depth; `idr_frames` counts
 frames whose VFRM metadata carried the IDR flag; and `arq_frames` counts frames
 stamped with either ARQ-class flag.
 They are zero on RX and non-frame-SHM streams. These counters are
