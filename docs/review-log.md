@@ -4650,3 +4650,28 @@ from byte 1, while bit4 is set and the source is fresh) — the ground
 WebUI's only view of calibration progress when the craft has no IP path.
 `calib_stale` is craft-local and stays false on ground. Prerequisite for
 the waybeam-hub vehicle-menu calibrate button.
+
+## Pass 122 — claimed-ground negotiated packet budget (2026-08-01)
+
+**Trigger.** The vehicle SOC becomes CPU-bound once the high-rate video path
+exceeds roughly 1000 packets/s. All deployed injection adapters are Realtek
+parts capable of a 3072-byte Waybeam DATA packet, but using that size
+unconditionally would silently strand legacy or unknown ground receivers.
+
+**Ruling.** The claimed ground owns one global packet-budget tier, subject to
+explicit vehicle acceptance. `VEHICLE_CMD 0x09 MTU_TIER` carries only a concrete
+Default/Medium/High enum; the ground-local Automatic mode resolves the minimum
+capability of all active ground adapters before sending it. The exact complete
+DATA wire-packet budgets are 1424/2048/3072 bytes. No receiver quorum, telemetry
+piggyback, or continuous MTU controller is added.
+
+The vehicle applies an accepted tier at a frame/block boundary and frames with
+`min(profile.max_payload, negotiated_packet_budget)`. It boots and becomes
+unbound at Default. A request beyond any active craft adapter is rejected, never
+clamped. Profiles remain the coarse packet-rate policy and should target
+1000–1200 total DATA packets/s; FEC stays one frame per block and does not pad or
+merge frames to force an arbitrary 20–30 symbols.
+
+**Verification status.** Protocol-level only at amendment time. Host tests,
+cross-builds, and RTL8812EU/CU RF verification at 3072 are required by the
+implementation pass before this feature is called device-confirmed.
