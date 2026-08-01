@@ -280,7 +280,7 @@ struct CalibrationPolicy {
     int loss_bad_milli = 50;
     int seek_step_qdb = 16;  // Pass 121 max-power seek
     int cap_rise_db = 1;
-    int rssi_guard_dbm = -20;
+    int rssi_guard_dbm = -6;
     int min_qdb = 4;
     int max_qdb = 108;
     int settle_ms = 800;

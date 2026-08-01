@@ -89,11 +89,12 @@ void test_full_run_and_artifact() {
     CHECK(r.restores == 1);
     CHECK(r.artifacts == 1);
     const CalibArtifact& a = r.cal.artifact();
-    // Pass 121 max-power seek against the model: rungs 0-2 ramp until the
-    // rssi_guard (-20) stops them; rungs 3-7 stop one step below their
-    // loss wall. Rung 3's first probe (from rung 2's placement - one
-    // step) is already past its wall, exercising the descend path.
-    static constexpr int32_t kWant[8] = {100, 100, 100, 68, 68, 52, 36, 36};
+    // Pass 121 max-power seek against the model: rungs 0-2 ramp clean to
+    // max_qdb (the -6 guard is out of the model's reach); rungs 3-7 stop
+    // one step below their loss wall. Rung 3's first probes (from rung
+    // 2's placement - one step) are already past its wall, exercising
+    // the descend path.
+    static constexpr int32_t kWant[8] = {108, 108, 108, 60, 60, 60, 44, 44};
     for (int m = 0; m < 8; ++m) {
         CHECK(a.placement_qdb[m] == kWant[m]);
         CHECK(a.placement_loss_milli[m] <= 15);

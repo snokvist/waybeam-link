@@ -38,7 +38,7 @@ struct CalibrateParams {
     uint16_t loss_bad_milli = 50;
     int32_t seek_step_qdb = 16;  // 4 dB per seek probe (Pass 121)
     int cap_rise_db = 1;         // < this rise on a ≥2 dB step = cap wall
-    int rssi_guard_dbm = -20;    // overload-regime sanity bound
+    int rssi_guard_dbm = -6;     // token RX-abuse backstop (P121 addendum)
     int32_t min_qdb = 4;         // 1 dBm
     int32_t max_qdb = 108;       // 27 dBm
     uint32_t settle_ms = 800;    // TXAGC settle + one report window
