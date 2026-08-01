@@ -1944,7 +1944,13 @@ overload or link break. The **cap wall**: a commanded step of ≥ 2 dB moves
 report `rssi_mean` by less than `cap_rise_db` — delivered power has
 stopped following commanded power (driver/regulatory caps latch silently;
 the artifact must never record commanded qdb the radio did not emit —
-observed live as the RF-cap event that voided the 50 m Pass 120 run).
+observed live as the RF-cap event that voided the 50 m Pass 120 run). A
+cap-wall trigger is **confirmed by one repeat dwell at the same power**
+before it stands (Pass 121 addendum 3): in the TXAGC compression knee
+the per-step rise straddles `cap_rise_db`, and a 10-run campaign showed
+single-dwell RSSI noise flipping MCS7's placement by two steps (8 dB) —
+a repeated deficit is a wall, a one-off reading is noise and the ramp
+continues.
 Placement = the last clean, responsive probe (one step below the wall); a
 ramp that reaches `max_qdb` clean places there. The longer verify dwell
 then **enforces** `loss_ok_milli` (Pass 121 addendum 2): near-cliff
