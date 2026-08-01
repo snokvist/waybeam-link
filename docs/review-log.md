@@ -4798,3 +4798,49 @@ numeric originator while changing session and adapter capability. The generic
 `POST /vehicle/command` rejects `mtu_tier`; only the typed `/link/mtu` path and
 its internal post-claim reissue may start it, preserving local capability
 validation and preference bookkeeping.
+
+## Pass 125 — authenticated ground-uplink TX calibration plan (2026-08-02)
+
+**Trigger.** Pass 120/121 calibrates the craft downlink only. The ground's
+designated uplink adapter remains at its driver/config placement, so return
+margin can collapse first at range and present to the craft as report blackout.
+The original PR #82 draft proposed appending feedback to SELECTOR_STATE, but
+that packet is explicitly unauthenticated/advisory and older receivers reject
+new exact-length shapes wholesale. Neither property is acceptable for feedback
+that moves an RF power actuator.
+
+**Ruling.** Reserve `0xF UPLINK_QUALITY`, a 34-byte craft→claimed-ground packet
+authenticated with the existing `csa_psk`. It carries the exact target ground
+tuple, last accepted report epoch, cumulative accepted-report count, cumulative
+signed RX-RSSI sum, craft-adapter fingerprint, and a four-byte HMAC. It is due
+at 2 Hz immediately before existing live DATA and never creates an air slot.
+The selected/claimed ground verifies source, target, session, MAC, monotonic
+counters, and freshness. SELECTOR_STATE remains byte-for-byte unchanged.
+
+Use ordinary unique LINK_REPORT epochs as the sparse probes: no padded traffic
+and no new VEHICLE_CMD. Extract §10.6's pure seek/verify state into a reusable
+time-injected `PowerSeek`; retain its eight-rung craft orchestrator and add a
+one-rung MCS0/LGI/HT20 ground orchestrator. Seed 16 qdb steps, 40-report probe
+dwells (one extension to 80 when ambiguous), 200-report verification, the
+existing 15/50‰ loss walls, and a 2 s authenticated-feedback timeout.
+
+An rx-node may load `power_map` only on its one `role:"tx"` uplink adapter;
+diversity-adapter maps remain rejected. Explicit config outranks a separate
+uplink artifact, which is applied only after the claimed craft and both adapter
+fingerprints match. Every non-success exit restores explicit config, the prior
+matching artifact, or backend auto/default in that order. Ground-local
+`GET/POST /api/v1/calibration` owns start/abort/status. New
+`uplink_calib_*`/`uplink_quality_*` fields stay separate from craft `calib_*`.
+
+**Integration boundary.** Link owns wire, engine, actuator, persistence, REST,
+and stats. Hub adds separately labelled Craft downlink/Ground uplink controls
+and calls local `:8092` for the latter. SBC packaging pins reviewed Link/Hub
+heads. Android currently has no Link wire decoder or selector-state consumer,
+so it needs no code change; unknown `0xF` remains a compatibility test.
+
+**Merge gate.** Full host suite and SSC338Q/x86-ground/RK3566 builds; at least
+15 focused wire/calibrator/config/store/REST/stats tests; independent full-diff
+review; ten consecutive hardware runs with placement spread no greater than
+one seek step; failure injection for abort, quality blackout, mismatch,
+restart, and retune; plus calibrated-vs-default/manual range evidence for
+report delivery, NACK recovery, blackouts, RSSI, and uplink packet loss.
