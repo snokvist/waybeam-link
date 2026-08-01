@@ -1459,10 +1459,12 @@ the current block remains byte-homogeneous. The framer starts with the ceiling:
 min(active_profile.max_payload, negotiated_packet_budget)
 ```
 
-Before fragmenting each frame, the framer MUST apply a **16-source-symbol
-jumbo guard**. Let `B` be that ceiling, `H = 26 + 11` bytes of DATA/repair
-overhead, `s_ceiling = B - H`, and `s_default = min(s_ceiling, 1424 - H)`.
-For frame blob length `L` (including `VencFrameMeta`), use:
+Before fragmenting each frame on a stream whose `fec.scheme` is `rlc256`, the
+framer MUST apply a **16-source-symbol jumbo guard**. FEC-disabled streams use
+the ceiling unchanged: shrinking their symbols cannot improve recovery. Let
+`B` be that ceiling, `H = 26 + 11` bytes of DATA/repair overhead,
+`s_ceiling = B - H`, and `s_default = min(s_ceiling, 1424 - H)`. For frame
+blob length `L` (including `VencFrameMeta`), use:
 
 ```
 s_guard = floor((L - 1) / (16 - 1))
@@ -1478,7 +1480,8 @@ Consequently, whenever Default would produce at least 16 source symbols,
 Medium/High MUST also produce at least 16; a genuinely small frame that already
 has `k < 16` at Default remains unchanged. The guard is evaluated once per
 frame, so all symbols in a block remain byte-homogeneous. Implementations count
-frames whose jumbo ceiling was reduced as `mtu_floor_clamped_frames` (§15.3).
+FEC frames whose jumbo ceiling was reduced as `mtu_floor_clamped_frames`
+(§15.3).
 
 Thus the profile table remains the RF/CPU policy ceiling and the ground tier is
 the receiver-fleet safety ceiling. Standard/low-rate profiles may retain 1424;
@@ -3754,8 +3757,8 @@ implied.
 On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
 the exact cumulative §14.1 symbols emitted by `FrameFramer`;
 `fec_oversize_frames` counts frames sent source-only because `k+r` exceeded
-GF(256) capacity; `mtu_floor_clamped_frames` counts frames for which §9.3a's
-16-source-symbol guard reduced a Medium/High ceiling; `idr_frames` counts
+GF(256) capacity; `mtu_floor_clamped_frames` counts RLC-FEC frames for which
+§9.3a's 16-source-symbol guard reduced a Medium/High ceiling; `idr_frames` counts
 frames whose VFRM metadata carried the IDR flag; and `arq_frames` counts frames
 stamped with either ARQ-class flag.
 They are zero on RX and non-frame-SHM streams. These counters are

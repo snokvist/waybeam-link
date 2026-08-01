@@ -4722,9 +4722,11 @@ raises a 20% P-frame policy from roughly 2 to 4 repair symbols at the measured
 high-rate operating point without restoring the full 20-symbol/Default packet
 load.
 
-This is a packet-size choice made once at the existing frame/block boundary,
-not padding, frame merging, a new wire field, or a continuous MTU negotiation.
-Every block remains homogeneous and self-describing. A cumulative
+This guard applies only to `rlc256` streams: shrinking a FEC-disabled stream
+would spend the packet-rate/CPU budget without adding recovery depth. It is a
+packet-size choice made once at the existing frame/block boundary, not padding,
+frame merging, a new wire field, or a continuous MTU negotiation. Every block
+remains homogeneous and self-describing. A cumulative
 `mtu_floor_clamped_frames` stream stat makes the guard observable. Merge
 readiness requires the complete host suite, all three target builds, a minimum
 ten-case targeted matrix around integer boundaries and tier/profile
