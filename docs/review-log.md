@@ -4608,3 +4608,13 @@ rungs 0-3 were stopped by the −20 rssi_guard, not by loss — a guard
 artifact 2 dB short of the radio's true maximum. Operator ruling: the
 guard is a token backstop, not a placement mechanism — default moves
 −20 → **−6**; the loss wall is the intended limiter at every rung.
+
+**Pass 121 addendum 2 (same day, operator).** The guard −6 rerun
+(fp 0xE3) exposed a verify gap: rung 5's placement probed clean at
+1.2 s dwells but the 2.5 s verify measured **942‰** — near-cliff
+instability appears only under sustained exposure — and the engine
+recorded it and moved on (rung 7 likewise verified 34‰ > loss_ok).
+Ruling: **verify enforces loss_ok_milli** — on failure, step down one
+seek_step_qdb and re-verify, bounded at 3 descents; a still-failing
+floor is recorded with its measured loss (the artifact never lies).
+Verify loss above loss_bad_milli also records the overload bracket.

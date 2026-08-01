@@ -1946,7 +1946,15 @@ stopped following commanded power (driver/regulatory caps latch silently;
 the artifact must never record commanded qdb the radio did not emit —
 observed live as the RF-cap event that voided the 50 m Pass 120 run).
 Placement = the last clean, responsive probe (one step below the wall); a
-ramp that reaches `max_qdb` clean places there. The wall's bracketing
+ramp that reaches `max_qdb` clean places there. The longer verify dwell
+then **enforces** `loss_ok_milli` (Pass 121 addendum 2): near-cliff
+instability can pass short probe dwells and fail only under sustained
+exposure (measured live: a placement that probed clean verified at
+942‰), so a placement whose verify loss exceeds `loss_ok_milli` steps
+down one `seek_step_qdb` and re-verifies, bounded at 3 descents — a
+still-failing floor is recorded with its measured loss (the artifact
+never lies). A verify loss above `loss_bad_milli` also records the
+rung's overload bracket. The wall's bracketing
 RSSIs **are** the rung's overload-ceiling record — there is no separate
 ceiling phase. If a rung's first probe is already past the loss wall the
 ramp descends until clean (floor `min_qdb`). A `rssi_guard_dbm` sanity
