@@ -273,6 +273,24 @@ struct CmdPolicy {
     uint32_t min_interval_ms = 250;
 };
 
+// §10.6 (Pass 120) craft-resident calibration seeds — mirrors
+// core CalibrateParams plus the artifact directory.
+struct CalibrationPolicy {
+    int target_rssi_dbm = -32;
+    int rssi_tol_db = 3;
+    int loss_ok_milli = 15;
+    int loss_bad_milli = 50;
+    int ceil_step_qdb = 16;
+    int min_qdb = 4;
+    int max_qdb = 108;
+    int settle_ms = 4000;
+    int probe_dwell_ms = 8000;
+    int verify_dwell_ms = 15000;
+    int report_loss_abort_ms = 3000;
+    int hard_cap_ms = 240000;
+    std::string artifact_dir = "/etc/waybeam-link/calibration";
+};
+
 struct Policy {
     double report_hz = 10.0;
     uint32_t report_timeout_ms = 500;
@@ -283,6 +301,7 @@ struct Policy {
     ReturnPolicy ret;  // JSON key "return" (C++ keyword)
     CsaPolicy csa;
     CmdPolicy cmd;
+    CalibrationPolicy calibration;
 };
 
 // Air backends. "udp" is dev tooling (one UDP socket = one virtual adapter,

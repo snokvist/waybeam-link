@@ -110,6 +110,11 @@ struct SelectorState {
     uint8_t loss_score = 0;
     // §3.15a — meaningful only when state_flags has kHolderPresent.
     uint16_t report_latch_holder = 0;
+    // §10.6 (Pass 120) — meaningful only when state_flags has kCalibPresent:
+    // bits 0-1 state {0 idle, 1 running, 2 done, 3 failed}, bits 2-4 rung,
+    // bits 5-7 reserved-zero; and the CRC-8 artifact hash (0 = none).
+    uint8_t calib_word = 0;
+    uint8_t calib_fingerprint = 0;
     friend bool operator==(const SelectorState&, const SelectorState&) = default;
 };
 

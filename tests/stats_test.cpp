@@ -179,6 +179,11 @@ StatsSnapshot sample_snapshot() {
     s.link.vcmd_state = "acked";
     s.link.vcmd_nonce = 3054418130;
     s.link.arq_rx_enabled = false;
+    // §10.6 Pass 120: distinct values so the golden pins the calib mirror.
+    s.link.calib_state = "running";
+    s.link.calib_rung = 5;
+    s.link.calib_fingerprint = 0xBF;
+    s.link.calib_stale = true;
     return s;
 }
 
@@ -279,7 +284,9 @@ const char* kGolden =
     "\"cmd_fps_select\":2,\"cmd_resolution_select\":0,"
     "\"cmd_framing_select\":0,"
     "\"vcmd_state\":\"acked\",\"vcmd_nonce\":3054418130,"
-    "\"arq_rx_enabled\":false}}\n";
+    "\"arq_rx_enabled\":false,"
+    "\"calib_state\":\"running\",\"calib_rung\":5,"
+    "\"calib_fingerprint\":191,\"calib_stale\":true}}\n";
 
 }  // namespace
 

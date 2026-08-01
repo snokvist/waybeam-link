@@ -38,6 +38,8 @@ struct ControlHandlers {
     std::function<std::string()> vehicle_command_json;
     // §10.5 TX-power override-latch state (GET; TX node only, null → 409).
     std::function<std::string()> tx_power_json;
+    // §10.6 (Pass 120) calibration surface (GET; TX node only, null → 409).
+    std::function<std::string()> calibration_json;
 
     // Writes — return "" on success, else a short error string (→ HTTP 400).
     // A null hook means the endpoint does not apply to this mode (→ HTTP 409).

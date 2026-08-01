@@ -547,6 +547,32 @@ Result<Config> load_config_json(const std::string& json_text) {
                     }
                 }
             }
+            if (p.contains("calibration")) {  // §10.6 Pass 120
+                const json& pk = p.at("calibration");
+                CalibrationPolicy& cal = cfg.policy.calibration;
+                cal.target_rssi_dbm =
+                    pk.value("target_rssi_dbm", cal.target_rssi_dbm);
+                cal.rssi_tol_db = pk.value("rssi_tol_db", cal.rssi_tol_db);
+                cal.loss_ok_milli = pk.value("loss_ok_milli", cal.loss_ok_milli);
+                cal.loss_bad_milli =
+                    pk.value("loss_bad_milli", cal.loss_bad_milli);
+                cal.ceil_step_qdb = pk.value("ceil_step_qdb", cal.ceil_step_qdb);
+                cal.min_qdb = pk.value("min_qdb", cal.min_qdb);
+                cal.max_qdb = pk.value("max_qdb", cal.max_qdb);
+                cal.settle_ms = pk.value("settle_ms", cal.settle_ms);
+                cal.probe_dwell_ms =
+                    pk.value("probe_dwell_ms", cal.probe_dwell_ms);
+                cal.verify_dwell_ms =
+                    pk.value("verify_dwell_ms", cal.verify_dwell_ms);
+                cal.report_loss_abort_ms =
+                    pk.value("report_loss_abort_ms", cal.report_loss_abort_ms);
+                cal.hard_cap_ms = pk.value("hard_cap_ms", cal.hard_cap_ms);
+                cal.artifact_dir = pk.value("artifact_dir", cal.artifact_dir);
+                if (cal.min_qdb > cal.max_qdb) {
+                    return Result<Config>::fail(
+                        "policy.calibration: min_qdb > max_qdb (§10.6)");
+                }
+            }
             if (p.contains("cmd")) {
                 const json& pm = p.at("cmd");
                 CmdPolicy& cmd = cfg.policy.cmd;

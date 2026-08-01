@@ -141,12 +141,23 @@ Decoded decode_selector_state(const uint8_t* buf, size_t len) {
     // §3.15a: bit3 and the length must agree. Accepting both shapes is what
     // keeps a legacy 32-byte summary decodable instead of dropping the whole
     // lockout display on a mixed-version pair.
-    if (len != kSelectorStateSize && len != kSelectorStateLegacySize) {
+    if (len != kSelectorStateCalibSize && len != kSelectorStateSize &&
+        len != kSelectorStateLegacySize) {
         return DecodeError::kLengthMismatch;
     }
     const bool holder_present =
         (buf[16] & selector_state_flags::kHolderPresent) != 0;
-    if (holder_present != (len == kSelectorStateSize)) {
+    const bool calib_present =
+        (buf[16] & selector_state_flags::kCalibPresent) != 0;
+    // §10.6: bit4 implies bit3 (fields append in order), and each flag must
+    // agree with the wire length.
+    if (calib_present && !holder_present) {
+        return DecodeError::kInvalidField;
+    }
+    const size_t expect = calib_present ? kSelectorStateCalibSize
+                          : holder_present ? kSelectorStateSize
+                                           : kSelectorStateLegacySize;
+    if (len != expect) {
         return DecodeError::kLengthMismatch;
     }
     SelectorState s;
@@ -168,6 +179,10 @@ Decoded decode_selector_state(const uint8_t* buf, size_t len) {
     s.loss_score = buf[31];
     if (holder_present) {
         s.report_latch_holder = be16_read(buf + 32);
+    }
+    if (calib_present) {
+        s.calib_word = buf[34];
+        s.calib_fingerprint = buf[35];
     }
     return selector_state_fields_valid(s) ? Decoded{s}
                                           : Decoded{DecodeError::kInvalidField};
@@ -492,8 +507,14 @@ size_t encode_selector_state(const SelectorState& pkt, uint8_t* out,
                              size_t cap) {
     const bool holder_present =
         (pkt.state_flags & selector_state_flags::kHolderPresent) != 0;
-    const size_t size =
-        holder_present ? kSelectorStateSize : kSelectorStateLegacySize;
+    const bool calib_present =
+        (pkt.state_flags & selector_state_flags::kCalibPresent) != 0;
+    if (calib_present && !holder_present) {
+        return 0;  // §10.6: bit4 implies bit3
+    }
+    const size_t size = calib_present ? kSelectorStateCalibSize
+                        : holder_present ? kSelectorStateSize
+                                         : kSelectorStateLegacySize;
     if (out == nullptr || cap < size || !selector_state_fields_valid(pkt)) {
         return 0;
     }
@@ -515,6 +536,10 @@ size_t encode_selector_state(const SelectorState& pkt, uint8_t* out,
     out[31] = pkt.loss_score;
     if (holder_present) {
         be16_write(out + 32, pkt.report_latch_holder);
+    }
+    if (calib_present) {
+        out[34] = pkt.calib_word;
+        out[35] = pkt.calib_fingerprint;
     }
     return size;
 }

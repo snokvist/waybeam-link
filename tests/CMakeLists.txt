@@ -42,6 +42,7 @@ add_wb_test(video_slot_cadence_test)
 add_wb_test(hmac_test)
 add_wb_test(csa_test)
 add_wb_test(vehicle_cmd_test)
+add_wb_test(calibrate_test)
 add_wb_test(recovery_test)
 add_wb_test(loopback_test)
 
