@@ -4702,3 +4702,31 @@ larger-than-v1 tier or less repair, so robustness remains preferred. The normal
 flight mode and its profile range were restored after the benchmark; Automatic
 remains selected, so the profile ceiling keeps low-rate profiles at 1424 and
 admits 3072 automatically when a jumbo-capable high-rate profile is active.
+
+## Pass 123 — jumbo source-symbol floor (2026-08-01)
+
+**Trigger.** The Pass 122 hardware comparison achieved its CPU and packet-rate
+goal at High, but a 100 fps P-frame averaged only 9.95 source symbols plus two
+repair symbols. That leaves a short FEC block with too little erasure depth for
+the intended burst-loss robustness; the operator requested a floor near 16
+before merge readiness.
+
+**Ruling (operator direction; exact threshold selected from the measured
+trade-off).** Apply a per-frame **16-source-symbol jumbo guard**. The largest
+symbol that still gives `k >= 16` is `floor((frame_len - 1) / 15)`. Intersect
+that with the profile/negotiated ceiling, but never shrink below the existing
+Default symbol size (1387 B). Thus jumbo mode cannot reduce a block below 16
+when the Default path would have reached 16, while small frames that were
+already below 16 at Default do not explode into tiny packets. The choice of 16
+raises a 20% P-frame policy from roughly 2 to 4 repair symbols at the measured
+high-rate operating point without restoring the full 20-symbol/Default packet
+load.
+
+This is a packet-size choice made once at the existing frame/block boundary,
+not padding, frame merging, a new wire field, or a continuous MTU negotiation.
+Every block remains homogeneous and self-describing. A cumulative
+`mtu_floor_clamped_frames` stream stat makes the guard observable. Merge
+readiness requires the complete host suite, all three target builds, a minimum
+ten-case targeted matrix around integer boundaries and tier/profile
+intersections, an independent full-diff review, and a repeated high-bitrate
+hardware comparison.

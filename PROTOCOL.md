@@ -972,9 +972,10 @@ payload** — FrameFramer parses only the metadata prefix, never the NAL bytes.
    (one frame = one block, §4).
 2. Set `ARQ` from `VencFrameMeta.flags` bit 0 (IDR ⇒ 1). With the explicit
    `all-frames` mode, set `PFRAME_ARQ` instead on non-IDRs, §4.1.
-3. **Fragment** the blob into `k` **source symbols** of size
-   `s = active_profile.max_payload − 26 − 11` (header + §14 repair subheader,
-   so source and repair symbols are interchangeable for coding); the last
+3. **Fragment** the blob into `k` **source symbols**. Start with the §9.3a
+   packet-budget ceiling and apply its 16-source-symbol jumbo guard for this
+   frame; then `s = guarded_packet_budget − 26 − 11` (header + §14 repair
+   subheader, so source and repair symbols are interchangeable for coding). The last
    symbol carries the tail (`< s`) and is zero-padded to `s` only for the FEC
    computation (§14), never on the wire. `k = ceil(blob_len / s)`. `s` is fixed
    for the life of the block (a frame is fragmented atomically under one
@@ -1452,23 +1453,43 @@ tier 0, 1, or 2. v1's supported Realtek injection backends declare High.
 
 The craft boots and becomes unbound at Default. An accepted §11.7 `MTU_TIER`
 command changes `negotiated_packet_budget` at the **next frame/block boundary**;
-the current block remains byte-homogeneous. The effective budget used by the
-framer is:
+the current block remains byte-homogeneous. The framer starts with the ceiling:
 
 ```
 min(active_profile.max_payload, negotiated_packet_budget)
 ```
+
+Before fragmenting each frame, the framer MUST apply a **16-source-symbol
+jumbo guard**. Let `B` be that ceiling, `H = 26 + 11` bytes of DATA/repair
+overhead, `s_ceiling = B - H`, and `s_default = min(s_ceiling, 1424 - H)`.
+For frame blob length `L` (including `VencFrameMeta`), use:
+
+```
+s_guard = floor((L - 1) / (16 - 1))
+s = min(s_ceiling, max(s_default, s_guard))
+guarded_packet_budget = s + H
+k = ceil(L / s)
+```
+
+The integer `L - 1` form is load-bearing: it is the largest symbol size that
+still yields `k >= 16`. The Default-sized lower bound means the guard never
+creates packets smaller than the compatibility path merely to inflate `k`.
+Consequently, whenever Default would produce at least 16 source symbols,
+Medium/High MUST also produce at least 16; a genuinely small frame that already
+has `k < 16` at Default remains unchanged. The guard is evaluated once per
+frame, so all symbols in a block remain byte-homogeneous. Implementations count
+frames whose jumbo ceiling was reduced as `mtu_floor_clamped_frames` (§15.3).
 
 Thus the profile table remains the RF/CPU policy ceiling and the ground tier is
 the receiver-fleet safety ceiling. Standard/low-rate profiles may retain 1424;
 high-rate profiles should use 2048 or 3072 to keep total emitted DATA packet
 rate (source plus FEC repair) near **1000–1200 packets/s** where practical.
 Packet rate is a soft table-authoring target, not a second runtime controller.
-One encoded frame remains one FEC block (§14): at 100 fps the target naturally
-gives roughly 10–12 symbols/frame, while 60 fps gives 17–20 and 30 fps gives
-33–40. Implementations MUST NOT pad or merge frames merely to manufacture a
-20–30-symbol block; symbol count is bounded by frame size, latency, and the
-`k+r ≤ 256` codec limit.
+One encoded frame remains one FEC block (§14). The jumbo guard holds eligible
+frames at 16 source symbols; larger frames naturally produce more. Implementations
+MUST NOT pad or merge frames, nor shrink below the Default symbol size, merely
+to manufacture a larger block; symbol count is bounded by frame size, latency,
+the compatibility packet floor, and the `k+r ≤ 256` codec limit.
 
 ### 9.4 Promote path (v0 = RSSI-margin; active probe deferred)
 wfb_ng promoted only after a boundary probe on a **separate wfb stream**; the
@@ -3732,8 +3753,10 @@ implied.
 On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
 the exact cumulative §14.1 symbols emitted by `FrameFramer`;
 `fec_oversize_frames` counts frames sent source-only because `k+r` exceeded
-GF(256) capacity; `idr_frames` counts frames whose VFRM metadata carried the
-IDR flag; and `arq_frames` counts frames stamped with either ARQ-class flag.
+GF(256) capacity; `mtu_floor_clamped_frames` counts frames for which §9.3a's
+16-source-symbol guard reduced a Medium/High ceiling; `idr_frames` counts
+frames whose VFRM metadata carried the IDR flag; and `arq_frames` counts frames
+stamped with either ARQ-class flag.
 They are zero on RX and non-frame-SHM streams. These counters are
 the fixed-policy baseline for comparing hypothetical JSCC shadow parity; byte
 or bitrate inference is not an acceptable substitute.
