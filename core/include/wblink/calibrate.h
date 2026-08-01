@@ -95,6 +95,7 @@ class Calibrator {
         rung_ = 0;
         qdb_ = p_.min_qdb;  // Pass 121: rung 0 ramps from the floor
         last_clean_.reset();
+        verify_descents_ = 0;
         enter_rung_ = true;
         phase_ = Phase::kSeek;
         dwell_start_ms_ = 0;  // set when the pin/power action is emitted
@@ -188,6 +189,23 @@ class Calibrator {
                 return a;
             }
             case Phase::kVerify: {
+                // Addendum 2: near-cliff instability can pass short probe
+                // dwells and fail only under sustained exposure — enforce
+                // loss_ok here with a bounded step-down.
+                if (loss > p_.loss_ok_milli && verify_descents_ < 3 &&
+                    qdb_ > p_.min_qdb) {
+                    auto& c = artifact_.ceilings[rung_];
+                    if (loss > p_.loss_bad_milli && !c.has_bad) {
+                        c.has_bad = true;
+                        c.first_bad_rssi =
+                            static_cast<int8_t>(std::lround(rssi));
+                    }
+                    ++verify_descents_;
+                    qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
+                    a.set_qdb = qdb_;
+                    begin_dwell(now_ms, p_.verify_dwell_ms);
+                    return a;
+                }
                 artifact_.placement_qdb[rung_] = qdb_;
                 artifact_.placement_rssi[rung_] =
                     static_cast<int8_t>(std::lround(rssi));
@@ -248,6 +266,7 @@ class Calibrator {
         // below the previous placement, not from the floor.
         qdb_ = std::max(p_.min_qdb, placement_qdb_ - p_.seek_step_qdb);
         last_clean_.reset();
+        verify_descents_ = 0;
         phase_ = Phase::kSeek;
         a.pin_rung = rung_;
         a.set_qdb = qdb_;
@@ -286,6 +305,7 @@ class Calibrator {
     uint64_t loss_sum_ = 0;
     uint64_t loss_w_ = 0;
     uint8_t rung_ = 0;
+    uint8_t verify_descents_ = 0;
     int32_t qdb_ = 0;
     int32_t placement_qdb_ = 0;
     std::optional<Probe> last_clean_;

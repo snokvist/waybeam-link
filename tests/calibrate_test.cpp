@@ -35,8 +35,16 @@ struct Channel {
         return static_cast<int8_t>(-41 +
                                    0.85 * (std::min(qdb, cap_qdb) / 4.0));
     }
+    // Near-cliff instability (addendum 2): at/above flaky_above the link
+    // survives short exposure but collapses under sustained exposure —
+    // clean through a probe dwell, bad partway into a verify dwell.
+    int8_t flaky_above = 127;
+    mutable int hot = 0;
     uint16_t loss(uint8_t rung) const {
-        return rssi() >= ceil[rung] ? 900 : 5;
+        const int8_t r = rssi();
+        if (r >= ceil[rung]) return 900;
+        if (r >= flaky_above && ++hot > 10) return 900;
+        return 5;
     }
 };
 
@@ -132,6 +140,28 @@ void test_cap_wall() {
     }
 }
 
+void test_verify_backoff() {
+    // Addendum 2: a placement that probes clean but fails the verify
+    // dwell must step down and re-verify — the fp 0xE3 rung-5 defect
+    // (probed clean, verified 942‰, recorded and moved on).
+    Rig r(fast_params());
+    r.ch.cap_qdb = 52;
+    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
+    r.ch.flaky_above = -31;  // 52 qdb lands at -29: flaky under exposure
+    CHECK(r.cal.start(r.now));
+    r.run(r.now + 590000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    const CalibArtifact& a = r.cal.artifact();
+    for (int m = 0; m < 8; ++m) {
+        // Every rung ends one step below the flaky zone, verified clean.
+        CHECK(a.placement_qdb[m] == 36);
+        CHECK(a.placement_loss_milli[m] <= 15);
+    }
+    // The verify failure recorded rung 0's overload bracket.
+    CHECK(a.ceilings[0].has_bad);
+    CHECK(a.ceilings[0].first_bad_rssi == -29);
+}
+
 void test_report_loss_abort() {
     Rig r(fast_params());
     CHECK(r.cal.start(r.now));
@@ -212,6 +242,7 @@ int main() {
     test_selector_state_calib_word();
     test_full_run_and_artifact();
     test_cap_wall();
+    test_verify_backoff();
     test_report_loss_abort();
     test_hard_cap();
     test_abort_cmd();
