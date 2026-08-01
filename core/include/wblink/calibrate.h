@@ -151,6 +151,17 @@ class Calibrator {
                 last_report_ms_ = now_ms;  // re-arm at the safe power
                 return place(a, now_ms, last_clean_->qdb);
             }
+            // Addendum 5: a blackout during verify is a verify failure of
+            // total severity — take the addendum-2 bounded step-down.
+            if (phase_ == Phase::kVerify && verify_descents_ < 3 &&
+                qdb_ > p_.min_qdb) {
+                ++verify_descents_;
+                qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
+                a.set_qdb = qdb_;
+                last_report_ms_ = now_ms;  // re-arm per descent
+                begin_dwell(now_ms, p_.verify_dwell_ms);
+                return a;
+            }
             finish(CalibState::kFailed, "report_loss", now_ms);
             a.restore = take_restore_();
             return a;

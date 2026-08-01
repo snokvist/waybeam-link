@@ -72,13 +72,22 @@ struct Rig {
     // Addendum 4: above this commanded power the feedback channel itself
     // collapses — no reports are delivered at all.
     int32_t blackout_above = 1 << 30;
+    // Addendum 5: hysteretic blackout — tripping at bo_trip holds until
+    // power drops to bo_clear (a marginal rung's overload doesn't release
+    // at the power that entered it).
+    int32_t bo_trip = 1 << 30;
+    int32_t bo_clear = -1;
+    bool blacked = false;
 
     explicit Rig(const CalibrateParams& p) : cal(p) {}
 
     void run(uint64_t until_ms, bool feed_reports = true) {
         while (now < until_ms) {
             now += 100;
-            if (feed_reports && ch.qdb <= blackout_above && now % 100 == 0) {
+            if (ch.qdb >= bo_trip) blacked = true;
+            else if (ch.qdb <= bo_clear) blacked = false;
+            if (feed_reports && ch.qdb <= blackout_above && !blacked &&
+                now % 100 == 0) {
                 cal.on_report(ch.rssi_sample(),
                               ch.loss(pinned == 255 ? 0 : pinned), 300, now);
             }
@@ -212,12 +221,34 @@ void test_blackout_retreat() {
     }
 }
 
+void test_verify_blackout_descent() {
+    // Addendum 5: the v3 rung-6 aborts — the seek blackout retreat lands
+    // on a placement that itself blacks out under sustained exposure
+    // (hysteresis: tripped at 52, releases only at ≤20). Verify must
+    // take the bounded step-down instead of aborting.
+    Rig r(fast_params());
+    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
+    r.bo_trip = 52;
+    r.bo_clear = 20;
+    CHECK(r.cal.start(r.now));
+    r.run(r.now + 590000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    CHECK(r.restores == 1);
+    const CalibArtifact& a = r.cal.artifact();
+    for (int m = 0; m < 8; ++m) {
+        CHECK(a.placement_qdb[m] == 20);  // descended into the clear zone
+        CHECK(a.placement_loss_milli[m] <= 15);
+    }
+}
+
 void test_report_loss_abort() {
     Rig r(fast_params());
     CHECK(r.cal.start(r.now));
     r.run(r.now + 2000);  // let it get going
     CHECK(r.cal.state() == CalibState::kRunning);
-    r.run(r.now + 10000, /*feed_reports=*/false);  // reports stop
+    // Reports stop for good: seek retreat + the bounded verify descents
+    // each buy one re-armed clock before the abort finally fires.
+    r.run(r.now + 30000, /*feed_reports=*/false);
     CHECK(r.cal.state() == CalibState::kFailed);
     CHECK(r.cal.fail_reason() != nullptr);
     CHECK(r.restores == 1);
@@ -295,6 +326,7 @@ int main() {
     test_verify_backoff();
     test_cap_confirm_rejects_noise();
     test_blackout_retreat();
+    test_verify_blackout_descent();
     test_report_loss_abort();
     test_hard_cap();
     test_abort_cmd();
