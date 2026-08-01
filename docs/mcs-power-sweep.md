@@ -1,0 +1,294 @@
+# MCS × TX-power sweep — wire PER without bad-FCS
+
+**Status:** tooling + first bench dataset. Follow-on from
+`docs/per-mcs-per-ladder-plan.md` §6, where the Pass-119 bad-FCS numerator
+was found blocked on every fleet chip (no driver delivers FCS-failed
+frames). This is the "another way": measure per-rung failure rate from the
+two ends' own counters, and use TX power as the controlled degradation axis
+the plan's B2 wanted to get from physically walking the craft.
+
+## Method
+
+One dwell = (pinned rung, fixed craft TX power) held for N seconds.
+
+- **Denominator** — craft `tx_submitted` delta over the dwell (§15.3).
+- **Numerator survivors** — ground per-adapter `rx` delta. Wire PER per
+  adapter = `1 − rx_Δ/tx_Δ`. Pre-diversity, per-adapter — deliberately so:
+  this is the quantity a per-rung selector gate would consume; diversity
+  merge sits *after* it.
+- **Attribution is exact, not inferred.** Single-rung policy (§3.0 Pass 118)
+  means every frame in a dwell was aired at the pinned rung; `rx_mcs` deltas
+  confirm it per dwell (and `rx_mcs_unknown` must stay 0).
+- **Axes** — rung via `POST :8091/api/v1/link/profile {"min":N,"max":N}`;
+  power via `iw dev wlan0 set txpower fixed <mBm>` on the craft
+  (kernel-monitor backend). Sweeping power *up* is as important as down: the
+  §4.8 anomaly (2–4% loss at −26 dBm) is a high-power/high-RSSI failure, so
+  the interesting region includes PA-overload territory, not just the fade
+  floor.
+
+Known measurement limits, stated so nobody plans around them silently:
+
+- Snapshot skew: craft and ground stats are read ~100 ms apart; at a 20 s
+  dwell that bounds the PER error at ~1‰. Don't shrink dwells below ~10 s.
+- The craft `tx_submitted` includes HEARTBEAT/ANNOUNCE alongside the video
+  feed — negligible against a live venc feed, dominant if the feed dies
+  (visible as a collapsed `tx_frames`; discard such rows).
+- Bench range (~50 cm) means the *fade* floor of upper rungs is unreachable
+  by power alone (1 dBm floor ≈ −40 dBm RSSI at the desk). What the bench
+  sweep does reach is the high-RSSI loss-floor region — the regime §4.8
+  actually failed in. Fade-floor tails still need attenuators or range.
+
+## Tool
+
+`tools/mcs_power_sweep.py` — drives the live rig from the ground host,
+restores the profile window and TX power on any exit. Output is one JSON
+row per dwell (adapters: PER‰, RSSI, `rx_mcs` deltas; streams: delivered /
+loss gauges).
+
+```
+python3 tools/mcs_power_sweep.py --rungs 0,2,4,5,7 \
+    --powers 1,5,10,15,20,27 --dwell 20 --settle 6 --out sweep.jsonl
+```
+
+## Results — 2026-08-01 (craft .232 8812EU ↔ ground .242 EU+CU, 5805/HT20, ~50 cm)
+
+Dataset: `docs/data/mcs-power-sweep-20260801.jsonl` (30 dwells × 20 s,
+rungs {0,2,4,5,7} × {1,5,10,15,20,27} dBm). PER‰ shown as eu-uplink /
+cu-diversity; RSSI is eu's mean. `rx_mcs_unknown` stayed 0 and the `rx_mcs`
+delta landed in the pinned bucket on every dwell — attribution held.
+
+| rung \ dBm | 1 (−40) | 5 (−39) | 10 (−33) | 15 (−28) | 20 (−23) | 27 (−19) |
+|---|---|---|---|---|---|---|
+| MCS0 | 16/13 | 12/10 | 15/13 | 16/14 | 16/13 | 19/19 |
+| MCS2 | 4/5 | 2/0 | 2/0 | 12/10 | 4/1 | 8/7 |
+| MCS4 | 8/8 | 8/5 | 3/1 | 7/6 | 0/0 | **1000/1000** |
+| MCS5 | 1/4 | 6/3 | 4/2 | 9/6 | **49/16** | **1000/1000** |
+| MCS7 | 1/4 | 4/0 | 0/0 | 13/10 | **628/328** | **1000/1000** |
+
+(Values ≤ ~5‰ are at the floor of the method — snapshot skew bounds ~1‰,
+and the USB2-hub contention baseline sits at a few ‰. A couple of −3‰
+readings are that skew, not physics.)
+
+### Finding 1 — the overload cliff is real, rung-ordered, and total
+
+Above ~−25 dBm RSSI the link does not degrade gracefully at high rungs — it
+falls off a cliff, in strict modulation order: MCS7 is already at 33–63%
+loss at 20 dBm and **dead** (rx = 0 on both adapters) at 27; MCS5 survives
+20 dBm at 2–5% and dies at 27; MCS4 is clean at 20 and dead at 27; MCS2 and
+MCS0 survive everything. This is receiver-side nonlinearity (EVM floor at
+strong signal), not fade — and it is precisely the §4.8 regime: the recorded
+"2–4% sustained loss at −26 dBm" was not an anomaly but the *edge* of this
+cliff.
+
+**Both adapters die together.** In the overload region the diversity
+assumption (§14, decorrelated per-adapter loss) inverts — loss correlation
+→ 1, so diversity buys nothing exactly where the selector most needs help.
+
+### Finding 2 — RSSI is non-monotonic as a quality proxy; §4.8's gate is refuted, not just miscalibrated
+
+At −40 dBm every rung including MCS7 runs at ≤ 4‰. At −23 dBm — the
+*highest* margin the §9.4 gate can see — MCS7 runs at 33–63% loss. Across
+the top half of the observable range, more RSSI is *worse* for high rungs.
+A promote gate of the form "RSSI ≥ rung floor + margin" is therefore wrong
+in kind, not in tuning: no margin constant fixes a proxy that changes sign.
+
+### Finding 3 — MCS0 has a flat ~10–19‰ loss floor, power-independent
+
+MCS0 is *lossier* than every other rung at low power, flat across the whole
+power axis (so not signal-related). Plausible mechanism: ~8× longer airtime
+per frame → proportionally higher exposure to collisions with the uplink
+return traffic on the same channel. Open question, worth its own look
+(candidate check: correlate with return-window activity; the per-dwell JSONL
+rows carry stream gauges).
+
+### Method note
+
+The dwell at rung 4 / 27 dBm also killed the *uplink-visible* downlink
+completely; the selector was pinned so nothing reacted, but an unpinned
+selector living purely on reports would have seen report loss, not a rate
+signal. Recovery after the sweep was immediate and clean on restore.
+
+## Implications for the §9.4 selector — proposal sketch (operator input wanted)
+
+1. **Stop treating RSSI as monotonic.** The gate needs an upper operating
+   band, not just a floor: promotion into rung r should require RSSI within
+   `[floor_r + margin, overload_r − margin]`, with `overload_r` per-rung
+   (measured here: ≈ −25 dBm for MCS7/5, ≈ −20 for MCS4 at this cal).
+   Bench-calibratable per hardware; this sweep is the calibration tool.
+2. **Per-rung PER memory (route 1, now trivial).** Under single-rung policy
+   the selector can key its existing loss window by the committed rung —
+   a per-rung PER EWMA with staleness, dwell-guarded around transitions.
+   That is the passive ladder from the Pass-119 plan with *exact*
+   attribution and zero wire change; the §4 emission-shape ruling shrinks
+   to "how much of this table does §15.3 export".
+3. **Promotion becomes probe-shaped.** With per-rung PER memory, promote =
+   enter target rung as a probation window and let the existing §9 lockout
+   machinery demote-on-strike; the probe result refreshes the rung's PER
+   entry. RSSI's only remaining job is choosing *which* rung to probe.
+4. **Couple power into the operating point.** The cliff moves with rung, so
+   at close range the right move before promoting is often power *down*
+   (§10.2 tiering / §10.5 override), not rung up. A joint (mcs, power)
+   selection targeting an RSSI band of roughly [−45, −28] at the receiver
+   would have avoided every failed dwell in this dataset.
+5. **Re-run the sweep with the fleet `power_map` tiering active** to
+   confirm shipped configs stay clear of the cliff at realistic ranges —
+   this run bypassed tiering deliberately by forcing `iw` power.
+
+## Results — 2026-08-01, second session: §10.2 tiering active
+
+First finding before any dwell ran: **the operating vehicle config has no
+`power_map`, so the auto-table's power tiering never actuates on it.** The
+§9.3 table carries per-rung `tx_power_level` intent (4/4/3/3/2/2/1/1), but
+without a node-local §10.2 curve the commit resolve is a no-op — the craft
+airs every rung at whatever `iw` power was last set. The tiering the table
+is "calibrated" around is designed, implemented (verified below), and
+**not deployed**.
+
+With a curve loaded (`power_map` on the craft adapter; PHY_REG_PG-subset
+file, flat baseline B across MCS0–7), the resolve actuates exactly as
+specced — hardware stepped B−0/−2/−4/−6 dB with the committed rung
+(level 4→1). One dwell per rung, `--powers auto`:
+
+**Baseline 20 dBm** (curve authored clear of the cliff):
+
+| rung | applied | RSSI (eu) | PER eu/cu |
+|---|---|---|---|
+| MCS0 | 20 dBm | −23 | 14/12‰ |
+| MCS2 | 18 dBm | −25 | 8/5‰ |
+| MCS4 | 16 dBm | −27 | 4/5‰ |
+| MCS5 | 16 dBm | −27 | 3/3‰ |
+| MCS7 | 14 dBm | −30 | 6/2‰ |
+
+Every rung clean — a correctly authored curve + tiering places the whole
+ladder inside the safe RSSI band. The mechanism works.
+
+**Baseline 27 dBm** (the `txpower auto` driver default — what an uncurved
+node effectively flies at, minus the tiering it doesn't get):
+
+| rung | applied | RSSI (eu) | PER eu/cu |
+|---|---|---|---|
+| MCS0 | 27 dBm | −19 | 11/9‰ |
+| MCS2 | 25 dBm | −19 | 10/12‰ |
+| MCS4 | 23 dBm | −20 | 15/7‰ |
+| MCS5 | 23 dBm | −21 | **995/980‰** |
+| MCS7 | 21 dBm | −22 | **987/925‰** |
+
+The −6 dB level ladder cannot out-run a ~5 dB-wide cliff from a hot
+baseline: MCS5/7 are effectively dead at close range even with tiering
+active. Interesting detail: MCS4 at 23 dBm survives (15‰) where MCS5 at the
+*same power* is dead — the per-rung overload ceilings really are per-rung.
+
+### Consequences
+
+1. **Deploy gap to close:** vehicles need a `power_map` authored per
+   adapter class, or the table's calibration is fiction on kernel-monitor
+   nodes. (Bench craft: none was configured; the devourer A/B bench earlier
+   used one, which is where the "calibrated" impression came from.)
+2. **Authoring rule the sweep gives you:** pick the baseline so every rung's
+   landing RSSI at *minimum operating range* stays below its overload
+   ceiling (here: ≈ −25 dBm for MCS5/7). The sweep tool measures both
+   sides of that inequality directly.
+3. The §9.4 proposal above stands unchanged — tiering places the operating
+   point; the banded gate + per-rung PER memory is what notices when the
+   placement is wrong (range closes, curve mis-authored, different antenna).
+
+## Results — 2026-08-01, third session: live per-packet MCS mixing (devourer)
+
+Question: can individual packets be injected at different MCS, live, in the
+full running stack? Scratch build (never committed): `RadioAir::inject`
+round-robins the per-packet radiotap MCS over a fixed set while `SetTxMode`
+stays at the committed rung (5) and live video flows.
+
+**Mechanism: yes, cleanly.** Wide span {2,5,7}, 30 s dwells, ~70k frames:
+all three ground buckets filled at exactly ⅓ each (23160/21928/22862 vs
+23317 expected), zero leakage into other buckets, `rx_mcs_unknown` 0. The
+chip airs each frame at its own descriptor rate with no visible switching
+cost at 3.5k fps alternation.
+
+**Per-rate PER is compositional.** Each rate in the mix showed the PER it
+would have shown aired alone under the same conditions — confirmed by an
+immediate single-rung MCS5 control (stock binary, same bring-up): mixed
+MCS5 28–94‰ vs single-rung MCS5 39–100‰, while MCS2 stayed at 6–7‰ in the
+same dwells. The narrow-span {4,5,6} run reproduced the same shape (MCS4
+7–9‰, MCS5/6 elevated). No mixing-specific penalty was observed at either
+span; ±1-rung restriction is NOT required by the mechanism.
+
+Two riders that matter for using this:
+
+1. **The mix inherits each rate's own ceiling.** Elevated MCS5/6 loss in
+   these dwells was the overload edge, not switching — the runs landed at
+   −22..−27 dBm RSSI. A mixed set must sit inside the *intersection* of its
+   members' safe RSSI windows, which is exactly the operator's "mid-sized
+   TX power" rule; at −30 dBm the full {2,5,7} span was compositional.
+2. **Devourer's default TXAGC varies between bring-ups** — RSSI moved from
+   −30/−36 (previous session) to −22/−27 (this one) with no config change,
+   ~6 dB. Per-packet mixing (and single-rung operation, for that matter)
+   wants an authored §10.2 curve rather than the bring-up default, or the
+   operating point wanders toward a ceiling.
+
+Also observed both sessions: MCS5 runs lossier than MCS7 at the same power
+on this 8812EU — per-rung ceilings are not monotonic in rate order (echoes
+the MCS4-survives-where-MCS5-dies row above). Worth keeping in mind when a
+future selector assumes rung order = quality order near the top.
+
+## Results — 2026-08-01, fourth session: closed-loop calibration (`tools/curve_author.py`)
+
+The "calibration feature" loop, validated end to end on the live rig
+(kernel-monitor craft): **calibrate → author → apply → acceptance-sweep**.
+
+`curve_author.py` pins each rung, steers craft TX power until the
+ground-reported RSSI lands in a target band (−32±3 — closed-loop, because
+open-loop dBm is untrustworthy: devourer bring-up TXAGC wanders ~6 dB),
+verifies wire PER at the placement, then probes upward for the rung's
+overload ceiling. Output: a §10.2 curve (level-4 baseline, compensated for
+the profile table's `tx_power_level` so the runtime resolve reproduces the
+placement) + a per-rung ceiling report (the future §9.4 banded-gate input).
+
+Run on the .232 8812EU at bench range: **all 8 rungs placed at 3 dBm /
+−33 RSSI, PER 0–11‰** — artifacts in `docs/data/curve-232eu-bench-20260801.*`.
+
+Measured ceilings (last-clean → first-bad RSSI, PER>50‰ threshold):
+
+| rung | ceiling bracket | note |
+|---|---|---|
+| MCS0–2 | clean to cap (−12) | no ceiling reachable at 27 dBm |
+| MCS3 | −15 → −12 (606‰) | |
+| MCS4 | −15 (36‰) → −12 (1000‰) | |
+| MCS5 | −18 (14‰) → −15 (997‰) | |
+| MCS6 | −22 (17‰) → −18 (52‰) | |
+| MCS7 | −22 (17‰) → −18 (170‰) | |
+
+**Acceptance sweep** (curve deployed as `power_map`, `--powers auto`, all 8
+rungs): resolve landed every rung at the calibrated 3 dBm, **PER 1–13‰
+across the entire ladder** — including MCS1/3/6 which the earlier sweeps
+skipped. Calibrate-once → always-apply works with zero runtime changes.
+
+**The MCS5 question, resolved: keep it.** On the kernel-monitor path,
+mid-band MCS5 is clean (3‰ at placement) and its ceiling (−15) is *higher*
+than MCS6/7's (−18). The hot-MCS5 anomaly from sessions 1–3 appeared only
+on the **devourer** path — consistent with per-rate TXAGC skew in the chip
+cal, which devourer's `SetTxPowerRateDiffs` exists to correct. Conclusion:
+don't drop MCS5 from mode catalogs; fix its per-rate power when the
+backend moves, and let per-device calibration data make the call per craft.
+
+### Productizing — operator direction (2026-08-01)
+
+- **Calibration as a feature**: integrate the loop into waybeam-link proper
+  (it already owns every primitive: profile pin, §10.5 power override, both
+  ends' stats), triggered from the waybeam-hub vehicle menu over the
+  existing REST surface. Run once per craft/ground pairing; persist curve +
+  ceiling report with the deploy config; **re-run when the pairing changes**
+  (craft adapter, ground adapter set, antennas). The artifact should carry a
+  pairing fingerprint (craft MAC/chip + ground adapter set + band) and the
+  runtime should surface CALIBRATION STALE when the live pairing mismatches
+  — detect drift, never guess (the mode-catalog fingerprint pattern).
+- **Perform calibration at ~50–100 m craft–ground separation** for a
+  flight-representative placement; the bench run above validates the loop,
+  not a flight curve. The receiver-referenced ceilings transfer across
+  range; the placement power is what the range realism buys.
+- **Devourer forward-validity**: the artifact is receiver-referenced
+  (placement RSSI band + per-rung ceilings), so it survives the backend
+  move unchanged — per-packet TX power just becomes a finer actuator for
+  hitting the same targets, and per-rate diffs absorb chip-cal skew.
+- Spec-first: the integrated feature needs a Pass (§10.2 authoring
+  procedure + calibration-state surfacing in §15.3) before code lands.

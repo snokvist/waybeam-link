@@ -4499,3 +4499,154 @@ dual-rung transmission is what removes the confound, and that is gated on
 §9.5 having a mixed-rate airtime model at all — the derived-bitrate math and
 `airtime_budget_frac` assume one service rate, and `ht20_service_time_us()`
 takes a single `mcs`. Nothing here is a step toward assuming otherwise.
+
+## Pass 120 — craft-resident link calibration (2026-08-01)
+
+**Question.** The bench sessions on PR #81 validated a closed-loop
+calibration (place every rung in a target RSSI band, measure per-rung
+overload ceilings, author the §10.2 curve, acceptance-sweep clean across
+the whole ladder) — driven over IP from the desk. The fleet needs it in the
+field, where the craft has no IP path. How does the loop run, and how does
+the artifact reach the craft?
+
+**Ruling (operator, 2026-08-01 — R1–R5 adopted as recommended).** It
+doesn't reach the craft; it is born there. The §3.5 LINK_REPORT already
+carries the complete feedback set (`rssi_best`/`rssi_mean`,
+`loss_postdiv_prearq`, `uniq`) at report cadence, so the loop moves
+craft-side and steers against what the ground reports hearing. No bulk
+data crosses the air — which §11.7's narrow-channel law would have
+forbidden anyway. The ground contributes exactly a claim-gated trigger and
+a display.
+
+- **R1 — registry.** `0x08 CALIBRATE {0=abort, 1=start}`, no further args
+  (nobody speculates a dry-run). `start` REJECTED when already running,
+  no power actuator, or no latched reporter — the last is load-bearing:
+  the loop is blind without reports. Gating is the existing §11.7
+  bound-issuer + PSK HMAC + nonce machinery, unchanged.
+- **R2 — persistence.** The MODE precedent, split the same way: run state
+  stays craft-session volatile; the *artifact* (curve + ceiling report +
+  pairing fingerprint, ~1 KB) persists in `/etc/waybeam-link/calibration/`
+  (atomic write, single last-good copy) and auto-loads as the TX adapter's
+  `power_map` on boot **only when the fingerprint's craft-adapter identity
+  matches the live adapter**. Mismatch ⇒ boot with no curve + surface
+  CALIBRATION STALE. A curve calibrated for other hardware is never
+  silently applied.
+- **R3 — observability.** The §3.15 32→34 `report_latch_holder` extension
+  pattern is the sanctioned mechanism: bytes 34–35, `state_flags` bit4,
+  {state, rung} + CRC-8 artifact hash (§3.6 idiom). Failure reasons and
+  the full report are management-HTTP only (`GET /api/v1/calibration`).
+- **R4 — restore.** Every exit path converges on power-first restore
+  (a probe may sit on a rung's ceiling), then the boot selector window,
+  then the §10.4 resolve. Report-loss abort at 3 s (not the §9 report
+  timeout — dwell-edge gaps must not thrash it); hard cap 240 s. §9.8
+  fail-toward-degradation throughout.
+- **R5 — placement.** The loop is a pure time-injected state machine in
+  `core/` (the selector/CSA shape): inputs are report samples and ticks,
+  outputs are pin/power/artifact actions. `io/` supplies actuation through
+  seams that all exist (§10.5 `set_power_qdb`, §9.7 pin, file sink). The
+  Android `:wifi` consumer vendors `core/` whole, so a phone ground
+  inherits calibration display for free.
+
+**Field-vs-bench fidelity, stated.** The field loop steers on
+post-diversity loss (what reports carry); the bench tool used per-adapter
+wire PER. They agree at the placement ("clean here") and at the cliff
+(adapters fail together — measured, PR #81). Per-adapter fidelity remains
+a bench-mode capability. Calibrate at 50–100 m separation (operator
+direction): placement power is what range realism buys; the
+receiver-referenced ceilings transfer regardless.
+
+**Boundary.** Calibration writes the §10.2 curve; it does not touch the
+selector's thresholds, §9.4's gate, or the channel. The per-rung ceiling
+table it persists is the *input* a future banded promote gate would
+consume — that gate is its own pass, not this one.
+
+## Pass 121 — calibration max-power seek (2026-08-01)
+
+**Trigger.** The first field run of the Pass 120 loop (craft 17, 50 m,
+live over RF) failed in a way the bench could not show: ground RSSI sat
+at −78…−85 for the whole run while the steer commanded power upward —
+an RF power cap latched below the commanded values ("RF CAP P0",
+operator-observed on-device), so the delivered power never followed and
+the target band (−32 ± 3) was unreachable regardless. Every rung would
+have "placed" at a commanded qdb the radio never emitted. The run was
+aborted over RF; no artifact was written (aborted runs never persist —
+the envelope held exactly as specced).
+
+**Ruling (operator direction).** Retire the target-band steer. The loop
+now seeks the **maximum power that does not break the link**, per rung:
+ramp upward in `seek_step_qdb` steps and stop at the first of two walls —
+the **loss wall** (report loss > `loss_bad_milli`: overload or break) or
+the **cap wall** (a commanded step of ≥ 2 dB moves report `rssi_mean` by
+< `cap_rise_db`: delivered power stopped following commanded power).
+Placement = one step below the wall; the wall's bracketing RSSIs ARE the
+overload-ceiling record, so the separate CEILING phase is deleted, not
+moved. A `rssi_guard_dbm` (−20) sanity bound keeps a too-close run out
+of the pure-overload regime. First-probe-already-bad descends until
+clean (floor `min_qdb`).
+
+**What this buys.**
+- The curve becomes "max deliverable clean power per rung" — maximal
+  link budget at range by construction, instead of "whatever landed at
+  −32 on the bench that day".
+- Commanded-vs-delivered divergence is *detected* (cap wall), not
+  recorded as fiction.
+- The calibration distance requirement collapses from a 50–100 m walk
+  to **near-bench, 2–10 m** — far enough that upper-rung overload
+  ceilings sit above the cap wall, close enough for a desk.
+
+**Unchanged.** Artifact shape, store, CRC-8 fingerprint, STALE gate,
+boot auto-load, §3.15 word, VCMD 0x08 semantics, the R4 restore order,
+and both abort clocks — this is an engine-phase change (SEEK→VERIFY per
+rung) plus spec text. §15.2 gains `seek_step_qdb`/`cap_rise_db`/
+`rssi_guard_dbm`; the retired band keys are ignored. The §10.2 level
+compensation stays: a tiered rung resolving below its own maximum is
+headroom, not error.
+
+**Pass 121 addendum (same day, operator).** First live seek run (bench
+distance, fp 0xE8): rungs 4-7 found genuine loss walls (17-21 dBm), but
+rungs 0-3 were stopped by the −20 rssi_guard, not by loss — a guard
+artifact 2 dB short of the radio's true maximum. Operator ruling: the
+guard is a token backstop, not a placement mechanism — default moves
+−20 → **−6**; the loss wall is the intended limiter at every rung.
+
+**Pass 121 addendum 2 (same day, operator).** The guard −6 rerun
+(fp 0xE3) exposed a verify gap: rung 5's placement probed clean at
+1.2 s dwells but the 2.5 s verify measured **942‰** — near-cliff
+instability appears only under sustained exposure — and the engine
+recorded it and moved on (rung 7 likewise verified 34‰ > loss_ok).
+Ruling: **verify enforces loss_ok_milli** — on failure, step down one
+seek_step_qdb and re-verify, bounded at 3 descents; a still-failing
+floor is recorded with its measured loss (the artifact never lies).
+Verify loss above loss_bad_milli also records the overload bracket.
+
+**Pass 121 addendum 4 (same day, autonomous campaign).** The addendum-3
+verification campaign failed 3/5 runs — all `report_loss`, all at rung 7.
+Mechanism: at a wall probe near total overload the feedback channel
+itself collapses (ground hears nothing, reports stop); a bad probe held
+~2 s in v1 (just under the 3 s abort), and the confirmation dwell
+doubled wall exposure past it. Ruling: a report blackout while probing
+ABOVE the rung's last clean power is the strongest possible wall
+evidence (loss = total), not a failure — book the bracket, retreat to
+last_clean, re-arm the report clock, proceed to verify. Once per rung;
+blackout at safe power / during verify / recurring on the rung still
+aborts. The report-loss abort remains the outer safety net for a truly
+dead ground.
+
+**Pass 121 addendum 5 (same day, autonomous campaign).** v3 campaign
+(addenda 3+4): 8/10 done, spreads collapsed — rungs 0-5 and 7 now ZERO
+spread across runs (rung 7 settles honestly at 15 dBm; the v1 23s were
+the noise, not the 15s). The 2 remaining failures were both rung 6 (the
+one marginal rung left): seek blackout → retreat → verify at the retreat
+placement blacks out again → abort, because verify had no retreat path.
+Ruling: a blackout during VERIFY is a verify failure of total severity —
+take the addendum-2 bounded step-down (shared 3-descent budget, clock
+re-armed per descent) instead of aborting. Abort remains for no-floor /
+exhausted descents / truly dead ground.
+
+**Pass 121 addendum 6 (2026-08-01).** §15.3 clarified: on a ground/rx
+node the `calib_*` stats fields mirror the RECEIVED §3.15 calibration
+word of the current selector source (state/rung from byte 0, fingerprint
+from byte 1, while bit4 is set and the source is fresh) — the ground
+WebUI's only view of calibration progress when the craft has no IP path.
+`calib_stale` is craft-local and stays false on ground. Prerequisite for
+the waybeam-hub vehicle-menu calibrate button.

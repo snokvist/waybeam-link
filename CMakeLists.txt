@@ -133,6 +133,7 @@ add_library(wblink_io STATIC
     io/src/air_udp.cpp
     io/src/air_mon.cpp
     io/src/power_file.cpp
+    io/src/calib_store.cpp
     io/src/venc_http.cpp
     io/src/control_server.cpp
     io/src/modes.cpp)

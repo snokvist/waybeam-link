@@ -1,0 +1,181 @@
+{
+ "target_rssi": -32,
+ "rungs": {
+  "0": {
+   "placement_dbm": 3,
+   "rssi": -33,
+   "per_milli": 11,
+   "per_adapter": [
+    {
+     "name": "eu-uplink",
+     "rx": 7126,
+     "per_milli": 11,
+     "rssi": -37
+    },
+    {
+     "name": "cu-diversity",
+     "rx": 7143,
+     "per_milli": 8,
+     "rssi": -33
+    }
+   ],
+   "placement_ok": true,
+   "ceiling_last_clean_rssi": -12,
+   "ceiling_first_bad_rssi": null
+  },
+  "1": {
+   "placement_dbm": 3,
+   "rssi": -33,
+   "per_milli": 4,
+   "per_adapter": [
+    {
+     "name": "eu-uplink",
+     "rx": 11337,
+     "per_milli": 4,
+     "rssi": -38
+    },
+    {
+     "name": "cu-diversity",
+     "rx": 11362,
+     "per_milli": 1,
+     "rssi": -33
+    }
+   ],
+   "placement_ok": true,
+   "ceiling_last_clean_rssi": -12,
+   "ceiling_first_bad_rssi": null
+  },
+  "2": {
+   "placement_dbm": 3,
+   "rssi": -33,
+   "per_milli": 9,
+   "per_adapter": [
+    {
+     "name": "eu-uplink",
+     "rx": 18857,
+     "per_milli": 9,
+     "rssi": -38
+    },
+    {
+     "name": "cu-diversity",
+     "rx": 18875,
+     "per_milli": 8,
+     "rssi": -33
+    }
+   ],
+   "placement_ok": true,
+   "ceiling_last_clean_rssi": -12,
+   "ceiling_first_bad_rssi": null
+  },
+  "3": {
+   "placement_dbm": 3,
+   "rssi": -33,
+   "per_milli": 0,
+   "per_adapter": [
+    {
+     "name": "eu-uplink",
+     "rx": 25005,
+     "per_milli": 0,
+     "rssi": -38
+    },
+    {
+     "name": "cu-diversity",
+     "rx": 25025,
+     "per_milli": -1,
+     "rssi": -33
+    }
+   ],
+   "placement_ok": true,
+   "ceiling_last_clean_rssi": -15,
+   "ceiling_first_bad_rssi": -12
+  },
+  "4": {
+   "placement_dbm": 3,
+   "rssi": -34,
+   "per_milli": 0,
+   "per_adapter": [
+    {
+     "name": "eu-uplink",
+     "rx": 32194,
+     "per_milli": 0,
+     "rssi": -38
+    },
+    {
+     "name": "cu-diversity",
+     "rx": 32263,
+     "per_milli": -2,
+     "rssi": -34
+    }
+   ],
+   "placement_ok": true,
+   "ceiling_last_clean_rssi": -15,
+   "ceiling_first_bad_rssi": -12
+  },
+  "5": {
+   "placement_dbm": 3,
+   "rssi": -33,
+   "per_milli": 3,
+   "per_adapter": [
+    {
+     "name": "eu-uplink",
+     "rx": 38664,
+     "per_milli": 3,
+     "rssi": -38
+    },
+    {
+     "name": "cu-diversity",
+     "rx": 38710,
+     "per_milli": 2,
+     "rssi": -33
+    }
+   ],
+   "placement_ok": true,
+   "ceiling_last_clean_rssi": -18,
+   "ceiling_first_bad_rssi": -15
+  },
+  "6": {
+   "placement_dbm": 3,
+   "rssi": -33,
+   "per_milli": 0,
+   "per_adapter": [
+    {
+     "name": "eu-uplink",
+     "rx": 40827,
+     "per_milli": -1,
+     "rssi": -38
+    },
+    {
+     "name": "cu-diversity",
+     "rx": 40788,
+     "per_milli": 0,
+     "rssi": -33
+    }
+   ],
+   "placement_ok": true,
+   "ceiling_last_clean_rssi": -22,
+   "ceiling_first_bad_rssi": -18
+  },
+  "7": {
+   "placement_dbm": 3,
+   "rssi": -33,
+   "per_milli": 8,
+   "per_adapter": [
+    {
+     "name": "eu-uplink",
+     "rx": 43101,
+     "per_milli": 8,
+     "rssi": -38
+    },
+    {
+     "name": "cu-diversity",
+     "rx": 43151,
+     "per_milli": 7,
+     "rssi": -33
+    }
+   ],
+   "placement_ok": true,
+   "ceiling_last_clean_rssi": -22,
+   "ceiling_first_bad_rssi": -18
+  }
+ }
+}

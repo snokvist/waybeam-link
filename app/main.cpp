@@ -58,6 +58,8 @@
 #include "wblink/rx.h"
 #include "wblink/scheduler.h"
 #include "wblink/selector.h"
+#include "wblink/calib_store.h"
+#include "wblink/calibrate.h"
 #include "wblink/selector_state.h"
 #include "wblink/stats.h"
 #include "wblink/table.h"
@@ -934,6 +936,7 @@ uint8_t vcmd_id_for(const std::string& name) {
     if (name == "resolution") return vcmd_id::kResolution;
     if (name == "framing") return vcmd_id::kFraming;
     if (name == "mode") return vcmd_id::kMode;  // §11.7 Pass 105
+    if (name == "calibrate") return vcmd_id::kCalibrate;  // §10.6 Pass 120
     return 0;
 }
 
@@ -946,6 +949,7 @@ const char* vcmd_name_for(uint8_t id) {
         case vcmd_id::kResolution: return "resolution";
         case vcmd_id::kFraming: return "framing";
         case vcmd_id::kMode: return "mode";  // §11.7 Pass 105
+        case vcmd_id::kCalibrate: return "calibrate";  // §10.6 Pass 120
     }
     return "";
 }
@@ -2027,6 +2031,12 @@ struct TxCore {
             if (selector_.on_report(*r, now)) {
                 ++reports_received_;
             }
+            if (calibrator_) {
+                // §10.6: every ACCEPTED report feeds the calibration dwell
+                // (the engine discards samples inside its settle window).
+                calibrator_->on_report(static_cast<int8_t>(r->rssi_mean),
+                                       r->loss_postdiv_prearq, r->uniq, now);
+            }
             return false;
         }
         if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
@@ -2087,7 +2097,7 @@ struct TxCore {
             // latched value already sits on the hardware.
             last_commit_mcs_ = act.commit->mcs;
             last_commit_level_ = act.commit->tx_power_level;
-            if (!power_override_) {
+            if (!power_override_ && !calibrating()) {
                 resolve_and_apply_power(act.commit->mcs,
                                         act.commit->tx_power_level);
             }
@@ -2096,6 +2106,8 @@ struct TxCore {
         // iteration (never blocks). The setters below only record the desired
         // value; this drives the actual connect/send/recv.
         venc_.poll(now);
+        // §10.6: drive the calibration engine at loop cadence.
+        calibrate_service(now);
         // Push the CURRENT target every tick: write-on-change (§9.6) makes
         // this a no-op normally, and a failed push (encoder briefly down)
         // retries next tick instead of waiting for the next rung change.
@@ -2242,6 +2254,11 @@ struct TxCore {
         // always carries it, so bit3 is always set and the packet is 34 bytes.
         s.state_flags |= selector_state_flags::kHolderPresent;
         s.report_latch_holder = report_gate_.latched_originator();
+        if (calibrator_) {  // §10.6 Pass 120: bit4 word (implies bit3)
+            s.state_flags |= selector_state_flags::kCalibPresent;
+            s.calib_word = calibrator_->word();
+            s.calib_fingerprint = calib_fingerprint_;
+        }
         return s;
     }
     // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
@@ -2360,9 +2377,37 @@ struct TxCore {
                 // §11.7 v2 staged (Pass 71): specified, but the venc-side
                 // knobs do not exist yet — unconfigured-actuator REJECTED.
                 return false;
+            case vcmd_id::kCalibrate:
+                // §10.6 (Pass 120): start needs an actuator and a latched
+                // reporter — the loop is blind without §3.5 reports.
+                if (arg > 1) return false;
+                if (!calibrator_) return false;
+                if (arg == 1) {
+                    if (!apply_power) return false;  // udp: logged intent only
+                    if (report_gate_.latched_originator() == 0) return false;
+                    return calibrator_->start(now);
+                }
+                return calibrator_->abort(now);
             default:
                 return false;
         }
+    }
+    void init_calibration(const CalibrationPolicy& c) {
+        CalibrateParams p;
+        p.loss_ok_milli = static_cast<uint16_t>(c.loss_ok_milli);
+        p.loss_bad_milli = static_cast<uint16_t>(c.loss_bad_milli);
+        p.seek_step_qdb = c.seek_step_qdb;
+        p.cap_rise_db = c.cap_rise_db;
+        p.rssi_guard_dbm = c.rssi_guard_dbm;
+        p.min_qdb = c.min_qdb;
+        p.max_qdb = c.max_qdb;
+        p.settle_ms = static_cast<uint32_t>(c.settle_ms);
+        p.probe_dwell_ms = static_cast<uint32_t>(c.probe_dwell_ms);
+        p.verify_dwell_ms = static_cast<uint32_t>(c.verify_dwell_ms);
+        p.report_loss_abort_ms =
+            static_cast<uint32_t>(c.report_loss_abort_ms);
+        p.hard_cap_ms = static_cast<uint32_t>(c.hard_cap_ms);
+        calibrator_.emplace(p);
     }
     bool cmd_arq_enabled() const { return cmd_arq_enabled_; }
     bool cmd_selector_frozen() const { return cmd_selector_frozen_; }
@@ -2488,6 +2533,19 @@ struct TxCore {
         snap.link.cmd_selector_frozen = cmd_selector_frozen_;
         snap.link.cmd_fps_ladder = cmd_fps_ladder();
         snap.link.cmd_fps_select = cmd_fps_select_;
+        if (calibrator_) {  // §10.6 Pass 120
+            switch (calibrator_->state()) {
+                case CalibState::kIdle: snap.link.calib_state = "idle"; break;
+                case CalibState::kRunning:
+                    snap.link.calib_state = "running"; break;
+                case CalibState::kDone: snap.link.calib_state = "done"; break;
+                case CalibState::kFailed:
+                    snap.link.calib_state = "failed"; break;
+            }
+            snap.link.calib_rung = calibrator_->rung();
+            snap.link.calib_fingerprint = calib_fingerprint_;
+            snap.link.calib_stale = calib_stale_;
+        }
         // cmd_resolution_select / cmd_framing_select stay 0 until the venc
         // knobs exist (§11.7 staged, Pass 71).
         if (fps_ladder_) {
@@ -2650,6 +2708,94 @@ struct TxCore {
     uint8_t last_commit_level_ = 4;
     uint32_t reports_received_ = 0;
     std::vector<Stream> streams_;
+
+  public:
+    // §10.6 (Pass 120) craft-resident calibration. The engine is core/; the
+    // app maps its actions onto the §9.7 pin and §10.5 power seams and
+    // persists the artifact through on_calib_artifact.
+    std::optional<Calibrator> calibrator_;
+    std::function<void(const CalibArtifact&)> on_calib_artifact;
+    uint8_t calib_fingerprint_ = 0;   // CRC-8 of persisted artifact (0=none)
+    bool calib_stale_ = false;        // persisted artifact pairing mismatch
+
+    void calibrate_service(uint64_t now) {
+        if (!calibrator_) return;
+        const CalibActions a = calibrator_->tick(now);
+        // Artifact BEFORE restore: persisting installs the fresh curve, so
+        // the restore resolve below re-places the committed rung from it.
+        if (a.artifact_ready && on_calib_artifact) {
+            on_calib_artifact(calibrator_->artifact());
+        }
+        if (a.restore) {
+            // R4 order: power first (a probe may sit on a rung's ceiling),
+            // then the selector window, then the §10.4 resolve.
+            for (PowerAdapter& pa : power_) {
+                pa.applied_qdb.reset();  // force a real re-apply
+            }
+            if (cmd_selector_frozen_) {
+                const uint8_t pf = selector_.profile_id();
+                selector_.set_profile_pin(pf, pf);
+            } else {
+                selector_.set_profile_pin(boot_min_profile_,
+                                          boot_max_profile_);
+            }
+            if (power_override_) {
+                // §10.5: the latch owns power — re-assert it (probes wrote
+                // past it, so "skip the resolve" alone strands the last
+                // probe value on the hardware).
+                set_power_override(*power_override_);
+            } else if (has_power_curve()) {
+                if (last_commit_mcs_) {
+                    resolve_and_apply_power(*last_commit_mcs_,
+                                            last_commit_level_);
+                }
+            } else {
+                // No curve and no override (a failed first-ever run): no
+                // in-process authority knows the pre-run power. Leave the
+                // last probe value but say so loudly.
+                std::fprintf(stderr,
+                             "calibrate: restore has no power authority "
+                             "(no curve, no override) — TX power left at "
+                             "the last probe value\n");
+            }
+            std::fprintf(stderr, "calibrate: %s%s%s\n",
+                         calibrator_->state() == CalibState::kDone
+                             ? "done"
+                             : "failed",
+                         calibrator_->fail_reason() ? " reason=" : "",
+                         calibrator_->fail_reason()
+                             ? calibrator_->fail_reason()
+                             : "");
+        }
+        if (a.set_qdb) {
+            // §10.6: every tx adapter, curve or not (power_targets_) — the
+            // run exists precisely because no curve may be loaded yet.
+            for (const PowerTarget& t : power_targets_) {
+                const int32_t v = t.ceiling
+                                      ? std::min(*a.set_qdb, *t.ceiling)
+                                      : *a.set_qdb;
+                if (apply_power) (void)apply_power(t.adapter_idx, v);
+            }
+        }
+        if (a.pin_rung) {
+            selector_.set_profile_pin(*a.pin_rung, *a.pin_rung);
+        }
+    }
+    bool has_power_curve() const { return !power_.empty(); }
+    // §10.6: install/replace the tx adapters' §10.2 curve (calibration
+    // artifact or boot auto-load) so the commit resolve uses it.
+    void install_curve(const PowerCurve& c) {
+        power_.clear();
+        for (const PowerTarget& t : power_targets_) {
+            power_.push_back(
+                PowerAdapter{t.name, t.adapter_idx, c, t.ceiling,
+                             std::nullopt});
+        }
+    }
+    bool calibrating() const {
+        return calibrator_ &&
+               calibrator_->state() == CalibState::kRunning;
+    }
 };
 
 // ---- RX side: engine + NACK encode -----------------------------------------
@@ -2907,6 +3053,22 @@ struct RxCore {
             snap.link.lockout_strikes = s.lockout_strikes;
             snap.link.lockout_active_mask = s.lockout_active_mask;
             snap.link.lockout_latched_mask = s.lockout_latched_mask;
+        }
+        // §15.3 (Pass 121 addendum 6): ground mirrors the received §3.15
+        // calibration word — the WebUI's only progress view when the craft
+        // has no IP path. Deliberately OUTSIDE the freshness gate: the
+        // word is sticky across RF gaps (calibration's own wall probes
+        // black out the link; a freshness-gated mirror flickers "idle"
+        // mid-run). calib_stale is craft-local and stays false here.
+        if (remote_selector_state_ &&
+            (remote_selector_state_->state_flags &
+             selector_state_flags::kCalibPresent) != 0) {
+            static const char* const kCalibNames[4] = {"idle", "running",
+                                                       "done", "failed"};
+            const SelectorState& cs = *remote_selector_state_;
+            snap.link.calib_state = kCalibNames[cs.calib_word & 0x03u];
+            snap.link.calib_rung = (cs.calib_word >> 2) & 0x07u;
+            snap.link.calib_fingerprint = cs.calib_fingerprint;
         }
     }
 
@@ -3374,6 +3536,60 @@ int run_tx(const Loaded& l) {
     bool psk_announced = l.cfg.policy.csa.psk.empty();
     DiscoveryCatalog discovery;
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv);
+    // §10.6 (Pass 120): craft-resident calibration — engine seeds, artifact
+    // persistence, and the boot auto-load with the fingerprint gate.
+    tx.init_calibration(l.cfg.policy.calibration);
+    const AdapterCfg* calib_tx_adapter = nullptr;
+    for (const AdapterCfg& a : l.cfg.adapters) {
+        if (a.role == Role::kTx) {
+            calib_tx_adapter = &a;
+            break;
+        }
+    }
+    // The last persisted artifact (boot-loaded or written this session) —
+    // GET /api/v1/calibration must never report a fingerprint with no body.
+    std::optional<CalibArtifact> last_artifact;
+    tx.on_calib_artifact = [&](const CalibArtifact& art) {
+        const std::string ident =
+            calib_tx_adapter ? calib_identity(*calib_tx_adapter) : "udp";
+        const uint8_t fp = calib_store_write(
+            l.cfg.policy.calibration.artifact_dir, ident, art);
+        if (fp == 0) {
+            std::fprintf(stderr, "calibrate: artifact write FAILED (%s)\n",
+                         l.cfg.policy.calibration.artifact_dir.c_str());
+            return;
+        }
+        last_artifact = art;
+        PowerCurve c;
+        for (size_t m = 0; m < 8; ++m) c.qdb[m] = art.curve_qdb[m];
+        c.valid = true;
+        tx.install_curve(c);
+        tx.calib_fingerprint_ = fp;
+        tx.calib_stale_ = false;
+        std::fprintf(stderr, "calibrate: artifact persisted fp=0x%02x\n", fp);
+    };
+    if (auto stored =
+            calib_store_load(l.cfg.policy.calibration.artifact_dir);
+        stored) {
+        const std::string ident =
+            calib_tx_adapter ? calib_identity(*calib_tx_adapter) : "udp";
+        if (stored.value->identity == ident) {
+            // Explicit config power_map wins; the artifact fills the gap.
+            if (!tx.has_power_curve()) {
+                tx.install_curve(stored.value->curve);
+                std::fprintf(stderr,
+                             "calibrate: boot auto-load fp=0x%02x (%s)\n",
+                             stored.value->fingerprint, ident.c_str());
+            }
+            tx.calib_fingerprint_ = stored.value->fingerprint;
+            last_artifact = stored.value->artifact;  // §15.5 GET surface
+        } else {
+            tx.calib_stale_ = true;  // §10.6: surface, never apply
+            std::fprintf(stderr,
+                         "calibrate: STALE artifact (stored %s, live %s)\n",
+                         stored.value->identity.c_str(), ident.c_str());
+        }
+    }
     tx.estimate_airtime = [&](size_t bytes, bool include_pending) {
         return air.value->estimate_airtime_us(bytes, include_pending);
     };
@@ -3451,11 +3667,13 @@ int run_tx(const Loaded& l) {
             const uint64_t slot_ms = now_us_it / 1000;
             if (selector_state_cadence.due(live_video_slot, slot_ms)) {
                 const SelectorState state = tx.selector_state(slot_ms);
-                uint8_t sf[kSelectorStateSize];
-                if (encode_selector_state(state, sf, sizeof(sf)) ==
-                    sizeof(sf)) {
+                // §10.6 Pass 120: the calib word makes this 36 bytes; the
+                // encoder returns the actual size for whichever flags are set.
+                uint8_t sf[kSelectorStateCalibSize];
+                const size_t sn = encode_selector_state(state, sf, sizeof(sf));
+                if (sn != 0) {
                     (void)selector_state_cadence.note_submitted(
-                        air.value->inject(sf, sizeof(sf)), slot_ms);
+                        air.value->inject(sf, sn), slot_ms);
                 }
             }
         }
@@ -3586,6 +3804,30 @@ int run_tx(const Loaded& l) {
                 return "qdb out of range (-511..511)";
             tx.set_power_override(qdb);
             return "";
+        };
+        h.calibration_json = [&] {  // §10.6 Pass 120
+            std::string st = "idle";
+            uint8_t rung = 0;
+            const char* reason = nullptr;
+            const CalibArtifact* art = nullptr;
+            if (tx.calibrator_) {
+                switch (tx.calibrator_->state()) {
+                    case CalibState::kIdle: st = "idle"; break;
+                    case CalibState::kRunning: st = "running"; break;
+                    case CalibState::kDone: st = "done"; break;
+                    case CalibState::kFailed: st = "failed"; break;
+                }
+                rung = tx.calibrator_->rung();
+                reason = tx.calibrator_->fail_reason();
+                if (tx.calibrator_->state() == CalibState::kDone) {
+                    art = &tx.calibrator_->artifact();
+                }
+            }
+            // The last persisted artifact serves whenever the current run
+            // has none to offer (boot-loaded, or a later run failed).
+            if (art == nullptr && last_artifact) art = &*last_artifact;
+            return calib_store_json(st, rung, tx.calib_fingerprint_,
+                                    tx.calib_stale_, reason, art);
         };
         h.tx_power_json = [&] {
             const auto ov = tx.power_override();

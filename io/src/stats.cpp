@@ -498,6 +498,15 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.vcmd_nonce);
     out += ",\"arq_rx_enabled\":";
     append_bool(out, snap.link.arq_rx_enabled);
+    // §10.6 Pass 120 calibration mirror.
+    out += ",\"calib_state\":";
+    append_escaped(out, snap.link.calib_state);
+    out += ",\"calib_rung\":";
+    append_u64(out, snap.link.calib_rung);
+    out += ",\"calib_fingerprint\":";
+    append_u64(out, snap.link.calib_fingerprint);
+    out += ",\"calib_stale\":";
+    append_bool(out, snap.link.calib_stale);
     out += "}}\n";
 }
 

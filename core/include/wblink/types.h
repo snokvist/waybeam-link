@@ -76,6 +76,7 @@ inline constexpr uint8_t kFpsSelect = 0x04;   // arg = preset index (Pass 71)
 inline constexpr uint8_t kResolution = 0x05;  // arg = preset index (staged)
 inline constexpr uint8_t kFraming = 0x06;     // arg = preset index (staged)
 inline constexpr uint8_t kMode = 0x07;        // arg = §15.5 catalog index (P105)
+inline constexpr uint8_t kCalibrate = 0x08;   // arg 0=abort 1=start (§10.6 P120)
 }  // namespace vcmd_id
 
 // §3.14 — every command is enable/disable or a ≤5-choice enum (Pass 68), EXCEPT
@@ -104,7 +105,9 @@ inline constexpr size_t kCacheReplyFixedSize = 17;
 inline constexpr size_t kAnnounceSize = 30;  // §3.12: 11 prefix + 1 + 2 + 16
 inline constexpr size_t kCacheAssignSize = 23;
 inline constexpr size_t kVehicleCmdSize = 23;  // §3.14: MAC covers bytes 0..18
-// §3.15: 34 with the §3.15a holder (state_flags bit3), 32 without.
+// §3.15: 36 with the §10.6 calibration word (bit4, implies bit3), 34 with
+// the §3.15a holder only (bit3), 32 without either.
+inline constexpr size_t kSelectorStateCalibSize = 36;
 inline constexpr size_t kSelectorStateSize = 34;
 inline constexpr size_t kSelectorStateLegacySize = 32;
 
@@ -127,8 +130,11 @@ inline constexpr uint8_t kConflict = 0x04;
 // §3.15a: the report_latch_holder field is present; also selects the wire
 // length (set = kSelectorStateSize, clear = kSelectorStateLegacySize).
 inline constexpr uint8_t kHolderPresent = 0x08;
+// §10.6 (Pass 120): the 2-byte calibration word is present (bytes 34-35);
+// set implies kHolderPresent (fields append in order).
+inline constexpr uint8_t kCalibPresent = 0x10;
 inline constexpr uint8_t kKnownMask =
-    kActive | kLatched | kConflict | kHolderPresent;
+    kActive | kLatched | kConflict | kHolderPresent | kCalibPresent;
 }  // namespace selector_state_flags
 
 // §3.2 — absolute DATA payload ceiling for buffer sizing (Realtek jumbo/A-MSDU

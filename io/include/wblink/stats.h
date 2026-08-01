@@ -255,6 +255,11 @@ struct LinkStats {
     std::string vcmd_state = "idle";   // issuer: §15.5 GET campaign state
     uint32_t vcmd_nonce = 0;           // issuer: last campaign nonce
     bool arq_rx_enabled = true;        // rx: §6.4 NACK-emission gate
+    // §10.6 (Pass 120) calibration surface — mirrors the §3.15 word.
+    std::string calib_state = "idle";  // idle|running|done|failed
+    uint8_t calib_rung = 0;            // meaningful while running
+    uint8_t calib_fingerprint = 0;     // CRC-8 of persisted artifact, 0=none
+    bool calib_stale = false;          // persisted artifact pairing mismatch
 };
 
 // §15.3 cache blocks — present only when the §14.3 role is enabled.

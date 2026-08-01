@@ -295,6 +295,13 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             }
             return reply(200, "OK", h_.tx_power_json());
         }
+        if (path == "/api/v1/calibration") {  // §10.6 Pass 120
+            if (!h_.calibration_json) {
+                return reply(409, "Conflict",
+                             json_err("calibration not available in this mode"));
+            }
+            return reply(200, "OK", h_.calibration_json());
+        }
         if (path == "/api/v1/discovery") {
             return reply(200, "OK",
                          h_.discovery_json ? h_.discovery_json()
