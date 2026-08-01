@@ -68,6 +68,8 @@ std::vector<VehicleCmd> drain_echoes(VcmdCraft& craft, uint64_t& now_us,
 }  // namespace
 
 int main() {
+    CHECK(vcmd_id::typed_endpoint_only(vcmd_id::kMtuTier));
+    CHECK(!vcmd_id::typed_endpoint_only(vcmd_id::kArq));
     const VcmdParams pol = policy_with_psk();
     const CommonPrefix craft_self{kCraftOrig, 0, 777};
     const std::optional<uint16_t> bound{kGround};

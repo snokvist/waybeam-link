@@ -151,6 +151,7 @@ struct StreamStats {
     uint64_t source_symbols_sent = 0;
     uint64_t repair_symbols_sent = 0;
     uint64_t fec_oversize_frames = 0;
+    uint64_t mtu_fec_guard_frames = 0;
     uint64_t idr_frames = 0;
     uint64_t arq_frames = 0;
     uint64_t arq_cutoff_frames = 0;  // §4.1 Pass 40 cadence suppression

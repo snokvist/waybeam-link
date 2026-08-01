@@ -56,6 +56,7 @@ struct FrameFramerStats {
     uint64_t repair_symbols = 0;
     uint64_t malformed_frame = 0;   // < 8 B (no VencFrameMeta prefix): dropped
     uint64_t fec_oversize_k = 0;    // k + r_target > 256 => FEC disabled (§14.1)
+    uint64_t mtu_fec_guard_frames = 0;  // §9.3a 16-equivalent repair guard
     uint64_t idr_frames = 0;
     uint64_t arq_frames = 0;
     uint64_t arq_cutoff_frames = 0;  // §4.1 Pass 40 high-cadence suppression

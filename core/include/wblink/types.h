@@ -78,6 +78,12 @@ inline constexpr uint8_t kFraming = 0x06;     // arg = preset index (staged)
 inline constexpr uint8_t kMode = 0x07;        // arg = §15.5 catalog index (P105)
 inline constexpr uint8_t kCalibrate = 0x08;   // arg 0=abort 1=start (§10.6 P120)
 inline constexpr uint8_t kMtuTier = 0x09;     // arg 0/1/2 (§9.3a Pass 122)
+
+// Typed-only commands have validation/state bookkeeping that the generic
+// §15.5 vehicle-command endpoint cannot safely reproduce.
+inline constexpr bool typed_endpoint_only(uint8_t id) {
+    return id == kMtuTier;
+}
 }  // namespace vcmd_id
 
 // §3.14 — every command is enable/disable or a ≤5-choice enum (Pass 68), EXCEPT
@@ -152,6 +158,7 @@ inline constexpr uint8_t kMedium = 1;
 inline constexpr uint8_t kHigh = 2;
 inline constexpr uint16_t kMediumBudget = 2048;
 inline constexpr uint16_t kHighBudget = 3072;
+inline constexpr uint16_t kFecProtectionK = 16;  // §9.3a Pass 124
 
 inline constexpr uint16_t budget(uint8_t tier) {
     return tier == kHigh ? kHighBudget

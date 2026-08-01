@@ -34,7 +34,7 @@ class DashboardSchemaTest(unittest.TestCase):
             "jscc_repair_demand_censored_blocks",
             "jscc_repair_predicted_parity_symbols",
             "source_symbols_sent", "repair_symbols_sent",
-            "fec_oversize_frames", "idr_frames",
+            "fec_oversize_frames", "mtu_fec_guard_frames", "idr_frames",
             "nack_rtt_samples", "nack_rtt_p95_us",
             "jscc_decision_frames", "jscc_valid_decisions",
             "jscc_fallback_decisions", "jscc_decision_valid",

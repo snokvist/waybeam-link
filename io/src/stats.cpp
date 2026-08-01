@@ -298,6 +298,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.repair_symbols_sent);
         out += ",\"fec_oversize_frames\":";
         append_u64(out, s.fec_oversize_frames);
+        out += ",\"mtu_fec_guard_frames\":";
+        append_u64(out, s.mtu_fec_guard_frames);
         out += ",\"idr_frames\":";
         append_u64(out, s.idr_frames);
         out += ",\"arq_frames\":";

@@ -1946,7 +1946,7 @@ struct TxCore {
             }
             if (s.jscc_shadow && have_meta) {
                 const uint16_t symbol = s.frame_framer->symbol_size();
-                const size_t k_sz = std::max<size_t>(1, (len + symbol - 1) / symbol);
+                const size_t k_sz = 1u + (len - 1u) / symbol;
                 const uint16_t k = static_cast<uint16_t>(
                     std::min<size_t>(k_sz, UINT16_MAX));
                 const size_t source_bytes =
@@ -1954,6 +1954,8 @@ struct TxCore {
                               (kDataHeaderSize + kFecSourceSubheaderSize);
                 const size_t resend_bytes =
                     kDataHeaderSize + kFecSourceSubheaderSize + symbol;
+                const uint16_t source_packet_budget = static_cast<uint16_t>(
+                    symbol + kDataHeaderSize + kFecSourceSubheaderSize);
                 JsccShadowFrameInput input;
                 input.source_k = k;
                 input.deadline_us = frame_deadline_us(idr);
@@ -1965,10 +1967,10 @@ struct TxCore {
                 if (estimate_airtime) {
                     input.source_tx_remaining_us =
                         estimate_airtime(source_bytes, true,
-                                         max_payload_for(selector_.profile_id()));
+                                         source_packet_budget);
                     input.resend_airtime_us =
                         estimate_airtime(resend_bytes, false,
-                                         max_payload_for(selector_.profile_id()));
+                                         source_packet_budget);
                 }
                 s.jscc_latest = s.jscc_shadow->evaluate(input);
                 ++s.jscc_decision_frames;
@@ -2514,6 +2516,8 @@ struct TxCore {
                     s.frame_framer->stats().repair_symbols;
                 st.fec_oversize_frames =
                     s.frame_framer->stats().fec_oversize_k;
+                st.mtu_fec_guard_frames =
+                    s.frame_framer->stats().mtu_fec_guard_frames;
                 st.idr_frames = s.frame_framer->stats().idr_frames;
                 st.arq_frames = s.frame_framer->stats().arq_frames;
                 st.arq_cutoff_frames =
@@ -4104,6 +4108,11 @@ int run_tx(const Loaded& l) {
                                air.value->read_tsf(meta.adapter_id),
                                static_cast<uint32_t>(meta.tsf_us),
                                std::nullopt)) {
+                    // §9.3a: every newly authenticated claim starts at
+                    // Default, including a rebooted ground that reuses the
+                    // same numeric originator. The new owner may reassert its
+                    // local capability only after this claim commits.
+                    tx.reset_negotiated_mtu();
                     tx.csa_freeze(service_now + static_cast<uint64_t>(
                                                    l.cfg.policy.csa.settle_s *
                                                    1000));
@@ -5161,7 +5170,16 @@ int run_rx(const Loaded& l) {
                 return {200, "{\"ok\":true,\"nonce\":" +
                                  std::to_string(vissuer.nonce()) + "}"};
             };
-            h.vehicle_command = start_vehicle_command;
+            h.vehicle_command = [&](const std::string& cmd, int arg) {
+                const uint8_t id = vcmd_id_for(cmd);
+                if (vcmd_id::typed_endpoint_only(id)) {
+                    return std::pair<int, std::string>{
+                        400,
+                        "{\"ok\":false,\"error\":\"command requires typed "
+                        "endpoint\"}"};
+                }
+                return start_vehicle_command(cmd, arg);
+            };
             h.link_mtu = [&](const std::string& mode)
                 -> std::pair<int, std::string> {
                 if (l.cfg.node.spectator) {
