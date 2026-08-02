@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -59,9 +60,11 @@ struct Rig {
     int32_t craft_rssi_sum = 0;
     int restores = 0;
     int artifacts = 0;
+    int power_before_rate = 0;
+    std::vector<UplinkRate> rates;
     bool quality_live = true;
 
-    explicit Rig(const UplinkCalibParams& p) : cal(p, 0, false) {}
+    explicit Rig(const UplinkCalibParams& p) : cal(p) {}
 
     // One 100 ms step: emit a report, deliver it (or not), and every 5th step
     // hand the calibrator the §3.16 delta.
@@ -89,7 +92,15 @@ struct Rig {
             cal.on_sample(s, now);
         }
         const UplinkCalibActions a = cal.tick(now, local_epoch, quality_live);
-        if (a.set_qdb) up.qdb = *a.set_qdb;
+        // Rate before power, exactly as app/main.cpp actuates them (§10.7 R4).
+        if (a.set_rate) rates.push_back(*a.set_rate);
+        if (a.set_qdb) {
+            up.qdb = *a.set_qdb;
+            // Every power command must land on a rung that was commanded
+            // first. Pass 131's new stranded-actuator surface is the rung, so
+            // "power arrived before its rate" is the shape to catch.
+            if (rates.empty()) ++power_before_rate;
+        }
         if (a.restore) ++restores;
         if (a.artifact_ready) ++artifacts;
     }
@@ -106,6 +117,15 @@ struct Rig {
     uint32_t last_epoch_ = 0;
     int32_t last_rssi_ = 0;
 };
+
+// Rung 0's placement. Pass 131 sweeps eight rungs, but this synthetic uplink
+// has no per-rung behaviour — every rung sees the same channel — so rung 0 is
+// representative for the seek-shape cases below. The eight-rung structure
+// itself is pinned separately, in test_eight_rung_sweep().
+const UplinkPlacement& first_placement(const UplinkCalibrator& c) {
+    static const UplinkPlacement kNone{};
+    return c.placements().empty() ? kNone : c.placements().front();
+}
 
 UplinkCalibParams fast_params() {
     UplinkCalibParams p;
@@ -125,7 +145,7 @@ void test_clean_ramp() {
     CHECK(r.cal.state() == CalibState::kDone);
     CHECK(r.restores == 1);   // §10.7: every exit restores, exactly once
     CHECK(r.artifacts == 1);
-    const UplinkPlacement& pl = r.cal.placement();
+    const UplinkPlacement& pl = first_placement(r.cal);
     CHECK(pl.placement_qdb == UplinkCalibParams{}.seek.max_qdb);
     CHECK(pl.placement_loss_milli <= 15);
     CHECK(pl.mcs == 0);
@@ -141,7 +161,7 @@ void test_floor_start() {
     CHECK(r.cal.start(r.now, r.local_epoch));
     r.run(r.now + 600000);
     CHECK(r.cal.state() == CalibState::kDone);
-    const UplinkPlacement& pl = r.cal.placement();
+    const UplinkPlacement& pl = first_placement(r.cal);
     CHECK(pl.placement_qdb >= 52);
     CHECK(pl.placement_qdb > UplinkCalibParams{}.seek.min_qdb);
     CHECK(pl.placement_loss_milli <= 15);
@@ -219,7 +239,7 @@ void test_abort() {
 // must lengthen the run, never let a half-observed dwell decide.
 void test_gate_is_epochs_not_time() {
     UplinkCalibParams p = fast_params();
-    UplinkCalibrator cal(p, 0, false);
+    UplinkCalibrator cal(p);
     CHECK(cal.start(1000, 0));
     CHECK(cal.dwell_target() == p.probe_epochs);
     // A long time with no samples decides nothing.
@@ -237,7 +257,7 @@ void test_ambiguous_extension() {
     UplinkCalibParams p = fast_params();
     p.seek.loss_ok_milli = 15;
     p.seek.loss_bad_milli = 50;
-    UplinkCalibrator cal(p, 0, false);
+    UplinkCalibrator cal(p);
     CHECK(cal.start(1000, 0));
     uint64_t t = 1000 + p.settle_ms + 1;
     // Deliver 4 of 5 epochs: 200permille is past the bad wall, so NOT
@@ -256,7 +276,7 @@ void test_ambiguous_extension() {
     UplinkCalibParams q = fast_params();
     q.probe_epochs = 40;
     q.ambiguous_epochs = 80;
-    UplinkCalibrator cal2(q, 0, false);
+    UplinkCalibrator cal2(q);
     CHECK(cal2.start(1000, 0));
     t = 1000 + q.settle_ms + 1;
     QualitySample amb;
@@ -282,7 +302,7 @@ void test_loss_denominator_boundary() {
     p.ambiguous_epochs = 80;
     p.seek.loss_ok_milli = 15;
     p.seek.loss_bad_milli = 50;
-    UplinkCalibrator cal(p, 0, false);
+    UplinkCalibrator cal(p);
     CHECK(cal.start(1000, 0));
     const uint64_t t = 1000 + p.settle_ms + 1;
 
@@ -306,7 +326,7 @@ void test_loss_denominator_boundary() {
 
     // And a genuinely lossy dwell still reads lossy: 4 lost in 40 = 100
     // permille, past the bad wall.
-    UplinkCalibrator lossy(p, 0, false);
+    UplinkCalibrator lossy(p);
     CHECK(lossy.start(1000, 0));
     QualitySample bad;
     bad.accepted = true;
@@ -347,7 +367,7 @@ void test_partial_blackout_ends_dwell() {
     UplinkCalibParams p = fast_params();
     p.probe_epochs = 40;
     p.ambiguous_epochs = 80;
-    UplinkCalibrator cal(p, 0, false);
+    UplinkCalibrator cal(p);
     CHECK(cal.start(1000, 0));
     const int32_t floor_qdb = p.seek.min_qdb;
     CHECK(cal.qdb() == floor_qdb);
@@ -389,7 +409,7 @@ void test_blackout_scores_measured_loss_not_flat_1000() {
     UplinkCalibParams p = fast_params();
     p.probe_epochs = 40;
     p.ambiguous_epochs = 80;
-    UplinkCalibrator cal(p, 0, false);
+    UplinkCalibrator cal(p);
     CHECK(cal.start(1000, 0));
     uint64_t t = 1000 + p.settle_ms + 1;
     (void)cal.tick(t, 0, true);  // arm the ground anchor at 0
@@ -414,7 +434,7 @@ void test_blackout_scores_measured_loss_not_flat_1000() {
 
     // A TOTAL blackout is unchanged: nothing received, still 1000permille,
     // still the seek's floor evidence.
-    UplinkCalibrator dead(p, 0, false);
+    UplinkCalibrator dead(p);
     CHECK(dead.start(1000, 0));
     uint64_t t2 = 1000 + p.settle_ms + 1;
     (void)dead.tick(t2, 0, true);
@@ -472,7 +492,7 @@ void test_silent_cap_sweeps_to_max() {
     CHECK(r.cal.start(r.now, r.local_epoch));
     r.run(r.now + 600000);
     CHECK(r.cal.state() == CalibState::kDone);
-    CHECK(r.cal.placement().placement_qdb == UplinkCalibParams{}.seek.max_qdb);
+    CHECK(first_placement(r.cal).placement_qdb == UplinkCalibParams{}.seek.max_qdb);
     CHECK(r.artifacts == 1);
     CHECK(r.restores == 1);
 }
@@ -489,7 +509,7 @@ void test_bracket_never_books_the_cold_floor() {
     CHECK(r.cal.start(r.now, r.local_epoch));
     r.run(r.now + 600000);
     CHECK(r.cal.state() == CalibState::kDone);
-    const UplinkPlacement& pl = r.cal.placement();
+    const UplinkPlacement& pl = first_placement(r.cal);
     CHECK(pl.placement_qdb > UplinkCalibParams{}.seek.min_qdb);
     // The sweep crossed a dead floor and then ran clean to the top, so there
     // is no overload evidence at all and the bracket must say so.
@@ -503,7 +523,7 @@ void test_bracket_never_books_the_cold_floor() {
     CHECK(h.cal.start(h.now, h.local_epoch));
     h.run(h.now + 600000);
     CHECK(h.cal.state() == CalibState::kDone);
-    const UplinkPlacement& hp = h.cal.placement();
+    const UplinkPlacement& hp = first_placement(h.cal);
     CHECK(hp.has_first_bad);
     CHECK(hp.first_bad_qdb > hp.last_clean_qdb);   // ceiling is ABOVE the floor
     // The placement sits AT the last clean probe, or below it when the verify
@@ -527,7 +547,7 @@ void test_verify_exhausted_is_failure() {
     UplinkCalibParams p = fast_params();
     p.seek.loss_ok_milli = 15;
     p.seek.loss_bad_milli = 50;
-    UplinkCalibrator cal(p, 0, false);
+    UplinkCalibrator cal(p);
     CHECK(cal.start(1000, 0));
     uint64_t t = 1000;
 
@@ -575,16 +595,80 @@ void test_second_run_clears_bracket() {
     CHECK(r.cal.start(r.now, r.local_epoch));
     r.run(r.now + 600000);
     CHECK(r.cal.state() == CalibState::kDone);
-    CHECK(r.cal.placement().has_first_bad);
-    const int32_t first_bad = r.cal.placement().first_bad_qdb;
+    CHECK(first_placement(r.cal).has_first_bad);
+    const int32_t first_bad = first_placement(r.cal).first_bad_qdb;
     CHECK(first_bad > 0);
 
     r.up.ceil_rssi = 127;  // run 2 is clean all the way to max
     CHECK(r.cal.start(r.now, r.local_epoch));
     r.run(r.now + 600000);
     CHECK(r.cal.state() == CalibState::kDone);
-    CHECK(!r.cal.placement().has_first_bad);
-    CHECK(r.cal.placement().first_bad_qdb == 0);  // not run 1's bracket
+    CHECK(!first_placement(r.cal).has_first_bad);
+    CHECK(first_placement(r.cal).first_bad_qdb == 0);  // not run 1's bracket
+}
+
+// Pass 131: the run sweeps all eight rungs and emits eight placements in
+// ascending order, each carrying the rate identity it was measured at. This
+// is the shape the artifact's `placements` list is written from, and the
+// shape a future rate policy indexes.
+void test_eight_rung_sweep() {
+    Rig r(fast_params());
+    CHECK(r.cal.start(r.now, r.local_epoch));
+    r.run(r.now + 600000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    CHECK(r.cal.placements().size() == kUplinkRungs);
+    CHECK(r.restores == 1);   // ONE restore for the whole run, not one per rung
+    CHECK(r.artifacts == 1);  // ...and one artifact, at the end
+
+    // Rate identity per rung, matching the §9.3 seeds: long GI on 0/1, short
+    // on 2..7. A placement measured at a GI the uplink cannot be commanded to
+    // would be a number about nothing.
+    const UplinkCalibParams seeds;
+    for (size_t i = 0; i < kUplinkRungs; ++i) {
+        const UplinkPlacement& pl = r.cal.placements()[i];
+        CHECK(pl.mcs == seeds.rungs[i].mcs);
+        CHECK(pl.short_gi == seeds.rungs[i].short_gi);
+        CHECK(pl.placement_loss_milli <= 15);
+        // Every rung sweeps from the floor, so on this flat synthetic channel
+        // every rung reaches the same top. What matters is that each is a real
+        // measurement rather than rung 0's result copied forward.
+        CHECK(pl.placement_qdb == seeds.seek.max_qdb);
+    }
+
+    // The rate was commanded once per rung, in order, and power never arrived
+    // on an uncommanded rung. This is Pass 131's new stranded-actuator
+    // surface: the sweep borrows the uplink's operating rung, not just its
+    // power.
+    CHECK(r.power_before_rate == 0);
+    CHECK(r.rates.size() == kUplinkRungs);
+    for (size_t i = 0; i < r.rates.size() && i < kUplinkRungs; ++i) {
+        CHECK(r.rates[i] == seeds.rungs[i]);
+    }
+}
+
+// A run that dies mid-sweep persists NOTHING. A truncated artifact would
+// auto-apply at the next boot looking like a finished commissioning — the
+// same false-success shape Pass 126's verify rule and Pass 129's write rule
+// each removed one layer further out.
+void test_failure_mid_sweep_persists_nothing() {
+    Rig r(fast_params());
+    CHECK(r.cal.start(r.now, r.local_epoch));
+    // Let a few rungs complete, then take the observer away.
+    while (r.cal.state() == CalibState::kRunning && r.cal.rung() < 3) r.step();
+    CHECK(r.cal.rung() == 3);
+    CHECK(r.cal.placements().size() == 3);  // rungs 0..2 measured and kept
+    r.quality_live = false;
+    r.step();
+
+    CHECK(r.cal.state() == CalibState::kFailed);
+    CHECK(r.cal.fail_reason() != nullptr);
+    if (r.cal.fail_reason() != nullptr) {
+        CHECK(std::string(r.cal.fail_reason()) == "quality_lost");
+    }
+    // Three placements are in hand, but no artifact was ever offered: the
+    // caller is never told to persist a partial sweep.
+    CHECK(r.artifacts == 0);
+    CHECK(r.restores == 1);  // ...and the actuators still came back, once
 }
 
 // §10.7 sequencer: one operator action, two phases, in the right order.
@@ -760,6 +844,8 @@ int main() {
     test_abort();
     test_gate_is_epochs_not_time();
     test_ambiguous_extension();
+    test_eight_rung_sweep();
+    test_failure_mid_sweep_persists_nothing();
     if (g_fail != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", g_fail);
         return 1;

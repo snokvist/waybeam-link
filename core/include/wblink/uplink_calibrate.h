@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// waybeam-link core: §10.7 (Pass 125) ground-uplink calibration orchestrator.
+// waybeam-link core: §10.7 ground-uplink calibration orchestrator.
 //
-// The counterpart to §10.6's Calibrator: same PowerSeek ramp, different
-// gating. The craft measures against live video (thousands of loss samples a
-// second, so dwells are wall-clock), while the ground measures against sparse
-// LINK_REPORT epochs — so every dwell here is gated on an EPOCH COUNT. A slow
-// report cadence must lengthen the run, never let an unobserved dwell score
-// as clean.
+// The counterpart to §10.6's Calibrator: same PowerSeek ramp, same eight-rung
+// loop since Pass 131, different gating. The craft measures against live video
+// (thousands of loss samples a second, so dwells are wall-clock), while the
+// ground measures against sparse LINK_REPORT epochs — so every dwell here is
+// gated on an EPOCH COUNT. A slow report cadence must lengthen the run, never
+// let an unobserved dwell score as clean. That is also why §10.7 raises the
+// ground's own report cadence for the duration of a run (§15.2
+// `uplink_calib_report_hz`): the gates are sample counts, so the only way to
+// finish sooner without measuring worse is to sample faster.
 //
 // Pure and time-injected: it consumes §3.16 QualitySamples and ticks, and
 // emits polled actions. It does not own the UplinkQualityGate (that needs the
@@ -14,27 +17,45 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "wblink/calibrate.h"        // PowerSeek, SeekParams, CalibState
 #include "wblink/uplink_quality.h"   // QualitySample
 
 namespace wblink {
 
+// §10.7 rung -> rate identity. Resolved by the CALLER from the §9.3 profile
+// table and passed in, so core/ keeps no table dependency — the same shape as
+// §10.6's `levels` array. Seeds match the authored table (long GI on 0/1,
+// short on 2..7); a placement measured at a GI the uplink cannot be commanded
+// to would be a number about nothing.
+struct UplinkRate {
+    uint8_t mcs = 0;
+    bool short_gi = false;
+    friend bool operator==(const UplinkRate&, const UplinkRate&) = default;
+};
+
+inline constexpr size_t kUplinkRungs = 8;
+
 struct UplinkCalibParams {
     SeekParams seek;
-    uint32_t settle_ms = 800;       // shared with §10.6: TXAGC settle
+    uint32_t settle_ms = 300;       // shared with §10.6: TXAGC settle
     uint32_t probe_epochs = 40;     // §10.7 seeds
     uint32_t ambiguous_epochs = 80;
     uint32_t verify_epochs = 200;
     uint32_t liveness_ms = 2000;
     uint32_t hard_cap_ms = 600000;
+    std::array<UplinkRate, kUplinkRungs> rungs{{{0, false}, {1, false},
+                                                {2, true},  {3, true},
+                                                {4, true},  {5, true},
+                                                {6, true},  {7, true}}};
 };
 
 // One rung's result. `placements` in the §10.7 artifact is a list of these —
-// v1 emits exactly one, and a future multi-rung uplink appends rather than
-// bumping the schema.
+// eight since Pass 131, one per rung in ascending order.
 struct UplinkPlacement {
     uint8_t mcs = 0;
     bool short_gi = false;
@@ -46,11 +67,14 @@ struct UplinkPlacement {
     int32_t first_bad_qdb = 0;
 };
 
-// Edge-triggered, polled once per tick. The app actuates set_qdb, and on
-// `restore` returns the actuator to its §10.7 owner (config map, then a
-// matching artifact, then backend auto) — that ordering is the app's, but the
-// single-shot signal is here so no exit path can skip it.
+// Edge-triggered, polled once per tick. The app actuates set_rate then
+// set_qdb — RATE FIRST, mirroring §10.6's R4 rule that the actuator gating the
+// other goes first — and on `restore` returns BOTH to their §10.7 owners. The
+// single-shot signal lives here so no exit path can skip it: since Pass 131
+// the run borrows the uplink's operating rung as well as its power, and a run
+// that dies at rung 5 must not leave the uplink transmitting at MCS5.
 struct UplinkCalibActions {
+    std::optional<UplinkRate> set_rate;
     std::optional<int32_t> set_qdb;
     bool restore = false;
     bool artifact_ready = false;
@@ -58,8 +82,8 @@ struct UplinkCalibActions {
 
 class UplinkCalibrator {
   public:
-    UplinkCalibrator(const UplinkCalibParams& p, uint8_t mcs, bool short_gi)
-        : p_(p), seek_(p.seek), mcs_(mcs), sgi_(short_gi) {}
+    explicit UplinkCalibrator(const UplinkCalibParams& p)
+        : p_(p), seek_(p.seek) {}
 
     bool start(uint64_t now_ms, uint32_t local_epoch) {
         if (state_ == CalibState::kRunning) return false;
@@ -68,15 +92,9 @@ class UplinkCalibrator {
         fail_reason_ = nullptr;
         restore_pending_ = false;
         artifact_pending_ = false;
-        placement_ = {};
-        placement_.mcs = mcs_;
-        placement_.short_gi = sgi_;
-        // Sweep from the floor. At range the bottom steps are normally dead;
-        // they are simply not clean and the sweep climbs past them.
-        const SeekStep s = seek_.begin();
-        qdb_ = s.qdb;
-        pending_qdb_ = s.qdb;
-        begin_dwell(now_ms, local_epoch, p_.probe_epochs);
+        placements_.clear();
+        rung_ = 0;
+        enter_rung(now_ms, local_epoch);
         return true;
     }
 
@@ -138,6 +156,10 @@ class UplinkCalibrator {
             a.artifact_ready = take_artifact_();
             return a;
         }
+        if (pending_rate_) {
+            a.set_rate = *pending_rate_;
+            pending_rate_.reset();
+        }
         if (pending_qdb_) {
             a.set_qdb = *pending_qdb_;
             pending_qdb_.reset();
@@ -181,7 +203,15 @@ class UplinkCalibrator {
 
     CalibState state() const { return state_; }
     const char* fail_reason() const { return fail_reason_; }
-    const UplinkPlacement& placement() const { return placement_; }
+    // Every completed rung, ascending. Empty until the first rung verifies,
+    // and only complete (8 entries) when state() is kDone — §10.7 persists
+    // nothing on a partial run, because a truncated artifact would auto-apply
+    // at the next boot looking like a finished commissioning.
+    const std::vector<UplinkPlacement>& placements() const {
+        return placements_;
+    }
+    uint8_t rung() const { return rung_; }
+    const UplinkRate& rate() const { return p_.rungs[rung_]; }
     int32_t qdb() const { return qdb_; }
     uint32_t dwell_progress() const { return emitted_; }
     uint32_t dwell_target() const { return target_epochs_; }
@@ -194,6 +224,7 @@ class UplinkCalibrator {
     // caller can log edges without polling state.
     struct DwellRecord {
         uint32_t seq = 0;
+        uint8_t rung = 0;
         int32_t qdb = 0;
         bool verify = false;
         bool blackout = false;
@@ -206,6 +237,18 @@ class UplinkCalibrator {
     const DwellRecord& last_dwell() const { return last_; }
 
   private:
+    // Commit rung_ and start its sweep from the floor. Every rung sweeps from
+    // min_qdb: seeding one mid-range from the previous placement made the
+    // result depend on where the sweep began (Pass 130), and that is no more
+    // acceptable across rungs than it was within one.
+    void enter_rung(uint64_t now_ms, uint32_t local_epoch) {
+        pending_rate_ = p_.rungs[rung_];
+        const SeekStep s = seek_.begin();
+        qdb_ = s.qdb;
+        pending_qdb_ = s.qdb;
+        begin_dwell(now_ms, local_epoch, p_.probe_epochs);
+    }
+
     // Re-arm the current dwell at the current power, keeping its target. The
     // ground epoch anchor re-arms with it (the first post-settle tick), so
     // both clocks restart together.
@@ -268,7 +311,7 @@ class UplinkCalibrator {
         const DwellVerdict v = loss > p_.seek.loss_bad_milli
                                    ? DwellVerdict::kBad
                                    : DwellVerdict::kClean;
-        last_ = DwellRecord{last_.seq + 1,   qdb_,  verify, blackout,
+        last_ = DwellRecord{last_.seq + 1,   rung_, qdb_,  verify, blackout,
                             emitted_,        received_,
                             loss,            static_cast<int32_t>(std::lround(rssi)),
                             target_epochs_};
@@ -296,28 +339,57 @@ class UplinkCalibrator {
                     a.restore = take_restore_();
                     return a;
                 }
-                placement_.placement_qdb = s.qdb;
-                placement_.placement_rssi_dbm =
-                    static_cast<int8_t>(std::lround(rssi));
-                placement_.placement_loss_milli = loss;
-                // Read the bracket from the seek rather than tracking a
-                // second copy here. The duplicate booked the COLD floor as the
-                // overload ceiling — measured on the bench as
-                // `first_bad_qdb: 4, last_clean_qdb: 108` — because only the
-                // seek applies the "bad ABOVE a clean probe" rule.
-                placement_.last_clean_qdb = seek_.last_clean_qdb();
-                placement_.has_first_bad = seek_.has_bad();
-                placement_.first_bad_qdb = seek_.first_bad_qdb();
-                finish(CalibState::kDone, nullptr);
-                a.restore = take_restore_();
-                a.artifact_ready = take_artifact_();
-                return a;
+                {
+                    UplinkPlacement pl;
+                    pl.mcs = p_.rungs[rung_].mcs;
+                    pl.short_gi = p_.rungs[rung_].short_gi;
+                    pl.placement_qdb = s.qdb;
+                    pl.placement_rssi_dbm =
+                        static_cast<int8_t>(std::lround(rssi));
+                    pl.placement_loss_milli = loss;
+                    // Read the bracket from the seek rather than tracking a
+                    // second copy here. The duplicate booked the COLD floor as
+                    // the overload ceiling — measured on the bench as
+                    // `first_bad_qdb: 4, last_clean_qdb: 108` — because only
+                    // the seek applies the "bad ABOVE a clean probe" rule.
+                    pl.last_clean_qdb = seek_.last_clean_qdb();
+                    pl.has_first_bad = seek_.has_bad();
+                    pl.first_bad_qdb = seek_.first_bad_qdb();
+                    placements_.push_back(pl);
+                }
+                return next_rung(a, now_ms, local_epoch);
             case SeekStep::Kind::kVerify:
                 begin_dwell(now_ms, local_epoch, p_.verify_epochs);
                 return a;
             case SeekStep::Kind::kProbe:
                 begin_dwell(now_ms, local_epoch, p_.probe_epochs);
                 return a;
+        }
+        return a;
+    }
+
+    // A rung verified. Advance, or finish the run on the last one. Mirrors
+    // §10.6's Calibrator::next_rung deliberately: same loop, same order, so
+    // the two directions cannot drift into different rung semantics.
+    UplinkCalibActions next_rung(UplinkCalibActions a, uint64_t now_ms,
+                                 uint32_t local_epoch) {
+        if (rung_ + 1 >= kUplinkRungs) {
+            finish(CalibState::kDone, nullptr);
+            a.restore = take_restore_();
+            a.artifact_ready = take_artifact_();
+            return a;
+        }
+        ++rung_;
+        enter_rung(now_ms, local_epoch);
+        // enter_rung queues the actuation for the next tick; hand it over now
+        // so the rung boundary costs no extra tick of dwell time.
+        if (pending_rate_) {
+            a.set_rate = *pending_rate_;
+            pending_rate_.reset();
+        }
+        if (pending_qdb_) {
+            a.set_qdb = *pending_qdb_;
+            pending_qdb_.reset();
         }
         return a;
     }
@@ -344,11 +416,10 @@ class UplinkCalibrator {
 
     UplinkCalibParams p_;
     PowerSeek seek_;
-    uint8_t mcs_ = 0;
-    bool sgi_ = false;
+    uint8_t rung_ = 0;
     CalibState state_ = CalibState::kIdle;
     const char* fail_reason_ = nullptr;
-    UplinkPlacement placement_{};
+    std::vector<UplinkPlacement> placements_;
     uint64_t started_ms_ = 0;
     uint64_t dwell_start_ms_ = 0;
     uint32_t dwell_local_epoch_ = 0;
@@ -361,6 +432,7 @@ class UplinkCalibrator {
     bool dwell_epoch_armed_ = false;
     bool restore_pending_ = false;
     bool artifact_pending_ = false;
+    std::optional<UplinkRate> pending_rate_;
     std::optional<int32_t> pending_qdb_;
     DwellRecord last_{};
 };

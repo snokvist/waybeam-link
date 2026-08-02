@@ -211,35 +211,53 @@ void test_identity_gate() {
     CHECK(uplink_calib_fingerprint(later) == uplink_calib_fingerprint(a));
 }
 
-// The list shape is v1 law so a future multi-rung uplink APPENDS rather than
-// bumping the schema and migrating every deployed artifact and Hub parser.
-// Prove a two-entry artifact round-trips under schema 1 today.
+// The list shape was v1 law so widening from one rung to eight would APPEND
+// rather than bump the schema and migrate every deployed artifact and Hub
+// parser. Pass 131 spends that allowance: a full eight-entry artifact is the
+// shipping shape, and it round-trips under schema 1 unchanged.
+//
+// The one-entry case is NOT retired with it — a Pass 125 build wrote
+// one-entry artifacts, and those files still exist on deployed grounds. The
+// loader must accept any length (see test_roundtrip, which writes one).
 void test_multi_rung_forward_compat() {
     const std::string dir = temp_dir();
     CHECK(!dir.empty());
     if (dir.empty()) return;
 
-    UplinkArtifact a = make_artifact();
-    UplinkPlacement second;
-    second.mcs = 3;
-    second.short_gi = true;
-    second.placement_qdb = 60;
-    second.placement_rssi_dbm = -38;
-    second.placement_loss_milli = 9;
-    second.last_clean_qdb = 60;
-    second.has_first_bad = false;
-    a.placements.push_back(second);
+    UplinkArtifact a = make_artifact();  // starts with rung 0
+    for (uint8_t mcs = 1; mcs < 8; ++mcs) {
+        UplinkPlacement p;
+        p.mcs = mcs;
+        p.short_gi = mcs >= 2;  // §9.3: long GI on 0/1, short on 2..7
+        p.placement_qdb = 60 + mcs;
+        p.placement_rssi_dbm = static_cast<int8_t>(-38 - mcs);
+        p.placement_loss_milli = 9;
+        p.last_clean_qdb = 60 + mcs;
+        p.has_first_bad = false;
+        a.placements.push_back(p);
+    }
 
     CHECK(uplink_calib_store_write(dir, a) != 0);
     auto loaded = uplink_calib_store_load(dir);
     CHECK(static_cast<bool>(loaded));
     if (loaded) {
-        CHECK(loaded.value->placements.size() == 2);
+        CHECK(loaded.value->placements.size() == 8);
+        // Every rung resolves by its own rate identity, which is what a rate
+        // policy will index and what the boot-time resolve already uses.
+        for (uint8_t mcs = 0; mcs < 8; ++mcs) {
+            const UplinkPlacement* p =
+                uplink_calib_placement_for(*loaded.value, mcs, mcs >= 2);
+            CHECK(p != nullptr);
+            if (p != nullptr) CHECK(p->mcs == mcs);
+        }
+        // A rung asked for at the WRONG guard interval must not resolve: the
+        // placement would be a measurement of a different operating point.
+        CHECK(uplink_calib_placement_for(*loaded.value, 5, false) == nullptr);
         const UplinkPlacement* p3 =
             uplink_calib_placement_for(*loaded.value, 3, true);
         CHECK(p3 != nullptr);
         if (p3 != nullptr) {
-            CHECK(p3->placement_qdb == 60);
+            CHECK(p3->placement_qdb == 63);
             CHECK(!p3->has_first_bad);  // null round-trips as absent
         }
         // The entry count and every field are inside the canonical form, so
@@ -252,7 +270,7 @@ void test_multi_rung_forward_compat() {
         // inequality here would be a coin-flip test.
         UplinkArtifact trimmed = *loaded.value;
         trimmed.placements.pop_back();
-        CHECK(trimmed.placements.size() == 1);
+        CHECK(trimmed.placements.size() == 7);
         // A changed VALUE in a kept entry does move it, which is what the
         // round-trip integrity check actually relies on.
         UplinkArtifact edited = *loaded.value;

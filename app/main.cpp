@@ -4666,9 +4666,34 @@ int run_rx(const Loaded& l) {
             static_cast<uint32_t>(cp.uplink_verify_epochs);
         ucal_params.liveness_ms = static_cast<uint32_t>(cp.uplink_liveness_ms);
         ucal_params.hard_cap_ms = static_cast<uint32_t>(cp.hard_cap_ms);
+        // §10.7 (Pass 131): rung -> rate identity from the §9.3 table, so a
+        // calibrated placement's GI is the GI the uplink would actually be
+        // commanded to. The seeded defaults already match the authored table;
+        // reading it here means a deployment that authored a different one
+        // agrees without a code change, and core/ still needs no table
+        // dependency — the resolve happens on this side of the seam.
+        if (l.have_table) {
+            for (const Profile& pr : l.table.profiles) {
+                if (pr.id < kUplinkRungs) {
+                    ucal_params.rungs[pr.id] =
+                        UplinkRate{pr.mcs, pr.gi == GuardInterval::kShort};
+                }
+            }
+        }
     }
-    UplinkCalibrator uplink_cal(ucal_params, l.cfg.air.uplink_mcs,
-                                l.cfg.air.uplink_sgi);
+    UplinkCalibrator uplink_cal(ucal_params);
+    // The placement for the rung the uplink actually transmits at. §10.7
+    // measures all eight and persists all eight, but only this one is
+    // resolved onto the actuator — the rest are for a future rate policy.
+    const auto uplink_measured_qdb = [&]() -> std::optional<int32_t> {
+        for (const UplinkPlacement& pl : uplink_cal.placements()) {
+            if (pl.mcs == l.cfg.air.uplink_mcs &&
+                pl.short_gi == l.cfg.air.uplink_sgi) {
+                return pl.placement_qdb;
+            }
+        }
+        return std::nullopt;
+    };
     CalibSequencer calib_seq;
     const uint16_t op_chan =
         l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
@@ -4775,12 +4800,23 @@ int run_rx(const Loaded& l) {
     // it the manual counterpart to §10.7 and the reference placement for the
     // calibrated-versus-manual comparison, with no config edit and restart.
     std::optional<int32_t> uplink_override;
-    // §10.7 restore order, highest precedence first: the §10.5 latch, then an
-    // explicit configured placement, then a matching artifact, then backend
-    // auto. One resolver, one call site — a second copy of this ordering is
-    // how the two drift.
-    const auto uplink_restore_power = [&]() {
+    // §10.7 restore. ONE convergence path for every borrowed actuator, in R4
+    // order — RATE first, then power — because the rung a placement was
+    // measured at is what makes the power meaningful, and the same reasoning
+    // that put power before the selector pin in §10.6 puts rate before power
+    // here. Pass 131 added the rate: the eight-rung sweep commands
+    // `set_tx_mode` per rung, so a run that exits at rung 5 would otherwise
+    // leave the uplink transmitting at MCS5 with a rung-0 power on it.
+    //
+    // Power precedence, highest first: the §10.5 latch, then an explicit
+    // configured placement, then a matching artifact, then backend auto. A
+    // second copy of this ordering is how the two drift, which is why the
+    // §10.5 override paths call this rather than setting power directly — the
+    // rate re-latch is an idempotent no-op there.
+    const auto uplink_restore_actuators = [&]() {
         if (uplink_adapter == nullptr) return;
+        air.value->latch_uplink_rate(l.cfg.air.uplink_mcs,
+                                     l.cfg.air.uplink_sgi);
         if (uplink_override) {
             (void)air.value->set_power_qdb(uplink_idx, *uplink_override);
         } else if (uplink_owner_qdb) {
@@ -4791,7 +4827,7 @@ int run_rx(const Loaded& l) {
             air.value->set_power_auto(uplink_idx);
         }
     };
-    uplink_restore_power();
+    uplink_restore_actuators();
     uplink_pairing_key = uplink_pairing_now();
     if (uplink_adapter != nullptr) {
         // One line naming which tier actually owns the actuator. The
@@ -4829,10 +4865,12 @@ int run_rx(const Loaded& l) {
             case CalibState::kDone: u.state = "done"; break;
             case CalibState::kFailed: u.state = "failed"; break;
         }
-        u.rung = 0;  // v1 has one uplink rung; shape mirrors calib_rung
+        // Pass 131: the rung is live progress through the eight-rung sweep,
+        // the same quantity §3.15's calibration word carries for §10.6.
+        u.rung = uplink_cal.rung();
         u.power_qdb = uplink_cal.state() == CalibState::kRunning
                           ? uplink_cal.qdb()
-                          : uplink_cal.placement().placement_qdb;
+                          : uplink_measured_qdb().value_or(0);
         u.fingerprint = uplink_artifact_fp;
         u.stale = uplink_artifact_stale;
         // §3.16: valid/age track LIVENESS (packet arrival), not counter
@@ -5312,7 +5350,7 @@ int run_rx(const Loaded& l) {
         // the service loop: shutdown never reaches the loop again.
         const UplinkCalibActions ua =
             uplink_cal.tick(now_ms(), rx.report_epoch(), true);
-        if (ua.restore) uplink_restore_power();
+        if (ua.restore) uplink_restore_actuators();
         // Empty on a cache-assignment node, which never gets the issuer
         // handlers — calling it unguarded would throw bad_function_call.
         if (sa.abort_downlink && start_vehicle_command) {
@@ -5577,14 +5615,14 @@ int run_rx(const Loaded& l) {
                 cancel_calibration("tx/power override latched");
                 if (is_auto) {
                     uplink_override.reset();
-                    uplink_restore_power();  // immediate, per §10.5
+                    uplink_restore_actuators();  // immediate, per §10.5
                     return "";
                 }
                 if (qdb < -511 || qdb > 511) {
                     return "qdb out of range (-511..511)";
                 }
                 uplink_override = qdb;
-                uplink_restore_power();
+                uplink_restore_actuators();
                 return "";
             };
             h.tx_power_json = [&] {
@@ -6054,10 +6092,16 @@ int run_rx(const Loaded& l) {
             const UplinkCalibActions ua = uplink_cal.tick(
                 now_ms(), rx.report_epoch(),
                 quality_gate.live(now_ms(), ucal_params.liveness_ms));
+            // Rate before power (§10.7 R4 order): the rung is what the power
+            // is being measured FOR, so commanding power first would spend a
+            // settle window at the new level on the old rung.
+            if (ua.set_rate && uplink_adapter != nullptr) {
+                air.value->set_tx_mode(ua.set_rate->mcs, ua.set_rate->short_gi);
+            }
             if (ua.set_qdb && uplink_adapter != nullptr) {
                 (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
             }
-            if (ua.restore) uplink_restore_power();
+            if (ua.restore) uplink_restore_actuators();
             // §10.7 per-dwell trace. The campaign's deliverable is a per-run
             // record (duration, samples/dwell, loss, RSSI, bracket); without
             // it a "verify_failed" carries no numbers and cannot be argued
@@ -6089,7 +6133,7 @@ int run_rx(const Loaded& l) {
                 const uint64_t key = uplink_pairing_now();
                 if (key != uplink_pairing_key) {
                     uplink_pairing_key = key;
-                    uplink_restore_power();
+                    uplink_restore_actuators();
                 }
             }
             if (ua.artifact_ready) {
@@ -6106,7 +6150,7 @@ int run_rx(const Loaded& l) {
                 art.channel_mhz = operating_chan;
                 art.bw_mhz = op_bw_mhz;
                 art.t_unix = static_cast<int64_t>(::time(nullptr));
-                art.placements.push_back(uplink_cal.placement());
+                art.placements = uplink_cal.placements();
                 const uint8_t fp = uplink_calib_store_write(
                     l.cfg.policy.calibration.artifact_dir, art);
                 if (fp == 0) {
@@ -6123,19 +6167,31 @@ int run_rx(const Loaded& l) {
                     uplink_cal.fail_persist();
                     const UplinkCalibActions fa = uplink_cal.tick(
                         now_ms(), rx.report_epoch(), true);
-                    if (fa.restore) uplink_restore_power();
+                    if (fa.restore) uplink_restore_actuators();
                 } else {
                     uplink_artifact = std::move(art);
                     uplink_artifact_fp = fp;
                     uplink_artifact_stale = false;
                     std::fprintf(stderr,
-                                 "uplink-calib: DONE placement=%d qdb "
-                                 "fp=0x%02x\n",
-                                 uplink_cal.placement().placement_qdb, fp);
+                                 "uplink-calib: DONE %zu rungs fp=0x%02x\n",
+                                 uplink_cal.placements().size(), fp);
+                    for (const UplinkPlacement& pl : uplink_cal.placements()) {
+                        std::fprintf(
+                            stderr,
+                            "uplink-calib:   mcs=%u %s -> %d qdb "
+                            "rssi=%d loss=%upermille%s\n",
+                            pl.mcs, pl.short_gi ? "sgi" : "lgi",
+                            pl.placement_qdb, pl.placement_rssi_dbm,
+                            pl.placement_loss_milli,
+                            (pl.mcs == l.cfg.air.uplink_mcs &&
+                             pl.short_gi == l.cfg.air.uplink_sgi)
+                                ? "  <- operating"
+                                : "");
+                    }
                 }
                 // The seek already applied the placement; re-resolving makes
                 // the running value and the persisted owner the same thing.
-                uplink_restore_power();
+                uplink_restore_actuators();
             }
         }
         // §10.7 bi-directional sequencer. Ticked unconditionally of the
