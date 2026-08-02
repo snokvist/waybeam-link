@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "wblink/hmac_sha256.h"
+#include "wblink/uplink_quality.h"
 #include "wblink/wire.h"
 #include "wbtest.h"
 
@@ -168,6 +169,198 @@ void test_type_isolation() {
     CHECK(std::get_if<DecodeError>(&d) != nullptr);
 }
 
+// Case 11: only accepted, selector-fresh reports enter the craft counters.
+// The caller owns the report-authority and freshness gates; what is pinned
+// here is that a repeated epoch and a reporter change do the right thing.
+void test_craft_counters() {
+    UplinkQualityCounters c;
+    CHECK_EQ_U(c.reports_received(), 0u);
+    // Nothing accepted yet -> nothing honest to send.
+    CHECK(!c.build(kCraft, kCraftSession, 0x5A, "psk").has_value());
+
+    c.note_accepted(kGround, kGroundSession, 1, -40, 0);
+    c.note_accepted(kGround, kGroundSession, 2, -42, 0);
+    CHECK_EQ_U(c.reports_received(), 2u);
+    CHECK_EQ_U(c.last_report_epoch(), 2u);
+    CHECK(static_cast<int32_t>(c.rssi_sum()) == -82);
+    CHECK_EQ_U(c.last_rx_mcs(), 0u);
+
+    // A reporter tuple change restarts the domain — a new ground must never
+    // read the previous one's history as its own delivery.
+    c.note_accepted(kGround + 1, 7777, 500, -30, 7);
+    CHECK_EQ_U(c.target_originator(), kGround + 1);
+    CHECK_EQ_U(c.reports_received(), 1u);
+    CHECK_EQ_U(c.last_report_epoch(), 500u);
+    CHECK(static_cast<int32_t>(c.rssi_sum()) == -30);
+    CHECK_EQ_U(c.last_rx_mcs(), 7u);
+    // Same originator, new session (a ground reboot) is also a new domain.
+    c.note_accepted(kGround + 1, 8888, 3, -31, 7);
+    CHECK_EQ_U(c.reports_received(), 1u);
+
+    // No PSK -> no packet. §10.7 moves a power actuator; unauthenticated
+    // feedback is not an option, so this must fail closed rather than emit.
+    CHECK(!c.build(kCraft, kCraftSession, 0x5A, "").has_value());
+    const auto q = c.build(kCraft, kCraftSession, 0x5A, "psk");
+    CHECK(q.has_value());
+    if (q) {
+        CHECK_EQ_U(q->prefix.originator, kCraft);
+        CHECK_EQ_U(q->prefix.destination, kGround + 1);
+        CHECK_EQ_U(q->target_originator, kGround + 1);
+        CHECK_EQ_U(q->target_session, 8888u);
+    }
+}
+
+// Cases 4-8: the ground accept gate. Wrong target, wrong session, wrong
+// craft, wrong key, replayed counters; duplicates refresh liveness only.
+void test_ground_gate() {
+    const std::string psk = "secret";
+    UplinkQualityGate g(psk, kGround, kGroundSession);
+
+    UplinkQualityCounters c;
+    c.note_accepted(kGround, kGroundSession, 10, -40, 3);
+    const auto mk = [&](const UplinkQualityCounters& src) {
+        const auto q = src.build(kCraft, kCraftSession, 0x5A, psk);
+        CHECK(q.has_value());
+        return *q;
+    };
+
+    // Baseline: first accepted packet has no delta to report.
+    const UplinkQuality first = mk(c);
+    QualitySample s = g.accept(first, kCraft, kCraftSession, 1000);
+    CHECK(s.accepted);
+    CHECK(!s.progressed);
+    CHECK(g.live(1000, 2000));
+
+    // Case 7: an exact duplicate refreshes liveness and yields no sample.
+    s = g.accept(first, kCraft, kCraftSession, 2500);
+    CHECK(s.accepted);
+    CHECK(!s.progressed);
+    CHECK(g.live(2500, 2000));
+    // ...and liveness really moved: at t=4400 the age is 1900 ms from the
+    // duplicate, but 3400 ms from the baseline — so this only passes if the
+    // duplicate refreshed the clock.
+    CHECK(g.live(4400, 2000));
+
+    // Progress: deltas are reported, RSSI delta is signed.
+    c.note_accepted(kGround, kGroundSession, 12, -50, 3);
+    s = g.accept(mk(c), kCraft, kCraftSession, 3000);
+    CHECK(s.accepted);
+    CHECK(s.progressed);
+    CHECK_EQ_U(s.reports_delta, 1u);
+    CHECK_EQ_U(s.epoch_delta, 2u);
+    CHECK(s.rssi_sum_delta == -50);
+
+    // Case 8: a replay of the earlier packet moves counters backward.
+    s = g.accept(first, kCraft, kCraftSession, 3100);
+    CHECK(!s.accepted);
+    CHECK(g.rejected() >= 1);
+
+    // Case 6: wrong craft, and wrong craft session.
+    s = g.accept(mk(c), kCraft + 1, kCraftSession, 3200);
+    CHECK(!s.accepted);
+    s = g.accept(mk(c), kCraft, kCraftSession + 1, 3200);
+    CHECK(!s.accepted);
+    // Nothing selected at all rejects everything.
+    s = g.accept(mk(c), 0, kCraftSession, 3200);
+    CHECK(!s.accepted);
+
+    // Cases 4-5: the packet targets a different ground / a stale session.
+    {
+        UplinkQualityGate other(psk, kGround + 5, kGroundSession);
+        CHECK(!other.accept(mk(c), kCraft, kCraftSession, 3300).accepted);
+        UplinkQualityGate stale(psk, kGround, kGroundSession + 1);
+        CHECK(!stale.accept(mk(c), kCraft, kCraftSession, 3300).accepted);
+    }
+
+    // Case 3: wrong key.
+    {
+        UplinkQualityGate wrong("other-key", kGround, kGroundSession);
+        CHECK(!wrong.accept(mk(c), kCraft, kCraftSession, 3400).accepted);
+    }
+
+    // Case 9: a craft session change starts a fresh receive domain rather
+    // than reading the old craft's cumulative state as a backward jump.
+    {
+        UplinkQualityGate g2(psk, kGround, kGroundSession);
+        CHECK(g2.accept(mk(c), kCraft, kCraftSession, 4000).accepted);
+        UplinkQualityCounters fresh;
+        fresh.note_accepted(kGround, kGroundSession, 1, -35, 0);
+        const auto q2 = fresh.build(kCraft, kCraftSession + 9, 0x5A, psk);
+        CHECK(q2.has_value());
+        if (q2) {
+            // Counters are LOWER than the previous craft's, which would be a
+            // replay within one domain — across domains it is a new baseline.
+            const QualitySample d =
+                g2.accept(*q2, kCraft, kCraftSession + 9, 4100);
+            CHECK(d.accepted);
+            CHECK(!d.progressed);
+        }
+    }
+}
+
+// Case 10: counter and RSSI delta arithmetic across the u32 wrap. A
+// calibrator run is far shorter than either wrap interval, but the
+// arithmetic must not care.
+void test_counter_wrap() {
+    const std::string psk = "secret";
+    UplinkQualityGate g(psk, kGround, kGroundSession);
+
+    const auto sign = [&](UplinkQuality& q) {
+        uint8_t buf[kUplinkQualitySize];
+        CHECK_EQ_U(encode_uplink_quality(q, buf, sizeof(buf)),
+                   kUplinkQualitySize);
+        q.quality_mac = quality_mac(
+            reinterpret_cast<const uint8_t*>(psk.data()), psk.size(), buf);
+    };
+
+    UplinkQuality a = make_quality();
+    a.reports_received = 0xFFFF'FFFEu;
+    a.last_report_epoch = 0xFFFF'FFFDu;
+    a.rssi_sum_dbm = 0xFFFF'FF00u;  // a large negative running sum
+    sign(a);
+    CHECK(g.accept(a, kCraft, kCraftSession, 1000).accepted);
+
+    UplinkQuality b = a;
+    b.reports_received = 2;          // wrapped past 0
+    b.last_report_epoch = 4;
+    b.rssi_sum_dbm = 0xFFFF'FE9Cu;   // -100 further
+    sign(b);
+    const QualitySample s = g.accept(b, kCraft, kCraftSession, 1100);
+    CHECK(s.accepted);
+    CHECK(s.progressed);
+    CHECK_EQ_U(s.reports_delta, 4u);   // 2 - 0xFFFFFFFE, modulo 2^32
+    CHECK_EQ_U(s.epoch_delta, 7u);
+    CHECK(s.rssi_sum_delta == -100);
+}
+
+// §10.7 liveness: the clock that aborts a run is packet ARRIVAL, never
+// counter progress. A craft that keeps talking while its uplink delivers
+// nothing must stay "live" — that stall is the seek's floor evidence, and
+// treating it as a timeout is what would abort every run at min_qdb.
+void test_liveness_survives_stalled_counters() {
+    const std::string psk = "secret";
+    UplinkQualityGate g(psk, kGround, kGroundSession);
+    UplinkQualityCounters c;
+    c.note_accepted(kGround, kGroundSession, 1, -40, 0);
+    const auto q = c.build(kCraft, kCraftSession, 0x5A, psk);
+    CHECK(q.has_value());
+    if (!q) return;
+
+    uint64_t t = 1000;
+    CHECK(g.accept(*q, kCraft, kCraftSession, t).accepted);
+    // Ten identical packets over 5 s: counters never move, liveness always
+    // does. With the two clocks collapsed this would have timed out at 2 s.
+    for (int i = 0; i < 10; ++i) {
+        t += 500;
+        const QualitySample s = g.accept(*q, kCraft, kCraftSession, t);
+        CHECK(s.accepted);
+        CHECK(!s.progressed);
+        CHECK(g.live(t, 2000));
+    }
+    // Silence, however, does expire.
+    CHECK(!g.live(t + 2001, 2000));
+}
+
 }  // namespace
 
 int main() {
@@ -176,5 +369,9 @@ int main() {
     test_structural_target();
     test_mac_coverage();
     test_type_isolation();
+    test_craft_counters();
+    test_ground_gate();
+    test_counter_wrap();
+    test_liveness_survives_stalled_counters();
     return wbtest_finish("uplink_quality_test");
 }

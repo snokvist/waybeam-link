@@ -36,7 +36,9 @@
 #include "wblink/config.h"
 #include "wblink/control_server.h"
 #include "wblink/modes.h"
+#include "wblink/crc8.h"
 #include "wblink/csa.h"
+#include "wblink/hmac_sha256.h"
 #include "wblink/vehicle_cmd.h"
 #include "wblink/endian.h"
 #include "wblink/fps_ladder.h"
@@ -67,6 +69,7 @@
 #include "wblink/txwedge.h"
 #include "wblink/venc.h"
 #include "wblink/video_slot_cadence.h"
+#include "wblink/uplink_quality.h"
 #include "wblink/air_mon.h"
 #if WBLINK_RADIO
 #include "wblink/air_radio.h"
@@ -2031,7 +2034,11 @@ struct TxCore {
 
     // Air packets heard back (uplink): NACKs feed the scheduler, LINK_REPORTs
     // feed the §9 selector.
-    bool on_air(const uint8_t* d, size_t n, uint64_t now) {
+    // rx_rssi/rx_mcs are the AirRxMeta of the frame carrying this packet —
+    // §3.16 needs both at the accepted-LINK_REPORT point. Defaulted so the
+    // loopback path, which has no PHY, stays a one-line call.
+    bool on_air(const uint8_t* d, size_t n, uint64_t now, int8_t rx_rssi = 0,
+                uint8_t rx_mcs = kUplinkRxMcsUnknown) {
         const Decoded dec = decode(d, n);
         if (const JsccFeedback* f = std::get_if<JsccFeedback>(&dec)) {
             if (f->target_originator != originator_ ||
@@ -2094,6 +2101,14 @@ struct TxCore {
             // §15.3 heard-ratio.
             if (selector_.on_report(*r, now)) {
                 ++reports_received_;
+                // §3.16 (Pass 125): the SAME freshness gate feeds the uplink
+                // quality counters. A redundant copy carries no new epoch, so
+                // counting it would tell the ground its uplink delivered more
+                // than it did — the one number §10.7's loss estimator divides
+                // by. Rejected reports never reach here at all.
+                quality_.note_accepted(r->prefix.originator,
+                                       r->prefix.session_id, r->report_epoch,
+                                       rx_rssi, rx_mcs);
             }
             if (calibrator_) {
                 // §10.6: every ACCEPTED report feeds the calibration dwell
@@ -2257,6 +2272,10 @@ struct TxCore {
     // §11.3: freeze the cascade + pause the watchdog across the CSA blackout.
     void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
 
+    UplinkQualityCounters quality_;  // §3.16 (Pass 125)
+    uint8_t quality_fingerprint_ = 0;
+    std::string quality_psk_;
+
     // §3.5 Pass 115: report authority is ONE authority across both return
     // gates. These wrap the pair deliberately — moving report_gate_ alone
     // would leave §3.10 JSCC feedback flowing from the displaced ground,
@@ -2325,6 +2344,19 @@ struct TxCore {
         }
         return s;
     }
+    // §3.16 (Pass 125) craft->ground authenticated uplink feedback. Returns
+    // nullopt when there is nothing honest to say: no PSK (the packet is
+    // unauthenticated then, and §10.7 moves a power actuator), no latched
+    // reporter, or no accepted report yet in this counter domain.
+    std::optional<UplinkQuality> uplink_quality() const {
+        return quality_.build(originator_, session_, quality_fingerprint_,
+                              quality_psk_);
+    }
+    void set_quality_identity(std::string psk, uint8_t fingerprint) {
+        quality_psk_ = std::move(psk);
+        quality_fingerprint_ = fingerprint;
+    }
+
     // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
     void set_csa_armed(bool on) {
         const uint8_t f = on ? data_flags::kCsaArmed : 0;
@@ -3654,6 +3686,18 @@ int run_tx(const Loaded& l) {
             break;
         }
     }
+    {
+        // §3.16 (Pass 125): the craft's half of the identity pair the ground
+        // stale-checks its uplink artifact against. Same canonical identity
+        // §10.6 already keys its own artifact on, hashed to the one byte the
+        // wire has room for.
+        const std::string ident =
+            calib_tx_adapter ? calib_identity(*calib_tx_adapter) : "udp";
+        tx.set_quality_identity(
+            l.cfg.policy.csa.psk,
+            crc8_dvbs2(reinterpret_cast<const uint8_t*>(ident.data()),
+                       ident.size()));
+    }
     // The last persisted artifact (boot-loaded or written this session) —
     // GET /api/v1/calibration must never report a fingerprint with no body.
     std::optional<CalibArtifact> last_artifact;
@@ -3768,6 +3812,7 @@ int run_tx(const Loaded& l) {
     ArqTimingTracker arq_timing;
     uint64_t now_us_it = now_us();
     VideoSlotCadence selector_state_cadence(500);
+    VideoSlotCadence uplink_quality_cadence(500);  // §3.16 2 Hz (Pass 125)
     const auto send_raw = [&](const uint8_t* f, size_t n) {
         // Pass 110 operator boundary: the 2 Hz selector summary owns no TX
         // opportunity. When due, prepend it inside an already-active live RTP
@@ -3784,6 +3829,21 @@ int run_tx(const Loaded& l) {
                 if (sn != 0) {
                     (void)selector_state_cadence.note_submitted(
                         air.value->inject(sf, sn), slot_ms);
+                }
+            }
+            // §3.16 (Pass 125): same guard-cost boundary, own cadence. It
+            // rides an already-active live slot and never opens one — video
+            // still ends the slot and alone arms the §7.2 quiet gap, so no
+            // live DATA means no fresh quality, which is exactly what makes
+            // §10.7 refuse to start or abort.
+            if (uplink_quality_cadence.due(live_video_slot, slot_ms)) {
+                if (const std::optional<UplinkQuality> q = tx.uplink_quality()) {
+                    uint8_t qf[kUplinkQualitySize];
+                    const size_t qn = encode_uplink_quality(*q, qf, sizeof(qf));
+                    if (qn != 0) {
+                        (void)uplink_quality_cadence.note_submitted(
+                            air.value->inject(qf, qn), slot_ms);
+                    }
                 }
             }
         }
@@ -4174,7 +4234,9 @@ int run_tx(const Loaded& l) {
                 }
                 return;
             }
-            if (tx.on_air(d, n, service_now)) {
+            // meta.rssi / meta.rx_mcs feed §3.16's cumulative counters at the
+            // accepted-LINK_REPORT point inside on_air.
+            if (tx.on_air(d, n, service_now, meta.rssi, meta.rx_mcs)) {
                 arq_timing.note_nack_received(d, n, service_us);
                 // A valid NACK bypasses the normal tick and live-video path.
                 tx.drain_resends(service_now, inject_resend);
