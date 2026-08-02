@@ -506,7 +506,14 @@ void test_bracket_never_books_the_cold_floor() {
     const UplinkPlacement& hp = h.cal.placement();
     CHECK(hp.has_first_bad);
     CHECK(hp.first_bad_qdb > hp.last_clean_qdb);   // ceiling is ABOVE the floor
-    CHECK(hp.last_clean_qdb == hp.placement_qdb);
+    // The placement sits AT the last clean probe, or below it when the verify
+    // dwell stepped down. It can never sit above: verify starts at the last
+    // clean probe and only ever descends. Asserting equality here was wrong —
+    // near a real ceiling the longer verify dwell is exactly the case Pass 130
+    // kept the bounded step-down for (a placement that probed clean verifying
+    // at 942permille is the measured example), so the two fields legitimately
+    // differ and the gap between them is what says the probe was optimistic.
+    CHECK(hp.placement_qdb <= hp.last_clean_qdb);
 }
 
 // C2 regression. PowerSeek reaches kDone from verify with loss above
