@@ -91,6 +91,20 @@ class UplinkCalibrator {
         return true;
     }
 
+    // Operator ruling: persistence IS the deliverable. §10.7 is a one-time
+    // commissioning step whose whole premise is that it is persisted on both
+    // sides, so a run whose artifact never reached disk did not commission
+    // anything — it applied a placement that dies at the next boot. Reporting
+    // `done` there is the same false success C2 removed, one layer out: the
+    // Hub menu binds the state field, and `fingerprint: 0` was the only
+    // signal that anything went wrong. The caller invokes this when the store
+    // write fails; the restore edge re-arms so the actuator returns to the
+    // owner that was there before the run.
+    void fail_persist() {
+        if (state_ != CalibState::kDone) return;
+        finish(CalibState::kFailed, "artifact_write_failed");
+    }
+
     // One accepted §3.16 packet. Deltas telescope across the dwell, so
     // summing them from the dwell's first accepted packet to its last IS
     // (E_B - E_A) / (R_B - R_A) / (S_B - S_A) — the §10.7 anchors, with no
@@ -289,6 +303,22 @@ class UplinkCalibrator {
                 // interlock inspects. Fail instead; nothing is persisted.
                 if (loss > p_.seek.loss_ok_milli) {
                     finish(CalibState::kFailed, "verify_failed");
+                    a.restore = take_restore_();
+                    return a;
+                }
+                // Operator ruling: a CAP WALL that lands the placement on the
+                // floor is not a calibration. The cap wall means delivered
+                // power stopped following commanded; landing at `min_qdb`
+                // means that was already true at the FIRST step off the
+                // floor, so no power was ever shown to deliver more than the
+                // minimum and "maximum deliverable clean power" was never
+                // measured. Observed on a ~1 m bench: +4 dB commanded moved
+                // the craft's RSSI under 1 dB. §10.6 answers this with a
+                // distance requirement (near-bench 2-10 m, Pass 121) and
+                // §10.7 inherits it — so this fails with a reason that names
+                // the remedy rather than persisting a floor placement.
+                if (seek_.capped() && s.qdb <= p_.seek.min_qdb) {
+                    finish(CalibState::kFailed, "cap_wall_at_floor");
                     a.restore = take_restore_();
                     return a;
                 }

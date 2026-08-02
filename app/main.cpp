@@ -6118,9 +6118,20 @@ int run_rx(const Loaded& l) {
                 const uint8_t fp = uplink_calib_store_write(
                     l.cfg.policy.calibration.artifact_dir, art);
                 if (fp == 0) {
+                    // §10.7 (Pass 129): persistence IS the deliverable, so a
+                    // write that never landed fails the run rather than
+                    // reporting `done` with fingerprint 0. Drain the re-armed
+                    // restore edge here so the actuator goes back to its
+                    // pre-run owner instead of holding a placement that dies
+                    // at the next boot.
                     std::fprintf(stderr,
-                                 "uplink-calib: artifact write FAILED (%s)\n",
+                                 "uplink-calib: artifact write FAILED (%s) — "
+                                 "run FAILED, placement not persisted\n",
                                  l.cfg.policy.calibration.artifact_dir.c_str());
+                    uplink_cal.fail_persist();
+                    const UplinkCalibActions fa = uplink_cal.tick(
+                        now_ms(), rx.report_epoch(), true);
+                    if (fa.restore) uplink_restore_power();
                 } else {
                     uplink_artifact = std::move(art);
                     uplink_artifact_fp = fp;

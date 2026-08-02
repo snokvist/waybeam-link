@@ -5116,3 +5116,48 @@ one-count lag to matter, and the observability to see `emitted=199/200` rather
 than a bare failure string. The first two are bench facts; the third is the
 lesson — the per-dwell trace was added to debug this and is now the campaign's
 required per-run record, which is what it should have been from the start.
+
+## Pass 129 — two operator rulings from the bench (2026-08-02)
+
+Both raised as open questions after the first successful §10.7 hardware run;
+both ruled the same way, that a result which cannot be used must not report
+success.
+
+**1. A failed artifact write fails the run.** With the calibration directory
+absent the run logged `artifact write FAILED` and still reported
+`state:"done"`, `fail_reason:null` — only `fingerprint: 0` betrayed it. The Hub
+menu binds `@wblink_uplink_calib_state`, so the operator's OSD row read "done"
+for a commissioning step that had persisted nothing and would lose its
+placement at the next boot. This is the same false success the Pass 126 verify
+rule removed, one layer further out, and worse for being invisible. §10.7 now
+fails with `artifact_write_failed` and re-arms the restore edge so the actuator
+returns to its pre-run owner rather than holding an unpersisted placement.
+
+Note what this does NOT change: the measurement was valid and the placement was
+applied for the session. The ruling is about what the operator is told, and the
+premise of the feature — "persisted on both sides" — is what makes an
+unpersisted run a failure rather than a partial success.
+
+**2. The cap wall at the floor is handled the way §10.6 handles it: distance.**
+The first live run placed at `min_qdb` because the cap wall fired on the first
+step off the floor — a commanded +4 dB moved the craft's RSSI by under 1 dB at
+roughly 1 m. That is not a §10.7 defect; it is the Pass 121 cap wall correctly
+reporting that delivered power is not tracking commanded. §10.6 already answers
+this procedurally — Pass 121 collapsed the requirement to **near-bench 2–10 m**
+precisely "so the upper rungs' overload ceilings sit above the cap wall" — and
+§10.7 inherits it.
+
+What §10.7 adds is that the condition is now legible. A cap wall that lands the
+placement ON the floor means no power was ever shown to deliver more than the
+minimum, so "maximum deliverable clean power" was never measured. Persisting
+that would auto-apply a floor placement at every subsequent boot on the strength
+of a measurement that never happened. It fails with `cap_wall_at_floor`, whose
+remedy is in its name. A cap wall above the floor is a real placement and
+succeeds unchanged — the rule is about the floor case only.
+
+**Method note.** Neither of these was reachable from a unit test, and neither is
+a coding error: the first is a question about what an operator is entitled to
+infer from a state field, the second about what a measurement means when the
+bench geometry is wrong. Both surfaced within minutes of the first successful
+hardware run, and both were operator rulings rather than implementer choices —
+which is the process working as intended rather than a gap in it.

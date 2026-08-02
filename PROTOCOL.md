@@ -2411,10 +2411,35 @@ binary serialization, not JSON formatting. The list shape is v1 law precisely
 so a future multi-rung uplink adds entries rather than bumping the schema and
 migrating every deployed artifact and Hub parser. Rate identity lives in the
 entry, never in the top-level identity block. Write atomically under the
-configured calibration directory. Apply it only when the same craft is selected
+configured calibration directory. **A write that does not land fails the run**
+(`artifact_write_failed`) rather than reporting `done` with a zero fingerprint
+(Pass 129 ruling): §10.7 is a one-time commissioning step whose entire premise
+is that it is persisted on both sides, so a run whose artifact never reached
+disk commissioned nothing — it applied a placement that dies at the next boot.
+Reporting success there is the same false success the verify rule removes, one
+layer out, and worse for being invisible: the Hub menu binds the state field,
+and `fingerprint: 0` was the only signal anything had gone wrong. The restore
+edge re-arms so the actuator returns to its pre-run owner. Observed on the bench
+with the calibration directory absent — which is precisely why the ground
+package must create it.
+Apply it only when the same craft is selected
 and both local and remote adapter identities match; otherwise surface stale and
 leave hardware at the higher-precedence source. A craft session reboot alone
-does not stale the artifact. Every exit restores, in order: explicit configured
+does not stale the artifact.
+
+**Near-bench distance is a §10.7 requirement, inherited from §10.6 (Pass 129).**
+The uplink run is subject to the same cap wall as the craft's, and so to the
+same procedural bound: §10.6's max-power seek "collapses the distance
+requirement to near-bench (2–10 m): far enough that the upper rungs' overload
+ceilings sit above the cap wall, close enough for a desk." Too close and the cap
+wall fires on the *first* step off the floor — measured at ~1 m, a commanded
++4 dB moved the craft's RSSI by under 1 dB — so the placement lands on `min_qdb`
+having never shown that any power delivers more than the minimum. That is not a
+calibration, and §10.7 **fails it** with reason `cap_wall_at_floor` rather than
+persisting a floor placement that would auto-apply at every subsequent boot. A
+cap wall *above* the floor is a genuine placement and succeeds unchanged — the
+rule is about the floor case only. The failure names its own remedy: move the
+nodes apart and re-run. Every exit restores, in order: explicit configured
 placement, prior matching artifact, then backend auto/default. Done applies the
 new placement; abort, process shutdown, retune conflict, and failure must never
 leave the last probe power active.

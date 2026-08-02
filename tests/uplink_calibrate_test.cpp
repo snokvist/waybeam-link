@@ -425,6 +425,69 @@ void test_blackout_scores_measured_loss_not_flat_1000() {
     CHECK(dead.qdb() > p.seek.min_qdb);  // ascends off the dead floor
 }
 
+// Operator ruling (Pass 129): persistence is the deliverable. A run whose
+// artifact never reached disk commissioned nothing — it applied a placement
+// that dies at the next boot — so reporting `done` is the same false success
+// C2 removed, one layer out. The Hub menu binds the state field, and
+// `fingerprint: 0` was the only signal anything had gone wrong.
+void test_failed_persist_fails_the_run() {
+    Rig r(fast_params());
+    CHECK(r.cal.start(r.now, r.local_epoch));
+    r.run(r.now + 600000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    CHECK(r.artifacts == 1);          // the caller was told to persist
+
+    r.cal.fail_persist();             // ...and the store write failed
+    CHECK(r.cal.state() == CalibState::kFailed);
+    CHECK(r.cal.fail_reason() != nullptr);
+    if (r.cal.fail_reason() != nullptr) {
+        CHECK(std::string(r.cal.fail_reason()) == "artifact_write_failed");
+    }
+    // The restore edge re-arms so the actuator returns to its pre-run owner
+    // rather than holding an unpersisted placement.
+    const UplinkCalibActions a = r.cal.tick(r.now, r.local_epoch, true);
+    CHECK(a.restore);
+    CHECK(!a.artifact_ready);
+    // Only a Done run can fail this way; it must not rewrite a real failure.
+    Rig f(fast_params());
+    f.up.floor_rssi = 0;              // never delivers -> no_clean_point
+    CHECK(f.cal.start(f.now, f.local_epoch));
+    f.run(f.now + 600000);
+    CHECK(f.cal.state() == CalibState::kFailed);
+    f.cal.fail_persist();
+    if (f.cal.fail_reason() != nullptr) {
+        CHECK(std::string(f.cal.fail_reason()) == "no_clean_point");
+    }
+}
+
+// Operator ruling (Pass 129): a cap wall that lands the placement ON THE FLOOR
+// is not a calibration. The cap wall means delivered power stopped following
+// commanded; landing at min_qdb means that was already true at the first step
+// off the floor, so no power was ever shown to deliver more than the minimum.
+// Measured on a ~1 m bench: +4 dB commanded moved the craft's RSSI under 1 dB.
+void test_cap_wall_at_floor_fails() {
+    Rig r(fast_params());
+    r.up.cap_qdb = 4;   // delivered power never follows commanded at all
+    CHECK(r.cal.start(r.now, r.local_epoch));
+    r.run(r.now + 600000);
+    CHECK(r.cal.state() == CalibState::kFailed);
+    CHECK(r.cal.fail_reason() != nullptr);
+    if (r.cal.fail_reason() != nullptr) {
+        CHECK(std::string(r.cal.fail_reason()) == "cap_wall_at_floor");
+    }
+    CHECK(r.artifacts == 0);   // nothing persisted
+    CHECK(r.restores == 1);    // and the actuator is handed back
+
+    // A cap wall ABOVE the floor is a real placement and still succeeds — the
+    // ruling is about the floor case, not about cap walls.
+    Rig ok(fast_params());
+    ok.up.cap_qdb = 52;
+    CHECK(ok.cal.start(ok.now, ok.local_epoch));
+    ok.run(ok.now + 600000);
+    CHECK(ok.cal.state() == CalibState::kDone);
+    CHECK(ok.cal.placement().placement_qdb > UplinkCalibParams{}.seek.min_qdb);
+}
+
 // C2 regression. PowerSeek reaches kDone from verify with loss above
 // loss_ok_milli only when the descent budget or the floor is exhausted. §10.6
 // records that ("the artifact never lies") because a craft artifact is a
@@ -656,6 +719,8 @@ int main() {
     test_partial_blackout_ends_dwell();
     test_blackout_scores_measured_loss_not_flat_1000();
     test_verify_exhausted_is_failure();
+    test_failed_persist_fails_the_run();
+    test_cap_wall_at_floor_fails();
     test_second_run_clears_bracket();
     test_loss_denominator_boundary();
     test_clean_ramp();

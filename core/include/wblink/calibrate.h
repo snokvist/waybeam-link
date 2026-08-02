@@ -85,6 +85,7 @@ class PowerSeek {
         last_clean_.reset();
         verify_descents_ = 0;
         cap_confirm_ = false;
+        capped_ = false;
         blackout_used_ = false;
         floor_ascend_ = false;
         phase_ = Phase::kSeek;
@@ -143,6 +144,12 @@ class PowerSeek {
 
     int32_t qdb() const { return qdb_; }
     bool in_verify() const { return phase_ == Phase::kVerify; }
+    // True when the placement was chosen by the CAP WALL — delivered power
+    // stopped following commanded — rather than by a loss wall or the guard.
+    // §10.6 records that either way; §10.7 uses it to tell "this is the most
+    // power the link can carry" from "this bench is too close to measure at
+    // all" (see the near-bench distance requirement).
+    bool capped() const { return capped_; }
     int8_t last_clean_rssi() const { return last_clean_rssi_; }
     bool has_bad() const { return has_bad_; }
     int8_t first_bad_rssi() const { return first_bad_rssi_; }
@@ -201,6 +208,7 @@ class PowerSeek {
                 cap_confirm_ = true;
                 return {SeekStep::Kind::kProbe, qdb_, false, nullptr};
             }
+            capped_ = true;
             return place_(last_clean_->qdb);
         }
         cap_confirm_ = false;
@@ -232,6 +240,7 @@ class PowerSeek {
     std::optional<Probe> last_clean_;
     uint8_t verify_descents_ = 0;
     bool cap_confirm_ = false;
+    bool capped_ = false;
     bool blackout_used_ = false;
     bool floor_ascend_ = false;
     int8_t last_clean_rssi_ = 127;
