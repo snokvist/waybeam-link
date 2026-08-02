@@ -97,3 +97,41 @@ dwells read 0-10permille. The speedup was never about packing the gap; it is
 about using EVERY gap (~60/s at 60 fps) instead of every sixth at the 10 Hz
 cadence — same traffic shape §7.2 is engineered for, 6x the rate.
 `uplink_verify_epochs` 400 -> 200 to hold the run near ~2.5 min/direction.
+
+## 10 m campaign — Pass 133 full sweep (the commissioning result)
+
+Craft moved to 10 m; craft sees the ground uplink at **−56 dBm** (bench was
+−13 dBm). `start_both`, ~360 s, all eight rungs place:
+
+| rung | GI | dBm | rssi | loss‰ | overload bracket |
+|---|---|---:|---:|---:|---|
+| 0 | lgi | 27.0 | −59 | 5 | none |
+| 1 | lgi | 27.0 | −59 | 0 | none |
+| 2 | sgi | 27.0 | −57 | 5 | none |
+| 3 | sgi | 25.0 | −59 | 15 | 27.0 |
+| 4 | sgi | 17.0 | −65 | 0 | 25.0 |
+| 5 | sgi | 17.0 | −64 | 0 | 25.0 |
+| 6 | sgi | 13.0 | −70 | 0 | 21.0 |
+| 7 | sgi | 13.0 | −71 | 5 | 21.0 |
+
+**14 dB of backoff, monotone, with a measured overload ceiling above every
+placement from rung 3 up.** Rungs 0–2 book no bracket: the PA stays linear
+enough at full power for BPSK/QPSK. Artifact `fp=80`,
+`uplink-artifact-10m.json`.
+
+### The rung-6 lesson
+
+The FIRST 10 m attempt failed at rung 6 and I proposed recording it as
+"unreachable at this geometry". It was not — the sweep had run **2 of 8
+steps**, terminating on a fluke-clean probe at 1.0 dBm followed by one bad
+probe. It never tried 17.0 dBm, where rung 5 had just placed. With the Pass 133
+full sweep, rung 6 places at **13.0 dBm**. A plausible physical story is not
+evidence that the measurement happened.
+
+### Known gap in this campaign
+
+The craft had no IP route at 10 m, so its §10.6 downlink sweep ran the
+**pre-Pass-133** binary and artifact `fp=9` was produced with early-terminate
+semantics — the same defect. It needs one re-run at 10 m with the craft on the
+Pass 133 build (now installed). The **uplink** result above is unaffected: the
+craft plays no `PowerSeek` role in §10.7, it only counts probes.
