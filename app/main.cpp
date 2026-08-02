@@ -3033,6 +3033,7 @@ struct RxCore {
     // reconstructing it from the craft's anchors.
     void set_probe_budget(uint32_t n) { reporter_.set_probe_budget(n); }
     void clear_probe_mode() { reporter_.clear_probe_mode(); }
+    bool probing() const { return reporter_.probing(); }
     bool probe_spent() const { return reporter_.probe_spent(); }
     // The injector's half of the §3.5 emission contract: the number to stamp
     // into the frame at the radio call, and the commit that spends it.
@@ -6092,7 +6093,17 @@ int run_rx(const Loaded& l) {
             // `return_window_us` or the report size moves. Outside a
             // calibration this never binds — ordinary operation queues one
             // report per window.
-            size_t window_budget = kReportsPerReturnWindow;
+            // ONLY while a §10.7 burst is in flight. Outside one this flushes
+            // the whole batch and clears, exactly as it always did. Capping
+            // ordinary traffic was a REGRESSION: reports are built on a 10 Hz
+            // timer but windows open per video EOB, so whenever windows open
+            // slower than reports are built the queue grows without bound and
+            // every report is delivered later than the last. Measured on the
+            // bench as the craft seeing ~4.8 epochs/s instead of 10 and
+            // tripping REPORT_TIMEOUT on staleness — a healthy-looking link
+            // (RSSI -54, 2.7M packets) with a starved return path.
+            size_t window_budget =
+                rx.probing() ? kReportsPerReturnWindow : report_ret_held.size();
             while (!report_ret_held.empty() && window_budget-- > 0) {
                 auto& [f, target] = report_ret_held.front();
                 // Stamps in place, so the redundancy copy must be taken AFTER
@@ -6112,9 +6123,12 @@ int run_rx(const Loaded& l) {
                 ++ret_window_misses;
             }
             urgent_ret_held.clear();
-            // NOT cleared: whatever did not fit this window is the next
-            // window's batch. Bounded by the §10.7 burst size, which is
-            // issued once per dwell.
+            // During a burst, whatever did not fit is the next window's batch
+            // (bounded by the burst size, issued once per dwell). Outside one
+            // the loop above drained it, so this is a no-op — but it is stated
+            // rather than assumed, because leaving stale reports queued on the
+            // ordinary path is exactly the regression above.
+            if (!rx.probing()) report_ret_held.clear();
             ret_at_us.reset();
             report_fallback_us.reset();
             ret_tsf_anchored = false;
