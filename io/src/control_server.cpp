@@ -336,6 +336,13 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             }
             return reply(200, "OK", h_.vehicle_command_json());
         }
+        if (path == "/api/v1/link/mtu") {
+            if (!h_.link_mtu_json) {
+                return reply(409, "Conflict",
+                             json_err("MTU negotiation not available in this mode"));
+            }
+            return reply(200, "OK", h_.link_mtu_json());
+        }
         if (path == "/api/v1/mode") {
             if (!h_.mode_get) {
                 return reply(409, "Conflict",
@@ -536,6 +543,17 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             return reply(400, "Bad Request", json_err("cmd and arg required"));
         }
         const auto [code, jbody] = h_.vehicle_command(cmd, j.value("arg", -1));
+        return reply(code,
+                     code == 200 ? "OK"
+                                 : (code == 409 ? "Conflict" : "Bad Request"),
+                     jbody);
+    }
+    if (path == "/api/v1/link/mtu") {
+        if (!h_.link_mtu) return na();
+        if (!j.contains("mode") || !j["mode"].is_string()) {
+            return reply(400, "Bad Request", json_err("mode (string) required"));
+        }
+        const auto [code, jbody] = h_.link_mtu(j["mode"].get<std::string>());
         return reply(code,
                      code == 200 ? "OK"
                                  : (code == 409 ? "Conflict" : "Bad Request"),

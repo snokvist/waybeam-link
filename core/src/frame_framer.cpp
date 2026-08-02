@@ -16,7 +16,7 @@ uint16_t FrameFramer::symbol_size() const {
     // §5.1a: s = max_payload - 26 (header) - 11 (repair subheader), so source
     // and repair symbols are the same size and both fit one MPDU. Config
     // guarantees max_payload >= kDataHeaderSize + 32, so s >= 21.
-    const int s = static_cast<int>(max_payload_) -
+    const int s = static_cast<int>(effective_packet_budget()) -
                   static_cast<int>(kDataHeaderSize) -
                   static_cast<int>(kFecRepairSubheaderSize);
     return s > 0 ? static_cast<uint16_t>(s) : 1;
@@ -74,15 +74,21 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     }
 
     const uint16_t s = symbol_size();
-    size_t k_sz = (len + s - 1) / s;
-    if (k_sz == 0) {
-        k_sz = 1;
-    }
+    const size_t k_sz = 1u + (len - 1u) / s;
     if (k_sz > 0xFFFFu) {  // window_len is u16 (§14.1) — unreachable at sane MTU
         ++stats_.malformed_frame;
         return false;
     }
     const uint16_t k = static_cast<uint16_t>(k_sz);
+
+    const uint16_t default_symbol = std::min<uint16_t>(
+        s, static_cast<uint16_t>(kDefaultMaxPayload - kDataHeaderSize -
+                                 kFecRepairSubheaderSize));
+    const size_t default_k = 1u + (len - 1u) / default_symbol;
+    const bool jumbo_fec_guard =
+        cfg_.fec.scheme == FecScheme::kRlc256 &&
+        s > default_symbol && k < mtu_tier::kFecProtectionK &&
+        default_k >= mtu_tier::kFecProtectionK;
 
     VencFrameMeta meta;
     read_frame_meta(blob, len, &meta);
@@ -115,6 +121,26 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
         const uint32_t cap =
             k < kFecMaxSymbols ? kFecMaxSymbols - k : 0;
         r = static_cast<uint16_t>(std::min<uint32_t>(*ov_parity, cap));
+    }
+    // §9.3a Pass 124: match the configured erasure depth at k=16 without
+    // refragmenting jumbo frames into extra source packets. Applied after a
+    // §14.2 override so the robustness floor cannot be silently bypassed.
+    if (jumbo_fec_guard) {
+        const uint32_t rate =
+            is_idr ? cfg_.fec.i_rate_permille : cfg_.fec.p_rate_permille;
+        const bool arq_only =
+            k <= cfg_.fec.min_k && (idr_arq || pframe_arq);
+        const uint32_t cap = kFecMaxSymbols - k;
+        const uint16_t guard_r = static_cast<uint16_t>(std::max<uint32_t>(
+            cfg_.fec.min_r,
+            (mtu_tier::kFecProtectionK * rate + 999u) / 1000u));
+        // The guard is subordinate to §14.1's ARQ-only min_k gate and its
+        // absolute GF(256) capacity check. In particular, do not resurrect a
+        // block which repair_count() rejected because min_r was impossible.
+        if (rate != 0 && !arq_only && guard_r <= cap && r < guard_r) {
+            r = guard_r;
+            ++stats_.mtu_fec_guard_frames;
+        }
     }
 
     ++stats_.frames;

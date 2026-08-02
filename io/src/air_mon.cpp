@@ -71,6 +71,20 @@ std::optional<uint64_t> read_iface_tx_packets(const std::string& ifname) {
     return std::strtoull(buf, nullptr, 10);
 }
 
+std::optional<uint32_t> read_iface_mtu(const std::string& ifname) {
+    const std::string path = "/sys/class/net/" + ifname + "/mtu";
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return std::nullopt;
+    char buf[32];
+    const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    buf[n] = '\0';
+    char* end = nullptr;
+    const unsigned long mtu = std::strtoul(buf, &end, 10);
+    if (end == buf || mtu > UINT32_MAX) return std::nullopt;
+    return static_cast<uint32_t>(mtu);
+}
+
 // §3.0 BPF pre-filter: rejects non-waybeam frames in the kernel before the
 // recvmsg() copy to userspace.  Mirrors dot11_parse()'s cheapest checks:
 // frame-control, SA prefix 0x56/0x42, optional net_id, payload magic 0x57/0x42.
@@ -686,10 +700,29 @@ int MonAir::wait_fd() const { return impl_->ready_fd; }
 
 size_t MonAir::rx_adapters() const { return impl_->adapters.size(); }
 bool MonAir::has_tx() const { return impl_->has_tx; }
+
+uint16_t MonAir::mtu_supported() const {
+    uint16_t supported = mtu_tier::kHighBudget;
+    for (const auto& adapter : impl_->adapters) {
+        const auto mtu = read_iface_mtu(adapter->ifname);
+        uint16_t budget = kDefaultMaxPayload;
+        if (mtu && *mtu >= mtu_tier::kHighBudget + kDot11HdrLen + 2) {
+            budget = mtu_tier::kHighBudget;
+        } else if (mtu &&
+                   *mtu >= mtu_tier::kMediumBudget + kDot11HdrLen + 2) {
+            budget = mtu_tier::kMediumBudget;
+        }
+        supported = std::min(supported, budget);
+        std::fprintf(stderr,
+                     "kernel-monitor: %s netdev mtu=%u -> packet budget %u\n",
+                     adapter->ifname.c_str(), mtu.value_or(0), budget);
+    }
+    return supported;
+}
 size_t MonAir::tx_index() const { return impl_->tx_idx; }  // §15.5a scout (Pass 64)
 
 std::optional<uint32_t> MonAir::estimate_airtime_us(
-    size_t bytes, bool include_pending) const {
+    size_t bytes, bool include_pending, uint16_t packet_budget) const {
     if (!impl_->has_tx) return std::nullopt;
     if (impl_->cfg.airtime_efficiency_permille == 0) return std::nullopt;
     uint64_t total = bytes;
@@ -703,8 +736,8 @@ std::optional<uint32_t> MonAir::estimate_airtime_us(
     // Input bytes are Waybeam wire packets. Account for one 802.11 header +
     // FCS per standard-rung-sized MPDU; service efficiency owns preamble,
     // contention, driver aggregation, and other measured transport effects.
-    const uint64_t packets =
-        (total + kDefaultMaxPayload - 1u) / kDefaultMaxPayload;
+    const uint64_t budget = std::max<uint16_t>(packet_budget, 1);
+    const uint64_t packets = (total + budget - 1u) / budget;
     total += packets * (kDot11HdrLen + kFcsLen);
     return ht20_service_time_us(
         static_cast<size_t>(std::min<uint64_t>(total, SIZE_MAX)), impl_->mcs,

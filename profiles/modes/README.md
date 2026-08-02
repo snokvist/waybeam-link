@@ -28,7 +28,7 @@ cell moves together and the structure survives.
 | **Medium latency** 60 fps | 1280×720 · 0.051→0.186 | 1920×1080 · 0.046→0.145 | 1920×1080 · 0.083→0.176 |
 | **High latency** 30 fps | 1920×1080 · 0.046→0.166 | 1920×1080 · 0.093→0.290 | 1920×1080 · 0.166→0.351 |
 
-Rung bitrates come from the Pass 111 table (`table_version` 0xBF): 2829 / 5754 /
+Rung bitrates come from the Pass 122 table (`table_version` 0x80): 2829 / 5754 /
 10303 / 13769 / 18025 / 21839 kbps. `(Low latency, Range Medium)` is the one
 knife-edge — 1600×900 lands at 0.0400 bpp, 0.1 % under the floor, so the
 smaller size is taken. Raise the floor at all and that cell becomes 1600×900.

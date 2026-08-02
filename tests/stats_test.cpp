@@ -119,6 +119,7 @@ StatsSnapshot sample_snapshot() {
     st.source_symbols_sent = 4120300;
     st.repair_symbols_sent = 358944;
     st.fec_oversize_frames = 0;
+    st.mtu_fec_guard_frames = 1234;
     st.idr_frames = 17;
     st.arq_frames = 68342;
     st.decode_errors = 0;
@@ -179,6 +180,10 @@ StatsSnapshot sample_snapshot() {
     s.link.vcmd_state = "acked";
     s.link.vcmd_nonce = 3054418130;
     s.link.arq_rx_enabled = false;
+    s.link.mtu_mode = "auto";
+    s.link.mtu_requested = 3072;
+    s.link.mtu_effective = 2048;
+    s.link.mtu_supported = 3072;
     // §10.6 Pass 120: distinct values so the golden pins the calib mirror.
     s.link.calib_state = "running";
     s.link.calib_rung = 5;
@@ -245,7 +250,8 @@ const char* kGolden =
     "\"resends_sent\":230,\"arq_lock_holder\":9,"
     "\"double_send_suppressed\":5,"
     "\"source_symbols_sent\":4120300,\"repair_symbols_sent\":358944,"
-    "\"fec_oversize_frames\":0,\"idr_frames\":17,\"arq_frames\":68342,"
+    "\"fec_oversize_frames\":0,\"mtu_fec_guard_frames\":1234,"
+    "\"idr_frames\":17,\"arq_frames\":68342,"
     "\"arq_cutoff_frames\":0,"
     "\"decode_errors\":0,\"active_profile\":4,\"table_version\":178}],"
     "\"arq_timing\":{"
@@ -285,6 +291,8 @@ const char* kGolden =
     "\"cmd_framing_select\":0,"
     "\"vcmd_state\":\"acked\",\"vcmd_nonce\":3054418130,"
     "\"arq_rx_enabled\":false,"
+    "\"mtu_mode\":\"auto\",\"mtu_requested\":3072,"
+    "\"mtu_effective\":2048,\"mtu_supported\":3072,"
     "\"calib_state\":\"running\",\"calib_rung\":5,"
     "\"calib_fingerprint\":191,\"calib_stale\":true}}\n";
 

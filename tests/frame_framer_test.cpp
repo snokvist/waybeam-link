@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <vector>
 
 #include "wblink/endian.h"
@@ -70,6 +71,14 @@ std::vector<uint8_t> make_frame(size_t body, bool idr, uint8_t seed) {
     return b;
 }
 
+size_t source_count(const std::vector<Sym>& sent) {
+    size_t count = 0;
+    for (const Sym& sym : sent) {
+        count += !sym.is_repair();
+    }
+    return count;
+}
+
 }  // namespace
 
 int main() {
@@ -125,6 +134,199 @@ int main() {
     }
 
     // --- min_k gate: k <= min_k => ARQ-only, r = 0 --------------------------
+    // --- §9.3a negotiated ceiling intersects the profile ceiling ------------
+    {
+        Harness h;
+        h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
+        // Boot/default remains compatibility-sized despite a High profile.
+        CHECK_EQ_U(h.framer.effective_packet_budget(), kDefaultMaxPayload);
+        CHECK_EQ_U(h.framer.symbol_size(), 1424u - 26u - 11u);
+        h.framer.set_negotiated_packet_budget(mtu_tier::kMediumBudget);
+        CHECK_EQ_U(h.framer.effective_packet_budget(), 2048u);
+        CHECK_EQ_U(h.framer.symbol_size(), 2048u - 26u - 11u);
+        h.feed(make_frame(6000, true, 33));
+        for (const Sym& sy : h.sent) {
+            CHECK(sy.payload.size() + kDataHeaderSize <= 2048u);
+        }
+        h.sent.clear();
+        h.framer.set_negotiated_packet_budget(mtu_tier::kHighBudget);
+        CHECK_EQ_U(h.framer.effective_packet_budget(), 3072u);
+        h.feed(make_frame(6000, true, 34));
+        for (const Sym& sy : h.sent) {
+            CHECK(sy.payload.size() + kDataHeaderSize <= 3072u);
+        }
+        // A lower profile remains authoritative even after High is accepted.
+        h.framer.set_operating_point(2, 0x80, kDefaultMaxPayload);
+        CHECK_EQ_U(h.framer.effective_packet_budget(), kDefaultMaxPayload);
+    }
+
+    // --- §9.3a Pass 124: 12-case jumbo repair-depth guard matrix -----------
+    {
+        struct GuardCase {
+            uint16_t profile_budget;
+            uint16_t negotiated_budget;
+            size_t frame_len;
+            uint16_t expected_symbol;
+            uint16_t expected_k;
+            uint16_t expected_r;
+            bool guarded;
+        };
+        static constexpr GuardCase cases[] = {
+            {1424, 1424, 30000, 1387, 22, 5, false},
+            {3072, 3072, 6000, 3035, 2, 2, false},
+            {2048, 2048, 20805, 2011, 11, 3, false},
+            {2048, 2048, 20806, 2011, 11, 4, true},
+            {2048, 2048, 30165, 2011, 15, 4, true},
+            {2048, 2048, 30166, 2011, 16, 4, false},
+            {3072, 3072, 30165, 3035, 10, 4, true},
+            {3072, 3072, 45525, 3035, 15, 4, true},
+            {3072, 3072, 45526, 3035, 16, 4, false},
+            {3072, 3072, 100000, 3035, 33, 7, false},
+            {2048, 3072, 45525, 2011, 23, 5, false},
+            {3072, 2048, 30000, 2011, 15, 4, true},
+        };
+        for (size_t i = 0; i < std::size(cases); ++i) {
+            const GuardCase& tc = cases[i];
+            FrameFecConfig fec;
+            fec.scheme = FecScheme::kRlc256;
+            fec.p_rate_permille = 200;
+            fec.min_r = 2;
+            Harness h(fec);
+            h.framer.set_operating_point(7, 0x80, tc.profile_budget);
+            h.framer.set_negotiated_packet_budget(tc.negotiated_budget);
+            CHECK_EQ_U(h.framer.symbol_size(), tc.expected_symbol);
+            h.feed(make_frame(tc.frame_len - kVencFrameMetaSize,
+                              /*idr=*/false,
+                              static_cast<uint8_t>(40 + i)));
+            CHECK_EQ_U(source_count(h.sent), tc.expected_k);
+            CHECK_EQ_U(h.framer.stats().repair_symbols, tc.expected_r);
+            CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames,
+                       tc.guarded ? 1u : 0u);
+            const size_t packet_budget =
+                tc.expected_symbol + kDataHeaderSize +
+                kFecRepairSubheaderSize;
+            for (const Sym& sym : h.sent) {
+                CHECK(sym.payload.size() + kDataHeaderSize <= packet_budget);
+                CHECK_EQ_U(be16_read(sym.payload.data() +
+                                     (sym.is_repair()
+                                          ? kFecOffWindowLen
+                                          : kFecSrcOffWindowLen)),
+                           tc.expected_k);
+            }
+        }
+    }
+
+    // A FEC-disabled stream keeps the full negotiated ceiling: reducing k has
+    // no recovery benefit there and would only spend packet-rate/CPU budget.
+    {
+        Harness h;
+        h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
+        h.framer.set_negotiated_packet_budget(mtu_tier::kHighBudget);
+        CHECK_EQ_U(h.framer.symbol_size(), 3035u);
+        h.feed(make_frame(30000 - kVencFrameMetaSize, false, 59));
+        CHECK_EQ_U(source_count(h.sent), 10u);
+        CHECK_EQ_U(h.framer.stats().repair_symbols, 0u);
+        CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames, 0u);
+    }
+
+    // At the measured high-rate size, keep k=10 but enforce the k=16-equivalent
+    // four-repair depth, even after a lower §14.2 override. Four arbitrary
+    // source erasures must remain deterministically recoverable.
+    {
+        FrameFecConfig fec;
+        fec.scheme = FecScheme::kRlc256;
+        fec.p_rate_permille = 200;
+        fec.min_k = 3;
+        Harness h(fec);
+        h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
+        h.framer.set_negotiated_packet_budget(mtu_tier::kHighBudget);
+        h.framer.set_next_frame_override(1, true);
+        const auto blob = make_frame(30000 - kVencFrameMetaSize, false, 60);
+        h.feed(blob);
+        CHECK_EQ_U(h.framer.stats().source_symbols, 10u);
+        CHECK_EQ_U(h.framer.stats().repair_symbols, 4u);
+        CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames, 1u);
+        CHECK_EQ_U(h.sent.size(), 14u);
+        for (const Sym& sym : h.sent) {
+            CHECK_EQ_U(be16_read(sym.payload.data() +
+                                 (sym.is_repair() ? kFecOffWindowLen
+                                                  : kFecSrcOffWindowLen)),
+                       10u);
+        }
+
+        const uint16_t symbol = h.framer.symbol_size();
+        RlcDecoder dec(10, symbol);
+        std::vector<uint8_t> padded(symbol, 0);
+        uint16_t source_index = 0;
+        for (const Sym& sym : h.sent) {
+            if (sym.is_repair()) {
+                dec.add_repair(
+                    sym.payload[kFecOffRepairIdx],
+                    sym.payload.data() + kFecRepairSubheaderSize);
+                continue;
+            }
+            if (source_index != 0 && source_index != 3 &&
+                source_index != 6 && source_index != 9) {
+                std::memset(padded.data(), 0, padded.size());
+                const size_t chunk =
+                    sym.payload.size() - kFecSourceSubheaderSize;
+                std::memcpy(padded.data(),
+                            sym.payload.data() + kFecSourceSubheaderSize,
+                            chunk);
+                dec.add_source(source_index, padded.data());
+            }
+            ++source_index;
+        }
+        CHECK(dec.can_decode());
+        std::vector<uint8_t> recovered(10u * symbol, 0);
+        CHECK(dec.decode(recovered.data()));
+        recovered.resize(blob.size());
+        CHECK(recovered == blob);
+
+        h.framer.reset_stats();
+        CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames, 0u);
+    }
+
+    // The jumbo guard cannot override the ARQ-only min_k gate. This remains
+    // source-only even though Default sizing would have produced k >= 16.
+    {
+        FrameFecConfig fec;
+        fec.scheme = FecScheme::kRlc256;
+        fec.p_rate_permille = 200;
+        fec.min_k = 10;
+        fec.min_r = 2;
+        Harness h(fec, FrameArqMode::kAllFrames);
+        h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
+        h.framer.set_negotiated_packet_budget(mtu_tier::kHighBudget);
+        h.feed(make_frame(30000 - kVencFrameMetaSize, false, 61));
+        CHECK_EQ_U(source_count(h.sent), 10u);
+        CHECK_EQ_U(h.framer.stats().repair_symbols, 0u);
+        CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames, 0u);
+        for (const Sym& sym : h.sent) {
+            CHECK(!sym.is_repair());
+            CHECK((sym.hdr.data_flags & data_flags::kPframeArq) != 0);
+        }
+    }
+
+    // An impossible min_r remains the existing §14.1 source-only fallback;
+    // Pass 124 must not recreate an invalid k+r > 256 block after rejection.
+    {
+        FrameFecConfig fec;
+        fec.scheme = FecScheme::kRlc256;
+        fec.p_rate_permille = 200;
+        fec.min_k = 3;
+        fec.min_r = 255;
+        Harness h(fec);
+        h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
+        h.framer.set_negotiated_packet_budget(mtu_tier::kHighBudget);
+        h.feed(make_frame(30000 - kVencFrameMetaSize, false, 62));
+        CHECK_EQ_U(source_count(h.sent), 10u);
+        CHECK_EQ_U(h.framer.stats().repair_symbols, 0u);
+        CHECK_EQ_U(h.framer.stats().fec_oversize_k, 1u);
+        CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames, 0u);
+        CHECK_EQ_U(h.sent.size(), 10u);
+    }
+
     {
         FrameFecConfig fec;
         fec.scheme = FecScheme::kRlc256;

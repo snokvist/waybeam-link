@@ -937,6 +937,7 @@ uint8_t vcmd_id_for(const std::string& name) {
     if (name == "framing") return vcmd_id::kFraming;
     if (name == "mode") return vcmd_id::kMode;  // §11.7 Pass 105
     if (name == "calibrate") return vcmd_id::kCalibrate;  // §10.6 Pass 120
+    if (name == "mtu_tier") return vcmd_id::kMtuTier;  // §9.3a Pass 122
     return 0;
 }
 
@@ -950,8 +951,22 @@ const char* vcmd_name_for(uint8_t id) {
         case vcmd_id::kFraming: return "framing";
         case vcmd_id::kMode: return "mode";  // §11.7 Pass 105
         case vcmd_id::kCalibrate: return "calibrate";  // §10.6 Pass 120
+        case vcmd_id::kMtuTier: return "mtu_tier";  // §9.3a Pass 122
     }
     return "";
+}
+
+std::optional<uint8_t> mtu_tier_for_mode(const std::string& mode,
+                                         uint16_t supported) {
+    if (mode == "default") return mtu_tier::kDefault;
+    if (mode == "medium") return mtu_tier::kMedium;
+    if (mode == "high") return mtu_tier::kHigh;
+    if (mode == "auto") {
+        if (supported >= mtu_tier::kHighBudget) return mtu_tier::kHigh;
+        if (supported >= mtu_tier::kMediumBudget) return mtu_tier::kMedium;
+        return mtu_tier::kDefault;
+    }
+    return std::nullopt;
 }
 
 uint8_t bw_code(uint8_t width_mhz) {
@@ -1123,6 +1138,16 @@ struct AirBackend {
     // channel_mhz, so before the first retune the card is on whatever mon-up
     // left it. RadioAir does apply it at create.
     std::vector<uint16_t> chan_by_adapter;
+
+    uint16_t mtu_supported() const {
+        if (mon) return mon->mtu_supported();
+#if WBLINK_RADIO
+        // Successful RadioAir construction means every active USB adapter was
+        // accepted by devourer's Realtek driver matrix (§9.3a v1).
+        if (radio) return mtu_tier::kHighBudget;
+#endif
+        return kDefaultMaxPayload;  // UDP/unknown: compatibility tier
+    }
 
     static Result<AirBackend> create(const Config& cfg) {
         AirBackend b;
@@ -1510,9 +1535,11 @@ struct AirBackend {
     }
     bool tx_pending() const { return udp && udp->tx_pending(); }
     std::optional<uint32_t> estimate_airtime_us(size_t bytes,
-                                                bool include_pending) const {
+                                                bool include_pending,
+                                                uint16_t packet_budget) const {
         if (mon) {
-            return mon->estimate_airtime_us(bytes, include_pending);
+            return mon->estimate_airtime_us(bytes, include_pending,
+                                            packet_budget);
         }
         if (!udp) return std::nullopt;
         return udp->estimate_airtime_us(bytes, include_pending);
@@ -1721,7 +1748,8 @@ struct TxCore {
     };
 
     TxCore(const Config& cfg, uint32_t session, const ProfileTable* table,
-           uint8_t table_version)
+           uint8_t table_version,
+           uint16_t mtu_supported = kDefaultMaxPayload)
         : originator_(cfg.node.originator),
           session_(session),
           table_version_(table_version),
@@ -1730,6 +1758,7 @@ struct TxCore {
           venc_(cfg.venc),
           venc_knobs_(cfg.venc),
           arq_max_fps_(cfg.policy.arq.arq_max_fps),
+          mtu_supported_(mtu_supported),
           boot_min_profile_(cfg.policy.select.min_profile),
           boot_max_profile_(cfg.policy.select.max_profile),
           feedback_gate_(ReportGatePolicy{
@@ -1810,7 +1839,9 @@ struct TxCore {
                 fc.fec.min_r = s.fec.min_r;
                 st.frame_framer.emplace(fc);
                 st.frame_framer->set_operating_point(0, table_version,
-                                                     max_payload_for(0));
+                                                     profile_max_payload_for(0));
+                st.frame_framer->set_negotiated_packet_budget(
+                    negotiated_packet_budget_);
                 if (s.jscc_shadow) {
                     const JsccShadowCfg& jc = *s.jscc_shadow;
                     st.jscc_shadow.emplace(JsccRuntimeShadowConfig{
@@ -1842,9 +1873,9 @@ struct TxCore {
         }
     }
 
-    // §5.1a MTU budget: the active rung's max_payload (profile 0 = floor at
-    // startup), or the standard-rung default when no table is loaded.
-    uint16_t max_payload_for(uint8_t profile_id) const {
+    // §5.1a/§9.3a packet budget: profile policy ceiling intersected with the
+    // currently accepted claimed-ground ceiling.
+    uint16_t profile_max_payload_for(uint8_t profile_id) const {
         if (table_ != nullptr) {
             for (const Profile& p : table_->profiles) {
                 if (p.id == profile_id) {
@@ -1853,6 +1884,10 @@ struct TxCore {
             }
         }
         return kDefaultMaxPayload;
+    }
+    uint16_t max_payload_for(uint8_t profile_id) const {
+        return std::min(profile_max_payload_for(profile_id),
+                        negotiated_packet_budget_);
     }
 
     uint32_t frame_deadline_us(bool is_idr) const {
@@ -1911,7 +1946,7 @@ struct TxCore {
             }
             if (s.jscc_shadow && have_meta) {
                 const uint16_t symbol = s.frame_framer->symbol_size();
-                const size_t k_sz = std::max<size_t>(1, (len + symbol - 1) / symbol);
+                const size_t k_sz = 1u + (len - 1u) / symbol;
                 const uint16_t k = static_cast<uint16_t>(
                     std::min<size_t>(k_sz, UINT16_MAX));
                 const size_t source_bytes =
@@ -1919,6 +1954,8 @@ struct TxCore {
                               (kDataHeaderSize + kFecSourceSubheaderSize);
                 const size_t resend_bytes =
                     kDataHeaderSize + kFecSourceSubheaderSize + symbol;
+                const uint16_t source_packet_budget = static_cast<uint16_t>(
+                    symbol + kDataHeaderSize + kFecSourceSubheaderSize);
                 JsccShadowFrameInput input;
                 input.source_k = k;
                 input.deadline_us = frame_deadline_us(idr);
@@ -1929,9 +1966,11 @@ struct TxCore {
                 input.now_ms = now;
                 if (estimate_airtime) {
                     input.source_tx_remaining_us =
-                        estimate_airtime(source_bytes, true);
+                        estimate_airtime(source_bytes, true,
+                                         source_packet_budget);
                     input.resend_airtime_us =
-                        estimate_airtime(resend_bytes, false);
+                        estimate_airtime(resend_bytes, false,
+                                         source_packet_budget);
                 }
                 s.jscc_latest = s.jscc_shadow->evaluate(input);
                 ++s.jscc_decision_frames;
@@ -2074,7 +2113,7 @@ struct TxCore {
         if (act.commit) {
             // §9.5 commit: the operating point stamped on every DATA packet
             // (drives RX deadlines + supersession budgets)...
-            const uint16_t mp = max_payload_for(act.commit->profile_id);
+            const uint16_t mp = profile_max_payload_for(act.commit->profile_id);
             for (Stream& s : streams_) {
                 if (s.framer) {
                     s.framer->set_operating_point(act.commit->profile_id,
@@ -2388,10 +2427,34 @@ struct TxCore {
                     return calibrator_->start(now);
                 }
                 return calibrator_->abort(now);
+            case vcmd_id::kMtuTier: {
+                if (!mtu_tier::valid(arg)) return false;
+                const uint16_t requested = mtu_tier::budget(arg);
+                if (requested > mtu_supported_) return false;  // no clamp
+                negotiated_packet_budget_ = requested;
+                for (Stream& s : streams_) {
+                    if (s.frame_framer) {
+                        s.frame_framer->set_negotiated_packet_budget(requested);
+                    }
+                }
+                std::fprintf(stderr,
+                             "mtu: accepted tier=%u budget=%u (supported=%u)\n",
+                             arg, requested, mtu_supported_);
+                return true;
+            }
             default:
                 return false;
         }
     }
+    void reset_negotiated_mtu() {
+        (void)apply_command(vcmd_id::kMtuTier, mtu_tier::kDefault, 0);
+    }
+    uint16_t mtu_effective() const {
+        // max_payload_for() is already the profile/negotiated intersection.
+        return max_payload_for(selector_.profile_id());
+    }
+    uint16_t mtu_requested() const { return negotiated_packet_budget_; }
+    uint16_t mtu_supported() const { return mtu_supported_; }
     void init_calibration(const CalibrationPolicy& c) {
         CalibrateParams p;
         p.loss_ok_milli = static_cast<uint16_t>(c.loss_ok_milli);
@@ -2454,6 +2517,8 @@ struct TxCore {
                     s.frame_framer->stats().repair_symbols;
                 st.fec_oversize_frames =
                     s.frame_framer->stats().fec_oversize_k;
+                st.mtu_fec_guard_frames =
+                    s.frame_framer->stats().mtu_fec_guard_frames;
                 st.idr_frames = s.frame_framer->stats().idr_frames;
                 st.arq_frames = s.frame_framer->stats().arq_frames;
                 st.arq_cutoff_frames =
@@ -2533,6 +2598,10 @@ struct TxCore {
         snap.link.cmd_selector_frozen = cmd_selector_frozen_;
         snap.link.cmd_fps_ladder = cmd_fps_ladder();
         snap.link.cmd_fps_select = cmd_fps_select_;
+        snap.link.mtu_mode = "remote";
+        snap.link.mtu_requested = negotiated_packet_budget_;
+        snap.link.mtu_effective = mtu_effective();
+        snap.link.mtu_supported = mtu_supported_;
         if (calibrator_) {  // §10.6 Pass 120
             switch (calibrator_->state()) {
                 case CalibState::kIdle: snap.link.calib_state = "idle"; break;
@@ -2673,7 +2742,8 @@ struct TxCore {
     std::function<void(uint8_t mcs, bool sgi)> apply_mode;
     std::function<bool(size_t adapter_idx, int32_t qdb)> apply_power;
     std::function<void(size_t adapter_idx)> apply_power_auto;
-    std::function<std::optional<uint32_t>(size_t bytes, bool include_pending)>
+    std::function<std::optional<uint32_t>(size_t bytes, bool include_pending,
+                                          uint16_t packet_budget)>
         estimate_airtime;
 
     uint16_t originator_;
@@ -2686,6 +2756,8 @@ struct TxCore {
     std::optional<FpsLadder> fps_ladder_;  // §9.11 (Pass 39)
     uint16_t arq_max_fps_ = 100;           // §4.1 Pass 40 cutoff
     bool arq_fps_suppressed_ = false;
+    uint16_t mtu_supported_ = kDefaultMaxPayload;  // §9.3a local adapter min
+    uint16_t negotiated_packet_budget_ = kDefaultMaxPayload;
     // §11.7 remote command state (craft-session-volatile).
     bool cmd_arq_enabled_ = true;
     bool cmd_selector_frozen_ = false;
@@ -3273,6 +3345,10 @@ struct VcmdStatsFill {
     const char* vcmd_state = nullptr;  // issuer (null = not an issuer)
     uint32_t vcmd_nonce = 0;
     bool arq_rx_enabled = true;        // rx gate
+    const char* mtu_mode = nullptr;    // ground local preference
+    uint16_t mtu_requested = kDefaultMaxPayload;
+    uint16_t mtu_effective = kDefaultMaxPayload;
+    uint16_t mtu_supported = kDefaultMaxPayload;
 };
 
 void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
@@ -3319,6 +3395,12 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
             snap.link.vcmd_nonce = vcmd->vcmd_nonce;
         }
         snap.link.arq_rx_enabled = vcmd->arq_rx_enabled;
+        if (vcmd->mtu_mode != nullptr) {
+            snap.link.mtu_mode = vcmd->mtu_mode;
+            snap.link.mtu_requested = vcmd->mtu_requested;
+            snap.link.mtu_effective = vcmd->mtu_effective;
+            snap.link.mtu_supported = vcmd->mtu_supported;
+        }
     }
     // Air adapters first so RxCore::fill_stats can merge its per-adapter
     // liveness view into them by index (radio backend; no-op on udp).
@@ -3535,7 +3617,8 @@ int run_tx(const Loaded& l) {
     std::array<uint8_t, kAnnouncePskSize> token = announce_token();
     bool psk_announced = l.cfg.policy.csa.psk.empty();
     DiscoveryCatalog discovery;
-    TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv);
+    TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv,
+              air.value->mtu_supported());
     // §10.6 (Pass 120): craft-resident calibration — engine seeds, artifact
     // persistence, and the boot auto-load with the fingerprint gate.
     tx.init_calibration(l.cfg.policy.calibration);
@@ -3590,8 +3673,10 @@ int run_tx(const Loaded& l) {
                          stored.value->identity.c_str(), ident.c_str());
         }
     }
-    tx.estimate_airtime = [&](size_t bytes, bool include_pending) {
-        return air.value->estimate_airtime_us(bytes, include_pending);
+    tx.estimate_airtime = [&](size_t bytes, bool include_pending,
+                              uint16_t packet_budget) {
+        return air.value->estimate_airtime_us(bytes, include_pending,
+                                              packet_budget);
     };
     if (air.value->is_radio()) {
         tx.apply_mode = [&](uint8_t mcs, bool sgi) {
@@ -3779,6 +3864,13 @@ int run_tx(const Loaded& l) {
                                    air.value ? &*air.value : nullptr);
         };
         h.health_json = [&] { return build_health_json(last_snap); };
+        h.link_mtu_json = [&] {
+            return std::string("{\"mode\":\"remote\",\"requested\":") +
+                   std::to_string(tx.mtu_requested()) +
+                   ",\"effective\":" + std::to_string(tx.mtu_effective()) +
+                   ",\"supported\":" + std::to_string(tx.mtu_supported()) +
+                   "}";
+        };
         h.discovery_json = [&] {
             return discovery.json(now_ms(), {});
         };
@@ -3966,6 +4058,7 @@ int run_tx(const Loaded& l) {
             }
             csa.clear_campaign();
             csa.release_binding();
+            tx.reset_negotiated_mtu();
             // §3.5 Pass 115: authority is released as one thing too. Dropping
             // the binding while the report latch stays pinned to the departed
             // issuer is precisely the split state the transfer exists to
@@ -3985,6 +4078,7 @@ int run_tx(const Loaded& l) {
                 csa.set_psk({token.begin(), token.end()});
                 craft_cmd.set_psk({token.begin(), token.end()});
                 psk_announced = true;
+                tx.reset_negotiated_mtu();
                 // §3.5 Pass 115: set_psk drops the §11.5a binding, so release
                 // report authority with it — a new pairing epoch must not
                 // leave the previous issuer still driving the selector.
@@ -4002,6 +4096,7 @@ int run_tx(const Loaded& l) {
     }
     std::fprintf(stderr, "tx: session=%u, running%s\n", session,
                  qg.enabled() ? " (quiet-gap pacing)" : "");
+    std::optional<uint16_t> prior_bound_issuer;
     const auto service_air = [&](uint64_t service_now) {
         const uint64_t service_us = now_us();
         air.value->poll_once(0, [&](const AirRxMeta& meta, const uint8_t* d,
@@ -4014,6 +4109,11 @@ int run_tx(const Loaded& l) {
                                air.value->read_tsf(meta.adapter_id),
                                static_cast<uint32_t>(meta.tsf_us),
                                std::nullopt)) {
+                    // §9.3a: every newly authenticated claim starts at
+                    // Default, including a rebooted ground that reuses the
+                    // same numeric originator. The new owner may reassert its
+                    // local capability only after this claim commits.
+                    tx.reset_negotiated_mtu();
                     tx.csa_freeze(service_now + static_cast<uint64_t>(
                                                    l.cfg.policy.csa.settle_s *
                                                    1000));
@@ -4066,6 +4166,49 @@ int run_tx(const Loaded& l) {
         // Return-radio readiness is always serviced before video ingress or a
         // held-live flush. This is the vehicle's ARQ priority boundary.
         service_air(now);
+        // service_air stamps accepted packets with a fresh µs clock. Refresh
+        // the loop timestamp before ticking the follower so unsigned age
+        // arithmetic cannot observe time moving backwards and expire a fresh
+        // binding immediately.
+        now_us_it = now_us();
+        // Resolve CSA/binding deadlines before framing any newly arrived
+        // video. In particular, a binding release must restore Default before
+        // another block can be constructed with the previous owner's jumbo
+        // budget.
+        const CsaAction ca = csa.tick(now_us_it);
+        if (ca.kind != CsaAction::Kind::kNone) {
+            const bool retuned =
+                air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast);
+            if (!retuned) {
+                std::fprintf(stderr, "csa: retune to %u MHz FAILED\n",
+                             ca.chan_mhz);  // Pass 69: never silent
+            } else {
+                tx.reassert_power();  // §10.5: retune may reset power
+                tx.on_rf_environment(ca.chan_mhz, ca.bw, now);
+                cur_chan = ca.chan_mhz;
+                cur_bw = ca.bw;
+            }
+            std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
+                         ca.chan_mhz);
+            // §11.6 Pass 80: arm the post-retune RX-liveness guard. The
+            // issuer's beacons blanket the verify window, so total silence
+            // for the deadline means the in-place retune half-applied.
+            if (l.cfg.policy.csa.rx_liveness_ms > 0) {
+                csa_liveness_deadline_ms =
+                    now + l.cfg.policy.csa.rx_liveness_ms;
+                csa_liveness_rx_baseline = air.value->rx_frames_total();
+                csa_liveness_chan = ca.chan_mhz;
+                csa_liveness_bw = ca.bw;
+            }
+        }
+        // §9.3a: jumbo authority belongs to the current claim. Losing or
+        // changing that claim restores the compatibility tier before ingress.
+        const std::optional<uint16_t> bound_now = csa.latched_issuer();
+        if (prior_bound_issuer && bound_now != prior_bound_issuer) {
+            tx.reset_negotiated_mtu();
+            std::fprintf(stderr, "mtu: claim released/changed -> Default\n");
+        }
+        prior_bound_issuer = bound_now;
         if (now >= next_shm_identity_check_ms) {
             for (ShmIn& si : shm_ins) {
                 if (si.ring && !si.ring->backing_object_current()) {
@@ -4188,32 +4331,6 @@ int run_tx(const Loaded& l) {
             want_armed != csa_armed_flag) {
             csa_armed_flag = want_armed;
             tx.set_csa_armed(want_armed);
-        }
-        const CsaAction ca = csa.tick(now_us_it);
-        if (ca.kind != CsaAction::Kind::kNone) {
-            const bool retuned =
-                air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast);
-            if (!retuned) {
-                std::fprintf(stderr, "csa: retune to %u MHz FAILED\n",
-                             ca.chan_mhz);  // Pass 69: never silent
-            } else {
-                tx.reassert_power();  // §10.5: retune may reset power
-                tx.on_rf_environment(ca.chan_mhz, ca.bw, service_now);
-                cur_chan = ca.chan_mhz;
-                cur_bw = ca.bw;
-            }
-            std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
-                         ca.chan_mhz);
-            // §11.6 Pass 80: arm the post-retune RX-liveness guard. The
-            // issuer's beacons blanket the verify window, so total silence
-            // for the deadline means the in-place retune half-applied.
-            if (l.cfg.policy.csa.rx_liveness_ms > 0) {
-                csa_liveness_deadline_ms =
-                    now + l.cfg.policy.csa.rx_liveness_ms;
-                csa_liveness_rx_baseline = air.value->rx_frames_total();
-                csa_liveness_chan = ca.chan_mhz;
-                csa_liveness_bw = ca.bw;
-            }
         }
         if (csa_liveness_deadline_ms && now >= *csa_liveness_deadline_ms) {
             if (air.value->rx_frames_total() == csa_liveness_rx_baseline) {
@@ -4722,6 +4839,16 @@ int run_rx(const Loaded& l) {
     VcmdIssuer vissuer(vcmd_params(l.cfg));
     vissuer.seed_nonce(session_nonce());
     bool arq_rx_enabled = true;  // §6.4 emission gate (POST /api/v1/arq)
+    // §9.3a: Automatic is local only. A successfully-created RadioAir means
+    // every active adapter is a supported Realtek and may advertise High;
+    // unknown backends resolve conservatively to Default.
+    std::string mtu_mode = "default";
+    const uint16_t mtu_supported = air.value->mtu_supported();
+    uint16_t mtu_requested = kDefaultMaxPayload;
+    uint16_t mtu_effective = kDefaultMaxPayload;
+    bool mtu_reissue_pending = false;
+    std::function<std::pair<int, std::string>(const std::string&, int)>
+        start_vehicle_command;
     // §9.10: the ground's designated uplink TX adapter gets the same
     // CCX-liveness watchdog as the craft's radio.
     TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
@@ -4810,6 +4937,14 @@ int run_rx(const Loaded& l) {
                        std::to_string(pending_selection->chan);
             }
             return out + "}";
+        };
+        // Read-only MTU capability/state is available on every RX role,
+        // including spectators and controlled caches.
+        h.link_mtu_json = [&] {
+            return std::string("{\"mode\":\"") + mtu_mode +
+                   "\",\"requested\":" + std::to_string(mtu_requested) +
+                   ",\"effective\":" + std::to_string(mtu_effective) +
+                   ",\"supported\":" + std::to_string(mtu_supported) + "}";
         };
         if (cache_store) {
             h.cache_assignment_json = [&] {
@@ -4967,7 +5102,7 @@ int run_rx(const Loaded& l) {
                        "\",\"arg\":" + std::to_string(vissuer.cmd_arg()) +
                        ",\"state\":\"" + vissuer.state_str() + "\"}";
             };
-            h.vehicle_command = [&](const std::string& cmd, int arg)
+            start_vehicle_command = [&](const std::string& cmd, int arg)
                 -> std::pair<int, std::string> {
                 const uint8_t id = vcmd_id_for(cmd);
                 if (id == 0) {
@@ -5035,6 +5170,52 @@ int run_rx(const Loaded& l) {
                              active_selection.originator);
                 return {200, "{\"ok\":true,\"nonce\":" +
                                  std::to_string(vissuer.nonce()) + "}"};
+            };
+            h.vehicle_command = [&](const std::string& cmd, int arg) {
+                const uint8_t id = vcmd_id_for(cmd);
+                if (vcmd_id::typed_endpoint_only(id)) {
+                    return std::pair<int, std::string>{
+                        400,
+                        "{\"ok\":false,\"error\":\"command requires typed "
+                        "endpoint\"}"};
+                }
+                return start_vehicle_command(cmd, arg);
+            };
+            h.link_mtu = [&](const std::string& mode)
+                -> std::pair<int, std::string> {
+                if (l.cfg.node.spectator) {
+                    return {409,
+                            "{\"ok\":false,\"error\":\"passive spectator "
+                            "cannot negotiate MTU\"}"};
+                }
+                const auto tier = mtu_tier_for_mode(mode, mtu_supported);
+                if (!tier) {
+                    return {400,
+                            "{\"ok\":false,\"error\":\"mode must be "
+                            "default|medium|high|auto\"}"};
+                }
+                const uint16_t resolved = mtu_tier::budget(*tier);
+                if (resolved > mtu_supported) {
+                    return {400,
+                            "{\"ok\":false,\"error\":\"requested MTU "
+                            "exceeds local adapter support\"}"};
+                }
+                if (vissuer.active()) {
+                    return {409,
+                            "{\"ok\":false,\"error\":\"campaign pending\"}"};
+                }
+                mtu_mode = mode;
+                mtu_requested = resolved;
+                if (selection_state != "committed" ||
+                    active_selection.originator == 0) {
+                    mtu_reissue_pending = true;
+                    return {200, std::string("{\"ok\":true,\"queued\":true,") +
+                                     "\"requested\":" +
+                                     std::to_string(mtu_requested) + "}"};
+                }
+                const auto result = start_vehicle_command("mtu_tier", *tier);
+                if (result.first == 200) mtu_reissue_pending = false;
+                return result;
             };
             h.csa = [&](uint32_t mhz,
                         uint32_t klass) -> std::pair<int, std::string> {
@@ -5251,7 +5432,15 @@ int run_rx(const Loaded& l) {
             }
             if (const VehicleCmd* vc = std::get_if<VehicleCmd>(&dec)) {
                 if ((vc->cmd_flags & vcmd_flags::kAck) != 0) {
-                    vissuer.on_echo(*vc, now_us_it);  // §11.7 craft echo
+                    const bool accepted =
+                        vissuer.on_echo(*vc, now_us_it);  // §11.7 craft echo
+                    if (accepted && vc->cmd_id == vcmd_id::kMtuTier &&
+                        std::strcmp(vissuer.state_str(), "acked") == 0) {
+                        mtu_effective = mtu_tier::budget(vc->cmd_arg);
+                        std::fprintf(stderr,
+                                     "mtu: vehicle ACK tier=%u budget=%u\n",
+                                     vc->cmd_arg, mtu_effective);
+                    }
                 }
                 return;  // a ground never acts on a command
             }
@@ -5505,6 +5694,10 @@ int run_rx(const Loaded& l) {
                 // window and the campaign closed at the deadline.
                 if (selection_state == "verifying") {
                     selection_state = "committed";
+                    // Every successful claim reasserts the local preference,
+                    // including Default. This matters when a ground reboots
+                    // and reclaims before the craft's old binding expires.
+                    mtu_reissue_pending = true;
                 }
                 pending_selection.reset();
                 previous_selection.reset();
@@ -5558,6 +5751,17 @@ int run_rx(const Loaded& l) {
                 break;
             case CsaIssuer::IssuerAction::Kind::kNone:
                 break;
+        }
+        // §9.3a: a preference chosen before/during claim is reissued once the
+        // CSA claim is actually committed. Keep this non-blocking and share
+        // the exact command validation/keying path used by the REST endpoint.
+        if (mtu_reissue_pending && selection_state == "committed" &&
+            !vissuer.active() && start_vehicle_command) {
+            const auto tier = mtu_tier_for_mode(mtu_mode, mtu_supported);
+            if (tier) {
+                const auto result = start_vehicle_command("mtu_tier", *tier);
+                if (result.first == 200) mtu_reissue_pending = false;
+            }
         }
         // §11.7 command campaign copies ride the same uplink as CSA copies.
         {
@@ -5639,7 +5843,9 @@ int run_rx(const Loaded& l) {
             }
             const ArqTimingStats timing = arq_timing.snapshot();
             const VcmdStatsFill vfill{0, vissuer.state_str(),
-                                      vissuer.nonce(), arq_rx_enabled};
+                                      vissuer.nonce(), arq_rx_enabled,
+                                      mtu_mode.c_str(), mtu_requested,
+                                      mtu_effective, mtu_supported};
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()

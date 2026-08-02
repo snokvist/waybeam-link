@@ -68,6 +68,8 @@ std::vector<VehicleCmd> drain_echoes(VcmdCraft& craft, uint64_t& now_us,
 }  // namespace
 
 int main() {
+    CHECK(vcmd_id::typed_endpoint_only(vcmd_id::kMtuTier));
+    CHECK(!vcmd_id::typed_endpoint_only(vcmd_id::kArq));
     const VcmdParams pol = policy_with_psk();
     const CommonPrefix craft_self{kCraftOrig, 0, 777};
     const std::optional<uint16_t> bound{kGround};
@@ -284,19 +286,25 @@ int main() {
         VehicleCmd wrong = echo;
         wrong.cmd_nonce = 3999;
         wrong.cmd_mac = mac_for(wrong, pol);
-        issuer.on_echo(wrong, now);
+        CHECK(!issuer.on_echo(wrong, now));
         CHECK(std::string(issuer.state_str()) == "pending");
         wrong = echo;
         wrong.prefix.originator = 18;  // not the bound craft
         wrong.cmd_mac = mac_for(wrong, pol);
-        issuer.on_echo(wrong, now);
+        CHECK(!issuer.on_echo(wrong, now));
         CHECK(std::string(issuer.state_str()) == "pending");
         wrong = echo;
         wrong.cmd_mac ^= 1;  // forged echo must not fake "acked" (§13)
-        issuer.on_echo(wrong, now);
+        CHECK(!issuer.on_echo(wrong, now));
         CHECK(std::string(issuer.state_str()) == "pending");
-        issuer.on_echo(echo, now);
+        CHECK(issuer.on_echo(echo, now));
         CHECK(std::string(issuer.state_str()) == "acked");
+        // A terminal campaign must not let a stale, foreign, or forged packet
+        // masquerade as a fresh accepted echo at an app-level caller.
+        wrong = echo;
+        wrong.cmd_arg = 1;
+        wrong.cmd_mac = mac_for(wrong, pol);
+        CHECK(!issuer.on_echo(wrong, now));
         // Start pacing: a new campaign within min_interval+copy_interval of
         // the last start is refused, then accepted.
         CHECK(!issuer.start({kGround, 0, kGroundSession}, kCraftOrig,
@@ -318,7 +326,7 @@ int main() {
         rej.cmd_id = vcmd_id::kSelector;
         rej.cmd_arg = 1;
         rej.cmd_mac = mac_for(rej, pol);
-        issuer.on_echo(rej, now);
+        CHECK(issuer.on_echo(rej, now));
         CHECK(std::string(issuer.state_str()) == "rejected");
     }
 

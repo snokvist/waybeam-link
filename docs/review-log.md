@@ -4650,3 +4650,151 @@ from byte 1, while bit4 is set and the source is fresh) — the ground
 WebUI's only view of calibration progress when the craft has no IP path.
 `calib_stale` is craft-local and stays false on ground. Prerequisite for
 the waybeam-hub vehicle-menu calibrate button.
+
+## Pass 122 — claimed-ground negotiated packet budget (2026-08-01)
+
+**Trigger.** The vehicle SOC becomes CPU-bound once the high-rate video path
+exceeds roughly 1000 packets/s. All deployed injection adapters are Realtek
+parts capable of a 3072-byte Waybeam DATA packet, but using that size
+unconditionally would silently strand legacy or unknown ground receivers.
+
+**Ruling.** The claimed ground owns one global packet-budget tier, subject to
+explicit vehicle acceptance. `VEHICLE_CMD 0x09 MTU_TIER` carries only a concrete
+Default/Medium/High enum; the ground-local Automatic mode resolves the minimum
+capability of all active ground adapters before sending it. The exact complete
+DATA wire-packet budgets are 1424/2048/3072 bytes. No receiver quorum, telemetry
+piggyback, or continuous MTU controller is added.
+
+The vehicle applies an accepted tier at a frame/block boundary and frames with
+`min(profile.max_payload, negotiated_packet_budget)`. It boots and becomes
+unbound at Default. A request beyond any active craft adapter is rejected, never
+clamped. Profiles remain the coarse packet-rate policy and should target
+1000–1200 total DATA packets/s; FEC stays one frame per block and does not pad or
+merge frames to force an arbitrary 20–30 symbols.
+
+**Verification status — device-confirmed (same day).** The implementation pass
+completed the 51-test host suite, SSC338Q/RK3566/x86 release builds, and the Hub
+2080-test suite. It was deployed lockstep with table version `0x80` to an
+SSC338Q + RTL8812EU craft, x86 ground with RTL8812EU uplink + RTL8812CU
+diversity, and an RK3566 + RTL8812CU spectator. Every active monitor netdev
+reported MTU 4052; ground Automatic resolved High, the authenticated command
+ACKed, and both issuer and craft reported 3072. The spectator exposed read-only
+capability state and rejected negotiation with HTTP 409 as required. Both x86
+and RK Hub menus exposed Default/Medium/High/Automatic.
+
+Matched 15 s RF samples used profile/MCS 5, a 21839 kb/s encoder target, and
+about 23.5 Mb/s delivered video. Vehicle CPU is process CPU from `/proc` at
+`CLK_TCK=100` (`perf` is not installed on the craft):
+
+| mode | budget | vehicle CPU | source + repair pps | all air submits/s | source + repair symbols/block | delivered | FEC recovered | unrecoverable |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Default | 1424 | 28.1% of one core | 2627 | 2684 | 20.41 + 4.35 | 23.39 Mb/s | 138 | 0 |
+| Medium | 2048 | 24.6% of one core | 1804 | 1860 | 14.12 + 3.01 | 23.53 Mb/s | 127 | 0 |
+| High | 3072 | 21.3% of one core | 1263 | 1319 | 9.95 + 2.00 | 23.52 Mb/s | 126 | 1 |
+
+High reduced link-process CPU by 24.2% relative and air submissions by 50.8%
+without decode errors. A longer High/Automatic observation accumulated 11514
+delivered frame-blocks, 806 FEC-recovered frames, one unrecoverable frame, zero
+decode errors, zero craft FEC-oversize frames, zero SHM-full drops, and no radio
+TX failure/wedge. The observed 1263 source+repair pps is close to, but slightly
+above, the 1000–1200 policy aim; reaching the strict band would require either a
+larger-than-v1 tier or less repair, so robustness remains preferred. The normal
+flight mode and its profile range were restored after the benchmark; Automatic
+remains selected, so the profile ceiling keeps low-rate profiles at 1424 and
+admits 3072 automatically when a jumbo-capable high-rate profile is active.
+
+## Pass 123 — jumbo source-symbol floor (2026-08-01; superseded by Pass 124)
+
+**Trigger.** The Pass 122 hardware comparison achieved its CPU and packet-rate
+goal at High, but a 100 fps P-frame averaged only 9.95 source symbols plus two
+repair symbols. That leaves a short FEC block with too little erasure depth for
+the intended burst-loss robustness; the operator requested a floor near 16
+before merge readiness.
+
+**Ruling (operator direction; exact threshold selected from the measured
+trade-off).** Apply a per-frame **16-source-symbol jumbo guard**. The largest
+symbol that still gives `k >= 16` is `floor((frame_len - 1) / 15)`. Intersect
+that with the profile/negotiated ceiling, but never shrink below the existing
+Default symbol size (1387 B). Thus jumbo mode cannot reduce a block below 16
+when the Default path would have reached 16, while small frames that were
+already below 16 at Default do not explode into tiny packets. The choice of 16
+raises a 20% P-frame policy from roughly 2 to 4 repair symbols at the measured
+high-rate operating point without restoring the full 20-symbol/Default packet
+load.
+
+This guard applies only to `rlc256` streams: shrinking a FEC-disabled stream
+would spend the packet-rate/CPU budget without adding recovery depth. It is a
+packet-size choice made once at the existing frame/block boundary, not padding,
+frame merging, a new wire field, or a continuous MTU negotiation. Every block
+remains homogeneous and self-describing. A cumulative
+`mtu_floor_clamped_frames` stream stat makes the guard observable. Merge
+readiness requires the complete host suite, all three target builds, a minimum
+ten-case targeted matrix around integer boundaries and tier/profile
+intersections, an independent full-diff review, and a repeated high-bitrate
+hardware comparison.
+
+## Pass 124 — repair-depth guard replaces source refragmentation (2026-08-01)
+
+**Review question.** Is 16 the right source-symbol floor, or is another number
+more suitable? Deterministic MDS properties and synthetic loss simulation show
+that source count is the wrong actuator. Pass 123's measured benefit came from
+the 20% policy crossing `ceil(16 * 0.20) = 4` repairs, not from `k=16` itself.
+
+At the measured 100 fps operating point, the candidate blocks were simulated
+under independent loss and a two-state Gilbert-Elliott burst process (80% loss
+in the bad state, 0.2% in the good state, 2% stationary loss, four-packet mean
+bad run; 1,000,000 blocks). Results:
+
+| policy | block | DATA packets/s | iid failure at 5% | burst failure |
+|---|---:|---:|---:|---:|
+| Pass 122 High | 10+2 | 1268 | 1.9568% | 3.3685% |
+| literal source floor | 16+4 | 2114 | 0.2574% | 2.5069% |
+| High + equivalent repair depth | 10+4 | 1480 | 0.0427% | 1.6679% |
+
+For the same four correctable erasures, `10+4` is both shorter and more robust
+than `16+4`; the literal floor transmits six extra independently lossy source
+packets and predicts roughly 25.6% vehicle CPU versus 22.4% for `10+4` from the
+Pass 122 hardware slope. Floors 12/15 stop at three repairs; floor 20 adds four
+source packets without a fifth repair; floor 21 reaches five repairs but
+restores/exceeds Default packet load. Thus **16 remains the correct policy
+threshold, but not a fragmentation target**.
+
+**Ruling.** Supersede Pass 123's refragmentation. Keep the negotiated jumbo
+symbol size. When jumbo produces `k < 16` for a frame that Default would have
+encoded with `k >= 16`, raise final parity to at least the configured class
+rate evaluated at `k=16` (four under the deployed 20% P-frame policy), after
+the fixed or enforced §14.2 decision. Small frames, FEC-disabled streams, and
+zero-rate classes are unchanged. Count actuations in `mtu_fec_guard_frames`.
+This preserves most of the packet/CPU gain while providing greater erasure
+robustness than the literal source-symbol clamp.
+
+**Merge-review addendum.** Pass 124 is subordinate to two existing §14.1
+hard gates. It does not resurrect parity for an ARQ-eligible `k <= min_k`
+frame, and it does not recreate a block rejected because configured `min_r`
+would make `k+r > 256`. Regression cases cover High-mode `k=10,min_k=10`
+under all-frame ARQ and `k=10,min_r=255`; both remain source-only.
+
+**Reviewed-binary hardware A/B (2026-08-01).** Commit `691ff36` ran on the
+SSC338Q craft against the x86 ground at profile/MCS 5 and a commanded
+21,839 kbps encoder rate. Each arm was a matched 20 s `/proc` process-CPU and
+counter-delta sample; delivered video remained approximately 23.7 Mb/s.
+
+| tier | budget | craft CPU (one core) | source+repair pkt/s | all air submits/s | mean k+r | guard frames | FEC recovered | unrecoverable / decode / oversize / TX fail |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Default | 1424 | 29.80% | 2687 | 2744 | 20.39+4.69 | 0 | 302 | 0 / 0 / 0 / 0 |
+| Medium | 2048 | 25.60% | 1949 | 2006 | 14.20+3.97 | 1673 | 195 | 0 / 0 / 0 / 0 |
+| High | 3072 | 24.25% | 1466 | 1522 | 9.70+4.00 | 2138 | 163 | 0 / 0 / 0 / 0 |
+
+High therefore removed 45.4% of DATA packet submissions and 5.55 percentage
+points of vehicle CPU versus Default while preserving an approximately
+four-erasure block depth. The original 1000--1200 packet/s target is met by
+source symbols alone (1038/s), but not by total DATA after the repair-depth
+guard (1466/s); that is the explicit CPU/robustness trade-off adopted above.
+
+**Review addendum.** Two authority seams are part of the same merge gate. The
+craft resets MTU to Default on every newly accepted authenticated CSA campaign,
+not only when `latched_issuer` changes: a rebooted ground may reuse the same
+numeric originator while changing session and adapter capability. The generic
+`POST /vehicle/command` rejects `mtu_tier`; only the typed `/link/mtu` path and
+its internal post-claim reissue may start it, preserving local capability
+validation and preference bookkeeping.

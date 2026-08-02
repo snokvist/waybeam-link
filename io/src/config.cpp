@@ -1032,13 +1032,14 @@ Result<ProfileTable> load_profile_table_json(const std::string& json_text) {
                                             (where + ".airtime_budget_frac").c_str());
             if (!airtime) return Result<ProfileTable>::fail(airtime.error);
             p.airtime_budget_permille = *airtime.value;
-            // §3.2/§9.3 air MTU budget; default standard-rung 1424, ceiling 4096.
+            // §3.2/§9.3a complete DATA packet budget. 4096 remains the decode
+            // allocation ceiling; authored v1 TX profiles stop at High/3072.
             const uint32_t mp = pj.value("max_payload", uint32_t{kDefaultMaxPayload});
-            if (mp < kDataHeaderSize + 32 || mp > kMaxDataPayload) {
+            if (mp < kDataHeaderSize + 32 || mp > mtu_tier::kHighBudget) {
                 return Result<ProfileTable>::fail(
                     where + ": max_payload must be in [" +
                     std::to_string(kDataHeaderSize + 32) + ", " +
-                    std::to_string(kMaxDataPayload) + "]");
+                    std::to_string(mtu_tier::kHighBudget) + "]");
             }
             p.max_payload = static_cast<uint16_t>(mp);
             auto scheme = parse_fec_scheme(pj.value("fec_scheme", std::string("none")),

@@ -185,7 +185,7 @@ CsaAction CsaFollower::tick(uint64_t now_us) {
             // §11.5a: hold the channel until reboot. Release only the binding
             // after bind_release_ms of silence from the bound issuer — no
             // channel change; the craft re-opens for in-place re-claim.
-            if (latched_ &&
+            if (latched_ && now_us >= last_bound_rx_us_ &&
                 now_us - last_bound_rx_us_ >
                     static_cast<uint64_t>(policy_.bind_release_ms) * 1000) {
                 latched_ = std::nullopt;

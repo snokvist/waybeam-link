@@ -67,7 +67,7 @@ inline constexpr uint8_t kRejected = 0x02;  // echo only: understood, won't do
 inline constexpr uint8_t kKnownMask = kAck | kRejected;
 }  // namespace vcmd_flags
 
-// §11.7 command registry. 0x08–0x1F reserved.
+// §11.7 command registry. 0x0A–0x1F reserved.
 namespace vcmd_id {
 inline constexpr uint8_t kArq = 0x01;        // arg 0=off 1=on
 inline constexpr uint8_t kSelector = 0x02;   // arg 0=run 1=freeze (§9.7 pin)
@@ -77,6 +77,13 @@ inline constexpr uint8_t kResolution = 0x05;  // arg = preset index (staged)
 inline constexpr uint8_t kFraming = 0x06;     // arg = preset index (staged)
 inline constexpr uint8_t kMode = 0x07;        // arg = §15.5 catalog index (P105)
 inline constexpr uint8_t kCalibrate = 0x08;   // arg 0=abort 1=start (§10.6 P120)
+inline constexpr uint8_t kMtuTier = 0x09;     // arg 0/1/2 (§9.3a Pass 122)
+
+// Typed-only commands have validation/state bookkeeping that the generic
+// §15.5 vehicle-command endpoint cannot safely reproduce.
+inline constexpr bool typed_endpoint_only(uint8_t id) {
+    return id == kMtuTier;
+}
 }  // namespace vcmd_id
 
 // §3.14 — every command is enable/disable or a ≤5-choice enum (Pass 68), EXCEPT
@@ -137,11 +144,30 @@ inline constexpr uint8_t kKnownMask =
     kActive | kLatched | kConflict | kHolderPresent | kCalibPresent;
 }  // namespace selector_state_flags
 
-// §3.2 — absolute DATA payload ceiling for buffer sizing (Realtek jumbo/A-MSDU
-// rungs reach ~3967 B; 4096 caps it). The EFFECTIVE per-frame budget is
-// profile-driven (Profile.max_payload, §9.3); standard rungs seed 1424.
+// §3.2 — absolute DATA payload ceiling for buffer sizing. The v1 negotiated
+// tiers stop at 3072 B, while 4096 leaves decode/storage headroom. The effective
+// per-frame budget is min(Profile.max_payload, negotiated tier), §9.3a.
 inline constexpr uint16_t kMaxDataPayload = 4096;
 inline constexpr uint16_t kDefaultMaxPayload = 1424;  // standard-rung default
+
+// §9.3a negotiated complete-DATA-packet budgets. Automatic is ground-local
+// and resolves to one of these concrete wire tiers before transmission.
+namespace mtu_tier {
+inline constexpr uint8_t kDefault = 0;
+inline constexpr uint8_t kMedium = 1;
+inline constexpr uint8_t kHigh = 2;
+inline constexpr uint16_t kMediumBudget = 2048;
+inline constexpr uint16_t kHighBudget = 3072;
+inline constexpr uint16_t kFecProtectionK = 16;  // §9.3a Pass 124
+
+inline constexpr uint16_t budget(uint8_t tier) {
+    return tier == kHigh ? kHighBudget
+         : tier == kMedium ? kMediumBudget
+                           : kDefaultMaxPayload;
+}
+
+inline constexpr bool valid(uint8_t tier) { return tier <= kHigh; }
+}  // namespace mtu_tier
 
 // §3.5 — target_stream_id value meaning node-scope (RF health is per-link).
 inline constexpr uint8_t kNodeScopeStreamId = 0xFF;

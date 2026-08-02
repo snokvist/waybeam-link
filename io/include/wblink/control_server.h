@@ -36,6 +36,8 @@ struct ControlHandlers {
     std::function<std::string()> cache_assignment_json;
     // §11.7 issuer campaign state (GET; issuer/ground only, null → 409).
     std::function<std::string()> vehicle_command_json;
+    // §9.3a negotiated packet-budget state (every node when wired).
+    std::function<std::string()> link_mtu_json;
     // §10.5 TX-power override-latch state (GET; TX node only, null → 409).
     std::function<std::string()> tx_power_json;
     // §10.6 (Pass 120) calibration surface (GET; TX node only, null → 409).
@@ -78,6 +80,9 @@ struct ControlHandlers {
     // cmd/arg — the campaign itself is polled via vehicle_command_json.
     std::function<std::pair<int, std::string>(const std::string& cmd, int arg)>
         vehicle_command;
+    // §9.3a ground-local preference. Returns a complete HTTP outcome so an
+    // in-flight command can be reported as 409 without losing the preference.
+    std::function<std::pair<int, std::string>(const std::string& mode)> link_mtu;
     // §6.4 RX-local NACK-emission gate (rx only; null → 409).
     std::function<std::string(bool enabled)> arq_enable;
     // §9.11 craft-local FPS-ladder toggle (Pass 99; tx/craft only, null → 409).

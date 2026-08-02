@@ -114,7 +114,9 @@ class VcmdIssuer {
 
     // A received VEHICLE_CMD with kAck from the air: MAC-verified and matched
     // against the in-flight campaign (sender, nonce, cmd, arg).
-    void on_echo(const VehicleCmd& pkt, uint64_t now_us);
+    // Returns true only when this packet is the authenticated echo that
+    // completes the currently active campaign.
+    bool on_echo(const VehicleCmd& pkt, uint64_t now_us);
 
     struct Action {
         enum class Kind : uint8_t { kNone, kSendCopy };

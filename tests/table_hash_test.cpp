@@ -45,13 +45,16 @@ Profile example_profile(uint8_t id) {
     p.bitrate_min_kbps = 2200;
     p.reserve_control_bps = 64000;
     p.reserve_telemetry_bps = 32000;
+    static constexpr uint16_t kMaxPayload[] = {
+        1424, 1424, 1424, 2048, 2048, 3072, 3072, 3072};
+    p.max_payload = kMaxPayload[id];
     return p;
 }
 
 // Pinned golden hash of the example table. Every vendored copy of the codec
 // (e.g. Waybeam-android :wifi) must reproduce this value for this table;
 // recompute only on a deliberate §3.6 canonical-form revision.
-constexpr uint8_t kGoldenExampleHash = 0xBF;  // Pass 111 calibrated airtime ceilings
+constexpr uint8_t kGoldenExampleHash = 0x80;  // Pass 122 packet-budget ceilings
 
 ProfileTable example_table() {
     ProfileTable t;

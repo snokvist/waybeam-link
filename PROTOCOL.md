@@ -326,15 +326,13 @@ are stamped on **every** packet of a block, not just the first. A surviving
 packet of a block reveals the block's boundary, ARQ-eligibility, and the TX's
 operating point/table even if the first packet was lost.
 
-**Header overhead:** 26 B header. The **usable MPDU is profile-driven**
-(§9.3 `max_payload`), not fixed: standard rungs seed ~1450 B (⇒ **1424 B max
-payload**, ~1.8%); Realtek jumbo/A-MSDU rungs reach ~3993 B (⇒ ~3967 B
-payload). The wire `payload_len` (u16) is self-describing, so an RX decodes
-whatever budget the TX used — including across a mid-stream profile change.
-`kMaxDataPayload` is the **absolute ceiling** (4096) for buffer sizing only;
-the effective per-frame budget is `active_profile.max_payload`. Adaptive MTU
-is essential for large IDR frames on the SHM path (§5.1a/§14): a 512 KB frame
-is k≈370 source symbols at 1400 B but only k≈132 at 3967 B.
+**Header overhead:** 26 B header. `Profile.max_payload` is the maximum complete
+Waybeam DATA wire packet (header included), despite the historical field name;
+it is not the DATA body length. The effective packet budget is negotiated per
+§9.3a and never exceeds the active profile's ceiling. The wire `payload_len`
+(u16) is self-describing, so an RX decodes any accepted budget, including across
+a frame-boundary change. `kMaxDataPayload` is the absolute 4096-byte allocation
+ceiling only; v1 negotiated operation is capped at 3072 bytes.
 
 ### 3.3 NACK packet — 23-byte fixed + bitmap
 
@@ -955,8 +953,8 @@ than best-effort blocks (a slightly-late I-frame still rescues its GOP).
 
 **No fragmentation (invariant, UDP/RTP ingress).** On a UDP/RTP-ingested stream
 each ingress datagram MUST fit one MPDU payload. Configure the encoder's RTP
-payloader `mtu` at or under the active profile's `max_payload` budget (§9.3;
-standard rungs ~1400, jumbo rungs up to ~3960). H.264/H.265 payloaders already
+payloader `mtu` at or under the effective §9.3a packet budget (standard rungs
+~1400, v1 High 3072 including the DATA header). H.264/H.265 payloaders already
 fragment NALs to MTU — this is a config assertion, not new code. A runtime
 datagram larger than the payload budget is **dropped with a stat**
 (`oversize_ingress`), never silently truncated.
@@ -974,9 +972,10 @@ payload** — FrameFramer parses only the metadata prefix, never the NAL bytes.
    (one frame = one block, §4).
 2. Set `ARQ` from `VencFrameMeta.flags` bit 0 (IDR ⇒ 1). With the explicit
    `all-frames` mode, set `PFRAME_ARQ` instead on non-IDRs, §4.1.
-3. **Fragment** the blob into `k` **source symbols** of size
-   `s = active_profile.max_payload − 26 − 11` (header + §14 repair subheader,
-   so source and repair symbols are interchangeable for coding); the last
+3. **Fragment** the blob into `k` **source symbols**. Start with the §9.3a
+   packet-budget ceiling and apply its 16-source-symbol jumbo guard for this
+   frame; then `s = guarded_packet_budget − 26 − 11` (header + §14 repair
+   subheader, so source and repair symbols are interchangeable for coding). The last
    symbol carries the tail (`< s`) and is zero-padded to `s` only for the FEC
    computation (§14), never on the wire. `k = ceil(blob_len / s)`. `s` is fixed
    for the life of the block (a frame is fragmented atomically under one
@@ -1414,10 +1413,9 @@ profile[i] = {
   id, mcs, guard_interval,
   tx_power_level,          // PORTABLE power intent (§10); NOT an absolute value
   airtime_budget_frac,
-  max_payload,             // u16 air MTU budget (§3.2); DATA payload ceiling on
-                           //   this rung. Standard rungs ~1424; Realtek jumbo/
-                           //   A-MSDU rungs up to ~3967. Drives FrameFramer's
-                           //   source-symbol size s (§5.1a). Absent ⇒ 1424.
+  max_payload,             // u16 complete DATA wire-packet ceiling (§3.2),
+                           //   header included. Drives FrameFramer's source-
+                           //   symbol size s (§5.1a). Absent ⇒ 1424.
   arq_deadline_ms[class],  // per §4.1 importance; I-frame class longer
   reserve_bps[stream_type],// guaranteed floor for CONTROL / TELEMETRY
   bitrate_min_kbps,        // policy floor ≥ venc hard floor 1000 (§9.6)
@@ -1429,6 +1427,74 @@ profile[i] = {
 
 Video rungs seed MCS **0–5**; rungs **6–7** are normal high rungs the promote path
 may reach (the wfb_ng "reserved for probe" tag is dropped — see §9.4).
+
+### 9.3a Ground-negotiated packet budget (Pass 122)
+
+The currently claimed ground is the sole packet-budget authority for the
+craft's broadcast stream. Spectators, caches, and other receivers do not vote:
+they either support the chosen budget or lose that stream. The craft retains an
+accept/reject gate, so a ground can never force a budget beyond the craft's
+local adapter capability.
+
+The three concrete tiers are complete Waybeam DATA wire-packet budgets:
+
+| tier | operator label | budget |
+|---|---|---:|
+| 0 | Default (1500-class) | 1424 B |
+| 1 | Medium | 2048 B |
+| 2 | High | 3072 B |
+
+"1500-class" is a compatibility label, not a promise that the radio netdev MTU
+equals 1500: radiotap/802.11 encapsulation sits outside this budget. A ground UI
+may additionally offer **Automatic**. Automatic is never sent over air; the
+ground resolves it to the minimum supported concrete tier across every active
+local injection adapter, treating an unknown capability as Default, then sends
+tier 0, 1, or 2. v1's supported Realtek injection backends declare High.
+
+The craft boots and becomes unbound at Default. It also resets to Default as
+soon as it accepts every new authenticated CSA claim, before that campaign's
+VERIFY window and even when the new claimant reuses the previous numeric
+originator; the committed ground reissues its preference after claim success.
+An accepted §11.7 `MTU_TIER`
+command changes `negotiated_packet_budget` at the **next frame/block boundary**;
+the current block remains byte-homogeneous. The framer starts with the ceiling:
+
+```
+min(active_profile.max_payload, negotiated_packet_budget)
+```
+
+Before fragmenting each frame, use `s = B - 26 - 11` and
+`k = ceil(frame_len / s)` exactly as §5.1a. A stream whose `fec.scheme` is
+`rlc256` MUST then apply the **16-equivalent protection guard**. Compute the
+source count the same frame would have had on the Default path:
+
+```
+k_default = ceil(frame_len / min(s, 1424 - 26 - 11))
+```
+
+When jumbo sizing gives `k < 16` while `k_default >= 16`, the final repair
+count for that frame MUST be at least
+`ceil(16 * configured_class_rate_permille / 1000)`, in addition to the
+configured `fec.min_r` floor. This lower bound applies after either the fixed
+policy or a §14.2 enforced override selects parity; zero configured class rate
+adds no protection. The §14.1 ARQ-only `k <= fec.min_k` gate has higher
+precedence and MUST NOT be overridden. If the requested floor cannot satisfy
+the absolute `k+r <= 256` codec limit, the existing §14.1 source-only fallback
+also has higher precedence and the guard MUST NOT recreate parity. It therefore
+supplies the same erasure depth the configured
+rate would have produced at `k=16` without fragmenting the same data into extra
+source packets. FEC-disabled streams and genuinely small frames that already
+have `k < 16` at Default are unchanged. Implementations count frames where the
+guard raises parity as `mtu_fec_guard_frames` (§15.3).
+
+Thus the profile table remains the RF/CPU policy ceiling and the ground tier is
+the receiver-fleet safety ceiling. Standard/low-rate profiles may retain 1424;
+high-rate profiles should use 2048 or 3072 to keep total emitted DATA packet
+rate (source plus FEC repair) near **1000–1200 packets/s** where practical.
+Packet rate is a soft table-authoring target, not a second runtime controller.
+One encoded frame remains one FEC block (§14). Implementations MUST NOT pad,
+merge, or refragment a frame merely to manufacture a larger `k`; the protection
+guard acts on repair depth and the `k+r ≤ 256` codec limit remains absolute.
 
 ### 9.4 Promote path (v0 = RSSI-margin; active probe deferred)
 wfb_ng promoted only after a boundary probe on a **separate wfb stream**; the
@@ -2526,7 +2592,8 @@ everything below is behaviour.
 | `0x06` | `FRAMING` | preset index 0..4 | Sets encoder framing mode to `venc.command_presets.framing[arg]` (a venc `video0.framing` string). Same `REJECTED` set as `RESOLUTION` (staged, Pass 71) |
 | `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
 | `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the loop is blind without LINK_REPORTs). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen — video quality degrades during; the operator chooses the moment (recommended: near-bench 2–10 m separation, §10.6 Pass 121) |
-| `0x09`–`0x1F` | *reserved* | — | not specified |
+| `0x09` | `MTU_TIER` | 0=Default, 1=Medium, 2=High | Requests the §9.3a global packet-budget tier. The craft accepts only when the requested budget is ≤ the minimum capability of every active craft TX adapter; otherwise it consumes the nonce and echoes `REJECTED` (no silent clamp). Acceptance commits at the next frame/block boundary. Unlike the other commands, binding release resets this state to Default, preventing an absent owner's jumbo choice from silently governing a future receiver fleet |
+| `0x0A`–`0x1F` | *reserved* | — | not specified |
 
 **v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
 encoder value spaces via **config preset-indexing**: the craft's
@@ -2607,7 +2674,9 @@ pending is refused **409**.
 
 **Volatility.** Command state is **craft-session-scoped**: a reboot resets all
 commands to boot config (alongside the §11.5a claim reset). It survives
-binding *release* and channel moves. There is no over-air state readback: a
+binding *release* and channel moves, **except `MTU_TIER`, which resets to
+Default on binding release as specified in §9.3a**. There is no separate
+over-air state readback: a
 returned or rebooted ground **re-establishes known state by re-issuing the
 idempotent commands**, not by querying. Applied command state is surfaced
 craft-locally in §15.3 (link-level `cmd_arq`, `cmd_selector_frozen`,
@@ -2615,7 +2684,9 @@ craft-locally in §15.3 (link-level `cmd_arq`, `cmd_selector_frozen`,
 currently/last bound issuer; v2 adds `cmd_fps_select`,
 `cmd_resolution_select`, `cmd_framing_select`) and the issuer's campaign
 state as the §15.5 `GET /api/v1/vehicle/command` object (`vcmd_state` in the
-issuer's §15.3 stats is the same value).
+issuer's §15.3 stats is the same value). DATA packet size itself is the final
+observable proof after an ACK; the ground reissues its local MTU preference
+after each successful claim.
 
 **Volatile venc actuation (Pass 73, superseding the Pass 71 persistence
 exception).** Commands `0x04`+ actuate through the §9.6 volatile path
@@ -3377,7 +3448,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
     "resends_sent": 230, "arq_lock_holder": 9, "double_send_suppressed": 5,
     "source_symbols_sent": 4120300, "repair_symbols_sent": 358944,
-    "fec_oversize_frames": 0, "idr_frames": 17, "arq_frames": 68342,
+    "fec_oversize_frames": 0, "mtu_fec_guard_frames": 1234,
+    "idr_frames": 17, "arq_frames": 68342,
     "arq_cutoff_frames": 0,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "arq_timing": {
@@ -3412,6 +3484,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "cmd_fps_ladder": true, "cmd_last_nonce": 0,
     "cmd_fps_select": 0, "cmd_resolution_select": 0, "cmd_framing_select": 0,
     "vcmd_state": "idle", "vcmd_nonce": 0, "arq_rx_enabled": true,
+    "mtu_mode": "auto", "mtu_requested": 3072,
+    "mtu_effective": 3072, "mtu_supported": 3072,
     "calib_state": "idle", "calib_rung": 0, "calib_fingerprint": 0,
     "calib_stale": false } }
 ```
@@ -3461,6 +3535,11 @@ session, §11.7),
 from the currently/last bound issuer (0 = never), `vcmd_state`/`vcmd_nonce`
 mirror the issuer's §15.5 `GET /api/v1/vehicle/command` object, and
 `arq_rx_enabled` is the node's §6.4 NACK-emission gate (`POST /api/v1/arq`).
+`mtu_mode` is the ground-local preference (`default`, `medium`, `high`, or
+`auto`; `remote` on a craft), `mtu_requested` is its resolved concrete budget,
+`mtu_effective` is the last ACKed budget on a ground and the currently committed
+framer cap on a craft, and `mtu_supported` is the minimum local capability
+across active adapters. All are bytes in the §9.3a complete-DATA-packet unit.
 The `calib_*` fields (Pass 120) mirror the §10.6 calibration word:
 `calib_state` {"idle","running","done","failed"}, `calib_rung` (meaningful
 while running), `calib_fingerprint` (CRC-8 of the persisted artifact, 0 =
@@ -3680,8 +3759,10 @@ implied.
 On frame-SHM TX ingress, `source_symbols_sent` and `repair_symbols_sent` are
 the exact cumulative §14.1 symbols emitted by `FrameFramer`;
 `fec_oversize_frames` counts frames sent source-only because `k+r` exceeded
-GF(256) capacity; `idr_frames` counts frames whose VFRM metadata carried the
-IDR flag; and `arq_frames` counts frames stamped with either ARQ-class flag.
+GF(256) capacity; `mtu_fec_guard_frames` counts RLC-FEC frames for which
+§9.3a's 16-equivalent guard raised repair depth; `idr_frames` counts
+frames whose VFRM metadata carried the IDR flag; and `arq_frames` counts frames
+stamped with either ARQ-class flag.
 They are zero on RX and non-frame-SHM streams. These counters are
 the fixed-policy baseline for comparing hypothetical JSCC shadow parity; byte
 or bitrate inference is not an acceptable substitute.
@@ -3777,6 +3858,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/link/selection` | receiver's configured/latched/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
+| `GET /api/v1/link/mtu` | local §9.3a state: `{mode, requested, effective, supported}` (every node; craft mode is `remote`) |
 | `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
 | `GET /api/v1/calibration` | §10.6 (Pass 120) calibration surface: `{state, rung, fingerprint, stale, artifact:{curve_qdb:[8], ceilings:[{rung, last_clean_rssi, first_bad_rssi}], placement_rssi, fingerprint_detail, t_unix} | null, fail_reason}` — the full report the §3.15 word summarizes; TX/craft node, management HTTP only |
 | `GET /api/v1/modes` | `{active, apply_configured, catalog_fingerprint, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist. A ground with an IP path reads it here; one without must hardcode a copy, and pins `catalog_fingerprint` (Pass 108) to detect index drift (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
@@ -3812,7 +3894,8 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/scout/start` | `{ "channels":[…]?, "dwell_ms":??, "mode":"list"\|"quickconnect", "target":{"originator":N}? }` | begin a channel sweep (§15.5a; ground/rx node) |
 | `POST /api/v1/scout/stop` | `{}` | end the sweep and hold the current channel |
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto `target_chan` (or the emptiest allowlisted channel) |
-| `POST /api/v1/vehicle/command` | `{ "cmd": "arq"\|"selector"\|"fps_ladder"\|"fps_select"\|"resolution"\|"framing", "arg": 0..4 }` | start a §11.7 command campaign toward the bound craft; returns `{ok, nonce}` immediately, poll the GET for the outcome (issuer/ground node) |
+| `POST /api/v1/vehicle/command` | `{ "cmd": "arq"\|"selector"\|"fps_ladder"\|"fps_select"\|"resolution"\|"framing", "arg": 0..4 }` | start a §11.7 command campaign toward the bound craft; returns `{ok, nonce}` immediately, poll the GET for the outcome (issuer/ground node). Commands with typed local safety/state, currently `MTU_TIER`, are rejected here and use their typed endpoint only |
+| `POST /api/v1/link/mtu` | `{ "mode": "default"\|"medium"\|"high"\|"auto" }` | set the ground-local §9.3a preference, resolve it, and start `MTU_TIER` immediately when a craft is bound; the preference is reissued after each successful claim. Returns 409 on a non-issuer node or while another command campaign is pending (issuer/ground node) |
 | `POST /api/v1/arq` | `{ "enabled": true\|false }` | RX-local NACK-emission gate (§6.4) — this node only, the craft is untouched (rx node) |
 | `POST /api/v1/link/fps` | `{ "ladder": true\|false }` | §9.11 ladder toggle (Pass 99); `true` = variable fps (the loop runs), `false` = static (the loop stops, fps holds). Routes through the same §11.7 `FPS_LADDER` transition as the over-air path; **MUT_LIVE**, no restart. `409` off a venc/TX node (TX/craft node) |
 | `POST /api/v1/mode` | `{ "name": "imx335-100fps-highrange" }` | select a user-facing operating mode (§16 of `docs/venc-mode-matrix.md`). **Not MUT_LIVE** — see below (TX/craft node) |

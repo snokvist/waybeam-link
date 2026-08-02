@@ -594,6 +594,9 @@ int main() {
             CHECK_EQ_U(t.value->profiles[5].airtime_budget_permille, 463);
             CHECK_EQ_U(t.value->profiles[6].airtime_budget_permille, 438);
             CHECK_EQ_U(t.value->profiles[7].airtime_budget_permille, 418);
+            CHECK_EQ_U(t.value->profiles[0].max_payload, 1424);
+            CHECK_EQ_U(t.value->profiles[3].max_payload, 2048);
+            CHECK_EQ_U(t.value->profiles[7].max_payload, 3072);
             CHECK_EQ_U(t.value->profiles[0].fec_overhead_permille, 250);
             CHECK_EQ_U(t.value->profiles[5].fec_overhead_permille, 180);
             static constexpr uint32_t kPass111Bitrates[] = {
@@ -602,7 +605,7 @@ int main() {
                 CHECK_EQ_U(derive_bitrate_kbps(t.value->profiles[i]),
                            kPass111Bitrates[i]);
             }
-            CHECK_EQ_U(table_version(*t.value), 0xBF);  // Pass 111 (was 0xD1)
+            CHECK_EQ_U(table_version(*t.value), 0x80);  // Pass 122 (was 0xBF)
         }
     }
     {

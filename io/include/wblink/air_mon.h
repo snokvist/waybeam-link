@@ -27,6 +27,7 @@
 
 #include "wblink/air_udp.h"  // AirRxMeta (shared meta shape)
 #include "wblink/config.h"   // AdapterCfg, Result
+#include "wblink/types.h"
 
 namespace wblink {
 
@@ -75,7 +76,9 @@ class MonAir {
     // §14.2 effective HT20 serialization time. include_pending adds socket
     // outbound bytes when the kernel exposes them; zero calibration = unknown.
     std::optional<uint32_t> estimate_airtime_us(size_t bytes,
-                                                bool include_pending) const;
+                                                bool include_pending,
+                                                uint16_t packet_budget =
+                                                    kDefaultMaxPayload) const;
 
     // Deliver queued RX frames (§3.0 payloads, header stripped); blocks up to
     // timeout_ms when the queue is empty. Returns frames delivered.
@@ -84,6 +87,9 @@ class MonAir {
 
     size_t rx_adapters() const;
     bool has_tx() const;
+    // §9.3a minimum packet budget across the live monitor netdevs. Unknown
+    // interface MTU reads resolve conservatively to Default.
+    uint16_t mtu_supported() const;
     // §15.5a scout: index of the designated `role:"tx"` uplink adapter — the one
     // the scout roams during a sweep (Pass 64). Not assumed to be 0.
     size_t tx_index() const;
