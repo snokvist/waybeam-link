@@ -5449,6 +5449,11 @@ int run_rx(const Loaded& l) {
             // the event loop below), so a by-reference capture would dangle —
             // a stack-use-after-scope on the first quickconnect. scout_quickconnect
             // already copies it (assignment below); scout_start must too.
+            // §10.7 (D2): scout_idx IS the role:"tx" uplink adapter, so a
+            // sweep roams the calibration actuator. The liveness clock cannot
+            // catch it — §3.16 keeps arriving on the diversity RX adapters
+            // that stay at rest — so every dwell would score a real blackout
+            // the seek blames on power and ramp to max_qdb.
             h.scout_start = [&, do_claim](const std::vector<uint16_t>& chans,
                                           uint32_t dwell, const std::string& mode,
                                           int target) -> std::string {
@@ -5458,6 +5463,7 @@ int run_rx(const Loaded& l) {
                     }
                     return do_claim(target, 0);  // pick the emptiest channel
                 }
+                cancel_calibration("scout sweep");
                 std::vector<uint16_t> ch = chans;
                 if (ch.empty()) ch = l.cfg.scout.channels;
                 if (ch.empty()) ch = l.cfg.policy.csa.channel_allowlist;
@@ -5620,6 +5626,7 @@ int run_rx(const Loaded& l) {
                     return "§10.5 TX-power override is latched";
                 }
                 if (scout.scanning()) return "scout is running";
+                if (issuer.active()) return "CSA campaign active (issuer)";
                 if (follower.campaign_active()) return "CSA campaign active";
                 // The craft must not be calibrating its own downlink: §10.7
                 // drives ground power to min_qdb, which starves the report
@@ -5650,6 +5657,19 @@ int run_rx(const Loaded& l) {
                 const uint8_t id = vcmd_id_for(cmd);
                 if (id == 0) {
                     return {400, "{\"ok\":false,\"error\":\"unknown cmd\"}"};
+                }
+                // §10.7 (D6): "while §10.7 runs the ground refuses to issue a
+                // §11.7 CALIBRATE campaign." Only the reverse direction was
+                // implemented. Without this the craft starts its §10.6 run
+                // with the ground uplink deliberately at min_qdb, starving
+                // the report stream every §10.6 dwell and its abort clock
+                // depend on. The sequencer's own downlink issue is exempt: by
+                // then the uplink phase is terminal.
+                if (id == vcmd_id::kCalibrate && arg != 0 &&
+                    uplink_cal.state() == CalibState::kRunning) {
+                    return {409,
+                            "{\"ok\":false,\"error\":\"ground uplink "
+                            "calibration is running\"}"};
                 }
                 // §11.7/§3.14: MODE (Pass 105) rides the full u8 — the catalog
                 // lives on the craft, so an over-range index is the craft's
@@ -6249,6 +6269,14 @@ int run_rx(const Loaded& l) {
         // §11 campaign engine. The trigger is now POST /api/v1/csa (§15.5);
         // the stdin trigger was removed with the control-plane migration.
         const CsaIssuer::IssuerAction ia = issuer.tick(now_us_it);
+        // §10.7 (D1): the follower guard alone was the RARE half — a ground
+        // node is normally the CSA ISSUER, and its commit/revert/abort paths
+        // all retune. Any non-idle issuer action means the channel is about
+        // to move under an in-flight seek, which would persist a placement
+        // measured across two channels under one channel_mhz identity.
+        if (ia.kind != CsaIssuer::IssuerAction::Kind::kNone) {
+            cancel_calibration("CSA issuer retune");
+        }
         switch (ia.kind) {
             case CsaIssuer::IssuerAction::Kind::kSendCopy: {
                 // §11.2 (Pass 90): campaign copies ride the craft's §7.2 quiet
