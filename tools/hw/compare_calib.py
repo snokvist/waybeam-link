@@ -7,12 +7,12 @@ now and then, which Pass 121's own 10-run campaign measured. The point is that
 the two Pass 125/126 changes to §10.6 did not move anything they promised not
 to:
 
-  floor rule  changed the bottom of a rung-0 ramp. Any rung that reached its
-              placement from a CLEAN floor must be unmoved.
-  W9          changed what the addendum-4 blackout retreat records as the
-              rung's overload bracket. A bracket of ZERO WIDTH
-              (first_bad_rssi == last_clean_rssi) is the W9 signature: the
-              retreat booked the clean probe's reading as the bad one.
+  bracket     a bracket of ZERO WIDTH (first_bad_rssi == last_clean_rssi) is
+              the W9 signature: a retreat that booked the clean probe's
+              reading as the bad one.
+  limiter     from Pass 130 a placement below max_qdb with NO bad probe has no
+              evidence behind it -- the loss wall is the only thing entitled
+              to stop a sweep early, and an RSSI plateau no longer does.
 """
 import json
 import sys
@@ -44,10 +44,19 @@ def main():
         nb = bracket(new, m)
         lc, fb = nb.get("last_clean_rssi"), nb.get("first_bad_rssi")
         bw = "-" if fb is None else f"{lc}..{fb}"
+        # A movement is only a regression if the BASELINE placement was
+        # evidence-based. A baseline rung stopped by the (now deleted) RSSI
+        # plateau was never a measurement, so the sweep disagreeing with it is
+        # the correction, not a regression.
+        ob = bracket(base, m)
+        base_grounded = ob.get("first_bad_rssi") is not None or bq[m] >= 108
         flag = ""
         if abs(d) > 1:
-            flag = "  <-- MOVED >1 step"
-            fails += 1
+            if base_grounded:
+                flag = "  <-- MOVED >1 step"
+                fails += 1
+            else:
+                flag = "  (baseline was plateau-limited, not measured)"
         print(f"  {m:>4}  {bq[m]:>8}  {nq[m]:>7}  {d:>+7.0f}  "
               f"{bl[m]:>9}  {nl[m]:>8}  {bw}{flag}")
 
@@ -67,13 +76,19 @@ def main():
             print(f"  ok   rung {m}: bracket width {abs(fb - lc)} dB "
                   f"(last_clean={lc}, first_bad={fb})")
 
-    # Every placement must still verify clean; the artifact records measured
-    # loss and a placement above loss_ok is a §10.6 "still-failing floor".
+    # Every placement must verify clean, and every placement below max_qdb
+    # must sit one step under a MEASURED loss wall. Before Pass 130 three of
+    # this craft's eight rungs were stopped by an RSSI plateau instead.
     print()
     for m in range(8):
         if nl[m] > 15:
             print(f"  note rung {m}: placement verified at {nl[m]}permille "
                   f"(> loss_ok 15) — §10.6 records it, §10.7 would fail")
+        nb = bracket(new, m)
+        if nq[m] < 108 and nb.get("first_bad_rssi") is None:
+            print(f"  FAIL rung {m}: placed at {nq[m]} qdb below max with no "
+                  f"loss wall behind it — nothing stopped the sweep")
+            fails += 1
 
     print(f"\n  placements moved >1 step: "
           f"{sum(1 for m in range(8) if abs(nq[m] - bq[m]) > STEP_QDB)}/8")
