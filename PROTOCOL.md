@@ -2058,6 +2058,47 @@ hardware-range reference, not a safety limit. **Recommend an opt-in per-node
 `max_power_qdb` sanity ceiling** in the controller (off by default) so a
 mis-authored table cannot silently cook a PA.
 
+**The ceiling bounds the sweep, not only the resolve (Pass 134).** As written
+above, `max_power_qdb` was applied at §10.2 resolve and at §10.7 artifact
+apply — never to the calibration sweeps that drive *every* rung to
+`policy.calibration.max_qdb` for a full dwell. That inverted the stated
+purpose: the one operation that deliberately walks a rung into overload was
+the one operation the sanity ceiling did not cover. Both §10.6 and §10.7
+therefore clamp their sweep to
+
+```
+effective_max_qdb = min(policy.calibration.max_qdb, adapter.max_power_qdb)
+```
+
+and, because the ceiling is a **PA limit and the PA's linear region shrinks as
+modulation order rises**, taper it per rung using the §10.2 level intent the
+§9.3 table already carries — no new key, and the mask rides a table both ends
+already agree on by hash:
+
+```
+rung_ceiling_qdb[m] = effective_max_qdb
+                    + (profiles[m].tx_power_level − 4) × 8
+```
+
+With the shipped `tx_power_level` `{4,4,3,3,2,2,1,1}` and a 27 dBm ceiling that
+is 27/27/25/25/23/23/21/21 dBm.
+
+**What this mask is and is not.** It is a backstop against a *mis-measurement*
+driving a top rung to full power; it is not the placement mechanism. The level
+scale is 2 dB per step from a baseline of 4 with a floor at 0, so it can
+express at most **8 dB** of taper, and a 10 m measurement of this fleet's
+uplink produced 27/27/27/23/17/13/13/13 — a **14 dB** spread. The loss wall
+remains the real limiter at every rung (§10.6); the mask only bounds how hot a
+sweep may get before that wall is found. A rung that reaches its ceiling clean
+records `first_bad_qdb = null` exactly as before — the ceiling is not a wall
+and must never be recorded as one.
+
+`max_power_qdb` stays **opt-in**: unset, `effective_max_qdb` is
+`policy.calibration.max_qdb` and the mask still tapers it, so the per-rung
+shape applies to every node while the absolute ceiling remains the operator's
+deliberate choice (§10.3's first paragraph is unchanged — there is still no
+regulatory clamp).
+
 ### 10.4 Actuation
 On profile commit, for each transmitting adapter resolve and apply its power
 inside the §9.5 sequenced transition. After **any** devourer retune that resets
@@ -2234,6 +2275,36 @@ adapter**. On mismatch the node boots with no curve and surfaces
 CALIBRATION STALE (§15.3) — a curve calibrated for different hardware is
 never silently applied. Re-run on any pairing change (craft adapter, ground
 adapter set, antennas).
+
+**A run that found no wall anywhere measured nothing (Pass 134).** §10.6 scores
+every dwell from LINK_REPORTs, so its result is only as good as the return
+path, and a *starved* return path fails in the most dangerous direction: fewer
+reports means fewer observed losses means every probe reads clean, and the
+sweep places at the ceiling on every rung. Measured on the bench — a §7.2 flush
+regression cut the report rate from 10 Hz to ~4.8 Hz, and the resulting
+artifact recorded `placement_loss_milli` `[5,2,3,2,0,0,0,0]` with seven of
+eight rungs at 27 dBm. That curve was applied, drove the craft's PA into
+saturation, and cost the video link. Two rules, at two layers:
+
+- **Feedback health is a precondition and a continuous check.** A run must not
+  start, and must abort rather than continue, while accepted reports are not
+  arriving at their expected cadence and freshness. This is the condition
+  itself; every other guard below only pattern-matches its output. It is
+  distinct from the 3 s report-loss abort, which catches *silence* — a stream
+  at half rate is never silent.
+- **Persistence refuses an implausible result.** If **every** rung placed at
+  its §10.3 ceiling with no overload bracket booked anywhere
+  (`first_bad_qdb == null` for all eight), the run **fails and persists
+  nothing**. A sweep whose whole product is "no wall exists at any rung" did
+  not measure the thing it exists to measure. §10.7 already refuses a result
+  authored from silence; this is the same rule for a result authored from
+  false cleanliness. The failure is surfaced as a §10.6 failure reason, and —
+  per the volatility exception — the previous last-good artifact is left
+  untouched rather than replaced.
+
+A **non-monotone** placement curve is surfaced (§15.5) but **not** refused: the
+PA shape is a physical expectation, not a protocol invariant, and at close
+range a genuinely flat curve is a legitimate reading.
 
 **Observability.** §3.15 carries a 2-byte calibration word (bytes 34–35,
 `state_flags` bit4 — the `report_latch_holder` extension pattern): byte 0 =
@@ -2444,6 +2515,16 @@ the §11.7 campaign across a dead uplink — defeating the order law through a
 against `running` and `failed`. §10.7 therefore fails with reason
 `verify_failed`, persists nothing, and restores. The §10.6 rule is unchanged;
 this is a §10.7 policy on the shared seek's output, not a change to the seek.
+
+**The §10.3 per-rung ceiling applies here too (Pass 134).** §10.7 drives the
+same shared seek against the ground's own uplink adapter, so it climbs to the
+same `effective_max_qdb` tapered by the same §10.2 level mask. The ground half
+carries the *stronger* case for it: the placement auto-applies at boot with no
+operator between the measurement and the actuator. §10.6's flat-at-ceiling
+refusal has no §10.7 analogue and needs none — §10.7 already fails a run whose
+verify did not reach `loss_ok_milli`, and a ground that reads clean at every
+power on every rung has a dead §3.16 counter stream, which the liveness expiry
+already catches as `quality_lost`.
 
 **Actuator ownership and config carve-out.** Config load rejects `power_map` on
 any `role:"rx"` adapter **regardless of node role**, and accepts it on a

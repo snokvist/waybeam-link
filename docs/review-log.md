@@ -5476,3 +5476,91 @@ of eight. The tell was in the trace I had already printed — rung 5 placed at
 17.0 dBm and rung 6 never probed above 5.0 — and I did not look because the
 failure had a plausible physical story attached to it. A plausible mechanism is
 not evidence that the measurement happened.
+
+## Pass 134 — the sanity ceiling must bound the sweep (2026-08-02)
+
+Two operator rulings, both triggered by a craft artifact that placed seven of
+eight rungs at 27 dBm and cost the video link when applied.
+
+**Ground truth measured first, because the whole question rests on it.** With
+neither `power_map` nor an artifact, `resolve_power_qdb()` returns `nullopt`
+and the controller issues **no power command at all** — the adapter stays on
+`iw txpower auto`. Measured on the bench fleet:
+
+| node | adapter | uncalibrated |
+|---|---|---|
+| ground uplink | 8812EU `wlx84fc1450bcde` | **19.00 dBm** |
+| ground diversity | 8812CU `wlx40a5ef2f2308` | 25.00 dBm (RX-only) |
+| craft `.2.232` | 8812EU on SigmaStar | HW per-rate TXAGC curve (its init logs exactly that; `iw` reads 0.00 because the out-of-tree driver has no `get_txpower`) |
+
+So **uncalibrated is neither flat nor maximal** — `auto` is the vendor's
+per-rate TXAGC table, which already backs off as modulation order rises. That
+is the same shape §10.6 exists to measure. A good calibration improves on it; a
+bad one replaces a safe taper with a flat commanded maximum.
+
+And nothing else in the stack bounds it. Measured directly on the ground
+uplink adapter, whose phy advertises 20.0 dBm max at 5805:
+
+```
+cmd 2000 mBm -> readback 20.00
+cmd 2700 mBm -> readback 27.00
+cmd 3000 mBm -> readback 30.00     accepted, no error
+```
+
+No regd clamp, no driver clamp. In our own code `max_power_qdb` was unset in
+both deploy configs, and even when set it reached only `resolve_power_qdb()`
+and the §10.7 artifact apply — `calib_params_from()` takes only
+`CalibrationPolicy`, so **the adapter ceiling never reached either
+calibrator**. Both swept to a flat `max_qdb` = 108 (27 dBm) on every rung.
+
+**1. The §10.3 ceiling bounds the sweep, tapered per rung by §10.2.**
+`effective_max_qdb = min(policy.calibration.max_qdb, adapter.max_power_qdb)`,
+and `rung_ceiling_qdb[m] = effective_max_qdb + (tx_power_level[m] − 4) × 8`.
+The mask is derived, not authored: the §9.3 table already carries the per-rung
+power intent `{4,4,3,3,2,2,1,1}`, and both ends already agree on that table by
+hash, so this costs no new config key and no new wire.
+
+Stated honestly, because it bounds what the mask can claim: the level scale is
+2 dB/step from a baseline of 4 with a floor at 0, so it expresses at most
+**8 dB** of taper (27/27/25/25/23/23/21/21 at a 27 dBm ceiling), while the
+10 m uplink measurement produced a **14 dB** spread. The mask is a backstop
+against a mis-measurement driving a top rung to full power. The loss wall is
+still the placement mechanism at every rung.
+
+A second reason the ceiling matters, found while reading the craft's
+`curve.txt` from the bad run: §10.6 stores the curve re-referenced to level 4
+(`curve_qdb[m] = placement − (level[m] − 4) × 8`), so a 27 dBm MCS7 placement
+was written as a **33 dBm** curve entry —
+
+```
+MCS0-3:  27.0 27.0 29.0 27.0
+MCS4-7:  31.0 31.0 33.0 33.0
+```
+
+The transform *widens* the exposure. `resolve_power_qdb()` clamps last, so the
+ceiling contains it — but only if a ceiling exists, which until now it did not.
+
+**2. A run that found no wall anywhere fails and persists nothing.** The bad
+artifact recorded `placement_loss_milli` `[5,2,3,2,0,0,0,0]`. Its cause was a
+§7.2 flush regression (fixed in `f9a4f35`) that cut the report rate from 10 Hz
+to ~4.8 Hz: §10.6 scores every dwell from LINK_REPORTs, and a starved return
+path fails in the most dangerous direction — fewer reports, fewer observed
+losses, every probe reads clean, every rung places at the ceiling.
+
+Two layers, because the persist-time rule alone only pattern-matches the
+symptom: feedback health becomes a **precondition and a continuous check**
+(distinct from the 3 s report-loss abort, which catches silence — a stream at
+half rate is never silent), and persistence **refuses** an artifact where every
+rung placed at its ceiling with `first_bad_qdb == null` throughout. §10.7
+already refuses a result authored from silence; this is the same rule for one
+authored from false cleanliness.
+
+A non-monotone placement curve is **surfaced, not refused** — the PA shape is a
+physical expectation, not a protocol invariant, and at close range a flat curve
+is a legitimate reading.
+
+**Method note.** The premise I nearly shipped was that the ground's 27 dBm
+placements were unreachable because its phy advertises a 20 dBm limit at 5805.
+Two `iw` commands showed the driver accepts 30 dBm without complaint. The
+advertised regulatory limit and what the actuator will do are different
+questions, and only one of them was measured.
