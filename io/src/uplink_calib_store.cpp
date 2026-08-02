@@ -76,7 +76,12 @@ std::string canonical_bytes(const UplinkArtifact& a) {
         put16(o, p.placement_loss_milli);
         put32(o, static_cast<uint32_t>(p.last_clean_qdb));
         put8(o, p.has_first_bad ? 1 : 0);
-        put32(o, static_cast<uint32_t>(p.first_bad_qdb));
+        // Zeroed when absent so the hash ROUND-TRIPS: the writer serializes
+        // `first_bad_qdb` as JSON null and the loader leaves the field at its
+        // 0 default, so hashing a live non-zero value here made every such
+        // artifact fail its own fingerprint on reload — the operator sees
+        // DONE, the next boot silently discards the measurement.
+        put32(o, p.has_first_bad ? static_cast<uint32_t>(p.first_bad_qdb) : 0u);
     }
     return o;
 }

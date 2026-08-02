@@ -319,6 +319,136 @@ void test_loss_denominator_boundary() {
     CHECK(lossy.dwell_target() == p.probe_epochs);  // decided, not ambiguous
 }
 
+// Feed one complete dwell's worth of evidence to a directly-driven
+// calibrator: advance past settle, hand it a single telescoped sample, tick.
+// `local_epoch` stays 0 throughout so the blackout fallback never fires — the
+// craft's own anchors decide these dwells.
+void feed_dwell(UplinkCalibrator& cal, uint64_t& t, uint32_t settle_ms,
+                uint32_t emitted, uint32_t received, int8_t rssi) {
+    t += settle_ms + 1;
+    QualitySample s;
+    s.accepted = true;
+    s.progressed = true;
+    s.epoch_delta = emitted;
+    s.reports_delta = received;
+    s.rssi_sum_delta = static_cast<int32_t>(rssi) *
+                       static_cast<int32_t>(received);
+    cal.on_sample(s, t);
+    (void)cal.tick(t, 0, true);
+}
+
+// C1 regression. A PARTIAL blackout — some epochs land, then the uplink dies
+// mid-dwell — leaves the craft's anchors frozen SHORT of target with
+// received_ > 0. Keying the fallback on `received_ == 0` wedged that dwell
+// until the 600 s hard cap, which made the §10.7 floor rule unreachable in
+// exactly the scenario it exists for. The dwell must end on the ground's own
+// epoch count, score 1000permille, and ascend.
+void test_partial_blackout_ends_dwell() {
+    UplinkCalibParams p = fast_params();
+    p.probe_epochs = 40;
+    p.ambiguous_epochs = 80;
+    UplinkCalibrator cal(p, 0, false);
+    CHECK(cal.start(1000, 0));
+    const int32_t floor_qdb = p.seek.min_qdb;
+    CHECK(cal.qdb() == floor_qdb);
+
+    uint64_t t = 1000 + p.settle_ms + 1;
+    (void)cal.tick(t, 0, true);  // arms the ground epoch anchor at 0
+
+    // 20 of the 40 epochs land, then the craft goes silent. received_ is 20,
+    // so the old `received_ == 0` guard could never fire.
+    QualitySample s;
+    s.accepted = true;
+    s.progressed = true;
+    s.epoch_delta = 20;
+    s.reports_delta = 20;
+    s.rssi_sum_delta = -40 * 20;
+    cal.on_sample(s, t);
+    (void)cal.tick(t, 20, true);
+    CHECK(cal.state() == CalibState::kRunning);
+    CHECK(cal.qdb() == floor_qdb);  // still deciding
+    CHECK(cal.dwell_progress() == 20);
+
+    // The ground keeps emitting under live feedback. At target the dwell must
+    // decide against the ground's own count.
+    t += 2000;
+    (void)cal.tick(t, p.probe_epochs, true);
+    CHECK(cal.state() == CalibState::kRunning);  // not a timeout, an observation
+    CHECK(cal.qdb() > floor_qdb);                // scored 1000permille -> ascend
+    CHECK(cal.dwell_progress() == 0);            // a fresh dwell at the new power
+}
+
+// C2 regression. PowerSeek reaches kDone from verify with loss above
+// loss_ok_milli only when the descent budget or the floor is exhausted. §10.6
+// records that ("the artifact never lies") because a craft artifact is a
+// record the operator reads. The §10.7 artifact AUTO-APPLIES and gates the
+// sequencer, so the same outcome there is a false success: it would persist an
+// unusable placement and start the downlink across a dead uplink, defeating
+// the order law through a state no interlock inspects.
+void test_verify_exhausted_is_failure() {
+    UplinkCalibParams p = fast_params();
+    p.seek.loss_ok_milli = 15;
+    p.seek.loss_bad_milli = 50;
+    UplinkCalibrator cal(p, 0, false);
+    CHECK(cal.start(1000, 0));
+    uint64_t t = 1000;
+
+    // The reproduced ladder: clean@4, clean@20, bad@36 -> place at 20.
+    feed_dwell(cal, t, p.settle_ms, p.probe_epochs, p.probe_epochs, -40);
+    CHECK(cal.qdb() == 20);
+    feed_dwell(cal, t, p.settle_ms, p.probe_epochs, p.probe_epochs, -36);
+    CHECK(cal.qdb() == 36);
+    feed_dwell(cal, t, p.settle_ms, p.probe_epochs, 1, -33);
+    CHECK(cal.qdb() == 20);  // retreated to the last clean probe, now verifying
+
+    // Verify at 20 fails under sustained exposure -> the bounded step-down.
+    feed_dwell(cal, t, p.settle_ms, p.verify_epochs, p.verify_epochs - 1, -36);
+    CHECK(cal.qdb() == 4);
+    CHECK(cal.state() == CalibState::kRunning);
+
+    // Verify at the floor fails too, and there is nowhere left to descend.
+    feed_dwell(cal, t, p.settle_ms, p.verify_epochs, 1, -40);
+    CHECK(cal.state() == CalibState::kFailed);
+    CHECK(cal.fail_reason() != nullptr);
+    if (cal.fail_reason() != nullptr) {
+        CHECK(std::string(cal.fail_reason()) == "verify_failed");
+    }
+    // Nothing is persisted, and the power is restored.
+    const UplinkCalibActions a = cal.tick(t, 0, true);
+    CHECK(!a.artifact_ready);
+    CHECK(!a.restore);  // already drained by the terminal step
+
+    // And the sequencer must not reach the downlink phase from it.
+    CalibSequencer q;
+    q.start(1000);
+    const SeqActions sa = q.tick(cal.state(), -1, t);
+    CHECK(!sa.start_downlink);
+    CHECK(q.phase() == CalibPhase::kFailed);
+}
+
+// C3 regression. first_bad_qdb_ survived start(), so a second run that never
+// saw a bad probe published the FIRST run's bracket alongside
+// has_first_bad=false — a value the writer serializes as JSON null and the
+// loader reads back as 0, so the artifact failed its own fingerprint on
+// reload. Two runs in one process; the second must publish a zeroed bracket.
+void test_second_run_clears_bracket() {
+    Rig r(fast_params());
+    r.up.ceil_rssi = -33;  // qdb 36 overloads: run 1 records a bad probe
+    CHECK(r.cal.start(r.now, r.local_epoch));
+    r.run(r.now + 600000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    CHECK(r.cal.placement().has_first_bad);
+    const int32_t first_bad = r.cal.placement().first_bad_qdb;
+    CHECK(first_bad > 0);
+
+    r.up.ceil_rssi = 127;  // run 2 is clean all the way to max
+    CHECK(r.cal.start(r.now, r.local_epoch));
+    r.run(r.now + 600000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    CHECK(!r.cal.placement().has_first_bad);
+    CHECK(r.cal.placement().first_bad_qdb == 0);  // not run 1's bracket
+}
+
 // §10.7 sequencer: one operator action, two phases, in the right order.
 void test_sequencer() {
     // Happy path: uplink done -> downlink issued -> craft runs -> done.
@@ -441,6 +571,9 @@ void test_sequencer() {
 
 int main() {
     test_sequencer();
+    test_partial_blackout_ends_dwell();
+    test_verify_exhausted_is_failure();
+    test_second_run_clears_bracket();
     test_loss_denominator_boundary();
     test_clean_ramp();
     test_floor_start();

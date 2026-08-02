@@ -4619,83 +4619,6 @@ int run_rx(const Loaded& l) {
                          curve.error.c_str());
         }
     }
-    // Tier 2: a persisted artifact, applied only when the local adapter, the
-    // craft, and the band/bandwidth all match. A mismatch is surfaced as
-    // stale and never applied — the hardware stays at the higher-precedence
-    // source (§10.7). Note the craft is not selected yet at startup, so the
-    // artifact is loaded here and its identity re-checked when one is.
-    const std::string uplink_identity =
-        uplink_adapter != nullptr ? calib_identity(*uplink_adapter) : "udp";
-    std::optional<UplinkArtifact> uplink_artifact;
-    uint8_t uplink_artifact_fp = 0;
-    bool uplink_artifact_stale = false;
-    if (auto stored =
-            uplink_calib_store_load(l.cfg.policy.calibration.artifact_dir);
-        stored) {
-        uplink_artifact_fp = uplink_calib_fingerprint(*stored.value);
-        if (stored.value->local_adapter_identity != uplink_identity) {
-            uplink_artifact_stale = true;
-            std::fprintf(stderr,
-                         "uplink: artifact STALE (stored %s, live %s)\n",
-                         stored.value->local_adapter_identity.c_str(),
-                         uplink_identity.c_str());
-        }
-        uplink_artifact = std::move(*stored.value);
-    }
-    const auto uplink_artifact_qdb = [&]() -> std::optional<int32_t> {
-        if (!uplink_artifact || uplink_artifact_stale) return std::nullopt;
-        const UplinkPlacement* p = uplink_calib_placement_for(
-            *uplink_artifact, l.cfg.air.uplink_mcs, l.cfg.air.uplink_sgi);
-        if (p == nullptr) return std::nullopt;
-        int32_t q = p->placement_qdb;
-        // §10.3 ceiling still clamps a stored placement — the artifact
-        // records what was measured, the ceiling is what the operator allows.
-        if (uplink_adapter != nullptr && uplink_adapter->max_power_qdb) {
-            q = std::min(q, *uplink_adapter->max_power_qdb);
-        }
-        return q;
-    };
-    // §10.5 (Pass 125) override latch, now available on any node with a
-    // role:"tx" adapter. It outranks every resolved tier — that is what makes
-    // it the manual counterpart to §10.7 and the reference placement for the
-    // calibrated-versus-manual comparison, with no config edit and restart.
-    std::optional<int32_t> uplink_override;
-    // §10.7 restore order, highest precedence first: the §10.5 latch, then an
-    // explicit configured placement, then a matching artifact, then backend
-    // auto. One resolver, one call site — a second copy of this ordering is
-    // how the two drift.
-    const auto uplink_restore_power = [&]() {
-        if (uplink_adapter == nullptr) return;
-        if (uplink_override) {
-            (void)air.value->set_power_qdb(uplink_idx, *uplink_override);
-        } else if (uplink_owner_qdb) {
-            (void)air.value->set_power_qdb(uplink_idx, *uplink_owner_qdb);
-        } else if (const std::optional<int32_t> aq = uplink_artifact_qdb()) {
-            (void)air.value->set_power_qdb(uplink_idx, *aq);
-        } else {
-            air.value->set_power_auto(uplink_idx);
-        }
-    };
-    uplink_restore_power();
-    if (uplink_adapter != nullptr) {
-        // One line naming which tier actually owns the actuator. The
-        // precedence is invisible otherwise, and "why is my power_map not
-        // being applied" is exactly the question this answers.
-        const std::optional<int32_t> aq = uplink_artifact_qdb();
-        std::fprintf(stderr, "uplink: power owner = %s",
-                     uplink_owner_qdb ? "config power_map"
-                     : aq             ? "artifact"
-                                      : "backend auto");
-        if (uplink_owner_qdb) {
-            std::fprintf(stderr, " (%d qdb)", *uplink_owner_qdb);
-        } else if (aq) {
-            std::fprintf(stderr, " (%d qdb, fp=0x%02x)", *aq,
-                         uplink_artifact_fp);
-        } else if (uplink_artifact_stale) {
-            std::fprintf(stderr, " (artifact present but STALE)");
-        }
-        std::fprintf(stderr, "\n");
-    }
 
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
@@ -4730,6 +4653,149 @@ int run_rx(const Loaded& l) {
     UplinkCalibrator uplink_cal(ucal_params, l.cfg.air.uplink_mcs,
                                 l.cfg.air.uplink_sgi);
     CalibSequencer calib_seq;
+    const uint16_t op_chan =
+        l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
+    const uint8_t op_bw_mhz =
+        l.cfg.adapters.empty() ? 20 : l.cfg.adapters[0].bw;
+
+    struct LinkSelection {
+        uint16_t originator = 0;
+        uint16_t chan = 0;
+        uint8_t bw = 0;  // §11 width code
+        uint8_t net_id = 0;
+    };
+    LinkSelection active_selection{rx.selected_originator().value_or(0),
+                                   op_chan, bw_code(op_bw_mhz),
+                                   l.cfg.node.net_id.value_or(0)};
+    std::optional<LinkSelection> pending_selection;
+    std::optional<LinkSelection> previous_selection;
+    std::string selection_state = "configured";
+    std::string previous_selection_state = selection_state;
+
+    // §15.5a (Pass 65): the ground's current operating channel — the config
+    // default until a claim commits, then the committed target. The scout returns
+    // all ears here, and a failed claim rolls back here.
+    uint16_t operating_chan = op_chan;
+    // Tier 2: a persisted artifact, applied only when the local adapter, the
+    // craft, and the band/bandwidth all match. A mismatch is surfaced as
+    // stale and never applied — the hardware stays at the higher-precedence
+    // source (§10.7). This block sits after the pairing tuple it needs
+    // (`active_selection`, `quality_gate`, `operating_chan`) rather than up
+    // with the config tier, because the CRAFT half of the identity does not
+    // exist at config-load time.
+    const std::string uplink_identity =
+        uplink_adapter != nullptr ? calib_identity(*uplink_adapter) : "udp";
+    std::optional<UplinkArtifact> uplink_artifact;
+    uint8_t uplink_artifact_fp = 0;
+    bool uplink_artifact_stale = false;
+    if (auto stored =
+            uplink_calib_store_load(l.cfg.policy.calibration.artifact_dir);
+        stored) {
+        uplink_artifact_fp = uplink_calib_fingerprint(*stored.value);
+        if (stored.value->local_adapter_identity != uplink_identity) {
+            uplink_artifact_stale = true;
+            std::fprintf(stderr,
+                         "uplink: artifact STALE (stored %s, live %s)\n",
+                         stored.value->local_adapter_identity.c_str(),
+                         uplink_identity.c_str());
+        }
+        uplink_artifact = std::move(*stored.value);
+    }
+    // The craft's §3.16 adapter fingerprint as the ARTIFACT records it: the RX
+    // chain the placement was measured against, taken from live feedback and
+    // not from config. 0 until feedback arrives, which is why a fresh boot
+    // resolves to no-artifact until the craft is both selected and reporting.
+    const auto uplink_craft_fp = [&]() -> uint8_t {
+        return quality_gate.have()
+                   ? quality_gate.last().craft_adapter_fingerprint
+                   : uint8_t{0};
+    };
+    const auto uplink_artifact_qdb = [&]() -> std::optional<int32_t> {
+        if (!uplink_artifact) return std::nullopt;
+        // §10.7: "Apply it only when the same craft is selected and both local
+        // and remote adapter identities match; otherwise surface stale and
+        // leave hardware at the higher-precedence source." The local half was
+        // checked at load; the rest cannot be, so the FULL tuple is checked
+        // here, at every resolve — the same tuple the writer stamps in.
+        if (!uplink_calib_matches(*uplink_artifact, uplink_identity,
+                                  active_selection.originator,
+                                  uplink_craft_fp(), operating_chan,
+                                  op_bw_mhz)) {
+            uplink_artifact_stale = true;
+            return std::nullopt;
+        }
+        uplink_artifact_stale = false;
+        const UplinkPlacement* p = uplink_calib_placement_for(
+            *uplink_artifact, l.cfg.air.uplink_mcs, l.cfg.air.uplink_sgi);
+        if (p == nullptr) return std::nullopt;
+        int32_t q = p->placement_qdb;
+        // §10.3 ceiling still clamps a stored placement — the artifact
+        // records what was measured, the ceiling is what the operator allows.
+        if (uplink_adapter != nullptr && uplink_adapter->max_power_qdb) {
+            q = std::min(q, *uplink_adapter->max_power_qdb);
+        }
+        return q;
+    };
+    // Applicability is a FUNCTION of that tuple, and every existing restore
+    // call site fires before the tuple is knowable (startup), or on an event
+    // unrelated to it (§10.5 unlatch, calibration exit). Without a re-resolve
+    // on tuple change a valid artifact loaded at boot would never be applied
+    // at all. Seeded with the startup tuple so the first pass is not a
+    // spurious actuation.
+    uint64_t uplink_pairing_key = 0;
+    const auto uplink_pairing_now = [&]() -> uint64_t {
+        return (static_cast<uint64_t>(active_selection.originator) << 32) |
+               (static_cast<uint64_t>(uplink_craft_fp()) << 24) |
+               static_cast<uint64_t>(operating_chan);
+    };
+    // §10.5 (Pass 125) override latch, now available on any node with a
+    // role:"tx" adapter. It outranks every resolved tier — that is what makes
+    // it the manual counterpart to §10.7 and the reference placement for the
+    // calibrated-versus-manual comparison, with no config edit and restart.
+    std::optional<int32_t> uplink_override;
+    // §10.7 restore order, highest precedence first: the §10.5 latch, then an
+    // explicit configured placement, then a matching artifact, then backend
+    // auto. One resolver, one call site — a second copy of this ordering is
+    // how the two drift.
+    const auto uplink_restore_power = [&]() {
+        if (uplink_adapter == nullptr) return;
+        if (uplink_override) {
+            (void)air.value->set_power_qdb(uplink_idx, *uplink_override);
+        } else if (uplink_owner_qdb) {
+            (void)air.value->set_power_qdb(uplink_idx, *uplink_owner_qdb);
+        } else if (const std::optional<int32_t> aq = uplink_artifact_qdb()) {
+            (void)air.value->set_power_qdb(uplink_idx, *aq);
+        } else {
+            air.value->set_power_auto(uplink_idx);
+        }
+    };
+    uplink_restore_power();
+    uplink_pairing_key = uplink_pairing_now();
+    if (uplink_adapter != nullptr) {
+        // One line naming which tier actually owns the actuator. The
+        // precedence is invisible otherwise, and "why is my power_map not
+        // being applied" is exactly the question this answers.
+        const std::optional<int32_t> aq = uplink_artifact_qdb();
+        std::fprintf(stderr, "uplink: power owner = %s",
+                     uplink_owner_qdb ? "config power_map"
+                     : aq             ? "artifact"
+                                      : "backend auto");
+        if (uplink_owner_qdb) {
+            std::fprintf(stderr, " (%d qdb)", *uplink_owner_qdb);
+        } else if (aq) {
+            std::fprintf(stderr, " (%d qdb, fp=0x%02x)", *aq,
+                         uplink_artifact_fp);
+        } else if (uplink_artifact && active_selection.originator == 0) {
+            // Not stale in the operator sense — nothing is selected yet, so
+            // the pairing simply cannot be evaluated. Saying STALE here would
+            // send people looking for a mismatch that does not exist.
+            std::fprintf(stderr, " (artifact present, awaiting craft)");
+        } else if (uplink_artifact_stale) {
+            std::fprintf(stderr, " (artifact present but STALE)");
+        }
+        std::fprintf(stderr, "\n");
+    }
+
     // One place that turns live §10.7/§3.16 state into the §15.3 fields, so
     // the stats line and GET /api/v1/calibration cannot describe the node
     // differently.
@@ -4767,24 +4833,6 @@ int run_rx(const Loaded& l) {
         }
         return u;
     };
-    const uint16_t op_chan =
-        l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
-    const uint8_t op_bw_mhz =
-        l.cfg.adapters.empty() ? 20 : l.cfg.adapters[0].bw;
-
-    struct LinkSelection {
-        uint16_t originator = 0;
-        uint16_t chan = 0;
-        uint8_t bw = 0;  // §11 width code
-        uint8_t net_id = 0;
-    };
-    LinkSelection active_selection{rx.selected_originator().value_or(0),
-                                   op_chan, bw_code(op_bw_mhz),
-                                   l.cfg.node.net_id.value_or(0)};
-    std::optional<LinkSelection> pending_selection;
-    std::optional<LinkSelection> previous_selection;
-    std::string selection_state = "configured";
-    std::string previous_selection_state = selection_state;
 
     // §15.4 frame-shm egress: one producer ring + a §6.3a reassembler per
     // frame-shm out-stream. deliver_now carries the loop's per-iteration clock
@@ -5230,10 +5278,6 @@ int run_rx(const Loaded& l) {
     // CCX-liveness watchdog as the craft's radio.
     TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
                                 l.cfg.air.wedge_min_submits});
-    // §15.5a (Pass 65): the ground's current operating channel — the config
-    // default until a claim commits, then the committed target. The scout returns
-    // all ears here, and a failed claim rolls back here.
-    uint16_t operating_chan = op_chan;
     // §15.5a scout (Pass 64). Roams the uplink (role:"tx") adapter only — the
     // diversity RX adapters hold the resting channel — and widens the net_id
     // filter during a sweep; psk_known reports a usable CSA key (configured
@@ -5955,6 +5999,18 @@ int run_rx(const Loaded& l) {
                 (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
             }
             if (ua.restore) uplink_restore_power();
+            // §10.7 tier-2 applicability moves with the pairing: the craft is
+            // selected after startup, its §3.16 fingerprint arrives later
+            // still, and a CSA moves the channel. Re-resolve on that change —
+            // never mid-run, where the calibrator owns the actuator.
+            if (uplink_artifact &&
+                uplink_cal.state() != CalibState::kRunning) {
+                const uint64_t key = uplink_pairing_now();
+                if (key != uplink_pairing_key) {
+                    uplink_pairing_key = key;
+                    uplink_restore_power();
+                }
+            }
             if (ua.artifact_ready) {
                 UplinkArtifact art;
                 art.local_adapter_identity = uplink_identity;

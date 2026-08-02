@@ -97,6 +97,39 @@ void test_round_trip() {
     std::remove(dir.c_str());
 }
 
+// C3 regression. An absent bracket is serialized as JSON null and read back
+// as 0, so the canonicalization must hash 0 for it regardless of what the
+// in-memory field happens to hold. It held the PREVIOUS run's bracket
+// (UplinkCalibrator did not reset it across start()), so every such artifact
+// failed its own fingerprint on reload: the operator saw DONE and the next
+// boot silently discarded the measurement.
+void test_absent_bracket_round_trips() {
+    const std::string dir = temp_dir();
+    CHECK(!dir.empty());
+    if (dir.empty()) return;
+
+    UplinkArtifact a = make_artifact();
+    a.placements[0].has_first_bad = false;
+    a.placements[0].first_bad_qdb = 88;  // stale in-memory residue
+
+    const uint8_t fp = uplink_calib_store_write(dir, a);
+    CHECK(fp != 0);
+    auto loaded = uplink_calib_store_load(dir);
+    CHECK(static_cast<bool>(loaded));  // must not be "fingerprint mismatch"
+    if (loaded) {
+        CHECK(!loaded.value->placements[0].has_first_bad);
+        CHECK(loaded.value->placements[0].first_bad_qdb == 0);
+    }
+    // And the hash genuinely ignores the residue: the same artifact with the
+    // field zeroed is the same artifact.
+    UplinkArtifact z = a;
+    z.placements[0].first_bad_qdb = 0;
+    CHECK(uplink_calib_fingerprint(z) == fp);
+
+    std::remove((dir + "/uplink-artifact.json").c_str());
+    std::remove(dir.c_str());
+}
+
 // The fingerprint covers a PINNED BINARY form, not the JSON text. Reformat
 // the file and it must still load; change a value and it must not.
 void test_fingerprint_is_binary_not_text() {
@@ -247,6 +280,7 @@ void test_craft_response_declares_downlink() {
 int main() {
     test_craft_response_declares_downlink();
     test_round_trip();
+    test_absent_bracket_round_trips();
     test_fingerprint_is_binary_not_text();
     test_tamper_rejected();
     test_identity_gate();

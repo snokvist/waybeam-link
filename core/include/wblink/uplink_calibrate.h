@@ -73,6 +73,7 @@ class UplinkCalibrator {
         placement_.short_gi = sgi_;
         last_clean_qdb_ = p_.seek.min_qdb;
         have_first_bad_ = false;
+        first_bad_qdb_ = 0;  // stale value would ride into the next placement
         // §10.6 Pass 121: ramp from the floor. Safe here only because of the
         // Pass 125 floor rule — an uplink at range is normally blacked out
         // there, which is the whole reason that rule exists.
@@ -132,16 +133,27 @@ class UplinkCalibrator {
             return a;
         }
         if (now_ms < dwell_start_ms_) return a;  // settling
+        // Anchor the ground's own epoch clock at the END of settle, not at
+        // begin_dwell: the craft's `emitted_` starts accumulating here, so an
+        // anchor taken before settle runs ahead by settle_ms worth of epochs
+        // and would trip the fallback below on a perfectly healthy dwell.
+        if (!dwell_epoch_armed_) {
+            dwell_epoch_armed_ = true;
+            dwell_local_epoch_ = local_epoch;
+        }
 
         if (emitted_ >= target_epochs_) {
             return evaluate(a, now_ms, local_epoch, false);
         }
-        // Counter blackout: live feedback, no advance. The craft's anchors
-        // are frozen, so fall back to the ground's own emission count and
-        // score the dwell 1000permille — §10.7. This is the seek's floor
-        // evidence, and the case a collapsed liveness clock would abort.
-        if (received_ == 0 &&
-            local_epoch - dwell_local_epoch_ >= target_epochs_) {
+        // Counter blackout: live feedback, the craft's anchors did not span
+        // the dwell. Fall back to the ground's own emission count and score
+        // 1000permille — §10.7. The condition is that `emitted_` fell short,
+        // NOT that `received_` is zero: a PARTIAL blackout (some epochs land,
+        // then the uplink dies) leaves received_ > 0 with the anchors frozen
+        // short of target, and keying on received_ == 0 wedged that dwell
+        // until the 600 s hard cap — precisely the floor case §10.7 exists
+        // for. Reaching here already implies emitted_ < target_epochs_.
+        if (local_epoch - dwell_local_epoch_ >= target_epochs_) {
             return evaluate(a, now_ms, local_epoch, true);
         }
         return a;
@@ -158,6 +170,7 @@ class UplinkCalibrator {
     void begin_dwell(uint64_t now_ms, uint32_t local_epoch, uint32_t target) {
         dwell_start_ms_ = now_ms + p_.settle_ms;
         dwell_local_epoch_ = local_epoch;
+        dwell_epoch_armed_ = false;
         target_epochs_ = target;
         emitted_ = 0;
         received_ = 0;
@@ -208,6 +221,21 @@ class UplinkCalibrator {
                 a.restore = take_restore_();
                 return a;
             case SeekStep::Kind::kDone:
+                // §10.7 does NOT inherit §10.6's "record the still-failing
+                // floor" rule. The craft's artifact is a record the operator
+                // reads; the ground's AUTO-APPLIES to the live uplink at boot
+                // and gates the sequencer's downlink phase. PowerSeek reaches
+                // kDone with loss > loss_ok_milli only when the descent budget
+                // or the floor is exhausted — placing there would report
+                // success for an uplink that just measured unusable, persist
+                // it, and let CalibSequencer start the downlink across it,
+                // defeating the order law through a SUCCESS state that no
+                // interlock inspects. Fail instead; nothing is persisted.
+                if (loss > p_.seek.loss_ok_milli) {
+                    finish(CalibState::kFailed, "verify_failed");
+                    a.restore = take_restore_();
+                    return a;
+                }
                 placement_.placement_qdb = s.qdb;
                 placement_.placement_rssi_dbm =
                     static_cast<int8_t>(std::lround(rssi));
@@ -268,6 +296,7 @@ class UplinkCalibrator {
     int32_t first_bad_qdb_ = 0;
     bool have_first_bad_ = false;
     bool extended_ = false;
+    bool dwell_epoch_armed_ = false;
     bool restore_pending_ = false;
     bool artifact_pending_ = false;
     std::optional<int32_t> pending_qdb_;
