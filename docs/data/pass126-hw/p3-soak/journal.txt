@@ -1,0 +1,220 @@
+Aug 02 14:05:28 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: START mcs=0
+Aug 02 14:05:28 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 14:05:32 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 14:05:32 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#10 probe  qdb=4 emitted=41/40 received=41 loss=0permille rssi=-44
+Aug 02 14:05:37 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 14:05:37 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#11 probe  qdb=20 emitted=41/40 received=41 loss=0permille rssi=-45
+Aug 02 14:05:42 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 14:05:42 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#12 probe  qdb=36 emitted=40/40 received=40 loss=0permille rssi=-41
+Aug 02 14:05:46 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 14:05:46 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#13 probe  qdb=52 emitted=40/40 received=40 loss=0permille rssi=-37
+Aug 02 14:05:51 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 14:05:51 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#14 probe  qdb=68 emitted=41/40 received=41 loss=0permille rssi=-30
+Aug 02 14:05:55 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 14:05:55 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#15 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-29
+Aug 02 14:06:00 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:06:00 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#16 probe  qdb=100 emitted=41/40 received=41 loss=0permille rssi=-28
+Aug 02 14:06:05 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:06:05 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#17 probe  qdb=108 emitted=40/40 received=40 loss=0permille rssi=-26
+Aug 02 14:06:25 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:06:25 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#18 VERIFY qdb=108 emitted=199/200 received=199 loss=5permille rssi=-28 [BLACKOUT]
+Aug 02 14:06:25 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: DONE placement=108 qdb fp=0xf1
+Aug 02 14:06:25 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:06:34 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: START mcs=0
+Aug 02 14:06:34 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 14:06:39 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 14:06:39 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#19 probe  qdb=4 emitted=40/40 received=40 loss=0permille rssi=-44
+Aug 02 14:06:43 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 14:06:43 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#20 probe  qdb=20 emitted=41/40 received=41 loss=0permille rssi=-44
+Aug 02 14:06:48 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 14:06:48 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#21 probe  qdb=36 emitted=41/40 received=41 loss=0permille rssi=-40
+Aug 02 14:06:52 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 14:06:52 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#22 probe  qdb=52 emitted=41/40 received=41 loss=0permille rssi=-36
+Aug 02 14:06:57 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 14:06:57 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#23 probe  qdb=68 emitted=41/40 received=41 loss=0permille rssi=-32
+Aug 02 14:07:02 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 14:07:02 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#24 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-30
+Aug 02 14:07:06 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:07:06 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#25 probe  qdb=100 emitted=41/40 received=41 loss=0permille rssi=-28
+Aug 02 14:07:11 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:07:11 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#26 probe  qdb=108 emitted=41/40 received=41 loss=0permille rssi=-28
+Aug 02 14:07:32 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:07:32 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#27 VERIFY qdb=108 emitted=198/200 received=198 loss=10permille rssi=-28 [BLACKOUT]
+Aug 02 14:07:32 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: DONE placement=108 qdb fp=0x0e
+Aug 02 14:07:32 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:07:40 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: START mcs=0
+Aug 02 14:07:40 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 14:07:45 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 14:07:45 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#28 probe  qdb=4 emitted=40/40 received=40 loss=0permille rssi=-44
+Aug 02 14:07:50 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 14:07:50 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#29 probe  qdb=20 emitted=41/40 received=41 loss=0permille rssi=-44
+Aug 02 14:07:54 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 14:07:54 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#30 probe  qdb=36 emitted=41/40 received=41 loss=0permille rssi=-41
+Aug 02 14:07:59 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 14:07:59 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#31 probe  qdb=52 emitted=41/40 received=41 loss=0permille rssi=-36
+Aug 02 14:08:03 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 14:08:03 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#32 probe  qdb=68 emitted=41/40 received=41 loss=0permille rssi=-32
+Aug 02 14:08:08 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 14:08:08 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#33 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-30
+Aug 02 14:08:13 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:08:13 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#34 probe  qdb=100 emitted=41/40 received=41 loss=0permille rssi=-28
+Aug 02 14:08:17 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:08:17 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#35 probe  qdb=108 emitted=41/40 received=41 loss=0permille rssi=-28
+Aug 02 14:08:38 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:08:38 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#36 VERIFY qdb=108 emitted=198/200 received=197 loss=15permille rssi=-28 [BLACKOUT]
+Aug 02 14:08:38 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: DONE placement=108 qdb fp=0x5b
+Aug 02 14:08:38 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:08:47 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: START mcs=0
+Aug 02 14:08:47 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 14:08:51 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 14:08:51 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#37 probe  qdb=4 emitted=41/40 received=41 loss=0permille rssi=-44
+Aug 02 14:08:56 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 14:08:56 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#38 probe  qdb=20 emitted=41/40 received=41 loss=0permille rssi=-44
+Aug 02 14:09:00 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 14:09:00 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#39 probe  qdb=36 emitted=41/40 received=41 loss=0permille rssi=-40
+Aug 02 14:09:05 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 14:09:05 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#40 probe  qdb=52 emitted=41/40 received=41 loss=0permille rssi=-36
+Aug 02 14:09:10 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 14:09:10 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#41 probe  qdb=68 emitted=41/40 received=41 loss=0permille rssi=-32
+Aug 02 14:09:14 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 14:09:14 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#42 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-30
+Aug 02 14:09:19 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:09:19 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#43 probe  qdb=100 emitted=41/40 received=41 loss=0permille rssi=-28
+Aug 02 14:09:27 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:09:27 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#44 probe  qdb=108 emitted=81/80 received=80 loss=12permille rssi=-28
+Aug 02 14:09:48 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:09:48 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#45 VERIFY qdb=108 emitted=199/200 received=199 loss=5permille rssi=-28 [BLACKOUT]
+Aug 02 14:09:48 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: DONE placement=108 qdb fp=0xf1
+Aug 02 14:09:48 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:09:56 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: START mcs=0
+Aug 02 14:09:56 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 14:10:01 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 14:10:01 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#46 probe  qdb=4 emitted=41/40 received=41 loss=0permille rssi=-44
+Aug 02 14:10:05 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 14:10:05 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#47 probe  qdb=20 emitted=41/40 received=41 loss=0permille rssi=-44
+Aug 02 14:10:10 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 14:10:10 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#48 probe  qdb=36 emitted=41/40 received=41 loss=0permille rssi=-41
+Aug 02 14:10:14 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 14:10:14 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#49 probe  qdb=52 emitted=40/40 received=40 loss=0permille rssi=-36
+Aug 02 14:10:23 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 14:10:23 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#50 probe  qdb=68 emitted=83/80 received=82 loss=12permille rssi=-32
+Aug 02 14:10:28 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 14:10:28 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#51 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-30
+Aug 02 14:10:32 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:10:32 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#52 probe  qdb=100 emitted=40/40 received=40 loss=0permille rssi=-28
+Aug 02 14:10:41 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:10:41 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#53 probe  qdb=108 emitted=82/80 received=81 loss=12permille rssi=-28
+Aug 02 14:11:02 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:11:02 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#54 VERIFY qdb=108 emitted=199/200 received=198 loss=10permille rssi=-28 [BLACKOUT]
+Aug 02 14:11:02 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: DONE placement=108 qdb fp=0x0e
+Aug 02 14:11:02 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:11:08 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: START mcs=0
+Aug 02 14:11:08 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 14:11:13 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 14:11:13 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#55 probe  qdb=4 emitted=36/40 received=36 loss=100permille rssi=-44 [BLACKOUT]
+Aug 02 14:11:17 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 14:11:17 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#56 probe  qdb=20 emitted=41/40 received=41 loss=0permille rssi=-44
+Aug 02 14:11:22 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 14:11:22 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#57 probe  qdb=36 emitted=41/40 received=41 loss=0permille rssi=-41
+Aug 02 14:11:27 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 14:11:27 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#58 probe  qdb=52 emitted=40/40 received=40 loss=0permille rssi=-37
+Aug 02 14:11:31 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 14:11:31 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#59 probe  qdb=68 emitted=41/40 received=41 loss=0permille rssi=-32
+Aug 02 14:11:36 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 14:11:36 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#60 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-29
+Aug 02 14:11:40 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:11:40 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#61 probe  qdb=100 emitted=41/40 received=41 loss=0permille rssi=-29
+Aug 02 14:11:45 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:11:45 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#62 probe  qdb=108 emitted=40/40 received=40 loss=0permille rssi=-28
+Aug 02 14:12:06 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:12:06 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#63 VERIFY qdb=108 emitted=198/200 received=198 loss=10permille rssi=-28 [BLACKOUT]
+Aug 02 14:12:06 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: DONE placement=108 qdb fp=0x46
+Aug 02 14:12:06 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:12:14 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: START mcs=0
+Aug 02 14:12:14 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 14:12:19 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 14:12:19 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#64 probe  qdb=4 emitted=41/40 received=41 loss=0permille rssi=-43
+Aug 02 14:12:24 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 14:12:24 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#65 probe  qdb=20 emitted=40/40 received=40 loss=0permille rssi=-43
+Aug 02 14:12:28 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 14:12:28 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#66 probe  qdb=36 emitted=41/40 received=41 loss=0permille rssi=-40
+Aug 02 14:12:33 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 14:12:33 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#67 probe  qdb=52 emitted=40/40 received=40 loss=0permille rssi=-35
+Aug 02 14:12:37 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 14:12:37 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#68 probe  qdb=68 emitted=41/40 received=41 loss=0permille rssi=-32
+Aug 02 14:12:42 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 14:12:42 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#69 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-30
+Aug 02 14:12:47 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:12:47 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#70 probe  qdb=100 emitted=41/40 received=41 loss=0permille rssi=-28
+Aug 02 14:12:51 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:12:51 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#71 probe  qdb=108 emitted=41/40 received=41 loss=0permille rssi=-28
+Aug 02 14:13:12 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:13:12 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#72 VERIFY qdb=108 emitted=198/200 received=198 loss=10permille rssi=-18 [BLACKOUT]
+Aug 02 14:13:12 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: DONE placement=108 qdb fp=0x5e
+Aug 02 14:13:12 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:13:21 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: START mcs=0
+Aug 02 14:13:21 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 14:13:25 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 14:13:25 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#73 probe  qdb=4 emitted=36/40 received=36 loss=100permille rssi=-35 [BLACKOUT]
+Aug 02 14:13:34 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 14:13:34 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#74 probe  qdb=20 emitted=77/80 received=76 loss=50permille rssi=-35 [BLACKOUT]
+Aug 02 14:13:39 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 14:13:39 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#75 probe  qdb=36 emitted=40/40 received=40 loss=0permille rssi=-31
+Aug 02 14:13:43 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 14:13:43 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#76 probe  qdb=52 emitted=41/40 received=41 loss=0permille rssi=-26
+Aug 02 14:13:48 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 14:13:48 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#77 probe  qdb=68 emitted=40/40 received=40 loss=0permille rssi=-22
+Aug 02 14:13:52 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 14:13:52 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#78 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-15
+Aug 02 14:13:57 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:13:57 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#79 probe  qdb=100 emitted=41/40 received=41 loss=0permille rssi=-13
+Aug 02 14:14:02 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:14:02 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#80 probe  qdb=108 emitted=40/40 received=40 loss=0permille rssi=-13
+Aug 02 14:14:22 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:14:22 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#81 VERIFY qdb=108 emitted=199/200 received=199 loss=5permille rssi=-13 [BLACKOUT]
+Aug 02 14:14:22 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: DONE placement=108 qdb fp=0x01
+Aug 02 14:14:22 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:14:30 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: START mcs=0
+Aug 02 14:14:30 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 14:14:34 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 14:14:34 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#82 probe  qdb=4 emitted=40/40 received=40 loss=0permille rssi=-35
+Aug 02 14:14:39 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 14:14:39 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#83 probe  qdb=20 emitted=41/40 received=41 loss=0permille rssi=-35
+Aug 02 14:14:43 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 14:14:43 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#84 probe  qdb=36 emitted=41/40 received=41 loss=0permille rssi=-31
+Aug 02 14:14:48 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 14:14:48 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#85 probe  qdb=52 emitted=41/40 received=41 loss=0permille rssi=-26
+Aug 02 14:14:53 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 14:14:53 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#86 probe  qdb=68 emitted=41/40 received=41 loss=0permille rssi=-22
+Aug 02 14:14:57 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 14:14:57 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#87 probe  qdb=84 emitted=40/40 received=40 loss=0permille rssi=-15
+Aug 02 14:15:02 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:15:02 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#88 probe  qdb=100 emitted=41/40 received=41 loss=0permille rssi=-13
+Aug 02 14:15:06 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:15:06 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#89 probe  qdb=108 emitted=40/40 received=40 loss=0permille rssi=-13
+Aug 02 14:15:27 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:15:27 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#90 VERIFY qdb=108 emitted=198/200 received=198 loss=10permille rssi=-13 [BLACKOUT]
+Aug 02 14:15:27 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: DONE placement=108 qdb fp=0xb6
+Aug 02 14:15:27 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:15:33 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: START mcs=0
+Aug 02 14:15:33 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 14:15:38 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 14:15:38 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#91 probe  qdb=4 emitted=35/40 received=35 loss=125permille rssi=-35 [BLACKOUT]
+Aug 02 14:15:42 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 14:15:42 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#92 probe  qdb=20 emitted=40/40 received=40 loss=0permille rssi=-35
+Aug 02 14:15:47 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 14:15:47 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#93 probe  qdb=36 emitted=41/40 received=41 loss=0permille rssi=-31
+Aug 02 14:15:52 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 14:15:52 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#94 probe  qdb=52 emitted=41/40 received=41 loss=0permille rssi=-26
+Aug 02 14:16:00 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 14:16:00 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#95 probe  qdb=68 emitted=81/80 received=80 loss=12permille rssi=-22
+Aug 02 14:16:05 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 14:16:05 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#96 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-15
+Aug 02 14:16:09 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:16:09 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#97 probe  qdb=100 emitted=41/40 received=41 loss=0permille rssi=-13
+Aug 02 14:16:14 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:16:14 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#98 probe  qdb=108 emitted=41/40 received=41 loss=0permille rssi=-13
+Aug 02 14:16:35 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 14:16:35 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: dwell#99 VERIFY qdb=108 emitted=198/200 received=198 loss=10permille rssi=-13 [BLACKOUT]
+Aug 02 14:16:35 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: uplink-calib: DONE placement=108 qdb fp=0xfe
+Aug 02 14:16:35 snokvist-NucBox-M6-Ultra waybeam-link[1473259]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)

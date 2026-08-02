@@ -51,3 +51,32 @@ default — so every §3.16 packet here is keyed off the **announced token**
 - Remaining: P1 (craft-calibrating + CSA-active interlocks, mid-run cancels),
   P2 guard-cost trace, P3 ×10, P4 blacked-out floor, P6 failure injection,
   P7 `start_both`, P8 range, P9 soak.
+
+## P3 — ten consecutive §10.7 runs (Pass 130 sweep)
+
+`tools/hw/p3_soak.sh`, evidence in `p3-soak/`.
+
+| metric | result | gate |
+|---|---|---|
+| completed | **10/10** | 10/10 |
+| placement spread | **0 qdb** (all 108) | <= 1 step (16 qdb) |
+| duration | 57-66 s, mean 61 | — |
+| placement loss | 5-15permille | <= loss_ok 15 |
+| probe/verify dwells | 80 / 10 — exactly 8 probes + 1 verify per run | — |
+| aborts, liveness losses, write failures | **0** | 0 |
+| radio after each run | 27.00 dBm every time | restored |
+
+**Caveat that matters more than the numbers.** Every run placed at `max_qdb`,
+because at ~1 m the link is clean at full power and no loss wall exists to find.
+So P3 demonstrates the mechanism is repeatable — same answer, same duration,
+same dwell count, ten times — but it does **not** demonstrate repeatability of a
+*wall-finding* placement, because the answer is pinned at the ceiling. A spread
+of 0 is partly an artifact of that. P3 must be re-run at 2-10 m before the
+"placement spread <= one step" gate means what it is meant to mean.
+
+**Observation worth carrying to P8.** `placement_rssi` stepped -28 -> -18 -> -13
+between runs 6 and 8 at unchanged commanded power, while the cumulative
+`quality_rssi` stayed near -25. A 15 dB swing in the dwell mean with no
+commanded change is either bench movement or receiver AGC, and it is the kind of
+drift that decides whether a placement measured once stays valid. Worth watching
+during the soak (P9).
