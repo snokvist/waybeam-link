@@ -135,3 +135,42 @@ The craft had no IP route at 10 m, so its §10.6 downlink sweep ran the
 semantics — the same defect. It needs one re-run at 10 m with the craft on the
 Pass 133 build (now installed). The **uplink** result above is unaffected: the
 craft plays no `PowerSeek` role in §10.7, it only counts probes.
+
+## Final 10 m run — both ends on Pass 133
+
+Craft re-flashed with the Pass 133 binary, moved back to 10 m (craft sees the
+uplink at −52 dBm; ground sees the craft at −62 dBm — a slightly worse spot
+than the earlier −58 dBm run). `start_both`, ~360 s. **Both directions swept
+the full range.**
+
+Uplink, artifact `fp=110` (`uplink-artifact-10m-final.json`):
+
+| rung | GI | dBm | rssi | loss‰ | overload ceiling |
+|---|---|---:|---:|---:|---|
+| 0 | lgi | 27.0 | −53 | 0 | none |
+| 1 | lgi | 27.0 | −54 | 5 | none |
+| 2 | sgi | 27.0 | −52 | 0 | none |
+| 3 | sgi | 23.0 | −56 | 0 | 27.0 |
+| 4 | sgi | 17.0 | −56 | 5 | 25.0 |
+| 5 | sgi | 13.0 | −60 | 10 | 21.0 |
+| 6 | sgi | 13.0 | −60 | 0 | 21.0 |
+| 7 | sgi | 13.0 | −61 | 5 | 21.0 |
+
+Downlink (§10.6 on the craft, now a full sweep): `calib_state=done`,
+`fp=43` — replaces `fp=9`, which the pre-Pass-133 binary produced with
+early-terminate semantics.
+
+### Reproducibility of the shape
+
+Two independent 10 m runs at slightly different positions:
+
+```
+run A (rssi_best -58):  27 27 27 25 17 17 13 13  dBm
+run B (rssi_best -62):  27 27 27 23 17 13 13 13  dBm
+```
+
+Same shape — flat 27.0 at MCS0-2, monotone decline to 13.0 at the top rungs,
+14 dB total backoff — with absolute values shifting a step or two with
+geometry. That is the expected behaviour for a PA-saturation limit modulated by
+link margin, and it is the argument for calibrating at the intended operating
+range rather than on a desk.
