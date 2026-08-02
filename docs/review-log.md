@@ -4926,3 +4926,82 @@ blackout, mismatch, restart, and retune; the combined Hub action end to end
 including uplink-failure-stops-sequence; plus calibrated-vs-default/manual range
 evidence for report delivery, NACK recovery, blackouts, RSSI, and uplink packet
 loss.
+
+## Pass 126 — §10.7 defects found by adversarial review (2026-08-02)
+
+Three CRITICALs against the Pass 125 implementation, each reproduced by an
+executed probe rather than by reading. All three lived in `core/` — the part
+that was best unit-tested and therefore most trusted. Two of the three produced
+a **false success**, which is worse than a crash: nothing downstream inspects a
+`done`.
+
+**C1 — the blackout fallback keyed on the wrong clock.** `UplinkCalibrator`
+ended a stalled dwell only when `received_ == 0`. A *partial* blackout — some
+epochs land, the uplink then dies mid-dwell — leaves `received_ > 0` with the
+craft's anchors frozen short of target, so the dwell never ended: reproduced as
+`STILL RUNNING after dt=200900 ms, dwell 1/40, qdb=4`, i.e. wedged at `min_qdb`
+for the full 600 s hard cap. That is the commonest shape of a real floor, so the
+§10.6 floor rule was unreachable in precisely the scenario Pass 125 added it
+for. The condition is now `emitted_` falling short of the epoch target, measured
+against the ground's own `Reporter::epoch()` delta. §10.7 amended to state the
+clock explicitly.
+
+Fixing it exposed a second-order error: the local-epoch anchor was taken at
+`begin_dwell`, i.e. *before* the settle window, while `emitted_` only starts
+accumulating after it. The ground clock therefore ran ahead by `settle_ms`
+worth of epochs and, once the fallback was reachable, would have tripped it on
+a perfectly healthy dwell. The anchor is now armed at the first post-settle
+tick, so both clocks start together.
+
+**C2 — `verify` had no failure outcome.** `PowerSeek::verify_` returns `kDone`
+when the descent budget or the floor is exhausted, even with loss above
+`loss_bad_milli`. Reproduced from the ladder clean@4 / clean@20 / bad@36:
+`state=2(kDone) placement qdb=4 loss=995 rssi=-90 last_clean=20` — a placement
+at 995‰ recorded *while a clean probe 16 qdb higher was on record*. For §10.6
+that is law and stays (`the artifact never lies`; a craft artifact is a record
+the operator reads, and the report clock aborts a dead downlink long before
+this). For §10.7 it is a false success: the ground artifact auto-applies at the
+next boot and its terminal state gates the sequencer, so `done` would persist an
+unusable power *and* start the §11.7 campaign across a dead uplink — defeating
+the order law through a success state, which no interlock inspects because every
+interlock is written against `running`/`failed`. Resolved as a §10.7 policy on
+the shared seek's output (`verify_failed`, nothing persisted, power restored),
+**not** as a change to `PowerSeek` — the operator's finding located it in
+`verify_`, but applying it there would have broken the §10.6 rule quoted above.
+§10.7 amended.
+
+**C3 — the artifact failed its own fingerprint on reload.** `first_bad_qdb_`
+survived `UplinkCalibrator::start()`, so a second run in one process published
+the *first* run's bracket alongside `has_first_bad=false`. The writer serializes
+that as JSON `null` and the loader reads it back as 0, so the rehash disagreed:
+`write fp=0x7f -> load: artifact fingerprint mismatch`. Operator sees DONE, next
+boot silently discards the measurement. Fixed at both ends — reset on `start()`,
+and `canonical_bytes` hashes 0 for an absent bracket so the form round-trips
+regardless of in-memory residue.
+
+**D3 — `uplink_calib_matches()` had zero call sites.** Fully unit-tested,
+exported, never called: the resolver checked only the *local* adapter identity,
+so a §10.7 artifact would apply against the wrong craft, the wrong craft RX
+chain, or the wrong channel — while the API reported `stale:false` asserting a
+match nothing had tested. The cause was structural rather than an oversight: the
+resolver was declared with the config tier, above `active_selection`,
+`quality_gate` and `operating_chan`, so the craft half of the pairing was not in
+scope. The resolve block now sits after that tuple and checks it in full.
+
+That move exposed the other half of the same defect. Applicability is a
+*function* of the pairing tuple, and every existing restore call site fires
+either before the tuple is knowable (startup: no craft selected, no §3.16
+feedback yet) or on an event unrelated to it (§10.5 unlatch, calibration exit).
+A valid artifact loaded at boot would therefore never have been applied at all.
+The service loop now re-resolves when the tuple moves — craft selection, first
+feedback, post-CSA channel — and never while the calibrator owns the actuator.
+The startup log distinguishes "awaiting craft" from "STALE": at boot the pairing
+cannot be evaluated, and reporting that as a mismatch sends people hunting for
+one that does not exist.
+
+**Method note.** Six defects were self-found during Pass 125, every one by
+*doing the next step* rather than by inspection — which is why review was
+expected to find little. It found three CRITICALs, because the reviewer executed
+probe programs against the state machines instead of reading them. For state
+machines, reproduction beats reading, and self-testing stops at the cases the
+author already thought of.

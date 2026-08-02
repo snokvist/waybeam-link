@@ -2311,11 +2311,32 @@ implementation that can drop a report between build and injection (no uplink
 adapter, full TX queue) must increment the epoch at injection, or `emitted`
 over-reports and the seek sees phantom loss.
 
-When `received == 0` the craft's anchors cannot advance; that dwell scores
-`loss = 1000‰` against the ground's own local `Reporter::epoch()` delta, and
-contributes no RSSI sample. Cap-wall confirmation matches §10.6; the §10.6
-blank-dwell hold (zero samples ⇒ hold and let the clocks arbitrate) has no
-uplink meaning and is not inherited.
+Whenever the craft's anchors do **not span the dwell** — `emitted` short of the
+epoch target when the ground's own local `Reporter::epoch()` delta has reached
+it — the dwell scores `loss = 1000‰` against that local delta and contributes no
+RSSI sample. The condition is that `emitted` fell short, **not** that `received`
+is zero: a *partial* blackout, where some epochs land and the uplink then dies
+mid-dwell, leaves `received > 0` with the anchors frozen short of target, and it
+is the commonest shape of a real floor. Gating the fallback on `received == 0`
+never ends that dwell, which strands the run at `min_qdb` until the hard cap and
+makes the floor rule unreachable in exactly the case it exists for. Cap-wall
+confirmation matches §10.6; the §10.6 blank-dwell hold (zero samples ⇒ hold and
+let the clocks arbitrate) has no uplink meaning and is not inherited.
+
+**A still-failing verify is a §10.7 FAILURE, not a placement (Pass 125
+amendment).** §10.6 records a placement whose verify never reached
+`loss_ok_milli` once the descent budget or the floor is exhausted — "the
+artifact never lies" — because a craft artifact is a *record the operator
+reads*, and §10.6's own report clock aborts the run long before a truly dead
+downlink could be recorded. Neither holds on the ground. The §10.7 artifact
+**auto-applies** to the live uplink at the next boot, and its terminal state
+**gates the sequencer's downlink phase**. Reaching `done` with a placement that
+just measured unusable would therefore persist an unusable power *and* start
+the §11.7 campaign across a dead uplink — defeating the order law through a
+**success** state that no interlock inspects, since every interlock is written
+against `running` and `failed`. §10.7 therefore fails with reason
+`verify_failed`, persists nothing, and restores. The §10.6 rule is unchanged;
+this is a §10.7 policy on the shared seek's output, not a change to the seek.
 
 **Actuator ownership and config carve-out.** Config load rejects `power_map` on
 any `role:"rx"` adapter **regardless of node role**, and accepts it on a
