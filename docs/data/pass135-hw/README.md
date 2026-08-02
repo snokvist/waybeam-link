@@ -86,3 +86,85 @@ the §11.7 `0x0A` tier — that is the workflow the tier exists for.
 
 Code-level only: the clamp of a preset above `max_power_qdb` (unit-tested and
 logged; never exercised on device, since all deployed presets are ≤ ceiling).
+
+---
+
+# Pass 135 §11.7 `0x0A` TX_POWER — device verification (2026-08-02)
+
+Run after the calibration above, so the craft holds `fp=26` and the ground
+`fp=239`. Every row below was issued as the menu row sends it.
+
+## Correction to how the tier is described
+
+Earlier wording said a tier "shifts the whole tapered curve". That is true of
+the **calibration sweep** ceiling (`rung_max_qdb()`, tapered by the §10.2
+level). The **runtime resolve** is a plain scalar clamp —
+`resolve_power_qdb()` ends in `v = min(v, max_power_qdb)` — so a tier is a
+flat ceiling applied to the already-shaped calibrated value. Measured against
+the live `fp=26` curve:
+
+```
+tier            MCS0  MCS1  MCS2  MCS3  MCS4  MCS5  MCS6  MCS7
+4 high (27dBm)   27    27    25    25    19    17    17    17   <- the curve
+2 med  (21dBm)   21    21    21    21    19    17    17    17
+0 low  (15dBm)   15    15    15    15    15    15    15    15
+
+§10.5 latch at 19 dBm, for contrast:
+                 19    19    19    19    19    19    19    19
+```
+
+It bites the LOW MCS rungs first — the ones calibration put highest — and
+leaves the high-order rungs on their measured backoff until the tier drops
+below them. The property that matters survives intact and is the whole reason
+this is not the §10.5 latch: **a tier can never raise a rung above its
+calibrated placement.** The latch at 19 dBm *raises* MCS5–7 from 17 to 19.
+
+## Craft actuation — device-confirmed
+
+At the live rung (profile 5, calibrated placement 17.0 dBm), only tier 0 is
+below it, and only tier 0 moved anything:
+
+```
+tier 4 -> {"ok":true}  17.00 dBm   ceiling_qdb 108
+tier 2 -> {"ok":true}  17.00 dBm   ceiling_qdb  84
+tier 0 -> {"ok":true}  15.00 dBm   ceiling_qdb  60
+```
+
+Note `tier 4` sets a **27 dBm** ceiling and the radio stayed at 17.00 — the
+tier clamps, it does not pull a rung up to its ceiling.
+
+Pinned to rung 0 (`POST /api/v1/link/profile {"min":0,"max":0}`) to exercise
+the full range, then back up — no hysteresis in either direction:
+
+```
+tier 4 -> 27.00 dBm    tier 2 -> 21.00 dBm    tier 0 -> 15.00 dBm
+back up:               tier 2 -> 21.00 dBm    tier 4 -> 27.00 dBm
+```
+
+`tx_power_tier_effective` reads **true** on the craft now, where it read false
+before the craft had an artifact — the field tracks reality rather than being
+set once.
+
+## Preset clamp — device-confirmed
+
+Ground loaded with `power_presets_qdb: [60,76,84,92,200]` against
+`max_power_qdb: 108`. 200 qdb is 50 dBm; if it ever reached `iw` the clamp
+would be a lie.
+
+```
+config: adapter eu-uplink: power preset 200 qdb clamped to max_power_qdb 108 (§10.3)
+GET  -> {"tier":-1,"presets_qdb":[60,76,84,92,108],...}   # clamped, not 200
+tier 4 -> iw 27.00 dBm                                     # not 50
+grep '5000 mBm|200 qdb' over the whole run -> no actuator line
+```
+
+Config restored byte-identical afterwards; the restored process logs no clamp.
+
+## Known gap, deliberately not closed
+
+There is **no "clear tier" verb.** `{"auto":true}` clears the §10.5 latch, but
+a tier only returns to `-1` on a waybeam-link restart, which re-reads
+`max_power_qdb` from config. After any tier selection the index therefore
+reads `0..4` rather than `-1` even when the selected value equals the boot
+ceiling (hardware-identical, but not identical to report). Raised rather than
+silently adding a verb.
