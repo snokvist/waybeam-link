@@ -870,14 +870,29 @@ timer. This follows the existing §7.2 paced-video ownership law: observability
 may add a few bytes inside an active TX opportunity, never manufacture another
 one.
 
-### 3.16 UPLINK_QUALITY packet (type `0xF`) — 35 bytes (Pass 125)
+### 3.16 UPLINK_QUALITY packet (type `0xF`) — 31 bytes (Pass 131)
 
-Craft→report-latched-ground **authenticated actuator feedback** for the
-ground-uplink calibration in §10.7. This is deliberately a separate packet,
-not another §3.15 append: SELECTOR_STATE is explicitly unauthenticated and
-advisory, while this feedback moves ground TX power. It also preserves the
-existing selector-state shape for older receivers; they ignore unknown type
-`0xF` without losing selector observability.
+Craft→report-latched-ground **counter feedback** for the ground-uplink
+calibration in §10.7: how many of that ground's LINK_REPORTs the craft
+accepted, at what receive RSSI, and on what delivered rung.
+
+It is deliberately a separate packet rather than another §3.15 append, for two
+reasons that both survive the Pass 131 de-authentication below. **Growing
+SELECTOR_STATE costs old receivers the whole packet**: §3.15a's extension
+pattern is a flag-gated append, and a pre-extension receiver validates the
+exact length, so it drops a longer summary entire — losing profile/MCS, lockout
+state and loss window along with the field it did not know about. A distinct
+type `0xF` is ignored by unknown-type receivers at no cost at all (§3.15).
+And **these counters are addressed, not broadcast**: SELECTOR_STATE carries
+`destination = 0` and goes to every receiver, whereas the counters are scoped
+to exactly one reporter tuple and mean nothing to a node that does not hold
+the latch.
+
+**Pass 131 removes the `quality_mac` field and with it the whole key
+apparatus.** The packet is now unauthenticated, like every other §3 packet
+except CSA and VEHICLE_CMD. See the trust paragraph at the end of this section
+for why that is the correct level, and §10.7 for what replaces the authority
+inference the MAC used to carry.
 
 | off | size | field | notes |
 |---|---:|---|---|
@@ -889,7 +904,6 @@ existing selector-state shape for older receivers; they ignore unknown type
 | 25 | 4 | `rssi_sum_dbm` | two's-complement i32 wire image of the cumulative craft RX-metadata RSSI sum; accumulation is modulo 2^32 |
 | 29 | 1 | `craft_adapter_fingerprint` | CRC-8/DVB-S2 of the craft RX/TX adapter's canonical calibration identity |
 | 30 | 1 | `last_rx_mcs` | delivered HT MCS of the most recently accepted report (`AirRxMeta.rx_mcs`); `0xFF` = unknown — no radiotap MCS field, a non-HT rate, or no report yet |
-| 31 | 4 | `quality_mac` | `trunc(HMAC(csa_psk, bytes[0..30]), 4)` — HMAC-SHA-256, leftmost 4 bytes, big-endian |
 
 The craft resets `last_report_epoch`, `reports_received`, `rssi_sum_dbm`, and
 `last_rx_mcs` when its accepted reporter `(originator, session)` changes. Every
@@ -901,12 +915,13 @@ Counter arithmetic is wrap-aware; a calibrator run is far shorter than either
 counter's wrap interval.
 
 `last_rx_mcs` is the **commanded-versus-delivered rung cross-check**, the rung
-analogue of §10.6's commanded-qdb-versus-delivered-RSSI check. v1's uplink
-has one operating point, so it is observability only; it exists on the wire from
-the first revision because the packet is exact-length with no spare byte and no
-flags field, so adding it later would be a wire break. It is what makes a driver
-or chip that silently ignores a commanded rate a *detected* fault rather than an
-unexplained loss wall. Surfaced as §15.3 `uplink_quality_rx_mcs`.
+analogue of §10.6's commanded-qdb-versus-delivered-RSSI check. Pass 125 shipped
+it as observability against a single-rung uplink; since Pass 131 sweeps all
+eight rungs it is load-bearing, because the sweep commands a rung per rung and
+this is the only evidence the radio honoured it. It is what makes a driver or
+chip that silently ignores a commanded rate a *detected* fault rather than an
+unexplained loss wall — a failure this fleet has seen. Surfaced as §15.3
+`uplink_quality_rx_mcs`.
 
 The packet becomes due at **2 Hz** and follows the §3.15 guard-cost boundary
 exactly: emit it immediately before live DATA already going on air, coalesce a
@@ -916,12 +931,23 @@ or an active run abort.
 
 The ground accepts it only when all of the following hold: exact length and
 field validity; common source `(originator, session)` equals the craft this
-ground has currently selected as its DATA source; both target fields equal the
-local ground `(originator, session)`; the MAC verifies with the existing
-`csa_psk`; and the cumulative state is duplicate-or-new under wrap-aware
-ordering. A target-tuple change starts a fresh receive domain. Wrong-key,
-wrong-target, stale-session, and backward-moving packets are dropped and
+ground has currently selected as its DATA source; and both target fields equal
+the local ground `(originator, session)`. A source or target tuple change starts
+a fresh receive domain. Wrong-target and stale-session packets are dropped and
 counted. This packet is not a command and confers no claim.
+
+**A backward cumulative counter is a domain reset, not a replay (Pass 131).**
+The craft zeroes these counters whenever *its* accepted reporter tuple changes,
+which happens without the craft's own `(originator, session)` moving — so the
+source-domain check above cannot see it, and the ground observes only that the
+counters went backwards. While the packet was authenticated that reading was
+ambiguous (a replayed packet looks the same), and resolving it needed a
+sustained-backward-run heuristic that wedged the gate at 519 consecutive
+rejects when it guessed wrong. Unauthenticated, the ambiguity is gone: there is
+no replay attacker to distinguish from, so backward means reset and the ground
+rebaselines on the spot, reporting the discontinuity to §10.7 so a dwell
+spanning it is restarted rather than scored across two domains. Comparison stays
+wrap-aware — that is how backward is told from forward, not a security control.
 
 **Two clocks, not one.** An accepted packet always refreshes **feedback
 liveness**: it is evidence the craft is alive, still targeting this ground, and
@@ -933,10 +959,33 @@ delivering**, never an absence of evidence. §10.7 consumes the two separately:
 liveness loss is a craft/downlink failure and ends the run; stalled counters
 under live feedback are a 1000‰ loss observation that drives the seek.
 
-Because the craft addresses quality only to its accepted §3.5 reporter, a
-valid-MAC packet naming a ground's own `(originator, session)` is itself proof
-that this ground holds the craft's report latch. That, not a §11.4 CSA binding,
-is the authority §10.7 requires — see §10.7.
+**Trust level, stated rather than assumed (Pass 131).** This packet is
+unauthenticated because the thing it feeds already is. §10.6 moves the *craft's*
+TX power actuator on plain unauthenticated LINK_REPORTs; §10.7 moves the
+ground's own uplink power on these counters. Requiring a MAC on one and not the
+other was an asymmetry with no threat behind it. And on the fleet's actual
+configuration it bought less than it appeared to: with no `csa_psk` configured
+the §11.4a key is the *announced token*, which is broadcast so a spectator can
+pair, so the MAC authenticated provenance against a passive third party and not
+against anyone who had heard an ANNOUNCE. What it cost was real — a
+per-emission/per-accept key resolver, a counter-domain resync gate, and a
+backward-threshold detector, which between them produced most of the defects in
+Passes 126–128.
+
+The residual exposure is bounded by construction and unchanged from what Pass
+127 already documented for announced mode: a forged quality packet can only
+mis-place the **ground's own uplink power** inside `[min_qdb, max_qdb]`, only
+while an operator-initiated §10.7 run is in flight, and never above that
+adapter's §10.3 `max_power_qdb` ceiling. It moves nothing on the craft and
+confers no claim.
+
+**What the MAC used to carry, and what replaces it.** Pass 125 inferred
+authority from the packet: a valid-MAC packet naming a ground's own
+`(originator, session)` was proof that ground held the craft's §3.5 report
+latch. That inference dies with the MAC and is **not** silently dropped — §10.7
+now reads the latch holder directly from §3.15a `report_latch_holder`, which
+already ships on the packet that exists for craft→ground advisory observability.
+Same trust level, same craft-owned source, no new wire.
 
 ---
 
@@ -2202,66 +2251,82 @@ move to devourer per-packet TX power unchanged — per-packet power is a
 finer actuator for the same per-rung maxima, and per-rate diffs absorb
 chip-cal skew.
 
-### 10.7 Ground-uplink TX calibration symmetry (Pass 125)
+### 10.7 Ground-uplink TX calibration symmetry (Pass 125; 8 rungs Pass 131)
 
-§10.6 calibrates the **craft downlink**. This section calibrates the ground's
-single designated `role:"tx"` uplink adapter against what the craft actually
-receives. The aim is the same maximum clean delivered power, but the uplink runs
-at its **configured uplink operating point** — v1: a single MCS0/LGI/HT20 rung —
-and on sparse normal LINK_REPORT traffic. It therefore produces one placement
-per configured rung, v1 exactly one, and adds no synthetic probe traffic.
+§10.6 calibrates the **craft downlink** across all eight MCS rungs. This section
+does the same for the ground's single designated `role:"tx"` uplink adapter,
+measured against what the craft actually receives. Same goal — the maximum clean
+delivered power per rung — and the same monotone sweep; what differs is that the
+evidence is sparse normal LINK_REPORT traffic rather than live video, so dwells
+are gated on report-epoch counts. It adds no synthetic probe traffic.
 
-**The uplink rung is configured, not inherited (Pass 125).** Before this
-section, an rx-node never called `set_tx_mode` at all: its uplink rung was the
-`TxRate` struct default, which happens to be MCS0/LGI/HT20. A calibrated
-placement must not rest on a default that no one asserted — the artifact records
-the rung it was measured at, and `last_rx_mcs` cross-checks it, so the rung must
-be a value the node commits. An rx-node with a designated uplink therefore reads
-`air.uplink_rate` (seeds `{mcs: 0, sgi: false, bw: 20}`) and commits it through
-the same `set_tx_mode` seam the tx-node uses, once at startup and after every
-retune that can reset it. Behaviour at the seeds is byte-identical to today; what
-changes is that the operating point is now asserted and observable, and the
-future multi-rung uplink widens a config value rather than adding a mechanism.
+**Eight rungs, not one (Pass 131).** Pass 125 calibrated only the single
+configured uplink rung and left the other seven to a future pass. That was the
+wrong unit of work: the sweep machinery is per-rung either way, `placements` was
+already a list, and a one-entry artifact meant the shadow-the-downlink uplink
+policy could not be enabled later without re-running commissioning at every
+site. §10.7 therefore sweeps rungs 0..7 in order and emits eight placements, the
+same shape §10.6 produces for the downlink. One operator action, both
+directions, all sixteen placements.
+
+Rung *i* resolves its `(mcs, guard_interval)` through the **§9.3 profile
+table**, not through a private list, so a calibrated placement's rate identity
+is one the uplink can actually be commanded to — long GI on rungs 0/1 and short
+on 2..7, matching the authored table. `air.uplink_rate` remains the *operating*
+point; the artifact entry that matches it is what applies at boot.
+
+**The uplink rung is committed, not inherited (Pass 125).** Before this section,
+an rx-node never called `set_tx_mode` at all: its uplink rung was the `TxRate`
+struct default, which happens to be MCS0/LGI/HT20. A calibrated placement must
+not rest on a default that no one asserted — the artifact records the rung it was
+measured at, and `last_rx_mcs` cross-checks it. An rx-node with a designated
+uplink therefore reads `air.uplink_rate` (seeds `{mcs: 0, sgi: false, bw: 20}`)
+and commits it through the same `set_tx_mode` seam the tx-node uses, once at
+startup and after every retune that can reset it.
+
+**The run now moves the rate as well as the power, and both must be restored
+(Pass 131).** Sweeping eight rungs means commanding `set_tx_mode` per rung, so
+the uplink's operating point is a *second* borrowed actuator. A run that exits
+at rung 5 — abort, failure, liveness loss, process shutdown — must not leave the
+uplink transmitting at MCS5. Rate and power are returned together on the single
+restore edge, **rate first**, mirroring §10.6's R4 ordering rule that the
+actuator which gates the other goes first. This is the same stranded-actuator
+hazard Passes 125 and 126 hit three times on power alone; it does not get a
+second convergence path.
+
+**The sweep is lockout-safe, which is why it may black out the return path.**
+Probing high rungs at low power kills report delivery for whole dwells. That
+demotes the craft on §9's report-timeout rule to `max(min_profile,
+floor_profile)`, and §9.2 excludes stale-report transitions from lockout
+strikes, so no rung is charged. Nor can a partial blackout charge one: the loss
+values *inside* a LINK_REPORT are the ground's measurement of the **downlink**,
+which the ground's own TX power does not affect. The craft parks low for the
+dwell and climbs back. The cost is degraded ARQ during the run, not selector
+state damage.
 
 **Authority and prerequisites.** Calibration is ground-local and starts only
 through `POST /api/v1/calibration` on the ground control server (deployment
-port `:8092`). It requires exactly one designated uplink adapter, a **resolvable
-§11.4a key** (below), live DATA from the selected craft, and fresh authenticated
-§3.16 feedback naming this ground's exact `(originator, session)`.
+port `:8092`). It requires exactly one designated uplink adapter, live DATA from
+the selected craft, fresh §3.16 feedback naming this ground's exact
+`(originator, session)`, and — new in Pass 131 — that the craft's §3.15a
+`report_latch_holder` **equals this ground's originator**.
 
-**§3.16 keying follows §11.4a provenance, not a configured secret (Pass 127
-amendment).** §3.16 is authenticated, and its key is resolved by the *same* rule
-`/csa` and §11.7 already use: the configured `csa_psk` when there is one, and
-otherwise the craft's per-boot **announced token**. Both ends resolve it
-continuously — the craft per emission, the ground per accepted packet, keyed on
-the *selected* craft — because in announced mode the token is per-craft and the
-§11.4a Pass 113 pairing gate replaces it at runtime. Latching the key at startup
-made §10.7 unreachable on any deployment that never sets `csa_psk`, which is the
-fleet default: the craft's `build()` returned `nullopt` and emitted nothing, the
-ground's gate refused every packet, and the only symptom was a permanent "no
-fresh feedback" on the start prerequisite. A key change **invalidates the
-counter baseline** — it is a different authenticated peer, and telescoping a
-delta across two key epochs would divide by a number that does not mean what it
-says.
+**Authority is the §3.5 report latch, read from §3.15a (Pass 131).** Pass 125
+inferred the latch from the feedback packet itself, on the strength of its MAC:
+the craft addresses quality only to its accepted reporter, so a valid-MAC packet
+naming this ground proved this ground held the latch. Pass 131 removes the MAC
+(§3.16), so that inference is gone and the latch must be read rather than
+deduced. §3.15a already carries it, craft-owned, on the packet that exists for
+craft→ground advisory observability — so this costs no new wire and changes no
+trust level. It is also *better* evidence: `report_latch_holder` is the gate's
+own state, whereas the old inference was a property of a packet.
 
-This inherits announced mode's trust model rather than widening it: the
-announced token is public by construction (§11.4a — it is broadcast so a
-spectator can pair), so in announced mode §3.16 authenticates *provenance
-against a passive third party*, not against an attacker who has heard the
-ANNOUNCE. That is already true of the CSA campaign and every VEHICLE_CMD, which
-move far more than one node's own TX power. The residual §10.7 exposure is
-bounded by construction: a forged quality packet can only mis-place the
-**ground's own uplink power** within `[min_qdb, max_qdb]`, only while an
-operator-initiated run is in flight, and never above the adapter's
-`max_power_qdb` ceiling (§10.3). Deployments that need spoof resistance here
-configure `csa_psk` and get secret mode, unchanged. That feedback is
-itself proof that this ground holds the craft's §3.5 report latch, which is the
-only authority §10.7 needs — a §11.4 CSA claim is **neither required nor
-sufficient**. Requiring one would make uplink calibration unavailable in any
-deployment that never changes channel, while the craft is already feeding that
-ground authenticated quality; and the §3.5 latch is single-holder by
-construction (`ReportGate`: first-latcher, silence-bounded re-latch), so two
-grounds can never calibrate against one craft. Also required: no CSA, scout,
+A §11.4 CSA claim is **neither required nor sufficient** and remains so.
+Requiring one would make uplink calibration unavailable in any deployment that
+never changes channel, while the craft is already feeding that ground quality;
+and the §3.5 latch is single-holder by construction (`ReportGate`: first-latcher,
+silence-bounded re-latch), so two grounds can never calibrate against one craft.
+Also required: no CSA, scout,
 MTU-command, §10.5 TX-power override, or other calibration in flight —
 including the **craft's**: start returns 409 when the mirrored §3.15
 `calib_state` is `running`. Conversely, while §10.7 runs the ground refuses to
@@ -2280,24 +2345,74 @@ uplink either aborts on the report clock or places against a thinning report
 stream. This is the operator-visible law behind the single bi-directional Hub
 action below.
 
-**Seek.** Extract the pure seek/verify portion of the §10.6 `Calibrator` into a
-time-injected `PowerSeek` used by both calibrators; the existing craft eight-rung
-orchestration and results must remain behaviourally unchanged **above the first
-clean probe** — the §10.6 floor rule is a deliberate change below it. The ground
-wrapper runs one seeker per configured uplink rung. Seed `seek_step_qdb=16`
-(4 dB), reuse §10.6's min/max, loss walls, `rssi_guard_dbm` backstop,
-bounded verify descents, and hard-cap rules. A probe dwell requires **40 unique report epochs** (~4 s at
-10 Hz); an ambiguous wall may extend once to **80**. Verification requires
-**200 epochs** (~20 s). The seed loss thresholds remain `loss_ok_milli=15` and
-`loss_bad_milli=50`. Expected runtime is roughly 45–75 s per rung. Counts are
-sample gates, not timers: a low report cadence takes longer rather than
-pretending missing observations were clean.
+**Seek.** Both directions share the time-injected `PowerSeek` (§10.6): one
+monotone sweep from `min_qdb`, placement at the highest clean probe, then a
+verify with a bounded step-down. §10.7 wraps it in a **rung loop** — commit the
+rung with `set_tx_mode`, sweep, verify, append the placement, advance — which is
+structurally the same loop §10.6 already runs, and deliberately so. Seed
+`seek_step_qdb=16` (4 dB); reuse §10.6's min/max, loss walls, `rssi_guard_dbm`
+backstop, bounded verify descents, and hard cap. A probe dwell requires **40
+unique report epochs**; an ambiguous wall may extend once to **80**;
+verification requires **200 epochs**. Seed loss thresholds remain
+`loss_ok_milli=15` and `loss_bad_milli=50`.
+
+Counts are **sample gates, not timers**: a low report cadence lengthens the run
+rather than pretending missing observations were clean.
+
+**Run time is met by raising the sample rate, never by lowering the sample
+count (Pass 131).** Eight rungs at eight probe steps plus a verify is
+`8 × (8 × 40 + 200) = 4160` report epochs, which at the §7.3 seed cadence of
+10 Hz is **473 s** — far past the ~2 min a commissioning step should take. The
+epoch counts cannot absorb that. At 40 samples one lost report is 25‰, which
+lands *between* `loss_ok_milli` and `loss_bad_milli` — this is precisely why the
+one-shot extension to 80 exists — and at 20 samples one lost report is 50‰,
+enough for a single unlucky report to fail a power the link was carrying. The
+gates are already at their resolution floor.
+
+For the duration of a run, therefore, the ground raises its own report cadence
+to `policy.calibration.uplink_calib_report_hz` (seed **60**) and drops
+`return.report_redundancy` to **1**. `settle_ms` seeds down from 800 to **300**
+for both directions: it was sized as TXAGC settle plus one report window, and
+the report-window term falls from 100 ms to ~17 ms. Measured budget at the
+seeds: **~11.4 s per rung, ~91 s for the uplink**, with §10.6's downlink at
+~118 s, so one bi-directional Hub action completes in roughly **3.5 minutes**.
+
+**The cadence ceiling is the craft's frame rate, and exceeding it corrupts the
+measurement.** §7.2 anchors LINK_REPORT on the craft's post-EOB quiet gap, and
+one gap opens per *video frame*, so a report rate above the frame rate has no
+gap to land in. Those reports are not lost — §7.2 degrades them to §7.1
+opportunistic return, which has no timing contract and a different delivery
+probability. §10.7 would then measure that transport difference **as uplink
+loss** and place TX power against it. `uplink_calib_report_hz` MUST NOT exceed
+the craft's committed fps. Lowering the craft's bitrate does not raise this
+ceiling — gaps open per frame, not per byte — though it does widen each gap and
+is worth having for that reason (§7.2 crossover).
+
+`hard_cap_ms` is unchanged and remains a **whole-run** bound for both
+directions: at the Pass 131 seeds it bounds a 91 s run with over 6× margin, and
+even worst-case ambiguous extensions plus full verify descents stay near 220 s.
+A wedged dwell is not what a cap protects against — that was the Pass 126 C1
+defect, and it is fixed by the local-epoch fallback below.
+
+The §9 cost of the raised cadence is stated rather than assumed: the selector's
+raw loss window shrinks from 100 ms to ~17 ms, so `loss_min_uniq` will often go
+unmet and the craft mostly **holds** (§9.1 rule 2 — an under-filled window
+changes nothing). Pass 110 removed early reports for exactly this reason, so
+this is a bench observation to make, not a property to assert.
 
 Loss of §3.16 **liveness** for 2 s aborts — the run has lost its observer.
 Stalled counters under live feedback never abort; per §3.16 they are the seek's
-strongest floor evidence. Because the seek starts at `min_qdb`, the uplink is
-*expected* to be blacked out for the first probes; the §10.6 floor rule ascends
-through them.
+strongest floor evidence. Because every rung sweeps from `min_qdb`, the uplink
+is *expected* to be blacked out for the first probes — and at the higher rungs
+for most of them. Those steps are simply **not clean** and the sweep climbs past
+them; since Pass 130 that needs no special rule.
+
+**A counter-domain reset restarts the dwell, it does not score it.** When §3.16
+reports a rebaseline (the craft's accepted reporter tuple changed under us,
+zeroing its counters), everything accumulated so far belongs to the previous
+domain. The §10.7 loss identity is a delta between two anchors of the *same*
+domain, so mixing them would divide by a number that does not mean what it says.
+The dwell re-arms at the current power, both clocks restarting together.
 
 **Dwell loss comes from two anchors of the same packet pair.** Let `A` and `B`
 be the first and last §3.16 packets accepted inside the dwell — the settle
@@ -2340,8 +2455,8 @@ The condition is that `emitted` fell short, **not** that `received` is zero: a
 *partial* blackout, where some epochs land and the uplink then dies mid-dwell,
 leaves `received > 0` with the anchors frozen short of target, and it is the
 commonest shape of a real floor. Gating the fallback on `received == 0` never
-ends that dwell, which strands the run at `min_qdb` until the hard cap and makes
-the floor rule unreachable in exactly the case it exists for.
+ends that dwell, which strands the run at `min_qdb` until the hard cap — the
+sweep never climbs off a dead floor, which is the one thing it exists to do.
 
 **Scoring this case a flat 1000‰ is equally wrong, and is a Pass 128 bench
 correction.** `last_report_epoch` advances only for reports the craft
@@ -2380,10 +2495,10 @@ any `role:"rx"` adapter **regardless of node role**, and accepts it on a
 role, which both permitted a never-applied map on a tx-node diversity adapter
 and blocked the one adapter that can use it on an rx-node. An rx-node with more
 than one `role:"tx"` adapter remains a config error (§6.4 permits at most one
-designated uplink). The map is the full §10.2 per-MCS curve, loaded whole; v1
-**resolves** only the configured uplink rung's level-4 entry, because that is
-the only rung the uplink uses — a usage restriction, not a format one, so a
-future multi-rung uplink needs no new file format. Respect that adapter's
+designated uplink). The map is the full §10.2 per-MCS curve, loaded whole, and
+**resolves** at the `air.uplink_rate` rung's level-4 entry, because that is the
+rung the uplink transmits at; the other seven are calibrated and persisted but
+not resolved until an operating policy selects them. Respect that adapter's
 `max_power_qdb`, apply at startup, and reapply after every retune/recovery that
 resets TXAGC. An explicit `power_map` always outranks a persisted calibration
 artifact; calibration may measure and persist while a map exists, but the
@@ -2393,13 +2508,19 @@ removed.
 **Artifact and restore law.** The ground artifact is a distinct schema, not a
 degenerate craft curve. It carries schema version and timestamp; local uplink
 adapter canonical identity; selected craft `originator` and §3.16 adapter
-fingerprint; channel and bandwidth; a **rung-indexed `placements` list** — v1
-exactly one entry, each entry carrying its own `mcs`/`short_gi` plus placement
-qdb/RSSI/loss and the clean/bad bracket; and canonical CRC-8 over a pinned
-binary serialization, not JSON formatting. The list shape is v1 law precisely
-so a future multi-rung uplink adds entries rather than bumping the schema and
-migrating every deployed artifact and Hub parser. Rate identity lives in the
-entry, never in the top-level identity block. Write atomically under the
+fingerprint; channel and bandwidth; a **rung-indexed `placements` list** — eight
+entries since Pass 131, one per rung in ascending order, each carrying its own
+`mcs`/`short_gi` plus placement qdb/RSSI/loss and the clean/bad bracket; and
+canonical CRC-8 over a pinned binary serialization, not JSON formatting. The
+list shape was v1 law precisely so widening from one rung to eight would add
+entries rather than bump the schema and migrate every deployed artifact and Hub
+parser — Pass 131 spends that allowance and the schema is unchanged. A loader
+MUST accept any list length: a one-entry artifact written by a Pass 125 build
+still loads, and resolves only if `air.uplink_rate` is the rung it holds. Rate
+identity lives in the entry, never in the top-level identity block. A run
+persists only on full success — a failure at rung 5 writes nothing, rather than
+a truncated five-entry artifact that would auto-apply at the next boot as though
+it were complete. Write atomically under the
 configured calibration directory. **A write that does not land fails the run**
 (`artifact_write_failed`) rather than reporting `done` with a zero fingerprint
 (Pass 129 ruling): §10.7 is a one-time commissioning step whose entire premise
@@ -2422,10 +2543,17 @@ Pass 130 removes the failure mode that made distance *critical* — a flat botto
 step no longer stops the sweep, so being too close now costs measurement
 resolution rather than producing a wrong placement.
 
-Every exit restores, in order: explicit configured
-placement, prior matching artifact, then backend auto/default. Done applies the
-new placement; abort, process shutdown, retune conflict, and failure must never
-leave the last probe power active.
+Every exit restores **all three borrowed actuators on one edge** — the uplink
+rate, the uplink power, and the report cadence/redundancy — in that order, rate
+first (§10.6's R4 rule: the actuator that gates the other goes first). Power
+returns to its owner by precedence: §10.5 override latch, explicit configured
+placement, prior matching artifact, then backend auto/default. Rate returns to
+`air.uplink_rate`; cadence returns to `policy.report_hz` and
+`return.report_redundancy`. Done applies the new placement for the operating
+rung; abort, process shutdown, retune conflict, liveness loss, and failure must
+never leave a probe power, a probe rung, or a calibration cadence active. One
+convergence path, not a call before each return — three actuators is where a
+per-exit copy stops being reviewable.
 
 **Observability.** A `start_both` run adds `phase` to the ground response —
 `idle|uplink|downlink|done|failed` — so the operator sees which half is
@@ -3126,12 +3254,13 @@ data-path crypto, or heavy state. Threats and mitigations:
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
 | Forged/stale CACHE_ASSIGN → cache retune or cross-vehicle window | accept only the configured controller originator **and UDP source endpoint**, exact cache destination, allowlisted channel, and monotonic controller-session epoch; clear the old window only after a successful retune | 3.13, 14.3 |
 | Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung / venc preset / mode switch) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets (v1 toggles) or an encoder preset from the operator's own deployment allowlist (v2, volatile — Pass 73; persists only on a pre-live venc fallback), or an operating mode from the craft's own `modes/` set (Pass 105, volatile — reboot restores boot `active_mode`; a mode restarts venc + re-bands the §9.7 selector but touches no channel/power) — never channel or power | 3.14, 11.7 |
-| Forged UPLINK_QUALITY → unsafe ground TX-power move | dedicated exact-length packet; existing `csa_psk` HMAC over bytes 0..30; exact selected-craft source and target ground `(originator, session)`; the craft addresses only its single-holder §3.5 report latch, so a valid packet proves the receiver *is* the report authority; cumulative-counter anti-replay; liveness expiry aborts and restores power | 3.16, 10.7 |
+| Forged UPLINK_QUALITY → unsafe ground TX-power move | **accepted, and bounded rather than prevented (Pass 131).** Unauthenticated by ruling: §10.6 already moves the *craft's* power actuator on plain LINK_REPORTs, so requiring a MAC here alone was asymmetry without a threat. Exact-length, exact selected-craft source and target ground `(originator, session)`; §10.7 reads the latch holder from §3.15a rather than inferring it from the packet. Worst case is bounded by construction: the **ground's own** uplink power, inside `[min_qdb, max_qdb]`, never above §10.3 `max_power_qdb`, only during an operator-initiated run, and reverted by the liveness expiry and the restore edge. Nothing on the craft moves | 3.16, 10.7 |
 
-HMAC remains off the bandwidth-carrying DATA path. It protects the rare
-channel/command actions and the low-rate feedback that can move ground TX
-power. Key distribution (`csa_psk`) is operator-provisioned to craft + ground
-(§15); §3.16 introduces no second key or derivation.
+HMAC remains off the bandwidth-carrying DATA path, and since Pass 131 off the
+feedback path too. It protects the rare channel/command actions — CSA (§11.4)
+and VEHICLE_CMD (§11.7) — and nothing else. Key distribution (`csa_psk`) is
+operator-provisioned to craft + ground (§15) or resolved as the §11.4a
+announced token; §3.16 uses neither.
 
 ---
 
@@ -3671,7 +3800,8 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   Pass 121) seeds the calibration loop; all defaults are the
   bench-validated values: `loss_ok_milli` (15), `loss_bad_milli` (50),
   `seek_step_qdb` (16), `rssi_guard_dbm` (−6),
-  `min_qdb`/`max_qdb` (4/108), `settle_ms` (800), `probe_dwell_ms`
+  `min_qdb`/`max_qdb` (4/108), `settle_ms` (**300**, Pass 131 — was 800),
+  `probe_dwell_ms`
   (1200), `verify_dwell_ms` (2500), `report_loss_abort_ms` (3000),
   `hard_cap_ms` (600000),
   `artifact_dir` ("/etc/waybeam-link/calibration"). The Pass 120
@@ -3680,15 +3810,23 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   Dwells are short by design: the live video IS the measurement traffic
   (thousands of loss samples per second), so a dwell needs only TXAGC
   settle plus a couple of report windows — a full 8-rung run is ~2 min.
-  **§10.7 (Pass 125)** reuses this block on the ground/rx node — same walls,
-  step, min/max, settle, and `artifact_dir` (the uplink artifact is a distinct
-  filename in the same directory) — and adds only what differs because the
-  uplink measures sparse reports instead of live video: `uplink_probe_epochs`
+  **§10.7 (Pass 125; 8 rungs Pass 131)** reuses this block on the ground/rx node
+  — same walls, step, min/max, settle, and `artifact_dir` (the uplink artifact is
+  a distinct filename in the same directory) — and adds only what differs
+  because the uplink measures sparse reports instead of live video:
+  `uplink_probe_epochs`
   (40), `uplink_ambiguous_epochs` (80), `uplink_verify_epochs` (200),
-  `uplink_liveness_ms` (2000). The uplink gates are **epoch counts, not
+  `uplink_liveness_ms` (2000), `uplink_calib_report_hz` (**60**, Pass 131).
+  The uplink gates are **epoch counts, not
   milliseconds**, so a slow report cadence lengthens the run instead of
   scoring unobserved dwells as clean; `probe_dwell_ms`/`verify_dwell_ms`/
   `report_loss_abort_ms` are craft-only and unused on the ground.
+  `uplink_calib_report_hz` is the cadence the ground runs its OWN reports at for
+  the duration of a run, restored on exit — it is what turns 4160 report epochs
+  from 473 s into ~91 s without touching a single sample gate. It MUST NOT
+  exceed the craft's committed fps: above that the §7.2 quiet gap cannot absorb
+  the extra reports and they degrade to §7.1 opportunistic return, whose
+  different delivery probability §10.7 would score as uplink loss.
 - `air.uplink_rate` (ground/rx node with a designated §6.4 uplink, §10.7)
   commits the uplink operating point: `mcs` (0), `sgi` (false), `bw` (20).
   Seeds equal the pre-Pass-125 `TxRate` struct default, so committed

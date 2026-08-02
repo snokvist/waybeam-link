@@ -5224,3 +5224,121 @@ not grow differently-buggy copies" had instead grown one copy with two
 personalities. The right unification was not a richer engine but a poorer one:
 both directions genuinely are the same monotone sweep, which is what the
 operator said at the outset.
+
+## Pass 131 — eight rungs, no MAC, and a sample-rate budget (2026-08-02)
+
+Operator scope for the ground uplink, given as three instructions: build the
+eight-rung equivalent of §10.6, delete the §3.16 authentication before adding
+anything, and expose it as one Hub action. Each of the three landed on a
+different kind of question.
+
+**1. §3.16 drops the MAC. 35 → 31 bytes.**
+
+The operator's argument: LINK_REPORT is unauthenticated and §10.6 moves the
+craft's power actuator on it, so authenticating the feedback that moves the
+*ground's* power actuator — and nothing else — was asymmetry with no threat
+behind it.
+
+Reading the deployed configs made it stronger. Neither `.2.232` nor `.2.199`
+sets `csa.psk`, which selects announced mode, where the §11.4a key is the
+per-boot token **broadcast so a spectator can pair**. Pass 127's own trust note
+already conceded that this authenticates provenance against a passive third
+party, not against anyone who has heard an ANNOUNCE. So on the fleet's actual
+configuration the MAC bought very little — while costing a per-emission and
+per-accept key resolver (Pass 127), a counter-domain resync gate, and a
+backward-threshold detector that wedged at 519 consecutive rejects (Pass 126).
+Three of the most defect-dense mechanisms in the feature existed to protect a
+secret that is published.
+
+What the MAC *did* carry, and what nearly went out with it: §10.7's authority
+rule. Pass 125 inferred the report latch from the packet — a valid-MAC packet
+naming a ground's own `(originator, session)` was proof that ground held the
+latch. That inference dies with the MAC. It needed no replacement wire, because
+§3.15a already ships `report_latch_holder` and the ground already parses it into
+`link.report_latch_holder`. The start prerequisite now reads the latch instead of
+deducing it, which is also better evidence: `report_latch_holder` is the gate's
+own state, whereas the inference was a property of a packet.
+
+Two fields stay. `craft_adapter_fingerprint` is half the artifact pairing
+identity in `uplink_calib_matches()`, and dropping it re-opens the D3 defect
+Pass 126 fixed. `last_rx_mcs` stops being observability the moment the sweep
+commands a rung per rung: it is the only evidence the radio honoured the
+command, on a fleet with a history of chips that do not.
+
+The de-authentication also *simplifies* a rule rather than weakening it. A
+backward cumulative counter was ambiguous — reset or replay — and resolving it
+needed the sustained-backward heuristic that wedged. With no replay attacker to
+distinguish from, backward means reset, and the gate rebaselines on the spot.
+
+**2. Eight rungs, not one.** Pass 125 calibrated the single configured uplink
+rung and deferred the rest. That was the wrong unit of work: the sweep machinery
+is per-rung either way, `placements` was already a list, and a one-entry artifact
+meant the shadow-the-downlink policy could not be enabled later without re-running
+commissioning at every site. The list allowance Pass 125 reserved is now spent
+and the schema is unchanged.
+
+Two consequences worth naming. The run now moves the uplink **rate** as well as
+its power, so there is a second borrowed actuator and a run that exits at rung 5
+must not leave the uplink on MCS5 — the same stranded-actuator hazard Passes 125
+and 126 hit three times on power alone, at triple the surface. All three
+borrowed actuators return on one edge, rate first. And a failed run persists
+nothing rather than a truncated artifact, which would otherwise auto-apply at the
+next boot looking complete.
+
+The blackout question turned out to be already answered. Probing high rungs at
+low power kills the return path for whole dwells, which sounded like it would
+pollute the craft's §9.2 rung lockouts. It cannot: §9.2 excludes stale-report
+transitions from strikes, and the loss values *inside* a LINK_REPORT are the
+ground's measurement of the downlink, which the ground's own TX power does not
+affect. The craft parks at its safe floor for the dwell and climbs back.
+
+**3. The 120 s budget could not be met by the method as specified, and the
+arithmetic said so before the bench did.**
+
+Eight rungs is `8 × (8 × 40 + 200) = 4160` report epochs. At the §7.3 seed
+cadence of 10 Hz that is **473 s**. The operator's instinct — "why would an
+8-rung probe take 600 s, adjust the method" — was right that the method had to
+change, but the obvious adjustment is the wrong one: the epoch counts are
+already at their resolution floor. At 40 samples one lost report is 25‰, landing
+*between* `loss_ok_milli` and `loss_bad_milli`, which is exactly why the one-shot
+extension to 80 exists; at 20 samples it is 50‰ and a single unlucky report
+fails a power the link was carrying. Cutting the gates buys speed by making the
+measurement wrong.
+
+Run time is samples ÷ rate, so the rate is the only lever that does not degrade
+the result — which is what §10.7 already said: *"Counts are sample gates, not
+timers."* For the duration of a run the ground raises its own report cadence to
+60 Hz and drops `report_redundancy` to 1; `settle_ms` seeds down 800 → 300,
+since its report-window term falls from 100 ms to ~17 ms. That is ~11.4 s per
+rung, ~91 s for the uplink, ~118 s for the downlink — ~3.5 min for one Hub press.
+
+**The ceiling is fps, and the reason is a trap.** §7.2 anchors LINK_REPORT on the
+craft's post-EOB quiet gap and one gap opens per video *frame*. A cadence above
+the frame rate does not fail loudly — §7.2 degrades the excess to §7.1
+opportunistic return, which has no timing contract and a different delivery
+probability. §10.7 would measure that transport difference as **uplink loss** and
+place TX power against it. So `uplink_calib_report_hz` MUST NOT exceed the
+craft's committed fps, and the operator's follow-up suggestion — cut the vehicle
+bitrate to go faster — does not move this ceiling either: gaps open per frame,
+not per byte. Lower bitrate widens each gap, which is worth having for
+reliability (the §7.2 crossover), but it does not buy a single report per second.
+
+`hard_cap_ms` is left alone. 600 s bounds a 91 s run with over 6× margin, and a
+wedged dwell was never what a cap protects against — that was Pass 126's C1
+defect, fixed by the local-epoch fallback. The plan initially proposed a per-rung
+cap and a new config key; the arithmetic removed the need for both.
+
+**Method note.** Passes 126–128 each found defects that unit tests could not
+reach, and the lesson recorded there was "reproduction beats reading". This pass
+adds a cheaper one: three of its four findings came from *arithmetic on the
+spec's own seeds* — 473 s, 25‰ at 40 samples, one gap per frame — done before
+any code was written. The blackout/lockout question and the report-rate ceiling
+were both answered by reading §9.2 and §7.2 against the proposed change rather
+than by running it. Cross-referencing a plan against the sections it borrows
+from is not the same activity as reading the code it will modify, and it caught
+the one design error (outrunning the gap rate) that would have produced a
+plausible, wrong, and thoroughly green result.
+
+A paste defect was cleared on the way: PROTOCOL.md carried §10.7 twice since
+`d7e58c9`, the first copy terminating in a stray re-paste of §10.6's own
+Observability and Forward-validity paragraphs.
