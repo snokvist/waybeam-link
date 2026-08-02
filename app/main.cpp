@@ -5943,6 +5943,15 @@ int run_rx(const Loaded& l) {
             // §10.7 start prerequisites. Each returns the failed one so the
             // operator sees WHY, not just 409 — the list is long and every
             // entry is a real hazard, not a formality.
+            // §11.7 issuer, held as a NAMED local rather than reached
+            // through `h`. ControlHandlers is std::move()d into the server
+            // once every handler is registered, so a lambda that captures `h`
+            // by reference and dereferences a sibling member at CALL time
+            // reads the moved-from husk — every std::function in it is empty.
+            // Device-caught: `both:true` reported "no vehicle-command path on
+            // this node" on a ground that plainly had one.
+            std::function<std::pair<int, std::string>(const std::string&, int)>
+                issue_vcmd;
             // §10.3/§11.7 0x0A (Pass 135): the ground's own uplink ceiling,
             // and with `both` the craft's too — one action, both directions,
             // the shape {"action":"start_both"} already has for calibration.
@@ -5966,13 +5975,13 @@ int run_rx(const Loaded& l) {
                 // whole action rather than half-applying it locally and
                 // reporting an error the operator reads as "nothing happened".
                 if (both) {
-                    if (!h.vehicle_command) {
+                    if (!issue_vcmd) {
                         return {409,
                                 std::string("{\"ok\":false,\"error\":\"no "
                                             "vehicle-command path on this "
                                             "node\"}")};
                     }
-                    const auto [code, body] = h.vehicle_command("tx_power", tier);
+                    const auto [code, body] = issue_vcmd("tx_power", tier);
                     if (code != 200) return {code, body};
                 }
                 uplink_power_tier = tier;
@@ -6137,7 +6146,7 @@ int run_rx(const Loaded& l) {
                 return {200, "{\"ok\":true,\"nonce\":" +
                                  std::to_string(vissuer.nonce()) + "}"};
             };
-            h.vehicle_command = [&](const std::string& cmd, int arg) {
+            issue_vcmd = [&](const std::string& cmd, int arg) {
                 const uint8_t id = vcmd_id_for(cmd);
                 if (vcmd_id::typed_endpoint_only(id)) {
                     return std::pair<int, std::string>{
@@ -6147,6 +6156,7 @@ int run_rx(const Loaded& l) {
                 }
                 return start_vehicle_command(cmd, arg);
             };
+            h.vehicle_command = issue_vcmd;
             h.link_mtu = [&](const std::string& mode)
                 -> std::pair<int, std::string> {
                 if (l.cfg.node.spectator) {
