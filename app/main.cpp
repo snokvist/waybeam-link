@@ -4768,6 +4768,7 @@ int run_rx(const Loaded& l) {
     // at all. Seeded with the startup tuple so the first pass is not a
     // spurious actuation.
     uint64_t uplink_pairing_key = 0;
+    uint32_t uplink_last_dwell_seq = 0;
     // The craft a running §10.7 measurement is bound to. The artifact stamps
     // the craft identity, so a selection change mid-run would persist a
     // placement measured partly against a different craft's RX chain.
@@ -6065,6 +6066,21 @@ int run_rx(const Loaded& l) {
                 (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
             }
             if (ua.restore) uplink_restore_power();
+            // §10.7 per-dwell trace. The campaign's deliverable is a per-run
+            // record (duration, samples/dwell, loss, RSSI, bracket); without
+            // it a "verify_failed" carries no numbers and cannot be argued
+            // with. Edge-triggered on the dwell counter, so this is one line
+            // per completed dwell, not per tick.
+            if (const auto& dw = uplink_cal.last_dwell();
+                dw.seq != uplink_last_dwell_seq) {
+                uplink_last_dwell_seq = dw.seq;
+                std::fprintf(stderr,
+                             "uplink-calib: dwell#%u %s qdb=%d emitted=%u/%u "
+                             "received=%u loss=%upermille rssi=%d%s\n",
+                             dw.seq, dw.verify ? "VERIFY" : "probe ", dw.qdb,
+                             dw.emitted, dw.target, dw.received, dw.loss_milli,
+                             dw.rssi_mean, dw.blackout ? " [BLACKOUT]" : "");
+            }
             // A craft change mid-run invalidates the measurement in progress
             // (D4) — the artifact stamps the craft identity, and the §3.16
             // counter domain restarts under a different RX chain.

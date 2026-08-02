@@ -5068,3 +5068,51 @@ defect lives exactly where the test fixtures stop — in what the *deployment*
 omits. It surfaced in the first five minutes of reading real device configs,
 which is an argument for reading the target's config before writing the harness,
 not after.
+
+## Pass 128 — blackout dwells score measured loss, not a flat 1000permille (2026-08-02)
+
+Found by the **first live §10.7 run**, which failed on a link that was carrying
+traffic without difficulty. The dwell trace (added in the same pass, because
+without it the failure was just the word `verify_failed`):
+
+```
+dwell#1 probe  qdb=4   emitted=41/40   received=41   loss=0permille    rssi=-40
+dwell#2 probe  qdb=20  emitted=41/40   received=41   loss=0permille    rssi=-40
+dwell#3 probe  qdb=20  emitted=41/40   received=41   loss=0permille    rssi=-39
+dwell#4 VERIFY qdb=4   emitted=199/200 received=198  loss=1000permille rssi=-66 [BLACKOUT]
+```
+
+Dwell #4 received **198 of 199** — roughly 5permille, clean by any reading —
+and was scored 1000permille, which failed the verify and (correctly, per Pass
+126's C2 rule) failed the whole run.
+
+The cause is a defect in Pass 126's own C1 fix. C1 generalised the blackout
+fallback from "`received == 0`" to "`emitted` fell short of target", which is
+right, but kept the flat 1000permille score, which is not. `last_report_epoch`
+advances only for reports the craft **accepted**, so on any lossy link the
+craft's anchor lags the ground's local clock by exactly the lost count — and the
+local clock therefore reaches the target *first*, on a healthy dwell. The
+fallback then fires by one epoch and calls a 5permille dwell a total blackout.
+
+Fixed by scoring the fallback against the **local span** as denominator rather
+than a constant. That degrades correctly at both ends: a total blackout still
+has `received == 0` and still scores 1000permille — the seek's floor evidence,
+unchanged — while a one-epoch lag scores the loss that actually occurred. RSSI
+likewise comes from the samples that did arrive whenever any did, instead of the
+synthetic guard value.
+
+**What the run also showed, and is not a defect.** The cap wall fired at
+20 qdb: a commanded +4 dB moved the craft's received RSSI by under 1 dB
+(-40 → -39), so the seek retreated to the last clean probe at 4 qdb, exactly as
+Pass 121 addendum 3 specifies. On a ~1 m bench that is the honest reading —
+delivered power is not tracking commanded power at the bottom of this adapter's
+range — and it is worth carrying into P8, where the question is whether a
+calibrated placement beats driver-auto at useful range.
+
+**Method note.** Pass 126 and 127 both ran every automated gate green before
+this. The defect needed three things a unit test did not have: a real craft
+whose accept rate is under 100%, a 200-epoch verify dwell long enough for a
+one-count lag to matter, and the observability to see `emitted=199/200` rather
+than a bare failure string. The first two are bench facts; the third is the
+lesson — the per-dwell trace was added to debug this and is now the campaign's
+required per-run record, which is what it should have been from the start.

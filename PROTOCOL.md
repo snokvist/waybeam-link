@@ -2340,13 +2340,33 @@ over-reports and the seek sees phantom loss.
 
 Whenever the craft's anchors do **not span the dwell** — `emitted` short of the
 epoch target when the ground's own local `Reporter::epoch()` delta has reached
-it — the dwell scores `loss = 1000‰` against that local delta and contributes no
-RSSI sample. The condition is that `emitted` fell short, **not** that `received`
-is zero: a *partial* blackout, where some epochs land and the uplink then dies
-mid-dwell, leaves `received > 0` with the anchors frozen short of target, and it
-is the commonest shape of a real floor. Gating the fallback on `received == 0`
-never ends that dwell, which strands the run at `min_qdb` until the hard cap and
-makes the floor rule unreachable in exactly the case it exists for. Cap-wall
+it — the dwell is scored against **that local delta as the denominator**:
+
+```
+loss‰ = 1000 * (local_span - received) / local_span      (received > 0)
+loss‰ = 1000                                              (received == 0)
+```
+
+The condition is that `emitted` fell short, **not** that `received` is zero: a
+*partial* blackout, where some epochs land and the uplink then dies mid-dwell,
+leaves `received > 0` with the anchors frozen short of target, and it is the
+commonest shape of a real floor. Gating the fallback on `received == 0` never
+ends that dwell, which strands the run at `min_qdb` until the hard cap and makes
+the floor rule unreachable in exactly the case it exists for.
+
+**Scoring this case a flat 1000‰ is equally wrong, and is a Pass 128 bench
+correction.** `last_report_epoch` advances only for reports the craft
+**accepted**, so on a link with any loss at all the craft's anchor lags the
+ground's local clock by exactly the lost count — and the local clock therefore
+reaches the target *first*. Measured on the first live run: a verify dwell of
+`received = 198, emitted = 199` against a 200-epoch target — about 5‰, entirely
+clean — took the fallback and scored 1000‰, failing the run at a placement the
+link was carrying without difficulty. The local-span denominator degrades
+correctly at both ends: a total blackout still has `received == 0` and still
+scores 1000‰, which is the seek's floor evidence, while a one-epoch lag scores
+the loss that actually occurred. RSSI comes from the samples that did arrive
+whenever `received > 0`, and only a genuinely empty dwell falls back to the
+synthetic guard value. Cap-wall
 confirmation matches §10.6; the §10.6 blank-dwell hold (zero samples ⇒ hold and
 let the clocks arbitrate) has no uplink meaning and is not inherited.
 

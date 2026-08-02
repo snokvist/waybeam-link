@@ -176,6 +176,25 @@ class UplinkCalibrator {
     uint32_t dwell_progress() const { return emitted_; }
     uint32_t dwell_target() const { return target_epochs_; }
 
+    // What the last completed dwell actually observed. §10.7's per-run record
+    // (duration, samples/dwell, loss, RSSI, bracket) is the campaign's
+    // deliverable, and a run that fails is exactly the one whose dwells have
+    // to be readable — "verify_failed" with no numbers behind it is not a
+    // finding, it is a rumour. `seq` increments per completed dwell so a
+    // caller can log edges without polling state.
+    struct DwellRecord {
+        uint32_t seq = 0;
+        int32_t qdb = 0;
+        bool verify = false;
+        bool blackout = false;
+        uint32_t emitted = 0;
+        uint32_t received = 0;
+        uint16_t loss_milli = 0;
+        int32_t rssi_mean = 0;
+        uint32_t target = 0;
+    };
+    const DwellRecord& last_dwell() const { return last_; }
+
   private:
     // Re-arm the current dwell at the current power, keeping its target. The
     // ground epoch anchor re-arms with it (the first post-settle tick), so
@@ -204,15 +223,27 @@ class UplinkCalibrator {
         const bool verify = seek_.in_verify();
         uint16_t loss = 1000;
         double rssi = static_cast<double>(p_.seek.rssi_guard_dbm) - 60.0;
-        if (!blackout && emitted_ > 0) {
-            const uint32_t lost = emitted_ > received_ ? emitted_ - received_
-                                                       : 0;
+        // The denominator is the craft's own anchor span when it spans the
+        // dwell, and the ground's local emission count when it does not.
+        //
+        // A flat 1000permille for the second case is WRONG, and cost a run on
+        // the bench: the craft's `last_report_epoch` only advances for reports
+        // it ACCEPTED, so on a link with any loss at all it lags the ground's
+        // local clock by exactly the lost count. The local clock therefore
+        // reaches the target first and a perfectly healthy dwell — measured
+        // received=198 of emitted=199, ~5permille — scored 1000permille and
+        // failed its verify. Scoring the local span against `received_`
+        // degrades correctly at both ends: a total blackout still has
+        // received_==0 and still scores 1000permille (the original §10.7
+        // rule, preserved), while a one-epoch lag scores the real loss.
+        const uint32_t span = blackout ? local_epoch - dwell_local_epoch_
+                                       : emitted_;
+        if (span > 0 && received_ > 0) {
+            const uint32_t lost = span > received_ ? span - received_ : 0;
             loss = static_cast<uint16_t>(
-                std::min<uint64_t>(1000, uint64_t{lost} * 1000 / emitted_));
-            if (received_ > 0) {
-                rssi = static_cast<double>(rssi_sum_) /
-                       static_cast<double>(received_);
-            }
+                std::min<uint64_t>(1000, uint64_t{lost} * 1000 / span));
+            rssi = static_cast<double>(rssi_sum_) /
+                   static_cast<double>(received_);
         }
         // §10.7 ambiguous extension: between the walls, once, and only on a
         // probe. A LONGER dwell is the only thing that resolves it, which is
@@ -227,6 +258,10 @@ class UplinkCalibrator {
         const DwellVerdict v = loss > p_.seek.loss_bad_milli
                                    ? DwellVerdict::kBad
                                    : DwellVerdict::kClean;
+        last_ = DwellRecord{last_.seq + 1,   qdb_,  verify, blackout,
+                            emitted_,        received_,
+                            loss,            static_cast<int32_t>(std::lround(rssi)),
+                            target_epochs_};
         if (v == DwellVerdict::kClean) {
             last_clean_qdb_ = qdb_;
         } else if (!have_first_bad_) {
@@ -321,6 +356,7 @@ class UplinkCalibrator {
     bool restore_pending_ = false;
     bool artifact_pending_ = false;
     std::optional<int32_t> pending_qdb_;
+    DwellRecord last_{};
 };
 
 // §10.7 (Pass 125) bi-directional sequencer. Calibration is a one-time

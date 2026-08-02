@@ -378,6 +378,53 @@ void test_partial_blackout_ends_dwell() {
     CHECK(cal.dwell_progress() == 0);            // a fresh dwell at the new power
 }
 
+// Bench regression (P1, first live §10.7 run). The blackout fallback scored a
+// flat 1000permille, but it fires whenever the craft's anchors fall short of
+// the target — and the craft's `last_report_epoch` only advances for reports it
+// ACCEPTED, so on any lossy link it lags the ground's local clock by exactly
+// the lost count. The local clock therefore hits the target first, and a
+// measured 198-of-199 verify dwell (~5permille, clean) scored 1000permille and
+// failed the run. Score the local span against `received_` instead.
+void test_blackout_scores_measured_loss_not_flat_1000() {
+    UplinkCalibParams p = fast_params();
+    p.probe_epochs = 40;
+    p.ambiguous_epochs = 80;
+    UplinkCalibrator cal(p, 0, false);
+    CHECK(cal.start(1000, 0));
+    uint64_t t = 1000 + p.settle_ms + 1;
+    (void)cal.tick(t, 0, true);  // arm the ground anchor at 0
+
+    // 39 of the 40 land; the craft's anchor stops one short of target while
+    // the ground's own clock reaches it. That is a CLEAN dwell.
+    QualitySample s;
+    s.accepted = true;
+    s.progressed = true;
+    s.epoch_delta = 39;
+    s.reports_delta = 39;
+    s.rssi_sum_delta = -40 * 39;
+    cal.on_sample(s, t);
+    t += 2000;
+    (void)cal.tick(t, 40, true);
+    const auto& d = cal.last_dwell();
+    CHECK(d.blackout);                 // the fallback did end the dwell
+    CHECK(d.loss_milli <= 30);         // ...but scored the MEASURED loss
+    CHECK(d.rssi_mean == -40);         // and kept the real RSSI
+    CHECK(cal.state() == CalibState::kRunning);
+    CHECK(cal.qdb() > p.seek.min_qdb); // clean at the floor -> ramp upward
+
+    // A TOTAL blackout is unchanged: nothing received, still 1000permille,
+    // still the seek's floor evidence.
+    UplinkCalibrator dead(p, 0, false);
+    CHECK(dead.start(1000, 0));
+    uint64_t t2 = 1000 + p.settle_ms + 1;
+    (void)dead.tick(t2, 0, true);
+    t2 += 2000;
+    (void)dead.tick(t2, 40, true);
+    CHECK(dead.last_dwell().blackout);
+    CHECK(dead.last_dwell().loss_milli == 1000);
+    CHECK(dead.qdb() > p.seek.min_qdb);  // ascends off the dead floor
+}
+
 // C2 regression. PowerSeek reaches kDone from verify with loss above
 // loss_ok_milli only when the descent budget or the floor is exhausted. §10.6
 // records that ("the artifact never lies") because a craft artifact is a
@@ -607,6 +654,7 @@ void test_sequencer() {
 int main() {
     test_sequencer();
     test_partial_blackout_ends_dwell();
+    test_blackout_scores_measured_loss_not_flat_1000();
     test_verify_exhausted_is_failure();
     test_second_run_clears_bracket();
     test_loss_denominator_boundary();
