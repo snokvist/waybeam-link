@@ -2351,7 +2351,12 @@ placement, prior matching artifact, then backend auto/default. Done applies the
 new placement; abort, process shutdown, retune conflict, and failure must never
 leave the last probe power active.
 
-**Observability.** Ground `GET /api/v1/calibration` returns the local uplink
+**Observability.** A `start_both` run adds `phase` to the ground response —
+`idle|uplink|downlink|done|failed` — so the operator sees which half is
+running and, on failure, which half failed. A plain `start` leaves it `idle`:
+`phase` describes the sequencer, not the uplink calibrator, and conflating
+them would report a lone uplink run as a half-finished bi-directional one.
+Ground `GET /api/v1/calibration` returns the local uplink
 state and artifact with `direction:"uplink"`; the craft response remains the
 §10.6 downlink schema with `direction:"downlink"`. Ground POST accepts exactly
 `{"action":"start"}` or `{"action":"abort"}`. Add separate role-neutral
@@ -2361,15 +2366,27 @@ placement/fingerprint, stale/fail reason, feedback validity/age, last report
 epoch, received count, derived RSSI mean, and delivered `last_rx_mcs`.
 
 **One operator action, two phases.** Calibration is a one-time,
-persisted-on-both-sides commissioning step, so Hub exposes a **single
-bi-directional calibration action**, not two. Hub owns the sequencing —
-uplink phase (local `POST :8092 /api/v1/calibration`), await terminal state,
-then downlink phase (§11.7 `CALIBRATE`), await the mirrored §3.15 word — and
-reports which phase is running and which failed. A failed uplink phase MUST NOT
-proceed to the downlink phase: the order law above is the whole reason the
-sequence exists. Link keeps the two operations independent and independently
-startable; the combined action is a Hub-side orchestration with no new Link
-surface and no new wire.
+persisted-on-both-sides commissioning step, so the operator sees a **single
+bi-directional calibration action**, not two.
+
+The sequencer lives on the **ground Link node**, as a third action on the
+existing endpoint: `POST /api/v1/calibration {"action":"start_both"}`. It runs
+the §10.7 uplink phase, awaits its terminal state, and only on success issues
+the §11.7 `CALIBRATE` campaign for the downlink phase, awaiting the mirrored
+§3.15 word. A failed uplink phase MUST NOT proceed — the order law above is
+the entire reason the sequence exists. `start` and `abort` are unchanged, so
+each direction stays independently startable and independently testable;
+`start_both` is a thin orchestrator over them and adds no wire.
+
+It lives here rather than in the Hub because this is where both actuators
+already are: the ground Link node owns its own uplink power *and* is the
+§11.7 command issuer, and every §10.7 interlock is local to it. Hub-side
+sequencing would reach across two endpoints to orchestrate what one node can
+do internally, and would have to do it from a single-client WebUI whose
+proxies block its poll loop — a two-minute state machine is not something that
+surface can host. The Hub therefore keeps one plain HTTP action, which is also
+all its data-driven OSD menu can express: a menu item is one POST with no
+conditionals, so it could never have driven two phases itself.
 
 ---
 
@@ -4192,7 +4209,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/csa` | `{ "mhz": 5805, "class": 0 }` | start a §11 CSA campaign (issuer/ground node) |
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
 | `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (any node with a `role:"tx"` adapter, including an rx-node's §6.4 uplink — Pass 125) |
-| `POST /api/v1/calibration` | `{ "action": "start" }` \| `{ "action": "abort" }` | §10.7 one-rung ground-uplink calibration; start requires its complete prerequisite set, abort is idempotent (ground/rx node) |
+| `POST /api/v1/calibration` | `{ "action": "start" }` \| `{ "action": "abort" }` \| `{ "action": "start_both" }` | §10.7 ground-uplink calibration; `start` requires its complete prerequisite set, `abort` is idempotent and cancels either phase, `start_both` additionally sequences the §11.7 downlink campaign after a successful uplink phase (ground/rx node) |
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node) |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
