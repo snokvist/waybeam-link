@@ -5134,6 +5134,10 @@ int run_rx(const Loaded& l) {
     // Disabled (default) they inject immediately — §7.1 baseline.
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> urgent_ret_held;
+    // §7.2/§10.7: how many queued LINK_REPORTs one quiet gap can absorb.
+    // Ordinary operation queues one, so this only binds during a §10.7 probe
+    // burst — which is exactly where overflowing the gap is invisible loss.
+    static constexpr size_t kReportsPerReturnWindow = 3;
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_ret_held;
     // §7.2 Pass 78: anchored report batches re-fire once at the NEXT return
     // window (spread across two listen gaps; a blind fallback batch is not
@@ -6069,7 +6073,25 @@ int run_rx(const Loaded& l) {
                 send_return(target, f.data(), f.size(), false);
             }
             report_repeat_held.clear();
-            for (auto& [f, target] : report_ret_held) {
+            // §10.7 (Pass 132): a probe burst is PACED across return windows,
+            // never dumped into one. The craft is RX-deaf while it transmits
+            // and §7.2's quiet gap is only `return_window_us` (~2000 µs) wide,
+            // so a batch larger than the gap spills into the craft's transmit
+            // period and is simply not heard. Measured on the bench: a
+            // 100-probe burst flushed at once lost ~40% of every dwell
+            // REGARDLESS of commanded power — a flat, power-independent floor
+            // that made every rung read `no_clean_point` while RSSI tracked
+            // power perfectly. Seed 8 ≈ 2000 µs / ~160 µs for a ~100-byte
+            // MEASURED, not derived: normal 1-per-window traffic delivers 99.7% on this
+            // link, while 8 per window lost 4-15% — the ground aims for the MIDDLE
+            // of the window and each frame still takes CCA/DIFS, so far fewer fit
+            // than raw airtime suggests. RE-DERIVE (§17) if
+            // `return_window_us` or the report size moves. Outside a
+            // calibration this never binds — ordinary operation queues one
+            // report per window.
+            size_t window_budget = kReportsPerReturnWindow;
+            while (!report_ret_held.empty() && window_budget-- > 0) {
+                auto& [f, target] = report_ret_held.front();
                 // Stamps in place, so the redundancy copy must be taken AFTER
                 // the send: a repeat carries the SAME epoch (§3.5 — a
                 // redundant copy is not a new emission).
@@ -6077,6 +6099,7 @@ int run_rx(const Loaded& l) {
                 if (ret_at_us && l.cfg.policy.ret.report_redundancy > 1) {
                     report_repeat_held.emplace_back(f, target);
                 }
+                report_ret_held.pop_front();
             }
             // §7.2 observability: a batch fired on a TSF-anchored window
             // deadline is a hit; one sent blind (no EOB heard) is a miss.
@@ -6086,7 +6109,9 @@ int run_rx(const Loaded& l) {
                 ++ret_window_misses;
             }
             urgent_ret_held.clear();
-            report_ret_held.clear();
+            // NOT cleared: whatever did not fit this window is the next
+            // window's batch. Bounded by the §10.7 burst size, which is
+            // issued once per dwell.
             ret_at_us.reset();
             report_fallback_us.reset();
             ret_tsf_anchored = false;
@@ -6103,7 +6128,13 @@ int run_rx(const Loaded& l) {
             const UplinkCalibActions ua = uplink_cal.tick(
                 now_ms(), rx.report_epoch(),
                 quality_gate.live(now_ms(), ucal_params.liveness_ms),
-                rx.probe_spent());
+                // The burst is finished when it has been built AND the paced
+                // queue has actually gone out. `probe_spent()` alone is the
+                // BUILD signal; with §7.2 pacing a 400-probe verify takes ~50
+                // windows to leave, which is longer than the drain — opening
+                // the drain on the build signal would score a dwell whose
+                // probes were still departing.
+                rx.probe_spent() && report_ret_held.empty());
             // Rate before power (§10.7 R4 order): the rung is what the power
             // is being measured FOR, so commanding power first would spend a
             // settle window at the new level on the old rung.

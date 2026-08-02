@@ -1,0 +1,78 @@
+Aug 02 18:40:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: START mcs=0
+Aug 02 18:40:33 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#1 rung=0 probe  qdb=4 sent=100/100 received=103 loss=0permille rssi=-34
+Aug 02 18:40:34 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#2 rung=0 probe  qdb=20 sent=100/100 received=99 loss=10permille rssi=-34
+Aug 02 18:40:36 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#3 rung=0 probe  qdb=36 sent=100/100 received=98 loss=20permille rssi=-30
+Aug 02 18:40:37 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#4 rung=0 probe  qdb=52 sent=100/100 received=99 loss=10permille rssi=-26
+Aug 02 18:40:39 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#5 rung=0 probe  qdb=68 sent=100/100 received=100 loss=0permille rssi=-22
+Aug 02 18:40:40 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#6 rung=0 probe  qdb=84 sent=100/100 received=99 loss=10permille rssi=-15
+Aug 02 18:40:42 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#7 rung=0 probe  qdb=100 sent=100/100 received=99 loss=10permille rssi=-13
+Aug 02 18:40:43 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#8 rung=0 probe  qdb=108 sent=100/100 received=99 loss=10permille rssi=-13
+Aug 02 18:40:46 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#9 rung=0 VERIFY qdb=108 sent=400/400 received=395 loss=12permille rssi=-13
+Aug 02 18:40:48 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#10 rung=1 probe  qdb=4 sent=100/100 received=100 loss=0permille rssi=-34
+Aug 02 18:40:49 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#11 rung=1 probe  qdb=20 sent=100/100 received=98 loss=20permille rssi=-34
+Aug 02 18:40:51 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#12 rung=1 probe  qdb=36 sent=100/100 received=96 loss=40permille rssi=-30
+Aug 02 18:40:52 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#13 rung=1 probe  qdb=52 sent=100/100 received=98 loss=20permille rssi=-26
+Aug 02 18:40:54 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#14 rung=1 probe  qdb=68 sent=100/100 received=97 loss=30permille rssi=-22
+Aug 02 18:40:55 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#15 rung=1 probe  qdb=84 sent=100/100 received=99 loss=10permille rssi=-15
+Aug 02 18:40:57 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#16 rung=1 probe  qdb=100 sent=100/100 received=99 loss=10permille rssi=-13
+Aug 02 18:40:58 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#17 rung=1 probe  qdb=108 sent=100/100 received=96 loss=40permille rssi=-13
+Aug 02 18:41:01 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#18 rung=1 VERIFY qdb=108 sent=400/400 received=396 loss=10permille rssi=-13
+Aug 02 18:41:03 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#19 rung=2 probe  qdb=4 sent=100/100 received=97 loss=30permille rssi=-34
+Aug 02 18:41:04 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#20 rung=2 probe  qdb=20 sent=100/100 received=96 loss=40permille rssi=-34
+Aug 02 18:41:06 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#21 rung=2 probe  qdb=36 sent=100/100 received=100 loss=0permille rssi=-30
+Aug 02 18:41:07 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#22 rung=2 probe  qdb=52 sent=100/100 received=98 loss=20permille rssi=-26
+Aug 02 18:41:08 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#23 rung=2 probe  qdb=68 sent=100/100 received=98 loss=20permille rssi=-22
+Aug 02 18:41:10 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#24 rung=2 probe  qdb=84 sent=100/100 received=97 loss=30permille rssi=-15
+Aug 02 18:41:11 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#25 rung=2 probe  qdb=100 sent=100/100 received=100 loss=0permille rssi=-13
+Aug 02 18:41:13 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#26 rung=2 probe  qdb=108 sent=100/100 received=98 loss=20permille rssi=-13
+Aug 02 18:41:16 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#27 rung=2 VERIFY qdb=108 sent=400/400 received=392 loss=20permille rssi=-13
+Aug 02 18:41:19 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#28 rung=2 VERIFY qdb=92 sent=400/400 received=395 loss=12permille rssi=-14
+Aug 02 18:41:21 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#29 rung=3 probe  qdb=4 sent=100/100 received=99 loss=10permille rssi=-34
+Aug 02 18:41:22 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#30 rung=3 probe  qdb=20 sent=100/100 received=98 loss=20permille rssi=-34
+Aug 02 18:41:23 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#31 rung=3 probe  qdb=36 sent=100/100 received=97 loss=30permille rssi=-30
+Aug 02 18:41:25 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#32 rung=3 probe  qdb=52 sent=100/100 received=100 loss=0permille rssi=-26
+Aug 02 18:41:26 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#33 rung=3 probe  qdb=68 sent=100/100 received=100 loss=0permille rssi=-22
+Aug 02 18:41:28 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#34 rung=3 probe  qdb=84 sent=100/100 received=100 loss=0permille rssi=-15
+Aug 02 18:41:29 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#35 rung=3 probe  qdb=100 sent=100/100 received=85 loss=150permille rssi=-13
+Aug 02 18:41:32 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#36 rung=3 VERIFY qdb=84 sent=400/400 received=387 loss=32permille rssi=-15
+Aug 02 18:41:36 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#37 rung=3 VERIFY qdb=68 sent=400/400 received=394 loss=15permille rssi=-22
+Aug 02 18:41:37 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#38 rung=4 probe  qdb=4 sent=100/100 received=98 loss=20permille rssi=-34
+Aug 02 18:41:39 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#39 rung=4 probe  qdb=20 sent=100/100 received=99 loss=10permille rssi=-34
+Aug 02 18:41:40 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#40 rung=4 probe  qdb=36 sent=100/100 received=98 loss=20permille rssi=-30
+Aug 02 18:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#41 rung=4 probe  qdb=52 sent=100/100 received=98 loss=20permille rssi=-26
+Aug 02 18:41:43 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#42 rung=4 probe  qdb=68 sent=100/100 received=100 loss=0permille rssi=-22
+Aug 02 18:41:44 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#43 rung=4 probe  qdb=84 sent=100/100 received=100 loss=0permille rssi=-15
+Aug 02 18:41:46 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#44 rung=4 probe  qdb=100 sent=100/100 received=0 loss=1000permille rssi=-66
+Aug 02 18:41:49 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#45 rung=4 VERIFY qdb=84 sent=400/400 received=372 loss=70permille rssi=-15
+Aug 02 18:41:52 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#46 rung=4 VERIFY qdb=68 sent=400/400 received=394 loss=15permille rssi=-22
+Aug 02 18:41:54 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#47 rung=5 probe  qdb=4 sent=100/100 received=98 loss=20permille rssi=-34
+Aug 02 18:41:55 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#48 rung=5 probe  qdb=20 sent=100/100 received=98 loss=20permille rssi=-34
+Aug 02 18:41:57 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#49 rung=5 probe  qdb=36 sent=100/100 received=100 loss=0permille rssi=-30
+Aug 02 18:41:58 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#50 rung=5 probe  qdb=52 sent=100/100 received=100 loss=0permille rssi=-26
+Aug 02 18:41:59 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#51 rung=5 probe  qdb=68 sent=100/100 received=100 loss=0permille rssi=-22
+Aug 02 18:42:01 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#52 rung=5 probe  qdb=84 sent=100/100 received=90 loss=100permille rssi=-15
+Aug 02 18:42:04 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#53 rung=5 VERIFY qdb=68 sent=400/400 received=395 loss=12permille rssi=-22
+Aug 02 18:42:06 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#54 rung=6 probe  qdb=4 sent=100/100 received=100 loss=0permille rssi=-34
+Aug 02 18:42:07 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#55 rung=6 probe  qdb=20 sent=100/100 received=97 loss=30permille rssi=-34
+Aug 02 18:42:08 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#56 rung=6 probe  qdb=36 sent=100/100 received=99 loss=10permille rssi=-30
+Aug 02 18:42:10 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#57 rung=6 probe  qdb=52 sent=100/100 received=97 loss=30permille rssi=-26
+Aug 02 18:42:11 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#58 rung=6 probe  qdb=68 sent=100/100 received=100 loss=0permille rssi=-22
+Aug 02 18:42:13 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#59 rung=6 probe  qdb=84 sent=100/100 received=31 loss=690permille rssi=-15
+Aug 02 18:42:16 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#60 rung=6 VERIFY qdb=68 sent=400/400 received=394 loss=15permille rssi=-22
+Aug 02 18:42:17 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#61 rung=7 probe  qdb=4 sent=100/100 received=98 loss=20permille rssi=-34
+Aug 02 18:42:19 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#62 rung=7 probe  qdb=20 sent=100/100 received=100 loss=0permille rssi=-34
+Aug 02 18:42:20 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#63 rung=7 probe  qdb=36 sent=100/100 received=100 loss=0permille rssi=-30
+Aug 02 18:42:22 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#64 rung=7 probe  qdb=52 sent=100/100 received=99 loss=10permille rssi=-26
+Aug 02 18:42:23 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#65 rung=7 probe  qdb=68 sent=100/100 received=99 loss=10permille rssi=-22
+Aug 02 18:42:25 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#66 rung=7 probe  qdb=84 sent=100/100 received=0 loss=1000permille rssi=-66
+Aug 02 18:42:28 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#67 rung=7 VERIFY qdb=68 sent=400/400 received=383 loss=42permille rssi=-22
+Aug 02 18:42:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: dwell#68 rung=7 VERIFY qdb=52 sent=400/400 received=396 loss=10permille rssi=-26
+Aug 02 18:42:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib: DONE 8 rungs fp=0x36
+Aug 02 18:42:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib:   mcs=0 lgi -> 108 qdb rssi=-13 loss=12permille  <- operating
+Aug 02 18:42:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib:   mcs=1 lgi -> 108 qdb rssi=-13 loss=10permille
+Aug 02 18:42:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib:   mcs=2 sgi -> 92 qdb rssi=-14 loss=12permille
+Aug 02 18:42:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib:   mcs=3 sgi -> 68 qdb rssi=-22 loss=15permille
+Aug 02 18:42:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib:   mcs=4 sgi -> 68 qdb rssi=-22 loss=15permille
+Aug 02 18:42:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib:   mcs=5 sgi -> 68 qdb rssi=-22 loss=12permille
+Aug 02 18:42:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib:   mcs=6 sgi -> 68 qdb rssi=-22 loss=15permille
+Aug 02 18:42:31 snokvist-NucBox-M6-Ultra waybeam-link[1557795]: uplink-calib:   mcs=7 sgi -> 52 qdb rssi=-26 loss=10permille
