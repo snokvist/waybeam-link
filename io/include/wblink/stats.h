@@ -199,6 +199,9 @@ struct LinkStats {
     uint8_t profile = 0;
     uint8_t mcs = 0;
     int32_t tx_power_qdb = 0;
+    int tx_power_tier = -1;                // §11.7 0x0A, -1 = no preset list
+    int32_t tx_power_ceiling_qdb = 0;      // §10.3 effective ceiling, 0 = none
+    bool tx_power_tier_effective = false;  // false: recorded but reaches no HW
     bool tx_power_override = false;  // §10.5 latch active (Pass 114)
     uint32_t report_epoch = 0;
     uint32_t report_age_ms = 0;

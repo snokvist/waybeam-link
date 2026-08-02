@@ -79,6 +79,7 @@ inline constexpr uint8_t kFraming = 0x06;     // arg = preset index (staged)
 inline constexpr uint8_t kMode = 0x07;        // arg = §15.5 catalog index (P105)
 inline constexpr uint8_t kCalibrate = 0x08;   // arg 0=abort 1=start (§10.6 P120)
 inline constexpr uint8_t kMtuTier = 0x09;     // arg 0/1/2 (§9.3a Pass 122)
+inline constexpr uint8_t kTxPower = 0x0A;     // arg = §10.3 preset idx (P135)
 
 // Typed-only commands have validation/state bookkeeping that the generic
 // §15.5 vehicle-command endpoint cannot safely reproduce.

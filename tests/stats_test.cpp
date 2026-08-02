@@ -136,6 +136,9 @@ StatsSnapshot sample_snapshot() {
     s.link.mcs = 4;
     s.link.tx_power_qdb = 1800;
     s.link.tx_power_override = true;  // §10.5 Pass 114
+    s.link.tx_power_tier = 1;              // §11.7 0x0A Pass 135
+    s.link.tx_power_ceiling_qdb = 76;
+    s.link.tx_power_tier_effective = true;
     s.link.report_epoch = 1822;
     s.link.report_age_ms = 40;
     s.link.state = "HOLD";
@@ -282,7 +285,9 @@ const char* kGolden =
     "\"return_window_hits\":7,\"return_window_misses\":2,"
     "\"unicast_sent\":0,\"unicast_fallback\":0},"
     "\"link\":{\"target_originator\":9,\"target_session\":183726,"
-    "\"profile\":4,\"mcs\":4,\"tx_power_qdb\":1800,\"tx_power_override\":true,"
+    "\"profile\":4,\"mcs\":4,\"tx_power_qdb\":1800,\"tx_power_tier\":1,"
+    "\"tx_power_ceiling_qdb\":76,\"tx_power_tier_effective\":true,"
+    "\"tx_power_override\":true,"
     "\"report_epoch\":1822,"
     "\"report_age_ms\":40,\"state\":\"HOLD\","
     "\"transition_reason\":\"LOSS_PERSISTENT\","

@@ -188,6 +188,48 @@ Result<Config> load_config_json(const std::string& json_text) {
             if (a.contains("max_power_qdb")) {
                 ac.max_power_qdb = a.at("max_power_qdb").get<int32_t>();
             }
+            // §11.7 0x0A TX_POWER preset list (Pass 135). Same rx rejection as
+            // power_map above, and for the same reason: an rx adapter never
+            // resolves power, so a list there would be silently inert.
+            if (a.contains("power_presets_qdb")) {
+                if (ac.role == Role::kRx) {
+                    return Result<Config>::fail(
+                        "adapter " + ac.name +
+                        ": power_presets_qdb on a role:\"rx\" adapter is never "
+                        "applied (§10.3) — put it on the role:\"tx\" adapter");
+                }
+                for (const json& v : a.at("power_presets_qdb")) {
+                    ac.power_presets_qdb.push_back(v.get<int32_t>());
+                }
+                // §11.7 preset-index bound (Pass 68): at most 5 choices.
+                if (ac.power_presets_qdb.size() > kVcmdMaxArg + 1u) {
+                    return Result<Config>::fail(
+                        "adapter " + ac.name +
+                        ": power_presets_qdb holds more than 5 entries — "
+                        "§11.7 cmd_arg indexes at most 5 choices");
+                }
+                if (ac.power_presets_qdb.empty()) {
+                    return Result<Config>::fail(
+                        "adapter " + ac.name +
+                        ": power_presets_qdb is empty — omit the key instead");
+                }
+                // A tier may only LOWER power (Pass 135): the boot ceiling is
+                // the operator's hard limit and no runtime path may pass it.
+                // Logged when it binds — a silently lowered preset would read
+                // back as a value the operator never chose.
+                if (ac.max_power_qdb) {
+                    for (int32_t& q : ac.power_presets_qdb) {
+                        if (q > *ac.max_power_qdb) {
+                            std::fprintf(stderr,
+                                         "config: adapter %s: power preset %d "
+                                         "qdb clamped to max_power_qdb %d "
+                                         "(§10.3)\n",
+                                         ac.name.c_str(), q, *ac.max_power_qdb);
+                            q = *ac.max_power_qdb;
+                        }
+                    }
+                }
+            }
             cfg.adapters.push_back(std::move(ac));
         }
 

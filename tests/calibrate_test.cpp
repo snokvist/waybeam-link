@@ -546,6 +546,19 @@ void test_rung_ceiling_bounds_the_sweep() {
     CalibrateParams low = fast_params();
     low.max_qdb = low.min_qdb;
     CHECK(rung_max_qdb(low, 7) == low.min_qdb);
+
+    // Pass 135: a §11.7 0x0A power tier moves this one baseline, and every
+    // rung ceiling follows. That is the whole reason the tier moves
+    // max_qdb rather than latching an absolute power the §10.5 way — a flat
+    // latch would collapse the taper the calibration exists to measure.
+    CalibrateParams tier = fast_params();
+    tier.max_qdb = 76;  // preset "medium", 19 dBm
+    static constexpr int32_t kTiered[8] = {76, 76, 68, 68, 60, 60, 52, 52};
+    for (size_t m = 0; m < 8; ++m) {
+        CHECK(rung_max_qdb(tier, m) == kTiered[m]);
+        // The shape is preserved: every rung moved by the SAME delta.
+        CHECK(rung_max_qdb(p, m) - rung_max_qdb(tier, m) == 108 - 76);
+    }
 }
 
 // Pass 134 ruling 2: a sweep whose whole product is "no wall exists at any

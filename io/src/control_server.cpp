@@ -295,6 +295,14 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             }
             return reply(200, "OK", h_.tx_power_json());
         }
+        if (path == "/api/v1/tx/power_tier") {  // §10.3/§11.7 0x0A Pass 135
+            if (!h_.tx_power_tier_json) {
+                return reply(409, "Conflict",
+                             json_err("no power preset list configured "
+                                      "(adapters[].power_presets_qdb)"));
+            }
+            return reply(200, "OK", h_.tx_power_tier_json());
+        }
         if (path == "/api/v1/calibration") {  // §10.6 Pass 120
             if (!h_.calibration_json) {
                 return reply(409, "Conflict",
@@ -469,6 +477,26 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
                          json_err("qdb out of range (-511..511)"));
         }
         return done(h_.tx_power_set(has_auto, static_cast<int>(qdb)));
+    }
+    if (path == "/api/v1/tx/power_tier") {  // §10.3/§11.7 0x0A Pass 135
+        if (!h_.tx_power_tier_set) return na();
+        if (!j.contains("tier") || !j["tier"].is_number_integer()) {
+            return reply(400, "Bad Request",
+                         json_err("tier (int) required"));
+        }
+        // Checked wide before narrowing, same rule as tx/power's qdb: a
+        // 64-bit JSON value must 400 here rather than wrap into an index.
+        const int64_t tier = j["tier"].get<int64_t>();
+        if (tier < 0 || tier > kVcmdMaxArg) {
+            return reply(400, "Bad Request",
+                         json_err("tier out of §11.7 preset range (0..4)"));
+        }
+        const auto [code, jbody] = h_.tx_power_tier_set(
+            static_cast<int>(tier), j.value("both", false));
+        return reply(code,
+                     code == 200 ? "OK"
+                                 : (code == 409 ? "Conflict" : "Bad Request"),
+                     jbody);
     }
     if (path == "/api/v1/calibration") {  // §10.7 Pass 125 (ground/rx node)
         if (!h_.uplink_calibrate) return na();
