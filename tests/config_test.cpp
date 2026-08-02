@@ -758,20 +758,35 @@ int main() {
         CHECK(bool(d));
         if (d) {
             const CalibrationPolicy& c = d.value->policy.calibration;
-            CHECK(c.uplink_probe_epochs == 40);
-            CHECK(c.uplink_ambiguous_epochs == 80);
-            CHECK(c.uplink_verify_epochs == 200);
+            // Pass 132 burst sizes: at 100 probes one loss is 10permille
+            // (inside loss_ok_milli) and five are 50permille (the bad wall),
+            // so every reading is decidable first time. That is what retired
+            // uplink_ambiguous_epochs rather than tuning it.
+            CHECK(c.uplink_probe_epochs == 100);
+            CHECK(c.uplink_verify_epochs == 400);
+            CHECK(c.uplink_drain_ms == 600);
             CHECK(c.uplink_liveness_ms == 2000);
+            CHECK(c.settle_ms == 300);
         }
     }
-    // The ambiguous extension is a LONGER re-dwell; at or below the probe
-    // gate it would be a silent no-op that still burned the one-shot budget.
+    // Pass 132: a burst too small to resolve the walls decides on noise. One
+    // lost probe must be <= loss_ok_milli, so with the 15permille seed a
+    // 40-probe burst (25permille per loss) is refused -- that reading is
+    // exactly what the retired ambiguous extension existed to paper over.
     expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"calibration":{"uplink_probe_epochs":40,
-                               "uplink_ambiguous_epochs":40}}})",
-        "must exceed uplink_probe_epochs");
+      "policy":{"calibration":{"uplink_probe_epochs":40}}})",
+        "too small to resolve loss_ok_milli");
+    // A config still carrying the retired key loads, with it ignored.
+    {
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "policy":{"calibration":{"uplink_ambiguous_epochs":80}}})");
+        CHECK(bool(d));
+    }
     expect_error(R"({"node":{"originator":9,"role":"rx"},
       "policy":{"calibration":{"uplink_verify_epochs":0}}})",
+        "must be >= 1");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"uplink_drain_ms":0}}})",
         "must be >= 1");
     // W4/W8: the seek moves in whole steps and judges the cap wall on a >= 2 dB
     // (8 qdb) commanded rise. Zero or negative never terminates and walks an

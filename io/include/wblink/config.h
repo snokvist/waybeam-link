@@ -282,7 +282,12 @@ struct CalibrationPolicy {
     int rssi_guard_dbm = -6;
     int min_qdb = 4;
     int max_qdb = 108;
-    int settle_ms = 800;
+    // Pass 132: 800 -> 300. It was sized as TXAGC settle plus one report
+    // window, and the report-window term was carrying the §10.7 case where a
+    // dwell had to wait for the cadence to produce a sample. A burst starts
+    // emitting the instant settle ends, so only the TXAGC term is real; §10.6
+    // still covers its own 100 ms window inside the 300.
+    int settle_ms = 300;
     int probe_dwell_ms = 1200;
     int verify_dwell_ms = 2500;
     int report_loss_abort_ms = 3000;
@@ -294,9 +299,16 @@ struct CalibrationPolicy {
     // EPOCH COUNTS, not milliseconds: a slow report cadence must lengthen the
     // run, never let an unobserved dwell score as clean. The craft-only ms
     // dwells and report_loss_abort_ms are unused on the ground.
-    int uplink_probe_epochs = 40;
-    int uplink_ambiguous_epochs = 80;
-    int uplink_verify_epochs = 200;
+    // Pass 132 burst sizes. 100 puts one lost probe at 10permille (inside
+    // loss_ok_milli) and five at 50permille (the bad wall). The old 40 put one
+    // loss at 25permille, BETWEEN the walls, which is the only reason
+    // `uplink_ambiguous_epochs` existed — it is retired, and a config still
+    // carrying the key simply loads with it ignored.
+    int uplink_probe_epochs = 100;
+    int uplink_verify_epochs = 400;
+    // Silence after a burst so the craft's counter reflects all of it before
+    // scoring. Must exceed one §3.16 period (500 ms at 2 Hz).
+    int uplink_drain_ms = 600;
     int uplink_liveness_ms = 2000;
 };
 

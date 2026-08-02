@@ -2351,54 +2351,70 @@ verify with a bounded step-down. §10.7 wraps it in a **rung loop** — commit t
 rung with `set_tx_mode`, sweep, verify, append the placement, advance — which is
 structurally the same loop §10.6 already runs, and deliberately so. Seed
 `seek_step_qdb=16` (4 dB); reuse §10.6's min/max, loss walls, `rssi_guard_dbm`
-backstop, bounded verify descents, and hard cap. A probe dwell requires **40
-unique report epochs**; an ambiguous wall may extend once to **80**;
-verification requires **200 epochs**. Seed loss thresholds remain
+backstop, bounded verify descents, and hard cap. A probe dwell is a burst of
+**100 probes**, verification **400**. Seed loss thresholds remain
 `loss_ok_milli=15` and `loss_bad_milli=50`.
 
-Counts are **sample gates, not timers**: a low report cadence lengthens the run
-rather than pretending missing observations were clean.
+Counts are **sample gates, not timers**, and since Pass 132 the ground sizes
+the sample itself: a dwell takes as long as it takes to send its burst, and
+never decides on fewer observations than it asked for.
 
-**Run time is met by raising the sample rate, never by lowering the sample
-count (Pass 131).** Eight rungs at eight probe steps plus a verify is
-`8 × (8 × 40 + 200) = 4160` report epochs, which at the §7.3 seed cadence of
-10 Hz is **473 s** — far past the ~2 min a commissioning step should take. The
-epoch counts cannot absorb that. At 40 samples one lost report is 25‰, which
-lands *between* `loss_ok_milli` and `loss_bad_milli` — this is precisely why the
-one-shot extension to 80 exists — and at 20 samples one lost report is 50‰,
-enough for a single unlucky report to fail a power the link was carrying. The
-gates are already at their resolution floor.
+**A dwell is a counted probe burst, and the ground divides by its own count
+(Pass 132).** The ground emits exactly `uplink_probe_epochs` LINK_REPORTs at
+the dwell's `(rung, qdb)`, **stops**, waits `uplink_drain_ms` for the craft's
+counter to settle, and scores:
 
-For the duration of a run, therefore, the ground raises its own report cadence
-to `policy.calibration.uplink_calib_report_hz` (seed **60**) and drops
-`return.report_redundancy` to **1**. `settle_ms` seeds down from 800 to **300**
-for both directions: it was sized as TXAGC settle plus one report window, and
-the report-window term falls from 100 ms to ~17 ms. Measured budget at the
-seeds: **~11.4 s per rung, ~91 s for the uplink**, with §10.6's downlink at
-~118 s, so one bi-directional Hub action completes in roughly **3.5 minutes**.
+```
+sent      = the ground's own Reporter::epoch() delta over the burst
+received  = the craft's reports_received delta (§3.16)
+loss‰     = 1000 * (sent - received) / sent            (sent > 0, received > 0)
+loss‰     = 1000                                        (received == 0)
+rssi_mean = (int32)(rssi_sum delta) / received          (received > 0)
+```
 
-**The cadence ceiling is the craft's frame rate, and exceeding it corrupts the
-measurement.** §7.2 anchors LINK_REPORT on the craft's post-EOB quiet gap, and
-one gap opens per *video frame*, so a report rate above the frame rate has no
-gap to land in. Those reports are not lost — §7.2 degrades them to §7.1
-opportunistic return, which has no timing contract and a different delivery
-probability. §10.7 would then measure that transport difference **as uplink
-loss** and place TX power against it. `uplink_calib_report_hz` MUST NOT exceed
-the craft's committed fps. Lowering the craft's bitrate does not raise this
-ceiling — gaps open per frame, not per byte — though it does widen each gap and
-is worth having for that reason (§7.2 crossover).
+`sent` is exact by construction: §3.5 commits a `report_epoch` **only on
+successful injection**, so the ground's own delta is precisely the frames the
+radio took. The drain is what removes in-flight boundary error — nothing is
+scored until the burst is finished and the craft has had longer than one §3.16
+period to report all of it.
 
-`hard_cap_ms` is unchanged and remains a **whole-run** bound for both
-directions: at the Pass 131 seeds it bounds a 91 s run with over 6× margin, and
-even worst-case ambiguous extensions plus full verify descents stay near 220 s.
-A wedged dwell is not what a cap protects against — that was the Pass 126 C1
-defect, and it is fixed by the local-epoch fallback below.
+**This supersedes Pass 125's anchoring identity and everything built on it.**
+Pass 125 measured loss on a stream whose rate the ground did not control, and
+needed four mechanisms to do it: `emitted = E_B - E_A`, the local-epoch
+blackout fallback (Pass 126 C1), that fallback's measured-loss scoring rule
+(Pass 128), and the one-shot ambiguous extension. Two of the four were
+themselves bench defects. All four are withdrawn. §3.16's `last_report_epoch`
+remains on the wire as observability (§15.3 `uplink_quality_report_epoch`); it
+is no longer arithmetic.
 
-The §9 cost of the raised cadence is stated rather than assumed: the selector's
-raw loss window shrinks from 100 ms to ~17 ms, so `loss_min_uniq` will often go
-unmet and the craft mostly **holds** (§9.1 rule 2 — an under-filled window
-changes nothing). Pass 110 removed early reports for exactly this reason, so
-this is a bench observation to make, not a property to assert.
+**Probe traffic is permitted during a run.** §10.7 previously forbade it — a
+rule written for a craft in flight. Calibration is a stationary, pre-flight,
+operator-initiated step, and a burst the operator asked for costs nothing a
+moving vehicle would have to pay. Probes are ordinary LINK_REPORTs with
+ordinary unique epochs, so the craft needs no new counting and no new wire.
+
+**Burst size is chosen to resolve the walls, which is what retires the
+ambiguous extension.** One lost probe must score at or under `loss_ok_milli`,
+i.e. `1000/N ≤ loss_ok_milli`; config rejects a smaller burst. At the seeds
+(`uplink_probe_epochs` **100**, `uplink_verify_epochs` **400**,
+`loss_ok_milli` 15) one loss is 10‰ and five are 50‰ — every reading is
+decidable first time. Pass 125's 40-probe gate put one loss at 25‰, *between*
+the walls, and the extension to 80 existed solely to resolve a reading the gate
+was too small to make.
+
+Nothing about the ground's ordinary cadence changes: `policy.report_hz`,
+`return.report_redundancy` and the §9 selector's 100 ms loss window are
+untouched, so a run perturbs the craft's selector no more than normal traffic
+does. Probes ride the existing §7.2 return path and fill the quiet gap the
+craft already opens per video frame; they never open a new one, so §7.2's
+guard-cost law holds unchanged.
+
+`settle_ms` seeds down from 800 to **300**. It was TXAGC settle plus one report
+window, and the report-window term was carrying the case where a dwell had to
+wait for the cadence to produce a sample; a burst starts the instant settle
+ends. `hard_cap_ms` is unchanged and remains a **whole-run** bound. A wedged
+dwell is not what a cap protects against, and cannot occur: a burst ends when
+the ground has finished sending, which it always does.
 
 Loss of §3.16 **liveness** for 2 s aborts — the run has lost its observer.
 Stalled counters under live feedback never abort; per §3.16 they are the seek's
@@ -2413,66 +2429,6 @@ zeroing its counters), everything accumulated so far belongs to the previous
 domain. The §10.7 loss identity is a delta between two anchors of the *same*
 domain, so mixing them would divide by a number that does not mean what it says.
 The dwell re-arms at the current power, both clocks restarting together.
-
-**Dwell loss comes from two anchors of the same packet pair.** Let `A` and `B`
-be the first and last §3.16 packets accepted inside the dwell — the settle
-window discards packets exactly as §10.6 discards samples — with cumulative
-`(last_report_epoch, reports_received, rssi_sum_dbm)` = `(E, R, S)`. In
-wrap-aware u32 arithmetic:
-
-```
-received  = R_B - R_A
-emitted   = E_B - E_A
-loss‰     = 1000 * (emitted - received) / emitted          (emitted > 0)
-rssi_mean = (int32)(S_B - S_A) / received                  (received > 0)
-```
-
-`report_epoch` increments **once per emitted report** (§3.5), so the craft's own
-`last_report_epoch` delta *is* the emitted count over the interval the craft
-observed — the ground keeps no per-epoch record and needs no emission
-bookkeeping. This costs nothing and removes in-flight boundary error by
-construction: a report emitted after `E_B` belongs to the next dwell. That
-matters, and is not fussiness — at a 40-epoch dwell one boundary-straddling
-report is 25‰, which lands between `loss_ok_milli` and `loss_bad_milli`, so a
-wall-clock or raw-emission denominator would make every clean dwell read
-ambiguous and burn the one-shot extension to 80 on nothing.
-
-This identity holds only while every **built** report is also **injected**. An
-implementation that can drop a report between build and injection (no uplink
-adapter, full TX queue) must increment the epoch at injection, or `emitted`
-over-reports and the seek sees phantom loss.
-
-Whenever the craft's anchors do **not span the dwell** — `emitted` short of the
-epoch target when the ground's own local `Reporter::epoch()` delta has reached
-it — the dwell is scored against **that local delta as the denominator**:
-
-```
-loss‰ = 1000 * (local_span - received) / local_span      (received > 0)
-loss‰ = 1000                                              (received == 0)
-```
-
-The condition is that `emitted` fell short, **not** that `received` is zero: a
-*partial* blackout, where some epochs land and the uplink then dies mid-dwell,
-leaves `received > 0` with the anchors frozen short of target, and it is the
-commonest shape of a real floor. Gating the fallback on `received == 0` never
-ends that dwell, which strands the run at `min_qdb` until the hard cap — the
-sweep never climbs off a dead floor, which is the one thing it exists to do.
-
-**Scoring this case a flat 1000‰ is equally wrong, and is a Pass 128 bench
-correction.** `last_report_epoch` advances only for reports the craft
-**accepted**, so on a link with any loss at all the craft's anchor lags the
-ground's local clock by exactly the lost count — and the local clock therefore
-reaches the target *first*. Measured on the first live run: a verify dwell of
-`received = 198, emitted = 199` against a 200-epoch target — about 5‰, entirely
-clean — took the fallback and scored 1000‰, failing the run at a placement the
-link was carrying without difficulty. The local-span denominator degrades
-correctly at both ends: a total blackout still has `received == 0` and still
-scores 1000‰, which is the seek's floor evidence, while a one-epoch lag scores
-the loss that actually occurred. RSSI comes from the samples that did arrive
-whenever `received > 0`, and only a genuinely empty dwell falls back to the
-synthetic guard value. Cap-wall
-confirmation matches §10.6; the §10.6 blank-dwell hold (zero samples ⇒ hold and
-let the clocks arbitrate) has no uplink meaning and is not inherited.
 
 **A still-failing verify is a §10.7 FAILURE, not a placement (Pass 125
 amendment).** §10.6 records a placement whose verify never reached
@@ -3810,23 +3766,21 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   Dwells are short by design: the live video IS the measurement traffic
   (thousands of loss samples per second), so a dwell needs only TXAGC
   settle plus a couple of report windows — a full 8-rung run is ~2 min.
-  **§10.7 (Pass 125; 8 rungs Pass 131)** reuses this block on the ground/rx node
-  — same walls, step, min/max, settle, and `artifact_dir` (the uplink artifact is
-  a distinct filename in the same directory) — and adds only what differs
-  because the uplink measures sparse reports instead of live video:
-  `uplink_probe_epochs`
-  (40), `uplink_ambiguous_epochs` (80), `uplink_verify_epochs` (200),
-  `uplink_liveness_ms` (2000), `uplink_calib_report_hz` (**60**, Pass 131).
-  The uplink gates are **epoch counts, not
-  milliseconds**, so a slow report cadence lengthens the run instead of
-  scoring unobserved dwells as clean; `probe_dwell_ms`/`verify_dwell_ms`/
-  `report_loss_abort_ms` are craft-only and unused on the ground.
-  `uplink_calib_report_hz` is the cadence the ground runs its OWN reports at for
-  the duration of a run, restored on exit — it is what turns 4160 report epochs
-  from 473 s into ~91 s without touching a single sample gate. It MUST NOT
-  exceed the craft's committed fps: above that the §7.2 quiet gap cannot absorb
-  the extra reports and they degrade to §7.1 opportunistic return, whose
-  different delivery probability §10.7 would score as uplink loss.
+  **§10.7 (8 rungs Pass 131; burst probes Pass 132)** reuses this block on the
+  ground/rx node — same walls, step, min/max, settle, and `artifact_dir` (the
+  uplink artifact is a distinct filename in the same directory) — and adds only
+  what differs because the uplink measures a counted probe burst instead of
+  live video: `uplink_probe_epochs` (**100**), `uplink_verify_epochs` (**400**),
+  `uplink_drain_ms` (**600**), `uplink_liveness_ms` (2000).
+  The uplink gates are **probe counts, not
+  milliseconds**; `probe_dwell_ms`/`verify_dwell_ms`/`report_loss_abort_ms` are
+  craft-only and unused on the ground. Config rejects a burst too small to
+  resolve the walls (`1000/N` must not exceed `loss_ok_milli`) — that check is
+  what replaced Pass 125's ambiguous extension, whose key
+  `uplink_ambiguous_epochs` is **retired and ignored**. `uplink_drain_ms` is the
+  silence after a burst in which the craft's counter settles; it must exceed one
+  §3.16 period (500 ms at 2 Hz), which is what removes in-flight boundary error
+  without any anchoring arithmetic.
 - `air.uplink_rate` (ground/rx node with a designated §6.4 uplink, §10.7)
   commits the uplink operating point: `mcs` (0), `sgi` (false), `bw` (20).
   Seeds equal the pre-Pass-125 `TxRate` struct default, so committed

@@ -5342,3 +5342,87 @@ plausible, wrong, and thoroughly green result.
 A paste defect was cleared on the way: PROTOCOL.md carried §10.7 twice since
 `d7e58c9`, the first copy terminating in a stray re-paste of §10.6's own
 Observability and Forward-validity paragraphs.
+
+## Pass 132 — the ground counts its own probes (2026-08-02)
+
+Operator ruling, and a correction to how Pass 131 was reasoned rather than to
+what it decided: *"you are taking too many truths to be hard and unbendable.
+instead ask: what is the easiest and most frictionless way to implement the
+ground uplink tx probe. THEN we can consider the smallest changes we need to
+the protocols and rules... a calibration is inherently when the craft is
+stationary and we dont have to adhere to the normal rules in this period."*
+
+That was right, and it located a design error three passes deep.
+
+**The error.** Pass 125 chose to measure uplink loss on a stream whose rate the
+ground did not control — ordinary periodic LINK_REPORTs — because §10.7 forbade
+synthetic probe traffic. Every complicated thing in this feature descends from
+that one choice:
+
+| mechanism | exists to answer |
+|---|---|
+| `emitted = E_B - E_A` anchoring identity | how many did the ground send? |
+| local-epoch blackout fallback (P126 C1) | ...when the craft's anchor freezes |
+| measured-loss fallback scoring (P128) | ...without calling 5‰ a blackout |
+| one-shot ambiguous extension | ...when 40 samples cannot resolve the walls |
+
+Two of those four were themselves bench defects, found in Passes 126 and 128.
+It is the most defect-dense part of the feature, and all of it answers a
+question the ground could always have answered directly: `Reporter` commits a
+`report_epoch` **only on successful injection** (§3.5), so the ground's own
+epoch delta is exactly the frames the radio took. The denominator was sitting
+in `reporter.h` the entire time, with a comment explaining why it was exact.
+
+**The ruling.** A dwell is a counted burst. The ground emits N probes at the
+dwell's `(rung, qdb)`, stops, waits `uplink_drain_ms` for the craft's counter to
+settle, and divides by its own N. All four mechanisms above are withdrawn.
+`last_report_epoch` stays on the wire as observability and stops being
+arithmetic.
+
+The drain is the whole of what the anchoring identity was buying: nothing is
+scored until the burst is finished and the craft has had longer than one §3.16
+period to report all of it, so a probe still in flight cannot straddle a
+boundary. One `uint64_t` replaces a spec section.
+
+**Burst size replaces the ambiguous extension.** Pass 125's 40-probe gate put
+one lost report at 25‰ — between `loss_ok_milli` (15) and `loss_bad_milli` (50)
+— so a single loss produced a reading that could not be made, and the extension
+to 80 existed to re-run the dwell longer. With the ground choosing N, the fix is
+to choose one big enough: at 100 probes one loss is 10‰ and five are 50‰, so
+every reading is decidable first time. Config now enforces
+`1000/N ≤ loss_ok_milli` rather than shipping a mechanism to recover from
+violating it.
+
+**What "extend the bounds slightly" actually cost.** One sentence: §10.7 no
+longer forbids probe traffic. That prohibition was written for a craft in
+flight; calibration is stationary, pre-flight and operator-initiated. Probes are
+ordinary LINK_REPORTs with ordinary unique epochs, so the craft counts them with
+code that already exists and the wire is untouched. They ride the existing §7.2
+return path and fill the quiet gap the craft already opens per video frame —
+they never open a new one, so §7.2's guard-cost law is unchanged.
+
+**And it withdraws Pass 131's third ruling entirely.** That ruling raised the
+ground's report cadence to 60 Hz for the duration of a run and dropped
+`report_redundancy` to 1, on the argument that "run time is samples ÷ rate, so
+the rate is the only lever". The arithmetic was right and the framing was wrong:
+it treated the *cadence* as the thing to change because it had accepted that the
+ground could not choose the *sample*. Withdrawing it also withdraws its costs —
+a shortened §9 loss window that Pass 110's reasoning said would make the craft's
+selector go quiet, a redundancy path with no gap left to land in, and a config
+key (`uplink_calib_report_hz`) whose ceiling could not be enforced by config
+because it depended on the craft's fps. `policy.report_hz`,
+`return.report_redundancy` and the §9 selector are now untouched by a run.
+
+`settle_ms` 800 → 300 survives from Pass 131 on its own merit: the
+report-window term it carried was for a dwell waiting on the cadence to produce
+a sample, and a burst starts the instant settle ends.
+
+**Method note.** Pass 131's method note congratulated itself for finding three
+defects by doing arithmetic on the spec's own seeds before writing code. It did
+— and it still missed this, because arithmetic on a premise cannot question the
+premise. The thing that found it was a question about *friction*: what is the
+easiest way to do this, asked before what the rules currently permit. Every
+constraint I had treated as fixed (§7.2's gap cadence, the no-probe-traffic
+rule, the 2 Hz feedback) turned out to be either irrelevant to a stationary
+bench or cheaper to amend than to work around. Three passes of increasingly
+careful work inside a bad frame is worse than one question about the frame.

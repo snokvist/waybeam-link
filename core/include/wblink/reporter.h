@@ -33,7 +33,32 @@ class Reporter {
              std::optional<uint8_t> local_table_version)
         : policy_(policy), tv_(local_table_version) {}
 
-    // Reports due now, one per latched stream (empty between cadence ticks).
+    // §10.7 (Pass 132) probe burst. A calibration dwell needs an EXACT
+    // denominator, and the cheapest way to get one is for the ground to stop
+    // inferring how many reports it sent and simply send a COUNTED burst.
+    // While a budget is set, build() ignores its cadence gate and emits on
+    // every call until the budget is spent, then emits nothing at all — that
+    // silence is the drain window in which the craft's counter settles before
+    // the dwell is scored.
+    //
+    // This is the whole reason §10.7 no longer needs the craft's
+    // `last_report_epoch` as a denominator, and with it goes the anchoring
+    // identity, the local-epoch blackout fallback, and that fallback's
+    // scoring rule — the three mechanisms Passes 126 and 128 found defects in.
+    // Burst probes are synthetic traffic, which §10.7 forbade; that rule was
+    // written for a flying craft, and calibration is stationary and pre-flight.
+    void set_probe_budget(uint32_t n) {
+        probing_ = true;
+        probe_budget_ = n;
+    }
+    void clear_probe_mode() {
+        probing_ = false;
+        probe_budget_ = 0;
+    }
+    bool probing() const { return probing_; }
+
+    // Reports due now, one per latched stream (empty between cadence ticks,
+    // or once a probe burst is spent).
     std::vector<LinkReport> build(const RxEngine& engine, uint64_t now_ms);
 
     // §3.5: `report_epoch` advances once per EMITTED report, and §10.7's loss
@@ -59,6 +84,8 @@ class Reporter {
     std::optional<uint8_t> tv_;
     uint32_t epoch_ = 0;
     uint64_t next_ms_ = 0;
+    bool probing_ = false;
+    uint32_t probe_budget_ = 0;
     std::map<uint64_t, Snap> last_;  // packed stream key -> last window end
 };
 

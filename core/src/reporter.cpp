@@ -15,10 +15,15 @@ uint64_t pack(const StreamKey& k) {
 std::vector<LinkReport> Reporter::build(const RxEngine& engine,
                                         uint64_t now_ms) {
     std::vector<LinkReport> out;
-    if (now_ms < next_ms_) {
+    if (probing_) {
+        // §10.7 burst: emit on every call until the counted budget is spent,
+        // then go silent so the craft's counter can settle before scoring.
+        if (probe_budget_ == 0) return out;
+    } else if (now_ms < next_ms_) {
         return out;
+    } else {
+        next_ms_ = now_ms + policy_.interval_ms;
     }
-    next_ms_ = now_ms + policy_.interval_ms;
 
     // Adapter-level RF summary (§7.3): best = strongest recent packet across
     // live adapters; mean = average of the per-adapter EWMAs.
@@ -72,6 +77,16 @@ std::vector<LinkReport> Reporter::build(const RxEngine& engine,
         r.probe_per = kNoProbe;  // §9.4: no probe machinery in v0
         r.recommended_prof = 0;
         out.push_back(r);
+    }
+    // Spend the budget on what was BUILT. A report the radio then refuses to
+    // take burns budget but no epoch (§3.5 commits on injection only), so the
+    // burst is at most `n` frames and the ground's own epoch delta stays the
+    // exact count of what actually went out — which is the denominator.
+    if (probing_) {
+        probe_budget_ =
+            out.size() >= probe_budget_
+                ? 0
+                : probe_budget_ - static_cast<uint32_t>(out.size());
     }
     return out;
 }

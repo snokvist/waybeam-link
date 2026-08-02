@@ -2,14 +2,21 @@
 // waybeam-link core: §10.7 ground-uplink calibration orchestrator.
 //
 // The counterpart to §10.6's Calibrator: same PowerSeek ramp, same eight-rung
-// loop since Pass 131, different gating. The craft measures against live video
-// (thousands of loss samples a second, so dwells are wall-clock), while the
-// ground measures against sparse LINK_REPORT epochs — so every dwell here is
-// gated on an EPOCH COUNT. A slow report cadence must lengthen the run, never
-// let an unobserved dwell score as clean. That is also why §10.7 raises the
-// ground's own report cadence for the duration of a run (§15.2
-// `uplink_calib_report_hz`): the gates are sample counts, so the only way to
-// finish sooner without measuring worse is to sample faster.
+// loop, different evidence. The craft measures against live video (thousands
+// of loss samples a second, so dwells are wall-clock); the ground measures by
+// sending a COUNTED BURST of probe reports and asking the craft how many
+// arrived (Pass 132).
+//
+// That one choice is why this file is short. Pass 125 measured loss on a
+// stream whose rate it did not control, and every mechanism it needed to do
+// that — the `emitted = E_B - E_A` anchoring identity, the local-epoch
+// blackout fallback, that fallback's scoring rule, the one-shot ambiguous
+// extension — existed to answer "how many did the ground send?". The ground
+// always knew: Reporter commits an epoch only on successful injection, so its
+// own epoch delta is exactly the frames the radio took. Burst, drain, divide.
+//
+// Probe traffic is synthetic, which §10.7 originally forbade. That rule was
+// written for a craft in flight; calibration is stationary and pre-flight.
 //
 // Pure and time-injected: it consumes §3.16 QualitySamples and ticks, and
 // emits polled actions. It does not own the UplinkQualityGate (that needs the
@@ -43,9 +50,20 @@ inline constexpr size_t kUplinkRungs = 8;
 struct UplinkCalibParams {
     SeekParams seek;
     uint32_t settle_ms = 300;       // shared with §10.6: TXAGC settle
-    uint32_t probe_epochs = 40;     // §10.7 seeds
-    uint32_t ambiguous_epochs = 80;
-    uint32_t verify_epochs = 200;
+    // §10.7 burst sizes (Pass 132). 100 makes one lost probe 10permille —
+    // inside loss_ok_milli — and five 50permille, exactly the bad wall. That
+    // is why there is no longer an ambiguous extension: the old 40-probe gate
+    // put one loss at 25permille, BETWEEN the walls, and the extension to 80
+    // existed only to resolve a reading the gate was too small to make. With
+    // the ground choosing the burst size, the right fix is a big enough burst.
+    uint32_t probe_epochs = 100;
+    uint32_t verify_epochs = 400;
+    // Silence after the burst, so the craft's counter reflects the whole of it
+    // before the dwell is scored. Longer than one §3.16 period (500 ms at
+    // 2 Hz) so at least one packet built after the last probe landed arrives.
+    // This is what removes the in-flight boundary error that the Pass 125
+    // epoch-anchoring identity existed to handle.
+    uint32_t drain_ms = 600;
     uint32_t liveness_ms = 2000;
     uint32_t hard_cap_ms = 600000;
     std::array<UplinkRate, kUplinkRungs> rungs{{{0, false}, {1, false},
@@ -76,6 +94,11 @@ struct UplinkPlacement {
 struct UplinkCalibActions {
     std::optional<UplinkRate> set_rate;
     std::optional<int32_t> set_qdb;
+    // §10.7 (Pass 132): how many more probe reports the ground should emit
+    // right now. 0 means STOP — the burst is complete and the drain window is
+    // open. Absent means "unchanged". The app hands this to
+    // Reporter::set_probe_budget; the restore edge clears probe mode.
+    std::optional<uint32_t> probe_budget;
     bool restore = false;
     bool artifact_ready = false;
 };
@@ -119,35 +142,32 @@ class UplinkCalibrator {
         finish(CalibState::kFailed, "artifact_write_failed");
     }
 
-    // One accepted §3.16 packet. Deltas telescope across the dwell, so
-    // summing them from the dwell's first accepted packet to its last IS
-    // (E_B - E_A) / (R_B - R_A) / (S_B - S_A) — the §10.7 anchors, with no
-    // ground-side epoch bookkeeping. Samples inside the settle window are
-    // discarded exactly as §10.6 discards its report samples.
+    // One accepted §3.16 packet. Only `reports_delta` and `rssi_sum_delta`
+    // are consumed: the denominator is the ground's own burst count, so the
+    // craft's `last_report_epoch` is observability now, not arithmetic.
+    // Samples inside the settle window are discarded exactly as §10.6
+    // discards its report samples.
     void on_sample(const QualitySample& s, uint64_t now_ms) {
         if (state_ != CalibState::kRunning) return;
-        // The craft restarted its counter domain mid-dwell. Everything
-        // accumulated so far belongs to the old domain, and the §10.7 loss
-        // identity is a delta between two anchors of the SAME domain — mixing
-        // them would score a placement against a number that does not mean
-        // what it says. Restart the dwell at this power rather than carry it.
+        // The craft restarted its counter domain mid-burst, so everything
+        // counted so far belongs to the old domain and the burst has no
+        // trustworthy numerator. Re-run it at this power rather than score it.
         if (s.resynced) {
             restart_dwell(now_ms);
             return;
         }
         if (!s.progressed) return;
         if (now_ms < dwell_start_ms_) return;
-        emitted_ += s.epoch_delta;
         received_ += s.reports_delta;
         rssi_sum_ += s.rssi_sum_delta;
     }
 
-    // local_epoch is the ground's own Reporter::epoch(). It is needed for one
-    // case only: a counter blackout, where the craft's anchors cannot advance
-    // because nothing is arriving, so the dwell would otherwise never end.
-    // quality_live is the §3.16 LIVENESS clock — packet arrival, never
-    // counter progress. Losing it means the run has no observer; stalled
-    // counters under live feedback are evidence, not a timeout.
+    // local_epoch is the ground's own Reporter::epoch() — a count of reports
+    // the radio ACTUALLY took (§3.5 commits on injection only), which is why
+    // it can serve as the dwell denominator directly. quality_live is the
+    // §3.16 LIVENESS clock: packet arrival, never counter progress. Losing it
+    // means the run has no observer. A stalled counter under live feedback is
+    // still evidence, not a timeout — it just reads as a 1000permille burst.
     UplinkCalibActions tick(uint64_t now_ms, uint32_t local_epoch,
                             bool quality_live) {
         UplinkCalibActions a;
@@ -175,30 +195,32 @@ class UplinkCalibrator {
             return a;
         }
         if (now_ms < dwell_start_ms_) return a;  // settling
-        // Anchor the ground's own epoch clock at the END of settle, not at
-        // begin_dwell: the craft's `emitted_` starts accumulating here, so an
-        // anchor taken before settle runs ahead by settle_ms worth of epochs
-        // and would trip the fallback below on a perfectly healthy dwell.
+        // Arm the burst at the END of settle, so the probes are counted at
+        // the power they are meant to measure and not at the previous one.
         if (!dwell_epoch_armed_) {
             dwell_epoch_armed_ = true;
             dwell_local_epoch_ = local_epoch;
         }
 
-        if (emitted_ >= target_epochs_) {
-            return evaluate(a, now_ms, local_epoch, false);
+        // sent = what the radio actually took, exactly (§3.5 commits the
+        // epoch on injection only). This IS the denominator. No anchoring
+        // identity, no boundary correction, no fallback: the ground knows
+        // what it sent because it chose how much to send.
+        const uint32_t sent = local_epoch - dwell_local_epoch_;
+        if (sent < target_epochs_) {
+            a.probe_budget = target_epochs_ - sent;  // top the burst back up
+            return a;
         }
-        // Counter blackout: live feedback, the craft's anchors did not span
-        // the dwell. Fall back to the ground's own emission count and score
-        // 1000permille — §10.7. The condition is that `emitted_` fell short,
-        // NOT that `received_` is zero: a PARTIAL blackout (some epochs land,
-        // then the uplink dies) leaves received_ > 0 with the anchors frozen
-        // short of target, and keying on received_ == 0 wedged that dwell
-        // until the 600 s hard cap — precisely the floor case §10.7 exists
-        // for. Reaching here already implies emitted_ < target_epochs_.
-        if (local_epoch - dwell_local_epoch_ >= target_epochs_) {
-            return evaluate(a, now_ms, local_epoch, true);
+        // Burst complete. Go silent and let the craft's counter settle before
+        // scoring — that silence is what makes `received_` reflect the WHOLE
+        // burst instead of however much had landed at an arbitrary instant.
+        if (drain_until_ms_ == 0) {
+            drain_until_ms_ = now_ms + p_.drain_ms;
+            a.probe_budget = 0;
+            return a;
         }
-        return a;
+        if (now_ms < drain_until_ms_) return a;
+        return evaluate(a, now_ms, local_epoch, sent);
     }
 
     CalibState state() const { return state_; }
@@ -213,7 +235,10 @@ class UplinkCalibrator {
     uint8_t rung() const { return rung_; }
     const UplinkRate& rate() const { return p_.rungs[rung_]; }
     int32_t qdb() const { return qdb_; }
-    uint32_t dwell_progress() const { return emitted_; }
+    // Probes delivered so far in this burst. The burst SIZE is dwell_target;
+    // progress toward ending the dwell is the ground's own emission count,
+    // which the caller already has.
+    uint32_t dwell_progress() const { return received_; }
     uint32_t dwell_target() const { return target_epochs_; }
 
     // What the last completed dwell actually observed. §10.7's per-run record
@@ -227,8 +252,7 @@ class UplinkCalibrator {
         uint8_t rung = 0;
         int32_t qdb = 0;
         bool verify = false;
-        bool blackout = false;
-        uint32_t emitted = 0;
+        uint32_t sent = 0;
         uint32_t received = 0;
         uint16_t loss_milli = 0;
         int32_t rssi_mean = 0;
@@ -255,7 +279,7 @@ class UplinkCalibrator {
     void restart_dwell(uint64_t now_ms) {
         dwell_start_ms_ = now_ms + p_.settle_ms;
         dwell_epoch_armed_ = false;
-        emitted_ = 0;
+        drain_until_ms_ = 0;
         received_ = 0;
         rssi_sum_ = 0;
     }
@@ -264,55 +288,34 @@ class UplinkCalibrator {
         dwell_start_ms_ = now_ms + p_.settle_ms;
         dwell_local_epoch_ = local_epoch;
         dwell_epoch_armed_ = false;
+        drain_until_ms_ = 0;
         target_epochs_ = target;
-        emitted_ = 0;
         received_ = 0;
         rssi_sum_ = 0;
-        extended_ = false;
     }
 
+    // Score a completed burst. `sent` is the ground's own exact count.
     UplinkCalibActions evaluate(UplinkCalibActions a, uint64_t now_ms,
-                                uint32_t local_epoch, bool blackout) {
+                                uint32_t local_epoch, uint32_t sent) {
         const bool verify = seek_.in_verify();
+        // A burst that delivered nothing is 1000permille and its RSSI is the
+        // synthetic guard value — the seek's floor evidence, unchanged. Any
+        // delivery at all scores the measured loss against the burst size and
+        // takes RSSI from the probes that actually arrived.
         uint16_t loss = 1000;
         double rssi = static_cast<double>(p_.seek.rssi_guard_dbm) - 60.0;
-        // The denominator is the craft's own anchor span when it spans the
-        // dwell, and the ground's local emission count when it does not.
-        //
-        // A flat 1000permille for the second case is WRONG, and cost a run on
-        // the bench: the craft's `last_report_epoch` only advances for reports
-        // it ACCEPTED, so on a link with any loss at all it lags the ground's
-        // local clock by exactly the lost count. The local clock therefore
-        // reaches the target first and a perfectly healthy dwell — measured
-        // received=198 of emitted=199, ~5permille — scored 1000permille and
-        // failed its verify. Scoring the local span against `received_`
-        // degrades correctly at both ends: a total blackout still has
-        // received_==0 and still scores 1000permille (the original §10.7
-        // rule, preserved), while a one-epoch lag scores the real loss.
-        const uint32_t span = blackout ? local_epoch - dwell_local_epoch_
-                                       : emitted_;
-        if (span > 0 && received_ > 0) {
-            const uint32_t lost = span > received_ ? span - received_ : 0;
+        if (sent > 0 && received_ > 0) {
+            const uint32_t lost = sent > received_ ? sent - received_ : 0;
             loss = static_cast<uint16_t>(
-                std::min<uint64_t>(1000, uint64_t{lost} * 1000 / span));
+                std::min<uint64_t>(1000, uint64_t{lost} * 1000 / sent));
             rssi = static_cast<double>(rssi_sum_) /
                    static_cast<double>(received_);
-        }
-        // §10.7 ambiguous extension: between the walls, once, and only on a
-        // probe. A LONGER dwell is the only thing that resolves it, which is
-        // why config rejects ambiguous_epochs <= probe_epochs.
-        if (!verify && !extended_ && !blackout &&
-            loss > p_.seek.loss_ok_milli && loss <= p_.seek.loss_bad_milli &&
-            p_.ambiguous_epochs > target_epochs_) {
-            extended_ = true;
-            target_epochs_ = p_.ambiguous_epochs;
-            return a;  // keep accumulating into the same dwell
         }
         const DwellVerdict v = loss > p_.seek.loss_bad_milli
                                    ? DwellVerdict::kBad
                                    : DwellVerdict::kClean;
-        last_ = DwellRecord{last_.seq + 1,   rung_, qdb_,  verify, blackout,
-                            emitted_,        received_,
+        last_ = DwellRecord{last_.seq + 1,   rung_, qdb_,  verify,
+                            sent,            received_,
                             loss,            static_cast<int32_t>(std::lround(rssi)),
                             target_epochs_};
         const SeekStep s = seek_.on_dwell(v, rssi, loss);
@@ -424,11 +427,10 @@ class UplinkCalibrator {
     uint64_t dwell_start_ms_ = 0;
     uint32_t dwell_local_epoch_ = 0;
     uint32_t target_epochs_ = 0;
-    uint32_t emitted_ = 0;
+    uint64_t drain_until_ms_ = 0;
     uint32_t received_ = 0;
     int64_t rssi_sum_ = 0;
     int32_t qdb_ = 0;
-    bool extended_ = false;
     bool dwell_epoch_armed_ = false;
     bool restore_pending_ = false;
     bool artifact_pending_ = false;

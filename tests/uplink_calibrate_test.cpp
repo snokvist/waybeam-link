@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// §10.7 (Pass 125) ground-uplink calibrator tests. A synthetic uplink drives
-// the epoch-gated loop end to end: the clean ramp, the floor start that every
-// real run begins in, the ambiguous extension, liveness abort, and the
-// restore-on-every-exit law.
+// §10.7 ground-uplink calibrator tests. A synthetic uplink drives the burst
+// loop end to end: the clean ramp, the floor start that every real run begins
+// in, the eight-rung sweep, liveness abort, and the restore-on-every-exit law.
 //
-// The gating is what differs from §10.6 and so is what is pinned here: dwells
-// advance on REPORT EPOCHS, not wall time, and a stalled counter under live
-// feedback is a 1000permille observation rather than a timeout.
+// What differs from §10.6 and so is what is pinned here: the ground SENDS a
+// counted burst of probes and divides by its own count (Pass 132), rather
+// than measuring a stream whose rate it does not control. A burst that
+// delivers nothing is a 1000permille observation, never a timeout.
 #include "wblink/uplink_calibrate.h"
 
 #include <cstdint>
@@ -56,38 +56,41 @@ struct Rig {
     uint64_t now = 1000;
     uint32_t local_epoch = 0;   // ground Reporter::epoch()
     uint32_t craft_reports = 0; // craft cumulative reports_received
-    uint32_t craft_epoch = 0;   // craft cumulative last_report_epoch
-    int32_t craft_rssi_sum = 0;
     int restores = 0;
     int artifacts = 0;
     int power_before_rate = 0;
+    int drains = 0;
+    uint32_t budget = 0;
     std::vector<UplinkRate> rates;
     bool quality_live = true;
 
     explicit Rig(const UplinkCalibParams& p) : cal(p) {}
 
-    // One 100 ms step: emit a report, deliver it (or not), and every 5th step
-    // hand the calibrator the §3.16 delta.
+    // One 10 ms tick. The ground emits whatever the calibrator's probe
+    // budget allows -- capped per tick to model the §7.2 quiet gap, which
+    // fits roughly a dozen small frames -- and the craft counts what it
+    // receives. §3.16 feedback still arrives at 2 Hz.
+    static constexpr uint32_t kProbesPerGap = 12;
+
     void step() {
-        now += 100;
-        ++local_epoch;
-        const uint32_t got = up.delivered(1);
-        craft_reports += got;
-        if (got != 0) {
-            craft_epoch = local_epoch;
-            craft_rssi_sum += up.rssi();
+        now += 10;
+        uint32_t emit = budget < kProbesPerGap ? budget : kProbesPerGap;
+        budget -= emit;
+        while (emit-- > 0) {
+            ++local_epoch;               // Reporter commits on injection only
+            craft_reports += up.delivered(1);
         }
-        if (local_epoch % 5 == 0) {  // 2 Hz feedback
+        if (now - last_fb_ms_ >= 500) {  // 2 Hz §3.16
+            last_fb_ms_ = now;
             QualitySample s;
             s.accepted = true;
             if (craft_reports != last_reports_) {
                 s.progressed = true;
                 s.reports_delta = craft_reports - last_reports_;
-                s.epoch_delta = craft_epoch - last_epoch_;
-                s.rssi_sum_delta = craft_rssi_sum - last_rssi_;
+                s.rssi_sum_delta =
+                    static_cast<int32_t>(up.rssi()) *
+                    static_cast<int32_t>(s.reports_delta);
                 last_reports_ = craft_reports;
-                last_epoch_ = craft_epoch;
-                last_rssi_ = craft_rssi_sum;
             }
             cal.on_sample(s, now);
         }
@@ -97,9 +100,13 @@ struct Rig {
         if (a.set_qdb) {
             up.qdb = *a.set_qdb;
             // Every power command must land on a rung that was commanded
-            // first. Pass 131's new stranded-actuator surface is the rung, so
+            // first. The rung is Pass 131's new stranded-actuator surface, so
             // "power arrived before its rate" is the shape to catch.
             if (rates.empty()) ++power_before_rate;
+        }
+        if (a.probe_budget) {
+            budget = *a.probe_budget;
+            if (*a.probe_budget == 0) ++drains;   // burst done, drain opened
         }
         if (a.restore) ++restores;
         if (a.artifact_ready) ++artifacts;
@@ -114,8 +121,7 @@ struct Rig {
     }
 
     uint32_t last_reports_ = 0;
-    uint32_t last_epoch_ = 0;
-    int32_t last_rssi_ = 0;
+    uint64_t last_fb_ms_ = 0;
 };
 
 // Rung 0's placement. Pass 131 sweeps eight rungs, but this synthetic uplink
@@ -130,11 +136,34 @@ const UplinkPlacement& first_placement(const UplinkCalibrator& c) {
 UplinkCalibParams fast_params() {
     UplinkCalibParams p;
     p.settle_ms = 200;
-    p.probe_epochs = 5;
-    p.ambiguous_epochs = 10;
-    p.verify_epochs = 20;
+    p.probe_epochs = 20;
+    p.verify_epochs = 40;
+    p.drain_ms = 600;
     p.liveness_ms = 2000;
     return p;
+}
+
+// Feed one complete burst: settle, arm, let the ground send the whole burst,
+// deliver `received` of it, drain, score. That is the entire measurement —
+// compare it with the anchoring dance Pass 125 needed to do the same job.
+void feed_dwell(UplinkCalibrator& cal, uint64_t& t, uint32_t& epoch,
+                const UplinkCalibParams& p, uint32_t received, int8_t rssi) {
+    const uint32_t target = cal.dwell_target();
+    t += p.settle_ms + 1;
+    (void)cal.tick(t, epoch, true);   // arms the burst anchor
+    epoch += target;                  // ...the ground sends it
+    if (received > 0) {
+        QualitySample s;
+        s.accepted = true;
+        s.progressed = true;
+        s.reports_delta = received;
+        s.rssi_sum_delta =
+            static_cast<int32_t>(rssi) * static_cast<int32_t>(received);
+        cal.on_sample(s, t);
+    }
+    (void)cal.tick(t, epoch, true);   // burst complete -> drain opens
+    t += p.drain_ms + 1;
+    (void)cal.tick(t, epoch, true);   // drain elapsed -> score
 }
 
 // A clean uplink ramps to max and verifies there.
@@ -251,198 +280,141 @@ void test_gate_is_epochs_not_time() {
     CHECK(cal.dwell_progress() == 0);
 }
 
-// Between the walls, once, and only on a probe: the ambiguous extension
-// lengthens the same dwell rather than deciding on a reading it cannot trust.
-void test_ambiguous_extension() {
+// Pass 132 deletes the ambiguous extension. It existed because a 40-probe
+// gate put ONE lost report at 25permille -- between loss_ok_milli (15) and
+// loss_bad_milli (50) -- so the reading could not be made and the dwell had
+// to be re-run longer. With the ground choosing the burst size, the fix is to
+// choose one big enough: at 100 probes one loss is 10permille (clean) and
+// five are 50permille (the wall), so every reading is decidable first time.
+// config.cpp enforces exactly this (1000/N <= loss_ok_milli).
+void test_burst_resolves_the_walls_first_time() {
     UplinkCalibParams p = fast_params();
+    p.probe_epochs = 100;
     p.seek.loss_ok_milli = 15;
     p.seek.loss_bad_milli = 50;
     UplinkCalibrator cal(p);
     CHECK(cal.start(1000, 0));
-    uint64_t t = 1000 + p.settle_ms + 1;
-    // Deliver 4 of 5 epochs: 200permille is past the bad wall, so NOT
-    // ambiguous — that one decides immediately.
-    QualitySample s;
-    s.accepted = true;
-    s.progressed = true;
-    s.epoch_delta = p.probe_epochs;
-    s.reports_delta = p.probe_epochs - 1;
-    s.rssi_sum_delta = -40 * static_cast<int32_t>(p.probe_epochs - 1);
-    cal.on_sample(s, t);
-    (void)cal.tick(t, p.probe_epochs, true);
-    CHECK(cal.dwell_target() == p.probe_epochs);  // decided, new probe dwell
+    uint64_t t = 1000;
+    uint32_t epoch = 0;
 
-    // Now an ambiguous reading: 1 lost in 40 = 25permille, between the walls.
-    UplinkCalibParams q = fast_params();
-    q.probe_epochs = 40;
-    q.ambiguous_epochs = 80;
-    UplinkCalibrator cal2(q);
+    // 99 of 100 = 10permille: clean, decided, and the seek steps UP.
+    const int32_t floor_qdb = cal.qdb();
+    feed_dwell(cal, t, epoch, p, 99, -40);
+    CHECK(cal.last_dwell().loss_milli == 10);
+    CHECK(cal.qdb() > floor_qdb);            // clean -> climb
+    CHECK(cal.dwell_target() == p.probe_epochs);  // a NEW dwell, not extended
+
+    // 94 of 100 = 60permille: past the bad wall, decided the other way.
+    UplinkCalibrator bad(p);
+    CHECK(bad.start(1000, 0));
+    uint64_t t2 = 1000;
+    uint32_t e2 = 0;
+    feed_dwell(bad, t2, e2, p, 94, -40);
+    CHECK(bad.last_dwell().loss_milli == 60);
+    CHECK(bad.dwell_target() == p.probe_epochs);
+}
+
+// THE Pass 132 simplification, pinned. The denominator is the ground's own
+// count of probes the radio took -- not the craft's `last_report_epoch`
+// delta, and not wall time. Reports still in flight cannot skew it, because
+// the burst is finished and drained before anything is scored.
+//
+// This one property retires four mechanisms: the `emitted = E_B - E_A`
+// anchoring identity (Pass 125), the local-epoch blackout fallback (Pass 126
+// C1), that fallback's measured-loss scoring rule (Pass 128), and the
+// ambiguous extension. Passes 126 and 128 were both defects INSIDE that
+// machinery.
+void test_denominator_is_the_grounds_own_count() {
+    UplinkCalibParams p = fast_params();
+    p.probe_epochs = 100;
+    UplinkCalibrator cal(p);
+    CHECK(cal.start(1000, 0));
+    uint64_t t = 1000;
+    uint32_t epoch = 0;
+
+    // A perfectly clean burst: 100 sent, 100 counted.
+    feed_dwell(cal, t, epoch, p, 100, -40);
+    CHECK(cal.last_dwell().sent == 100);
+    CHECK(cal.last_dwell().received == 100);
+    CHECK(cal.last_dwell().loss_milli == 0);
+    CHECK(cal.last_dwell().rssi_mean == -40);
+
+    // The craft's own epoch counter is NOT consulted: QualitySample carries an
+    // epoch_delta field and the calibrator ignores it entirely. Feed a wildly
+    // wrong one and the score is unchanged.
+    UplinkCalibrator cal2(p);
     CHECK(cal2.start(1000, 0));
-    t = 1000 + q.settle_ms + 1;
-    QualitySample amb;
-    amb.accepted = true;
-    amb.progressed = true;
-    amb.epoch_delta = 40;
-    amb.reports_delta = 39;
-    amb.rssi_sum_delta = -40 * 39;
-    cal2.on_sample(amb, t);
-    (void)cal2.tick(t, 40, true);
-    CHECK(cal2.dwell_target() == q.ambiguous_epochs);  // extended, not decided
-    CHECK(cal2.dwell_progress() == 40);                // same dwell continues
+    uint64_t t2 = 1000;
+    uint32_t e2 = 0;
+    const uint32_t target = cal2.dwell_target();
+    t2 += p.settle_ms + 1;
+    (void)cal2.tick(t2, e2, true);
+    e2 += target;
+    QualitySample s;
+    s.accepted = true;
+    s.progressed = true;
+    s.reports_delta = 100;
+    s.epoch_delta = 9999;               // nonsense; must not be used
+    s.rssi_sum_delta = -40 * 100;
+    cal2.on_sample(s, t2);
+    (void)cal2.tick(t2, e2, true);
+    t2 += p.drain_ms + 1;
+    (void)cal2.tick(t2, e2, true);
+    CHECK(cal2.last_dwell().sent == 100);
+    CHECK(cal2.last_dwell().loss_milli == 0);
 }
 
-// Case 20: the dwell denominator is anchored on the craft's own
-// last_report_epoch bounds, so a report emitted after E_B belongs to the NEXT
-// dwell. This is the arithmetic the 15/50permille walls sit on: at a 40-epoch
-// dwell one boundary-straddling report is 25permille, which lands between the
-// walls and would turn every clean dwell ambiguous.
-void test_loss_denominator_boundary() {
+// The C1 shape, which the burst model makes structurally impossible. A
+// PARTIAL blackout -- some probes land, then the uplink dies mid-burst --
+// used to leave the craft's anchors frozen short of target with received > 0,
+// so the dwell never ended and the run wedged at min_qdb until the 600 s hard
+// cap. Now the dwell ends when the GROUND has finished sending, which it
+// always does, and the partial delivery is simply the measured loss.
+void test_partial_blackout_ends_the_burst() {
     UplinkCalibParams p = fast_params();
-    p.probe_epochs = 40;
-    p.ambiguous_epochs = 80;
-    p.seek.loss_ok_milli = 15;
-    p.seek.loss_bad_milli = 50;
+    p.probe_epochs = 100;
     UplinkCalibrator cal(p);
     CHECK(cal.start(1000, 0));
-    const uint64_t t = 1000 + p.settle_ms + 1;
+    const int32_t floor_qdb = cal.qdb();
+    uint64_t t = 1000;
+    uint32_t epoch = 0;
 
-    // A perfectly clean dwell: the craft saw 40 epochs and accepted all 40.
-    // The ground emitted more than that in wall-clock terms -- reports 41 and
-    // 42 are still in flight -- but they are outside (E_A, E_B] and must not
-    // be counted against this dwell.
-    QualitySample s;
-    s.accepted = true;
-    s.progressed = true;
-    s.epoch_delta = 40;
-    s.reports_delta = 40;
-    s.rssi_sum_delta = -40 * 40;
-    cal.on_sample(s, t);
-    // local_epoch is 42: two more emitted than the craft has acknowledged.
-    // A wall-clock or raw-emission denominator would read 2/42 = 47permille
-    // here and extend; the anchored one reads 0.
-    (void)cal.tick(t, 42, true);
-    CHECK(cal.dwell_target() == p.probe_epochs);  // decided, not extended
+    // Half the burst lands, then silence. received > 0, so the old
+    // `received == 0` guard could never have fired.
+    feed_dwell(cal, t, epoch, p, 50, -40);
     CHECK(cal.state() == CalibState::kRunning);
-
-    // And a genuinely lossy dwell still reads lossy: 4 lost in 40 = 100
-    // permille, past the bad wall.
-    UplinkCalibrator lossy(p);
-    CHECK(lossy.start(1000, 0));
-    QualitySample bad;
-    bad.accepted = true;
-    bad.progressed = true;
-    bad.epoch_delta = 40;
-    bad.reports_delta = 36;
-    bad.rssi_sum_delta = -40 * 36;
-    lossy.on_sample(bad, t);
-    (void)lossy.tick(t, 40, true);
-    CHECK(lossy.dwell_target() == p.probe_epochs);  // decided, not ambiguous
+    CHECK(cal.last_dwell().sent == 100);
+    CHECK(cal.last_dwell().received == 50);
+    CHECK(cal.last_dwell().loss_milli == 500);  // measured, not a flat 1000
+    CHECK(cal.qdb() > floor_qdb);               // bad at the floor -> climb
 }
 
-// Feed one complete dwell's worth of evidence to a directly-driven
-// calibrator: advance past settle, hand it a single telescoped sample, tick.
-// `local_epoch` stays 0 throughout so the blackout fallback never fires — the
-// craft's own anchors decide these dwells.
-void feed_dwell(UplinkCalibrator& cal, uint64_t& t, uint32_t settle_ms,
-                uint32_t emitted, uint32_t received, int8_t rssi) {
-    t += settle_ms + 1;
-    QualitySample s;
-    s.accepted = true;
-    s.progressed = true;
-    s.epoch_delta = emitted;
-    s.reports_delta = received;
-    s.rssi_sum_delta = static_cast<int32_t>(rssi) *
-                       static_cast<int32_t>(received);
-    cal.on_sample(s, t);
-    (void)cal.tick(t, 0, true);
-}
-
-// C1 regression. A PARTIAL blackout — some epochs land, then the uplink dies
-// mid-dwell — leaves the craft's anchors frozen SHORT of target with
-// received_ > 0. Keying the fallback on `received_ == 0` wedged that dwell
-// until the 600 s hard cap, which made the §10.7 floor rule unreachable in
-// exactly the scenario it exists for. The dwell must end on the ground's own
-// epoch count, score 1000permille, and ascend.
-void test_partial_blackout_ends_dwell() {
+// A totally dead burst is the seek's floor evidence and still scores
+// 1000permille with the synthetic guard RSSI. The Pass 128 bench failure --
+// a 198-of-199 verify dwell scored as a total blackout because the craft's
+// accepted-epoch anchor lagged the ground's clock by the lost count -- cannot
+// recur: there is no anchor to lag, only the ground's own count.
+void test_dead_burst_is_1000_permille() {
     UplinkCalibParams p = fast_params();
-    p.probe_epochs = 40;
-    p.ambiguous_epochs = 80;
-    UplinkCalibrator cal(p);
-    CHECK(cal.start(1000, 0));
-    const int32_t floor_qdb = p.seek.min_qdb;
-    CHECK(cal.qdb() == floor_qdb);
-
-    uint64_t t = 1000 + p.settle_ms + 1;
-    (void)cal.tick(t, 0, true);  // arms the ground epoch anchor at 0
-
-    // 20 of the 40 epochs land, then the craft goes silent. received_ is 20,
-    // so the old `received_ == 0` guard could never fire.
-    QualitySample s;
-    s.accepted = true;
-    s.progressed = true;
-    s.epoch_delta = 20;
-    s.reports_delta = 20;
-    s.rssi_sum_delta = -40 * 20;
-    cal.on_sample(s, t);
-    (void)cal.tick(t, 20, true);
-    CHECK(cal.state() == CalibState::kRunning);
-    CHECK(cal.qdb() == floor_qdb);  // still deciding
-    CHECK(cal.dwell_progress() == 20);
-
-    // The ground keeps emitting under live feedback. At target the dwell must
-    // decide against the ground's own count.
-    t += 2000;
-    (void)cal.tick(t, p.probe_epochs, true);
-    CHECK(cal.state() == CalibState::kRunning);  // not a timeout, an observation
-    CHECK(cal.qdb() > floor_qdb);                // scored 1000permille -> ascend
-    CHECK(cal.dwell_progress() == 0);            // a fresh dwell at the new power
-}
-
-// Bench regression (P1, first live §10.7 run). The blackout fallback scored a
-// flat 1000permille, but it fires whenever the craft's anchors fall short of
-// the target — and the craft's `last_report_epoch` only advances for reports it
-// ACCEPTED, so on any lossy link it lags the ground's local clock by exactly
-// the lost count. The local clock therefore hits the target first, and a
-// measured 198-of-199 verify dwell (~5permille, clean) scored 1000permille and
-// failed the run. Score the local span against `received_` instead.
-void test_blackout_scores_measured_loss_not_flat_1000() {
-    UplinkCalibParams p = fast_params();
-    p.probe_epochs = 40;
-    p.ambiguous_epochs = 80;
-    UplinkCalibrator cal(p);
-    CHECK(cal.start(1000, 0));
-    uint64_t t = 1000 + p.settle_ms + 1;
-    (void)cal.tick(t, 0, true);  // arm the ground anchor at 0
-
-    // 39 of the 40 land; the craft's anchor stops one short of target while
-    // the ground's own clock reaches it. That is a CLEAN dwell.
-    QualitySample s;
-    s.accepted = true;
-    s.progressed = true;
-    s.epoch_delta = 39;
-    s.reports_delta = 39;
-    s.rssi_sum_delta = -40 * 39;
-    cal.on_sample(s, t);
-    t += 2000;
-    (void)cal.tick(t, 40, true);
-    const auto& d = cal.last_dwell();
-    CHECK(d.blackout);                 // the fallback did end the dwell
-    CHECK(d.loss_milli <= 30);         // ...but scored the MEASURED loss
-    CHECK(d.rssi_mean == -40);         // and kept the real RSSI
-    CHECK(cal.state() == CalibState::kRunning);
-    CHECK(cal.qdb() > p.seek.min_qdb); // clean at the floor -> ramp upward
-
-    // A TOTAL blackout is unchanged: nothing received, still 1000permille,
-    // still the seek's floor evidence.
+    p.probe_epochs = 100;
     UplinkCalibrator dead(p);
     CHECK(dead.start(1000, 0));
-    uint64_t t2 = 1000 + p.settle_ms + 1;
-    (void)dead.tick(t2, 0, true);
-    t2 += 2000;
-    (void)dead.tick(t2, 40, true);
-    CHECK(dead.last_dwell().blackout);
+    uint64_t t = 1000;
+    uint32_t epoch = 0;
+    const int32_t floor_qdb = dead.qdb();
+    feed_dwell(dead, t, epoch, p, 0, -40);
+    CHECK(dead.last_dwell().received == 0);
     CHECK(dead.last_dwell().loss_milli == 1000);
-    CHECK(dead.qdb() > p.seek.min_qdb);  // ascends off the dead floor
+    CHECK(dead.qdb() > floor_qdb);   // ascends off the dead floor
+
+    // ...and the near-clean case that Pass 128 mis-scored reads clean.
+    UplinkCalibrator ok(p);
+    CHECK(ok.start(1000, 0));
+    uint64_t t2 = 1000;
+    uint32_t e2 = 0;
+    feed_dwell(ok, t2, e2, p, 99, -40);
+    CHECK(ok.last_dwell().loss_milli == 10);
+    CHECK(ok.last_dwell().rssi_mean == -40);
 }
 
 // Operator ruling (Pass 129): persistence is the deliverable. A run whose
@@ -550,22 +522,23 @@ void test_verify_exhausted_is_failure() {
     UplinkCalibrator cal(p);
     CHECK(cal.start(1000, 0));
     uint64_t t = 1000;
+    uint32_t epoch = 0;
 
     // The reproduced ladder: clean@4, clean@20, bad@36 -> place at 20.
-    feed_dwell(cal, t, p.settle_ms, p.probe_epochs, p.probe_epochs, -40);
+    feed_dwell(cal, t, epoch, p, p.probe_epochs, -40);
     CHECK(cal.qdb() == 20);
-    feed_dwell(cal, t, p.settle_ms, p.probe_epochs, p.probe_epochs, -36);
+    feed_dwell(cal, t, epoch, p, p.probe_epochs, -36);
     CHECK(cal.qdb() == 36);
-    feed_dwell(cal, t, p.settle_ms, p.probe_epochs, 1, -33);
+    feed_dwell(cal, t, epoch, p, 1, -33);
     CHECK(cal.qdb() == 20);  // retreated to the last clean probe, now verifying
 
     // Verify at 20 fails under sustained exposure -> the bounded step-down.
-    feed_dwell(cal, t, p.settle_ms, p.verify_epochs, p.verify_epochs - 1, -36);
+    feed_dwell(cal, t, epoch, p, p.verify_epochs - 1, -36);
     CHECK(cal.qdb() == 4);
     CHECK(cal.state() == CalibState::kRunning);
 
     // Verify at the floor fails too, and there is nowhere left to descend.
-    feed_dwell(cal, t, p.settle_ms, p.verify_epochs, 1, -40);
+    feed_dwell(cal, t, epoch, p, 1, -40);
     CHECK(cal.state() == CalibState::kFailed);
     CHECK(cal.fail_reason() != nullptr);
     if (cal.fail_reason() != nullptr) {
@@ -828,14 +801,14 @@ void test_sequencer() {
 
 int main() {
     test_sequencer();
-    test_partial_blackout_ends_dwell();
-    test_blackout_scores_measured_loss_not_flat_1000();
+    test_partial_blackout_ends_the_burst();
+    test_dead_burst_is_1000_permille();
     test_verify_exhausted_is_failure();
     test_bracket_never_books_the_cold_floor();
     test_failed_persist_fails_the_run();
     test_silent_cap_sweeps_to_max();
     test_second_run_clears_bracket();
-    test_loss_denominator_boundary();
+    test_denominator_is_the_grounds_own_count();
     test_clean_ramp();
     test_floor_start();
     test_counter_blackout_is_evidence();
@@ -843,7 +816,7 @@ int main() {
     test_liveness_abort();
     test_abort();
     test_gate_is_epochs_not_time();
-    test_ambiguous_extension();
+    test_burst_resolves_the_walls_first_time();
     test_eight_rung_sweep();
     test_failure_mid_sweep_persists_nothing();
     if (g_fail != 0) {

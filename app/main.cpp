@@ -3027,6 +3027,12 @@ struct RxCore {
     // calibrator needs it only for the counter-blackout case, where the
     // craft's anchors cannot advance.
     uint32_t report_epoch() const { return reporter_.epoch(); }
+    // §10.7 (Pass 132) probe burst. `report_epoch()` above is what makes this
+    // work: it counts reports the radio actually TOOK, so the calibrator can
+    // size a burst and then divide by the ground's own exact count instead of
+    // reconstructing it from the craft's anchors.
+    void set_probe_budget(uint32_t n) { reporter_.set_probe_budget(n); }
+    void clear_probe_mode() { reporter_.clear_probe_mode(); }
     // The injector's half of the §3.5 emission contract: the number to stamp
     // into the frame at the radio call, and the commit that spends it.
     uint32_t next_report_epoch() const { return reporter_.next_epoch(); }
@@ -4660,11 +4666,10 @@ int run_rx(const Loaded& l) {
         ucal_params.settle_ms = static_cast<uint32_t>(cp.settle_ms);
         ucal_params.probe_epochs =
             static_cast<uint32_t>(cp.uplink_probe_epochs);
-        ucal_params.ambiguous_epochs =
-            static_cast<uint32_t>(cp.uplink_ambiguous_epochs);
         ucal_params.verify_epochs =
             static_cast<uint32_t>(cp.uplink_verify_epochs);
         ucal_params.liveness_ms = static_cast<uint32_t>(cp.uplink_liveness_ms);
+        ucal_params.drain_ms = static_cast<uint32_t>(cp.uplink_drain_ms);
         ucal_params.hard_cap_ms = static_cast<uint32_t>(cp.hard_cap_ms);
         // §10.7 (Pass 131): rung -> rate identity from the §9.3 table, so a
         // calibrated placement's GI is the GI the uplink would actually be
@@ -4814,6 +4819,11 @@ int run_rx(const Loaded& l) {
     // §10.5 override paths call this rather than setting power directly — the
     // rate re-latch is an idempotent no-op there.
     const auto uplink_restore_actuators = [&]() {
+        // Probe mode first, and unconditionally: it is the one actuator that
+        // is not the adapter's, so an early return on a missing uplink
+        // adapter must not leave the reporter stuck in a spent burst — which
+        // would silence LINK_REPORT entirely, for good.
+        rx.clear_probe_mode();
         if (uplink_adapter == nullptr) return;
         air.value->latch_uplink_rate(l.cfg.air.uplink_mcs,
                                      l.cfg.air.uplink_sgi);
@@ -6101,6 +6111,9 @@ int run_rx(const Loaded& l) {
             if (ua.set_qdb && uplink_adapter != nullptr) {
                 (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
             }
+            // §10.7 (Pass 132): the burst. 0 opens the drain window, so the
+            // craft's counter settles before the dwell is scored.
+            if (ua.probe_budget) rx.set_probe_budget(*ua.probe_budget);
             if (ua.restore) uplink_restore_actuators();
             // §10.7 per-dwell trace. The campaign's deliverable is a per-run
             // record (duration, samples/dwell, loss, RSSI, bracket); without
@@ -6111,11 +6124,11 @@ int run_rx(const Loaded& l) {
                 dw.seq != uplink_last_dwell_seq) {
                 uplink_last_dwell_seq = dw.seq;
                 std::fprintf(stderr,
-                             "uplink-calib: dwell#%u %s qdb=%d emitted=%u/%u "
-                             "received=%u loss=%upermille rssi=%d%s\n",
-                             dw.seq, dw.verify ? "VERIFY" : "probe ", dw.qdb,
-                             dw.emitted, dw.target, dw.received, dw.loss_milli,
-                             dw.rssi_mean, dw.blackout ? " [BLACKOUT]" : "");
+                             "uplink-calib: dwell#%u rung=%u %s qdb=%d "
+                             "sent=%u/%u received=%u loss=%upermille rssi=%d\n",
+                             dw.seq, dw.rung, dw.verify ? "VERIFY" : "probe ",
+                             dw.qdb, dw.sent, dw.target, dw.received,
+                             dw.loss_milli, dw.rssi_mean);
             }
             // A craft change mid-run invalidates the measurement in progress
             // (D4) — the artifact stamps the craft identity, and the §3.16

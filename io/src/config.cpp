@@ -575,12 +575,12 @@ Result<Config> load_config_json(const std::string& json_text) {
                 // §10.7 uplink gates — epoch counts, never milliseconds.
                 cal.uplink_probe_epochs =
                     pk.value("uplink_probe_epochs", cal.uplink_probe_epochs);
-                cal.uplink_ambiguous_epochs = pk.value(
-                    "uplink_ambiguous_epochs", cal.uplink_ambiguous_epochs);
                 cal.uplink_verify_epochs =
                     pk.value("uplink_verify_epochs", cal.uplink_verify_epochs);
                 cal.uplink_liveness_ms =
                     pk.value("uplink_liveness_ms", cal.uplink_liveness_ms);
+                cal.uplink_drain_ms =
+                    pk.value("uplink_drain_ms", cal.uplink_drain_ms);
                 if (cal.min_qdb > cal.max_qdb) {
                     return Result<Config>::fail(
                         "policy.calibration: min_qdb > max_qdb (§10.6)");
@@ -598,18 +598,23 @@ Result<Config> load_config_json(const std::string& json_text) {
                 }
                 if (cal.uplink_probe_epochs < 1 ||
                     cal.uplink_verify_epochs < 1 ||
-                    cal.uplink_liveness_ms < 1) {
+                    cal.uplink_liveness_ms < 1 || cal.uplink_drain_ms < 1) {
                     return Result<Config>::fail(
-                        "policy.calibration: uplink epoch/liveness gates must "
-                        "be >= 1 (§10.7)");
+                        "policy.calibration: uplink burst/drain/liveness "
+                        "gates must be >= 1 (§10.7)");
                 }
-                // The ambiguous extension is a LONGER re-dwell of the same
-                // probe, so a value at or below the probe gate would make it
-                // a no-op that silently consumed the one-shot budget.
-                if (cal.uplink_ambiguous_epochs <= cal.uplink_probe_epochs) {
+                // Pass 132: a burst too small to resolve the walls decides on
+                // noise. One lost probe must land at or under loss_ok_milli,
+                // i.e. 1000/N <= loss_ok_milli — otherwise a single unlucky
+                // probe reads as ambiguous or bad and the placement is a
+                // coin-flip. This is the check that replaces the ambiguous
+                // extension rather than reintroducing it.
+                if (cal.loss_ok_milli > 0 &&
+                    1000 / cal.uplink_probe_epochs > cal.loss_ok_milli) {
                     return Result<Config>::fail(
-                        "policy.calibration: uplink_ambiguous_epochs must "
-                        "exceed uplink_probe_epochs (§10.7)");
+                        "policy.calibration: uplink_probe_epochs too small to "
+                        "resolve loss_ok_milli — one lost probe must be <= it "
+                        "(§10.7)");
                 }
             }
             if (p.contains("cmd")) {
