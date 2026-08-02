@@ -2210,6 +2210,18 @@ at its **configured uplink operating point** — v1: a single MCS0/LGI/HT20 rung
 and on sparse normal LINK_REPORT traffic. It therefore produces one placement
 per configured rung, v1 exactly one, and adds no synthetic probe traffic.
 
+**The uplink rung is configured, not inherited (Pass 125).** Before this
+section, an rx-node never called `set_tx_mode` at all: its uplink rung was the
+`TxRate` struct default, which happens to be MCS0/LGI/HT20. A calibrated
+placement must not rest on a default that no one asserted — the artifact records
+the rung it was measured at, and `last_rx_mcs` cross-checks it, so the rung must
+be a value the node commits. An rx-node with a designated uplink therefore reads
+`air.uplink_rate` (seeds `{mcs: 0, sgi: false, bw: 20}`) and commits it through
+the same `set_tx_mode` seam the tx-node uses, once at startup and after every
+retune that can reset it. Behaviour at the seeds is byte-identical to today; what
+changes is that the operating point is now asserted and observable, and the
+future multi-rung uplink widens a config value rather than adding a mechanism.
+
 **Authority and prerequisites.** Calibration is ground-local and starts only
 through `POST /api/v1/calibration` on the ground control server (deployment
 port `:8092`). It requires exactly one designated uplink adapter, a configured
@@ -2268,20 +2280,28 @@ wrap-aware u32 arithmetic:
 
 ```
 received  = R_B - R_A
-emitted   = unique report epochs this ground emitted in (E_A, E_B]
+emitted   = E_B - E_A
 loss‰     = 1000 * (emitted - received) / emitted          (emitted > 0)
 rssi_mean = (int32)(S_B - S_A) / received                  (received > 0)
 ```
 
-Anchoring `emitted` on the craft's own `last_report_epoch` bounds — not on
-ground wall-clock, and not on every epoch emitted during the dwell — removes
-in-flight boundary error: a report emitted after `E_B` belongs to the next
-dwell. This is load-bearing, not fussiness: at a 40-epoch dwell one
-boundary-straddling report is 25‰, which lands between `loss_ok_milli` and
-`loss_bad_milli`, so an unanchored denominator would make every clean dwell read
-ambiguous and burn the one-shot extension to 80 on nothing. When `received == 0`
-the craft's anchors cannot advance; that dwell scores `loss = 1000‰` with
-`emitted` taken as the ground's own emission count over the dwell, and
+`report_epoch` increments **once per emitted report** (§3.5), so the craft's own
+`last_report_epoch` delta *is* the emitted count over the interval the craft
+observed — the ground keeps no per-epoch record and needs no emission
+bookkeeping. This costs nothing and removes in-flight boundary error by
+construction: a report emitted after `E_B` belongs to the next dwell. That
+matters, and is not fussiness — at a 40-epoch dwell one boundary-straddling
+report is 25‰, which lands between `loss_ok_milli` and `loss_bad_milli`, so a
+wall-clock or raw-emission denominator would make every clean dwell read
+ambiguous and burn the one-shot extension to 80 on nothing.
+
+This identity holds only while every **built** report is also **injected**. An
+implementation that can drop a report between build and injection (no uplink
+adapter, full TX queue) must increment the epoch at injection, or `emitted`
+over-reports and the seek sees phantom loss.
+
+When `received == 0` the craft's anchors cannot advance; that dwell scores
+`loss = 1000‰` against the ground's own local `Reporter::epoch()` delta, and
 contributes no RSSI sample. Cap-wall confirmation matches §10.6; the §10.6
 blank-dwell hold (zero samples ⇒ hold and let the clocks arbitrate) has no
 uplink meaning and is not inherited.
@@ -3556,6 +3576,21 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   Dwells are short by design: the live video IS the measurement traffic
   (thousands of loss samples per second), so a dwell needs only TXAGC
   settle plus a couple of report windows — a full 8-rung run is ~2 min.
+  **§10.7 (Pass 125)** reuses this block on the ground/rx node — same walls,
+  step, min/max, settle, and `artifact_dir` (the uplink artifact is a distinct
+  filename in the same directory) — and adds only what differs because the
+  uplink measures sparse reports instead of live video: `uplink_probe_epochs`
+  (40), `uplink_ambiguous_epochs` (80), `uplink_verify_epochs` (200),
+  `uplink_liveness_ms` (2000). The uplink gates are **epoch counts, not
+  milliseconds**, so a slow report cadence lengthens the run instead of
+  scoring unobserved dwells as clean; `probe_dwell_ms`/`verify_dwell_ms`/
+  `report_loss_abort_ms` are craft-only and unused on the ground.
+- `air.uplink_rate` (ground/rx node with a designated §6.4 uplink, §10.7)
+  commits the uplink operating point: `mcs` (0), `sgi` (false), `bw` (20).
+  Seeds equal the pre-Pass-125 `TxRate` struct default, so committed
+  behaviour is unchanged; what changes is that it is asserted rather than
+  inherited, which is what makes a calibrated placement's recorded rung and
+  §3.16's `last_rx_mcs` cross-check meaningful.
 - `scout` (ground/rx node, §15.5) configures the channel searcher: `dwell_ms`
   (base per-channel listen, **300 ms**; an occupied channel auto-extends until
   its first ANNOUNCE candidate resolves, §15.5a Pass 72) and `channels`

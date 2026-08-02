@@ -59,7 +59,18 @@ worktree changes into any commit.
 - **Floor ≠ ceiling.** With no clean probe yet, loss means "too cold" — ascend.
   Retreat/place only above a clean probe. This amends §10.6 too.
 - **Dwell loss is anchored on the craft's own `last_report_epoch` bounds**, not
-  on ground wall-clock or raw ground emission count. Formula is spec'd in §10.7.
+  on ground wall-clock. `report_epoch` increments once per emitted report, so
+  `emitted = E_B - E_A` and the ground keeps **no** per-epoch record. Verify the
+  build→inject pairing holds; if a built report can be dropped before injection,
+  move the increment to injection. Formula is spec'd in §10.7.
+- **The uplink rung is configured, not inherited.** Add `air.uplink_rate`
+  (`{mcs:0, sgi:false, bw:20}`) and commit it via the existing `set_tx_mode`
+  seam at rx-node startup and after retune. Today an rx-node never calls
+  `set_tx_mode` at all and rides the `TxRate` struct default; the seeds are
+  byte-identical, so this asserts the operating point rather than changing it.
+- Uplink gates are **epoch counts, not milliseconds**: `uplink_probe_epochs`
+  (40), `uplink_ambiguous_epochs` (80), `uplink_verify_epochs` (200),
+  `uplink_liveness_ms` (2000). Everything else reuses `policy.calibration`.
 - Calibration uses normal LINK_REPORT epochs. Do not add padded probes.
 - Ground calibration is local REST, not VEHICLE_CMD.
 - Uplink is one placement per configured rung; v1 configures one
@@ -81,8 +92,9 @@ worktree changes into any commit.
 
 ## End-to-end flow
 
-1. Ground emits ordinary LINK_REPORTs at its configured cadence and records the
-   unique epochs it emitted, keyed by epoch number.
+1. Ground emits ordinary LINK_REPORTs at its configured cadence, at its
+   configured `air.uplink_rate`. Its `report_epoch` advances once per report;
+   no other emission bookkeeping is kept.
 2. Craft accepts reports through the existing report-authority gate — which
    latches passively; no CSA is involved. For each newly accepted report it
    increments a cumulative count, adds the accepted copy's `AirRxMeta.rssi` to a
@@ -94,8 +106,8 @@ worktree changes into any commit.
    liveness; only an advancing count refreshes counter progress.
 5. A local REST start checks prerequisites — including that the craft is not
    itself calibrating — snapshots the current power owner, then runs the seek.
-   Dwell loss uses the §10.7 formula, with `emitted` counted over
-   `(E_A, E_B]` from the dwell's own first and last accepted packets.
+   Dwell loss uses the §10.7 formula: `emitted = E_B - E_A` from the dwell's own
+   first and last accepted packets.
 6. A stalled count under live feedback is a 1000‰ dwell. With no clean probe yet
    the seek ascends through it; above a clean probe it is a wall.
 7. A successful verify atomically persists and applies the placement. Any other
@@ -185,13 +197,15 @@ never-been-clean branch is expected to change — baseline it separately and run
 craft-side regression, since it alters the bottom of every rung-0 ramp.
 
 The uplink observation adapter consumes deltas between authenticated quality
-samples, using the §10.7 formula: `emitted` is the count of unique epochs this
-ground emitted in `(E_A, E_B]`, where `E` comes from the dwell's own first and
-last accepted packets. Do not use ground wall-clock or the raw emission count
-over the dwell — at 40 samples one boundary-straddling report is 25‰ and lands
-between the ok and bad walls. Never substitute wall time for missing samples.
-Bound the ambiguous extension once and share the existing three verify-descent
-budget.
+samples, using the §10.7 formula. `emitted` is simply `E_B - E_A` from the
+dwell's own first and last accepted packets — `core/src/reporter.cpp` increments
+`report_epoch` once per emitted report, so no per-epoch set or map is needed
+anywhere. Confirm that a built report is always injected before relying on this;
+if not, move the increment to the injection point. Do not use ground wall-clock
+or a raw per-dwell emission count — at 40 samples one boundary-straddling report
+is 25‰ and lands between the ok and bad walls. Never substitute wall time for
+missing samples. Bound the ambiguous extension once and share the existing three
+verify-descent budget.
 
 ### 4. Ground actuator ownership and conflict handling
 
@@ -215,6 +229,13 @@ broaden craft selector ownership.
 Extend the §10.5 override latch to an rx-node's uplink adapter (same range,
 clamp, re-assert points, restore). This is the manual placement the hardware
 A/B needs and removes the config-edit-plus-restart workaround.
+
+Add `air.uplink_rate` and commit it. `set_tx_mode` is currently wired only in
+`run_tx` (`app/main.cpp`, inside `if (air.value->is_radio())`); wire the same
+call in `run_rx` for the designated uplink, at startup and after every retune
+that can reset the operating point. Seeds match the `TxRate` default, so no
+on-air behaviour changes — but the rung recorded in the artifact and checked
+against §3.16's `last_rx_mcs` is now one the node actually committed.
 
 Define one central ground power-owner resolver:
 
@@ -355,7 +376,7 @@ cmake --build --preset x86-ground
 cmake --build --preset rk3566
 ```
 
-Add at least these 26 focused successful cases (they may be grouped into test
+Add at least these 27 focused successful cases (they may be grouped into test
 binaries, but report individual cases):
 
 1. UPLINK_QUALITY exact 35-byte round trip, including negative RSSI sum and
@@ -385,9 +406,10 @@ binaries, but report individual cases):
 18. Cap wall confirms once and places the last clean step.
 19. Loss wall/blackout retreats and verify descents remain bounded and apply
     only above a clean probe.
-20. **Loss denominator:** `emitted` counted over `(E_A, E_B]` is unaffected by a
-    report emitted after `E_B`; the naive per-dwell emission count is shown to
-    misreport that same scenario as ~25‰.
+20. **Loss denominator:** `emitted = E_B - E_A` is unaffected by a report
+    emitted after `E_B`; the naive per-dwell emission count is shown to
+    misreport that same scenario as ~25‰. Assert `report_epoch` advances
+    exactly once per emitted report.
 21. Two-second **liveness** expiry aborts and restores prior power.
 22. Config accepts a map on a `role:"tx"` adapter on either node role and
     rejects it on any `role:"rx"` adapter on either node role; multiple-uplink
@@ -401,6 +423,8 @@ binaries, but report individual cases):
     parses without a schema bump; identity stale handling; atomic store.
 26. Explicit map/artifact/auto precedence, REST validation, and stats golden
     defaults (`uplink_calib_rung` 0, `uplink_quality_rx_mcs` 255) all pass.
+27. `air.uplink_rate` seeds produce byte-identical radiotap to today's
+    rx-node default, and a non-default rung reaches `set_tx_mode`.
 
 Also run the full Hub suite and SBC target builds. Run the coordination protocol
 audit and port check; Link's own `PROTOCOL.md` remains the wire source of truth.
@@ -456,7 +480,7 @@ claim **device-confirmed** or **code-level only**.
 
 - [ ] Link spec commit precedes implementation commits in PR #82.
 - [ ] Full Link tests and three target builds pass.
-- [ ] At least 26 focused cases above pass.
+- [ ] At least 27 focused cases above pass.
 - [ ] Hub feature branch/PR passes its full suite and exposes one bi-directional
       action that sequences uplink then downlink and stops on uplink failure.
 - [ ] SBC feature branch/PR pins reviewed heads and both images build.

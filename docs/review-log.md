@@ -4850,12 +4850,24 @@ through to a `report_loss` abort because it requires a `last_clean_`. The Pass
 receivable at 2–10 m; a one-rung MCS0 uplink at range exercises it every run.
 
 **Dwell loss is anchored on the craft's own `last_report_epoch` bounds:**
-`emitted` counts unique ground-emitted epochs in `(E_A, E_B]` from the dwell's
-own first and last accepted packets. At a 40-epoch dwell one boundary-straddling
-report is 25‰ — between `loss_ok_milli` and `loss_bad_milli` — so an unanchored
-denominator would make every clean dwell read ambiguous and burn the one-shot
-extension to 80 on nothing. `received == 0` scores 1000‰ against the ground's own
-emission count and contributes no RSSI sample.
+`emitted = E_B - E_A` from the dwell's own first and last accepted packets. At a
+40-epoch dwell one boundary-straddling report is 25‰ — between `loss_ok_milli`
+and `loss_bad_milli` — so an unanchored denominator would make every clean dwell
+read ambiguous and burn the one-shot extension to 80 on nothing. Because
+`core/src/reporter.cpp` increments `report_epoch` once per emitted report, this
+needs **no ground-side emission bookkeeping at all** — the craft's own delta is
+the emitted count. The identity holds only while build and injection are paired;
+an implementation that can drop a built report must increment at injection.
+`received == 0` scores 1000‰ against the ground's local `Reporter::epoch()`
+delta and contributes no RSSI sample.
+
+**The uplink rung is configured, not inherited.** An rx-node never called
+`set_tx_mode`: its uplink rung was the `TxRate` struct default, which happens to
+be MCS0/LGI/HT20. A calibrated placement must not rest on a default no one
+asserted, since the artifact records the rung and `last_rx_mcs` cross-checks it.
+`air.uplink_rate` (seeds `{0, false, 20}`) commits it through the existing seam;
+on-air behaviour at the seeds is byte-identical, and the future multi-rung pass
+widens a config value rather than adding a mechanism.
 
 Use ordinary unique LINK_REPORT epochs as the sparse probes: no padded traffic
 and no new VEHICLE_CMD. Extract §10.6's pure seek/verify state into a reusable
@@ -4906,7 +4918,7 @@ accounting and §7.2's return-window sizing, which assumes today's uplink frame
 duration.
 
 **Merge gate.** Full host suite and SSC338Q/x86-ground/RK3566 builds; at least
-26 focused wire/calibrator/config/store/REST/stats tests; independent full-diff
+27 focused wire/calibrator/config/store/REST/stats tests; independent full-diff
 review; ten consecutive hardware runs with placement spread no greater than one
 seek step; a blacked-out-floor run proving the seek ascends rather than aborting;
 interlock verification in both directions; failure injection for abort, liveness
