@@ -168,3 +168,39 @@ a tier only returns to `-1` on a waybeam-link restart, which re-reads
 reads `0..4` rather than `-1` even when the selected value equals the boot
 ceiling (hardware-identical, but not identical to report). Raised rather than
 silently adding a verb.
+
+---
+
+# Pre-review sweep — findings applied (2026-08-02)
+
+Three agents swept the diff before adversarial review. **Every claim was
+re-checked against the source before acting; three were rejected.** That ratio
+is the point — an unverified finding is a hypothesis, not a defect.
+
+## Rejected after checking
+
+| claim | why not |
+|---|---|
+| craft REST handler narrows an unvalidated `int` (`main.cpp:4310`) | the range check is at the route layer (`control_server.cpp:490`) and runs before either handler; device-confirmed 400 on `9`, `-1`, `{}`, `"low"` |
+| a second moved-from `h.<member>` site exists | exhaustive sweep found none; `0e293e0` was the only one |
+| §10.7 start lacks the §10.6 report-cadence precondition | **correct asymmetry.** §10.6 scores from LINK_REPORTs, so a starved return path reads CLEAN and places HIGH. §10.7 counts its own emissions, so the same starvation reads LOSSY and places LOW. Only the dangerous failure mode is guarded, and it is |
+
+## Fixed (`e134ee2`, plus `d3aad3a` / `0663366` earlier)
+
+| defect | severity |
+|---|---|
+| §10.5 ground uplink override bypassed the §10.3 ceiling — device-proven 30.00 dBm against a 27 dBm ceiling | **PA safety**, spec violation |
+| rung ceiling taper unbounded above — a `tx_power_level > 4` table lifts the ceiling on both directions at once | **PA safety**, latent (shipped table is all ≤ 4) |
+| artifact `placement_qdb` unbounded, auto-applies at boot behind a non-tamper-seal CRC | **PA safety**, latent |
+| tier applied partially across adapters with unequal preset lists, reporting success | correctness |
+| tier did not re-assert a latched §10.5 override through the new clamp | correctness — the control silently did nothing |
+| ground §10.7 sweep bound not rebuilt on a tier change | correctness — tier bounded flight but not the sweep |
+| ground `tx_power_tier_effective` meant "a curve exists", not "reaches hardware" | observability overpromise |
+| loopback LINK_REPORTs all carried `report_epoch = 0` | correctness on the bench path |
+| `next_ms_` stale through a probe burst → unpaced report after a run | minor |
+| oversize LINK_REPORT dropped with no counter and no log | observability |
+| the two hub menus disagreed on what "high" power means (21 vs 27 dBm) | correctness |
+
+None of the fixes is device-verified: the ground's 8812EU uplink adapter
+dropped off USB (`usb 1-1: USB disconnect`) and needs a physical re-plug. The
+*defects* were verified in code, and the §10.5 one on hardware before the fix.
