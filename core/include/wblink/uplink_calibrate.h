@@ -71,9 +71,6 @@ class UplinkCalibrator {
         placement_ = {};
         placement_.mcs = mcs_;
         placement_.short_gi = sgi_;
-        last_clean_qdb_ = p_.seek.min_qdb;
-        have_first_bad_ = false;
-        first_bad_qdb_ = 0;  // stale value would ride into the next placement
         // Sweep from the floor. At range the bottom steps are normally dead;
         // they are simply not clean and the sweep climbs past them.
         const SeekStep s = seek_.begin();
@@ -275,12 +272,6 @@ class UplinkCalibrator {
                             emitted_,        received_,
                             loss,            static_cast<int32_t>(std::lround(rssi)),
                             target_epochs_};
-        if (v == DwellVerdict::kClean) {
-            last_clean_qdb_ = qdb_;
-        } else if (!have_first_bad_) {
-            have_first_bad_ = true;
-            first_bad_qdb_ = qdb_;
-        }
         const SeekStep s = seek_.on_dwell(v, rssi, loss);
         qdb_ = s.qdb;
         if (s.power_changed) a.set_qdb = s.qdb;
@@ -309,9 +300,14 @@ class UplinkCalibrator {
                 placement_.placement_rssi_dbm =
                     static_cast<int8_t>(std::lround(rssi));
                 placement_.placement_loss_milli = loss;
-                placement_.last_clean_qdb = last_clean_qdb_;
-                placement_.has_first_bad = have_first_bad_;
-                placement_.first_bad_qdb = first_bad_qdb_;
+                // Read the bracket from the seek rather than tracking a
+                // second copy here. The duplicate booked the COLD floor as the
+                // overload ceiling — measured on the bench as
+                // `first_bad_qdb: 4, last_clean_qdb: 108` — because only the
+                // seek applies the "bad ABOVE a clean probe" rule.
+                placement_.last_clean_qdb = seek_.last_clean_qdb();
+                placement_.has_first_bad = seek_.has_bad();
+                placement_.first_bad_qdb = seek_.first_bad_qdb();
                 finish(CalibState::kDone, nullptr);
                 a.restore = take_restore_();
                 a.artifact_ready = take_artifact_();
@@ -361,9 +357,6 @@ class UplinkCalibrator {
     uint32_t received_ = 0;
     int64_t rssi_sum_ = 0;
     int32_t qdb_ = 0;
-    int32_t last_clean_qdb_ = 0;
-    int32_t first_bad_qdb_ = 0;
-    bool have_first_bad_ = false;
     bool extended_ = false;
     bool dwell_epoch_armed_ = false;
     bool restore_pending_ = false;

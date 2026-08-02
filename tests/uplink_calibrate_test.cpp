@@ -477,6 +477,38 @@ void test_silent_cap_sweeps_to_max() {
     CHECK(r.restores == 1);
 }
 
+// Bench regression: the artifact's overload bracket must describe where the
+// link breaks from being too HOT. §10.7 kept a second copy of the bracket
+// alongside the seek's, and only the seek applied the "bad ABOVE a clean
+// probe" rule — so a dead floor booked itself as the ceiling. Measured live as
+// `first_bad_qdb: 4, last_clean_qdb: 108`, i.e. the bottom of the range
+// recorded as the top.
+void test_bracket_never_books_the_cold_floor() {
+    Rig r(fast_params());
+    r.up.floor_rssi = -34;   // qdb 4 and 20 deliver nothing; 36+ is clean
+    CHECK(r.cal.start(r.now, r.local_epoch));
+    r.run(r.now + 600000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    const UplinkPlacement& pl = r.cal.placement();
+    CHECK(pl.placement_qdb > UplinkCalibParams{}.seek.min_qdb);
+    // The sweep crossed a dead floor and then ran clean to the top, so there
+    // is no overload evidence at all and the bracket must say so.
+    CHECK(!pl.has_first_bad);
+    CHECK(pl.first_bad_qdb == 0);
+    CHECK(pl.last_clean_qdb == pl.placement_qdb);
+
+    // With a real ceiling the bracket is booked, and above the clean probe.
+    Rig h(fast_params());
+    h.up.ceil_rssi = -30;    // overload once RSSI reaches -30
+    CHECK(h.cal.start(h.now, h.local_epoch));
+    h.run(h.now + 600000);
+    CHECK(h.cal.state() == CalibState::kDone);
+    const UplinkPlacement& hp = h.cal.placement();
+    CHECK(hp.has_first_bad);
+    CHECK(hp.first_bad_qdb > hp.last_clean_qdb);   // ceiling is ABOVE the floor
+    CHECK(hp.last_clean_qdb == hp.placement_qdb);
+}
+
 // C2 regression. PowerSeek reaches kDone from verify with loss above
 // loss_ok_milli only when the descent budget or the floor is exhausted. §10.6
 // records that ("the artifact never lies") because a craft artifact is a
@@ -708,6 +740,7 @@ int main() {
     test_partial_blackout_ends_dwell();
     test_blackout_scores_measured_loss_not_flat_1000();
     test_verify_exhausted_is_failure();
+    test_bracket_never_books_the_cold_floor();
     test_failed_persist_fails_the_run();
     test_silent_cap_sweeps_to_max();
     test_second_run_clears_bracket();

@@ -87,6 +87,7 @@ class PowerSeek {
         last_clean_rssi_ = 127;
         has_bad_ = false;
         first_bad_rssi_ = 0;
+        first_bad_qdb_ = 0;
         return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
     }
 
@@ -134,6 +135,12 @@ class PowerSeek {
     int8_t last_clean_rssi() const { return last_clean_rssi_; }
     bool has_bad() const { return has_bad_; }
     int8_t first_bad_rssi() const { return first_bad_rssi_; }
+    // The bracket in the POWER domain, for §10.7's artifact. Same rule as the
+    // RSSI bracket: only a bad probe ABOVE a clean one is overload evidence.
+    int32_t first_bad_qdb() const { return first_bad_qdb_; }
+    int32_t last_clean_qdb() const {
+        return last_clean_ ? last_clean_->qdb : p_.min_qdb;
+    }
 
   private:
     enum class Phase : uint8_t { kSweep, kVerify };
@@ -143,6 +150,7 @@ class PowerSeek {
         if (!has_bad_) {
             has_bad_ = true;
             first_bad_rssi_ = static_cast<int8_t>(std::lround(rssi));
+            first_bad_qdb_ = qdb_;
         }
     }
     SeekStep place_() {
@@ -174,6 +182,7 @@ class PowerSeek {
     int8_t last_clean_rssi_ = 127;
     bool has_bad_ = false;
     int8_t first_bad_rssi_ = 0;
+    int32_t first_bad_qdb_ = 0;
 };
 
 struct CalibrateParams {
