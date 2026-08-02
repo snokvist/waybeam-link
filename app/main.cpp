@@ -2311,7 +2311,6 @@ struct TxCore {
 
     UplinkQualityCounters quality_;  // §3.16 (Pass 125)
     uint8_t quality_fingerprint_ = 0;
-    std::string quality_psk_;
 
     // §3.5 Pass 115: report authority is ONE authority across both return
     // gates. These wrap the pair deliberately — moving report_gate_ alone
@@ -2381,24 +2380,14 @@ struct TxCore {
         }
         return s;
     }
-    // §3.16 (Pass 125) craft->ground authenticated uplink feedback. Returns
-    // nullopt when there is nothing honest to say: no PSK (the packet is
-    // unauthenticated then, and §10.7 moves a power actuator), no latched
-    // reporter, or no accepted report yet in this counter domain.
+    // §3.16 craft->ground uplink feedback. Returns nullopt when there is
+    // nothing honest to say: no latched reporter, or no accepted report yet in
+    // this counter domain. Pass 131 removed the key — see §3.16/§13.
     std::optional<UplinkQuality> uplink_quality() const {
-        return quality_.build(originator_, session_, quality_fingerprint_,
-                              quality_psk_);
+        return quality_.build(originator_, session_, quality_fingerprint_);
     }
-    void set_quality_identity(std::string psk, uint8_t fingerprint) {
-        quality_psk_ = std::move(psk);
+    void set_quality_identity(uint8_t fingerprint) {
         quality_fingerprint_ = fingerprint;
-    }
-    // §3.16/§11.4a (Pass 127): in ANNOUNCED mode there is no configured
-    // secret — the per-boot token IS the key, and it is re-keyed at runtime by
-    // the Pass 113 pairing gate. The caller pushes the live token each tick,
-    // exactly as it already re-keys the CSA issuer and the command issuer.
-    void set_quality_psk(const std::string& psk) {
-        if (quality_psk_ != psk) quality_psk_ = psk;
     }
 
     // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
@@ -3061,6 +3050,24 @@ struct RxCore {
             return -1;
         }
         return static_cast<int>(remote_selector_state_->calib_word & 0x03u);
+    }
+
+    // §3.15a report_latch_holder, or -1 when the craft is not reporting it
+    // (bit3 clear = legacy build, or no selector state yet). Pass 131: this is
+    // §10.7's authority signal. Pass 125 inferred the latch from a valid MAC
+    // on §3.16; with the MAC gone the latch is READ from the packet that
+    // already carries it, craft-owned, rather than deduced. Note -1 (not
+    // reported) is deliberately distinct from 0 (reported, nobody holds it) —
+    // §3.15a is explicit that a receiver MUST NOT render the first as the
+    // second, and a start prerequisite that conflated them would tell an
+    // operator they had lost a latch that was never being published.
+    int craft_report_latch_holder() const {
+        if (!remote_selector_state_ ||
+            (remote_selector_state_->state_flags &
+             selector_state_flags::kHolderPresent) == 0) {
+            return -1;
+        }
+        return static_cast<int>(remote_selector_state_->report_latch_holder);
     }
 
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
@@ -3787,7 +3794,6 @@ int run_tx(const Loaded& l) {
         const std::string ident =
             calib_tx_adapter ? calib_identity(*calib_tx_adapter) : "udp";
         tx.set_quality_identity(
-            l.cfg.policy.csa.psk,
             crc8_dvbs2(reinterpret_cast<const uint8_t*>(ident.data()),
                        ident.size()));
     }
@@ -3930,18 +3936,6 @@ int run_tx(const Loaded& l) {
             // live DATA means no fresh quality, which is exactly what makes
             // §10.7 refuse to start or abort.
             if (uplink_quality_cadence.due(live_video_slot, slot_ms)) {
-                // §11.4a key provenance, resolved HERE rather than latched at
-                // startup: configured secret if there is one, else the live
-                // announced token — which the Pass 113 pairing gate replaces
-                // at runtime. Latching it meant an announced-mode craft (the
-                // fleet default: no `csa.psk` anywhere) held an empty key, so
-                // build() returned nullopt and §3.16 was never emitted at all
-                // — §10.7 silently unavailable, reported only as "no fresh
-                // feedback" on the ground.
-                tx.set_quality_psk(
-                    l.cfg.policy.csa.psk.empty()
-                        ? std::string(token.begin(), token.end())
-                        : l.cfg.policy.csa.psk);
                 if (const std::optional<UplinkQuality> q = tx.uplink_quality()) {
                     uint8_t qf[kUplinkQualitySize];
                     const size_t qn = encode_uplink_quality(*q, qf, sizeof(qf));
@@ -4657,8 +4651,7 @@ int run_rx(const Loaded& l) {
     // §3.16 accept gate + §10.7 calibrator. The gate needs the currently
     // selected DATA source, which the calibrator has no notion of, so the two
     // stay separate and the poll loop routes samples between them.
-    UplinkQualityGate quality_gate(l.cfg.policy.csa.psk, l.cfg.node.originator,
-                                   session);
+    UplinkQualityGate quality_gate(l.cfg.node.originator, session);
     uint32_t selected_craft_session = 0;
     UplinkCalibParams ucal_params;
     {
@@ -5706,27 +5699,27 @@ int run_rx(const Loaded& l) {
                 if (uplink_adapter == nullptr) {
                     return "no designated role:\"tx\" uplink adapter";
                 }
-                // §11.4a key provenance (Pass 127): a RESOLVABLE key, not a
-                // configured one. Announced mode — no `csa.psk` anywhere, the
-                // fleet default — keys §3.16 off the craft's per-boot
-                // announced token, exactly as /csa and §11.7 already do.
-                // Requiring a configured secret made §10.7 unreachable on
-                // every deployment that never sets one.
-                if (!quality_gate.have_psk()) {
-                    return l.cfg.policy.csa.psk.empty()
-                               ? "no live §3.16 key for craft (announced token "
-                                 "not heard yet)"
-                               : "csa_psk is not configured";
-                }
                 if (active_selection.originator == 0 ||
                     selected_craft_session == 0) {
                     return "no craft selected as DATA source";
                 }
-                // Authority: fresh authenticated feedback naming THIS ground
-                // is proof we hold the craft's §3.5 report latch. No CSA
-                // claim is required, or sufficient (§10.7).
+                // Authority (§10.7, Pass 131): we must hold the craft's §3.5
+                // report latch. Pass 125 inferred that from a valid MAC on
+                // §3.16; with the MAC gone it is READ from §3.15a, which the
+                // craft already publishes. The two failure messages are kept
+                // apart on purpose — "not published" sends the operator to the
+                // craft's build, "held by N" sends them to the other ground,
+                // and one message for both would send them to neither.
+                if (const int holder = rx.craft_report_latch_holder();
+                    holder < 0) {
+                    return "craft is not publishing §3.15a report_latch_holder";
+                } else if (holder != l.cfg.node.originator) {
+                    return holder == 0
+                               ? "craft has no report latch holder"
+                               : "another ground holds the craft's report latch";
+                }
                 if (!quality_gate.live(now_ms(), ucal_params.liveness_ms)) {
-                    return "no fresh authenticated §3.16 feedback";
+                    return "no fresh §3.16 feedback";
                 }
                 if (uplink_override) {
                     return "§10.5 TX-power override is latched";
@@ -6199,24 +6192,10 @@ int run_rx(const Loaded& l) {
                 }
                 return;
             }
-            // §3.16 (Pass 125): authenticated uplink feedback from the craft
-            // we are currently taking DATA from. The gate owns every accept
-            // rule; all that happens here is routing the sample.
+            // §3.16: uplink feedback from the craft we are currently taking
+            // DATA from. The gate owns every accept rule; all that happens
+            // here is routing the sample.
             if (const UplinkQuality* uq = std::get_if<UplinkQuality>(&dec)) {
-                // §11.4a key provenance (Pass 127), same rule as /csa and
-                // §11.7 use: configured secret if present, else this craft's
-                // cached announced token. Resolved per packet because the
-                // token is per-craft AND re-keyed at runtime by the pairing
-                // gate. Latched at startup it was empty for the whole fleet
-                // (nobody configures csa.psk), so the gate refused every
-                // packet and §10.7 could never start.
-                if (l.cfg.policy.csa.psk.empty()) {
-                    const auto tok =
-                        discovery.token_for(active_selection.originator);
-                    quality_gate.set_psk(
-                        tok ? std::string(tok->begin(), tok->end())
-                            : std::string());
-                }
                 const QualitySample s = quality_gate.accept(
                     *uq, active_selection.originator, selected_craft_session,
                     now);

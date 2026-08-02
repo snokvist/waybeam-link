@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// waybeam-link core: §3.16 (Pass 125) UPLINK_QUALITY endpoints — the craft's
-// cumulative accumulator and the ground's authenticated accept gate. Pure and
-// time-injected like the §11 engines: no sockets, no clocks, no radio.
+// waybeam-link core: §3.16 UPLINK_QUALITY endpoints — the craft's cumulative
+// accumulator and the ground's accept gate. Pure and time-injected like the
+// §11 engines: no sockets, no clocks, no radio. Unauthenticated since Pass
+// 131; there is no key on either side.
 //
 // The two halves are here together because they are one contract read from
 // opposite ends, and every field's meaning (reset domain, wrap arithmetic,
@@ -11,9 +12,7 @@
 
 #include <cstdint>
 #include <optional>
-#include <string>
 
-#include "wblink/hmac_sha256.h"
 #include "wblink/types.h"
 #include "wblink/wire.h"
 
@@ -56,14 +55,16 @@ class UplinkQualityCounters {
     uint32_t rssi_sum() const { return rssi_sum_; }
     uint8_t last_rx_mcs() const { return last_rx_mcs_; }
 
-    // Build the authenticated packet. nullopt when there is nothing honest to
-    // say: no PSK (this moves a power actuator — unauthenticated is not an
-    // option), no latched reporter, or no accepted report yet in this domain.
+    // Build the packet. nullopt when there is nothing honest to say: no
+    // latched reporter, or no accepted report yet in this domain. Pass 131
+    // removed the PSK parameter and its guard — that guard is what made the
+    // whole feature silently inoperable on every announced-mode deployment
+    // (Pass 127), because an empty configured secret returned nullopt here and
+    // the craft emitted nothing at all.
     std::optional<UplinkQuality> build(uint16_t self_originator,
                                        uint32_t self_session,
-                                       uint8_t fingerprint,
-                                       const std::string& psk) const {
-        if (psk.empty() || originator_ == 0 || reports_ == 0) {
+                                       uint8_t fingerprint) const {
+        if (originator_ == 0 || reports_ == 0) {
             return std::nullopt;
         }
         UplinkQuality q;
@@ -75,13 +76,6 @@ class UplinkQualityCounters {
         q.rssi_sum_dbm = rssi_sum_;
         q.craft_adapter_fingerprint = fingerprint;
         q.last_rx_mcs = last_rx_mcs_;
-        uint8_t buf[kUplinkQualitySize];
-        if (encode_uplink_quality(q, buf, sizeof(buf)) != kUplinkQualitySize) {
-            return std::nullopt;
-        }
-        q.quality_mac =
-            quality_mac(reinterpret_cast<const uint8_t*>(psk.data()),
-                        psk.size(), buf);
         return q;
     }
 
@@ -114,34 +108,19 @@ struct QualitySample {
 
 class UplinkQualityGate {
   public:
-    // psk and the local identity are fixed for the process; the selected
-    // craft can change, so it is passed per call.
-    UplinkQualityGate(std::string psk, uint16_t self_originator,
-                      uint32_t self_session)
-        : psk_(std::move(psk)),
-          self_originator_(self_originator),
-          self_session_(self_session) {}
-
-    // §11.4a (Pass 127): the key is not fixed for the process. In ANNOUNCED
-    // mode it is the craft's per-boot token, learned from ANNOUNCE and
-    // replaced whenever the craft re-pairs, so the caller re-resolves it per
-    // selected craft. A key change invalidates the counter baseline — it is a
-    // different authenticated peer, and carrying the old anchors across would
-    // telescope a delta over two unrelated domains.
-    void set_psk(const std::string& psk) {
-        if (psk == psk_) return;
-        psk_ = psk;
-        have_ = false;
-        backward_ = 0;
-    }
-    bool have_psk() const { return !psk_.empty(); }
+    // The local identity is fixed for the process; the selected craft can
+    // change, so it is passed per call. Pass 131 removed the PSK entirely —
+    // see §3.16 and §13 for why an unauthenticated packet is the right level
+    // here, and §10.7 for what carries the authority instead.
+    UplinkQualityGate(uint16_t self_originator, uint32_t self_session)
+        : self_originator_(self_originator), self_session_(self_session) {}
 
     // selected_craft/session: the craft this ground currently takes DATA from.
     // A zero originator means "nothing selected" and rejects everything.
     QualitySample accept(const UplinkQuality& q, uint16_t selected_craft,
                          uint32_t selected_session, uint64_t now_ms) {
         QualitySample s;
-        if (psk_.empty() || selected_craft == 0) return s;
+        if (selected_craft == 0) return s;
         if (q.prefix.originator != selected_craft ||
             q.prefix.session_id != selected_session) {
             ++rejected_;
@@ -152,46 +131,33 @@ class UplinkQualityGate {
             ++rejected_;
             return s;
         }
-        uint8_t buf[kUplinkQualitySize];
-        if (encode_uplink_quality(q, buf, sizeof(buf)) != kUplinkQualitySize) {
-            ++rejected_;
-            return s;
-        }
-        if (quality_mac(reinterpret_cast<const uint8_t*>(psk_.data()),
-                        psk_.size(), buf) != q.quality_mac) {
-            ++rejected_;
-            return s;
-        }
         // A source/target change starts a fresh receive domain: the previous
         // craft's cumulative state is not a baseline for this one.
         if (!have_ || q.prefix.originator != last_.prefix.originator ||
             q.prefix.session_id != last_.prefix.session_id) {
             return rebaseline_(s, q, now_ms);
         }
-        // Wrap-aware ordering: a backward counter is a replay, not a wrap.
-        // Deltas are bounded by a calibrator run, so anything in the top half
-        // of the u32 space is backward, not a very large forward step.
+        // Wrap-aware ordering. Deltas are bounded by a calibrator run, so
+        // anything in the top half of the u32 space is backward, not a very
+        // large forward step.
         const uint32_t d_reports = q.reports_received - last_.reports_received;
         const uint32_t d_epoch = q.last_report_epoch - last_.last_report_epoch;
         if (d_reports > kBackwardThreshold || d_epoch > kBackwardThreshold) {
-            // The craft resets its counters whenever ITS accepted reporter
-            // tuple changes (§3.16) — which happens without the craft's own
-            // originator/session moving, so the domain check above cannot see
-            // it. Treating that permanently as a replay wedged the gate:
-            // reproduced at 519 consecutive rejects, i.e. every packet for the
-            // rest of the process. A SUSTAINED backward run is a reset; an
-            // isolated one is still refused, so a replayed packet interleaved
-            // with the live 2 Hz stream never reaches the threshold.
-            if (++backward_ >= kResyncAfter) {
-                ++resyncs_;
-                QualitySample r = rebaseline_(s, q, now_ms);
-                r.resynced = true;
-                return r;
-            }
-            ++rejected_;
-            return s;
+            // Backward means the craft reset its counters, which it does
+            // whenever ITS accepted reporter tuple changes (§3.16) — without
+            // the craft's own originator/session moving, so the domain check
+            // above cannot see it. While the packet was authenticated this was
+            // ambiguous (a replay looks identical) and needed a
+            // sustained-backward heuristic, which wedged the gate at 519
+            // consecutive rejects when it guessed wrong. Unauthenticated there
+            // is no replay to distinguish from, so rebaseline on the spot and
+            // tell §10.7, which restarts any dwell spanning the discontinuity
+            // rather than scoring a delta across two domains.
+            ++resyncs_;
+            QualitySample r = rebaseline_(s, q, now_ms);
+            r.resynced = true;
+            return r;
         }
-        backward_ = 0;
         s.accepted = true;
         liveness_ms_ = now_ms;  // any accepted packet is liveness
         if (d_reports == 0) {
@@ -222,29 +188,22 @@ class UplinkQualityGate {
   private:
     // Half the u32 space: forward deltas in a run are thousands at most.
     static constexpr uint32_t kBackwardThreshold = 0x8000'0000u;
-    // Consecutive backward packets that mean "reset", not "replay". At the
-    // 2 Hz §3.16 cadence this is 1.5 s — long enough that a live stream
-    // interleaves and short enough that a run is not lost to it.
-    static constexpr uint32_t kResyncAfter = 3;
 
     QualitySample rebaseline_(QualitySample s, const UplinkQuality& q,
                               uint64_t now_ms) {
         last_ = q;
         have_ = true;
         liveness_ms_ = now_ms;
-        backward_ = 0;
         s.accepted = true;
         return s;  // baseline only — no delta to report yet
     }
 
-    std::string psk_;
     uint16_t self_originator_ = 0;
     uint32_t self_session_ = 0;
     UplinkQuality last_{};
     bool have_ = false;
     uint64_t liveness_ms_ = 0;
     uint32_t rejected_ = 0;
-    uint32_t backward_ = 0;
     uint32_t resyncs_ = 0;
 };
 

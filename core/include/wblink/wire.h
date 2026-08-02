@@ -118,10 +118,12 @@ struct SelectorState {
     friend bool operator==(const SelectorState&, const SelectorState&) = default;
 };
 
-// §3.16 UPLINK_QUALITY (fixed 35 bytes) — craft→report-latched-ground
-// authenticated feedback for the §10.7 uplink calibration. quality_mac is
-// carried opaque here; HMAC computation/verification is the §10.7 gate's job,
-// exactly as CSA/VEHICLE_CMD do it.
+// §3.16 UPLINK_QUALITY (fixed 31 bytes) — craft→report-latched-ground counter
+// feedback for the §10.7 uplink calibration. Unauthenticated since Pass 131:
+// §10.6 already moves the craft's power actuator on plain LINK_REPORTs, so a
+// MAC on the feedback that moves only the GROUND's own power was asymmetry
+// without a threat. §10.7 reads its authority from §3.15a report_latch_holder
+// instead of inferring it from a tag.
 struct UplinkQuality {
     CommonPrefix prefix;
     uint16_t target_originator = 0;
@@ -134,7 +136,6 @@ struct UplinkQuality {
     uint32_t rssi_sum_dbm = 0;
     uint8_t craft_adapter_fingerprint = 0;
     uint8_t last_rx_mcs = kUplinkRxMcsUnknown;
-    uint32_t quality_mac = 0;
     friend bool operator==(const UplinkQuality&, const UplinkQuality&) = default;
 };
 

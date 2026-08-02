@@ -189,19 +189,6 @@ inline uint32_t csa_mac(const uint8_t* psk, size_t psk_len,
            static_cast<uint32_t>(tag[3]);
 }
 
-// §3.16 quality_mac: the same primitive over the encoded UPLINK_QUALITY
-// packet's bytes 0..30 (everything before the quality_mac field), so the
-// delivered-rung byte is authenticated along with the counters.
-inline uint32_t quality_mac(const uint8_t* psk, size_t psk_len,
-                            const uint8_t* quality_bytes31) {
-    uint8_t tag[Sha256::kDigestLen];
-    hmac_sha256(psk, psk_len, quality_bytes31, 31, tag);
-    return (static_cast<uint32_t>(tag[0]) << 24) |
-           (static_cast<uint32_t>(tag[1]) << 16) |
-           (static_cast<uint32_t>(tag[2]) << 8) |
-           static_cast<uint32_t>(tag[3]);
-}
-
 // §3.14 cmd_mac: the same primitive over the encoded VEHICLE_CMD packet's
 // bytes 0..18 (everything before the cmd_mac field).
 inline uint32_t vcmd_mac(const uint8_t* psk, size_t psk_len,

@@ -370,7 +370,6 @@ Decoded decode_uplink_quality(const uint8_t* buf, size_t len) {
     q.rssi_sum_dbm = be32_read(buf + 25);
     q.craft_adapter_fingerprint = buf[29];
     q.last_rx_mcs = buf[30];
-    q.quality_mac = be32_read(buf + 31);
     // §3.16: target_originator MUST be non-zero and equal `destination`. Both
     // are properties of the packet itself, so they are structural — the
     // receiver-relative checks (is this MY tuple, MY selected craft) belong to
@@ -638,7 +637,6 @@ size_t encode_uplink_quality(const UplinkQuality& pkt, uint8_t* out,
     be32_write(out + 25, pkt.rssi_sum_dbm);
     out[29] = pkt.craft_adapter_fingerprint;
     out[30] = pkt.last_rx_mcs;
-    be32_write(out + 31, pkt.quality_mac);
     return kUplinkQualitySize;
 }
 
