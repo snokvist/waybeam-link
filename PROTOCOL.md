@@ -2099,6 +2099,19 @@ shape applies to every node while the absolute ceiling remains the operator's
 deliberate choice (§10.3's first paragraph is unchanged — there is still no
 regulatory clamp).
 
+**It does not bind an UNCALIBRATED node, and that is deliberate (operator
+ruling, Pass 134).** With no `power_map` and no artifact, `resolve_power_qdb()`
+returns `nullopt` and the controller issues **no power command at all** — the
+adapter stays on the backend default (`iw txpower auto`; measured 19.00 dBm on
+the fleet's ground 8812EU and 27.00 dBm on the craft's). `max_power_qdb`
+therefore bounds the sweep and clamps what the resolve applies; it is **not** an
+unconditional PA limiter. Making it one would mean asserting a fixed power at
+startup and after every retune with no curve loaded, which contradicts §10.3's
+first paragraph and would replace a driver's per-rate TXAGC table with a flat
+commanded value on every node that has never been calibrated — strictly worse
+than the state it would be protecting. The ceiling binds where a number of ours
+reaches the actuator, and nowhere else.
+
 ### 10.4 Actuation
 On profile commit, for each transmitting adapter resolve and apply its power
 inside the §9.5 sequenced transition. After **any** devourer retune that resets
