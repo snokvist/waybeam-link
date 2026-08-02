@@ -56,3 +56,44 @@ drive it **14 dB into saturation**.
    `no_clean_point`. Baseline measurement settled it: normal 1-per-window
    traffic delivers **99.7%** on this link. Paced to
    `kReportsPerReturnWindow = 3`; at 8 the floor was still 40–155‰.
+
+## Combined `start_both` — device-confirmed
+
+One operator action, both directions, ~300 s end to end:
+
+```
+t+0..165s   phase=uplink    8 rungs        -> uplink=done
+t+180s      phase=downlink  §11.7 CALIBRATE issued, craft=running
+t+180..270s craft sweeps its own 8 rungs   (r0 -> r6)
+t+300s      phase=done      craft calib_state=done fp=250
+```
+
+Uplink placements at `kReportsPerReturnWindow = 1` (loss 0-10permille):
+
+| rung | GI | dBm | rssi | loss‰ |
+|---|---|---:|---:|---:|
+| 0 | lgi | 27.0 | −13 | 0 |
+| 1 | lgi | 27.0 | −13 | 0 |
+| 2 | sgi | 27.0 | −13 | 5 |
+| 3 | sgi | 25.0 | −13 | 10 |
+| 4 | sgi | 17.0 | −22 | 0 |
+| 5 | sgi | 17.0 | −22 | 5 |
+| 6 | sgi | 17.0 | −22 | 5 |
+| 7 | sgi | 17.0 | −22 | 0 |
+
+The PA-saturation curve reproduces (27.0 dBm at the low rungs, 17.0 at the
+high ones) with more margin than the 3-per-window run.
+
+**Order law verified negatively too:** an earlier `start_both` whose uplink
+phase failed stopped with `uplink_phase_failed` and `craft_calib=idle`
+throughout — §11.7 `CALIBRATE` was never issued.
+
+### Why the pacing ended at 1 per window
+
+3 per window put verify dwells at 22-30permille — straddling `loss_ok_milli`
+(15), so a run was a coin flip: one completed, the next failed
+`verify_failed` after exhausting its descent budget. At 1 per window the
+dwells read 0-10permille. The speedup was never about packing the gap; it is
+about using EVERY gap (~60/s at 60 fps) instead of every sixth at the 10 Hz
+cadence — same traffic shape §7.2 is engineered for, 6x the rate.
+`uplink_verify_epochs` 400 -> 200 to hold the run near ~2.5 min/direction.

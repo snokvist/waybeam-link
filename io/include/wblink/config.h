@@ -305,7 +305,7 @@ struct CalibrationPolicy {
     // `uplink_ambiguous_epochs` existed — it is retired, and a config still
     // carrying the key simply loads with it ignored.
     int uplink_probe_epochs = 100;
-    int uplink_verify_epochs = 400;
+    int uplink_verify_epochs = 200;
     // Silence after a burst so the craft's counter reflects all of it before
     // scoring. Must exceed one §3.16 period (500 ms at 2 Hz).
     int uplink_drain_ms = 600;

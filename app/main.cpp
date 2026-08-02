@@ -5137,7 +5137,7 @@ int run_rx(const Loaded& l) {
     // §7.2/§10.7: how many queued LINK_REPORTs one quiet gap can absorb.
     // Ordinary operation queues one, so this only binds during a §10.7 probe
     // burst — which is exactly where overflowing the gap is invisible loss.
-    static constexpr size_t kReportsPerReturnWindow = 3;
+    static constexpr size_t kReportsPerReturnWindow = 1;
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_ret_held;
     // §7.2 Pass 78: anchored report batches re-fire once at the NEXT return
     // window (spread across two listen gaps; a blind fallback batch is not
@@ -6082,10 +6082,13 @@ int run_rx(const Loaded& l) {
             // REGARDLESS of commanded power — a flat, power-independent floor
             // that made every rung read `no_clean_point` while RSSI tracked
             // power perfectly. Seed 8 ≈ 2000 µs / ~160 µs for a ~100-byte
-            // MEASURED, not derived: normal 1-per-window traffic delivers 99.7% on this
-            // link, while 8 per window lost 4-15% — the ground aims for the MIDDLE
-            // of the window and each frame still takes CCA/DIFS, so far fewer fit
-            // than raw airtime suggests. RE-DERIVE (§17) if
+            // ONE, which is the shape §7.2 is engineered for and the only one
+            // measured good: normal traffic delivers 99.7% at 1 per window, 8 per
+            // window lost 4-15%, and 3 per window left verify dwells at 22-30permille
+            // — straddling loss_ok_milli, so runs became a coin flip. The speedup
+            // does NOT come from packing the gap; it comes from using EVERY gap
+            // (~60/s at 60 fps) instead of every sixth one at the 10 Hz cadence.
+            // Same shape, 6x the rate. RE-DERIVE (§17) if
             // `return_window_us` or the report size moves. Outside a
             // calibration this never binds — ordinary operation queues one
             // report per window.

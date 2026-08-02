@@ -763,7 +763,7 @@ int main() {
             // so every reading is decidable first time. That is what retired
             // uplink_ambiguous_epochs rather than tuning it.
             CHECK(c.uplink_probe_epochs == 100);
-            CHECK(c.uplink_verify_epochs == 400);
+            CHECK(c.uplink_verify_epochs == 200);
             CHECK(c.uplink_drain_ms == 600);
             CHECK(c.uplink_liveness_ms == 2000);
             CHECK(c.settle_ms == 300);

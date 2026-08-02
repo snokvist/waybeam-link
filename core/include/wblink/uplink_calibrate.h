@@ -57,7 +57,7 @@ struct UplinkCalibParams {
     // existed only to resolve a reading the gate was too small to make. With
     // the ground choosing the burst size, the right fix is a big enough burst.
     uint32_t probe_epochs = 100;
-    uint32_t verify_epochs = 400;
+    uint32_t verify_epochs = 200;
     // Silence after the burst, so the craft's counter reflects the whole of it
     // before the dwell is scored. Longer than one §3.16 period (500 ms at
     // 2 Hz) so at least one packet built after the last probe landed arrives.
