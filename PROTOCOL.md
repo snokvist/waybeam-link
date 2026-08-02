@@ -2235,9 +2235,36 @@ future multi-rung uplink widens a config value rather than adding a mechanism.
 
 **Authority and prerequisites.** Calibration is ground-local and starts only
 through `POST /api/v1/calibration` on the ground control server (deployment
-port `:8092`). It requires exactly one designated uplink adapter, a configured
-`csa_psk`, live DATA from the selected craft, and fresh authenticated §3.16
-feedback naming this ground's exact `(originator, session)`. That feedback is
+port `:8092`). It requires exactly one designated uplink adapter, a **resolvable
+§11.4a key** (below), live DATA from the selected craft, and fresh authenticated
+§3.16 feedback naming this ground's exact `(originator, session)`.
+
+**§3.16 keying follows §11.4a provenance, not a configured secret (Pass 127
+amendment).** §3.16 is authenticated, and its key is resolved by the *same* rule
+`/csa` and §11.7 already use: the configured `csa_psk` when there is one, and
+otherwise the craft's per-boot **announced token**. Both ends resolve it
+continuously — the craft per emission, the ground per accepted packet, keyed on
+the *selected* craft — because in announced mode the token is per-craft and the
+§11.4a Pass 113 pairing gate replaces it at runtime. Latching the key at startup
+made §10.7 unreachable on any deployment that never sets `csa_psk`, which is the
+fleet default: the craft's `build()` returned `nullopt` and emitted nothing, the
+ground's gate refused every packet, and the only symptom was a permanent "no
+fresh feedback" on the start prerequisite. A key change **invalidates the
+counter baseline** — it is a different authenticated peer, and telescoping a
+delta across two key epochs would divide by a number that does not mean what it
+says.
+
+This inherits announced mode's trust model rather than widening it: the
+announced token is public by construction (§11.4a — it is broadcast so a
+spectator can pair), so in announced mode §3.16 authenticates *provenance
+against a passive third party*, not against an attacker who has heard the
+ANNOUNCE. That is already true of the CSA campaign and every VEHICLE_CMD, which
+move far more than one node's own TX power. The residual §10.7 exposure is
+bounded by construction: a forged quality packet can only mis-place the
+**ground's own uplink power** within `[min_qdb, max_qdb]`, only while an
+operator-initiated run is in flight, and never above the adapter's
+`max_power_qdb` ceiling (§10.3). Deployments that need spoof resistance here
+configure `csa_psk` and get secret mode, unchanged. That feedback is
 itself proof that this ground holds the craft's §3.5 report latch, which is the
 only authority §10.7 needs — a §11.4 CSA claim is **neither required nor
 sufficient**. Requiring one would make uplink calibration unavailable in any

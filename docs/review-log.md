@@ -5005,3 +5005,66 @@ expected to find little. It found three CRITICALs, because the reviewer executed
 probe programs against the state machines instead of reading them. For state
 machines, reproduction beats reading, and self-testing stops at the cases the
 author already thought of.
+
+## Pass 127 — §3.16 keys off the announced token, not a configured secret (2026-08-02)
+
+Found on the bench, before a single §10.7 run: **the whole feature was
+inoperable on the fleet's actual configuration, and failed silently.**
+
+Neither the craft (`.2.232`) nor the ground (`.2.199`) configures `csa.psk`.
+That is not an oversight — it selects **announced mode** (§11.4a): the per-boot
+token is both the CSA key and the advertised ANNOUNCE payload, and the ground
+caches it off the air (Pass 63). Measured on the live pair: the craft
+advertises `psk_present: true` and the ground's discovery catalog holds its
+token.
+
+Pass 125 keyed §3.16 off `l.cfg.policy.csa.psk` at startup on both ends:
+
+- craft — `set_quality_identity()` called once with the empty config secret, so
+  `UplinkQualityCounters::build()` hit its `psk.empty()` guard and returned
+  `nullopt`. **UPLINK_QUALITY was never transmitted at all.**
+- ground — `UplinkQualityGate` constructed with the empty secret, so `accept()`
+  returned on its first line. **Every packet refused.**
+
+The only operator-visible symptom is the §10.7 start prerequisite reporting "no
+fresh authenticated §3.16 feedback" forever, which reads as a radio or pairing
+problem rather than a key-provenance bug. The spec earned this: §10.7 said "a
+configured `csa_psk`", so the implementation matched the spec and the *spec* had
+the gap. Operator ruling: the PSK is shared over RF at pairing and must not
+require a committed static secret.
+
+Both ends now resolve the key continuously by §11.4a provenance — configured
+secret if present, else the live announced token — the craft per emission, the
+ground per accepted packet keyed on the *selected* craft. Continuous rather than
+latched because the token is per-craft and the Pass 113 pairing gate re-keys it
+at runtime; the same reason `/csa` and §11.7 already resolve per call rather
+than caching. A key change drops the gate's counter baseline: it is a different
+authenticated peer, and telescoping a §10.7 delta across two key epochs would
+divide by a number that does not mean what it says.
+
+The start prerequisite changed from "is a secret configured" to "is a key
+resolvable", and its two failure messages now name which mode the operator is
+in — "announced token not heard yet" is a different problem from "csa_psk is not
+configured", and conflating them is what would send someone editing a config
+that was already correct.
+
+**Trust note, stated rather than assumed.** The announced token is public by
+construction — it is broadcast so a spectator can pair. So in announced mode
+§3.16 authenticates provenance against a *passive* third party, not against an
+attacker who has heard the ANNOUNCE. This inherits announced mode's existing
+trust model rather than widening it: the same is already true of the CSA
+campaign and every VEHICLE_CMD, both of which move considerably more than one
+node's own TX power. The residual §10.7 exposure is bounded by construction — a
+forged quality packet can only mis-place the **ground's own uplink power**
+inside `[min_qdb, max_qdb]`, only while an operator-initiated run is in flight,
+and never above the adapter's §10.3 `max_power_qdb` ceiling. Deployments needing
+spoof resistance configure `csa_psk` and get secret mode, unchanged. §13 threat
+row and §10.7 amended.
+
+**Method note.** Pass 126 fixed thirteen defects across three repos and re-ran
+every automated gate green. This one was invisible to all of it: every test
+supplies a PSK, because a test that wants to exercise the codec has to. The
+defect lives exactly where the test fixtures stop — in what the *deployment*
+omits. It surfaced in the first five minutes of reading real device configs,
+which is an argument for reading the target's config before writing the harness,
+not after.
