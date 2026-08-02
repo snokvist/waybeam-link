@@ -19,6 +19,11 @@ std::vector<LinkReport> Reporter::build(const RxEngine& engine,
         // §10.7 burst: emit on every call until the counted budget is spent,
         // then go silent so the craft's counter can settle before scoring.
         if (probe_budget_ == 0) return out;
+        // Keep the ordinary cadence clock running THROUGH the burst. Left
+        // stale, next_ms_ is already in the past when clear_probe_mode()
+        // returns, so the first post-burst build() fires immediately instead
+        // of on cadence — an unpaced report straight after a run.
+        next_ms_ = now_ms + policy_.interval_ms;
     } else if (now_ms < next_ms_) {
         return out;
     } else {

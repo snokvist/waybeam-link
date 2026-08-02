@@ -160,6 +160,17 @@ Result<UplinkArtifact> uplink_calib_store_load(const std::string& dir) {
             p.mcs = static_cast<uint8_t>(e.value("mcs", 0u));
             p.short_gi = e.value("short_gi", false);
             p.placement_qdb = e.value("placement_qdb", 0);
+            // §10.5 wire range. The artifact auto-applies at boot with no
+            // operator in the loop, and placement_qdb reaches set_power_qdb
+            // directly — clamped further only when max_power_qdb happens to
+            // be configured. The CRC-8 below is explicitly NOT a tamper seal,
+            // so an out-of-range value is corruption, not a request: refuse
+            // the whole artifact rather than actuate part of one.
+            if (p.placement_qdb < -511 || p.placement_qdb > 511) {
+                return Result<UplinkArtifact>::fail(
+                    "uplink artifact: placement_qdb out of range "
+                    "(-511..511)");
+            }
             p.placement_rssi_dbm =
                 static_cast<int8_t>(e.value("placement_rssi_dbm", 0));
             p.placement_loss_milli =

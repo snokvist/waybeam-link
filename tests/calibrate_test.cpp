@@ -547,6 +547,17 @@ void test_rung_ceiling_bounds_the_sweep() {
     low.max_qdb = low.min_qdb;
     CHECK(rung_max_qdb(low, 7) == low.min_qdb);
 
+    // The taper may only ever LOWER. A §9.3 table authoring a level above the
+    // baseline must NOT lift a rung ceiling past the operator's flat ceiling —
+    // otherwise §10.3 stops being a ceiling, and because the table is shared
+    // it would do so on both directions at once.
+    CalibrateParams hot = fast_params();
+    hot.levels = {6, 5, 4, 4, 4, 4, 4, 4};
+    for (size_t m = 0; m < 8; ++m) {
+        CHECK(rung_max_qdb(hot, m) <= hot.max_qdb);
+    }
+    CHECK(rung_max_qdb(hot, 0) == hot.max_qdb);  // clamped, not 124
+
     // Pass 135: a §11.7 0x0A power tier moves this one baseline, and every
     // rung ceiling follows. That is the whole reason the tier moves
     // max_qdb rather than latching an absolute power the §10.5 way — a flat

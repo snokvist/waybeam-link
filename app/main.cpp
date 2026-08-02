@@ -2847,19 +2847,28 @@ struct TxCore {
     // shape survives, which is exactly what the rung-agnostic §10.5 latch
     // cannot do. Returns false = REJECTED (no list, or index past its end).
     bool set_power_tier(uint8_t tier) {
-        bool any = false;
+        // ALL-OR-NOTHING. Validate every configured list before touching any
+        // ceiling: applying the tier to one tx adapter, skipping another whose
+        // list is shorter, and still reporting success would leave two
+        // adapters on different ceilings with nothing saying so — and
+        // power_tier_ceiling() reports only the FIRST, which is the number
+        // that then seeds the calibrator and §15.3.
+        bool configured = false;
+        for (const PowerTarget& t : power_targets_) {
+            if (t.presets_qdb.empty()) continue;
+            configured = true;
+            if (tier >= t.presets_qdb.size()) return false;
+        }
+        if (!configured) return false;
         for (PowerAdapter& pa : power_) {
             if (tier >= pa.presets_qdb.size()) continue;
             pa.ceiling = pa.presets_qdb[tier];
             pa.applied_qdb.reset();  // force a real re-apply at the new bound
-            any = true;
         }
         for (PowerTarget& t : power_targets_) {
             if (tier >= t.presets_qdb.size()) continue;
             t.ceiling = t.presets_qdb[tier];
-            any = true;
         }
-        if (!any) return false;
         power_tier_ = tier;
         // The sweep bound moves with it, so a calibration started after a tier
         // change measures inside the new envelope rather than the boot one.
@@ -2869,7 +2878,14 @@ struct TxCore {
         // Re-resolve once at the committed operating point. On a node with no
         // curve this resolves to nullopt and moves nothing — §10.3 (Pass 134):
         // the ceiling binds only where a number of ours reaches the actuator.
-        if (!power_override_ && last_commit_mcs_) {
+        if (power_override_) {
+            // §10.5 says the ceiling is the only clamp on a latch, so a
+            // lowered tier must re-assert it through the NEW clamp. Skipping
+            // this left the hardware on the old, higher clamped value until
+            // some unrelated event re-applied it — a tier that visibly did
+            // nothing, which is the worst outcome for a safety control.
+            set_power_override(*power_override_);
+        } else if (last_commit_mcs_) {
             resolve_and_apply_power(*last_commit_mcs_, last_commit_level_);
         }
         return true;
@@ -4818,6 +4834,10 @@ int run_rx(const Loaded& l) {
         uplink_adapter != nullptr ? uplink_adapter->power_presets_qdb
                                   : std::vector<int32_t>{};
     int uplink_power_tier = -1;
+    // The policy-level sweep bound, kept so a runtime tier can rebuild
+    // ucal_params.seek.max_qdb from the same two inputs the startup fold used.
+    const int32_t cp_max_qdb =
+        static_cast<int32_t>(l.cfg.policy.calibration.max_qdb);
     // §10.7 power-owner resolve, highest precedence first: an explicit
     // configured map, then a matching persisted artifact, then the backend
     // default. Calibration borrows the actuator and every exit hands it back
@@ -5403,7 +5423,16 @@ int run_rx(const Loaded& l) {
                                              uint16_t target) {
         if (!qg.enabled()) {
             uint8_t tmp[kLinkReportSize];
-            if (n > sizeof(tmp)) return;
+            if (n > sizeof(tmp)) {
+                // Was a bare `return` — a dropped LINK_REPORT with no counter
+                // and no log, on the stream §10.6 scores its dwells from.
+                std::fprintf(stderr,
+                             "return: LINK_REPORT %zu B exceeds %zu B, "
+                             "dropped\n",
+                             n, sizeof(tmp));
+                ++ret_window_misses;
+                return;
+            }
             std::memcpy(tmp, f, n);
             send_report(target, tmp, n);
             return;
@@ -5966,11 +5995,15 @@ int run_rx(const Loaded& l) {
             // and with `both` the craft's too — one action, both directions,
             // the shape {"action":"start_both"} already has for calibration.
             h.tx_power_tier_json = [&] {
+                // `effective` must mean "this ceiling reaches hardware", not
+                // "a curve exists somewhere". An artifact that fails the §10.7
+                // pairing check is never applied, so has_value() alone
+                // overstated it — the craft half uses has_power_curve(), which
+                // is the real test.
                 return power_tier_json(
                     uplink_power_tier, uplink_power_presets, uplink_ceiling_qdb,
-                    /*effective=*/uplink_artifact.has_value() ||
-                        (uplink_adapter != nullptr &&
-                         !uplink_adapter->power_map.empty()));
+                    /*effective=*/uplink_owner_qdb.has_value() ||
+                        uplink_artifact_qdb().has_value());
             };
             h.tx_power_tier_set = [&](int tier, bool both)
                 -> std::pair<int, std::string> {
@@ -5996,6 +6029,13 @@ int run_rx(const Loaded& l) {
                 }
                 uplink_power_tier = tier;
                 uplink_ceiling_qdb = uplink_power_presets[tier];
+                // The sweep bound is folded once at startup, so without this a
+                // §10.7 run started after a tier change would still climb to
+                // the BOOT ceiling — the tier would bound flight power but not
+                // the one operation that deliberately walks a rung into
+                // overload. §10.6 already re-seeds via init_calibration.
+                ucal_params.seek.max_qdb =
+                    std::min(cp_max_qdb, *uplink_ceiling_qdb);
                 // Re-resolve now: the artifact-apply path reads the ceiling on
                 // every pairing resolve, but nothing forces one here, and a
                 // tier the operator can see but not feel is worse than none.
@@ -7144,6 +7184,22 @@ int run_loopback(const Loaded& l) {
             tx.on_air(f, n, loop_now);
         }
     };
+    // §3.5: Reporter::build() leaves report_epoch at 0 and the INJECTOR stamps
+    // it, so an injector that does not stamp emits a constant 0 on the wire.
+    // run_rx has send_report for this; loopback passed inject_nack as its
+    // report injector and therefore emitted epoch 0 on every LINK_REPORT,
+    // silently degrading anything on the bench that keys on epoch monotonicity
+    // — including the §10.7 denominator the whole feature is measured with.
+    const RxCore::Inject inject_report = [&](const uint8_t* f, size_t n,
+                                             uint16_t) {
+        std::vector<uint8_t> tmp(f, f + n);
+        (void)link_report_stamp_epoch(tmp.data(), tmp.size(),
+                                      rx.next_report_epoch());
+        if (return_rng.uniform() >= l.cfg.loopback.return_loss_p) {
+            tx.on_air(tmp.data(), tmp.size(), loop_now);
+            rx.commit_report_epoch();
+        }
+    };
 
     StatsEmitter emitter(l.cfg.stats.to_stdout, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
@@ -7242,7 +7298,7 @@ int run_loopback(const Loaded& l) {
             tx.on_ingress(ev.stream_id, ev.data, ev.len, loop_now, inject);
         });
         tx.tick(loop_now, inject);
-        rx.tick(loop_now, deliver, inject_nack, inject_nack);
+        rx.tick(loop_now, deliver, inject_nack, inject_report);
         if (control) {
             control->service(loop_now);
         }

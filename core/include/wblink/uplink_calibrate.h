@@ -292,9 +292,11 @@ class UplinkCalibrator {
         const int32_t lvl = rung < p_.levels.size()
                                 ? static_cast<int32_t>(p_.levels[rung])
                                 : kPowerLevelBaseline;
-        return std::max(
-            p_.seek.min_qdb,
-            p_.seek.max_qdb + (lvl - kPowerLevelBaseline) * kQdbPerLevel);
+        // Bounded on both sides, same reason as §10.6's rung_max_qdb: the
+        // taper may only lower, never raise the operator's flat ceiling.
+        return std::clamp(
+            p_.seek.max_qdb + (lvl - kPowerLevelBaseline) * kQdbPerLevel,
+            p_.seek.min_qdb, p_.seek.max_qdb);
     }
 
     void enter_rung(uint64_t now_ms, uint32_t local_epoch) {
