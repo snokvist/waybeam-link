@@ -265,3 +265,263 @@ Aug 02 12:20:42 snokvist-NucBox-M6-Ultra waybeam-link[1453270]: rx: latch recove
 Aug 02 12:20:42 snokvist-NucBox-M6-Ultra waybeam-link[1453270]: link: latched originator=17 (5805 MHz) — selection bound
 Aug 02 12:20:42 snokvist-NucBox-M6-Ultra waybeam-link[1453270]: kernel-monitor: wlx84fc1450bcde txpower auto ok
 Aug 02 12:20:43 snokvist-NucBox-M6-Ultra waybeam-link[1453270]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra systemd[1]: Stopping waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Deactivated successfully.
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra systemd[1]: Stopped waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Consumed 2min 42.589s CPU time, 13.3M memory peak.
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra systemd[1]: Starting waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra rfkill[1458494]: unblock set for type wifi
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-mon-up[1458497]: mon-up: wlx84fc1450bcde ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 19.00 dBm
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-mon-up[1458509]: mon-up: wlx40a5ef2f2308 ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 25.00 dBm
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra systemd[1]: Started waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: node 9 role=rx preferred=17
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: adapters (2):
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]:   eu-uplink role=tx ch=5805 bw=20
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]:   cu-diversity role=rx ch=5805 bw=20
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: streams (2):
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]:   id=0 type=1 out ->
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]:   id=1 type=4 out -> 127.0.0.1:5601
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: policy: report_hz=10 demote_milli=45 fwd_clamp_blocks=4 csa_psk=(unset)
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: stats: hz=10 stdout=off -> (no sink)
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: profile table: 8 profiles, table_version=0x80
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: uplink: power owner = backend auto (artifact present, awaiting craft)
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: rx: frame-shm egress 'venc_frame_out' created
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: kernel-monitor: wlx84fc1450bcde netdev mtu=4052 -> packet budget 3072
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: kernel-monitor: wlx40a5ef2f2308 netdev mtu=4052 -> packet budget 3072
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: control: REST on 127.0.0.1:8092 (rx)
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: rx: session=3367924653, 2 adapters, running (quiet-gap returns)
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: rx: latch recovery stream=0 origin=17 attempt 1/5
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: link: latched originator=17 (5805 MHz) — selection bound
+Aug 02 12:38:35 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:38:36 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 12:38:47 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: uplink-calib: START mcs=0
+Aug 02 12:38:47 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 12:38:52 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 12:38:52 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: uplink-calib: dwell#1 probe  qdb=4 emitted=40/40 received=40 loss=0permille rssi=-39
+Aug 02 12:38:56 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: uplink-calib: dwell#2 probe  qdb=20 emitted=42/40 received=42 loss=0permille rssi=-39
+Aug 02 12:39:01 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 12:39:01 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: uplink-calib: dwell#3 probe  qdb=20 emitted=41/40 received=41 loss=0permille rssi=-39
+Aug 02 12:39:22 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 12:39:22 snokvist-NucBox-M6-Ultra waybeam-link[1458521]: uplink-calib: dwell#4 VERIFY qdb=4 emitted=199/200 received=198 loss=10permille rssi=-39 [BLACKOUT]
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra systemd[1]: Stopping waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Deactivated successfully.
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra systemd[1]: Stopped waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Consumed 11.733s CPU time, 10.4M memory peak.
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra systemd[1]: Starting waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra rfkill[1458811]: unblock set for type wifi
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-mon-up[1458813]: mon-up: wlx84fc1450bcde ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 19.00 dBm
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-mon-up[1458826]: mon-up: wlx40a5ef2f2308 ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 25.00 dBm
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra systemd[1]: Started waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: node 9 role=rx preferred=17
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: adapters (2):
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-link[1458838]:   eu-uplink role=tx ch=5805 bw=20
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-link[1458838]:   cu-diversity role=rx ch=5805 bw=20
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: streams (2):
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-link[1458838]:   id=0 type=1 out ->
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-link[1458838]:   id=1 type=4 out -> 127.0.0.1:5601
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: policy: report_hz=10 demote_milli=45 fwd_clamp_blocks=4 csa_psk=(unset)
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: stats: hz=10 stdout=off -> (no sink)
+Aug 02 12:39:52 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: profile table: 8 profiles, table_version=0x80
+Aug 02 12:39:53 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:39:53 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: uplink: power owner = backend auto
+Aug 02 12:39:53 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: rx: frame-shm egress 'venc_frame_out' created
+Aug 02 12:39:53 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: kernel-monitor: wlx84fc1450bcde netdev mtu=4052 -> packet budget 3072
+Aug 02 12:39:53 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: kernel-monitor: wlx40a5ef2f2308 netdev mtu=4052 -> packet budget 3072
+Aug 02 12:39:53 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: control: REST on 127.0.0.1:8092 (rx)
+Aug 02 12:39:53 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: rx: session=1793158531, 2 adapters, running (quiet-gap returns)
+Aug 02 12:39:53 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: rx: latch recovery stream=0 origin=17 attempt 1/5
+Aug 02 12:39:53 snokvist-NucBox-M6-Ultra waybeam-link[1458838]: link: latched originator=17 (5805 MHz) — selection bound
+Aug 02 12:40:04 snokvist-NucBox-M6-Ultra systemd[1]: Stopping waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Deactivated successfully.
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra systemd[1]: Stopped waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Consumed 1.809s CPU time, 9.8M memory peak.
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra systemd[1]: Starting waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra rfkill[1458959]: unblock set for type wifi
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-mon-up[1458961]: mon-up: wlx84fc1450bcde ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 19.00 dBm
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-mon-up[1458973]: mon-up: wlx40a5ef2f2308 ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 25.00 dBm
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra systemd[1]: Started waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: node 9 role=rx preferred=17
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: adapters (2):
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]:   eu-uplink role=tx ch=5805 bw=20
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]:   cu-diversity role=rx ch=5805 bw=20
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: streams (2):
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]:   id=0 type=1 out ->
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]:   id=1 type=4 out -> 127.0.0.1:5601
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: policy: report_hz=10 demote_milli=45 fwd_clamp_blocks=4 csa_psk=(unset)
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: stats: hz=10 stdout=off -> (no sink)
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: profile table: 8 profiles, table_version=0x80
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink: power owner = backend auto
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: rx: frame-shm egress 'venc_frame_out' created
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde netdev mtu=4052 -> packet budget 3072
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx40a5ef2f2308 netdev mtu=4052 -> packet budget 3072
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: control: REST on 127.0.0.1:8092 (rx)
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: rx: session=906909614, 2 adapters, running (quiet-gap returns)
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: rx: latch recovery stream=0 origin=17 attempt 1/5
+Aug 02 12:40:05 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: link: latched originator=17 (5805 MHz) — selection bound
+Aug 02 12:40:17 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: START mcs=0
+Aug 02 12:40:17 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 12:40:21 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 12:40:21 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: dwell#1 probe  qdb=4 emitted=40/40 received=40 loss=0permille rssi=-39
+Aug 02 12:40:30 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 12:40:30 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: dwell#2 probe  qdb=20 emitted=82/80 received=81 loss=12permille rssi=-39
+Aug 02 12:40:34 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 12:40:34 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: dwell#3 probe  qdb=36 emitted=41/40 received=41 loss=0permille rssi=-35
+Aug 02 12:40:39 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 12:40:39 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: dwell#4 probe  qdb=52 emitted=41/40 received=41 loss=0permille rssi=-30
+Aug 02 12:40:44 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 12:40:44 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: dwell#5 probe  qdb=68 emitted=41/40 received=41 loss=0permille rssi=-29
+Aug 02 12:40:48 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 12:40:48 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: dwell#6 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-24
+Aug 02 12:40:53 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 12:40:53 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: dwell#7 probe  qdb=100 emitted=40/40 received=40 loss=0permille rssi=-21
+Aug 02 12:40:57 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 12:40:57 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: dwell#8 probe  qdb=108 emitted=41/40 received=41 loss=0permille rssi=-20
+Aug 02 12:41:18 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:41:18 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: dwell#9 VERIFY qdb=108 emitted=199/200 received=198 loss=10permille rssi=-20 [BLACKOUT]
+Aug 02 12:41:18 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: uplink-calib: DONE placement=108 qdb fp=0x4e
+Aug 02 12:41:18 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 12:41:18 snokvist-NucBox-M6-Ultra waybeam-link[1458985]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra systemd[1]: Stopping waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Deactivated successfully.
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra systemd[1]: Stopped waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Consumed 14.558s CPU time, 11M memory peak.
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra systemd[1]: Starting waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra rfkill[1459319]: unblock set for type wifi
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-mon-up[1459322]: mon-up: wlx84fc1450bcde ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 19.00 dBm
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-mon-up[1459335]: mon-up: wlx40a5ef2f2308 ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 25.00 dBm
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra systemd[1]: Started waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: node 9 role=rx preferred=17
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: adapters (2):
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]:   eu-uplink role=tx ch=5805 bw=20
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]:   cu-diversity role=rx ch=5805 bw=20
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: streams (2):
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]:   id=0 type=1 out ->
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]:   id=1 type=4 out -> 127.0.0.1:5601
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: policy: report_hz=10 demote_milli=45 fwd_clamp_blocks=4 csa_psk=(unset)
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: stats: hz=10 stdout=off -> (no sink)
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: profile table: 8 profiles, table_version=0x80
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: uplink: power owner = backend auto
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: rx: frame-shm egress 'venc_frame_out' created
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: kernel-monitor: wlx84fc1450bcde netdev mtu=4052 -> packet budget 3072
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: kernel-monitor: wlx40a5ef2f2308 netdev mtu=4052 -> packet budget 3072
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: control: REST on 127.0.0.1:8092 (rx)
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: rx: session=2680664079, 2 adapters, running (quiet-gap returns)
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: rx: latch recovery stream=0 origin=17 attempt 1/5
+Aug 02 12:41:41 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: link: latched originator=17 (5805 MHz) — selection bound
+Aug 02 12:41:53 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: uplink-calib: START mcs=0
+Aug 02 12:41:53 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 12:42:02 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: kernel-monitor: wlx84fc1450bcde txpower fixed 20 qdb (500 mBm)
+Aug 02 12:42:02 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: uplink-calib: dwell#1 probe  qdb=4 emitted=81/80 received=80 loss=12permille rssi=-39
+Aug 02 12:42:06 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: uplink-calib: dwell#2 probe  qdb=20 emitted=41/40 received=41 loss=0permille rssi=-39
+Aug 02 12:42:11 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: kernel-monitor: wlx84fc1450bcde txpower fixed 4 qdb (100 mBm)
+Aug 02 12:42:11 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: uplink-calib: dwell#3 probe  qdb=20 emitted=41/40 received=41 loss=0permille rssi=-39
+Aug 02 12:42:32 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:42:32 snokvist-NucBox-M6-Ultra waybeam-link[1459347]: uplink-calib: dwell#4 VERIFY qdb=4 emitted=198/200 received=197 loss=15permille rssi=-39 [BLACKOUT]
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra systemd[1]: Stopping waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Deactivated successfully.
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra systemd[1]: Stopped waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Consumed 11.609s CPU time, 10.6M memory peak.
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra systemd[1]: Starting waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra rfkill[1459876]: unblock set for type wifi
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-mon-up[1459879]: mon-up: wlx84fc1450bcde ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 19.00 dBm
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-mon-up[1459891]: mon-up: wlx40a5ef2f2308 ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 25.00 dBm
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra systemd[1]: Started waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: node 9 role=rx preferred=17
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: adapters (2):
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]:   eu-uplink role=tx ch=5805 bw=20
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]:   cu-diversity role=rx ch=5805 bw=20
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: streams (2):
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]:   id=0 type=1 out ->
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]:   id=1 type=4 out -> 127.0.0.1:5601
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: policy: report_hz=10 demote_milli=45 fwd_clamp_blocks=4 csa_psk=(unset)
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: stats: hz=10 stdout=off -> (no sink)
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: profile table: 8 profiles, table_version=0x80
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: uplink: power owner = backend auto
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: rx: frame-shm egress 'venc_frame_out' created
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde netdev mtu=4052 -> packet budget 3072
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx40a5ef2f2308 netdev mtu=4052 -> packet budget 3072
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: control: REST on 127.0.0.1:8092 (rx)
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: rx: session=2611201836, 2 adapters, running (quiet-gap returns)
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: rx: latch recovery stream=0 origin=17 attempt 1/5
+Aug 02 12:42:58 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: link: latched originator=17 (5805 MHz) — selection bound
+Aug 02 12:43:10 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: uplink-calib: START mcs=0
+Aug 02 12:43:10 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower fixed 36 qdb (900 mBm)
+Aug 02 12:43:14 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower fixed 52 qdb (1300 mBm)
+Aug 02 12:43:14 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: uplink-calib: dwell#1 probe  qdb=36 emitted=41/40 received=41 loss=0permille rssi=-35
+Aug 02 12:43:19 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower fixed 68 qdb (1700 mBm)
+Aug 02 12:43:19 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: uplink-calib: dwell#2 probe  qdb=52 emitted=40/40 received=40 loss=0permille rssi=-30
+Aug 02 12:43:24 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower fixed 84 qdb (2100 mBm)
+Aug 02 12:43:24 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: uplink-calib: dwell#3 probe  qdb=68 emitted=41/40 received=41 loss=0permille rssi=-29
+Aug 02 12:43:28 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower fixed 100 qdb (2500 mBm)
+Aug 02 12:43:28 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: uplink-calib: dwell#4 probe  qdb=84 emitted=41/40 received=41 loss=0permille rssi=-24
+Aug 02 12:43:33 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 12:43:33 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: uplink-calib: dwell#5 probe  qdb=100 emitted=41/40 received=41 loss=0permille rssi=-22
+Aug 02 12:43:41 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 12:43:41 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: uplink-calib: dwell#6 probe  qdb=108 emitted=81/80 received=80 loss=12permille rssi=-20
+Aug 02 12:44:02 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:44:02 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: uplink-calib: dwell#7 VERIFY qdb=108 emitted=199/200 received=199 loss=5permille rssi=-20 [BLACKOUT]
+Aug 02 12:44:02 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: uplink-calib: artifact write FAILED (/etc/waybeam-link/calibration-missing) — run FAILED, placement not persisted
+Aug 02 12:44:02 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:44:02 snokvist-NucBox-M6-Ultra waybeam-link[1459903]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra systemd[1]: Stopping waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Deactivated successfully.
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra systemd[1]: Stopped waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Consumed 12.717s CPU time, 11.1M memory peak.
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra systemd[1]: Starting waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra rfkill[1460330]: unblock set for type wifi
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-mon-up[1460333]: mon-up: wlx84fc1450bcde ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 19.00 dBm
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-mon-up[1460345]: mon-up: wlx40a5ef2f2308 ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 25.00 dBm
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra systemd[1]: Started waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: node 9 role=rx preferred=17
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: adapters (2):
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]:   eu-uplink role=tx ch=5805 bw=20
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]:   cu-diversity role=rx ch=5805 bw=20
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: streams (2):
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]:   id=0 type=1 out ->
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]:   id=1 type=4 out -> 127.0.0.1:5601
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: policy: report_hz=10 demote_milli=45 fwd_clamp_blocks=4 csa_psk=(unset)
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: stats: hz=10 stdout=off -> (no sink)
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: profile table: 8 profiles, table_version=0x80
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: uplink: power owner = backend auto (artifact present, awaiting craft)
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: rx: frame-shm egress 'venc_frame_out' created
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: kernel-monitor: wlx84fc1450bcde netdev mtu=4052 -> packet budget 3072
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: kernel-monitor: wlx40a5ef2f2308 netdev mtu=4052 -> packet budget 3072
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: control: REST on 127.0.0.1:8092 (rx)
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: rx: session=60969786, 2 adapters, running (quiet-gap returns)
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: rx: latch recovery stream=0 origin=17 attempt 1/5
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: link: latched originator=17 (5805 MHz) — selection bound
+Aug 02 12:44:22 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:44:23 snokvist-NucBox-M6-Ultra waybeam-link[1460359]: kernel-monitor: wlx84fc1450bcde txpower fixed 108 qdb (2700 mBm)
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra systemd[1]: Stopping waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Deactivated successfully.
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra systemd[1]: Stopped waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra systemd[1]: waybeam-ground.service: Consumed 4.131s CPU time, 10M memory peak.
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra systemd[1]: Starting waybeam-ground.service - Waybeam FPV ground receiver...
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra rfkill[1460608]: unblock set for type wifi
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-mon-up[1460612]: mon-up: wlx84fc1450bcde ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 19.00 dBm
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-mon-up[1460624]: mon-up: wlx40a5ef2f2308 ->         type monitor         channel 161 (5805 MHz), width: 20 MHz (no HT), center1: 5805 MHz         txpower 25.00 dBm
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra systemd[1]: Started waybeam-ground.service - Waybeam FPV ground receiver.
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: node 9 role=rx preferred=17
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: adapters (2):
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]:   eu-uplink role=tx ch=5805 bw=20
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]:   cu-diversity role=rx ch=5805 bw=20
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: streams (2):
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]:   id=0 type=1 out ->
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]:   id=1 type=4 out -> 127.0.0.1:5601
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: policy: report_hz=10 demote_milli=45 fwd_clamp_blocks=4 csa_psk=(unset)
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: stats: hz=10 stdout=off -> (no sink)
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: profile table: 8 profiles, table_version=0x80
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: kernel-monitor: wlx84fc1450bcde txpower auto ok
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: uplink: power owner = backend auto
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: rx: frame-shm egress 'venc_frame_out' created
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: kernel-monitor: wlx84fc1450bcde netdev mtu=4052 -> packet budget 3072
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: kernel-monitor: wlx40a5ef2f2308 netdev mtu=4052 -> packet budget 3072
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: control: REST on 127.0.0.1:8092 (rx)
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: rx: session=2111906546, 2 adapters, running (quiet-gap returns)
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: rx: latch recovery stream=0 origin=17 attempt 1/5
+Aug 02 12:44:49 snokvist-NucBox-M6-Ultra waybeam-link[1460636]: link: latched originator=17 (5805 MHz) — selection bound
