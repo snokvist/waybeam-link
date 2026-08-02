@@ -3038,11 +3038,19 @@ struct RxCore {
     // directions can refuse to overlap without any new wire. They must not:
     // §10.7 drives ground power to min_qdb, starving the report stream that
     // every §10.6 dwell and its abort clock depend on.
-    bool craft_calibrating() const {
-        return remote_selector_state_ &&
-               (remote_selector_state_->state_flags &
-                selector_state_flags::kCalibPresent) != 0 &&
-               (remote_selector_state_->calib_word & 0x03u) == 1u;
+    bool craft_calibrating() const { return craft_calib_state() == 1; }
+
+    // The mirrored §3.15 calibration word's state nibble, or -1 when the
+    // craft is not airing one (older build, or no selector state yet). The
+    // §10.7 sequencer needs the full value, not just "running": it has to
+    // tell a finished downlink phase from a failed one.
+    int craft_calib_state() const {
+        if (!remote_selector_state_ ||
+            (remote_selector_state_->state_flags &
+             selector_state_flags::kCalibPresent) == 0) {
+            return -1;
+        }
+        return static_cast<int>(remote_selector_state_->calib_word & 0x03u);
     }
 
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
@@ -4721,6 +4729,7 @@ int run_rx(const Loaded& l) {
     }
     UplinkCalibrator uplink_cal(ucal_params, l.cfg.air.uplink_mcs,
                                 l.cfg.air.uplink_sgi);
+    CalibSequencer calib_seq;
     // One place that turns live §10.7/§3.16 state into the §15.3 fields, so
     // the stats line and GET /api/v1/calibration cannot describe the node
     // differently.
@@ -5483,7 +5492,9 @@ int run_rx(const Loaded& l) {
             // of the two it is holding, since both live at this path.
             h.calibration_json = [&]() -> std::string {
                 const UplinkStatsFill u = uplink_fill();
-                std::string s = "{\"direction\":\"uplink\",\"state\":\"";
+                std::string s = "{\"direction\":\"uplink\",\"phase\":\"";
+                s += CalibSequencer::phase_name(calib_seq.phase());
+                s += "\",\"state\":\"";
                 s += u.state;
                 s += "\",\"rung\":" + std::to_string(u.rung);
                 s += ",\"power_qdb\":" + std::to_string(u.power_qdb);
@@ -5538,7 +5549,11 @@ int run_rx(const Loaded& l) {
                     s += "null";
                 }
                 s += ",\"fail_reason\":";
-                const char* fr = uplink_cal.fail_reason();
+                // The sequencer's reason wins when set: it names WHICH phase
+                // failed, which the uplink calibrator's cannot.
+                const char* fr = calib_seq.fail_reason()
+                                     ? calib_seq.fail_reason()
+                                     : uplink_cal.fail_reason();
                 if (fr != nullptr) {
                     s += "\"";
                     s += fr;
@@ -5555,10 +5570,23 @@ int run_rx(const Loaded& l) {
             h.uplink_calibrate = [&](const std::string& action)
                 -> std::string {
                 if (action == "abort") {
+                    // Cancels whichever phase is live: the local calibrator
+                    // always, and the craft's run over air when the sequencer
+                    // has already handed off to it.
+                    const SeqActions sa = calib_seq.abort(now_ms());
                     (void)uplink_cal.abort(now_ms());  // idempotent
+                    if (sa.abort_downlink) {
+                        (void)start_vehicle_command("calibrate", 0);
+                    }
                     return "";
                 }
-                if (action != "start") return "action must be start or abort";
+                const bool both = (action == "start_both");
+                if (!both && action != "start") {
+                    return "action must be start, start_both or abort";
+                }
+                if (calib_seq.active()) {
+                    return "bi-directional calibration already running";
+                }
                 if (uplink_cal.state() == CalibState::kRunning) {
                     return "calibration already running";
                 }
@@ -5592,8 +5620,10 @@ int run_rx(const Loaded& l) {
                 if (!uplink_cal.start(now_ms(), rx.report_epoch())) {
                     return "calibration already running";
                 }
-                std::fprintf(stderr, "uplink-calib: START mcs=%u\n",
-                             l.cfg.air.uplink_mcs);
+                if (both) calib_seq.start(now_ms());
+                std::fprintf(stderr, "uplink-calib: START mcs=%u%s\n",
+                             l.cfg.air.uplink_mcs,
+                             both ? " (bi-directional)" : "");
                 return "";
             };
             h.scout_quickconnect = do_claim;
@@ -5923,6 +5953,26 @@ int run_rx(const Loaded& l) {
                 // The seek already applied the placement; re-resolving makes
                 // the running value and the persisted owner the same thing.
                 uplink_restore_power();
+            }
+        }
+        // §10.7 bi-directional sequencer. Ticked unconditionally of the
+        // calibrator above, because the downlink phase runs entirely after
+        // the local calibrator has gone terminal.
+        if (calib_seq.active()) {
+            const SeqActions sa = calib_seq.tick(
+                uplink_cal.state(), rx.craft_calib_state(), now_ms());
+            if (sa.start_downlink) {
+                const auto r = start_vehicle_command("calibrate", 1);
+                std::fprintf(stderr,
+                             "calib-seq: uplink done -> downlink (%d)\n",
+                             r.first);
+            }
+            if (!calib_seq.active()) {
+                std::fprintf(stderr, "calib-seq: %s%s%s\n",
+                             CalibSequencer::phase_name(calib_seq.phase()),
+                             calib_seq.fail_reason() ? " " : "",
+                             calib_seq.fail_reason() ? calib_seq.fail_reason()
+                                                     : "");
             }
         }
         const int air_timeout =

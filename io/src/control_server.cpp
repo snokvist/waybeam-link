@@ -475,14 +475,14 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         // §10.7: exactly {"action":"start"} or {"action":"abort"}. A missing
         // or non-string action is malformed (400); an action the node cannot
         // honour right now is a conflict (409, via done()).
+        static const char* kActionErr =
+            "action must be \"start\", \"start_both\" or \"abort\"";
         if (!j.contains("action") || !j["action"].is_string()) {
-            return reply(400, "Bad Request",
-                         json_err("action must be \"start\" or \"abort\""));
+            return reply(400, "Bad Request", json_err(kActionErr));
         }
         const std::string action = j["action"].get<std::string>();
-        if (action != "start" && action != "abort") {
-            return reply(400, "Bad Request",
-                         json_err("action must be \"start\" or \"abort\""));
+        if (action != "start" && action != "start_both" && action != "abort") {
+            return reply(400, "Bad Request", json_err(kActionErr));
         }
         // NOT done(): that maps any refusal to 400. §10.7 distinguishes a
         // malformed body (400, above) from a well-formed request the node

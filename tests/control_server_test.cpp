@@ -388,6 +388,10 @@ int main() {
         CHECK(ucal_action == "start");
         CHECK_EQ_U(status_of(post_cal("{\"action\":\"abort\"}")), 200);
         CHECK(ucal_action == "abort");
+        // §10.7 (Pass 125): the bi-directional action is a third verb on the
+        // same endpoint, so `start` and `abort` keep working unchanged.
+        CHECK_EQ_U(status_of(post_cal("{\"action\":\"start_both\"}")), 200);
+        CHECK(ucal_action == "start_both");
 
         const int calls_before = ucal_calls;
         CHECK_EQ_U(status_of(post_cal("{}")), 400);

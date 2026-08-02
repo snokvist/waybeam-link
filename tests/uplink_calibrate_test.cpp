@@ -319,9 +319,128 @@ void test_loss_denominator_boundary() {
     CHECK(lossy.dwell_target() == p.probe_epochs);  // decided, not ambiguous
 }
 
+// §10.7 sequencer: one operator action, two phases, in the right order.
+void test_sequencer() {
+    // Happy path: uplink done -> downlink issued -> craft runs -> done.
+    {
+        CalibSequencer q;
+        q.start(1000);
+        CHECK(q.phase() == CalibPhase::kUplink);
+        CHECK(q.active());
+        // Uplink still running: nothing is issued.
+        SeqActions a = q.tick(CalibState::kRunning, -1, 1100);
+        CHECK(!a.start_downlink);
+        CHECK(q.phase() == CalibPhase::kUplink);
+        // Uplink done -> the downlink campaign goes out, exactly once.
+        a = q.tick(CalibState::kDone, -1, 2000);
+        CHECK(a.start_downlink);
+        CHECK(q.phase() == CalibPhase::kDownlink);
+        a = q.tick(CalibState::kDone, -1, 2100);
+        CHECK(!a.start_downlink);
+        // The craft picks it up, then finishes.
+        (void)q.tick(CalibState::kDone, 1, 3000);
+        CHECK(q.phase() == CalibPhase::kDownlink);
+        (void)q.tick(CalibState::kDone, 2, 60000);
+        CHECK(q.phase() == CalibPhase::kDone);
+        CHECK(!q.active());
+        CHECK(q.fail_reason() == nullptr);
+    }
+
+    // THE order law: a failed uplink phase must never start the downlink.
+    // §10.6 depends on the uplink delivering reports, so running it across a
+    // bad one measures the wrong thing.
+    {
+        CalibSequencer q;
+        q.start(1000);
+        const SeqActions a = q.tick(CalibState::kFailed, -1, 2000);
+        CHECK(!a.start_downlink);
+        CHECK(q.phase() == CalibPhase::kFailed);
+        CHECK(q.fail_reason() != nullptr);
+        if (q.fail_reason() != nullptr) {
+            CHECK(std::string(q.fail_reason()) == "uplink_phase_failed");
+        }
+    }
+
+    // A stale done/failed word from a PREVIOUS craft run must not be read as
+    // this phase's result before the craft has even picked the command up.
+    {
+        CalibSequencer q;
+        q.start(1000);
+        CHECK(q.tick(CalibState::kDone, 2, 2000).start_downlink);
+        // Craft still airing the old "done" — not ours, keep waiting.
+        (void)q.tick(CalibState::kDone, 2, 2100);
+        CHECK(q.phase() == CalibPhase::kDownlink);
+        (void)q.tick(CalibState::kDone, 1, 3000);   // now it starts
+        (void)q.tick(CalibState::kDone, 2, 40000);  // and finishes
+        CHECK(q.phase() == CalibPhase::kDone);
+    }
+
+    // A lost VCMD must not hang the sequencer forever.
+    {
+        CalibSequencer q(5000);
+        q.start(1000);
+        CHECK(q.tick(CalibState::kDone, 2000, 2000).start_downlink);
+        (void)q.tick(CalibState::kDone, -1, 4000);
+        CHECK(q.phase() == CalibPhase::kDownlink);
+        (void)q.tick(CalibState::kDone, -1, 9000);
+        CHECK(q.phase() == CalibPhase::kFailed);
+        if (q.fail_reason() != nullptr) {
+            CHECK(std::string(q.fail_reason()) == "downlink_no_ack");
+        }
+    }
+
+    // A craft-side failure is reported as the DOWNLINK phase failing, so the
+    // operator knows which half to look at.
+    {
+        CalibSequencer q;
+        q.start(1000);
+        (void)q.tick(CalibState::kDone, -1, 2000);
+        (void)q.tick(CalibState::kDone, 1, 3000);
+        (void)q.tick(CalibState::kDone, 3, 40000);
+        CHECK(q.phase() == CalibPhase::kFailed);
+        if (q.fail_reason() != nullptr) {
+            CHECK(std::string(q.fail_reason()) == "downlink_phase_failed");
+        }
+    }
+
+    // Abort cancels whichever phase is live, and only the downlink one owes
+    // an over-air cancel.
+    {
+        CalibSequencer q;
+        q.start(1000);
+        SeqActions a = q.abort(1500);
+        CHECK(!a.abort_downlink);  // uplink phase: local abort only
+        CHECK(q.phase() == CalibPhase::kFailed);
+        a = q.abort(1600);
+        CHECK(!a.abort_downlink);  // idempotent, nothing live
+
+        CalibSequencer q2;
+        q2.start(1000);
+        (void)q2.tick(CalibState::kDone, -1, 2000);
+        CHECK(q2.phase() == CalibPhase::kDownlink);
+        a = q2.abort(2500);
+        CHECK(a.abort_downlink);  // the craft is running: cancel over air
+        CHECK(q2.phase() == CalibPhase::kFailed);
+    }
+
+    // A plain `start` never enters the sequencer, so `phase` stays idle: it
+    // describes the SEQUENCER, and reporting a lone uplink run as a
+    // half-finished bi-directional one would be a lie.
+    {
+        CalibSequencer q;
+        CHECK(q.phase() == CalibPhase::kIdle);
+        CHECK(!q.active());
+        const SeqActions a = q.tick(CalibState::kDone, 2, 5000);
+        CHECK(!a.start_downlink);
+        CHECK(q.phase() == CalibPhase::kIdle);
+        CHECK(std::string(CalibSequencer::phase_name(q.phase())) == "idle");
+    }
+}
+
 }  // namespace
 
 int main() {
+    test_sequencer();
     test_loss_denominator_boundary();
     test_clean_ramp();
     test_floor_start();

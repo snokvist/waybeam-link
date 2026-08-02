@@ -273,4 +273,129 @@ class UplinkCalibrator {
     std::optional<int32_t> pending_qdb_;
 };
 
+// §10.7 (Pass 125) bi-directional sequencer. Calibration is a one-time
+// commissioning step, so the operator gets ONE action; this runs the uplink
+// phase, then — only on success — the §11.7 downlink campaign.
+//
+// It lives on the ground Link node because that is where both actuators
+// already are: this node owns its uplink power and is the §11.7 issuer, and
+// every §10.7 interlock is local to it. Pure state here, actuation by the
+// caller, so the ordering law is testable without a radio.
+enum class CalibPhase : uint8_t { kIdle, kUplink, kDownlink, kDone, kFailed };
+
+struct SeqActions {
+    bool start_downlink = false;  // issue §11.7 CALIBRATE arg=1
+    bool abort_downlink = false;  // issue §11.7 CALIBRATE arg=0
+};
+
+class CalibSequencer {
+  public:
+    // downlink_start_timeout_ms bounds the wait for the craft's §3.15 word to
+    // show `running`: a VCMD can be lost, and a sequencer that waits forever
+    // for an acknowledgement that is never coming is indistinguishable from a
+    // hung run.
+    explicit CalibSequencer(uint32_t downlink_start_timeout_ms = 15000)
+        : start_timeout_ms_(downlink_start_timeout_ms) {}
+
+    void start(uint64_t now_ms) {
+        phase_ = CalibPhase::kUplink;
+        fail_reason_ = nullptr;
+        entered_ms_ = now_ms;
+        saw_running_ = false;
+    }
+
+    // Cancel whichever phase is live. Returns the actuation the caller owes:
+    // an uplink-phase abort is local (the caller aborts its calibrator), a
+    // downlink-phase abort has to go over air.
+    SeqActions abort(uint64_t now_ms) {
+        SeqActions a;
+        if (phase_ == CalibPhase::kDownlink) a.abort_downlink = true;
+        if (phase_ == CalibPhase::kUplink || phase_ == CalibPhase::kDownlink) {
+            finish(CalibPhase::kFailed, "abort", now_ms);
+        }
+        return a;
+    }
+
+    // uplink_state is the local calibrator's; craft_calib_state is the
+    // mirrored §3.15 nibble (-1 = the craft is not airing one).
+    SeqActions tick(CalibState uplink_state, int craft_calib_state,
+                    uint64_t now_ms) {
+        SeqActions a;
+        switch (phase_) {
+            case CalibPhase::kUplink:
+                if (uplink_state == CalibState::kRunning) break;
+                if (uplink_state == CalibState::kDone) {
+                    // Only here. §10.7's order law is the entire reason the
+                    // sequence exists: a downlink run measured across a badly
+                    // placed uplink aborts on its own report clock or places
+                    // against a thinning report stream.
+                    phase_ = CalibPhase::kDownlink;
+                    entered_ms_ = now_ms;
+                    saw_running_ = false;
+                    a.start_downlink = true;
+                } else {
+                    finish(CalibPhase::kFailed, "uplink_phase_failed", now_ms);
+                }
+                break;
+            case CalibPhase::kDownlink:
+                if (craft_calib_state == 1) {
+                    saw_running_ = true;
+                    break;
+                }
+                if (!saw_running_) {
+                    // The craft has not picked the command up yet. A stale
+                    // done/failed from a PREVIOUS run is still being aired,
+                    // so it must not be read as this phase's result.
+                    if (now_ms - entered_ms_ > start_timeout_ms_) {
+                        finish(CalibPhase::kFailed, "downlink_no_ack", now_ms);
+                    }
+                    break;
+                }
+                if (craft_calib_state == 2) {
+                    finish(CalibPhase::kDone, nullptr, now_ms);
+                } else if (craft_calib_state == 3) {
+                    finish(CalibPhase::kFailed, "downlink_phase_failed",
+                           now_ms);
+                }
+                // -1 (word gone) or 0 (idle) after running: keep waiting; the
+                // §3.15 word is sticky, so a real terminal state will land.
+                break;
+            case CalibPhase::kIdle:
+            case CalibPhase::kDone:
+            case CalibPhase::kFailed:
+                break;
+        }
+        return a;
+    }
+
+    CalibPhase phase() const { return phase_; }
+    bool active() const {
+        return phase_ == CalibPhase::kUplink || phase_ == CalibPhase::kDownlink;
+    }
+    const char* fail_reason() const { return fail_reason_; }
+    static const char* phase_name(CalibPhase p) {
+        switch (p) {
+            case CalibPhase::kUplink: return "uplink";
+            case CalibPhase::kDownlink: return "downlink";
+            case CalibPhase::kDone: return "done";
+            case CalibPhase::kFailed: return "failed";
+            case CalibPhase::kIdle: break;
+        }
+        return "idle";
+    }
+
+  private:
+    void finish(CalibPhase p, const char* reason, uint64_t now_ms) {
+        phase_ = p;
+        fail_reason_ = reason;
+        entered_ms_ = now_ms;
+    }
+
+    uint32_t start_timeout_ms_;
+    CalibPhase phase_ = CalibPhase::kIdle;
+    const char* fail_reason_ = nullptr;
+    uint64_t entered_ms_ = 0;
+    bool saw_running_ = false;
+};
+
 }  // namespace wblink
