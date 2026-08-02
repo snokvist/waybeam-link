@@ -5039,7 +5039,17 @@ int run_rx(const Loaded& l) {
         air.value->latch_uplink_rate(l.cfg.air.uplink_mcs,
                                      l.cfg.air.uplink_sgi);
         if (uplink_override) {
-            (void)air.value->set_power_qdb(uplink_idx, *uplink_override);
+            // §10.5: "the §10.3 max_power_qdb ceiling — when configured — is
+            // the only *clamp*: the hardware receives min(qdb, max_power_qdb)
+            // per adapter, while GET/§15.3 report the latched request value."
+            // The craft honours that (TxCore::set_power_override); the ground
+            // did not, so an operator latch reached the uplink actuator
+            // unbounded. Device-confirmed before the fix: with the ceiling at
+            // 108 qdb, POST {"qdb":120} put the radio at 30.00 dBm.
+            (void)air.value->set_power_qdb(
+                uplink_idx, uplink_ceiling_qdb
+                                ? std::min(*uplink_override, *uplink_ceiling_qdb)
+                                : *uplink_override);
         } else if (uplink_owner_qdb) {
             (void)air.value->set_power_qdb(uplink_idx, *uplink_owner_qdb);
         } else if (const std::optional<int32_t> aq = uplink_artifact_qdb()) {

@@ -68,7 +68,7 @@ inline constexpr uint8_t kRejected = 0x02;  // echo only: understood, won't do
 inline constexpr uint8_t kKnownMask = kAck | kRejected;
 }  // namespace vcmd_flags
 
-// §11.7 command registry. 0x0A–0x1F reserved.
+// §11.7 command registry. 0x0B–0x1F reserved.
 namespace vcmd_id {
 inline constexpr uint8_t kArq = 0x01;        // arg 0=off 1=on
 inline constexpr uint8_t kSelector = 0x02;   // arg 0=run 1=freeze (§9.7 pin)
