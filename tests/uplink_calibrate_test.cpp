@@ -320,7 +320,8 @@ void test_burst_resolves_the_walls_first_time() {
 
     // 99 of 100 = 10permille: clean, decided, and the seek steps UP.
     const int32_t floor_qdb = cal.qdb();
-    feed_dwell(cal, t, epoch, p, 99, -40);
+    feed_dwell(cal, t, epoch, p, 99, -40);   // clean -> Pass 133 confirm burst
+    feed_dwell(cal, t, epoch, p, 99, -40);   // confirmed; this one scores
     CHECK(cal.last_dwell().loss_milli == 10);
     CHECK(cal.qdb() > floor_qdb);            // clean -> climb
     CHECK(cal.dwell_target() == p.probe_epochs);  // a NEW dwell, not extended
@@ -353,7 +354,9 @@ void test_denominator_is_the_grounds_own_count() {
     uint64_t t = 1000;
     uint32_t epoch = 0;
 
-    // A perfectly clean burst: 100 sent, 100 counted.
+    // A perfectly clean burst: 100 sent, 100 counted. Two of them, because
+    // Pass 133 re-runs a rung's first clean probe before accepting it.
+    feed_dwell(cal, t, epoch, p, 100, -40);
     feed_dwell(cal, t, epoch, p, 100, -40);
     CHECK(cal.last_dwell().sent == 100);
     CHECK(cal.last_dwell().received == 100);
@@ -381,6 +384,7 @@ void test_denominator_is_the_grounds_own_count() {
     (void)cal2.tick(t2, e2, true, true);
     t2 += p.drain_ms + 1;
     (void)cal2.tick(t2, e2, true, true);
+    feed_dwell(cal2, t2, e2, p, 100, -40);   // the Pass 133 confirm burst
     CHECK(cal2.last_dwell().sent == 100);
     CHECK(cal2.last_dwell().loss_milli == 0);
 }
@@ -428,11 +432,14 @@ void test_dead_burst_is_1000_permille() {
     CHECK(dead.last_dwell().loss_milli == 1000);
     CHECK(dead.qdb() > floor_qdb);   // ascends off the dead floor
 
-    // ...and the near-clean case that Pass 128 mis-scored reads clean.
+    // ...and the near-clean case that Pass 128 mis-scored reads clean. Two
+    // bursts: Pass 133 re-runs the FIRST clean probe of a rung once before it
+    // may establish `last_clean`, so the second is the one that scores.
     UplinkCalibrator ok(p);
     CHECK(ok.start(1000, 0));
     uint64_t t2 = 1000;
     uint32_t e2 = 0;
+    feed_dwell(ok, t2, e2, p, 99, -40);
     feed_dwell(ok, t2, e2, p, 99, -40);
     CHECK(ok.last_dwell().loss_milli == 10);
     CHECK(ok.last_dwell().rssi_mean == -40);
@@ -545,13 +552,21 @@ void test_verify_exhausted_is_failure() {
     uint64_t t = 1000;
     uint32_t epoch = 0;
 
-    // The reproduced ladder: clean@4, clean@20, bad@36 -> place at 20.
-    feed_dwell(cal, t, epoch, p, p.probe_epochs, -40);
+    // Pass 133 ladder: clean@4 (confirmed), clean@20, then bad all the way to
+    // max_qdb. The bracket is booked at 36 but the sweep runs the FULL range
+    // before placing at the highest clean probe, 20.
+    feed_dwell(cal, t, epoch, p, p.probe_epochs, -40);   // clean, triggers confirm
+    CHECK(cal.qdb() == 4);                                // same power re-run
+    feed_dwell(cal, t, epoch, p, p.probe_epochs, -40);   // confirmed clean
     CHECK(cal.qdb() == 20);
     feed_dwell(cal, t, epoch, p, p.probe_epochs, -36);
     CHECK(cal.qdb() == 36);
-    feed_dwell(cal, t, epoch, p, 1, -33);
-    CHECK(cal.qdb() == 20);  // retreated to the last clean probe, now verifying
+    // Every remaining step is bad; none of them ends the sweep.
+    for (int32_t q = 36; q < p.seek.max_qdb; q += p.seek.seek_step_qdb) {
+        feed_dwell(cal, t, epoch, p, 1, -33);
+    }
+    feed_dwell(cal, t, epoch, p, 1, -33);                 // the max_qdb probe
+    CHECK(cal.qdb() == 20);  // placed at the highest clean probe, now verifying
 
     // Verify at 20 fails under sustained exposure -> the bounded step-down.
     feed_dwell(cal, t, epoch, p, p.verify_epochs - 1, -36);

@@ -401,10 +401,12 @@ void test_sweep_is_monotone_and_seed_free() {
         st = s.on_dwell(DwellVerdict::kClean, -40, 5);
         CHECK(st.kind == SeekStep::Kind::kProbe);
         CHECK(st.qdb == p.min_qdb + 3 * p.seek_step_qdb);
-        // The wall: bad above a clean probe places at the clean one.
+        // Pass 133: a bad probe above a clean one books the overload bracket
+        // but does NOT end the sweep — the placement is the highest clean
+        // probe over the FULL range, so the climb continues.
         st = s.on_dwell(DwellVerdict::kBad, -20, 900);
-        CHECK(st.kind == SeekStep::Kind::kVerify);
-        CHECK(st.qdb == p.min_qdb + 2 * p.seek_step_qdb);
+        CHECK(st.kind == SeekStep::Kind::kProbe);
+        CHECK(st.qdb == p.min_qdb + 4 * p.seek_step_qdb);
         CHECK(s.has_bad());
         CHECK(s.first_bad_rssi() == -20);       // the OVERLOAD reading...
         // ...and the cold steps below the first clean probe never entered it.
@@ -473,8 +475,12 @@ void test_blackout_bracket_uses_observed_rssi() {
     CHECK(up.qdb == 20);
     // The dwell at 20 sampled -26 before the feedback channel died.
     const SeekStep bo = s.on_dwell(DwellVerdict::kBad, -26.0, 1000);
-    CHECK(bo.kind == SeekStep::Kind::kVerify);
-    CHECK(bo.qdb == 4);                 // retreated to the last clean power
+    // Pass 133: the bracket is booked, the sweep keeps climbing. The placement
+    // still ends up at the last clean probe — it is just decided at the top of
+    // the range rather than at the first wall.
+    CHECK(bo.kind == SeekStep::Kind::kProbe);
+    CHECK(bo.qdb == 36);
+    CHECK(s.last_clean_qdb() == 4);
     CHECK(s.has_bad());
     CHECK(s.first_bad_rssi() == -26);   // measured
     CHECK(s.last_clean_rssi() == -40);  // bracket has real width

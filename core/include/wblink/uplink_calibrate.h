@@ -116,6 +116,7 @@ class UplinkCalibrator {
         restore_pending_ = false;
         artifact_pending_ = false;
         placements_.clear();
+        ceiling_reason_ = nullptr;
         rung_ = 0;
         enter_rung(now_ms, local_epoch);
         return true;
@@ -242,6 +243,10 @@ class UplinkCalibrator {
         return placements_;
     }
     uint8_t rung() const { return rung_; }
+    // Why the sweep stopped short of eight rungs, or nullptr if it did not.
+    // A `done` run with fewer than kUplinkRungs placements reached a geometry
+    // ceiling; this says which wall it hit there.
+    const char* ceiling_reason() const { return ceiling_reason_; }
     const UplinkRate& rate() const { return p_.rungs[rung_]; }
     int32_t qdb() const { return qdb_; }
     // Probes delivered so far in this burst. The burst SIZE is dwell_target;
@@ -276,6 +281,8 @@ class UplinkCalibrator {
     // acceptable across rungs than it was within one.
     void enter_rung(uint64_t now_ms, uint32_t local_epoch) {
         pending_rate_ = p_.rungs[rung_];
+        have_clean_ = false;
+        confirming_ = false;
         const SeekStep s = seek_.begin();
         qdb_ = s.qdb;
         pending_qdb_ = s.qdb;
@@ -322,9 +329,25 @@ class UplinkCalibrator {
             rssi = static_cast<double>(rssi_sum_) /
                    static_cast<double>(received_);
         }
-        const DwellVerdict v = loss > p_.seek.loss_bad_milli
-                                   ? DwellVerdict::kBad
-                                   : DwellVerdict::kClean;
+        DwellVerdict v = loss > p_.seek.loss_bad_milli ? DwellVerdict::kBad
+                                                       : DwellVerdict::kClean;
+        // §10.7 (Pass 133): the FIRST clean probe of a rung is re-run once at
+        // the same power before it is allowed to establish `last_clean`.
+        // Measured at 10 m: rung 6 read 100/100 at 1.0 dBm on a link whose
+        // RSSI there was -77 dBm — not physical, a small-sample fluke — and
+        // that became the placement candidate, so the rung failed
+        // `verify_failed` instead of the honest `no_clean_point`. Only the
+        // first is confirmed: later clean probes climb from an already
+        // established clean point, and confirming every one would double the
+        // probe count on a rung that sweeps clean to the top.
+        if (!verify && v == DwellVerdict::kClean && !have_clean_ &&
+            !confirming_) {
+            confirming_ = true;
+            begin_dwell(now_ms, local_epoch, target_epochs_);
+            return a;   // same power, same burst size; its verdict decides
+        }
+        confirming_ = false;
+        if (!verify && v == DwellVerdict::kClean) have_clean_ = true;
         last_ = DwellRecord{last_.seq + 1,   rung_, qdb_,  verify,
                             sent,            received_,
                             loss,            static_cast<int32_t>(std::lround(rssi)),
@@ -334,9 +357,7 @@ class UplinkCalibrator {
         if (s.power_changed) a.set_qdb = s.qdb;
         switch (s.kind) {
             case SeekStep::Kind::kFailed:
-                finish(CalibState::kFailed, s.fail_reason);
-                a.restore = take_restore_();
-                return a;
+                return rung_unreachable(a, s.fail_reason);
             case SeekStep::Kind::kDone:
                 // §10.7 does NOT inherit §10.6's "record the still-failing
                 // floor" rule. The craft's artifact is a record the operator
@@ -349,9 +370,7 @@ class UplinkCalibrator {
                 // defeating the order law through a SUCCESS state that no
                 // interlock inspects. Fail instead; nothing is persisted.
                 if (loss > p_.seek.loss_ok_milli) {
-                    finish(CalibState::kFailed, "verify_failed");
-                    a.restore = take_restore_();
-                    return a;
+                    return rung_unreachable(a, "verify_failed");
                 }
                 {
                     UplinkPlacement pl;
@@ -379,6 +398,31 @@ class UplinkCalibrator {
                 begin_dwell(now_ms, local_epoch, p_.probe_epochs);
                 return a;
         }
+        return a;
+    }
+
+    // §10.7 (Pass 133): a rung with no usable placement CAPS the sweep rather
+    // than failing the whole run. Rungs get monotonically harder — a rung that
+    // cannot hold a clean placement at this geometry guarantees every rung
+    // above it cannot either — so continuing is wasted time and discarding the
+    // rungs that DID calibrate is wasted evidence. Measured at 10 m: rungs 0-5
+    // placed cleanly (0-15permille) and were thrown away because MCS6 needs
+    // ~-70 dBm and the uplink delivers -77 there.
+    //
+    // `placements.size()` IS the ceiling — no schema change, and the loader
+    // already accepts any length. Rung 0 is the exception: with nothing
+    // measured there is no result, so that stays a failure.
+    UplinkCalibActions rung_unreachable(UplinkCalibActions a,
+                                        const char* reason) {
+        if (placements_.empty()) {
+            finish(CalibState::kFailed, reason);
+            a.restore = take_restore_();
+            return a;
+        }
+        ceiling_reason_ = reason;
+        finish(CalibState::kDone, nullptr);
+        a.restore = take_restore_();
+        a.artifact_ready = take_artifact_();
         return a;
     }
 
@@ -440,6 +484,9 @@ class UplinkCalibrator {
     uint32_t target_epochs_ = 0;
     uint64_t drain_until_ms_ = 0;
     bool burst_issued_ = false;
+    bool have_clean_ = false;
+    bool confirming_ = false;
+    const char* ceiling_reason_ = nullptr;
     uint32_t received_ = 0;
     int64_t rssi_sum_ = 0;
     int32_t qdb_ = 0;

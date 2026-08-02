@@ -109,14 +109,22 @@ class PowerSeek {
             // we are cooking the receiver before loss has risen.
             if (rssi > p_.rssi_guard_dbm) return place_();
         } else if (last_clean_) {
-            // The wall: this power is bad and a lower one was clean. There is
-            // nothing to gain above it. Only a bad probe ABOVE a clean one is
-            // overload evidence, so only that one books the rung's ceiling
-            // bracket — a bad step below the first clean probe is "too cold",
-            // and recording it as first_bad_rssi would describe the bottom of
-            // the range as an overload ceiling.
+            // A bad probe above a clean one books the rung's overload bracket
+            // — but it does NOT end the sweep (Pass 133). Terminating here
+            // assumed clean-then-bad means "ceiling found", which is only true
+            // if the clean reading was real. At the bottom of the range on a
+            // marginal link it often is not: measured at 10 m, rung 6 read
+            // 100/100 at 1.0 dBm (rssi -77, not physical), then bad one step
+            // up, and the sweep PLACED after 2 of 8 steps — never trying the
+            // 17.0 dBm region where the adjacent rung had just placed
+            // cleanly. The run then failed, and reported the rung unreachable
+            // when it had simply never been measured.
+            //
+            // So: record the bracket and keep climbing. The placement is the
+            // HIGHEST clean probe over the FULL range, which is what "maximum
+            // clean TX power" means and what makes the result a property of
+            // the channel rather than of the first two readings.
             note_bad_(rssi);
-            return place_();
         } else {
             // Nothing clean anywhere yet, so this is still the dead bottom of
             // the range — a blacked-out floor is simply "not clean" and the

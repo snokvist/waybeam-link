@@ -5426,3 +5426,53 @@ constraint I had treated as fixed (§7.2's gap cadence, the no-probe-traffic
 rule, the 2 Hz feedback) turned out to be either irrelevant to a stationary
 bench or cheaper to amend than to work around. Three passes of increasingly
 careful work inside a bad frame is worse than one question about the frame.
+
+## Pass 133 — sweep the whole range, and confirm the first clean probe (2026-08-02)
+
+Two operator rulings from the 10 m campaign, the second overturning the first
+answer I proposed.
+
+**1. A bad probe above a clean one no longer ends the sweep.** §10.7's first
+10 m run failed at rung 6, and I read that as "MCS6 is unreachable at this
+geometry" and proposed capping the sweep there and persisting rungs 0-5. The
+operator's response — *"the full probe need to be run!! of course it will fail
+at 1db on 10m! you need to go all the way up"* — was correct, and the trace
+proves it:
+
+```
+rung 6 probe qdb=4  -> 0permille    rssi -77   (fluke clean)
+rung 6 probe qdb=20 -> 210permille  rssi -77   (bad above clean -> PLACED)
+rung 6 VERIFY qdb=4 -> 100permille              -> verify_failed
+```
+
+The rung ran **2 of 8 steps**. It never tried 17.0 dBm, where the adjacent rung
+had just placed cleanly. "Unreachable" was never measured, and my proposed
+ceiling would have persisted that non-measurement as a result — a worse failure
+than the one it replaced, because it would have looked like data.
+
+`PowerSeek` now books the overload bracket on a bad-above-clean probe and keeps
+climbing; the placement is the highest clean probe over the FULL range. This is
+the third mechanism Pass 130's logic removes rather than tunes: terminating at
+the first wall assumed the clean reading below it was real, which at the bottom
+of the range on a marginal link it frequently is not. Runtime becomes
+predictable too — every rung is exactly 8 probes plus its verify.
+
+Re-run at 10 m with the full sweep, all eight rungs place: 27.0 dBm at MCS0-2,
+25.0 at MCS3, 17.0 at MCS4-5, **13.0 at MCS6-7** — the rung that had been
+declared unreachable. Every rung from 3 up books a real overload bracket above
+its placement, losses 0-15permille. 14 dB of backoff, monotone.
+
+**2. A rung's first clean probe is re-run once before it may establish
+`last_clean`.** The fluke above is why. Only the first: later clean probes climb
+from an established clean point, and confirming every one would double the probe
+count on a rung that sweeps clean to the top. This is a §10.7 policy on the
+seek's INPUT, mirroring C2's policy on its output — `PowerSeek` itself stays a
+pure monotone sweep.
+
+**Method note.** I proposed the ceiling ruling with a table of six good
+placements and one "unreachable" rung, which read as a well-evidenced finding.
+It was six good placements and one rung that had been measured for two steps out
+of eight. The tell was in the trace I had already printed — rung 5 placed at
+17.0 dBm and rung 6 never probed above 5.0 — and I did not look because the
+failure had a plausible physical story attached to it. A plausible mechanism is
+not evidence that the measurement happened.
