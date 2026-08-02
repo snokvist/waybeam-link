@@ -97,7 +97,17 @@ class UplinkCalibrator {
     // ground-side epoch bookkeeping. Samples inside the settle window are
     // discarded exactly as §10.6 discards its report samples.
     void on_sample(const QualitySample& s, uint64_t now_ms) {
-        if (state_ != CalibState::kRunning || !s.progressed) return;
+        if (state_ != CalibState::kRunning) return;
+        // The craft restarted its counter domain mid-dwell. Everything
+        // accumulated so far belongs to the old domain, and the §10.7 loss
+        // identity is a delta between two anchors of the SAME domain — mixing
+        // them would score a placement against a number that does not mean
+        // what it says. Restart the dwell at this power rather than carry it.
+        if (s.resynced) {
+            restart_dwell(now_ms);
+            return;
+        }
+        if (!s.progressed) return;
         if (now_ms < dwell_start_ms_) return;
         emitted_ += s.epoch_delta;
         received_ += s.reports_delta;
@@ -167,6 +177,17 @@ class UplinkCalibrator {
     uint32_t dwell_target() const { return target_epochs_; }
 
   private:
+    // Re-arm the current dwell at the current power, keeping its target. The
+    // ground epoch anchor re-arms with it (the first post-settle tick), so
+    // both clocks restart together.
+    void restart_dwell(uint64_t now_ms) {
+        dwell_start_ms_ = now_ms + p_.settle_ms;
+        dwell_epoch_armed_ = false;
+        emitted_ = 0;
+        received_ = 0;
+        rssi_sum_ = 0;
+    }
+
     void begin_dwell(uint64_t now_ms, uint32_t local_epoch, uint32_t target) {
         dwell_start_ms_ = now_ms + p_.settle_ms;
         dwell_local_epoch_ = local_epoch;
@@ -323,8 +344,17 @@ class CalibSequencer {
     // show `running`: a VCMD can be lost, and a sequencer that waits forever
     // for an acknowledgement that is never coming is indistinguishable from a
     // hung run.
-    explicit CalibSequencer(uint32_t downlink_start_timeout_ms = 15000)
-        : start_timeout_ms_(downlink_start_timeout_ms) {}
+    //
+    // downlink_cap_ms bounds the phase AFTER the craft picks it up. Without it
+    // a craft that dies mid-run — the §3.15 word simply stops arriving, which
+    // is `-1`, deliberately not a terminal state — leaves `active()` latched
+    // forever, and every future start (either direction) is refused by an
+    // interlock guarding a sequence that ended long ago. Seeded above §10.6's
+    // own 600 s hard cap so a legitimately slow craft run always wins the race.
+    explicit CalibSequencer(uint32_t downlink_start_timeout_ms = 15000,
+                            uint32_t downlink_cap_ms = 660000)
+        : start_timeout_ms_(downlink_start_timeout_ms),
+          cap_ms_(downlink_cap_ms) {}
 
     void start(uint64_t now_ms) {
         phase_ = CalibPhase::kUplink;
@@ -367,6 +397,14 @@ class CalibSequencer {
                 }
                 break;
             case CalibPhase::kDownlink:
+                if (saw_running_ && now_ms - entered_ms_ > cap_ms_) {
+                    // The craft stopped airing a terminal word. Cancel over
+                    // air so it does not keep running against a sequence this
+                    // node has given up on.
+                    a.abort_downlink = true;
+                    finish(CalibPhase::kFailed, "downlink_timeout", now_ms);
+                    break;
+                }
                 if (craft_calib_state == 1) {
                     saw_running_ = true;
                     break;
@@ -421,6 +459,7 @@ class CalibSequencer {
     }
 
     uint32_t start_timeout_ms_;
+    uint32_t cap_ms_;
     CalibPhase phase_ = CalibPhase::kIdle;
     const char* fail_reason_ = nullptr;
     uint64_t entered_ms_ = 0;

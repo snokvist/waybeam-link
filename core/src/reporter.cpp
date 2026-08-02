@@ -58,7 +58,7 @@ std::vector<LinkReport> Reporter::build(const RxEngine& engine,
         r.target_originator = s.key.originator;
         r.target_session = s.key.session_id;
         r.target_stream_id = s.key.stream_id;
-        r.report_epoch = ++epoch_;
+        r.report_epoch = 0;  // stamped at injection (§3.5/§10.7)
         r.table_version = tv_.value_or(0);
         r.rssi_best = best;
         r.rssi_mean = mean;

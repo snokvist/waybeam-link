@@ -36,6 +36,16 @@ class Reporter {
     // Reports due now, one per latched stream (empty between cadence ticks).
     std::vector<LinkReport> build(const RxEngine& engine, uint64_t now_ms);
 
+    // §3.5: `report_epoch` advances once per EMITTED report, and §10.7's loss
+    // identity divides by the craft's delta of exactly this field — so an
+    // epoch spent on a report the radio never took is phantom loss on the
+    // ground's seek. build() therefore leaves the field at 0; the caller
+    // stamps `next_epoch()` into the encoded frame at the radio call and
+    // commits only on success. A report dropped between build and injection
+    // (no uplink adapter, TX queue full) burns no number, and the next report
+    // reuses it.
+    uint32_t next_epoch() const { return epoch_ + 1; }
+    void commit_epoch() { ++epoch_; }
     uint32_t epoch() const { return epoch_; }
     void reset_link() { last_.clear(); }
 

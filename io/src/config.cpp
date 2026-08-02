@@ -586,6 +586,17 @@ Result<Config> load_config_json(const std::string& json_text) {
                     return Result<Config>::fail(
                         "policy.calibration: min_qdb > max_qdb (§10.6)");
                 }
+                // The seek moves in whole steps and judges the cap wall on a
+                // >= 2 dB commanded rise. A step of 0 or less never advances
+                // (or walks backward into an unbounded negative qdb handed
+                // straight to set_power_qdb); a step under 2 dB can never
+                // satisfy the cap-wall test, silently disabling one of the
+                // three walls §10.6 places against. 8 qdb IS 2 dB.
+                if (cal.seek_step_qdb < 8) {
+                    return Result<Config>::fail(
+                        "policy.calibration: seek_step_qdb must be >= 8 (2 dB "
+                        "— the cap wall's minimum commanded step, §10.6)");
+                }
                 if (cal.uplink_probe_epochs < 1 ||
                     cal.uplink_verify_epochs < 1 ||
                     cal.uplink_liveness_ms < 1) {

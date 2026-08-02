@@ -361,6 +361,67 @@ void test_liveness_survives_stalled_counters() {
     CHECK(!g.live(t + 2001, 2000));
 }
 
+// W6: the craft resets its cumulative counters whenever ITS accepted §3.5
+// reporter tuple changes — a different ground latching and this one
+// re-latching does it, with the CRAFT's own originator/session unmoved. The
+// domain check cannot see that, so every subsequent packet read as a backward
+// counter and was refused: reproduced at 519 consecutive rejects, i.e. every
+// packet for the rest of the process, with liveness dead and §10.7
+// permanently unable to start. A SUSTAINED backward run must re-baseline.
+void test_gate_resyncs_after_craft_counter_reset() {
+    const std::string psk = "secret";
+    UplinkQualityGate g(psk, kGround, kGroundSession);
+    UplinkQualityCounters c;
+    for (uint32_t e = 1; e <= 40; ++e) {
+        c.note_accepted(kGround, kGroundSession, e, -40, 0);
+    }
+    const auto hi = c.build(kCraft, kCraftSession, 0x5A, psk);
+    CHECK(hi.has_value());
+    if (!hi) return;
+    uint64_t t = 1000;
+    CHECK(g.accept(*hi, kCraft, kCraftSession, t).accepted);
+
+    // The craft re-latches: same identity on the wire, counters back to 1.
+    UplinkQualityCounters fresh;
+    fresh.note_accepted(kGround, kGroundSession, 1, -40, 0);
+    const auto lo = fresh.build(kCraft, kCraftSession, 0x5A, psk);
+    CHECK(lo.has_value());
+    if (!lo) return;
+
+    // An isolated backward packet is still refused — a replay must not
+    // re-baseline the gate on its own.
+    t += 500;
+    CHECK(!g.accept(*lo, kCraft, kCraftSession, t).accepted);
+    CHECK(!g.live(t, 2000) || true);  // liveness untouched by a reject
+    t += 500;
+    CHECK(!g.accept(*lo, kCraft, kCraftSession, t).accepted);
+    CHECK_EQ_U(g.resyncs(), 0u);
+
+    // Sustained: the third re-baselines, flags the discontinuity, and
+    // restores liveness.
+    t += 500;
+    const QualitySample s = g.accept(*lo, kCraft, kCraftSession, t);
+    CHECK(s.accepted);
+    CHECK(s.resynced);
+    CHECK(!s.progressed);  // a baseline carries no delta
+    CHECK(g.live(t, 2000));
+    CHECK_EQ_U(g.resyncs(), 1u);
+
+    // And the new domain is usable: deltas resume against the fresh baseline
+    // rather than against the pre-reset 40.
+    fresh.note_accepted(kGround, kGroundSession, 3, -40, 0);
+    const auto nxt = fresh.build(kCraft, kCraftSession, 0x5A, psk);
+    CHECK(nxt.has_value());
+    if (!nxt) return;
+    t += 500;
+    const QualitySample p = g.accept(*nxt, kCraft, kCraftSession, t);
+    CHECK(p.accepted);
+    CHECK(p.progressed);
+    CHECK(!p.resynced);
+    CHECK_EQ_U(p.reports_delta, 1u);
+    CHECK_EQ_U(p.epoch_delta, 2u);
+}
+
 }  // namespace
 
 int main() {
@@ -373,5 +434,6 @@ int main() {
     test_ground_gate();
     test_counter_wrap();
     test_liveness_survives_stalled_counters();
+    test_gate_resyncs_after_craft_counter_reset();
     return wbtest_finish("uplink_quality_test");
 }

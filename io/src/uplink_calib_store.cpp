@@ -32,7 +32,15 @@ bool write_atomic(const std::string& path, const std::string& body) {
         std::ofstream f(tmp, std::ios::trunc);
         if (!f) return false;
         f << body;
-        if (!f.good()) return false;
+        // close() BEFORE the check: a buffered stream reports ENOSPC/EIO only
+        // when the buffer is actually flushed, so testing good() at scope exit
+        // — where the destructor swallows the error — promoted a truncated
+        // temp file over a valid artifact. Leave no partial file behind.
+        f.close();
+        if (!f.good()) {
+            std::remove(tmp.c_str());
+            return false;
+        }
     }
     return std::rename(tmp.c_str(), path.c_str()) == 0;
 }

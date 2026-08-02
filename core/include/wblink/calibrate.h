@@ -111,11 +111,20 @@ class PowerSeek {
     // with no clean probe it is indistinguishable from "too cold", so it
     // ascends under the same rule as a bad probe. Returns nullopt when the
     // caller should apply its own abort policy instead.
-    std::optional<SeekStep> on_blackout() {
+    //
+    // observed_rssi is whatever the BLACKED-OUT dwell managed to sample before
+    // the channel died, and it is the honest upper bracket. Passing the last
+    // CLEAN probe's RSSI instead collapses the rung's overload bracket to zero
+    // width — the bracket is the §10.6 ceiling record, so that is a silent
+    // corruption of the artifact, not a cosmetic one. nullopt = the dwell was
+    // entirely blank, which is the only case where the clean RSSI is the best
+    // available answer.
+    std::optional<SeekStep> on_blackout(
+        std::optional<double> observed_rssi = std::nullopt) {
         if (phase_ == Phase::kSeek && last_clean_ && qdb_ > last_clean_->qdb &&
             !blackout_used_) {
             blackout_used_ = true;
-            note_bad_(last_clean_->rssi);
+            note_bad_(observed_rssi.value_or(last_clean_->rssi));
             return place_(last_clean_->qdb);
         }
         if (phase_ == Phase::kSeek && !last_clean_ && at_floor_()) {
@@ -354,7 +363,9 @@ class Calibrator {
             // verify takes the bounded step-down, and a blackout at the floor
             // with no clean probe ascends (Pass 125). nullopt = no seek-side
             // answer, so the §10.6 abort policy applies.
-            const std::optional<SeekStep> s = seek_.on_blackout();
+            const std::optional<SeekStep> s = seek_.on_blackout(
+                rssi_n_ != 0 ? std::optional<double>(double(rssi_sum_) / rssi_n_)
+                             : std::nullopt);
             if (s) {
                 last_report_ms_ = now_ms;  // re-arm at the new power
                 return apply_step(a, now_ms, *s);

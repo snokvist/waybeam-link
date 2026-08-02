@@ -296,6 +296,16 @@ size_t encode_data(const DataHeader& hdr, const uint8_t* payload,
 size_t encode_nack(const NackHeader& hdr, const uint8_t* bitmap,
                    uint8_t bitmap_len, uint8_t* out, size_t cap);
 size_t encode_link_report(const LinkReport& pkt, uint8_t* out, size_t cap);
+
+// Rewrite `report_epoch` in an already-encoded LINK_REPORT frame. §3.5 says
+// the epoch advances once per EMITTED report, and §10.7 divides by the craft's
+// delta of exactly this field — so an epoch burned on a frame the radio never
+// took is phantom loss on the ground's seek. Reports can be built well before
+// they are injected (§7.2 holds a batch for the craft's quiet gap) and can be
+// dropped in between (no uplink adapter, TX queue full), so the number is
+// stamped at the radio call rather than at build. LINK_REPORT carries no MAC,
+// so this is a plain field write. Returns false on a short/absent buffer.
+bool link_report_stamp_epoch(uint8_t* frame, size_t len, uint32_t epoch);
 size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap);
 size_t encode_selector_state(const SelectorState& pkt, uint8_t* out,
                              size_t cap);

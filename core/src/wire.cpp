@@ -523,6 +523,12 @@ size_t encode_link_report(const LinkReport& pkt, uint8_t* out, size_t cap) {
     return kLinkReportSize;
 }
 
+bool link_report_stamp_epoch(uint8_t* frame, size_t len, uint32_t epoch) {
+    if (frame == nullptr || len < kLinkReportSize) return false;
+    be32_write(frame + 18, epoch);  // same offset as encode_link_report
+    return true;
+}
+
 size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap) {
     if (out == nullptr || cap < kHeartbeatSize) {
         return 0;

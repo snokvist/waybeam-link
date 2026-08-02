@@ -426,6 +426,38 @@ void test_seek_floor_ceiling_split() {
     }
 }
 
+// The addendum-4 retreat books the rung's OVERLOAD bracket, and the upper
+// bound of that bracket is what the blacked-out dwell measured — not the last
+// clean probe's reading. Passing the clean RSSI collapses the bracket to zero
+// width, which is a silent corruption of the §10.6 ceiling record (the
+// artifact's whole purpose at that rung), and it is above the first clean
+// probe, where §10.7 promises §10.6 behaviour is unchanged.
+void test_blackout_bracket_uses_observed_rssi() {
+    SeekParams p;
+    {
+        PowerSeek s(p);
+        (void)s.begin(4);
+        const SeekStep up = s.on_dwell(DwellVerdict::kClean, -40.0, 5);
+        CHECK(up.qdb == 20);
+        // The dwell at 20 sampled -26 before the feedback channel died.
+        const std::optional<SeekStep> bo = s.on_blackout(-26.0);
+        CHECK(bo.has_value());
+        if (bo) CHECK(bo->qdb == 4);  // retreated to the last clean power
+        CHECK(s.has_bad());
+        CHECK(s.first_bad_rssi() == -26);   // measured
+        CHECK(s.last_clean_rssi() == -40);  // bracket has real width
+    }
+    // A genuinely blank blackout has nothing measured, so the clean probe's
+    // reading remains the best available answer — the pre-Pass-125 fallback.
+    {
+        PowerSeek s(p);
+        (void)s.begin(4);
+        (void)s.on_dwell(DwellVerdict::kClean, -40.0, 5);
+        CHECK(s.on_blackout().has_value());
+        CHECK(s.first_bad_rssi() == -40);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -442,6 +474,7 @@ int main() {
     test_floor_ascend();
     test_no_clean_point();
     test_seek_floor_ceiling_split();
+    test_blackout_bracket_uses_observed_rssi();
     if (g_fail != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", g_fail);
         return 1;

@@ -553,6 +553,41 @@ void test_sequencer() {
         CHECK(q2.phase() == CalibPhase::kFailed);
     }
 
+    // W5: once saw_running_ latches, the craft simply going quiet is `-1` —
+    // deliberately not a terminal state, because the §3.15 word is sticky and
+    // a real result is expected to land. A craft that DIES mid-phase never
+    // sends one, which latched active() forever and made every future start
+    // in either direction fail an interlock guarding a sequence that ended.
+    {
+        CalibSequencer q(15000, 60000);
+        q.start(1000);
+        CHECK(q.tick(CalibState::kDone, -1, 2000).start_downlink);
+        (void)q.tick(CalibState::kDone, 1, 3000);  // craft picks it up
+        (void)q.tick(CalibState::kDone, -1, 50000);
+        CHECK(q.phase() == CalibPhase::kDownlink);  // still within the cap
+        CHECK(q.active());
+        const SeqActions a = q.tick(CalibState::kDone, -1, 70000);
+        CHECK(a.abort_downlink);  // tell the craft to stop, it may still be on
+        CHECK(q.phase() == CalibPhase::kFailed);
+        CHECK(!q.active());  // and the interlock releases
+        if (q.fail_reason() != nullptr) {
+            CHECK(std::string(q.fail_reason()) == "downlink_timeout");
+        }
+    }
+
+    // The cap must never beat a legitimately slow craft run: the default sits
+    // above §10.6's own 600 s hard cap.
+    {
+        CalibSequencer q;
+        q.start(1000);
+        (void)q.tick(CalibState::kDone, -1, 2000);
+        (void)q.tick(CalibState::kDone, 1, 3000);
+        (void)q.tick(CalibState::kDone, 1, 600000);
+        CHECK(q.phase() == CalibPhase::kDownlink);
+        (void)q.tick(CalibState::kDone, 2, 601000);
+        CHECK(q.phase() == CalibPhase::kDone);
+    }
+
     // A plain `start` never enters the sequencer, so `phase` stays idle: it
     // describes the SEQUENCER, and reporting a lone uplink run as a
     // half-finished bi-directional one would be a lie.

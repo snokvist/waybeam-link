@@ -3032,6 +3032,10 @@ struct RxCore {
     // calibrator needs it only for the counter-blackout case, where the
     // craft's anchors cannot advance.
     uint32_t report_epoch() const { return reporter_.epoch(); }
+    // The injector's half of the §3.5 emission contract: the number to stamp
+    // into the frame at the radio call, and the commit that spends it.
+    uint32_t next_report_epoch() const { return reporter_.next_epoch(); }
+    void commit_report_epoch() { reporter_.commit_epoch(); }
 
     // §10.7 interlock: is the craft running its own §10.6 downlink
     // calibration? The §3.15 word already mirrors it here, so the two
@@ -3057,7 +3061,9 @@ struct RxCore {
               const Inject& inject_report, const Inject& inject_nack,
               bool emit_nacks = true) {
         engine_.tick(now, deliver);
-        // §7.3: LINK_REPORTs ride the same uplink as NACKs.
+        // §7.3: LINK_REPORTs ride the same uplink as NACKs. The epoch is
+        // stamped by the injector at the radio call, not here — see
+        // Reporter::next_epoch().
         for (LinkReport r : reporter_.build(engine_, now)) {
             r.prefix.originator = originator_;
             r.prefix.destination = r.target_originator;
@@ -4743,6 +4749,10 @@ int run_rx(const Loaded& l) {
     // at all. Seeded with the startup tuple so the first pass is not a
     // spurious actuation.
     uint64_t uplink_pairing_key = 0;
+    // The craft a running §10.7 measurement is bound to. The artifact stamps
+    // the craft identity, so a selection change mid-run would persist a
+    // placement measured partly against a different craft's RX chain.
+    uint16_t uplink_cal_craft = 0;
     const auto uplink_pairing_now = [&]() -> uint64_t {
         return (static_cast<uint64_t>(active_selection.originator) << 32) |
                (static_cast<uint64_t>(uplink_craft_fp()) << 24) |
@@ -5045,6 +5055,15 @@ int run_rx(const Loaded& l) {
             so.reasm->reset_stream();
             so.source.reset();
         }
+        // §3.16 scopes its accept to the exact (originator, session) of the
+        // stream we consume, and the session is LEARNED from that craft's
+        // DATA. Carrying the previous craft's session across a selection
+        // change leaves the gate scoped to a tuple that cannot exist, while
+        // the §10.7 "no craft selected" prerequisite reads a non-zero value
+        // and lets a start through against feedback that will never arrive.
+        if (selected.originator != active_selection.originator) {
+            selected_craft_session = 0;
+        }
         active_selection = selected;
         assign_caches(selected);
     };
@@ -5083,10 +5102,25 @@ int run_rx(const Loaded& l) {
         if (urgent) arq_timing.note_nack_injected(f, n, now_us());
         air.value->inject_return(target, f, n, urgent);
     };
+    // §3.5/§10.7: the epoch is stamped HERE, at the radio call, and advances
+    // only on a successful submit. Reports are built well before they are
+    // injected (§7.2 holds a batch for the craft's quiet gap) and can be
+    // dropped in between — an epoch spent on a frame the radio never took is
+    // phantom loss on the ground's §10.7 seek, because the craft's
+    // last_report_epoch delta IS that seek's denominator.
+    const auto send_report = [&](uint16_t target, uint8_t* f, size_t n) {
+        (void)link_report_stamp_epoch(f, n, rx.next_report_epoch());
+        if (air.value->inject_return(target, f, n, false) != 0) {
+            rx.commit_report_epoch();
+        }
+    };
     const RxCore::Inject inject_report = [&](const uint8_t* f, size_t n,
                                              uint16_t target) {
         if (!qg.enabled()) {
-            send_return(target, f, n, false);
+            uint8_t tmp[kLinkReportSize];
+            if (n > sizeof(tmp)) return;
+            std::memcpy(tmp, f, n);
+            send_report(target, tmp, n);
             return;
         }
         report_ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
@@ -5681,6 +5715,7 @@ int run_rx(const Loaded& l) {
                 if (!uplink_cal.start(now_ms(), rx.report_epoch())) {
                     return "calibration already running";
                 }
+                uplink_cal_craft = active_selection.originator;
                 if (both) calib_seq.start(now_ms());
                 std::fprintf(stderr, "uplink-calib: START mcs=%u%s\n",
                              l.cfg.air.uplink_mcs,
@@ -5964,8 +5999,11 @@ int run_rx(const Loaded& l) {
                 send_return(target, f.data(), f.size(), false);
             }
             report_repeat_held.clear();
-            for (const auto& [f, target] : report_ret_held) {
-                send_return(target, f.data(), f.size(), false);
+            for (auto& [f, target] : report_ret_held) {
+                // Stamps in place, so the redundancy copy must be taken AFTER
+                // the send: a repeat carries the SAME epoch (§3.5 — a
+                // redundant copy is not a new emission).
+                send_report(target, f.data(), f.size());
                 if (ret_at_us && l.cfg.policy.ret.report_redundancy > 1) {
                     report_repeat_held.emplace_back(f, target);
                 }
@@ -5999,6 +6037,13 @@ int run_rx(const Loaded& l) {
                 (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
             }
             if (ua.restore) uplink_restore_power();
+            // A craft change mid-run invalidates the measurement in progress
+            // (D4) — the artifact stamps the craft identity, and the §3.16
+            // counter domain restarts under a different RX chain.
+            if (uplink_cal.state() == CalibState::kRunning &&
+                active_selection.originator != uplink_cal_craft) {
+                cancel_calibration("craft selection changed");
+            }
             // §10.7 tier-2 applicability moves with the pairing: the craft is
             // selected after startup, its §3.16 fingerprint arrives later
             // still, and a CSA moves the channel. Re-resolve on that change —

@@ -773,6 +773,24 @@ int main() {
     expect_error(R"({"node":{"originator":9,"role":"rx"},
       "policy":{"calibration":{"uplink_verify_epochs":0}}})",
         "must be >= 1");
+    // W4/W8: the seek moves in whole steps and judges the cap wall on a >= 2 dB
+    // (8 qdb) commanded rise. Zero or negative never terminates and walks an
+    // unbounded negative qdb into set_power_qdb; under 8 the cap wall can never
+    // fire, silently disabling one of §10.6's three walls.
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"seek_step_qdb":0}}})",
+        "seek_step_qdb must be >= 8");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"seek_step_qdb":-16}}})",
+        "seek_step_qdb must be >= 8");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"seek_step_qdb":4}}})",
+        "seek_step_qdb must be >= 8");
+    {
+        auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "policy":{"calibration":{"seek_step_qdb":8}}})");
+        CHECK(bool(ok) && ok.value->policy.calibration.seek_step_qdb == 8);
+    }
 
     // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------
     {

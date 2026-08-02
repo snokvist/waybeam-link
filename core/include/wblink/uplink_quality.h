@@ -106,6 +106,7 @@ class UplinkQualityCounters {
 struct QualitySample {
     bool accepted = false;   // passed every §3.16 gate
     bool progressed = false; // reports_received advanced (a real sample)
+    bool resynced = false;   // the counter domain restarted under us
     uint32_t reports_delta = 0;
     uint32_t epoch_delta = 0;
     int32_t rssi_sum_delta = 0;
@@ -151,11 +152,7 @@ class UplinkQualityGate {
         // craft's cumulative state is not a baseline for this one.
         if (!have_ || q.prefix.originator != last_.prefix.originator ||
             q.prefix.session_id != last_.prefix.session_id) {
-            last_ = q;
-            have_ = true;
-            liveness_ms_ = now_ms;
-            s.accepted = true;
-            return s;  // baseline only — no delta to report yet
+            return rebaseline_(s, q, now_ms);
         }
         // Wrap-aware ordering: a backward counter is a replay, not a wrap.
         // Deltas are bounded by a calibrator run, so anything in the top half
@@ -163,9 +160,24 @@ class UplinkQualityGate {
         const uint32_t d_reports = q.reports_received - last_.reports_received;
         const uint32_t d_epoch = q.last_report_epoch - last_.last_report_epoch;
         if (d_reports > kBackwardThreshold || d_epoch > kBackwardThreshold) {
+            // The craft resets its counters whenever ITS accepted reporter
+            // tuple changes (§3.16) — which happens without the craft's own
+            // originator/session moving, so the domain check above cannot see
+            // it. Treating that permanently as a replay wedged the gate:
+            // reproduced at 519 consecutive rejects, i.e. every packet for the
+            // rest of the process. A SUSTAINED backward run is a reset; an
+            // isolated one is still refused, so a replayed packet interleaved
+            // with the live 2 Hz stream never reaches the threshold.
+            if (++backward_ >= kResyncAfter) {
+                ++resyncs_;
+                QualitySample r = rebaseline_(s, q, now_ms);
+                r.resynced = true;
+                return r;
+            }
             ++rejected_;
             return s;
         }
+        backward_ = 0;
         s.accepted = true;
         liveness_ms_ = now_ms;  // any accepted packet is liveness
         if (d_reports == 0) {
@@ -191,10 +203,25 @@ class UplinkQualityGate {
     bool have() const { return have_; }
     const UplinkQuality& last() const { return last_; }
     uint32_t rejected() const { return rejected_; }
+    uint32_t resyncs() const { return resyncs_; }
 
   private:
     // Half the u32 space: forward deltas in a run are thousands at most.
     static constexpr uint32_t kBackwardThreshold = 0x8000'0000u;
+    // Consecutive backward packets that mean "reset", not "replay". At the
+    // 2 Hz §3.16 cadence this is 1.5 s — long enough that a live stream
+    // interleaves and short enough that a run is not lost to it.
+    static constexpr uint32_t kResyncAfter = 3;
+
+    QualitySample rebaseline_(QualitySample s, const UplinkQuality& q,
+                              uint64_t now_ms) {
+        last_ = q;
+        have_ = true;
+        liveness_ms_ = now_ms;
+        backward_ = 0;
+        s.accepted = true;
+        return s;  // baseline only — no delta to report yet
+    }
 
     std::string psk_;
     uint16_t self_originator_ = 0;
@@ -203,6 +230,8 @@ class UplinkQualityGate {
     bool have_ = false;
     uint64_t liveness_ms_ = 0;
     uint32_t rejected_ = 0;
+    uint32_t backward_ = 0;
+    uint32_t resyncs_ = 0;
 };
 
 }  // namespace wblink
