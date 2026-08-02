@@ -422,6 +422,59 @@ void test_gate_resyncs_after_craft_counter_reset() {
     CHECK_EQ_U(p.epoch_delta, 2u);
 }
 
+// Pass 127: §3.16 in ANNOUNCED mode. There is no configured secret — the
+// craft's per-boot token IS the key, broadcast in ANNOUNCE and re-keyed at
+// runtime by the §11.4a pairing gate. Both ends latched the key at startup
+// from `csa.psk`, so on the fleet default (nobody configures one) the craft
+// emitted nothing and the ground refused everything: §10.7 silently
+// unavailable, surfacing only as "no fresh feedback".
+void test_announced_token_keys_quality() {
+    // An empty key is not a key: the craft says nothing, the gate takes
+    // nothing. That is the pre-fix state, and it must stay true as the
+    // explicit "no key yet" case.
+    UplinkQualityCounters c;
+    c.note_accepted(kGround, kGroundSession, 5, -40, 0);
+    CHECK(!c.build(kCraft, kCraftSession, 0x5A, "").has_value());
+    UplinkQualityGate none("", kGround, kGroundSession);
+    CHECK(!none.have_psk());
+
+    // The announced token is an ordinary key to both halves.
+    const std::string token(16, '\xA7');
+    const auto q = c.build(kCraft, kCraftSession, 0x5A, token);
+    CHECK(q.has_value());
+    if (!q) return;
+    UplinkQualityGate g("", kGround, kGroundSession);
+    CHECK(!g.accept(*q, kCraft, kCraftSession, 1000).accepted);  // no key yet
+    g.set_psk(token);
+    CHECK(g.have_psk());
+    CHECK(g.accept(*q, kCraft, kCraftSession, 1000).accepted);
+
+    // Idempotent: re-pushing the same token must not disturb the baseline,
+    // because the app resolves it per packet.
+    c.note_accepted(kGround, kGroundSession, 6, -40, 0);
+    const auto q2 = c.build(kCraft, kCraftSession, 0x5A, token);
+    CHECK(q2.has_value());
+    if (!q2) return;
+    g.set_psk(token);
+    const QualitySample s = g.accept(*q2, kCraft, kCraftSession, 1100);
+    CHECK(s.accepted);
+    CHECK(s.progressed);  // baseline survived the no-op re-key
+    CHECK_EQ_U(s.reports_delta, 1u);
+
+    // A re-key is a DIFFERENT authenticated peer. The counter baseline must
+    // drop with it — carrying the old anchors across would telescope a §10.7
+    // delta over two unrelated domains.
+    const std::string token2(16, '\x5C');
+    g.set_psk(token2);
+    CHECK(!g.accept(*q2, kCraft, kCraftSession, 1200).accepted);  // old key
+    const auto q3 = c.build(kCraft, kCraftSession, 0x5A, token2);
+    CHECK(q3.has_value());
+    if (!q3) return;
+    const QualitySample fresh = g.accept(*q3, kCraft, kCraftSession, 1300);
+    CHECK(fresh.accepted);
+    CHECK(!fresh.progressed);  // re-baselined, no delta across the re-key
+}
+
 }  // namespace
 
 int main() {
@@ -435,5 +488,6 @@ int main() {
     test_counter_wrap();
     test_liveness_survives_stalled_counters();
     test_gate_resyncs_after_craft_counter_reset();
+    test_announced_token_keys_quality();
     return wbtest_finish("uplink_quality_test");
 }

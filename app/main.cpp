@@ -2394,6 +2394,13 @@ struct TxCore {
         quality_psk_ = std::move(psk);
         quality_fingerprint_ = fingerprint;
     }
+    // §3.16/§11.4a (Pass 127): in ANNOUNCED mode there is no configured
+    // secret — the per-boot token IS the key, and it is re-keyed at runtime by
+    // the Pass 113 pairing gate. The caller pushes the live token each tick,
+    // exactly as it already re-keys the CSA issuer and the command issuer.
+    void set_quality_psk(const std::string& psk) {
+        if (quality_psk_ != psk) quality_psk_ = psk;
+    }
 
     // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
     void set_csa_armed(bool on) {
@@ -3924,6 +3931,18 @@ int run_tx(const Loaded& l) {
             // live DATA means no fresh quality, which is exactly what makes
             // §10.7 refuse to start or abort.
             if (uplink_quality_cadence.due(live_video_slot, slot_ms)) {
+                // §11.4a key provenance, resolved HERE rather than latched at
+                // startup: configured secret if there is one, else the live
+                // announced token — which the Pass 113 pairing gate replaces
+                // at runtime. Latching it meant an announced-mode craft (the
+                // fleet default: no `csa.psk` anywhere) held an empty key, so
+                // build() returned nullopt and §3.16 was never emitted at all
+                // — §10.7 silently unavailable, reported only as "no fresh
+                // feedback" on the ground.
+                tx.set_quality_psk(
+                    l.cfg.policy.csa.psk.empty()
+                        ? std::string(token.begin(), token.end())
+                        : l.cfg.policy.csa.psk);
                 if (const std::optional<UplinkQuality> q = tx.uplink_quality()) {
                     uint8_t qf[kUplinkQualitySize];
                     const size_t qn = encode_uplink_quality(*q, qf, sizeof(qf));
@@ -5687,8 +5706,17 @@ int run_rx(const Loaded& l) {
                 if (uplink_adapter == nullptr) {
                     return "no designated role:\"tx\" uplink adapter";
                 }
-                if (l.cfg.policy.csa.psk.empty()) {
-                    return "csa_psk is not configured (§3.16 is authenticated)";
+                // §11.4a key provenance (Pass 127): a RESOLVABLE key, not a
+                // configured one. Announced mode — no `csa.psk` anywhere, the
+                // fleet default — keys §3.16 off the craft's per-boot
+                // announced token, exactly as /csa and §11.7 already do.
+                // Requiring a configured secret made §10.7 unreachable on
+                // every deployment that never sets one.
+                if (!quality_gate.have_psk()) {
+                    return l.cfg.policy.csa.psk.empty()
+                               ? "no live §3.16 key for craft (announced token "
+                                 "not heard yet)"
+                               : "csa_psk is not configured";
                 }
                 if (active_selection.originator == 0 ||
                     selected_craft_session == 0) {
@@ -6149,6 +6177,20 @@ int run_rx(const Loaded& l) {
             // we are currently taking DATA from. The gate owns every accept
             // rule; all that happens here is routing the sample.
             if (const UplinkQuality* uq = std::get_if<UplinkQuality>(&dec)) {
+                // §11.4a key provenance (Pass 127), same rule as /csa and
+                // §11.7 use: configured secret if present, else this craft's
+                // cached announced token. Resolved per packet because the
+                // token is per-craft AND re-keyed at runtime by the pairing
+                // gate. Latched at startup it was empty for the whole fleet
+                // (nobody configures csa.psk), so the gate refused every
+                // packet and §10.7 could never start.
+                if (l.cfg.policy.csa.psk.empty()) {
+                    const auto tok =
+                        discovery.token_for(active_selection.originator);
+                    quality_gate.set_psk(
+                        tok ? std::string(tok->begin(), tok->end())
+                            : std::string());
+                }
                 const QualitySample s = quality_gate.accept(
                     *uq, active_selection.originator, selected_craft_session,
                     now);

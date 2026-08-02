@@ -122,6 +122,20 @@ class UplinkQualityGate {
           self_originator_(self_originator),
           self_session_(self_session) {}
 
+    // §11.4a (Pass 127): the key is not fixed for the process. In ANNOUNCED
+    // mode it is the craft's per-boot token, learned from ANNOUNCE and
+    // replaced whenever the craft re-pairs, so the caller re-resolves it per
+    // selected craft. A key change invalidates the counter baseline — it is a
+    // different authenticated peer, and carrying the old anchors across would
+    // telescope a delta over two unrelated domains.
+    void set_psk(const std::string& psk) {
+        if (psk == psk_) return;
+        psk_ = psk;
+        have_ = false;
+        backward_ = 0;
+    }
+    bool have_psk() const { return !psk_.empty(); }
+
     // selected_craft/session: the craft this ground currently takes DATA from.
     // A zero originator means "nothing selected" and rejects everything.
     QualitySample accept(const UplinkQuality& q, uint16_t selected_craft,
