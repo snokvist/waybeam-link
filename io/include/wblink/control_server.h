@@ -42,6 +42,11 @@ struct ControlHandlers {
     std::function<std::string()> tx_power_json;
     // §10.6 (Pass 120) calibration surface (GET; TX node only, null → 409).
     std::function<std::string()> calibration_json;
+    // §10.7 (Pass 125) POST /api/v1/calibration on a ground/rx node: "start"
+    // or "abort". Returns "" on success, else the failed prerequisite — the
+    // list is long and every entry is a real hazard, so the operator needs
+    // to know WHICH one, not just that it was refused.
+    std::function<std::string(const std::string& action)> uplink_calibrate;
 
     // Writes — return "" on success, else a short error string (→ HTTP 400).
     // A null hook means the endpoint does not apply to this mode (→ HTTP 409).

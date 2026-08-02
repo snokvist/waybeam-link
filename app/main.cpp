@@ -69,6 +69,7 @@
 #include "wblink/txwedge.h"
 #include "wblink/venc.h"
 #include "wblink/video_slot_cadence.h"
+#include "wblink/uplink_calibrate.h"
 #include "wblink/uplink_quality.h"
 #include "wblink/air_mon.h"
 #if WBLINK_RADIO
@@ -1751,6 +1752,26 @@ struct AirBackend {
 
 // ---- TX side: per in-stream framer + ring + scheduler ----------------------
 
+// §15.2 policy.calibration -> the core engine seeds. Shared: §10.6's craft
+// calibrator and §10.7's ground uplink calibrator read the same block, and
+// only the gating differs (§10.7 uses epoch counts, not the ms dwells).
+CalibrateParams calib_params_from(const CalibrationPolicy& c) {
+    CalibrateParams p;
+    p.loss_ok_milli = static_cast<uint16_t>(c.loss_ok_milli);
+    p.loss_bad_milli = static_cast<uint16_t>(c.loss_bad_milli);
+    p.seek_step_qdb = c.seek_step_qdb;
+    p.cap_rise_db = c.cap_rise_db;
+    p.rssi_guard_dbm = c.rssi_guard_dbm;
+    p.min_qdb = c.min_qdb;
+    p.max_qdb = c.max_qdb;
+    p.settle_ms = static_cast<uint32_t>(c.settle_ms);
+    p.probe_dwell_ms = static_cast<uint32_t>(c.probe_dwell_ms);
+    p.verify_dwell_ms = static_cast<uint32_t>(c.verify_dwell_ms);
+    p.report_loss_abort_ms = static_cast<uint32_t>(c.report_loss_abort_ms);
+    p.hard_cap_ms = static_cast<uint32_t>(c.hard_cap_ms);
+    return p;
+}
+
 struct TxCore {
     using Inject = std::function<void(const uint8_t*, size_t)>;
 
@@ -2513,21 +2534,7 @@ struct TxCore {
     uint16_t mtu_requested() const { return negotiated_packet_budget_; }
     uint16_t mtu_supported() const { return mtu_supported_; }
     void init_calibration(const CalibrationPolicy& c) {
-        CalibrateParams p;
-        p.loss_ok_milli = static_cast<uint16_t>(c.loss_ok_milli);
-        p.loss_bad_milli = static_cast<uint16_t>(c.loss_bad_milli);
-        p.seek_step_qdb = c.seek_step_qdb;
-        p.cap_rise_db = c.cap_rise_db;
-        p.rssi_guard_dbm = c.rssi_guard_dbm;
-        p.min_qdb = c.min_qdb;
-        p.max_qdb = c.max_qdb;
-        p.settle_ms = static_cast<uint32_t>(c.settle_ms);
-        p.probe_dwell_ms = static_cast<uint32_t>(c.probe_dwell_ms);
-        p.verify_dwell_ms = static_cast<uint32_t>(c.verify_dwell_ms);
-        p.report_loss_abort_ms =
-            static_cast<uint32_t>(c.report_loss_abort_ms);
-        p.hard_cap_ms = static_cast<uint32_t>(c.hard_cap_ms);
-        calibrator_.emplace(p);
+        calibrator_.emplace(calib_params_from(c));
     }
     bool cmd_arq_enabled() const { return cmd_arq_enabled_; }
     bool cmd_selector_frozen() const { return cmd_selector_frozen_; }
@@ -3001,6 +3008,24 @@ struct RxCore {
 
     bool block_had_nack(uint8_t stream_id, uint32_t block_id) const {
         return engine_.block_had_nack(stream_id, block_id);
+    }
+
+    // §10.7: the ground's own emitted-report counter. report_epoch advances
+    // once per emitted report (§3.5), so this IS the emission count — the
+    // calibrator needs it only for the counter-blackout case, where the
+    // craft's anchors cannot advance.
+    uint32_t report_epoch() const { return reporter_.epoch(); }
+
+    // §10.7 interlock: is the craft running its own §10.6 downlink
+    // calibration? The §3.15 word already mirrors it here, so the two
+    // directions can refuse to overlap without any new wire. They must not:
+    // §10.7 drives ground power to min_qdb, starving the report stream that
+    // every §10.6 dwell and its abort clock depend on.
+    bool craft_calibrating() const {
+        return remote_selector_state_ &&
+               (remote_selector_state_->state_flags &
+                selector_state_flags::kCalibPresent) != 0 &&
+               (remote_selector_state_->calib_word & 0x03u) == 1u;
     }
 
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
@@ -4499,6 +4524,55 @@ int run_rx(const Loaded& l) {
     // last_rx_mcs cross-checks it, and neither is meaningful against a
     // default nobody chose.
     air.value->latch_uplink_rate(l.cfg.air.uplink_mcs, l.cfg.air.uplink_sgi);
+
+    // §10.7 (Pass 125): the ground's single designated uplink adapter is the
+    // only local power actuator. Config load already guarantees a power_map
+    // can only sit on a role:"tx" adapter, and the radio backend guarantees
+    // there is at most one.
+    const AdapterCfg* uplink_adapter = nullptr;
+    size_t uplink_idx = 0;
+    for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+        if (l.cfg.adapters[i].role == Role::kTx) {
+            uplink_adapter = &l.cfg.adapters[i];
+            uplink_idx = i;
+            break;
+        }
+    }
+    // §10.7 power-owner resolve, highest precedence first: an explicit
+    // configured map, then a matching persisted artifact, then the backend
+    // default. Calibration borrows the actuator and every exit hands it back
+    // to whoever this says owns it — which is why it is resolved once, here,
+    // rather than reconstructed at each restore site.
+    std::optional<int32_t> uplink_owner_qdb;
+    if (uplink_adapter != nullptr && !uplink_adapter->power_map.empty()) {
+        auto curve = load_power_curve(uplink_adapter->power_map,
+                                      uplink_adapter->channel_mhz >= 5000);
+        if (curve) {
+            // §10.2: the authored curve IS level 4, so the uplink's fixed
+            // operating point resolves at the baseline level.
+            uplink_owner_qdb = resolve_power_qdb(
+                *curve.value, l.cfg.air.uplink_mcs, kPowerLevelBaseline,
+                uplink_adapter->max_power_qdb);
+            if (uplink_owner_qdb) {
+                std::fprintf(stderr,
+                             "uplink: power_map mcs=%u -> %d qdb (explicit)\n",
+                             l.cfg.air.uplink_mcs, *uplink_owner_qdb);
+            }
+        } else {
+            std::fprintf(stderr, "uplink: power_map load failed: %s\n",
+                         curve.error.c_str());
+        }
+    }
+    const auto uplink_restore_power = [&]() {
+        if (uplink_adapter == nullptr) return;
+        if (uplink_owner_qdb) {
+            (void)air.value->set_power_qdb(uplink_idx, *uplink_owner_qdb);
+        } else {
+            air.value->set_power_auto(uplink_idx);
+        }
+    };
+    if (uplink_owner_qdb) uplink_restore_power();
+
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
         std::fprintf(stderr, "binding error: %s\n", bindings.error.c_str());
@@ -4508,6 +4582,29 @@ int run_rx(const Loaded& l) {
     DiscoveryCatalog discovery;
     RxCore rx(l.cfg, session, l.have_table ? &l.table : nullptr,
               l.have_table ? std::optional<uint8_t>(l.tv) : std::nullopt);
+
+    // §3.16 accept gate + §10.7 calibrator. The gate needs the currently
+    // selected DATA source, which the calibrator has no notion of, so the two
+    // stay separate and the poll loop routes samples between them.
+    UplinkQualityGate quality_gate(l.cfg.policy.csa.psk, l.cfg.node.originator,
+                                   session);
+    uint32_t selected_craft_session = 0;
+    UplinkCalibParams ucal_params;
+    {
+        const CalibrationPolicy& cp = l.cfg.policy.calibration;
+        ucal_params.seek = Calibrator::seek_params(calib_params_from(cp));
+        ucal_params.settle_ms = static_cast<uint32_t>(cp.settle_ms);
+        ucal_params.probe_epochs =
+            static_cast<uint32_t>(cp.uplink_probe_epochs);
+        ucal_params.ambiguous_epochs =
+            static_cast<uint32_t>(cp.uplink_ambiguous_epochs);
+        ucal_params.verify_epochs =
+            static_cast<uint32_t>(cp.uplink_verify_epochs);
+        ucal_params.liveness_ms = static_cast<uint32_t>(cp.uplink_liveness_ms);
+        ucal_params.hard_cap_ms = static_cast<uint32_t>(cp.hard_cap_ms);
+    }
+    UplinkCalibrator uplink_cal(ucal_params, l.cfg.air.uplink_mcs,
+                                l.cfg.air.uplink_sgi);
     const uint16_t op_chan =
         l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
     const uint8_t op_bw_mhz =
@@ -5187,6 +5284,50 @@ int run_rx(const Loaded& l) {
                 scout.stop(now_ms());
                 return "";
             };
+            // §10.7 start prerequisites. Each returns the failed one so the
+            // operator sees WHY, not just 409 — the list is long and every
+            // entry is a real hazard, not a formality.
+            h.uplink_calibrate = [&](const std::string& action)
+                -> std::string {
+                if (action == "abort") {
+                    (void)uplink_cal.abort(now_ms());  // idempotent
+                    return "";
+                }
+                if (action != "start") return "action must be start or abort";
+                if (uplink_cal.state() == CalibState::kRunning) {
+                    return "calibration already running";
+                }
+                if (uplink_adapter == nullptr) {
+                    return "no designated role:\"tx\" uplink adapter";
+                }
+                if (l.cfg.policy.csa.psk.empty()) {
+                    return "csa_psk is not configured (§3.16 is authenticated)";
+                }
+                if (active_selection.originator == 0 ||
+                    selected_craft_session == 0) {
+                    return "no craft selected as DATA source";
+                }
+                // Authority: fresh authenticated feedback naming THIS ground
+                // is proof we hold the craft's §3.5 report latch. No CSA
+                // claim is required, or sufficient (§10.7).
+                if (!quality_gate.live(now_ms(), ucal_params.liveness_ms)) {
+                    return "no fresh authenticated §3.16 feedback";
+                }
+                if (scout.scanning()) return "scout is running";
+                if (follower.campaign_active()) return "CSA campaign active";
+                // The craft must not be calibrating its own downlink: §10.7
+                // drives ground power to min_qdb, which starves the report
+                // stream every §10.6 dwell and its abort clock depend on.
+                if (rx.craft_calibrating()) {
+                    return "craft downlink calibration is running";
+                }
+                if (!uplink_cal.start(now_ms(), rx.report_epoch())) {
+                    return "calibration already running";
+                }
+                std::fprintf(stderr, "uplink-calib: START mcs=%u\n",
+                             l.cfg.air.uplink_mcs);
+                return "";
+            };
             h.scout_quickconnect = do_claim;
             // §11.7 command campaign toward the bound craft (§15.5).
             h.vehicle_command_json = [&] {
@@ -5470,6 +5611,25 @@ int run_rx(const Loaded& l) {
             report_fallback_us.reset();
             ret_tsf_anchored = false;
         }
+        // §10.7 calibrator service. `restore` is single-shot and set on EVERY
+        // terminal path, so this is the one place probe power is handed back
+        // to the §10.7 owner — no exit can strand it.
+        if (uplink_cal.state() == CalibState::kRunning) {
+            const UplinkCalibActions ua = uplink_cal.tick(
+                now_ms(), rx.report_epoch(),
+                quality_gate.live(now_ms(), ucal_params.liveness_ms));
+            if (ua.set_qdb && uplink_adapter != nullptr) {
+                (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
+            }
+            if (ua.restore) uplink_restore_power();
+            if (ua.artifact_ready) {
+                // §10.7 persistence lands in the next step; the placement is
+                // already applied by the seek's final set_qdb.
+                std::fprintf(stderr,
+                             "uplink-calib: DONE placement=%d qdb\n",
+                             uplink_cal.placement().placement_qdb);
+            }
+        }
         const int air_timeout =
             urgent_ret_held.empty() && report_ret_held.empty() ? 2 : 0;
         air.value->poll_once(air_timeout, [&](const AirRxMeta& meta,
@@ -5499,7 +5659,22 @@ int run_rx(const Loaded& l) {
                 }
                 return;
             }
+            // §3.16 (Pass 125): authenticated uplink feedback from the craft
+            // we are currently taking DATA from. The gate owns every accept
+            // rule; all that happens here is routing the sample.
+            if (const UplinkQuality* uq = std::get_if<UplinkQuality>(&dec)) {
+                const QualitySample s = quality_gate.accept(
+                    *uq, active_selection.originator, selected_craft_session,
+                    now);
+                uplink_cal.on_sample(s, now);
+                return;
+            }
             if (const DataView* v = std::get_if<DataView>(&dec)) {
+                // The craft's session comes from the stream we are actually
+                // consuming — §3.16 scopes its accept to that exact tuple.
+                if (v->hdr.prefix.originator == active_selection.originator) {
+                    selected_craft_session = v->hdr.prefix.session_id;
+                }
                 arq_timing.note_retransmit_arrived(*v, now_us_it);
                 if (frame_is_eob(d, n)) arq_timing.note_eob(now_us_it);
                 if (qg.enabled()) {

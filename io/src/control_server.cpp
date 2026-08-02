@@ -470,6 +470,28 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         }
         return done(h_.tx_power_set(has_auto, static_cast<int>(qdb)));
     }
+    if (path == "/api/v1/calibration") {  // §10.7 Pass 125 (ground/rx node)
+        if (!h_.uplink_calibrate) return na();
+        // §10.7: exactly {"action":"start"} or {"action":"abort"}. A missing
+        // or non-string action is malformed (400); an action the node cannot
+        // honour right now is a conflict (409, via done()).
+        if (!j.contains("action") || !j["action"].is_string()) {
+            return reply(400, "Bad Request",
+                         json_err("action must be \"start\" or \"abort\""));
+        }
+        const std::string action = j["action"].get<std::string>();
+        if (action != "start" && action != "abort") {
+            return reply(400, "Bad Request",
+                         json_err("action must be \"start\" or \"abort\""));
+        }
+        // NOT done(): that maps any refusal to 400. §10.7 distinguishes a
+        // malformed body (400, above) from a well-formed request the node
+        // cannot honour right now (409) — the prerequisite list is the whole
+        // point, and "bad request" would misdescribe every entry in it.
+        const std::string err = h_.uplink_calibrate(action);
+        return err.empty() ? reply(200, "OK", json_ok())
+                           : reply(409, "Conflict", json_err(err));
+    }
     if (path == "/api/v1/fec") {
         if (!h_.fec) return na();
         if (!j.contains("stream_id")) {

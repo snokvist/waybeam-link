@@ -80,6 +80,8 @@ int main() {
     // Captured knob state, mutated by the handlers.
     int pin_min = -1, pin_max = -1;
     int txp_auto = -1, txp_qdb = -1000;
+    std::string ucal_action, ucal_refuse;
+    int ucal_calls = 0;
     int latch_calls = 0, latch_clear = -1, latch_orig = -1;
     int fec_sid = -1, fec_i = -1, fec_p = -1, fec_k = -1, fec_r = -1;
     bool fec_ok = true;
@@ -124,6 +126,12 @@ int main() {
     h.tx_power_json = [&]() -> std::string {
         return std::string(
             "{\"override_active\":false,\"backend\":\"kernel-monitor\"}");
+    };
+    // §10.7 ground-uplink calibration POST (Pass 125).
+    h.uplink_calibrate = [&](const std::string& action) -> std::string {
+        ucal_action = action;
+        ++ucal_calls;
+        return ucal_refuse;  // non-empty = failed prerequisite -> 409
     };
     h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
         fec_sid = sid;
@@ -349,6 +357,34 @@ int main() {
             "POST /api/v1/tx/power HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    // §10.7 POST /api/v1/calibration: exactly start|abort. A malformed body
+    // is 400 and must not reach the hook; a refused prerequisite is 409 and
+    // carries WHICH one, since the operator cannot guess from a bare code.
+    {
+        const auto post_cal = [&](const std::string& body) {
+            const std::string req =
+                "POST /api/v1/calibration HTTP/1.0\r\nContent-Length: " +
+                std::to_string(body.size()) + "\r\n\r\n" + body;
+            return roundtrip(s, port, req);
+        };
+        CHECK_EQ_U(status_of(post_cal("{\"action\":\"start\"}")), 200);
+        CHECK(ucal_action == "start");
+        CHECK_EQ_U(status_of(post_cal("{\"action\":\"abort\"}")), 200);
+        CHECK(ucal_action == "abort");
+
+        const int calls_before = ucal_calls;
+        CHECK_EQ_U(status_of(post_cal("{}")), 400);
+        CHECK_EQ_U(status_of(post_cal("{\"action\":\"resume\"}")), 400);
+        CHECK_EQ_U(status_of(post_cal("{\"action\":7}")), 400);
+        CHECK_EQ_U(ucal_calls, calls_before);  // hook never reached
+
+        ucal_refuse = "no fresh authenticated feedback";
+        const std::string r = post_cal("{\"action\":\"start\"}");
+        CHECK_EQ_U(status_of(r), 409);
+        CHECK(body_of(r).find("no fresh authenticated feedback") !=
+              std::string::npos);
+        ucal_refuse.clear();
     }
     {
         const std::string body = "{\"qdb\":20,\"auto\":true}";
