@@ -33,6 +33,19 @@ class Reporter {
              std::optional<uint8_t> local_table_version)
         : policy_(policy), tv_(local_table_version) {}
 
+    // §10.7 (Pass 131): the ground raises its own cadence for the duration of
+    // a calibration run and restores it on exit. The §10.7 dwell gates are
+    // SAMPLE counts, so the only way to finish sooner without measuring worse
+    // is to sample faster — 4160 report epochs is 473 s at 10 Hz and ~91 s at
+    // 60. Bounded by the craft's frame rate at the caller (§7.2): above that
+    // there is no quiet gap left to land in and the excess degrades to §7.1
+    // opportunistic return, whose different delivery probability §10.7 would
+    // score as uplink loss.
+    void set_interval_ms(uint32_t interval_ms) {
+        policy_.interval_ms = interval_ms;
+    }
+    uint32_t interval_ms() const { return policy_.interval_ms; }
+
     // Reports due now, one per latched stream (empty between cadence ticks).
     std::vector<LinkReport> build(const RxEngine& engine, uint64_t now_ms);
 

@@ -3052,6 +3052,19 @@ struct RxCore {
         return static_cast<int>(remote_selector_state_->calib_word & 0x03u);
     }
 
+    // §10.7 (Pass 131): run the ground's own LINK_REPORT cadence faster for
+    // the duration of a calibration, and put it back on exit. Both clocks move
+    // together — `reporter_` builds the reports and `feedback_period_ms_`
+    // paces the §3.9 feedback beside them — because leaving one behind would
+    // change the ratio between two things the §10.7 loss identity assumes are
+    // in step.
+    void set_report_cadence(double hz) {
+        const uint32_t ms =
+            hz > 0 ? static_cast<uint32_t>(1000.0 / hz) : uint32_t{0};
+        reporter_.set_interval_ms(ms);
+        feedback_period_ms_ = ms;
+    }
+
     // §3.15a report_latch_holder, or -1 when the craft is not reporting it
     // (bit3 clear = legacy build, or no selector state yet). Pass 131: this is
     // §10.7's authority signal. Pass 125 inferred the latch from a valid MAC
@@ -4800,6 +4813,11 @@ int run_rx(const Loaded& l) {
     // it the manual counterpart to §10.7 and the reference placement for the
     // calibrated-versus-manual comparison, with no config edit and restart.
     std::optional<int32_t> uplink_override;
+    // §10.7 (Pass 131) third borrowed actuator: the ground's own report
+    // cadence and redundancy. Held here rather than read from config at the
+    // use site so the restore below owns all three, and so the §7.2 repeat
+    // path cannot keep firing at a cadence that has no gap left for it.
+    uint32_t report_redundancy_now = l.cfg.policy.ret.report_redundancy;
     // §10.7 restore. ONE convergence path for every borrowed actuator, in R4
     // order — RATE first, then power — because the rung a placement was
     // measured at is what makes the power meaningful, and the same reasoning
@@ -4814,6 +4832,11 @@ int run_rx(const Loaded& l) {
     // §10.5 override paths call this rather than setting power directly — the
     // rate re-latch is an idempotent no-op there.
     const auto uplink_restore_actuators = [&]() {
+        // Cadence first, and unconditionally: it is the one actuator that is
+        // not the adapter's, so an early return on a missing uplink adapter
+        // must not strand the ground at 60 Hz.
+        rx.set_report_cadence(l.cfg.policy.report_hz);
+        report_redundancy_now = l.cfg.policy.ret.report_redundancy;
         if (uplink_adapter == nullptr) return;
         air.value->latch_uplink_rate(l.cfg.air.uplink_mcs,
                                      l.cfg.air.uplink_sgi);
@@ -5775,9 +5798,19 @@ int run_rx(const Loaded& l) {
                     return "calibration already running";
                 }
                 uplink_cal_craft = active_selection.originator;
+                // §10.7 (Pass 131): borrow the cadence. The dwell gates are
+                // SAMPLE counts, so sampling faster is the only way to finish
+                // sooner without measuring worse — 4160 epochs is 473 s at
+                // 10 Hz and ~91 s at 60. Redundancy drops to 1 because at
+                // report_hz == fps the §7.2 repeat has no gap left to land in
+                // and would collide with the next fresh report.
+                rx.set_report_cadence(
+                    l.cfg.policy.calibration.uplink_calib_report_hz);
+                report_redundancy_now = 1;
                 if (both) calib_seq.start(now_ms());
-                std::fprintf(stderr, "uplink-calib: START mcs=%u%s\n",
-                             l.cfg.air.uplink_mcs,
+                std::fprintf(stderr,
+                             "uplink-calib: START 8 rungs, report %.0f Hz%s\n",
+                             l.cfg.policy.calibration.uplink_calib_report_hz,
                              both ? " (bi-directional)" : "");
                 return "";
             };
@@ -6063,7 +6096,7 @@ int run_rx(const Loaded& l) {
                 // the send: a repeat carries the SAME epoch (§3.5 — a
                 // redundant copy is not a new emission).
                 send_report(target, f.data(), f.size());
-                if (ret_at_us && l.cfg.policy.ret.report_redundancy > 1) {
+                if (ret_at_us && report_redundancy_now > 1) {
                     report_repeat_held.emplace_back(f, target);
                 }
             }
