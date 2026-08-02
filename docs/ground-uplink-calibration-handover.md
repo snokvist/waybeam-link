@@ -464,9 +464,24 @@ driving one with `tools/rtp_feed.py` or a live encoder, per the idle-TX gotcha i
    placement at useful range. Record LINK_REPORT delivery, NACK recovery,
    report blackouts, craft RX RSSI, and uplink loss. Calibration must not make
    the return path less robust.
-8. Verify quality adds at most its 2 Hz piggyback packets, creates no standalone
-   TX opportunities, and causes no material CPU/packet-rate regression on craft
-   or ground.
+8. **Guard-cost boundary (automated, case 12).** Case 12 is a `run_tx` loop
+   property, so no unit test reaches it — this is its verification step and it
+   is required, not optional. Capture a craft trace and run the analyzer:
+
+   ```sh
+   WBLINK_PACKET_TRACE=/tmp/craft.jsonl ./waybeam-link tx ...   # with a live feed
+   tools/verify_quality_guard.py /tmp/craft.jsonl
+   ```
+
+   It exits non-zero unless every UPLINK_QUALITY was immediately followed by a
+   live (non-repair, non-retransmit) DATA frame **in the same TX opportunity**
+   (≤ 2000 µs), at or under the 2 Hz cadence. A trace with no quality packets
+   reports INCONCLUSIVE and also fails — an empty check must never read green.
+   Note it does *not* flag a quality packet following an END_OF_BLOCK in wire
+   order: in a live stream it always does, since slots end with an EOB and the
+   next begins with the prepend. The §7.2 hazard is emitting *inside* the quiet
+   gap, which the same-TX-opportunity bound is what actually detects.
+   Also confirm no material CPU/packet-rate regression on craft or ground.
 9. Reboot both ends and confirm only an identity-matching artifact auto-applies;
    explicit `power_map` still wins, and the craft's own downlink artifact
    survives independently.

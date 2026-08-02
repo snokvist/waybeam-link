@@ -69,6 +69,7 @@
 #include "wblink/txwedge.h"
 #include "wblink/venc.h"
 #include "wblink/video_slot_cadence.h"
+#include "wblink/uplink_calib_store.h"
 #include "wblink/uplink_calibrate.h"
 #include "wblink/uplink_quality.h"
 #include "wblink/air_mon.h"
@@ -312,6 +313,19 @@ class ArqTimingTracker {
 
 // Bench-only, bounded packet-event trace. The wire remains the source of truth:
 // this observer decodes existing frames and never feeds decisions back in.
+// §3.1 type nibble -> name, for the bench packet trace. Reads the wire byte
+// directly: this is the path for packets `decode` returned as neither DATA
+// nor NACK, including ones a mixed-version peer sent that we do not model.
+const char* packet_type_name(const uint8_t* frame, size_t len) {
+    if (len < 3) return "other";
+    static const char* const kNames[16] = {
+        "other",       "data",         "nack",        "link_report",
+        "heartbeat",   "csa",          "recovery",    "jscc_feedback",
+        "cache_status", "cache_request", "cache_reply", "announce",
+        "cache_assign", "vehicle_cmd", "selector_state", "uplink_quality"};
+    return kNames[frame[2] & 0x0F];
+}
+
 class PacketEventTrace {
   public:
     explicit PacketEventTrace(const char* role) : role_(role) {
@@ -415,12 +429,15 @@ class PacketEventTrace {
                 nack->hdr.target_session, nack->hdr.base_seq, bitmap.c_str(), len);
             return;
         }
+        // Everything else was collapsed into "other", which made the §3.15 /
+        // §3.16 guard-cost boundary unverifiable from a trace: the whole
+        // property is about WHICH packet rode WHICH slot. Name the type.
         std::fprintf(out_,
                      "{\"type\":\"packet\",\"t_us\":%llu,"
                      "\"direction\":\"%s\",\"outcome\":\"%s\","
-                     "\"adapter\":%d,\"packet\":\"other\",\"bytes\":%zu}\n",
+                     "\"adapter\":%d,\"packet\":\"%s\",\"bytes\":%zu}\n",
                      static_cast<unsigned long long>(t), direction, outcome,
-                     adapter, len);
+                     adapter, packet_type_name(frame, len), len);
     }
 
   private:
@@ -4563,15 +4580,75 @@ int run_rx(const Loaded& l) {
                          curve.error.c_str());
         }
     }
+    // Tier 2: a persisted artifact, applied only when the local adapter, the
+    // craft, and the band/bandwidth all match. A mismatch is surfaced as
+    // stale and never applied — the hardware stays at the higher-precedence
+    // source (§10.7). Note the craft is not selected yet at startup, so the
+    // artifact is loaded here and its identity re-checked when one is.
+    const std::string uplink_identity =
+        uplink_adapter != nullptr ? calib_identity(*uplink_adapter) : "udp";
+    std::optional<UplinkArtifact> uplink_artifact;
+    uint8_t uplink_artifact_fp = 0;
+    bool uplink_artifact_stale = false;
+    if (auto stored =
+            uplink_calib_store_load(l.cfg.policy.calibration.artifact_dir);
+        stored) {
+        uplink_artifact_fp = uplink_calib_fingerprint(*stored.value);
+        if (stored.value->local_adapter_identity != uplink_identity) {
+            uplink_artifact_stale = true;
+            std::fprintf(stderr,
+                         "uplink: artifact STALE (stored %s, live %s)\n",
+                         stored.value->local_adapter_identity.c_str(),
+                         uplink_identity.c_str());
+        }
+        uplink_artifact = std::move(*stored.value);
+    }
+    const auto uplink_artifact_qdb = [&]() -> std::optional<int32_t> {
+        if (!uplink_artifact || uplink_artifact_stale) return std::nullopt;
+        const UplinkPlacement* p = uplink_calib_placement_for(
+            *uplink_artifact, l.cfg.air.uplink_mcs, l.cfg.air.uplink_sgi);
+        if (p == nullptr) return std::nullopt;
+        int32_t q = p->placement_qdb;
+        // §10.3 ceiling still clamps a stored placement — the artifact
+        // records what was measured, the ceiling is what the operator allows.
+        if (uplink_adapter != nullptr && uplink_adapter->max_power_qdb) {
+            q = std::min(q, *uplink_adapter->max_power_qdb);
+        }
+        return q;
+    };
+    // §10.7 restore order, highest precedence first: explicit configured
+    // placement, then a matching artifact, then backend auto. One resolver,
+    // one call site — a second copy of this ordering is how the two drift.
     const auto uplink_restore_power = [&]() {
         if (uplink_adapter == nullptr) return;
         if (uplink_owner_qdb) {
             (void)air.value->set_power_qdb(uplink_idx, *uplink_owner_qdb);
+        } else if (const std::optional<int32_t> aq = uplink_artifact_qdb()) {
+            (void)air.value->set_power_qdb(uplink_idx, *aq);
         } else {
             air.value->set_power_auto(uplink_idx);
         }
     };
-    if (uplink_owner_qdb) uplink_restore_power();
+    uplink_restore_power();
+    if (uplink_adapter != nullptr) {
+        // One line naming which tier actually owns the actuator. The
+        // precedence is invisible otherwise, and "why is my power_map not
+        // being applied" is exactly the question this answers.
+        const std::optional<int32_t> aq = uplink_artifact_qdb();
+        std::fprintf(stderr, "uplink: power owner = %s",
+                     uplink_owner_qdb ? "config power_map"
+                     : aq             ? "artifact"
+                                      : "backend auto");
+        if (uplink_owner_qdb) {
+            std::fprintf(stderr, " (%d qdb)", *uplink_owner_qdb);
+        } else if (aq) {
+            std::fprintf(stderr, " (%d qdb, fp=0x%02x)", *aq,
+                         uplink_artifact_fp);
+        } else if (uplink_artifact_stale) {
+            std::fprintf(stderr, " (artifact present but STALE)");
+        }
+        std::fprintf(stderr, "\n");
+    }
 
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
@@ -5623,11 +5700,38 @@ int run_rx(const Loaded& l) {
             }
             if (ua.restore) uplink_restore_power();
             if (ua.artifact_ready) {
-                // §10.7 persistence lands in the next step; the placement is
-                // already applied by the seek's final set_qdb.
-                std::fprintf(stderr,
-                             "uplink-calib: DONE placement=%d qdb\n",
-                             uplink_cal.placement().placement_qdb);
+                UplinkArtifact art;
+                art.local_adapter_identity = uplink_identity;
+                art.craft_originator = active_selection.originator;
+                // The craft half of the pairing comes from the feedback that
+                // produced this measurement, not from config — it identifies
+                // the RX chain the placement was actually measured against.
+                art.craft_adapter_fingerprint =
+                    quality_gate.have()
+                        ? quality_gate.last().craft_adapter_fingerprint
+                        : 0;
+                art.channel_mhz = operating_chan;
+                art.bw_mhz = op_bw_mhz;
+                art.t_unix = static_cast<int64_t>(::time(nullptr));
+                art.placements.push_back(uplink_cal.placement());
+                const uint8_t fp = uplink_calib_store_write(
+                    l.cfg.policy.calibration.artifact_dir, art);
+                if (fp == 0) {
+                    std::fprintf(stderr,
+                                 "uplink-calib: artifact write FAILED (%s)\n",
+                                 l.cfg.policy.calibration.artifact_dir.c_str());
+                } else {
+                    uplink_artifact = std::move(art);
+                    uplink_artifact_fp = fp;
+                    uplink_artifact_stale = false;
+                    std::fprintf(stderr,
+                                 "uplink-calib: DONE placement=%d qdb "
+                                 "fp=0x%02x\n",
+                                 uplink_cal.placement().placement_qdb, fp);
+                }
+                // The seek already applied the placement; re-resolving makes
+                // the running value and the persisted owner the same thing.
+                uplink_restore_power();
             }
         }
         const int air_timeout =
