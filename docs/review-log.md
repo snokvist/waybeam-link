@@ -4809,38 +4809,108 @@ that packet is explicitly unauthenticated/advisory and older receivers reject
 new exact-length shapes wholesale. Neither property is acceptable for feedback
 that moves an RF power actuator.
 
-**Ruling.** Reserve `0xF UPLINK_QUALITY`, a 34-byte craft→claimed-ground packet
-authenticated with the existing `csa_psk`. It carries the exact target ground
-tuple, last accepted report epoch, cumulative accepted-report count, cumulative
-signed RX-RSSI sum, craft-adapter fingerprint, and a four-byte HMAC. It is due
-at 2 Hz immediately before existing live DATA and never creates an air slot.
-The selected/claimed ground verifies source, target, session, MAC, monotonic
-counters, and freshness. SELECTOR_STATE remains byte-for-byte unchanged.
+**Ruling.** Reserve `0xF UPLINK_QUALITY`, a **35-byte** craft→report-latched-ground
+packet authenticated with the existing `csa_psk` over bytes 0..30. It carries the
+exact target ground tuple, last accepted report epoch, cumulative
+accepted-report count, cumulative signed RX-RSSI sum, craft-adapter fingerprint,
+`last_rx_mcs`, and a four-byte HMAC. It is due at 2 Hz immediately before
+existing live DATA and never creates an air slot. SELECTOR_STATE remains
+byte-for-byte unchanged.
+
+`last_rx_mcs` ships in v1 despite v1 having one uplink rung: the packet is
+exact-length with no spare byte and no flags field, so adding it later is a wire
+break, and it is the commanded-versus-delivered rung cross-check — the rung
+analogue of §10.6's commanded-qdb-versus-delivered-RSSI cap wall. Given the
+fleet's history of chips silently not honouring a commanded rate, a future
+multi-rung uplink without it would present as an unexplained loss wall.
+
+**Authority is the §3.5 report latch, not a §11.4 CSA claim.** The craft
+addresses quality only to its accepted reporter, so a valid-MAC packet naming a
+ground's own `(originator, session)` *is* proof that ground holds the latch.
+Requiring a CSA claim would make uplink calibration unavailable in any
+deployment that never changes channel, while the craft is already feeding that
+ground authenticated quality; and `ReportGate` is single-holder, so two grounds
+can never calibrate against one craft. §3.16's accept rule and §10.7's start
+rule are therefore the same rule.
+
+**Two clocks, not one.** Any accepted packet refreshes *liveness*; only an
+advancing `reports_received` refreshes *counter progress*. Liveness loss for 2 s
+aborts — the run has lost its observer. Stalled counters under live feedback are
+a 1000‰ loss observation, not an absence of evidence. The first draft conflated
+them, which would have aborted every run within 2 s of leaving the floor: unlike
+§10.6, where the ground keeps emitting reports whose *contents* change at total
+loss, §3.16's contents freeze when the uplink dies.
+
+**Floor and ceiling are different walls — this amends §10.6.** A loss wall means
+"too hot" only above a clean probe. With none yet, loss means "too cold" and the
+seek MUST ascend to `max_qdb`, failing `no_clean_point` only there. Today
+`calibrate.h` places at `min_qdb` in that case and its blackout retreat falls
+through to a `report_loss` abort because it requires a `last_clean_`. The Pass
+121 near-bench campaign never exercised this because a 1 dBm floor is always
+receivable at 2–10 m; a one-rung MCS0 uplink at range exercises it every run.
+
+**Dwell loss is anchored on the craft's own `last_report_epoch` bounds:**
+`emitted` counts unique ground-emitted epochs in `(E_A, E_B]` from the dwell's
+own first and last accepted packets. At a 40-epoch dwell one boundary-straddling
+report is 25‰ — between `loss_ok_milli` and `loss_bad_milli` — so an unanchored
+denominator would make every clean dwell read ambiguous and burn the one-shot
+extension to 80 on nothing. `received == 0` scores 1000‰ against the ground's own
+emission count and contributes no RSSI sample.
 
 Use ordinary unique LINK_REPORT epochs as the sparse probes: no padded traffic
 and no new VEHICLE_CMD. Extract §10.6's pure seek/verify state into a reusable
-time-injected `PowerSeek`; retain its eight-rung craft orchestrator and add a
-one-rung MCS0/LGI/HT20 ground orchestrator. Seed 16 qdb steps, 40-report probe
-dwells (one extension to 80 when ambiguous), 200-report verification, the
-existing 15/50‰ loss walls, and a 2 s authenticated-feedback timeout.
+time-injected `PowerSeek` taking an explicit `clean|bad|no_evidence` per-dwell
+verdict; retain the eight-rung craft orchestrator and add a ground orchestrator
+running one seeker per configured uplink rung (v1: one, MCS0/LGI/HT20 — a config
+value, not a constant). Seed 16 qdb steps, 40-report probe dwells (one extension
+to 80 when ambiguous), 200-report verification, the existing 15/50‰ loss walls,
+and a 2 s liveness timeout.
 
-An rx-node may load `power_map` only on its one `role:"tx"` uplink adapter;
-diversity-adapter maps remain rejected. Explicit config outranks a separate
-uplink artifact, which is applied only after the claimed craft and both adapter
-fingerprints match. Every non-success exit restores explicit config, the prior
-matching artifact, or backend auto/default in that order. Ground-local
-`GET/POST /api/v1/calibration` owns start/abort/status. New
-`uplink_calib_*`/`uplink_quality_*` fields stay separate from craft `calib_*`.
+**Actuator.** The `power_map` rejection re-keys from node role to **adapter
+role**: rejected on any `role:"rx"` adapter, accepted on a `role:"tx"` adapter,
+either node role. The full MCS0–7 curve loads; v1 resolves only the configured
+uplink rung — a usage restriction, not a format one. §10.5's override latch
+extends to any node with a `role:"tx"` adapter, giving the ground a manual
+placement without a config edit and a restart. Explicit config outranks the
+uplink artifact, which applies only when the selected craft and both adapter
+identities match. Every non-success exit restores explicit config, the prior
+matching artifact, or backend auto/default in that order.
+
+**Interlock and order.** The two directions must never overlap: §10.7 drives
+ground power to `min_qdb`, starving the report stream §10.6's dwells and
+`report_loss_abort_ms` clock depend on. §10.7 start 409s on the mirrored §3.15
+`calib_state == running`; while §10.7 runs the ground refuses to issue §11.7
+`CALIBRATE`. Order is **uplink first, then downlink** — §10.6 needs a working
+uplink, §10.7 needs only live DATA.
 
 **Integration boundary.** Link owns wire, engine, actuator, persistence, REST,
-and stats. Hub adds separately labelled Craft downlink/Ground uplink controls
-and calls local `:8092` for the latter. SBC packaging pins reviewed Link/Hub
-heads. Android currently has no Link wire decoder or selector-state consumer,
-so it needs no code change; unknown `0xF` remains a compatibility test.
+and stats, and keeps the two operations independent and independently startable.
+Hub exposes **one** bi-directional calibration action and owns the sequencing
+(uplink via local `:8092`, stop on failure, then §11.7 downlink) — calibration
+is a one-time commissioning step persisted on both sides, so a ~2-minute
+combined run is the right unit of work and splitting it invites the wrong order.
+SBC packaging pins reviewed Link/Hub heads. Android currently has no Link wire
+decoder or selector-state consumer, so it needs no code change; unknown `0xF`
+remains a compatibility test.
+
+**Prepared for, not implemented: multi-rung ground uplink.** A future pass will
+run the uplink at higher rungs so control/telemetry occupies less airtime. Pass
+125 ensures nothing needs migrating for it — `power_map` is already the full
+MCS0–7 curve, `TxRate{mcs,sgi,bw}` already flows per-frame through
+`dot11_tx_prefix`, §10.5's latch is rung-agnostic, §3.16 carries `last_rx_mcs`,
+the artifact's `placements` is a list with rate identity inside the entry, and
+§15.3 carries `uplink_calib_rung`. The floor rule is a prerequisite, not a
+nicety: a higher rung has a higher usable floor. That pass's other contact
+points are §9.3's `airtime_budget_frac` (`io/airtime.h`) for uplink airtime
+accounting and §7.2's return-window sizing, which assumes today's uplink frame
+duration.
 
 **Merge gate.** Full host suite and SSC338Q/x86-ground/RK3566 builds; at least
-15 focused wire/calibrator/config/store/REST/stats tests; independent full-diff
-review; ten consecutive hardware runs with placement spread no greater than
-one seek step; failure injection for abort, quality blackout, mismatch,
-restart, and retune; plus calibrated-vs-default/manual range evidence for
-report delivery, NACK recovery, blackouts, RSSI, and uplink packet loss.
+26 focused wire/calibrator/config/store/REST/stats tests; independent full-diff
+review; ten consecutive hardware runs with placement spread no greater than one
+seek step; a blacked-out-floor run proving the seek ascends rather than aborting;
+interlock verification in both directions; failure injection for abort, liveness
+blackout, mismatch, restart, and retune; the combined Hub action end to end
+including uplink-failure-stops-sequence; plus calibrated-vs-default/manual range
+evidence for report delivery, NACK recovery, blackouts, RSSI, and uplink packet
+loss.

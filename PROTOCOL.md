@@ -870,9 +870,9 @@ timer. This follows the existing §7.2 paced-video ownership law: observability
 may add a few bytes inside an active TX opportunity, never manufacture another
 one.
 
-### 3.16 UPLINK_QUALITY packet (type `0xF`) — 34 bytes (Pass 125)
+### 3.16 UPLINK_QUALITY packet (type `0xF`) — 35 bytes (Pass 125)
 
-Craft→claimed-ground **authenticated actuator feedback** for the one-rung
+Craft→report-latched-ground **authenticated actuator feedback** for the
 ground-uplink calibration in §10.7. This is deliberately a separate packet,
 not another §3.15 append: SELECTOR_STATE is explicitly unauthenticated and
 advisory, while this feedback moves ground TX power. It also preserves the
@@ -882,23 +882,31 @@ existing selector-state shape for older receivers; they ignore unknown type
 | off | size | field | notes |
 |---|---:|---|---|
 | 0 | 11 | *common* | §3.1 — sender = craft; `destination` = target ground originator |
-| 11 | 2 | `target_originator` | claimed/report-latched ground; MUST equal `destination` and be non-zero |
+| 11 | 2 | `target_originator` | report-latched ground; MUST equal `destination` and be non-zero |
 | 13 | 4 | `target_session` | exact ground session whose reports formed these counters |
 | 17 | 4 | `last_report_epoch` | most recent accepted §3.5 epoch from that tuple; 0 before the first accepted report |
 | 21 | 4 | `reports_received` | cumulative accepted LINK_REPORT count in this target-tuple epoch |
 | 25 | 4 | `rssi_sum_dbm` | two's-complement i32 wire image of the cumulative craft RX-metadata RSSI sum; accumulation is modulo 2^32 |
 | 29 | 1 | `craft_adapter_fingerprint` | CRC-8/DVB-S2 of the craft RX/TX adapter's canonical calibration identity |
-| 30 | 4 | `quality_mac` | `trunc(HMAC(csa_psk, bytes[0..29]), 4)` — HMAC-SHA-256, leftmost 4 bytes, big-endian |
+| 30 | 1 | `last_rx_mcs` | delivered HT MCS of the most recently accepted report (`AirRxMeta.rx_mcs`); `0xFF` = unknown — no radiotap MCS field, a non-HT rate, or no report yet |
+| 31 | 4 | `quality_mac` | `trunc(HMAC(csa_psk, bytes[0..30]), 4)` — HMAC-SHA-256, leftmost 4 bytes, big-endian |
 
-The craft resets `last_report_epoch`, `reports_received`, and `rssi_sum_dbm`
-when its accepted reporter `(originator, session)` changes. Every accepted
-LINK_REPORT increments the count once and adds the signed `AirRxMeta.rssi` of
-that received frame in unsigned modulo arithmetic (never C++ signed overflow);
-rejected, duplicate, and stale reports contribute nothing. The cumulative pair
-lets the ground compare its locally emitted
-unique report epochs with craft-received deltas without adding calibration
-probe packets. Counter arithmetic is wrap-aware; a calibrator run is far
-shorter than either counter's wrap interval.
+The craft resets `last_report_epoch`, `reports_received`, `rssi_sum_dbm`, and
+`last_rx_mcs` when its accepted reporter `(originator, session)` changes. Every
+accepted LINK_REPORT increments the count once and adds the signed
+`AirRxMeta.rssi` of the **accepted copy** — under craft-side RX diversity, the
+adapter that first delivered that report — in unsigned modulo arithmetic (never
+C++ signed overflow). Rejected, duplicate, and stale reports contribute nothing.
+Counter arithmetic is wrap-aware; a calibrator run is far shorter than either
+counter's wrap interval.
+
+`last_rx_mcs` is the **commanded-versus-delivered rung cross-check**, the rung
+analogue of §10.6's commanded-qdb-versus-delivered-RSSI cap wall. v1's uplink
+has one operating point, so it is observability only; it exists on the wire from
+the first revision because the packet is exact-length with no spare byte and no
+flags field, so adding it later would be a wire break. It is what makes a driver
+or chip that silently ignores a commanded rate a *detected* fault rather than an
+unexplained loss wall. Surfaced as §15.3 `uplink_quality_rx_mcs`.
 
 The packet becomes due at **2 Hz** and follows the §3.15 guard-cost boundary
 exactly: emit it immediately before live DATA already going on air, coalesce a
@@ -907,15 +915,28 @@ gap. No live DATA means no fresh quality and therefore makes §10.7 start fail
 or an active run abort.
 
 The ground accepts it only when all of the following hold: exact length and
-field validity; common source `(originator, session)` equals the currently
-claimed craft; both target fields equal the local ground `(originator,
-session)`; the source craft is the current selected DATA source; the MAC
-verifies in constant time with the existing `csa_psk`; and the cumulative
-state is duplicate-or-new under wrap-aware ordering. A target-tuple change
-starts a fresh receive domain. Wrong-key, wrong-target, stale-session, and
-backward-moving packets are dropped and counted. A duplicate may refresh
-neither samples nor freshness. This packet is not a command and confers no
-claim; the accepted §11.4 CSA binding remains the authority source.
+field validity; common source `(originator, session)` equals the craft this
+ground has currently selected as its DATA source; both target fields equal the
+local ground `(originator, session)`; the MAC verifies with the existing
+`csa_psk`; and the cumulative state is duplicate-or-new under wrap-aware
+ordering. A target-tuple change starts a fresh receive domain. Wrong-key,
+wrong-target, stale-session, and backward-moving packets are dropped and
+counted. This packet is not a command and confers no claim.
+
+**Two clocks, not one.** An accepted packet always refreshes **feedback
+liveness**: it is evidence the craft is alive, still targeting this ground, and
+still airing DATA. It refreshes **counter progress** only when
+`reports_received` advances under wrap-aware ordering. A duplicate is therefore
+neither an error nor a sample — it refreshes liveness alone. An accepted packet
+whose counters have not advanced is **positive evidence that the uplink is not
+delivering**, never an absence of evidence. §10.7 consumes the two separately:
+liveness loss is a craft/downlink failure and ends the run; stalled counters
+under live feedback are a 1000‰ loss observation that drives the seek.
+
+Because the craft addresses quality only to its accepted §3.5 reporter, a
+valid-MAC packet naming a ground's own `(originator, session)` is itself proof
+that this ground holds the craft's report latch. That, not a §11.4 CSA binding,
+is the authority §10.7 requires — see §10.7.
 
 ---
 
@@ -2022,6 +2043,16 @@ makes the §10.2 curve resolve **yield** until the override is cleared.
 - A failed actuator write (the forked `iw` on kernel-monitor) is logged and
   **not cached** as applied — the value is re-applied at the next commit
   resolve or re-assert point instead of being silently believed on-hardware.
+- **Scope (Pass 125).** The latch is available on **any node with a `role:"tx"`
+  adapter**, not only a tx-node — including an rx-node's single designated
+  §6.4 uplink adapter. Range, §10.3 clamp, re-assert points, and restore
+  semantics are identical; the latch is rung-agnostic by construction (it
+  overrides the resolve, whatever rung produced it). It is the manual
+  counterpart to §10.7's calibrated placement and the reference point for the
+  calibrated-versus-manual comparison, so a ground placement never requires a
+  config edit and a restart. §10.7 start returns 409 while the latch is active;
+  latching while §10.7 runs aborts the run and restores before the latch
+  applies.
 
 **Backend actuation matrix.** The §10 model is backend-agnostic; only the
 actuator differs (the §3.0 rate split's power twin):
@@ -2078,7 +2109,8 @@ never lies). A verify loss above `loss_bad_milli` also records the
 rung's overload bracket. The wall's bracketing
 RSSIs **are** the rung's overload-ceiling record — there is no separate
 ceiling phase. If a rung's first probe is already past the loss wall the
-ramp descends until clean (floor `min_qdb`). A `rssi_guard_dbm` sanity
+ramp descends until clean, bounded by the floor rule below. A
+`rssi_guard_dbm` sanity
 bound (default −6, Pass 121 addendum — the first live run showed −20
 clamped the low rungs 2 dB short of their true maximum) stops the ramp
 when reports land above it; it is a token backstop against RX front-end
@@ -2086,6 +2118,22 @@ abuse, not a placement mechanism — the loss wall is the intended limiter
 at every rung. The loop evaluates **post-diversity** loss (what LINK_REPORT
 carries); at the placement and at the cliff this agrees with per-adapter
 wire PER (measured: adapters fail together in overload).
+
+**Floor and ceiling are different walls (Pass 125 amendment).** A loss wall
+means "too hot" only when a clean probe already exists at lower power. Before
+the rung's first clean probe the seeker is below the usable floor and loss means
+"too cold": it MUST continue ascending in `seek_step_qdb` steps toward
+`max_qdb`, and MUST NOT place, retreat, or abort. Only a bad probe at `max_qdb`
+with no clean probe anywhere on that rung fails, reason `no_clean_point`.
+Symmetrically, the addendum-4 blackout retreat and the addendum-2 verify
+step-down apply only **above** the rung's last clean probe — both already
+require one, and with no clean probe the correct move is up, not out. Without
+this rule a floor-start ramp (rung 0 from `min_qdb`) on a link whose floor is
+genuinely unusable either places at `min_qdb` or aborts on the report clock;
+the Pass 121 near-bench campaign never exercised it because a 1 dBm floor is
+always receivable at 2–10 m. §10.7's one-rung MCS0 uplink at range is the case
+that does exercise it, so the rule is stated here, where both calibrators
+inherit it.
 
 **Why not a target band (Pass 120, retired).** Steering to a fixed RSSI
 band bakes the calibration distance into the method: at range the band is
@@ -2156,74 +2204,141 @@ chip-cal skew.
 ### 10.7 Ground-uplink TX calibration symmetry (Pass 125)
 
 §10.6 calibrates the **craft downlink**. This section calibrates the ground's
-single designated `role:"tx"` uplink adapter against what the claimed craft
-actually receives. The aim is the same maximum clean delivered power, but the
-uplink has one fixed robust operating point (MCS0/LGI/HT20) and sparse normal
-LINK_REPORT traffic. It therefore produces one placement, not an eight-rung
-curve, and adds no synthetic probe traffic.
+single designated `role:"tx"` uplink adapter against what the craft actually
+receives. The aim is the same maximum clean delivered power, but the uplink runs
+at its **configured uplink operating point** — v1: a single MCS0/LGI/HT20 rung —
+and on sparse normal LINK_REPORT traffic. It therefore produces one placement
+per configured rung, v1 exactly one, and adds no synthetic probe traffic.
 
 **Authority and prerequisites.** Calibration is ground-local and starts only
 through `POST /api/v1/calibration` on the ground control server (deployment
-port `:8092`). It requires exactly one designated uplink adapter, an accepted
-claim/binding to the selected craft, a configured `csa_psk`, live DATA, fresh
-authenticated §3.16 feedback, and no CSA, scout, MTU-command, TX-power override,
-or other calibration in flight. No VEHICLE_CMD is added: the craft continuously
-publishes quality only for its accepted reporter, and the claimed ground alone
+port `:8092`). It requires exactly one designated uplink adapter, a configured
+`csa_psk`, live DATA from the selected craft, and fresh authenticated §3.16
+feedback naming this ground's exact `(originator, session)`. That feedback is
+itself proof that this ground holds the craft's §3.5 report latch, which is the
+only authority §10.7 needs — a §11.4 CSA claim is **neither required nor
+sufficient**. Requiring one would make uplink calibration unavailable in any
+deployment that never changes channel, while the craft is already feeding that
+ground authenticated quality; and the §3.5 latch is single-holder by
+construction (`ReportGate`: first-latcher, silence-bounded re-latch), so two
+grounds can never calibrate against one craft. Also required: no CSA, scout,
+MTU-command, §10.5 TX-power override, or other calibration in flight —
+including the **craft's**: start returns 409 when the mirrored §3.15
+`calib_state` is `running`. Conversely, while §10.7 runs the ground refuses to
+issue a §11.7 `CALIBRATE` campaign. The two directions must never overlap:
+§10.7 deliberately drives ground power to `min_qdb`, which starves the report
+stream that §10.6's `report_loss_abort_ms` clock and every one of its dwells
+depend on. No VEHICLE_CMD is added for the uplink direction: the craft
+continuously publishes quality to its accepted reporter, and that ground alone
 owns its local actuator. Start returns 409 with the failed prerequisite; abort
 is idempotent.
 
-**One-rung seek.** Extract the pure seek/verify portion of the §10.6 `Calibrator`
-into a time-injected `PowerSeek` used by both calibrators; the existing craft
-eight-rung orchestration and results must remain behaviourally unchanged. The
-ground wrapper runs one MCS0/LGI/HT20 seeker. Seed `seek_step_qdb=16` (4 dB),
-reuse §10.6's min/max, RSSI-rise cap wall, loss walls, confirmation dwell,
-blackout retreat, bounded verify descents, and hard-cap rules. A probe dwell
-requires **40 unique report epochs** (~4 s at 10 Hz); an ambiguous wall may
-extend once to **80**. Verification requires **200 epochs** (~20 s). The seed
-loss thresholds remain `loss_ok_milli=15` and `loss_bad_milli=50`. Expected
-runtime is roughly 45–75 s; absence of fresh authenticated quality for 2 s
-aborts. Counts are sample gates, not timers: a low report cadence takes longer
-rather than pretending missing observations were clean.
+**Order matters.** §10.6 depends on the uplink delivering reports; §10.7 depends
+only on live DATA, which any working downlink provides. Calibrate the **uplink
+first, then the downlink** — a downlink run measured across a badly placed
+uplink either aborts on the report clock or places against a thinning report
+stream. This is the operator-visible law behind the single bi-directional Hub
+action below.
 
-For each quality interval the ground knows the unique LINK_REPORT epochs it
-emitted and derives received count plus RSSI mean from the deltas of §3.16's
-cumulative fields. A skipped emitted epoch is loss. Cap-wall confirmation and
-blackout handling match §10.6, but a quality blackout itself cannot be treated
-as trustworthy wall evidence indefinitely: after the one bounded above-clean
-retreat opportunity, the 2 s freshness deadline aborts.
+**Seek.** Extract the pure seek/verify portion of the §10.6 `Calibrator` into a
+time-injected `PowerSeek` used by both calibrators; the existing craft eight-rung
+orchestration and results must remain behaviourally unchanged **above the first
+clean probe** — the §10.6 floor rule is a deliberate change below it. The ground
+wrapper runs one seeker per configured uplink rung. Seed `seek_step_qdb=16`
+(4 dB), reuse §10.6's min/max, RSSI-rise cap wall, loss walls, confirmation
+dwell, floor/ceiling rule, blackout retreat, bounded verify descents, and
+hard-cap rules. A probe dwell requires **40 unique report epochs** (~4 s at
+10 Hz); an ambiguous wall may extend once to **80**. Verification requires
+**200 epochs** (~20 s). The seed loss thresholds remain `loss_ok_milli=15` and
+`loss_bad_milli=50`. Expected runtime is roughly 45–75 s per rung. Counts are
+sample gates, not timers: a low report cadence takes longer rather than
+pretending missing observations were clean.
 
-**Actuator ownership and config carve-out.** An rx-node still rejects a
-`power_map` on every `role:"rx"` diversity adapter. It may accept one only on
-its designated `role:"tx"` uplink adapter, resolve the MCS0/level-4 entry,
-respect that adapter's `max_power_qdb`, apply it at startup, and reapply after
-every retune/recovery that resets TXAGC. More than one uplink adapter remains a
-config error. An explicit `power_map` always outranks a persisted calibration
+Loss of §3.16 **liveness** for 2 s aborts — the run has lost its observer.
+Stalled counters under live feedback never abort; per §3.16 they are the seek's
+strongest floor evidence. Because the seek starts at `min_qdb`, the uplink is
+*expected* to be blacked out for the first probes; the §10.6 floor rule ascends
+through them.
+
+**Dwell loss comes from two anchors of the same packet pair.** Let `A` and `B`
+be the first and last §3.16 packets accepted inside the dwell — the settle
+window discards packets exactly as §10.6 discards samples — with cumulative
+`(last_report_epoch, reports_received, rssi_sum_dbm)` = `(E, R, S)`. In
+wrap-aware u32 arithmetic:
+
+```
+received  = R_B - R_A
+emitted   = unique report epochs this ground emitted in (E_A, E_B]
+loss‰     = 1000 * (emitted - received) / emitted          (emitted > 0)
+rssi_mean = (int32)(S_B - S_A) / received                  (received > 0)
+```
+
+Anchoring `emitted` on the craft's own `last_report_epoch` bounds — not on
+ground wall-clock, and not on every epoch emitted during the dwell — removes
+in-flight boundary error: a report emitted after `E_B` belongs to the next
+dwell. This is load-bearing, not fussiness: at a 40-epoch dwell one
+boundary-straddling report is 25‰, which lands between `loss_ok_milli` and
+`loss_bad_milli`, so an unanchored denominator would make every clean dwell read
+ambiguous and burn the one-shot extension to 80 on nothing. When `received == 0`
+the craft's anchors cannot advance; that dwell scores `loss = 1000‰` with
+`emitted` taken as the ground's own emission count over the dwell, and
+contributes no RSSI sample. Cap-wall confirmation matches §10.6; the §10.6
+blank-dwell hold (zero samples ⇒ hold and let the clocks arbitrate) has no
+uplink meaning and is not inherited.
+
+**Actuator ownership and config carve-out.** Config load rejects `power_map` on
+any `role:"rx"` adapter **regardless of node role**, and accepts it on a
+`role:"tx"` adapter on either node role — the existing rule was keyed on node
+role, which both permitted a never-applied map on a tx-node diversity adapter
+and blocked the one adapter that can use it on an rx-node. An rx-node with more
+than one `role:"tx"` adapter remains a config error (§6.4 permits at most one
+designated uplink). The map is the full §10.2 per-MCS curve, loaded whole; v1
+**resolves** only the configured uplink rung's level-4 entry, because that is
+the only rung the uplink uses — a usage restriction, not a format one, so a
+future multi-rung uplink needs no new file format. Respect that adapter's
+`max_power_qdb`, apply at startup, and reapply after every retune/recovery that
+resets TXAGC. An explicit `power_map` always outranks a persisted calibration
 artifact; calibration may measure and persist while a map exists, but the
 artifact does not silently take runtime ownership until the explicit map is
 removed.
 
 **Artifact and restore law.** The ground artifact is a distinct schema, not a
-degenerate craft curve. It contains schema version and timestamp; local uplink
+degenerate craft curve. It carries schema version and timestamp; local uplink
 adapter canonical identity; selected craft `originator` and §3.16 adapter
-fingerprint; band/bandwidth/rate; placement qdb/RSSI/loss; clean/bad bracket;
-and canonical CRC-8. Write atomically under the configured calibration
-directory. Apply it only after the same craft is claimed and both local and
-remote adapter identities match; otherwise surface stale and leave hardware at
-the higher-precedence source. A craft session reboot alone does not stale the
-artifact. Every exit restores, in order: explicit configured placement, prior
-matching artifact, then backend auto/default. Done applies the new placement;
-abort, process shutdown, retune conflict, and failure must never leave the last
-probe power active.
+fingerprint; channel and bandwidth; a **rung-indexed `placements` list** — v1
+exactly one entry, each entry carrying its own `mcs`/`short_gi` plus placement
+qdb/RSSI/loss and the clean/bad bracket; and canonical CRC-8 over a pinned
+binary serialization, not JSON formatting. The list shape is v1 law precisely
+so a future multi-rung uplink adds entries rather than bumping the schema and
+migrating every deployed artifact and Hub parser. Rate identity lives in the
+entry, never in the top-level identity block. Write atomically under the
+configured calibration directory. Apply it only when the same craft is selected
+and both local and remote adapter identities match; otherwise surface stale and
+leave hardware at the higher-precedence source. A craft session reboot alone
+does not stale the artifact. Every exit restores, in order: explicit configured
+placement, prior matching artifact, then backend auto/default. Done applies the
+new placement; abort, process shutdown, retune conflict, and failure must never
+leave the last probe power active.
 
 **Observability.** Ground `GET /api/v1/calibration` returns the local uplink
 state and artifact with `direction:"uplink"`; the craft response remains the
 §10.6 downlink schema with `direction:"downlink"`. Ground POST accepts exactly
 `{"action":"start"}` or `{"action":"abort"}`. Add separate role-neutral
 `uplink_calib_*` and `uplink_quality_*` stats rather than overloading the
-craft/received `calib_*` fields. At minimum expose state, placement/fingerprint,
-stale/fail reason, feedback validity/age, last report epoch, received count,
-and derived RSSI mean. Hub labels the two operations **Craft downlink** and
-**Ground uplink** and sends the latter only to the local ground endpoint.
+craft/received `calib_*` fields. At minimum expose state, rung,
+placement/fingerprint, stale/fail reason, feedback validity/age, last report
+epoch, received count, derived RSSI mean, and delivered `last_rx_mcs`.
+
+**One operator action, two phases.** Calibration is a one-time,
+persisted-on-both-sides commissioning step, so Hub exposes a **single
+bi-directional calibration action**, not two. Hub owns the sequencing —
+uplink phase (local `POST :8092 /api/v1/calibration`), await terminal state,
+then downlink phase (§11.7 `CALIBRATE`), await the mirrored §3.15 word — and
+reports which phase is running and which failed. A failed uplink phase MUST NOT
+proceed to the downlink phase: the order law above is the whole reason the
+sequence exists. Link keeps the two operations independent and independently
+startable; the combined action is a Hub-side orchestration with no new Link
+surface and no new wire.
 
 ---
 
@@ -2887,7 +3002,7 @@ data-path crypto, or heavy state. Threats and mitigations:
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
 | Forged/stale CACHE_ASSIGN → cache retune or cross-vehicle window | accept only the configured controller originator **and UDP source endpoint**, exact cache destination, allowlisted channel, and monotonic controller-session epoch; clear the old window only after a successful retune | 3.13, 14.3 |
 | Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung / venc preset / mode switch) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets (v1 toggles) or an encoder preset from the operator's own deployment allowlist (v2, volatile — Pass 73; persists only on a pre-live venc fallback), or an operating mode from the craft's own `modes/` set (Pass 105, volatile — reboot restores boot `active_mode`; a mode restarts venc + re-bands the §9.7 selector but touches no channel/power) — never channel or power | 3.14, 11.7 |
-| Forged UPLINK_QUALITY → unsafe ground TX-power move | dedicated exact-length packet; existing `csa_psk` HMAC; exact selected-craft and target ground tuple; claim binding; cumulative-counter anti-replay; feedback expiry aborts and restores power | 3.16, 10.7 |
+| Forged UPLINK_QUALITY → unsafe ground TX-power move | dedicated exact-length packet; existing `csa_psk` HMAC over bytes 0..30; exact selected-craft source and target ground `(originator, session)`; the craft addresses only its single-holder §3.5 report latch, so a valid packet proves the receiver *is* the report authority; cumulative-counter anti-replay; liveness expiry aborts and restores power | 3.16, 10.7 |
 
 HMAC remains off the bandwidth-carrying DATA path. It protects the rare
 channel/command actions and the low-rate feedback that can move ground TX
@@ -3611,11 +3726,12 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "mtu_effective": 3072, "mtu_supported": 3072,
     "calib_state": "idle", "calib_rung": 0, "calib_fingerprint": 0,
     "calib_stale": false,
-    "uplink_calib_state": "idle", "uplink_calib_power_qdb": 0,
+    "uplink_calib_state": "idle", "uplink_calib_rung": 0,
+    "uplink_calib_power_qdb": 0,
     "uplink_calib_fingerprint": 0, "uplink_calib_stale": false,
     "uplink_quality_valid": false, "uplink_quality_age_ms": 0,
     "uplink_quality_report_epoch": 0, "uplink_quality_reports": 0,
-    "uplink_quality_rssi_mean": 0 } }
+    "uplink_quality_rssi_mean": 0, "uplink_quality_rx_mcs": 255 } }
 ```
 `csa_state` is the §11 follow-me state machine string (issuer states when a
 switch campaign is active, otherwise the follower's), and `channel` is the
@@ -3689,12 +3805,17 @@ is craft-local knowledge and stays `false` on a ground node.
 The `uplink_calib_*` / `uplink_quality_*` fields (Pass 125) are distinct from
 that mirror. They are populated on the ground/rx node by its local §10.7
 calibrator and accepted §3.16 feedback, with role-neutral zero/idle defaults
-elsewhere. `uplink_calib_state` is `idle|running|done|failed`, power is the
-applied or completed one-rung placement, and stale has the §10.7 identity
-meaning. Quality is valid only for the current claimed craft and local session;
-age is monotonic milliseconds since the last new accepted cumulative sample.
-The report epoch/count are the craft-accepted cumulative values and RSSI mean is
-derived over the most recent non-empty delta (0 when no such delta exists).
+elsewhere. `uplink_calib_state` is `idle|running|done|failed`, `uplink_calib_rung` is the
+uplink rung being sought or last placed (v1 always 0, mirroring `calib_rung`'s
+shape so a future multi-rung uplink changes no stats schema), power is the
+applied or completed placement for that rung, and stale has the §10.7 identity
+meaning. Quality is valid only for the currently selected craft and local
+session; `uplink_quality_age_ms` is monotonic milliseconds since the last
+**liveness** refresh (any accepted packet), which is the clock §10.7's 2 s abort
+watches — counter progress is tracked separately by `uplink_quality_reports`.
+The report epoch/count are the craft-accepted cumulative values, RSSI mean is
+derived over the most recent non-empty delta (0 when no such delta exists), and
+`uplink_quality_rx_mcs` is §3.16's delivered-rung cross-check (255 = unknown).
 
 `return_window_hits/misses` (TX-side) and `reports_expected/received` expose the
 §7.2 optimisation's health directly, and `adapter_stalled` + the
@@ -3998,9 +4119,9 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
 | `GET /api/v1/link/mtu` | local §9.3a state: `{mode, requested, effective, supported}` (every node; craft mode is `remote`) |
 | `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
-| `GET /api/v1/calibration` | role-specific calibration surface. Craft/tx: §10.6 response plus `direction:"downlink"`. Ground/rx: §10.7 `{direction:"uplink",state,power_qdb,fingerprint,stale,quality:{valid,age_ms,last_report_epoch,reports_received,rssi_mean},artifact:{...}|null,fail_reason}` |
+| `GET /api/v1/calibration` | role-specific calibration surface. Craft/tx: §10.6 response plus `direction:"downlink"`. Ground/rx: §10.7 `{direction:"uplink",state,rung,power_qdb,fingerprint,stale,quality:{valid,age_ms,last_report_epoch,reports_received,rssi_mean,rx_mcs},artifact:{...,placements:[...]}|null,fail_reason}` |
 | `GET /api/v1/modes` | `{active, apply_configured, catalog_fingerprint, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist. A ground with an IP path reads it here; one without must hardcode a copy, and pins `catalog_fingerprint` (Pass 108) to detect index drift (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
-| `GET /api/v1/tx/power` | `{override_active, qdb, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`kernel-monitor`\|`udp` (TX node) |
+| `GET /api/v1/tx/power` | `{override_active, qdb, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`kernel-monitor`\|`udp` (any node with a `role:"tx"` adapter) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -4024,7 +4145,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 |---|---|---|
 | `POST /api/v1/csa` | `{ "mhz": 5805, "class": 0 }` | start a §11 CSA campaign (issuer/ground node) |
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
-| `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (TX node) |
+| `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (any node with a `role:"tx"` adapter, including an rx-node's §6.4 uplink — Pass 125) |
 | `POST /api/v1/calibration` | `{ "action": "start" }` \| `{ "action": "abort" }` | §10.7 one-rung ground-uplink calibration; start requires its complete prerequisite set, abort is idempotent (ground/rx node) |
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node) |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
