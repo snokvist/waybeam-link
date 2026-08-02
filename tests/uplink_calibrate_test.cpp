@@ -271,9 +271,58 @@ void test_ambiguous_extension() {
     CHECK(cal2.dwell_progress() == 40);                // same dwell continues
 }
 
+// Case 20: the dwell denominator is anchored on the craft's own
+// last_report_epoch bounds, so a report emitted after E_B belongs to the NEXT
+// dwell. This is the arithmetic the 15/50permille walls sit on: at a 40-epoch
+// dwell one boundary-straddling report is 25permille, which lands between the
+// walls and would turn every clean dwell ambiguous.
+void test_loss_denominator_boundary() {
+    UplinkCalibParams p = fast_params();
+    p.probe_epochs = 40;
+    p.ambiguous_epochs = 80;
+    p.seek.loss_ok_milli = 15;
+    p.seek.loss_bad_milli = 50;
+    UplinkCalibrator cal(p, 0, false);
+    CHECK(cal.start(1000, 0));
+    const uint64_t t = 1000 + p.settle_ms + 1;
+
+    // A perfectly clean dwell: the craft saw 40 epochs and accepted all 40.
+    // The ground emitted more than that in wall-clock terms -- reports 41 and
+    // 42 are still in flight -- but they are outside (E_A, E_B] and must not
+    // be counted against this dwell.
+    QualitySample s;
+    s.accepted = true;
+    s.progressed = true;
+    s.epoch_delta = 40;
+    s.reports_delta = 40;
+    s.rssi_sum_delta = -40 * 40;
+    cal.on_sample(s, t);
+    // local_epoch is 42: two more emitted than the craft has acknowledged.
+    // A wall-clock or raw-emission denominator would read 2/42 = 47permille
+    // here and extend; the anchored one reads 0.
+    (void)cal.tick(t, 42, true);
+    CHECK(cal.dwell_target() == p.probe_epochs);  // decided, not extended
+    CHECK(cal.state() == CalibState::kRunning);
+
+    // And a genuinely lossy dwell still reads lossy: 4 lost in 40 = 100
+    // permille, past the bad wall.
+    UplinkCalibrator lossy(p, 0, false);
+    CHECK(lossy.start(1000, 0));
+    QualitySample bad;
+    bad.accepted = true;
+    bad.progressed = true;
+    bad.epoch_delta = 40;
+    bad.reports_delta = 36;
+    bad.rssi_sum_delta = -40 * 36;
+    lossy.on_sample(bad, t);
+    (void)lossy.tick(t, 40, true);
+    CHECK(lossy.dwell_target() == p.probe_epochs);  // decided, not ambiguous
+}
+
 }  // namespace
 
 int main() {
+    test_loss_denominator_boundary();
     test_clean_ramp();
     test_floor_start();
     test_counter_blackout_is_evidence();

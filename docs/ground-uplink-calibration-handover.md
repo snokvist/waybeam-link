@@ -428,6 +428,28 @@ binaries, but report individual cases):
 27. `air.uplink_rate` seeds produce byte-identical radiotap to today's
     rx-node default, and a non-default rung reaches `set_tx_mode`.
 
+### Coverage status (Link implementation, 2026-08-02)
+
+Cases 1–10, 14–22 and 25–26 are automated and green (`uplink_quality_test`,
+`uplink_calibrate_test`, `uplink_calib_store_test`, `calibrate_test`,
+`config_test`, `control_server_test`, `stats_test`).
+
+Five are **integration-level and NOT reachable from a unit test**, because they
+live in `run_tx` / `run_rx` rather than in a `core/` engine. They are listed
+here so nobody reads a green suite as covering them:
+
+| case | what is covered | what is not |
+|---|---|---|
+| 11 | the counter class rejects a repeated epoch and resets on a reporter change | that `main.cpp` folds counters *only* behind `selector_.on_report()` |
+| 12 | — | the whole property; use `tools/verify_quality_guard.py` on a device trace (step 8 above) |
+| 23 | the REST route and its status codes | that the latch reaches the rx node's uplink adapter |
+| 24 | each interlock's *decision* in isolation | that a running craft calibration, a scout, or a latch actually blocks a start on hardware |
+| 27 | `air.uplink_rate` parsing and defaults | that the seeds produce byte-identical radiotap to the pre-Pass-125 rx node |
+
+Confirm all five on the device campaign below. Case 27 in particular is a
+claim about *unchanged* behaviour, so it wants a before/after capture rather
+than an assertion that the new path works.
+
 Also run the full Hub suite and SBC target builds. Run the coordination protocol
 audit and port check; Link's own `PROTOCOL.md` remains the wire source of truth.
 Perform an independent full-diff review after tests, specifically checking
