@@ -762,29 +762,6 @@ int main() {
             CHECK(c.uplink_ambiguous_epochs == 80);
             CHECK(c.uplink_verify_epochs == 200);
             CHECK(c.uplink_liveness_ms == 2000);
-            // Pass 131: the calibration cadence, and the settle window that
-            // came down with it. 4160 report epochs is 473 s at the 10 Hz
-            // seed; these two are what make it ~91 s without touching a
-            // single sample gate above.
-            CHECK(c.uplink_calib_report_hz == 60.0);
-            CHECK(c.settle_ms == 300);
-        }
-    }
-    // Pass 131: a "calibration cadence" below the ordinary one would make the
-    // run SLOWER than not raising it at all, which is never what the key is
-    // for. There is deliberately no upper bound: the real ceiling is the
-    // craft's fps (§7.2) and this node cannot know it.
-    expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"report_hz":10,
-                "calibration":{"uplink_calib_report_hz":5}}})",
-        "must be >= policy.report_hz");
-    {
-        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"},
-          "policy":{"report_hz":10,
-                    "calibration":{"uplink_calib_report_hz":90}}})");
-        CHECK(bool(d));
-        if (d) {
-            CHECK(d.value->policy.calibration.uplink_calib_report_hz == 90.0);
         }
     }
     // The ambiguous extension is a LONGER re-dwell; at or below the probe

@@ -282,11 +282,7 @@ struct CalibrationPolicy {
     int rssi_guard_dbm = -6;
     int min_qdb = 4;
     int max_qdb = 108;
-    // Pass 131: 800 -> 300. It was sized as TXAGC settle plus one report
-    // window; at the §10.7 calibration cadence the report-window term falls
-    // from 100 ms to ~17 ms, and eight rungs x nine dwells makes the
-    // difference 36 s of a 91 s run.
-    int settle_ms = 300;
+    int settle_ms = 800;
     int probe_dwell_ms = 1200;
     int verify_dwell_ms = 2500;
     int report_loss_abort_ms = 3000;
@@ -302,16 +298,6 @@ struct CalibrationPolicy {
     int uplink_ambiguous_epochs = 80;
     int uplink_verify_epochs = 200;
     int uplink_liveness_ms = 2000;
-    // §10.7 (Pass 131): the cadence the ground runs ITS OWN reports at for the
-    // duration of a run, restored on exit alongside the power and the rate.
-    // The gates above are sample counts, so this is what turns 4160 epochs
-    // from 473 s into ~91 s without touching a single one of them.
-    //
-    // MUST NOT exceed the craft's committed fps: §7.2 opens one quiet gap per
-    // video frame, and reports above that rate do not fail loudly — they
-    // degrade to §7.1 opportunistic return, whose different delivery
-    // probability §10.7 would measure as uplink loss and place power against.
-    double uplink_calib_report_hz = 60.0;
 };
 
 struct Policy {

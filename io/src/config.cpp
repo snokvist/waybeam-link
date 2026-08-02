@@ -581,8 +581,6 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pk.value("uplink_verify_epochs", cal.uplink_verify_epochs);
                 cal.uplink_liveness_ms =
                     pk.value("uplink_liveness_ms", cal.uplink_liveness_ms);
-                cal.uplink_calib_report_hz = pk.value(
-                    "uplink_calib_report_hz", cal.uplink_calib_report_hz);
                 if (cal.min_qdb > cal.max_qdb) {
                     return Result<Config>::fail(
                         "policy.calibration: min_qdb > max_qdb (§10.6)");
@@ -604,18 +602,6 @@ Result<Config> load_config_json(const std::string& json_text) {
                     return Result<Config>::fail(
                         "policy.calibration: uplink epoch/liveness gates must "
                         "be >= 1 (§10.7)");
-                }
-                // §10.7 (Pass 131). The lower bound is the ordinary cadence:
-                // a "calibration cadence" below it would make the run SLOWER
-                // than not raising it at all, which is never what the key is
-                // for. There is no upper bound here because the real ceiling
-                // is the craft's fps (§7.2) and this node cannot know it —
-                // that one is a procedure, stated in §15.2 and checked on the
-                // bench, not something config can enforce.
-                if (cal.uplink_calib_report_hz < cfg.policy.report_hz) {
-                    return Result<Config>::fail(
-                        "policy.calibration: uplink_calib_report_hz must be "
-                        ">= policy.report_hz (§10.7)");
                 }
                 // The ambiguous extension is a LONGER re-dwell of the same
                 // probe, so a value at or below the probe gate would make it
