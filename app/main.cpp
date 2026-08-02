@@ -1777,7 +1777,6 @@ CalibrateParams calib_params_from(const CalibrationPolicy& c) {
     p.loss_ok_milli = static_cast<uint16_t>(c.loss_ok_milli);
     p.loss_bad_milli = static_cast<uint16_t>(c.loss_bad_milli);
     p.seek_step_qdb = c.seek_step_qdb;
-    p.cap_rise_db = c.cap_rise_db;
     p.rssi_guard_dbm = c.rssi_guard_dbm;
     p.min_qdb = c.min_qdb;
     p.max_qdb = c.max_qdb;

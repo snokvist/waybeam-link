@@ -559,7 +559,6 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cal.loss_bad_milli =
                     pk.value("loss_bad_milli", cal.loss_bad_milli);
                 cal.seek_step_qdb = pk.value("seek_step_qdb", cal.seek_step_qdb);
-                cal.cap_rise_db = pk.value("cap_rise_db", cal.cap_rise_db);
                 cal.rssi_guard_dbm =
                     pk.value("rssi_guard_dbm", cal.rssi_guard_dbm);
                 cal.min_qdb = pk.value("min_qdb", cal.min_qdb);

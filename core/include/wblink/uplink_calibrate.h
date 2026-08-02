@@ -74,10 +74,9 @@ class UplinkCalibrator {
         last_clean_qdb_ = p_.seek.min_qdb;
         have_first_bad_ = false;
         first_bad_qdb_ = 0;  // stale value would ride into the next placement
-        // §10.6 Pass 121: ramp from the floor. Safe here only because of the
-        // Pass 125 floor rule — an uplink at range is normally blacked out
-        // there, which is the whole reason that rule exists.
-        const SeekStep s = seek_.begin(p_.seek.min_qdb);
+        // Sweep from the floor. At range the bottom steps are normally dead;
+        // they are simply not clean and the sweep climbs past them.
+        const SeekStep s = seek_.begin();
         qdb_ = s.qdb;
         pending_qdb_ = s.qdb;
         begin_dwell(now_ms, local_epoch, p_.probe_epochs);
@@ -303,22 +302,6 @@ class UplinkCalibrator {
                 // interlock inspects. Fail instead; nothing is persisted.
                 if (loss > p_.seek.loss_ok_milli) {
                     finish(CalibState::kFailed, "verify_failed");
-                    a.restore = take_restore_();
-                    return a;
-                }
-                // Operator ruling: a CAP WALL that lands the placement on the
-                // floor is not a calibration. The cap wall means delivered
-                // power stopped following commanded; landing at `min_qdb`
-                // means that was already true at the FIRST step off the
-                // floor, so no power was ever shown to deliver more than the
-                // minimum and "maximum deliverable clean power" was never
-                // measured. Observed on a ~1 m bench: +4 dB commanded moved
-                // the craft's RSSI under 1 dB. §10.6 answers this with a
-                // distance requirement (near-bench 2-10 m, Pass 121) and
-                // §10.7 inherits it — so this fails with a reason that names
-                // the remedy rather than persisting a floor placement.
-                if (seek_.capped() && s.qdb <= p_.seek.min_qdb) {
-                    finish(CalibState::kFailed, "cap_wall_at_floor");
                     a.restore = take_restore_();
                     return a;
                 }

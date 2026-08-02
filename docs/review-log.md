@@ -5161,3 +5161,66 @@ infer from a state field, the second about what a measurement means when the
 bench geometry is wrong. Both surfaced within minutes of the first successful
 hardware run, and both were operator rulings rather than implementer choices —
 which is the process working as intended rather than a gap in it.
+
+## Pass 130 — one monotone sweep; the cap wall is deleted (2026-08-02)
+
+Operator ruling, after asking the right question about §10.7's first bench
+failure: *"the whole idea like we did with craft calibration is to find the
+highest clean tx power. why cap it. why do we care about last seed, it may be
+wrong or seeded for a different adapter. this whole solution seems overly
+complicated for what is essentially a max tx power probe with persist."*
+
+All three parts were correct, and the evidence was already in hand.
+
+**The cap wall was costing link budget, not protecting it.** Its premise: a
+silently-capped radio makes the recorded qdb fiction. But commanding `max_qdb`
+into a capped radio radiates the cap, so the placement behaves identically — the
+stop buys nothing. Meanwhile a plateau that is *not* a cap costs real headroom,
+and both directions were losing it:
+
+| run | limiter | cost |
+|---|---|---|
+| craft P0a, rung 4 | cap wall | 4 dB discarded, loss 5permille |
+| craft P0a, rung 6 | cap wall | 4 dB discarded, loss 0permille |
+| craft P0a, rung 7 | cap wall | **12 dB discarded**, loss 1permille |
+| ground §10.7 | cap wall | placed at `min_qdb`, **26 dB low** |
+
+Rungs 4/6/7 of the craft's own bench-validated artifact were limited by an
+RSSI-plateau heuristic with no loss wall in sight. The loss wall and
+`rssi_guard_dbm` are the real limiters; they remain.
+
+**Seed dependence was a measurement error, not an optimisation.** Rungs 1-7
+seeded one step below the previous placement, so the result depended on where
+the sweep began — and it misplaced: against the reference channel model the
+descent grid stepped straight past a clean 68 qdb and landed on 60. Every rung
+now sweeps from `min_qdb`. Slower, and a property of the channel alone.
+
+**With no descent, three mechanisms have nothing left to decide.** The Pass 125
+floor rule is withdrawn: a bad probe below the first clean one is "too cold" and
+the sweep simply climbs. The addendum-4 blackout retreat and addendum-5 verify
+step-down fall out of treating a blacked-out dwell as "not clean" — above a
+clean probe it places at it, during verify it steps down, below the first clean
+probe it climbs. One new guard was needed: a rung may never *complete* on dwells
+that carried no reports, because a placement authored from silence is the
+report-loss abort, not a result.
+
+The sweep also fixed a bracket defect the seek had hidden: only a bad probe
+**above** a clean one now books `first_bad_rssi`. It describes where the link
+breaks from being too *hot*, and a sweep that starts in a dead zone was
+recording the cold bottom of the range as an overload ceiling.
+
+`PowerSeek` drops from 138 to 96 non-comment lines. Deleted outright:
+`cap_rise_db` (configs carrying it still load, key ignored), `cap_confirm_`,
+`capped_`, `floor_ascend_`, `blackout_used_`, `on_blackout()`, the descend
+branch, and with them Pass 129's `cap_wall_at_floor` — which existed only to
+refuse a result the cap wall should never have produced.
+
+**Method note.** This is the second §10.7 carve-out from `PowerSeek` in two
+passes (C2's verify semantics, then the cap gate), and the engine had already
+been bent once *for* §10.7 (the Pass 125 floor rule changed shipped craft
+behaviour). Three carve-outs and a bend is not a shared algorithm — it is two
+algorithms wearing one type, and the extraction I justified as "so the two do
+not grow differently-buggy copies" had instead grown one copy with two
+personalities. The right unification was not a richer engine but a poorer one:
+both directions genuinely are the same monotone sweep, which is what the
+operator said at the outset.

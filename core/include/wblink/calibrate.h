@@ -7,15 +7,13 @@
 // here touches a radio, a file, or a clock — app/ actuates through the §9.7
 // pin and §10.5 set_power_qdb seams and persists the artifact (io/).
 //
-// Per rung (Pass 121 max-power seek): SEEK — ramp power upward in
-// seek_step_qdb steps until the first wall: loss wall (report loss >
-// loss_bad_milli), cap wall (a ≥2 dB commanded step moves rssi_mean by
-// < cap_rise_db — delivered power stopped following commanded), the
-// rssi_guard_dbm overload bound, or max_qdb. Placement = the last clean,
-// responsive probe; the wall's bracketing RSSIs ARE the overload-ceiling
-// record. Then VERIFY (longer dwell, record placement loss) → next rung,
-// starting one step below this placement. A first probe already past the
-// loss wall descends until clean (floor min_qdb).
+// Per rung (Pass 130 max-power sweep): climb from min_qdb in seek_step_qdb
+// steps until the loss wall (report loss > loss_bad_milli), the
+// rssi_guard_dbm overload backstop, or max_qdb. Placement = the highest clean
+// probe; the wall's bracketing RSSIs ARE the overload-ceiling record. Then
+// VERIFY (longer dwell, record placement loss) → next rung, sweeping again
+// from min_qdb. Steps below the first clean probe are simply not clean — a
+// blacked-out floor needs no special rule, and nothing ever descends.
 //
 // §10.6 safety envelope: report-loss abort (no accepted report for
 // report_loss_abort_ms), hard cap, and a single-shot `restore` action on
@@ -43,7 +41,6 @@ struct SeekParams {
     uint16_t loss_ok_milli = 15;
     uint16_t loss_bad_milli = 50;
     int32_t seek_step_qdb = 16;
-    int cap_rise_db = 1;
     int rssi_guard_dbm = -6;
     int32_t min_qdb = 4;
     int32_t max_qdb = 108;
@@ -77,18 +74,16 @@ class PowerSeek {
   public:
     explicit PowerSeek(const SeekParams& p) : p_(p) {}
 
-    // Start a ramp at from_qdb. The craft seeds rung 0 at min_qdb and later
-    // rungs one step below the previous placement (§10.6); the ground seeds
-    // its single rung at min_qdb (§10.7).
-    SeekStep begin(int32_t from_qdb) {
-        qdb_ = clamp_(from_qdb);
+    // Sweep upward from min_qdb. Both directions seed here: §10.6 restarts the
+    // sweep for every rung and §10.7 has one. Seeding a rung mid-range (from
+    // the previous placement) was a runtime optimisation that made the RESULT
+    // depend on where the sweep began, which is not a property a measurement
+    // should have.
+    SeekStep begin() {
+        qdb_ = p_.min_qdb;
         last_clean_.reset();
         verify_descents_ = 0;
-        cap_confirm_ = false;
-        capped_ = false;
-        blackout_used_ = false;
-        floor_ascend_ = false;
-        phase_ = Phase::kSeek;
+        phase_ = Phase::kSweep;
         last_clean_rssi_ = 127;
         has_bad_ = false;
         first_bad_rssi_ = 0;
@@ -97,133 +92,70 @@ class PowerSeek {
 
     SeekStep on_dwell(DwellVerdict v, double rssi, uint16_t loss_milli) {
         if (v == DwellVerdict::kNoEvidence) {
-            // §10.6: a blank dwell carries no evidence either way — hold at
-            // this power and re-dwell. The caller's clocks arbitrate.
+            // §10.6 blank dwell: no evidence either way — hold here and let
+            // the caller's report clock arbitrate. §10.7 never produces it.
             return {phase_ == Phase::kVerify ? SeekStep::Kind::kVerify
                                              : SeekStep::Kind::kProbe,
                     qdb_, false, nullptr};
         }
         if (phase_ == Phase::kVerify) return verify_(rssi, loss_milli);
-        return seek_(v, rssi, loss_milli);
-    }
 
-    // §10.6 addendum 4/5: the feedback channel itself collapsed. Above the
-    // last clean power that is wall evidence (retreat once); at the floor
-    // with no clean probe it is indistinguishable from "too cold", so it
-    // ascends under the same rule as a bad probe. Returns nullopt when the
-    // caller should apply its own abort policy instead.
-    //
-    // observed_rssi is whatever the BLACKED-OUT dwell managed to sample before
-    // the channel died, and it is the honest upper bracket. Passing the last
-    // CLEAN probe's RSSI instead collapses the rung's overload bracket to zero
-    // width — the bracket is the §10.6 ceiling record, so that is a silent
-    // corruption of the artifact, not a cosmetic one. nullopt = the dwell was
-    // entirely blank, which is the only case where the clean RSSI is the best
-    // available answer.
-    std::optional<SeekStep> on_blackout(
-        std::optional<double> observed_rssi = std::nullopt) {
-        if (phase_ == Phase::kSeek && last_clean_ && qdb_ > last_clean_->qdb &&
-            !blackout_used_) {
-            blackout_used_ = true;
-            note_bad_(observed_rssi.value_or(last_clean_->rssi));
-            return place_(last_clean_->qdb);
+        if (v == DwellVerdict::kClean && loss_milli <= p_.loss_bad_milli) {
+            last_clean_ = Probe{qdb_, rssi};
+            last_clean_rssi_ = static_cast<int8_t>(std::lround(rssi));
+            // Token backstop against RX front-end abuse. The loss wall is the
+            // intended limiter at every rung; this only catches the case where
+            // we are cooking the receiver before loss has risen.
+            if (rssi > p_.rssi_guard_dbm) return place_();
+        } else if (last_clean_) {
+            // The wall: this power is bad and a lower one was clean. There is
+            // nothing to gain above it. Only a bad probe ABOVE a clean one is
+            // overload evidence, so only that one books the rung's ceiling
+            // bracket — a bad step below the first clean probe is "too cold",
+            // and recording it as first_bad_rssi would describe the bottom of
+            // the range as an overload ceiling.
+            note_bad_(rssi);
+            return place_();
+        } else {
+            // Nothing clean anywhere yet, so this is still the dead bottom of
+            // the range — a blacked-out floor is simply "not clean" and the
+            // sweep keeps climbing. No floor rule, no retreat, no descent.
         }
-        if (phase_ == Phase::kSeek && !last_clean_ && at_floor_()) {
-            // Nothing below to retreat to and nothing clean to retreat from:
-            // the only untested direction is up.
-            return ascend_();
+        if (qdb_ >= p_.max_qdb) {
+            if (last_clean_) return place_();
+            return {SeekStep::Kind::kFailed, qdb_, false, "no_clean_point"};
         }
-        if (phase_ == Phase::kVerify &&
-            verify_descents_ < p_.verify_descent_budget && qdb_ > p_.min_qdb) {
-            ++verify_descents_;
-            qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
-            return SeekStep{SeekStep::Kind::kVerify, qdb_, true, nullptr};
-        }
-        return std::nullopt;
+        qdb_ = std::min(p_.max_qdb, qdb_ + p_.seek_step_qdb);
+        return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
     }
 
     int32_t qdb() const { return qdb_; }
     bool in_verify() const { return phase_ == Phase::kVerify; }
-    // True when the placement was chosen by the CAP WALL — delivered power
-    // stopped following commanded — rather than by a loss wall or the guard.
-    // §10.6 records that either way; §10.7 uses it to tell "this is the most
-    // power the link can carry" from "this bench is too close to measure at
-    // all" (see the near-bench distance requirement).
-    bool capped() const { return capped_; }
     int8_t last_clean_rssi() const { return last_clean_rssi_; }
     bool has_bad() const { return has_bad_; }
     int8_t first_bad_rssi() const { return first_bad_rssi_; }
 
   private:
-    enum class Phase : uint8_t { kSeek, kVerify };
+    enum class Phase : uint8_t { kSweep, kVerify };
     struct Probe { int32_t qdb; double rssi; };
 
-    int32_t clamp_(int32_t q) const {
-        return std::min(p_.max_qdb, std::max(p_.min_qdb, q));
-    }
-    bool at_floor_() const { return qdb_ <= p_.min_qdb; }
     void note_bad_(double rssi) {
         if (!has_bad_) {
             has_bad_ = true;
             first_bad_rssi_ = static_cast<int8_t>(std::lround(rssi));
         }
     }
-    SeekStep place_(int32_t qdb) {
-        qdb_ = qdb;
+    SeekStep place_() {
+        qdb_ = last_clean_->qdb;
         phase_ = Phase::kVerify;
         return {SeekStep::Kind::kVerify, qdb_, true, nullptr};
-    }
-    // §10.7 floor rule: below the first clean probe, loss means "too cold".
-    SeekStep ascend_() {
-        if (qdb_ >= p_.max_qdb) {
-            return {SeekStep::Kind::kFailed, qdb_, false, "no_clean_point"};
-        }
-        floor_ascend_ = true;
-        qdb_ = std::min(p_.max_qdb, qdb_ + p_.seek_step_qdb);
-        return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
-    }
-
-    SeekStep seek_(DwellVerdict v, double rssi, uint16_t loss) {
-        if (v == DwellVerdict::kBad || loss > p_.loss_bad_milli) {
-            note_bad_(rssi);
-            // Ceiling: a clean probe exists below — this is overload, retreat.
-            if (last_clean_) return place_(last_clean_->qdb);
-            // Floor: no clean probe anywhere on this rung. Descending is only
-            // meaningful while there is somewhere lower to go AND we did not
-            // arrive here by ascending off the floor; otherwise the untested
-            // direction is up. Rungs 1-7 seed mid-range, so their bad first
-            // probe still descends exactly as before Pass 125.
-            if (!floor_ascend_ && !at_floor_()) {
-                qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
-                return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
-            }
-            return ascend_();
-        }
-        last_clean_rssi_ = static_cast<int8_t>(std::lround(rssi));
-        // Cap wall: an upward >=2 dB commanded step the report RSSI did not
-        // follow. Confirmed by one repeat dwell (§10.6 addendum 3).
-        if (last_clean_ && qdb_ - last_clean_->qdb >= 8 &&
-            rssi - last_clean_->rssi < p_.cap_rise_db) {
-            if (!cap_confirm_) {
-                cap_confirm_ = true;
-                return {SeekStep::Kind::kProbe, qdb_, false, nullptr};
-            }
-            capped_ = true;
-            return place_(last_clean_->qdb);
-        }
-        cap_confirm_ = false;
-        floor_ascend_ = false;  // a clean probe ends the floor search
-        last_clean_ = Probe{qdb_, rssi};
-        if (rssi > p_.rssi_guard_dbm || qdb_ >= p_.max_qdb) {
-            return place_(qdb_);
-        }
-        qdb_ = std::min(p_.max_qdb, qdb_ + p_.seek_step_qdb);
-        return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
     }
 
     SeekStep verify_(double rssi, uint16_t loss) {
         // §10.6 addendum 2: near-cliff instability passes a short probe dwell
-        // and fails only under sustained exposure — enforce loss_ok here.
+        // and fails only under sustained exposure (measured: a placement that
+        // probed clean verified at 942permille), so loss_ok is enforced here
+        // and a failing placement steps down and re-verifies, bounded.
         if (loss > p_.loss_ok_milli &&
             verify_descents_ < p_.verify_descent_budget && qdb_ > p_.min_qdb) {
             if (loss > p_.loss_bad_milli) note_bad_(rssi);
@@ -235,14 +167,10 @@ class PowerSeek {
     }
 
     SeekParams p_;
-    Phase phase_ = Phase::kSeek;
+    Phase phase_ = Phase::kSweep;
     int32_t qdb_ = 0;
     std::optional<Probe> last_clean_;
     uint8_t verify_descents_ = 0;
-    bool cap_confirm_ = false;
-    bool capped_ = false;
-    bool blackout_used_ = false;
-    bool floor_ascend_ = false;
     int8_t last_clean_rssi_ = 127;
     bool has_bad_ = false;
     int8_t first_bad_rssi_ = 0;
@@ -252,7 +180,6 @@ struct CalibrateParams {
     uint16_t loss_ok_milli = 15;  // §15.2 policy.calibration seeds
     uint16_t loss_bad_milli = 50;
     int32_t seek_step_qdb = 16;  // 4 dB per seek probe (Pass 121)
-    int cap_rise_db = 1;         // < this rise on a ≥2 dB step = cap wall
     int rssi_guard_dbm = -6;     // token RX-abuse backstop (P121 addendum)
     int32_t min_qdb = 4;         // 1 dBm
     int32_t max_qdb = 108;       // 27 dBm
@@ -306,7 +233,6 @@ class Calibrator {
         s.loss_ok_milli = p.loss_ok_milli;
         s.loss_bad_milli = p.loss_bad_milli;
         s.seek_step_qdb = p.seek_step_qdb;
-        s.cap_rise_db = p.cap_rise_db;
         s.rssi_guard_dbm = p.rssi_guard_dbm;
         s.min_qdb = p.min_qdb;
         s.max_qdb = p.max_qdb;
@@ -330,7 +256,7 @@ class Calibrator {
         rung_ = 0;
         // Pass 121: rung 0 ramps from the floor. Pass 125's floor rule is
         // what makes that safe when the floor is genuinely unusable.
-        qdb_ = seek_.begin(p_.min_qdb).qdb;
+        qdb_ = seek_.begin().qdb;
         enter_rung_ = true;
         dwell_start_ms_ = 0;  // set when the pin/power action is emitted
         return true;
@@ -367,17 +293,23 @@ class Calibrator {
             return a;
         }
         if (now_ms - last_report_ms_ > p_.report_loss_abort_ms) {
-            // Addendum 4/5 live in PowerSeek now: a blackout above the last
-            // clean power is wall evidence (retreat once), a blackout during
-            // verify takes the bounded step-down, and a blackout at the floor
-            // with no clean probe ascends (Pass 125). nullopt = no seek-side
-            // answer, so the §10.6 abort policy applies.
-            const std::optional<SeekStep> s = seek_.on_blackout(
-                rssi_n_ != 0 ? std::optional<double>(double(rssi_sum_) / rssi_n_)
-                             : std::nullopt);
-            if (s) {
+            // Addendum 4/5 fall out of the sweep: a report blackout is a
+            // dwell that delivered nothing, which is simply NOT CLEAN. Above a
+            // clean probe that places at it (the addendum-4 retreat); during
+            // verify it takes the bounded step-down (addendum 5); below the
+            // first clean probe the sweep just keeps climbing. Only a blackout
+            // with nothing clean anywhere and nowhere left to climb aborts.
+            const double obs = rssi_n_ != 0 ? double(rssi_sum_) / rssi_n_
+                                            : double(p_.rssi_guard_dbm) - 60.0;
+            const SeekStep s = seek_.on_dwell(DwellVerdict::kBad, obs, 1000);
+            // A rung can never COMPLETE on dwells that carried no reports:
+            // the placement would be authored from silence. Only a step that
+            // keeps probing/verifying is progress; anything terminal under a
+            // blackout is the report-loss abort.
+            if (s.kind == SeekStep::Kind::kProbe ||
+                s.kind == SeekStep::Kind::kVerify) {
                 last_report_ms_ = now_ms;  // re-arm at the new power
-                return apply_step(a, now_ms, *s);
+                return apply_step(a, now_ms, s);
             }
             finish(CalibState::kFailed, "report_loss", now_ms);
             a.restore = take_restore_();
@@ -487,11 +419,11 @@ class Calibrator {
             return a;
         }
         ++rung_;
-        // Neighbor rungs' walls sit near each other: ramp from one step
-        // below the previous placement, not from the floor. That mid-range
-        // seed is why a bad first probe on rungs 1-7 must still DESCEND —
-        // see PowerSeek::seek_'s floor/ceiling split.
-        const SeekStep s = seek_.begin(placement_qdb_ - p_.seek_step_qdb);
+        // Every rung sweeps from the floor. Seeding mid-range from the
+        // previous placement was a runtime optimisation that made the result
+        // depend on where the sweep began; a measurement should not have that
+        // property, and the extra probes cost well under the hard cap.
+        const SeekStep s = seek_.begin();
         qdb_ = s.qdb;
         a.pin_rung = rung_;
         a.set_qdb = s.qdb;

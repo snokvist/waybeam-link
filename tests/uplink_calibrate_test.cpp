@@ -460,32 +460,21 @@ void test_failed_persist_fails_the_run() {
     }
 }
 
-// Operator ruling (Pass 129): a cap wall that lands the placement ON THE FLOOR
-// is not a calibration. The cap wall means delivered power stopped following
-// commanded; landing at min_qdb means that was already true at the first step
-// off the floor, so no power was ever shown to deliver more than the minimum.
-// Measured on a ~1 m bench: +4 dB commanded moved the craft's RSSI under 1 dB.
-void test_cap_wall_at_floor_fails() {
+// Pass 130: a silently-capped radio no longer stops the sweep. The §10.7
+// placement is applied to the same adapter it was measured on, so commanding
+// max_qdb into a capped radio radiates the cap — identical behaviour, and no
+// risk of mistaking an adapter's flat bottom step for a ceiling. This is the
+// bench case that placed at min_qdb and had to be failed under Pass 129; it
+// now simply succeeds at the top of the range.
+void test_silent_cap_sweeps_to_max() {
     Rig r(fast_params());
-    r.up.cap_qdb = 4;   // delivered power never follows commanded at all
+    r.up.cap_qdb = 4;   // delivered power never follows commanded
     CHECK(r.cal.start(r.now, r.local_epoch));
     r.run(r.now + 600000);
-    CHECK(r.cal.state() == CalibState::kFailed);
-    CHECK(r.cal.fail_reason() != nullptr);
-    if (r.cal.fail_reason() != nullptr) {
-        CHECK(std::string(r.cal.fail_reason()) == "cap_wall_at_floor");
-    }
-    CHECK(r.artifacts == 0);   // nothing persisted
-    CHECK(r.restores == 1);    // and the actuator is handed back
-
-    // A cap wall ABOVE the floor is a real placement and still succeeds — the
-    // ruling is about the floor case, not about cap walls.
-    Rig ok(fast_params());
-    ok.up.cap_qdb = 52;
-    CHECK(ok.cal.start(ok.now, ok.local_epoch));
-    ok.run(ok.now + 600000);
-    CHECK(ok.cal.state() == CalibState::kDone);
-    CHECK(ok.cal.placement().placement_qdb > UplinkCalibParams{}.seek.min_qdb);
+    CHECK(r.cal.state() == CalibState::kDone);
+    CHECK(r.cal.placement().placement_qdb == UplinkCalibParams{}.seek.max_qdb);
+    CHECK(r.artifacts == 1);
+    CHECK(r.restores == 1);
 }
 
 // C2 regression. PowerSeek reaches kDone from verify with loss above
@@ -720,7 +709,7 @@ int main() {
     test_blackout_scores_measured_loss_not_flat_1000();
     test_verify_exhausted_is_failure();
     test_failed_persist_fails_the_run();
-    test_cap_wall_at_floor_fails();
+    test_silent_cap_sweeps_to_max();
     test_second_run_clears_bracket();
     test_loss_denominator_boundary();
     test_clean_ramp();

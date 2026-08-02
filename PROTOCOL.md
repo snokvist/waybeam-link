@@ -901,7 +901,7 @@ Counter arithmetic is wrap-aware; a calibrator run is far shorter than either
 counter's wrap interval.
 
 `last_rx_mcs` is the **commanded-versus-delivered rung cross-check**, the rung
-analogue of §10.6's commanded-qdb-versus-delivered-RSSI cap wall. v1's uplink
+analogue of §10.6's commanded-qdb-versus-delivered-RSSI check. v1's uplink
 has one operating point, so it is observability only; it exists on the wire from
 the first revision because the packet is exact-length with no spare byte and no
 flags field, so adding it later would be a wire break. It is what makes a driver
@@ -2086,75 +2086,65 @@ target-band steer).** For each rung in the §9.3 ladder: pin the rung (§9.7
 in `seek_step_qdb` steps (rung 0 from `min_qdb`; later rungs from one step
 below the previous rung's placement), evaluating each probe dwell against
 two walls. The **loss wall**: report loss crosses `loss_bad_milli` —
-overload or link break. The **cap wall**: a commanded step of ≥ 2 dB moves
-report `rssi_mean` by less than `cap_rise_db` — delivered power has
-stopped following commanded power (driver/regulatory caps latch silently;
-the artifact must never record commanded qdb the radio did not emit —
-observed live as the RF-cap event that voided the 50 m Pass 120 run). A
-cap-wall trigger is **confirmed by one repeat dwell at the same power**
-before it stands (Pass 121 addendum 3): in the TXAGC compression knee
-the per-step rise straddles `cap_rise_db`, and a 10-run campaign showed
-single-dwell RSSI noise flipping MCS7's placement by two steps (8 dB) —
-a repeated deficit is a wall, a one-off reading is noise and the ramp
-continues.
-Placement = the last clean, responsive probe (one step below the wall); a
-ramp that reaches `max_qdb` clean places there. The longer verify dwell
+overload or link break.
+Placement = the highest clean probe; a sweep that reaches
+`max_qdb` clean places there. The longer verify dwell
 then **enforces** `loss_ok_milli` (Pass 121 addendum 2): near-cliff
 instability can pass short probe dwells and fail only under sustained
 exposure (measured live: a placement that probed clean verified at
-942‰), so a placement whose verify loss exceeds `loss_ok_milli` steps
-down one `seek_step_qdb` and re-verifies, bounded at 3 descents — a
-still-failing floor is recorded with its measured loss (the artifact
-never lies). A verify loss above `loss_bad_milli` also records the
-rung's overload bracket. The wall's bracketing
-RSSIs **are** the rung's overload-ceiling record — there is no separate
-ceiling phase. If a rung's first probe is already past the loss wall the
-ramp descends until clean, bounded by the floor rule below. A
-`rssi_guard_dbm` sanity
-bound (default −6, Pass 121 addendum — the first live run showed −20
-clamped the low rungs 2 dB short of their true maximum) stops the ramp
-when reports land above it; it is a token backstop against RX front-end
-abuse, not a placement mechanism — the loss wall is the intended limiter
-at every rung. The loop evaluates **post-diversity** loss (what LINK_REPORT
-carries); at the placement and at the cliff this agrees with per-adapter
-wire PER (measured: adapters fail together in overload).
+942permille), so a placement whose verify loss exceeds `loss_ok_milli` steps
+down one `seek_step_qdb` and re-verifies, bounded at 3 descents. A verify loss
+above `loss_bad_milli` also records the rung's overload bracket. A
+`rssi_guard_dbm` sanity bound (default -6, Pass 121 addendum) stops the sweep
+when reports land above it; it is a token backstop against RX front-end abuse,
+not a placement mechanism - the loss wall is the intended limiter at every
+rung. The loop evaluates **post-diversity** loss (what LINK_REPORT carries).
 
-**Floor and ceiling are different walls (Pass 125 amendment).** A loss wall
-means "too hot" only when there is somewhere lower to test. With a clean probe
-already recorded, a bad probe is overload: retreat to it, unchanged. With **no**
-clean probe on the rung the direction is decided by position, not by having-been-
-clean:
+**One monotone sweep: no descent, no cap wall (Pass 130 - replaces the Pass 121
+seek shape and withdraws the Pass 125 floor rule).** The measurement is "the
+highest commanded power that is still clean", and that is a single ascending
+pass from `min_qdb` to `max_qdb`. Three mechanisms are deleted, each because it
+cost more than it gave:
 
-- **above `min_qdb`** — descend one `seek_step_qdb`, exactly as before. Rungs
-  1–7 seed mid-range at one step below the previous rung's placement, and a
-  higher rung overloads at a *lower* RSSI, so their bad first probe is genuinely
-  too hot. This path is unchanged by Pass 125.
-- **at `min_qdb`** — there is nothing lower to test, so the only untested
-  direction is up: ascend in `seek_step_qdb` steps. Once ascending off the
-  floor, a further bad probe keeps ascending rather than oscillating back down;
-  the first clean probe ends the floor search and the ramp resumes normally.
-  Only a bad probe at `max_qdb` with no clean probe anywhere on the rung fails,
-  reason `no_clean_point`.
+- **The cap wall is gone**, and `cap_rise_db` with it. It stopped the ramp when
+  a >=2 dB commanded step failed to move `rssi_mean`, on the theory that a
+  silently-capped radio makes the recorded qdb fiction. But commanding
+  `max_qdb` into a capped radio radiates the cap, so the placement behaves
+  *identically* - the stop bought nothing - while a plateau that is **not** a
+  cap costs real headroom. Measured on the craft's own validated run the cap
+  wall was the limiter on rungs 4, 6 and 7 and discarded **12 dB at MCS7** with
+  loss at 1permille and no wall in sight; on the ground it stopped a 10.7
+  sweep at the first step, because that adapter's TXAGC is flat between 1 and
+  5 dBm, placing 26 dB low. The loss wall and `rssi_guard_dbm` are the real
+  limiters and both remain. A config still carrying `cap_rise_db` loads; the
+  key is ignored.
+- **Nothing descends.** A bad probe below the first clean one is simply "too
+  cold" and the sweep keeps climbing, so the Pass 125 floor rule has nothing
+  left to decide and is withdrawn. A report blackout is likewise just a dwell
+  that delivered nothing: above a clean probe it places at it (the addendum-4
+  retreat), during verify it takes the bounded step-down (addendum 5), below
+  the first clean probe it climbs. A rung may never *complete* on dwells that
+  carried no reports - a placement authored from silence is the report-loss
+  abort, not a result.
+- **Every rung sweeps from `min_qdb`.** Seeding rung *N* one step below rung
+  *N-1*'s placement was a runtime optimisation that made the result depend on
+  where the sweep began, which a measurement must not have. It also misplaced:
+  against the reference channel model the descent grid stepped past a clean
+  68 qdb and landed on 60. The extra probes cost well under the hard cap.
 
-The addendum-4 blackout retreat and the addendum-2 verify step-down already
-require a clean probe; a blackout at `min_qdb` with none follows the same
-ascend rule rather than aborting. Without this, a floor-start ramp (rung 0 from
-`min_qdb`) on a link whose floor is genuinely unusable either places at
-`min_qdb` — recording a placement the link cannot carry — or aborts on the
-report clock. The Pass 121 near-bench campaign never exercised it because a
-1 dBm floor is always receivable at 2–10 m. §10.7's one-rung MCS0 uplink at
-range exercises it on every run, so the rule is stated here, where both
-calibrators inherit it.
+Only a bad probe **above** a clean one books the rung's overload bracket.
+`first_bad_rssi` describes where the link breaks from being too hot; the cold
+bottom of the range is the opposite condition and must not be recorded as a
+ceiling.
 
 **Why not a target band (Pass 120, retired).** Steering to a fixed RSSI
 band bakes the calibration distance into the method: at range the band is
 unreachable, so every rung steers to the cap and the placement carries no
-information — and under a silent power cap the recorded qdb is fiction
-(both observed in the 50 m run). Max-power seek authors the **maximum
-deliverable clean power per rung** — maximal link budget at range by
+information (observed in the 50 m run). The max-power sweep authors the
+**maximum deliverable clean power per rung** — maximal link budget at range by
 construction — and collapses the distance requirement to **near-bench
 (2–10 m)**: far enough that the upper rungs' overload ceilings sit above
-the cap wall, close enough for a desk. A 50–100 m walk is no longer part
+the overload ceilings, close enough for a desk. A 50–100 m walk is no longer part
 of the procedure.
 
 **Safety envelope (R4, Pass 120).** While running: the selector is frozen
@@ -2206,7 +2196,7 @@ Failure *reason* and the full report are management-HTTP only (§15.5
 (`calib_state`, `calib_rung`, `calib_fingerprint`, `calib_stale`).
 
 **Forward validity.** The curve is actuator-referenced (max clean
-commanded power, verified delivered via the cap wall) and the ceilings are
+commanded power) and the ceilings are
 receiver-referenced (RSSI brackets), so the artifact survives a backend
 move to devourer per-packet TX power unchanged — per-packet power is a
 finer actuator for the same per-rung maxima, and per-rate diffs absorb
@@ -2295,9 +2285,8 @@ time-injected `PowerSeek` used by both calibrators; the existing craft eight-run
 orchestration and results must remain behaviourally unchanged **above the first
 clean probe** — the §10.6 floor rule is a deliberate change below it. The ground
 wrapper runs one seeker per configured uplink rung. Seed `seek_step_qdb=16`
-(4 dB), reuse §10.6's min/max, RSSI-rise cap wall, loss walls, confirmation
-dwell, floor/ceiling rule, blackout retreat, bounded verify descents, and
-hard-cap rules. A probe dwell requires **40 unique report epochs** (~4 s at
+(4 dB), reuse §10.6's min/max, loss walls, `rssi_guard_dbm` backstop,
+bounded verify descents, and hard-cap rules. A probe dwell requires **40 unique report epochs** (~4 s at
 10 Hz); an ambiguous wall may extend once to **80**. Verification requires
 **200 epochs** (~20 s). The seed loss thresholds remain `loss_ok_milli=15` and
 `loss_bad_milli=50`. Expected runtime is roughly 45–75 s per rung. Counts are
@@ -2427,19 +2416,249 @@ and both local and remote adapter identities match; otherwise surface stale and
 leave hardware at the higher-precedence source. A craft session reboot alone
 does not stale the artifact.
 
-**Near-bench distance is a §10.7 requirement, inherited from §10.6 (Pass 129).**
-The uplink run is subject to the same cap wall as the craft's, and so to the
-same procedural bound: §10.6's max-power seek "collapses the distance
-requirement to near-bench (2–10 m): far enough that the upper rungs' overload
-ceilings sit above the cap wall, close enough for a desk." Too close and the cap
-wall fires on the *first* step off the floor — measured at ~1 m, a commanded
-+4 dB moved the craft's RSSI by under 1 dB — so the placement lands on `min_qdb`
-having never shown that any power delivers more than the minimum. That is not a
-calibration, and §10.7 **fails it** with reason `cap_wall_at_floor` rather than
-persisting a floor placement that would auto-apply at every subsequent boot. A
-cap wall *above* the floor is a genuine placement and succeeds unchanged — the
-rule is about the floor case only. The failure names its own remedy: move the
-nodes apart and re-run. Every exit restores, in order: explicit configured
+**Near-bench distance (2-10 m) remains the procedure**, inherited from §10.6:
+far enough that the overload ceilings are reachable, close enough for a desk.
+Pass 130 removes the failure mode that made distance *critical* — a flat bottom
+step no longer stops the sweep — so being too close now costs measurement
+resolution rather than producing a wrong placement.
+
+**Observability.** §3.15 carries a 2-byte calibration word (bytes 34–35,
+`state_flags` bit4 — the `report_latch_holder` extension pattern): byte 0 =
+bits 0–1 state {0 none/idle, 1 running, 2 done-ok, 3 failed}, bits 2–4
+current rung, bits 5–7 reserved-zero; byte 1 = CRC-8 content hash of the
+persisted artifact's canonical serialization (§3.6 idiom), `0x00` = none.
+Failure *reason* and the full report are management-HTTP only (§15.5
+`GET /api/v1/calibration`). §15.3 `link` mirrors the word
+(`calib_state`, `calib_rung`, `calib_fingerprint`, `calib_stale`).
+
+**Forward validity.** The curve is actuator-referenced (max clean
+commanded power) and the ceilings are
+receiver-referenced (RSSI brackets), so the artifact survives a backend
+move to devourer per-packet TX power unchanged — per-packet power is a
+finer actuator for the same per-rung maxima, and per-rate diffs absorb
+chip-cal skew.
+
+### 10.7 Ground-uplink TX calibration symmetry (Pass 125)
+
+§10.6 calibrates the **craft downlink**. This section calibrates the ground's
+single designated `role:"tx"` uplink adapter against what the craft actually
+receives. The aim is the same maximum clean delivered power, but the uplink runs
+at its **configured uplink operating point** — v1: a single MCS0/LGI/HT20 rung —
+and on sparse normal LINK_REPORT traffic. It therefore produces one placement
+per configured rung, v1 exactly one, and adds no synthetic probe traffic.
+
+**The uplink rung is configured, not inherited (Pass 125).** Before this
+section, an rx-node never called `set_tx_mode` at all: its uplink rung was the
+`TxRate` struct default, which happens to be MCS0/LGI/HT20. A calibrated
+placement must not rest on a default that no one asserted — the artifact records
+the rung it was measured at, and `last_rx_mcs` cross-checks it, so the rung must
+be a value the node commits. An rx-node with a designated uplink therefore reads
+`air.uplink_rate` (seeds `{mcs: 0, sgi: false, bw: 20}`) and commits it through
+the same `set_tx_mode` seam the tx-node uses, once at startup and after every
+retune that can reset it. Behaviour at the seeds is byte-identical to today; what
+changes is that the operating point is now asserted and observable, and the
+future multi-rung uplink widens a config value rather than adding a mechanism.
+
+**Authority and prerequisites.** Calibration is ground-local and starts only
+through `POST /api/v1/calibration` on the ground control server (deployment
+port `:8092`). It requires exactly one designated uplink adapter, a **resolvable
+§11.4a key** (below), live DATA from the selected craft, and fresh authenticated
+§3.16 feedback naming this ground's exact `(originator, session)`.
+
+**§3.16 keying follows §11.4a provenance, not a configured secret (Pass 127
+amendment).** §3.16 is authenticated, and its key is resolved by the *same* rule
+`/csa` and §11.7 already use: the configured `csa_psk` when there is one, and
+otherwise the craft's per-boot **announced token**. Both ends resolve it
+continuously — the craft per emission, the ground per accepted packet, keyed on
+the *selected* craft — because in announced mode the token is per-craft and the
+§11.4a Pass 113 pairing gate replaces it at runtime. Latching the key at startup
+made §10.7 unreachable on any deployment that never sets `csa_psk`, which is the
+fleet default: the craft's `build()` returned `nullopt` and emitted nothing, the
+ground's gate refused every packet, and the only symptom was a permanent "no
+fresh feedback" on the start prerequisite. A key change **invalidates the
+counter baseline** — it is a different authenticated peer, and telescoping a
+delta across two key epochs would divide by a number that does not mean what it
+says.
+
+This inherits announced mode's trust model rather than widening it: the
+announced token is public by construction (§11.4a — it is broadcast so a
+spectator can pair), so in announced mode §3.16 authenticates *provenance
+against a passive third party*, not against an attacker who has heard the
+ANNOUNCE. That is already true of the CSA campaign and every VEHICLE_CMD, which
+move far more than one node's own TX power. The residual §10.7 exposure is
+bounded by construction: a forged quality packet can only mis-place the
+**ground's own uplink power** within `[min_qdb, max_qdb]`, only while an
+operator-initiated run is in flight, and never above the adapter's
+`max_power_qdb` ceiling (§10.3). Deployments that need spoof resistance here
+configure `csa_psk` and get secret mode, unchanged. That feedback is
+itself proof that this ground holds the craft's §3.5 report latch, which is the
+only authority §10.7 needs — a §11.4 CSA claim is **neither required nor
+sufficient**. Requiring one would make uplink calibration unavailable in any
+deployment that never changes channel, while the craft is already feeding that
+ground authenticated quality; and the §3.5 latch is single-holder by
+construction (`ReportGate`: first-latcher, silence-bounded re-latch), so two
+grounds can never calibrate against one craft. Also required: no CSA, scout,
+MTU-command, §10.5 TX-power override, or other calibration in flight —
+including the **craft's**: start returns 409 when the mirrored §3.15
+`calib_state` is `running`. Conversely, while §10.7 runs the ground refuses to
+issue a §11.7 `CALIBRATE` campaign. The two directions must never overlap:
+§10.7 deliberately drives ground power to `min_qdb`, which starves the report
+stream that §10.6's `report_loss_abort_ms` clock and every one of its dwells
+depend on. No VEHICLE_CMD is added for the uplink direction: the craft
+continuously publishes quality to its accepted reporter, and that ground alone
+owns its local actuator. Start returns 409 with the failed prerequisite; abort
+is idempotent.
+
+**Order matters.** §10.6 depends on the uplink delivering reports; §10.7 depends
+only on live DATA, which any working downlink provides. Calibrate the **uplink
+first, then the downlink** — a downlink run measured across a badly placed
+uplink either aborts on the report clock or places against a thinning report
+stream. This is the operator-visible law behind the single bi-directional Hub
+action below.
+
+**Seek.** Extract the pure seek/verify portion of the §10.6 `Calibrator` into a
+time-injected `PowerSeek` used by both calibrators; the existing craft eight-rung
+orchestration and results must remain behaviourally unchanged **above the first
+clean probe** — the §10.6 floor rule is a deliberate change below it. The ground
+wrapper runs one seeker per configured uplink rung. Seed `seek_step_qdb=16`
+(4 dB), reuse §10.6's min/max, loss walls, `rssi_guard_dbm` backstop,
+bounded verify descents, and hard-cap rules. A probe dwell requires **40 unique report epochs** (~4 s at
+10 Hz); an ambiguous wall may extend once to **80**. Verification requires
+**200 epochs** (~20 s). The seed loss thresholds remain `loss_ok_milli=15` and
+`loss_bad_milli=50`. Expected runtime is roughly 45–75 s per rung. Counts are
+sample gates, not timers: a low report cadence takes longer rather than
+pretending missing observations were clean.
+
+Loss of §3.16 **liveness** for 2 s aborts — the run has lost its observer.
+Stalled counters under live feedback never abort; per §3.16 they are the seek's
+strongest floor evidence. Because the seek starts at `min_qdb`, the uplink is
+*expected* to be blacked out for the first probes; the §10.6 floor rule ascends
+through them.
+
+**Dwell loss comes from two anchors of the same packet pair.** Let `A` and `B`
+be the first and last §3.16 packets accepted inside the dwell — the settle
+window discards packets exactly as §10.6 discards samples — with cumulative
+`(last_report_epoch, reports_received, rssi_sum_dbm)` = `(E, R, S)`. In
+wrap-aware u32 arithmetic:
+
+```
+received  = R_B - R_A
+emitted   = E_B - E_A
+loss‰     = 1000 * (emitted - received) / emitted          (emitted > 0)
+rssi_mean = (int32)(S_B - S_A) / received                  (received > 0)
+```
+
+`report_epoch` increments **once per emitted report** (§3.5), so the craft's own
+`last_report_epoch` delta *is* the emitted count over the interval the craft
+observed — the ground keeps no per-epoch record and needs no emission
+bookkeeping. This costs nothing and removes in-flight boundary error by
+construction: a report emitted after `E_B` belongs to the next dwell. That
+matters, and is not fussiness — at a 40-epoch dwell one boundary-straddling
+report is 25‰, which lands between `loss_ok_milli` and `loss_bad_milli`, so a
+wall-clock or raw-emission denominator would make every clean dwell read
+ambiguous and burn the one-shot extension to 80 on nothing.
+
+This identity holds only while every **built** report is also **injected**. An
+implementation that can drop a report between build and injection (no uplink
+adapter, full TX queue) must increment the epoch at injection, or `emitted`
+over-reports and the seek sees phantom loss.
+
+Whenever the craft's anchors do **not span the dwell** — `emitted` short of the
+epoch target when the ground's own local `Reporter::epoch()` delta has reached
+it — the dwell is scored against **that local delta as the denominator**:
+
+```
+loss‰ = 1000 * (local_span - received) / local_span      (received > 0)
+loss‰ = 1000                                              (received == 0)
+```
+
+The condition is that `emitted` fell short, **not** that `received` is zero: a
+*partial* blackout, where some epochs land and the uplink then dies mid-dwell,
+leaves `received > 0` with the anchors frozen short of target, and it is the
+commonest shape of a real floor. Gating the fallback on `received == 0` never
+ends that dwell, which strands the run at `min_qdb` until the hard cap and makes
+the floor rule unreachable in exactly the case it exists for.
+
+**Scoring this case a flat 1000‰ is equally wrong, and is a Pass 128 bench
+correction.** `last_report_epoch` advances only for reports the craft
+**accepted**, so on a link with any loss at all the craft's anchor lags the
+ground's local clock by exactly the lost count — and the local clock therefore
+reaches the target *first*. Measured on the first live run: a verify dwell of
+`received = 198, emitted = 199` against a 200-epoch target — about 5‰, entirely
+clean — took the fallback and scored 1000‰, failing the run at a placement the
+link was carrying without difficulty. The local-span denominator degrades
+correctly at both ends: a total blackout still has `received == 0` and still
+scores 1000‰, which is the seek's floor evidence, while a one-epoch lag scores
+the loss that actually occurred. RSSI comes from the samples that did arrive
+whenever `received > 0`, and only a genuinely empty dwell falls back to the
+synthetic guard value. Cap-wall
+confirmation matches §10.6; the §10.6 blank-dwell hold (zero samples ⇒ hold and
+let the clocks arbitrate) has no uplink meaning and is not inherited.
+
+**A still-failing verify is a §10.7 FAILURE, not a placement (Pass 125
+amendment).** §10.6 records a placement whose verify never reached
+`loss_ok_milli` once the descent budget or the floor is exhausted — "the
+artifact never lies" — because a craft artifact is a *record the operator
+reads*, and §10.6's own report clock aborts the run long before a truly dead
+downlink could be recorded. Neither holds on the ground. The §10.7 artifact
+**auto-applies** to the live uplink at the next boot, and its terminal state
+**gates the sequencer's downlink phase**. Reaching `done` with a placement that
+just measured unusable would therefore persist an unusable power *and* start
+the §11.7 campaign across a dead uplink — defeating the order law through a
+**success** state that no interlock inspects, since every interlock is written
+against `running` and `failed`. §10.7 therefore fails with reason
+`verify_failed`, persists nothing, and restores. The §10.6 rule is unchanged;
+this is a §10.7 policy on the shared seek's output, not a change to the seek.
+
+**Actuator ownership and config carve-out.** Config load rejects `power_map` on
+any `role:"rx"` adapter **regardless of node role**, and accepts it on a
+`role:"tx"` adapter on either node role — the existing rule was keyed on node
+role, which both permitted a never-applied map on a tx-node diversity adapter
+and blocked the one adapter that can use it on an rx-node. An rx-node with more
+than one `role:"tx"` adapter remains a config error (§6.4 permits at most one
+designated uplink). The map is the full §10.2 per-MCS curve, loaded whole; v1
+**resolves** only the configured uplink rung's level-4 entry, because that is
+the only rung the uplink uses — a usage restriction, not a format one, so a
+future multi-rung uplink needs no new file format. Respect that adapter's
+`max_power_qdb`, apply at startup, and reapply after every retune/recovery that
+resets TXAGC. An explicit `power_map` always outranks a persisted calibration
+artifact; calibration may measure and persist while a map exists, but the
+artifact does not silently take runtime ownership until the explicit map is
+removed.
+
+**Artifact and restore law.** The ground artifact is a distinct schema, not a
+degenerate craft curve. It carries schema version and timestamp; local uplink
+adapter canonical identity; selected craft `originator` and §3.16 adapter
+fingerprint; channel and bandwidth; a **rung-indexed `placements` list** — v1
+exactly one entry, each entry carrying its own `mcs`/`short_gi` plus placement
+qdb/RSSI/loss and the clean/bad bracket; and canonical CRC-8 over a pinned
+binary serialization, not JSON formatting. The list shape is v1 law precisely
+so a future multi-rung uplink adds entries rather than bumping the schema and
+migrating every deployed artifact and Hub parser. Rate identity lives in the
+entry, never in the top-level identity block. Write atomically under the
+configured calibration directory. **A write that does not land fails the run**
+(`artifact_write_failed`) rather than reporting `done` with a zero fingerprint
+(Pass 129 ruling): §10.7 is a one-time commissioning step whose entire premise
+is that it is persisted on both sides, so a run whose artifact never reached
+disk commissioned nothing — it applied a placement that dies at the next boot.
+Reporting success there is the same false success the verify rule removes, one
+layer out, and worse for being invisible: the Hub menu binds the state field,
+and `fingerprint: 0` was the only signal anything had gone wrong. The restore
+edge re-arms so the actuator returns to its pre-run owner. Observed on the bench
+with the calibration directory absent — which is precisely why the ground
+package must create it.
+Apply it only when the same craft is selected
+and both local and remote adapter identities match; otherwise surface stale and
+leave hardware at the higher-precedence source. A craft session reboot alone
+does not stale the artifact.
+
+**Near-bench distance (2-10 m) remains the procedure**, inherited from §10.6:
+far enough that the overload ceilings are reachable, close enough for a desk.
+Pass 130 removes the failure mode that made distance *critical* — a flat bottom
+step no longer stops the sweep, so being too close now costs measurement
+resolution rather than producing a wrong placement.
+
+Every exit restores, in order: explicit configured
 placement, prior matching artifact, then backend auto/default. Done applies the
 new placement; abort, process shutdown, retune conflict, and failure must never
 leave the last probe power active.
@@ -3687,7 +3906,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 - `policy.calibration` (craft/tx node, §10.6, Pass 120; seek keys
   Pass 121) seeds the calibration loop; all defaults are the
   bench-validated values: `loss_ok_milli` (15), `loss_bad_milli` (50),
-  `seek_step_qdb` (16), `cap_rise_db` (1), `rssi_guard_dbm` (−6),
+  `seek_step_qdb` (16), `rssi_guard_dbm` (−6),
   `min_qdb`/`max_qdb` (4/108), `settle_ms` (800), `probe_dwell_ms`
   (1200), `verify_dwell_ms` (2500), `report_loss_abort_ms` (3000),
   `hard_cap_ms` (600000),
