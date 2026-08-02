@@ -56,6 +56,15 @@ class Reporter {
         probe_budget_ = 0;
     }
     bool probing() const { return probing_; }
+    // The burst has been fully BUILT. Not the same as fully injected — the
+    // §7.2 return path batches reports and commits their epochs at the next
+    // quiet gap — but it is the correct signal to stop emitting, and the
+    // calibrator scores against the committed count whatever it turns out to
+    // be. Measured on the bench: topping the budget up from the COMMITTED
+    // count instead re-armed it faster than the batch drained, and the ground
+    // emitted 3480 probes for a 100-probe burst, flooding the return path
+    // until the craft's own §3.16 feedback could not get out (`quality_lost`).
+    bool probe_spent() const { return probing_ && probe_budget_ == 0; }
 
     // Reports due now, one per latched stream (empty between cadence ticks,
     // or once a probe burst is spent).

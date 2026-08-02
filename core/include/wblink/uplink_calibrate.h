@@ -169,7 +169,7 @@ class UplinkCalibrator {
     // means the run has no observer. A stalled counter under live feedback is
     // still evidence, not a timeout — it just reads as a 1000permille burst.
     UplinkCalibActions tick(uint64_t now_ms, uint32_t local_epoch,
-                            bool quality_live) {
+                            bool quality_live, bool burst_spent) {
         UplinkCalibActions a;
         if (state_ != CalibState::kRunning) {
             a.restore = take_restore_();
@@ -202,25 +202,34 @@ class UplinkCalibrator {
             dwell_local_epoch_ = local_epoch;
         }
 
-        // sent = what the radio actually took, exactly (§3.5 commits the
-        // epoch on injection only). This IS the denominator. No anchoring
-        // identity, no boundary correction, no fallback: the ground knows
-        // what it sent because it chose how much to send.
-        const uint32_t sent = local_epoch - dwell_local_epoch_;
-        if (sent < target_epochs_) {
-            a.probe_budget = target_epochs_ - sent;  // top the burst back up
+        // Issue the burst ONCE, then wait for the reporter to say it has been
+        // built. Topping the budget up from the committed epoch count instead
+        // is a live defect, found on the bench: the §7.2 return path batches
+        // reports and commits their epochs at the next quiet gap, so `sent`
+        // lags what has been built by the whole held batch. Re-arming against
+        // the lagging number emitted 3480 probes for a 100-probe burst and
+        // flooded the return path until the craft's §3.16 could not get out.
+        // Budget spent at build time, burst ended at build time: one clock.
+        if (!burst_issued_) {
+            burst_issued_ = true;
+            a.probe_budget = target_epochs_;
             return a;
         }
+        if (!burst_spent) return a;   // still emitting
         // Burst complete. Go silent and let the craft's counter settle before
         // scoring — that silence is what makes `received_` reflect the WHOLE
         // burst instead of however much had landed at an arbitrary instant.
         if (drain_until_ms_ == 0) {
             drain_until_ms_ = now_ms + p_.drain_ms;
-            a.probe_budget = 0;
             return a;
         }
         if (now_ms < drain_until_ms_) return a;
-        return evaluate(a, now_ms, local_epoch, sent);
+        // `sent` is read at the END of the drain, so the held batch has been
+        // injected and its epochs committed. It is the exact count of probes
+        // the radio took -- which may be under the burst size if any build
+        // was refused, and that is fine: the denominator is what went out.
+        return evaluate(a, now_ms, local_epoch,
+                        local_epoch - dwell_local_epoch_);
     }
 
     CalibState state() const { return state_; }
@@ -280,6 +289,7 @@ class UplinkCalibrator {
         dwell_start_ms_ = now_ms + p_.settle_ms;
         dwell_epoch_armed_ = false;
         drain_until_ms_ = 0;
+        burst_issued_ = false;
         received_ = 0;
         rssi_sum_ = 0;
     }
@@ -289,6 +299,7 @@ class UplinkCalibrator {
         dwell_local_epoch_ = local_epoch;
         dwell_epoch_armed_ = false;
         drain_until_ms_ = 0;
+        burst_issued_ = false;
         target_epochs_ = target;
         received_ = 0;
         rssi_sum_ = 0;
@@ -428,6 +439,7 @@ class UplinkCalibrator {
     uint32_t dwell_local_epoch_ = 0;
     uint32_t target_epochs_ = 0;
     uint64_t drain_until_ms_ = 0;
+    bool burst_issued_ = false;
     uint32_t received_ = 0;
     int64_t rssi_sum_ = 0;
     int32_t qdb_ = 0;

@@ -59,8 +59,9 @@ struct Rig {
     int restores = 0;
     int artifacts = 0;
     int power_before_rate = 0;
-    int drains = 0;
+    int bursts = 0;
     uint32_t budget = 0;
+    uint32_t inflight = 0;   // built, not yet committed (§7.2 batching)
     std::vector<UplinkRate> rates;
     bool quality_live = true;
 
@@ -74,11 +75,18 @@ struct Rig {
 
     void step() {
         now += 10;
-        uint32_t emit = budget < kProbesPerGap ? budget : kProbesPerGap;
-        budget -= emit;
-        while (emit-- > 0) {
-            ++local_epoch;               // Reporter commits on injection only
-            craft_reports += up.delivered(1);
+        // Reports are BUILT (spending budget) and injected later, at the §7.2
+        // return window -- only then is the epoch committed. The lag is what
+        // made a top-up loop run away on hardware, so the rig models it.
+        uint32_t build = budget < kProbesPerGap ? budget : kProbesPerGap;
+        budget -= build;
+        inflight += build;
+        if (now % 20 == 0) {             // return window: commit the batch
+            while (inflight-- > 0) {
+                ++local_epoch;
+                craft_reports += up.delivered(1);
+            }
+            inflight = 0;
         }
         if (now - last_fb_ms_ >= 500) {  // 2 Hz §3.16
             last_fb_ms_ = now;
@@ -94,7 +102,8 @@ struct Rig {
             }
             cal.on_sample(s, now);
         }
-        const UplinkCalibActions a = cal.tick(now, local_epoch, quality_live);
+        const UplinkCalibActions a =
+            cal.tick(now, local_epoch, quality_live, budget == 0);
         // Rate before power, exactly as app/main.cpp actuates them (§10.7 R4).
         if (a.set_rate) rates.push_back(*a.set_rate);
         if (a.set_qdb) {
@@ -106,7 +115,7 @@ struct Rig {
         }
         if (a.probe_budget) {
             budget = *a.probe_budget;
-            if (*a.probe_budget == 0) ++drains;   // burst done, drain opened
+            ++bursts;
         }
         if (a.restore) ++restores;
         if (a.artifact_ready) ++artifacts;
@@ -115,7 +124,8 @@ struct Rig {
     void run(uint64_t until_ms) {
         while (now < until_ms && cal.state() == CalibState::kRunning) step();
         // Drain the single-shot restore/artifact edge after the terminal step.
-        const UplinkCalibActions a = cal.tick(now, local_epoch, quality_live);
+        const UplinkCalibActions a =
+            cal.tick(now, local_epoch, quality_live, budget == 0);
         if (a.restore) ++restores;
         if (a.artifact_ready) ++artifacts;
     }
@@ -150,8 +160,9 @@ void feed_dwell(UplinkCalibrator& cal, uint64_t& t, uint32_t& epoch,
                 const UplinkCalibParams& p, uint32_t received, int8_t rssi) {
     const uint32_t target = cal.dwell_target();
     t += p.settle_ms + 1;
-    (void)cal.tick(t, epoch, true);   // arms the burst anchor
-    epoch += target;                  // ...the ground sends it
+    (void)cal.tick(t, epoch, true, false);  // arms the anchor
+    (void)cal.tick(t, epoch, true, false);  // issues the burst
+    epoch += target;                        // ...the ground sends it
     if (received > 0) {
         QualitySample s;
         s.accepted = true;
@@ -161,9 +172,9 @@ void feed_dwell(UplinkCalibrator& cal, uint64_t& t, uint32_t& epoch,
             static_cast<int32_t>(rssi) * static_cast<int32_t>(received);
         cal.on_sample(s, t);
     }
-    (void)cal.tick(t, epoch, true);   // burst complete -> drain opens
+    (void)cal.tick(t, epoch, true, true);   // burst spent -> drain opens
     t += p.drain_ms + 1;
-    (void)cal.tick(t, epoch, true);   // drain elapsed -> score
+    (void)cal.tick(t, epoch, true, true);   // drain elapsed -> score
 }
 
 // A clean uplink ramps to max and verifies there.
@@ -256,26 +267,36 @@ void test_abort() {
     for (int i = 0; i < 5; ++i) r.step();
     CHECK(r.cal.abort(r.now));
     CHECK(!r.cal.abort(r.now));  // idempotent
-    const UplinkCalibActions a = r.cal.tick(r.now, r.local_epoch, true);
+    const UplinkCalibActions a = r.cal.tick(r.now, r.local_epoch, true, true);
     CHECK(a.restore);
     CHECK(!a.artifact_ready);
     CHECK(r.cal.state() == CalibState::kFailed);
-    const UplinkCalibActions b = r.cal.tick(r.now, r.local_epoch, true);
+    const UplinkCalibActions b = r.cal.tick(r.now, r.local_epoch, true, true);
     CHECK(!b.restore);  // single-shot
 }
 
-// The dwell gate counts EPOCHS, not milliseconds: halving the report cadence
-// must lengthen the run, never let a half-observed dwell decide.
-void test_gate_is_epochs_not_time() {
+// The dwell gate is the BURST, not the clock: a dwell decides when its probes
+// have gone out and drained, never on elapsed time. Wall time alone must not
+// end one, however long it runs.
+void test_gate_is_the_burst_not_time() {
     UplinkCalibParams p = fast_params();
     UplinkCalibrator cal(p);
     CHECK(cal.start(1000, 0));
     CHECK(cal.dwell_target() == p.probe_epochs);
-    // A long time with no samples decides nothing.
+
+    // The burst is issued exactly once, and while it is still being emitted
+    // (`burst_spent` false) no amount of time decides anything. This is also
+    // the regression for the bench runaway: the budget is handed out on ONE
+    // tick, so a top-up loop cannot re-arm it faster than the §7.2 batch
+    // drains and flood the return path (measured: 3480 probes for a 100
+    // burst, which starved the craft's §3.16 into `quality_lost`).
+    int budgets_issued = 0;
     for (uint64_t t = 1200; t < 60000; t += 100) {
-        const UplinkCalibActions a = cal.tick(t, 0, true);
+        const UplinkCalibActions a = cal.tick(t, 0, true, false);
+        if (a.probe_budget) ++budgets_issued;
         CHECK(!a.restore);
     }
+    CHECK(budgets_issued == 1);
     CHECK(cal.state() == CalibState::kRunning);
     CHECK(cal.dwell_progress() == 0);
 }
@@ -348,7 +369,7 @@ void test_denominator_is_the_grounds_own_count() {
     uint32_t e2 = 0;
     const uint32_t target = cal2.dwell_target();
     t2 += p.settle_ms + 1;
-    (void)cal2.tick(t2, e2, true);
+    (void)cal2.tick(t2, e2, true, true);
     e2 += target;
     QualitySample s;
     s.accepted = true;
@@ -357,9 +378,9 @@ void test_denominator_is_the_grounds_own_count() {
     s.epoch_delta = 9999;               // nonsense; must not be used
     s.rssi_sum_delta = -40 * 100;
     cal2.on_sample(s, t2);
-    (void)cal2.tick(t2, e2, true);
+    (void)cal2.tick(t2, e2, true, true);
     t2 += p.drain_ms + 1;
-    (void)cal2.tick(t2, e2, true);
+    (void)cal2.tick(t2, e2, true, true);
     CHECK(cal2.last_dwell().sent == 100);
     CHECK(cal2.last_dwell().loss_milli == 0);
 }
@@ -437,7 +458,7 @@ void test_failed_persist_fails_the_run() {
     }
     // The restore edge re-arms so the actuator returns to its pre-run owner
     // rather than holding an unpersisted placement.
-    const UplinkCalibActions a = r.cal.tick(r.now, r.local_epoch, true);
+    const UplinkCalibActions a = r.cal.tick(r.now, r.local_epoch, true, true);
     CHECK(a.restore);
     CHECK(!a.artifact_ready);
     // Only a Done run can fail this way; it must not rewrite a real failure.
@@ -545,7 +566,7 @@ void test_verify_exhausted_is_failure() {
         CHECK(std::string(cal.fail_reason()) == "verify_failed");
     }
     // Nothing is persisted, and the power is restored.
-    const UplinkCalibActions a = cal.tick(t, 0, true);
+    const UplinkCalibActions a = cal.tick(t, 0, true, true);
     CHECK(!a.artifact_ready);
     CHECK(!a.restore);  // already drained by the terminal step
 
@@ -815,7 +836,7 @@ int main() {
     test_no_clean_point();
     test_liveness_abort();
     test_abort();
-    test_gate_is_epochs_not_time();
+    test_gate_is_the_burst_not_time();
     test_burst_resolves_the_walls_first_time();
     test_eight_rung_sweep();
     test_failure_mid_sweep_persists_nothing();

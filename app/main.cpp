@@ -3033,6 +3033,7 @@ struct RxCore {
     // reconstructing it from the craft's anchors.
     void set_probe_budget(uint32_t n) { reporter_.set_probe_budget(n); }
     void clear_probe_mode() { reporter_.clear_probe_mode(); }
+    bool probe_spent() const { return reporter_.probe_spent(); }
     // The injector's half of the §3.5 emission contract: the number to stamp
     // into the frame at the radio call, and the commit that spends it.
     uint32_t next_report_epoch() const { return reporter_.next_epoch(); }
@@ -5359,7 +5360,7 @@ int run_rx(const Loaded& l) {
         // Drain the single-shot restore edge here rather than leaving it to
         // the service loop: shutdown never reaches the loop again.
         const UplinkCalibActions ua =
-            uplink_cal.tick(now_ms(), rx.report_epoch(), true);
+            uplink_cal.tick(now_ms(), rx.report_epoch(), true, true);
         if (ua.restore) uplink_restore_actuators();
         // Empty on a cache-assignment node, which never gets the issuer
         // handlers — calling it unguarded would throw bad_function_call.
@@ -6101,7 +6102,8 @@ int run_rx(const Loaded& l) {
         {
             const UplinkCalibActions ua = uplink_cal.tick(
                 now_ms(), rx.report_epoch(),
-                quality_gate.live(now_ms(), ucal_params.liveness_ms));
+                quality_gate.live(now_ms(), ucal_params.liveness_ms),
+                rx.probe_spent());
             // Rate before power (§10.7 R4 order): the rung is what the power
             // is being measured FOR, so commanding power first would spend a
             // settle window at the new level on the old rung.
@@ -6179,7 +6181,7 @@ int run_rx(const Loaded& l) {
                                  l.cfg.policy.calibration.artifact_dir.c_str());
                     uplink_cal.fail_persist();
                     const UplinkCalibActions fa = uplink_cal.tick(
-                        now_ms(), rx.report_epoch(), true);
+                        now_ms(), rx.report_epoch(), true, true);
                     if (fa.restore) uplink_restore_actuators();
                 } else {
                     uplink_artifact = std::move(art);
