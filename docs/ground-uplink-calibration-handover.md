@@ -56,8 +56,10 @@ worktree changes into any commit.
 - **Two clocks.** Any accepted packet refreshes *liveness*; only an advancing
   `reports_received` refreshes *counter progress*. Liveness loss aborts; stalled
   counters under live feedback are a 1000‰ loss sample. Never conflate them.
-- **Floor ≠ ceiling.** With no clean probe yet, loss means "too cold" — ascend.
-  Retreat/place only above a clean probe. This amends §10.6 too.
+- **Floor ≠ ceiling.** With no clean probe, direction is decided by *position*:
+  above `min_qdb` descend (rungs 1–7 seed mid-range and are genuinely too hot);
+  at `min_qdb` ascend, because nothing lower is testable. Fail `no_clean_point`
+  only at `max_qdb` with nothing clean anywhere. This amends §10.6 too.
 - **Dwell loss is anchored on the craft's own `last_report_epoch` bounds**, not
   on ground wall-clock. `report_epoch` increments once per emitted report, so
   `emitted = E_B - E_A` and the ground keeps **no** per-epoch record. Verify the
@@ -498,7 +500,21 @@ claim **device-confirmed** or **code-level only**.
 - Do not add continuous/adaptive power steering after calibration.
 - **Do not implement the multi-rung uplink in this PR.** A future pass will let
   the ground uplink run at higher MCS rungs so control/telemetry occupies less
-  airtime. Pass 125 only ensures nothing has to be migrated for it: the
+  airtime. The intended policy is **shadow-the-downlink with a negative offset
+  and a floor**: the uplink rung tracks the craft's committed video rung minus
+  a fixed step, clamped at MCS0, so the return path is always more robust than
+  the video it protects. Two things to pin when that pass is written — (a) the
+  offset itself: the operator sketch read "video MCS2 ⇒ uplink MCS0", which is
+  −2, while the stated rule was −1; (b) the rung source. The ground does not run
+  the §9 selector, so it must read the craft's committed operating point from
+  the §3.2 DATA header stamp (present on *every* packet, so it tracks instantly
+  and needs no new wire) rather than from advisory §3.15 SELECTOR_STATE. Note
+  the standing hazard: shadowing assumes uplink and downlink conditions
+  correlate, which asymmetric antennas, TX power, and ground-only RX diversity
+  can break — the §10.6 floor rule and a per-rung calibrated placement are what
+  keep the heuristic safe, which is why `placements` is a list and the floor
+  rule is a prerequisite rather than a nicety. Pass 125 ensures nothing has to
+  be migrated for any of it: the
   `power_map` is already the full MCS0–7 `PowerCurve`, `TxRate{mcs,sgi,bw}`
   already flows per-frame through `dot11_tx_prefix`, §10.5's latch is
   rung-agnostic, §3.16 carries `last_rx_mcs`, the artifact's `placements` is a

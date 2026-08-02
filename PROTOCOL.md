@@ -2120,20 +2120,31 @@ carries); at the placement and at the cliff this agrees with per-adapter
 wire PER (measured: adapters fail together in overload).
 
 **Floor and ceiling are different walls (Pass 125 amendment).** A loss wall
-means "too hot" only when a clean probe already exists at lower power. Before
-the rung's first clean probe the seeker is below the usable floor and loss means
-"too cold": it MUST continue ascending in `seek_step_qdb` steps toward
-`max_qdb`, and MUST NOT place, retreat, or abort. Only a bad probe at `max_qdb`
-with no clean probe anywhere on that rung fails, reason `no_clean_point`.
-Symmetrically, the addendum-4 blackout retreat and the addendum-2 verify
-step-down apply only **above** the rung's last clean probe — both already
-require one, and with no clean probe the correct move is up, not out. Without
-this rule a floor-start ramp (rung 0 from `min_qdb`) on a link whose floor is
-genuinely unusable either places at `min_qdb` or aborts on the report clock;
-the Pass 121 near-bench campaign never exercised it because a 1 dBm floor is
-always receivable at 2–10 m. §10.7's one-rung MCS0 uplink at range is the case
-that does exercise it, so the rule is stated here, where both calibrators
-inherit it.
+means "too hot" only when there is somewhere lower to test. With a clean probe
+already recorded, a bad probe is overload: retreat to it, unchanged. With **no**
+clean probe on the rung the direction is decided by position, not by having-been-
+clean:
+
+- **above `min_qdb`** — descend one `seek_step_qdb`, exactly as before. Rungs
+  1–7 seed mid-range at one step below the previous rung's placement, and a
+  higher rung overloads at a *lower* RSSI, so their bad first probe is genuinely
+  too hot. This path is unchanged by Pass 125.
+- **at `min_qdb`** — there is nothing lower to test, so the only untested
+  direction is up: ascend in `seek_step_qdb` steps. Once ascending off the
+  floor, a further bad probe keeps ascending rather than oscillating back down;
+  the first clean probe ends the floor search and the ramp resumes normally.
+  Only a bad probe at `max_qdb` with no clean probe anywhere on the rung fails,
+  reason `no_clean_point`.
+
+The addendum-4 blackout retreat and the addendum-2 verify step-down already
+require a clean probe; a blackout at `min_qdb` with none follows the same
+ascend rule rather than aborting. Without this, a floor-start ramp (rung 0 from
+`min_qdb`) on a link whose floor is genuinely unusable either places at
+`min_qdb` — recording a placement the link cannot carry — or aborts on the
+report clock. The Pass 121 near-bench campaign never exercised it because a
+1 dBm floor is always receivable at 2–10 m. §10.7's one-rung MCS0 uplink at
+range exercises it on every run, so the rule is stated here, where both
+calibrators inherit it.
 
 **Why not a target band (Pass 120, retired).** Steering to a fixed RSSI
 band bakes the calibration distance into the method: at range the band is

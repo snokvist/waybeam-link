@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
+#include <string>
 
 namespace {
 
@@ -53,9 +55,14 @@ struct Channel {
         }
         return rssi();
     }
+    // Pass 125: the model only ever had an overload CEILING, which is why
+    // the floor case went unexercised through the whole Pass 121 campaign.
+    // Below floor_rssi the link is simply too weak to deliver.
+    int8_t floor_rssi = -128;
     uint16_t loss(uint8_t rung) const {
         const int8_t r = rssi();
         if (r >= ceil[rung]) return 900;
+        if (r < floor_rssi) return 900;
         if (r >= flaky_above && ++hot > 10) return 900;
         return 5;
     }
@@ -322,6 +329,103 @@ void test_selector_state_calib_word() {
     CHECK(std::get_if<SelectorState>(&dec3) != nullptr);
 }
 
+// Pass 125 floor rule. Before it, a rung-0 ramp whose floor is unusable
+// placed at min_qdb (loss wall + no last_clean + qdb <= min ⇒ place(min)),
+// recording a placement the link cannot actually carry. Now it ascends.
+void test_floor_ascend() {
+    Rig r(fast_params());
+    // rssi = -41 + 0.85*(qdb/4): qdb 4/20/36 read -40/-36/-33 (all below the
+    // floor), qdb 52 reads -29 and delivers. Ceilings are cleared because a
+    // -30 floor under the default -30 rung-6/7 ceilings leaves those rungs
+    // no clean window at all — that is a model contradiction, not a seek bug.
+    r.ch.floor_rssi = -30;
+    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
+    CHECK(r.cal.start(r.now));
+    r.run(r.now + 590000);
+    CHECK(r.cal.state() == CalibState::kDone);
+    const CalibArtifact& a = r.cal.artifact();
+    // The placement must be a power that actually worked, never the floor.
+    CHECK(a.placement_qdb[0] > CalibrateParams{}.min_qdb);
+    CHECK(a.placement_qdb[0] >= 52);
+    CHECK(a.placement_loss_milli[0] <= 15);
+    // Ascending through the dead floor still books the bracket it crossed.
+    CHECK(a.ceilings[0].has_bad);
+}
+
+// A link that never delivers at any commanded power fails with a reason
+// that says so, instead of placing at the floor and calling it success.
+void test_no_clean_point() {
+    Rig r(fast_params());
+    r.ch.floor_rssi = 0;  // unreachable: max_qdb only reaches -18
+    CHECK(r.cal.start(r.now));
+    r.run(r.now + 590000);
+    CHECK(r.cal.state() == CalibState::kFailed);
+    CHECK(r.cal.fail_reason() != nullptr);
+    if (r.cal.fail_reason() != nullptr) {
+        CHECK(std::string(r.cal.fail_reason()) == "no_clean_point");
+    }
+    CHECK(r.restores == 1);  // every exit restores, §10.6 R4
+}
+
+// PowerSeek directly: the floor/ceiling split is the one behaviour that had
+// to change, so pin both sides of it at unit level.
+void test_seek_floor_ceiling_split() {
+    SeekParams p;  // min 4, max 108, step 16
+
+    // Ceiling: rungs 1-7 seed mid-range with no clean probe, so a bad first
+    // probe there is too HOT and must still descend exactly as before.
+    {
+        PowerSeek s(p);
+        const SeekStep begin = s.begin(60);
+        CHECK(begin.qdb == 60);
+        const SeekStep bad = s.on_dwell(DwellVerdict::kBad, -20, 900);
+        CHECK(bad.kind == SeekStep::Kind::kProbe);
+        CHECK(bad.qdb == 44);  // descended one step
+        CHECK(bad.power_changed);
+    }
+
+    // Floor: at min_qdb there is nowhere lower, so the untested direction is
+    // up — and once ascending, a further bad probe keeps ascending rather
+    // than oscillating back down.
+    {
+        PowerSeek s(p);
+        CHECK(s.begin(p.min_qdb).qdb == p.min_qdb);
+        const SeekStep up1 = s.on_dwell(DwellVerdict::kBad, -40, 900);
+        CHECK(up1.kind == SeekStep::Kind::kProbe);
+        CHECK(up1.qdb == p.min_qdb + p.seek_step_qdb);
+        const SeekStep up2 = s.on_dwell(DwellVerdict::kBad, -36, 900);
+        CHECK(up2.qdb == p.min_qdb + 2 * p.seek_step_qdb);
+        // A clean probe ends the floor search: the ramp resumes normally and
+        // a later bad probe retreats to that clean power.
+        const SeekStep ok = s.on_dwell(DwellVerdict::kClean, -29, 5);
+        CHECK(ok.kind == SeekStep::Kind::kProbe);
+        CHECK(ok.qdb == p.min_qdb + 3 * p.seek_step_qdb);
+        const SeekStep wall = s.on_dwell(DwellVerdict::kBad, -20, 900);
+        CHECK(wall.kind == SeekStep::Kind::kVerify);
+        CHECK(wall.qdb == p.min_qdb + 2 * p.seek_step_qdb);
+    }
+
+    // A blackout at the floor with no clean probe ascends rather than
+    // handing the caller an abort (§10.7: the seek starts blacked out).
+    {
+        PowerSeek s(p);
+        s.begin(p.min_qdb);
+        const std::optional<SeekStep> bo = s.on_blackout();
+        CHECK(bo.has_value());
+        if (bo) CHECK(bo->qdb == p.min_qdb + p.seek_step_qdb);
+    }
+
+    // kNoEvidence holds position — the craft's blank dwell, never the
+    // ground's stalled counter.
+    {
+        PowerSeek s(p);
+        s.begin(40);
+        const SeekStep hold = s.on_dwell(DwellVerdict::kNoEvidence, 0, 0);
+        CHECK(hold.qdb == 40);
+        CHECK(!hold.power_changed);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -335,6 +439,9 @@ int main() {
     test_report_loss_abort();
     test_hard_cap();
     test_abort_cmd();
+    test_floor_ascend();
+    test_no_clean_point();
+    test_seek_floor_ceiling_split();
     if (g_fail != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", g_fail);
         return 1;

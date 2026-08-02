@@ -33,6 +33,203 @@
 
 namespace wblink {
 
+// §10.6/§10.7 shared seek/verify mechanics (Pass 125). Pure in the strongest
+// sense: no clocks, no dwell management, no rung orchestration. The caller
+// decides WHEN a dwell completed and WHAT evidence it carried; this decides
+// where the power goes next. Extracted so the craft's 8-rung ms-gated loop
+// and the ground's 1-rung epoch-gated loop share one bench-validated ramp
+// instead of growing a second, differently-buggy copy.
+struct SeekParams {
+    uint16_t loss_ok_milli = 15;
+    uint16_t loss_bad_milli = 50;
+    int32_t seek_step_qdb = 16;
+    int cap_rise_db = 1;
+    int rssi_guard_dbm = -6;
+    int32_t min_qdb = 4;
+    int32_t max_qdb = 108;
+    uint8_t verify_descent_budget = 3;
+};
+
+// What a completed dwell observed.
+//
+// kNoEvidence is the craft's blank dwell (§10.6: zero samples arrived) — hold
+// at this power and let the caller's clocks arbitrate. The ground never uses
+// it: under live §3.16 feedback a stalled counter IS evidence of a dead
+// uplink, so §10.7 supplies kBad. That asymmetry is the whole point of the
+// two-clocks split, and it is why this is an explicit input rather than
+// something inferred from a zero sample count.
+enum class DwellVerdict : uint8_t { kClean, kBad, kNoEvidence };
+
+struct SeekStep {
+    enum class Kind : uint8_t {
+        kProbe,   // dwell again at qdb, probe cadence
+        kVerify,  // dwell at qdb, verify cadence — placement candidate
+        kDone,    // qdb is the verified placement
+        kFailed,  // fail_reason is set
+    };
+    Kind kind = Kind::kProbe;
+    int32_t qdb = 0;
+    bool power_changed = false;  // caller actuates qdb when set
+    const char* fail_reason = nullptr;
+};
+
+class PowerSeek {
+  public:
+    explicit PowerSeek(const SeekParams& p) : p_(p) {}
+
+    // Start a ramp at from_qdb. The craft seeds rung 0 at min_qdb and later
+    // rungs one step below the previous placement (§10.6); the ground seeds
+    // its single rung at min_qdb (§10.7).
+    SeekStep begin(int32_t from_qdb) {
+        qdb_ = clamp_(from_qdb);
+        last_clean_.reset();
+        verify_descents_ = 0;
+        cap_confirm_ = false;
+        blackout_used_ = false;
+        floor_ascend_ = false;
+        phase_ = Phase::kSeek;
+        last_clean_rssi_ = 127;
+        has_bad_ = false;
+        first_bad_rssi_ = 0;
+        return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
+    }
+
+    SeekStep on_dwell(DwellVerdict v, double rssi, uint16_t loss_milli) {
+        if (v == DwellVerdict::kNoEvidence) {
+            // §10.6: a blank dwell carries no evidence either way — hold at
+            // this power and re-dwell. The caller's clocks arbitrate.
+            return {phase_ == Phase::kVerify ? SeekStep::Kind::kVerify
+                                             : SeekStep::Kind::kProbe,
+                    qdb_, false, nullptr};
+        }
+        if (phase_ == Phase::kVerify) return verify_(rssi, loss_milli);
+        return seek_(v, rssi, loss_milli);
+    }
+
+    // §10.6 addendum 4/5: the feedback channel itself collapsed. Above the
+    // last clean power that is wall evidence (retreat once); at the floor
+    // with no clean probe it is indistinguishable from "too cold", so it
+    // ascends under the same rule as a bad probe. Returns nullopt when the
+    // caller should apply its own abort policy instead.
+    std::optional<SeekStep> on_blackout() {
+        if (phase_ == Phase::kSeek && last_clean_ && qdb_ > last_clean_->qdb &&
+            !blackout_used_) {
+            blackout_used_ = true;
+            note_bad_(last_clean_->rssi);
+            return place_(last_clean_->qdb);
+        }
+        if (phase_ == Phase::kSeek && !last_clean_ && at_floor_()) {
+            // Nothing below to retreat to and nothing clean to retreat from:
+            // the only untested direction is up.
+            return ascend_();
+        }
+        if (phase_ == Phase::kVerify &&
+            verify_descents_ < p_.verify_descent_budget && qdb_ > p_.min_qdb) {
+            ++verify_descents_;
+            qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
+            return SeekStep{SeekStep::Kind::kVerify, qdb_, true, nullptr};
+        }
+        return std::nullopt;
+    }
+
+    int32_t qdb() const { return qdb_; }
+    bool in_verify() const { return phase_ == Phase::kVerify; }
+    int8_t last_clean_rssi() const { return last_clean_rssi_; }
+    bool has_bad() const { return has_bad_; }
+    int8_t first_bad_rssi() const { return first_bad_rssi_; }
+
+  private:
+    enum class Phase : uint8_t { kSeek, kVerify };
+    struct Probe { int32_t qdb; double rssi; };
+
+    int32_t clamp_(int32_t q) const {
+        return std::min(p_.max_qdb, std::max(p_.min_qdb, q));
+    }
+    bool at_floor_() const { return qdb_ <= p_.min_qdb; }
+    void note_bad_(double rssi) {
+        if (!has_bad_) {
+            has_bad_ = true;
+            first_bad_rssi_ = static_cast<int8_t>(std::lround(rssi));
+        }
+    }
+    SeekStep place_(int32_t qdb) {
+        qdb_ = qdb;
+        phase_ = Phase::kVerify;
+        return {SeekStep::Kind::kVerify, qdb_, true, nullptr};
+    }
+    // §10.7 floor rule: below the first clean probe, loss means "too cold".
+    SeekStep ascend_() {
+        if (qdb_ >= p_.max_qdb) {
+            return {SeekStep::Kind::kFailed, qdb_, false, "no_clean_point"};
+        }
+        floor_ascend_ = true;
+        qdb_ = std::min(p_.max_qdb, qdb_ + p_.seek_step_qdb);
+        return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
+    }
+
+    SeekStep seek_(DwellVerdict v, double rssi, uint16_t loss) {
+        if (v == DwellVerdict::kBad || loss > p_.loss_bad_milli) {
+            note_bad_(rssi);
+            // Ceiling: a clean probe exists below — this is overload, retreat.
+            if (last_clean_) return place_(last_clean_->qdb);
+            // Floor: no clean probe anywhere on this rung. Descending is only
+            // meaningful while there is somewhere lower to go AND we did not
+            // arrive here by ascending off the floor; otherwise the untested
+            // direction is up. Rungs 1-7 seed mid-range, so their bad first
+            // probe still descends exactly as before Pass 125.
+            if (!floor_ascend_ && !at_floor_()) {
+                qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
+                return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
+            }
+            return ascend_();
+        }
+        last_clean_rssi_ = static_cast<int8_t>(std::lround(rssi));
+        // Cap wall: an upward >=2 dB commanded step the report RSSI did not
+        // follow. Confirmed by one repeat dwell (§10.6 addendum 3).
+        if (last_clean_ && qdb_ - last_clean_->qdb >= 8 &&
+            rssi - last_clean_->rssi < p_.cap_rise_db) {
+            if (!cap_confirm_) {
+                cap_confirm_ = true;
+                return {SeekStep::Kind::kProbe, qdb_, false, nullptr};
+            }
+            return place_(last_clean_->qdb);
+        }
+        cap_confirm_ = false;
+        floor_ascend_ = false;  // a clean probe ends the floor search
+        last_clean_ = Probe{qdb_, rssi};
+        if (rssi > p_.rssi_guard_dbm || qdb_ >= p_.max_qdb) {
+            return place_(qdb_);
+        }
+        qdb_ = std::min(p_.max_qdb, qdb_ + p_.seek_step_qdb);
+        return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
+    }
+
+    SeekStep verify_(double rssi, uint16_t loss) {
+        // §10.6 addendum 2: near-cliff instability passes a short probe dwell
+        // and fails only under sustained exposure — enforce loss_ok here.
+        if (loss > p_.loss_ok_milli &&
+            verify_descents_ < p_.verify_descent_budget && qdb_ > p_.min_qdb) {
+            if (loss > p_.loss_bad_milli) note_bad_(rssi);
+            ++verify_descents_;
+            qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
+            return {SeekStep::Kind::kVerify, qdb_, true, nullptr};
+        }
+        return {SeekStep::Kind::kDone, qdb_, false, nullptr};
+    }
+
+    SeekParams p_;
+    Phase phase_ = Phase::kSeek;
+    int32_t qdb_ = 0;
+    std::optional<Probe> last_clean_;
+    uint8_t verify_descents_ = 0;
+    bool cap_confirm_ = false;
+    bool blackout_used_ = false;
+    bool floor_ascend_ = false;
+    int8_t last_clean_rssi_ = 127;
+    bool has_bad_ = false;
+    int8_t first_bad_rssi_ = 0;
+};
+
 struct CalibrateParams {
     uint16_t loss_ok_milli = 15;  // §15.2 policy.calibration seeds
     uint16_t loss_bad_milli = 50;
@@ -80,7 +277,23 @@ struct CalibActions {
 
 class Calibrator {
   public:
-    explicit Calibrator(const CalibrateParams& p) : p_(p) {}
+    explicit Calibrator(const CalibrateParams& p)
+        : p_(p), seek_(seek_params(p)) {}
+
+    // §10.6's seek knobs are a subset of CalibrateParams; §10.7 builds the
+    // same SeekParams from the same config block (§15.2) and differs only in
+    // how it gates dwells.
+    static SeekParams seek_params(const CalibrateParams& p) {
+        SeekParams s;
+        s.loss_ok_milli = p.loss_ok_milli;
+        s.loss_bad_milli = p.loss_bad_milli;
+        s.seek_step_qdb = p.seek_step_qdb;
+        s.cap_rise_db = p.cap_rise_db;
+        s.rssi_guard_dbm = p.rssi_guard_dbm;
+        s.min_qdb = p.min_qdb;
+        s.max_qdb = p.max_qdb;
+        return s;
+    }
 
     // §11.7 CALIBRATE start/abort semantics: false = REJECTED (already
     // running / not running). The app layers the other REJECT conditions
@@ -97,13 +310,10 @@ class Calibrator {
         fail_reason_ = nullptr;
         artifact_ = {};
         rung_ = 0;
-        qdb_ = p_.min_qdb;  // Pass 121: rung 0 ramps from the floor
-        last_clean_.reset();
-        verify_descents_ = 0;
-        cap_confirm_ = false;
-        blackout_used_ = false;
+        // Pass 121: rung 0 ramps from the floor. Pass 125's floor rule is
+        // what makes that safe when the floor is genuinely unusable.
+        qdb_ = seek_.begin(p_.min_qdb).qdb;
         enter_rung_ = true;
-        phase_ = Phase::kSeek;
         dwell_start_ms_ = 0;  // set when the pin/power action is emitted
         return true;
     }
@@ -139,32 +349,15 @@ class Calibrator {
             return a;
         }
         if (now_ms - last_report_ms_ > p_.report_loss_abort_ms) {
-            // Addendum 4: a blackout while probing above the rung's last
-            // clean power is wall evidence (total overload kills the
-            // feedback channel itself) — retreat once, don't abort.
-            if (phase_ == Phase::kSeek && last_clean_ &&
-                qdb_ > last_clean_->qdb && !blackout_used_) {
-                blackout_used_ = true;
-                auto& c = artifact_.ceilings[rung_];
-                if (!c.has_bad) {
-                    c.has_bad = true;
-                    c.first_bad_rssi = static_cast<int8_t>(std::lround(
-                        rssi_n_ ? double(rssi_sum_) / rssi_n_
-                                : last_clean_->rssi));
-                }
-                last_report_ms_ = now_ms;  // re-arm at the safe power
-                return place(a, now_ms, last_clean_->qdb);
-            }
-            // Addendum 5: a blackout during verify is a verify failure of
-            // total severity — take the addendum-2 bounded step-down.
-            if (phase_ == Phase::kVerify && verify_descents_ < 3 &&
-                qdb_ > p_.min_qdb) {
-                ++verify_descents_;
-                qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
-                a.set_qdb = qdb_;
-                last_report_ms_ = now_ms;  // re-arm per descent
-                begin_dwell(now_ms, p_.verify_dwell_ms);
-                return a;
+            // Addendum 4/5 live in PowerSeek now: a blackout above the last
+            // clean power is wall evidence (retreat once), a blackout during
+            // verify takes the bounded step-down, and a blackout at the floor
+            // with no clean probe ascends (Pass 125). nullopt = no seek-side
+            // answer, so the §10.6 abort policy applies.
+            const std::optional<SeekStep> s = seek_.on_blackout();
+            if (s) {
+                last_report_ms_ = now_ms;  // re-arm at the new power
+                return apply_step(a, now_ms, *s);
             }
             finish(CalibState::kFailed, "report_loss", now_ms);
             a.restore = take_restore_();
@@ -182,87 +375,33 @@ class Calibrator {
         }
         // Dwell complete — evaluate with whatever samples arrived. A blank
         // dwell carries no evidence either way: hold at this power and let
-        // the report clocks arbitrate (addendum 4 retreat, or abort).
+        // the report clocks arbitrate (addendum 4 retreat, or abort). This is
+        // the craft-only kNoEvidence verdict; §10.7 never produces it.
         if (rssi_n_ == 0) {
-            begin_dwell(now_ms, phase_ == Phase::kVerify
-                                    ? p_.verify_dwell_ms
-                                    : p_.probe_dwell_ms);
-            return a;
+            return apply_step(
+                a, now_ms, seek_.on_dwell(DwellVerdict::kNoEvidence, 0, 0));
         }
         const double rssi = double(rssi_sum_) / rssi_n_;
         const uint16_t loss = loss_w_ ? static_cast<uint16_t>(
             std::min<uint64_t>(1000, loss_sum_ / loss_w_)) : 0;
-        switch (phase_) {
-            case Phase::kSeek: {
-                auto& c = artifact_.ceilings[rung_];
-                if (loss > p_.loss_bad_milli) {  // loss wall
-                    if (!c.has_bad) {
-                        c.has_bad = true;
-                        c.first_bad_rssi =
-                            static_cast<int8_t>(std::lround(rssi));
-                    }
-                    if (last_clean_) {
-                        return place(a, now_ms, last_clean_->qdb);
-                    }
-                    if (qdb_ <= p_.min_qdb) {  // floor still bad: record it
-                        return place(a, now_ms, p_.min_qdb);
-                    }
-                    qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
-                    a.set_qdb = qdb_;
-                    begin_dwell(now_ms, p_.probe_dwell_ms);
-                    return a;
-                }
-                c.last_clean_rssi = static_cast<int8_t>(std::lround(rssi));
-                // Cap wall: an upward ≥2 dB commanded step that the report
-                // RSSI did not follow — delivered power stopped tracking.
-                // Addendum 3: confirm with one repeat dwell — in the TXAGC
-                // compression knee a one-off deficit is dwell noise.
-                if (last_clean_ && qdb_ - last_clean_->qdb >= 8 &&
-                    rssi - last_clean_->rssi < p_.cap_rise_db) {
-                    if (!cap_confirm_) {
-                        cap_confirm_ = true;
-                        begin_dwell(now_ms, p_.probe_dwell_ms);
-                        return a;  // re-dwell at the same power
-                    }
-                    return place(a, now_ms, last_clean_->qdb);
-                }
-                cap_confirm_ = false;
-                last_clean_ = Probe{qdb_, rssi};
-                if (rssi > p_.rssi_guard_dbm || qdb_ >= p_.max_qdb) {
-                    return place(a, now_ms, qdb_);  // guard / cap-clean
-                }
-                qdb_ = std::min(p_.max_qdb, qdb_ + p_.seek_step_qdb);
-                a.set_qdb = qdb_;
-                begin_dwell(now_ms, p_.probe_dwell_ms);
-                return a;
-            }
-            case Phase::kVerify: {
-                // Addendum 2: near-cliff instability can pass short probe
-                // dwells and fail only under sustained exposure — enforce
-                // loss_ok here with a bounded step-down.
-                if (loss > p_.loss_ok_milli && verify_descents_ < 3 &&
-                    qdb_ > p_.min_qdb) {
-                    auto& c = artifact_.ceilings[rung_];
-                    if (loss > p_.loss_bad_milli && !c.has_bad) {
-                        c.has_bad = true;
-                        c.first_bad_rssi =
-                            static_cast<int8_t>(std::lround(rssi));
-                    }
-                    ++verify_descents_;
-                    qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
-                    a.set_qdb = qdb_;
-                    begin_dwell(now_ms, p_.verify_dwell_ms);
-                    return a;
-                }
-                artifact_.placement_qdb[rung_] = qdb_;
-                artifact_.placement_rssi[rung_] =
-                    static_cast<int8_t>(std::lround(rssi));
-                artifact_.placement_loss_milli[rung_] = loss;
-                placement_qdb_ = qdb_;
-                return next_rung(a, now_ms);
-            }
+        // §10.6 evaluates loss against its own walls, so the verdict is
+        // derived here rather than asserted: the craft always has samples to
+        // judge with. The ground's §10.7 adapter is the one that asserts kBad
+        // for a counter stall (§3.16 two clocks).
+        const DwellVerdict v = loss > p_.loss_bad_milli ? DwellVerdict::kBad
+                                                        : DwellVerdict::kClean;
+        const bool was_verify = seek_.in_verify();
+        const SeekStep s = seek_.on_dwell(v, rssi, loss);
+        if (was_verify && s.kind == SeekStep::Kind::kDone) {
+            artifact_.placement_qdb[rung_] = s.qdb;
+            artifact_.placement_rssi[rung_] =
+                static_cast<int8_t>(std::lround(rssi));
+            artifact_.placement_loss_milli[rung_] = loss;
+            placement_qdb_ = s.qdb;
+            sync_ceiling();
+            return next_rung(a, now_ms);
         }
-        return a;
+        return apply_step(a, now_ms, s);
     }
 
     CalibState state() const { return state_; }
@@ -277,22 +416,40 @@ class Calibrator {
     }
 
   private:
-    enum class Phase : uint8_t { kSeek, kVerify };
-    struct Probe { int32_t qdb; double rssi; };
-
     void begin_dwell(uint64_t now_ms, uint32_t dwell_ms) {
         dwell_start_ms_ = now_ms + p_.settle_ms;
         dwell_end_ms_ = dwell_start_ms_ + dwell_ms;
         rssi_sum_ = 0; rssi_n_ = 0; loss_sum_ = 0; loss_w_ = 0;
     }
 
-    // Seek hit a wall (or the cap/guard): drop to the placement power and
-    // enter the VERIFY dwell there.
-    CalibActions place(CalibActions a, uint64_t now_ms, int32_t qdb) {
-        qdb_ = qdb;
-        a.set_qdb = qdb_;
-        phase_ = Phase::kVerify;
-        begin_dwell(now_ms, p_.verify_dwell_ms);
+    // The rung's overload bracket lives in the artifact but is discovered by
+    // the seek — mirror it out after every step that can move it.
+    void sync_ceiling() {
+        auto& c = artifact_.ceilings[rung_];
+        c.last_clean_rssi = seek_.last_clean_rssi();
+        c.has_bad = seek_.has_bad();
+        c.first_bad_rssi = seek_.first_bad_rssi();
+    }
+
+    // Turn one PowerSeek decision into §10.6 actions + dwell bookkeeping.
+    CalibActions apply_step(CalibActions a, uint64_t now_ms,
+                            const SeekStep& s) {
+        sync_ceiling();
+        qdb_ = s.qdb;
+        if (s.power_changed) a.set_qdb = s.qdb;
+        switch (s.kind) {
+            case SeekStep::Kind::kFailed:
+                finish(CalibState::kFailed, s.fail_reason, now_ms);
+                a.restore = take_restore_();
+                return a;
+            case SeekStep::Kind::kVerify:
+                begin_dwell(now_ms, p_.verify_dwell_ms);
+                return a;
+            case SeekStep::Kind::kDone:
+            case SeekStep::Kind::kProbe:
+                begin_dwell(now_ms, p_.probe_dwell_ms);
+                return a;
+        }
         return a;
     }
 
@@ -311,15 +468,13 @@ class Calibrator {
         }
         ++rung_;
         // Neighbor rungs' walls sit near each other: ramp from one step
-        // below the previous placement, not from the floor.
-        qdb_ = std::max(p_.min_qdb, placement_qdb_ - p_.seek_step_qdb);
-        last_clean_.reset();
-        verify_descents_ = 0;
-        cap_confirm_ = false;
-        blackout_used_ = false;
-        phase_ = Phase::kSeek;
+        // below the previous placement, not from the floor. That mid-range
+        // seed is why a bad first probe on rungs 1-7 must still DESCEND —
+        // see PowerSeek::seek_'s floor/ceiling split.
+        const SeekStep s = seek_.begin(placement_qdb_ - p_.seek_step_qdb);
+        qdb_ = s.qdb;
         a.pin_rung = rung_;
-        a.set_qdb = qdb_;
+        a.set_qdb = s.qdb;
         begin_dwell(now_ms, p_.probe_dwell_ms);
         return a;
     }
@@ -355,16 +510,12 @@ class Calibrator {
     uint64_t loss_sum_ = 0;
     uint64_t loss_w_ = 0;
     uint8_t rung_ = 0;
-    uint8_t verify_descents_ = 0;
     int32_t qdb_ = 0;
     int32_t placement_qdb_ = 0;
-    std::optional<Probe> last_clean_;
     bool enter_rung_ = true;
-    bool cap_confirm_ = false;
-    bool blackout_used_ = false;
     bool restore_pending_ = false;
     bool artifact_pending_ = false;
-    Phase phase_ = Phase::kSeek;
+    PowerSeek seek_{SeekParams{}};
 };
 
 }  // namespace wblink
