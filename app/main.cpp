@@ -5202,6 +5202,30 @@ int run_rx(const Loaded& l) {
     bool mtu_reissue_pending = false;
     std::function<std::pair<int, std::string>(const std::string&, int)>
         start_vehicle_command;
+    // §10.7: "abort, process shutdown, retune conflict, and failure must never
+    // leave the last probe power active." ONE convergence path for every
+    // cancel — the alternative is a restore call per exit site, and the sites
+    // that get forgotten are exactly the ones nobody exercises. Placed after
+    // start_vehicle_command's declaration because the downlink phase has to
+    // be cancelled over air.
+    const auto cancel_calibration = [&](const char* why) {
+        if (uplink_cal.state() != CalibState::kRunning && !calib_seq.active()) {
+            return;
+        }
+        const SeqActions sa = calib_seq.abort(now_ms());
+        (void)uplink_cal.abort(now_ms());
+        // Drain the single-shot restore edge here rather than leaving it to
+        // the service loop: shutdown never reaches the loop again.
+        const UplinkCalibActions ua =
+            uplink_cal.tick(now_ms(), rx.report_epoch(), true);
+        if (ua.restore) uplink_restore_power();
+        // Empty on a cache-assignment node, which never gets the issuer
+        // handlers — calling it unguarded would throw bad_function_call.
+        if (sa.abort_downlink && start_vehicle_command) {
+            (void)start_vehicle_command("calibrate", 0);
+        }
+        std::fprintf(stderr, "uplink-calib: CANCELLED (%s)\n", why);
+    };
     // §9.10: the ground's designated uplink TX adapter gets the same
     // CCX-liveness watchdog as the craft's radio.
     TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
@@ -5454,14 +5478,7 @@ int run_rx(const Loaded& l) {
                 // Latching mid-run would fight the seek for the actuator, so
                 // the run yields first and restores through its own single
                 // convergence path — before the latch applies (§10.5).
-                if (uplink_cal.state() == CalibState::kRunning) {
-                    (void)uplink_cal.abort(now_ms());
-                    const UplinkCalibActions ua =
-                        uplink_cal.tick(now_ms(), rx.report_epoch(), true);
-                    if (ua.restore) uplink_restore_power();
-                    std::fprintf(stderr,
-                                 "uplink-calib: ABORT (tx/power override)\n");
-                }
+                cancel_calibration("tx/power override latched");
                 if (is_auto) {
                     uplink_override.reset();
                     uplink_restore_power();  // immediate, per §10.5
@@ -5570,14 +5587,7 @@ int run_rx(const Loaded& l) {
             h.uplink_calibrate = [&](const std::string& action)
                 -> std::string {
                 if (action == "abort") {
-                    // Cancels whichever phase is live: the local calibrator
-                    // always, and the craft's run over air when the sequencer
-                    // has already handed off to it.
-                    const SeqActions sa = calib_seq.abort(now_ms());
-                    (void)uplink_cal.abort(now_ms());  // idempotent
-                    if (sa.abort_downlink) {
-                        (void)start_vehicle_command("calibrate", 0);
-                    }
+                    cancel_calibration("operator abort");  // idempotent
                     return "";
                 }
                 const bool both = (action == "start_both");
@@ -5912,7 +5922,12 @@ int run_rx(const Loaded& l) {
         // §10.7 calibrator service. `restore` is single-shot and set on EVERY
         // terminal path, so this is the one place probe power is handed back
         // to the §10.7 owner — no exit can strand it.
-        if (uplink_cal.state() == CalibState::kRunning) {
+        // Ticked UNCONDITIONALLY. tick() early-returns when the calibrator is
+        // not running, but it drains the single-shot restore/artifact edges
+        // first — and a terminal state set from OUTSIDE this loop (the REST
+        // abort, the §10.5 latch) has no other drain point. Gating this on
+        // kRunning stranded probe power on exactly those paths.
+        {
             const UplinkCalibActions ua = uplink_cal.tick(
                 now_ms(), rx.report_epoch(),
                 quality_gate.live(now_ms(), ucal_params.liveness_ms));
@@ -5999,6 +6014,11 @@ int run_rx(const Loaded& l) {
                                     air.value->read_tsf(meta.adapter_id),
                                     static_cast<uint32_t>(meta.tsf_us),
                                     std::nullopt)) {
+                    // §10.7: a retune moves the channel out from under an
+                    // in-flight run. Continuing would persist a placement
+                    // measured across two channels under one channel_mhz
+                    // identity — worse than having no artifact at all.
+                    cancel_calibration("CSA retune");
                     std::fprintf(stderr, "csa: following -> %u MHz\n",
                                  c->target_chan);
                 }
@@ -6476,6 +6496,10 @@ int run_rx(const Loaded& l) {
             next_stats = now + stats_period;
         }
     }
+    // §10.7: shutdown is an exit like any other. Without this a SIGTERM
+    // mid-run leaves the uplink adapter at the last probe power until some
+    // later start re-resolves the owner.
+    cancel_calibration("shutdown");
     return 0;
 }
 
