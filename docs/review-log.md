@@ -5580,3 +5580,44 @@ placements were unreachable because its phy advertises a 20 dBm limit at 5805.
 Two `iw` commands showed the driver accepts 30 dBm without complaint. The
 advertised regulatory limit and what the actuator will do are different
 questions, and only one of them was measured.
+
+### Pass 134 addendum — restore with no curve hands power to the backend
+
+Device-verified on the first §10.6 run under the new guards (craft `.2.232`,
+bench range). The refusal worked exactly as specified — eight rungs swept in
+~80 s, `no_wall_found`, nothing persisted, video untouched at 2‰ — and then:
+
+```
+calibrate: restore has no power authority (no curve, no override)
+           — TX power left at the last probe value
+calibrate: failed reason=no_wall_found
+→ iw dev wlan0: txpower 15.00 dBm     (60 qdb = rung 7's mask ceiling)
+```
+
+§10.6 R4's restore order is "power first, then the boot selector window, then
+the §10.4 resolve re-places the committed rung". On a node with **no curve and
+no §10.5 override** that order has an undefined leaf: there is no resolve to
+re-place with, so power was left wherever the last probe put it. Before Pass
+134 the leaf was near-unreachable — a run that got far enough to move power
+almost always ended by installing a curve. The `no_wall_found` refusal makes a
+first-ever run end in *failure* routinely, so the leaf became the common path
+on exactly the runs the refusal exists to catch.
+
+This is not a new ruling. §10.5 already defines the same condition — release
+power authority with no curve loaded — and its answer on kernel-monitor is
+`txpower auto`, "after which the curve resolve resumes if a curve is loaded".
+§10.6's restore now uses it. The remaining leaf is a backend with no auto
+actuator at all (udp/dev), which is logged honestly rather than described as a
+restore.
+
+Worth stating for the operational picture, because it was measured the same
+hour: `iw txpower auto` reports **19.00 dBm** on the ground's 8812EU and
+**27.00 dBm** on the craft's. That number is a *cap* the driver will not
+exceed, not evidence of a per-rate taper below it — an earlier claim in this
+campaign that uncalibrated craft power is "the vendor's per-rate TXAGC curve"
+was inferred from an init-script log line, not measured, and `iw` cannot see
+below the cap. So an uncalibrated craft sits under a 27 dBm ceiling, and
+`max_power_qdb` does **not** lower it: with no curve and no artifact the
+controller issues no power command at all, so §10.3 binds the sweep and clamps
+applied placements but is not an unconditional PA limit. Closing that would be
+a behaviour change §10.3 does not currently authorise, and is left open.

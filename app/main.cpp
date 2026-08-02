@@ -2953,14 +2953,32 @@ struct TxCore {
                     resolve_and_apply_power(*last_commit_mcs_,
                                             last_commit_level_);
                 }
-            } else {
-                // No curve and no override (a failed first-ever run): no
-                // in-process authority knows the pre-run power. Leave the
-                // last probe value but say so loudly.
+            } else if (apply_power_auto) {
+                // No curve and no override: no in-process authority knows the
+                // pre-run power, but the BACKEND does — this is exactly the
+                // §10.5 `{"auto": true}` condition ("release power authority
+                // with no curve loaded"), whose defined answer on
+                // kernel-monitor is `txpower auto`. Before Pass 134 this leaf
+                // was near-unreachable, because a run that got far enough to
+                // move power almost always ended by installing a curve. The
+                // no_wall_found refusal makes a first-ever run END in failure
+                // routinely, and leaving the last probe value latched strands
+                // the actuator on exactly the runs the refusal exists to
+                // catch. Device-confirmed: a bench-range run left the craft
+                // at 15.00 dBm (rung 7's mask ceiling) indefinitely.
+                for (const PowerTarget& t : power_targets_) {
+                    apply_power_auto(t.adapter_idx);
+                }
                 std::fprintf(stderr,
-                             "calibrate: restore has no power authority "
-                             "(no curve, no override) — TX power left at "
-                             "the last probe value\n");
+                             "calibrate: restore -> backend auto "
+                             "(no curve, no override)\n");
+            } else {
+                // udp/dev backend: no actuator at all, so there is nothing to
+                // hand back. Say so rather than implying a restore happened.
+                std::fprintf(stderr,
+                             "calibrate: restore has no power authority and "
+                             "no auto actuator — TX power left at the last "
+                             "probe value\n");
             }
             std::fprintf(stderr, "calibrate: %s%s%s\n",
                          calibrator_->state() == CalibState::kDone
