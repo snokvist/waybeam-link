@@ -5548,12 +5548,28 @@ path fails in the most dangerous direction — fewer reports, fewer observed
 losses, every probe reads clean, every rung places at the ceiling.
 
 Two layers, because the persist-time rule alone only pattern-matches the
-symptom: feedback health becomes a **precondition and a continuous check**
-(distinct from the 3 s report-loss abort, which catches silence — a stream at
-half rate is never silent), and persistence **refuses** an artifact where every
-rung placed at its ceiling with `first_bad_qdb == null` throughout. §10.7
-already refuses a result authored from silence; this is the same rule for one
-authored from false cleanliness.
+symptom: feedback health becomes a **start precondition** (distinct from the
+3 s report-loss abort, which catches silence — a stream at half rate is never
+silent), and persistence **refuses** an artifact where every rung placed at its
+ceiling with `first_bad_qdb == null` throughout. §10.7 already refuses a result
+authored from silence; this is the same rule for one authored from false
+cleanliness.
+
+**The continuous half of that check was withdrawn during implementation, and
+the reason is Pass 133.** I specced health as "a precondition *and* a
+continuous check", implemented it as a whole-run accepted-report rate floor,
+and three existing tests went red — `test_blackout_retreat`,
+`test_verify_blackout_descent`, `test_floor_ascend`. They were right and the
+spec was wrong. Since Pass 133 the sweep no longer stops at the first wall, so
+every rung climbs through the entire blacked-out region above its own overload
+point; on a marginal link that is most of a run's wall time, **by design**. A
+rate floor evaluated during a sweep is therefore indistinguishable from wall
+evidence (Pass 121 addendum 4) and fails exactly the runs that are measuring
+correctly. Report health is a property of the link **at rest**: once the sweep
+starts, a low report rate is a measurement, not a fault. The precondition is
+measured over a closed 4 s window of ordinary operation and rejected as a
+§11.7 REJECT alongside the existing actuator and latched-reporter conditions —
+"latched" was never the same question as "latched and keeping up".
 
 A non-monotone placement curve is **surfaced, not refused** — the PA shape is a
 physical expectation, not a protocol invariant, and at close range a flat curve
