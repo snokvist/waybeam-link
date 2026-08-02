@@ -189,6 +189,22 @@ StatsSnapshot sample_snapshot() {
     s.link.calib_rung = 5;
     s.link.calib_fingerprint = 0xBF;
     s.link.calib_stale = true;
+    // §10.7 Pass 125. Distinct values throughout, including two negatives:
+    // adjacent fields sharing a value would let a field-order swap slip past
+    // a golden, and the two i32s must not silently serialize as unsigned.
+    // uplink_calib_rung is 0 in real v1 output (one uplink rung) — non-zero
+    // here only so the golden pins its position.
+    s.link.uplink_calib_state = "done";
+    s.link.uplink_calib_rung = 3;
+    s.link.uplink_calib_power_qdb = -44;
+    s.link.uplink_calib_fingerprint = 0x2A;
+    s.link.uplink_calib_stale = true;
+    s.link.uplink_quality_valid = true;
+    s.link.uplink_quality_age_ms = 137;
+    s.link.uplink_quality_report_epoch = 9001;
+    s.link.uplink_quality_reports = 8640;
+    s.link.uplink_quality_rssi_mean = -37;
+    s.link.uplink_quality_rx_mcs = 7;
     return s;
 }
 
@@ -294,7 +310,13 @@ const char* kGolden =
     "\"mtu_mode\":\"auto\",\"mtu_requested\":3072,"
     "\"mtu_effective\":2048,\"mtu_supported\":3072,"
     "\"calib_state\":\"running\",\"calib_rung\":5,"
-    "\"calib_fingerprint\":191,\"calib_stale\":true}}\n";
+    "\"calib_fingerprint\":191,\"calib_stale\":true,"
+    "\"uplink_calib_state\":\"done\",\"uplink_calib_rung\":3,"
+    "\"uplink_calib_power_qdb\":-44,\"uplink_calib_fingerprint\":42,"
+    "\"uplink_calib_stale\":true,\"uplink_quality_valid\":true,"
+    "\"uplink_quality_age_ms\":137,\"uplink_quality_report_epoch\":9001,"
+    "\"uplink_quality_reports\":8640,\"uplink_quality_rssi_mean\":-37,"
+    "\"uplink_quality_rx_mcs\":7}}\n";
 
 }  // namespace
 

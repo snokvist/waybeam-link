@@ -157,6 +157,9 @@ std::string calib_store_json(const std::string& state, uint8_t rung,
                              const char* fail_reason,
                              const CalibArtifact* artifact) {
     json j;
+    // §10.7 Pass 125: both directions answer at /api/v1/calibration, so the
+    // response has to say which one it is. The craft is always downlink.
+    j["direction"] = "downlink";
     j["state"] = state;
     j["rung"] = rung;
     j["fingerprint"] = fingerprint;

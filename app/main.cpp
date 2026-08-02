@@ -3450,6 +3450,23 @@ struct VcmdStatsFill {
     uint16_t mtu_supported = kDefaultMaxPayload;
 };
 
+// §10.7 (Pass 125) ground-uplink stats. A struct rather than eleven more
+// parameters, and a pointer so every other role emits the role-neutral
+// idle/zero defaults without threading anything.
+struct UplinkStatsFill {
+    const char* state = "idle";
+    uint8_t rung = 0;
+    int32_t power_qdb = 0;
+    uint8_t fingerprint = 0;
+    bool stale = false;
+    bool quality_valid = false;
+    uint32_t quality_age_ms = 0;
+    uint32_t report_epoch = 0;
+    uint32_t reports = 0;
+    int32_t rssi_mean = 0;
+    uint8_t rx_mcs = kUplinkRxMcsUnknown;
+};
+
 void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 uint64_t t0, const TxCore* tx, const RxCore* rx,
                 const AirBackend* air = nullptr,
@@ -3467,7 +3484,8 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 StatsSnapshot* out_snap = nullptr,
                 const ArqTimingStats* arq_timing = nullptr,
                 const VcmdStatsFill* vcmd = nullptr,
-                uint16_t channel_mhz = 0) {
+                uint16_t channel_mhz = 0,
+                const UplinkStatsFill* uplink = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -3486,6 +3504,19 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     snap.link.channel_mhz = channel_mhz;  // §11 current operating channel (0 = not tracked)
     if (tx != nullptr) {
         tx->fill_stats(snap, now);
+    }
+    if (uplink != nullptr) {  // §10.7 Pass 125 (ground/rx node only)
+        snap.link.uplink_calib_state = uplink->state;
+        snap.link.uplink_calib_rung = uplink->rung;
+        snap.link.uplink_calib_power_qdb = uplink->power_qdb;
+        snap.link.uplink_calib_fingerprint = uplink->fingerprint;
+        snap.link.uplink_calib_stale = uplink->stale;
+        snap.link.uplink_quality_valid = uplink->quality_valid;
+        snap.link.uplink_quality_age_ms = uplink->quality_age_ms;
+        snap.link.uplink_quality_report_epoch = uplink->report_epoch;
+        snap.link.uplink_quality_reports = uplink->reports;
+        snap.link.uplink_quality_rssi_mean = uplink->rssi_mean;
+        snap.link.uplink_quality_rx_mcs = uplink->rx_mcs;
     }
     if (vcmd != nullptr) {
         snap.link.cmd_last_nonce = vcmd->cmd_last_nonce;
@@ -4616,12 +4647,20 @@ int run_rx(const Loaded& l) {
         }
         return q;
     };
-    // §10.7 restore order, highest precedence first: explicit configured
-    // placement, then a matching artifact, then backend auto. One resolver,
-    // one call site — a second copy of this ordering is how the two drift.
+    // §10.5 (Pass 125) override latch, now available on any node with a
+    // role:"tx" adapter. It outranks every resolved tier — that is what makes
+    // it the manual counterpart to §10.7 and the reference placement for the
+    // calibrated-versus-manual comparison, with no config edit and restart.
+    std::optional<int32_t> uplink_override;
+    // §10.7 restore order, highest precedence first: the §10.5 latch, then an
+    // explicit configured placement, then a matching artifact, then backend
+    // auto. One resolver, one call site — a second copy of this ordering is
+    // how the two drift.
     const auto uplink_restore_power = [&]() {
         if (uplink_adapter == nullptr) return;
-        if (uplink_owner_qdb) {
+        if (uplink_override) {
+            (void)air.value->set_power_qdb(uplink_idx, *uplink_override);
+        } else if (uplink_owner_qdb) {
             (void)air.value->set_power_qdb(uplink_idx, *uplink_owner_qdb);
         } else if (const std::optional<int32_t> aq = uplink_artifact_qdb()) {
             (void)air.value->set_power_qdb(uplink_idx, *aq);
@@ -4682,6 +4721,43 @@ int run_rx(const Loaded& l) {
     }
     UplinkCalibrator uplink_cal(ucal_params, l.cfg.air.uplink_mcs,
                                 l.cfg.air.uplink_sgi);
+    // One place that turns live §10.7/§3.16 state into the §15.3 fields, so
+    // the stats line and GET /api/v1/calibration cannot describe the node
+    // differently.
+    const auto uplink_fill = [&]() {
+        UplinkStatsFill u;
+        switch (uplink_cal.state()) {
+            case CalibState::kIdle: u.state = "idle"; break;
+            case CalibState::kRunning: u.state = "running"; break;
+            case CalibState::kDone: u.state = "done"; break;
+            case CalibState::kFailed: u.state = "failed"; break;
+        }
+        u.rung = 0;  // v1 has one uplink rung; shape mirrors calib_rung
+        u.power_qdb = uplink_cal.state() == CalibState::kRunning
+                          ? uplink_cal.qdb()
+                          : uplink_cal.placement().placement_qdb;
+        u.fingerprint = uplink_artifact_fp;
+        u.stale = uplink_artifact_stale;
+        // §3.16: valid/age track LIVENESS (packet arrival), not counter
+        // progress — that is the clock §10.7's abort watches.
+        u.quality_valid = quality_gate.live(now_ms(), ucal_params.liveness_ms);
+        u.quality_age_ms =
+            quality_gate.have()
+                ? static_cast<uint32_t>(now_ms() - quality_gate.liveness_ms())
+                : 0;
+        if (quality_gate.have()) {
+            const UplinkQuality& q = quality_gate.last();
+            u.report_epoch = q.last_report_epoch;
+            u.reports = q.reports_received;
+            u.rx_mcs = q.last_rx_mcs;
+            u.rssi_mean =
+                q.reports_received != 0
+                    ? static_cast<int32_t>(q.rssi_sum_dbm) /
+                          static_cast<int32_t>(q.reports_received)
+                    : 0;
+        }
+        return u;
+    };
     const uint16_t op_chan =
         l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
     const uint8_t op_bw_mhz =
@@ -5361,6 +5437,118 @@ int run_rx(const Loaded& l) {
                 scout.stop(now_ms());
                 return "";
             };
+            // §10.5 override latch on the ground's uplink adapter.
+            h.tx_power_set = [&](bool is_auto, int qdb) -> std::string {
+                if (uplink_adapter == nullptr) {
+                    return "no role:\"tx\" adapter on this node";
+                }
+                // Latching mid-run would fight the seek for the actuator, so
+                // the run yields first and restores through its own single
+                // convergence path — before the latch applies (§10.5).
+                if (uplink_cal.state() == CalibState::kRunning) {
+                    (void)uplink_cal.abort(now_ms());
+                    const UplinkCalibActions ua =
+                        uplink_cal.tick(now_ms(), rx.report_epoch(), true);
+                    if (ua.restore) uplink_restore_power();
+                    std::fprintf(stderr,
+                                 "uplink-calib: ABORT (tx/power override)\n");
+                }
+                if (is_auto) {
+                    uplink_override.reset();
+                    uplink_restore_power();  // immediate, per §10.5
+                    return "";
+                }
+                if (qdb < -511 || qdb > 511) {
+                    return "qdb out of range (-511..511)";
+                }
+                uplink_override = qdb;
+                uplink_restore_power();
+                return "";
+            };
+            h.tx_power_json = [&] {
+                std::string s = "{\"override_active\":";
+                s += uplink_override ? "true" : "false";
+                if (uplink_override) {
+                    s += ",\"qdb\":" + std::to_string(*uplink_override);
+                }
+                s += ",\"backend\":\"";
+                s += l.cfg.air.kind == AirCfg::Kind::kMonitor ? "kernel-monitor"
+                     : l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio"
+                                                              : "udp";
+                s += "\"}";
+                return s;
+            };
+            // §10.7 GET: the ground's OWN uplink state. The craft response
+            // keeps the §10.6 schema; `direction` is what tells a Hub which
+            // of the two it is holding, since both live at this path.
+            h.calibration_json = [&]() -> std::string {
+                const UplinkStatsFill u = uplink_fill();
+                std::string s = "{\"direction\":\"uplink\",\"state\":\"";
+                s += u.state;
+                s += "\",\"rung\":" + std::to_string(u.rung);
+                s += ",\"power_qdb\":" + std::to_string(u.power_qdb);
+                s += ",\"fingerprint\":" + std::to_string(u.fingerprint);
+                s += ",\"stale\":";
+                s += u.stale ? "true" : "false";
+                s += ",\"quality\":{\"valid\":";
+                s += u.quality_valid ? "true" : "false";
+                s += ",\"age_ms\":" + std::to_string(u.quality_age_ms);
+                s += ",\"last_report_epoch\":" + std::to_string(u.report_epoch);
+                s += ",\"reports_received\":" + std::to_string(u.reports);
+                s += ",\"rssi_mean\":" + std::to_string(u.rssi_mean);
+                s += ",\"rx_mcs\":" + std::to_string(u.rx_mcs);
+                s += "},\"artifact\":";
+                if (uplink_artifact) {
+                    s += "{\"local_adapter_identity\":\"" +
+                         uplink_artifact->local_adapter_identity + "\"";
+                    s += ",\"craft_originator\":" +
+                         std::to_string(uplink_artifact->craft_originator);
+                    s += ",\"craft_adapter_fingerprint\":" +
+                         std::to_string(
+                             uplink_artifact->craft_adapter_fingerprint);
+                    s += ",\"channel_mhz\":" +
+                         std::to_string(uplink_artifact->channel_mhz);
+                    s += ",\"bw_mhz\":" +
+                         std::to_string(uplink_artifact->bw_mhz);
+                    s += ",\"t_unix\":" +
+                         std::to_string(uplink_artifact->t_unix);
+                    s += ",\"placements\":[";
+                    bool first_p = true;
+                    for (const UplinkPlacement& p : uplink_artifact->placements) {
+                        if (!first_p) s += ",";
+                        first_p = false;
+                        s += "{\"mcs\":" + std::to_string(p.mcs);
+                        s += ",\"short_gi\":";
+                        s += p.short_gi ? "true" : "false";
+                        s += ",\"placement_qdb\":" +
+                             std::to_string(p.placement_qdb);
+                        s += ",\"placement_rssi_dbm\":" +
+                             std::to_string(p.placement_rssi_dbm);
+                        s += ",\"placement_loss_milli\":" +
+                             std::to_string(p.placement_loss_milli);
+                        s += ",\"last_clean_qdb\":" +
+                             std::to_string(p.last_clean_qdb);
+                        s += ",\"first_bad_qdb\":";
+                        s += p.has_first_bad ? std::to_string(p.first_bad_qdb)
+                                             : "null";
+                        s += "}";
+                    }
+                    s += "]}";
+                } else {
+                    s += "null";
+                }
+                s += ",\"fail_reason\":";
+                const char* fr = uplink_cal.fail_reason();
+                if (fr != nullptr) {
+                    s += "\"";
+                    s += fr;
+                    s += "\"";
+                } else {
+                    s += "null";
+                }
+                s += "}";
+                return s;
+            };
             // §10.7 start prerequisites. Each returns the failed one so the
             // operator sees WHY, not just 409 — the list is long and every
             // entry is a real hazard, not a formality.
@@ -5389,6 +5577,9 @@ int run_rx(const Loaded& l) {
                 // claim is required, or sufficient (§10.7).
                 if (!quality_gate.live(now_ms(), ucal_params.liveness_ms)) {
                     return "no fresh authenticated §3.16 feedback";
+                }
+                if (uplink_override) {
+                    return "§10.5 TX-power override is latched";
                 }
                 if (scout.scanning()) return "scout is running";
                 if (follower.campaign_active()) return "CSA campaign active";
@@ -6219,6 +6410,7 @@ int run_rx(const Loaded& l) {
                                       vissuer.nonce(), arq_rx_enabled,
                                       mtu_mode.c_str(), mtu_requested,
                                       mtu_effective, mtu_supported};
+            const UplinkStatsFill ufill = uplink_fill();
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
@@ -6227,7 +6419,7 @@ int run_rx(const Loaded& l) {
                        &frame_stats, &shm_stats,
                        cache_ctl ? &crs : nullptr,
                        cache_store ? &css : nullptr, &last_snap, &timing,
-                       &vfill, operating_chan);
+                       &vfill, operating_chan, &ufill);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }

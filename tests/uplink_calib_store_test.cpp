@@ -4,6 +4,7 @@
 // include the craft session), and forward compatibility of the placements
 // list — a two-entry artifact from a future multi-rung uplink must parse
 // under schema 1, which is the whole reason it is a list from v1.
+#include "wblink/calib_store.h"
 #include "wblink/uplink_calib_store.h"
 
 #include <cstdio>
@@ -230,9 +231,21 @@ void test_multi_rung_forward_compat() {
     std::remove(dir.c_str());
 }
 
+// The other half of the §10.7 discriminator: the CRAFT response at the same
+// path must say downlink. Without this a Hub holding one body cannot tell
+// which direction it describes, and the single bi-directional action would
+// render the wrong phase's state.
+void test_craft_response_declares_downlink() {
+    const std::string j =
+        calib_store_json("idle", 0, 0, false, nullptr, nullptr);
+    CHECK(j.find("\"direction\":\"downlink\"") != std::string::npos);
+    CHECK(j.find("\"uplink\"") == std::string::npos);
+}
+
 }  // namespace
 
 int main() {
+    test_craft_response_declares_downlink();
     test_round_trip();
     test_fingerprint_is_binary_not_text();
     test_tamper_rejected();

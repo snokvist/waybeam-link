@@ -127,6 +127,14 @@ int main() {
         return std::string(
             "{\"override_active\":false,\"backend\":\"kernel-monitor\"}");
     };
+    // §10.7 (Pass 125): both directions answer at /api/v1/calibration, so
+    // `direction` is what tells a Hub which one it is holding. This node
+    // serves the ground/uplink shape.
+    h.calibration_json = [] {
+        return std::string(
+            "{\"direction\":\"uplink\",\"state\":\"done\",\"rung\":0,"
+            "\"power_qdb\":72,\"quality\":{\"valid\":true,\"rx_mcs\":0}}");
+    };
     // §10.7 ground-uplink calibration POST (Pass 125).
     h.uplink_calibrate = [&](const std::string& action) -> std::string {
         ucal_action = action;
@@ -357,6 +365,14 @@ int main() {
             "POST /api/v1/tx/power HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    // §10.7 GET: the body carries the direction discriminator verbatim.
+    {
+        const std::string r =
+            roundtrip(s, port, "GET /api/v1/calibration HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"direction\":\"uplink\"") != std::string::npos);
+        CHECK(body_of(r).find("\"rx_mcs\":0") != std::string::npos);
     }
     // §10.7 POST /api/v1/calibration: exactly start|abort. A malformed body
     // is 400 and must not reach the hook; a refused prerequisite is 409 and
