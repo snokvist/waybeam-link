@@ -5670,3 +5670,47 @@ the default fixture. And a rung's placement is the highest **grid** step
 (`min_qdb + 16k`) that stayed clean, not the ceiling itself, so expected
 placements do not equal `rung_ceiling_qdb` except where the grid happens to
 land on it.
+
+## Pass 135 — §11.7 `0x0A TX_POWER`: a runtime ceiling, not a runtime power (2026-08-02)
+
+Pass 134 built a per-rung ceiling and left it config-only. The operator wants a
+min/medium/high power trim on the ground hub menu reaching both directions, so
+the ceiling needs a runtime path. Three rulings.
+
+**1. The lever is the mask baseline, not the §10.5 latch.** §10.5 already
+exists and is the obvious candidate — one endpoint, already runtime, already
+clamped by §10.3. It is also the wrong shape, and the spec says so in its own
+words: the latch is *"rung-agnostic by construction — it overrides the resolve,
+whatever rung produced it."* A menu tier of "medium = 19 dBm" would apply
+19 dBm at MCS0, where 21 is fine, and 19 dBm at MCS7, where the 10 m campaign
+measured a 13 dBm wall — flattening the exact curve Pass 134 exists to
+preserve. `TX_POWER` therefore moves `effective_max_qdb`, the *baseline* the
+per-rung mask is derived from, so one choice shifts the whole tapered curve and
+the measured shape survives.
+
+**2. The encoding is preset-indexing, and it needs no new exception.** The Pass
+68 bound — every command is enable/disable or a ≤5-choice enum — holds without
+widening; `0x07` MODE remains the sole `cmd_arg` exception. Absolute qdb is
+per-adapter and per-deployment, measured this campaign: the ground's 8812EU
+defaults to a 19.00 dBm cap and the craft's to 27.00 dBm, so the same "medium"
+cannot be the same number on both. That is the identical argument `0x04`–`0x06`
+make for `venc.command_presets`, so `TX_POWER` uses the same road — with the
+list at `adapters[].power_presets_qdb`, beside the §10.3 ceiling it selects
+rather than in the venc object, because it is not a venc value.
+
+**3. A tier may only LOWER power** (operator ruling). Every preset is clamped
+at config load to that adapter's boot `max_power_qdb`. §10.3 stays the
+operator's hard ceiling, no runtime path raises power past it, and raising it
+keeps the friction of a config edit. This settles a fourth question for free:
+`0x09` MTU_TIER resets on binding release because an absent owner's jumbo
+choice would silently govern a future fleet, but a power tier can only lower,
+so a departed owner's choice is never the hazardous direction — and resetting
+it would move power mid-flight. `TX_POWER` is **not** reset on binding release.
+
+**What it does not do.** On a node with no curve and no artifact the tier is
+accepted and recorded but moves nothing, per the Pass 134 §10.3 ruling that the
+ceiling binds only where a number of ours reaches the actuator. That is not a
+gap to paper over: it means the menu's power trim does nothing until the node
+is calibrated, which is honest and points at the right next action. `GET
+/api/v1/tx/power_tier` reports `effective: false` in that state rather than
+implying a setting that is not reaching hardware.
