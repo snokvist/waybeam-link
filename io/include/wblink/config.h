@@ -289,6 +289,16 @@ struct CalibrationPolicy {
     int report_loss_abort_ms = 3000;
     int hard_cap_ms = 600000;
     std::string artifact_dir = "/etc/waybeam-link/calibration";
+    // §10.7 (Pass 125) ground-uplink gates. The walls, step, min/max, settle
+    // and artifact_dir above are shared; only these differ, because the uplink
+    // measures sparse LINK_REPORT epochs instead of live video. They are
+    // EPOCH COUNTS, not milliseconds: a slow report cadence must lengthen the
+    // run, never let an unobserved dwell score as clean. The craft-only ms
+    // dwells and report_loss_abort_ms are unused on the ground.
+    int uplink_probe_epochs = 40;
+    int uplink_ambiguous_epochs = 80;
+    int uplink_verify_epochs = 200;
+    int uplink_liveness_ms = 2000;
 };
 
 struct Policy {
@@ -338,6 +348,17 @@ struct AirCfg {
     // own SA (craft half of the gate-4 A/B). Opt-in — makes a passive
     // monitor transmit ACKs.
     bool ack_responder = false;
+    // §10.7 (Pass 125) the rx-node's uplink operating point. Before this an
+    // rx node never called set_tx_mode at all and rode the TxRate struct
+    // default, which happens to be exactly these seeds — so committed
+    // behaviour is unchanged. What changes is that the rung is ASSERTED:
+    // §10.7 records it in the calibration artifact and §3.16's last_rx_mcs
+    // cross-checks it, and neither means anything against a default nobody
+    // chose. A future multi-rung uplink widens these values, not the
+    // mechanism.
+    uint8_t uplink_mcs = 0;
+    bool uplink_sgi = false;
+    uint8_t uplink_bw = 20;
 };
 
 // Loopback-mode synthetic loss (§16.2). Dev tooling, not §15.

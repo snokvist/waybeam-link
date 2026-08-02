@@ -1433,7 +1433,31 @@ struct AirBackend {
     // T_switch (a straggler follows because a sibling heard the CSA). On the
     // udp dev backend the retune is a logged intent — the CSA state machines
     // stay exercisable end-to-end without radios.
+    // §10.7 (Pass 125): latch the rx node's uplink operating point and commit
+    // it through the same seam the tx node's selector uses. A tx node never
+    // latches — its selector re-commits the rate on every profile change, so
+    // it self-heals; an rx node has no selector, which is why the rate has to
+    // be re-asserted after every retune. Unlatched, both calls are no-ops.
+    std::optional<std::pair<uint8_t, bool>> uplink_rate;
+    void latch_uplink_rate(uint8_t mcs, bool sgi) {
+        uplink_rate = std::pair<uint8_t, bool>{mcs, sgi};
+        set_tx_mode(mcs, sgi);
+    }
+    // Scope guard, not a call before each `return`: retune_all/retune_one have
+    // several exits and a missed one would leave the uplink on whatever rate
+    // the retune left behind — silently, and only on some paths.
+    struct ReassertRate {
+        AirBackend& a;
+        explicit ReassertRate(AirBackend& b) : a(b) {}
+        ~ReassertRate() {
+            if (a.uplink_rate) {
+                a.set_tx_mode(a.uplink_rate->first, a.uplink_rate->second);
+            }
+        }
+    };
+
     bool retune_all(uint16_t chan_mhz, uint8_t bw, bool fast) {
+        const ReassertRate guard(*this);
         if (mon) {
             const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
                                           : bw;
@@ -1566,6 +1590,7 @@ struct AirBackend {
         return 0;
     }
     bool retune_one(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
+        const ReassertRate guard(*this);
         if (mon) {
             const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
                                           : bw;
@@ -4405,6 +4430,13 @@ int run_rx(const Loaded& l) {
     }
     PacketEventTrace packet_trace("rx");
     air.value->set_packet_trace(&packet_trace);
+    // §10.7 (Pass 125): commit the uplink operating point. Before this an rx
+    // node never called set_tx_mode at all and rode the TxRate struct default;
+    // the seeds match it, so this changes no bytes on air. What it buys is
+    // that the rung is asserted — the §10.7 artifact records it and §3.16's
+    // last_rx_mcs cross-checks it, and neither is meaningful against a
+    // default nobody chose.
+    air.value->latch_uplink_rate(l.cfg.air.uplink_mcs, l.cfg.air.uplink_sgi);
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
         std::fprintf(stderr, "binding error: %s\n", bindings.error.c_str());
