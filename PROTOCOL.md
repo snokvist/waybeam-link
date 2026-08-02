@@ -2531,11 +2531,23 @@ this is a §10.7 policy on the shared seek's output, not a change to the seek.
 same shared seek against the ground's own uplink adapter, so it climbs to the
 same `effective_max_qdb` tapered by the same §10.2 level mask. The ground half
 carries the *stronger* case for it: the placement auto-applies at boot with no
-operator between the measurement and the actuator. §10.6's flat-at-ceiling
-refusal has no §10.7 analogue and needs none — §10.7 already fails a run whose
-verify did not reach `loss_ok_milli`, and a ground that reads clean at every
-power on every rung has a dead §3.16 counter stream, which the liveness expiry
-already catches as `quality_lost`.
+operator between the measurement and the actuator.
+
+**And so does the flat-at-ceiling refusal (Pass 134 addendum).** The first form
+of this ruling said §10.7 needed no §10.6 analogue, on the reasoning that a
+ground reading clean at every power on every rung must have a dead §3.16
+counter stream, which the liveness expiry already catches as `quality_lost`.
+**Device evidence falsified that.** A bench-range run with a fully live counter
+stream — verify dwells returning real 0–10‰ values throughout — placed all
+eight rungs at their §10.3 ceilings with `first_bad_qdb == null` everywhere,
+reached `done`, and persisted a curve that was the ceiling mask read back
+rather than a measurement. At close range no wall exists, and that is a
+property of the **geometry**, not of the feedback path; the two conditions are
+not the same and only one of them was covered. §10.7 therefore carries the same
+rule as §10.6: every rung at its ceiling with no bracket booked anywhere fails
+the run with `no_wall_found` and persists nothing, leaving the previous
+last-good artifact in place. This is the direction where the rule matters most,
+for the reason in the paragraph above.
 
 **Actuator ownership and config carve-out.** Config load rejects `power_map` on
 any `role:"rx"` adapter **regardless of node role**, and accepts it on a

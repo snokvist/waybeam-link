@@ -9,6 +9,7 @@
 // delivers nothing is a 1000permille observation, never a timeout.
 #include "wblink/uplink_calibrate.h"
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -35,15 +36,24 @@ using namespace wblink;
 struct Uplink {
     int32_t qdb = 0;
     int8_t floor_rssi = -128;  // below this, nothing is delivered
-    int8_t ceil_rssi = 127;    // at/above this, overload
+    int8_t ceil_rssi = 127;    // flat override; -1 means "use ceil[rung]"
+    // Per-rung overload ceiling, mirroring §10.6's rig (Pass 134). A model
+    // with no wall on ANY rung is now a refused run, not a strong link, so
+    // the default channel has to be measurable — rungs 0-2 ramp clean to
+    // their §10.3 ceilings, 3-7 wall below theirs.
+    std::array<int8_t, 8> ceil{127, 127, 127, -20, -21, -23, -25, -26};
     int32_t cap_qdb = 100000;  // silently latched RF cap
+    uint8_t rung = 0;
     int8_t rssi() const {
         return static_cast<int8_t>(-41 + 0.85 * (std::min(qdb, cap_qdb) / 4.0));
+    }
+    int8_t ceiling() const {
+        return ceil_rssi != 127 ? ceil_rssi : ceil[rung < 8 ? rung : 7];
     }
     // Delivered fraction in permille of what the ground emitted.
     uint32_t delivered(uint32_t emitted) const {
         const int8_t r = rssi();
-        if (r < floor_rssi || r >= ceil_rssi) return 0;
+        if (r < floor_rssi || r >= ceiling()) return 0;
         return emitted;  // clean: every epoch lands
     }
 };
@@ -64,6 +74,9 @@ struct Rig {
     uint32_t inflight = 0;   // built, not yet committed (§7.2 batching)
     std::vector<UplinkRate> rates;
     bool quality_live = true;
+    // Lift the synthetic RF cap from this rung up, so a test can flatten the
+    // low rungs' sweep while leaving the channel measurable overall.
+    int cap_clears_at_rung = -1;
 
     explicit Rig(const UplinkCalibParams& p) : cal(p) {}
 
@@ -106,6 +119,11 @@ struct Rig {
             cal.tick(now, local_epoch, quality_live, budget == 0);
         // Rate before power, exactly as app/main.cpp actuates them (§10.7 R4).
         if (a.set_rate) rates.push_back(*a.set_rate);
+        up.rung = cal.rung();
+        if (cap_clears_at_rung >= 0 && up.rung >= cap_clears_at_rung) {
+            up.cap_qdb = 100000;
+            up.ceil = {127, 127, 127, -20, -21, -23, -25, -26};
+        }
         if (a.set_qdb) {
             up.qdb = *a.set_qdb;
             // Every power command must land on a rung that was commanded
@@ -487,8 +505,17 @@ void test_failed_persist_fails_the_run() {
 // bench case that placed at min_qdb and had to be failed under Pass 129; it
 // now simply succeeds at the top of the range.
 void test_silent_cap_sweeps_to_max() {
+    //
+    // Pass 134: a cap this hard pins delivered RSSI at the bottom for every
+    // rung, so no wall can exist anywhere — which is now the REFUSED shape,
+    // not a strong link. The cap is therefore applied only to the rungs whose
+    // sweep it is meant to flatten; rungs 3-7 keep the model's ceilings, so
+    // the run is a measurement and rung 0's ramp is still the thing under
+    // test.
     Rig r(fast_params());
     r.up.cap_qdb = 4;   // delivered power never follows commanded
+    r.up.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
+    r.cap_clears_at_rung = 3;  // restore the model's walls from rung 3 up
     CHECK(r.cal.start(r.now, r.local_epoch));
     r.run(r.now + 600000);
     CHECK(r.cal.state() == CalibState::kDone);
@@ -638,16 +665,22 @@ void test_eight_rung_sweep() {
         CHECK(pl.mcs == seeds.rungs[i].mcs);
         CHECK(pl.short_gi == seeds.rungs[i].short_gi);
         CHECK(pl.placement_loss_milli <= 15);
-        // Every rung sweeps from the floor, so on this flat synthetic channel
-        // every rung reaches its own top. Pass 134: that top is the §10.3
-        // ceiling tapered by the rung's §10.2 level, NOT a flat max_qdb —
-        // 108/108/100/100/92/92/84/84 under the seeded {4,4,3,3,2,2,1,1}.
-        // What matters is that each is a real measurement rather than rung
-        // 0's result copied forward.
-        const int32_t want =
+        // Rungs 0-2 have no wall in the model and stop at their §10.3
+        // ceilings — tapered by the §10.2 level, NOT a flat max_qdb
+        // (108/108/100 under the seeded {4,4,3,3,2,2,1,1}). Rungs 3-7 wall
+        // below theirs. The mixture is the point: each placement is a real
+        // measurement of ITS rung rather than rung 0's result copied forward,
+        // and a run that is ceiling-limited on EVERY rung is refused (Pass
+        // 134, test_no_wall_anywhere_persists_nothing).
+        // The seek grid is min_qdb + 16k, so a rung's placement is the
+        // highest GRID step that stayed clean, not the ceiling itself.
+        static constexpr int32_t kWant[8] = {108, 108, 100, 84, 84, 68, 68, 52};
+        CHECK(pl.placement_qdb == kWant[i]);
+        const int32_t ceiling =
             seeds.seek.max_qdb +
             (int32_t(seeds.levels[i]) - kPowerLevelBaseline) * kQdbPerLevel;
-        CHECK(pl.placement_qdb == want);
+        CHECK(pl.placement_qdb <= ceiling);
+        CHECK(pl.has_first_bad == (i >= 3));
     }
 
     // The rate was commanded once per rung, in order, and power never arrived
@@ -841,6 +874,42 @@ void test_sequencer() {
 
 }  // namespace
 
+
+// Pass 134 addendum: the §10.6 refusal applies to the GROUND too. The Pass
+// 134 ruling argued it did not — that a ground reading clean at every power
+// on every rung must have a dead §3.16 counter stream, which the liveness
+// expiry already catches. Device evidence falsified that: a bench-range run
+// with a fully live counter stream (verify dwells returned real 0-10permille
+// values) placed all eight rungs at their §10.3 ceilings with no bracket
+// anywhere, reached `done`, and persisted a curve that was the ceiling mask
+// read back. At 1 m no wall exists — a property of the geometry, not of the
+// feedback path. The ground carries the STRONGER case, because its artifact
+// auto-applies at boot with no operator in between.
+void test_no_wall_anywhere_persists_nothing() {
+    Rig r(fast_params());
+    r.up.ceil = {127, 127, 127, 127, 127, 127, 127, 127};  // nothing ever bad
+    CHECK(r.cal.start(r.now, r.local_epoch));
+    r.run(r.now + 600000);
+    CHECK(r.cal.state() == CalibState::kFailed);
+    CHECK(r.cal.fail_reason() != nullptr);
+    if (r.cal.fail_reason() != nullptr) {
+        CHECK(std::string(r.cal.fail_reason()) == "no_wall_found");
+    }
+    CHECK(r.artifacts == 0);  // the whole point: nothing is written
+    CHECK(r.restores == 1);   // every exit still restores, §10.7 R4
+    // The feedback path was healthy throughout — this is NOT quality_lost,
+    // and conflating the two is exactly the reasoning error being corrected.
+    CHECK(r.quality_live);
+
+    // One genuine wall anywhere makes the run a measurement again.
+    Rig ok(fast_params());
+    ok.up.ceil = {127, 127, 127, 127, 127, 127, 127, -26};
+    CHECK(ok.cal.start(ok.now, ok.local_epoch));
+    ok.run(ok.now + 600000);
+    CHECK(ok.cal.state() == CalibState::kDone);
+    CHECK(ok.artifacts == 1);
+}
+
 int main() {
     test_sequencer();
     test_partial_blackout_ends_the_burst();
@@ -860,6 +929,7 @@ int main() {
     test_gate_is_the_burst_not_time();
     test_burst_resolves_the_walls_first_time();
     test_eight_rung_sweep();
+    test_no_wall_anywhere_persists_nothing();
     test_failure_mid_sweep_persists_nothing();
     if (g_fail != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", g_fail);

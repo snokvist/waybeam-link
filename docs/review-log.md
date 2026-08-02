@@ -5621,3 +5621,52 @@ below the cap. So an uncalibrated craft sits under a 27 dBm ceiling, and
 controller issues no power command at all, so §10.3 binds the sweep and clamps
 applied placements but is not an unconditional PA limit. Closing that would be
 a behaviour change §10.3 does not currently authorise, and is left open.
+
+### Pass 134 addendum 2 — §10.7 needs the refusal too, and my reason it didn't was wrong
+
+The Pass 134 spec asserted:
+
+> §10.6's flat-at-ceiling refusal has no §10.7 analogue and needs none — a
+> ground that reads clean at every power on every rung has a dead §3.16
+> counter stream, which the liveness expiry already catches as `quality_lost`.
+
+A combined `start_both` at bench range falsified it in one run. The §3.16
+counter stream was healthy the whole time — verify dwells returned real
+0–10‰ values on every rung — and the run still produced:
+
+```
+rung mcs   gi   place    dBm  loss‰  rssi  first_bad
+   0   0  LGI      84   21.0      5   -20       None
+   1   1  LGI      84   21.0      5   -20       None
+   2   2  SGI      76   19.0      0   -22       None
+   3   3  SGI      76   19.0      5   -22       None
+   4   4  SGI      68   17.0      0   -24       None
+   5   5  SGI      68   17.0     10   -24       None
+   6   6  SGI      60   15.0      5   -26       None
+   7   7  SGI      60   15.0      5   -26       None
+```
+
+That is the §10.3 mask (`max_power_qdb` 84, levels {4,4,3,3,2,2,1,1}) read
+back verbatim. It reached `done`, persisted as `fp=164`, and replaced the good
+10 m `fp=110`. The craft half of the same run correctly refused with
+`no_wall_found` — so the two directions disagreed about the identical
+condition, on the same link, in the same 5 minutes.
+
+The error was conflating two different causes of "clean everywhere". A dead
+feedback path produces it, and the liveness expiry does catch that. **Close
+range also produces it**, with a perfectly live feedback path, because no wall
+exists to find — a property of the geometry. §10.7 now carries the same rule
+as §10.6.
+
+Worth stating plainly: the argument I used to exempt §10.7 was reasoning about
+what *must* be true, on the direction I had just finished calling the stronger
+case for the ceiling. The run that disproved it cost five minutes.
+
+Two secondary corrections from the same session, both recorded so they are not
+re-derived: the uplink test rig had a single flat `ceil_rssi` and therefore
+modelled a channel with no wall on any rung — now a per-rung array mirroring
+§10.6's rig, since "no wall anywhere" is the refused shape and can no longer be
+the default fixture. And a rung's placement is the highest **grid** step
+(`min_qdb + 16k`) that stayed clean, not the ceiling itself, so expected
+placements do not equal `rung_ceiling_qdb` except where the grid happens to
+land on it.

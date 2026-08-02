@@ -444,12 +444,38 @@ class UplinkCalibrator {
         return a;
     }
 
+    // §10.7 (Pass 134 addendum): the same refusal §10.6 carries. The original
+    // Pass 134 ruling argued the ground did not need it — that a ground
+    // reading clean at every power on every rung must have a dead §3.16
+    // counter stream, which the liveness expiry already catches. DEVICE
+    // EVIDENCE FALSIFIED THAT: a bench-range run with a fully live counter
+    // stream (verify dwells returned real 0-10permille values) placed all eight
+    // rungs at their §10.3 ceilings with no bracket anywhere, reached `done`,
+    // and persisted a curve that is the mask read back rather than a
+    // measurement. At 1 m no wall exists — that is a property of the
+    // geometry, not of the feedback path. The ground carries the STRONGER
+    // case for the refusal, because its artifact auto-applies at boot with no
+    // operator between the measurement and the actuator.
+    bool found_no_wall_anywhere() const {
+        if (placements_.size() != kUplinkRungs) return false;
+        for (size_t m = 0; m < placements_.size(); ++m) {
+            if (placements_[m].has_first_bad) return false;
+            if (placements_[m].placement_qdb < rung_ceiling_qdb(m)) return false;
+        }
+        return true;
+    }
+
     // A rung verified. Advance, or finish the run on the last one. Mirrors
     // §10.6's Calibrator::next_rung deliberately: same loop, same order, so
     // the two directions cannot drift into different rung semantics.
     UplinkCalibActions next_rung(UplinkCalibActions a, uint64_t now_ms,
                                  uint32_t local_epoch) {
         if (size_t{rung_} + 1 >= kUplinkRungs) {
+            if (found_no_wall_anywhere()) {
+                finish(CalibState::kFailed, "no_wall_found");
+                a.restore = take_restore_();
+                return a;  // persists nothing; last-good artifact survives
+            }
             finish(CalibState::kDone, nullptr);
             a.restore = take_restore_();
             a.artifact_ready = take_artifact_();
