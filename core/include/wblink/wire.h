@@ -118,6 +118,26 @@ struct SelectorState {
     friend bool operator==(const SelectorState&, const SelectorState&) = default;
 };
 
+// §3.16 UPLINK_QUALITY (fixed 35 bytes) — craft→report-latched-ground
+// authenticated feedback for the §10.7 uplink calibration. quality_mac is
+// carried opaque here; HMAC computation/verification is the §10.7 gate's job,
+// exactly as CSA/VEHICLE_CMD do it.
+struct UplinkQuality {
+    CommonPrefix prefix;
+    uint16_t target_originator = 0;
+    uint32_t target_session = 0;
+    uint32_t last_report_epoch = 0;
+    uint32_t reports_received = 0;
+    // §3.16: the two's-complement i32 WIRE IMAGE of the cumulative RSSI sum.
+    // Held unsigned so accumulation and delta are modulo 2^32 by construction
+    // — signed overflow here would be UB. Consumers take (int32_t)(b - a).
+    uint32_t rssi_sum_dbm = 0;
+    uint8_t craft_adapter_fingerprint = 0;
+    uint8_t last_rx_mcs = kUplinkRxMcsUnknown;
+    uint32_t quality_mac = 0;
+    friend bool operator==(const UplinkQuality&, const UplinkQuality&) = default;
+};
+
 // §3.9 RECOVERY_REQUEST — RX asks the exact TX session to bootstrap a stream.
 struct RecoveryRequest {
     CommonPrefix prefix;
@@ -263,7 +283,7 @@ using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
                              Heartbeat, CsaPacket, RecoveryRequest,
                              JsccFeedback, CacheStatus, CacheRequestView,
                              CacheReplyView, Announce, CacheAssign, VehicleCmd,
-                             SelectorState>;
+                             SelectorState, UplinkQuality>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -281,6 +301,8 @@ size_t encode_selector_state(const SelectorState& pkt, uint8_t* out,
                              size_t cap);
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap);
 size_t encode_vehicle_cmd(const VehicleCmd& pkt, uint8_t* out, size_t cap);
+size_t encode_uplink_quality(const UplinkQuality& pkt, uint8_t* out,
+                             size_t cap);
 size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap);
 size_t encode_cache_assign(const CacheAssign& pkt, uint8_t* out, size_t cap);
 size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,

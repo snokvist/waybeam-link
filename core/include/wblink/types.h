@@ -28,6 +28,7 @@ enum class PacketType : uint8_t {
     kCacheAssign = 0xC,  // §3.13 receiver-owned cache following
     kVehicleCmd = 0xD,  // §3.14 remote vehicle command (rides §11 machinery)
     kSelectorState = 0xE,  // §3.15 craft-owned adaptive state summary
+    kUplinkQuality = 0xF,  // §3.16 authenticated craft→ground uplink feedback
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -117,6 +118,13 @@ inline constexpr size_t kVehicleCmdSize = 23;  // §3.14: MAC covers bytes 0..18
 inline constexpr size_t kSelectorStateCalibSize = 36;
 inline constexpr size_t kSelectorStateSize = 34;
 inline constexpr size_t kSelectorStateLegacySize = 32;
+// §3.16 (Pass 125): MAC covers bytes 0..30. Exact-length, no flags byte —
+// the shape is fixed for v1, which is why last_rx_mcs ships now (§3.16).
+inline constexpr size_t kUplinkQualitySize = 35;
+// §3.16 last_rx_mcs sentinel: no radiotap MCS field, a non-HT rate, or no
+// accepted report yet. Mirrors io's kRxMcsUnknown, restated here because
+// core/ stays dependency-free (it is vendored standalone).
+inline constexpr uint8_t kUplinkRxMcsUnknown = 0xFF;
 
 // §3.11 CACHE_STATUS capability_flags bits.
 namespace cache_capability {
