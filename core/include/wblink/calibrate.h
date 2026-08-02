@@ -79,6 +79,12 @@ class PowerSeek {
     // the previous placement) was a runtime optimisation that made the RESULT
     // depend on where the sweep began, which is not a property a measurement
     // should have.
+    // §10.3 (Pass 134): the caller may narrow the ceiling per rung. The seek
+    // owns no policy here — it is handed the bound and climbs to it.
+    SeekStep begin(int32_t max_qdb) {
+        p_.max_qdb = std::max(p_.min_qdb, max_qdb);
+        return begin();
+    }
     SeekStep begin() {
         qdb_ = p_.min_qdb;
         last_clean_.reset();
@@ -210,6 +216,19 @@ struct CalibrateParams {
     std::array<uint8_t, 8> levels{4, 4, 3, 3, 2, 2, 1, 1};
 };
 
+// §10.3 (Pass 134) per-rung sweep ceiling: the flat sanity ceiling tapered by
+// the rung's §10.2 level intent, so a sweep cannot walk a high-order rung to
+// full power looking for a wall the PA reaches first. Derived from the §9.3
+// table both ends already agree on by hash — no new key, no new wire. The
+// caller has already folded the adapter's §10.3 max_power_qdb into max_qdb.
+inline int32_t rung_max_qdb(const CalibrateParams& p, size_t rung) {
+    const int32_t lvl = rung < p.levels.size()
+                            ? static_cast<int32_t>(p.levels[rung])
+                            : kPowerLevelBaseline;
+    return std::max(p.min_qdb,
+                    p.max_qdb + (lvl - kPowerLevelBaseline) * kQdbPerLevel);
+}
+
 struct CalibCeiling {
     int8_t last_clean_rssi = 127;  // 127 = never probed
     bool has_bad = false;
@@ -273,7 +292,7 @@ class Calibrator {
         rung_ = 0;
         // Pass 121: rung 0 ramps from the floor. Pass 125's floor rule is
         // what makes that safe when the floor is genuinely unusable.
-        qdb_ = seek_.begin().qdb;
+        qdb_ = seek_.begin(rung_max_qdb(p_, 0)).qdb;
         enter_rung_ = true;
         dwell_start_ms_ = 0;  // set when the pin/power action is emitted
         return true;
@@ -422,8 +441,36 @@ class Calibrator {
         return a;
     }
 
+    // §10.6 (Pass 134): a run whose whole product is "no wall exists at any
+    // rung" did not measure the thing it exists to measure. Every rung at its
+    // §10.3 ceiling with no overload bracket booked anywhere is the signature
+    // of a starved feedback path, not of a good link — fewer accepted reports
+    // means fewer observed losses means every probe reads clean. Measured:
+    // a §7.2 flush regression halved the report rate and produced
+    // placement_loss_milli [5,2,3,2,0,0,0,0] with seven rungs at 27 dBm.
+    bool found_no_wall_anywhere() const {
+        for (size_t m = 0; m < 8; ++m) {
+            if (artifact_.ceilings[m].has_bad) return false;
+            if (artifact_.placement_qdb[m] < rung_max_qdb(p_, m)) return false;
+        }
+        return true;
+    }
+
+    // Deliberately no in-run report-rate floor. Since Pass 133 the sweep no
+    // longer stops at the first wall, so every rung climbs through the whole
+    // blacked-out region above its own overload point — on a marginal link
+    // that is most of a run's wall time, by design. A rate floor evaluated
+    // during a sweep cannot be told from wall evidence (Pass 121 addendum 4)
+    // and would fail exactly the runs that are measuring correctly. Report
+    // health is a property of the link AT REST and is a §11.7 start
+    // precondition in the app layer.
     CalibActions next_rung(CalibActions a, uint64_t now_ms) {
         if (rung_ >= 7) {
+            if (found_no_wall_anywhere()) {
+                finish(CalibState::kFailed, "no_wall_found", now_ms);
+                a.restore = take_restore_();
+                return a;  // persists nothing; last-good artifact survives
+            }
             for (size_t m = 0; m < 8; ++m) {
                 artifact_.curve_qdb[m] =
                     artifact_.placement_qdb[m] -
@@ -440,7 +487,7 @@ class Calibrator {
         // previous placement was a runtime optimisation that made the result
         // depend on where the sweep began; a measurement should not have that
         // property, and the extra probes cost well under the hard cap.
-        const SeekStep s = seek_.begin();
+        const SeekStep s = seek_.begin(rung_max_qdb(p_, rung_));
         qdb_ = s.qdb;
         a.pin_rung = rung_;
         a.set_qdb = s.qdb;

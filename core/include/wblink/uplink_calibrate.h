@@ -49,6 +49,12 @@ inline constexpr size_t kUplinkRungs = 8;
 
 struct UplinkCalibParams {
     SeekParams seek;
+    // §10.3 (Pass 134): the §9.3 table's tx_power_level per rung, tapering
+    // seek.max_qdb so the ground cannot walk its own uplink PA to full power
+    // on a high-order rung. The ground half carries the stronger case for the
+    // mask than §10.6 does — this placement auto-applies at boot with no
+    // operator between the measurement and the actuator.
+    std::array<uint8_t, kUplinkRungs> levels{4, 4, 3, 3, 2, 2, 1, 1};
     uint32_t settle_ms = 300;       // shared with §10.6: TXAGC settle
     // §10.7 burst sizes (Pass 132). 100 makes one lost probe 10permille —
     // inside loss_ok_milli — and five 50permille, exactly the bad wall. That
@@ -279,11 +285,23 @@ class UplinkCalibrator {
     // min_qdb: seeding one mid-range from the previous placement made the
     // result depend on where the sweep began (Pass 130), and that is no more
     // acceptable across rungs than it was within one.
+    // §10.3 mask, same derivation as §10.6's rung_max_qdb — the seek's own
+    // max_qdb is the flat ceiling the caller already narrowed by the
+    // adapter's max_power_qdb.
+    int32_t rung_ceiling_qdb(size_t rung) const {
+        const int32_t lvl = rung < p_.levels.size()
+                                ? static_cast<int32_t>(p_.levels[rung])
+                                : kPowerLevelBaseline;
+        return std::max(
+            p_.seek.min_qdb,
+            p_.seek.max_qdb + (lvl - kPowerLevelBaseline) * kQdbPerLevel);
+    }
+
     void enter_rung(uint64_t now_ms, uint32_t local_epoch) {
         pending_rate_ = p_.rungs[rung_];
         have_clean_ = false;
         confirming_ = false;
-        const SeekStep s = seek_.begin();
+        const SeekStep s = seek_.begin(rung_ceiling_qdb(rung_));
         qdb_ = s.qdb;
         pending_qdb_ = s.qdb;
         begin_dwell(now_ms, local_epoch, p_.probe_epochs);
@@ -431,7 +449,7 @@ class UplinkCalibrator {
     // the two directions cannot drift into different rung semantics.
     UplinkCalibActions next_rung(UplinkCalibActions a, uint64_t now_ms,
                                  uint32_t local_epoch) {
-        if (rung_ + 1 >= kUplinkRungs) {
+        if (size_t{rung_} + 1 >= kUplinkRungs) {
             finish(CalibState::kDone, nullptr);
             a.restore = take_restore_();
             a.artifact_ready = take_artifact_();

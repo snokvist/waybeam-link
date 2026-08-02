@@ -2138,6 +2138,7 @@ struct TxCore {
             // §15.3 heard-ratio.
             if (selector_.on_report(*r, now)) {
                 ++reports_received_;
+                note_report_health(now);
                 // §3.16 (Pass 125): the SAME freshness gate feeds the uplink
                 // quality counters. A redundant copy carries no new epoch, so
                 // counting it would tell the ground its uplink delivered more
@@ -2514,6 +2515,18 @@ struct TxCore {
                 if (arg == 1) {
                     if (!apply_power) return false;  // udp: logged intent only
                     if (report_gate_.latched_originator() == 0) return false;
+                    // §10.6 (Pass 134): feedback health, measured on the link
+                    // AT REST. §10.6 scores every dwell from §3.5 reports, so
+                    // a return path running at half cadence reads as fewer
+                    // observed losses — every probe clean at every power, and
+                    // the sweep places the whole curve at its ceiling. That is
+                    // not a state to measure through; it is a state to refuse
+                    // to start in. Latched-but-starved is invisible to the
+                    // check above, which only asks whether a reporter exists.
+                    if (report_health_hz_milli_ <
+                        calib_min_report_hz_ * 1000u) {
+                        return false;
+                    }
                     return calibrator_->start(now);
                 }
                 return calibrator_->abort(now);
@@ -2545,9 +2558,45 @@ struct TxCore {
     }
     uint16_t mtu_requested() const { return negotiated_packet_budget_; }
     uint16_t mtu_supported() const { return mtu_supported_; }
-    void init_calibration(const CalibrationPolicy& c) {
-        calibrator_.emplace(calib_params_from(c));
+    // §10.3 (Pass 134): the adapter's sanity ceiling narrows the sweep, and
+    // the §9.3 table's per-rung tx_power_level tapers it. Without this the
+    // one operation that deliberately walks a rung into overload was the one
+    // operation the ceiling did not cover.
+    void init_calibration(const CalibrationPolicy& c,
+                          std::optional<int32_t> max_power_qdb) {
+        calib_min_report_hz_ = static_cast<uint32_t>(c.calib_min_report_hz);
+        CalibrateParams p = calib_params_from(c);
+        if (max_power_qdb) p.max_qdb = std::min(p.max_qdb, *max_power_qdb);
+        if (table_ != nullptr) {
+            for (const Profile& pr : table_->profiles) {
+                if (pr.mcs < p.levels.size()) {
+                    p.levels[pr.mcs] = pr.tx_power_level;
+                }
+            }
+        }
+        calibrator_.emplace(p);
     }
+    // §10.6 (Pass 134) accepted-report cadence over the last closed window.
+    // A whole window rather than an instantaneous gap, because the §7.2
+    // return path is bursty by construction — one report per video EOB gap,
+    // so gaps are normal and only the aggregate rate is meaningful.
+    static constexpr uint64_t kReportHealthWindowMs = 4000;
+    void note_report_health(uint64_t now) {
+        if (report_health_start_ms_ == 0) {
+            report_health_start_ms_ = now;
+            report_health_count_ = 0;
+        }
+        ++report_health_count_;
+        const uint64_t el = now - report_health_start_ms_;
+        if (el >= kReportHealthWindowMs) {
+            report_health_hz_milli_ =
+                static_cast<uint32_t>(report_health_count_ * 1000000ull / el);
+            report_health_start_ms_ = now;
+            report_health_count_ = 0;
+        }
+    }
+    uint32_t report_health_hz_milli() const { return report_health_hz_milli_; }
+
     bool cmd_arq_enabled() const { return cmd_arq_enabled_; }
     bool cmd_selector_frozen() const { return cmd_selector_frozen_; }
     bool cmd_fps_ladder() const {
@@ -2855,6 +2904,13 @@ struct TxCore {
     std::optional<uint8_t> last_commit_mcs_;      // §10.5 clear-restore point
     uint8_t last_commit_level_ = 4;
     uint32_t reports_received_ = 0;
+    // §10.6 (Pass 134) report-health window. NOT reset by reset_stats(): it
+    // gates whether a calibration may start, and an operator zeroing the
+    // stats display must not open that gate.
+    uint64_t report_health_start_ms_ = 0;
+    uint32_t report_health_count_ = 0;
+    uint32_t report_health_hz_milli_ = 0;
+    uint32_t calib_min_report_hz_ = 6;
     std::vector<Stream> streams_;
 
   public:
@@ -3784,9 +3840,6 @@ int run_tx(const Loaded& l) {
     DiscoveryCatalog discovery;
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv,
               air.value->mtu_supported());
-    // §10.6 (Pass 120): craft-resident calibration — engine seeds, artifact
-    // persistence, and the boot auto-load with the fingerprint gate.
-    tx.init_calibration(l.cfg.policy.calibration);
     const AdapterCfg* calib_tx_adapter = nullptr;
     for (const AdapterCfg& a : l.cfg.adapters) {
         if (a.role == Role::kTx) {
@@ -3794,6 +3847,13 @@ int run_tx(const Loaded& l) {
             break;
         }
     }
+    // §10.6 (Pass 120): craft-resident calibration — engine seeds, artifact
+    // persistence, and the boot auto-load with the fingerprint gate. The
+    // §10.3 ceiling (Pass 134) comes from the same adapter the sweep drives.
+    tx.init_calibration(l.cfg.policy.calibration,
+                        calib_tx_adapter != nullptr
+                            ? calib_tx_adapter->max_power_qdb
+                            : std::nullopt);
     {
         // §3.16 (Pass 125): the craft's half of the identity pair the ground
         // stale-checks its uplink artifact against. Same canonical identity
@@ -4665,6 +4725,14 @@ int run_rx(const Loaded& l) {
     {
         const CalibrationPolicy& cp = l.cfg.policy.calibration;
         ucal_params.seek = Calibrator::seek_params(calib_params_from(cp));
+        // §10.3 (Pass 134): the adapter's opt-in sanity ceiling bounds the
+        // sweep, not only the §10.7 apply below. The ground half carries the
+        // stronger case for it — this placement auto-applies at boot with no
+        // operator between the measurement and the actuator.
+        if (uplink_adapter != nullptr && uplink_adapter->max_power_qdb) {
+            ucal_params.seek.max_qdb = std::min(ucal_params.seek.max_qdb,
+                                                *uplink_adapter->max_power_qdb);
+        }
         ucal_params.settle_ms = static_cast<uint32_t>(cp.settle_ms);
         ucal_params.probe_epochs =
             static_cast<uint32_t>(cp.uplink_probe_epochs);
@@ -4684,6 +4752,9 @@ int run_rx(const Loaded& l) {
                 if (pr.id < kUplinkRungs) {
                     ucal_params.rungs[pr.id] =
                         UplinkRate{pr.mcs, pr.gi == GuardInterval::kShort};
+                    // §10.3 (Pass 134): the same table row carries the per-rung
+                    // power intent the sweep ceiling is tapered by.
+                    ucal_params.levels[pr.id] = pr.tx_power_level;
                 }
             }
         }

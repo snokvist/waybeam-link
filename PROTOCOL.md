@@ -2286,12 +2286,23 @@ artifact recorded `placement_loss_milli` `[5,2,3,2,0,0,0,0]` with seven of
 eight rungs at 27 dBm. That curve was applied, drove the craft's PA into
 saturation, and cost the video link. Two rules, at two layers:
 
-- **Feedback health is a precondition and a continuous check.** A run must not
-  start, and must abort rather than continue, while accepted reports are not
-  arriving at their expected cadence and freshness. This is the condition
-  itself; every other guard below only pattern-matches its output. It is
+- **Feedback health is a start precondition, and only a start precondition.**
+  A run must not start while accepted reports are not arriving at their
+  expected cadence — measured over a recent window of *ordinary operation*,
+  before the sweep perturbs anything, and rejected as a §11.7 `CALIBRATE`
+  REJECT alongside the other app-layer conditions. This is the condition
+  itself; the persistence rule below only pattern-matches its output. It is
   distinct from the 3 s report-loss abort, which catches *silence* — a stream
   at half rate is never silent.
+
+  It deliberately does **not** continue into the run, and the reason is Pass
+  133: since the sweep no longer stops at the first wall, every rung climbs
+  through the whole blacked-out region above its own overload point. On a
+  marginal link that is most of the run's wall time, by design. A report-rate
+  floor evaluated *during* a sweep therefore cannot be distinguished from wall
+  evidence (Pass 121 addendum 4), and would fail exactly the runs that are
+  measuring correctly. Report health is a property of the link at rest; once
+  the sweep starts, low report rate is a **measurement**, not a fault.
 - **Persistence refuses an implausible result.** If **every** rung placed at
   its §10.3 ceiling with no overload bracket booked anywhere
   (`first_bad_qdb == null` for all eight), the run **fails and persists
@@ -3841,9 +3852,14 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   `probe_dwell_ms`
   (1200), `verify_dwell_ms` (2500), `report_loss_abort_ms` (3000),
   `hard_cap_ms` (600000),
-  `artifact_dir` ("/etc/waybeam-link/calibration"). The Pass 120
+  `artifact_dir` ("/etc/waybeam-link/calibration"),
+  `calib_min_report_hz` (**6**, Pass 134 — the §11.7 `CALIBRATE` start
+  precondition, measured on the link at rest and seeded well under the 10 Hz
+  nominal so ordinary §7.2 gap jitter never rejects a start). The Pass 120
   target-band keys (`target_rssi_dbm`, `rssi_tol_db`, `ceil_step_qdb`)
-  are retired and ignored.
+  are retired and ignored. `max_qdb` is the *flat* bound; the sweep's actual
+  per-rung ceiling is it narrowed by the adapter's §10.3 `max_power_qdb` and
+  tapered by the §9.3 row's `tx_power_level` (Pass 134).
   Dwells are short by design: the live video IS the measurement traffic
   (thousands of loss samples per second), so a dwell needs only TXAGC
   settle plus a couple of report windows — a full 8-rung run is ~2 min.

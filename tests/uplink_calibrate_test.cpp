@@ -639,9 +639,15 @@ void test_eight_rung_sweep() {
         CHECK(pl.short_gi == seeds.rungs[i].short_gi);
         CHECK(pl.placement_loss_milli <= 15);
         // Every rung sweeps from the floor, so on this flat synthetic channel
-        // every rung reaches the same top. What matters is that each is a real
-        // measurement rather than rung 0's result copied forward.
-        CHECK(pl.placement_qdb == seeds.seek.max_qdb);
+        // every rung reaches its own top. Pass 134: that top is the §10.3
+        // ceiling tapered by the rung's §10.2 level, NOT a flat max_qdb —
+        // 108/108/100/100/92/92/84/84 under the seeded {4,4,3,3,2,2,1,1}.
+        // What matters is that each is a real measurement rather than rung
+        // 0's result copied forward.
+        const int32_t want =
+            seeds.seek.max_qdb +
+            (int32_t(seeds.levels[i]) - kPowerLevelBaseline) * kQdbPerLevel;
+        CHECK(pl.placement_qdb == want);
     }
 
     // The rate was commanded once per rung, in order, and power never arrived

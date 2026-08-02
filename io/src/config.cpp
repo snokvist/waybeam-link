@@ -571,6 +571,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cal.report_loss_abort_ms =
                     pk.value("report_loss_abort_ms", cal.report_loss_abort_ms);
                 cal.hard_cap_ms = pk.value("hard_cap_ms", cal.hard_cap_ms);
+                cal.calib_min_report_hz =
+                    pk.value("calib_min_report_hz", cal.calib_min_report_hz);
                 cal.artifact_dir = pk.value("artifact_dir", cal.artifact_dir);
                 // §10.7 uplink gates — epoch counts, never milliseconds.
                 cal.uplink_probe_epochs =

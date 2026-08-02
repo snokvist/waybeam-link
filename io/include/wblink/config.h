@@ -292,6 +292,12 @@ struct CalibrationPolicy {
     int verify_dwell_ms = 2500;
     int report_loss_abort_ms = 3000;
     int hard_cap_ms = 600000;
+    // §10.6 (Pass 134): whole-run accepted-report rate floor. The 3 s abort
+    // above catches SILENCE; this catches a return path at HALF rate, which
+    // reads as fewer observed losses and places every rung at its ceiling.
+    // Seeded well under the 10 Hz nominal so ordinary dwell-edge gaps and
+    // bounded overload blackouts never trip it.
+    int calib_min_report_hz = 6;
     std::string artifact_dir = "/etc/waybeam-link/calibration";
     // §10.7 (Pass 125) ground-uplink gates. The walls, step, min/max, settle
     // and artifact_dir above are shared; only these differ, because the uplink
