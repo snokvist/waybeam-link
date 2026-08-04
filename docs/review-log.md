@@ -5670,3 +5670,119 @@ the default fixture. And a rung's placement is the highest **grid** step
 (`min_qdb + 16k`) that stayed clean, not the ceiling itself, so expected
 placements do not equal `rung_ceiling_qdb` except where the grid happens to
 land on it.
+
+## Pass 135 — §11.7 `0x0A TX_POWER`: a runtime ceiling, not a runtime power (2026-08-02)
+
+Pass 134 built a per-rung ceiling and left it config-only. The operator wants a
+min/medium/high power trim on the ground hub menu reaching both directions, so
+the ceiling needs a runtime path. Three rulings.
+
+**1. The lever is the mask baseline, not the §10.5 latch.** §10.5 already
+exists and is the obvious candidate — one endpoint, already runtime, already
+clamped by §10.3. It is also the wrong shape, and the spec says so in its own
+words: the latch is *"rung-agnostic by construction — it overrides the resolve,
+whatever rung produced it."* A menu tier of "medium = 19 dBm" would apply
+19 dBm at MCS0, where 21 is fine, and 19 dBm at MCS7, where the 10 m campaign
+measured a 13 dBm wall — flattening the exact curve Pass 134 exists to
+preserve. `TX_POWER` therefore moves `effective_max_qdb`, the *baseline* the
+per-rung mask is derived from, so one choice shifts the whole tapered curve and
+the measured shape survives.
+
+**2. The encoding is preset-indexing, and it needs no new exception.** The Pass
+68 bound — every command is enable/disable or a ≤5-choice enum — holds without
+widening; `0x07` MODE remains the sole `cmd_arg` exception. Absolute qdb is
+per-adapter and per-deployment, measured this campaign: the ground's 8812EU
+defaults to a 19.00 dBm cap and the craft's to 27.00 dBm, so the same "medium"
+cannot be the same number on both. That is the identical argument `0x04`–`0x06`
+make for `venc.command_presets`, so `TX_POWER` uses the same road — with the
+list at `adapters[].power_presets_qdb`, beside the §10.3 ceiling it selects
+rather than in the venc object, because it is not a venc value.
+
+**3. A tier may only LOWER power** (operator ruling). Every preset is clamped
+at config load to that adapter's boot `max_power_qdb`. §10.3 stays the
+operator's hard ceiling, no runtime path raises power past it, and raising it
+keeps the friction of a config edit. This settles a fourth question for free:
+`0x09` MTU_TIER resets on binding release because an absent owner's jumbo
+choice would silently govern a future fleet, but a power tier can only lower,
+so a departed owner's choice is never the hazardous direction — and resetting
+it would move power mid-flight. `TX_POWER` is **not** reset on binding release.
+
+**What it does not do.** On a node with no curve and no artifact the tier is
+accepted and recorded but moves nothing, per the Pass 134 §10.3 ruling that the
+ceiling binds only where a number of ours reaches the actuator. That is not a
+gap to paper over: it means the menu's power trim does nothing until the node
+is calibrated, which is honest and points at the right next action. `GET
+/api/v1/tx/power_tier` reports `effective: false` in that state rather than
+implying a setting that is not reaching hardware.
+
+## Pass 136 — a tier is refused mid-calibration; and three things Pass 135 only appeared to do (2026-08-04)
+
+A pre-merge review of the Pass 135 branch, asked to confirm the solution was the
+simplest one that works and carried no dead code. It found one spec gap and
+three defects that unit tests and four clean cross-builds all passed over.
+
+**The ruling: a tier is REFUSED while a §10.6/§10.7 calibration is running.**
+§10.5 already says a latch mid-run makes the run yield first, then applies. A
+tier cannot use that shape, because it does not compete with the run for the
+actuator — it moves the *bound the run is measuring against*. Scoring one
+dwell's evidence at one ceiling against a later dwell's at another produces a
+placement that describes no channel. Worse on the craft: applying a tier
+re-seeds `CalibrateParams`, and the re-seed constructs a fresh `Calibrator` —
+which destroys the running one and, with it, the restore that hands the
+actuator back. The craft would sit at whatever power the abandoned sweep last
+commanded, which is the stranded-actuator failure Pass 131 added the rate
+restore to prevent. §10.3 and §15.5 now carry the refusal; the sweep bound
+moves for the NEXT run.
+
+**The ground's sweep bound never moved.** `UplinkCalibrator` copies its params
+at construction, and the handler set `ucal_params.seek.max_qdb` — a struct
+nothing reads again for the sweep. The one operation that deliberately walks a
+rung into overload was the one operation the tier did not bound, while the
+comment above it explained at length that it did. This is the shape to watch
+for in this codebase: a correct-sounding justification attached to a write with
+no reader. Fixed with `UplinkCalibrator::set_max_qdb()`, refused while running
+per the ruling above, and pinned by a test that fails without it.
+
+**The ground's tier reached no actuator at all in two of three configurations.**
+Applying relied on `uplink_pairing_key = 0` to provoke the pairing re-resolve —
+but that path is gated on an artifact existing, so a ground with a config
+`power_map`, or with no artifact yet, recorded the tier and moved nothing.
+`uplink_owner_qdb` compounded it: resolved once at startup against the boot
+ceiling and never again, it pinned the OLD ceiling for the life of the process.
+The handler now re-resolves the curve and calls `uplink_restore_actuators()`
+directly.
+
+**§15.3 could not report any of it on a ground.** Only `TxCore::fill_stats`
+sets the `link.tx_power_*` fields and the ground has no `TxCore`, so its stats
+line reported `tier: -1`, `power 0`, `override false` no matter what was
+selected — while `GET /api/v1/tx/power_tier` reported the truth. Device-shown
+during this review: tier 4 selected, endpoint says 4, §15.3 says −1. The hub
+menu binds to §15.3, so the row an operator actually reads was the one that
+could not move, and every device check so far had read the endpoint instead.
+`tx_power_override`/`tx_power_qdb` on an rx-node's uplink adapter were already
+required by §10.5's Pass 125 scope ruling — this was a conformance gap, not a
+new field.
+
+**Also fixed, smaller.** The Pass 135 reporter-pacing fix advanced the cadence
+clock only while the probe budget lasted, but the DRAIN — budget spent, still
+probing — is the long part of probe mode, so the clock refroze and
+`clear_probe_mode()` still released an unpaced report. And `power_tier_ceiling()`
+read the first target with any ceiling while `power_presets()` read the first
+with a list, so on a multi-tx-adapter node §15.5 could pair one adapter's
+ceiling with another's presets.
+
+**Menus.** The ground menu offered a tier but no §10.5 manual override, though
+the ground has registered those handlers since Pass 125; it now carries both,
+plus a `@wblink_tx_power` row so an operator can see which lever holds the
+radio. The `both:true` rows are gated on `@wblink_claimed`, matching every
+other vehicle-command row. The vehicle's `now` action had been repointed from
+`/tx/power` to `/tx/power_tier`, dropping the override readout from the very
+submenu that still offers override rows; it now reports both.
+
+**Addendum — `effective` must count a §10.5 latch.** Found on the device while
+verifying the above: with tier 0 selected (ceiling 60 qdb) and no curve or
+artifact, a `{"qdb":120}` latch was clamped to 15.00 dBm — the tier plainly
+reaching hardware — while `effective` reported `false`. §10.5 says the §10.3
+ceiling is the *only* clamp on an override, so a held latch is a path from the
+tier to the actuator just as a curve or artifact is. §15.5 amended; both halves
+now report `curve || artifact || latch`.

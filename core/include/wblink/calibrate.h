@@ -225,8 +225,12 @@ inline int32_t rung_max_qdb(const CalibrateParams& p, size_t rung) {
     const int32_t lvl = rung < p.levels.size()
                             ? static_cast<int32_t>(p.levels[rung])
                             : kPowerLevelBaseline;
-    return std::max(p.min_qdb,
-                    p.max_qdb + (lvl - kPowerLevelBaseline) * kQdbPerLevel);
+    // Bounded on BOTH sides. The taper may only ever lower: a §9.3 table
+    // authoring tx_power_level > kPowerLevelBaseline would otherwise produce
+    // a rung ceiling ABOVE the operator's flat ceiling, and §10.3 would stop
+    // being a ceiling — on both directions at once, since the table is shared.
+    return std::clamp(p.max_qdb + (lvl - kPowerLevelBaseline) * kQdbPerLevel,
+                      p.min_qdb, p.max_qdb);
 }
 
 struct CalibCeiling {

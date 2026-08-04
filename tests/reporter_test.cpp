@@ -167,5 +167,33 @@ int main() {
         CHECK_EQ_U(ra[0].target_stream_id, 0);
     }
 
+    // §10.7 probe burst must not leave the §7.3 cadence clock stale. The
+    // DRAIN — budget spent, still probing — is the long part of probe mode,
+    // so advancing the clock only while the budget lasts refreezes it and
+    // clear_probe_mode() still releases an unpaced report immediately.
+    {
+        Harness p;
+        for (uint32_t q = 0; q < 3; ++q) p.feed(0, q, 0, -50);
+        const uint64_t t = 1000;
+        CHECK_EQ_U(p.reporter.build(p.engine, t).size(), 1);  // latch + cadence
+
+        p.reporter.set_probe_budget(2);
+        CHECK_EQ_U(p.reporter.build(p.engine, t + 1).size(), 1);  // ignores cadence
+        CHECK_EQ_U(p.reporter.build(p.engine, t + 2).size(), 1);
+        CHECK(p.reporter.probe_spent());
+
+        // Drain far longer than one 100 ms interval — the normal case.
+        uint64_t d = 3;
+        for (; d < 900; d += 10) {
+            CHECK_EQ_U(p.reporter.build(p.engine, t + d).size(), 0);
+        }
+        const uint64_t last_drain = d - 10;  // 893
+
+        p.reporter.clear_probe_mode();
+        // Not due yet: the clock kept running through the drain.
+        CHECK_EQ_U(p.reporter.build(p.engine, t + last_drain + 99).size(), 0);
+        CHECK_EQ_U(p.reporter.build(p.engine, t + last_drain + 100).size(), 1);
+    }
+
     return wbtest_finish("reporter_test");
 }

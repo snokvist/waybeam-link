@@ -85,6 +85,14 @@ struct ControlHandlers {
     // cmd/arg — the campaign itself is polled via vehicle_command_json.
     std::function<std::pair<int, std::string>(const std::string& cmd, int arg)>
         vehicle_command;
+    // §10.3/§11.7 0x0A power tier (Pass 135). GET reports the local tier;
+    // POST selects it, and with `both` also issues the over-air command, so
+    // one menu action trims both directions the way start_both calibrates
+    // both. Returns a complete HTTP outcome: 409 when unconfigured, out of
+    // range, or `both` with no bound craft.
+    std::function<std::string()> tx_power_tier_json;
+    std::function<std::pair<int, std::string>(int tier, bool both)>
+        tx_power_tier_set;
     // §9.3a ground-local preference. Returns a complete HTTP outcome so an
     // in-flight command can be reported as 409 without losing the preference.
     std::function<std::pair<int, std::string>(const std::string& mode)> link_mtu;

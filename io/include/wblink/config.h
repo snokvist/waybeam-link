@@ -78,6 +78,10 @@ struct AdapterCfg {
     uint8_t bw = 20;           // 20 / 40 / 80
     std::string power_map;     // §10.2 per-adapter absolute power table path
     std::optional<int32_t> max_power_qdb;  // §10.3 opt-in sanity ceiling
+    // §10.3/§11.7 0x0A (Pass 135): selectable ceilings, <=5 per the §11.7
+    // preset-index bound. Each entry is clamped to max_power_qdb at load, so
+    // the runtime path can only ever LOWER power.
+    std::vector<int32_t> power_presets_qdb;
 };
 
 struct StreamCfg {

@@ -408,6 +408,12 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.mcs);
     out += ",\"tx_power_qdb\":";
     append_i32(out, snap.link.tx_power_qdb);
+    out += ",\"tx_power_tier\":";
+    append_i32(out, snap.link.tx_power_tier);
+    out += ",\"tx_power_ceiling_qdb\":";
+    append_i32(out, snap.link.tx_power_ceiling_qdb);
+    out += ",\"tx_power_tier_effective\":";
+    out += snap.link.tx_power_tier_effective ? "true" : "false";
     out += ",\"tx_power_override\":";
     out += snap.link.tx_power_override ? "true" : "false";
     out += ",\"report_epoch\":";

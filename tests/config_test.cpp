@@ -8,6 +8,7 @@
 #include "wblink/selector.h"
 
 #include <string>
+#include <vector>
 
 #include "wbtest.h"
 
@@ -23,7 +24,8 @@ const char* kSample = R"({
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
       "channel": 5805, "bw": 20,
       "power_map": "/etc/waybeam-link/power.wlan0.txt",
-      "max_power_qdb": 2000 },
+      "max_power_qdb": 2000,
+      "power_presets_qdb": [60, 76, 84] },
     { "name": "wlan1", "bus": "1-1.3", "role": "rx", "channel": 5805, "bw": 20 }
   ],
   "streams": [
@@ -104,6 +106,12 @@ int main() {
             CHECK(c.adapters[0].max_power_qdb.has_value() &&
                   *c.adapters[0].max_power_qdb == 2000);
             CHECK(!c.adapters[1].max_power_qdb.has_value());
+            // §11.7 0x0A (Pass 135): all three sit under max_power_qdb, so
+            // none is clamped and the list survives verbatim.
+            CHECK_EQ_U(c.adapters[0].power_presets_qdb.size(), 3);
+            CHECK(c.adapters[0].power_presets_qdb ==
+                  std::vector<int32_t>({60, 76, 84}));
+            CHECK(c.adapters[1].power_presets_qdb.empty());
 
             CHECK_EQ_U(c.streams.size(), 2);
             CHECK_EQ_U(c.streams[0].stream_id, 0);
@@ -951,6 +959,48 @@ int main() {
       "cache":{"store":{"enabled":true,"listen":"127.0.0.1:5801",
         "stream_ids":[0],"controller":{"originator":0,
         "endpoint":"127.0.0.1:5802"}}}})", "controller");
+
+    // --- §11.7 0x0A power presets (Pass 135) -------------------------------
+    // Content-based substitution: no offset arithmetic against kSample, which
+    // silently walks off the end when the sample text moves.
+    const auto subst = [](std::string src, const std::string& from,
+                          const std::string& to) {
+        const size_t at = src.find(from);
+        return at == std::string::npos ? src : src.replace(at, from.size(), to);
+    };
+    {
+        // A tier may only ever LOWER power: a preset above the boot ceiling is
+        // clamped to it, not honoured. Without this the runtime menu would be
+        // a way past the one sanity limit §10.3 exists to provide.
+        auto r = load_config_json(
+            subst(kSample, "[60, 76, 84]", "[60, 76, 9000]"));
+        CHECK(bool(r));
+        if (r) {
+            CHECK_EQ_U(r.value->adapters[0].power_presets_qdb.size(), 3);
+            CHECK(r.value->adapters[0].power_presets_qdb[2] == 2000);
+        }
+    }
+    {
+        // No ceiling configured: nothing to clamp against, list kept as-is.
+        auto r = load_config_json(
+            subst(kSample, "\"max_power_qdb\": 2000,", ""));
+        CHECK(bool(r));
+        if (r) {
+            CHECK(!r.value->adapters[0].max_power_qdb.has_value());
+            CHECK(r.value->adapters[0].power_presets_qdb[2] == 84);
+        }
+    }
+    // An rx adapter never resolves power, so a list there is inert — the same
+    // reason power_map is rejected on one.
+    expect_error(subst(kSample, "\"1-1.3\", \"role\": \"rx\",",
+                       "\"1-1.3\", \"role\": \"rx\", "
+                       "\"power_presets_qdb\": [60],"),
+                 "power_presets_qdb on a role:\"rx\" adapter");
+    // §11.7 cmd_arg indexes at most 5 choices (Pass 68).
+    expect_error(subst(kSample, "[60, 76, 84]", "[4,20,36,52,68,84]"),
+                 "more than 5 entries");
+    expect_error(subst(kSample, "[60, 76, 84]", "[]"),
+                 "power_presets_qdb is empty");
 
     return wbtest_finish("config_test");
 }

@@ -2112,6 +2112,29 @@ commanded value on every node that has never been calibrated — strictly worse
 than the state it would be protecting. The ceiling binds where a number of ours
 reaches the actuator, and nowhere else.
 
+**The ceiling is settable at runtime (Pass 135).** `adapters[].power_presets_qdb`
+(§15.2; up to five entries, `role:"tx"` adapters only — rejected on a
+`role:"rx"` adapter for the same reason `power_map` is) names the selectable
+ceilings; §11.7 `0x0A TX_POWER` and §15.5
+`POST /api/v1/tx/power_tier` select among them by index. Selecting a tier
+replaces `effective_max_qdb` — and therefore every `rung_ceiling_qdb[m]` above
+— and re-resolves once at the committed operating point, so a calibrated node
+moves immediately. **Every preset is clamped at config load to that adapter's
+boot `max_power_qdb`**, so the runtime path can only ever lower power; raising
+the hard ceiling stays a config edit. The clamp is logged when it binds, never
+silent.
+
+**A tier is REFUSED while a §10.6 or §10.7 calibration is running (Pass 136).**
+The run owns the power actuator and its seek is mid-descent against the old
+bound; re-basing the ceiling underneath it would score one dwell's evidence
+against another dwell's ceiling, and on the craft the re-seed would replace the
+live calibrator outright — losing the run *and* the restore that hands the
+actuator back, leaving the radio at whatever power the abandoned sweep last
+commanded. This is the same position §10.5 already takes on latching mid-run
+(the run yields first, then the latch applies); a tier has no equivalent yield
+because it changes the very bound the run is measuring against. Abort the run
+first. The sweep bound moves for the **next** run, not the current one.
+
 ### 10.4 Actuation
 On profile commit, for each transmitting adapter resolve and apply its power
 inside the §9.5 sequenced transition. After **any** devourer retune that resets
@@ -3154,7 +3177,8 @@ everything below is behaviour.
 | `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
 | `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the loop is blind without LINK_REPORTs). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen — video quality degrades during; the operator chooses the moment (recommended: near-bench 2–10 m separation, §10.6 Pass 121) |
 | `0x09` | `MTU_TIER` | 0=Default, 1=Medium, 2=High | Requests the §9.3a global packet-budget tier. The craft accepts only when the requested budget is ≤ the minimum capability of every active craft TX adapter; otherwise it consumes the nonce and echoes `REJECTED` (no silent clamp). Acceptance commits at the next frame/block boundary. Unlike the other commands, binding release resets this state to Default, preventing an absent owner's jumbo choice from silently governing a future receiver fleet |
-| `0x0A`–`0x1F` | *reserved* | — | not specified |
+| `0x0A` | `TX_POWER` | preset index 0..4 | Selects the node's §10.3 power **ceiling** from `adapters[].power_presets_qdb` (§15.2) — the baseline the Pass 134 per-rung mask is derived from, so one choice moves the whole tapered curve and the calibrated per-rung *shape* is preserved. This is deliberately NOT the §10.5 override latch, which is rung-agnostic by construction and would flatten a curve whose whole point is that MCS0 and MCS7 want different power. Applying a tier sets the runtime ceiling on the §10.4 resolve, the §10.5 clamp, and a future §10.6/§10.7 sweep, then forces one re-resolve at the committed operating point. **A tier can only ever LOWER power** (operator ruling): every preset is clamped at config load to that adapter's boot `max_power_qdb`, so §10.3 remains the operator's hard ceiling and no runtime path can raise power past it. `REJECTED` when no `role:"tx"` adapter carries a preset list, `arg` is past its length, or a §10.6 calibration is running (Pass 136 — the run owns the actuator). On a node with no curve and no artifact the tier is accepted and recorded but **moves nothing** — per §10.3 the ceiling binds only where a number of ours reaches the actuator. Craft-session volatile like the rest of §11.7; unlike `0x09` MTU_TIER it is **not** reset on binding release, because a tier only lowers power, so a departed owner's choice is never the hazardous direction and resetting it would move power mid-flight |
+| `0x0B`–`0x1F` | *reserved* | — | not specified |
 
 **v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
 encoder value spaces via **config preset-indexing**: the craft's
@@ -3165,6 +3189,15 @@ ladder members (the cap-coupling cadence machinery assumes ladder rungs);
 preset lists from deployment config, never over the air; an index with no
 configured entry is consumed + `REJECTED` (the unconfigured-actuator pattern
 below). No venc-specific values are baked into this spec.
+
+`0x0A` TX_POWER (Pass 135) is the third user of this encoding and the first
+outside venc. It fits the pattern for the same reason `0x04`-`0x06` do: an
+absolute qdb ceiling is per-adapter and per-deployment, so the same "medium"
+cannot mean the same number on two different radios (measured on the fleet: the
+ground's 8812EU defaults to a 19.00 dBm cap, the craft's to 27.00 dBm). Only
+an ordinal crosses the air; the list is `adapters[].power_presets_qdb` rather
+than `venc.command_presets`, because the value it selects is the §10.3 ceiling
+and belongs beside it.
 
 **MODE (Pass 105) takes the other road.** Where `0x04`–`0x06` fit an open-ended
 value space *into* the ≤5 bound (a config-curated preset list), MODE instead
@@ -3778,7 +3811,8 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
       "channel": 5805, "bw": 20,
       "power_map": "/etc/waybeam-link/power.wlan0.txt",
-      "max_power_qdb": 2000 },
+      "max_power_qdb": 2000,
+      "power_presets_qdb": [60, 76, 84] },
     { "name": "wlan1", "bus": "1-1.3", "role": "rx", "channel": 5805, "bw": 20 }
   ],
   "streams": [
@@ -4498,6 +4532,8 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 |---|---|---|
 | `POST /api/v1/csa` | `{ "mhz": 5805, "class": 0 }` | start a §11 CSA campaign (issuer/ground node) |
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
+| `GET /api/v1/tx/power_tier` | — | §10.3/§11.7 `0x0A` power tier: `{tier, presets_qdb, ceiling_qdb, effective}` — `tier` is `-1` when no preset list is configured, and `effective` is false on a node with no curve, no artifact and no §10.5 latch, where the ceiling binds nothing (§10.3). A held latch counts (Pass 136): the ceiling is the one clamp on an override, so the tier reaches hardware through it |
+| `POST /api/v1/tx/power_tier` | `{ "tier": 1 }` \| `{ "tier": 1, "both": true }` | Selects the local ceiling by preset index; 400 on a missing/non-integer `tier`, 409 when unconfigured or out of range. `both` additionally issues §11.7 `0x0A` to the bound craft — the one-action-both-directions shape `{"action":"start_both"}` already has for calibration. `both` on a node with no craft binding is a 409, not a silent local-only apply. 409 while a §10.6/§10.7 calibration is running (Pass 136) — the run owns the actuator and the ceiling is what it is measuring against |
 | `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (any node with a `role:"tx"` adapter, including an rx-node's §6.4 uplink — Pass 125) |
 | `POST /api/v1/calibration` | `{ "action": "start" }` \| `{ "action": "abort" }` \| `{ "action": "start_both" }` | §10.7 ground-uplink calibration; `start` requires its complete prerequisite set, `abort` is idempotent and cancels either phase, `start_both` additionally sequences the §11.7 downlink campaign after a successful uplink phase (ground/rx node) |
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node) |

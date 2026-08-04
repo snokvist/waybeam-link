@@ -14,7 +14,8 @@
       "role": "tx",
       "channel": 5805,
       "bw": 20,
-      "max_power_qdb": 84
+      "max_power_qdb": 108,
+      "power_presets_qdb": [60, 76, 84, 92, 108]
     }
   ],
   "streams": [

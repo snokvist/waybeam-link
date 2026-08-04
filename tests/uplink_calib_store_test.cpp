@@ -303,5 +303,19 @@ int main() {
     test_tamper_rejected();
     test_identity_gate();
     test_multi_rung_forward_compat();
+
+    // §10.5 wire range on a value that auto-applies at boot with no operator
+    // in the loop. The CRC-8 is documented as NOT a tamper seal, so an
+    // out-of-range placement is corruption — refuse the artifact rather than
+    // actuate part of one.
+    {
+        const std::string dir = temp_dir();
+        UplinkArtifact a = make_artifact();
+        a.placements[0].placement_qdb = 5000;
+        CHECK(uplink_calib_store_write(dir, a) != 0);
+        auto r = uplink_calib_store_load(dir);
+        CHECK(!r);
+        if (!r) CHECK(r.error.find("out of range") != std::string::npos);
+    }
     return wbtest_finish("uplink_calib_store_test");
 }
