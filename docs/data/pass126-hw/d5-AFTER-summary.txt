@@ -1,5 +1,0 @@
-  originator 9: 469 reports, 240 distinct epochs
-    range 228..467 (span 240), observed 240 = 100.0% of the span
-    repeats (§7.2 redundancy copies): 229
-    backward steps: 0
-    epoch deltas between distinct reports: +1x239

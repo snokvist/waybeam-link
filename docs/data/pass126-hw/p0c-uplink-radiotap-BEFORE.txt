@@ -1,3 +1,0 @@
-capturing 400 frames from originator 0x09 on wlx84fc1450bcde (max 20s)
-  1600 frames
-    1600  100.0%  MCS ? LGI ?MHz
