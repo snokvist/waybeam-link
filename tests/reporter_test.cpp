@@ -64,7 +64,20 @@ int main() {
     CHECK_EQ_U(r1[0].target_originator, kTxOrig);
     CHECK_EQ_U(r1[0].target_session, kTxSession);
     CHECK_EQ_U(r1[0].target_stream_id, 0);
-    CHECK_EQ_U(r1[0].report_epoch, 1);
+    // §3.5/§10.7: build() no longer spends an epoch. The number belongs to an
+    // EMITTED report, so it is stamped into the frame at the radio call and
+    // committed only on a successful submit — a report dropped between build
+    // and injection (no uplink adapter, TX queue full) burns none, and the
+    // next one reuses it. Otherwise §10.7's denominator counts emissions that
+    // never happened and the seek reads phantom loss.
+    CHECK_EQ_U(r1[0].report_epoch, 0);
+    CHECK_EQ_U(h.reporter.next_epoch(), 1);
+    CHECK_EQ_U(h.reporter.epoch(), 0);
+    h.reporter.commit_epoch();
+    CHECK_EQ_U(h.reporter.epoch(), 1);
+    CHECK_EQ_U(h.reporter.next_epoch(), 2);
+    // A failed submit commits nothing: next_epoch stands still.
+    CHECK_EQ_U(h.reporter.next_epoch(), 2);
     CHECK_EQ_U(r1[0].probe_per, kNoProbe);
 
     // RSSI: best = strongest recent packet, mean = average of adapter EWMAs.
@@ -90,7 +103,29 @@ int main() {
     auto r3 = h.reporter.build(h.engine, 400);
     CHECK_EQ_U(r3.size(), 1);
     CHECK_EQ_U(r3[0].loss_postdiv_prearq, 0);
-    CHECK_EQ_U(r3[0].report_epoch, 4);  // 4th emitting build
+    CHECK_EQ_U(r3[0].report_epoch, 0);  // stamped by the injector, not here
+
+    // The stamp is a plain in-place field write on an encoded frame, at the
+    // same offset encode_link_report uses — that is what lets the epoch be
+    // decided after the frame has been sitting in the §7.2 hold queue.
+    {
+        LinkReport probe = r3[0];
+        probe.prefix = {9, kTxOrig, 4242};
+        uint8_t frame[kLinkReportSize];
+        CHECK_EQ_U(encode_link_report(probe, frame, sizeof(frame)),
+                   kLinkReportSize);
+        CHECK(link_report_stamp_epoch(frame, sizeof(frame), 77));
+        const Decoded d = decode(frame, kLinkReportSize);
+        const LinkReport* got = std::get_if<LinkReport>(&d);
+        CHECK(got != nullptr);
+        if (got != nullptr) {
+            CHECK_EQ_U(got->report_epoch, 77);
+            CHECK_EQ_U(got->uniq, probe.uniq);  // nothing else moved
+            CHECK_EQ_U(got->target_stream_id, probe.target_stream_id);
+        }
+        CHECK(!link_report_stamp_epoch(frame, kLinkReportSize - 1, 78));
+        CHECK(!link_report_stamp_epoch(nullptr, kLinkReportSize, 78));
+    }
 
     // Pass 110: uniq is the same interval denominator as the loss fraction;
     // diversity remains the cumulative decorrelation gauge.

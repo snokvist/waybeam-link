@@ -118,6 +118,27 @@ struct SelectorState {
     friend bool operator==(const SelectorState&, const SelectorState&) = default;
 };
 
+// §3.16 UPLINK_QUALITY (fixed 31 bytes) — craft→report-latched-ground counter
+// feedback for the §10.7 uplink calibration. Unauthenticated since Pass 131:
+// §10.6 already moves the craft's power actuator on plain LINK_REPORTs, so a
+// MAC on the feedback that moves only the GROUND's own power was asymmetry
+// without a threat. §10.7 reads its authority from §3.15a report_latch_holder
+// instead of inferring it from a tag.
+struct UplinkQuality {
+    CommonPrefix prefix;
+    uint16_t target_originator = 0;
+    uint32_t target_session = 0;
+    uint32_t last_report_epoch = 0;
+    uint32_t reports_received = 0;
+    // §3.16: the two's-complement i32 WIRE IMAGE of the cumulative RSSI sum.
+    // Held unsigned so accumulation and delta are modulo 2^32 by construction
+    // — signed overflow here would be UB. Consumers take (int32_t)(b - a).
+    uint32_t rssi_sum_dbm = 0;
+    uint8_t craft_adapter_fingerprint = 0;
+    uint8_t last_rx_mcs = kUplinkRxMcsUnknown;
+    friend bool operator==(const UplinkQuality&, const UplinkQuality&) = default;
+};
+
 // §3.9 RECOVERY_REQUEST — RX asks the exact TX session to bootstrap a stream.
 struct RecoveryRequest {
     CommonPrefix prefix;
@@ -263,7 +284,7 @@ using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
                              Heartbeat, CsaPacket, RecoveryRequest,
                              JsccFeedback, CacheStatus, CacheRequestView,
                              CacheReplyView, Announce, CacheAssign, VehicleCmd,
-                             SelectorState>;
+                             SelectorState, UplinkQuality>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -276,11 +297,23 @@ size_t encode_data(const DataHeader& hdr, const uint8_t* payload,
 size_t encode_nack(const NackHeader& hdr, const uint8_t* bitmap,
                    uint8_t bitmap_len, uint8_t* out, size_t cap);
 size_t encode_link_report(const LinkReport& pkt, uint8_t* out, size_t cap);
+
+// Rewrite `report_epoch` in an already-encoded LINK_REPORT frame. §3.5 says
+// the epoch advances once per EMITTED report, and §10.7 divides by the craft's
+// delta of exactly this field — so an epoch burned on a frame the radio never
+// took is phantom loss on the ground's seek. Reports can be built well before
+// they are injected (§7.2 holds a batch for the craft's quiet gap) and can be
+// dropped in between (no uplink adapter, TX queue full), so the number is
+// stamped at the radio call rather than at build. LINK_REPORT carries no MAC,
+// so this is a plain field write. Returns false on a short/absent buffer.
+bool link_report_stamp_epoch(uint8_t* frame, size_t len, uint32_t epoch);
 size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap);
 size_t encode_selector_state(const SelectorState& pkt, uint8_t* out,
                              size_t cap);
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap);
 size_t encode_vehicle_cmd(const VehicleCmd& pkt, uint8_t* out, size_t cap);
+size_t encode_uplink_quality(const UplinkQuality& pkt, uint8_t* out,
+                             size_t cap);
 size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap);
 size_t encode_cache_assign(const CacheAssign& pkt, uint8_t* out, size_t cap);
 size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,

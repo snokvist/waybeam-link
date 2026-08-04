@@ -267,6 +267,25 @@ struct LinkStats {
     uint8_t calib_rung = 0;            // meaningful while running
     uint8_t calib_fingerprint = 0;     // CRC-8 of persisted artifact, 0=none
     bool calib_stale = false;          // persisted artifact pairing mismatch
+    // §10.7 (Pass 125) ground-uplink surface. DISTINCT from the mirror above:
+    // those fields are the craft's downlink state relayed over §3.15, these
+    // are this node's own. Role-neutral zero/idle defaults elsewhere.
+    std::string uplink_calib_state = "idle";  // idle|running|done|failed
+    // Always 0 in v1 — the shape mirrors calib_rung so a future multi-rung
+    // uplink changes no stats schema and no Hub parser.
+    uint8_t uplink_calib_rung = 0;
+    int32_t uplink_calib_power_qdb = 0;
+    uint8_t uplink_calib_fingerprint = 0;
+    bool uplink_calib_stale = false;
+    // §3.16 feedback. age_ms is LIVENESS (any accepted packet), which is the
+    // clock §10.7's 2 s abort watches; counter progress is uplink_quality_
+    // reports, and conflating them is the thing Pass 125 exists to prevent.
+    bool uplink_quality_valid = false;
+    uint32_t uplink_quality_age_ms = 0;
+    uint32_t uplink_quality_report_epoch = 0;
+    uint32_t uplink_quality_reports = 0;
+    int32_t uplink_quality_rssi_mean = 0;
+    uint8_t uplink_quality_rx_mcs = kUplinkRxMcsUnknown;  // 255 = unknown
 };
 
 // §15.3 cache blocks — present only when the §14.3 role is enabled.

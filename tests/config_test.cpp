@@ -694,11 +694,118 @@ int main() {
           "venc":{"enabled":true,"i_headroom_permille":1200}})", "headrooms");
     }
 
-    // --- §10.2 Pass 43: power_map on an rx node is rejected -----------------
+    // --- §10.2/§10.7 Pass 125: power_map is gated by ADAPTER role -----------
+    // Pass 43 keyed this on NODE role, which got both cases wrong. The rule
+    // is now: a map is legal exactly where it is actuated.
+    {
+        // rx node + role:"tx" uplink adapter: LEGAL as of Pass 125 — this is
+        // the §10.7 ground-uplink actuator. Pass 43 rejected it.
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "adapters":[{"name":"wlan1","bus":"1-1.2","role":"tx","channel":5805,
+                       "power_map":"/etc/waybeam-link/power.wlan1.txt"}]})");
+        CHECK(bool(d));
+        if (d) {
+            CHECK(d.value->adapters.size() == 1);
+            CHECK(!d.value->adapters[0].power_map.empty());
+        }
+    }
+    // rx node + role:"rx" diversity adapter: still rejected, never actuated.
     expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "adapters":[{"name":"wlan1","bus":"1-1.2","role":"tx","channel":5805,
+      "adapters":[{"name":"wlan0","bus":"1-1.1","role":"tx","channel":5805},
+                  {"name":"wlan1","bus":"1-1.2","role":"rx","channel":5805,
                    "power_map":"/etc/waybeam-link/power.wlan1.txt"}]})",
         "never applied");
+    // tx node + role:"rx" diversity adapter: NOW rejected too. Pass 43 let
+    // this through on a node-role test, silently loading a map that the
+    // §10.4 selector commit only ever resolves for the tx adapter.
+    expect_error(R"({"node":{"originator":9,"role":"tx"},
+      "adapters":[{"name":"wlan0","bus":"1-1.1","role":"tx","channel":5805},
+                  {"name":"wlan1","bus":"1-1.2","role":"rx","channel":5805,
+                   "power_map":"/etc/waybeam-link/power.wlan1.txt"}]})",
+        "never applied");
+    // tx node + role:"tx": unchanged, and already covered by the golden
+    // config at the top of this file. More than one role:"tx" adapter is
+    // rejected at backend open (air_radio.cpp), not here.
+
+    // --- §10.7 Pass 125: air.uplink_rate ------------------------------------
+    {
+        // Seeds equal the pre-Pass-125 TxRate struct default, so an absent
+        // block must produce byte-identical on-air behaviour.
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
+        CHECK(bool(d));
+        if (d) {
+            CHECK(d.value->air.uplink_mcs == 0);
+            CHECK(!d.value->air.uplink_sgi);
+            CHECK(d.value->air.uplink_bw == 20);
+        }
+        auto e = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "air":{"kind":"radio","uplink_rate":{"mcs":3,"sgi":true,"bw":40}}})");
+        CHECK(bool(e));
+        if (e) {
+            CHECK(e.value->air.uplink_mcs == 3);
+            CHECK(e.value->air.uplink_sgi);
+            CHECK(e.value->air.uplink_bw == 40);
+        }
+    }
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "air":{"kind":"radio","uplink_rate":{"mcs":8}}})", "mcs must be 0..7");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "air":{"kind":"radio","uplink_rate":{"bw":80}}})", "bw must be 20 or 40");
+
+    // --- §10.7 Pass 125: uplink calibration gates ---------------------------
+    {
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
+        CHECK(bool(d));
+        if (d) {
+            const CalibrationPolicy& c = d.value->policy.calibration;
+            // Pass 132 burst sizes: at 100 probes one loss is 10permille
+            // (inside loss_ok_milli) and five are 50permille (the bad wall),
+            // so every reading is decidable first time. That is what retired
+            // uplink_ambiguous_epochs rather than tuning it.
+            CHECK(c.uplink_probe_epochs == 100);
+            CHECK(c.uplink_verify_epochs == 200);
+            CHECK(c.uplink_drain_ms == 600);
+            CHECK(c.uplink_liveness_ms == 2000);
+            CHECK(c.settle_ms == 300);
+        }
+    }
+    // Pass 132: a burst too small to resolve the walls decides on noise. One
+    // lost probe must be <= loss_ok_milli, so with the 15permille seed a
+    // 40-probe burst (25permille per loss) is refused -- that reading is
+    // exactly what the retired ambiguous extension existed to paper over.
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"uplink_probe_epochs":40}}})",
+        "too small to resolve loss_ok_milli");
+    // A config still carrying the retired key loads, with it ignored.
+    {
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "policy":{"calibration":{"uplink_ambiguous_epochs":80}}})");
+        CHECK(bool(d));
+    }
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"uplink_verify_epochs":0}}})",
+        "must be >= 1");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"uplink_drain_ms":0}}})",
+        "must be >= 1");
+    // W4/W8: the seek moves in whole steps and judges the cap wall on a >= 2 dB
+    // (8 qdb) commanded rise. Zero or negative never terminates and walks an
+    // unbounded negative qdb into set_power_qdb; under 8 the cap wall can never
+    // fire, silently disabling one of §10.6's three walls.
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"seek_step_qdb":0}}})",
+        "seek_step_qdb must be >= 8");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"seek_step_qdb":-16}}})",
+        "seek_step_qdb must be >= 8");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"seek_step_qdb":4}}})",
+        "seek_step_qdb must be >= 8");
+    {
+        auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "policy":{"calibration":{"seek_step_qdb":8}}})");
+        CHECK(bool(ok) && ok.value->policy.calibration.seek_step_qdb == 8);
+    }
 
     // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------
     {

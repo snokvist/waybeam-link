@@ -356,6 +356,31 @@ Decoded decode_cache_assign(const uint8_t* buf, size_t len) {
     return a;
 }
 
+Decoded decode_uplink_quality(const uint8_t* buf, size_t len) {
+    if (len != kUplinkQualitySize) {
+        return len < kUplinkQualitySize ? DecodeError::kTruncated
+                                        : DecodeError::kLengthMismatch;
+    }
+    UplinkQuality q;
+    q.prefix = decode_prefix(buf);
+    q.target_originator = be16_read(buf + 11);
+    q.target_session = be32_read(buf + 13);
+    q.last_report_epoch = be32_read(buf + 17);
+    q.reports_received = be32_read(buf + 21);
+    q.rssi_sum_dbm = be32_read(buf + 25);
+    q.craft_adapter_fingerprint = buf[29];
+    q.last_rx_mcs = buf[30];
+    // §3.16: target_originator MUST be non-zero and equal `destination`. Both
+    // are properties of the packet itself, so they are structural — the
+    // receiver-relative checks (is this MY tuple, MY selected craft) belong to
+    // the §10.7 accept gate, not here.
+    if (q.target_originator == 0 ||
+        q.target_originator != q.prefix.destination) {
+        return DecodeError::kInvalidField;
+    }
+    return q;
+}
+
 Decoded decode_vehicle_cmd(const uint8_t* buf, size_t len) {
     if (len != kVehicleCmdSize) {
         return len < kVehicleCmdSize ? DecodeError::kTruncated
@@ -424,6 +449,8 @@ Decoded decode(const uint8_t* buf, size_t len) {
             return decode_announce(buf, len);
         case PacketType::kCacheAssign:
             return decode_cache_assign(buf, len);
+        case PacketType::kUplinkQuality:
+            return decode_uplink_quality(buf, len);
         case PacketType::kVehicleCmd:
             return decode_vehicle_cmd(buf, len);
         case PacketType::kSelectorState:
@@ -493,6 +520,12 @@ size_t encode_link_report(const LinkReport& pkt, uint8_t* out, size_t cap) {
     be16_write(out + 36, pkt.probe_per);
     out[38] = pkt.recommended_prof;
     return kLinkReportSize;
+}
+
+bool link_report_stamp_epoch(uint8_t* frame, size_t len, uint32_t epoch) {
+    if (frame == nullptr || len < kLinkReportSize) return false;
+    be32_write(frame + 18, epoch);  // same offset as encode_link_report
+    return true;
 }
 
 size_t encode_heartbeat(const Heartbeat& pkt, uint8_t* out, size_t cap) {
@@ -585,6 +618,26 @@ size_t encode_vehicle_cmd(const VehicleCmd& pkt, uint8_t* out, size_t cap) {
     out[18] = pkt.cmd_arg;
     be32_write(out + 19, pkt.cmd_mac);
     return kVehicleCmdSize;
+}
+
+size_t encode_uplink_quality(const UplinkQuality& pkt, uint8_t* out,
+                             size_t cap) {
+    // §3.16: the same structural invariant decode_uplink_quality enforces —
+    // refuse to mint a packet an honest receiver would reject.
+    if (out == nullptr || cap < kUplinkQualitySize ||
+        pkt.target_originator == 0 ||
+        pkt.target_originator != pkt.prefix.destination) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kUplinkQuality, out);
+    be16_write(out + 11, pkt.target_originator);
+    be32_write(out + 13, pkt.target_session);
+    be32_write(out + 17, pkt.last_report_epoch);
+    be32_write(out + 21, pkt.reports_received);
+    be32_write(out + 25, pkt.rssi_sum_dbm);
+    out[29] = pkt.craft_adapter_fingerprint;
+    out[30] = pkt.last_rx_mcs;
+    return kUplinkQualitySize;
 }
 
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap) {

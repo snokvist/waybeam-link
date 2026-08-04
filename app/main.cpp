@@ -36,7 +36,9 @@
 #include "wblink/config.h"
 #include "wblink/control_server.h"
 #include "wblink/modes.h"
+#include "wblink/crc8.h"
 #include "wblink/csa.h"
+#include "wblink/hmac_sha256.h"
 #include "wblink/vehicle_cmd.h"
 #include "wblink/endian.h"
 #include "wblink/fps_ladder.h"
@@ -67,6 +69,9 @@
 #include "wblink/txwedge.h"
 #include "wblink/venc.h"
 #include "wblink/video_slot_cadence.h"
+#include "wblink/uplink_calib_store.h"
+#include "wblink/uplink_calibrate.h"
+#include "wblink/uplink_quality.h"
 #include "wblink/air_mon.h"
 #if WBLINK_RADIO
 #include "wblink/air_radio.h"
@@ -308,6 +313,19 @@ class ArqTimingTracker {
 
 // Bench-only, bounded packet-event trace. The wire remains the source of truth:
 // this observer decodes existing frames and never feeds decisions back in.
+// §3.1 type nibble -> name, for the bench packet trace. Reads the wire byte
+// directly: this is the path for packets `decode` returned as neither DATA
+// nor NACK, including ones a mixed-version peer sent that we do not model.
+const char* packet_type_name(const uint8_t* frame, size_t len) {
+    if (len < 3) return "other";
+    static const char* const kNames[16] = {
+        "other",       "data",         "nack",        "link_report",
+        "heartbeat",   "csa",          "recovery",    "jscc_feedback",
+        "cache_status", "cache_request", "cache_reply", "announce",
+        "cache_assign", "vehicle_cmd", "selector_state", "uplink_quality"};
+    return kNames[frame[2] & 0x0F];
+}
+
 class PacketEventTrace {
   public:
     explicit PacketEventTrace(const char* role) : role_(role) {
@@ -411,12 +429,15 @@ class PacketEventTrace {
                 nack->hdr.target_session, nack->hdr.base_seq, bitmap.c_str(), len);
             return;
         }
+        // Everything else was collapsed into "other", which made the §3.15 /
+        // §3.16 guard-cost boundary unverifiable from a trace: the whole
+        // property is about WHICH packet rode WHICH slot. Name the type.
         std::fprintf(out_,
                      "{\"type\":\"packet\",\"t_us\":%llu,"
                      "\"direction\":\"%s\",\"outcome\":\"%s\","
-                     "\"adapter\":%d,\"packet\":\"other\",\"bytes\":%zu}\n",
+                     "\"adapter\":%d,\"packet\":\"%s\",\"bytes\":%zu}\n",
                      static_cast<unsigned long long>(t), direction, outcome,
-                     adapter, len);
+                     adapter, packet_type_name(frame, len), len);
     }
 
   private:
@@ -1433,7 +1454,31 @@ struct AirBackend {
     // T_switch (a straggler follows because a sibling heard the CSA). On the
     // udp dev backend the retune is a logged intent — the CSA state machines
     // stay exercisable end-to-end without radios.
+    // §10.7 (Pass 125): latch the rx node's uplink operating point and commit
+    // it through the same seam the tx node's selector uses. A tx node never
+    // latches — its selector re-commits the rate on every profile change, so
+    // it self-heals; an rx node has no selector, which is why the rate has to
+    // be re-asserted after every retune. Unlatched, both calls are no-ops.
+    std::optional<std::pair<uint8_t, bool>> uplink_rate;
+    void latch_uplink_rate(uint8_t mcs, bool sgi) {
+        uplink_rate = std::pair<uint8_t, bool>{mcs, sgi};
+        set_tx_mode(mcs, sgi);
+    }
+    // Scope guard, not a call before each `return`: retune_all/retune_one have
+    // several exits and a missed one would leave the uplink on whatever rate
+    // the retune left behind — silently, and only on some paths.
+    struct ReassertRate {
+        AirBackend& a;
+        explicit ReassertRate(AirBackend& b) : a(b) {}
+        ~ReassertRate() {
+            if (a.uplink_rate) {
+                a.set_tx_mode(a.uplink_rate->first, a.uplink_rate->second);
+            }
+        }
+    };
+
     bool retune_all(uint16_t chan_mhz, uint8_t bw, bool fast) {
+        const ReassertRate guard(*this);
         if (mon) {
             const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
                                           : bw;
@@ -1566,6 +1611,7 @@ struct AirBackend {
         return 0;
     }
     bool retune_one(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
+        const ReassertRate guard(*this);
         if (mon) {
             const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
                                           : bw;
@@ -1722,6 +1768,25 @@ struct AirBackend {
 };
 
 // ---- TX side: per in-stream framer + ring + scheduler ----------------------
+
+// §15.2 policy.calibration -> the core engine seeds. Shared: §10.6's craft
+// calibrator and §10.7's ground uplink calibrator read the same block, and
+// only the gating differs (§10.7 uses epoch counts, not the ms dwells).
+CalibrateParams calib_params_from(const CalibrationPolicy& c) {
+    CalibrateParams p;
+    p.loss_ok_milli = static_cast<uint16_t>(c.loss_ok_milli);
+    p.loss_bad_milli = static_cast<uint16_t>(c.loss_bad_milli);
+    p.seek_step_qdb = c.seek_step_qdb;
+    p.rssi_guard_dbm = c.rssi_guard_dbm;
+    p.min_qdb = c.min_qdb;
+    p.max_qdb = c.max_qdb;
+    p.settle_ms = static_cast<uint32_t>(c.settle_ms);
+    p.probe_dwell_ms = static_cast<uint32_t>(c.probe_dwell_ms);
+    p.verify_dwell_ms = static_cast<uint32_t>(c.verify_dwell_ms);
+    p.report_loss_abort_ms = static_cast<uint32_t>(c.report_loss_abort_ms);
+    p.hard_cap_ms = static_cast<uint32_t>(c.hard_cap_ms);
+    return p;
+}
 
 struct TxCore {
     using Inject = std::function<void(const uint8_t*, size_t)>;
@@ -2006,7 +2071,11 @@ struct TxCore {
 
     // Air packets heard back (uplink): NACKs feed the scheduler, LINK_REPORTs
     // feed the §9 selector.
-    bool on_air(const uint8_t* d, size_t n, uint64_t now) {
+    // rx_rssi/rx_mcs are the AirRxMeta of the frame carrying this packet —
+    // §3.16 needs both at the accepted-LINK_REPORT point. Defaulted so the
+    // loopback path, which has no PHY, stays a one-line call.
+    bool on_air(const uint8_t* d, size_t n, uint64_t now, int8_t rx_rssi = 0,
+                uint8_t rx_mcs = kUplinkRxMcsUnknown) {
         const Decoded dec = decode(d, n);
         if (const JsccFeedback* f = std::get_if<JsccFeedback>(&dec)) {
             if (f->target_originator != originator_ ||
@@ -2069,6 +2138,15 @@ struct TxCore {
             // §15.3 heard-ratio.
             if (selector_.on_report(*r, now)) {
                 ++reports_received_;
+                note_report_health(now);
+                // §3.16 (Pass 125): the SAME freshness gate feeds the uplink
+                // quality counters. A redundant copy carries no new epoch, so
+                // counting it would tell the ground its uplink delivered more
+                // than it did — the one number §10.7's loss estimator divides
+                // by. Rejected reports never reach here at all.
+                quality_.note_accepted(r->prefix.originator,
+                                       r->prefix.session_id, r->report_epoch,
+                                       rx_rssi, rx_mcs);
             }
             if (calibrator_) {
                 // §10.6: every ACCEPTED report feeds the calibration dwell
@@ -2232,6 +2310,9 @@ struct TxCore {
     // §11.3: freeze the cascade + pause the watchdog across the CSA blackout.
     void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
 
+    UplinkQualityCounters quality_;  // §3.16 (Pass 125)
+    uint8_t quality_fingerprint_ = 0;
+
     // §3.5 Pass 115: report authority is ONE authority across both return
     // gates. These wrap the pair deliberately — moving report_gate_ alone
     // would leave §3.10 JSCC feedback flowing from the displaced ground,
@@ -2300,6 +2381,16 @@ struct TxCore {
         }
         return s;
     }
+    // §3.16 craft->ground uplink feedback. Returns nullopt when there is
+    // nothing honest to say: no latched reporter, or no accepted report yet in
+    // this counter domain. Pass 131 removed the key — see §3.16/§13.
+    std::optional<UplinkQuality> uplink_quality() const {
+        return quality_.build(originator_, session_, quality_fingerprint_);
+    }
+    void set_quality_identity(uint8_t fingerprint) {
+        quality_fingerprint_ = fingerprint;
+    }
+
     // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
     void set_csa_armed(bool on) {
         const uint8_t f = on ? data_flags::kCsaArmed : 0;
@@ -2424,6 +2515,18 @@ struct TxCore {
                 if (arg == 1) {
                     if (!apply_power) return false;  // udp: logged intent only
                     if (report_gate_.latched_originator() == 0) return false;
+                    // §10.6 (Pass 134): feedback health, measured on the link
+                    // AT REST. §10.6 scores every dwell from §3.5 reports, so
+                    // a return path running at half cadence reads as fewer
+                    // observed losses — every probe clean at every power, and
+                    // the sweep places the whole curve at its ceiling. That is
+                    // not a state to measure through; it is a state to refuse
+                    // to start in. Latched-but-starved is invisible to the
+                    // check above, which only asks whether a reporter exists.
+                    if (report_health_hz_milli_ <
+                        calib_min_report_hz_ * 1000u) {
+                        return false;
+                    }
                     return calibrator_->start(now);
                 }
                 return calibrator_->abort(now);
@@ -2455,23 +2558,45 @@ struct TxCore {
     }
     uint16_t mtu_requested() const { return negotiated_packet_budget_; }
     uint16_t mtu_supported() const { return mtu_supported_; }
-    void init_calibration(const CalibrationPolicy& c) {
-        CalibrateParams p;
-        p.loss_ok_milli = static_cast<uint16_t>(c.loss_ok_milli);
-        p.loss_bad_milli = static_cast<uint16_t>(c.loss_bad_milli);
-        p.seek_step_qdb = c.seek_step_qdb;
-        p.cap_rise_db = c.cap_rise_db;
-        p.rssi_guard_dbm = c.rssi_guard_dbm;
-        p.min_qdb = c.min_qdb;
-        p.max_qdb = c.max_qdb;
-        p.settle_ms = static_cast<uint32_t>(c.settle_ms);
-        p.probe_dwell_ms = static_cast<uint32_t>(c.probe_dwell_ms);
-        p.verify_dwell_ms = static_cast<uint32_t>(c.verify_dwell_ms);
-        p.report_loss_abort_ms =
-            static_cast<uint32_t>(c.report_loss_abort_ms);
-        p.hard_cap_ms = static_cast<uint32_t>(c.hard_cap_ms);
+    // §10.3 (Pass 134): the adapter's sanity ceiling narrows the sweep, and
+    // the §9.3 table's per-rung tx_power_level tapers it. Without this the
+    // one operation that deliberately walks a rung into overload was the one
+    // operation the ceiling did not cover.
+    void init_calibration(const CalibrationPolicy& c,
+                          std::optional<int32_t> max_power_qdb) {
+        calib_min_report_hz_ = static_cast<uint32_t>(c.calib_min_report_hz);
+        CalibrateParams p = calib_params_from(c);
+        if (max_power_qdb) p.max_qdb = std::min(p.max_qdb, *max_power_qdb);
+        if (table_ != nullptr) {
+            for (const Profile& pr : table_->profiles) {
+                if (pr.mcs < p.levels.size()) {
+                    p.levels[pr.mcs] = pr.tx_power_level;
+                }
+            }
+        }
         calibrator_.emplace(p);
     }
+    // §10.6 (Pass 134) accepted-report cadence over the last closed window.
+    // A whole window rather than an instantaneous gap, because the §7.2
+    // return path is bursty by construction — one report per video EOB gap,
+    // so gaps are normal and only the aggregate rate is meaningful.
+    static constexpr uint64_t kReportHealthWindowMs = 4000;
+    void note_report_health(uint64_t now) {
+        if (report_health_start_ms_ == 0) {
+            report_health_start_ms_ = now;
+            report_health_count_ = 0;
+        }
+        ++report_health_count_;
+        const uint64_t el = now - report_health_start_ms_;
+        if (el >= kReportHealthWindowMs) {
+            report_health_hz_milli_ =
+                static_cast<uint32_t>(report_health_count_ * 1000000ull / el);
+            report_health_start_ms_ = now;
+            report_health_count_ = 0;
+        }
+    }
+    uint32_t report_health_hz_milli() const { return report_health_hz_milli_; }
+
     bool cmd_arq_enabled() const { return cmd_arq_enabled_; }
     bool cmd_selector_frozen() const { return cmd_selector_frozen_; }
     bool cmd_fps_ladder() const {
@@ -2779,6 +2904,13 @@ struct TxCore {
     std::optional<uint8_t> last_commit_mcs_;      // §10.5 clear-restore point
     uint8_t last_commit_level_ = 4;
     uint32_t reports_received_ = 0;
+    // §10.6 (Pass 134) report-health window. NOT reset by reset_stats(): it
+    // gates whether a calibration may start, and an operator zeroing the
+    // stats display must not open that gate.
+    uint64_t report_health_start_ms_ = 0;
+    uint32_t report_health_count_ = 0;
+    uint32_t report_health_hz_milli_ = 0;
+    uint32_t calib_min_report_hz_ = 6;
     std::vector<Stream> streams_;
 
   public:
@@ -2821,14 +2953,32 @@ struct TxCore {
                     resolve_and_apply_power(*last_commit_mcs_,
                                             last_commit_level_);
                 }
-            } else {
-                // No curve and no override (a failed first-ever run): no
-                // in-process authority knows the pre-run power. Leave the
-                // last probe value but say so loudly.
+            } else if (apply_power_auto) {
+                // No curve and no override: no in-process authority knows the
+                // pre-run power, but the BACKEND does — this is exactly the
+                // §10.5 `{"auto": true}` condition ("release power authority
+                // with no curve loaded"), whose defined answer on
+                // kernel-monitor is `txpower auto`. Before Pass 134 this leaf
+                // was near-unreachable, because a run that got far enough to
+                // move power almost always ended by installing a curve. The
+                // no_wall_found refusal makes a first-ever run END in failure
+                // routinely, and leaving the last probe value latched strands
+                // the actuator on exactly the runs the refusal exists to
+                // catch. Device-confirmed: a bench-range run left the craft
+                // at 15.00 dBm (rung 7's mask ceiling) indefinitely.
+                for (const PowerTarget& t : power_targets_) {
+                    apply_power_auto(t.adapter_idx);
+                }
                 std::fprintf(stderr,
-                             "calibrate: restore has no power authority "
-                             "(no curve, no override) — TX power left at "
-                             "the last probe value\n");
+                             "calibrate: restore -> backend auto "
+                             "(no curve, no override)\n");
+            } else {
+                // udp/dev backend: no actuator at all, so there is nothing to
+                // hand back. Say so rather than implying a restore happened.
+                std::fprintf(stderr,
+                             "calibrate: restore has no power authority and "
+                             "no auto actuator — TX power left at the last "
+                             "probe value\n");
             }
             std::fprintf(stderr, "calibrate: %s%s%s\n",
                          calibrator_->state() == CalibState::kDone
@@ -2946,11 +3096,69 @@ struct RxCore {
         return engine_.block_had_nack(stream_id, block_id);
     }
 
+    // §10.7: the ground's own emitted-report counter. report_epoch advances
+    // once per emitted report (§3.5), so this IS the emission count — the
+    // calibrator needs it only for the counter-blackout case, where the
+    // craft's anchors cannot advance.
+    uint32_t report_epoch() const { return reporter_.epoch(); }
+    // §10.7 (Pass 132) probe burst. `report_epoch()` above is what makes this
+    // work: it counts reports the radio actually TOOK, so the calibrator can
+    // size a burst and then divide by the ground's own exact count instead of
+    // reconstructing it from the craft's anchors.
+    void set_probe_budget(uint32_t n) { reporter_.set_probe_budget(n); }
+    void clear_probe_mode() { reporter_.clear_probe_mode(); }
+    bool probing() const { return reporter_.probing(); }
+    bool probe_spent() const { return reporter_.probe_spent(); }
+    // The injector's half of the §3.5 emission contract: the number to stamp
+    // into the frame at the radio call, and the commit that spends it.
+    uint32_t next_report_epoch() const { return reporter_.next_epoch(); }
+    void commit_report_epoch() { reporter_.commit_epoch(); }
+
+    // §10.7 interlock: is the craft running its own §10.6 downlink
+    // calibration? The §3.15 word already mirrors it here, so the two
+    // directions can refuse to overlap without any new wire. They must not:
+    // §10.7 drives ground power to min_qdb, starving the report stream that
+    // every §10.6 dwell and its abort clock depend on.
+    bool craft_calibrating() const { return craft_calib_state() == 1; }
+
+    // The mirrored §3.15 calibration word's state nibble, or -1 when the
+    // craft is not airing one (older build, or no selector state yet). The
+    // §10.7 sequencer needs the full value, not just "running": it has to
+    // tell a finished downlink phase from a failed one.
+    int craft_calib_state() const {
+        if (!remote_selector_state_ ||
+            (remote_selector_state_->state_flags &
+             selector_state_flags::kCalibPresent) == 0) {
+            return -1;
+        }
+        return static_cast<int>(remote_selector_state_->calib_word & 0x03u);
+    }
+
+    // §3.15a report_latch_holder, or -1 when the craft is not reporting it
+    // (bit3 clear = legacy build, or no selector state yet). Pass 131: this is
+    // §10.7's authority signal. Pass 125 inferred the latch from a valid MAC
+    // on §3.16; with the MAC gone the latch is READ from the packet that
+    // already carries it, craft-owned, rather than deduced. Note -1 (not
+    // reported) is deliberately distinct from 0 (reported, nobody holds it) —
+    // §3.15a is explicit that a receiver MUST NOT render the first as the
+    // second, and a start prerequisite that conflated them would tell an
+    // operator they had lost a latch that was never being published.
+    int craft_report_latch_holder() const {
+        if (!remote_selector_state_ ||
+            (remote_selector_state_->state_flags &
+             selector_state_flags::kHolderPresent) == 0) {
+            return -1;
+        }
+        return static_cast<int>(remote_selector_state_->report_latch_holder);
+    }
+
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
               const Inject& inject_report, const Inject& inject_nack,
               bool emit_nacks = true) {
         engine_.tick(now, deliver);
-        // §7.3: LINK_REPORTs ride the same uplink as NACKs.
+        // §7.3: LINK_REPORTs ride the same uplink as NACKs. The epoch is
+        // stamped by the injector at the radio call, not here — see
+        // Reporter::next_epoch().
         for (LinkReport r : reporter_.build(engine_, now)) {
             r.prefix.originator = originator_;
             r.prefix.destination = r.target_originator;
@@ -3351,6 +3559,23 @@ struct VcmdStatsFill {
     uint16_t mtu_supported = kDefaultMaxPayload;
 };
 
+// §10.7 (Pass 125) ground-uplink stats. A struct rather than eleven more
+// parameters, and a pointer so every other role emits the role-neutral
+// idle/zero defaults without threading anything.
+struct UplinkStatsFill {
+    const char* state = "idle";
+    uint8_t rung = 0;
+    int32_t power_qdb = 0;
+    uint8_t fingerprint = 0;
+    bool stale = false;
+    bool quality_valid = false;
+    uint32_t quality_age_ms = 0;
+    uint32_t report_epoch = 0;
+    uint32_t reports = 0;
+    int32_t rssi_mean = 0;
+    uint8_t rx_mcs = kUplinkRxMcsUnknown;
+};
+
 void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 uint64_t t0, const TxCore* tx, const RxCore* rx,
                 const AirBackend* air = nullptr,
@@ -3368,7 +3593,8 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                 StatsSnapshot* out_snap = nullptr,
                 const ArqTimingStats* arq_timing = nullptr,
                 const VcmdStatsFill* vcmd = nullptr,
-                uint16_t channel_mhz = 0) {
+                uint16_t channel_mhz = 0,
+                const UplinkStatsFill* uplink = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -3387,6 +3613,19 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     snap.link.channel_mhz = channel_mhz;  // §11 current operating channel (0 = not tracked)
     if (tx != nullptr) {
         tx->fill_stats(snap, now);
+    }
+    if (uplink != nullptr) {  // §10.7 Pass 125 (ground/rx node only)
+        snap.link.uplink_calib_state = uplink->state;
+        snap.link.uplink_calib_rung = uplink->rung;
+        snap.link.uplink_calib_power_qdb = uplink->power_qdb;
+        snap.link.uplink_calib_fingerprint = uplink->fingerprint;
+        snap.link.uplink_calib_stale = uplink->stale;
+        snap.link.uplink_quality_valid = uplink->quality_valid;
+        snap.link.uplink_quality_age_ms = uplink->quality_age_ms;
+        snap.link.uplink_quality_report_epoch = uplink->report_epoch;
+        snap.link.uplink_quality_reports = uplink->reports;
+        snap.link.uplink_quality_rssi_mean = uplink->rssi_mean;
+        snap.link.uplink_quality_rx_mcs = uplink->rx_mcs;
     }
     if (vcmd != nullptr) {
         snap.link.cmd_last_nonce = vcmd->cmd_last_nonce;
@@ -3619,15 +3858,30 @@ int run_tx(const Loaded& l) {
     DiscoveryCatalog discovery;
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv,
               air.value->mtu_supported());
-    // §10.6 (Pass 120): craft-resident calibration — engine seeds, artifact
-    // persistence, and the boot auto-load with the fingerprint gate.
-    tx.init_calibration(l.cfg.policy.calibration);
     const AdapterCfg* calib_tx_adapter = nullptr;
     for (const AdapterCfg& a : l.cfg.adapters) {
         if (a.role == Role::kTx) {
             calib_tx_adapter = &a;
             break;
         }
+    }
+    // §10.6 (Pass 120): craft-resident calibration — engine seeds, artifact
+    // persistence, and the boot auto-load with the fingerprint gate. The
+    // §10.3 ceiling (Pass 134) comes from the same adapter the sweep drives.
+    tx.init_calibration(l.cfg.policy.calibration,
+                        calib_tx_adapter != nullptr
+                            ? calib_tx_adapter->max_power_qdb
+                            : std::nullopt);
+    {
+        // §3.16 (Pass 125): the craft's half of the identity pair the ground
+        // stale-checks its uplink artifact against. Same canonical identity
+        // §10.6 already keys its own artifact on, hashed to the one byte the
+        // wire has room for.
+        const std::string ident =
+            calib_tx_adapter ? calib_identity(*calib_tx_adapter) : "udp";
+        tx.set_quality_identity(
+            crc8_dvbs2(reinterpret_cast<const uint8_t*>(ident.data()),
+                       ident.size()));
     }
     // The last persisted artifact (boot-loaded or written this session) —
     // GET /api/v1/calibration must never report a fingerprint with no body.
@@ -3743,6 +3997,7 @@ int run_tx(const Loaded& l) {
     ArqTimingTracker arq_timing;
     uint64_t now_us_it = now_us();
     VideoSlotCadence selector_state_cadence(500);
+    VideoSlotCadence uplink_quality_cadence(500);  // §3.16 2 Hz (Pass 125)
     const auto send_raw = [&](const uint8_t* f, size_t n) {
         // Pass 110 operator boundary: the 2 Hz selector summary owns no TX
         // opportunity. When due, prepend it inside an already-active live RTP
@@ -3759,6 +4014,21 @@ int run_tx(const Loaded& l) {
                 if (sn != 0) {
                     (void)selector_state_cadence.note_submitted(
                         air.value->inject(sf, sn), slot_ms);
+                }
+            }
+            // §3.16 (Pass 125): same guard-cost boundary, own cadence. It
+            // rides an already-active live slot and never opens one — video
+            // still ends the slot and alone arms the §7.2 quiet gap, so no
+            // live DATA means no fresh quality, which is exactly what makes
+            // §10.7 refuse to start or abort.
+            if (uplink_quality_cadence.due(live_video_slot, slot_ms)) {
+                if (const std::optional<UplinkQuality> q = tx.uplink_quality()) {
+                    uint8_t qf[kUplinkQualitySize];
+                    const size_t qn = encode_uplink_quality(*q, qf, sizeof(qf));
+                    if (qn != 0) {
+                        (void)uplink_quality_cadence.note_submitted(
+                            air.value->inject(qf, qn), slot_ms);
+                    }
                 }
             }
         }
@@ -4149,7 +4419,9 @@ int run_tx(const Loaded& l) {
                 }
                 return;
             }
-            if (tx.on_air(d, n, service_now)) {
+            // meta.rssi / meta.rx_mcs feed §3.16's cumulative counters at the
+            // accepted-LINK_REPORT point inside on_air.
+            if (tx.on_air(d, n, service_now, meta.rssi, meta.rx_mcs)) {
                 arq_timing.note_nack_received(d, n, service_us);
                 // A valid NACK bypasses the normal tick and live-video path.
                 tx.drain_resends(service_now, inject_resend);
@@ -4405,6 +4677,53 @@ int run_rx(const Loaded& l) {
     }
     PacketEventTrace packet_trace("rx");
     air.value->set_packet_trace(&packet_trace);
+    // §10.7 (Pass 125): commit the uplink operating point. Before this an rx
+    // node never called set_tx_mode at all and rode the TxRate struct default;
+    // the seeds match it, so this changes no bytes on air. What it buys is
+    // that the rung is asserted — the §10.7 artifact records it and §3.16's
+    // last_rx_mcs cross-checks it, and neither is meaningful against a
+    // default nobody chose.
+    air.value->latch_uplink_rate(l.cfg.air.uplink_mcs, l.cfg.air.uplink_sgi);
+
+    // §10.7 (Pass 125): the ground's single designated uplink adapter is the
+    // only local power actuator. Config load already guarantees a power_map
+    // can only sit on a role:"tx" adapter, and the radio backend guarantees
+    // there is at most one.
+    const AdapterCfg* uplink_adapter = nullptr;
+    size_t uplink_idx = 0;
+    for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+        if (l.cfg.adapters[i].role == Role::kTx) {
+            uplink_adapter = &l.cfg.adapters[i];
+            uplink_idx = i;
+            break;
+        }
+    }
+    // §10.7 power-owner resolve, highest precedence first: an explicit
+    // configured map, then a matching persisted artifact, then the backend
+    // default. Calibration borrows the actuator and every exit hands it back
+    // to whoever this says owns it — which is why it is resolved once, here,
+    // rather than reconstructed at each restore site.
+    std::optional<int32_t> uplink_owner_qdb;
+    if (uplink_adapter != nullptr && !uplink_adapter->power_map.empty()) {
+        auto curve = load_power_curve(uplink_adapter->power_map,
+                                      uplink_adapter->channel_mhz >= 5000);
+        if (curve) {
+            // §10.2: the authored curve IS level 4, so the uplink's fixed
+            // operating point resolves at the baseline level.
+            uplink_owner_qdb = resolve_power_qdb(
+                *curve.value, l.cfg.air.uplink_mcs, kPowerLevelBaseline,
+                uplink_adapter->max_power_qdb);
+            if (uplink_owner_qdb) {
+                std::fprintf(stderr,
+                             "uplink: power_map mcs=%u -> %d qdb (explicit)\n",
+                             l.cfg.air.uplink_mcs, *uplink_owner_qdb);
+            }
+        } else {
+            std::fprintf(stderr, "uplink: power_map load failed: %s\n",
+                         curve.error.c_str());
+        }
+    }
+
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
         std::fprintf(stderr, "binding error: %s\n", bindings.error.c_str());
@@ -4414,6 +4733,64 @@ int run_rx(const Loaded& l) {
     DiscoveryCatalog discovery;
     RxCore rx(l.cfg, session, l.have_table ? &l.table : nullptr,
               l.have_table ? std::optional<uint8_t>(l.tv) : std::nullopt);
+
+    // §3.16 accept gate + §10.7 calibrator. The gate needs the currently
+    // selected DATA source, which the calibrator has no notion of, so the two
+    // stay separate and the poll loop routes samples between them.
+    UplinkQualityGate quality_gate(l.cfg.node.originator, session);
+    uint32_t selected_craft_session = 0;
+    UplinkCalibParams ucal_params;
+    {
+        const CalibrationPolicy& cp = l.cfg.policy.calibration;
+        ucal_params.seek = Calibrator::seek_params(calib_params_from(cp));
+        // §10.3 (Pass 134): the adapter's opt-in sanity ceiling bounds the
+        // sweep, not only the §10.7 apply below. The ground half carries the
+        // stronger case for it — this placement auto-applies at boot with no
+        // operator between the measurement and the actuator.
+        if (uplink_adapter != nullptr && uplink_adapter->max_power_qdb) {
+            ucal_params.seek.max_qdb = std::min(ucal_params.seek.max_qdb,
+                                                *uplink_adapter->max_power_qdb);
+        }
+        ucal_params.settle_ms = static_cast<uint32_t>(cp.settle_ms);
+        ucal_params.probe_epochs =
+            static_cast<uint32_t>(cp.uplink_probe_epochs);
+        ucal_params.verify_epochs =
+            static_cast<uint32_t>(cp.uplink_verify_epochs);
+        ucal_params.liveness_ms = static_cast<uint32_t>(cp.uplink_liveness_ms);
+        ucal_params.drain_ms = static_cast<uint32_t>(cp.uplink_drain_ms);
+        ucal_params.hard_cap_ms = static_cast<uint32_t>(cp.hard_cap_ms);
+        // §10.7 (Pass 131): rung -> rate identity from the §9.3 table, so a
+        // calibrated placement's GI is the GI the uplink would actually be
+        // commanded to. The seeded defaults already match the authored table;
+        // reading it here means a deployment that authored a different one
+        // agrees without a code change, and core/ still needs no table
+        // dependency — the resolve happens on this side of the seam.
+        if (l.have_table) {
+            for (const Profile& pr : l.table.profiles) {
+                if (pr.id < kUplinkRungs) {
+                    ucal_params.rungs[pr.id] =
+                        UplinkRate{pr.mcs, pr.gi == GuardInterval::kShort};
+                    // §10.3 (Pass 134): the same table row carries the per-rung
+                    // power intent the sweep ceiling is tapered by.
+                    ucal_params.levels[pr.id] = pr.tx_power_level;
+                }
+            }
+        }
+    }
+    UplinkCalibrator uplink_cal(ucal_params);
+    // The placement for the rung the uplink actually transmits at. §10.7
+    // measures all eight and persists all eight, but only this one is
+    // resolved onto the actuator — the rest are for a future rate policy.
+    const auto uplink_measured_qdb = [&]() -> std::optional<int32_t> {
+        for (const UplinkPlacement& pl : uplink_cal.placements()) {
+            if (pl.mcs == l.cfg.air.uplink_mcs &&
+                pl.short_gi == l.cfg.air.uplink_sgi) {
+                return pl.placement_qdb;
+            }
+        }
+        return std::nullopt;
+    };
+    CalibSequencer calib_seq;
     const uint16_t op_chan =
         l.cfg.adapters.empty() ? 0 : l.cfg.adapters[0].channel_mhz;
     const uint8_t op_bw_mhz =
@@ -4432,6 +4809,191 @@ int run_rx(const Loaded& l) {
     std::optional<LinkSelection> previous_selection;
     std::string selection_state = "configured";
     std::string previous_selection_state = selection_state;
+
+    // §15.5a (Pass 65): the ground's current operating channel — the config
+    // default until a claim commits, then the committed target. The scout returns
+    // all ears here, and a failed claim rolls back here.
+    uint16_t operating_chan = op_chan;
+    // Tier 2: a persisted artifact, applied only when the local adapter, the
+    // craft, and the band/bandwidth all match. A mismatch is surfaced as
+    // stale and never applied — the hardware stays at the higher-precedence
+    // source (§10.7). This block sits after the pairing tuple it needs
+    // (`active_selection`, `quality_gate`, `operating_chan`) rather than up
+    // with the config tier, because the CRAFT half of the identity does not
+    // exist at config-load time.
+    const std::string uplink_identity =
+        uplink_adapter != nullptr ? calib_identity(*uplink_adapter) : "udp";
+    std::optional<UplinkArtifact> uplink_artifact;
+    uint8_t uplink_artifact_fp = 0;
+    bool uplink_artifact_stale = false;
+    if (auto stored =
+            uplink_calib_store_load(l.cfg.policy.calibration.artifact_dir);
+        stored) {
+        uplink_artifact_fp = uplink_calib_fingerprint(*stored.value);
+        if (stored.value->local_adapter_identity != uplink_identity) {
+            uplink_artifact_stale = true;
+            std::fprintf(stderr,
+                         "uplink: artifact STALE (stored %s, live %s)\n",
+                         stored.value->local_adapter_identity.c_str(),
+                         uplink_identity.c_str());
+        }
+        uplink_artifact = std::move(*stored.value);
+    }
+    // The craft's §3.16 adapter fingerprint as the ARTIFACT records it: the RX
+    // chain the placement was measured against, taken from live feedback and
+    // not from config. 0 until feedback arrives, which is why a fresh boot
+    // resolves to no-artifact until the craft is both selected and reporting.
+    const auto uplink_craft_fp = [&]() -> uint8_t {
+        return quality_gate.have()
+                   ? quality_gate.last().craft_adapter_fingerprint
+                   : uint8_t{0};
+    };
+    const auto uplink_artifact_qdb = [&]() -> std::optional<int32_t> {
+        if (!uplink_artifact) return std::nullopt;
+        // §10.7: "Apply it only when the same craft is selected and both local
+        // and remote adapter identities match; otherwise surface stale and
+        // leave hardware at the higher-precedence source." The local half was
+        // checked at load; the rest cannot be, so the FULL tuple is checked
+        // here, at every resolve — the same tuple the writer stamps in.
+        if (!uplink_calib_matches(*uplink_artifact, uplink_identity,
+                                  active_selection.originator,
+                                  uplink_craft_fp(), operating_chan,
+                                  op_bw_mhz)) {
+            uplink_artifact_stale = true;
+            return std::nullopt;
+        }
+        uplink_artifact_stale = false;
+        const UplinkPlacement* p = uplink_calib_placement_for(
+            *uplink_artifact, l.cfg.air.uplink_mcs, l.cfg.air.uplink_sgi);
+        if (p == nullptr) return std::nullopt;
+        int32_t q = p->placement_qdb;
+        // §10.3 ceiling still clamps a stored placement — the artifact
+        // records what was measured, the ceiling is what the operator allows.
+        if (uplink_adapter != nullptr && uplink_adapter->max_power_qdb) {
+            q = std::min(q, *uplink_adapter->max_power_qdb);
+        }
+        return q;
+    };
+    // Applicability is a FUNCTION of that tuple, and every existing restore
+    // call site fires before the tuple is knowable (startup), or on an event
+    // unrelated to it (§10.5 unlatch, calibration exit). Without a re-resolve
+    // on tuple change a valid artifact loaded at boot would never be applied
+    // at all. Seeded with the startup tuple so the first pass is not a
+    // spurious actuation.
+    uint64_t uplink_pairing_key = 0;
+    uint32_t uplink_last_dwell_seq = 0;
+    // The craft a running §10.7 measurement is bound to. The artifact stamps
+    // the craft identity, so a selection change mid-run would persist a
+    // placement measured partly against a different craft's RX chain.
+    uint16_t uplink_cal_craft = 0;
+    const auto uplink_pairing_now = [&]() -> uint64_t {
+        return (static_cast<uint64_t>(active_selection.originator) << 32) |
+               (static_cast<uint64_t>(uplink_craft_fp()) << 24) |
+               static_cast<uint64_t>(operating_chan);
+    };
+    // §10.5 (Pass 125) override latch, now available on any node with a
+    // role:"tx" adapter. It outranks every resolved tier — that is what makes
+    // it the manual counterpart to §10.7 and the reference placement for the
+    // calibrated-versus-manual comparison, with no config edit and restart.
+    std::optional<int32_t> uplink_override;
+    // §10.7 restore. ONE convergence path for every borrowed actuator, in R4
+    // order — RATE first, then power — because the rung a placement was
+    // measured at is what makes the power meaningful, and the same reasoning
+    // that put power before the selector pin in §10.6 puts rate before power
+    // here. Pass 131 added the rate: the eight-rung sweep commands
+    // `set_tx_mode` per rung, so a run that exits at rung 5 would otherwise
+    // leave the uplink transmitting at MCS5 with a rung-0 power on it.
+    //
+    // Power precedence, highest first: the §10.5 latch, then an explicit
+    // configured placement, then a matching artifact, then backend auto. A
+    // second copy of this ordering is how the two drift, which is why the
+    // §10.5 override paths call this rather than setting power directly — the
+    // rate re-latch is an idempotent no-op there.
+    const auto uplink_restore_actuators = [&]() {
+        // Probe mode first, and unconditionally: it is the one actuator that
+        // is not the adapter's, so an early return on a missing uplink
+        // adapter must not leave the reporter stuck in a spent burst — which
+        // would silence LINK_REPORT entirely, for good.
+        rx.clear_probe_mode();
+        if (uplink_adapter == nullptr) return;
+        air.value->latch_uplink_rate(l.cfg.air.uplink_mcs,
+                                     l.cfg.air.uplink_sgi);
+        if (uplink_override) {
+            (void)air.value->set_power_qdb(uplink_idx, *uplink_override);
+        } else if (uplink_owner_qdb) {
+            (void)air.value->set_power_qdb(uplink_idx, *uplink_owner_qdb);
+        } else if (const std::optional<int32_t> aq = uplink_artifact_qdb()) {
+            (void)air.value->set_power_qdb(uplink_idx, *aq);
+        } else {
+            air.value->set_power_auto(uplink_idx);
+        }
+    };
+    uplink_restore_actuators();
+    uplink_pairing_key = uplink_pairing_now();
+    if (uplink_adapter != nullptr) {
+        // One line naming which tier actually owns the actuator. The
+        // precedence is invisible otherwise, and "why is my power_map not
+        // being applied" is exactly the question this answers.
+        const std::optional<int32_t> aq = uplink_artifact_qdb();
+        std::fprintf(stderr, "uplink: power owner = %s",
+                     uplink_owner_qdb ? "config power_map"
+                     : aq             ? "artifact"
+                                      : "backend auto");
+        if (uplink_owner_qdb) {
+            std::fprintf(stderr, " (%d qdb)", *uplink_owner_qdb);
+        } else if (aq) {
+            std::fprintf(stderr, " (%d qdb, fp=0x%02x)", *aq,
+                         uplink_artifact_fp);
+        } else if (uplink_artifact && active_selection.originator == 0) {
+            // Not stale in the operator sense — nothing is selected yet, so
+            // the pairing simply cannot be evaluated. Saying STALE here would
+            // send people looking for a mismatch that does not exist.
+            std::fprintf(stderr, " (artifact present, awaiting craft)");
+        } else if (uplink_artifact_stale) {
+            std::fprintf(stderr, " (artifact present but STALE)");
+        }
+        std::fprintf(stderr, "\n");
+    }
+
+    // One place that turns live §10.7/§3.16 state into the §15.3 fields, so
+    // the stats line and GET /api/v1/calibration cannot describe the node
+    // differently.
+    const auto uplink_fill = [&]() {
+        UplinkStatsFill u;
+        switch (uplink_cal.state()) {
+            case CalibState::kIdle: u.state = "idle"; break;
+            case CalibState::kRunning: u.state = "running"; break;
+            case CalibState::kDone: u.state = "done"; break;
+            case CalibState::kFailed: u.state = "failed"; break;
+        }
+        // Pass 131: the rung is live progress through the eight-rung sweep,
+        // the same quantity §3.15's calibration word carries for §10.6.
+        u.rung = uplink_cal.rung();
+        u.power_qdb = uplink_cal.state() == CalibState::kRunning
+                          ? uplink_cal.qdb()
+                          : uplink_measured_qdb().value_or(0);
+        u.fingerprint = uplink_artifact_fp;
+        u.stale = uplink_artifact_stale;
+        // §3.16: valid/age track LIVENESS (packet arrival), not counter
+        // progress — that is the clock §10.7's abort watches.
+        u.quality_valid = quality_gate.live(now_ms(), ucal_params.liveness_ms);
+        u.quality_age_ms =
+            quality_gate.have()
+                ? static_cast<uint32_t>(now_ms() - quality_gate.liveness_ms())
+                : 0;
+        if (quality_gate.have()) {
+            const UplinkQuality& q = quality_gate.last();
+            u.report_epoch = q.last_report_epoch;
+            u.reports = q.reports_received;
+            u.rx_mcs = q.last_rx_mcs;
+            u.rssi_mean =
+                q.reports_received != 0
+                    ? static_cast<int32_t>(q.rssi_sum_dbm) /
+                          static_cast<int32_t>(q.reports_received)
+                    : 0;
+        }
+        return u;
+    };
 
     // §15.4 frame-shm egress: one producer ring + a §6.3a reassembler per
     // frame-shm out-stream. deliver_now carries the loop's per-iteration clock
@@ -4644,6 +5206,15 @@ int run_rx(const Loaded& l) {
             so.reasm->reset_stream();
             so.source.reset();
         }
+        // §3.16 scopes its accept to the exact (originator, session) of the
+        // stream we consume, and the session is LEARNED from that craft's
+        // DATA. Carrying the previous craft's session across a selection
+        // change leaves the gate scoped to a tuple that cannot exist, while
+        // the §10.7 "no craft selected" prerequisite reads a non-zero value
+        // and lets a start through against feedback that will never arrive.
+        if (selected.originator != active_selection.originator) {
+            selected_craft_session = 0;
+        }
         active_selection = selected;
         assign_caches(selected);
     };
@@ -4653,6 +5224,10 @@ int run_rx(const Loaded& l) {
     // Disabled (default) they inject immediately — §7.1 baseline.
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> urgent_ret_held;
+    // §7.2/§10.7: how many queued LINK_REPORTs one quiet gap can absorb.
+    // Ordinary operation queues one, so this only binds during a §10.7 probe
+    // burst — which is exactly where overflowing the gap is invisible loss.
+    static constexpr size_t kReportsPerReturnWindow = 1;
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_ret_held;
     // §7.2 Pass 78: anchored report batches re-fire once at the NEXT return
     // window (spread across two listen gaps; a blind fallback batch is not
@@ -4682,10 +5257,25 @@ int run_rx(const Loaded& l) {
         if (urgent) arq_timing.note_nack_injected(f, n, now_us());
         air.value->inject_return(target, f, n, urgent);
     };
+    // §3.5/§10.7: the epoch is stamped HERE, at the radio call, and advances
+    // only on a successful submit. Reports are built well before they are
+    // injected (§7.2 holds a batch for the craft's quiet gap) and can be
+    // dropped in between — an epoch spent on a frame the radio never took is
+    // phantom loss on the ground's §10.7 seek, because the craft's
+    // last_report_epoch delta IS that seek's denominator.
+    const auto send_report = [&](uint16_t target, uint8_t* f, size_t n) {
+        (void)link_report_stamp_epoch(f, n, rx.next_report_epoch());
+        if (air.value->inject_return(target, f, n, false) != 0) {
+            rx.commit_report_epoch();
+        }
+    };
     const RxCore::Inject inject_report = [&](const uint8_t* f, size_t n,
                                              uint16_t target) {
         if (!qg.enabled()) {
-            send_return(target, f, n, false);
+            uint8_t tmp[kLinkReportSize];
+            if (n > sizeof(tmp)) return;
+            std::memcpy(tmp, f, n);
+            send_report(target, tmp, n);
             return;
         }
         report_ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
@@ -4849,14 +5439,34 @@ int run_rx(const Loaded& l) {
     bool mtu_reissue_pending = false;
     std::function<std::pair<int, std::string>(const std::string&, int)>
         start_vehicle_command;
+    // §10.7: "abort, process shutdown, retune conflict, and failure must never
+    // leave the last probe power active." ONE convergence path for every
+    // cancel — the alternative is a restore call per exit site, and the sites
+    // that get forgotten are exactly the ones nobody exercises. Placed after
+    // start_vehicle_command's declaration because the downlink phase has to
+    // be cancelled over air.
+    const auto cancel_calibration = [&](const char* why) {
+        if (uplink_cal.state() != CalibState::kRunning && !calib_seq.active()) {
+            return;
+        }
+        const SeqActions sa = calib_seq.abort(now_ms());
+        (void)uplink_cal.abort(now_ms());
+        // Drain the single-shot restore edge here rather than leaving it to
+        // the service loop: shutdown never reaches the loop again.
+        const UplinkCalibActions ua =
+            uplink_cal.tick(now_ms(), rx.report_epoch(), true, true);
+        if (ua.restore) uplink_restore_actuators();
+        // Empty on a cache-assignment node, which never gets the issuer
+        // handlers — calling it unguarded would throw bad_function_call.
+        if (sa.abort_downlink && start_vehicle_command) {
+            (void)start_vehicle_command("calibrate", 0);
+        }
+        std::fprintf(stderr, "uplink-calib: CANCELLED (%s)\n", why);
+    };
     // §9.10: the ground's designated uplink TX adapter gets the same
     // CCX-liveness watchdog as the craft's radio.
     TxWedge wedge(TxWedgePolicy{l.cfg.air.wedge_window_ms,
                                 l.cfg.air.wedge_min_submits});
-    // §15.5a (Pass 65): the ground's current operating channel — the config
-    // default until a claim commits, then the committed target. The scout returns
-    // all ears here, and a failed claim rolls back here.
-    uint16_t operating_chan = op_chan;
     // §15.5a scout (Pass 64). Roams the uplink (role:"tx") adapter only — the
     // diversity RX adapters hold the resting channel — and widens the net_id
     // filter during a sweep; psk_known reports a usable CSA key (configured
@@ -5072,6 +5682,11 @@ int run_rx(const Loaded& l) {
             // the event loop below), so a by-reference capture would dangle —
             // a stack-use-after-scope on the first quickconnect. scout_quickconnect
             // already copies it (assignment below); scout_start must too.
+            // §10.7 (D2): scout_idx IS the role:"tx" uplink adapter, so a
+            // sweep roams the calibration actuator. The liveness clock cannot
+            // catch it — §3.16 keeps arriving on the diversity RX adapters
+            // that stay at rest — so every dwell would score a real blackout
+            // the seek blames on power and ramp to max_qdb.
             h.scout_start = [&, do_claim](const std::vector<uint16_t>& chans,
                                           uint32_t dwell, const std::string& mode,
                                           int target) -> std::string {
@@ -5081,6 +5696,7 @@ int run_rx(const Loaded& l) {
                     }
                     return do_claim(target, 0);  // pick the emptiest channel
                 }
+                cancel_calibration("scout sweep");
                 std::vector<uint16_t> ch = chans;
                 if (ch.empty()) ch = l.cfg.scout.channels;
                 if (ch.empty()) ch = l.cfg.policy.csa.channel_allowlist;
@@ -5091,6 +5707,183 @@ int run_rx(const Loaded& l) {
             };
             h.scout_stop = [&]() -> std::string {
                 scout.stop(now_ms());
+                return "";
+            };
+            // §10.5 override latch on the ground's uplink adapter.
+            h.tx_power_set = [&](bool is_auto, int qdb) -> std::string {
+                if (uplink_adapter == nullptr) {
+                    return "no role:\"tx\" adapter on this node";
+                }
+                // Latching mid-run would fight the seek for the actuator, so
+                // the run yields first and restores through its own single
+                // convergence path — before the latch applies (§10.5).
+                cancel_calibration("tx/power override latched");
+                if (is_auto) {
+                    uplink_override.reset();
+                    uplink_restore_actuators();  // immediate, per §10.5
+                    return "";
+                }
+                if (qdb < -511 || qdb > 511) {
+                    return "qdb out of range (-511..511)";
+                }
+                uplink_override = qdb;
+                uplink_restore_actuators();
+                return "";
+            };
+            h.tx_power_json = [&] {
+                std::string s = "{\"override_active\":";
+                s += uplink_override ? "true" : "false";
+                if (uplink_override) {
+                    s += ",\"qdb\":" + std::to_string(*uplink_override);
+                }
+                s += ",\"backend\":\"";
+                s += l.cfg.air.kind == AirCfg::Kind::kMonitor ? "kernel-monitor"
+                     : l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio"
+                                                              : "udp";
+                s += "\"}";
+                return s;
+            };
+            // §10.7 GET: the ground's OWN uplink state. The craft response
+            // keeps the §10.6 schema; `direction` is what tells a Hub which
+            // of the two it is holding, since both live at this path.
+            h.calibration_json = [&]() -> std::string {
+                const UplinkStatsFill u = uplink_fill();
+                std::string s = "{\"direction\":\"uplink\",\"phase\":\"";
+                s += CalibSequencer::phase_name(calib_seq.phase());
+                s += "\",\"state\":\"";
+                s += u.state;
+                s += "\",\"rung\":" + std::to_string(u.rung);
+                s += ",\"power_qdb\":" + std::to_string(u.power_qdb);
+                s += ",\"fingerprint\":" + std::to_string(u.fingerprint);
+                s += ",\"stale\":";
+                s += u.stale ? "true" : "false";
+                s += ",\"quality\":{\"valid\":";
+                s += u.quality_valid ? "true" : "false";
+                s += ",\"age_ms\":" + std::to_string(u.quality_age_ms);
+                s += ",\"last_report_epoch\":" + std::to_string(u.report_epoch);
+                s += ",\"reports_received\":" + std::to_string(u.reports);
+                s += ",\"rssi_mean\":" + std::to_string(u.rssi_mean);
+                s += ",\"rx_mcs\":" + std::to_string(u.rx_mcs);
+                s += "},\"artifact\":";
+                if (uplink_artifact) {
+                    s += "{\"local_adapter_identity\":\"" +
+                         uplink_artifact->local_adapter_identity + "\"";
+                    s += ",\"craft_originator\":" +
+                         std::to_string(uplink_artifact->craft_originator);
+                    s += ",\"craft_adapter_fingerprint\":" +
+                         std::to_string(
+                             uplink_artifact->craft_adapter_fingerprint);
+                    s += ",\"channel_mhz\":" +
+                         std::to_string(uplink_artifact->channel_mhz);
+                    s += ",\"bw_mhz\":" +
+                         std::to_string(uplink_artifact->bw_mhz);
+                    s += ",\"t_unix\":" +
+                         std::to_string(uplink_artifact->t_unix);
+                    s += ",\"placements\":[";
+                    bool first_p = true;
+                    for (const UplinkPlacement& p : uplink_artifact->placements) {
+                        if (!first_p) s += ",";
+                        first_p = false;
+                        s += "{\"mcs\":" + std::to_string(p.mcs);
+                        s += ",\"short_gi\":";
+                        s += p.short_gi ? "true" : "false";
+                        s += ",\"placement_qdb\":" +
+                             std::to_string(p.placement_qdb);
+                        s += ",\"placement_rssi_dbm\":" +
+                             std::to_string(p.placement_rssi_dbm);
+                        s += ",\"placement_loss_milli\":" +
+                             std::to_string(p.placement_loss_milli);
+                        s += ",\"last_clean_qdb\":" +
+                             std::to_string(p.last_clean_qdb);
+                        s += ",\"first_bad_qdb\":";
+                        s += p.has_first_bad ? std::to_string(p.first_bad_qdb)
+                                             : "null";
+                        s += "}";
+                    }
+                    s += "]}";
+                } else {
+                    s += "null";
+                }
+                s += ",\"fail_reason\":";
+                // The sequencer's reason wins when set: it names WHICH phase
+                // failed, which the uplink calibrator's cannot.
+                const char* fr = calib_seq.fail_reason()
+                                     ? calib_seq.fail_reason()
+                                     : uplink_cal.fail_reason();
+                if (fr != nullptr) {
+                    s += "\"";
+                    s += fr;
+                    s += "\"";
+                } else {
+                    s += "null";
+                }
+                s += "}";
+                return s;
+            };
+            // §10.7 start prerequisites. Each returns the failed one so the
+            // operator sees WHY, not just 409 — the list is long and every
+            // entry is a real hazard, not a formality.
+            h.uplink_calibrate = [&](const std::string& action)
+                -> std::string {
+                if (action == "abort") {
+                    cancel_calibration("operator abort");  // idempotent
+                    return "";
+                }
+                const bool both = (action == "start_both");
+                if (!both && action != "start") {
+                    return "action must be start, start_both or abort";
+                }
+                if (calib_seq.active()) {
+                    return "bi-directional calibration already running";
+                }
+                if (uplink_cal.state() == CalibState::kRunning) {
+                    return "calibration already running";
+                }
+                if (uplink_adapter == nullptr) {
+                    return "no designated role:\"tx\" uplink adapter";
+                }
+                if (active_selection.originator == 0 ||
+                    selected_craft_session == 0) {
+                    return "no craft selected as DATA source";
+                }
+                // Authority (§10.7, Pass 131): we must hold the craft's §3.5
+                // report latch. Pass 125 inferred that from a valid MAC on
+                // §3.16; with the MAC gone it is READ from §3.15a, which the
+                // craft already publishes. The two failure messages are kept
+                // apart on purpose — "not published" sends the operator to the
+                // craft's build, "held by N" sends them to the other ground,
+                // and one message for both would send them to neither.
+                if (const int holder = rx.craft_report_latch_holder();
+                    holder < 0) {
+                    return "craft is not publishing §3.15a report_latch_holder";
+                } else if (holder != l.cfg.node.originator) {
+                    return holder == 0
+                               ? "craft has no report latch holder"
+                               : "another ground holds the craft's report latch";
+                }
+                if (!quality_gate.live(now_ms(), ucal_params.liveness_ms)) {
+                    return "no fresh §3.16 feedback";
+                }
+                if (uplink_override) {
+                    return "§10.5 TX-power override is latched";
+                }
+                if (scout.scanning()) return "scout is running";
+                if (issuer.active()) return "CSA campaign active (issuer)";
+                if (follower.campaign_active()) return "CSA campaign active";
+                // The craft must not be calibrating its own downlink: §10.7
+                // drives ground power to min_qdb, which starves the report
+                // stream every §10.6 dwell and its abort clock depend on.
+                if (rx.craft_calibrating()) {
+                    return "craft downlink calibration is running";
+                }
+                if (!uplink_cal.start(now_ms(), rx.report_epoch())) {
+                    return "calibration already running";
+                }
+                uplink_cal_craft = active_selection.originator;
+                if (both) calib_seq.start(now_ms());
+                std::fprintf(stderr, "uplink-calib: START mcs=%u%s\n",
+                             l.cfg.air.uplink_mcs,
+                             both ? " (bi-directional)" : "");
                 return "";
             };
             h.scout_quickconnect = do_claim;
@@ -5107,6 +5900,19 @@ int run_rx(const Loaded& l) {
                 const uint8_t id = vcmd_id_for(cmd);
                 if (id == 0) {
                     return {400, "{\"ok\":false,\"error\":\"unknown cmd\"}"};
+                }
+                // §10.7 (D6): "while §10.7 runs the ground refuses to issue a
+                // §11.7 CALIBRATE campaign." Only the reverse direction was
+                // implemented. Without this the craft starts its §10.6 run
+                // with the ground uplink deliberately at min_qdb, starving
+                // the report stream every §10.6 dwell and its abort clock
+                // depend on. The sequencer's own downlink issue is exempt: by
+                // then the uplink phase is terminal.
+                if (id == vcmd_id::kCalibrate && arg != 0 &&
+                    uplink_cal.state() == CalibState::kRunning) {
+                    return {409,
+                            "{\"ok\":false,\"error\":\"ground uplink "
+                            "calibration is running\"}"};
                 }
                 // §11.7/§3.14: MODE (Pass 105) rides the full u8 — the catalog
                 // lives on the craft, so an over-range index is the craft's
@@ -5357,11 +6163,46 @@ int run_rx(const Loaded& l) {
                 send_return(target, f.data(), f.size(), false);
             }
             report_repeat_held.clear();
-            for (const auto& [f, target] : report_ret_held) {
-                send_return(target, f.data(), f.size(), false);
+            // §10.7 (Pass 132): a probe burst is PACED across return windows,
+            // never dumped into one. The craft is RX-deaf while it transmits
+            // and §7.2's quiet gap is only `return_window_us` (~2000 µs) wide,
+            // so a batch larger than the gap spills into the craft's transmit
+            // period and is simply not heard. Measured on the bench: a
+            // 100-probe burst flushed at once lost ~40% of every dwell
+            // REGARDLESS of commanded power — a flat, power-independent floor
+            // that made every rung read `no_clean_point` while RSSI tracked
+            // power perfectly. Seed 8 ≈ 2000 µs / ~160 µs for a ~100-byte
+            // ONE, which is the shape §7.2 is engineered for and the only one
+            // measured good: normal traffic delivers 99.7% at 1 per window, 8 per
+            // window lost 4-15%, and 3 per window left verify dwells at 22-30permille
+            // — straddling loss_ok_milli, so runs became a coin flip. The speedup
+            // does NOT come from packing the gap; it comes from using EVERY gap
+            // (~60/s at 60 fps) instead of every sixth one at the 10 Hz cadence.
+            // Same shape, 6x the rate. RE-DERIVE (§17) if
+            // `return_window_us` or the report size moves. Outside a
+            // calibration this never binds — ordinary operation queues one
+            // report per window.
+            // ONLY while a §10.7 burst is in flight. Outside one this flushes
+            // the whole batch and clears, exactly as it always did. Capping
+            // ordinary traffic was a REGRESSION: reports are built on a 10 Hz
+            // timer but windows open per video EOB, so whenever windows open
+            // slower than reports are built the queue grows without bound and
+            // every report is delivered later than the last. Measured on the
+            // bench as the craft seeing ~4.8 epochs/s instead of 10 and
+            // tripping REPORT_TIMEOUT on staleness — a healthy-looking link
+            // (RSSI -54, 2.7M packets) with a starved return path.
+            size_t window_budget =
+                rx.probing() ? kReportsPerReturnWindow : report_ret_held.size();
+            while (!report_ret_held.empty() && window_budget-- > 0) {
+                auto& [f, target] = report_ret_held.front();
+                // Stamps in place, so the redundancy copy must be taken AFTER
+                // the send: a repeat carries the SAME epoch (§3.5 — a
+                // redundant copy is not a new emission).
+                send_report(target, f.data(), f.size());
                 if (ret_at_us && l.cfg.policy.ret.report_redundancy > 1) {
                     report_repeat_held.emplace_back(f, target);
                 }
+                report_ret_held.pop_front();
             }
             // §7.2 observability: a batch fired on a TSF-anchored window
             // deadline is a hit; one sent blind (no EOB heard) is a miss.
@@ -5371,10 +6212,159 @@ int run_rx(const Loaded& l) {
                 ++ret_window_misses;
             }
             urgent_ret_held.clear();
-            report_ret_held.clear();
+            // During a burst, whatever did not fit is the next window's batch
+            // (bounded by the burst size, issued once per dwell). Outside one
+            // the loop above drained it, so this is a no-op — but it is stated
+            // rather than assumed, because leaving stale reports queued on the
+            // ordinary path is exactly the regression above.
+            if (!rx.probing()) report_ret_held.clear();
             ret_at_us.reset();
             report_fallback_us.reset();
             ret_tsf_anchored = false;
+        }
+        // §10.7 calibrator service. `restore` is single-shot and set on EVERY
+        // terminal path, so this is the one place probe power is handed back
+        // to the §10.7 owner — no exit can strand it.
+        // Ticked UNCONDITIONALLY. tick() early-returns when the calibrator is
+        // not running, but it drains the single-shot restore/artifact edges
+        // first — and a terminal state set from OUTSIDE this loop (the REST
+        // abort, the §10.5 latch) has no other drain point. Gating this on
+        // kRunning stranded probe power on exactly those paths.
+        {
+            const UplinkCalibActions ua = uplink_cal.tick(
+                now_ms(), rx.report_epoch(),
+                quality_gate.live(now_ms(), ucal_params.liveness_ms),
+                // The burst is finished when it has been built AND the paced
+                // queue has actually gone out. `probe_spent()` alone is the
+                // BUILD signal; with §7.2 pacing a 400-probe verify takes ~50
+                // windows to leave, which is longer than the drain — opening
+                // the drain on the build signal would score a dwell whose
+                // probes were still departing.
+                rx.probe_spent() && report_ret_held.empty());
+            // Rate before power (§10.7 R4 order): the rung is what the power
+            // is being measured FOR, so commanding power first would spend a
+            // settle window at the new level on the old rung.
+            if (ua.set_rate && uplink_adapter != nullptr) {
+                air.value->set_tx_mode(ua.set_rate->mcs, ua.set_rate->short_gi);
+            }
+            if (ua.set_qdb && uplink_adapter != nullptr) {
+                (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
+            }
+            // §10.7 (Pass 132): the burst. 0 opens the drain window, so the
+            // craft's counter settles before the dwell is scored.
+            if (ua.probe_budget) rx.set_probe_budget(*ua.probe_budget);
+            if (ua.restore) uplink_restore_actuators();
+            // §10.7 per-dwell trace. The campaign's deliverable is a per-run
+            // record (duration, samples/dwell, loss, RSSI, bracket); without
+            // it a "verify_failed" carries no numbers and cannot be argued
+            // with. Edge-triggered on the dwell counter, so this is one line
+            // per completed dwell, not per tick.
+            if (const auto& dw = uplink_cal.last_dwell();
+                dw.seq != uplink_last_dwell_seq) {
+                uplink_last_dwell_seq = dw.seq;
+                std::fprintf(stderr,
+                             "uplink-calib: dwell#%u rung=%u %s qdb=%d "
+                             "sent=%u/%u received=%u loss=%upermille rssi=%d\n",
+                             dw.seq, dw.rung, dw.verify ? "VERIFY" : "probe ",
+                             dw.qdb, dw.sent, dw.target, dw.received,
+                             dw.loss_milli, dw.rssi_mean);
+            }
+            // A craft change mid-run invalidates the measurement in progress
+            // (D4) — the artifact stamps the craft identity, and the §3.16
+            // counter domain restarts under a different RX chain.
+            if (uplink_cal.state() == CalibState::kRunning &&
+                active_selection.originator != uplink_cal_craft) {
+                cancel_calibration("craft selection changed");
+            }
+            // §10.7 tier-2 applicability moves with the pairing: the craft is
+            // selected after startup, its §3.16 fingerprint arrives later
+            // still, and a CSA moves the channel. Re-resolve on that change —
+            // never mid-run, where the calibrator owns the actuator.
+            if (uplink_artifact &&
+                uplink_cal.state() != CalibState::kRunning) {
+                const uint64_t key = uplink_pairing_now();
+                if (key != uplink_pairing_key) {
+                    uplink_pairing_key = key;
+                    uplink_restore_actuators();
+                }
+            }
+            if (ua.artifact_ready) {
+                UplinkArtifact art;
+                art.local_adapter_identity = uplink_identity;
+                art.craft_originator = active_selection.originator;
+                // The craft half of the pairing comes from the feedback that
+                // produced this measurement, not from config — it identifies
+                // the RX chain the placement was actually measured against.
+                art.craft_adapter_fingerprint =
+                    quality_gate.have()
+                        ? quality_gate.last().craft_adapter_fingerprint
+                        : 0;
+                art.channel_mhz = operating_chan;
+                art.bw_mhz = op_bw_mhz;
+                art.t_unix = static_cast<int64_t>(::time(nullptr));
+                art.placements = uplink_cal.placements();
+                const uint8_t fp = uplink_calib_store_write(
+                    l.cfg.policy.calibration.artifact_dir, art);
+                if (fp == 0) {
+                    // §10.7 (Pass 129): persistence IS the deliverable, so a
+                    // write that never landed fails the run rather than
+                    // reporting `done` with fingerprint 0. Drain the re-armed
+                    // restore edge here so the actuator goes back to its
+                    // pre-run owner instead of holding a placement that dies
+                    // at the next boot.
+                    std::fprintf(stderr,
+                                 "uplink-calib: artifact write FAILED (%s) — "
+                                 "run FAILED, placement not persisted\n",
+                                 l.cfg.policy.calibration.artifact_dir.c_str());
+                    uplink_cal.fail_persist();
+                    const UplinkCalibActions fa = uplink_cal.tick(
+                        now_ms(), rx.report_epoch(), true, true);
+                    if (fa.restore) uplink_restore_actuators();
+                } else {
+                    uplink_artifact = std::move(art);
+                    uplink_artifact_fp = fp;
+                    uplink_artifact_stale = false;
+                    std::fprintf(stderr,
+                                 "uplink-calib: DONE %zu rungs fp=0x%02x\n",
+                                 uplink_cal.placements().size(), fp);
+                    for (const UplinkPlacement& pl : uplink_cal.placements()) {
+                        std::fprintf(
+                            stderr,
+                            "uplink-calib:   mcs=%u %s -> %d qdb "
+                            "rssi=%d loss=%upermille%s\n",
+                            pl.mcs, pl.short_gi ? "sgi" : "lgi",
+                            pl.placement_qdb, pl.placement_rssi_dbm,
+                            pl.placement_loss_milli,
+                            (pl.mcs == l.cfg.air.uplink_mcs &&
+                             pl.short_gi == l.cfg.air.uplink_sgi)
+                                ? "  <- operating"
+                                : "");
+                    }
+                }
+                // The seek already applied the placement; re-resolving makes
+                // the running value and the persisted owner the same thing.
+                uplink_restore_actuators();
+            }
+        }
+        // §10.7 bi-directional sequencer. Ticked unconditionally of the
+        // calibrator above, because the downlink phase runs entirely after
+        // the local calibrator has gone terminal.
+        if (calib_seq.active()) {
+            const SeqActions sa = calib_seq.tick(
+                uplink_cal.state(), rx.craft_calib_state(), now_ms());
+            if (sa.start_downlink) {
+                const auto r = start_vehicle_command("calibrate", 1);
+                std::fprintf(stderr,
+                             "calib-seq: uplink done -> downlink (%d)\n",
+                             r.first);
+            }
+            if (!calib_seq.active()) {
+                std::fprintf(stderr, "calib-seq: %s%s%s\n",
+                             CalibSequencer::phase_name(calib_seq.phase()),
+                             calib_seq.fail_reason() ? " " : "",
+                             calib_seq.fail_reason() ? calib_seq.fail_reason()
+                                                     : "");
+            }
         }
         const int air_timeout =
             urgent_ret_held.empty() && report_ret_held.empty() ? 2 : 0;
@@ -5400,12 +6390,32 @@ int run_rx(const Loaded& l) {
                                     air.value->read_tsf(meta.adapter_id),
                                     static_cast<uint32_t>(meta.tsf_us),
                                     std::nullopt)) {
+                    // §10.7: a retune moves the channel out from under an
+                    // in-flight run. Continuing would persist a placement
+                    // measured across two channels under one channel_mhz
+                    // identity — worse than having no artifact at all.
+                    cancel_calibration("CSA retune");
                     std::fprintf(stderr, "csa: following -> %u MHz\n",
                                  c->target_chan);
                 }
                 return;
             }
+            // §3.16: uplink feedback from the craft we are currently taking
+            // DATA from. The gate owns every accept rule; all that happens
+            // here is routing the sample.
+            if (const UplinkQuality* uq = std::get_if<UplinkQuality>(&dec)) {
+                const QualitySample s = quality_gate.accept(
+                    *uq, active_selection.originator, selected_craft_session,
+                    now);
+                uplink_cal.on_sample(s, now);
+                return;
+            }
             if (const DataView* v = std::get_if<DataView>(&dec)) {
+                // The craft's session comes from the stream we are actually
+                // consuming — §3.16 scopes its accept to that exact tuple.
+                if (v->hdr.prefix.originator == active_selection.originator) {
+                    selected_craft_session = v->hdr.prefix.session_id;
+                }
                 arq_timing.note_retransmit_arrived(*v, now_us_it);
                 if (frame_is_eob(d, n)) arq_timing.note_eob(now_us_it);
                 if (qg.enabled()) {
@@ -5615,6 +6625,14 @@ int run_rx(const Loaded& l) {
         // §11 campaign engine. The trigger is now POST /api/v1/csa (§15.5);
         // the stdin trigger was removed with the control-plane migration.
         const CsaIssuer::IssuerAction ia = issuer.tick(now_us_it);
+        // §10.7 (D1): the follower guard alone was the RARE half — a ground
+        // node is normally the CSA ISSUER, and its commit/revert/abort paths
+        // all retune. Any non-idle issuer action means the channel is about
+        // to move under an in-flight seek, which would persist a placement
+        // measured across two channels under one channel_mhz identity.
+        if (ia.kind != CsaIssuer::IssuerAction::Kind::kNone) {
+            cancel_calibration("CSA issuer retune");
+        }
         switch (ia.kind) {
             case CsaIssuer::IssuerAction::Kind::kSendCopy: {
                 // §11.2 (Pass 90): campaign copies ride the craft's §7.2 quiet
@@ -5846,6 +6864,7 @@ int run_rx(const Loaded& l) {
                                       vissuer.nonce(), arq_rx_enabled,
                                       mtu_mode.c_str(), mtu_requested,
                                       mtu_effective, mtu_supported};
+            const UplinkStatsFill ufill = uplink_fill();
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
@@ -5854,13 +6873,17 @@ int run_rx(const Loaded& l) {
                        &frame_stats, &shm_stats,
                        cache_ctl ? &crs : nullptr,
                        cache_store ? &css : nullptr, &last_snap, &timing,
-                       &vfill, operating_chan);
+                       &vfill, operating_chan, &ufill);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
             next_stats = now + stats_period;
         }
     }
+    // §10.7: shutdown is an exit like any other. Without this a SIGTERM
+    // mid-run leaves the uplink adapter at the last probe power until some
+    // later start re-resolves the owner.
+    cancel_calibration("shutdown");
     return 0;
 }
 

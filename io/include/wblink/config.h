@@ -279,16 +279,43 @@ struct CalibrationPolicy {
     int loss_ok_milli = 15;
     int loss_bad_milli = 50;
     int seek_step_qdb = 16;  // Pass 121 max-power seek
-    int cap_rise_db = 1;
     int rssi_guard_dbm = -6;
     int min_qdb = 4;
     int max_qdb = 108;
-    int settle_ms = 800;
+    // Pass 132: 800 -> 300. It was sized as TXAGC settle plus one report
+    // window, and the report-window term was carrying the §10.7 case where a
+    // dwell had to wait for the cadence to produce a sample. A burst starts
+    // emitting the instant settle ends, so only the TXAGC term is real; §10.6
+    // still covers its own 100 ms window inside the 300.
+    int settle_ms = 300;
     int probe_dwell_ms = 1200;
     int verify_dwell_ms = 2500;
     int report_loss_abort_ms = 3000;
     int hard_cap_ms = 600000;
+    // §10.6 (Pass 134): whole-run accepted-report rate floor. The 3 s abort
+    // above catches SILENCE; this catches a return path at HALF rate, which
+    // reads as fewer observed losses and places every rung at its ceiling.
+    // Seeded well under the 10 Hz nominal so ordinary dwell-edge gaps and
+    // bounded overload blackouts never trip it.
+    int calib_min_report_hz = 6;
     std::string artifact_dir = "/etc/waybeam-link/calibration";
+    // §10.7 (Pass 125) ground-uplink gates. The walls, step, min/max, settle
+    // and artifact_dir above are shared; only these differ, because the uplink
+    // measures sparse LINK_REPORT epochs instead of live video. They are
+    // EPOCH COUNTS, not milliseconds: a slow report cadence must lengthen the
+    // run, never let an unobserved dwell score as clean. The craft-only ms
+    // dwells and report_loss_abort_ms are unused on the ground.
+    // Pass 132 burst sizes. 100 puts one lost probe at 10permille (inside
+    // loss_ok_milli) and five at 50permille (the bad wall). The old 40 put one
+    // loss at 25permille, BETWEEN the walls, which is the only reason
+    // `uplink_ambiguous_epochs` existed — it is retired, and a config still
+    // carrying the key simply loads with it ignored.
+    int uplink_probe_epochs = 100;
+    int uplink_verify_epochs = 200;
+    // Silence after a burst so the craft's counter reflects all of it before
+    // scoring. Must exceed one §3.16 period (500 ms at 2 Hz).
+    int uplink_drain_ms = 600;
+    int uplink_liveness_ms = 2000;
 };
 
 struct Policy {
@@ -338,6 +365,17 @@ struct AirCfg {
     // own SA (craft half of the gate-4 A/B). Opt-in — makes a passive
     // monitor transmit ACKs.
     bool ack_responder = false;
+    // §10.7 (Pass 125) the rx-node's uplink operating point. Before this an
+    // rx node never called set_tx_mode at all and rode the TxRate struct
+    // default, which happens to be exactly these seeds — so committed
+    // behaviour is unchanged. What changes is that the rung is ASSERTED:
+    // §10.7 records it in the calibration artifact and §3.16's last_rx_mcs
+    // cross-checks it, and neither means anything against a default nobody
+    // chose. A future multi-rung uplink widens these values, not the
+    // mechanism.
+    uint8_t uplink_mcs = 0;
+    bool uplink_sgi = false;
+    uint8_t uplink_bw = 20;
 };
 
 // Loopback-mode synthetic loss (§16.2). Dev tooling, not §15.

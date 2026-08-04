@@ -517,6 +517,29 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.calib_fingerprint);
     out += ",\"calib_stale\":";
     append_bool(out, snap.link.calib_stale);
+    // §10.7 Pass 125 ground-uplink surface (this node's own, not a mirror).
+    out += ",\"uplink_calib_state\":";
+    append_escaped(out, snap.link.uplink_calib_state);
+    out += ",\"uplink_calib_rung\":";
+    append_u64(out, snap.link.uplink_calib_rung);
+    out += ",\"uplink_calib_power_qdb\":";
+    append_i32(out, snap.link.uplink_calib_power_qdb);
+    out += ",\"uplink_calib_fingerprint\":";
+    append_u64(out, snap.link.uplink_calib_fingerprint);
+    out += ",\"uplink_calib_stale\":";
+    append_bool(out, snap.link.uplink_calib_stale);
+    out += ",\"uplink_quality_valid\":";
+    append_bool(out, snap.link.uplink_quality_valid);
+    out += ",\"uplink_quality_age_ms\":";
+    append_u64(out, snap.link.uplink_quality_age_ms);
+    out += ",\"uplink_quality_report_epoch\":";
+    append_u64(out, snap.link.uplink_quality_report_epoch);
+    out += ",\"uplink_quality_reports\":";
+    append_u64(out, snap.link.uplink_quality_reports);
+    out += ",\"uplink_quality_rssi_mean\":";
+    append_i32(out, snap.link.uplink_quality_rssi_mean);
+    out += ",\"uplink_quality_rx_mcs\":";
+    append_u64(out, snap.link.uplink_quality_rx_mcs);
     out += "}}\n";
 }
 

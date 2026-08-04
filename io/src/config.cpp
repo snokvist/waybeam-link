@@ -172,15 +172,18 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             ac.bw = static_cast<uint8_t>(bw);
             ac.power_map = a.value("power_map", std::string{});
-            // §10.2 Pass 43: the power resolve runs only in the tx-node
-            // selector commit — an rx-node power_map would be silently
-            // loaded and never applied. Explicit beats silent.
-            if (cfg.node.role == Role::kRx && !ac.power_map.empty()) {
+            // §10.2/§10.7 Pass 125: the rule is per-ADAPTER role, not per-node
+            // role. A map on a role:"rx" diversity adapter is never actuated on
+            // either node kind; a map on the single role:"tx" adapter IS —
+            // the tx-node selector commit (§10.4) or the rx-node's designated
+            // §6.4 uplink (§10.7). The old node-role test both permitted a
+            // never-applied map on a tx-node diversity adapter and blocked the
+            // one adapter that can use it on an rx node.
+            if (ac.role == Role::kRx && !ac.power_map.empty()) {
                 return Result<Config>::fail(
                     "adapter " + ac.name +
-                    ": power_map on an rx node is never applied (§10.2) — "
-                    "remove it (ground-uplink power control is a future "
-                    "ruling)");
+                    ": power_map on a role:\"rx\" adapter is never applied "
+                    "(§10.2) — put it on the role:\"tx\" adapter");
             }
             if (a.contains("max_power_qdb")) {
                 ac.max_power_qdb = a.at("max_power_qdb").get<int32_t>();
@@ -556,7 +559,6 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cal.loss_bad_milli =
                     pk.value("loss_bad_milli", cal.loss_bad_milli);
                 cal.seek_step_qdb = pk.value("seek_step_qdb", cal.seek_step_qdb);
-                cal.cap_rise_db = pk.value("cap_rise_db", cal.cap_rise_db);
                 cal.rssi_guard_dbm =
                     pk.value("rssi_guard_dbm", cal.rssi_guard_dbm);
                 cal.min_qdb = pk.value("min_qdb", cal.min_qdb);
@@ -569,10 +571,52 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cal.report_loss_abort_ms =
                     pk.value("report_loss_abort_ms", cal.report_loss_abort_ms);
                 cal.hard_cap_ms = pk.value("hard_cap_ms", cal.hard_cap_ms);
+                cal.calib_min_report_hz =
+                    pk.value("calib_min_report_hz", cal.calib_min_report_hz);
                 cal.artifact_dir = pk.value("artifact_dir", cal.artifact_dir);
+                // §10.7 uplink gates — epoch counts, never milliseconds.
+                cal.uplink_probe_epochs =
+                    pk.value("uplink_probe_epochs", cal.uplink_probe_epochs);
+                cal.uplink_verify_epochs =
+                    pk.value("uplink_verify_epochs", cal.uplink_verify_epochs);
+                cal.uplink_liveness_ms =
+                    pk.value("uplink_liveness_ms", cal.uplink_liveness_ms);
+                cal.uplink_drain_ms =
+                    pk.value("uplink_drain_ms", cal.uplink_drain_ms);
                 if (cal.min_qdb > cal.max_qdb) {
                     return Result<Config>::fail(
                         "policy.calibration: min_qdb > max_qdb (§10.6)");
+                }
+                // The seek moves in whole steps and judges the cap wall on a
+                // >= 2 dB commanded rise. A step of 0 or less never advances
+                // (or walks backward into an unbounded negative qdb handed
+                // straight to set_power_qdb); a step under 2 dB can never
+                // satisfy the cap-wall test, silently disabling one of the
+                // three walls §10.6 places against. 8 qdb IS 2 dB.
+                if (cal.seek_step_qdb < 8) {
+                    return Result<Config>::fail(
+                        "policy.calibration: seek_step_qdb must be >= 8 (2 dB "
+                        "— the cap wall's minimum commanded step, §10.6)");
+                }
+                if (cal.uplink_probe_epochs < 1 ||
+                    cal.uplink_verify_epochs < 1 ||
+                    cal.uplink_liveness_ms < 1 || cal.uplink_drain_ms < 1) {
+                    return Result<Config>::fail(
+                        "policy.calibration: uplink burst/drain/liveness "
+                        "gates must be >= 1 (§10.7)");
+                }
+                // Pass 132: a burst too small to resolve the walls decides on
+                // noise. One lost probe must land at or under loss_ok_milli,
+                // i.e. 1000/N <= loss_ok_milli — otherwise a single unlucky
+                // probe reads as ambiguous or bad and the placement is a
+                // coin-flip. This is the check that replaces the ambiguous
+                // extension rather than reintroducing it.
+                if (cal.loss_ok_milli > 0 &&
+                    1000 / cal.uplink_probe_epochs > cal.loss_ok_milli) {
+                    return Result<Config>::fail(
+                        "policy.calibration: uplink_probe_epochs too small to "
+                        "resolve loss_ok_milli — one lost probe must be <= it "
+                        "(§10.7)");
                 }
             }
             if (p.contains("cmd")) {
@@ -928,6 +972,23 @@ Result<Config> load_config_json(const std::string& json_text) {
                 return Result<Config>::fail(
                     "air: airtime_efficiency_permille is only valid for "
                     "kernel-monitor");
+            }
+            // §10.7 uplink_rate: the rx node's committed operating point.
+            if (a.contains("uplink_rate")) {
+                const json& ur = a.at("uplink_rate");
+                const uint32_t mcs = ur.value("mcs", 0u);
+                if (mcs > 7) {
+                    return Result<Config>::fail(
+                        "air.uplink_rate: mcs must be 0..7 (§9.3 HT rungs)");
+                }
+                const uint32_t ubw = ur.value("bw", 20u);
+                if (ubw != 20 && ubw != 40) {
+                    return Result<Config>::fail(
+                        "air.uplink_rate: bw must be 20 or 40 (HT only)");
+                }
+                cfg.air.uplink_mcs = static_cast<uint8_t>(mcs);
+                cfg.air.uplink_sgi = ur.value("sgi", false);
+                cfg.air.uplink_bw = static_cast<uint8_t>(ubw);
             }
         }
 

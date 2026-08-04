@@ -385,8 +385,9 @@ int main() {
         CHECK(std::get_if<DecodeError>(&d2) != nullptr &&
               std::get<DecodeError>(d2) == DecodeError::kBadVersion);
 
-        // Unknown type nibble.
-        const uint8_t bad_type[] = {0x57, 0x42, 0x0F, 0, 0, 0, 0, 0, 0, 0, 0};
+        // Unknown type nibble. 0x0 is the only unregistered type left (§3.1:
+        // 0x1-0xF are all assigned since Pass 125 took 0xF for UPLINK_QUALITY).
+        const uint8_t bad_type[] = {0x57, 0x42, 0x00, 0, 0, 0, 0, 0, 0, 0, 0};
         const Decoded d3 = decode(bad_type, sizeof(bad_type));
         CHECK(std::get_if<DecodeError>(&d3) != nullptr &&
               std::get<DecodeError>(d3) == DecodeError::kUnknownType);

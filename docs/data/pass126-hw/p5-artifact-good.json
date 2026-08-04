@@ -1,0 +1,22 @@
+{
+  "bw_mhz": 20,
+  "channel_mhz": 5805,
+  "craft_adapter_fingerprint": 201,
+  "craft_originator": 17,
+  "direction": "uplink",
+  "fingerprint": 5,
+  "local_adapter_identity": "wlx84fc1450bcde/84:fc:14:50:bc:de",
+  "placements": [
+    {
+      "first_bad_qdb": null,
+      "last_clean_qdb": 4,
+      "mcs": 0,
+      "placement_loss_milli": 15,
+      "placement_qdb": 4,
+      "placement_rssi_dbm": -39,
+      "short_gi": false
+    }
+  ],
+  "schema": 1,
+  "t_unix": 1785665902
+}

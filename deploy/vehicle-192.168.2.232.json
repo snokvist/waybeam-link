@@ -13,7 +13,8 @@
       "ifname": "wlan0",
       "role": "tx",
       "channel": 5805,
-      "bw": 20
+      "bw": 20,
+      "max_power_qdb": 84
     }
   ],
   "streams": [
