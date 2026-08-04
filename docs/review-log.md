@@ -5786,3 +5786,47 @@ reaching hardware — while `effective` reported `false`. §10.5 says the §10.3
 ceiling is the *only* clamp on an override, so a held latch is a path from the
 tier to the actuator just as a curve or artifact is. §15.5 amended; both halves
 now report `curve || artifact || latch`.
+
+## Pass 137 — the first unit tests for app/main.cpp (2026-08-04)
+
+Pass 136 closed with an admission: 37% of the §10.7/§11.7 shipping code lives
+in `app/main.cpp`, which no test binary links, and both defects that reached a
+device were in exactly that code. This pass buys the cheapest coverage that
+addresses it, and records why it took the shape it did.
+
+**The obstacle.** Everything in `app/main.cpp` sits in one anonymous namespace
+— internal linkage, nothing to link against. The two options were to extract
+`TxCore` and the `run_*` orchestration into headers, or to `#include` the whole
+translation unit from a test with its entry point suppressed.
+
+**The choice: include the TU.** The extraction is the right long-term answer,
+but it is a large refactor of the file every feature touches, and doing it
+*first* would mean the refactor itself lands with no tests holding it still.
+Coverage on the code as it stands is worth more than a clean seam with nothing
+behind it. `#ifndef WBLINK_APP_TEST` around `main()` is the entire production
+cost — the three cross-built binaries are byte-identical before and after, so
+the shipped artifact is provably unaffected.
+
+**What it pins.** Eleven cases, all of them rules that had no automated check:
+the §10.3 uncalibrated-node ruling (tier accepted, actuator untouched), the
+all-or-nothing rule across adapters with unequal preset lists, the Pass 136
+mid-calibration refusal, the §10.5 latch re-assert through a lowered ceiling,
+the same-adapter ceiling/preset pairing, the §15.5 `effective` contract, and
+the §11.7 name↔id round trip — a map written twice in two chains no compiler
+cross-checks. Verified non-vacuous: with the Pass 136 guard and the latch
+re-assert deleted, the suite reports five failures across both.
+
+**One contract discovered, not changed.** `channel_allowed()` on an empty
+allowlist returns *false*, and both call sites invoke it bare. An unconfigured
+`policy.csa.channel_allowlist` therefore refuses `POST /api/v1/channel` and
+drops incoming CSA assignments. That is fail-closed and right for a control
+that moves a flying link's radio, but "empty means unrestricted" is the
+intuitive misreading, so it is now pinned as the contract rather than left as
+an accident someone later "fixes".
+
+**Where the next seam is.** `run_rx()` is a single 2.3k-line function whose
+§10.7 state lives in locals captured by lambdas; nothing in this file can see
+inside it, and that is why the ground-side tier fixes remain device-verified
+only. Cutting that function's uplink-power block into a small struct with the
+same injectable-actuator shape `TxCore` already has is the highest-value next
+step, and these tests now exist to hold the rest still while it happens.
