@@ -2847,6 +2847,12 @@ struct TxCore {
     // shape survives, which is exactly what the rung-agnostic §10.5 latch
     // cannot do. Returns false = REJECTED (no list, or index past its end).
     bool set_power_tier(uint8_t tier) {
+        // A running §10.6 sweep OWNS the power actuator, and the re-init
+        // below would replace the live Calibrator wholesale — losing the run
+        // and, with it, the restore that hands the actuator back. The craft
+        // would be left at whatever power the abandoned sweep last commanded.
+        // §10.5 latching takes the same position (the run yields first).
+        if (calibrating()) return false;
         // ALL-OR-NOTHING. Validate every configured list before touching any
         // ceiling: applying the tier to one tx adapter, skipping another whose
         // list is shorter, and still reporting success would leave two
@@ -2891,22 +2897,41 @@ struct TxCore {
         return true;
     }
     int power_tier() const { return power_tier_; }
+    // §15.5 reports ONE ceiling and ONE preset list, so both must come from
+    // the same adapter — the tiered one. Reading the ceiling from the first
+    // target with any ceiling and the list from the first with a non-empty
+    // one let a second tx adapter contribute half of a pair that is then
+    // presented as describing a single node.
+    const PowerTarget* tiered_target() const {
+        for (const PowerTarget& t : power_targets_) {
+            if (!t.presets_qdb.empty()) return &t;
+        }
+        return nullptr;
+    }
     std::optional<int32_t> power_tier_ceiling() const {
+        if (const PowerTarget* t = tiered_target()) return t->ceiling;
+        // No preset list anywhere: no tier is selectable, so there is no
+        // pairing to keep consistent — still report the §10.3 boot ceiling,
+        // which is what §15.3 carried before tiers existed.
         for (const PowerTarget& t : power_targets_) {
             if (t.ceiling) return t.ceiling;
         }
         return std::nullopt;
     }
     const std::vector<int32_t>& power_presets() const {
-        for (const PowerTarget& t : power_targets_) {
-            if (!t.presets_qdb.empty()) return t.presets_qdb;
-        }
         static const std::vector<int32_t> kNone;
-        return kNone;
+        const PowerTarget* t = tiered_target();
+        return t != nullptr ? t->presets_qdb : kNone;
     }
     // §15.5 `effective`: false when no curve and no artifact are loaded, where
     // a tier is recorded but reaches no actuator (§10.3 Pass 134 ruling).
-    bool power_tier_effective() const { return has_power_curve(); }
+    // A §10.5 latch counts: the ceiling is the ONE clamp on an override, so
+    // while one is held the tier plainly reaches hardware even with no curve
+    // — device-shown, tier 0 (ceiling 60) clamping a 120 qdb latch to 15 dBm
+    // while `effective` claimed the tier bound nothing.
+    bool power_tier_effective() const {
+        return has_power_curve() || power_override_.has_value();
+    }
 
     // §10.5 (Pass 114) override-latch: latch an absolute qdb on every tx
     // adapter; the §10.4 commit resolve yields until cleared. Ceiling-clamped
@@ -3677,6 +3702,16 @@ struct UplinkStatsFill {
     uint32_t reports = 0;
     int32_t rssi_mean = 0;
     uint8_t rx_mcs = kUplinkRxMcsUnknown;
+    // §10.3/§10.5/§11.7 0x0A (Pass 135). Only TxCore::fill_stats sets the
+    // link.tx_power_* fields, and the ground has no TxCore — so its §15.3
+    // reported tier -1 and power 0 no matter what was selected, while the
+    // endpoint reported the truth. The hub menu binds to §15.3, so the one
+    // row an operator reads was the one that could not move.
+    int tx_power_tier = -1;
+    int32_t tx_power_ceiling_qdb = 0;
+    bool tx_power_tier_effective = false;
+    bool tx_power_override = false;
+    int32_t tx_power_qdb = 0;
 };
 
 void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
@@ -3729,6 +3764,11 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
         snap.link.uplink_quality_reports = uplink->reports;
         snap.link.uplink_quality_rssi_mean = uplink->rssi_mean;
         snap.link.uplink_quality_rx_mcs = uplink->rx_mcs;
+        snap.link.tx_power_tier = uplink->tx_power_tier;
+        snap.link.tx_power_ceiling_qdb = uplink->tx_power_ceiling_qdb;
+        snap.link.tx_power_tier_effective = uplink->tx_power_tier_effective;
+        snap.link.tx_power_override = uplink->tx_power_override;
+        snap.link.tx_power_qdb = uplink->tx_power_qdb;
     }
     if (vcmd != nullptr) {
         snap.link.cmd_last_nonce = vcmd->cmd_last_nonce;
@@ -4844,10 +4884,16 @@ int run_rx(const Loaded& l) {
     // to whoever this says owns it — which is why it is resolved once, here,
     // rather than reconstructed at each restore site.
     std::optional<int32_t> uplink_owner_qdb;
+    // Retained, not scoped to the load: a §11.7 0x0A tier moves the ceiling
+    // this resolve is clamped by, so the resolve has to be repeatable. Left
+    // as a local, the startup value pinned the BOOT ceiling for the life of
+    // the process and a tier could never lower a power_map-owned uplink.
+    std::optional<PowerCurve> uplink_power_curve;
     if (uplink_adapter != nullptr && !uplink_adapter->power_map.empty()) {
         auto curve = load_power_curve(uplink_adapter->power_map,
                                       uplink_adapter->channel_mhz >= 5000);
         if (curve) {
+            uplink_power_curve = *curve.value;
             // §10.2: the authored curve IS level 4, so the uplink's fixed
             // operating point resolves at the baseline level.
             uplink_owner_qdb = resolve_power_qdb(
@@ -5124,6 +5170,24 @@ int run_rx(const Loaded& l) {
                           : uplink_measured_qdb().value_or(0);
         u.fingerprint = uplink_artifact_fp;
         u.stale = uplink_artifact_stale;
+        // §10.3/§10.5/§11.7 0x0A. `effective` and the precedence below mirror
+        // uplink_restore_actuators() exactly — a second copy of that ordering
+        // is how the two drift, so keep them edited together.
+        u.tx_power_tier = uplink_power_tier;
+        u.tx_power_ceiling_qdb = uplink_ceiling_qdb.value_or(0);
+        u.tx_power_tier_effective = uplink_override.has_value() ||
+                                    uplink_owner_qdb.has_value() ||
+                                    uplink_artifact_qdb().has_value();
+        u.tx_power_override = uplink_override.has_value();
+        if (uplink_override) {
+            // §10.5: §15.3 reports the latched REQUEST, not the clamped value
+            // the hardware got. The craft half does the same.
+            u.tx_power_qdb = *uplink_override;
+        } else if (uplink_owner_qdb) {
+            u.tx_power_qdb = *uplink_owner_qdb;
+        } else if (const std::optional<int32_t> aq = uplink_artifact_qdb()) {
+            u.tx_power_qdb = *aq;
+        }
         // §3.16: valid/age track LIVENESS (packet arrival), not counter
         // progress — that is the clock §10.7's abort watches.
         u.quality_valid = quality_gate.live(now_ms(), ucal_params.liveness_ms);
@@ -6000,9 +6064,13 @@ int run_rx(const Loaded& l) {
                 // pairing check is never applied, so has_value() alone
                 // overstated it — the craft half uses has_power_curve(), which
                 // is the real test.
+                // §10.5 counts: the ceiling is the one clamp on a latch, so
+                // while one is held the tier reaches hardware regardless of
+                // whether a curve or artifact owns the resolve.
                 return power_tier_json(
                     uplink_power_tier, uplink_power_presets, uplink_ceiling_qdb,
-                    /*effective=*/uplink_owner_qdb.has_value() ||
+                    /*effective=*/uplink_override.has_value() ||
+                        uplink_owner_qdb.has_value() ||
                         uplink_artifact_qdb().has_value());
             };
             h.tx_power_tier_set = [&](int tier, bool both)
@@ -6013,6 +6081,16 @@ int run_rx(const Loaded& l) {
                             std::string("{\"ok\":false,\"error\":\"no power "
                                         "preset at that index "
                                         "(adapters[].power_presets_qdb)\"}")};
+                }
+                // A running §10.7 sweep owns the uplink actuator and is
+                // mid-descent against the OLD bound. Same position §10.5
+                // takes on latching mid-run, and the same one the craft half
+                // takes in set_power_tier().
+                if (uplink_cal.state() == CalibState::kRunning) {
+                    return {409,
+                            std::string("{\"ok\":false,\"error\":\"uplink "
+                                        "calibration running — abort it "
+                                        "first (§10.7)\"}")};
                 }
                 // `both` first: if the craft cannot be commanded, refuse the
                 // whole action rather than half-applying it locally and
@@ -6034,12 +6112,29 @@ int run_rx(const Loaded& l) {
                 // the BOOT ceiling — the tier would bound flight power but not
                 // the one operation that deliberately walks a rung into
                 // overload. §10.6 already re-seeds via init_calibration.
+                //
+                // It must go through the calibrator: UplinkCalibrator COPIES
+                // its params at construction, so assigning ucal_params here
+                // updated a struct nothing reads again and the bound never
+                // moved. ucal_params is kept in step because §15.3 and the
+                // §10.7 start gate still read liveness_ms from it.
                 ucal_params.seek.max_qdb =
                     std::min(cp_max_qdb, *uplink_ceiling_qdb);
-                // Re-resolve now: the artifact-apply path reads the ceiling on
-                // every pairing resolve, but nothing forces one here, and a
-                // tier the operator can see but not feel is worse than none.
-                uplink_pairing_key = 0;
+                (void)uplink_cal.set_max_qdb(ucal_params.seek.max_qdb);
+                // Apply now. Relying on the pairing-key re-resolve alone was
+                // not enough: that path is gated on an artifact existing, so
+                // on a ground with a config power_map — or with no artifact
+                // yet — the tier moved no actuator at all. uplink_owner_qdb
+                // is resolved once at startup against the boot ceiling, so it
+                // is re-resolved here or it would pin the OLD ceiling for the
+                // life of the process.
+                if (uplink_owner_qdb && uplink_power_curve) {
+                    uplink_owner_qdb = resolve_power_qdb(
+                        *uplink_power_curve, l.cfg.air.uplink_mcs,
+                        kPowerLevelBaseline, uplink_ceiling_qdb);
+                }
+                uplink_pairing_key = uplink_pairing_now();
+                uplink_restore_actuators();
                 return {200, std::string("{\"ok\":true}")};
             };
             h.uplink_calibrate = [&](const std::string& action)

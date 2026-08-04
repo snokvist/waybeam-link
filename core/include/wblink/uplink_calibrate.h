@@ -114,6 +114,21 @@ class UplinkCalibrator {
     explicit UplinkCalibrator(const UplinkCalibParams& p)
         : p_(p), seek_(p.seek) {}
 
+    // §10.3/§11.7 0x0A (Pass 135): move the sweep's flat ceiling — the value
+    // rung_ceiling_qdb() tapers per rung — after construction, so a runtime
+    // power tier bounds the NEXT run. The params are copied by the
+    // constructor, so mutating the caller's UplinkCalibParams does nothing;
+    // that was the original shape of this and it was silently inert.
+    // Refused while running: the seek is mid-descent against the old bound
+    // and re-basing it would score a dwell at one ceiling against another.
+    // Only p_ needs it: enter_rung() hands seek_ its bound explicitly via
+    // seek_.begin(rung_ceiling_qdb(rung_)), and that reads p_.seek.max_qdb.
+    bool set_max_qdb(int32_t qdb) {
+        if (state_ == CalibState::kRunning) return false;
+        p_.seek.max_qdb = qdb;
+        return true;
+    }
+
     bool start(uint64_t now_ms, uint32_t local_epoch) {
         if (state_ == CalibState::kRunning) return false;
         state_ = CalibState::kRunning;

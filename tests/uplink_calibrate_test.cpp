@@ -195,6 +195,37 @@ void feed_dwell(UplinkCalibrator& cal, uint64_t& t, uint32_t& epoch,
     (void)cal.tick(t, epoch, true, true);   // drain elapsed -> score
 }
 
+// §10.3/§11.7 0x0A (Pass 135): a runtime power tier lowers the sweep ceiling
+// AFTER construction. The calibrator copies its params, so the caller cannot
+// do this by mutating the UplinkCalibParams it passed in — that was the
+// original shape and it moved nothing, silently letting a tiered ground still
+// walk a rung to the boot ceiling.
+void test_tier_lowers_the_sweep_ceiling() {
+    const UplinkCalibParams base = fast_params();
+    const int32_t lowered = base.seek.max_qdb - 24;  // 6 dB down
+    Rig r(base);
+    CHECK(r.cal.set_max_qdb(lowered));
+    CHECK(r.cal.start(r.now, r.local_epoch));
+    r.run(r.now + 600000);
+    // Rung 0 is clean all the way up in this rig, so it places exactly AT the
+    // ceiling — which makes the ceiling directly observable.
+    CHECK(first_placement(r.cal).placement_qdb == lowered);
+    CHECK(r.up.qdb <= lowered);  // nothing was ever COMMANDED above it either
+}
+
+// Refused mid-run: the seek is descending against the old bound, and
+// re-basing it would score one dwell's evidence against another's ceiling.
+void test_tier_refused_mid_run() {
+    const UplinkCalibParams base = fast_params();
+    Rig r(base);
+    CHECK(r.cal.start(r.now, r.local_epoch));
+    r.step();
+    CHECK(r.cal.state() == CalibState::kRunning);
+    CHECK(!r.cal.set_max_qdb(base.seek.max_qdb - 24));
+    r.run(r.now + 600000);
+    CHECK(first_placement(r.cal).placement_qdb == base.seek.max_qdb);
+}
+
 // A clean uplink ramps to max and verifies there.
 void test_clean_ramp() {
     Rig r(fast_params());
@@ -931,6 +962,8 @@ int main() {
     test_eight_rung_sweep();
     test_no_wall_anywhere_persists_nothing();
     test_failure_mid_sweep_persists_nothing();
+    test_tier_lowers_the_sweep_ceiling();
+    test_tier_refused_mid_run();
     if (g_fail != 0) {
         std::fprintf(stderr, "%d check(s) failed\n", g_fail);
         return 1;
