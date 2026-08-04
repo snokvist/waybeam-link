@@ -4363,6 +4363,15 @@ int run_tx(const Loaded& l) {
                                          "requires a bound craft — this node "
                                          "is the craft\"}")};
             }
+            // Checked before the call so the operator gets the reason. Both
+            // refusals are a false return, and reporting "no preset at that
+            // index" for a running sweep would send someone to edit config
+            // over what is a wait-and-retry (§10.3 Pass 136).
+            if (tx.calibrating()) {
+                return {409,
+                        std::string("{\"ok\":false,\"error\":\"calibration "
+                                    "running — abort it first (§10.6)\"}")};
+            }
             if (!tx.set_power_tier(static_cast<uint8_t>(tier))) {
                 return {409,
                         std::string("{\"ok\":false,\"error\":\"no power "
