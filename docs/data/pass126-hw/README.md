@@ -17,12 +17,12 @@ default — so every §3.16 packet here is keyed off the **announced token**
 | gate | result | evidence |
 |---|---|---|
 | P0a §10.6 regression | PASS — 8/8 placements identical, brackets 2 dB / 4 dB wide (no W9 zero-width) | `p0a/`, `baseline-craft-artifact.json` |
-| P0b config load | PASS — both live configs load unchanged under the new binary | `ground-journal.txt` |
+| P0b config load | PASS — both live configs load unchanged under the new binary | journal (not committed) |
 | P0c uplink rate | PASS — craft sees 100% MCS0 before and after, `rx_mcs_unknown=0` | `p0c-craft-rxmcs-{BEFORE,AFTER}.txt` |
-| D5 report epochs | PASS — 100.0% of the epoch span observed (was 99.6%), 0 backward, deltas +1 only | `d5-epochs-*.txt` |
+| D5 report epochs | PASS — 100.0% of the epoch span observed (was 99.6%), 0 backward, deltas +1 only | epoch dump (not committed) |
 | D3 pairing gate | PASS — matching artifact applies (radio at 1.00 dBm = 4 qdb); a validly-signed artifact naming a different craft loads, reports `stale:true`, and applies nothing (radio stays 19 dBm) | `p5-artifact-good.json` |
-| §10.7 end to end | PASS — 36 s, `done`, fp=5, artifact persisted with full pairing identity | `ground-journal.txt` |
-| P1 interlocks (partial) | PASS — malformed 400; scout-running 409; §10.5 latch 409 (and the latch moved the radio to 15 dBm and released to 19) | `ground-journal.txt` |
+| §10.7 end to end | PASS — 36 s, `done`, fp=5, artifact persisted with full pairing identity | journal (not committed) |
+| P1 interlocks (partial) | PASS — malformed 400; scout-running 409; §10.5 latch 409 (and the latch moved the radio to 15 dBm and released to 19) | journal (not committed) |
 
 ## Defects found ON HARDWARE
 
@@ -54,7 +54,8 @@ default — so every §3.16 packet here is keyed off the **announced token**
 
 ## P3 — ten consecutive §10.7 runs (Pass 130 sweep)
 
-`tools/hw/p3_soak.sh`, evidence in `p3-soak/`.
+`tools/hw/p3_soak.sh`. The ten run captures and their summary were
+ephemeral and are not committed — rerun the script to regenerate them.
 
 | metric | result | gate |
 |---|---|---|
