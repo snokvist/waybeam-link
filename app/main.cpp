@@ -7429,6 +7429,12 @@ int usage(const char* argv0) {
 
 }  // namespace
 
+// Everything above is in an anonymous namespace, so it has internal linkage
+// and no other translation unit can link against it. tests/app_test.cpp
+// therefore #includes THIS FILE and suppresses the entry point, which is the
+// only way to reach TxCore and the app-layer helpers from a test without
+// first extracting them. See tests/app_test.cpp for why that trade was made.
+#ifndef WBLINK_APP_TEST
 int main(int argc, char** argv) {
     if (argc < 2) {
         return usage(argv[0]);
@@ -7492,3 +7498,4 @@ int main(int argc, char** argv) {
     }
     return run_loopback(l);
 }
+#endif  // WBLINK_APP_TEST

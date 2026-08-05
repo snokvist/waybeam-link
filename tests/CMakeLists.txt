@@ -68,6 +68,21 @@ add_wb_test(modes_test wblink_io)
 target_include_directories(modes_test SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 
+# app_test #includes app/main.cpp whole (that file's contents are one anonymous
+# namespace, so there is nothing to link against) with WBLINK_APP_TEST
+# suppressing its entry point. It therefore needs the app's own include path
+# and the vendored third_party headers wblink_io keeps PRIVATE.
+add_wb_test(app_test wblink_io)
+target_compile_definitions(app_test PRIVATE WBLINK_APP_TEST=1)
+target_include_directories(app_test PRIVATE ${CMAKE_SOURCE_DIR})
+target_include_directories(app_test SYSTEM PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party)
+# With main() suppressed, run_tx/run_rx/run_loopback/load_all/usage have no
+# caller in THIS TU and every build would warn. They are not dead — the
+# shipped binary calls all of them — so the warning is silenced here only,
+# never repo-wide, where it would hide genuinely unreachable code.
+target_compile_options(app_test PRIVATE -Wno-unused-function)
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME expand_arq_topology_test
