@@ -6012,6 +6012,40 @@ settled it. Two adapters of the same part number are not a replicate.
 register, and the items it gated (G3, G4, G5, B2) need re-reading on their own
 merits rather than inheriting a blocked status.
 
+**Pass 139 review addendum — which tree each arm ran, and what the bump changes.**
+Re-read before merging #89. Three findings, two of them about my own claims.
+
+- **The vehicle arm ran the OLD vendored tree.** The craft's installed binary
+  is dated 2026-08-04 18:55, before the re-vendor. So the only arm that
+  demonstrates *healthy* MCS5–7 through devourer was measured on `a71060f`.
+  The newly vendored `800c3c8` was run only on the bench 8822e — the known-bad
+  adapter — where it transmitted but never delivered. Saying the new tree is
+  "not merely compile-verified" is true but overstates it: **no healthy-adapter
+  delivery has been measured on `800c3c8`.** That measurement wants doing before
+  a devourer node ships, and it is cheap once the craft is next up.
+- **#378 makes carrier-sense real on Jaguar1, where it was a silent no-op.**
+  waybeam-link never calls `SetCcaMode` and never sets `tuning.disable_cca`,
+  which defaults false — so we inherit **carrier-sense enabled**. On Jaguar3
+  (8822C/E) that was already the case and the craft measures fine at 96–98%, so
+  this is not a regression there. On Jaguar1 (8812AU) the same inheritance now
+  actuates for the first time. Note devourer's own FPV example takes the
+  opposite posture deliberately (`examples/streamtx/main.cpp:225-228`,
+  `disable_cca = true`, *"the link owns the channel, so CSMA back-off only
+  stutters it"*) — which describes waybeam-link exactly. **We have never made
+  this choice; we have only inherited it.** Making it explicit is an operator
+  ruling about RF behaviour, not a refactor, so it is raised here rather than
+  taken: an FPV link that defers to CSMA trades latency determinism for
+  politeness, and §7.2's quiet-gap already assumes we control the air.
+- **#354 moves the TX retry limit** from a hardcoded 12 to configurable,
+  default 0. Reaches only unicast returns (§3.0 Pass-12 hybrid); both fleet
+  configs leave `ack_responder`/`unicast_returns` unset, so no effect today.
+  Recorded because enabling that hybrid later now inherits 0 retries, not 12.
+
+**Why #89 is still safe to merge.** Both fleet nodes run `air.kind:
+"kernel-monitor"` — devourer is not loaded in production at all, so the bump
+changes no running behaviour. The exposure begins the moment a node moves to
+`radio`, which is the direction the parity plan is heading; that is why these
+are written down now rather than discovered later.
 **Pass 139 CCA posture — measured, and the answer is no.** The re-vendor review
 noted we inherit carrier-sense ENABLED and never chose it. The operator asked
 whether disabling it would blind the craft's receive path, since the craft is
