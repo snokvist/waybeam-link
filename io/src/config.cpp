@@ -978,6 +978,7 @@ Result<Config> load_config_json(const std::string& json_text) {
                 a.value("wedge_window_ms", cfg.air.wedge_window_ms);
             cfg.air.wedge_min_submits =
                 a.value("wedge_min_submits", cfg.air.wedge_min_submits);
+            cfg.air.disable_cca = a.value("disable_cca", cfg.air.disable_cca);
             cfg.air.ack_responder =
                 a.value("ack_responder", cfg.air.ack_responder);
             if (kind == "radio") {

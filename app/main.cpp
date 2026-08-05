@@ -1369,6 +1369,7 @@ struct AirBackend {
             // §3.0 Pass 12 hardware-ACK hybrid halves.
             rc.ack_responder = cfg.air.ack_responder;
             rc.unicast_returns = cfg.policy.ret.unicast;
+            rc.disable_cca = cfg.air.disable_cca;
             auto a = RadioAir::create(rc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);

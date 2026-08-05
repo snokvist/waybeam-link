@@ -365,6 +365,23 @@ struct AirCfg {
     // §9.10 TX-wedge watchdog (radio backend, §17 seeds). window 0 disables.
     uint32_t wedge_window_ms = 1000;
     uint32_t wedge_min_submits = 8;
+    // Radio backend: clear the MAC carrier-sense gate so TX does not defer to
+    // a busy channel. devourer's FPV example (examples/streamtx) takes exactly
+    // the opposite default from ours, on the reasoning that "the link owns the
+    // channel, so CSMA back-off only stutters it".
+    //
+    // MEASURED ON THE CRAFT (Pass 139, 8822e, 2 interleaved reps, real video):
+    // clearing the gate costs ~45% of the UPLINK. Ground returns sent ~760 per
+    // window either way; craft heard 556/588 with the gate ON (73.3/77.0%) and
+    // 331/318 with it OFF (43.2/41.7%). Downlink was unaffected.
+    //
+    // The reason streamtx can do it and we cannot: it is a TX-only streamer
+    // with no return path. Our craft is half-duplex on ONE radio, so
+    // transmitting is not listening, and carrier-sense is what holds TX off
+    // while the ground is mid-return. §7.2's quiet gap depends on hearing it.
+    // So this defaults false and is a knob rather than an inheritance — the
+    // point of it existing is that the choice is now made, not absorbed.
+    bool disable_cca = false;
     // §3.0 Pass 12: arm the TX adapter's hardware ACK responder with its
     // own SA (craft half of the gate-4 A/B). Opt-in — makes a passive
     // monitor transmit ACKs.

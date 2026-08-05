@@ -6011,3 +6011,38 @@ settled it. Two adapters of the same part number are not a replicate.
 **Consequence for `docs/devourer-parity-plan.md`.** G0 no longer gates the
 register, and the items it gated (G3, G4, G5, B2) need re-reading on their own
 merits rather than inheriting a blocked status.
+
+**Pass 139 CCA posture — measured, and the answer is no.** The re-vendor review
+noted we inherit carrier-sense ENABLED and never chose it. The operator asked
+whether disabling it would blind the craft's receive path, since the craft is
+duplex on one radio and must hear the ground's returns in the §7.2 quiet gaps.
+Tested rather than reasoned about, because the vendor's own comments disagree:
+`IRtlDevice.h` promises the MAC gate only ("the vendor's BB CCA-off writes are
+NOT applied — they deafen the RX") while the Jaguar3 note lists BB registers it
+does write (`0x1a9c[20]`, `0x1a14[9:8]`, `0x1d58`).
+
+Craft 8822e, real venc video, ground on its normal kernel-monitor service as
+the return source, two interleaved reps. Metric is returns the ground *sent*
+against returns the craft *heard* — raw craft-RX alone moves with how much the
+ground has to say.
+
+| `disable_cca` | returns sent | craft heard | uplink delivery |
+|---|---|---|---|
+| false | 759 | 556 | **73.3 %** |
+| true  | 767 | 331 | **43.2 %** |
+| false | 764 | 588 | **77.0 %** |
+| true  | 762 | 318 | **41.7 %** |
+
+**RX is not deafened — it is talked over.** Clearing the gate costs ~45 % of the
+uplink. Downlink was unaffected (ground RX 108–118 k in every window), which
+isolates it to receive-while-transmitting rather than to any BB write.
+
+The mechanism is the one the operator proposed: half-duplex on one radio means
+transmitting is not listening, and carrier-sense is precisely what holds TX off
+while the ground is mid-return. devourer's `streamtx` can take the opposite
+posture because it is a **TX-only streamer with no return path** — "the link
+owns the channel" costs it nothing. It does not describe us.
+
+`air.disable_cca` ships **false**. The value of the knob is not the ability to
+turn it on; it is that the posture is now a decision with a measurement behind
+it instead of a library default we absorbed without noticing.

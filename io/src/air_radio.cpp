@@ -419,6 +419,10 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // (Pass 8: TX-wedge detector; SPE_RPT is per-descriptor, so RX-only
         // adapters keep byte-identical bring-up).
         dc.tx.report = ad->tx;
+        // MAC carrier-sense gate. Applied to every adapter, not just the TX
+        // one: an RX-only ear that defers has nothing to defer, but the
+        // bring-up posture stays uniform across the node.
+        dc.tuning.disable_cca = cfg.disable_cca;
         WiFiDriver wd(im.logger);
         ad->dev = wd.CreateRtlDevice(ad->handle, ad->ctx, ad->lock, dc);
         if (!ad->dev) {
