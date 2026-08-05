@@ -24,12 +24,16 @@
 // could not have caught either. Every case below is one of the rules that had
 // NO automated check before this file existed.
 //
-// What this does NOT reach
-// ------------------------
-// run_rx() is a single 2.3k-line function whose §10.7 state lives in locals
-// captured by lambdas; nothing here can see inside it. That is the next seam
-// worth cutting, and the reason the ground-side tier fixes are still
-// device-verified only.
+// The first seam (Pass 138)
+// -------------------------
+// run_rx() is a single 2.3k-line function whose state lives in locals captured
+// by lambdas, so none of it was reachable from here. Its §10.3/§10.5/§10.7
+// power ownership is now UplinkPower, a struct at namespace scope with
+// injected actuators — the same shape TxCore already had — and the ground-side
+// rules below are covered rather than device-verified only.
+//
+// What this still does NOT reach: everything else in run_rx — selection, CSA,
+// the cache-repair controller, the calibration sequencer. Each is its own seam.
 #define WBLINK_APP_TEST 1
 #include "app/main.cpp"
 
@@ -108,6 +112,9 @@ void test_tier_on_uncalibrated_node_actuates_nothing() {
     CHECK_EQ_U(tx.power_tier(), 0);
     CHECK(tx.power_tier_ceiling().value_or(-1) == 60);
     CHECK(spy.empty());                  // nothing reached the radio
+    // Nor a backend-auto command, which is a DIFFERENT wrong answer: it would
+    // reset hardware power rather than leave it where the operator had it.
+    CHECK_EQ_U(spy.autos, 0);
     CHECK(!tx.power_tier_effective());   // and §15.5 says so
 }
 
@@ -237,6 +244,160 @@ void test_power_tier_json_shape() {
     CHECK(none.find("\"ceiling_qdb\":null") != std::string::npos);
 }
 
+// ---- §10.3/§10.5/§10.7 ground uplink power owner (Pass 138) ----------------
+//
+// These are the rules that were device-verified only. UplinkPower was cut out
+// of run_rx precisely so they could be reached; the four hand-written copies of
+// the precedence ordering it replaced are the reason two of them had drifted.
+
+// A ground with no curve, no artifact and no latch commands nothing at all —
+// the backend default owns the radio, and §15.5 must not claim otherwise.
+void test_uplink_unowned_goes_to_backend_auto() {
+    UplinkPower p;
+    int autos = 0;
+    std::vector<int32_t> applied;
+    p.apply_qdb = [&](int32_t q) { applied.push_back(q); };
+    p.apply_auto = [&] { ++autos; };
+
+    p.apply();
+    CHECK_EQ_U(autos, 1);
+    CHECK(applied.empty());
+    CHECK(!p.effective());
+    CHECK(p.owner() == UplinkPower::Owner::kNone);
+    CHECK(std::string(p.owner_name()) == "backend auto");
+}
+
+// §10.7 precedence, highest first. Each source is added in turn and must take
+// the actuator from the one below it.
+void test_uplink_precedence_order() {
+    UplinkPower p;
+    std::vector<int32_t> applied;
+    p.apply_qdb = [&](int32_t q) { applied.push_back(q); };
+    p.apply_auto = [&] { applied.push_back(INT32_MIN); };
+
+    std::optional<int32_t> artifact;
+    p.artifact_qdb = [&] { return artifact; };
+
+    artifact = 70;
+    p.apply();
+    CHECK(p.owner() == UplinkPower::Owner::kArtifact);
+    CHECK(applied.back() == 70);
+
+    p.curve = flat_curve(80);
+    p.mcs = 3;
+    p.resolve_owner();
+    p.apply();
+    CHECK(p.owner() == UplinkPower::Owner::kConfigMap);
+    CHECK(applied.back() == 80);   // config map outranks the artifact
+
+    p.override_qdb = 90;
+    p.apply();
+    CHECK(p.owner() == UplinkPower::Owner::kOverride);
+    CHECK(applied.back() == 90);   // and the §10.5 latch outranks both
+
+    p.override_qdb.reset();
+    p.apply();
+    CHECK(applied.back() == 80);   // released back to the config map
+}
+
+// §10.5's exact wording: the ceiling is the only CLAMP, and GET/§15.3 report
+// the latched REQUEST. Those are two different numbers and the split is easy
+// to collapse by accident — on the ground it was collapsed the wrong way, and
+// a 120 qdb latch reached a 27 dBm radio against a 108 ceiling.
+void test_uplink_latch_reports_request_but_actuates_clamped() {
+    UplinkPower p;
+    std::vector<int32_t> applied;
+    p.apply_qdb = [&](int32_t q) { applied.push_back(q); };
+    p.apply_auto = [&] {};
+    p.ceiling_qdb = 108;
+
+    p.override_qdb = 120;
+    p.apply();
+    CHECK(applied.back() == 108);              // hardware: clamped
+    CHECK(p.reported_qdb().value_or(0) == 120);  // §15.3: the request
+    CHECK(p.hw_qdb().value_or(0) == 108);
+    CHECK(p.effective());  // the ceiling plainly reaches hw through the latch
+}
+
+// A tier moves the ceiling AND re-resolves the configured map under it. The
+// re-resolve was missing: owner_qdb was computed once at startup against the
+// boot ceiling, so a tier could not lower a power_map-owned uplink for the
+// life of the process.
+void test_uplink_tier_reresolves_the_config_map() {
+    UplinkPower p;
+    std::vector<int32_t> applied;
+    p.apply_qdb = [&](int32_t q) { applied.push_back(q); };
+    p.apply_auto = [&] {};
+    p.presets_qdb = {60, 84, 108};
+    p.ceiling_qdb = 108;
+    p.curve = flat_curve(200);   // authored well above every preset
+    p.mcs = 0;
+    p.resolve_owner();
+    CHECK(p.owner_qdb.value_or(0) == 108);   // clamped at the boot ceiling
+
+    CHECK(p.set_tier(0));
+    CHECK(p.owner_qdb.value_or(0) == 60);    // re-resolved under the new one
+    CHECK(applied.back() == 60);             // and it reached the actuator
+    CHECK(p.ceiling_qdb.value_or(0) == 60);
+}
+
+// The tier must reach an actuator on a ground with NO artifact, which is the
+// configuration where the old pairing-key route silently did nothing (that
+// path is gated on an artifact existing).
+void test_uplink_tier_actuates_without_an_artifact() {
+    UplinkPower p;
+    std::vector<int32_t> applied;
+    p.apply_qdb = [&](int32_t q) { applied.push_back(q); };
+    p.apply_auto = [&] { applied.push_back(INT32_MIN); };
+    p.presets_qdb = {60, 108};
+    p.ceiling_qdb = 108;
+    p.artifact_qdb = [] { return std::optional<int32_t>{}; };  // none paired
+    p.override_qdb = 200;
+    p.apply();                       // give it something to clamp
+    applied.clear();
+
+    CHECK(p.set_tier(0));
+    CHECK(!applied.empty());                   // it actuated
+    CHECK(applied.back() == 60);
+}
+
+// REJECTED, and nothing moves — not a silent clamp to the nearest preset.
+void test_uplink_tier_rejects_out_of_range() {
+    UplinkPower p;
+    p.apply_qdb = [](int32_t) {};
+    p.apply_auto = [] {};
+    p.presets_qdb = {60, 108};
+    p.ceiling_qdb = 108;
+
+    CHECK(!p.set_tier(2));
+    CHECK(!p.set_tier(-1));
+    CHECK_EQ_U(static_cast<int64_t>(p.tier) + 1, 0);   // still -1
+    CHECK(p.ceiling_qdb.value_or(0) == 108);           // untouched
+
+    UplinkPower none;                                   // no list at all
+    none.apply_qdb = [](int32_t) {};
+    none.apply_auto = [] {};
+    CHECK(!none.set_tier(0));
+}
+
+// §15.5 and §15.3 read the same object now, so `effective` cannot mean one
+// thing on the endpoint and another on the stats line — which is exactly how
+// it drifted before.
+void test_uplink_json_matches_effective() {
+    UplinkPower p;
+    p.apply_qdb = [](int32_t) {};
+    p.apply_auto = [] {};
+    p.presets_qdb = {60, 108};
+    p.ceiling_qdb = 108;
+
+    CHECK(p.json().find("\"effective\":false") != std::string::npos);
+    CHECK(p.json().find("\"tier\":-1") != std::string::npos);
+    p.override_qdb = 50;
+    p.apply();
+    CHECK(p.effective());
+    CHECK(p.json().find("\"effective\":true") != std::string::npos);
+}
+
 // ---- §11.7 command registry ------------------------------------------------
 
 // The name<->id map is written twice, in two switch/if chains that no compiler
@@ -288,6 +449,13 @@ int main() {
     test_lowered_tier_reasserts_a_held_override();
     test_tier_refused_during_calibration();
     test_power_tier_json_shape();
+    test_uplink_unowned_goes_to_backend_auto();
+    test_uplink_precedence_order();
+    test_uplink_latch_reports_request_but_actuates_clamped();
+    test_uplink_tier_reresolves_the_config_map();
+    test_uplink_tier_actuates_without_an_artifact();
+    test_uplink_tier_rejects_out_of_range();
+    test_uplink_json_matches_effective();
     test_vcmd_name_id_roundtrip();
     test_channel_allowed_is_fail_closed();
     test_bw_code();

@@ -5830,3 +5830,114 @@ inside it, and that is why the ground-side tier fixes remain device-verified
 only. Cutting that function's uplink-power block into a small struct with the
 same injectable-actuator shape `TxCore` already has is the highest-value next
 step, and these tests now exist to hold the rest still while it happens.
+
+## Pass 138 — the ground uplink's power owner becomes one object (2026-08-05)
+
+Pass 137 named `run_rx()` as the next seam and this cuts the first piece of it:
+`UplinkPower`, holding the §10.3 ceiling, the §10.5 latch, the §11.7 0x0A tier,
+and the one precedence path they share.
+
+**The justification is duplication that already cost two bugs.** The ordering —
+latch, then configured map, then matching artifact, then backend auto — was
+written out FOUR times in `run_rx`: the actuation, the §15.3 fill, the startup
+`power owner =` log, and the §15.5 `effective` flag. The code carried a comment
+saying "a second copy of this ordering is how the two drift", which documents
+the hazard instead of removing it. Two copies had in fact drifted, and both
+were Pass 136 fixes: `effective` claimed a tier bound hardware when it did not,
+and the tier's own apply path reached no actuator at all on a ground with a
+config `power_map` or with no artifact yet. This is not abstraction for a
+hypothetical future — it is four copies collapsing to one.
+
+**The split that must survive.** §10.5 says the ceiling is the only *clamp* and
+that GET/§15.3 report the latched *request*. Those are two different numbers,
+and collapsing them is exactly what put 30.00 dBm on a 27 dBm-ceilinged radio.
+`hw_qdb()` clamps, `reported_qdb()` does not, and the asymmetry is now stated
+in one place rather than implied across four.
+
+**What stayed out.** The calibrator's sweep bound is not power, so moving it
+remains the caller's job — the tier handler still drives
+`uplink_cal.set_max_qdb()` itself. The artifact resolve stays a callback: §10.7
+applicability is a function of the pairing tuple, which changes with selection
+and CSA and belongs to `run_rx`.
+
+**Coverage.** Seven new cases, all previously device-verified only: the
+unowned→backend-auto path, the full precedence order as each source is added,
+the report-vs-actuate split under a latch, the tier re-resolving the configured
+map under its new ceiling, the tier actuating with no artifact present (the
+configuration where the old pairing-key route silently did nothing), the
+out-of-range rejection, and §15.5/§15.3 agreeing on `effective`. app_test is
+106 checks, up from 73.
+
+**NOT device-verified.** The bench went down mid-pass — the ground's 8812EU
+uplink adapter was unplugged (`ConditionPathExists` now skips the service) and
+both the craft and the spectator stopped answering. `--check` against the real
+ground config parses, resolves both adapters and reports `bindings: OK`, and
+all three cross-builds are clean, but the actuation path this pass rewrote has
+not been re-run on hardware. The tier ladder, the latch clamp and the
+`power owner =` line must be re-checked on the ground before this merges.
+
+**Pass 138 self-review.** Re-read before opening the PR, looking for the same
+three things this pass claims to fix. Found three, all mine:
+
+- **The struct grew its own copies of the chain.** Four were removed from
+  `run_rx` and `owner()`, `reported_qdb()` and `hw_qdb()` each walked it again
+  — the identical defect, one scope in. Collapsed to a single `resolve()`
+  returning `{owner, requested qdb}`. That also cuts `artifact_qdb()` calls,
+  which are not free: each re-runs the §10.7 pairing check and moves the stale
+  flag as a side effect.
+- **`set_override()` / `clear_override()` were dead.** No production caller —
+  `run_rx` sets the field and converges through `uplink_restore_actuators()`,
+  which also owns probe mode and the rate latch, so it cannot delegate to them.
+  Test-only API is speculative generality; removed, and the tests now drive the
+  same two steps production does.
+- **`PowerSpy::autos` was written and never read**, in the test helper of all
+  places. Turned into a real assertion instead of deleted: a tier on an
+  uncalibrated node must not command backend-auto either, which is a *different*
+  wrong answer from actuating — it would reset hardware power rather than leave
+  it alone.
+
+One stale comment removed: the §15.3 fill still warned that it mirrored
+`uplink_restore_actuators()` and had to be edited in step. Nothing to keep in
+step now.
+
+**Checked and deliberately left alone.** `TxCore` and `UplinkPower` share no
+methods beyond stdlib calls. The resemblance is conceptual only: the craft
+resolves per-commit across N adapters through a §10.2 level taper, the ground
+resolves once at a fixed MCS and has an artifact source the craft has no
+equivalent of. Unifying them would mean an abstraction over two genuinely
+different shapes to save nothing.
+
+**Pass 138 device verification (2026-08-05).** Ground x86 + craft `.2.232`,
+both on 5805 HT20, uplink `eu-uplink` presets `[60,76,84,92,108]`, ceiling 108.
+The ground ran the `UplinkPower` build; the point of the exercise is that a
+refactor changed nothing observable.
+
+- **Tier ladder.** `POST {"tier":N}` for 0/2/4 → `iw` reports **15.00 /
+  21.00 / 27.00 dBm**, matching the presets exactly.
+- **§10.5 clamp/report split.** With tier 0 held (ceiling 60), `POST
+  {"qdb":120}` → hardware **15.00 dBm** while `GET /tx/power` and §15.3
+  `tx_power_qdb` both report the latched **120**. The clamp is applied at the
+  actuator, never to the stored request.
+- **A tier change re-asserts a held latch.** Latch 120 held across tiers
+  4 → 1 → 0; each re-applied `min(120, ceiling)` → 27 / 19 / 15 dBm, and
+  `override_active` stayed true throughout.
+- **Startup owner line.** `uplink: power owner = backend auto (artifact
+  present, awaiting craft)`, then the artifact bound and the backend moved from
+  `txpower auto ok` to `txpower fixed 108 qdb`. The owner is named, not implied.
+- **`both:true`.** With a CSA claim held, `{"tier":0,"both":true}` moved
+  **both** ends to 15.00 dBm — the craft from 17.00, which is the tier-0
+  ceiling (60) biting below its artifact's MCS5 placement (68). Restoring
+  tier 4 returned the craft to 17.00 and the ground to 27.00, confirming the
+  §11.7 half is bidirectional and that tier 4 correctly does *not* raise the
+  craft above its calibrated placement.
+
+Worth recording because it is a property no unit test covers: **`both:true`
+refuses atomically.** Both refusals seen in the run — `craft not claimed` and
+the §11.7 `rate-limit or no key` — left the *ground* tier untouched rather than
+applying locally and failing to propagate. A partial apply would silently
+desync the two ends' power envelopes, which is exactly the state the operator
+cannot see from either endpoint alone.
+
+Link health across the whole sweep: 413k/415k frames on the two adapters,
+RSSI −30/−24, `tx_failed` 0, `drop` 0, MCS5 dominant. Cycling power did not
+disturb the link.
