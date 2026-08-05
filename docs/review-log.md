@@ -5941,3 +5941,73 @@ cannot see from either endpoint alone.
 Link health across the whole sweep: 413k/415k frames on the two adapters,
 RSSI −30/−24, `tx_failed` 0, `drop` 0, MCS5 dominant. Cycling power did not
 disturb the link.
+
+## Pass 139 — G0: devourer MCS4+ at 5805, settled on hardware (2026-08-05)
+
+`docs/mon-air-verification.md` has said since 2026-07-11 that devourer cannot
+transmit 16-QAM+ on the RTL8822E in UNII-3, 5805 included. That claim is why
+the whole fleet runs `kernel-monitor`, and it gated most of
+`docs/devourer-parity-plan.md`. It was never re-measured after the 8822E TX
+fixes landed upstream (`b5a6df7`, #238/#268) and were vendored. This pass
+measures it.
+
+**Method.** One reference receiver held constant across every arm — an 8822c
+on `kernel-monitor`, passive spectator — so only the transmitter changes. The
+link profile is pinned per rate (`POST /api/v1/link/profile {min:N,max:N}`),
+left to settle, and the RX `rx_mcs` histogram delta over a 20 s dwell is
+divided by the TX `tx_submitted` delta. `rx_at_other_rates` is reported
+alongside: it was 0 in every valid window, which is what makes the delivery
+figure trustworthy — the receiver attributed every frame to the commanded
+rate rather than to a retry at some other one.
+
+| arm | TX chip | TX driver | RSSI | MCS4 | MCS5 | MCS6 | MCS7 |
+|---|---|---|---|---|---|---|---|
+| bench | 8822e | kernel-monitor | −19 | 99.86 | 99.94 | 99.91 | **99.96** |
+| bench | 8822e | devourer, warm | −22 | 98.24 | 4.16 | 0.21 | **0.18** |
+| bench | 8822e | devourer, cold-cycled | — | 99.05 | 1.55 | 0.17 | **0.17** |
+| bench | 8822e | devourer, upstream `800c3c8` | — | — | 2.14 | 0.52 | **0.11** |
+| bench | 8822e | devourer + `max_power_qdb=108` | — | — | 1.54 | 0.45 | **0.19** |
+| bench | 8822c | devourer | −40 | 99.82 | 99.82 | 99.78 | **99.80** |
+| **vehicle `.2.232`** | **8822e** | **devourer, real venc video** | **−27** | 98.21 | 96.42 | 95.87 | **98.21** |
+
+**G0 is closed affirmatively. Devourer transmits MCS4–7 at 5805**, on the
+8822e, on the actual vehicle, carrying real video from `venc_frame`. The pivot
+rationale does not survive.
+
+**The bench adapter is a per-unit outlier, not evidence about the chip.** It
+fails MCS5+ under devourer while the *same physical adapter* delivers 99.96%
+at MCS7 under the kernel driver, so its radio is sound. Ruled out, each by
+measurement rather than argument:
+
+- **Warm re-init.** `AdapterCaps.h` warns that high-order constellation TX
+  degrades across warm re-inits "which reads exactly like a link too weak to
+  carry them" — precisely the trap this measurement could have fallen into. A
+  true VBUS cold cycle (xHCI `usbN-portM/disable`; the device de-enumerated to
+  `not attached` and returned with a new device number) changed nothing.
+- **devourer version.** Re-ran against upstream `800c3c8`, 21 commits ahead of
+  the then-vendored `a71060f`. No change. (Re-vendored anyway — separate
+  commit — for #377/#371/#380/#355.)
+- **TX power.** The bench config carried no power settings and the craft's
+  carries `max_power_qdb=108`; adding it changed nothing, and the efuse refs
+  logged identically either way.
+- **Link budget and RX overload.** The vehicle arm *works* at −27 dBm, weaker
+  than the bench arm that fails at −22.
+- **RFE variant.** Both are `rfe_type=0x15`, both log the same DPK force-bypass
+  and eFEM pin-mux — the same code path.
+
+What remains is per-unit efuse calibration: bench `ref A=0x43 B=0x42` against
+craft `A=0x48 B=0x3f`. A physical re-plug is untested (operator remote); the
+adapter is parked as suspect and should not be used for TX A/Bs.
+
+**Methodological note worth keeping.** The first conclusion drawn here — "the
+8822e TX path is broken under devourer, exclude it from TX roles" — was wrong,
+and wrong in the expensive direction: it would have become a BOM constraint on
+the pure-devourer end-state. It came from testing one adapter and generalising
+to a chip. The direction-swap to the 8822c looked like a control but only
+established that *some* adapter works; the discriminating test was the same
+chip in a different unit, which is what the operator asked for and what
+settled it. Two adapters of the same part number are not a replicate.
+
+**Consequence for `docs/devourer-parity-plan.md`.** G0 no longer gates the
+register, and the items it gated (G3, G4, G5, B2) need re-reading on their own
+merits rather than inheriting a blocked status.
