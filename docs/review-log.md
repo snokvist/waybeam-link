@@ -5830,3 +5830,48 @@ inside it, and that is why the ground-side tier fixes remain device-verified
 only. Cutting that function's uplink-power block into a small struct with the
 same injectable-actuator shape `TxCore` already has is the highest-value next
 step, and these tests now exist to hold the rest still while it happens.
+
+## Pass 138 — the ground uplink's power owner becomes one object (2026-08-05)
+
+Pass 137 named `run_rx()` as the next seam and this cuts the first piece of it:
+`UplinkPower`, holding the §10.3 ceiling, the §10.5 latch, the §11.7 0x0A tier,
+and the one precedence path they share.
+
+**The justification is duplication that already cost two bugs.** The ordering —
+latch, then configured map, then matching artifact, then backend auto — was
+written out FOUR times in `run_rx`: the actuation, the §15.3 fill, the startup
+`power owner =` log, and the §15.5 `effective` flag. The code carried a comment
+saying "a second copy of this ordering is how the two drift", which documents
+the hazard instead of removing it. Two copies had in fact drifted, and both
+were Pass 136 fixes: `effective` claimed a tier bound hardware when it did not,
+and the tier's own apply path reached no actuator at all on a ground with a
+config `power_map` or with no artifact yet. This is not abstraction for a
+hypothetical future — it is four copies collapsing to one.
+
+**The split that must survive.** §10.5 says the ceiling is the only *clamp* and
+that GET/§15.3 report the latched *request*. Those are two different numbers,
+and collapsing them is exactly what put 30.00 dBm on a 27 dBm-ceilinged radio.
+`hw_qdb()` clamps, `reported_qdb()` does not, and the asymmetry is now stated
+in one place rather than implied across four.
+
+**What stayed out.** The calibrator's sweep bound is not power, so moving it
+remains the caller's job — the tier handler still drives
+`uplink_cal.set_max_qdb()` itself. The artifact resolve stays a callback: §10.7
+applicability is a function of the pairing tuple, which changes with selection
+and CSA and belongs to `run_rx`.
+
+**Coverage.** Seven new cases, all previously device-verified only: the
+unowned→backend-auto path, the full precedence order as each source is added,
+the report-vs-actuate split under a latch, the tier re-resolving the configured
+map under its new ceiling, the tier actuating with no artifact present (the
+configuration where the old pairing-key route silently did nothing), the
+out-of-range rejection, and §15.5/§15.3 agreeing on `effective`. app_test is
+106 checks, up from 73.
+
+**NOT device-verified.** The bench went down mid-pass — the ground's 8812EU
+uplink adapter was unplugged (`ConditionPathExists` now skips the service) and
+both the craft and the spectator stopped answering. `--check` against the real
+ground config parses, resolves both adapters and reports `bindings: OK`, and
+all three cross-builds are clean, but the actuation path this pass rewrote has
+not been re-run on hardware. The tier ladder, the latch clamp and the
+`power owner =` line must be re-checked on the ground before this merges.
