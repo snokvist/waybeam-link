@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "wblink/air_iface.h"  // AirIface (the backend contract)
 #include "wblink/air_udp.h"  // AirRxMeta (shared meta shape)
 #include "wblink/config.h"   // AdapterCfg, Result
 #include "wblink/types.h"
@@ -45,26 +46,24 @@ struct MonAirCfg {
     uint16_t airtime_efficiency_permille = 0;  // §14.2; 0 = unavailable
 };
 
-class MonAir {
+class MonAir : public AirIface {
   public:
-    using RxCb = std::function<void(const AirRxMeta&, const uint8_t*, size_t)>;
-
     static Result<MonAir> create(const MonAirCfg& cfg);
 
     MonAir(MonAir&&) noexcept;
     MonAir& operator=(MonAir&&) noexcept;
-    ~MonAir();
+    ~MonAir() override;
 
     // Send one wire packet on the TX adapter (§3.0 + radiotap MCS added here).
     // Returns 1 when submitted, 0 on failure.
-    size_t inject(const uint8_t* frame, size_t len);
-    size_t inject_resend(const uint8_t* frame, size_t len);
+    size_t inject(const uint8_t* frame, size_t len) override;
+    size_t inject_resend(const uint8_t* frame, size_t len) override;
 
     // Return (NACK/LINK_REPORT) toward dest_originator. Monitor injection has
     // no hardware ACK responder, so this is a plain broadcast inject() (the
     // ground filters by originator); counted as a unicast fallback for §15.3.
     size_t inject_return(uint16_t dest_originator, const uint8_t* frame,
-                         size_t len, bool urgent = false);
+                         size_t len, bool urgent) override;
     void return_counters(uint64_t& unicast_sent,
                          uint64_t& unicast_fallback) const;
 
@@ -75,64 +74,70 @@ class MonAir {
 
     // §14.2 effective HT20 serialization time. include_pending adds socket
     // outbound bytes when the kernel exposes them; zero calibration = unknown.
-    std::optional<uint32_t> estimate_airtime_us(size_t bytes,
-                                                bool include_pending,
-                                                uint16_t packet_budget =
-                                                    kDefaultMaxPayload) const;
+    std::optional<uint32_t> estimate_airtime_us(
+        size_t bytes, bool include_pending,
+        uint16_t packet_budget) const override;
 
     // Deliver queued RX frames (§3.0 payloads, header stripped); blocks up to
     // timeout_ms when the queue is empty. Returns frames delivered.
-    int poll_once(int timeout_ms, const RxCb& cb);
+    int poll_once(int timeout_ms, const RxCb& cb) override;
     int wait_fd() const;
+    // One socket per backend here; the plural is the interface's shape (udp-air
+    // waits per adapter).
+    std::vector<int> wait_fds() const override { return {wait_fd()}; }
 
-    size_t rx_adapters() const;
-    bool has_tx() const;
+    size_t rx_adapters() const override;
+    bool has_tx() const override;
     // §9.3a minimum packet budget across the live monitor netdevs. Unknown
     // interface MTU reads resolve conservatively to Default.
-    uint16_t mtu_supported() const;
+    uint16_t mtu_supported() const override;
     // §15.5a scout: index of the designated `role:"tx"` uplink adapter — the one
     // the scout roams during a sweep (Pass 64). Not assumed to be 0.
-    size_t tx_index() const;
+    size_t tx_index() const override;
+    // Frames go on real RF through the kernel driver.
+    bool is_rf() const override { return true; }
 
     // --- control plane (main thread only) --------------------------------
     // Committed operating point → stamped into each frame's radiotap MCS.
-    void set_tx_mode(uint8_t mcs, bool sgi);
+    void set_tx_mode(uint8_t mcs, bool sgi) override;
     // §15.5a scout: decouple the two net_id roles at runtime. The scout widens
     // the RX filter to hear all net_ids during a sweep, then narrows it to the
     // claimed craft's net_id post-lock; the stamp follows so return traffic
     // (NACK/CSA) lands inside the craft's filter. set_filter_net_id re-attaches
     // the §3.0 BPF pre-filter (nullopt = waybeam-shape only, any net_id).
-    void set_stamp_net_id(uint8_t net_id);
-    void set_filter_net_id(std::optional<uint8_t> net_id);
+    void set_stamp_net_id(uint8_t net_id) override;
+    void set_filter_net_id(std::optional<uint8_t> net_id) override;
     // §10.4/§10.5 power: nl80211 fixed power via a bounded `iw set txpower
     // fixed <qdb×25 mBm>` fork — the kernel-monitor leg of the backend
     // actuation matrix (Pass 114). False on CLI failure — callers must not
     // cache the value as applied (§10.5).
-    bool set_power_qdb(size_t adapter, int32_t qdb);
+    bool set_power_qdb(size_t adapter, int32_t qdb) override;
     // §10.5 auto restore: `iw set txpower auto` — hand power back to the
     // driver default / per-rate TXAGC curve (the mon-up.sh posture).
-    bool set_power_auto(size_t adapter);
+    bool set_power_auto(size_t adapter) override;
     // Monitor netdevs expose no per-adapter TSF read → always nullopt (caller
     // falls back to host time, §7.2).
-    std::optional<uint64_t> read_tsf(size_t adapter);
+    std::optional<uint64_t> read_tsf(size_t adapter) override;
     // §11.5/§15.5a channel retune: drives `iw dev <if> set freq` (the ssc338q
     // SDK lacks libnl-3). Changes the wiphy channel without a down/up, so RX
     // sockets survive. Returns false if the iw call fails. Serves both the CSA
     // follower switch and the scout sweep.
-    bool retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast);
+    bool retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
+                bool fast) override;
     // §11.6 Pass 80 RX-liveness recovery: full monitor re-init of one adapter
     // (link down → monitor type → link up → MTU → set freq — the bring-up
     // sequence). For the RTL88x2 half-applied in-place retune (TX airs, RX
     // deaf). RX sockets are bound by ifindex and survive the down/up.
-    bool recover(size_t adapter, uint16_t chan_mhz, uint8_t bw);
-    bool reapply_tx_power(size_t adapter);
+    bool recover(size_t adapter, uint16_t chan_mhz,
+                 uint8_t width_mhz) override;
+    bool reapply_tx_power(size_t adapter) override;
     // §11.6 issuer verify hygiene (Pass 69): discard RX backlog captured
     // before a retune completed — kernel socket buffers and the process
     // queue — so post-retune consumers only see frames actually received on
     // the new channel (the Pass 66 stale-drain artifact must not satisfy a
     // video-verify). Called after retune_all; a handful of genuinely fresh
     // frames may be discarded with the backlog, which the data path absorbs.
-    void flush_rx();
+    void flush_rx() override;
 
     struct AdapterCounters {
         std::string name;
