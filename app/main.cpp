@@ -1019,12 +1019,27 @@ struct UplinkPower {
         return artifact_qdb ? artifact_qdb() : std::nullopt;
     }
 
-    Owner owner() const {
-        if (override_qdb) return Owner::kOverride;
-        if (owner_qdb) return Owner::kConfigMap;
-        if (artifact()) return Owner::kArtifact;
-        return Owner::kNone;
+    // Owner + the value that owner REQUESTS, resolved together in the one
+    // place the precedence is written. Walking the chain separately per
+    // accessor is how run_rx ended up with four copies of it, and the first
+    // draft of this struct promptly grew three of its own.
+    //
+    // Resolving once also matters because artifact() is not free: it re-runs
+    // the §10.7 pairing check and updates the stale flag as a side effect.
+    struct Resolved {
+        Owner owner = Owner::kNone;
+        std::optional<int32_t> qdb;
+    };
+    Resolved resolve() const {
+        if (override_qdb) return {Owner::kOverride, override_qdb};
+        if (owner_qdb) return {Owner::kConfigMap, owner_qdb};
+        if (const std::optional<int32_t> a = artifact()) {
+            return {Owner::kArtifact, a};
+        }
+        return {};
     }
+
+    Owner owner() const { return resolve().owner; }
 
     const char* owner_name() const {
         switch (owner()) {
@@ -1038,23 +1053,18 @@ struct UplinkPower {
 
     // What §15.3 REPORTS. §10.5 is explicit that a latch reports the REQUEST,
     // not the clamped value the hardware got.
-    std::optional<int32_t> reported_qdb() const {
-        if (override_qdb) return override_qdb;
-        if (owner_qdb) return owner_qdb;
-        return artifact();
-    }
+    std::optional<int32_t> reported_qdb() const { return resolve().qdb; }
 
     // What the ACTUATOR receives. Only the latch needs clamping here: the
     // curve resolve takes the ceiling as an argument and the artifact resolve
     // clamps at its source, so clamping them twice would be a no-op that
     // invited someone to "simplify" one of the three away.
     std::optional<int32_t> hw_qdb() const {
-        if (override_qdb) {
-            return ceiling_qdb ? std::min(*override_qdb, *ceiling_qdb)
-                               : *override_qdb;
+        const Resolved r = resolve();
+        if (r.owner == Owner::kOverride && ceiling_qdb) {
+            return std::min(*r.qdb, *ceiling_qdb);
         }
-        if (owner_qdb) return owner_qdb;
-        return artifact();
+        return r.qdb;
     }
 
     // The single convergence point. Every §10.5/§10.7/§11.7 path ends here.
@@ -1065,6 +1075,7 @@ struct UplinkPower {
             apply_auto();
         }
     }
+
 
     // §10.3 Pass 134/136: a ceiling binds only where a number of ours reaches
     // the actuator — a curve, an artifact, or a held latch clamped by it.
@@ -1088,15 +1099,6 @@ struct UplinkPower {
         resolve_owner();
         apply();
         return true;
-    }
-
-    void set_override(int32_t qdb) {
-        override_qdb = qdb;
-        apply();
-    }
-    void clear_override() {
-        override_qdb.reset();
-        apply();
     }
 
     std::string json() const {
@@ -5281,9 +5283,9 @@ int run_rx(const Loaded& l) {
                           : uplink_measured_qdb().value_or(0);
         u.fingerprint = uplink_artifact_fp;
         u.stale = uplink_artifact_stale;
-        // §10.3/§10.5/§11.7 0x0A. `effective` and the precedence below mirror
-        // uplink_restore_actuators() exactly — a second copy of that ordering
-        // is how the two drift, so keep them edited together.
+        // §10.3/§10.5/§11.7 0x0A. This used to warn that it mirrored
+        // uplink_restore_actuators() and had to be edited in step with it.
+        // There is nothing to keep in step now — both read one object.
         u.tx_power_tier = upwr.tier;
         u.tx_power_ceiling_qdb = upwr.ceiling_qdb.value_or(0);
         u.tx_power_tier_effective = upwr.effective();

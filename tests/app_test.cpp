@@ -112,6 +112,9 @@ void test_tier_on_uncalibrated_node_actuates_nothing() {
     CHECK_EQ_U(tx.power_tier(), 0);
     CHECK(tx.power_tier_ceiling().value_or(-1) == 60);
     CHECK(spy.empty());                  // nothing reached the radio
+    // Nor a backend-auto command, which is a DIFFERENT wrong answer: it would
+    // reset hardware power rather than leave it where the operator had it.
+    CHECK_EQ_U(spy.autos, 0);
     CHECK(!tx.power_tier_effective());   // and §15.5 says so
 }
 
@@ -287,11 +290,13 @@ void test_uplink_precedence_order() {
     CHECK(p.owner() == UplinkPower::Owner::kConfigMap);
     CHECK(applied.back() == 80);   // config map outranks the artifact
 
-    p.set_override(90);
+    p.override_qdb = 90;
+    p.apply();
     CHECK(p.owner() == UplinkPower::Owner::kOverride);
     CHECK(applied.back() == 90);   // and the §10.5 latch outranks both
 
-    p.clear_override();
+    p.override_qdb.reset();
+    p.apply();
     CHECK(applied.back() == 80);   // released back to the config map
 }
 
@@ -306,7 +311,8 @@ void test_uplink_latch_reports_request_but_actuates_clamped() {
     p.apply_auto = [&] {};
     p.ceiling_qdb = 108;
 
-    p.set_override(120);
+    p.override_qdb = 120;
+    p.apply();
     CHECK(applied.back() == 108);              // hardware: clamped
     CHECK(p.reported_qdb().value_or(0) == 120);  // §15.3: the request
     CHECK(p.hw_qdb().value_or(0) == 108);
@@ -346,7 +352,8 @@ void test_uplink_tier_actuates_without_an_artifact() {
     p.presets_qdb = {60, 108};
     p.ceiling_qdb = 108;
     p.artifact_qdb = [] { return std::optional<int32_t>{}; };  // none paired
-    p.set_override(200);                       // give it something to clamp
+    p.override_qdb = 200;
+    p.apply();                       // give it something to clamp
     applied.clear();
 
     CHECK(p.set_tier(0));
@@ -385,7 +392,8 @@ void test_uplink_json_matches_effective() {
 
     CHECK(p.json().find("\"effective\":false") != std::string::npos);
     CHECK(p.json().find("\"tier\":-1") != std::string::npos);
-    p.set_override(50);
+    p.override_qdb = 50;
+    p.apply();
     CHECK(p.effective());
     CHECK(p.json().find("\"effective\":true") != std::string::npos);
 }

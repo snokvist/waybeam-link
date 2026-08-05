@@ -5875,3 +5875,34 @@ ground config parses, resolves both adapters and reports `bindings: OK`, and
 all three cross-builds are clean, but the actuation path this pass rewrote has
 not been re-run on hardware. The tier ladder, the latch clamp and the
 `power owner =` line must be re-checked on the ground before this merges.
+
+**Pass 138 self-review.** Re-read before opening the PR, looking for the same
+three things this pass claims to fix. Found three, all mine:
+
+- **The struct grew its own copies of the chain.** Four were removed from
+  `run_rx` and `owner()`, `reported_qdb()` and `hw_qdb()` each walked it again
+  — the identical defect, one scope in. Collapsed to a single `resolve()`
+  returning `{owner, requested qdb}`. That also cuts `artifact_qdb()` calls,
+  which are not free: each re-runs the §10.7 pairing check and moves the stale
+  flag as a side effect.
+- **`set_override()` / `clear_override()` were dead.** No production caller —
+  `run_rx` sets the field and converges through `uplink_restore_actuators()`,
+  which also owns probe mode and the rate latch, so it cannot delegate to them.
+  Test-only API is speculative generality; removed, and the tests now drive the
+  same two steps production does.
+- **`PowerSpy::autos` was written and never read**, in the test helper of all
+  places. Turned into a real assertion instead of deleted: a tier on an
+  uncalibrated node must not command backend-auto either, which is a *different*
+  wrong answer from actuating — it would reset hardware power rather than leave
+  it alone.
+
+One stale comment removed: the §15.3 fill still warned that it mirrored
+`uplink_restore_actuators()` and had to be edited in step. Nothing to keep in
+step now.
+
+**Checked and deliberately left alone.** `TxCore` and `UplinkPower` share no
+methods beyond stdlib calls. The resemblance is conceptual only: the craft
+resolves per-commit across N adapters through a §10.2 level taper, the ground
+resolves once at a fixed MCS and has an artifact source the craft has no
+equivalent of. Unifying them would mean an abstraction over two genuinely
+different shapes to save nothing.
