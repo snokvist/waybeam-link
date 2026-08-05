@@ -5906,3 +5906,38 @@ resolves per-commit across N adapters through a §10.2 level taper, the ground
 resolves once at a fixed MCS and has an artifact source the craft has no
 equivalent of. Unifying them would mean an abstraction over two genuinely
 different shapes to save nothing.
+
+**Pass 138 device verification (2026-08-05).** Ground x86 + craft `.2.232`,
+both on 5805 HT20, uplink `eu-uplink` presets `[60,76,84,92,108]`, ceiling 108.
+The ground ran the `UplinkPower` build; the point of the exercise is that a
+refactor changed nothing observable.
+
+- **Tier ladder.** `POST {"tier":N}` for 0/2/4 → `iw` reports **15.00 /
+  21.00 / 27.00 dBm**, matching the presets exactly.
+- **§10.5 clamp/report split.** With tier 0 held (ceiling 60), `POST
+  {"qdb":120}` → hardware **15.00 dBm** while `GET /tx/power` and §15.3
+  `tx_power_qdb` both report the latched **120**. The clamp is applied at the
+  actuator, never to the stored request.
+- **A tier change re-asserts a held latch.** Latch 120 held across tiers
+  4 → 1 → 0; each re-applied `min(120, ceiling)` → 27 / 19 / 15 dBm, and
+  `override_active` stayed true throughout.
+- **Startup owner line.** `uplink: power owner = backend auto (artifact
+  present, awaiting craft)`, then the artifact bound and the backend moved from
+  `txpower auto ok` to `txpower fixed 108 qdb`. The owner is named, not implied.
+- **`both:true`.** With a CSA claim held, `{"tier":0,"both":true}` moved
+  **both** ends to 15.00 dBm — the craft from 17.00, which is the tier-0
+  ceiling (60) biting below its artifact's MCS5 placement (68). Restoring
+  tier 4 returned the craft to 17.00 and the ground to 27.00, confirming the
+  §11.7 half is bidirectional and that tier 4 correctly does *not* raise the
+  craft above its calibrated placement.
+
+Worth recording because it is a property no unit test covers: **`both:true`
+refuses atomically.** Both refusals seen in the run — `craft not claimed` and
+the §11.7 `rate-limit or no key` — left the *ground* tier untouched rather than
+applying locally and failing to propagate. A partial apply would silently
+desync the two ends' power envelopes, which is exactly the state the operator
+cannot see from either endpoint alone.
+
+Link health across the whole sweep: 413k/415k frames on the two adapters,
+RSSI −30/−24, `tx_failed` 0, `drop` 0, MCS5 dominant. Cycling power did not
+disturb the link.
