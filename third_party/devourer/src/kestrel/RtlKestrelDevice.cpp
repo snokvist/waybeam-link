@@ -74,6 +74,17 @@ RtlKestrelDevice::RtlKestrelDevice(RtlAdapter device, Logger_t logger,
    * from the Jaguar2 TXAGC-index meaning). Applied at every set_channel. */
   if (_cfg.tx.power_index.has_value())
     _hal.set_default_txpwr_dbm(*_cfg.tx.power_index);
+  /* The AX DATA_TXCNT_LMT field holds ATTEMPTS in 6 bits, so this family's
+   * retry ceiling is 62 (63 attempts) — one below the 11ac dies' 63. Clamp
+   * once here (send_packet reads the stored copy) and say so, rather than
+   * silently delivering 62 where the knob's 0..63 grammar promised 63. */
+  if (_cfg.tx.retry_limit > 62) {
+    _logger->warn("Kestrel: DEVOURER_TX_RETRY_LIMIT={} exceeds this family's "
+                  "ceiling of 62 retries (the AX field counts attempts, 6 "
+                  "bits) — clamped to 62",
+                  _cfg.tx.retry_limit);
+    _cfg.tx.retry_limit = 62;
+  }
 }
 
 RtlKestrelDevice::~RtlKestrelDevice() {
@@ -216,15 +227,40 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
     _logger->error("Kestrel: TX bring-up failed");
     return;
   }
-  /* TX-only: enable the CMAC port + scheduler contention queues (this clears
-   * the CCA gates — see EnableTxScheduler). Kept out of BringUpMonitor so the
-   * pure-monitor RX path keeps CCA on and can actually hear frames. */
-  _hal.set_cca_on(_cfg.debug.kestrel_cca_on);
+  /* TX-only: enable the CMAC port + scheduler contention queues. Kept out
+   * of BringUpMonitor so the pure-monitor RX path keeps CCA on and can
+   * actually hear frames.
+   *
+   * Carrier-sense default: the 8852C die runs the standards-compliant
+   * default — gates STAY ON unless DEVOURER_DIS_CCA (witness-measured on
+   * the 8832CU: full-rate TX with all gates on from bring-up, 2106
+   * frames/12 s, and real deferral under a co-channel flood, 35 vs 83
+   * frames vs dis_cca — the same both-directions proof as the other
+   * generations; the bring-up's DACK/RX-DCK/ADDCK suffice, no IQK/DPK
+   * needed). The 8852B die keeps the gates cleared until its arm of
+   * tests/kestrel_cca_default_check.sh runs — unmeasured, not incapable.
+   * DEVOURER_KESTREL_CCA_ON forces gates-on on either die (the B-die
+   * measurement lever). */
+  /* DEVOURER_DIS_CCA is the explicit override and beats everything,
+   * including the KESTREL_CCA_ON measurement lever — one knob, one final
+   * state, and the bring-up log matches it. */
+  const bool cca_on = !_cfg.tuning.disable_cca &&
+                      (_cfg.debug.kestrel_cca_on ||
+                       _variant == kestrel::ChipVariant::C8852C);
+  _hal.set_cca_on(cca_on, /*default_unmeasured=*/!cca_on &&
+                              !_cfg.tuning.disable_cca);
   EnableTxScheduler();
-  /* DEVOURER_DIS_CCA: EnableTxScheduler already cleared the CCA gates for TX;
-   * this just re-asserts it explicitly (idempotent) when the knob is set. */
+  /* DEVOURER_DIS_CCA: set_cca_on(false) already cleared the gates; this
+   * re-asserts explicitly (idempotent) when the knob is set. */
   if (_cfg.tuning.disable_cca)
     SetCcaMode(true);
+  /* ACK window (DEVOURER_ACK_TIMEOUT_US): one library default on every
+   * generation — byte0 of R_AX_RSP_CHK_SIG (the field the vendor's
+   * narrowband path scales); see the DeviceConfig field doc. */
+  _device.rtw_write8(0xCC00, static_cast<uint8_t>(
+      _cfg.tx.ack_timeout_us > 255   ? 255
+      : _cfg.tx.ack_timeout_us < 1 ? 1
+                                     : _cfg.tx.ack_timeout_us));
   _tx_mgmt_ep = _device.nth_bulk_out_ep(0); /* B0MG -> BULKOUTID0 */
   _tx_data_ep = _device.nth_bulk_out_ep(3); /* ACH0 -> BULKOUTID3 */
   if (_tx_mgmt_ep == 0) {
@@ -293,26 +329,36 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
           if (!kestrel::parse_rx_8852b(data + off, static_cast<size_t>(n) - off,
                                        f, drv_info_unit))
             break;
-          if (f.rpkt_type == kestrel::RPKT_TYPE_PPDU && f.payload_len >= 6) {
-            /* physts header (halbb physts_hdr_info): byte3 = rssi_avg_td, byte4+
-             * = per-path rssi_td, all U(8,1) (RSSI% = dBm+110 = raw>>1). Cache
-             * for the following WIFI frame(s). */
-            _last_rssi[0] = static_cast<uint8_t>(f.payload[4] >> 1);
-            _last_rssi[1] = static_cast<uint8_t>(f.payload[5] >> 1);
-            /* Per-frame SNR for the passive floor: the 8-byte header is followed
-             * by the IEs; IE_01 (OFDM/HE info, physts_ie_1_info) is
-             * the first for a decodable OFDM/HE PPDU. Self-validate on its ie_hdr
-             * (byte0 [4:0] == 1) before trusting the offset: avg_snr is IE byte 8
-             * [5:0] in dB. Store as raw = dB*2 (the RxQualityAccumulator
-             * convention snr_db = raw/2). 0 when IE_01 absent (e.g. CCK).
-             * On-air-validated on BOTH dies (passive floor cross-matches the
-             * NHM floor within ~1 dB): the C8852C physts is bit-identical to the
-             * C8852B once its measurement engine is brought up (the 8852C branch
-             * in kestrel_halbb_rx_bringup + the R_AX_PPDU_STAT no-APP-prepend
-             * config in bb_reset_all) — same header, same IE_01 offset. */
-            _last_snr = 0;
-            if (f.payload_len >= 8 + 9 && (f.payload[8] & 0x1f) == 1)
-              _last_snr = static_cast<uint8_t>((f.payload[16] & 0x3f) * 2);
+          if (f.rpkt_type == kestrel::RPKT_TYPE_PPDU && f.payload_len >= 8) {
+            /* Full physts parse (header per-path rssi_td + IE01 avg SNR +
+             * IE04..07 per-path SNR/EVM pages) — kestrel::parse_physts_8852.
+             * Cached for the following WIFI frame(s) in the aggregate.
+             * On-air-validated on BOTH dies for the header + IE_01 offsets
+             * (passive floor cross-matches the NHM floor within ~1 dB): the
+             * C8852C physts is bit-identical to the C8852B once its measurement
+             * engine is brought up (the 8852C branch in
+             * kestrel_halbb_rx_bringup + the R_AX_PPDU_STAT no-APP-prepend
+             * config in bb_reset_all) — same header, same IE walk. */
+            kestrel::KestrelPhySts ps;
+            if (kestrel::parse_physts_8852(
+                    f.payload, f.payload_len,
+                    _variant == kestrel::ChipVariant::C8852C, ps))
+              _last_physts = ps;
+            /* Trace: raw physts blobs (first few) — the IE-page ground truth
+             * when a per-path metric reads 0 (is the page absent, or zero?). */
+            static int physts_dumped = 0;
+            if (physts_dumped < 4) {
+              ++physts_dumped;
+              std::string hex;
+              const uint32_t n = f.payload_len < 96 ? f.payload_len : 96;
+              hex.reserve(n * 2);
+              for (uint32_t i = 0; i < n; i++) {
+                static const char d[] = "0123456789abcdef";
+                hex.push_back(d[f.payload[i] >> 4]);
+                hex.push_back(d[f.payload[i] & 0xf]);
+              }
+              _logger->trace("Kestrel physts[{}B]: {}", f.payload_len, hex);
+            }
           } else if (f.rpkt_type == kestrel::RPKT_TYPE_WIFI && packetProcessor) {
             Packet p{};
             p.RxAtrib.pkt_len = static_cast<uint16_t>(f.payload_len);
@@ -323,14 +369,26 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
             p.RxAtrib.ppdu_type = f.ppdu_type; /* 7=HE_SU 8=HE_ERSU */
             p.RxAtrib.ppdu_cnt = f.ppdu_cnt;
             p.RxAtrib.tsfl = f.freerun_cnt;
-            p.RxAtrib.rssi[0] = _last_rssi[0];
-            p.RxAtrib.rssi[1] = _last_rssi[1];
-            p.RxAtrib.snr[0] = _last_snr;
-            /* Feed the windowed RX-quality aggregate (passive rssi-snr floor +
-             * LinkHealth). rssi_raw = dBm+110 (== _last_rssi), snr_raw = dB*2;
-             * a frame with no IE_01 SNR (snr=0) still counts toward RSSI. */
-            if (_last_rssi[0] > 0)
-              _rxq.add(_last_rssi[0], _last_snr, 0);
+            for (int i = 0; i < 4; i++) {
+              p.RxAtrib.rssi[i] = _last_physts.rssi[i];
+              p.RxAtrib.snr[i] = _last_physts.snr[i];
+              p.RxAtrib.evm[i] = _last_physts.evm[i];
+            }
+            /* Window aggregates fold CRC-clean frames only (the Jaguar
+             * convention): a garbled frame's cached physts would bias the
+             * means and the active-chain classification.
+             *
+             * _rxq: passive rssi-snr floor + LinkHealth, fed path-A RSSI +
+             * the IE01 average SNR (the all-paths quantity the passive floor
+             * was validated against; per-path SNR goes to _rxpaths instead).
+             * A frame with no IE_01 SNR (snr_avg=0) still counts toward RSSI.
+             * _rxpaths: per-antenna window means (GetActiveRxPaths). Both
+             * dies are 2 RX chains; C/D read 0 and are excluded by n_chains. */
+            if (!f.crc_err) {
+              if (_last_physts.rssi[0] > 0)
+                _rxq.add(_last_physts.rssi[0], _last_physts.snr_avg, 0);
+              _rxpaths.add(p.RxAtrib.rssi, p.RxAtrib.snr, p.RxAtrib.evm, 2);
+            }
             p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.payload),
                                         f.payload_len);
             packetProcessor(p);
@@ -761,6 +819,14 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   c.tx_chains = 2; /* 8852B/8852C are 2T2R */
   c.rx_chains = 2;
   c.per_chain_rssi = true; /* per-path RSSI from the PPDU-status physts header */
+  /* Hardware ARQ: SetAckResponder is not implemented on the AX generation
+   * (matrix-measured 0% closure) — that flag stays false. The retry knob IS
+   * wired (WD DATA_TXCNT_LMT per frame, attempts-semantics folded to the
+   * N-retries contract in send_packet; witness-measured on the 8832CU:
+   * limits {0,2} -> modal {1,3} on-air copies exactly, limit 8 -> an 8/9
+   * near-tie consistent with ~90% witness capture of a 9-copy truth —
+   * obedient, no wedge). */
+  c.tx_retry_limit_ok = true;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   if (_variant == kestrel::ChipVariant::C8852C)
     c.bw_mask |= devourer::kBw160; /* 8852C-only (vendor bw_sup BW_CAP_160M) */
@@ -1041,11 +1107,27 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
   const uint32_t wd_len = (_variant == kestrel::ChipVariant::C8852C)
                               ? kestrel::WD_BODY_LEN_V1
                               : kestrel::WD_BODY_LEN;
+  /* Per-frame retry limit (DEVOURER_TX_RETRY_LIMIT, default 0 = single-shot,
+   * same contract as the 11ac descriptor families): the AX WD carries it as
+   * wd_info dword1 DATA_TXCNT_LMT with SEL, overriding the per-MACID CCTRL
+   * default. The field counts ATTEMPTS, not retries — measured on the
+   * 8832CU (tests/kestrel_retry_witness.sh: limit-value 2 -> modal 2 on-air
+   * copies, 8 -> 8, where the J3 retries-field gives N+1), so the knob folds
+   * +1 here to keep N-means-N-retries across generations. Value 0 is
+   * hardware-clamped to one attempt (336/336 frames aired exactly once), so
+   * the explicit 1 below is belt-and-braces, not a behavior change. NB the
+   * vendor's hal_sta.c writes its rty_lmt verbatim into the CCTRL twin of
+   * this field — its "retry limit" is off-by-one against 11ac by the same
+   * measurement. */
+  const int rl = _cfg.tx.retry_limit < 0    ? 0
+                 : _cfg.tx.retry_limit > 62 ? 62
+                                            : _cfg.tx.retry_limit;
+  const int txcnt = rl + 1;
   auto buf = is_data && _tx_data_ep
                  ? kestrel::build_data_txdesc(frame, flen, tr, 0,
-                                              _tx_seq++ & 0xfff, wd_len)
+                                              _tx_seq++ & 0xfff, wd_len, txcnt)
                  : kestrel::build_mgnt_txdesc(frame, flen, tr, 0,
-                                              _tx_seq++ & 0xfff, wd_len);
+                                              _tx_seq++ & 0xfff, wd_len, txcnt);
   if (is_data && _tx_data_ep)
     ep = _tx_data_ep;
   int rc = _device.bulk_send_sync_ep(ep, buf.data(),

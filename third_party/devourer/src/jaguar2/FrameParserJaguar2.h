@@ -39,6 +39,11 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_CHK_EN_8822B(d, v)     SET_BITS_TO_LE_4BYTE((d) + 0x0C, 14, 1, v)
 #define SET_TX_DESC_DISDATAFB_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x0C, 10, 1, v)
 #define SET_TX_DESC_DATARATE_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x10, 0, 7, v)
+/* DATA_RTY_LOWEST_RATE (0x10 [12:8]): measured NOT a plain DESC_RATE bound on
+ * the sibling 8822C fw (RA-group reinterpretation — RetryFallback note in
+ * DeviceConfig.h). Field documented, deliberately unwritten. */
+#define SET_TX_DESC_DATA_RTY_LOWEST_RATE_8822B(d, v) \
+  SET_BITS_TO_LE_4BYTE((d) + 0x10, 8, 5, v)
 #define SET_TX_DESC_DATA_SC_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 0, 4, v)
 #define SET_TX_DESC_DATA_SHORT_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x14, 4, 1, v)
 #define SET_TX_DESC_DATA_BW_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 5, 2, v)
@@ -139,7 +144,11 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(d, 12);
   SET_TX_DESC_MACID_8822B(d, 0x01);
   SET_TX_DESC_QSEL_8822B(d, 0x12);
-  SET_TX_DESC_RATE_ID_8822B(d, 9);
+  /* RA group from the caller (rateid_for_mgn — family/NSS/band); the old
+   * hardcoded 9 ignored the param and put HT frames in the VHT_2SS group,
+   * whose retries wander into VHT rates on this fw
+   * (tests/retry_ladder_probe.sh). */
+  SET_TX_DESC_RATE_ID_8822B(d, rate_id);
   SET_TX_DESC_USE_RATE_8822B(d, 1);
   SET_TX_DESC_DISDATAFB_8822B(d, 0);
   SET_TX_DESC_SW_DEFINE_8822B(d, 1);

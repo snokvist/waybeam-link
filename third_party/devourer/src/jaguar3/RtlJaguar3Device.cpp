@@ -319,7 +319,8 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
         if (!p.RxAtrib.crc_err) {
           _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
-          _rxpaths.add(p.RxAtrib.rssi, 2); /* 8822C/8822E are 2T2R */
+          _rxpaths.add(p.RxAtrib.rssi, p.RxAtrib.snr, p.RxAtrib.evm,
+                       2); /* 8822C/8822E are 2T2R */
           if (_cfg.tuning.cfo_track)
             _cfo.add(p.RxAtrib.cfo_tail); /* closed-loop CFO input (#217) */
         }
@@ -877,6 +878,14 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   else
     _txpkt_img.store(0, std::memory_order_relaxed);
   apply_dpdt_route_8822e(); /* 8822E DPDT/eFEM pin-mux (post-coex) */
+  /* ACK window (DEVOURER_ACK_TIMEOUT_US): one library default on every
+   * generation, replacing the halmac per-bandwidth REG_ACKTO defaults
+   * init_wmac_cfg just wrote (the 128 default covers the slowest
+   * narrowband ACK) — see the DeviceConfig field doc. */
+  _device.rtw_write8(0x0640, static_cast<uint8_t>(
+      _cfg.tx.ack_timeout_us > 255   ? 255
+      : _cfg.tx.ack_timeout_us < 1 ? 1
+                                     : _cfg.tx.ack_timeout_us));
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ golden-init replay (debug) */
   if (_cfg.debug.bb_dump) {
     /* Full MAC+BB dump (0x000..0x4ffc — MAC plane, then BB incl. the RF
@@ -1526,6 +1535,10 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
   c.tx_chains = 2; /* 8822C/8822E are 2T2R */
   c.rx_chains = 2;
   c.per_chain_rssi = true;
+  /* Hardware ARQ (truth table at the AdapterCaps declarations): both dies
+   * measured — responder matrix + retry-knob A/B + the arq_e2e ledgers. */
+  c.ack_responder_ok = true;
+  c.tx_retry_limit_ok = true;
   /* Per-packet TX power: the TXPWR_OFSET_TYPE bank selector + programmable
    * 0x1e70 offset banks (SetTxPacketPowerOffsetQdb / radiotap DBM_TX_POWER;
    * TxPktPwrBanks.h). Continuous in step_qdb units, ±63/-64 index travel, 2
@@ -1964,7 +1977,13 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   uint8_t bw_desc = (bwidth == CHANNEL_WIDTH_40)   ? 1
                     : (bwidth == CHANNEL_WIDTH_80) ? 2
                                                    : 0;
-  uint8_t rate_id = vht ? 9 : 8;
+  /* RA group by rate family/NSS/band (rateid_for_mgn): the group is the
+   * rate-space the fw retry ladder walks. The inherited `vht ? 9 : 8` put
+   * HT frames in VHT_2SS (retries fell back through the legacy chain) and
+   * legacy frames in the CCK-only B group. Witness-measured per copy: the
+   * family-correct group steps MCSx -> MCS(x-1) -> 6M floor instead. */
+  uint8_t rate_id = rateid_for_mgn(static_cast<unsigned char>(fixed_rate),
+                                   _channel.Channel > 14);
 
   /* 40-in-80: a 40 MHz frame on an 80 MHz-configured channel needs a data
    * sub-channel telling the PHY which 40 MHz half to use — the lower 40 (which
@@ -1998,14 +2017,38 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
       bw_desc, sgi != 0, ldpc != 0, stbc, bmc, ndpa, data_sc, pwr_type,
       pkt_offset);
   if (_cfg.tx.report) {
-    /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a per-frame CCX TX report;
-     * the report echoes SW_DEFINE's low byte, so stamp a rotating tag for
-     * per-frame correlation (src/TxReport.h). Both fields sit inside the
-     * checksummed span — re-checksum (idempotent). */
-    SET_TX_DESC_SPE_RPT_8822C(out, 1);
-    SET_TX_DESC_SW_DEFINE_8822C(out, _tx_rpt_tag.fetch_add(1) & 0xff);
+    /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a CCX TX report; the
+     * report echoes SW_DEFINE's low byte, so stamp a rotating tag for
+     * per-frame correlation (src/TxReport.h). The tag goes on EVERY frame
+     * while the request samples every Nth (cfg value = N): the fw's CCX
+     * emission saturates at ~1.3k reports/s, and with the tag continuous a
+     * received-report tag delta other than N is a dropped report. Both
+     * fields sit inside the checksummed span — re-checksum (idempotent). */
+    const uint64_t k = _tx_rpt_tag.fetch_add(1);
+    SET_TX_DESC_SPE_RPT_8822C(
+        out, k % static_cast<uint64_t>(_cfg.tx.report) == 0 ? 1 : 0);
+    SET_TX_DESC_SW_DEFINE_8822C(out, static_cast<uint16_t>(k & 0xff));
     jaguar3::cal_txdesc_chksum_8822c(out);
   }
+  /* Per-frame retry limit from cfg (DEVOURER_TX_RETRY_LIMIT, default 0) —
+   * the fill_data_tx_desc builder hardcodes 12, which floods a busy
+   * half-duplex link. Both fields sit inside the checksummed span. */
+  SET_TX_DESC_RTY_LMT_EN_8822C(out, 1);
+  SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(out, _cfg.tx.retry_limit);
+  /* RA-group override (DEVOURER_TX_RATEID): the ladder-sweep lever the
+   * retry-ladder probe drives (tests/retry_ladder_probe.sh). Checksummed
+   * span. */
+  if (_cfg.debug.tx_rateid)
+    SET_TX_DESC_RATE_ID_8822C(out, *_cfg.debug.tx_rateid);
+  /* Retry rate-fallback control (DEVOURER_TX_RETRY_FALLBACK): default leaves
+   * the builder's DISDATAFB=0 — the fw ladder, MCS-native now that the RA
+   * group is family-correct (MCSx -> MCS(x-1) -> 6M floor; CCK floor at
+   * 2.4 GHz); Off pins retries at the descriptor rate. No floor form (the
+   * RetryFallback note in DeviceConfig.h has the measurement). Same
+   * checksummed span as the retry limit. */
+  if (_cfg.tx.retry_fallback == devourer::RetryFallback::Off)
+    SET_TX_DESC_DISDATAFB_8822C(out, 1);
+  jaguar3::cal_txdesc_chksum_8822c(out);
   const devourer::AmpduMode am = _ampdu; /* one lock-free load */
   if (am.enabled || _cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
     /* A-MPDU descriptor half. The product SetAmpduMode state applies first,
@@ -2017,7 +2060,7 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
       SET_TX_DESC_AGG_EN_8822C(out, 1);
       SET_TX_DESC_MAX_AGG_NUM_8822C(out, am.max_num & 0x1f);
       SET_TX_DESC_AMPDU_DENSITY_8822C(out, am.density & 0x7);
-      SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(out, am.no_ack ? 0 : 12);
+      SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(out, am.no_ack ? 0 : _cfg.tx.retry_limit);
     }
     if (_cfg.debug.tx_qsel)
       SET_TX_DESC_QSEL_8822C(out, *_cfg.debug.tx_qsel);
