@@ -6080,3 +6080,25 @@ owns the channel" costs it nothing. It does not describe us.
 `air.disable_cca` ships **false**. The value of the knob is not the ability to
 turn it on; it is that the posture is now a decision with a measurement behind
 it instead of a library default we absorbed without noticing.
+
+**Pass 139 carried item closed — healthy-adapter delivery on `800c3c8`.** The
+review addendum flagged that the only healthy MCS5–7 evidence came from the old
+vendored tree, since the craft's binary predated the bump. Re-measured with the
+craft running a binary built from this branch (same reference receiver, real
+venc video, 20 s dwells):
+
+| MCS | craft TX | delivered | old tree (`a71060f`) |
+|---|---|---|---|
+| 4 | 41 218 | 41 646 | 98.21 % |
+| 5 | 49 703 | 48 907 | 96.42 % → **98.40 %** |
+| 6 | 52 983 | 52 472 | 95.87 % → **99.04 %** |
+| 7 | 56 011 | 56 134 | 98.21 % |
+
+MCS4 and MCS7 compute slightly above 100 %, which is a sampling artifact rather
+than a result: the craft's `tx_submitted` and the ground's `rx_mcs` are read an
+ssh round-trip apart, and with variable-rate real video the two deltas do not
+close over the same instant. The defensible claim is **at or indistinguishable
+from lossless at every rate, ≥98 % throughout, no regression from the bump** —
+not that the link delivered more frames than were sent. A tighter number would
+need both counters sampled from one clock, which this harness does not do and
+does not need to for a no-regression check.
