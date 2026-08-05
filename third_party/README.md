@@ -7,7 +7,7 @@ newer tree and update the provenance below.
 
 | tree | upstream | vendored commit | copied from |
 |---|---|---|---|
-| `devourer/` | https://github.com/OpenIPC/devourer | `a71060f` (#353) | Plain-tree copy of upstream `master`; `reference/` and `.gitmodules` excluded. No local vendor delta. This includes the upstreamed RTL8822E MCS4+/48M+ TX, `0x41e8` RX-desense, eFEM/DPDT, calibration/runtime, and channel-switch fixes from `b5a6df7` (#238/#268), superseding the former `snokvist/devourer` cherry-pick pin. Optional Kestrel 11ax and non-fleet Jaguar families are forced off by the top-level CMake; waybeam-link builds only 8812AU/CU/EU and enables only the devourer features it explicitly configures. |
+| `devourer/` | https://github.com/OpenIPC/devourer | `800c3c8` (#380) | Plain-tree copy of upstream `master`; `reference/` and `.gitmodules` excluded. No local vendor delta. This includes the upstreamed RTL8822E MCS4+/48M+ TX, `0x41e8` RX-desense, eFEM/DPDT, calibration/runtime, and channel-switch fixes from `b5a6df7` (#238/#268), superseding the former `snokvist/devourer` cherry-pick pin. Optional Kestrel 11ax and non-fleet Jaguar families are forced off by the top-level CMake; waybeam-link builds only 8812AU/CU/EU and enables only the devourer features it explicitly configures. |
 | `libusb-cmake/` | https://github.com/libusb/libusb-cmake | `c8477c1` (includes the `libusb/` sources) | same Android checkout |
 | `nlohmann/` | https://github.com/nlohmann/json | 3.12.0 single-header | (io layer only — core stays zero-dep) |
 

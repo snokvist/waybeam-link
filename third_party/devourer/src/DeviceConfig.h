@@ -79,6 +79,39 @@ enum class RxMode : uint8_t {
   Decoupled,   /* naive worker-thread hand-off (known-bad A/B control) */
 };
 
+/* Hardware retry rate-fallback control for injected frames. The HalMAC
+ * generations default to the firmware's fallback ladder, whose rate-space is
+ * the descriptor's RA group (rateid_for_mgn, RateDefinitions.h) — with the
+ * family-correct group the ladder is MCS-native, witness-measured per copy
+ * (tests/retry_ladder_probe.sh): 8822B MCS3 -> MCS2 -> MCS1 -> MCS0 (pure),
+ * 8822C MCS3 x4 -> MCS2 -> 6M floor (CCK floor at 2.4 GHz; VHT steps
+ * M7 -> M4 -> M1 -> M0 -> 6M). Jaguar1's fw does not step at all — every
+ * retry at the descriptor rate regardless of this knob (8821AU-measured).
+ * Off pins every retry at the descriptor DATARATE (DISDATAFB / DISABLE_FB =
+ * 1; measured: 1,200/1,200 retried frames re-aired at the original rate) —
+ * for constant-rate links where a step-down retry costs extra airtime. A
+ * DATA_RTY_LOWEST_RATE floor form was measured and REJECTED: the fw
+ * reinterprets the bound inside the RA-group rate space, wandering retries
+ * into VHT rates (final_rate 45 = VHT1SS_MCS1 on an HT frame) with a 20x
+ * retry inflation — the field is not a plain DESC_RATE bound on this fw. */
+enum class RetryFallback : uint8_t { Default, Off };
+
+/* What the spsc-fat ring does when its buffer pool runs dry (consumer behind
+ * under sustained overload). The choice decides which side of the hardware-ARQ
+ * contract survives overload — the chip ACKs on FIFO admission, so anything
+ * the HOST discards afterwards is a loss the TX peer believes delivered. */
+enum class PoolExhaust : uint8_t {
+  Backpressure, /* park the URB unarmed: the chip FIFO fills and the chip
+                 * declines further ACKs — congestion loss stays ARQ-visible
+                 * (bench: 14,214/14,214 forced drops reported ok=0 and
+                 * retried). Ring re-arms as the consumer returns buffers. */
+  Drop,         /* keep the ring armed and discard the payload — the chip
+                 * already ACKed it, so the TX peer logs it delivered and
+                 * never retries (counted as rx.ring pool_dropped). Smoother
+                 * under overload, but only for consumers that accept silent
+                 * loss (no ARQ / delivery accounting on top). */
+};
+
 struct DeviceConfig {
   /* ---- RX ------------------------------------------------------------- */
   struct Rx {
@@ -125,6 +158,11 @@ struct DeviceConfig {
      * burst backlog host-side instead of overflowing the chip RX FIFO. 0 =
      * pool of exactly urbs buffers (no spare). Ignored by async/sync. */
     int pool_spare = 0;
+    /* env: DEVOURER_RX_POOL_EXHAUST — "backpressure" (default) | "drop":
+     * the SpscFat pool-exhaustion policy (see PoolExhaust above). Only read
+     * by SpscFat; the other modes never drop host-side (async/reorder degrade
+     * to inline consume, which backpressures the chip by construction). */
+    PoolExhaust pool_exhaust = PoolExhaust::Backpressure;
     /* env: DEVOURER_RX_RING_MS — cadence (ms) for the diagnostic rx.ring
      * telemetry event (armed-URB depth, min depth in the window, resubmit
      * failures, max inline-consume latency). Unset/0 = no telemetry (the
@@ -175,6 +213,44 @@ struct DeviceConfig {
      * Runtime equivalent: StartCwTone/StopCwTone on the concrete device. */
     bool cw_tone = false;
     uint8_t cw_tone_gain = 0;
+    /* env: DEVOURER_TX_RETRY_LIMIT — per-frame hardware retry limit (0..63;
+     * Kestrel ceiling 62 — its attempts-counting WD field folds +1). Maps to
+     * the TX descriptor DATA_RETRY_LIMIT / RTS_DATA_RTY_LMT field on the
+     * 11ac generations and wd_info DATA_TXCNT_LMT on Kestrel. 0 = no retries
+     * (WFB default: FEC provides reliability, not MAC retries). On a busy
+     * half-duplex link retries flood the air and blind the receiver.
+     * Hardware-ARQ (SetAckResponder + unicast TA, docs/scheduled-mac.md)
+     * needs a nonzero value. Inert on the 8814A die only (vendor
+     * DATA_RETRY_LIMIT=0 carve-out kept pending its bench). */
+    int retry_limit = 0;
+    /* env: DEVOURER_ACK_TIMEOUT_US — hardware ACK response window in µs
+     * (1..255, clamped), the hardware-ARQ RANGE lever: the MAC writes a
+     * frame off (and retries) when no ACK is counted within this window,
+     * and round-trip propagation eats ~6.7 µs per km. ONE default, 128 µs,
+     * programmed identically on every generation at bring-up — the same
+     * knob value means the same range budget (~15 km round trip) no matter
+     * which die is plugged. 128 is the vendor's interop-blessed J1/J2
+     * value and covers the slowest narrowband ACK in the tree (the 5 MHz
+     * per-bandwidth vendor value is 117 µs), so it also replaces the
+     * per-chip / per-bandwidth vendor defaults (which ranged 33..128 µs
+     * and made hardware-ARQ range silently die-dependent). The register:
+     * REG_ACKTO 0x640 on the 11ac generations, R_AX_RSP_CHK_SIG 0xCC00
+     * byte0 on Kestrel; the CTS window (REG_CTS2TO 0x641) is separate and
+     * untouched. Sizing: ~6.7 µs x round-trip km + ~50 µs ACK flight and
+     * detection margin; a longer window is NOT free — every retry of a
+     * LOST frame waits the full window, measured (dead RA, retry 8, max
+     * duty): 2719 write-offs/8 s at 33 µs vs 2015 at 128 vs 1507 at 255.
+     * Bench proof the register gates the ARQ verdict: at 8 µs (below the
+     * ACK's flight time) retries pin at the limit with 0% ok against a
+     * live responder; at 128/255 the responder cell runs 100% ok,
+     * retries ~0. */
+    int ack_timeout_us = 128;
+    /* env: DEVOURER_TX_RETRY_FALLBACK — "off" | unset. Unset = the firmware
+     * fallback ladder with its own floor (the current behaviour, descriptors
+     * byte-identical). "off" disables per-retry rate fallback (DISDATAFB /
+     * DISABLE_FB = 1): retries re-air at the descriptor rate. See the
+     * RetryFallback enum for why there is no floor form. */
+    RetryFallback retry_fallback = RetryFallback::Default;
     /* env: DEVOURER_TX_USB_AGG — USB TX aggregation: max frames packed into
      * one bulk-OUT URB by send_packets (0 = off, the default: send_packets
      * degrades to a per-frame loop and every TX path is byte-identical to
@@ -189,8 +265,17 @@ struct DeviceConfig {
      * `tx.report` events. The TX-side link sensor. On the HalMAC chips the
      * descriptor SW_DEFINE also carries a rotating 8-bit tag the report
      * echoes (per-frame correlation). Default off (descriptors
-     * byte-identical). Needs an RX loop to deliver the C2H reports. */
-    bool report = false;
+     * byte-identical). Needs an RX loop to deliver the C2H reports.
+     *
+     * Value = sampling divisor N: 1 requests a report on EVERY frame, N > 1
+     * on every Nth (0..255). The CCX emission path saturates at ~1.3–1.4 k
+     * reports/s (docs/scheduled-mac.md), so above ~1.25 k fps pick
+     * N >= fps/1300 and coverage of the SAMPLED frames stays deterministic
+     * instead of load-collapsing. HalMAC dies stamp the SW_DEFINE tag on
+     * every frame regardless of sampling, so consecutive received-report
+     * tags differ by exactly N — any other delta is a dropped report
+     * (consumers must know N; tests/txrpt_coverage_attrib.py --sample-n). */
+    int report = 0;
     /* env: DEVOURER_TX_AMPDU_MODE="tid/maxnum[/density[/noack[/maxtime_hex]]]"
      * — arm the first-class A-MPDU TX mode (src/AmpduMode.h) at the end of
      * bring-up: mark data frames aggregatable and program the MAC pacing
@@ -275,10 +360,18 @@ struct DeviceConfig {
      * follow-up: the fw replays cfg_param but lazily, and its rsvd-page download
      * stalls per batch. */
     int fw_table_offload = 0;
-    /* env: DEVOURER_DIS_CCA — Jaguar2/3 MAC carrier-sense disable at bring-up
-     * (primary CCA 0x520[14] + EDCCA [15]): injected/beacon TX stops deferring to
-     * a busy channel and punches through co-channel traffic. Runtime equivalent:
-     * SetCcaMode. Default-on on the streamtx FPV downlink. */
+    /* env: DEVOURER_DIS_CCA — MAC carrier-sense disable at bring-up, every
+     * generation (primary CCA 0x520[14] + EDCCA [15]; Jaguar1 additionally
+     * programs/parks its BB EDCCA thresholds 0x8a4 — its init table leaves
+     * them at never-trigger, and the explicit apply is what makes EDCCA
+     * real on that family): injected/beacon TX stops deferring to a
+     * busy channel and punches through co-channel traffic. Default false =
+     * carrier-sense + EDCCA ENABLED (the standards-compliant default) on
+     * Jaguar1/2/3 and the Kestrel 8852C; the Kestrel 8852B TX bring-up
+     * clears the gates and warns pending its measurement arm
+     * (tests/kestrel_cca_default_check.sh). Runtime equivalent: SetCcaMode.
+     * Default-on on the streamtx FPV downlink (the link owns the
+     * channel). */
     bool disable_cca = false;
     /* env: DEVOURER_TXPKT_STEP_QDB — Jaguar3 per-packet power-bank step size
      * in quarter-dB: the dB weight of one 0x1e70 offset-index step
@@ -371,6 +464,14 @@ struct DeviceConfig {
      * monitor-inject convention). Data-queue values are the TID (0..7);
      * hardware A-MPDU formation is expected only on data queues. */
     std::optional<uint8_t> tx_qsel;
+    /* env: DEVOURER_TX_RATEID — EXPERIMENTAL (retry-ladder probe,
+     * tests/retry_ladder_probe.sh): override the TX-descriptor RATE_ID (the
+     * RA group). The group defines the rate-space the firmware's retry
+     * fallback ladder walks — the inherited inject value (9 = VHT_2SS on
+     * the 8822C-era table; 8 = the CCK-only B group) is why an MCS frame's
+     * retries fall back through legacy OFDM. Vendor group ids:
+     * reference ieee80211.h RATEID_IDX_* (4 = GN 2SS, 5 = GN 1SS, ...). */
+    std::optional<uint8_t> tx_rateid;
     /* env: DEVOURER_TX_AMPDU="max[/density]" — EXPERIMENTAL (A-MPDU spike):
      * set AGG_EN=1 + MAX_AGG_NUM (1..0x1f; hardware units of 2 MPDUs) +
      * AMPDU_DENSITY (0..7, default 0) on every data TX descriptor, asking the

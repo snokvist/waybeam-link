@@ -5,6 +5,16 @@ core ARQ/broadcast verification it enabled. Companion to `docs/step11-bench.md`.
 
 ## Why the pivot
 
+> ⚠️ **The premise below was REFUTED on hardware 2026-08-05 (Pass 139).** The
+> vehicle's RTL8822E transmits **MCS4–7 at 5805 through devourer**, carrying
+> real venc video, at 95.87–98.21% delivery. The claim in this section held for
+> the *specific bench adapter* it was measured on, and still reproduces there —
+> but it is not a property of the chip, the band, or the driver. Do not cite it
+> as a reason to prefer kernel-monitor. The backend itself remains valuable for
+> exactly the reason given further down (a real RF path with no devourer or
+> libusb, `WBLINK_RADIO=OFF`), and that rationale is unaffected. Full A/B and
+> the confounds ruled out: `docs/review-log.md` Pass 139.
+
 The vendored **devourer** userspace driver cannot transmit 16-QAM+ (MCS4+) on
 the RTL8822E in **UNII-3** — including **5805 MHz, the §4.1 gate channel** — even
 with the correct per-channel TXAGC values (a deep IQK/TXGAPK/PA-cal gap). The

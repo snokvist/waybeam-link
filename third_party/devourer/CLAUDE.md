@@ -277,8 +277,11 @@ Behavioural traps the per-field docs can't carry:
   `0xAA:0xBB[:0xCC]@<ms>` cycles masks on a timer for mobility/MRC
   measurements (`docs/measuring-spatial-diversity.md`,
   `tests/mrc_mobility.py`). `DEVOURER_RX_ALLPATHS=1` emits per-chain
-  RSSI/SNR/EVM as a separate `rx.path` event (C/D nonzero only on the
-  8814AU).
+  RSSI/SNR/EVM as a separate `rx.path` event on every generation (Kestrel
+  parses its halbb physts path pages; C/D nonzero only on the 8814AU — the
+  other dies are ≤2 RX chains). Windowed per-antenna means ride
+  `GetActiveRxPaths()` / the `adapter.rxpaths` event (rssi/snr/evm per
+  chain).
 - `DEVOURER_RX_KEEP_CORRUPTED=1` is the entry point for the fused-FEC salvage
   layer (`docs/fused-fec.md`), and stays opt-in for a reason: a body with a
   corrupt tail is the worst-case input for an IP-stack consumer that didn't
@@ -288,17 +291,25 @@ Behavioural traps the per-field docs can't carry:
   that loss is pre-FCS sync/AGC, upstream of the equalizer. They target
   in-band spurs on otherwise decodable frames
   (`docs/pseudo-preamble-puncturing.md`).
-- `DEVOURER_DIS_CCA=1` (Jaguar2/3, runtime `SetCcaMode`) disables the MAC
-  carrier-sense gate — **both** primary CCA (`0x520[14]`) and EDCCA (`[15]`).
-  The primary-CCA bit is the one that matters: monitor injection is not
-  CCA-free, it defers ~40–60% to a co-channel 802.11 transmitter, and
-  clearing `[14]` recovers ~1.5–2.2× (on-air 8822EU/8812CU,
-  `tests/dis_cca_tx_onair.sh`); the energy bit `[15]` alone is null against a
-  decodable preamble. **On by default on the streamtx FPV downlink** (the
-  link owns the channel — CSMA backoff only stutters it);
-  `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. Does NOT apply the
-  vendor BB CCA-off writes (they deafen the RX). RX-decode side is a separate
-  null (`tests/dis_cca_onair.sh`).
+- `DEVOURER_DIS_CCA=1` (every generation, runtime `SetCcaMode` — the
+  interface method is pure virtual so no generation can silently no-op it)
+  disables the MAC carrier-sense gate — **both** primary CCA (`0x520[14]`)
+  and EDCCA (`[15]`). The default is carrier-sense + EDCCA **enabled** on
+  Jaguar1/2/3; on Jaguar1 the enable is real work — its BB table parks the
+  EDCCA thresholds (`0x8a4`) at never-trigger, so bring-up programs the
+  vendor adaptivity operating point (IGI-coupled; the phydm watchdog
+  re-tracks it when running). The primary-CCA bit is the one that matters:
+  monitor injection is not CCA-free, it defers ~40–60% to a co-channel
+  802.11 transmitter, and clearing `[14]` recovers ~1.5–2.2× (on-air
+  8822EU/8812CU, `tests/dis_cca_tx_onair.sh`); the energy bit `[15]` alone
+  is null against a decodable preamble. **On by default on the streamtx FPV
+  downlink** (the link owns the channel — CSMA backoff only stutters it);
+  `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. On Kestrel the
+  8852C runs the same enabled default (measured: full-rate TX, 2.4x flood
+  deferral); the 8852B TX bring-up still clears the gates and WARNS pending
+  its measurement arm (`tests/kestrel_cca_default_check.sh`). Does NOT apply
+  the vendor BB CCA-off writes (they deafen the RX). RX-decode side is a
+  separate null (`tests/dis_cca_onair.sh`).
 
 **Runtime TX power** — the adaptive-link power lever, three knobs on every
 generation: `SetTxPowerOffsetQdb` (relative, shape-preserving),
@@ -416,9 +427,23 @@ guard time, dynamic beacon grants, ACK/TxReport, per-UE RX attribution) are
 
 `SetAmpduMode` enables 802.11 A-MPDU on injected frames: ~+30% *goodput* at
 the PHY ceiling by amortizing per-frame overhead — an occupancy metric can't
-show it, count delivered payload. `SetAckResponder(mac)` arms the hardware
+show it, count delivered payload. That number is high-MCS broadcast; the
+unicast-ARQ shape measured **−8%** delivered at MCS3, and per-frame CCX
+accounting does not survive AGG_EN (docs/aggregation.md) — under A-MPDU the
+receipts tier is the delivery truth. `SetAckResponder(mac)` arms the hardware
 ACK/BlockAck responder; with a unicast TA on the soliciting frame this closes
-a hardware-ARQ loop (autonomous MAC retransmission until ACK). Per-frame TX
+a hardware-ARQ loop (autonomous MAC retransmission until ACK). The ACK's
+horizon is chip-FIFO **admission** (bench: 8812EU responder,
+`tests/arq_e2e_delivery.sh` per-frame ledgers): receiver-side congestion
+upstream of admission declines the ACK, so the loop sees and retries it — but
+a host stage that drops on a full queue while keeping URBs armed turns the
+same loss into ACKed-but-undelivered that the TX peer logs as delivered and
+never retries. The spsc-fat ring's `DEVOURER_RX_POOL_EXHAUST` policy is that
+choice (`src/DeviceConfig.h`): `backpressure` (default) parks exhausted URBs
+so the chip declines further ACKs and the loss stays ARQ-visible
+(`pool_stalls` in `rx.ring`; bench: 0 ACKed-but-undelivered under stalls that
+lose 5.5k+ frames on the `drop` policy, which remains opt-in and counted as
+`pool_dropped`). Per-frame TX
 outcomes surface as `tx.report` events (CCX via C2H) — the TX-side link
 sensor; C2H rides the RX path, so J1/J2 TX-only sessions see none (run
 `DEVOURER_TX_WITH_RX=thread`; J3's coex thread drains C2H regardless).

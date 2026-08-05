@@ -76,6 +76,12 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.rx.rx_mode = parse_rx_mode(e);
   if (env_long("DEVOURER_RX_POOL_SPARE", &v))
     cfg.rx.pool_spare = static_cast<int>(v);
+  if (const char *e = env_str("DEVOURER_RX_POOL_EXHAUST")) {
+    if (str_ieq(e, "drop"))
+      cfg.rx.pool_exhaust = devourer::PoolExhaust::Drop;
+    else if (str_ieq(e, "backpressure") || str_ieq(e, "bp"))
+      cfg.rx.pool_exhaust = devourer::PoolExhaust::Backpressure;
+  }
   if (env_long("DEVOURER_RX_RING_MS", &v))
     cfg.rx.ring_ms = static_cast<int>(v);
   cfg.rx.phy_status_8821c = !env_flag("DEVOURER_8821C_NO_PHYST");
@@ -100,11 +106,39 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.tx.cw_tone_gain = static_cast<uint8_t>(v) & 0x1F;
   if (env_long("DEVOURER_TX_USB_AGG", &v) && v > 0)
     cfg.tx.usb_agg_max = static_cast<unsigned>(v);
-  cfg.tx.report = env_flag("DEVOURER_TX_REPORT");
+  if (env_long("DEVOURER_TX_REPORT", &v)) /* sampling divisor N, 0..255 */
+    cfg.tx.report = static_cast<int>(v < 0 ? 0 : v > 255 ? 255 : v);
   if (const char *e = env_str("DEVOURER_TX_AMPDU_MODE")) {
     devourer::AmpduMode m;
-    if (devourer::parse_ampdu_mode(e, m))
+    if (devourer::parse_ampdu_mode(e, m)) {
       cfg.tx.ampdu = m;
+    } else {
+      /* A silently-ignored spec means a bench that thinks it measured
+       * aggregation and didn't — fail loudly like RETRY_FALLBACK below. */
+      std::fprintf(stderr,
+                   "devourer [W] DEVOURER_TX_AMPDU_MODE='%s' unparsable — "
+                   "A-MPDU stays off\n", e);
+      std::fflush(stderr);
+    }
+  }
+  if (env_long("DEVOURER_ACK_TIMEOUT_US", &v) && v >= 1)
+    /* 1..255; out-of-range low keeps the library default (a 0 collapsing
+     * to 1 us would write off every frame). */
+    cfg.tx.ack_timeout_us = static_cast<int>(v > 255 ? 255 : v);
+  if (env_long("DEVOURER_TX_RETRY_LIMIT", &v))
+    cfg.tx.retry_limit = static_cast<int>(v < 0 ? 0 : (v > 63 ? 63 : v));
+  if (const char *e = env_str("DEVOURER_TX_RETRY_FALLBACK")) {
+    if (str_ieq(e, "off")) {
+      cfg.tx.retry_fallback = devourer::RetryFallback::Off;
+    } else {
+      /* A floor form was measured and rejected — the fw reinterprets
+       * DATA_RTY_LOWEST_RATE inside the RA-group rate space (see the
+       * RetryFallback enum note in DeviceConfig.h). */
+      std::fprintf(stderr,
+                   "devourer [W] DEVOURER_TX_RETRY_FALLBACK='%s' unsupported "
+                   "(only \"off\") — keeping the firmware ladder\n", e);
+      std::fflush(stderr); /* the diagnostic plane is per-line flushed */
+    }
   }
 
   /* ---- bf ---- */
@@ -200,6 +234,8 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.debug.replay_wseq = e;
   if (env_long("DEVOURER_TX_QSEL", &v))
     cfg.debug.tx_qsel = static_cast<uint8_t>(v & 0x1f);
+  if (env_long("DEVOURER_TX_RATEID", &v))
+    cfg.debug.tx_rateid = static_cast<uint8_t>(v & 0x1f);
   /* "max[/density[/rty]]" — A-MPDU spike descriptor overrides. */
   if (const char *e = env_str("DEVOURER_TX_AMPDU")) {
     char *end = nullptr;

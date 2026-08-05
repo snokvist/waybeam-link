@@ -65,6 +65,7 @@
 #include "RxPacket.h"
 #include "RadiotapBuilder.h"
 #include "RtlAdapter.h"
+#include "cell/RxReceipt.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -123,6 +124,85 @@ static devourer::EventSink *g_ev = nullptr;
 static const bool g_tx_status_enabled =
     std::getenv("DEVOURER_TX_STATUS") != nullptr;
 
+/* DEVOURER_RX_PCTR + DEVOURER_RX_AGG_SA: per-frame rx.seq delivery ledger,
+ * mirroring examples/rx/main.cpp — pctr is the u32 txdemo stamps at the
+ * QoS-Data body start (MPDU offset 26). In this demo the SA gate is required:
+ * the ledger's transmitter is a different station than the canonical-SA
+ * rx.frame stream above (the ARQ end-to-end bench keys on unicast frames
+ * whose TA can't be the group-address canonical SA). */
+static const bool g_rx_pctr = []() {
+  const char *e = std::getenv("DEVOURER_RX_PCTR");
+  return e != nullptr && std::strcmp(e, "0") != 0;
+}();
+static uint8_t g_seq_sa[6] = {};
+static const bool g_seq_sa_set = []() {
+  const char *e = std::getenv("DEVOURER_RX_AGG_SA");
+  if (e == nullptr || *e == '\0')
+    return false;
+  const auto m = devourer::parse_mac(e);
+  if (!m)
+    return false;
+  std::memcpy(g_seq_sa, m->data(), 6);
+  return true;
+}();
+
+/* DEVOURER_RX_RECEIPT_MS: windowed RX receipts (src/cell/RxReceipt.h) — the
+ * app-layer delivery truth. Every SA-matched pctr frame is noted in a sliding
+ * bitmap window, and every RECEIPT_MS a receipt frame (802.11 data, TA =
+ * DEVOURER_RX_RECEIPT_SA, RA = the tracked DEVOURER_RX_AGG_SA transmitter,
+ * body = the versioned TLV) is injected on this same handle — the feedback
+ * path. Windows overlap, so losing individual receipt frames costs nothing.
+ * Requires DEVOURER_RX_PCTR + DEVOURER_RX_AGG_SA (the ledger's identity). */
+static const long g_receipt_ms = []() {
+  const char *e = std::getenv("DEVOURER_RX_RECEIPT_MS");
+  return e ? std::strtol(e, nullptr, 0) : 0L;
+}();
+static uint8_t g_receipt_sa[6] = {0x02, 0x44, 0x52, 0x00, 0x00, 0x01};
+static const bool g_receipt_sa_ok = []() {
+  const char *e = std::getenv("DEVOURER_RX_RECEIPT_SA");
+  if (e == nullptr || *e == '\0')
+    return true; /* keep the default */
+  const auto m = devourer::parse_mac(e);
+  if (!m)
+    return false;
+  std::memcpy(g_receipt_sa, m->data(), 6);
+  return true;
+}();
+/* DEVOURER_RX_RECEIPT_WINDOW: bits of receipt coverage (default 8192). Size
+ * it past the worst backlog drain — see the sizing note in RxReceipt.h. */
+static const uint16_t g_receipt_window_bits = []() {
+  const char *e = std::getenv("DEVOURER_RX_RECEIPT_WINDOW");
+  const long v = e ? std::strtol(e, nullptr, 0) : 8192L;
+  return static_cast<uint16_t>(v < 64 ? 64 : v > 65535 ? 65535 : v);
+}();
+static devourer::cell::ReceiptWindow g_receipt_window{g_receipt_window_bits};
+
+/* Concurrent send_packet callers (the stdin TX thread + the receipt timer)
+ * serialize here — the per-generation send paths are single-caller. */
+static std::mutex g_send_mu;
+
+/* DEVOURER_RX_SINK_SPIN_US / DEVOURER_RX_SINK_STALL_MS+_EVERY: the same
+ * consumer-cost models as examples/rx/main.cpp — a per-frame busy-spin (the
+ * inline wfb-ng FEC+AES+UDP cost PixelPilot pays on this thread) and a
+ * periodic multi-ms stall (GC pause / consumer preemption). Both run on the
+ * libusb pump thread, which is exactly the point. */
+static const long g_rx_sink_spin_us = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_SPIN_US");
+  return e ? std::strtol(e, nullptr, 0) : 0L;
+}();
+static const long g_rx_stall_ms = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_STALL_MS");
+  return e ? std::strtol(e, nullptr, 0) : 0L;
+}();
+static const long g_rx_stall_every = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_STALL_EVERY");
+  const long v = e ? std::strtol(e, nullptr, 0) : 100L;
+  return v > 0 ? v : 100L; /* 0/garbage would divide-by-zero the modulo */
+}();
+/* Atomic: the RX callback can run on the TX thread's event pump too (libusb's
+ * sync API pumps events; see AsyncRxShared in src/UsbTransport.cpp). */
+static std::atomic<long> g_rx_seen{0};
+
 static void packet_processor(const Packet &packet) {
   if (packet.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET) {
     if (!g_tx_status_enabled) return;
@@ -148,6 +228,40 @@ static void packet_processor(const Packet &packet) {
     }
     return;
   }
+  const long rx_seen = ++g_rx_seen;
+  if (g_rx_sink_spin_us > 0) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::microseconds(g_rx_sink_spin_us);
+    while (std::chrono::steady_clock::now() < deadline) {
+      /* busy-wait: a sleep would yield the pump thread and defeat the model */
+    }
+  }
+  if (g_rx_stall_ms > 0 && (rx_seen % g_rx_stall_every) == 0) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(g_rx_stall_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+      /* periodic consumer hiccup */
+    }
+  }
+
+  /* rx.seq — the ARQ bench's host-delivery ground truth: one lean event per
+   * SA-matched frame, same fields as rxdemo's so the analyzers are shared. */
+  if (g_rx_pctr && g_seq_sa_set && packet.Data.size() >= 30 &&
+      std::memcmp(packet.Data.data() + 10, g_seq_sa, 6) == 0) {
+    uint32_t pctr;
+    std::memcpy(&pctr, packet.Data.data() + 26, 4);
+    if (g_receipt_ms > 0)
+      g_receipt_window.note(pctr);
+    devourer::Ev(*g_ev, "rx.seq")
+        .t() /* host monotonic ms — correlates a pctr gap with an rx.ring dip */
+        .f("pctr", (unsigned long long)pctr)
+        .f("tsfl", packet.RxAtrib.tsfl)
+        .f("seq", packet.RxAtrib.seq_num)
+        .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+        .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
+        .f("ppdu", packet.RxAtrib.ppdu_cnt);
+  }
+
   if (packet.Data.size() < 16) return;
   if (std::memcmp(packet.Data.data() + 10, kCanonicalSa, 6) != 0) return;
   long hits = ++g_rx_hits;
@@ -253,7 +367,11 @@ static void tx_thread(TxArgs args) {
     }
     tx_buf.insert(tx_buf.end(), dot11.begin(), dot11.end());
     tx_buf.insert(tx_buf.end(), psdu.begin(), psdu.end());
-    bool ok = args.rtl->send_packet(tx_buf.data(), tx_buf.size());
+    bool ok;
+    {
+      std::lock_guard<std::mutex> lk(g_send_mu);
+      ok = args.rtl->send_packet(tx_buf.data(), tx_buf.size());
+    }
     ++tx_count;
     if (tx_count <= 5 || tx_count % 500 == 0) {
       devourer::Ev(*g_ev, "stream.tx")
@@ -391,6 +509,59 @@ int main(int argc, char **argv) {
   TxArgs txa{rtlDevice, interval_ms, max_psdu, &should_stop, logger};
   std::thread tx{tx_thread, std::move(txa)};
 
+  /* Receipt emitter (DEVOURER_RX_RECEIPT_MS): every tick, encode the current
+   * window and inject it as an 802.11 data frame at a fixed robust 6M —
+   * receipts are control-plane, not part of the adaptive-rate stream. The
+   * first ticks fire during bring-up and fail harmlessly (send rc=false);
+   * the cadence, not any one frame, is the contract. */
+  std::thread receipt;
+  if (g_receipt_ms > 0 && g_seq_sa_set && g_receipt_sa_ok) {
+    receipt = std::thread([rtlDevice, &should_stop]() {
+      const auto rt =
+          devourer::build_stream_radiotap(devourer::parse_tx_mode_str("6M"));
+      std::vector<uint8_t> frame;
+      std::vector<uint8_t> tlv(
+          devourer::cell::receipt_tlv_size(g_receipt_window_bits));
+      long emitted = 0;
+      while (!should_stop.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(g_receipt_ms));
+        const size_t n =
+            g_receipt_window.encode(g_seq_sa, tlv.data(), tlv.size());
+        if (n == 0)
+          continue; /* nothing received yet */
+        frame.clear();
+        frame.insert(frame.end(), rt.begin(), rt.end());
+        /* Plain (non-QoS) data header: RA = the receipted transmitter,
+         * TA/BSSID = the receipt identity. Body at offset 24 = the TLV. */
+        const uint8_t hdr[24] = {
+            0x08, 0x00, 0x00, 0x00,
+            g_seq_sa[0], g_seq_sa[1], g_seq_sa[2],
+            g_seq_sa[3], g_seq_sa[4], g_seq_sa[5],
+            g_receipt_sa[0], g_receipt_sa[1], g_receipt_sa[2],
+            g_receipt_sa[3], g_receipt_sa[4], g_receipt_sa[5],
+            g_receipt_sa[0], g_receipt_sa[1], g_receipt_sa[2],
+            g_receipt_sa[3], g_receipt_sa[4], g_receipt_sa[5],
+            0x00, 0x00};
+        frame.insert(frame.end(), hdr, hdr + sizeof hdr);
+        frame.insert(frame.end(), tlv.data(), tlv.data() + n);
+        bool ok;
+        {
+          std::lock_guard<std::mutex> lk(g_send_mu);
+          ok = rtlDevice->send_packet(frame.data(), frame.size());
+        }
+        ++emitted;
+        if (emitted <= 3 || emitted % 50 == 0) {
+          devourer::Ev(*g_ev, "receipt.tx")
+              .t()
+              .f("n", emitted)
+              .f("ok", ok ? 1 : 0)
+              .f("tlv_len", n)
+              .f("late", (unsigned long long)g_receipt_window.late());
+        }
+      }
+    });
+  }
+
   logger->info("duplex entering RX loop on ch {} — TX thread ready",
                channel);
   // RX loop. Same Init() path as rxdemo; SelectedChannel sets up the
@@ -404,6 +575,7 @@ int main(int argc, char **argv) {
   // — none wired here, so Ctrl-C ends the process abruptly and the OS reaps
   // the TX thread).
   should_stop = true;
+  if (receipt.joinable()) receipt.join();
   if (tx.joinable()) tx.join();
   /* Device, then interface, handle and context (DeviceSession.h). Explicit
    * only because the process has nothing left to do here — the destructor

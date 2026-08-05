@@ -159,6 +159,29 @@ struct AdapterCaps {
    * strong-link, close-range mode, the opposite of a range mode. */
   bool vht_2g4_ok = false;
 
+  /* --- hardware-ARQ capability (bench-derived truth table, on-air responder
+   * matrix + retry-knob A/B; the measured contract is docs/scheduled-mac.md).
+   * ack_responder_ok: SetAckResponder measurably closes a hardware-ARQ loop
+   * as the RESPONDER (SIFS ACKs that a soliciting TX's CCX reports confirm).
+   * Measured true: 8812A (works, degraded — intermittent SIFS ACKs), 8814A,
+   * 8821A (61–64% single-shot MCS3, 94% at retry 8, disarm-proof-verified —
+   * an earlier "broken" verdict was a harness artifact: the responder's arm
+   * was never verified, so a silently dead responder read as on=0/off=0),
+   * 8822B, 8812C/8822C, 8812E/8822E (the 8811A rides the 8812 die path and
+   * inherits its row). False-as-unmeasured (the
+   * vht_2g4_ok reading: unmeasured, not incapable): the 8821C — it shares
+   * the recipe but no 8821CU/CE cell has run. FALSE on Kestrel:
+   * SetAckResponder is not implemented on the AX generation.
+   * tx_retry_limit_ok: DEVOURER_TX_RETRY_LIMIT drives hardware autonomous
+   * retransmission (measured 12/0/12 A/B: 8821AU, 8812BU, 8822CU; Kestrel
+   * 8832CU witness-measured — the AX WD DATA_TXCNT_LMT field counts
+   * ATTEMPTS, folded +1 to the N-retries contract, limits {0,2,8} -> modal
+   * on-air copies {1,3,8-9}). FALSE on the 8814A die (the vendor
+   * DATA_RETRY_LIMIT=0 carve-out is kept — knob inert) and
+   * false-as-unmeasured on the 8821C. */
+  bool ack_responder_ok = false;
+  bool tx_retry_limit_ok = false;
+
   /* --- feature flags --- */
   /* Per-packet TX power: a per-frame power trim driven by radiotap
    * DBM_TX_POWER (dB delta vs the calibrated table / session base) or a

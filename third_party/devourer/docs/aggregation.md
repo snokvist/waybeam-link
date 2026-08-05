@@ -53,8 +53,11 @@ re-airing one frame N times.
 
 ## TX-status reports (`tx.report`)
 
-`DeviceConfig tx.report` (env `DEVOURER_TX_REPORT`) sets `SPE_RPT` in every
-data descriptor; the firmware answers each transmission with a CCX report,
+`DeviceConfig tx.report` (env `DEVOURER_TX_REPORT`, value = sampling divisor
+N) sets `SPE_RPT` in every Nth data descriptor — 1 = every frame; above
+~1.25 k fps sample with N ≥ fps/1300 or the fw's ~1.3 k reports/s CCX
+emission ceiling collapses coverage (docs/scheduled-mac.md). The firmware
+answers each requested transmission with a CCX report,
 decoded at the C2H RX sites into `tx.report` events (`src/TxReport.h`): `state`
 (0 = delivered/completed, 1 = retry-drop), `retries` (hardware
 retransmissions), `queue_time_raw`, `final_rate`, `bmc`. HalMAC reports echo
@@ -136,6 +139,30 @@ airtime ground truth):
   payload gain on a near-saturated chip; measure goodput (delivered payload)
   to see it. The multiplier grows with PHY rate, since preamble overhead is a
   bigger fraction at high MCS.
+- **The gain does not generalize to the unicast-ARQ shape.** The same
+  aggregation at MCS3/512 B unicast with hardware ACK + retry 8 (the FPV
+  ARQ configuration, `tests/arq_e2e_delivery.sh`, batch-8 feed at 4 k fps
+  demand) delivered **−8%** vs the identical un-aggregated feed (208.8 k vs
+  226.7 k frames over the same span) — at low MCS the preamble amortization
+  is small and the BA machinery costs more than it saves. The +30% above is
+  a high-MCS, broadcast/no-ack, near-PHY-ceiling number; measure the
+  intended shape before enabling A-MPDU on an ARQ link. The delivery
+  *contract* itself is unaffected: the instrumented three-ledger arm shows
+  `acked_undelivered = 0` under BA exactly as per-frame — with the same
+  ACK-loss duplicate asymmetry (the un-aggregated control redelivered +97
+  duplicates, ≈0.04%, at saturation). The BA arm's 1.1% saturation
+  shortfall cannot be decomposed into write-offs vs declines precisely
+  because of the next bullet — inside a BA link, only the receipts tier can
+  say where frames died.
+- **Per-frame CCX accounting does not survive aggregation** (measured,
+  8812CU): with AGG_EN, ~60% of requested SPE_RPT reports are never emitted
+  (suppressed in a per-aggregate pattern — tag deltas bunch at whole
+  multiples of the sampling divisor), every emitted report says retries=0
+  (BlockAck retransmission cycles are invisible to CCX), and no frame ever
+  carries multiple reports. The SW_DEFINE tag-gap drop signal is therefore
+  accounting-grade only for un-aggregated frames; under A-MPDU, use the
+  windowed RX receipts (`src/cell/RxReceipt.h`) as the delivery truth — the
+  receiver-side ledger is unaffected by TX aggregation.
 - `ppdu_cnt` reads 0 on the 8812CU RX used for the bench; `paggr` + `tsfl`
   clustering are the working RX markers.
 

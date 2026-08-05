@@ -41,6 +41,8 @@ struct RadioAirCfg {
     // half; unlatched targets fall back to broadcast, counted).
     bool ack_responder = false;
     bool unicast_returns = false;
+    // Clear the MAC carrier-sense gate at bring-up (see AirCfg::disable_cca).
+    bool disable_cca = false;
 };
 
 class RadioAir {
