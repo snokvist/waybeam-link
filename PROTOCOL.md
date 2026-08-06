@@ -2347,6 +2347,19 @@ So on devourer the stable identity has to be **declared**, not derived —
 `calib_id` is the answer, and the bus-path fallback warns every boot until one
 is set.
 
+**The per-unit identity does exist in hardware; devourer just cannot reach it.**
+Dumping the EFUSE through the vendor kernel driver shows both values in the
+same map: the 6-byte MAC at logical offset `0x157` differs per unit (it is what
+the driver writes to the netdev, and what gives Linux its stable `wlx<mac>`
+interface name), while the USB serial string descriptor at `0x174` is the
+constant `"123456"` burned identically into every unit. Measured on an 8822EU
+and an 8812CU. devourer already decodes this map and Jaguar1 already implements
+a `GetMacAddress` against it — but `IRtlDevice` exposes no accessor, so a
+consumer that has taken the adapter from the kernel driver cannot read it.
+`docs/devourer-mac-identity.md` is the upstream request. If it lands, tier 1
+gains a derived sibling and `calib_id` becomes the override rather than the
+only option; until then it is the only option, and the wording above stands.
+
 **A run that found no wall anywhere measured nothing (Pass 134).** §10.6 scores
 every dwell from LINK_REPORTs, so its result is only as good as the return
 path, and a *starved* return path fails in the most dangerous direction: fewer

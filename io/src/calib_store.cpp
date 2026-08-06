@@ -97,7 +97,7 @@ std::string calib_identity(const AdapterCfg& adapter) {
         // artifact keyed this way goes stale the next time the dongle moves —
         // and the node then boots with no curve. Say so once, loudly.
         std::fprintf(stderr,
-                     "calibrate: adapter \"%s\" has no USB serial — keying the "
+                     "calibrate: adapter \"%s\" has no calib_id — keying the "
                      "artifact on bus path \"%s\", which CHANGES on re-plug. "
                      "Set adapters[].calib_id to pin it (§10.7).\n",
                      adapter.name.c_str(), adapter.bus.c_str());
