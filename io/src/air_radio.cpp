@@ -64,6 +64,7 @@ std::string usb_path_of(libusb_device* dev) {
 struct RxFrame {
     uint8_t adapter;
     int8_t rssi;
+    uint8_t net_id;             // §3.0 SA tag of the sender (§15.5a scout)
     uint8_t rx_mcs;             // §15.3 Pass 118, kRxMcsUnknown if unresolved
     uint32_t tsfl;
     uint32_t gen;               // flush generation at RX time (Pass 69)
@@ -303,6 +304,9 @@ struct RadioAir::Impl {
         RxFrame f;
         f.adapter = adapter_id;
         f.rssi = rssi;
+        // §15.5a: which net_id this was heard on. Only interesting while the
+        // filter is wide (a sweep), but it is the sender's tag either way.
+        f.net_id = d->net_id;
         f.rx_mcs = rx_mcs;
         f.tsfl = p.RxAtrib.tsfl;
         f.gen = flush_gen.load(std::memory_order_acquire);  // Pass 69
@@ -591,6 +595,7 @@ int RadioAir::poll_once(int timeout_ms, const RxCb& cb) {
         AirRxMeta meta;
         meta.adapter_id = f.adapter;
         meta.rssi = f.rssi;
+        meta.net_id = f.net_id;
         meta.rx_mcs = f.rx_mcs;
         meta.tsf_us = f.tsfl;
         cb(meta, f.data.data(), f.data.size());
