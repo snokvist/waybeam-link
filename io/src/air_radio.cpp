@@ -828,8 +828,25 @@ bool RadioAir::has_tx() const {
 }
 
 uint16_t RadioAir::mtu_supported() const {
-    // G5: a successful create() means every adapter passed devourer's Realtek
-    // driver matrix (§9.3a v1), so the tier is asserted rather than probed.
+    // G5 (Pass 143): kernel-monitor reads each netdev MTU because the kernel
+    // path is what would reject or fragment an oversized frame. There is no
+    // netdev here — frames go as raw MPDUs straight to bulk-OUT — so the
+    // question is what devourer itself bounds. Two bounds exist and neither
+    // binds at §9.3a's High budget:
+    //
+    //   TX: none. send_packet sizes its TXDMA block from the frame
+    //       (jaguar3 RtlJaguar3Device.cpp:1713) and imposes no length cap.
+    //   RX: the bulk-IN URB, DeviceConfig::Rx::urb_bytes, default 16 KiB and
+    //       floored at 4 KiB — an aggregate must not span two URBs. We never
+    //       set it, so the effective floor is 4 KiB against a 3072 B budget.
+    //
+    // So the tier is asserted, and now with the reason stated rather than on
+    // the strength of create() having succeeded. Logged like the monitor path
+    // logs its netdev derivation, so a boot log shows what each backend chose.
+    std::fprintf(stderr,
+                 "radio: no netdev MTU gate (raw MPDU injection); "
+                 "packet budget %u\n",
+                 static_cast<unsigned>(mtu_tier::kHighBudget));
     return mtu_tier::kHighBudget;
 }
 

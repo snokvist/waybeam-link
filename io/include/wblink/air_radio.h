@@ -144,9 +144,10 @@ class RadioAir : public AirIface {
     // enumerating and declining to inject — that is a config shape this
     // backend does not build today, not a hardware limit.)
     bool has_tx() const override;
-    // G5 — a successful create() means every adapter was accepted by
-    // devourer's Realtek driver matrix (§9.3a v1), so the tier is asserted
-    // rather than probed.
+    // §9.3a tier. Asserted, not probed — there is no netdev gate on raw MPDU
+    // injection, and the two bounds devourer does have (no TX cap; the 16 KiB
+    // bulk-IN URB, floored at 4 KiB) clear the High budget by a wide margin.
+    // Reasoning at the definition; logged at bring-up like the monitor path.
     uint16_t mtu_supported() const override;
     // G2 — §14.2 JSCC airtime has no estimator here; the scheduler already
     // treats nullopt as "no airtime signal".

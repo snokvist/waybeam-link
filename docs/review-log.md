@@ -6459,3 +6459,23 @@ and making the retune a same-channel no-op — whose only job is to arm the guar
 
 Leg 4 is the claim: a stopped, joined and restarted RX loop still delivers, at
 the same rate. Harness: `docs/data/pass143-hw/run_g4b.sh`.
+
+**G5 — asserted, but no longer bare.** Kernel-monitor reads each netdev MTU
+because the kernel path is what would reject or fragment an oversized frame.
+There is no netdev on the devourer path — frames go as raw MPDUs straight to
+bulk-OUT — so the question is what devourer itself bounds. Two bounds exist:
+
+- **TX: none.** `send_packet` sizes its TXDMA block from the frame
+  (`jaguar3/RtlJaguar3Device.cpp:1713`) and imposes no length cap.
+- **RX: the bulk-IN URB** (`DeviceConfig::Rx::urb_bytes`), default 16 KiB and
+  floored at 4 KiB, because an aggregate must not span two URBs.
+
+Neither binds at §9.3a's 3072-byte High budget — the *floor* of the tighter one
+clears it by a third. waybeam-link never sets `urb_bytes`, so deriving the
+budget from it would be a computation that can never change the answer; the
+tier stays asserted. What changes is that the assertion now carries its reason
+at the definition and prints one line at bring-up, the way the monitor path
+prints its netdev derivation, so a boot log shows what each backend chose and
+why. The register asked for "the devourer equivalent bound identified and read,
+or a ruling that construction success is the evidence" — this is the first: the
+bounds were found, and they do not bind.

@@ -89,7 +89,7 @@ the TX role needs the capability.
 | G2 | §14.2 JSCC airtime unavailable on radio | feature | RULING — declared (`estimate_airtime_us` → `nullopt`) |
 | G3 | CSA retune is commanded, not confirmed, on devourer | correctness | **DONE** (Pass 143) — `GetSelectedChannel()` read-back; driver-level, not RF |
 | G4 | `recover()` returns false on radio | feature | **DONE** (Pass 143) — RX-loop restart; `InitWrite` is one-shot so it is not a MAC/PHY bring-up |
-| G5 | `mtu_supported()` is a hardcoded assumption on radio | feature | OPEN (ungated) — declared |
+| G5 | `mtu_supported()` is a hardcoded assumption on radio | feature | **DONE** (Pass 143) — bounds identified, neither binds; assertion now reasoned + logged |
 | G6 | `tx_index()` returns 0 for radio | correctness | **DONE** (Pass 142, #91) |
 | G7 | `set_power_auto` semantics differ between backends | spec hygiene | RULING — declared |
 | G8 | Neither RF backend has a unit test | test surface | OPEN — **harness now exists** (Pass 140 `FakeAir`) |
@@ -266,7 +266,15 @@ survey it before writing a recovery path.
 
 ---
 
-## G5 — `mtu_supported()` is a hardcoded assumption on radio
+## G5 — `mtu_supported()` is a hardcoded assumption on radio — **DONE (Pass 143)**
+
+> Closed by the first of the two routes this section offered. The devourer
+> bounds were identified: **no TX cap at all**, and an RX bulk-IN URB of
+> 16 KiB (floored at 4 KiB). Neither binds at the 3072 B High budget, and
+> waybeam-link never sets `urb_bytes`, so a derived budget could not change
+> the answer. The tier stays asserted — with its reason at the definition and
+> a bring-up log line, so it is visible rather than bare.
+
 
 `AirBackend::mtu_supported()` (`app/main.cpp:1335`) delegates; the assertion is `io/src/air_radio.cpp:750-754` on the
 reasoning that successful `RadioAir` construction proves devourer accepted
@@ -520,20 +528,19 @@ landed (Pass 140), so the two items that used to sit at either end of this list
 are gone. Ordering is now by **what the TX role needs**, since that is the role
 devourer is taking.
 
-1. **G5** — small; assert-vs-probe on a tier that is currently asserted.
-2. **G2 / G7** — after their rulings. Both are declared on `AirIface` now, so
+1. **G2 / G7** — after their rulings. Both are declared on `AirIface` now, so
    the code change is bounded and the open part is genuinely the decision.
-3. **The G1 leftover**: the unguarded claim-during-sweep race. The widen-scope
+2. **The G1 leftover**: the unguarded claim-during-sweep race. The widen-scope
    question was ruled node-wide (Pass 143, §15.5a amended); what stays open is
    that the §2 selector, CSA follower and discovery view are not net_id-scoped
    during a sweep.
-4. **B3** — hardware, runs in parallel.
-5. **H1** — a per-unit acceptance check at the intended MCS, needed before a
+3. **B3** — hardware, runs in parallel.
+4. **H1** — a per-unit acceptance check at the intended MCS, needed before a
    pure-devourer TX fleet ships, not before any of the above lands.
-6. **G8** — narrower than when written; the devourer decode path, following the
+5. **G8** — narrower than when written; the devourer decode path, following the
    `FakeAir` shape rather than a second harness.
 
-**Not on this list any more:** G0 (closed), G1/G6 (Pass 142), G3/G4 (Pass 143), G9 (fixed in
+**Not on this list any more:** G0 (closed), G1/G6 (Pass 142), G3/G4/G5 (Pass 143), G9 (fixed in
 Pass 140), B2 (dead by ruling), H2 (settled and measured), and the interface
 collapse itself.
 
