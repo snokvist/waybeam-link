@@ -45,6 +45,9 @@ struct RadioAirCfg {
     bool unicast_returns = false;
     // Clear the MAC carrier-sense gate at bring-up (see AirCfg::disable_cca).
     bool disable_cca = false;
+    // §14.2 authored transport-efficiency calibration (1..1000, 0 = off).
+    // Per transport: the monitor rig's 600 does not carry over to devourer.
+    uint16_t airtime_efficiency_permille = 0;
 };
 
 class RadioAir : public AirIface {
@@ -134,10 +137,9 @@ class RadioAir : public AirIface {
     // assert it and somewhere the compiler notices when a new method is added.
     // Behaviour is preserved exactly; ids are docs/devourer-parity-plan.md.
 
-    // G7 — "auto" differs by backend and that difference is a protocol
-    // question, not an implementation gap: kernel-monitor hands power back to
-    // the driver default, this backend zeroes the offset, which undoes a §10.5
-    // latch but leaves any §10.2 curve resolve to re-apply on top.
+    // §10.5 "auto": zero the offset, undoing the latch and leaving any §10.2
+    // curve resolve to re-apply on top. Differs from kernel-monitor (which
+    // hands power back to the driver default) — the spec documents both.
     bool set_power_auto(size_t adapter) override;
     // create() requires exactly one role:"tx" adapter, so a constructed
     // RadioAir always has an uplink. (An RX-only devourer node is reachable by
@@ -149,8 +151,10 @@ class RadioAir : public AirIface {
     // bulk-IN URB, floored at 4 KiB) clear the High budget by a wide margin.
     // Reasoning at the definition; logged at bring-up like the monitor path.
     uint16_t mtu_supported() const override;
-    // G2 — §14.2 JSCC airtime has no estimator here; the scheduler already
-    // treats nullopt as "no airtime signal".
+    // §14.2 service-rate estimate. nullopt when uncalibrated — the opt-in
+    // posture is the point, an uncalibrated node reads unavailable rather than
+    // optimistic. include_pending is ignored: devourer's send_packet is a
+    // synchronous bulk-OUT, so there is no queue to add (spec §14.2).
     std::optional<uint32_t> estimate_airtime_us(
         size_t bytes, bool include_pending,
         uint16_t packet_budget) const override;

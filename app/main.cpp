@@ -1393,6 +1393,10 @@ struct AirBackend {
             rc.ack_responder = cfg.air.ack_responder;
             rc.unicast_returns = cfg.policy.ret.unicast;
             rc.disable_cca = cfg.air.disable_cca;
+            // §14.2 (Pass 143): the authored calibration reaches both RF
+            // backends. Zero keeps the estimate unavailable.
+            rc.airtime_efficiency_permille =
+                cfg.air.airtime_efficiency_permille;
             auto a = RadioAir::create(rc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);

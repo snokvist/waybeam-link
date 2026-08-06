@@ -6479,3 +6479,34 @@ prints its netdev derivation, so a boot log shows what each backend chose and
 why. The register asked for "the devourer equivalent bound identified and read,
 or a ruling that construction success is the evidence" — this is the first: the
 bounds were found, and they do not bind.
+
+**G2 — §14.2 airtime on radio, ruled and landed.** The register offered three
+candidates for replacing kernel-monitor's `SIOCOUTQ` pending-bytes term.
+Reading the TX path removed the choice from two of them: devourer's
+`send_packet` is a **synchronous** bulk-OUT (`RtlJaguar3Device.cpp:1701-1709`)
+that returns only once the transfer has completed or failed. There is no submit
+queue to read — candidate 1 does not exist — and the pending term is near-zero
+*by construction*, not by approximation. Candidate 3 (`tx_submitted -
+tx_reports`) is a real in-flight measure but is also the §9.10 wedge signal, so
+a wedging radio would read as a deep queue and inflate the estimate exactly
+when the link is failing; two meanings on one counter.
+
+Operator-ruled 2026-08-06: **enable the model, without a pending term.**
+`air.airtime_efficiency_permille` is now valid on either RF backend and
+`include_pending` is ignored on radio. Pass 56's posture is preserved
+deliberately — an uncalibrated devourer node reads `airtime_unavailable` rather
+than falling back to an optimistic default — and §14.2 now says the efficiency
+figure is per transport, so the 600-permille monitor seed does not carry over
+and must be re-derived on devourer before the model means anything there.
+
+**G7 needed no ruling — it was already ruled.** The register called
+`set_power_auto`'s backend asymmetry "an undeclared asymmetry currently living
+in a `main.cpp` comment". §10.5 (`PROTOCOL.md:2170`) has described both halves
+for some time: *"on the radio backend a one-shot offset 0 undoes the latch,
+then the §10.2 curve resolve resumes when a curve is loaded; on kernel-monitor
+the driver default is restored via `txpower auto`"*. The behaviour matches the
+spec exactly. Only the register entry and a code comment claiming a ruling was
+owed were wrong; both corrected. Worth noting as a pattern in the other
+direction from G9 — there the register asserted a rule the spec did not carry;
+here it reported a gap the spec had already closed. A register is a claim about
+the spec, and claims in both directions need checking.

@@ -23,6 +23,7 @@
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "logger.h"
+#include "wblink/airtime.h"
 #include "wblink/dot11.h"
 
 namespace wblink {
@@ -792,9 +793,10 @@ std::optional<uint64_t> RadioAir::read_tsf(size_t adapter) {
 // instead of being the absence of a branch at 98 call sites.
 
 bool RadioAir::set_power_auto(size_t adapter) {
-    // G7: "auto" here means offset 0 — it undoes a §10.5 latch and leaves the
-    // §10.2 curve resolve to re-apply on top. Not the same as the kernel
-    // driver's `txpower auto`; reconciling them is a protocol ruling.
+    // §10.5: "auto" here is a one-shot offset 0 — it undoes the latch and lets
+    // the §10.2 curve resolve re-apply on top. Deliberately not the same as the
+    // kernel driver's `txpower auto`, and the spec says so per backend
+    // (PROTOCOL.md §10.5); this is not an undeclared asymmetry.
     return set_power_qdb(adapter, 0);
 }
 
@@ -852,10 +854,26 @@ uint16_t RadioAir::mtu_supported() const {
 
 std::optional<uint32_t> RadioAir::estimate_airtime_us(
     size_t bytes, bool include_pending, uint16_t packet_budget) const {
-    (void)bytes;
+    // §14.2 (Pass 143). Same conservative service-rate model kernel-monitor
+    // uses, minus the pending term: devourer's send_packet is a synchronous
+    // bulk-OUT that returns once the transfer has completed or failed, so the
+    // frame is already with the chip and there is no queue to query. Absent by
+    // construction, not approximated — which is why include_pending is ignored
+    // here rather than treated as an unmet request.
     (void)include_pending;
-    (void)packet_budget;
-    return std::nullopt;  // G2: no §14.2 estimator on this backend
+    const Impl& im = *impl_;
+    if (im.cfg.airtime_efficiency_permille == 0) {
+        return std::nullopt;  // uncalibrated reads unavailable, never optimistic
+    }
+    // Input bytes are Waybeam wire packets. Account for one 802.11 header +
+    // FCS per standard-rung-sized MPDU; service efficiency owns preamble,
+    // contention, and the other measured transport effects.
+    const uint64_t budget = std::max<uint16_t>(packet_budget, 1);
+    const uint64_t packets = (bytes + budget - 1u) / budget;
+    const uint64_t total = bytes + packets * (kDot11HdrLen + kFcsLen);
+    return ht20_service_time_us(
+        static_cast<size_t>(std::min<uint64_t>(total, SIZE_MAX)), im.rate.mcs,
+        im.rate.sgi, im.cfg.airtime_efficiency_permille);
 }
 
 void RadioAir::tx_report_counters(uint64_t& submitted,
