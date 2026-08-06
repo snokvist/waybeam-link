@@ -20,7 +20,7 @@ where hand-editing goes wrong. Derived from `deploy/`:
 |---|---|---|---|---|---|
 | `tx-vehicle` | `tx` | — | exactly one, `role:"tx"` | `dir:"in"` (frame-shm or udp) | `venc`, `policy.select`, per-stream `fec`/`arq_mode` |
 | `tx-ground` | **`rx`** | false | one `role:"tx"` uplink + N `role:"rx"` ears | `dir:"out"` | `scout`, optional `cache.repair` |
-| `rx-spectator` | `rx` | **true** | all `role:"rx"` | `dir:"out"` | no uplink at all (§3.8 heartbeat suppression) |
+| `rx-spectator` | `rx` | **true** | all `role:"rx"` | `dir:"out"` | no uplink at all (§3.8 heartbeat suppression) — kernel-monitor only today, see §2a |
 | `rx-cache` | `rx` | false | all `role:"rx"` | **empty** | `cache.store` (+ `controller`, `status_to`) |
 
 `tx-ground` is a `role:"rx"` node. `rx-cache` has zero streams and no
@@ -32,7 +32,9 @@ Invariants the tool must enforce, all of which are already load-time or
 runtime-time errors today and all of which are cheaper to catch at authoring
 time:
 
-- `RadioAir` requires **exactly one** `role:"tx"` adapter per process.
+- `RadioAir::create` **hard-fails** unless exactly one adapter is `role:"tx"`
+  (`air_radio.cpp:348`). `MonAir` does not — it carries a `has_tx` flag and
+  runs happily with zero, which is how the `.199` spectator flies. See §2a.
 - `node.spectator` requires `node.role:"rx"` (`config.cpp:130`).
 - `power_map` / `max_power_qdb` / `power_presets_qdb` on a `role:"rx"` adapter
   are rejected (`config.cpp:182`, `:194`).
@@ -71,6 +73,31 @@ Two of these are cheap, one is not:
 
 **Question for the operator: which of these does the harness target?** The plan
 below assumes (1) and is written so (2) is an additive change, not a rewrite.
+
+## 2a. **OPEN — an `rx-spectator` on devourer is not constructible today**
+
+The two backends disagree about whether a node may have no transmitter:
+
+- `RadioAir::create` returns `radio: exactly one adapter must have role "tx"`
+  when `n_tx != 1` (`air_radio.cpp:348`). Zero is as fatal as two.
+- `MonAir` tracks `has_tx` and tolerates zero (`air_mon.cpp`), which is exactly
+  what `deploy/ground-192.168.2.199.json` relies on — one `role:"rx"` adapter,
+  `spectator: true`, no uplink.
+
+So the `rx-spectator` archetype, which the harness is asked to emit for either
+backend, can only be emitted for `kernel-monitor` as things stand. On devourer
+it would have to nominate a `role:"tx"` adapter and then depend on the §3.8
+spectator suppression to ensure it never keys. Pass 145 / T9 measured that
+suppression holding — `tx_submitted` pinned at 0 across 18 451 received frames
+— but a `role:"tx"` adapter on a spectator is a posture the harness should not
+invent on its own, and "the layer above promises not to transmit" is a
+different guarantee from "this node has no transmitter".
+
+**Question for the operator:** does a devourer spectator nominate a silent
+`role:"tx"` adapter, or does `RadioAir` grow the `has_tx` tolerance `MonAir`
+already has? The second is the smaller config and the stronger guarantee; the
+first needs no code change. Either way it is a ruling, not an inference, and it
+gates the `rx-spectator` × `radio` cell of the test matrix in §6.
 
 ## 3. Where the tool lives — a mode of `waybeam-link`, not a new binary
 
@@ -206,7 +233,7 @@ none of which the harness may answer on its own:
 2. If legal, does it carry provenance (`source: "operator" | "campaign"`), and
    does `/api/v1/calibration` and the §15.3 stats object have to surface that
    distinction? A ground that trusts a fingerprint is trusting a measurement.
-3. Identity. Pass 73 / T7 recorded `calibrate: STALE artifact (stored
+3. Identity. Pass 145 / T7 recorded `calibrate: STALE artifact (stored
    wlan0/98:03:cf:cf:a4:28, live bus/1-1)` — the same physical adapter has a
    different identity per backend, and on devourer the identity is a **bus
    path** that changes on every re-plug. A vendored artifact would go stale on a
