@@ -25,6 +25,7 @@
 #include "logger.h"
 #include "wblink/airtime.h"
 #include "wblink/dot11.h"
+#include "wblink/radio_decode.h"
 
 namespace wblink {
 
@@ -71,16 +72,6 @@ struct RxFrame {
     uint32_t gen;               // flush generation at RX time (Pass 69)
     std::vector<uint8_t> data;  // §3.0 payload (802.11 header stripped)
 };
-
-// Realtek RX descriptor rate code -> HT MCS index. hal_com.h pins
-// DESC_RATEMCS0 = 0x0c (0..3 CCK, 4..11 legacy OFDM, 12.. HT), so anything
-// below 12 or above the §9.3 ladder is reported unresolved (§15.3).
-inline uint8_t desc_rate_to_mcs(uint16_t code) {
-    constexpr uint16_t kDescRateMcs0 = 0x0c;
-    if (code < kDescRateMcs0) return kRxMcsUnknown;
-    const uint16_t mcs = static_cast<uint16_t>(code - kDescRateMcs0);
-    return mcs < kRxMcsBuckets ? static_cast<uint8_t>(mcs) : kRxMcsUnknown;
-}
 
 }  // namespace
 
@@ -275,13 +266,11 @@ struct RadioAir::Impl {
             p.RxAtrib.crc_err || p.RxAtrib.icv_err) {
             return;
         }
-        // §3.0: monitor RX delivers the MPDU with the chip-validated 4-byte
-        // FCS still appended — strip it before the length-exact parse.
-        if (p.Data.size() <= kFcsLen) {
+        const auto mpdu_len = mpdu_len_without_fcs(p.Data.size());
+        if (!mpdu_len) {
             return;
         }
-        const auto d = dot11_parse(p.Data.data(), p.Data.size() - kFcsLen,
-                                   filter_opt());
+        const auto d = dot11_parse(p.Data.data(), *mpdu_len, filter_opt());
         if (!d || d->originator == cfg.originator) {  // not ours / our own TX
             a.rx_filtered.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -299,20 +288,11 @@ struct RadioAir::Impl {
                 return;
             }
         }
-        // Per-chain power byte, dBm = value − 110; 0 = no phy report on
-        // this frame → keep the previous value.
-        uint8_t best = 0;
-        for (uint8_t chain : p.RxAtrib.rssi) {
-            if (chain > best) {
-                best = chain;
-            }
-        }
-        int8_t rssi = a.rssi_last.load(std::memory_order_relaxed);
-        if (best != 0) {
-            const int dbm = static_cast<int>(best) - 110;
-            rssi = static_cast<int8_t>(dbm < -128 ? -128
-                                       : dbm > 0  ? 0
-                                                  : dbm);
+        const int8_t prev = a.rssi_last.load(std::memory_order_relaxed);
+        const int8_t rssi = rssi_dbm_from_chains(
+            p.RxAtrib.rssi, sizeof(p.RxAtrib.rssi) / sizeof(p.RxAtrib.rssi[0]),
+            prev);
+        if (rssi != prev) {
             a.rssi_last.store(rssi, std::memory_order_relaxed);
         }
         a.rx_frames.fetch_add(1, std::memory_order_relaxed);

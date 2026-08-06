@@ -6510,3 +6510,124 @@ owed were wrong; both corrected. Worth noting as a pattern in the other
 direction from G9 — there the register asserted a rule the spec did not carry;
 here it reported a gap the spec had already closed. A register is a claim about
 the spec, and claims in both directions need checking.
+
+## Pass 144 — a sweep observes a channel; it does not adopt what it hears (2026-08-06)
+
+Pass 143 ruled the §15.5a widen node-wide and wrote down the exposure it left:
+foreign-`net_id` frames reach every RX consumer for the sweep's duration, and
+the ones holding link state are not scoped. That was recorded as a separate
+open item on purpose — ruling on the widen was not a ruling that the exposure
+was acceptable. This closes it.
+
+**The exposure was real, and larger than the words used for it.** The register
+and the Pass 143 entry both described it as a §2 *latch* risk. On the bench a
+latch never happened — `link.target_originator` stayed 0 in both arms, with and
+without a video feed. What did happen is worse and simpler. Ground pinned to
+`net_id` 3, unpaired craft airing real video on `net_id` 7, ground sweeping
+5805:
+
+| arm | frames accepted | stream 0 delivered | `selector_state_valid` |
+|---|---|---|---|
+| before | 5119 | **5085 packets** | true |
+| after | 5152 | *no stream exists* | false |
+
+The ground **decoded and emitted a stranger's video onto its own stream
+output** — for as long as the sweep ran. Not a theoretical latch: the whole §2
+path ingested a craft it was not paired with, and would also have followed that
+craft's CSA had it sent one. The "after" node still hears the craft (5152
+frames, more than the before arm) — the widen is untouched, which is the point:
+**the sweep still observes everything, it just no longer adopts any of it.**
+
+Both arms still list the craft in `scout/results` at its real `net_id` 7, so
+scoping the engine costs no discovery. That was the thing worth checking — a
+gate that also blinded the survey would have closed the exposure by breaking
+the feature.
+
+**What is deliberately left wide.** The survey and the §15.5 discovery view
+keep seeing every `net_id`. Neither holds link state, and reporting who is out
+there is what a sweep is *for*. The rule is RF-only (udp-air has no §3.0
+identity to scope by) and does not apply to a node with no configured `net_id`,
+which accepts any by §3.0.
+
+**Method note.** The first two A/B runs showed "no difference" and were nearly
+written up as "hazard does not reproduce". They were measuring the wrong
+observable — `target_originator`, the name the register had used. Dumping the
+whole `link` object and the stream table instead of the one field the
+hypothesis named is what surfaced the delivery counter. When an A/B says
+*nothing happened*, widen the readout before believing it.
+
+**The claim-during-sweep race, and how narrow it actually is.** `do_claim`
+never stopped the scout, so a sweep running past a claim finishes seconds later
+and its `rest()` restores the resting channel and `net_id` filter *over* the
+claim — the scout clobbering the operator's click with the campaign already in
+flight. It now ends the sweep, placed after every cheap rejection so a claim
+that never happens leaves a running sweep alone.
+
+**Review caught the first cut using `stop()`.** `ScoutEngine::stop()` calls
+`rest()`, which re-pins the filter and retunes **every ear** back to the
+resting channel — one syscall per adapter, `iw` shell-outs on kernel-monitor —
+immediately before the claim's own `retune_all` moves them to the craft. A full
+round trip to nowhere, in front of a campaign the craft is timing with a 500 ms
+budget. `abandon()` is `stop()` without the restore: the in-flight channel's
+survey is still folded in, only the pointless restore is skipped. The claim's
+existing rollback paths already put the filter and channel back if it fails
+after this point.
+
+Reproducing it taught something about the window. A claim needs
+`scout.candidate_for()`, and **candidates only exist once a channel's dwell
+finalizes** — so on a single-channel sweep there is almost no window at all: the
+dwell ends, the candidate appears, and the sweep rests in the same breath. The
+race needs a *multi-channel* sweep, where a craft found on an early channel is
+claimable while later channels are still dwelling. Swept `[5745, 5805, 5825]`
+at 6 s per channel with the craft on the middle one, claim at 14 s:
+
+| arm | after `{"ok":true}` | after the third dwell |
+|---|---|---|
+| before | `scanning=true` — sweep runs on through the claim | `scanning=false` |
+| after | `scanning=false` — sweep ended with the claim | `scanning=false` |
+
+**What this bench could not show.** The campaign aborts with `no CSA_ARMED` in
+*both* arms — the bench craft never arms, for reasons unrelated to this change —
+so the clobber's end consequence (a live campaign losing its channel to
+`rest()`) is verified by inspection of `rest()`, not by observation. The
+mechanism the fix targets is observed directly; its downstream cost is not, and
+the entry should not be read as claiming otherwise.
+
+**B3 — closed by ruling, not by hardware (operator, 2026-08-06).** The item
+asked whether a pure-devourer fleet forces Realtek-only hardware on the
+Ethernet-cache node, which carries an MT7921 that devourer can never drive. The
+premise is what falls: **the fleet is not pure-devourer by design.**
+kernel-monitor is retained permanently as an **RX-only** backend for cache and
+spectator nodes, while devourer takes the TX role. So the MT7921 leg needs no
+BOM change and no exception — an RX-only monitor node is the supported shape,
+not a fallback. This also settles the shape of every remaining parity item:
+they matter for the TX role, and a monitor node that never transmits does not
+need them.
+
+**G8 — the devourer decode path, finally reachable.** Three rules lived inline
+in `RadioAir::on_packet`, where nothing could reach them without a libusb
+handle and a real adapter: the descriptor rate→MCS mapping, the FCS strip, and
+the per-chain RSSI reduction. They are pure functions of a buffer and a few
+descriptor fields, so the fix is not a harness — it is a header
+(`io/include/wblink/radio_decode.h`) that knows no devourer type, because
+`on_packet` reads the fields out of `Packet::RxAtrib` and passes plain values.
+27 checks in `tests/radio_decode_test.cpp`; suite count 55 → 56.
+
+Two behaviours the tests pin that were previously only implied:
+
+- **MCS8+ must read *unresolved*, not alias back onto a bucket.** A 2T2R part
+  really does deliver `0x14`, and mapping it into the 0..7 histogram would
+  break the §15.3 Pass 118 invariant that `rx_mcs` sums to `rx_frames`.
+- **An all-zero chain report keeps the previous RSSI**, rather than reporting
+  the -110 floor. A frame with no PHY report says nothing about signal;
+  inventing a floor would read as a link that just collapsed.
+
+And one the extraction made visible: **the lower RSSI clamp cannot fire.** The
+chain byte is unsigned, so `value - 110` spans -110..+145 and only the upper
+clamp is reachable. Kept as a guard on the arithmetic, with a test pinning the
+reachable floor at -109 (chain byte 1) so a future signed input cannot quietly change
+the range.
+
+With this the register has **no code items left**. What remains is H1, blocked
+upstream (the EFUSE-stability probe is unwired for the Jaguar3 8822E), and the
+§15.3 counters-schema question that Pass 140 set aside deliberately.

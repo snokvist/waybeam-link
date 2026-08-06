@@ -671,6 +671,18 @@ class ScoutEngine {
         rest();
     }
 
+    // Stop without the rest() restore, for a caller that is about to retune
+    // and re-pin the filter itself (Pass 144: the claim path). stop() would
+    // send every ear back to the resting channel one syscall-per-adapter at a
+    // time, only for the claim to move them again a moment later — wasted
+    // latency in front of a campaign the craft is timing. The survey for the
+    // in-flight channel is still folded in; only the restore is skipped.
+    void abandon(uint64_t now_ms) {
+        if (phase_ == Phase::kIdle) return;
+        finalize_current(now_ms);
+        phase_ = Phase::kIdle;
+    }
+
     // Feed one decoded RX frame (raw wire bytes d/n for length + originator).
     void on_frame(const AirRxMeta& meta, const Decoded& dec, const uint8_t* d,
                   size_t n) {
@@ -5869,6 +5881,19 @@ int run_rx(const Loaded& l) {
                     scout.emptiest(l.cfg.policy.csa.channel_allowlist, cand->chan);
             }
             if (target == 0) return "no target channel (specify target_chan)";
+            // §15.5a (Pass 144): a claim is what a sweep is *for*, so it ends
+            // the sweep instead of racing it. Left running, the sweep finishes
+            // seconds later and its rest() restores the resting channel and
+            // net_id filter *over* the claim, with the campaign already in
+            // flight — the scout clobbering the operator's click. Placed after
+            // every cheap rejection, so a claim that never happens leaves a
+            // running sweep alone. abandon() rather than stop(): the very next
+            // lines retune every ear and re-pin the filter, so stop()'s restore
+            // would be a full round trip to the resting channel and back, in
+            // front of a campaign the craft is timing.
+            if (scout.scanning()) {
+                scout.abandon(now_ms());
+            }
             // §15.5a: bind the link to the craft's net_id and move all ears onto
             // its current channel so the campaign and CSA_ARMED return are heard.
             air.value->set_stamp_net_id(cand->net_id);
@@ -6681,6 +6706,21 @@ int run_rx(const Loaded& l) {
             const Decoded dec = decode(d, n);
             discovery.observe(dec, now, meta.net_id);
             scout.on_frame(meta, dec, d, n);  // §15.5a sweep aggregation
+            // §15.5a (Pass 144): the sweep widen is node-wide, so foreign
+            // net_ids reach this callback. The two consumers above want them —
+            // reporting who is out there is what a sweep is for, and neither
+            // holds link state. Everything below does. Measured on the bench
+            // before this gate existed: sweeping past an unpaired craft on
+            // another net_id delivered 5085 packets of its video to the local
+            // stream output, and the same path can latch it or follow its CSA.
+            // Only on RF (udp-air has no
+            // §3.0 identity) and only when a net_id is configured (§3.0: an
+            // unconfigured node accepts any).
+            if (air.value->is_radio() && scout.scanning() &&
+                active_selection.net_id &&
+                meta.net_id != *active_selection.net_id) {
+                return;
+            }
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
                 // Pass 67: a receiver-owned cache follows only its controller's
                 // Ethernet assignment, never an RF spectator campaign.

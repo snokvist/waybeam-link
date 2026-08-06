@@ -92,7 +92,7 @@ the TX role needs the capability.
 | G5 | `mtu_supported()` is a hardcoded assumption on radio | feature | **DONE** (Pass 143) — bounds identified, neither binds; assertion now reasoned + logged |
 | G6 | `tx_index()` returns 0 for radio | correctness | **DONE** (Pass 142, #91) |
 | G7 | `set_power_auto` semantics differ between backends | spec hygiene | **DONE** — no ruling was owed; §10.5 already documents both backends |
-| G8 | Neither RF backend has a unit test | test surface | OPEN — **harness now exists** (Pass 140 `FakeAir`) |
+| G8 | Neither RF backend has a unit test | test surface | **DONE** (Pass 144) — decode rules lifted into `radio_decode.h`, 27 checks |
 | **G9** | §3.8 heartbeat suppression was monitor-only | correctness | **DONE** (guard unified, Pass 140) **+ RULING** — §3.8 does not say a TX-less node suppresses; and it cannot fire on radio |
 | B2 | RadioAir cannot build a node without a TX adapter | blocker | **DEAD** — operator ruling: enumerate and decline to inject |
 | B3 | The Ethernet cache runs an MT7921 | blocker (hardware) | RULING — BOM, not code |
@@ -327,7 +327,16 @@ two are equivalent for §10.5 purposes.
 
 ---
 
-## G8 — neither RF backend has a unit test
+## G8 — neither RF backend has a unit test — **DONE (Pass 144)**
+
+> The devourer-specific rules — descriptor rate→MCS, the FCS strip, the
+> per-chain RSSI reduction — are now in `io/include/wblink/radio_decode.h`
+> and tested directly (`tests/radio_decode_test.cpp`, 27 checks). No fake was
+> needed: they are pure functions of a buffer, and the header deliberately
+> knows no devourer type so the test target need not link the vendored
+> driver. Pins MCS8+ reading unresolved (the §15.3 sum invariant) and the
+> all-zero-chain rule; surfaced that the lower RSSI clamp is unreachable.
+
 
 No `air_radio_test.cpp` / `air_mon_test.cpp`. Kernel-monitor at least has its
 RX parsing covered by `radiotap_test.cpp` and the shared encapsulation by
@@ -465,7 +474,16 @@ surface that a monitor-only fleet never had to decide.
 
 ---
 
-## B3 — the Ethernet cache runs an MT7921
+## B3 — the Ethernet cache runs an MT7921 — **DONE (ruling, 2026-08-06)**
+
+> The premise falls rather than the item resolving: **the fleet is not
+> pure-devourer by design.** kernel-monitor is retained permanently as the
+> **RX-only** backend for cache and spectator nodes; devourer takes the TX
+> role. The MT7921 leg therefore needs no BOM change and no exception — an
+> RX-only monitor node is a supported shape, not a fallback. This also fixes
+> the frame for everything left: parity items matter for the TX role, and a
+> node that never transmits does not need them.
+
 
 `docs/verification-hardware.md:15`: cache `.247` carries an MT7921
 (`14c3:7961`, `mt7921e`) alongside an RTL8812AU. Devourer is Realtek-only, so
@@ -547,17 +565,20 @@ landed (Pass 140), so the two items that used to sit at either end of this list
 are gone. Ordering is now by **what the TX role needs**, since that is the role
 devourer is taking.
 
-1. **The G1 leftover**: the unguarded claim-during-sweep race. The widen-scope
-   question was ruled node-wide (Pass 143, §15.5a amended); what stays open is
-   that the §2 selector, CSA follower and discovery view are not net_id-scoped
-   during a sweep.
-2. **B3** — hardware, runs in parallel.
-3. **H1** — a per-unit acceptance check at the intended MCS, needed before a
-   pure-devourer TX fleet ships, not before any of the above lands.
-4. **G8** — narrower than when written; the devourer decode path, following the
-   `FakeAir` shape rather than a second harness.
+**Nothing is left on this list.** Every code item is closed. Two things
+outlive the register:
 
-**Not on this list any more:** G0 (closed), G1/G6 (Pass 142), G2/G3/G4/G5/G7 (Pass 143), G9 (fixed in
+1. **H1** — a per-unit acceptance check at the intended MCS. **Blocked
+   upstream**: `ProbeEfuseStability` is unwired for the Jaguar3 8822E (Pass
+   143), so the discriminating probe cannot run without vendored changes.
+   Until then the rule stands: acceptance-test a devourer TX unit at its
+   intended MCS before it flies, and do not generalise one unit to a chip.
+2. **The §15.3 counters schema** — the last per-backend dispatch in
+   `AirBackend`, set aside deliberately by Pass 140 because the two backends'
+   counter structs differ by real fields. A schema question, not a parity one.
+
+**Not on this list any more:** G0 (closed), G1/G6 (Pass 142),
+G2/G3/G4/G5/G7 (Pass 143), G1's leftovers and B3 (Pass 144), G9 (fixed in
 Pass 140), B2 (dead by ruling), H2 (settled and measured), and the interface
 collapse itself.
 

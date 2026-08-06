@@ -4720,11 +4720,22 @@ supported (§15.2 `scout`).
   every RX adapter hears all net_ids for the sweep's duration, not just the
   scout adapter (operator-ruled 2026-08-06, Pass 143: both backends implement
   it node-wide, and per-adapter filter state would be new machinery on each for
-  no measured benefit). The filter is restored when the sweep rests. Note the
-  consequence: for the sweep's duration a diversity ear parked on the resting
-  channel also admits foreign-`net_id` frames into the §2 selector, the §11 CSA
-  follower and the §15.5 discovery view, none of which are `net_id`-scoped. The
-  survey is scoped (below); those consumers are not. On a two-adapter ground the diversity RX adapters stay on the resting
+  no measured benefit). The filter is restored when the sweep rests. Because the widen
+  is node-wide, foreign-`net_id` frames reach every RX consumer, so the ones
+  that hold link state are scoped instead (operator-ruled 2026-08-06, Pass
+  144): **while a sweep is running, a frame whose `net_id` differs from the
+  node's resting `net_id` does not reach the §2 RX engine or the §11 CSA
+  follower.** Measured before the rule existed: a ground sweeping past an
+  unpaired craft on another `net_id` accepted 5119 of its frames and
+  **delivered 5085 packets of its video onto the local stream output** — a
+  sweep is meant to observe a channel, not to decode a stranger's video. The
+  same path can take a §2 latch or follow a §11 channel change, either of which
+  would outlive the sweep that admitted it. The **survey** and the
+  §15.5 **discovery view** deliberately keep seeing every `net_id` — reporting
+  who is out there is what a sweep is for, and neither holds link state. A node
+  with no configured `net_id` accepts any (§3.0), so nothing is scoped there.
+  On the UDP bench transports there is no §3.0 identity to scope by and the
+  rule does not apply. On a two-adapter ground the diversity RX adapters stay on the resting
   channel, so an active link there survives the sweep; a single-adapter ground has
   no spare ear and drops any active link while scouting. **The survey (per-channel
   occupancy and candidates) is derived from the scout adapter's frames only**: a
