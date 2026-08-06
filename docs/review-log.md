@@ -6859,3 +6859,68 @@ guard had fired nowhere — the craft's log had been dead since 13:17 because
 the tmpfs was full. An empty grep is only evidence once the instrument is
 known to be alive. Check the log is still being written before believing what
 it does not say.
+
+## Pass 148 — §9.10 v2: the TX node restarts itself on a wedge (2026-08-06)
+
+Operator ruling, taken once both of v1's own deferral conditions were met:
+Pass 11's step-11 saturation series supplies "silent across a healthy
+500–4500 pps sweep" (healthy CCX return rates fall to ~25% but never to zero,
+so every window sees progress), and Pass 147 supplies "fires within one window
+of an induced wedge", device-confirmed on devourer.
+
+**Why a process restart and not something gentler.** Pass 147 measured every
+weaker option failing. The kernel re-enumerating the USB device does not heal
+the link — the process's libusb handle is dead and nothing re-opens one.
+`recover()` restarts the RX path and never touches the TX handle. A full
+in-process re-init is impossible while devourer's `InitWrite` unconditionally
+assigns `_coex_thread` and `std::terminate`s on a second call. What did work,
+every time, was a fresh process. So the action is an exit, and the supervisor
+is a precondition rather than a detail.
+
+**The asymmetry is the design.** A wedge means different things by node role.
+On the craft the wedged adapter *is* the video transmitter, so the link is
+already dead and a restart costs nothing that is not already lost. On the
+ground the wedged adapter is the uplink, while RX and video keep working — a
+process bounce there would turn a control-path fault into a blank screen for
+the pilot. The exit is therefore wired only in the TX loop. The ground keeps
+the detector for observability and never acts on it. This is not a knob
+defaulted differently per node; it is structural, so no ground config can
+switch it on by accident.
+
+`wedge_exit_windows` (seed 3) is consecutive windows, not cumulative. The
+distinction matters: the pre-existing `wedge_windows()` counter is a lifetime
+total, so a craft that wedged briefly twice a flight would eventually trip a
+cumulative threshold with no fault present. The new counter resets on any
+backend TX progress, and an idle window holds it rather than clearing it —
+matching how the verdict itself treats an idle window as evidence of nothing.
+
+**Known and accepted: a hard-failed adapter now crash-loops.** If the wedge is
+a genuine hardware death rather than a clearable state, the node exits, the
+supervisor re-execs, the adapter wedges again. That is the correct outcome —
+the alternative is a craft that stays silently dead — but it does mean the
+2 s respawn backoff and the bounded per-episode `bulk_send FAIL` volume are
+what keep it from filling the vehicle's tmpfs. Pass 147 bounded the healthy
+log; a permanently faulted adapter still writes ~700 KB per episode. Noted
+rather than solved: at that point the craft is not flying.
+
+**Device-verified end to end (craft `.2.232`, devourer, hands off after the
+induction).** USB deauthorize for 8 s, then re-authorize and touch nothing:
+
+```
+air: TX WEDGED for 3 consecutive windows — exiting for supervisor re-exec (§9.10 v2)
+waybeam-link exited 9 (TX wedged, §9.10 v2) -- respawning in 2s
+waybeam-link exited 1 -- respawning in 2s
+waybeam-link exited 1 -- respawning in 2s
+```
+
+The two `exited 1` respawns are the adapter still being absent — the backoff
+loop behaving exactly as the crash-loop guard is meant to. Once the device
+returned, the next spawn took it: new pid, `tx_failed` back to 0, `tx_wedged`
+false, reports advancing, and the ground's delivered frames went 34983 → 95087
+at MCS 5. About twelve seconds from fault to restored link with no manual step,
+where before this pass the craft stayed dead until someone noticed.
+
+That run also validated the `free_adapter`-before-every-spawn change: the
+kernel driver had re-bound the adapter on re-enumeration, so a supervisor that
+only unbound once at service start would have respawned into "no matching
+Realtek device" forever.

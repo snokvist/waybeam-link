@@ -84,6 +84,11 @@ using namespace wblink;
 volatile std::sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
 
+// §9.10 v2 (Pass 148): distinct from the generic failure 1, so a supervisor
+// (or an operator reading the log) can tell "the transmitter wedged and I am
+// asking to be re-execed" from "this node cannot start at all".
+constexpr int kExitTxWedged = 9;
+
 // §15.5 Pass 104: where GET /api/v1/modes enumerates from. Explicit
 // venc.modes_dir wins; otherwise derive it from mode_apply_cmd's directory (the
 // §16 layout co-locates the applier and the modes/<name>.json files), so a
@@ -4840,6 +4845,22 @@ int run_tx(const Loaded& l) {
                           "backend TX progress over the window (§9.10)\n"
                         : "air: tx wedge cleared — backend TX progress "
                           "resumed\n");
+            }
+            // §9.10 v2 (Pass 148). This adapter IS the video transmitter, so a
+            // sustained wedge means the link is already dead — the restart
+            // costs nothing that is not already lost. Nothing weaker recovers
+            // it (Pass 147: the USB re-enumeration does not heal the dead
+            // libusb handle, recover() never touches the TX path, and a second
+            // InitWrite terminates the process), so exit and let the
+            // supervisor re-exec. Deliberately absent from the ground loop,
+            // where the wedged adapter is the uplink and RX/video still work.
+            if (l.cfg.air.wedge_exit_windows != 0 &&
+                wedge.consecutive_wedged() >= l.cfg.air.wedge_exit_windows) {
+                std::fprintf(stderr,
+                             "air: TX WEDGED for %u consecutive windows — "
+                             "exiting for supervisor re-exec (§9.10 v2)\n",
+                             wedge.consecutive_wedged());
+                return kExitTxWedged;
             }
         }
         if (control) {

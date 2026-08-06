@@ -369,6 +369,11 @@ struct AirCfg {
     // §9.10 TX-wedge watchdog (radio backend, §17 seeds). window 0 disables.
     uint32_t wedge_window_ms = 1000;
     uint32_t wedge_min_submits = 8;
+    // §9.10 v2 (Pass 148): consecutive wedged windows before the TX node
+    // exits for its supervisor to re-exec. 0 disables (v1 observability-only).
+    // Read by the vehicle loop only — see §9.10 on why the ground never exits
+    // on a wedged uplink while its RX and video are still working.
+    uint32_t wedge_exit_windows = 3;
     // Radio backend: clear the MAC carrier-sense gate so TX does not defer to
     // a busy channel. devourer's FPV example (examples/streamtx) takes exactly
     // the opposite default from ours, on the reasoning that "the link owns the
