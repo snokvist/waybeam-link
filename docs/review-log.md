@@ -7697,3 +7697,35 @@ pass exists to keep it off, silently, at boot, with the fingerprint reporting a
 match. A relative-backend auto-load therefore also requires every placement to
 lie inside the live offset window, and refuses as STALE with the space named.
 Load-time only; no artifact or wire format change.
+
+**Pass 151 pre-device review — two live holes, both created by this pass
+sitting on top of unconverted §10.5 neighbours.**
+
+1. **§11.7 `0x0A` power tiers are absolute-space and were still accepted on a
+   relative backend.** `install_curve` sets the resolve clamp to
+   `power_offset_max_qdb` (0), and `set_power_tier` then overwrote it with an
+   absolute preset — 60..108, i.e. 15..27 dB above the bound — removing the one
+   guard that keeps a resolved curve inside the window. Not merely theoretical:
+   `deploy/vehicle-192.168.2.232.json` carries
+   `power_presets_qdb: [60,76,84,92,108]` **and** runs devourer, so the very
+   node about to be calibrated could have had its bound erased by one menu
+   press. Compounding it, making `power_tier_effective()` read `curve_actuates()`
+   meant §15.3 would have reported the tier effective while its presets meant
+   nothing there — the exact lie Pass 136 removed for the latch. Tiers are now
+   REJECTED on a relative backend, and `power_tier_effective()` says so.
+
+2. **The ground's §10.5 latch was unbounded while its actuator became
+   relative.** The §10.7 conversion moved `UplinkPower::apply_qdb` into offset
+   space; the latch handler's bound had been deliberately omitted in the Pass
+   150 review with the comment "deferred with the §10.7 re-base". The re-base
+   landed and the comment did not. On a relative ground a plain
+   `POST /api/v1/tx/power {"qdb":84}` would have become **+21 dB of offset from
+   REST** — the hazard the whole conversion exists to remove. Now bounded by
+   `power_offset_max_qdb` when the ground's backend is relative, and unbounded
+   exactly as before when it is not.
+
+Both share one shape, and it is the same one Pass 150 hit twice: converting a
+subsystem into a new space leaves its *neighbours* speaking the old one, and a
+neighbour that merely clamps or reports looks harmless right up until it is the
+thing holding the bound. The audit that found these was reading for "what else
+reads `pa.ceiling`", not for anything on the change list.

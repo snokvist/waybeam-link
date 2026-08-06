@@ -325,7 +325,10 @@ void test_artifact_curve_actuates_as_offset() {
     spy.attach(tx);
     tx.set_backend_relative(true);
     tx.install_curve(flat_curve(-16));   // an offset-space curve
-    CHECK(tx.power_tier_effective());
+    CHECK(tx.has_power_curve());
+    // §11.7 0x0A tiers are a different matter: the presets are absolute qdb,
+    // so a tier is REJECTED here and never reported effective (Pass 151).
+    CHECK(!tx.power_tier_effective());
 
     tx.apply_boot_power_offsets();
     spy.clear();
@@ -397,6 +400,37 @@ void test_relative_sweep_stays_inside_the_offset_window() {
         CHECK(art.placement_qdb[m] == -16);
         CHECK(art.ceilings[m].has_bad);
     }
+}
+
+// §10.3/§11.7 0x0A (Pass 151): `power_presets_qdb` are ABSOLUTE qdb, so a tier
+// on a relative backend would install one (60..108) as the clamp on an OFFSET
+// resolve — replacing the §10.5 bound with a number 15..27 dB above it. The
+// flying craft config carries a preset list AND runs devourer, so this is
+// reachable today, not hypothetical.
+void test_tier_rejected_on_relative_backend() {
+    Config c = one_tx_config(108, {60, 84, 108});
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[0].power_offset_max_qdb = 0;
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+    tx.set_backend_relative(true);
+    tx.install_curve(flat_curve(-16));
+
+    CHECK(!tx.set_power_tier(0));           // REJECTED, not silently applied
+    CHECK(!tx.power_tier_effective());      // and §15.3 does not claim it
+    // The §10.5 bound is intact: the resolve still clamps at 0, not at 60.
+    spy.clear();
+    tx.resolve_and_apply_power(5, 4);
+    CHECK(!spy.offsets.empty());
+    CHECK(spy.offsets.back().second == -16);
+
+    // The same tier on an absolute backend is accepted, unchanged.
+    TxCore mon(c, 1, nullptr, 0);
+    mon.set_backend_relative(false);
+    mon.install_curve(flat_curve(108));
+    CHECK(mon.set_power_tier(0));
+    CHECK(mon.power_tier_ceiling().value_or(-1) == 60);
 }
 
 // §10.6 (Pass 151): a config whose bound sits at or under its own safe offset
@@ -889,6 +923,7 @@ int main() {
     test_config_curve_refused_on_relative_backend();
     test_artifact_curve_actuates_as_offset();
     test_relative_sweep_stays_inside_the_offset_window();
+    test_tier_rejected_on_relative_backend();
     test_empty_offset_window_has_no_sweep();
     test_tier_refused_during_calibration();
     test_power_tier_json_shape();

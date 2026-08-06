@@ -3000,6 +3000,15 @@ struct TxCore {
         // would be left at whatever power the abandoned sweep last commanded.
         // §10.5 latching takes the same position (the run yields first).
         if (calibrating()) return false;
+        // §10.3/§11.7 0x0A (Pass 151): `power_presets_qdb` are ABSOLUTE qdb
+        // and there is no offset-space tier. Applying one on a relative
+        // backend replaces the §10.5 offset bound (0) with an absolute preset
+        // (60..108) as the resolve clamp — removing the one guard that keeps a
+        // resolved curve inside the window — while §15.3 reported the tier
+        // effective. Reachable TODAY: the flying craft config carries
+        // `power_presets_qdb: [60,76,84,92,108]` and runs devourer. REJECTED
+        // until tiers are re-based with the rest of §10.5.
+        if (backend_relative_) return false;
         // ALL-OR-NOTHING. Validate every configured list before touching any
         // ceiling: applying the tier to one tx adapter, skipping another whose
         // list is shorter, and still reporting success would leave two
@@ -3080,10 +3089,11 @@ struct TxCore {
     // ceiling — set_power_override does not read t.ceiling at all — so a tier
     // cannot claim to be effective on the strength of one.
     bool power_tier_effective() const {
-        // A curve that resolve_and_apply_power() refuses (relative backend)
-        // reaches no hardware, so reporting the tier effective would be the
-        // same lie Pass 136 removed for the latch.
-        return curve_actuates();
+        // A curve that resolve_and_apply_power() refuses reaches no hardware,
+        // so reporting the tier effective would be the same lie Pass 136
+        // removed for the latch — and on a relative backend a tier is REJECTED
+        // outright (Pass 151), so nothing there can be effective either.
+        return curve_actuates() && !backend_relative_;
     }
 
     // The one predicate for "resolve_and_apply_power() will reach hardware".
@@ -6315,11 +6325,20 @@ int run_rx(const Loaded& l) {
                 if (qdb < -511 || qdb > 511) {
                     return "qdb out of range (-511..511)";
                 }
-                // NOT bounded by power_offset_max_qdb: on this node the
-                // latch flows into UplinkPower's ABSOLUTE actuator (see
-                // apply_qdb), so a relative bound would reject every sane
-                // absolute. The ground's §10.5 conversion is deferred with the
-                // §10.7 re-base — recorded rather than half-applied.
+                // §10.5 (Pass 151): the bound follows the space, because the
+                // latch flows into UplinkPower::apply_qdb — which is the
+                // RELATIVE actuator once `uplink_relative`. Unbounded there, a
+                // plain `{"qdb":84}` becomes +21 dB of offset from REST, which
+                // is the hazard this whole conversion exists to remove. On an
+                // absolute ground (every ground in the fleet today) the value
+                // is an absolute qdb and a relative bound would reject every
+                // sane one, so it stays unbounded exactly as before.
+                if (uplink_relative && uplink_adapter != nullptr &&
+                    qdb > uplink_adapter->power_offset_max_qdb) {
+                    return "qdb exceeds power_offset_max_qdb on this "
+                           "role:\"tx\" adapter (§10.5); raise the bound to "
+                           "opt in";
+                }
                 upwr.override_qdb = qdb;
                 uplink_restore_actuators();
                 return "";
