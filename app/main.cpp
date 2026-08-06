@@ -5203,6 +5203,45 @@ int run_rx(const Loaded& l) {
     // §10.3/§10.5/§10.7/§11.7 0x0A: one owner for the uplink's power, holding
     // the ceiling a tier moves and the single precedence path every apply site
     // runs through. Its actuators are wired below, once the radio exists.
+    // §10.7 (Pass 152): the at-rest uplink loss floor, over a rolling window
+    // of ORDINARY operation, so the sweep's walls can be defined relative to
+    // it. Measured on the fleet at 10 m: a stable 25permille floor against the
+    // 15permille absolute loss_ok seed — the acceptance gate sat BELOW the
+    // link's own floor, so no TX power could pass it and §10.7 could not
+    // succeed at any distance. The uplink shares the medium with the craft's
+    // video, so a few percent of reports collide regardless of power; that is
+    // the baseline to measure degradation FROM, not a quality bar to clear.
+    //
+    // Sampled outside the run, like §10.6's Pass 134 report-health
+    // precondition and for the same reason: once the sweep starts, elevated
+    // loss is the measurement.
+    struct UplinkFloor {
+        uint32_t win_ms = 4000;
+        uint64_t mark_ms = 0;
+        uint32_t mark_sent = 0;
+        uint32_t mark_recv = 0;
+        bool have = false;
+        uint16_t floor_milli = 0;
+        void sample(uint64_t now, uint32_t sent, uint32_t recv) {
+            if (mark_ms == 0 || sent < mark_sent || recv < mark_recv) {
+                mark_ms = now;  // first sample, or the craft's counters reset
+                mark_sent = sent;
+                mark_recv = recv;
+                return;
+            }
+            if (now - mark_ms < win_ms) return;
+            const uint32_t ds = sent - mark_sent;
+            const uint32_t dr = recv - mark_recv;
+            if (ds > 0 && dr <= ds) {
+                floor_milli =
+                    static_cast<uint16_t>(1000ull * (ds - dr) / ds);
+                have = true;
+            }
+            mark_ms = now;
+            mark_sent = sent;
+            mark_recv = recv;
+        }
+    } ufloor;
     UplinkPower upwr;
     upwr.mcs = l.cfg.air.uplink_mcs;
     // §10.5/§10.7 (Pass 151): the ground's power space, decided ONCE from the
@@ -6566,9 +6605,32 @@ int run_rx(const Loaded& l) {
                 if (rx.craft_calibrating()) {
                     return "craft downlink calibration is running";
                 }
+                // §10.7 (Pass 152): the walls are the at-rest floor plus the
+                // configured margins. Without a floor the run would judge
+                // against an absolute bar that may sit below the link's own
+                // noise — the state that made every rung unreachable at 10 m —
+                // so refuse rather than measure against a number we know
+                // nothing about. Self-clearing within one window.
+                if (!ufloor.have) {
+                    return "uplink loss floor not measured yet — retry in a "
+                           "few seconds (§10.7)";
+                }
+                const uint16_t wall_ok = static_cast<uint16_t>(
+                    std::min(1000, ufloor.floor_milli +
+                                       l.cfg.policy.calibration.loss_ok_milli));
+                const uint16_t wall_bad = static_cast<uint16_t>(
+                    std::min(1000, ufloor.floor_milli +
+                                       l.cfg.policy.calibration.loss_bad_milli));
+                if (!uplink_cal.set_loss_walls(wall_ok, wall_bad)) {
+                    return "calibration already running";
+                }
                 if (!uplink_cal.start(now_ms(), rx.report_epoch())) {
                     return "calibration already running";
                 }
+                std::fprintf(stderr,
+                             "uplink-calib: at-rest floor %upermille -> walls "
+                             "ok=%u bad=%upermille\n",
+                             ufloor.floor_milli, wall_ok, wall_bad);
                 uplink_cal_craft = active_selection.originator;
                 if (both) calib_seq.start(now_ms());
                 std::fprintf(stderr, "uplink-calib: START mcs=%u%s\n",
@@ -6916,6 +6978,14 @@ int run_rx(const Loaded& l) {
         // §10.7 calibrator service. `restore` is single-shot and set on EVERY
         // terminal path, so this is the one place probe power is handed back
         // to the §10.7 owner — no exit can strand it.
+        // §10.7 (Pass 152): keep the at-rest floor current, but ONLY while no
+        // sweep is running — during a run the loss IS the measurement, and
+        // folding it back into the baseline would chase its own tail.
+        if (quality_gate.have() &&
+            uplink_cal.state() != CalibState::kRunning) {
+            const UplinkQuality& q = quality_gate.last();
+            ufloor.sample(now_ms(), q.last_report_epoch, q.reports_received);
+        }
         // Ticked UNCONDITIONALLY. tick() early-returns when the calibrator is
         // not running, but it drains the single-shot restore/artifact edges
         // first — and a terminal state set from OUTSIDE this loop (the REST

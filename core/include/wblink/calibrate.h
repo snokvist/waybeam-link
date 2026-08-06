@@ -94,10 +94,10 @@ class PowerSeek {
         has_bad_ = false;
         first_bad_rssi_ = 0;
         first_bad_qdb_ = 0;
-        have_last_loss_ = false;
-        last_loss_ = 0;
-        last_rssi_ = 0.0;
-        last_qdb_ = p_.min_qdb;
+        have_best_ = false;
+        best_loss_ = 0;
+        best_rssi_ = 0.0;
+        best_qdb_ = p_.min_qdb;
         placed_loss_ = 0;
         placed_rssi_ = 0.0;
         return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
@@ -199,45 +199,46 @@ class PowerSeek {
         // -2 dB: 6permille, -4 dB: 2permille, -6 dB: 1permille. The only way
         // to know a lower power is better is to try one, so the first verify
         // always trials a step down.
+        // The BEST reading of this verify walk is what the rung places at.
+        // Tracking only the previous reading was wrong whenever nothing was
+        // acceptable: the recovery descent then walked straight past its own
+        // best and placed wherever the budget ran out. Measured on the
+        // ground's uplink at 10 m — verify read 30, 25, 20, then 45permille —
+        // it placed the 45 and failed the rung, having measured the 20 three
+        // dwells earlier. A plain have/value pair rather than std::optional:
+        // GCC's -Wmaybe-uninitialized cannot see through the optional across
+        // inlining and warns on the ARM cross-build.
+        const bool is_best = !have_best_ || loss < best_loss_;
+        if (is_best) {
+            have_best_ = true;
+            best_loss_ = loss;
+            best_rssi_ = rssi;
+            best_qdb_ = qdb_;
+        }
+
         const bool unacceptable = loss > p_.loss_ok_milli;
         const bool can_descend =
             verify_descents_ < p_.verify_descent_budget && qdb_ > p_.min_qdb;
 
-        // A plain have/value pair rather than std::optional: GCC's
-        // -Wmaybe-uninitialized cannot see through the optional across
-        // inlining and warns on the ARM cross-build, and there is no
-        // engagement invariant here worth an optional to express.
-        if (!unacceptable && have_last_loss_ && loss >= last_loss_) {
-            // The step bought nothing, so place at the PREVIOUS, higher power
-            // — equal loss at more power is strictly better link budget. That
-            // reading was necessarily acceptable: had it not been, the
-            // recovery clause would have descended past it rather than
-            // recording it here.
-            qdb_ = last_qdb_;
-            placed_loss_ = last_loss_;
-            placed_rssi_ = last_rssi_;
-            // The hardware sits one step low; power_changed walks it back up.
-            return {SeekStep::Kind::kDone, qdb_, true, nullptr};
-        }
-        // Reaching here means one of: still unacceptable (recovery), the first
-        // verify (the mandatory trial), or a step that improved. All three
-        // descend if there is budget and floor left.
-        if (can_descend) {
+        // Descend for either reason, and they compose: RECOVERY while the
+        // reading is not yet acceptable (§10.6 addendum 2), and the MINIMUM
+        // HUNT while each step is still improving on the best seen. The first
+        // verify is always a best, so the trial step is structural.
+        if ((unacceptable || is_best) && can_descend) {
             if (loss > p_.loss_bad_milli) note_bad_(rssi);
-            have_last_loss_ = true;
-            last_loss_ = loss;
-            last_rssi_ = rssi;
-            last_qdb_ = qdb_;
             ++verify_descents_;
             qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
             return {SeekStep::Kind::kVerify, qdb_, true, nullptr};
         }
-        // Budget or floor exhausted: this reading is the best available. It
-        // may still be unacceptable — §10.6 records that floor, §10.7 refuses
-        // it (both unchanged).
-        placed_loss_ = loss;
-        placed_rssi_ = rssi;
-        return {SeekStep::Kind::kDone, qdb_, false, nullptr};
+        // Place at the best reading, which is usually a power we have already
+        // stepped past — power_changed walks the actuator back up to it. It
+        // may still be unacceptable if nothing was: §10.6 records that floor,
+        // §10.7 refuses it (both unchanged).
+        placed_loss_ = best_loss_;
+        placed_rssi_ = best_rssi_;
+        const bool moved = qdb_ != best_qdb_;
+        qdb_ = best_qdb_;
+        return {SeekStep::Kind::kDone, qdb_, moved, nullptr};
     }
 
     SeekParams p_;
@@ -253,10 +254,10 @@ class PowerSeek {
     // a point the seek has already stepped past. The caller must record THAT
     // point's evidence, not the last dwell's, or the artifact reports a
     // placement paired with a different power's loss and RSSI.
-    bool have_last_loss_ = false;
-    uint16_t last_loss_ = 0;
-    double last_rssi_ = 0.0;
-    int32_t last_qdb_ = 0;
+    bool have_best_ = false;
+    uint16_t best_loss_ = 0;
+    double best_rssi_ = 0.0;
+    int32_t best_qdb_ = 0;
     uint16_t placed_loss_ = 0;
     double placed_rssi_ = 0.0;
 };

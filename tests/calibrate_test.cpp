@@ -484,6 +484,39 @@ void test_verify_places_at_loss_minimum() {
     }
 }
 
+// §10.6/§10.7 (Pass 152): when NOTHING is acceptable, the recovery descent
+// must still place at the BEST reading it measured, not wherever the budget
+// ran out. Replays the ground's measured uplink rung 0 at 10 m verbatim.
+void test_verify_places_at_best_when_nothing_is_acceptable() {
+    SeekParams p;  // loss_ok 15, budget 3, step 16
+    p.rssi_guard_dbm = 127;
+
+    PowerSeek s(p);
+    // Drive straight to the verify phase: every probe clean at 30permille
+    // (under loss_bad 50), so the placement is the top of the range.
+    SeekStep st = s.begin();
+    int g = 0;
+    while (st.kind == SeekStep::Kind::kProbe && g++ < 40) {
+        st = s.on_dwell(DwellVerdict::kClean, -56, 30);
+    }
+    CHECK(st.kind == SeekStep::Kind::kVerify);
+    CHECK(st.qdb == p.max_qdb);                       // 108
+
+    // The measured verify walk: 30 -> 25 -> 20 -> 45permille.
+    st = s.on_dwell(DwellVerdict::kClean, -56, 30);   // at 108
+    CHECK(st.kind == SeekStep::Kind::kVerify && st.qdb == 92);
+    st = s.on_dwell(DwellVerdict::kClean, -57, 25);   // at 92
+    CHECK(st.kind == SeekStep::Kind::kVerify && st.qdb == 76);
+    st = s.on_dwell(DwellVerdict::kClean, -60, 20);   // at 76 — the best
+    CHECK(st.kind == SeekStep::Kind::kVerify && st.qdb == 60);
+    st = s.on_dwell(DwellVerdict::kClean, -64, 45);   // at 60 — worse
+
+    CHECK(st.kind == SeekStep::Kind::kDone);
+    CHECK(st.qdb == 76);                 // NOT 60, where the walk ended
+    CHECK(st.power_changed);             // and the actuator is walked back up
+    CHECK(s.placed_loss_milli() == 20);  // the best reading's own evidence
+}
+
 // §10.6 (Pass 151): the taper narrows the sweep ceiling in absolute space
 // only. In offset space the efuse per-rate table already carries that backoff,
 // and re-applying it collapses a level-1 rung to min == max — no sweep at all.
@@ -710,6 +743,7 @@ int main() {
     test_rung_ceiling_bounds_the_sweep();
     test_no_wall_anywhere_persists_nothing();
     test_verify_places_at_loss_minimum();
+    test_verify_places_at_best_when_nothing_is_acceptable();
     test_offset_space_does_not_taper_rung_ceiling();
     test_sweep_is_monotone_and_seed_free();
     test_blackout_bracket_uses_observed_rssi();
