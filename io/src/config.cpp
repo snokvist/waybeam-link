@@ -1010,11 +1010,16 @@ Result<Config> load_config_json(const std::string& json_text) {
                     "air: kind \"" + kind +
                     "\" unknown (udp | udp-broadcast | radio | kernel-monitor)");
             }
+            // §14.2: the authored calibration is a transport-efficiency
+            // measurement, so it is valid on either RF backend (Pass 143) and
+            // meaningless on the udp bench transports. Per transport — the
+            // monitor rig's seed does not carry over to devourer.
             if (cfg.air.kind != AirCfg::Kind::kMonitor &&
+                cfg.air.kind != AirCfg::Kind::kRadio &&
                 cfg.air.airtime_efficiency_permille != 0) {
                 return Result<Config>::fail(
                     "air: airtime_efficiency_permille is only valid for "
-                    "kernel-monitor");
+                    "kernel-monitor and radio");
             }
             // §10.7 uplink_rate: the rx node's committed operating point.
             if (a.contains("uplink_rate")) {

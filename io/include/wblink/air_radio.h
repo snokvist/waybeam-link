@@ -45,6 +45,9 @@ struct RadioAirCfg {
     bool unicast_returns = false;
     // Clear the MAC carrier-sense gate at bring-up (see AirCfg::disable_cca).
     bool disable_cca = false;
+    // §14.2 authored transport-efficiency calibration (1..1000, 0 = off).
+    // Per transport: the monitor rig's 600 does not carry over to devourer.
+    uint16_t airtime_efficiency_permille = 0;
 };
 
 class RadioAir : public AirIface {
@@ -111,6 +114,14 @@ class RadioAir : public AirIface {
     // §15.5a scout: the uplink adapter the sweep roams, resolved from the
     // role:"tx" adapter create() already requires.
     size_t tx_index() const override;
+    // §11.6 Pass 80 RX-liveness recovery: stop the RX loop, join it, re-run
+    // the write-side bring-up at the target channel, restart the loop. Not a
+    // USB-level reset — whether a devourer re-init clears an RTL88x2 USB wedge
+    // is unmeasured, so this recovers the half-applied-retune case it can
+    // reach and does not claim the other. Counters survive on purpose: rx_frames
+    // is the guard's own liveness baseline.
+    bool recover(size_t adapter, uint16_t chan_mhz,
+                 uint8_t width_mhz) override;
     // §11.6 verify hygiene (Pass 69): discard the process-queue RX backlog
     // captured before a retune completed, so post-retune consumers only see
     // frames from the new channel. devourer's internal USB pipeline is below
@@ -126,26 +137,24 @@ class RadioAir : public AirIface {
     // assert it and somewhere the compiler notices when a new method is added.
     // Behaviour is preserved exactly; ids are docs/devourer-parity-plan.md.
 
-    // G4 — §11.6 Pass 80 RX-liveness recovery is kernel-monitor only. The
-    // caller's watchdog treats false as "recovery unavailable", not "failed".
-    bool recover(size_t adapter, uint16_t chan_mhz,
-                 uint8_t width_mhz) override;
-    // G7 — "auto" differs by backend and that difference is a protocol
-    // question, not an implementation gap: kernel-monitor hands power back to
-    // the driver default, this backend zeroes the offset, which undoes a §10.5
-    // latch but leaves any §10.2 curve resolve to re-apply on top.
+    // §10.5 "auto": zero the offset, undoing the latch and leaving any §10.2
+    // curve resolve to re-apply on top. Differs from kernel-monitor (which
+    // hands power back to the driver default) — the spec documents both.
     bool set_power_auto(size_t adapter) override;
     // create() requires exactly one role:"tx" adapter, so a constructed
     // RadioAir always has an uplink. (An RX-only devourer node is reachable by
     // enumerating and declining to inject — that is a config shape this
     // backend does not build today, not a hardware limit.)
     bool has_tx() const override;
-    // G5 — a successful create() means every adapter was accepted by
-    // devourer's Realtek driver matrix (§9.3a v1), so the tier is asserted
-    // rather than probed.
+    // §9.3a tier. Asserted, not probed — there is no netdev gate on raw MPDU
+    // injection, and the two bounds devourer does have (no TX cap; the 16 KiB
+    // bulk-IN URB, floored at 4 KiB) clear the High budget by a wide margin.
+    // Reasoning at the definition; logged at bring-up like the monitor path.
     uint16_t mtu_supported() const override;
-    // G2 — §14.2 JSCC airtime has no estimator here; the scheduler already
-    // treats nullopt as "no airtime signal".
+    // §14.2 service-rate estimate. nullopt when uncalibrated — the opt-in
+    // posture is the point, an uncalibrated node reads unavailable rather than
+    // optimistic. include_pending is ignored: devourer's send_packet is a
+    // synchronous bulk-OUT, so there is no queue to add (spec §14.2).
     std::optional<uint32_t> estimate_airtime_us(
         size_t bytes, bool include_pending,
         uint16_t packet_budget) const override;

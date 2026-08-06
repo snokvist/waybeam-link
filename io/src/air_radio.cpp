@@ -23,6 +23,7 @@
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "logger.h"
+#include "wblink/airtime.h"
 #include "wblink/dot11.h"
 
 namespace wblink {
@@ -179,6 +180,28 @@ struct RadioAir::Impl {
     // Main-thread unicast-return counters (§15.3).
     uint64_t ret_unicast_sent = 0;
     uint64_t ret_unicast_fallback = 0;
+
+    // One RX loop thread per adapter (the proven N=3 pattern). Used at
+    // bring-up and again by recover() — the two must stay identical, which is
+    // the whole reason this is a function.
+    void start_rx_thread(Adapter& a, uint8_t id) {
+        Impl* imp = this;
+        Adapter* adp = &a;
+        a.rx_thread = std::thread([imp, adp, id]() {
+            try {
+                adp->dev->StartRxLoop([imp, adp, id](const Packet& p) {
+                    imp->on_packet(*adp, id, p);
+                });
+            } catch (const std::exception& e) {
+                // §15.3 Pass 101: a definitive death (vs the §6.5 stall
+                // heuristic a quiet channel also trips). Set before the log so
+                // a stats read racing the exit still sees the ear as dead.
+                adp->rx_dead.store(true, std::memory_order_relaxed);
+                std::fprintf(stderr, "radio: rx loop \"%s\" died: %s\n",
+                             adp->name.c_str(), e.what());
+            }
+        });
+    }
 
     void latch_sa(const Dot11Rx& d) {
         SaEntry e;
@@ -468,23 +491,7 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                 std::to_string(cfg.adapters[i].channel_mhz));
         }
         ad.dev->InitWrite(SelectedChannel{chan, 0, CHANNEL_WIDTH_20});
-        Impl* imp = air.impl_.get();
-        Impl::Adapter* adp = &ad;
-        const uint8_t id = static_cast<uint8_t>(i);
-        ad.rx_thread = std::thread([imp, adp, id]() {
-            try {
-                adp->dev->StartRxLoop([imp, adp, id](const Packet& p) {
-                    imp->on_packet(*adp, id, p);
-                });
-            } catch (const std::exception& e) {
-                // §15.3 Pass 101: a definitive death (vs the §6.5 stall
-                // heuristic a quiet channel also trips). Set before the log so
-                // a stats read racing the exit still sees the ear as dead.
-                adp->rx_dead.store(true, std::memory_order_relaxed);
-                std::fprintf(stderr, "radio: rx loop \"%s\" died: %s\n",
-                             adp->name.c_str(), e.what());
-            }
-        });
+        im.start_rx_thread(ad, static_cast<uint8_t>(i));
     }
     // §3.0 Pass 12 (craft half): arm the TX adapter's hardware ACK
     // responder with its own SA — the exact addr1 the ground's unicast
@@ -680,7 +687,82 @@ bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
                                    : CHANNEL_WIDTH_20;
         dev.SetMonitorChannel(c);
     }
+    // G3 (Pass 143): both actuators are `void`, so this used to answer true
+    // unconditionally — a devourer node could report COMMITTED with nothing
+    // applied. GetSelectedChannel() returns the driver's own record of where
+    // it put the radio, so a mismatch means the call was refused or landed
+    // somewhere else (an unsupported channel, a generation whose FastRetune
+    // no-ops, a width the chip declined). It is bookkeeping, not RF: it cannot
+    // see a half-applied retune where the chip disagrees with the driver.
+    // That case is the §11.6 RX-liveness guard's, which is backend-agnostic
+    // and now has a recover() under it. This is exactly the confidence
+    // kernel-monitor gets from `iw` reporting success.
+    const SelectedChannel got = dev.GetSelectedChannel();
+    if (got.Channel != chan) {
+        std::fprintf(stderr,
+                     "radio: retune \"%s\" to ch %u not applied "
+                     "(driver reports ch %u)\n",
+                     impl_->adapters[adapter]->name.c_str(), chan,
+                     static_cast<unsigned>(got.Channel));
+        return false;
+    }
     return true;
+}
+
+bool RadioAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz) {
+    // G4 (Pass 143): the §11.6 Pass 80 RX-liveness guard fires when a retune
+    // half-applies — TX airs on the new channel, RX hears nothing. On
+    // kernel-monitor the answer is a full netdev bring-up; here it is a
+    // re-init of the RX pipeline: stop the loop, join it, re-run the write-side
+    // bring-up at the target channel, restart the loop.
+    //
+    // Two things bound what this can be, both measured (Pass 143):
+    //
+    //   InitWrite is ONE-SHOT. It unconditionally assigns `_coex_thread`
+    //   (jaguar3 RtlJaguar3Device.cpp:207), so calling it a second time
+    //   destroys a joinable thread and std::terminate()s the process — which
+    //   is exactly what the first cut of this function did on the bench. The
+    //   restartable surface devourer documents is StartRxLoop (IRtlDevice.h:58)
+    //   plus SetMonitorChannel, and that is what this uses. So this is an
+    //   RX-path restart, not the full MAC/PHY bring-up kernel-monitor gets from
+    //   an `ip link down/up`; it is weaker on purpose rather than by omission.
+    //
+    //   It is not a USB-level reset either. `CLAUDE.md` records that an RTL88x2
+    //   USB wedge (RX counter frozen) needs a physical re-plug, and whether any
+    //   in-process re-init clears that is unmeasured.
+    //
+    // Counters are preserved across the restart on purpose: rx_frames is the
+    // §11.6 liveness baseline, and zeroing it would forge liveness.
+    Impl& im = *impl_;
+    if (adapter >= im.adapters.size()) return false;
+    Impl::Adapter& a = *im.adapters[adapter];
+    if (!a.dev) return false;
+    const uint8_t chan = mhz_to_channel(chan_mhz);
+    if (chan == 0) return false;
+    const uint8_t bw = width_mhz > 2 ? (width_mhz >= 80   ? 2
+                                        : width_mhz >= 40 ? 1
+                                                          : 0)
+                                     : width_mhz;
+    a.dev->StopRxLoop();
+    if (a.rx_thread.joinable()) {
+        a.rx_thread.join();
+    }
+    SelectedChannel c{};
+    c.Channel = chan;
+    c.ChannelOffset = 0;
+    c.ChannelWidth = bw == 2   ? CHANNEL_WIDTH_80
+                     : bw == 1 ? CHANNEL_WIDTH_40
+                               : CHANNEL_WIDTH_20;
+    a.dev->SetMonitorChannel(c);
+    const SelectedChannel got = a.dev->GetSelectedChannel();
+    // Clear the Pass 101 death latch only once the bring-up has answered:
+    // a stats read racing this must not see a healthy ear that is not back.
+    a.rx_dead.store(false, std::memory_order_relaxed);
+    im.start_rx_thread(a, static_cast<uint8_t>(adapter));
+    const bool ok = got.Channel == chan;
+    std::fprintf(stderr, "radio: RX-liveness recovery on \"%s\" -> %u MHz %s\n",
+                 a.name.c_str(), chan_mhz, ok ? "ok" : "FAILED");
+    return ok;
 }
 
 bool RadioAir::reapply_tx_power(size_t adapter) {
@@ -710,17 +792,11 @@ std::optional<uint64_t> RadioAir::read_tsf(size_t adapter) {
 // preserved exactly; what changes is that the answer is now stated per backend
 // instead of being the absence of a branch at 98 call sites.
 
-bool RadioAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz) {
-    (void)adapter;
-    (void)chan_mhz;
-    (void)width_mhz;
-    return false;  // G4: §11.6 Pass 80 re-init is kernel-monitor only
-}
-
 bool RadioAir::set_power_auto(size_t adapter) {
-    // G7: "auto" here means offset 0 — it undoes a §10.5 latch and leaves the
-    // §10.2 curve resolve to re-apply on top. Not the same as the kernel
-    // driver's `txpower auto`; reconciling them is a protocol ruling.
+    // §10.5: "auto" here is a one-shot offset 0 — it undoes the latch and lets
+    // the §10.2 curve resolve re-apply on top. Deliberately not the same as the
+    // kernel driver's `txpower auto`, and the spec says so per backend
+    // (PROTOCOL.md §10.5); this is not an undeclared asymmetry.
     return set_power_qdb(adapter, 0);
 }
 
@@ -754,17 +830,50 @@ bool RadioAir::has_tx() const {
 }
 
 uint16_t RadioAir::mtu_supported() const {
-    // G5: a successful create() means every adapter passed devourer's Realtek
-    // driver matrix (§9.3a v1), so the tier is asserted rather than probed.
+    // G5 (Pass 143): kernel-monitor reads each netdev MTU because the kernel
+    // path is what would reject or fragment an oversized frame. There is no
+    // netdev here — frames go as raw MPDUs straight to bulk-OUT — so the
+    // question is what devourer itself bounds. Two bounds exist and neither
+    // binds at §9.3a's High budget:
+    //
+    //   TX: none. send_packet sizes its TXDMA block from the frame
+    //       (jaguar3 RtlJaguar3Device.cpp:1713) and imposes no length cap.
+    //   RX: the bulk-IN URB, DeviceConfig::Rx::urb_bytes, default 16 KiB and
+    //       floored at 4 KiB — an aggregate must not span two URBs. We never
+    //       set it, so the effective floor is 4 KiB against a 3072 B budget.
+    //
+    // So the tier is asserted, and now with the reason stated rather than on
+    // the strength of create() having succeeded. Logged like the monitor path
+    // logs its netdev derivation, so a boot log shows what each backend chose.
+    std::fprintf(stderr,
+                 "radio: no netdev MTU gate (raw MPDU injection); "
+                 "packet budget %u\n",
+                 static_cast<unsigned>(mtu_tier::kHighBudget));
     return mtu_tier::kHighBudget;
 }
 
 std::optional<uint32_t> RadioAir::estimate_airtime_us(
     size_t bytes, bool include_pending, uint16_t packet_budget) const {
-    (void)bytes;
+    // §14.2 (Pass 143). Same conservative service-rate model kernel-monitor
+    // uses, minus the pending term: devourer's send_packet is a synchronous
+    // bulk-OUT that returns once the transfer has completed or failed, so the
+    // frame is already with the chip and there is no queue to query. Absent by
+    // construction, not approximated — which is why include_pending is ignored
+    // here rather than treated as an unmet request.
     (void)include_pending;
-    (void)packet_budget;
-    return std::nullopt;  // G2: no §14.2 estimator on this backend
+    const Impl& im = *impl_;
+    if (im.cfg.airtime_efficiency_permille == 0) {
+        return std::nullopt;  // uncalibrated reads unavailable, never optimistic
+    }
+    // Input bytes are Waybeam wire packets. Account for one 802.11 header +
+    // FCS per standard-rung-sized MPDU; service efficiency owns preamble,
+    // contention, and the other measured transport effects.
+    const uint64_t budget = std::max<uint16_t>(packet_budget, 1);
+    const uint64_t packets = (bytes + budget - 1u) / budget;
+    const uint64_t total = bytes + packets * (kDot11HdrLen + kFcsLen);
+    return ht20_service_time_us(
+        static_cast<size_t>(std::min<uint64_t>(total, SIZE_MAX)), im.rate.mcs,
+        im.rate.sgi, im.cfg.airtime_efficiency_permille);
 }
 
 void RadioAir::tx_report_counters(uint64_t& submitted,

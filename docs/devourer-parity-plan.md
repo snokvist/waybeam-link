@@ -86,12 +86,12 @@ the TX role needs the capability.
 |---|---|---|---|
 | **G0** | Close the 5805 MCS4+ pivot rationale | verification | **DONE** — Pass 139 / #89, closed *affirmatively* |
 | **G1** | §15.5a scout net_id retargeting is a no-op on radio | correctness | **DONE** (Pass 142, #91) — atomic filter + device A/B; uncovered and fixed a missing `AirRxMeta::net_id` |
-| G2 | §14.2 JSCC airtime unavailable on radio | feature | RULING — declared (`estimate_airtime_us` → `nullopt`) |
-| G3 | CSA retune is commanded, not confirmed, on devourer | correctness | OPEN (ungated) |
-| G4 | `recover()` returns false on radio | feature | OPEN (ungated) — declared, pairs with G3 |
-| G5 | `mtu_supported()` is a hardcoded assumption on radio | feature | OPEN (ungated) — declared |
+| G2 | §14.2 JSCC airtime unavailable on radio | feature | **DONE** (Pass 143) — ruled: model enabled, no pending term (devourer TX is synchronous) |
+| G3 | CSA retune is commanded, not confirmed, on devourer | correctness | **DONE** (Pass 143) — `GetSelectedChannel()` read-back; driver-level, not RF |
+| G4 | `recover()` returns false on radio | feature | **DONE** (Pass 143) — RX-loop restart; `InitWrite` is one-shot so it is not a MAC/PHY bring-up |
+| G5 | `mtu_supported()` is a hardcoded assumption on radio | feature | **DONE** (Pass 143) — bounds identified, neither binds; assertion now reasoned + logged |
 | G6 | `tx_index()` returns 0 for radio | correctness | **DONE** (Pass 142, #91) |
-| G7 | `set_power_auto` semantics differ between backends | spec hygiene | RULING — declared |
+| G7 | `set_power_auto` semantics differ between backends | spec hygiene | **DONE** — no ruling was owed; §10.5 already documents both backends |
 | G8 | Neither RF backend has a unit test | test surface | OPEN — **harness now exists** (Pass 140 `FakeAir`) |
 | **G9** | §3.8 heartbeat suppression was monitor-only | correctness | **DONE** (guard unified, Pass 140) **+ RULING** — §3.8 does not say a TX-less node suppresses; and it cannot fire on radio |
 | B2 | RadioAir cannot build a node without a TX adapter | blocker | **DEAD** — operator ruling: enumerate and decline to inject |
@@ -178,7 +178,18 @@ callers that were previously unreachable on radio:
 
 ---
 
-## G2 — §14.2 JSCC airtime unavailable on radio
+## G2 — §14.2 JSCC airtime unavailable on radio — **DONE (Pass 143)**
+
+> Ruled and landed in #93. Two of the three candidates below were removed by
+> reading the TX path rather than by choosing: devourer's `send_packet` is a
+> **synchronous** bulk-OUT, so there is no submit queue (candidate 1 does not
+> exist) and the pending term is near-zero *by construction*. Candidate 3 is
+> also the §9.10 wedge signal — a wedging radio would read as a deep queue.
+> The model is enabled with `include_pending` ignored, and Pass 56's opt-in
+> posture is kept: an uncalibrated node reads unavailable, never optimistic.
+> §14.2 now states the efficiency figure is per transport — the monitor seed
+> does not carry over and must be re-derived on devourer.
+
 
 `io/src/config.cpp:1013-1018` rejects `airtime_efficiency_permille` for any
 backend except kernel-monitor, and `AirBackend::estimate_airtime_us`
@@ -204,7 +215,14 @@ posture — a devourer node with no calibration should read *unavailable*, not
 
 ---
 
-## G3 — CSA retune is commanded, not confirmed, on devourer
+## G3 — CSA retune is commanded, not confirmed, on devourer — **DONE (Pass 143)**
+
+> Closed in #92. `retune()` reads `GetSelectedChannel()` back and fails on a
+> mismatch. The read-back is the driver's own record, so it catches a refused
+> or misrouted call and *not* a chip that disagrees with its driver — the same
+> rung `iw` puts kernel-monitor on. RF-level confirmation stays with the
+> §11.6 guard, which was always backend-agnostic.
+
 
 `RadioAir::retune` (`io/src/air_radio.cpp:650-681`) returns `true` unconditionally, because
 devourer's `FastRetune` / `SetMonitorChannel` are `void`.
@@ -225,7 +243,19 @@ fix.
 
 ---
 
-## G4 — `recover()` returns false on radio
+## G4 — `recover()` returns false on radio — **DONE (Pass 143)**
+
+> Closed in #92, and smaller than this section assumed. **`InitWrite` is
+> one-shot**: it unconditionally assigns `_coex_thread`
+> (`jaguar3/RtlJaguar3Device.cpp:207`), so a second call destroys a joinable
+> thread and terminates the process — found by doing it. `recover()` is
+> therefore an RX-loop restart (`StopRxLoop` → join → `SetMonitorChannel` →
+> `StartRxLoop`), not the MAC/PHY bring-up kernel-monitor gets. The question
+> this section raised — whether an in-process re-init clears an RTL88x2 USB
+> wedge — is still **unmeasured**, and a full bring-up would need vendored
+> changes (upstream, not here). `AdapterHealth`'s probes were surveyed as
+> suggested; see the H1 note in Pass 143.
+
 
 `app/main.cpp:1606-1625` (`recover_all`) / `io/src/air_radio.cpp:710-715`: Pass 80's one-shot monitor re-init recovery declared
 devourer out of scope.
@@ -247,7 +277,15 @@ survey it before writing a recovery path.
 
 ---
 
-## G5 — `mtu_supported()` is a hardcoded assumption on radio
+## G5 — `mtu_supported()` is a hardcoded assumption on radio — **DONE (Pass 143)**
+
+> Closed by the first of the two routes this section offered. The devourer
+> bounds were identified: **no TX cap at all**, and an RX bulk-IN URB of
+> 16 KiB (floored at 4 KiB). Neither binds at the 3072 B High budget, and
+> waybeam-link never sets `urb_bytes`, so a derived budget could not change
+> the answer. The tier stays asserted — with its reason at the definition and
+> a bring-up log line, so it is visible rather than bare.
+
 
 `AirBackend::mtu_supported()` (`app/main.cpp:1335`) delegates; the assertion is `io/src/air_radio.cpp:750-754` on the
 reasoning that successful `RadioAir` construction proves devourer accepted
@@ -270,7 +308,15 @@ convention — a real bug the moment a devourer ground lists its uplink second.
 
 ---
 
-## G7 — `set_power_auto` semantics differ between backends
+## G7 — `set_power_auto` semantics differ between backends — **DONE (no ruling owed)**
+
+> This entry was wrong. §10.5 (`PROTOCOL.md:2170`) already describes both
+> halves — radio does a one-shot offset 0 then resumes the §10.2 curve
+> resolve; kernel-monitor restores the driver default via `txpower auto` —
+> and the code matches. Nothing was undeclared. The mirror image of G9, where
+> this register asserted a rule the spec did not carry: a register is a claim
+> *about* the spec, and claims in both directions need checking.
+
 
 `io/src/air_radio.cpp:717-722`: monitor calls `iw txpower auto` (driver default /
 per-rate TXAGC curve); radio calls `set_power_qdb(adapter, 0)` — offset zero
@@ -501,22 +547,17 @@ landed (Pass 140), so the two items that used to sit at either end of this list
 are gone. Ordering is now by **what the TX role needs**, since that is the role
 devourer is taking.
 
-1. **G3 + G4** together: "commanded, not confirmed" and "no recovery path" are
-   the same weakness seen from two sides, and a TX node is where a
-   half-applied retune actually costs something.
-2. **G5** — small; assert-vs-probe on a tier that is currently asserted.
-3. **G2 / G7** — after their rulings. Both are declared on `AirIface` now, so
-   the code change is bounded and the open part is genuinely the decision.
-4. **The two G1 leftovers** (see that section): the unguarded claim-during-sweep
-   race, and the RULING on whether the sweep widen is node-wide or
-   scout-adapter-scoped. Neither blocks the above.
-5. **B3** — hardware, runs in parallel.
-6. **H1** — a per-unit acceptance check at the intended MCS, needed before a
+1. **The G1 leftover**: the unguarded claim-during-sweep race. The widen-scope
+   question was ruled node-wide (Pass 143, §15.5a amended); what stays open is
+   that the §2 selector, CSA follower and discovery view are not net_id-scoped
+   during a sweep.
+2. **B3** — hardware, runs in parallel.
+3. **H1** — a per-unit acceptance check at the intended MCS, needed before a
    pure-devourer TX fleet ships, not before any of the above lands.
-7. **G8** — narrower than when written; the devourer decode path, following the
+4. **G8** — narrower than when written; the devourer decode path, following the
    `FakeAir` shape rather than a second harness.
 
-**Not on this list any more:** G0 (closed), G1/G6 (Pass 142), G9 (fixed in
+**Not on this list any more:** G0 (closed), G1/G6 (Pass 142), G2/G3/G4/G5/G7 (Pass 143), G9 (fixed in
 Pass 140), B2 (dead by ruling), H2 (settled and measured), and the interface
 collapse itself.
 

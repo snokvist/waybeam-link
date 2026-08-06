@@ -290,6 +290,23 @@ int main() {
             "arq_mode":"sometimes"}]})", "idr-only");
     }
 
+    // §14.2 Pass 143: the authored calibration is a transport-efficiency
+    // measurement, so it is valid on the radio backend too — and still
+    // rejected on the udp bench transports (below).
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 7, "role": "rx"},
+          "air": {"kind": "radio", "airtime_efficiency_permille": 550},
+          "adapters": [
+            {"name": "uplink", "bus": "1-1", "role": "tx", "channel": 5805}
+          ]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->air.kind == AirCfg::Kind::kRadio);
+            CHECK_EQ_U(r.value->air.airtime_efficiency_permille, 550);
+        }
+    }
+
     // --- air "kernel-monitor" backend + adapter ifname ---------------------
     {
         auto r = load_config_json(R"({

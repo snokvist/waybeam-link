@@ -6360,3 +6360,153 @@ The node boots correct and is broken *by the sweep that was supposed to widen
 it* — and it stays broken, since nothing restores accept-any until a restart.
 Harness: `run_anynet.sh` with `rx-anynet.json`, or `start.sh <arm>` +
 `windows.sh` against an already-running pair.
+
+## Pass 143 — two rulings taken, and an H1 probe that could not run (2026-08-06)
+
+Pass 142 surfaced two places where the code and `PROTOCOL.md` disagreed and
+declined to pick. Both are now operator-ruled (2026-08-06), so the spec moves
+to match the implementation rather than the other way round.
+
+**§15.5a — the sweep widen is node-wide.** The spec said *the scout adapter*
+ignores its `net_id` filter; both backends drop it on every ear (`MonAir`
+re-attaches BPF per adapter, `RadioAir` shares one atomic across RX threads).
+Per-adapter filter state would be new machinery in both for no measured
+benefit, so the spec now says node-wide. **The consequence is written down
+rather than left implied:** for the sweep's duration a diversity ear on the
+resting channel admits foreign-`net_id` frames into the §2 selector, the §11
+CSA follower and the §15.5 discovery view. The *survey* is scoped to the scout
+adapter; those three consumers are not. That exposure is a separate open item —
+ruling on the widen is not a ruling that the exposure is fine.
+
+**§3.8 — a node with no TX adapter does not beat.** The register asserted this
+as "a rule"; §3.8 said "every node emits HEARTBEAT at 1 Hz while otherwise
+quiet" and named grounds and quiet rx as the nodes the path serves. The
+behaviour has shipped since Pass 140 (`AirIface::has_tx()`), so this ruling
+records what the code does and removes the contradiction. It cannot fire on
+devourer, whose `has_tx()` is unconditionally true.
+
+**H1: the discriminating probe does not exist for this chip.** The vendored
+`AdapterHealth.h` describes a failure mode that matches the suspect unit
+closely — a chip that enumerates fine and inits green while its EFUSE reads
+return stochastic content, so the driver loads the wrong RFE/PA/LNA tables,
+which is what a unit that transmits but cannot sustain 64-QAM would look like.
+Ran `examples/doctor` against both bench adapters:
+
+| adapter | bring-up | efuse stability | fw boot | rx smoke | verdict |
+|---|---|---|---|---|---|
+| 8822EU (H1 suspect) | yes | **not probed — unsupported on this chip** | checksum + MCU ready | 10 ok / 0 corrupt | HEALTHY |
+| 8812CU (control) | yes | 8 reads, 0 mismatched, id `0x8129` | checksum + MCU ready | 8 ok / 0 corrupt | HEALTHY |
+
+`ProbeEfuseStability` is wired for the Jaguar3 `C8822C` variant and not for
+`C8822E`, so the one probe that would test the standing hypothesis is the one
+that cannot run on the unit it was meant for. **H1 is therefore neither
+confirmed nor refuted** — the card is not dying by any probe that does run, and
+the EFUSE question is untested rather than answered. Closing it would mean
+wiring the Jaguar3-E map reader, which is vendored code and out of bounds here;
+upstream is the right venue.
+
+One caps difference worth recording while it is in hand: devourer reports
+`txpwr_step_measured: 0` and `txpwr_rate_diffs_measured: 0` for the 8822E and
+`1`/`1` for the 8822C. The per-rate TXAGC path on 8822E is unvalidated in the
+driver. That is a per-*family* attribute and the craft's 8822E does deliver
+MCS4–7, so it does not explain a per-unit difference — but it is the first
+asymmetry found between the two Jaguar3 variants that touches exactly the
+mechanism H1 is about.
+
+**G3 — a retune that can report failure.** `RadioAir::retune` answered `true`
+unconditionally, because devourer's `FastRetune`/`SetMonitorChannel` are `void`
+— a devourer node could report COMMITTED with nothing applied.
+`GetSelectedChannel()` returns the driver's own record of where it put the
+radio, so a mismatch now fails the retune: an unsupported channel, a generation
+whose `FastRetune` no-ops, a width the chip declined. **This is bookkeeping, not
+RF** — it cannot see a half-applied retune where the chip disagrees with the
+driver — but that is precisely the confidence `iw` gives kernel-monitor, so the
+two backends now sit at the same rung, and the RF-level check remains the §11.6
+RX-liveness guard, which is backend-agnostic.
+
+**G4 — and the vendored constraint that shaped it.** The obvious recovery is
+the devourer analogue of kernel-monitor's `ip link down/up`: stop the RX loop,
+join it, re-run `InitWrite`, restart. That crashes the process.
+`RtlJaguar3Device::InitWrite` unconditionally assigns `_coex_thread`
+(`RtlJaguar3Device.cpp:207`), so a second call destroys a joinable thread and
+`std::terminate`s — measured on the bench, not read:
+
+    csa: RX SILENT 4000 ms after retune to 5745 MHz — half-applied retune …
+    TRACE recover: joined
+    terminate called without an active exception
+
+**`InitWrite` is one-shot.** The restartable surface devourer documents is
+`StartRxLoop` (`IRtlDevice.h:58`) plus `SetMonitorChannel`, and that is what
+`recover()` uses. So this is an RX-path restart, not a MAC/PHY bring-up: weaker
+than the kernel-monitor path by measurement rather than by omission, and it is
+not a USB-level reset either — whether any in-process re-init clears the
+RTL88x2 wedge that `CLAUDE.md` says needs a physical re-plug is still unmeasured.
+Counters survive the restart deliberately; `rx_frames` is the guard's own
+liveness baseline and zeroing it would forge liveness.
+
+Device-verified end to end. The first attempt could only ever show two legs of
+three: hopping the craft to an empty channel does not silence it on a bench
+where the peer is a metre away and bleeds across 60 MHz. Silencing the *peer*
+and making the retune a same-channel no-op — whose only job is to arm the guard
+— puts all three in one run:
+
+| leg | craft RX over 6 s |
+|---|---|
+| 1. peer up | +6 |
+| 2. peer stopped | **+0** |
+| 3. `POST /api/v1/channel {5805}` | guard fires → `RX-liveness recovery on "cu-tx" -> 5805 MHz ok` |
+| 4. peer restarted | **+6** |
+
+Leg 4 is the claim: a stopped, joined and restarted RX loop still delivers, at
+the same rate. Harness: `docs/data/pass143-hw/run_g4b.sh`.
+
+**G5 — asserted, but no longer bare.** Kernel-monitor reads each netdev MTU
+because the kernel path is what would reject or fragment an oversized frame.
+There is no netdev on the devourer path — frames go as raw MPDUs straight to
+bulk-OUT — so the question is what devourer itself bounds. Two bounds exist:
+
+- **TX: none.** `send_packet` sizes its TXDMA block from the frame
+  (`jaguar3/RtlJaguar3Device.cpp:1713`) and imposes no length cap.
+- **RX: the bulk-IN URB** (`DeviceConfig::Rx::urb_bytes`), default 16 KiB and
+  floored at 4 KiB, because an aggregate must not span two URBs.
+
+Neither binds at §9.3a's 3072-byte High budget — the *floor* of the tighter one
+clears it by a third. waybeam-link never sets `urb_bytes`, so deriving the
+budget from it would be a computation that can never change the answer; the
+tier stays asserted. What changes is that the assertion now carries its reason
+at the definition and prints one line at bring-up, the way the monitor path
+prints its netdev derivation, so a boot log shows what each backend chose and
+why. The register asked for "the devourer equivalent bound identified and read,
+or a ruling that construction success is the evidence" — this is the first: the
+bounds were found, and they do not bind.
+
+**G2 — §14.2 airtime on radio, ruled and landed.** The register offered three
+candidates for replacing kernel-monitor's `SIOCOUTQ` pending-bytes term.
+Reading the TX path removed the choice from two of them: devourer's
+`send_packet` is a **synchronous** bulk-OUT (`RtlJaguar3Device.cpp:1701-1709`)
+that returns only once the transfer has completed or failed. There is no submit
+queue to read — candidate 1 does not exist — and the pending term is near-zero
+*by construction*, not by approximation. Candidate 3 (`tx_submitted -
+tx_reports`) is a real in-flight measure but is also the §9.10 wedge signal, so
+a wedging radio would read as a deep queue and inflate the estimate exactly
+when the link is failing; two meanings on one counter.
+
+Operator-ruled 2026-08-06: **enable the model, without a pending term.**
+`air.airtime_efficiency_permille` is now valid on either RF backend and
+`include_pending` is ignored on radio. Pass 56's posture is preserved
+deliberately — an uncalibrated devourer node reads `airtime_unavailable` rather
+than falling back to an optimistic default — and §14.2 now says the efficiency
+figure is per transport, so the 600-permille monitor seed does not carry over
+and must be re-derived on devourer before the model means anything there.
+
+**G7 needed no ruling — it was already ruled.** The register called
+`set_power_auto`'s backend asymmetry "an undeclared asymmetry currently living
+in a `main.cpp` comment". §10.5 (`PROTOCOL.md:2170`) has described both halves
+for some time: *"on the radio backend a one-shot offset 0 undoes the latch,
+then the §10.2 curve resolve resumes when a curve is loaded; on kernel-monitor
+the driver default is restored via `txpower auto`"*. The behaviour matches the
+spec exactly. Only the register entry and a code comment claiming a ruling was
+owed were wrong; both corrected. Worth noting as a pattern in the other
+direction from G9 — there the register asserted a rule the spec did not carry;
+here it reported a gap the spec had already closed. A register is a claim about
+the spec, and claims in both directions need checking.
