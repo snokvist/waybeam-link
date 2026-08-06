@@ -2320,6 +2320,24 @@ CALIBRATION STALE (§15.3) — a curve calibrated for different hardware is
 never silently applied. Re-run on any pairing change (craft adapter, ground
 adapter set, antennas).
 
+**Adapter identity is per-actuator and must be stable across a re-plug**
+(operator-ruled 2026-08-06, Pass 146). The two backends drive different
+actuators — kernel-monitor writes nl80211 fixed power, devourer writes an
+offset relative to the efuse per-rate table — so a curve measured under one is
+**not** valid under the other, and the identity deliberately differs by backend
+so a mismatch reads STALE rather than being applied. Resolution order:
+
+1. `adapters[].calib_id`, when the operator sets it — an explicit name for a
+   physical adapter, and the only option for a dongle whose serial is blank or
+   duplicated across a fleet.
+2. `ifname/<MAC>` on kernel-monitor, read from the netdev.
+3. `serial/<usb-serial>` on devourer, read from the USB device.
+4. `bus/<bus-port>` as a last resort, **logged as unstable**: USB bus paths
+   shuffle on any re-plug, so an artifact keyed this way goes stale the next
+   time the dongle is moved, and the node silently boots with no curve.
+
+Before Pass 146 the devourer case was (4) alone.
+
 **A run that found no wall anywhere measured nothing (Pass 134).** §10.6 scores
 every dwell from LINK_REPORTs, so its result is only as good as the return
 path, and a *starved* return path fails in the most dangerous direction: fewer
