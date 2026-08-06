@@ -7525,3 +7525,56 @@ is radio-only — that asymmetry is why the ground's uplink never went through t
 Not yet on device. The craft currently holds the equivalent value as a volatile
 §10.5 latch (`qdb: -16`); the config key is what makes it survive a restart, and
 `-24` is the shipped seed.
+
+**Pass 150 review findings — the implementation was half-done (2026-08-06).**
+An adversarial review of the first cut found four CRITICAL paths still on the
+old absolute actuator. The pattern is worth naming: the relative contract was
+added *alongside* the absolute one rather than replacing it, and the paths left
+behind were the ones that actually run.
+
+1. **The §10.4 commit resolve.** `resolve_and_apply_power` wrote §10.2 curve
+   values through `apply_power`, so on any node with a `power_map` the first
+   profile commit after boot would overwrite the −24 boot offset with a
+   60…108 qdb curve entry — reinterpreted as **+15…+27 dB**. The boot offset
+   was correct and did not survive contact with the selector. The §10.2 curve
+   is now REFUSED on a relative backend until it is re-based into offset space.
+2. **The §10.6 sweep**, which drives `apply_power` from `min_qdb` to
+   `min(108, max_power_qdb)` — and is bound only when `is_radio()`, making it
+   *devourer-exclusive* and therefore entirely in offset space. It would have
+   walked +1 dB → +27 dB, **RF-triggerable** via `vcmd_id::kCalibrate`, with no
+   downstream clamp before the chip's own ±126 qdb rail. Calibration start now
+   refuses on a relative backend.
+3. **The calibration restore leaf** (`no_wall_found`, which Pass 134 made a
+   routine outcome) called `apply_power_auto` → offset 0: the compressing
+   point. `clear_power_override` had been fixed; its sibling had not.
+4. **The entire ground uplink.** `apply_boot_power_offsets` had exactly one
+   call site, in `run_tx`. The ground's `upwr.apply_qdb` still wrote absolute,
+   `upwr.apply_auto` landed on offset 0 every boot, and `:8092`'s latch was
+   unbounded. The spec sentence "every `role:"tx"` adapter" was false for half
+   the fleet. Now converted, bounded and boot-offset applied.
+
+Also fixed: actuator failures were discarded, so `set_power_override` latched
+and reported a value the radio had refused (reachable — `MonAir` returns false
+with no reference); the boot log asserted an offset it had not necessarily
+applied; §11.6 recovery on kernel-monitor ends in `txpower auto` and
+`reassert_power` restored nothing without a latch or curve, permanently losing
+the boot offset — the boot offset is now the floor of that precedence;
+`power_tier_effective()` still claimed a tier was effective on the strength of
+a held latch it no longer clamps; and `max_power_qdb` is now range-checked
+(−40…120), because the pre-150 "disable the ceiling" idiom of `2000` shipped in
+two sample configs and the §15.2 example, which as a kernel-monitor *reference*
+means 500 dBm handed to `iw`.
+
+Test debt the review surfaced: `PowerSpy` funnelled both actuators into one
+vector, so **no test could distinguish an absolute write from an offset one** —
+the entire subject of this pass. They are recorded separately now, and a
+regression test pins that a commit on a relative backend reaches hardware with
+neither.
+
+Left deliberately: `max_power_qdb` still clamps `power_presets_qdb` at load and
+seeds `PowerTarget::ceiling`, so the "accepted with a warning and ignored"
+wording overstates what the code does on devourer today. The tier re-basing
+that would resolve it belongs with the calibrate-up rework. Also unresolved and
+now recorded: §15.3 `tx_power_qdb` carries an offset on the craft and an
+absolute on the ground with no schema signal, and waybeam-hub's WebUI consumes
+it — a cross-repo change, not fixable here.

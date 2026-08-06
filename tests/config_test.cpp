@@ -24,7 +24,7 @@ const char* kSample = R"({
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
       "channel": 5805, "bw": 20,
       "power_map": "/etc/waybeam-link/power.wlan0.txt",
-      "max_power_qdb": 2000,
+      "max_power_qdb": 108,
       "power_presets_qdb": [60, 76, 84] },
     { "name": "wlan1", "bus": "1-1.3", "role": "rx", "channel": 5805, "bw": 20 }
   ],
@@ -104,7 +104,7 @@ int main() {
             CHECK_EQ_U(c.adapters[0].channel_mhz, 5805);
             CHECK_EQ_U(c.adapters[0].bw, 20);
             CHECK(c.adapters[0].max_power_qdb.has_value() &&
-                  *c.adapters[0].max_power_qdb == 2000);
+                  *c.adapters[0].max_power_qdb == 108);
             CHECK(!c.adapters[1].max_power_qdb.has_value());
             // §11.7 0x0A (Pass 135): all three sit under max_power_qdb, so
             // none is clamped and the list survives verbatim.
@@ -1057,13 +1057,13 @@ int main() {
         CHECK(bool(r));
         if (r) {
             CHECK_EQ_U(r.value->adapters[0].power_presets_qdb.size(), 3);
-            CHECK(r.value->adapters[0].power_presets_qdb[2] == 2000);
+            CHECK(r.value->adapters[0].power_presets_qdb[2] == 108);
         }
     }
     {
         // No ceiling configured: nothing to clamp against, list kept as-is.
         auto r = load_config_json(
-            subst(kSample, "\"max_power_qdb\": 2000,", ""));
+            subst(kSample, "\"max_power_qdb\": 108,", ""));
         CHECK(bool(r));
         if (r) {
             CHECK(!r.value->adapters[0].max_power_qdb.has_value());

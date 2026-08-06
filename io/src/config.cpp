@@ -190,6 +190,19 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (a.contains("max_power_qdb")) {
                 ac.max_power_qdb = a.at("max_power_qdb").get<int32_t>();
+                // §10.3 (Pass 150): this is now kernel-monitor's absolute
+                // REFERENCE, fed to `iw txpower fixed (ref + offset)`. The
+                // pre-150 "disable the ceiling" idiom of a huge value (the
+                // sample configs shipped 2000 = 500 dBm) would hand the driver
+                // a nonsense absolute, so the range is now enforced.
+                if (*ac.max_power_qdb < -40 || *ac.max_power_qdb > 120) {
+                    return Result<Config>::fail(
+                        "adapter " + ac.name + ": max_power_qdb " +
+                        std::to_string(*ac.max_power_qdb) +
+                        " out of range -40..120 qdb — since Pass 150 this is "
+                        "the kernel-monitor absolute reference, not a ceiling "
+                        "(§10.3/§10.5)");
+                }
             }
             // §10.5 (Pass 150): relative offset + its bound. Parsed for every
             // adapter; only role:"tx" ever applies them.

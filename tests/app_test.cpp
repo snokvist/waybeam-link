@@ -78,17 +78,24 @@ PowerCurve flat_curve(int32_t qdb) {
 // sits somewhere else is exactly the class of bug this file exists for.
 struct PowerSpy {
     std::vector<std::pair<size_t, int32_t>> applied;
+    std::vector<std::pair<size_t, int32_t>> offsets;   // apply_power_offset
+    std::vector<std::pair<size_t, int32_t>> absolutes; // apply_power (§10.2)
     int autos = 0;
     void attach(TxCore& tx) {
         tx.apply_power = [this](size_t idx, int32_t qdb) {
             applied.emplace_back(idx, qdb);
+            absolutes.emplace_back(idx, qdb);
             return true;
         };
         tx.apply_power_auto = [this](size_t) { ++autos; };
-        // §10.5 (Pass 150): the relative actuator is what the latch and the
-        // boot offset now drive; apply_power stays the §10.2 curve path.
+        // §10.5 (Pass 150): record the two actuators SEPARATELY. They share a
+        // signature and, on devourer, the same register write with opposite
+        // documented meanings — so a test that funnels both cannot tell an
+        // absolute write from an offset one, which is this pass's whole
+        // subject.
         tx.apply_power_offset = [this](size_t idx, int32_t qdb) {
             applied.emplace_back(idx, qdb);
+            offsets.emplace_back(idx, qdb);
             return true;
         };
     }
@@ -101,7 +108,7 @@ struct PowerSpy {
     int32_t last_qdb() const {
         return applied.empty() ? INT32_MIN : applied.back().second;
     }
-    void clear() { applied.clear(); autos = 0; }
+    void clear() { applied.clear(); offsets.clear(); absolutes.clear(); }
 };
 
 // ---- §10.3/§11.7 0x0A power tier -------------------------------------------
@@ -250,6 +257,38 @@ void test_auto_restores_safe_offset_not_backend_default() {
     tx.clear_power_override();
     CHECK(!spy.empty());
     CHECK(spy.last_qdb() == -24);  // the safe offset, not 0
+}
+
+// §10.5 (Pass 150) CRITICAL regression: the §10.2 curve holds ABSOLUTE qdb,
+// so on a relative backend a single profile commit would rewrite the boot
+// offset with 60..108 qdb reinterpreted as +15..+27 dB — reinstating exactly
+// the overdrive this pass removes. The curve must be refused there, and the
+// boot offset must be the only thing that ever reached the actuator.
+void test_curve_refused_on_relative_backend() {
+    Config c = one_tx_config(108, {});
+    c.adapters[0].power_offset_qdb = -24;
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+    tx.set_backend_relative(true);
+    tx.install_curve(flat_curve(108));
+
+    tx.apply_boot_power_offsets();
+    spy.clear();
+    tx.resolve_and_apply_power(5, 4);   // a §10.4 commit
+
+    CHECK(spy.absolutes.empty());       // no absolute write reached hardware
+    CHECK(spy.offsets.empty());         // and the commit did not re-offset
+
+    // On an absolute backend the same curve DOES resolve — the refusal is
+    // scoped to the backend, not a disabling of §10.2.
+    TxCore mon(c, 1, nullptr, 0);
+    PowerSpy mspy;
+    mspy.attach(mon);
+    mon.set_backend_relative(false);
+    mon.install_curve(flat_curve(108));
+    mon.resolve_and_apply_power(5, 4);
+    CHECK(!mspy.absolutes.empty());
 }
 
 // §10.3 Pass 136. A running §10.6 sweep owns the power actuator, and applying
@@ -722,6 +761,7 @@ int main() {
     test_override_is_bounded_and_rejected_not_clamped();
     test_boot_offset_applied_to_every_tx_adapter();
     test_auto_restores_safe_offset_not_backend_default();
+    test_curve_refused_on_relative_backend();
     test_tier_refused_during_calibration();
     test_power_tier_json_shape();
     test_uplink_unowned_goes_to_backend_auto();

@@ -2600,6 +2600,13 @@ struct TxCore {
                 if (!calibrator_) return false;
                 if (arg == 1) {
                     if (!apply_power) return false;  // udp: logged intent only
+                    // §10.5 (Pass 150): the §10.6 sweep drives ABSOLUTE qdb
+                    // rungs (up to max_power_qdb, 108 on both flying configs).
+                    // On a relative backend those are offsets — the sweep would
+                    // walk +1 dB to +27 dB of boost, RF-triggerable, with no
+                    // downstream clamp until the chip's own ±126 qdb rail.
+                    // Refuse until §10.6 is re-based into offset space.
+                    if (backend_relative_) return false;
                     if (report_gate_.latched_originator() == 0) return false;
                     // §10.6 (Pass 134): feedback health, measured on the link
                     // AT REST. §10.6 scores every dwell from §3.5 reports, so
@@ -2901,6 +2908,21 @@ struct TxCore {
     // §10.4 curve resolve for the committed operating point, through the
     // change-detection cache (apply only when the resolved value moves).
     void resolve_and_apply_power(uint8_t mcs, uint8_t level) {
+        // §10.5 (Pass 150): the §10.2 curve holds ABSOLUTE qdb. On a relative
+        // backend those numbers are offsets — a 108 qdb curve entry is +27 dB
+        // — so a single profile commit would silently undo the boot offset and
+        // reinstate the overdrive this pass exists to remove. Refuse until the
+        // curve is re-based into offset space with §10.6.
+        if (backend_relative_ && !power_.empty()) {
+            if (!warned_curve_refused_) {
+                warned_curve_refused_ = true;
+                std::fprintf(stderr,
+                             "power: §10.2 curve REFUSED on a relative backend "
+                             "(§10.5 Pass 150) — power_map holds absolute qdb; "
+                             "running on the §10.5 boot offset instead\n");
+            }
+            return;
+        }
         for (PowerAdapter& pa : power_) {
             const auto qdb =
                 resolve_power_qdb(pa.curve, mcs, level, pa.ceiling);
@@ -3007,13 +3029,17 @@ struct TxCore {
     // while one is held the tier plainly reaches hardware even with no curve
     // — device-shown, tier 0 (ceiling 60) clamping a 120 qdb latch to 15 dBm
     // while `effective` claimed the tier bound nothing.
+    // §10.5 (Pass 150): a held latch no longer passes through the §10.3
+    // ceiling — set_power_override does not read t.ceiling at all — so a tier
+    // cannot claim to be effective on the strength of one.
     bool power_tier_effective() const {
-        return has_power_curve() || power_override_.has_value();
+        return has_power_curve();
     }
 
-    // §10.5 (Pass 114) override-latch: latch an absolute qdb on every tx
-    // adapter; the §10.4 commit resolve yields until cleared. Ceiling-clamped
-    // per adapter (§10.3) — nothing else bounds it.
+    // §10.5 (Pass 150) override-latch: latch a RELATIVE offset on every tx
+    // adapter; the §10.4 commit resolve yields until cleared. Bounded by
+    // power_offset_max_qdb and rejected past it — the §10.3 ceiling no longer
+    // clamps it, because on an offset backend it clamped the offset.
     // §10.5 (Pass 150): the latch is a RELATIVE offset, bounded by each
     // adapter's power_offset_max_qdb and REJECTED past it — never silently
     // clamped. The old min(qdb, max_power_qdb) clamp is gone: on an offset
@@ -3025,15 +3051,22 @@ struct TxCore {
         for (const PowerTarget& t : power_targets_) {
             if (qdb > t.offset_max_qdb) return false;
         }
-        power_override_ = qdb;
+        // A node with no tx adapter has no bound to check against; latching
+        // an unbounded value there would report authority nobody holds.
+        if (power_targets_.empty()) return false;
+        bool all_ok = true;
         for (const PowerTarget& t : power_targets_) {
             if (apply_power_offset) {
-                apply_power_offset(t.adapter_idx, qdb);
+                all_ok = apply_power_offset(t.adapter_idx, qdb) && all_ok;
             } else {
                 std::fprintf(stderr, "power: %s offset -> %+d qdb\n",
                              t.name.c_str(), static_cast<int>(qdb));
             }
         }
+        // §15.3 must not report a latch the radio refused (air_iface.h: a
+        // false return means the caller must not cache it as applied).
+        if (!all_ok) return false;
+        power_override_ = qdb;
         return true;
     }
 
@@ -3043,13 +3076,17 @@ struct TxCore {
     // operating point on the fleet's 8822EU.
     void apply_boot_power_offsets() {
         for (const PowerTarget& t : power_targets_) {
-            if (apply_power_offset) {
-                apply_power_offset(t.adapter_idx, t.offset_qdb);
-            }
+            const bool ok =
+                apply_power_offset && apply_power_offset(t.adapter_idx,
+                                                         t.offset_qdb);
+            // Say what happened. A safety control that logs an intent it did
+            // not achieve is worse than one that logs nothing.
             std::fprintf(stderr,
-                         "power: %s §10.5 boot offset %+d qdb (bound %+d)\n",
+                         "power: %s §10.5 boot offset %+d qdb (bound %+d) -> "
+                         "%s\n",
                          t.name.c_str(), static_cast<int>(t.offset_qdb),
-                         static_cast<int>(t.offset_max_qdb));
+                         static_cast<int>(t.offset_max_qdb),
+                         ok ? "applied" : "NOT APPLIED");
         }
     }
 
@@ -3084,12 +3121,22 @@ struct TxCore {
             set_power_override(*power_override_);
             return;
         }
+        bool any_curve = false;
         for (PowerAdapter& pa : power_) {
             if (pa.applied_qdb && apply_power) {
+                any_curve = true;
                 if (!apply_power(pa.adapter_idx, *pa.applied_qdb)) {
                     pa.applied_qdb.reset();  // §10.5: retry at next commit
                 }
             }
+        }
+        // §10.5 (Pass 150): with no latch and no curve this used to restore
+        // NOTHING, so a §11.6 recovery — which ends in `txpower auto` on
+        // kernel-monitor — permanently lost the boot offset on the default
+        // config. The boot offset is the floor of this precedence, not an
+        // absent case.
+        if (!any_curve) {
+            apply_boot_power_offsets();
         }
     }
 
@@ -3104,6 +3151,12 @@ struct TxCore {
     // §10.5 (Pass 150) relative actuator — bound for EVERY backend, unlike
     // apply_power which is radio-only.
     std::function<bool(size_t adapter_idx, int32_t qdb)> apply_power_offset;
+    // §10.5 (Pass 150): true when the backend's power lever is RELATIVE
+    // (devourer). The §10.2 absolute curve and the §10.6 absolute sweep are
+    // then not merely inaccurate but dangerous — their 60..108 qdb values
+    // become +15..+27 dB of boost — so both are refused until re-based.
+    void set_backend_relative(bool on) { backend_relative_ = on; }
+    bool backend_relative() const { return backend_relative_; }
     std::function<std::optional<uint32_t>(size_t bytes, bool include_pending,
                                           uint16_t packet_budget)>
         estimate_airtime;
@@ -3140,6 +3193,8 @@ struct TxCore {
     int power_tier_ = -1;                         // §11.7 0x0A, -1 = unset
     CalibrationPolicy calib_policy_;              // for a tier re-init
     std::optional<int32_t> power_override_;       // §10.5 latch (volatile)
+    bool backend_relative_ = false;  // §10.5 Pass 150
+    bool warned_curve_refused_ = false;
     std::optional<uint8_t> last_commit_mcs_;      // §10.5 clear-restore point
     uint8_t last_commit_level_ = 4;
     uint32_t reports_received_ = 0;
@@ -3192,7 +3247,7 @@ struct TxCore {
                     resolve_and_apply_power(*last_commit_mcs_,
                                             last_commit_level_);
                 }
-            } else if (apply_power_auto) {
+            } else if (apply_power_offset) {
                 // No curve and no override: no in-process authority knows the
                 // pre-run power, but the BACKEND does — this is exactly the
                 // §10.5 `{"auto": true}` condition ("release power authority
@@ -3205,11 +3260,15 @@ struct TxCore {
                 // the actuator on exactly the runs the refusal exists to
                 // catch. Device-confirmed: a bench-range run left the craft
                 // at 15.00 dBm (rung 7's mask ceiling) indefinitely.
+                // §10.5 (Pass 150): "backend auto" on a relative backend is
+                // offset 0 — the uncharacterised efuse default, measured to be
+                // a compressing operating point. Land on the configured safe
+                // offset instead, matching clear_power_override().
                 for (const PowerTarget& t : power_targets_) {
-                    apply_power_auto(t.adapter_idx);
+                    apply_power_offset(t.adapter_idx, t.offset_qdb);
                 }
                 std::fprintf(stderr,
-                             "calibrate: restore -> backend auto "
+                             "calibrate: restore -> safe offset "
                              "(no curve, no override)\n");
             } else {
                 // udp/dev backend: no actuator at all, so there is nothing to
@@ -4191,6 +4250,9 @@ int run_tx(const Loaded& l) {
     tx.apply_power_offset = [&](size_t idx, int32_t qdb) {
         return air.value->set_power_offset_qdb(idx, qdb);
     };
+    // §10.5 (Pass 150): devourer's lever is relative, so the absolute §10.2
+    // curve and §10.6 sweep are refused until they are re-based.
+    tx.set_backend_relative(air.value->is_radio());
     if (air.value->is_radio()) {
         tx.apply_mode = [&](uint8_t mcs, bool sgi) {
             air.value->set_tx_mode(mcs, sgi);
@@ -5257,10 +5319,33 @@ int run_rx(const Loaded& l) {
     // min(qdb, max_power_qdb) per adapter, while GET/§15.3 report the latched
     // request value." UplinkPower::hw_qdb() applies that clamp;
     // reported_qdb() deliberately does not.
+    // §10.5 (Pass 150): the uplink is a role:"tx" adapter like any other, so
+    // it runs the same relative contract. `set_power_qdb` here would be
+    // absolute on kernel-monitor and an OFFSET on devourer — the divergence
+    // this pass removes — and the ground is the half of the fleet that still
+    // transmits on monitor today.
     upwr.apply_qdb = [&](int32_t q) {
-        (void)air.value->set_power_qdb(uplink_idx, q);
+        (void)air.value->set_power_offset_qdb(uplink_idx, q);
     };
-    upwr.apply_auto = [&] { air.value->set_power_auto(uplink_idx); };
+    // "auto" must land on the configured safe offset, never the backend
+    // default (offset 0 = the uncharacterised efuse point).
+    upwr.apply_auto = [&] {
+        if (uplink_adapter != nullptr) {
+            (void)air.value->set_power_offset_qdb(
+                uplink_idx, uplink_adapter->power_offset_qdb);
+        }
+    };
+    // §10.5 forced safe boot offset, before the uplink carries anything.
+    if (uplink_adapter != nullptr) {
+        const bool ok = air.value->set_power_offset_qdb(
+            uplink_idx, uplink_adapter->power_offset_qdb);
+        std::fprintf(stderr,
+                     "power: %s §10.5 boot offset %+d qdb (bound %+d) -> %s\n",
+                     uplink_adapter->name.c_str(),
+                     static_cast<int>(uplink_adapter->power_offset_qdb),
+                     static_cast<int>(uplink_adapter->power_offset_max_qdb),
+                     ok ? "applied" : "NOT APPLIED");
+    }
     uplink_restore_actuators();
     uplink_pairing_key = uplink_pairing_now();
     if (uplink_adapter != nullptr) {
@@ -6092,6 +6177,13 @@ int run_rx(const Loaded& l) {
                 }
                 if (qdb < -511 || qdb > 511) {
                     return "qdb out of range (-511..511)";
+                }
+                // §10.5 (Pass 150): bounded and REJECTED, not clamped — the
+                // same contract the craft enforces. Without this the ground's
+                // :8092 latch stayed unbounded while the craft's was fixed.
+                if (qdb > uplink_adapter->power_offset_max_qdb) {
+                    return "qdb exceeds power_offset_max_qdb (§10.5); raise "
+                           "the bound to opt in";
                 }
                 upwr.override_qdb = qdb;
                 uplink_restore_actuators();
