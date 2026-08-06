@@ -7433,3 +7433,45 @@ meaningful and composes with Pass 146's backend-scoped calibration identity.
 
 Not yet implemented — this records the agreed shape, and the amendment lands
 with the code that implements it.
+
+**Ruling refinement: safe-by-default, headroom earned by calibration
+(operator-directed 2026-08-06).** The proposal above still let a node boot at
+whatever `power_offset_qdb` said, defaulting to 0. Offset 0 is the **efuse
+default, and this pass measured that it is the compressing point** — 54 ‰
+against 6 ‰ two dB below it. Booting at 0 is therefore booting at an
+uncharacterised, and on the one unit we have measured, actively bad operating
+point. The rule is inverted:
+
+- **Every TX adapter boots at a forced known-safe backoff.** Not the efuse
+  default, not 0. This is unconditional and uniform — no per-backend, per-role
+  or per-node exception, because a rule with exceptions is one somebody's
+  config will find the wrong side of.
+- **Calibration walks the adapter UP from safe to its empirical maximum**, per
+  unit, bounded by `power_offset_max_qdb`. Headroom is earned by measurement,
+  never assumed from a table.
+- **The artifact stores that per-adapter empirical max offset**, composing with
+  Pass 146's backend-scoped calibration identity.
+- **`{"auto": true}` resolves to the calibrated value when a valid artifact
+  exists, otherwise to the safe default — never to the raw efuse default.**
+  Same for the §11.6 recovery path (Pass 48), so an unattended recovery can
+  never drop a node onto the uncharacterised point.
+
+**The sweep direction reverses with it.** The earlier note said to find the
+knee by sweeping down from 0. Under safe-by-default the sweep runs **upward**
+from safe until delivered loss at fixed MCS degrades, which is strictly better:
+the node never operates above the knee except for the single step that finds
+it, and it matches the sweep-from-the-safe-end discipline this session learned
+the hard way when a top-down power sweep froze the link and returned no rows.
+
+**On the cost of a conservative default.** Backing off is not simply trading
+range for safety. On a compressing unit it is a net gain in *both* — this craft
+delivered more frames at −4 dB than at 0 dB, with a tenth of the loss. The
+conservative default only costs anything at genuine range limits, and
+calibration is what buys that back. An uncalibrated node flying slightly short
+is the correct failure direction.
+
+**Open: the seed value.** We have n = 1. −4 dB is measured-good on this
+8822EU; −6 dB would carry margin for a worse-calibrated module at a cost
+calibration recovers anyway. The seed should be recorded as a seed — a number
+chosen from one unit, expected to be wrong for some card, and made not to
+matter by the calibrate-up path.
