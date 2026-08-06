@@ -2327,9 +2327,14 @@ offset relative to the efuse per-rate table — so a curve measured under one is
 **not** valid under the other, and the identity deliberately differs by backend
 so a mismatch reads STALE rather than being applied. Resolution order:
 
-1. `adapters[].calib_id`, when the operator sets it — an explicit name for a
-   physical adapter, and the only option for a dongle whose serial is blank or
-   duplicated across a fleet.
+1. `id/<backend>/<adapters[].calib_id>`, when the operator sets it — an
+   explicit name for a physical adapter, and the only option for a dongle whose
+   serial is blank or duplicated across a fleet. **Scoped by backend**, because
+   unlike the derived tiers below it would otherwise be identical under both:
+   an ifname exists only on kernel-monitor and a bus path only on devourer, but
+   a name the operator chose carries no such distinction, and an unscoped one
+   would apply a monitor-measured curve to devourer's offset actuator without
+   ever reading STALE.
 2. `ifname/<MAC>` on kernel-monitor, read from the netdev.
 3. `bus/<bus-port>` as a last resort, **logged as unstable**: USB bus paths
    shuffle on any re-plug, so an artifact keyed this way goes stale the next

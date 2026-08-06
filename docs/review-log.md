@@ -6812,3 +6812,25 @@ now runs devourer on the same adapter. The fix, if wanted, is to scope tier 1
 by backend (`id/<air.kind>/<calib_id>`), which restores the invariant for all
 three tiers at the cost of one config-visible string change. Left as an
 operator ruling.
+
+**Tier-1 backend scoping, resolved (operator ruling 2026-08-06).** The open
+question above is closed by implementing it: the declared tier is now
+`id/<backend>/<calib_id>`. §10.7 claimed the identity "deliberately differs by
+backend"; tiers 2 and 3 delivered that for free — an ifname exists only on
+kernel-monitor, a bus path only on devourer — but tier 1 broke it, since a name
+the operator chose carries no such distinction.
+
+The craft's own stored artifact is the proof this was worth fixing rather than
+documenting: it reads `"identity":"wlan0/98:03:cf:cf:a4:28"`, a kernel-monitor
+identity measured in June. That adapter now runs devourer. Had `calib_id` been
+set back then, the identity would match today and a curve measured against
+nl80211 fixed power would be applied to devourer's efuse-relative offset —
+silently, with no STALE, which is precisely the failure the fingerprint exists
+to catch.
+
+Blast radius checked before changing a persisted format: the ground keys on
+tier 2 (`ifname`, no `calib_id`), so its hard-won 10 m `fp=110` uplink artifact
+is untouched; the craft's artifact is already stale for unrelated reasons. Only
+the tier that was wrong moved. The backend tag is deliberately not the config
+spelling ("monitor", not "kernel-monitor") — these strings land in a persisted
+artifact and must not move when config wording does.

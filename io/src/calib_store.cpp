@@ -69,12 +69,31 @@ uint8_t fingerprint_of(const std::string& body) {
 
 }  // namespace
 
-std::string calib_identity(const AdapterCfg& adapter) {
+const char* calib_backend_tag(AirCfg::Kind kind) {
+    switch (kind) {
+        case AirCfg::Kind::kRadio:
+            return "radio";
+        case AirCfg::Kind::kMonitor:
+            return "monitor";
+        default:
+            return "udp";
+    }
+}
+
+std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend) {
     // §10.7 (Pass 146). Per-actuator by design — a monitor-measured curve must
     // read STALE on devourer, not be applied — and stable across a re-plug,
     // which the old bus-path form was not.
     if (!adapter.calib_id.empty()) {
-        return "id/" + adapter.calib_id;
+        // Scoped by backend: the derived tiers below distinguish backends for
+        // free (an ifname only exists on monitor, a bus path only on devourer),
+        // but calib_id is operator-chosen and would otherwise be identical
+        // under both — silently applying a monitor curve to devourer's offset
+        // actuator. Live case, not hypothetical: this fleet's craft ran
+        // kernel-monitor before Pass 145 and now runs devourer on the same
+        // physical adapter.
+        return std::string("id/") + calib_backend_tag(backend) + "/" +
+               adapter.calib_id;
     }
     if (!adapter.ifname.empty()) {
         const std::string mac = read_file("/sys/class/net/" + adapter.ifname +
