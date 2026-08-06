@@ -15,13 +15,19 @@
 # The 8822EU is used as the EAR only: it is the H1 suspect unit whose 64-QAM
 # TX is unreliable, and nothing here depends on its transmit path.
 set -u
+#
+# Build the two arms first (the binaries are NOT committed):
+#   git checkout main                 && cmake --build --preset x86-ground \
+#     && cp build/x86-ground/waybeam-link <thisdir>/wl-before
+#   git checkout <the fix>            && cmake --build --preset x86-ground \
+#     && cp build/x86-ground/waybeam-link <thisdir>/wl-after
 
 SP="$(cd "$(dirname "$0")" && pwd)"
 REPO=/home/snokvist/dev/waybeam-coordination/waybeam-link
 DWELL=${DWELL:-1500}
 
 cleanup() {
-    sudo pkill -TERM -f 'g1/wl-(before|after)' 2>/dev/null
+    sudo pkill -TERM -f 'wl-(before|after) (tx|rx) -c' 2>/dev/null
     sleep 2
 }
 trap cleanup EXIT

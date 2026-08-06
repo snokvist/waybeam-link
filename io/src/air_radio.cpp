@@ -117,6 +117,9 @@ struct RadioAir::Impl {
     // (the inject* paths read cfg.stamp_net_id directly). The filter is read
     // by every RX thread in on_packet, so it lives here as an atomic rather
     // than in cfg; -1 encodes "no filter" (hear any net_id), matching MonAir.
+    // cfg.filter_net_id is therefore the BOOT value only — seeded into this
+    // atomic in create() and never read again. Do not surface it as the live
+    // filter.
     std::atomic<int16_t> filter_net_id{-1};
 
     std::optional<uint8_t> filter_opt() const {
@@ -724,9 +727,12 @@ bool RadioAir::set_power_auto(size_t adapter) {
 void RadioAir::set_stamp_net_id(uint8_t net_id) {
     // TX-side identity, read only by the main-thread inject* paths. Every
     // caller today is the ground's §15.5a scout / §11 CSA selection in run_rx.
-    // NOTE the Pass-12 ACK responder (craft half, opt-in) latches its SA —
-    // net_id byte included — at bring-up. A TX node that ever retargets its
-    // stamp at runtime must re-arm it; no such caller exists today.
+    // NOTE the Pass-12 ACK responder (opt-in) latches its SA — net_id byte
+    // included — at bring-up and is never re-armed, so a node that both arms it
+    // and retargets its stamp ends up matching a stale MACID. Unguarded, but
+    // inert: only a ground retargets (every caller is in run_rx) and nothing
+    // unicasts *to* a ground — §3.0 scopes unicast returns to ground→craft.
+    // A craft that ever retargets would have to re-arm.
     impl_->cfg.stamp_net_id = net_id;
 }
 

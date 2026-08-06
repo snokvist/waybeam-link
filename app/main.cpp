@@ -1638,18 +1638,18 @@ struct AirBackend {
         // retunes via iw (Pass 63); the radio backend via devourer. All real.
         return true;
     }
-    // §15.5a scout: widen/narrow the RX net_id filter at runtime (monitor only;
-    // no-op elsewhere) and retune a single adapter (the scout adapter).
+    // §15.5a scout: widen/narrow the RX net_id filter at runtime and retune a
+    // single adapter (the scout adapter). Real on both RF backends since Pass
+    // 142; UdpAir has no §3.0 identity to retarget.
     void set_filter_net_id(std::optional<uint8_t> net_id) {
         iface()->set_filter_net_id(net_id);
     }
     void set_stamp_net_id(uint8_t net_id) {
         iface()->set_stamp_net_id(net_id);
     }
-    // §15.5a scout (Pass 64): index of the uplink adapter the sweep roams. Only
-    // the kernel-monitor backend has a resolvable tx adapter here; the radio/udp
-    // dev backends scout index 0 (their tx is conventionally first, and udp is a
-    // logged-intent no-op anyway).
+    // §15.5a scout (Pass 64): index of the uplink adapter the sweep roams. Both
+    // RF backends resolve it from their adapter set (radio since Pass 142); udp
+    // answers 0, where the retune is a logged-intent no-op anyway.
     size_t tx_index() const {
         return iface()->tx_index();
     }
@@ -4994,11 +4994,15 @@ int run_rx(const Loaded& l) {
         uint16_t originator = 0;
         uint16_t chan = 0;
         uint8_t bw = 0;  // §11 width code
-        uint8_t net_id = 0;
+        // §3.0: nullopt is "unconfigured — accept any net_id", which is a
+        // distinct state from 0 and must survive a claim, a rollback and a
+        // §15.5a sweep. Collapsing it to 0 here made an unconfigured node deaf
+        // to every non-zero net_id the moment a sweep rested.
+        std::optional<uint8_t> net_id;
     };
     LinkSelection active_selection{rx.selected_originator().value_or(0),
                                    op_chan, bw_code(op_bw_mhz),
-                                   l.cfg.node.net_id.value_or(0)};
+                                   l.cfg.node.net_id};
     std::optional<LinkSelection> pending_selection;
     std::optional<LinkSelection> previous_selection;
     std::string selection_state = "configured";
@@ -5351,7 +5355,9 @@ int run_rx(const Loaded& l) {
         a.assignment_epoch = ++cache_assignment_epoch;
         a.target_chan = selected.chan;
         a.target_bw = selected.bw;
-        a.target_net_id = selected.net_id;
+        // §14.3 wire field is a plain uint8_t — a cache assignment carries no
+        // "any net_id" encoding, so an unconfigured link assigns 0.
+        a.target_net_id = selected.net_id.value_or(0);
         next_cache_assignment_ms = 0;
     };
     assign_caches(active_selection);  // startup/restart healing (§14.3 Pass 67)
@@ -5749,7 +5755,7 @@ int run_rx(const Loaded& l) {
                               ",\"bw\":" +
                               std::to_string(active_selection.bw) +
                               ",\"net_id\":" +
-                              std::to_string(active_selection.net_id) +
+                              std::to_string(active_selection.net_id.value_or(0)) +
                               ",\"caches_configured\":" +
                               std::to_string(cache_endpoints.size()) +
                               ",\"caches_following\":" +
@@ -5864,7 +5870,7 @@ int run_rx(const Loaded& l) {
             air.value->set_stamp_net_id(cand->net_id);
             air.value->set_filter_net_id(cand->net_id);
             if (!air.value->retune_all(cand->chan, op_bw_mhz, false)) {
-                air.value->set_stamp_net_id(active_selection.net_id);
+                air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
                 air.value->set_filter_net_id(active_selection.net_id);
                 air.value->retune_all(active_selection.chan, op_bw_mhz, false);
                 return "failed to retune onto craft channel";
@@ -5875,7 +5881,7 @@ int run_rx(const Loaded& l) {
             const CommonPrefix pre{l.cfg.node.originator, 0, session};
             if (!issuer.start(pre, target, 0, 1, cand->chan, 0, 4, now_us_it)) {
                 air.value->retune_all(active_selection.chan, op_bw_mhz, false);
-                air.value->set_stamp_net_id(active_selection.net_id);
+                air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
                 air.value->set_filter_net_id(active_selection.net_id);
                 return "rejected (active campaign or rate-limit)";
             }
@@ -6968,7 +6974,7 @@ int run_rx(const Loaded& l) {
                                               previous_selection->bw,
                                               ia.fast);
                         air.value->set_stamp_net_id(
-                            previous_selection->net_id);
+                            previous_selection->net_id.value_or(0));
                         air.value->set_filter_net_id(
                             previous_selection->net_id);
                         apply_selection(*previous_selection);
@@ -7026,7 +7032,7 @@ int run_rx(const Loaded& l) {
                                              "FAILED\n",
                                      previous_selection->chan);
                     }
-                    air.value->set_stamp_net_id(previous_selection->net_id);
+                    air.value->set_stamp_net_id(previous_selection->net_id.value_or(0));
                     air.value->set_filter_net_id(previous_selection->net_id);
                     apply_selection(*previous_selection);
                     operating_chan = previous_selection->chan;
@@ -7049,7 +7055,7 @@ int run_rx(const Loaded& l) {
                                          "FAILED\n",
                                  active_selection.chan);  // Pass 69
                 }
-                air.value->set_stamp_net_id(active_selection.net_id);
+                air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
                 air.value->set_filter_net_id(active_selection.net_id);
                 operating_chan = active_selection.chan;
                 selection_state = previous_selection_state;

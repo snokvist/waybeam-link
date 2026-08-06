@@ -10,12 +10,6 @@
 #   sweep   — filter wide: rx_frames advances
 #   after   — sweep stopped: back to rx_filtered only
 set -u
-#
-# Build the two arms first (the binaries are NOT committed):
-#   git checkout main                 && cmake --build --preset x86-ground \
-#     && cp build/x86-ground/waybeam-link <thisdir>/wl-before
-#   git checkout <the fix>            && cmake --build --preset x86-ground \
-#     && cp build/x86-ground/waybeam-link <thisdir>/wl-after
 
 SP="$(cd "$(dirname "$0")" && pwd)"
 REPO=/home/snokvist/dev/waybeam-coordination/waybeam-link
@@ -26,7 +20,7 @@ cleanup
 
 (cd "$REPO" && sudo setsid "$SP/wl-after" tx -c "$SP/tx.json" >/dev/null 2>"$SP/r-tx.log" </dev/null &)
 sleep 6
-(cd "$REPO" && sudo setsid "$SP/wl-after" rx -c "$SP/rx.json" >/dev/null 2>"$SP/r-rx.log" </dev/null &)
+(cd "$REPO" && sudo setsid "$SP/wl-after" rx -c "$SP/rx-anynet.json" >/dev/null 2>"$SP/r-rx.log" </dev/null &)
 sleep 6
 
 sample() { curl -s localhost:8099/api/v1/stats; }
