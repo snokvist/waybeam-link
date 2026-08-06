@@ -377,6 +377,7 @@ rulings do not — they can be taken at any time and cost nothing but a decision
 
 - 1a. Feature options B6, the export/install package B7, and an `android-arm64`
   compile-only preset B12. Gate: every existing preset byte-identical.
+  **Scoped and measured — see §4.1.**
 - 1b. Device-source abstraction B1, `lock_dir` B5, `do_reset` B4. Gate: the
   x86 bench path unchanged; a wrapped-fd path that compiles and is exercised by
   the Android consumer.
@@ -397,6 +398,52 @@ rulings do not — they can be taken at any time and cost nothing but a decision
 delete `:wifi`'s duplicated devourer vendoring and CMake shim, and keep the
 survey/inspect JNI surface (it is genuinely useful and has no waybeam-link
 equivalent).
+
+### 4.1 Phase 1a, scoped
+
+Phase 1a is the piece that can start immediately — it is orthogonal to #92
+(§3.0) and it is the gate that settles the three unverified portability claims.
+It is also **much smaller than B6 makes it sound**, which is worth recording
+because the estimate would otherwise be wrong by an order of magnitude.
+
+The four optional units are **leaves**. Measured, not assumed:
+
+- Nothing else in `io/` includes `air_mon.h`, `frame_shm.h`, `wblink/venc.h`
+  or `control_server.h`. The single `MonAir` mention in `io/src/air_radio.cpp:111`
+  is a comment.
+- `io/src/udp.cpp` touches frame-shm only as a `BindKind::kFrameShm` enum check
+  (`:246` — "frame-shm streams are owned by the app, not by BindingSet"). It
+  never calls into `FrameShmRing`.
+- `io/src/config.cpp`'s ~13 frame-shm references are all the enum and its
+  validation messages. Also no API use.
+- `control_server.cpp` and `venc_http.cpp` depend only on `binding.h`
+  (`split_host_port`).
+
+**So the library half of 1a is CMake-only: four options and four
+`target_sources()` guards, with zero source edits in `io/`.** A `BindKind` a
+build cannot construct becomes a runtime config error, which is the honest
+outcome and needs no new machinery.
+
+The one wrinkle is `app/main.cpp`, which references all four unconditionally
+(`MonAir` ×6, `FrameShm`/`ShmOut` ×27, `ControlServer` ×6). Guarding *those*
+would be real surgery — and it is unnecessary, because **Android links
+`wblink_io` + `wblink_core`, not the executable.** Add a fifth option
+`WBLINK_BUILD_APP` (default ON) and have the `android-arm64` preset turn it
+off; `app/main.cpp` is then untouched by the whole phase. The `#if WBLINK_RADIO`
+sites already in `app/main.cpp` (6 of them) show the alternative if the daemon
+ever does need to build without a subsystem — the precedent exists, it just
+should not be spent here.
+
+Acceptance for 1a:
+
+- `WBLINK_MON`, `WBLINK_FRAME_SHM`, `WBLINK_CONTROL_SERVER`, `WBLINK_VENC`,
+  `WBLINK_BUILD_APP`, all defaulting `ON`.
+- `dev`, `ssc338q`, `x86-ground`, `rk3566`, `ssc338q-au`, `ssc338q-eu`
+  unchanged — same sources, same warnings, `ctest --preset dev` green.
+- A new `android-arm64` preset that builds `wblink_core` + `wblink_io` only,
+  radio on, the other four off, and **breaks the build if bionic lacks
+  `fopencookie`** — which is the entire point of adding it now rather than
+  discovering it in the consumer.
 
 ## 5. Loose ends worth knowing before starting
 
