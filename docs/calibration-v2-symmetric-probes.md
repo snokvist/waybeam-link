@@ -1,9 +1,9 @@
 # Calibration v2 — symmetric probe exchange
 
-Status: **design proposal, Tier 2** (see `CLAUDE.md`, "The law"). Nothing here
-amends `PROTOCOL.md`. Implementation starts only after operator review of this
-document and rulings on the open questions in §6; the spec amendment then lands
-as ONE tier-1 Pass.
+Status: **design approved — operator rulings Q1–Q3 resolved 2026-08-06**
+(see §6). Still Tier 2 in the sense that nothing here amends `PROTOCOL.md`:
+the implementing PR (issue #116) opens with ONE tier-1 spec amendment + Pass
+that realises §6's rulings, then the code.
 
 Direct ancestor: the Pass 152 field addendum (last entry of
 `review-log-archive-p001-152.md`), which ends on exactly the question this
@@ -98,7 +98,7 @@ sender:    loss = 1000 * (N - received) / N     — self-denominating
   ground returns per-dwell tallies on the existing report path.
 - **Uplink (§10.7):** ground is sender, craft is receiver. The ground-resident
   sweep, REST trigger, and artifact store stay; the craft returns per-dwell
-  tallies over the air (repurposing/replacing §3.16 — open question Q1).
+  tallies over the air (0xF TALLY subtype — ruled, §6).
 - **Sequencer:** `start_both` keeps its order law (uplink first) but both
   phases now use the same dwell primitive, so the sequencer stops needing
   per-direction special cases.
@@ -131,7 +131,7 @@ VCMD trigger + §3.15 word; REST surface.
 
 The run starts by silencing the video input and ends by restoring it (both
 edges under the existing restore law — rate, power, and now feed). HEARTBEAT
-and ANNOUNCE continue untouched. Mechanism is open question Q2. Consequence
+and ANNOUNCE continue untouched. Mechanism: input-starve (ruled, §6). Consequence
 worth stating: a calibration run no longer needs a display, a decoder, or
 even a camera feed — a headless bench with two nodes is sufficient.
 
@@ -166,20 +166,25 @@ entry has the arithmetic. These live in `policy.calibration` and
 4. Implementation in the library shape (§3), behind the existing REST/VCMD
    triggers so hub/menu consumers see no interface change.
 
-## 6. Open questions — operator rulings needed before implementation
+## 6. Operator rulings (resolved 2026-08-06)
 
-- **Q1 — tally wire type:** repurpose packet type 0xF (§3.16) with a new
-  per-dwell layout (version-gated), or retire 0xF and allocate a fresh type?
-  Either is a tier-1 wire change; the per-dwell layout is ~16 bytes.
-- **Q2 — video pause mechanism:** venc HTTP actuation (io already has the
-  client) vs input-starve (stop reading the RTP/frame-shm input so the TX
-  queue drains naturally). Starve is simpler and backend-agnostic; venc
-  actuation is more explicit but couples calibration to venc's API.
-- **Q3 — probe frame class:** ride the existing DATA framing (so probes
-  exercise the exact TX path video uses — FEC, pacing) or a distinct frame
-  type exempt from FEC/ARQ (cleaner accounting)? Recommendation: distinct
-  type, sized like DATA — measurement traffic should not enter ARQ/FEC
-  accounting, and §14.1a already set precedent for class exemptions.
+Context that forced the shape: the packet type is the low nibble of
+`ver_type` (§3.1) — types `0x1`–`0xF` are all assigned, so **the type space
+is full** and a fresh type does not exist without a version bump.
+
+- **Q1 + Q3 — RULED: type 0xF becomes the CALIBRATION family.** The
+  cumulative §3.16 UPLINK_QUALITY layout is retired. 0xF carries a subtype
+  byte: **PROBE** (run_id, dwell_id, seq, padded to negotiated MTU; both
+  directions) and **TALLY** (~16 bytes per-dwell: run_id, dwell_id,
+  received, rssi_sum). Probes are distinct from DATA and exempt from
+  FEC/ARQ accounting (§14.1a class-exemption precedent). Receivers already
+  ignore unrecognised 0xF layouts, so a mixed-version pair degrades to
+  "calibration unavailable", not a fault.
+- **Q2 — RULED: input-starve.** The link node stops reading its
+  RTP/frame-shm input for the run; venc keeps encoding and frames drop at
+  the ring (drop-not-block — harmless). No venc API coupling; restore is
+  "resume reading", on the same edge as the rate/power restore law. Works
+  identically on bench rigs driven by `tools/rtp_feed.py`.
 
 ## 7. Verification plan (for the eventual implementation)
 
