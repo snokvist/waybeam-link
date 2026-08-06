@@ -6834,3 +6834,163 @@ is untouched; the craft's artifact is already stale for unrelated reasons. Only
 the tier that was wrong moved. The backend tag is deliberately not the config
 spelling ("monitor", not "kernel-monitor") — these strings land in a persisted
 artifact and must not move when config wording does.
+## Pass 147 — G4 closed on hardware: both halves induced (2026-08-06)
+
+G4 was the last open item on the devourer parity register, and it was one
+question with two mechanisms behind it. `recover()` and the §9.10 TX-wedge
+watchdog share the word "wedge" and nothing else: the watchdog's only action
+is a log line and a stats field (`app/main.cpp:4837`), while `recover_all()`
+has exactly one call site — the §11.6 post-retune RX-liveness guard
+(`app/main.cpp:4814`). Both are now device-confirmed on the craft's devourer
+adapter, by separate inductions.
+
+**G4a — `RadioAir::recover()`.** Induced with `POST /api/v1/channel` on the
+craft (§15.5 Pass 113), which retunes and arms the liveness guard in one call,
+needing no ground cooperation and no campaign. Sending the craft alone to 5765
+while the ground held 5745 guarantees zero RX for the whole window:
+
+```
+csa: RX SILENT 4000 ms after retune to 5765 MHz — half-applied retune, monitor re-init (§11.6 Pass 80)
+radio: RX-liveness recovery on "eu-craft" -> 5765 MHz ok
+```
+
+The `StopRxLoop` → join → `SetMonitorChannel` → `StartRxLoop` cycle completes
+without the `std::terminate` the first cut of this function hit on `InitWrite`,
+and leaves a working ear: `rx_dead=false`, reports advancing, and on returning
+to 5745 the ground re-latched and delivered 28042 → 51838 frames in 10 s.
+
+Scoped honestly: this proves recovery **runs and leaves the RX pipeline
+functional**. It is not proof it *repairs* a genuinely half-applied retune —
+that fault has never been produced on demand, and an RX-path restart is
+weaker than the full MAC/PHY bring-up kernel-monitor gets from `ip link
+down/up`.
+
+**G4b — the §9.10 detector.** Two earlier attempts failed for one reason,
+now understood: they tried to induce the wedge with *load* (pin the profile,
+overload the rung), but §9.6 rate-follow keeps the radio healthy, and a
+healthy radio still reports. The counters say why load can never work —
+`tx_submitted` increments *before* `send_packet` (`io/src/air_radio.cpp:511`)
+and `tx_reports` are parsed from the devourer event stream, so the signature
+belongs to a dead endpoint, not a busy one. Deauthorizing the craft's USB
+device (`/sys/bus/usb/devices/1-1/authorized`) is the remote equivalent of
+unplugging it, which is the induction §17 names:
+
+| sample | tx_submitted | tx_failed | tx_reports | tx_wedged |
+|---|---|---|---|---|
+| baseline | 609127 | 0 | 318420 | false |
+| +2 s | 630305 | 14506 | 321866 | **true** |
+| +12 s | 680042 | 64243 | 321866 | **true** |
+
+Reports froze at 321866 and never moved again; the verdict landed inside the
+first window, and the transition logged once with no flapping. The craft was
+restored by a service restart (`tx_failed` back to 0, reports tracking
+submissions ~1:1).
+
+**Re-authorizing the USB device did not heal the link**, and that is the
+specified behaviour rather than a defect — §9.10 says recovery "requires a
+physical re-plug regardless". Precisely: the kernel re-enumerates the dongle,
+but the running process's libusb handle is dead and nothing re-opens one. No
+keying or session state is involved.
+
+**Both of §9.10's deferral conditions are now met.** The section defers
+coupling the detector into adaptation (or an automatic USB reset) until it is
+"silent across a healthy 500–4500 pps sweep, fires within one window of an
+induced wedge". Pass 11's step-11 saturation series supplies the first —
+healthy CCX return rates fall from 100% to ~25% but never to zero, so every
+window sees progress and the detector stays silent. This pass supplies the
+second. Whether to now couple actuation is an operator ruling and is NOT
+taken here; v1 stays observability-only until it is.
+
+**Incidental, and the reason this pass took two runs: the craft had been
+logging into a full tmpfs for two hours.** devourer's human diagnostics
+default to stderr at one Info line *per transmitted packet*
+(`bulk_send EP n OK n bytes`) — measured at ~250 pps, 3.3 MB per 30 s, which
+fills the craft's 45 MB `/tmp` in about seven minutes. After that the log
+silently stops and every other user of `/tmp` on the vehicle is out of space.
+A ground node on the radio backend feeds the same rate into journald, whose
+rate limiter drops lines instead — the same blindness by a different route.
+The ground is not exposed today only because it runs kernel-monitor, which
+never constructs the devourer logger.
+
+Fixed by filtering the diagnostics sink rather than lowering the level:
+`set_level(Warn)` would also drop the bring-up block (endpoint selection,
+efuse decode, chip cut) that devourer work actually reads, and `logger.h:24`
+documents the level fields as "configure before worker threads spawn;
+intentionally unsynchronized", so lowering it after bring-up — once the RX
+threads run — is a documented race. A `fopencookie` sink installed before any
+thread starts is contract-clean and reuses the pattern `ev_write` already
+established in the same file. Device-verified on the craft: **120 bytes per
+60 s, down from ~6.5 MB/min**, with all 80 devourer bring-up lines intact and
+a one-time notice on stderr so the missing line is never a silent drop.
+
+Method note, and it nearly cost a false negative: the first G4a run reported
+no matching log lines, which read exactly like "the guard did not fire". The
+guard had fired nowhere — the craft's log had been dead since 13:17 because
+the tmpfs was full. An empty grep is only evidence once the instrument is
+known to be alive. Check the log is still being written before believing what
+it does not say.
+
+## Pass 148 — §9.10 v2: the TX node restarts itself on a wedge (2026-08-06)
+
+Operator ruling, taken once both of v1's own deferral conditions were met:
+Pass 11's step-11 saturation series supplies "silent across a healthy
+500–4500 pps sweep" (healthy CCX return rates fall to ~25% but never to zero,
+so every window sees progress), and Pass 147 supplies "fires within one window
+of an induced wedge", device-confirmed on devourer.
+
+**Why a process restart and not something gentler.** Pass 147 measured every
+weaker option failing. The kernel re-enumerating the USB device does not heal
+the link — the process's libusb handle is dead and nothing re-opens one.
+`recover()` restarts the RX path and never touches the TX handle. A full
+in-process re-init is impossible while devourer's `InitWrite` unconditionally
+assigns `_coex_thread` and `std::terminate`s on a second call. What did work,
+every time, was a fresh process. So the action is an exit, and the supervisor
+is a precondition rather than a detail.
+
+**The asymmetry is the design.** A wedge means different things by node role.
+On the craft the wedged adapter *is* the video transmitter, so the link is
+already dead and a restart costs nothing that is not already lost. On the
+ground the wedged adapter is the uplink, while RX and video keep working — a
+process bounce there would turn a control-path fault into a blank screen for
+the pilot. The exit is therefore wired only in the TX loop. The ground keeps
+the detector for observability and never acts on it. This is not a knob
+defaulted differently per node; it is structural, so no ground config can
+switch it on by accident.
+
+`wedge_exit_windows` (seed 3) is consecutive windows, not cumulative. The
+distinction matters: the pre-existing `wedge_windows()` counter is a lifetime
+total, so a craft that wedged briefly twice a flight would eventually trip a
+cumulative threshold with no fault present. The new counter resets on any
+backend TX progress, and an idle window holds it rather than clearing it —
+matching how the verdict itself treats an idle window as evidence of nothing.
+
+**Known and accepted: a hard-failed adapter now crash-loops.** If the wedge is
+a genuine hardware death rather than a clearable state, the node exits, the
+supervisor re-execs, the adapter wedges again. That is the correct outcome —
+the alternative is a craft that stays silently dead — but it does mean the
+2 s respawn backoff and the bounded per-episode `bulk_send FAIL` volume are
+what keep it from filling the vehicle's tmpfs. Pass 147 bounded the healthy
+log; a permanently faulted adapter still writes ~700 KB per episode. Noted
+rather than solved: at that point the craft is not flying.
+
+**Device-verified end to end (craft `.2.232`, devourer, hands off after the
+induction).** USB deauthorize for 8 s, then re-authorize and touch nothing:
+
+```
+air: TX WEDGED for 3 consecutive windows — exiting for supervisor re-exec (§9.10 v2)
+waybeam-link exited 9 (TX wedged, §9.10 v2) -- respawning in 2s
+waybeam-link exited 1 -- respawning in 2s
+waybeam-link exited 1 -- respawning in 2s
+```
+
+The two `exited 1` respawns are the adapter still being absent — the backoff
+loop behaving exactly as the crash-loop guard is meant to. Once the device
+returned, the next spawn took it: new pid, `tx_failed` back to 0, `tx_wedged`
+false, reports advancing, and the ground's delivered frames went 34983 → 95087
+at MCS 5. About twelve seconds from fault to restored link with no manual step,
+where before this pass the craft stayed dead until someone noticed.
+
+That run also validated the `free_adapter`-before-every-spawn change: the
+kernel driver had re-bound the adapter on re-enumeration, so a supervisor that
+only unbound once at service start would have respawned into "no matching
+Realtek device" forever.

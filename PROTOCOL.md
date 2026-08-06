@@ -1933,14 +1933,38 @@ reports on devourer, netdev TX packets on kernel-monitor):
 - too few submissions to judge → hold the previous verdict (an idle TX is
   not evidence either way).
 
-**Action (v1) — observability only.** The verdict is surfaced per adapter as
-`tx_wedged` (§15.3) and logged on every transition; it deliberately does NOT
-actuate §9. A craft TX wedge stops video and returns together, so the §9.8
-`report_epoch` watchdog already fails the selector toward the floor, and
-recovery requires a physical re-plug regardless. Coupling the detector into
-adaptation (or an automatic USB reset) is deferred until the detector itself
-passes bench validation: silent across a healthy 500–4500 pps sweep, fires
-within one window of an induced wedge (§17 knob table).
+**Action (v2, operator-ruled 2026-08-06, Pass 148) — the TX node restarts
+itself.** The verdict is surfaced per adapter as `tx_wedged` (§15.3) and logged
+on every transition. It still does NOT actuate §9 — a wedge is not a link
+condition to adapt to, it is a dead transmitter — but once
+`wedge_exit_windows` (§17, seed 3) consecutive windows have been wedged, a node
+whose adapter is the **video TX** exits non-zero and lets its supervisor
+re-exec it.
+
+Both v1 deferral conditions were met before this was taken: silent across the
+healthy 500–4500 pps sweep (Pass 11's step-11 series — return rates fall to
+~25% but never to zero, so every window sees progress), and fires within one
+window of an induced wedge (Pass 147, on devourer, via a USB deauthorize).
+
+**A process restart, because nothing weaker works.** Measured Pass 147: the
+kernel re-enumerating the device does not heal the link, since the process's
+libusb handle is dead and nothing re-opens one; `recover()` is an RX-path
+restart that never touches the TX handle; and an in-process full re-init is
+impossible while devourer's `InitWrite` is one-shot. A fresh process re-opens
+the adapter from scratch, which is the only sequence observed to clear a wedge.
+
+**Asymmetric by node role, deliberately.** On the craft a TX wedge has already
+stopped the video, so a restart costs nothing that is not already lost. On the
+ground the wedged adapter is the *uplink*, while RX and video keep working —
+exiting there would convert a control-path fault into a blank screen. So the
+exit is wired only in the TX/vehicle loop; the ground runs the same detector
+for observability and never exits on it. `wedge_exit_windows = 0` disables the
+exit entirely, restoring v1 behaviour.
+
+The supervisor is a precondition, not an implementation detail: a node that
+exits with nothing to re-exec it is strictly worse than one that stays wedged
+and keeps reporting. `deploy/vehicle-waybeam-link.init` supervises for exactly
+this reason.
 
 ### 9.11 FPS ladder (Pass 39, corrected Pass 53 — frame-size preservation)
 
@@ -3914,7 +3938,8 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
                 "min_interval_ms": 250 }
   },
   "air":   { "kind": "radio", "ack_responder": false,
-             "wedge_window_ms": 1000, "wedge_min_submits": 8 },
+             "wedge_window_ms": 1000, "wedge_min_submits": 8,
+             "wedge_exit_windows": 3 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
   "control": { "bind": "0.0.0.0:8091" },
   "scout": { "dwell_ms": 300, "channels": null },
@@ -4951,6 +4976,7 @@ local-ingress polling interval.
 | `guard_us` / `return_window_us` | §7.2 quiet gap | craft TX→RX settle + ground turnaround + return airtime |
 | EWMA α, `mcs_settle_s` | §9 smoothing/settle | no-FEC loss spikiness |
 | `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
+| `wedge_exit_windows` | §9.10 v2 TX-node self-restart | both v1 conditions above met first; sized so a transient never bounces a healthy craft — 3 consecutive wedged windows at the 1000 ms seed, i.e. 3 s with zero backend TX progress. 0 disables (v1 behaviour). Vehicle loop only |
 | cache close timers (`tail_grace_ms`/`local_quiet_ms`/`min_collect_ms`/`hard_close_ms`) | §14.3 local-collection close | loss-position sweep at target fps on the Ethernet bench; close must beat next-block supersession with round-trip margin |
 | frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, profile transitions — operator sequencing 2026-07-16), then the radio/kernel-monitor backends on the rig |
 | FPS ladder frame floor/hysteresis/timers (`min_p_frame_bytes`, `restore_hysteresis_bytes`, `sample_timeout_ms`, `reduce_after/reduce_dwell/restore_after/settle_ms`) | §9.11 frame-size-preservation loop | UDP-air frame-size ladder harness first; flight calibration against direct frame-SHM cadence and visual output |

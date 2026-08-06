@@ -1,6 +1,13 @@
 #!/bin/sh
-# Waybeam Link vehicle service for kernel-monitor mode. It intentionally is
-# not linked into rcS until the stationary RF/decoder gate has passed.
+# Waybeam Link vehicle service. Boot-enabled as S96waybeam-link (symlink) since
+# 2026-07-23: the stationary RF/decoder gate passed and the apfpv AP bring-up is
+# retired. S95waybeam (venc) must start first — it feeds frame-shm venc_frame.
+#
+# The adapter runs on DEVOURER, not kernel monitor (B3 ruling: devourer owns
+# TX, kernel-monitor stays the RX-only backend for cache/spectator nodes). So
+# there is no modprobe and no monitor bring-up here — the job is the opposite,
+# making sure no kernel driver holds the adapter, or libusb_open fails with a
+# bare "no matching Realtek device".
 DAEMON=/usr/bin/waybeam-link
 CFG=/etc/waybeam-link/craft.json
 PIDF=/var/run/waybeam-link.pid
@@ -8,9 +15,24 @@ SUPF=/var/run/waybeam-link-sup.pid
 STOPF=/var/run/waybeam-link.stop
 LOG=/tmp/waybeam-link.log
 ERR=/tmp/waybeam-link.err
+USBIF=1-1:1.0
+USBDEV=1-1
+USBDRV=rtl88x2eu
 
 nprocs() { ps 2>/dev/null | grep -c '[w]aybeam-link tx'; }
 is_running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; }
+
+# Take the adapter away from the kernel driver. Must run before EVERY spawn,
+# not just the first: a §9.10 v2 wedge exit is usually preceded by the device
+# re-enumerating, and the kernel driver re-binds it the moment it reappears.
+# Without this the respawn fails on a device that is physically present.
+free_adapter() {
+  if [ -e "/sys/bus/usb/devices/$USBIF/driver" ]; then
+    echo "$USBIF" > "/sys/bus/usb/drivers/$USBDRV/unbind" 2>/dev/null
+    sleep 2
+  fi
+  [ -e "/sys/bus/usb/devices/$USBDEV" ]
+}
 
 # Stop the supervisor FIRST, or it respawns the daemon we are about to kill.
 kill_all() {
@@ -26,16 +48,28 @@ kill_all() {
 }
 
 # Respawn supervisor: a craft process death mid-flight used to be terminal —
-# there is no second link. Restart it until an explicit stop. The backoff
-# keeps a config-error crash-loop from pinning the CPU; SIGTERM to this shell
-# ends the loop (kill_all removes the stop flag afterwards).
+# there is no second link. Restart it until an explicit stop. This is also the
+# other half of §9.10 v2: the daemon exits 9 when its transmitter has been
+# wedged for wedge_exit_windows, because a fresh process re-opening the adapter
+# is the only sequence measured to clear a wedge (Pass 147). A node that exits
+# with nothing to re-exec it is strictly worse than one that stays wedged, so
+# this loop is a precondition of that feature, not a convenience.
+#
+# The backoff keeps a config-error crash-loop from pinning the CPU; SIGTERM to
+# this shell ends the loop (kill_all removes the stop flag afterwards).
 supervise() {
   while [ ! -f "$STOPF" ]; do
+    free_adapter || echo "adapter at bus $USBDEV not present" >> "$ERR"
     "$DAEMON" tx -c "$CFG" >>"$LOG" 2>>"$ERR" </dev/null &
     echo $! > "$PIDF"
     wait $!
+    rc=$?
     [ -f "$STOPF" ] && break
-    echo "waybeam-link exited -- respawning in 2s" >> "$ERR"
+    if [ "$rc" = "9" ]; then
+      echo "waybeam-link exited 9 (TX wedged, §9.10 v2) -- respawning in 2s" >> "$ERR"
+    else
+      echo "waybeam-link exited $rc -- respawning in 2s" >> "$ERR"
+    fi
     sleep 2
   done
   rm -f "$PIDF"
@@ -45,16 +79,14 @@ start() {
   [ -x "$DAEMON" ] || { echo "missing $DAEMON"; return 1; }
   [ -f "$CFG" ] || { echo "missing $CFG"; return 1; }
   kill_all
-  if [ -x /usr/bin/adapter ]; then
+  # Belt and braces: if the AP stack was manually started, tear it down before
+  # taking the adapter.
+  if [ -x /usr/bin/adapter ] && pidof hostapd wpa_supplicant >/dev/null 2>&1; then
     echo "stopping AP stack"
     /usr/bin/adapter stop >/dev/null 2>&1
     sleep 1
   fi
-  if ! lsmod 2>/dev/null | grep -q '^8812eu'; then
-    modprobe 8812eu || return 1
-    sleep 1
-  fi
-  /usr/bin/waybeam-mon-up wlan0 161 HT20 || return 1
+  free_adapter || { echo "adapter at bus $USBDEV not present"; return 1; }
   rm -f "$LOG" "$ERR" "$STOPF"
   echo "starting waybeam-link craft ($CFG)"
   setsid "$0" __supervise >/dev/null 2>&1 </dev/null &
