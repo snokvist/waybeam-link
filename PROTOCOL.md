@@ -2561,10 +2561,17 @@ resolution must not degrade the result.
 So the verify phase **descends while loss keeps improving** and stops when a
 step buys nothing, bounded by the existing `verify_descent_budget` and the
 window floor. The first verify always trials one step down — that trial is the
-mechanism, not an optimisation. When a step fails to improve, the placement is
-the **previous, higher** power: equal loss at more power is strictly better link
-budget. The descent's direction of travel is toward the safe end, so neither
-phase can strand a probe above the window top.
+mechanism, not an optimisation. The descent's direction of travel is toward the
+safe end, so neither phase can strand a probe above the window top.
+
+**The placement is the BEST reading of the verify walk (Pass 152)**, which is
+usually a power the seek has already stepped past; the actuator is walked back
+up to it. Placing at the previous reading was right only while each step
+improved, and wrong whenever *nothing* was acceptable: the recovery clause then
+descended past its own best and placed wherever the budget happened to run out.
+Measured on the ground's uplink at 10 m — verify read 30, 25, 20, then
+45permille — it placed the 45 and failed the rung, having measured the 20 three
+dwells earlier.
 
 This applies on **both** backends. The compression knee is a property of a power
 amplifier, not of devourer, and §10.6/§10.7 deliberately share one seek rather
@@ -2675,6 +2682,26 @@ structurally the same loop §10.6 already runs, and deliberately so. Seed
 backstop, bounded verify descents, and hard cap. A probe dwell is a burst of
 **100 probes**, verification **400**. Seed loss thresholds remain
 `loss_ok_milli=15` and `loss_bad_milli=50`.
+
+**The walls are relative to the at-rest loss floor (Pass 152).**
+`loss_ok_milli` and `loss_bad_milli` are **margins above a measured baseline**
+here, not absolute bars. §10.7 injects its probes into a medium the craft is
+saturating with video, so a few percent of LINK_REPORTs collide regardless of
+TX power. Measured on the fleet at 10 m: a stable **25permille** at-rest floor
+against the 15permille absolute seed — the acceptance gate sat *below* the
+link's own floor, so no power could pass it, every rung read `verify_failed`,
+and §10.7 could not have succeeded at any distance. The one artifact it ever
+produced placed all eight rungs at 108 with no bracket anywhere, which is the
+Pass 134 starved-feedback signature, not a measurement.
+
+The floor is sampled over a rolling window of **ordinary operation** and
+**only while no sweep is running** — the same rule and the same reason as
+§10.6's Pass 134 report-health precondition: once the sweep starts, elevated
+loss is the measurement, and folding it back into the baseline would chase its
+own tail. A start with no floor yet measured is refused rather than judged
+against an absolute bar; the condition self-clears within one window. On a
+quiet link the floor is ~0 and the behaviour is identical to the absolute
+seeds, so this is a shift of origin rather than a loosening.
 
 **Both §10.6 Pass 151 rules apply here unchanged**, because both live in the
 shared seek: the placement is the loss minimum rather than the first tolerable

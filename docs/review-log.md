@@ -7729,3 +7729,49 @@ subsystem into a new space leaves its *neighbours* speaking the old one, and a
 neighbour that merely clamps or reports looks harmless right up until it is the
 thing holding the bound. The audit that found these was reading for "what else
 reads `pa.ceiling`", not for anything on the change list.
+
+---
+
+## Pass 152 — §10.7 walls relative to the at-rest floor; place at the best (2026-08-06)
+
+**Device evidence, from the first real bi-directional attempt at 10 m.** The
+craft downlink (§10.6, Pass 151 offset space) **succeeded** — placements
+`0,0,-2,0,-2,-4,-2,-2` dB, all inside `[-24,0]`, walls booked on rungs 5 and 6,
+placement loss 0-4permille, artifact fp=0x6C persisted and non-stale. Under the
+pre-151 rule every rung would have placed at 0 dB (the efuse default), because
+every verify at the ceiling read 1-4permille — comfortably under `loss_ok`. The
+minimum hunt moved five of eight rungs down. It also *confirms* the Pass 150
+reading rather than overturning it: rungs 5/6 booked `first_bad_rssi` ABOVE
+`last_clean_rssi` — loss rising as power rises — at a range where the ground's
+receiver sees -51..-57 dBm and cannot be overloading. That is transmitter-side
+EVM, and it shows on the high-order rungs that need constellation quality and
+not on MCS0-3, which is exactly what per-rung calibration exists to capture.
+
+**The uplink (§10.7) failed rung 0, and the cause was the gate, not the sweep.**
+Verify read 30, 25, 20permille as power came down 108 -> 92 -> 76 qdb — a clean
+monotone signal — then 45permille at 60 (too cold). But `loss_ok_milli` is 15,
+and the link's **at-rest** uplink loss measures a stable **25permille** at the
+operating power. The acceptance gate sat below the floor: no TX power could ever
+pass, at any distance. The only artifact §10.7 has ever produced placed all
+eight rungs at 108 with `first_bad_qdb: null` throughout — the Pass 134
+starved-feedback signature — so this section has arguably never authored a valid
+result under real video load. Operator ruling: **walls relative to the at-rest
+floor**, sampled over a rolling window of ordinary operation and only while no
+sweep is running. On a quiet link the floor is ~0 and nothing changes; this is a
+shift of origin, not a loosening.
+
+**And a defect of my own, found in the same trace.** With nothing acceptable,
+the recovery descent walked past its own best and placed wherever the budget ran
+out — 60 qdb at 45permille, when it had measured 76 qdb at 20permille three
+dwells earlier. `PowerSeek` now tracks the best reading of the verify walk and
+places there, walking the actuator back up. Pass 151's "place at the previous
+reading" was correct only while each step improved; it had no answer for a walk
+where none of them did. With both changes the same measured trace places 76 qdb
+/ 19 dBm and passes a 25+15 = 40permille gate.
+
+Both rules stay in the shared seek, so §10.6 gets the best-placement fix too.
+The floor-relative gate is §10.7-only: the craft's downlink is scored from the
+video stream itself rather than injected probes, its floor at placement measured
+0-4permille tonight, and widening a gate that is working is not a change this
+pass has evidence for. The same latent issue exists there at range — recorded,
+not fixed, and a ruling when there is evidence.
