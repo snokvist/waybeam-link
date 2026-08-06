@@ -518,6 +518,14 @@ that continuously emits ANNOUNCE (§3.12) at ≥1 Hz therefore **never separatel
 emits HEARTBEAT** — ANNOUNCE subsumes it as the presence beacon (Pass 62); the
 HEARTBEAT path still serves non-announcing nodes (grounds, quiet rx).
 
+**A node with no TX adapter does not emit HEARTBEAT** (operator-ruled
+2026-08-06, Pass 143). "Every node" above means every node that can transmit:
+a receive-only node has no uplink to beat on, and the guard is
+`AirIface::has_tx()`. Nothing downstream depends on hearing such a node — it
+creates no §2 RX state at its peers and is not a CSA or claim target. Note this
+cannot fire on the devourer backend today, whose `has_tx()` is unconditionally
+true because bring-up requires exactly one `role:"tx"` adapter.
+
 ### 3.9 RECOVERY_REQUEST packet (type `0x6`) — 18 bytes
 
 | off | size | field | notes |
@@ -4694,8 +4702,15 @@ supported (§15.2 `scout`).
   and aggregating the §15.5 passive-discovery view. For claim, the first heard
   candidate suffices — the §2 admission count (`N_admit`/`T_admit`) is the
   anti-flood gate for the *latch picker*, not a barrier to a deliberate operator
-  claim. During a sweep the scout adapter ignores its `net_id` filter (hears all
-  net_ids). On a two-adapter ground the diversity RX adapters stay on the resting
+  claim. During a sweep the node's `net_id` filter is dropped **node-wide** —
+  every RX adapter hears all net_ids for the sweep's duration, not just the
+  scout adapter (operator-ruled 2026-08-06, Pass 143: both backends implement
+  it node-wide, and per-adapter filter state would be new machinery on each for
+  no measured benefit). The filter is restored when the sweep rests. Note the
+  consequence: for the sweep's duration a diversity ear parked on the resting
+  channel also admits foreign-`net_id` frames into the §2 selector, the §11 CSA
+  follower and the §15.5 discovery view, none of which are `net_id`-scoped. The
+  survey is scoped (below); those consumers are not. On a two-adapter ground the diversity RX adapters stay on the resting
   channel, so an active link there survives the sweep; a single-adapter ground has
   no spare ear and drops any active link while scouting. **The survey (per-channel
   occupancy and candidates) is derived from the scout adapter's frames only**: a

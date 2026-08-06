@@ -6360,3 +6360,55 @@ The node boots correct and is broken *by the sweep that was supposed to widen
 it* — and it stays broken, since nothing restores accept-any until a restart.
 Harness: `run_anynet.sh` with `rx-anynet.json`, or `start.sh <arm>` +
 `windows.sh` against an already-running pair.
+
+## Pass 143 — two rulings taken, and an H1 probe that could not run (2026-08-06)
+
+Pass 142 surfaced two places where the code and `PROTOCOL.md` disagreed and
+declined to pick. Both are now operator-ruled (2026-08-06), so the spec moves
+to match the implementation rather than the other way round.
+
+**§15.5a — the sweep widen is node-wide.** The spec said *the scout adapter*
+ignores its `net_id` filter; both backends drop it on every ear (`MonAir`
+re-attaches BPF per adapter, `RadioAir` shares one atomic across RX threads).
+Per-adapter filter state would be new machinery in both for no measured
+benefit, so the spec now says node-wide. **The consequence is written down
+rather than left implied:** for the sweep's duration a diversity ear on the
+resting channel admits foreign-`net_id` frames into the §2 selector, the §11
+CSA follower and the §15.5 discovery view. The *survey* is scoped to the scout
+adapter; those three consumers are not. That exposure is a separate open item —
+ruling on the widen is not a ruling that the exposure is fine.
+
+**§3.8 — a node with no TX adapter does not beat.** The register asserted this
+as "a rule"; §3.8 said "every node emits HEARTBEAT at 1 Hz while otherwise
+quiet" and named grounds and quiet rx as the nodes the path serves. The
+behaviour has shipped since Pass 140 (`AirIface::has_tx()`), so this ruling
+records what the code does and removes the contradiction. It cannot fire on
+devourer, whose `has_tx()` is unconditionally true.
+
+**H1: the discriminating probe does not exist for this chip.** The vendored
+`AdapterHealth.h` describes a failure mode that matches the suspect unit
+closely — a chip that enumerates fine and inits green while its EFUSE reads
+return stochastic content, so the driver loads the wrong RFE/PA/LNA tables,
+which is what a unit that transmits but cannot sustain 64-QAM would look like.
+Ran `examples/doctor` against both bench adapters:
+
+| adapter | bring-up | efuse stability | fw boot | rx smoke | verdict |
+|---|---|---|---|---|---|
+| 8822EU (H1 suspect) | yes | **not probed — unsupported on this chip** | checksum + MCU ready | 10 ok / 0 corrupt | HEALTHY |
+| 8812CU (control) | yes | 8 reads, 0 mismatched, id `0x8129` | checksum + MCU ready | 8 ok / 0 corrupt | HEALTHY |
+
+`ProbeEfuseStability` is wired for the Jaguar3 `C8822C` variant and not for
+`C8822E`, so the one probe that would test the standing hypothesis is the one
+that cannot run on the unit it was meant for. **H1 is therefore neither
+confirmed nor refuted** — the card is not dying by any probe that does run, and
+the EFUSE question is untested rather than answered. Closing it would mean
+wiring the Jaguar3-E map reader, which is vendored code and out of bounds here;
+upstream is the right venue.
+
+One caps difference worth recording while it is in hand: devourer reports
+`txpwr_step_measured: 0` and `txpwr_rate_diffs_measured: 0` for the 8822E and
+`1`/`1` for the 8822C. The per-rate TXAGC path on 8822E is unvalidated in the
+driver. That is a per-*family* attribute and the craft's 8822E does deliver
+MCS4–7, so it does not explain a per-unit difference — but it is the first
+asymmetry found between the two Jaguar3 variants that touches exactly the
+mechanism H1 is about.
