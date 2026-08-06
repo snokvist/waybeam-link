@@ -6631,3 +6631,91 @@ the range.
 With this the register has **no code items left**. What remains is H1, blocked
 upstream (the EFUSE-stability probe is unwired for the Jaguar3 8822E), and the
 §15.3 counters-schema question that Pass 140 set aside deliberately.
+
+## Pass 145 — a CSA verify window the samples cannot meet (2026-08-06)
+
+Closing out the devourer verification found one real defect, in the shipped
+sample configs rather than in code.
+
+**`verify_timeout_ms: 150` strands a devourer link on every CSA.** §11.6 has
+the ground commit and then wait for the craft's CSA_ARMED. A devourer craft's
+measured arm time is **255–277 ms** (two runs, `dt 255 ms` and `dt 277 ms` in
+the craft log), so a 150 ms verify window expires before the craft can possibly
+answer. What that looks like on the bench:
+
+    craft   csa: armed -> 5745 MHz (nonce 1, dt 277 ms)
+            csa: VERIFY -> 5745 MHz
+    ground  csa: commit -> 5745 MHz
+            csa: selection reverted -> 5805 MHz
+            csa: aborted (no CSA_ARMED) -> resting 5805 MHz
+
+Craft on the new channel, ground back on the old one, video stopped dead. The
+failure reads as "the craft never armed" when the craft armed correctly and was
+simply not waited for.
+
+The **default is 500 ms and safe** — the fleet's `craft.json` sets neither key
+and was never at risk. It is `examples/config.radio-tx.sample.json`,
+`config.radio-rx.sample.json` and `config.tx.sample.json` that hardcode 150,
+which is exactly where someone bringing up a devourer node starts. All three
+now say 600 (clear of the measured arm time, under the 750 ms `rx_liveness_ms`
+default that §11.6 requires it to stay below), and the two radio samples carry
+the measurement inline so the number is not mistaken for taste.
+
+With the window corrected the same pair switches cleanly, twice:
+
+| window | accepted | delivered |
+|---|---|---|
+| before, 5805 | +1 486 | +1 472 |
+| after CSA → 5745 | +21 346 | +21 294 |
+| after return → 5805 | +1 392 | +1 380 |
+
+`csa: campaign confirmed` on both hops, and G3's read-back never reported an
+unapplied retune — the retune confirmation added in Pass 143 is exercised by
+this path and stays quiet, which is the correct result.
+
+**G2 remains unverified at runtime, and this records why rather than pretending
+otherwise.** Five attempts, each stopped by a different precondition:
+
+1. Read `jscc_fallback` at the top level of the stats object; it is per-stream.
+   Both arms returned `None`, which would have read as "no difference".
+2. Correct path, but `jscc_decision_frames = 0`: JSCC needs `jscc_shadow`,
+   which config accepts **only on frame-shm ingress**, so it cannot run on a
+   UDP-fed bench node at all. That is what forced the craft onto devourer.
+3. Craft on devourer with frame-shm: 2170 decisions, every one
+   `fallback='rtt_not_ready'` — the decision short-circuits before airtime.
+4. `min_rtt_samples` 20 → 3 changed nothing. The counters say why:
+   `nacks_sent 0`, `nack_rtt_samples 0`, `frames_with_arq 0`. The 30 %/20 % RLC
+   absorbs the natural ~2 % loss, so ARQ never fires and RTT never readies.
+5. Induced loss to force ARQ — 200 ‰ and then 40 ‰ — both left the bench ground
+   in `latch recovery 5/5`, so it never latched, never reported, and the craft
+   read `feedback_missing`. The drop rate was not the variable: it fails the
+   same way at either.
+
+The bench *ground* is the suspect, not the craft — the real kernel-monitor
+ground latches this same devourer craft and delivered 53 590 packets from it
+(T7, same session). The next attempt should derive the loss-injecting ground
+from the live `ground.json` rather than the bench sample, since the difference
+between them is what decides whether the stream latches at all.
+
+So: **§14.2 JSCC does not actuate on this fleet today** — on either backend,
+for reasons that predate every change in Passes 142–145. G2's config gate is
+unit-tested; its estimator is not exercised anywhere.
+
+**Also verified in this close-out**, on merged main: a devourer link on a
+non-zero `net_id` (T1) and the fleet likewise on `net_id 7` and back (T11);
+foreign `net_id` still rejected at rest (T2); the sweep widen/restore (T3); the
+§9.3a tier logged per node (T5); a 2-minute soak with every health flag clean
+(T6); **G6 with the uplink listed second — the item Pass 142 could only close
+by inspection** — where a sweep of 5745 left `ear-first[0] +24815` and
+`uplink-second[1] +581`, i.e. the sweep roamed index 1, which a hardcoded 0
+could not produce (T8); §3.8 heartbeat suppression on a spectator, `tx_submitted`
+pinned at 0 across 18 451 received frames (T9); and the **shipping topology** of
+a devourer craft feeding a kernel-monitor ground (T7).
+
+T7 also confirmed the calibration-identity behaviour the register flags as
+adjacent: `calibrate: STALE artifact (stored wlan0/98:03:cf:cf:a4:28, live
+bus/1-1)`. The same physical adapter carries a different identity per backend,
+and it fails safe — refusing a monitor-derived curve on devourer rather than
+applying the wrong one. On a devourer TX fleet every artifact would also go
+stale after a re-plug, since the devourer identity is a bus path. Still a
+ruling, still unresolved.

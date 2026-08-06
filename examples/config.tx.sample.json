@@ -25,7 +25,7 @@
                 "fwd_clamp_blocks": 4 },
     "fec":    { "scheme": "none", "overhead_frac": 0.0 },
     "return": { "guard_us": 300, "return_window_us": 2000 },
-    "csa":    { "settle_s": 3.0, "verify_timeout_ms": 150,
+    "csa":    { "settle_s": 3.0, "verify_timeout_ms": 600,
                 "min_interval_s": 5, "ack_timeout_ms": 1000,
                 "home_chan": 5745,
                 "channel_allowlist": [5745, 5805, 5825] }

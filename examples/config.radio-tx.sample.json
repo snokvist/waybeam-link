@@ -51,7 +51,8 @@
     "csa": {
       "psk": "CHANGE-ME-craft-and-ground-only",
       "settle_s": 3.0,
-      "verify_timeout_ms": 150,
+      "verify_timeout_ms": 600,
+      "_verify_timeout_ms": "Pass 145: was 150, which a devourer craft cannot meet — its measured CSA arm time is 255-277 ms, so the ground timed out waiting for CSA_ARMED, reverted, and left the craft alone on the new channel. Must stay below rx_liveness_ms (750 default).",
       "min_interval_s": 5,
       "ack_timeout_ms": 1000,
       "home_chan": 5745,
