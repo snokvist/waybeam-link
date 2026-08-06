@@ -7380,3 +7380,56 @@ An attempted second kernel-monitor sweep to pin the anchor directly cost the
 link — the manual `/tmp` config is unsupervised, the process died, and the craft
 went dark until the supervised devourer service was restarted. Do not run the
 monitor A/B without either a supervisor or someone watching it.
+
+**Proposed ruling for Pass 150 (operator-directed 2026-08-06).** Given the
+standing fleet shape — kernel-monitor is permanently RX-only, devourer is the
+TX role (Passes 142–144) — candidates 1 and 3 are withdrawn. With no absolute
+TX backend to be consistent with, building a dBm→TXAGC mapping serves only a
+sentence in the spec (and the reciprocity measurement above puts that mapping
+at ±5 dB without a calibrated reference receiver), while a split
+`qdb`/`offset_qdb` API leaves a lane every TX node rejects forever.
+
+**§10.5 becomes a relative-only contract**, with one shape realised natively by
+each backend rather than a declared asymmetry: the latch is an offset in
+quarter-dB against the backend's own calibrated reference — the efuse per-rate
+table on devourer, the configured reference on kernel-monitor, which applies
+`reference + offset` via `iw`. That works during the interim while the ground
+still transmits on monitor, and needs no change when monitor TX goes away.
+
+Four parts:
+
+1. **The latch is relative, per-rate shape preserved.** No absolute contract
+   anywhere in TX.
+2. **Positive offsets are bounded by an explicit per-adapter ceiling,
+   `power_offset_max_qdb`, defaulting to 0 — not forbidden.** The first draft
+   of this ruling proposed a hard `≤ 0` clamp on the strength of this craft's
+   compression knee; that was an overreach, corrected by the operator. Efuse
+   tables are per-module and some ship conservative or wrong, so positive
+   headroom is a legitimate per-card need and must not be designed out on one
+   unit's evidence. Default-deny, explicitly overridable: the default ceiling
+   of 0 keeps a node provably at or below its chip's own calibrated table —
+   which is the compliance story available in the absence of an absolute scale
+   — and raising it is an explicit operator act that owns that assertion. A
+   request past the ceiling is **REJECTED**, never silently clamped, so the
+   operator learns rather than wonders.
+3. **`{"auto": true}` must stop meaning offset 0.** Today `set_power_auto()` is
+   literally `set_power_qdb(0)`, so "auto" returns the radio to its
+   uncalibrated default — which on this craft is the **54 ‰** operating point,
+   making `auto` the most dangerous value in the API. It must mean "return to
+   the configured calibrated offset". Note this touches a safety path: §11.6
+   recovery ends in `txpower auto` (Pass 48), so under this ruling recovery
+   restores the calibrated backoff instead of the raw default.
+4. **`max_power_qdb` is retired for TX in favour of `power_offset_qdb`** (the
+   boot/calibrated operating offset, clamped by the ceiling above). An absolute
+   ceiling is meaningless when nothing sets absolute power, and today it reads
+   as a safety cap while functioning as a boost permit. This also gives
+   persistence for free: `power_offset_qdb: -16` on this craft makes the
+   measured fix survive a restart without exploiting the current bug.
+
+§10.6/§10.7 calibration follows: sweep offsets and score **delivered loss at
+fixed MCS**, not RSSI, because the knee is per-unit and invisible in RSSI (see
+the 0 → −2 dB row above). The artifact stores an offset, which is per-unit
+meaningful and composes with Pass 146's backend-scoped calibration identity.
+
+Not yet implemented — this records the agreed shape, and the amendment lands
+with the code that implements it.
