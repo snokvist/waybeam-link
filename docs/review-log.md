@@ -7255,3 +7255,223 @@ the right default while `e_rate` has no validated non-default setting — a
 blended rate would have to track measured density — but it means the byte
 saving does not become picture quality on its own, which is precisely the
 untested conversion the reallocation case would need.
+
+## Pass 150 — §10.5 qdb means two different things per backend (2026-08-06)
+
+**OPEN OPERATOR RULING.** Finding and measurement only; §10.5 is NOT amended
+here, because the fix is a choice between three incompatible contracts and the
+spec says a gap is a ruling, never an inference.
+
+**The divergence.** §10.5 states `POST /api/v1/tx/power {"qdb": N}` latches an
+**absolute** power. Only one backend does that:
+
+- `MonAir::set_power_qdb` (`io/src/air_mon.cpp:769`) runs
+  `iw dev <if> set txpower fixed <mBm>` at 1 qdb = 25 mBm. Absolute, as
+  specified.
+- `RadioAir::set_power_qdb` (`io/src/air_radio.cpp:692`) calls
+  `SetTxPowerOffsetQdb(qdb)`. The vendored header is unambiguous: it adjusts
+  "power **RELATIVE** to the efuse-calibrated per-rate table … preserving the
+  calibrated per-rate shape", and calls itself "the closed-loop controller's
+  knob (*back off 2 dB, keep the shape*)".
+
+Same endpoint, same integer, opposite meaning. Nothing in §10.5 says so. The
+`set_power_auto` asymmetry immediately below it *is* declared per backend
+(offset 0 vs the kernel's `txpower auto`), which makes the undeclared one
+easier to miss — the file reads as if the divergences had all been catalogued.
+
+**It inverts a stated safety property.** §10.3's `max_power_qdb` is the
+operator's hard ceiling; the Pass 135 design rests on it so that a tier "can
+never cook a PA". The clamp is `min(qdb, max_power_qdb)` on the *request*. On
+an offset backend that clamps the **offset**, so the craft's
+`max_power_qdb: 108` does not cap output at 27 dBm — it permits a **+27 dB
+boost** over calibrated. The guard against overdriving is itself an
+overdrive permit.
+
+Measured, not reasoned: sweeping +15 → +27 dB of "power" on the craft drove the
+PA into compression, collapsed the link, and demoted the selector to MCS 2 at
+every step — including at `qdb: 108`, which is nominally the *same* power as
+auto. Clearing the override restored MCS 5 and 94017 delivered against
+1464–11123 under any override.
+
+**Blast radius is wider than the override.** `set_power_qdb` is also the
+actuator for the §10.2 power-map resolve (`resolve_and_apply_power`) and for
+the §10.6/§10.7 calibration sweeps (`upwr.apply_qdb`, and the per-rung
+`ua.set_qdb`). A calibration running on a devourer node therefore steps
+*offsets* while its artifact records them as absolute rungs. On this fleet the
+uplink sweep runs on the ground, which is kernel-monitor and correct, and the
+craft has no `power_map` at all — so the divergence is currently unexercised
+outside the override. That is luck, not design.
+
+**Three candidate contracts, none free:**
+
+1. **Make devourer absolute.** Needs a dBm→TXAGC mapping we do not have.
+   `SetTxPowerIndexOverride(idx)` is flat-absolute but *replaces* the
+   calibrated per-rate shape, which is the thing worth keeping. Most faithful
+   to §10.5 as written, and the most likely to make output worse.
+2. **Declare the asymmetry** in §10.5 (absolute on kernel-monitor, relative on
+   devourer) and make the §10.3 clamp direction-aware, so an offset backend
+   accepts `qdb ≤ 0` only. Smallest change; restores the "may only lower
+   power" property the ceiling was written for; leaves one endpoint with two
+   meanings.
+3. **Split the field.** `qdb` stays absolute and is REJECTED by offset
+   backends; add an explicit `offset_qdb`. Unambiguous at the API, cannot be
+   misread the way this pass misread it, but it is an API change and every
+   caller (calibrator included) has to choose a lane.
+
+Recommendation is (2) or (3); (3) is cleaner and (2) is cheaper. Not chosen
+here.
+
+**Method note.** The author walked straight into this bug: a power sweep was
+authored top-down from `power_presets_qdb` [60…108] on the assumption that
+§10.3's preset list and §10.5's latch share units. They do not — one is an
+absolute ceiling, the other a per-backend-meaning latch — and the first sweep
+step was therefore both the riskiest setting *and* wrong by 27 dB. Two lessons,
+both operator-supplied: sweep a live-link parameter from the safe end upward so
+a freeze costs the last row rather than the run, and do not assume two fields
+sharing a unit suffix share a reference point.
+
+**Mapping the two scales, and what it says about devourer calibration
+(2026-08-06).** Measured on the craft's 8822EU, ground RSSI as the proxy,
+geometry and channel held constant.
+
+**The devourer offset scale is honest and usable.** Sweeping
+`SetTxPowerOffsetQdb` 0 → −30 dB against ground RSSI (`cu-diversity`):
+
+| offset | 0 | −2 | −4 | −6 | −10 | −15 | −20 | −30 |
+|---|---|---|---|---|---|---|---|---|
+| RSSI | −18 | −21 | −22 | −23 | −28 | −32 | −32 | −32 |
+| pre-div loss ‰ | **54** | 6 | 4 | 5 | 6 | 5 | 5 | 6 |
+
+Roughly **1 dB of RSSI per 1 dB of offset from 0 to −10**, then a hard floor at
+about −15 dB where the TXAGC index bottoms out. So devourer gives a monotonic,
+correctly-scaled power axis over ~15 dB — it is a perfectly good calibration
+lever, it simply is not the absolute one §10.5 claims.
+
+**The critical result is in the first two columns: maximum RSSI is NOT maximum
+usable power.** Going 0 → −2 dB costs 3 dB of received signal and takes loss
+from **54 ‰ to 6 ‰**. Signal down, quality up ninefold. The PA is in
+compression at its calibrated default and the extra drive is buying distortion,
+not range. Any calibration that scores rungs on RSSI, or that simply maximises
+power subject to a ceiling, will select the worst operating point available and
+report it as the best. **The compression knee has to be found by sweeping power
+*down* and scoring delivered loss at fixed MCS.** On this unit the knee is
+between 0 and −2 dB.
+
+**Absolute anchor: measurable in principle, too loose here to be worth
+trusting.** By path-loss reciprocity — ground uplink at a kernel-set 19.00 dBm
+absolute, received at the craft at −29 dBm, so L = 48 dB — the craft's TX at
+−4 dB offset back-computes to **16 dBm via `eu-uplink`** and **26 dBm via
+`cu-diversity`**. The two ground adapters read the *same* signal 10 dB apart
+(consistently: eu ≈ −30, cu ≈ −22 across the whole sweep), so the anchor is
+20 dBm or 30 dBm at offset 0 depending on which radio you believe. Reciprocity
+is the right method and needs no backend switch, but it needs one RSSI-calibrated
+reference receiver before the number means anything. Recorded as ±5 dB at best,
+not as a result.
+
+**So the practical guidance, pending the Pass 150 ruling:** calibrate devourer
+in offset space, per unit, by walking down from 0 and scoring loss — not by
+assuming `max_power_qdb` caps anything, and not by maximising RSSI. On this
+craft that lands at −4 dB (`qdb: -16`), which reproduces the kernel-monitor
+error rate exactly (3 ‰ pre / 1 ‰ post). The 8822E TX-quality investigation
+recorded earlier as "per-UNIT, not per-chip" is very likely the same effect
+seen without the power axis.
+
+An attempted second kernel-monitor sweep to pin the anchor directly cost the
+link — the manual `/tmp` config is unsupervised, the process died, and the craft
+went dark until the supervised devourer service was restarted. Do not run the
+monitor A/B without either a supervisor or someone watching it.
+
+**Proposed ruling for Pass 150 (operator-directed 2026-08-06).** Given the
+standing fleet shape — kernel-monitor is permanently RX-only, devourer is the
+TX role (Passes 142–144) — candidates 1 and 3 are withdrawn. With no absolute
+TX backend to be consistent with, building a dBm→TXAGC mapping serves only a
+sentence in the spec (and the reciprocity measurement above puts that mapping
+at ±5 dB without a calibrated reference receiver), while a split
+`qdb`/`offset_qdb` API leaves a lane every TX node rejects forever.
+
+**§10.5 becomes a relative-only contract**, with one shape realised natively by
+each backend rather than a declared asymmetry: the latch is an offset in
+quarter-dB against the backend's own calibrated reference — the efuse per-rate
+table on devourer, the configured reference on kernel-monitor, which applies
+`reference + offset` via `iw`. That works during the interim while the ground
+still transmits on monitor, and needs no change when monitor TX goes away.
+
+Four parts:
+
+1. **The latch is relative, per-rate shape preserved.** No absolute contract
+   anywhere in TX.
+2. **Positive offsets are bounded by an explicit per-adapter ceiling,
+   `power_offset_max_qdb`, defaulting to 0 — not forbidden.** The first draft
+   of this ruling proposed a hard `≤ 0` clamp on the strength of this craft's
+   compression knee; that was an overreach, corrected by the operator. Efuse
+   tables are per-module and some ship conservative or wrong, so positive
+   headroom is a legitimate per-card need and must not be designed out on one
+   unit's evidence. Default-deny, explicitly overridable: the default ceiling
+   of 0 keeps a node provably at or below its chip's own calibrated table —
+   which is the compliance story available in the absence of an absolute scale
+   — and raising it is an explicit operator act that owns that assertion. A
+   request past the ceiling is **REJECTED**, never silently clamped, so the
+   operator learns rather than wonders.
+3. **`{"auto": true}` must stop meaning offset 0.** Today `set_power_auto()` is
+   literally `set_power_qdb(0)`, so "auto" returns the radio to its
+   uncalibrated default — which on this craft is the **54 ‰** operating point,
+   making `auto` the most dangerous value in the API. It must mean "return to
+   the configured calibrated offset". Note this touches a safety path: §11.6
+   recovery ends in `txpower auto` (Pass 48), so under this ruling recovery
+   restores the calibrated backoff instead of the raw default.
+4. **`max_power_qdb` is retired for TX in favour of `power_offset_qdb`** (the
+   boot/calibrated operating offset, clamped by the ceiling above). An absolute
+   ceiling is meaningless when nothing sets absolute power, and today it reads
+   as a safety cap while functioning as a boost permit. This also gives
+   persistence for free: `power_offset_qdb: -16` on this craft makes the
+   measured fix survive a restart without exploiting the current bug.
+
+§10.6/§10.7 calibration follows: sweep offsets and score **delivered loss at
+fixed MCS**, not RSSI, because the knee is per-unit and invisible in RSSI (see
+the 0 → −2 dB row above). The artifact stores an offset, which is per-unit
+meaningful and composes with Pass 146's backend-scoped calibration identity.
+
+Not yet implemented — this records the agreed shape, and the amendment lands
+with the code that implements it.
+
+**Ruling refinement: safe-by-default, headroom earned by calibration
+(operator-directed 2026-08-06).** The proposal above still let a node boot at
+whatever `power_offset_qdb` said, defaulting to 0. Offset 0 is the **efuse
+default, and this pass measured that it is the compressing point** — 54 ‰
+against 6 ‰ two dB below it. Booting at 0 is therefore booting at an
+uncharacterised, and on the one unit we have measured, actively bad operating
+point. The rule is inverted:
+
+- **Every TX adapter boots at a forced known-safe backoff.** Not the efuse
+  default, not 0. This is unconditional and uniform — no per-backend, per-role
+  or per-node exception, because a rule with exceptions is one somebody's
+  config will find the wrong side of.
+- **Calibration walks the adapter UP from safe to its empirical maximum**, per
+  unit, bounded by `power_offset_max_qdb`. Headroom is earned by measurement,
+  never assumed from a table.
+- **The artifact stores that per-adapter empirical max offset**, composing with
+  Pass 146's backend-scoped calibration identity.
+- **`{"auto": true}` resolves to the calibrated value when a valid artifact
+  exists, otherwise to the safe default — never to the raw efuse default.**
+  Same for the §11.6 recovery path (Pass 48), so an unattended recovery can
+  never drop a node onto the uncharacterised point.
+
+**The sweep direction reverses with it.** The earlier note said to find the
+knee by sweeping down from 0. Under safe-by-default the sweep runs **upward**
+from safe until delivered loss at fixed MCS degrades, which is strictly better:
+the node never operates above the knee except for the single step that finds
+it, and it matches the sweep-from-the-safe-end discipline this session learned
+the hard way when a top-down power sweep froze the link and returned no rows.
+
+**On the cost of a conservative default.** Backing off is not simply trading
+range for safety. On a compressing unit it is a net gain in *both* — this craft
+delivered more frames at −4 dB than at 0 dB, with a tenth of the loss. The
+conservative default only costs anything at genuine range limits, and
+calibration is what buys that back. An uncalibrated node flying slightly short
+is the correct failure direction.
+
+**Open: the seed value.** We have n = 1. −4 dB is measured-good on this
+8822EU; −6 dB would carry margin for a worse-calibrated module at a cost
+calibration recovers anyway. The seed should be recorded as a seed — a number
+chosen from one unit, expected to be wrong for some card, and made not to
+matter by the calibrate-up path.
