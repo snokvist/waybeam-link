@@ -661,6 +661,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cal.loss_bad_milli =
                     pk.value("loss_bad_milli", cal.loss_bad_milli);
                 cal.seek_step_qdb = pk.value("seek_step_qdb", cal.seek_step_qdb);
+                cal.offset_seek_step_qdb =
+                    pk.value("offset_seek_step_qdb", cal.offset_seek_step_qdb);
                 cal.rssi_guard_dbm =
                     pk.value("rssi_guard_dbm", cal.rssi_guard_dbm);
                 cal.min_qdb = pk.value("min_qdb", cal.min_qdb);
@@ -699,6 +701,18 @@ Result<Config> load_config_json(const std::string& json_text) {
                     return Result<Config>::fail(
                         "policy.calibration: seek_step_qdb must be >= 8 (2 dB "
                         "— the cap wall's minimum commanded step, §10.6)");
+                }
+                // §10.6 (Pass 151): the offset window is 24 qdb by default,
+                // so this step decides how many probes a relative-backend
+                // sweep gets. Bounded on both sides — under 4 qdb (1 dB) is
+                // below the actuator's own resolution and just burns dwells;
+                // over 24 leaves a default window with two probes, which is
+                // the condition this key exists to prevent.
+                if (cal.offset_seek_step_qdb < 4 ||
+                    cal.offset_seek_step_qdb > 24) {
+                    return Result<Config>::fail(
+                        "policy.calibration: offset_seek_step_qdb must be "
+                        "4..24 qdb (1..6 dB, §10.6 Pass 151)");
                 }
                 if (cal.uplink_probe_epochs < 1 ||
                     cal.uplink_verify_epochs < 1 ||

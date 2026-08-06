@@ -7686,3 +7686,14 @@ overdrive, not a translation. The fingerprint scoping that makes a cross-backend
 load read STALE is also why the artifact needs no space marker — but an explicit
 config `power_map` is *not* backend-scoped, carries no space, and stays refused
 on a relative backend.
+
+**Pass 151 addendum — the artifact's space is not its fingerprint.** The Pass
+146 identity scopes an artifact by *backend*, and the plan leaned on that to
+avoid adding a space marker. That holds going forward but not backward: between
+Pass 146 and Pass 150 a devourer artifact could be authored by the absolute
+sweep, and it still matches its own fingerprint. Read as offsets its 4..108
+rungs clamp onto the §10.5 bound — parking the node on the efuse default this
+pass exists to keep it off, silently, at boot, with the fingerprint reporting a
+match. A relative-backend auto-load therefore also requires every placement to
+lie inside the live offset window, and refuses as STALE with the space named.
+Load-time only; no artifact or wire format change.

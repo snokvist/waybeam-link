@@ -2530,11 +2530,20 @@ remedy, and is preferred over widening the window automatically — the floor is
 safety property, not a search bound.
 
 Actuation follows the space: placements are commanded through the same relative
-actuator §10.5 uses, and the artifact's curve holds offsets. Nothing marks the
-space *in* the artifact, because nothing needs to — the Pass 146 fingerprint is
-already backend-scoped, so an artifact authored in one space cannot load in the
-other. An explicit config `power_map` is **not** backend-scoped, carries no
-space, and therefore remains refused on a relative backend (§10.2).
+actuator §10.5 uses, and the artifact's curve holds offsets. An explicit config
+`power_map` is **not** backend-scoped, carries no space, and therefore remains
+refused on a relative backend (§10.2).
+
+The artifact carries no space *field*, because the Pass 146 fingerprint already
+scopes it by backend — but backend and space came apart once, in the window
+between Pass 146 and Pass 150 when a devourer artifact could be authored by the
+absolute sweep. Such an artifact still matches its fingerprint, and its 4..108
+rungs read as offsets would clamp onto the §10.5 bound and park the node on the
+uncharacterised efuse default this pass exists to keep it off. So on a relative
+backend a boot auto-load additionally requires **every placement to fall inside
+the live offset window**; one that does not reads CALIBRATION STALE with the
+space named as the reason, exactly as a fingerprint mismatch does. This is a
+load-time check on stored state, not a wire or artifact format change.
 
 **Placement is the loss minimum, not the first tolerable point (Pass 151).**
 Passes 121–130 place at the highest probe under `loss_bad_milli`, then verify

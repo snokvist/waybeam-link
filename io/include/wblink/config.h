@@ -302,6 +302,12 @@ struct CalibrationPolicy {
     int loss_ok_milli = 15;
     int loss_bad_milli = 50;
     int seek_step_qdb = 16;  // Pass 121 max-power seek
+    // §10.6 (Pass 151) step for a RELATIVE air backend, where min_qdb/max_qdb
+    // do not apply at all: the window is derived per-adapter from
+    // power_offset_qdb .. power_offset_max_qdb. Separate from seek_step_qdb
+    // because that window is 24 qdb by default against a 16 qdb step, and two
+    // probes is not a measurement. Parsed and ignored on absolute backends.
+    int offset_seek_step_qdb = 8;  // 2 dB
     int rssi_guard_dbm = -6;
     int min_qdb = 4;
     int max_qdb = 108;

@@ -55,6 +55,11 @@ struct UplinkCalibParams {
     // mask than §10.6 does — this placement auto-applies at boot with no
     // operator between the measurement and the actuator.
     std::array<uint8_t, kUplinkRungs> levels{4, 4, 3, 3, 2, 2, 1, 1};
+    // §10.6/§10.7 (Pass 151): same meaning as CalibrateParams — false in
+    // offset space, where the efuse per-rate table the offset is measured
+    // against already carries this backoff, and where re-applying it collapses
+    // a level-1 rung to min == max.
+    bool taper_rung_ceiling = true;
     uint32_t settle_ms = 300;       // shared with §10.6: TXAGC settle
     // §10.7 burst sizes (Pass 132). 100 makes one lost probe 10permille —
     // inside loss_ok_milli — and five 50permille, exactly the bad wall. That
@@ -304,6 +309,7 @@ class UplinkCalibrator {
     // max_qdb is the flat ceiling the caller already narrowed by the
     // adapter's max_power_qdb.
     int32_t rung_ceiling_qdb(size_t rung) const {
+        if (!p_.taper_rung_ceiling) return p_.seek.max_qdb;
         const int32_t lvl = rung < p_.levels.size()
                                 ? static_cast<int32_t>(p_.levels[rung])
                                 : kPowerLevelBaseline;
@@ -404,7 +410,11 @@ class UplinkCalibrator {
                 // it, and let CalibSequencer start the downlink across it,
                 // defeating the order law through a SUCCESS state that no
                 // interlock inspects. Fail instead; nothing is persisted.
-                if (loss > p_.seek.loss_ok_milli) {
+                //
+                // Pass 151: judge the PLACED point, not the last dwell — a
+                // minimum-hunt step-back places one step above where the
+                // final dwell was measured.
+                if (seek_.placed_loss_milli() > p_.seek.loss_ok_milli) {
                     return rung_unreachable(a, "verify_failed");
                 }
                 {
@@ -413,8 +423,8 @@ class UplinkCalibrator {
                     pl.short_gi = p_.rungs[rung_].short_gi;
                     pl.placement_qdb = s.qdb;
                     pl.placement_rssi_dbm =
-                        static_cast<int8_t>(std::lround(rssi));
-                    pl.placement_loss_milli = loss;
+                        static_cast<int8_t>(std::lround(seek_.placed_rssi()));
+                    pl.placement_loss_milli = seek_.placed_loss_milli();
                     // Read the bracket from the seek rather than tracking a
                     // second copy here. The duplicate booked the COLD floor as
                     // the overload ceiling — measured on the bench as
