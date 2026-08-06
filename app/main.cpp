@@ -4051,7 +4051,7 @@ int run_tx(const Loaded& l) {
         // §10.6 already keys its own artifact on, hashed to the one byte the
         // wire has room for.
         const std::string ident =
-            calib_tx_adapter ? calib_identity(*calib_tx_adapter) : "udp";
+            calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
         tx.set_quality_identity(
             crc8_dvbs2(reinterpret_cast<const uint8_t*>(ident.data()),
                        ident.size()));
@@ -4061,7 +4061,7 @@ int run_tx(const Loaded& l) {
     std::optional<CalibArtifact> last_artifact;
     tx.on_calib_artifact = [&](const CalibArtifact& art) {
         const std::string ident =
-            calib_tx_adapter ? calib_identity(*calib_tx_adapter) : "udp";
+            calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
         const uint8_t fp = calib_store_write(
             l.cfg.policy.calibration.artifact_dir, ident, art);
         if (fp == 0) {
@@ -4082,7 +4082,7 @@ int run_tx(const Loaded& l) {
             calib_store_load(l.cfg.policy.calibration.artifact_dir);
         stored) {
         const std::string ident =
-            calib_tx_adapter ? calib_identity(*calib_tx_adapter) : "udp";
+            calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
         if (stored.value->identity == ident) {
             // Explicit config power_map wins; the artifact fills the gap.
             if (!tx.has_power_curve()) {
@@ -5057,7 +5057,7 @@ int run_rx(const Loaded& l) {
     // with the config tier, because the CRAFT half of the identity does not
     // exist at config-load time.
     const std::string uplink_identity =
-        uplink_adapter != nullptr ? calib_identity(*uplink_adapter) : "udp";
+        uplink_adapter != nullptr ? calib_identity(*uplink_adapter, l.cfg.air.kind) : "udp";
     std::optional<UplinkArtifact> uplink_artifact;
     uint8_t uplink_artifact_fp = 0;
     bool uplink_artifact_stale = false;

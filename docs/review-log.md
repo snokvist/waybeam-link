@@ -6764,6 +6764,76 @@ implemented and unit-tested before anyone read a serial off real hardware. One
 the fix itself — a design can be internally consistent, tested green, and
 still resting on something that was never checked.
 
+**Addendum (review of this pass, before merge).** Two corrections and one
+finding.
+
+The bus-fallback warning said the adapter "has no USB serial". The code never
+reads a serial — the serial path was removed earlier in this same pass — and
+the claim is false besides: these dongles *do* carry a serial, it is just
+worthless. An operator-facing message must not assert a fact the code did not
+check. It now names the actual condition, `no calib_id`.
+
+**The per-unit identity exists in hardware after all; devourer simply cannot
+reach it.** Dumping the EFUSE through the vendor kernel driver
+(`/proc/net/rtl88x2{eu,cu}/<iface>/efuse_map`) shows both values sitting in the
+same map, a few bytes apart: the 6-byte MAC at logical `0x157` is per-unit —
+`84:fc:14:50:bc:de` on the bench 8822EU, `40:a5:ef:2f:23:08` on the 8812CU,
+matching each netdev exactly — while the USB serial string descriptor at
+`0x174` is the constant `"123456"` on both. That is the whole explanation for
+the earlier measurement: the serial is not *missing*, it is *burned in as a
+placeholder*, and the identity Linux uses for its stable `wlx<mac>` name was
+always the MAC beside it.
+
+This makes the earlier method note sharper rather than softer. Reading three
+sysfs serials killed the serial design correctly, but stopping there left the
+conclusion "devourer has no derivable identity", which is wrong — it has one,
+six bytes away, unexposed. A negative result is worth one more question: not
+just "is this key unusable?" but "is there a usable key next to it?"
+
+devourer already decodes that map (`HalJaguar3::read_efuse_logical_map` takes
+an explicit `upto`) and Jaguar1 already implements `EepromManager::GetMacAddress`
+against it with per-chip offsets — but `IRtlDevice` exposes no accessor, so
+even the working implementation is unreachable, and Jaguar3's `_efuse_cache` is
+`[0x100]`, stopping short of `0x157`. `docs/devourer-mac-identity.md` is the
+upstream request: a default-false `GetPermanentMacAddress` on the interface
+plus per-family reads. If it lands, `calib_id` becomes the override rather than
+the only option. Nothing in this pass depends on that landing.
+
+**Open question, deliberately not decided here.** §10.7 claims the identity
+"deliberately differs by backend so a mismatch reads STALE". That holds for
+tiers 2 and 3 — `ifname/<MAC>` on kernel-monitor versus `bus/<path>` on
+devourer can never collide. It does **not** hold for tier 1: `calib_id` is an
+operator-chosen string that overrides both, so the same physical dongle given
+the same name under both backends yields the same identity, and a
+monitor-measured curve would be applied on devourer without ever reading
+STALE — the exact hazard the section exists to prevent. This is not
+hypothetical for this fleet: the craft ran kernel-monitor before Pass 145 and
+now runs devourer on the same adapter. The fix, if wanted, is to scope tier 1
+by backend (`id/<air.kind>/<calib_id>`), which restores the invariant for all
+three tiers at the cost of one config-visible string change. Left as an
+operator ruling.
+
+**Tier-1 backend scoping, resolved (operator ruling 2026-08-06).** The open
+question above is closed by implementing it: the declared tier is now
+`id/<backend>/<calib_id>`. §10.7 claimed the identity "deliberately differs by
+backend"; tiers 2 and 3 delivered that for free — an ifname exists only on
+kernel-monitor, a bus path only on devourer — but tier 1 broke it, since a name
+the operator chose carries no such distinction.
+
+The craft's own stored artifact is the proof this was worth fixing rather than
+documenting: it reads `"identity":"wlan0/98:03:cf:cf:a4:28"`, a kernel-monitor
+identity measured in June. That adapter now runs devourer. Had `calib_id` been
+set back then, the identity would match today and a curve measured against
+nl80211 fixed power would be applied to devourer's efuse-relative offset —
+silently, with no STALE, which is precisely the failure the fingerprint exists
+to catch.
+
+Blast radius checked before changing a persisted format: the ground keys on
+tier 2 (`ifname`, no `calib_id`), so its hard-won 10 m `fp=110` uplink artifact
+is untouched; the craft's artifact is already stale for unrelated reasons. Only
+the tier that was wrong moved. The backend tag is deliberately not the config
+spelling ("monitor", not "kernel-monitor") — these strings land in a persisted
+artifact and must not move when config wording does.
 ## Pass 147 — G4 closed on hardware: both halves induced (2026-08-06)
 
 G4 was the last open item on the devourer parity register, and it was one

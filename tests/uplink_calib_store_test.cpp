@@ -325,24 +325,34 @@ int main() {
         AdapterCfg a;
         a.name = "uplink";
         // udp/bench adapter: no identity to derive.
-        CHECK(calib_identity(a) == "udp");
+        CHECK(calib_identity(a, AirCfg::Kind::kUdp) == "udp");
 
         // A bus path with no USB serial is the last resort, and unstable.
         a.bus = "9-9";   // no such device, so no sysfs serial to read
-        CHECK(calib_identity(a) == "bus/9-9");
+        CHECK(calib_identity(a, AirCfg::Kind::kRadio) == "bus/9-9");
 
         // An ifname wins over the bus path: kernel-monitor asks the netdev.
         a.ifname = "wlnosuchdev";
-        CHECK(calib_identity(a).rfind("wlnosuchdev/", 0) == 0);
+        CHECK(calib_identity(a, AirCfg::Kind::kMonitor).rfind("wlnosuchdev/", 0) == 0);
 
         // calib_id wins over everything, which is what makes it usable for a
         // dongle whose serial is blank or duplicated across a fleet.
         a.calib_id = "craft-eu-1";
-        CHECK(calib_identity(a) == "id/craft-eu-1");
+        CHECK(calib_identity(a, AirCfg::Kind::kRadio) == "id/radio/craft-eu-1");
         // ...and it does not depend on either derived source still being set.
         a.ifname.clear();
         a.bus.clear();
-        CHECK(calib_identity(a) == "id/craft-eu-1");
+        CHECK(calib_identity(a, AirCfg::Kind::kRadio) == "id/radio/craft-eu-1");
+        // The declared tier is scoped by backend, so the SAME operator-chosen
+        // name under kernel-monitor is a DIFFERENT identity. Without this a
+        // monitor-measured curve would be applied to devourer's offset
+        // actuator without ever reading STALE — the exact failure §10.7
+        // exists to prevent, and live for this fleet: the craft ran monitor
+        // before Pass 145 and devourer after, on one physical adapter.
+        CHECK(calib_identity(a, AirCfg::Kind::kMonitor) ==
+              "id/monitor/craft-eu-1");
+        CHECK(calib_identity(a, AirCfg::Kind::kRadio) !=
+              calib_identity(a, AirCfg::Kind::kMonitor));
     }
 
     return wbtest_finish("uplink_calib_store_test");

@@ -2351,9 +2351,14 @@ offset relative to the efuse per-rate table — so a curve measured under one is
 **not** valid under the other, and the identity deliberately differs by backend
 so a mismatch reads STALE rather than being applied. Resolution order:
 
-1. `adapters[].calib_id`, when the operator sets it — an explicit name for a
-   physical adapter, and the only option for a dongle whose serial is blank or
-   duplicated across a fleet.
+1. `id/<backend>/<adapters[].calib_id>`, when the operator sets it — an
+   explicit name for a physical adapter, and the only option for a dongle whose
+   serial is blank or duplicated across a fleet. **Scoped by backend**, because
+   unlike the derived tiers below it would otherwise be identical under both:
+   an ifname exists only on kernel-monitor and a bus path only on devourer, but
+   a name the operator chose carries no such distinction, and an unscoped one
+   would apply a monitor-measured curve to devourer's offset actuator without
+   ever reading STALE.
 2. `ifname/<MAC>` on kernel-monitor, read from the netdev.
 3. `bus/<bus-port>` as a last resort, **logged as unstable**: USB bus paths
    shuffle on any re-plug, so an artifact keyed this way goes stale the next
@@ -2370,6 +2375,19 @@ That is precisely the failure the fingerprint check exists to prevent.
 So on devourer the stable identity has to be **declared**, not derived —
 `calib_id` is the answer, and the bus-path fallback warns every boot until one
 is set.
+
+**The per-unit identity does exist in hardware; devourer just cannot reach it.**
+Dumping the EFUSE through the vendor kernel driver shows both values in the
+same map: the 6-byte MAC at logical offset `0x157` differs per unit (it is what
+the driver writes to the netdev, and what gives Linux its stable `wlx<mac>`
+interface name), while the USB serial string descriptor at `0x174` is the
+constant `"123456"` burned identically into every unit. Measured on an 8822EU
+and an 8812CU. devourer already decodes this map and Jaguar1 already implements
+a `GetMacAddress` against it — but `IRtlDevice` exposes no accessor, so a
+consumer that has taken the adapter from the kernel driver cannot read it.
+`docs/devourer-mac-identity.md` is the upstream request. If it lands, tier 1
+gains a derived sibling and `calib_id` becomes the override rather than the
+only option; until then it is the only option, and the wording above stands.
 
 **A run that found no wall anywhere measured nothing (Pass 134).** §10.6 scores
 every dwell from LINK_REPORTs, so its result is only as good as the return

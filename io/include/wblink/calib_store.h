@@ -25,7 +25,20 @@ namespace wblink {
 // Stable identity for the tx adapter the curve was calibrated against:
 // kernel-monitor → "ifname/<mac>" (sysfs), devourer → "bus/<path>",
 // udp → "udp". Weak identities beat silent misapplication.
-std::string calib_identity(const AdapterCfg& adapter);
+//
+// `backend` scopes the operator-declared `calib_id` tier. The derived tiers
+// distinguish backends for free — an ifname only exists on kernel-monitor, a
+// bus path only on devourer — but `calib_id` is a name the operator chose and
+// would otherwise be identical under both, which would let a monitor-measured
+// curve be applied to devourer's very different actuator without ever reading
+// STALE. That is the failure §10.7 exists to prevent, so the declared tier is
+// scoped too. Pass `AirCfg::Kind`; see `calib_backend_tag`.
+std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend);
+
+// Short stable token for an air backend, used only to scope calibration
+// identities. Deliberately not the config spelling: these strings land in a
+// persisted artifact, so they must not move when config wording does.
+const char* calib_backend_tag(AirCfg::Kind kind);
 
 // Persist the artifact; returns the CRC-8 fingerprint (never 0 on success —
 // 0 is the §3.15 "no artifact" sentinel), or 0 on write failure.
