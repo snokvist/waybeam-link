@@ -111,8 +111,8 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     read_frame_meta(blob, len, &meta);
     const bool is_idr = (meta.flags & kFrameFlagIdr) != 0;
     // §14.1a priority order IDR -> enhance -> P. No producer marks an IDR
-    // non-referenced; assert the disjointness rather than relying on it, and
-    // let IDR win if a producer ever does (protecting more, never less).
+    // non-referenced, but do not rely on it: resolve so IDR wins if one ever
+    // does — more protection, never less.
     const bool is_enhance = !is_idr && (meta.flags & kFrameFlagEnhance) != 0;
     const FrameFecClass cls = is_idr      ? FrameFecClass::kIdr
                               : is_enhance ? FrameFecClass::kEnhance

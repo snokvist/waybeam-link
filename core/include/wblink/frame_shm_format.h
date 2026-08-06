@@ -87,14 +87,4 @@ inline bool frame_blob_is_idr(const uint8_t* blob, size_t len) {
     return read_frame_meta(blob, len, &m) && (m.flags & kFrameFlagIdr) != 0;
 }
 
-// True if the blob is a non-referenced (SVC-T droppable) frame — §14.1a. The
-// producer sets bit 2 when the encoder reports ENHANCE_P_NOTFORREF; nothing
-// predicts from such a frame, so its loss costs exactly one frame. This flag
-// is the ONLY source of truth for the class: density is a producer-side
-// period (1/(ref_enhance+1)) that no preset name identifies.
-inline bool frame_blob_is_enhance(const uint8_t* blob, size_t len) {
-    VencFrameMeta m;
-    return read_frame_meta(blob, len, &m) && (m.flags & kFrameFlagEnhance) != 0;
-}
-
 }  // namespace wblink

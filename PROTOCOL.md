@@ -3550,8 +3550,9 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
 
   **Classification is a priority order, not a set of independent tests:**
   IDR → non-referenced → P. An IDR is never marked non-referenced by either
-  producer backend, so the classes are disjoint in practice; implementations
-  MUST assert the disjointness rather than rely on it.
+  producer backend, so the classes are disjoint in practice. Implementations
+  MUST NOT rely on that: resolve in priority order so a producer that ever
+  sets both bits is protected as an IDR — more protection, never less.
 
 - **The `min_k` gate is conditional (Pass 94).** `r = 0` at small `k` is an
   *optimisation* — do not spend parity where ARQ will recover the frame anyway

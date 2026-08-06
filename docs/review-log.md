@@ -7219,3 +7219,39 @@ it costs. The reallocation case rests entirely on a link where referenced frames
 transmitter, not a hard RF environment. Stage 3 is therefore **not** closed; it
 needs a genuinely lossy link, and §14.1a's arithmetic stays operator guidance
 rather than a validated recipe.
+
+**Pre-merge review of this pass's own diff (2026-08-06).** Three findings, all
+fixed in the branch.
+
+1. **`reset_stats()` never zeroed the §14.2 enforcement counters** — a
+   pre-existing defect this pass was about to extend. `jscc_decision_frames`,
+   `jscc_valid_decisions` and `jscc_fallback_decisions` were reset;
+   `jscc_enforced_frames` and `jscc_discarded_frames` were not, so after a
+   §15.5 `POST /api/v1/stats/reset` they carried lifetime totals against
+   restarted denominators — `enforced/decisions` could read greater than 1 and
+   any windowed enforcement measurement was quietly wrong. Adding
+   `jscc_exempt_frames` would have made it three. All three now reset, and the
+   declaration site carries the warning, because that is where the omission
+   gets made. Not unit-tested: `app_test.cpp` can reach `TxCore` (it
+   `#include`s `main.cpp`) but has no JSCC scaffolding at all, and standing one
+   up — enforce, feedback, airtime, a valid decision — is disproportionate to a
+   three-line fix. Recorded rather than hidden.
+2. **A dead accessor.** `frame_blob_is_enhance()` was added per the #92 draft
+   and never called: both call sites already hold a parsed `VencFrameMeta` and
+   test the flag directly, which is correct — the accessor would re-parse.
+   Removed. Note `frame_blob_is_idr()` is dead in exactly the same way, but it
+   predates this pass and is left alone.
+3. **Spec said "assert", code resolves.** §14.1a required implementations to
+   *assert* IDR/enhance disjointness; there is no runtime assert and adding one
+   to a per-frame hot path to catch a producer bug that has never occurred is
+   not warranted. The code resolves in priority order so an IDR wins if a
+   producer ever set both bits — more protection, never less. Spec and both
+   code comments now say what the code does.
+
+Also documented rather than changed: §9.6 `frame_caps` still derives
+`max_p_bytes` from `p_rate_permille`, so with `e_rate` lowered the cap is
+conservative and freed airtime is **not** handed back to the encoder. That is
+the right default while `e_rate` has no validated non-default setting — a
+blended rate would have to track measured density — but it means the byte
+saving does not become picture quality on its own, which is precisely the
+untested conversion the reallocation case would need.

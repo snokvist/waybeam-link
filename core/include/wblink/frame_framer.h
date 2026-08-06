@@ -73,8 +73,8 @@ struct FrameFramerStats {
 };
 
 // §14.1a classification, in priority order. IDR wins over kEnhance because no
-// producer marks an IDR non-referenced; the framer asserts that disjointness
-// rather than relying on it.
+// producer marks an IDR non-referenced; the framer RESOLVES rather than relies
+// on that, so a producer that ever set both bits gets IDR protection.
 enum class FrameFecClass : uint8_t { kP = 0, kEnhance = 1, kIdr = 2 };
 
 class FrameFramer {

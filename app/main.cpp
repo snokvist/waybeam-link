@@ -1857,7 +1857,9 @@ struct TxCore {
         uint64_t jscc_decision_frames = 0;
         uint64_t jscc_valid_decisions = 0;
         uint64_t jscc_fallback_decisions = 0;
-        // §14.2 enforcement (Pass 38).
+        // §14.2 enforcement (Pass 38). NOTE: every counter below must also
+        // be zeroed in reset_stats() — two of them were not, and a §15.5
+        // reset left them at lifetime totals against restarted denominators.
         bool jscc_enforce = false;
         uint64_t jscc_enforced_frames = 0;
         uint64_t jscc_discarded_frames = 0;
@@ -2357,6 +2359,12 @@ struct TxCore {
                 const FrameFecConfig& fec = s.frame_framer->fec();
                 if (fec.scheme != FecScheme::kNone) {
                     in.i_rate_permille = fec.i_rate_permille;
+                    // §9.6 caps stay on the P rate even when §14.1a lowers the
+                    // non-referenced class: max_p_bytes is then conservative
+                    // (net of more parity than is actually emitted), so freed
+                    // airtime is NOT handed back to the encoder. Deliberate —
+                    // e_rate has no validated non-default setting (§14.1a), and
+                    // a blended rate would have to track measured density.
                     in.p_rate_permille = fec.p_rate_permille;
                 }
                 in.symbol_size = static_cast<uint16_t>(
@@ -2697,6 +2705,13 @@ struct TxCore {
                 s.jscc_decision_frames = 0;
                 s.jscc_valid_decisions = 0;
                 s.jscc_fallback_decisions = 0;
+                // Pass 149: the enforcement counters were omitted here, so a
+                // §15.5 reset left them at lifetime totals while the decision
+                // denominators restarted — enforced/decisions could read >1
+                // and every windowed measurement was silently wrong.
+                s.jscc_enforced_frames = 0;
+                s.jscc_discarded_frames = 0;
+                s.jscc_exempt_frames = 0;
             }
             s.sched.reset_counters();
         }
