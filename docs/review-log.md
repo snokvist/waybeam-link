@@ -7629,3 +7629,60 @@ The shape of both: Pass 150 converted the paths that were in mind and left the o
 Also fixed: `power_tier_effective()` reported a curve the resolve refuses; the calibration restore's curve leaf was inert on a relative backend and would have stranded the last probe value (one guard away from Pass 134's "left the craft at 15.00 dBm"); `UdpAir::set_power_offset_qdb` returned true with no actuator, so the boot log printed "applied" for a write that reached nothing.
 
 Deferred and recorded, not fixed: §15.3 `tx_power_qdb` reports 0 when the node is on its boot offset — the value that means "efuse default", the state this pass exists to forbid — and neither `power_offset_qdb` nor its bound is exposed on any surface, so an operator can only confirm the boot offset from stderr at startup. An out-of-range `max_power_qdb` is a hard load failure, which on a vehicle is total link loss after an upgrade from the old `2000` sample idiom; clamp-and-warn may be the better failure mode. The `UplinkPower` tests still pin pre-150 absolute semantics.
+
+---
+
+## Pass 151 — §10.6/§10.7 calibrate-up re-base into offset space (2026-08-06)
+
+**The blocker.** Pass 150 refused §10.6 calibration and the §10.2 curve resolve
+on relative backends, because the sweep drives absolute qdb rungs to `max_qdb`
+108, which on devourer is +27 dB of boost — RF-triggerable, unclamped before the
+chip rail. Correct as a stop-gap, but it left the craft uncalibratable and the
+10 m devourer↔devourer campaign unrunnable. This pass re-bases the sweep instead
+of refusing it.
+
+**The window is derived, not configured.** On a relative backend the seek runs
+`[power_offset_qdb, power_offset_max_qdb]` — the safe boot offset up to the
+§10.5 bound, both already per-adapter keys. That buys a property the absolute
+window never had: **calibration can never place a relative backend hotter than
+`power_offset_max_qdb` nor colder than the safe offset it started from.** One
+new key, `offset_seek_step_qdb` (8 = 2 dB), exists only because the default
+window is 24 qdb against a 16 qdb step — two probes is not a measurement. The
+direction is unchanged, and is the recorded rule for live-link sweeps: **safe
+end first**, so every probe sits at or below the efuse default.
+
+**The re-base exposed a placement defect, and the finer step is what triggers
+it.** `PowerSeek::verify_` descended only while `loss > loss_ok_milli` and
+returned at the *first* acceptable reading, on the assumption that loss falls
+monotonically with power up to a wall. On a compressing PA the minimum is
+**interior**. Measured on the craft's 8822EU at fixed MCS 5 — 0 dB: 19 ‰,
+−2 dB: 6 ‰, −4 dB: 2 ‰, −6 dB: 1 ‰. The old rule is benign there only by
+arithmetic accident: 19 exceeds `loss_ok_milli` = 15 by enough to force exactly
+one 4 dB step, landing on −4 dB. At the 2 dB step this pass requires, it stops
+at −2 dB and takes **3× the achievable loss while reporting success**. A
+measurement whose result degrades when you raise its resolution is not
+measuring the thing it claims to.
+
+So verify now **descends while loss keeps improving** and stops when a step buys
+nothing, placing at the *previous, higher* power — equal loss at more power is
+strictly better link budget. Bounded by the existing `verify_descent_budget` and
+the window floor; the descent travels toward the safe end, so neither phase can
+strand a probe above the window top. Operator-ruled **universal**, both
+backends: the compression knee is a property of a power amplifier, not of
+devourer, and the two sections deliberately share one seek rather than growing a
+second, differently-buggy copy.
+
+**Both halves of §10.7 move together, or neither does.** The space is chosen
+once from the air backend kind, and the sweep's *measurement* and its *actuator*
+follow it as a unit. This is the discipline the Pass 150 second review paid for:
+converting only the applier turned an 84 qdb placement into `108 + 84 = 192`. A
+ground on kernel-monitor — every ground in the fleet — is unaffected end to end.
+
+**§10.6 "Forward validity" is withdrawn.** It claimed the artifact "survives a
+backend move to devourer unchanged". The same section's Pass 146 identity rule
+already said the opposite, and Pass 150 settled which is right: the two backends
+command different quantities, so a monitor artifact applied on devourer is an
+overdrive, not a translation. The fingerprint scoping that makes a cross-backend
+load read STALE is also why the artifact needs no space marker — but an explicit
+config `power_map` is *not* backend-scoped, carries no space, and stays refused
+on a relative backend.

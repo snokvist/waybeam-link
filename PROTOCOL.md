@@ -2491,12 +2491,77 @@ Failure *reason* and the full report are management-HTTP only (§15.5
 `GET /api/v1/calibration`). §15.3 `link` mirrors the word
 (`calib_state`, `calib_rung`, `calib_fingerprint`, `calib_stale`).
 
-**Forward validity.** The curve is actuator-referenced (max clean
-commanded power) and the ceilings are
-receiver-referenced (RSSI brackets), so the artifact survives a backend
-move to devourer per-packet TX power unchanged — per-packet power is a
-finer actuator for the same per-rung maxima, and per-rate diffs absorb
-chip-cal skew.
+**Forward validity — WITHDRAWN (Pass 151).** Passes 120–134 claimed the
+artifact "survives a backend move to devourer unchanged", on the theory that
+per-packet power is a finer actuator for the same per-rung maxima. That is
+false, and this section already contradicted itself: the Pass 146 identity rule
+above states that a curve measured under one backend is **not** valid under the
+other and deliberately scopes the fingerprint so a cross-backend load reads
+STALE. Pass 150 settled which is right — kernel-monitor commands an absolute
+nl80211 power while devourer commands an **offset** relative to the efuse
+per-rate table, so the two curves are not the same quantity and a monitor
+artifact applied on devourer is an overdrive, not a translation. The identity
+scoping stands; this paragraph is struck.
+
+**Offset-space calibration on a relative backend (Pass 151).** §10.5 (Pass 150)
+made TX power relative on devourer, so a sweep in absolute qdb — `min_qdb` 4 to
+`max_qdb` 108 — walks +1 dB to +27 dB of boost there. On a relative backend the
+run therefore sweeps in **offset space**, and the window is not configured
+separately but **derived from the §10.5 keys already governing that adapter**:
+
+```
+min = adapters[].power_offset_qdb        (the safe boot offset)
+max = adapters[].power_offset_max_qdb    (the §10.5 bound, default 0)
+step = policy.calibration.offset_seek_step_qdb   (default 8 = 2 dB)
+```
+
+which yields the property the absolute window never had:
+
+> Calibration can never place a relative backend hotter than
+> `power_offset_max_qdb`, nor colder than the safe offset it started from.
+
+A separate step is required because the default window is 24 qdb and
+`seek_step_qdb` is 16 — two probes is not a measurement. The sweep direction is
+unchanged and remains the Pass 130 monotone ascent: **safe end first**, so on a
+relative backend every probe in the run sits at or below the efuse default. An
+adapter whose true optimum lies *below* its safe boot offset is out of reach by
+construction; lowering `power_offset_qdb` and re-running is the operator's
+remedy, and is preferred over widening the window automatically — the floor is a
+safety property, not a search bound.
+
+Actuation follows the space: placements are commanded through the same relative
+actuator §10.5 uses, and the artifact's curve holds offsets. Nothing marks the
+space *in* the artifact, because nothing needs to — the Pass 146 fingerprint is
+already backend-scoped, so an artifact authored in one space cannot load in the
+other. An explicit config `power_map` is **not** backend-scoped, carries no
+space, and therefore remains refused on a relative backend (§10.2).
+
+**Placement is the loss minimum, not the first tolerable point (Pass 151).**
+Passes 121–130 place at the highest probe under `loss_bad_milli`, then verify
+and step down only while loss exceeds `loss_ok_milli` — so the descent stops at
+the *first* acceptable reading. That assumed loss falls monotonically with power
+up to a wall. On a compressing PA it does not: the minimum is **interior**, and
+"highest power still under a threshold" and "lowest loss" are different points.
+Measured on the craft's 8822EU at fixed MCS 5 — 0 dB: 19permille, −2 dB:
+6permille, −4 dB: 2permille, −6 dB: 1permille. The old rule is benign there only
+by arithmetic accident, because 19 > `loss_ok_milli` forces exactly one 4 dB
+step; at the finer step this section now requires it would stop at −2 dB and
+take **3× the achievable loss while reporting success**. Raising measurement
+resolution must not degrade the result.
+
+So the verify phase **descends while loss keeps improving** and stops when a
+step buys nothing, bounded by the existing `verify_descent_budget` and the
+window floor. The first verify always trials one step down — that trial is the
+mechanism, not an optimisation. When a step fails to improve, the placement is
+the **previous, higher** power: equal loss at more power is strictly better link
+budget. The descent's direction of travel is toward the safe end, so neither
+phase can strand a probe above the window top.
+
+This applies on **both** backends. The compression knee is a property of a power
+amplifier, not of devourer, and §10.6/§10.7 deliberately share one seek rather
+than growing a second, differently-buggy copy. A curve authored before Pass 151
+is not invalidated — it is simply a placement under the older rule, and is
+replaced on the next run.
 
 ### 10.7 Ground-uplink TX calibration symmetry (Pass 125; 8 rungs Pass 131)
 
@@ -2601,6 +2666,16 @@ structurally the same loop §10.6 already runs, and deliberately so. Seed
 backstop, bounded verify descents, and hard cap. A probe dwell is a burst of
 **100 probes**, verification **400**. Seed loss thresholds remain
 `loss_ok_milli=15` and `loss_bad_milli=50`.
+
+**Both §10.6 Pass 151 rules apply here unchanged**, because both live in the
+shared seek: the placement is the loss minimum rather than the first tolerable
+point, and on a **relative** ground backend the window and actuator are the
+offset-space ones derived from the uplink adapter's §10.5 keys. A ground on
+kernel-monitor — every ground in the fleet today — keeps absolute qdb end to
+end. The space is chosen once, from the air backend kind, and the sweep's
+*measurement* and its *actuator* move together: a run that measures in one space
+and commands in the other places `108 + 84 = 192` qdb, which is how this was
+found (Pass 150 review, second round).
 
 Counts are **sample gates, not timers**, and since Pass 132 the ground sizes
 the sample itself: a dwell takes as long as it takes to send its burst, and
@@ -4207,6 +4282,12 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   are retired and ignored. `max_qdb` is the *flat* bound; the sweep's actual
   per-rung ceiling is it narrowed by the adapter's §10.3 `max_power_qdb` and
   tapered by the §9.3 row's `tx_power_level` (Pass 134).
+  `offset_seek_step_qdb` (**8** = 2 dB, Pass 151) is the step used when the air
+  backend is relative (§10.5), where `min_qdb`/`max_qdb` do not apply at all:
+  the window is derived per-adapter from `power_offset_qdb` and
+  `power_offset_max_qdb`. It exists because that window is 24 qdb by default and
+  `seek_step_qdb` is 16 — two probes is not a measurement. On an absolute
+  backend the key is parsed and ignored.
   Dwells are short by design: the live video IS the measurement traffic
   (thousands of loss samples per second), so a dwell needs only TXAGC
   settle plus a couple of report windows — a full 8-rung run is ~2 min.
