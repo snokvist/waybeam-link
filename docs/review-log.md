@@ -7329,3 +7329,54 @@ step was therefore both the riskiest setting *and* wrong by 27 dB. Two lessons,
 both operator-supplied: sweep a live-link parameter from the safe end upward so
 a freeze costs the last row rather than the run, and do not assume two fields
 sharing a unit suffix share a reference point.
+
+**Mapping the two scales, and what it says about devourer calibration
+(2026-08-06).** Measured on the craft's 8822EU, ground RSSI as the proxy,
+geometry and channel held constant.
+
+**The devourer offset scale is honest and usable.** Sweeping
+`SetTxPowerOffsetQdb` 0 → −30 dB against ground RSSI (`cu-diversity`):
+
+| offset | 0 | −2 | −4 | −6 | −10 | −15 | −20 | −30 |
+|---|---|---|---|---|---|---|---|---|
+| RSSI | −18 | −21 | −22 | −23 | −28 | −32 | −32 | −32 |
+| pre-div loss ‰ | **54** | 6 | 4 | 5 | 6 | 5 | 5 | 6 |
+
+Roughly **1 dB of RSSI per 1 dB of offset from 0 to −10**, then a hard floor at
+about −15 dB where the TXAGC index bottoms out. So devourer gives a monotonic,
+correctly-scaled power axis over ~15 dB — it is a perfectly good calibration
+lever, it simply is not the absolute one §10.5 claims.
+
+**The critical result is in the first two columns: maximum RSSI is NOT maximum
+usable power.** Going 0 → −2 dB costs 3 dB of received signal and takes loss
+from **54 ‰ to 6 ‰**. Signal down, quality up ninefold. The PA is in
+compression at its calibrated default and the extra drive is buying distortion,
+not range. Any calibration that scores rungs on RSSI, or that simply maximises
+power subject to a ceiling, will select the worst operating point available and
+report it as the best. **The compression knee has to be found by sweeping power
+*down* and scoring delivered loss at fixed MCS.** On this unit the knee is
+between 0 and −2 dB.
+
+**Absolute anchor: measurable in principle, too loose here to be worth
+trusting.** By path-loss reciprocity — ground uplink at a kernel-set 19.00 dBm
+absolute, received at the craft at −29 dBm, so L = 48 dB — the craft's TX at
+−4 dB offset back-computes to **16 dBm via `eu-uplink`** and **26 dBm via
+`cu-diversity`**. The two ground adapters read the *same* signal 10 dB apart
+(consistently: eu ≈ −30, cu ≈ −22 across the whole sweep), so the anchor is
+20 dBm or 30 dBm at offset 0 depending on which radio you believe. Reciprocity
+is the right method and needs no backend switch, but it needs one RSSI-calibrated
+reference receiver before the number means anything. Recorded as ±5 dB at best,
+not as a result.
+
+**So the practical guidance, pending the Pass 150 ruling:** calibrate devourer
+in offset space, per unit, by walking down from 0 and scoring loss — not by
+assuming `max_power_qdb` caps anything, and not by maximising RSSI. On this
+craft that lands at −4 dB (`qdb: -16`), which reproduces the kernel-monitor
+error rate exactly (3 ‰ pre / 1 ‰ post). The 8822E TX-quality investigation
+recorded earlier as "per-UNIT, not per-chip" is very likely the same effect
+seen without the power axis.
+
+An attempted second kernel-monitor sweep to pin the anchor directly cost the
+link — the manual `/tmp` config is unsupervised, the process died, and the craft
+went dark until the supervised devourer service was restarted. Do not run the
+monitor A/B without either a supervisor or someone watching it.
