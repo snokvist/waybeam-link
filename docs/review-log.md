@@ -6560,9 +6560,18 @@ hypothesis named is what surfaced the delivery counter. When an A/B says
 never stopped the scout, so a sweep running past a claim finishes seconds later
 and its `rest()` restores the resting channel and `net_id` filter *over* the
 claim — the scout clobbering the operator's click with the campaign already in
-flight. It now stops the sweep, placed after every cheap rejection (so a claim
-that never happens leaves a running sweep alone) and before the first move (so
-`rest()`'s own restore lands first and is immediately overwritten).
+flight. It now ends the sweep, placed after every cheap rejection so a claim
+that never happens leaves a running sweep alone.
+
+**Review caught the first cut using `stop()`.** `ScoutEngine::stop()` calls
+`rest()`, which re-pins the filter and retunes **every ear** back to the
+resting channel — one syscall per adapter, `iw` shell-outs on kernel-monitor —
+immediately before the claim's own `retune_all` moves them to the craft. A full
+round trip to nowhere, in front of a campaign the craft is timing with a 500 ms
+budget. `abandon()` is `stop()` without the restore: the in-flight channel's
+survey is still folded in, only the pointless restore is skipped. The claim's
+existing rollback paths already put the filter and channel back if it fails
+after this point.
 
 Reproducing it taught something about the window. A claim needs
 `scout.candidate_for()`, and **candidates only exist once a channel's dwell
