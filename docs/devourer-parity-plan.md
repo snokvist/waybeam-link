@@ -1,4 +1,4 @@
-# Devourer↔kernel-monitor parity — survey and working plan (2026-08-05)
+# Devourer↔kernel-monitor parity — survey and working plan (2026-08-06)
 
 **Survey and planning only. No spec ruling is made here, so there is no
 `docs/review-log.md` Pass entry attached.** Every item below that touches
@@ -9,10 +9,14 @@ Companion to `docs/devourer-revendor-review.md` (vendored-driver state) and
 supersedes for the devourer column).
 
 **Deliberately open-ended.** Ordering, scope, and the per-item verdicts are
-expected to move — several entries are gated on a bench result that has not
-been read out yet (G0), and the test-surface item (G8) lands on top of the
-in-flight unit-testing work rather than beside it. Treat the register as a
-live working set, not a committed sequence.
+expected to move; the test-surface item (G8) lands on top of the in-flight
+unit-testing work rather than beside it. Treat the register as a live working
+set, not a committed sequence.
+
+**File:line citations below are as of `main` at Pass 142.** They have already
+been invalidated once wholesale (Pass 140 moved ~25 methods off `AirBackend`
+onto `AirIface`), so prefer the symbol name over the number when they
+disagree.
 
 ## Why this document exists
 
@@ -28,7 +32,7 @@ were not recorded in one place. This is that place.
 
 The library ambition is unchanged and is now closer: `AirIface` (Pass 140) is
 the extraction boundary, and it exists precisely so a backend can be lifted out
-behind a contract rather than out of a 530-line hand-dispatch. Two backends
+behind a contract rather than out of a 632-line hand-dispatch (516 after). Two backends
 also make that boundary honest — an interface with a single implementation
 proves nothing.
 
@@ -89,7 +93,7 @@ the TX role needs the capability.
 | G6 | `tx_index()` returns 0 for radio | correctness | **DONE** (Pass 142, #91) |
 | G7 | `set_power_auto` semantics differ between backends | spec hygiene | RULING — declared |
 | G8 | Neither RF backend has a unit test | test surface | OPEN — **harness now exists** (Pass 140 `FakeAir`) |
-| **G9** | §3.11 heartbeat suppression was monitor-only | correctness | **DONE** — Pass 140; it was never in this register |
+| **G9** | §3.8 heartbeat suppression was monitor-only | correctness | **DONE** (guard unified, Pass 140) **+ RULING** — §3.8 does not say a TX-less node suppresses; and it cannot fire on radio |
 | B2 | RadioAir cannot build a node without a TX adapter | blocker | **DEAD** — operator ruling: enumerate and decline to inject |
 | B3 | The Ethernet cache runs an MT7921 | blocker (hardware) | RULING — BOM, not code |
 | **H1** | Some 8822e units cannot transmit 64-QAM under devourer | hardware | **OPEN** — per-unit, not per-chip; see below |
@@ -144,62 +148,44 @@ H1 below.
 > surface it — a register item's stated fix can be necessary and still not be
 > sufficient.
 
-The worst gap in the set, and the only one that fails *silently* — everything
-else either fails closed or degrades visibly. **On the critical path** under
-the end-state ruling: devourer becomes the TX role, and the §15.5a scout is a
-TX-role function.
+**What it was.** The worst gap in the set, and the only one that failed
+*silently* — everything else fails closed or degrades visibly. Both net_id
+setters did nothing on radio, so a sweep never widened (a craft on another
+net_id was never discovered, while the scout reported clean) and a claim left
+the ground stamping its **boot** net_id, which the craft's §3.0 filter then
+dropped — breaking ARQ and the CSA campaign with no error at either end. The
+`if (mon)`-with-no-`else` shape was removed by Pass 140; Pass 142 supplied the
+answer behind the declaration.
 
-Two things changed since this was written. It is no longer an `if (mon)` with
-no `else` in `app/main.cpp` — Pass 140 moved it onto `AirIface`, so
-`RadioAir::set_filter_net_id` / `set_stamp_net_id` are **declared** no-ops with
-their consequence stated at the definition. And the fix is larger than a
-forwarding call: `cfg.filter_net_id` is read on each adapter's **RX thread**
-(`io/src/air_radio.cpp` `on_packet`), so a runtime setter is a synchronisation
-change inside the backend. `MonAir` gets away with a plain setter because its
-equivalent is a BPF re-attach syscall.
+**The interim fail-closed guard** this section proposed — reject a
+scout/quickconnect config on `air.kind:"radio"` — is moot and was never landed.
 
-`app/main.cpp:1554-1559`:
+**What it left behind (new, open).** Making the setters live exposed two
+callers that were previously unreachable on radio:
 
-```
-void set_filter_net_id(std::optional<uint8_t> net_id) {
-    if (mon) mon->set_filter_net_id(net_id);
-}
-void set_stamp_net_id(uint8_t net_id) {
-    if (mon) mon->set_stamp_net_id(net_id);
-}
-```
-
-No `else`. Both are called from 14 sites across the scout sweep, claim commit,
-spectator tune, and CSA rollback (`app/main.cpp:4874`, `5005-5055`, `5548`,
-`5660-5743`). On the radio backend every one of them does nothing:
-
-- The RX filter never widens for a sweep, so with `node.net_id` configured a
-  craft on a different net_id is **never discovered** — while the scout
-  reports a clean sweep.
-- After a claim, the ground keeps stamping its **boot** net_id, so the craft's
-  §3.0 RX filter drops the ground's NACK/LINK_REPORT/CSA returns. ARQ and the
-  CSA campaign both break, with no error surfaced at either end.
-
-`RadioAirCfg` already carries `stamp_net_id` / `filter_net_id`
-(`io/include/wblink/air_radio.h:32-33`); they are simply create-time only.
-Devourer is *easier* than monitor here — `MonAir` needs an atomic plus a
-`SO_ATTACH_FILTER` BPF re-attach (`io/src/air_mon.cpp:756-767`), devourer needs
-only the atomic in the RX path.
-
-**Open:** whether an interim fail-closed guard (reject a scout/quickconnect
-config on `air.kind:"radio"` until the setters exist) is worth landing ahead
-of the real fix. Cheap, and it converts a silent failure into a startup error.
+- **A claim during an in-flight sweep is unguarded.** `do_claim` does not stop
+  the scout, so a sweep completing afterwards calls `rest()`, which restores
+  both the resting filter *and* the resting channel — clobbering the claim
+  mid-campaign. Pre-existing on kernel-monitor; now live on radio. Wants a
+  `scout.stop()` in the claim path, or an explicit rejection.
+- **The widen is node-wide, but §15.5a scopes it to the scout adapter.** Both
+  backends widen every ear (`MonAir` re-attaches BPF per adapter; `RadioAir`
+  shares one atomic across RX threads). The scout *survey* is correctly scoped,
+  but the §2 selector, the CSA follower and the discovery table are not, so a
+  diversity ear on the resting channel admits foreign-net_id traffic for the
+  sweep's duration. **RULING** — either scope the widen per adapter or amend
+  §15.5a to describe what both backends actually do.
 
 ---
 
 ## G2 — §14.2 JSCC airtime unavailable on radio
 
-`io/src/config.cpp:926-931` rejects `airtime_efficiency_permille` for any
+`io/src/config.cpp:1013-1018` rejects `airtime_efficiency_permille` for any
 backend except kernel-monitor, and `AirBackend::estimate_airtime_us`
-(`app/main.cpp:1537-1546`) has no radio branch — it returns `nullopt`. So on
+(`app/main.cpp:1630-1635`) has no radio branch — it returns `nullopt`. So on
 devourer every JSCC decision falls back: `jscc_fallback_decisions` equals
 decision frames and §14.2 enforcement never actuates
-(`app/main.cpp:1967-1993`).
+(`app/main.cpp:2076-2080`).
 
 The model itself is already backend-agnostic —
 `ht20_service_time_us` (`io/include/wblink/airtime.h`) is pure. The work is
@@ -220,9 +206,9 @@ posture — a devourer node with no calibration should read *unavailable*, not
 
 ## G3 — CSA retune is commanded, not confirmed, on devourer
 
-`io/src/air_radio.cpp:622-645` returns `true` unconditionally, because
+`RadioAir::retune` (`io/src/air_radio.cpp:650-681`) returns `true` unconditionally, because
 devourer's `FastRetune` / `SetMonitorChannel` are `void`.
-`app/main.cpp:1119-1135` documents the resulting confidence split honestly
+`app/main.cpp:1324-1329` documents the resulting confidence split honestly
 (monitor *confirmed*, radio *commanded*), but the protocol state machine does
 not distinguish them.
 
@@ -233,15 +219,15 @@ soak-validated 20/20) and **still open for radio**. A devourer node can report
 COMMITTED with the chip on the old channel.
 
 The §11.6 liveness guard is backend-agnostic — it watches `rx_frames_total`
-(`app/main.cpp:1494-1509`) — so most of the fix is reuse rather than new
+(`app/main.cpp:1595-1602`) — so most of the fix is reuse rather than new
 design. Should land with G4; a retune guard with no recovery path is half a
 fix.
 
 ---
 
-## G4 — `recover_all()` returns false on radio
+## G4 — `recover()` returns false on radio
 
-`app/main.cpp:1516-1525`: Pass 80's one-shot monitor re-init recovery declared
+`app/main.cpp:1606-1625` (`recover_all`) / `io/src/air_radio.cpp:710-715`: Pass 80's one-shot monitor re-init recovery declared
 devourer out of scope.
 
 Devourer has the primitives. `IRtlDevice::StartRxLoop` is documented
@@ -263,7 +249,7 @@ survey it before writing a recovery path.
 
 ## G5 — `mtu_supported()` is a hardcoded assumption on radio
 
-`app/main.cpp:1143-1148` returns `mtu_tier::kHighBudget` for radio on the
+`AirBackend::mtu_supported()` (`app/main.cpp:1335`) delegates; the assertion is `io/src/air_radio.cpp:750-754` on the
 reasoning that successful `RadioAir` construction proves devourer accepted
 every adapter. Kernel-monitor reads each netdev MTU and takes the minimum
 (`io/src/air_mon.cpp:704-721`).
@@ -286,7 +272,7 @@ convention — a real bug the moment a devourer ground lists its uplink second.
 
 ## G7 — `set_power_auto` semantics differ between backends
 
-`app/main.cpp:1404-1414`: monitor calls `iw txpower auto` (driver default /
+`io/src/air_radio.cpp:717-722`: monitor calls `iw txpower auto` (driver default /
 per-rate TXAGC curve); radio calls `set_power_qdb(adapter, 0)` — offset zero
 relative to the efuse-calibrated per-rate table. Probably the correct §10.5
 semantic for devourer, but it is an undeclared asymmetry currently living in a
@@ -300,14 +286,14 @@ two are equivalent for §10.5 purposes.
 No `air_radio_test.cpp` / `air_mon_test.cpp`. Kernel-monitor at least has its
 RX parsing covered by `radiotap_test.cpp` and the shared encapsulation by
 `dot11_test.cpp`; the devourer-specific path — `desc_rate_to_mcs`
-(`io/src/air_radio.cpp:76-81`), the `crc_err`/`icv_err` drop
-(`io/src/air_radio.cpp:237`), RSSI/TSF extraction — has none.
+(`io/src/air_radio.cpp:77-82`), the `crc_err`/`icv_err` drop
+(`io/src/air_radio.cpp:249`), RSSI/TSF extraction — has none.
 
 **The harness now exists and the precondition is met.** Pass 137 made
 `app/main.cpp` reachable from a test; Pass 140 put every backend behind
 `AirIface` and added `FakeAir`, so `AirBackend`'s orchestration — the retune
 and recovery loops — is unit-tested for the first time (`tests/app_test.cpp`,
-151 checks). What G8 still wants is narrower than when it was written: the
+150 checks). What G8 still wants is narrower than when it was written: the
 **devourer-specific decode path** (`desc_rate_to_mcs`, the `crc_err`/`icv_err`
 drop, RSSI/TSF extraction), which needs no fake because it is pure function of
 a buffer. Follow the `FakeAir` shape rather than inventing a second harness.
@@ -316,9 +302,9 @@ a buffer. Follow the `FakeAir` shape rather than inventing a second harness.
 
 ## B2 — RadioAir cannot build a node without a TX adapter
 
-`io/src/air_radio.cpp:325-334` hard-fails unless exactly one `role:"tx"`
+`io/src/air_radio.cpp:336-349` hard-fails unless exactly one `role:"tx"`
 adapter is present. `MonAir` has `allow_rx_only`
-(`io/include/wblink/air_mon.h:37-40`), which `app/main.cpp:1174-1181` sets for
+(`io/include/wblink/air_mon.h:41`), which `app/main.cpp:1366-1368` sets for
 two node classes:
 
 - the **store-only Ethernet cache** (`cfg.cache.store.enabled && streams.empty()`)
@@ -340,18 +326,33 @@ which Pass 140 did.
 
 ---
 
-## G9 — §3.11 heartbeat suppression was monitor-only (DONE, was never listed)
+## G9 — §3.8 heartbeat suppression was monitor-only (DONE, was never listed)
 
 **This register missed one.** `app/main.cpp`'s heartbeat guard read
 
     if (mon && !mon->has_tx()) return;
 
-so a node with no TX adapter suppressed its §3.11 heartbeat **only on
+so a node with no TX adapter suppressed its §3.8 heartbeat **only on
 kernel-monitor**. Unlike G1/G4/G5/G6 it carried no comment anywhere — it read
 as a monitor implementation detail rather than a rule.
 
-It is a rule: a node with no uplink does not beat, whichever backend it runs.
-Pass 140 made it backend-agnostic via `AirIface::has_tx()`.
+Pass 140 made the *guard* backend-agnostic via `AirIface::has_tx()`, which is
+the part that is genuinely done. Two things this register asserted are not:
+
+- **"It is a rule" is an inference, not law.** §3.8 says "**every node** emits
+  HEARTBEAT at 1 Hz while otherwise quiet", and names grounds and quiet rx
+  nodes as the ones the HEARTBEAT path serves. It says nothing about a node
+  with no TX adapter suppressing it. Suppression may well be right — a node
+  that cannot transmit cannot beat — but the spec does not say so, and this
+  repo's law is that a gap is an operator ruling. **RULING** wanted, then a
+  §3.8 amendment.
+- **It cannot fire on radio.** `RadioAir::has_tx()` returns `true`
+  unconditionally, because `create()` requires exactly one `role:"tx"`
+  adapter. So the unified guard is unified in shape only; the moment the
+  RX-only devourer config shape described under B2 lands, the heartbeat is
+  *not* suppressed there. G9 is closed for monitor and udp and carries a live
+  follow-up for radio — the same "a dead item was hiding a live one" pattern
+  this document closes with, reproduced inside the entry that names it.
 
 Worth recording *why* the register missed it: the item only becomes reachable
 once B2 is false. While a radio node could not be built without a TX adapter,
@@ -444,7 +445,7 @@ re-derived.
 piece intended for vendoring. The POSIX assumptions live in `io/`, and the
 devourer-specific one is **device acquisition**:
 
-`io/src/air_radio.cpp:370-407` does `libusb_init` → `libusb_get_device_list` →
+`io/src/air_radio.cpp:390-407` does `libusb_init` → `libusb_get_device_list` →
 `libusb_open`, matching VID/PID and an `lsusb -t`-style bus path. **Unrooted
 Android cannot enumerate usbfs** — it must take a file descriptor from the Java
 `UsbManager` and call `libusb_wrap_sys_device()`. The vendored libusb has that
@@ -458,12 +459,15 @@ rather than a bus path. Two smaller notes:
 - Its kernel-driver-detach step and `libusb_reset_device` behaviour both need
   checking under a wrapped fd.
 
-**Structural observation.** Closing G1/G2/G4/G5/G6 collapses most of the
-`if (mon) … else if (radio) …` cascade in `AirBackend` (`app/main.cpp:1117`
-onward). That is the natural moment to make the extraction a real virtual
-interface rather than the current three-`optional` struct — done *as* the
-parity work lands rather than as a separate refactor afterwards. Not proposed
-as a commitment here; noted so the opportunity is not missed.
+**Structural observation — landed ahead of the parity work.** This section
+predicted that closing G1/G2/G4/G5/G6 would collapse the `if (mon) … else if
+(radio) …` cascade in `AirBackend`, and proposed doing the virtual-interface
+extraction *as* those items landed. Pass 140 did it first and independently:
+`AirBackend` now holds one `std::unique_ptr<AirIface>` (`app/main.cpp:1296`)
+and the contract is all-pure-virtual. What survives of the cascade is the
+§15.3 per-adapter counters fill (`app/main.cpp:1701-1780`), which none of
+G1–G6 touches — the two backends' counter structs differ by real fields, so
+reconciling them is a §15.3 schema question, deliberately left open.
 
 ## Adjacent, deliberately out of scope
 
@@ -497,22 +501,24 @@ landed (Pass 140), so the two items that used to sit at either end of this list
 are gone. Ordering is now by **what the TX role needs**, since that is the role
 devourer is taking.
 
-1. ~~**G1**~~ — **done** (Pass 142, #91), with G6.
-2. ~~**G6**~~ — **done**.
-3. **G3 + G4** together, as before: "commanded, not confirmed" and "no recovery
-   path" are the same weakness seen from two sides, and a TX node is where a
+1. **G3 + G4** together: "commanded, not confirmed" and "no recovery path" are
+   the same weakness seen from two sides, and a TX node is where a
    half-applied retune actually costs something.
-4. **G5** — small; assert-vs-probe on a tier that is currently asserted.
-5. **G2 / G7** — after their rulings. Both are declared on `AirIface` now, so
+2. **G5** — small; assert-vs-probe on a tier that is currently asserted.
+3. **G2 / G7** — after their rulings. Both are declared on `AirIface` now, so
    the code change is bounded and the open part is genuinely the decision.
-6. **B3** — hardware, runs in parallel.
-7. **H1** — a per-unit acceptance check at the intended MCS, needed before a
+4. **The two G1 leftovers** (see that section): the unguarded claim-during-sweep
+   race, and the RULING on whether the sweep widen is node-wide or
+   scout-adapter-scoped. Neither blocks the above.
+5. **B3** — hardware, runs in parallel.
+6. **H1** — a per-unit acceptance check at the intended MCS, needed before a
    pure-devourer TX fleet ships, not before any of the above lands.
-8. **G8** — narrower than when written; the devourer decode path, following the
+7. **G8** — narrower than when written; the devourer decode path, following the
    `FakeAir` shape rather than a second harness.
 
-**Not on this list any more:** G0 (closed), G1/G6 (Pass 142), G9 (fixed in Pass 140), B2 (dead by
-ruling), H2 (settled and measured), and the interface collapse itself.
+**Not on this list any more:** G0 (closed), G1/G6 (Pass 142), G9 (fixed in
+Pass 140), B2 (dead by ruling), H2 (settled and measured), and the interface
+collapse itself.
 
 ## What to re-read when a premise moves
 
