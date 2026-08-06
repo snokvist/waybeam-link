@@ -7578,3 +7578,42 @@ that would resolve it belongs with the calibrate-up rework. Also unresolved and
 now recorded: §15.3 `tx_power_qdb` carries an offset on the craft and an
 absolute on the ground with no schema signal, and waybeam-hub's WebUI consumes
 it — a cross-repo change, not fixable here.
+
+**Pass 150 device verification (2026-08-06, craft `.2.232` + ground).** Both
+ends deployed, both on their config defaults with no runtime latch.
+
+Craft (devourer), from `power_offset_qdb` defaulting to −24 with **no config
+change at all** — the volatile `qdb: -16` latch that had been holding the link
+together was simply not re-applied after the restart:
+
+```
+eu-craft role=tx ch=5805 bw=20 power_offset_qdb=-24 power_offset_max_qdb=0 max_power_qdb=108
+power: eu-craft §10.5 boot offset -24 qdb (bound +0) -> applied
+```
+
+Ground (kernel-monitor), proving the `reference + offset` realisation:
+`boot offset -24 qdb -> applied`, and `iw` reads **21.00 dBm** = the 108 qdb
+reference minus 24. The latch arithmetic follows: `qdb: -8` → 25.00 dBm,
+`auto` → back to 21.00 dBm, *not* the driver default. Note the ground's uplink
+moved 19 → 21 dBm, because before this the boot power came from whatever the
+uplink owner last resolved; it now comes from a declared offset.
+
+| check | craft | ground |
+|---|---|---|
+| boot offset applied | ✅ −24 | ✅ −24 → 21.00 dBm |
+| latch above bound (+8) | ✅ REJECTED | ✅ REJECTED |
+| latch within bound (−8) | ✅ accepted | ✅ 25.00 dBm |
+| `auto` → safe, not backend default | ✅ | ✅ 21.00 dBm |
+
+Link with both ends on safe defaults: **MCS 5, 5 ‰ pre / 1 ‰ post-diversity,
+95035 delivered, 0 unrecoverable.** That reproduces the kernel-monitor
+reference number from a config default, where the pre-Pass-150 devourer default
+delivered 50 ‰ / 19 ‰ — the whole point of the pass, now persistent across a
+restart instead of a hand-applied latch.
+
+**Not verified on device:** the §10.6 RF-triggered calibration refusal. The
+craft's REST `POST /api/v1/calibration` is not bound in tx mode, and the RF
+`VEHICLE_CMD` path needs a §11.7 CSA claim, which `csa_psk=(unset)` blocks —
+the separate Pass 150 finding. The gate rests on code inspection and unit
+tests; calibration read `state: idle` throughout either way, which is the safe
+outcome but is not evidence the gate fired.
