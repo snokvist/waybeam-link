@@ -35,10 +35,31 @@ change what those sections recommend:
   premise we have never established — that a per-packet commanded rate actually
   flies at that rate, per frame, on our dies and both backends. Pass 118 committed
   the mechanism and explicitly scoped the divergence policy out, so no waybeam node
-  has ever aired two rates in one moment. And their notion of "adjacent" is a rate;
-  ours is a §9.3 *profile* bundling MCS, GI, power, payload and FEC overhead — so
-  the probe measures rate headroom, not profile headroom, and that gap needs an
-  operator ruling before the evidence can gate §9.4.
+  has ever aired two rates in one moment.
+
+**Two operator rulings, 2026-08-06**, both folded into the issues:
+
+- **No dedicated passive scout adapter role** (#100). devourer's `chanscout`
+  shape is declined, so a standing survey is off the table permanently and
+  accumulating evidence *across successive operator-initiated sweeps* is the
+  settled design rather than an interim step.
+- **The probe changes MCS only, and `probe_per` is specified as measuring rate
+  headroom, not profile headroom** (#101) — stated plainly in §3.5 rather than
+  left to inference. Probing the adjacent *rung* was rejected as infeasible:
+  `max_payload` varies per rung (1424/2048/3072), so a probe frame at another
+  rung's payload collides with the §5.1 no-fragmentation invariant and the §14
+  RLC symbol size.
+
+  The ruling has a consequence that belongs in §9.4 and is easy to get wrong
+  later. Power resolves as `curve[mcs] + (level − 4) × 8` (§10.2 Pass-6,
+  `core/include/wblink/power.h`), and `tx_power_level` steps 4,4,3,3,2,2,1,1
+  across the shipped rungs — so three of the seven promote transitions drop the
+  target 2 dB below where an MCS-only probe flew, before per-MCS curve
+  differences are counted. **An up-probe therefore measures the candidate rate
+  under conditions at least as favourable as the target profile, and sometimes
+  strictly more favourable: sound as a veto, optimistic as a warrant.** Probe
+  evidence is necessary-but-not-sufficient for promotion — it can block a
+  promote the RSSI model would have allowed, but never authorize one alone.
 
 Scope: the four areas the operator named first — **channel occupancy + the
 channel scout**, **aggregation and hardware ACKs**, **FEC**, and devourer's
