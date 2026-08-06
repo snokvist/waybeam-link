@@ -101,6 +101,16 @@ class RadioAir : public AirIface {
                 bool fast) override;
     // §10.4/§11.2: re-program TX power at the current channel post-retune.
     bool reapply_tx_power(size_t adapter) override;
+    // §15.5a runtime net_id roles. The stamp is main-thread only (the inject*
+    // paths); the filter is read per frame on every adapter's RX thread, so it
+    // is an atomic here rather than a cfg field. Filtering is software-only in
+    // this backend, so a widen takes effect on the next frame with no
+    // pre-filter to re-attach (kernel-monitor re-attaches BPF).
+    void set_stamp_net_id(uint8_t net_id) override;
+    void set_filter_net_id(std::optional<uint8_t> net_id) override;
+    // §15.5a scout: the uplink adapter the sweep roams, resolved from the
+    // role:"tx" adapter create() already requires.
+    size_t tx_index() const override;
     // §11.6 verify hygiene (Pass 69): discard the process-queue RX backlog
     // captured before a retune completed, so post-retune consumers only see
     // frames from the new channel. devourer's internal USB pipeline is below
@@ -125,15 +135,6 @@ class RadioAir : public AirIface {
     // the driver default, this backend zeroes the offset, which undoes a §10.5
     // latch but leaves any §10.2 curve resolve to re-apply on top.
     bool set_power_auto(size_t adapter) override;
-    // G1 — both net_id roles are fixed at construction here. The RX filter is
-    // read on the per-adapter RX thread, so a real setter is a synchronisation
-    // change inside the backend rather than a forwarding call. Until then these
-    // are no-ops, which is why a §15.5a scout sweep never widens on devourer.
-    void set_stamp_net_id(uint8_t net_id) override;
-    void set_filter_net_id(std::optional<uint8_t> net_id) override;
-    // G6 — answers 0 on the convention that the single role:"tx" adapter is
-    // listed first. A config that lists it elsewhere scouts the wrong ear.
-    size_t tx_index() const override;
     // create() requires exactly one role:"tx" adapter, so a constructed
     // RadioAir always has an uplink. (An RX-only devourer node is reachable by
     // enumerating and declining to inject — that is a config shape this

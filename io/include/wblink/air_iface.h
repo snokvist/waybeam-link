@@ -12,10 +12,12 @@
 // across ~25 methods and 98 call sites. Four of those methods answered only
 // the kernel-monitor backend. Each is *documented* as such at its definition
 // — this is not a set of typos — but the limitation is invisible where it
-// matters: a caller writing `air->set_filter_net_id(n)` in run_rx cannot see
-// that the call does nothing on a devourer node, and the consequences are
-// silent (the §15.5a scout filter never widens, so a craft on another net_id
-// is never discovered while the sweep still reports clean).
+// matters: a caller writing `air->recover(...)` in run_rx cannot see that the
+// call does nothing on a devourer node, and the consequence is silent (the
+// §11.6 watchdog reads "recovery unavailable" as "recovery failed"). The
+// original motivating case, the §15.5a scout filter that never widened on
+// devourer, landed in Pass 141 — which is the contract working as intended:
+// the gap was stated in one place, then closed there.
 //
 // A pure-virtual contract does not make those backends more capable. It makes
 // each backend *state its answer* in one place, where a test can assert it and
@@ -128,18 +130,16 @@ class AirIface {
 
     // ---- §3.0 identity ---------------------------------------------------
 
-    // G1. Runtime net_id retargeting is real only on kernel-monitor. On
-    // devourer both values are fixed at construction and read by the per-
-    // adapter RX thread, so a setter is a synchronisation change in the
-    // backend rather than a forwarding call — see docs/devourer-parity-plan.md.
+    // Runtime net_id retargeting: the §15.5a scout widens the filter mid-sweep
+    // and both roles are re-pinned on selection. Real on kernel-monitor and on
+    // devourer (Pass 141); the bench UdpAir has no §3.0 identity to retarget.
     virtual void set_stamp_net_id(uint8_t net_id) = 0;
     virtual void set_filter_net_id(std::optional<uint8_t> net_id) = 0;
 
     // ---- capability ------------------------------------------------------
 
-    // §15.5a scout: index of the uplink adapter the sweep roams. G6: only
-    // kernel-monitor resolves this from the adapter set; the others answer 0
-    // on the convention that TX is listed first.
+    // §15.5a scout: index of the uplink adapter the sweep roams. Resolved from
+    // the adapter set on the RF backends; UdpAir answers 0 (one bench pipe).
     virtual size_t tx_index() const = 0;
 
     // False on an RX-only node, which suppresses the §3.11 heartbeat.
