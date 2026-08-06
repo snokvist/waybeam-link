@@ -3033,7 +3033,10 @@ struct TxCore {
     // ceiling — set_power_override does not read t.ceiling at all — so a tier
     // cannot claim to be effective on the strength of one.
     bool power_tier_effective() const {
-        return has_power_curve();
+        // A curve that resolve_and_apply_power() refuses (relative backend)
+        // reaches no hardware, so reporting the tier effective would be the
+        // same lie Pass 136 removed for the latch.
+        return has_power_curve() && !backend_relative_;
     }
 
     // §10.5 (Pass 150) override-latch: latch a RELATIVE offset on every tx
@@ -3242,7 +3245,7 @@ struct TxCore {
                 // past it, so "skip the resolve" alone strands the last
                 // probe value on the hardware).
                 set_power_override(*power_override_);
-            } else if (has_power_curve()) {
+            } else if (has_power_curve() && !backend_relative_) {
                 if (last_commit_mcs_) {
                     resolve_and_apply_power(*last_commit_mcs_,
                                             last_commit_level_);
@@ -4250,9 +4253,11 @@ int run_tx(const Loaded& l) {
     tx.apply_power_offset = [&](size_t idx, int32_t qdb) {
         return air.value->set_power_offset_qdb(idx, qdb);
     };
-    // §10.5 (Pass 150): devourer's lever is relative, so the absolute §10.2
-    // curve and §10.6 sweep are refused until they are re-based.
-    tx.set_backend_relative(air.value->is_radio());
+    // §10.5 (Pass 150): ONLY devourer's lever is relative. NOT is_radio() —
+    // that is is_rf(), which kernel-monitor also answers true to, and gating on
+    // it refused the §10.2 curve and §10.6 calibration on the one backend where
+    // absolute qdb is CORRECT, making calibration unreachable fleet-wide.
+    tx.set_backend_relative(l.cfg.air.kind == AirCfg::Kind::kRadio);
     if (air.value->is_radio()) {
         tx.apply_mode = [&](uint8_t mcs, bool sgi) {
             air.value->set_tx_mode(mcs, sgi);
@@ -5324,8 +5329,14 @@ int run_rx(const Loaded& l) {
     // absolute on kernel-monitor and an OFFSET on devourer — the divergence
     // this pass removes — and the ground is the half of the fleet that still
     // transmits on monitor today.
+    // §10.5/§10.7 (Pass 150 review): the uplink sweep probes through the
+    // ABSOLUTE actuator (set_power_qdb), so every value the owner precedence
+    // can produce — artifact placement, power_map resolve, latch — is an
+    // absolute qdb. Applying those through the relative actuator turned an
+    // 84 qdb placement into 108+84 = 192 qdb. Measurement and application must
+    // share a space: this stays absolute until §10.7 is re-based with §10.6.
     upwr.apply_qdb = [&](int32_t q) {
-        (void)air.value->set_power_offset_qdb(uplink_idx, q);
+        (void)air.value->set_power_qdb(uplink_idx, q);
     };
     // "auto" must land on the configured safe offset, never the backend
     // default (offset 0 = the uncharacterised efuse point).
@@ -6178,13 +6189,11 @@ int run_rx(const Loaded& l) {
                 if (qdb < -511 || qdb > 511) {
                     return "qdb out of range (-511..511)";
                 }
-                // §10.5 (Pass 150): bounded and REJECTED, not clamped — the
-                // same contract the craft enforces. Without this the ground's
-                // :8092 latch stayed unbounded while the craft's was fixed.
-                if (qdb > uplink_adapter->power_offset_max_qdb) {
-                    return "qdb exceeds power_offset_max_qdb (§10.5); raise "
-                           "the bound to opt in";
-                }
+                // NOT bounded by power_offset_max_qdb: on this node the
+                // latch flows into UplinkPower's ABSOLUTE actuator (see
+                // apply_qdb), so a relative bound would reject every sane
+                // absolute. The ground's §10.5 conversion is deferred with the
+                // §10.7 re-base — recorded rather than half-applied.
                 upwr.override_qdb = qdb;
                 uplink_restore_actuators();
                 return "";
