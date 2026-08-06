@@ -50,6 +50,7 @@ add_wb_test(loopback_test)
 
 add_wb_test(txwedge_test wblink_io)
 add_wb_test(dot11_test wblink_io)
+add_wb_test(radio_decode_test wblink_io)
 add_wb_test(radiotap_test wblink_io)
 add_wb_test(config_test wblink_io)
 add_wb_test(uplink_calib_store_test wblink_io)

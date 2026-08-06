@@ -6594,3 +6594,31 @@ BOM change and no exception — an RX-only monitor node is the supported shape,
 not a fallback. This also settles the shape of every remaining parity item:
 they matter for the TX role, and a monitor node that never transmits does not
 need them.
+
+**G8 — the devourer decode path, finally reachable.** Three rules lived inline
+in `RadioAir::on_packet`, where nothing could reach them without a libusb
+handle and a real adapter: the descriptor rate→MCS mapping, the FCS strip, and
+the per-chain RSSI reduction. They are pure functions of a buffer and a few
+descriptor fields, so the fix is not a harness — it is a header
+(`io/include/wblink/radio_decode.h`) that knows no devourer type, because
+`on_packet` reads the fields out of `Packet::RxAtrib` and passes plain values.
+27 checks in `tests/radio_decode_test.cpp`; suite count 55 → 56.
+
+Two behaviours the tests pin that were previously only implied:
+
+- **MCS8+ must read *unresolved*, not alias back onto a bucket.** A 2T2R part
+  really does deliver `0x14`, and mapping it into the 0..7 histogram would
+  break the §15.3 Pass 118 invariant that `rx_mcs` sums to `rx_frames`.
+- **An all-zero chain report keeps the previous RSSI**, rather than reporting
+  the -110 floor. A frame with no PHY report says nothing about signal;
+  inventing a floor would read as a link that just collapsed.
+
+And one the extraction made visible: **the lower RSSI clamp cannot fire.** The
+chain byte is unsigned, so `value - 110` spans -110..+145 and only the upper
+clamp is reachable. Kept as a guard on the arithmetic, with a test pinning the
+reachable floor at -109 (chain byte 1) so a future signed input cannot quietly change
+the range.
+
+With this the register has **no code items left**. What remains is H1, blocked
+upstream (the EFUSE-stability probe is unwired for the Jaguar3 8822E), and the
+§15.3 counters-schema question that Pass 140 set aside deliberately.
