@@ -102,6 +102,7 @@ class UdpAir : public AirIface {
     bool reapply_tx_power(size_t /*adapter*/) override { return true; }
     // Power is logged intent, accepted the same way an in-process write is.
     bool set_power_qdb(size_t adapter, int32_t qdb) override;
+    bool set_power_offset_qdb(size_t adapter, int32_t qdb) override;
     bool set_power_auto(size_t adapter) override;
     // No PHY: there is no rate to stamp and no hardware clock to read.
     void set_tx_mode(uint8_t /*mcs*/, bool /*sgi*/) override {}

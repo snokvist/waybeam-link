@@ -7497,3 +7497,31 @@ removal would be a coordinated fleet change for no safety gain: on
 kernel-monitor it is now the reference the offset applies to, and on devourer
 it is accepted with a warning and ignored. Removing it can follow once the
 calibration rework retires the last consumer.
+
+**Pass 150 implementation notes — what it takes with it.**
+
+**The §11.7 0x0A power tier (Pass 135) loses its grip on the latch, and that is
+visible rather than silent.** Pass 135 was built on "the §10.3 ceiling is the
+ONE clamp on an override", so a lowered tier re-asserted a held latch through
+the new, lower clamp. Pass 150 removes that clamp — it was clamping an offset —
+so a tier no longer bounds the latch at all. `power_presets_qdb` still moves
+`max_power_qdb`, which now means the kernel-monitor reference and nothing on
+devourer. **Re-basing the tier onto offsets is deliberately NOT done here**:
+the four flying configs carry absolute preset lists (60…108) that, reinterpreted
+as offsets, would be +15 to +27 dB — the exact overdrive this pass exists to
+prevent. Re-basing therefore needs a migration, and it belongs with the
+calibrate-up rework that will author those lists from measurement instead of by
+hand.
+
+The `app_test` case asserting the old clamp was **re-authored, not patched**:
+it now proves an over-bound request is refused with nothing reaching hardware,
+where before it proved 120 qdb silently became 108. Keeping the old assertion
+green would have meant keeping the bug.
+
+**`apply_power_offset` is bound for every backend**, unlike `apply_power`, which
+is radio-only — that asymmetry is why the ground's uplink never went through the
+§10.2 curve path and why the divergence hid for so long.
+
+Not yet on device. The craft currently holds the equivalent value as a volatile
+§10.5 latch (`qdb: -16`); the config key is what makes it survive a restart, and
+`-24` is the shipped seed.

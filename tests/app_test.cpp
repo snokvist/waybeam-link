@@ -85,6 +85,12 @@ struct PowerSpy {
             return true;
         };
         tx.apply_power_auto = [this](size_t) { ++autos; };
+        // §10.5 (Pass 150): the relative actuator is what the latch and the
+        // boot offset now drive; apply_power stays the §10.2 curve path.
+        tx.apply_power_offset = [this](size_t idx, int32_t qdb) {
+            applied.emplace_back(idx, qdb);
+            return true;
+        };
     }
     bool empty() const { return applied.empty(); }
     // Sentinel rather than .back() on an empty vector. wbtest is built so one
@@ -181,27 +187,69 @@ void test_tier_rejected_with_no_preset_list() {
     CHECK_EQ_U(static_cast<int64_t>(tx.power_tier()) + 1, 0);  // stays -1
 }
 
-// §10.5 says the §10.3 ceiling is the ONE clamp on an override. A lowered tier
-// must therefore re-assert a held latch through the NEW clamp; skipping that
-// left the hardware on the old, higher value — a safety control that visibly
-// did nothing, which is the worst possible outcome for one.
-void test_lowered_tier_reasserts_a_held_override() {
+// §10.5 (Pass 150) REPLACES the pre-150 contract this test used to encode.
+// The §10.3 ceiling is no longer the clamp on an override — on a relative
+// backend it clamped the OFFSET, so a "cannot cook a PA" ceiling of 108
+// silently authorised +27 dB. The latch is now bounded by
+// power_offset_max_qdb and REJECTED past it, never clamped.
+void test_override_is_bounded_and_rejected_not_clamped() {
     TxCore tx(one_tx_config(108, {60, 108}), 1, nullptr, 0);
     PowerSpy spy;
     spy.attach(tx);
 
-    tx.set_power_override(120);            // above every ceiling
+    // Above the bound (default 0): refused outright, and nothing reaches
+    // hardware — the pre-150 behaviour silently applied 108 here.
+    CHECK(!tx.set_power_override(120));
+    CHECK(spy.empty());
+
+    // At or below the bound: applied verbatim, NOT clamped to any ceiling.
+    CHECK(tx.set_power_override(-8));
     CHECK(!spy.empty());
-    CHECK(spy.last_qdb() == 108);          // clamped at the boot ceiling
+    CHECK(spy.last_qdb() == -8);
     spy.clear();
 
-    CHECK(tx.set_power_tier(0));           // ceiling 60
-    CHECK(!spy.empty());                   // the latch was re-applied...
-    CHECK(spy.last_qdb() == 60);           // ...through the NEW clamp
+    // 0 is the bound's default and is allowed — it is the efuse default, so
+    // it is a legal request even though it is not a safe boot value.
+    CHECK(tx.set_power_override(0));
+    CHECK(spy.last_qdb() == 0);
+}
 
-    // And §15.5 `effective` counts a held latch: the ceiling plainly reaches
-    // hardware through it, even on a node with no curve.
-    CHECK(tx.power_tier_effective());
+// §10.5 (Pass 150): the forced safe boot offset. The whole point is that a
+// node never transmits at the uncharacterised efuse default, so this must
+// reach the actuator for EVERY role:"tx" adapter before the first frame.
+void test_boot_offset_applied_to_every_tx_adapter() {
+    Config c = one_tx_config(108, {});
+    c.adapters.push_back(tx_adapter("tx1", 108, {}));
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[1].power_offset_qdb = -24;
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+
+    tx.apply_boot_power_offsets();
+    CHECK_EQ_U(spy.applied.size(), 2u);
+    for (const auto& [idx, qdb] : spy.applied) {
+        (void)idx;
+        CHECK(qdb == -24);
+    }
+}
+
+// §10.5 (Pass 150): auto must land on the configured safe offset, NOT the
+// backend default. Pre-150 it called apply_power_auto, which on devourer was
+// offset 0 — the compressing point — and §11.6 recovery ends here (Pass 48),
+// so an unattended recovery could drop a node onto it.
+void test_auto_restores_safe_offset_not_backend_default() {
+    Config c = one_tx_config(108, {});
+    c.adapters[0].power_offset_qdb = -24;
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+
+    CHECK(tx.set_power_override(-8));
+    spy.clear();
+    tx.clear_power_override();
+    CHECK(!spy.empty());
+    CHECK(spy.last_qdb() == -24);  // the safe offset, not 0
 }
 
 // §10.3 Pass 136. A running §10.6 sweep owns the power actuator, and applying
@@ -489,6 +537,13 @@ class FakeAir : public AirIface {
         return true;
     }
     bool set_power_qdb(size_t, int32_t) override { return true; }
+    // §10.5 Pass 150 relative contract; record it so the boot-offset
+    // and latch tests can assert what actually reached the backend.
+    std::vector<std::pair<size_t, int32_t>> power_offsets;
+    bool set_power_offset_qdb(size_t i, int32_t q) override {
+        power_offsets.emplace_back(i, q);
+        return true;
+    }
     bool set_power_auto(size_t) override { return true; }
     std::optional<uint64_t> read_tsf(size_t) override { return std::nullopt; }
     void set_tx_mode(uint8_t, bool) override {}
@@ -664,7 +719,9 @@ int main() {
     test_ceiling_and_presets_come_from_the_same_adapter();
     test_tier_is_all_or_nothing_across_adapters();
     test_tier_rejected_with_no_preset_list();
-    test_lowered_tier_reasserts_a_held_override();
+    test_override_is_bounded_and_rejected_not_clamped();
+    test_boot_offset_applied_to_every_tx_adapter();
+    test_auto_restores_safe_offset_not_backend_default();
     test_tier_refused_during_calibration();
     test_power_tier_json_shape();
     test_uplink_unowned_goes_to_backend_auto();

@@ -112,6 +112,7 @@ class MonAir : public AirIface {
     // actuation matrix (Pass 114). False on CLI failure — callers must not
     // cache the value as applied (§10.5).
     bool set_power_qdb(size_t adapter, int32_t qdb) override;
+    bool set_power_offset_qdb(size_t adapter, int32_t qdb) override;
     // §10.5 auto restore: `iw set txpower auto` — hand power back to the
     // driver default / per-rate TXAGC curve (the mon-up.sh posture).
     bool set_power_auto(size_t adapter) override;

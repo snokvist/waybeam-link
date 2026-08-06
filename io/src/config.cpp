@@ -191,6 +191,32 @@ Result<Config> load_config_json(const std::string& json_text) {
             if (a.contains("max_power_qdb")) {
                 ac.max_power_qdb = a.at("max_power_qdb").get<int32_t>();
             }
+            // §10.5 (Pass 150): relative offset + its bound. Parsed for every
+            // adapter; only role:"tx" ever applies them.
+            if (a.contains("power_offset_max_qdb")) {
+                ac.power_offset_max_qdb =
+                    a.at("power_offset_max_qdb").get<int32_t>();
+            }
+            if (a.contains("power_offset_qdb")) {
+                ac.power_offset_qdb = a.at("power_offset_qdb").get<int32_t>();
+            }
+            if (ac.power_offset_qdb < -511 || ac.power_offset_qdb > 511 ||
+                ac.power_offset_max_qdb < -511 ||
+                ac.power_offset_max_qdb > 511) {
+                return Result<Config>::fail(
+                    "adapter " + ac.name +
+                    ": power_offset_qdb/power_offset_max_qdb must be "
+                    "-511..511 qdb (§10.5)");
+            }
+            // The boot point may not start above its own bound — otherwise a
+            // node boots at a power the runtime latch would refuse to set.
+            if (ac.power_offset_qdb > ac.power_offset_max_qdb) {
+                return Result<Config>::fail(
+                    "adapter " + ac.name + ": power_offset_qdb (" +
+                    std::to_string(ac.power_offset_qdb) +
+                    ") exceeds power_offset_max_qdb (" +
+                    std::to_string(ac.power_offset_max_qdb) + ") (§10.5)");
+            }
             // §11.7 0x0A TX_POWER preset list (Pass 135). Same rx rejection as
             // power_map above, and for the same reason: an rx adapter never
             // resolves power, so a list there would be silently inert.
@@ -1235,6 +1261,8 @@ std::string dump_config_summary(const Config& cfg) {
     for (const AdapterCfg& a : cfg.adapters) {
         ss << "  " << a.name << " role=" << (a.role == Role::kTx ? "tx" : "rx")
            << " ch=" << a.channel_mhz << " bw=" << unsigned(a.bw);
+        ss << " power_offset_qdb=" << a.power_offset_qdb
+           << " power_offset_max_qdb=" << a.power_offset_max_qdb;
         if (a.max_power_qdb) {
             ss << " max_power_qdb=" << *a.max_power_qdb;
         }

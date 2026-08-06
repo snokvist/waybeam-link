@@ -1536,6 +1536,10 @@ struct AirBackend {
     bool set_power_qdb(size_t adapter, int32_t qdb) {
         return iface()->set_power_qdb(adapter, qdb);
     }
+    // §10.5 (Pass 150) relative contract, resolved natively per backend.
+    bool set_power_offset_qdb(size_t adapter, int32_t qdb) {
+        return iface()->set_power_offset_qdb(adapter, qdb);
+    }
     void set_power_auto(size_t adapter) {
         (void)iface()->set_power_auto(adapter);
     }
@@ -1920,7 +1924,8 @@ struct TxCore {
             }
             // §10.5 override targets: EVERY tx adapter, curve or not.
             power_targets_.push_back(
-                PowerTarget{a.name, i, a.max_power_qdb, a.power_presets_qdb});
+                PowerTarget{a.name, i, a.max_power_qdb, a.power_presets_qdb,
+                            a.power_offset_qdb, a.power_offset_max_qdb});
             if (a.power_map.empty()) {
                 continue;
             }
@@ -2885,8 +2890,12 @@ struct TxCore {
     struct PowerTarget {
         std::string name;
         size_t adapter_idx;
-        std::optional<int32_t> ceiling;  // §10.3 — the ONE clamp on overrides
+        std::optional<int32_t> ceiling;  // §10.3 — kernel-monitor reference
         std::vector<int32_t> presets_qdb;  // §11.7 0x0A selectable ceilings
+        // §10.5 (Pass 150) relative contract: the safe boot offset and the
+        // bound the runtime latch may not exceed.
+        int32_t offset_qdb = -24;
+        int32_t offset_max_qdb = 0;
     };
 
     // §10.4 curve resolve for the committed operating point, through the
@@ -3005,17 +3014,42 @@ struct TxCore {
     // §10.5 (Pass 114) override-latch: latch an absolute qdb on every tx
     // adapter; the §10.4 commit resolve yields until cleared. Ceiling-clamped
     // per adapter (§10.3) — nothing else bounds it.
-    void set_power_override(int32_t qdb) {
+    // §10.5 (Pass 150): the latch is a RELATIVE offset, bounded by each
+    // adapter's power_offset_max_qdb and REJECTED past it — never silently
+    // clamped. The old min(qdb, max_power_qdb) clamp is gone: on an offset
+    // backend it clamped the offset, so a documented safety ceiling became a
+    // boost permit. All-or-nothing, matching set_power_tier: validate every
+    // target before touching any, so a partial apply cannot leave two tx
+    // adapters on different offsets with nothing saying so.
+    bool set_power_override(int32_t qdb) {
+        for (const PowerTarget& t : power_targets_) {
+            if (qdb > t.offset_max_qdb) return false;
+        }
         power_override_ = qdb;
         for (const PowerTarget& t : power_targets_) {
-            const int32_t v =
-                t.ceiling ? std::min(qdb, *t.ceiling) : qdb;
-            if (apply_power) {
-                apply_power(t.adapter_idx, v);
+            if (apply_power_offset) {
+                apply_power_offset(t.adapter_idx, qdb);
             } else {
-                std::fprintf(stderr, "power: %s override -> %d qdb\n",
-                             t.name.c_str(), v);
+                std::fprintf(stderr, "power: %s offset -> %+d qdb\n",
+                             t.name.c_str(), static_cast<int>(qdb));
             }
+        }
+        return true;
+    }
+
+    // §10.5 (Pass 150): the forced safe boot point. Applied once at startup on
+    // every role:"tx" adapter so no node ever transmits at the uncharacterised
+    // efuse default (offset 0), which Pass 150 measured as a compressing
+    // operating point on the fleet's 8822EU.
+    void apply_boot_power_offsets() {
+        for (const PowerTarget& t : power_targets_) {
+            if (apply_power_offset) {
+                apply_power_offset(t.adapter_idx, t.offset_qdb);
+            }
+            std::fprintf(stderr,
+                         "power: %s §10.5 boot offset %+d qdb (bound %+d)\n",
+                         t.name.c_str(), static_cast<int>(t.offset_qdb),
+                         static_cast<int>(t.offset_max_qdb));
         }
     }
 
@@ -3025,9 +3059,14 @@ struct TxCore {
     // without waiting for the next profile change.
     void clear_power_override() {
         power_override_.reset();
-        if (apply_power_auto) {
-            for (const PowerTarget& t : power_targets_) {
-                apply_power_auto(t.adapter_idx);
+        // §10.5 (Pass 150): auto resolves to the adapter's configured safe
+        // offset, NOT the backend default. apply_power_auto was offset 0 on
+        // devourer — the uncharacterised point, and the worst setting on a
+        // compressing unit. §11.6 recovery ends here (Pass 48), so this is
+        // also what an unattended recovery lands on.
+        for (const PowerTarget& t : power_targets_) {
+            if (apply_power_offset) {
+                apply_power_offset(t.adapter_idx, t.offset_qdb);
             }
         }
         for (PowerAdapter& pa : power_) {
@@ -3062,6 +3101,9 @@ struct TxCore {
     std::function<void(uint8_t mcs, bool sgi)> apply_mode;
     std::function<bool(size_t adapter_idx, int32_t qdb)> apply_power;
     std::function<void(size_t adapter_idx)> apply_power_auto;
+    // §10.5 (Pass 150) relative actuator — bound for EVERY backend, unlike
+    // apply_power which is radio-only.
+    std::function<bool(size_t adapter_idx, int32_t qdb)> apply_power_offset;
     std::function<std::optional<uint32_t>(size_t bytes, bool include_pending,
                                           uint16_t packet_budget)>
         estimate_airtime;
@@ -4144,6 +4186,11 @@ int run_tx(const Loaded& l) {
         return air.value->estimate_airtime_us(bytes, include_pending,
                                               packet_budget);
     };
+    // §10.5 (Pass 150): the relative actuator is backend-agnostic — each
+    // backend resolves the offset against its own calibrated reference.
+    tx.apply_power_offset = [&](size_t idx, int32_t qdb) {
+        return air.value->set_power_offset_qdb(idx, qdb);
+    };
     if (air.value->is_radio()) {
         tx.apply_mode = [&](uint8_t mcs, bool sgi) {
             air.value->set_tx_mode(mcs, sgi);
@@ -4376,7 +4423,11 @@ int run_tx(const Loaded& l) {
             }
             if (qdb < -511 || qdb > 511)
                 return "qdb out of range (-511..511)";
-            tx.set_power_override(qdb);
+            // §10.5 (Pass 150): bounded and REJECTED, not clamped — the
+            // operator learns instead of wondering why nothing moved.
+            if (!tx.set_power_override(qdb))
+                return "qdb exceeds power_offset_max_qdb on a role:\"tx\" "
+                       "adapter (§10.5); raise the bound to opt in";
             return "";
         };
         h.calibration_json = [&] {  // §10.6 Pass 120
@@ -4610,6 +4661,10 @@ int run_tx(const Loaded& l) {
         std::fprintf(stderr, "control: REST on %s (tx)\n",
                      l.cfg.control.bind.c_str());
     }
+    // §10.5 (Pass 150): forced safe boot offset on every role:"tx" adapter,
+    // applied before the first frame goes out — a node must never transmit at
+    // the uncharacterised efuse default even briefly.
+    tx.apply_boot_power_offsets();
     std::fprintf(stderr, "tx: session=%u, running%s\n", session,
                  qg.enabled() ? " (quiet-gap pacing)" : "");
     std::optional<uint16_t> prior_bound_issuer;

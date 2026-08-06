@@ -387,6 +387,34 @@ int main() {
         "bind":{"kind":"frame-shm","name":"venc_frame"},
         "fec":{"scheme":"none","e_rate_permille":0}}]})",
                  "rlc256");
+    // §10.5 (Pass 150): the boot offset may not start above its own bound —
+    // a node must never boot at a power the runtime latch would refuse.
+    expect_error(R"({"node":{"originator":7,"role":"tx"},
+      "adapters":[{"name":"wlan0","role":"tx","channel":5805,
+        "power_offset_qdb":8,"power_offset_max_qdb":0}]})",
+                 "exceeds power_offset_max_qdb");
+    expect_error(R"({"node":{"originator":7,"role":"tx"},
+      "adapters":[{"name":"wlan0","role":"tx","channel":5805,
+        "power_offset_qdb":-9999}]})",
+                 "-511..511");
+    {
+        // Defaults: safe-by-default seed, bound at 0. Absent keys must give
+        // the seed, not 0 — 0 is the uncharacterised efuse default.
+        auto r = load_config_json(R"({"node":{"originator":7,"role":"tx"},
+          "adapters":[{"name":"wlan0","role":"tx","channel":5805}]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK_EQ_U(static_cast<int64_t>(r.value->adapters[0].power_offset_qdb) + 24, 0);
+            CHECK_EQ_U(r.value->adapters[0].power_offset_max_qdb, 0);
+        }
+        // Positive headroom is supported when explicitly opted into — efuse
+        // tables are per-module and some ship conservative.
+        auto p = load_config_json(R"({"node":{"originator":7,"role":"tx"},
+          "adapters":[{"name":"wlan0","role":"tx","channel":5805,
+            "power_offset_qdb":16,"power_offset_max_qdb":40}]})");
+        CHECK(bool(p));
+        if (p) CHECK_EQ_U(p.value->adapters[0].power_offset_qdb, 16);
+    }
     // fec.scheme only on a frame-shm binding.
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",

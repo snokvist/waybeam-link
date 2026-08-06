@@ -114,6 +114,11 @@ class AirIface {
     // §10.5: false = the backend did NOT accept the value, and the caller must
     // not cache it as applied.
     virtual bool set_power_qdb(size_t adapter, int32_t qdb) = 0;
+    // §10.5 (Pass 150): ONE relative contract — qdb is an offset against this
+    // backend's calibrated reference, resolved natively by each backend
+    // (devourer: the efuse per-rate table; kernel-monitor: the adapter's
+    // max_power_qdb). Returns false when the backend has no reference.
+    virtual bool set_power_offset_qdb(size_t adapter, int32_t qdb) = 0;
 
     // §10.5 auto restore. G7: the two RF backends mean different things by
     // "auto" — kernel-monitor returns the driver default (`txpower auto`),
