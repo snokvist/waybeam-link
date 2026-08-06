@@ -6248,3 +6248,57 @@ Two things the re-vendored devourer made visible that the old tree did not:
 The unit stays retired from TX A/Bs. Every mechanism that could be tested
 remotely has been, and the craft's 8822e remains the reference: same chip, same
 RFE type, MCS4–7 at or indistinguishable from lossless.
+
+## Pass 142 — §15.5a scout retargeting works on devourer (2026-08-06)
+
+Pass 140 stated G1 on the contract: the two net_id setters were no-ops on
+`RadioAir`, so a §15.5a sweep never widened the §3.0 RX filter and a craft on
+another net_id was never discovered while the sweep still reported clean. This
+closes it, together with G6 (`tx_index()` answered 0 by convention, so a config
+listing its `role:"tx"` adapter second scouted the wrong ear — `create()`
+already resolves it into `tx_idx`).
+
+**No spec moves.** §15.5a already says what a sweep does; the backend did not
+do it. The synchronisation is the whole of the change: the filter is read per
+frame on each adapter's RX thread, so it leaves `cfg` for an atomic beside the
+other RX-thread state, `-1 = hear any`, the encoding `MonAir` already uses. The
+stamp is TX-side and main-thread only, so it stays a plain write. Unlike
+kernel-monitor there is no kernel pre-filter to re-attach — filtering here is
+software-only in `on_packet` — so a widen lands on the next frame.
+
+**The device test found the half of G1 that no reading had.** Two devourer
+nodes on the bench host with deliberately mismatched net_ids (TX 8812CU at
+net_id 7, RX 8822EU pinned to 3), sweeping 5805:
+
+| binary | candidates | craft (originator 17) |
+|---|---|---|
+| before | 0 | not found |
+| after, first run | 1 | found, reported **net_id 0** |
+| after, with the meta fix | 1 | found, net_id 7 |
+
+`RadioAir` never filled `AirRxMeta::net_id`. That was invisible while the
+filter was pinned — every accepted frame really was the configured id — and
+wrong the moment a sweep widened it. Since selecting a candidate re-pins both
+roles to the *reported* value, the scout would have claimed net_id 0 and lost
+the craft it had just found. A sweep that reports a hit and then cannot form
+the link is worse than one that reports nothing.
+
+**The widen has to be temporary, so that was measured too.** Same pair, the
+ear's counters across three windows:
+
+| window | accepted | filtered |
+|---|---|---|
+| idle, before any sweep | 0 | 12 |
+| sweeping | 11 | 1 |
+| after `scout/stop` | 0 | 12 |
+
+The craft is audible throughout — 12 frames a window land in `filtered` — and
+only the sweep lets them through. A filter left open would have passed the
+discovery test above and still been a regression.
+
+Harness and both node configs: `docs/data/pass142-hw/`. The 8822EU is the ear
+only; nothing here depends on the transmit path of the H1 suspect unit.
+
+Remaining register items are unchanged: G3/G4 (retune commanded-not-confirmed,
+no recovery path), G5 (MTU asserted), G2/G7 (operator rulings), G8 (decode-path
+tests), G9, B3, H1.
