@@ -317,5 +317,33 @@ int main() {
         CHECK(!r);
         if (!r) CHECK(r.error.find("out of range") != std::string::npos);
     }
+    // §10.7 Pass 146: identity resolution order. The point of the order is
+    // that an artifact survives a re-plug — the old bus-path form did not —
+    // while still differing per backend, so a monitor-measured curve reads
+    // STALE on devourer instead of being applied to a different actuator.
+    {
+        AdapterCfg a;
+        a.name = "uplink";
+        // udp/bench adapter: no identity to derive.
+        CHECK(calib_identity(a) == "udp");
+
+        // A bus path with no USB serial is the last resort, and unstable.
+        a.bus = "9-9";   // no such device, so no sysfs serial to read
+        CHECK(calib_identity(a) == "bus/9-9");
+
+        // An ifname wins over the bus path: kernel-monitor asks the netdev.
+        a.ifname = "wlnosuchdev";
+        CHECK(calib_identity(a).rfind("wlnosuchdev/", 0) == 0);
+
+        // calib_id wins over everything, which is what makes it usable for a
+        // dongle whose serial is blank or duplicated across a fleet.
+        a.calib_id = "craft-eu-1";
+        CHECK(calib_identity(a) == "id/craft-eu-1");
+        // ...and it does not depend on either derived source still being set.
+        a.ifname.clear();
+        a.bus.clear();
+        CHECK(calib_identity(a) == "id/craft-eu-1");
+    }
+
     return wbtest_finish("uplink_calib_store_test");
 }

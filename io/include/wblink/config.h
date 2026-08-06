@@ -73,6 +73,10 @@ struct AdapterCfg {
     // backend (air.kind "kernel-monitor") binds AF_PACKET to it. Empty for the
     // udp/radio backends (devourer matches on `bus`).
     std::string ifname;
+    // §10.7 (Pass 146): explicit calibration identity for this physical
+    // adapter. Wins over every derived form; the only option for a
+    // dongle whose USB serial is blank or duplicated across a fleet.
+    std::string calib_id;
     Role role = Role::kRx;
     uint16_t channel_mhz = 0;  // center freq MHz, band-agnostic (§11.1 style)
     uint8_t bw = 20;           // 20 / 40 / 80

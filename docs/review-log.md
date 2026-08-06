@@ -6719,3 +6719,143 @@ and it fails safe — refusing a monitor-derived curve on devourer rather than
 applying the wrong one. On a devourer TX fleet every artifact would also go
 stale after a re-plug, since the devourer identity is a bus path. Still a
 ruling, still unresolved.
+
+## Pass 146 — a calibration identity that survives a re-plug (2026-08-06)
+
+The §10.7 artifact auto-loads only when its fingerprint matches the live
+adapter, and on devourer that identity was `bus/<bus-port>`. `CLAUDE.md`
+records that USB bus paths shuffle after any re-plug, so on a devourer TX
+fleet every artifact goes stale the first time a dongle is moved — the node
+boots with no curve, and the only symptom is a line in the log. Seen live
+during the Pass 145 close-out: `calibrate: STALE artifact (stored
+wlan0/98:03:cf:cf:a4:28, live bus/1-1)`.
+
+Resolution order is now `calib_id` → `ifname/<MAC>` → `bus/<path>`, and the
+bus fallback warns at every boot until an id is set. The identity still
+differs by backend on purpose: kernel-monitor writes nl80211 fixed power,
+devourer writes an offset against the efuse per-rate table, so a
+monitor-measured curve **must** read STALE on devourer rather than be applied
+to a different actuator.
+
+**The USB serial was the plan, and hardware killed it.** It is the obvious
+stable key — present whether or not a kernel driver is bound, readable from
+sysfs, no vendored change needed. Then reading it:
+
+| adapter | serial |
+|---|---|
+| bench 8822EU (bus 1-1) | `123456` |
+| bench 8812CU (bus 5-1) | `123456` |
+| craft 8822EU (bus 1-1) | `123456` |
+
+A placeholder, identical across two different chips on two different hosts.
+Keying on it would have been **worse than the bus path it replaced**: two
+adapters in one host would share an artifact, and a curve measured on one
+dongle would be applied to another *without ever reading STALE* — defeating
+the exact check the fingerprint exists to perform. The instability would have
+been traded for silent misapplication.
+
+So on devourer the stable identity has to be **declared, not derived**. That
+is a worse ergonomic answer than an automatic one, and it is the only safe
+one available without vendored changes.
+
+Worth keeping as a method note: the serial approach was designed, specified,
+implemented and unit-tested before anyone read a serial off real hardware. One
+`cat` of three sysfs files ended it. Verify the premise of a fix as early as
+the fix itself — a design can be internally consistent, tested green, and
+still resting on something that was never checked.
+
+## Pass 147 — G4 closed on hardware: both halves induced (2026-08-06)
+
+G4 was the last open item on the devourer parity register, and it was one
+question with two mechanisms behind it. `recover()` and the §9.10 TX-wedge
+watchdog share the word "wedge" and nothing else: the watchdog's only action
+is a log line and a stats field (`app/main.cpp:4837`), while `recover_all()`
+has exactly one call site — the §11.6 post-retune RX-liveness guard
+(`app/main.cpp:4814`). Both are now device-confirmed on the craft's devourer
+adapter, by separate inductions.
+
+**G4a — `RadioAir::recover()`.** Induced with `POST /api/v1/channel` on the
+craft (§15.5 Pass 113), which retunes and arms the liveness guard in one call,
+needing no ground cooperation and no campaign. Sending the craft alone to 5765
+while the ground held 5745 guarantees zero RX for the whole window:
+
+```
+csa: RX SILENT 4000 ms after retune to 5765 MHz — half-applied retune, monitor re-init (§11.6 Pass 80)
+radio: RX-liveness recovery on "eu-craft" -> 5765 MHz ok
+```
+
+The `StopRxLoop` → join → `SetMonitorChannel` → `StartRxLoop` cycle completes
+without the `std::terminate` the first cut of this function hit on `InitWrite`,
+and leaves a working ear: `rx_dead=false`, reports advancing, and on returning
+to 5745 the ground re-latched and delivered 28042 → 51838 frames in 10 s.
+
+Scoped honestly: this proves recovery **runs and leaves the RX pipeline
+functional**. It is not proof it *repairs* a genuinely half-applied retune —
+that fault has never been produced on demand, and an RX-path restart is
+weaker than the full MAC/PHY bring-up kernel-monitor gets from `ip link
+down/up`.
+
+**G4b — the §9.10 detector.** Two earlier attempts failed for one reason,
+now understood: they tried to induce the wedge with *load* (pin the profile,
+overload the rung), but §9.6 rate-follow keeps the radio healthy, and a
+healthy radio still reports. The counters say why load can never work —
+`tx_submitted` increments *before* `send_packet` (`io/src/air_radio.cpp:511`)
+and `tx_reports` are parsed from the devourer event stream, so the signature
+belongs to a dead endpoint, not a busy one. Deauthorizing the craft's USB
+device (`/sys/bus/usb/devices/1-1/authorized`) is the remote equivalent of
+unplugging it, which is the induction §17 names:
+
+| sample | tx_submitted | tx_failed | tx_reports | tx_wedged |
+|---|---|---|---|---|
+| baseline | 609127 | 0 | 318420 | false |
+| +2 s | 630305 | 14506 | 321866 | **true** |
+| +12 s | 680042 | 64243 | 321866 | **true** |
+
+Reports froze at 321866 and never moved again; the verdict landed inside the
+first window, and the transition logged once with no flapping. The craft was
+restored by a service restart (`tx_failed` back to 0, reports tracking
+submissions ~1:1).
+
+**Re-authorizing the USB device did not heal the link**, and that is the
+specified behaviour rather than a defect — §9.10 says recovery "requires a
+physical re-plug regardless". Precisely: the kernel re-enumerates the dongle,
+but the running process's libusb handle is dead and nothing re-opens one. No
+keying or session state is involved.
+
+**Both of §9.10's deferral conditions are now met.** The section defers
+coupling the detector into adaptation (or an automatic USB reset) until it is
+"silent across a healthy 500–4500 pps sweep, fires within one window of an
+induced wedge". Pass 11's step-11 saturation series supplies the first —
+healthy CCX return rates fall from 100% to ~25% but never to zero, so every
+window sees progress and the detector stays silent. This pass supplies the
+second. Whether to now couple actuation is an operator ruling and is NOT
+taken here; v1 stays observability-only until it is.
+
+**Incidental, and the reason this pass took two runs: the craft had been
+logging into a full tmpfs for two hours.** devourer's human diagnostics
+default to stderr at one Info line *per transmitted packet*
+(`bulk_send EP n OK n bytes`) — measured at ~250 pps, 3.3 MB per 30 s, which
+fills the craft's 45 MB `/tmp` in about seven minutes. After that the log
+silently stops and every other user of `/tmp` on the vehicle is out of space.
+A ground node on the radio backend feeds the same rate into journald, whose
+rate limiter drops lines instead — the same blindness by a different route.
+The ground is not exposed today only because it runs kernel-monitor, which
+never constructs the devourer logger.
+
+Fixed by filtering the diagnostics sink rather than lowering the level:
+`set_level(Warn)` would also drop the bring-up block (endpoint selection,
+efuse decode, chip cut) that devourer work actually reads, and `logger.h:24`
+documents the level fields as "configure before worker threads spawn;
+intentionally unsynchronized", so lowering it after bring-up — once the RX
+threads run — is a documented race. A `fopencookie` sink installed before any
+thread starts is contract-clean and reuses the pattern `ev_write` already
+established in the same file. Device-verified on the craft: **120 bytes per
+60 s, down from ~6.5 MB/min**, with all 80 devourer bring-up lines intact and
+a one-time notice on stderr so the missing line is never a silent drop.
+
+Method note, and it nearly cost a false negative: the first G4a run reported
+no matching log lines, which read exactly like "the guard did not fire". The
+guard had fired nowhere — the craft's log had been dead since 13:17 because
+the tmpfs was full. An empty grep is only evidence once the instrument is
+known to be alive. Check the log is still being written before believing what
+it does not say.
