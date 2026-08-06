@@ -6994,3 +6994,91 @@ That run also validated the `free_adapter`-before-every-spawn change: the
 kernel driver had re-bound the adapter on re-enumeration, so a supervisor that
 only unbound once at service start would have respawned into "no matching
 Realtek device" forever.
+
+## Pass 149 — the third FEC class: non-referenced frames (2026-08-06)
+
+Operator ruling on a §14.2 gap found while reviewing the PR #92 design draft,
+plus the §14.1a section that draft was written to justify. The producer half
+landed the same day (waybeam_venc #216, merged 11:10), so this is the first
+pass where the flag has a live source.
+
+**The flag was already on the wire and already parsed.** §15.4
+`VencFrameMeta.flags` bit 2 has been defined and inside `kFrameFlagsKnown`
+since the frame-shm bring-up — it survives validation rather than being
+rejected as unknown. There was simply no accessor and no policy consulting it.
+So this pass adds no wire format, no producer change, and no version bump.
+
+**Classification must come from the frame, never the preset.** The obvious
+shortcut — key the link off the configured resilience name — does not work,
+and the reason is worth recording. Droppable density is `1/(ref_enhance + 1)`,
+a producer-side *period*: `ltr:<N>` makes it a continuum over N ∈ 1..255, and
+the density is shared across names (`rally` and `ltr` both give 50 %, `range`
+and `fpv` both give 20 %). No preset name identifies the class. The frame flag
+is the only source of truth.
+
+**The ARQ exclusion is structural, not a tuning choice.** This is the part
+that generalises past any one preset. For a *referenced* frame a late
+retransmit still pays, because it repairs the DPB and truncates the cascade
+even when it misses the display deadline. For a non-referenced frame there is
+no DPB effect at all — the only value is showing that one frame — so a repair
+landing after the deadline is worth exactly zero. No RTT threshold flips that,
+and the cost of being wrong is bounded at one frame, which is what the frame
+was worth.
+
+**Which is what opened the §14.2 hole, and why the exemption is total.**
+Rule 1's gate is `k > min_k OR NOT arq_eligible`. Making the class
+ARQ-ineligible flips the right-hand term permanently true, so an enforcing
+controller would start repainting parity onto these frames at *every* `k`,
+where today it is blocked below `min_k`. The feature would not fail loudly —
+it would quietly do nothing while reporting success. Same shape as B11: an
+eligibility change moving a gate that was being reasoned about somewhere else.
+The operator ruled the exemption total rather than clamping the override to
+`e_rate`, so the class is now outside enforcement entirely.
+
+Rule 2 is the cost of ruling it total, and is recorded as deliberate: a
+non-referenced frame is the *cheapest* frame in the stream to discard under
+transient overload, so exempting it forgoes an attractive drop candidate. The
+selective-discard design that implies is a larger §9.x congestion question and
+is explicitly not started here.
+
+**Freed parity is a reallocation, and for a stripe-less preset it is
+mandatory.** This inverts how the #92 draft framed the feature. `ltr` forces
+intra-refresh off — deliberately, since stripes landing in a `TRAIL_N` frame
+never enter the DPB — which removes the sub-second recovery path and leaves
+the IDR as the sole repair point at the authored GOP. Order-of-magnitude at a
+2.0 s GOP, moving from 20 % droppable with 500 ms stripes to 50 % droppable
+with none, class rates left flat: expected glitch duration per loss goes from
+~200 ms to ~500 ms. Half the losses get ~60× cheaper, the other half get ~4×
+more expensive, and the expensive half dominates. So `e_rate = 0` on its own
+is not a 5 % byte saving to bank — it is the funding for the higher `i_rate`
+that the preset now requires, and shipping the former without the latter is a
+regression. The GF(256) `r ≤ 256 - k` cap bounds how much the IDR can absorb
+(~2650 ‰ at k≈70), so the referenced P-chain keeps a share regardless.
+
+No automatic controller for the split. The right ratio is a §17 measurement
+we do not have, and the two-stage verification below is designed to get it —
+building the controller first would be fitting a curve to no data.
+
+**`e_rate` unset must be indistinguishable from a node predating this pass**,
+for every `(k, class, arq_mode, override)` combination. Hence `optional`, and
+deliberately not a 0 default: 0-by-default would silently strip authored
+protection the moment a producer switched preset. Both drift directions
+(link configured, producer not; producer configured, link not) degrade to
+authored behaviour — safe, but silent, which is why `fec_enhance_frames` is
+reported whether or not `e_rate` is set.
+
+**Verification is staged, and stage 2 is the control that should look bad.**
+The live craft `.2.232` runs `resilience: "range"` today — ~20 % of frames
+already carry the flag — so classification is measurable on hardware before
+any preset change. (1) counter reads ~20 % with nothing else moved; (2) switch
+to `ltr`, counter reads ~50 %, still flat rates — this is the deliberately
+unprotected baseline; (3) reallocate and measure glitch *duration*, not loss
+count, against stage 2. Only a duration histogram can distinguish a 1-frame
+drop from a cascade to the next IDR, which is the whole claim.
+
+Method note: the first check of the craft's preset read `/etc/venc.json` and
+found no `resilience` key, which read as "the flag fires on nothing" and very
+nearly sequenced this work behind a preset switch nobody would make. The key
+lives in `/etc/waybeam.json`. An absent key in the file you happened to open
+is not evidence of an absent setting — same failure as Pass 147's empty grep
+of a log that had stopped being written.

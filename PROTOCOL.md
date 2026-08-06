@@ -3544,8 +3544,14 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
   | condition | repair count | rationale |
   |---|---|---|
   | `k ≤ fec.min_k` (seed 3) **AND the frame is ARQ-eligible** | `r = 0` (ARQ-only) | at k=3 one repair = 33% overhead; NACK→RETRANSMIT recovers within deadline (§17 gate 3). |
+  | non-referenced frame, `k > min_k` | `r = ceil(k · e_rate)`; `e_rate` **UNSET ⇒ inherit `p_rate`** | nothing predicts from it (§14.1a), so its loss costs exactly one frame. |
   | P-frame, `k > min_k` | `r = ceil(k · p_rate)`, seed `p_rate` 0.10 | P-frames are expendable (supersession §6.2); light parity for the short burst diversity misses. |
   | IDR frame | `r = ceil(k · i_rate)`, seed `i_rate` 0.25 | IDR loss is catastrophic (whole GOP until next IDR); heavier parity justified. |
+
+  **Classification is a priority order, not a set of independent tests:**
+  IDR → non-referenced → P. An IDR is never marked non-referenced by either
+  producer backend, so the classes are disjoint in practice; implementations
+  MUST assert the disjointness rather than rely on it.
 
 - **The `min_k` gate is conditional (Pass 94).** `r = 0` at small `k` is an
   *optimisation* — do not spend parity where ARQ will recover the frame anyway
@@ -3582,6 +3588,87 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
 - **Priority:** a frame's repair symbols are that frame's **live data**, emitted
   immediately after its source symbols at the same live priority (§5.3), *not*
   demoted to retransmit priority.
+
+### 14.1a Non-referenced (SVC-T droppable) frames — the third FEC class
+
+**Source of truth is the frame, never the encoder preset.** A frame is
+non-referenced iff §15.4 `VencFrameMeta.flags` bit 2 (`0x04`) is set. The
+producer sets it when the SDK reports `ENHANCE_P_NOTFORREF` and rewrites the
+NAL header to HEVC `TRAIL_N`. The link MUST NOT infer the class from a
+configured preset name, an fps, or a frame-size heuristic: the droppable
+density is `1/(ref_enhance + 1)` — a producer-side *period*, freely
+configurable (`ltr:<N>`, N ∈ 1..255) and shared by several presets
+(`rally` and `ltr` both give 50 %, `range` and `fpv` both give 20 %). No
+name identifies it.
+
+**ARQ: non-referenced frames are never ARQ-eligible**, under any `arq_mode`.
+This is structural, not a tuning choice. For a *referenced* frame a late
+retransmit still has value after its display deadline, because it repairs the
+DPB and truncates the cascade. For a non-referenced frame there is no DPB
+effect at all — its only value is displaying that one frame — so a repair
+arriving after the deadline is worth exactly zero. The exclusion therefore
+holds at every RTT and every cadence, and the cost of being wrong is bounded
+at one frame, which is precisely what the frame was worth.
+
+Two consequences implementations MUST handle rather than discover:
+
+- The §14.1 `min_k` gate stops firing for this class (it is conditional on
+  ARQ-eligibility). A small non-referenced frame that was ARQ-only now falls
+  through to the `e_rate` path — with `e_rate = 0` it ships bare. That is the
+  intent, but it MUST be a tested outcome. Same failure shape as B11.
+- The §14.2 rule-1 override gate is `k > min_k OR NOT arq_eligible`, so making
+  this class ARQ-ineligible flips that gate permanently open for it. See the
+  §14.2 exemption, which is what closes the hole.
+
+**`e_rate` is UNSET by default and unset means "inherit `p_rate`."** Unset
+MUST be bit-for-bit indistinguishable from a node that predates this section,
+for every `(k, class, arq_mode, override)` combination. It is deliberately not
+defaulted to 0: that would silently strip authored protection the moment a
+producer switched preset.
+
+**The `min_r` interaction is a trap, and the useful settings are bounded by
+it.** `repair_count` short-circuits on `rate == 0` *before* applying the
+`min_r` floor, so `e_rate = 0` yields genuinely zero parity. But a small
+non-zero rate does not: `e_rate = 10 ‰` on a `k = 20` frame gives
+`ceil(0.2) = 1`, floored up to `min_r = 2` — an **effective 100 ‰**, i.e.
+exactly the `p_rate` it was meant to undercut. The useful settings are
+therefore `0` or **clearly above `min_r / k`**; everything between is silently
+dominated by the floor. If graduated low rates are ever wanted, `min_r` needs
+a per-class variant — do NOT special-case the floor inside `repair_count`.
+The §9.3a jumbo guard carries its own `rate != 0` check and so inherits this
+behaviour consistently.
+
+**Freed parity is a reallocation, not a saving — and for a stripe-less
+producer preset it is mandatory, not optional.** A producer preset that
+maximises droppable density (`ltr`) also forces intra-refresh **off**, because
+stripes landing in a `TRAIL_N` frame never enter the DPB and so cost bitrate
+while repairing nothing. That removes the sub-second recovery path and leaves
+the IDR as the sole repair point at the authored GOP. Order-of-magnitude, at
+a 2.0 s GOP: a producer moving from 20 % droppable with 500 ms stripes to
+50 % droppable with none takes expected glitch duration per loss from
+~200 ms to ~500 ms **if class rates are left flat** — half the losses get
+~60× cheaper while the other half get ~4× more expensive, and the expensive
+half dominates. Lowering `e_rate` without raising `i_rate` therefore ships a
+regression. Two hard constraints on any reallocation:
+
+- Total parity airtime is the budget to hold constant; bytes saved are not a
+  result to bank.
+- The IDR cannot absorb the whole freed budget: GF(256) caps `r ≤ 256 - k`,
+  so the reachable ceiling is `i_rate ≤ (256 - k)/k`. At a typical jumbo rung
+  (`k ≈ 70` for a ~94 KB IDR) that is ~2650 ‰ — large, but bounded, and the
+  referenced P-chain still cascades and still needs its share.
+
+An automatic controller for this split is **not specified here**: the right
+ratio is a measurement (§17), and the arithmetic above is operator guidance
+until that measurement exists.
+
+**Observability is the drift detector, and is not optional.** The producer
+preset and the link's `e_rate` are set in two different processes and nothing
+couples them. `fec_enhance_frames` over `frames` MUST report the observed
+density so a mismatch is visible rather than silent: a link configured for
+50 % against a producer on `range` reads ~20 %, and against `off` reads 0 %.
+Both drift directions degrade to authored behaviour and neither is unsafe —
+but neither is self-announcing either.
 
 ### 14.2 JSCC inner decision contract
 
@@ -3725,6 +3812,31 @@ fail-safe — every rule below applies to one frame and resets on the next:
    serviced in-deadline). The IDR `ARQ` bit is never removed — I-frame
    importance outlives one frame timing window, and the §5.3 deadline gate
    already bounds late resends.
+
+**Non-referenced frames are exempt from enforcement entirely (Pass 149,
+operator ruling).** A frame carrying §15.4 flag bit 2 is not actuated by any
+rule above — not rule 1 (its parity stays the §14.1a `e_rate`), not rule 2
+(it is never discarded by the controller), and rule 3 is already moot because
+§14.1a makes the class ARQ-ineligible unconditionally. Rule 1 is the
+load-bearing half: making the class ARQ-ineligible flips rule 1's
+`k > min_k OR NOT arq_eligible` gate permanently open, so without this
+exemption an enforcing controller would repaint parity onto exactly the frames
+`e_rate` exists to leave bare — at *every* `k`, where today it is blocked
+below `min_k`. The feature would not fail loudly; it would quietly do nothing.
+
+The exemption covers **actuation only**. The shadow still evaluates these
+frames and they remain in `jscc_decision_frames` / `jscc_valid_decisions`, so
+telemetry stays comparable across the change; `input.arq_capable` is reported
+`false` for them so the shadow does not model an ARQ that cannot occur.
+Exempted frames are counted in `jscc_exempt_frames` (§15.3).
+
+Rule 2 is the one place a future amendment could reasonably differ: a
+non-referenced frame is the *cheapest* frame in the stream to discard under
+transient overload, so exempting it forgoes a genuinely attractive drop
+candidate. That is a deliberate, revisitable consequence of ruling the
+exemption total, and any change to it is a new operator ruling — the
+selective-discard design it implies is out of scope here and belongs with
+§9.x congestion policy, not §14.2.
 
 **Flip criteria (operator guidance, not code):** enable `enforce` only after
 a shadow soak on the same link class shows `jscc_valid_decisions ≥ 99%` of
@@ -4058,6 +4170,13 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   `scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
   `"rlc256"` enables §14.1. Rates are integer per-mille (project convention). On
   a `udp` stream the `fec` block is ignored (Framer path, §5.1).
+
+  `e_rate_permille` (§14.1a) is **optional and unset by default**; unset means
+  "inherit `p_rate_permille`" and MUST be behaviourally identical to a config
+  that omits it. Range 0–1000 when present. It is rejected on a stream whose
+  `scheme` is `"none"` (nothing to rate) and, like the other rates, ignored on
+  a `udp` stream. Setting it to 0 is the only value that yields genuinely zero
+  parity — see the `min_r` trap in §14.1a before choosing anything between.
 - `arq_mode` is valid only on frame-SHM ingress and is either `"idr-only"`
   (default) or the opt-in `"all-frames"` experiment from §4.1.
 - A frame-SHM ingress may additionally carry the optional `jscc_shadow` block
@@ -4156,6 +4275,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "jscc_output_arq_eligible": true, "jscc_output_discard": false,
     "jscc_feedback_epoch": 1821, "jscc_feedback_age_ms": 42,
     "jscc_enforced_frames": 0, "jscc_discarded_frames": 0,
+    "jscc_exempt_frames": 0,
     "shm_health_valid": true, "shm_full_drops": 0,
     "shm_throttle_permille": 1000, "shm_oversize_drops": 0,
     "shm_bad_slots": 0, "shm_ring_full": 0,
@@ -4167,7 +4287,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "source_symbols_sent": 4120300, "repair_symbols_sent": 358944,
     "fec_oversize_frames": 0, "mtu_fec_guard_frames": 1234,
     "idr_frames": 17, "arq_frames": 68342,
-    "arq_cutoff_frames": 0,
+    "arq_cutoff_frames": 0, "fec_enhance_frames": 4096,
     "decode_errors": 0, "active_profile": 4, "table_version": 178 } ],
   "arq_timing": {
     "eob_to_nack_build": { "samples": 18, "p95_us": 820, "max_us": 901 },
@@ -4499,8 +4619,11 @@ the exact cumulative §14.1 symbols emitted by `FrameFramer`;
 `fec_oversize_frames` counts frames sent source-only because `k+r` exceeded
 GF(256) capacity; `mtu_fec_guard_frames` counts RLC-FEC frames for which
 §9.3a's 16-equivalent guard raised repair depth; `idr_frames` counts
-frames whose VFRM metadata carried the IDR flag; and `arq_frames` counts frames
-stamped with either ARQ-class flag.
+frames whose VFRM metadata carried the IDR flag; `fec_enhance_frames` counts
+frames whose VFRM metadata carried the §14.1a non-referenced flag (bit 2) —
+its ratio to `frames` is the observed droppable density and the only detector
+for producer/link preset drift, so it is reported whether or not `e_rate` is
+configured; and `arq_frames` counts frames stamped with either ARQ-class flag.
 They are zero on RX and non-frame-SHM streams. These counters are
 the fixed-policy baseline for comparing hypothetical JSCC shadow parity; byte
 or bitrate inference is not an acceptable substitute.
@@ -4628,7 +4751,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/tx/power_tier` | `{ "tier": 1 }` \| `{ "tier": 1, "both": true }` | Selects the local ceiling by preset index; 400 on a missing/non-integer `tier`, 409 when unconfigured or out of range. `both` additionally issues §11.7 `0x0A` to the bound craft — the one-action-both-directions shape `{"action":"start_both"}` already has for calibration. `both` on a node with no craft binding is a 409, not a silent local-only apply. 409 while a §10.6/§10.7 calibration is running (Pass 136) — the run owns the actuator and the ceiling is what it is measuring against |
 | `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (any node with a `role:"tx"` adapter, including an rx-node's §6.4 uplink — Pass 125) |
 | `POST /api/v1/calibration` | `{ "action": "start" }` \| `{ "action": "abort" }` \| `{ "action": "start_both" }` | §10.7 ground-uplink calibration; `start` requires its complete prerequisite set, `abort` is idempotent and cancels either phase, `start_both` additionally sequences the §11.7 downlink campaign after a successful uplink phase (ground/rx node) |
-| `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node) |
+| `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2, "e_permille": 0 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node). `e_permille` (§14.1a) is optional; omitting it leaves the current setting untouched, and `null` clears it back to "inherit `p_permille`" |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
 | `POST /api/v1/bench/rx-drop` | `{ "permille": 0 }` | UDP-air bench RX only: retune independent synthetic loss per listener (0–1000); 409 on RF backends |
