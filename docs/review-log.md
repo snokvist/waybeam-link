@@ -6510,3 +6510,48 @@ owed were wrong; both corrected. Worth noting as a pattern in the other
 direction from G9 — there the register asserted a rule the spec did not carry;
 here it reported a gap the spec had already closed. A register is a claim about
 the spec, and claims in both directions need checking.
+
+## Pass 144 — a sweep observes a channel; it does not adopt what it hears (2026-08-06)
+
+Pass 143 ruled the §15.5a widen node-wide and wrote down the exposure it left:
+foreign-`net_id` frames reach every RX consumer for the sweep's duration, and
+the ones holding link state are not scoped. That was recorded as a separate
+open item on purpose — ruling on the widen was not a ruling that the exposure
+was acceptable. This closes it.
+
+**The exposure was real, and larger than the words used for it.** The register
+and the Pass 143 entry both described it as a §2 *latch* risk. On the bench a
+latch never happened — `link.target_originator` stayed 0 in both arms, with and
+without a video feed. What did happen is worse and simpler. Ground pinned to
+`net_id` 3, unpaired craft airing real video on `net_id` 7, ground sweeping
+5805:
+
+| arm | frames accepted | stream 0 delivered | `selector_state_valid` |
+|---|---|---|---|
+| before | 5119 | **5085 packets** | true |
+| after | 5152 | *no stream exists* | false |
+
+The ground **decoded and emitted a stranger's video onto its own stream
+output** — for as long as the sweep ran. Not a theoretical latch: the whole §2
+path ingested a craft it was not paired with, and would also have followed that
+craft's CSA had it sent one. The "after" node still hears the craft (5152
+frames, more than the before arm) — the widen is untouched, which is the point:
+**the sweep still observes everything, it just no longer adopts any of it.**
+
+Both arms still list the craft in `scout/results` at its real `net_id` 7, so
+scoping the engine costs no discovery. That was the thing worth checking — a
+gate that also blinded the survey would have closed the exposure by breaking
+the feature.
+
+**What is deliberately left wide.** The survey and the §15.5 discovery view
+keep seeing every `net_id`. Neither holds link state, and reporting who is out
+there is what a sweep is *for*. The rule is RF-only (udp-air has no §3.0
+identity to scope by) and does not apply to a node with no configured `net_id`,
+which accepts any by §3.0.
+
+**Method note.** The first two A/B runs showed "no difference" and were nearly
+written up as "hazard does not reproduce". They were measuring the wrong
+observable — `target_originator`, the name the register had used. Dumping the
+whole `link` object and the stream table instead of the one field the
+hypothesis named is what surfaced the delivery counter. When an A/B says
+*nothing happened*, widen the readout before believing it.

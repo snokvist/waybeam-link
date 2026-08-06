@@ -6681,6 +6681,21 @@ int run_rx(const Loaded& l) {
             const Decoded dec = decode(d, n);
             discovery.observe(dec, now, meta.net_id);
             scout.on_frame(meta, dec, d, n);  // §15.5a sweep aggregation
+            // §15.5a (Pass 144): the sweep widen is node-wide, so foreign
+            // net_ids reach this callback. The two consumers above want them —
+            // reporting who is out there is what a sweep is for, and neither
+            // holds link state. Everything below does. Measured on the bench
+            // before this gate existed: sweeping past an unpaired craft on
+            // another net_id delivered 5085 packets of its video to the local
+            // stream output, and the same path can latch it or follow its CSA.
+            // Only on RF (udp-air has no
+            // §3.0 identity) and only when a net_id is configured (§3.0: an
+            // unconfigured node accepts any).
+            if (air.value->is_radio() && scout.scanning() &&
+                active_selection.net_id &&
+                meta.net_id != *active_selection.net_id) {
+                return;
+            }
             if (const CsaPacket* c = std::get_if<CsaPacket>(&dec)) {
                 // Pass 67: a receiver-owned cache follows only its controller's
                 // Ethernet assignment, never an RF spectator campaign.

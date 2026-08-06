@@ -547,10 +547,10 @@ landed (Pass 140), so the two items that used to sit at either end of this list
 are gone. Ordering is now by **what the TX role needs**, since that is the role
 devourer is taking.
 
-1. **The G1 leftover**: the unguarded claim-during-sweep race. The widen-scope
-   question was ruled node-wide (Pass 143, §15.5a amended); what stays open is
-   that the §2 selector, CSA follower and discovery view are not net_id-scoped
-   during a sweep.
+1. **The G1 leftover, reduced**: the sweep-scoping half is closed (Pass 144);
+   what remains is the unguarded **claim-during-sweep race** — `do_claim` does
+   not stop the scout, so a sweep completing afterwards restores the resting
+   filter and channel over the claim.
 2. **B3** — hardware, runs in parallel.
 3. **H1** — a per-unit acceptance check at the intended MCS, needed before a
    pure-devourer TX fleet ships, not before any of the above lands.
