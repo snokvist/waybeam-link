@@ -24,7 +24,7 @@ settled here, not there.
 - **Spec amendments commit FIRST**, as their own commit; code implementing the
   ruling follows in the same PR, as a separate commit.
 - **Every spec ruling gets a numbered Pass entry in `docs/review-log.md`.**
-  Currently at Pass 145 — read the last two or three passes before touching
+  Currently at Pass 147 — read the last two or three passes before touching
   anything spec-adjacent, to pick up the reasoning, not just the verdict.
 - **Never commit to main.** Feature branch (`impl/`, `fix/`, `docs/`) → PR →
   squash-merge, and merge only on the operator's explicit word.
@@ -43,7 +43,7 @@ settled here, not there.
 
 ## Authoring configs
 
-Node configs are dense (225 parsed keys) and **coupled across nodes**: the
+Node configs are dense (226 parsed keys) and **coupled across nodes**: the
 cache's `store.controller.endpoint` must equal the owning ground's
 `cache.repair.listen`, the ground's `cache.repair.caches[]` must name the
 cache's `store.listen` and `originator`, every receiver's

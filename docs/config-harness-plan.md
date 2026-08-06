@@ -233,12 +233,15 @@ none of which the harness may answer on its own:
 2. If legal, does it carry provenance (`source: "operator" | "campaign"`), and
    does `/api/v1/calibration` and the §15.3 stats object have to surface that
    distinction? A ground that trusts a fingerprint is trusting a measurement.
-3. Identity. Pass 145 / T7 recorded `calibrate: STALE artifact (stored
-   wlan0/98:03:cf:cf:a4:28, live bus/1-1)` — the same physical adapter has a
-   different identity per backend, and on devourer the identity is a **bus
-   path** that changes on every re-plug. A vendored artifact would go stale on a
-   re-plug. Does a vendored artifact get a weaker identity (chip + adapter
-   name), or does it accept staleness and re-authoring?
+3. ~~Identity.~~ **Ruled by Pass 146** while this plan was being written. The
+   resolution order is now `calib_id` → `ifname/<MAC>` → `bus/<path>`, with the
+   bus fallback warning at every boot, because the USB serial turned out to be
+   the placeholder `123456` on three different adapters. On devourer a stable
+   identity must be **declared, not derived** — which makes the harness the
+   natural place to declare it: it is the one tool that knows which physical
+   adapter you just chose. `calib_id` on the TX adapter moves into the wizard's
+   scope (§5), and an authored artifact would key on it. What remains open is
+   only (1) and (2) above.
 
 Per the law in `CLAUDE.md` these are operator rulings, and whichever way they
 go the ruling gets a numbered Pass entry in `docs/review-log.md` and commits
@@ -275,7 +278,7 @@ its own, so it stays an option rather than a prerequisite. `--json` first.
 
 ### `--strict`, and why it matters more than the schema
 
-**The loader silently ignores keys it does not recognise.** All 225 lookups in
+**The loader silently ignores keys it does not recognise.** All 226 lookups in
 `config.cpp` go through `value()` / `contains()`; nothing enumerates the object
 and complains about the rest. So `"max_bitrate"` for `"max_bitrate_kbps"`, or a
 key invented from an older doc, loads clean and flies wrong. That is the single
@@ -321,6 +324,14 @@ be structural, not a habit:
 - Emit the `§N.M` section reference alongside each field. The comments in
   `config.cpp` already carry them; putting them in the schema points an agent
   at `PROTOCOL.md` instead of leaving it to guess semantics from a key name.
+
+This is not hypothetical: **Pass 146 added `adapters[].calib_id` while this
+plan was being written**, between the first draft and its review. That is the
+exact event the machinery above exists to catch — a new key, added for good
+reason, that a hand-maintained schema or an agent working from an example would
+not have learned about. It is also a key the harness specifically wants, since
+Pass 146's whole finding is that a devourer identity must be declared rather
+than derived.
 
 Prior art worth noting: `tools/expand_arq_topology.py` already expands one
 topology description into matched TX/RX configs for the UDP ARQ bench. The
