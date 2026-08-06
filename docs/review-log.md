@@ -7475,3 +7475,25 @@ is the correct failure direction.
 calibration recovers anyway. The seed should be recorded as a seed — a number
 chosen from one unit, expected to be wrong for some card, and made not to
 matter by the calibrate-up path.
+
+**Pass 150 ADOPTED (2026-08-06).** Seed ruled at **−24 qdb (−6 dB)**. §10.5 is
+rewritten relative-only, §10.3's ceiling recommendation is amended in place
+with the reason it failed, and §15.2 gains `power_offset_qdb` /
+`power_offset_max_qdb`.
+
+Implementation is staged deliberately. **This pass delivers the power
+contract**: safe-by-default boot offset on every `role:"tx"` adapter, a bounded
+latch that REJECTS rather than clamps, `auto` resolving to calibrated-or-safe,
+and one relative contract realised natively per backend (devourer against the
+efuse table, kernel-monitor against `max_power_qdb`). **The calibrate-up
+rework of §10.6/§10.7 is NOT in this pass** — it needs the artifact to move
+into offset space and the sweep to reverse direction, which is a larger change
+to a subsystem with its own device-verification burden. Until it lands, a node
+runs at the safe seed and its headroom stays unearned. That is the correct
+failure direction and is stated rather than left implicit.
+
+`max_power_qdb` is not removed. All four flying configs carry it, so a hard
+removal would be a coordinated fleet change for no safety gain: on
+kernel-monitor it is now the reference the offset applies to, and on devourer
+it is accepted with a warning and ignored. Removing it can follow once the
+calibration rework retires the last consumer.
