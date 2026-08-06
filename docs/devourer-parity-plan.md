@@ -16,15 +16,21 @@ live working set, not a committed sequence.
 
 ## Why this document exists
 
-The end-state under consideration is a **pure devourer** waybeam-link: one RF
-backend, extractable as a portable library (Android `:wifi` being the first
-non-Linux consumer), and ultimately integratable as a module inside
-`waybeam-hub` so the deployed system reduces to `waybeam_venc` +
-`waybeam-hub`. That end-state requires the devourer backend to be at least
-feature-equivalent to kernel-monitor on every node class the fleet runs.
+The end-state was originally written here as a **pure devourer**
+waybeam-link — one RF backend, kernel-monitor removed. **That is no longer the
+plan (operator, 2026-08-06).** kernel-monitor is kept as the spectator / RX /
+Ethernet-cache backend; devourer takes the **TX role**. Both backends ship.
 
-Today it is not, and the gaps are not recorded in one place. This is that
-place.
+What survives unchanged is the reason the document exists: the devourer backend
+must be feature-equivalent to kernel-monitor **on the node classes it will
+run** — which, under the ruling, means the TX role. It is not, and the gaps
+were not recorded in one place. This is that place.
+
+The library ambition is unchanged and is now closer: `AirIface` (Pass 140) is
+the extraction boundary, and it exists precisely so a backend can be lifted out
+behind a contract rather than out of a 530-line hand-dispatch. Two backends
+also make that boundary honest — an interface with a single implementation
+proves nothing.
 
 ## Standing position
 
@@ -33,6 +39,19 @@ backend's frames decode on either backend's RX (Pass 13, reinforced by Pass
 118's per-packet radiotap MCS convergence). **Migration can therefore be
 incremental and mixed-fleet**; no flag day is required, and a node can be
 moved and moved back. Every item below is independently landable.
+
+**The end-state is now a ruling, and it changes how this register is ordered
+(operator, 2026-08-06).** kernel-monitor is **not** being stripped: it is kept
+as the spectator / RX / Ethernet-cache backend. Devourer becomes the **TX
+role**. That single sentence sorts the whole register, because every remaining
+devourer gap is TX-role functionality — scout net_id retargeting (G1), wedge
+recovery (G4), scout `tx_index` (G6), MTU tier (G5), airtime (G2), power-auto
+semantics (G7). Monitor keeps everything it needs for the roles it is retained
+for, so "which of these matter" is answered by "does the TX role need it",
+not by G0-gating. **G1 is therefore on the critical path**, not a side item.
+
+This register was written before that ruling and before G0 read out. It has
+been realigned rather than rewritten: items whose premise moved say so.
 
 ## Already at parity — do not re-derive
 
@@ -55,56 +74,75 @@ separately, not parity work.
 
 ## Register
 
-Status values: OPEN, GATED (blocked on another item), RULING (needs an
-operator decision before code), DONE. Nothing here is scheduled until G0
-reads out.
+Status values: OPEN, RULING (needs an operator decision before code), DONE.
+**Nothing is gated on G0 any more — it read out.** Ordering is now by whether
+the TX role needs the capability.
 
 | id | item | kind | status |
 |---|---|---|---|
-| **G0** | Close the 5805 MCS4+ pivot rationale | verification | **OPEN — gates everything else** |
-| **G1** | §15.5a scout net_id retargeting is a silent no-op on radio | correctness | **OPEN — live bug, not gated on G0** |
-| G2 | §14.2 JSCC airtime unavailable on radio | feature | RULING |
-| G3 | CSA retune is commanded, not confirmed, on devourer | correctness | GATED (G0) |
-| G4 | `recover_all()` returns false on radio | feature | GATED (G0), pairs with G3 |
-| G5 | `mtu_supported()` is a hardcoded assumption on radio | feature | GATED (G0) |
-| G6 | `tx_index()` returns 0 for radio | correctness | OPEN (trivial) |
-| G7 | `set_power_auto` semantics differ between backends | spec hygiene | RULING |
-| G8 | Neither RF backend has a unit test | test surface | OPEN — **rebase onto the unit-testing PR** |
-| B2 | RadioAir cannot build a node without a TX adapter | blocker | GATED (G0) |
+| **G0** | Close the 5805 MCS4+ pivot rationale | verification | **DONE** — Pass 139 / #89, closed *affirmatively* |
+| **G1** | §15.5a scout net_id retargeting is a no-op on radio | correctness | **OPEN — critical path.** Declared on `AirIface`; the fix is RX-thread synchronisation inside the backend |
+| G2 | §14.2 JSCC airtime unavailable on radio | feature | RULING — declared (`estimate_airtime_us` → `nullopt`) |
+| G3 | CSA retune is commanded, not confirmed, on devourer | correctness | OPEN (ungated) |
+| G4 | `recover()` returns false on radio | feature | OPEN (ungated) — declared, pairs with G3 |
+| G5 | `mtu_supported()` is a hardcoded assumption on radio | feature | OPEN (ungated) — declared |
+| G6 | `tx_index()` returns 0 for radio | correctness | OPEN (trivial) — declared |
+| G7 | `set_power_auto` semantics differ between backends | spec hygiene | RULING — declared |
+| G8 | Neither RF backend has a unit test | test surface | OPEN — **harness now exists** (Pass 140 `FakeAir`) |
+| **G9** | §3.11 heartbeat suppression was monitor-only | correctness | **DONE** — Pass 140; it was never in this register |
+| B2 | RadioAir cannot build a node without a TX adapter | blocker | **DEAD** — operator ruling: enumerate and decline to inject |
 | B3 | The Ethernet cache runs an MT7921 | blocker (hardware) | RULING — BOM, not code |
+| **H1** | Some 8822e units cannot transmit 64-QAM under devourer | hardware | **OPEN** — per-unit, not per-chip; see below |
+| **H2** | Carrier-sense posture is a devourer-only knob | settled | **DONE** — Pass 139, measured; `air.disable_cca` ships `false` |
+
+**"Declared" means the limit is now stated on `AirIface`** (Pass 140) rather
+than being the absence of a branch in `AirBackend`. That does not close the
+item — the capability is still missing — but the answer lives where a test can
+assert it, and closing one flips a test rather than going unnoticed.
 
 ---
 
-## G0 — close the 5805 MCS4+ pivot rationale
+## G0 — 5805 MCS4+ pivot rationale: CLOSED AFFIRMATIVELY
 
-**This gates the rest.** `docs/mon-air-verification.md:8-16` is why the entire
-fleet runs kernel-monitor: devourer could not transmit 16-QAM+ (MCS4+) on
-Jaguar3 (8812EU) in UNII-3, including **5805 MHz — the §4.1 gate channel**.
-`docs/devourer-revendor-review.md` §1 still reads *"the fix is vendored, but
-not yet re-verified at 5805"*, and carries it as Open decision #5.
+**Read out on hardware 2026-08-05 (Pass 139, PR #89). Devourer transmits
+MCS4–7 at 5805.** The vehicle's 8822e delivered **98.21 / 96.42 / 95.87 /
+98.21 %** at MCS4/5/6/7 through devourer carrying real venc video, measured
+against a constant kernel-monitor reference receiver with `rx_at_other_rates`
+zero in every window. Re-measured on the re-vendored `800c3c8` tree: at or
+indistinguishable from lossless, ≥98 % throughout.
 
-**The evidence may already exist, collected incidentally.**
-`docs/step11-bench.md` §4.9 A1 (2026-08-01, craft `.232` ↔ ground `.242`,
-ch 5805/HT20) records `air.kind:"radio"` tracking MCS 2→5→7 interval-to-interval
-on both ground adapters, and the sharp-variant run counted **~22k frames in
-bucket 7 and zero at bucket 0**. That is MCS7 aired through devourer at 5805
-and decoded. But it was run as a *rate-attribution* test for Pass 118, not as
-the close-out for the pivot, so it was never read as one.
+`docs/mon-air-verification.md` carries a refutation banner on its "Why the
+pivot" section. The backend itself keeps its separate and still-valid
+rationale — a real RF path with no devourer or libusb at `WBLINK_RADIO=OFF` —
+which was never in question and is reinforced by the end-state ruling above.
 
-What is missing is a delivery/EVM A/B against the `MonAir` baseline
-(`docs/mon-air-verification.md:44-54` — 99.97% at MCS7), and a numbered Pass
-that supersedes the "Why the pivot" section and resolves revendor Open
-decision #5. Likely a short bench session rather than a fix.
-
-Until this reads out, **every item gated on it is speculative work.**
+**The correction worth keeping.** The first reading of this experiment was
+"the 8822e TX path is broken under devourer, exclude it from TX roles" — wrong,
+and wrong in the expensive direction, since it would have become a BOM
+constraint on the whole end-state. It came from testing **one adapter** and
+generalising to a chip. A direction-swap to a different chip (8822c) looked
+like a control but only established that *some* adapter works; the
+discriminating test was **the same chip in a different unit**. Two adapters of
+the same part number are not a replicate. What survives as a real finding is
+H1 below.
 
 ---
 
 ## G1 — §15.5a scout net_id retargeting is a silent no-op on radio
 
 The worst gap in the set, and the only one that fails *silently* — everything
-else either fails closed or degrades visibly. **Not gated on G0**: it is a
-live correctness bug for anyone running a devourer ground today.
+else either fails closed or degrades visibly. **On the critical path** under
+the end-state ruling: devourer becomes the TX role, and the §15.5a scout is a
+TX-role function.
+
+Two things changed since this was written. It is no longer an `if (mon)` with
+no `else` in `app/main.cpp` — Pass 140 moved it onto `AirIface`, so
+`RadioAir::set_filter_net_id` / `set_stamp_net_id` are **declared** no-ops with
+their consequence stated at the definition. And the fix is larger than a
+forwarding call: `cfg.filter_net_id` is read on each adapter's **RX thread**
+(`io/src/air_radio.cpp` `on_packet`), so a runtime setter is a synchronisation
+change inside the backend. `MonAir` gets away with a plain setter because its
+equivalent is a BPF re-attach syscall.
 
 `app/main.cpp:1554-1559`:
 
@@ -252,11 +290,14 @@ RX parsing covered by `radiotap_test.cpp` and the shared encapsulation by
 (`io/src/air_radio.cpp:76-81`), the `crc_err`/`icv_err` drop
 (`io/src/air_radio.cpp:237`), RSSI/TSF extraction — has none.
 
-This matters little today and a great deal the moment the backend is extracted
-as a library. **Land on top of the in-flight unit-testing PR**, not beside it —
-this document will be rebased once that merges, and the shape of G8 should
-follow whatever harness that work establishes rather than inventing a second
-one.
+**The harness now exists and the precondition is met.** Pass 137 made
+`app/main.cpp` reachable from a test; Pass 140 put every backend behind
+`AirIface` and added `FakeAir`, so `AirBackend`'s orchestration — the retune
+and recovery loops — is unit-tested for the first time (`tests/app_test.cpp`,
+151 checks). What G8 still wants is narrower than when it was written: the
+**devourer-specific decode path** (`desc_rate_to_mcs`, the `crc_err`/`icv_err`
+drop, RSSI/TSF extraction), which needs no fake because it is pure function of
+a buffer. Follow the `FakeAir` shape rather than inventing a second harness.
 
 ---
 
@@ -271,9 +312,96 @@ two node classes:
 - the **§2/§13 passive spectator** (Pass 74) — a display receiver with no
   return path
 
-Under pure devourer neither is constructible. The guard is deliberate (ordinary
-ground/craft configs must fail closed when their uplink is missing), so the fix
-is the same opt-in flag, not a relaxation.
+**DEAD — operator ruling, 2026-08-06.** This was never a hardware or driver
+limit: a devourer node can enumerate its adapters and simply decline to use the
+TX injection path, which makes it RX-only. The item is a construct of the
+current `create()` guard, and the guard itself stays deliberate (ordinary
+ground/craft configs must fail closed when their uplink is missing), so what
+remains is the same opt-in flag `MonAir` already has — not a blocker, and not
+gating anything.
+
+One consequence to carry: **`heartbeat` (G9) depended on this being true.** Its
+guard was monitor-only, and the reason it was harmless is that a radio node
+could not be RX-only. Once one can, the guard had to become backend-agnostic —
+which Pass 140 did.
+
+---
+
+## G9 — §3.11 heartbeat suppression was monitor-only (DONE, was never listed)
+
+**This register missed one.** `app/main.cpp`'s heartbeat guard read
+
+    if (mon && !mon->has_tx()) return;
+
+so a node with no TX adapter suppressed its §3.11 heartbeat **only on
+kernel-monitor**. Unlike G1/G4/G5/G6 it carried no comment anywhere — it read
+as a monitor implementation detail rather than a rule.
+
+It is a rule: a node with no uplink does not beat, whichever backend it runs.
+Pass 140 made it backend-agnostic via `AirIface::has_tx()`.
+
+Worth recording *why* the register missed it: the item only becomes reachable
+once B2 is false. While a radio node could not be built without a TX adapter,
+the missing branch was unreachable and therefore invisible to a survey that
+walked the backends looking for divergence. **A dead item was hiding a live
+one** — which is an argument for re-reading a register after any of its
+premises is overturned, not just the gating one.
+
+---
+
+## H1 — some 8822e units cannot transmit 64-QAM under devourer
+
+Not a chip property, not a band property, not a driver-version property: a
+**per-unit** one. It is recorded here because a pure-devourer TX fleet has to
+know that units vary.
+
+- The **craft's** 8822e delivers MCS4–7 at 95.9–98.2 % through devourer at
+  5805 with real video.
+- A **bench** 8822e — same chip, same `rfe_type=0x15`, same DPK-bypass and eFEM
+  path, same binary — delivers MCS4 and then collapses: MCS5/6/7 at ~1.7 / 0.5 /
+  0.1 %. The **same physical adapter** does 99.96 % at MCS7 under the *kernel*
+  driver, so its radio is sound.
+
+Ruled out by measurement, each separately: warm re-init (a true VBUS cold cycle
+to full de-enumeration), devourer version (upstream `800c3c8`, 21 commits on),
+TX power configuration, link budget and RX overload (the craft *works* at
+−27 dBm, weaker than the bench arm failing at −22), RFE variant, **a physical
+re-plug**, and **the kernel driver having touched the chip at all** (`8812eu`
+blacklisted so it cannot auto-load, port VBUS-cycled, chip verified to come
+back with no module loaded and no driver bound — fails identically).
+
+The only surviving difference is per-unit efuse calibration: bench
+`ref A=0x43 B=0x42` against craft `A=0x48 B=0x3f`. Two further observations
+from the re-vendored tree point the same way — the retry ladder now **delivers
+the fallback retries** (`rx_at_other_rates` ≈14–16 k in every failing window),
+so the radio is transmitting and only the dense constellations are
+unrecoverable; and the *virgin* chip is **worse** at MCS4 than one the kernel
+driver initialised first, which is what an incomplete per-unit calibration in
+devourer looks like and the opposite of what driver interference would predict.
+
+**What this means for the end-state:** a pure-devourer TX fleet needs a
+per-unit acceptance check at the intended MCS, not a per-model assumption. It
+is not a reason to avoid devourer, and it is emphatically not the BOM exclusion
+the first reading of G0 proposed.
+
+---
+
+## H2 — carrier-sense posture is a devourer-only knob (DONE)
+
+waybeam-link never called `SetCcaMode` and never set `tuning.disable_cca`, so
+it **inherited** devourer's carrier-sense-enabled default. Measured on the
+craft (Pass 139): clearing the gate costs ~45 % of the **uplink** — returns
+sent ~760 per window either way, craft heard 556/588 with the gate on
+(73.3/77.0 %) against 331/318 with it off (43.2/41.7 %); downlink unaffected.
+
+RX is not deafened, it is **talked over**: the craft is half-duplex on one
+radio, so transmitting is not listening, and carrier-sense is what holds TX off
+while the ground is mid-return. devourer's own `streamtx` example takes the
+opposite posture because it is a **TX-only streamer with no return path** —
+"the link owns the channel" costs it nothing, and does not describe us.
+
+`air.disable_cca` ships **false**. Listed here because it is a devourer-only
+surface that a monitor-only fleet never had to decide.
 
 ---
 
@@ -351,13 +479,34 @@ as a commitment here; noted so the opportunity is not missed.
 
 ## Sketch of an order
 
-Held loosely — G0 may change the shape of everything under it.
+Realigned 2026-08-06. G0 is closed and the `AirBackend` interface collapse has
+landed (Pass 140), so the two items that used to sit at either end of this list
+are gone. Ordering is now by **what the TX role needs**, since that is the role
+devourer is taking.
 
-1. **G0**, and read out what the 2026-08-01 A1 run already proves.
-2. **G1**, independent of G0's verdict.
-3. **G3 + G4** together.
-4. **B2, G5, G6** — small and mechanical.
-5. **G2** — after its ruling.
-6. **B3** — hardware decision, runs in parallel with all of the above.
-7. **G8** and the `AirBackend` interface collapse, rebased onto the
-   unit-testing work.
+1. **G1** — critical path. The §15.5a scout is a TX-role function and this is
+   the only gap that fails silently. Larger than it looks: the fix is RX-thread
+   synchronisation inside `RadioAir`, not a forwarding call.
+2. **G6** — trivial, and it is the same scout path as G1. Land them together.
+3. **G3 + G4** together, as before: "commanded, not confirmed" and "no recovery
+   path" are the same weakness seen from two sides, and a TX node is where a
+   half-applied retune actually costs something.
+4. **G5** — small; assert-vs-probe on a tier that is currently asserted.
+5. **G2 / G7** — after their rulings. Both are declared on `AirIface` now, so
+   the code change is bounded and the open part is genuinely the decision.
+6. **B3** — hardware, runs in parallel.
+7. **H1** — a per-unit acceptance check at the intended MCS, needed before a
+   pure-devourer TX fleet ships, not before any of the above lands.
+8. **G8** — narrower than when written; the devourer decode path, following the
+   `FakeAir` shape rather than a second harness.
+
+**Not on this list any more:** G0 (closed), G9 (fixed in Pass 140), B2 (dead by
+ruling), H2 (settled and measured), and the interface collapse itself.
+
+## What to re-read when a premise moves
+
+G9 is the cautionary tale. It was invisible to the original survey precisely
+because B2 was true — a radio node could not be RX-only, so the missing branch
+was unreachable and looked like a monitor detail. **A dead item was hiding a
+live one.** When any premise here is overturned, the items it was propping up
+are worth re-walking, not just the ones it was gating.
