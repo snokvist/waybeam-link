@@ -2491,12 +2491,93 @@ Failure *reason* and the full report are management-HTTP only (§15.5
 `GET /api/v1/calibration`). §15.3 `link` mirrors the word
 (`calib_state`, `calib_rung`, `calib_fingerprint`, `calib_stale`).
 
-**Forward validity.** The curve is actuator-referenced (max clean
-commanded power) and the ceilings are
-receiver-referenced (RSSI brackets), so the artifact survives a backend
-move to devourer per-packet TX power unchanged — per-packet power is a
-finer actuator for the same per-rung maxima, and per-rate diffs absorb
-chip-cal skew.
+**Forward validity — WITHDRAWN (Pass 151).** Passes 120–134 claimed the
+artifact "survives a backend move to devourer unchanged", on the theory that
+per-packet power is a finer actuator for the same per-rung maxima. That is
+false, and this section already contradicted itself: the Pass 146 identity rule
+above states that a curve measured under one backend is **not** valid under the
+other and deliberately scopes the fingerprint so a cross-backend load reads
+STALE. Pass 150 settled which is right — kernel-monitor commands an absolute
+nl80211 power while devourer commands an **offset** relative to the efuse
+per-rate table, so the two curves are not the same quantity and a monitor
+artifact applied on devourer is an overdrive, not a translation. The identity
+scoping stands; this paragraph is struck.
+
+**Offset-space calibration on a relative backend (Pass 151).** §10.5 (Pass 150)
+made TX power relative on devourer, so a sweep in absolute qdb — `min_qdb` 4 to
+`max_qdb` 108 — walks +1 dB to +27 dB of boost there. On a relative backend the
+run therefore sweeps in **offset space**, and the window is not configured
+separately but **derived from the §10.5 keys already governing that adapter**:
+
+```
+min = adapters[].power_offset_qdb        (the safe boot offset)
+max = adapters[].power_offset_max_qdb    (the §10.5 bound, default 0)
+step = policy.calibration.offset_seek_step_qdb   (default 8 = 2 dB)
+```
+
+which yields the property the absolute window never had:
+
+> Calibration can never place a relative backend hotter than
+> `power_offset_max_qdb`, nor colder than the safe offset it started from.
+
+A separate step is required because the default window is 24 qdb and
+`seek_step_qdb` is 16 — two probes is not a measurement. The sweep direction is
+unchanged and remains the Pass 130 monotone ascent: **safe end first**, so on a
+relative backend every probe in the run sits at or below the efuse default. An
+adapter whose true optimum lies *below* its safe boot offset is out of reach by
+construction; lowering `power_offset_qdb` and re-running is the operator's
+remedy, and is preferred over widening the window automatically — the floor is a
+safety property, not a search bound.
+
+Actuation follows the space: placements are commanded through the same relative
+actuator §10.5 uses, and the artifact's curve holds offsets. An explicit config
+`power_map` is **not** backend-scoped, carries no space, and therefore remains
+refused on a relative backend (§10.2).
+
+The artifact carries no space *field*, because the Pass 146 fingerprint already
+scopes it by backend — but backend and space came apart once, in the window
+between Pass 146 and Pass 150 when a devourer artifact could be authored by the
+absolute sweep. Such an artifact still matches its fingerprint, and its 4..108
+rungs read as offsets would clamp onto the §10.5 bound and park the node on the
+uncharacterised efuse default this pass exists to keep it off. So on a relative
+backend a boot auto-load additionally requires **every placement to fall inside
+the live offset window**; one that does not reads CALIBRATION STALE with the
+space named as the reason, exactly as a fingerprint mismatch does. This is a
+load-time check on stored state, not a wire or artifact format change.
+
+**Placement is the loss minimum, not the first tolerable point (Pass 151).**
+Passes 121–130 place at the highest probe under `loss_bad_milli`, then verify
+and step down only while loss exceeds `loss_ok_milli` — so the descent stops at
+the *first* acceptable reading. That assumed loss falls monotonically with power
+up to a wall. On a compressing PA it does not: the minimum is **interior**, and
+"highest power still under a threshold" and "lowest loss" are different points.
+Measured on the craft's 8822EU at fixed MCS 5 — 0 dB: 19permille, −2 dB:
+6permille, −4 dB: 2permille, −6 dB: 1permille. The old rule is benign there only
+by arithmetic accident, because 19 > `loss_ok_milli` forces exactly one 4 dB
+step; at the finer step this section now requires it would stop at −2 dB and
+take **3× the achievable loss while reporting success**. Raising measurement
+resolution must not degrade the result.
+
+So the verify phase **descends while loss keeps improving** and stops when a
+step buys nothing, bounded by the existing `verify_descent_budget` and the
+window floor. The first verify always trials one step down — that trial is the
+mechanism, not an optimisation. The descent's direction of travel is toward the
+safe end, so neither phase can strand a probe above the window top.
+
+**The placement is the BEST reading of the verify walk (Pass 152)**, which is
+usually a power the seek has already stepped past; the actuator is walked back
+up to it. Placing at the previous reading was right only while each step
+improved, and wrong whenever *nothing* was acceptable: the recovery clause then
+descended past its own best and placed wherever the budget happened to run out.
+Measured on the ground's uplink at 10 m — verify read 30, 25, 20, then
+45permille — it placed the 45 and failed the rung, having measured the 20 three
+dwells earlier.
+
+This applies on **both** backends. The compression knee is a property of a power
+amplifier, not of devourer, and §10.6/§10.7 deliberately share one seek rather
+than growing a second, differently-buggy copy. A curve authored before Pass 151
+is not invalidated — it is simply a placement under the older rule, and is
+replaced on the next run.
 
 ### 10.7 Ground-uplink TX calibration symmetry (Pass 125; 8 rungs Pass 131)
 
@@ -2601,6 +2682,50 @@ structurally the same loop §10.6 already runs, and deliberately so. Seed
 backstop, bounded verify descents, and hard cap. A probe dwell is a burst of
 **100 probes**, verification **400**. Seed loss thresholds remain
 `loss_ok_milli=15` and `loss_bad_milli=50`.
+
+**The walls are relative to the at-rest loss floor (Pass 152).**
+`loss_ok_milli` and `loss_bad_milli` are **margins above a measured baseline**
+here, not absolute bars. §10.7 injects its probes into a medium the craft is
+saturating with video, so some fraction of LINK_REPORTs is lost to contention
+regardless of TX power. On the fleet that fraction was measured well above the
+15permille absolute seed, which put the acceptance gate *below* the link's own
+floor: no power could pass it, every rung read `verify_failed`, and §10.7 could
+not have succeeded at any distance. The one artifact it had ever produced
+placed all eight rungs at 108 with no bracket anywhere — the Pass 134
+starved-feedback signature, not a measurement.
+
+The floor is sampled over a rolling window of **ordinary operation** and
+**only while no sweep is running** — the same rule and the same reason as
+§10.6's Pass 134 report-health precondition: once the sweep starts, elevated
+loss is the measurement, and folding it back into the baseline would chase its
+own tail. A start with no floor yet measured is refused rather than judged
+against an absolute bar. On a quiet link the floor is ~0 and the behaviour is
+identical to the absolute seeds, so this is a shift of origin rather than a
+loosening.
+
+> **No characteristic value is given here on purpose, and the estimator's
+> resolution is an OPEN QUESTION.** Field readings of the same link at fixed
+> power and fixed geometry ranged from 16 to 99permille, and a controlled run
+> showed that spread to be almost entirely binomial sampling noise: 21 windows
+> of n=150 reports gave sd 23.3permille against a predicted 22.1permille. The
+> window is therefore a **sample-count** gate (`min_samples`), not a clock —
+> but the counts §10.7 can reach may still be too small to rank power rungs at
+> all. Separating a 20permille difference at an 80permille baseline needs
+> n≈1500 per dwell, roughly 7.5x the Pass 132 verify burst, and at report
+> cadence that is minutes per dwell. Whether report-loss is the right observable
+> for this section, or whether it needs dedicated probe traffic, is NOT settled
+> by this pass. Treat any floor number quoted in the review log as an
+> observation under its own n, never as a property of the link.
+
+**Both §10.6 Pass 151 rules apply here unchanged**, because both live in the
+shared seek: the placement is the loss minimum rather than the first tolerable
+point, and on a **relative** ground backend the window and actuator are the
+offset-space ones derived from the uplink adapter's §10.5 keys. A ground on
+kernel-monitor — every ground in the fleet today — keeps absolute qdb end to
+end. The space is chosen once, from the air backend kind, and the sweep's
+*measurement* and its *actuator* move together: a run that measures in one space
+and commands in the other places `108 + 84 = 192` qdb, which is how this was
+found (Pass 150 review, second round).
 
 Counts are **sample gates, not timers**, and since Pass 132 the ground sizes
 the sample itself: a dwell takes as long as it takes to send its burst, and
@@ -3306,7 +3431,7 @@ everything below is behaviour.
 | `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
 | `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the loop is blind without LINK_REPORTs). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen — video quality degrades during; the operator chooses the moment (recommended: near-bench 2–10 m separation, §10.6 Pass 121) |
 | `0x09` | `MTU_TIER` | 0=Default, 1=Medium, 2=High | Requests the §9.3a global packet-budget tier. The craft accepts only when the requested budget is ≤ the minimum capability of every active craft TX adapter; otherwise it consumes the nonce and echoes `REJECTED` (no silent clamp). Acceptance commits at the next frame/block boundary. Unlike the other commands, binding release resets this state to Default, preventing an absent owner's jumbo choice from silently governing a future receiver fleet |
-| `0x0A` | `TX_POWER` | preset index 0..4 | Selects the node's §10.3 power **ceiling** from `adapters[].power_presets_qdb` (§15.2) — the baseline the Pass 134 per-rung mask is derived from, so one choice moves the whole tapered curve and the calibrated per-rung *shape* is preserved. This is deliberately NOT the §10.5 override latch, which is rung-agnostic by construction and would flatten a curve whose whole point is that MCS0 and MCS7 want different power. Applying a tier sets the runtime ceiling on the §10.4 resolve, the §10.5 clamp, and a future §10.6/§10.7 sweep, then forces one re-resolve at the committed operating point. **A tier can only ever LOWER power** (operator ruling): every preset is clamped at config load to that adapter's boot `max_power_qdb`, so §10.3 remains the operator's hard ceiling and no runtime path can raise power past it. `REJECTED` when no `role:"tx"` adapter carries a preset list, `arg` is past its length, or a §10.6 calibration is running (Pass 136 — the run owns the actuator). On a node with no curve and no artifact the tier is accepted and recorded but **moves nothing** — per §10.3 the ceiling binds only where a number of ours reaches the actuator. Craft-session volatile like the rest of §11.7; unlike `0x09` MTU_TIER it is **not** reset on binding release, because a tier only lowers power, so a departed owner's choice is never the hazardous direction and resetting it would move power mid-flight |
+| `0x0A` | `TX_POWER` | preset index 0..4 | Selects the node's §10.3 power **ceiling** from `adapters[].power_presets_qdb` (§15.2) — the baseline the Pass 134 per-rung mask is derived from, so one choice moves the whole tapered curve and the calibrated per-rung *shape* is preserved. This is deliberately NOT the §10.5 override latch, which is rung-agnostic by construction and would flatten a curve whose whole point is that MCS0 and MCS7 want different power. Applying a tier sets the runtime ceiling on the §10.4 resolve, the §10.5 clamp, and a future §10.6/§10.7 sweep, then forces one re-resolve at the committed operating point. **A tier can only ever LOWER power** (operator ruling): every preset is clamped at config load to that adapter's boot `max_power_qdb`, so §10.3 remains the operator's hard ceiling and no runtime path can raise power past it. `REJECTED` when no `role:"tx"` adapter carries a preset list, `arg` is past its length, a §10.6 calibration is running (Pass 136 — the run owns the actuator), or **the air backend is relative** (Pass 151): `power_presets_qdb` are absolute qdb and there is no offset-space tier, so applying one would install a 60..108 preset as the clamp on an offset resolve — replacing the §10.5 bound with a number 15..27 dB above it while §15.3 reported the tier effective. Tiers are re-based with the rest of §10.5. On a node with no curve and no artifact the tier is accepted and recorded but **moves nothing** — per §10.3 the ceiling binds only where a number of ours reaches the actuator. Craft-session volatile like the rest of §11.7; unlike `0x09` MTU_TIER it is **not** reset on binding release, because a tier only lowers power, so a departed owner's choice is never the hazardous direction and resetting it would move power mid-flight |
 | `0x0B`–`0x1F` | *reserved* | — | not specified |
 
 **v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
@@ -4207,6 +4332,12 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   are retired and ignored. `max_qdb` is the *flat* bound; the sweep's actual
   per-rung ceiling is it narrowed by the adapter's §10.3 `max_power_qdb` and
   tapered by the §9.3 row's `tx_power_level` (Pass 134).
+  `offset_seek_step_qdb` (**8** = 2 dB, Pass 151) is the step used when the air
+  backend is relative (§10.5), where `min_qdb`/`max_qdb` do not apply at all:
+  the window is derived per-adapter from `power_offset_qdb` and
+  `power_offset_max_qdb`. It exists because that window is 24 qdb by default and
+  `seek_step_qdb` is 16 — two probes is not a measurement. On an absolute
+  backend the key is parsed and ignored.
   Dwells are short by design: the live video IS the measurement traffic
   (thousands of loss samples per second), so a dwell needs only TXAGC
   settle plus a couple of report windows — a full 8-rung run is ~2 min.

@@ -894,6 +894,25 @@ int main() {
           "policy":{"calibration":{"seek_step_qdb":8}}})");
         CHECK(bool(ok) && ok.value->policy.calibration.seek_step_qdb == 8);
     }
+    // §10.6 (Pass 151): the relative-backend step. Bounded on BOTH sides —
+    // under 1 dB is below the actuator's resolution and just burns dwells,
+    // and over 6 dB leaves the default 24 qdb window with two probes, which
+    // is the condition the key exists to prevent.
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"offset_seek_step_qdb":2}}})",
+        "offset_seek_step_qdb must be 4..24");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"offset_seek_step_qdb":32}}})",
+        "offset_seek_step_qdb must be 4..24");
+    {
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
+        CHECK(bool(d) &&
+              d.value->policy.calibration.offset_seek_step_qdb == 8);
+        auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "policy":{"calibration":{"offset_seek_step_qdb":4}}})");
+        CHECK(bool(ok) &&
+              ok.value->policy.calibration.offset_seek_step_qdb == 4);
+    }
 
     // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------
     {

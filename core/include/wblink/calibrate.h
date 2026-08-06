@@ -94,6 +94,12 @@ class PowerSeek {
         has_bad_ = false;
         first_bad_rssi_ = 0;
         first_bad_qdb_ = 0;
+        have_best_ = false;
+        best_loss_ = 0;
+        best_rssi_ = 0.0;
+        best_qdb_ = p_.min_qdb;
+        placed_loss_ = 0;
+        placed_rssi_ = 0.0;
         return {SeekStep::Kind::kProbe, qdb_, true, nullptr};
     }
 
@@ -149,6 +155,10 @@ class PowerSeek {
     int8_t last_clean_rssi() const { return last_clean_rssi_; }
     bool has_bad() const { return has_bad_; }
     int8_t first_bad_rssi() const { return first_bad_rssi_; }
+    // Valid once on_dwell() has returned kDone: the evidence belonging to the
+    // PLACED power, which after a Pass 151 step-back is not the last dwell's.
+    uint16_t placed_loss_milli() const { return placed_loss_; }
+    double placed_rssi() const { return placed_rssi_; }
     // The bracket in the POWER domain, for §10.7's artifact. Same rule as the
     // RSSI bracket: only a bad probe ABOVE a clean one is overload evidence.
     int32_t first_bad_qdb() const { return first_bad_qdb_; }
@@ -174,18 +184,61 @@ class PowerSeek {
     }
 
     SeekStep verify_(double rssi, uint16_t loss) {
-        // §10.6 addendum 2: near-cliff instability passes a short probe dwell
-        // and fails only under sustained exposure (measured: a placement that
-        // probed clean verified at 942permille), so loss_ok is enforced here
-        // and a failing placement steps down and re-verifies, bounded.
-        if (loss > p_.loss_ok_milli &&
-            verify_descents_ < p_.verify_descent_budget && qdb_ > p_.min_qdb) {
+        // Two independent reasons to step down, and they compose (Pass 151).
+        //
+        // §10.6 addendum 2 — RECOVERY: near-cliff instability passes a short
+        // probe dwell and fails only under sustained exposure (measured: a
+        // placement that probed clean verified at 942permille), so loss_ok is
+        // enforced here and a failing placement steps down regardless of
+        // whether the step improved anything.
+        //
+        // §10.6 Pass 151 — MINIMUM HUNT: on a compressing PA the loss minimum
+        // is INTERIOR, so "the first acceptable reading" and "the best
+        // reading" are different points and the old rule stopped at the
+        // former. Measured on the craft's 8822EU at MCS 5 — 0 dB: 19permille,
+        // -2 dB: 6permille, -4 dB: 2permille, -6 dB: 1permille. The only way
+        // to know a lower power is better is to try one, so the first verify
+        // always trials a step down.
+        // The BEST reading of this verify walk is what the rung places at.
+        // Tracking only the previous reading was wrong whenever nothing was
+        // acceptable: the recovery descent then walked straight past its own
+        // best and placed wherever the budget ran out. Measured on the
+        // ground's uplink at 10 m — verify read 30, 25, 20, then 45permille —
+        // it placed the 45 and failed the rung, having measured the 20 three
+        // dwells earlier. A plain have/value pair rather than std::optional:
+        // GCC's -Wmaybe-uninitialized cannot see through the optional across
+        // inlining and warns on the ARM cross-build.
+        const bool is_best = !have_best_ || loss < best_loss_;
+        if (is_best) {
+            have_best_ = true;
+            best_loss_ = loss;
+            best_rssi_ = rssi;
+            best_qdb_ = qdb_;
+        }
+
+        const bool unacceptable = loss > p_.loss_ok_milli;
+        const bool can_descend =
+            verify_descents_ < p_.verify_descent_budget && qdb_ > p_.min_qdb;
+
+        // Descend for either reason, and they compose: RECOVERY while the
+        // reading is not yet acceptable (§10.6 addendum 2), and the MINIMUM
+        // HUNT while each step is still improving on the best seen. The first
+        // verify is always a best, so the trial step is structural.
+        if ((unacceptable || is_best) && can_descend) {
             if (loss > p_.loss_bad_milli) note_bad_(rssi);
             ++verify_descents_;
             qdb_ = std::max(p_.min_qdb, qdb_ - p_.seek_step_qdb);
             return {SeekStep::Kind::kVerify, qdb_, true, nullptr};
         }
-        return {SeekStep::Kind::kDone, qdb_, false, nullptr};
+        // Place at the best reading, which is usually a power we have already
+        // stepped past — power_changed walks the actuator back up to it. It
+        // may still be unacceptable if nothing was: §10.6 records that floor,
+        // §10.7 refuses it (both unchanged).
+        placed_loss_ = best_loss_;
+        placed_rssi_ = best_rssi_;
+        const bool moved = qdb_ != best_qdb_;
+        qdb_ = best_qdb_;
+        return {SeekStep::Kind::kDone, qdb_, moved, nullptr};
     }
 
     SeekParams p_;
@@ -197,6 +250,16 @@ class PowerSeek {
     bool has_bad_ = false;
     int8_t first_bad_rssi_ = 0;
     int32_t first_bad_qdb_ = 0;
+    // Pass 151: the verify phase hunts the loss minimum, so kDone may place at
+    // a point the seek has already stepped past. The caller must record THAT
+    // point's evidence, not the last dwell's, or the artifact reports a
+    // placement paired with a different power's loss and RSSI.
+    bool have_best_ = false;
+    uint16_t best_loss_ = 0;
+    double best_rssi_ = 0.0;
+    int32_t best_qdb_ = 0;
+    uint16_t placed_loss_ = 0;
+    double placed_rssi_ = 0.0;
 };
 
 struct CalibrateParams {
@@ -214,6 +277,17 @@ struct CalibrateParams {
     // The §9.3 table's tx_power_level per MCS — the authored curve is the
     // level-4 baseline, so placements are compensated per §10.2.
     std::array<uint8_t, 8> levels{4, 4, 3, 3, 2, 2, 1, 1};
+    // §10.6 (Pass 151) whether `levels` also narrows the per-rung sweep
+    // CEILING, as distinct from encoding the §10.2 curve. False in offset
+    // space, for two reasons. The taper exists so a sweep cannot walk a
+    // high-order rung to full power looking for a wall the PA reaches first —
+    // but a relative backend's offset is measured against the efuse
+    // **per-rate** table, which already applies exactly that backoff, so
+    // taking it again double-counts. And it does not merely shade the result:
+    // against the default 24 qdb window a level-1 rung tapers to min == max
+    // and cannot sweep at all. The curve compensation below is unaffected —
+    // it is an encoding, and round-trips in either space.
+    bool taper_rung_ceiling = true;
 };
 
 // §10.3 (Pass 134) per-rung sweep ceiling: the flat sanity ceiling tapered by
@@ -222,6 +296,7 @@ struct CalibrateParams {
 // table both ends already agree on by hash — no new key, no new wire. The
 // caller has already folded the adapter's §10.3 max_power_qdb into max_qdb.
 inline int32_t rung_max_qdb(const CalibrateParams& p, size_t rung) {
+    if (!p.taper_rung_ceiling) return p.max_qdb;
     const int32_t lvl = rung < p.levels.size()
                             ? static_cast<int32_t>(p.levels[rung])
                             : kPowerLevelBaseline;
@@ -385,10 +460,13 @@ class Calibrator {
         const bool was_verify = seek_.in_verify();
         const SeekStep s = seek_.on_dwell(v, rssi, loss);
         if (was_verify && s.kind == SeekStep::Kind::kDone) {
+            // Pass 151: read the placed point's own evidence from the seek.
+            // `loss`/`rssi` here are the LAST dwell's, which after a
+            // minimum-hunt step-back belongs to a different power.
             artifact_.placement_qdb[rung_] = s.qdb;
             artifact_.placement_rssi[rung_] =
-                static_cast<int8_t>(std::lround(rssi));
-            artifact_.placement_loss_milli[rung_] = loss;
+                static_cast<int8_t>(std::lround(seek_.placed_rssi()));
+            artifact_.placement_loss_milli[rung_] = seek_.placed_loss_milli();
             placement_qdb_ = s.qdb;
             sync_ceiling();
             return next_rung(a, now_ms);

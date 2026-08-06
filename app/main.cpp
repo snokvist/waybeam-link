@@ -2599,14 +2599,19 @@ struct TxCore {
                 if (arg > 1) return false;
                 if (!calibrator_) return false;
                 if (arg == 1) {
-                    if (!apply_power) return false;  // udp: logged intent only
-                    // §10.5 (Pass 150): the §10.6 sweep drives ABSOLUTE qdb
-                    // rungs (up to max_power_qdb, 108 on both flying configs).
-                    // On a relative backend those are offsets — the sweep would
-                    // walk +1 dB to +27 dB of boost, RF-triggerable, with no
-                    // downstream clamp until the chip's own ±126 qdb rail.
-                    // Refuse until §10.6 is re-based into offset space.
-                    if (backend_relative_) return false;
+                    // §10.6 (Pass 151): whichever actuator this backend's
+                    // space uses must exist. On udp both are absent and the
+                    // run stays a logged intent, so it is refused as before.
+                    if (backend_relative_) {
+                        // The Pass 150 blanket refusal is lifted: the sweep now
+                        // runs in offset space, bounded by the §10.5 band. A
+                        // config that leaves no band (bound at or under the
+                        // safe offset) still has nothing to sweep.
+                        if (!apply_power_offset) return false;
+                        if (!offset_window()) return false;
+                    } else if (!apply_power) {
+                        return false;
+                    }
                     if (report_gate_.latched_originator() == 0) return false;
                     // §10.6 (Pass 134): feedback health, measured on the link
                     // AT REST. §10.6 scores every dwell from §3.5 reports, so
@@ -2666,7 +2671,6 @@ struct TxCore {
         calib_min_report_hz_ = static_cast<uint32_t>(c.calib_min_report_hz);
         calib_policy_ = c;
         CalibrateParams p = calib_params_from(c);
-        if (max_power_qdb) p.max_qdb = std::min(p.max_qdb, *max_power_qdb);
         if (table_ != nullptr) {
             for (const Profile& pr : table_->profiles) {
                 if (pr.mcs < p.levels.size()) {
@@ -2674,7 +2678,43 @@ struct TxCore {
                 }
             }
         }
+        if (const auto w = offset_window()) {
+            // §10.6 (Pass 151): offset space. min_qdb/max_qdb and the §10.3
+            // absolute ceiling do not apply here at all — the §10.5 band IS
+            // the window, so the sweep cannot place hotter than
+            // power_offset_max_qdb nor colder than the safe offset it began
+            // at, and it climbs from the safe end as every live-link sweep
+            // must. `levels` still encodes the §10.2 curve; it just stops
+            // narrowing the ceiling (see taper_rung_ceiling).
+            p.min_qdb = w->first;
+            p.max_qdb = w->second;
+            p.seek_step_qdb = c.offset_seek_step_qdb;
+            p.taper_rung_ceiling = false;
+        } else if (max_power_qdb) {
+            p.max_qdb = std::min(p.max_qdb, *max_power_qdb);
+        }
         calibrator_.emplace(p);
+    }
+
+    // §10.6 (Pass 151): the relative-backend sweep window, or nullopt on an
+    // absolute backend. One sweep drives every tx adapter, so the band must be
+    // safe for all of them: the top is the LOWEST §10.5 bound, and the bottom
+    // is the COLDEST safe offset — starting at the warmest would command an
+    // adapter above its own boot offset, which is the state Pass 150 exists to
+    // forbid.
+    std::optional<std::pair<int32_t, int32_t>> offset_window() const {
+        if (!backend_relative_ || power_targets_.empty()) return std::nullopt;
+        int32_t lo = power_targets_.front().offset_qdb;
+        int32_t hi = power_targets_.front().offset_max_qdb;
+        for (const PowerTarget& t : power_targets_) {
+            lo = std::min(lo, t.offset_qdb);
+            hi = std::min(hi, t.offset_max_qdb);
+        }
+        // A config whose bound sits at or under its own safe offset leaves no
+        // band to sweep. Refusing here keeps §11.7 CALIBRATE honest (REJECTED)
+        // rather than running a one-point sweep and calling it a curve.
+        if (hi <= lo) return std::nullopt;
+        return std::make_pair(lo, hi);
     }
     // §10.6 (Pass 134) accepted-report cadence over the last closed window.
     // A whole window rather than an instantaneous gap, because the §7.2
@@ -2908,18 +2948,23 @@ struct TxCore {
     // §10.4 curve resolve for the committed operating point, through the
     // change-detection cache (apply only when the resolved value moves).
     void resolve_and_apply_power(uint8_t mcs, uint8_t level) {
-        // §10.5 (Pass 150): the §10.2 curve holds ABSOLUTE qdb. On a relative
-        // backend those numbers are offsets — a 108 qdb curve entry is +27 dB
-        // — so a single profile commit would silently undo the boot offset and
-        // reinstate the overdrive this pass exists to remove. Refuse until the
-        // curve is re-based into offset space with §10.6.
-        if (backend_relative_ && !power_.empty()) {
+        // §10.5 (Pass 150) / §10.6 (Pass 151): a curve's numbers only mean
+        // something in a known space. An offset-space curve is one THIS
+        // backend's own calibration authored — the Pass 146 fingerprint is
+        // backend-scoped, so a foreign one cannot load — and it actuates. An
+        // explicit config `power_map` is not backend-scoped and carries no
+        // space at all, so on a relative backend it stays refused: a 108 qdb
+        // entry there is +27 dB, not 27 dBm, and one profile commit would
+        // silently undo the boot offset.
+        if (!power_.empty() && !curve_actuates()) {
             if (!warned_curve_refused_) {
                 warned_curve_refused_ = true;
                 std::fprintf(stderr,
                              "power: §10.2 curve REFUSED on a relative backend "
-                             "(§10.5 Pass 150) — power_map holds absolute qdb; "
-                             "running on the §10.5 boot offset instead\n");
+                             "(§10.5 Pass 150) — config power_map holds "
+                             "absolute qdb; running on the §10.5 boot offset "
+                             "instead. Run §10.6 calibration to author an "
+                             "offset-space curve.\n");
             }
             return;
         }
@@ -2930,7 +2975,9 @@ struct TxCore {
                 // §10.5: cache only what the backend accepted — a failed
                 // write retries at the next commit/re-assert.
                 bool ok = true;
-                if (apply_power) {
+                if (backend_relative_ && apply_power_offset) {
+                    ok = apply_power_offset(pa.adapter_idx, *qdb);
+                } else if (!backend_relative_ && apply_power) {
                     ok = apply_power(pa.adapter_idx, *qdb);
                 } else {
                     std::fprintf(stderr, "power: %s mcs=%u level=%u -> %d qdb\n",
@@ -2953,6 +3000,15 @@ struct TxCore {
         // would be left at whatever power the abandoned sweep last commanded.
         // §10.5 latching takes the same position (the run yields first).
         if (calibrating()) return false;
+        // §10.3/§11.7 0x0A (Pass 151): `power_presets_qdb` are ABSOLUTE qdb
+        // and there is no offset-space tier. Applying one on a relative
+        // backend replaces the §10.5 offset bound (0) with an absolute preset
+        // (60..108) as the resolve clamp — removing the one guard that keeps a
+        // resolved curve inside the window — while §15.3 reported the tier
+        // effective. Reachable TODAY: the flying craft config carries
+        // `power_presets_qdb: [60,76,84,92,108]` and runs devourer. REJECTED
+        // until tiers are re-based with the rest of §10.5.
+        if (backend_relative_) return false;
         // ALL-OR-NOTHING. Validate every configured list before touching any
         // ceiling: applying the tier to one tx adapter, skipping another whose
         // list is shorter, and still reporting success would leave two
@@ -3033,10 +3089,19 @@ struct TxCore {
     // ceiling — set_power_override does not read t.ceiling at all — so a tier
     // cannot claim to be effective on the strength of one.
     bool power_tier_effective() const {
-        // A curve that resolve_and_apply_power() refuses (relative backend)
-        // reaches no hardware, so reporting the tier effective would be the
-        // same lie Pass 136 removed for the latch.
-        return has_power_curve() && !backend_relative_;
+        // A curve that resolve_and_apply_power() refuses reaches no hardware,
+        // so reporting the tier effective would be the same lie Pass 136
+        // removed for the latch — and on a relative backend a tier is REJECTED
+        // outright (Pass 151), so nothing there can be effective either.
+        return curve_actuates() && !backend_relative_;
+    }
+
+    // The one predicate for "resolve_and_apply_power() will reach hardware".
+    // Pass 150 spelled this test out at three call sites and they drifted
+    // apart within a single pass; there is one copy now.
+    bool curve_actuates() const {
+        return has_power_curve() &&
+               (!backend_relative_ || curve_is_offset_space_);
     }
 
     // §10.5 (Pass 150) override-latch: latch a RELATIVE offset on every tx
@@ -3197,6 +3262,10 @@ struct TxCore {
     CalibrationPolicy calib_policy_;              // for a tier re-init
     std::optional<int32_t> power_override_;       // §10.5 latch (volatile)
     bool backend_relative_ = false;  // §10.5 Pass 150
+    // §10.6 (Pass 151): set when the loaded curve was authored by THIS
+    // backend's calibration, so its numbers are in this backend's space. A
+    // config power_map never sets it — it is not backend-scoped.
+    bool curve_is_offset_space_ = false;
     bool warned_curve_refused_ = false;
     std::optional<uint8_t> last_commit_mcs_;      // §10.5 clear-restore point
     uint8_t last_commit_level_ = 4;
@@ -3245,7 +3314,7 @@ struct TxCore {
                 // past it, so "skip the resolve" alone strands the last
                 // probe value on the hardware).
                 set_power_override(*power_override_);
-            } else if (has_power_curve() && !backend_relative_) {
+            } else if (curve_actuates()) {
                 if (last_commit_mcs_) {
                     resolve_and_apply_power(*last_commit_mcs_,
                                             last_commit_level_);
@@ -3294,6 +3363,19 @@ struct TxCore {
             // §10.6: every tx adapter, curve or not (power_targets_) — the
             // run exists precisely because no curve may be loaded yet.
             for (const PowerTarget& t : power_targets_) {
+                if (backend_relative_) {
+                    // §10.6 (Pass 151): the sweep is in offset space, so it
+                    // drives the SAME actuator §10.5 boots this node with,
+                    // bounded by the same key. Belt and braces on the clamp:
+                    // offset_window() already caps the seek, but a probe is
+                    // the one thing in the process that deliberately walks
+                    // toward a wall.
+                    const int32_t v = std::min(*a.set_qdb, t.offset_max_qdb);
+                    if (apply_power_offset) {
+                        (void)apply_power_offset(t.adapter_idx, v);
+                    }
+                    continue;
+                }
                 const int32_t v = t.ceiling
                                       ? std::min(*a.set_qdb, *t.ceiling)
                                       : *a.set_qdb;
@@ -3311,9 +3393,19 @@ struct TxCore {
         power_.clear();
         for (const PowerTarget& t : power_targets_) {
             power_.push_back(
-                PowerAdapter{t.name, t.adapter_idx, c, t.ceiling,
+                PowerAdapter{t.name, t.adapter_idx, c,
+                             // §10.6 (Pass 151): in offset space the §10.5
+                             // bound is the ceiling; the §10.3 absolute one
+                             // is not a comparable quantity.
+                             backend_relative_
+                                 ? std::optional<int32_t>(t.offset_max_qdb)
+                                 : t.ceiling,
                              t.presets_qdb, std::nullopt});
         }
+        // An installed curve came from THIS backend's artifact (the Pass 146
+        // fingerprint is backend-scoped), so on a relative backend it holds
+        // offsets and the §10.4 resolve may actuate it.
+        curve_is_offset_space_ = backend_relative_;
     }
     bool calibrating() const {
         return calibrator_ &&
@@ -4181,6 +4273,16 @@ int run_tx(const Loaded& l) {
             break;
         }
     }
+    // §10.5 (Pass 150): ONLY devourer's lever is relative. NOT is_radio() —
+    // that is is_rf(), which kernel-monitor also answers true to, and gating on
+    // it refused the §10.2 curve and §10.6 calibration on the one backend where
+    // absolute qdb is CORRECT, making calibration unreachable fleet-wide.
+    //
+    // This must precede init_calibration: §10.6 (Pass 151) derives its sweep
+    // window from the backend's space, so a flag set afterwards would build an
+    // absolute-space calibrator on a relative backend — the exact +27 dB
+    // hazard Pass 150 refused the run to avoid.
+    tx.set_backend_relative(l.cfg.air.kind == AirCfg::Kind::kRadio);
     // §10.6 (Pass 120): craft-resident calibration — engine seeds, artifact
     // persistence, and the boot auto-load with the fingerprint gate. The
     // §10.3 ceiling (Pass 134) comes from the same adapter the sweep drives.
@@ -4226,7 +4328,22 @@ int run_tx(const Loaded& l) {
         stored) {
         const std::string ident =
             calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
-        if (stored.value->identity == ident) {
+        // §10.6 (Pass 151): the backend-scoped identity proves which BACKEND
+        // authored the artifact, not which SPACE — and on devourer those came
+        // apart exactly once, in the window before Pass 150 refused the run.
+        // Such an artifact holds absolute rungs (4..108) that would now be
+        // read as offsets, clamp onto the §10.5 bound, and park the node on
+        // the uncharacterised efuse default this pass exists to keep it off.
+        // A placement outside the live window is that artifact; refuse it the
+        // same way a fingerprint mismatch is refused.
+        const auto win = tx.offset_window();
+        bool space_ok = true;
+        if (win) {
+            for (const int32_t q : stored.value->artifact.placement_qdb) {
+                if (q < win->first || q > win->second) space_ok = false;
+            }
+        }
+        if (stored.value->identity == ident && space_ok) {
             // Explicit config power_map wins; the artifact fills the gap.
             if (!tx.has_power_curve()) {
                 tx.install_curve(stored.value->curve);
@@ -4239,8 +4356,10 @@ int run_tx(const Loaded& l) {
         } else {
             tx.calib_stale_ = true;  // §10.6: surface, never apply
             std::fprintf(stderr,
-                         "calibrate: STALE artifact (stored %s, live %s)\n",
-                         stored.value->identity.c_str(), ident.c_str());
+                         "calibrate: STALE artifact (stored %s, live %s%s)\n",
+                         stored.value->identity.c_str(), ident.c_str(),
+                         space_ok ? "" : ", placements outside the §10.5 "
+                                         "offset window — wrong power space");
         }
     }
     tx.estimate_airtime = [&](size_t bytes, bool include_pending,
@@ -4253,11 +4372,6 @@ int run_tx(const Loaded& l) {
     tx.apply_power_offset = [&](size_t idx, int32_t qdb) {
         return air.value->set_power_offset_qdb(idx, qdb);
     };
-    // §10.5 (Pass 150): ONLY devourer's lever is relative. NOT is_radio() —
-    // that is is_rf(), which kernel-monitor also answers true to, and gating on
-    // it refused the §10.2 curve and §10.6 calibration on the one backend where
-    // absolute qdb is CORRECT, making calibration unreachable fleet-wide.
-    tx.set_backend_relative(l.cfg.air.kind == AirCfg::Kind::kRadio);
     if (air.value->is_radio()) {
         tx.apply_mode = [&](uint8_t mcs, bool sgi) {
             air.value->set_tx_mode(mcs, sgi);
@@ -5089,8 +5203,70 @@ int run_rx(const Loaded& l) {
     // §10.3/§10.5/§10.7/§11.7 0x0A: one owner for the uplink's power, holding
     // the ceiling a tier moves and the single precedence path every apply site
     // runs through. Its actuators are wired below, once the radio exists.
+    // §10.7 (Pass 152): the at-rest uplink loss floor, over a rolling window
+    // of ORDINARY operation, so the sweep's walls can be defined relative to
+    // it. Measured on the fleet at 10 m: a stable 25permille floor against the
+    // 15permille absolute loss_ok seed — the acceptance gate sat BELOW the
+    // link's own floor, so no TX power could pass it and §10.7 could not
+    // succeed at any distance. The uplink shares the medium with the craft's
+    // video, so a few percent of reports collide regardless of power; that is
+    // the baseline to measure degradation FROM, not a quality bar to clear.
+    //
+    // Sampled outside the run, like §10.6's Pass 134 report-health
+    // precondition and for the same reason: once the sweep starts, elevated
+    // loss is the measurement.
+    struct UplinkFloor {
+        // The window is a SAMPLE-COUNT gate, not a clock. Reports arrive at
+        // ~10 Hz, so the first cut at 4 s closed on n=40 — where one lost
+        // report is 25permille and the estimator's own sigma (25permille) is
+        // the size of the floor it is estimating. Measured live: a 4 s window
+        // read 50permille against a 40 s window's 24.8 +/- 7.7, and the
+        // inflated floor admitted a rung at 45permille that the true floor
+        // would have refused. n=300 puts sigma near 9permille at a
+        // 25permille floor, which is the resolution the walls need.
+        uint32_t min_samples = 300;
+        uint32_t max_win_ms = 60000;  // give up and re-mark on a dead link
+        uint64_t mark_ms = 0;
+        uint32_t mark_sent = 0;
+        uint32_t mark_recv = 0;
+        bool have = false;
+        uint16_t floor_milli = 0;
+        void sample(uint64_t now, uint32_t sent, uint32_t recv) {
+            if (mark_ms == 0 || sent < mark_sent || recv < mark_recv) {
+                mark_ms = now;  // first sample, or the craft's counters reset
+                mark_sent = sent;
+                mark_recv = recv;
+                return;
+            }
+            const uint32_t ds = sent - mark_sent;
+            if (ds < min_samples) {
+                if (now - mark_ms < max_win_ms) return;
+                mark_ms = now;  // link too quiet to estimate; start over
+                mark_sent = sent;
+                mark_recv = recv;
+                return;
+            }
+            const uint32_t dr = recv - mark_recv;
+            if (dr <= ds) {
+                floor_milli =
+                    static_cast<uint16_t>(1000ull * (ds - dr) / ds);
+                have = true;
+            }
+            mark_ms = now;
+            mark_sent = sent;
+            mark_recv = recv;
+        }
+    } ufloor;
     UplinkPower upwr;
     upwr.mcs = l.cfg.air.uplink_mcs;
+    // §10.5/§10.7 (Pass 151): the ground's power space, decided ONCE from the
+    // backend kind and read by the §10.7 sweep window, its actuator, and the
+    // owner's apply alike. Pass 150's second review found this half-converted
+    // — the sweep measured absolute while the applier commanded relative, so
+    // an 84 qdb placement became 108+84 = 192 — so measurement and actuation
+    // move together here or not at all. Every ground in the fleet is on
+    // kernel-monitor today, where this is false and nothing changes.
+    const bool uplink_relative = l.cfg.air.kind == AirCfg::Kind::kRadio;
     if (uplink_adapter != nullptr) {
         upwr.ceiling_qdb = uplink_adapter->max_power_qdb;
         upwr.presets_qdb = uplink_adapter->power_presets_qdb;
@@ -5138,11 +5314,22 @@ int run_rx(const Loaded& l) {
     {
         const CalibrationPolicy& cp = l.cfg.policy.calibration;
         ucal_params.seek = Calibrator::seek_params(calib_params_from(cp));
-        // §10.3 (Pass 134): the adapter's opt-in sanity ceiling bounds the
-        // sweep, not only the §10.7 apply below. The ground half carries the
-        // stronger case for it — this placement auto-applies at boot with no
-        // operator between the measurement and the actuator.
-        if (upwr.ceiling_qdb) {
+        if (uplink_relative && uplink_adapter != nullptr &&
+            uplink_adapter->power_offset_max_qdb >
+                uplink_adapter->power_offset_qdb) {
+            // §10.7 (Pass 151): offset space, derived from the same §10.5 keys
+            // that boot this uplink — so the sweep climbs from the safe offset
+            // and stops at the bound. The §10.3 absolute ceiling below is not
+            // a comparable quantity here and is deliberately not folded in.
+            ucal_params.seek.min_qdb = uplink_adapter->power_offset_qdb;
+            ucal_params.seek.max_qdb = uplink_adapter->power_offset_max_qdb;
+            ucal_params.seek.seek_step_qdb = cp.offset_seek_step_qdb;
+            ucal_params.taper_rung_ceiling = false;
+        } else if (upwr.ceiling_qdb) {
+            // §10.3 (Pass 134): the adapter's opt-in sanity ceiling bounds the
+            // sweep, not only the §10.7 apply below. The ground half carries
+            // the stronger case for it — this placement auto-applies at boot
+            // with no operator between the measurement and the actuator.
             ucal_params.seek.max_qdb =
                 std::min(ucal_params.seek.max_qdb, *upwr.ceiling_qdb);
         }
@@ -5329,13 +5516,16 @@ int run_rx(const Loaded& l) {
     // absolute on kernel-monitor and an OFFSET on devourer — the divergence
     // this pass removes — and the ground is the half of the fleet that still
     // transmits on monitor today.
-    // §10.5/§10.7 (Pass 150 review): the uplink sweep probes through the
-    // ABSOLUTE actuator (set_power_qdb), so every value the owner precedence
-    // can produce — artifact placement, power_map resolve, latch — is an
-    // absolute qdb. Applying those through the relative actuator turned an
-    // 84 qdb placement into 108+84 = 192 qdb. Measurement and application must
-    // share a space: this stays absolute until §10.7 is re-based with §10.6.
+    // §10.5/§10.7 (Pass 150 review, re-based Pass 151): every value the owner
+    // precedence can produce — artifact placement, power_map resolve, latch —
+    // is in whatever space the §10.7 sweep measured in, so the applier reads
+    // the same `uplink_relative` the sweep window did. Converting one without
+    // the other turned an 84 qdb placement into 108+84 = 192 qdb.
     upwr.apply_qdb = [&](int32_t q) {
+        if (uplink_relative) {
+            (void)air.value->set_power_offset_qdb(uplink_idx, q);
+            return;
+        }
         (void)air.value->set_power_qdb(uplink_idx, q);
     };
     // "auto" must land on the configured safe offset, never the backend
@@ -6189,11 +6379,20 @@ int run_rx(const Loaded& l) {
                 if (qdb < -511 || qdb > 511) {
                     return "qdb out of range (-511..511)";
                 }
-                // NOT bounded by power_offset_max_qdb: on this node the
-                // latch flows into UplinkPower's ABSOLUTE actuator (see
-                // apply_qdb), so a relative bound would reject every sane
-                // absolute. The ground's §10.5 conversion is deferred with the
-                // §10.7 re-base — recorded rather than half-applied.
+                // §10.5 (Pass 151): the bound follows the space, because the
+                // latch flows into UplinkPower::apply_qdb — which is the
+                // RELATIVE actuator once `uplink_relative`. Unbounded there, a
+                // plain `{"qdb":84}` becomes +21 dB of offset from REST, which
+                // is the hazard this whole conversion exists to remove. On an
+                // absolute ground (every ground in the fleet today) the value
+                // is an absolute qdb and a relative bound would reject every
+                // sane one, so it stays unbounded exactly as before.
+                if (uplink_relative && uplink_adapter != nullptr &&
+                    qdb > uplink_adapter->power_offset_max_qdb) {
+                    return "qdb exceeds power_offset_max_qdb on this "
+                           "role:\"tx\" adapter (§10.5); raise the bound to "
+                           "opt in";
+                }
                 upwr.override_qdb = qdb;
                 uplink_restore_actuators();
                 return "";
@@ -6421,9 +6620,32 @@ int run_rx(const Loaded& l) {
                 if (rx.craft_calibrating()) {
                     return "craft downlink calibration is running";
                 }
+                // §10.7 (Pass 152): the walls are the at-rest floor plus the
+                // configured margins. Without a floor the run would judge
+                // against an absolute bar that may sit below the link's own
+                // noise — the state that made every rung unreachable at 10 m —
+                // so refuse rather than measure against a number we know
+                // nothing about. Self-clearing within one window.
+                if (!ufloor.have) {
+                    return "uplink loss floor not measured yet — retry in a "
+                           "few seconds (§10.7)";
+                }
+                const uint16_t wall_ok = static_cast<uint16_t>(
+                    std::min(1000, ufloor.floor_milli +
+                                       l.cfg.policy.calibration.loss_ok_milli));
+                const uint16_t wall_bad = static_cast<uint16_t>(
+                    std::min(1000, ufloor.floor_milli +
+                                       l.cfg.policy.calibration.loss_bad_milli));
+                if (!uplink_cal.set_loss_walls(wall_ok, wall_bad)) {
+                    return "calibration already running";
+                }
                 if (!uplink_cal.start(now_ms(), rx.report_epoch())) {
                     return "calibration already running";
                 }
+                std::fprintf(stderr,
+                             "uplink-calib: at-rest floor %upermille -> walls "
+                             "ok=%u bad=%upermille\n",
+                             ufloor.floor_milli, wall_ok, wall_bad);
                 uplink_cal_craft = active_selection.originator;
                 if (both) calib_seq.start(now_ms());
                 std::fprintf(stderr, "uplink-calib: START mcs=%u%s\n",
@@ -6771,6 +6993,14 @@ int run_rx(const Loaded& l) {
         // §10.7 calibrator service. `restore` is single-shot and set on EVERY
         // terminal path, so this is the one place probe power is handed back
         // to the §10.7 owner — no exit can strand it.
+        // §10.7 (Pass 152): keep the at-rest floor current, but ONLY while no
+        // sweep is running — during a run the loss IS the measurement, and
+        // folding it back into the baseline would chase its own tail.
+        if (quality_gate.have() &&
+            uplink_cal.state() != CalibState::kRunning) {
+            const UplinkQuality& q = quality_gate.last();
+            ufloor.sample(now_ms(), q.last_report_epoch, q.reports_received);
+        }
         // Ticked UNCONDITIONALLY. tick() early-returns when the calibrator is
         // not running, but it drains the single-shot restore/artifact edges
         // first — and a terminal state set from OUTSIDE this loop (the REST
@@ -6794,7 +7024,16 @@ int run_rx(const Loaded& l) {
                 air.value->set_tx_mode(ua.set_rate->mcs, ua.set_rate->short_gi);
             }
             if (ua.set_qdb && uplink_adapter != nullptr) {
-                (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
+                // §10.7 (Pass 151): the probe drives the same actuator the
+                // window was derived against — see `uplink_relative`.
+                if (uplink_relative) {
+                    (void)air.value->set_power_offset_qdb(
+                        uplink_idx,
+                        std::min(*ua.set_qdb,
+                                 uplink_adapter->power_offset_max_qdb));
+                } else {
+                    (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
+                }
             }
             // §10.7 (Pass 132): the burst. 0 opens the drain window, so the
             // craft's counter settles before the dwell is scored.

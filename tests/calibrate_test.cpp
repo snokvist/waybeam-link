@@ -407,6 +407,133 @@ void test_no_clean_point() {
     CHECK(r.restores == 1);  // every exit restores, §10.6 R4
 }
 
+// §10.6 (Pass 151): the placement is the loss MINIMUM, not the first reading
+// under loss_ok_milli. This replays the craft's measured 8822EU compression
+// curve at MCS 5 — the real numbers behind the pass.
+void test_verify_places_at_loss_minimum() {
+    // Offset space: the §10.5 window, at the 2 dB step it forces.
+    SeekParams p;
+    p.min_qdb = -24;
+    p.max_qdb = 0;
+    p.seek_step_qdb = 8;
+    p.rssi_guard_dbm = 127;  // out of the way; the loss wall is the limiter
+
+    // Measured on the craft, post-diversity, fixed MCS 5.
+    auto measured = [](int32_t qdb) -> uint16_t {
+        if (qdb >= 0) return 19;
+        if (qdb >= -8) return 6;
+        if (qdb >= -16) return 2;
+        return 1;
+    };
+
+    PowerSeek s(p);
+    SeekStep st = s.begin();
+    int guard = 0;
+    while (st.kind != SeekStep::Kind::kDone &&
+           st.kind != SeekStep::Kind::kFailed && guard++ < 40) {
+        const uint16_t loss = measured(st.qdb);
+        st = s.on_dwell(loss > p.loss_bad_milli ? DwellVerdict::kBad
+                                                : DwellVerdict::kClean,
+                        -40, loss);
+    }
+    CHECK(st.kind == SeekStep::Kind::kDone);
+    // The ascent is clean the whole way (19permille < loss_bad 50), so it
+    // places at the top — and the verify hunt is what saves it. The OLD rule
+    // stopped at -8 qdb (6permille, the first reading under loss_ok 15); the
+    // minimum is -24.
+    CHECK(st.qdb == -24);
+    CHECK(s.placed_loss_milli() == 1);
+    // The seek must leave power where it placed it, not where it last probed.
+    CHECK(st.power_changed || st.qdb == -24);
+
+    // ...and it does NOT keep descending once a step stops paying. A flat
+    // channel places at the first verify, one step back up from the trial.
+    {
+        PowerSeek f(p);
+        SeekStep t = f.begin();
+        int g = 0;
+        while (t.kind != SeekStep::Kind::kDone &&
+               t.kind != SeekStep::Kind::kFailed && g++ < 40) {
+            t = f.on_dwell(DwellVerdict::kClean, -40, 2);
+        }
+        CHECK(t.kind == SeekStep::Kind::kDone);
+        CHECK(t.qdb == p.max_qdb);   // the trial bought nothing; step back up
+        CHECK(f.placed_loss_milli() == 2);
+    }
+
+    // The §10.6 addendum-2 recovery still runs to the budget while the
+    // reading is UNACCEPTABLE, improving or not — this is the near-cliff case
+    // the minimum hunt must not weaken.
+    {
+        PowerSeek u(p);
+        SeekStep t = u.begin();
+        int g = 0;
+        // Clean probes, then every verify reads 900permille wherever it lands.
+        while (t.kind == SeekStep::Kind::kProbe && g++ < 40) {
+            t = u.on_dwell(DwellVerdict::kClean, -40, 2);
+        }
+        CHECK(t.kind == SeekStep::Kind::kVerify);
+        int descents = 0;
+        while (t.kind == SeekStep::Kind::kVerify && g++ < 40) {
+            t = u.on_dwell(DwellVerdict::kBad, -20, 900);
+            ++descents;
+        }
+        CHECK(t.kind == SeekStep::Kind::kDone);
+        CHECK(descents == p.verify_descent_budget + 1);
+        CHECK(u.placed_loss_milli() == 900);  // recorded, not disguised
+    }
+}
+
+// §10.6/§10.7 (Pass 152): when NOTHING is acceptable, the recovery descent
+// must still place at the BEST reading it measured, not wherever the budget
+// ran out. Replays the ground's measured uplink rung 0 at 10 m verbatim.
+void test_verify_places_at_best_when_nothing_is_acceptable() {
+    SeekParams p;  // loss_ok 15, budget 3, step 16
+    p.rssi_guard_dbm = 127;
+
+    PowerSeek s(p);
+    // Drive straight to the verify phase: every probe clean at 30permille
+    // (under loss_bad 50), so the placement is the top of the range.
+    SeekStep st = s.begin();
+    int g = 0;
+    while (st.kind == SeekStep::Kind::kProbe && g++ < 40) {
+        st = s.on_dwell(DwellVerdict::kClean, -56, 30);
+    }
+    CHECK(st.kind == SeekStep::Kind::kVerify);
+    CHECK(st.qdb == p.max_qdb);                       // 108
+
+    // The measured verify walk: 30 -> 25 -> 20 -> 45permille.
+    st = s.on_dwell(DwellVerdict::kClean, -56, 30);   // at 108
+    CHECK(st.kind == SeekStep::Kind::kVerify && st.qdb == 92);
+    st = s.on_dwell(DwellVerdict::kClean, -57, 25);   // at 92
+    CHECK(st.kind == SeekStep::Kind::kVerify && st.qdb == 76);
+    st = s.on_dwell(DwellVerdict::kClean, -60, 20);   // at 76 — the best
+    CHECK(st.kind == SeekStep::Kind::kVerify && st.qdb == 60);
+    st = s.on_dwell(DwellVerdict::kClean, -64, 45);   // at 60 — worse
+
+    CHECK(st.kind == SeekStep::Kind::kDone);
+    CHECK(st.qdb == 76);                 // NOT 60, where the walk ended
+    CHECK(st.power_changed);             // and the actuator is walked back up
+    CHECK(s.placed_loss_milli() == 20);  // the best reading's own evidence
+}
+
+// §10.6 (Pass 151): the taper narrows the sweep ceiling in absolute space
+// only. In offset space the efuse per-rate table already carries that backoff,
+// and re-applying it collapses a level-1 rung to min == max — no sweep at all.
+void test_offset_space_does_not_taper_rung_ceiling() {
+    CalibrateParams p;
+    p.min_qdb = -24;
+    p.max_qdb = 0;
+    p.levels = {4, 4, 3, 3, 2, 2, 1, 1};
+
+    p.taper_rung_ceiling = true;
+    CHECK(rung_max_qdb(p, 0) == 0);
+    CHECK(rung_max_qdb(p, 6) == -24);   // level 1: collapsed onto min_qdb
+
+    p.taper_rung_ceiling = false;
+    for (size_t m = 0; m < 8; ++m) CHECK(rung_max_qdb(p, m) == 0);
+}
+
 // PowerSeek directly (Pass 130): one monotone ascending sweep, no descent,
 // no cap wall, no floor rule. Where the sweep STARTS must not affect where it
 // ends, which is why every rung now begins at min_qdb.
@@ -615,6 +742,9 @@ int main() {
     test_no_clean_point();
     test_rung_ceiling_bounds_the_sweep();
     test_no_wall_anywhere_persists_nothing();
+    test_verify_places_at_loss_minimum();
+    test_verify_places_at_best_when_nothing_is_acceptable();
+    test_offset_space_does_not_taper_rung_ceiling();
     test_sweep_is_monotone_and_seed_free();
     test_blackout_bracket_uses_observed_rssi();
     if (g_fail != 0) {
