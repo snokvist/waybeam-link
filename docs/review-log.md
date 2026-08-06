@@ -6182,3 +6182,35 @@ bench hooks.
 `app_test`: **150 checks, up from 107.** The three changed behaviours were
 verified non-vacuous by reverting each guard to its old form — two failures
 each time, and both tests named the exact counter that moved.
+
+**Pass 140 device verification (2026-08-06).** Ground x86 running this build,
+craft `.2.232` brought up only for the `retune_all` arm and stopped again. The
+point of the exercise is a refactor that changed three behaviours on purpose:
+the collapsed loops had to be seen driving real adapters.
+
+- **`retune_one` (scout sweep, no craft needed).** `POST /scout/start` over
+  5745/5805/5825: the uplink ear roamed 5805 → 5825 → back while the diversity
+  ear **stayed on 5805 throughout**, and results came back for all three
+  channels. That per-adapter targeting is the property the collapse had to
+  preserve — the scout moves one ear with the others left in place.
+- **`retune_all` (CSA, craft up).** `POST /csa {"mhz":5745}` moved **both**
+  ground ears and the craft together; `{"mhz":5805}` brought all three back.
+- **Power re-apply on success.** The journal shows the whole ownership story:
+  `txpower fixed 84 qdb (2100 mBm)` once the craft paired, then
+  `csa: commit -> 5745 MHz` followed by `txpower auto ok`, then on the way back
+  `csa: commit -> 5805 MHz` followed by `txpower fixed 84 qdb` again.
+- **CSA with no craft is refused** (`no craft selected — nothing latched, no
+  claim`) and leaves both adapters untouched.
+
+Two readings worth writing down because each looks like a fault and is not:
+
+- **Power fell 21.00 → 19.00 dBm on the move to 5745.** The §10.7 artifact is
+  scoped to the channel it was calibrated on, so off 5805 it stops owning power
+  and the owner falls to backend auto — the driver default. `/tx/power_tier`
+  reported `effective: false` for exactly that window and `true` again after
+  the return. That is the Pass 136 observability doing its job, not a lost
+  latch.
+- **A tier applied with the craft down moves nothing.** With no pairing there
+  is no artifact placement to clamp, which is the §10.3 ruling that a ceiling
+  does not bind an unpaired node. The endpoint says `effective: false`; the
+  radio stays where `mon-up` left it.
