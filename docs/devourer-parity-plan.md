@@ -81,12 +81,12 @@ the TX role needs the capability.
 | id | item | kind | status |
 |---|---|---|---|
 | **G0** | Close the 5805 MCS4+ pivot rationale | verification | **DONE** — Pass 139 / #89, closed *affirmatively* |
-| **G1** | §15.5a scout net_id retargeting is a no-op on radio | correctness | **OPEN — critical path.** Declared on `AirIface`; the fix is RX-thread synchronisation inside the backend |
+| **G1** | §15.5a scout net_id retargeting is a no-op on radio | correctness | **DONE** (Pass 142, #91) — atomic filter + device A/B; uncovered and fixed a missing `AirRxMeta::net_id` |
 | G2 | §14.2 JSCC airtime unavailable on radio | feature | RULING — declared (`estimate_airtime_us` → `nullopt`) |
 | G3 | CSA retune is commanded, not confirmed, on devourer | correctness | OPEN (ungated) |
 | G4 | `recover()` returns false on radio | feature | OPEN (ungated) — declared, pairs with G3 |
 | G5 | `mtu_supported()` is a hardcoded assumption on radio | feature | OPEN (ungated) — declared |
-| G6 | `tx_index()` returns 0 for radio | correctness | OPEN (trivial) — declared |
+| G6 | `tx_index()` returns 0 for radio | correctness | **DONE** (Pass 142, #91) |
 | G7 | `set_power_auto` semantics differ between backends | spec hygiene | RULING — declared |
 | G8 | Neither RF backend has a unit test | test surface | OPEN — **harness now exists** (Pass 140 `FakeAir`) |
 | **G9** | §3.11 heartbeat suppression was monitor-only | correctness | **DONE** — Pass 140; it was never in this register |
@@ -128,7 +128,21 @@ H1 below.
 
 ---
 
-## G1 — §15.5a scout net_id retargeting is a silent no-op on radio
+## G1 — §15.5a scout net_id retargeting is a silent no-op on radio — **DONE (Pass 142)**
+
+> Landed in #91. The filter moved out of `cfg` into an atomic read per frame
+> in `on_packet` (`-1` = hear-any, the `MonAir` encoding); the stamp stayed a
+> plain main-thread write. Device A/B on two mismatched-net_id devourer nodes:
+> before, 0 candidates; after, the craft found at its real net_id — and the
+> ear filters it again once the sweep stops.
+>
+> **The survey missed half of it.** `RadioAir` never filled
+> `AirRxMeta::net_id`, so the first working sweep reported the craft at net_id
+> 0. Invisible while the filter was pinned; wrong the moment it widened. Since
+> selection re-pins both roles to the *reported* value, the scout would have
+> claimed 0 and lost the craft it had just found. Only the device test could
+> surface it — a register item's stated fix can be necessary and still not be
+> sufficient.
 
 The worst gap in the set, and the only one that fails *silently* — everything
 else either fails closed or degrades visibly. **On the critical path** under
@@ -262,12 +276,11 @@ ruling that construction success *is* the evidence.
 
 ---
 
-## G6 — `tx_index()` returns 0 for radio
+## G6 — `tx_index()` returns 0 for radio — **DONE (Pass 142)**
 
-`app/main.cpp:1564-1567` returns 0 for any non-monitor backend, so the §15.5a
-scout roams adapter 0 by convention. `RadioAir` already knows `impl_->tx_idx`
-(`io/src/air_radio.cpp:429`); this is an accessor plus a branch. Trivial, but
-it is a real bug the moment a devourer ground lists its uplink second.
+Returned 0 for any non-monitor backend, so the §15.5a scout roamed adapter 0 by
+convention — a real bug the moment a devourer ground lists its uplink second.
+`create()` already resolved it into `impl_->tx_idx`. Landed with G1 in #91.
 
 ---
 
@@ -484,10 +497,8 @@ landed (Pass 140), so the two items that used to sit at either end of this list
 are gone. Ordering is now by **what the TX role needs**, since that is the role
 devourer is taking.
 
-1. **G1** — critical path. The §15.5a scout is a TX-role function and this is
-   the only gap that fails silently. Larger than it looks: the fix is RX-thread
-   synchronisation inside `RadioAir`, not a forwarding call.
-2. **G6** — trivial, and it is the same scout path as G1. Land them together.
+1. ~~**G1**~~ — **done** (Pass 142, #91), with G6.
+2. ~~**G6**~~ — **done**.
 3. **G3 + G4** together, as before: "commanded, not confirmed" and "no recovery
    path" are the same weakness seen from two sides, and a TX node is where a
    half-applied retune actually costs something.
@@ -500,7 +511,7 @@ devourer is taking.
 8. **G8** — narrower than when written; the devourer decode path, following the
    `FakeAir` shape rather than a second harness.
 
-**Not on this list any more:** G0 (closed), G9 (fixed in Pass 140), B2 (dead by
+**Not on this list any more:** G0 (closed), G1/G6 (Pass 142), G9 (fixed in Pass 140), B2 (dead by
 ruling), H2 (settled and measured), and the interface collapse itself.
 
 ## What to re-read when a premise moves
