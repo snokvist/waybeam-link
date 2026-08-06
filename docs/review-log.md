@@ -7255,3 +7255,77 @@ the right default while `e_rate` has no validated non-default setting — a
 blended rate would have to track measured density — but it means the byte
 saving does not become picture quality on its own, which is precisely the
 untested conversion the reallocation case would need.
+
+## Pass 150 — §10.5 qdb means two different things per backend (2026-08-06)
+
+**OPEN OPERATOR RULING.** Finding and measurement only; §10.5 is NOT amended
+here, because the fix is a choice between three incompatible contracts and the
+spec says a gap is a ruling, never an inference.
+
+**The divergence.** §10.5 states `POST /api/v1/tx/power {"qdb": N}` latches an
+**absolute** power. Only one backend does that:
+
+- `MonAir::set_power_qdb` (`io/src/air_mon.cpp:769`) runs
+  `iw dev <if> set txpower fixed <mBm>` at 1 qdb = 25 mBm. Absolute, as
+  specified.
+- `RadioAir::set_power_qdb` (`io/src/air_radio.cpp:692`) calls
+  `SetTxPowerOffsetQdb(qdb)`. The vendored header is unambiguous: it adjusts
+  "power **RELATIVE** to the efuse-calibrated per-rate table … preserving the
+  calibrated per-rate shape", and calls itself "the closed-loop controller's
+  knob (*back off 2 dB, keep the shape*)".
+
+Same endpoint, same integer, opposite meaning. Nothing in §10.5 says so. The
+`set_power_auto` asymmetry immediately below it *is* declared per backend
+(offset 0 vs the kernel's `txpower auto`), which makes the undeclared one
+easier to miss — the file reads as if the divergences had all been catalogued.
+
+**It inverts a stated safety property.** §10.3's `max_power_qdb` is the
+operator's hard ceiling; the Pass 135 design rests on it so that a tier "can
+never cook a PA". The clamp is `min(qdb, max_power_qdb)` on the *request*. On
+an offset backend that clamps the **offset**, so the craft's
+`max_power_qdb: 108` does not cap output at 27 dBm — it permits a **+27 dB
+boost** over calibrated. The guard against overdriving is itself an
+overdrive permit.
+
+Measured, not reasoned: sweeping +15 → +27 dB of "power" on the craft drove the
+PA into compression, collapsed the link, and demoted the selector to MCS 2 at
+every step — including at `qdb: 108`, which is nominally the *same* power as
+auto. Clearing the override restored MCS 5 and 94017 delivered against
+1464–11123 under any override.
+
+**Blast radius is wider than the override.** `set_power_qdb` is also the
+actuator for the §10.2 power-map resolve (`resolve_and_apply_power`) and for
+the §10.6/§10.7 calibration sweeps (`upwr.apply_qdb`, and the per-rung
+`ua.set_qdb`). A calibration running on a devourer node therefore steps
+*offsets* while its artifact records them as absolute rungs. On this fleet the
+uplink sweep runs on the ground, which is kernel-monitor and correct, and the
+craft has no `power_map` at all — so the divergence is currently unexercised
+outside the override. That is luck, not design.
+
+**Three candidate contracts, none free:**
+
+1. **Make devourer absolute.** Needs a dBm→TXAGC mapping we do not have.
+   `SetTxPowerIndexOverride(idx)` is flat-absolute but *replaces* the
+   calibrated per-rate shape, which is the thing worth keeping. Most faithful
+   to §10.5 as written, and the most likely to make output worse.
+2. **Declare the asymmetry** in §10.5 (absolute on kernel-monitor, relative on
+   devourer) and make the §10.3 clamp direction-aware, so an offset backend
+   accepts `qdb ≤ 0` only. Smallest change; restores the "may only lower
+   power" property the ceiling was written for; leaves one endpoint with two
+   meanings.
+3. **Split the field.** `qdb` stays absolute and is REJECTED by offset
+   backends; add an explicit `offset_qdb`. Unambiguous at the API, cannot be
+   misread the way this pass misread it, but it is an API change and every
+   caller (calibrator included) has to choose a lane.
+
+Recommendation is (2) or (3); (3) is cleaner and (2) is cheaper. Not chosen
+here.
+
+**Method note.** The author walked straight into this bug: a power sweep was
+authored top-down from `power_presets_qdb` [60…108] on the assumption that
+§10.3's preset list and §10.5's latch share units. They do not — one is an
+absolute ceiling, the other a per-backend-meaning latch — and the first sweep
+step was therefore both the riskiest setting *and* wrong by 27 dB. Two lessons,
+both operator-supplied: sweep a live-link parameter from the safe end upward so
+a freeze costs the last row rather than the run, and do not assume two fields
+sharing a unit suffix share a reference point.
