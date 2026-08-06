@@ -2686,22 +2686,36 @@ backstop, bounded verify descents, and hard cap. A probe dwell is a burst of
 **The walls are relative to the at-rest loss floor (Pass 152).**
 `loss_ok_milli` and `loss_bad_milli` are **margins above a measured baseline**
 here, not absolute bars. §10.7 injects its probes into a medium the craft is
-saturating with video, so a few percent of LINK_REPORTs collide regardless of
-TX power. Measured on the fleet at 10 m: a stable **25permille** at-rest floor
-against the 15permille absolute seed — the acceptance gate sat *below* the
-link's own floor, so no power could pass it, every rung read `verify_failed`,
-and §10.7 could not have succeeded at any distance. The one artifact it ever
-produced placed all eight rungs at 108 with no bracket anywhere, which is the
-Pass 134 starved-feedback signature, not a measurement.
+saturating with video, so some fraction of LINK_REPORTs is lost to contention
+regardless of TX power. On the fleet that fraction was measured well above the
+15permille absolute seed, which put the acceptance gate *below* the link's own
+floor: no power could pass it, every rung read `verify_failed`, and §10.7 could
+not have succeeded at any distance. The one artifact it had ever produced
+placed all eight rungs at 108 with no bracket anywhere — the Pass 134
+starved-feedback signature, not a measurement.
 
 The floor is sampled over a rolling window of **ordinary operation** and
 **only while no sweep is running** — the same rule and the same reason as
 §10.6's Pass 134 report-health precondition: once the sweep starts, elevated
 loss is the measurement, and folding it back into the baseline would chase its
 own tail. A start with no floor yet measured is refused rather than judged
-against an absolute bar; the condition self-clears within one window. On a
-quiet link the floor is ~0 and the behaviour is identical to the absolute
-seeds, so this is a shift of origin rather than a loosening.
+against an absolute bar. On a quiet link the floor is ~0 and the behaviour is
+identical to the absolute seeds, so this is a shift of origin rather than a
+loosening.
+
+> **No characteristic value is given here on purpose, and the estimator's
+> resolution is an OPEN QUESTION.** Field readings of the same link at fixed
+> power and fixed geometry ranged from 16 to 99permille, and a controlled run
+> showed that spread to be almost entirely binomial sampling noise: 21 windows
+> of n=150 reports gave sd 23.3permille against a predicted 22.1permille. The
+> window is therefore a **sample-count** gate (`min_samples`), not a clock —
+> but the counts §10.7 can reach may still be too small to rank power rungs at
+> all. Separating a 20permille difference at an 80permille baseline needs
+> n≈1500 per dwell, roughly 7.5x the Pass 132 verify burst, and at report
+> cadence that is minutes per dwell. Whether report-loss is the right observable
+> for this section, or whether it needs dedicated probe traffic, is NOT settled
+> by this pass. Treat any floor number quoted in the review log as an
+> observation under its own n, never as a property of the link.
 
 **Both §10.6 Pass 151 rules apply here unchanged**, because both live in the
 shared seek: the placement is the loss minimum rather than the first tolerable

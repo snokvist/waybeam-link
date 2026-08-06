@@ -7775,3 +7775,43 @@ video stream itself rather than injected probes, its floor at placement measured
 0-4permille tonight, and widening a gate that is working is not a change this
 pass has evidence for. The same latent issue exists there at range — recorded,
 not fixed, and a ruling when there is evidence.
+
+**Pass 152 field addendum — the floor swings were MY sampling noise, and the
+observable may be wrong (2026-08-06, same evening).** Both directions completed
+at 10 m: craft downlink `fp=0x6c` (8 rungs), ground uplink `fp=0x99` (5 rungs,
+mcs0 at 76 qdb / 19 dBm). The place-at-the-best fix earned itself on hardware —
+rung 5's verify walk read 45, 130, 95, 605permille and the pre-152 rule would
+have placed the 605 and failed the rung. Correcting the floor window from a 4 s
+clock to an n>=300 sample gate also changed an outcome the right way: the short
+window read 50permille against a 40 s window's 24.8, and that inflated wall had
+admitted a rung at 45permille that the corrected wall (31) refused.
+
+Then the diagnosis that matters. I read at-rest floors of 16, 25, 50, 54, 59,
+80, 99 and 110permille and called the link non-stationary, first blaming
+interference and then video bitrate. Both wrong. A controlled run — power fixed
+at 19 dBm, RSSI pinned at -64, video steady at 21.5-22.9 Mbps, 21 windows of
+n~150 — gave **mean 79.6permille, sd 23.3permille, correlation with video
+bitrate -0.12**. Binomial noise alone predicts sd 22.1permille at that p and n.
+The scatter was *entirely* sampling noise; there was no phenomenon to explain.
+
+Which turns the uplink question inside out. §10.7's dwells are sized for a link
+whose baseline loss is near zero (Pass 132: "one lost probe is 10permille").
+At an 80permille baseline a 200-probe verify dwell has sigma ~19permille, so the
+walk above is 2-sigma noise, placements reported 15 vs 10permille are
+indistinguishable, and which rungs come back "unreachable" is part coin flip.
+Separating 20permille at that baseline needs n~1500 per dwell — minutes each,
+hours per run. No threshold choice fixes an under-sampled estimator.
+
+Meanwhile RSSI held steady at -64 across the whole run and moved cleanly and
+monotonically with commanded power in every sweep: a low-variance estimator of
+the same physical quantity, which Pass 130 deliberately removed from placement
+in favour of the loss wall. That was right for the case Pass 130 argued, but at
+this link's loss level the loss wall cannot do the job it was handed.
+
+So the open question is **not** what threshold to use — it is whether
+report-loss is the right observable for §10.7 at all, or whether the section
+needs dedicated probe traffic rather than piggybacked LINK_REPORTs. Left open
+deliberately. The §10.7 spec text has been softened to stop quoting a floor
+value as characteristic; operator feedback on this campaign was that too much
+was being ruled while still being figured out, and this is the correction:
+findings go here, rulings wait for a settled mechanism.
