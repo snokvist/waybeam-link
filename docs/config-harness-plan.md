@@ -217,13 +217,102 @@ Per the law in `CLAUDE.md` these are operator rulings, and whichever way they
 go the ruling gets a numbered Pass entry in `docs/review-log.md` and commits
 ahead of the code.
 
-## 8. Suggested order
+## 8. The same harness as an API for coding agents
 
-1. `waybeam-link discover` + `--json` + the reconciliation note. Useful on its
-   own, on day one, for every bring-up.
-2. Ruling on §2 (backend mix) — it decides the wizard's adapter model.
-3. The wizard for the two RX archetypes (`rx-spectator`, `rx-cache`), which are
+Most configs in this repo are drafted with AI assistance, and an agent hitting
+a hand-written schema in a prompt is exactly the thing that goes stale. The
+answer is not a second surface: **the CLI is the API, with `--json` on
+everything**, and the schema is emitted by the binary rather than checked in
+next to it.
+
+Three surfaces, all of them the same code paths a human uses:
+
+1. `waybeam-link config-schema --json` — the machine-readable schema **of this
+   binary**. An agent working on a feature branch asks that branch's binary
+   what it accepts, so the schema cannot be older than the loader it describes.
+   A checked-in `schema.json` in a prompt or a vendored MCP server has no such
+   property.
+2. `waybeam-link <mode> -c cfg --check --strict --json` — structured
+   diagnostics instead of a prose line on stderr:
+   `{"ok":false,"errors":[{"path":"policy.calibration.seek_step_qdb",
+   "msg":"must be >= 8 (2 dB …)","section":"§10.6"}],"warnings":[…]}`.
+   This is what closes the agent's loop — draft, check, repair — without a
+   human reading the error out loud.
+3. `waybeam-link config --archetype tx-vehicle --answers a.json -o node.json`
+   — the wizard's non-interactive mode from §3 is already an agent API. The
+   agent fills the answers file; the tool still owns the shape, the
+   invariants and the fleet coupling.
+
+MCP on top of this is a thin stdio shim over three subcommands with no logic of
+its own, so it stays an option rather than a prerequisite. `--json` first.
+
+### `--strict`, and why it matters more than the schema
+
+**The loader silently ignores keys it does not recognise.** All 225 lookups in
+`config.cpp` go through `value()` / `contains()`; nothing enumerates the object
+and complains about the rest. So `"max_bitrate"` for `"max_bitrate_kbps"`, or a
+key invented from an older doc, loads clean and flies wrong. That is the single
+most likely failure mode for an AI-drafted config, and no schema handed to the
+agent prevents it — only the binary rejecting it does.
+
+Two things make this safe to adopt:
+
+- `_`-prefixed keys are comments (`_comment`, `_verify_timeout_ms` in
+  `examples/config.radio-rx.sample.json`) and stay exempt by rule.
+- Every node config in `deploy/` and `examples/` was checked against the key
+  set in `config.cpp`: **no unknown keys today**. The only hit is
+  `examples/topology.frame-shm-udp.sample.json`, which is not a node config —
+  it is input to `tools/expand_arq_topology.py`. Strict mode can therefore be
+  turned on without breaking anything we currently fly.
+
+Suggested staging: `--check --strict` warns first, and becomes an error once
+the harness is what authors configs.
+
+### Tracking waybeam-link as it changes
+
+This is the part that decides whether the harness is worth building, because a
+generator that lags the loader is worse than no generator. The mechanism should
+be structural, not a habit:
+
+- **One key registration per parsed field**, declared next to the
+  `value()`/`contains()` call that already exists, serving three purposes at
+  once: unknown-key detection for `--strict`, the field list for
+  `config-schema`, and the drift check. Adding a feature means adding one line
+  beside the parse line you were already writing — not a 1248-line rewrite of
+  the most safety-critical path in `io/`.
+- **A golden schema under `tests/golden/`**, diffed in the `dev` preset. A new
+  config key then shows up as a reviewable line in the PR that introduces it,
+  which is how a new feature becomes visible to the harness instead of silently
+  bypassing it.
+- **A test that fails when a key is parsed but unregistered**, so the
+  registration cannot be forgotten. Mechanical enforcement; no reviewer
+  vigilance required.
+- **The rule in `CLAUDE.md`**: node configs are generated and validated, never
+  hand-written — draft with `config --answers`, verify with `--check --strict`,
+  and read the schema from the binary rather than from memory or from an
+  example that may predate the feature.
+- Emit the `§N.M` section reference alongside each field. The comments in
+  `config.cpp` already carry them; putting them in the schema points an agent
+  at `PROTOCOL.md` instead of leaving it to guess semantics from a key name.
+
+Prior art worth noting: `tools/expand_arq_topology.py` already expands one
+topology description into matched TX/RX configs for the UDP ARQ bench. The
+fleet file in §5 is the same idea generalised to the shipping archetypes — and
+the reason to move it into the binary is precisely the drift problem above.
+
+## 9. Suggested order
+
+1. Key registration + `--check --strict --json` + `config-schema --json`, with
+   the golden schema and the unregistered-key test. This lands **first**: it is
+   the smallest change, it is useful to every agent-drafted config from the day
+   it merges even with no wizard at all, and it is the anti-drift floor
+   everything else stands on.
+2. `waybeam-link discover` + `--json` + the reconciliation note. Useful on its
+   own for every bring-up.
+3. Ruling on §2 (backend mix) — it decides the wizard's adapter model.
+4. The wizard for the two RX archetypes (`rx-spectator`, `rx-cache`), which are
    the smallest configs, plus the fleet file and the golden test.
-4. `tx-ground`, then `tx-vehicle` (largest surface: venc, fec, select, modes).
-5. Level 1 TX power inside the wizard.
-6. Ruling on §7 Level 2, then the authored artifact if it is granted.
+5. `tx-ground`, then `tx-vehicle` (largest surface: venc, fec, select, modes).
+6. Level 1 TX power inside the wizard.
+7. `--strict` from warning to error; the `CLAUDE.md` rule.
+8. Ruling on §7 Level 2, then the authored artifact if it is granted.
