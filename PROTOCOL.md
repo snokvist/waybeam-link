@@ -3649,28 +3649,47 @@ The §9.3a jumbo guard carries its own `rate != 0` check and so inherits this
 behaviour consistently.
 
 **Freed parity is a reallocation, not a saving — and for a stripe-less
-producer preset it is mandatory, not optional.** A producer preset that
-maximises droppable density (`ltr`) also forces intra-refresh **off**, because
-stripes landing in a `TRAIL_N` frame never enter the DPB and so cost bitrate
-while repairing nothing. That removes the sub-second recovery path and leaves
-the IDR as the sole repair point at the authored GOP. Order-of-magnitude, at
-a 2.0 s GOP: a producer moving from 20 % droppable with 500 ms stripes to
-50 % droppable with none takes expected glitch duration per loss from
-~200 ms to ~500 ms **if class rates are left flat** — half the losses get
-~60× cheaper while the other half get ~4× more expensive, and the expensive
-half dominates. Lowering `e_rate` without raising `i_rate` therefore ships a
-regression. Two hard constraints on any reallocation:
+producer preset it was predicted to be mandatory — and measurement did not
+bear that out. The prediction is recorded here with its refutation, because
+the reasoning is sound and only its premise failed.**
 
-- Total parity airtime is the budget to hold constant; bytes saved are not a
-  result to bank.
-- The IDR cannot absorb the whole freed budget: GF(256) caps `r ≤ 256 - k`,
-  so the reachable ceiling is `i_rate ≤ (256 - k)/k`. At a typical jumbo rung
-  (`k ≈ 70` for a ~94 KB IDR) that is ~2650 ‰ — large, but bounded, and the
-  referenced P-chain still cascades and still needs its share.
+A producer preset that maximises droppable density (`ltr`) also forces
+intra-refresh **off**, because stripes landing in a `TRAIL_N` frame never enter
+the DPB and so cost bitrate while repairing nothing. That removes the
+sub-second recovery path and leaves the IDR as the sole repair point at the
+authored GOP. The expectation was therefore that at a 2.0 s GOP, moving from
+20 % droppable with 500 ms stripes to 50 % droppable with none would take
+expected glitch duration per loss from ~200 ms to ~500 ms with flat class
+rates — half the losses ~60× cheaper, the other half ~4× more expensive, and
+the expensive half dominating.
 
-An automatic controller for this split is **not specified here**: the right
-ratio is a measurement (§17), and the arithmetic above is operator guidance
-until that measurement exists.
+**It does not, because the referenced class does not fail.** Measured
+(Pass 149, both backends): with `e_rate` unset, `frames_unrecoverable` is
+**zero** at 1–2 ‰ post-diversity loss *and* zero at 19 ‰ — a 10× spread in link
+quality with the same authored `i_rate` 300 ‰ / `p_rate` 200 ‰. There is no
+cascade in that envelope for a raised `i_rate` to prevent. Reallocation was
+also measured directly and made things **worse**: at equal airtime the
+droppable class lost 15.7 % versus 10.2 % unreallocated, because the extra
+parity packets raise channel occupancy and the frames paying for it are exactly
+the ones with no protection left. **Reallocation is not neutral for the
+unprotected class; it is negative-sum for it.**
+
+Two constraints still bind any future reallocation, and one warning now
+outranks them:
+
+- Adding parity is not free airtime-neutral bookkeeping — it costs occupancy,
+  which the unprotected class pays for. Measure the class, not the budget.
+- The IDR cannot absorb a large freed budget: GF(256) caps `r ≤ 256 - k`, so
+  the ceiling is `i_rate ≤ (256 - k)/k` — at `k ≈ 70` for a ~94 KB IDR, about
+  2650 ‰.
+
+No automatic controller is specified, and **none should be built on the
+arithmetic above**: it is a hypothesis this pass falsified within its measured
+envelope, retained as provenance. A reallocation case requires first
+demonstrating a link on which the referenced class actually fails. Until such a
+link is measured (§17), `e_rate` has **no validated non-default setting**, and
+the honest trade on a clean link is ~8 % of stream bytes against ~5 % of frames
+dropped as bounded one-frame glitches.
 
 **Observability is the drift detector, and is not optional.** The producer
 preset and the link's `e_rate` are set in two different processes and nothing
