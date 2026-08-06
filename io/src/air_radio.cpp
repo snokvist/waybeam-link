@@ -167,10 +167,22 @@ struct RadioAir::Impl {
         return static_cast<ssize_t>(n);  // always consume (drop non-reports)
     }
     // Human-diagnostics sink: forward everything except the per-packet
-    // bulk_send line (see diag_stream). Same EveryLine contract as ev_write —
+    // success line (see diag_stream). Same EveryLine contract as ev_write —
     // one complete line per write.
+    //
+    // Matched POSITIVELY on the flood's exact shape, not on the substring
+    // "bulk_send". UsbTransport.cpp logs two lines with that substring —
+    // `info("bulk_send EP {} OK {} bytes")` (the flood) and
+    // `error("bulk_send EP {} FAIL rc={} got {}/{}")` — and the FAIL line is
+    // the one diagnostic that matters while TX is breaking. A substring
+    // filter would swallow it precisely during a §9.10 wedge. Anything this
+    // does not recognise is kept, so an unfamiliar line is never dropped.
+    static bool is_bulk_send_ok(const char* buf, size_t n) {
+        return ev_contains(buf, n, "bulk_send EP", 12) &&
+               ev_contains(buf, n, " OK ", 4);
+    }
     static ssize_t diag_write(void*, const char* buf, size_t n) {
-        if (!ev_contains(buf, n, "bulk_send", 9)) {
+        if (!is_bulk_send_ok(buf, n)) {
             std::fwrite(buf, 1, n, stderr);
             std::fflush(stderr);
         }
@@ -428,9 +440,9 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
             // Never a silent drop: say once that the per-packet line is gone,
             // so a reader who expects it knows why it is missing.
             std::fprintf(stderr,
-                         "radio: devourer per-packet bulk_send diagnostics "
-                         "suppressed (log volume); all other devourer "
-                         "diagnostics unchanged\n");
+                         "radio: devourer per-packet bulk_send OK lines "
+                         "suppressed (log volume); failures and all other "
+                         "devourer diagnostics unchanged\n");
         }
     }
 
