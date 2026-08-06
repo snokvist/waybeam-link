@@ -6719,3 +6719,47 @@ and it fails safe — refusing a monitor-derived curve on devourer rather than
 applying the wrong one. On a devourer TX fleet every artifact would also go
 stale after a re-plug, since the devourer identity is a bus path. Still a
 ruling, still unresolved.
+
+## Pass 146 — a calibration identity that survives a re-plug (2026-08-06)
+
+The §10.7 artifact auto-loads only when its fingerprint matches the live
+adapter, and on devourer that identity was `bus/<bus-port>`. `CLAUDE.md`
+records that USB bus paths shuffle after any re-plug, so on a devourer TX
+fleet every artifact goes stale the first time a dongle is moved — the node
+boots with no curve, and the only symptom is a line in the log. Seen live
+during the Pass 145 close-out: `calibrate: STALE artifact (stored
+wlan0/98:03:cf:cf:a4:28, live bus/1-1)`.
+
+Resolution order is now `calib_id` → `ifname/<MAC>` → `bus/<path>`, and the
+bus fallback warns at every boot until an id is set. The identity still
+differs by backend on purpose: kernel-monitor writes nl80211 fixed power,
+devourer writes an offset against the efuse per-rate table, so a
+monitor-measured curve **must** read STALE on devourer rather than be applied
+to a different actuator.
+
+**The USB serial was the plan, and hardware killed it.** It is the obvious
+stable key — present whether or not a kernel driver is bound, readable from
+sysfs, no vendored change needed. Then reading it:
+
+| adapter | serial |
+|---|---|
+| bench 8822EU (bus 1-1) | `123456` |
+| bench 8812CU (bus 5-1) | `123456` |
+| craft 8822EU (bus 1-1) | `123456` |
+
+A placeholder, identical across two different chips on two different hosts.
+Keying on it would have been **worse than the bus path it replaced**: two
+adapters in one host would share an artifact, and a curve measured on one
+dongle would be applied to another *without ever reading STALE* — defeating
+the exact check the fingerprint exists to perform. The instability would have
+been traded for silent misapplication.
+
+So on devourer the stable identity has to be **declared, not derived**. That
+is a worse ergonomic answer than an automatic one, and it is the only safe
+one available without vendored changes.
+
+Worth keeping as a method note: the serial approach was designed, specified,
+implemented and unit-tested before anyone read a serial off real hardware. One
+`cat` of three sysfs files ended it. Verify the premise of a fix as early as
+the fix itself — a design can be internally consistent, tested green, and
+still resting on something that was never checked.

@@ -161,6 +161,9 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             ac.bus = a.value("bus", std::string{});
             ac.ifname = a.value("ifname", std::string{});
+            // §10.7 (Pass 146): pins the calibration artifact to this
+            // physical adapter regardless of ifname/serial/bus path.
+            ac.calib_id = a.value("calib_id", std::string{});
             auto arole = parse_role(a.at("role").get<std::string>(),
                                     ("adapter " + ac.name).c_str());
             if (!arole) return Result<Config>::fail(arole.error);

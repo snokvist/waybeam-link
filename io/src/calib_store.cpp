@@ -70,6 +70,12 @@ uint8_t fingerprint_of(const std::string& body) {
 }  // namespace
 
 std::string calib_identity(const AdapterCfg& adapter) {
+    // §10.7 (Pass 146). Per-actuator by design — a monitor-measured curve must
+    // read STALE on devourer, not be applied — and stable across a re-plug,
+    // which the old bus-path form was not.
+    if (!adapter.calib_id.empty()) {
+        return "id/" + adapter.calib_id;
+    }
     if (!adapter.ifname.empty()) {
         const std::string mac = read_file("/sys/class/net/" + adapter.ifname +
                                           "/address");
@@ -80,6 +86,21 @@ std::string calib_identity(const AdapterCfg& adapter) {
         return adapter.ifname + "/" + (m.empty() ? "?" : m);
     }
     if (!adapter.bus.empty()) {
+        // NOT the USB serial, though it looks like the obvious stable key:
+        // every RTL88x2 dongle measured — 8822EU and 8812CU on the bench, the
+        // craft's 8822EU — reports the placeholder "123456". Keying on that
+        // would let two adapters in one host share an artifact and apply each
+        // other's curve without ever reading STALE, which is worse than the
+        // instability below. On devourer the identity must be DECLARED.
+        //
+        // Last resort. Bus paths shuffle on any re-plug (CLAUDE.md), so an
+        // artifact keyed this way goes stale the next time the dongle moves —
+        // and the node then boots with no curve. Say so once, loudly.
+        std::fprintf(stderr,
+                     "calibrate: adapter \"%s\" has no USB serial — keying the "
+                     "artifact on bus path \"%s\", which CHANGES on re-plug. "
+                     "Set adapters[].calib_id to pin it (§10.7).\n",
+                     adapter.name.c_str(), adapter.bus.c_str());
         return "bus/" + adapter.bus;
     }
     return "udp";

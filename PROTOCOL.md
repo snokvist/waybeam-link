@@ -2331,12 +2331,21 @@ so a mismatch reads STALE rather than being applied. Resolution order:
    physical adapter, and the only option for a dongle whose serial is blank or
    duplicated across a fleet.
 2. `ifname/<MAC>` on kernel-monitor, read from the netdev.
-3. `serial/<usb-serial>` on devourer, read from the USB device.
-4. `bus/<bus-port>` as a last resort, **logged as unstable**: USB bus paths
+3. `bus/<bus-port>` as a last resort, **logged as unstable**: USB bus paths
    shuffle on any re-plug, so an artifact keyed this way goes stale the next
    time the dongle is moved, and the node silently boots with no curve.
 
-Before Pass 146 the devourer case was (4) alone.
+**The USB serial number is deliberately NOT used**, though it was the obvious
+candidate. Measured on the fleet: every RTL88x2 dongle to hand — an 8822EU and
+an 8812CU on the bench, and the craft's 8822EU — reports the placeholder serial
+`123456`. It is neither unique nor per-unit, so keying on it would be *worse*
+than a bus path: two adapters in one host would share an artifact, and a curve
+measured on one dongle would be applied to another without ever reading STALE.
+That is precisely the failure the fingerprint check exists to prevent.
+
+So on devourer the stable identity has to be **declared**, not derived —
+`calib_id` is the answer, and the bus-path fallback warns every boot until one
+is set.
 
 **A run that found no wall anywhere measured nothing (Pass 134).** §10.6 scores
 every dwell from LINK_REPORTs, so its result is only as good as the return
