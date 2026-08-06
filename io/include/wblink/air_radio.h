@@ -111,6 +111,14 @@ class RadioAir : public AirIface {
     // §15.5a scout: the uplink adapter the sweep roams, resolved from the
     // role:"tx" adapter create() already requires.
     size_t tx_index() const override;
+    // §11.6 Pass 80 RX-liveness recovery: stop the RX loop, join it, re-run
+    // the write-side bring-up at the target channel, restart the loop. Not a
+    // USB-level reset — whether a devourer re-init clears an RTL88x2 USB wedge
+    // is unmeasured, so this recovers the half-applied-retune case it can
+    // reach and does not claim the other. Counters survive on purpose: rx_frames
+    // is the guard's own liveness baseline.
+    bool recover(size_t adapter, uint16_t chan_mhz,
+                 uint8_t width_mhz) override;
     // §11.6 verify hygiene (Pass 69): discard the process-queue RX backlog
     // captured before a retune completed, so post-retune consumers only see
     // frames from the new channel. devourer's internal USB pipeline is below
@@ -126,10 +134,6 @@ class RadioAir : public AirIface {
     // assert it and somewhere the compiler notices when a new method is added.
     // Behaviour is preserved exactly; ids are docs/devourer-parity-plan.md.
 
-    // G4 — §11.6 Pass 80 RX-liveness recovery is kernel-monitor only. The
-    // caller's watchdog treats false as "recovery unavailable", not "failed".
-    bool recover(size_t adapter, uint16_t chan_mhz,
-                 uint8_t width_mhz) override;
     // G7 — "auto" differs by backend and that difference is a protocol
     // question, not an implementation gap: kernel-monitor hands power back to
     // the driver default, this backend zeroes the offset, which undoes a §10.5

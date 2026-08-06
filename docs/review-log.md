@@ -6412,3 +6412,50 @@ driver. That is a per-*family* attribute and the craft's 8822E does deliver
 MCS4–7, so it does not explain a per-unit difference — but it is the first
 asymmetry found between the two Jaguar3 variants that touches exactly the
 mechanism H1 is about.
+
+**G3 — a retune that can report failure.** `RadioAir::retune` answered `true`
+unconditionally, because devourer's `FastRetune`/`SetMonitorChannel` are `void`
+— a devourer node could report COMMITTED with nothing applied.
+`GetSelectedChannel()` returns the driver's own record of where it put the
+radio, so a mismatch now fails the retune: an unsupported channel, a generation
+whose `FastRetune` no-ops, a width the chip declined. **This is bookkeeping, not
+RF** — it cannot see a half-applied retune where the chip disagrees with the
+driver — but that is precisely the confidence `iw` gives kernel-monitor, so the
+two backends now sit at the same rung, and the RF-level check remains the §11.6
+RX-liveness guard, which is backend-agnostic.
+
+**G4 — and the vendored constraint that shaped it.** The obvious recovery is
+the devourer analogue of kernel-monitor's `ip link down/up`: stop the RX loop,
+join it, re-run `InitWrite`, restart. That crashes the process.
+`RtlJaguar3Device::InitWrite` unconditionally assigns `_coex_thread`
+(`RtlJaguar3Device.cpp:207`), so a second call destroys a joinable thread and
+`std::terminate`s — measured on the bench, not read:
+
+    csa: RX SILENT 4000 ms after retune to 5745 MHz — half-applied retune …
+    TRACE recover: joined
+    terminate called without an active exception
+
+**`InitWrite` is one-shot.** The restartable surface devourer documents is
+`StartRxLoop` (`IRtlDevice.h:58`) plus `SetMonitorChannel`, and that is what
+`recover()` uses. So this is an RX-path restart, not a MAC/PHY bring-up: weaker
+than the kernel-monitor path by measurement rather than by omission, and it is
+not a USB-level reset either — whether any in-process re-init clears the
+RTL88x2 wedge that `CLAUDE.md` says needs a physical re-plug is still unmeasured.
+Counters survive the restart deliberately; `rx_frames` is the guard's own
+liveness baseline and zeroing it would forge liveness.
+
+Device-verified end to end. The first attempt could only ever show two legs of
+three: hopping the craft to an empty channel does not silence it on a bench
+where the peer is a metre away and bleeds across 60 MHz. Silencing the *peer*
+and making the retune a same-channel no-op — whose only job is to arm the guard
+— puts all three in one run:
+
+| leg | craft RX over 6 s |
+|---|---|
+| 1. peer up | +6 |
+| 2. peer stopped | **+0** |
+| 3. `POST /api/v1/channel {5805}` | guard fires → `RX-liveness recovery on "cu-tx" -> 5805 MHz ok` |
+| 4. peer restarted | **+6** |
+
+Leg 4 is the claim: a stopped, joined and restarted RX loop still delivers, at
+the same rate. Harness: `docs/data/pass143-hw/run_g4b.sh`.
