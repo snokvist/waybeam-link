@@ -3620,11 +3620,21 @@ Two consequences implementations MUST handle rather than discover:
   this class ARQ-ineligible flips that gate permanently open for it. See the
   §14.2 exemption, which is what closes the hole.
 
-**`e_rate` is UNSET by default and unset means "inherit `p_rate`."** Unset
-MUST be bit-for-bit indistinguishable from a node that predates this section,
-for every `(k, class, arq_mode, override)` combination. It is deliberately not
-defaulted to 0: that would silently strip authored protection the moment a
-producer switched preset.
+**`e_rate` is UNSET by default and unset means "inherit `p_rate`."** With it
+unset the **parity rate is unchanged for every class** — no frame's
+`ceil(k · rate)` moves — so a config predating this section keeps its authored
+protection. It is deliberately not defaulted to 0: that would silently strip
+that protection the moment a producer switched preset.
+
+Unset is *not*, however, globally byte-identical, and the exception must be
+tested rather than assumed. The ARQ exclusion above is unconditional and
+independent of `e_rate`, which changes one corner: a non-referenced frame at
+`k ≤ min_k` under `arq_mode: all-frames` was ARQ-eligible, so the `min_k` gate
+fired and it shipped `r = 0` carrying `PFRAME_ARQ`. It is now ARQ-ineligible,
+the gate is inert for it, and it takes the FEC path instead —
+`r = max(ceil(k · p_rate), min_r)`. It trades a retransmit it could not have
+used for parity it can, which is the intended direction, but it is a real
+behavioural change at unset and implementations MUST cover it explicitly.
 
 **The `min_r` interaction is a trap, and the useful settings are bounded by
 it.** `repair_count` short-circuits on `rate == 0` *before* applying the
@@ -4173,7 +4183,9 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 
   `e_rate_permille` (§14.1a) is **optional and unset by default**; unset means
   "inherit `p_rate_permille`" and MUST be behaviourally identical to a config
-  that omits it. Range 0–1000 when present. It is rejected on a stream whose
+  that omits it. Range 0–4000 when present, matching the other rates' §15.5 bound (a
+  rate above 1000‰ means more parity than data, which §14.1a's reallocation
+  arithmetic reaches for `i_rate`). It is rejected on a stream whose
   `scheme` is `"none"` (nothing to rate) and, like the other rates, ignored on
   a `udp` stream. Setting it to 0 is the only value that yields genuinely zero
   parity — see the `min_r` trap in §14.1a before choosing anything between.
@@ -4751,7 +4763,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/tx/power_tier` | `{ "tier": 1 }` \| `{ "tier": 1, "both": true }` | Selects the local ceiling by preset index; 400 on a missing/non-integer `tier`, 409 when unconfigured or out of range. `both` additionally issues §11.7 `0x0A` to the bound craft — the one-action-both-directions shape `{"action":"start_both"}` already has for calibration. `both` on a node with no craft binding is a 409, not a silent local-only apply. 409 while a §10.6/§10.7 calibration is running (Pass 136) — the run owns the actuator and the ceiling is what it is measuring against |
 | `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (any node with a `role:"tx"` adapter, including an rx-node's §6.4 uplink — Pass 125) |
 | `POST /api/v1/calibration` | `{ "action": "start" }` \| `{ "action": "abort" }` \| `{ "action": "start_both" }` | §10.7 ground-uplink calibration; `start` requires its complete prerequisite set, `abort` is idempotent and cancels either phase, `start_both` additionally sequences the §11.7 downlink campaign after a successful uplink phase (ground/rx node) |
-| `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2, "e_permille": 0 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node). `e_permille` (§14.1a) is optional; omitting it leaves the current setting untouched, and `null` clears it back to "inherit `p_permille`" |
+| `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2, "e_permille": 0 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node). `e_permille` (§14.1a) is optional and, like every other field here, participates in the POST's full-replacement semantics: omitting it — or sending `null` — restores the default of inheriting `p_permille` |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
 | `POST /api/v1/bench/rx-drop` | `{ "permille": 0 }` | UDP-air bench RX only: retune independent synthetic loss per listener (0–1000); 409 on RF backends |

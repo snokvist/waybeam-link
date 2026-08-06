@@ -7059,10 +7059,18 @@ No automatic controller for the split. The right ratio is a §17 measurement
 we do not have, and the two-stage verification below is designed to get it —
 building the controller first would be fitting a curve to no data.
 
-**`e_rate` unset must be indistinguishable from a node predating this pass**,
-for every `(k, class, arq_mode, override)` combination. Hence `optional`, and
-deliberately not a 0 default: 0-by-default would silently strip authored
-protection the moment a producer switched preset. Both drift directions
+**`e_rate` unset leaves the parity rate unchanged for every class.** Hence
+`optional`, and deliberately not a 0 default: 0-by-default would silently strip
+authored protection the moment a producer switched preset.
+
+Writing the tests caught the first draft of that claim overreaching — it said
+unset was *byte-identical* to a pre-Pass-149 node, and it is not. The ARQ
+exclusion is unconditional, so at `k ≤ min_k` under `all-frames` a
+non-referenced frame that was ARQ-only (`r = 0`, `PFRAME_ARQ` stamped) now
+takes the FEC path and gets `max(ceil(k·p_rate), min_r)`. More protection, not
+less, and the right direction — but a real change at unset, and exactly the
+kind of corner a global "nothing moves" assertion would have papered over.
+The spec now states the exception and the test pins it. Both drift directions
 (link configured, producer not; producer configured, link not) degrade to
 authored behaviour — safe, but silent, which is why `fec_enhance_frames` is
 reported whether or not `e_rate` is set.
