@@ -16,6 +16,9 @@ carried forward" section this supersedes and expands), `docs/config-harness-plan
 (whose §2/§2a rulings gate part of this), `docs/devourer-integration-analysis.md`
 (the upside register behind #95–#101).
 
+**#92 (asymmetric FEC for non-referenced frames) lands first.** It is in flight
+and it moves two surfaces this plan proposes to freeze — see §3.0.
+
 ## Why this document exists
 
 `docs/devourer-parity-plan.md` closed its register with the observation that the
@@ -184,7 +187,7 @@ have. Only `WBLINK_RADIO` exists as an option today.
 | source | why it must become optional |
 |---|---|
 | `io/src/air_mon.cpp` | AF_PACKET + `fork`/`execvp("iw")`. Needs root; useless on Android. Pulls `linux/if_packet.h`, `linux/filter.h`, `sys/wait.h`. |
-| `io/src/frame_shm.cpp` | `shm_open` — **not in bionic.** A hard link failure on Android, not a runtime one. |
+| `io/src/frame_shm.cpp` | `shm_open` — bionic does not provide POSIX shared memory. Expected to be a **link** failure on Android, not a runtime one; the `android-arm64` preset in phase 1a is what proves it rather than this table. |
 | `io/src/control_server.cpp` | An HTTP listener a phone app does not want by default. |
 | `io/src/venc_http.cpp` | TX/vehicle-side actuation; dead weight on a receiver. |
 
@@ -207,9 +210,13 @@ deletes its copy rather than maintaining a second one.
 
 `io/src` writes to `stderr` in 24 places (12 of them in `air_radio.cpp`), and
 `RadioAir` builds a devourer `Logger` whose event/diag streams are
-`fopencookie` handles. `fopencookie` is available on bionic (API ≥ 23) and musl,
-so it is not a portability blocker — but a library that owns the consumer's
-stderr is. Needs an injectable sink (logcat / syslog / caller callback).
+`fopencookie` handles. `air_radio.cpp:6` already calls it a "glibc/musl
+extension"; bionic is expected to carry it from API 23 (`:wifi` is minSdk 26),
+so it should not be a blocker — but that is an expectation, and the phase-1a
+preset is what settles it.
+
+The blocker that is *not* in doubt: a library must not own the consumer's
+stderr. Needs an injectable sink (logcat / syslog / caller callback).
 
 **Preserve on the way through:** `csa_psk` must never reach a log or stat
 (`CLAUDE.md`). A new sink is a new output path that touches config.
@@ -245,15 +252,56 @@ apply.
 
 ### B12 — arch coverage
 
-Better than expected. `ssc338q` is ARMv7/32-bit and builds `wblink_io` and the
-full app, so `io/` is already 32-bit-proven — not just `core/`. Untested:
+Better than expected. `ssc338q` is `arm-openipc-linux-gnueabihf`
+(`cmake/toolchain-ssc338q.cmake`) — ARMv7 hard-float, 32-bit — and it builds
+`wblink_io` and the full app, so `io/` is already 32-bit-proven, not just
+`core/`. What that does **not** cover is the libc: it is glibc. Untested are
 **bionic** (any arch) and **musl** (OpenWRT). Android's `:wifi` is `arm64-v8a`
-only today with a comment reserving `armeabi-v7a` for later.
+only today, with a comment reserving `armeabi-v7a` for later.
 
 Cheapest gate: an `android-arm64` compile-only preset alongside `ssc338q`, so
 the bionic build breaks in CI rather than in the consumer.
 
-## 3. Should the open issues land before or after the split?
+## 3. Sequencing
+
+### 3.0 — #92 lands first, and it moves one of Phase 0's two items
+
+[#92](https://github.com/snokvist/waybeam-link/pull/92) is a draft design PR
+(docs only, `feature/asymmetric-fec-plan`) whose implementation is the current
+work. It spends less FEC on SVC-T non-referenced frames, and per its own plan
+the implementing PR carries:
+
+- a `kFrameFlagEnhance` accessor in `core/include/wblink/frame_shm_format.h`
+  and a third rate branch at the two `is_idr ? i_rate : p_rate` sites in
+  `core/src/frame_framer.cpp`;
+- **a new config key** — `streams[].fec.e_rate_permille`, beside the existing
+  `i_rate_permille` / `p_rate_permille` / `min_k` / `min_r`
+  (`io/src/config.cpp:316-319`);
+- **a new §15.3 counter** — `fec_enhance_frames`, in a schema that is
+  golden-tested;
+- a **§14.1 spec amendment**, committing first with its own numbered Pass.
+
+Two consequences, and only one of them is a real constraint:
+
+1. **Phase 0's config-surface freeze must queue behind #92.** `CLAUDE.md`
+   already states that a new config key is a harness-visible change that has to
+   be registered in the same commit. Landing #106 item 1 first would register a
+   key set that goes stale immediately and churn both the schema golden and the
+   §15.3 stats golden twice. This is sequencing, not conflict — #92's
+   implementation should simply register `e_rate_permille` if item 1 has
+   already merged, and item 1 should include it if it has not.
+2. **Phase 1 does not conflict with #92 at all.** 1a (CMake feature options,
+   export package, `android-arm64` preset), 1b (device source, `lock_dir`,
+   `do_reset`) and 1c (log sink) touch `CMakeLists.txt`, `io/src/air_radio.cpp`
+   and `io/include/` — no overlap with `core/src/frame_framer.cpp` or the
+   framer's config struct. **Phase 1 can start now, in parallel.**
+
+There is also a small alignment worth noticing rather than acting on: #92 makes
+`core/` spend FEC by frame class, which is exactly the kind of policy an Android
+receiver inherits for free by vendoring `core/` whole. It costs the extraction
+nothing and it is a good argument for the layering as it stands.
+
+### 3.1 Should the open issues land before or after the split?
 
 ### Land before — they define the surface the library publishes
 
@@ -322,7 +370,8 @@ suites, ASan+UBSan) and `cmake --build --preset ssc338q` green.
 **Phase 0 — rulings and the config surface.** #106 items 1, 3, 4. Plus a
 decision on B9 (what a library does instead of `exit()` on a §9.10 wedge) and
 on B11 (identity under a wrapped fd). Nothing here is extraction work; all of it
-constrains extraction work.
+constrains extraction work. **Item 1 queues behind #92** (§3.0); the two
+rulings do not — they can be taken at any time and cost nothing but a decision.
 
 **Phase 1 — mechanical, no behaviour change.**
 
