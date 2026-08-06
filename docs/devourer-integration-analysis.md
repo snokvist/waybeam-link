@@ -5,6 +5,21 @@
 deferred to an operator ruling; when one is made it commits first as a spec
 amendment + numbered Pass, per repo law.
 
+**Tracked work.** The operator's first tranche is filed as scoped issues; this
+document stays the background reference behind them, not a work plan:
+
+| issue | covers | section |
+|---|---|---|
+| [#95](https://github.com/snokvist/waybeam-link/issues/95) | Scout occupancy — fill the reserved ACS fields from frame-free energy sensing | §1 (option A) |
+| [#96](https://github.com/snokvist/waybeam-link/issues/96) | Hardware ACK — bind `air.ack_responder` to `tx.retry_limit`; A-MPDU declined | §2 |
+| [#97](https://github.com/snokvist/waybeam-link/issues/97) | LDPC / STBC — we affirmatively command BCC and no-STBC today | §3 |
+| [#98](https://github.com/snokvist/waybeam-link/issues/98) | Adaptive link — harvest SNR/EVM, the saturation case §9.4 cannot see | §4 |
+| [#99](https://github.com/snokvist/waybeam-link/issues/99) | §7.2 quiet-gap error budget (TDMA prerequisite; TDMA deferred) | §5 |
+
+Not yet filed, and still open: the scout scoring layer (§1 option B), sequence-
+derived rate probing (§4), narrowband rungs (§6.1), and adapter/ground-station
+qualification as bench process (§6.2).
+
 Scope: the four areas the operator named first — **channel occupancy + the
 channel scout**, **aggregation and hardware ACKs**, **FEC**, and devourer's
 **interpretation of the adaptive link** (`third_party/devourer/docs/adaptive-link.md`,
