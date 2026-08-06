@@ -72,6 +72,48 @@ int main() {
         CHECK(!w.wedged());
     }
 
+    // §9.10 v2 (Pass 148): consecutive_wedged() drives the TX self-restart, so
+    // it must count CONSECUTIVE windows, not the lifetime total — a craft that
+    // wedged briefly twice in a flight must not accumulate its way to a
+    // restart with no fault present.
+    {
+        TxWedge w(pol);
+        w.poll(0, 0, 0);
+        CHECK(w.consecutive_wedged() == 0);
+        w.poll(1000, 100, 0);  // wedged window 1
+        CHECK(w.consecutive_wedged() == 1);
+        w.poll(2000, 200, 0);  // wedged window 2
+        CHECK(w.consecutive_wedged() == 2);
+        // Any backend progress clears it, even while the lifetime total keeps
+        // its history. Both counters are CUMULATIVE, so a healthy window has
+        // to advance the progress value, not merely be non-zero.
+        w.poll(3000, 300, 5);
+        CHECK(w.consecutive_wedged() == 0);
+        CHECK(w.wedge_windows() == 2);
+        w.poll(4000, 400, 10);
+        CHECK(w.consecutive_wedged() == 0);
+        w.poll(5000, 500, 15);
+        CHECK(w.consecutive_wedged() == 0);
+        CHECK(w.wedge_windows() == 2);  // lifetime total unchanged by progress
+        // A second, separate episode counts from zero rather than resuming.
+        w.poll(6000, 600, 15);
+        CHECK(w.consecutive_wedged() == 1);
+        CHECK(w.wedge_windows() == 3);
+    }
+    // An idle window holds the consecutive count rather than clearing it: an
+    // idle TX is evidence of nothing, exactly as it is for the verdict itself.
+    {
+        TxWedge w(pol);
+        w.poll(0, 0, 0);
+        w.poll(1000, 100, 0);
+        CHECK(w.consecutive_wedged() == 1);
+        w.poll(2000, 101, 0);  // 1 submit — below min_submits, no verdict
+        CHECK(w.consecutive_wedged() == 1);
+        CHECK(w.wedged());
+        w.poll(3000, 201, 0);  // back to real submissions, still no progress
+        CHECK(w.consecutive_wedged() == 2);
+    }
+
     // window_ms = 0 disables the watchdog entirely.
     {
         TxWedge w(TxWedgePolicy{0, 8});
