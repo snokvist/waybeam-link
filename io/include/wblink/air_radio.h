@@ -22,8 +22,10 @@
 #include <string>
 #include <vector>
 
+#include "wblink/air_iface.h"  // AirIface (the backend contract)
 #include "wblink/air_udp.h"  // AirRxMeta (shared meta shape)
 #include "wblink/config.h"   // AdapterCfg, Result
+#include "wblink/types.h"    // kRxMcsBuckets, mtu_tier
 
 namespace wblink {
 
@@ -45,58 +47,108 @@ struct RadioAirCfg {
     bool disable_cca = false;
 };
 
-class RadioAir {
+class RadioAir : public AirIface {
   public:
-    using RxCb = std::function<void(const AirRxMeta&, const uint8_t*, size_t)>;
-
     static Result<RadioAir> create(const RadioAirCfg& cfg);
 
     RadioAir(RadioAir&&) noexcept;
     RadioAir& operator=(RadioAir&&) noexcept;
-    ~RadioAir();
+    ~RadioAir() override;
 
     // Send one wire packet on the TX adapter (§3.0 encapsulation added
     // here). Returns 1 when submitted, 0 on failure.
-    size_t inject(const uint8_t* frame, size_t len);
-    size_t inject_resend(const uint8_t* frame, size_t len);
+    size_t inject(const uint8_t* frame, size_t len) override;
+    size_t inject_resend(const uint8_t* frame, size_t len) override;
 
     // Send one return (NACK/LINK_REPORT) toward dest_originator. With
     // unicast_returns on and an SA latched for the target, this goes out as
     // the §3.0 Pass-12 hardware-ACKed unicast QoS-Data; otherwise it is a
     // plain broadcast inject() (fallback counted).
     size_t inject_return(uint16_t dest_originator, const uint8_t* frame,
-                         size_t len, bool urgent = false);
+                         size_t len, bool urgent) override;
     // Cumulative unicast-return counters for §15.3.
     void return_counters(uint64_t& unicast_sent,
                          uint64_t& unicast_fallback) const;
 
     // Deliver queued RX frames (§3.0 payloads, header stripped); blocks up
     // to timeout_ms when the queue is empty. Returns frames delivered.
-    int poll_once(int timeout_ms, const RxCb& cb);
+    int poll_once(int timeout_ms, const RxCb& cb) override;
     int wait_fd() const;
+    std::vector<int> wait_fds() const override { return {wait_fd()}; }
 
-    size_t rx_adapters() const;
+    size_t rx_adapters() const override;
 
     // --- control plane (main thread only) --------------------------------
     // Committed operating point → the TX adapter's rate-less default
     // (§9.5/§10.4). 20 MHz HT only in v0 (§1 craft constraint).
-    void set_tx_mode(uint8_t mcs, bool sgi);
-    // §10.4 absolute power apply; returns the qdb devourer reports applied.
-    int set_power_qdb(size_t adapter, int32_t qdb);
+    void set_tx_mode(uint8_t mcs, bool sgi) override;
+    // §10.4 absolute power apply. In-process, so it always reports accepted
+    // (§10.5's false means "backend refused"); devourer's own applied-qdb
+    // return was never read by any caller.
+    bool set_power_qdb(size_t adapter, int32_t qdb) override;
     // Hardware TSF of one adapter (µs, control transfer — can fail under
     // heavy RX load; nullopt then, caller falls back to host time, §7.2).
-    std::optional<uint64_t> read_tsf(size_t adapter);
+    std::optional<uint64_t> read_tsf(size_t adapter) override;
     // §11 CSA retune. fast + bw==0 → FastRetune (class 0, TXAGC untouched —
     // follow with reapply_tx_power); otherwise a full SetMonitorChannel.
     // false = bad adapter/channel. bw: §11.1 encoding (0=20 1=40 2=80).
-    bool retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast);
+    // NOTE the parameter is the interface's canonical MHz width, but the
+    // dual-encoding tolerance the callers relied on is preserved verbatim: a
+    // value <=2 is taken as an already-encoded §11.1 class. That wart moved
+    // here from two caller-side `bw > 2 ? bw_code(bw) : bw` expressions; it is
+    // preserved, not endorsed, and resolving it is its own change.
+    bool retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
+                bool fast) override;
     // §10.4/§11.2: re-program TX power at the current channel post-retune.
-    bool reapply_tx_power(size_t adapter);
+    bool reapply_tx_power(size_t adapter) override;
     // §11.6 verify hygiene (Pass 69): discard the process-queue RX backlog
     // captured before a retune completed, so post-retune consumers only see
     // frames from the new channel. devourer's internal USB pipeline is below
     // this boundary (same posture as driver buffers on kernel-monitor).
-    void flush_rx();
+    void flush_rx() override;
+
+    // --- declared limits -------------------------------------------------
+    // Everything below is a capability this backend does NOT have today. Each
+    // was previously an `if (mon)` in app/main.cpp's AirBackend with no radio
+    // branch — documented at the definition, but invisible at the ~98 call
+    // sites, where the call reads as working code. Stating them here does not
+    // make the backend more capable; it puts the answer somewhere a test can
+    // assert it and somewhere the compiler notices when a new method is added.
+    // Behaviour is preserved exactly; ids are docs/devourer-parity-plan.md.
+
+    // G4 — §11.6 Pass 80 RX-liveness recovery is kernel-monitor only. The
+    // caller's watchdog treats false as "recovery unavailable", not "failed".
+    bool recover(size_t adapter, uint16_t chan_mhz,
+                 uint8_t width_mhz) override;
+    // G7 — "auto" differs by backend and that difference is a protocol
+    // question, not an implementation gap: kernel-monitor hands power back to
+    // the driver default, this backend zeroes the offset, which undoes a §10.5
+    // latch but leaves any §10.2 curve resolve to re-apply on top.
+    bool set_power_auto(size_t adapter) override;
+    // G1 — both net_id roles are fixed at construction here. The RX filter is
+    // read on the per-adapter RX thread, so a real setter is a synchronisation
+    // change inside the backend rather than a forwarding call. Until then these
+    // are no-ops, which is why a §15.5a scout sweep never widens on devourer.
+    void set_stamp_net_id(uint8_t net_id) override;
+    void set_filter_net_id(std::optional<uint8_t> net_id) override;
+    // G6 — answers 0 on the convention that the single role:"tx" adapter is
+    // listed first. A config that lists it elsewhere scouts the wrong ear.
+    size_t tx_index() const override;
+    // create() requires exactly one role:"tx" adapter, so a constructed
+    // RadioAir always has an uplink. (An RX-only devourer node is reachable by
+    // enumerating and declining to inject — that is a config shape this
+    // backend does not build today, not a hardware limit.)
+    bool has_tx() const override;
+    // G5 — a successful create() means every adapter was accepted by
+    // devourer's Realtek driver matrix (§9.3a v1), so the tier is asserted
+    // rather than probed.
+    uint16_t mtu_supported() const override;
+    // G2 — §14.2 JSCC airtime has no estimator here; the scheduler already
+    // treats nullopt as "no airtime signal".
+    std::optional<uint32_t> estimate_airtime_us(
+        size_t bytes, bool include_pending,
+        uint16_t packet_budget) const override;
+    bool is_rf() const override { return true; }
 
     struct AdapterCounters {
         std::string name;
@@ -120,6 +172,9 @@ class RadioAir {
         bool rx_dead = false;  // §15.3 Pass 101: RX thread exited (definitive)
     };
     AdapterCounters counters(size_t adapter) const;
+    uint64_t rx_frames(size_t adapter) const override {
+        return counters(adapter).rx_frames;
+    }
 
     // TX adapter's cumulative (tx_submitted, tx_reports) for the §9.10
     // wedge watchdog — cheap per-iteration accessor, no string copies.

@@ -615,19 +615,30 @@ void RadioAir::set_tx_mode(uint8_t mcs, bool sgi) {
     impl_->adapters[impl_->tx_idx]->dev->SetTxMode(m);
 }
 
-int RadioAir::set_power_qdb(size_t adapter, int32_t qdb) {
+bool RadioAir::set_power_qdb(size_t adapter, int32_t qdb) {
     if (adapter >= impl_->adapters.size()) {
-        return 0;
+        return false;
     }
-    return impl_->adapters[adapter]->dev->SetTxPowerOffsetQdb(
+    // devourer returns the qdb it applied; no caller has ever read it, and
+    // §10.5's bool means "the backend accepted the write", which an
+    // in-process offset always does.
+    (void)impl_->adapters[adapter]->dev->SetTxPowerOffsetQdb(
         static_cast<int>(qdb));
+    return true;
 }
 
-bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t bw,
+bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
                       bool fast) {
     if (adapter >= impl_->adapters.size()) {
         return false;
     }
+    // Dual-encoding tolerance moved here verbatim from the two caller-side
+    // `bw > 2 ? bw_code(bw) : bw` expressions: >2 is an MHz width, <=2 is an
+    // already-encoded §11.1 class. Preserved, not endorsed (see the header).
+    const uint8_t bw = width_mhz > 2 ? (width_mhz >= 80   ? 2
+                                        : width_mhz >= 40 ? 1
+                                                          : 0)
+                                     : width_mhz;
     const uint8_t chan = mhz_to_channel(chan_mhz);
     if (chan == 0) {
         return false;
@@ -669,6 +680,57 @@ std::optional<uint64_t> RadioAir::read_tsf(size_t adapter) {
     } catch (const std::exception&) {
         return std::nullopt;  // control transfer raced the RX bulk load
     }
+}
+
+// --- declared limits (docs/devourer-parity-plan.md) ----------------------
+// These were `if (mon)` branches in AirBackend with no radio arm. Behaviour is
+// preserved exactly; what changes is that the answer is now stated per backend
+// instead of being the absence of a branch at 98 call sites.
+
+bool RadioAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz) {
+    (void)adapter;
+    (void)chan_mhz;
+    (void)width_mhz;
+    return false;  // G4: §11.6 Pass 80 re-init is kernel-monitor only
+}
+
+bool RadioAir::set_power_auto(size_t adapter) {
+    // G7: "auto" here means offset 0 — it undoes a §10.5 latch and leaves the
+    // §10.2 curve resolve to re-apply on top. Not the same as the kernel
+    // driver's `txpower auto`; reconciling them is a protocol ruling.
+    return set_power_qdb(adapter, 0);
+}
+
+void RadioAir::set_stamp_net_id(uint8_t net_id) {
+    (void)net_id;  // G1: fixed at construction
+}
+
+void RadioAir::set_filter_net_id(std::optional<uint8_t> net_id) {
+    // G1: the filter is read on each adapter's RX thread, so a live setter is
+    // a synchronisation change in this backend, not a forwarding call.
+    (void)net_id;
+}
+
+size_t RadioAir::tx_index() const {
+    return 0;  // G6: convention, not resolution — see the header
+}
+
+bool RadioAir::has_tx() const {
+    return true;  // create() requires exactly one role:"tx" adapter
+}
+
+uint16_t RadioAir::mtu_supported() const {
+    // G5: a successful create() means every adapter passed devourer's Realtek
+    // driver matrix (§9.3a v1), so the tier is asserted rather than probed.
+    return mtu_tier::kHighBudget;
+}
+
+std::optional<uint32_t> RadioAir::estimate_airtime_us(
+    size_t bytes, bool include_pending, uint16_t packet_budget) const {
+    (void)bytes;
+    (void)include_pending;
+    (void)packet_budget;
+    return std::nullopt;  // G2: no §14.2 estimator on this backend
 }
 
 void RadioAir::tx_report_counters(uint64_t& submitted,

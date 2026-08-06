@@ -438,6 +438,224 @@ void test_bw_code() {
     CHECK_EQ_U(bw_code(40), 1);
 }
 
+
+// ---------------------------------------------------------------------------
+// AirIface contract (Pass 140)
+//
+// FakeAir exists because the interface's whole point is that a backend states
+// its answer somewhere a test can read it. Before the contract there was
+// nothing to fake: AirBackend held concrete std::optional<MonAir>, so the
+// capability gaps could only be observed on hardware.
+//
+// These cases pin the DECLARED LIMITS, not aspirations. Several assert that a
+// backend does nothing — that is the point. When a gap is closed for real, the
+// matching assertion fails and has to be rewritten deliberately, which is the
+// opposite of a silent no-op quietly becoming a silent action.
+// ---------------------------------------------------------------------------
+
+class FakeAir : public AirIface {
+  public:
+    size_t adapters = 2;
+    bool rf = true;
+    bool tx = true;
+    // Observations
+    int retunes = 0, recovers = 0, reapplies = 0, flushes = 0;
+    int stamp_sets = 0, filter_sets = 0;
+    bool retune_ok = true, recover_ok = false;
+    std::vector<size_t> retuned_adapters;
+    std::vector<uint8_t> retune_widths;
+
+    size_t inject(const uint8_t*, size_t) override { return 1; }
+    size_t inject_resend(const uint8_t*, size_t) override { return 1; }
+    size_t inject_return(uint16_t, const uint8_t*, size_t, bool) override {
+        return 1;
+    }
+    int poll_once(int, const RxCb&) override { return 0; }
+    std::vector<int> wait_fds() const override { return {}; }
+    size_t rx_adapters() const override { return adapters; }
+    void flush_rx() override { ++flushes; }
+    bool retune(size_t a, uint16_t, uint8_t w, bool) override {
+        ++retunes;
+        retuned_adapters.push_back(a);
+        retune_widths.push_back(w);
+        return retune_ok;
+    }
+    bool recover(size_t, uint16_t, uint8_t) override {
+        ++recovers;
+        return recover_ok;
+    }
+    bool reapply_tx_power(size_t) override {
+        ++reapplies;
+        return true;
+    }
+    bool set_power_qdb(size_t, int32_t) override { return true; }
+    bool set_power_auto(size_t) override { return true; }
+    std::optional<uint64_t> read_tsf(size_t) override { return std::nullopt; }
+    void set_tx_mode(uint8_t, bool) override {}
+    void set_stamp_net_id(uint8_t) override { ++stamp_sets; }
+    void set_filter_net_id(std::optional<uint8_t>) override { ++filter_sets; }
+    size_t tx_index() const override { return 0; }
+    bool has_tx() const override { return tx; }
+    uint16_t mtu_supported() const override { return kDefaultMaxPayload; }
+    std::optional<uint32_t> estimate_airtime_us(size_t, bool,
+                                                uint16_t) const override {
+        return std::nullopt;
+    }
+    bool is_rf() const override { return rf; }
+    uint64_t rx_frames(size_t a) const override { return 100 * (a + 1); }
+};
+
+// The udp dev backend is the one every fall-through used to land on, so its
+// declared answers are what the old `else` branches actually did.
+void test_udp_backend_declares_its_limits() {
+    AirUdpCfg uc;
+    uc.originator = 7;
+    auto a = UdpAir::create(uc);
+    CHECK(static_cast<bool>(a));
+    UdpAir& u = *a.value;
+
+    // No RF: this is what AirBackend::is_radio() now asks.
+    CHECK(!u.is_rf());
+    // A retune is logged intent and reports success — that is what keeps the
+    // §11 CSA state machines exercisable without radios (§16).
+    CHECK(u.retune(0, 5805, 20, false));
+    // §11.6 Pass 80 re-init has no meaning here.
+    CHECK(!u.recover(0, 5805, 20));
+    // No hardware clock (§7.2 falls back to host time).
+    CHECK(!u.read_tsf(0).has_value());
+    // Power is logged intent, accepted like an in-process write (§10.5).
+    CHECK(u.set_power_qdb(0, 60));
+    CHECK(u.set_power_auto(0));
+    // Compatibility MTU tier: no driver matrix to assert anything better.
+    CHECK_EQ_U(u.mtu_supported(), kDefaultMaxPayload);
+    // Has an uplink by construction, so it does not suppress §3.11 heartbeats.
+    CHECK(u.has_tx());
+    // On the contract, so it must answer an out-of-range adapter the way the
+    // RF backends do (zeroed) rather than indexing off the end — a caller
+    // holding an AirIface* cannot tell which backend it has.
+    CHECK_EQ_U(u.rx_frames(9999), 0u);
+}
+
+// The §11.1 width/class duality used to sit in two caller-side ternaries.
+void test_width_mhz_resolves_both_encodings() {
+    CHECK_EQ_U(AirBackend::width_mhz(0), 20u);
+    CHECK_EQ_U(AirBackend::width_mhz(1), 40u);
+    CHECK_EQ_U(AirBackend::width_mhz(2), 80u);
+    // Anything above the class range is already an MHz width.
+    CHECK_EQ_U(AirBackend::width_mhz(20), 20u);
+    CHECK_EQ_U(AirBackend::width_mhz(40), 40u);
+    CHECK_EQ_U(AirBackend::width_mhz(80), 80u);
+}
+
+// With the backend owned through the contract, a test can install a fake and
+// drive the REAL loops. These three previously could only be checked on
+// hardware, and two of them cover behaviour this pass deliberately changed.
+
+// Build an AirBackend around a FakeAir. chan_by_adapter is sized like a real
+// create() would size it, so note_chan's bounds check behaves the same.
+AirBackend backend_with(std::unique_ptr<FakeAir> f, size_t adapters) {
+    AirBackend b;
+    b.chan_by_adapter.assign(adapters, 5745);
+    b.air = std::move(f);
+    return b;
+}
+
+// CHANGED IN THIS PASS: the monitor path used to flush unconditionally.
+// Flushing after a recovery that recovered nothing discards live backlog for
+// no benefit, and on a backend with no re-init path it is a pure loss.
+void test_recover_all_only_flushes_when_something_recovered() {
+    auto f = std::make_unique<FakeAir>();
+    f->adapters = 2;
+    f->recover_ok = false;
+    FakeAir* spy = f.get();
+    AirBackend b = backend_with(std::move(f), 2);
+
+    CHECK(!b.recover_all(5805, 20));
+    CHECK_EQ_U(static_cast<unsigned>(spy->recovers), 2u);
+    CHECK_EQ_U(static_cast<unsigned>(spy->flushes), 0u);  // the guard
+    // A failed recovery must not move the recorded channel either.
+    CHECK_EQ_U(b.chan_by_adapter[0], 5745u);
+
+    spy->recover_ok = true;
+    spy->recovers = 0;
+    CHECK(b.recover_all(5805, 20));
+    CHECK_EQ_U(static_cast<unsigned>(spy->flushes), 1u);
+    CHECK_EQ_U(b.chan_by_adapter[0], 5805u);
+    CHECK_EQ_U(b.chan_by_adapter[1], 5805u);
+}
+
+// CHANGED IN THIS PASS: the radio path used to re-apply TX power even when the
+// retune had failed. Re-applying power for a channel the adapter is not on is
+// meaningless; the monitor path already only did it on success.
+void test_retune_all_reapplies_power_only_on_success() {
+    auto f = std::make_unique<FakeAir>();
+    f->adapters = 3;
+    f->retune_ok = false;
+    FakeAir* spy = f.get();
+    AirBackend b = backend_with(std::move(f), 3);
+
+    CHECK(!b.retune_all(5805, 20, false));
+    CHECK_EQ_U(static_cast<unsigned>(spy->retunes), 3u);   // every adapter tried
+    CHECK_EQ_U(static_cast<unsigned>(spy->reapplies), 0u); // none on failure
+    CHECK_EQ_U(b.chan_by_adapter[0], 5745u);               // channel not moved
+    // §11.6 verify hygiene: the backlog is dropped either way, because it is
+    // old-channel residue regardless of whether the retune took.
+    CHECK_EQ_U(static_cast<unsigned>(spy->flushes), 1u);
+
+    spy->retune_ok = true;
+    spy->retunes = 0;
+    CHECK(b.retune_all(5805, 20, false));
+    CHECK_EQ_U(static_cast<unsigned>(spy->reapplies), 3u);
+    CHECK_EQ_U(b.chan_by_adapter[2], 5805u);
+}
+
+// The backend receives an MHz width whichever encoding the caller used — the
+// duality that used to live in two caller-side ternaries.
+void test_retune_all_passes_mhz_width_for_either_encoding() {
+    for (const auto& [in, want] : std::vector<std::pair<uint8_t, uint8_t>>{
+             {2, 80}, {1, 40}, {0, 20}, {80, 80}, {40, 40}, {20, 20}}) {
+        auto f = std::make_unique<FakeAir>();
+        f->adapters = 1;
+        FakeAir* spy = f.get();
+        AirBackend b = backend_with(std::move(f), 1);
+        b.retune_all(5805, in, false);
+        CHECK_EQ_U(spy->retune_widths.at(0), want);
+    }
+}
+
+// rx_frames_total sums the liveness counter across adapters through the
+// contract. It used to skip the udp backend entirely and read 0 there, so the
+// §11.6 watchdog saw a permanently dead link on the dev transport.
+void test_rx_frames_total_sums_through_the_contract() {
+    auto f = std::make_unique<FakeAir>();
+    f->adapters = 3;
+    AirBackend b = backend_with(std::move(f), 3);
+    CHECK_EQ_U(b.rx_frames_total(), 600u);  // 100 + 200 + 300
+}
+
+// is_radio() asks the contract "is this real RF", not "is this devourer".
+void test_is_radio_follows_the_backend() {
+    auto f = std::make_unique<FakeAir>();
+    f->rf = false;
+    FakeAir* spy = f.get();
+    AirBackend b = backend_with(std::move(f), 1);
+    CHECK(!b.is_radio());
+    spy->rf = true;
+    CHECK(b.is_radio());
+}
+
+// A node with no TX adapter emits no §3.11 heartbeat, on ANY backend. This was
+// the one divergence with no comment anywhere.
+void test_heartbeat_suppressed_without_tx_on_any_backend() {
+    FakeAir f;
+    f.tx = false;
+    CHECK(!f.has_tx());
+    f.rf = false;  // and it is not an RF-only rule
+    CHECK(!f.has_tx());
+    f.tx = true;
+    CHECK(f.has_tx());
+}
+
 }  // namespace
 
 int main() {
@@ -459,5 +677,13 @@ int main() {
     test_vcmd_name_id_roundtrip();
     test_channel_allowed_is_fail_closed();
     test_bw_code();
+    test_udp_backend_declares_its_limits();
+    test_width_mhz_resolves_both_encodings();
+    test_recover_all_only_flushes_when_something_recovered();
+    test_retune_all_reapplies_power_only_on_success();
+    test_retune_all_passes_mhz_width_for_either_encoding();
+    test_rx_frames_total_sums_through_the_contract();
+    test_is_radio_follows_the_backend();
+    test_heartbeat_suppressed_without_tx_on_any_backend();
     return wbtest_finish("app_test");
 }

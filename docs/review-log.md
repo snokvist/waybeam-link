@@ -6102,3 +6102,149 @@ from lossless at every rate, ≥98 % throughout, no regression from the bump** �
 not that the link delivered more frames than were sent. A tighter number would
 need both counters sampled from one clock, which this harness does not do and
 does not need to for a no-regression check.
+
+## Pass 140 — one contract for every frame transport (2026-08-06)
+
+Pass 137 named `run_rx()` as the next seam and Pass 138 cut the first piece out
+of it. This cuts a different kind of seam: not a slice of orchestration, but
+the boundary underneath it. `app/main.cpp`'s `AirBackend` held three concrete
+backends in `std::optional` and hand-dispatched every call —
+
+    if (mon)   { ... }
+    if (radio) { ... }
+    else       { udp ... }
+
+— across ~25 methods reached from 98 call sites. Four of those methods answered
+only kernel-monitor. Each was *documented* as such at its definition, so this
+was never a set of typos; the problem is that the limitation is invisible where
+it is used. `air.value->set_filter_net_id(n)` in `run_rx` reads as working code,
+and the consequence of it not working is silent (the §15.5a scout filter never
+widens, so a craft on another net_id is never discovered while the sweep still
+reports clean).
+
+**`io/include/wblink/air_iface.h` is all-pure-virtual on purpose.** A backend
+must state its answer even when the answer is "this transport has no such
+concept". `udp-air has no TSF` is now written down rather than inferred from a
+fall-through, and the next method added cannot quietly acquire a fourth
+behaviour by omission.
+
+`MonAir` needed almost nothing — its API already *was* the contract, which is
+the evidence that the contract was discovered rather than invented. `RadioAir`
+needed nine explicit stubs and they are exactly the register's existing items
+(G1, G2, G4, G5, G6, G7). `UdpAir` needed the most, because it is the bench
+transport every fall-through used to land on.
+
+**One divergence had no documentation anywhere:** the §3.11 heartbeat guard,
+`if (mon && !mon->has_tx())`. It read as a monitor detail. It is a rule — a
+node with no TX adapter emits no heartbeat, whichever backend it runs — and it
+now says so through `has_tx()`. That entry is missing from
+`docs/devourer-parity-plan.md`, which should gain it when the register is
+realigned.
+
+**Loops that were written two and three times collapse to one each.**
+`retune_all`, `recover_all` and `rx_frames_total` iterated per-adapter
+primitives that the two RF backends already had in common; only the loop was
+duplicated. `rx_frames_total` needed one addition to the contract —
+`rx_frames(adapter)`, deliberately *not* the whole counters struct, because
+those differ by real fields (`kernel_dropped`/`bpf_filtered` against
+`evm`/`cfo`/`snr`) and reconciling them is a §15.3 schema question. The §15.3
+fills therefore keep their existing per-backend dispatch and are named here as
+the follow-up rather than smuggled in.
+
+**Three behaviour changes, deliberate, each pinned by a test.** A pure move
+would have been preferable, but three places could not be collapsed without
+choosing:
+
+- `recover_all` now flushes RX **only when something recovered**. The monitor
+  path flushed unconditionally; discarding backlog after a recovery that
+  recovered nothing throws away live frames for no benefit, and on a backend
+  with no re-init path it is a pure loss.
+- `retune_all` now re-applies TX power **only on a successful retune**. The
+  radio path re-applied unconditionally — re-programming TXAGC for a channel
+  the adapter is not on. The monitor path already only did it on success.
+- `rx_frames_total` now includes the udp dev backend, which it previously
+  skipped entirely and read 0 for. The §11.6 liveness watchdog therefore saw a
+  permanently dead link on the dev transport.
+
+**Ownership moved to `std::unique_ptr<AirIface>`, and the reason is testing,
+not performance.** An accessor resolving the engaged backend per call would
+have removed the duplicate dispatch just as well, and that is what this pass
+did first. It was wrong: with the backends owned as `std::optional` members,
+nothing can install a fake, so the collapsed loops — where all three behaviour
+changes above live — stay unreachable from a test. Owning through the contract
+makes `AirBackend` injectable. It also removes a hazard the optionals carried:
+`AirBackend` is returned by value from `create()`, so anything caching a
+pointer into an optional member would dangle after the move, silently, since
+the object still exists at its new address. Typed non-owning views (`mon`,
+`radio`, `udp`) remain beside the owner for the §15.3 fills and the udp-only
+bench hooks.
+
+`app_test`: **150 checks, up from 107.** The three changed behaviours were
+verified non-vacuous by reverting each guard to its old form — two failures
+each time, and both tests named the exact counter that moved.
+
+**Pass 140 device verification (2026-08-06).** Ground x86 running this build,
+craft `.2.232` brought up only for the `retune_all` arm and stopped again. The
+point of the exercise is a refactor that changed three behaviours on purpose:
+the collapsed loops had to be seen driving real adapters.
+
+- **`retune_one` (scout sweep, no craft needed).** `POST /scout/start` over
+  5745/5805/5825: the uplink ear roamed 5805 → 5825 → back while the diversity
+  ear **stayed on 5805 throughout**, and results came back for all three
+  channels. That per-adapter targeting is the property the collapse had to
+  preserve — the scout moves one ear with the others left in place.
+- **`retune_all` (CSA, craft up).** `POST /csa {"mhz":5745}` moved **both**
+  ground ears and the craft together; `{"mhz":5805}` brought all three back.
+- **Power re-apply on success.** The journal shows the whole ownership story:
+  `txpower fixed 84 qdb (2100 mBm)` once the craft paired, then
+  `csa: commit -> 5745 MHz` followed by `txpower auto ok`, then on the way back
+  `csa: commit -> 5805 MHz` followed by `txpower fixed 84 qdb` again.
+- **CSA with no craft is refused** (`no craft selected — nothing latched, no
+  claim`) and leaves both adapters untouched.
+
+Two readings worth writing down because each looks like a fault and is not:
+
+- **Power fell 21.00 → 19.00 dBm on the move to 5745.** The §10.7 artifact is
+  scoped to the channel it was calibrated on, so off 5805 it stops owning power
+  and the owner falls to backend auto — the driver default. `/tx/power_tier`
+  reported `effective: false` for exactly that window and `true` again after
+  the return. That is the Pass 136 observability doing its job, not a lost
+  latch.
+- **A tier applied with the craft down moves nothing.** With no pairing there
+  is no artifact placement to clamp, which is the §10.3 ruling that a ceiling
+  does not bind an unpaired node. The endpoint says `effective: false`; the
+  radio stays where `mon-up` left it.
+
+**Bench EU carried item closed (2026-08-06) — the replug does not rescue it.**
+Pass 139 parked the bench 8822e as suspect with one untested confound: a
+physical re-plug. It has now been re-plugged, and two further arms rule out the
+remaining explanations.
+
+| arm | MCS4 | MCS5 | MCS6 | MCS7 |
+|---|---|---|---|---|
+| after physical re-plug | 98.65 % | 5.84 % | 0.74 % | **0.11 %** |
+| kernel driver blacklisted, VBUS-cycled, never bound | 50.16 % | 1.71 % | 0.47 % | **0.10 %** |
+
+The second arm tests the operator's hypothesis that the kernel driver holding
+or having initialised the chip was the cause: `8812eu` blacklisted so it cannot
+auto-load, the USB port VBUS-cycled to full de-enumeration, and the chip
+verified to come back with **no module loaded and no driver bound** before
+devourer claimed it. It fails the same way. A chip the kernel never touched is
+not the fix.
+
+Two things the re-vendored devourer made visible that the old tree did not:
+
+- **`rx_at_other_rates` is now large in every failing window** (≈14–16 k). The
+  #377/#371 retry-ladder work delivers the fallback retries, so the frames that
+  fail at 64-QAM arrive at lower rates instead of vanishing. That is direct
+  corroboration rather than a new symptom: the radio transmits, and only the
+  dense constellations are unrecoverable on this unit.
+- **The virgin chip is WORSE at MCS4** (50.16 % against 98.65 % on the arm
+  where the kernel driver had initialised it first). Inheriting the kernel
+  driver's bring-up state helps this unit, which is what an incomplete
+  per-unit calibration in devourer would look like — and the opposite of what
+  a "the kernel driver is in the way" explanation predicts.
+
+The unit stays retired from TX A/Bs. Every mechanism that could be tested
+remotely has been, and the craft's 8822e remains the reference: same chip, same
+RFE type, MCS4–7 at or indistinguishable from lossless.
