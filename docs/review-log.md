@@ -7475,3 +7475,145 @@ is the correct failure direction.
 calibration recovers anyway. The seed should be recorded as a seed — a number
 chosen from one unit, expected to be wrong for some card, and made not to
 matter by the calibrate-up path.
+
+**Pass 150 ADOPTED (2026-08-06).** Seed ruled at **−24 qdb (−6 dB)**. §10.5 is
+rewritten relative-only, §10.3's ceiling recommendation is amended in place
+with the reason it failed, and §15.2 gains `power_offset_qdb` /
+`power_offset_max_qdb`.
+
+Implementation is staged deliberately. **This pass delivers the power
+contract**: safe-by-default boot offset on every `role:"tx"` adapter, a bounded
+latch that REJECTS rather than clamps, `auto` resolving to calibrated-or-safe,
+and one relative contract realised natively per backend (devourer against the
+efuse table, kernel-monitor against `max_power_qdb`). **The calibrate-up
+rework of §10.6/§10.7 is NOT in this pass** — it needs the artifact to move
+into offset space and the sweep to reverse direction, which is a larger change
+to a subsystem with its own device-verification burden. Until it lands, a node
+runs at the safe seed and its headroom stays unearned. That is the correct
+failure direction and is stated rather than left implicit.
+
+`max_power_qdb` is not removed. All four flying configs carry it, so a hard
+removal would be a coordinated fleet change for no safety gain: on
+kernel-monitor it is now the reference the offset applies to, and on devourer
+it is accepted with a warning and ignored. Removing it can follow once the
+calibration rework retires the last consumer.
+
+**Pass 150 implementation notes — what it takes with it.**
+
+**The §11.7 0x0A power tier (Pass 135) loses its grip on the latch, and that is
+visible rather than silent.** Pass 135 was built on "the §10.3 ceiling is the
+ONE clamp on an override", so a lowered tier re-asserted a held latch through
+the new, lower clamp. Pass 150 removes that clamp — it was clamping an offset —
+so a tier no longer bounds the latch at all. `power_presets_qdb` still moves
+`max_power_qdb`, which now means the kernel-monitor reference and nothing on
+devourer. **Re-basing the tier onto offsets is deliberately NOT done here**:
+the four flying configs carry absolute preset lists (60…108) that, reinterpreted
+as offsets, would be +15 to +27 dB — the exact overdrive this pass exists to
+prevent. Re-basing therefore needs a migration, and it belongs with the
+calibrate-up rework that will author those lists from measurement instead of by
+hand.
+
+The `app_test` case asserting the old clamp was **re-authored, not patched**:
+it now proves an over-bound request is refused with nothing reaching hardware,
+where before it proved 120 qdb silently became 108. Keeping the old assertion
+green would have meant keeping the bug.
+
+**`apply_power_offset` is bound for every backend**, unlike `apply_power`, which
+is radio-only — that asymmetry is why the ground's uplink never went through the
+§10.2 curve path and why the divergence hid for so long.
+
+Not yet on device. The craft currently holds the equivalent value as a volatile
+§10.5 latch (`qdb: -16`); the config key is what makes it survive a restart, and
+`-24` is the shipped seed.
+
+**Pass 150 review findings — the implementation was half-done (2026-08-06).**
+An adversarial review of the first cut found four CRITICAL paths still on the
+old absolute actuator. The pattern is worth naming: the relative contract was
+added *alongside* the absolute one rather than replacing it, and the paths left
+behind were the ones that actually run.
+
+1. **The §10.4 commit resolve.** `resolve_and_apply_power` wrote §10.2 curve
+   values through `apply_power`, so on any node with a `power_map` the first
+   profile commit after boot would overwrite the −24 boot offset with a
+   60…108 qdb curve entry — reinterpreted as **+15…+27 dB**. The boot offset
+   was correct and did not survive contact with the selector. The §10.2 curve
+   is now REFUSED on a relative backend until it is re-based into offset space.
+2. **The §10.6 sweep**, which drives `apply_power` from `min_qdb` to
+   `min(108, max_power_qdb)` — and is bound only when `is_radio()`, making it
+   *devourer-exclusive* and therefore entirely in offset space. It would have
+   walked +1 dB → +27 dB, **RF-triggerable** via `vcmd_id::kCalibrate`, with no
+   downstream clamp before the chip's own ±126 qdb rail. Calibration start now
+   refuses on a relative backend.
+3. **The calibration restore leaf** (`no_wall_found`, which Pass 134 made a
+   routine outcome) called `apply_power_auto` → offset 0: the compressing
+   point. `clear_power_override` had been fixed; its sibling had not.
+4. **The entire ground uplink.** `apply_boot_power_offsets` had exactly one
+   call site, in `run_tx`. The ground's `upwr.apply_qdb` still wrote absolute,
+   `upwr.apply_auto` landed on offset 0 every boot, and `:8092`'s latch was
+   unbounded. The spec sentence "every `role:"tx"` adapter" was false for half
+   the fleet. Now converted, bounded and boot-offset applied.
+
+Also fixed: actuator failures were discarded, so `set_power_override` latched
+and reported a value the radio had refused (reachable — `MonAir` returns false
+with no reference); the boot log asserted an offset it had not necessarily
+applied; §11.6 recovery on kernel-monitor ends in `txpower auto` and
+`reassert_power` restored nothing without a latch or curve, permanently losing
+the boot offset — the boot offset is now the floor of that precedence;
+`power_tier_effective()` still claimed a tier was effective on the strength of
+a held latch it no longer clamps; and `max_power_qdb` is now range-checked
+(−40…120), because the pre-150 "disable the ceiling" idiom of `2000` shipped in
+two sample configs and the §15.2 example, which as a kernel-monitor *reference*
+means 500 dBm handed to `iw`.
+
+Test debt the review surfaced: `PowerSpy` funnelled both actuators into one
+vector, so **no test could distinguish an absolute write from an offset one** —
+the entire subject of this pass. They are recorded separately now, and a
+regression test pins that a commit on a relative backend reaches hardware with
+neither.
+
+Left deliberately: `max_power_qdb` still clamps `power_presets_qdb` at load and
+seeds `PowerTarget::ceiling`, so the "accepted with a warning and ignored"
+wording overstates what the code does on devourer today. The tier re-basing
+that would resolve it belongs with the calibrate-up rework. Also unresolved and
+now recorded: §15.3 `tx_power_qdb` carries an offset on the craft and an
+absolute on the ground with no schema signal, and waybeam-hub's WebUI consumes
+it — a cross-repo change, not fixable here.
+
+**Pass 150 device verification (2026-08-06, craft `.2.232` + ground).** Both
+ends deployed, both on their config defaults with no runtime latch.
+
+Craft (devourer), from `power_offset_qdb` defaulting to −24 with **no config
+change at all** — the volatile `qdb: -16` latch that had been holding the link
+together was simply not re-applied after the restart:
+
+```
+eu-craft role=tx ch=5805 bw=20 power_offset_qdb=-24 power_offset_max_qdb=0 max_power_qdb=108
+power: eu-craft §10.5 boot offset -24 qdb (bound +0) -> applied
+```
+
+Ground (kernel-monitor), proving the `reference + offset` realisation:
+`boot offset -24 qdb -> applied`, and `iw` reads **21.00 dBm** = the 108 qdb
+reference minus 24. The latch arithmetic follows: `qdb: -8` → 25.00 dBm,
+`auto` → back to 21.00 dBm, *not* the driver default. Note the ground's uplink
+moved 19 → 21 dBm, because before this the boot power came from whatever the
+uplink owner last resolved; it now comes from a declared offset.
+
+| check | craft | ground |
+|---|---|---|
+| boot offset applied | ✅ −24 | ✅ −24 → 21.00 dBm |
+| latch above bound (+8) | ✅ REJECTED | ✅ REJECTED |
+| latch within bound (−8) | ✅ accepted | ✅ 25.00 dBm |
+| `auto` → safe, not backend default | ✅ | ✅ 21.00 dBm |
+
+Link with both ends on safe defaults: **MCS 5, 5 ‰ pre / 1 ‰ post-diversity,
+95035 delivered, 0 unrecoverable.** That reproduces the kernel-monitor
+reference number from a config default, where the pre-Pass-150 devourer default
+delivered 50 ‰ / 19 ‰ — the whole point of the pass, now persistent across a
+restart instead of a hand-applied latch.
+
+**Not verified on device:** the §10.6 RF-triggered calibration refusal. The
+craft's REST `POST /api/v1/calibration` is not bound in tx mode, and the RF
+`VEHICLE_CMD` path needs a §11.7 CSA claim, which `csa_psk=(unset)` blocks —
+the separate Pass 150 finding. The gate rests on code inspection and unit
+tests; calibration read `state: idle` throughout either way, which is the safe
+outcome but is not evidence the gate fired.

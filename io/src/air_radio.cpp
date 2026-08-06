@@ -701,6 +701,14 @@ bool RadioAir::set_power_qdb(size_t adapter, int32_t qdb) {
     return true;
 }
 
+// §10.5 (Pass 150): devourer's native lever already IS the relative one —
+// SetTxPowerOffsetQdb moves the whole efuse per-rate curve and preserves its
+// shape. So the relative contract is the identity here, and set_power_qdb's
+// long-standing "absolute" name was the lie the spec inherited.
+bool RadioAir::set_power_offset_qdb(size_t adapter, int32_t qdb) {
+    return set_power_qdb(adapter, qdb);
+}
+
 bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
                       bool fast) {
     if (adapter >= impl_->adapters.size()) {

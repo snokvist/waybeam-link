@@ -89,6 +89,7 @@ class RadioAir : public AirIface {
     // (§10.5's false means "backend refused"); devourer's own applied-qdb
     // return was never read by any caller.
     bool set_power_qdb(size_t adapter, int32_t qdb) override;
+    bool set_power_offset_qdb(size_t adapter, int32_t qdb) override;
     // Hardware TSF of one adapter (µs, control transfer — can fail under
     // heavy RX load; nullopt then, caller falls back to host time, §7.2).
     std::optional<uint64_t> read_tsf(size_t adapter) override;

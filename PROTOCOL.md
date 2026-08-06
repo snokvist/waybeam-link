@@ -2090,6 +2090,18 @@ hardware-range reference, not a safety limit. **Recommend an opt-in per-node
 `max_power_qdb` sanity ceiling** in the controller (off by default) so a
 mis-authored table cannot silently cook a PA.
 
+> **AMENDED (Pass 150).** That recommendation held only for a backend whose
+> power write is absolute. devourer's is relative to the efuse table, so
+> `min(qdb, max_power_qdb)` clamped the *offset*: the documented "cannot cook a
+> PA" ceiling became a permit for `max_power_qdb` **dB of boost** — measured at
+> +27 dB on the craft, which drove the PA into compression and collapsed the
+> link. `max_power_qdb` is therefore **no longer a TX ceiling**. It survives
+> only as kernel-monitor's absolute *reference* (§10.5). The safety role passes
+> to `power_offset_max_qdb` (default 0) bounding a relative latch, and the
+> operating point to `power_offset_qdb` (seed −24 qdb), applied at boot on every
+> `role:"tx"` adapter. Configs carrying `max_power_qdb` still load; on a
+> devourer node it is accepted with a warning and ignored.
+
 **The ceiling bounds the sweep, not only the resolve (Pass 134).** As written
 above, `max_power_qdb` was applied at §10.2 resolve and at §10.7 artifact
 apply — never to the calibration sweeps that drive *every* rung to
@@ -2180,18 +2192,58 @@ The one runtime power write (`POST /api/v1/tx/power`, §15.5) is an
 re-resolved away at the next §10.4 profile commit, so setting an override
 makes the §10.2 curve resolve **yield** until the override is cleared.
 
-- `{"qdb": <int>}` latches an **absolute** power on every `role:"tx"` adapter
-  of this node: applied immediately. While latched the §10.4 commit resolve
+**The latch is RELATIVE (Pass 150).** `qdb` is an offset in quarter-dB against
+the adapter's **calibrated reference**, not an absolute power. One contract,
+realised natively per backend:
+
+- **devourer** — the efuse per-rate table, via `SetTxPowerOffsetQdb`. The
+  calibrated per-rate *shape* is preserved; the offset moves the whole curve.
+- **kernel-monitor** — the adapter's configured `max_power_qdb` reference, via
+  `iw dev <if> set txpower fixed (max_power_qdb + qdb)`. An adapter with no
+  `max_power_qdb` has no reference, so the write is skipped and logged rather
+  than guessed.
+
+There is deliberately **no absolute TX contract anywhere**. devourer is the TX
+role (Passes 142–144) and its lever is natively relative; a dBm→TXAGC mapping
+would have to be built per unit, and Pass 150 measured that mapping at ±5 dB
+without a calibrated reference receiver. `max_power_qdb` survives only as
+kernel-monitor's *reference*, and is not a ceiling.
+
+**Safe by default; headroom is earned.** Every `role:"tx"` adapter applies
+`power_offset_qdb` (§15.2, seed **−24 qdb = −6 dB**) at startup. The efuse
+default (offset 0) is NOT a safe operating point: Pass 150 measured an 8822EU
+compressing there, delivering 54 ‰ loss against 6 ‰ two dB below it. No adapter
+may run at an uncharacterised power, so the boot value is a backoff and
+§10.6/§10.7 calibration walks each unit **up** to its empirical maximum.
+
+**The latch is bounded by `power_offset_max_qdb`** (§15.2, default `0`).
+A request above it is **REJECTED**, never silently clamped — the operator
+learns instead of wondering. The default of 0 keeps a node provably at or
+below its chip's own calibrated table, which is the compliance argument
+available in the absence of an absolute scale. Positive offsets are **not**
+forbidden: efuse tables are per-module and some ship conservative or wrong, so
+raising the ceiling is a supported, explicit operator act that owns that
+assertion.
+
+- `{"qdb": <int>}` latches the offset on every `role:"tx"` adapter of this
+  node: applied immediately. While latched the §10.4 commit resolve
   **yields** (a profile commit does not itself reset hardware power, so no
   write happens there); the latch is **re-asserted** after every event that
   can reset hardware power — a §11/§11.5 retune (the §10.4 `ReApplyTxPower`
   slot) and a §11.6 recovery (which ends in `txpower auto`, Pass 48).
   Accepted wire-range is `-511..511` qdb (400 outside — the actuator field
-  width, checked before any clamp). The §10.3 `max_power_qdb` ceiling — when
-  configured — is the only *clamp*: the hardware receives
-  `min(qdb, max_power_qdb)` per adapter, while `GET`/§15.3 report the latched
-  request value.
-- `{"auto": true}` clears the latch **and forces one immediate restore** (it
+  width, checked before any bound). A request exceeding
+  `power_offset_max_qdb` is **409 REJECTED** (Pass 150), not clamped; the
+  pre-Pass-150 `min(qdb, max_power_qdb)` silent clamp is withdrawn, because on
+  an offset backend it clamped the *offset* and so turned a documented safety
+  ceiling into a boost permit (a `max_power_qdb: 108` adapter accepted +27 dB).
+- `{"auto": true}` resolves to the adapter's **calibrated offset** when a valid
+  §10.7 artifact exists, else to `power_offset_qdb` — **never** to the raw
+  efuse default (Pass 150). Before this, `auto` was literally offset 0, i.e.
+  the uncharacterised default, which on a compressing unit is the worst
+  setting available; §11.6 recovery ends in `txpower auto` (Pass 48), so an
+  unattended recovery could drop a node onto it. It clears the latch **and
+  forces one immediate restore** (it
   must not wait for the next profile change): on the radio backend a one-shot
   offset 0 undoes the latch, then the §10.2 curve resolve resumes when a
   curve is loaded; on kernel-monitor the driver default is restored via
@@ -4044,7 +4096,9 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
       "channel": 5805, "bw": 20,
       "power_map": "/etc/waybeam-link/power.wlan0.txt",
-      "max_power_qdb": 2000,
+      "max_power_qdb": 108,
+      "power_offset_qdb": -24,
+      "power_offset_max_qdb": 0,
       "power_presets_qdb": [60, 76, 84] },
     { "name": "wlan1", "bus": "1-1.3", "role": "rx", "channel": 5805, "bw": 20 }
   ],
@@ -4197,7 +4251,28 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     "fec": { "scheme": "rlc256", "i_rate_permille": 250,
              "p_rate_permille": 100, "min_k": 3, "min_r": 2 } }
   ```
-  `scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
+  `power_offset_qdb` (§10.5, Pass 150) is the **relative** TX offset in
+quarter-dB applied to every `role:"tx"` adapter at startup, against the
+backend's calibrated reference (devourer: the efuse per-rate table;
+kernel-monitor: `max_power_qdb`). Default **−24 (−6 dB)** — a *seed*, not a
+measurement: it comes from one 8822EU and is expected to be wrong for some
+module, which §10.6/§10.7 calibration exists to correct by walking each adapter
+up to its empirical maximum. It is deliberately not 0, because 0 is the
+uncharacterised efuse default and was measured to be a compressing operating
+point.
+
+`power_offset_max_qdb` (§10.5, default `0`) bounds the runtime latch. A
+`POST /api/v1/tx/power` above it is REJECTED, not clamped. `0` keeps the node
+at or below its chip's calibrated table; raising it is an explicit operator
+act, supported because efuse tables are per-module and some ship conservative.
+Load-time rule: `power_offset_qdb <= power_offset_max_qdb`, else the config is
+rejected.
+
+`max_power_qdb` is **no longer a TX ceiling** (§10.3 amendment). On
+kernel-monitor it is the absolute reference the offset applies to; on devourer
+it is accepted with a warning and ignored.
+
+`scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
   `"rlc256"` enables §14.1. Rates are integer per-mille (project convention). On
   a `udp` stream the `fec` block is ignored (Framer path, §5.1).
 

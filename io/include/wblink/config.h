@@ -84,7 +84,19 @@ struct AdapterCfg {
     uint16_t channel_mhz = 0;  // center freq MHz, band-agnostic (§11.1 style)
     uint8_t bw = 20;           // 20 / 40 / 80
     std::string power_map;     // §10.2 per-adapter absolute power table path
-    std::optional<int32_t> max_power_qdb;  // §10.3 opt-in sanity ceiling
+    // §10.3 (Pass 150): NO LONGER a TX ceiling. On kernel-monitor this is the
+    // absolute REFERENCE the §10.5 relative offset applies to; on devourer the
+    // efuse per-rate table is the reference and this is ignored with a warning.
+    std::optional<int32_t> max_power_qdb;
+    // §10.5 (Pass 150) relative TX offset in quarter-dB against the backend's
+    // calibrated reference, applied at boot on every role:"tx" adapter.
+    // Seed -24 (-6 dB) — a SEED from one 8822EU, not a measurement; 0 is the
+    // uncharacterised efuse default and was measured to be compressing.
+    int32_t power_offset_qdb = -24;
+    // §10.5 bound on the runtime latch. Default 0 keeps the node at or below
+    // its chip's calibrated table. Positives are supported but must be opted
+    // into: efuse tables are per-module and some ship conservative.
+    int32_t power_offset_max_qdb = 0;
     // §10.3/§11.7 0x0A (Pass 135): selectable ceilings, <=5 per the §11.7
     // preset-index bound. Each entry is clamped to max_power_qdb at load, so
     // the runtime path can only ever LOWER power.

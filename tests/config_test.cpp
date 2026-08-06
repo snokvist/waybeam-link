@@ -24,7 +24,7 @@ const char* kSample = R"({
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
       "channel": 5805, "bw": 20,
       "power_map": "/etc/waybeam-link/power.wlan0.txt",
-      "max_power_qdb": 2000,
+      "max_power_qdb": 108,
       "power_presets_qdb": [60, 76, 84] },
     { "name": "wlan1", "bus": "1-1.3", "role": "rx", "channel": 5805, "bw": 20 }
   ],
@@ -104,7 +104,7 @@ int main() {
             CHECK_EQ_U(c.adapters[0].channel_mhz, 5805);
             CHECK_EQ_U(c.adapters[0].bw, 20);
             CHECK(c.adapters[0].max_power_qdb.has_value() &&
-                  *c.adapters[0].max_power_qdb == 2000);
+                  *c.adapters[0].max_power_qdb == 108);
             CHECK(!c.adapters[1].max_power_qdb.has_value());
             // §11.7 0x0A (Pass 135): all three sit under max_power_qdb, so
             // none is clamped and the list survives verbatim.
@@ -387,6 +387,34 @@ int main() {
         "bind":{"kind":"frame-shm","name":"venc_frame"},
         "fec":{"scheme":"none","e_rate_permille":0}}]})",
                  "rlc256");
+    // §10.5 (Pass 150): the boot offset may not start above its own bound —
+    // a node must never boot at a power the runtime latch would refuse.
+    expect_error(R"({"node":{"originator":7,"role":"tx"},
+      "adapters":[{"name":"wlan0","role":"tx","channel":5805,
+        "power_offset_qdb":8,"power_offset_max_qdb":0}]})",
+                 "exceeds power_offset_max_qdb");
+    expect_error(R"({"node":{"originator":7,"role":"tx"},
+      "adapters":[{"name":"wlan0","role":"tx","channel":5805,
+        "power_offset_qdb":-9999}]})",
+                 "-511..511");
+    {
+        // Defaults: safe-by-default seed, bound at 0. Absent keys must give
+        // the seed, not 0 — 0 is the uncharacterised efuse default.
+        auto r = load_config_json(R"({"node":{"originator":7,"role":"tx"},
+          "adapters":[{"name":"wlan0","role":"tx","channel":5805}]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK_EQ_U(static_cast<int64_t>(r.value->adapters[0].power_offset_qdb) + 24, 0);
+            CHECK_EQ_U(r.value->adapters[0].power_offset_max_qdb, 0);
+        }
+        // Positive headroom is supported when explicitly opted into — efuse
+        // tables are per-module and some ship conservative.
+        auto p = load_config_json(R"({"node":{"originator":7,"role":"tx"},
+          "adapters":[{"name":"wlan0","role":"tx","channel":5805,
+            "power_offset_qdb":16,"power_offset_max_qdb":40}]})");
+        CHECK(bool(p));
+        if (p) CHECK_EQ_U(p.value->adapters[0].power_offset_qdb, 16);
+    }
     // fec.scheme only on a frame-shm binding.
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
@@ -1029,13 +1057,13 @@ int main() {
         CHECK(bool(r));
         if (r) {
             CHECK_EQ_U(r.value->adapters[0].power_presets_qdb.size(), 3);
-            CHECK(r.value->adapters[0].power_presets_qdb[2] == 2000);
+            CHECK(r.value->adapters[0].power_presets_qdb[2] == 108);
         }
     }
     {
         // No ceiling configured: nothing to clamp against, list kept as-is.
         auto r = load_config_json(
-            subst(kSample, "\"max_power_qdb\": 2000,", ""));
+            subst(kSample, "\"max_power_qdb\": 108,", ""));
         CHECK(bool(r));
         if (r) {
             CHECK(!r.value->adapters[0].max_power_qdb.has_value());
