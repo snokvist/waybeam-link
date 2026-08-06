@@ -1,0 +1,44 @@
+{
+  "node": {
+    "originator": 9,
+    "role": "rx"
+  },
+  "profile_table": "profiles/table.example.json",
+  "adapters": [
+    {
+      "name": "eu-ear",
+      "bus": "1-1",
+      "role": "tx",
+      "channel": 5805,
+      "bw": 20
+    }
+  ],
+  "streams": [
+    {
+      "stream_id": 0,
+      "stream_type": "RTP",
+      "dir": "out",
+      "bind": {
+        "kind": "udp",
+        "send": "127.0.0.1:5701"
+      }
+    }
+  ],
+  "air": {
+    "kind": "radio"
+  },
+  "policy": {
+    "csa": {
+      "channel_allowlist": [
+        5805
+      ],
+      "home_chan": 5805
+    }
+  },
+  "stats": {
+    "hz": 1
+  },
+  "control": {
+    "bind": "127.0.0.1:8099"
+  }
+}

@@ -64,6 +64,7 @@ std::string usb_path_of(libusb_device* dev) {
 struct RxFrame {
     uint8_t adapter;
     int8_t rssi;
+    uint8_t net_id;             // §3.0 SA tag of the sender (§15.5a scout)
     uint8_t rx_mcs;             // §15.3 Pass 118, kRxMcsUnknown if unresolved
     uint32_t tsfl;
     uint32_t gen;               // flush generation at RX time (Pass 69)
@@ -112,6 +113,20 @@ struct RadioAir::Impl {
     std::vector<std::unique_ptr<Adapter>> adapters;
     size_t tx_idx = 0;
     uint16_t seq = 0;
+    // §15.5a runtime net_id roles. The stamp is TX-side and main-thread only
+    // (the inject* paths read cfg.stamp_net_id directly). The filter is read
+    // by every RX thread in on_packet, so it lives here as an atomic rather
+    // than in cfg; -1 encodes "no filter" (hear any net_id), matching MonAir.
+    // cfg.filter_net_id is therefore the BOOT value only — seeded into this
+    // atomic in create() and never read again. Do not surface it as the live
+    // filter.
+    std::atomic<int16_t> filter_net_id{-1};
+
+    std::optional<uint8_t> filter_opt() const {
+        const int16_t v = filter_net_id.load(std::memory_order_relaxed);
+        return v < 0 ? std::nullopt
+                     : std::optional<uint8_t>(static_cast<uint8_t>(v));
+    }
     // §3.0 Pass 118: the committed operating point, stamped into every
     // frame's radiotap. set_tx_mode keeps SetTxMode in lockstep with it.
     TxRate rate;
@@ -243,7 +258,7 @@ struct RadioAir::Impl {
             return;
         }
         const auto d = dot11_parse(p.Data.data(), p.Data.size() - kFcsLen,
-                                   cfg.filter_net_id);
+                                   filter_opt());
         if (!d || d->originator == cfg.originator) {  // not ours / our own TX
             a.rx_filtered.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -292,6 +307,9 @@ struct RadioAir::Impl {
         RxFrame f;
         f.adapter = adapter_id;
         f.rssi = rssi;
+        // §15.5a: which net_id this was heard on. Only interesting while the
+        // filter is wide (a sweep), but it is the sender's tag either way.
+        f.net_id = d->net_id;
         f.rx_mcs = rx_mcs;
         f.tsfl = p.RxAtrib.tsfl;
         f.gen = flush_gen.load(std::memory_order_acquire);  // Pass 69
@@ -341,6 +359,10 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                                       std::strerror(errno));
     }
     im.cfg = cfg;
+    im.filter_net_id.store(cfg.filter_net_id
+                               ? static_cast<int16_t>(*cfg.filter_net_id)
+                               : static_cast<int16_t>(-1),
+                           std::memory_order_relaxed);
     im.logger = std::make_shared<Logger>();
     im.logger->set_level(Logger::Level::Info);
     // Route the machine-event sink into the tx.report harvester (also keeps
@@ -576,6 +598,7 @@ int RadioAir::poll_once(int timeout_ms, const RxCb& cb) {
         AirRxMeta meta;
         meta.adapter_id = f.adapter;
         meta.rssi = f.rssi;
+        meta.net_id = f.net_id;
         meta.rx_mcs = f.rx_mcs;
         meta.tsf_us = f.tsfl;
         cb(meta, f.data.data(), f.data.size());
@@ -702,17 +725,28 @@ bool RadioAir::set_power_auto(size_t adapter) {
 }
 
 void RadioAir::set_stamp_net_id(uint8_t net_id) {
-    (void)net_id;  // G1: fixed at construction
+    // TX-side identity, read only by the main-thread inject* paths. Every
+    // caller today is the ground's §15.5a scout / §11 CSA selection in run_rx.
+    // NOTE the Pass-12 ACK responder (opt-in) latches its SA — net_id byte
+    // included — at bring-up and is never re-armed, so a node that both arms it
+    // and retargets its stamp ends up matching a stale MACID. Unguarded, but
+    // inert: only a ground retargets (every caller is in run_rx) and nothing
+    // unicasts *to* a ground — §3.0 scopes unicast returns to ground→craft.
+    // A craft that ever retargets would have to re-arm.
+    impl_->cfg.stamp_net_id = net_id;
 }
 
 void RadioAir::set_filter_net_id(std::optional<uint8_t> net_id) {
-    // G1: the filter is read on each adapter's RX thread, so a live setter is
-    // a synchronisation change in this backend, not a forwarding call.
-    (void)net_id;
+    // §15.5a: widen (nullopt) or re-pin the §3.0 RX filter mid-sweep. The
+    // filter is software-only in this backend — on_packet reads the atomic per
+    // frame — so unlike kernel-monitor there is no pre-filter to re-attach.
+    impl_->filter_net_id.store(
+        net_id ? static_cast<int16_t>(*net_id) : static_cast<int16_t>(-1),
+        std::memory_order_relaxed);
 }
 
 size_t RadioAir::tx_index() const {
-    return 0;  // G6: convention, not resolution — see the header
+    return impl_->tx_idx;  // create() resolves it from role:"tx"
 }
 
 bool RadioAir::has_tx() const {

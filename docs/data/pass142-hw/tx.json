@@ -1,0 +1,9 @@
+{
+  "node": { "originator": 17, "role": "tx", "net_id": 7 },
+  "profile_table": "profiles/table.example.json",
+  "adapters": [ { "name": "cu-tx", "bus": "5-1", "role": "tx", "channel": 5805, "bw": 20 } ],
+  "streams": [ { "stream_id": 0, "stream_type": "RTP", "dir": "in", "classifier": "h265",
+                 "bind": { "kind": "udp", "listen": "127.0.0.1:5700" } } ],
+  "air": { "kind": "radio" },
+  "stats": { "hz": 1 }
+}

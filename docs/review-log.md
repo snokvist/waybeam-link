@@ -6248,3 +6248,115 @@ Two things the re-vendored devourer made visible that the old tree did not:
 The unit stays retired from TX A/Bs. Every mechanism that could be tested
 remotely has been, and the craft's 8822e remains the reference: same chip, same
 RFE type, MCS4–7 at or indistinguishable from lossless.
+
+## Pass 142 — §15.5a scout retargeting works on devourer (2026-08-06)
+
+Pass 140 stated G1 on the contract: the two net_id setters were no-ops on
+`RadioAir`, so a §15.5a sweep never widened the §3.0 RX filter and a craft on
+another net_id was never discovered while the sweep still reported clean. This
+closes it, together with G6 (`tx_index()` answered 0 by convention, so a config
+listing its `role:"tx"` adapter second scouted the wrong ear — `create()`
+already resolves it into `tx_idx`).
+
+**No spec moves for the mechanism.** §15.5a already says what a sweep does;
+the backend did not do it. (One inherited divergence in the *scope* of the
+widen is recorded at the end of this entry.) The synchronisation is the whole of the change: the filter is read per
+frame on each adapter's RX thread, so it leaves `cfg` for an atomic beside the
+other RX-thread state, `-1 = hear any`, the encoding `MonAir` already uses. The
+stamp is TX-side and main-thread only, so it stays a plain write. Unlike
+kernel-monitor there is no kernel pre-filter to re-attach — filtering here is
+software-only in `on_packet` — so a widen lands on the next frame.
+
+**The device test found the half of G1 that no reading had.** Two devourer
+nodes on the bench host with deliberately mismatched net_ids (TX 8812CU at
+net_id 7, RX 8822EU pinned to 3), sweeping 5805:
+
+| binary | candidates | craft (originator 17) |
+|---|---|---|
+| before | 0 | not found |
+| after, first run | 1 | found, reported **net_id 0** |
+| after, with the meta fix | 1 | found, net_id 7 |
+
+`RadioAir` never filled `AirRxMeta::net_id`. That was invisible while the
+filter was pinned — every accepted frame really was the configured id — and
+wrong the moment a sweep widened it. Since selecting a candidate re-pins both
+roles to the *reported* value, the scout would have claimed net_id 0 and lost
+the craft it had just found. A sweep that reports a hit and then cannot form
+the link is worse than one that reports nothing.
+
+**The widen has to be temporary, so that was measured too.** Same pair, the
+ear's counters across three windows:
+
+| window | accepted | filtered |
+|---|---|---|
+| idle, before any sweep | 0 | 12 |
+| sweeping | 11 | 1 |
+| after `scout/stop` | 0 | 12 |
+
+The craft is audible throughout — 12 frames a window land in `filtered` — and
+only the sweep lets them through. A filter left open would have passed the
+discovery test above and still been a regression.
+
+Harness and both node configs: `docs/data/pass142-hw/` (the two arm binaries
+are not committed; the header says how to build them). The 8822EU node is the
+receiver under test — it does inject its own heartbeats, since the §3.0
+exactly-one-`role:"tx"` rule makes its single adapter the uplink, but no
+measurement here depends on that transmit path, which is why the H1 suspect
+unit is usable for it.
+
+**G6 is closed by inspection, not by this A/B** — both harness nodes declare a
+single adapter, so `tx_idx` is 0 either way and the test cannot tell a resolved
+index from a hardcoded one. `create()` rejects any adapter set without exactly
+one `role:"tx"` before recording the index, so the accessor is sound; the bug it
+fixes needs a two-adapter ground that lists its uplink second, which the bench
+does not have.
+
+**Two things this makes newly visible, neither claimed by the fix.** With
+`AirRxMeta::net_id` populated, `GET /api/v1/discovery` on a devourer node stops
+reporting every peer at net_id 0 — a §15.5 response-value correction the hub
+WebUI sees. And during a sweep the accepted/filtered split moves on the
+devourer backend by construction (the restore table above *is* that movement),
+so a consumer trending §15.3 `rx`/`filtered` will see a step for the sweep's
+duration.
+
+**One divergence from the spec is inherited, not introduced, and wants a
+ruling.** §15.5a says *the scout adapter* ignores its net_id filter during a
+sweep. Both backends widen node-wide — `MonAir` re-attaches the BPF filter on
+every adapter, and `RadioAir` now shares one atomic across every RX thread — so
+a diversity ear parked on the resting channel also hears all net_ids for the
+sweep's duration. The *survey* is correctly scoped (`ScoutEngine::on_frame`
+drops frames from any adapter but the scout), but the §2 selector, the CSA
+follower and the discovery table are not. Filed as a register item; not
+silently resolved either way.
+
+Remaining register items are unchanged: G3/G4 (retune commanded-not-confirmed,
+no recovery path), G5 (MTU asserted), G2/G7 (operator rulings), G8 (decode-path
+tests), G9, B3, H1.
+
+**A live setter exposed a lossy caller.** `LinkSelection::net_id` was a plain
+`uint8_t` built with `l.cfg.node.net_id.value_or(0)`, so every path that re-pins
+the resting filter from a selection — `scout.set_rest_filter` after a sweep, the
+claim rollback, the CSA abort and revert — turned §3.0's "unconfigured, accept
+any net_id" into "accept net_id 0". An unconfigured ground could sweep, find a
+craft stamping net_id 7, and be deaf to it the moment the sweep rested.
+
+The defect is older than this pass and lives on both backends, but it was
+unreachable on devourer while the setter was a no-op, so closing G1 is what
+makes it live on the backend the fleet is moving its TX role to. `LinkSelection`
+now carries `std::optional<uint8_t>`; the stamp sites take `.value_or(0)`
+because a stamp has no "any", and so does the §14.3 `target_net_id` cache-assign
+field, whose wire encoding is a plain `uint8_t`.
+
+Device A/B on the same bench pair with `node.net_id` removed from the RX config,
+so §3.0 says it must accept any net_id:
+
+| window | before: accepted / filtered | after: accepted / filtered |
+|---|---|---|
+| idle, from a clean start | 12 / 0 | 12 / 0 |
+| sweeping | 12 / 0 | 12 / 0 |
+| after `scout/stop` | **0 / 12** | 12 / 0 |
+
+The node boots correct and is broken *by the sweep that was supposed to widen
+it* — and it stays broken, since nothing restores accept-any until a restart.
+Harness: `run_anynet.sh` with `rx-anynet.json`, or `start.sh <arm>` +
+`windows.sh` against an already-running pair.
