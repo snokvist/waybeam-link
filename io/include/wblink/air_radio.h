@@ -172,6 +172,9 @@ class RadioAir : public AirIface {
         bool rx_dead = false;  // §15.3 Pass 101: RX thread exited (definitive)
     };
     AdapterCounters counters(size_t adapter) const;
+    uint64_t rx_frames(size_t adapter) const override {
+        return counters(adapter).rx_frames;
+    }
 
     // TX adapter's cumulative (tx_submitted, tx_reports) for the §9.10
     // wedge watchdog — cheap per-iteration accessor, no string copies.

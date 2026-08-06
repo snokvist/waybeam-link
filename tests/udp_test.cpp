@@ -231,7 +231,7 @@ int main() {
             CHECK(bool(tx));
             if (tx) {
                 const auto empty_airtime =
-                    tx.value->estimate_airtime_us(100, true);
+                    tx.value->estimate_airtime_us(100, true, kDefaultMaxPayload);
                 CHECK(empty_airtime.has_value());
                 if (empty_airtime) CHECK_EQ_U(*empty_airtime, 800u);
                 const uint8_t live1[] = {1};
@@ -271,7 +271,7 @@ int main() {
         auto air = UdpAir::create(cfg);
         CHECK(bool(air));
         if (air) {
-            CHECK(!air.value->estimate_airtime_us(100, true).has_value());
+            CHECK(!air.value->estimate_airtime_us(100, true, kDefaultMaxPayload).has_value());
             unsigned drop_events = 0;
             air.value->set_trace(
                 [&](const char* direction, const char* outcome, int adapter,

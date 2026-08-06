@@ -17,23 +17,13 @@
 #include <optional>
 #include <vector>
 
+#include "wblink/air_iface.h"  // AirIface (the backend contract)
 #include "wblink/binding.h"
-#include "wblink/radiotap.h"  // kRxMcsUnknown (AirRxMeta.rx_mcs)
 
 namespace wblink {
 
-struct AirRxMeta {
-    uint8_t adapter_id = 0;
-    int8_t rssi = 0;      // synthetic on udp-air
-    uint64_t tsf_us = 0;  // synthetic on udp-air (loopback has no TSF, §16)
-    uint8_t net_id = 0;   // §3.0 L2 tag from the frame SA (0 on udp/loopback)
-    uint8_t rx_mcs = kRxMcsUnknown;  // always unknown on udp-air (no PHY)
-};
-
-class UdpAir {
+class UdpAir : public AirIface {
   public:
-    using RxCb =
-        std::function<void(const AirRxMeta&, const uint8_t*, size_t)>;
     // Bench-only packet-event observation. direction is "tx" or "rx";
     // outcome is "submitted", "failed", "accepted", "filtered", or
     // "synthetic_drop". Disabled unless a caller installs the callback.
@@ -43,25 +33,25 @@ class UdpAir {
     static Result<UdpAir> create(const AirUdpCfg& cfg);
 
     // Send one air frame to every tx target. Returns targets reached.
-    size_t inject(const uint8_t* frame, size_t len);
+    size_t inject(const uint8_t* frame, size_t len) override;
     // Enqueue an already-authorized §5.3 retransmission ahead of paced live
     // traffic. Identical to inject() when pacing is disabled.
-    size_t inject_resend(const uint8_t* frame, size_t len);
+    size_t inject_resend(const uint8_t* frame, size_t len) override;
 
     // Drain all listen sockets; cb per frame, tagged with the adapter index.
     // Returns frames delivered, or -1 on poll error.
-    int poll_once(int timeout_ms, const RxCb& cb);
+    int poll_once(int timeout_ms, const RxCb& cb) override;
     void set_trace(TraceCb cb) { trace_ = std::move(cb); }
     void set_rx_drop_permille(uint16_t value) { rx_drop_permille_ = value; }
     uint16_t rx_drop_permille() const { return rx_drop_permille_; }
 
-    size_t rx_adapters() const { return adapters_.size(); }
+    size_t rx_adapters() const override { return adapters_.size(); }
     uint16_t adapter_port(size_t i) const {
         return adapters_[i].bound_port();
     }
     // Bench synthetic-drop counter for adapter i (0 unless rx_drop_permille>0).
     uint64_t rx_dropped(size_t i) const { return rx_dropped_[i]; }
-    uint64_t rx_frames(size_t i) const { return rx_frames_[i]; }
+    uint64_t rx_frames(size_t i) const override { return rx_frames_[i]; }
     uint64_t rx_filtered(size_t i) const { return rx_filtered_[i]; }
     uint64_t kernel_dropped(size_t i) const {
         return adapters_[i].kernel_drops();
@@ -74,9 +64,53 @@ class UdpAir {
     // Paced Ethernet bench airtime model (§14.2). include_pending models a
     // new live frame appended behind both current queues; false models one
     // prioritized resend. Unpaced UDP has no authored serialization rate.
-    std::optional<uint32_t> estimate_airtime_us(size_t bytes,
-                                                bool include_pending) const;
-    std::vector<int> wait_fds() const;
+    // packet_budget is the interface's third parameter; the Ethernet bench
+    // model has no per-packet budget to apply and ignores it.
+    std::optional<uint32_t> estimate_airtime_us(
+        size_t bytes, bool include_pending,
+        uint16_t packet_budget) const override;
+    std::vector<int> wait_fds() const override;
+
+    // --- declared limits -------------------------------------------------
+    // udp-air is the bench/loopback transport: no PHY, no radio, no L2
+    // addressing. Every entry below states that in the one place a caller or
+    // a test can see it, instead of it being the absence of a branch in
+    // AirBackend. Behaviour is exactly what the old fall-throughs did.
+
+    // No L2 addressing: the target is ignored and this is a plain inject.
+    size_t inject_return(uint16_t dest_originator, const uint8_t* frame,
+                         size_t len, bool urgent) override;
+    // Nothing buffers below this boundary — the RX drain is the socket read.
+    void flush_rx() override {}
+    // A retune is logged intent, so it "succeeds": the CSA state machines stay
+    // exercisable end-to-end without radios (§16).
+    bool retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
+                bool fast) override;
+    // §11.6 Pass 80 re-init has no meaning here; the caller reads false as
+    // "recovery unavailable on this backend".
+    bool recover(size_t adapter, uint16_t chan_mhz,
+                 uint8_t width_mhz) override;
+    // Nothing to re-apply. True = "nothing failed", which is what the retune
+    // loop's ignored return has always meant for this backend.
+    bool reapply_tx_power(size_t /*adapter*/) override { return true; }
+    // Power is logged intent, accepted the same way an in-process write is.
+    bool set_power_qdb(size_t adapter, int32_t qdb) override;
+    bool set_power_auto(size_t adapter) override;
+    // No PHY: there is no rate to stamp and no hardware clock to read.
+    void set_tx_mode(uint8_t /*mcs*/, bool /*sgi*/) override {}
+    std::optional<uint64_t> read_tsf(size_t /*adapter*/) override {
+        return std::nullopt;
+    }
+    // §3.0 net_id rides the SA, which loopback has no room for (AirRxMeta
+    // documents net_id as 0 on udp).
+    void set_stamp_net_id(uint8_t /*net_id*/) override {}
+    void set_filter_net_id(std::optional<uint8_t> /*net_id*/) override {}
+    // The dev backend scouts index 0 and has an uplink by construction.
+    size_t tx_index() const override { return 0; }
+    bool has_tx() const override { return true; }
+    // Compatibility tier: no driver matrix to assert anything better.
+    uint16_t mtu_supported() const override { return kDefaultMaxPayload; }
+    bool is_rf() const override { return false; }
 
   private:
     std::vector<UdpEgress> targets_;

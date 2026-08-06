@@ -1281,13 +1281,40 @@ QuietGapPolicy quietgap_policy(const Config& cfg) {
 // ---- air backend selection (udp dev backend | devourer radio, §3.0) --------
 
 struct AirBackend {
-    std::optional<UdpAir> udp;
-    std::optional<MonAir> mon;
+    // One owner, held by the contract. Typed views alongside it are NON-owning
+    // and exist only for the §15.3 stats fills, which read each backend's own
+    // counters struct (their fields genuinely differ — kernel_dropped /
+    // bpf_filtered against evm / cfo / snr — so unifying them is a schema
+    // question, not a dispatch one) and for the udp-only bench hooks.
+    //
+    // Owning through a unique_ptr rather than a std::optional member is what
+    // lets a test install a FakeAir and exercise the loops below. It also
+    // removes a hazard the optionals had: AirBackend is returned by value from
+    // create(), so anything caching a pointer INTO an optional member would
+    // dangle after the move, silently, since the object still exists at its
+    // new address.
+    std::unique_ptr<AirIface> air;
+    UdpAir* udp = nullptr;
+    MonAir* mon = nullptr;
 #if WBLINK_RADIO
-    std::optional<RadioAir> radio;
+    RadioAir* radio = nullptr;
 #endif
     uint64_t last_tx_ms = 0;
     uint64_t last_announce_ms = 0;  // §3.12 ANNOUNCE cadence (own timer)
+
+    // The ONE place that decides which backend is engaged. Every method below
+    // goes through it, so the precedence lives here instead of being retyped
+    // per call — that repetition is how the four kernel-monitor-only methods
+    // came to differ from their neighbours without anyone noticing.
+    //
+    // Resolved per call rather than cached: these are std::optional members and
+    // AirBackend is returned by value from create(), so a stored AirIface*
+    // would dangle after the move — silently, since the object still exists at
+    // its new address.
+    AirIface* iface() { return air.get(); }
+    const AirIface* iface() const {
+        return const_cast<AirBackend*>(this)->iface();
+    }
     // Live per-adapter channel, indexed like cfg.adapters. §15.5 /api/v1/info
     // reported the CONFIG channel before this, so every adapter still read its
     // boot channel after a CSA or a scout sweep. Per-adapter rather than one
@@ -1305,15 +1332,7 @@ struct AirBackend {
     // left it. RadioAir does apply it at create.
     std::vector<uint16_t> chan_by_adapter;
 
-    uint16_t mtu_supported() const {
-        if (mon) return mon->mtu_supported();
-#if WBLINK_RADIO
-        // Successful RadioAir construction means every active USB adapter was
-        // accepted by devourer's Realtek driver matrix (§9.3a v1).
-        if (radio) return mtu_tier::kHighBudget;
-#endif
-        return kDefaultMaxPayload;  // UDP/unknown: compatibility tier
-    }
+    uint16_t mtu_supported() const { return iface()->mtu_supported(); }
 
     static Result<AirBackend> create(const Config& cfg) {
         AirBackend b;
@@ -1331,7 +1350,9 @@ struct AirBackend {
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
             }
-            b.udp.emplace(std::move(*a.value));
+            auto owned = std::make_unique<UdpAir>(std::move(*a.value));
+            b.udp = owned.get();
+            b.air = std::move(owned);
             return Result<AirBackend>::ok(std::move(b));
         }
         if (cfg.air.kind == AirCfg::Kind::kMonitor) {
@@ -1355,7 +1376,9 @@ struct AirBackend {
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
             }
-            b.mon.emplace(std::move(*a.value));
+            auto owned = std::make_unique<MonAir>(std::move(*a.value));
+            b.mon = owned.get();
+            b.air = std::move(owned);
             return Result<AirBackend>::ok(std::move(b));
         }
         if (cfg.air.kind == AirCfg::Kind::kRadio) {
@@ -1374,7 +1397,9 @@ struct AirBackend {
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
             }
-            b.radio.emplace(std::move(*a.value));
+            auto owned = std::make_unique<RadioAir>(std::move(*a.value));
+            b.radio = owned.get();
+            b.air = std::move(owned);
             return Result<AirBackend>::ok(std::move(b));
 #else
             return Result<AirBackend>::fail(
@@ -1387,19 +1412,7 @@ struct AirBackend {
     }
 
     size_t inject(const uint8_t* f, size_t n) {
-        size_t sent = 0;
-        if (mon) {
-            sent = mon->inject(f, n);
-        } else {
-#if WBLINK_RADIO
-            if (radio) {
-                sent = radio->inject(f, n);
-            } else
-#endif
-            {
-                sent = udp->inject(f, n);
-            }
-        }
+        const size_t sent = iface()->inject(f, n);
         if (sent > 0) {
             last_tx_ms = now_ms();
         }
@@ -1407,29 +1420,13 @@ struct AirBackend {
     }
 
     size_t inject_resend(const uint8_t* f, size_t n) {
-        size_t sent = 0;
-        if (mon) {
-            sent = mon->inject_resend(f, n);
-        } else {
-#if WBLINK_RADIO
-            if (radio) {
-                sent = radio->inject_resend(f, n);
-            } else
-#endif
-            {
-                sent = udp->inject_resend(f, n);
-            }
-        }
+        const size_t sent = iface()->inject_resend(f, n);
         if (sent > 0) last_tx_ms = now_ms();
         return sent;
     }
 
     std::vector<int> wait_fds() const {
-        if (mon) return {mon->wait_fd()};
-#if WBLINK_RADIO
-        if (radio) return {radio->wait_fd()};
-#endif
-        return udp->wait_fds();
+        return iface()->wait_fds();
     }
 
     // Returns (NACK/LINK_REPORT) carry their target so the radio backend
@@ -1437,20 +1434,7 @@ struct AirBackend {
     // dev backend has no L2 addressing and ignores the target.
     size_t inject_return(uint16_t target, const uint8_t* f, size_t n,
                          bool urgent = false) {
-        size_t sent = 0;
-        if (mon) {
-            sent = mon->inject_return(target, f, n, urgent);
-        } else {
-#if WBLINK_RADIO
-            if (radio) {
-                sent = radio->inject_return(target, f, n, urgent);
-            } else
-#endif
-            {
-                (void)target;
-                sent = udp->inject(f, n);
-            }
-        }
+        const size_t sent = iface()->inject_return(target, f, n, urgent);
         if (sent > 0) {
             last_tx_ms = now_ms();
         }
@@ -1458,7 +1442,11 @@ struct AirBackend {
     }
 
     void heartbeat(uint16_t originator, uint32_t session, uint64_t now) {
-        if (mon && !mon->has_tx()) return;
+        // An RX-only node has no uplink to beat on, and this guard was the
+        // one backend divergence that was NOT documented anywhere — it read as
+        // a monitor detail rather than a rule. It is a rule: a node with no TX
+        // adapter does not emit §3.11 heartbeats, whichever backend it runs.
+        if (!iface()->has_tx()) return;
         if (now < last_tx_ms || now - last_tx_ms < 1000) {
             return;
         }
@@ -1504,16 +1492,8 @@ struct AirBackend {
         }
     }
 
-    int poll_once(int timeout_ms, const UdpAir::RxCb& cb) {
-        if (mon) {
-            return mon->poll_once(timeout_ms, cb);
-        }
-#if WBLINK_RADIO
-        if (radio) {
-            return radio->poll_once(timeout_ms, cb);
-        }
-#endif
-        return udp->poll_once(timeout_ms, cb);
+    int poll_once(int timeout_ms, const AirIface::RxCb& cb) {
+        return iface()->poll_once(timeout_ms, cb);
     }
 
     void set_packet_trace(PacketEventTrace* trace) {
@@ -1525,76 +1505,21 @@ struct AirBackend {
     }
 
     size_t rx_adapters() const {
-        if (mon) {
-            return mon->rx_adapters();
-        }
-#if WBLINK_RADIO
-        if (radio) {
-            return radio->rx_adapters();
-        }
-#endif
-        return udp->rx_adapters();
+        return iface()->rx_adapters();
     }
 
-    // Radio-only surfaces (no-ops / nullopt on the udp dev backend).
-    void set_tx_mode(uint8_t mcs, bool sgi) {
-        if (mon) {
-            mon->set_tx_mode(mcs, sgi);
-            return;
-        }
-#if WBLINK_RADIO
-        if (radio) {
-            radio->set_tx_mode(mcs, sgi);
-        }
-#else
-        (void)mcs;
-        (void)sgi;
-#endif
-    }
-    // §10.5: false = the backend did NOT accept the value (callers must not
-    // cache it as applied). radio/udp writes are in-process — always accepted.
+    // Radio surfaces. Each backend states its own answer (§10.5's bool, the
+    // §10.2-vs-driver-default split behind set_power_auto, nullopt TSF where
+    // there is no hardware clock) — see io/include/wblink/air_iface.h.
+    void set_tx_mode(uint8_t mcs, bool sgi) { iface()->set_tx_mode(mcs, sgi); }
     bool set_power_qdb(size_t adapter, int32_t qdb) {
-        if (mon) {
-            return mon->set_power_qdb(adapter, qdb);
-        }
-#if WBLINK_RADIO
-        if (radio) {
-            radio->set_power_qdb(adapter, qdb);
-        }
-#else
-        (void)adapter;
-        (void)qdb;
-#endif
-        return true;
+        return iface()->set_power_qdb(adapter, qdb);
     }
-    // §10.5 auto restore: monitor → driver default (`txpower auto`); radio →
-    // offset 0 (undoes the latch; the §10.2 curve resolve re-applies on top
-    // when a curve is loaded). udp: logged intent, like set_power_qdb.
     void set_power_auto(size_t adapter) {
-        if (mon) {
-            mon->set_power_auto(adapter);
-            return;
-        }
-#if WBLINK_RADIO
-        if (radio) {
-            radio->set_power_qdb(adapter, 0);
-        }
-#else
-        (void)adapter;
-#endif
+        (void)iface()->set_power_auto(adapter);
     }
     std::optional<uint64_t> read_tsf(uint8_t adapter) {
-        if (mon) {
-            return mon->read_tsf(adapter);
-        }
-#if WBLINK_RADIO
-        if (radio) {
-            return radio->read_tsf(adapter);
-        }
-#else
-        (void)adapter;
-#endif
-        return std::nullopt;
+        return iface()->read_tsf(adapter);
     }
     // §11.6 intra-process atomic switch: every local adapter retunes at
     // T_switch (a straggler follows because a sibling heard the CSA). On the
@@ -1623,53 +1548,37 @@ struct AirBackend {
         }
     };
 
+    // §11.1 bandwidth arrives as either an MHz width or an already-encoded
+    // class, depending on the caller. One place resolves it now.
+    static uint8_t width_mhz(uint8_t bw) {
+        return bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20) : bw;
+    }
+
     bool retune_all(uint16_t chan_mhz, uint8_t bw, bool fast) {
         const ReassertRate guard(*this);
-        if (mon) {
-            const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
-                                          : bw;
-            bool ok = true;
-            for (size_t i = 0; i < mon->rx_adapters(); ++i) {
-                const bool tuned = mon->retune(i, chan_mhz, width, fast);
-                ok = tuned && ok;
-                if (tuned) {
-                    mon->reapply_tx_power(i);
-                    note_chan(i, chan_mhz);  // confirmed by iw_set_freq
-                }
+        AirIface* a = iface();
+        if (!a->is_rf()) {
+            std::fprintf(stderr, "csa: retune -> %u MHz bw=%u%s (udp backend, "
+                                 "intent only)\n",
+                         chan_mhz, bw, fast ? " fast" : "");
+        }
+        const uint8_t width = width_mhz(bw);
+        bool ok = true;
+        for (size_t i = 0; i < a->rx_adapters(); ++i) {
+            if (a->retune(i, chan_mhz, width, fast)) {
+                note_chan(i, chan_mhz);
+                a->reapply_tx_power(i);  // §11.2 post-retune TXAGC
+            } else {
+                ok = false;
+                std::fprintf(stderr,
+                             "csa: adapter %zu retune to %u MHz failed\n", i,
+                             chan_mhz);
             }
-            // Pass 69 §11.6 verify hygiene: pre-retune backlog is
-            // old-channel residue — it must never satisfy a video-verify.
-            mon->flush_rx();
-            return ok;
         }
-#if WBLINK_RADIO
-        if (radio) {
-            const uint8_t code = bw > 2 ? bw_code(bw) : bw;
-            bool ok = true;
-            for (size_t i = 0; i < radio->rx_adapters(); ++i) {
-                if (!radio->retune(i, chan_mhz, code, fast)) {
-                    ok = false;
-                    std::fprintf(stderr, "csa: adapter %zu retune to %u MHz "
-                                         "failed\n",
-                                 i, chan_mhz);
-                } else {
-                    note_chan(i, chan_mhz);
-                }
-                radio->reapply_tx_power(i);  // §11.2 post-retune TXAGC
-            }
-            // Pass 69 §11.6 verify hygiene: pre-retune backlog is
-            // old-channel residue — it must never satisfy a video-verify.
-            radio->flush_rx();
-            return ok;
-        }
-#endif
-        std::fprintf(stderr, "csa: retune -> %u MHz bw=%u%s (udp backend, "
-                             "intent only)\n",
-                     chan_mhz, bw, fast ? " fast" : "");
-        for (size_t i = 0; i < chan_by_adapter.size(); ++i) {
-            note_chan(i, chan_mhz);  // dev backend: follow the logged intent
-        }
-        return true;
+        // Pass 69 §11.6 verify hygiene: pre-retune backlog is old-channel
+        // residue — it must never satisfy a video-verify.
+        a->flush_rx();
+        return ok;
     }
     // Bounds-checked because the retune loops iterate the BACKEND's adapter
     // count. That equals cfg.adapters.size() today (both backends build 1:1
@@ -1684,56 +1593,45 @@ struct AirBackend {
     // §11.6 Pass 80: total RX frames across adapters (liveness baseline) and
     // the one-shot full monitor re-init recovery (kernel-monitor only).
     uint64_t rx_frames_total() const {
+        const AirIface* a = iface();
         uint64_t total = 0;
-        if (mon) {
-            for (size_t i = 0; i < mon->rx_adapters(); ++i) {
-                total += mon->counters(i).rx_frames;
-            }
+        for (size_t i = 0; i < a->rx_adapters(); ++i) {
+            total += a->rx_frames(i);
         }
-#if WBLINK_RADIO
-        if (radio) {
-            for (size_t i = 0; i < radio->rx_adapters(); ++i) {
-                total += radio->counters(i).rx_frames;
-            }
-        }
-#endif
         return total;
     }
+    // §11.6 Pass 80. A backend without a re-init path answers false for every
+    // adapter (see AirIface), so this returns false there without a special
+    // case — which is what "recovery unavailable" used to mean.
     bool recover_all(uint16_t chan_mhz, uint8_t bw) {
-        if (mon) {
-            const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
-                                          : bw;
-            bool ok = true;
-            for (size_t i = 0; i < mon->rx_adapters(); ++i) {
-                const bool up = mon->recover(i, chan_mhz, width);
-                if (up) note_chan(i, chan_mhz);
-                ok = up && ok;
+        AirIface* a = iface();
+        const uint8_t width = width_mhz(bw);
+        bool ok = true;
+        bool any = false;
+        for (size_t i = 0; i < a->rx_adapters(); ++i) {
+            const bool up = a->recover(i, chan_mhz, width);
+            if (up) {
+                note_chan(i, chan_mhz);
+                any = true;
             }
-            mon->flush_rx();
-            return ok;
+            ok = up && ok;
         }
-        return false;  // §11.6 Pass 80: devourer/udp out of scope
+        // Only flush when something actually came back. The old monitor path
+        // flushed unconditionally; discarding the backlog after a recovery
+        // that recovered nothing throws away frames for no benefit, and on a
+        // backend with no re-init path it would be a pure loss.
+        if (any) a->flush_rx();
+        return ok;
     }
-    bool is_radio() const {
-        if (mon) {
-            return true;
-        }
-#if WBLINK_RADIO
-        return radio.has_value();
-#else
-        return false;
-#endif
-    }
+    // "Real RF", not "is devourer" — both RF backends answer true, the udp
+    // dev transport false. Name kept for its call sites.
+    bool is_radio() const { return iface()->is_rf(); }
     bool tx_pending() const { return udp && udp->tx_pending(); }
     std::optional<uint32_t> estimate_airtime_us(size_t bytes,
                                                 bool include_pending,
                                                 uint16_t packet_budget) const {
-        if (mon) {
-            return mon->estimate_airtime_us(bytes, include_pending,
-                                            packet_budget);
-        }
-        if (!udp) return std::nullopt;
-        return udp->estimate_airtime_us(bytes, include_pending);
+        return iface()->estimate_airtime_us(bytes, include_pending,
+                                           packet_budget);
     }
     bool supports_csa() const {
         // UDP exercises CSA state without a physical retune; kernel-monitor now
@@ -1743,38 +1641,24 @@ struct AirBackend {
     // §15.5a scout: widen/narrow the RX net_id filter at runtime (monitor only;
     // no-op elsewhere) and retune a single adapter (the scout adapter).
     void set_filter_net_id(std::optional<uint8_t> net_id) {
-        if (mon) mon->set_filter_net_id(net_id);
+        iface()->set_filter_net_id(net_id);
     }
     void set_stamp_net_id(uint8_t net_id) {
-        if (mon) mon->set_stamp_net_id(net_id);
+        iface()->set_stamp_net_id(net_id);
     }
     // §15.5a scout (Pass 64): index of the uplink adapter the sweep roams. Only
     // the kernel-monitor backend has a resolvable tx adapter here; the radio/udp
     // dev backends scout index 0 (their tx is conventionally first, and udp is a
     // logged-intent no-op anyway).
     size_t tx_index() const {
-        if (mon) return mon->tx_index();
-        return 0;
+        return iface()->tx_index();
     }
     bool retune_one(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
         const ReassertRate guard(*this);
-        if (mon) {
-            const uint8_t width = bw <= 2 ? (bw == 2 ? 80 : bw == 1 ? 40 : 20)
-                                          : bw;
-            const bool tuned = mon->retune(adapter, chan_mhz, width, fast);
-            if (tuned) note_chan(adapter, chan_mhz);
-            return tuned;
-        }
-#if WBLINK_RADIO
-        if (radio) {
-            const bool tuned = radio->retune(adapter, chan_mhz,
-                                             bw > 2 ? bw_code(bw) : bw, fast);
-            if (tuned) note_chan(adapter, chan_mhz);
-            return tuned;
-        }
-#endif
-        note_chan(adapter, chan_mhz);
-        return true;  // udp: logged intent
+        const bool tuned =
+            iface()->retune(adapter, chan_mhz, width_mhz(bw), fast);
+        if (tuned) note_chan(adapter, chan_mhz);
+        return tuned;
     }
     bool set_udp_rx_drop(int permille) {
         if (!udp || permille < 0 || permille > 1000) {

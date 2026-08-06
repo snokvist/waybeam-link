@@ -36,9 +36,19 @@
 #include <optional>
 #include <vector>
 
-#include "wblink/air_udp.h"  // AirRxMeta — the shared RX callback shape
+#include "wblink/radiotap.h"  // kRxMcsUnknown (AirRxMeta.rx_mcs)
 
 namespace wblink {
+
+// The per-frame RX metadata every backend hands to its callback. It lives
+// here rather than beside one transport because it is part of the contract.
+struct AirRxMeta {
+    uint8_t adapter_id = 0;
+    int8_t rssi = 0;      // synthetic on udp-air
+    uint64_t tsf_us = 0;  // synthetic on udp-air (loopback has no TSF, §16)
+    uint8_t net_id = 0;   // §3.0 L2 tag from the frame SA (0 on udp/loopback)
+    uint8_t rx_mcs = kRxMcsUnknown;  // always unknown on udp-air (no PHY)
+};
 
 class AirIface {
   public:
@@ -146,6 +156,12 @@ class AirIface {
     // True for a backend that puts frames on real RF. Distinguishes both RF
     // backends from the udp dev transport — it is not "is devourer".
     virtual bool is_rf() const = 0;
+
+    // §11.6 Pass 80 liveness baseline: accepted frames on one adapter. Only
+    // this counter is on the contract — the full per-backend counters structs
+    // differ by real fields (kernel_dropped/bpf_filtered vs evm/cfo/snr) and
+    // reconciling them is a §15.3 schema question, not a dispatch one.
+    virtual uint64_t rx_frames(size_t adapter) const = 0;
 
   protected:
     // Non-copyable, but the concrete backends are returned by value from their

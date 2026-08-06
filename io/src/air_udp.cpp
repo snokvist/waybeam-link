@@ -116,7 +116,8 @@ std::vector<int> UdpAir::wait_fds() const {
 }
 
 std::optional<uint32_t> UdpAir::estimate_airtime_us(
-    size_t bytes, bool include_pending) const {
+    size_t bytes, bool include_pending, uint16_t packet_budget) const {
+    (void)packet_budget;  // no per-packet budget in the Ethernet bench model
     if (pace_mbps_ == 0) return std::nullopt;
     uint64_t total = bytes;
     if (include_pending) {
@@ -251,4 +252,46 @@ int UdpAir::poll_once(int timeout_ms, const RxCb& cb) {
     return delivered;
 }
 
+// --- declared limits (see the header) ------------------------------------
+
+size_t UdpAir::inject_return(uint16_t dest_originator, const uint8_t* frame,
+                             size_t len, bool urgent) {
+    // No L2 addressing on the dev backend: the target cannot be expressed, so
+    // a return is a plain broadcast inject. Exactly what AirBackend's udp
+    // fall-through did.
+    (void)dest_originator;
+    (void)urgent;
+    return inject(frame, len);
+}
+
+bool UdpAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
+                    bool fast) {
+    // Logged intent, so it reports success — that is what keeps the §11 CSA
+    // state machines exercisable end to end without radios (§16).
+    (void)adapter;
+    (void)chan_mhz;
+    (void)width_mhz;
+    (void)fast;
+    return true;
+}
+
+bool UdpAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz) {
+    (void)adapter;
+    (void)chan_mhz;
+    (void)width_mhz;
+    return false;  // §11.6 Pass 80 re-init has no meaning here
+}
+
+bool UdpAir::set_power_qdb(size_t adapter, int32_t qdb) {
+    (void)adapter;
+    (void)qdb;
+    return true;  // logged intent; accepted like an in-process write
+}
+
+bool UdpAir::set_power_auto(size_t adapter) {
+    (void)adapter;
+    return true;
+}
+
 }  // namespace wblink
+

@@ -6102,3 +6102,83 @@ from lossless at every rate, ≥98 % throughout, no regression from the bump** �
 not that the link delivered more frames than were sent. A tighter number would
 need both counters sampled from one clock, which this harness does not do and
 does not need to for a no-regression check.
+
+## Pass 140 — one contract for every frame transport (2026-08-06)
+
+Pass 137 named `run_rx()` as the next seam and Pass 138 cut the first piece out
+of it. This cuts a different kind of seam: not a slice of orchestration, but
+the boundary underneath it. `app/main.cpp`'s `AirBackend` held three concrete
+backends in `std::optional` and hand-dispatched every call —
+
+    if (mon)   { ... }
+    if (radio) { ... }
+    else       { udp ... }
+
+— across ~25 methods reached from 98 call sites. Four of those methods answered
+only kernel-monitor. Each was *documented* as such at its definition, so this
+was never a set of typos; the problem is that the limitation is invisible where
+it is used. `air.value->set_filter_net_id(n)` in `run_rx` reads as working code,
+and the consequence of it not working is silent (the §15.5a scout filter never
+widens, so a craft on another net_id is never discovered while the sweep still
+reports clean).
+
+**`io/include/wblink/air_iface.h` is all-pure-virtual on purpose.** A backend
+must state its answer even when the answer is "this transport has no such
+concept". `udp-air has no TSF` is now written down rather than inferred from a
+fall-through, and the next method added cannot quietly acquire a fourth
+behaviour by omission.
+
+`MonAir` needed almost nothing — its API already *was* the contract, which is
+the evidence that the contract was discovered rather than invented. `RadioAir`
+needed nine explicit stubs and they are exactly the register's existing items
+(G1, G2, G4, G5, G6, G7). `UdpAir` needed the most, because it is the bench
+transport every fall-through used to land on.
+
+**One divergence had no documentation anywhere:** the §3.11 heartbeat guard,
+`if (mon && !mon->has_tx())`. It read as a monitor detail. It is a rule — a
+node with no TX adapter emits no heartbeat, whichever backend it runs — and it
+now says so through `has_tx()`. That entry is missing from
+`docs/devourer-parity-plan.md`, which should gain it when the register is
+realigned.
+
+**Loops that were written two and three times collapse to one each.**
+`retune_all`, `recover_all` and `rx_frames_total` iterated per-adapter
+primitives that the two RF backends already had in common; only the loop was
+duplicated. `rx_frames_total` needed one addition to the contract —
+`rx_frames(adapter)`, deliberately *not* the whole counters struct, because
+those differ by real fields (`kernel_dropped`/`bpf_filtered` against
+`evm`/`cfo`/`snr`) and reconciling them is a §15.3 schema question. The §15.3
+fills therefore keep their existing per-backend dispatch and are named here as
+the follow-up rather than smuggled in.
+
+**Three behaviour changes, deliberate, each pinned by a test.** A pure move
+would have been preferable, but three places could not be collapsed without
+choosing:
+
+- `recover_all` now flushes RX **only when something recovered**. The monitor
+  path flushed unconditionally; discarding backlog after a recovery that
+  recovered nothing throws away live frames for no benefit, and on a backend
+  with no re-init path it is a pure loss.
+- `retune_all` now re-applies TX power **only on a successful retune**. The
+  radio path re-applied unconditionally — re-programming TXAGC for a channel
+  the adapter is not on. The monitor path already only did it on success.
+- `rx_frames_total` now includes the udp dev backend, which it previously
+  skipped entirely and read 0 for. The §11.6 liveness watchdog therefore saw a
+  permanently dead link on the dev transport.
+
+**Ownership moved to `std::unique_ptr<AirIface>`, and the reason is testing,
+not performance.** An accessor resolving the engaged backend per call would
+have removed the duplicate dispatch just as well, and that is what this pass
+did first. It was wrong: with the backends owned as `std::optional` members,
+nothing can install a fake, so the collapsed loops — where all three behaviour
+changes above live — stay unreachable from a test. Owning through the contract
+makes `AirBackend` injectable. It also removes a hazard the optionals carried:
+`AirBackend` is returned by value from `create()`, so anything caching a
+pointer into an optional member would dangle after the move, silently, since
+the object still exists at its new address. Typed non-owning views (`mon`,
+`radio`, `udp`) remain beside the owner for the §15.3 fills and the udp-only
+bench hooks.
+
+`app_test`: **150 checks, up from 107.** The three changed behaviours were
+verified non-vacuous by reverting each guard to its old form — two failures
+each time, and both tests named the exact counter that moved.

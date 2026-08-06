@@ -156,6 +156,9 @@ class MonAir : public AirIface {
         uint64_t rx_mcs_unknown = 0;
     };
     AdapterCounters counters(size_t adapter) const;
+    uint64_t rx_frames(size_t adapter) const override {
+        return counters(adapter).rx_frames;
+    }
 
   private:
     MonAir();
