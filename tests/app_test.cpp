@@ -530,6 +530,10 @@ void test_udp_backend_declares_its_limits() {
     CHECK_EQ_U(u.mtu_supported(), kDefaultMaxPayload);
     // Has an uplink by construction, so it does not suppress §3.11 heartbeats.
     CHECK(u.has_tx());
+    // On the contract, so it must answer an out-of-range adapter the way the
+    // RF backends do (zeroed) rather than indexing off the end — a caller
+    // holding an AirIface* cannot tell which backend it has.
+    CHECK_EQ_U(u.rx_frames(9999), 0u);
 }
 
 // The §11.1 width/class duality used to sit in two caller-side ternaries.

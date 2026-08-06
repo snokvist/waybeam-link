@@ -6214,3 +6214,37 @@ Two readings worth writing down because each looks like a fault and is not:
   is no artifact placement to clamp, which is the §10.3 ruling that a ceiling
   does not bind an unpaired node. The endpoint says `effective: false`; the
   radio stays where `mon-up` left it.
+
+**Bench EU carried item closed (2026-08-06) — the replug does not rescue it.**
+Pass 139 parked the bench 8822e as suspect with one untested confound: a
+physical re-plug. It has now been re-plugged, and two further arms rule out the
+remaining explanations.
+
+| arm | MCS4 | MCS5 | MCS6 | MCS7 |
+|---|---|---|---|---|
+| after physical re-plug | 98.65 % | 5.84 % | 0.74 % | **0.11 %** |
+| kernel driver blacklisted, VBUS-cycled, never bound | 50.16 % | 1.71 % | 0.47 % | **0.10 %** |
+
+The second arm tests the operator's hypothesis that the kernel driver holding
+or having initialised the chip was the cause: `8812eu` blacklisted so it cannot
+auto-load, the USB port VBUS-cycled to full de-enumeration, and the chip
+verified to come back with **no module loaded and no driver bound** before
+devourer claimed it. It fails the same way. A chip the kernel never touched is
+not the fix.
+
+Two things the re-vendored devourer made visible that the old tree did not:
+
+- **`rx_at_other_rates` is now large in every failing window** (≈14–16 k). The
+  #377/#371 retry-ladder work delivers the fallback retries, so the frames that
+  fail at 64-QAM arrive at lower rates instead of vanishing. That is direct
+  corroboration rather than a new symptom: the radio transmits, and only the
+  dense constellations are unrecoverable on this unit.
+- **The virgin chip is WORSE at MCS4** (50.16 % against 98.65 % on the arm
+  where the kernel driver had initialised it first). Inheriting the kernel
+  driver's bring-up state helps this unit, which is what an incomplete
+  per-unit calibration in devourer would look like — and the opposite of what
+  a "the kernel driver is in the way" explanation predicts.
+
+The unit stays retired from TX A/Bs. Every mechanism that could be tested
+remotely has been, and the craft's 8822e remains the reference: same chip, same
+RFE type, MCS4–7 at or indistinguishable from lossless.

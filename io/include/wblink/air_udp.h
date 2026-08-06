@@ -51,7 +51,14 @@ class UdpAir : public AirIface {
     }
     // Bench synthetic-drop counter for adapter i (0 unless rx_drop_permille>0).
     uint64_t rx_dropped(size_t i) const { return rx_dropped_[i]; }
-    uint64_t rx_frames(size_t i) const override { return rx_frames_[i]; }
+    // Bounds-checked because this one is on the AirIface contract: both RF
+    // backends answer an out-of-range adapter with a zeroed counters struct,
+    // and a caller holding an AirIface* cannot tell which backend it has. The
+    // sibling accessors below are not on the contract and keep their existing
+    // (caller-bounded) shape.
+    uint64_t rx_frames(size_t i) const override {
+        return i < rx_frames_.size() ? rx_frames_[i] : 0;
+    }
     uint64_t rx_filtered(size_t i) const { return rx_filtered_[i]; }
     uint64_t kernel_dropped(size_t i) const {
         return adapters_[i].kernel_drops();
