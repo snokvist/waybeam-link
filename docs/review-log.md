@@ -7090,3 +7090,47 @@ nearly sequenced this work behind a preset switch nobody would make. The key
 lives in `/etc/waybeam.json`. An absent key in the file you happened to open
 is not evidence of an absent setting — same failure as Pass 147's empty grep
 of a log that had stopped being written.
+
+**Device stage 1 (craft `.2.232`, 2026-08-06).** Deployed the Pass 149 build,
+craft on `resilience: "range"`, `arq_mode: idr-only`, `e_rate` unset. Density
+measured over two 20 s windows: 241/1204 and 241/1203 — **20.0 %**, exactly
+`1/(ref_enhance+1)` at enhance=4. The deployment is behaviourally a no-op
+otherwise, which is the property stage 1 is for: `e_rate` unset changes no
+parity, and `idr-only` means the ARQ exclusion has nothing to exclude. The
+§14.2 exemption is likewise unexercised on device (`jscc_decision_frames` 0 —
+enforcement is off), so it rests on the unit test plus a mutation check that
+confirmed the assertion fails when the `!is_enhance` guard is removed.
+
+A reversible `/api/v1/fec` sweep then proved the rate path end to end.
+`e_permille=0` removed **1666** repair symbols per 1204-frame window against
+**1662** predicted for zero parity on the class, versus **1180** had `min_r`
+applied — so the `rate == 0` short-circuit preceding the floor is now
+device-confirmed, not just read off the source. Reverting restored 8366 vs a
+8302 baseline.
+
+**And the sweep produced the first real cost measurement, which changes the
+guidance.** The ground logged 159 unrecoverable frames during the unprotected
+window and none before or after. That is not a defect — it is the link:
+`loss_prediversity_milli` 48, `loss_postdiv_prearq_milli` **19**, so 1.9 %
+residual post-diversity packet loss. At the measured 44861-byte average frame
+and a 1424 B MTU, k ≈ 32, giving `1 - 0.981^32` = **46.2 %** probability that an
+unprotected frame loses at least one symbol. Observed 159/~370 = 43 %. The
+model and the measurement agree.
+
+The consequence: **`e_rate = 0` is not viable at this link's residual loss.**
+At 20 % density it costs ~9 % of all frames; at `ltr`'s 50 % it would cost
+~23 % — a visibly stuttering stream, not a cheap optimisation. The usable band
+here is bounded below by the `min_r` floor at `min_r/k = 2/32` ≈ 62 ‰ and above
+by `p_rate` 200 ‰, so a middle value is both meaningful and the thing stage 3
+has to find. §14.1a already says "0 or clearly above `min_r/k`"; this measures
+what that band actually is on real hardware and retires the assumption that 0
+is the interesting setting.
+
+Checked and cleared while investigating: neither `craft.json` nor `ground.json`
+carries `air.rx_drop_permille`, so no synthetic bench drop is inflating any of
+this. Two open threads, neither blocking: RSSI is **-22/-26 dBm** — hot enough
+that near-field receiver overload is a plausible contributor to 4.8 %
+pre-diversity loss at MCS 5 — and both ground adapters report `dup: 0` with
+`diversity` (834475) *below* `delivered` (881271), which is hard to square with
+diversity halving the loss rate. The counters may not mean what the names
+suggest; worth a look before anyone tunes against them.
