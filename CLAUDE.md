@@ -17,15 +17,36 @@ settled here, not there.
 
 ## The law
 
-- **`PROTOCOL.md` v1 is LAW.** When the spec has a gap or ambiguity, STOP and
-  raise it to the operator — never pick silently. This has happened repeatedly
-  (HMAC hash choice, RTT estimator anchor, SA field semantics) and every one of
-  those was an operator ruling, not an inference.
-- **Spec amendments commit FIRST**, as their own commit; code implementing the
-  ruling follows in the same PR, as a separate commit.
-- **Every spec ruling gets a numbered Pass entry in `docs/review-log.md`.**
-  Currently at Pass 147 — read the last two or three passes before touching
-  anything spec-adjacent, to pick up the reasoning, not just the verdict.
+`PROTOCOL.md` v1 is LAW — but the law has two tiers, and applying tier 1 to
+tier-2 material is how Passes 120–152 spent a third of themselves reversing
+each other. Decide the tier BEFORE writing anything.
+
+**Tier 1 — contract.** Wire formats, trust/auth machinery, state-machine
+behaviour a peer implementation depends on, config semantics. Process
+(unchanged):
+
+- A spec gap or ambiguity is an **operator ruling** — STOP and raise it,
+  never pick silently. (HMAC hash choice, RTT anchor, SA semantics — every
+  one was a ruling, not an inference.)
+- **Spec amendments commit FIRST**, as their own commit; implementing code
+  follows in the same PR as a separate commit.
+- **Every ruling gets a numbered Pass in `docs/review-log.md`** — ≤40 lines:
+  verdict, changed `§N.M`, evidence pointer. No addenda; a new fact is a new
+  Pass or a finding. Passes 1–152 live in
+  `docs/review-log-archive-p001-152.md` and all citations still resolve.
+
+**Tier 2 — findings.** Anything still being measured: loss walls, gates,
+dwell counts, seeds, sweep bounds, estimator choices. These are **config
+knobs + dated entries in `docs/findings.md`** — never spec text, never a Pass,
+until the mechanism settles. Then ONE amendment (tier-1 process) closes the
+finding out. Litmus: *"is this a behaviour change I intend to keep?"* A
+threshold chosen to make one run pass is not; an understood mechanism is.
+Prefer one amendment after understanding over three during discovery. If an
+unmerged amendment asserts something later evidence undermines, soften it
+before merge instead of stacking a correction on top.
+
+**Unchanged either way:**
+
 - **Never commit to main.** Feature branch (`impl/`, `fix/`, `docs/`) → PR →
   squash-merge, and merge only on the operator's explicit word.
 - **Never edit vendored code under `third_party/`** (devourer, libusb-cmake).
@@ -40,6 +61,50 @@ settled here, not there.
   so an unrecognised key — a typo, or a name invented from an older example —
   is **silently ignored**. `--check` passing proves the config parses, not that
   it says what you meant. See "Authoring configs" below.
+
+## Verification playbook
+
+These practices repeatedly caught bugs that green test suites and four clean
+cross-builds sailed past. They are the half of the process that earns its
+cost — do not skip them to save time.
+
+- **Review by executing probes, not by reading.** Pre-merge, run the actual
+  command/trace against the claim (Passes 126/136/150: six CRITICAL
+  half-converted paths found this way). A test that injects the very value
+  production computes wrongly cannot catch that class of bug.
+- **Read deployed state before trusting a design.** The fleet's real configs
+  (`deploy/*.json`) and real hardware identities, not examples. One `cat` of
+  sysfs serials would have voided the Pass-146 identity design (all dongles
+  report `123456`); reading the PSK-less fleet config would have voided the
+  §3.16 MAC (Pass 127).
+- **Device A/Bs widen their readout.** When an A/B says "nothing happened",
+  dump the whole object before concluding (Pass 144: the "latch risk" was a
+  stranger's video decoded onto our stream output).
+- **Refuse false success.** A result that cannot be used must not report
+  success (artifact-write-failed, flat-at-ceiling). Every such refusal later
+  fired correctly on hardware.
+- **Sweep from the safe end** on any live-link parameter (power, MCS, MTU,
+  FEC, channel), and sweep the FULL commanded range — terminating at the
+  first wall placed a rung 14 dB wrong (Pass 133).
+- **Two adapters of the same part number are not a replicate** (Pass 139:
+  the "broken chip" behind the whole kernel-monitor posture was one bad
+  unit). Per-unit, not per-chip.
+- Method lessons like these graduate to the coordination repo's memory, not
+  into the review log.
+
+## Operating loop
+
+Current phase order (operator direction, 2026-08-06): **consolidate → expand
+→ distill.**
+
+1. **Consolidate:** settle §10.5 offset-space actuation (PR #114), calibration
+   v2 (`docs/calibration-v2-symmetric-probes.md` — design → ruling → impl),
+   minimal strict config check (#106 first slice).
+2. **Expand:** devourer upside tranche #95–#101, in the order filed;
+   devourer is the TX-role backend, kernel-monitor stays for RX/spectator.
+3. **Distill:** library extraction (#109) — `core/` plus a real "waybeam
+   node" layer out of `app/main.cpp`; the calibration-v2 engine should land
+   already library-shaped (pure core, injected send/tally callbacks).
 
 ## Authoring configs
 
@@ -104,11 +169,15 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   `gate3_rtt.py` (NACK→RETRANSMIT latency), `rtp_feed.py` (synthetic RTP feeder).
 - `profiles/` — the §9.3 operating-point table (data, not code).
 - `examples/` — sample configs (loopback, udp-air tx/rx, radio tx/rx).
-- `docs/` — `build-order.md` (§19 order + §17 gates), `review-log.md` (spec
-  ruling history), `groundwork.md` (constant provenance), `findings-pass3.md`
+- `docs/` — `build-order.md` (§19 order + §17 gates), `review-log.md` (live
+  Tier-1 ruling log, Pass 153+), `review-log-archive-p001-152.md` (frozen
+  Pass 1–152 history), `findings.md` (Tier-2 measurement notes),
+  `groundwork.md` (constant provenance), `findings-pass3.md`
   (adversarial-review arbitration), `step11-bench.md` (current bench state +
   remaining-work plan), `config-harness-plan.md` (the config generator /
-  agent-facing schema proposal, with two open rulings).
+  agent-facing schema proposal, with two open rulings),
+  `calibration-v2-symmetric-probes.md` (the calibration redesign, Tier 2
+  until ruled).
 
 ## Runtime / bench gotchas
 
@@ -141,9 +210,12 @@ Each of these cost real debugging time during bring-up — don't rediscover them
 - Bench-only knob `air.rx_drop_permille` (0–1000): per-adapter independent
   synthetic RX drop, used to manufacture known-independent loss for gate-2
   validation.
+- A calibration run needs **no video displayed** — bench it headless (the
+  v2 design pauses the video feed entirely for the run).
 
 ## Working style
 
 - Prefer minimal patches; match existing comment density and the
   spec-section-reference style (comments cite `§N.M`, not prose paraphrase).
-- Current open work and PR stack: see `docs/step11-bench.md`.
+- Current open work and PR stack: see `docs/step11-bench.md` and the
+  "Operating loop" above.
