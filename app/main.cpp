@@ -5216,7 +5216,16 @@ int run_rx(const Loaded& l) {
     // precondition and for the same reason: once the sweep starts, elevated
     // loss is the measurement.
     struct UplinkFloor {
-        uint32_t win_ms = 4000;
+        // The window is a SAMPLE-COUNT gate, not a clock. Reports arrive at
+        // ~10 Hz, so the first cut at 4 s closed on n=40 — where one lost
+        // report is 25permille and the estimator's own sigma (25permille) is
+        // the size of the floor it is estimating. Measured live: a 4 s window
+        // read 50permille against a 40 s window's 24.8 +/- 7.7, and the
+        // inflated floor admitted a rung at 45permille that the true floor
+        // would have refused. n=300 puts sigma near 9permille at a
+        // 25permille floor, which is the resolution the walls need.
+        uint32_t min_samples = 300;
+        uint32_t max_win_ms = 60000;  // give up and re-mark on a dead link
         uint64_t mark_ms = 0;
         uint32_t mark_sent = 0;
         uint32_t mark_recv = 0;
@@ -5229,10 +5238,16 @@ int run_rx(const Loaded& l) {
                 mark_recv = recv;
                 return;
             }
-            if (now - mark_ms < win_ms) return;
             const uint32_t ds = sent - mark_sent;
+            if (ds < min_samples) {
+                if (now - mark_ms < max_win_ms) return;
+                mark_ms = now;  // link too quiet to estimate; start over
+                mark_sent = sent;
+                mark_recv = recv;
+                return;
+            }
             const uint32_t dr = recv - mark_recv;
-            if (ds > 0 && dr <= ds) {
+            if (dr <= ds) {
                 floor_milli =
                     static_cast<uint16_t>(1000ull * (ds - dr) / ds);
                 have = true;
