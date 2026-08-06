@@ -1861,6 +1861,9 @@ struct TxCore {
         bool jscc_enforce = false;
         uint64_t jscc_enforced_frames = 0;
         uint64_t jscc_discarded_frames = 0;
+        // §14.2 Pass 149: valid decisions skipped because the frame is
+        // non-referenced (§14.1a) and exempt from enforcement entirely.
+        uint64_t jscc_exempt_frames = 0;
     };
 
     TxCore(const Config& cfg, uint32_t session, const ProfileTable* table,
@@ -1952,6 +1955,7 @@ struct TxCore {
                 fc.fec.scheme = s.fec.scheme;
                 fc.fec.i_rate_permille = s.fec.i_rate_permille;
                 fc.fec.p_rate_permille = s.fec.p_rate_permille;
+                fc.fec.e_rate_permille = s.fec.e_rate_permille;  // §14.1a
                 fc.fec.min_k = s.fec.min_k;
                 fc.fec.min_r = s.fec.min_r;
                 st.frame_framer.emplace(fc);
@@ -2055,6 +2059,9 @@ struct TxCore {
             VencFrameMeta meta;
             const bool have_meta = read_frame_meta(blob, len, &meta);
             const bool idr = have_meta && (meta.flags & kFrameFlagIdr) != 0;
+            // §14.1a non-referenced class (IDR wins, matching FrameFramer).
+            const bool enhance =
+                have_meta && !idr && (meta.flags & kFrameFlagEnhance) != 0;
             if (fps_ladder_ && have_meta && !idr) {
                 fps_ladder_->note_p_frame(
                     static_cast<uint32_t>(std::min<size_t>(
@@ -2076,9 +2083,12 @@ struct TxCore {
                 JsccShadowFrameInput input;
                 input.source_k = k;
                 input.deadline_us = frame_deadline_us(idr);
+                // §14.1a: a non-referenced frame is never ARQ-eligible, so the
+                // shadow must not model an ARQ that cannot occur.
                 input.arq_capable =
-                    (idr ||
-                     s.frame_framer->arq_mode() == FrameArqMode::kAllFrames) &&
+                    (idr || (s.frame_framer->arq_mode() ==
+                                 FrameArqMode::kAllFrames &&
+                             !enhance)) &&
                     !arq_fps_suppressed_;  // §4.1 Pass 40 cutoff
                 input.now_ms = now;
                 if (estimate_airtime) {
@@ -2099,14 +2109,23 @@ struct TxCore {
                 // §14.2 enforcement (Pass 38): a VALID decision actuates for
                 // this one frame; any fallback keeps the fixed §14.1 path.
                 if (s.jscc_enforce && s.jscc_latest.valid) {
-                    if (s.jscc_latest.decision.discard) {
+                    if (enhance) {
+                        // §14.2 (Pass 149, operator ruling): non-referenced
+                        // frames are exempt from enforcement ENTIRELY — no
+                        // parity replacement (rule 1), no deadline discard
+                        // (rule 2), and rule 3 is moot since §14.1a makes the
+                        // class ARQ-ineligible. The shadow still evaluated it
+                        // above, so telemetry stays comparable.
+                        ++s.jscc_exempt_frames;
+                    } else if (s.jscc_latest.decision.discard) {
                         ++s.jscc_discarded_frames;  // rule 2: drop, not queue
                         return;
+                    } else {
+                        s.frame_framer->set_next_frame_override(
+                            s.jscc_latest.decision.parity_symbols,
+                            s.jscc_latest.decision.arq_eligible);
+                        ++s.jscc_enforced_frames;
                     }
-                    s.frame_framer->set_next_frame_override(
-                        s.jscc_latest.decision.parity_symbols,
-                        s.jscc_latest.decision.arq_eligible);
-                    ++s.jscc_enforced_frames;
                 }
             }
             s.frame_framer->on_frame(
@@ -2469,7 +2488,8 @@ struct TxCore {
     // §14.1 live FEC-rate retune for a frame-shm stream. Returns false if the
     // stream_id is unknown or is not a frame-shm (FrameFramer) stream.
     bool set_stream_fec(uint8_t stream_id, uint16_t i_permille,
-                        uint16_t p_permille, uint16_t min_k, uint16_t min_r) {
+                        uint16_t p_permille, uint16_t min_k, uint16_t min_r,
+                        std::optional<uint16_t> e_permille) {
         for (Stream& s : streams_) {
             if (s.stream_id != stream_id) {
                 continue;
@@ -2477,7 +2497,8 @@ struct TxCore {
             if (!s.frame_framer) {
                 return false;  // udp stream: no per-stream FEC (§15.2)
             }
-            s.frame_framer->set_fec_rates(i_permille, p_permille, min_k, min_r);
+            s.frame_framer->set_fec_rates(i_permille, p_permille, min_k, min_r,
+                                          e_permille);
             return true;
         }
         return false;
@@ -2707,6 +2728,8 @@ struct TxCore {
                 st.arq_frames = s.frame_framer->stats().arq_frames;
                 st.arq_cutoff_frames =
                     s.frame_framer->stats().arq_cutoff_frames;
+                st.fec_enhance_frames =
+                    s.frame_framer->stats().fec_enhance_frames;  // §14.1a
             }
             if (s.jscc_shadow) {
                 const JsccShadowResult& js = s.jscc_latest;
@@ -2736,6 +2759,7 @@ struct TxCore {
                 st.jscc_feedback_age_ms = js.feedback_age_ms;
                 st.jscc_enforced_frames = s.jscc_enforced_frames;
                 st.jscc_discarded_frames = s.jscc_discarded_frames;
+                st.jscc_exempt_frames = s.jscc_exempt_frames;
             }
             st.resends_sent = s.sched.counters().resends_sent;
             st.arq_lock_holder = s.sched.counters().lock_holder;
@@ -4410,16 +4434,19 @@ int run_tx(const Loaded& l) {
             }
             return {200, std::string("{\"ok\":true}")};
         };
-        h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
+        h.fec = [&](int sid, int ip, int pp, int mk, int mr,
+                    std::optional<uint16_t> ep) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
             if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
                 mr < 0 || mr > 255)
                 return "bad fec rates (0..4000 permille, min_k>=1, min_r 0..255)";
+            // §14.1a: the control server already range-checked e_permille;
+            // nullopt here means "inherit p_permille" (full replacement).
             return tx.set_stream_fec(static_cast<uint8_t>(sid),
                                      static_cast<uint16_t>(ip),
                                      static_cast<uint16_t>(pp),
                                      static_cast<uint16_t>(mk),
-                                     static_cast<uint16_t>(mr))
+                                     static_cast<uint16_t>(mr), ep)
                        ? ""
                        : "no frame-shm stream with that id";
         };
@@ -7382,16 +7409,19 @@ int run_loopback(const Loaded& l) {
                                static_cast<uint8_t>(mx));
             return "";
         };
-        h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
+        h.fec = [&](int sid, int ip, int pp, int mk, int mr,
+                    std::optional<uint16_t> ep) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
             if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
                 mr < 0 || mr > 255)
                 return "bad fec rates (0..4000 permille, min_k>=1, min_r 0..255)";
+            // §14.1a: the control server already range-checked e_permille;
+            // nullopt here means "inherit p_permille" (full replacement).
             return tx.set_stream_fec(static_cast<uint8_t>(sid),
                                      static_cast<uint16_t>(ip),
                                      static_cast<uint16_t>(pp),
                                      static_cast<uint16_t>(mk),
-                                     static_cast<uint16_t>(mr))
+                                     static_cast<uint16_t>(mr), ep)
                        ? ""
                        : "no frame-shm stream with that id";
         };

@@ -525,9 +525,25 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         if (!j.contains("stream_id")) {
             return reply(400, "Bad Request", json_err("stream_id required"));
         }
+        // §14.1a: absent or null => nullopt (inherit p_permille). Type- and
+        // range-guard before get<>: an out-of-range or non-integer value must
+        // be a 400, never a throw unwinding out of the server.
+        std::optional<uint16_t> e_permille;
+        if (j.contains("e_permille") && !j.at("e_permille").is_null()) {
+            if (!j.at("e_permille").is_number_integer()) {
+                return reply(400, "Bad Request",
+                             json_err("e_permille must be an integer or null"));
+            }
+            const int64_t e = j.at("e_permille").get<int64_t>();
+            if (e < 0 || e > 4000) {
+                return reply(400, "Bad Request",
+                             json_err("e_permille must be 0..4000"));
+            }
+            e_permille = static_cast<uint16_t>(e);
+        }
         return done(h_.fec(j.value("stream_id", 0), j.value("i_permille", 250),
                            j.value("p_permille", 100), j.value("min_k", 3),
-                           j.value("min_r", 2)));
+                           j.value("min_r", 2), e_permille));
     }
     if (path == "/api/v1/stats/reset") {
         if (!h_.reset_stats) return na();

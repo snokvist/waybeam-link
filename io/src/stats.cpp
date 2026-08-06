@@ -256,6 +256,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.jscc_enforced_frames);
         out += ",\"jscc_discarded_frames\":";
         append_u64(out, s.jscc_discarded_frames);
+        out += ",\"jscc_exempt_frames\":";
+        append_u64(out, s.jscc_exempt_frames);
         out += ",\"shm_health_valid\":";
         append_bool(out, s.shm_health_valid);
         out += ",\"shm_full_drops\":";
@@ -306,6 +308,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.arq_frames);
         out += ",\"arq_cutoff_frames\":";
         append_u64(out, s.arq_cutoff_frames);
+        out += ",\"fec_enhance_frames\":";
+        append_u64(out, s.fec_enhance_frames);
         out += ",\"decode_errors\":";
         append_u64(out, s.decode_errors);
         out += ",\"active_profile\":";

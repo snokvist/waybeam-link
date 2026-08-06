@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -59,8 +60,11 @@ struct ControlHandlers {
     // §10.5 (Pass 114) TX-power override-latch: is_auto=true clears the
     // latch (qdb ignored), else latch the absolute qdb on every tx adapter.
     std::function<std::string(bool is_auto, int qdb)> tx_power_set;
+    // e_permille: §14.1a third class; nullopt = inherit p_permille. The
+    // POST is a full replacement, so an omitted e_permille restores that.
     std::function<std::string(int stream_id, int i_permille, int p_permille,
-                              int min_k, int min_r)>
+                              int min_k, int min_r,
+                              std::optional<uint16_t> e_permille)>
         fec;
     std::function<void()> reset_stats;  // side-effect only; always 200
     // §15.5 Pass 103: drop the venc actuator's write-on-change cache so the

@@ -22,7 +22,22 @@ uint16_t FrameFramer::symbol_size() const {
     return s > 0 ? static_cast<uint16_t>(s) : 1;
 }
 
-uint16_t FrameFramer::repair_count(uint16_t k, bool is_idr, bool arq_eligible) {
+uint16_t FrameFramer::class_rate(FrameFecClass cls) const {
+    switch (cls) {
+        case FrameFecClass::kIdr:
+            return cfg_.fec.i_rate_permille;
+        // §14.1a: UNSET inherits the P rate, so a config predating Pass 149
+        // is bit-for-bit unchanged. Not a 0 default — see the header.
+        case FrameFecClass::kEnhance:
+            return cfg_.fec.e_rate_permille.value_or(cfg_.fec.p_rate_permille);
+        case FrameFecClass::kP:
+            break;
+    }
+    return cfg_.fec.p_rate_permille;
+}
+
+uint16_t FrameFramer::repair_count(uint16_t k, FrameFecClass cls,
+                                   bool arq_eligible) {
     // §14.1 adaptive policy.
     if (cfg_.fec.scheme != FecScheme::kRlc256) {
         return 0;
@@ -37,8 +52,10 @@ uint16_t FrameFramer::repair_count(uint16_t k, bool is_idr, bool arq_eligible) {
     if (k <= cfg_.fec.min_k && arq_eligible) {
         return 0;  // ARQ-only at small k
     }
-    const uint32_t rate =
-        is_idr ? cfg_.fec.i_rate_permille : cfg_.fec.p_rate_permille;
+    // §14.1a: the gate above is inert for kEnhance (never ARQ-eligible), so a
+    // small non-referenced frame falls through to its own rate here. With
+    // e_rate=0 it ships bare — intended, and tested rather than discovered.
+    const uint32_t rate = class_rate(cls);
     if (rate == 0) {
         return 0;
     }
@@ -93,16 +110,29 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     VencFrameMeta meta;
     read_frame_meta(blob, len, &meta);
     const bool is_idr = (meta.flags & kFrameFlagIdr) != 0;
+    // §14.1a priority order IDR -> enhance -> P. No producer marks an IDR
+    // non-referenced; assert the disjointness rather than relying on it, and
+    // let IDR win if a producer ever does (protecting more, never less).
+    const bool is_enhance = !is_idr && (meta.flags & kFrameFlagEnhance) != 0;
+    const FrameFecClass cls = is_idr      ? FrameFecClass::kIdr
+                              : is_enhance ? FrameFecClass::kEnhance
+                                           : FrameFecClass::kP;
 
     const uint32_t block_id = block_id_++;
     const uint32_t base_seq = next_seq_;
     // §4.1 Pass 40: above the cadence cutoff nothing is ARQ-class; §14.2
     // rule 3: a valid enforced decision may additionally clear PFRAME_ARQ
     // for this frame. The IDR ARQ bit is only ever removed by the cutoff.
+    // §14.1a: a non-referenced frame is NEVER ARQ-eligible, under any
+    // arq_mode. Structural, not tuning: a referenced frame's late retransmit
+    // still repairs the DPB and truncates the cascade, but nothing predicts
+    // from this one, so a repair past its display deadline is worth exactly
+    // zero. Excluded from arq_class too, else arq_cutoff_frames counts frames
+    // that had no ARQ to cut.
     const bool arq_class =
-        is_idr || cfg_.arq_mode == FrameArqMode::kAllFrames;
+        is_idr || (cfg_.arq_mode == FrameArqMode::kAllFrames && !is_enhance);
     const bool idr_arq = is_idr && !arq_suppressed_ && arq_enabled_;
-    const bool pframe_arq = !is_idr &&
+    const bool pframe_arq = !is_idr && !is_enhance &&
                             cfg_.arq_mode == FrameArqMode::kAllFrames &&
                             ov_allow_parq && !arq_suppressed_ && arq_enabled_;
     const uint8_t base_flags = static_cast<uint8_t>(
@@ -110,13 +140,18 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
                  : (pframe_arq ? data_flags::kPframeArq : 0)) |
         extra_flags_);
 
-    uint16_t r = repair_count(k, is_idr, idr_arq || pframe_arq);
+    uint16_t r = repair_count(k, cls, idr_arq || pframe_arq);
     // §14.2 rule 1: a valid enforced decision replaces the fixed rate, still
     // GF(256)-clamped and still subject to the min_k ARQ-only rule.
     // §14.2 rule 1 keeps the override "subject to the §14.1 min_k ARQ-only
     // rule", so it inherits Pass 94's condition: the gate blocks the override
     // only where ARQ could have carried the frame instead.
-    if (ov_parity && cfg_.fec.scheme == FecScheme::kRlc256 &&
+    // §14.2 (Pass 149): kEnhance is exempt from enforcement ENTIRELY. Without
+    // this, making the class ARQ-ineligible above flips the `!(idr_arq ||
+    // pframe_arq)` term permanently true, so the override would repaint parity
+    // onto exactly the frames e_rate exists to leave bare — at every k, where
+    // it is blocked below min_k for every other class.
+    if (ov_parity && !is_enhance && cfg_.fec.scheme == FecScheme::kRlc256 &&
         (k > cfg_.fec.min_k || !(idr_arq || pframe_arq))) {
         const uint32_t cap =
             k < kFecMaxSymbols ? kFecMaxSymbols - k : 0;
@@ -126,8 +161,7 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     // refragmenting jumbo frames into extra source packets. Applied after a
     // §14.2 override so the robustness floor cannot be silently bypassed.
     if (jumbo_fec_guard) {
-        const uint32_t rate =
-            is_idr ? cfg_.fec.i_rate_permille : cfg_.fec.p_rate_permille;
+        const uint32_t rate = class_rate(cls);
         const bool arq_only =
             k <= cfg_.fec.min_k && (idr_arq || pframe_arq);
         const uint32_t cap = kFecMaxSymbols - k;
@@ -146,6 +180,9 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     ++stats_.frames;
     if (is_idr) {
         ++stats_.idr_frames;
+    }
+    if (is_enhance) {
+        ++stats_.fec_enhance_frames;  // §14.1a observed droppable density
     }
     if (idr_arq || pframe_arq) {
         ++stats_.arq_frames;

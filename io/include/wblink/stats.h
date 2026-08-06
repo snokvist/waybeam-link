@@ -121,6 +121,7 @@ struct StreamStats {
     // §14.2 enforcement (Pass 38): actuated valid decisions + rule-2 drops.
     uint64_t jscc_enforced_frames = 0;
     uint64_t jscc_discarded_frames = 0;
+    uint64_t jscc_exempt_frames = 0;  // §14.2 Pass 149 §14.1a exemption
     // §15.3 Pass 109: ingress producer health is optional at ring version 1.
     // When valid, full_drops is the delta since attach/reset and throttle is a
     // gauge. shm_ring_full remains independent consumer-side evidence.
@@ -155,6 +156,7 @@ struct StreamStats {
     uint64_t idr_frames = 0;
     uint64_t arq_frames = 0;
     uint64_t arq_cutoff_frames = 0;  // §4.1 Pass 40 cadence suppression
+    uint64_t fec_enhance_frames = 0;  // §14.1a observed droppable density
     uint64_t decode_errors = 0;
     uint8_t active_profile = 0;
     uint8_t table_version = 0;

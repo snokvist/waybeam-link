@@ -279,6 +279,8 @@ int main() {
             CHECK_EQ_U(s.fec.i_rate_permille, 300u);
             CHECK_EQ_U(s.fec.p_rate_permille, 120u);
             CHECK_EQ_U(s.fec.min_k, 4u);
+            // §14.1a: absent e_rate_permille => unset (inherit p_rate).
+            CHECK(!s.fec.e_rate_permille.has_value());
         }
         expect_error(R"({"node":{"originator":7,"role":"tx"},
           "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
@@ -352,6 +354,39 @@ int main() {
       "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
         "bind":{"kind":"frame-shm"}}]})",
                  "name");
+    // §14.1a fec.e_rate_permille: present, explicit null, and the bounds.
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 7, "role": "tx"},
+          "streams": [{ "stream_id": 0, "stream_type": "RTP", "dir": "in",
+            "bind": { "kind": "frame-shm", "name": "venc_frame" },
+            "fec": { "scheme": "rlc256", "e_rate_permille": 0 } }]})");
+        CHECK(bool(r));
+        if (r) {
+            const StreamCfg& s = r.value->streams[0];
+            CHECK(s.fec.e_rate_permille.has_value());
+            CHECK_EQ_U(*s.fec.e_rate_permille, 0u);  // 0 != unset
+        }
+        // Explicit null is the same as absent — "inherit p_rate".
+        auto n = load_config_json(R"({
+          "node": {"originator": 7, "role": "tx"},
+          "streams": [{ "stream_id": 0, "stream_type": "RTP", "dir": "in",
+            "bind": { "kind": "frame-shm", "name": "venc_frame" },
+            "fec": { "scheme": "rlc256", "e_rate_permille": null } }]})");
+        CHECK(bool(n));
+        if (n) CHECK(!n.value->streams[0].fec.e_rate_permille.has_value());
+    }
+    expect_error(R"({"node":{"originator":7,"role":"tx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"frame-shm","name":"venc_frame"},
+        "fec":{"scheme":"rlc256","e_rate_permille":4001}}]})",
+                 "0..4000");
+    // A rate with no scheme to apply it is a config error, not a silent no-op.
+    expect_error(R"({"node":{"originator":7,"role":"tx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"frame-shm","name":"venc_frame"},
+        "fec":{"scheme":"none","e_rate_permille":0}}]})",
+                 "rlc256");
     // fec.scheme only on a frame-shm binding.
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
