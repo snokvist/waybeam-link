@@ -7134,3 +7134,44 @@ pre-diversity loss at MCS 5 — and both ground adapters report `dup: 0` with
 `diversity` (834475) *below* `delivered` (881271), which is hard to square with
 diversity halving the loss rate. The counters may not mean what the names
 suggest; worth a look before anyone tunes against them.
+
+**Channel comparison, 2026-08-06 (rules out channel dirt).** The 1.9 % residual
+prompted a check of whether 5805 was simply congested. Both nodes moved to
+5745 (channel 149, allowlisted on both) and back, 45 s reset windows each:
+
+| channel | pre-diversity | post-diversity | MCS |
+|---|---|---|---|
+| 5805 (161) | 45–50 ‰ | 17–19 ‰ | 5 |
+| 5745 (149) | 47 ‰ | **22 ‰** | 5 |
+
+5745 is marginally *worse*. The loss follows the link across channels rather
+than sitting on one, so it is not interference on 5805 — with RSSI at
+**-22/-25 dBm** the likelier cause is near-field receiver overload or duplex
+self-desense on the bench, neither of which a channel change fixes. Both nodes
+were reverted and re-verified at 50/19 ‰ with 0 unrecoverable.
+
+Three operational findings fell out of that attempt, all worth keeping:
+
+- **A runtime CSA cannot move this fleet: `csa_psk` is unset on both nodes.**
+  `POST /api/v1/csa` returns `{"ok":true}` and then does nothing — the ground
+  arms, the craft never echoes `CSA_ARMED`, and it aborts. A 200 on an
+  unauthenticated CSA is misleading; the endpoint should refuse when no PSK is
+  configured rather than report success and no-op. Filed as an observation,
+  not fixed here.
+- **`/api/v1/csa` is ground-side only** (`run_rx`), while `/api/v1/channel` is
+  TX-side only (`run_tx`). Posting CSA to the craft returns "endpoint not
+  available in this mode", which reads like a build problem rather than a role
+  split. Worth a line in §15.5.
+- **The ground's uplink adapter was left in `managed` mode** by today's
+  devourer USB unbind/rebind runs, so its retune failed `EBUSY` and CSA could
+  not have completed even with a PSK. `waybeam-ground-prep` mon-ups both on
+  service start, so a restart fixed it — but nothing detects the state, and
+  the node ran that way while reporting healthy. Loss was unchanged before and
+  after (48/19 → 45/17), so this did not cause the residual, but a monitor-mode
+  check belongs in the adapter health surface.
+
+Also unexplained and left open: both ground adapters report `dup: 0` while each
+receives ~the full stream (127546 / 132273 packets against 120769 delivered),
+and `diversity` reads *below* `delivered`. Diversity is demonstrably working —
+it halves the loss rate — so the counters do not appear to mean what the names
+suggest. Do not tune against them until that is resolved.
