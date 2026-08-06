@@ -3605,6 +3605,20 @@ not permission to infer one from the other. The initial monitor rig seed is
 **600 permille**, matching the measured MCS3/SGI service envelope; deployments
 must re-derive it under their driver, contention, and aggregation behavior.
 
+The same authored calibration enables the model on the **devourer radio**
+backend (operator-ruled 2026-08-06, Pass 143) with one documented difference:
+**the radio estimate carries no pending term.** There is no socket to query,
+and devourer's `send_packet` is a synchronous bulk-OUT that returns only once
+the transfer has completed or failed — so a frame is already handed to the chip
+by the time the caller resumes, and there is no queue to account for. The
+pending term is therefore absent by construction rather than approximated away,
+and `include_pending` is ignored on this backend. Everything else is identical:
+same service-rate model, same per-MPDU 802.11/FCS accounting, same opt-in
+posture — an uncalibrated devourer node reads `airtime_unavailable`, it does
+**not** fall back to an optimistic default. The efficiency figure is per
+transport and must be re-derived on devourer; the monitor seed does not carry
+over.
+
 Shadow configuration is optional and disabled when absent:
 
 ```json
