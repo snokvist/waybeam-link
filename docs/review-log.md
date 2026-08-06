@@ -7175,3 +7175,47 @@ receives ~the full stream (127546 / 132273 packets against 120769 delivered),
 and `diversity` reads *below* `delivered`. Diversity is demonstrably working —
 it halves the loss rate — so the counters do not appear to mean what the names
 suggest. Do not tune against them until that is resolved.
+
+**Stages 2 and 3, on a clean link (2026-08-06).** The 1.9 % residual above was
+not the RF environment — it was the craft's **devourer TX path**. Switching the
+craft to the kernel-monitor backend on the same channel, same MCS 5, same RSSI
+took post-diversity loss from **17–19 ‰ to 1–2 ‰**, roughly a 10× improvement.
+Everything below was therefore re-measured on the monitor backend, and the
+earlier "`e_rate = 0` is not viable" conclusion is withdrawn — it was measured
+against a degraded transmitter, not a link. (Why devourer's TX is lossy is
+parked; a mis-set TX power overdriving the PA is the leading hypothesis.)
+
+Producer switched to `resilience: "ltr"`: density measured **exactly 50.0 %**
+(1355/2711), and `idr_frames` 23 in 2715 frames ≈ 1 per 118 — the 2.0 s GOP,
+confirming `ltr` drops intra-refresh and leaves the IDR as sole repair point,
+as §14.1a states. 45 s windows, `/api/v1/fec` retunes, ground stats reset each:
+
+| config | parity (rep/src) | unrecoverable | of droppable class |
+|---|---|---|---|
+| `e` unset (i300/p200) | 21.5 % | **0** | 0 % |
+| `e` unset (repeat, control) | 21.4 % | **0** | 0 % |
+| `e = 0` (i300/p200) | 11.6 % | 138 | 10.2 % |
+| `e = 0` + realloc (i600/p380) | 22.4 % | 213 | 15.7 % |
+
+**The mechanism works exactly as specified**: density detected without any
+producer coupling, parity on the class removed cleanly (21.5 → 11.6 %, a 46 %
+cut ≈ 8 % of stream bytes), and the control reproduces 0 unrecoverable, so the
+losses are attributable to `e_rate` and not drift.
+
+**But the reallocation thesis did not survive its own test, twice over.** First,
+there was nothing for it to buy: at baseline the referenced class already loses
+*nothing*, so there is no cascade for a raised `i_rate`/`p_rate` to prevent.
+Second, spending the freed budget made the droppable class **worse** — 15.7 %
+lost versus 10.2 % at the same measured airtime. The extra parity packets raise
+channel occupancy, and the frames paying for that are precisely the ones with no
+protection left. Reallocation is not neutral for the unprotected class; it is
+negative-sum for it.
+
+So on a clean link the honest trade is narrow: **~8 % of stream bytes against
+~5 % of frames dropped** (10.2 % of a 50 % class), each a bounded one-frame
+glitch. Worth taking only if that airtime buys something better than the frames
+it costs. The reallocation case rests entirely on a link where referenced frames
+*do* fail, and that link has yet to be measured — the one we had was a broken
+transmitter, not a hard RF environment. Stage 3 is therefore **not** closed; it
+needs a genuinely lossy link, and §14.1a's arithmetic stays operator guidance
+rather than a validated recipe.
