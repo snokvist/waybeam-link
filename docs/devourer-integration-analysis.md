@@ -5,11 +5,13 @@
 deferred to an operator ruling; when one is made it commits first as a spec
 amendment + numbered Pass, per repo law.
 
-Scope: the four areas the operator named — **channel occupancy + the channel
-scout**, **aggregation and hardware ACKs**, **FEC**, and devourer's
+Scope: the four areas the operator named first — **channel occupancy + the
+channel scout**, **aggregation and hardware ACKs**, **FEC**, and devourer's
 **interpretation of the adaptive link** (`third_party/devourer/docs/adaptive-link.md`,
-`adaptive-link-building-blocks.md`). The question asked is specifically: *what
-does devourer cover natively that we currently build ourselves?*
+`adaptive-link-building-blocks.md`) — plus, added in a second pass, **TDMA** (§5)
+and a sweep of the remaining docs for anything else high-impact (§6). The
+question asked is specifically: *what does devourer cover natively that we
+currently build ourselves?*
 
 This extends `docs/devourer-revendor-review.md` (2026-07-24, written against
 devourer `7a6541f`). That survey is still the correct broad map; it is re-read,
@@ -433,6 +435,295 @@ writing in the first place.
 
 ---
 
+---
+
+## 5. TDMA — a deterministic TX path instead of fitting returns around video
+
+Sources: `docs/scheduled-mac.md`, `docs/time-distribution.md`, and the
+`examples/tdma/` burst-level scheme written up in `docs/narrowband.md`. These are
+three different things that all get called "TDMA", and separating them is most of
+the answer.
+
+### 5.1 The load-bearing asymmetry
+
+Every measurement in those documents lands on one distinction, and it decides
+what a TDMA design can and cannot promise:
+
+**Scheduling a *state change* against a shared clock is cheap and precise.
+Scheduling a *frame's departure from the antenna* is expensive and coarse.**
+
+| operation | mechanism | measured |
+|---|---|---|
+| two receivers relating their clocks off a common frame | per-frame MAC-latched `tsfl` | **~0.35 µs RMS** (8822C + 8822B) |
+| slave locking to a hardware-beacon master | `StartBeacon` + TSF fit | **0.31–0.40 µs RMS** (all three generations) |
+| anchoring a local burst schedule to the far end | TSF-fitted marker (`tdma` `sync=tsf`) | **~44 µs RMS**, vs ~1.1 ms on the raw host callback — **25× tighter** |
+| landing a **host-submitted** frame on a slot boundary | `send_packet` | **no sub-slot control at all** — arrival phase ~5.4 ms RMS, drifting across the whole slot |
+| landing a **hardware-timed** frame on a slot boundary | beacon engine + `AdjustBeaconTimingFine` | converges, **~1.25 ms RMS** steady state |
+| submit→air jitter, the tail a scheduler must budget | `send_packet`, p99.9 | **0.76 ms** (Jaguar1) · **3.1–3.2 ms** (Jaguar2/Jaguar3/PCIe) |
+
+devourer's own go/no-go is blunt: *"fine (sub-ms) DL slots are **REFUTED** on all
+transports for a p99.9-grade deadline on a real channel."* And the closed-loop
+timing-advance experiment says why in one sentence — under full duplex,
+`send_packet` *"queues the frame and the chip airs it on its own schedule, so
+userspace call-timing has no sub-slot control over air departure."*
+
+Crucially, **the tail is CSMA deferral**, not transport. Which means Pass 139's
+CCA ruling and any TDMA aim precision pull in opposite directions: we measured
+that clearing the carrier-sense gate costs ~45% of the uplink, so we cannot buy
+the tail back with `disable_cca`. That tension should be stated up front in any
+TDMA design rather than discovered in a bench.
+
+### 5.2 What this already says about §7.2, today, with no TDMA at all
+
+This is the part worth acting on regardless of whether TDMA is ever built.
+
+`QuietGap::return_deadline` (`core/include/wblink/quietgap.h:69-84`) is a
+well-built anchor: it takes `elapsed = ReadTsf() − tsfl_eob` on the *same*
+adapter, so per-frame USB delivery latency is correctly absorbed rather than
+charged to the aim. The residual error terms are the ones downstream of it:
+
+1. the `ReadTsf()` control transfer itself — devourer measures the USB
+   register read→write path at **~0.5–1.2 ms on Jaguar3** (the number that bounds
+   its fine-steer actuator); on a bulk-flooded adapter a register read is
+   additionally *starved*, which is why `RadioAir::read_tsf` already catches the
+   racing case (`io/src/air_radio.cpp:659-670`);
+2. the host sleep from the computed deadline to the `inject` call;
+3. **submit→air**, p99 1.7–2.4 ms on Jaguar3 versus **101 µs on Jaguar1**.
+
+Against a `window_us = 2000` aimed at its midpoint (`quietgap.h:30-31`), the
+budget is ±1000 µs. On a Jaguar3 uplink, term 3 alone exceeds it about 1% of the
+time; on a Jaguar1 uplink it essentially never does.
+
+**Two concrete consequences:**
+
+- **Which adapter carries `role:"tx"` on the ground is worth roughly an order of
+  magnitude in return-window aim error.** The x86 ground rig has both an 8812AU
+  (Jaguar1, p99 101 µs / p99.9 0.76 ms) and 8812CUs (Jaguar3, p99 2.2 ms / p99.9
+  3.2 ms). Nothing in our configs or docs says the uplink should prefer the
+  Jaguar1, and the failure mode if it doesn't — a small, correlated tail of
+  returns missing the craft's listen window — presents as unexplained report loss
+  and §9.8 watchdog noise, not as a timing bug.
+- **The §7.2 midpoint aiming is currently mostly dormant, and RadioAir turns it
+  on.** The monitor netdev exposes no per-adapter TSF *read* (Pass 118), so on
+  the shipped kernel-monitor fleet `tsf_now` is absent, `elapsed` is 0, and the
+  header's own comment applies: *"USB latency becomes the error term."* §7.2
+  additionally specifies that a TSF-less backend must not add the midpoint delay
+  to a post-EOB NACK at all. So moving a node to `air.kind: "radio"` **activates a
+  precision mechanism whose error budget has never been measured** — and the
+  devourer numbers say that budget is uncomfortably close to the window width on
+  a Jaguar3. This belongs in the §17 gate-4 slot that already owns `guard_us` /
+  `return_window_us` re-derivation.
+
+Note the two seeds do different jobs and only one faces the tail: `guard_us`
+covers the craft's TX→RX settle and the ground's turnaround (devourer's per-
+transport *floor* RMS is 11–26 µs and p90 ≤ 64 µs, so 300 µs is generous there),
+while `window_us` is what has to absorb the ground's deferral tail. If gate 4
+finds a miss rate, the lever is `window_us`, not `guard_us`.
+
+### 5.3 The TDMA proposal, assessed
+
+The operator's framing — *TDMA instead of inserting telemetry and reports around
+the video stream* — is precisely right about the defect. §7.2's gap is
+**reactive**: it is re-anchored on every EOB, so its phase wanders with video
+pacing, and the spec itself already concedes the failure mode:
+
+> **Crossover (state it, don't hide it):** at high fps + saturated bitrate the
+> idle gap shrinks below `return_window_us` and the contract degrades to §7.1
+> best-effort.
+
+A reserved slot does not shrink when the video gets busy. **That is the strongest
+argument for the change, and it comes from our own spec, not from devourer.**
+Pass 78's audio-EOB failure (non-video EOBs re-arming the gap mid-flush until the
+craft transmitted through its own listen windows) is the same class of bug: a
+gap defined *relative to traffic* is perturbable by traffic. A gap defined
+against a clock is not.
+
+**The achievable shape: slot the state, not the transmission.**
+
+- Craft **silence** and ground **listening** are scheduled on a shared TSF grid.
+  Both are state changes, so they land in the ~44 µs class — 25× tighter than a
+  host-clock anchor and two orders below the window width.
+- **Transmissions stay best-effort inside a slot** sized for the deferral tail.
+  No promise that a return departs at instant T; only that it departs inside a
+  window both ends agree on in advance.
+
+That is strictly more deterministic than today — periodic, reserved, non-shrinking,
+and with no anchor to chase — while promising only what the hardware delivers.
+
+**The unachievable shape: "the return lands at instant T."** Refuted on USB.
+`send_packet` has no sub-slot air-departure control; the only converging actuator
+is the beacon engine, at ~1.25 ms RMS, carrying **one frame per TBTT** from a
+reserved page, with content swaps quantized to the TBTT grid (p50 40–72 ms, p99
+67–174 ms). Per return type:
+
+| return | can it ride a hardware-timed beacon slot? |
+|---|---|
+| LINK_REPORT (periodic 10 Hz) | *Possibly* — the 100 ms period tolerates TBTT quantization, but the content would be 1–2 intervals stale, which interacts badly with `report_epoch` freshness (§3.5) and the §9.8 watchdog. Needs design, not a knob. |
+| NACK (event-driven, §5.3 hold-down, deadline-bound) | **No.** 40–174 ms update quantization is disqualifying for the one return whose whole value is latency. |
+| video | **No.** One frame per TBTT. |
+
+So the honest end-state is **grid for timing, `send_packet` for content** — which
+is a real improvement without pretending to slot-accurate transmission.
+
+**What it costs.** It inverts §7.2's ownership: today the gap is paced around
+video, and a grid paces video around the gap. That touches §5 (block emission and
+the airtime-critical override), the whole of §7.2, and §9.5 airtime accounting.
+The operator's instinct that this is "a larger change we don't start with" is
+correct — and it is worth noting the ordering dependency: §9.5 airtime accounting
+is *already* the gate on Pass 118's per-packet rung residual (§4 above), so a
+TDMA grid and per-packet UEP want the same groundwork.
+
+**What it does not cost: the clock.** We already carry per-frame `tsfl` on both
+backends (`io/src/air_radio.cpp:296`, `io/src/air_mon.cpp:466`) and `ReadTsf` on
+RadioAir. Sub-µs clock distribution is a solved, all-generations capability. And
+the `tdma` example's `sync=tsf` mode shows the grid can be recovered from
+**ordinary traffic** — a running host↔TSF least-squares fit over the frames
+already arriving — with no beacon, no `StartBeacon`, and therefore no collision
+with Pass 139's CCA ruling (the hardware beacon wants CSMA off to air punctually:
+0.31 µs RMS with the gate cleared versus ~470 µs RMS with it on). **A grid
+derived from the video stream's own TSF stamps is the CCA-compatible route**, and
+it is the one worth designing toward.
+
+### 5.4 The *other* TDMA in the tree, which is a separate idea
+
+`examples/tdma/` is **burst-level bandwidth TDMA**, not slot MAC: a transmitter
+alternating bursts between a robust narrowband width for critical frames and a
+wide width for bulk, flipping with `FastSetBandwidth`. It is burst-level rather
+than per-frame because narrowband is an ADC-clock-domain state, not a radiotap
+field, and a receiver decodes exactly one width at a time. That mechanism is the
+subject of §6.1 below and is a much smaller change than a slot MAC.
+
+---
+
+## 6. Other high-impact areas from the remaining docs
+
+### 6.1 Narrowband (5/10 MHz) — rungs *below* the bottom of the §9.3 ladder
+
+The most valuable thing in the tree that none of the earlier reviews mention.
+
+Narrowband halves or quarters the baseband sample clock while leaving the RF in
+its ordinary 20 MHz tune. Halving the bandwidth halves the noise power the
+receiver integrates — **~3 dB of link budget per octave**. Our §9.3 table is
+eight rungs, MCS0–7, **every one of them HT20**, with `floor_profile: 0`
+(`profiles/table.example.json`). MCS0/HT20/long-GI is the absolute bottom of the
+link today. Narrowband would add a genuinely new bottom: ~3 dB at 10 MHz, ~6 dB
+at 5 MHz, on a range-limited broadcast link whose whole design premise is
+surviving the far end of the flight.
+
+It is also cheap to *enter*: `FastSetBandwidth` writes only the re-clock delta
+from a cached channel state — **~0.18 ms on the 8812AU, ~0.8 ms on the 8822C**,
+versus ~90 ms for a full `SetMonitorChannel`. That is rung-transition cheap, not
+channel-change expensive, and register parity with the full path is bench-verified
+(`tests/fast_bw_parity.sh`).
+
+Fleet support is good: **all three of our chips** do narrowband (8812AU, 8822C,
+8822E). The one Jaguar1 exclusion is the 8821A, which we do not run.
+
+The caveats are real and specific, and they shape which step to take:
+
+- **Both ends must switch together.** Narrowband and 20 MHz are different ADC
+  clock domains; a receiver decodes exactly one at a time. So a narrowband rung is
+  a *coordinated* transition like a §11 CSA, not a unilateral §9.5 rung commit —
+  and a botched transition is a mutual deafness, which is why §11 has a
+  `verify_timeout` backout and §9.5 does not.
+- **5 MHz at 5 GHz is CFO-limited and bimodal per bring-up** — quartering the
+  clock quarters the subcarrier spacing while the absolute crystal offset is
+  ~2.2× larger at 5.2 GHz. A marginal crystal pair syncs on one power-up and is
+  deaf on the next. We fly 5805 MHz, so **10 MHz is the safe narrowband step and
+  5 MHz should be treated as out of scope** absent the closed-loop crystal
+  tracker (`DEVOURER_CFO_TRACK`, all three generations).
+- **The 8822E is the awkward die**: its narrowband needs extra MAC-clock
+  reconfiguration and TX-shaping tweaks, and *its vendor 5 MHz DAC divide code is
+  dead on real silicon* — only the 8822C code emits a lobe. Our craft is the
+  8822E. Another reason 10 MHz is the target.
+- **Radiotap lies about bandwidth** — a narrowband emission still reports 20 MHz
+  to a monitor sniffer. Validation needs an SDR occupied-bandwidth measurement or
+  a narrowband peer decoding; a second Wi-Fi card's reported bandwidth is blind
+  here. Worth knowing before designing a bench.
+- **Spec cost**: a profile carries `mcs` and `guard_interval` and no bandwidth
+  field, so narrowband rungs mean a §9.3 table *schema* change. The table is a
+  CRC-8 content hash on the wire (§3.6) and the table's own comment says changing
+  it is "a fleet-wide lockstep redeploy." Not a knob — a coordinated release.
+
+Even with all of that, "three more dB at the bottom of the ladder, entered in
+0.2–0.8 ms, on hardware we already own" is the largest single range item in the
+tree, and it is a better use of a bench slot than most of §1–4.
+
+### 6.2 Adapter health — the Pass 139 lesson has a tool
+
+Pass 139 spent a substantial investigation establishing that a bench 8812EU was a
+**per-unit outlier** — MCS5+ dead under devourer, 99.96% at MCS7 under the kernel
+driver, same physical adapter — and closed with *"the adapter is parked as
+suspect."* Its own methodological note is the sharpest thing in the review log:
+*"Two adapters of the same part number are not a replicate."*
+
+devourer ships the instrument for exactly that: `examples/doctor` grades an
+adapter HEALTHY / SUSPECT / FAILING in the exit code, from EFUSE read-stability
+across N *physical* map reads (a degrading unit returns a different calibration
+map on every read, so the driver programs the wrong RFE/PA/LNA tables and the
+radio goes deaf while init reports green), FW-boot status, and an RX smoke count.
+`tests/adapter_doctor_cold.sh` wraps it in per-rep VBUS cold cycles.
+
+One caveat lands directly on us: **EFUSE stability is not probed on the 8822E** —
+its OTP is not reliably readable after bring-up by design, so probing would flag
+healthy units. That is our craft die, so `doctor` gives us FW-boot + RX smoke
+there, not the conclusive test. It is still the right pre-flight screen for the
+8812AU and 8812CU, and running it before any TX A/B would have shortened Pass 139.
+
+Adjacent and equally cheap: `tests/ground_station_qualify.sh` sweeps the rate
+ladder and *refuses the pairing* (exit 1) when the test rate sits off the flat
+part of the receiver's curve. devourer's own worked example is stark — same TX,
+same channel, minutes apart: a receiver with internal antennas ran MCS7 at 2.9%
+while an external-antenna receiver was flat at ~80% across the ladder, both
+healthy. Any delivery A/B we run measures the *link*, and a ground station near
+its own cliff measures itself. Given how much of `docs/step11-bench.md` is
+delivery A/Bs, adopting a qualification gate before the measurement is a process
+fix with no code cost.
+
+### 6.3 Per-chain diversity readout — a second axis on our primary redundancy
+
+Per-adapter RX diversity is our primary redundancy and §17 gate 2 measures
+cross-adapter loss correlation ρ. devourer measures a *different* ρ: the
+**envelope correlation between RF chains within one adapter**, and the effective
+branch count N_eff that follows from it. The per-chain `rssi[4]`/`snr[4]`/`evm[4]`
+this needs already arrive on every RadioAir packet, and `RadioAir::on_packet`
+currently collapses them to `best` (`io/src/air_radio.cpp:266-272`) — a crude
+selection combine with no visibility.
+
+Two findings from that document are deployment-relevant to us even without
+adopting any code:
+
+- **Widely-spaced external antennas decorrelate even stationary; a compact
+  internal array only decorrelates under motion.** So the *ground* station (static)
+  wants wide spacing, while a compact array earns its chains only on the craft
+  (moving). That is a BOM/antenna-placement conclusion, and it can invert the
+  ranking a static bench would give.
+- **A static bench cannot measure this at all** — envelope correlation is only
+  defined over a fading channel, so a bench capture with both ends still measures
+  correlation of measurement noise. The tool refuses to report a verdict when it
+  detects it. Worth knowing before anyone tries to characterise our diversity on
+  the bench rig.
+
+Value here is modest and diagnostic rather than a control input: it would let us
+distinguish "our two ground ears are correlated because the antennas are
+co-located" from "the link is simply weak" — a question §17 gate 2's
+`diversity`/`adapters` fields can pose but not answer.
+
+### 6.4 Surveyed and declined
+
+For completeness, so the next re-vendor does not re-survey them: the Kestrel /
+Wi-Fi-6 stack (HE trigger UL, TWT, ER SU/DCM), AP mode, multi-AP cellular, PCIe
+transport, and LA capture are all for connection-oriented or AX hardware we do
+not run — unchanged from the previous review's Tier E. The keyed FHSS / hopset
+subsystem (`src/hopset/`) is genuinely impressive against a reactive jammer
+(hopping bounds loss to ~1/N of dwells; measured 0.95 delivery against a parked
+jammer that fully denies a static link) but presumes per-slot channel agility,
+which is the structural opposite of §11's deliberate single-channel hold and
+incompatible with a half-duplex return path that must be heard in a quiet gap.
+Recorded as understood-and-declined, not unexamined.
+
+---
+
 ## Open decisions (deferred — each needs an operator ruling + a numbered Pass)
 
 1. **Scout occupancy field-fill** (§1 option A) — fill
@@ -463,6 +754,26 @@ writing in the first place.
    the craft is a Jaguar3 with programmable BB offset banks. Still open.
 10. **`FASTRETUNE_FW=2` cross-band offload** (carried unchanged) — ~2–2.6 ms vs
     ~90 ms cross-band, ~3× less host CPU on the SSC338Q. Touches §11.
+11. **Ground uplink adapter generation** (§5.2) — prefer a Jaguar1 for
+    `role:"tx"` where one is plugged; ~10× tighter return-window aim than a
+    Jaguar3. Config/deployment guidance, but it should be *measured* into the
+    §17 gate-4 slot rather than asserted from devourer's bench.
+12. **§7.2 error budget on RadioAir** (§5.2) — RadioAir activates the TSF
+    midpoint aiming that kernel-monitor cannot do; the aim error has never been
+    measured and devourer's numbers put it close to `window_us`. Belongs in
+    gate 4 alongside the existing `guard_us`/`return_window_us` re-derivation.
+13. **TDMA slot grid for the return path** (§5.3) — the large one. Recommended
+    shape: schedule *state* (craft silence, ground listening) on a TSF grid
+    recovered from ordinary traffic; leave transmission best-effort inside a
+    slot. Fixes §7.2's own admitted high-fps crossover. Touches §5, §7.2, §9.5.
+    Shares its §9.5 airtime-accounting prerequisite with item 7.
+14. **Narrowband rungs below `floor_profile`** (§6.1) — ~3 dB at 10 MHz, entered
+    in 0.2–0.8 ms, supported on all three fleet chips. Needs a §9.3 table schema
+    field (→ content-hash change → lockstep redeploy) and a coordinated
+    both-ends transition. 5 MHz is out of scope at 5805. Touches §9.3, §9.5.
+15. **Adapter qualification as bench process** (§6.2) — `doctor` before a TX A/B,
+    `ground_station_qualify` before believing a delivery number. No spec surface;
+    a `docs/step11-bench.md` process change.
 
 Closed since the previous review, recorded so they are not re-opened: **G0**
 (devourer MCS4+ at 5805, Pass 139) and **DIS_CCA** (`air.disable_cca` ships
@@ -486,3 +797,18 @@ false, measured, Pass 139).
 
 Everything in 2–5 is `air.kind: "radio"`-only. If the fleet is not moving to
 RadioAir, only item 1 is reachable.
+
+Two additions from the second pass, both of which slot *before* item 5:
+
+- **Adapter + ground-station qualification** (#15) — free, no code, and it makes
+  every measurement below it trustworthy. Should arguably be item 0.
+- **The §7.2 error budget on RadioAir** (#12, with the uplink-adapter choice #11)
+  — a gate-4 measurement that is a prerequisite for any TDMA design and is worth
+  doing on its own, because moving to RadioAir turns the mechanism on either way.
+
+The two large items — **TDMA** (#13) and **narrowband rungs** (#14) — sit after
+those. Both share prerequisites with work already on the list: TDMA wants the
+same §9.5 airtime accounting as per-packet rung divergence (#7), and narrowband
+wants the coordinated-transition machinery §11 already has. Neither should start
+before the gate-4 timing measurement, since that measurement is what says how
+wide a slot has to be.
