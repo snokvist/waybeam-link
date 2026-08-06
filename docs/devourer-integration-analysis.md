@@ -15,10 +15,30 @@ document stays the background reference behind them, not a work plan:
 | [#97](https://github.com/snokvist/waybeam-link/issues/97) | LDPC / STBC — we affirmatively command BCC and no-STBC today | §3 |
 | [#98](https://github.com/snokvist/waybeam-link/issues/98) | Adaptive link — harvest SNR/EVM, the saturation case §9.4 cannot see | §4 |
 | [#99](https://github.com/snokvist/waybeam-link/issues/99) | §7.2 quiet-gap error budget (TDMA prerequisite; TDMA deferred) | §5 |
+| [#100](https://github.com/snokvist/waybeam-link/issues/100) | Scout ranking — the four chanmig scoring ideas, in our own engine (needs #95) | §1 (option B) |
+| [#101](https://github.com/snokvist/waybeam-link/issues/101) | Sequence-derived rate probing — closes the §9.2 numerator | §4 |
 
-Not yet filed, and still open: the scout scoring layer (§1 option B), sequence-
-derived rate probing (§4), narrowband rungs (§6.1), and adapter/ground-station
+Not yet filed, and still open: narrowband rungs (§6.1) and adapter/ground-station
 qualification as bench process (§6.2).
+
+Two framing decisions carried into #100 and #101, recorded here because they
+change what those sections recommend:
+
+- **#100 takes the ideas, not the engine.** `RecommendEngine` decides whether to
+  migrate an *in-flight* link; our scout decides where to claim a craft at claim
+  time, and we already hold its leg 1 (§3.5 delivery) in richer form. A standing
+  survey is additionally impossible under our adapter roles — the scout *is* the
+  `role:"tx"` uplink — so "continuous evidence" becomes "accumulate across
+  successive sweeps", not a background scan. Continuous in-flight scoring and its
+  automation gate remain a separate §11 decision.
+- **#101 is device-verified first, refitted second.** The mechanism rests on a
+  premise we have never established — that a per-packet commanded rate actually
+  flies at that rate, per frame, on our dies and both backends. Pass 118 committed
+  the mechanism and explicitly scoped the divergence policy out, so no waybeam node
+  has ever aired two rates in one moment. And their notion of "adjacent" is a rate;
+  ours is a §9.3 *profile* bundling MCS, GI, power, payload and FEC overhead — so
+  the probe measures rate headroom, not profile headroom, and that gap needs an
+  operator ruling before the evidence can gate §9.4.
 
 Scope: the four areas the operator named first — **channel occupancy + the
 channel scout**, **aggregation and hardware ACKs**, **FEC**, and devourer's
