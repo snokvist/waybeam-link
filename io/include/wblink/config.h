@@ -35,6 +35,9 @@ struct StreamFecCfg {
     FecScheme scheme = FecScheme::kNone;
     uint16_t i_rate_permille = 250;
     uint16_t p_rate_permille = 100;
+    // §14.1a non-referenced (SVC-T droppable) class. UNSET => inherit
+    // p_rate_permille, i.e. identical to a config predating Pass 149.
+    std::optional<uint16_t> e_rate_permille;
     uint16_t min_k = 3;
     uint16_t min_r = 2;  // §14.1 (Pass 98) minimum repair floor per FEC'd frame
 };

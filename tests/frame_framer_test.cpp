@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <optional>
 #include <vector>
 
 #include "wblink/endian.h"
@@ -61,14 +62,41 @@ struct Harness {
 };
 
 // A frame blob = 8-byte VencFrameMeta prefix + deterministic body of `body` B.
-std::vector<uint8_t> make_frame(size_t body, bool idr, uint8_t seed) {
+std::vector<uint8_t> make_frame(size_t body, bool idr, uint8_t seed,
+                               uint8_t extra_flags = 0) {
     std::vector<uint8_t> b(kVencFrameMetaSize + body, 0);
     b[4] = kFrameCodecH265;
-    b[5] = idr ? kFrameFlagIdr : 0;
+    b[5] = static_cast<uint8_t>((idr ? kFrameFlagIdr : 0) | extra_flags);
     for (size_t i = 0; i < body; ++i) {
         b[kVencFrameMetaSize + i] = static_cast<uint8_t>((i * 31u + seed) & 0xFF);
     }
     return b;
+}
+
+size_t repair_count_of(const std::vector<Sym>& sent) {
+    size_t count = 0;
+    for (const Sym& sym : sent) {
+        count += sym.is_repair();
+    }
+    return count;
+}
+
+bool any_pframe_arq(const std::vector<Sym>& sent) {
+    for (const Sym& sym : sent) {
+        if ((sym.hdr.data_flags & data_flags::kPframeArq) != 0) return true;
+    }
+    return false;
+}
+
+// §14.1a rlc256 policy at the seed rates, so every enhance case below shares
+// one construction and differs only in the knob under test.
+FrameFecConfig rlc(std::optional<uint16_t> e = std::nullopt) {
+    FrameFecConfig f;
+    f.scheme = FecScheme::kRlc256;
+    f.i_rate_permille = 250;
+    f.p_rate_permille = 100;
+    f.e_rate_permille = e;
+    return f;
 }
 
 size_t source_count(const std::vector<Sym>& sent) {
@@ -615,6 +643,130 @@ int main() {
         p.framer.set_arq_suppressed(true);
         p.feed(make_frame(3000, /*idr=*/false, 14));
         CHECK_EQ_U(p.framer.stats().arq_cutoff_frames, 0u);
+    }
+
+    // === §14.1a non-referenced (SVC-T droppable) class — Pass 149 ==========
+
+    // --- classification is disjoint and IDR-first -------------------------
+    {
+        Harness h(rlc(), FrameArqMode::kAllFrames);
+        h.feed(make_frame(3000, /*idr=*/false, 0, kFrameFlagEnhance));
+        CHECK_EQ_U(h.framer.stats().fec_enhance_frames, 1u);
+        CHECK_EQ_U(h.framer.stats().idr_frames, 0u);
+        // A producer marking BOTH must resolve to IDR: protect more, never
+        // less. Nothing does this today; the framer must not rely on that.
+        h.feed(make_frame(3000, /*idr=*/true, 1, kFrameFlagEnhance));
+        CHECK_EQ_U(h.framer.stats().idr_frames, 1u);
+        CHECK_EQ_U(h.framer.stats().fec_enhance_frames, 1u);  // unchanged
+        // The counter is the drift detector, so it must count regardless of
+        // whether e_rate is configured (it is unset here).
+        CHECK(!h.framer.fec().e_rate_permille.has_value());
+    }
+
+    // --- e_rate UNSET: parity rate identical to the P class ---------------
+    {
+        for (size_t body : {3000u, 9000u, 40000u}) {
+            Harness e(rlc(), FrameArqMode::kIdrOnly);
+            Harness p(rlc(), FrameArqMode::kIdrOnly);
+            e.feed(make_frame(body, false, 2, kFrameFlagEnhance));
+            p.feed(make_frame(body, false, 2));
+            CHECK_EQ_U(repair_count_of(e.sent), repair_count_of(p.sent));
+            CHECK_EQ_U(e.sent.size(), p.sent.size());
+        }
+    }
+
+    // --- e_rate = 0: genuinely zero parity, NOT resurrected by min_r ------
+    {
+        Harness h(rlc(/*e=*/0), FrameArqMode::kIdrOnly);
+        h.feed(make_frame(9000, false, 3, kFrameFlagEnhance));
+        CHECK_EQ_U(repair_count_of(h.sent), 0u);
+        CHECK(!h.sent.empty());  // source symbols still ship
+        // ...while the P class at the same size keeps its parity.
+        Harness p(rlc(/*e=*/0), FrameArqMode::kIdrOnly);
+        p.feed(make_frame(9000, false, 3));
+        CHECK(repair_count_of(p.sent) > 0u);
+    }
+
+    // --- the min_r trap: a small non-zero e_rate is dominated by the floor -
+    {
+        // e_rate 10 permille on a k~7 frame gives ceil(0.07)=1, floored to
+        // min_r=2 — the same r the 100 permille P rate produces. Documented
+        // in §14.1a so nobody reads a "light" setting as light.
+        Harness lo(rlc(/*e=*/10), FrameArqMode::kIdrOnly);
+        Harness p(rlc(), FrameArqMode::kIdrOnly);
+        lo.feed(make_frame(9000, false, 4, kFrameFlagEnhance));
+        p.feed(make_frame(9000, false, 4));
+        CHECK_EQ_U(repair_count_of(lo.sent), repair_count_of(p.sent));
+    }
+
+    // --- ARQ: never eligible, under any arq_mode -------------------------
+    {
+        Harness h(rlc(), FrameArqMode::kAllFrames);
+        h.feed(make_frame(3000, false, 5, kFrameFlagEnhance));
+        CHECK(!any_pframe_arq(h.sent));
+        CHECK_EQ_U(h.framer.stats().arq_frames, 0u);
+        // A plain P frame in the same mode still gets it — the exclusion is
+        // the class, not the mode.
+        h.sent.clear();
+        h.feed(make_frame(3000, false, 6));
+        CHECK(any_pframe_arq(h.sent));
+        CHECK_EQ_U(h.framer.stats().arq_frames, 1u);
+        // arq_cutoff_frames must not count a class that had no ARQ to cut.
+        Harness s(rlc(), FrameArqMode::kAllFrames);
+        s.framer.set_arq_suppressed(true);
+        s.feed(make_frame(3000, false, 7, kFrameFlagEnhance));
+        CHECK_EQ_U(s.framer.stats().arq_cutoff_frames, 0u);
+    }
+
+    // --- the documented non-identity corner (§14.1a) ----------------------
+    {
+        // k <= min_k under all-frames: this frame WAS ARQ-only (r=0) and is
+        // now FEC'd at min_r instead. Pinned because it is the one place
+        // "e_rate unset changes nothing" would have been wrong.
+        Harness h(rlc(), FrameArqMode::kAllFrames);
+        const uint16_t s = h.framer.symbol_size();
+        h.feed(make_frame(s, false, 8, kFrameFlagEnhance));  // k = 2 (meta+body)
+        CHECK(!any_pframe_arq(h.sent));
+        CHECK_EQ_U(repair_count_of(h.sent), h.framer.fec().min_r);
+        // The same small frame without the flag keeps the old ARQ-only shape.
+        Harness p(rlc(), FrameArqMode::kAllFrames);
+        p.feed(make_frame(s, false, 8));
+        CHECK(any_pframe_arq(p.sent));
+        CHECK_EQ_U(repair_count_of(p.sent), 0u);
+    }
+
+    // --- §14.2 exemption: an override never touches this class ------------
+    {
+        // Without the exemption the ARQ change above flips rule 1's
+        // `k > min_k || !arq_eligible` gate permanently open, so the override
+        // would repaint parity onto exactly the frames e_rate leaves bare.
+        Harness h(rlc(/*e=*/0), FrameArqMode::kAllFrames);
+        h.framer.set_next_frame_override(/*parity_symbols=*/9,
+                                         /*allow_pframe_arq=*/true);
+        h.feed(make_frame(9000, false, 9, kFrameFlagEnhance));
+        CHECK_EQ_U(repair_count_of(h.sent), 0u);  // still bare
+        // Same override on a P frame DOES actuate — the exemption is scoped
+        // to the class, not a disabling of §14.2.
+        Harness p(rlc(/*e=*/0), FrameArqMode::kAllFrames);
+        p.framer.set_next_frame_override(9, true);
+        p.feed(make_frame(9000, false, 9));
+        CHECK_EQ_U(repair_count_of(p.sent), 9u);
+        // ...and at k <= min_k, where the gate is the thing that changed.
+        Harness sm(rlc(/*e=*/0), FrameArqMode::kAllFrames);
+        sm.framer.set_next_frame_override(5, true);
+        sm.feed(make_frame(sm.framer.symbol_size(), false, 10,
+                           kFrameFlagEnhance));
+        CHECK_EQ_U(repair_count_of(sm.sent), 0u);
+    }
+
+    // --- live retune (§15.5) is a full replacement ------------------------
+    {
+        Harness h(rlc(/*e=*/0), FrameArqMode::kIdrOnly);
+        CHECK(h.framer.fec().e_rate_permille.has_value());
+        h.framer.set_fec_rates(250, 100, 3, 2);  // e omitted => cleared
+        CHECK(!h.framer.fec().e_rate_permille.has_value());
+        h.feed(make_frame(9000, false, 11, kFrameFlagEnhance));
+        CHECK(repair_count_of(h.sent) > 0u);  // back to inheriting p_rate
     }
 
     return wbtest_finish("frame_framer_test");

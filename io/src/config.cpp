@@ -317,10 +317,28 @@ Result<Config> load_config_json(const std::string& json_text) {
                 sc.fec.p_rate_permille = f.value("p_rate_permille", uint16_t{100});
                 sc.fec.min_k = f.value("min_k", uint16_t{3});
                 sc.fec.min_r = f.value("min_r", uint16_t{2});
+                // §14.1a: optional third class. Absent (or explicit null) =>
+                // inherit p_rate_permille, byte-identical to a pre-Pass-149
+                // config. Never defaulted to 0 — that would silently strip
+                // authored protection when a producer switched preset.
+                if (f.contains("e_rate_permille") && !f.at("e_rate_permille").is_null()) {
+                    const auto e = f.at("e_rate_permille").get<int64_t>();
+                    if (e < 0 || e > 4000) {
+                        return Result<Config>::fail(
+                            "stream " + std::to_string(sid) +
+                            ": fec.e_rate_permille must be 0..4000 (§14.1a)");
+                    }
+                    sc.fec.e_rate_permille = static_cast<uint16_t>(e);
+                }
                 if (sc.fec.scheme != FecScheme::kNone && sc.bind.kind != BindKind::kFrameShm) {
                     return Result<Config>::fail(
                         "stream " + std::to_string(sid) +
                         ": fec.scheme is only valid on a frame-shm binding (§14.1)");
+                }
+                if (sc.fec.e_rate_permille && sc.fec.scheme == FecScheme::kNone) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": fec.e_rate_permille needs fec.scheme \"rlc256\" (§14.1a)");
                 }
             }
             if (s.contains("jscc_shadow")) {

@@ -6994,3 +6994,264 @@ That run also validated the `free_adapter`-before-every-spawn change: the
 kernel driver had re-bound the adapter on re-enumeration, so a supervisor that
 only unbound once at service start would have respawned into "no matching
 Realtek device" forever.
+
+## Pass 149 — the third FEC class: non-referenced frames (2026-08-06)
+
+Operator ruling on a §14.2 gap found while reviewing the PR #92 design draft,
+plus the §14.1a section that draft was written to justify. The producer half
+landed the same day (waybeam_venc #216, merged 11:10), so this is the first
+pass where the flag has a live source.
+
+**The flag was already on the wire and already parsed.** §15.4
+`VencFrameMeta.flags` bit 2 has been defined and inside `kFrameFlagsKnown`
+since the frame-shm bring-up — it survives validation rather than being
+rejected as unknown. There was simply no accessor and no policy consulting it.
+So this pass adds no wire format, no producer change, and no version bump.
+
+**Classification must come from the frame, never the preset.** The obvious
+shortcut — key the link off the configured resilience name — does not work,
+and the reason is worth recording. Droppable density is `1/(ref_enhance + 1)`,
+a producer-side *period*: `ltr:<N>` makes it a continuum over N ∈ 1..255, and
+the density is shared across names (`rally` and `ltr` both give 50 %, `range`
+and `fpv` both give 20 %). No preset name identifies the class. The frame flag
+is the only source of truth.
+
+**The ARQ exclusion is structural, not a tuning choice.** This is the part
+that generalises past any one preset. For a *referenced* frame a late
+retransmit still pays, because it repairs the DPB and truncates the cascade
+even when it misses the display deadline. For a non-referenced frame there is
+no DPB effect at all — the only value is showing that one frame — so a repair
+landing after the deadline is worth exactly zero. No RTT threshold flips that,
+and the cost of being wrong is bounded at one frame, which is what the frame
+was worth.
+
+**Which is what opened the §14.2 hole, and why the exemption is total.**
+Rule 1's gate is `k > min_k OR NOT arq_eligible`. Making the class
+ARQ-ineligible flips the right-hand term permanently true, so an enforcing
+controller would start repainting parity onto these frames at *every* `k`,
+where today it is blocked below `min_k`. The feature would not fail loudly —
+it would quietly do nothing while reporting success. Same shape as B11: an
+eligibility change moving a gate that was being reasoned about somewhere else.
+The operator ruled the exemption total rather than clamping the override to
+`e_rate`, so the class is now outside enforcement entirely.
+
+Rule 2 is the cost of ruling it total, and is recorded as deliberate: a
+non-referenced frame is the *cheapest* frame in the stream to discard under
+transient overload, so exempting it forgoes an attractive drop candidate. The
+selective-discard design that implies is a larger §9.x congestion question and
+is explicitly not started here.
+
+**Freed parity is a reallocation, and for a stripe-less preset it is
+mandatory.** This inverts how the #92 draft framed the feature. `ltr` forces
+intra-refresh off — deliberately, since stripes landing in a `TRAIL_N` frame
+never enter the DPB — which removes the sub-second recovery path and leaves
+the IDR as the sole repair point at the authored GOP. Order-of-magnitude at a
+2.0 s GOP, moving from 20 % droppable with 500 ms stripes to 50 % droppable
+with none, class rates left flat: expected glitch duration per loss goes from
+~200 ms to ~500 ms. Half the losses get ~60× cheaper, the other half get ~4×
+more expensive, and the expensive half dominates. So `e_rate = 0` on its own
+is not a 5 % byte saving to bank — it is the funding for the higher `i_rate`
+that the preset now requires, and shipping the former without the latter is a
+regression. The GF(256) `r ≤ 256 - k` cap bounds how much the IDR can absorb
+(~2650 ‰ at k≈70), so the referenced P-chain keeps a share regardless.
+
+No automatic controller for the split. The right ratio is a §17 measurement
+we do not have, and the two-stage verification below is designed to get it —
+building the controller first would be fitting a curve to no data.
+
+**`e_rate` unset leaves the parity rate unchanged for every class.** Hence
+`optional`, and deliberately not a 0 default: 0-by-default would silently strip
+authored protection the moment a producer switched preset.
+
+Writing the tests caught the first draft of that claim overreaching — it said
+unset was *byte-identical* to a pre-Pass-149 node, and it is not. The ARQ
+exclusion is unconditional, so at `k ≤ min_k` under `all-frames` a
+non-referenced frame that was ARQ-only (`r = 0`, `PFRAME_ARQ` stamped) now
+takes the FEC path and gets `max(ceil(k·p_rate), min_r)`. More protection, not
+less, and the right direction — but a real change at unset, and exactly the
+kind of corner a global "nothing moves" assertion would have papered over.
+The spec now states the exception and the test pins it. Both drift directions
+(link configured, producer not; producer configured, link not) degrade to
+authored behaviour — safe, but silent, which is why `fec_enhance_frames` is
+reported whether or not `e_rate` is set.
+
+**Verification is staged, and stage 2 is the control that should look bad.**
+The live craft `.2.232` runs `resilience: "range"` today — ~20 % of frames
+already carry the flag — so classification is measurable on hardware before
+any preset change. (1) counter reads ~20 % with nothing else moved; (2) switch
+to `ltr`, counter reads ~50 %, still flat rates — this is the deliberately
+unprotected baseline; (3) reallocate and measure glitch *duration*, not loss
+count, against stage 2. Only a duration histogram can distinguish a 1-frame
+drop from a cascade to the next IDR, which is the whole claim.
+
+Method note: the first check of the craft's preset read `/etc/venc.json` and
+found no `resilience` key, which read as "the flag fires on nothing" and very
+nearly sequenced this work behind a preset switch nobody would make. The key
+lives in `/etc/waybeam.json`. An absent key in the file you happened to open
+is not evidence of an absent setting — same failure as Pass 147's empty grep
+of a log that had stopped being written.
+
+**Device stage 1 (craft `.2.232`, 2026-08-06).** Deployed the Pass 149 build,
+craft on `resilience: "range"`, `arq_mode: idr-only`, `e_rate` unset. Density
+measured over two 20 s windows: 241/1204 and 241/1203 — **20.0 %**, exactly
+`1/(ref_enhance+1)` at enhance=4. The deployment is behaviourally a no-op
+otherwise, which is the property stage 1 is for: `e_rate` unset changes no
+parity, and `idr-only` means the ARQ exclusion has nothing to exclude. The
+§14.2 exemption is likewise unexercised on device (`jscc_decision_frames` 0 —
+enforcement is off), so it rests on the unit test plus a mutation check that
+confirmed the assertion fails when the `!is_enhance` guard is removed.
+
+A reversible `/api/v1/fec` sweep then proved the rate path end to end.
+`e_permille=0` removed **1666** repair symbols per 1204-frame window against
+**1662** predicted for zero parity on the class, versus **1180** had `min_r`
+applied — so the `rate == 0` short-circuit preceding the floor is now
+device-confirmed, not just read off the source. Reverting restored 8366 vs a
+8302 baseline.
+
+**And the sweep produced the first real cost measurement, which changes the
+guidance.** The ground logged 159 unrecoverable frames during the unprotected
+window and none before or after. That is not a defect — it is the link:
+`loss_prediversity_milli` 48, `loss_postdiv_prearq_milli` **19**, so 1.9 %
+residual post-diversity packet loss. At the measured 44861-byte average frame
+and a 1424 B MTU, k ≈ 32, giving `1 - 0.981^32` = **46.2 %** probability that an
+unprotected frame loses at least one symbol. Observed 159/~370 = 43 %. The
+model and the measurement agree.
+
+The consequence: **`e_rate = 0` is not viable at this link's residual loss.**
+At 20 % density it costs ~9 % of all frames; at `ltr`'s 50 % it would cost
+~23 % — a visibly stuttering stream, not a cheap optimisation. The usable band
+here is bounded below by the `min_r` floor at `min_r/k = 2/32` ≈ 62 ‰ and above
+by `p_rate` 200 ‰, so a middle value is both meaningful and the thing stage 3
+has to find. §14.1a already says "0 or clearly above `min_r/k`"; this measures
+what that band actually is on real hardware and retires the assumption that 0
+is the interesting setting.
+
+Checked and cleared while investigating: neither `craft.json` nor `ground.json`
+carries `air.rx_drop_permille`, so no synthetic bench drop is inflating any of
+this. Two open threads, neither blocking: RSSI is **-22/-26 dBm** — hot enough
+that near-field receiver overload is a plausible contributor to 4.8 %
+pre-diversity loss at MCS 5 — and both ground adapters report `dup: 0` with
+`diversity` (834475) *below* `delivered` (881271), which is hard to square with
+diversity halving the loss rate. The counters may not mean what the names
+suggest; worth a look before anyone tunes against them.
+
+**Channel comparison, 2026-08-06 (rules out channel dirt).** The 1.9 % residual
+prompted a check of whether 5805 was simply congested. Both nodes moved to
+5745 (channel 149, allowlisted on both) and back, 45 s reset windows each:
+
+| channel | pre-diversity | post-diversity | MCS |
+|---|---|---|---|
+| 5805 (161) | 45–50 ‰ | 17–19 ‰ | 5 |
+| 5745 (149) | 47 ‰ | **22 ‰** | 5 |
+
+5745 is marginally *worse*. The loss follows the link across channels rather
+than sitting on one, so it is not interference on 5805 — with RSSI at
+**-22/-25 dBm** the likelier cause is near-field receiver overload or duplex
+self-desense on the bench, neither of which a channel change fixes. Both nodes
+were reverted and re-verified at 50/19 ‰ with 0 unrecoverable.
+
+Three operational findings fell out of that attempt, all worth keeping:
+
+- **A runtime CSA cannot move this fleet: `csa_psk` is unset on both nodes.**
+  `POST /api/v1/csa` returns `{"ok":true}` and then does nothing — the ground
+  arms, the craft never echoes `CSA_ARMED`, and it aborts. A 200 on an
+  unauthenticated CSA is misleading; the endpoint should refuse when no PSK is
+  configured rather than report success and no-op. Filed as an observation,
+  not fixed here.
+- **`/api/v1/csa` is ground-side only** (`run_rx`), while `/api/v1/channel` is
+  TX-side only (`run_tx`). Posting CSA to the craft returns "endpoint not
+  available in this mode", which reads like a build problem rather than a role
+  split. Worth a line in §15.5.
+- **The ground's uplink adapter was left in `managed` mode** by today's
+  devourer USB unbind/rebind runs, so its retune failed `EBUSY` and CSA could
+  not have completed even with a PSK. `waybeam-ground-prep` mon-ups both on
+  service start, so a restart fixed it — but nothing detects the state, and
+  the node ran that way while reporting healthy. Loss was unchanged before and
+  after (48/19 → 45/17), so this did not cause the residual, but a monitor-mode
+  check belongs in the adapter health surface.
+
+Also unexplained and left open: both ground adapters report `dup: 0` while each
+receives ~the full stream (127546 / 132273 packets against 120769 delivered),
+and `diversity` reads *below* `delivered`. Diversity is demonstrably working —
+it halves the loss rate — so the counters do not appear to mean what the names
+suggest. Do not tune against them until that is resolved.
+
+**Stages 2 and 3, on a clean link (2026-08-06).** The 1.9 % residual above was
+not the RF environment — it was the craft's **devourer TX path**. Switching the
+craft to the kernel-monitor backend on the same channel, same MCS 5, same RSSI
+took post-diversity loss from **17–19 ‰ to 1–2 ‰**, roughly a 10× improvement.
+Everything below was therefore re-measured on the monitor backend, and the
+earlier "`e_rate = 0` is not viable" conclusion is withdrawn — it was measured
+against a degraded transmitter, not a link. (Why devourer's TX is lossy is
+parked; a mis-set TX power overdriving the PA is the leading hypothesis.)
+
+Producer switched to `resilience: "ltr"`: density measured **exactly 50.0 %**
+(1355/2711), and `idr_frames` 23 in 2715 frames ≈ 1 per 118 — the 2.0 s GOP,
+confirming `ltr` drops intra-refresh and leaves the IDR as sole repair point,
+as §14.1a states. 45 s windows, `/api/v1/fec` retunes, ground stats reset each:
+
+| config | parity (rep/src) | unrecoverable | of droppable class |
+|---|---|---|---|
+| `e` unset (i300/p200) | 21.5 % | **0** | 0 % |
+| `e` unset (repeat, control) | 21.4 % | **0** | 0 % |
+| `e = 0` (i300/p200) | 11.6 % | 138 | 10.2 % |
+| `e = 0` + realloc (i600/p380) | 22.4 % | 213 | 15.7 % |
+
+**The mechanism works exactly as specified**: density detected without any
+producer coupling, parity on the class removed cleanly (21.5 → 11.6 %, a 46 %
+cut ≈ 8 % of stream bytes), and the control reproduces 0 unrecoverable, so the
+losses are attributable to `e_rate` and not drift.
+
+**But the reallocation thesis did not survive its own test, twice over.** First,
+there was nothing for it to buy: at baseline the referenced class already loses
+*nothing*, so there is no cascade for a raised `i_rate`/`p_rate` to prevent.
+Second, spending the freed budget made the droppable class **worse** — 15.7 %
+lost versus 10.2 % at the same measured airtime. The extra parity packets raise
+channel occupancy, and the frames paying for that are precisely the ones with no
+protection left. Reallocation is not neutral for the unprotected class; it is
+negative-sum for it.
+
+So on a clean link the honest trade is narrow: **~8 % of stream bytes against
+~5 % of frames dropped** (10.2 % of a 50 % class), each a bounded one-frame
+glitch. Worth taking only if that airtime buys something better than the frames
+it costs. The reallocation case rests entirely on a link where referenced frames
+*do* fail, and that link has yet to be measured — the one we had was a broken
+transmitter, not a hard RF environment. Stage 3 is therefore **not** closed; it
+needs a genuinely lossy link, and §14.1a's arithmetic stays operator guidance
+rather than a validated recipe.
+
+**Pre-merge review of this pass's own diff (2026-08-06).** Three findings, all
+fixed in the branch.
+
+1. **`reset_stats()` never zeroed the §14.2 enforcement counters** — a
+   pre-existing defect this pass was about to extend. `jscc_decision_frames`,
+   `jscc_valid_decisions` and `jscc_fallback_decisions` were reset;
+   `jscc_enforced_frames` and `jscc_discarded_frames` were not, so after a
+   §15.5 `POST /api/v1/stats/reset` they carried lifetime totals against
+   restarted denominators — `enforced/decisions` could read greater than 1 and
+   any windowed enforcement measurement was quietly wrong. Adding
+   `jscc_exempt_frames` would have made it three. All three now reset, and the
+   declaration site carries the warning, because that is where the omission
+   gets made. Not unit-tested: `app_test.cpp` can reach `TxCore` (it
+   `#include`s `main.cpp`) but has no JSCC scaffolding at all, and standing one
+   up — enforce, feedback, airtime, a valid decision — is disproportionate to a
+   three-line fix. Recorded rather than hidden.
+2. **A dead accessor.** `frame_blob_is_enhance()` was added per the #92 draft
+   and never called: both call sites already hold a parsed `VencFrameMeta` and
+   test the flag directly, which is correct — the accessor would re-parse.
+   Removed. Note `frame_blob_is_idr()` is dead in exactly the same way, but it
+   predates this pass and is left alone.
+3. **Spec said "assert", code resolves.** §14.1a required implementations to
+   *assert* IDR/enhance disjointness; there is no runtime assert and adding one
+   to a per-frame hot path to catch a producer bug that has never occurred is
+   not warranted. The code resolves in priority order so an IDR wins if a
+   producer ever set both bits — more protection, never less. Spec and both
+   code comments now say what the code does.
+
+Also documented rather than changed: §9.6 `frame_caps` still derives
+`max_p_bytes` from `p_rate_permille`, so with `e_rate` lowered the cap is
+conservative and freed airtime is **not** handed back to the encoder. That is
+the right default while `e_rate` has no validated non-default setting — a
+blended rate would have to track measured density — but it means the byte
+saving does not become picture quality on its own, which is precisely the
+untested conversion the reallocation case would need.
