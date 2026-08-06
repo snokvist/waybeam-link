@@ -6555,3 +6555,42 @@ observable — `target_originator`, the name the register had used. Dumping the
 whole `link` object and the stream table instead of the one field the
 hypothesis named is what surfaced the delivery counter. When an A/B says
 *nothing happened*, widen the readout before believing it.
+
+**The claim-during-sweep race, and how narrow it actually is.** `do_claim`
+never stopped the scout, so a sweep running past a claim finishes seconds later
+and its `rest()` restores the resting channel and `net_id` filter *over* the
+claim — the scout clobbering the operator's click with the campaign already in
+flight. It now stops the sweep, placed after every cheap rejection (so a claim
+that never happens leaves a running sweep alone) and before the first move (so
+`rest()`'s own restore lands first and is immediately overwritten).
+
+Reproducing it taught something about the window. A claim needs
+`scout.candidate_for()`, and **candidates only exist once a channel's dwell
+finalizes** — so on a single-channel sweep there is almost no window at all: the
+dwell ends, the candidate appears, and the sweep rests in the same breath. The
+race needs a *multi-channel* sweep, where a craft found on an early channel is
+claimable while later channels are still dwelling. Swept `[5745, 5805, 5825]`
+at 6 s per channel with the craft on the middle one, claim at 14 s:
+
+| arm | after `{"ok":true}` | after the third dwell |
+|---|---|---|
+| before | `scanning=true` — sweep runs on through the claim | `scanning=false` |
+| after | `scanning=false` — sweep ended with the claim | `scanning=false` |
+
+**What this bench could not show.** The campaign aborts with `no CSA_ARMED` in
+*both* arms — the bench craft never arms, for reasons unrelated to this change —
+so the clobber's end consequence (a live campaign losing its channel to
+`rest()`) is verified by inspection of `rest()`, not by observation. The
+mechanism the fix targets is observed directly; its downstream cost is not, and
+the entry should not be read as claiming otherwise.
+
+**B3 — closed by ruling, not by hardware (operator, 2026-08-06).** The item
+asked whether a pure-devourer fleet forces Realtek-only hardware on the
+Ethernet-cache node, which carries an MT7921 that devourer can never drive. The
+premise is what falls: **the fleet is not pure-devourer by design.**
+kernel-monitor is retained permanently as an **RX-only** backend for cache and
+spectator nodes, while devourer takes the TX role. So the MT7921 leg needs no
+BOM change and no exception — an RX-only monitor node is the supported shape,
+not a fallback. This also settles the shape of every remaining parity item:
+they matter for the TX role, and a monitor node that never transmits does not
+need them.

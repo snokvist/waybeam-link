@@ -465,7 +465,16 @@ surface that a monitor-only fleet never had to decide.
 
 ---
 
-## B3 — the Ethernet cache runs an MT7921
+## B3 — the Ethernet cache runs an MT7921 — **DONE (ruling, 2026-08-06)**
+
+> The premise falls rather than the item resolving: **the fleet is not
+> pure-devourer by design.** kernel-monitor is retained permanently as the
+> **RX-only** backend for cache and spectator nodes; devourer takes the TX
+> role. The MT7921 leg therefore needs no BOM change and no exception — an
+> RX-only monitor node is a supported shape, not a fallback. This also fixes
+> the frame for everything left: parity items matter for the TX role, and a
+> node that never transmits does not need them.
+
 
 `docs/verification-hardware.md:15`: cache `.247` carries an MT7921
 (`14c3:7961`, `mt7921e`) alongside an RTL8812AU. Devourer is Realtek-only, so
@@ -547,17 +556,14 @@ landed (Pass 140), so the two items that used to sit at either end of this list
 are gone. Ordering is now by **what the TX role needs**, since that is the role
 devourer is taking.
 
-1. **The G1 leftover, reduced**: the sweep-scoping half is closed (Pass 144);
-   what remains is the unguarded **claim-during-sweep race** — `do_claim` does
-   not stop the scout, so a sweep completing afterwards restores the resting
-   filter and channel over the claim.
-2. **B3** — hardware, runs in parallel.
-3. **H1** — a per-unit acceptance check at the intended MCS, needed before a
-   pure-devourer TX fleet ships, not before any of the above lands.
-4. **G8** — narrower than when written; the devourer decode path, following the
-   `FakeAir` shape rather than a second harness.
+1. **G8** — the devourer decode path, following the `FakeAir` shape rather
+   than a second harness. The only code item left.
+2. **H1** — a per-unit acceptance check at the intended MCS. **Blocked
+   upstream**: `ProbeEfuseStability` is unwired for the Jaguar3 8822E (Pass
+   143), so the discriminating probe cannot run without vendored changes.
 
-**Not on this list any more:** G0 (closed), G1/G6 (Pass 142), G2/G3/G4/G5/G7 (Pass 143), G9 (fixed in
+**Not on this list any more:** G0 (closed), G1/G6 (Pass 142),
+G2/G3/G4/G5/G7 (Pass 143), G1's leftovers and B3 (Pass 144), G9 (fixed in
 Pass 140), B2 (dead by ruling), H2 (settled and measured), and the interface
 collapse itself.
 

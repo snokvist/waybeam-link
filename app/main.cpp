@@ -5869,6 +5869,17 @@ int run_rx(const Loaded& l) {
                     scout.emptiest(l.cfg.policy.csa.channel_allowlist, cand->chan);
             }
             if (target == 0) return "no target channel (specify target_chan)";
+            // §15.5a (Pass 144): a claim is what a sweep is *for*, so it ends
+            // the sweep instead of racing it. Left running, the sweep finishes
+            // seconds later and its rest() restores the resting channel and
+            // net_id filter *over* the claim, with the campaign already in
+            // flight — the scout clobbering the operator's click. Placed after
+            // every cheap rejection so a claim that never happens leaves a
+            // running sweep alone, and before the first move below so rest()'s
+            // own restore lands first and is immediately overwritten.
+            if (scout.scanning()) {
+                scout.stop(now_ms());
+            }
             // §15.5a: bind the link to the craft's net_id and move all ears onto
             // its current channel so the campaign and CSA_ARMED return are heard.
             air.value->set_stamp_net_id(cand->net_id);
