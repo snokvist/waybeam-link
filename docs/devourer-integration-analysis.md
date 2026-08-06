@@ -1,5 +1,48 @@
 # Devourer deep-integration analysis — occupancy/scout, aggregation/HW-ACK, FEC, adaptive link (2026-08-05)
 
+> **Rebased onto `main` at Pass 144 (2026-08-06) after a review pass over
+> #95–#101.** This document was drafted against `main` at PR #89; Passes 140–144
+> landed in between and moved several premises. What changed, and what it means:
+>
+> - **`docs/devourer-parity-plan.md` is now on `main` and its register is
+>   closed** — "Nothing is left on this list. Every code item is closed." It
+>   also frames the devourer feature surface as *"upside available once the
+>   backend moves, not parity"*, and names the §9.4 EVM rewire as "the largest
+>   piece of that upside". **#95–#101 are that upside register**, and the parity
+>   work being finished is why this tranche is startable. There is no overlap.
+> - **The end-state is a ruling (2026-08-06): kernel-monitor is KEPT** as the
+>   spectator / RX / Ethernet-cache backend, and **devourer takes the TX role**.
+>   That narrows §3 and §4 usefully — LDPC/STBC and per-packet rate divergence
+>   are TX-side, so the "does kernel-monitor honour these radiotap bits"
+>   question demotes from blocking to migration-hygiene. Mixed fleets are
+>   supported, so nothing may hard-depend on a devourer-only sensor.
+> - **Pass 144 (G8) created `io/include/wblink/radio_decode.h`** — the devourer
+>   RX descriptor decode rules as pure, unit-testable functions, with 27 checks
+>   in `tests/radio_decode_test.cpp`. It is the extension point for the RX-side
+>   work in §3 (LDPC readback), §4 (SNR/EVM harvest) and the rate verifier §4's
+>   probing needs, and it moves much of that work from bench to code gate.
+> - **Pass 140's `AirIface` extraction rewrote `io/src/air_radio.cpp`**, so all
+>   line citations below are re-verified but should be read symbol-first, per the
+>   parity plan's own warning that its numbers "have already been invalidated
+>   once wholesale".
+> - **Two prior findings bear on the issues** and are recorded in
+>   `docs/per-mcs-per-ladder-plan.md` §5: the Jaguar1 `BMC` hardcode (which may
+>   undercut the hardware ACK on an 8812AU, colliding with §5.2's preference for
+>   a Jaguar1 uplink), and upstream `OpenIPC/devourer#334` (which if it lands
+>   ungated would zero the retry limit §2 makes load-bearing).
+> - **§4's EVM proposal supersedes a documented decision**, not an oversight:
+>   `docs/per-mcs-per-ladder-plan.md` §2 rejected EVM on symmetry grounds and
+>   said it "stays available as an opportunistic enhancement on devourer nodes
+>   once the backend moves that way; **the ladder must not depend on it**". The
+>   premise moved; that constraint did not, so the §9.4 gate must be
+>   absent-safe.
+>
+> One correctness fix came out of the review: **#95's original scope would have
+> left the defect intact.** `ScoutEngine::emptiest()` ranks on
+> `wifi_util_permille`, so filling `interference_util_permille` faithfully and
+> leaving the ranking alone closes every checkbox and changes nothing. The
+> ranking move is now explicit in that issue.
+
 **Investigation only. No spec ruling is made here**, so there is no
 `docs/review-log.md` Pass entry attached. Every item under "Open decisions" is
 deferred to an operator ruling; when one is made it commits first as a spec
