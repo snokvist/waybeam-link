@@ -21,7 +21,11 @@ Channel 5805/HT20 throughout; every process SIGTERM-stopped and both ends
 verified silent after. Apparatus: two env knobs in this branch —
 `WBLINK_MCS_CYCLE` (TX: DATA radiotap MCS = wire seq % 8, the harshest
 per-packet mix) and `WBLINK_MCS_TRACE` (RX: per-frame `seq/rx_mcs/adapter/
-rssi` lines) — plus `scratchpad-link/stage0_correlate.py` offline.
+rssi/sid` lines) — plus `scratchpad-link/stage0_correlate.py` offline.
+Attribution caveat for lossy re-runs: §12 resends reuse the wire seq and
+fly the COMMITTED rate (inject_resend is deliberately outside the cycle
+knob), so duplicate-seq trace lines are resends, never rate mismatches —
+this campaign's runs had ARQ off and 0–2‰ loss, so none occurred.
 
 **#101 stage 0 — PASS on every die present; the premise holds.**
 Per-packet commanded rate flies frame-for-frame on all three fleet dies:

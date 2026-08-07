@@ -7621,9 +7621,13 @@ art.craft_adapter_fingerprint = craft_tally_fp;
             const Decoded dec = decode(d, n);
             if (mcs_trace_enabled()) {  // #101 stage-0 verifier (Tier-2)
                 if (const DataView* dv = std::get_if<DataView>(&dec)) {
-                    std::fprintf(stderr, "mcstrace seq=%u mcs=%u ad=%u rssi=%d\n",
+                    // sid: seq spaces are per-stream — a gap analysis over
+                    // this trace must never conflate streams' counters.
+                    std::fprintf(stderr,
+                                 "mcstrace seq=%u mcs=%u ad=%u rssi=%d sid=%u\n",
                                  dv->hdr.seq, meta.rx_mcs, meta.adapter_id,
-                                 static_cast<int>(rssi));
+                                 static_cast<int>(rssi),
+                                 static_cast<unsigned>(dv->hdr.stream_id));
                 }
             }
             discovery.observe(dec, now, meta.net_id);

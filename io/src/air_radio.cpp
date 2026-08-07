@@ -855,10 +855,13 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
 }
 
 // #101 stage-0 bench knob (Tier-2, findings.md 2026-08-08): WBLINK_MCS_CYCLE
-// set ⇒ every §3.2 DATA frame airs at radiotap MCS = seq % 8 — the harshest
-// deterministic per-packet mix (every consecutive frame a different rate),
-// derived from the wire seq alone so an RX-side trace can verify the
-// commanded rate frame-for-frame. Non-DATA frames keep the committed rate.
+// set ⇒ every first-send §3.2 DATA frame airs at radiotap MCS = seq % 8 —
+// the harshest deterministic per-packet mix (every consecutive frame a
+// different rate), derived from the wire seq alone so an RX-side trace can
+// verify the commanded rate frame-for-frame. Non-DATA frames keep the
+// committed rate, and so do §12 RESENDS (inject_resend — deliberately: a
+// resend reuses the wire seq, so on a lossy run the correlator must treat
+// duplicate-seq trace lines as resends, never as rate mismatches).
 // No default behaviour change; never set in a deployed config.
 static bool mcs_cycle_enabled() {
     static const bool on = std::getenv("WBLINK_MCS_CYCLE") != nullptr;
