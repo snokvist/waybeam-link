@@ -1580,6 +1580,12 @@ struct AirBackend {
             // backends. Zero keeps the estimate unavailable.
             rc.airtime_efficiency_permille =
                 cfg.air.airtime_efficiency_permille;
+            // §3.11 (Pass 162): same uplink-free archetypes as the monitor
+            // branch above — dedicated cache with no media streams, §2
+            // passive spectator (Pass 74).
+            rc.allow_rx_only =
+                (cfg.cache.store.enabled && cfg.streams.empty()) ||
+                cfg.node.spectator;
             auto a = RadioAir::create(rc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
