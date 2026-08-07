@@ -144,13 +144,14 @@ void test_no_wall_found_refused() {
 }
 
 void test_offset_space_flat_at_ceiling_places() {
-    // §10.7 (Pass 153, operator-ruled 2026-08-07): in offset space the
-    // ceiling is offset 0 — the §10.5 boot-safe placement — so a clean
-    // window completes and persists the ceiling placement, bracket empty.
+    // §10.7 (Pass 153, operator-ruled 2026-08-07): in offset space a clean
+    // window completes and persists — and with the window extended above
+    // the efuse reference, an UNBRACKETED run places no higher than 0.
     UplinkCalibParams p = fast_params();
     p.seek.min_qdb = -24;
-    p.seek.max_qdb = 0;
+    p.seek.max_qdb = 24;
     p.seek.seek_step_qdb = 8;
+    p.seek.no_bracket_cap_qdb = 0;
     p.taper_rung_ceiling = false;
     Bench b(p);
     b.ch.knee_qdb = 200;  // clean across the whole window
@@ -163,6 +164,32 @@ void test_offset_space_flat_at_ceiling_places() {
     const UplinkPlacement& pl = b.cal.placements()[0];
     CHECK(!pl.has_first_bad);
     CHECK(pl.placement_qdb <= 0 && pl.placement_qdb >= -24);
+    // The sweep still explored the whole window: honesty fields record the
+    // true highest clean probe, above the capped placement.
+    CHECK(pl.last_clean_qdb == 24);
+}
+
+void test_offset_space_bracket_above_reference_places_measured() {
+    // §10.7 (Pass 153): a run whose sweep DID book a bracket above the
+    // reference places below its wall as measured — genuine per-unit
+    // headroom above offset 0 stays usable when evidence supports it.
+    UplinkCalibParams p = fast_params();
+    p.seek.min_qdb = -24;
+    p.seek.max_qdb = 24;
+    p.seek.seek_step_qdb = 8;
+    p.seek.no_bracket_cap_qdb = 0;
+    p.taper_rung_ceiling = false;
+    Bench b(p);
+    b.ch.knee_qdb = 8;    // loss rises above +8...
+    b.ch.wall_qdb = 17;   // ...total above +16: bracket books inside window
+    CHECK(b.cal.start(b.now));
+    CHECK(b.run());
+    CHECK(b.cal.state() == CalibState::kDone);
+    CHECK(b.cal.placements().size() == 1);
+    const UplinkPlacement& pl = b.cal.placements()[0];
+    CHECK(pl.has_first_bad);
+    CHECK(pl.placement_qdb > 0);  // measured headroom above the reference
+    CHECK(pl.placement_qdb < b.ch.wall_qdb);
 }
 
 void test_verify_failed_when_nothing_acceptable() {
@@ -232,6 +259,7 @@ int main() {
     test_clean_run_places_below_wall();
     test_no_wall_found_refused();
     test_offset_space_flat_at_ceiling_places();
+    test_offset_space_bracket_above_reference_places_measured();
     test_verify_failed_when_nothing_acceptable();
     test_evidence_lost();
     test_abort_and_fail_persist_restore();

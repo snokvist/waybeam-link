@@ -5381,6 +5381,9 @@ int run_rx(const Loaded& l) {
             ucal_params.seek.min_qdb = uplink_adapter->power_offset_qdb;
             ucal_params.seek.max_qdb = uplink_adapter->power_offset_max_qdb;
             ucal_params.seek.seek_step_qdb = cp.offset_seek_step_qdb;
+            // §10.5 (Pass 153): the window may extend above the efuse
+            // reference, but an unbracketed placement never does.
+            ucal_params.seek.no_bracket_cap_qdb = 0;
             ucal_params.taper_rung_ceiling = false;
         } else if (upwr.ceiling_qdb) {
             // §10.3 (Pass 134): the adapter's opt-in sanity ceiling bounds the

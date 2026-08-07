@@ -46,6 +46,12 @@ struct SeekParams {
     int32_t min_qdb = 4;
     int32_t max_qdb = 108;
     uint8_t verify_descent_budget = 3;
+    // §10.5/§10.7 (Pass 153): offset space only — a sweep that booked no
+    // overload bracket starts its verify no higher than this bound (the
+    // efuse reference, 0). Above the reference sits per-unit PA compression
+    // a close-range flat field cannot see; placing there requires a
+    // measured wall. Unset in absolute space.
+    std::optional<int32_t> no_bracket_cap_qdb;
 };
 
 // What a completed dwell observed.
@@ -180,6 +186,14 @@ class PowerSeek {
     }
     SeekStep place_() {
         qdb_ = last_clean_->qdb;
+        // §10.5 (Pass 153): no bracket booked → the verify walk starts at
+        // the reference, not above it. The walk only descends from here, so
+        // capping the start caps the placement; everything below is then
+        // measured by the walk itself, never inherited from this clamp.
+        if (p_.no_bracket_cap_qdb && !has_bad_ &&
+            qdb_ > *p_.no_bracket_cap_qdb) {
+            qdb_ = std::max(p_.min_qdb, *p_.no_bracket_cap_qdb);
+        }
         phase_ = Phase::kVerify;
         return {SeekStep::Kind::kVerify, qdb_, true, nullptr};
     }
@@ -354,6 +368,10 @@ class Calibrator {
         s.rssi_guard_dbm = p.rssi_guard_dbm;
         s.min_qdb = p.min_qdb;
         s.max_qdb = p.max_qdb;
+        // §10.5 (Pass 153): taper_rung_ceiling is the space discriminator
+        // (Pass 151) — offset space caps unbracketed placements at the
+        // efuse reference. §10.7 sets the same cap on its own SeekParams.
+        if (!p.taper_rung_ceiling) s.no_bracket_cap_qdb = 0;
         return s;
     }
 

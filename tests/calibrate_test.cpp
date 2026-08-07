@@ -141,9 +141,11 @@ void test_no_wall_found_refused() {
 
 void test_offset_space_flat_at_ceiling_places() {
     // §10.6 (Pass 153, operator-ruled 2026-08-07): offset space completes a
-    // flat-at-ceiling run — the ceiling is the §10.5 boot-safe offset 0.
+    // flat-window run, and seek_params() derives the reference cap from
+    // taper_rung_ceiling — unbracketed rungs place no higher than offset 0
+    // even with the window extended above the reference.
     CalibrateParams p = fast_params();
-    p.max_qdb = 0;
+    p.max_qdb = 24;
     p.min_qdb = -24;
     p.taper_rung_ceiling = false;
     Bench b(p);
@@ -155,6 +157,7 @@ void test_offset_space_flat_at_ceiling_places() {
     CHECK(b.artifacts == 1);
     for (size_t m = 0; m < 8; ++m) {
         CHECK(!b.cal.artifact().ceilings[m].has_bad);
+        CHECK(b.cal.artifact().placement_qdb[m] <= 0);
     }
 }
 
