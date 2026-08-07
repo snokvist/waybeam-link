@@ -913,6 +913,20 @@ int main() {
         CHECK(bool(ok) &&
               ok.value->policy.calibration.offset_seek_step_qdb == 4);
     }
+    // Tier-2 floor knob (findings.md 2026-08-07): seed + parse, and the
+    // shared >= 1 uplink gate covers it.
+    {
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
+        CHECK(bool(d) &&
+              d.value->policy.calibration.uplink_floor_min_samples == 300);
+        auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "policy":{"calibration":{"uplink_floor_min_samples":40}}})");
+        CHECK(bool(ok) &&
+              ok.value->policy.calibration.uplink_floor_min_samples == 40);
+    }
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"uplink_floor_min_samples":0}}})",
+        "floor gates must be >= 1");
 
     // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------
     {

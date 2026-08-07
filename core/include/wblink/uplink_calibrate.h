@@ -134,10 +134,11 @@ class UplinkCalibrator {
         return true;
     }
 
-    // §10.7 (Pass 152): the walls are set per run, because they are defined
-    // relative to the at-rest loss floor the caller measures just before the
-    // sweep. Same position and guard as set_max_qdb — a running sweep owns
-    // the thresholds it is judging against.
+    // The walls are set per run, because the caller may reference them
+    // against an at-rest loss floor measured just before the sweep — a
+    // Tier-2 mechanism, unruled in §10.7 (docs/findings.md 2026-08-07).
+    // Same position and guard as set_max_qdb — a running sweep owns the
+    // thresholds it is judging against.
     bool set_loss_walls(uint16_t ok_milli, uint16_t bad_milli) {
         if (state_ == CalibState::kRunning) return false;
         if (bad_milli <= ok_milli) return false;

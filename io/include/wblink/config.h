@@ -345,6 +345,12 @@ struct CalibrationPolicy {
     // scoring. Must exceed one §3.16 period (500 ms at 2 Hz).
     int uplink_drain_ms = 600;
     int uplink_liveness_ms = 2000;
+    // Tier-2 knob (docs/findings.md 2026-08-07): sample-count gate on the
+    // ground's at-rest loss-floor estimate — the sample the §10.7 walls may
+    // be referenced against while the wall-origin question is unruled. A
+    // count, not a clock: at ~10 Hz reports n=40 has σ the size of the floor
+    // it estimates; n=300 puts σ near 9permille at a 25permille floor.
+    int uplink_floor_min_samples = 300;
 };
 
 struct Policy {

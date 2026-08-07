@@ -687,6 +687,9 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pk.value("uplink_liveness_ms", cal.uplink_liveness_ms);
                 cal.uplink_drain_ms =
                     pk.value("uplink_drain_ms", cal.uplink_drain_ms);
+                cal.uplink_floor_min_samples =
+                    pk.value("uplink_floor_min_samples",
+                             cal.uplink_floor_min_samples);
                 if (cal.min_qdb > cal.max_qdb) {
                     return Result<Config>::fail(
                         "policy.calibration: min_qdb > max_qdb (§10.6)");
@@ -716,10 +719,11 @@ Result<Config> load_config_json(const std::string& json_text) {
                 }
                 if (cal.uplink_probe_epochs < 1 ||
                     cal.uplink_verify_epochs < 1 ||
-                    cal.uplink_liveness_ms < 1 || cal.uplink_drain_ms < 1) {
+                    cal.uplink_liveness_ms < 1 || cal.uplink_drain_ms < 1 ||
+                    cal.uplink_floor_min_samples < 1) {
                     return Result<Config>::fail(
-                        "policy.calibration: uplink burst/drain/liveness "
-                        "gates must be >= 1 (§10.7)");
+                        "policy.calibration: uplink burst/drain/liveness/"
+                        "floor gates must be >= 1 (§10.7)");
                 }
                 // Pass 132: a burst too small to resolve the walls decides on
                 // noise. One lost probe must land at or under loss_ok_milli,
