@@ -330,8 +330,12 @@ class UplinkCalibrator {
                 // nothing, leaving the last-good artifact in place. Device
                 // evidence forced this: a bench-range run with fully live
                 // feedback placed everything at the ceiling and persisted the
-                // mask read back as a measurement.
-                if (!placements_.back().has_first_bad &&
+                // mask read back as a measurement. Absolute space only
+                // (Pass 153): in offset space the ceiling is offset 0 — the
+                // §10.5 boot-safe placement — so flat-at-ceiling is the
+                // expected close-range reading and the run completes.
+                if (p_.taper_rung_ceiling &&
+                    !placements_.back().has_first_bad &&
                     placements_.back().placement_qdb >= rung_ceiling_qdb()) {
                     finish(CalibState::kFailed, "no_wall_found");
                     a.restore = take_restore_();

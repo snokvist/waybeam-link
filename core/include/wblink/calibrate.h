@@ -566,7 +566,10 @@ class Calibrator {
     // precondition in the app layer.
     CalibActions next_rung(CalibActions a, uint64_t now_ms) {
         if (rung_ >= 7) {
-            if (found_no_wall_anywhere()) {
+            // §10.6 (Pass 153): absolute space only — in offset space the
+            // ceiling is offset 0, the §10.5 boot-safe placement, and a
+            // flat-at-ceiling read is the expected close-range result.
+            if (p_.taper_rung_ceiling && found_no_wall_anywhere()) {
                 finish(CalibState::kFailed, "no_wall_found", now_ms);
                 a.restore = take_restore_();
                 return a;  // persists nothing; last-good artifact survives

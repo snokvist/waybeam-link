@@ -120,9 +120,14 @@ void test_full_run_places_below_walls() {
 }
 
 void test_no_wall_found_refused() {
+    // §10.6 (Pass 153): the flat-at-ceiling refusal is absolute-space only,
+    // and taper_rung_ceiling is the space discriminator (Pass 151). With the
+    // taper on, park every rung level at the baseline so all eight share the
+    // same untapered ceiling the flat channel can reach.
     CalibrateParams p = fast_params();
     p.max_qdb = 40;       // stop the sweep well under every wall
-    p.taper_rung_ceiling = false;  // one flat ceiling for all rungs
+    p.taper_rung_ceiling = true;
+    for (auto& lv : p.levels) lv = 4;  // baseline: no per-rung taper
     Bench b(p);
     b.ch.knee_qdb = 200;  // flat clean everywhere
     CHECK(b.cal.start(b.now));
@@ -132,6 +137,25 @@ void test_no_wall_found_refused() {
           std::strcmp(b.cal.fail_reason(), "no_wall_found") == 0);
     CHECK(b.restores == 1);
     CHECK(b.artifacts == 0);  // persists nothing
+}
+
+void test_offset_space_flat_at_ceiling_places() {
+    // §10.6 (Pass 153, operator-ruled 2026-08-07): offset space completes a
+    // flat-at-ceiling run — the ceiling is the §10.5 boot-safe offset 0.
+    CalibrateParams p = fast_params();
+    p.max_qdb = 0;
+    p.min_qdb = -24;
+    p.taper_rung_ceiling = false;
+    Bench b(p);
+    b.ch.knee_qdb = 200;  // flat clean across the whole window
+    CHECK(b.cal.start(b.now));
+    CHECK(b.run());
+    CHECK(b.cal.state() == CalibState::kDone);
+    CHECK(b.restores == 1);
+    CHECK(b.artifacts == 1);
+    for (size_t m = 0; m < 8; ++m) {
+        CHECK(!b.cal.artifact().ceilings[m].has_bad);
+    }
 }
 
 void test_evidence_lost_when_nothing_delivers() {
@@ -186,6 +210,7 @@ void test_start_abort_reject_semantics() {
 int main() {
     test_full_run_places_below_walls();
     test_no_wall_found_refused();
+    test_offset_space_flat_at_ceiling_places();
     test_evidence_lost_when_nothing_delivers();
     test_abort_restores_once();
     test_hard_cap();

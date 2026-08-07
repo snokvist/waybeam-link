@@ -127,9 +127,11 @@ void test_clean_run_places_below_wall() {
 }
 
 void test_no_wall_found_refused() {
+    // §10.7 (Pass 153): the flat-at-ceiling refusal is absolute-space only.
     UplinkCalibParams p = fast_params();
     p.seek.max_qdb = 40;
-    p.taper_rung_ceiling = false;
+    p.taper_rung_ceiling = true;
+    p.rung_level = 4;  // baseline: rung_ceiling_qdb() == seek.max_qdb
     Bench b(p);
     b.ch.knee_qdb = 200;  // clean all the way to the ceiling
     CHECK(b.cal.start(b.now));
@@ -139,6 +141,28 @@ void test_no_wall_found_refused() {
           std::strcmp(b.cal.fail_reason(), "no_wall_found") == 0);
     CHECK(b.artifacts == 0);
     CHECK(b.restores == 1);
+}
+
+void test_offset_space_flat_at_ceiling_places() {
+    // §10.7 (Pass 153, operator-ruled 2026-08-07): in offset space the
+    // ceiling is offset 0 — the §10.5 boot-safe placement — so a clean
+    // window completes and persists the ceiling placement, bracket empty.
+    UplinkCalibParams p = fast_params();
+    p.seek.min_qdb = -24;
+    p.seek.max_qdb = 0;
+    p.seek.seek_step_qdb = 8;
+    p.taper_rung_ceiling = false;
+    Bench b(p);
+    b.ch.knee_qdb = 200;  // clean across the whole window
+    CHECK(b.cal.start(b.now));
+    CHECK(b.run());
+    CHECK(b.cal.state() == CalibState::kDone);
+    CHECK(b.artifacts == 1);
+    CHECK(b.restores == 1);
+    CHECK(b.cal.placements().size() == 1);
+    const UplinkPlacement& pl = b.cal.placements()[0];
+    CHECK(!pl.has_first_bad);
+    CHECK(pl.placement_qdb <= 0 && pl.placement_qdb >= -24);
 }
 
 void test_verify_failed_when_nothing_acceptable() {
@@ -207,6 +231,7 @@ void test_set_max_qdb_guard() {
 int main() {
     test_clean_run_places_below_wall();
     test_no_wall_found_refused();
+    test_offset_space_flat_at_ceiling_places();
     test_verify_failed_when_nothing_acceptable();
     test_evidence_lost();
     test_abort_and_fail_persist_restore();
