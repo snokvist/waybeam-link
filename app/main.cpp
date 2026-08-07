@@ -5203,27 +5203,19 @@ int run_rx(const Loaded& l) {
     // §10.3/§10.5/§10.7/§11.7 0x0A: one owner for the uplink's power, holding
     // the ceiling a tier moves and the single precedence path every apply site
     // runs through. Its actuators are wired below, once the radio exists.
-    // §10.7 (Pass 152): the at-rest uplink loss floor, over a rolling window
-    // of ORDINARY operation, so the sweep's walls can be defined relative to
-    // it. Measured on the fleet at 10 m: a stable 25permille floor against the
-    // 15permille absolute loss_ok seed — the acceptance gate sat BELOW the
-    // link's own floor, so no TX power could pass it and §10.7 could not
-    // succeed at any distance. The uplink shares the medium with the craft's
-    // video, so a few percent of reports collide regardless of power; that is
-    // the baseline to measure degradation FROM, not a quality bar to clear.
+    // At-rest uplink loss floor, over a rolling window of ORDINARY operation,
+    // so the §10.7 walls can be referenced against it. Tier-2 mechanism —
+    // how the walls are referenced is unruled in the spec; the evidence and
+    // sizing live in docs/findings.md (2026-08-07 entry).
     //
     // Sampled outside the run, like §10.6's Pass 134 report-health
     // precondition and for the same reason: once the sweep starts, elevated
     // loss is the measurement.
     struct UplinkFloor {
-        // The window is a SAMPLE-COUNT gate, not a clock. Reports arrive at
-        // ~10 Hz, so the first cut at 4 s closed on n=40 — where one lost
-        // report is 25permille and the estimator's own sigma (25permille) is
-        // the size of the floor it is estimating. Measured live: a 4 s window
-        // read 50permille against a 40 s window's 24.8 +/- 7.7, and the
-        // inflated floor admitted a rung at 45permille that the true floor
-        // would have refused. n=300 puts sigma near 9permille at a
-        // 25permille floor, which is the resolution the walls need.
+        // A SAMPLE-COUNT gate, not a clock — sized by the
+        // policy.calibration.uplink_floor_min_samples knob (findings.md: at
+        // ~10 Hz reports, n=40 has sigma the size of the floor it estimates;
+        // n=300 puts sigma near 9permille at a 25permille floor).
         uint32_t min_samples = 300;
         uint32_t max_win_ms = 60000;  // give up and re-mark on a dead link
         uint64_t mark_ms = 0;
@@ -5257,6 +5249,8 @@ int run_rx(const Loaded& l) {
             mark_recv = recv;
         }
     } ufloor;
+    ufloor.min_samples = static_cast<uint32_t>(
+        l.cfg.policy.calibration.uplink_floor_min_samples);
     UplinkPower upwr;
     upwr.mcs = l.cfg.air.uplink_mcs;
     // §10.5/§10.7 (Pass 151): the ground's power space, decided ONCE from the
@@ -6620,12 +6614,13 @@ int run_rx(const Loaded& l) {
                 if (rx.craft_calibrating()) {
                     return "craft downlink calibration is running";
                 }
-                // §10.7 (Pass 152): the walls are the at-rest floor plus the
-                // configured margins. Without a floor the run would judge
-                // against an absolute bar that may sit below the link's own
-                // noise — the state that made every rung unreachable at 10 m —
-                // so refuse rather than measure against a number we know
-                // nothing about. Self-clearing within one window.
+                // Tier-2 mechanism (findings.md 2026-08-07): the walls are
+                // the at-rest floor plus the configured margins. Without a
+                // floor the run would judge against an absolute bar that may
+                // sit below the link's own noise — the state that made every
+                // rung unreachable at 10 m — so refuse rather than measure
+                // against a number we know nothing about. Self-clearing
+                // within one window.
                 if (!ufloor.have) {
                     return "uplink loss floor not measured yet — retry in a "
                            "few seconds (§10.7)";
@@ -6993,9 +6988,10 @@ int run_rx(const Loaded& l) {
         // §10.7 calibrator service. `restore` is single-shot and set on EVERY
         // terminal path, so this is the one place probe power is handed back
         // to the §10.7 owner — no exit can strand it.
-        // §10.7 (Pass 152): keep the at-rest floor current, but ONLY while no
-        // sweep is running — during a run the loss IS the measurement, and
-        // folding it back into the baseline would chase its own tail.
+        // Tier-2 floor sampling (findings.md 2026-08-07): keep the at-rest
+        // floor current, but ONLY while no sweep is running — during a run
+        // the loss IS the measurement, and folding it back into the baseline
+        // would chase its own tail.
         if (quality_gate.have() &&
             uplink_cal.state() != CalibState::kRunning) {
             const UplinkQuality& q = quality_gate.last();
