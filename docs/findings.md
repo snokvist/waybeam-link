@@ -123,7 +123,9 @@ cost, the §7.2 term with **no measured number at all** (devourer bounds it
 0.5–1.2 ms on Jaguar3; a bulk-flooded adapter additionally starves the
 read). Dumped to stderr every 30 s as bucketed distributions
 (<50/<100/<200/<500/<1k/<2k/<5k/≥5k µs) — the tail is the contract, means
-hide it. The third term (craft-side arrival phase relative to its own gap)
+hide it. **rx role only**: the dump lives in the ground loop; on a tx node
+the flag collects and never prints (the gate-4 campaign is a ground-side
+evaluation — extend the dump if a craft-side number is ever wanted). The third term (craft-side arrival phase relative to its own gap)
 is **deliberately not instrumented yet**: it needs either a host↔TSF fit
 (devourer tdma example) or a host-time proxy whose error is exactly the
 terms under study — that placement choice is part of the §17 gate-4

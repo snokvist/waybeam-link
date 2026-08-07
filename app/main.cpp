@@ -1394,8 +1394,10 @@ inline bool aim_log_enabled() {
     static const bool on = std::getenv("WBLINK_AIM_LOG") != nullptr;
     return on;
 }
-AimHist g_aim_release;   // release lateness past the return deadline
-AimHist g_aim_read_tsf;  // ReadTsf() control-transfer cost
+// rx-role only: the 30 s dump lives in the run_rx loop — a tx node with
+// the flag set collects and never prints (findings.md says so).
+static AimHist g_aim_release;   // release lateness past the return deadline
+static AimHist g_aim_read_tsf;  // ReadTsf() control-transfer cost
 
 // ---- air backend selection (udp dev backend | devourer radio, §3.0) --------
 
