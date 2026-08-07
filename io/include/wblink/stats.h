@@ -282,15 +282,13 @@ struct LinkStats {
     int32_t uplink_calib_power_qdb = 0;
     uint8_t uplink_calib_fingerprint = 0;
     bool uplink_calib_stale = false;
-    // §3.16 feedback. age_ms is LIVENESS (any accepted packet), which is the
-    // clock §10.7's 2 s abort watches; counter progress is uplink_quality_
-    // reports, and conflating them is the thing Pass 125 exists to prevent.
-    bool uplink_quality_valid = false;
-    uint32_t uplink_quality_age_ms = 0;
-    uint32_t uplink_quality_report_epoch = 0;
-    uint32_t uplink_quality_reports = 0;
-    int32_t uplink_quality_rssi_mean = 0;
-    uint8_t uplink_quality_rx_mcs = kUplinkRxMcsUnknown;  // 255 = unknown
+    // §3.16 (Pass 153) probe-exchange counters, role-neutral: the local
+    // node's current/last calibration run. feed_paused is the §10.6
+    // input-starve state (craft-local; false on a ground node).
+    uint64_t calib_probes_sent = 0;
+    uint64_t calib_tallies_rx = 0;
+    uint8_t calib_rx_mcs = kUplinkRxMcsUnknown;  // 255 = unknown
+    bool feed_paused = false;
 };
 
 // §15.3 cache blocks — present only when the §14.3 role is enabled.
