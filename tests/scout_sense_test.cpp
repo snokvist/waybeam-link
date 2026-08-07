@@ -47,6 +47,20 @@ void test_derivation() {
         CHECK(!d.interference_valid);
         CHECK_EQ_U(d.util_permille, 50);
     }
+    // A window under the floor (an abandoned dwell finalizing just after
+    // its barrier) is too short to rate — one FA event must not read as
+    // hundreds of permille.
+    {
+        const auto d =
+            derive_occupancy(fa_sense(1), 50, wblink::kMinObserveUs / 50);
+        CHECK(!d.interference_valid);
+        CHECK_EQ_U(d.util_permille, 50);
+    }
+    // At the floor exactly, the rate is trusted.
+    {
+        const auto d = derive_occupancy(fa_sense(0), 50, wblink::kMinObserveUs);
+        CHECK(d.interference_valid);
+    }
     // Quiet channel: zero false alarms derive a valid zero.
     {
         const auto d = derive_occupancy(fa_sense(0), 10, 300000);

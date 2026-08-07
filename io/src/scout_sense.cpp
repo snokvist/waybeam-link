@@ -15,7 +15,7 @@ OccupancyDerived derive_occupancy(
     if (!sense) {
         return out;
     }
-    if (sense->fa_valid && observe_us > 0) {
+    if (sense->fa_valid && observe_us >= kMinObserveUs) {
         // Saturating index of non-decodable energy (spec §15.5a): the
         // chanmig-proven bounded form, an index comparable within one
         // adapter — not an absolute duty cycle (FA events carry no

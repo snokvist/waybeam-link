@@ -740,11 +740,15 @@ class ScoutEngine {
         // §15.5a (Pass 155): settle elapsed → one throwaway sense read
         // drains the FA/CCA deltas and the frame-quality window; the
         // observe window for the interference denominator starts here.
+        // One attempt per dwell; a FAILED drain (USB glitch → nullopt)
+        // must NOT arm the observe window — the delta would span back to
+        // the last successful drain and read as a saturated interference
+        // score on a pristine channel. The dwell falls back sensor-less.
         if (!barrier_done_ && now_ms >= barrier_at_ms_) {
             barrier_done_ = true;
-            observe_start_ms_ = now_ms;
-            if (h_.sense) {
-                (void)h_.sense(scout_adapter_);
+            if (h_.sense && h_.sense(scout_adapter_)) {
+                barrier_drained_ = true;
+                observe_start_ms_ = now_ms;
             }
         }
         if (now_ms < dwell_deadline_ms_) {
@@ -903,6 +907,7 @@ class ScoutEngine {
         // the settle, from tick() — the delta counters must not charge this
         // bin with its own retune.
         barrier_done_ = false;
+        barrier_drained_ = false;
         barrier_at_ms_ = now_ms + kSenseSettleMs;
         observe_start_ms_ = 0;
     }
@@ -925,11 +930,11 @@ class ScoutEngine {
         // since the barrier. The observe window is barrier→now; a dwell too
         // short for its barrier reads no sensor and falls back whole.
         std::optional<AirIface::AirSense> sense;
-        if (h_.sense && barrier_done_) {
+        if (h_.sense && barrier_drained_) {
             sense = h_.sense(scout_adapter_);
         }
         const uint64_t observe_us =
-            (barrier_done_ && now_ms > observe_start_ms_)
+            (barrier_drained_ && now_ms > observe_start_ms_)
                 ? (now_ms - observe_start_ms_) * 1000u
                 : 0u;
         const OccupancyDerived d = derive_occupancy(
@@ -977,7 +982,10 @@ class ScoutEngine {
     uint64_t entered_ms_ = 0;
     bool extended_ = false;
     // §15.5a (Pass 155) discard-barrier state, reset per channel entry.
+    // done = the one attempt was made; drained = it actually returned a
+    // value, which is what arms the observe window and the finalize read.
     bool barrier_done_ = false;
+    bool barrier_drained_ = false;
     uint64_t barrier_at_ms_ = 0;
     uint64_t observe_start_ms_ = 0;
     Accum accum_;

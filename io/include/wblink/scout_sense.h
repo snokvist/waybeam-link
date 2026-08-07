@@ -18,6 +18,12 @@ namespace wblink {
 // discard barrier.
 inline constexpr double kFaHalfRatePerSec = 200.0;
 inline constexpr uint32_t kSenseSettleMs = 30;
+// Minimum observe window before an FA delta is trusted as a rate: an
+// abandoned dwell (the Pass 144 claim path) can finalize milliseconds after
+// its barrier, where a single FA event reads as hundreds of permille. Too
+// short to rate = invalid (JSON null), never a high-variance guess. At the
+// 200 FA/s half-rate, 100 ms ≈ 20 ambient events of statistics.
+inline constexpr uint64_t kMinObserveUs = 100000;
 
 struct OccupancyDerived {
     bool interference_valid = false;
@@ -33,8 +39,9 @@ struct OccupancyDerived {
 // Fold one dwell's frame-free sensor delta into the §15.5a fields.
 // `observe_us` is the barrier→read window (the interference denominator —
 // NOT the full dwell, which charges the bin with its own retune). A missing
-// sensor, an invalid FA leg, or a zero observe window leaves interference
-// invalid (JSON null, never a fake zero).
+// sensor, an invalid FA leg, or an observe window under kMinObserveUs
+// leaves interference invalid (JSON null, never a fake zero or a
+// high-variance guess).
 OccupancyDerived derive_occupancy(
     const std::optional<AirIface::AirSense>& sense,
     uint16_t wifi_util_permille, uint64_t observe_us);
