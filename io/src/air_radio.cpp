@@ -273,12 +273,17 @@ struct RadioAir::Impl {
         // Stop loops first, then join, then power the chips down and release
         // USB — the ordering devourer's demos use. A join can block while a
         // bring-up is still in flight (bring-up does not poll the stop flag).
+        // Null entries exist transiently during the Pass 154 re-bind (the
+        // permutation moves adapters through a cleared vector), and devourer
+        // register I/O can throw mid-re-bind (USB glitch) — this destructor
+        // must survive running at that point.
         for (auto& a : adapters) {
-            if (a->dev) {
+            if (a && a->dev) {
                 a->dev->StopRxLoop();
             }
         }
         for (auto& a : adapters) {
+            if (!a) continue;
             if (a->rx_thread.joinable()) {
                 a->rx_thread.join();
             }
@@ -462,6 +467,17 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     for (const AdapterCfg& a : cfg.adapters) {
         any_mac_pin = any_mac_pin || !a.mac.empty();
     }
+    // Paths strict-pinned by a mac-less stanza are reserved: the claim is
+    // sequential, so a non-strict claim (first-free, or a mac stanza's
+    // pass-2 fallback) consuming such a device would fail bring-up on a
+    // config that has a valid assignment — the strict owner claims later
+    // and finds its port taken.
+    std::vector<std::string> strict_pins;
+    for (const AdapterCfg& a : cfg.adapters) {
+        if (!a.bus.empty() && a.mac.empty()) {
+            strict_pins.push_back(a.bus);
+        }
+    }
 
     std::vector<std::string> used_paths;
     for (size_t i = 0; i < cfg.adapters.size(); ++i) {
@@ -501,6 +517,16 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                 if (taken ||
                     (pass == 0 && !ac.bus.empty() && ac.bus != path)) {
                     continue;
+                }
+                const bool strict_attempt = pass == 0 && !ac.bus.empty();
+                if (!strict_attempt && path != ac.bus) {
+                    bool reserved = false;
+                    for (const auto& sp : strict_pins) {
+                        reserved = reserved || (sp == path);
+                    }
+                    if (reserved) {
+                        continue;
+                    }
                 }
                 found = list[k];
                 found_path = path;
@@ -619,6 +645,22 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                     taken[d] = true;
                     break;
                 }
+            }
+            // A bus pin is explicit (§15.2); when a mac match outranked it
+            // and took the unit at that port, the displacement must not be
+            // silent — this stanza is now on a different physical unit.
+            const AdapterCfg& ac = cfg.adapters[i];
+            if (ac.mac.empty() && !ac.bus.empty() &&
+                im.adapters[i]->path != ac.bus) {
+                std::fprintf(stderr,
+                             "radio: adapter \"%s\": bus pin %s DISPLACED by "
+                             "a mac match — bound to path %s (mac %s) "
+                             "instead (§15.2 precedence)\n",
+                             ac.name.c_str(), ac.bus.c_str(),
+                             im.adapters[i]->path.c_str(),
+                             im.adapters[i]->mac.empty()
+                                 ? "none"
+                                 : im.adapters[i]->mac.c_str());
             }
         }
         // Re-stamp the stanza-owned fields onto the re-bound units, surface

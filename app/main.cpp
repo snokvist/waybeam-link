@@ -2731,10 +2731,19 @@ struct TxCore {
     // the §9.3 table's per-rung tx_power_level tapers it. Without this the
     // one operation that deliberately walks a rung into overload was the one
     // operation the ceiling did not cover.
-    void init_calibration(const CalibrationPolicy& c,
-                          std::optional<int32_t> max_power_qdb) {
+    // Split from init_calibration (Pass 154): the §3.16 tally-receiver path
+    // and its feed-quiet expiry run on every craft, including a D3 unit
+    // whose calibrator is refused — the policy seeds must not be gated on
+    // the calibrator existing, or feed_quiet_ms is silently dead exactly on
+    // the node whose identity is missing.
+    void seed_calib_policy(const CalibrationPolicy& c) {
         calib_policy_ = c;
         feed_quiet_ms_ = static_cast<uint32_t>(c.feed_quiet_ms);
+    }
+
+    void init_calibration(const CalibrationPolicy& c,
+                          std::optional<int32_t> max_power_qdb) {
+        seed_calib_policy(c);
         CalibrateParams p = calib_params_from(c);
         if (table_ != nullptr) {
             for (const Profile& pr : table_->profiles) {
@@ -4428,6 +4437,9 @@ int run_tx(const Loaded& l) {
     // §10.3 ceiling (Pass 134) comes from the same adapter the sweep drives.
     // Not constructed at all without an identity (Pass 154 D3): a run whose
     // artifact could never be keyed must refuse at start, not at persist.
+    // The policy seeds (feed-quiet expiry) apply either way — the §3.16
+    // tally receiver runs on a D3 craft too.
+    tx.seed_calib_policy(l.cfg.policy.calibration);
     if (!calib_ident.empty()) {
         tx.init_calibration(l.cfg.policy.calibration,
                             calib_tx_adapter != nullptr
@@ -7172,7 +7184,15 @@ int run_rx(const Loaded& l) {
                     uplink_restore_actuators();
                 }
             }
-            if (ua.artifact_ready) {
+            if (ua.artifact_ready && uplink_identity.empty()) {
+                // Unreachable while D3 refuses the start; kept as the same
+                // belt the craft persist carries — no future start path may
+                // persist an artifact keyed on "" (it would match nothing
+                // and read permanently stale).
+                std::fprintf(stderr,
+                             "uplink: artifact write refused — no adapter "
+                             "identity (Pass 154 D3)\n");
+            } else if (ua.artifact_ready) {
                 UplinkArtifact art;
                 art.local_adapter_identity = uplink_identity;
                 art.craft_originator = active_selection.originator;
