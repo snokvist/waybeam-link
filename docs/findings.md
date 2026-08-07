@@ -12,6 +12,88 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-08 — bench-gate campaign: stage 0 clean on all three dies; four gates measured; two pinned to geometry
+
+One session, x86 rig (8812AU `20:0d:b0:c4:a7:6a` bus 8-1, 8812CU
+`40:a5:ef:2f:23:08` bus 5-1) + craft .232 (8822EU `dc:57:5b:00:d0:57`,
+devourer via tmpfs binary, kernel driver rmmod'd for the run and restored).
+Channel 5805/HT20 throughout; every process SIGTERM-stopped and both ends
+verified silent after. Apparatus: two env knobs in this branch —
+`WBLINK_MCS_CYCLE` (TX: DATA radiotap MCS = wire seq % 8, the harshest
+per-packet mix) and `WBLINK_MCS_TRACE` (RX: per-frame `seq/rx_mcs/adapter/
+rssi` lines) — plus `scratchpad-link/stage0_correlate.py` offline.
+
+**#101 stage 0 — PASS on every die present; the premise holds.**
+Per-packet commanded rate flies frame-for-frame on all three fleet dies:
+AU→CU 3600/3600 rate-verified (0 lost, mismatch matrix EMPTY), CU→AU
+3590/3590 (10 lost = 2‰, spread across rates — and their rates are known
+by computation, which IS the §9.2 numerator working), EU(craft)→dual ears
+au 3593/3593 + cu 3600/3600 (both ears independently agree). CCX
+cross-check on every TX: `tx_reports == tx_submitted` exactly (3737,
+3741), `tx_report_fails = 0` across ~11k broadcast frames — the Jaguar
+retry rate-walk is dormant on the no-ACK path, confirmed on air.
+Kernel-monitor leg: MOOT (ruling #120). **Open:** per-unit coverage is one
+unit per die — Pass 139's lesson wants a second unit of at least the CU/EU
+parts on the rig before probing is enabled fleet-wide (fail-closed default
+stands).
+
+**#97 LDPC/STBC — proof-of-flight PASS both codings (AU TX → CU ear).**
+`air.ldpc`: rx_ldpc 1878/1878 received frames; control (T1, ldpc off)
+rx_ldpc 0/3738. `air.stbc`: rx_stbc 1878/1878. No caps refusal on the
+Jaguar1 TX die. **Open:** the cliff A/B (PER shift at range) — needs
+attenuation the bench can't produce at 30 cm.
+
+**#98/#125 saturation knee — instrument PASS, knee unreachable in-law.**
+MCS7 pinned, offset swept the full legal range −24→0 qdb (safe end first):
+peak RSSI −17→−12 tracked the commanded 6 dB, SNR 33–36, EVM −30..−34
+(valid throughout), PER 0‰ at every dwell. The §10.3/§10.5 law caps at
+offset 0, so the PA knee sits above what config can command at this
+antenna spacing. **Open:** knee reproduction needs a physical change
+(antennas nearer / no attenuator) — operator hardware action.
+
+**#96 unicast A/B — mechanism PASS; retry distribution degenerate at
+bench SNR.** A-leg: 236 unicast returns, fallback 0 (SA latched from
+first frame), `tx_report_fails` 0 → the retry-8 ceiling never touched;
+craft `reports_received` 211/211. B-leg (broadcast): same 211/211.
+**Open:** the retry *distribution* only becomes non-trivial on a marginal
+link — same geometry limit as #98.
+
+**#99 aim A/B — the AU-uplink rule double-confirmed on this host's own
+units.** Ground uplink = c812: release-lateness mean 2261 µs (n=1373,
+max 27 ms, ZERO releases under 1 ms), driven by `ReadTsf` mean 1234 µs —
+the ±1000 µs window is structurally unreachable. Ground uplink = AU:
+`ReadTsf` mean 184 µs (max 441), lateness mean 1462 µs with a healthy
+sub-50 µs population (102) and tail bounded at 7.4 ms. Matches the
+2026-08-07 Jaguar1-vs-Jaguar3 finding almost exactly (2.2 ms class).
+
+**#95/#100 scout on-air — Pass 161 machinery verified; out-ranking is
+geometry-limited; craft-home non-inflation CONFIRMED.** Leg 1 (CU flood
+400 pps on 5785, net_id 1 = undecodable): at 30 cm the flood leaks FA
+into EVERY bin (util 833–890 band-wide) and the ranking correctly refuses
+with `BROAD_DEGRADATION` — the swamped near-field genuinely is not
+channel-attributable. The discriminator that survives: **burstiness** —
+5785 reads q90−q50 = 72 vs ≤5 on every other bin; the second axis sees
+the interferer when the first saturates. Leg 2 (decodable net-0 craft on
+5805 at 120 pps): 5805 `wifi_util` 165 with the **lowest** interference
+index of all bins (363 vs 620–715) — decodable home traffic lands in the
+wifi axis and does NOT inflate the FA index. #100 mechanics on air:
+rounds folded (3–4), domain = the scout's EFUSE MAC, rejects gauges all
+zero, confidence seeded correctly. **Open:** true out-ranking (loaded bin
+worse than quiet bins from the same ear) needs physical separation.
+
+**Pass 162 RX-only bring-up (B2 follow-up) — PASS on hardware.** CU
+brought up RX-only (full Jaguar3 init + IQK), EFUSE MAC read, 8 s stats
+with `tx_submitted` pinned 0 (heartbeat guard live), then ingested 3600
+frames as the T1 ear — the success-path contract holds. Cosmetic: boot
+restore prints `uplink: artifact STALE (stored mac/..., live udp)` on an
+uplink-free node — "no uplink" would read better; harmless.
+
+**Defect found and fixed by the campaign** (commit in this branch):
+RadioAir teardown use-after-free — `~Impl` closed the libusb handle
+before the devourer device destructor ran its `rtw_hal_deinit` power-down
+writes; ASan flagged it on every radio teardown. `dev.reset()` now
+precedes `libusb_close`.
+
 ## 2026-08-07 — first frame-free occupancy sweep: the two axes are demonstrably independent on ambient air
 
 **Setup.** x86 devourer ground (8812AU scout), Pass 155 build, 7-channel
