@@ -30,7 +30,8 @@
 namespace wblink {
 
 struct RadioAirCfg {
-    std::vector<AdapterCfg> adapters;  // exactly one Role::kTx among them
+    std::vector<AdapterCfg> adapters;  // at most one Role::kTx among them;
+                                       // zero only with allow_rx_only
     uint8_t stamp_net_id = 0;          // §3.0 SA net_id (TX always stamps)
     std::optional<uint8_t> filter_net_id;  // RX enforces only when configured
     uint16_t originator = 0;           // stamped in SA; own frames dropped
@@ -58,6 +59,11 @@ struct RadioAirCfg {
     // §14.2 authored transport-efficiency calibration (1..1000, 0 = off).
     // Per transport: the monitor rig's 600 does not carry over to devourer.
     uint16_t airtime_efficiency_permille = 0;
+    // §3.11 (Pass 162) RX-only bring-up: permit zero role:"tx" adapters.
+    // Derived from the archetype (cache-no-streams, §2 spectator), never a
+    // config key. With no TX, every TX-die knob above (ack_responder,
+    // unicast_returns, ldpc, stbc) refuses create — fail closed.
+    bool allow_rx_only = false;
 };
 
 class RadioAir : public AirIface {
@@ -123,7 +129,8 @@ class RadioAir : public AirIface {
     void set_stamp_net_id(uint8_t net_id) override;
     void set_filter_net_id(std::optional<uint8_t> net_id) override;
     // §15.5a scout: the uplink adapter the sweep roams, resolved from the
-    // role:"tx" adapter create() already requires.
+    // role:"tx" adapter. Meaningful only under has_tx(); an RX-only node
+    // reads 0, matching kernel-monitor (§3.11 Pass 162).
     size_t tx_index() const override;
     // §11.6 Pass 80 RX-liveness recovery: stop the RX loop, join it, re-run
     // the write-side bring-up at the target channel, restart the loop. Not a
@@ -152,10 +159,9 @@ class RadioAir : public AirIface {
     // curve resolve to re-apply on top. Differs from kernel-monitor (which
     // hands power back to the driver default) — the spec documents both.
     bool set_power_auto(size_t adapter) override;
-    // create() requires exactly one role:"tx" adapter, so a constructed
-    // RadioAir always has an uplink. (An RX-only devourer node is reachable by
-    // enumerating and declining to inject — that is a config shape this
-    // backend does not build today, not a hardware limit.)
+    // §3.11 (Pass 162): truthful. False on the RX-only bring-up
+    // (allow_rx_only, zero role:"tx"), where inject*/set_tx_mode report
+    // not-sent/no-op and the §15.3 TX counters stay 0.
     bool has_tx() const override;
     // §9.3a tier. Asserted, not probed — there is no netdev gate on raw MPDU
     // injection, and the two bounds devourer does have (no TX cap; the 16 KiB

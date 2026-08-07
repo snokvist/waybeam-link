@@ -129,6 +129,7 @@ struct RadioAir::Impl {
     Logger_t logger;
     std::vector<std::unique_ptr<Adapter>> adapters;
     size_t tx_idx = 0;
+    bool has_tx = false;  // §3.11 Pass 162: false on the RX-only bring-up
     uint16_t seq = 0;
     // §15.5a runtime net_id roles. The stamp is TX-side and main-thread only
     // (the inject* paths read cfg.stamp_net_id directly). The filter is read
@@ -446,11 +447,28 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     for (const auto& a : cfg.adapters) {
         n_tx += (a.role == Role::kTx) ? 1 : 0;
     }
-    if (n_tx != 1) {
+    // §3.11 (Pass 162): at most one designated uplink (§6.4); zero only for
+    // the uplink-free archetypes the caller vouches for via allow_rx_only.
+    if (n_tx > 1 || (n_tx == 0 && !cfg.allow_rx_only)) {
         return Result<RadioAir>::fail(
             "radio: exactly one adapter must have role \"tx\" (the "
             "designated uplink / craft radio), got " +
             std::to_string(n_tx));
+    }
+    if (n_tx == 0) {
+        // Fail closed (Pass 156/157 posture): each of these names a TX-die
+        // property; on a node with no TX die it would run silently inert.
+        const char* knob = cfg.ack_responder     ? "air.ack_responder"
+                           : cfg.unicast_returns ? "policy.return.unicast"
+                           : cfg.ldpc            ? "air.ldpc"
+                           : cfg.stbc            ? "air.stbc"
+                                                 : nullptr;
+        if (knob != nullptr) {
+            return Result<RadioAir>::fail(
+                std::string("radio: ") + knob +
+                " names a TX-die property, but no adapter has role \"tx\" "
+                "(§3.11 Pass 162 — RX-only bring-up fails closed)");
+        }
     }
 
     RadioAir air;
@@ -461,6 +479,7 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                                       std::strerror(errno));
     }
     im.cfg = cfg;
+    im.has_tx = n_tx == 1;  // §3.11 Pass 162; roles never change post-create
     im.filter_net_id.store(cfg.filter_net_id
                                ? static_cast<int16_t>(*cfg.filter_net_id)
                                : static_cast<int16_t>(-1),
@@ -830,6 +849,7 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
 
 size_t RadioAir::inject(const uint8_t* frame, size_t len) {
     Impl& im = *impl_;
+    if (!im.has_tx) return 0;  // §3.11 Pass 162: not-sent, never adapter 0
     Impl::Adapter& tx = *im.adapters[im.tx_idx];
     im.tx_buf.resize(kDot11TxPrefixLen + len);
     dot11_tx_prefix(im.tx_buf.data(), im.rate, im.cfg.stamp_net_id,
@@ -846,6 +866,7 @@ size_t RadioAir::inject(const uint8_t* frame, size_t len) {
 
 size_t RadioAir::inject_resend(const uint8_t* frame, size_t len) {
     Impl& im = *impl_;
+    if (!im.has_tx) return 0;  // §3.11 Pass 162
     Impl::Adapter& tx = *im.adapters[im.tx_idx];
     im.tx_buf.resize(kDot11TxUrgentPrefixLen + len);
     dot11_tx_prefix_urgent(im.tx_buf.data(), im.rate, im.cfg.stamp_net_id,
@@ -954,6 +975,7 @@ void RadioAir::set_tx_mode(uint8_t mcs, bool sgi) {
     // malformed-prefix degradation keeps "every frame airs the same coding".
     m.ldpc = impl_->rate.ldpc;
     m.stbc = impl_->rate.stbc != 0;
+    if (!impl_->has_tx) return;  // §3.11 Pass 162: no TX die to commit to
     impl_->adapters[impl_->tx_idx]->dev->SetTxMode(m);
 }
 
@@ -1142,11 +1164,13 @@ void RadioAir::set_filter_net_id(std::optional<uint8_t> net_id) {
 }
 
 size_t RadioAir::tx_index() const {
-    return impl_->tx_idx;  // create() resolves it from role:"tx"
+    // create() resolves it from role:"tx"; 0 on an RX-only node (meaningful
+    // only under has_tx(), matching kernel-monitor — §3.11 Pass 162).
+    return impl_->tx_idx;
 }
 
 bool RadioAir::has_tx() const {
-    return true;  // create() requires exactly one role:"tx" adapter
+    return impl_->has_tx;  // §3.11 Pass 162: truthful on both RF backends
 }
 
 uint16_t RadioAir::mtu_supported() const {
@@ -1182,6 +1206,9 @@ std::optional<uint32_t> RadioAir::estimate_airtime_us(
     // here rather than treated as an unmet request.
     (void)include_pending;
     const Impl& im = *impl_;
+    if (!im.has_tx) {
+        return std::nullopt;  // §3.11 Pass 162: nothing airs (MonAir parity)
+    }
     if (im.cfg.airtime_efficiency_permille == 0) {
         return std::nullopt;  // uncalibrated reads unavailable, never optimistic
     }
@@ -1231,6 +1258,11 @@ std::optional<AirIface::AirSense> RadioAir::rx_sense(size_t adapter) {
 
 void RadioAir::tx_report_counters(uint64_t& submitted,
                                   uint64_t& reports) const {
+    if (!impl_->has_tx) {  // §3.11 Pass 162: both 0 — the §9.10 watchdog
+        submitted = 0;     // sees no submits and stays disarmed.
+        reports = 0;
+        return;
+    }
     submitted = impl_->adapters[impl_->tx_idx]->tx_submitted;
     reports = impl_->tx_reports.load(std::memory_order_relaxed);
 }
