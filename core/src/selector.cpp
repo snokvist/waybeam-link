@@ -550,6 +550,7 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
 
     const bool demote_ok =
         now_ms - last_demote_ms_ >= policy_.down_cooldown_ms;
+    bool blocked_saturated = false;  // §9.4 Pass 160, counted once per tick
 
     // Rule 1 — acute loss: one confidence-qualified raw report moves
     // directly to the resolved safe floor. The event belongs to the rung on
@@ -598,7 +599,7 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
         // §9.4 Pass 160: a fresh Saturated verdict suppresses EVERY climb —
         // gating only rule 6 would reroute the saturation flap through here.
         if (saturated_fresh(now_ms)) {
-            ++promote_blocked_saturated_;
+            blocked_saturated = true;
         } else {
             last_demote_ms_ = now_ms;  // reuse the cooldown as the climb pacer
             start_promote(rung_ + 1, now_ms, a,
@@ -629,14 +630,19 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
             // §9.4 Pass 160 saturation gate: strong RSSI is exactly what a
             // saturating front end shows — the one case margin cannot see.
             if (saturated_fresh(now_ms)) {
-                ++promote_blocked_saturated_;
+                blocked_saturated = true;
             } else {
                 start_promote(next, now_ms, a, SelectorReason::kPromote);
                 return;
             }
         }
     }
-    // Rule 7 — hold.
+    // Rule 7 — hold. One suppression count per tick however many climb
+    // rules the fresh-Saturated verdict blocked (a gauge of blocked TIME,
+    // not of rules).
+    if (blocked_saturated) {
+        ++promote_blocked_saturated_;
+    }
     state_ = flap_frozen(now_ms) ? "FREEZE" : "HOLD";
 }
 

@@ -2324,6 +2324,17 @@ struct TxCore {
             }
             const uint32_t ls = report_gate_.latched_session();
             if (ls != 0 && ls != v->prefix.session_id) return false;
+            // The monotone gate is SCOPED to the sender identity — a ground
+            // reboot restarts its epoch counter near 1, and an unscoped
+            // high-water mark would drop the rebooted ground's verdicts for
+            // thousands of epochs (mirrors on_report's per-identity epoch
+            // domain, selector.cpp).
+            const std::pair<uint16_t, uint32_t> vid{v->prefix.originator,
+                                                    v->prefix.session_id};
+            if (!verdict_epoch_src_ || *verdict_epoch_src_ != vid) {
+                verdict_epoch_src_ = vid;
+                verdict_epoch_seen_ = 0;
+            }
             if (verdict_epoch_seen_ != 0 &&
                 v->report_epoch < verdict_epoch_seen_) {
                 return false;
@@ -3098,8 +3109,10 @@ struct TxCore {
         // suppression count. verdict 0 with age 0 = none this session.
         snap.link.verdict = selector_.verdict();
         snap.link.verdict_age_ms =
-            verdict_rx_ms_ == 0 ? 0
-                                : static_cast<uint32_t>(now - verdict_rx_ms_);
+            verdict_rx_ms_ == 0
+                ? 0
+                : static_cast<uint32_t>(std::min<uint64_t>(
+                      now - verdict_rx_ms_, 0xFFFFFFFFull));
         snap.link.promote_blocked_saturated =
             selector_.promote_blocked_saturated();
     }
@@ -3433,6 +3446,8 @@ struct TxCore {
     ReportGate feedback_gate_;             // §3.10 Pass 55
     ReportGate report_gate_;               // §3.5 Pass 41
     uint32_t verdict_epoch_seen_ = 0;      // §3.16 Pass 159 monotone gate
+    std::optional<std::pair<uint16_t, uint32_t>>
+        verdict_epoch_src_;                // ...scoped to (orig, session)
     uint64_t verdict_rx_ms_ = 0;           // last accepted verdict (§15.3)
     uint64_t frame_cadence_us_ = 0; // windowed ingress cadence estimate
     uint64_t cadence_start_ms_ = 0;
@@ -3804,7 +3819,12 @@ struct RxCore {
                 v.prefix.session_id = session_;
                 v.target_originator = r.target_originator;
                 v.target_session = r.target_session;
-                v.report_epoch = r.report_epoch;
+                // Reporter::build leaves r.report_epoch 0 — the real epoch
+                // is stamped into the FRAME at injection. The verdict wants
+                // the sender's current counter (monotone, ties it to the
+                // report stream) WITHOUT committing one: a burned epoch is
+                // phantom loss in the §10.7 seek denominator.
+                v.report_epoch = next_report_epoch();
                 v.verdict = link_verdict_now;
                 uint8_t vf[kLinkVerdictSize];
                 if (encode_link_verdict(v, vf, sizeof(vf)) > 0) {

@@ -354,7 +354,7 @@ size_t encode_calib_probe(const CalibProbe& pkt, uint16_t pad_to, uint8_t* out,
                           size_t cap);
 size_t encode_calib_tally(const CalibTally& pkt, uint8_t* out, size_t cap);
 // §3.16 (Pass 159) LINK_VERDICT: fixed 23 bytes, addressed (destination
-// must be non-zero — the encoder does not enforce it, the decoder does).
+// must be non-zero — enforced by encoder and decoder both).
 size_t encode_link_verdict(const LinkVerdictPkt& pkt, uint8_t* out,
                            size_t cap);
 size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap);
