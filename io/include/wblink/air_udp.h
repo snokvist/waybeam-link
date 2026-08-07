@@ -121,6 +121,8 @@ class UdpAir : public AirIface {
     bool is_rf() const override { return false; }
     // No hardware, no per-unit identity (§10.6 Pass 154).
     std::string adapter_mac(size_t) const override { return {}; }
+    // No RF, no frame-free sensor (§15.5a Pass 155).
+    std::optional<AirSense> rx_sense(size_t) override { return std::nullopt; }
 
   private:
     std::vector<UdpEgress> targets_;

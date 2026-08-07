@@ -172,6 +172,26 @@ class AirIface {
     // (ruling #120) and its identity stays the §10.6 monitor tiers.
     virtual std::string adapter_mac(size_t adapter) const = 0;
 
+    // §15.5a (Pass 155): one adapter's frame-free channel-energy DELTA since
+    // the previous read (delta-on-read — a throwaway call is the §15.5a
+    // discard barrier). Backend-agnostic mirror of the radio backend's
+    // sensor; no devourer types cross this boundary. nullopt = this backend
+    // has no frame-free sensor (udp bench; kernel-monitor is frozen, #120)
+    // — §15.5a occupancy then falls back structurally to decoded-frame
+    // accounting. Main-thread only (control-plane register I/O).
+    struct AirSense {
+        bool fa_valid = false;
+        uint32_t fa_ofdm = 0;   // false alarms: non-decodable energy events
+        uint32_t cca_ofdm = 0;  // channel-busy detections (incl. decodes)
+        bool igi_valid = false;
+        int igi = 0;            // DIG initial-gain index (floor proxy)
+        bool nf_valid = false;
+        double nf_dbm = 0.0;    // passive floor: mean rssi − snr over frames
+        bool abs_nf_valid = false;
+        int8_t abs_nf_dbm = 0;  // absolute idle floor (opt-in generations)
+    };
+    virtual std::optional<AirSense> rx_sense(size_t adapter) = 0;
+
     // §11.6 Pass 80 liveness baseline: accepted frames on one adapter. Only
     // this counter is on the contract — the full per-backend counters structs
     // differ by real fields (kernel_dropped/bpf_filtered vs evm/cfo/snr) and

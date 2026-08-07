@@ -100,6 +100,9 @@ class MonAir : public AirIface {
     // and keeps its own §10.6 identity tiers (calib_id/ifname) — it gains no
     // Pass 154 MAC leg.
     std::string adapter_mac(size_t) const override { return {}; }
+    // No frame-free sensor through nl80211 monitor RX; §15.5a occupancy
+    // falls back structurally (util == wifi_util) — frozen, #120.
+    std::optional<AirSense> rx_sense(size_t) override { return std::nullopt; }
 
     // --- control plane (main thread only) --------------------------------
     // Committed operating point → stamped into each frame's radiotap MCS.

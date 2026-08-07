@@ -164,6 +164,11 @@ class RadioAir : public AirIface {
     // (GetPermanentMacAddress), lowercase "aa:bb:cc:dd:ee:ff"; empty = the
     // unit reports no identity (callers fail closed — D3).
     std::string adapter_mac(size_t adapter) const override;
+    // §15.5a (Pass 155): devourer GetRxQuality — it SUBSUMES GetRxEnergy
+    // (drains the FA/CCA delta and the frame-quality window internally;
+    // devourer's contract forbids polling both on one cadence). A USB
+    // glitch folds into nullopt: a sweep must degrade, never crash.
+    std::optional<AirSense> rx_sense(size_t adapter) override;
 
     struct AdapterCounters {
         std::string name;
