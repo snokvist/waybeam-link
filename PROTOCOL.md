@@ -2491,14 +2491,22 @@ wall exists anywhere" did not measure the thing it exists to measure. Per
 the volatility exception the previous last-good artifact is left untouched.
 
 **Offset space is exempt (Pass 153, operator-ruled 2026-08-07).** On a
-relative backend (§10.5) the sweep ceiling is offset **0** — the calibrated
-boot-safe placement itself, not a PA limit — so "flat at ceiling" means the
-whole allowed window below the reference is clean and the reference stands.
-That is the expected close-range reading, not an unmeasured extrapolation:
-the run **completes and persists** the ceiling placement with its bracket
-honestly empty. Measured before the ruling: six consecutive
-`no_wall_found` refusals at 10 m hard-blocked the §10.7 sequencer on a
-ground whose window ([−24, 0] qdB) cannot contain a wall at that range.
+relative backend (§10.5) offset **0** is the calibrated efuse reference —
+a known-linear point, not a PA limit — and the window may extend to either
+side of it (`power_offset_max_qdb` is not bounded at 0: there is no
+evidence the reference is the per-unit usable maximum). A flat window is
+therefore the expected close-range reading, not an unmeasured
+extrapolation, and the run **completes and persists**. Placement follows
+one cap: **a run that booked no overload bracket places no higher than
+offset 0.** Exploring above the reference is what the window is for, but
+placing there requires a measured wall — above the reference sits the PA
+compression region a close-range flat field cannot see (per-unit,
+measured: −6 dB from reference gave 10× less loss on one 8822EU), so an
+unbracketed best above 0 is noise-selected, not evidence. A run whose
+sweep did book a bracket places below it as measured, wherever that falls.
+Measured before the ruling: six consecutive `no_wall_found` refusals at
+10 m hard-blocked the §10.7 sequencer on a ground whose window
+([−24, 0] qdB) cannot contain a wall at that range.
 
 A **non-monotone** placement curve is surfaced (§15.5) but **not** refused: the
 PA shape is a physical expectation, not a protocol invariant, and at close
