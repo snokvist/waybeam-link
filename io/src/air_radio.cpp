@@ -1106,6 +1106,32 @@ std::string RadioAir::adapter_mac(size_t adapter) const {
     return impl_->adapters[adapter]->mac;
 }
 
+std::optional<AirIface::AirSense> RadioAir::rx_sense(size_t adapter) {
+    Impl& im = *impl_;
+    if (adapter >= im.adapters.size() || !im.adapters[adapter]->dev) {
+        return std::nullopt;
+    }
+    devourer::RxQuality q;
+    try {
+        q = im.adapters[adapter]->dev->GetRxQuality();
+    } catch (const std::exception&) {
+        // Register I/O can throw on a USB glitch; a sweep degrades to the
+        // sensor-less fallback rather than taking the process down.
+        return std::nullopt;
+    }
+    AirSense s;
+    s.fa_valid = q.energy_valid;
+    s.fa_ofdm = q.fa_ofdm;
+    s.cca_ofdm = q.cca_ofdm;
+    s.igi_valid = q.igi_valid;
+    s.igi = q.igi;
+    s.nf_valid = q.nf_valid;
+    s.nf_dbm = q.noise_floor_dbm;
+    s.abs_nf_valid = q.abs_nf_valid;
+    s.abs_nf_dbm = q.abs_noise_floor_dbm;
+    return s;
+}
+
 void RadioAir::tx_report_counters(uint64_t& submitted,
                                   uint64_t& reports) const {
     submitted = impl_->adapters[impl_->tx_idx]->tx_submitted;

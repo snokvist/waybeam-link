@@ -59,6 +59,7 @@
 #include "wblink/ring.h"
 #include "wblink/rx.h"
 #include "wblink/scheduler.h"
+#include "wblink/scout_sense.h"
 #include "wblink/selector.h"
 #include "wblink/calib_store.h"
 #include "wblink/calibrate.h"
@@ -637,6 +638,12 @@ class ScoutEngine {
         std::function<void(uint16_t chan_mhz, uint8_t bw)> retune_all;  // all ears
         std::function<void(std::optional<uint8_t> net_id)> set_filter;
         std::function<bool(uint16_t originator)> psk_known;
+        // §15.5a (Pass 155): frame-free channel sense of one adapter,
+        // delta-on-read (the throwaway barrier call and the dwell-end read
+        // are the same hook). Null/nullopt = sensor-less backend — the
+        // occupancy derivation falls back structurally.
+        std::function<std::optional<AirIface::AirSense>(size_t adapter)>
+            sense;
     };
     ScoutEngine(Hooks h, uint8_t bw, uint16_t rest_chan,
                 std::optional<uint8_t> rest_filter, size_t scout_adapter)
@@ -730,6 +737,20 @@ class ScoutEngine {
     // first resolved candidate.
     void tick(uint64_t now_ms) {
         if (phase_ != Phase::kScanning) return;
+        // §15.5a (Pass 155): settle elapsed → one throwaway sense read
+        // drains the FA/CCA deltas and the frame-quality window; the
+        // observe window for the interference denominator starts here.
+        // One attempt per dwell; a FAILED drain (USB glitch → nullopt)
+        // must NOT arm the observe window — the delta would span back to
+        // the last successful drain and read as a saturated interference
+        // score on a pristine channel. The dwell falls back sensor-less.
+        if (!barrier_done_ && now_ms >= barrier_at_ms_) {
+            barrier_done_ = true;
+            if (h_.sense && h_.sense(scout_adapter_)) {
+                barrier_drained_ = true;
+                observe_start_ms_ = now_ms;
+            }
+        }
         if (now_ms < dwell_deadline_ms_) {
             if (!extended_ || accum_.candidates.empty()) return;
         } else if (!extended_ && accum_.frames > 0 &&
@@ -763,7 +784,11 @@ class ScoutEngine {
                    ",\"occupancy\":{\"wifi_util_permille\":" +
                    std::to_string(o.wifi_util_permille) +
                    ",\"util_permille\":" + std::to_string(o.util_permille) +
-                   ",\"interference_util_permille\":null,\"noise_dbm\":" +
+                   ",\"interference_util_permille\":" +
+                   (o.have_interference
+                        ? std::to_string(o.interference_util_permille)
+                        : "null") +
+                   ",\"noise_dbm\":" +
                    (o.have_noise ? std::to_string(o.noise_dbm) : "null") +
                    ",\"bss_count\":" + std::to_string(o.bss_count) +
                    ",\"quality_permille\":" + std::to_string(o.quality_permille) +
@@ -815,24 +840,22 @@ class ScoutEngine {
         }
         return found;
     }
-    // Emptiest allowlisted channel by measured wifi_util (lowest wins), skipping
-    // `except` (the craft's current channel). 0 if no occupancy for any allowed
-    // channel (caller then falls back to an explicit target).
+    // Emptiest allowlisted channel (lowest wins), skipping `except` (the
+    // craft's current channel). §15.5a (Pass 155): ranks on `util_permille`
+    // — the interference-inclusive TOTAL — because ranking on decoded
+    // airtime alone scored a channel saturated by a non-decodable emitter
+    // as pristine. On a sensor-less backend util == wifi_util by
+    // construction, so the v1 behaviour is the structural fallback. 0 if
+    // no occupancy for any allowed channel (caller then falls back to an
+    // explicit target).
     uint16_t emptiest(const std::vector<uint16_t>& allowlist,
                       uint16_t except) const {
-        uint16_t best = 0;
-        uint32_t best_util = 1001;  // > any per-mille
-        for (const uint16_t ch : allowlist) {
-            if (ch == except) continue;
-            for (const auto& r : results_) {
-                if (r.chan != ch) continue;
-                if (r.occ.wifi_util_permille < best_util) {
-                    best_util = r.occ.wifi_util_permille;
-                    best = ch;
-                }
-            }
+        std::vector<ChannelUtil> measured;
+        measured.reserve(results_.size());
+        for (const auto& r : results_) {
+            measured.push_back(ChannelUtil{r.chan, r.occ.util_permille});
         }
-        return best;
+        return emptiest_channel(measured, allowlist, except);
     }
 
   private:
@@ -840,6 +863,10 @@ class ScoutEngine {
     struct Occupancy {
         uint16_t wifi_util_permille = 0;
         uint16_t util_permille = 0;
+        // §15.5a (Pass 155): frame-free interference index; invalid = JSON
+        // null (sensor-less backend / generation without the counter).
+        bool have_interference = false;
+        uint16_t interference_util_permille = 0;
         bool have_noise = false;
         int noise_dbm = 0;
         uint16_t bss_count = 0;
@@ -876,6 +903,13 @@ class ScoutEngine {
         entered_ms_ = now_ms;
         extended_ = false;
         dwell_deadline_ms_ = now_ms + dwell_ms_;
+        // §15.5a (Pass 155) dwell hygiene: the discard barrier fires after
+        // the settle, from tick() — the delta counters must not charge this
+        // bin with its own retune.
+        barrier_done_ = false;
+        barrier_drained_ = false;
+        barrier_at_ms_ = now_ms + kSenseSettleMs;
+        observe_start_ms_ = 0;
     }
     void finalize_current(uint64_t now_ms) {
         ChannelResult r;
@@ -891,11 +925,31 @@ class ScoutEngine {
                            1000u, accum_.airtime_us * 1000u / dwell_us))
                      : 0u;
         r.occ.wifi_util_permille = static_cast<uint16_t>(util);
-        r.occ.util_permille = static_cast<uint16_t>(util);  // v1: Wi-Fi only
         r.occ.bss_count = static_cast<uint16_t>(accum_.transmitters.size());
-        r.occ.availability_permille = static_cast<uint16_t>(1000u - util);
-        r.occ.quality_permille = r.occ.availability_permille;  // v1 proxy
-        if (accum_.frames > 0) {
+        // §15.5a (Pass 155): fold the frame-free sensor delta accumulated
+        // since the barrier. The observe window is barrier→now; a dwell too
+        // short for its barrier reads no sensor and falls back whole.
+        std::optional<AirIface::AirSense> sense;
+        if (h_.sense && barrier_drained_) {
+            sense = h_.sense(scout_adapter_);
+        }
+        const uint64_t observe_us =
+            (barrier_drained_ && now_ms > observe_start_ms_)
+                ? (now_ms - observe_start_ms_) * 1000u
+                : 0u;
+        const OccupancyDerived d = derive_occupancy(
+            sense, r.occ.wifi_util_permille, observe_us);
+        r.occ.util_permille = d.util_permille;
+        r.occ.have_interference = d.interference_valid;
+        r.occ.interference_util_permille = d.interference_util_permille;
+        r.occ.availability_permille =
+            static_cast<uint16_t>(1000u - r.occ.util_permille);
+        r.occ.quality_permille = r.occ.availability_permille;  // #100 owns more
+        if (d.noise_valid) {
+            r.occ.have_noise = true;
+            r.occ.noise_dbm = d.noise_dbm;
+        } else if (accum_.frames > 0) {
+            // Sensor-less fallback: the v1 min-RSSI-of-decoded-frames proxy.
             r.occ.have_noise = true;
             r.occ.noise_dbm = accum_.min_rssi;
         }
@@ -927,6 +981,13 @@ class ScoutEngine {
     static constexpr uint64_t kExtendMs = 1200;
     uint64_t entered_ms_ = 0;
     bool extended_ = false;
+    // §15.5a (Pass 155) discard-barrier state, reset per channel entry.
+    // done = the one attempt was made; drained = it actually returned a
+    // value, which is what arms the observe window and the finalize read.
+    bool barrier_done_ = false;
+    bool barrier_drained_ = false;
+    uint64_t barrier_at_ms_ = 0;
+    uint64_t observe_start_ms_ = 0;
     Accum accum_;
     std::vector<ChannelResult> results_;
 };
@@ -6256,6 +6317,9 @@ int run_rx(const Loaded& l) {
                 return !l.cfg.policy.csa.psk.empty() ||
                        discovery.token_for(orig).has_value();
             },
+            // §15.5a (Pass 155): frame-free sense of the scout adapter;
+            // nullopt on sensor-less backends.
+            [&](size_t a) { return air.value->iface()->rx_sense(a); },
         },
         op_bw_mhz, op_chan, l.cfg.node.net_id, scout_idx);
     // §15.5 REST control plane. RX/ground node owns the CSA trigger (replaces

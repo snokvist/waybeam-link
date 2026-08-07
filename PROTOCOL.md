@@ -5219,21 +5219,62 @@ supported (§15.2 `scout`).
   most frames** (the true channel is heard for the whole dwell; a leak is a handful
   of frames), so the claim retunes to the right channel regardless of scan order.
 - **Per-channel occupancy** is reported as a record whose field set is a superset
-  aligned with the Realtek "Advanced Channel Scanning" survey so a future
-  hardware backend is a field-fill, not a reshape. v1 fills only the
-  packet-derivable fields from monitor RX over the dwell; units are **per-mille**
-  and **dBm**:
+  aligned with the Realtek "Advanced Channel Scanning" survey. The hardware
+  field-fill that table reserved space for is **Pass 155**: on the radio
+  backend the reserved fields are real frame-free measurements from
+  devourer's energy sensors; on a backend with no such sensor
+  (kernel-monitor — frozen, issue #120 — and the udp bench) they stay
+  `null`/proxy exactly as v1 shipped them. Units are **per-mille** and
+  **dBm**:
 
-  | field | v1 source | later (hardware ACS) |
+  | field | source (radio backend, Pass 155) | sensor-less backend |
   |---|---|---|
-  | `wifi_util_permille` | decodable-frame airtime estimate | CLM Wi-Fi portion |
-  | `util_permille` | = `wifi_util` (Wi-Fi only in v1) | total incl. non-Wi-Fi |
-  | `interference_util_permille` | `null` (unmeasurable from packets) | CLM−Wi-Fi |
-  | `noise_dbm` | RSSI-floor proxy (idle/min `DBM_ANTSIGNAL`) | NHM true noise floor |
-  | `bss_count` | distinct BSSID/SA transmitters heard | ACS BSS count |
-  | `quality_permille` / `availability_permille` | derived from the above | ACS direct |
+  | `wifi_util_permille` | decodable-frame airtime estimate (unchanged) | same |
+  | `util_permille` | **total occupancy**: `min(1000, wifi_util + interference)` | = `wifi_util` |
+  | `interference_util_permille` | saturating index of **non-decodable energy**: `1000·r/(r+H)`, `r` = frame-free false-alarm delta per second over the observe window, `H` the half-rate seed (200 FA/s, Tier-2) | `null` |
+  | `noise_dbm` | the chip's **absolute idle floor** where the generation provides it, else the **passive floor** (mean `rssi − snr` over decoded frames), else the min-RSSI proxy | min-RSSI proxy (labeled: a proxy) |
+  | `bss_count` | distinct waybeam transmitters heard (unchanged) | same |
+  | `quality_permille` / `availability_permille` | `availability = 1000 − util_permille` (total); `quality` remains the availability proxy until the #100 scoring layer | same, over `util` |
 
-  The candidate craft's own traffic is excluded from its channel's counts.
+  Three deliberate boundaries on the new fields:
+
+  - `interference_util_permille` is an **index, not an absolute duty
+    cycle** — false-alarm counts have no per-event duration, and raw energy
+    units are only comparable **within one adapter**. The saturating form is
+    the one the vendored chanmig scorer proved on-air
+    (`fa_rate/(fa_rate+fa_half)`); cross-adapter comparison needs the #100
+    rank normalisation.
+  - The **NHM histogram is deliberately excluded** from these fields: its
+    absolute floor is generation-dependent (a quiet channel reads busy on
+    some parts), so it may inform the #100 scoring layer but never a
+    directly-reported occupancy number here.
+  - A counter the generation does not expose stays JSON `null`, never a
+    fake zero.
+
+  **Dwell hygiene (Pass 155).** The frame-free counters are delta-on-read,
+  so each dwell is: retune → settle (Tier-2 seed) → **discard barrier** (one
+  throwaway drain of the delta counters and the frame-quality window) →
+  observe → read at dwell end. Without the barrier a bin is charged with its
+  own retune and settle plus frames still in the USB pipeline from the
+  previous channel — the same leakage Pass 66's heard-most rule absorbs on
+  the discovery side. The interference denominator is the **observe window**
+  (barrier → read), not the full dwell; `wifi_util` keeps the full elapsed
+  dwell as its denominator (Pass 72).
+
+  **The ranking input moves with the fields (Pass 155).** `emptiest()` — the
+  quick-connect claim's channel choice — ranks on **`util_permille`**, the
+  interference-inclusive total. On a sensor-less backend `util_permille`
+  equals `wifi_util_permille` by construction, so the fallback to v1
+  behaviour is structural rather than a special case. Filling the fields
+  without moving the ranking would leave the defect intact: a channel
+  saturated by a non-decodable emitter would still rank pristine.
+
+  The survey counts **all decodable waybeam frames the scout adapter
+  hears**, including the currently-selected craft's — exclusion is per
+  *adapter* (the diversity ears parked on the resting channel), not per
+  craft. An earlier clause here claimed the candidate craft's own traffic
+  was excluded from its channel's counts; that never matched the shipped
+  accounting and is struck (Pass 155).
 - **Quick-connect / claim.** `scout/quickconnect` (or `mode:"quickconnect"` with a
   `target`) claims a craft: set `stamp`+`filter` net_id to the craft's, retune
   **all** link adapters onto the craft's current channel (not just the uplink — so

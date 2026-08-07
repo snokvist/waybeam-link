@@ -24,6 +24,40 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 155 — §15.5a occupancy: frame-free fields become real, ranking follows (2026-08-07)
+
+**Verdict.** Issue #95 implemented. The scout's occupancy was fed exclusively
+by decoded waybeam frames, so `emptiest()` ranked channels by how much of
+*our own* traffic they carried — a channel saturated by a non-decodable
+emitter scored pristine and maximally attractive. The reserved §15.5a fields
+become real frame-free measurements on the radio backend, and the ranking
+input moves to the interference-inclusive total (filling the fields alone
+would have left the defect intact).
+
+**Changed sections (§15.5a occupancy block).**
+- `interference_util_permille`: saturating index `1000·r/(r+H)` of the
+  frame-free false-alarm rate over the observe window (H = 200 FA/s Tier-2
+  seed — the form the vendored chanmig scorer proved on-air). An index
+  comparable within one adapter, not an absolute duty cycle. `null` on
+  sensor-less backends.
+- `noise_dbm`: absolute idle floor where the generation provides it, else
+  the passive `rssi − snr` floor, else the v1 min-RSSI proxy (labeled).
+- `util_permille`: total occupancy `min(1000, wifi_util + interference)`;
+  equals `wifi_util` on sensor-less backends by construction.
+- `emptiest()` ranks on `util_permille` — the structural fallback covers
+  kernel-monitor (frozen, #120) without a special case.
+- Dwell hygiene: retune → settle → discard barrier (throwaway delta drain)
+  → observe → read; interference denominator is the observe window.
+- NHM excluded from reported fields (generation-dependent floor); it may
+  inform the #100 scoring layer only. Nullable convention restated.
+- Struck the false clause that the candidate craft's own traffic is
+  excluded from its channel's counts — exclusion is per adapter (Pass 65),
+  and the accounting never excluded the craft.
+
+**Evidence.** Issue #95 (the blind-metric chain, symbol-cited); vendored
+chanmig `ChannelScore.cpp` `cell_occupancy` (fa_half model, NHM exclusion
+rationale); `docs/scout-design.md` §6 field reservation.
+
 ## Pass 154 — EFUSE-MAC adapter identity; calibration binds to the unit (2026-08-07)
 
 **Verdict.** Per-adapter calibration binds to the per-unit EFUSE MAC, not the

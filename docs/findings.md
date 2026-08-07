@@ -12,6 +12,31 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-07 — first frame-free occupancy sweep: the two axes are demonstrably independent on ambient air
+
+**Setup.** x86 devourer ground (8812AU scout), Pass 155 build, 7-channel
+allowlist sweep at 300 ms dwells, craft link stopped (zero waybeam traffic
+anywhere).
+
+**Measured.** `wifi_util_permille` 0 on all seven bins (correct — nothing
+decodable of ours on air) while `interference_util_permille` independently
+ranked them: 5180 = 638, 5220 = 590, 5825 = 468, 5805 = 311, 5745 = 249,
+5765 = 176, 5785 = 175. 5180/5220 are where this bench's household APs
+live. `noise_dbm` filled only on 5180 (−81, passive floor — the one bin
+with decodable foreign frames); null elsewhere, no fake zeros.
+
+**Means.** The pre-155 ranking would have scored all seven bins identically
+pristine (wifi_util 0 everywhere); the interference-inclusive ranking picks
+5785/5765 over the AP-occupied bins. Ambient "quiet" UNII-3 bins read
+~175–300 on the index — the fa-half seed (200 FA/s) puts the ambient FA
+floor mid-scale, which is fine for ranking (monotone within the adapter)
+but is a reminder the index is not a duty cycle.
+
+**Open.** The #95 operator bench gate (a *known controlled* interferer
+out-ranking quiet bins; craft video on its home channel not inflating its
+own bin) — needs a hand on the signal generator. Whether the fa-half seed
+wants re-derivation per §17 once #100's rank normalisation lands.
+
 ## 2026-08-07 — CU RF re-baseline after the #384 re-vendor (rfe_type 0→3): placements within flat-field noise, wall pattern unchanged
 
 **Setup.** Same rig as the entry below (x86 devourer ground: 8812AU TX
