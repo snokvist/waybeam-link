@@ -18,6 +18,7 @@
 
 #include "IRtlDevice.h"
 #include "RxPacket.h"
+#include "RxQuality.h"  // §15.3 Pass 158: the vendored fold conventions
 #include "SelectedChannel.h"
 #include "TxMode.h"
 #include "UsbOpen.h"
@@ -104,6 +105,9 @@ struct RadioAir::Impl {
         std::atomic<uint64_t> rx_ldpc{0};
         std::atomic<uint64_t> rx_stbc{0};
         bool ldpc_flag_ok = false;
+        // §15.3 Pass 158 quality window (internally locked; RX thread
+        // add()s, the stats emitter drains via rx_quality_window()).
+        devourer::RxQualityAccumulator quality;
         uint64_t tx_submitted = 0;  // main-thread only
         uint64_t tx_failed = 0;
         // Bench-only synthetic-drop PRNG (RX-thread only; xorshift32).
@@ -364,6 +368,16 @@ struct RadioAir::Impl {
         if (cfg.unicast_returns) {
             latch_sa(*d);
         }
+        // §15.3 Pass 158: fold path-A raw quality (the accumulator skips
+        // rssi_raw<=0 itself; EVM is presence-guarded, SNR is not — §15.3
+        // pins the asymmetry). The −128 EVM rail is a no-stream sentinel,
+        // not a measurement (RxPathActivityAccumulator filters it too) —
+        // one railed sample would drag the mean impossibly clean; 0 is the
+        // accumulator's own "no EVM" convention. Same acceptance point as
+        // rx_mcs — post-filter, post-synthetic-drop — so the window
+        // describes the frames the link actually delivered.
+        a.quality.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0],
+                      p.RxAtrib.evm[0] == -128 ? 0 : p.RxAtrib.evm[0]);
         // §15.3 Pass 157: received coding as the die reported it. On
         // ldpc_flag_ok=false dies the bits are never set, so the counters
         // read 0 there — the flag, exported with them, says so.
@@ -1223,12 +1237,39 @@ RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {
     c.rx_ldpc = a.rx_ldpc.load(std::memory_order_relaxed);
     c.rx_stbc = a.rx_stbc.load(std::memory_order_relaxed);
     c.ldpc_flag_ok = a.ldpc_flag_ok;
+    // (Pass 158 quality lives in rx_quality_window(), not here — its read
+    // drains the window, and counters() must stay non-destructive.)
     if (a.tx) {  // reports only exist for the injecting adapter's frames
         c.tx_reports = impl_->tx_reports.load(std::memory_order_relaxed);
         c.tx_report_fails =
             impl_->tx_report_fails.load(std::memory_order_relaxed);
     }
     return c;
+}
+
+RadioAir::RxQualityWindow RadioAir::rx_quality_window(size_t adapter) {
+    RxQualityWindow w;
+    if (adapter >= impl_->adapters.size()) return w;
+    // snapshot() drains and resets the vendored accumulator — the delta
+    // semantics §15.3 documents. Unit folds per LinkHealth.h: PWDB dBm ≈
+    // raw − 110; SNR/EVM signed half-dB (dB = raw/2, EVM lower = cleaner).
+    const devourer::RxQualitySnapshot s =
+        impl_->adapters[adapter]->quality.snapshot();
+    w.frames = s.frames;
+    if (s.frames > 0) {
+        w.rssi_peak_dbm = s.rssi_max_raw - 110;
+        w.rssi_mean_dbm = s.rssi_mean_raw - 110;
+        w.snr_db = s.snr_mean_raw / 2;
+        if (s.evm_valid) {
+            w.evm_db = s.evm_mean_raw / 2;
+            w.evm_valid = true;
+        }
+        if (s.nf_valid) {
+            w.noise_dbm = static_cast<int32_t>(s.nf_mean_dbm);
+            w.noise_valid = true;
+        }
+    }
+    return w;
 }
 
 }  // namespace wblink

@@ -213,6 +213,24 @@ class RadioAir : public AirIface {
         return counters(adapter).rx_frames;
     }
 
+    // §15.3 (Pass 158) per-adapter quality window over accepted frames,
+    // folded with devourer's RxQuality conventions (path-A raw; rssi<=0
+    // skipped; SNR/EVM only when present; PEAK RSSI — saturation trashes a
+    // fraction of frames to low apparent power, so a mean inverts the
+    // signal). Reading DRAINS the window (delta semantics): the §15.3
+    // stats emitter is the single reader.
+    struct RxQualityWindow {
+        uint32_t frames = 0;      // quality samples folded (0 = empty)
+        int32_t rssi_peak_dbm = 0;
+        int32_t rssi_mean_dbm = 0;
+        int32_t snr_db = 0;
+        int32_t evm_db = 0;       // lower (more negative) = cleaner
+        bool evm_valid = false;   // false = no frame carried EVM, not "0"
+        int32_t noise_dbm = 0;    // passive floor: rssi_dbm - snr_db
+        bool noise_valid = false;
+    };
+    RxQualityWindow rx_quality_window(size_t adapter);
+
     // TX adapter's cumulative (tx_submitted, tx_reports) for the §9.10
     // wedge watchdog — cheap per-iteration accessor, no string copies.
     void tx_report_counters(uint64_t& submitted, uint64_t& reports) const;

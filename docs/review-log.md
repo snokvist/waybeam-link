@@ -24,6 +24,39 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 158 — §15.3 quality window: harvest the SNR/EVM the silicon already hands us (2026-08-07)
+
+**Verdict.** Issue #98 stage 1 (observation only — stages 2/3, the §3.5
+wire carriage and §9.4 saturation gate, are their own future rulings; the
+sensor is shared with issue #125's calibration observability leg).
+`RxAtrib` delivers per-frame per-chain RSSI/SNR/EVM and `on_packet` kept
+RSSI alone, discarding the two scalars that distinguish "strong but dirty"
+(front-end saturation — EVM reverses while RSSI climbs and SNR sits flat)
+from "weak and dirty". Harvest them per adapter with devourer's own
+folding (`RxQualityAccumulator` reused whole, not reimplemented): path-A
+raw, `rssi_raw <= 0` skipped, EVM folded only when present (and the −128
+no-stream rail discarded at the feed — one railed sample per window would
+read *impossibly clean* and mask the very knee this exposes), passive
+noise floor `(rssi_raw − 110) − snr_raw/2`, window PEAK for RSSI. Known
+accumulator asymmetry, pinned in §15.3: SNR is folded over all
+RSSI-carrying frames (no presence guard), so `snr: 0` is ambiguous. This
+deliberately does NOT touch `GetRxQuality()` — the scout owns that
+device-side window and its FA/CCA delta (Pass 155 exclusivity); the
+per-frame fold is our own accumulator over our own delivered frames, so
+there is no shared-delta owner question.
+
+**Changed sections.** §15.3: radio-backend `rssi_best`/`rssi_mean`/
+`snr`/`noise` become real windowed values (peak / mean / dB / passive
+floor; previously last-frame RSSI and constant 0); new `evm` +
+`evm_valid` fields (mean dB, lower better; valid=false means no data, not
+perfect coding); delta-window semantics, stats emitter is the single
+reader; empty-window and non-radio fallbacks pinned.
+
+**Evidence.** Issue #98 (devourer saturation-knee sweep: RSSI ↑, SNR flat
+18 dB, EVM −28 → −13 dB); `third_party/devourer/src/RxQuality.h`
+(fold conventions), `LinkHealth.h:18-20` (units: PWDB dBm ≈ raw−110,
+SNR/EVM signed half-dB); `RxPacket.h:57-66` (per-chain arrays).
+
 ## Pass 157 — TX coding becomes commandable: air.ldpc / air.stbc, RX-proved (2026-08-07)
 
 **Verdict.** Issue #97. The radiotap MCS known mask has always claimed FEC
