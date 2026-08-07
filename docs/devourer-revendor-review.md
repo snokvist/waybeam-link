@@ -18,6 +18,8 @@ driver so the next person does not re-derive it.
 |---|---|---|---|
 | `4f20e27` (#14) | 2026-07-11 | `3025e2d` + fix `a353a9c` | The 8822E/8812EU MCS4+ TX fix (see below) |
 | `73d83a4` | 2026-07-22 | **`7a6541f`** | Large jump: whole new subsystems (channel migration, FHSS/keyed hopping, FW channel-switch offload, HE/Wi-Fi-6 Kestrel, scheduled MAC, time distribution) |
+| (#111) | 2026-08-02 | `800c3c8` | #378/#379 carrier-sense defaults, #380 `DEVOURER_ACK_TIMEOUT_US`, #377 MCS retry ladder |
+| Pass 154 PR | 2026-08-07 | **`5a5dd62`** | **#383** `IRtlDevice::GetPermanentMacAddress` (per-unit EFUSE MAC — the §10.6 Pass 154 identity primitive); **#384** Jaguar3 EFUSE-walk append-order fix — **flips 8822C `rfe_type` 0→3**, a 7-RF-register delta (radioa `0x52/0x63/0xb3/0xb6/0xdd`, radiob `0x52/0x63`; BB/AGC/cal-init untouched, measured offline via `scratchpad/rfe_delta.cpp`) so CU RF now matches the vendor kernel driver — CU bench re-baselined, `docs/findings.md` 2026-08-07; **#386** wires the MAC accessor on Jaguar2/Kestrel too (compiled out of our builds — fleet is Jaguar1 + Jaguar3; noted because it moots carrying a D3 `0x107` fallback ourselves) |
 
 The MCS4+ fix has been in-tree since #14. The `7a6541f` bump is what pulled in the
 broad feature surface this document surveys.
