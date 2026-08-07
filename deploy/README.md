@@ -9,6 +9,13 @@ Current four-node kernel-monitor verification topology:
 | RK3566 ground | `192.168.2.199` | RTL8812CU **passive spectator** (Pass 74) — RX only, no uplink; frame-SHM to MPP/DRM | `waybeam-ground-rk.init`, `ground-192.168.2.199.json` |
 | Cache | `192.168.2.247` | MT7921 + RTL8812AU receive-only | `waybeam-cache.service`, `cache-192.168.2.247.json` |
 
+**Ground uplink adapter choice (issue #99, findings.md 2026-08-07):** where
+a ground rig has both generations, its `role:"tx"` adapter should be the
+**Jaguar1 (8812AU)** — submit→air p99 is 101 µs there vs 2.2 ms on Jaguar3
+(8822/8812CU) against the §7.2 ±1000 µs return-window budget, and a
+Jaguar3 uplink's deferral tail is *correlated* return loss inside a window.
+Jaguar3 units stay diversity ears.
+
 The cache belongs to the x86 ground receiver (originator 9). That receiver owns
 vehicle discovery/pairing and sends the committed vehicle originator, channel,
 bandwidth, and net ID to the cache over Ethernet. The cache accepts assignments

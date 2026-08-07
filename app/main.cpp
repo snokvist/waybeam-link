@@ -1357,6 +1357,48 @@ QuietGapPolicy quietgap_policy(const Config& cfg) {
     return p;
 }
 
+// §7.2 aim instrumentation (issue #99 stage 1, Tier-2 bench knob — no spec
+// surface, findings.md 2026-08-07): WBLINK_AIM_LOG=1 histograms (a) release
+// lateness past the computed return deadline and (b) the ReadTsf() control
+// transfer cost — the §7.2 error term with no measured number — dumped to
+// stderr every 30 s. Distributions, not means: the tail is the contract.
+struct AimHist {
+    uint64_t n = 0, sum_us = 0, max_us = 0;
+    uint64_t b[8] = {};  // <50 <100 <200 <500 <1000 <2000 <5000 >=5000
+    void add(uint64_t us) {
+        static constexpr uint64_t edge[7] = {50, 100, 200, 500,
+                                             1000, 2000, 5000};
+        ++n;
+        sum_us += us;
+        if (us > max_us) max_us = us;
+        size_t i = 0;
+        while (i < 7 && us >= edge[i]) ++i;
+        ++b[i];
+    }
+    void dump(const char* name) const {
+        if (n == 0) return;
+        std::fprintf(stderr,
+                     "aim: %s n=%llu mean=%lluus max=%lluus "
+                     "buckets[<50,<100,<200,<500,<1k,<2k,<5k,>=5k]="
+                     "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                     name, (unsigned long long)n,
+                     (unsigned long long)(sum_us / n),
+                     (unsigned long long)max_us, (unsigned long long)b[0],
+                     (unsigned long long)b[1], (unsigned long long)b[2],
+                     (unsigned long long)b[3], (unsigned long long)b[4],
+                     (unsigned long long)b[5], (unsigned long long)b[6],
+                     (unsigned long long)b[7]);
+    }
+};
+inline bool aim_log_enabled() {
+    static const bool on = std::getenv("WBLINK_AIM_LOG") != nullptr;
+    return on;
+}
+// rx-role only: the 30 s dump lives in the run_rx loop — a tx node with
+// the flag set collects and never prints (findings.md says so).
+static AimHist g_aim_release;   // release lateness past the return deadline
+static AimHist g_aim_read_tsf;  // ReadTsf() control-transfer cost
+
 // ---- air backend selection (udp dev backend | devourer radio, §3.0) --------
 
 struct AirBackend {
@@ -1614,7 +1656,18 @@ struct AirBackend {
         (void)iface()->set_power_auto(adapter);
     }
     std::optional<uint64_t> read_tsf(uint8_t adapter) {
-        return iface()->read_tsf(adapter);
+        if (!aim_log_enabled()) {
+            return iface()->read_tsf(adapter);
+        }
+        // Issue #99: the §7.2 term with no number — time the control
+        // transfer (bench knob; the steady clock is never on a wire).
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto r = iface()->read_tsf(adapter);
+        g_aim_read_tsf.add(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t0)
+                .count()));
+        return r;
     }
     // §11.6 intra-process atomic switch: every local adapter retunes at
     // T_switch (a straggler follows because a sibling heard the CSA). On the
@@ -7181,6 +7234,14 @@ int run_rx(const Loaded& l) {
         const uint64_t now = now_ms();
         now_us_it = now_us();
         deliver_now = now;  // the deliver lambda's clock for reassembler pushes
+        if (aim_log_enabled()) {
+            static uint64_t aim_next_dump_ms = 0;
+            if (now >= aim_next_dump_ms) {
+                aim_next_dump_ms = now + 30000;
+                g_aim_release.dump("release_lateness");
+                g_aim_read_tsf.dump("read_tsf_cost");
+            }
+        }
         // Fire the coalesced return window. Reports prefer an EOB midpoint and
         // degrade to opportunistic return only after the bounded fallback.
         const bool have_returns =
@@ -7205,6 +7266,11 @@ int run_rx(const Loaded& l) {
             }
             csa_copy_held.reset();
             csa_copy_fallback_us.reset();
+        }
+        if (return_deadline_due && aim_log_enabled()) {
+            // Issue #99: how late past the computed §7.2 deadline the host
+            // loop actually released the window.
+            g_aim_release.add(now_us_it - *ret_at_us);
         }
         if (return_deadline_due || report_fallback_due) {
             for (const auto& [f, target] : urgent_ret_held) {
