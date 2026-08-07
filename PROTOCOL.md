@@ -862,11 +862,19 @@ first-latcher/relatch and the §11.4 CSA transfer (Pass 115).
 
 `state_flags` active and latched describe the effective `lockout_profile`;
 latched implies active. Masks are ladder-index diagnostics, not profile IDs.
-An RX accepts the summary only from the currently latched RTP
-`(originator,session)` and only when `table_version` matches. It expires the
-summary after **1.5 s** without a refresh so a stopped/rebooted craft cannot
-leave a stale warning on the OSD. Mixed-version receivers safely ignore the
-unknown packet type and continue decoding DATA.
+An RX accepts the summary from the RTP `(originator,session)` tuple it is
+currently consuming, and only when `table_version` matches. **The acceptance
+tuple latches (Pass 153):** once a summary from a live-consumed tuple has
+been accepted, the same tuple stays acceptable across that stream's §2 idle
+teardown, until a different tuple's live stream replaces the latch. Without
+the latch the §3.16 pause exemption below is unreceivable — a calibration
+run starves the video stream past teardown precisely while the word is the
+operator's only progress view and the §10.7 sequencer's downlink evidence.
+The RX expires the summary after **1.5 s** without a refresh so a
+stopped/rebooted craft cannot leave a stale warning on the OSD (a rebooted
+craft's new session re-latches through its live stream, never through the
+old latch). Mixed-version receivers safely ignore the unknown packet type
+and continue decoding DATA.
 
 The packet is unauthenticated because it is advisory only. Forging it can at
 most alter diagnostics for an already-spoofed craft identity; it cannot change
@@ -2302,7 +2310,10 @@ any report cadence, so a dwell's sample count rises ~100× while its wall time
 drops. While the feed is paused the §3.15 word emits **unconditionally at its
 2 Hz cadence** — its live-slot prepend law (§3.15) presumes live DATA, and a
 run has none; this is the one traffic the pause exempts, because it is the
-operator's only progress view.
+operator's only progress view. The receiving ground keeps accepting it
+through the §3.15 acceptance latch: the pause starves the RTP stream past
+the §2 idle teardown, and a live-stream-only acceptance rule would refuse
+every word the pause exemption mandates.
 
 **Procedure (Pass 121 — max-power seek; supersedes the Pass 120
 target-band steer).** For each rung in the §9.3 ladder: pin the rung (§9.7

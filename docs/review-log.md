@@ -57,6 +57,13 @@ run (input-starve), restored on the rate/power restore edge.
   question, `docs/findings.md` entries struck); **single rung again**
   (reverts Pass 131's widening; artifact list shape unchanged, loader accepts
   any length); no feedback-freshness precondition.
+- §3.15: the word-acceptance tuple **latches** — once accepted from a
+  live-consumed RTP `(originator,session)`, the tuple survives that stream's
+  §2 idle teardown until a different tuple's live stream replaces it.
+  Without this the §3.16 pause-emission clause is unreceivable: the pause
+  starves the stream past teardown, the ground refuses every mid-run word,
+  and the §10.7 sequencer falsely fails `downlink_no_ack` (found on the
+  2026-08-07 hardware bench; craft-side runs completed correctly throughout).
 - §15.2: dwell knobs `dwell_probe_frames`/`dwell_verify_frames`/
   `probe_pace_us`/`tally_wait_ms`/`tally_retries`/`feed_quiet_ms` (Tier-2
   seeds); nine keys retired. §15.3: `uplink_quality_*` (6 fields) →
