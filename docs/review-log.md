@@ -24,6 +24,34 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 162 — RX-only devourer bring-up: spectator/cache leave kernel-monitor (2026-08-08)
+
+**Verdict.** B2 of ruling #120 (devourer sole in-tree backend): `RadioAir`
+bring-up accepts zero `role:"tx"` adapters for the two uplink-free
+archetypes — dedicated cache with no media streams, §2 spectator (Pass 74)
+— the same gate kernel-monitor has carried since Pass 74
+(`allow_rx_only`, derived from the archetype, not a config key). All other
+node shapes keep the one-designated-uplink requirement; more than one
+`role:"tx"` stays a config error everywhere (§6.4). `has_tx()` becomes
+truthful on the devourer backend, so the Pass 143 heartbeat guard now
+fires there too — the §3.11 note claiming it "cannot fire on devourer" is
+struck. Fail-closed corollary (Pass 156/157 posture): `air.ack_responder`,
+`policy.return.unicast`, `air.ldpc`, `air.stbc` each name a TX-die
+property, so setting any of them on an RX-only adapter set refuses create
+instead of running silently inert. Send paths return 0, TX counters stay
+0, `tx_index()` is defined only under `has_tx()` (callers keep the guard —
+the §15.5a scout on an uplink-free node roams adapter 0, unchanged from
+kernel-monitor's RX-only behaviour).
+
+**Changed.** §3.11 (RX-only bring-up block replaces the devourer
+cannot-fire note).
+
+**Evidence.** Branch `impl/rx-only-radioair`; ruling #120 item 2 (B2
+promoted onto the queue; cache/spectator migrate to devourer);
+kernel-monitor template `io/src/air_mon.cpp` (`allow_rx_only`, guarded
+`send_frame`, `tx_report_counters`); archetype expression
+`app/main.cpp` AirBackend::create (monitor branch, now shared).
+
 ## Pass 161 — scout evidence accumulates; ranking gains hysteresis, confidence, reasons (2026-08-07)
 
 **Verdict.** Issue #100 (downstream of #95; the passive-scout-adapter role

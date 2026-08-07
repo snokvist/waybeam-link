@@ -577,9 +577,22 @@ HEARTBEAT path still serves non-announcing nodes (grounds, quiet rx).
 2026-08-06, Pass 143). "Every node" above means every node that can transmit:
 a receive-only node has no uplink to beat on, and the guard is
 `AirIface::has_tx()`. Nothing downstream depends on hearing such a node — it
-creates no §2 RX state at its peers and is not a CSA or claim target. Note this
-cannot fire on the devourer backend today, whose `has_tx()` is unconditionally
-true because bring-up requires exactly one `role:"tx"` adapter.
+creates no §2 RX state at its peers and is not a CSA or claim target.
+
+**RX-only bring-up (Pass 162).** Both RF backends accept an adapter set with
+**zero** `role:"tx"` adapters, but only for the two uplink-free archetypes —
+a dedicated cache with no media streams (its RF face is receive-only; repair
+is Ethernet-side, §13) and a §2 passive spectator (Pass 74). Every other
+node shape keeps the one-designated-uplink requirement, and more than one
+`role:"tx"` adapter remains a config error on every shape (§6.4).
+`has_tx()` is truthful on both backends and the heartbeat guard above fires
+identically on either. On an RX-only node the TX-side machinery **refuses
+bring-up rather than running silently inert** (the Pass 156/157 posture):
+`air.ack_responder`, `policy.return.unicast`, `air.ldpc` and `air.stbc` are
+all properties of a TX die the node does not have, so a config that sets any
+of them with no `role:"tx"` adapter fails create. Send paths report
+not-sent (0) and the §15.3 TX counters stay 0; `tx_index()` is meaningful
+only when `has_tx()` — callers keep the guard.
 
 ### 3.9 RECOVERY_REQUEST packet (type `0x6`) — 18 bytes
 
