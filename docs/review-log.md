@@ -24,6 +24,44 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 154 — EFUSE-MAC adapter identity; calibration binds to the unit (2026-08-07)
+
+**Verdict.** Per-adapter calibration binds to the per-unit EFUSE MAC, not the
+USB bus path (operator rulings D1–D3, issue #118, 2026-08-07; unblocked by
+vendored devourer #383 `GetPermanentMacAddress` + #384 Jaguar3 EFUSE-walk
+fix). A USB path identifies a *port*, not a device — swapping two dongles
+silently applied each other's absolute qdb curve to the wrong PA, with no
+regulatory clamp behind it (§10.3).
+
+- **D1** — new optional `adapters[].mac`; stanza match precedence
+  **`mac` > `bus` > first-free**, `bus` kept as an explicit port pin. The
+  §10.6/§10.7 artifacts anchor on the same MAC.
+- **D2** — **fail closed + safe offset**: an identity that does not match
+  never applies a `power_map`/artifact; the adapter still comes up at the
+  §10.5 safe boot offset (−24 qdb) with a loud log — flyable, curve withheld.
+- **D3** — a unit reporting no identity (`GetPermanentMacAddress` → false)
+  is refused an absolute curve outright; no declared/bus fallback tier on
+  the radio backend (no dual code path). Upstream Jaguar2 wiring is
+  hardware-gated (no unit on the bench); upstream independently landed #386
+  meanwhile — moot for our builds (family compiled out).
+
+**Changed sections.**
+- §10.6 identity block: radio resolution collapses to the single derived
+  tier `mac/<efuse-mac>` (Pass 146's 3-tier order survives only on
+  kernel-monitor, frozen per the backend ruling, issue #120);
+  `id/radio/<calib_id>` and `bus/…` retired on radio — artifacts keyed to
+  them read STALE, a re-run re-keys. "devourer cannot reach it" paragraph
+  replaced: the upstream request is fulfilled.
+- §10.2: "per physical adapter" binds by unit identity, never USB position.
+- §15.2: `adapters[].mac` key (format, post-bring-up binding, D2 fallback,
+  duplicate/backend rejection); example updated.
+- §15.5: `GET /api/v1/info` `adapters[]` gains `mac` (null = none).
+
+**Evidence.** Issue #118 (rulings + measured serial-placeholder/bus-shuffle
+record); coordination memory `devourer_efuse_walk_and_mac_identity` (vendor
+offset 0x157, rfe 0→3 seven-register delta); `third_party/README.md`
+provenance `5a5dd62`; CU re-baseline in `docs/findings.md` (2026-08-07).
+
 ## Pass 153 — 0xF EXTENDED type + calibration v2 probe exchange (2026-08-07)
 
 **Verdict.** Calibration v2 adopted as spec

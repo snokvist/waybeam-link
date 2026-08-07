@@ -2074,7 +2074,10 @@ stock Realtek `PHY_REG_PG.txt` power-by-rate format (`docs/groundwork.md §14`).
   **intent/index**, hardware-agnostic. **This is the single canonical name;**
   `tx_power_cap`/`tx_power_qdb` from earlier drafts are dead.
 - **Each TX node keeps a LOCAL per-adapter power map**, one per physical adapter,
-  in the `PHY_REG_PG.txt` row format, holding the **absolute** `qdb` values. The
+  in the `PHY_REG_PG.txt` row format, holding the **absolute** `qdb` values.
+  "Per physical adapter" binds by **unit identity** (§10.6 Pass 154 — the
+  EFUSE MAC on the radio backend), never by USB position: an absolute curve
+  that followed a *port* would silently follow a re-plug onto the wrong PA. The
   controller resolves `(this adapter, profile.mcs, profile.tx_power_level)` → an
   absolute `SetTxPowerOffsetQdb` value and applies it to that adapter's device.
   **The profile-driven resolve runs only in the tx-node selector commit (Pass
@@ -2426,24 +2429,37 @@ never silently applied. Re-run on any pairing change (craft adapter, ground
 adapter set, antennas).
 
 **Adapter identity is per-actuator and must be stable across a re-plug**
-(operator-ruled 2026-08-06, Pass 146). The two backends drive different
-actuators — kernel-monitor writes nl80211 fixed power, devourer writes an
-offset relative to the efuse per-rate table — so a curve measured under one is
-**not** valid under the other, and the identity deliberately differs by backend
-so a mismatch reads STALE rather than being applied. Resolution order:
+(operator-ruled 2026-08-06, Pass 146; re-based on the per-unit EFUSE MAC,
+Pass 154). The two backends drive different actuators — kernel-monitor writes
+nl80211 fixed power, devourer writes an offset relative to the efuse per-rate
+table — so a curve measured under one is **not** valid under the other, and
+the identity deliberately differs by backend so a mismatch reads STALE rather
+than being applied. Resolution:
 
-1. `id/<backend>/<adapters[].calib_id>`, when the operator sets it — an
-   explicit name for a physical adapter, and the only option for a dongle whose
-   serial is blank or duplicated across a fleet. **Scoped by backend**, because
-   unlike the derived tiers below it would otherwise be identical under both:
-   an ifname exists only on kernel-monitor and a bus path only on devourer, but
-   a name the operator chose carries no such distinction, and an unscoped one
-   would apply a monitor-measured curve to devourer's offset actuator without
-   ever reading STALE.
-2. `ifname/<MAC>` on kernel-monitor, read from the netdev.
-3. `bus/<bus-port>` as a last resort, **logged as unstable**: USB bus paths
-   shuffle on any re-plug, so an artifact keyed this way goes stale the next
-   time the dongle is moved, and the node silently boots with no curve.
+1. **radio (devourer): `mac/<efuse-mac>` — the only tier (Pass 154).** The
+   per-unit EFUSE MAC, read through `GetPermanentMacAddress()` at adapter
+   bring-up (vendored devourer #383; #384 makes the read correct on
+   append-ordered 8822C maps). A unit that reports none — unprogrammed
+   EFUSE, or a chip whose accessor degrades to `false` — has **no
+   calibration identity**: no artifact is loaded or written, no §10.6/§10.7
+   run may start, and no absolute curve is ever applied; the adapter still
+   comes up at the §10.5 safe boot offset with a loud log (operator rulings
+   D2/D3, issue #118). There is deliberately **no declared or bus-path
+   fallback on this backend** — a fallback tier is exactly the port-keyed
+   misapplication this rule exists to prevent. The former
+   `id/radio/<calib_id>` and `bus/<bus-port>` identities are retired on
+   radio; an artifact keyed to one reads STALE and a re-run re-keys it.
+2. `id/monitor/<adapters[].calib_id>` on kernel-monitor, when the operator
+   sets it — an explicit name for a physical adapter, backend-scoped for the
+   Pass 146 reason (an unscoped name would apply a monitor curve to
+   devourer's offset actuator without ever reading STALE).
+3. `ifname/<MAC>` on kernel-monitor, read from the netdev.
+4. `bus/<bus-port>` on kernel-monitor as a last resort, **logged as
+   unstable**: USB bus paths shuffle on any re-plug.
+
+kernel-monitor's tiers are carried unchanged and **frozen with the backend**
+(deprecated-frozen per the 2026-08-07 backend ruling, issue #120); they gain
+no new semantics here.
 
 **The USB serial number is deliberately NOT used**, though it was the obvious
 candidate. Measured on the fleet: every RTL88x2 dongle to hand — an 8822EU and
@@ -2453,22 +2469,18 @@ than a bus path: two adapters in one host would share an artifact, and a curve
 measured on one dongle would be applied to another without ever reading STALE.
 That is precisely the failure the fingerprint check exists to prevent.
 
-So on devourer the stable identity has to be **declared**, not derived —
-`calib_id` is the answer, and the bus-path fallback warns every boot until one
-is set.
-
-**The per-unit identity does exist in hardware; devourer just cannot reach it.**
-Dumping the EFUSE through the vendor kernel driver shows both values in the
-same map: the 6-byte MAC at logical offset `0x157` differs per unit (it is what
-the driver writes to the netdev, and what gives Linux its stable `wlx<mac>`
-interface name), while the USB serial string descriptor at `0x174` is the
-constant `"123456"` burned identically into every unit. Measured on an 8822EU
-and an 8812CU. devourer already decodes this map and Jaguar1 already implements
-a `GetMacAddress` against it — but `IRtlDevice` exposes no accessor, so a
-consumer that has taken the adapter from the kernel driver cannot read it.
-`docs/devourer-mac-identity.md` is the upstream request. If it lands, tier 1
-gains a derived sibling and `calib_id` becomes the override rather than the
-only option; until then it is the only option, and the wording above stands.
+**The per-unit identity is reachable in hardware (Pass 154).** Dumping the
+EFUSE shows both values in the same map: the 6-byte MAC at logical offset
+`0x157` (8822C/8822E; per-chip offsets on Jaguar1) differs per unit — it is
+what the kernel driver writes to the netdev, and what gives Linux its stable
+`wlx<mac>` interface name — while the USB serial string descriptor at `0x174`
+is the constant `"123456"` above. Upstream devourer #383 exposes it
+(`IRtlDevice::GetPermanentMacAddress`, validity = neither all-0xFF nor
+all-zero) and #384 fixes the Jaguar3 logical-map walk that decoded
+append-ordered 8822C maps as 0xFF. `docs/devourer-mac-identity.md`'s upstream
+request is fulfilled; tier 1 above is the derived identity it anticipated,
+and it is derived rather than declared precisely so a re-plugged or swapped
+unit can never carry another unit's curve.
 
 **A run that found no wall anywhere measured nothing (Pass 134; evidence
 re-based Pass 153).** Under the retired LINK_REPORT evidence a *starved*
@@ -4214,7 +4226,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
              "recovery_on_latch": true, "net_id": null },
   "profile_table": "/etc/waybeam-link/profiles.json",
   "adapters": [
-    { "name": "wlan0", "bus": "1-1.2", "role": "tx",
+    { "name": "wlan0", "mac": "84:fc:14:50:bc:de", "bus": "1-1.2", "role": "tx",
       "channel": 5805, "bw": 20,
       "power_map": "/etc/waybeam-link/power.wlan0.txt",
       "max_power_qdb": 108,
@@ -4270,6 +4282,21 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 - RX nodes use `"dir":"out"` streams (UDP `send` targets) and `role:"rx"` adapters
   (diversity = same `channel`; a scout may sit on a different channel on another
   adapter).
+- `adapters[].mac` (radio backend only, Pass 154; lowercase
+  `aa:bb:cc:dd:ee:ff`, normalized at load) pins a stanza to a physical unit
+  by its §10.6 EFUSE-MAC identity. Match precedence is
+  **`mac` > `bus` > first-free**; `bus` survives as an explicit USB **port**
+  pin. Because the 8822E EFUSE is only reliably readable at bring-up, MAC
+  matching binds **after** bring-up: stanzas claim provisionally (bus, then
+  first-free), identities are read, and stanzas re-bind to their matching
+  unit before any RX/TX starts. A configured `mac` absent at bring-up does
+  **not** fail the node (operator ruling D2, issue #118): the stanza falls
+  back to `bus`/first-free, comes up at the §10.5 safe boot offset with a
+  loud log, and every identity-bound absolute (`power_map`, calibration
+  artifact) is withheld — fail closed, still flyable. Duplicate `mac`
+  values across stanzas are a config error; the key is rejected on
+  non-radio backends (kernel-monitor is frozen, issue #120, and derives
+  identity from `ifname`).
 - `node.spectator` (default `false`, §2/§13 spectator RX, Pass 74) opts a display
   node into **passive, uplink-free reception** — the analog-video model. A
   spectator may run with **zero `role:"tx"` adapters**: it delivers by FEC +
@@ -4940,7 +4967,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 |---|---|
 | `GET /api/v1/stats` | the current §15.3 snapshot as one JSON object (no trailing newline) |
 | `GET /api/v1/stats/stream` | `text/event-stream`; one §15.3 object per `stats.hz` tick |
-| `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]`, `build`; on a TX/craft node also the live self state `channel`, `psk_announced`, `claimed`, `claimed_by` (Pass 113) |
+| `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]` (each `{name, role, channel, mac}` — `mac` is the §10.6 per-unit EFUSE identity on the radio backend, `null` where the backend reports none, Pass 154), `build`; on a TX/craft node also the live self state `channel`, `psk_announced`, `claimed`, `claimed_by` (Pass 113) |
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
 | `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |
 | `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[]}` (§15.5a; ground/rx node) |
