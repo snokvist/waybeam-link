@@ -135,6 +135,7 @@ add_library(wblink_io STATIC
     io/src/power_file.cpp
     io/src/calib_store.cpp
     io/src/scout_sense.cpp
+    io/src/scout_store.cpp
     io/src/uplink_calib_store.cpp
     io/src/venc_http.cpp
     io/src/control_server.cpp
