@@ -4570,6 +4570,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
 { "t_ms": 172834, "node": 17, "session": 2748291,
   "adapters": [ { "name": "wlan0", "rx": 10234, "dup": 812,
     "rssi_best": -58, "rssi_mean": -63, "snr": 22, "noise": -85,
+    "evm": -24, "evm_valid": true,
     "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
     "drop": 0, "filtered": 0, "kernel_drop": 0, "bpf_filtered": 0, "tsf_fallback": 0,
     "tx_reports": 531, "tx_report_fails": 0,
@@ -4912,6 +4913,32 @@ and they are the denominator half of a per-MCS PER ladder whose numerator is
 not specified. The array is always present and always 8 elements, all-zero on
 `UdpAir` where there is no PHY rate to report — a consumer never branches on
 its length.
+
+On the radio backend the per-adapter signal fields are a **quality window**
+(Pass 158, issue #98 stage 1): every accepted frame's path-A raw
+RSSI/SNR/EVM is folded with devourer's own conventions (`RxQuality.h` —
+`rssi_raw <= 0` is not a sample; SNR/EVM folded only when present, so a
+mixed stream does not bias the means toward zero), and each stats line
+drains the window (delta semantics — the window IS the stats interval; the
+stats emitter is the single reader). `rssi_best` is the window **peak**,
+deliberately not the mean: near-field saturation trashes a fraction of
+frames to low apparent power, dragging a mean down while the peak stays
+pegged — the mean inverts the very signal this exists to expose.
+`rssi_mean` is the window mean, `snr` the mean SNR in dB (raw half-dB
+folded /2), `noise` the passive floor estimate `rssi_dbm − snr_db` (a
+PASSIVE estimate, updated only when frames decode). `evm` (new) is the
+mean EVM in dB — **lower (more negative) is better**, and it is the
+discriminator RSSI cannot be: on a saturating front end RSSI climbs while
+EVM reverses (devourer's measured knee: SNR flat at 18 dB across the whole
+sweep while EVM went −28 → −13 dB). `evm_valid` says whether any frame in
+the window carried EVM at all (CCK / non-type-1 phy-status does not) —
+`evm: 0` with `evm_valid: false` means *no data*, not perfect coding. An
+empty window keeps the previous `rssi_best`/`rssi_mean` behaviour
+(last-frame RSSI) and reads `snr`/`noise`/`evm` as 0/invalid. All of this
+is **observation only** — no control path reads it; the §9.4 saturation
+gate and any wire carriage (§3.5) are separate rulings (issue #98 stages
+2–3, issue #125). Off the radio backend the fields keep their prior
+values: kernel-monitor radiotap carries no SNR/EVM.
 
 `rx_ldpc` / `rx_stbc` (Pass 157) count accepted frames whose RX path
 reported LDPC coding / a nonzero STBC stream count, and `ldpc_flag_ok` is
