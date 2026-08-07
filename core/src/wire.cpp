@@ -357,13 +357,16 @@ Decoded decode_cache_assign(const uint8_t* buf, size_t len) {
     return a;
 }
 
-Decoded decode_calibration(const uint8_t* buf, size_t len) {
-    // §3.16 (Pass 153): subtype dispatch. The subtype byte needs to exist
-    // before it can be read; below that even CalibUnknown is unreachable.
+Decoded decode_extended(const uint8_t* buf, size_t len) {
+    // §3.16 (Pass 153): the first payload byte is the extended type ID —
+    // ONE shared dispatch point for every 0xF frame. It needs to exist
+    // before it can be read; below that even ExtUnknown is unreachable.
     if (len < kCommonPrefixSize + 1) return DecodeError::kTruncated;
-    const uint8_t subtype = buf[11];
-    switch (subtype) {
-        case calib_subtype::kProbe: {
+    const uint8_t ext_id = buf[11];
+    switch (ext_id) {
+        case ext_type::kReservedInvalid:
+            return DecodeError::kInvalidField;  // 0x00: reserved-invalid
+        case ext_type::kCalProbe: {
             // The one variable-length non-DATA type: fixed fields plus zero
             // padding to the sender's negotiated §9.3a budget, so length is a
             // RANGE check against the largest tier, not an exact size.
@@ -388,7 +391,7 @@ Decoded decode_calibration(const uint8_t* buf, size_t len) {
             }
             return pr;
         }
-        case calib_subtype::kTally: {
+        case ext_type::kCalTally: {
             if (len != kCalibTallySize) {
                 return len < kCalibTallySize ? DecodeError::kTruncated
                                              : DecodeError::kLengthMismatch;
@@ -407,12 +410,12 @@ Decoded decode_calibration(const uint8_t* buf, size_t len) {
             return t;
         }
         default: {
-            // §3.16: an unknown subtype is a DECODED value, not an error — a
-            // mixed-version pair degrades to "calibration unavailable" while
-            // the frame still counts as valid RX for liveness (§11.4).
-            CalibUnknown u;
+            // §3.16: an unknown extended type ID is a DECODED value, not an
+            // error — additive growth must degrade to "feature unavailable"
+            // while the frame still counts as valid RX for liveness (§11.4).
+            ExtUnknown u;
             u.prefix = decode_prefix(buf);
-            u.subtype = subtype;
+            u.ext_id = ext_id;
             return u;
         }
     }
@@ -486,8 +489,8 @@ Decoded decode(const uint8_t* buf, size_t len) {
             return decode_announce(buf, len);
         case PacketType::kCacheAssign:
             return decode_cache_assign(buf, len);
-        case PacketType::kCalibration:
-            return decode_calibration(buf, len);
+        case PacketType::kExtended:
+            return decode_extended(buf, len);
         case PacketType::kVehicleCmd:
             return decode_vehicle_cmd(buf, len);
         case PacketType::kSelectorState:
@@ -670,8 +673,8 @@ size_t encode_calib_probe(const CalibProbe& pkt, uint16_t pad_to, uint8_t* out,
         pkt.prefix.destination == 0) {
         return 0;
     }
-    encode_prefix(pkt.prefix, PacketType::kCalibration, out);
-    out[11] = calib_subtype::kProbe;
+    encode_prefix(pkt.prefix, PacketType::kExtended, out);
+    out[11] = ext_type::kCalProbe;
     be32_write(out + 12, pkt.run_id);
     be16_write(out + 16, pkt.dwell_id);
     be16_write(out + 18, pkt.seq);
@@ -686,8 +689,8 @@ size_t encode_calib_tally(const CalibTally& pkt, uint8_t* out, size_t cap) {
         pkt.prefix.destination == 0) {
         return 0;
     }
-    encode_prefix(pkt.prefix, PacketType::kCalibration, out);
-    out[11] = calib_subtype::kTally;
+    encode_prefix(pkt.prefix, PacketType::kExtended, out);
+    out[11] = ext_type::kCalTally;
     be32_write(out + 12, pkt.run_id);
     be16_write(out + 16, pkt.dwell_id);
     be16_write(out + 18, pkt.received);

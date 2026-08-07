@@ -281,15 +281,17 @@ void test_codec_rejects_and_unknown_subtype() {
     // pad_to below the fixed size clamps up, never truncates.
     CHECK(encode_calib_probe(pr, 4, buf, sizeof buf) == kCalibProbeFixedSize);
 
-    // Unknown subtype decodes to CalibUnknown, not an error (§3.16: a
-    // mixed-version pair degrades to "calibration unavailable" and the frame
-    // still counts as valid RX).
+    // Unknown extended type ID decodes to ExtUnknown, not an error (§3.16:
+    // additive growth degrades to "feature unavailable" and the frame still
+    // counts as valid RX). ID 0x00 is reserved-invalid and IS an error.
     const size_t n = encode_calib_probe(pr, 0, buf, sizeof buf);
     CHECK(n == kCalibProbeFixedSize);
     buf[11] = 0x7E;
     const Decoded d = decode(buf, n);
-    const CalibUnknown* u = std::get_if<CalibUnknown>(&d);
-    CHECK(u != nullptr && u->subtype == 0x7E);
+    const ExtUnknown* u = std::get_if<ExtUnknown>(&d);
+    CHECK(u != nullptr && u->ext_id == 0x7E);
+    buf[11] = 0x00;
+    CHECK(std::holds_alternative<DecodeError>(decode(buf, n)));
 
     // Oversize probe (past the High budget) is a length error.
     uint8_t big[4096] = {};

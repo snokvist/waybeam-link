@@ -327,7 +327,7 @@ const char* packet_type_name(const uint8_t* frame, size_t len) {
         "other",       "data",         "nack",        "link_report",
         "heartbeat",   "csa",          "recovery",    "jscc_feedback",
         "cache_status", "cache_request", "cache_reply", "announce",
-        "cache_assign", "vehicle_cmd", "selector_state", "calibration"};
+        "cache_assign", "vehicle_cmd", "selector_state", "extended"};
     return kNames[frame[2] & 0x0F];
 }
 
@@ -2277,8 +2277,8 @@ struct TxCore {
             }
             return false;
         }
-        if (std::holds_alternative<CalibUnknown>(dec)) {
-            return false;  // §3.16: newer peer — calibration unavailable
+        if (std::holds_alternative<ExtUnknown>(dec)) {
+            return false;  // §3.16: newer peer — feature unavailable
         }
         if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
             if (r->target_originator != originator_ ||
@@ -7245,8 +7245,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 }
                 return;
             }
-            if (std::holds_alternative<CalibUnknown>(dec)) {
-                return;  // §3.16: newer peer — calibration unavailable
+            if (std::holds_alternative<ExtUnknown>(dec)) {
+                return;  // §3.16: newer peer — feature unavailable
             }
             if (const DataView* v = std::get_if<DataView>(&dec)) {
                 // The craft's session comes from the stream we are actually

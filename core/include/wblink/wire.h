@@ -118,7 +118,7 @@ struct SelectorState {
     friend bool operator==(const SelectorState&, const SelectorState&) = default;
 };
 
-// §3.16 (Pass 153) CALIBRATION family, subtype 0x01 PROBE — one numbered
+// §3.16 (Pass 153) EXTENDED type 0x01 CAL_PROBE — one numbered
 // frame of a counted dwell burst, zero-padded on the wire to the negotiated
 // §9.3a budget so a probe is byte-equivalent on air to a full DATA packet.
 // The padding is validated as a range and not surfaced: a decoded view
@@ -133,7 +133,7 @@ struct CalibProbe {
     friend bool operator==(const CalibProbe&, const CalibProbe&) = default;
 };
 
-// §3.16 (Pass 153) CALIBRATION family, subtype 0x02 TALLY — the dwell's one
+// §3.16 (Pass 153) EXTENDED type 0x02 CAL_TALLY — the dwell's one
 // receipt. Unauthenticated for the Pass 131 reasons (bounded blast radius,
 // §3.16 trust paragraph); idempotent by (run_id, dwell_id).
 struct CalibTally {
@@ -149,14 +149,15 @@ struct CalibTally {
     friend bool operator==(const CalibTally&, const CalibTally&) = default;
 };
 
-// §3.16: an 0xF frame whose subtype this build does not know. Deliberately a
-// decoded value, not a DecodeError — a mixed-version pair must degrade to
-// "calibration unavailable" while the frame still counts as valid RX for
-// liveness purposes (§11.4 follower).
-struct CalibUnknown {
+// §3.16: an 0xF frame whose extended type ID this build does not know.
+// Deliberately a decoded value, not a DecodeError — a newer peer's additive
+// frame must degrade to "feature unavailable" while still counting as valid
+// RX for liveness purposes (§11.4 follower). ID 0x00 is reserved-invalid
+// and IS a decode error.
+struct ExtUnknown {
     CommonPrefix prefix;
-    uint8_t subtype = 0;
-    friend bool operator==(const CalibUnknown&, const CalibUnknown&) = default;
+    uint8_t ext_id = 0;
+    friend bool operator==(const ExtUnknown&, const ExtUnknown&) = default;
 };
 
 // §3.9 RECOVERY_REQUEST — RX asks the exact TX session to bootstrap a stream.
@@ -305,7 +306,7 @@ using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
                              JsccFeedback, CacheStatus, CacheRequestView,
                              CacheReplyView, Announce, CacheAssign, VehicleCmd,
                              SelectorState, CalibProbe, CalibTally,
-                             CalibUnknown>;
+                             ExtUnknown>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
