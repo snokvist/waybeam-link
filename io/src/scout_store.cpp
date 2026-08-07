@@ -107,7 +107,14 @@ ScoutRanking ScoutStore::rank(uint64_t now_ms, uint16_t resting_chan,
             last = std::max(last, s.at_ms);
         }
         if (n == 0) continue;
-        std::sort(vals, vals + n);
+        // n <= kRingDepth (8): insertion sort — also sidesteps a GCC 13
+        // -Warray-bounds false positive on std::sort over this array.
+        for (size_t i = 1; i < n; ++i) {
+            const uint16_t v = vals[i];
+            size_t j = i;
+            for (; j > 0 && vals[j - 1] > v; --j) vals[j] = vals[j - 1];
+            vals[j] = v;
+        }
         ScoutBinRank r;
         r.chan_mhz = b.chan_mhz;
         r.score = vals[n / 2];  // q50 (upper median)
