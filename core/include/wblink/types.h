@@ -28,7 +28,7 @@ enum class PacketType : uint8_t {
     kCacheAssign = 0xC,  // §3.13 receiver-owned cache following
     kVehicleCmd = 0xD,  // §3.14 remote vehicle command (rides §11 machinery)
     kSelectorState = 0xE,  // §3.15 craft-owned adaptive state summary
-    kUplinkQuality = 0xF,  // §3.16 authenticated craft→ground uplink feedback
+    kCalibration = 0xF,  // §3.16 calibration family: PROBE/TALLY (Pass 153)
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -119,12 +119,18 @@ inline constexpr size_t kVehicleCmdSize = 23;  // §3.14: MAC covers bytes 0..18
 inline constexpr size_t kSelectorStateCalibSize = 36;
 inline constexpr size_t kSelectorStateSize = 34;
 inline constexpr size_t kSelectorStateLegacySize = 32;
-// §3.16 (Pass 131): 31 bytes — the 4-byte quality_mac is deleted, the packet
-// is unauthenticated. Still exact-length with no flags byte, so the shape is
-// fixed and last_rx_mcs has to ship in it rather than be appended later.
-inline constexpr size_t kUplinkQualitySize = 31;
-// §3.16 last_rx_mcs sentinel: no radiotap MCS field, a non-HT rate, or no
-// accepted report yet. Mirrors io's kRxMcsUnknown, restated here because
+// §3.16 (Pass 153) calibration family. PROBE is fixed 22 bytes zero-padded
+// to the negotiated §9.3a budget — the one variable-length non-DATA type, so
+// its decoder range-checks [kCalibProbeFixedSize, mtu_tier::kHighBudget].
+// TALLY is exact-length.
+namespace calib_subtype {
+inline constexpr uint8_t kProbe = 0x01;
+inline constexpr uint8_t kTally = 0x02;
+}  // namespace calib_subtype
+inline constexpr size_t kCalibProbeFixedSize = 22;
+inline constexpr size_t kCalibTallySize = 26;
+// §3.16 rx_mcs sentinel: no radiotap MCS field, a non-HT rate, or no
+// accepted probe yet. Mirrors io's kRxMcsUnknown, restated here because
 // core/ stays dependency-free (it is vendored standalone).
 inline constexpr uint8_t kUplinkRxMcsUnknown = 0xFF;
 

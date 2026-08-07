@@ -45,6 +45,7 @@ add_wb_test(vehicle_cmd_test)
 add_wb_test(uplink_quality_test)
 add_wb_test(uplink_calibrate_test)
 add_wb_test(calibrate_test)
+add_wb_test(calib_dwell_test)
 add_wb_test(recovery_test)
 add_wb_test(loopback_test)
 
