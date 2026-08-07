@@ -5164,7 +5164,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]` (each `{name, role, channel, mac}` — `mac` is the §10.6 per-unit EFUSE identity on the radio backend, `null` where the backend reports none, Pass 154), `build`; on a TX/craft node also the live self state `channel`, `psk_announced`, `claimed`, `claimed_by` (Pass 113) |
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
 | `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |
-| `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, rounds, domain, rejects:{}, recommendation:{}, channels:[], candidates:[]}` (§15.5a Pass 161; ground/rx node) |
+| `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[], ranking:{rounds, domain, confidence_permille, rejects:{}, recommendation:{}, bins:[]}}` (§15.5a Pass 161; ground/rx node) |
 | `GET /api/v1/link/selection` | receiver's configured/latched/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
@@ -5470,9 +5470,13 @@ supported (§15.2 `scout`).
   15 min) — occupancy is time-varying and one 300 ms dwell is a single
   sample of a bursty process. Stale samples are explicitly excluded from
   the score (surfaced, never silently aged). The **round counter** advances
-  only when every bin in the store has a fresh sample since the last
-  advance (the chanmig anti-starvation guard), and rounds accrue across
-  operator-initiated sweeps; because nobody may sweep twice, low rounds
+  only when every bin of the **latest sweep's declared universe** has a
+  fresh sample since the last advance (the chanmig anti-starvation guard).
+  A bin outside that universe — a channel the operator has stopped
+  sweeping — keeps ranking while its evidence stays fresh but stops
+  vetoing the round advance: without this, one wide sweep followed by
+  narrow ones would freeze `rounds` (and confidence) forever. Rounds
+  accrue across operator-initiated sweeps; because nobody may sweep twice, low rounds
   **degrade `confidence`, never suppress the answer** — a claim flow that
   refuses to recommend because nobody swept twice is worse than one that
   recommends with stated low confidence. The **fold trust boundary**:
@@ -5488,9 +5492,13 @@ supported (§15.2 `scout`).
   "worth moving to": a bin **qualifies** at
   `qualify_max_util_permille` (seed 200) and a **recommendation**
   additionally clears `improvement_margin_permille` (seed 80) over the
-  resting channel's own score; when ≥ `broad_degrade_permille` (seed 700)
-  of the ranked bins fail to qualify, the recommendation is a **hold** —
-  the interference is not this channel's, moving will not help. Ties break
+  resting channel's own score; when more than one bin is ranked and ≥
+  `broad_degrade_permille` (seed 700) of them fail to qualify, the
+  recommendation is a **hold** — the interference is not this channel's,
+  moving will not help (a lone unqualified bin reads `NO_QUALIFIED`, not
+  "broad"). Confidence is rounds-degraded: full at
+  `min_rounds` (seed 2), floored at `confidence_floor_permille` (seed
+  250) while any fresh evidence exists — both §17 seeds like the rest. Ties break
   **deterministically by lowest channel MHz** (the Pass 66 class of bug:
   near-equal candidates must not alternate by scan order). All thresholds
   are **§17 RE-DERIVE seeds** — the shapes are chanmig's, the values are
@@ -5498,11 +5506,17 @@ supported (§15.2 `scout`).
   active link whose fresh §3.16 verdict is `Weak` or `Saturated`, the
   recommendation is **refused with that reason** — the impairment is range
   or self-jam, not the channel — while the ranked list is still reported.
-  `GET /scout/results` carries all of it as **enumerated reasons, never
-  prose**: per bin `score`/`burstiness`/`samples`/`fresh`/`last_seen_ms`,
-  top-level `rounds`, `domain`, `rejects{domain_reset, implausible,
-  stale}`, and `recommendation{chan|null, reason}`. A dashboard must be
-  able to render *why* from this payload alone. (The standing-survey /
+  `GET /scout/results` carries all of it in a `ranking` object as
+  **enumerated reasons, never prose**: per bin
+  `score`/`burstiness`/`samples`/`qualified`/`age_ms`, plus `rounds`,
+  `domain`, `confidence_permille`, `rejects{domain_reset, implausible,
+  stale}` and `recommendation{chan|null, reason}`. `rejects.stale` is a
+  **gauge** of currently-held stale samples at read time, not a cumulative
+  count (domain resets and implausible folds ARE cumulative — they are
+  events; staleness is a state). A `recommendation` naming the resting
+  channel itself means "stay is best" — a consumer MUST NOT issue a
+  same-channel move on it. A dashboard must be able to render *why* from
+  this payload alone. (The standing-survey /
   in-flight-migration engine remains declined — operator ruling
   2026-08-06: no passive scout adapter role; cross-sweep accumulation is
   the settled shape.)
