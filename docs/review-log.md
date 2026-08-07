@@ -24,6 +24,41 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 156 — hardware-ACK hybrid: responder and retry limit are one decision (2026-08-07)
+
+**Verdict.** Issue #96. devourer #354 moved the TX retry-limit default to 0
+(WFB posture), and `RadioAir` never set `dc.tx.retry_limit` — so the armed
+§3.0 Pass 12 hybrid was a one-ended ARQ loop: a peer that ACKs correctly and
+a sender that never retransmits, silently inert. The responder knob and the
+retry knob are one decision, not two independent defaults.
+
+**Changed sections.**
+- §3.0 (Pass 12 hybrid): the stale "descriptor retry limit 12" claim
+  corrected; retries are `air.tx_retry_limit`, and the coupling is law — on
+  the radio backend `return.unicast` or `air.ack_responder` with
+  `tx_retry_limit: 0` is a config validation error, never an inert run.
+  Two inherited devourer behaviours pinned load-bearing: RX-pool posture
+  stays `backpressure` (`drop` produces ACKed-but-undelivered — the loop's
+  one way to lie), and a Jaguar3 retry may fall down the rate ladder
+  (`MCS3 ×4 → MCS2 → 6M ×4` witnessed), so no airtime accounting assumes a
+  retry flew at the commanded rung.
+- §15.2: `air.tx_retry_limit`, default **8** (operator-ruled 2026-08-07),
+  range 0–63. The ruling point: devourer's sweep gives 8 → 99.97 %
+  delivered where airtime is precious and a FEC floor exists (§14 runs
+  one); 16 buys the last 0.03 % at +5.4 % retry airtime. Inert for
+  broadcast, so the default costs nothing on a broadcast-only node.
+
+**Out of scope, recorded so it stays closed:** A-MPDU stays rejected — the
++30 % headline is a high-MCS broadcast shape; at this hybrid's exact shape
+(MCS3, 512 B, ACK+retry 8) aggregation measured −8 %, suppresses ~60 % of
+SPE_RPT (blinding the §9.10 wedge sensor and the retry distribution), and
+paces launches 0.8–3 ms in front of the §7.2 quiet-gap design (issue #96
+evidence at vendored `800c3c8`).
+
+**Evidence.** Issue #96 (devourer sweep table, per-die responder rates);
+`third_party/devourer/src/DeviceConfig.h` retry_limit doc; witness rate
+ladder in the issue notes.
+
 ## Pass 155 — §15.5a occupancy: frame-free fields become real, ranking follows (2026-08-07)
 
 **Verdict.** Issue #95 implemented. The scout's occupancy was fed exclusively
