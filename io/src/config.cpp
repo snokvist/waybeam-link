@@ -1106,6 +1106,16 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.air.disable_cca = a.value("disable_cca", cfg.air.disable_cca);
             cfg.air.ack_responder =
                 a.value("ack_responder", cfg.air.ack_responder);
+            // §15.2 (Pass 156): unicast hardware-retry limit, 0-63 (the
+            // TX-descriptor field width).
+            cfg.air.tx_retry_limit =
+                a.value("tx_retry_limit", cfg.air.tx_retry_limit);
+            if (cfg.air.tx_retry_limit < 0 || cfg.air.tx_retry_limit > 63) {
+                return Result<Config>::fail(
+                    "air.tx_retry_limit " +
+                    std::to_string(cfg.air.tx_retry_limit) +
+                    " out of range 0..63 (§15.2 Pass 156)");
+            }
             if (kind == "radio") {
                 cfg.air.kind = AirCfg::Kind::kRadio;
             } else if (kind == "kernel-monitor") {
@@ -1202,6 +1212,24 @@ Result<Config> load_config_json(const std::string& json_text) {
                         ge.at("loss_b").get<double>()};
                 }
             }
+        }
+
+        // §3.0/§15.2 (Pass 156) coupling law: the hardware-ACK hybrid's
+        // knobs are ONE decision. Enabling unicast returns or the ACK
+        // responder with a zero retry limit arms an ARQ loop at one end and
+        // disables it at the other — a knob that reads enabled while doing
+        // nothing, refused rather than run inert. Radio backend only: the
+        // kernel MAC owns its own retries on kernel-monitor (frozen, #120).
+        if (cfg.air.kind == AirCfg::Kind::kRadio &&
+            cfg.air.tx_retry_limit == 0 &&
+            (cfg.air.ack_responder || cfg.policy.ret.unicast)) {
+            return Result<Config>::fail(
+                std::string("air.tx_retry_limit is 0 while ") +
+                (cfg.air.ack_responder ? "air.ack_responder"
+                                       : "return.unicast") +
+                " is enabled — the hardware-ACK hybrid would run silently "
+                "inert (§3.0 Pass 156); set a nonzero limit or disable the "
+                "hybrid");
         }
 
         // §15.2 (Pass 154): adapters[].mac is the radio backend's EFUSE

@@ -259,6 +259,76 @@ int main() {
         }
     }
 
+    // --- §3.0/§15.2 tx_retry_limit coupling (Pass 156) ----------------------
+    {
+        // Default seeds 8 (operator-ruled); parse override works.
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->air.tx_retry_limit, 8);
+        auto r2 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "tx_retry_limit": 16}})");
+        CHECK(bool(r2));
+        if (r2) CHECK_EQ_U(r2.value->air.tx_retry_limit, 16);
+    }
+    // The hybrid armed with retries disabled is refused, not run inert —
+    // either half arms it.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","ack_responder":true,"tx_retry_limit":0}})",
+                     "silently inert");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","tx_retry_limit":0},
+          "policy":{"return":{"unicast":true}}})",
+                     "silently inert");
+    }
+    // Limit 0 alone is legal (the WFB posture, hybrid off) — and the
+    // kernel-monitor control: the kernel MAC owns retries there, so the
+    // coupling never fires (frozen, #120).
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "tx_retry_limit": 0}})");
+        CHECK(bool(r));
+        auto r2 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "kernel-monitor", "tx_retry_limit": 0},
+          "adapters": [{"name":"m","ifname":"wlan9","role":"tx",
+                        "channel":5805}],
+          "policy": {"return": {"unicast": true}}})");
+        CHECK(bool(r2));
+    }
+    // Descriptor field width is enforced — both arms, and the boundary
+    // value itself is accepted.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","tx_retry_limit":64}})",
+                     "out of range 0..63");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","tx_retry_limit":-1}})",
+                     "out of range 0..63");
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "tx_retry_limit": 63}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->air.tx_retry_limit, 63);
+    }
+    // Both hybrid halves on at once: the refusal names ack_responder (the
+    // message ternary's first branch), and the udp dev backend is a second
+    // non-radio control alongside kernel-monitor above.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","ack_responder":true,"tx_retry_limit":0},
+          "policy":{"return":{"unicast":true}}})",
+                     "air.ack_responder");
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "udp", "tx_retry_limit": 0},
+          "policy": {"return": {"unicast": true}}})");
+        CHECK(bool(r));
+    }
+
     // --- §15.2 adapters[].mac (Pass 154) ------------------------------------
     {
         // Parsed and normalized to lowercase on the radio backend.

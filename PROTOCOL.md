@@ -241,10 +241,34 @@ returns (**NACK / LINK_REPORT only** — CSA campaign copies stay broadcast,
 | QoS Control | `0x00 0x00` for normal reports; TID 6 for urgent NACKs; Normal ACK policy |
 | radiotap | the same rate-less prefix with `TX_FLAGS = 0` (the frame *expects* an ACK) |
 
-The injecting chip hardware-retransmits an unACKed unicast frame (devourer
-descriptor retry limit 12, Jaguar1 and Jaguar3 alike) — SIFS-timed hardware
-ARQ on the return path for zero extra return-path bytes. Pinned
-consequences:
+The injecting chip hardware-retransmits an unACKed unicast frame up to
+`air.tx_retry_limit` times (§15.2, Pass 156 — default **8**, operator-ruled
+2026-08-07) — SIFS-timed hardware ARQ on the return path for zero extra
+return-path bytes. An earlier revision here claimed a fixed devourer
+descriptor limit of 12; upstream #354 made it configurable with default
+**0** (the WFB posture: FEC provides reliability), which turned the armed
+hybrid into a silent no-op — a peer that ACKs correctly and a sender that
+never retransmits. The two knobs are therefore **one decision** (Pass 156):
+on the radio backend, enabling `return.unicast` or `air.ack_responder` with
+`tx_retry_limit: 0` is a **config validation error**, never an inert run.
+The law has a second, capability leg below the config layer: devourer keeps
+the vendor `DATA_RETRY_LIMIT` carve-out on dies whose caps read
+`tx_retry_limit_ok = false` (the 8814A; the unmeasured 8821C fails closed
+per devourer's false-as-unmeasured convention) — there the descriptor field
+is silently skipped, so a validated nonzero limit still never retransmits.
+A radio node with `return.unicast` enabled therefore **refuses bring-up**
+when its resolved TX unit (post §15.2 re-bind — the unit, not the stanza)
+reports `tx_retry_limit_ok = false`. `ack_responder` needs no capability
+gate: `SetAckResponder` reports refusal at arm time and the run degrades
+loudly (logged, returns fall back to broadcast-received), whereas a skipped
+retry field has no runtime signal at all — the gate sits exactly where the
+silence is.
+Two inherited devourer behaviours are pinned as load-bearing: the RX-pool
+posture stays `backpressure` (the `drop` alternative produces
+ACKed-but-undelivered frames — the one way this loop can lie); and on
+Jaguar3 a retried frame may fall down the rate ladder (witnessed
+`MCS3 ×4 → MCS2 → 6M ×4`), so no airtime accounting may assume a retry
+flew at the commanded rung. Pinned consequences:
 
 - **Receivers always accept both shapes.** The RX filter additionally
   accepts QoS-Data whose FC1 is clear **except the Retry bit** (hardware
@@ -4266,7 +4290,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
                 "ack_timeout_ms": 1000, "retry_cap": 3,
                 "min_interval_ms": 250 }
   },
-  "air":   { "kind": "radio", "ack_responder": false,
+  "air":   { "kind": "radio", "ack_responder": false, "tx_retry_limit": 8,
              "wedge_window_ms": 1000, "wedge_min_submits": 8,
              "wedge_exit_windows": 3 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
@@ -4320,6 +4344,20 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   notices. A spectator (above) emits nothing regardless, having no uplink.
 - Every policy constant is overridable → bench re-derivation (§9, §17) is config,
   not recompile.
+- `air.tx_retry_limit` (radio backend, Pass 156; default **8**, range 0–63 —
+  the descriptor field width on the measured generations; Kestrel's WD field
+  counts *attempts*, so devourer folds the +1 and the effective ceiling
+  there is 62 — an authored 63 runs 62 with a device-log note) is the
+  per-frame hardware retry limit for unicast ACK-policy TX. Inert for broadcast (no ACK policy ⇒ the MAC never
+  retries), so the default costs nothing on a broadcast-only node. The
+  default is the operator-ruled devourer-sweep point for an airtime-precious
+  link with a FEC floor (limit 8 → 99.97 % delivered; 16 buys the last
+  0.03 % at +5.4 % retry airtime — §14 already runs the floor). **Coupling
+  law (§3.0):** on the radio backend, `return.unicast` or `air.ack_responder`
+  with `tx_retry_limit: 0` is a config error, and a `return.unicast` node
+  whose resolved TX die reports `caps.tx_retry_limit_ok = false` refuses
+  bring-up (§3.0, capability leg). kernel-monitor is untouched (the kernel
+  MAC owns its retries; frozen, #120).
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
   stats and logs. It is **optional** and is the **sole** key-provenance selector
   (§11.4a, Pass 61): absent selects the auto-generated announced session token

@@ -1471,9 +1471,11 @@ struct AirBackend {
             rc.filter_net_id = cfg.node.net_id;
             rc.originator = cfg.node.originator;
             rc.rx_drop_permille = cfg.air.rx_drop_permille;
-            // §3.0 Pass 12 hardware-ACK hybrid halves.
+            // §3.0 Pass 12 hardware-ACK hybrid halves + the Pass 156
+            // retry half of the same decision.
             rc.ack_responder = cfg.air.ack_responder;
             rc.unicast_returns = cfg.policy.ret.unicast;
+            rc.tx_retry_limit = cfg.air.tx_retry_limit;
             rc.disable_cca = cfg.air.disable_cca;
             // §14.2 (Pass 143): the authored calibration reaches both RF
             // backends. Zero keeps the estimate unavailable.

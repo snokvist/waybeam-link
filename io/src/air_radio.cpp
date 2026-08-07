@@ -563,6 +563,11 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // stamping (RtlJaguar*Device TX path), and a diversity ear never
         // injects, so it stays inert there.
         dc.tx.report = any_mac_pin ? 1 : ad->tx;
+        // §3.0 (Pass 156): unicast hardware-retry limit. Consumed
+        // per-TX-descriptor (like tx.report), so it is set uniformly — an
+        // RX-only ear never injects and broadcast frames carry no ACK
+        // policy, so it binds exactly on the hybrid's unicast returns.
+        dc.tx.retry_limit = cfg.tx_retry_limit;
         // MAC carrier-sense gate. Applied to every adapter, not just the TX
         // one: an RX-only ear that defers has nothing to defer, but the
         // bring-up posture stays uniform across the node.
@@ -694,6 +699,24 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                 ad.dev->SetMonitorChannel(
                     SelectedChannel{chan, 0, CHANNEL_WIDTH_20});
             }
+        }
+    }
+
+    // §3.0 (Pass 156) capability leg: on dies keeping the vendor
+    // DATA_RETRY_LIMIT carve-out (caps.tx_retry_limit_ok=false — 8814A;
+    // 8821C false-as-unmeasured) the descriptor field is silently skipped,
+    // so a validated nonzero limit still never retransmits. Checked on the
+    // resolved TX unit, after the §15.2 re-bind — the unit, not the stanza.
+    // ack_responder is deliberately not gated here: SetAckResponder refuses
+    // loudly at arm time below; a skipped retry field has no signal at all.
+    if (cfg.unicast_returns) {
+        Impl::Adapter& tx = *im.adapters[im.tx_idx];
+        if (!tx.dev->GetAdapterCaps().tx_retry_limit_ok) {
+            return Result<RadioAir>::fail(
+                "radio: adapter \"" + tx.name +
+                "\": this die cannot honor air.tx_retry_limit "
+                "(caps.tx_retry_limit_ok=false) — return.unicast would run "
+                "silently inert (§3.0 Pass 156)");
         }
     }
 
