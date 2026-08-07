@@ -96,6 +96,10 @@ class MonAir : public AirIface {
     size_t tx_index() const override;
     // Frames go on real RF through the kernel driver.
     bool is_rf() const override { return true; }
+    // Deliberately empty: kernel-monitor is deprecated-frozen (ruling #120)
+    // and keeps its own §10.6 identity tiers (calib_id/ifname) — it gains no
+    // Pass 154 MAC leg.
+    std::string adapter_mac(size_t) const override { return {}; }
 
     // --- control plane (main thread only) --------------------------------
     // Committed operating point → stamped into each frame's radiotap MCS.

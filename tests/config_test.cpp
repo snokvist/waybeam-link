@@ -259,6 +259,54 @@ int main() {
         }
     }
 
+    // --- §15.2 adapters[].mac (Pass 154) ------------------------------------
+    {
+        // Parsed and normalized to lowercase on the radio backend.
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio"},
+          "adapters": [
+            { "name": "up", "role": "tx", "channel": 5805,
+              "mac": "84:FC:14:50:BC:DE" },
+            { "name": "ear", "role": "rx", "channel": 5805 }]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->adapters[0].mac == "84:fc:14:50:bc:de");
+            CHECK(r.value->adapters[1].mac.empty());
+        }
+    }
+    // Malformed MACs are a config error, not a silently dead pin.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio"},
+          "adapters":[{"name":"up","role":"tx","channel":5805,
+                       "mac":"84fc1450bcde"}]})",
+                     "mac must be");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio"},
+          "adapters":[{"name":"up","role":"tx","channel":5805,
+                       "mac":"84:fc:14:50:bc:zz"}]})",
+                     "mac must be");
+    }
+    // Two stanzas pinned to one unit cannot both bind it.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio"},
+          "adapters":[
+            {"name":"a","role":"tx","channel":5805,"mac":"84:fc:14:50:bc:de"},
+            {"name":"b","role":"rx","channel":5805,"mac":"84:FC:14:50:BC:DE"}]})",
+                     "duplicate mac");
+    }
+    // The key is radio-only: on any other backend it would promise a binding
+    // that never happens (kernel-monitor is frozen, ruling #120).
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"kernel-monitor"},
+          "adapters":[{"name":"up","ifname":"wlan0","role":"tx",
+                       "channel":5805,"mac":"84:fc:14:50:bc:de"}]})",
+                     "radio-backend key");
+    }
+
     // --- frame-shm binding + fec block (§15.4/§14.1) ------------------------
     {
         auto r = load_config_json(R"({

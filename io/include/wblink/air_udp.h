@@ -119,6 +119,8 @@ class UdpAir : public AirIface {
     // Compatibility tier: no driver matrix to assert anything better.
     uint16_t mtu_supported() const override { return kDefaultMaxPayload; }
     bool is_rf() const override { return false; }
+    // No hardware, no per-unit identity (§10.6 Pass 154).
+    std::string adapter_mac(size_t) const override { return {}; }
 
   private:
     std::vector<UdpEgress> targets_;

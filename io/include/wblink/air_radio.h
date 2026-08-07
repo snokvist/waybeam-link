@@ -160,6 +160,10 @@ class RadioAir : public AirIface {
         size_t bytes, bool include_pending,
         uint16_t packet_budget) const override;
     bool is_rf() const override { return true; }
+    // §10.6 (Pass 154): the per-unit EFUSE MAC read at bring-up
+    // (GetPermanentMacAddress), lowercase "aa:bb:cc:dd:ee:ff"; empty = the
+    // unit reports no identity (callers fail closed — D3).
+    std::string adapter_mac(size_t adapter) const override;
 
     struct AdapterCounters {
         std::string name;
