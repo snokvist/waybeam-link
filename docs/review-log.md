@@ -64,6 +64,12 @@ run (input-starve), restored on the rate/power restore edge.
   starves the stream past teardown, the ground refuses every mid-run word,
   and the §10.7 sequencer falsely fails `downlink_no_ack` (found on the
   2026-08-07 hardware bench; craft-side runs completed correctly throughout).
+- §10.6/§10.7: the Pass 134 flat-at-ceiling `no_wall_found` refusal is
+  scoped to **absolute space**. In offset space (Pass 151 backends) the
+  ceiling is offset 0 — the §10.5 boot-safe placement — so flat-at-ceiling
+  is the expected close-range reading and the run completes, persisting the
+  ceiling placement with an empty bracket (operator-ruled 2026-08-07 after
+  six consecutive refusals hard-blocked the sequencer at 10 m).
 - §15.2: dwell knobs `dwell_probe_frames`/`dwell_verify_frames`/
   `probe_pace_us`/`tally_wait_ms`/`tally_retries`/`feed_quiet_ms` (Tier-2
   seeds); nine keys retired. §15.3: `uplink_quality_*` (6 fields) →

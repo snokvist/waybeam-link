@@ -2482,13 +2482,23 @@ evidence fails loudly at its first dwell instead of being refused by a proxy
 measured before the run.
 
 What survives is the geometry half of the rule: **persistence refuses an
-implausible result.** If every swept rung placed at its §10.3 ceiling with no
-overload bracket booked anywhere (`first_bad_qdb == null` throughout), the
-run **fails and persists nothing** (`no_wall_found`). At close range no wall
-exists — that is a property of the geometry, not of the feedback path — and a
-sweep whose whole product is "no wall exists anywhere" did not measure the
-thing it exists to measure. Per the volatility exception the previous
-last-good artifact is left untouched.
+implausible result — in absolute space.** If every swept rung placed at its
+§10.3 ceiling with no overload bracket booked anywhere
+(`first_bad_qdb == null` throughout), the run **fails and persists nothing**
+(`no_wall_found`). At close range no wall exists — that is a property of the
+geometry, not of the feedback path — and a sweep whose whole product is "no
+wall exists anywhere" did not measure the thing it exists to measure. Per
+the volatility exception the previous last-good artifact is left untouched.
+
+**Offset space is exempt (Pass 153, operator-ruled 2026-08-07).** On a
+relative backend (§10.5) the sweep ceiling is offset **0** — the calibrated
+boot-safe placement itself, not a PA limit — so "flat at ceiling" means the
+whole allowed window below the reference is clean and the reference stands.
+That is the expected close-range reading, not an unmeasured extrapolation:
+the run **completes and persists** the ceiling placement with its bracket
+honestly empty. Measured before the ruling: six consecutive
+`no_wall_found` refusals at 10 m hard-blocked the §10.7 sequencer on a
+ground whose window ([−24, 0] qdB) cannot contain a wall at that range.
 
 A **non-monotone** placement curve is surfaced (§15.5) but **not** refused: the
 PA shape is a physical expectation, not a protocol invariant, and at close
