@@ -1829,8 +1829,23 @@ struct AirBackend {
             AdapterStats as;
             as.name = c.name;
             as.rx = c.rx_frames;
-            as.rssi_best = c.rssi_last;
-            as.rssi_mean = c.rssi_last;
+            // §15.3 Pass 158: the quality window (drained here — this loop
+            // is the single reader). Empty window keeps the pre-158
+            // last-frame RSSI so a quiet adapter still shows its last level.
+            const auto qw = radio->rx_quality_window(i);
+            if (qw.frames > 0) {
+                as.rssi_best = qw.rssi_peak_dbm;
+                as.rssi_mean = qw.rssi_mean_dbm;
+                as.snr = qw.snr_db;
+                if (qw.noise_valid) as.noise = qw.noise_dbm;
+                if (qw.evm_valid) {
+                    as.evm = qw.evm_db;
+                    as.evm_valid = true;
+                }
+            } else {
+                as.rssi_best = c.rssi_last;
+                as.rssi_mean = c.rssi_last;
+            }
             as.tx_submitted = c.tx_submitted;
             as.tx_failed = c.tx_failed;
             as.drop = c.rx_dropped;

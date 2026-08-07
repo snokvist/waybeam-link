@@ -26,10 +26,17 @@ struct AdapterStats {
     std::string name;
     uint64_t rx = 0;
     uint64_t dup = 0;
+    // §15.3 Pass 158: on the radio backend these four are a per-stats-tick
+    // quality window — rssi_best is the window PEAK (saturation-proof),
+    // snr the mean dB, noise the passive floor rssi−snr. evm (mean dB,
+    // lower = cleaner) is the saturation discriminator; evm_valid=false
+    // means no frame carried EVM, not perfect coding.
     int32_t rssi_best = 0;
     int32_t rssi_mean = 0;
     int32_t snr = 0;
     int32_t noise = 0;
+    int32_t evm = 0;
+    bool evm_valid = false;
     uint64_t tx_submitted = 0;
     uint64_t tx_failed = 0;
     uint64_t tx_timeout = 0;
