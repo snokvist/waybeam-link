@@ -71,7 +71,7 @@
 #include "wblink/video_slot_cadence.h"
 #include "wblink/uplink_calib_store.h"
 #include "wblink/uplink_calibrate.h"
-#include "wblink/uplink_quality.h"
+#include "wblink/calib_dwell.h"
 #include "wblink/air_mon.h"
 #if WBLINK_RADIO
 #include "wblink/air_radio.h"
@@ -327,7 +327,7 @@ const char* packet_type_name(const uint8_t* frame, size_t len) {
         "other",       "data",         "nack",        "link_report",
         "heartbeat",   "csa",          "recovery",    "jscc_feedback",
         "cache_status", "cache_request", "cache_reply", "announce",
-        "cache_assign", "vehicle_cmd", "selector_state", "uplink_quality"};
+        "cache_assign", "vehicle_cmd", "selector_state", "calibration"};
     return kNames[frame[2] & 0x0F];
 }
 
@@ -1836,9 +1836,11 @@ CalibrateParams calib_params_from(const CalibrationPolicy& c) {
     p.min_qdb = c.min_qdb;
     p.max_qdb = c.max_qdb;
     p.settle_ms = static_cast<uint32_t>(c.settle_ms);
-    p.probe_dwell_ms = static_cast<uint32_t>(c.probe_dwell_ms);
-    p.verify_dwell_ms = static_cast<uint32_t>(c.verify_dwell_ms);
-    p.report_loss_abort_ms = static_cast<uint32_t>(c.report_loss_abort_ms);
+    p.dwell_probe_frames = static_cast<uint16_t>(c.dwell_probe_frames);
+    p.dwell_verify_frames = static_cast<uint16_t>(c.dwell_verify_frames);
+    p.dwell.probe_pace_us = static_cast<uint32_t>(c.probe_pace_us);
+    p.dwell.tally_wait_ms = static_cast<uint32_t>(c.tally_wait_ms);
+    p.dwell.tally_retries = static_cast<uint32_t>(c.tally_retries);
     p.hard_cap_ms = static_cast<uint32_t>(c.hard_cap_ms);
     return p;
 }
@@ -2216,23 +2218,67 @@ struct TxCore {
             // §15.3 heard-ratio.
             if (selector_.on_report(*r, now)) {
                 ++reports_received_;
-                note_report_health(now);
-                // §3.16 (Pass 125): the SAME freshness gate feeds the uplink
-                // quality counters. A redundant copy carries no new epoch, so
-                // counting it would tell the ground its uplink delivered more
-                // than it did — the one number §10.7's loss estimator divides
-                // by. Rejected reports never reach here at all.
-                quality_.note_accepted(r->prefix.originator,
-                                       r->prefix.session_id, r->report_epoch,
-                                       rx_rssi, rx_mcs);
-            }
-            if (calibrator_) {
-                // §10.6: every ACCEPTED report feeds the calibration dwell
-                // (the engine discards samples inside its settle window).
-                calibrator_->on_report(static_cast<int8_t>(r->rssi_mean),
-                                       r->loss_postdiv_prearq, r->uniq, now);
             }
             return false;
+        }
+        if (const CalibProbe* pr = std::get_if<CalibProbe>(&dec)) {
+            // §3.16 acceptance: addressed to us, from the report-latched
+            // ground tuple — the only peer whose probes may pause the feed
+            // (D-C ruling) or draw tallies.
+            if (pr->prefix.destination != originator_) return false;
+            if (report_gate_.latched_originator() != pr->prefix.originator) {
+                return false;
+            }
+            const uint32_t ls = report_gate_.latched_session();
+            if (ls != 0 && ls != pr->prefix.session_id) return false;
+            const DwellTallyOut t = calib_rx_.on_probe(
+                pr->run_id, pr->dwell_id, pr->seq, pr->count, rx_rssi, rx_mcs,
+                now);
+            if (t.new_run) {
+                std::fprintf(stderr,
+                             "calibrate: uplink run %u from ground %u — "
+                             "video feed PAUSED (input-starve, §3.16)\n",
+                             t.run_id, pr->prefix.originator);
+            }
+            if (t.send && send_calib) {
+                CalibTally out;
+                out.prefix.originator = originator_;
+                out.prefix.destination = pr->prefix.originator;
+                out.prefix.session_id = session_;
+                out.run_id = t.run_id;
+                out.dwell_id = t.dwell_id;
+                out.received = t.received;
+                out.rssi_sum_dbm = t.rssi_sum_dbm;
+                out.rx_mcs = t.rx_mcs;
+                out.adapter_fingerprint = calib_ident_fingerprint_;
+                uint8_t tb[kCalibTallySize];
+                const size_t tn = encode_calib_tally(out, tb, sizeof tb);
+                if (tn != 0) {
+                    send_calib(tb, tn);
+                    ++calib_tallies_tx_;
+                }
+            }
+            return false;
+        }
+        if (const CalibTally* t = std::get_if<CalibTally>(&dec)) {
+            // §3.16: our own §10.6 run's evidence, from the accepted reporter.
+            if (t->prefix.destination != originator_) return false;
+            if (report_gate_.latched_originator() != t->prefix.originator) {
+                return false;
+            }
+            const uint32_t ls = report_gate_.latched_session();
+            if (ls != 0 && ls != t->prefix.session_id) return false;
+            if (calibrator_) {
+                calibrator_->on_tally(t->run_id, t->dwell_id, t->received,
+                                      t->rssi_sum_dbm, t->rx_mcs,
+                                      t->adapter_fingerprint);
+                ++calib_tallies_rx_;
+                calib_rx_mcs_ = t->rx_mcs;
+            }
+            return false;
+        }
+        if (std::holds_alternative<CalibUnknown>(dec)) {
+            return false;  // §3.16: newer peer — calibration unavailable
         }
         if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
             if (r->target_originator != originator_ ||
@@ -2303,14 +2349,30 @@ struct TxCore {
         venc_.poll(now);
         // §10.6: drive the calibration engine at loop cadence.
         calibrate_service(now);
+        calibrate_probe_service(now);
+        // §3.16 (Pass 153): resume a probe-paused feed once the ground's
+        // uplink run has gone quiet — the bounded, self-clearing D-C edge.
+        if (calib_rx_.run_id() != 0 &&
+            calib_rx_.quiet_for(now, feed_quiet_ms_)) {
+            calib_rx_.expire_run();
+            std::fprintf(stderr,
+                         "calibrate: uplink probes quiet — video feed "
+                         "RESUMED\n");
+        }
         // Push the CURRENT target every tick: write-on-change (§9.6) makes
         // this a no-op normally, and a failed push (encoder briefly down)
         // retries next tick instead of waiting for the next rung change.
         if (selector_.bitrate_kbps() > 0) {
             venc_.set_bitrate(selector_.bitrate_kbps());
         }
-        // §9.6 cadence estimate: frames over a ~1 s window.
-        if (cadence_start_ms_ != 0 && now >= cadence_start_ms_ + 1000) {
+        // §9.6 cadence estimate: frames over a ~1 s window. Frozen while
+        // the feed is paused (Pass 153): a starved input is not evidence
+        // about the encoder's cadence, and the §9.6/§9.11 ladder inputs must
+        // hold at their pre-pause values.
+        if (feed_paused()) {
+            cadence_frames_ = 0;
+            cadence_start_ms_ = now;
+        } else if (cadence_start_ms_ != 0 && now >= cadence_start_ms_ + 1000) {
             frame_cadence_us_ = cadence_frames_ > 0
                 ? (now - cadence_start_ms_) * 1000ull / cadence_frames_
                 : 0;
@@ -2394,8 +2456,18 @@ struct TxCore {
     // §11.3: freeze the cascade + pause the watchdog across the CSA blackout.
     void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
 
-    UplinkQualityCounters quality_;  // §3.16 (Pass 125)
-    uint8_t quality_fingerprint_ = 0;
+    // §3.16 (Pass 153): receiver half of the dwell primitive — counts the
+    // ground's uplink probes and answers tallies; its run lifecycle also
+    // drives the D-C feed pause.
+    DwellReceiver calib_rx_;
+    Inject send_calib;  // wired to the air inject in run_tx
+    uint8_t calib_ident_fingerprint_ = 0;
+    uint32_t feed_quiet_ms_ = 2000;  // §15.2 feed_quiet_ms
+    // §15.3 probe-exchange counters (role-neutral).
+    uint64_t calib_probes_tx_ = 0;
+    uint64_t calib_tallies_rx_ = 0;
+    uint64_t calib_tallies_tx_ = 0;
+    uint8_t calib_rx_mcs_ = kUplinkRxMcsUnknown;
 
     // §3.5 Pass 115: report authority is ONE authority across both return
     // gates. These wrap the pair deliberately — moving report_gate_ alone
@@ -2465,14 +2537,11 @@ struct TxCore {
         }
         return s;
     }
-    // §3.16 craft->ground uplink feedback. Returns nullopt when there is
-    // nothing honest to say: no latched reporter, or no accepted report yet in
-    // this counter domain. Pass 131 removed the key — see §3.16/§13.
-    std::optional<UplinkQuality> uplink_quality() const {
-        return quality_.build(originator_, session_, quality_fingerprint_);
-    }
-    void set_quality_identity(uint8_t fingerprint) {
-        quality_fingerprint_ = fingerprint;
+    // §3.16 (Pass 153): the CRC-8 of this craft's TX-adapter canonical
+    // calibration identity — stamped into every TALLY we return so the
+    // ground's artifact can identity-gate its evidence source.
+    void set_calib_identity(uint8_t fingerprint) {
+        calib_ident_fingerprint_ = fingerprint;
     }
 
     // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
@@ -2613,18 +2682,10 @@ struct TxCore {
                         return false;
                     }
                     if (report_gate_.latched_originator() == 0) return false;
-                    // §10.6 (Pass 134): feedback health, measured on the link
-                    // AT REST. §10.6 scores every dwell from §3.5 reports, so
-                    // a return path running at half cadence reads as fewer
-                    // observed losses — every probe clean at every power, and
-                    // the sweep places the whole curve at its ceiling. That is
-                    // not a state to measure through; it is a state to refuse
-                    // to start in. Latched-but-starved is invisible to the
-                    // check above, which only asks whether a reporter exists.
-                    if (report_health_hz_milli_ <
-                        calib_min_report_hz_ * 1000u) {
-                        return false;
-                    }
+                    // Pass 153: no report-health precondition — probe/tally
+                    // delivery is its own health check, and a run that cannot
+                    // exchange evidence fails loudly at its first dwell
+                    // (evidence_lost) instead of being refused by a proxy.
                     return calibrator_->start(now);
                 }
                 return calibrator_->abort(now);
@@ -2668,8 +2729,8 @@ struct TxCore {
     // operation the ceiling did not cover.
     void init_calibration(const CalibrationPolicy& c,
                           std::optional<int32_t> max_power_qdb) {
-        calib_min_report_hz_ = static_cast<uint32_t>(c.calib_min_report_hz);
         calib_policy_ = c;
+        feed_quiet_ms_ = static_cast<uint32_t>(c.feed_quiet_ms);
         CalibrateParams p = calib_params_from(c);
         if (table_ != nullptr) {
             for (const Profile& pr : table_->profiles) {
@@ -2720,22 +2781,6 @@ struct TxCore {
     // A whole window rather than an instantaneous gap, because the §7.2
     // return path is bursty by construction — one report per video EOB gap,
     // so gaps are normal and only the aggregate rate is meaningful.
-    static constexpr uint64_t kReportHealthWindowMs = 4000;
-    void note_report_health(uint64_t now) {
-        if (report_health_start_ms_ == 0) {
-            report_health_start_ms_ = now;
-            report_health_count_ = 0;
-        }
-        ++report_health_count_;
-        const uint64_t el = now - report_health_start_ms_;
-        if (el >= kReportHealthWindowMs) {
-            report_health_hz_milli_ =
-                static_cast<uint32_t>(report_health_count_ * 1000000ull / el);
-            report_health_start_ms_ = now;
-            report_health_count_ = 0;
-        }
-    }
-    uint32_t report_health_hz_milli() const { return report_health_hz_milli_; }
 
     bool cmd_arq_enabled() const { return cmd_arq_enabled_; }
     bool cmd_selector_frozen() const { return cmd_selector_frozen_; }
@@ -2890,6 +2935,11 @@ struct TxCore {
             snap.link.calib_fingerprint = calib_fingerprint_;
             snap.link.calib_stale = calib_stale_;
         }
+        // §3.16 (Pass 153) probe-exchange counters + the input-starve state.
+        snap.link.calib_probes_sent = calib_probes_tx_;
+        snap.link.calib_tallies_rx = calib_tallies_rx_;
+        snap.link.calib_rx_mcs = calib_rx_mcs_;
+        snap.link.feed_paused = feed_paused();
         // cmd_resolution_select / cmd_framing_select stay 0 until the venc
         // knobs exist (§11.7 staged, Pass 71).
         if (fps_ladder_) {
@@ -3273,10 +3323,6 @@ struct TxCore {
     // §10.6 (Pass 134) report-health window. NOT reset by reset_stats(): it
     // gates whether a calibration may start, and an operator zeroing the
     // stats display must not open that gate.
-    uint64_t report_health_start_ms_ = 0;
-    uint32_t report_health_count_ = 0;
-    uint32_t report_health_hz_milli_ = 0;
-    uint32_t calib_min_report_hz_ = 6;
     std::vector<Stream> streams_;
 
   public:
@@ -3386,6 +3432,43 @@ struct TxCore {
             selector_.set_profile_pin(*a.pin_rung, *a.pin_rung);
         }
     }
+    // §3.16 (Pass 153): the video input is starved while EITHER direction
+    // runs — our own §10.6 run, or a ground-driven §10.7 run observed as an
+    // active probe run at the receiver half.
+    bool feed_paused() const {
+        return calibrating() || calib_rx_.run_id() != 0;
+    }
+
+    // §3.16 (Pass 153): drain the §10.6 run's probe emissions. Probes go
+    // through send_calib (plain air inject) — they are their own traffic
+    // class, never ride the §7.2 held queue, and with the feed paused there
+    // is no video to pace against anyway.
+    void calibrate_probe_service(uint64_t now) {
+        if (!calibrator_ || !send_calib) return;
+        calibrator_->new_tick();
+        const uint16_t dest = report_gate_.latched_originator();
+        if (dest == 0) return;
+        for (;;) {
+            const DwellProbeOut po = calibrator_->next_probe(now);
+            if (!po.send) break;
+            CalibProbe pr;
+            pr.prefix.originator = originator_;
+            pr.prefix.destination = dest;
+            pr.prefix.session_id = session_;
+            pr.run_id = calibrator_->probe_run_id();
+            pr.dwell_id = calibrator_->probe_dwell_id();
+            pr.seq = po.seq;
+            pr.count = calibrator_->probe_dwell_count();
+            uint8_t buf[mtu_tier::kHighBudget];
+            const size_t n = encode_calib_probe(
+                pr, mtu_effective(), buf, sizeof buf);
+            if (n != 0) {
+                send_calib(buf, n);
+                ++calib_probes_tx_;
+            }
+        }
+    }
+
     bool has_power_curve() const { return !power_.empty(); }
     // §10.6: install/replace the tx adapters' §10.2 curve (calibration
     // artifact or boot auto-load) so the commit resolve uses it.
@@ -3498,10 +3581,6 @@ struct RxCore {
     // work: it counts reports the radio actually TOOK, so the calibrator can
     // size a burst and then divide by the ground's own exact count instead of
     // reconstructing it from the craft's anchors.
-    void set_probe_budget(uint32_t n) { reporter_.set_probe_budget(n); }
-    void clear_probe_mode() { reporter_.clear_probe_mode(); }
-    bool probing() const { return reporter_.probing(); }
-    bool probe_spent() const { return reporter_.probe_spent(); }
     // The injector's half of the §3.5 emission contract: the number to stamp
     // into the frame at the radio call, and the commit that spends it.
     uint32_t next_report_epoch() const { return reporter_.next_epoch(); }
@@ -3961,11 +4040,9 @@ struct UplinkStatsFill {
     int32_t power_qdb = 0;
     uint8_t fingerprint = 0;
     bool stale = false;
-    bool quality_valid = false;
-    uint32_t quality_age_ms = 0;
-    uint32_t report_epoch = 0;
-    uint32_t reports = 0;
-    int32_t rssi_mean = 0;
+    // §3.16 (Pass 153) probe-exchange counters for the local node's run.
+    uint64_t probes_sent = 0;
+    uint64_t tallies_rx = 0;
     uint8_t rx_mcs = kUplinkRxMcsUnknown;
     // §10.3/§10.5/§11.7 0x0A (Pass 135). Only TxCore::fill_stats sets the
     // link.tx_power_* fields, and the ground has no TxCore — so its §15.3
@@ -4023,12 +4100,9 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
         snap.link.uplink_calib_power_qdb = uplink->power_qdb;
         snap.link.uplink_calib_fingerprint = uplink->fingerprint;
         snap.link.uplink_calib_stale = uplink->stale;
-        snap.link.uplink_quality_valid = uplink->quality_valid;
-        snap.link.uplink_quality_age_ms = uplink->quality_age_ms;
-        snap.link.uplink_quality_report_epoch = uplink->report_epoch;
-        snap.link.uplink_quality_reports = uplink->reports;
-        snap.link.uplink_quality_rssi_mean = uplink->rssi_mean;
-        snap.link.uplink_quality_rx_mcs = uplink->rx_mcs;
+        snap.link.calib_probes_sent = uplink->probes_sent;
+        snap.link.calib_tallies_rx = uplink->tallies_rx;
+        snap.link.calib_rx_mcs = uplink->rx_mcs;
         snap.link.tx_power_tier = uplink->tx_power_tier;
         snap.link.tx_power_ceiling_qdb = uplink->tx_power_ceiling_qdb;
         snap.link.tx_power_tier_effective = uplink->tx_power_tier_effective;
@@ -4291,13 +4365,12 @@ int run_tx(const Loaded& l) {
                             ? calib_tx_adapter->max_power_qdb
                             : std::nullopt);
     {
-        // §3.16 (Pass 125): the craft's half of the identity pair the ground
-        // stale-checks its uplink artifact against. Same canonical identity
-        // §10.6 already keys its own artifact on, hashed to the one byte the
-        // wire has room for.
+        // §3.16 (Pass 153): the craft's half of the identity pair, stamped
+        // into every TALLY. Same canonical identity §10.6 keys its own
+        // artifact on, hashed to the one byte the wire has room for.
         const std::string ident =
             calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
-        tx.set_quality_identity(
+        tx.set_calib_identity(
             crc8_dvbs2(reinterpret_cast<const uint8_t*>(ident.data()),
                        ident.size()));
     }
@@ -4437,7 +4510,10 @@ int run_tx(const Loaded& l) {
     ArqTimingTracker arq_timing;
     uint64_t now_us_it = now_us();
     VideoSlotCadence selector_state_cadence(500);
-    VideoSlotCadence uplink_quality_cadence(500);  // §3.16 2 Hz (Pass 125)
+    // §3.15 word while the feed is paused (Pass 153): with no live slots the
+    // prepend below never fires, so a plain 2 Hz timer keeps the operator's
+    // only calibration progress view alive.
+    uint64_t next_paused_word_ms = 0;
     const auto send_raw = [&](const uint8_t* f, size_t n) {
         // Pass 110 operator boundary: the 2 Hz selector summary owns no TX
         // opportunity. When due, prepend it inside an already-active live RTP
@@ -4454,21 +4530,6 @@ int run_tx(const Loaded& l) {
                 if (sn != 0) {
                     (void)selector_state_cadence.note_submitted(
                         air.value->inject(sf, sn), slot_ms);
-                }
-            }
-            // §3.16 (Pass 125): same guard-cost boundary, own cadence. It
-            // rides an already-active live slot and never opens one — video
-            // still ends the slot and alone arms the §7.2 quiet gap, so no
-            // live DATA means no fresh quality, which is exactly what makes
-            // §10.7 refuse to start or abort.
-            if (uplink_quality_cadence.due(live_video_slot, slot_ms)) {
-                if (const std::optional<UplinkQuality> q = tx.uplink_quality()) {
-                    uint8_t qf[kUplinkQualitySize];
-                    const size_t qn = encode_uplink_quality(*q, qf, sizeof(qf));
-                    if (qn != 0) {
-                        (void)uplink_quality_cadence.note_submitted(
-                            air.value->inject(qf, qn), slot_ms);
-                    }
                 }
             }
         }
@@ -4491,6 +4552,11 @@ int run_tx(const Loaded& l) {
     const TxCore::Inject inject_resend = [&](const uint8_t* f, size_t n) {
         air.value->inject_resend(f, n);
         arq_timing.note_resend_submitted(f, n, now_us());
+    };
+    // §3.16 (Pass 153): probes and tallies are control-plane — plain inject,
+    // never the §7.2 held queue (they must not arm or ride quiet gaps).
+    tx.send_calib = [&](const uint8_t* f, size_t n) {
+        air.value->inject(f, n);
     };
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
     // retunes the (single) radio at the TSF-anchored T_switch. In announced
@@ -5009,10 +5075,17 @@ int run_tx(const Loaded& l) {
         // Air readiness comes first in the unified wait. SHM readiness only
         // marks a ring pending; a small bounded burst per ring is consumed
         // below without allowing a producer to monopolise the vehicle loop.
+        // §3.16 (Pass 153) input-starve: while a calibration direction runs,
+        // the video input is not read at all — ring event fds stay out of the
+        // wait set, UDP ingress datagrams are consumed and dropped, and the
+        // frame-shm drain below is skipped. venc keeps encoding; frames drop
+        // at the ring (drop-not-block). Resume is the same edge as the
+        // rate/power restore (own run) or the probe-quiet expiry (D-C).
+        const bool feed_paused = tx.feed_paused();
         std::vector<int> ready_fds = air.value->wait_fds();
         const size_t air_fd_count = ready_fds.size();
         for (const ShmIn& si : shm_ins) {
-            if (si.ring) {
+            if (si.ring && !feed_paused) {
                 ready_fds.push_back(si.ring->event_fd());
             }
         }
@@ -5033,12 +5106,15 @@ int run_tx(const Loaded& l) {
         };
         // Held frames need µs-scale reactivity — don't sleep in poll then.
         bool shm_pending = false;
-        for (const ShmIn& si : shm_ins) shm_pending |= si.pending;
+        if (!feed_paused) {
+            for (const ShmIn& si : shm_ins) shm_pending |= si.pending;
+        }
         const int in_timeout =
             held.empty() && !air.value->tx_pending() && !shm_pending ? 2 : 0;
         bindings.value->poll_once(
             in_timeout,
             [&](const IngressEvent& ev) {
+                if (feed_paused) return;  // Pass 153: consumed and dropped
                 tx.on_ingress(ev.stream_id, ev.data, ev.len, now, inject);
             },
             ready_fds, on_ready);
@@ -5051,6 +5127,7 @@ int run_tx(const Loaded& l) {
         const uint64_t service_now = now_ms();
         service_air(service_now);
         for (ShmIn& si : shm_ins) {
+            if (feed_paused) break;  // Pass 153: leave pending for resume
             if (!si.ring || !si.pending) continue;
             // B5: match the buffer to the producer's declared slot size (grows
             // at most once per larger geometry, including a producer swap). An
@@ -5075,6 +5152,18 @@ int run_tx(const Loaded& l) {
             // loop iteration continues draining without waiting for an edge.
         }
         now_us_it = now_us();
+        // §3.15 word while paused (Pass 153): no live slots exist, so the
+        // 2 Hz summary gets its own timer instead of the send_raw prepend.
+        if (feed_paused) {
+            const uint64_t nowp = now_us_it / 1000;
+            if (nowp >= next_paused_word_ms) {
+                const SelectorState st = tx.selector_state(nowp);
+                uint8_t sf[kSelectorStateCalibSize];
+                const size_t sn = encode_selector_state(st, sf, sizeof sf);
+                if (sn != 0) (void)air.value->inject(sf, sn);
+                next_paused_word_ms = nowp + 500;
+            }
+        }
         // §3.2 bit 4 / §11.6 (Pass 89): CSA_ARMED tracks the whole campaign —
         // set on accept, cleared on COMMITTED (or on the §11.5 revert back to
         // IDLE). Driven from follower state rather than pinned at the accept
@@ -5203,54 +5292,6 @@ int run_rx(const Loaded& l) {
     // §10.3/§10.5/§10.7/§11.7 0x0A: one owner for the uplink's power, holding
     // the ceiling a tier moves and the single precedence path every apply site
     // runs through. Its actuators are wired below, once the radio exists.
-    // At-rest uplink loss floor, over a rolling window of ORDINARY operation,
-    // so the §10.7 walls can be referenced against it. Tier-2 mechanism —
-    // how the walls are referenced is unruled in the spec; the evidence and
-    // sizing live in docs/findings.md (2026-08-07 entry).
-    //
-    // Sampled outside the run, like §10.6's Pass 134 report-health
-    // precondition and for the same reason: once the sweep starts, elevated
-    // loss is the measurement.
-    struct UplinkFloor {
-        // A SAMPLE-COUNT gate, not a clock — sized by the
-        // policy.calibration.uplink_floor_min_samples knob (findings.md: at
-        // ~10 Hz reports, n=40 has sigma the size of the floor it estimates;
-        // n=300 puts sigma near 9permille at a 25permille floor).
-        uint32_t min_samples = 300;
-        uint32_t max_win_ms = 60000;  // give up and re-mark on a dead link
-        uint64_t mark_ms = 0;
-        uint32_t mark_sent = 0;
-        uint32_t mark_recv = 0;
-        bool have = false;
-        uint16_t floor_milli = 0;
-        void sample(uint64_t now, uint32_t sent, uint32_t recv) {
-            if (mark_ms == 0 || sent < mark_sent || recv < mark_recv) {
-                mark_ms = now;  // first sample, or the craft's counters reset
-                mark_sent = sent;
-                mark_recv = recv;
-                return;
-            }
-            const uint32_t ds = sent - mark_sent;
-            if (ds < min_samples) {
-                if (now - mark_ms < max_win_ms) return;
-                mark_ms = now;  // link too quiet to estimate; start over
-                mark_sent = sent;
-                mark_recv = recv;
-                return;
-            }
-            const uint32_t dr = recv - mark_recv;
-            if (dr <= ds) {
-                floor_milli =
-                    static_cast<uint16_t>(1000ull * (ds - dr) / ds);
-                have = true;
-            }
-            mark_ms = now;
-            mark_sent = sent;
-            mark_recv = recv;
-        }
-    } ufloor;
-    ufloor.min_samples = static_cast<uint32_t>(
-        l.cfg.policy.calibration.uplink_floor_min_samples);
     UplinkPower upwr;
     upwr.mcs = l.cfg.air.uplink_mcs;
     // §10.5/§10.7 (Pass 151): the ground's power space, decided ONCE from the
@@ -5299,10 +5340,9 @@ int run_rx(const Loaded& l) {
     RxCore rx(l.cfg, session, l.have_table ? &l.table : nullptr,
               l.have_table ? std::optional<uint8_t>(l.tv) : std::nullopt);
 
-    // §3.16 accept gate + §10.7 calibrator. The gate needs the currently
-    // selected DATA source, which the calibrator has no notion of, so the two
-    // stay separate and the poll loop routes samples between them.
-    UplinkQualityGate quality_gate(l.cfg.node.originator, session);
+    // §3.16 (Pass 153): the craft adapter fingerprint arrives on TALLYs now
+    // (D-A ruling) — 0 until the first run's first tally this session.
+    uint8_t craft_tally_fp = 0;
     uint32_t selected_craft_session = 0;
     UplinkCalibParams ucal_params;
     {
@@ -5328,35 +5368,38 @@ int run_rx(const Loaded& l) {
                 std::min(ucal_params.seek.max_qdb, *upwr.ceiling_qdb);
         }
         ucal_params.settle_ms = static_cast<uint32_t>(cp.settle_ms);
-        ucal_params.probe_epochs =
-            static_cast<uint32_t>(cp.uplink_probe_epochs);
-        ucal_params.verify_epochs =
-            static_cast<uint32_t>(cp.uplink_verify_epochs);
-        ucal_params.liveness_ms = static_cast<uint32_t>(cp.uplink_liveness_ms);
-        ucal_params.drain_ms = static_cast<uint32_t>(cp.uplink_drain_ms);
+        ucal_params.dwell_probe_frames =
+            static_cast<uint16_t>(cp.dwell_probe_frames);
+        ucal_params.dwell_verify_frames =
+            static_cast<uint16_t>(cp.dwell_verify_frames);
+        ucal_params.dwell.probe_pace_us =
+            static_cast<uint32_t>(cp.probe_pace_us);
+        ucal_params.dwell.tally_wait_ms =
+            static_cast<uint32_t>(cp.tally_wait_ms);
+        ucal_params.dwell.tally_retries =
+            static_cast<uint32_t>(cp.tally_retries);
         ucal_params.hard_cap_ms = static_cast<uint32_t>(cp.hard_cap_ms);
-        // §10.7 (Pass 131): rung -> rate identity from the §9.3 table, so a
-        // calibrated placement's GI is the GI the uplink would actually be
-        // commanded to. The seeded defaults already match the authored table;
-        // reading it here means a deployment that authored a different one
-        // agrees without a code change, and core/ still needs no table
-        // dependency — the resolve happens on this side of the seam.
+        // §10.7 (Pass 153): THE rung is the configured operating point; its
+        // rate identity and §10.3 taper level come from the §9.3 table row
+        // that carries it, so a deployment that authored a different table
+        // agrees without a code change (core/ keeps no table dependency).
+        ucal_params.rate =
+            UplinkRate{l.cfg.air.uplink_mcs, l.cfg.air.uplink_sgi};
         if (l.have_table) {
             for (const Profile& pr : l.table.profiles) {
-                if (pr.id < kUplinkRungs) {
-                    ucal_params.rungs[pr.id] =
-                        UplinkRate{pr.mcs, pr.gi == GuardInterval::kShort};
-                    // §10.3 (Pass 134): the same table row carries the per-rung
-                    // power intent the sweep ceiling is tapered by.
-                    ucal_params.levels[pr.id] = pr.tx_power_level;
+                if (pr.mcs == l.cfg.air.uplink_mcs &&
+                    (pr.gi == GuardInterval::kShort) ==
+                        l.cfg.air.uplink_sgi) {
+                    ucal_params.rung_level = pr.tx_power_level;
+                    break;
                 }
             }
         }
     }
     UplinkCalibrator uplink_cal(ucal_params);
-    // The placement for the rung the uplink actually transmits at. §10.7
-    // measures all eight and persists all eight, but only this one is
-    // resolved onto the actuator — the rest are for a future rate policy.
+    // The placement for the rung the uplink actually transmits at — since
+    // Pass 153 the only rung measured; the lookup shape survives so an older
+    // eight-entry artifact resolves the matching entry.
     const auto uplink_measured_qdb = [&]() -> std::optional<int32_t> {
         for (const UplinkPlacement& pl : uplink_cal.placements()) {
             if (pl.mcs == l.cfg.air.uplink_mcs &&
@@ -5403,6 +5446,16 @@ int run_rx(const Loaded& l) {
     // exist at config-load time.
     const std::string uplink_identity =
         uplink_adapter != nullptr ? calib_identity(*uplink_adapter, l.cfg.air.kind) : "udp";
+    // §3.16 (Pass 153): the ground's receiver half (craft §10.6 downlink
+    // probes → tallies) and the probe-exchange observability counters.
+    DwellReceiver dcal_rx;
+    const uint8_t ground_ident_fp = crc8_dvbs2(
+        reinterpret_cast<const uint8_t*>(uplink_identity.data()),
+        uplink_identity.size());
+    uint64_t ucal_probes_tx = 0;
+    uint64_t ucal_tallies_rx = 0;
+    uint64_t ucal_tallies_tx = 0;
+    uint8_t ucal_rx_mcs = kUplinkRxMcsUnknown;
     std::optional<UplinkArtifact> uplink_artifact;
     uint8_t uplink_artifact_fp = 0;
     bool uplink_artifact_stale = false;
@@ -5419,15 +5472,13 @@ int run_rx(const Loaded& l) {
         }
         uplink_artifact = std::move(*stored.value);
     }
-    // The craft's §3.16 adapter fingerprint as the ARTIFACT records it: the RX
-    // chain the placement was measured against, taken from live feedback and
-    // not from config. 0 until feedback arrives, which is why a fresh boot
-    // resolves to no-artifact until the craft is both selected and reporting.
-    const auto uplink_craft_fp = [&]() -> uint8_t {
-        return quality_gate.have()
-                   ? quality_gate.last().craft_adapter_fingerprint
-                   : uint8_t{0};
-    };
+    // The craft's adapter fingerprint as the ARTIFACT records it: the RX
+    // chain the placement was measured against. Since Pass 153 it arrives on
+    // the run's §3.16 TALLYs (D-A) — so before any run this session it is 0
+    // = UNKNOWN, and the artifact resolve below defers the craft-adapter
+    // check to the rest of the tuple; the first tally with a different
+    // fingerprint flips the artifact STALE through the pairing key.
+    const auto uplink_craft_fp = [&]() -> uint8_t { return craft_tally_fp; };
     const auto uplink_artifact_qdb = [&]() -> std::optional<int32_t> {
         if (!uplink_artifact) return std::nullopt;
         // §10.7: "Apply it only when the same craft is selected and both local
@@ -5435,10 +5486,13 @@ int run_rx(const Loaded& l) {
         // leave hardware at the higher-precedence source." The local half was
         // checked at load; the rest cannot be, so the FULL tuple is checked
         // here, at every resolve — the same tuple the writer stamps in.
+        const uint8_t live_fp = uplink_craft_fp();
+        const uint8_t fp_for_match =
+            live_fp != 0 ? live_fp
+                         : uplink_artifact->craft_adapter_fingerprint;
         if (!uplink_calib_matches(*uplink_artifact, uplink_identity,
-                                  active_selection.originator,
-                                  uplink_craft_fp(), operating_chan,
-                                  op_bw_mhz)) {
+                                  active_selection.originator, fp_for_match,
+                                  operating_chan, op_bw_mhz)) {
             uplink_artifact_stale = true;
             return std::nullopt;
         }
@@ -5490,11 +5544,6 @@ int run_rx(const Loaded& l) {
     // Power precedence now lives in UplinkPower::apply() — ONE copy, which is
     // what this comment used to warn about having four of.
     const auto uplink_restore_actuators = [&]() {
-        // Probe mode first, and unconditionally: it is the one actuator that
-        // is not the adapter's, so an early return on a missing uplink
-        // adapter must not leave the reporter stuck in a spent burst — which
-        // would silence LINK_REPORT entirely, for good.
-        rx.clear_probe_mode();
         if (uplink_adapter == nullptr) return;
         air.value->latch_uplink_rate(l.cfg.air.uplink_mcs,
                                      l.cfg.air.uplink_sgi);
@@ -5597,24 +5646,10 @@ int run_rx(const Loaded& l) {
         // hardware got — reported_qdb() is the half of the split that does
         // not apply the ceiling. The craft half does the same.
         u.tx_power_qdb = upwr.reported_qdb().value_or(0);
-        // §3.16: valid/age track LIVENESS (packet arrival), not counter
-        // progress — that is the clock §10.7's abort watches.
-        u.quality_valid = quality_gate.live(now_ms(), ucal_params.liveness_ms);
-        u.quality_age_ms =
-            quality_gate.have()
-                ? static_cast<uint32_t>(now_ms() - quality_gate.liveness_ms())
-                : 0;
-        if (quality_gate.have()) {
-            const UplinkQuality& q = quality_gate.last();
-            u.report_epoch = q.last_report_epoch;
-            u.reports = q.reports_received;
-            u.rx_mcs = q.last_rx_mcs;
-            u.rssi_mean =
-                q.reports_received != 0
-                    ? static_cast<int32_t>(q.rssi_sum_dbm) /
-                          static_cast<int32_t>(q.reports_received)
-                    : 0;
-        }
+        // §3.16 (Pass 153) probe-exchange counters.
+        u.probes_sent = ucal_probes_tx;
+        u.tallies_rx = ucal_tallies_rx;
+        u.rx_mcs = ucal_rx_mcs;
         return u;
     };
 
@@ -5849,10 +5884,6 @@ int run_rx(const Loaded& l) {
     // Disabled (default) they inject immediately — §7.1 baseline.
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> urgent_ret_held;
-    // §7.2/§10.7: how many queued LINK_REPORTs one quiet gap can absorb.
-    // Ordinary operation queues one, so this only binds during a §10.7 probe
-    // burst — which is exactly where overflowing the gap is invisible loss.
-    static constexpr size_t kReportsPerReturnWindow = 1;
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_ret_held;
     // §7.2 Pass 78: anchored report batches re-fire once at the NEXT return
     // window (spread across two listen gaps; a blind fallback batch is not
@@ -6088,7 +6119,7 @@ int run_rx(const Loaded& l) {
         // Drain the single-shot restore edge here rather than leaving it to
         // the service loop: shutdown never reaches the loop again.
         const UplinkCalibActions ua =
-            uplink_cal.tick(now_ms(), rx.report_epoch(), true, true);
+            uplink_cal.tick(now_ms());
         if (ua.restore) uplink_restore_actuators();
         // Empty on a cache-assignment node, which never gets the issuer
         // handlers — calling it unguarded would throw bad_function_call.
@@ -6418,12 +6449,9 @@ int run_rx(const Loaded& l) {
                 s += ",\"fingerprint\":" + std::to_string(u.fingerprint);
                 s += ",\"stale\":";
                 s += u.stale ? "true" : "false";
-                s += ",\"quality\":{\"valid\":";
-                s += u.quality_valid ? "true" : "false";
-                s += ",\"age_ms\":" + std::to_string(u.quality_age_ms);
-                s += ",\"last_report_epoch\":" + std::to_string(u.report_epoch);
-                s += ",\"reports_received\":" + std::to_string(u.reports);
-                s += ",\"rssi_mean\":" + std::to_string(u.rssi_mean);
+                s += ",\"probes\":{\"sent\":" +
+                     std::to_string(u.probes_sent);
+                s += ",\"tallies_rx\":" + std::to_string(u.tallies_rx);
                 s += ",\"rx_mcs\":" + std::to_string(u.rx_mcs);
                 s += "},\"artifact\":";
                 if (uplink_artifact) {
@@ -6599,9 +6627,6 @@ int run_rx(const Loaded& l) {
                                ? "craft has no report latch holder"
                                : "another ground holds the craft's report latch";
                 }
-                if (!quality_gate.live(now_ms(), ucal_params.liveness_ms)) {
-                    return "no fresh §3.16 feedback";
-                }
                 if (upwr.override_qdb) {
                     return "§10.5 TX-power override is latched";
                 }
@@ -6609,38 +6634,18 @@ int run_rx(const Loaded& l) {
                 if (issuer.active()) return "CSA campaign active (issuer)";
                 if (follower.campaign_active()) return "CSA campaign active";
                 // The craft must not be calibrating its own downlink: §10.7
-                // drives ground power to min_qdb, which starves the report
-                // stream every §10.6 dwell and its abort clock depend on.
+                // drives ground power to min_qdb, which starves the uplink
+                // return path every §10.6 tally rides (§3.16).
                 if (rx.craft_calibrating()) {
                     return "craft downlink calibration is running";
                 }
-                // Tier-2 mechanism (findings.md 2026-08-07): the walls are
-                // the at-rest floor plus the configured margins. Without a
-                // floor the run would judge against an absolute bar that may
-                // sit below the link's own noise — the state that made every
-                // rung unreachable at 10 m — so refuse rather than measure
-                // against a number we know nothing about. Self-clearing
-                // within one window.
-                if (!ufloor.have) {
-                    return "uplink loss floor not measured yet — retry in a "
-                           "few seconds (§10.7)";
-                }
-                const uint16_t wall_ok = static_cast<uint16_t>(
-                    std::min(1000, ufloor.floor_milli +
-                                       l.cfg.policy.calibration.loss_ok_milli));
-                const uint16_t wall_bad = static_cast<uint16_t>(
-                    std::min(1000, ufloor.floor_milli +
-                                       l.cfg.policy.calibration.loss_bad_milli));
-                if (!uplink_cal.set_loss_walls(wall_ok, wall_bad)) {
+                // Pass 153: no feedback-freshness or floor precondition —
+                // with the craft's feed paused the contention floor is
+                // structurally zero (absolute walls), and probe/tally
+                // delivery is its own health check.
+                if (!uplink_cal.start(now_ms())) {
                     return "calibration already running";
                 }
-                if (!uplink_cal.start(now_ms(), rx.report_epoch())) {
-                    return "calibration already running";
-                }
-                std::fprintf(stderr,
-                             "uplink-calib: at-rest floor %upermille -> walls "
-                             "ok=%u bad=%upermille\n",
-                             ufloor.floor_milli, wall_ok, wall_bad);
                 uplink_cal_craft = active_selection.originator;
                 if (both) calib_seq.start(now_ms());
                 std::fprintf(stderr, "uplink-calib: START mcs=%u%s\n",
@@ -6954,8 +6959,7 @@ int run_rx(const Loaded& l) {
             // bench as the craft seeing ~4.8 epochs/s instead of 10 and
             // tripping REPORT_TIMEOUT on staleness — a healthy-looking link
             // (RSSI -54, 2.7M packets) with a starved return path.
-            size_t window_budget =
-                rx.probing() ? kReportsPerReturnWindow : report_ret_held.size();
+            size_t window_budget = report_ret_held.size();
             while (!report_ret_held.empty() && window_budget-- > 0) {
                 auto& [f, target] = report_ret_held.front();
                 // Stamps in place, so the redundancy copy must be taken AFTER
@@ -6975,12 +6979,7 @@ int run_rx(const Loaded& l) {
                 ++ret_window_misses;
             }
             urgent_ret_held.clear();
-            // During a burst, whatever did not fit is the next window's batch
-            // (bounded by the burst size, issued once per dwell). Outside one
-            // the loop above drained it, so this is a no-op — but it is stated
-            // rather than assumed, because leaving stale reports queued on the
-            // ordinary path is exactly the regression above.
-            if (!rx.probing()) report_ret_held.clear();
+            report_ret_held.clear();
             ret_at_us.reset();
             report_fallback_us.reset();
             ret_tsf_anchored = false;
@@ -6988,31 +6987,13 @@ int run_rx(const Loaded& l) {
         // §10.7 calibrator service. `restore` is single-shot and set on EVERY
         // terminal path, so this is the one place probe power is handed back
         // to the §10.7 owner — no exit can strand it.
-        // Tier-2 floor sampling (findings.md 2026-08-07): keep the at-rest
-        // floor current, but ONLY while no sweep is running — during a run
-        // the loss IS the measurement, and folding it back into the baseline
-        // would chase its own tail.
-        if (quality_gate.have() &&
-            uplink_cal.state() != CalibState::kRunning) {
-            const UplinkQuality& q = quality_gate.last();
-            ufloor.sample(now_ms(), q.last_report_epoch, q.reports_received);
-        }
         // Ticked UNCONDITIONALLY. tick() early-returns when the calibrator is
         // not running, but it drains the single-shot restore/artifact edges
         // first — and a terminal state set from OUTSIDE this loop (the REST
         // abort, the §10.5 latch) has no other drain point. Gating this on
         // kRunning stranded probe power on exactly those paths.
         {
-            const UplinkCalibActions ua = uplink_cal.tick(
-                now_ms(), rx.report_epoch(),
-                quality_gate.live(now_ms(), ucal_params.liveness_ms),
-                // The burst is finished when it has been built AND the paced
-                // queue has actually gone out. `probe_spent()` alone is the
-                // BUILD signal; with §7.2 pacing a 400-probe verify takes ~50
-                // windows to leave, which is longer than the drain — opening
-                // the drain on the build signal would score a dwell whose
-                // probes were still departing.
-                rx.probe_spent() && report_ret_held.empty());
+            const UplinkCalibActions ua = uplink_cal.tick(now_ms());
             // Rate before power (§10.7 R4 order): the rung is what the power
             // is being measured FOR, so commanding power first would spend a
             // settle window at the new level on the old rung.
@@ -7031,9 +7012,33 @@ int run_rx(const Loaded& l) {
                     (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
                 }
             }
-            // §10.7 (Pass 132): the burst. 0 opens the drain window, so the
-            // craft's counter settles before the dwell is scored.
-            if (ua.probe_budget) rx.set_probe_budget(*ua.probe_budget);
+            // §3.16 (Pass 153): drain the run's probe emissions — MTU-padded,
+            // paced by the engine, unicast to the craft the run is bound to.
+            if (uplink_adapter != nullptr &&
+                uplink_cal.state() == CalibState::kRunning &&
+                uplink_cal_craft != 0) {
+                uplink_cal.new_tick();
+                for (;;) {
+                    const DwellProbeOut po = uplink_cal.next_probe(now_ms());
+                    if (!po.send) break;
+                    CalibProbe pr;
+                    pr.prefix.originator = l.cfg.node.originator;
+                    pr.prefix.destination = uplink_cal_craft;
+                    pr.prefix.session_id = session;
+                    pr.run_id = uplink_cal.probe_run_id();
+                    pr.dwell_id = uplink_cal.probe_dwell_id();
+                    pr.seq = po.seq;
+                    pr.count = uplink_cal.probe_dwell_count();
+                    uint8_t buf[mtu_tier::kHighBudget];
+                    const size_t n = encode_calib_probe(
+                        pr, mtu_effective, buf, sizeof buf);
+                    if (n != 0) {
+                        (void)air.value->inject_return(uplink_cal_craft, buf,
+                                                       n, false);
+                        ++ucal_probes_tx;
+                    }
+                }
+            }
             if (ua.restore) uplink_restore_actuators();
             // §10.7 per-dwell trace. The campaign's deliverable is a per-run
             // record (duration, samples/dwell, loss, RSSI, bracket); without
@@ -7076,10 +7081,7 @@ int run_rx(const Loaded& l) {
                 // The craft half of the pairing comes from the feedback that
                 // produced this measurement, not from config — it identifies
                 // the RX chain the placement was actually measured against.
-                art.craft_adapter_fingerprint =
-                    quality_gate.have()
-                        ? quality_gate.last().craft_adapter_fingerprint
-                        : 0;
+art.craft_adapter_fingerprint = craft_tally_fp;
                 art.channel_mhz = operating_chan;
                 art.bw_mhz = op_bw_mhz;
                 art.t_unix = static_cast<int64_t>(::time(nullptr));
@@ -7098,8 +7100,7 @@ int run_rx(const Loaded& l) {
                                  "run FAILED, placement not persisted\n",
                                  l.cfg.policy.calibration.artifact_dir.c_str());
                     uplink_cal.fail_persist();
-                    const UplinkCalibActions fa = uplink_cal.tick(
-                        now_ms(), rx.report_epoch(), true, true);
+                    const UplinkCalibActions fa = uplink_cal.tick(now_ms());
                     if (fa.restore) uplink_restore_actuators();
                 } else {
                     uplink_artifact = std::move(art);
@@ -7196,15 +7197,56 @@ int run_rx(const Loaded& l) {
                 }
                 return;
             }
-            // §3.16: uplink feedback from the craft we are currently taking
-            // DATA from. The gate owns every accept rule; all that happens
-            // here is routing the sample.
-            if (const UplinkQuality* uq = std::get_if<UplinkQuality>(&dec)) {
-                const QualitySample s = quality_gate.accept(
-                    *uq, active_selection.originator, selected_craft_session,
-                    now);
-                uplink_cal.on_sample(s, now);
+            // §3.16 (Pass 153): the calibration family, scoped to the craft
+            // we are currently taking DATA from.
+            if (const CalibProbe* cp = std::get_if<CalibProbe>(&dec)) {
+                // Ground as RECEIVER: the craft's §10.6 downlink probes.
+                if (cp->prefix.destination == l.cfg.node.originator &&
+                    cp->prefix.originator == active_selection.originator &&
+                    (selected_craft_session == 0 ||
+                     cp->prefix.session_id == selected_craft_session)) {
+                    const DwellTallyOut t = dcal_rx.on_probe(
+                        cp->run_id, cp->dwell_id, cp->seq, cp->count,
+                        meta.rssi, meta.rx_mcs, now);
+                    if (t.send && uplink_adapter != nullptr) {
+                        CalibTally out;
+                        out.prefix.originator = l.cfg.node.originator;
+                        out.prefix.destination = cp->prefix.originator;
+                        out.prefix.session_id = session;
+                        out.run_id = t.run_id;
+                        out.dwell_id = t.dwell_id;
+                        out.received = t.received;
+                        out.rssi_sum_dbm = t.rssi_sum_dbm;
+                        out.rx_mcs = t.rx_mcs;
+                        out.adapter_fingerprint = ground_ident_fp;
+                        uint8_t tb[kCalibTallySize];
+                        const size_t tn =
+                            encode_calib_tally(out, tb, sizeof tb);
+                        if (tn != 0) {
+                            (void)air.value->inject_return(
+                                cp->prefix.originator, tb, tn, false);
+                            ++ucal_tallies_tx;
+                        }
+                    }
+                }
                 return;
+            }
+            if (const CalibTally* ct = std::get_if<CalibTally>(&dec)) {
+                // Ground as SENDER: the craft's per-dwell receipt for our
+                // §10.7 uplink run.
+                if (ct->prefix.destination == l.cfg.node.originator &&
+                    ct->prefix.originator == active_selection.originator) {
+                    uplink_cal.on_tally(ct->run_id, ct->dwell_id,
+                                        ct->received, ct->rssi_sum_dbm,
+                                        ct->rx_mcs, ct->adapter_fingerprint);
+                    craft_tally_fp = ct->adapter_fingerprint;
+                    ucal_rx_mcs = ct->rx_mcs;
+                    ++ucal_tallies_rx;
+                }
+                return;
+            }
+            if (std::holds_alternative<CalibUnknown>(dec)) {
+                return;  // §3.16: newer peer — calibration unavailable
             }
             if (const DataView* v = std::get_if<DataView>(&dec)) {
                 // The craft's session comes from the stream we are actually
