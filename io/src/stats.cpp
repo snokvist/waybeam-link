@@ -452,6 +452,12 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.report_latch_holder);
     out += ",\"report_latch_known\":";
     append_bool(out, snap.link.report_latch_known);
+    out += ",\"verdict\":";
+    append_u64(out, snap.link.verdict);
+    out += ",\"verdict_age_ms\":";
+    append_u64(out, snap.link.verdict_age_ms);
+    out += ",\"promote_blocked_saturated\":";
+    append_u64(out, snap.link.promote_blocked_saturated);
     out += ",\"selector_state_valid\":";
     append_bool(out, snap.link.selector_state_valid);
     out += ",\"selector_state_age_ms\":";

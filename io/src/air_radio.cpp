@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -19,6 +20,7 @@
 #include "IRtlDevice.h"
 #include "RxPacket.h"
 #include "RxQuality.h"  // §15.3 Pass 158: the vendored fold conventions
+#include "LinkHealth.h"  // §3.16 Pass 159: the vendored verdict thresholds
 #include "SelectedChannel.h"
 #include "TxMode.h"
 #include "UsbOpen.h"
@@ -50,6 +52,15 @@ uint8_t mhz_to_channel(uint16_t mhz) {
 }
 
 // "bus-port[.port...]" (lsusb -t style), e.g. "3-1.2".
+// §3.16 Pass 159: monotonic ms for the quality-drain guard (main-thread
+// pacing only, never on a wire or in an artifact).
+uint64_t steady_ms() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
 std::string usb_path_of(libusb_device* dev) {
     uint8_t ports[7];
     const int n = libusb_get_port_numbers(dev, ports, sizeof(ports));
@@ -133,6 +144,12 @@ struct RadioAir::Impl {
         return v < 0 ? std::nullopt
                      : std::optional<uint8_t>(static_cast<uint8_t>(v));
     }
+    // §15.3/§3.16 Pass 159: the shared quality drain (main-thread only).
+    // Cache is per final adapter index; verdict is the node-level cause.
+    void quality_drain(uint64_t now_steady_ms);
+    uint64_t quality_drained_ms = 0;
+    std::vector<RadioAir::RxQualityWindow> quality_cache;
+    uint8_t quality_verdict = link_verdict::kUnknown;
     // §3.0 Pass 118: the committed operating point, stamped into every
     // frame's radiotap. set_tx_mode keeps SetTxMode in lockstep with it.
     TxRate rate;
@@ -769,6 +786,9 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     // agree. §9.5 set_tx_mode rewrites mcs/sgi and leaves these standing.
     im.rate.ldpc = cfg.ldpc;
     im.rate.stbc = cfg.stbc ? 1 : 0;
+    // §15.3 Pass 159: quality cache sized to the FINAL adapter set, before
+    // any reader can call the shared drain.
+    im.quality_cache.resize(im.adapters.size());
 
     for (size_t i = 0; i < im.adapters.size(); ++i) {
         Impl::Adapter& ad = *im.adapters[i];
@@ -1247,29 +1267,88 @@ RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {
     return c;
 }
 
-RadioAir::RxQualityWindow RadioAir::rx_quality_window(size_t adapter) {
-    RxQualityWindow w;
-    if (adapter >= impl_->adapters.size()) return w;
-    // snapshot() drains and resets the vendored accumulator — the delta
-    // semantics §15.3 documents. Unit folds per LinkHealth.h: PWDB dBm ≈
-    // raw − 110; SNR/EVM signed half-dB (dB = raw/2, EVM lower = cleaner).
-    const devourer::RxQualitySnapshot s =
-        impl_->adapters[adapter]->quality.snapshot();
-    w.frames = s.frames;
-    if (s.frames > 0) {
-        w.rssi_peak_dbm = s.rssi_max_raw - 110;
-        w.rssi_mean_dbm = s.rssi_mean_raw - 110;
-        w.snr_db = s.snr_mean_raw / 2;
-        if (s.evm_valid) {
-            w.evm_db = s.evm_mean_raw / 2;
-            w.evm_valid = true;
-        }
-        if (s.nf_valid) {
-            w.noise_dbm = static_cast<int32_t>(s.nf_mean_dbm);
-            w.noise_valid = true;
-        }
+void RadioAir::Impl::quality_drain(uint64_t now_steady_ms) {
+    // §15.3/§3.16 (Pass 159): ONE internal drain, at most once per second,
+    // shared by the stats read and the verdict — a second consumer can
+    // never split the delta. Main-thread only (like the control plane).
+    if (quality_drained_ms != 0 &&
+        now_steady_ms - quality_drained_ms < 1000) {
+        return;
     }
-    return w;
+    quality_drained_ms = now_steady_ms;
+    int best = -1;
+    devourer::RxQualitySnapshot best_raw{};
+    for (size_t i = 0; i < adapters.size(); ++i) {
+        // snapshot() drains and resets the vendored accumulator. Unit folds
+        // per LinkHealth.h: PWDB dBm ≈ raw − 110; SNR/EVM signed half-dB
+        // (dB = raw/2, EVM lower = cleaner).
+        const devourer::RxQualitySnapshot s = adapters[i]->quality.snapshot();
+        RadioAir::RxQualityWindow w;
+        w.frames = s.frames;
+        if (s.frames > 0) {
+            w.rssi_peak_dbm = s.rssi_max_raw - 110;
+            w.rssi_mean_dbm = s.rssi_mean_raw - 110;
+            w.snr_db = s.snr_mean_raw / 2;
+            if (s.evm_valid) {
+                w.evm_db = s.evm_mean_raw / 2;
+                w.evm_valid = true;
+            }
+            if (s.nf_valid) {
+                w.noise_dbm = static_cast<int32_t>(s.nf_mean_dbm);
+                w.noise_valid = true;
+            }
+            if (best < 0 || s.rssi_max_raw > best_raw.rssi_max_raw) {
+                best = static_cast<int>(i);
+                best_raw = s;
+            }
+        }
+        quality_cache[i] = w;
+    }
+    // §3.16 (Pass 159): classify the best-peak ear — the ear rssi_best
+    // describes; the verdict and the RSSI series must describe the same
+    // thing. Frame-metric legs only (no energy/IGI — scout owns those,
+    // Pass 155). No ear heard anything → NoSignal.
+    if (best < 0) {
+        quality_verdict = link_verdict::kNoSignal;
+        return;
+    }
+    devourer::LinkHealthInput in;
+    in.frames = best_raw.frames;
+    in.rssi_raw = best_raw.rssi_max_raw;
+    in.snr_raw = best_raw.snr_mean_raw;
+    in.evm_raw = best_raw.evm_mean_raw;
+    in.evm_valid = best_raw.evm_valid;
+    switch (devourer::classify_link_health(in).verdict) {
+        case devourer::LinkVerdict::NoSignal:
+            quality_verdict = link_verdict::kNoSignal;
+            break;
+        case devourer::LinkVerdict::Saturated:
+            quality_verdict = link_verdict::kSaturated;
+            break;
+        case devourer::LinkVerdict::Interference:
+            quality_verdict = link_verdict::kInterference;
+            break;
+        case devourer::LinkVerdict::Weak:
+            quality_verdict = link_verdict::kWeak;
+            break;
+        case devourer::LinkVerdict::Marginal:
+            quality_verdict = link_verdict::kMarginal;
+            break;
+        case devourer::LinkVerdict::Healthy:
+            quality_verdict = link_verdict::kHealthy;
+            break;
+    }
+}
+
+RadioAir::RxQualityWindow RadioAir::rx_quality_window(size_t adapter) {
+    if (adapter >= impl_->adapters.size()) return {};
+    impl_->quality_drain(steady_ms());
+    return impl_->quality_cache[adapter];
+}
+
+uint8_t RadioAir::link_verdict() {
+    impl_->quality_drain(steady_ms());
+    return impl_->quality_verdict;
 }
 
 }  // namespace wblink

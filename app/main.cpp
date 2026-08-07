@@ -1330,6 +1330,7 @@ SelectorPolicy selector_policy(const Config& cfg) {
     p.rung_rssi_floor_dbm = s.rung_rssi_floor_dbm;
     p.promote_rssi_hyst_db = s.promote_rssi_hyst_db;
     p.promote_dwell_ms = s_to_ms(s.promote_dwell_s);
+    p.verdict_ttl_ms = s_to_ms(s.verdict_ttl_s);  // §9.4 Pass 160
     p.bitrate_lead_ms = s_to_ms(s.bitrate_lead_s);
     p.mcs_up_grace_ms = s_to_ms(s.mcs_up_grace_s);
     p.mcs_settle_ms = s_to_ms(s.mcs_settle_s);
@@ -2308,6 +2309,41 @@ struct TxCore {
             }
             return false;
         }
+        if (const LinkVerdictPkt* v = std::get_if<LinkVerdictPkt>(&dec)) {
+            // §3.16 (Pass 159) acceptance = the §3.5 filter: addressed to
+            // us, target tuple is us, sender is the report-latched tuple,
+            // epoch monotone (a reordered verdict must not regress the
+            // craft's view). Anything else drops without counting.
+            if (v->prefix.destination != originator_ ||
+                v->target_originator != originator_ ||
+                v->target_session != session_) {
+                return false;
+            }
+            if (report_gate_.latched_originator() != v->prefix.originator) {
+                return false;
+            }
+            const uint32_t ls = report_gate_.latched_session();
+            if (ls != 0 && ls != v->prefix.session_id) return false;
+            // The monotone gate is SCOPED to the sender identity — a ground
+            // reboot restarts its epoch counter near 1, and an unscoped
+            // high-water mark would drop the rebooted ground's verdicts for
+            // thousands of epochs (mirrors on_report's per-identity epoch
+            // domain, selector.cpp).
+            const std::pair<uint16_t, uint32_t> vid{v->prefix.originator,
+                                                    v->prefix.session_id};
+            if (!verdict_epoch_src_ || *verdict_epoch_src_ != vid) {
+                verdict_epoch_src_ = vid;
+                verdict_epoch_seen_ = 0;
+            }
+            if (verdict_epoch_seen_ != 0 &&
+                v->report_epoch < verdict_epoch_seen_) {
+                return false;
+            }
+            verdict_epoch_seen_ = v->report_epoch;
+            selector_.on_verdict(v->verdict, now);
+            verdict_rx_ms_ = now;
+            return false;
+        }
         if (const CalibProbe* pr = std::get_if<CalibProbe>(&dec)) {
             // §3.16 acceptance: addressed to us, from the report-latched
             // ground tuple — the only peer whose probes may pause the feed
@@ -3069,6 +3105,16 @@ struct TxCore {
         snap.ret.report_latch_holder = report_gate_.latched_originator();
         snap.link.report_latch_holder = report_gate_.latched_originator();
         snap.link.report_latch_known = true;   // local gate; always known here
+        // §15.3 Pass 159/160: last ACCEPTED §3.16 verdict + the climb-gate
+        // suppression count. verdict 0 with age 0 = none this session.
+        snap.link.verdict = selector_.verdict();
+        snap.link.verdict_age_ms =
+            verdict_rx_ms_ == 0
+                ? 0
+                : static_cast<uint32_t>(std::min<uint64_t>(
+                      now - verdict_rx_ms_, 0xFFFFFFFFull));
+        snap.link.promote_blocked_saturated =
+            selector_.promote_blocked_saturated();
     }
 
     struct PowerAdapter {
@@ -3399,6 +3445,10 @@ struct TxCore {
     uint8_t boot_max_profile_ = 255;
     ReportGate feedback_gate_;             // §3.10 Pass 55
     ReportGate report_gate_;               // §3.5 Pass 41
+    uint32_t verdict_epoch_seen_ = 0;      // §3.16 Pass 159 monotone gate
+    std::optional<std::pair<uint16_t, uint32_t>>
+        verdict_epoch_src_;                // ...scoped to (orig, session)
+    uint64_t verdict_rx_ms_ = 0;           // last accepted verdict (§15.3)
     uint64_t frame_cadence_us_ = 0; // windowed ingress cadence estimate
     uint64_t cadence_start_ms_ = 0;
     uint32_t cadence_frames_ = 0;
@@ -3740,7 +3790,8 @@ struct RxCore {
 
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
               const Inject& inject_report, const Inject& inject_nack,
-              bool emit_nacks = true) {
+              bool emit_nacks = true, uint8_t link_verdict_now = 0,
+              const Inject* inject_verdict = nullptr) {
         engine_.tick(now, deliver);
         // §7.3: LINK_REPORTs ride the same uplink as NACKs. The epoch is
         // stamped by the injector at the radio call, not here — see
@@ -3752,6 +3803,34 @@ struct RxCore {
             uint8_t frame[kLinkReportSize];
             if (encode_link_report(r, frame, sizeof(frame)) > 0) {
                 inject_report(frame, sizeof(frame), r.target_originator);
+            }
+            // §3.16 (Pass 159): the verdict travels with report authority —
+            // ≤1 Hz, only while reports flow, only when the sensor has a
+            // cause (Unknown = no radio backend / nothing heard). Its OWN
+            // inject path: the report injector stamps+commits a §3.5 epoch
+            // per frame, which on a 23 B verdict would burn a phantom epoch
+            // into the §10.7 seek.
+            if (inject_verdict != nullptr &&
+                link_verdict_now != link_verdict::kUnknown &&
+                now - verdict_emit_ms_ >= 1000) {
+                LinkVerdictPkt v;
+                v.prefix.originator = originator_;
+                v.prefix.destination = r.target_originator;
+                v.prefix.session_id = session_;
+                v.target_originator = r.target_originator;
+                v.target_session = r.target_session;
+                // Reporter::build leaves r.report_epoch 0 — the real epoch
+                // is stamped into the FRAME at injection. The verdict wants
+                // the sender's current counter (monotone, ties it to the
+                // report stream) WITHOUT committing one: a burned epoch is
+                // phantom loss in the §10.7 seek denominator.
+                v.report_epoch = next_report_epoch();
+                v.verdict = link_verdict_now;
+                uint8_t vf[kLinkVerdictSize];
+                if (encode_link_verdict(v, vf, sizeof(vf)) > 0) {
+                    (*inject_verdict)(vf, sizeof(vf), r.target_originator);
+                    verdict_emit_ms_ = now;
+                }
             }
         }
         if (!emit_nacks) {
@@ -4079,6 +4158,7 @@ struct RxCore {
     std::optional<uint8_t> local_table_version_;
     RxEngine engine_;
     Reporter reporter_;
+    uint64_t verdict_emit_ms_ = 0;  // §3.16 Pass 159 ≤1 Hz emit guard
     uint32_t feedback_period_ms_ = 0;
     uint64_t next_feedback_ms_ = 0;
     uint32_t feedback_epoch_ = 0;
@@ -4262,6 +4342,15 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     }
     if (rx != nullptr) {
         rx->fill_stats(snap, now);
+#if WBLINK_RADIO
+        // §15.3 Pass 159 role-dependent view: a radio GROUND shows the
+        // cause it computes (what it sends); the craft's accepted-verdict
+        // fill lives in its own tx fill and is not touched here.
+        if (air != nullptr && air->radio != nullptr) {
+            snap.link.verdict = air->radio->link_verdict();
+            snap.link.verdict_age_ms = 0;
+        }
+#endif
     }
     // §6.3a frame-shm egress: fold each reassembler's frame-level outcomes into
     // the matching stream (by stream_id). recovered_arq / delivered / loss stay
@@ -7523,8 +7612,26 @@ art.craft_adapter_fingerprint = craft_tally_fp;
         service_cache_repair(now);
         // §6.4 RX-local emission gate (§15.5 POST /api/v1/arq) composes with
         // the quiet-gap repair-tail hold.
+#if WBLINK_RADIO
+        // §3.16 (Pass 159): the node cause from the shared quality drain;
+        // Unknown off the radio backend, and the verdict frame rides its own
+        // inject (no §3.5 epoch stamp/commit — see RxCore::tick).
+        const uint8_t lv = air.value->radio != nullptr
+                               ? air.value->radio->link_verdict()
+                               : link_verdict::kUnknown;
+#else
+        const uint8_t lv = link_verdict::kUnknown;
+#endif
+        const RxCore::Inject inject_verdict =
+            [&](const uint8_t* f, size_t n, uint16_t target) {
+                uint8_t tmp[kLinkVerdictSize];
+                if (n > sizeof(tmp)) return;
+                std::memcpy(tmp, f, n);
+                (void)air.value->inject_return(target, tmp, n, false);
+            };
         rx.tick(now, deliver, inject_report, inject_nack,
-                arq_rx_enabled && (!qg.enabled() || repair_tail_closed));
+                arq_rx_enabled && (!qg.enabled() || repair_tail_closed), lv,
+                &inject_verdict);
         air.value->heartbeat(l.cfg.node.originator, session, now);
         // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
         // so a stalled block never wedges frame-shm egress.

@@ -957,7 +957,8 @@ to Pass 152. Pass 153 retires that layout and re-purposes the type as the
 | `0x00` | *reserved-invalid* | a decode error, never assigned |
 | `0x01` | `CAL_PROBE` | below |
 | `0x02` | `CAL_TALLY` | below |
-| `0x03`–`0xFF` | *unassigned* | additive growth allocates here |
+| `0x03` | `LINK_VERDICT` | below (Pass 159) |
+| `0x04`–`0xFF` | *unassigned* | additive growth allocates here |
 
 An unknown ID is **ignored, not an error** (below) — that posture is what
 makes the registry the additive-growth channel, and the §3.1 version nibble
@@ -1057,6 +1058,48 @@ during an operator-initiated run, and the restore law reverts it; a forged
 PROBE stream from the latched tuple can pause the craft's video for at most
 the probe-quiet timeout past its last frame. Nothing on the craft moves and
 no claim is conferred.
+
+**`LINK_VERDICT` (`0x03`, Pass 159, issue #98 stage 2) — 23 bytes, RX→TX.**
+The §15.3 quality window (Pass 158) classifies at the ground; this carries
+the **cause** to the deciding node, not a vendor scalar — the §9.4 selector
+needs "you are saturating your own front end", which is the one condition
+where the correct response inverts (back power *off*, not on), and no RSSI
+field in §3.5 can express it. The issue's original pricing (§3.5 append +
+§3.1 version event) predates Pass 153; the registry is the additive path,
+and an old craft ignores the ID by §3.16 law — mixed fleets need no
+flag-day.
+
+| off | size | field | notes |
+|---|---|---|---|
+| 0 | 11 | *common* | §3.1 — sender = the reporting RX node |
+| 11 | 1 | `ext_id` | `0x03` |
+| 12 | 2 | `target_originator` | u16 — the TX node the verdict describes |
+| 14 | 4 | `target_session` | u32 |
+| 18 | 4 | `report_epoch` | u32 — the sender's current §3.5 epoch; ties the verdict to the report stream (an epoch older than the last accepted verdict's is dropped) |
+| 22 | 1 | `verdict` | `0` Unknown · `1` NoSignal · `2` Saturated · `3` Interference · `4` Weak · `5` Marginal · `6` Healthy; `>6` = decode error |
+
+Semantics:
+
+- **Computed at the drain** from the best-peak ear's window (the ear
+  `rssi_best` describes — verdict and RSSI series must describe the same
+  thing) via the vendored `classify_link_health` thresholds, frame-metric
+  legs only — the energy/IGI legs stay with the scout (Pass 155
+  exclusivity), so `Interference` here means "dirty but not strong", never
+  a FA-count claim.
+- **Addressed, never broadcast** (`destination` MUST be non-zero), emitted
+  at most 1 Hz alongside the sender's reports and only while reports flow
+  — verdict authority travels with report authority. With more than one
+  report target in a window the verdict rides the first-built report's
+  target (single-craft fleet posture; a multi-craft round-robin is a
+  future amendment, recorded here so it is a choice and not an accident).
+- **Craft acceptance = the §3.5 filter**: addressed to us, target tuple is
+  us, sender is the report-latched `(originator, session)`, epoch
+  monotone. Anything else is dropped without counting.
+- **Radio-backend senders only** (the sensor is Pass 158); a
+  kernel-monitor or udp ground never emits one, the craft's verdict stays
+  `Unknown`, and every consumer MUST treat `Unknown`/stale as **absence of
+  evidence, not health** — the shipped fleet's behaviour is unchanged by
+  construction (§9.4 Pass 160).
 
 ---
 
@@ -1702,6 +1745,24 @@ injection model has no such side stream, so that mechanism is **dropped for v0**
   margin; §17-overridable, bench re-derivable per rung).
 - **v1 (optional) — active probe:** TX injects a short burst at the next rung, RX
   returns its PER in `probe_per`. Add only if v0 promotes prove too timid.
+- **Saturation gate (Pass 160, issue #98 stage 3):** a **fresh `Saturated`
+  §3.16 LINK_VERDICT suppresses every climbing path** — both the RSSI-margin
+  promote here and the §9.5-adjacent backpressure escape (gating only one
+  would reroute the flap, not remove it). Rationale: saturation presents as
+  strong RSSI → reads as headroom → promote → EVM collapses → loss → demote
+  — an oscillation invisible to every input the selector had, and whose
+  correct response (back power *off*) is the opposite of the weak-link
+  response. Freshness is `policy.select.verdict_ttl_s` (seed **3.0 s**
+  of report cadence; §17-overridable): a verdict older than the TTL, or
+  `Unknown`, is **absence of evidence and gates nothing** — a
+  kernel-monitor ground never emits verdicts and its craft behaves exactly
+  as pre-160. Demote paths NEVER consult the verdict (§9.0
+  robustness-first: nothing may make demotion harder). Suppressions are
+  counted (§15.3 `promote_blocked_saturated`). **Residual, deliberately
+  not here:** driving the §10 power lever *down* on `Saturated` is an
+  actuation ruling of its own; and `Interference` vs `Weak` consumption
+  (channel problem → scout/CSA vs range problem → power/demote) stays
+  observation-only until measured.
 
 ### 9.5 Transition sequencing (asymmetric)
 MCS and bitrate never move together:
@@ -4642,6 +4703,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "loss_window_milli": 12, "loss_ewma_milli": 18, "loss_uniq": 214,
     "loss_score": 0, "safe_floor_profile": 0,
     "report_latch_holder": 9, "report_latch_known": true,
+    "verdict": 0, "verdict_age_ms": 0, "promote_blocked_saturated": 0,
     "selector_state_valid": true, "selector_state_age_ms": 0,
     "lockout_active": true, "lockout_latched": false,
     "lockout_profile": 5, "lockout_ceiling_profile": 4,
@@ -4922,9 +4984,12 @@ RSSI/SNR/EVM is folded with devourer's own conventions (`RxQuality.h` —
 measurement; SNR however is folded over **all** RSSI-carrying frames, so
 a PWDB-only frame reads SNR 0 into the mean — exposure is nil on this
 link, whose accepted frames are our own HT injections, but `snr: 0` is
-therefore not distinguishable from a true 0 dB mean), and each stats line
-drains the window (delta semantics — the window IS the stats interval; the
-stats emitter is the single reader). `rssi_best` is the window **peak**,
+therefore not distinguishable from a true 0 dB mean), and the window is
+drained **inside the backend at most once per second** (Pass 159 amends
+Pass 158's stats-emitter-drains wording): the drain is shared by the stats
+line and the §3.16 `LINK_VERDICT` classification, both of which read the
+cached last window — so a second consumer can never split the delta, and
+the two always describe the same interval. `rssi_best` is the window **peak**,
 deliberately not the mean: near-field saturation trashes a fraction of
 frames to low apparent power, dragging a mean down while the peak stays
 pegged — the mean inverts the very signal this exists to expose.
@@ -4943,6 +5008,16 @@ is **observation only** — no control path reads it; the §9.4 saturation
 gate and any wire carriage (§3.5) are separate rulings (issue #98 stages
 2–3, issue #125). Off the radio backend the fields keep their prior
 values: kernel-monitor radiotap carries no SNR/EVM.
+
+`link.verdict` / `link.verdict_age_ms` (Pass 159) are role-dependent views
+of the same §3.16 value: on a **craft**, the last *accepted* LINK_VERDICT
+and its age (0 / large-age when none this session — `Unknown` by
+construction); on a **radio ground**, the verdict the node last computed
+at its own drain (what it sends). `link.promote_blocked_saturated`
+(Pass 160) counts selector ticks on which the §9.4 gate suppressed an
+otherwise-eligible climb (once per tick however many climb rules were
+blocked — a gauge of blocked *time*, not of rules); craft-only, 0
+elsewhere.
 
 `rx_ldpc` / `rx_stbc` (Pass 157) count accepted frames whose RX path
 reported LDPC coding / a nonzero STBC stream count, and `ldpc_flag_ok` is

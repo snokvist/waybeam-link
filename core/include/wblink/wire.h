@@ -149,6 +149,20 @@ struct CalibTally {
     friend bool operator==(const CalibTally&, const CalibTally&) = default;
 };
 
+// §3.16 (Pass 159) EXTENDED type 0x03 LINK_VERDICT — the RX's classified
+// link cause, addressed to the TX it scores. One byte of cause, never a
+// vendor scalar; report_epoch ties it to the §3.5 report stream so a
+// reordered verdict cannot regress the craft's view.
+struct LinkVerdictPkt {
+    CommonPrefix prefix;
+    uint16_t target_originator = 0;
+    uint32_t target_session = 0;
+    uint32_t report_epoch = 0;
+    uint8_t verdict = link_verdict::kUnknown;  // 0..6, §3.16
+    friend bool operator==(const LinkVerdictPkt&,
+                           const LinkVerdictPkt&) = default;
+};
+
 // §3.16: an 0xF frame whose extended type ID this build does not know.
 // Deliberately a decoded value, not a DecodeError — a newer peer's additive
 // frame must degrade to "feature unavailable" while still counting as valid
@@ -306,7 +320,7 @@ using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
                              JsccFeedback, CacheStatus, CacheRequestView,
                              CacheReplyView, Announce, CacheAssign, VehicleCmd,
                              SelectorState, CalibProbe, CalibTally,
-                             ExtUnknown>;
+                             LinkVerdictPkt, ExtUnknown>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -339,6 +353,10 @@ size_t encode_vehicle_cmd(const VehicleCmd& pkt, uint8_t* out, size_t cap);
 size_t encode_calib_probe(const CalibProbe& pkt, uint16_t pad_to, uint8_t* out,
                           size_t cap);
 size_t encode_calib_tally(const CalibTally& pkt, uint8_t* out, size_t cap);
+// §3.16 (Pass 159) LINK_VERDICT: fixed 23 bytes, addressed (destination
+// must be non-zero — enforced by encoder and decoder both).
+size_t encode_link_verdict(const LinkVerdictPkt& pkt, uint8_t* out,
+                           size_t cap);
 size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap);
 size_t encode_cache_assign(const CacheAssign& pkt, uint8_t* out, size_t cap);
 size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,

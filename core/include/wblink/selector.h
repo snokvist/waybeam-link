@@ -69,6 +69,9 @@ struct SelectorPolicy {
                                               -77, -73, -71, -70};
     double promote_rssi_hyst_db = 6.0;
     uint32_t promote_dwell_ms = 500;
+    // §9.4 Pass 160 saturation gate: a §3.16 Saturated verdict younger than
+    // this suppresses every climbing path. Unknown/stale gates nothing.
+    uint32_t verdict_ttl_ms = 3000;
     // §9.5
     uint32_t bitrate_lead_ms = 500;
     uint32_t mcs_up_grace_ms = 250;
@@ -150,6 +153,15 @@ class Selector {
     // reporter identity. Caller uses this to keep downstream consumers from
     // treating a replay as fresh evidence.
     bool on_report(const LinkReport& r, uint64_t now_ms);
+    // §9.4 Pass 160: accepted §3.16 LINK_VERDICT (0..6). Caller has already
+    // run the acceptance filter; the selector only tracks value + age.
+    void on_verdict(uint8_t verdict, uint64_t now_ms);
+    uint8_t verdict() const { return verdict_; }
+    uint64_t verdict_ms() const { return verdict_ms_; }
+    // Promote attempts suppressed by a fresh Saturated verdict (§15.3).
+    uint64_t promote_blocked_saturated() const {
+        return promote_blocked_saturated_;
+    }
     void set_pressure(bool on, uint64_t now_ms);  // §9.9 gauge
     SelectorActions tick(uint64_t now_ms);
 
@@ -262,6 +274,13 @@ class Selector {
     uint64_t freeze_until_ms_ = 0;
     std::vector<uint64_t> demoted_from_ms_;  // per rung, 0 = never
     std::vector<uint64_t> promoted_into_ms_;
+
+    // §9.4 Pass 160: last accepted verdict + when. 0/never = Unknown,
+    // which gates nothing.
+    uint8_t verdict_ = 0;
+    uint64_t verdict_ms_ = 0;
+    uint64_t promote_blocked_saturated_ = 0;
+    bool saturated_fresh(uint64_t now_ms) const;
 
     // §9.8 / §9.9 / §11.3.
     uint64_t csa_freeze_until_ms_ = 0;

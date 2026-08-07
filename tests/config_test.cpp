@@ -37,6 +37,7 @@ const char* kSample = R"({
   "policy": {
     "report_hz": 10, "report_timeout_ms": 500,
     "select": { "demote_milli": 20, "emergency_loss_milli": 180,
+                "verdict_ttl_s": 4.5,
                 "loss_min_uniq": 40, "loss_persist_score": 6,
                 "rung_lockout_s": 12.5, "rung_lockout_latch_count": 5,
                 "rssi_floor_dbm": -85,
@@ -129,6 +130,9 @@ int main() {
             CHECK(c.policy.select.rung_lockout_s == 12.5);
             CHECK_EQ_U(c.policy.select.rung_lockout_latch_count, 5);
             CHECK(c.policy.select.rssi_floor_dbm == -85);
+            // §9.4 Pass 160: value-visible parse proof (an unknown key
+            // would be silently ignored — the loader never enumerates).
+            CHECK(c.policy.select.verdict_ttl_s == 4.5);
             CHECK_EQ_U(c.policy.arq.fwd_clamp_blocks, 4);
             CHECK(c.policy.fec.scheme == FecScheme::kNone);
             CHECK_EQ_U(c.policy.ret.guard_us, 300);

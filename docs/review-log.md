@@ -24,6 +24,52 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 160 — §9.4 saturation gate: a fresh Saturated verdict suppresses every climb (2026-08-07)
+
+**Verdict.** Issue #98 stage 3 (operator-approved 2026-08-07). The
+saturation flap — strong RSSI reads as headroom, promote, EVM collapses,
+loss, demote — is invisible to every selector input and its correct
+response inverts (power *off*). With the cause now on the wire (Pass 159),
+the selector consumes it: a fresh `Saturated` suppresses **both** climbing
+paths (§9.4 RSSI-margin promote AND the backpressure escape — gating one
+reroutes the flap). `Unknown`/stale gates nothing (absence of evidence —
+kernel-monitor fleets unchanged by construction); demote paths never
+consult the verdict (§9.0). Freshness knob `policy.select.verdict_ttl_s`
+seed 3.0. Suppressions counted (§15.3 `promote_blocked_saturated`).
+
+**Changed sections.** §9.4 (saturation gate bullet + residuals: the §10
+power-down actuation and Interference/Weak consumption are their own
+future rulings); §15.3 (`promote_blocked_saturated`).
+
+**Evidence.** devourer saturation-knee sweep (issue #98); Pass 159 wire;
+selector rules 5/6 in `core/src/selector.cpp`.
+
+## Pass 159 — LINK_VERDICT: the cause crosses the wire as §3.16 0x03, not a version event (2026-08-07)
+
+**Verdict.** Issue #98 stage 2, shape 2 (operator-approved 2026-08-07):
+one **cause byte**, never a vendor scalar. The issue's pricing (§3.5
+append + §3.1 version event) predates Pass 153 — the EXTENDED registry is
+the additive path, an old craft ignores ID `0x03` by law, and mixed
+fleets need no flag-day. 23-byte addressed frame: target tuple +
+`report_epoch` (monotone, ties the verdict to the report stream) + verdict
+`0..6` (Unknown/NoSignal/Saturated/Interference/Weak/Marginal/Healthy).
+Computed at the drain from the **best-peak ear** (the ear `rssi_best`
+describes — the verdict and the RSSI series must describe the same thing)
+via vendored `classify_link_health`, frame-metric legs only (energy/IGI
+stay with the scout, Pass 155). Emitted ≤1 Hz alongside reports, only
+while reports flow; craft acceptance = the §3.5 latch filter + epoch
+monotone. Pass 158's "stats emitter drains" wording is amended: the drain
+moves inside the backend (≥1 s guard), shared by the stats line and the
+classification — a second consumer can never split the delta.
+
+**Changed sections.** §3.16 (registry `0x03` + LINK_VERDICT layout and
+semantics); §15.3 (quality-window drain wording; `link.verdict` /
+`verdict_age_ms` role-dependent views).
+
+**Evidence.** Pass 153 registry design notes (§3.16); `LinkHealth.h`
+thresholds + `classify_link_health` (pure, self-tested);
+Pass 158 window.
+
 ## Pass 158 — §15.3 quality window: harvest the SNR/EVM the silicon already hands us (2026-08-07)
 
 **Verdict.** Issue #98 stage 1 (observation only — stages 2/3, the §3.5

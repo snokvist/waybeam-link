@@ -539,6 +539,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 sel.promote_rssi_hyst_db =
                     ps.value("promote_rssi_hyst_db", sel.promote_rssi_hyst_db);
                 sel.promote_dwell_s = ps.value("promote_dwell_s", sel.promote_dwell_s);
+                sel.verdict_ttl_s =
+                    ps.value("verdict_ttl_s", sel.verdict_ttl_s);
                 sel.mcs_settle_s = ps.value("mcs_settle_s", sel.mcs_settle_s);
                 sel.down_cooldown_s = ps.value("down_cooldown_s", sel.down_cooldown_s);
                 sel.ewma_alpha = ps.value("ewma_alpha", sel.ewma_alpha);

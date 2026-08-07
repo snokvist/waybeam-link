@@ -409,6 +409,24 @@ Decoded decode_extended(const uint8_t* buf, size_t len) {
             }
             return t;
         }
+        case ext_type::kLinkVerdict: {
+            // §3.16 (Pass 159): exact-length, addressed, verdict 0..6.
+            if (len != kLinkVerdictSize) {
+                return len < kLinkVerdictSize ? DecodeError::kTruncated
+                                              : DecodeError::kLengthMismatch;
+            }
+            LinkVerdictPkt v;
+            v.prefix = decode_prefix(buf);
+            v.target_originator = be16_read(buf + 12);
+            v.target_session = be32_read(buf + 14);
+            v.report_epoch = be32_read(buf + 18);
+            v.verdict = buf[22];
+            if (v.verdict > link_verdict::kMax ||
+                v.prefix.destination == 0) {
+                return DecodeError::kInvalidField;
+            }
+            return v;
+        }
         default: {
             // §3.16: an unknown extended type ID is a DECODED value, not an
             // error — additive growth must degrade to "feature unavailable"
@@ -698,6 +716,22 @@ size_t encode_calib_tally(const CalibTally& pkt, uint8_t* out, size_t cap) {
     out[24] = pkt.rx_mcs;
     out[25] = pkt.adapter_fingerprint;
     return kCalibTallySize;
+}
+
+size_t encode_link_verdict(const LinkVerdictPkt& pkt, uint8_t* out,
+                           size_t cap) {
+    // §3.16 (Pass 159): addressed, never broadcast; verdict 0..6.
+    if (out == nullptr || cap < kLinkVerdictSize ||
+        pkt.prefix.destination == 0 || pkt.verdict > link_verdict::kMax) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kExtended, out);
+    out[11] = ext_type::kLinkVerdict;
+    be16_write(out + 12, pkt.target_originator);
+    be32_write(out + 14, pkt.target_session);
+    be32_write(out + 18, pkt.report_epoch);
+    out[22] = pkt.verdict;
+    return kLinkVerdictSize;
 }
 
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap) {
