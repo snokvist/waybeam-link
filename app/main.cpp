@@ -60,6 +60,7 @@
 #include "wblink/rx.h"
 #include "wblink/scheduler.h"
 #include "wblink/scout_sense.h"
+#include "wblink/scout_store.h"
 #include "wblink/selector.h"
 #include "wblink/calib_store.h"
 #include "wblink/calibrate.h"
@@ -644,6 +645,11 @@ class ScoutEngine {
         // occupancy derivation falls back structurally.
         std::function<std::optional<AirIface::AirSense>(size_t adapter)>
             sense;
+        // §15.5a (Pass 161): the scout adapter's calibration-domain key
+        // ("mac/<efuse>" else "idx/N") and the node's §3.16 verdict for
+        // the one-classifier rule. Null hooks degrade (fixed key, Unknown).
+        std::function<std::string()> domain;
+        std::function<uint8_t()> verdict;
     };
     ScoutEngine(Hooks h, uint8_t bw, uint16_t rest_chan,
                 std::optional<uint8_t> rest_filter, size_t scout_adapter)
@@ -669,6 +675,9 @@ class ScoutEngine {
         if (channels.empty()) return "no channels to scan";
         channels_ = std::move(channels);
         dwell_ms_ = dwell_ms ? dwell_ms : 300;
+        // §15.5a (Pass 161): the sweep FOLDS into the store; results_ stays
+        // the last sweep's raw occupancy view.
+        store_.begin_sweep(h_.domain ? h_.domain() : "idx/0", channels_);
         results_.clear();
         chan_idx_ = 0;
         phase_ = Phase::kScanning;
@@ -767,7 +776,10 @@ class ScoutEngine {
         enter_channel(now_ms);
     }
 
-    std::string results_json() const {
+    std::string results_json(uint64_t now_ms) const {
+        // §15.5a (Pass 161): ranked, explained, accumulated.
+        const ScoutRanking rk = store_.rank(
+            now_ms, rest_chan_, h_.verdict ? h_.verdict() : 0);
         std::string out = "{\"scanning\":";
         out += scanning() ? "true" : "false";
         out += ",\"current_chan\":";
@@ -810,7 +822,40 @@ class ScoutEngine {
                        ",\"psk_known\":" + (c.psk_known ? "true" : "false") + "}";
             }
         }
-        out += "]}";
+        // domain is JSON-safe by construction: snprintf %02x MAC or
+        // "idx/N" — nothing quotable can appear (pinned here because the
+        // invariant lives in air_radio.cpp, three files away).
+        out += "],\"ranking\":{\"rounds\":" + std::to_string(rk.rounds) +
+               ",\"domain\":\"" + store_.domain() + "\"" +
+               ",\"confidence_permille\":" +
+               std::to_string(rk.confidence_permille) +
+               ",\"rejects\":{\"domain_reset\":" +
+               std::to_string(store_.domain_resets()) +
+               ",\"implausible\":" +
+               std::to_string(store_.rejected_implausible()) +
+               ",\"stale\":" + std::to_string(rk.stale_samples) +
+               "},\"recommendation\":{\"chan\":" +
+               (rk.reason == ScoutRecReason::kOk
+                    ? std::to_string(rk.recommended_chan)
+                    : std::string("null")) +
+               ",\"reason\":\"" + scout_rec_reason_name(rk.reason) +
+               "\"},\"bins\":[";
+        bool bcomma = false;
+        for (const ScoutBinRank& b : rk.bins) {
+            if (bcomma) out += ',';
+            bcomma = true;
+            out += "{\"chan\":" + std::to_string(b.chan_mhz) +
+                   ",\"score\":" + std::to_string(b.score) +
+                   ",\"burstiness\":" + std::to_string(b.burstiness) +
+                   ",\"samples\":" + std::to_string(b.samples) +
+                   ",\"qualified\":" + (b.qualified ? "true" : "false") +
+                   ",\"age_ms\":" +
+                   std::to_string(now_ms >= b.last_seen_ms
+                                      ? now_ms - b.last_seen_ms
+                                      : 0) +
+                   "}";
+        }
+        out += "]}}";
         return out;
     }
 
@@ -957,6 +1002,14 @@ class ScoutEngine {
             c.frames = accum_.frames_by_orig[k];  // §15.5a (Pass 66) evidence
             r.candidates.push_back(c);
         }
+        // §15.5a (Pass 161): fold this dwell into the evidence store.
+        {
+            ScoutSample smp;
+            smp.chan_mhz = r.chan;
+            smp.util_permille = r.occ.util_permille;
+            smp.at_ms = now_ms;
+            store_.fold(smp);
+        }
         results_.push_back(std::move(r));
     }
     void rest() {
@@ -990,6 +1043,7 @@ class ScoutEngine {
     uint64_t observe_start_ms_ = 0;
     Accum accum_;
     std::vector<ChannelResult> results_;
+    ScoutStore store_;  // §15.5a Pass 161 accumulated evidence
 };
 
 // §15.2 policy.csa → the core engine's parameter block (string PSK to raw
@@ -6484,6 +6538,21 @@ int run_rx(const Loaded& l) {
             // §15.5a (Pass 155): frame-free sense of the scout adapter;
             // nullopt on sensor-less backends.
             [&](size_t a) { return air.value->iface()->rx_sense(a); },
+            // §15.5a (Pass 161): calibration-domain key + §3.16 verdict.
+            [&, scout_idx]() -> std::string {
+                const std::string m =
+                    air.value->iface()->adapter_mac(scout_idx);
+                return m.empty() ? "idx/" + std::to_string(scout_idx)
+                                 : "mac/" + m;
+            },
+            [&]() -> uint8_t {
+#if WBLINK_RADIO
+                if (air.value->radio != nullptr) {
+                    return air.value->radio->link_verdict();
+                }
+#endif
+                return 0;
+            },
         },
         op_bw_mhz, op_chan, l.cfg.node.net_id, scout_idx);
     // §15.5 REST control plane. RX/ground node owns the CSA trigger (replaces
@@ -6511,7 +6580,7 @@ int run_rx(const Loaded& l) {
         h.discovery_json = [&] {
             return discovery.json(now_ms(), rx.stream_keys());
         };
-        h.scout_results = [&] { return scout.results_json(); };
+        h.scout_results = [&] { return scout.results_json(now_ms()); };
         h.selection_json = [&] {
             const uint64_t at = now_ms();
             size_t following = 0;
@@ -6704,6 +6773,22 @@ int run_rx(const Loaded& l) {
                     if (target < 0) {
                         return "quickconnect requires target.originator";
                     }
+                    // §15.5a (Pass 161) one-classifier rule: a fresh
+                    // Weak/Saturated on the ACTIVE link means the impairment
+                    // is range or self-jam — a channel move will not help.
+#if WBLINK_RADIO
+                    if (air.value->radio != nullptr) {
+                        const uint8_t v = air.value->radio->link_verdict();
+                        if (v == link_verdict::kWeak ||
+                            v == link_verdict::kSaturated) {
+                            return std::string("refused: active impairment ") +
+                                   (v == link_verdict::kWeak ? "WEAK"
+                                                             : "SATURATED") +
+                                   " is not channel-attributable "
+                                   "(§15.5a Pass 161)";
+                        }
+                    }
+#endif
                     return do_claim(target, 0);  // pick the emptiest channel
                 }
                 cancel_calibration("scout sweep");
