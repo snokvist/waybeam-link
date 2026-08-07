@@ -259,6 +259,53 @@ int main() {
         }
     }
 
+    // --- §3.0/§15.2 tx_retry_limit coupling (Pass 156) ----------------------
+    {
+        // Default seeds 8 (operator-ruled); parse override works.
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->air.tx_retry_limit, 8);
+        auto r2 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "tx_retry_limit": 16}})");
+        CHECK(bool(r2));
+        if (r2) CHECK_EQ_U(r2.value->air.tx_retry_limit, 16);
+    }
+    // The hybrid armed with retries disabled is refused, not run inert —
+    // either half arms it.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","ack_responder":true,"tx_retry_limit":0}})",
+                     "silently inert");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","tx_retry_limit":0},
+          "policy":{"return":{"unicast":true}}})",
+                     "silently inert");
+    }
+    // Limit 0 alone is legal (the WFB posture, hybrid off) — and the
+    // kernel-monitor control: the kernel MAC owns retries there, so the
+    // coupling never fires (frozen, #120).
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "tx_retry_limit": 0}})");
+        CHECK(bool(r));
+        auto r2 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "kernel-monitor", "tx_retry_limit": 0},
+          "adapters": [{"name":"m","ifname":"wlan9","role":"tx",
+                        "channel":5805}],
+          "policy": {"return": {"unicast": true}}})");
+        CHECK(bool(r2));
+    }
+    // Descriptor field width is enforced.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","tx_retry_limit":64}})",
+                     "out of range 0..63");
+    }
+
     // --- §15.2 adapters[].mac (Pass 154) ------------------------------------
     {
         // Parsed and normalized to lowercase on the radio backend.

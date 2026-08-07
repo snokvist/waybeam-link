@@ -43,6 +43,11 @@ struct RadioAirCfg {
     // half; unlatched targets fall back to broadcast, counted).
     bool ack_responder = false;
     bool unicast_returns = false;
+    // §15.2 (Pass 156): unicast hardware-retry limit (devourer
+    // dc.tx.retry_limit). Config load enforces the §3.0 coupling law, so a
+    // constructed RadioAir with either hybrid half on always has this
+    // nonzero.
+    int tx_retry_limit = 8;
     // Clear the MAC carrier-sense gate at bring-up (see AirCfg::disable_cca).
     bool disable_cca = false;
     // §14.2 authored transport-efficiency calibration (1..1000, 0 = off).

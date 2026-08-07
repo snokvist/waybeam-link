@@ -563,6 +563,11 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // stamping (RtlJaguar*Device TX path), and a diversity ear never
         // injects, so it stays inert there.
         dc.tx.report = any_mac_pin ? 1 : ad->tx;
+        // §3.0 (Pass 156): unicast hardware-retry limit. Consumed
+        // per-TX-descriptor (like tx.report), so it is set uniformly — an
+        // RX-only ear never injects and broadcast frames carry no ACK
+        // policy, so it binds exactly on the hybrid's unicast returns.
+        dc.tx.retry_limit = cfg.tx_retry_limit;
         // MAC carrier-sense gate. Applied to every adapter, not just the TX
         // one: an RX-only ear that defers has nothing to defer, but the
         // bring-up posture stays uniform across the node.
