@@ -1453,6 +1453,16 @@ inline bool aim_log_enabled() {
 static AimHist g_aim_release;   // release lateness past the return deadline
 static AimHist g_aim_read_tsf;  // ReadTsf() control-transfer cost
 
+// #101 stage-0 verifier (Tier-2 bench knob, findings.md 2026-08-08):
+// WBLINK_MCS_TRACE=1 dumps one stderr line per received DATA frame —
+// (wire seq, PHY rx_mcs, adapter, rssi) — so an offline correlator can
+// check the commanded per-packet rate flew frame-for-frame against the
+// TX side's WBLINK_MCS_CYCLE schedule (mcs = seq % 8). rx-role only.
+inline bool mcs_trace_enabled() {
+    static const bool on = std::getenv("WBLINK_MCS_TRACE") != nullptr;
+    return on;
+}
+
 // ---- air backend selection (udp dev backend | devourer radio, §3.0) --------
 
 struct AirBackend {
@@ -7609,6 +7619,13 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 meta.rssi != 0 ? meta.rssi : l.cfg.loopback.rssi_dbm;
             // §11 taps (cheap header decode; DATA still flows to the engine).
             const Decoded dec = decode(d, n);
+            if (mcs_trace_enabled()) {  // #101 stage-0 verifier (Tier-2)
+                if (const DataView* dv = std::get_if<DataView>(&dec)) {
+                    std::fprintf(stderr, "mcstrace seq=%u mcs=%u ad=%u rssi=%d\n",
+                                 dv->hdr.seq, meta.rx_mcs, meta.adapter_id,
+                                 static_cast<int>(rssi));
+                }
+            }
             discovery.observe(dec, now, meta.net_id);
             scout.on_frame(meta, dec, d, n);  // §15.5a sweep aggregation
             // §15.5a (Pass 144): the sweep widen is node-wide, so foreign
