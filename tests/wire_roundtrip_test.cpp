@@ -228,6 +228,50 @@ int main() {
         }
     }
 
+    // §3.16 (Pass 159) LINK_VERDICT round-trip (23 bytes, addressed).
+    for (int i = 0; i < kIters; ++i) {
+        LinkVerdictPkt lv;
+        lv.prefix = random_prefix(rng);
+        if (lv.prefix.destination == 0) lv.prefix.destination = 1;
+        lv.target_originator = rng.u16();
+        lv.target_session = rng.u32();
+        lv.report_epoch = rng.u32();
+        lv.verdict = static_cast<uint8_t>(rng.u8() % 7);  // 0..6
+        const size_t n = encode_link_verdict(lv, buf, sizeof(buf));
+        CHECK_EQ_U(n, kLinkVerdictSize);
+        const Decoded d = decode(buf, n);
+        const LinkVerdictPkt* v = std::get_if<LinkVerdictPkt>(&d);
+        CHECK(v != nullptr);
+        if (v != nullptr) {
+            CHECK(*v == lv);
+        }
+    }
+    // §3.16: verdict >6, broadcast destination, and wrong length are
+    // refused — encoder side for the first two, decoder for all.
+    {
+        LinkVerdictPkt lv;
+        lv.prefix = random_prefix(rng);
+        lv.prefix.destination = 9;
+        lv.verdict = 7;
+        CHECK_EQ_U(encode_link_verdict(lv, buf, sizeof(buf)), 0);
+        lv.verdict = link_verdict::kSaturated;
+        lv.prefix.destination = 0;  // broadcast: never legal
+        CHECK_EQ_U(encode_link_verdict(lv, buf, sizeof(buf)), 0);
+        lv.prefix.destination = 9;
+        const size_t n = encode_link_verdict(lv, buf, sizeof(buf));
+        CHECK_EQ_U(n, kLinkVerdictSize);
+        buf[22] = 7;  // corrupt on the wire: verdict out of range
+        const Decoded bad_verdict = decode(buf, n);
+        CHECK(std::get_if<DecodeError>(&bad_verdict) != nullptr);
+        buf[22] = link_verdict::kSaturated;
+        const Decoded short_len = decode(buf, n - 1);
+        const Decoded long_len = decode(buf, n + 1);
+        CHECK(std::get_if<DecodeError>(&short_len) != nullptr);
+        CHECK(std::get_if<DecodeError>(&long_len) != nullptr);
+        // A pre-159 build sees ext id 0x03 as ExtUnknown — pinned by the
+        // registry law; here we only pin that 0x03 now decodes as itself.
+    }
+
     // §3.12: reserved flag bits and wrong length are decode errors.
     {
         Announce a;

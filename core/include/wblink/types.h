@@ -131,9 +131,24 @@ namespace ext_type {
 inline constexpr uint8_t kReservedInvalid = 0x00;
 inline constexpr uint8_t kCalProbe = 0x01;
 inline constexpr uint8_t kCalTally = 0x02;
+inline constexpr uint8_t kLinkVerdict = 0x03;  // §3.16 Pass 159
 }  // namespace ext_type
 inline constexpr size_t kCalibProbeFixedSize = 22;
 inline constexpr size_t kCalibTallySize = 26;
+inline constexpr size_t kLinkVerdictSize = 23;  // §3.16 Pass 159, exact-length
+// §3.16 (Pass 159) LINK_VERDICT values — the CAUSE, never a vendor scalar.
+// 0/stale = absence of evidence, gates nothing (§9.4 Pass 160). >6 = decode
+// error.
+namespace link_verdict {
+inline constexpr uint8_t kUnknown = 0;
+inline constexpr uint8_t kNoSignal = 1;
+inline constexpr uint8_t kSaturated = 2;
+inline constexpr uint8_t kInterference = 3;
+inline constexpr uint8_t kWeak = 4;
+inline constexpr uint8_t kMarginal = 5;
+inline constexpr uint8_t kHealthy = 6;
+inline constexpr uint8_t kMax = 6;
+}  // namespace link_verdict
 // §3.16 rx_mcs sentinel: no radiotap MCS field, a non-HT rate, or no
 // accepted probe yet. Mirrors io's kRxMcsUnknown, restated here because
 // core/ stays dependency-free (it is vendored standalone).

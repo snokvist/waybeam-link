@@ -244,6 +244,12 @@ struct LinkStats {
     // same answer as holder 0.
     uint16_t report_latch_holder = 0;
     bool report_latch_known = false;
+    // §15.3 Pass 159/160 role-dependent verdict view (0 = Unknown/none):
+    // craft = last ACCEPTED §3.16 verdict + age; radio ground = the cause
+    // it computes (age 0). promote_blocked_saturated is craft-only.
+    uint8_t verdict = 0;
+    uint32_t verdict_age_ms = 0;
+    uint64_t promote_blocked_saturated = 0;
     bool flap_freeze = false;
     std::string csa_state = "IDLE";
     // §11 follow-me: current RF operating channel (center MHz). 0 when the node

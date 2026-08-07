@@ -219,6 +219,20 @@ bool Selector::flap_frozen(uint64_t now_ms) const {
     return now_ms < freeze_until_ms_;
 }
 
+void Selector::on_verdict(uint8_t verdict, uint64_t now_ms) {
+    // §9.4 Pass 160: value + age only. Acceptance (latch, epoch monotone)
+    // ran in the caller; >kMax cannot arrive (decode error upstream).
+    verdict_ = verdict;
+    verdict_ms_ = now_ms;
+}
+
+bool Selector::saturated_fresh(uint64_t now_ms) const {
+    // Unknown / stale = absence of evidence, gates nothing (§9.4 Pass 160).
+    return verdict_ == link_verdict::kSaturated && verdict_ms_ != 0 &&
+           now_ms >= verdict_ms_ &&
+           now_ms - verdict_ms_ < policy_.verdict_ttl_ms;
+}
+
 bool Selector::on_report(const LinkReport& r, uint64_t now_ms) {
     // ReportGate has already authorized this identity. A session change is a
     // reporter reboot and a source change is a silence-based re-latch; both
@@ -581,10 +595,16 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
         now_ms - last_demote_ms_ >= policy_.down_cooldown_ms &&
         rung_ < adaptive_hi &&
         !flap_frozen(now_ms)) {
-        last_demote_ms_ = now_ms;  // reuse the cooldown as the climb pacer
-        start_promote(rung_ + 1, now_ms, a,
-                      SelectorReason::kBackpressure);
-        return;
+        // §9.4 Pass 160: a fresh Saturated verdict suppresses EVERY climb —
+        // gating only rule 6 would reroute the saturation flap through here.
+        if (saturated_fresh(now_ms)) {
+            ++promote_blocked_saturated_;
+        } else {
+            last_demote_ms_ = now_ms;  // reuse the cooldown as the climb pacer
+            start_promote(rung_ + 1, now_ms, a,
+                          SelectorReason::kBackpressure);
+            return;
+        }
     }
     // Rule 6 — RSSI-margin promote (§9.4). Gated on clean delivered loss
     // (§9.0 robustness-first: promoting while loss sits at the demote
@@ -606,8 +626,14 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
         const uint64_t dwell = recent_demote ? policy_.reentry_dwell_ms
                                              : policy_.promote_dwell_ms;
         if (rssi_ewma_ >= need && now_ms - last_change_ms_ >= dwell) {
-            start_promote(next, now_ms, a, SelectorReason::kPromote);
-            return;
+            // §9.4 Pass 160 saturation gate: strong RSSI is exactly what a
+            // saturating front end shows — the one case margin cannot see.
+            if (saturated_fresh(now_ms)) {
+                ++promote_blocked_saturated_;
+            } else {
+                start_promote(next, now_ms, a, SelectorReason::kPromote);
+                return;
+            }
         }
     }
     // Rule 7 — hold.

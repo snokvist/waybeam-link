@@ -1749,8 +1749,8 @@ injection model has no such side stream, so that mechanism is **dropped for v0**
   strong RSSI → reads as headroom → promote → EVM collapses → loss → demote
   — an oscillation invisible to every input the selector had, and whose
   correct response (back power *off*) is the opposite of the weak-link
-  response. Freshness is `policy.select.verdict_ttl_ms` (seed **3000 ms** =
-  3 s of report cadence; §17-overridable): a verdict older than the TTL, or
+  response. Freshness is `policy.select.verdict_ttl_s` (seed **3.0 s**
+  of report cadence; §17-overridable): a verdict older than the TTL, or
   `Unknown`, is **absence of evidence and gates nothing** — a
   kernel-monitor ground never emits verdicts and its craft behaves exactly
   as pre-160. Demote paths NEVER consult the verdict (§9.0

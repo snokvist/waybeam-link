@@ -34,8 +34,8 @@ the selector consumes it: a fresh `Saturated` suppresses **both** climbing
 paths (§9.4 RSSI-margin promote AND the backpressure escape — gating one
 reroutes the flap). `Unknown`/stale gates nothing (absence of evidence —
 kernel-monitor fleets unchanged by construction); demote paths never
-consult the verdict (§9.0). Freshness knob `policy.select.verdict_ttl_ms`
-seed 3000. Suppressions counted (§15.3 `promote_blocked_saturated`).
+consult the verdict (§9.0). Freshness knob `policy.select.verdict_ttl_s`
+seed 3.0. Suppressions counted (§15.3 `promote_blocked_saturated`).
 
 **Changed sections.** §9.4 (saturation gate bullet + residuals: the §10
 power-down actuation and Interference/Weak consumption are their own

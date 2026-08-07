@@ -140,6 +140,8 @@ struct SelectPolicy {
     int8_t rssi_fade_arm_dbm = -65;
     double promote_rssi_hyst_db = 6.0;
     double promote_dwell_s = 0.5;
+    // §9.4 Pass 160: Saturated-verdict freshness window for the climb gate.
+    double verdict_ttl_s = 3.0;
     double mcs_settle_s = 5.0;
     double down_cooldown_s = 0.2;
     double ewma_alpha = 0.3;

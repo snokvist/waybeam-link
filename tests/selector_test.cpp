@@ -165,6 +165,35 @@ int main() {
         CHECK(order_ok);  // §9.5 promote: bitrate lags every commit by grace
     }
 
+    // --- §9.4 Pass 160: a fresh Saturated verdict suppresses every climb ----
+    {
+        Harness h;
+        h.boot();
+        // Establish steady strong-RSSI reports, then plant Saturated: the
+        // exact regime the RSSI-margin promote would climb in.
+        (void)h.run(0, 1000, -40, 0);
+        const uint8_t before = h.sel.profile_id();
+        h.sel.on_verdict(link_verdict::kSaturated, 1000);
+        (void)h.run(1000, 3500, -40, 0);
+        CHECK_EQ_U(h.sel.profile_id(), before);  // pinned while fresh
+        CHECK(h.sel.promote_blocked_saturated() > 0);
+        // TTL (seed 3000 ms) expires with no refresh → climbing resumes.
+        (void)h.run(4200, 8000, -40, 0);
+        CHECK(h.sel.profile_id() > before);
+    }
+    {
+        // Healthy and Unknown gate nothing; Saturated never blocks demote.
+        Harness h;
+        h.boot();
+        h.sel.on_verdict(link_verdict::kHealthy, 0);
+        (void)h.run(0, 4000, -40, 0);
+        const uint8_t climbed = h.sel.profile_id();
+        CHECK(climbed > 1);  // Healthy did not gate the climb
+        h.sel.on_verdict(link_verdict::kSaturated, 4000);
+        (void)h.run(4000, 5500, -90, 0);  // RSSI floor demotes regardless
+        CHECK(h.sel.profile_id() < climbed);
+    }
+
     // --- Pass 110 persistent loss: five windows, exactly one rung ------------
     {
         SelectorPolicy p;
