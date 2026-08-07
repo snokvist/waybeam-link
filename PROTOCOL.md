@@ -284,12 +284,12 @@ wire packet inside it.
 0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK ·
 0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY · 0xB ANNOUNCE ·
 0xC CACHE_ASSIGN · 0xD VEHICLE_CMD · 0xE SELECTOR_STATE ·
-0xF CALIBRATION` (a subtype family since Pass 153; was UPLINK_QUALITY,
-Passes 125–152). 15 of 16 used; the version nibble will not ship 16
-wire-incompatible revisions, so there is no type-budget scarcity. A future
-wire-incompatible expansion can consume the remaining `0x0` type or advance
-the version nibble; within `0xF` the subtype byte (§3.16) extends without
-either.
+0xF EXTENDED` (an extended-type registry since Pass 153; was
+UPLINK_QUALITY, Passes 125–152). 15 of 16 used. Additive growth goes
+through the `0xF` extended type ID registry (§3.16) — one byte, first in
+the payload — and the **version nibble is reserved for breaking changes
+only**; a future wire-incompatible expansion consumes the remaining `0x0`
+type or advances the version nibble.
 
 **Common prefix describes the SENDER.** Control packets (NACK, LINK_REPORT) name
 the stream they concern via a **target descriptor** in their body (§3.3, §3.5) —
@@ -880,15 +880,28 @@ timer. This follows the existing §7.2 paced-video ownership law: observability
 may add a few bytes inside an active TX opportunity, never manufacture another
 one.
 
-### 3.16 CALIBRATION packet family (type `0xF`) — PROBE / TALLY (Pass 153)
+### 3.16 EXTENDED type (`0xF`) — type-ID registry; CAL_PROBE / CAL_TALLY (Pass 153)
 
 Type `0xF` carried the UPLINK_QUALITY cumulative-counter packet from Pass 125
 to Pass 152. Pass 153 retires that layout and re-purposes the type as the
-**calibration family**: the §3.1 type space is full, so the byte at offset 11
-is a **subtype** discriminator. The reasons `0xF` is a separate type rather
-than a §3.15 append are unchanged from Pass 131 and carry over: growing
-SELECTOR_STATE costs pre-extension receivers the whole packet, and calibration
-traffic is **addressed, not broadcast** — it is scoped to exactly one peer.
+**EXTENDED type**: the §3.1 type space is full, so the first payload byte
+(offset 11) is an **extended type ID** — one shared dispatch point for every
+`0xF` frame. The registry:
+
+| ID | name | notes |
+|---|---|---|
+| `0x00` | *reserved-invalid* | a decode error, never assigned |
+| `0x01` | `CAL_PROBE` | below |
+| `0x02` | `CAL_TALLY` | below |
+| `0x03`–`0xFF` | *unassigned* | additive growth allocates here |
+
+An unknown ID is **ignored, not an error** (below) — that posture is what
+makes the registry the additive-growth channel, and the §3.1 version nibble
+is reserved for breaking changes only. The first two registered types are
+the calibration pair; the reasons they are a separate type rather than a
+§3.15 append are unchanged from Pass 131 and carry over: growing
+SELECTOR_STATE costs pre-extension receivers the whole packet, and
+calibration traffic is **addressed, not broadcast** — scoped to one peer.
 
 Both §10.6 and §10.7 measure with the same primitive: the sender emits **N
 numbered, MTU-padded PROBE frames** at a fixed `(rung, qdb)` dwell, the
@@ -899,13 +912,14 @@ windows and no dual-clock liveness gate; the `dwell_id` *is* the
 synchronisation. A lost tally is re-elicited (the sender re-emits the dwell's
 tail probe, bounded); a duplicate tally is idempotent.
 
-**Subtypes.** `0x01 PROBE`, `0x02 TALLY`. An unknown subtype is **not** a
-decode error: it decodes to an ignorable value, is dropped after the common
-prefix checks, and still counts as valid RX for liveness purposes (§11.4
-follower liveness must not fail because a peer is newer). A mixed-version pair
-therefore degrades to "calibration unavailable", never to a fault.
+**Unknown IDs.** An unregistered ID is **not** a decode error: it decodes to
+an ignorable value, is dropped after the common prefix checks, and still
+counts as valid RX for liveness purposes (§11.4 follower liveness must not
+fail because a peer is newer). A mixed-version pair therefore degrades to
+"feature unavailable" — for the calibration pair, "calibration unavailable"
+— never to a fault.
 
-**PROBE (`0x01`)** — fixed 22 bytes, zero-padded to the negotiated §9.3a
+**CAL_PROBE (`0x01`)** — fixed 22 bytes, zero-padded to the negotiated §9.3a
 packet budget (`mtu_effective`). The padding is the point: a probe is
 byte-equivalent on air to a full DATA packet, so loss-at-MCS measured by
 probes transfers to flight load. Frame size is a first-order term in PER at a
@@ -915,19 +929,19 @@ nothing the link carries in flight.
 | off | size | field | notes |
 |---|---:|---|---|
 | 0 | 11 | *common* | §3.1 — sender = the probing node; `destination` = the receiving peer, non-zero |
-| 11 | 1 | `subtype` | `0x01` |
+| 11 | 1 | `ext_type` | `0x01` |
 | 12 | 4 | `run_id` | sender-chosen per-run nonce; a new `run_id` opens a new run at the receiver |
 | 16 | 2 | `dwell_id` | starts at 1, strictly increasing within the run |
 | 18 | 2 | `seq` | 1..`count`, unique per probe within the dwell |
 | 20 | 2 | `count` | N — the dwell's full burst size, carried on every probe |
-| 22 | — | *padding* | zero fill to the negotiated budget; length is validated as a **range** `[22, §9.3a High budget]` — the family's PROBE is the only variable-length non-DATA type |
+| 22 | — | *padding* | zero fill to the negotiated budget; length is validated as a **range** `[22, §9.3a High budget]` — CAL_PROBE is the only variable-length non-DATA layout |
 
-**TALLY (`0x02`)** — exact 26 bytes.
+**CAL_TALLY (`0x02`)** — exact 26 bytes.
 
 | off | size | field | notes |
 |---|---:|---|---|
 | 0 | 11 | *common* | §3.1 — sender = the probe receiver; `destination` = the probing node, non-zero |
-| 11 | 1 | `subtype` | `0x02` |
+| 11 | 1 | `ext_type` | `0x02` |
 | 12 | 4 | `run_id` | echo |
 | 16 | 2 | `dwell_id` | echo |
 | 18 | 2 | `received` | count of **distinct** `seq` values observed for the dwell (duplicates counted once) |
@@ -961,7 +975,7 @@ ground can trigger it — and resumes on a probe-quiet timeout. The pause is
 bounded and self-clearing; no VCMD and no new wire is involved.
 
 **FEC/ARQ exemption (the §14.1a precedent, stated structurally).** The
-calibration family is control-plane. Probes and tallies never enter DATA
+EXTENDED type is control-plane. Probes and tallies never enter DATA
 accounting: they carry no FEC parity and are never protected by it, are
 ARQ-ineligible and never appear in a NACK bitmap, do not contribute to §3.5
 report loss or the §9 selector's loss window, and neither arm nor close a §7.2
@@ -3559,13 +3573,13 @@ data-path crypto, or heavy state. Threats and mitigations:
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
 | Forged/stale CACHE_ASSIGN → cache retune or cross-vehicle window | accept only the configured controller originator **and UDP source endpoint**, exact cache destination, allowlisted channel, and monotonic controller-session epoch; clear the old window only after a successful retune | 3.13, 14.3 |
 | Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung / venc preset / mode switch) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets (v1 toggles) or an encoder preset from the operator's own deployment allowlist (v2, volatile — Pass 73; persists only on a pre-live venc fallback), or an operating mode from the craft's own `modes/` set (Pass 105, volatile — reboot restores boot `active_mode`; a mode restarts venc + re-bands the §9.7 selector but touches no channel/power) — never channel or power | 3.14, 11.7 |
-| Forged CALIBRATION TALLY → unsafe ground TX-power move; forged PROBE → craft feed pause | **accepted, and bounded rather than prevented (Pass 131 ruling, Pass 153 layout).** Unauthenticated by ruling: §10.6 already moves the *craft's* power actuator on plain LINK_REPORTs, so requiring a MAC here alone was asymmetry without a threat. Length/subtype validity, exact peer source and target `(originator, session)`; §10.7 reads the latch holder from §3.15a rather than inferring it from the packet. Worst case is bounded by construction: a forged TALLY mis-places the **ground's own** uplink power, inside `[min_qdb, max_qdb]`, never above §10.3 `max_power_qdb`, only during an operator-initiated run, and the restore edge reverts it; a forged PROBE stream from the latched tuple pauses the craft's video for at most `feed_quiet_ms` past its last frame. Nothing else moves | 3.16, 10.7 |
+| Forged CAL_TALLY → unsafe ground TX-power move; forged CAL_PROBE → craft feed pause | **accepted, and bounded rather than prevented (Pass 131 ruling, Pass 153 layout).** Unauthenticated by ruling: §10.6 already moves the *craft's* power actuator on plain LINK_REPORTs, so requiring a MAC here alone was asymmetry without a threat. Length/ID validity, exact peer source and target `(originator, session)`; §10.7 reads the latch holder from §3.15a rather than inferring it from the packet. Worst case is bounded by construction: a forged TALLY mis-places the **ground's own** uplink power, inside `[min_qdb, max_qdb]`, never above §10.3 `max_power_qdb`, only during an operator-initiated run, and the restore edge reverts it; a forged PROBE stream from the latched tuple pauses the craft's video for at most `feed_quiet_ms` past its last frame. Nothing else moves | 3.16, 10.7 |
 
 HMAC remains off the bandwidth-carrying DATA path, and since Pass 131 off the
 feedback path too. It protects the rare channel/command actions — CSA (§11.4)
 and VEHICLE_CMD (§11.7) — and nothing else. Key distribution (`csa_psk`) is
 operator-provisioned to craft + ground (§15) or resolved as the §11.4a
-announced token; the §3.16 calibration family uses neither.
+announced token; the §3.16 EXTENDED type uses neither.
 
 ---
 

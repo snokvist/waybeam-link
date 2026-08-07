@@ -24,24 +24,30 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
-## Pass 153 — 0xF CALIBRATION family: symmetric probe exchange (2026-08-07)
+## Pass 153 — 0xF EXTENDED type + calibration v2 probe exchange (2026-08-07)
 
 **Verdict.** Calibration v2 adopted as spec
 (`docs/calibration-v2-symmetric-probes.md`, operator rulings Q1–Q3 2026-08-06,
-D-A/D-C 2026-08-07). Type `0xF` becomes the CALIBRATION subtype family;
-the §3.16 UPLINK_QUALITY cumulative-counter layout is retired. One dwell
-primitive, both directions: N MTU-padded PROBE frames at `(rung, qdb)`,
-one per-dwell TALLY back, self-denominating loss. Video pauses for the run
-(input-starve), restored on the rate/power restore edge.
+D-A/D-C 2026-08-07, EXTENDED generalization 2026-08-07). Type `0xF` becomes
+the **EXTENDED type**: first payload byte = extended type ID registry
+(`0x00` reserved-invalid, `0x01` CAL_PROBE, `0x02` CAL_TALLY, `0x03`–`0xFF`
+unassigned; unknown IDs ignored). The version nibble is reserved for
+breaking changes only — additive growth goes through the registry. The
+§3.16 UPLINK_QUALITY cumulative-counter layout is retired. One dwell
+primitive, both directions: N MTU-padded CAL_PROBE frames at `(rung, qdb)`,
+one per-dwell CAL_TALLY back, self-denominating loss. Video pauses for the
+run (input-starve), restored on the rate/power restore edge.
 
 **Changed sections.**
-- §3.1: type table `0xF UPLINK_QUALITY` → `0xF CALIBRATION`.
-- §3.16: rewritten — PROBE (22B fixed + pad to `mtu_effective`, range-length)
-  and TALLY (26B exact; carries `rx_mcs` + `adapter_fingerprint` — D-A ruling
-  keeps the delivered-rung cross-check and evidence identity gate). Unknown
-  subtype = ignorable, not a decode error. Craft feed pause on first accepted
-  PROBE of a new run, resume on probe-quiet timeout (D-C ruling — no VCMD).
-  FEC/ARQ exemption stated structurally.
+- §3.1: type table `0xF UPLINK_QUALITY` → `0xF EXTENDED`; version nibble
+  reserved for breaking changes.
+- §3.16: rewritten — the type-ID registry, then CAL_PROBE (22B fixed + pad
+  to `mtu_effective`, range-length) and CAL_TALLY (26B exact; carries
+  `rx_mcs` + `adapter_fingerprint` — D-A ruling keeps the delivered-rung
+  cross-check and evidence identity gate). Unknown ID = ignorable, not a
+  decode error; `0x00` = reserved-invalid. Craft feed pause on first
+  accepted CAL_PROBE of a new run, resume on probe-quiet timeout (D-C
+  ruling — no VCMD). FEC/ARQ exemption stated structurally.
 - §10.6: evidence = per-dwell tallies; Pass 134 report-health precondition
   deleted (self-denominating evidence cannot author false-clean); blackout
   rules keep addendum semantics with `evidence_lost` trigger; feed-pause and
