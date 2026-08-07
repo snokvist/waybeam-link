@@ -846,36 +846,50 @@ int main() {
         CHECK(bool(d));
         if (d) {
             const CalibrationPolicy& c = d.value->policy.calibration;
-            // Pass 132 burst sizes: at 100 probes one loss is 10permille
-            // (inside loss_ok_milli) and five are 50permille (the bad wall),
-            // so every reading is decidable first time. That is what retired
-            // uplink_ambiguous_epochs rather than tuning it.
-            CHECK(c.uplink_probe_epochs == 100);
-            CHECK(c.uplink_verify_epochs == 200);
-            CHECK(c.uplink_drain_ms == 600);
-            CHECK(c.uplink_liveness_ms == 2000);
+            // §3.16 (Pass 153) dwell seeds: at 500 probes one loss is
+            // 2permille — decidable first time, and the verify dwell finally
+            // has the n the estimator arithmetic demands.
+            CHECK(c.dwell_probe_frames == 500);
+            CHECK(c.dwell_verify_frames == 1000);
+            CHECK(c.probe_pace_us == 2000);
+            CHECK(c.tally_wait_ms == 500);
+            CHECK(c.tally_retries == 3);
+            CHECK(c.feed_quiet_ms == 2000);
             CHECK(c.settle_ms == 300);
         }
     }
-    // Pass 132: a burst too small to resolve the walls decides on noise. One
-    // lost probe must be <= loss_ok_milli, so with the 15permille seed a
-    // 40-probe burst (25permille per loss) is refused -- that reading is
-    // exactly what the retired ambiguous extension existed to paper over.
+    // Pass 132 (kept on the new primitive): a burst too small to resolve the
+    // walls decides on noise — one lost probe must be <= loss_ok_milli, so
+    // with the 15permille seed a 40-probe burst (25permille) is refused.
     expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"calibration":{"uplink_probe_epochs":40}}})",
+      "policy":{"calibration":{"dwell_probe_frames":40}}})",
         "too small to resolve loss_ok_milli");
-    // A config still carrying the retired key loads, with it ignored.
+    // Configs still carrying Pass-152-era keys load, with them ignored.
     {
         auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"},
-          "policy":{"calibration":{"uplink_ambiguous_epochs":80}}})");
+          "policy":{"calibration":{"uplink_ambiguous_epochs":80,
+            "uplink_probe_epochs":100, "uplink_drain_ms":600,
+            "uplink_floor_min_samples":300, "calib_min_report_hz":6,
+            "probe_dwell_ms":1200, "report_loss_abort_ms":3000}}})");
         CHECK(bool(d));
     }
+    // §3.16: dwell bursts bounded by the receiver's exact-dedup bitmap.
     expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"calibration":{"uplink_verify_epochs":0}}})",
-        "must be >= 1");
+      "policy":{"calibration":{"dwell_verify_frames":0}}})",
+        "must be 1..1024");
     expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"calibration":{"uplink_drain_ms":0}}})",
+      "policy":{"calibration":{"dwell_verify_frames":2048}}})",
+        "must be 1..1024");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"tally_wait_ms":0}}})",
         "must be >= 1");
+    {
+        auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "policy":{"calibration":{"tally_retries":0,
+            "dwell_probe_frames":100}}})");
+        CHECK(bool(ok) && ok.value->policy.calibration.tally_retries == 0 &&
+              ok.value->policy.calibration.dwell_probe_frames == 100);
+    }
     // W4/W8: the seek moves in whole steps and judges the cap wall on a >= 2 dB
     // (8 qdb) commanded rise. Zero or negative never terminates and walks an
     // unbounded negative qdb into set_power_qdb; under 8 the cap wall can never
@@ -895,38 +909,25 @@ int main() {
         CHECK(bool(ok) && ok.value->policy.calibration.seek_step_qdb == 8);
     }
     // §10.6 (Pass 151): the relative-backend step. Bounded on BOTH sides —
-    // under 1 dB is below the actuator's resolution and just burns dwells,
-    // and over 6 dB leaves the default 24 qdb window with two probes, which
-    // is the condition the key exists to prevent.
+    // under 2 qdb aliases on the 0.5 dB TXAGC families (devourer Jaguar1/2;
+    // Jaguar3 resolves 1 qdb), and over 6 dB leaves the default 24 qdb
+    // window with two probes, which is the condition the key exists to
+    // prevent.
     expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"calibration":{"offset_seek_step_qdb":2}}})",
-        "offset_seek_step_qdb must be 4..24");
+      "policy":{"calibration":{"offset_seek_step_qdb":1}}})",
+        "offset_seek_step_qdb must be 2..24");
     expect_error(R"({"node":{"originator":9,"role":"rx"},
       "policy":{"calibration":{"offset_seek_step_qdb":32}}})",
-        "offset_seek_step_qdb must be 4..24");
+        "offset_seek_step_qdb must be 2..24");
     {
         auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
         CHECK(bool(d) &&
               d.value->policy.calibration.offset_seek_step_qdb == 8);
         auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
-          "policy":{"calibration":{"offset_seek_step_qdb":4}}})");
+          "policy":{"calibration":{"offset_seek_step_qdb":2}}})");
         CHECK(bool(ok) &&
-              ok.value->policy.calibration.offset_seek_step_qdb == 4);
+              ok.value->policy.calibration.offset_seek_step_qdb == 2);
     }
-    // Tier-2 floor knob (findings.md 2026-08-07): seed + parse, and the
-    // shared >= 1 uplink gate covers it.
-    {
-        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
-        CHECK(bool(d) &&
-              d.value->policy.calibration.uplink_floor_min_samples == 300);
-        auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
-          "policy":{"calibration":{"uplink_floor_min_samples":40}}})");
-        CHECK(bool(ok) &&
-              ok.value->policy.calibration.uplink_floor_min_samples == 40);
-    }
-    expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"calibration":{"uplink_floor_min_samples":0}}})",
-        "floor gates must be >= 1");
 
     // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------
     {

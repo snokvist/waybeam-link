@@ -202,12 +202,10 @@ StatsSnapshot sample_snapshot() {
     s.link.uplink_calib_power_qdb = -44;
     s.link.uplink_calib_fingerprint = 0x2A;
     s.link.uplink_calib_stale = true;
-    s.link.uplink_quality_valid = true;
-    s.link.uplink_quality_age_ms = 137;
-    s.link.uplink_quality_report_epoch = 9001;
-    s.link.uplink_quality_reports = 8640;
-    s.link.uplink_quality_rssi_mean = -37;
-    s.link.uplink_quality_rx_mcs = 7;
+    s.link.calib_probes_sent = 12345;
+    s.link.calib_tallies_rx = 42;
+    s.link.calib_rx_mcs = 7;
+    s.link.feed_paused = true;
     return s;
 }
 
@@ -319,10 +317,9 @@ const char* kGolden =
     "\"calib_fingerprint\":191,\"calib_stale\":true,"
     "\"uplink_calib_state\":\"done\",\"uplink_calib_rung\":3,"
     "\"uplink_calib_power_qdb\":-44,\"uplink_calib_fingerprint\":42,"
-    "\"uplink_calib_stale\":true,\"uplink_quality_valid\":true,"
-    "\"uplink_quality_age_ms\":137,\"uplink_quality_report_epoch\":9001,"
-    "\"uplink_quality_reports\":8640,\"uplink_quality_rssi_mean\":-37,"
-    "\"uplink_quality_rx_mcs\":7}}\n";
+    "\"uplink_calib_stale\":true,\"calib_probes_sent\":12345,"
+    "\"calib_tallies_rx\":42,\"calib_rx_mcs\":7,"
+    "\"feed_paused\":true}}\n";
 
 }  // namespace
 

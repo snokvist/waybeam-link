@@ -33,41 +33,10 @@ class Reporter {
              std::optional<uint8_t> local_table_version)
         : policy_(policy), tv_(local_table_version) {}
 
-    // §10.7 (Pass 132) probe burst. A calibration dwell needs an EXACT
-    // denominator, and the cheapest way to get one is for the ground to stop
-    // inferring how many reports it sent and simply send a COUNTED burst.
-    // While a budget is set, build() ignores its cadence gate and emits on
-    // every call until the budget is spent, then emits nothing at all — that
-    // silence is the drain window in which the craft's counter settles before
-    // the dwell is scored.
-    //
-    // This is the whole reason §10.7 no longer needs the craft's
-    // `last_report_epoch` as a denominator, and with it goes the anchoring
-    // identity, the local-epoch blackout fallback, and that fallback's
-    // scoring rule — the three mechanisms Passes 126 and 128 found defects in.
-    // Burst probes are synthetic traffic, which §10.7 forbade; that rule was
-    // written for a flying craft, and calibration is stationary and pre-flight.
-    void set_probe_budget(uint32_t n) {
-        probing_ = true;
-        probe_budget_ = n;
-    }
-    void clear_probe_mode() {
-        probing_ = false;
-        probe_budget_ = 0;
-    }
-    bool probing() const { return probing_; }
-    // The burst has been fully BUILT. Not the same as fully injected — the
-    // §7.2 return path batches reports and commits their epochs at the next
-    // quiet gap — but it is the correct signal to stop emitting, and the
-    // calibrator scores against the committed count whatever it turns out to
-    // be. Measured on the bench: topping the budget up from the COMMITTED
-    // count instead re-armed it faster than the batch drained, and the ground
-    // emitted 3480 probes for a 100-probe burst, flooding the return path
-    // until the craft's own §3.16 feedback could not get out (`quality_lost`).
-    bool probe_spent() const { return probing_ && probe_budget_ == 0; }
 
-    // Reports due now, one per latched stream (empty between cadence ticks,
-    // or once a probe burst is spent).
+    // Reports due now, one per latched stream (empty between cadence
+    // ticks). §3.16 (Pass 153): probe mode is gone — calibration probes are
+    // their own packet family and never ride LINK_REPORT.
     std::vector<LinkReport> build(const RxEngine& engine, uint64_t now_ms);
 
     // §3.5: `report_epoch` advances once per EMITTED report, and §10.7's loss
@@ -93,8 +62,6 @@ class Reporter {
     std::optional<uint8_t> tv_;
     uint32_t epoch_ = 0;
     uint64_t next_ms_ = 0;
-    bool probing_ = false;
-    uint32_t probe_budget_ = 0;
     std::map<uint64_t, Snap> last_;  // packed stream key -> last window end
 };
 

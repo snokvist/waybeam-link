@@ -284,10 +284,12 @@ wire packet inside it.
 0x4 HEARTBEAT · 0x5 CSA · 0x6 RECOVERY_REQUEST · 0x7 JSCC_FEEDBACK ·
 0x8 CACHE_STATUS · 0x9 CACHE_REQUEST · 0xA CACHE_REPLY · 0xB ANNOUNCE ·
 0xC CACHE_ASSIGN · 0xD VEHICLE_CMD · 0xE SELECTOR_STATE ·
-0xF UPLINK_QUALITY`. 15 of 16 used; the version nibble will not ship 16
-wire-incompatible revisions, so there is no type-budget scarcity. A future
-wire-incompatible expansion can consume the remaining `0x0` type or advance
-the version nibble.
+0xF EXTENDED` (an extended-type registry since Pass 153; was
+UPLINK_QUALITY, Passes 125–152). 15 of 16 used. Additive growth goes
+through the `0xF` extended type ID registry (§3.16) — one byte, first in
+the payload — and the **version nibble is reserved for breaking changes
+only**; a future wire-incompatible expansion consumes the remaining `0x0`
+type or advances the version nibble.
 
 **Common prefix describes the SENDER.** Control packets (NACK, LINK_REPORT) name
 the stream they concern via a **target descriptor** in their body (§3.3, §3.5) —
@@ -860,11 +862,22 @@ first-latcher/relatch and the §11.4 CSA transfer (Pass 115).
 
 `state_flags` active and latched describe the effective `lockout_profile`;
 latched implies active. Masks are ladder-index diagnostics, not profile IDs.
-An RX accepts the summary only from the currently latched RTP
-`(originator,session)` and only when `table_version` matches. It expires the
-summary after **1.5 s** without a refresh so a stopped/rebooted craft cannot
-leave a stale warning on the OSD. Mixed-version receivers safely ignore the
-unknown packet type and continue decoding DATA.
+An RX accepts the summary from the RTP `(originator,session)` tuple it is
+currently consuming, and only when `table_version` matches. **The acceptance
+tuple latches (Pass 153):** once a summary from a live-consumed tuple has
+been accepted, the same tuple stays acceptable across that stream's §2 idle
+teardown, until a different tuple's live stream replaces the latch. The
+latch stands in **only while no live RTP stream exists** — with any live
+stream present, a summary that matches no stream is a stale session and is
+refused, latch or no latch. Without
+the latch the §3.16 pause exemption below is unreceivable — a calibration
+run starves the video stream past teardown precisely while the word is the
+operator's only progress view and the §10.7 sequencer's downlink evidence.
+The RX expires the summary after **1.5 s** without a refresh so a
+stopped/rebooted craft cannot leave a stale warning on the OSD (a rebooted
+craft's new session re-latches through its live stream, never through the
+old latch). Mixed-version receivers safely ignore the unknown packet type
+and continue decoding DATA.
 
 The packet is unauthenticated because it is advisory only. Forging it can at
 most alter diagnostics for an already-spoofed craft identity; it cannot change
@@ -878,122 +891,119 @@ timer. This follows the existing §7.2 paced-video ownership law: observability
 may add a few bytes inside an active TX opportunity, never manufacture another
 one.
 
-### 3.16 UPLINK_QUALITY packet (type `0xF`) — 31 bytes (Pass 131)
+### 3.16 EXTENDED type (`0xF`) — type-ID registry; CAL_PROBE / CAL_TALLY (Pass 153)
 
-Craft→report-latched-ground **counter feedback** for the ground-uplink
-calibration in §10.7: how many of that ground's LINK_REPORTs the craft
-accepted, at what receive RSSI, and on what delivered rung.
+Type `0xF` carried the UPLINK_QUALITY cumulative-counter packet from Pass 125
+to Pass 152. Pass 153 retires that layout and re-purposes the type as the
+**EXTENDED type**: the §3.1 type space is full, so the first payload byte
+(offset 11) is an **extended type ID** — one shared dispatch point for every
+`0xF` frame. The registry:
 
-It is deliberately a separate packet rather than another §3.15 append, for two
-reasons that both survive the Pass 131 de-authentication below. **Growing
-SELECTOR_STATE costs old receivers the whole packet**: §3.15a's extension
-pattern is a flag-gated append, and a pre-extension receiver validates the
-exact length, so it drops a longer summary entire — losing profile/MCS, lockout
-state and loss window along with the field it did not know about. A distinct
-type `0xF` is ignored by unknown-type receivers at no cost at all (§3.15).
-And **these counters are addressed, not broadcast**: SELECTOR_STATE carries
-`destination = 0` and goes to every receiver, whereas the counters are scoped
-to exactly one reporter tuple and mean nothing to a node that does not hold
-the latch.
+| ID | name | notes |
+|---|---|---|
+| `0x00` | *reserved-invalid* | a decode error, never assigned |
+| `0x01` | `CAL_PROBE` | below |
+| `0x02` | `CAL_TALLY` | below |
+| `0x03`–`0xFF` | *unassigned* | additive growth allocates here |
 
-**Pass 131 removes the `quality_mac` field and with it the whole key
-apparatus.** The packet is now unauthenticated, like every other §3 packet
-except CSA and VEHICLE_CMD. See the trust paragraph at the end of this section
-for why that is the correct level, and §10.7 for what replaces the authority
-inference the MAC used to carry.
+An unknown ID is **ignored, not an error** (below) — that posture is what
+makes the registry the additive-growth channel, and the §3.1 version nibble
+is reserved for breaking changes only. The first two registered types are
+the calibration pair; the reasons they are a separate type rather than a
+§3.15 append are unchanged from Pass 131 and carry over: growing
+SELECTOR_STATE costs pre-extension receivers the whole packet, and
+calibration traffic is **addressed, not broadcast** — scoped to one peer.
+
+Both §10.6 and §10.7 measure with the same primitive: the sender emits **N
+numbered, MTU-padded PROBE frames** at a fixed `(rung, qdb)` dwell, the
+receiver counts them and returns **one TALLY per dwell**, and the sender scores
+`loss‰ = 1000 · (N − received) / N` — **self-denominating**. There are no
+cumulative counters, no counter domains, no wrap/resync handling, no drain
+windows and no dual-clock liveness gate; the `dwell_id` *is* the
+synchronisation. A lost tally is re-elicited (the sender re-emits the dwell's
+tail probe, bounded); a duplicate tally is idempotent.
+
+**Unknown IDs.** An unregistered ID is **not** a decode error: it decodes to
+an ignorable value, is dropped after the common prefix checks, and still
+counts as valid RX for liveness purposes (§11.4 follower liveness must not
+fail because a peer is newer). A mixed-version pair therefore degrades to
+"feature unavailable" — for the calibration pair, "calibration unavailable"
+— never to a fault.
+
+**CAL_PROBE (`0x01`)** — fixed 22 bytes, zero-padded to the negotiated §9.3a
+packet budget (`mtu_effective`). The padding is the point: a probe is
+byte-equivalent on air to a full DATA packet, so loss-at-MCS measured by
+probes transfers to flight load. Frame size is a first-order term in PER at a
+given MCS — the retired layout's 10 Hz report probes were representative of
+nothing the link carries in flight.
 
 | off | size | field | notes |
 |---|---:|---|---|
-| 0 | 11 | *common* | §3.1 — sender = craft; `destination` = target ground originator |
-| 11 | 2 | `target_originator` | report-latched ground; MUST equal `destination` and be non-zero |
-| 13 | 4 | `target_session` | exact ground session whose reports formed these counters |
-| 17 | 4 | `last_report_epoch` | most recent accepted §3.5 epoch from that tuple; 0 before the first accepted report |
-| 21 | 4 | `reports_received` | cumulative accepted LINK_REPORT count in this target-tuple epoch |
-| 25 | 4 | `rssi_sum_dbm` | two's-complement i32 wire image of the cumulative craft RX-metadata RSSI sum; accumulation is modulo 2^32 |
-| 29 | 1 | `craft_adapter_fingerprint` | CRC-8/DVB-S2 of the craft RX/TX adapter's canonical calibration identity |
-| 30 | 1 | `last_rx_mcs` | delivered HT MCS of the most recently accepted report (`AirRxMeta.rx_mcs`); `0xFF` = unknown — no radiotap MCS field, a non-HT rate, or no report yet |
+| 0 | 11 | *common* | §3.1 — sender = the probing node; `destination` = the receiving peer, non-zero |
+| 11 | 1 | `ext_type` | `0x01` |
+| 12 | 4 | `run_id` | sender-chosen per-run nonce; a new `run_id` opens a new run at the receiver |
+| 16 | 2 | `dwell_id` | starts at 1, strictly increasing within the run |
+| 18 | 2 | `seq` | 1..`count`, unique per probe within the dwell |
+| 20 | 2 | `count` | N — the dwell's full burst size, carried on every probe |
+| 22 | — | *padding* | zero fill to the negotiated budget; length is validated as a **range** `[22, §9.3a High budget]` — CAL_PROBE is the only variable-length non-DATA layout |
 
-The craft resets `last_report_epoch`, `reports_received`, `rssi_sum_dbm`, and
-`last_rx_mcs` when its accepted reporter `(originator, session)` changes. Every
-accepted LINK_REPORT increments the count once and adds the signed
-`AirRxMeta.rssi` of the **accepted copy** — under craft-side RX diversity, the
-adapter that first delivered that report — in unsigned modulo arithmetic (never
-C++ signed overflow). Rejected, duplicate, and stale reports contribute nothing.
-Counter arithmetic is wrap-aware; a calibrator run is far shorter than either
-counter's wrap interval.
+**CAL_TALLY (`0x02`)** — exact 26 bytes.
 
-`last_rx_mcs` is the **commanded-versus-delivered rung cross-check**, the rung
-analogue of §10.6's commanded-qdb-versus-delivered-RSSI check. Pass 125 shipped
-it as observability against a single-rung uplink; since Pass 131 sweeps all
-eight rungs it is load-bearing, because the sweep commands a rung per rung and
-this is the only evidence the radio honoured it. It is what makes a driver or
-chip that silently ignores a commanded rate a *detected* fault rather than an
-unexplained loss wall — a failure this fleet has seen. Surfaced as §15.3
-`uplink_quality_rx_mcs`.
+| off | size | field | notes |
+|---|---:|---|---|
+| 0 | 11 | *common* | §3.1 — sender = the probe receiver; `destination` = the probing node, non-zero |
+| 11 | 1 | `ext_type` | `0x02` |
+| 12 | 4 | `run_id` | echo |
+| 16 | 2 | `dwell_id` | echo |
+| 18 | 2 | `received` | count of **distinct** `seq` values observed for the dwell (duplicates counted once) |
+| 20 | 4 | `rssi_sum_dbm` | two's-complement i32 wire image: sum of the accepted probes' `AirRxMeta.rssi`; mean = `rssi_sum_dbm / received` |
+| 24 | 1 | `rx_mcs` | delivered HT MCS of the most recently accepted probe; `0xFF` = unknown. The commanded-versus-delivered rung cross-check — the only evidence the radio honoured `set_tx_mode`, a failure this fleet has seen |
+| 25 | 1 | `adapter_fingerprint` | CRC-8/DVB-S2 of the receiver adapter's canonical calibration identity (§10.6 Pass 146 tiers) — the identity gate on the evidence source |
 
-The packet becomes due at **2 Hz** and follows the §3.15 guard-cost boundary
-exactly: emit it immediately before live DATA already going on air, coalesce a
-missed period, and never create a standalone TX event or extend an EOB quiet
-gap. No live DATA means no fresh quality and therefore makes §10.7 start fail
-or an active run abort.
+**Dwell protocol.** The receiver accumulates `received`/`rssi_sum` per
+`(run_id, dwell_id)`, deduplicating by `seq`. It closes the dwell and emits its
+tally on any of: `seq == count` arriving; the first probe of a **later**
+`dwell_id` (close-by-succession — the tail probe was lost); or run expiry
+(probe-quiet timeout). After closing, any late or duplicate probe of a closed
+dwell re-elicits the same tally — idempotent retransmission with no
+sender-side request subtype. The sender treats a dwell whose tally never
+arrives after bounded re-elicitation as **inconclusive, never clean**: it
+re-dwells (bounded) and then fails the run. Missing evidence reads as missing
+— the starved-feedback false-clean failure (Pass 134) is structurally
+impossible in this family.
 
-The ground accepts it only when all of the following hold: exact length and
-field validity; common source `(originator, session)` equals the craft this
-ground has currently selected as its DATA source; and both target fields equal
-the local ground `(originator, session)`. A source or target tuple change starts
-a fresh receive domain. Wrong-target and stale-session packets are dropped and
-counted. This packet is not a command and confers no claim.
+**Acceptance.** Exact/range length and field validity; the common source
+`(originator, session)` must equal the peer the local run addresses — on the
+ground, the currently selected DATA-source craft; on the craft, the
+report-latched ground (§3.15a `report_latch_holder`) — and `destination` must
+equal the local originator. Wrong-source and wrong-target packets are dropped
+and counted. Neither subtype is a command and neither confers any claim.
 
-**A backward cumulative counter is a domain reset, not a replay (Pass 131).**
-The craft zeroes these counters whenever *its* accepted reporter tuple changes,
-which happens without the craft's own `(originator, session)` moving — so the
-source-domain check above cannot see it, and the ground observes only that the
-counters went backwards. While the packet was authenticated that reading was
-ambiguous (a replayed packet looks the same), and resolving it needed a
-sustained-backward-run heuristic that wedged the gate at 519 consecutive
-rejects when it guessed wrong. Unauthenticated, the ambiguity is gone: there is
-no replay attacker to distinguish from, so backward means reset and the ground
-rebaselines on the spot, reporting the discontinuity to §10.7 so a dwell
-spanning it is restarted rather than scored across two domains. Comparison stays
-wrap-aware — that is how backward is told from forward, not a security control.
+**Craft feed pause (§10.6/§10.7, operator-ruled 2026-08-07).** The craft
+pauses its video input (input-starve, §10.6) on the first **accepted** PROBE
+of a new `run_id` — the acceptance filter above means only the report-latched
+ground can trigger it — and resumes on a probe-quiet timeout. The pause is
+bounded and self-clearing; no VCMD and no new wire is involved.
 
-**Two clocks, not one.** An accepted packet always refreshes **feedback
-liveness**: it is evidence the craft is alive, still targeting this ground, and
-still airing DATA. It refreshes **counter progress** only when
-`reports_received` advances under wrap-aware ordering. A duplicate is therefore
-neither an error nor a sample — it refreshes liveness alone. An accepted packet
-whose counters have not advanced is **positive evidence that the uplink is not
-delivering**, never an absence of evidence. §10.7 consumes the two separately:
-liveness loss is a craft/downlink failure and ends the run; stalled counters
-under live feedback are a 1000‰ loss observation that drives the seek.
+**FEC/ARQ exemption (the §14.1a precedent, stated structurally).** The
+EXTENDED type is control-plane. Probes and tallies never enter DATA
+accounting: they carry no FEC parity and are never protected by it, are
+ARQ-ineligible and never appear in a NACK bitmap, do not contribute to §3.5
+report loss or the §9 selector's loss window, and neither arm nor close a §7.2
+quiet gap. This is structural — the RX data engine consumes only DATA — and a
+conforming implementation MUST keep it so. Per-adapter TX submission
+diagnostics (§15.3 `tx_submitted` and kin) do count probes: they transmitted.
 
-**Trust level, stated rather than assumed (Pass 131).** This packet is
-unauthenticated because the thing it feeds already is. §10.6 moves the *craft's*
-TX power actuator on plain unauthenticated LINK_REPORTs; §10.7 moves the
-ground's own uplink power on these counters. Requiring a MAC on one and not the
-other was an asymmetry with no threat behind it. And on the fleet's actual
-configuration it bought less than it appeared to: with no `csa_psk` configured
-the §11.4a key is the *announced token*, which is broadcast so a spectator can
-pair, so the MAC authenticated provenance against a passive third party and not
-against anyone who had heard an ANNOUNCE. What it cost was real — a
-per-emission/per-accept key resolver, a counter-domain resync gate, and a
-backward-threshold detector, which between them produced most of the defects in
-Passes 126–128.
-
-The residual exposure is bounded by construction and unchanged from what Pass
-127 already documented for announced mode: a forged quality packet can only
-mis-place the **ground's own uplink power** inside `[min_qdb, max_qdb]`, only
-while an operator-initiated §10.7 run is in flight, and never above that
-adapter's §10.3 `max_power_qdb` ceiling. It moves nothing on the craft and
-confers no claim.
-
-**What the MAC used to carry, and what replaces it.** Pass 125 inferred
-authority from the packet: a valid-MAC packet naming a ground's own
-`(originator, session)` was proof that ground held the craft's §3.5 report
-latch. That inference dies with the MAC and is **not** silently dropped — §10.7
-now reads the latch holder directly from §3.15a `report_latch_holder`, which
-already ships on the packet that exists for craft→ground advisory observability.
-Same trust level, same craft-owned source, no new wire.
+**Trust level.** Unauthenticated, for the Pass 131 reasons, which survive the
+layout change: §10.6 moves the craft's power on plain LINK_REPORTs and §10.7
+moves the ground's own uplink power on these tallies — a MAC on one and not
+the other is asymmetry without a threat. The residual exposure stays bounded
+by construction: a forged TALLY can only mis-place the **ground's own** uplink
+power inside `[min_qdb, max_qdb]`, never above §10.3 `max_power_qdb`, only
+during an operator-initiated run, and the restore law reverts it; a forged
+PROBE stream from the latched tuple can pause the craft's video for at most
+the probe-quiet timeout past its last frame. Nothing on the craft moves and
+no claim is conferred.
 
 ---
 
@@ -2283,20 +2293,38 @@ actuates on **both** RF backends through the same `set_power_qdb` seam.
 Authoring the §10.2 curve in the field, where the craft has no IP path. The
 loop that measured per-rung placements and overload ceilings on the bench
 (`tools/curve_author.py`, `docs/mcs-power-sweep.md`) runs **on the craft**,
-steering against what the ground reports hearing — the §3.5 LINK_REPORT
-already carries the complete feedback set (`rssi_best`/`rssi_mean`,
-`loss_postdiv_prearq`, `uniq`) at report cadence, so calibration adds **no
-uplink bytes and no bulk transfer**: the artifact is born on the node that
-consumes it. Trigger and abort are §11.7 `CALIBRATE` (bound-issuer + PSK +
-nonce — the claim gate is the existing one).
+scoring against what the accepted-reporter ground actually received: each
+dwell the craft emits a counted burst of §3.16 PROBE frames and the ground
+returns one per-dwell §3.16 TALLY (~26 bytes) — **self-denominating loss, no
+bulk transfer**: the artifact is born on the node that consumes it. Before
+Pass 153 the evidence was the live video stream's LINK_REPORT loss, which made
+video simultaneously the measurement and the interference; the probe exchange
+severs that coupling. Trigger and abort are §11.7 `CALIBRATE` (bound-issuer +
+PSK + nonce — the claim gate is the existing one).
+
+**The run pauses video (Pass 153).** Calibration is stationary and pre-flight
+and needs video neither displayed nor transmitted, so the run starts by
+**input-starving** the video feed — the node stops reading its RTP/frame-shm
+input; the encoder keeps producing and frames drop at the ring
+(drop-not-block, harmless) — and every exit resumes it on the **same restore
+edge** as rate and power. HEARTBEAT and ANNOUNCE are untouched. With video
+silent the channel belongs to the probes: probe density is no longer capped by
+any report cadence, so a dwell's sample count rises ~100× while its wall time
+drops. While the feed is paused the §3.15 word emits **unconditionally at its
+2 Hz cadence** — its live-slot prepend law (§3.15) presumes live DATA, and a
+run has none; this is the one traffic the pause exempts, because it is the
+operator's only progress view. The receiving ground keeps accepting it
+through the §3.15 acceptance latch: the pause starves the RTP stream past
+the §2 idle teardown, and a live-stream-only acceptance rule would refuse
+every word the pause exemption mandates.
 
 **Procedure (Pass 121 — max-power seek; supersedes the Pass 120
 target-band steer).** For each rung in the §9.3 ladder: pin the rung (§9.7
 `min==max`), then ramp the TX adapter's power via `set_power_qdb` upward
 in `seek_step_qdb` steps (rung 0 from `min_qdb`; later rungs from one step
 below the previous rung's placement), evaluating each probe dwell against
-two walls. The **loss wall**: report loss crosses `loss_bad_milli` —
-overload or link break.
+two walls. The **loss wall**: the dwell's tally loss crosses
+`loss_bad_milli` — overload or link break.
 Placement = the highest clean probe; a sweep that reaches
 `max_qdb` clean places there. The longer verify dwell
 then **enforces** `loss_ok_milli` (Pass 121 addendum 2): near-cliff
@@ -2308,7 +2336,9 @@ above `loss_bad_milli` also records the rung's overload bracket. A
 `rssi_guard_dbm` sanity bound (default -6, Pass 121 addendum) stops the sweep
 when reports land above it; it is a token backstop against RX front-end abuse,
 not a placement mechanism - the loss wall is the intended limiter at every
-rung. The loop evaluates **post-diversity** loss (what LINK_REPORT carries).
+rung. The loop evaluates **post-diversity** loss by construction: the tally's
+`received` deduplicates by `seq`, so a probe heard on any ground adapter
+counts once.
 
 **One monotone sweep: no descent, no cap wall (Pass 130 - replaces the Pass 121
 seek shape and withdraws the Pass 125 floor rule).** The measurement is "the
@@ -2360,25 +2390,24 @@ of the procedure.
 **Safety envelope (R4, Pass 120).** While running: the selector is frozen
 (the loop owns the pin); the channel is never touched; total runtime is
 hard-capped (default 600 s — a full 8-rung run at the default dwells is
-~2 min; the cap is a runaway backstop, not the expected duration). A
-report blackout **while probing above the rung's last clean power** is
-wall evidence, not failure (Pass 121 addendum 4 — at total overload the
-feedback channel itself collapses; measured: 3/5 campaign runs aborted
-at rung 7 once the confirmation dwell stretched wall exposure past the
-3 s clock): the loop books the overload bracket, retreats to the last
-clean power, re-arms the report clock, and proceeds to verify — once per
-rung. A blackout **during verify** is a verify failure of total severity
-(Pass 121 addendum 5): it takes the addendum-2 bounded step-down (shared
-3-descent budget, clock re-armed per descent) instead of aborting —
-measured: retreat placements at a marginal rung can still black out
-under sustained exposure, and aborting there threw away a recoverable
+~2 min; the cap is a runaway backstop, not the expected duration). A tally
+with `received == 0` is an ordinary 1000‰ reading, not a blackout. An
+**evidence blackout** — the dwell's tally never arriving despite bounded
+re-elicitation (§3.16) — keeps the Pass 121 addendum semantics with the
+trigger renamed: **while probing above the rung's last clean power** it is
+wall evidence, not failure (addendum 4 — at total overload the craft's own
+feedback RX collapses too): the loop books the overload bracket, retreats to
+the last clean power and proceeds to verify — once per rung. A blackout
+**during verify** is a verify failure of total severity (addendum 5): it
+takes the addendum-2 bounded step-down (shared 3-descent budget) instead of
+aborting — measured: retreat placements at a marginal rung can still black
+out under sustained exposure, and aborting there threw away a recoverable
 run. The abort remains for a blackout with no clean floor, exhausted
-descents, or a truly dead ground. Every exit — done, `CALIBRATE abort`,
-report-loss, hard cap, process death — converges on the same restore order:
-**power first** (a probe may sit on a rung's ceiling), then the boot
-`[min_profile, max_profile]` window, then the §10.4 resolve re-places the
-committed rung. Report-loss abort fires after **3 s without an accepted
-report** (not the §9 report timeout — dwell-edge gaps must not thrash it).
+descents, or a truly dead ground (`evidence_lost`). Every exit — done,
+`CALIBRATE abort`, evidence-loss, hard cap, process death — converges on the
+same restore order: **power first** (a probe may sit on a rung's ceiling),
+then the boot `[min_profile, max_profile]` window, then the §10.4 resolve
+re-places the committed rung, then the **video feed resumes** (Pass 153).
 §9.8 fail-toward-degradation applies throughout.
 
 **Artifact + persistence (R2, Pass 120 — the volatility exception).** The
@@ -2441,42 +2470,51 @@ consumer that has taken the adapter from the kernel driver cannot read it.
 gains a derived sibling and `calib_id` becomes the override rather than the
 only option; until then it is the only option, and the wording above stands.
 
-**A run that found no wall anywhere measured nothing (Pass 134).** §10.6 scores
-every dwell from LINK_REPORTs, so its result is only as good as the return
-path, and a *starved* return path fails in the most dangerous direction: fewer
-reports means fewer observed losses means every probe reads clean, and the
-sweep places at the ceiling on every rung. Measured on the bench — a §7.2 flush
-regression cut the report rate from 10 Hz to ~4.8 Hz, and the resulting
-artifact recorded `placement_loss_milli` `[5,2,3,2,0,0,0,0]` with seven of
-eight rungs at 27 dBm. That curve was applied, drove the craft's PA into
-saturation, and cost the video link. Two rules, at two layers:
+**A run that found no wall anywhere measured nothing (Pass 134; evidence
+re-based Pass 153).** Under the retired LINK_REPORT evidence a *starved*
+return path failed in the most dangerous direction: fewer reports meant fewer
+observed losses meant every probe read clean — measured on the bench, a §7.2
+flush regression at ~4.8 Hz report rate authored a curve with seven of eight
+rungs at 27 dBm that drove the PA into saturation and cost the video link.
+The §3.16 tally is self-denominating, so that failure class is **structurally
+impossible now**: missing evidence reads as missing (dwell inconclusive →
+`evidence_lost`), never as clean. Pass 134's start precondition — the
+report-health cadence gate, `calib_min_report_hz` — is therefore **deleted**;
+probe/tally delivery is its own health check, and a run that cannot exchange
+evidence fails loudly at its first dwell instead of being refused by a proxy
+measured before the run.
 
-- **Feedback health is a start precondition, and only a start precondition.**
-  A run must not start while accepted reports are not arriving at their
-  expected cadence — measured over a recent window of *ordinary operation*,
-  before the sweep perturbs anything, and rejected as a §11.7 `CALIBRATE`
-  REJECT alongside the other app-layer conditions. This is the condition
-  itself; the persistence rule below only pattern-matches its output. It is
-  distinct from the 3 s report-loss abort, which catches *silence* — a stream
-  at half rate is never silent.
+What survives is the geometry half of the rule: **persistence refuses an
+implausible result — in absolute space.** If every swept rung placed at its
+§10.3 ceiling with no overload bracket booked anywhere
+(`first_bad_qdb == null` throughout), the run **fails and persists nothing**
+(`no_wall_found`). At close range no wall exists — that is a property of the
+geometry, not of the feedback path — and a sweep whose whole product is "no
+wall exists anywhere" did not measure the thing it exists to measure. Per
+the volatility exception the previous last-good artifact is left untouched.
 
-  It deliberately does **not** continue into the run, and the reason is Pass
-  133: since the sweep no longer stops at the first wall, every rung climbs
-  through the whole blacked-out region above its own overload point. On a
-  marginal link that is most of the run's wall time, by design. A report-rate
-  floor evaluated *during* a sweep therefore cannot be distinguished from wall
-  evidence (Pass 121 addendum 4), and would fail exactly the runs that are
-  measuring correctly. Report health is a property of the link at rest; once
-  the sweep starts, low report rate is a **measurement**, not a fault.
-- **Persistence refuses an implausible result.** If **every** rung placed at
-  its §10.3 ceiling with no overload bracket booked anywhere
-  (`first_bad_qdb == null` for all eight), the run **fails and persists
-  nothing**. A sweep whose whole product is "no wall exists at any rung" did
-  not measure the thing it exists to measure. §10.7 already refuses a result
-  authored from silence; this is the same rule for a result authored from
-  false cleanliness. The failure is surfaced as a §10.6 failure reason, and —
-  per the volatility exception — the previous last-good artifact is left
-  untouched rather than replaced.
+**Offset space is exempt (Pass 153, operator-ruled 2026-08-07).** On a
+relative backend (§10.5) offset **0** is the calibrated efuse reference —
+a known-linear point, not a PA limit — and the window may extend to either
+side of it (`power_offset_max_qdb` is not bounded at 0: there is no
+evidence the reference is the per-unit usable maximum). A flat window is
+therefore the expected close-range reading, not an unmeasured
+extrapolation, and the run **completes and persists**. Placement follows
+one cap: **a run that booked no live overload bracket places no higher
+than offset 0** (or no lower than the window floor, when a configured
+window sits entirely above the reference). A bracket is **live** only
+while the sweep's highest clean probe still sits below the booked wall —
+a bad probe the sweep later climbed past cleanly is a noise transient
+and does not release the cap. Exploring above the reference is what the
+window is for, but placing there requires a measured wall — above the
+reference sits the PA compression region a close-range flat field cannot
+see (per-unit, measured: −6 dB from reference gave 10× less loss on one
+8822EU), so an unbracketed best above 0 is noise-selected, not evidence.
+A run whose sweep booked a live bracket places below its wall as
+measured, wherever that falls.
+Measured before the ruling: six consecutive `no_wall_found` refusals at
+10 m hard-blocked the §10.7 sequencer on a ground whose window
+([−24, 0] qdB) cannot contain a wall at that range.
 
 A **non-monotone** placement curve is surfaced (§15.5) but **not** refused: the
 PA shape is a physical expectation, not a protocol invariant, and at close
@@ -2579,29 +2617,28 @@ than growing a second, differently-buggy copy. A curve authored before Pass 151
 is not invalidated — it is simply a placement under the older rule, and is
 replaced on the next run.
 
-### 10.7 Ground-uplink TX calibration symmetry (Pass 125; 8 rungs Pass 131)
+### 10.7 Ground-uplink TX calibration symmetry (Pass 125; single rung Pass 153)
 
 §10.6 calibrates the **craft downlink** across all eight MCS rungs. This section
 does the same for the ground's single designated `role:"tx"` uplink adapter,
 measured against what the craft actually receives. Same goal — the maximum clean
-delivered power per rung — and the same monotone sweep; what differs is that the
-evidence is sparse normal LINK_REPORT traffic rather than live video, so dwells
-are gated on report-epoch counts. It adds no synthetic probe traffic.
+delivered power — and the same monotone sweep, on the same evidence primitive
+since Pass 153: the ground emits counted, MTU-padded §3.16 PROBE bursts and the
+craft returns one §3.16 TALLY per dwell.
 
-**Eight rungs, not one (Pass 131).** Pass 125 calibrated only the single
-configured uplink rung and left the other seven to a future pass. That was the
-wrong unit of work: the sweep machinery is per-rung either way, `placements` was
-already a list, and a one-entry artifact meant the shadow-the-downlink uplink
-policy could not be enabled later without re-running commissioning at every
-site. §10.7 therefore sweeps rungs 0..7 in order and emits eight placements, the
-same shape §10.6 produces for the downlink. One operator action, both
-directions, all sixteen placements.
+**One rung again (Pass 153, reverting Pass 131's widening).** Pass 131 swept
+all eight rungs on the theory that a shadow-the-downlink uplink policy would
+need them; no such policy exists, and the widening served a hypothetical while
+multiplying every §10.7 defect by eight. §10.7 calibrates **only the
+configured `air.uplink_rate` rung**. The artifact schema was list-shaped
+precisely so scope can widen later by appending entries — the loader accepts
+any list length (below), so nothing is lost, only deferred until an operating
+policy actually selects other rungs.
 
-Rung *i* resolves its `(mcs, guard_interval)` through the **§9.3 profile
-table**, not through a private list, so a calibrated placement's rate identity
-is one the uplink can actually be commanded to — long GI on rungs 0/1 and short
-on 2..7, matching the authored table. `air.uplink_rate` remains the *operating*
-point; the artifact entry that matches it is what applies at boot.
+The rung resolves its `(mcs, guard_interval)` through the **§9.3 profile
+table**, not through a private list, so the placement's rate identity is one
+the uplink can actually be commanded to. `air.uplink_rate` remains the
+*operating* point; the artifact entry that matches it is what applies at boot.
 
 **The uplink rung is committed, not inherited (Pass 125).** Before this section,
 an rx-node never called `set_tx_mode` at all: its uplink rung was the `TxRate`
@@ -2612,15 +2649,14 @@ uplink therefore reads `air.uplink_rate` (seeds `{mcs: 0, sgi: false, bw: 20}`)
 and commits it through the same `set_tx_mode` seam the tx-node uses, once at
 startup and after every retune that can reset it.
 
-**The run now moves the rate as well as the power, and both must be restored
-(Pass 131).** Sweeping eight rungs means commanding `set_tx_mode` per rung, so
-the uplink's operating point is a *second* borrowed actuator. A run that exits
-at rung 5 — abort, failure, liveness loss, process shutdown — must not leave the
-uplink transmitting at MCS5. Rate and power are returned together on the single
-restore edge, **rate first**, mirroring §10.6's R4 ordering rule that the
-actuator which gates the other goes first. This is the same stranded-actuator
-hazard Passes 125 and 126 hit three times on power alone; it does not get a
-second convergence path.
+**The run still commits the rate, and rate and power restore together
+(Pass 131 law, single-rung form).** The swept rung equals the operating rung,
+so `set_tx_mode` is an assert rather than a move — but the run still owns both
+actuators, and every exit — abort, failure, evidence loss, process shutdown —
+returns rate and power together on the single restore edge, **rate first**,
+mirroring §10.6's R4 ordering rule. This is the same stranded-actuator hazard
+Passes 125 and 126 hit three times on power alone; it does not get a second
+convergence path.
 
 **The sweep is lockout-safe, which is why it may black out the return path.**
 Probing high rungs at low power kills report delivery for whole dwells. That
@@ -2635,9 +2671,11 @@ state damage.
 **Authority and prerequisites.** Calibration is ground-local and starts only
 through `POST /api/v1/calibration` on the ground control server (deployment
 port `:8092`). It requires exactly one designated uplink adapter, live DATA from
-the selected craft, fresh §3.16 feedback naming this ground's exact
-`(originator, session)`, and — new in Pass 131 — that the craft's §3.15a
-`report_latch_holder` **equals this ground's originator**.
+the selected craft, and — since Pass 131 — that the craft's §3.15a
+`report_latch_holder` **equals this ground's originator**. There is no
+feedback-freshness precondition since Pass 153: probe/tally delivery is its
+own health check, and a run that cannot exchange evidence fails loudly at its
+first dwell (`evidence_lost`) instead of being refused by a proxy.
 
 **Authority is the §3.5 report latch, read from §3.15a (Pass 131).** Pass 125
 inferred the latch from the feedback packet itself, on the strength of its MAC:
@@ -2659,38 +2697,40 @@ MTU-command, §10.5 TX-power override, or other calibration in flight —
 including the **craft's**: start returns 409 when the mirrored §3.15
 `calib_state` is `running`. Conversely, while §10.7 runs the ground refuses to
 issue a §11.7 `CALIBRATE` campaign. The two directions must never overlap:
-§10.7 deliberately drives ground power to `min_qdb`, which starves the report
-stream that §10.6's `report_loss_abort_ms` clock and every one of its dwells
-depend on. No VEHICLE_CMD is added for the uplink direction: the craft
-continuously publishes quality to its accepted reporter, and that ground alone
+§10.7 deliberately drives ground power to `min_qdb`, which starves the uplink
+return path that carries §10.6's per-dwell tallies — every §10.6 dwell depends
+on it. No VEHICLE_CMD is added for the uplink direction: the craft answers
+probes with tallies to its accepted reporter (§3.16), and that ground alone
 owns its local actuator. Start returns 409 with the failed prerequisite; abort
 is idempotent.
 
-**Order matters.** §10.6 depends on the uplink delivering reports; §10.7 depends
-only on live DATA, which any working downlink provides. Calibrate the **uplink
-first, then the downlink** — a downlink run measured across a badly placed
-uplink either aborts on the report clock or places against a thinning report
-stream. This is the operator-visible law behind the single bi-directional Hub
+**Order matters.** §10.6 depends on the uplink delivering its tallies; §10.7's
+own evidence rides the downlink, which any working video link provides.
+Calibrate the **uplink first, then the downlink** — a downlink run measured
+across a badly placed uplink loses tallies into a thinning return path and
+ends in `evidence_lost` re-dwells rather than measurements. This is the operator-visible law behind the single bi-directional Hub
 action below.
 
 **Seek.** Both directions share the time-injected `PowerSeek` (§10.6): one
 monotone sweep from `min_qdb`, then the §10.6 verify walk — descend while loss
 keeps improving, bounded, placing at the walk's best reading (Pass 151/152).
-§10.7 wraps it in a **rung loop** — commit the rung with `set_tx_mode`, sweep,
-verify, append the placement, advance — which is
-structurally the same loop §10.6 already runs, and deliberately so. Seed
-`seek_step_qdb=16` (4 dB); reuse §10.6's min/max, loss walls, `rssi_guard_dbm`
-backstop, bounded verify descents, and hard cap. A probe dwell is a burst of
-**100 probes**, verification **400**. Seed loss thresholds remain
-`loss_ok_milli=15` and `loss_bad_milli=50`.
+§10.7 commits its single rung with `set_tx_mode`, sweeps, verifies, and
+records the placement — the same per-rung procedure §10.6 loops over eight
+times, and deliberately so. Seed `seek_step_qdb=16` (4 dB); reuse §10.6's
+min/max, loss walls, `rssi_guard_dbm` backstop, bounded verify descents, and
+hard cap. A probe dwell is a burst of **`dwell_probe_frames`** probes (seed
+**500**), verification **`dwell_verify_frames`** (seed **1000**) — shared
+§15.2 knobs, both directions. Seed loss thresholds remain `loss_ok_milli=15`
+and `loss_bad_milli=50`.
 
-**How the walls are referenced is Tier-2, deliberately unruled here.**
-Whether `loss_ok_milli`/`loss_bad_milli` are absolute bars or margins above a
-measured at-rest loss floor is still being measured — the evidence, the
-current knob-governed floor sampling (`uplink_floor_min_samples`, §15.2), and
-the open estimator-resolution question live in `docs/findings.md`. The ruling
-waits for the calibration-v2 observable decision
-(`docs/calibration-v2-symmetric-probes.md`) rather than being made here.
+**The walls are absolute again (Pass 153 — the wall-origin question closes).**
+The Pass 152 floor-relative walls existed because §10.7's probes shared the
+medium with the craft's video, so the link had a contention floor no power
+could beat. With the craft's feed paused for the run (§3.16 feed pause) that
+floor is structurally zero, and `loss_ok_milli`/`loss_bad_milli` read as plain
+absolute bars. The at-rest floor estimator, its `uplink_floor_min_samples`
+knob and the floor-relative wall computation are deleted; the `docs/findings.md`
+floor entries close against this Pass.
 
 **Both §10.6 Pass 151 rules apply here unchanged**, because both live in the
 shared seek: the placement is the loss minimum rather than the first tolerable
@@ -2702,80 +2742,56 @@ end. The space is chosen once, from the air backend kind, and the sweep's
 and commands in the other places `108 + 84 = 192` qdb, which is how this was
 found (Pass 150 review, second round).
 
-Counts are **sample gates, not timers**, and since Pass 132 the ground sizes
-the sample itself: a dwell takes as long as it takes to send its burst, and
-never decides on fewer observations than it asked for.
-
-**A dwell is a counted probe burst, and the ground divides by its own count
-(Pass 132).** The ground emits exactly `uplink_probe_epochs` LINK_REPORTs at
-the dwell's `(rung, qdb)`, **stops**, waits `uplink_drain_ms` for the craft's
-counter to settle, and scores:
+**A dwell is a counted PROBE burst, and the sender divides by its own count
+(Pass 132's rule on the Pass 153 primitive).** Counts are **sample gates, not
+timers**: a dwell takes as long as its burst takes, and never decides on fewer
+observations than it asked for. The ground emits exactly N MTU-padded §3.16
+PROBEs at the dwell's `(rung, qdb)`, paced by `probe_pace_us`, and scores the
+craft's TALLY:
 
 ```
-sent      = the ground's own Reporter::epoch() delta over the burst
-received  = the craft's reports_received delta (§3.16)
-loss‰     = 1000 * (sent - received) / sent            (sent > 0, received > 0)
-loss‰     = 1000                                        (received == 0)
-rssi_mean = (int32)(rssi_sum delta) / received          (received > 0)
+sent      = N                                  (carried on every probe)
+received  = tally received                     (distinct seq, post-diversity)
+loss‰     = 1000 * (N - received) / N
+rssi_mean = (int32)rssi_sum_dbm / received     (received > 0)
 ```
 
-`sent` is exact by construction: §3.5 commits a `report_epoch` **only on
-successful injection**, so the ground's own delta is precisely the frames the
-radio took. The drain is what removes in-flight boundary error — nothing is
-scored until the burst is finished and the craft has had longer than one §3.16
-period to report all of it.
+`sent` is exact by construction — the sender counts its own injections. There
+is no drain window, no counter domain, no epoch anchoring and no dual-clock
+liveness gate: the `dwell_id` is the synchronisation, a lost tally is
+re-elicited by re-emitting the dwell's tail probe (bounded — `tally_wait_ms` ×
+`tally_retries`), and a duplicate tally is idempotent. The whole Pass
+125/126/128/132 counting apparatus — anchoring identity, blackout fallback,
+measured-loss scoring rule, drain window, ambiguous extension, liveness dual
+clock, counter-domain resync — is withdrawn; the retired §3.16 cumulative
+layout was its last consumer.
 
-**This supersedes Pass 125's anchoring identity and everything built on it.**
-Pass 125 measured loss on a stream whose rate the ground did not control, and
-needed four mechanisms to do it: `emitted = E_B - E_A`, the local-epoch
-blackout fallback (Pass 126 C1), that fallback's measured-loss scoring rule
-(Pass 128), and the one-shot ambiguous extension. Two of the four were
-themselves bench defects. All four are withdrawn. §3.16's `last_report_epoch`
-remains on the wire as observability (§15.3 `uplink_quality_report_epoch`); it
-is no longer arithmetic.
+**Burst size is chosen to resolve the walls (Pass 132, kept verbatim).** One
+lost probe must score at or under `loss_ok_milli`, i.e. `1000/N ≤
+loss_ok_milli`; config rejects a smaller burst. At the seeds (500 probe / 1000
+verify, `loss_ok_milli` 15) one lost probe is 2‰ — every reading is decidable
+first time, and the verify dwell finally has the sample count the estimator
+arithmetic demands: the 2026-08-06 findings entry showed honest discrimination
+at a lossy baseline needs n≈1500 per dwell, which the 10 Hz report cadence
+could never supply and MTU-padded probes at channel rate supply in seconds.
 
-**Probe traffic is permitted during a run.** §10.7 previously forbade it — a
-rule written for a craft in flight. Calibration is a stationary, pre-flight,
-operator-initiated step, and a burst the operator asked for costs nothing a
-moving vehicle would have to pay. Probes are ordinary LINK_REPORTs with
-ordinary unique epochs, so the craft needs no new counting and no new wire.
-
-**Burst size is chosen to resolve the walls, which is what retires the
-ambiguous extension.** One lost probe must score at or under `loss_ok_milli`,
-i.e. `1000/N ≤ loss_ok_milli`; config rejects a smaller burst. At the seeds
-(`uplink_probe_epochs` **100**, `uplink_verify_epochs` **400**,
-`loss_ok_milli` 15) one loss is 10‰ and five are 50‰ — every reading is
-decidable first time. Pass 125's 40-probe gate put one loss at 25‰, *between*
-the walls, and the extension to 80 existed solely to resolve a reading the gate
-was too small to make.
-
-Nothing about the ground's ordinary cadence changes: `policy.report_hz`,
+Nothing about the ground's ordinary report cadence changes: `policy.report_hz`,
 `return.report_redundancy` and the §9 selector's 100 ms loss window are
-untouched, so a run perturbs the craft's selector no more than normal traffic
-does. Probes ride the existing §7.2 return path and fill the quiet gap the
-craft already opens per video frame; they never open a new one, so §7.2's
-guard-cost law holds unchanged.
+untouched. Probes are their own §3.16 traffic class — with the craft's feed
+paused there is no video to collide with, and §7.2's guard-cost law is
+untouched because probes neither arm nor close a quiet gap (§3.16). The
+craft's feed pause applies to this direction exactly as §3.16 states: the
+first accepted PROBE of the run pauses the craft's video input, and the
+probe-quiet timeout resumes it.
 
-`settle_ms` seeds down from 800 to **300**. It was TXAGC settle plus one report
-window, and the report-window term was carrying the case where a dwell had to
-wait for the cadence to produce a sample; a burst starts the instant settle
-ends. `hard_cap_ms` is unchanged and remains a **whole-run** bound. A wedged
-dwell is not what a cap protects against, and cannot occur: a burst ends when
-the ground has finished sending, which it always does.
-
-Loss of §3.16 **liveness** for 2 s aborts — the run has lost its observer.
-Stalled counters under live feedback never abort; per §3.16 they are the seek's
-strongest floor evidence. Because every rung sweeps from `min_qdb`, the uplink
-is *expected* to be blacked out for the first probes — and at the higher rungs
-for most of them. Those steps are simply **not clean** and the sweep climbs past
-them; since Pass 130 that needs no special rule.
-
-**A counter-domain reset restarts the dwell, it does not score it.** When §3.16
-reports a rebaseline (the craft's accepted reporter tuple changed under us,
-zeroing its counters), everything accumulated so far belongs to the previous
-domain. The §10.7 loss identity is a delta between two anchors of the *same*
-domain, so mixing them would divide by a number that does not mean what it says.
-The dwell re-arms at the current power, both clocks restarting together.
+`settle_ms` (300) covers TXAGC settle; a burst starts the instant settle ends.
+`hard_cap_ms` is unchanged and remains a **whole-run** bound. A tally with
+`received == 0` is an ordinary 1000‰ reading: because the sweep starts from
+`min_qdb`, the uplink is *expected* to deliver nothing at the first powers —
+those probes are simply **not clean** and the sweep climbs past them (Pass 130
+needs no special rule). A dwell whose tally never arrives despite
+re-elicitation is **inconclusive, never clean**: bounded re-dwell, then the
+run fails `evidence_lost` — it has lost its observer.
 
 **A still-failing verify is a §10.7 FAILURE, not a placement (Pass 125
 amendment).** §10.6 records a placement whose verify never reached
@@ -2800,19 +2816,18 @@ operator between the measurement and the actuator.
 
 **And so does the flat-at-ceiling refusal (Pass 134 addendum).** The first form
 of this ruling said §10.7 needed no §10.6 analogue, on the reasoning that a
-ground reading clean at every power on every rung must have a dead §3.16
-counter stream, which the liveness expiry already catches as `quality_lost`.
-**Device evidence falsified that.** A bench-range run with a fully live counter
-stream — verify dwells returning real 0–10‰ values throughout — placed all
-eight rungs at their §10.3 ceilings with `first_bad_qdb == null` everywhere,
+ground reading clean at every power must have dead feedback, which liveness
+already catches. **Device evidence falsified that.** A bench-range run with
+fully live feedback — verify dwells returning real 0–10‰ values throughout —
+placed every swept rung at its §10.3 ceiling with `first_bad_qdb == null`,
 reached `done`, and persisted a curve that was the ceiling mask read back
 rather than a measurement. At close range no wall exists, and that is a
 property of the **geometry**, not of the feedback path; the two conditions are
-not the same and only one of them was covered. §10.7 therefore carries the same
-rule as §10.6: every rung at its ceiling with no bracket booked anywhere fails
-the run with `no_wall_found` and persists nothing, leaving the previous
-last-good artifact in place. This is the direction where the rule matters most,
-for the reason in the paragraph above.
+not the same and only one of them was covered. §10.7 therefore carries the
+same rule as §10.6: the swept rung placing at its ceiling with no bracket
+booked fails the run with `no_wall_found` and persists nothing, leaving the
+previous last-good artifact in place. This is the direction where the rule
+matters most, for the reason in the paragraph above.
 
 **Actuator ownership and config carve-out.** Config load rejects `power_map` on
 any `role:"rx"` adapter **regardless of node role**, and accepts it on a
@@ -2832,20 +2847,26 @@ removed.
 
 **Artifact and restore law.** The ground artifact is a distinct schema, not a
 degenerate craft curve. It carries schema version and timestamp; local uplink
-adapter canonical identity; selected craft `originator` and §3.16 adapter
-fingerprint; channel and bandwidth; a **rung-indexed `placements` list** — eight
-entries since Pass 131, one per rung in ascending order, each carrying its own
-`mcs`/`short_gi` plus placement qdb/RSSI/loss and the clean/bad bracket; and
+adapter canonical identity; selected craft `originator` and the §3.16 TALLY
+`adapter_fingerprint`; channel and bandwidth; a **rung-indexed `placements`
+list** — one entry since Pass 153 (the `air.uplink_rate` rung), each entry
+carrying its own `mcs`/`short_gi` plus placement qdb/RSSI/loss and the
+clean/bad bracket; and
 canonical CRC-8 over a pinned binary serialization, not JSON formatting. The
-list shape was v1 law precisely so widening from one rung to eight would add
-entries rather than bump the schema and migrate every deployed artifact and Hub
-parser — Pass 131 spends that allowance and the schema is unchanged. A loader
-MUST accept any list length: a one-entry artifact written by a Pass 125 build
-still loads, and resolves only if `air.uplink_rate` is the rung it holds. Rate
-identity lives in the entry, never in the top-level identity block. A run
-persists only on full success — a failure at rung 5 writes nothing, rather than
-a truncated five-entry artifact that would auto-apply at the next boot as though
-it were complete. Write atomically under the
+list shape is v1 law precisely so scope can move between one rung and eight by
+adding or omitting entries rather than bumping the schema — Pass 131 widened
+to eight, Pass 153 narrows back to one, and the schema is unchanged in both
+directions. A loader MUST accept any list length: an eight-entry artifact
+written by a Pass 131 build still loads, and resolves only the entry matching
+`air.uplink_rate`. Rate identity lives in the entry, never in the top-level
+identity block. A run persists only on full success — a failed run writes
+nothing rather than an artifact that would auto-apply at the next boot as
+though it were a measurement. One identity leg is enforced **as known**
+(Pass 153): the craft adapter fingerprint reaches the ground only on the
+run's TALLYs, so a boot resolve before any run this session checks the rest
+of the tuple (local identity, craft originator, channel, bandwidth) and
+defers the craft-adapter leg; the first tally carrying a different
+fingerprint flips the artifact STALE. Write atomically under the
 configured calibration directory. **A write that does not land fails the run**
 (`artifact_write_failed`) rather than reporting `done` with a zero fingerprint
 (Pass 129 ruling): §10.7 is a one-time commissioning step whose entire premise
@@ -2889,10 +2910,10 @@ Ground `GET /api/v1/calibration` returns the local uplink
 state and artifact with `direction:"uplink"`; the craft response remains the
 §10.6 downlink schema with `direction:"downlink"`. Ground POST accepts exactly
 `{"action":"start"}` or `{"action":"abort"}`. Add separate role-neutral
-`uplink_calib_*` and `uplink_quality_*` stats rather than overloading the
-craft/received `calib_*` fields. At minimum expose state, rung,
-placement/fingerprint, stale/fail reason, feedback validity/age, last report
-epoch, received count, derived RSSI mean, and delivered `last_rx_mcs`.
+`uplink_calib_*` stats rather than overloading the craft/received `calib_*`
+fields. At minimum expose state, rung, placement/fingerprint, stale/fail
+reason, and the probe-exchange counters (`calib_probes_sent`,
+`calib_tallies_rx`, delivered `calib_rx_mcs`).
 
 **One operator action, two phases.** Calibration is a one-time,
 persisted-on-both-sides commissioning step, so the operator sees a **single
@@ -3404,7 +3425,7 @@ everything below is behaviour.
 | `0x05` | `RESOLUTION` | preset index 0..4 | Sets encoder resolution to `venc.command_presets.resolution[arg]` (a venc `video0.size` string, e.g. `"1280x720"`). `REJECTED` when the preset list is unconfigured, `arg` ≥ its length, `venc.enabled` is false, or the actuation path is not yet implemented (staged, Pass 71 — the venc-side knob is a venc-repo dependency) |
 | `0x06` | `FRAMING` | preset index 0..4 | Sets encoder framing mode to `venc.command_presets.framing[arg]` (a venc `video0.framing` string). Same `REJECTED` set as `RESOLUTION` (staged, Pass 71) |
 | `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
-| `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the loop is blind without LINK_REPORTs). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen — video quality degrades during; the operator chooses the moment (recommended: near-bench 2–10 m separation, §10.6 Pass 121) |
+| `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the tallies come from the accepted reporter, and the loop is blind without them, §3.16). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen and the **video feed paused** (input-starve, Pass 153) — the operator chooses the moment (recommended: near-bench 2–10 m separation, §10.6 Pass 121) |
 | `0x09` | `MTU_TIER` | 0=Default, 1=Medium, 2=High | Requests the §9.3a global packet-budget tier. The craft accepts only when the requested budget is ≤ the minimum capability of every active craft TX adapter; otherwise it consumes the nonce and echoes `REJECTED` (no silent clamp). Acceptance commits at the next frame/block boundary. Unlike the other commands, binding release resets this state to Default, preventing an absent owner's jumbo choice from silently governing a future receiver fleet |
 | `0x0A` | `TX_POWER` | preset index 0..4 | Selects the node's §10.3 power **ceiling** from `adapters[].power_presets_qdb` (§15.2) — the baseline the Pass 134 per-rung mask is derived from, so one choice moves the whole tapered curve and the calibrated per-rung *shape* is preserved. This is deliberately NOT the §10.5 override latch, which is rung-agnostic by construction and would flatten a curve whose whole point is that MCS0 and MCS7 want different power. Applying a tier sets the runtime ceiling on the §10.4 resolve, the §10.5 clamp, and a future §10.6/§10.7 sweep, then forces one re-resolve at the committed operating point. **A tier can only ever LOWER power** (operator ruling): every preset is clamped at config load to that adapter's boot `max_power_qdb`, so §10.3 remains the operator's hard ceiling and no runtime path can raise power past it. `REJECTED` when no `role:"tx"` adapter carries a preset list, `arg` is past its length, a §10.6 calibration is running (Pass 136 — the run owns the actuator), or **the air backend is relative** (Pass 151): `power_presets_qdb` are absolute qdb and there is no offset-space tier, so applying one would install a 60..108 preset as the clamp on an offset resolve — replacing the §10.5 bound with a number 15..27 dB above it while §15.3 reported the tier effective. Tiers are re-based with the rest of §10.5. On a node with no curve and no artifact the tier is accepted and recorded but **moves nothing** — per §10.3 the ceiling binds only where a number of ours reaches the actuator. Craft-session volatile like the rest of §11.7; unlike `0x09` MTU_TIER it is **not** reset on binding release, because a tier only lowers power, so a departed owner's choice is never the hazardous direction and resetting it would move power mid-flight |
 | `0x0B`–`0x1F` | *reserved* | — | not specified |
@@ -3589,13 +3610,13 @@ data-path crypto, or heavy state. Threats and mitigations:
 | Forged CACHE_STATUS → registry poisoning / repair misdirection | caches are operator-provisioned static endpoints; status from any other endpoint is dropped (no on-air cache discovery in v1) | 14.3 |
 | Forged/stale CACHE_ASSIGN → cache retune or cross-vehicle window | accept only the configured controller originator **and UDP source endpoint**, exact cache destination, allowlisted channel, and monotonic controller-session epoch; clear the old window only after a successful retune | 3.13, 14.3 |
 | Forged VEHICLE_CMD → degraded link settings (ARQ off / pinned rung / venc preset / mode switch) | the §11.4 posture verbatim: 4-byte HMAC + per-`(originator,session)` `cmd_nonce` monotonicity + **bound-issuer-only** (no bootstrap) + rate-limit; unbound/non-bound senders get a silent drop (no probe oracle); worst case is bounded to settings a reboot resets (v1 toggles) or an encoder preset from the operator's own deployment allowlist (v2, volatile — Pass 73; persists only on a pre-live venc fallback), or an operating mode from the craft's own `modes/` set (Pass 105, volatile — reboot restores boot `active_mode`; a mode restarts venc + re-bands the §9.7 selector but touches no channel/power) — never channel or power | 3.14, 11.7 |
-| Forged UPLINK_QUALITY → unsafe ground TX-power move | **accepted, and bounded rather than prevented (Pass 131).** Unauthenticated by ruling: §10.6 already moves the *craft's* power actuator on plain LINK_REPORTs, so requiring a MAC here alone was asymmetry without a threat. Exact-length, exact selected-craft source and target ground `(originator, session)`; §10.7 reads the latch holder from §3.15a rather than inferring it from the packet. Worst case is bounded by construction: the **ground's own** uplink power, inside `[min_qdb, max_qdb]`, never above §10.3 `max_power_qdb`, only during an operator-initiated run, and reverted by the liveness expiry and the restore edge. Nothing on the craft moves | 3.16, 10.7 |
+| Forged CAL_TALLY → unsafe ground TX-power move; forged CAL_PROBE → craft feed pause | **accepted, and bounded rather than prevented (Pass 131 ruling, Pass 153 layout).** Unauthenticated by ruling: §10.6 already moves the *craft's* power actuator on plain LINK_REPORTs, so requiring a MAC here alone was asymmetry without a threat. Length/ID validity, exact peer source and target `(originator, session)`; §10.7 reads the latch holder from §3.15a rather than inferring it from the packet. Worst case is bounded by construction: a forged TALLY mis-places the **ground's own** uplink power, inside `[min_qdb, max_qdb]`, never above §10.3 `max_power_qdb`, only during an operator-initiated run, and the restore edge reverts it; a forged PROBE stream from the latched tuple pauses the craft's video for at most `feed_quiet_ms` past its last frame. Nothing else moves | 3.16, 10.7 |
 
 HMAC remains off the bandwidth-carrying DATA path, and since Pass 131 off the
 feedback path too. It protects the rare channel/command actions — CSA (§11.4)
 and VEHICLE_CMD (§11.7) — and nothing else. Key distribution (`csa_psk`) is
 operator-provisioned to craft + ground (§15) or resolved as the §11.4a
-announced token; §3.16 uses neither.
+announced token; the §3.16 EXTENDED type uses neither.
 
 ---
 
@@ -4291,20 +4312,13 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   `copies`/`copy_interval_ms`/`ack_timeout_ms`/`retry_cap`; craft side:
   `echo_copies`/`min_interval_ms`). All §17 RE-DERIVE seeds. The channel shares
   `csa.psk`/the announced token (§11.4a) — there is no separate command key.
-- `policy.calibration` (craft/tx node, §10.6, Pass 120; seek keys
-  Pass 121) seeds the calibration loop; all defaults are the
-  bench-validated values: `loss_ok_milli` (15), `loss_bad_milli` (50),
-  `seek_step_qdb` (16), `rssi_guard_dbm` (−6),
-  `min_qdb`/`max_qdb` (4/108), `settle_ms` (**300**, Pass 131 — was 800),
-  `probe_dwell_ms`
-  (1200), `verify_dwell_ms` (2500), `report_loss_abort_ms` (3000),
-  `hard_cap_ms` (600000),
-  `artifact_dir` ("/etc/waybeam-link/calibration"),
-  `calib_min_report_hz` (**6**, Pass 134 — the §11.7 `CALIBRATE` start
-  precondition, measured on the link at rest and seeded well under the 10 Hz
-  nominal so ordinary §7.2 gap jitter never rejects a start). The Pass 120
-  target-band keys (`target_rssi_dbm`, `rssi_tol_db`, `ceil_step_qdb`)
-  are retired and ignored. `max_qdb` is the *flat* bound; the sweep's actual
+- `policy.calibration` (both node roles, §10.6/§10.7; probe primitive
+  Pass 153) seeds the calibration loop; defaults are the bench-validated
+  values: `loss_ok_milli` (15), `loss_bad_milli` (50), `seek_step_qdb` (16),
+  `rssi_guard_dbm` (−6), `min_qdb`/`max_qdb` (4/108), `settle_ms` (**300**,
+  TXAGC settle), `hard_cap_ms` (600000, whole-run bound),
+  `artifact_dir` ("/etc/waybeam-link/calibration").
+  `max_qdb` is the *flat* bound; the sweep's actual
   per-rung ceiling is it narrowed by the adapter's §10.3 `max_power_qdb` and
   tapered by the §9.3 row's `tx_power_level` (Pass 134).
   `offset_seek_step_qdb` (**8** = 2 dB, Pass 151) is the step used when the air
@@ -4313,27 +4327,27 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   `power_offset_max_qdb`. It exists because that window is 24 qdb by default and
   `seek_step_qdb` is 16 — two probes is not a measurement. On an absolute
   backend the key is parsed and ignored.
-  Dwells are short by design: the live video IS the measurement traffic
-  (thousands of loss samples per second), so a dwell needs only TXAGC
-  settle plus a couple of report windows — a full 8-rung run is ~2 min.
-  **§10.7 (8 rungs Pass 131; burst probes Pass 132)** reuses this block on the
-  ground/rx node — same walls, step, min/max, settle, and `artifact_dir` (the
-  uplink artifact is a distinct filename in the same directory) — and adds only
-  what differs because the uplink measures a counted probe burst instead of
-  live video: `uplink_probe_epochs` (**100**), `uplink_verify_epochs` (**400**),
-  `uplink_drain_ms` (**600**), `uplink_liveness_ms` (2000), and
-  `uplink_floor_min_samples` (**300**) — a **Tier-2 knob** sizing the at-rest
-  loss-floor sample the run's walls may be referenced against; how the walls
-  are referenced is unruled (§10.7, `docs/findings.md`).
-  The uplink gates are **probe counts, not
-  milliseconds**; `probe_dwell_ms`/`verify_dwell_ms`/`report_loss_abort_ms` are
-  craft-only and unused on the ground. Config rejects a burst too small to
-  resolve the walls (`1000/N` must not exceed `loss_ok_milli`) — that check is
-  what replaced Pass 125's ambiguous extension, whose key
-  `uplink_ambiguous_epochs` is **retired and ignored**. `uplink_drain_ms` is the
-  silence after a burst in which the craft's counter settles; it must exceed one
-  §3.16 period (500 ms at 2 Hz), which is what removes in-flight boundary error
-  without any anchoring arithmetic.
+  The Pass 153 dwell knobs are shared by both directions and are **probe
+  counts, not milliseconds** (Tier 2 — seeds to be settled by measurement):
+  `dwell_probe_frames` (**500**) and `dwell_verify_frames` (**1000**) size the
+  §3.16 bursts — config rejects a burst too small to resolve the walls
+  (`1000/N` must not exceed `loss_ok_milli`, the Pass 132 rule, kept);
+  `probe_pace_us` (**2000**) paces probe injection so a burst cannot flood the
+  adapter queue; `tally_wait_ms` (**500**) and `tally_retries` (**3**) bound
+  tally re-elicitation; `feed_quiet_ms` (**2000**) is the probe-quiet timeout
+  that resumes a craft feed paused by an uplink run (§3.16). Dwells are short
+  by design — probes go out at channel rate, so a 500-frame dwell completes in
+  about a second at the low rungs; a full 8-rung §10.6 run stays ~2 min.
+  **§10.7 (single rung, Pass 153)** reuses this block on the ground/rx node —
+  same walls, step, min/max, settle, dwell knobs and `artifact_dir` (the
+  uplink artifact is a distinct filename in the same directory).
+  **Retired and ignored** when present in a config: the Pass 120 target-band
+  keys (`target_rssi_dbm`, `rssi_tol_db`, `ceil_step_qdb`), `cap_rise_db`
+  (Pass 130), `uplink_ambiguous_epochs` (Pass 132), and — retired by Pass 153
+  with the report-riding evidence — `probe_dwell_ms`, `verify_dwell_ms`,
+  `report_loss_abort_ms`, `calib_min_report_hz`, `uplink_probe_epochs`,
+  `uplink_verify_epochs`, `uplink_drain_ms`, `uplink_liveness_ms`,
+  `uplink_floor_min_samples`.
 - `air.uplink_rate` (ground/rx node with a designated §6.4 uplink, §10.7)
   commits the uplink operating point: `mcs` (0), `sgi` (false), `bw` (20).
   Seeds equal the pre-Pass-125 `TxRate` struct default, so committed
@@ -4544,9 +4558,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "uplink_calib_state": "idle", "uplink_calib_rung": 0,
     "uplink_calib_power_qdb": 0,
     "uplink_calib_fingerprint": 0, "uplink_calib_stale": false,
-    "uplink_quality_valid": false, "uplink_quality_age_ms": 0,
-    "uplink_quality_report_epoch": 0, "uplink_quality_reports": 0,
-    "uplink_quality_rssi_mean": 0, "uplink_quality_rx_mcs": 255 } }
+    "calib_probes_sent": 0, "calib_tallies_rx": 0,
+    "calib_rx_mcs": 255, "feed_paused": false } }
 ```
 `csa_state` is the §11 follow-me state machine string (issuer states when a
 switch campaign is active, otherwise the follower's), and `channel` is the
@@ -4617,20 +4630,19 @@ the word is eventually consistent by construction (the craft airs it
 continuously, including the terminal done/failed states). `calib_stale`
 is craft-local knowledge and stays `false` on a ground node.
 
-The `uplink_calib_*` / `uplink_quality_*` fields (Pass 125) are distinct from
-that mirror. They are populated on the ground/rx node by its local §10.7
-calibrator and accepted §3.16 feedback, with role-neutral zero/idle defaults
-elsewhere. `uplink_calib_state` is `idle|running|done|failed`, `uplink_calib_rung` is the
-uplink rung being sought or last placed (v1 always 0, mirroring `calib_rung`'s
-shape so a future multi-rung uplink changes no stats schema), power is the
-applied or completed placement for that rung, and stale has the §10.7 identity
-meaning. Quality is valid only for the currently selected craft and local
-session; `uplink_quality_age_ms` is monotonic milliseconds since the last
-**liveness** refresh (any accepted packet), which is the clock §10.7's 2 s abort
-watches — counter progress is tracked separately by `uplink_quality_reports`.
-The report epoch/count are the craft-accepted cumulative values, RSSI mean is
-derived over the most recent non-empty delta (0 when no such delta exists), and
-`uplink_quality_rx_mcs` is §3.16's delivered-rung cross-check (255 = unknown).
+The `uplink_calib_*` fields (Pass 125) are distinct from that mirror. They
+are populated on the ground/rx node by its local §10.7 calibrator, with
+role-neutral zero/idle defaults elsewhere. `uplink_calib_state` is
+`idle|running|done|failed`, `uplink_calib_rung` is the uplink rung being
+sought or last placed (always the `air.uplink_rate` rung since Pass 153;
+the field keeps `calib_rung`'s shape so a future multi-rung uplink changes no
+stats schema), power is the applied or completed placement for that rung, and
+stale has the §10.7 identity meaning. The Pass 153 probe-exchange counters
+are role-neutral and describe the local node's current or last run:
+`calib_probes_sent` / `calib_tallies_rx` count §3.16 PROBEs injected and
+TALLYs accepted, `calib_rx_mcs` is the last tally's delivered-rung
+cross-check (255 = unknown), and `feed_paused` reports the §10.6 input-starve
+state (craft-local; `false` on a ground node).
 
 `return_window_hits/misses` (TX-side) and `reports_expected/received` expose the
 §7.2 optimisation's health directly, and `adapter_stalled` + the

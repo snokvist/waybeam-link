@@ -366,8 +366,11 @@ void test_relative_sweep_stays_inside_the_offset_window() {
 
     CalibrationPolicy pol;
     pol.settle_ms = 100;
-    pol.probe_dwell_ms = 200;
-    pol.verify_dwell_ms = 300;
+    pol.dwell_probe_frames = 20;
+    pol.dwell_verify_frames = 40;
+    pol.probe_pace_us = 100;
+    pol.tally_wait_ms = 20;
+    pol.tally_retries = 2;
     tx.init_calibration(pol, c.adapters[0].max_power_qdb);
 
     const auto w = tx.offset_window();
@@ -377,14 +380,33 @@ void test_relative_sweep_stays_inside_the_offset_window() {
 
     // A channel with a real wall, so the run COMPLETES rather than tripping
     // the Pass 134 "no wall anywhere" refusal — the success path is the one
-    // that persists an artifact and therefore the one worth pinning.
+    // that persists an artifact and therefore the one worth pinning. The
+    // evidence is the real §3.16 exchange: engine probes into a real
+    // DwellReceiver, tallies back.
     uint64_t now = 1000;
+    DwellReceiver ground;
     CHECK(tx.calibrator_->start(now));
-    for (int i = 0; i < 60000 && tx.calibrating(); ++i) {
-        now += 100;
-        const int32_t at = spy.offsets.empty() ? -24 : spy.offsets.back().second;
-        tx.calibrator_->on_report(-40, at >= -8 ? 900 : 5, 300, now);
+    for (int i = 0; i < 120000 && tx.calibrating(); ++i) {
+        now += 1;
         tx.calibrate_service(now);
+        tx.calibrator_->new_tick();
+        for (;;) {
+            const DwellProbeOut po = tx.calibrator_->next_probe(now);
+            if (!po.send) break;
+            const int32_t at =
+                spy.offsets.empty() ? -24 : spy.offsets.back().second;
+            const uint16_t loss = at >= -8 ? 900 : 5;  // wall at -8
+            const uint32_t n = tx.calibrator_->probe_dwell_count();
+            if (po.seq <= n * loss / 1000) continue;
+            const DwellTallyOut t = ground.on_probe(
+                tx.calibrator_->probe_run_id(),
+                tx.calibrator_->probe_dwell_id(), po.seq,
+                static_cast<uint16_t>(n), -40, 5, now);
+            if (t.send) {
+                tx.calibrator_->on_tally(t.run_id, t.dwell_id, t.received,
+                                         t.rssi_sum_dbm, t.rx_mcs, 0);
+            }
+        }
     }
     CHECK(!tx.calibrating());
     CHECK(tx.calibrator_->state() == CalibState::kDone);

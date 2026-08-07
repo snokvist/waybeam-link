@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "wblink/config.h"
 
+#include "wblink/calib_dwell.h"  // kMaxDwellFrames (§3.16)
+
 #include "wblink/fps_ladder.h"  // §9.11 ladder-membership validation
 
 #include <cctype>
@@ -668,28 +670,26 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cal.min_qdb = pk.value("min_qdb", cal.min_qdb);
                 cal.max_qdb = pk.value("max_qdb", cal.max_qdb);
                 cal.settle_ms = pk.value("settle_ms", cal.settle_ms);
-                cal.probe_dwell_ms =
-                    pk.value("probe_dwell_ms", cal.probe_dwell_ms);
-                cal.verify_dwell_ms =
-                    pk.value("verify_dwell_ms", cal.verify_dwell_ms);
-                cal.report_loss_abort_ms =
-                    pk.value("report_loss_abort_ms", cal.report_loss_abort_ms);
                 cal.hard_cap_ms = pk.value("hard_cap_ms", cal.hard_cap_ms);
-                cal.calib_min_report_hz =
-                    pk.value("calib_min_report_hz", cal.calib_min_report_hz);
                 cal.artifact_dir = pk.value("artifact_dir", cal.artifact_dir);
-                // §10.7 uplink gates — epoch counts, never milliseconds.
-                cal.uplink_probe_epochs =
-                    pk.value("uplink_probe_epochs", cal.uplink_probe_epochs);
-                cal.uplink_verify_epochs =
-                    pk.value("uplink_verify_epochs", cal.uplink_verify_epochs);
-                cal.uplink_liveness_ms =
-                    pk.value("uplink_liveness_ms", cal.uplink_liveness_ms);
-                cal.uplink_drain_ms =
-                    pk.value("uplink_drain_ms", cal.uplink_drain_ms);
-                cal.uplink_floor_min_samples =
-                    pk.value("uplink_floor_min_samples",
-                             cal.uplink_floor_min_samples);
+                // §3.16 (Pass 153) shared dwell knobs — probe COUNTS, never
+                // milliseconds. The Pass-152-era keys (probe_dwell_ms,
+                // verify_dwell_ms, report_loss_abort_ms, calib_min_report_hz,
+                // uplink_probe_epochs, uplink_verify_epochs, uplink_drain_ms,
+                // uplink_liveness_ms, uplink_floor_min_samples) are retired
+                // and ignored.
+                cal.dwell_probe_frames =
+                    pk.value("dwell_probe_frames", cal.dwell_probe_frames);
+                cal.dwell_verify_frames =
+                    pk.value("dwell_verify_frames", cal.dwell_verify_frames);
+                cal.probe_pace_us =
+                    pk.value("probe_pace_us", cal.probe_pace_us);
+                cal.tally_wait_ms =
+                    pk.value("tally_wait_ms", cal.tally_wait_ms);
+                cal.tally_retries =
+                    pk.value("tally_retries", cal.tally_retries);
+                cal.feed_quiet_ms =
+                    pk.value("feed_quiet_ms", cal.feed_quiet_ms);
                 if (cal.min_qdb > cal.max_qdb) {
                     return Result<Config>::fail(
                         "policy.calibration: min_qdb > max_qdb (§10.6)");
@@ -707,36 +707,44 @@ Result<Config> load_config_json(const std::string& json_text) {
                 }
                 // §10.6 (Pass 151): the offset window is 24 qdb by default,
                 // so this step decides how many probes a relative-backend
-                // sweep gets. Bounded on both sides — under 4 qdb (1 dB) is
-                // below the actuator's own resolution and just burns dwells;
-                // over 24 leaves a default window with two probes, which is
-                // the condition this key exists to prevent.
-                if (cal.offset_seek_step_qdb < 4 ||
+                // sweep gets. Bounded on both sides — the devourer TXAGC
+                // granularity is 2 qdb (0.5 dB) on Jaguar1/2 and 1 qdb on
+                // Jaguar3, so under 2 qdb the sweep aliases on the coarser
+                // families (two probes landing on one register value); over
+                // 24 leaves a default window with two probes, which is the
+                // condition this key exists to prevent.
+                if (cal.offset_seek_step_qdb < 2 ||
                     cal.offset_seek_step_qdb > 24) {
                     return Result<Config>::fail(
                         "policy.calibration: offset_seek_step_qdb must be "
-                        "4..24 qdb (1..6 dB, §10.6 Pass 151)");
+                        "2..24 qdb (0.5..6 dB, §10.6 Pass 151)");
                 }
-                if (cal.uplink_probe_epochs < 1 ||
-                    cal.uplink_verify_epochs < 1 ||
-                    cal.uplink_liveness_ms < 1 || cal.uplink_drain_ms < 1 ||
-                    cal.uplink_floor_min_samples < 1) {
+                // §3.16 (Pass 153): dwell bursts are bounded below by 1 and
+                // above by the receiver's exact-dedup bitmap.
+                if (cal.dwell_probe_frames < 1 ||
+                    cal.dwell_probe_frames > int{kMaxDwellFrames} ||
+                    cal.dwell_verify_frames < 1 ||
+                    cal.dwell_verify_frames > int{kMaxDwellFrames}) {
                     return Result<Config>::fail(
-                        "policy.calibration: uplink burst/drain/liveness/"
-                        "floor gates must be >= 1 (§10.7)");
+                        "policy.calibration: dwell_probe_frames/"
+                        "dwell_verify_frames must be 1..1024 (§3.16)");
                 }
-                // Pass 132: a burst too small to resolve the walls decides on
-                // noise. One lost probe must land at or under loss_ok_milli,
-                // i.e. 1000/N <= loss_ok_milli — otherwise a single unlucky
-                // probe reads as ambiguous or bad and the placement is a
-                // coin-flip. This is the check that replaces the ambiguous
-                // extension rather than reintroducing it.
+                if (cal.probe_pace_us < 1 || cal.tally_wait_ms < 1 ||
+                    cal.tally_retries < 0 || cal.feed_quiet_ms < 1) {
+                    return Result<Config>::fail(
+                        "policy.calibration: probe pacing / tally gates must "
+                        "be >= 1 (tally_retries >= 0) (§3.16)");
+                }
+                // Pass 132 (kept verbatim on the new primitive): a burst too
+                // small to resolve the walls decides on noise. One lost probe
+                // must land at or under loss_ok_milli, i.e. 1000/N <=
+                // loss_ok_milli.
                 if (cal.loss_ok_milli > 0 &&
-                    1000 / cal.uplink_probe_epochs > cal.loss_ok_milli) {
+                    1000 / cal.dwell_probe_frames > cal.loss_ok_milli) {
                     return Result<Config>::fail(
-                        "policy.calibration: uplink_probe_epochs too small to "
+                        "policy.calibration: dwell_probe_frames too small to "
                         "resolve loss_ok_milli — one lost probe must be <= it "
-                        "(§10.7)");
+                        "(§3.16)");
                 }
             }
             if (p.contains("cmd")) {

@@ -118,25 +118,46 @@ struct SelectorState {
     friend bool operator==(const SelectorState&, const SelectorState&) = default;
 };
 
-// §3.16 UPLINK_QUALITY (fixed 31 bytes) — craft→report-latched-ground counter
-// feedback for the §10.7 uplink calibration. Unauthenticated since Pass 131:
-// §10.6 already moves the craft's power actuator on plain LINK_REPORTs, so a
-// MAC on the feedback that moves only the GROUND's own power was asymmetry
-// without a threat. §10.7 reads its authority from §3.15a report_latch_holder
-// instead of inferring it from a tag.
-struct UplinkQuality {
+// §3.16 (Pass 153) EXTENDED type 0x01 CAL_PROBE — one numbered
+// frame of a counted dwell burst, zero-padded on the wire to the negotiated
+// §9.3a budget so a probe is byte-equivalent on air to a full DATA packet.
+// The padding is validated as a range and not surfaced: a decoded view
+// carries the fixed fields plus the observed wire length.
+struct CalibProbe {
     CommonPrefix prefix;
-    uint16_t target_originator = 0;
-    uint32_t target_session = 0;
-    uint32_t last_report_epoch = 0;
-    uint32_t reports_received = 0;
-    // §3.16: the two's-complement i32 WIRE IMAGE of the cumulative RSSI sum.
-    // Held unsigned so accumulation and delta are modulo 2^32 by construction
-    // — signed overflow here would be UB. Consumers take (int32_t)(b - a).
+    uint32_t run_id = 0;
+    uint16_t dwell_id = 0;  // starts at 1, strictly increasing within a run
+    uint16_t seq = 0;       // 1..count
+    uint16_t count = 0;     // the dwell's full burst size, on every probe
+    uint16_t wire_len = 0;  // observed frame length incl. padding (decode-only)
+    friend bool operator==(const CalibProbe&, const CalibProbe&) = default;
+};
+
+// §3.16 (Pass 153) EXTENDED type 0x02 CAL_TALLY — the dwell's one
+// receipt. Unauthenticated for the Pass 131 reasons (bounded blast radius,
+// §3.16 trust paragraph); idempotent by (run_id, dwell_id).
+struct CalibTally {
+    CommonPrefix prefix;
+    uint32_t run_id = 0;
+    uint16_t dwell_id = 0;
+    uint16_t received = 0;  // distinct seq observed, post-diversity
+    // §3.16: two's-complement i32 WIRE IMAGE of the per-dwell RSSI sum.
+    // Held unsigned so arithmetic is modulo 2^32 by construction.
     uint32_t rssi_sum_dbm = 0;
-    uint8_t craft_adapter_fingerprint = 0;
-    uint8_t last_rx_mcs = kUplinkRxMcsUnknown;
-    friend bool operator==(const UplinkQuality&, const UplinkQuality&) = default;
+    uint8_t rx_mcs = kUplinkRxMcsUnknown;  // delivered-rung cross-check
+    uint8_t adapter_fingerprint = 0;       // receiver adapter identity (Pass 146)
+    friend bool operator==(const CalibTally&, const CalibTally&) = default;
+};
+
+// §3.16: an 0xF frame whose extended type ID this build does not know.
+// Deliberately a decoded value, not a DecodeError — a newer peer's additive
+// frame must degrade to "feature unavailable" while still counting as valid
+// RX for liveness purposes (§11.4 follower). ID 0x00 is reserved-invalid
+// and IS a decode error.
+struct ExtUnknown {
+    CommonPrefix prefix;
+    uint8_t ext_id = 0;
+    friend bool operator==(const ExtUnknown&, const ExtUnknown&) = default;
 };
 
 // §3.9 RECOVERY_REQUEST — RX asks the exact TX session to bootstrap a stream.
@@ -284,7 +305,8 @@ using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
                              Heartbeat, CsaPacket, RecoveryRequest,
                              JsccFeedback, CacheStatus, CacheRequestView,
                              CacheReplyView, Announce, CacheAssign, VehicleCmd,
-                             SelectorState, UplinkQuality>;
+                             SelectorState, CalibProbe, CalibTally,
+                             ExtUnknown>;
 
 // Strict-length decode of one frame (devourer hands us the exact 802.11 MAC
 // payload boundary — trailing bytes are an error, not padding).
@@ -312,8 +334,11 @@ size_t encode_selector_state(const SelectorState& pkt, uint8_t* out,
                              size_t cap);
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap);
 size_t encode_vehicle_cmd(const VehicleCmd& pkt, uint8_t* out, size_t cap);
-size_t encode_uplink_quality(const UplinkQuality& pkt, uint8_t* out,
-                             size_t cap);
+// §3.16 PROBE: writes the 22 fixed bytes and zero-pads to pad_to (clamped to
+// [kCalibProbeFixedSize, mtu_tier::kHighBudget]); pkt.wire_len is ignored.
+size_t encode_calib_probe(const CalibProbe& pkt, uint16_t pad_to, uint8_t* out,
+                          size_t cap);
+size_t encode_calib_tally(const CalibTally& pkt, uint8_t* out, size_t cap);
 size_t encode_announce(const Announce& pkt, uint8_t* out, size_t cap);
 size_t encode_cache_assign(const CacheAssign& pkt, uint8_t* out, size_t cap);
 size_t encode_recovery_request(const RecoveryRequest& pkt, uint8_t* out,

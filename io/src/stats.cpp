@@ -538,18 +538,14 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.uplink_calib_fingerprint);
     out += ",\"uplink_calib_stale\":";
     append_bool(out, snap.link.uplink_calib_stale);
-    out += ",\"uplink_quality_valid\":";
-    append_bool(out, snap.link.uplink_quality_valid);
-    out += ",\"uplink_quality_age_ms\":";
-    append_u64(out, snap.link.uplink_quality_age_ms);
-    out += ",\"uplink_quality_report_epoch\":";
-    append_u64(out, snap.link.uplink_quality_report_epoch);
-    out += ",\"uplink_quality_reports\":";
-    append_u64(out, snap.link.uplink_quality_reports);
-    out += ",\"uplink_quality_rssi_mean\":";
-    append_i32(out, snap.link.uplink_quality_rssi_mean);
-    out += ",\"uplink_quality_rx_mcs\":";
-    append_u64(out, snap.link.uplink_quality_rx_mcs);
+    out += ",\"calib_probes_sent\":";
+    append_u64(out, snap.link.calib_probes_sent);
+    out += ",\"calib_tallies_rx\":";
+    append_u64(out, snap.link.calib_tallies_rx);
+    out += ",\"calib_rx_mcs\":";
+    append_u64(out, snap.link.calib_rx_mcs);
+    out += ",\"feed_paused\":";
+    append_bool(out, snap.link.feed_paused);
     out += "}}\n";
 }
 

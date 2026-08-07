@@ -311,46 +311,19 @@ struct CalibrationPolicy {
     int rssi_guard_dbm = -6;
     int min_qdb = 4;
     int max_qdb = 108;
-    // Pass 132: 800 -> 300. It was sized as TXAGC settle plus one report
-    // window, and the report-window term was carrying the §10.7 case where a
-    // dwell had to wait for the cadence to produce a sample. A burst starts
-    // emitting the instant settle ends, so only the TXAGC term is real; §10.6
-    // still covers its own 100 ms window inside the 300.
-    int settle_ms = 300;
-    int probe_dwell_ms = 1200;
-    int verify_dwell_ms = 2500;
-    int report_loss_abort_ms = 3000;
+    int settle_ms = 300;  // TXAGC settle (Pass 153: no report window)
     int hard_cap_ms = 600000;
-    // §10.6 (Pass 134): whole-run accepted-report rate floor. The 3 s abort
-    // above catches SILENCE; this catches a return path at HALF rate, which
-    // reads as fewer observed losses and places every rung at its ceiling.
-    // Seeded well under the 10 Hz nominal so ordinary dwell-edge gaps and
-    // bounded overload blackouts never trip it.
-    int calib_min_report_hz = 6;
+    // §3.16 (Pass 153) shared dwell knobs, both directions and both node
+    // roles. Tier-2 seeds; frames are PROBE COUNTS, not milliseconds, and
+    // Pass 132's decidability rule (1000/N <= loss_ok_milli) still gates the
+    // probe burst at load.
+    int dwell_probe_frames = 500;
+    int dwell_verify_frames = 1000;
+    int probe_pace_us = 2000;   // inter-probe pacing
+    int tally_wait_ms = 500;    // tally re-elicitation window
+    int tally_retries = 3;      // bounded re-elicitation
+    int feed_quiet_ms = 2000;   // craft feed-pause resume timeout (D-C)
     std::string artifact_dir = "/etc/waybeam-link/calibration";
-    // §10.7 (Pass 125) ground-uplink gates. The walls, step, min/max, settle
-    // and artifact_dir above are shared; only these differ, because the uplink
-    // measures sparse LINK_REPORT epochs instead of live video. They are
-    // EPOCH COUNTS, not milliseconds: a slow report cadence must lengthen the
-    // run, never let an unobserved dwell score as clean. The craft-only ms
-    // dwells and report_loss_abort_ms are unused on the ground.
-    // Pass 132 burst sizes. 100 puts one lost probe at 10permille (inside
-    // loss_ok_milli) and five at 50permille (the bad wall). The old 40 put one
-    // loss at 25permille, BETWEEN the walls, which is the only reason
-    // `uplink_ambiguous_epochs` existed — it is retired, and a config still
-    // carrying the key simply loads with it ignored.
-    int uplink_probe_epochs = 100;
-    int uplink_verify_epochs = 200;
-    // Silence after a burst so the craft's counter reflects all of it before
-    // scoring. Must exceed one §3.16 period (500 ms at 2 Hz).
-    int uplink_drain_ms = 600;
-    int uplink_liveness_ms = 2000;
-    // Tier-2 knob (docs/findings.md 2026-08-07): sample-count gate on the
-    // ground's at-rest loss-floor estimate — the sample the §10.7 walls may
-    // be referenced against while the wall-origin question is unruled. A
-    // count, not a clock: at ~10 Hz reports n=40 has σ the size of the floor
-    // it estimates; n=300 puts σ near 9permille at a 25permille floor.
-    int uplink_floor_min_samples = 300;
 };
 
 struct Policy {

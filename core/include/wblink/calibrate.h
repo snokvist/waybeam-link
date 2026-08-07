@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <optional>
 
+#include "wblink/calib_dwell.h"
 #include "wblink/power.h"  // kPowerLevelBaseline / kQdbPerLevel
 
 namespace wblink {
@@ -45,6 +46,12 @@ struct SeekParams {
     int32_t min_qdb = 4;
     int32_t max_qdb = 108;
     uint8_t verify_descent_budget = 3;
+    // §10.5/§10.7 (Pass 153): offset space only — a sweep that booked no
+    // overload bracket starts its verify no higher than this bound (the
+    // efuse reference, 0). Above the reference sits per-unit PA compression
+    // a close-range flat field cannot see; placing there requires a
+    // measured wall. Unset in absolute space.
+    std::optional<int32_t> no_bracket_cap_qdb;
 };
 
 // What a completed dwell observed.
@@ -179,6 +186,21 @@ class PowerSeek {
     }
     SeekStep place_() {
         qdb_ = last_clean_->qdb;
+        // §10.5 (Pass 153): no LIVE bracket booked → the verify walk starts
+        // at the reference, not above it. Live means the highest clean probe
+        // still sits below the booked wall; a bad probe the sweep later
+        // climbed past cleanly is a noise transient (the flat-field noise of
+        // docs/findings.md 2026-08-07), and releasing the cap on it would
+        // verify from the ceiling — the noise-selected placement the cap
+        // exists to forbid. The walk only descends from here, so capping the
+        // start caps the placement; everything below is then measured by the
+        // walk itself, never inherited from this clamp.
+        const bool live_bracket =
+            has_bad_ && first_bad_qdb_ > last_clean_->qdb;
+        if (p_.no_bracket_cap_qdb && !live_bracket &&
+            qdb_ > *p_.no_bracket_cap_qdb) {
+            qdb_ = std::max(p_.min_qdb, *p_.no_bracket_cap_qdb);
+        }
         phase_ = Phase::kVerify;
         return {SeekStep::Kind::kVerify, qdb_, true, nullptr};
     }
@@ -269,10 +291,12 @@ struct CalibrateParams {
     int rssi_guard_dbm = -6;     // token RX-abuse backstop (P121 addendum)
     int32_t min_qdb = 4;         // 1 dBm
     int32_t max_qdb = 108;       // 27 dBm
-    uint32_t settle_ms = 800;    // TXAGC settle + one report window
-    uint32_t probe_dwell_ms = 1200;
-    uint32_t verify_dwell_ms = 2500;
-    uint32_t report_loss_abort_ms = 3000;
+    uint32_t settle_ms = 300;  // TXAGC settle (Pass 153: no report window)
+    // §3.16 (Pass 153): dwell burst sizes in PROBE FRAMES, shared with §10.7.
+    // Pass 132's decidability rule holds: 1000/N <= loss_ok_milli.
+    uint16_t dwell_probe_frames = 500;
+    uint16_t dwell_verify_frames = 1000;
+    DwellSendParams dwell;  // pacing + tally re-elicitation bounds
     uint32_t hard_cap_ms = 600000;
     // The §9.3 table's tx_power_level per MCS — the authored curve is the
     // level-4 baseline, so placements are compensated per §10.2.
@@ -338,7 +362,7 @@ struct CalibActions {
 class Calibrator {
   public:
     explicit Calibrator(const CalibrateParams& p)
-        : p_(p), seek_(seek_params(p)) {}
+        : p_(p), dwell_(p.dwell), seek_(seek_params(p)) {}
 
     // §10.6's seek knobs are a subset of CalibrateParams; §10.7 builds the
     // same SeekParams from the same config block (§15.2) and differs only in
@@ -351,6 +375,10 @@ class Calibrator {
         s.rssi_guard_dbm = p.rssi_guard_dbm;
         s.min_qdb = p.min_qdb;
         s.max_qdb = p.max_qdb;
+        // §10.5 (Pass 153): taper_rung_ceiling is the space discriminator
+        // (Pass 151) — offset space caps unbracketed placements at the
+        // efuse reference. §10.7 sets the same cap on its own SeekParams.
+        if (!p.taper_rung_ceiling) s.no_bracket_cap_qdb = 0;
         return s;
     }
 
@@ -361,7 +389,10 @@ class Calibrator {
         if (state_ == CalibState::kRunning) return false;
         state_ = CalibState::kRunning;
         started_ms_ = now_ms;
-        last_report_ms_ = now_ms;  // armed; the 3 s clock runs from start
+        // §3.16: a fresh run_id opens a new run at the receiver. Derived from
+        // the injected clock (never wall time) and kept non-zero.
+        run_id_ = static_cast<uint32_t>(now_ms) | 1u;
+        dwell_seq_ = 0;
         // An abort whose restore was not yet drained (abort → start between
         // ticks) must not fire that restore mid-new-run.
         restore_pending_ = false;
@@ -382,18 +413,31 @@ class Calibrator {
         return true;
     }
 
-    // One ACCEPTED §3.5 report (post report-gate). Samples inside the
-    // settle window are discarded; the report-loss clock always resets.
-    void on_report(int8_t rssi_mean, uint16_t loss_milli, uint32_t uniq,
-                   uint64_t now_ms) {
+    // One ACCEPTED §3.16 TALLY (post source/destination gate). Stale
+    // run/dwell ids are ignored inside the sender.
+    void on_tally(uint32_t run_id, uint16_t dwell_id, uint16_t received,
+                  uint32_t rssi_sum_dbm, uint8_t rx_mcs,
+                  uint8_t adapter_fingerprint) {
         if (state_ != CalibState::kRunning) return;
-        last_report_ms_ = now_ms;
-        if (dwell_start_ms_ == 0 || now_ms < dwell_start_ms_) return;
-        rssi_sum_ += rssi_mean;
-        ++rssi_n_;
-        loss_sum_ += static_cast<uint64_t>(loss_milli) * std::max(uniq, 1u);
-        loss_w_ += std::max(uniq, 1u);
+        (void)dwell_.on_tally(run_id, dwell_id, received, rssi_sum_dbm,
+                              rx_mcs, adapter_fingerprint);
     }
+
+    // §3.16 probe emission — drained by the app once per tick after
+    // new_tick(); the app encodes (run_id, dwell_id, seq, dwell_count) and
+    // injects, padded to the negotiated budget. Gated on the settle window so
+    // TXAGC has settled before the first probe of a dwell goes out.
+    void new_tick() { dwell_.new_tick(); }
+    DwellProbeOut next_probe(uint64_t now_ms) {
+        if (state_ != CalibState::kRunning || dwell_start_ms_ == 0 ||
+            now_ms < dwell_start_ms_) {
+            return DwellProbeOut{};
+        }
+        return dwell_.next_probe(now_ms);
+    }
+    uint32_t probe_run_id() const { return run_id_; }
+    uint16_t probe_dwell_id() const { return dwell_.dwell_id(); }
+    uint16_t probe_dwell_count() const { return dwell_count_; }
 
     CalibActions tick(uint64_t now_ms) {
         CalibActions a;
@@ -407,26 +451,26 @@ class Calibrator {
             a.restore = take_restore_();
             return a;
         }
-        if (now_ms - last_report_ms_ > p_.report_loss_abort_ms) {
-            // Addendum 4/5 fall out of the sweep: a report blackout is a
-            // dwell that delivered nothing, which is simply NOT CLEAN. Above a
-            // clean probe that places at it (the addendum-4 retreat); during
-            // verify it takes the bounded step-down (addendum 5); below the
-            // first clean probe the sweep just keeps climbing. Only a blackout
-            // with nothing clean anywhere and nowhere left to climb aborts.
-            const double obs = rssi_n_ != 0 ? double(rssi_sum_) / rssi_n_
-                                            : double(p_.rssi_guard_dbm) - 60.0;
+        if (dwell_.state() == DwellState::kNoEvidence) {
+            // §3.16 evidence blackout: the dwell's tally never arrived
+            // despite bounded re-elicitation. Addendum 4/5 semantics with the
+            // trigger renamed — a blackout is a dwell that delivered nothing,
+            // which is simply NOT CLEAN. Above a clean probe that places at
+            // it (the addendum-4 retreat); during verify it takes the bounded
+            // step-down (addendum 5); below the first clean probe the sweep
+            // just keeps climbing. Only a blackout with nothing clean
+            // anywhere and nowhere left to climb aborts.
+            const double obs = double(p_.rssi_guard_dbm) - 60.0;
             const SeekStep s = seek_.on_dwell(DwellVerdict::kBad, obs, 1000);
-            // A rung can never COMPLETE on dwells that carried no reports:
-            // the placement would be authored from silence. Only a step that
+            // A rung can never COMPLETE on a dwell that carried no tally: the
+            // placement would be authored from silence. Only a step that
             // keeps probing/verifying is progress; anything terminal under a
-            // blackout is the report-loss abort.
+            // blackout is the evidence-loss abort.
             if (s.kind == SeekStep::Kind::kProbe ||
                 s.kind == SeekStep::Kind::kVerify) {
-                last_report_ms_ = now_ms;  // re-arm at the new power
                 return apply_step(a, now_ms, s);
             }
-            finish(CalibState::kFailed, "report_loss", now_ms);
+            finish(CalibState::kFailed, "evidence_lost", now_ms);
             a.restore = take_restore_();
             return a;
         }
@@ -434,27 +478,25 @@ class Calibrator {
             enter_rung_ = false;
             a.pin_rung = rung_;
             a.set_qdb = qdb_;
-            begin_dwell(now_ms, p_.probe_dwell_ms);
+            begin_dwell(now_ms, p_.dwell_probe_frames);
             return a;
         }
-        if (dwell_start_ms_ == 0 || now_ms < dwell_end_ms_) {
-            return a;
+        if (dwell_.state() != DwellState::kDone) {
+            return a;  // burst in flight or tally still awaited
         }
-        // Dwell complete — evaluate with whatever samples arrived. A blank
-        // dwell carries no evidence either way: hold at this power and let
-        // the report clocks arbitrate (addendum 4 retreat, or abort). This is
-        // the craft-only kNoEvidence verdict; §10.7 never produces it.
-        if (rssi_n_ == 0) {
-            return apply_step(
-                a, now_ms, seek_.on_dwell(DwellVerdict::kNoEvidence, 0, 0));
-        }
-        const double rssi = double(rssi_sum_) / rssi_n_;
-        const uint16_t loss = loss_w_ ? static_cast<uint16_t>(
-            std::min<uint64_t>(1000, loss_sum_ / loss_w_)) : 0;
+        // Dwell complete — the tally is the evidence. received == 0 is an
+        // ordinary 1000‰ reading (§3.16), not a blackout; its RSSI mean is
+        // undefined, so the guard fallback stands in.
+        const DwellResult& res = dwell_.result();
+        const uint16_t loss = res.loss_milli();
+        const double rssi =
+            res.received > 0
+                ? double(static_cast<int32_t>(res.rssi_sum_dbm)) /
+                      res.received
+                : double(p_.rssi_guard_dbm) - 60.0;
+        dwell_.reset();  // consumed; next begin_dwell re-arms
         // §10.6 evaluates loss against its own walls, so the verdict is
-        // derived here rather than asserted: the craft always has samples to
-        // judge with. The ground's §10.7 adapter is the one that asserts kBad
-        // for a counter stall (§3.16 two clocks).
+        // derived here rather than asserted.
         const DwellVerdict v = loss > p_.loss_bad_milli ? DwellVerdict::kBad
                                                         : DwellVerdict::kClean;
         const bool was_verify = seek_.in_verify();
@@ -486,10 +528,11 @@ class Calibrator {
     }
 
   private:
-    void begin_dwell(uint64_t now_ms, uint32_t dwell_ms) {
+    void begin_dwell(uint64_t now_ms, uint16_t frames) {
         dwell_start_ms_ = now_ms + p_.settle_ms;
-        dwell_end_ms_ = dwell_start_ms_ + dwell_ms;
-        rssi_sum_ = 0; rssi_n_ = 0; loss_sum_ = 0; loss_w_ = 0;
+        dwell_count_ = frames;
+        ++dwell_seq_;  // §3.16: strictly increasing within the run
+        (void)dwell_.begin(run_id_, dwell_seq_, frames, now_ms);
     }
 
     // The rung's overload bracket lives in the artifact but is discovered by
@@ -513,11 +556,11 @@ class Calibrator {
                 a.restore = take_restore_();
                 return a;
             case SeekStep::Kind::kVerify:
-                begin_dwell(now_ms, p_.verify_dwell_ms);
+                begin_dwell(now_ms, p_.dwell_verify_frames);
                 return a;
             case SeekStep::Kind::kDone:
             case SeekStep::Kind::kProbe:
-                begin_dwell(now_ms, p_.probe_dwell_ms);
+                begin_dwell(now_ms, p_.dwell_probe_frames);
                 return a;
         }
         return a;
@@ -548,7 +591,10 @@ class Calibrator {
     // precondition in the app layer.
     CalibActions next_rung(CalibActions a, uint64_t now_ms) {
         if (rung_ >= 7) {
-            if (found_no_wall_anywhere()) {
+            // §10.6 (Pass 153): absolute space only — in offset space the
+            // ceiling is offset 0, the §10.5 boot-safe placement, and a
+            // flat-at-ceiling read is the expected close-range result.
+            if (p_.taper_rung_ceiling && found_no_wall_anywhere()) {
                 finish(CalibState::kFailed, "no_wall_found", now_ms);
                 a.restore = take_restore_();
                 return a;  // persists nothing; last-good artifact survives
@@ -573,7 +619,7 @@ class Calibrator {
         qdb_ = s.qdb;
         a.pin_rung = rung_;
         a.set_qdb = s.qdb;
-        begin_dwell(now_ms, p_.probe_dwell_ms);
+        begin_dwell(now_ms, p_.dwell_probe_frames);
         return a;
     }
 
@@ -583,6 +629,7 @@ class Calibrator {
         restore_pending_ = true;
         artifact_pending_ = (s == CalibState::kDone);
         dwell_start_ms_ = 0;
+        dwell_.reset();
     }
     bool take_restore_() {
         const bool r = restore_pending_;
@@ -600,13 +647,11 @@ class Calibrator {
     const char* fail_reason_ = nullptr;
     CalibArtifact artifact_{};
     uint64_t started_ms_ = 0;
-    uint64_t last_report_ms_ = 0;
     uint64_t dwell_start_ms_ = 0;
-    uint64_t dwell_end_ms_ = 0;
-    int64_t rssi_sum_ = 0;
-    uint32_t rssi_n_ = 0;
-    uint64_t loss_sum_ = 0;
-    uint64_t loss_w_ = 0;
+    uint32_t run_id_ = 0;
+    uint16_t dwell_seq_ = 0;
+    uint16_t dwell_count_ = 0;
+    DwellSender dwell_{DwellSendParams{}};
     uint8_t rung_ = 0;
     int32_t qdb_ = 0;
     int32_t placement_qdb_ = 0;
