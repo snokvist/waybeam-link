@@ -12,6 +12,46 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-07 — flat-field verify selection is noise; widening the offset window recovers real walls
+
+**Setup.** x86 devourer ground (8812AU TX `ground-au-1`, 8812CU diversity) +
+.232 craft (8822EU `craft-eu-1`), 10 m, 5805/HT20, calibration v2 dwells
+(500/1000 frames).
+
+**Measured.** With the original [−24, 0] offset window the whole field is
+flat (1–10‰ everywhere, no bracket bookable), so the §10.7 verify walk's
+"best" is noise-selected: morning runs placed (−8 @ 1‰, then 0 @ 6‰),
+midday runs refused `no_wall_found` **six consecutive times** (verify at the
+ceiling kept reading 1–3‰ vs 4‰ one step down) — the outcome tracked slow
+RF drift, not the link. After the same-day rulings (offset-space exemption +
+window widened to [−24, +24] with the unbracketed-placement cap) the same
+bench books **real walls on 5 of 8 downlink rungs** (fp=133 placements
+`[-8, 0, 0, +8, +8, 0, -8, 0]`, brackets at first_bad_rssi −66/−41): the
+walls were simply above the old window's ceiling. Uplink at MCS0 stays
+wall-less even at +24 (RSSI −48, 4‰) — capped placement −8 @ 2‰.
+
+**Means.** Within a flat region, placement differences of one seek step are
+not reproducible measurements; only a booked bracket makes a placement a
+property of the channel. The window should be wide enough to contain the
+wall, and the reference cap handles the case where it is not.
+
+**Open.** Uplink MCS0 wall not yet within [−24, +24] at 10 m — either a
+longer placement or a higher-MCS uplink rung would book it. The craft's
+rung-6 (64-QAM) early wall (first_bad −41) matches the known per-unit
+8822EU 64-QAM TX weakness; unify with that finding when the unit is
+re-characterised.
+
+## 2026-08-07 — ground binary wedges on SIGTERM after an in-process calibration run
+
+Twice this session the x86-ground process ignored SIGTERM (stop script +
+direct kill; REST already dead, process alive until SIGKILL) — both times
+after it had completed at least one §10.7 run in-process; a fresh instance
+stops cleanly. Suspect a teardown path wedged in devourer USB close while
+calibration-era actuator state is present. Bench impact only (SIGKILL is
+acceptable on x86, never on SigmaStar). Open: reproduce under gdb / with
+devourer verbose teardown logging; check whether the §10.7 restore path
+leaves an actuator thread parked.
+
 ## ~~2026-08-07 — §10.7 walls referenced to a measured at-rest floor~~ CLOSED by Pass 153
 
 The floor mechanism (and its `uplink_floor_min_samples` knob) is deleted:
