@@ -749,11 +749,12 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                 "\": this die cannot emit STBC (caps.tx.stbc_ok=false, "
                 "1T1R) — air.stbc would run silently inert (§3.0 Pass 157)");
         }
-        // Node coding into the committed TxRate; §9.5 set_tx_mode rewrites
-        // mcs/sgi and leaves these standing.
-        im.rate.ldpc = cfg.ldpc;
-        im.rate.stbc = cfg.stbc ? 1 : 0;
     }
+    // Node coding into the committed TxRate — unconditionally, so the
+    // coupling to config never rides on the two defaults happening to
+    // agree. §9.5 set_tx_mode rewrites mcs/sgi and leaves these standing.
+    im.rate.ldpc = cfg.ldpc;
+    im.rate.stbc = cfg.stbc ? 1 : 0;
 
     for (size_t i = 0; i < im.adapters.size(); ++i) {
         Impl::Adapter& ad = *im.adapters[i];
@@ -915,6 +916,10 @@ void RadioAir::set_tx_mode(uint8_t mcs, bool sgi) {
     m.ht_mcs = mcs;
     m.bw_mhz = 20;
     m.sgi = sgi;
+    // §3.0 Pass 157: the fallback carries the node coding too, so the
+    // malformed-prefix degradation keeps "every frame airs the same coding".
+    m.ldpc = impl_->rate.ldpc;
+    m.stbc = impl_->rate.stbc != 0;
     impl_->adapters[impl_->tx_idx]->dev->SetTxMode(m);
 }
 
