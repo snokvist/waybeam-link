@@ -113,6 +113,39 @@ acceptable on x86, never on SigmaStar). Open: reproduce under gdb / with
 devourer verbose teardown logging; check whether the §10.7 restore path
 leaves an actuator thread parked.
 
+## 2026-08-07 — §7.2 aim error budget: instruments landed, numbers owed (issue #99)
+
+**What exists now (bench knob, no spec surface):** `WBLINK_AIM_LOG=1`
+histograms two of issue #99's three error terms — (a) *release lateness*,
+how late past the computed `QuietGap::return_deadline` the host loop
+actually fired the return window, and (b) the `ReadTsf()` control-transfer
+cost, the §7.2 term with **no measured number at all** (devourer bounds it
+0.5–1.2 ms on Jaguar3; a bulk-flooded adapter additionally starves the
+read). Dumped to stderr every 30 s as bucketed distributions
+(<50/<100/<200/<500/<1k/<2k/<5k/≥5k µs) — the tail is the contract, means
+hide it. The third term (craft-side arrival phase relative to its own gap)
+is **deliberately not instrumented yet**: it needs either a host↔TSF fit
+(devourer tdma example) or a host-time proxy whose error is exactly the
+terms under study — that placement choice is part of the §17 gate-4
+evaluation itself.
+
+**What the vendored bench already says (act on it now):** submit→air p99 is
+**101 µs on Jaguar1 (8812AU, async USB2)** vs **2.2 ms on Jaguar3 (8822CU,
+sync USB3)** against a ±1000 µs window budget — on a Jaguar3 uplink, that
+one term alone blows the budget ~1 % of the time, and the failure is
+*correlated* return loss inside a window (defeating Pass 78's redundancy,
+which assumes independence). **The ground's `role:"tx"` adapter should be
+the 8812AU** wherever the rig has a choice; the x86 bench rig already
+complies (AU = `au-uplink`), now as a rule rather than an accident (also
+noted in `deploy/README.md`).
+
+**Open:** the gate-4 campaign — run the instruments per uplink generation
+(AU vs CU), measure end-to-end aim as a distribution, report the miss rate
+against `[eob+guard, eob+guard+window]`, then recommend re-derived
+`guard_us`/`return_window_us` seeds or a documented miss budget.
+`disable_cca` is NOT a lever (Pass 139: clearing it costs ~45 % of the
+uplink). TDMA stays deferred per the issue's own assessment.
+
 ## ~~2026-08-07 — §10.7 walls referenced to a measured at-rest floor~~ CLOSED by Pass 153
 
 The floor mechanism (and its `uplink_floor_min_samples` knob) is deleted:
