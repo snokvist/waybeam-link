@@ -49,8 +49,12 @@ void ScoutStore::begin_sweep(const std::string& domain,
         rounds_ = 0;
         domain_ = domain;
     }
+    for (Bin& b : bins_) {
+        b.in_universe = false;  // re-declared below; retired bins keep
+                                // ranking but stop vetoing rounds
+    }
     for (const uint16_t c : channels) {
-        (void)bin_of(c);  // declare the universe before the first fold
+        bin_of(c)->in_universe = true;
     }
 }
 
@@ -68,7 +72,7 @@ void ScoutStore::fold(const ScoutSample& s) {
     // EVERY bin has been observed since the last advance.
     bool all = true;
     for (const Bin& bb : bins_) {
-        if (!bb.fresh_this_round) {
+        if (bb.in_universe && !bb.fresh_this_round) {
             all = false;
             break;
         }
@@ -96,7 +100,7 @@ ScoutRanking ScoutStore::rank(uint64_t now_ms, uint16_t resting_chan,
             const ScoutSample& s = b.ring[i];
             if (now_ms >= s.at_ms &&
                 now_ms - s.at_ms > policy_.max_evidence_age_ms) {
-                ++rej_stale_;
+                ++out.stale_samples;  // gauge at this read, not cumulative
                 continue;
             }
             vals[n++] = s.util_permille;
@@ -135,8 +139,8 @@ ScoutRanking ScoutStore::rank(uint64_t now_ms, uint16_t resting_chan,
         // rounds can be 0 with usable evidence (a partial first sweep) —
         // floor at one sample's worth so the answer is never 0-confidence
         // while backed by fresh data.
-        out.confidence_permille =
-            static_cast<uint16_t>(std::max<uint32_t>(1000u * r / denom, 250));
+        out.confidence_permille = static_cast<uint16_t>(std::max<uint32_t>(
+            1000u * r / denom, policy_.confidence_floor_permille));
     }
 
     // Recommendation — reasons in refusal-priority order.
@@ -159,9 +163,12 @@ ScoutRanking ScoutStore::rank(uint64_t now_ms, uint16_t resting_chan,
     for (const ScoutBinRank& r : out.bins) {
         if (!r.qualified) ++unqualified;
     }
-    if (unqualified * 1000 >=
-        static_cast<size_t>(policy_.broad_degrade_permille) *
-            out.bins.size()) {
+    // A lone unqualified bin is NO_QUALIFIED, never "broad" — broadness
+    // needs more than one opinion.
+    if (out.bins.size() > 1 &&
+        unqualified * 1000 >=
+            static_cast<size_t>(policy_.broad_degrade_permille) *
+                out.bins.size()) {
         out.reason = ScoutRecReason::kBroadDegradation;
         return out;
     }

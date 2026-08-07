@@ -21,6 +21,7 @@ struct ScoutStorePolicy {
     uint16_t qualify_max_util_permille = 200;
     uint16_t improvement_margin_permille = 80;
     uint16_t broad_degrade_permille = 700;
+    uint16_t confidence_floor_permille = 250;
     static constexpr size_t kRingDepth = 8;
 };
 
@@ -58,7 +59,9 @@ struct ScoutRanking {
     ScoutRecReason reason = ScoutRecReason::kNoEvidence;
     uint16_t recommended_chan = 0;   // valid only when reason == kOk
     uint32_t rounds = 0;
-    uint16_t confidence_permille = 0;  // rounds- and freshness-degraded
+    uint16_t confidence_permille = 0;  // rounds-degraded (freshness is
+                                       // binary: stale evidence is excluded)
+    uint32_t stale_samples = 0;  // GAUGE: held-but-stale at this read
 };
 
 class ScoutStore {
@@ -71,7 +74,9 @@ class ScoutStore {
     // one adapter (§15.5a). Declares (creates) every bin up front so the
     // round guard sees the full universe before the first fold — a
     // dynamically-appearing bin must not let a partial sweep read as a
-    // completed round.
+    // completed round. A bin OUTSIDE the latest declared universe keeps
+    // ranking while fresh but stops vetoing the round advance — else one
+    // wide sweep followed by narrow ones freezes rounds forever.
     void begin_sweep(const std::string& domain,
                      const std::vector<uint16_t>& channels);
     // Fold one dwell sample. Structurally implausible samples (permille >
@@ -89,7 +94,6 @@ class ScoutStore {
     // distinguishable from "everything rejected").
     uint64_t rejected_implausible() const { return rej_implausible_; }
     uint64_t domain_resets() const { return domain_resets_; }
-    uint64_t rejected_stale() const { return rej_stale_; }
     const std::string& domain() const { return domain_; }
     uint32_t rounds() const { return rounds_; }
 
@@ -100,6 +104,7 @@ class ScoutStore {
         size_t n = 0;     // valid entries
         size_t next = 0;  // ring cursor
         bool fresh_this_round = false;
+        bool in_universe = true;  // member of the latest declared sweep
     };
     Bin* bin_of(uint16_t chan_mhz);
 
@@ -109,8 +114,6 @@ class ScoutStore {
     uint32_t rounds_ = 0;
     uint64_t rej_implausible_ = 0;
     uint64_t domain_resets_ = 0;
-    mutable uint64_t rej_stale_ = 0;  // counted at rank time (age is a
-                                      // property of "now", not of the fold)
 };
 
 }  // namespace wblink

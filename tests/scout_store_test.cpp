@@ -73,7 +73,10 @@ int main() {
         const uint64_t later = 1000 + 16 * 60 * 1000;  // past the 15 min bound
         ScoutRanking r = st.rank(later, 0, 0);
         CHECK(r.reason == ScoutRecReason::kNoEvidence);
-        CHECK(st.rejected_stale() > 0);
+        CHECK(r.stale_samples > 0);
+        // gauge, not cumulative: a second read reports the same number
+        const ScoutRanking r_again = st.rank(later, 0, 0);
+        CHECK_EQ_U(r_again.stale_samples, r.stale_samples);
         // fresh evidence revives the bin
         st.begin_sweep(dom, {5805});
         st.fold(sample(5805, 100, later));
@@ -114,6 +117,29 @@ int main() {
         const ScoutRanking r2 = st2.rank(2000, 0, 0);
         CHECK_EQ_U(r2.bins[0].chan_mhz, 5765);
         CHECK_EQ_U(r2.recommended_chan, 5765);
+    }
+
+    // --- shrinking universe: retired bins stop vetoing rounds ---------------
+    {
+        ScoutStore st;
+        sweep(st, dom, 1000, {{5745, 100}, {5805, 100}, {5825, 100}});
+        CHECK_EQ_U(st.rounds(), 1);
+        // narrower sweeps thereafter: 5745 retired, rounds must still accrue
+        sweep(st, dom, 2000, {{5805, 110}, {5825, 120}});
+        CHECK_EQ_U(st.rounds(), 2);
+        sweep(st, dom, 3000, {{5805, 110}, {5825, 120}});
+        CHECK_EQ_U(st.rounds(), 3);
+        // ...while the retired bin keeps ranking while fresh
+        const ScoutRanking r = st.rank(4000, 0, 0);
+        CHECK_EQ_U(r.bins.size(), 3);
+    }
+
+    // --- a lone unqualified bin reads NO_QUALIFIED, never "broad" -----------
+    {
+        ScoutStore st;
+        sweep(st, dom, 1000, {{5805, 900}});
+        const ScoutRanking r = st.rank(2000, 0, 0);
+        CHECK(r.reason == ScoutRecReason::kNoQualified);
     }
 
     // --- broad degradation: everything busy → hold, not a jump --------------

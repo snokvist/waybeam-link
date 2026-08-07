@@ -822,6 +822,9 @@ class ScoutEngine {
                        ",\"psk_known\":" + (c.psk_known ? "true" : "false") + "}";
             }
         }
+        // domain is JSON-safe by construction: snprintf %02x MAC or
+        // "idx/N" — nothing quotable can appear (pinned here because the
+        // invariant lives in air_radio.cpp, three files away).
         out += "],\"ranking\":{\"rounds\":" + std::to_string(rk.rounds) +
                ",\"domain\":\"" + store_.domain() + "\"" +
                ",\"confidence_permille\":" +
@@ -830,7 +833,7 @@ class ScoutEngine {
                std::to_string(store_.domain_resets()) +
                ",\"implausible\":" +
                std::to_string(store_.rejected_implausible()) +
-               ",\"stale\":" + std::to_string(store_.rejected_stale()) +
+               ",\"stale\":" + std::to_string(rk.stale_samples) +
                "},\"recommendation\":{\"chan\":" +
                (rk.reason == ScoutRecReason::kOk
                     ? std::to_string(rk.recommended_chan)
