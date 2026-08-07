@@ -909,23 +909,24 @@ int main() {
         CHECK(bool(ok) && ok.value->policy.calibration.seek_step_qdb == 8);
     }
     // §10.6 (Pass 151): the relative-backend step. Bounded on BOTH sides —
-    // under 1 dB is below the actuator's resolution and just burns dwells,
-    // and over 6 dB leaves the default 24 qdb window with two probes, which
-    // is the condition the key exists to prevent.
+    // under 2 qdb aliases on the 0.5 dB TXAGC families (devourer Jaguar1/2;
+    // Jaguar3 resolves 1 qdb), and over 6 dB leaves the default 24 qdb
+    // window with two probes, which is the condition the key exists to
+    // prevent.
     expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"calibration":{"offset_seek_step_qdb":2}}})",
-        "offset_seek_step_qdb must be 4..24");
+      "policy":{"calibration":{"offset_seek_step_qdb":1}}})",
+        "offset_seek_step_qdb must be 2..24");
     expect_error(R"({"node":{"originator":9,"role":"rx"},
       "policy":{"calibration":{"offset_seek_step_qdb":32}}})",
-        "offset_seek_step_qdb must be 4..24");
+        "offset_seek_step_qdb must be 2..24");
     {
         auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
         CHECK(bool(d) &&
               d.value->policy.calibration.offset_seek_step_qdb == 8);
         auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
-          "policy":{"calibration":{"offset_seek_step_qdb":4}}})");
+          "policy":{"calibration":{"offset_seek_step_qdb":2}}})");
         CHECK(bool(ok) &&
-              ok.value->policy.calibration.offset_seek_step_qdb == 4);
+              ok.value->policy.calibration.offset_seek_step_qdb == 2);
     }
 
     // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------

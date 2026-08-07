@@ -707,15 +707,17 @@ Result<Config> load_config_json(const std::string& json_text) {
                 }
                 // §10.6 (Pass 151): the offset window is 24 qdb by default,
                 // so this step decides how many probes a relative-backend
-                // sweep gets. Bounded on both sides — under 4 qdb (1 dB) is
-                // below the actuator's own resolution and just burns dwells;
-                // over 24 leaves a default window with two probes, which is
-                // the condition this key exists to prevent.
-                if (cal.offset_seek_step_qdb < 4 ||
+                // sweep gets. Bounded on both sides — the devourer TXAGC
+                // granularity is 2 qdb (0.5 dB) on Jaguar1/2 and 1 qdb on
+                // Jaguar3, so under 2 qdb the sweep aliases on the coarser
+                // families (two probes landing on one register value); over
+                // 24 leaves a default window with two probes, which is the
+                // condition this key exists to prevent.
+                if (cal.offset_seek_step_qdb < 2 ||
                     cal.offset_seek_step_qdb > 24) {
                     return Result<Config>::fail(
                         "policy.calibration: offset_seek_step_qdb must be "
-                        "4..24 qdb (1..6 dB, §10.6 Pass 151)");
+                        "2..24 qdb (0.5..6 dB, §10.6 Pass 151)");
                 }
                 // §3.16 (Pass 153): dwell bursts are bounded below by 1 and
                 // above by the receiver's exact-dedup bitmap.
