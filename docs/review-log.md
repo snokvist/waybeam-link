@@ -24,6 +24,34 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 161 — scout evidence accumulates; ranking gains hysteresis, confidence, reasons (2026-08-07)
+
+**Verdict.** Issue #100 (downstream of #95; the passive-scout-adapter role
+stays DECLINED per the 2026-08-06 operator ruling — cross-sweep
+accumulation is the settled shape, not an interim one). Four chanmig ideas
+adopted as *shapes* with our values as §17 seeds, their engine not
+adopted: (1) sweeps FOLD into per-bin evidence rings (8 samples, age
+bound 15 min) instead of replacing; rounds advance only when every bin
+has fresh evidence (anti-starvation), and low rounds degrade confidence,
+never suppress the answer. (2) Fold trust boundary: per-adapter
+calibration-domain key (EFUSE MAC else index) — a foreign domain RESETS
+the store; implausible samples rejected; both counted by reason.
+(3) Hysteresis: qualify bar (200‰) + recommend margin (80‰ over the
+resting channel) + broad-degradation hold (≥700‰ bins unqualified ⇒ the
+interference is not channel-attributable) + deterministic lowest-MHz
+tie-break. (4) One classifier, one owner: a fresh §3.16 `Weak`/
+`Saturated` verdict on the active link REFUSES the recommendation with
+that reason (range/self-jam is not the channel's fault) — the scout
+consumes #98's verdict rather than growing a second classifier.
+Explainability is the acceptance bar: enumerated reasons, never prose.
+
+**Changed sections.** §15.5a (evidence store, ranking, trust boundary,
+verdict reuse, results shape); §15.5 endpoint table (`scout/results`).
+
+**Evidence.** Issue #100 (chanmig analysis, adaptation table);
+`docs/devourer-integration-analysis.md` §1 option B; Pass 155 occupancy
+fields (the evidence being ranked); Pass 159 verdict (the classifier).
+
 ## Pass 160 — §9.4 saturation gate: a fresh Saturated verdict suppresses every climb (2026-08-07)
 
 **Verdict.** Issue #98 stage 3 (operator-approved 2026-08-07). The
