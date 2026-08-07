@@ -80,18 +80,27 @@ const char* calib_backend_tag(AirCfg::Kind kind) {
     }
 }
 
-std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend) {
-    // §10.7 (Pass 146). Per-actuator by design — a monitor-measured curve must
-    // read STALE on devourer, not be applied — and stable across a re-plug,
-    // which the old bus-path form was not.
+std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend,
+                           const std::string& efuse_mac) {
+    // §10.7 (Pass 146; radio re-based Pass 154). Per-actuator by design — a
+    // monitor-measured curve must read STALE on devourer, not be applied —
+    // and stable across a re-plug, which the old bus-path form was not.
+    if (backend == AirCfg::Kind::kRadio) {
+        // Pass 154: the single derived tier. NOT the USB serial, though it
+        // looks like the obvious stable key: every RTL88x2 dongle measured
+        // reports the placeholder "123456". NOT calib_id or the bus path
+        // either — no fallback tier exists here (D3): an identity-less unit
+        // gets no absolute curve, it does not get a weaker key.
+        if (efuse_mac.empty()) {
+            return {};
+        }
+        return "mac/" + efuse_mac;
+    }
     if (!adapter.calib_id.empty()) {
-        // Scoped by backend: the derived tiers below distinguish backends for
-        // free (an ifname only exists on monitor, a bus path only on devourer),
-        // but calib_id is operator-chosen and would otherwise be identical
-        // under both — silently applying a monitor curve to devourer's offset
-        // actuator. Live case, not hypothetical: this fleet's craft ran
-        // kernel-monitor before Pass 145 and now runs devourer on the same
-        // physical adapter.
+        // Scoped by backend (Pass 146): calib_id is operator-chosen and an
+        // unscoped name would apply a monitor curve to devourer's offset
+        // actuator without ever reading STALE. Monitor-only since Pass 154
+        // (kernel-monitor is deprecated-frozen, ruling #120).
         return std::string("id/") + calib_backend_tag(backend) + "/" +
                adapter.calib_id;
     }
@@ -105,16 +114,9 @@ std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend) {
         return adapter.ifname + "/" + (m.empty() ? "?" : m);
     }
     if (!adapter.bus.empty()) {
-        // NOT the USB serial, though it looks like the obvious stable key:
-        // every RTL88x2 dongle measured — 8822EU and 8812CU on the bench, the
-        // craft's 8822EU — reports the placeholder "123456". Keying on that
-        // would let two adapters in one host share an artifact and apply each
-        // other's curve without ever reading STALE, which is worse than the
-        // instability below. On devourer the identity must be DECLARED.
-        //
-        // Last resort. Bus paths shuffle on any re-plug (CLAUDE.md), so an
-        // artifact keyed this way goes stale the next time the dongle moves —
-        // and the node then boots with no curve. Say so once, loudly.
+        // Monitor last resort. Bus paths shuffle on any re-plug (CLAUDE.md),
+        // so an artifact keyed this way goes stale the next time the dongle
+        // moves — and the node then boots with no curve. Say so once, loudly.
         std::fprintf(stderr,
                      "calibrate: adapter \"%s\" has no calib_id — keying the "
                      "artifact on bus path \"%s\", which CHANGES on re-plug. "

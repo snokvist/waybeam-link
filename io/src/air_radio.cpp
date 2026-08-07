@@ -79,6 +79,11 @@ struct RadioAir::Impl {
     struct Adapter {
         std::string name;
         std::string path;
+        // §10.6 (Pass 154) per-unit EFUSE MAC ("aa:bb:cc:dd:ee:ff", lowercase),
+        // read once after InitWrite (the 8822E caches it during hal init and
+        // its OTP is not reliably readable later; the 8822C walks on demand).
+        // Empty = the unit reports no identity — callers fail closed.
+        std::string mac;
         bool tx = false;
         libusb_context* ctx = nullptr;
         libusb_device_handle* handle = nullptr;
@@ -268,12 +273,17 @@ struct RadioAir::Impl {
         // Stop loops first, then join, then power the chips down and release
         // USB — the ordering devourer's demos use. A join can block while a
         // bring-up is still in flight (bring-up does not poll the stop flag).
+        // Null entries exist transiently during the Pass 154 re-bind (the
+        // permutation moves adapters through a cleared vector), and devourer
+        // register I/O can throw mid-re-bind (USB glitch) — this destructor
+        // must survive running at that point.
         for (auto& a : adapters) {
-            if (a->dev) {
+            if (a && a->dev) {
                 a->dev->StopRxLoop();
             }
         }
         for (auto& a : adapters) {
+            if (!a) continue;
             if (a->rx_thread.joinable()) {
                 a->rx_thread.join();
             }
@@ -446,6 +456,29 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         }
     }
 
+    // §15.2 (Pass 154) stanza matching, precedence mac > bus > first-free.
+    // The 8822E EFUSE is only reliably readable during InitWrite, so a MAC
+    // pin cannot drive the CLAIM: stanzas claim provisionally (bus-pinned
+    // exact, else first free Realtek device), every unit is brought up and
+    // its identity read, then stanzas RE-BIND to their matching unit before
+    // any RX thread starts or a frame is injected. With no mac pins the
+    // provisional binding is final and the claim behaves as before.
+    bool any_mac_pin = false;
+    for (const AdapterCfg& a : cfg.adapters) {
+        any_mac_pin = any_mac_pin || !a.mac.empty();
+    }
+    // Paths strict-pinned by a mac-less stanza are reserved: the claim is
+    // sequential, so a non-strict claim (first-free, or a mac stanza's
+    // pass-2 fallback) consuming such a device would fail bring-up on a
+    // config that has a valid assignment — the strict owner claims later
+    // and finds its port taken.
+    std::vector<std::string> strict_pins;
+    for (const AdapterCfg& a : cfg.adapters) {
+        if (!a.bus.empty() && a.mac.empty()) {
+            strict_pins.push_back(a.bus);
+        }
+    }
+
     std::vector<std::string> used_paths;
     for (size_t i = 0; i < cfg.adapters.size(); ++i) {
         const AdapterCfg& ac = cfg.adapters[i];
@@ -464,23 +497,41 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         const ssize_t n = libusb_get_device_list(ad->ctx, &list);
         libusb_device* found = nullptr;
         std::string found_path;
-        for (ssize_t k = 0; k < n; ++k) {
-            libusb_device_descriptor dd;
-            if (libusb_get_device_descriptor(list[k], &dd) != 0 ||
-                dd.idVendor != kRealtekVid) {
-                continue;
+        // A bus pin on a stanza WITHOUT a mac stays strict (an explicit port
+        // pin, §15.2). With a mac it degrades to a claim preference: the
+        // dongle may have moved, and the post-bring-up re-bind (or its D2
+        // fallback) is what decides, so pass 2 takes any free device.
+        const int passes = (!ac.bus.empty() && !ac.mac.empty()) ? 2 : 1;
+        for (int pass = 0; pass < passes && found == nullptr; ++pass) {
+            for (ssize_t k = 0; k < n; ++k) {
+                libusb_device_descriptor dd;
+                if (libusb_get_device_descriptor(list[k], &dd) != 0 ||
+                    dd.idVendor != kRealtekVid) {
+                    continue;
+                }
+                const std::string path = usb_path_of(list[k]);
+                bool taken = false;
+                for (const auto& u : used_paths) {
+                    taken = taken || (u == path);
+                }
+                if (taken ||
+                    (pass == 0 && !ac.bus.empty() && ac.bus != path)) {
+                    continue;
+                }
+                const bool strict_attempt = pass == 0 && !ac.bus.empty();
+                if (!strict_attempt && path != ac.bus) {
+                    bool reserved = false;
+                    for (const auto& sp : strict_pins) {
+                        reserved = reserved || (sp == path);
+                    }
+                    if (reserved) {
+                        continue;
+                    }
+                }
+                found = list[k];
+                found_path = path;
+                break;
             }
-            const std::string path = usb_path_of(list[k]);
-            bool taken = false;
-            for (const auto& u : used_paths) {
-                taken = taken || (u == path);
-            }
-            if (taken || (!ac.bus.empty() && ac.bus != path)) {
-                continue;
-            }
-            found = list[k];
-            found_path = path;
-            break;
         }
         int open_rc = found ? libusb_open(found, &ad->handle)
                             : LIBUSB_ERROR_NO_DEVICE;
@@ -506,8 +557,12 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         dc.rx.enable_with_tx = true;
         // Per-frame TX-status CCX reports on the injecting adapter only
         // (Pass 8: TX-wedge detector; SPE_RPT is per-descriptor, so RX-only
-        // adapters keep byte-identical bring-up).
-        dc.tx.report = ad->tx;
+        // adapters keep byte-identical bring-up). With a §15.2 mac pin the
+        // TX stanza's unit is unknown until after bring-up, so every unit is
+        // created report-capable — the flag only gates TX-descriptor
+        // stamping (RtlJaguar*Device TX path), and a diversity ear never
+        // injects, so it stays inert there.
+        dc.tx.report = any_mac_pin ? 1 : ad->tx;
         // MAC carrier-sense gate. Applied to every adapter, not just the TX
         // one: an RX-only ear that defers has nothing to defer, but the
         // bring-up posture stays uniform across the node.
@@ -525,7 +580,9 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     }
 
     // Bring-up serialized on this (the control) thread, then one RX loop
-    // thread per adapter over the already-up chip.
+    // thread per adapter over the already-up chip. RX threads start only
+    // after the Pass 154 re-bind below — an adapter id crossing the queue
+    // must be the FINAL stanza index.
     for (size_t i = 0; i < im.adapters.size(); ++i) {
         Impl::Adapter& ad = *im.adapters[i];
         const uint8_t chan = mhz_to_channel(cfg.adapters[i].channel_mhz);
@@ -535,6 +592,120 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                 std::to_string(cfg.adapters[i].channel_mhz));
         }
         ad.dev->InitWrite(SelectedChannel{chan, 0, CHANNEL_WIDTH_20});
+        // §10.6 (Pass 154): the per-unit identity, read while it is reliably
+        // readable (the accessor folds USB glitches into false — a unit with
+        // no answer has no identity, and callers fail closed on that).
+        uint8_t mac[6];
+        if (ad.dev->GetPermanentMacAddress(mac)) {
+            char buf[18];
+            std::snprintf(buf, sizeof buf, "%02x:%02x:%02x:%02x:%02x:%02x",
+                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            ad.mac = buf;
+        }
+    }
+
+    // §15.2 (Pass 154) re-bind: mac pins first (they outrank a bus claim),
+    // then bus pins among what remains, then first-free leftovers in claim
+    // order. Skipped entirely with no mac pins — provisional == final.
+    if (any_mac_pin) {
+        const size_t n = im.adapters.size();
+        std::vector<std::unique_ptr<Impl::Adapter>> devs =
+            std::move(im.adapters);
+        im.adapters.clear();
+        im.adapters.resize(n);
+        std::vector<bool> taken(n, false);
+        for (size_t i = 0; i < n; ++i) {
+            const AdapterCfg& ac = cfg.adapters[i];
+            if (ac.mac.empty()) continue;
+            for (size_t d = 0; d < n; ++d) {
+                if (!taken[d] && !devs[d]->mac.empty() &&
+                    devs[d]->mac == ac.mac) {
+                    im.adapters[i] = std::move(devs[d]);
+                    taken[d] = true;
+                    break;
+                }
+            }
+        }
+        for (size_t i = 0; i < n; ++i) {
+            const AdapterCfg& ac = cfg.adapters[i];
+            if (im.adapters[i] || ac.bus.empty()) continue;
+            for (size_t d = 0; d < n; ++d) {
+                if (!taken[d] && devs[d]->path == ac.bus) {
+                    im.adapters[i] = std::move(devs[d]);
+                    taken[d] = true;
+                    break;
+                }
+            }
+        }
+        for (size_t i = 0; i < n; ++i) {
+            if (im.adapters[i]) continue;
+            for (size_t d = 0; d < n; ++d) {
+                if (!taken[d]) {
+                    im.adapters[i] = std::move(devs[d]);
+                    taken[d] = true;
+                    break;
+                }
+            }
+            // A bus pin is explicit (§15.2); when a mac match outranked it
+            // and took the unit at that port, the displacement must not be
+            // silent — this stanza is now on a different physical unit.
+            const AdapterCfg& ac = cfg.adapters[i];
+            if (ac.mac.empty() && !ac.bus.empty() &&
+                im.adapters[i]->path != ac.bus) {
+                std::fprintf(stderr,
+                             "radio: adapter \"%s\": bus pin %s DISPLACED by "
+                             "a mac match — bound to path %s (mac %s) "
+                             "instead (§15.2 precedence)\n",
+                             ac.name.c_str(), ac.bus.c_str(),
+                             im.adapters[i]->path.c_str(),
+                             im.adapters[i]->mac.empty()
+                                 ? "none"
+                                 : im.adapters[i]->mac.c_str());
+            }
+        }
+        // Re-stamp the stanza-owned fields onto the re-bound units, surface
+        // every D2 fallback loudly, and retune any unit whose provisional
+        // bring-up channel is not its final stanza's.
+        for (size_t i = 0; i < n; ++i) {
+            Impl::Adapter& ad = *im.adapters[i];
+            const AdapterCfg& ac = cfg.adapters[i];
+            ad.name = ac.name.empty() ? ("adapter" + std::to_string(i))
+                                      : ac.name;
+            ad.tx = (ac.role == Role::kTx);
+            ad.drop_rng = 0x9E3779B9u ^ static_cast<uint32_t>(i + 1);
+            if (ad.tx) {
+                im.tx_idx = i;
+            }
+            if (!ac.mac.empty() && ad.mac != ac.mac) {
+                // §10.6 D2 (Pass 154): fail closed, stay flyable. The §10.5
+                // safe boot offset is applied by the caller as on any boot;
+                // what is withheld is every identity-bound absolute — the
+                // artifact for the configured unit cannot match this one.
+                std::fprintf(
+                    stderr,
+                    "radio: adapter \"%s\": configured mac %s NOT PRESENT — "
+                    "bound to path %s (mac %s) at the safe boot offset; "
+                    "identity-bound calibration is withheld (§10.6 D2)\n",
+                    ad.name.c_str(), ac.mac.c_str(), ad.path.c_str(),
+                    ad.mac.empty() ? "none" : ad.mac.c_str());
+            }
+            const uint8_t chan = mhz_to_channel(ac.channel_mhz);
+            if (ad.dev->GetSelectedChannel().Channel != chan) {
+                ad.dev->SetMonitorChannel(
+                    SelectedChannel{chan, 0, CHANNEL_WIDTH_20});
+            }
+        }
+    }
+
+    for (size_t i = 0; i < im.adapters.size(); ++i) {
+        Impl::Adapter& ad = *im.adapters[i];
+        // The declared adapter set (§15.5 /info mirrors this): name, port,
+        // per-unit identity, role. "mac none" is the D3 posture announcing
+        // itself — that unit can never hold an absolute curve.
+        std::fprintf(stderr, "radio: adapter \"%s\" up (path %s, mac %s%s)\n",
+                     ad.name.c_str(), ad.path.c_str(),
+                     ad.mac.empty() ? "none" : ad.mac.c_str(),
+                     ad.tx ? ", tx" : "");
         im.start_rx_thread(ad, static_cast<uint8_t>(i));
     }
     // §3.0 Pass 12 (craft half): arm the TX adapter's hardware ACK
@@ -926,6 +1097,13 @@ std::optional<uint32_t> RadioAir::estimate_airtime_us(
     return ht20_service_time_us(
         static_cast<size_t>(std::min<uint64_t>(total, SIZE_MAX)), im.rate.mcs,
         im.rate.sgi, im.cfg.airtime_efficiency_permille);
+}
+
+std::string RadioAir::adapter_mac(size_t adapter) const {
+    if (adapter >= impl_->adapters.size()) {
+        return {};
+    }
+    return impl_->adapters[adapter]->mac;
 }
 
 void RadioAir::tx_report_counters(uint64_t& submitted,

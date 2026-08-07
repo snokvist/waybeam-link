@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "wblink/radiotap.h"  // kRxMcsUnknown (AirRxMeta.rx_mcs)
@@ -162,6 +163,14 @@ class AirIface {
     // True for a backend that puts frames on real RF. Distinguishes both RF
     // backends from the udp dev transport — it is not "is devourer".
     virtual bool is_rf() const = 0;
+
+    // §10.6 (Pass 154) per-unit adapter identity: the EFUSE MAC as lowercase
+    // "aa:bb:cc:dd:ee:ff", read at bring-up on the radio backend. Empty =
+    // the backend has no per-unit identity for this adapter — the caller
+    // fails closed (no absolute curve), it must never substitute a weaker
+    // key. Kernel-monitor answers empty by design: it is deprecated-frozen
+    // (ruling #120) and its identity stays the §10.6 monitor tiers.
+    virtual std::string adapter_mac(size_t adapter) const = 0;
 
     // §11.6 Pass 80 liveness baseline: accepted frames on one adapter. Only
     // this counter is on the contract — the full per-backend counters structs

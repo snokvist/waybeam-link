@@ -22,18 +22,20 @@
 
 namespace wblink {
 
-// Stable identity for the tx adapter the curve was calibrated against:
-// kernel-monitor → "ifname/<mac>" (sysfs), devourer → "bus/<path>",
-// udp → "udp". Weak identities beat silent misapplication.
+// Stable identity for the tx adapter the curve was calibrated against.
 //
-// `backend` scopes the operator-declared `calib_id` tier. The derived tiers
-// distinguish backends for free — an ifname only exists on kernel-monitor, a
-// bus path only on devourer — but `calib_id` is a name the operator chose and
-// would otherwise be identical under both, which would let a monitor-measured
-// curve be applied to devourer's very different actuator without ever reading
-// STALE. That is the failure §10.7 exists to prevent, so the declared tier is
-// scoped too. Pass `AirCfg::Kind`; see `calib_backend_tag`.
-std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend);
+// radio (devourer), Pass 154: "mac/<efuse-mac>" — `efuse_mac` is the live
+// per-unit identity the backend read at bring-up (AirIface::adapter_mac).
+// EMPTY when the unit reports none: that is the D3 fail-closed answer — no
+// artifact may be loaded or written and no absolute curve applied. There is
+// deliberately no declared or bus-path fallback tier on this backend; a
+// fallback is exactly the port-keyed misapplication §10.6 exists to prevent.
+//
+// kernel-monitor (frozen, ruling #120) keeps the Pass 146 tiers unchanged:
+// "id/monitor/<calib_id>" when declared, else "ifname/<mac>" (sysfs), else
+// "bus/<path>" (logged unstable). udp → "udp". `efuse_mac` is ignored there.
+std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend,
+                           const std::string& efuse_mac);
 
 // Short stable token for an air backend, used only to scope calibration
 // identities. Deliberately not the config spelling: these strings land in a

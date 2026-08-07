@@ -165,7 +165,44 @@ Result<Config> load_config_json(const std::string& json_text) {
             ac.ifname = a.value("ifname", std::string{});
             // §10.7 (Pass 146): pins the calibration artifact to this
             // physical adapter regardless of ifname/serial/bus path.
+            // kernel-monitor only since Pass 154 (frozen, ruling #120).
             ac.calib_id = a.value("calib_id", std::string{});
+            // §15.2 (Pass 154): EFUSE-MAC stanza pin, radio backend only
+            // (cross-checked against air.kind after the air block parses).
+            // Normalized to lowercase so it compares against the backend's
+            // formatted identity byte-for-byte.
+            ac.mac = a.value("mac", std::string{});
+            if (!ac.mac.empty()) {
+                if (ac.mac.size() != 17) {
+                    return Result<Config>::fail(
+                        "adapter " + ac.name +
+                        ": mac must be aa:bb:cc:dd:ee:ff");
+                }
+                for (size_t k = 0; k < ac.mac.size(); ++k) {
+                    char& c = ac.mac[k];
+                    if (k % 3 == 2) {
+                        if (c != ':') {
+                            return Result<Config>::fail(
+                                "adapter " + ac.name +
+                                ": mac must be aa:bb:cc:dd:ee:ff");
+                        }
+                    } else if (c >= 'A' && c <= 'F') {
+                        c = static_cast<char>(c - 'A' + 'a');
+                    } else if (!((c >= '0' && c <= '9') ||
+                                 (c >= 'a' && c <= 'f'))) {
+                        return Result<Config>::fail(
+                            "adapter " + ac.name +
+                            ": mac must be aa:bb:cc:dd:ee:ff");
+                    }
+                }
+                for (const AdapterCfg& other : cfg.adapters) {
+                    if (other.mac == ac.mac) {
+                        return Result<Config>::fail(
+                            "adapter " + ac.name + ": duplicate mac " +
+                            ac.mac + " (also on \"" + other.name + "\")");
+                    }
+                }
+            }
             auto arole = parse_role(a.at("role").get<std::string>(),
                                     ("adapter " + ac.name).c_str());
             if (!arole) return Result<Config>::fail(arole.error);
@@ -1167,6 +1204,20 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
         }
 
+        // §15.2 (Pass 154): adapters[].mac is the radio backend's EFUSE
+        // identity pin — on any other backend it would be a silently dead
+        // key promising a binding that never happens, so it is rejected.
+        if (cfg.air.kind != AirCfg::Kind::kRadio) {
+            for (const AdapterCfg& a : cfg.adapters) {
+                if (!a.mac.empty()) {
+                    return Result<Config>::fail(
+                        "adapter " + a.name +
+                        ": mac is a radio-backend key (§15.2 Pass 154); "
+                        "kernel-monitor derives identity from ifname");
+                }
+            }
+        }
+
         // §15.1: <=4 UDP bindings node-wide (conservatively counting the
         // stats binding against the pool).
         if (udp_bindings > 4) {
@@ -1300,6 +1351,9 @@ std::string dump_config_summary(const Config& cfg) {
     for (const AdapterCfg& a : cfg.adapters) {
         ss << "  " << a.name << " role=" << (a.role == Role::kTx ? "tx" : "rx")
            << " ch=" << a.channel_mhz << " bw=" << unsigned(a.bw);
+        if (!a.mac.empty()) {
+            ss << " mac=" << a.mac;  // §15.2 Pass 154 stanza pin
+        }
         ss << " power_offset_qdb=" << a.power_offset_qdb
            << " power_offset_max_qdb=" << a.power_offset_max_qdb;
         if (a.max_power_qdb) {

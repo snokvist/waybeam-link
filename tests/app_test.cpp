@@ -777,6 +777,7 @@ class FakeAir : public AirIface {
         return std::nullopt;
     }
     bool is_rf() const override { return rf; }
+    std::string adapter_mac(size_t) const override { return {}; }
     uint64_t rx_frames(size_t a) const override { return 100 * (a + 1); }
 };
 

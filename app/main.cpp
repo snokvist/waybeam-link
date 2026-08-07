@@ -1349,6 +1349,10 @@ struct AirBackend {
     // left it. RadioAir does apply it at create.
     std::vector<uint16_t> chan_by_adapter;
 
+    // §10.6 (Pass 154) per-unit EFUSE identity, empty where the backend has
+    // none (udp, kernel-monitor, an unprogrammed unit). Contract passthrough.
+    std::string adapter_mac(size_t i) const { return iface()->adapter_mac(i); }
+
     uint16_t mtu_supported() const { return iface()->mtu_supported(); }
 
     static Result<AirBackend> create(const Config& cfg) {
@@ -2727,10 +2731,19 @@ struct TxCore {
     // the §9.3 table's per-rung tx_power_level tapers it. Without this the
     // one operation that deliberately walks a rung into overload was the one
     // operation the ceiling did not cover.
-    void init_calibration(const CalibrationPolicy& c,
-                          std::optional<int32_t> max_power_qdb) {
+    // Split from init_calibration (Pass 154): the §3.16 tally-receiver path
+    // and its feed-quiet expiry run on every craft, including a D3 unit
+    // whose calibrator is refused — the policy seeds must not be gated on
+    // the calibrator existing, or feed_quiet_ms is silently dead exactly on
+    // the node whose identity is missing.
+    void seed_calib_policy(const CalibrationPolicy& c) {
         calib_policy_ = c;
         feed_quiet_ms_ = static_cast<uint32_t>(c.feed_quiet_ms);
+    }
+
+    void init_calibration(const CalibrationPolicy& c,
+                          std::optional<int32_t> max_power_qdb) {
+        seed_calib_policy(c);
         CalibrateParams p = calib_params_from(c);
         if (table_ != nullptr) {
             for (const Profile& pr : table_->profiles) {
@@ -4309,7 +4322,14 @@ std::string build_info_json(const Loaded& l, uint32_t session,
                 : a.channel_mhz;
         s += "{\"name\":\"" + a.name + "\",\"role\":\"";
         s += (a.role == Role::kTx ? "tx" : "rx");
-        s += "\",\"channel\":" + std::to_string(chan) + "}";
+        s += "\",\"channel\":" + std::to_string(chan);
+        // §15.5 (Pass 154): the per-unit EFUSE identity the §10.6 artifacts
+        // key on; null where the backend reports none (D3 posture visible).
+        const std::string mac =
+            air != nullptr ? air->adapter_mac(i) : std::string{};
+        s += ",\"mac\":";
+        s += mac.empty() ? "null" : "\"" + mac + "\"";
+        s += "}";
     }
     s += "]";
     if (self != nullptr) {  // Pass 113 TX self state
@@ -4377,11 +4397,30 @@ int run_tx(const Loaded& l) {
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv,
               air.value->mtu_supported());
     const AdapterCfg* calib_tx_adapter = nullptr;
-    for (const AdapterCfg& a : l.cfg.adapters) {
-        if (a.role == Role::kTx) {
-            calib_tx_adapter = &a;
+    size_t calib_tx_idx = 0;
+    for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+        if (l.cfg.adapters[i].role == Role::kTx) {
+            calib_tx_adapter = &l.cfg.adapters[i];
+            calib_tx_idx = i;
             break;
         }
+    }
+    // §10.6 (Pass 154): the canonical calibration identity, resolved ONCE
+    // against the live per-unit EFUSE MAC the backend read at bring-up.
+    // Empty = an identity-less unit on the radio backend — the D3 fail-closed
+    // answer: no calibrator, no artifact read or write, no absolute curve.
+    // The §10.5 safe boot offset still applies, so the node stays flyable.
+    const std::string calib_ident =
+        calib_tx_adapter
+            ? calib_identity(*calib_tx_adapter, l.cfg.air.kind,
+                             air.value->adapter_mac(calib_tx_idx))
+            : "udp";
+    if (calib_tx_adapter != nullptr && calib_ident.empty()) {
+        std::fprintf(stderr,
+                     "calibrate: adapter \"%s\" reports no EFUSE identity — "
+                     "§10.6 calibration and any absolute curve are REFUSED "
+                     "(Pass 154 D3); running at the §10.5 safe boot offset\n",
+                     calib_tx_adapter->name.c_str());
     }
     // §10.5 (Pass 150): ONLY devourer's lever is relative. NOT is_radio() —
     // that is is_rf(), which kernel-monitor also answers true to, and gating on
@@ -4396,28 +4435,38 @@ int run_tx(const Loaded& l) {
     // §10.6 (Pass 120): craft-resident calibration — engine seeds, artifact
     // persistence, and the boot auto-load with the fingerprint gate. The
     // §10.3 ceiling (Pass 134) comes from the same adapter the sweep drives.
-    tx.init_calibration(l.cfg.policy.calibration,
-                        calib_tx_adapter != nullptr
-                            ? calib_tx_adapter->max_power_qdb
-                            : std::nullopt);
-    {
-        // §3.16 (Pass 153): the craft's half of the identity pair, stamped
-        // into every TALLY. Same canonical identity §10.6 keys its own
-        // artifact on, hashed to the one byte the wire has room for.
-        const std::string ident =
-            calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
-        tx.set_calib_identity(
-            crc8_dvbs2(reinterpret_cast<const uint8_t*>(ident.data()),
-                       ident.size()));
+    // Not constructed at all without an identity (Pass 154 D3): a run whose
+    // artifact could never be keyed must refuse at start, not at persist.
+    // The policy seeds (feed-quiet expiry) apply either way — the §3.16
+    // tally receiver runs on a D3 craft too.
+    tx.seed_calib_policy(l.cfg.policy.calibration);
+    if (!calib_ident.empty()) {
+        tx.init_calibration(l.cfg.policy.calibration,
+                            calib_tx_adapter != nullptr
+                                ? calib_tx_adapter->max_power_qdb
+                                : std::nullopt);
     }
+    // §3.16 (Pass 153): the craft's half of the identity pair, stamped
+    // into every TALLY. Same canonical identity §10.6 keys its own
+    // artifact on, hashed to the one byte the wire has room for. An empty
+    // identity hashes to 0 — exactly the wire's "unknown" sentinel.
+    tx.set_calib_identity(
+        crc8_dvbs2(reinterpret_cast<const uint8_t*>(calib_ident.data()),
+                   calib_ident.size()));
     // The last persisted artifact (boot-loaded or written this session) —
     // GET /api/v1/calibration must never report a fingerprint with no body.
     std::optional<CalibArtifact> last_artifact;
     tx.on_calib_artifact = [&](const CalibArtifact& art) {
-        const std::string ident =
-            calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
+        if (calib_ident.empty()) {
+            // Unreachable while D3 refuses the calibrator whole; kept as the
+            // belt so no future start path can persist an unkeyed artifact.
+            std::fprintf(stderr,
+                         "calibrate: artifact write refused — no adapter "
+                         "identity (Pass 154 D3)\n");
+            return;
+        }
         const uint8_t fp = calib_store_write(
-            l.cfg.policy.calibration.artifact_dir, ident, art);
+            l.cfg.policy.calibration.artifact_dir, calib_ident, art);
         if (fp == 0) {
             std::fprintf(stderr, "calibrate: artifact write FAILED (%s)\n",
                          l.cfg.policy.calibration.artifact_dir.c_str());
@@ -4432,11 +4481,12 @@ int run_tx(const Loaded& l) {
         tx.calib_stale_ = false;
         std::fprintf(stderr, "calibrate: artifact persisted fp=0x%02x\n", fp);
     };
-    if (auto stored =
-            calib_store_load(l.cfg.policy.calibration.artifact_dir);
+    if (auto stored = calib_ident.empty()
+                          ? Result<CalibStored>::fail("no identity (D3)")
+                          : calib_store_load(
+                                l.cfg.policy.calibration.artifact_dir);
         stored) {
-        const std::string ident =
-            calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
+        const std::string& ident = calib_ident;
         // §10.6 (Pass 151): the backend-scoped identity proves which BACKEND
         // authored the artifact, not which SPACE — and on devourer those came
         // apart exactly once, in the window before Pass 150 refused the run.
@@ -5483,8 +5533,21 @@ int run_rx(const Loaded& l) {
     // (`active_selection`, `quality_gate`, `operating_chan`) rather than up
     // with the config tier, because the CRAFT half of the identity does not
     // exist at config-load time.
+    // §10.6 (Pass 154): resolved against the live per-unit EFUSE MAC the
+    // backend read at bring-up. Empty = identity-less unit on the radio
+    // backend — §10.7 runs are refused (D3) and no stored artifact can match.
     const std::string uplink_identity =
-        uplink_adapter != nullptr ? calib_identity(*uplink_adapter, l.cfg.air.kind) : "udp";
+        uplink_adapter != nullptr
+            ? calib_identity(*uplink_adapter, l.cfg.air.kind,
+                             air.value->adapter_mac(uplink_idx))
+            : "udp";
+    if (uplink_adapter != nullptr && uplink_identity.empty()) {
+        std::fprintf(stderr,
+                     "uplink: adapter \"%s\" reports no EFUSE identity — "
+                     "§10.7 calibration and any absolute curve are REFUSED "
+                     "(Pass 154 D3); running at the §10.5 safe boot offset\n",
+                     uplink_adapter->name.c_str());
+    }
     // §3.16 (Pass 153): the ground's receiver half (craft §10.6 downlink
     // probes → tallies) and the probe-exchange observability counters.
     DwellReceiver dcal_rx;
@@ -5498,8 +5561,10 @@ int run_rx(const Loaded& l) {
     std::optional<UplinkArtifact> uplink_artifact;
     uint8_t uplink_artifact_fp = 0;
     bool uplink_artifact_stale = false;
-    if (auto stored =
-            uplink_calib_store_load(l.cfg.policy.calibration.artifact_dir);
+    if (auto stored = uplink_identity.empty()
+                          ? Result<UplinkArtifact>::fail("no identity (D3)")
+                          : uplink_calib_store_load(
+                                l.cfg.policy.calibration.artifact_dir);
         stored) {
         uplink_artifact_fp = uplink_calib_fingerprint(*stored.value);
         if (stored.value->local_adapter_identity != uplink_identity) {
@@ -6682,6 +6747,12 @@ int run_rx(const Loaded& l) {
                 // with the craft's feed paused the contention floor is
                 // structurally zero (absolute walls), and probe/tally
                 // delivery is its own health check.
+                if (uplink_identity.empty()) {
+                    // Pass 154 D3: an identity-less unit cannot key the
+                    // artifact §10.7 exists to persist — refuse at start,
+                    // not at persist.
+                    return "adapter reports no EFUSE identity (Pass 154 D3)";
+                }
                 if (!uplink_cal.start(now_ms())) {
                     return "calibration already running";
                 }
@@ -7113,7 +7184,15 @@ int run_rx(const Loaded& l) {
                     uplink_restore_actuators();
                 }
             }
-            if (ua.artifact_ready) {
+            if (ua.artifact_ready && uplink_identity.empty()) {
+                // Unreachable while D3 refuses the start; kept as the same
+                // belt the craft persist carries — no future start path may
+                // persist an artifact keyed on "" (it would match nothing
+                // and read permanently stale).
+                std::fprintf(stderr,
+                             "uplink: artifact write refused — no adapter "
+                             "identity (Pass 154 D3)\n");
+            } else if (ua.artifact_ready) {
                 UplinkArtifact art;
                 art.local_adapter_identity = uplink_identity;
                 art.craft_originator = active_selection.originator;
