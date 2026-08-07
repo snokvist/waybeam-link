@@ -1088,7 +1088,10 @@ Semantics:
   a FA-count claim.
 - **Addressed, never broadcast** (`destination` MUST be non-zero), emitted
   at most 1 Hz alongside the sender's reports and only while reports flow
-  — verdict authority travels with report authority.
+  — verdict authority travels with report authority. With more than one
+  report target in a window the verdict rides the first-built report's
+  target (single-craft fleet posture; a multi-craft round-robin is a
+  future amendment, recorded here so it is a choice and not an accident).
 - **Craft acceptance = the §3.5 filter**: addressed to us, target tuple is
   us, sender is the report-latched `(originator, session)`, epoch
   monotone. Anything else is dropped without counting.
@@ -5011,8 +5014,10 @@ of the same §3.16 value: on a **craft**, the last *accepted* LINK_VERDICT
 and its age (0 / large-age when none this session — `Unknown` by
 construction); on a **radio ground**, the verdict the node last computed
 at its own drain (what it sends). `link.promote_blocked_saturated`
-(Pass 160) counts promote attempts the §9.4 gate suppressed on a fresh
-`Saturated`; craft-only, 0 elsewhere.
+(Pass 160) counts selector ticks on which the §9.4 gate suppressed an
+otherwise-eligible climb (once per tick however many climb rules were
+blocked — a gauge of blocked *time*, not of rules); craft-only, 0
+elsewhere.
 
 `rx_ldpc` / `rx_stbc` (Pass 157) count accepted frames whose RX path
 reported LDPC coding / a nonzero STBC stream count, and `ldpc_flag_ok` is
