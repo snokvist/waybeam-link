@@ -99,6 +99,11 @@ struct RadioAir::Impl {
         // §15.3 Pass 118 per-MCS accepted-frame histogram + unresolved bucket.
         std::atomic<uint64_t> rx_mcs[kRxMcsBuckets] = {};
         std::atomic<uint64_t> rx_mcs_unknown{0};
+        // §15.3 Pass 157 received-coding counters; ldpc_flag_ok is the die's
+        // static ldpc_rx_flag cap (set at bring-up, read-only after).
+        std::atomic<uint64_t> rx_ldpc{0};
+        std::atomic<uint64_t> rx_stbc{0};
+        bool ldpc_flag_ok = false;
         uint64_t tx_submitted = 0;  // main-thread only
         uint64_t tx_failed = 0;
         // Bench-only synthetic-drop PRNG (RX-thread only; xorshift32).
@@ -359,6 +364,11 @@ struct RadioAir::Impl {
         if (cfg.unicast_returns) {
             latch_sa(*d);
         }
+        // §15.3 Pass 157: received coding as the die reported it. On
+        // ldpc_flag_ok=false dies the bits are never set, so the counters
+        // read 0 there — the flag, exported with them, says so.
+        if (p.RxAtrib.ldpc) a.rx_ldpc.fetch_add(1, std::memory_order_relaxed);
+        if (p.RxAtrib.stbc) a.rx_stbc.fetch_add(1, std::memory_order_relaxed);
         const uint8_t rx_mcs = desc_rate_to_mcs(p.RxAtrib.data_rate);
         if (rx_mcs < kRxMcsBuckets) {
             a.rx_mcs[rx_mcs].fetch_add(1, std::memory_order_relaxed);
@@ -597,6 +607,9 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                 std::to_string(cfg.adapters[i].channel_mhz));
         }
         ad.dev->InitWrite(SelectedChannel{chan, 0, CHANNEL_WIDTH_20});
+        // §15.3 (Pass 157): whether this die reports received coding at
+        // all — static per die, so read once here.
+        ad.ldpc_flag_ok = ad.dev->GetAdapterCaps().ldpc_rx_flag;
         // §10.6 (Pass 154): the per-unit identity, read while it is reliably
         // readable (the accessor folds USB glitches into false — a unit with
         // no answer has no identity, and callers fail closed on that).
@@ -718,6 +731,28 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                 "(caps.tx_retry_limit_ok=false) — return.unicast would run "
                 "silently inert (§3.0 Pass 156)");
         }
+    }
+    // §3.0 (Pass 157) same leg for the coding knobs: an enabled coding the
+    // TX die cannot emit must refuse, not silently air BCC/no-STBC.
+    if (cfg.ldpc || cfg.stbc) {
+        Impl::Adapter& tx = *im.adapters[im.tx_idx];
+        const devourer::TxCaps tc = tx.dev->GetAdapterCaps().tx;
+        if (cfg.ldpc && !tc.ldpc_ok) {
+            return Result<RadioAir>::fail(
+                "radio: adapter \"" + tx.name +
+                "\": this die cannot emit LDPC (caps.tx.ldpc_ok=false) — "
+                "air.ldpc would run silently inert (§3.0 Pass 157)");
+        }
+        if (cfg.stbc && !tc.stbc_ok) {
+            return Result<RadioAir>::fail(
+                "radio: adapter \"" + tx.name +
+                "\": this die cannot emit STBC (caps.tx.stbc_ok=false, "
+                "1T1R) — air.stbc would run silently inert (§3.0 Pass 157)");
+        }
+        // Node coding into the committed TxRate; §9.5 set_tx_mode rewrites
+        // mcs/sgi and leaves these standing.
+        im.rate.ldpc = cfg.ldpc;
+        im.rate.stbc = cfg.stbc ? 1 : 0;
     }
 
     for (size_t i = 0; i < im.adapters.size(); ++i) {
@@ -1180,6 +1215,9 @@ RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {
         c.rx_mcs[i] = a.rx_mcs[i].load(std::memory_order_relaxed);
     }
     c.rx_mcs_unknown = a.rx_mcs_unknown.load(std::memory_order_relaxed);
+    c.rx_ldpc = a.rx_ldpc.load(std::memory_order_relaxed);
+    c.rx_stbc = a.rx_stbc.load(std::memory_order_relaxed);
+    c.ldpc_flag_ok = a.ldpc_flag_ok;
     if (a.tx) {  // reports only exist for the injecting adapter's frames
         c.tx_reports = impl_->tx_reports.load(std::memory_order_relaxed);
         c.tx_report_fails =

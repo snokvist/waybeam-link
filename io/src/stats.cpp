@@ -123,6 +123,12 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         }
         out += "],\"rx_mcs_unknown\":";
         append_u64(out, a.rx_mcs_unknown);
+        out += ",\"rx_ldpc\":";
+        append_u64(out, a.rx_ldpc);
+        out += ",\"rx_stbc\":";
+        append_u64(out, a.rx_stbc);
+        out += ",\"ldpc_flag_ok\":";
+        append_bool(out, a.ldpc_flag_ok);
         out += ",\"adapter_stalled\":";
         append_bool(out, a.adapter_stalled);
         out += ",\"rx_dead\":";

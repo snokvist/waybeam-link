@@ -1476,6 +1476,8 @@ struct AirBackend {
             rc.ack_responder = cfg.air.ack_responder;
             rc.unicast_returns = cfg.policy.ret.unicast;
             rc.tx_retry_limit = cfg.air.tx_retry_limit;
+            rc.ldpc = cfg.air.ldpc;  // §3.0 Pass 157 node coding
+            rc.stbc = cfg.air.stbc;
             rc.disable_cca = cfg.air.disable_cca;
             // §14.2 (Pass 143): the authored calibration reaches both RF
             // backends. Zero keeps the estimate unavailable.
@@ -1841,6 +1843,9 @@ struct AirBackend {
                 as.rx_mcs[m] = c.rx_mcs[m];  // §15.3 Pass 118
             }
             as.rx_mcs_unknown = c.rx_mcs_unknown;
+            as.rx_ldpc = c.rx_ldpc;  // §15.3 Pass 157
+            as.rx_stbc = c.rx_stbc;
+            as.ldpc_flag_ok = c.ldpc_flag_ok;
             as.tx_wedged = c.tx && tx_wedged;
             as.rx_dead = c.rx_dead;  // §15.3 Pass 101 (RadioAir only)
             snap.adapters.push_back(std::move(as));

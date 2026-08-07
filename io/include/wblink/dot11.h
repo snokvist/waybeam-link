@@ -38,6 +38,10 @@ struct TxRate {
     uint8_t mcs = 0;
     bool sgi = false;
     uint8_t bw = 20;  // HT only: 20 or 40
+    // §3.0 Pass 157 node coding (config, not per-transition): §9.5 rewrites
+    // mcs/sgi and leaves these standing.
+    bool ldpc = false;
+    uint8_t stbc = 0;  // STBC stream count, 0 or 1 in v0
 };
 
 // §3.0 pinned constants.
@@ -101,7 +105,8 @@ inline void dot11_hdr_qos26(uint8_t* h, const uint8_t dest[6], uint8_t net_id,
 inline size_t dot11_tx_prefix(uint8_t* out, const TxRate& rate, uint8_t net_id,
                               uint16_t originator, uint8_t adapter_idx,
                               uint16_t seq) {
-    radiotap_tx_ht(out, rate.mcs, rate.sgi, rate.bw, kTxFlagsNoAck);
+    radiotap_tx_ht(out, rate.mcs, rate.sgi, rate.bw, kTxFlagsNoAck,
+                   rate.ldpc, rate.stbc);
     dot11_hdr24(out + kRadiotapTxLen, net_id, originator, adapter_idx, seq);
     return kDot11TxPrefixLen;
 }
@@ -116,7 +121,8 @@ inline size_t dot11_tx_prefix_unicast(uint8_t* out, const TxRate& rate,
                                       uint8_t adapter_idx, uint16_t seq,
                                       uint8_t tid = 0) {
     // TX_FLAGS = 0, not NOACK: this frame expects a MAC ACK.
-    radiotap_tx_ht(out, rate.mcs, rate.sgi, rate.bw, kTxFlagsAck);
+    radiotap_tx_ht(out, rate.mcs, rate.sgi, rate.bw, kTxFlagsAck,
+                   rate.ldpc, rate.stbc);
     dot11_hdr_qos26(out + kRadiotapTxLen, dest, net_id, originator, adapter_idx,
                     seq, tid);
     return kDot11TxUnicastPrefixLen;
@@ -129,7 +135,8 @@ inline size_t dot11_tx_prefix_urgent(uint8_t* out, const TxRate& rate,
                                      uint8_t adapter_idx, uint16_t seq) {
     static constexpr uint8_t kBroadcast[6] = {0xff, 0xff, 0xff,
                                                0xff, 0xff, 0xff};
-    radiotap_tx_ht(out, rate.mcs, rate.sgi, rate.bw, kTxFlagsNoAck);
+    radiotap_tx_ht(out, rate.mcs, rate.sgi, rate.bw, kTxFlagsNoAck,
+                   rate.ldpc, rate.stbc);
     dot11_hdr_qos26(out + kRadiotapTxLen, kBroadcast, net_id, originator,
                     adapter_idx, seq, kUrgentTid);
     return kDot11TxUrgentPrefixLen;

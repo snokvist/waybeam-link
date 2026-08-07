@@ -47,6 +47,12 @@ struct AdapterStats {
     // Advisory observation only — no control path reads these.
     uint64_t rx_mcs[kRxMcsBuckets] = {};
     uint64_t rx_mcs_unknown = 0;
+    // §15.3 Pass 157: received-coding counters + the static die truth of
+    // whether they can ever be nonzero (devourer ldpc_rx_flag). Advisory,
+    // like rx_mcs; 0/false off the radio backend.
+    uint64_t rx_ldpc = 0;
+    uint64_t rx_stbc = 0;
+    bool ldpc_flag_ok = false;
     bool adapter_stalled = false;  // §6.5 liveness watchdog verdict (heuristic)
     bool rx_dead = false;          // §15.3 Pass 101: RX loop terminated (definitive)
     bool tx_wedged = false;        // §9.10 CCX-liveness verdict (TX adapter)

@@ -314,6 +314,35 @@ int main() {
         CHECK(bool(r));
         if (r) CHECK_EQ_U(r.value->air.tx_retry_limit, 63);
     }
+    // --- §15.2 air.ldpc / air.stbc (Pass 157) -------------------------------
+    // Defaults off; radio accepts both; any other backend refuses each key
+    // (Pass 154 mac posture — a dead key on udp, an unverifiable leg on
+    // frozen kernel-monitor, #120).
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(!r.value->air.ldpc);
+            CHECK(!r.value->air.stbc);
+        }
+        auto r2 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "ldpc": true, "stbc": true}})");
+        CHECK(bool(r2));
+        if (r2) {
+            CHECK(r2.value->air.ldpc);
+            CHECK(r2.value->air.stbc);
+        }
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"udp","ldpc":true}})",
+                     "air.ldpc is a radio-backend key");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"kernel-monitor","stbc":true},
+          "adapters":[{"name":"m","ifname":"wlan9","role":"tx",
+                       "channel":5805}]})",
+                     "air.stbc is a radio-backend key");
+    }
     // Both hybrid halves on at once: the refusal names ack_responder (the
     // message ternary's first branch), and the udp dev backend is a second
     // non-radio control alongside kernel-monitor above.

@@ -1116,6 +1116,10 @@ Result<Config> load_config_json(const std::string& json_text) {
                     std::to_string(cfg.air.tx_retry_limit) +
                     " out of range 0..63 (§15.2 Pass 156)");
             }
+            // §15.2 (Pass 157) node TX coding; radio-only enforcement is
+            // below, once kind resolves.
+            cfg.air.ldpc = a.value("ldpc", cfg.air.ldpc);
+            cfg.air.stbc = a.value("stbc", cfg.air.stbc);
             if (kind == "radio") {
                 cfg.air.kind = AirCfg::Kind::kRadio;
             } else if (kind == "kernel-monitor") {
@@ -1230,6 +1234,17 @@ Result<Config> load_config_json(const std::string& json_text) {
                 " is enabled — the hardware-ACK hybrid would run silently "
                 "inert (§3.0 Pass 156); set a nonzero limit or disable the "
                 "hybrid");
+        }
+
+        // §15.2 (Pass 157): TX coding keys are radio-backend-only — a dead
+        // key on udp-air, an unverifiable leg on frozen kernel-monitor
+        // (#120). Same posture as adapters[].mac below.
+        if (cfg.air.kind != AirCfg::Kind::kRadio &&
+            (cfg.air.ldpc || cfg.air.stbc)) {
+            return Result<Config>::fail(
+                std::string(cfg.air.ldpc ? "air.ldpc" : "air.stbc") +
+                " is a radio-backend key (§15.2 Pass 157); remove it or set "
+                "air.kind \"radio\"");
         }
 
         // §15.2 (Pass 154): adapters[].mac is the radio backend's EFUSE
