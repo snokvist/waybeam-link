@@ -3550,10 +3550,20 @@ struct RxCore {
                     selector_state_admissible(
                         *s, local_table_version_, info.key.originator,
                         info.key.session_id)) {
+                    // §3.15 (Pass 153): latch the accepted tuple — acceptance
+                    // survives the §2 idle teardown a §3.16 pause causes.
+                    word_source_ = {info.key.originator, info.key.session_id};
                     remote_selector_state_ = *s;
                     remote_selector_state_ms_ = now;
                     return;
                 }
+            }
+            if (word_source_ &&
+                selector_state_admissible(*s, local_table_version_,
+                                          word_source_->first,
+                                          word_source_->second)) {
+                remote_selector_state_ = *s;
+                remote_selector_state_ms_ = now;
             }
         }
     }
@@ -3760,6 +3770,15 @@ struct RxCore {
                     break;
                 }
             }
+            // §3.15 (Pass 153): the acceptance latch keeps the mirrored word
+            // current across the §2 teardown a calibration pause causes.
+            if (!selector_source_current && word_source_ &&
+                selector_state_admissible(*remote_selector_state_,
+                                          local_table_version_,
+                                          word_source_->first,
+                                          word_source_->second)) {
+                selector_source_current = true;
+            }
         }
         if (selector_source_current &&
             selector_state_fresh(now, remote_selector_state_ms_)) {
@@ -3840,6 +3859,7 @@ struct RxCore {
         next_feedback_ms_ = 0;
         remote_selector_state_.reset();
         remote_selector_state_ms_ = 0;
+        word_source_.reset();  // §3.15: the latch never crosses crafts
     }
 
     std::optional<uint16_t> selected_originator() const {
@@ -3958,6 +3978,9 @@ struct RxCore {
     std::vector<LatchStream> latch_scratch_;  // reused; see emit_latch_recovery
     std::optional<SelectorState> remote_selector_state_;
     uint64_t remote_selector_state_ms_ = 0;
+    // §3.15 (Pass 153) acceptance latch: the (originator, session) tuple of
+    // the last summary accepted through a live-consumed RTP stream.
+    std::optional<std::pair<uint16_t, uint32_t>> word_source_;
 };
 
 // ---- shared setup -----------------------------------------------------------
