@@ -702,6 +702,24 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         }
     }
 
+    // §3.0 (Pass 156) capability leg: on dies keeping the vendor
+    // DATA_RETRY_LIMIT carve-out (caps.tx_retry_limit_ok=false — 8814A;
+    // 8821C false-as-unmeasured) the descriptor field is silently skipped,
+    // so a validated nonzero limit still never retransmits. Checked on the
+    // resolved TX unit, after the §15.2 re-bind — the unit, not the stanza.
+    // ack_responder is deliberately not gated here: SetAckResponder refuses
+    // loudly at arm time below; a skipped retry field has no signal at all.
+    if (cfg.unicast_returns) {
+        Impl::Adapter& tx = *im.adapters[im.tx_idx];
+        if (!tx.dev->GetAdapterCaps().tx_retry_limit_ok) {
+            return Result<RadioAir>::fail(
+                "radio: adapter \"" + tx.name +
+                "\": this die cannot honor air.tx_retry_limit "
+                "(caps.tx_retry_limit_ok=false) — return.unicast would run "
+                "silently inert (§3.0 Pass 156)");
+        }
+    }
+
     for (size_t i = 0; i < im.adapters.size(); ++i) {
         Impl::Adapter& ad = *im.adapters[i];
         // The declared adapter set (§15.5 /info mirrors this): name, port,

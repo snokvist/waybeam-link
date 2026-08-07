@@ -299,11 +299,34 @@ int main() {
           "policy": {"return": {"unicast": true}}})");
         CHECK(bool(r2));
     }
-    // Descriptor field width is enforced.
+    // Descriptor field width is enforced — both arms, and the boundary
+    // value itself is accepted.
     {
         expect_error(R"({"node":{"originator":3,"role":"rx"},
           "air":{"kind":"radio","tx_retry_limit":64}})",
                      "out of range 0..63");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","tx_retry_limit":-1}})",
+                     "out of range 0..63");
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "tx_retry_limit": 63}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->air.tx_retry_limit, 63);
+    }
+    // Both hybrid halves on at once: the refusal names ack_responder (the
+    // message ternary's first branch), and the udp dev backend is a second
+    // non-radio control alongside kernel-monitor above.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","ack_responder":true,"tx_retry_limit":0},
+          "policy":{"return":{"unicast":true}}})",
+                     "air.ack_responder");
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "udp", "tx_retry_limit": 0},
+          "policy": {"return": {"unicast": true}}})");
+        CHECK(bool(r));
     }
 
     // --- §15.2 adapters[].mac (Pass 154) ------------------------------------
