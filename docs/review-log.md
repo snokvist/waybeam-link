@@ -24,6 +24,41 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 157 — TX coding becomes commandable: air.ldpc / air.stbc, RX-proved (2026-08-07)
+
+**Verdict.** Issue #97. The radiotap MCS known mask has always claimed FEC
+and STBC known while leaving both flag bits clear — every frame we air
+affirmatively commands BCC and zero STBC streams. The two bits become
+config: `air.ldpc` (FEC = LDPC) and `air.stbc` (stream count 1), **both
+default off** — the enable is a future ruling on cliff-A/B evidence, this
+pass is the mechanism plus its proof surface. Two knobs, not one: LDPC is
+coding gain on one stream, STBC is diversity across two chains; separate
+arms. Ruling #120 reframes the issue's open kernel-monitor strip question:
+the backend is frozen, the knobs are refused there (Pass 154 mac posture),
+devourer-only.
+
+**Changed sections.**
+- §3.0 (rate-mechanism block): coding paragraph — per-packet mechanism,
+  node-wide policy (calibration probes inherit the node coding, so delivery
+  walls are per-coding); Pass 156 capability leg on `TxCaps.ldpc_ok` /
+  `stbc_ok`; fleet-decision warning (a TX cannot see a remote ear's caps —
+  a non-decoding receiver reads an LDPC arm as pure loss; fleet
+  `ldpc_rx_ht` is true on all three dies); proof-over-inference via
+  devourer `RxAtrib.ldpc`/`stbc` on `ldpc_rx_flag` dies; default-on flip is
+  a §9.3/§17 RE-DERIVE trigger.
+- §15.2: the two keys, radio-backend-only (refused elsewhere), defaults
+  off, sample updated.
+- §15.3: per-adapter `rx_ldpc` / `rx_stbc` counters + static
+  `ldpc_flag_ok` (a zero counter means nothing on a flag-incapable die —
+  the 8814A decodes but cannot report). Advisory like `rx_mcs`.
+
+**Evidence.** Issue #97 (fleet caps table, measurement caveats);
+`io/include/wblink/radiotap.h:41` (the known mask);
+`third_party/devourer/src/RadiotapTxFlags.h` (send-path decode, all three
+jaguar generations); `AdapterCaps.h:128–139` (ldpc_rx trio),
+`TxCaps.h:20–36`; LDPC ≈ +3 dB at the 10 %-delivery crossing, MCS7/20 MHz
+(devourer `tests/ldpc_waterfall.sh`).
+
 ## Pass 156 — hardware-ACK hybrid: responder and retry limit are one decision (2026-08-07)
 
 **Verdict.** Issue #96. devourer #354 moved the TX retry-limit default to 0

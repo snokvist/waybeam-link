@@ -44,6 +44,11 @@ StatsSnapshot sample_snapshot() {
     a.rx_mcs[6] = 5;
     a.rx_mcs[7] = 0;
     a.rx_mcs_unknown = 2;
+    // §15.3 Pass 157: distinct values so the golden pins order and the bool
+    // serializes as true/false, not 1/0.
+    a.rx_ldpc = 77;
+    a.rx_stbc = 6;
+    a.ldpc_flag_ok = true;
     a.adapter_stalled = false;
     s.adapters.push_back(a);
     StreamStats st;
@@ -219,6 +224,7 @@ const char* kGolden =
     "\"tx_reports\":40,"
     "\"tx_report_fails\":2,"
     "\"rx_mcs\":[1,2,3,4,118,10099,5,0],\"rx_mcs_unknown\":2,"
+    "\"rx_ldpc\":77,\"rx_stbc\":6,\"ldpc_flag_ok\":true,"
     "\"adapter_stalled\":false,\"rx_dead\":false,\"tx_wedged\":false}],"
     "\"streams\":[{\"stream_id\":0,\"type\":\"RTP\",\"seq\":90233,"
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"

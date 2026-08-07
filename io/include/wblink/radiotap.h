@@ -34,7 +34,8 @@ inline constexpr uint16_t kTxFlagsNoAck = 0x0008;
 inline constexpr uint16_t kTxFlagsAck = 0x0000;
 
 inline size_t radiotap_tx_ht(uint8_t* out, uint8_t mcs, bool sgi, uint8_t bw,
-                             uint16_t tx_flags = kTxFlagsNoAck) {
+                             uint16_t tx_flags = kTxFlagsNoAck,
+                             bool ldpc = false, uint8_t stbc = 0) {
     // it_present = TX_FLAGS (1<<15) | MCS (1<<19) = 0x00088000.
     constexpr uint32_t kPresent = (1u << 15) | (1u << 19);
     // MCS "known" mask: BW | MCS | GI | FEC | STBC.
@@ -53,6 +54,11 @@ inline size_t radiotap_tx_ht(uint8_t* out, uint8_t mcs, bool sgi, uint8_t bw,
     uint8_t flags = 0;
     if (bw >= 40) flags = static_cast<uint8_t>(flags | 0x01u);  // 40 MHz
     if (sgi) flags = static_cast<uint8_t>(flags | 0x04u);       // short GI
+    // §3.0 Pass 157: the known mask above claims FEC and STBC known, so a
+    // clear bit is an affirmative BCC / zero-stream command — these carry
+    // the node coding, not an omission.
+    if (ldpc) flags = static_cast<uint8_t>(flags | 0x10u);  // FEC: LDPC
+    flags = static_cast<uint8_t>(flags | ((stbc & 0x03u) << 5));  // streams
     out[11] = flags;
     out[12] = mcs <= 31 ? mcs : 0;
     return kRadiotapTxHtLen;

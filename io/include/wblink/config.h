@@ -408,6 +408,12 @@ struct AirCfg {
     // returns or the ACK responder with retry limit 0 is a CONFIG ERROR —
     // the armed hybrid must never run silently inert (§3.0).
     int tx_retry_limit = 8;
+    // §15.2 (Pass 157) node TX coding, radio backend only (refused
+    // elsewhere): LDPC FEC / one-stream STBC in every frame's radiotap MCS
+    // field. Both default off — the enable is a measured operator action
+    // (issue #97 cliff A/B), and flipping ldpc re-derives §9.3.
+    bool ldpc = false;
+    bool stbc = false;
     // §10.7 (Pass 125) the rx-node's uplink operating point. Before this an
     // rx node never called set_tx_mode at all and rode the TxRate struct
     // default, which happens to be exactly these seeds — so committed

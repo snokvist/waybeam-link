@@ -48,6 +48,11 @@ struct RadioAirCfg {
     // constructed RadioAir with either hybrid half on always has this
     // nonzero.
     int tx_retry_limit = 8;
+    // §3.0 (Pass 157) node TX coding, stamped into every frame's radiotap
+    // MCS field. Both default off; create() refuses when the TX die's
+    // TxCaps reads the enabled coding unsupported (capability leg).
+    bool ldpc = false;
+    bool stbc = false;
     // Clear the MAC carrier-sense gate at bring-up (see AirCfg::disable_cca).
     bool disable_cca = false;
     // §14.2 authored transport-efficiency calibration (1..1000, 0 = off).
@@ -194,6 +199,13 @@ class RadioAir : public AirIface {
         // whose rate the backend could not resolve. Sums to rx_frames.
         uint64_t rx_mcs[kRxMcsBuckets] = {};
         uint64_t rx_mcs_unknown = 0;
+        // §15.3 Pass 157: accepted frames whose RX path reported LDPC
+        // coding / a nonzero STBC stream count. ldpc_flag_ok is the static
+        // die truth (devourer ldpc_rx_flag) — when false the counters stay
+        // 0 however the air was coded, so a zero means nothing there.
+        uint64_t rx_ldpc = 0;
+        uint64_t rx_stbc = 0;
+        bool ldpc_flag_ok = false;
         bool rx_dead = false;  // §15.3 Pass 101: RX thread exited (definitive)
     };
     AdapterCounters counters(size_t adapter) const;

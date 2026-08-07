@@ -210,6 +210,35 @@ transition committed. Per-packet rate *divergence* (importance-gated rungs) is
 deliberately out of scope here and is gated on the §9.5 airtime-accounting and
 §9.2 loss-attribution work; see Pass 118's residual.
 
+**Coding is commandable and observable (Pass 157).** The radiotap MCS known
+mask above has always claimed FEC and STBC known — asserting BCC and zero
+STBC streams on every frame aired. Those two flag bits now carry the node's
+configured coding: `air.ldpc` sets FEC = LDPC, `air.stbc` sets STBC stream
+count 1 (§15.2; both default **off** — flipping either is a measured
+operator action, the cliff A/B owed on issue #97). Like the rate, coding is
+per-packet mechanism but node-wide policy: every frame a node airs carries
+the same coding — video broadcast, returns, control, and §10 calibration
+probes alike, so a calibrated curve's delivery walls are per-coding. Radio
+backend only, with the Pass 156 capability leg: enabling `air.ldpc` on a TX
+unit whose `caps.tx.ldpc_ok` reads false, or `air.stbc` where
+`caps.tx.stbc_ok` reads false (a 1T1R part), refuses bring-up. The RX side
+needs no knob — the fleet basebands decode LDPC-coded HT PPDUs
+unconditionally (`ldpc_rx_ht`, bench-derived per die, deliberately not the
+vendor driver's 2013-era advertisement policy) — but enabling TX coding is
+a **fleet decision**: a TX node cannot see a remote ear's caps, and a
+receiver that cannot decode LDPC reads an LDPC arm as pure loss.
+Proof over inference: devourer reports the *received* coding per frame
+(`RxAtrib.ldpc`/`stbc`) on dies whose `ldpc_rx_flag` reads true (the 8812A
+does; the 8814A decodes fine but the vendor wired no indicator), surfaced
+per adapter as §15.3 `rx_ldpc`/`rx_stbc` — an A/B's proof-of-flight is the
+reported bit on a flag-capable ear, not the delivery number. kernel-monitor
+gets no leg (frozen, #120): both knobs are refused on that backend, which
+moots the never-answered question of whether its driver strips the bits.
+LDPC moves the effective link margin of every §9.3 rung (≈ +3 dB at the
+10 %-delivery crossing, MCS7/20 MHz, devourer waterfall bench): a
+default-on flip is a §9.3/§17 RE-DERIVE trigger and a future amendment on
+the A/B evidence, not this pass.
+
 **RX rate is observable (Pass 118).** RX radiotap is parsed for
 `DBM_ANTSIGNAL` (RSSI), `TSFT` (the §7.2 per-adapter TSF), and the **`MCS`
 field**; on devourer the same value comes from the RX descriptor's rate code.
@@ -4291,6 +4320,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
                 "min_interval_ms": 250 }
   },
   "air":   { "kind": "radio", "ack_responder": false, "tx_retry_limit": 8,
+             "ldpc": false, "stbc": false,
              "wedge_window_ms": 1000, "wedge_min_submits": 8,
              "wedge_exit_windows": 3 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
@@ -4358,6 +4388,15 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   whose resolved TX die reports `caps.tx_retry_limit_ok = false` refuses
   bring-up (§3.0, capability leg). kernel-monitor is untouched (the kernel
   MAC owns its retries; frozen, #120).
+- `air.ldpc`, `air.stbc` (radio backend only, Pass 157; both default
+  **off**): per-frame TX coding — LDPC FEC, and one-stream STBC, in the
+  radiotap MCS field (§3.0). Two knobs, not one: LDPC is coding gain on one
+  spatial stream, STBC is transmit diversity across two chains — they are
+  measured on separate arms. **Refused on any other backend** (a dead key
+  on udp-air; an unverifiable leg on frozen kernel-monitor, #120 — the
+  Pass 154 `adapters[].mac` posture). Enabling either on a TX die whose
+  `TxCaps` reads it unsupported refuses bring-up (§3.0 capability leg).
+  Defaults stay off until the issue-#97 cliff A/B lands.
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
   stats and logs. It is **optional** and is the **sole** key-provenance selector
   (§11.4a, Pass 61): absent selects the auto-generated announced session token
@@ -4535,6 +4574,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "drop": 0, "filtered": 0, "kernel_drop": 0, "bpf_filtered": 0, "tsf_fallback": 0,
     "tx_reports": 531, "tx_report_fails": 0,
     "rx_mcs": [0, 0, 0, 0, 118, 10116, 0, 0], "rx_mcs_unknown": 0,
+    "rx_ldpc": 0, "rx_stbc": 0, "ldpc_flag_ok": true,
     "adapter_stalled": false, "rx_dead": false, "tx_wedged": false } ],
   "streams": [ { "stream_id": 0, "type": "RTP",
     "seq": 90233, "delivered": 89901, "uniq": 90100, "diversity": 178342,
@@ -4872,6 +4912,16 @@ and they are the denominator half of a per-MCS PER ladder whose numerator is
 not specified. The array is always present and always 8 elements, all-zero on
 `UdpAir` where there is no PHY rate to report — a consumer never branches on
 its length.
+
+`rx_ldpc` / `rx_stbc` (Pass 157) count accepted frames whose RX path
+reported LDPC coding / a nonzero STBC stream count, and `ldpc_flag_ok` is
+the static per-adapter truth of whether this die reports received coding at
+all (devourer `ldpc_rx_flag`; when false the counters stay 0 however the
+air was coded, so an A/B's proof-of-flight ear must be flag-capable — the
+counters prove coding flew, `ldpc_flag_ok` says whether a zero means
+anything). Advisory observation exactly like `rx_mcs`: no control path
+reads them; 0/false on `UdpAir` and on the frozen kernel-monitor backend
+(no RX-parse leg, #120).
 
 A node with a §14.3 cache role enabled additionally emits the matching
 top-level object (absent when the role is off, like `stats.bind`):
