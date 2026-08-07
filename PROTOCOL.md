@@ -251,6 +251,18 @@ hybrid into a silent no-op — a peer that ACKs correctly and a sender that
 never retransmits. The two knobs are therefore **one decision** (Pass 156):
 on the radio backend, enabling `return.unicast` or `air.ack_responder` with
 `tx_retry_limit: 0` is a **config validation error**, never an inert run.
+The law has a second, capability leg below the config layer: devourer keeps
+the vendor `DATA_RETRY_LIMIT` carve-out on dies whose caps read
+`tx_retry_limit_ok = false` (the 8814A; the unmeasured 8821C fails closed
+per devourer's false-as-unmeasured convention) — there the descriptor field
+is silently skipped, so a validated nonzero limit still never retransmits.
+A radio node with `return.unicast` enabled therefore **refuses bring-up**
+when its resolved TX unit (post §15.2 re-bind — the unit, not the stanza)
+reports `tx_retry_limit_ok = false`. `ack_responder` needs no capability
+gate: `SetAckResponder` reports refusal at arm time and the run degrades
+loudly (logged, returns fall back to broadcast-received), whereas a skipped
+retry field has no runtime signal at all — the gate sits exactly where the
+silence is.
 Two inherited devourer behaviours are pinned as load-bearing: the RX-pool
 posture stays `backpressure` (the `drop` alternative produces
 ACKed-but-undelivered frames — the one way this loop can lie); and on
@@ -4333,15 +4345,19 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 - Every policy constant is overridable → bench re-derivation (§9, §17) is config,
   not recompile.
 - `air.tx_retry_limit` (radio backend, Pass 156; default **8**, range 0–63 —
-  the descriptor field width) is the per-frame hardware retry limit for
-  unicast ACK-policy TX. Inert for broadcast (no ACK policy ⇒ the MAC never
+  the descriptor field width on the measured generations; Kestrel's WD field
+  counts *attempts*, so devourer folds the +1 and the effective ceiling
+  there is 62 — an authored 63 runs 62 with a device-log note) is the
+  per-frame hardware retry limit for unicast ACK-policy TX. Inert for broadcast (no ACK policy ⇒ the MAC never
   retries), so the default costs nothing on a broadcast-only node. The
   default is the operator-ruled devourer-sweep point for an airtime-precious
   link with a FEC floor (limit 8 → 99.97 % delivered; 16 buys the last
   0.03 % at +5.4 % retry airtime — §14 already runs the floor). **Coupling
   law (§3.0):** on the radio backend, `return.unicast` or `air.ack_responder`
-  with `tx_retry_limit: 0` is a config error. kernel-monitor is untouched
-  (the kernel MAC owns its retries; frozen, #120).
+  with `tx_retry_limit: 0` is a config error, and a `return.unicast` node
+  whose resolved TX die reports `caps.tx_retry_limit_ok = false` refuses
+  bring-up (§3.0, capability leg). kernel-monitor is untouched (the kernel
+  MAC owns its retries; frozen, #120).
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
   stats and logs. It is **optional** and is the **sole** key-provenance selector
   (§11.4a, Pass 61): absent selects the auto-generated announced session token

@@ -55,9 +55,26 @@ SPE_RPT (blinding the §9.10 wedge sensor and the retry distribution), and
 paces launches 0.8–3 ms in front of the §7.2 quiet-gap design (issue #96
 evidence at vendored `800c3c8`).
 
+**Review addendum (pre-merge, same pass).** The config coupling closed the
+config-value hole but not the die-capability hole: devourer keeps the
+vendor `DATA_RETRY_LIMIT` carve-out where `caps.tx_retry_limit_ok = false`
+(8814A; 8821C false-as-unmeasured) — the descriptor write is silently
+skipped and a validated nonzero limit still never retransmits. §3.0 gains
+the capability leg: `return.unicast` refuses bring-up when the resolved TX
+unit (post §15.2 re-bind) reports the cap false. `ack_responder` is
+deliberately not caps-gated — `SetAckResponder` refusal is loud at arm time
+and the run degrades (returns still received via broadcast RX), while the
+skipped retry field has no signal at all. §15.2 also records Kestrel's
+attempts-counting WD field: devourer folds the +1, effective ceiling 62,
+authored 63 runs 62 with a device-log note. No fleet impact: AU (8812A),
+CU (8812C/jaguar3), EU (8822E) all read the cap true.
+
 **Evidence.** Issue #96 (devourer sweep table, per-die responder rates);
 `third_party/devourer/src/DeviceConfig.h` retry_limit doc; witness rate
-ladder in the issue notes.
+ladder in the issue notes; capability rows
+`third_party/devourer/src/jaguar1/RtlJaguarDevice.cpp:1807` /
+`jaguar2/RtlJaguar2Device.cpp:1138` / `jaguar3/RtlJaguar3Device.cpp:1541` /
+`kestrel/RtlKestrelDevice.cpp:829` (clamp at :81–86, :1122–1124).
 
 ## Pass 155 — §15.5a occupancy: frame-free fields become real, ranking follows (2026-08-07)
 
