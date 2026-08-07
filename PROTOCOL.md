@@ -2810,7 +2810,12 @@ written by a Pass 131 build still loads, and resolves only the entry matching
 `air.uplink_rate`. Rate identity lives in the entry, never in the top-level
 identity block. A run persists only on full success — a failed run writes
 nothing rather than an artifact that would auto-apply at the next boot as
-though it were a measurement. Write atomically under the
+though it were a measurement. One identity leg is enforced **as known**
+(Pass 153): the craft adapter fingerprint reaches the ground only on the
+run's TALLYs, so a boot resolve before any run this session checks the rest
+of the tuple (local identity, craft originator, channel, bandwidth) and
+defers the craft-adapter leg; the first tally carrying a different
+fingerprint flips the artifact STALE. Write atomically under the
 configured calibration directory. **A write that does not land fails the run**
 (`artifact_write_failed`) rather than reporting `done` with a zero fingerprint
 (Pass 129 ruling): §10.7 is a one-time commissioning step whose entire premise
