@@ -34,8 +34,12 @@ RSSI alone, discarding the two scalars that distinguish "strong but dirty"
 (front-end saturation — EVM reverses while RSSI climbs and SNR sits flat)
 from "weak and dirty". Harvest them per adapter with devourer's own
 folding (`RxQualityAccumulator` reused whole, not reimplemented): path-A
-raw, `rssi_raw <= 0` skipped, SNR/EVM folded only when present, passive
-noise floor `(rssi_raw − 110) − snr_raw/2`, window PEAK for RSSI. This
+raw, `rssi_raw <= 0` skipped, EVM folded only when present (and the −128
+no-stream rail discarded at the feed — one railed sample per window would
+read *impossibly clean* and mask the very knee this exposes), passive
+noise floor `(rssi_raw − 110) − snr_raw/2`, window PEAK for RSSI. Known
+accumulator asymmetry, pinned in §15.3: SNR is folded over all
+RSSI-carrying frames (no presence guard), so `snr: 0` is ambiguous. This
 deliberately does NOT touch `GetRxQuality()` — the scout owns that
 device-side window and its FA/CCA delta (Pass 155 exclusivity); the
 per-frame fold is our own accumulator over our own delivered frames, so

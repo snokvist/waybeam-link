@@ -4917,8 +4917,12 @@ its length.
 On the radio backend the per-adapter signal fields are a **quality window**
 (Pass 158, issue #98 stage 1): every accepted frame's path-A raw
 RSSI/SNR/EVM is folded with devourer's own conventions (`RxQuality.h` —
-`rssi_raw <= 0` is not a sample; SNR/EVM folded only when present, so a
-mixed stream does not bias the means toward zero), and each stats line
+`rssi_raw <= 0` is not a sample; EVM folded only when present, and the
+−128 no-stream rail is discarded at the feed as a sentinel, not a
+measurement; SNR however is folded over **all** RSSI-carrying frames, so
+a PWDB-only frame reads SNR 0 into the mean — exposure is nil on this
+link, whose accepted frames are our own HT injections, but `snr: 0` is
+therefore not distinguishable from a true 0 dB mean), and each stats line
 drains the window (delta semantics — the window IS the stats interval; the
 stats emitter is the single reader). `rssi_best` is the window **peak**,
 deliberately not the mean: near-field saturation trashes a fraction of

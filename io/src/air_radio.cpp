@@ -369,10 +369,15 @@ struct RadioAir::Impl {
             latch_sa(*d);
         }
         // §15.3 Pass 158: fold path-A raw quality (the accumulator skips
-        // rssi_raw<=0 itself and folds SNR/EVM only when present). Same
-        // acceptance point as rx_mcs — post-filter, post-synthetic-drop —
-        // so the window describes the frames the link actually delivered.
-        a.quality.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
+        // rssi_raw<=0 itself; EVM is presence-guarded, SNR is not — §15.3
+        // pins the asymmetry). The −128 EVM rail is a no-stream sentinel,
+        // not a measurement (RxPathActivityAccumulator filters it too) —
+        // one railed sample would drag the mean impossibly clean; 0 is the
+        // accumulator's own "no EVM" convention. Same acceptance point as
+        // rx_mcs — post-filter, post-synthetic-drop — so the window
+        // describes the frames the link actually delivered.
+        a.quality.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0],
+                      p.RxAtrib.evm[0] == -128 ? 0 : p.RxAtrib.evm[0]);
         // §15.3 Pass 157: received coding as the die reported it. On
         // ldpc_flag_ok=false dies the bits are never set, so the counters
         // read 0 there — the flag, exported with them, says so.
