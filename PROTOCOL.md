@@ -2674,48 +2674,23 @@ stream. This is the operator-visible law behind the single bi-directional Hub
 action below.
 
 **Seek.** Both directions share the time-injected `PowerSeek` (§10.6): one
-monotone sweep from `min_qdb`, placement at the highest clean probe, then a
-verify with a bounded step-down. §10.7 wraps it in a **rung loop** — commit the
-rung with `set_tx_mode`, sweep, verify, append the placement, advance — which is
+monotone sweep from `min_qdb`, then the §10.6 verify walk — descend while loss
+keeps improving, bounded, placing at the walk's best reading (Pass 151/152).
+§10.7 wraps it in a **rung loop** — commit the rung with `set_tx_mode`, sweep,
+verify, append the placement, advance — which is
 structurally the same loop §10.6 already runs, and deliberately so. Seed
 `seek_step_qdb=16` (4 dB); reuse §10.6's min/max, loss walls, `rssi_guard_dbm`
 backstop, bounded verify descents, and hard cap. A probe dwell is a burst of
 **100 probes**, verification **400**. Seed loss thresholds remain
 `loss_ok_milli=15` and `loss_bad_milli=50`.
 
-**The walls are relative to the at-rest loss floor (Pass 152).**
-`loss_ok_milli` and `loss_bad_milli` are **margins above a measured baseline**
-here, not absolute bars. §10.7 injects its probes into a medium the craft is
-saturating with video, so some fraction of LINK_REPORTs is lost to contention
-regardless of TX power. On the fleet that fraction was measured well above the
-15permille absolute seed, which put the acceptance gate *below* the link's own
-floor: no power could pass it, every rung read `verify_failed`, and §10.7 could
-not have succeeded at any distance. The one artifact it had ever produced
-placed all eight rungs at 108 with no bracket anywhere — the Pass 134
-starved-feedback signature, not a measurement.
-
-The floor is sampled over a rolling window of **ordinary operation** and
-**only while no sweep is running** — the same rule and the same reason as
-§10.6's Pass 134 report-health precondition: once the sweep starts, elevated
-loss is the measurement, and folding it back into the baseline would chase its
-own tail. A start with no floor yet measured is refused rather than judged
-against an absolute bar. On a quiet link the floor is ~0 and the behaviour is
-identical to the absolute seeds, so this is a shift of origin rather than a
-loosening.
-
-> **No characteristic value is given here on purpose, and the estimator's
-> resolution is an OPEN QUESTION.** Field readings of the same link at fixed
-> power and fixed geometry ranged from 16 to 99permille, and a controlled run
-> showed that spread to be almost entirely binomial sampling noise: 21 windows
-> of n=150 reports gave sd 23.3permille against a predicted 22.1permille. The
-> window is therefore a **sample-count** gate (`min_samples`), not a clock —
-> but the counts §10.7 can reach may still be too small to rank power rungs at
-> all. Separating a 20permille difference at an 80permille baseline needs
-> n≈1500 per dwell, roughly 7.5x the Pass 132 verify burst, and at report
-> cadence that is minutes per dwell. Whether report-loss is the right observable
-> for this section, or whether it needs dedicated probe traffic, is NOT settled
-> by this pass. Treat any floor number quoted in the review log as an
-> observation under its own n, never as a property of the link.
+**How the walls are referenced is Tier-2, deliberately unruled here.**
+Whether `loss_ok_milli`/`loss_bad_milli` are absolute bars or margins above a
+measured at-rest loss floor is still being measured — the evidence, the
+current knob-governed floor sampling (`uplink_floor_min_samples`, §15.2), and
+the open estimator-resolution question live in `docs/findings.md`. The ruling
+waits for the calibration-v2 observable decision
+(`docs/calibration-v2-symmetric-probes.md`) rather than being made here.
 
 **Both §10.6 Pass 151 rules apply here unchanged**, because both live in the
 shared seek: the placement is the loss minimum rather than the first tolerable
@@ -4346,7 +4321,10 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   uplink artifact is a distinct filename in the same directory) — and adds only
   what differs because the uplink measures a counted probe burst instead of
   live video: `uplink_probe_epochs` (**100**), `uplink_verify_epochs` (**400**),
-  `uplink_drain_ms` (**600**), `uplink_liveness_ms` (2000).
+  `uplink_drain_ms` (**600**), `uplink_liveness_ms` (2000), and
+  `uplink_floor_min_samples` (**300**) — a **Tier-2 knob** sizing the at-rest
+  loss-floor sample the run's walls may be referenced against; how the walls
+  are referenced is unruled (§10.7, `docs/findings.md`).
   The uplink gates are **probe counts, not
   milliseconds**; `probe_dwell_ms`/`verify_dwell_ms`/`report_loss_abort_ms` are
   craft-only and unused on the ground. Config rejects a burst too small to

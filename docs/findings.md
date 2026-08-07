@@ -12,6 +12,37 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-07 — §10.7 walls referenced to a measured at-rest floor (mechanism demoted from spec)
+
+The Pass 152 floor-relative-walls text shipped into `PROTOCOL.md` via the
+#115 squash; this entry is its Tier-2 home after demotion — the spec now
+marks the walls' reference point as unruled. The **mechanism stays in the
+code** (ground `run_rx`), governed by config, not by spec:
+
+- **What it does:** the ground samples an at-rest uplink loss floor over a
+  rolling window of ordinary operation, only while no sweep is running (the
+  same exclusion, for the same reason, as §10.6's Pass 134 report-health
+  precondition: once the sweep starts, elevated loss *is* the measurement).
+  A §10.7 start with no floor yet measured is refused. The run's walls are
+  then `floor + loss_ok_milli` / `floor + loss_bad_milli`. On a quiet link
+  the floor is ~0 and behaviour equals the absolute seeds.
+- **Why it exists (measured):** the fleet's at-rest report loss at 10 m sat
+  well above the 15 ‰ absolute `loss_ok_milli` seed, putting the acceptance
+  gate below the link's own floor — every rung read `verify_failed` at any
+  power, and the one artifact ever produced was the Pass 134
+  starved-feedback signature (all eight rungs at 108, no bracket).
+- **Window sizing (measured):** the window is a sample-count gate, not a
+  clock — knob `policy.calibration.uplink_floor_min_samples` (default
+  **300**). A 4 s / n=40 first cut read a 50 ‰ floor against a 40 s
+  window's 24.8 ± 7.7 ‰ and admitted a rung at 45 ‰ the true floor would
+  have refused; n=300 puts σ near 9 ‰ at a 25 ‰ floor.
+- **Open:** whether report-loss is the right observable at all — the
+  2026-08-06 entry below shows even n=300 may be too small to rank rungs at
+  a lossy baseline (separating 20 ‰ at an 80 ‰ floor needs n≈1500/dwell).
+  Both questions dissolve into the calibration-v2 ruling
+  (`calibration-v2-symmetric-probes.md` §5-§6); this mechanism is interim
+  and expected to be deleted with §10.7's evidence plumbing.
+
 ## 2026-08-06 — §10.7 report-loss is an under-powered observable at this link's baseline
 
 Carried over from the Pass 152 field addendum (the last entry of the archived
