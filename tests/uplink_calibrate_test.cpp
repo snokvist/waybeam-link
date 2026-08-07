@@ -43,7 +43,21 @@ struct Channel {
     int32_t knee_qdb = 40;
     uint16_t base_loss = 2;
     int32_t qdb = 0;
+    // One-dwell noise transient: the FIRST visit to this qdb reads bad for
+    // the whole dwell; once the sweep moves off it, any revisit is clean
+    // (a WiFi burst, not a wall). loss_milli() is called per probe, so the
+    // "fired" edge is the qdb moving away, not the first call.
+    std::optional<int32_t> transient_bad_qdb;
+    mutable bool transient_fired = false;
+    mutable bool transient_seen = false;
     uint16_t loss_milli() const {
+        if (transient_bad_qdb) {
+            if (qdb == *transient_bad_qdb && !transient_fired) {
+                transient_seen = true;
+                return 999;
+            }
+            if (transient_seen) transient_fired = true;
+        }
         if (qdb >= wall_qdb) return 1000;
         const int32_t over = qdb > knee_qdb ? qdb - knee_qdb : 0;
         return static_cast<uint16_t>(
@@ -169,6 +183,30 @@ void test_offset_space_flat_at_ceiling_places() {
     CHECK(pl.last_clean_qdb == 24);
 }
 
+void test_offset_space_stale_bracket_does_not_release_cap() {
+    // §10.7 (Pass 153): a bad probe the sweep later climbed past cleanly is
+    // a noise transient, not a wall — the booked bracket is STALE (highest
+    // clean sits above it) and must not release the reference cap.
+    UplinkCalibParams p = fast_params();
+    p.seek.min_qdb = -24;
+    p.seek.max_qdb = 24;
+    p.seek.seek_step_qdb = 8;
+    p.seek.no_bracket_cap_qdb = 0;
+    p.taper_rung_ceiling = false;
+    Bench b(p);
+    b.ch.knee_qdb = 200;          // flat clean everywhere...
+    b.ch.transient_bad_qdb = -8;  // ...except one noise burst at -8
+    CHECK(b.cal.start(b.now));
+    CHECK(b.run());
+    CHECK(b.cal.state() == CalibState::kDone);
+    CHECK(b.cal.placements().size() == 1);
+    const UplinkPlacement& pl = b.cal.placements()[0];
+    CHECK(pl.has_first_bad);          // the transient is surfaced honestly
+    CHECK(pl.first_bad_qdb == -8);
+    CHECK(pl.placement_qdb <= 0);     // ...but does not release the cap
+    CHECK(pl.last_clean_qdb == 24);
+}
+
 void test_offset_space_bracket_above_reference_places_measured() {
     // §10.7 (Pass 153): a run whose sweep DID book a bracket above the
     // reference places below its wall as measured — genuine per-unit
@@ -259,6 +297,7 @@ int main() {
     test_clean_run_places_below_wall();
     test_no_wall_found_refused();
     test_offset_space_flat_at_ceiling_places();
+    test_offset_space_stale_bracket_does_not_release_cap();
     test_offset_space_bracket_above_reference_places_measured();
     test_verify_failed_when_nothing_acceptable();
     test_evidence_lost();

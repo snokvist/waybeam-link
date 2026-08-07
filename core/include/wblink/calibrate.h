@@ -186,11 +186,18 @@ class PowerSeek {
     }
     SeekStep place_() {
         qdb_ = last_clean_->qdb;
-        // §10.5 (Pass 153): no bracket booked → the verify walk starts at
-        // the reference, not above it. The walk only descends from here, so
-        // capping the start caps the placement; everything below is then
-        // measured by the walk itself, never inherited from this clamp.
-        if (p_.no_bracket_cap_qdb && !has_bad_ &&
+        // §10.5 (Pass 153): no LIVE bracket booked → the verify walk starts
+        // at the reference, not above it. Live means the highest clean probe
+        // still sits below the booked wall; a bad probe the sweep later
+        // climbed past cleanly is a noise transient (the flat-field noise of
+        // docs/findings.md 2026-08-07), and releasing the cap on it would
+        // verify from the ceiling — the noise-selected placement the cap
+        // exists to forbid. The walk only descends from here, so capping the
+        // start caps the placement; everything below is then measured by the
+        // walk itself, never inherited from this clamp.
+        const bool live_bracket =
+            has_bad_ && first_bad_qdb_ > last_clean_->qdb;
+        if (p_.no_bracket_cap_qdb && !live_bracket &&
             qdb_ > *p_.no_bracket_cap_qdb) {
             qdb_ = std::max(p_.min_qdb, *p_.no_bracket_cap_qdb);
         }

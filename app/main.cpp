@@ -3545,9 +3545,13 @@ struct RxCore {
             return;
         }
         if (const SelectorState* s = std::get_if<SelectorState>(&dec)) {
+            bool any_rtp = false;
             for (const RxStreamInfo& info : engine_.streams()) {
-                if (info.stream_type == stream_type::kRtp &&
-                    selector_state_admissible(
+                if (info.stream_type != stream_type::kRtp) {
+                    continue;
+                }
+                any_rtp = true;
+                if (selector_state_admissible(
                         *s, local_table_version_, info.key.originator,
                         info.key.session_id)) {
                     // §3.15 (Pass 153): latch the accepted tuple — acceptance
@@ -3558,7 +3562,11 @@ struct RxCore {
                     return;
                 }
             }
-            if (word_source_ &&
+            // The latch stands in ONLY while no live RTP stream exists (the
+            // teardown case it exists for). With a live stream present, a
+            // non-matching word is a stale session — a rebooted craft
+            // re-latches through its new stream, never through the old latch.
+            if (!any_rtp && word_source_ &&
                 selector_state_admissible(*s, local_table_version_,
                                           word_source_->first,
                                           word_source_->second)) {
@@ -3761,9 +3769,13 @@ struct RxCore {
         }
         bool selector_source_current = false;
         if (remote_selector_state_) {
+            bool any_rtp = false;
             for (const RxStreamInfo& info : engine_.streams()) {
-                if (info.stream_type == stream_type::kRtp &&
-                    selector_state_admissible(
+                if (info.stream_type != stream_type::kRtp) {
+                    continue;
+                }
+                any_rtp = true;
+                if (selector_state_admissible(
                         *remote_selector_state_, local_table_version_,
                         info.key.originator, info.key.session_id)) {
                     selector_source_current = true;
@@ -3771,8 +3783,9 @@ struct RxCore {
                 }
             }
             // §3.15 (Pass 153): the acceptance latch keeps the mirrored word
-            // current across the §2 teardown a calibration pause causes.
-            if (!selector_source_current && word_source_ &&
+            // current across the §2 teardown a calibration pause causes —
+            // same no-live-stream gate as the admission path.
+            if (!selector_source_current && !any_rtp && word_source_ &&
                 selector_state_admissible(*remote_selector_state_,
                                           local_table_version_,
                                           word_source_->first,

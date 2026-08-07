@@ -866,7 +866,10 @@ An RX accepts the summary from the RTP `(originator,session)` tuple it is
 currently consuming, and only when `table_version` matches. **The acceptance
 tuple latches (Pass 153):** once a summary from a live-consumed tuple has
 been accepted, the same tuple stays acceptable across that stream's §2 idle
-teardown, until a different tuple's live stream replaces the latch. Without
+teardown, until a different tuple's live stream replaces the latch. The
+latch stands in **only while no live RTP stream exists** — with any live
+stream present, a summary that matches no stream is a stale session and is
+refused, latch or no latch. Without
 the latch the §3.16 pause exemption below is unreceivable — a calibration
 run starves the video stream past teardown precisely while the word is the
 operator's only progress view and the §10.7 sequencer's downlink evidence.
@@ -2497,13 +2500,18 @@ side of it (`power_offset_max_qdb` is not bounded at 0: there is no
 evidence the reference is the per-unit usable maximum). A flat window is
 therefore the expected close-range reading, not an unmeasured
 extrapolation, and the run **completes and persists**. Placement follows
-one cap: **a run that booked no overload bracket places no higher than
-offset 0.** Exploring above the reference is what the window is for, but
-placing there requires a measured wall — above the reference sits the PA
-compression region a close-range flat field cannot see (per-unit,
-measured: −6 dB from reference gave 10× less loss on one 8822EU), so an
-unbracketed best above 0 is noise-selected, not evidence. A run whose
-sweep did book a bracket places below it as measured, wherever that falls.
+one cap: **a run that booked no live overload bracket places no higher
+than offset 0** (or no lower than the window floor, when a configured
+window sits entirely above the reference). A bracket is **live** only
+while the sweep's highest clean probe still sits below the booked wall —
+a bad probe the sweep later climbed past cleanly is a noise transient
+and does not release the cap. Exploring above the reference is what the
+window is for, but placing there requires a measured wall — above the
+reference sits the PA compression region a close-range flat field cannot
+see (per-unit, measured: −6 dB from reference gave 10× less loss on one
+8822EU), so an unbracketed best above 0 is noise-selected, not evidence.
+A run whose sweep booked a live bracket places below its wall as
+measured, wherever that falls.
 Measured before the ruling: six consecutive `no_wall_found` refusals at
 10 m hard-blocked the §10.7 sequencer on a ground whose window
 ([−24, 0] qdB) cannot contain a wall at that range.
