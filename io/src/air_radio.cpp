@@ -12,6 +12,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -317,6 +318,12 @@ struct RadioAir::Impl {
             if (a->dev) {
                 a->dev->Stop();
             }
+            // The device destructor is the chip power-down (RtlJaguarDevice
+            // runs rtw_hal_deinit's control writes there) — it must run
+            // while the handle is still open. Leaving it to ~Adapter ran it
+            // after the libusb_close below: a use-after-free on every
+            // teardown (ASan, 2026-08-08 bench).
+            a->dev.reset();
             if (a->handle) {
                 libusb_release_interface(a->handle, 0);
                 libusb_close(a->handle);
@@ -847,12 +854,33 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     return Result<RadioAir>::ok(std::move(air));
 }
 
+// #101 stage-0 bench knob (Tier-2, findings.md 2026-08-08): WBLINK_MCS_CYCLE
+// set ⇒ every first-send §3.2 DATA frame airs at radiotap MCS = seq % 8 —
+// the harshest deterministic per-packet mix (every consecutive frame a
+// different rate), derived from the wire seq alone so an RX-side trace can
+// verify the commanded rate frame-for-frame. Non-DATA frames keep the
+// committed rate, and so do §12 RESENDS (inject_resend — deliberately: a
+// resend reuses the wire seq, so on a lossy run the correlator must treat
+// duplicate-seq trace lines as resends, never as rate mismatches).
+// No default behaviour change; never set in a deployed config.
+static bool mcs_cycle_enabled() {
+    static const bool on = std::getenv("WBLINK_MCS_CYCLE") != nullptr;
+    return on;
+}
+
 size_t RadioAir::inject(const uint8_t* frame, size_t len) {
     Impl& im = *impl_;
     if (!im.has_tx) return 0;  // §3.11 Pass 162: not-sent, never adapter 0
     Impl::Adapter& tx = *im.adapters[im.tx_idx];
+    TxRate rate = im.rate;
+    // §3.1 type nibble at byte 2; §3.2 seq BE32 at 13 — low byte carries
+    // seq % 8 exactly (8 divides 256).
+    if (mcs_cycle_enabled() && len >= 17 &&
+        (frame[2] & 0x0F) == static_cast<uint8_t>(PacketType::kData)) {
+        rate.mcs = frame[16] & 0x7;
+    }
     im.tx_buf.resize(kDot11TxPrefixLen + len);
-    dot11_tx_prefix(im.tx_buf.data(), im.rate, im.cfg.stamp_net_id,
+    dot11_tx_prefix(im.tx_buf.data(), rate, im.cfg.stamp_net_id,
                     im.cfg.originator, static_cast<uint8_t>(im.tx_idx),
                     im.seq++);
     std::memcpy(im.tx_buf.data() + kDot11TxPrefixLen, frame, len);
