@@ -1206,6 +1206,9 @@ std::optional<uint32_t> RadioAir::estimate_airtime_us(
     // here rather than treated as an unmet request.
     (void)include_pending;
     const Impl& im = *impl_;
+    if (!im.has_tx) {
+        return std::nullopt;  // §3.11 Pass 162: nothing airs (MonAir parity)
+    }
     if (im.cfg.airtime_efficiency_permille == 0) {
         return std::nullopt;  // uncalibrated reads unavailable, never optimistic
     }

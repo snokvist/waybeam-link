@@ -591,8 +591,10 @@ bring-up rather than running silently inert** (the Pass 156/157 posture):
 `air.ack_responder`, `policy.return.unicast`, `air.ldpc` and `air.stbc` are
 all properties of a TX die the node does not have, so a config that sets any
 of them with no `role:"tx"` adapter fails create. Send paths report
-not-sent (0) and the §15.3 TX counters stay 0; `tx_index()` is meaningful
-only when `has_tx()` — callers keep the guard.
+not-sent (0) and the §15.3 TX counters stay 0. `tx_index()` reads 0 on an
+RX-only node: state-mutating callers guard on `has_tx()`, while the §15.5a
+scout deliberately does not — it roams adapter 0, unchanged from
+kernel-monitor's RX-only behaviour.
 
 ### 3.9 RECOVERY_REQUEST packet (type `0x6`) — 18 bytes
 
