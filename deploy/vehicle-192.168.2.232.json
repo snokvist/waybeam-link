@@ -1,5 +1,5 @@
 {
-  "_comment": "Vehicle: RTL8812EU kernel-monitor TX/RX on 5805/HT20; adaptive MCS1-5 with venc-owned bitrate follow (§9.6), 30% IDR / 20% P-frame RLC, FPS_SELECT {30,60,90,100} over a 100fps base.",
+  "_comment": "Mirrors /etc/waybeam-link/craft.json on the vehicle at 192.168.2.232, read from the node 2026-08-08. Devourer (air.kind radio) since 2026-08-06; the kernel-monitor shape this file used to carry was stale.",
   "node": {
     "originator": 17,
     "role": "tx",
@@ -10,12 +10,20 @@
   "adapters": [
     {
       "name": "eu-craft",
-      "ifname": "wlan0",
       "role": "tx",
       "channel": 5805,
       "bw": 20,
       "max_power_qdb": 108,
-      "power_presets_qdb": [60, 76, 84, 92, 108]
+      "power_presets_qdb": [
+        60,
+        76,
+        84,
+        92,
+        108
+      ],
+      "bus": "1-1",
+      "calib_id": "craft-eu-1",
+      "power_offset_max_qdb": 24
     }
   ],
   "streams": [
@@ -46,13 +54,14 @@
     }
   ],
   "air": {
-    "kind": "kernel-monitor"
+    "kind": "radio"
   },
   "policy": {
     "report_timeout_ms": 750,
     "select": {
-      "min_profile": 1,
-      "max_profile": 5
+      "min_profile": 2,
+      "max_profile": 5,
+      "demote_milli": 45
     },
     "return": {
       "quiet_gap": true,
@@ -61,7 +70,20 @@
     },
     "csa": {
       "home_chan": 5805,
-      "channel_allowlist": [5180, 5220, 5745, 5765, 5785, 5805, 5825]
+      "channel_allowlist": [
+        5180,
+        5220,
+        5745,
+        5765,
+        5785,
+        5805,
+        5825
+      ],
+      "verify_timeout_ms": 600,
+      "rx_liveness_ms": 4000
+    },
+    "calibration": {
+      "offset_seek_step_qdb": 2
     }
   },
   "venc": {
@@ -69,13 +91,35 @@
     "enabled": true,
     "recovery_enabled": true,
     "max_bitrate_kbps": 25000,
-    "command_presets": { "fps": [30, 60, 90, 100] }
+    "command_presets": {
+      "fps": [
+        30,
+        60,
+        90,
+        100
+      ]
+    },
+    "mode_apply_cmd": "/etc/waybeam-link/modes/apply-mode.sh",
+    "active_mode": "imx335-60fps-lowrange",
+    "fps_ladder": {
+      "enabled": false,
+      "min": 30,
+      "preferred": 100,
+      "max": 144,
+      "min_p_frame_bytes": 10000,
+      "restore_hysteresis_bytes": 1000,
+      "sample_timeout_ms": 500,
+      "reduce_after_ms": 3000,
+      "reduce_dwell_ms": 4000,
+      "restore_after_ms": 8000,
+      "settle_ms": 1500
+    }
   },
   "control": {
     "bind": "127.0.0.1:8091"
   },
   "stats": {
-    "hz": 1,
+    "hz": 10,
     "stdout": false
   }
 }
