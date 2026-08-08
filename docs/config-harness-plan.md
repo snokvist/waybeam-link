@@ -80,14 +80,17 @@ The two backends disagree about whether a node may have no transmitter:
 
 - `RadioAir::create` returns `radio: exactly one adapter must have role "tx"`
   when `n_tx != 1` (`air_radio.cpp:348`). Zero is as fatal as two.
-- `MonAir` tracks `has_tx` and tolerates zero (`air_mon.cpp`), which is exactly
-  what `deploy/ground-192.168.2.199.json` relies on — one `role:"rx"` adapter,
-  `spectator: true`, no uplink.
+- **OVERTAKEN (Pass 162, then Pass 164).** The paragraph below described a
+  world where only `MonAir` tolerated zero `role:"tx"` adapters. `RadioAir`
+  gained `allow_rx_only` in Pass 162 and it was proven on hardware on
+  2026-08-08 (19466 frames, diversity 19430, loss 0 ‰); Pass 164 then deleted
+  `MonAir` entirely. The `rx-spectator` archetype is emittable on devourer —
+  which is the only backend — and needs no nominated TX adapter.
 
-So the `rx-spectator` archetype, which the harness is asked to emit for either
-backend, can only be emitted for `kernel-monitor` as things stand. On devourer
-it would have to nominate a `role:"tx"` adapter and then depend on the §3.8
-spectator suppression to ensure it never keys. Pass 145 / T9 measured that
+~~So the `rx-spectator` archetype, which the harness is asked to emit for
+either backend, can only be emitted for `kernel-monitor` as things stand. On
+devourer it would have to nominate a `role:"tx"` adapter and then depend on the
+§3.8 spectator suppression to ensure it never keys.~~ Pass 145 / T9 measured that
 suppression holding — `tx_submitted` pinned at 0 across 18 451 received frames
 — but a `role:"tx"` adapter on a spectator is a posture the harness should not
 invent on its own, and "the layer above promises not to transmit" is a

@@ -121,7 +121,7 @@ Scripts under `tools/` support the §17 bench gates:
 Bench knob: `air.rx_drop_permille` (per-adapter independent synthetic RX
 drop; bench-only, default off) — used to manufacture known-independent loss
 for gate-2 machinery validation and to exercise FEC recovery. Honored by all
-three air backends (`udp`, `kernel-monitor`, `radio`).
+air backends (`udp`, `udp-broadcast`, `radio`).
 
 ### Real-video frame-SHM/UDP bench
 
@@ -264,9 +264,10 @@ script `/etc/init.d/waybeam-link {start|stop}`, which does `adapter stop` +
 "policy": { "select": { "min_profile": 0, "max_profile": 0 } }
 ```
 
-Craft runs 20 MHz, MCS pinned low at 5805 (§10, 8812EU sub-band limits). Drivers
-that *do* support mac80211 monitor injection can instead use
-`air.kind "kernel-monitor"` with an `ifname` + `ip link … monitor` setup.
+Craft runs 20 MHz, MCS pinned low at 5805 (§10, 8812EU sub-band limits).
+`air.kind "kernel-monitor"` — AF_PACKET injection through a mac80211 monitor
+netdev — was **retired in Pass 164**; devourer is the only RF backend, and a
+config carrying the old value is rejected with a message that says so.
 
 **(b) UDP sim (no radios)** — DATA fanned out over ethernet to the ground:
 
@@ -285,17 +286,19 @@ Run (repo root as cwd for `profiles/`): `waybeam-link tx -c <tx>.json`.
 ]
 ```
 
-**(a) Monitor injection** — one or more adapters in monitor mode on the craft's
-channel (extra `role":"rx"` adapters add diversity; one `role":"tx"` carries
-NACK/LINK_REPORT returns):
+**(a) Devourer RX** — one or more adapters on the craft's channel (extra
+`role":"rx"` adapters add diversity; one `role":"tx"` carries NACK/LINK_REPORT
+returns). Adapters are matched by USB `bus` — or by `mac`, the per-unit EFUSE
+identity (§15.2 Pass 154) — never by netdev name:
 
 ```json
-"adapters": [{ "name": "wlan1", "ifname": "wlx…", "role": "rx", "channel": 5805, "bw": 20 }],
-"air": { "kind": "kernel-monitor" }
+"adapters": [{ "name": "wlan1", "bus": "5-1", "role": "rx", "channel": 5805, "bw": 20 }],
+"air": { "kind": "radio" }
 ```
 
-A dedicated `cache.store` node with no media streams is the one exception to
-the designated-uplink rule: all of its monitor adapters may be `role:"rx"`.
+A dedicated `cache.store` node with no media streams is one exception to the
+designated-uplink rule, and a `node.spectator` display node is the other: all
+of their adapters may be `role:"rx"` (§3.11 Pass 162 `allow_rx_only`).
 Such a node is RF receive-only; cache status, requests, and replies use its
 configured UDP/IP endpoints.
 For production MVP it is linked to one receiver with
@@ -354,7 +357,7 @@ validates `VencFrameMeta`, Annex-B start codes, IDR flags, and pts monotonicity
 recovery under synthetic loss.
 
 **Verified end-to-end** (Star6E .201 → x86 ground): venc `frame-shm://venc_frame`
-→ craft `radio` inject (8812EU, MCS0, 5805) → ground kernel-monitor RX → reassemble
+→ craft `radio` inject (8812EU, MCS0, 5805) → ground `radio` RX → reassemble
 → `venc_frame_out`, read back **byte-clean** (bad_meta=0, bad_startcode=0,
 pts_regress=0) at ~90 fps, `decode_errors=0`. Also proven over the udp-air sim
 (same, at full bitrate) and the in-process `frame_shm_loopback_test` (FEC recovery

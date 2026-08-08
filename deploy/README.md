@@ -1,13 +1,30 @@
 # MVP flight-test deployment
 
-Current four-node kernel-monitor verification topology:
+Every node runs **devourer** (`air.kind: "radio"`). Pass 164 deleted the
+kernel-monitor backend, so no bring-up here touches a kernel netdev — the job
+is the opposite, making sure no driver holds the adapter before `libusb_open`.
+
+The two nodes read from live hardware on 2026-08-08:
 
 | Node | Address | RF role | Service/config |
 |---|---|---|---|
-| Vehicle | `192.168.2.232` | RTL8812EU TX/RX, channel 161 HT20 | `vehicle-waybeam-link.init`, `vehicle-192.168.2.232.json` |
-| x86 ground | `192.168.2.242` | RTL8812EU return TX/RX + RTL8812CU RX | `waybeam-ground.service`, `ground-192.168.2.242.json` |
-| RK3566 ground | `192.168.2.199` | RTL8812CU **passive spectator** (Pass 74) — RX only, no uplink; frame-SHM to MPP/DRM | `waybeam-ground-rk.init`, `ground-192.168.2.199.json` |
-| Cache | `192.168.2.247` | MT7921 + RTL8812AU receive-only | `waybeam-cache.service`, `cache-192.168.2.247.json` |
+| Vehicle | `192.168.2.232` | RTL8812EU TX/RX, ch 5805 HT20, bus `1-1` | `vehicle-waybeam-link.init`, `vehicle-192.168.2.232.json` |
+| x86 ground | `192.168.2.242` | RTL8812AU uplink TX (`8-1`) + RTL8812CU RX (`5-1`) | drive manually; `ground-192.168.2.242.json` |
+
+**Missing, deliberately.** The RK3566 spectator (`192.168.2.199`) and the
+Ethernet cache (`192.168.2.247`) were **offline when Pass 164 landed**, so
+their configs and their monitor-mode unit files were deleted rather than
+migrated by guesswork — an invented devourer config is a config no node has
+ever loaded. Both nodes still exist. Re-author each from the live
+`/etc/waybeam-link/*.json` when it is powered, as #149 did for the two above,
+and check it with `--check --strict`. `docs/verification-hardware.md` still
+records their hardware.
+
+The x86 ground's old `waybeam-ground.service` went with them: its
+`waybeam-mon-up` pre-start would leave a kernel driver holding the adapter,
+which is precisely what makes devourer fail with a bare "no matching Realtek
+device". `vehicle-waybeam-link.init` is the surviving reference for a
+devourer-correct bring-up.
 
 **Ground uplink adapter choice (issue #99, findings.md 2026-08-07):** where
 a ground rig has both generations, its `role:"tx"` adapter should be the
@@ -24,7 +41,9 @@ window, and resumes status/repair service. Its RTL8812AU is receive diversity;
 RF-inserted cache replies are not implemented in this deployment.
 
 The RK3566 remains a useful second-view test receiver. It may consume repair
-status for the same vehicle, but it does not own or retarget the cache.
+status for the same vehicle, but it does not own or retarget the cache. Its
+spectator archetype — zero `role:"tx"` adapters — was proven on devourer on
+2026-08-08 (19466 frames, loss 0 ‰), which is what allowed Pass 164.
 
 The vehicle uses whole-frame `venc_frame` SHM input, adaptive MCS 1–5
 (`select.min_profile 1 / max_profile 5`, since #47), 30% IDR RLC, and 20%
@@ -78,16 +97,16 @@ the configured 500 ms retry cadence.
 
 ## Before flight
 
-- Reserve or statically configure `.242`, `.199`, and `.247`; the cache
-  endpoints require these exact addresses.
+- Reserve or statically configure `.242`, and `.199`/`.247` once re-authored;
+  the cache endpoints require these exact addresses.
 - Keep the cache controller endpoint paired with receiver originator 9 and
   `192.168.2.242:5802`; changing either requires updating both deployments.
 - Make the SHM viewer persistent or start it explicitly before every test.
 - Verify channel 161 is permitted at the test site. NOTE: the vehicle TX power
-  is **not** configured or enforced by waybeam-link — the config sets no power,
-  kernel-monitor power actuation is a documented no-op, and `mon-up.sh` sets
-  `txpower auto`. Any regulatory power limit must be met at the adapter/driver,
-  not assumed from this repo.
+  runs at the §10.5 relative offset (`power_offset_qdb`, seed −24 qdb = −6 dB)
+  against the adapter's efuse table — an offset, not an absolute. Any
+  regulatory power limit must be met at the adapter/driver, not assumed from
+  this repo.
 - CSA key mode: no deploy config sets `csa.psk`, so the fleet runs
   **announced-token mode** (Pass 61/63) — the per-boot CSA token is public on
   the ANNOUNCE beacon, and the only takeover defence is the §11.5a sticky
