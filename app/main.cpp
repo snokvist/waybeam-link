@@ -1560,13 +1560,12 @@ struct AirBackend {
             rc.stbc = cfg.air.stbc;
             rc.mcs_probe = cfg.air.mcs_probe;  // §9.4 Pass 163
             rc.disable_cca = cfg.air.disable_cca;
-            // §14.2 (Pass 143): the authored calibration reaches both RF
-            // backends. Zero keeps the estimate unavailable.
+            // §14.2 (Pass 143): the authored calibration. Zero keeps the
+            // estimate unavailable.
             rc.airtime_efficiency_permille =
                 cfg.air.airtime_efficiency_permille;
-            // §3.11 (Pass 162): same uplink-free archetypes as the monitor
-            // branch above — dedicated cache with no media streams, §2
-            // passive spectator (Pass 74).
+            // §3.11 (Pass 162): the uplink-free archetypes — dedicated cache
+            // with no media streams, §2 passive spectator (Pass 74).
             rc.allow_rx_only =
                 (cfg.cache.store.enabled && cfg.streams.empty()) ||
                 cfg.node.spectator;
@@ -1819,8 +1818,9 @@ struct AirBackend {
         if (any) a->flush_rx();
         return ok;
     }
-    // "Real RF", not "is devourer" — both RF backends answer true, the udp
-    // dev transport false. Name kept for its call sites.
+    // "Real RF", not "is devourer" — the udp dev transport answers false.
+    // Since Pass 164 devourer is the only backend that answers true, so the
+    // distinction is now vestigial; name kept for its call sites.
     bool is_radio() const { return iface()->is_rf(); }
     bool tx_pending() const { return udp && udp->tx_pending(); }
     std::optional<uint32_t> estimate_airtime_us(size_t bytes,
@@ -2088,8 +2088,8 @@ struct TxCore {
         }
         // §10: one power curve per TX adapter with an authored map. The
         // resolve happens at profile commit and actuates through the
-        // apply_power hook on both RF backends (§10.5); on the udp dev
-        // backend it stays a logged intent.
+        // apply_power hook (§10.5); on the udp dev backend it stays a logged
+        // intent.
         for (size_t i = 0; i < cfg.adapters.size(); ++i) {
             const AdapterCfg& a = cfg.adapters[i];
             if (a.role != Role::kTx) {
@@ -5595,8 +5595,8 @@ int run_tx(const Loaded& l) {
                              l.cfg.policy.csa.rx_liveness_ms,
                              csa_liveness_chan);
                 air.value->recover_all(csa_liveness_chan, csa_liveness_bw);
-                // §10.5: recovery ends in `txpower auto` (Pass 48) — put the
-                // latch / resolved curve value back.
+                // §10.5: a recovery can reset hardware power (Pass 48) — put
+                // the latch / resolved curve value back regardless.
                 tx.reassert_power();
             }
             csa_liveness_deadline_ms.reset();  // one-shot per retune
@@ -6868,9 +6868,9 @@ int run_rx(const Loaded& l) {
                 // RELATIVE actuator once `uplink_relative`. Unbounded there, a
                 // plain `{"qdb":84}` becomes +21 dB of offset from REST, which
                 // is the hazard this whole conversion exists to remove. On an
-                // absolute ground (every ground in the fleet today) the value
-                // is an absolute qdb and a relative bound would reject every
-                // sane one, so it stays unbounded exactly as before.
+                // absolute ground — only the udp bench since Pass 164 — the
+                // value is an absolute qdb and a relative bound would reject
+                // every sane one, so it stays unbounded exactly as before.
                 if (uplink_relative && uplink_adapter != nullptr &&
                     qdb > uplink_adapter->power_offset_max_qdb) {
                     return "qdb exceeds power_offset_max_qdb on this "

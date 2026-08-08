@@ -483,7 +483,8 @@ int main() {
                   "airtime_efficiency_permille": 600},
           "adapters": [
             {"name": "uplink", "bus": "1-1", "role": "tx", "channel": 5805},
-            {"name": "div0", "bus": "5-1", "role": "rx", "channel": 5805}
+            {"name": "div0", "bus": "5-1", "ifname": "legacy0",
+             "role": "rx", "channel": 5805}
           ]})");
         CHECK(bool(r));
         if (r) {
@@ -496,6 +497,11 @@ int main() {
             CHECK(c.adapters[0].role == Role::kTx);
             CHECK(c.adapters[1].bus == "5-1");
             CHECK(c.adapters[1].role == Role::kRx);
+            // adapters[].ifname is INERT since Pass 164 but still PARSED, and
+            // config_registry_test.py ties the registry entry to the accessor
+            // site. Pin the parse: dropping the accessor would silently drop
+            // the registry entry with it.
+            CHECK(c.adapters[1].ifname == "legacy0");
         }
         // Pass 164: the value is REJECTED, and the message names the
         // retirement rather than reporting an unknown kind — every pre-164
@@ -614,7 +620,7 @@ int main() {
         auto r = load_config_json(R"({
           "node":{"originator":9,"role":"rx","spectator":true,
                   "preferred_originator":17},
-          "adapters":[{"name":"rx0","ifname":"wlan0","role":"rx",
+          "adapters":[{"name":"rx0","bus":"5-1","role":"rx",
                        "channel":5805,"bw":20}],
           "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
                       "bind":{"kind":"frame-shm","name":"venc_frame"}}],

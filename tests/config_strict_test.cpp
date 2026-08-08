@@ -143,8 +143,10 @@ int main() {
     }
 
     // --- inert: the uplink-free case, which is the whole point --------------
-    // deploy/ground-192.168.2.199.json is this shape: a real spectator whose
-    // policy.return block is dead text (§15.2, PROTOCOL.md:4510).
+    // The RK3566 spectator archetype: a real spectator whose policy.return
+    // block is dead text (§15.2, PROTOCOL.md:4510). Its config,
+    // deploy/ground-192.168.2.199.json, was deleted in Pass 164 (node offline,
+    // could not be mirrored) -- this fixture is now the only copy of the shape.
     {
         const std::string ret =
             R"(, "policy": { "return": { "guard_us": 300, "quiet_gap": true } })";
@@ -276,29 +278,33 @@ int main() {
         CHECK(!has(clean, "adapters[].ifname", KeyVerdict::kInert));
         CHECK(!has(clean, "adapters[].calib_id", KeyVerdict::kInert));
     }
-    // The absolute-power keys are backend-conditional: dead on radio (the
-    // §10.5 lever is relative), live on the udp bench where the absolute arm
-    // still runs. This is the acceptance case for the live craft config,
-    // which carries calib_id AND max_power_qdb on devourer.
+    // REGRESSION PIN (pre-merge review, Pass 164). max_power_qdb and
+    // power_presets_qdb were briefly declared inert on radio. They are NOT:
+    // §15.3 tx_power_ceiling_qdb (app/main.cpp:3186), §15.5
+    // GET /api/v1/tx/power_tier (:5133), the ground override clamp that
+    // reaches the actuator (:1197) and the §10.7 sweep bound (:5934, :7041)
+    // all read them on a radio node, and BOTH flying configs set them. A
+    // predicate here tells the operator to delete a key that clamps TX power.
     {
         const char* kAbsAdapter =
             R"({ "name": "wlan0", "bus": "1-1", "role": "tx",
                  "channel": 5805, "bw": 20, "max_power_qdb": 84,
                  "power_presets_qdb": [60, 76, 84] })";
         const auto radio = findings_for(cfg_json(kAbsAdapter, ""));
-        CHECK(has(radio, "adapters[].max_power_qdb", KeyVerdict::kInert));
-        CHECK(has(radio, "adapters[].power_presets_qdb", KeyVerdict::kInert));
+        CHECK(!has(radio, "adapters[].max_power_qdb", KeyVerdict::kInert));
+        CHECK(!has(radio, "adapters[].power_presets_qdb", KeyVerdict::kInert));
         const auto udp = findings_for(cfg_json(kAbsAdapter, "",
             R"({ "kind": "udp", "tx": ["127.0.0.1:1"], "rx": ["0.0.0.0:1"] })"));
         CHECK(!has(udp, "adapters[].max_power_qdb", KeyVerdict::kInert));
         CHECK(!has(udp, "adapters[].power_presets_qdb", KeyVerdict::kInert));
     }
-    // Prefix-bleed guard, the trap that bit air.tx_retry_limit in #148: the
-    // neighbouring adapters[].power_* keys are the RELATIVE contract and must
-    // stay unpredicated, or Pass 164 would report the one power key every
-    // flying node depends on as dead.
+    // Prefix-bleed guard, the trap that bit air.tx_retry_limit in #148. These
+    // are the RELATIVE §10.5 contract plus the two absolute-ceiling keys
+    // above: every one is live on every backend and must stay unpredicated.
     for (const char* p : {"adapters[].power_offset_qdb",
                           "adapters[].power_offset_max_qdb",
+                          "adapters[].max_power_qdb",
+                          "adapters[].power_presets_qdb",
                           "adapters[].power_map", "adapters[].bus",
                           "adapters[].mac"}) {
         const KeyEntry* e = entry(p);

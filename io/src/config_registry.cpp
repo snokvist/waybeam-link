@@ -26,9 +26,12 @@ using json = nlohmann::json;
 
 // PROTOCOL.md:4510 — a spectator "generates no ARQ / NACK / LINK_REPORT
 // (return and §3.9 recovery paths no-op with no tx adapter)". The gate is the
-// TX adapter, not the spectator flag: deploy/cache-192.168.2.247.json is also
+// TX adapter, not the spectator flag: the Ethernet cache archetype is also
 // uplink-free and correctly omits policy.return, which keying on `spectator`
-// would have missed. Runtime: `iface()->has_tx()`, app/main.cpp:1657 / :3846.
+// would have missed. (Its config, deploy/cache-192.168.2.247.json, was deleted
+// in Pass 164 -- the node was offline and could not be mirrored -- so the
+// example is no longer checkable in-repo; the reasoning stands on the
+// archetype, not the file.) Runtime: `iface()->has_tx()`, app/main.cpp:1657 / :3846.
 //
 // has_tx() is per BACKEND, and only the RF one follows the adapters
 // (RadioAir::has_tx returns impl_->has_tx). UdpAir hardcodes
@@ -84,21 +87,24 @@ bool cache_store_enabled(const Config& c) { return c.cache.store.enabled; }
 // MAC and has deliberately no fallback tier, Pass 154 D3).
 bool never_live(const Config&) { return false; }
 
-// The absolute-power keys. §10.5 (Pass 150) made devourer's lever RELATIVE,
-// and every path that reads these two is on the non-relative arm:
-//   app/main.cpp:4753  set_backend_relative(air.kind == kRadio)
-//   app/main.cpp:3305  §11.7 0x0A tier apply: `if (backend_relative_) return false`
-//   app/main.cpp:3660  §10.2 curve resolve REFUSED on a relative backend,
-//                      which is what would have read PowerAdapter::ceiling
-//   app/main.cpp:2984  init_calibration clamps on max_power_qdb only in the
-//                      `else` of offset_window(), i.e. absolute space only
-//   app/main.cpp:3675  the §10.6 probe apply reads t.ceiling only under
-//                      `!backend_relative_`
-// So on radio — every flying node since Pass 164 — both are dead text. They
-// stay live on the udp bench, where those arms still run.
-bool backend_absolute(const Config& c) {
-    return c.air.kind != AirCfg::Kind::kRadio;  // app/main.cpp:4753
-}
+// DO NOT PREDICATE adapters[].max_power_qdb OR adapters[].power_presets_qdb.
+// Pass 164's first cut declared both inert on the radio backend, reasoning
+// that every reader sits on the `!backend_relative_` arm. That covers the
+// craft TxCore sites (`app/main.cpp:3305`, `:3660`, `:2984`, `:3675`) and
+// MISSES four that run on radio:
+//   app/main.cpp:3186  snap.link.tx_power_ceiling_qdb = *power_tier_ceiling()
+//                      — §15.3, ungated by backend
+//   app/main.cpp:5133  §15.5 GET /api/v1/tx/power_tier emits presets_qdb and
+//                      ceiling_qdb, ungated
+//   app/main.cpp:1197  ground UplinkPower::hw_qdb() clamps a §10.5 override
+//                      latch by ceiling_qdb — it REACHES THE ACTUATOR
+//   app/main.cpp:5934 / :7041  the §10.7 artifact placement and the sweep
+//                      bound are clamped by ceiling_qdb
+// Both keys are set on both flying configs, so the false predicate told the
+// operator to delete a key that clamps TX power. §15.2 says it plainly: the
+// §10.5 reference role went with kernel-monitor, the §10.3 ceiling role did
+// not. Caught by pre-merge review, not by the seven mutation tests — those
+// proved only that the tests agreed with the wrong model.
 
 const char* kWhyNoUplink =
     "this node has no role:\"tx\" adapter on an RF backend, so \u00a715.2 gives "
@@ -117,9 +123,7 @@ const char* kWhyCalibIdGone =
     "\u00a710.6 identity tiers 2-4 went with kernel-monitor (Pass 164); the "
     "radio backend keys the calibration artifact on the EFUSE MAC and has no "
     "fallback tier";
-const char* kWhyRelative =
-    "air.kind is radio, whose power lever is RELATIVE (\u00a710.5 Pass 150) — "
-    "absolute-qdb keys are refused on a relative backend (Pass 151)";
+
 
 const KeyEntry kKeys[] = {
     {"adapters",                                  KeyType::kArray},
@@ -129,12 +133,12 @@ const KeyEntry kKeys[] = {
     {"adapters[].channel",                        KeyType::kNumber},
     {"adapters[].ifname",                         KeyType::kString, never_live, kWhyIfnameGone},
     {"adapters[].mac",                            KeyType::kString},
-    {"adapters[].max_power_qdb",                  KeyType::kNumber, backend_absolute, kWhyRelative},
+    {"adapters[].max_power_qdb",                  KeyType::kNumber},
     {"adapters[].name",                           KeyType::kString},
     {"adapters[].power_map",                      KeyType::kString},
     {"adapters[].power_offset_max_qdb",           KeyType::kNumber},
     {"adapters[].power_offset_qdb",               KeyType::kNumber},
-    {"adapters[].power_presets_qdb",              KeyType::kArray, backend_absolute, kWhyRelative},
+    {"adapters[].power_presets_qdb",              KeyType::kArray},
     {"adapters[].role",                           KeyType::kString},
     {"air",                                       KeyType::kObject},
     {"air.ack_responder",                         KeyType::kBool},
