@@ -34,6 +34,7 @@
 #include "wblink/cache_store.h"
 #include "wblink/cache_udp.h"
 #include "wblink/config.h"
+#include "wblink/config_registry.h"
 #include "wblink/control_server.h"
 #include "wblink/modes.h"
 #include "wblink/crc8.h"
@@ -8556,8 +8557,12 @@ int run_loopback(const Loaded& l) {
 int usage(const char* argv0) {
     std::fprintf(stderr,
                  "usage: %s <tx|rx|loopback> -c <config.json> [--check]\n"
-                 "  --check  validate config + bindings and exit\n",
-                 argv0);
+                 "       %s config-schema [--json]\n"
+                 "  --check         validate config + bindings and exit\n"
+                 "  config-schema   print the declared §15.2 key surface to\n"
+                 "                  stdout (JSON is the only format; --json is\n"
+                 "                  accepted for symmetry with #106)\n",
+                 argv0, argv0);
     return 2;
 }
 
@@ -8574,6 +8579,28 @@ int main(int argc, char** argv) {
         return usage(argv[0]);
     }
     const std::string mode = argv[1];
+    // Reporting only: no config is loaded and no binding is opened, so this
+    // runs anywhere the binary does — including a craft overlay with no
+    // config staged yet. Data goes to stdout; the flight loop's §15.3 stats
+    // share that fd but are unreachable from here.
+    if (mode == "config-schema") {
+        for (int i = 2; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--json") != 0) {
+                return usage(argv[0]);
+            }
+        }
+        const std::string schema = config_schema_json();
+        // A schema this exits 0 on but did not finish writing is worse than no
+        // schema: the caller is usually a pipeline or a generator that will
+        // treat truncation as an empty key set. Check the write AND the flush
+        // — buffered output can fail at either.
+        if (std::fwrite(schema.data(), 1, schema.size(), stdout) != schema.size() ||
+            std::fflush(stdout) != 0) {
+            std::perror("config-schema: write");
+            return 1;
+        }
+        return 0;
+    }
     if (mode != "tx" && mode != "rx" && mode != "loopback") {
         return usage(argv[0]);
     }

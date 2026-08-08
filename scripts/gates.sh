@@ -143,6 +143,12 @@ EOF
         fi
         run "check $(basename "$c")" ./build/dev/waybeam-link "$m" -c "$c" --check
     done
+
+    # config-schema is the only CLI surface no test reaches: app_test
+    # suppresses main(), and config_schema_test exercises the function, not
+    # the mode. Runs the real binary end to end, which is what proves the
+    # argv branch and the write path work at all.
+    run "config-schema" ./build/dev/waybeam-link config-schema --json
 fi
 
 echo

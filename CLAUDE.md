@@ -61,6 +61,13 @@ before merge instead of stacking a correction on top.
   so an unrecognised key — a typo, or a name invented from an older example —
   is **silently ignored**. `--check` passing proves the config parses, not that
   it says what you meant. See "Authoring configs" below.
+  `waybeam-link config-schema --json` prints the declared key surface
+  (`io/src/config_registry.cpp`, 263 keys) so a key can be checked without
+  reading the loader. The registry is not a second source of truth:
+  `tests/config_registry_test.py` reconstructs every accessor site in
+  `config.cpp` and fails the build if the two disagree in either direction.
+  It publishes the surface — it does **not** yet reject an unknown key in a
+  config; that is `--strict`, #106 item 1 PR B.
 
 ## Verification playbook
 
@@ -108,7 +115,8 @@ Current phase order (operator direction, 2026-08-06): **consolidate → expand
 
 ## Authoring configs
 
-Node configs are dense (226 parsed keys) and **coupled across nodes**: the
+Node configs are dense (263 registered keys, `config-schema --json`) and
+**coupled across nodes**: the
 cache's `store.controller.endpoint` must equal the owning ground's
 `cache.repair.listen`, the ground's `cache.repair.caches[]` must name the
 cache's `store.listen` and `originator`, every receiver's
@@ -120,6 +128,11 @@ prose. Until the harness in `docs/config-harness-plan.md` exists:
 - **Verify every key against `io/src/config.cpp`, not against an example.**
   Examples and deployed configs can predate a rename; the loader cannot. A key
   the loader does not read is a silently dead line.
+  `waybeam-link config-schema --json | grep <key>` answers this faster and is
+  build-checked against the loader, so it cannot go stale the way an example
+  can. Note it answers "does this key exist", not "is it live on THIS node" —
+  a key can be registered and still be inert for the node's mode (§15.2
+  withholds `policy.return.*` from a `node.spectator`, for one).
 - `_`-prefixed keys are comments by convention (`_comment`,
   `_verify_timeout_ms`) and are the only keys allowed to be unknown.
 - Validate with `build/dev/waybeam-link <tx|rx> -c <cfg> --check`, then read
@@ -140,7 +153,7 @@ scripts/gates.sh            # EVERY merge gate; what CI runs. --quick = dev + ct
 ```
 
 Run that rather than a remembered checklist. It covers the eight presets, the
-61-suite `ctest`, the B7 embed check, the install/`find_package` round trip and
+64-suite `ctest`, the B7 embed check, the install/`find_package` round trip and
 the four `deploy/*.json` `--check`s, and it **fails on a diagnostic for our
 targets even when the build exits 0**. Toolchains the host lacks are SKIPPED
 loudly and counted separately — a skip is never a pass. Export
@@ -151,7 +164,7 @@ drift.
 The individual commands, when you want one of them:
 
 ```
-cmake --build --preset dev && ctest --preset dev   # 61 suites, ASan+UBSan
+cmake --build --preset dev && ctest --preset dev   # 64 suites, ASan+UBSan
 cmake --build --preset ssc338q                      # ARMv7 cross (SigmaStar target)
 ```
 

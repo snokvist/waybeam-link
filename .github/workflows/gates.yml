@@ -25,10 +25,17 @@ jobs:
       - name: Toolchain deps
         # GStreamer is optional (frame_shm_gst_bench is guarded on pkg-config
         # being present); everything else is vendored under third_party/.
+        #
+        # python3 is NOT optional: five suites need it, among them
+        # config_registry_test, which is the only guard keeping
+        # io/src/config_registry.cpp honest against io/src/config.cpp. Without
+        # it ctest registers a failing sentinel instead (tests/CMakeLists.txt).
+        # ubuntu-latest ships python3, so naming it here is about not depending
+        # on that staying true.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build g++ pkg-config libgstreamer1.0-dev \
+            cmake ninja-build g++ pkg-config python3 libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev
 
       # The runner exports ANDROID_NDK_ROOT / ANDROID_NDK_HOME itself, and
