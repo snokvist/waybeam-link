@@ -4,11 +4,13 @@
 `docs/review-log.md` Pass entry attached.**
 
 **Refreshed 2026-08-08 against `main` at Pass 163 (`56463c0`).** The first
-draft was written against Pass 148 and four of its twelve blockers have since
-been answered by work that landed for other reasons. Every symbol and line
-cited below was re-grepped at `56463c0`; the previous draft's numbers were
-stale by roughly 1,100 lines of `app/main.cpp` alone. What changed is recorded
-in §6 so a reader of the old version can see which conclusions moved.
+draft was written against Pass 148. Four of its twelve blockers have since
+been answered by work that landed for other reasons, and **one got worse** —
+B8, where a claim both drafts recorded as a safe expectation turns out to be
+false and to block the radio backend on Android outright (§2b). Every symbol
+and line cited below was re-grepped at `56463c0`; the previous draft's numbers
+were stale by roughly 1,100 lines of `app/main.cpp` alone. What changed is
+recorded in §6 so a reader of the old version can see which conclusions moved.
 
 **Citations are symbol-first.** Per `docs/devourer-parity-plan.md`'s standing
 warning, prefer the symbol name over the number when they disagree.
@@ -269,7 +271,7 @@ Only `WBLINK_RADIO` exists as an option today (`CMakeLists.txt:12`).
 
 | source | why it must become optional |
 |---|---|
-| `io/src/frame_shm.cpp` | `shm_open` — bionic does not provide POSIX shared memory. Expected to be a **link** failure on Android, not a runtime one; the `android-arm64` preset in phase 1a is what proves it rather than this table. |
+| `io/src/frame_shm.cpp` | `shm_open` — **confirmed absent from bionic**, and it is a *compile* failure, not the link failure the earlier drafts predicted. bionic documents the omission deliberately: `bits/posix_limits.h:69`, `#define _POSIX_SHARED_MEMORY_OBJECTS __BIONIC_POSIX_FEATURE_MISSING /* mmap/munmap are implemented, but shm_open/shm_unlink are not. */`. Zero `shm_open` symbols in `libc.so`. |
 | `io/src/control_server.cpp` | An HTTP listener a phone app does not want by default. |
 | `io/src/venc_http.cpp` | TX/vehicle-side actuation; dead weight on a receiver. |
 
@@ -311,19 +313,49 @@ consumer deletes its copy rather than maintaining a second one. Until then the
 drift compounds, and B11's resolution is unavailable on Android until that
 submodule is bumped.
 
-#### B8 — log and diagnostic sinks
+#### B8 — log and diagnostic sinks — **now a confirmed hard blocker, and it gates `RadioAir` itself**
 
 `io/src` writes to `stderr` in **28 places** (was 24): `air_radio.cpp` 15,
 `air_mon.cpp` 8, `venc_http.cpp` 2, and one each in `calib_store.cpp`,
-`frame_shm.cpp`, `config.cpp`. `RadioAir` builds a devourer `Logger` whose
-event and diag streams are `fopencookie` handles (`air_radio.cpp:521`,
-`:532`); the include comment at `:6` already calls it a "glibc/musl
-extension". bionic is expected to carry it from API 23 and `:wifi` is minSdk
-26 (`wifi/build.gradle.kts:12`), so it should not be a blocker — but that is
-an expectation, and the phase-1a preset is what settles it.
+`frame_shm.cpp`, `config.cpp`. That half is unchanged: a library must not own
+the consumer's stderr, and it needs an injectable sink (logcat / syslog /
+caller callback).
 
-The blocker that is *not* in doubt: a library must not own the consumer's
-stderr. Needs an injectable sink (logcat / syslog / caller callback).
+The other half was wrong in both earlier drafts. They said `fopencookie` "is
+expected to carry [on bionic] from API 23 … so it should not be a blocker —
+but that is an expectation, and the phase-1a preset is what settles it."
+**Measured 2026-08-08 against NDK 26.3.11579264 (the version `:wifi` itself
+pins), it does not exist at all:**
+
+```
+$ grep -rl fopencookie  <sysroot>/usr/include            → 0 files
+$ nm -D --defined-only  <sysroot>/.../26/libc.so | grep -c fopencookie → 0
+$ aarch64-linux-android26-clang++ t_fopencookie.cpp
+  error: unknown type name 'cookie_io_functions_t'
+```
+
+This is not a logging nicety. `RadioAir::create` builds both devourer sinks
+with it — the event stream that feeds the `tx.report` harvester and the diag
+stream that carries the Pass 147 log-volume bound (`air_radio.cpp:521`,
+`:532`). **The radio backend, the one thing Android definitely needs, does not
+compile on bionic today.**
+
+The remedy is cheap, which is why this is a scope change and not a redesign.
+bionic ships BSD `funopen`/`funopen64` instead — present in `libc.so`,
+declared `__INTRODUCED_IN(24)` under `__USE_BSD` (`stdio.h:232`), so it is
+available at `:wifi`'s minSdk 26. Both devourer sinks take a plain `FILE*`, so
+`funopen` is a drop-in behind a ~15-line adapter; the only real difference is
+the write callback's signature (`int(void*, const char*, int)` against
+`ssize_t(void*, const char*, size_t)`).
+
+Consequence for the phasing: **1a and 1c are coupled.** The `android-arm64`
+preset cannot come up green without at least the minimal `fopencookie` →
+`funopen` shim, so that shim moves forward into 1a. The preset stops being a
+discovery gate and becomes a regression gate — the discovery already happened,
+here.
+
+**Preserve on the way through:** `csa_psk` must never reach a log or stat
+(`CLAUDE.md`). A new sink is a new output path that touches config.
 
 **Preserve on the way through:** `csa_psk` must never reach a log or stat
 (`CLAUDE.md`). A new sink is a new output path that touches config.
@@ -479,11 +511,14 @@ waybeam-link equivalent.
 
 ### 4.1 Phase 1a, scoped
 
-Phase 1a can start immediately, and it is the gate that settles the two
-remaining unverified portability claims (`shm_open` and `fopencookie` on
-bionic). It is also **much smaller than B6 makes it sound**.
+Phase 1a can start immediately. Both portability claims the earlier drafts
+deferred to it are now **settled ahead of it** (§2b B6, B8): `shm_open` is
+absent from bionic and `fopencookie` is absent from bionic. So 1a is no longer
+a discovery step — it is the step that makes the two known absences
+structurally impossible to regress.
 
-The three optional units are **leaves**. Re-measured at `56463c0`:
+The *optional-unit* half of 1a is still **much smaller than B6 makes it
+sound**. The three optional units are **leaves**. Re-measured at `56463c0`:
 
 - Nothing in `io/` includes `frame_shm.h`, `wblink/venc.h` or
   `control_server.h` — each is included only by its own `.cpp`, by
@@ -498,12 +533,20 @@ The three optional units are **leaves**. Re-measured at `56463c0`:
 - The two remaining `MonAir` mentions in `io/src/air_radio.cpp` (`:142`,
   `:1279`) are both comments.
 
-**So the library half of 1a is CMake-only: three options and three
+**So the optional-unit half of 1a is CMake-only: three options and three
 `target_sources()` guards, with zero source edits in `io/`.** A `BindKind` a
 build cannot construct becomes a runtime config error, which is the honest
 outcome and needs no new machinery.
 
-Two wrinkles, both already solved by existing options:
+**But 1a is no longer CMake-only overall.** `air_radio.cpp` is not optional on
+Android — it is the whole point — and it does not compile against bionic
+(B8). The minimal `fopencookie` → `funopen` shim therefore lands inside 1a, or
+the preset cannot come up green. That is the one real source edit in the
+phase, it is confined to `air_radio.cpp`'s two sink constructions, and the
+rest of B8 (injectable sinks for the 28 `stderr` sites) stays in 1c where the
+draft put it.
+
+Two further wrinkles, both already solved by existing options:
 
 - `app/main.cpp` references all three unconditionally (`FrameShm` ×10 +
   `ShmOut` ×12, `ControlServer` ×6). Guarding those would be real surgery, and
@@ -524,10 +567,13 @@ Acceptance for 1a:
   `WBLINK_BUILD_APP`, all defaulting `ON`.
 - `dev`, `ssc338q`, `x86-ground`, `rk3566`, `ssc338q-au`, `ssc338q-eu`
   unchanged — same sources, same warnings, `ctest --preset dev` 60/60 green.
+- The `fopencookie` → `funopen` shim, with the glibc path byte-identical to
+  today (the shim selected by the platform, not by a new config knob).
 - A new `android-arm64` preset that builds `wblink_core` + `wblink_io` only,
-  radio on, the other three off, app and tests off, and **breaks the build if
-  bionic lacks `fopencookie`** — which is the entire point of adding it now
-  rather than discovering it in the consumer.
+  radio on, the other three off, app and tests off, **and comes up green** —
+  which now means the two known bionic absences are fenced, not that they are
+  discovered. NDK 26.3.11579264 is present on the dev host and is the version
+  `:wifi` pins, so this preset is buildable here today.
 
 ## 5. Loose ends worth knowing before starting
 
@@ -575,6 +621,15 @@ For a reader of the Pass-148 draft. Conclusions that moved:
   CMakeLists.
 - **B1 gained two implementation details** — the 6-attempt EBUSY retry loop
   and the `cacheDir` lock path.
+- **B8 went the wrong way, and it is the refresh's one genuinely new
+  blocker.** Both drafts expected `fopencookie` to exist on bionic and treated
+  it as a non-blocker. Measured against NDK 26.3.11579264 it is absent
+  entirely — headers and `libc.so` both — so `RadioAir` does not compile on
+  Android today. `funopen` is the ~15-line remedy, but the shim moves into
+  Phase 1a, which is therefore no longer CMake-only. The lesson is the
+  document's own: the two claims flagged as "expectations, settled by the
+  phase-1a preset" were settled by *running the compiler for ten seconds*
+  instead, and one of the two was wrong.
 
 Numbers that moved: `app/main.cpp` 7,540 → **8,635**; `run_rx` ~2,360 →
 **~2,600**; ctest 46 → **60** suites; `io/src` stderr sites 24 → **28**;
