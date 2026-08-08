@@ -24,6 +24,42 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 163 — sequence-derived rate probing: the §9.2 numerator closed, probe as veto (2026-08-08)
+
+**Verdict.** Issue #101's code stages, on two operator rulings: the probe
+changes the **MCS and nothing else** (2026-08-06 — `probe_per` is RATE
+headroom, not profile headroom) and the schedule is **up-candidate only**
+(2026-08-08 — no down-slot; downshift stays loss-driven; the up-candidate's
+PER is what `probe_per` reports, settling the §3.5 reporting shape without
+widening the field). A first-send video DATA frame with
+`seq % probe_period == probe_slot` flies the next ascending-id profile's
+`mcs` at the current rung's power/GI/payload; both ends derive the probe
+set from `seq` alone. Rate a pure function of seq closes §9.2's open
+numerator: a missing probe-slot seq's rate is known by computation.
+Evidence is a **veto, never a warrant** — fresh `probe_per ≥
+probe_veto_permille` suppresses both climb paths (Pass 160 shape); nothing
+promotes on probe evidence alone. Receiver window enforces three guards:
+rate-verified successes, epoch-gated gap losses, CRC-errored frames
+attribute rate-free (descriptor rate is pre-FCS) and seq-free; any
+operating-context change resets the window. Enablement is fail-closed:
+`air.mcs_probe` default off, radio-only, per-unit stage-0 proof required
+(findings.md 2026-08-08); RX side needs no knob — rate-verification makes
+one-sided enablement inert stats.
+
+**Changed.** §3.5 `probe_per` row (up-candidate rate PER); §3.6 canonical
+form appends `probe_period`/`probe_slot` u16s after `floor_profile` — a
+deliberate fleet-lockstep `table_version` rotation, vendored golden hashes
+recompute; §9.2 heading + numerator note + ceiling wording; §9.4 rewritten
+(probe subsections replace the deferred "v1 active probe"); §15.2
+`air.mcs_probe`, `policy.select.probe_veto_permille`/`probe_veto_ttl_s`;
+§15.3 `promote_blocked_probe`; §17 probe schedule/window seed row.
+
+**Evidence.** Stage-0 premise device-proven on all three fleet dies,
+per-frame rate-verified with CCX cross-check, retry walk dormant on
+broadcast (findings.md 2026-08-08; issue #101). Window guards and veto
+semantics from devourer `rc_proto.py`/`score.py` (constants re-seeded as
+§17 RE-DERIVE, not copied).
+
 ## Pass 162 — RX-only devourer bring-up: spectator/cache leave kernel-monitor (2026-08-08)
 
 **Verdict.** B2 of ruling #120 (devourer sole in-tree backend): `RadioAir`
