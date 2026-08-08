@@ -677,7 +677,10 @@ receiving node. And on Android, in this order:
    answer and calibration is simply unavailable on Android — which must read
    as STALE, never as a silent apply.
 3. Replace the leech in `wifi_jni.cpp` with the library and delete `:wifi`'s
-   duplicated CMake wiring.
+   duplicated CMake wiring. **Resolve the claimed interface number here**
+   (`find_wifi_interface()` before the claim, §4.2) — composite BT+WiFi
+   dongles are a phone-population problem, not a fleet one, and it needs a
+   composite adapter on the bench to verify.
 4. Keep the survey/inspect JNI surface — it is genuinely useful and has no
    waybeam-link equivalent.
 
@@ -904,6 +907,30 @@ the `RadioAir`, and closing it is the caller's job.
   for a library consumer that retries in-process (Android, after a permission
   grant). Adapters are now owned by `Impl` from allocation, so `~Impl` runs
   over the half-built one. Same probe after the fix: 0.
+
+**One gap stays open and belongs to Phase 3: the claimed interface number.**
+`RadioAir` claims interface `0` (`air_radio.cpp`, both device sources), and
+so does the Android JNI today, so nothing regresses. But devourer's own header
+says `find_wifi_interface()` **must** run first, because composite RTL8822BU
+adapters put Bluetooth on interfaces 0/1 and WiFi on 2
+(`third_party/devourer/src/UsbOpen.h`). Our fleet's 8812AU/CU/EU are not
+composite, which is why this has never bitten. The fd path opens the door to
+exactly the population where it would — a phone claiming whatever dongle the
+user plugs in — so it must be fixed before Android ships, and it needs a
+composite adapter on a bench to verify, which is why it is not fixed here.
+
+**Review-driven changes worth carrying forward as method notes.** The
+pre-merge review found no defect in the production change, and one CRITICAL
+**in the new test**: a case asserting the `-1 = enumerate` semantics ran a
+full enumerated bring-up, which on this host only failed because
+`/dev/bus/usb` is root-owned. On a bench rig with the usbfs udev rule that
+lets `waybeam-link` run unprivileged, it would have reset and brought up live
+flight hardware inside `ctest`. Two rules fall out: **a unit test must never
+let `create()` enumerate**, and a case that reaches the device open must
+supply an fd that is provably not a USB device (the test uses `/dev/null`,
+verified by `strace`: no device node opened, no sysfs walk). The same review
+also showed one assertion passing for the wrong reason — a mac-pin case whose
+pinned stanza was never reached because an earlier stanza failed first.
 
 **B11's unproven leg is now reachable but still unrun.** `do_reset=false` with
 `InitWrite` and the EFUSE walk is expressible for the first time; running it

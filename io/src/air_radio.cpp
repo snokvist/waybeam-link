@@ -92,6 +92,9 @@ struct RadioAir::Impl {
     struct Adapter {
         std::string name;
         std::string path;
+        // "bus:devaddr" — the one physical-unit key both device sources can
+        // answer (a wrapped fd has no port path). Claim-time only.
+        std::string dev_key;
         // §10.6 (Pass 154) per-unit EFUSE MAC ("aa:bb:cc:dd:ee:ff", lowercase),
         // read once after InitWrite (the 8822E caches it during hal init and
         // its OTP is not reliably readable later; the 8822C walks on demand).
@@ -518,8 +521,18 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     bool any_fd = false;
     for (size_t i = 0; i < cfg.adapter_fds.size(); ++i) {
         const int fd = cfg.adapter_fds[i];
-        if (fd < 0) {
+        if (fd == -1) {
             continue;  // -1 = enumerate this stanza, today's path
+        }
+        // Only -1 means "enumerate". Any other negative is a caller mistake —
+        // a stashed -EBADF, a default-constructed sentinel — and silently
+        // enumerating on it is the opposite of the posture everywhere else
+        // in this block.
+        if (fd < 0) {
+            return Result<RadioAir>::fail(
+                "radio: adapter \"" + cfg.adapters[i].name +
+                "\": adapter_fds holds " + std::to_string(fd) +
+                "; only -1 means \"enumerate this stanza\"");
         }
         any_fd = true;
         // A bus pin names a port to enumerate; a wrapped fd is already open
@@ -657,10 +670,16 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
             const int wrc = libusb_wrap_sys_device(
                 ad->ctx, static_cast<intptr_t>(fd), &ad->handle);
             if (wrc != 0 || ad->handle == nullptr) {
+                // libusb writes the handle only on success, so the null arm
+                // is defensive — report the code, never libusb_strerror(0),
+                // which would say "Success" on a failure line.
                 return Result<RadioAir>::fail(
                     "radio: adapter \"" + ad->name + "\": libusb_wrap_sys_device"
                     " on fd " + std::to_string(fd) + " failed (" +
-                    libusb_strerror(static_cast<libusb_error>(wrc)) + ")");
+                    (wrc != 0
+                         ? libusb_strerror(static_cast<libusb_error>(wrc))
+                         : "no handle") +
+                    ")");
             }
             // libusb fills no port numbers on the wrap path, so there is no
             // real bus path here. `by_fd` — not this string — is what keeps
@@ -724,6 +743,43 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
             ad->path = found_path;
         }
 
+        // Two stanzas must not end up on one physical unit. used_paths
+        // covers that within the enumeration, but a wrapped fd never appears
+        // there — and devourer's advisory lock does not close the gap
+        // either, because its key is the port path for an enumerated device
+        // and bus+devaddr for a wrapped one (a wrapped device has no port
+        // numbers), so the same dongle claimed both ways takes two different
+        // locks. Without this the collision still fails closed, but via the
+        // kernel claim: 1.5 s of BUSY retries and then "in use?", blaming a
+        // process that does not exist. bus+devaddr is the one key both
+        // sources can answer, and it is only readable once the handle is open.
+        //
+        // Bus 0 is libusb's own "I could not read the bus number" sentinel on
+        // the wrap path (op_wrap_sys_device: sysfs unavailable → CONNECTINFO,
+        // which reports devnum only, "linux starts numbering buses from 1").
+        // Two genuinely different dongles would then both key as "0:<devnum>"
+        // and could collide — and that is the unrooted-Android case, i.e.
+        // exactly the configuration this feature exists to serve. So an
+        // unreliable key does not participate: refusing a valid two-adapter
+        // node is a worse failure than the slow BUSY this check optimises.
+        {
+            libusb_device* d = libusb_get_device(ad->handle);
+            const uint8_t bus = libusb_get_bus_number(d);
+            if (bus != 0) {
+                ad->dev_key = std::to_string(bus) + ":" +
+                              std::to_string(libusb_get_device_address(d));
+                for (size_t j = 0; j < i; ++j) {
+                    const Impl::Adapter& other = *im.adapters[j];
+                    if (other.dev_key == ad->dev_key) {
+                        return Result<RadioAir>::fail(
+                            "radio: adapters \"" + other.name + "\" and \"" +
+                            ad->name + "\" resolve to the same USB device (" +
+                            ad->dev_key + ")");
+                    }
+                }
+            }
+        }
+
         // B4/B5: reset and lock directory are now caller-chosen. Only the
         // plain claim is ever used — never claim_interface_reset_reopen,
         // whose recovery re-finds the device by bus+port path, which an
@@ -737,17 +793,18 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // (Waybeam-android wifi_jni.cpp build_device). BUSY is the only
         // retried code — it is never a configuration error, so waiting
         // cannot mask one, and every other failure still returns at once.
+        constexpr int kClaimAttempts = 6;
         int rc = 0;
-        for (int attempt = 0; attempt < 6; ++attempt) {
+        for (int attempt = 1; attempt <= kClaimAttempts; ++attempt) {
             rc = devourer::claim_interface_then_reset(ad->handle, 0, im.logger,
                                                       cfg.do_reset, ad->lock,
                                                       cfg.lock_dir);
-            if (rc != LIBUSB_ERROR_BUSY) {
-                break;
+            if (rc != LIBUSB_ERROR_BUSY || attempt == kClaimAttempts) {
+                break;  // no sleep and no "retrying" line after the last try
             }
             std::fprintf(stderr,
-                         "radio: adapter \"%s\" claim BUSY, retrying (%d/6)\n",
-                         ad->name.c_str(), attempt + 1);
+                         "radio: adapter \"%s\" claim BUSY, retrying (%d/%d)\n",
+                         ad->name.c_str(), attempt, kClaimAttempts - 1);
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
         if (rc != 0) {

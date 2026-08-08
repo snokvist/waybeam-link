@@ -88,6 +88,12 @@ struct RadioAirCfg {
     // An fd-supplied stanza has no bus path (libusb fills no port numbers on
     // the wrap path), so it is excluded from bus-path claiming entirely; the
     // §15.2 mac re-bind still binds it, because identity is read off the die.
+    //
+    // "Parallel" means parallel AT CLAIM TIME, exactly as a bus pin is. With
+    // any mac pin present the §15.2 re-bind may hand adapters[i] a different
+    // physical unit than adapter_fds[i] opened — that is the point of the
+    // re-bind, and it displaces a bus pin the same way (loudly, on stderr).
+    // Do not read adapter_fds[i] as "the fd behind adapter i" afterwards.
     std::vector<int> adapter_fds;
 
     // B4: libusb_reset_device during the claim. True is today's hardcoded
