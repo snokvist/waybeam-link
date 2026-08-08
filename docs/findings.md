@@ -47,13 +47,16 @@ rx_ldpc 0/3738. `air.stbc`: rx_stbc 1878/1878. No caps refusal on the
 Jaguar1 TX die. **Open:** the cliff A/B (PER shift at range) — needs
 attenuation the bench can't produce at 30 cm.
 
-**#98/#125 saturation knee — instrument PASS, knee unreachable in-law.**
-MCS7 pinned, offset swept the full legal range −24→0 qdb (safe end first):
-peak RSSI −17→−12 tracked the commanded 6 dB, SNR 33–36, EVM −30..−34
-(valid throughout), PER 0‰ at every dwell. The §10.3/§10.5 law caps at
-offset 0, so the PA knee sits above what config can command at this
-antenna spacing. **Open:** knee reproduction needs a physical change
-(antennas nearer / no attenuator) — operator hardware action.
+**#98/#125 saturation knee — instrument PASS, knee not reached at the
+default offset cap.** MCS7 pinned, offset swept −24→0 qdb (safe end
+first): peak RSSI −17→−12 tracked the commanded 6 dB, SNR 33–36, EVM
+−30..−34 (valid throughout), PER 0‰ at every dwell. *Corrected
+2026-08-08:* the original "unreachable in-law" conclusion was wrong —
+offset 0 is only the `power_offset_max_qdb` **default**, an
+operator-authored key, and the calibration-v2 window spans [−24,+24].
+**Open:** config-only rerun first (max raised to +24, sweep 0→+24 from
+the safe end, issue #134); physical geometry only if that still doesn't
+reach compression.
 
 **#96 unicast A/B — mechanism PASS; retry distribution degenerate at
 bench SNR.** A-leg: 236 unicast returns, fallback 0 (SA latched from
@@ -67,8 +70,12 @@ units.** Ground uplink = c812: release-lateness mean 2261 µs (n=1373,
 max 27 ms, ZERO releases under 1 ms), driven by `ReadTsf` mean 1234 µs —
 the ±1000 µs window is structurally unreachable. Ground uplink = AU:
 `ReadTsf` mean 184 µs (max 441), lateness mean 1462 µs with a healthy
-sub-50 µs population (102) and tail bounded at 7.4 ms. Matches the
-2026-08-07 Jaguar1-vs-Jaguar3 finding almost exactly (2.2 ms class).
+sub-50 µs population (102) and tail bounded at 7.4 ms. The c812 number
+matches the 2026-08-07 Jaguar3 finding (2.2 ms class). **Caveat:** the
+AU-leg absolute lateness (1462 µs mean) does NOT reconcile with the
+2026-08-07 Jaguar1 p99 ≈ 101 µs — pacer parameters were not matched
+between runs, so only the relative die comparison is quotable until a
+matched-methodology rerun (issue #134).
 
 **#95/#100 scout on-air — Pass 161 machinery verified; out-ranking is
 geometry-limited; craft-home non-inflation CONFIRMED.** Leg 1 (CU flood
@@ -80,10 +87,15 @@ channel-attributable. The discriminator that survives: **burstiness** —
 the interferer when the first saturates. Leg 2 (decodable net-0 craft on
 5805 at 120 pps): 5805 `wifi_util` 165 with the **lowest** interference
 index of all bins (363 vs 620–715) — decodable home traffic lands in the
-wifi axis and does NOT inflate the FA index. #100 mechanics on air:
-rounds folded (3–4), domain = the scout's EFUSE MAC, rejects gauges all
-zero, confidence seeded correctly. **Open:** true out-ranking (loaded bin
-worse than quiet bins from the same ear) needs physical separation.
+wifi axis and does NOT inflate the FA index. Implication for the #95
+out-ranking gate: an in-band decodable interferer *depresses* its own
+channel's FA index (valid PHY detections are not false alarms), so
+out-ranking must be judged on **total util** (both axes), never on the
+FA/interference axis alone. #100 mechanics on air: rounds folded (3–4),
+domain = the scout's EFUSE MAC, rejects gauges all zero, confidence
+seeded correctly. **Open:** true out-ranking (loaded bin worse than
+quiet bins from the same ear) needs physical separation — judged on
+total util per the above.
 
 **Pass 162 RX-only bring-up (B2 follow-up) — PASS on hardware.** CU
 brought up RX-only (full Jaguar3 init + IQK), EFUSE MAC read, 8 s stats
