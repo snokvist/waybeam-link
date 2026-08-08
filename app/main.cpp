@@ -3864,8 +3864,13 @@ struct RxCore {
         if (const DataView* v = std::get_if<DataView>(&dec)) {
             // §9.4 Pass 163: the probe window tracks the video stream only,
             // scoped to one sender tuple — a different tuple is another
-            // operating context and resets the evidence.
-            if (v->hdr.stream_type == stream_type::kRtp) {
+            // operating context and resets the evidence. Review fix: gate on
+            // the ACCEPTED originator (0 = none yet), or an interleaving
+            // stranger stream (Pass 144: they do reach this callback)
+            // thrash-resets the window and silently suppresses the veto.
+            if (v->hdr.stream_type == stream_type::kRtp &&
+                probe_originator_ != 0 &&
+                v->hdr.prefix.originator == probe_originator_) {
                 const StreamKey key{v->hdr.prefix.originator,
                                     v->hdr.prefix.session_id,
                                     v->hdr.stream_id};
@@ -3981,6 +3986,11 @@ struct RxCore {
     // backend, delta-fed by the loop (the bodies were dropped pre-parse).
     void on_crc_frames(uint8_t rx_mcs, uint32_t count, uint64_t now) {
         probe_window_.on_crc_frames(rx_mcs, count, now);
+    }
+
+    // §9.4 Pass 163: the loop's active selection scopes the probe feed.
+    void set_probe_originator(uint16_t originator) {
+        probe_originator_ = originator;
     }
 
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
@@ -4363,6 +4373,7 @@ struct RxCore {
     // probes or the backend has no PHY rate).
     McsProbeWindow probe_window_;
     std::optional<StreamKey> probe_key_;
+    uint16_t probe_originator_ = 0;  // accepted sender; 0 = feed disabled
     uint64_t verdict_emit_ms_ = 0;  // §3.16 Pass 159 ≤1 Hz emit guard
     uint32_t feedback_period_ms_ = 0;
     uint64_t next_feedback_ms_ = 0;
@@ -7897,13 +7908,21 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 std::memcpy(tmp, f, n);
                 (void)air.value->inject_return(target, tmp, n, false);
             };
-        // §9.4 Pass 163 guard 3: feed CRC-errored descriptor rates to the
-        // probe window as deltas (the backend dropped the bodies pre-parse).
+        // §9.4 Pass 163: scope the probe feed to the accepted sender, then
+        // feed CRC-errored descriptor rates as deltas (guard 3 — the
+        // backend dropped the bodies pre-parse).
+        rx.set_probe_originator(active_selection.originator);
         {
             static uint64_t crc_last[kRxMcsBuckets] = {};
             uint64_t crc_now[kRxMcsBuckets];
             if (air.value->crc_mcs_totals(crc_now)) {
                 for (size_t m = 0; m < kRxMcsBuckets; ++m) {
+                    if (crc_now[m] < crc_last[m]) {
+                        // Counter regressed (backend recreate): resync
+                        // without feeding a wrapped delta.
+                        crc_last[m] = crc_now[m];
+                        continue;
+                    }
                     const uint64_t d = crc_now[m] - crc_last[m];
                     if (d != 0) {
                         rx.on_crc_frames(

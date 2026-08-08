@@ -49,7 +49,8 @@ struct ProfileTable {
     uint16_t probe_slot = 0;
 };
 
-// Canonical serialization size: count u8 + 27 B per profile + floor u8.
+// Canonical serialization size: count u8 + 27 B per profile + floor u8 +
+// probe schedule 4 B (period u16 + slot u16, Pass 163).
 // (25 B pinned fields + max_payload u16 appended, §9.3.)
 inline constexpr size_t kCanonicalProfileSize = 27;
 
@@ -58,7 +59,8 @@ inline constexpr size_t kCanonicalProfileSize = 27;
 bool has_duplicate_ids(const ProfileTable& table);
 
 // §3.6 canonical binary serialization: count u8, then each profile sorted
-// ascending by id in the pinned big-endian field order, then floor_profile.
+// ascending by id in the pinned big-endian field order, then floor_profile,
+// then probe_period u16 + probe_slot u16 (Pass 163).
 // Precondition: unique ids, profiles.size() <= 255.
 std::vector<uint8_t> canonical_serialize(const ProfileTable& table);
 

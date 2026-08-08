@@ -38,10 +38,15 @@ set from `seq` alone. Rate a pure function of seq closes §9.2's open
 numerator: a missing probe-slot seq's rate is known by computation.
 Evidence is a **veto, never a warrant** — fresh `probe_per ≥
 probe_veto_permille` suppresses both climb paths (Pass 160 shape); nothing
-promotes on probe evidence alone. Receiver window enforces three guards:
+promotes on probe evidence alone. Receiver window enforces four guards:
 rate-verified successes, epoch-gated gap losses, CRC-errored frames
-attribute rate-free (descriptor rate is pre-FCS) and seq-free; any
-operating-context change resets the window. Enablement is fail-closed:
+attribute rate-free (descriptor rate is pre-FCS) and seq-free, and — third
+ruling, 2026-08-08, from the pre-merge review — **failure-only evidence
+never reports**: at least one direct candidate-rate observation (success or
+CRC-verified failure) is required, or a non-probing TX on the fleet-shared
+schedule would manufacture a phantom veto from ordinary air loss. Any
+operating-context change resets the window (TX-side too: rung transitions
+clear the selector's probe evidence). Enablement is fail-closed:
 `air.mcs_probe` default off, radio-only, per-unit stage-0 proof required
 (findings.md 2026-08-08); RX side needs no knob — rate-verification makes
 one-sided enablement inert stats.

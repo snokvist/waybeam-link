@@ -112,6 +112,30 @@ int main() {
         CHECK(per > 350 && per < 650);
     }
 
+    // ---- guard 4: failure-only evidence never reports -----------------
+    // A NON-probing TX (stage-0-unproven die, probing off) on a
+    // probe-scheduled table: non-probe frames confirm, environmentally lost
+    // probe-slot seqs accrue as failures — but with zero direct
+    // candidate-rate observations the window must report nothing, or
+    // ordinary air loss manufactures a phantom veto (operator ruling
+    // 2026-08-08).
+    {
+        McsProbeWindow w(&t, tv, prm);
+        for (uint32_t s = 0; s < 320; ++s) {
+            if (probe_slot_hit(s, t.probe_period, t.probe_slot)) {
+                continue;  // TX never probed; slot seqs simply lost
+            }
+            w.on_data(s, 2, tv, 1, kT0);
+        }
+        CHECK(w.confirmed());
+        CHECK(w.failures() > 0);
+        CHECK(!w.probe_per(kT0).has_value());
+        // One direct observation (a CRC-verified candidate failure) makes
+        // the accrued evidence reportable.
+        w.on_crc_frames(3, 1, kT0);
+        CHECK(w.probe_per(kT0).has_value());
+    }
+
     // ---- guard 2: gap losses are epoch-gated --------------------------
     // TX demonstrably NOT flying the commanded rate (non-probe frames at a
     // different MCS) => un-confirmed => missing probe slots attribute

@@ -1260,6 +1260,18 @@ Result<Config> load_config_json(const std::string& json_text) {
                 "air.mcs_probe is a radio-backend key (§15.2 Pass 163); "
                 "remove it or set air.kind \"radio\"");
         }
+        // ...and a TX-NODE property: on an rx-role node it would be a
+        // silently dead knob (apply_probe is installed only in the tx loop).
+        if (cfg.air.mcs_probe && cfg.node.role != Role::kTx) {
+            return Result<Config>::fail(
+                "air.mcs_probe is a TX-node key (§15.2 Pass 163); only a "
+                "role \"tx\" node probes");
+        }
+        if (cfg.policy.select.probe_veto_permille > 1000) {
+            return Result<Config>::fail(
+                "policy.select.probe_veto_permille must be 0..1000 "
+                "(§9.4 Pass 163; above 1000 the veto could never fire)");
+        }
 
         // §15.2 (Pass 154): adapters[].mac is the radio backend's EFUSE
         // identity pin — on any other backend it would be a silently dead

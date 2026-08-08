@@ -1816,7 +1816,16 @@ injection model has no such side stream, so that mechanism is **dropped**.
   is flying the commanded rate, and a mismatch un-confirms; (3) **CRC-errored
   frames attribute rate-free** — the body is untrusted so they never advance
   the gap walk, but the descriptor rate is pre-FCS, so a corrupt frame at the
-  candidate rate is a rate-verified failure, pushed seq-free. Any change of
+  candidate rate is a rate-verified failure, pushed seq-free; (4) **evidence
+  reports only after the candidate rate has been directly observed at least
+  once this window** — a rate-verified success or a CRC-verified failure
+  (operator ruling 2026-08-08). Without (4), a non-probing TX (probing is
+  per-unit while the table is fleet-shared) satisfies (2) on every non-probe
+  frame and ordinary air loss on probe-slot seqs manufactures a
+  full-strength phantom veto; the window cannot otherwise distinguish
+  "candidate failing" from "TX not probing". The one case (4) forfeits — a
+  candidate failing with zero PHY detections — is already held by the RSSI
+  floor. Any change of
   the sender's `active_profile`, `table_version` or reporter identity
   **resets the window** — evidence from another operating context must never
   gate or clear a veto. Because the receiver rate-verifies, one-sided

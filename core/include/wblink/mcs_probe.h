@@ -33,9 +33,18 @@ std::optional<uint8_t> probe_up_candidate_mcs(const ProfileTable& table,
 //   2. gap losses are epoch-gated (attributed only while non-probe frames
 //      confirm the TX is flying the commanded rate);
 //   3. CRC-errored frames attribute rate-free and seq-free (descriptor rate
-//      is pre-FCS) — they never advance the gap walk.
+//      is pre-FCS) — they never advance the gap walk;
+//   4. evidence reports only after the candidate rate has been DIRECTLY
+//      observed at least once this window (a rate-verified success or a
+//      CRC-verified failure) — a non-probing TX on a probe-scheduled table
+//      produces zero candidate-rate observations, so ordinary air loss on
+//      probe-slot seqs can never manufacture a veto (operator ruling
+//      2026-08-08).
 // Any operating-context change (active_profile, table_version, sender
 // identity — the caller resets on identity change) resets the window.
+// Wrap posture: seq comparisons are absolute (u32 monotonic per §3.1, no
+// wrap within a flight). A same-session seq regression leaves the window
+// inert until the context resets or evidence ages out — fail closed.
 class McsProbeWindow {
   public:
     struct Params {
@@ -90,6 +99,7 @@ class McsProbeWindow {
     uint64_t window_start_ms_ = 0;
     uint32_t successes_ = 0;
     uint32_t failures_ = 0;
+    uint32_t candidate_observed_ = 0;  // guard 4: direct observations
 
     // Seq dedup/gap state: bitmap over the last kSeenBits seqs behind head.
     static constexpr uint32_t kSeenBits = 1024;

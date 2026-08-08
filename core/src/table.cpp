@@ -29,7 +29,7 @@ std::vector<uint8_t> canonical_serialize(const ProfileTable& table) {
               [](const Profile* a, const Profile* b) { return a->id < b->id; });
 
     std::vector<uint8_t> out;
-    out.reserve(2 + kCanonicalProfileSize * sorted.size());
+    out.reserve(2 + kCanonicalProfileSize * sorted.size() + 4);
     out.push_back(static_cast<uint8_t>(sorted.size()));
     for (const Profile* p : sorted) {
         uint8_t f[kCanonicalProfileSize];

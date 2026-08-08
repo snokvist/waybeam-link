@@ -348,16 +348,24 @@ int main() {
                      "air.stbc is a radio-backend key");
     }
     // --- §15.2 air.mcs_probe (Pass 163) -------------------------------------
-    // Default off; radio accepts; any other backend refuses (same posture).
+    // Default off; radio TX node accepts; any other backend refuses (same
+    // posture), and so does an rx-role node (silently dead knob otherwise).
     {
         auto r = load_config_json(R"({
-          "node": {"originator": 3, "role": "rx"},
+          "node": {"originator": 3, "role": "tx"},
           "air": {"kind": "radio", "mcs_probe": true}})");
         CHECK(bool(r));
         if (r) CHECK(r.value->air.mcs_probe);
-        expect_error(R"({"node":{"originator":3,"role":"rx"},
+        expect_error(R"({"node":{"originator":3,"role":"tx"},
           "air":{"kind":"udp","mcs_probe":true}})",
                      "air.mcs_probe is a radio-backend key");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","mcs_probe":true}})",
+                     "air.mcs_probe is a TX-node key");
+        expect_error(R"({"node":{"originator":3,"role":"tx"},
+          "air":{"kind":"radio"},
+          "policy":{"select":{"probe_veto_permille":1500}}})",
+                     "probe_veto_permille");
     }
     // Both hybrid halves on at once: the refusal names ack_responder (the
     // message ternary's first branch), and the udp dev backend is a second

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // §9.4 Pass 163 — sequence-derived rate probe: candidate derivation + the
-// RX evidence window (three normative guards; see mcs_probe.h).
+// RX evidence window (four normative guards; see mcs_probe.h).
 #include "wblink/mcs_probe.h"
 
 #include <cstring>
@@ -41,6 +41,7 @@ void McsProbeWindow::reset() {
     confirmed_ = false;
     successes_ = 0;
     failures_ = 0;
+    candidate_observed_ = 0;
     have_head_ = false;
 }
 
@@ -97,6 +98,7 @@ void McsProbeWindow::on_data(uint32_t seq, uint8_t active_profile,
     if (now_ms - window_start_ms_ > p_.max_age_ms) {
         successes_ = 0;
         failures_ = 0;
+        candidate_observed_ = 0;
         window_start_ms_ = now_ms;
     }
     bool first_arrival;
@@ -111,7 +113,10 @@ void McsProbeWindow::on_data(uint32_t seq, uint8_t active_profile,
         // Recycle bitmap bits for the seqs entering the window.
         const uint32_t delta = seq - head_seq_;
         if (delta >= kSeenBits) {
+            // Bitmap knowledge died across the blackout, and nothing during
+            // it confirmed the commanded rate — skip, never attribute.
             std::memset(seen_, 0, sizeof(seen_));
+            walked_seq_ = seq;
         } else {
             for (uint32_t s = head_seq_ + 1; s != seq + 1; ++s) {
                 const uint32_t bit = s % kSeenBits;
@@ -138,6 +143,7 @@ void McsProbeWindow::on_data(uint32_t seq, uint8_t active_profile,
         // lag) is ignored, never mis-credited.
         if (first_arrival && candidate_ && rx_mcs == *candidate_) {
             ++successes_;
+            ++candidate_observed_;  // guard 4
         }
         return;
     }
@@ -159,6 +165,7 @@ void McsProbeWindow::on_crc_frames(uint8_t rx_mcs, uint32_t count,
     if (now_ms - window_start_ms_ > p_.max_age_ms) {
         successes_ = 0;
         failures_ = 0;
+        candidate_observed_ = 0;
         window_start_ms_ = now_ms;
     }
     // Guard 3: the descriptor rate is pre-FCS — a corrupt frame at the
@@ -166,6 +173,7 @@ void McsProbeWindow::on_crc_frames(uint8_t rx_mcs, uint32_t count,
     // advances the gap walk; the body is untrusted).
     if (rx_mcs == *candidate_) {
         failures_ += count;
+        candidate_observed_ += count;  // guard 4
     }
 }
 
@@ -177,7 +185,9 @@ std::optional<uint16_t> McsProbeWindow::probe_per(uint64_t now_ms) const {
         return std::nullopt;  // stale evidence gates nothing
     }
     const uint32_t total = successes_ + failures_;
-    if (total < p_.min_samples) {
+    if (total < p_.min_samples || candidate_observed_ == 0) {
+        // Guard 4: no direct candidate-rate observation => "TX not probing"
+        // is indistinguishable from "candidate failing" — report nothing.
         return std::nullopt;
     }
     const uint32_t per =
