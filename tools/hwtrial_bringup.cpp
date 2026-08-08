@@ -25,6 +25,19 @@
 //   hwtrial_bringup --fd 5/2 --fd 8/4         # wrapped fds (needs usbfs rw)
 //   hwtrial_bringup --fd 5/2 --bus 5-2        # duplicate-unit guard: must FAIL
 //
+// `--tx N` is the one mode that RADIATES. It makes the single adapter a
+// role:"tx" uplink and injects N §3.0 frames at MCS 0 (the most robust rate)
+// and a low TX power, then reports submitted/failed and the CCX report
+// counters. Pair it with a second process running an RX ear on the same
+// channel and a DIFFERENT --originator: RadioAir drops frames stamped with
+// its own originator, so one process can never hear itself.
+//
+//   term A:  hwtrial_bringup --bus 5-1 --originator 2 --net-id 7 --seconds 12
+//   term B:  hwtrial_bringup --bus 8-1 --originator 1 --net-id 7 --tx 300
+//
+// Term A's rx_frames is the confirmation. Keep bursts short and start from
+// the low-power end (repo law: sweep from the safe end first).
+//
 // Exit 0 = every adapter came up and reported an identity. Anything else is a
 // failure with a reason on stderr.
 
@@ -122,6 +135,12 @@ int main(int argc, char** argv) {
     int seconds = 3;
     std::string lock_dir;
     bool automatic = false;
+    int tx_frames = 0;
+    int originator = 1;
+    int net_id = 7;
+    // Offset space (§10.5). Negative = below the die default: the safe end.
+    int power_offset_qdb = -24;
+    int mcs = 0;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -148,6 +167,21 @@ int main(int argc, char** argv) {
         } else if (a == "--lock-dir" && next) {
             lock_dir = next;
             ++i;
+        } else if (a == "--tx" && next) {
+            tx_frames = std::atoi(next);
+            ++i;
+        } else if (a == "--originator" && next) {
+            originator = std::atoi(next);
+            ++i;
+        } else if (a == "--net-id" && next) {
+            net_id = std::atoi(next);
+            ++i;
+        } else if (a == "--power-offset-qdb" && next) {
+            power_offset_qdb = std::atoi(next);
+            ++i;
+        } else if (a == "--mcs" && next) {
+            mcs = std::atoi(next);
+            ++i;
         } else {
             usage();
             return 2;
@@ -170,16 +204,21 @@ int main(int argc, char** argv) {
     }
 
     wblink::RadioAirCfg cfg;
-    // RX-only on purpose: nothing here can transmit. It also means every
-    // TX-die knob stays at its fail-closed default.
-    cfg.allow_rx_only = true;
+    // RX-only unless --tx was asked for. Without it nothing here can
+    // transmit, and every TX-die knob stays at its fail-closed default.
+    cfg.allow_rx_only = tx_frames == 0;
     cfg.lock_dir = lock_dir;
+    cfg.originator = static_cast<uint16_t>(originator);
+    cfg.stamp_net_id = static_cast<uint8_t>(net_id);
+    cfg.filter_net_id = static_cast<uint8_t>(net_id);
 
     std::vector<int> owned_fds;
     for (const std::string& b : buses) {
         wblink::AdapterCfg a;
         a.name = "bus-" + b;
-        a.role = wblink::Role::kRx;
+        // Exactly one uplink, and only when --tx asked for one (§6.4).
+        a.role = (tx_frames != 0 && cfg.adapters.empty()) ? wblink::Role::kTx
+                                                          : wblink::Role::kRx;
         a.channel_mhz = chan_mhz;
         a.bus = b;
         cfg.adapters.push_back(a);
@@ -194,7 +233,8 @@ int main(int argc, char** argv) {
         owned_fds.push_back(fd);
         wblink::AdapterCfg a;
         a.name = "fd-" + std::to_string(b) + "/" + std::to_string(d);
-        a.role = wblink::Role::kRx;
+        a.role = (tx_frames != 0 && cfg.adapters.empty()) ? wblink::Role::kTx
+                                                          : wblink::Role::kRx;
         a.channel_mhz = chan_mhz;
         // No bus pin: create() refuses one on an fd-supplied stanza.
         cfg.adapters.push_back(a);
@@ -210,8 +250,15 @@ int main(int argc, char** argv) {
                  cfg.adapters.size(), fds.size(), chan_mhz,
                  cfg.do_reset ? "true" : "false",
                  lock_dir.empty() ? "(devourer default)" : lock_dir.c_str());
+    if (tx_frames != 0) {
+        std::fprintf(stderr,
+                     "  *** TX MODE: %d frames, mcs %d, power offset %d qdb, "
+                     "originator %d, net_id %d — THIS RADIATES ***\n",
+                     tx_frames, mcs, power_offset_qdb, originator, net_id);
+    }
 
     int rc = 0;
+    size_t tx_sent = 0;
     {
         auto air = wblink::RadioAir::create(cfg);
         if (!air) {
@@ -230,11 +277,58 @@ int main(int argc, char** argv) {
                 rc = 1;  // §10.6: a unit with no identity cannot be trusted
             }
         }
+        if (tx_frames != 0) {
+            // Safe end first: lowest rate, power well below the die default.
+            a.set_tx_mode(static_cast<uint8_t>(mcs), false);
+            if (!a.set_power_offset_qdb(a.tx_index(), power_offset_qdb)) {
+                std::fprintf(stderr, "FAIL: set_power_offset_qdb refused\n");
+                rc = 1;
+            }
+            // The body is never parsed at the layer this counts, but it is
+            // NOT free-form: dot11_parse's pre-check requires the §3.1 magic
+            // 0x57 0x42 ("WB") as the first two payload bytes, and a frame
+            // without it is heard and counted as rx_filtered, never
+            // rx_frames. Measured the hard way — an 0xA5 filler burst put
+            // 236 frames in the ear's filtered counter and zero in its
+            // accepted one, which looks exactly like a TX failure and is not.
+            std::vector<uint8_t> payload(200, 0xA5);
+            payload[0] = 0x57;
+            payload[1] = 0x42;
+            size_t sent = 0;
+            for (int f = 0; f < tx_frames; ++f) {
+                sent += a.inject(payload.data(), payload.size());
+                // ~1 kHz. Deliberately unhurried: this is a liveness proof,
+                // not a throughput test, and a tight loop would just measure
+                // the USB bulk queue.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            tx_sent = sent;
+        }
         // Dwell so the RX threads actually run, then report. Frames are not
         // required (an idle channel is legitimate); a live counter proves the
         // loop is alive when there IS traffic.
         for (int s = 0; s < seconds; ++s) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        // TX counters AFTER the dwell, not straight after the inject loop:
+        // CCX reports arrive asynchronously, so reading them immediately
+        // undercounts (measured 353/500 read early vs the true tail). Use
+        // --seconds to size the settle.
+        if (tx_frames != 0) {
+            const auto c = a.counters(a.tx_index());
+            std::fprintf(stderr,
+                         "  TX: inject_ok=%zu submitted=%llu failed=%llu "
+                         "reports=%llu report_fails=%llu\n",
+                         tx_sent,
+                         static_cast<unsigned long long>(c.tx_submitted),
+                         static_cast<unsigned long long>(c.tx_failed),
+                         static_cast<unsigned long long>(c.tx_reports),
+                         static_cast<unsigned long long>(c.tx_report_fails));
+            if (tx_sent != static_cast<size_t>(tx_frames) ||
+                c.tx_failed != 0) {
+                std::fprintf(stderr, "FAIL: not every frame was submitted\n");
+                rc = 1;
+            }
         }
         for (size_t i = 0; i < a.rx_adapters(); ++i) {
             const auto& c = a.counters(i);
