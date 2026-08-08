@@ -162,6 +162,28 @@ Waybeam-android's `:wifi`. It exists because `ssc338q` proves ARMv7 and
 narrower there, all of which this preset catches at build time rather than
 in the consumer.
 
+`cmake -S examples/embed-consumer -B build/embed && cmake --build build/embed`
+is the **embedding gate**. It is the smallest project that consumes this tree
+by `add_subdirectory` and links `wblink::io`, and it asserts at configure time
+that embedding does not build the daemon's world, does not flip the
+consumer's `BUILD_SHARED_LIBS`, and does not hijack the consumer's
+`PKG_CONFIG_EXECUTABLE`. All three regressed before it existed. **Anything
+added at the top of `CMakeLists.txt` with `CACHE ... FORCE` will break it** —
+use a normal variable, which shadows the cache for this directory and below
+without writing to the consumer's.
+
+Two consumption shapes, deliberately not symmetric:
+
+| shape | gets | why |
+|---|---|---|
+| `find_package(wblink)` | `wblink::core` | the dependency-free wire library, installable on its own |
+| `add_subdirectory(...)` | `wblink::core` **and** `wblink::io` | `wblink_io` PUBLIC-links vendored `devourer`/`usb-1.0`, which have no install rules of their own, so it cannot be exported without authoring install rules for `third_party/` |
+
+Use the namespaced aliases (`wblink::core`, `wblink::io`) in anything new;
+the bare names exist for this file's own targets. `wblink_core` carries
+`cxx_std_20` as a PUBLIC usage requirement — `CMAKE_CXX_STANDARD` is
+directory-scoped and does not travel with an exported target.
+
 The library feature options — `WBLINK_FRAME_SHM`, `WBLINK_CONTROL_SERVER`,
 `WBLINK_VENC`, `WBLINK_BUILD_APP` — all default **ON**, so every flying
 build is unaffected. They exist for a consumer that links `wblink_io`

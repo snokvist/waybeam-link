@@ -286,13 +286,14 @@ One prerequisite falls out of this and belongs to Phase 3, not here: Android's
 devourer submodule is pinned at `73f1cb4` (2026-07-09), which **predates**
 `GetPermanentMacAddress` (#383/#386). See B7.
 
-### 2b. Still live — four
+### 2b. Still live — three
 
 Ordered by how much they constrain the design, not by size. **Five of the
 original nine have since closed in code and are kept below with a status
 line rather than deleted, because each one's reasoning is what the next
 phase is built on.** B6's residue and B12 closed with Phase 1a (PR #138);
-B1, B4 and B5 with Phase 1b. What remains is **B7, B8, B9, B10**.
+B1, B4 and B5 with Phase 1b; B7 with Phase 1a′. What remains is **B8, B9,
+B10**.
 
 #### B1 — device acquisition: enumeration vs. a wrapped fd
 
@@ -386,6 +387,11 @@ Proposed: `WBLINK_FRAME_SHM`, `WBLINK_CONTROL_SERVER`, `WBLINK_VENC`, all
 defaulting `ON` so no existing preset changes behaviour.
 
 #### B7 — build-system duplication is the extraction debt, made visible
+
+**CLOSED by Phase 1a′ — see §4.3.** The consumable unit is
+`add_subdirectory` + `wblink::io`; `find_package(wblink)` installs and exports
+`wblink::core`. The Android copy described below can now be deleted, which is
+Phase 3 work.
 
 `waybeam-link/CMakeLists.txt` has **no `install()`, `export()` or `EXPORT`
 target at all** — re-verified, zero occurrences. There is nothing to consume.
@@ -644,9 +650,11 @@ as overtaken. Nothing here is extraction work; it constrains all of it.
 
 **Phase 1 — mechanical, no behaviour change.**
 
-- 1a. Feature options B6, the export/install package B7, and an
+- 1a. **LANDED (#138).** Feature options B6 and an
   `android-arm64` compile-only preset B12. Gate: every existing preset
-  byte-identical. **Scoped and measured — see §4.1.**
+  byte-identical. **Scoped and measured — see §4.1.** The export/install
+  package B7 moved out of 1a into its own phase, 1a′ (§4.3), so 1a's
+  "every preset unchanged" gate stayed easy to argue.
 - 1b. **LANDED — see §4.2.** Device-source abstraction B1 (including the
   EBUSY retry loop), `lock_dir` B5, `do_reset` B4. Gate met: all four
   `deploy/*.json` `--check` dumps byte-identical, `dev` 61/61, `ssc338q` and
@@ -936,6 +944,64 @@ pinned stanza was never reached because an earlier stanza failed first.
 `InitWrite` and the EFUSE walk is expressible for the first time; running it
 needs a dongle and a caller that can produce an fd, so it stays where §4's
 Phase 3 put it.
+
+### 4.3 Phase 1a′, as landed
+
+Closes B7. The survey framed this as "there is no `install()` rule", which is
+true but is not the blocker. **Probing an actual embedding consumer first
+changed the whole scope**, and it is the reason this phase is small: a
+throwaway project that did `add_subdirectory(waybeam-link)` and linked
+`wblink_io` configured and built *successfully* on the pre-change tree — so
+the survey's framing would have had us write install rules for a problem that
+was not the one hurting. What that consumer actually got was:
+
+- its `PKG_CONFIG_EXECUTABLE` **cache entry permanently redirected** to
+  `cmake/pkgconf-libusb.sh`, a shim that answers `libusb-1.0` and `exit 1`s on
+  everything else — so every other `pkg_check_modules()` in the consuming
+  project failed. Fail-loud rather than fail-silent, but fatal either way;
+- its `BUILD_SHARED_LIBS` forced `OFF` project-wide, silently turning its own
+  shared libraries into static ones;
+- **133 targets**, including the `waybeam-link` daemon, all 61 test binaries
+  and both bench tools.
+
+All three came from `set(... CACHE ... FORCE)` at the top of our
+`CMakeLists.txt`. The fix is that `option()` honours a normal variable under
+CMP0077 (NEW at our `cmake_minimum_required`), and a normal variable shadows
+the cache for this directory and everything below it — identical effect on our
+build, nothing written to the consumer's cache. The daemon's world now
+defaults to `${PROJECT_IS_TOP_LEVEL}`.
+
+**What landed**: namespaced aliases `wblink::core` / `wblink::io`; `cxx_std_20`
+as a PUBLIC usage requirement on both; the `FORCE`-cache block converted to
+normal variables (libusb, devourer chip families, pkg-config shim);
+`WBLINK_BUILD_APP` / `WBLINK_BUILD_TESTS` and both `tools/` targets gated on
+`PROJECT_IS_TOP_LEVEL`; an `install()`/`export()` package for `wblink_core`;
+and `examples/embed-consumer/`, which asserts all four properties **at
+configure time** so a regression is a build failure rather than something a
+reader has to notice.
+
+**The asymmetry is deliberate, not unfinished.** `install(EXPORT)` refuses a
+target whose link interface names targets outside the export set, and
+`wblink_io` PUBLIC-links `devourer` and `usb-1.0`. devourer has no `install()`
+rule at all, and libusb-cmake's are force-disabled here because we link its
+static target directly. Exporting `wblink_io` would mean authoring install
+rules for vendored trees we may not edit, whose interface include directories
+point into our source tree. So `find_package(wblink)` offers `wblink::core`;
+embedding offers both. Both named consumers (Android via Gradle, the MonAir
+external repo) embed, so nothing is blocked by this.
+
+**Two defects found by building a consumer rather than reading the CMake**,
+worth recording because neither is visible in a source review: `install(EXPORT
+NAMESPACE wblink::)` prefixes the **target** name, so the package exported
+`wblink::wblink_core` while embedding offered `wblink::core` — the same
+library under two spellings depending on how it was consumed, fixed with
+`EXPORT_NAME`. And `CMAKE_CXX_STANDARD` is directory-scoped and does not
+travel with an exported target, so a `find_package()` consumer at its
+compiler's default standard failed inside our own `table.h`.
+
+**Not moved**: the Android submodule bump and the Kestrel force-OFF that must
+accompany it stay Phase 3 (§4). This phase makes the deletion of Android's
+hand-copy *possible*; it does not perform it.
 
 ## 5. Loose ends worth knowing before starting
 
