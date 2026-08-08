@@ -1065,12 +1065,13 @@ Three decisions worth recording, because each had a plausible alternative:
   are — the two things that make the line worth emitting. Boundary cases 510,
   511, 512, 513 are asserted.
 
-The one place `stderr` survives outside the default sink is
-`RadioAir`'s teardown, and it moved: the destructor used to restore
+`RadioAir`'s teardown also moved off `stderr`: the destructor used to restore
 `set_diag_stream(stderr)` before closing our cookie stream, which would have
 pulled devourer's last lines back out of a consumer's sink. It now restores
-`wb_log_stream()`, which is a process-lifetime object precisely so it can
-outlive every object that might log while being destroyed.
+`wb_log_stream()`. That change is defensive rather than load-bearing — the
+`Logger` is owned by `Impl` and dies a few statements later, and every other
+holder is released above it, so nothing can currently log through the
+re-pointed stream. What matters is the destination, not the lifetime.
 
 **The §15.3 stats line** (`StatsEmitter::set_local_sink`). It **replaces** the
 stdout write rather than adding to it, so a consumer cannot double-emit and
@@ -1104,6 +1105,40 @@ counting `stderr` tokens, which include comments and `fflush` halves.
   emits §15.3 NDJSON with a populated `adapters[]`, 500 ms apart at
   `stats.hz=2`, diagnostics on fd 2 and stats on fd 1 with no crossover. See
   `docs/findings.md`.
+**Pre-merge review found four defects worth recording, because three of them
+are properties no amount of reading would have surfaced:**
+
+- **CRITICAL, and it was a use-after-free at every process exit.**
+  `wb_log_stream()` is never closed, so the C library's exit-time cleanup
+  flushes it — and that runs *after* static destructors, i.e. after a
+  consumer's sink object is gone. Reproduced under ASan. The stream is now
+  `_IONBF`, so there is never residue to flush. `setvbuf` here is correctness,
+  not tuning, and the same change fixes the second finding.
+- **The stream was fully buffered**, so it handed the sink 8192-byte chunks
+  split mid-line — a direct breach of `log.h`'s "one complete `\n`-terminated
+  message" contract. It only appeared to work because vendored devourer
+  happens to `fflush` after every line, i.e. correctness rested on an
+  unenforceable property of code `CLAUDE.md` forbids editing.
+- **The teardown contract was documented backwards.** Uninstalling a sink does
+  not wait for in-flight calls, so the instinctive shutdown order (stop the
+  callbacks, then tear down) is a use-after-free while an RX thread is inside
+  the callback. The safe order — destroy wblink objects, *then* uninstall,
+  *then* free — is now stated explicitly in `log.h`. No lock was added: it
+  would sit in the RX threads' diagnostic path, and the ordering is the
+  cheaper contract.
+- **Four of the test's own stated properties were vacuous or unasserted**,
+  and the two memory-safety defects sat exactly underneath them: an `fflush`
+  hid the buffering bug, `udp=nullptr` made the independence claim untestable,
+  the psk check never ran the loader that touches the secret, and nothing
+  captured fd 1 or fd 2 — so "the defaults are unchanged", the single claim
+  protecting every flying node, was not being checked at all. The test now
+  redirects both descriptors and asserts placement, not just callback arrival.
+  47 checks, up from 30.
+
+The mechanical rewrite itself came through clean: every format string is
+byte-identical after literal concatenation, and `-Wformat` under
+`-Wall -Wextra -Wconversion` covers all 24 sites for arity and type.
+
 - All 26 gates green, `android-arm64` included — and the bionic gate now
   covers `cookie_stream.h` from `log.cpp` as well, so it no longer depends on
   `WBLINK_RADIO=ON` to compile the shim at all.

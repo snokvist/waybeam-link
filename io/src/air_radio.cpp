@@ -361,11 +361,13 @@ struct RadioAir::Impl {
             std::fclose(ev_stream);
         }
         if (diag_stream != nullptr) {
-            // Point it somewhere valid before closing, so any later devourer
-            // line (or a destructor's own diagnostics) still lands somewhere.
-            // wb_log_stream() is the process-lifetime stream for exactly this:
-            // stderr would take the line back out of the consumer's sink, and
-            // leaving diag_stream installed would dangle.
+            // Point it somewhere valid before closing, so a later devourer
+            // line still lands somewhere. Defensive, not load-bearing: this
+            // Logger is owned by Impl and dies a few statements below, and
+            // every other holder was released above, so nothing is currently
+            // able to log through it. The change from stderr to
+            // wb_log_stream() is what matters — stderr would take the line
+            // back out of a consumer's sink, which is the whole point of B8.
             if (logger) {
                 logger->set_diag_stream(wb_log_stream());
             }

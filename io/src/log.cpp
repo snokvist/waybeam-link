@@ -73,7 +73,24 @@ std::FILE* wb_log_stream() {
             wb_log_write(buf, n);
             return static_cast<ssize_t>(n);
         });
-        return f != nullptr ? f : stderr;
+        if (f == nullptr) {
+            return stderr;
+        }
+        // Unbuffered, and both reasons are correctness rather than latency.
+        //
+        // This stream is deliberately never closed, so anything left in a
+        // buffer is flushed by the C library's exit-time cleanup — which runs
+        // AFTER static destructors, i.e. after a consumer's sink object is
+        // gone. Buffered, that is a use-after-free at every process exit.
+        // Unbuffered there is never any residue to flush.
+        //
+        // It also keeps the LogWriteFn contract: a buffered stream hands the
+        // sink 8192-byte chunks split mid-line, and log.h promises one
+        // complete '\n'-terminated message per call. The construction-time
+        // diag stream sets _IOLBF for the same reason (air_radio.cpp); this
+        // one goes further because it must also survive teardown ordering.
+        std::setvbuf(f, nullptr, _IONBF, 0);
+        return f;
     }();
     return stream;
 }

@@ -32,7 +32,10 @@ namespace wblink {
 // way — a sink that adds its own line break will double-space.
 //
 // May be called from any thread, including RadioAir's RX loops. Sinks must be
-// re-entrant or do their own locking; the default one relies on stdio's.
+// re-entrant or do their own locking; the default one relies on stdio's. A
+// sink must not call back into wb_logf() — there is no depth guard, so
+// reporting a sink's own failure through the log recurses until the stack
+// gives out.
 using LogWriteFn = void (*)(void* cookie, const char* msg, size_t n);
 
 struct LogSink {
@@ -42,9 +45,23 @@ struct LogSink {
 
 // Install a sink, or nullptr to restore the stderr default.
 //
-// The sink is NOT owned and must outlive every subsequent wblink call. It is
-// stored as one atomic pointer rather than a pair, so a reader never pairs a
-// new callback with the old cookie — the reason for the indirection.
+// The sink is NOT owned. It is stored as one atomic pointer rather than a
+// pair, so a reader never pairs a new callback with the old cookie — that is
+// the reason for the indirection.
+//
+// TEARDOWN ORDER, and it is the reverse of the instinctive one:
+//
+//   1. destroy every wblink object (RadioAir's destructor joins its RX
+//      threads — until it returns, those threads can still be inside your
+//      callback)
+//   2. wb_log_set_sink(nullptr)
+//   3. free the LogSink and whatever it points at
+//
+// Uninstalling does NOT wait for in-flight calls; this function swaps a
+// pointer and returns. "Stop the callbacks, then tear down" is therefore a
+// use-after-free, not a safe shutdown. There is deliberately no lock here —
+// it would sit in the RX threads' diagnostic path — so the ordering is the
+// contract instead.
 void wb_log_set_sink(const LogSink* sink);
 
 // printf-style, one message per call. Include the trailing '\n'.
@@ -59,8 +76,9 @@ void wb_log_write(const char* msg, size_t n);
 // nothing else (devourer's Logger::set_diag_stream). Created once per process
 // on first use and deliberately never closed: it is the last-resort
 // destination for code that logs during teardown, so its lifetime has to
-// outlast every object that might. Falls back to stderr if the stream cannot
-// be built.
+// outlast every object that might. Unbuffered — see log.cpp for why that is
+// load-bearing and not a tuning choice. Falls back to stderr if the stream
+// cannot be built.
 std::FILE* wb_log_stream();
 
 }  // namespace wblink
