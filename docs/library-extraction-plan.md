@@ -286,11 +286,19 @@ One prerequisite falls out of this and belongs to Phase 3, not here: Android's
 devourer submodule is pinned at `73f1cb4` (2026-07-09), which **predates**
 `GetPermanentMacAddress` (#383/#386). See B7.
 
-### 2b. Still live — nine
+### 2b. Still live — four
 
-Ordered by how much they constrain the design, not by size.
+Ordered by how much they constrain the design, not by size. **Five of the
+original nine have since closed in code and are kept below with a status
+line rather than deleted, because each one's reasoning is what the next
+phase is built on.** B6's residue and B12 closed with Phase 1a (PR #138);
+B1, B4 and B5 with Phase 1b. What remains is **B7, B8, B9, B10**.
 
 #### B1 — device acquisition: enumeration vs. a wrapped fd
+
+**CLOSED by Phase 1b.** `RadioAirCfg::adapter_fds` is the second device
+source; see §4.2 for what landed and for the two things the survey below got
+wrong.
 
 `RadioAir::create` does `libusb_init` (`io/src/air_radio.cpp:579`) →
 `libusb_get_device_list` (`:583`) → `libusb_open` (`:622`), matching
@@ -323,6 +331,9 @@ on Android sits behind it.
 
 #### B4 — `do_reset` and the reopen path under a wrapped fd
 
+**CLOSED by Phase 1b** — and **one claim below is wrong**, corrected in §4.2:
+`recover()` performs no USB reset, so `do_reset=false` costs nothing there.
+
 `RadioAir` hardcodes `/*do_reset=*/true` (`io/src/air_radio.cpp:634`).
 `claim_interface_reset_reopen` recovers from reset re-enumeration by re-finding
 the **same bus + port path** (`third_party/devourer/src/UsbOpen.h:68-72`).
@@ -346,6 +357,8 @@ one it can perform.
 
 #### B5 — `lock_dir` is not plumbed
 
+**CLOSED by Phase 1b** (`RadioAirCfg::lock_dir`, empty = devourer's `/tmp`).
+
 devourer parameterises the advisory lock directory
 (`UsbOpen.h:47-52`, empty = `/tmp`), but `lock_dir` appears **nowhere** in
 `io/` or `app/` — `RadioAir` passes only `ad->lock` (`air_radio.cpp:634`) and
@@ -353,6 +366,11 @@ takes the `/tmp` default. Android has no `/tmp`. Small and mechanical, and the
 consumer already demonstrates the parameter's use.
 
 #### B6 (residue) — compile-time feature options
+
+**CLOSED by Phase 1a (PR #138).** `WBLINK_FRAME_SHM`, `WBLINK_CONTROL_SERVER`,
+`WBLINK_VENC` and `WBLINK_BUILD_APP` all exist and all default ON; the survey
+sentence below ("only `WBLINK_RADIO` exists as an option today") describes
+`56463c0`, not `main`.
 
 With `air_mon.cpp` leaving by relocation, **three** sources remain that
 `wblink_io` compiles unconditionally and a phone cannot or should not have.
@@ -492,6 +510,10 @@ end-state and is additive.
 
 #### B12 — arch coverage
 
+**CLOSED by Phase 1a (PR #138).** The `android-arm64` preset proposed at the
+end of this section is the one that landed, with `WBLINK_WERROR=ON` so it
+fails rather than prints. musl/OpenWRT stays untested and unclaimed.
+
 Better than expected, unchanged. `ssc338q` is `arm-openipc-linux-gnueabihf`
 (`cmake/toolchain-ssc338q.cmake:36-37`) — ARMv7 hard-float, 32-bit — and it
 builds `wblink_io` and the full app, so `io/` is already 32-bit-proven, not
@@ -615,7 +637,7 @@ The draft listed two open rulings as Phase 0 blockers. Both are answered:
 ## 4. Suggested phasing
 
 Each phase is independently landable and each keeps `ctest --preset dev`
-(**60 suites**, ASan+UBSan) and `cmake --build --preset ssc338q` green.
+(**61 suites**, ASan+UBSan) and `cmake --build --preset ssc338q` green.
 
 **Phase 0 — the config surface.** #106 item 1 only. Close #106 items 3 and 4
 as overtaken. Nothing here is extraction work; it constrains all of it.
@@ -625,9 +647,10 @@ as overtaken. Nothing here is extraction work; it constrains all of it.
 - 1a. Feature options B6, the export/install package B7, and an
   `android-arm64` compile-only preset B12. Gate: every existing preset
   byte-identical. **Scoped and measured — see §4.1.**
-- 1b. Device-source abstraction B1 (including the EBUSY retry loop),
-  `lock_dir` B5, `do_reset` B4. Gate: the x86 bench path unchanged; a
-  wrapped-fd path that compiles.
+- 1b. **LANDED — see §4.2.** Device-source abstraction B1 (including the
+  EBUSY retry loop), `lock_dir` B5, `do_reset` B4. Gate met: all four
+  `deploy/*.json` `--check` dumps byte-identical, `dev` 61/61, `ssc338q` and
+  `android-arm64` clean.
 - 1c. Log-sink injection B8; `csa_psk` redaction preserved.
 
 **Phase 2 — the actual extraction.**
@@ -809,6 +832,83 @@ Acceptance for 1a:
   which now means the two known bionic absences are fenced, not that they are
   discovered. NDK 26.3.11579264 is present on the dev host and is the version
   `:wifi` pins, so this preset is buildable here today.
+
+### 4.2 Phase 1b, as landed
+
+Closes B1, B4 and B5. `RadioAirCfg` gains three fields — `adapter_fds`,
+`do_reset` (default `true`) and `lock_dir` (default empty) — all
+**programmatic-only** per the operator's 2026-08-08 ruling: `io/src/config.cpp`
+is untouched, no key is added, and the #106 registry learns nothing. The
+measured consequence is that all four `deploy/*.json` produce a
+**byte-identical `--check` dump** before and after.
+
+**Two survey claims did not survive contact with the code.** Both were
+probe-executed, not re-read:
+
+1. **`do_reset=false` does not disable §11.6 `recover()`.** B4 above says it
+   does, and the follow-on reasoning about "the honest recovery is to ask the
+   Java layer to re-request the fd" was built on that. `RadioAir::recover()`
+   is `StopRxLoop` → `SetMonitorChannel` → `StartRxLoop` — it calls no
+   `libusb_reset_device`, because Pass 143 had already established that
+   `InitWrite` is one-shot and the restartable surface is the RX loop. So the
+   only thing `do_reset=false` gives up is the **bring-up** reset. Recovery on
+   an fd-supplied adapter is exactly recovery on an enumerated one. §9.10's
+   process-exit wedge path (B9) is unaffected by this and remains open.
+2. **A wrapped fd and an enumerated adapter can coexist in one process.** The
+   consumer sets `LIBUSB_OPTION_NO_DEVICE_DISCOVERY` globally via
+   `libusb_set_option(nullptr, …)`, which reads as "this process cannot
+   enumerate". It is in fact stored **per context**
+   (`linux_context_priv::no_device_discovery`,
+   `third_party/libusb-cmake/libusb/libusb/os/linux_usbfs.c`), consulted in
+   `op_init` to skip the usbfs scan. `RadioAir` already gives every adapter
+   its own context, so Phase 1b sets the option per-context through
+   `libusb_init_context` — the fd adapter skips discovery, a path-claimed
+   adapter beside it still enumerates. It must be set **at init**: setting it
+   on a live context arrives after the scan and leaves `op_exit`'s
+   `init_count` unbalanced.
+
+**What the fd path skips, and what it keeps.** A wrapped handle carries no
+port numbers (`op_wrap_sys_device` calls `initialize_device` with no sysfs
+dir), so an fd-supplied stanza is excluded from bus-path claiming, from
+`used_paths`, and from the §15.2 bus re-bind pass — carried by an explicit
+`Adapter::by_fd` flag, not by the emptiness of a string. It **keeps the mac
+re-bind**, which still works because identity is read off the die. A stanza
+that supplies both an fd and a `bus` pin is refused: the pin can be neither
+honoured nor checked, and §15.2's posture is that a pin which stops meaning
+what it says must be loud.
+
+**Fail-closed rules, all validated before any libusb call** (so
+`tests/radio_fd_source_test.cpp` is hermetic, like `radio_rx_only_test`):
+`adapter_fds` must be empty or exactly parallel to `adapters`; no fd may back
+two stanzas; an fd-supplied stanza may not carry a `bus` pin; and `do_reset`
+must be `false` when any fd is supplied — refused rather than silently
+downgraded, since the reset re-enumerates and orphans the caller's fd.
+
+**Ownership.** libusb marks a wrapped handle `fd_keep`, so teardown closes
+libusb's side and leaves the caller's descriptor open. The fd must outlive
+the `RadioAir`, and closing it is the caller's job.
+
+**Two behaviour changes on the enumerated path**, both deliberate:
+
+- **`LIBUSB_ERROR_BUSY` at claim is now retried 6 × 250 ms** instead of
+  failing immediately (the consumer's proven shape). BUSY is never a
+  configuration error, so waiting cannot mask one, and every other failure
+  code still returns at once. It buys a supervisor re-exec the second it takes
+  for a dead owner's advisory lock and kernel claim to clear.
+- **A leak on `create()`'s failure paths is fixed.** The in-flight `Adapter`
+  was a local `unique_ptr` not yet pushed into `Impl`, so a context opened
+  moments earlier was dropped on the floor when the adapter search failed —
+  **measured at 2 fds per failed `create()`, 100 over 50 calls**, and invisible
+  to LeakSanitizer because libusb keeps every context on a global list. It
+  barely mattered for a daemon that exits on the failure, and it matters a lot
+  for a library consumer that retries in-process (Android, after a permission
+  grant). Adapters are now owned by `Impl` from allocation, so `~Impl` runs
+  over the half-built one. Same probe after the fix: 0.
+
+**B11's unproven leg is now reachable but still unrun.** `do_reset=false` with
+`InitWrite` and the EFUSE walk is expressible for the first time; running it
+needs a dongle and a caller that can produce an fd, so it stays where §4's
+Phase 3 put it.
 
 ## 5. Loose ends worth knowing before starting
 

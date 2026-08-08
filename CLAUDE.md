@@ -136,7 +136,7 @@ prose. Until the harness in `docs/config-harness-plan.md` exists:
 ## Build & test
 
 ```
-cmake --build --preset dev && ctest --preset dev   # merge gate: 46 suites, ASan+UBSan
+cmake --build --preset dev && ctest --preset dev   # merge gate: 61 suites, ASan+UBSan
 cmake --build --preset ssc338q                      # ARMv7 cross (SigmaStar target)
 ```
 

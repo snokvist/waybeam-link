@@ -68,6 +68,42 @@ struct RadioAirCfg {
     // config key. With no TX, every TX-die knob above (ack_responder,
     // unicast_returns, ldpc, stbc) refuses create — fail closed.
     bool allow_rx_only = false;
+
+    // --- device source (B1/B4/B5). Programmatic-only by operator ruling
+    // (2026-08-08): no config key, nothing for the #106 key registry, and
+    // io/src/config.cpp never writes any of the three. A JSON-driven daemon
+    // therefore gets exactly today's behaviour, byte for byte.
+
+    // Pre-opened USB device descriptors, parallel to adapters[]. Empty (the
+    // default) or -1 in a slot means "enumerate this stanza by bus path" —
+    // the shipped path. Otherwise the fd is handed to
+    // libusb_wrap_sys_device(), the only device source unrooted Android has:
+    // it cannot enumerate usbfs, so its fds come from the Java UsbManager.
+    //
+    // OWNERSHIP STAYS WITH THE CALLER. libusb marks a wrapped handle
+    // fd_keep, so teardown closes the libusb handle and leaves the fd open;
+    // the caller must outlive the RadioAir and close each fd afterwards.
+    // The fd must also stay valid for the whole RadioAir lifetime.
+    //
+    // An fd-supplied stanza has no bus path (libusb fills no port numbers on
+    // the wrap path), so it is excluded from bus-path claiming entirely; the
+    // §15.2 mac re-bind still binds it, because identity is read off the die.
+    std::vector<int> adapter_fds;
+
+    // B4: libusb_reset_device during the claim. True is today's hardcoded
+    // behaviour. It MUST be false when any fd is supplied — the reset
+    // re-enumerates the device and orphans the caller's fd — and create()
+    // refuses the combination rather than overriding it silently.
+    //
+    // What this does NOT cost: §11.6 recover() performs no USB reset (it is
+    // StopRxLoop / SetMonitorChannel / StartRxLoop, air_radio.cpp), so
+    // recovery is unaffected by do_reset=false. Only the bring-up reset goes.
+    bool do_reset = true;
+
+    // B5: devourer's advisory lock-file directory (UsbOpen.h). Empty = its
+    // /tmp default. Android has no /tmp; its consumer passes the app cache
+    // dir, so the parameter has to reach devourer from here.
+    std::string lock_dir;
 };
 
 class RadioAir : public AirIface {

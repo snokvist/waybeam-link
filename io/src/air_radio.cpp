@@ -98,6 +98,10 @@ struct RadioAir::Impl {
         // Empty = the unit reports no identity — callers fail closed.
         std::string mac;
         bool tx = false;
+        // B1: opened from a caller-supplied fd rather than enumerated. Such
+        // a unit has no bus path, so it never claims, reserves or re-binds
+        // by path — and its fd belongs to the caller, not to us.
+        bool by_fd = false;
         libusb_context* ctx = nullptr;
         libusb_device_handle* handle = nullptr;
         std::shared_ptr<devourer::UsbDeviceLock> lock;
@@ -335,6 +339,10 @@ struct RadioAir::Impl {
             a->dev.reset();
             if (a->handle) {
                 libusb_release_interface(a->handle, 0);
+                // B1: a wrapped handle is fd_keep, so this releases libusb's
+                // side and leaves the caller's descriptor open — closing it
+                // is the caller's job, and doing it here would close a
+                // descriptor we never owned.
                 libusb_close(a->handle);
             }
             a->lock.reset();
@@ -497,6 +505,52 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         }
     }
 
+    // B1 (Phase 1b) device source. Validated here, before any libusb work,
+    // so every refusal below is hermetic and testable without a dongle.
+    if (!cfg.adapter_fds.empty() &&
+        cfg.adapter_fds.size() != cfg.adapters.size()) {
+        return Result<RadioAir>::fail(
+            "radio: adapter_fds must be empty (enumerate every stanza) or "
+            "exactly as long as adapters (" +
+            std::to_string(cfg.adapters.size()) + "), got " +
+            std::to_string(cfg.adapter_fds.size()));
+    }
+    bool any_fd = false;
+    for (size_t i = 0; i < cfg.adapter_fds.size(); ++i) {
+        const int fd = cfg.adapter_fds[i];
+        if (fd < 0) {
+            continue;  // -1 = enumerate this stanza, today's path
+        }
+        any_fd = true;
+        // A bus pin names a port to enumerate; a wrapped fd is already open
+        // and carries no port numbers, so the pin can be neither honoured nor
+        // checked. §15.2 makes displacement loud rather than silent, and the
+        // same applies to a pin that cannot mean anything.
+        if (!cfg.adapters[i].bus.empty()) {
+            return Result<RadioAir>::fail(
+                "radio: adapter \"" + cfg.adapters[i].name +
+                "\" is fd-supplied, so its bus pin \"" + cfg.adapters[i].bus +
+                "\" cannot be honoured — drop the pin, or the fd (a mac pin "
+                "still works: identity is read off the die)");
+        }
+        for (size_t j = 0; j < i; ++j) {
+            if (cfg.adapter_fds[j] == fd) {
+                return Result<RadioAir>::fail(
+                    "radio: fd " + std::to_string(fd) +
+                    " supplied for two adapters (\"" + cfg.adapters[j].name +
+                    "\" and \"" + cfg.adapters[i].name + "\")");
+            }
+        }
+    }
+    // B4: the reset re-enumerates the device, which orphans the caller's fd
+    // and leaves it pointing at nothing. Refuse rather than override — a
+    // caller that asked for a reset is owed an answer, not a silent downgrade.
+    if (any_fd && cfg.do_reset) {
+        return Result<RadioAir>::fail(
+            "radio: do_reset must be false when any adapter is fd-supplied "
+            "(libusb_reset_device re-enumerates and orphans the caller's fd)");
+    }
+
     RadioAir air;
     Impl& im = *air.impl_;
     im.ready_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -557,6 +611,8 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     std::vector<std::string> strict_pins;
     for (const AdapterCfg& a : cfg.adapters) {
         if (!a.bus.empty() && a.mac.empty()) {
+            // fd-supplied stanzas are already refused a bus pin above, so
+            // nothing here can reserve a path on their behalf.
             strict_pins.push_back(a.bus);
         }
     }
@@ -564,70 +620,136 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     std::vector<std::string> used_paths;
     for (size_t i = 0; i < cfg.adapters.size(); ++i) {
         const AdapterCfg& ac = cfg.adapters[i];
-        auto ad = std::make_unique<Impl::Adapter>();
+        // Owned by Impl from the outset, so that every failure return below
+        // runs ~Impl over it. Held as a local unique_ptr it was NOT: the
+        // context opened a few lines down leaked on each of the failure
+        // paths (previously just "no matching Realtek device", now also the
+        // wrap/claim failures the fd source adds). ~Impl null-checks dev,
+        // handle, lock and ctx individually, so a half-built adapter is safe
+        // to hand it.
+        im.adapters.push_back(std::make_unique<Impl::Adapter>());
+        Impl::Adapter* ad = im.adapters.back().get();
         ad->name = ac.name.empty() ? ("adapter" + std::to_string(i))
                                    : ac.name;
         ad->tx = (ac.role == Role::kTx);
         // Nonzero, adapter-distinct xorshift32 seed for the bench drop knob.
         ad->drop_rng = 0x9E3779B9u ^ static_cast<uint32_t>(i + 1);
 
+        const int fd = i < cfg.adapter_fds.size() ? cfg.adapter_fds[i] : -1;
+        ad->by_fd = fd >= 0;
+
         // Per-adapter libusb_context (the proven multi-adapter pattern).
-        if (libusb_init(&ad->ctx) != 0) {
-            return Result<RadioAir>::fail("radio: libusb_init failed");
-        }
-        libusb_device** list = nullptr;
-        const ssize_t n = libusb_get_device_list(ad->ctx, &list);
-        libusb_device* found = nullptr;
-        std::string found_path;
-        // A bus pin on a stanza WITHOUT a mac stays strict (an explicit port
-        // pin, §15.2). With a mac it degrades to a claim preference: the
-        // dongle may have moved, and the post-bring-up re-bind (or its D2
-        // fallback) is what decides, so pass 2 takes any free device.
-        const int passes = (!ac.bus.empty() && !ac.mac.empty()) ? 2 : 1;
-        for (int pass = 0; pass < passes && found == nullptr; ++pass) {
-            for (ssize_t k = 0; k < n; ++k) {
-                libusb_device_descriptor dd;
-                if (libusb_get_device_descriptor(list[k], &dd) != 0 ||
-                    dd.idVendor != kRealtekVid) {
-                    continue;
-                }
-                const std::string path = usb_path_of(list[k]);
-                bool taken = false;
-                for (const auto& u : used_paths) {
-                    taken = taken || (u == path);
-                }
-                if (taken ||
-                    (pass == 0 && !ac.bus.empty() && ac.bus != path)) {
-                    continue;
-                }
-                const bool strict_attempt = pass == 0 && !ac.bus.empty();
-                if (!strict_attempt && path != ac.bus) {
-                    bool reserved = false;
-                    for (const auto& sp : strict_pins) {
-                        reserved = reserved || (sp == path);
-                    }
-                    if (reserved) {
+        if (ad->by_fd) {
+            // NO_DEVICE_DISCOVERY must be set AT init: the linux backend
+            // consults it in op_init to skip the usbfs scan and the hotplug
+            // monitor (os/linux_usbfs.c). Setting it afterwards would arrive
+            // too late and unbalance op_exit's init_count. Per-context via
+            // libusb_init_context, not the global libusb_set_option(nullptr,
+            // ...) the JNI uses — that would also silence enumeration for a
+            // path-claimed adapter in the same process.
+            libusb_init_option opt{};
+            opt.option = LIBUSB_OPTION_NO_DEVICE_DISCOVERY;
+            if (libusb_init_context(&ad->ctx, &opt, 1) != 0) {
+                return Result<RadioAir>::fail(
+                    "radio: adapter \"" + ad->name +
+                    "\": libusb_init_context (no-discovery) failed");
+            }
+            const int wrc = libusb_wrap_sys_device(
+                ad->ctx, static_cast<intptr_t>(fd), &ad->handle);
+            if (wrc != 0 || ad->handle == nullptr) {
+                return Result<RadioAir>::fail(
+                    "radio: adapter \"" + ad->name + "\": libusb_wrap_sys_device"
+                    " on fd " + std::to_string(fd) + " failed (" +
+                    libusb_strerror(static_cast<libusb_error>(wrc)) + ")");
+            }
+            // libusb fills no port numbers on the wrap path, so there is no
+            // real bus path here. `by_fd` — not this string — is what keeps
+            // the unit out of used_paths and out of the bus re-bind; the
+            // string exists only so the diagnostics below name it as
+            // something rather than printing an empty field.
+            ad->path = "fd:" + std::to_string(fd);
+        } else {
+            if (libusb_init(&ad->ctx) != 0) {
+                return Result<RadioAir>::fail("radio: libusb_init failed");
+            }
+            libusb_device** list = nullptr;
+            const ssize_t n = libusb_get_device_list(ad->ctx, &list);
+            libusb_device* found = nullptr;
+            std::string found_path;
+            // A bus pin on a stanza WITHOUT a mac stays strict (an explicit port
+            // pin, §15.2). With a mac it degrades to a claim preference: the
+            // dongle may have moved, and the post-bring-up re-bind (or its D2
+            // fallback) is what decides, so pass 2 takes any free device.
+            const int passes = (!ac.bus.empty() && !ac.mac.empty()) ? 2 : 1;
+            for (int pass = 0; pass < passes && found == nullptr; ++pass) {
+                for (ssize_t k = 0; k < n; ++k) {
+                    libusb_device_descriptor dd;
+                    if (libusb_get_device_descriptor(list[k], &dd) != 0 ||
+                        dd.idVendor != kRealtekVid) {
                         continue;
                     }
+                    const std::string path = usb_path_of(list[k]);
+                    bool taken = false;
+                    for (const auto& u : used_paths) {
+                        taken = taken || (u == path);
+                    }
+                    if (taken ||
+                        (pass == 0 && !ac.bus.empty() && ac.bus != path)) {
+                        continue;
+                    }
+                    const bool strict_attempt = pass == 0 && !ac.bus.empty();
+                    if (!strict_attempt && path != ac.bus) {
+                        bool reserved = false;
+                        for (const auto& sp : strict_pins) {
+                            reserved = reserved || (sp == path);
+                        }
+                        if (reserved) {
+                            continue;
+                        }
+                    }
+                    found = list[k];
+                    found_path = path;
+                    break;
                 }
-                found = list[k];
-                found_path = path;
+            }
+            int open_rc = found ? libusb_open(found, &ad->handle)
+                                : LIBUSB_ERROR_NO_DEVICE;
+            libusb_free_device_list(list, 1);
+            if (open_rc != 0) {
+                return Result<RadioAir>::fail(
+                    "radio: adapter \"" + ad->name + "\" (bus \"" + ac.bus +
+                    "\"): no matching Realtek device / open failed");
+            }
+            used_paths.push_back(found_path);
+            ad->path = found_path;
+        }
+
+        // B4/B5: reset and lock directory are now caller-chosen. Only the
+        // plain claim is ever used — never claim_interface_reset_reopen,
+        // whose recovery re-finds the device by bus+port path, which an
+        // fd-supplied unit does not have.
+        //
+        // BUSY is retried: the advisory lock and the kernel interface claim
+        // both linger briefly after a previous owner exits, so a restart
+        // (a supervisor re-exec, or an Android caller closing and re-opening
+        // the dongle) can hit a stale claim that clears within a second. The
+        // consumer already proves this shape at 6 x 250 ms
+        // (Waybeam-android wifi_jni.cpp build_device). BUSY is the only
+        // retried code — it is never a configuration error, so waiting
+        // cannot mask one, and every other failure still returns at once.
+        int rc = 0;
+        for (int attempt = 0; attempt < 6; ++attempt) {
+            rc = devourer::claim_interface_then_reset(ad->handle, 0, im.logger,
+                                                      cfg.do_reset, ad->lock,
+                                                      cfg.lock_dir);
+            if (rc != LIBUSB_ERROR_BUSY) {
                 break;
             }
+            std::fprintf(stderr,
+                         "radio: adapter \"%s\" claim BUSY, retrying (%d/6)\n",
+                         ad->name.c_str(), attempt + 1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
-        int open_rc = found ? libusb_open(found, &ad->handle)
-                            : LIBUSB_ERROR_NO_DEVICE;
-        libusb_free_device_list(list, 1);
-        if (open_rc != 0) {
-            return Result<RadioAir>::fail(
-                "radio: adapter \"" + ad->name + "\" (bus \"" + ac.bus +
-                "\"): no matching Realtek device / open failed");
-        }
-        used_paths.push_back(found_path);
-        ad->path = found_path;
-
-        const int rc = devourer::claim_interface_then_reset(
-            ad->handle, 0, im.logger, /*do_reset=*/true, ad->lock);
         if (rc != 0) {
             return Result<RadioAir>::fail("radio: adapter \"" + ad->name +
                                           "\" claim/reset failed (in use?)");
@@ -663,7 +785,6 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         if (ad->tx) {
             im.tx_idx = i;
         }
-        im.adapters.push_back(std::move(ad));
     }
 
     // Bring-up serialized on this (the control) thread, then one RX loop
@@ -720,7 +841,10 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
             const AdapterCfg& ac = cfg.adapters[i];
             if (im.adapters[i] || ac.bus.empty()) continue;
             for (size_t d = 0; d < n; ++d) {
-                if (!taken[d] && devs[d]->path == ac.bus) {
+                // An fd-supplied unit has no path, so it can never satisfy a
+                // bus pin — guarded explicitly rather than leaning on ""
+                // never equalling a non-empty ac.bus.
+                if (!taken[d] && !devs[d]->by_fd && devs[d]->path == ac.bus) {
                     im.adapters[i] = std::move(devs[d]);
                     taken[d] = true;
                     break;
