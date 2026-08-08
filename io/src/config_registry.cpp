@@ -76,6 +76,30 @@ bool mode_configured(const Config& c) { return !c.venc.mode_apply_cmd.empty(); }
 bool cache_repair_enabled(const Config& c) { return c.cache.repair.enabled; }
 bool cache_store_enabled(const Config& c) { return c.cache.store.enabled; }
 
+// Pass 164 stranded these: the kernel-monitor backend was their only reader.
+// Not "inert on some backend" — inert everywhere, which is why the predicate
+// takes no decision. Grep is the gate here: `adapter.ifname` has no consumer
+// left in io/ or app/, and calib_store.cpp's calib_identity() no longer reads
+// calib_id (§10.6 tiers 2-4 went with the backend; radio keys on the EFUSE
+// MAC and has deliberately no fallback tier, Pass 154 D3).
+bool never_live(const Config&) { return false; }
+
+// The absolute-power keys. §10.5 (Pass 150) made devourer's lever RELATIVE,
+// and every path that reads these two is on the non-relative arm:
+//   app/main.cpp:4753  set_backend_relative(air.kind == kRadio)
+//   app/main.cpp:3305  §11.7 0x0A tier apply: `if (backend_relative_) return false`
+//   app/main.cpp:3660  §10.2 curve resolve REFUSED on a relative backend,
+//                      which is what would have read PowerAdapter::ceiling
+//   app/main.cpp:2984  init_calibration clamps on max_power_qdb only in the
+//                      `else` of offset_window(), i.e. absolute space only
+//   app/main.cpp:3675  the §10.6 probe apply reads t.ceiling only under
+//                      `!backend_relative_`
+// So on radio — every flying node since Pass 164 — both are dead text. They
+// stay live on the udp bench, where those arms still run.
+bool backend_absolute(const Config& c) {
+    return c.air.kind != AirCfg::Kind::kRadio;  // app/main.cpp:4753
+}
+
 const char* kWhyNoUplink =
     "this node has no role:\"tx\" adapter on an RF backend, so \u00a715.2 gives "
     "it no uplink and return/ARQ never run";
@@ -86,21 +110,31 @@ const char* kWhyNotUdp =
 const char* kWhyVencOff = "venc.enabled is false";
 const char* kWhyRepairOff = "cache.repair.enabled is false";
 const char* kWhyStoreOff = "cache.store.enabled is false";
+const char* kWhyIfnameGone =
+    "the kernel-monitor backend that bound to this netdev was deleted in "
+    "Pass 164, and nothing else reads it";
+const char* kWhyCalibIdGone =
+    "\u00a710.6 identity tiers 2-4 went with kernel-monitor (Pass 164); the "
+    "radio backend keys the calibration artifact on the EFUSE MAC and has no "
+    "fallback tier";
+const char* kWhyRelative =
+    "air.kind is radio, whose power lever is RELATIVE (\u00a710.5 Pass 150) — "
+    "absolute-qdb keys are refused on a relative backend (Pass 151)";
 
 const KeyEntry kKeys[] = {
     {"adapters",                                  KeyType::kArray},
     {"adapters[].bus",                            KeyType::kString},
     {"adapters[].bw",                             KeyType::kNumber},
-    {"adapters[].calib_id",                       KeyType::kString},
+    {"adapters[].calib_id",                       KeyType::kString, never_live, kWhyCalibIdGone},
     {"adapters[].channel",                        KeyType::kNumber},
-    {"adapters[].ifname",                         KeyType::kString},
+    {"adapters[].ifname",                         KeyType::kString, never_live, kWhyIfnameGone},
     {"adapters[].mac",                            KeyType::kString},
-    {"adapters[].max_power_qdb",                  KeyType::kNumber},
+    {"adapters[].max_power_qdb",                  KeyType::kNumber, backend_absolute, kWhyRelative},
     {"adapters[].name",                           KeyType::kString},
     {"adapters[].power_map",                      KeyType::kString},
     {"adapters[].power_offset_max_qdb",           KeyType::kNumber},
     {"adapters[].power_offset_qdb",               KeyType::kNumber},
-    {"adapters[].power_presets_qdb",              KeyType::kArray},
+    {"adapters[].power_presets_qdb",              KeyType::kArray, backend_absolute, kWhyRelative},
     {"adapters[].role",                           KeyType::kString},
     {"air",                                       KeyType::kObject},
     {"air.ack_responder",                         KeyType::kBool},

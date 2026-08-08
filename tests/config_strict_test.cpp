@@ -254,6 +254,61 @@ int main() {
         }
     }
 
+    // --- Pass 164 stranded keys --------------------------------------------
+    // adapters[].ifname and adapters[].calib_id lost their only reader when
+    // the kernel-monitor backend was deleted. They are inert on EVERY
+    // backend, so both arms of every fixture must report them.
+    {
+        const char* kIfnameAdapter =
+            R"({ "name": "wlan0", "bus": "1-1", "ifname": "wlan0",
+                 "calib_id": "craft-eu-1",
+                 "role": "tx", "channel": 5805, "bw": 20 })";
+        const auto radio = findings_for(cfg_json(kIfnameAdapter, ""));
+        CHECK(has(radio, "adapters[].ifname", KeyVerdict::kInert));
+        CHECK(has(radio, "adapters[].calib_id", KeyVerdict::kInert));
+        // ...and on udp too — these are not backend-conditional.
+        const auto udp = findings_for(cfg_json(kIfnameAdapter, "",
+            R"({ "kind": "udp", "tx": ["127.0.0.1:1"], "rx": ["0.0.0.0:1"] })"));
+        CHECK(has(udp, "adapters[].ifname", KeyVerdict::kInert));
+        CHECK(has(udp, "adapters[].calib_id", KeyVerdict::kInert));
+        // A config that omits them says nothing — inert must not be noise.
+        const auto clean = findings_for(cfg_json(kTxAndRx, ""));
+        CHECK(!has(clean, "adapters[].ifname", KeyVerdict::kInert));
+        CHECK(!has(clean, "adapters[].calib_id", KeyVerdict::kInert));
+    }
+    // The absolute-power keys are backend-conditional: dead on radio (the
+    // §10.5 lever is relative), live on the udp bench where the absolute arm
+    // still runs. This is the acceptance case for the live craft config,
+    // which carries calib_id AND max_power_qdb on devourer.
+    {
+        const char* kAbsAdapter =
+            R"({ "name": "wlan0", "bus": "1-1", "role": "tx",
+                 "channel": 5805, "bw": 20, "max_power_qdb": 84,
+                 "power_presets_qdb": [60, 76, 84] })";
+        const auto radio = findings_for(cfg_json(kAbsAdapter, ""));
+        CHECK(has(radio, "adapters[].max_power_qdb", KeyVerdict::kInert));
+        CHECK(has(radio, "adapters[].power_presets_qdb", KeyVerdict::kInert));
+        const auto udp = findings_for(cfg_json(kAbsAdapter, "",
+            R"({ "kind": "udp", "tx": ["127.0.0.1:1"], "rx": ["0.0.0.0:1"] })"));
+        CHECK(!has(udp, "adapters[].max_power_qdb", KeyVerdict::kInert));
+        CHECK(!has(udp, "adapters[].power_presets_qdb", KeyVerdict::kInert));
+    }
+    // Prefix-bleed guard, the trap that bit air.tx_retry_limit in #148: the
+    // neighbouring adapters[].power_* keys are the RELATIVE contract and must
+    // stay unpredicated, or Pass 164 would report the one power key every
+    // flying node depends on as dead.
+    for (const char* p : {"adapters[].power_offset_qdb",
+                          "adapters[].power_offset_max_qdb",
+                          "adapters[].power_map", "adapters[].bus",
+                          "adapters[].mac"}) {
+        const KeyEntry* e = entry(p);
+        CHECK(e != nullptr);
+        if (e != nullptr && e->live != nullptr) {
+            std::fprintf(stderr, "  %s must not be Pass-164-gated\n", p);
+            CHECK(false);
+        }
+    }
+
     // A well-formed config with none of the above must be silent, or --strict
     // is noise and will be ignored.
     {
