@@ -6,12 +6,14 @@
 **Refreshed 2026-08-08 against `main` at Pass 163 (`56463c0`).** The first
 draft was written against Pass 148. Three of its twelve blockers have since
 been closed outright by work that landed for other reasons and a fourth was
-halved, leaving nine live. One blocker **got worse** —
-B8, where a claim both drafts recorded as a safe expectation turns out to be
-false and to block the radio backend on Android outright (§2b). Every symbol
-and line cited below was re-grepped at `56463c0`; the previous draft's numbers
+halved, leaving nine live. Two moved the other way: **B8 got worse** — a claim
+both drafts recorded as a safe expectation is false, and blocks the radio
+backend on Android outright — and **B2's resolution exposed a successor
+question** the drafts had assumed away (§0). Every symbol and line cited below
+was re-grepped at `56463c0`, then probe-executed; the previous draft's numbers
 were stale by roughly 1,100 lines of `app/main.cpp` alone. What changed is
-recorded in §6 so a reader of the old version can see which conclusions moved.
+recorded in §6 so a reader of the old version can see which conclusions
+moved.
 
 **Citations are symbol-first.** Per `docs/devourer-parity-plan.md`'s standing
 warning, prefer the symbol name over the number when they disagree.
@@ -19,7 +21,7 @@ warning, prefer the symbol name over the number when they disagree.
 Companions: `docs/devourer-parity-plan.md` (whose "Library extraction — notes
 carried forward" section this supersedes), `docs/config-harness-plan.md`
 (whose §2 ruling gates part of this), `docs/devourer-integration-analysis.md`
-(the upside register behind #95–#101, now all landed).
+(the upside register behind #95–#101, seven of eight now landed — see §3.1).
 
 ## Why this document exists
 
@@ -51,13 +53,45 @@ inspect view (`nativeStartInspect`, `:906`). It speaks no waybeam protocol at
 all — the whole module is five Kotlin files and one 1,004-line `wifi_jni.cpp`,
 and its consumer treats it as a raw byte sink
 (`app/src/main/java/com/waybeam/app/service/WaybeamService.kt:537`). Replacing
-it with waybeam-link means the phone becomes a real node: §3.0 decapsulation,
-per-adapter RX diversity by packet-seq dedup, FEC recovery, §8 NACK/ARQ
-returns, §9 LINK_REPORT, §11 CSA follow, and the §15.5a scout/quickconnect
-path. That is `run_rx`, not `RadioAir`.
+it with waybeam-link means the phone becomes a real node, and what "real"
+means here is decided by which archetype it is. That is `run_rx`, not
+`RadioAir`.
 
-**In config terms Android is `rx-spectator`** — and as of Pass 162 that cell is
-constructible (§2, B2 RESOLVED).
+**Which archetype is an OPEN question, and the first draft got it wrong by
+assuming the answer.** Both earlier versions said Android is `rx-spectator`
+and listed §8 NACK/ARQ returns, §9 LINK_REPORT and §11 CSA follow among what
+it gains. **A spectator gets none of those three.** §15.2 is explicit
+(`PROTOCOL.md:4508-4519`): a spectator
+
+> may run with **zero `role:"tx"` adapters**: it delivers by FEC + diversity
+> only, generates **no ARQ / NACK / LINK_REPORT** … with **no §11 claim** …
+> A spectator does **not** follow CSA channel moves; it re-acquires a hopped
+> craft by **re-scout**.
+
+And the archetype is *forced*, not chosen. `allow_rx_only` is derived, not
+configured (`app/main.cpp:1600-1602`):
+
+```cpp
+rc.allow_rx_only = (cfg.cache.store.enabled && cfg.streams.empty())
+                   || cfg.node.spectator;
+```
+
+Android needs media streams, so the cache branch is closed to it and
+`node.spectator` is its only RX-only route. So the two candidate shapes carry
+genuinely different capability:
+
+| | adapters | gets | loses |
+|---|---|---|---|
+| `rx-spectator` | N receive dongles, no uplink | §3.0 decap, RX diversity, FEC recovery, §15.5a scout/quickconnect, passive-tune feed select | ARQ/NACK, LINK_REPORT, §11 claim + CSA follow (re-scout instead) |
+| `tx-ground` | N receive + **one `role:"tx"`** | all of the above **plus** the three return-path features | requires a transmit-capable dongle and an uplink budget on the phone |
+
+**This is the question B2's resolution exposed rather than answered**, and it
+belongs to the operator, not to this document: *is the Android target a
+passive spectator, or a ground with an uplink?* The library must express both
+either way — that part is settled — but the answer decides what Phase 3
+actually delivers, and it decides whether the §8/§9/§11 paths are on
+Android's critical path at all. Until it is ruled, this document claims only
+the spectator set.
 
 **The MonAir external repo is the second proving consumer, by ruling.** Issue
 #120 item 3: at the library split, `MonAir` is *moved, not rewritten* into a
@@ -99,7 +133,11 @@ holds under growth.
 
 `load_config_json()` and `load_profile_table_json()` both still take strings
 (`io/src/config.cpp:115`, `:1313`), so a consumer with no filesystem is
-already served.
+already served **for config**. That does not generalise to `io/` as a whole:
+`calib_store.cpp`, `uplink_calib_store.cpp`, `power_file.cpp` and `modes.cpp`
+all do real filesystem I/O and none of them is on B6's optional-source list.
+A filesystem-less consumer loses calibration artifacts and the mode catalog,
+not its config.
 
 `io/` has also been absorbing pure logic on its own: `ScoutStore`
 (`io/include/wblink/scout_store.h:67`, 199 lines of `.cpp`) is injected-time
@@ -164,7 +202,15 @@ a TX-die property, so setting any of them on an RX-only adapter set **refuses
 create** rather than running silently inert.
 
 **The Android N-dongle no-uplink node is now expressible.** What remains of
-the Android device story is B1, and B1 is mechanical.
+the Android *device* story is B1, and B1 is mechanical.
+
+**But "expressible" is not "capable", and the difference is a ruling, not a
+detail.** The only RX-only route for a streams node is `node.spectator`, and
+the spectator contract deliberately withholds ARQ/NACK, LINK_REPORT, the §11
+claim and CSA follow (§0). B2 closed the *construction* gate exactly as the
+draft framed it; it did not decide what an uplink-free Android node is
+allowed to do, and the draft's own §0 promised three capabilities the
+resolution does not grant. That successor question is now the open one.
 
 **B3 — backend mix — DISSOLVED by ruling #120.** The draft asked whether
 `air.kind` should stay node-level or grow a per-adapter `backend` key, so a
@@ -181,22 +227,46 @@ split. It never needs a `WBLINK_MON` option; it needs a destination. This is
 the cheaper resolution by a wide margin — 927 lines plus its backend branches
 leave the tree instead of acquiring a build flag.
 
-**B11 — calibration identity under a wrapped fd — CLOSED by Pass 154.** The
-draft's concern was that `calib_identity()` had *neither* an `ifname` nor a
-bus path under a wrapped fd. Pass 154 re-based radio identity onto the
-per-unit EFUSE MAC: `io/src/calib_store.cpp:83` now returns the single derived
-tier `"mac/" + efuse_mac` on `kRadio`, and the MAC is read **off the die over
-USB** (`ad.dev->GetPermanentMacAddress(mac)`, `io/src/air_radio.cpp:693`) after
-`CreateRtlDevice`. A wrapped fd reaches the die exactly as an enumerated
-handle does, so the identity is available on Android by construction.
+**B11 — calibration identity under a wrapped fd — NARROWED to one unproven
+bench leg by Pass 154.** The draft's concern was that `calib_identity()` had
+*neither* an `ifname` nor a bus path under a wrapped fd. Pass 154 re-based
+radio identity onto the per-unit EFUSE MAC: `io/src/calib_store.cpp:83` now
+returns the single derived tier `"mac/" + efuse_mac` on `kRadio`, and the MAC
+is read **off the die over USB**
+(`ad.dev->GetPermanentMacAddress(mac)`, `io/src/air_radio.cpp:693`). There is
+no longer a host-side lookup to be missing, which is the substance of the
+resolution.
+
+**It is not "available by construction", and an earlier version of this
+refresh said so wrongly.** The read is not merely after `CreateRtlDevice`
+(`:662`) — it is after **bring-up**, `ad.dev->InitWrite(...)` at `:685`, and
+devourer's contract requires that (`third_party/devourer/src/IRtlDevice.h:347-353`):
+
+> the EFUSE is only guaranteed readable on a **brought-up chip** … for a
+> guaranteed answer on a programmed unit, ask **after bring-up**.
+
+Our own code already records the same constraint in a stronger form
+(`io/src/air_radio.cpp:546`): *"The 8822E EFUSE is only reliably readable
+during InitWrite, so a MAC pin cannot drive the CLAIM"* — which is why Pass
+154 claims stanzas provisionally and **re-binds** them after bring-up. That
+whole dance depends on `InitWrite` succeeding.
+
+The Android consumer — the very thing cited as proof that a wrapped fd behaves
+like an enumerated handle — **never calls `InitWrite`**. Its leech, survey and
+inspect paths all call `dev->Init(...)` (`wifi_jni.cpp:624`, `:709`, `:854`,
+`:922`). So the exact combination B11 needs — wrapped fd **and**
+`do_reset=false` (forced by B4) **and** `InitWrite` **and** the EFUSE walk —
+has never been executed anywhere, on any bench.
+
+Correct status: **closed for enumerated handles; one unproven leg under a
+wrapped fd**, and that leg is cheap to run once Phase 1b exists. If it fails,
+D3's fail-closed path is the honest fallback — no absolute curve, safe boot
+offset, loud log — and it needs no new machinery. What must not happen is a
+silent apply.
 
 One prerequisite falls out of this and belongs to Phase 3, not here: Android's
 devourer submodule is pinned at `73f1cb4` (2026-07-09), which **predates**
 `GetPermanentMacAddress` (#383/#386). See B7.
-
-The D3 fail-closed path is the honest fallback if a unit ever does report no
-identity — no absolute curve, safe boot offset, loud log — and it needs no new
-machinery.
 
 ### 2b. Still live — nine
 
@@ -290,8 +360,15 @@ already drifted exactly as predicted:
 - the libusb-cmake `BUILD_SHARED_LIBS`/`LIBUSB_*` force-block
   (`wifi/src/main/cpp/CMakeLists.txt:8-12` against `CMakeLists.txt:29-36`);
 - devourer chip-family selection (`:21-27` — JAGUAR1 + JAGUAR3_8822C +
-  JAGUAR3_8822E on, matching our `fleet` set exactly, but hardcoded rather
-  than driven by anything like `WBLINK_DEVOURER_CHIPS`);
+  JAGUAR3_8822E on, hardcoded rather than driven by anything like
+  `WBLINK_DEVOURER_CHIPS`). It matches our `fleet` set today **only by
+  accident**: it never sets `DEVOURER_KESTREL_8852B`/`_8852C` because those
+  options do not exist in its pinned `73f1cb4`. In our `5a5dd62` they exist
+  and default **ON** (`third_party/devourer/CMakeLists.txt:32-33`), and our
+  fleet path force-sets them OFF (`CMakeLists.txt:88-89`). **So the moment
+  Phase 3 bumps that submodule to match ours, the Android build silently
+  acquires two Kestrel 11ax families.** That is the sharpest instance of this
+  document's own drift thesis, and it is a Phase 3 step, not a surprise;
 - the static archive link order, copied verbatim down to the comment
   (`:35-36` "devourer must precede usb-1.0 (referencer before provider for
   static archives)" against `CMakeLists.txt:27`/`:154`);
@@ -316,11 +393,22 @@ submodule is bumped.
 
 #### B8 — log and diagnostic sinks — **now a confirmed hard blocker, and it gates `RadioAir` itself**
 
-`io/src` writes to `stderr` in **28 places** (was 24): `air_radio.cpp` 15,
+`io/src` mentions `stderr` in **28 places** (was 24): `air_radio.cpp` 15,
 `air_mon.cpp` 8, `venc_http.cpp` 2, and one each in `calib_store.cpp`,
-`frame_shm.cpp`, `config.cpp`. That half is unchanged: a library must not own
-the consumer's stderr, and it needs an injectable sink (logcat / syslog /
-caller callback).
+`frame_shm.cpp`, `config.cpp`. Those are token hits, not write statements —
+in `air_radio.cpp` two are comments, one is a `set_diag_stream(stderr)`
+restore and one is the `fflush` half of a preceding write, so the real figure
+there is ~11. The other five files' counts are exact. That half of the blocker
+is unchanged: a library must not own the consumer's stderr, and it needs an
+injectable sink (logcat / syslog / caller callback).
+
+**`stderr` is not the whole surface — `stdout` carries the stats stream.**
+`StatsEmitter::emit` does `fwrite(…, stdout)` + `fflush(stdout)` whenever
+`stats.to_stdout` is set (`io/src/stats.cpp:574`, key at
+`io/src/config.cpp:826`). On Android stdout is discarded, so this is **silent
+loss of the entire §15.3 stats line**, not log noise — a worse failure mode
+than the stderr sites, and easy to miss because it is not a diagnostic path.
+Phase 1c's injectable sink must cover both streams.
 
 The other half was wrong in both earlier drafts. They said `fopencookie` "is
 expected to carry [on bionic] from API 23 … so it should not be a blocker —
@@ -410,16 +498,23 @@ landed:
 | #96 hardware ACK | Pass 156 | `air.tx_retry_limit`, the §3.0 coupling law |
 | #97 LDPC/STBC | Pass 157 | `air.ldpc` / `air.stbc`, both default off |
 | #98 SNR/EVM | Passes 158–160 | §15.3 quality window, §3.16 LINK_VERDICT `0x03`, §9.4 saturation gate |
-| #99 quiet-gap budget | Pass 159/160 era | §7.2 error budget |
+| #99 quiet-gap budget | **stage 1 only, no Pass** | PR #130 is *"stage 1: §7.2 aim instrumentation (**Tier-2 bench knob**) + AU-uplink rule"* — a findings knob, not a ruling. Do not count it as landed. |
 | #100 scout ranking | Pass 161 | hysteresis, confidence, enumerated reasons |
 | #101 rate probing | Pass 163 | `AirIface::set_mcs_probe` (`:142`), `core/mcs_probe.{h,cpp}` |
 | #92 asymmetric FEC | Pass 149 | `streams[].fec.e_rate_permille` (`config.cpp:402-419`), `fec_enhance_frames` |
 
-The GitHub issues for #95–#101 remain OPEN pending device verification, but
-their code is merged and the surface they define is settled. **#92 is
-closed**, so the whole of the draft's §3.0 — "#92 lands first, and it moves one
-of Phase 0's two items" — is obsolete and has been deleted rather than
-amended.
+Seven of the eight landed as Tier-1 rulings; **#99 is the exception** and is
+called out in the table because an earlier version of this refresh swept it in
+with the rest. Its GitHub issue and #134 both record it as actively
+unreconciled — release-lateness mean ≈1462 µs against a Jaguar1 p99 ≈101 µs,
+*"these do not reconcile … before any absolute number is quoted"*. It defines
+no library surface, so it does not block the split; it simply is not done.
+
+The GitHub issues for #95–#101 all remain OPEN pending device verification,
+but for the other seven the code is merged and the surface they define is
+settled. **#92 is closed**, so the whole of the draft's §3.0 — "#92 lands
+first, and it moves one of Phase 0's two items" — is obsolete and has been
+deleted rather than amended.
 
 Two conclusions follow.
 
@@ -445,11 +540,20 @@ Exactly one thing, and it is not extraction work.
 **#106 item 1 — key registration + `--check --strict --json` +
 `config-schema --json`.** The library's config surface *is* its API, and
 `io/src/config.cpp` reads every field through `value()`/`contains()` and never
-enumerates the object — re-verified: **231 such sites**, and **zero**
-occurrences of any strict or unknown-key check anywhere in `io/` or `app/`. An
-unrecognised key loads clean and flies wrong. A library consumer has strictly
-less context than an operator does, so this must precede any external
-consumer.
+enumerates the object — re-counted: **239 such sites** (190 `.value(` + 49
+`.contains(`), and **zero** occurrences of any strict or unknown-key check
+anywhere in `io/` or `app/`. An unrecognised key loads clean and flies wrong.
+A library consumer has strictly less context than an operator does, so this
+must precede any external consumer.
+
+**One caveat on what item 1 actually buys.** #106's own ordering makes item 1
+land `--strict` as a *warning*; it is item **8** that promotes it to an error,
+and item 8 is gated on the generator (items 5–6). So item 1 gives the library
+a published, golden-tested key registry — which is the part a consumer needs —
+but the "loads clean and flies wrong" hole is not closed until item 8. Worth
+saying plainly so nobody reads item 1 as the fix. #106 item **9** (an operator
+ruling on author-supplied §10.6 artifacts, which touches calibration identity
+and therefore B11) is also still open and is not addressed here.
 
 The surface kept growing through the tranche, which is the argument for
 freezing it rather than against: Pass 163 alone added `air.mcs_probe`
@@ -463,7 +567,23 @@ is the head of the queue.**
 
 `#106` items 3 and 4 are both overtaken — item 4 by Pass 162 (B2), item 3 by
 ruling #120 (B3). They should be closed as such rather than ruled. That leaves
-#106 with item 1 and the generator work.
+#106 with item 1, item 8, item 9 and the generator work.
+
+**Issue #134 carries two items this document depends on**, and an earlier
+version of this refresh omitted it entirely:
+
+- *"#120 follow-through — cache/spectator configs flip to devourer (RX-only
+  bring-up is hardware-proven; pure config change on those nodes)"* — this is
+  the **hardware** evidence for B2. §2a argues B2 from a unit test; #134 is
+  where the fleet actually proves it.
+- *"#101 per-unit stage-0 … Fleet arming of `air.mcs_probe` (Pass 163,
+  merged) waits on this"* — so a key Phase 0 must register is merged but not
+  yet armable. That does not block registration; it does mean the registry
+  will describe a key no node currently sets.
+
+Both are operator-present bench legs, so neither is actionable here — they are
+recorded so the split does not claim evidence it has not got. Issue #125
+(saturation-knee calibration observability) does **not** bear on extraction.
 
 ### 3.3 What no longer needs an answer before the split
 
@@ -504,11 +624,24 @@ as overtaken. Nothing here is extraction work; it constrains all of it.
 
 **Phase 3 — the two consumers.** Move `MonAir` to its external RX-only repo
 (ruling #120 item 3) — the split's proof that an outside repo can build a
-receiving node. And on Android: bump the devourer submodule from `73f1cb4` to
-match ours (a prerequisite for B11's identity), replace the leech in
-`wifi_jni.cpp` with the library, delete `:wifi`'s duplicated CMake wiring, and
-keep the survey/inspect JNI surface — it is genuinely useful and has no
-waybeam-link equivalent.
+receiving node. And on Android, in this order:
+
+1. Bump the devourer submodule from `73f1cb4` to match ours — a prerequisite
+   for B11's identity — **and in the same commit force
+   `DEVOURER_KESTREL_8852B`/`_8852C` OFF**, which the bump otherwise turns on
+   by default (B7). Doing these as one step is the whole point; doing them as
+   two ships an 11ax-capable build nobody asked for.
+2. Run B11's unproven leg: wrapped fd + `do_reset=false` + `InitWrite` +
+   EFUSE walk on a real dongle. If it returns false, D3 fail-closed is the
+   answer and calibration is simply unavailable on Android — which must read
+   as STALE, never as a silent apply.
+3. Replace the leech in `wifi_jni.cpp` with the library and delete `:wifi`'s
+   duplicated CMake wiring.
+4. Keep the survey/inspect JNI surface — it is genuinely useful and has no
+   waybeam-link equivalent.
+
+None of this starts before the archetype ruling in §0, which decides whether
+the Android node needs a `role:"tx"` adapter at all.
 
 ### 4.1 Phase 1a, scoped
 
@@ -522,13 +655,25 @@ The *optional-unit* half of 1a is still **much smaller than B6 makes it
 sound**. The three optional units are **leaves**. Re-measured at `56463c0`:
 
 - Nothing in `io/` includes `frame_shm.h`, `wblink/venc.h` or
-  `control_server.h` — each is included only by its own `.cpp`, by
-  `app/main.cpp`, and by its test.
+  `control_server.h`.
+- **But the includer list is wider than `.cpp` + `app/` + tests**, and an
+  earlier version of this section got that wrong. Two `tools/` targets also
+  include `frame_shm.h` — `tools/frame_shm_feed.cpp:27` and
+  `tools/frame_shm_gst_bench.cpp:16` — and both are `add_executable` targets
+  linking `wblink_io` (`CMakeLists.txt:186-190`, `:197-200`). They are gated
+  **only** by `NOT CMAKE_CROSSCOMPILING`: not by `WBLINK_BUILD_APP`, not by
+  `WBLINK_BUILD_TESTS`. So `WBLINK_FRAME_SHM=OFF` breaks every *native*
+  preset unless 1a gates them too. This is the one place where the phase has
+  no existing escape hatch, and it is exactly the class of thing an
+  include-grep of `io/` cannot see.
 - `io/src/udp.cpp` touches frame-shm only as a `BindKind::kFrameShm` enum
   check (`:244-246` — "frame-shm streams are owned by the app (FrameShmRing),
   not by BindingSet"). It never calls into `FrameShmRing`.
-- `io/src/config.cpp`'s 9 frame-shm references are all the enum and its
-  validation messages. No API use.
+- `io/src/config.cpp`'s frame-shm references are all the enum and its
+  validation messages. No API use. (Count them by spelling and you get 12
+  `frame-shm` strings plus 6 `BindKind::kFrameShm` over 18 lines; the earlier
+  "9" counted one spelling. The substantive point — enum and validation only,
+  never an API call — is what matters and it holds either way.)
 - `control_server.cpp` and `venc_http.cpp` depend only on `binding.h`
   (`split_host_port`).
 - The two remaining `MonAir` mentions in `io/src/air_radio.cpp` (`:142`,
@@ -560,7 +705,8 @@ phase, it is confined to `air_radio.cpp`'s two sink constructions, and the
 rest of B8 (injectable sinks for the 28 `stderr` sites) stays in 1c where the
 draft put it.
 
-Two further wrinkles, both already solved by existing options:
+Three further wrinkles. Two are already solved by existing options; the third
+is not, and is the reason 1a's acceptance below has a `FATAL_ERROR` clause.
 
 - `app/main.cpp` references all three unconditionally (`FrameShm` ×10 +
   `ShmOut` ×12, `ControlServer` ×6). Guarding those would be real surgery, and
@@ -574,13 +720,27 @@ Two further wrinkles, both already solved by existing options:
   `frame_shm_loopback_test`, `venc_actuator_test`, `control_server_test`) need
   no guarding either: `WBLINK_BUILD_TESTS` already exists
   (`CMakeLists.txt:9`) and the compile-only preset turns it off.
+- **`tools/frame_shm_feed` and `tools/frame_shm_gst_bench` have no such
+  option.** They are gated on `NOT CMAKE_CROSSCOMPILING` alone, so unlike the
+  app and the tests they cannot be switched off by anything that exists
+  today. 1a must gate them on `WBLINK_FRAME_SHM` explicitly. This is the one
+  genuinely new build-system item the phase carries.
 
 Acceptance for 1a:
 
 - `WBLINK_FRAME_SHM`, `WBLINK_CONTROL_SERVER`, `WBLINK_VENC`,
   `WBLINK_BUILD_APP`, all defaulting `ON`.
-- `dev`, `ssc338q`, `x86-ground`, `rk3566`, `ssc338q-au`, `ssc338q-eu`
-  unchanged — same sources, same warnings, `ctest --preset dev` 60/60 green.
+- **The invalid matrix cells fail loudly, not confusingly.** `app/main.cpp`
+  includes all three optional headers unconditionally (`:37`, `:48`, `:73`),
+  so `WBLINK_FRAME_SHM=OFF` with `WBLINK_BUILD_APP=ON` cannot compile;
+  likewise the two `tools/` targets against `WBLINK_FRAME_SHM=OFF`. Each such
+  combination must `message(FATAL_ERROR …)` at configure time. An option
+  matrix with a silently broken cell is worse than no option.
+- The two `tools/` frame-shm targets gated on `WBLINK_FRAME_SHM` as well as
+  the existing `NOT CMAKE_CROSSCOMPILING`.
+- **All seven** configure presets unchanged — `dev`, **`release`**,
+  `x86-ground`, `rk3566`, `ssc338q`, `ssc338q-au`, `ssc338q-eu` — same
+  sources, same warnings, `ctest --preset dev` 60/60 green.
 - The `fopencookie` → `funopen` shim, with the glibc path byte-identical to
   today (the shim selected by the platform, not by a new config knob).
 - A new `android-arm64` preset that builds `wblink_core` + `wblink_io` only,
@@ -635,6 +795,26 @@ For a reader of the Pass-148 draft. Conclusions that moved:
   CMakeLists.
 - **B1 gained two implementation details** — the 6-attempt EBUSY retry loop
   and the `cacheDir` lock path.
+- **B2's resolution exposed a successor question, and §0 was wrong.** Both
+  drafts said Android is `rx-spectator` and listed §8 ARQ/NACK, §9
+  LINK_REPORT and §11 CSA follow among what it gains. A spectator gets none
+  of the three (`PROTOCOL.md:4508-4519`), and the archetype is derived, not
+  chosen. Whether the Android target is a spectator or a ground with an
+  uplink is now the document's one open operator question.
+- **B11 was over-claimed and is corrected here.** An earlier version of this
+  refresh said the identity is available under a wrapped fd "by
+  construction". It is not: the EFUSE read follows `InitWrite` bring-up
+  (`air_radio.cpp:685` → `:693`) per devourer's own contract, and the Android
+  consumer never calls `InitWrite`. Status is *closed for enumerated handles,
+  one unproven leg under a wrapped fd*.
+- **§4.1's includer enumeration was wrong** — `tools/frame_shm_feed.cpp` and
+  `tools/frame_shm_gst_bench.cpp` also include `frame_shm.h`, and are gated
+  only on `NOT CMAKE_CROSSCOMPILING`. The link-level claim survived
+  unchanged; the target inventory did not.
+- **#99 did not land** as a Tier-1 ruling — PR #130 is a stage-1 Tier-2 bench
+  knob, and #134 records it as unreconciled. Seven of eight, not eight.
+- **#134 was omitted** and carries B2's hardware evidence plus the reason
+  `air.mcs_probe` is merged but not fleet-armable.
 - **B8 went the wrong way, and it is the refresh's one genuinely new
   blocker.** Both drafts expected `fopencookie` to exist on bionic and treated
   it as a non-blocker. Measured against NDK 26.3.11579264 it is absent
@@ -647,10 +827,14 @@ For a reader of the Pass-148 draft. Conclusions that moved:
 
 Numbers that moved: `app/main.cpp` 7,540 → **8,635**; `run_rx` ~2,360 →
 **~2,600**; ctest 46 → **60** suites; `io/src` stderr sites 24 → **28**;
-config `value()`/`contains()` sites ~225 → **231**; `WBLINK_RADIO` sites in
-`app/main.cpp` 6 → **12**; `config.cpp` frame-shm references ~13 → **9**;
+config `value()`/`contains()` sites ~225 → **239**; `WBLINK_RADIO` sites in
+`app/main.cpp` 6 → **12**; 
 vendored devourer `800c3c8` → **`5a5dd62`**. `AirIface` gained two methods
 (`rx_sense`, `set_mcs_probe`), reaching 26 pure virtuals.
+
+Findings 1–14 of an adversarial review are folded in above; three were
+CRITICAL (the §0 archetype gap, the B11 over-claim, the missing `tools/`
+targets) and each was re-verified against the source before being accepted.
 
 Citations that survived unchanged: `io/include/wblink/config.h:23`
 (`BindKind`) and `io/src/udp.cpp:246` (the frame-shm enum check). The string
