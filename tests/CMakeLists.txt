@@ -63,6 +63,7 @@ add_wb_test(config_test wblink_io)
 add_wb_test(uplink_calib_store_test wblink_io)
 target_compile_definitions(config_test PRIVATE
     WBLINK_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_wb_test(config_schema_test wblink_io)
 add_wb_test(udp_test wblink_io)
 if(WBLINK_FRAME_SHM)
     add_wb_test(frame_shm_test wblink_io)
@@ -116,4 +117,32 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME jscc_replay_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/jscc_replay_test.py)
+    # Source-level check: the declared registry vs. the loader's accessor
+    # sites. Reads io/src/*.cpp directly, so it needs no build artifact.
+    add_test(NAME config_registry_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/config_registry_test.py)
+else()
+    # Registering nothing here leaves ctest GREEN on a host without python3
+    # while five suites silently did not run — among them config_registry_test,
+    # which is the only thing keeping io/src/config_registry.cpp honest against
+    # io/src/config.cpp. A registry whose drift guard can disappear is just a
+    # second source of truth, so absence is failure, not silence.
+    #
+    # Measured with -DCMAKE_DISABLE_FIND_PACKAGE_Python3=ON: without this
+    # branch `ctest --preset dev` dropped from 64 tests to 59 and exited 0.
+    #
+    # The name MUST end in "_test". The dev test preset filters on
+    # `"name": "_test$"` (CMakePresets.json:101), so a sentinel named anything
+    # else is dropped by the only ctest invocation any gate runs, leaving this
+    # branch decorative in exactly the case it exists for. That is not
+    # hypothetical: the first version was named `python_tests_unavailable` and
+    # its negative control used `ctest -R <name>`, which bypasses the preset
+    # filter and therefore "passed".
+    message(WARNING
+        "Python3 not found: 5 suites cannot run, including config_registry_test "
+        "(the registry-vs-loader drift guard). ctest will FAIL rather than "
+        "silently pass. Install python3 to run the real gate.")
+    add_test(NAME python_tests_unavailable_test
+             COMMAND ${CMAKE_COMMAND} -E false)
 endif()
