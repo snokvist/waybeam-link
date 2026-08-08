@@ -12,6 +12,63 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-08 — Phase 1b on hardware: B11's last leg PASSES, and wrapped-fd identity is source-independent
+
+First hardware run of anything from #109's Phase 1 (issues #140 legs A1, A3,
+B2–B5). x86 bench rig, `tools/hwtrial_bringup`, RX-only bring-up — nothing
+injected, kernel drivers unloaded and restored around the runs. Units: 8812AU
+(Jaguar1) at bus path `8-1`, 8812CU (Jaguar3) at `5-1`.
+
+**B11's unproven leg passes.** Wrapped fd + `do_reset=false` + `InitWrite` +
+EFUSE walk — the combination Pass 154 narrowed B11 to and which had never
+executed anywhere — returns an identity on both dies, and returns **the same
+MAC as the enumerated path**: `20:0d:b0:c4:a7:6a` (Jaguar1) and
+`40:a5:ef:2f:23:08` (Jaguar3), byte-identical across the two device sources.
+Independently corroborated: after the run the kernel's own netdev for the AU
+came back as `wlx200db0c4a76a`. So **§10.6 calibration identity is available
+under a wrapped fd**, D3 fail-closed is not needed on that account, and B11
+closes. `docs/library-extraction-plan.md` filed this leg under Phase 3 as
+phone-blocked; it never was — `libusb_wrap_sys_device` takes any usbfs fd on
+Linux.
+
+**The Phase 1b duplicate-device guard is correct in both limbs**, which had
+only been argued from source. Two distinct units bring up clean (no false
+positive — the failure mode that would have refused a valid two-adapter node).
+The same dongle claimed both ways is refused **immediately**:
+`adapters "bus-8-1" and "fd-8/4" resolve to the same USB device (8:4)`, instead
+of 1.25 s of BUSY retries blaming a process that does not exist.
+
+**Why devourer's advisory lock could not have caught that** is now visible in
+the filesystem: the enumerated claim writes `/tmp/devourer-usb-8-1.lock` (port
+path) and the wrapped claim writes `devourer-usb-8-a4.lock` (bus+devaddr,
+because a wrapped device has no port numbers). Two different keys, same
+dongle.
+
+**Mixed sources in one process work** — one enumerated adapter beside one
+wrapped fd, both up with correct identities. That is the per-context
+`NO_DEVICE_DISCOVERY` claim (Phase 1b) confirmed on hardware rather than from
+the libusb source.
+
+**`lock_dir` is honoured**: `--lock-dir /run/wblink-locktest` put the lock file
+there and nowhere else.
+
+**fd ownership holds.** The harness `fcntl(F_GETFD)`s its descriptors *after*
+`RadioAir` teardown and they are still open — libusb's `fd_keep` contract, and
+the reason a caller must close them itself.
+
+**BUSY retry behaves, with one nuance worth writing down.** Against a held
+adapter it prints exactly `retrying (1/5)` … `(5/5)` — six attempts, no
+`(6/6)` line, then the accurate `claim/reset failed (in use?)`. But the 1.25 s
+window does **not** cover a live peer's full bring-up plus teardown (measured
+longer than that), so the retry cannot mask a genuinely contending process.
+That is the intended property, not a shortfall: it exists to ride out a *dead*
+owner's lingering advisory lock and kernel claim across a supervisor re-exec.
+
+**Open:** nothing here exercised TX, ARQ, or a second unit per die (Pass 139).
+Legs A4 (mac-pin re-bind with the dongles swapped between ports), A5 (stats
+schema from a real node) and A6 (§11.6 recovery) remain, and B/6 — a real
+Android `UsbManager` fd — stays blocked on a phone.
+
 ## 2026-08-08 — Pass 163 probe window: two known evidence biases (both fail toward "no opinion" or optimism, never a wrong veto)
 
 - **ARQ resend masking (optimistic).** A lost probe-slot first-send whose

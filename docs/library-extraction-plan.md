@@ -245,6 +245,13 @@ split. It never needs a `WBLINK_MON` option; it needs a destination. This is
 the cheaper resolution by a wide margin — 927 lines plus its backend branches
 leave the tree instead of acquiring a build flag.
 
+**B11 — calibration identity under a wrapped fd — CLOSED 2026-08-08 on
+hardware.** The one unproven leg described below was run (issue #140, leg B2):
+wrapped fd + `do_reset=false` + `InitWrite` + EFUSE walk returns an identity on
+both fleet dies, and returns the **same MAC as the enumerated path**. See
+`docs/findings.md`. The narrowing analysis is kept because it is what made the
+leg cheap to identify and run.
+
 **B11 — calibration identity under a wrapped fd — NARROWED to one unproven
 bench leg by Pass 154.** The draft's concern was that `calib_identity()` had
 *neither* an `ifname` nor a bus path under a wrapped fd. Pass 154 re-based
@@ -680,10 +687,10 @@ receiving node. And on Android, in this order:
    `DEVOURER_KESTREL_8852B`/`_8852C` OFF**, which the bump otherwise turns on
    by default (B7). Doing these as one step is the whole point; doing them as
    two ships an 11ax-capable build nobody asked for.
-2. Run B11's unproven leg: wrapped fd + `do_reset=false` + `InitWrite` +
-   EFUSE walk on a real dongle. If it returns false, D3 fail-closed is the
-   answer and calibration is simply unavailable on Android — which must read
-   as STALE, never as a silent apply.
+2. ~~Run B11's unproven leg~~ **DONE 2026-08-08, passes** — on the bench, with
+   no phone (`tools/hwtrial_bringup --fd`). Identity under a wrapped fd matches
+   the enumerated path on both fleet dies, so calibration is available on
+   Android and the D3 fail-closed contingency is not needed for this reason.
 3. Replace the leech in `wifi_jni.cpp` with the library and delete `:wifi`'s
    duplicated CMake wiring. **Resolve the claimed interface number here**
    (`find_wifi_interface()` before the claim, §4.2) — composite BT+WiFi
@@ -940,10 +947,12 @@ verified by `strace`: no device node opened, no sysfs walk). The same review
 also showed one assertion passing for the wrong reason — a mac-pin case whose
 pinned stanza was never reached because an earlier stanza failed first.
 
-**B11's unproven leg is now reachable but still unrun.** `do_reset=false` with
-`InitWrite` and the EFUSE walk is expressible for the first time; running it
-needs a dongle and a caller that can produce an fd, so it stays where §4's
-Phase 3 put it.
+**B11's unproven leg has since been RUN and passes** (2026-08-08, issue #140
+leg B2) — see `docs/findings.md`. It never needed a phone: `libusb_wrap_sys_device`
+takes any usbfs fd on Linux, so `tools/hwtrial_bringup --fd <bus>/<dev>`
+exercises the whole path on the bench. Identity under a wrapped fd is
+byte-identical to the enumerated path on both fleet dies, so §10.6 calibration
+is available on Android and B11 closes.
 
 ### 4.3 Phase 1a′, as landed
 
