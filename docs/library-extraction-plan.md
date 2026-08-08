@@ -1101,10 +1101,14 @@ counting `stderr` tokens, which include comments and `fflush` halves.
   `air_radio.cpp` sites print correctly with the right MACs
   (`20:0d:b0:c4:a7:6a` Jaguar1, `40:a5:ef:2f:23:08` Jaguar3); teardown clean
   through the new `wb_log_stream()` path.
-- **Leg A5 run at the same time**: a real spectator node on those two adapters
-  emits §15.3 NDJSON with a populated `adapters[]`, 500 ms apart at
-  `stats.hz=2`, diagnostics on fd 2 and stats on fd 1 with no crossover. See
-  `docs/findings.md`.
+- **Legs A5, A4 and A6 run at the same time**, closing everything in issue
+  #140 that does not need an Android phone. A5: a real spectator node emits
+  §15.3 with a populated `adapters[]`, 500 ms apart at `stats.hz=2`, no fd
+  crossover. A4: the §15.2 mac-pin re-bind corrects both stanzas when listing
+  order disagrees with enumeration order, and both warnings (`DISPLACED`,
+  `NOT PRESENT`) fire where they should. A6: `recover()` restores RX — 7054
+  frames across the recovery — with **no USB reset**, which #139 had only
+  asserted from reading the code. See `docs/findings.md`.
 **Pre-merge review found four defects worth recording, because three of them
 are properties no amount of reading would have surfaced:**
 

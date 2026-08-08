@@ -120,10 +120,15 @@ int open_usbfs(unsigned bus, unsigned dev) {
 }
 
 void usage() {
+    // The TX flags were missing here until a #140 A6 run lost a bench pass to
+    // guessing "--power-offset" for --power-offset-qdb: the harness printed
+    // this line, which does not mention the flag, and exited 2.
     std::fprintf(stderr,
                  "usage: hwtrial_bringup [--auto] [--bus <path>]... "
                  "[--fd <bus>/<dev>]... [--chan-mhz N] [--seconds N] "
-                 "[--lock-dir DIR]\n");
+                 "[--lock-dir DIR]\n"
+                 "       TX (RADIATES): [--tx <frames>] [--mcs N] "
+                 "[--power-offset-qdb N] [--originator N] [--net-id N]\n");
 }
 
 }  // namespace
