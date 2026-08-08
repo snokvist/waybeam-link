@@ -1,5 +1,5 @@
 {
-  "_comment": "Ground: RTL8812EU return uplink plus RTL8812CU receive diversity; whole-frame SHM egress and Ethernet cache repair.",
+  "_comment": "Mirrors /etc/waybeam-link/ground.json on the ground at 192.168.2.242, read from the node 2026-08-08. Devourer (air.kind radio). The 8812EU uplink is temporarily disconnected, so the 8812AU on bus 8-1 is the uplink and the 8812CU on 5-1 is RX diversity. The cache.repair stanza this file used to carry pointed at a .247 cache the running node does not configure.",
   "node": {
     "originator": 9,
     "role": "rx",
@@ -9,20 +9,28 @@
   "profile_table": "/etc/waybeam-link/table.example.json",
   "adapters": [
     {
-      "name": "eu-uplink",
-      "ifname": "wlx84fc1450bcde",
+      "name": "au-uplink",
       "role": "tx",
       "channel": 5805,
       "bw": 20,
       "max_power_qdb": 108,
-      "power_presets_qdb": [60, 76, 84, 92, 108]
+      "power_presets_qdb": [
+        60,
+        76,
+        84,
+        92,
+        108
+      ],
+      "bus": "8-1",
+      "calib_id": "ground-au-1",
+      "power_offset_max_qdb": 24
     },
     {
       "name": "cu-diversity",
-      "ifname": "wlx40a5ef2f2308",
       "role": "rx",
       "channel": 5805,
-      "bw": 20
+      "bw": 20,
+      "bus": "5-1"
     }
   ],
   "streams": [
@@ -47,7 +55,7 @@
     }
   ],
   "air": {
-    "kind": "kernel-monitor"
+    "kind": "radio"
   },
   "policy": {
     "return": {
@@ -57,38 +65,31 @@
     },
     "csa": {
       "home_chan": 5805,
-      "channel_allowlist": [5180, 5220, 5745, 5765, 5785, 5805, 5825]
+      "channel_allowlist": [
+        5180,
+        5220,
+        5745,
+        5765,
+        5785,
+        5805,
+        5825
+      ]
+    },
+    "calibration": {
+      "offset_seek_step_qdb": 2
     }
   },
   "scout": {
     "dwell_ms": 300,
-    "channels": [5180, 5220, 5745, 5765, 5785, 5805, 5825]
-  },
-  "cache": {
-    "repair": {
-      "enabled": true,
-      "stream_id": 0,
-      "listen": "192.168.2.242:5802",
-      "caches": [
-        {
-          "originator": 33,
-          "endpoint": "192.168.2.247:5801"
-        }
-      ],
-      "tail_grace_ms": 1,
-      "local_quiet_ms": 2,
-      "min_collect_ms": 4,
-      "hard_close_ms": 8,
-      "request_timeout_ms": 4,
-      "nack_grace_ms": 3,
-      "repair_fraction_permille": 200,
-      "absolute_symbol_limit": 8,
-      "max_cache_attempts": 2,
-      "reply_limit": 4,
-      "health_floor_permille": 800,
-      "status_timeout_ms": 1500,
-      "assignment_interval_ms": 500
-    }
+    "channels": [
+      5180,
+      5220,
+      5745,
+      5765,
+      5785,
+      5805,
+      5825
+    ]
   },
   "control": {
     "bind": "127.0.0.1:8092"
