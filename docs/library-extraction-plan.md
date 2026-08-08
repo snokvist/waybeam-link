@@ -726,6 +726,20 @@ is not, and is the reason 1a's acceptance below has a `FATAL_ERROR` clause.
   today. 1a must gate them on `WBLINK_FRAME_SHM` explicitly. This is the one
   genuinely new build-system item the phase carries.
 
+**LANDED 2026-08-08** (`impl/phase1a-bionic-build`). What the phase actually
+cost, against the estimate above: four CMake options, three
+`target_sources()` guards, five guarded tests, three `nfds_t` casts, one
+77-line header, one toolchain wrapper, one preset. The `dev` translation-unit
+set is byte-identical before and after (231 TUs, diffed via
+`compile_commands.json`), so the "no behaviour change" claim is measured
+rather than asserted. Two things the estimate missed and the build found:
+the strip block at `CMakeLists.txt:204` also references the `waybeam-link`
+target and needed the `WBLINK_BUILD_APP` guard, and **`nfds_t` is `unsigned
+int` on bionic against `unsigned long` on glibc**, so three `::poll()` call
+sites tripped `-Wconversion` (`io/src/udp.cpp:307`, `:349`,
+`io/src/air_udp.cpp:205`). That third one is the preset earning its cost on
+its first run — a real 64→32-bit narrowing that no existing gate could see.
+
 Acceptance for 1a:
 
 - `WBLINK_FRAME_SHM`, `WBLINK_CONTROL_SERVER`, `WBLINK_VENC`,

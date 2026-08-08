@@ -146,6 +146,23 @@ eu | all): `x86-ground` and `rk3566` (aarch64 ground cross) build with
 `ssc338q-eu` are single-chip vehicle variants (smallest binary for the
 ~5.7 MB overlay). The default `fleet` trio is 8812AU + 8812CU + 8812EU.
 
+`cmake --build --preset android-arm64` is the **bionic** compile-only gate
+(libraries only — no app, no tests). It needs an NDK:
+`-DWBLINK_ANDROID_NDK=<root>` or env `WBLINK_ANDROID_NDK` /
+`ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT`; API 26 + arm64-v8a match
+Waybeam-android's `:wifi`. It exists because `ssc338q` proves ARMv7 and
+32-bit but is glibc — bionic has neither `fopencookie` (see
+`io/include/wblink/cookie_stream.h`) nor `shm_open`, and `nfds_t` is
+narrower there, all of which this preset catches at build time rather than
+in the consumer.
+
+The library feature options — `WBLINK_FRAME_SHM`, `WBLINK_CONTROL_SERVER`,
+`WBLINK_VENC`, `WBLINK_BUILD_APP` — all default **ON**, so every flying
+build is unaffected. They exist for a consumer that links `wblink_io`
+without the daemon. `WBLINK_BUILD_APP=ON` requires all three subsystems
+(`app/main.cpp` uses each unconditionally) and refuses at configure time
+otherwise.
+
 `dev` is the gate for every PR. `ssc338q` is compile-only verification (no
 sanitizers, no run) but must stay green and warning-free for **our** targets
 (`wblink_core`, `wblink_io`, `waybeam-link`) — vendored subdirectories build
