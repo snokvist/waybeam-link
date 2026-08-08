@@ -4,8 +4,9 @@
 `docs/review-log.md` Pass entry attached.**
 
 **Refreshed 2026-08-08 against `main` at Pass 163 (`56463c0`).** The first
-draft was written against Pass 148. Four of its twelve blockers have since
-been answered by work that landed for other reasons, and **one got worse** —
+draft was written against Pass 148. Three of its twelve blockers have since
+been closed outright by work that landed for other reasons and a fourth was
+halved, leaving nine live. One blocker **got worse** —
 B8, where a claim both drafts recorded as a safe expectation turns out to be
 false and to block the radio backend on Android outright (§2b). Every symbol
 and line cited below was re-grepped at `56463c0`; the previous draft's numbers
@@ -97,12 +98,12 @@ tranche — `rx_sense` (`:201`, Pass 155) and `set_mcs_probe` (`:142`, Pass
 holds under growth.
 
 `load_config_json()` and `load_profile_table_json()` both still take strings
-(`io/src/config.cpp:115`, `:1313`), so
-a consumer with no filesystem is already served.
+(`io/src/config.cpp:115`, `:1313`), so a consumer with no filesystem is
+already served.
 
 `io/` has also been absorbing pure logic on its own: `ScoutStore`
-(`io/include/wblink/scout_store.h:67`, 199 lines of `.cpp`) is injected-time and
-socket-free, and `scout_sense.{h,cpp}` is a pure derivation unit. The
+(`io/include/wblink/scout_store.h:67`, 199 lines of `.cpp`) is injected-time
+and socket-free, and `scout_sense.{h,cpp}` is a pure derivation unit. The
 extraction pattern this document proposes is one the repo has already started
 following by itself.
 
@@ -135,7 +136,7 @@ loop.
 
 ## 2. The blocking list
 
-### 2a. Resolved since the first draft — four of twelve
+### 2a. Resolved since the first draft — three closed outright, one halved
 
 **B2 — `RadioAir` RX-only — RESOLVED by Pass 162.** This was the draft's
 "single hardest blocker, and it is not code". It is now code, and merged.
@@ -197,7 +198,7 @@ The D3 fail-closed path is the honest fallback if a unit ever does report no
 identity — no absolute curve, safe boot offset, loud log — and it needs no new
 machinery.
 
-### 2b. Still live — eight
+### 2b. Still live — nine
 
 Ordered by how much they constrain the design, not by size.
 
