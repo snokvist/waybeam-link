@@ -3,7 +3,6 @@
 
 #include <libusb.h>
 
-#include <stdio.h>  // fopencookie (glibc/musl extension)
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -28,6 +27,7 @@
 #include "WiFiDriver.h"
 #include "logger.h"
 #include "wblink/airtime.h"
+#include "wblink/cookie_stream.h"  // bionic has no fopencookie
 #include "wblink/dot11.h"
 #include "wblink/radio_decode.h"
 
@@ -516,9 +516,7 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     // event lines out of our stdout stats stream). No cookie stream → just
     // silence the sink; tx.report counters then stay 0.
     {
-        cookie_io_functions_t io{};
-        io.write = &Impl::ev_write;
-        im.ev_stream = fopencookie(&im, "w", io);
+        im.ev_stream = wb_fopen_write(&im, &Impl::ev_write);
         if (im.ev_stream != nullptr) {
             im.logger->events().configure(im.ev_stream);
         } else {
@@ -527,9 +525,7 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     }
     // Bound the human-diagnostics volume before any worker thread spawns.
     {
-        cookie_io_functions_t io{};
-        io.write = &Impl::diag_write;
-        im.diag_stream = fopencookie(&im, "w", io);
+        im.diag_stream = wb_fopen_write(&im, &Impl::diag_write);
         if (im.diag_stream != nullptr) {
             std::setvbuf(im.diag_stream, nullptr, _IOLBF, 0);
             im.logger->set_diag_stream(im.diag_stream);

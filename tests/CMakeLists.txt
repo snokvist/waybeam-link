@@ -63,12 +63,18 @@ add_wb_test(uplink_calib_store_test wblink_io)
 target_compile_definitions(config_test PRIVATE
     WBLINK_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_wb_test(udp_test wblink_io)
-add_wb_test(frame_shm_test wblink_io)
-add_wb_test(frame_shm_loopback_test wblink_io)
+if(WBLINK_FRAME_SHM)
+    add_wb_test(frame_shm_test wblink_io)
+    add_wb_test(frame_shm_loopback_test wblink_io)
+endif()
 add_wb_test(power_test wblink_io)
 add_wb_test(stats_test wblink_io)
-add_wb_test(control_server_test wblink_io)
-add_wb_test(venc_actuator_test wblink_io)
+if(WBLINK_CONTROL_SERVER)
+    add_wb_test(control_server_test wblink_io)
+endif()
+if(WBLINK_VENC)
+    add_wb_test(venc_actuator_test wblink_io)
+endif()
 add_wb_test(modes_test wblink_io)
 # modes_test parses the catalog JSON to verify sort order + fields; give it the
 # vendored nlohmann header (wblink_io keeps its third_party include PRIVATE).
@@ -79,16 +85,20 @@ target_include_directories(modes_test SYSTEM PRIVATE
 # namespace, so there is nothing to link against) with WBLINK_APP_TEST
 # suppressing its entry point. It therefore needs the app's own include path
 # and the vendored third_party headers wblink_io keeps PRIVATE.
-add_wb_test(app_test wblink_io)
-target_compile_definitions(app_test PRIVATE WBLINK_APP_TEST=1)
-target_include_directories(app_test PRIVATE ${CMAKE_SOURCE_DIR})
-target_include_directories(app_test SYSTEM PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party)
-# With main() suppressed, run_tx/run_rx/run_loopback/load_all/usage have no
-# caller in THIS TU and every build would warn. They are not dead — the
-# shipped binary calls all of them — so the warning is silenced here only,
-# never repo-wide, where it would hide genuinely unreachable code.
-target_compile_options(app_test PRIVATE -Wno-unused-function)
+# Guarded on WBLINK_BUILD_APP for the same reason the daemon is: this TU IS
+# app/main.cpp, so it needs every subsystem that file uses unconditionally.
+if(WBLINK_BUILD_APP)
+    add_wb_test(app_test wblink_io)
+    target_compile_definitions(app_test PRIVATE WBLINK_APP_TEST=1)
+    target_include_directories(app_test PRIVATE ${CMAKE_SOURCE_DIR})
+    target_include_directories(app_test SYSTEM PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party)
+    # With main() suppressed, run_tx/run_rx/run_loopback/load_all/usage have no
+    # caller in THIS TU and every build would warn. They are not dead — the
+    # shipped binary calls all of them — so the warning is silenced here only,
+    # never repo-wide, where it would hide genuinely unreachable code.
+    target_compile_options(app_test PRIVATE -Wno-unused-function)
+endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)

@@ -10,11 +10,72 @@ option(WBLINK_BUILD_TESTS "Build unit tests" ON)
 option(WBLINK_SANITIZE "Build with ASan+UBSan (host dev builds)" OFF)
 option(WBLINK_FUZZ "Build the libFuzzer wire fuzz target (clang only)" OFF)
 option(WBLINK_RADIO "Build the devourer radio air backend (§3.0/§7)" ON)
+# Library-extraction feature options (docs/library-extraction-plan.md B6).
+# All default ON, so every existing preset compiles the same source set it
+# always did. They exist for a consumer that links wblink_io WITHOUT the
+# daemon — the frame-SHM ring needs shm_open and <linux/futex.h>, neither of
+# which bionic provides, and the two servers are dead weight on a receiver.
+option(WBLINK_FRAME_SHM "Build the frame-SHM ring (§15.4)" ON)
+option(WBLINK_CONTROL_SERVER "Build the REST/SSE control server (§15.5)" ON)
+option(WBLINK_VENC "Build venc HTTP actuation (§9.6)" ON)
+option(WBLINK_BUILD_APP "Build the waybeam-link daemon" ON)
+# Promote our own warnings to errors. OFF by default so a dev build still
+# compiles with a squiggle; ON for the android-arm64 gate, whose whole purpose
+# is catching portability diagnostics (nfds_t narrowing was the first). Without
+# it that preset only PRINTS the bug, inside a log dominated by vendored
+# devourer/libusb warnings — a human-attention gate, not a build gate.
+option(WBLINK_WERROR "Treat WBLINK_WARNINGS as errors (our targets only)" OFF)
+
+# app/main.cpp includes frame_shm.h, control_server.h and wblink/venc.h
+# unconditionally, so the daemon cannot be built against a wblink_io that
+# lacks any of them. Refuse at configure time rather than emit a compiler
+# error a hundred lines deep — an option matrix with a silently broken cell
+# is worse than no option.
+if(WBLINK_BUILD_APP)
+    foreach(_feat FRAME_SHM CONTROL_SERVER VENC)
+        if(NOT WBLINK_${_feat})
+            message(FATAL_ERROR
+                "WBLINK_BUILD_APP=ON requires WBLINK_${_feat}=ON: "
+                "app/main.cpp uses that subsystem unconditionally. Set "
+                "WBLINK_BUILD_APP=OFF to build the libraries alone.")
+        endif()
+    endforeach()
+endif()
+
+# The bionic gate exists to match the consumer, so say something when it does
+# not. First-non-empty-env-var-wins in the toolchain file means a stale
+# ANDROID_NDK_HOME can otherwise silently build against a different NDK than
+# Waybeam-android pins. Lives here, not in the toolchain file: that file is
+# re-processed by every try_compile, which emitted the warning 18 times.
+if(ANDROID)
+    set(WBLINK_ANDROID_NDK_PIN "26.3.11579264")
+    if(EXISTS "${WBLINK_ANDROID_NDK}/source.properties")
+        file(STRINGS "${WBLINK_ANDROID_NDK}/source.properties" _wblink_ndk_rev
+             REGEX "^Pkg\\.Revision *=")
+        if(NOT _wblink_ndk_rev MATCHES "${WBLINK_ANDROID_NDK_PIN}")
+            message(WARNING
+                "NDK at '${WBLINK_ANDROID_NDK}' is ${_wblink_ndk_rev}, not the "
+                "${WBLINK_ANDROID_NDK_PIN} that Waybeam-android's :wifi pins. "
+                "The bionic gate still runs, but parity with the consumer is "
+                "not guaranteed.")
+        endif()
+    endif()
+endif()
 
 # Our warning set is applied per-target (WBLINK_WARNINGS below), NOT via
 # directory-level add_compile_options — the vendored third_party subdirectories
 # (devourer, libusb) must build with their own flags, not ours.
 set(WBLINK_WARNINGS -Wall -Wextra -Wshadow -Wconversion)
+if(WBLINK_WERROR)
+    # Narrow on purpose. Blanket -Werror would inherit every future
+    # -Wall/-Wextra expansion, so an NDK bump could break the gate on code
+    # that has nothing to do with portability. These three are the classes the
+    # gate exists for and all three exist on GCC and clang, so WBLINK_WERROR
+    # stays usable on the glibc presets. NOT -Werror=shorten-64-to-32: clang
+    # folds it under -Wconversion and GCC rejects the unknown option outright.
+    list(APPEND WBLINK_WARNINGS
+         -Werror=conversion -Werror=shadow -Werror=sign-compare)
+endif()
 if(WBLINK_SANITIZE)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
@@ -129,7 +190,6 @@ add_library(wblink_io STATIC
     io/src/config.cpp
     io/src/udp.cpp
     io/src/cache_udp.cpp
-    io/src/frame_shm.cpp
     io/src/stats.cpp
     io/src/air_udp.cpp
     io/src/air_mon.cpp
@@ -138,8 +198,6 @@ add_library(wblink_io STATIC
     io/src/scout_sense.cpp
     io/src/scout_store.cpp
     io/src/uplink_calib_store.cpp
-    io/src/venc_http.cpp
-    io/src/control_server.cpp
     io/src/modes.cpp)
 target_include_directories(wblink_io PUBLIC io/include)
 target_include_directories(wblink_io SYSTEM PRIVATE third_party)
@@ -153,15 +211,32 @@ if(WBLINK_RADIO)
         third_party/libusb-cmake/libusb/libusb)
     target_link_libraries(wblink_io PUBLIC devourer usb-1.0)
 endif()
+# The three optional units. Only the target_sources half of the WBLINK_RADIO
+# pattern above applies: none of these three has a single #if consumer, so a
+# feature macro would reach every flying build's command line for nothing.
+# Re-add one when a consumer needs to branch on it. All three are leaves —
+# nothing else in io/ carries an undefined reference to them (verified with nm
+# over libwblink_io.a).
+if(WBLINK_FRAME_SHM)
+    target_sources(wblink_io PRIVATE io/src/frame_shm.cpp)
+endif()
+if(WBLINK_CONTROL_SERVER)
+    target_sources(wblink_io PRIVATE io/src/control_server.cpp)
+endif()
+if(WBLINK_VENC)
+    target_sources(wblink_io PRIVATE io/src/venc_http.cpp)
+endif()
 
-add_executable(waybeam-link app/main.cpp)
-target_compile_options(waybeam-link PRIVATE ${WBLINK_WARNINGS})
-target_link_libraries(waybeam-link PRIVATE wblink_io)
+if(WBLINK_BUILD_APP)
+    add_executable(waybeam-link app/main.cpp)
+    target_compile_options(waybeam-link PRIVATE ${WBLINK_WARNINGS})
+    target_link_libraries(waybeam-link PRIVATE wblink_io)
+endif()
 
 # Strip the shipped binary on cross builds — the SSC338Q craft roots on a
 # ~5.7 MB overlay where an unstripped ~2.9 MB binary barely fits (and a second
 # copy does not). Native builds stay unstripped so the bench keeps its symbols.
-if(CMAKE_CROSSCOMPILING AND CMAKE_STRIP)
+if(WBLINK_BUILD_APP AND CMAKE_CROSSCOMPILING AND CMAKE_STRIP)
     add_custom_command(TARGET waybeam-link POST_BUILD
         COMMAND "${CMAKE_STRIP}" "$<TARGET_FILE:waybeam-link>"
         COMMENT "Stripping waybeam-link (cross build; small target rootfs)")
@@ -169,7 +244,7 @@ endif()
 
 # Native-only real-video bench. Keep GStreamer out of the target binary and
 # cross build; the tool still uses the production FrameShmRing implementation.
-if(NOT CMAKE_CROSSCOMPILING AND EXISTS "/usr/bin/pkg-config")
+if(WBLINK_FRAME_SHM AND NOT CMAKE_CROSSCOMPILING AND EXISTS "/usr/bin/pkg-config")
     execute_process(
         COMMAND /usr/bin/pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0
         OUTPUT_VARIABLE WBLINK_GST_CFLAGS
@@ -194,7 +269,7 @@ endif()
 # Synthetic frame-SHM bench endpoint (deterministic pattern producer +
 # verifying consumer) — no GStreamer, so it runs on any dev host. Used by
 # tools/cache_repair_bench.sh.
-if(NOT CMAKE_CROSSCOMPILING)
+if(WBLINK_FRAME_SHM AND NOT CMAKE_CROSSCOMPILING)
     add_executable(frame_shm_feed tools/frame_shm_feed.cpp)
     target_compile_options(frame_shm_feed PRIVATE ${WBLINK_WARNINGS})
     target_link_libraries(frame_shm_feed PRIVATE wblink_io)
