@@ -142,6 +142,9 @@ struct SelectPolicy {
     double promote_dwell_s = 0.5;
     // §9.4 Pass 160: Saturated-verdict freshness window for the climb gate.
     double verdict_ttl_s = 3.0;
+    // §9.4 Pass 163 probe veto: threshold + evidence freshness (§17 seeds).
+    uint16_t probe_veto_permille = 50;
+    double probe_veto_ttl_s = 3.0;
     double mcs_settle_s = 5.0;
     double down_cooldown_s = 0.2;
     double ewma_alpha = 0.3;
@@ -416,6 +419,11 @@ struct AirCfg {
     // (issue #97 cliff A/B), and flipping ldpc re-derives §9.3.
     bool ldpc = false;
     bool stbc = false;
+    // §9.4 Pass 163: enables the sequence-derived TX rate probe on the video
+    // stream. Radio-only, default off — fail-closed per stage-0 (issue
+    // #101): only dies/units whose per-packet commanded rate is proven may
+    // probe. Inert unless the table also carries a nonzero probe.period.
+    bool mcs_probe = false;
     // §10.7 (Pass 125) the rx-node's uplink operating point. Before this an
     // rx node never called set_tx_mode at all and rode the TxRate struct
     // default, which happens to be exactly these seeds — so committed

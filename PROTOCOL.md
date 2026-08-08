@@ -452,7 +452,7 @@ degradation this rule promises into a worse outcome than no fallback at all.
 | 27 | 4 | `uniq` | u32 — unique packets this interval (loss denominator), never the lifetime counter |
 | 31 | 4 | `diversity` | u32 — duplicate copies across adapters (decorrelation gauge) |
 | 35 | 1 | `adapters` | u8 — latched, *non-stalled* adapter count (§6.5) |
-| 36 | 2 | `probe_per` | u16, ‰ — promote-probe PER; `0xFFFF` = no probe |
+| 36 | 2 | `probe_per` | u16, ‰ — **up-candidate rate PER** (§9.4 Pass 163): delivered failure rate of the MCS one rung above the sender's `active_profile`, measured by the §9.4 sequence-derived probe window on the video stream. **Rate headroom, not profile headroom** — the probe changes the MCS and nothing else (operator ruling 2026-08-06). `0xFFFF` = no probe (window unfilled, stale, probing disabled, or die unproven — fail closed) |
 | 38 | 1 | `recommended_prof` | u8 — RX hint; TX has final authority |
 
 - Injected via the designated uplink TX adapter (§6.4), same accounting as NACK.
@@ -531,6 +531,19 @@ The serialization was corrected here to match the shipped implementation
 (`kCanonicalProfileSize = 27`); the implementation was not changed, because
 rotating `table_version` across a deployed fleet would drop every node to §3.4
 best-effort for no benefit.
+
+**Amendment (Pass 163) — the probe schedule is hashed content.** The §9.4
+sequence-derived probe schedule is a versioned protocol invariant: period,
+slot and the candidate derivation must be identical at both ends, or the RX
+attributes losses to rates the TX never flew. The canonical serialization
+therefore **appends after `floor_profile`**: `probe_period` u16 BE ·
+`probe_slot` u16 BE (both from the table JSON's `probe` object; `0/0` when
+absent — probing structurally off). A mismatched pair refuses to score
+instead of mis-scoring, by the existing §3.4 mismatch rule. Unlike Pass 82
+this DOES rotate `table_version` for every existing table — a deliberate
+fleet-wide lockstep redeploy, accepted because a silently divergent schedule
+is exactly the failure this hash exists to close. Golden hashes in vendored
+codecs (Waybeam-android `:wifi`) must be recomputed at the same vendoring.
 
 ### 3.7 The `loss_postdiv_prearq` semantics (do not confuse with wfb_ng)
 
@@ -1606,7 +1619,15 @@ cascade, call `set_pressure`, or alter MCS, bitrate, FEC, FPS, pins, freezes, or
 flap state. A later operator ruling must define cadence and precedence before
 either field becomes selector evidence.
 
-### 9.2 Per-rung loss lockout (Minstrel-inspired, no probing)
+### 9.2 Per-rung loss lockout (Minstrel-inspired)
+
+**The attribution numerator (Pass 163).** Pass 118 left open how a sequence
+gap is attributed to the rate the *missing* packet would have carried. With
+the §9.4 probe schedule, rate is a pure function of `seq` for the video
+stream — so the missing seq's rate is known by computation, and the per-MCS
+PER ladder gains its numerator without any wire field. Attribution is
+receiver-side only and guarded (§9.4); nothing in this section's lockout
+machinery changes.
 
 Each ladder rung carries three small fields: a saturating strike count, a
 monotonic `blocked_until`, and a latched bit. A loss-driven demote charges only
@@ -1622,9 +1643,10 @@ the **vacated rung where the evidence was observed**:
 
 The lowest active/latched locked rung forms an **upward ceiling**. RSSI promote
 and backpressure escape may climb only to the rung immediately below it; they
-MUST NOT skip over a locked rung to try a higher one. Skipping would be an
-active probe, still deferred by §9.4. Multiple rungs can be locked
-simultaneously.
+MUST NOT skip over a locked rung to try a higher one. The §9.4 probe (Pass
+163) does not change this: it measures only the adjacent rate and its
+evidence is a veto, never a warrant to climb — let alone skip. Multiple
+rungs can be locked simultaneously.
 
 An acute-loss demote charges the current rung once and moves to the resolved
 safe floor. Persistent loss charges the current rung once and moves exactly
@@ -1743,14 +1765,14 @@ One encoded frame remains one FEC block (§14). Implementations MUST NOT pad,
 merge, or refragment a frame merely to manufacture a larger `k`; the protection
 guard acts on repair depth and the `k+r ≤ 256` codec limit remains absolute.
 
-### 9.4 Promote path (v0 = RSSI-margin; active probe deferred)
+### 9.4 Promote path (RSSI-margin + sequence-derived probe veto)
 wfb_ng promoted only after a boundary probe on a **separate wfb stream**; the
-injection model has no such side stream, so that mechanism is **dropped for v0**.
+injection model has no such side stream, so that mechanism is **dropped**.
 
-- **v0 — RSSI-margin promote:** promote when `rssi ≥ next_rung_floor +
+- **RSSI-margin promote:** promote when `rssi ≥ next_rung_floor +
   rssi_floor_hyst_db` (**6 dB**) AND no RSSI guard active AND flap-freeze clear AND
   the §9.2 ceiling permits the next rung AND `promote_dwell_s` (**0.5 s**)
-  elapsed. Self-contained, no probe.
+  elapsed. Self-contained, no probe required.
 - **`next_rung_floor` provenance (Pass-6 ruling):** per-rung RSSI floors are
   **node-local policy**, NOT part of the hashed §9.3 wire table — they encode
   this receiver's antenna/LNA reality, and adding them to the table would break
@@ -1758,8 +1780,64 @@ injection model has no such side stream, so that mechanism is **dropped for v0**
   `policy.select.rung_rssi_floor_dbm`, one dBm value per rung index, seeds
   `[-88, -85, -83, -80, -77, -73, -71, -70]` (typical HT20 RX sensitivity +
   margin; §17-overridable, bench re-derivable per rung).
-- **v1 (optional) — active probe:** TX injects a short burst at the next rung, RX
-  returns its PER in `probe_per`. Add only if v0 promotes prove too timid.
+- **Sequence-derived rate probe (Pass 163, issue #101).** A small
+  deterministic share of the **video stream's first-send DATA frames** flies
+  the MCS one rung above the selected profile, and both ends derive which
+  frames those were from the wire `seq` alone — no signalling, no wire field:
+  a first-send video DATA frame with `seq % probe_period == probe_slot` is a
+  probe frame (§12 resends are exempt and fly the committed rate). The
+  schedule (`probe_period`, `probe_slot`) is table content, hashed into
+  `table_version` (§3.6) — a mismatched pair refuses to score. **Up-candidate
+  only** (operator ruling 2026-08-08): there is no down-slot; downshift stays
+  loss-driven (§9.1/§9.2). **The probe changes the MCS and nothing else**
+  (operator ruling 2026-08-06): it flies at the current rung's power, GI,
+  payload and FEC — `probe_per` measures RATE headroom, never PROFILE
+  headroom. The candidate is the next ascending-id profile's `mcs`, resolved
+  through the live table (never `rung_index == mcs`); no probe fires at the
+  top rung or when the adjacent profile shares the current MCS.
+- **Probe evidence is a VETO, not a WARRANT.** Power resolves per-rung
+  (§10.2), so an up-probe flies under conditions at least as favourable as
+  the target profile — sound as a veto ("MCS+1 fails even at current power ⇒
+  the no-better-powered adjacent profile will not hold"), optimistic as a
+  warrant. A fresh reported `probe_per ≥ probe_veto_permille` (seed **50‰**,
+  §17) therefore suppresses **both** climb paths — the RSSI-margin promote
+  and the backpressure escape (gating one would reroute the flap, the Pass
+  160 lesson) — for `probe_veto_ttl_s` (seed **3.0 s**) of report cadence.
+  `probe_per = 0xFFFF` or a stale value is absence of evidence and gates
+  nothing; **no code path may authorize a promote on probe evidence alone.**
+  Suppressions are counted (§15.3 `promote_blocked_probe`).
+- **Receiver window guards (normative — the subtlety lives here).** The RX
+  accumulates per-candidate evidence in a probe window that MUST enforce:
+  (1) **successes are rate-verified** — a probe-slot seq counts only when the
+  PHY-decoded rate matches the expected candidate; a frame that demonstrably
+  flew elsewhere (command lag, suppressed probe, resend) is ignored, never
+  mis-credited; (2) **gap losses are epoch-gated** — a missing probe-slot seq
+  is attributed to the candidate only while non-probe frames confirm the TX
+  is flying the commanded rate, and a mismatch un-confirms; (3) **CRC-errored
+  frames attribute rate-free** — the body is untrusted so they never advance
+  the gap walk, but the descriptor rate is pre-FCS, so a corrupt frame at the
+  candidate rate is a rate-verified failure, pushed seq-free; (4) **evidence
+  reports only after the candidate rate has been directly observed at least
+  once this window** — a rate-verified success or a CRC-verified failure
+  (operator ruling 2026-08-08). Without (4), a non-probing TX (probing is
+  per-unit while the table is fleet-shared) satisfies (2) on every non-probe
+  frame and ordinary air loss on probe-slot seqs manufactures a
+  full-strength phantom veto; the window cannot otherwise distinguish
+  "candidate failing" from "TX not probing". The one case (4) forfeits — a
+  candidate failing with zero PHY detections — is already held by the RSSI
+  floor. Any change of
+  the sender's `active_profile`, `table_version` or reporter identity
+  **resets the window** — evidence from another operating context must never
+  gate or clear a veto. Because the receiver rate-verifies, one-sided
+  enablement degrades to inert stats, never mis-evidence.
+- **Fail-closed enablement (stage 0 is law).** TX probing is off by default
+  and radio-backend-only (`air.mcs_probe`, §15.2): a die/unit whose
+  per-packet commanded rate is not stage-0-proven (issue #101; findings.md
+  2026-08-08 proves 8812AU/8812CU/8812EU on this bench's units — per-unit,
+  not per-part, Pass 139) must not probe, and an RX with no probe evidence
+  reports `0xFFFF`. The retry rate-walk is dormant on the broadcast video
+  path (CCX-verified); §96's nonzero return retry limit does not touch video
+  DATA.
 - **Saturation gate (Pass 160, issue #98 stage 3):** a **fresh `Saturated`
   §3.16 LINK_VERDICT suppresses every climbing path** — both the RSSI-margin
   promote here and the §9.5-adjacent backpressure escape (gating only one
@@ -4473,6 +4551,17 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   Pass 154 `adapters[].mac` posture). Enabling either on a TX die whose
   `TxCaps` reads it unsupported refuses bring-up (§3.0 capability leg).
   Defaults stay off until the issue-#97 cliff A/B lands.
+- `air.mcs_probe` (radio backend only, Pass 163; default **off**): enables
+  the §9.4 sequence-derived TX rate probe on the video stream. **Refused on
+  any other backend** (same posture as `air.ldpc` above) and on an RX-only
+  node (§3.11). Fail-closed by design: leave off on any die/unit whose
+  per-packet commanded rate is not stage-0-proven (issue #101). The probe
+  fires only when the loaded table carries a nonzero `probe.period` (§3.6) —
+  the knob without the schedule is inert, and vice versa. The RX-side probe
+  window needs no knob (rate-verifying makes one-sided enablement inert).
+- `policy.select.probe_veto_permille` (seed 50) / `probe_veto_ttl_s`
+  (seed 3.0): the §9.4 probe-veto threshold and evidence freshness
+  (§17-overridable).
 - `csa.psk` is present only on craft + ground configs; it MUST be excluded from
   stats and logs. It is **optional** and is the **sole** key-provenance selector
   (§11.4a, Pass 61): absent selects the auto-generated announced session token
@@ -4719,6 +4808,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "loss_score": 0, "safe_floor_profile": 0,
     "report_latch_holder": 9, "report_latch_known": true,
     "verdict": 0, "verdict_age_ms": 0, "promote_blocked_saturated": 0,
+    "promote_blocked_probe": 0,
     "selector_state_valid": true, "selector_state_age_ms": 0,
     "lockout_active": true, "lockout_latched": false,
     "lockout_profile": 5, "lockout_ceiling_profile": 4,
@@ -5032,7 +5122,9 @@ at its own drain (what it sends). `link.promote_blocked_saturated`
 (Pass 160) counts selector ticks on which the §9.4 gate suppressed an
 otherwise-eligible climb (once per tick however many climb rules were
 blocked — a gauge of blocked *time*, not of rules); craft-only, 0
-elsewhere.
+elsewhere. `link.promote_blocked_probe` (Pass 163) is the same gauge for
+the §9.4 probe veto — fresh `probe_per ≥ probe_veto_permille` suppressing
+an otherwise-eligible climb; craft-only, 0 elsewhere.
 
 `rx_ldpc` / `rx_stbc` (Pass 157) count accepted frames whose RX path
 reported LDPC coding / a nonzero STBC stream count, and `ldpc_flag_ok` is
@@ -5667,6 +5759,7 @@ local-ingress polling interval.
 | frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, profile transitions — operator sequencing 2026-07-16), then the radio/kernel-monitor backends on the rig |
 | FPS ladder frame floor/hysteresis/timers (`min_p_frame_bytes`, `restore_hysteresis_bytes`, `sample_timeout_ms`, `reduce_after/reduce_dwell/restore_after/settle_ms`) | §9.11 frame-size-preservation loop | UDP-air frame-size ladder harness first; flight calibration against direct frame-SHM cadence and visual output |
 | `arq_max_fps` | §4.1 high-cadence ARQ cutoff | operator comfort floor 10 ms (2026-07-16); re-derive against gate-3 recovery latency at high fps |
+| §9.4 probe schedule + window (`probe.period`/`probe.slot` in the table; window `min_samples` 32, `max_age_ms` 8000, gap horizon 128; `probe_veto_permille` 50, `probe_veto_ttl_s` 3.0) | probe duty vs evidence rate; when the up-candidate's PER has an opinion and when it bars a climb | devourer's 64/(4) ≈1.6 % duty and 64-sample window are BENCH FITS to their fps/block structure — RE-DERIVE against ours: duty vs delivery cost at the cliff, window fill time vs rung dwell at our report cadence; veto threshold against the §9.1 demote band |
 
 **Bench gates (must pass before the dependent design is trusted):**
 

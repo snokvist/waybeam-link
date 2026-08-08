@@ -22,6 +22,8 @@
     { "id": 7, "mcs": 7, "guard_interval": "short", "tx_power_level": 1, "airtime_budget_frac": 0.418, "max_payload": 3072, "fec_scheme": "none", "fec_overhead_frac": 0.18, "arq_deadline_ms": { "iframe": 40, "pframe": 12 }, "bitrate_min_kbps": 2200, "reserve_bps": { "control": 64000, "telemetry": 32000 } }
   ],
   "floor_profile": 0,
+  "probe": { "period": 64, "slot": 4 },
   "_per_adapter_power": "Absolute per-MCS power is authored per physical adapter in a LOCAL file (PHY_REG_PG.txt row format, §10.2), e.g. profiles/power.<adapter>.txt — one per adapter (each has its own efuse cal/antenna). Node-local, operator-owned, not shipped here. Craft has one adapter; only ground has more.",
-  "_rungs_note": "MCS 6-7 are normal high rungs the RSSI-margin promote can reach (§9.4). The wfb_ng 'reserved for probe' tag is dropped in v0 (no probe side-stream)."
+  "_rungs_note": "MCS 6-7 are normal high rungs the RSSI-margin promote can reach (§9.4). The wfb_ng 'reserved for probe' tag is dropped (Pass 163's probe rides the video stream in-band, no side stream).",
+  "_probe_note": "§9.4 Pass 163 sequence-derived rate probe: video DATA frames with seq % period == slot fly the up-candidate MCS. Hashed into table_version (§3.6) — edit in lockstep fleet-wide. §17 seeds; period 0 disables. TX also needs air.mcs_probe (stage-0-proven units only)."
 }

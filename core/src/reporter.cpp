@@ -69,7 +69,10 @@ std::vector<LinkReport> Reporter::build(const RxEngine& engine,
             std::min<uint64_t>(denom, 0xFFFFFFFFull));
         r.diversity = static_cast<uint32_t>(s.counters.diversity);
         r.adapters = live;
-        r.probe_per = kNoProbe;  // §9.4: no probe machinery in v0
+        // §3.5 Pass 163: only the probe window's stream carries evidence;
+        // absence fails closed to kNoProbe.
+        r.probe_per = (probe_ && probe_->first == s.key) ? probe_->second
+                                                         : kNoProbe;
         r.recommended_prof = 0;
         out.push_back(r);
     }

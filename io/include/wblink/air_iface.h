@@ -134,6 +134,14 @@ class AirIface {
     // Applies to the TX adapter. Not per-adapter: a node has one uplink.
     virtual void set_tx_mode(uint8_t mcs, bool sgi) = 0;
 
+    // §9.4 Pass 163 sequence-derived rate probe: first-send video DATA
+    // frames with seq % period == slot fly candidate_mcs instead of the
+    // set_tx_mode() rate. period 0 disarms. Real on the radio backend only
+    // (`air.mcs_probe` is refused elsewhere); kernel-monitor and udp-air
+    // no-op — their frames always fly the committed mode.
+    virtual void set_mcs_probe(uint16_t period, uint16_t slot,
+                               uint8_t candidate_mcs) = 0;
+
     // ---- §3.0 identity ---------------------------------------------------
 
     // Runtime net_id retargeting: the §15.5a scout widens the filter mid-sweep

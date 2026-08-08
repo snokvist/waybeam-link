@@ -75,6 +75,10 @@ int main() {
         cfg = base;
         cfg.stbc = true;
         CHECK(fails_containing(cfg, "air.stbc"));
+
+        cfg = base;
+        cfg.mcs_probe = true;  // §9.4 Pass 163: probing is a TX-die property
+        CHECK(fails_containing(cfg, "air.mcs_probe"));
     }
 
     return wbtest_finish("radio_rx_only_test");

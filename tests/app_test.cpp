@@ -767,6 +767,7 @@ class FakeAir : public AirIface {
     bool set_power_auto(size_t) override { return true; }
     std::optional<uint64_t> read_tsf(size_t) override { return std::nullopt; }
     void set_tx_mode(uint8_t, bool) override {}
+    void set_mcs_probe(uint16_t, uint16_t, uint8_t) override {}
     void set_stamp_net_id(uint8_t) override { ++stamp_sets; }
     void set_filter_net_id(std::optional<uint8_t>) override { ++filter_sets; }
     size_t tx_index() const override { return 0; }

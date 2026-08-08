@@ -347,6 +347,26 @@ int main() {
                        "channel":5805}]})",
                      "air.stbc is a radio-backend key");
     }
+    // --- §15.2 air.mcs_probe (Pass 163) -------------------------------------
+    // Default off; radio TX node accepts; any other backend refuses (same
+    // posture), and so does an rx-role node (silently dead knob otherwise).
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "tx"},
+          "air": {"kind": "radio", "mcs_probe": true}})");
+        CHECK(bool(r));
+        if (r) CHECK(r.value->air.mcs_probe);
+        expect_error(R"({"node":{"originator":3,"role":"tx"},
+          "air":{"kind":"udp","mcs_probe":true}})",
+                     "air.mcs_probe is a radio-backend key");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","mcs_probe":true}})",
+                     "air.mcs_probe is a TX-node key");
+        expect_error(R"({"node":{"originator":3,"role":"tx"},
+          "air":{"kind":"radio"},
+          "policy":{"select":{"probe_veto_permille":1500}}})",
+                     "probe_veto_permille");
+    }
     // Both hybrid halves on at once: the refusal names ack_responder (the
     // message ternary's first branch), and the udp dev backend is a second
     // non-radio control alongside kernel-monitor above.
@@ -844,7 +864,9 @@ int main() {
                 CHECK_EQ_U(derive_bitrate_kbps(t.value->profiles[i]),
                            kPass111Bitrates[i]);
             }
-            CHECK_EQ_U(table_version(*t.value), 0x80);  // Pass 122 (was 0xBF)
+            CHECK_EQ_U(table_version(*t.value), 0xC1);  // Pass 163 (was 0x80)
+            CHECK_EQ_U(t.value->probe_period, 64);
+            CHECK_EQ_U(t.value->probe_slot, 4);
         }
     }
     {
@@ -888,6 +910,32 @@ int main() {
            "bitrate_min_kbps":2200,"reserve_bps":{"control":64000,"telemetry":32000}}],
           "floor_profile":0})");
         CHECK(!t);
+    }
+    {
+        // §3.6 Pass 163 probe schedule: parsed, hashed, and slot < period
+        // enforced. Absence keeps 0/0 (probing structurally off).
+        const char* one = R"({"profiles":[
+          {"id":0,"mcs":0,"guard_interval":"long","tx_power_level":4,
+           "airtime_budget_frac":0.6,"arq_deadline_ms":{"iframe":80,"pframe":25},
+           "bitrate_min_kbps":2200,"reserve_bps":{"control":64000,"telemetry":32000}}],
+          "floor_profile":0)";
+        auto plain = load_profile_table_json(std::string(one) + "}");
+        CHECK(bool(plain));
+        auto probed = load_profile_table_json(
+            std::string(one) + R"(,"probe":{"period":64,"slot":4}})");
+        CHECK(bool(probed));
+        if (plain && probed) {
+            CHECK_EQ_U(plain.value->probe_period, 0);
+            CHECK_EQ_U(probed.value->probe_period, 64);
+            CHECK_EQ_U(probed.value->probe_slot, 4);
+            // The schedule is hashed content (§3.6): same profiles, different
+            // schedule => different table_version.
+            CHECK(table_version(*plain.value) != table_version(*probed.value));
+        }
+        auto bad = load_profile_table_json(
+            std::string(one) + R"(,"probe":{"period":16,"slot":16}})");
+        CHECK(!bad);
+        CHECK(bad.error.find("probe.slot") != std::string::npos);
     }
 
     // --- §14.2 enforce flag (Pass 38): parse + default off -----------------

@@ -107,6 +107,9 @@ class MonAir : public AirIface {
     // --- control plane (main thread only) --------------------------------
     // Committed operating point → stamped into each frame's radiotap MCS.
     void set_tx_mode(uint8_t mcs, bool sgi) override;
+    // §9.4 Pass 163: probing is radio-only (`air.mcs_probe` refused here,
+    // #120 frozen backend) — frames always fly the committed mode.
+    void set_mcs_probe(uint16_t, uint16_t, uint8_t) override {}
     // §15.5a scout: decouple the two net_id roles at runtime. The scout widens
     // the RX filter to hear all net_ids during a sweep, then narrows it to the
     // claimed craft's net_id post-lock; the stamp follows so return traffic

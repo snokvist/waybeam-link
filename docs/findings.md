@@ -12,6 +12,20 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-08 — Pass 163 probe window: two known evidence biases (both fail toward "no opinion" or optimism, never a wrong veto)
+
+- **ARQ resend masking (optimistic).** A lost probe-slot first-send whose
+  §12 resend arrives before the gap walk settles is marked seen — the
+  candidate failure is never counted. Mis-credit is impossible (resends fly
+  the committed rate; same-MCS adjacency is disarmed), so the bias only
+  under-counts candidate failures on ARQ-repaired streams, weakening the
+  veto. Importance-gated video ARQ keeps the volume low. Revisit if flight
+  data shows the veto missing real walls.
+- **Blackout skip (conservative).** A seq jump ≥ the 1024-bit seen-window
+  discards attribution across the gap entirely (nothing during an outage
+  confirmed the commanded rate). Long outages therefore contribute no
+  evidence — by design.
+
 ## 2026-08-08 — bench-gate campaign: stage 0 clean on all three dies; four gates measured; two pinned to geometry
 
 One session, x86 rig (8812AU `20:0d:b0:c4:a7:6a` bus 8-1, 8812CU

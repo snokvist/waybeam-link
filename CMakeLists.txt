@@ -100,6 +100,7 @@ endif()
 add_library(wblink_core STATIC
     core/src/wire.cpp
     core/src/table.cpp
+    core/src/mcs_probe.cpp
     core/src/gf256.cpp
     core/src/rlc.cpp
     core/src/framer.cpp

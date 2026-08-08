@@ -308,6 +308,7 @@ const char* kGolden =
     "\"loss_score\":5,\"safe_floor_profile\":1,"
     "\"report_latch_holder\":9,\"report_latch_known\":true,"
     "\"verdict\":2,\"verdict_age_ms\":740,\"promote_blocked_saturated\":3,"
+    "\"promote_blocked_probe\":0,"
     "\"selector_state_valid\":true,\"selector_state_age_ms\":75,"
     "\"lockout_active\":true,\"lockout_latched\":false,"
     "\"lockout_profile\":5,\"lockout_ceiling_profile\":4,"

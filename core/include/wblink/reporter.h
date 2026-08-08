@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "wblink/rx.h"
@@ -52,6 +53,18 @@ class Reporter {
     uint32_t epoch() const { return epoch_; }
     void reset_link() { last_.clear(); }
 
+    // §3.5 Pass 163: up-candidate probe_per for the ONE stream the §9.4
+    // probe window tracks (the accepted sender's video stream); every other
+    // stream reports kNoProbe. Caller refreshes before each build; nullopt
+    // clears (window unfilled/stale — fail closed to kNoProbe).
+    void set_probe_per(const StreamKey& key, std::optional<uint16_t> per) {
+        if (per.has_value()) {
+            probe_ = std::pair<StreamKey, uint16_t>{key, *per};
+        } else {
+            probe_.reset();
+        }
+    }
+
   private:
     struct Snap {
         uint64_t uniq = 0;
@@ -63,6 +76,8 @@ class Reporter {
     uint32_t epoch_ = 0;
     uint64_t next_ms_ = 0;
     std::map<uint64_t, Snap> last_;  // packed stream key -> last window end
+    // §3.5 Pass 163: (stream, up-candidate PER ‰) — see set_probe_per().
+    std::optional<std::pair<StreamKey, uint16_t>> probe_;
 };
 
 }  // namespace wblink
