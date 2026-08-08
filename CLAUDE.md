@@ -147,7 +147,13 @@ eu | all): `x86-ground` and `rk3566` (aarch64 ground cross) build with
 ~5.7 MB overlay). The default `fleet` trio is 8812AU + 8812CU + 8812EU.
 
 `cmake --build --preset android-arm64` is the **bionic** compile-only gate
-(libraries only — no app, no tests). It needs an NDK:
+(libraries only — no app, no tests). Two of its cache variables are
+load-bearing, not tidiness: `WBLINK_RADIO=ON` because `io/src/air_radio.cpp`
+is the only TU that includes `cookie_stream.h`, so turning the radio off would
+silently stop compiling the one file the shim exists for; and
+`WBLINK_WERROR=ON` because without it the preset merely *prints* a portability
+diagnostic into a log dominated by vendored devourer/libusb warnings — a
+human-attention gate, not a build gate. It needs an NDK:
 `-DWBLINK_ANDROID_NDK=<root>` or env `WBLINK_ANDROID_NDK` /
 `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT`; API 26 + arm64-v8a match
 Waybeam-android's `:wifi`. It exists because `ssc338q` proves ARMv7 and

@@ -23,7 +23,11 @@ set(WBLINK_ANDROID_NDK "" CACHE PATH "Root of the Android NDK")
 if(WBLINK_ANDROID_NDK STREQUAL "")
     foreach(_wblink_ndk_env WBLINK_ANDROID_NDK ANDROID_NDK_HOME ANDROID_NDK_ROOT)
         if(NOT "$ENV{${_wblink_ndk_env}}" STREQUAL "")
-            set(WBLINK_ANDROID_NDK "$ENV{${_wblink_ndk_env}}")
+            # FORCE into the cache: an env-resolved path held only as a normal
+            # variable makes the build dir single-use, since any re-configure
+            # from a shell without the env var loses it.
+            set(WBLINK_ANDROID_NDK "$ENV{${_wblink_ndk_env}}" CACHE PATH
+                "Root of the Android NDK" FORCE)
             break()
         endif()
     endforeach()
@@ -35,6 +39,22 @@ if(NOT EXISTS "${WBLINK_ANDROID_NDK}/build/cmake/android.toolchain.cmake")
         "-DWBLINK_ANDROID_NDK or env WBLINK_ANDROID_NDK (ANDROID_NDK_HOME / "
         "ANDROID_NDK_ROOT are also honoured) to an NDK root — e.g. "
         "~/Android/Sdk/ndk/26.3.11579264, the revision Waybeam-android pins.")
+endif()
+
+# The gate exists to match the consumer, so say something when it does not.
+# First-non-empty-env-var-wins means a stale ANDROID_NDK_HOME can silently
+# build against a different NDK than the one Waybeam-android pins.
+set(WBLINK_ANDROID_NDK_PIN "26.3.11579264")
+if(EXISTS "${WBLINK_ANDROID_NDK}/source.properties")
+    file(STRINGS "${WBLINK_ANDROID_NDK}/source.properties" _wblink_ndk_rev
+         REGEX "^Pkg.Revision *=")
+    if(NOT _wblink_ndk_rev MATCHES "${WBLINK_ANDROID_NDK_PIN}")
+        message(WARNING
+            "NDK at '${WBLINK_ANDROID_NDK}' is ${_wblink_ndk_rev}, not the "
+            "${WBLINK_ANDROID_NDK_PIN} that Waybeam-android's :wifi pins. The "
+            "bionic gate still runs, but parity with the consumer is not "
+            "guaranteed.")
+    endif()
 endif()
 
 set(ANDROID_ABI arm64-v8a)

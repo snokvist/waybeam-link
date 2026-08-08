@@ -19,6 +19,12 @@ option(WBLINK_FRAME_SHM "Build the frame-SHM ring (§15.4)" ON)
 option(WBLINK_CONTROL_SERVER "Build the REST/SSE control server (§15.5)" ON)
 option(WBLINK_VENC "Build venc HTTP actuation (§9.6)" ON)
 option(WBLINK_BUILD_APP "Build the waybeam-link daemon" ON)
+# Promote our own warnings to errors. OFF by default so a dev build still
+# compiles with a squiggle; ON for the android-arm64 gate, whose whole purpose
+# is catching portability diagnostics (nfds_t narrowing was the first). Without
+# it that preset only PRINTS the bug, inside a log dominated by vendored
+# devourer/libusb warnings — a human-attention gate, not a build gate.
+option(WBLINK_WERROR "Treat WBLINK_WARNINGS as errors (our targets only)" OFF)
 
 # app/main.cpp includes frame_shm.h, control_server.h and wblink/venc.h
 # unconditionally, so the daemon cannot be built against a wblink_io that
@@ -40,6 +46,9 @@ endif()
 # directory-level add_compile_options — the vendored third_party subdirectories
 # (devourer, libusb) must build with their own flags, not ours.
 set(WBLINK_WARNINGS -Wall -Wextra -Wshadow -Wconversion)
+if(WBLINK_WERROR)
+    list(APPEND WBLINK_WARNINGS -Werror)
+endif()
 if(WBLINK_SANITIZE)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
@@ -181,15 +190,12 @@ endif()
 # reference to them (verified with nm over libwblink_io.a).
 if(WBLINK_FRAME_SHM)
     target_sources(wblink_io PRIVATE io/src/frame_shm.cpp)
-    target_compile_definitions(wblink_io PUBLIC WBLINK_FRAME_SHM=1)
 endif()
 if(WBLINK_CONTROL_SERVER)
     target_sources(wblink_io PRIVATE io/src/control_server.cpp)
-    target_compile_definitions(wblink_io PUBLIC WBLINK_CONTROL_SERVER=1)
 endif()
 if(WBLINK_VENC)
     target_sources(wblink_io PRIVATE io/src/venc_http.cpp)
-    target_compile_definitions(wblink_io PUBLIC WBLINK_VENC=1)
 endif()
 
 if(WBLINK_BUILD_APP)

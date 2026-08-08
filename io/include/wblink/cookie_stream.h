@@ -31,6 +31,15 @@
 #include <cstddef>  // size_t
 #include <cstdio>   // std::FILE
 
+// Neither spelling is unconditional. glibc gates fopencookie on _GNU_SOURCE
+// and bionic gates funopen on __USE_BSD (NDK stdio.h / sys/cdefs.h); both are
+// satisfied today only because the compiler predefines _GNU_SOURCE for C++.
+// Should that ever stop being true, fail here with a name rather than a
+// hundred lines of unrelated template noise at the call site.
+#if defined(__BIONIC__) && !defined(__USE_BSD)
+#error "cookie_stream.h: funopen not declared (bionic needs _BSD_SOURCE/_GNU_SOURCE before any libc header)"
+#endif
+
 namespace wblink {
 
 // Bytes handed to the callback are NOT NUL-terminated. Return the number
