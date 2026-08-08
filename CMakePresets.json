@@ -65,6 +65,20 @@
         "CMAKE_BUILD_TYPE": "Release",
         "WBLINK_DEVOURER_CHIPS": "eu"
       }
+    },
+    {
+      "name": "android-arm64",
+      "displayName": "Android arm64 / bionic (compile-only verify: libraries, no app)",
+      "binaryDir": "${sourceDir}/build/android-arm64",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-android-arm64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WBLINK_BUILD_APP": "OFF",
+        "WBLINK_BUILD_TESTS": "OFF",
+        "WBLINK_FRAME_SHM": "OFF",
+        "WBLINK_CONTROL_SERVER": "OFF",
+        "WBLINK_VENC": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -74,7 +88,8 @@
     { "name": "rk3566", "configurePreset": "rk3566" },
     { "name": "ssc338q", "configurePreset": "ssc338q" },
     { "name": "ssc338q-au", "configurePreset": "ssc338q-au" },
-    { "name": "ssc338q-eu", "configurePreset": "ssc338q-eu" }
+    { "name": "ssc338q-eu", "configurePreset": "ssc338q-eu" },
+    { "name": "android-arm64", "configurePreset": "android-arm64" }
   ],
   "testPresets": [
     {

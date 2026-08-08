@@ -202,7 +202,7 @@ int UdpAir::poll_once(int timeout_ms, const RxCb& cb) {
         timeout_ms = std::min(
             timeout_ms, static_cast<int>(std::max<int64_t>(0, ms)));
     }
-    const int rc = ::poll(fds.data(), fds.size(), timeout_ms);
+    const int rc = ::poll(fds.data(), static_cast<nfds_t>(fds.size()), timeout_ms);
     if (rc < 0) {
         return errno == EINTR ? 0 : -1;
     }

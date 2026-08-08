@@ -304,7 +304,7 @@ int BindingSet::poll_once(int timeout_ms,
     for (const In& i : ins_) {
         fds.push_back(pollfd{i.sock.fd(), POLLIN, 0});
     }
-    const int rc = ::poll(fds.data(), fds.size(), timeout_ms);
+    const int rc = ::poll(fds.data(), static_cast<nfds_t>(fds.size()), timeout_ms);
     if (rc < 0) {
         return errno == EINTR ? 0 : -1;
     }
@@ -346,7 +346,7 @@ int BindingSet::poll_once(int timeout_ms,
     if (fds.empty()) {
         return 0;
     }
-    const int rc = ::poll(fds.data(), fds.size(), timeout_ms);
+    const int rc = ::poll(fds.data(), static_cast<nfds_t>(fds.size()), timeout_ms);
     if (rc < 0) {
         return errno == EINTR ? 0 : -1;
     }
