@@ -13,6 +13,8 @@
 # the summary — a skip must never read as a pass:
 #   ssc338q*       needs WBLINK_SSC338Q_TOOLCHAIN
 #   android-arm64  needs WBLINK_ANDROID_NDK / ANDROID_NDK_HOME / ANDROID_NDK_ROOT
+#   rk3566         needs an aarch64 cross gcc
+#   deploy --check needs each config's absolute profile_table on THIS host
 #
 # Hardware trials are NOT here. They need a rig and they radiate; see issue
 # #140 and tools/hwtrial_bringup.
@@ -65,9 +67,20 @@ build_preset dev
 run "ctest dev"  ctest --preset dev
 
 if [ "$QUICK" -eq 0 ]; then
-    for p in release x86-ground rk3566; do
+    for p in release x86-ground; do
         build_preset "$p"
     done
+
+    # rk3566 is a cross like ssc338q, just one whose compiler happens to be
+    # packaged on Debian/Ubuntu. It is guarded for the same reason: a bench
+    # host has it, a bare runner does not, and an unguarded gate that only
+    # ever runs on the author's machine is not a gate.
+    _rk_prefix="${WBLINK_RK3566_PREFIX:-aarch64-linux-gnu-}"
+    if command -v "${_rk_prefix}gcc" > /dev/null 2>&1; then
+        build_preset rk3566
+    else
+        skip "rk3566" "no ${_rk_prefix}gcc (apt: g++-aarch64-linux-gnu)"
+    fi
 
     if [ -n "${WBLINK_SSC338Q_TOOLCHAIN:-}" ]; then
         for p in ssc338q ssc338q-au ssc338q-eu; do
@@ -114,8 +127,20 @@ EOF
 
     # Deploy-config sanity on the four flying nodes. --check parses and
     # validates; it does NOT prove the config says what you meant (CLAUDE.md).
+    #
+    # Three of the four name an ABSOLUTE profile_table under /etc/waybeam-link,
+    # which exists on a bench host and on the nodes themselves and nowhere
+    # else. Locally that made this gate pass for the wrong reason — it was
+    # testing that the author's machine is a bench host. Guard per config on
+    # the table it actually names, and skip loudly when it is missing rather
+    # than reporting a pass or a spurious failure.
     for c in deploy/*.json; do
         m=rx; case "$c" in *vehicle*) m=tx;; esac
+        tbl=$(sed -n 's/.*"profile_table"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$c" | head -1)
+        if [ -n "$tbl" ] && [ "${tbl#/}" != "$tbl" ] && [ ! -f "$tbl" ]; then
+            skip "check $(basename "$c")" "profile_table $tbl not on this host"
+            continue
+        fi
         run "check $(basename "$c")" ./build/dev/waybeam-link "$m" -c "$c" --check
     done
 fi
