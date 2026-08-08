@@ -2,6 +2,12 @@
 cmake_minimum_required(VERSION 3.22)
 project(waybeam-link CXX C)
 
+# Early, not next to install(): CMAKE_INSTALL_INCLUDEDIR is expanded into
+# wblink_core's INSTALL_INTERFACE below, which is evaluated where it is
+# written — including GNUInstallDirs only at the install block would expand it
+# to the empty string and point the exported target at the prefix root.
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -108,8 +114,14 @@ if(WBLINK_RADIO)
     # No hotplug enumeration needed and the SSC338Q cross toolchain has no
     # libudev — the netlink fallback covers both hosts.
     set(LIBUSB_ENABLE_UDEV       OFF)
+    # CURRENT, not CMAKE_BINARY_DIR: embedded, the latter is the CONSUMER's
+    # build root, so a consumer that also vendors libusb-cmake at the
+    # conventional spot collides with "binary directory is already used".
+    # Waybeam-android does exactly that today, which means its hand-copy must
+    # be deleted in the same commit that adds add_subdirectory(waybeam-link) —
+    # the migration cannot be staged.
     add_subdirectory(third_party/libusb-cmake
-                     ${CMAKE_BINARY_DIR}/libusb EXCLUDE_FROM_ALL)
+                     ${CMAKE_CURRENT_BINARY_DIR}/libusb EXCLUDE_FROM_ALL)
 
     # Likewise scoped. As a FORCE cache entry this redirected the ENTIRE
     # consuming project's pkg-config to a shim that answers libusb-1.0 and
@@ -172,7 +184,30 @@ if(WBLINK_RADIO)
     set(DEVOURER_KESTREL_8852C ${_wblink_extra})
     set(DEVOURER_PCIE          OFF)
     add_subdirectory(third_party/devourer
-                     ${CMAKE_BINARY_DIR}/devourer EXCLUDE_FROM_ALL)
+                     ${CMAKE_CURRENT_BINARY_DIR}/devourer EXCLUDE_FROM_ALL)
+
+    # Prove the normal variables above were actually honoured. They rely on
+    # CMP0077 being NEW inside the vendored tree, which is true only while its
+    # own cmake_minimum_required stays >= 3.13 — and a re-vendor could lower
+    # it. Under CMP0077 OLD, option() would overwrite our value in devourer's
+    # scope ONLY, so ours still reads OFF and checking it would prove nothing:
+    # the honest witness is what devourer actually compiled. Silently gaining
+    # two 11ax families in a vehicle build is the exact failure the old
+    # `CACHE ... FORCE` made impossible, so it must not become possible now.
+    get_target_property(_wblink_dv_defs devourer INTERFACE_COMPILE_DEFINITIONS)
+    foreach(_k 8852B 8852C)
+        if(NOT _wblink_extra AND "DEVOURER_HAVE_KESTREL_${_k}=1" IN_LIST
+                                 _wblink_dv_defs)
+            message(FATAL_ERROR
+                "devourer built Kestrel ${_k} despite WBLINK_DEVOURER_CHIPS="
+                "'${WBLINK_DEVOURER_CHIPS}'. The vendored tree is not honouring "
+                "our option values — check CMP0077 (its cmake_minimum_required "
+                "must stay >= 3.13) after any re-vendor.")
+        endif()
+    endforeach()
+    message(STATUS
+        "devourer chips '${WBLINK_DEVOURER_CHIPS}': jaguar1=${_wblink_j1} "
+        "8822c=${_wblink_j3c} 8822e=${_wblink_j3e} extra=${_wblink_extra}")
 endif()
 
 # --- wblink_core: zero-dependency portable wire/session library (PROTOCOL.md
@@ -205,7 +240,7 @@ add_library(wblink_core STATIC
     core/src/recovery.cpp)
 target_include_directories(wblink_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core/include>
-    $<INSTALL_INTERFACE:include>)
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 # C++20 is a usage requirement, not a local setting. CMAKE_CXX_STANDARD is
 # directory-scoped and does NOT travel with an exported or embedded target, so
 # without this a find_package() consumer at its compiler's default standard
@@ -339,8 +374,6 @@ endif()
 # and the static archive link order. examples/embed-consumer/ is that consumer,
 # reduced to the smallest thing that proves it.
 if(PROJECT_IS_TOP_LEVEL)
-    include(GNUInstallDirs)
-    include(CMakePackageConfigHelpers)
 
     install(TARGETS wblink_core EXPORT wblinkTargets
             ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
@@ -352,9 +385,32 @@ if(PROJECT_IS_TOP_LEVEL)
 
     # No version file: the library has no released version yet, and a
     # fabricated one would let a consumer write a compatibility constraint
-    # that means nothing. Add it with the first tagged release.
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/wblinkConfig.cmake"
-         "include(\"\${CMAKE_CURRENT_LIST_DIR}/wblinkTargets.cmake\")\n")
+    # that means nothing. Add it with the first tagged release; until then
+    # find_package(wblink 1.0) fails loudly with "version: unknown".
+    #
+    # Component handling is not boilerplate here: the package deliberately
+    # ships one target out of two, so without it find_package(wblink
+    # COMPONENTS io) reports SUCCESS and leaves wblink::io undefined —
+    # precisely the mistake this asymmetry invites.
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/wblinkConfig.cmake" [[
+include("${CMAKE_CURRENT_LIST_DIR}/wblinkTargets.cmake")
+# Only wblink::core is in this package. Answer a COMPONENTS request honestly
+# instead of reporting success with the target undefined.
+foreach(_wblink_c ${wblink_FIND_COMPONENTS})
+    if(TARGET wblink::${_wblink_c})
+        set(wblink_${_wblink_c}_FOUND 1)
+    else()
+        set(wblink_${_wblink_c}_FOUND 0)
+        if(wblink_FIND_REQUIRED_${_wblink_c})
+            set(wblink_FOUND 0)
+            set(wblink_NOT_FOUND_MESSAGE
+                "wblink component '${_wblink_c}' is not in the installed \
+package; only 'core' is exported. wblink::io links vendored devourer/usb-1.0, \
+which have no install rules -- consume it with add_subdirectory() instead.")
+        endif()
+    endif()
+endforeach()
+]])
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/wblinkConfig.cmake"
             DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/wblink)
 endif()

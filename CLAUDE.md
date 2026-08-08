@@ -165,12 +165,27 @@ in the consumer.
 `cmake -S examples/embed-consumer -B build/embed && cmake --build build/embed`
 is the **embedding gate**. It is the smallest project that consumes this tree
 by `add_subdirectory` and links `wblink::io`, and it asserts at configure time
-that embedding does not build the daemon's world, does not flip the
-consumer's `BUILD_SHARED_LIBS`, and does not hijack the consumer's
-`PKG_CONFIG_EXECUTABLE`. All three regressed before it existed. **Anything
-added at the top of `CMakeLists.txt` with `CACHE ... FORCE` will break it** —
-use a normal variable, which shadows the cache for this directory and below
-without writing to the consumer's.
+that embedding does not build **our** daemon's world, does not write
+`BUILD_SHARED_LIBS` into the consumer's cache, and does not hijack the
+consumer's `PKG_CONFIG_EXECUTABLE`. All three regressed before it existed.
+**Anything added at the top of `CMakeLists.txt` with `CACHE ... FORCE` will
+break it** — use a normal variable, which shadows the cache for this directory
+and below without writing to the consumer's.
+
+Two limits worth knowing rather than discovering. Embedding still leaks ~70
+`EXCLUDE_FROM_ALL` targets from the vendored trees (devourer's example
+executables, libusb's selftests); nothing extra is *built*, but a consumer
+with its own `doctor` or `sense` target hits a target-name collision, and we
+cannot gate that without editing `third_party/`. And a consumer's explicit
+`-DDEVOURER_*` or `-DPKG_CONFIG_EXECUTABLE` is ignored inside our subtree —
+`WBLINK_DEVOURER_CHIPS` is the supported knob. (`FORCE` overrode them too,
+more destructively; do not "fix" this with `if(NOT DEFINED ...)`, which would
+let a stale cache entry win.)
+
+Do not `cmake --install` a `dev` build: it ships an ASan-instrumented
+`libwblink_core.a` whose exported target carries no `-fsanitize` usage
+requirement, so the consumer's link fails on `__asan_*`. Install from
+`release`.
 
 Two consumption shapes, deliberately not symmetric:
 

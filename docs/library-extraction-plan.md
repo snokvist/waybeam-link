@@ -999,6 +999,27 @@ library under two spellings depending on how it was consumed, fixed with
 travel with an exported target, so a `find_package()` consumer at its
 compiler's default standard failed inside our own `table.h`.
 
+**The review of this phase found five real defects, all in the new code and
+all found by probing rather than reading**, and two are worth carrying:
+`add_subdirectory(... ${CMAKE_BINARY_DIR}/libusb)` puts the vendored trees at
+the *consumer's* build root when embedded, and `Waybeam-android` vendors
+libusb-cmake at byte-identically the same expression — so its hand-copy must
+be deleted in the **same commit** that adds `add_subdirectory(waybeam-link)`;
+the migration cannot be staged. And the normal-variable conversion quietly
+gave up a guarantee `CACHE ... FORCE` had: if a future re-vendor lowered
+devourer's `cmake_minimum_required` below 3.13, CMP0077 would go OLD, our
+option values would be ignored **with no warning**, and a vehicle build would
+silently gain two 11ax families. The tree now asserts on what devourer
+actually compiled (`DEVOURER_HAVE_KESTREL_*` in its interface definitions),
+because checking our own variable would prove nothing — CMP0077 OLD overwrites
+it only inside devourer's scope.
+
+One review claim was **wrong and is recorded so it is not re-raised**: that
+Android already builds both Kestrel families by devourer default. Its pinned
+`73f1cb4` has **no Kestrel `option()` at all** (7 `DEVOURER_*` options against
+our 9), which is exactly why its hand-copy sets 7 entries and matches our
+fleet set today. The risk is entirely in the bump, as §2b B7 says.
+
 **Not moved**: the Android submodule bump and the Kestrel force-OFF that must
 accompany it stay Phase 3 (§4). This phase makes the deletion of Android's
 hand-copy *possible*; it does not perform it.
