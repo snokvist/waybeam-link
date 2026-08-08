@@ -85,13 +85,31 @@ genuinely different capability:
 | `rx-spectator` | N receive dongles, no uplink | §3.0 decap, RX diversity, FEC recovery, §15.5a scout/quickconnect, passive-tune feed select | ARQ/NACK, LINK_REPORT, §11 claim + CSA follow (re-scout instead) |
 | `tx-ground` | N receive + **one `role:"tx"`** | all of the above **plus** the three return-path features | requires a transmit-capable dongle and an uplink budget on the phone |
 
-**This is the question B2's resolution exposed rather than answered**, and it
-belongs to the operator, not to this document: *is the Android target a
-passive spectator, or a ground with an uplink?* The library must express both
-either way — that part is settled — but the answer decides what Phase 3
-actually delivers, and it decides whether the §8/§9/§11 paths are on
-Android's critical path at all. Until it is ruled, this document claims only
-the spectator set.
+**RULED 2026-08-08 (operator): `tx-ground`, with spectator also supported.**
+B2's resolution exposed this question rather than answering it, and the
+answer is the second column. Note precisely what it means: Android is a
+**ground with an uplink** — `node.role:"rx"` plus one `role:"tx"` adapter —
+**not** a craft. So the target loop is still `run_rx` and Phase 2a's target
+does not move. `deploy/ground-192.168.2.242.json` is the template
+(`role:"rx"`, not spectator, 2 adapters, one `role:"tx"` named `eu-uplink`);
+`ground-192.168.2.199.json` is the spectator variant.
+
+Three consequences the spectator-scoped plan had excluded, now in scope:
+
+- the wrapped-fd path (B1) must serve a `role:"tx"` adapter, not only RX ears;
+- the TX-die knobs — `air.ack_responder`, `policy.return.unicast`, `air.ldpc`,
+  `air.stbc`, `air.mcs_probe` — become reachable, having been fail-closed
+  refusals on an RX-only node since Pass 162;
+- §8 ARQ/NACK, §9 LINK_REPORT and §11 claim/CSA-follow are back on the
+  critical path.
+
+**The trust boundary does not move, which is worth stating because it looked
+like it would.** §11 claim needs the `csa_psk` boundary, and a phone holding
+the fleet's operator secret would be a real change. Measured instead: all
+four `deploy/*.json` have `policy.csa.psk` **absent**, i.e. the fleet runs
+the announced-session-token mode (§11.4a, `psk_present=1`). Android matches
+today's posture with no secret provisioned. It becomes a question only if the
+fleet ever moves to operator-secret mode.
 
 **The MonAir external repo is the second proving consumer, by ruling.** Issue
 #120 item 3: at the library split, `MonAir` is *moved, not rewritten* into a
@@ -729,7 +747,7 @@ is not, and is the reason 1a's acceptance below has a `FATAL_ERROR` clause.
 **LANDED 2026-08-08** (`impl/phase1a-bionic-build`). What the phase actually
 cost, against the estimate above: four CMake options, three
 `target_sources()` guards, five guarded tests, three `nfds_t` casts, one
-77-line header, one toolchain wrapper, one preset. The `dev` translation-unit
+92-line header, one toolchain wrapper, one preset. The `dev` translation-unit
 set is byte-identical before and after (231 TUs, diffed via
 `compile_commands.json`), so the "no behaviour change" claim is measured
 rather than asserted. Two things the estimate missed and the build found:
@@ -739,6 +757,35 @@ int` on bionic against `unsigned long` on glibc**, so three `::poll()` call
 sites tripped `-Wconversion` (`io/src/udp.cpp:307`, `:349`,
 `io/src/air_udp.cpp:205`). That third one is the preset earning its cost on
 its first run — a real 64→32-bit narrowing that no existing gate could see.
+
+**Three forward items the Phase-1a reviews surfaced**, recorded here rather
+than acted on, because each belongs to a later phase:
+
+- **`WBLINK_VENC=OFF` is right today and wrong as a destination.**
+  `VencActuator` is a non-optional member of `TxCore` (`app/main.cpp:3602`)
+  driven every tick, and it is the sole egress for the §9.6 rate decision — an
+  HTTP GET to a same-SoC `waybeam_venc`. That is meaningless on a phone
+  encoding through MediaCodec, so a full-TX Android node needs a **rate-sink
+  abstraction** with `venc_http` as one implementation, not `WBLINK_VENC=ON`.
+- **`WBLINK_FRAME_SHM=OFF` stays correct**, and #137 (filed after this
+  document merged) confirms the direction: it proposes an injected frame-sink
+  at the `core/frame_reassembler.cpp` layer with `io/src/frame_shm.cpp`
+  demoted to one sink among several. The residual footgun is that
+  `io/src/config.cpp` still parses a `frame-shm` binding kind unconditionally,
+  so a build without the ring accepts such a config and produces nothing. Not
+  reachable in-repo — only `app/main.cpp` constructs `FrameShmRing`, and
+  `WBLINK_BUILD_APP=ON` forces the option ON — and #137 may retire the shape
+  entirely, so no load-time refusal is added for a consumer that does not yet
+  exist.
+- **devourer does NOT block the wrapped-fd path, and a review claim that it
+  does is wrong.** `claim_interface_then_reset`
+  (`third_party/devourer/src/UsbOpen.cpp:74`) takes an **already-opened
+  handle** and never enumerates; the `libusb_get_device_list`/`libusb_open`
+  pair at `:209`/`:222` lives in `claim_interface_reset_reopen` (`:167`), the
+  reopen-after-reset path that `do_reset=false` does not take. The Android
+  consumer already calls the plain variant (`wifi_jni.cpp:389`). So B1 needs
+  **no `third_party/` change and no upstream request** — it stays bounded to
+  `io/src/air_radio.cpp`.
 
 Acceptance for 1a:
 

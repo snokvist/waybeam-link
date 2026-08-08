@@ -42,12 +42,39 @@ if(WBLINK_BUILD_APP)
     endforeach()
 endif()
 
+# The bionic gate exists to match the consumer, so say something when it does
+# not. First-non-empty-env-var-wins in the toolchain file means a stale
+# ANDROID_NDK_HOME can otherwise silently build against a different NDK than
+# Waybeam-android pins. Lives here, not in the toolchain file: that file is
+# re-processed by every try_compile, which emitted the warning 18 times.
+if(ANDROID)
+    set(WBLINK_ANDROID_NDK_PIN "26.3.11579264")
+    if(EXISTS "${WBLINK_ANDROID_NDK}/source.properties")
+        file(STRINGS "${WBLINK_ANDROID_NDK}/source.properties" _wblink_ndk_rev
+             REGEX "^Pkg\\.Revision *=")
+        if(NOT _wblink_ndk_rev MATCHES "${WBLINK_ANDROID_NDK_PIN}")
+            message(WARNING
+                "NDK at '${WBLINK_ANDROID_NDK}' is ${_wblink_ndk_rev}, not the "
+                "${WBLINK_ANDROID_NDK_PIN} that Waybeam-android's :wifi pins. "
+                "The bionic gate still runs, but parity with the consumer is "
+                "not guaranteed.")
+        endif()
+    endif()
+endif()
+
 # Our warning set is applied per-target (WBLINK_WARNINGS below), NOT via
 # directory-level add_compile_options — the vendored third_party subdirectories
 # (devourer, libusb) must build with their own flags, not ours.
 set(WBLINK_WARNINGS -Wall -Wextra -Wshadow -Wconversion)
 if(WBLINK_WERROR)
-    list(APPEND WBLINK_WARNINGS -Werror)
+    # Narrow on purpose. Blanket -Werror would inherit every future
+    # -Wall/-Wextra expansion, so an NDK bump could break the gate on code
+    # that has nothing to do with portability. These three are the classes the
+    # gate exists for and all three exist on GCC and clang, so WBLINK_WERROR
+    # stays usable on the glibc presets. NOT -Werror=shorten-64-to-32: clang
+    # folds it under -Wconversion and GCC rejects the unknown option outright.
+    list(APPEND WBLINK_WARNINGS
+         -Werror=conversion -Werror=shadow -Werror=sign-compare)
 endif()
 if(WBLINK_SANITIZE)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -184,10 +211,12 @@ if(WBLINK_RADIO)
         third_party/libusb-cmake/libusb/libusb)
     target_link_libraries(wblink_io PUBLIC devourer usb-1.0)
 endif()
-# The three optional units, each following the WBLINK_RADIO pattern above:
-# source added by target_sources, feature macro PUBLIC so consumers and tests
-# see it. All three are leaves — nothing else in io/ carries an undefined
-# reference to them (verified with nm over libwblink_io.a).
+# The three optional units. Only the target_sources half of the WBLINK_RADIO
+# pattern above applies: none of these three has a single #if consumer, so a
+# feature macro would reach every flying build's command line for nothing.
+# Re-add one when a consumer needs to branch on it. All three are leaves —
+# nothing else in io/ carries an undefined reference to them (verified with nm
+# over libwblink_io.a).
 if(WBLINK_FRAME_SHM)
     target_sources(wblink_io PRIVATE io/src/frame_shm.cpp)
 endif()

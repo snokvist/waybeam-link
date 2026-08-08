@@ -41,21 +41,14 @@ if(NOT EXISTS "${WBLINK_ANDROID_NDK}/build/cmake/android.toolchain.cmake")
         "~/Android/Sdk/ndk/26.3.11579264, the revision Waybeam-android pins.")
 endif()
 
-# The gate exists to match the consumer, so say something when it does not.
-# First-non-empty-env-var-wins means a stale ANDROID_NDK_HOME can silently
-# build against a different NDK than the one Waybeam-android pins.
-set(WBLINK_ANDROID_NDK_PIN "26.3.11579264")
-if(EXISTS "${WBLINK_ANDROID_NDK}/source.properties")
-    file(STRINGS "${WBLINK_ANDROID_NDK}/source.properties" _wblink_ndk_rev
-         REGEX "^Pkg.Revision *=")
-    if(NOT _wblink_ndk_rev MATCHES "${WBLINK_ANDROID_NDK_PIN}")
-        message(WARNING
-            "NDK at '${WBLINK_ANDROID_NDK}' is ${_wblink_ndk_rev}, not the "
-            "${WBLINK_ANDROID_NDK_PIN} that Waybeam-android's :wifi pins. The "
-            "bionic gate still runs, but parity with the consumer is not "
-            "guaranteed.")
-    endif()
-endif()
+# CMake re-processes this file inside every try_compile (compiler detection,
+# libusb feature probes), and those child projects get a FRESH cache that does
+# NOT inherit -D cache variables. Without this, `-DWBLINK_ANDROID_NDK=<path>`
+# — the documented resolution path — fails in the child with an empty value,
+# and with BOTH -D and env set the child would silently resolve to the env NDK
+# while the parent built against the -D one. Propagating the resolved value is
+# what makes -D work at all, and what makes it beat env everywhere.
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES WBLINK_ANDROID_NDK)
 
 set(ANDROID_ABI arm64-v8a)
 set(ANDROID_PLATFORM android-26)
