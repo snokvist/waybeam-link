@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "wblink/crc8.h"
+#include "wblink/log.h"
 
 namespace wblink {
 
@@ -117,11 +118,10 @@ std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend,
         // Monitor last resort. Bus paths shuffle on any re-plug (CLAUDE.md),
         // so an artifact keyed this way goes stale the next time the dongle
         // moves — and the node then boots with no curve. Say so once, loudly.
-        std::fprintf(stderr,
-                     "calibrate: adapter \"%s\" has no calib_id — keying the "
-                     "artifact on bus path \"%s\", which CHANGES on re-plug. "
-                     "Set adapters[].calib_id to pin it (§10.7).\n",
-                     adapter.name.c_str(), adapter.bus.c_str());
+        wb_logf("calibrate: adapter \"%s\" has no calib_id — keying the "
+                "artifact on bus path \"%s\", which CHANGES on re-plug. "
+                "Set adapters[].calib_id to pin it (§10.7).\n",
+                adapter.name.c_str(), adapter.bus.c_str());
         return "bus/" + adapter.bus;
     }
     return "udp";

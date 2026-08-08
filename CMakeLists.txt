@@ -259,6 +259,7 @@ target_compile_options(wblink_core PRIVATE ${WBLINK_WARNINGS})
 # nlohmann/json (io layer only — core must stay dependency-free).
 add_library(wblink_io STATIC
     io/src/config.cpp
+    io/src/log.cpp
     io/src/udp.cpp
     io/src/cache_udp.cpp
     io/src/stats.cpp

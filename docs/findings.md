@@ -12,6 +12,122 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-08 — Legs A4 and A6 closed: §15.2 mac-pin re-bind, and recover() observed to perform no USB reset
+
+Issue #140. Run on the bench rig alongside PR #146, both dongles, kernel
+drivers unloaded and restored. Closes everything in #140 that does not need an
+Android phone.
+
+### A4 — §15.2 mac-pin re-bind
+
+Pass 154's two-pass claim/re-bind, which #139 modified (it added the `by_fd`
+guard to the bus pass). Three cases, each a spectator config so the node
+cannot transmit:
+
+| case | config | result |
+|---|---|---|
+| listing order vs enumeration order | both stanzas mac-pinned, listed AU-then-CU | `pin-au` → 8-1 (AU mac), `pin-cu` → 5-1 (CU mac) |
+| mac pin vs bus pin on the same unit | stanza 0 mac-pinned to the CU, stanza 1 bus-pinned to 5-1 (the CU) | `DISPLACED ... (§15.2 precedence)` fires on the bus-pinned stanza, which then takes the AU |
+| pinned mac absent | stanza 0 pinned to `02:00:00:00:00:01` | `NOT PRESENT ... at the safe boot offset; identity-bound calibration is withheld (§10.6 D2)` |
+
+The first case is the substance. Enumeration order on this host is 5-1 (CU)
+then 8-1 (AU) — established by case 3, where the unmatched stanza fell to the
+first free unit, 5-1. So the provisional by-index claim would have given
+`pin-au` the CU and `pin-cu` the AU, and the re-bind corrected **both**. That
+is the same input the issue's "dongles swapped between ports" produces:
+the pinned MAC is not at the position the claim assigned.
+
+**Stated plainly: the dongles were not physically moved.** The condition was
+created by making listing order disagree with enumeration order. The re-bind
+sees only enumeration order and EFUSE MACs, so a physical swap is the same
+input by a slower route — but if anyone wants the literal test, it is still
+unrun.
+
+### A6 — §11.6 recover() performs no USB reset
+
+#139 asserted this from reading the code (`recover()` is StopRxLoop /
+SetMonitorChannel / StartRxLoop, no reset anywhere). Now observed.
+
+Method matters here, because the first attempt proved nothing: with
+`do_reset` at its default `true`, bring-up resets the device and puts
+`usb 8-1: reset SuperSpeed USB device` in `dmesg` — which is exactly the line
+A6 is looking for, from the wrong cause. The probe therefore sets
+**`do_reset=false`**, so any reset in the log must be `recover()`'s.
+
+Measured, with a second process injecting at MCS 0 / −24 qdb so there was
+real traffic to lose:
+
+```
+before: rx=5346   →  recover() -> true  →  after: rx=12400
+RX DELTA ACROSS recover(): 7054 frames
+dmesg for the ear's bus (5-1): nothing
+```
+
+`recover()` returns true, the RX loop restarts (devourer re-submits its URB
+ring), and **7054 frames arrive across and after the recovery** with zero
+resets, disconnects or re-enumeration on that adapter. An earlier run without
+a transmitter showed the loop restarting but `rx` flat at 0 — correct, and
+worthless as evidence, since nothing was being sent. A6 needed traffic to say
+anything.
+
+Incidentally re-confirms `do_reset=false` on the *enumerated* path (not just
+the wrapped-fd path #139 needed it for): bring-up succeeded and the EFUSE MAC
+read correctly without the reset.
+
+### Two bench notes
+
+- The 8812CU's kernel driver is **`88x2cu`**, not `8812eu`. `8812eu` loads
+  with zero users and rmmod'ing it does nothing for the CU. `CLAUDE.md`
+  already names `88x2cu` — this is a note for anyone who guesses from
+  `lsmod` instead.
+- After a devourer run ends with the card disabled, `modprobe rtw88_8812au`
+  alone did **not** bring the AU's netdev back; `modprobe -r` then `modprobe`
+  did. Check `ip -br link` after restoring drivers rather than assuming.
+
+**Open:** B/6 (a real Android `UsbManager` fd) is the only remaining #140 leg
+and is genuinely phone-blocked. The composite-dongle question needs an
+RTL8822BU, not a phone.
+
+## 2026-08-08 — Leg A5: §15.3 stats from a real node, and the fd separation the log sinks depend on
+
+Run alongside PR #146 (issue #144, B8) to check the injected sinks against a
+real node rather than only against `ctest`. Issue #140 leg A5.
+
+Setup: bench host, both dongles, kernel drivers unloaded (`rtw88_8812au`,
+`88x2cu` — note the CU is `88x2cu`, not `8812eu`, which loads with zero users
+and is the wrong module to rmmod). Config: the spectator template
+`deploy/ground-192.168.2.199.json` with `air.kind:"radio"`, both units as
+`role:"rx"` on 5805/20, `stats.hz=2`, `stats.stdout=true`. **Spectator, so
+§15.2 withholds ARQ/NACK/LINK_REPORT and the node provably cannot transmit** —
+this is a non-radiating measurement.
+
+Measured:
+
+- Both units bind and report their EFUSE identities unchanged from every prior
+  run — `20:0d:b0:c4:a7:6a` (Jaguar1, `8-1`), `40:a5:ef:2f:23:08` (Jaguar3,
+  `5-1`).
+- §15.3 emits with a populated `adapters[]` — two entries carrying real
+  per-unit counters (`rx`, `filtered`, `kernel_drop`, `rssi_best`,
+  `adapter_stalled`, `rx_dead`, `tx_wedged`), every line parsing as JSON.
+- Cadence exact: `t_ms` deltas 500/501 ms at `stats.hz=2` over 15 lines.
+- **Complete fd separation**: stats on fd 1, every diagnostic on fd 2, zero
+  crossover in either direction. This is the property B8's log sink depends
+  on — a diagnostic reaching stdout corrupts the NDJSON stream a consumer is
+  parsing, and it would do so only under the conditions that produce
+  diagnostics, i.e. when something is already wrong.
+
+One measurement artifact worth not rediscovering: bring-up of two devourer
+adapters takes ~7 s, so a `timeout 8` run yields **one** stats line and looks
+like a broken emitter. It is not — the same config at `timeout 15` gives 15
+lines at the correct interval. Size the run past bring-up before concluding
+anything about cadence.
+
+**Open:** nothing here blocks. What A5 does *not* cover is a node with a live
+peer — `adapters[].rx` is 0 throughout because nothing was transmitting, so
+the counters are structurally-correct-but-zero. The schema question in §5 of
+`docs/library-extraction-plan.md` (per-backend counter dispatch, `MonAir`
+leaving the tree under #120) is unaffected either way and stays for Phase 2a.
+
 ## 2026-08-08 — TX confirmed over the air on merged Phase-1 code: 500/500 submitted, 500/500 reported, 499 received
 
 Follows the RX-only run below (#140 legs A1/A3/B1–B5), which deliberately never

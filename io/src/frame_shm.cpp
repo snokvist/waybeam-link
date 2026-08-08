@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "wblink/frame_shm.h"
 
+#include "wblink/log.h"
+
 #include <fcntl.h>
 #include <linux/futex.h>
 #include <sys/eventfd.h>
@@ -383,10 +385,9 @@ long FrameShmRing::read_frame(uint8_t* buf, size_t cap) {
         ++stats_.bad_slots;
         if (!warned_undersized_) {
             warned_undersized_ = true;
-            std::fprintf(stderr,
-                         "frame_shm: read buffer %zu < frame %u — ingress "
-                         "stalled; size the buffer to slot_data_size (%u)\n",
-                         cap, len, slot_data_size_);
+            wb_logf("frame_shm: read buffer %zu < frame %u — ingress "
+                    "stalled; size the buffer to slot_data_size (%u)\n",
+                    cap, len, slot_data_size_);
         }
         return -1;
     }

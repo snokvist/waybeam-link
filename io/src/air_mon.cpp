@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "wblink/dot11.h"
+#include "wblink/log.h"
 #include "wblink/airtime.h"
 #include "wblink/radiotap.h"
 #include "wblink/types.h"
@@ -206,10 +207,9 @@ void attach_bpf_filter(int fd, std::optional<uint8_t> net_id,
     prog.filter = f.data();
     if (::setsockopt(fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog,
                      sizeof(prog)) != 0) {
-        std::fprintf(stderr,
-                     "kernel-monitor: SO_ATTACH_FILTER on %s: %s "
-                     "(non-fatal, userspace filter still active)\n",
-                     ifname, std::strerror(errno));
+        wb_logf("kernel-monitor: SO_ATTACH_FILTER on %s: %s "
+                "(non-fatal, userspace filter still active)\n",
+                ifname, std::strerror(errno));
     }
 }
 
@@ -716,9 +716,8 @@ uint16_t MonAir::mtu_supported() const {
             budget = mtu_tier::kMediumBudget;
         }
         supported = std::min(supported, budget);
-        std::fprintf(stderr,
-                     "kernel-monitor: %s netdev mtu=%u -> packet budget %u\n",
-                     adapter->ifname.c_str(), mtu.value_or(0), budget);
+        wb_logf("kernel-monitor: %s netdev mtu=%u -> packet budget %u\n",
+                adapter->ifname.c_str(), mtu.value_or(0), budget);
     }
     return supported;
 }
@@ -778,11 +777,10 @@ bool MonAir::set_power_offset_qdb(size_t adapter, int32_t qdb) {
     if (adapter >= impl_->adapters.size()) return false;
     const std::optional<int32_t>& ref = impl_->adapters[adapter]->cfg_max_power_qdb;
     if (!ref) {
-        std::fprintf(stderr,
-                     "kernel-monitor: %s has no max_power_qdb reference — "
-                     "§10.5 offset %d qdb not applied\n",
-                     impl_->adapters[adapter]->ifname.c_str(),
-                     static_cast<int>(qdb));
+        wb_logf("kernel-monitor: %s has no max_power_qdb reference — "
+                "§10.5 offset %d qdb not applied\n",
+                impl_->adapters[adapter]->ifname.c_str(),
+                static_cast<int>(qdb));
         return false;
     }
     return set_power_qdb(adapter, *ref + qdb);
@@ -799,14 +797,13 @@ bool MonAir::set_power_qdb(size_t adapter, int32_t qdb) {
     const char* argv[] = {"iw",  "dev",     ifname.c_str(), "set",
                           "txpower", "fixed", mbm,          nullptr};
     if (!run_cli(argv)) {
-        std::fprintf(stderr,
-                     "kernel-monitor: iw set txpower fixed %s mBm on %s "
-                     "failed\n",
-                     mbm, ifname.c_str());
+        wb_logf("kernel-monitor: iw set txpower fixed %s mBm on %s "
+                "failed\n",
+                mbm, ifname.c_str());
         return false;
     }
-    std::fprintf(stderr, "kernel-monitor: %s txpower fixed %d qdb (%s mBm)\n",
-                 ifname.c_str(), qdb, mbm);
+    wb_logf("kernel-monitor: %s txpower fixed %d qdb (%s mBm)\n",
+            ifname.c_str(), qdb, mbm);
     return true;
 }
 
@@ -819,8 +816,8 @@ bool MonAir::set_power_auto(size_t adapter) {
     const char* argv[] = {"iw",      "dev",  ifname.c_str(), "set",
                           "txpower", "auto", nullptr};
     const bool ok = run_cli(argv);
-    std::fprintf(stderr, "kernel-monitor: %s txpower auto %s\n",
-                 ifname.c_str(), ok ? "ok" : "FAILED");
+    wb_logf("kernel-monitor: %s txpower auto %s\n",
+            ifname.c_str(), ok ? "ok" : "FAILED");
     return ok;
 }
 
@@ -834,9 +831,9 @@ bool MonAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t bw, bool fast) {
     if (adapter >= impl_->adapters.size()) return false;
     const std::string& ifname = impl_->adapters[adapter]->ifname;
     if (!iw_set_freq(ifname, chan_mhz, bw)) {
-        std::fprintf(stderr, "kernel-monitor: iw set freq %u (%u MHz bw) on %s "
-                             "failed\n",
-                     chan_mhz, bw, ifname.c_str());
+        wb_logf("kernel-monitor: iw set freq %u (%u MHz bw) on %s "
+                        "failed\n",
+                chan_mhz, bw, ifname.c_str());
         return false;
     }
     return true;
@@ -872,9 +869,8 @@ bool MonAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t bw) {
     run_cli(mtu);  // best-effort, as in mon-up.sh
     ok = iw_set_freq(ifname, chan_mhz, bw) && ok;
     run_cli(txp);  // best-effort, as in mon-up.sh
-    std::fprintf(stderr,
-                 "kernel-monitor: RX-liveness recovery on %s -> %u MHz %s\n",
-                 ifc, chan_mhz, ok ? "ok" : "FAILED");
+    wb_logf("kernel-monitor: RX-liveness recovery on %s -> %u MHz %s\n",
+            ifc, chan_mhz, ok ? "ok" : "FAILED");
     return ok;
 }
 

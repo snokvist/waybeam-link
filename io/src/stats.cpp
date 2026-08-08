@@ -570,7 +570,9 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
 void StatsEmitter::emit(const StatsSnapshot& snap) {
     line_.clear();
     format_stats_line(snap, line_);
-    if (to_stdout_) {
+    if (sink_ != nullptr) {
+        sink_(sink_cookie_, line_.data(), line_.size());
+    } else if (to_stdout_) {
         std::fwrite(line_.data(), 1, line_.size(), stdout);
         std::fflush(stdout);
     }

@@ -4,6 +4,7 @@
 #include "wblink/calib_dwell.h"  // kMaxDwellFrames (§3.16)
 
 #include "wblink/fps_ladder.h"  // §9.11 ladder-membership validation
+#include "wblink/log.h"
 
 #include <cctype>
 #include <cmath>
@@ -301,11 +302,10 @@ Result<Config> load_config_json(const std::string& json_text) {
                 if (ac.max_power_qdb) {
                     for (int32_t& q : ac.power_presets_qdb) {
                         if (q > *ac.max_power_qdb) {
-                            std::fprintf(stderr,
-                                         "config: adapter %s: power preset %d "
-                                         "qdb clamped to max_power_qdb %d "
-                                         "(§10.3)\n",
-                                         ac.name.c_str(), q, *ac.max_power_qdb);
+                            wb_logf("config: adapter %s: power preset %d "
+                                    "qdb clamped to max_power_qdb %d "
+                                    "(§10.3)\n",
+                                    ac.name.c_str(), q, *ac.max_power_qdb);
                             q = *ac.max_power_qdb;
                         }
                     }

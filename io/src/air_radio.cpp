@@ -29,6 +29,7 @@
 #include "wblink/airtime.h"
 #include "wblink/cookie_stream.h"  // bionic has no fopencookie
 #include "wblink/dot11.h"
+#include "wblink/log.h"
 #include "wblink/radio_decode.h"
 
 namespace wblink {
@@ -232,8 +233,7 @@ struct RadioAir::Impl {
     }
     static ssize_t diag_write(void*, const char* buf, size_t n) {
         if (!is_bulk_send_ok(buf, n)) {
-            std::fwrite(buf, 1, n, stderr);
-            std::fflush(stderr);
+            wb_log_write(buf, n);
         }
         return static_cast<ssize_t>(n);
     }
@@ -277,8 +277,8 @@ struct RadioAir::Impl {
                 // heuristic a quiet channel also trips). Set before the log so
                 // a stats read racing the exit still sees the ear as dead.
                 adp->rx_dead.store(true, std::memory_order_relaxed);
-                std::fprintf(stderr, "radio: rx loop \"%s\" died: %s\n",
-                             adp->name.c_str(), e.what());
+                wb_logf("radio: rx loop \"%s\" died: %s\n",
+                        adp->name.c_str(), e.what());
             }
         });
     }
@@ -361,10 +361,15 @@ struct RadioAir::Impl {
             std::fclose(ev_stream);
         }
         if (diag_stream != nullptr) {
-            // Put stderr back before closing, so any later devourer line (or
-            // a destructor's own diagnostics) still lands somewhere.
+            // Point it somewhere valid before closing, so a later devourer
+            // line still lands somewhere. Defensive, not load-bearing: this
+            // Logger is owned by Impl and dies a few statements below, and
+            // every other holder was released above, so nothing is currently
+            // able to log through it. The change from stderr to
+            // wb_log_stream() is what matters — stderr would take the line
+            // back out of a consumer's sink, which is the whole point of B8.
             if (logger) {
-                logger->set_diag_stream(stderr);
+                logger->set_diag_stream(wb_log_stream());
             }
             std::fclose(diag_stream);
         }
@@ -598,10 +603,9 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
             im.logger->set_diag_stream(im.diag_stream);
             // Never a silent drop: say once that the per-packet line is gone,
             // so a reader who expects it knows why it is missing.
-            std::fprintf(stderr,
-                         "radio: devourer per-packet bulk_send OK lines "
-                         "suppressed (log volume); failures and all other "
-                         "devourer diagnostics unchanged\n");
+            wb_logf("radio: devourer per-packet bulk_send OK lines "
+                    "suppressed (log volume); failures and all other "
+                    "devourer diagnostics unchanged\n");
         }
     }
 
@@ -802,9 +806,8 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
             if (rc != LIBUSB_ERROR_BUSY || attempt == kClaimAttempts) {
                 break;  // no sleep and no "retrying" line after the last try
             }
-            std::fprintf(stderr,
-                         "radio: adapter \"%s\" claim BUSY, retrying (%d/%d)\n",
-                         ad->name.c_str(), attempt, kClaimAttempts - 1);
+            wb_logf("radio: adapter \"%s\" claim BUSY, retrying (%d/%d)\n",
+                    ad->name.c_str(), attempt, kClaimAttempts - 1);
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
         if (rc != 0) {
@@ -923,15 +926,14 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
             const AdapterCfg& ac = cfg.adapters[i];
             if (ac.mac.empty() && !ac.bus.empty() &&
                 im.adapters[i]->path != ac.bus) {
-                std::fprintf(stderr,
-                             "radio: adapter \"%s\": bus pin %s DISPLACED by "
-                             "a mac match — bound to path %s (mac %s) "
-                             "instead (§15.2 precedence)\n",
-                             ac.name.c_str(), ac.bus.c_str(),
-                             im.adapters[i]->path.c_str(),
-                             im.adapters[i]->mac.empty()
-                                 ? "none"
-                                 : im.adapters[i]->mac.c_str());
+                wb_logf("radio: adapter \"%s\": bus pin %s DISPLACED by "
+                        "a mac match — bound to path %s (mac %s) "
+                        "instead (§15.2 precedence)\n",
+                        ac.name.c_str(), ac.bus.c_str(),
+                        im.adapters[i]->path.c_str(),
+                        im.adapters[i]->mac.empty()
+                            ? "none"
+                            : im.adapters[i]->mac.c_str());
             }
         }
         // Re-stamp the stanza-owned fields onto the re-bound units, surface
@@ -952,13 +954,11 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                 // safe boot offset is applied by the caller as on any boot;
                 // what is withheld is every identity-bound absolute — the
                 // artifact for the configured unit cannot match this one.
-                std::fprintf(
-                    stderr,
-                    "radio: adapter \"%s\": configured mac %s NOT PRESENT — "
-                    "bound to path %s (mac %s) at the safe boot offset; "
-                    "identity-bound calibration is withheld (§10.6 D2)\n",
-                    ad.name.c_str(), ac.mac.c_str(), ad.path.c_str(),
-                    ad.mac.empty() ? "none" : ad.mac.c_str());
+                wb_logf("radio: adapter \"%s\": configured mac %s NOT PRESENT "
+                        "— bound to path %s (mac %s) at the safe boot offset; "
+                        "identity-bound calibration is withheld (§10.6 D2)\n",
+                        ad.name.c_str(), ac.mac.c_str(), ad.path.c_str(),
+                        ad.mac.empty() ? "none" : ad.mac.c_str());
             }
             const uint8_t chan = mhz_to_channel(ac.channel_mhz);
             if (ad.dev->GetSelectedChannel().Channel != chan) {
@@ -1017,10 +1017,10 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // The declared adapter set (§15.5 /info mirrors this): name, port,
         // per-unit identity, role. "mac none" is the D3 posture announcing
         // itself — that unit can never hold an absolute curve.
-        std::fprintf(stderr, "radio: adapter \"%s\" up (path %s, mac %s%s)\n",
-                     ad.name.c_str(), ad.path.c_str(),
-                     ad.mac.empty() ? "none" : ad.mac.c_str(),
-                     ad.tx ? ", tx" : "");
+        wb_logf("radio: adapter \"%s\" up (path %s, mac %s%s)\n",
+                ad.name.c_str(), ad.path.c_str(),
+                ad.mac.empty() ? "none" : ad.mac.c_str(),
+                ad.tx ? ", tx" : "");
         im.start_rx_thread(ad, static_cast<uint8_t>(i));
     }
     // §3.0 Pass 12 (craft half): arm the TX adapter's hardware ACK
@@ -1036,15 +1036,13 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                      static_cast<uint8_t>(cfg.originator & 0xff),
                      static_cast<uint8_t>(im.tx_idx)};
         if (tx.dev->SetAckResponder(mac)) {
-            std::fprintf(stderr,
-                         "radio: ack responder armed on \"%s\" "
-                         "(56:42:%02x:%02x:%02x:%02x)\n",
-                         tx.name.c_str(), mac.bytes[2], mac.bytes[3],
-                         mac.bytes[4], mac.bytes[5]);
+            wb_logf("radio: ack responder armed on \"%s\" "
+                    "(56:42:%02x:%02x:%02x:%02x)\n",
+                    tx.name.c_str(), mac.bytes[2], mac.bytes[3],
+                    mac.bytes[4], mac.bytes[5]);
         } else {
-            std::fprintf(stderr,
-                         "radio: ack responder unsupported on \"%s\"\n",
-                         tx.name.c_str());
+            wb_logf("radio: ack responder unsupported on \"%s\"\n",
+                    tx.name.c_str());
         }
     }
     return Result<RadioAir>::ok(std::move(air));
@@ -1287,11 +1285,10 @@ bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
     // kernel-monitor gets from `iw` reporting success.
     const SelectedChannel got = dev.GetSelectedChannel();
     if (got.Channel != chan) {
-        std::fprintf(stderr,
-                     "radio: retune \"%s\" to ch %u not applied "
-                     "(driver reports ch %u)\n",
-                     impl_->adapters[adapter]->name.c_str(), chan,
-                     static_cast<unsigned>(got.Channel));
+        wb_logf("radio: retune \"%s\" to ch %u not applied "
+                "(driver reports ch %u)\n",
+                impl_->adapters[adapter]->name.c_str(), chan,
+                static_cast<unsigned>(got.Channel));
         return false;
     }
     return true;
@@ -1348,8 +1345,8 @@ bool RadioAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz) {
     a.rx_dead.store(false, std::memory_order_relaxed);
     im.start_rx_thread(a, static_cast<uint8_t>(adapter));
     const bool ok = got.Channel == chan;
-    std::fprintf(stderr, "radio: RX-liveness recovery on \"%s\" -> %u MHz %s\n",
-                 a.name.c_str(), chan_mhz, ok ? "ok" : "FAILED");
+    wb_logf("radio: RX-liveness recovery on \"%s\" -> %u MHz %s\n",
+            a.name.c_str(), chan_mhz, ok ? "ok" : "FAILED");
     return ok;
 }
 
@@ -1435,10 +1432,9 @@ uint16_t RadioAir::mtu_supported() const {
     // So the tier is asserted, and now with the reason stated rather than on
     // the strength of create() having succeeded. Logged like the monitor path
     // logs its netdev derivation, so a boot log shows what each backend chose.
-    std::fprintf(stderr,
-                 "radio: no netdev MTU gate (raw MPDU injection); "
-                 "packet budget %u\n",
-                 static_cast<unsigned>(mtu_tier::kHighBudget));
+    wb_logf("radio: no netdev MTU gate (raw MPDU injection); "
+            "packet budget %u\n",
+            static_cast<unsigned>(mtu_tier::kHighBudget));
     return mtu_tier::kHighBudget;
 }
 
