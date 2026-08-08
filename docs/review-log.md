@@ -24,6 +24,55 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 164 — kernel-monitor is deleted; devourer is the only RF backend (2026-08-08)
+
+**Verdict.** Ruling #120 item 3 said `MonAir` would be **moved** to an
+external RX-only repo at the library split, as the split's second proving
+consumer. The operator ruled **DROP** instead (2026-08-08), on evidence:
+the backend's last archetype is a spectator, and a devourer spectator with
+**zero `role:"tx"` adapters** delivered 19466 frames, uniq 19466, diversity
+19430, loss 0 ‰, filtered/drop 0, both dies EFUSE-autoloaded — the leg
+item 2 was waiting on. Both flying nodes migrated to devourer on 2026-08-06;
+only the repo was stale. `air.kind "kernel-monitor"` is now rejected by the
+loader. Nothing on air changes — the backend was never wire-visible — so
+this is not a §3.1 version event.
+
+**Changed.** §3.0 backend catalog (devourer sole RF backend + one retirement
+paragraph; `air.kind` ∈ `udp | udp-broadcast | radio`); §10.5 actuation
+matrix loses the `iw`-forked absolute row and `max_power_qdb`'s
+reference role; §10.6/§10.7 identity tiers 2–4 (`id/monitor/`,
+`ifname/<MAC>`, `bus/`) retired, `mac/<efuse-mac>` stands alone; §15.5
+`GET /api/v1/tx/power` `backend` ∈ `radio | udp`; §14.2
+`airtime_efficiency_permille` stated for an RF backend generally; §11.6
+RX-liveness recovery described as the devourer RX-path restart it is.
+
+**Two scope decisions, both operator-answered.**
+
+1. **Stranded keys are inert, not retired.** `adapters[].{ifname, calib_id,
+   max_power_qdb, power_presets_qdb}` lose their last consumer, and §11.7
+   `0x0A TX_POWER` becomes a command that can never succeed (every remaining
+   actuator is relative, Pass 151). All still load; `--check --strict`
+   reports the keys **inert** — the #106 registry's first real customer, and
+   it catches `calib_id` on the live craft config. Retiring them, and ruling
+   on `0x0A`, is a separate pass: one law change per pass.
+2. **`deploy/ground-192.168.2.199.json` and `deploy/cache-192.168.2.247.json`
+   are deleted, not migrated.** Both nodes were offline on 2026-08-08, so
+   their real state could not be read, and `scripts/gates.sh` `--check`s
+   every `deploy/*.json` — a kernel-monitor file left there fails the gate.
+   Inventing devourer content for them would put configs in the repo that no
+   node has ever loaded. Re-author from the live node when powered.
+
+**Kept deliberately.** §15.3 `bpf_filtered` keeps its slot at a permanent 0
+(schema stability for consumers); measurements taken through the monitor path
+— the CU TX wedge, the 30–117 ms cross-channel retune cost, the 19/27 dBm
+`txpower auto` defaults — stay in the spec, attributed. Pass history is
+untouched.
+
+**Consequence for #109.** The extraction plan's "second proving consumer" is
+gone (`docs/library-extraction-plan.md`); Phase 3's proof of the split now
+rests on the Android consumer alone. B6's `air_mon.cpp` leg is solved by
+deletion rather than relocation.
+
 ## Pass 163 — sequence-derived rate probing: the §9.2 numerator closed, probe as veto (2026-08-08)
 
 **Verdict.** Issue #101's code stages, on two operator rulings: the probe
