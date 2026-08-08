@@ -712,7 +712,7 @@ void test_bw_code() {
 //
 // FakeAir exists because the interface's whole point is that a backend states
 // its answer somewhere a test can read it. Before the contract there was
-// nothing to fake: AirBackend held concrete std::optional<MonAir>, so the
+// nothing to fake: AirBackend held concrete backend optionals, so the
 // capability gaps could only be observed on hardware.
 //
 // These cases pin the DECLARED LIMITS, not aspirations. Several assert that a
@@ -839,7 +839,7 @@ AirBackend backend_with(std::unique_ptr<FakeAir> f, size_t adapters) {
     return b;
 }
 
-// CHANGED IN THIS PASS: the monitor path used to flush unconditionally.
+// CHANGED IN PASS 143: the recover path used to flush unconditionally.
 // Flushing after a recovery that recovered nothing discards live backlog for
 // no benefit, and on a backend with no re-init path it is a pure loss.
 void test_recover_all_only_flushes_when_something_recovered() {
@@ -865,7 +865,7 @@ void test_recover_all_only_flushes_when_something_recovered() {
 
 // CHANGED IN THIS PASS: the radio path used to re-apply TX power even when the
 // retune had failed. Re-applying power for a channel the adapter is not on is
-// meaningless; the monitor path already only did it on success.
+// meaningless.
 void test_retune_all_reapplies_power_only_on_success() {
     auto f = std::make_unique<FakeAir>();
     f->adapters = 3;

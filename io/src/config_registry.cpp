@@ -30,8 +30,8 @@ using json = nlohmann::json;
 // uplink-free and correctly omits policy.return, which keying on `spectator`
 // would have missed. Runtime: `iface()->has_tx()`, app/main.cpp:1657 / :3846.
 //
-// has_tx() is per BACKEND, and only the two RF ones follow the adapters
-// (MonAir::has_tx / RadioAir::has_tx return impl_->has_tx). UdpAir hardcodes
+// has_tx() is per BACKEND, and only the RF one follows the adapters
+// (RadioAir::has_tx returns impl_->has_tx). UdpAir hardcodes
 // `return true` — "the dev backend has an uplink by construction"
 // (io/include/wblink/air_udp.h:119) — and udp configs carry no adapters at
 // all, so an adapters-only predicate called every policy.return key inert on
@@ -45,7 +45,6 @@ bool has_uplink(const Config& c) {
         case AirCfg::Kind::kNone:
             return true;  // loopback: no backend to point at, so claim nothing
         case AirCfg::Kind::kRadio:
-        case AirCfg::Kind::kMonitor:
             break;
     }
     for (const AdapterCfg& a : c.adapters) {

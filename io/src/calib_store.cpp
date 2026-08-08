@@ -70,22 +70,11 @@ uint8_t fingerprint_of(const std::string& body) {
 
 }  // namespace
 
-const char* calib_backend_tag(AirCfg::Kind kind) {
-    switch (kind) {
-        case AirCfg::Kind::kRadio:
-            return "radio";
-        case AirCfg::Kind::kMonitor:
-            return "monitor";
-        default:
-            return "udp";
-    }
-}
-
 std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend,
                            const std::string& efuse_mac) {
-    // §10.7 (Pass 146; radio re-based Pass 154). Per-actuator by design — a
-    // monitor-measured curve must read STALE on devourer, not be applied —
-    // and stable across a re-plug, which the old bus-path form was not.
+    (void)adapter;  // tiers 2-4 retired with kernel-monitor (Pass 164)
+    // §10.7 (Pass 146; radio re-based Pass 154). Per-actuator by design, and
+    // stable across a re-plug, which the old bus-path form was not.
     if (backend == AirCfg::Kind::kRadio) {
         // Pass 154: the single derived tier. NOT the USB serial, though it
         // looks like the obvious stable key: every RTL88x2 dongle measured
@@ -97,33 +86,10 @@ std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend,
         }
         return "mac/" + efuse_mac;
     }
-    if (!adapter.calib_id.empty()) {
-        // Scoped by backend (Pass 146): calib_id is operator-chosen and an
-        // unscoped name would apply a monitor curve to devourer's offset
-        // actuator without ever reading STALE. Monitor-only since Pass 154
-        // (kernel-monitor is deprecated-frozen, ruling #120).
-        return std::string("id/") + calib_backend_tag(backend) + "/" +
-               adapter.calib_id;
-    }
-    if (!adapter.ifname.empty()) {
-        const std::string mac = read_file("/sys/class/net/" + adapter.ifname +
-                                          "/address");
-        std::string m = mac;
-        while (!m.empty() && (m.back() == '\n' || m.back() == ' ')) {
-            m.pop_back();
-        }
-        return adapter.ifname + "/" + (m.empty() ? "?" : m);
-    }
-    if (!adapter.bus.empty()) {
-        // Monitor last resort. Bus paths shuffle on any re-plug (CLAUDE.md),
-        // so an artifact keyed this way goes stale the next time the dongle
-        // moves — and the node then boots with no curve. Say so once, loudly.
-        wb_logf("calibrate: adapter \"%s\" has no calib_id — keying the "
-                "artifact on bus path \"%s\", which CHANGES on re-plug. "
-                "Set adapters[].calib_id to pin it (§10.7).\n",
-                adapter.name.c_str(), adapter.bus.c_str());
-        return "bus/" + adapter.bus;
-    }
+    // No other backend has a power actuator, so no other backend has a
+    // calibration identity. The Pass 146 declared/ifname/bus tiers existed
+    // only for kernel-monitor and went with it (Pass 164) — which is why
+    // adapters[].calib_id and adapters[].ifname are now inert keys.
     return "udp";
 }
 

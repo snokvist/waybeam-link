@@ -147,7 +147,7 @@ struct RadioAir::Impl {
     // §15.5a runtime net_id roles. The stamp is TX-side and main-thread only
     // (the inject* paths read cfg.stamp_net_id directly). The filter is read
     // by every RX thread in on_packet, so it lives here as an atomic rather
-    // than in cfg; -1 encodes "no filter" (hear any net_id), matching MonAir.
+    // than in cfg; -1 encodes "no filter" (hear any net_id).
     // cfg.filter_net_id is therefore the BOOT value only — seeded into this
     // atomic in create() and never read again. Do not surface it as the live
     // filter.
@@ -245,7 +245,7 @@ struct RadioAir::Impl {
     // Pass 69 §11.6 verify hygiene: bumped by flush_rx(); frames are stamped
     // at callback entry so anything captured before a flush is droppable at
     // poll_once. devourer's internal USB pipeline (~ms deep) is below this
-    // boundary, like driver-internal buffers on the kernel-monitor backend.
+    // boundary, the same way driver-internal buffers would be.
     std::atomic<uint32_t> flush_gen{0};
 
     // §3.0 Pass 12: last-heard SA per originator (RX threads write, the
@@ -1282,7 +1282,7 @@ bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
     // see a half-applied retune where the chip disagrees with the driver.
     // That case is the §11.6 RX-liveness guard's, which is backend-agnostic
     // and now has a recover() under it. This is exactly the confidence
-    // kernel-monitor gets from `iw` reporting success.
+    // a kernel-path backend would get from `iw` reporting success.
     const SelectedChannel got = dev.GetSelectedChannel();
     if (got.Channel != chan) {
         wb_logf("radio: retune \"%s\" to ch %u not applied "
@@ -1297,9 +1297,9 @@ bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
 bool RadioAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz) {
     // G4 (Pass 143): the §11.6 Pass 80 RX-liveness guard fires when a retune
     // half-applies — TX airs on the new channel, RX hears nothing. On
-    // kernel-monitor the answer is a full netdev bring-up; here it is a
-    // re-init of the RX pipeline: stop the loop, join it, re-run the write-side
-    // bring-up at the target channel, restart the loop.
+    // a kernel-path backend the answer would be a full netdev bring-up; here
+    // it is a re-init of the RX pipeline: stop the loop, join it, re-run the
+    // write-side bring-up at the target channel, restart the loop.
     //
     // Two things bound what this can be, both measured (Pass 143):
     //
@@ -1309,8 +1309,8 @@ bool RadioAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz) {
     //   is exactly what the first cut of this function did on the bench. The
     //   restartable surface devourer documents is StartRxLoop (IRtlDevice.h:58)
     //   plus SetMonitorChannel, and that is what this uses. So this is an
-    //   RX-path restart, not the full MAC/PHY bring-up kernel-monitor gets from
-    //   an `ip link down/up`; it is weaker on purpose rather than by omission.
+    //   RX-path restart, not the full MAC/PHY bring-up an `ip link down/up`
+    //   would give; it is weaker on purpose rather than by omission.
     //
     //   It is not a USB-level reset either. `CLAUDE.md` records that an RTL88x2
     //   USB wedge (RX counter frozen) needs a physical re-plug, and whether any
@@ -1400,7 +1400,7 @@ void RadioAir::set_stamp_net_id(uint8_t net_id) {
 void RadioAir::set_filter_net_id(std::optional<uint8_t> net_id) {
     // §15.5a: widen (nullopt) or re-pin the §3.0 RX filter mid-sweep. The
     // filter is software-only in this backend — on_packet reads the atomic per
-    // frame — so unlike kernel-monitor there is no pre-filter to re-attach.
+    // frame — so there is no kernel pre-filter to re-attach.
     impl_->filter_net_id.store(
         net_id ? static_cast<int16_t>(*net_id) : static_cast<int16_t>(-1),
         std::memory_order_relaxed);
@@ -1408,19 +1408,19 @@ void RadioAir::set_filter_net_id(std::optional<uint8_t> net_id) {
 
 size_t RadioAir::tx_index() const {
     // create() resolves it from role:"tx"; 0 on an RX-only node (meaningful
-    // only under has_tx(), matching kernel-monitor — §3.11 Pass 162).
+    // only under has_tx() — §3.11 Pass 162).
     return impl_->tx_idx;
 }
 
 bool RadioAir::has_tx() const {
-    return impl_->has_tx;  // §3.11 Pass 162: truthful on both RF backends
+    return impl_->has_tx;  // §3.11 Pass 162: truthful, not hardcoded
 }
 
 uint16_t RadioAir::mtu_supported() const {
-    // G5 (Pass 143): kernel-monitor reads each netdev MTU because the kernel
-    // path is what would reject or fragment an oversized frame. There is no
-    // netdev here — frames go as raw MPDUs straight to bulk-OUT — so the
-    // question is what devourer itself bounds. Two bounds exist and neither
+    // G5 (Pass 143): a kernel-path backend would read each netdev MTU,
+    // because the kernel is what would reject or fragment an oversized frame.
+    // There is no netdev here — frames go as raw MPDUs straight to bulk-OUT —
+    // so the question is what devourer itself bounds. Two bounds exist and neither
     // binds at §9.3a's High budget:
     //
     //   TX: none. send_packet sizes its TXDMA block from the frame
@@ -1440,8 +1440,8 @@ uint16_t RadioAir::mtu_supported() const {
 
 std::optional<uint32_t> RadioAir::estimate_airtime_us(
     size_t bytes, bool include_pending, uint16_t packet_budget) const {
-    // §14.2 (Pass 143). Same conservative service-rate model kernel-monitor
-    // uses, minus the pending term: devourer's send_packet is a synchronous
+    // §14.2 (Pass 143). The conservative service-rate model without the
+    // pending term: devourer's send_packet is a synchronous
     // bulk-OUT that returns once the transfer has completed or failed, so the
     // frame is already with the chip and there is no queue to query. Absent by
     // construction, not approximated — which is why include_pending is ignored
@@ -1449,7 +1449,7 @@ std::optional<uint32_t> RadioAir::estimate_airtime_us(
     (void)include_pending;
     const Impl& im = *impl_;
     if (!im.has_tx) {
-        return std::nullopt;  // §3.11 Pass 162: nothing airs (MonAir parity)
+        return std::nullopt;  // §3.11 Pass 162: nothing airs
     }
     if (im.cfg.airtime_efficiency_permille == 0) {
         return std::nullopt;  // uncalibrated reads unavailable, never optimistic

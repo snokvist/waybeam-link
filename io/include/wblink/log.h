@@ -5,8 +5,8 @@
 //
 // Every diagnostic in io/src used to be a bare std::fprintf(stderr, ...). That
 // is right for the daemon and wrong for a library: a consumer embedding
-// wblink_io — Android's :wifi, the external MonAir RX repo after the #120
-// split — has no stderr worth reading, so the adapter that came up on the
+// wblink_io — Android's :wifi, for one — has no stderr worth reading, so the
+// adapter that came up on the
 // wrong bus path, the calibration artifact keyed on something that shifts on
 // re-plug, and the frame-SHM buffer that is wedging ingress all vanish.
 //

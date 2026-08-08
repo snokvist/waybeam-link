@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // waybeam-link io: §9.10 TX-wedge watchdog — backend completion-progress
-// liveness. Devourer supplies CCX reports; kernel-monitor supplies Linux
-// netdev tx_packets. Pure and clock-injected (the quietgap.h pattern) so it
+// liveness. Devourer supplies CCX reports. Pure and clock-injected (the
+// quietgap.h pattern) so it
 // unit-tests dry. The trigger is progress ABSENCE, never deficit: one
 // completion in a window proves the backend is still moving frames.
 #pragma once

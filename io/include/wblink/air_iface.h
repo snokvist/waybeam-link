@@ -9,8 +9,8 @@
 //     if (radio) { ... }
 //     else       { udp ... }
 //
-// across ~25 methods and 98 call sites. Four of those methods answered only
-// the kernel-monitor backend. Each is *documented* as such at its definition
+// across ~25 methods and 98 call sites. Some of those methods answer only
+// one backend. Each is *documented* as such at its definition
 // — this is not a set of typos — but the limitation is invisible where it
 // matters: a caller writing `air->recover(...)` in run_rx cannot see that the
 // call does nothing on a devourer node, and the consequence is silent (the
@@ -104,8 +104,8 @@ class AirIface {
     virtual bool retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
                         bool fast) = 0;
 
-    // §11.6 Pass 80 one-shot full re-init after a wedge. G4: real only on
-    // kernel-monitor today.
+    // §11.6 Pass 80 one-shot full re-init after a wedge. G4: on devourer an
+    // RX-path restart (Pass 143); a no-op on udp-air.
     virtual bool recover(size_t adapter, uint16_t chan_mhz,
                          uint8_t width_mhz) = 0;
 
@@ -117,15 +117,12 @@ class AirIface {
     virtual bool set_power_qdb(size_t adapter, int32_t qdb) = 0;
     // §10.5 (Pass 150): ONE relative contract — qdb is an offset against this
     // backend's calibrated reference, resolved natively by each backend
-    // (devourer: the efuse per-rate table; kernel-monitor: the adapter's
-    // max_power_qdb). Returns false when the backend has no reference.
+    // (devourer: the efuse per-rate table). Returns false when the backend
+    // has no reference.
     virtual bool set_power_offset_qdb(size_t adapter, int32_t qdb) = 0;
 
-    // §10.5 auto restore. G7: the two RF backends mean different things by
-    // "auto" — kernel-monitor returns the driver default (`txpower auto`),
-    // devourer returns offset 0, which undoes the latch but leaves any §10.2
-    // curve resolve to re-apply on top. Unifying that is a protocol ruling,
-    // not a refactor; both behaviours are preserved verbatim.
+    // §10.5 auto restore. On devourer "auto" is offset 0, which undoes the
+    // latch but leaves any §10.2 curve resolve to re-apply on top.
     virtual bool set_power_auto(size_t adapter) = 0;
 
     // §7.2 TSF-anchored quiet gap.
@@ -137,16 +134,16 @@ class AirIface {
     // §9.4 Pass 163 sequence-derived rate probe: first-send video DATA
     // frames with seq % period == slot fly candidate_mcs instead of the
     // set_tx_mode() rate. period 0 disarms. Real on the radio backend only
-    // (`air.mcs_probe` is refused elsewhere); kernel-monitor and udp-air
-    // no-op — their frames always fly the committed mode.
+    // (`air.mcs_probe` is refused elsewhere); udp-air no-ops — its frames
+    // always fly the committed mode.
     virtual void set_mcs_probe(uint16_t period, uint16_t slot,
                                uint8_t candidate_mcs) = 0;
 
     // ---- §3.0 identity ---------------------------------------------------
 
     // Runtime net_id retargeting: the §15.5a scout widens the filter mid-sweep
-    // and both roles are re-pinned on selection. Real on kernel-monitor and on
-    // devourer (Pass 142); the bench UdpAir has no §3.0 identity to retarget.
+    // and both roles are re-pinned on selection. Real on devourer (Pass 142);
+    // the bench UdpAir has no §3.0 identity to retarget.
     virtual void set_stamp_net_id(uint8_t net_id) = 0;
     virtual void set_filter_net_id(std::optional<uint8_t> net_id) = 0;
 
@@ -184,7 +181,7 @@ class AirIface {
     // the previous read (delta-on-read — a throwaway call is the §15.5a
     // discard barrier). Backend-agnostic mirror of the radio backend's
     // sensor; no devourer types cross this boundary. nullopt = this backend
-    // has no frame-free sensor (udp bench; kernel-monitor is frozen, #120)
+    // has no frame-free sensor (the udp bench)
     // — §15.5a occupancy then falls back structurally to decoded-frame
     // accounting. Main-thread only (control-plane register I/O).
     struct AirSense {

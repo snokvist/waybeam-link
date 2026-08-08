@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Authored kernel-monitor service-rate model for §14.2 JSCC. A zero
+// Authored conservative service-rate model for §14.2 JSCC. A zero
 // efficiency is deliberately unavailable rather than an optimistic default.
 #pragma once
 

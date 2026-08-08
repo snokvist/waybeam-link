@@ -21,9 +21,9 @@ using namespace wblink;
 namespace {
 
 // Minimal loadable node config. Callers splice extra stanzas in via `extra`.
-// `air.kind` matters: has_uplink() is per backend, and only the RF ones follow
-// the adapters (UdpAir::has_tx is hardcoded true). kernel-monitor is what
-// deploy/ground-192.168.2.199.json actually flies.
+// `air.kind` matters: has_uplink() is per backend, and only the RF one follows
+// the adapters (UdpAir::has_tx is hardcoded true). radio is what every flying
+// node runs since Pass 164 deleted kernel-monitor.
 const char* kUdpInStream =
     R"({ "stream_id": 0, "stream_type": "RTP", "dir": "in",
          "bind": { "kind": "udp", "listen": "127.0.0.1:5600" } })";
@@ -34,7 +34,7 @@ const char* kShmOutStream =
          "bind": { "kind": "frame-shm", "name": "wbtest_ring" } })";
 
 std::string cfg_json(const std::string& adapters, const std::string& extra,
-                     const std::string& air = R"({ "kind": "kernel-monitor" })",
+                     const std::string& air = R"({ "kind": "radio" })",
                      const std::string& streams = kUdpInStream) {
     return std::string(R"({
   "node": { "originator": 7, "role": "rx" },
@@ -44,10 +44,10 @@ std::string cfg_json(const std::string& adapters, const std::string& extra,
 }
 
 const char* kRxOnly =
-    R"({ "name": "wlan0", "ifname": "wlan0", "role": "rx", "channel": 5805, "bw": 20 })";
+    R"({ "name": "wlan0", "bus": "1-1", "role": "rx", "channel": 5805, "bw": 20 })";
 const char* kTxAndRx =
-    R"({ "name": "wlan0", "ifname": "wlan0", "role": "tx", "channel": 5805, "bw": 20 },)"
-    R"({ "name": "wlan1", "ifname": "wlan1", "role": "rx", "channel": 5805, "bw": 20 })";
+    R"({ "name": "wlan0", "bus": "1-1", "role": "tx", "channel": 5805, "bw": 20 },)"
+    R"({ "name": "wlan1", "bus": "5-1", "role": "rx", "channel": 5805, "bw": 20 })";
 
 // Load, then classify. Fails the test rather than returning junk if the
 // fixture itself does not load — a fixture that stopped parsing would
@@ -197,7 +197,7 @@ int main() {
         CHECK(!has(off, "cache.repair.enabled", KeyVerdict::kInert));
         const auto on = findings_for(cfg_json(kTxAndRx,
             R"(, "cache": { "repair": { "enabled": true, )" + caches + " } }",
-            R"({ "kind": "kernel-monitor" })", kShmOutStream));
+            R"({ "kind": "radio" })", kShmOutStream));
         CHECK(!has(on, "cache.repair.listen", KeyVerdict::kInert));
     }
     {

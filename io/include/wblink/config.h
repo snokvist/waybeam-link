@@ -72,13 +72,14 @@ struct NodeCfg {
 struct AdapterCfg {
     std::string name;
     std::string bus;
-    // Linux monitor-mode netdev (e.g. "wlan0", "wlx84fc…") — the kernel-monitor
-    // backend (air.kind "kernel-monitor") binds AF_PACKET to it. Empty for the
-    // udp/radio backends (devourer matches on `bus`).
+    // INERT since Pass 164 — the kernel-monitor backend that bound AF_PACKET
+    // to this netdev is deleted, and no other path reads it. Still parsed;
+    // `--check --strict` reports it. Retiring the key is a later pass.
     std::string ifname;
     // §10.7 (Pass 146): explicit calibration identity for this physical
-    // adapter. kernel-monitor only since Pass 154 (frozen, ruling #120) —
-    // on the radio backend identity is derived from the EFUSE MAC.
+    // adapter. INERT since Pass 164 — it keyed identity tiers 2-4, which went
+    // with kernel-monitor; on the radio backend identity is the EFUSE MAC and
+    // there is deliberately no fallback tier (Pass 154, ruling D3).
     std::string calib_id;
     // §15.2 (Pass 154): EFUSE-MAC pin for this stanza, lowercase
     // "aa:bb:cc:dd:ee:ff". Radio backend only; match precedence
@@ -89,9 +90,10 @@ struct AdapterCfg {
     uint16_t channel_mhz = 0;  // center freq MHz, band-agnostic (§11.1 style)
     uint8_t bw = 20;           // 20 / 40 / 80
     std::string power_map;     // §10.2 per-adapter absolute power table path
-    // §10.3 (Pass 150): NO LONGER a TX ceiling. On kernel-monitor this is the
-    // absolute REFERENCE the §10.5 relative offset applies to; on devourer the
-    // efuse per-rate table is the reference and this is ignored with a warning.
+    // §10.3 (Pass 150): NO LONGER a TX ceiling. Its one surviving role was
+    // kernel-monitor's absolute REFERENCE, and that went with the backend
+    // (Pass 164) — devourer's reference is the efuse per-rate table. INERT:
+    // ignored with a warning, reported by `--check --strict`.
     std::optional<int32_t> max_power_qdb;
     // §10.5 (Pass 150) relative TX offset in quarter-dB against the backend's
     // calibrated reference, applied at boot on every role:"tx" adapter.
@@ -104,7 +106,9 @@ struct AdapterCfg {
     int32_t power_offset_max_qdb = 0;
     // §10.3/§11.7 0x0A (Pass 135): selectable ceilings, <=5 per the §11.7
     // preset-index bound. Each entry is clamped to max_power_qdb at load, so
-    // the runtime path can only ever LOWER power.
+    // the runtime path can only ever LOWER power. INERT since Pass 164: the
+    // vcmd is REJECTED on a relative backend (Pass 151) and every remaining
+    // actuator is relative.
     std::vector<int32_t> power_presets_qdb;
 };
 
@@ -284,9 +288,9 @@ struct CsaPolicy {
     // 150 -> 500 ruling failed to reach a single running binary.
     uint32_t verify_timeout_ms = kCsaVerifyTimeoutMsDefault;
     // §11.6 Pass 80: post-retune RX-liveness deadline (0 disables). Silence
-    // for this long after a CSA retune => one full monitor re-init. §15.2
+    // for this long after a CSA retune => one full backend re-init. §15.2
     // (Pass 92): MUST exceed verify_timeout_ms — a verify window that outlives
-    // this guard lets a monitor re-init fire mid-switch. Enforced at load.
+    // this guard lets a backend re-init fire mid-switch. Enforced at load.
     uint32_t rx_liveness_ms = 750;
     uint32_t min_interval_s = 5;
     uint32_t ack_timeout_ms = 1000;
@@ -356,24 +360,23 @@ struct AirUdpCfg {
     std::vector<std::string> tx;  // frame targets (tx: video; rx: NACKs)
     std::vector<std::string> rx;  // listen sockets = virtual adapters
     // Bench-only per-adapter synthetic RX drop (0–1000), parity with the
-    // monitor/radio backends — manufactures known loss on the udp-air path.
+    // radio backend — manufactures known loss on the udp-air path.
     uint16_t rx_drop_permille = 0;
     bool broadcast = false;
     uint16_t originator = 0;  // self-filter identity in broadcast mode
     uint32_t pace_mbps = 0;   // broadcast serialization rate; 0 = unpaced
 };
 struct AirCfg {
-    // kMonitor = the kernel-driver monitor-mode backend (AF_PACKET raw inject +
-    // radiotap RX, §3.0). Like kRadio, its adapters come from the top-level
-    // adapters array (each carrying an `ifname`); it reuses rx_drop_permille.
-    enum class Kind : uint8_t { kNone, kUdp, kUdpBroadcast, kRadio, kMonitor };
+    // kRadio = devourer, the only RF backend (§3.0). The AF_PACKET
+    // kernel-monitor backend was deleted in Pass 164.
+    enum class Kind : uint8_t { kNone, kUdp, kUdpBroadcast, kRadio };
     Kind kind = Kind::kNone;
     AirUdpCfg udp;
     // Bench-only synthetic RX loss on the radio backend: drop this many
     // permille of filter-passed frames, independently per adapter (gate-2/3
     // exercise without physical fades). 0 = off (the shipping default).
     uint16_t rx_drop_permille = 0;
-    // §14.2 kernel-monitor effective serialization calibration. Zero keeps
+    // §14.2 effective serialization calibration (radio backend). Zero keeps
     // transport airtime unknown and JSCC in authored fixed-policy fallback.
     uint16_t airtime_efficiency_permille = 0;
     // §9.10 TX-wedge watchdog (radio backend, §17 seeds). window 0 disables.
@@ -403,7 +406,7 @@ struct AirCfg {
     bool disable_cca = false;
     // §3.0 Pass 12: arm the TX adapter's hardware ACK responder with its
     // own SA (craft half of the gate-4 A/B). Opt-in — makes a passive
-    // monitor transmit ACKs.
+    // receiver transmit ACKs.
     bool ack_responder = false;
     // §15.2 (Pass 156): per-frame hardware retry limit for unicast
     // ACK-policy TX (devourer dc.tx.retry_limit; 0-63, descriptor width).

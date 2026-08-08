@@ -31,16 +31,11 @@ namespace wblink {
 // deliberately no declared or bus-path fallback tier on this backend; a
 // fallback is exactly the port-keyed misapplication §10.6 exists to prevent.
 //
-// kernel-monitor (frozen, ruling #120) keeps the Pass 146 tiers unchanged:
-// "id/monitor/<calib_id>" when declared, else "ifname/<mac>" (sysfs), else
-// "bus/<path>" (logged unstable). udp → "udp". `efuse_mac` is ignored there.
+// Every other backend → "udp": none has a power actuator, so none has an
+// identity. The Pass 146 "id/monitor/<calib_id>" / "ifname/<mac>" / "bus/<path>"
+// tiers existed only for kernel-monitor and were deleted with it (Pass 164).
 std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend,
                            const std::string& efuse_mac);
-
-// Short stable token for an air backend, used only to scope calibration
-// identities. Deliberately not the config spelling: these strings land in a
-// persisted artifact, so they must not move when config wording does.
-const char* calib_backend_tag(AirCfg::Kind kind);
 
 // Persist the artifact; returns the CRC-8 fingerprint (never 0 on success —
 // 0 is the §3.15 "no artifact" sentinel), or 0 on write failure.

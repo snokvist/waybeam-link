@@ -76,7 +76,6 @@
 #include "wblink/uplink_calib_store.h"
 #include "wblink/uplink_calibrate.h"
 #include "wblink/calib_dwell.h"
-#include "wblink/air_mon.h"
 #if WBLINK_RADIO
 #include "wblink/air_radio.h"
 #endif
@@ -1484,7 +1483,6 @@ struct AirBackend {
     // new address.
     std::unique_ptr<AirIface> air;
     UdpAir* udp = nullptr;
-    MonAir* mon = nullptr;
 #if WBLINK_RADIO
     RadioAir* radio = nullptr;
 #endif
@@ -1493,8 +1491,8 @@ struct AirBackend {
 
     // The ONE place that decides which backend is engaged. Every method below
     // goes through it, so the precedence lives here instead of being retyped
-    // per call — that repetition is how the four kernel-monitor-only methods
-    // came to differ from their neighbours without anyone noticing.
+    // per call — that repetition is how backend-specific methods came to
+    // differ from their neighbours without anyone noticing.
     //
     // Resolved per call rather than cached: these are std::optional members and
     // AirBackend is returned by value from create(), so a stored AirIface*
@@ -1511,18 +1509,15 @@ struct AirBackend {
     // sweeps with the others left in place), so they genuinely diverge.
     //
     // Confidence differs by backend, deliberately not papered over:
-    //   kernel-monitor — confirmed: MonAir::retune reports iw_set_freq's result.
-    //   radio          — commanded: RadioAir::retune returns true unconditionally
-    //                    (devourer FastRetune/SetMonitorChannel are void), so
-    //                    this records intent, not confirmation.
-    //   udp dev        — logged intent, same as the retune itself.
-    // The seed is config intent on kernel-monitor: MonAir::create never applies
-    // channel_mhz, so before the first retune the card is on whatever mon-up
-    // left it. RadioAir does apply it at create.
+    //   radio   — commanded: RadioAir::retune returns true unconditionally
+    //             (devourer FastRetune/SetMonitorChannel are void), so this
+    //             records intent, not confirmation.
+    //   udp dev — logged intent, same as the retune itself.
+    // RadioAir applies channel_mhz at create, so the seed is the live value.
     std::vector<uint16_t> chan_by_adapter;
 
     // §10.6 (Pass 154) per-unit EFUSE identity, empty where the backend has
-    // none (udp, kernel-monitor, an unprogrammed unit). Contract passthrough.
+    // none (udp, an unprogrammed unit). Contract passthrough.
     std::string adapter_mac(size_t i) const { return iface()->adapter_mac(i); }
 
     uint16_t mtu_supported() const { return iface()->mtu_supported(); }
@@ -1545,32 +1540,6 @@ struct AirBackend {
             }
             auto owned = std::make_unique<UdpAir>(std::move(*a.value));
             b.udp = owned.get();
-            b.air = std::move(owned);
-            return Result<AirBackend>::ok(std::move(b));
-        }
-        if (cfg.air.kind == AirCfg::Kind::kMonitor) {
-            MonAirCfg mc;
-            mc.adapters = cfg.adapters;
-            // A dedicated cache with no media streams receives DATA over RF
-            // and returns CACHE_STATUS/REQUEST/REPLY over Ethernet. It must
-            // not manufacture RF traffic merely to satisfy the normal ground
-            // uplink invariant. A §2/§13 passive spectator (Pass 74) is the
-            // other uplink-free node: a display receiver with no return path.
-            mc.allow_rx_only =
-                (cfg.cache.store.enabled && cfg.streams.empty()) ||
-                cfg.node.spectator;
-            mc.stamp_net_id = cfg.node.net_id.value_or(0);
-            mc.filter_net_id = cfg.node.net_id;
-            mc.originator = cfg.node.originator;
-            mc.rx_drop_permille = cfg.air.rx_drop_permille;
-            mc.airtime_efficiency_permille =
-                cfg.air.airtime_efficiency_permille;
-            auto a = MonAir::create(mc);
-            if (!a) {
-                return Result<AirBackend>::fail(a.error);
-            }
-            auto owned = std::make_unique<MonAir>(std::move(*a.value));
-            b.mon = owned.get();
             b.air = std::move(owned);
             return Result<AirBackend>::ok(std::move(b));
         }
@@ -1818,7 +1787,7 @@ struct AirBackend {
         }
     }
     // §11.6 Pass 80: total RX frames across adapters (liveness baseline) and
-    // the one-shot full monitor re-init recovery (kernel-monitor only).
+    // the one-shot backend re-init recovery.
     uint64_t rx_frames_total() const {
         const AirIface* a = iface();
         uint64_t total = 0;
@@ -1861,12 +1830,12 @@ struct AirBackend {
                                            packet_budget);
     }
     bool supports_csa() const {
-        // UDP exercises CSA state without a physical retune; kernel-monitor now
-        // retunes via iw (Pass 63); the radio backend via devourer. All real.
+        // UDP exercises CSA state without a physical retune; the radio
+        // backend retunes via devourer. Both real.
         return true;
     }
     // §15.5a scout: widen/narrow the RX net_id filter at runtime and retune a
-    // single adapter (the scout adapter). Real on both RF backends since Pass
+    // single adapter (the scout adapter). Real on the radio backend since Pass
     // 142; UdpAir has no §3.0 identity to retarget.
     void set_filter_net_id(std::optional<uint8_t> net_id) {
         iface()->set_filter_net_id(net_id);
@@ -1925,34 +1894,6 @@ struct AirBackend {
             (void)tx_wedged;
             return;
         }
-        if (mon) {
-            for (size_t i = 0; i < mon->rx_adapters(); ++i) {
-                const auto c = mon->counters(i);
-                AdapterStats as;
-                as.name = c.name;
-                as.rx = c.rx_frames;
-                as.rssi_best = c.rssi_last;
-                as.rssi_mean = c.rssi_last;
-                as.tx_submitted = c.tx_submitted;
-                as.tx_failed = c.tx_failed;
-                as.drop = c.rx_dropped;
-                as.filtered = c.rx_filtered;
-                as.kernel_drop = c.kernel_dropped;
-                as.bpf_filtered = c.bpf_filtered;
-                as.tsf_fallback = (i == 0) ? tsf_fallbacks : 0;
-                // No CCX tx.report on monitor injection. The §9.10 verdict
-                // instead uses netdev tx_packets progress internally.
-                as.tx_reports = 0;
-                as.tx_report_fails = 0;
-                for (size_t m = 0; m < kRxMcsBuckets; ++m) {
-                    as.rx_mcs[m] = c.rx_mcs[m];  // §15.3 Pass 118
-                }
-                as.rx_mcs_unknown = c.rx_mcs_unknown;
-                as.tx_wedged = c.tx && tx_wedged;
-                snap.adapters.push_back(std::move(as));
-            }
-            return;
-        }
 #if WBLINK_RADIO
         if (!radio) {
             return;
@@ -2007,7 +1948,7 @@ struct AirBackend {
 
     // §9.4 Pass 163 guard 3: cumulative CRC/ICV-errored frames per
     // descriptor MCS, summed across adapters. false = the backend has no
-    // such surface (udp, kernel-monitor).
+    // such surface (udp).
     bool crc_mcs_totals(uint64_t (&out)[kRxMcsBuckets]) const {
 #if WBLINK_RADIO
         if (radio) {
@@ -2027,10 +1968,6 @@ struct AirBackend {
 
     // §15.3 return-block unicast counters (radio backend; no-op on udp).
     void fill_return_stats(ReturnStats& ret) const {
-        if (mon) {
-            mon->return_counters(ret.unicast_sent, ret.unicast_fallback);
-            return;
-        }
 #if WBLINK_RADIO
         if (radio) {
             radio->return_counters(ret.unicast_sent, ret.unicast_fallback);
@@ -2041,15 +1978,9 @@ struct AirBackend {
     }
 
     // TX adapter's cumulative (submitted, completion-progress) counters for
-    // §9.10: netdev tx_packets on monitor, CCX reports on devourer. nullopt on
-    // UDP, which has no independent completion surface.
+    // §9.10: CCX reports on devourer. nullopt on UDP, which has no
+    // independent completion surface.
     std::optional<std::pair<uint64_t, uint64_t>> tx_progress_counters() const {
-        if (mon) {
-            uint64_t s = 0;
-            uint64_t p = 0;
-            mon->tx_progress_counters(s, p);
-            return std::make_pair(s, p);
-        }
 #if WBLINK_RADIO
         if (radio) {
             uint64_t s = 0;
@@ -3299,7 +3230,7 @@ struct TxCore {
     struct PowerTarget {
         std::string name;
         size_t adapter_idx;
-        std::optional<int32_t> ceiling;  // §10.3 — kernel-monitor reference
+        std::optional<int32_t> ceiling;  // §10.3 — inert since Pass 164
         std::vector<int32_t> presets_qdb;  // §11.7 0x0A selectable ceilings
         // §10.5 (Pass 150) relative contract: the safe boot offset and the
         // bound the runtime latch may not exceed.
@@ -3561,10 +3492,9 @@ struct TxCore {
             }
         }
         // §10.5 (Pass 150): with no latch and no curve this used to restore
-        // NOTHING, so a §11.6 recovery — which ends in `txpower auto` on
-        // kernel-monitor — permanently lost the boot offset on the default
-        // config. The boot offset is the floor of this precedence, not an
-        // absent case.
+        // NOTHING, so a §11.6 recovery — which restores the backend default —
+        // permanently lost the boot offset on the default config. The boot
+        // offset is the floor of this precedence, not an absent case.
         if (!any_curve) {
             apply_boot_power_offsets();
         }
@@ -3689,8 +3619,8 @@ struct TxCore {
                 // No curve and no override: no in-process authority knows the
                 // pre-run power, but the BACKEND does — this is exactly the
                 // §10.5 `{"auto": true}` condition ("release power authority
-                // with no curve loaded"), whose defined answer on
-                // kernel-monitor is `txpower auto`. Before Pass 134 this leaf
+                // with no curve loaded"), whose defined answer is the
+                // backend default. Before Pass 134 this leaf
                 // was near-unreachable, because a run that got far enough to
                 // move power almost always ended by installing a curve. The
                 // no_wall_found refusal makes a first-ever run END in failure
@@ -4811,10 +4741,10 @@ int run_tx(const Loaded& l) {
                      "(Pass 154 D3); running at the §10.5 safe boot offset\n",
                      calib_tx_adapter->name.c_str());
     }
-    // §10.5 (Pass 150): ONLY devourer's lever is relative. NOT is_radio() —
-    // that is is_rf(), which kernel-monitor also answers true to, and gating on
-    // it refused the §10.2 curve and §10.6 calibration on the one backend where
-    // absolute qdb is CORRECT, making calibration unreachable fleet-wide.
+    // §10.5 (Pass 150): ONLY devourer's lever is relative. Keyed on the
+    // backend kind, not on is_rf() — the retired kernel-monitor backend also
+    // answered is_rf() true while commanding absolute qdb, and gating on it
+    // made calibration unreachable fleet-wide.
     //
     // This must precede init_calibration: §10.6 (Pass 151) derives its sweep
     // window from the backend's space, so a flag set afterwards would build an
@@ -5193,9 +5123,7 @@ int run_tx(const Loaded& l) {
                 s += std::to_string(*ov);
             }
             s += ",\"backend\":\"";
-            s += l.cfg.air.kind == AirCfg::Kind::kMonitor ? "kernel-monitor"
-                 : l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio"
-                                                          : "udp";
+            s += l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio" : "udp";
             s += "\"}";
             return s;
         };
@@ -5782,8 +5710,7 @@ int run_rx(const Loaded& l) {
     // owner's apply alike. Pass 150's second review found this half-converted
     // — the sweep measured absolute while the applier commanded relative, so
     // an 84 qdb placement became 108+84 = 192 — so measurement and actuation
-    // move together here or not at all. Every ground in the fleet is on
-    // kernel-monitor today, where this is false and nothing changes.
+    // move together here or not at all.
     const bool uplink_relative = l.cfg.air.kind == AirCfg::Kind::kRadio;
     if (uplink_adapter != nullptr) {
         upwr.ceiling_qdb = uplink_adapter->max_power_qdb;
@@ -6056,10 +5983,7 @@ int run_rx(const Loaded& l) {
     // request value." UplinkPower::hw_qdb() applies that clamp;
     // reported_qdb() deliberately does not.
     // §10.5 (Pass 150): the uplink is a role:"tx" adapter like any other, so
-    // it runs the same relative contract. `set_power_qdb` here would be
-    // absolute on kernel-monitor and an OFFSET on devourer — the divergence
-    // this pass removes — and the ground is the half of the fleet that still
-    // transmits on monitor today.
+    // it runs the same relative contract.
     // §10.5/§10.7 (Pass 150 review, re-based Pass 151): every value the owner
     // precedence can produce — artifact placement, power_map resolve, latch —
     // is in whatever space the §10.7 sweep measured in, so the applier reads
@@ -6964,9 +6888,7 @@ int run_rx(const Loaded& l) {
                     s += ",\"qdb\":" + std::to_string(*upwr.override_qdb);
                 }
                 s += ",\"backend\":\"";
-                s += l.cfg.air.kind == AirCfg::Kind::kMonitor ? "kernel-monitor"
-                     : l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio"
-                                                              : "udp";
+                s += l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio" : "udp";
                 s += "\"}";
                 return s;
             };
@@ -7340,7 +7262,7 @@ int run_rx(const Loaded& l) {
                                   "\"}"};
                 };
                 if (!air.value->supports_csa()) {
-                    return err(400, "CSA unsupported by kernel-monitor backend");
+                    return err(400, "CSA unsupported by this air backend");
                 }
                 // §15.5a / B9: re-key from the craft's LIVE announced token
                 // before every campaign. do_claim keyed the issuer once, but the
@@ -8717,7 +8639,7 @@ int main(int argc, char** argv) {
     // std::signal() defaults to BSD semantics (SA_RESTART set), which restarts a
     // blocking flight-loop syscall instead of interrupting it — so a shutdown
     // signal could be swallowed. Every blocking path already handles EINTR
-    // (air_mon recv/recvmsg, the bounded CLI wait), so with SA_RESTART cleared
+    // (the bounded CLI wait, blocking backend reads), so with SA_RESTART cleared
     // the loop observes g_stop promptly on teardown.
     struct sigaction sa{};
     sa.sa_handler = on_signal;

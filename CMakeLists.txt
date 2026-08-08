@@ -265,7 +265,6 @@ add_library(wblink_io STATIC
     io/src/cache_udp.cpp
     io/src/stats.cpp
     io/src/air_udp.cpp
-    io/src/air_mon.cpp
     io/src/power_file.cpp
     io/src/calib_store.cpp
     io/src/scout_sense.cpp

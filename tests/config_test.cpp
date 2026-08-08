@@ -288,8 +288,8 @@ int main() {
                      "silently inert");
     }
     // Limit 0 alone is legal (the WFB posture, hybrid off) — and the
-    // kernel-monitor control: the kernel MAC owns retries there, so the
-    // coupling never fires (frozen, #120).
+    // non-radio control: the coupling law is radio-only, so a udp node may
+    // pair a zero limit with unicast returns without tripping it.
     {
         auto r = load_config_json(R"({
           "node": {"originator": 3, "role": "rx"},
@@ -297,9 +297,7 @@ int main() {
         CHECK(bool(r));
         auto r2 = load_config_json(R"({
           "node": {"originator": 3, "role": "rx"},
-          "air": {"kind": "kernel-monitor", "tx_retry_limit": 0},
-          "adapters": [{"name":"m","ifname":"wlan9","role":"tx",
-                        "channel":5805}],
+          "air": {"kind": "udp", "tx_retry_limit": 0},
           "policy": {"return": {"unicast": true}}})");
         CHECK(bool(r2));
     }
@@ -320,8 +318,7 @@ int main() {
     }
     // --- §15.2 air.ldpc / air.stbc (Pass 157) -------------------------------
     // Defaults off; radio accepts both; any other backend refuses each key
-    // (Pass 154 mac posture — a dead key on udp, an unverifiable leg on
-    // frozen kernel-monitor, #120).
+    // (Pass 154 mac posture — a dead key off the radio backend).
     {
         auto r = load_config_json(R"({
           "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
@@ -342,9 +339,8 @@ int main() {
           "air":{"kind":"udp","ldpc":true}})",
                      "air.ldpc is a radio-backend key");
         expect_error(R"({"node":{"originator":3,"role":"rx"},
-          "air":{"kind":"kernel-monitor","stbc":true},
-          "adapters":[{"name":"m","ifname":"wlan9","role":"tx",
-                       "channel":5805}]})",
+          "air":{"kind":"udp-broadcast","stbc":true,
+                 "tx":["127.0.0.1:5801"],"rx":["127.0.0.1:5810"]}})",
                      "air.stbc is a radio-backend key");
     }
     // --- §15.2 air.mcs_probe (Pass 163) -------------------------------------
@@ -368,8 +364,7 @@ int main() {
                      "probe_veto_permille");
     }
     // Both hybrid halves on at once: the refusal names ack_responder (the
-    // message ternary's first branch), and the udp dev backend is a second
-    // non-radio control alongside kernel-monitor above.
+    // message ternary's first branch).
     {
         expect_error(R"({"node":{"originator":3,"role":"rx"},
           "air":{"kind":"radio","ack_responder":true,"tx_retry_limit":0},
@@ -421,11 +416,11 @@ int main() {
                      "duplicate mac");
     }
     // The key is radio-only: on any other backend it would promise a binding
-    // that never happens (kernel-monitor is frozen, ruling #120).
+    // that never happens.
     {
         expect_error(R"({"node":{"originator":3,"role":"rx"},
-          "air":{"kind":"kernel-monitor"},
-          "adapters":[{"name":"up","ifname":"wlan0","role":"tx",
+          "air":{"kind":"udp"},
+          "adapters":[{"name":"up","role":"tx",
                        "channel":5805,"mac":"84:fc:14:50:bc:de"}]})",
                      "radio-backend key");
     }
@@ -480,28 +475,46 @@ int main() {
         }
     }
 
-    // --- air "kernel-monitor" backend + adapter ifname ---------------------
+    // --- air "radio" backend + the retired kernel-monitor value -------------
     {
         auto r = load_config_json(R"({
           "node": {"originator": 7, "role": "rx", "net_id": 2},
-          "air": {"kind": "kernel-monitor", "rx_drop_permille": 30,
+          "air": {"kind": "radio", "rx_drop_permille": 30,
                   "airtime_efficiency_permille": 600},
           "adapters": [
-            {"name": "uplink", "ifname": "wlan0", "role": "tx", "channel": 5805},
-            {"name": "div0", "ifname": "wlx01", "role": "rx", "channel": 5805}
+            {"name": "uplink", "bus": "1-1", "role": "tx", "channel": 5805},
+            {"name": "div0", "bus": "5-1", "role": "rx", "channel": 5805}
           ]})");
         CHECK(bool(r));
         if (r) {
             const Config& c = *r.value;
-            CHECK(c.air.kind == AirCfg::Kind::kMonitor);
+            CHECK(c.air.kind == AirCfg::Kind::kRadio);
             CHECK_EQ_U(c.air.rx_drop_permille, 30);
             CHECK_EQ_U(c.air.airtime_efficiency_permille, 600);
             CHECK_EQ_U(c.adapters.size(), 2);
-            CHECK(c.adapters[0].ifname == "wlan0");
+            CHECK(c.adapters[0].bus == "1-1");
             CHECK(c.adapters[0].role == Role::kTx);
-            CHECK(c.adapters[1].ifname == "wlx01");
+            CHECK(c.adapters[1].bus == "5-1");
             CHECK(c.adapters[1].role == Role::kRx);
         }
+        // Pass 164: the value is REJECTED, and the message names the
+        // retirement rather than reporting an unknown kind — every pre-164
+        // RX/spectator config on the shelf carries it. This is the negative
+        // control for the deletion: without it, a stale config would fail
+        // with a generic "unknown" and read as a typo.
+        expect_error(R"({
+          "node": {"originator": 7, "role": "rx"},
+          "air": {"kind": "kernel-monitor"},
+          "adapters": [
+            {"name": "uplink", "ifname": "wlan0", "role": "tx",
+             "channel": 5805}
+          ]})",
+                     "retired in Pass 164");
+        // ...while a genuinely unknown kind still reports the live value set,
+        // which no longer offers kernel-monitor.
+        expect_error(R"({"node":{"originator":7,"role":"rx"},
+          "air":{"kind":"nonsense"}})",
+                     "udp | udp-broadcast | radio)");
     }
 
     // --- §15.1 rejection paths ---------------------------------------------
@@ -605,7 +618,7 @@ int main() {
                        "channel":5805,"bw":20}],
           "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
                       "bind":{"kind":"frame-shm","name":"venc_frame"}}],
-          "air":{"kind":"kernel-monitor"}})");
+          "air":{"kind":"radio"}})");
         CHECK(bool(r));
         if (r) CHECK(r.value->node.spectator);
     }
@@ -673,7 +686,7 @@ int main() {
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "air":{"kind":"udp","pace_mbps":20}})", "only valid");
     expect_error(R"({"node":{"originator":1,"role":"rx"},
-      "air":{"kind":"kernel-monitor",
+      "air":{"kind":"radio",
              "airtime_efficiency_permille":1001}})", "0..1000");
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "air":{"kind":"udp","airtime_efficiency_permille":600}})",
