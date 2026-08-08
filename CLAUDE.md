@@ -162,6 +162,16 @@ Waybeam-android's `:wifi`. It exists because `ssc338q` proves ARMv7 and
 narrower there, all of which this preset catches at build time rather than
 in the consumer.
 
+`build/dev/hwtrial_bringup` is the **hardware trial harness** (issue #140).
+It brings adapters up from either device source — `--auto`/`--bus <path>` for
+the enumerated path, `--fd <bus>/<dev>` for the wrapped-fd path — prints each
+unit's EFUSE identity and RX counters, and tears down. **It never transmits**
+(adapters are created `allow_rx_only`), which is what makes it safe to run
+without an RF session. The fd mode needs usbfs write access, so run it under
+`sudo` with the kernel drivers unloaded (`CLAUDE.md` bench notes), and restore
+them afterwards. It is the only way to exercise the Android-shaped path
+without an Android device.
+
 `cmake -S examples/embed-consumer -B build/embed && cmake --build build/embed`
 is the **embedding gate**. It is the smallest project that consumes this tree
 by `add_subdirectory` and links `wblink::io`, and it asserts at configure time

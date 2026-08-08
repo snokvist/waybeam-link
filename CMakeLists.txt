@@ -350,6 +350,17 @@ if(WBLINK_FRAME_SHM AND PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
     target_link_libraries(frame_shm_feed PRIVATE wblink_io)
 endif()
 
+# Hardware trial harness (issue #140). Top-level + radio only, and native
+# only — it opens usbfs on the host it runs on. RX-only by construction, so it
+# cannot transmit; see the file header.
+if(WBLINK_RADIO AND PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
+    add_executable(hwtrial_bringup tools/hwtrial_bringup.cpp)
+    target_compile_options(hwtrial_bringup PRIVATE ${WBLINK_WARNINGS})
+    target_include_directories(hwtrial_bringup SYSTEM PRIVATE
+        third_party/libusb-cmake/libusb/libusb)
+    target_link_libraries(hwtrial_bringup PRIVATE wblink_io)
+endif()
+
 if(WBLINK_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
