@@ -31,15 +31,17 @@ jobs:
             cmake ninja-build g++ pkg-config libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev
 
+      # The runner exports ANDROID_NDK_ROOT / ANDROID_NDK_HOME itself, and
+      # gates.sh honours either, so nothing is set here. (An `env:` block
+      # referencing ${{ env.ANDROID_NDK_LATEST_HOME }} would be WORSE than
+      # nothing: the `env` context holds workflow-level variables, not the
+      # runner's environment, so it expands empty and overrides the real one.)
+      # That NDK is generally not the pinned 26.3.11579264 and the build warns
+      # about exactly that; the bionic gate still earns its keep, because the
+      # portability breaks it catches do not depend on the revision matching.
+      # SSC338Q has no public toolchain, so those three presets skip here and
+      # stay a local gate.
       - name: Run gates
-        env:
-          # The runner ships an NDK; it is generally NOT the 26.3.11579264 that
-          # Waybeam-android pins, and the build warns about exactly that. The
-          # bionic gate is still worth running — its job is catching
-          # portability breaks (nfds_t narrowing was the first), which do not
-          # depend on the revision matching. SSC338Q has no public toolchain,
-          # so those three presets skip here and stay a local gate.
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: ./scripts/gates.sh
 
       - name: Summary

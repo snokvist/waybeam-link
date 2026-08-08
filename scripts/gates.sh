@@ -52,24 +52,33 @@ run() {  # run <name> <cmd...>
 }
 skip() { echo "SKIP  $1 ($2)"; SKIP+=("$1"); }
 
-run "build dev"  cmake --build --preset dev
+# Configure THEN build. `cmake --build --preset X` needs the build directory to
+# already exist, so a version of this script that only built worked on a
+# machine with warm build dirs and failed on a fresh clone — which is exactly
+# how CI found it on its first run.
+build_preset() {
+    run "configure $1" cmake --preset "$1"
+    run "build $1"     cmake --build --preset "$1"
+}
+
+build_preset dev
 run "ctest dev"  ctest --preset dev
 
 if [ "$QUICK" -eq 0 ]; then
     for p in release x86-ground rk3566; do
-        run "build $p" cmake --build --preset "$p"
+        build_preset "$p"
     done
 
     if [ -n "${WBLINK_SSC338Q_TOOLCHAIN:-}" ]; then
         for p in ssc338q ssc338q-au ssc338q-eu; do
-            run "build $p" cmake --build --preset "$p"
+            build_preset "$p"
         done
     else
         skip "ssc338q{,-au,-eu}" "set WBLINK_SSC338Q_TOOLCHAIN"
     fi
 
     if [ -n "${WBLINK_ANDROID_NDK:-}${ANDROID_NDK_HOME:-}${ANDROID_NDK_ROOT:-}" ]; then
-        run "build android-arm64" cmake --build --preset android-arm64
+        build_preset android-arm64
     else
         skip "android-arm64" "set WBLINK_ANDROID_NDK or ANDROID_NDK_HOME"
     fi
