@@ -66,8 +66,11 @@ before merge instead of stacking a correction on top.
   reading the loader. The registry is not a second source of truth:
   `tests/config_registry_test.py` reconstructs every accessor site in
   `config.cpp` and fails the build if the two disagree in either direction.
-  It publishes the surface — it does **not** yet reject an unknown key in a
-  config; that is `--strict`, #106 item 1 PR B.
+  `--check --strict` classifies the keys in a config against it: **unknown**
+  (not read by the loader) and **inert** (registered, but this node's mode does
+  not read it — §15.2 withholds `policy.return.*` from a node with no
+  `role:"tx"` adapter, for one). Both are warnings; exit stays 0 until #106
+  item 8. `--json` gives the same report machine-readably.
 
 ## Verification playbook
 
@@ -130,13 +133,14 @@ prose. Until the harness in `docs/config-harness-plan.md` exists:
   the loader does not read is a silently dead line.
   `waybeam-link config-schema --json | grep <key>` answers this faster and is
   build-checked against the loader, so it cannot go stale the way an example
-  can. Note it answers "does this key exist", not "is it live on THIS node" —
-  a key can be registered and still be inert for the node's mode (§15.2
-  withholds `policy.return.*` from a `node.spectator`, for one).
+  can. It answers "does this key exist", not "is it live on THIS node" — for
+  that run `--check --strict`, which reports inert keys with the reason.
 - `_`-prefixed keys are comments by convention (`_comment`,
   `_verify_timeout_ms`) and are the only keys allowed to be unknown.
-- Validate with `build/dev/waybeam-link <tx|rx> -c <cfg> --check`, then read
-  the config dump — and remember `policy.csa.psk` must print redacted.
+- Validate with `build/dev/waybeam-link <tx|rx> -c <cfg> --check --strict`,
+  then read the config dump — and remember `policy.csa.psk` must print
+  redacted. `--strict` adds the unknown/inert key report; without it a typo
+  still loads clean.
 - `deploy/*.json` are the four flying nodes and the reference for what a real
   config looks like; `examples/*.json` are samples, not deployments.
 - The archetype a config belongs to is not its `node.role`: a ground with an
@@ -153,7 +157,7 @@ scripts/gates.sh            # EVERY merge gate; what CI runs. --quick = dev + ct
 ```
 
 Run that rather than a remembered checklist. It covers the eight presets, the
-64-suite `ctest`, the B7 embed check, the install/`find_package` round trip and
+65-suite `ctest`, the B7 embed check, the install/`find_package` round trip and
 the four `deploy/*.json` `--check`s, and it **fails on a diagnostic for our
 targets even when the build exits 0**. Toolchains the host lacks are SKIPPED
 loudly and counted separately — a skip is never a pass. Export
@@ -164,7 +168,7 @@ drift.
 The individual commands, when you want one of them:
 
 ```
-cmake --build --preset dev && ctest --preset dev   # 64 suites, ASan+UBSan
+cmake --build --preset dev && ctest --preset dev   # 65 suites, ASan+UBSan
 cmake --build --preset ssc338q                      # ARMv7 cross (SigmaStar target)
 ```
 

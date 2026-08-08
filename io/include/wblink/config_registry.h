@@ -27,6 +27,9 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
+
+#include "wblink/config.h"
 
 namespace wblink {
 
@@ -40,20 +43,49 @@ struct KeyEntry {
     // Dotted path; see the header comment for "[]" semantics.
     const char* path;
     KeyType type;
+    // Liveness predicate, or nullptr when the key is live on every node.
+    //
+    // Returns false when this node's mode does not read the key. It is a
+    // DECLARED property, not one inferred from which branch the parse took:
+    // the loader parses `policy.return.*` unconditionally (config.cpp:649)
+    // and the gate that makes it dead is downstream (app/main.cpp:3846), so
+    // no amount of watching the parse can see it.
+    //
+    // Each predicate encodes a gate that exists in the code, cited at its
+    // definition in config_registry.cpp. A key group whose gate cannot be
+    // pointed at stays unpredicated — a guessed predicate reports a live key
+    // as dead, which is worse than not checking.
+    bool (*live)(const Config&) = nullptr;
+    // Why the key would be inert, phrased for an operator. Non-null exactly
+    // when `live` is.
+    const char* inert_reason = nullptr;
 };
 
-// No liveness field here yet, deliberately. `--strict` (#106 item 1 PR B)
-// needs to say that a key is *inert* — registered, but not read on this node's
-// mode: §15.2 withholds return/ARQ from an uplink-free node, so
-// `policy.return.*` does nothing there even though the loader parses it
-// unconditionally (config.cpp:649; the real gate is downstream in
-// app/main.cpp:3846). That cannot be inferred from which branch the parse
-// took, because the parse only sees loader-level gates and the ones that
-// matter live past the loader — so it will have to be declared, as a member
-// added here with a `= nullptr` default. Adding it then costs nothing: an
-// aggregate initialiser that omits the member still compiles, so only the
-// entries that gain a predicate change. Carrying a field that is null in all
-// 263 entries today would just be flexibility nothing uses.
+// What --strict says about one key found in a config.
+enum class KeyVerdict {
+    kUnknown,  // not in the registry: a typo, or a name from an older example
+    kInert,    // registered, but this node's mode does not read it
+};
+
+struct KeyFinding {
+    std::string path;
+    KeyVerdict verdict;
+    // For kInert, the matching entry's inert_reason. Empty for kUnknown.
+    const char* reason;
+};
+
+// Every key in `config_json` that is unknown or inert for `cfg`, in path
+// order. Keys with any `_`-prefixed segment are comments by convention and
+// are never reported.
+//
+// `config_json` is the raw text the config was loaded from; `cfg` is the
+// result of loading it, which is what the liveness predicates read.
+std::vector<KeyFinding> check_config_keys(const std::string& config_json,
+                                          const Config& cfg);
+
+// The findings as a JSON object, for `--check --strict --json`. Reports paths
+// and verdicts only — never a value, so no config content reaches it.
+std::string check_report_json(const std::vector<KeyFinding>& findings);
 
 // The registry, sorted by path. The sort is asserted in
 // tests/config_schema_test.cpp, which also checks the serialiser's shape.

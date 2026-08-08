@@ -64,6 +64,7 @@ add_wb_test(uplink_calib_store_test wblink_io)
 target_compile_definitions(config_test PRIVATE
     WBLINK_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_wb_test(config_schema_test wblink_io)
+add_wb_test(config_strict_test wblink_io)
 add_wb_test(udp_test wblink_io)
 if(WBLINK_FRAME_SHM)
     add_wb_test(frame_shm_test wblink_io)
