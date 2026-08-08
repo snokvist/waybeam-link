@@ -293,14 +293,14 @@ One prerequisite falls out of this and belongs to Phase 3, not here: Android's
 devourer submodule is pinned at `73f1cb4` (2026-07-09), which **predates**
 `GetPermanentMacAddress` (#383/#386). See B7.
 
-### 2b. Still live — three
+### 2b. Still live — two
 
-Ordered by how much they constrain the design, not by size. **Five of the
+Ordered by how much they constrain the design, not by size. **Seven of the
 original nine have since closed in code and are kept below with a status
 line rather than deleted, because each one's reasoning is what the next
 phase is built on.** B6's residue and B12 closed with Phase 1a (PR #138);
-B1, B4 and B5 with Phase 1b; B7 with Phase 1a′. What remains is **B8, B9,
-B10**.
+B1, B4 and B5 with Phase 1b; B7 with Phase 1a′; B8 with Phase 1c. What
+remains is **B9, B10**.
 
 #### B1 — device acquisition: enumeration vs. a wrapped fd
 
@@ -440,7 +440,13 @@ consumer deletes its copy rather than maintaining a second one. Until then the
 drift compounds, and B11's resolution is unavailable on Android until that
 submodule is bumped.
 
-#### B8 — log and diagnostic sinks — **now a confirmed hard blocker, and it gates `RadioAir` itself**
+#### B8 — log and diagnostic sinks — **CLOSED by Phase 1c (§4.4)**
+
+**Status: closed by PR #146 (issue #144), 2026-08-08.** Both streams are now
+injectable — `wb_log_set_sink()` for diagnostics (`io/include/wblink/log.h`)
+and `StatsEmitter::set_local_sink()` for the §15.3 line. Defaults reproduce
+the old behaviour exactly, so no flying node changed. See §4.4. The survey
+below is kept because the *counting* is what the next phase inherits.
 
 `io/src` mentions `stderr` in **28 places** (was 24): `air_radio.cpp` 15,
 `air_mon.cpp` 8, `venc_http.cpp` 2, and one each in `calib_store.cpp`,
@@ -491,9 +497,6 @@ preset cannot come up green without at least the minimal `fopencookie` →
 `funopen` shim, so that shim moves forward into 1a. The preset stops being a
 discovery gate and becomes a regression gate — the discovery already happened,
 here.
-
-**Preserve on the way through:** `csa_psk` must never reach a log or stat
-(`CLAUDE.md`). A new sink is a new output path that touches config.
 
 **Preserve on the way through:** `csa_psk` must never reach a log or stat
 (`CLAUDE.md`). A new sink is a new output path that touches config.
@@ -1032,6 +1035,78 @@ fleet set today. The risk is entirely in the bump, as §2b B7 says.
 **Not moved**: the Android submodule bump and the Kestrel force-OFF that must
 accompany it stay Phase 3 (§4). This phase makes the deletion of Android's
 hand-copy *possible*; it does not perform it.
+
+### 4.4 Phase 1c, as landed
+
+PR #146, issue #144. Two sinks, both defaulting to exactly what the code did
+before, so every flying node is byte-for-byte unaffected — verified by running
+the daemon, not by reading the diff.
+
+**Diagnostics** (`io/include/wblink/log.h`, `io/src/log.cpp`). One
+process-wide sink, installed with `wb_log_set_sink()`; `wb_logf()` is the
+printf-style entry point, `wb_log_write()` the pre-formatted one, and
+`wb_log_stream()` a `FILE*` view for the vendored APIs that accept nothing
+else. Default sink writes to `stderr`.
+
+Three decisions worth recording, because each had a plausible alternative:
+
+- **A global, not a threaded-through logger object.** `io/` has no logger, no
+  context reaching `RadioAir`'s RX threads, and no per-object diagnostics
+  policy. Twenty-four line-oriented writes do not justify inventing one; a
+  function pointer is the whole requirement.
+- **The sink is one atomic pointer to a caller-owned `LogSink`, not an
+  atomic pair.** Storing `fn` and `cookie` as two atomics would let a reader
+  pair a new callback with the previous cookie. That is a use-after-free with
+  a plausible-looking stack, so it is designed out rather than documented
+  around.
+- **`wb_logf` allocates rather than truncates.** It formats into a 512-byte
+  stack buffer and re-formats on the heap if that is short. A truncated
+  diagnostic loses its tail, and the tail is where the bus path and the MAC
+  are — the two things that make the line worth emitting. Boundary cases 510,
+  511, 512, 513 are asserted.
+
+The one place `stderr` survives outside the default sink is
+`RadioAir`'s teardown, and it moved: the destructor used to restore
+`set_diag_stream(stderr)` before closing our cookie stream, which would have
+pulled devourer's last lines back out of a consumer's sink. It now restores
+`wb_log_stream()`, which is a process-lifetime object precisely so it can
+outlive every object that might log while being destroyed.
+
+**The §15.3 stats line** (`StatsEmitter::set_local_sink`). It **replaces** the
+stdout write rather than adding to it, so a consumer cannot double-emit and
+`stats.stdout` keeps meaning what it meant for every node that installs
+nothing. The UDP binding is independent of both. No config key, nothing
+harness-visible, and `last_line()` still serves §15.5 the identical bytes.
+
+**Two counts in §2b B8 were wrong, in opposite directions**, which is worth
+recording because the survey's numbers were quoted onward. The real write
+count in `air_radio.cpp` is **11 `fprintf` sites plus 2 raw stream writes**,
+not 15 tokens; and the total converted across `io/src` is **24 `fprintf` sites
++ 2 raw**, against the survey's "28 mentions, ~11 real". The survey was
+counting `stderr` tokens, which include comments and `fflush` halves.
+
+**Verified by probe, not by reading:**
+
+- Negative control on each half separately — forcing the stats dispatch past
+  the sink, and forcing the log sink to the default — makes `log_sink_test`
+  fail 3 and 9 checks respectively, and the broken stats build visibly leaks
+  the §15.3 line onto the test's stdout. Restored: 30 checks, 0 failures.
+- `--check` on a config that trips the §10.3 clamp: 2 diagnostics on fd 2,
+  **0 on fd 1**. A diagnostic leaking to stdout would corrupt the NDJSON
+  stream, so the fd separation is the property, not the message.
+- `loopback` for 3 s: 3 stats lines on stdout, all parsing as JSON.
+- On hardware (issue #140, both bench dongles, kernel drivers unloaded):
+  `hwtrial_bringup --bus 8-1 --bus 5-1` brings both units up and the converted
+  `air_radio.cpp` sites print correctly with the right MACs
+  (`20:0d:b0:c4:a7:6a` Jaguar1, `40:a5:ef:2f:23:08` Jaguar3); teardown clean
+  through the new `wb_log_stream()` path.
+- **Leg A5 run at the same time**: a real spectator node on those two adapters
+  emits §15.3 NDJSON with a populated `adapters[]`, 500 ms apart at
+  `stats.hz=2`, diagnostics on fd 2 and stats on fd 1 with no crossover. See
+  `docs/findings.md`.
+- All 26 gates green, `android-arm64` included — and the bionic gate now
+  covers `cookie_stream.h` from `log.cpp` as well, so it no longer depends on
+  `WBLINK_RADIO=ON` to compile the shim at all.
 
 ## 5. Loose ends worth knowing before starting
 

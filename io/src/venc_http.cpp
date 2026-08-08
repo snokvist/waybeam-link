@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "wblink/binding.h"
+#include "wblink/log.h"
 
 namespace wblink {
 
@@ -329,8 +330,8 @@ void VencActuator::finish_txn(int status, uint64_t now_ms) {
             commit();
             if (live_fallback_) {
                 live_fallback_ = false;
-                std::fprintf(stderr, "venc: /api/v1/live/set available — "
-                                     "volatile path restored\n");
+                wb_logf("venc: /api/v1/live/set available — "
+                                "volatile path restored\n");
             }
         } else if (status == 404) {
             // §9.6 Pass 73: re-send the SAME push on the persisting /set; the
@@ -350,9 +351,8 @@ void VencActuator::finish_txn(int status, uint64_t now_ms) {
         if (txn_latch_on_ok_) {
             if (!live_fallback_) {
                 live_fallback_ = true;
-                std::fprintf(stderr,
-                             "venc: /api/v1/live/set unsupported (pre-live "
-                             "venc) — falling back to persisting /api/v1/set\n");
+                wb_logf("venc: /api/v1/live/set unsupported (pre-live "
+                        "venc) — falling back to persisting /api/v1/set\n");
             }
             live_reprobe_ms_ = now_ms + kLiveReprobeMs;
         }

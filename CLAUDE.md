@@ -164,8 +164,10 @@ eu | all): `x86-ground` and `rk3566` (aarch64 ground cross) build with
 `cmake --build --preset android-arm64` is the **bionic** compile-only gate
 (libraries only — no app, no tests). Two of its cache variables are
 load-bearing, not tidiness: `WBLINK_RADIO=ON` because `io/src/air_radio.cpp`
-is the only TU that includes `cookie_stream.h`, so turning the radio off would
-silently stop compiling the one file the shim exists for; and
+is the only TU that hands devourer a cookie stream, so turning the radio off
+stops exercising what the shim exists *for* (since #146 `io/src/log.cpp`
+includes `cookie_stream.h` unconditionally, so the shim itself compiles in
+every config — the radio is what proves it against a real consumer); and
 `WBLINK_WERROR=ON` because without it the preset merely *prints* a portability
 diagnostic into a log dominated by vendored devourer/libusb warnings — a
 human-attention gate, not a build gate. It needs an NDK:
@@ -248,6 +250,10 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   32-bit-clean and dependency-free.
 - `io/` — config (JSON), UDP bindings, stats NDJSON writer, dot11 encapsulation,
   the devourer `RadioAir` backend, venc HTTP actuation, power-file loader.
+  **Diagnostics go through `wb_logf()` (`io/include/wblink/log.h`), never
+  `fprintf(stderr)` directly**, and the §15.3 line goes through
+  `StatsEmitter`'s local sink, never `stdout` directly — both default to the
+  old behaviour, and both exist so an embedding consumer is not deaf (#144).
 - `app/main.cpp` — event loops (`tx`/`rx`/`loopback` modes).
 - `tests/` — one `_test.cpp` per unit, run via ctest.
 - `tools/` — bench analyzers: `gate2_rho.py` (cross-adapter loss correlation),

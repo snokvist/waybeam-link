@@ -12,6 +12,46 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-08 — Leg A5: §15.3 stats from a real node, and the fd separation the log sinks depend on
+
+Run alongside PR #146 (issue #144, B8) to check the injected sinks against a
+real node rather than only against `ctest`. Issue #140 leg A5.
+
+Setup: bench host, both dongles, kernel drivers unloaded (`rtw88_8812au`,
+`88x2cu` — note the CU is `88x2cu`, not `8812eu`, which loads with zero users
+and is the wrong module to rmmod). Config: the spectator template
+`deploy/ground-192.168.2.199.json` with `air.kind:"radio"`, both units as
+`role:"rx"` on 5805/20, `stats.hz=2`, `stats.stdout=true`. **Spectator, so
+§15.2 withholds ARQ/NACK/LINK_REPORT and the node provably cannot transmit** —
+this is a non-radiating measurement.
+
+Measured:
+
+- Both units bind and report their EFUSE identities unchanged from every prior
+  run — `20:0d:b0:c4:a7:6a` (Jaguar1, `8-1`), `40:a5:ef:2f:23:08` (Jaguar3,
+  `5-1`).
+- §15.3 emits with a populated `adapters[]` — two entries carrying real
+  per-unit counters (`rx`, `filtered`, `kernel_drop`, `rssi_best`,
+  `adapter_stalled`, `rx_dead`, `tx_wedged`), every line parsing as JSON.
+- Cadence exact: `t_ms` deltas 500/501 ms at `stats.hz=2` over 15 lines.
+- **Complete fd separation**: stats on fd 1, every diagnostic on fd 2, zero
+  crossover in either direction. This is the property B8's log sink depends
+  on — a diagnostic reaching stdout corrupts the NDJSON stream a consumer is
+  parsing, and it would do so only under the conditions that produce
+  diagnostics, i.e. when something is already wrong.
+
+One measurement artifact worth not rediscovering: bring-up of two devourer
+adapters takes ~7 s, so a `timeout 8` run yields **one** stats line and looks
+like a broken emitter. It is not — the same config at `timeout 15` gives 15
+lines at the correct interval. Size the run past bring-up before concluding
+anything about cadence.
+
+**Open:** nothing here blocks. What A5 does *not* cover is a node with a live
+peer — `adapters[].rx` is 0 throughout because nothing was transmitting, so
+the counters are structurally-correct-but-zero. The schema question in §5 of
+`docs/library-extraction-plan.md` (per-backend counter dispatch, `MonAir`
+leaving the tree under #120) is unaffected either way and stays for Phase 2a.
+
 ## 2026-08-08 — TX confirmed over the air on merged Phase-1 code: 500/500 submitted, 500/500 reported, 499 received
 
 Follows the RX-only run below (#140 legs A1/A3/B1–B5), which deliberately never

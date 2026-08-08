@@ -355,11 +355,31 @@ struct StatsSnapshot {
 // Appends one §15.3 NDJSON line (terminated with '\n') to out.
 void format_stats_line(const StatsSnapshot& snap, std::string& out);
 
+// One complete §15.3 line, trailing '\n' included. NOT NUL-terminated.
+//
+// This exists because the local egress was hardcoded to stdout (B8, issue
+// #144). A library consumer has no stdout worth reading, so it lost not log
+// noise but the node's entire counter surface — everything the ground UI, the
+// selector history and the bench analyzers read.
+using StatsSinkFn = void (*)(void* cookie, const char* line, size_t n);
+
 class StatsEmitter {
   public:
     // udp may be nullptr (stdout only). Neither sink is owned.
     StatsEmitter(bool to_stdout, UdpEgress* udp)
         : to_stdout_(to_stdout), udp_(udp) {}
+
+    // Installs a local sink, REPLACING the stdout write — not adding to it, so
+    // a consumer cannot accidentally double-emit, and `stats.stdout` in the
+    // config keeps meaning what it meant for every node that installs nothing.
+    // The UDP binding is independent and is unaffected either way.
+    //
+    // Call before the first emit(); the emitter is not thread-safe and neither
+    // is this. Passing nullptr restores the stdout behaviour.
+    void set_local_sink(StatsSinkFn fn, void* cookie) {
+        sink_ = fn;
+        sink_cookie_ = cookie;
+    }
 
     void emit(const StatsSnapshot& snap);
 
@@ -371,6 +391,8 @@ class StatsEmitter {
   private:
     bool to_stdout_;
     UdpEgress* udp_;
+    StatsSinkFn sink_ = nullptr;
+    void* sink_cookie_ = nullptr;
     std::string line_;  // reused across emits
 };
 
