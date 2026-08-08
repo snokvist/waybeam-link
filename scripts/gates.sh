@@ -141,7 +141,7 @@ EOF
             skip "check $(basename "$c")" "profile_table $tbl not on this host"
             continue
         fi
-        run "check $(basename "$c")" ./build/dev/waybeam-link "$m" -c "$c" --check
+        run "check $(basename "$c")" ./build/dev/waybeam-link "$m" -c "$c" --check --strict
     done
 
     # config-schema is the only CLI surface no test reaches: app_test

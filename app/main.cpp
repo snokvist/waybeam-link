@@ -8556,9 +8556,13 @@ int run_loopback(const Loaded& l) {
 
 int usage(const char* argv0) {
     std::fprintf(stderr,
-                 "usage: %s <tx|rx|loopback> -c <config.json> [--check]\n"
+                 "usage: %s <tx|rx|loopback> -c <config.json> "
+                 "[--check [--strict] [--json]]\n"
                  "       %s config-schema [--json]\n"
                  "  --check         validate config + bindings and exit\n"
+                 "  --strict        also report unknown and inert keys\n"
+                 "                  (warnings; exit stays 0)\n"
+                 "  --json          machine-readable --strict report on stdout\n"
                  "  config-schema   print the declared §15.2 key surface to\n"
                  "                  stdout (JSON is the only format; --json is\n"
                  "                  accepted for symmetry with #106)\n",
@@ -8606,16 +8610,35 @@ int main(int argc, char** argv) {
     }
     std::string config_path;
     bool check_only = false;
+    bool strict = false;
+    bool as_json = false;
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             config_path = argv[++i];
         } else if (std::strcmp(argv[i], "--check") == 0) {
             check_only = true;
+        } else if (std::strcmp(argv[i], "--strict") == 0) {
+            strict = true;
+        } else if (std::strcmp(argv[i], "--json") == 0) {
+            as_json = true;
         } else {
             return usage(argv[0]);
         }
     }
     if (config_path.empty()) {
+        return usage(argv[0]);
+    }
+    // Both only mean anything while validating, and silently ignoring them on
+    // a flight invocation would be the same class of bug this feature exists
+    // to find.
+    if ((strict || as_json) && !check_only) {
+        std::fprintf(stderr, "--strict and --json apply to --check only\n");
+        return usage(argv[0]);
+    }
+    // --json alone produced no output and exited 0, which a script parsing the
+    // report reads as "clean". It is the report's format, not a mode.
+    if (as_json && !strict) {
+        std::fprintf(stderr, "--json needs --strict (it formats its report)\n");
         return usage(argv[0]);
     }
 
@@ -8631,6 +8654,58 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::fprintf(stderr, "bindings: OK\n");
+        if (strict) {
+            // Re-read rather than thread the text through load_all: --check is
+            // a one-shot path, and the alternative is a field on Loaded that
+            // the flight path would carry for nothing.
+            std::string text;
+            std::FILE* cf = std::fopen(config_path.c_str(), "rb");
+            if (cf == nullptr) {
+                // Silence here would print "0 finding(s)" for a file we never
+                // read — a false clean, and under #106 item 8 a false pass.
+                std::perror("--strict: reopen config");
+                return 1;
+            }
+            char buf[4096];
+            size_t got;
+            while ((got = std::fread(buf, 1, sizeof(buf), cf)) > 0) {
+                text.append(buf, got);
+            }
+            const bool read_failed = std::ferror(cf) != 0;
+            std::fclose(cf);
+            if (read_failed) {
+                std::fprintf(stderr, "--strict: error reading %s\n",
+                             config_path.c_str());
+                return 1;
+            }
+            const std::vector<KeyFinding> findings =
+                check_config_keys(text, l.cfg);
+            if (as_json) {
+                const std::string report = check_report_json(findings);
+                if (std::fwrite(report.data(), 1, report.size(), stdout) !=
+                        report.size() ||
+                    std::fflush(stdout) != 0) {
+                    std::perror("--json: write");
+                    return 1;
+                }
+            } else {
+                for (const KeyFinding& f : findings) {
+                    if (f.verdict == KeyVerdict::kUnknown) {
+                        std::fprintf(stderr,
+                                     "strict: unknown key %s — not read by the "
+                                     "loader; check `config-schema --json`\n",
+                                     f.path.c_str());
+                    } else {
+                        std::fprintf(stderr, "strict: inert key %s — %s\n",
+                                     f.path.c_str(), f.reason);
+                    }
+                }
+                std::fprintf(stderr, "strict: %zu finding(s)\n",
+                             findings.size());
+            }
+            // Warnings, not errors: #106 item 8 promotes --strict to a
+            // non-zero exit once the generator is what authors configs.
+        }
         return 0;
     }
 
