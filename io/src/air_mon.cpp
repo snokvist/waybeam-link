@@ -294,6 +294,8 @@ struct MonAir::Impl {
     struct Adapter {
         std::string name;
         std::string ifname;
+        // §10.5 (Pass 150): absolute reference the relative offset applies to.
+        std::optional<int32_t> cfg_max_power_qdb;
         int fd = -1;
         bool tx = false;
         std::thread rx_thread;
@@ -590,6 +592,7 @@ Result<MonAir> MonAir::create(const MonAirCfg& cfg) {
         auto a = std::make_unique<Impl::Adapter>();
         a->name = ac.name;
         a->ifname = ac.ifname;
+        a->cfg_max_power_qdb = ac.max_power_qdb;  // §10.5 offset reference
         a->fd = fd;
         a->tx = (ac.role == Role::kTx);
         a->iface_rx_baseline = read_iface_rx_packets(ac.ifname);
@@ -764,6 +767,25 @@ void MonAir::set_filter_net_id(std::optional<uint8_t> net_id) {
     for (auto& a : impl_->adapters) {
         attach_bpf_filter(a->fd, net_id, a->ifname.c_str());
     }
+}
+
+// §10.5 (Pass 150): kernel-monitor has no efuse-relative lever, so it realises
+// the relative contract against the adapter's configured max_power_qdb — the
+// absolute REFERENCE the offset applies to (it is no longer a ceiling, §10.3).
+// No reference configured => no defensible absolute to write, so skip and say
+// so rather than guess one and quietly transmit at the wrong power.
+bool MonAir::set_power_offset_qdb(size_t adapter, int32_t qdb) {
+    if (adapter >= impl_->adapters.size()) return false;
+    const std::optional<int32_t>& ref = impl_->adapters[adapter]->cfg_max_power_qdb;
+    if (!ref) {
+        std::fprintf(stderr,
+                     "kernel-monitor: %s has no max_power_qdb reference — "
+                     "§10.5 offset %d qdb not applied\n",
+                     impl_->adapters[adapter]->ifname.c_str(),
+                     static_cast<int>(qdb));
+        return false;
+    }
+    return set_power_qdb(adapter, *ref + qdb);
 }
 
 bool MonAir::set_power_qdb(size_t adapter, int32_t qdb) {

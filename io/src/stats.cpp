@@ -94,6 +94,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_i32(out, a.snr);
         out += ",\"noise\":";
         append_i32(out, a.noise);
+        out += ",\"evm\":";
+        append_i32(out, a.evm);
+        out += ",\"evm_valid\":";
+        append_bool(out, a.evm_valid);
         out += ",\"tx_submitted\":";
         append_u64(out, a.tx_submitted);
         out += ",\"tx_failed\":";
@@ -123,6 +127,12 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         }
         out += "],\"rx_mcs_unknown\":";
         append_u64(out, a.rx_mcs_unknown);
+        out += ",\"rx_ldpc\":";
+        append_u64(out, a.rx_ldpc);
+        out += ",\"rx_stbc\":";
+        append_u64(out, a.rx_stbc);
+        out += ",\"ldpc_flag_ok\":";
+        append_bool(out, a.ldpc_flag_ok);
         out += ",\"adapter_stalled\":";
         append_bool(out, a.adapter_stalled);
         out += ",\"rx_dead\":";
@@ -256,6 +266,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.jscc_enforced_frames);
         out += ",\"jscc_discarded_frames\":";
         append_u64(out, s.jscc_discarded_frames);
+        out += ",\"jscc_exempt_frames\":";
+        append_u64(out, s.jscc_exempt_frames);
         out += ",\"shm_health_valid\":";
         append_bool(out, s.shm_health_valid);
         out += ",\"shm_full_drops\":";
@@ -306,6 +318,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.arq_frames);
         out += ",\"arq_cutoff_frames\":";
         append_u64(out, s.arq_cutoff_frames);
+        out += ",\"fec_enhance_frames\":";
+        append_u64(out, s.fec_enhance_frames);
         out += ",\"decode_errors\":";
         append_u64(out, s.decode_errors);
         out += ",\"active_profile\":";
@@ -438,6 +452,14 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.report_latch_holder);
     out += ",\"report_latch_known\":";
     append_bool(out, snap.link.report_latch_known);
+    out += ",\"verdict\":";
+    append_u64(out, snap.link.verdict);
+    out += ",\"verdict_age_ms\":";
+    append_u64(out, snap.link.verdict_age_ms);
+    out += ",\"promote_blocked_saturated\":";
+    append_u64(out, snap.link.promote_blocked_saturated);
+    out += ",\"promote_blocked_probe\":";
+    append_u64(out, snap.link.promote_blocked_probe);
     out += ",\"selector_state_valid\":";
     append_bool(out, snap.link.selector_state_valid);
     out += ",\"selector_state_age_ms\":";
@@ -534,18 +556,14 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.uplink_calib_fingerprint);
     out += ",\"uplink_calib_stale\":";
     append_bool(out, snap.link.uplink_calib_stale);
-    out += ",\"uplink_quality_valid\":";
-    append_bool(out, snap.link.uplink_quality_valid);
-    out += ",\"uplink_quality_age_ms\":";
-    append_u64(out, snap.link.uplink_quality_age_ms);
-    out += ",\"uplink_quality_report_epoch\":";
-    append_u64(out, snap.link.uplink_quality_report_epoch);
-    out += ",\"uplink_quality_reports\":";
-    append_u64(out, snap.link.uplink_quality_reports);
-    out += ",\"uplink_quality_rssi_mean\":";
-    append_i32(out, snap.link.uplink_quality_rssi_mean);
-    out += ",\"uplink_quality_rx_mcs\":";
-    append_u64(out, snap.link.uplink_quality_rx_mcs);
+    out += ",\"calib_probes_sent\":";
+    append_u64(out, snap.link.calib_probes_sent);
+    out += ",\"calib_tallies_rx\":";
+    append_u64(out, snap.link.calib_tallies_rx);
+    out += ",\"calib_rx_mcs\":";
+    append_u64(out, snap.link.calib_rx_mcs);
+    out += ",\"feed_paused\":";
+    append_bool(out, snap.link.feed_paused);
     out += "}}\n";
 }
 

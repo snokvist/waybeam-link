@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Unit tests for the §10.6 craft-resident calibration engine
-// (core/include/wblink/calibrate.h): a synthetic channel model drives the
-// full 8-rung loop; the abort paths (report loss, hard cap, §11.7 abort)
-// each verify the single-shot restore action.
+// (core/include/wblink/calibrate.h) on the Pass 153 evidence primitive: a
+// synthetic channel carries real DwellSender probes into a real
+// DwellReceiver (the ground half), whose tallies feed back — so the whole
+// §3.16 exchange is under test, not a mock of it. Covers the full 8-rung
+// run, minimum-hunt placement below the wall, abort/hard-cap restore edges,
+// and the no_wall_found / evidence_lost refusals.
 #include "wblink/calibrate.h"
-#include "wblink/wire.h"
 
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <optional>
-#include <string>
+#include <cstring>
 
 namespace {
 
@@ -26,600 +26,198 @@ int g_fail = 0;
 
 using namespace wblink;
 
-// The bench-measured channel: rssi ≈ -41 + 0.85*dBm off the DELIVERED
-// power (cap_qdb models the silently-latched RF cap of Pass 121), and
-// each rung has an overload ceiling RSSI above which loss goes to ~1000‰.
-struct Channel {
-    int32_t qdb = 0;
-    int32_t cap_qdb = 10000;  // default: no cap
-    std::array<int8_t, 8> ceil{127, 127, 127, -24, -24, -27, -30, -30};
-    int8_t rssi() const {
-        return static_cast<int8_t>(-41 +
-                                   0.85 * (std::min(qdb, cap_qdb) / 4.0));
-    }
-    // Near-cliff instability (addendum 2): at/above flaky_above the link
-    // survives short exposure but collapses under sustained exposure —
-    // clean through a probe dwell, bad partway into a verify dwell.
-    int8_t flaky_above = 127;
-    mutable int hot = 0;
-    // One-dwell RSSI noise glitch (addendum 3): the first dwell at
-    // glitch_qdb reads 3 dB low — 7 samples = settle(2) + probe(5) at
-    // the fast_params cadence — then reads true. A confirmation dwell
-    // sees the real value.
-    int32_t glitch_qdb = -1;
-    mutable int glitch_left = 7;
-    int8_t rssi_sample() const {
-        if (qdb == glitch_qdb && glitch_left > 0) {
-            --glitch_left;
-            return static_cast<int8_t>(rssi() - 3);
-        }
-        return rssi();
-    }
-    // Pass 125: the model only ever had an overload CEILING, which is why
-    // the floor case went unexercised through the whole Pass 121 campaign.
-    // Below floor_rssi the link is simply too weak to deliver.
-    int8_t floor_rssi = -128;
-    uint16_t loss(uint8_t rung) const {
-        const int8_t r = rssi();
-        if (r >= ceil[rung]) return 900;
-        if (r < floor_rssi) return 900;
-        if (r >= flaky_above && ++hot > 10) return 900;
-        return 5;
-    }
-};
-
-// Drive: apply actions to the model, feed reports at 10 Hz, tick at 100 ms.
-struct Rig {
-    Calibrator cal;
-    Channel ch;
-    uint8_t pinned = 255;
-    uint64_t now = 1000;
-    int restores = 0;
-    int artifacts = 0;
-    // Addendum 4: above this commanded power the feedback channel itself
-    // collapses — no reports are delivered at all.
-    int32_t blackout_above = 1 << 30;
-    // Addendum 5: hysteretic blackout — tripping at bo_trip holds until
-    // power drops to bo_clear (a marginal rung's overload doesn't release
-    // at the power that entered it).
-    int32_t bo_trip = 1 << 30;
-    int32_t bo_clear = -1;
-    bool blacked = false;
-
-    explicit Rig(const CalibrateParams& p) : cal(p) {}
-
-    void run(uint64_t until_ms, bool feed_reports = true) {
-        while (now < until_ms) {
-            now += 100;
-            if (ch.qdb >= bo_trip) blacked = true;
-            else if (ch.qdb <= bo_clear) blacked = false;
-            if (feed_reports && ch.qdb <= blackout_above && !blacked &&
-                now % 100 == 0) {
-                cal.on_report(ch.rssi_sample(),
-                              ch.loss(pinned == 255 ? 0 : pinned), 300, now);
-            }
-            const CalibActions a = cal.tick(now);
-            if (a.pin_rung) pinned = *a.pin_rung;
-            if (a.set_qdb) ch.qdb = *a.set_qdb;
-            if (a.restore) ++restores;
-            if (a.artifact_ready) ++artifacts;
-            if (cal.state() != CalibState::kRunning && !a.restore &&
-                !a.artifact_ready) {
-                return;
-            }
-        }
-    }
-};
-
 CalibrateParams fast_params() {
     CalibrateParams p;
-    p.settle_ms = 200;
-    p.probe_dwell_ms = 500;
-    p.verify_dwell_ms = 800;
-    p.hard_cap_ms = 600000;  // generous: the fast dwells finish way under
+    p.settle_ms = 5;
+    p.dwell_probe_frames = 20;
+    p.dwell_verify_frames = 40;
+    p.dwell.probe_pace_us = 100;  // fast bench clock
+    p.dwell.tally_wait_ms = 20;
+    p.dwell.tally_retries = 2;
+    p.dwell.max_probes_per_tick = 64;
     return p;
 }
 
-void test_full_run_and_artifact() {
-    Rig r(fast_params());
-    CHECK(r.cal.start(r.now));
-    CHECK(!r.cal.start(r.now));  // §11.7: start while running = REJECTED
-    r.run(r.now + 590000);
-    CHECK(r.cal.state() == CalibState::kDone);
-    CHECK(r.restores == 1);
-    CHECK(r.artifacts == 1);
-    const CalibArtifact& a = r.cal.artifact();
-    // Pass 130 max-power sweep against the model: rungs 0-2 climb clean to
-    // max_qdb (the -6 guard is out of the model's reach); rungs 3-7 stop at
-    // the highest clean step below their loss wall. Every rung sweeps from
-    // min_qdb, so the placements are a property of the CHANNEL alone — under
-    // the old mid-range seeding rung 3 landed at 60 because the descent grid
-    // stepped straight past the clean 68.
-    // Pass 134: rungs 0-2 are guard-free in this model, so each stops at its
-    // OWN §10.3 ceiling — 108/108/100 under levels {4,4,3,...} — rather than
-    // at a flat max_qdb. Rungs 3-7 wall below their ceiling and are unmoved.
-    static constexpr int32_t kWant[8] = {108, 108, 100, 68, 68, 52, 36, 36};
-    for (int m = 0; m < 8; ++m) {
-        CHECK(a.placement_qdb[m] == kWant[m]);
-        CHECK(a.placement_loss_milli[m] <= 15);
-        // §10.2 level compensation baked into the curve.
-        CHECK(a.curve_qdb[m] ==
-              a.placement_qdb[m] -
-                  (int32_t(CalibrateParams{}.levels[m]) - 4) * 8);
+// Synthetic channel: per-rung overload wall in qdb. Below the wall, loss has
+// an interior minimum below `knee_qdb` (PA compression: loss grows above the
+// knee); at/above the wall every probe — including the re-elicited tail — is
+// lost.
+struct Channel {
+    std::array<int32_t, 8> wall_qdb{60, 60, 56, 56, 52, 52, 48, 48};
+    int32_t knee_qdb = 40;
+    uint16_t base_loss = 2;  // permille below the knee
+    int32_t qdb = 0;
+    uint8_t rung = 0;
+
+    uint16_t loss_milli() const {
+        if (qdb >= wall_qdb[rung]) return 1000;
+        const int32_t over = qdb > knee_qdb ? qdb - knee_qdb : 0;
+        return static_cast<uint16_t>(
+            std::min<int32_t>(999, base_loss + over * 8));
     }
-    // Rungs with a model ceiling found it during the ramp; MCS0-2 are
-    // guard-stopped with no bad probe.
-    CHECK(!a.ceilings[0].has_bad);
-    CHECK(!a.ceilings[2].has_bad);
-    for (int m = 3; m < 8; ++m) {
-        CHECK(a.ceilings[m].has_bad);
-        CHECK(a.ceilings[m].first_bad_rssi >= a.ceilings[m].last_clean_rssi);
+    int8_t rssi() const { return static_cast<int8_t>(-70 + qdb / 4); }
+};
+
+// Drive one engine tick + a full probe drain through the channel/receiver.
+struct Bench {
+    Calibrator cal;
+    DwellReceiver rx;
+    Channel ch;
+    uint64_t now = 1000;
+    int restores = 0;
+    int artifacts = 0;
+
+    explicit Bench(const CalibrateParams& p) : cal(p) {}
+
+    void step() {
+        const CalibActions a = cal.tick(now);
+        if (a.pin_rung) ch.rung = *a.pin_rung;
+        if (a.set_qdb) ch.qdb = *a.set_qdb;
+        if (a.restore) ++restores;
+        if (a.artifact_ready) ++artifacts;
+        cal.new_tick();
+        for (;;) {
+            const DwellProbeOut po = cal.next_probe(now);
+            if (!po.send) break;
+            // Deterministic loss: the first `loss` fraction of the seq space
+            // drops; the tail survives unless the wall is total.
+            const uint16_t loss = ch.loss_milli();
+            const uint32_t n = cal.probe_dwell_count();
+            const uint32_t dropped = n * loss / 1000;
+            if (po.seq <= dropped) continue;
+            const DwellTallyOut t =
+                rx.on_probe(cal.probe_run_id(), cal.probe_dwell_id(), po.seq,
+                            static_cast<uint16_t>(n), ch.rssi(), ch.rung,
+                            now);
+            if (t.send) {
+                cal.on_tally(t.run_id, t.dwell_id, t.received,
+                             t.rssi_sum_dbm, t.rx_mcs, 0x5A);
+            }
+        }
+        ++now;
     }
-    // §3.15 word: done state, artifact hash is the app's business.
-    CHECK((r.cal.word() & 0x03) == 2);
+    bool run(uint64_t budget_ms = 600000) {
+        const uint64_t end = now + budget_ms;
+        while (now < end && cal.state() == CalibState::kRunning) step();
+        step();  // drain the terminal single-shot edges
+        return cal.state() != CalibState::kRunning;
+    }
+};
+
+void test_full_run_places_below_walls() {
+    Bench b(fast_params());
+    CHECK(b.cal.start(b.now));
+    CHECK(b.run());
+    CHECK(b.cal.state() == CalibState::kDone);
+    CHECK(b.restores == 1);
+    CHECK(b.artifacts == 1);
+    const CalibArtifact& art = b.cal.artifact();
+    for (size_t m = 0; m < 8; ++m) {
+        CHECK(art.placement_qdb[m] < b.ch.wall_qdb[m]);
+        CHECK(art.ceilings[m].has_bad);
+    }
+    CHECK((b.cal.word() & 0x03u) == 2);  // done
 }
 
-void test_silent_rf_cap_does_not_stop_the_sweep() {
-    // A silently-latched RF cap: delivered power stops following commanded at
-    // 13 dBm, so RSSI plateaus while loss stays clean.
-    //
-    // Pass 121 stopped the ramp there. Pass 130 does not, because stopping
-    // buys nothing and can cost a great deal: commanding max_qdb into a capped
-    // radio still radiates the cap, so the placement behaves identically —
-    // while a plateau that is NOT a cap (AGC, noise, an adapter whose bottom
-    // step is flat) throws away real headroom. Measured on the craft's own
-    // validated run, the cap wall was the limiter on rungs 4/6/7 and discarded
-    // 12 dB at MCS7 with loss at 1permille and no wall in sight.
-    //
-    // The model keeps its DEFAULT ceilings (Pass 134): a run that finds no
-    // wall on any rung is now refused as a non-measurement, so proving "the
-    // cap does not stop the sweep" has to be proven on a channel that is
-    // otherwise measurable. The cap holds delivered RSSI at -29, which is
-    // above rungs 6/7's -30 ceiling and below every other rung's, so 0-5
-    // climb clean to their own ceilings and 6/7 wall — exactly the mixture
-    // this test needs.
-    Rig r(fast_params());
-    r.ch.cap_qdb = 52;
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 590000);
-    CHECK(r.cal.state() == CalibState::kDone);
-    const CalibArtifact& a = r.cal.artifact();
-    // Per-rung §10.3 ceilings under the seeded levels {4,4,3,3,2,2,1,1}.
-    static constexpr int32_t kCeil[8] = {108, 108, 100, 100, 92, 92, 84, 84};
-    for (int m = 0; m < 6; ++m) {
-        CHECK(a.placement_qdb[m] == kCeil[m]);  // the plateau did NOT stop it
-        CHECK(!a.ceilings[m].has_bad);          // no loss wall was ever hit
-        CHECK(a.placement_loss_milli[m] <= 15);
-    }
-    for (int m = 6; m < 8; ++m) {
-        CHECK(a.placement_qdb[m] == 36);
-        CHECK(a.ceilings[m].has_bad);
-    }
+void test_no_wall_found_refused() {
+    // §10.6 (Pass 153): the flat-at-ceiling refusal is absolute-space only,
+    // and taper_rung_ceiling is the space discriminator (Pass 151). With the
+    // taper on, park every rung level at the baseline so all eight share the
+    // same untapered ceiling the flat channel can reach.
+    CalibrateParams p = fast_params();
+    p.max_qdb = 40;       // stop the sweep well under every wall
+    p.taper_rung_ceiling = true;
+    for (auto& lv : p.levels) lv = 4;  // baseline: no per-rung taper
+    Bench b(p);
+    b.ch.knee_qdb = 200;  // flat clean everywhere
+    CHECK(b.cal.start(b.now));
+    CHECK(b.run());
+    CHECK(b.cal.state() == CalibState::kFailed);
+    CHECK(b.cal.fail_reason() != nullptr &&
+          std::strcmp(b.cal.fail_reason(), "no_wall_found") == 0);
+    CHECK(b.restores == 1);
+    CHECK(b.artifacts == 0);  // persists nothing
 }
 
-void test_verify_backoff() {
-    // Addendum 2: a placement that probes clean but fails the verify
-    // dwell must step down and re-verify — the fp 0xE3 rung-5 defect
-    // (probed clean, verified 942‰, recorded and moved on).
-    Rig r(fast_params());
-    r.ch.cap_qdb = 52;
-    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
-    r.ch.flaky_above = -31;  // 52 qdb lands at -29: flaky under exposure
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 590000);
-    CHECK(r.cal.state() == CalibState::kDone);
-    const CalibArtifact& a = r.cal.artifact();
-    for (int m = 0; m < 8; ++m) {
-        // Every rung ends one step below the flaky zone, verified clean.
-        CHECK(a.placement_qdb[m] == 36);
-        CHECK(a.placement_loss_milli[m] <= 15);
-    }
-    // The verify failure recorded rung 0's overload bracket.
-    CHECK(a.ceilings[0].has_bad);
-    CHECK(a.ceilings[0].first_bad_rssi == -29);
-}
-
-void test_cap_confirm_rejects_noise() {
-    // Addendum 3: one noisy dwell at 68 qdb reads 3 dB low — without the
-    // confirmation re-dwell this is a false cap wall (the 10-run
-    // campaign's 8 dB MCS7 flip). The confirm dwell reads true and the
-    // ramp must continue to the genuine limit.
-    // Default ceilings kept (Pass 134): rungs 3-7 wall, so the run is a real
-    // measurement and is not refused. The glitch lives on rung 0, which is
-    // guard-free and must ramp past it.
-    Rig r(fast_params());
-    r.ch.glitch_qdb = 68;
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 590000);
-    CHECK(r.cal.state() == CalibState::kDone);
-    // Rung 0 ramps clean to its own §10.3 ceiling despite the glitch.
-    CHECK(r.cal.artifact().placement_qdb[0] == 108);
-}
-
-void test_blackout_retreat() {
-    // Addendum 4: probing above 52 qdb kills the feedback channel (total
-    // overload — the v2 campaign's rung-7 report_loss aborts). The loop
-    // must book the wall, retreat to the last clean power, and finish.
-    Rig r(fast_params());
-    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
-    r.blackout_above = 52;
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 590000);
-    CHECK(r.cal.state() == CalibState::kDone);
-    CHECK(r.restores == 1);
-    const CalibArtifact& a = r.cal.artifact();
-    for (int m = 0; m < 8; ++m) {
-        CHECK(a.placement_qdb[m] == 52);
-        CHECK(a.ceilings[m].has_bad);  // blackout booked as the bracket
-        CHECK(a.placement_loss_milli[m] <= 15);
+void test_offset_space_flat_at_ceiling_places() {
+    // §10.6 (Pass 153, operator-ruled 2026-08-07): offset space completes a
+    // flat-window run, and seek_params() derives the reference cap from
+    // taper_rung_ceiling — unbracketed rungs place no higher than offset 0
+    // even with the window extended above the reference.
+    CalibrateParams p = fast_params();
+    p.max_qdb = 24;
+    p.min_qdb = -24;
+    p.taper_rung_ceiling = false;
+    Bench b(p);
+    b.ch.knee_qdb = 200;  // flat clean across the whole window
+    CHECK(b.cal.start(b.now));
+    CHECK(b.run());
+    CHECK(b.cal.state() == CalibState::kDone);
+    CHECK(b.restores == 1);
+    CHECK(b.artifacts == 1);
+    for (size_t m = 0; m < 8; ++m) {
+        CHECK(!b.cal.artifact().ceilings[m].has_bad);
+        CHECK(b.cal.artifact().placement_qdb[m] <= 0);
     }
 }
 
-void test_verify_blackout_descent() {
-    // Addendum 5: the v3 rung-6 aborts — the seek blackout retreat lands
-    // on a placement that itself blacks out under sustained exposure
-    // (hysteresis: tripped at 52, releases only at ≤20). Verify must
-    // take the bounded step-down instead of aborting.
-    Rig r(fast_params());
-    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
-    r.bo_trip = 52;
-    r.bo_clear = 20;
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 590000);
-    CHECK(r.cal.state() == CalibState::kDone);
-    CHECK(r.restores == 1);
-    const CalibArtifact& a = r.cal.artifact();
-    for (int m = 0; m < 8; ++m) {
-        CHECK(a.placement_qdb[m] == 20);  // descended into the clear zone
-        CHECK(a.placement_loss_milli[m] <= 15);
-    }
+void test_evidence_lost_when_nothing_delivers() {
+    Bench b(fast_params());
+    for (auto& w : b.ch.wall_qdb) w = 0;  // everything above the wall
+    CHECK(b.cal.start(b.now));
+    CHECK(b.run());
+    CHECK(b.cal.state() == CalibState::kFailed);
+    CHECK(b.cal.fail_reason() != nullptr &&
+          std::strcmp(b.cal.fail_reason(), "evidence_lost") == 0);
+    CHECK(b.artifacts == 0);
 }
 
-void test_report_loss_abort() {
-    Rig r(fast_params());
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 2000);  // let it get going
-    CHECK(r.cal.state() == CalibState::kRunning);
-    // Reports stop for good. Each blacked-out dwell is simply "not clean", so
-    // the sweep climbs; the run ends when it runs out of range, or on the
-    // report clock if it had already banked a clean probe to retreat to.
-    r.run(r.now + 120000, /*feed_reports=*/false);
-    CHECK(r.cal.state() == CalibState::kFailed);
-    CHECK(r.cal.fail_reason() != nullptr);
-    CHECK(r.restores == 1);
-    CHECK(r.artifacts == 0);  // no artifact on failure
+void test_abort_restores_once() {
+    Bench b(fast_params());
+    CHECK(b.cal.start(b.now));
+    for (int i = 0; i < 50; ++i) b.step();
+    CHECK(b.cal.state() == CalibState::kRunning);
+    CHECK(b.cal.abort(b.now));
+    b.step();
+    CHECK(b.cal.state() == CalibState::kFailed);
+    CHECK(b.restores == 1);
+    b.step();
+    CHECK(b.restores == 1);  // single-shot
+    CHECK(b.cal.start(b.now));  // restart re-arms cleanly
+    CHECK(b.cal.state() == CalibState::kRunning);
 }
 
 void test_hard_cap() {
     CalibrateParams p = fast_params();
-    p.hard_cap_ms = 3000;
-    Rig r(p);
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 10000);
-    CHECK(r.cal.state() == CalibState::kFailed);
-    CHECK(r.restores == 1);
+    p.hard_cap_ms = 100;
+    p.dwell.tally_wait_ms = 500;  // the run outlives the cap
+    Bench b(p);
+    for (auto& w : b.ch.wall_qdb) w = 0;  // starve evidence
+    CHECK(b.cal.start(b.now));
+    CHECK(b.run(5000));
+    CHECK(b.cal.state() == CalibState::kFailed);
+    CHECK(b.cal.fail_reason() != nullptr &&
+          std::strcmp(b.cal.fail_reason(), "hard_cap") == 0);
 }
 
-void test_abort_cmd() {
-    Rig r(fast_params());
-    CHECK(!r.cal.abort(r.now));  // §11.7: abort while idle = REJECTED
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 1500);
-    CHECK(r.cal.abort(r.now));
-    CHECK(!r.cal.abort(r.now));  // idempotent-in-effect, second = REJECTED
-    const CalibActions a = r.cal.tick(r.now + 100);
-    CHECK(a.restore);  // single-shot restore on the next tick
-    CHECK(!r.cal.tick(r.now + 200).restore);
-    // A failed run can be restarted.
-    CHECK(r.cal.start(r.now + 300));
-    // Abort → start with NO tick in between: the undrained restore must
-    // not fire mid-new-run.
-    CHECK(r.cal.abort(r.now + 400));
-    CHECK(r.cal.start(r.now + 500));
-    CHECK(!r.cal.tick(r.now + 600).restore);
-}
-
-void test_selector_state_calib_word() {
-    // §3.15 Pass 120: bit4 word encodes at 36 bytes and round-trips; bit4
-    // without bit3 is refused in both directions.
-    SelectorState in;
-    in.prefix = {17, 0, 123456};
-    in.state_flags = selector_state_flags::kHolderPresent |
-                     selector_state_flags::kCalibPresent;
-    in.report_latch_holder = 9;
-    in.calib_word = 0x15;  // running, rung 5
-    in.calib_fingerprint = 0xBF;
-    uint8_t buf[64];
-    const size_t n = encode_selector_state(in, buf, sizeof buf);
-    CHECK(n == kSelectorStateCalibSize);
-    const auto dec = decode(buf, n);
-    const SelectorState* out = std::get_if<SelectorState>(&dec);
-    CHECK(out != nullptr);
-    if (out) {
-        CHECK(out->calib_word == 0x15);
-        CHECK(out->calib_fingerprint == 0xBF);
-        CHECK(out->report_latch_holder == 9);
-    }
-    // bit4 without bit3: encoder refuses...
-    SelectorState bad = in;
-    bad.state_flags = selector_state_flags::kCalibPresent;
-    CHECK(encode_selector_state(bad, buf, sizeof buf) == 0);
-    // ...and the decoder refuses the same shape on the wire.
-    buf[16] = selector_state_flags::kCalibPresent;
-    const auto dec2 = decode(buf, n);
-    CHECK(std::get_if<SelectorState>(&dec2) == nullptr);
-    // Legacy 34- and 32-byte shapes still decode (mixed-version pair).
-    SelectorState legacy = in;
-    legacy.state_flags = selector_state_flags::kHolderPresent;
-    CHECK(encode_selector_state(legacy, buf, sizeof buf) ==
-          kSelectorStateSize);
-    const auto dec3 = decode(buf, kSelectorStateSize);
-    CHECK(std::get_if<SelectorState>(&dec3) != nullptr);
-}
-
-// Pass 125 floor rule. Before it, a rung-0 ramp whose floor is unusable
-// placed at min_qdb (loss wall + no last_clean + qdb <= min ⇒ place(min)),
-// recording a placement the link cannot actually carry. Now it ascends.
-void test_floor_ascend() {
-    Rig r(fast_params());
-    // rssi = -41 + 0.85*(qdb/4): qdb 4/20/36 read -40/-36/-33 (all below the
-    // floor), qdb 52 reads -29 and delivers. Ceilings are cleared because a
-    // -30 floor under the default -30 rung-6/7 ceilings leaves those rungs
-    // no clean window at all — that is a model contradiction, not a seek bug.
-    // Pass 134: a uniform -20 ceiling replaces the cleared one. The original
-    // "no ceiling anywhere" model is now itself the refused case, and the
-    // point under test is the FLOOR, which a -20 ceiling leaves a clean
-    // window above (-30 .. -21, i.e. qdb 52..84).
-    r.ch.floor_rssi = -30;
-    r.ch.ceil = {-20, -20, -20, -20, -20, -20, -20, -20};
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 590000);
-    CHECK(r.cal.state() == CalibState::kDone);
-    const CalibArtifact& a = r.cal.artifact();
-    // The placement must be a power that actually worked, never the floor.
-    CHECK(a.placement_qdb[0] > CalibrateParams{}.min_qdb);
-    CHECK(a.placement_qdb[0] >= 52);
-    CHECK(a.placement_loss_milli[0] <= 15);
-    // Crossing a dead floor is NOT overload evidence, so it must not book the
-    // rung's ceiling bracket: `first_bad_rssi` describes where the link breaks
-    // from being too HOT, and the bottom of the range is the opposite. Only a
-    // bad probe above a clean one enters it.
-    // The -20 ceiling books a REAL bracket at the hot end; what matters is
-    // that the bracket is the hot end. Every floor crossing sat below
-    // last_clean_rssi and none of them entered it.
-    CHECK(a.ceilings[0].has_bad);
-    CHECK(a.ceilings[0].first_bad_rssi >= a.ceilings[0].last_clean_rssi);
-    CHECK(a.ceilings[0].last_clean_rssi <= -6);
-}
-
-// A link that never delivers at any commanded power fails with a reason
-// that says so, instead of placing at the floor and calling it success.
-void test_no_clean_point() {
-    Rig r(fast_params());
-    r.ch.floor_rssi = 0;  // unreachable: max_qdb only reaches -18
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 590000);
-    CHECK(r.cal.state() == CalibState::kFailed);
-    CHECK(r.cal.fail_reason() != nullptr);
-    if (r.cal.fail_reason() != nullptr) {
-        CHECK(std::string(r.cal.fail_reason()) == "no_clean_point");
-    }
-    CHECK(r.restores == 1);  // every exit restores, §10.6 R4
-}
-
-// PowerSeek directly (Pass 130): one monotone ascending sweep, no descent,
-// no cap wall, no floor rule. Where the sweep STARTS must not affect where it
-// ends, which is why every rung now begins at min_qdb.
-void test_sweep_is_monotone_and_seed_free() {
-    SeekParams p;  // min 4, max 108, step 16
-
-    // A dead bottom is not a special case: those steps are simply not clean
-    // and the sweep keeps climbing. No floor rule, no ascend latch.
-    {
-        PowerSeek s(p);
-        CHECK(s.begin().qdb == p.min_qdb);
-        SeekStep st = s.on_dwell(DwellVerdict::kBad, -90, 1000);
-        CHECK(st.kind == SeekStep::Kind::kProbe);
-        CHECK(st.qdb == p.min_qdb + p.seek_step_qdb);
-        st = s.on_dwell(DwellVerdict::kBad, -88, 1000);
-        CHECK(st.qdb == p.min_qdb + 2 * p.seek_step_qdb);
-        // First clean probe; the sweep continues upward looking for more.
-        st = s.on_dwell(DwellVerdict::kClean, -40, 5);
-        CHECK(st.kind == SeekStep::Kind::kProbe);
-        CHECK(st.qdb == p.min_qdb + 3 * p.seek_step_qdb);
-        // Pass 133: a bad probe above a clean one books the overload bracket
-        // but does NOT end the sweep — the placement is the highest clean
-        // probe over the FULL range, so the climb continues.
-        st = s.on_dwell(DwellVerdict::kBad, -20, 900);
-        CHECK(st.kind == SeekStep::Kind::kProbe);
-        CHECK(st.qdb == p.min_qdb + 4 * p.seek_step_qdb);
-        CHECK(s.has_bad());
-        CHECK(s.first_bad_rssi() == -20);       // the OVERLOAD reading...
-        // ...and the cold steps below the first clean probe never entered it.
-        CHECK(s.last_clean_rssi() == -40);      // bracket has real width
-    }
-
-    // A clean sweep that never finds a wall places at max_qdb. A flat RSSI
-    // response no longer stops it: if the radio is capped, commanding max
-    // still radiates the cap, so there is nothing to gain by stopping lower
-    // and 12 dB of measured headroom to lose (Pass 130).
-    {
-        PowerSeek s(p);
-        SeekStep st = s.begin();
-        int steps = 0;
-        while (st.kind == SeekStep::Kind::kProbe && steps++ < 20) {
-            st = s.on_dwell(DwellVerdict::kClean, -40, 2);  // RSSI never moves
-        }
-        CHECK(st.kind == SeekStep::Kind::kVerify);
-        CHECK(st.qdb == p.max_qdb);
-        CHECK(!s.has_bad());
-    }
-
-    // An uplink that is bad everywhere fails rather than placing.
-    {
-        PowerSeek s(p);
-        SeekStep st = s.begin();
-        int steps = 0;
-        while (st.kind == SeekStep::Kind::kProbe && steps++ < 20) {
-            st = s.on_dwell(DwellVerdict::kBad, -90, 1000);
-        }
-        CHECK(st.kind == SeekStep::Kind::kFailed);
-        CHECK(std::string(st.fail_reason) == "no_clean_point");
-    }
-
-    // The rssi_guard backstop still stops a ramp that is cooking the receiver
-    // before loss has risen.
-    {
-        PowerSeek s(p);
-        (void)s.begin();
-        const SeekStep hot = s.on_dwell(DwellVerdict::kClean, -2, 3);
-        CHECK(hot.kind == SeekStep::Kind::kVerify);
-        CHECK(hot.qdb == p.min_qdb);
-    }
-
-    // kNoEvidence holds position — the craft's blank dwell, never the
-    // ground's stalled counter.
-    {
-        PowerSeek s(p);
-        (void)s.begin();
-        const SeekStep hold = s.on_dwell(DwellVerdict::kNoEvidence, 0, 0);
-        CHECK(hold.qdb == p.min_qdb);
-        CHECK(!hold.power_changed);
-    }
-}
-
-// The addendum-4 retreat books the rung's OVERLOAD bracket, and its upper
-// bound is what the blacked-out dwell measured — not the last clean probe's
-// reading, which would collapse the bracket to zero width and silently corrupt
-// the §10.6 ceiling record. With the sweep, a blackout is just a not-clean
-// dwell, so the caller passes the observed RSSI straight in.
-void test_blackout_bracket_uses_observed_rssi() {
-    SeekParams p;
-    PowerSeek s(p);
-    (void)s.begin();
-    const SeekStep up = s.on_dwell(DwellVerdict::kClean, -40.0, 5);
-    CHECK(up.qdb == 20);
-    // The dwell at 20 sampled -26 before the feedback channel died.
-    const SeekStep bo = s.on_dwell(DwellVerdict::kBad, -26.0, 1000);
-    // Pass 133: the bracket is booked, the sweep keeps climbing. The placement
-    // still ends up at the last clean probe — it is just decided at the top of
-    // the range rather than at the first wall.
-    CHECK(bo.kind == SeekStep::Kind::kProbe);
-    CHECK(bo.qdb == 36);
-    CHECK(s.last_clean_qdb() == 4);
-    CHECK(s.has_bad());
-    CHECK(s.first_bad_rssi() == -26);   // measured
-    CHECK(s.last_clean_rssi() == -40);  // bracket has real width
+void test_start_abort_reject_semantics() {
+    Bench b(fast_params());
+    CHECK(b.cal.start(b.now));
+    CHECK(!b.cal.start(b.now));
+    CHECK(b.cal.abort(b.now));
+    CHECK(!b.cal.abort(b.now));
 }
 
 }  // namespace
 
-
-// Pass 134 ruling 1: the §10.3 sanity ceiling bounds the SWEEP, tapered per
-// rung by the §10.2 level intent. Before this, the one operation that
-// deliberately walks a rung into overload was the one operation the ceiling
-// did not cover — a §10.6 run drove every rung, including MCS7, to a flat
-// 27 dBm looking for a wall the PA reaches first.
-void test_rung_ceiling_bounds_the_sweep() {
-    CalibrateParams p = fast_params();
-    p.max_qdb = 108;
-    Rig r(p);
-    // No loss wall anywhere, so nothing but the ceiling can stop the ramp:
-    // whatever the highest commanded power per rung turns out to be, it is
-    // the mask and not the channel that produced it.
-    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};
-    int32_t peak[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    CHECK(r.cal.start(r.now));
-    while (r.now < 590000 && r.cal.state() == CalibState::kRunning) {
-        r.run(r.now + 100);
-        if (r.pinned < 8 && r.ch.qdb > peak[r.pinned]) peak[r.pinned] = r.ch.qdb;
-    }
-    static constexpr int32_t kCeil[8] = {108, 108, 100, 100, 92, 92, 84, 84};
-    for (int m = 0; m < 8; ++m) {
-        CHECK(peak[m] == kCeil[m]);
-    }
-    // And the ceiling is exactly the derivation, not a hand-written table.
-    for (size_t m = 0; m < 8; ++m) {
-        CHECK(rung_max_qdb(p, m) == kCeil[m]);
-    }
-    // A ceiling under the floor collapses to the floor rather than inverting.
-    CalibrateParams low = fast_params();
-    low.max_qdb = low.min_qdb;
-    CHECK(rung_max_qdb(low, 7) == low.min_qdb);
-
-    // The taper may only ever LOWER. A §9.3 table authoring a level above the
-    // baseline must NOT lift a rung ceiling past the operator's flat ceiling —
-    // otherwise §10.3 stops being a ceiling, and because the table is shared
-    // it would do so on both directions at once.
-    CalibrateParams hot = fast_params();
-    hot.levels = {6, 5, 4, 4, 4, 4, 4, 4};
-    for (size_t m = 0; m < 8; ++m) {
-        CHECK(rung_max_qdb(hot, m) <= hot.max_qdb);
-    }
-    CHECK(rung_max_qdb(hot, 0) == hot.max_qdb);  // clamped, not 124
-
-    // Pass 135: a §11.7 0x0A power tier moves this one baseline, and every
-    // rung ceiling follows. That is the whole reason the tier moves
-    // max_qdb rather than latching an absolute power the §10.5 way — a flat
-    // latch would collapse the taper the calibration exists to measure.
-    CalibrateParams tier = fast_params();
-    tier.max_qdb = 76;  // preset "medium", 19 dBm
-    static constexpr int32_t kTiered[8] = {76, 76, 68, 68, 60, 60, 52, 52};
-    for (size_t m = 0; m < 8; ++m) {
-        CHECK(rung_max_qdb(tier, m) == kTiered[m]);
-        // The shape is preserved: every rung moved by the SAME delta.
-        CHECK(rung_max_qdb(p, m) - rung_max_qdb(tier, m) == 108 - 76);
-    }
-}
-
-// Pass 134 ruling 2: a sweep whose whole product is "no wall exists at any
-// rung" did not measure the thing it exists to measure. This is the fp=0x2b
-// signature — a return path at half rate reads as fewer observed losses, so
-// every probe is clean at every power and the curve lands flat at maximum.
-// The run must fail and persist NOTHING, leaving the last-good artifact.
-void test_no_wall_anywhere_persists_nothing() {
-    Rig r(fast_params());
-    r.ch.ceil = {127, 127, 127, 127, 127, 127, 127, 127};  // nothing ever bad
-    CHECK(r.cal.start(r.now));
-    r.run(r.now + 590000);
-    CHECK(r.cal.state() == CalibState::kFailed);
-    CHECK(r.cal.fail_reason() != nullptr);
-    if (r.cal.fail_reason() != nullptr) {
-        CHECK(std::string(r.cal.fail_reason()) == "no_wall_found");
-    }
-    CHECK(r.artifacts == 0);  // the whole point: nothing is written
-    CHECK(r.restores == 1);   // every exit still restores, §10.6 R4
-
-    // ONE genuine wall anywhere is enough to make the run a measurement —
-    // the rule refuses non-measurement, not a strong link.
-    Rig ok(fast_params());
-    ok.ch.ceil = {127, 127, 127, 127, 127, 127, 127, -30};
-    CHECK(ok.cal.start(ok.now));
-    ok.run(ok.now + 590000);
-    CHECK(ok.cal.state() == CalibState::kDone);
-    CHECK(ok.artifacts == 1);
-}
-
 int main() {
-    test_selector_state_calib_word();
-    test_full_run_and_artifact();
-    test_silent_rf_cap_does_not_stop_the_sweep();
-    test_verify_backoff();
-    test_cap_confirm_rejects_noise();
-    test_blackout_retreat();
-    test_verify_blackout_descent();
-    test_report_loss_abort();
+    test_full_run_places_below_walls();
+    test_no_wall_found_refused();
+    test_offset_space_flat_at_ceiling_places();
+    test_evidence_lost_when_nothing_delivers();
+    test_abort_restores_once();
     test_hard_cap();
-    test_abort_cmd();
-    test_floor_ascend();
-    test_no_clean_point();
-    test_rung_ceiling_bounds_the_sweep();
-    test_no_wall_anywhere_persists_nothing();
-    test_sweep_is_monotone_and_seed_free();
-    test_blackout_bracket_uses_observed_rssi();
-    if (g_fail != 0) {
-        std::fprintf(stderr, "%d check(s) failed\n", g_fail);
-        return 1;
-    }
-    return 0;
+    test_start_abort_reject_semantics();
+    if (g_fail == 0) std::printf("calibrate_test: all passed\n");
+    return g_fail == 0 ? 0 : 1;
 }

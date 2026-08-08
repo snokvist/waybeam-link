@@ -30,7 +30,8 @@
 namespace wblink {
 
 struct RadioAirCfg {
-    std::vector<AdapterCfg> adapters;  // exactly one Role::kTx among them
+    std::vector<AdapterCfg> adapters;  // at most one Role::kTx among them;
+                                       // zero only with allow_rx_only
     uint8_t stamp_net_id = 0;          // §3.0 SA net_id (TX always stamps)
     std::optional<uint8_t> filter_net_id;  // RX enforces only when configured
     uint16_t originator = 0;           // stamped in SA; own frames dropped
@@ -43,11 +44,30 @@ struct RadioAirCfg {
     // half; unlatched targets fall back to broadcast, counted).
     bool ack_responder = false;
     bool unicast_returns = false;
+    // §15.2 (Pass 156): unicast hardware-retry limit (devourer
+    // dc.tx.retry_limit). Config load enforces the §3.0 coupling law, so a
+    // constructed RadioAir with either hybrid half on always has this
+    // nonzero.
+    int tx_retry_limit = 8;
+    // §3.0 (Pass 157) node TX coding, stamped into every frame's radiotap
+    // MCS field. Both default off; create() refuses when the TX die's
+    // TxCaps reads the enabled coding unsupported (capability leg).
+    bool ldpc = false;
+    bool stbc = false;
+    // §9.4 Pass 163: sequence-derived rate probing intent — a TX-die
+    // property; create() refuses it on an RX-only node (fail closed). The
+    // schedule itself arrives later via set_mcs_probe().
+    bool mcs_probe = false;
     // Clear the MAC carrier-sense gate at bring-up (see AirCfg::disable_cca).
     bool disable_cca = false;
     // §14.2 authored transport-efficiency calibration (1..1000, 0 = off).
     // Per transport: the monitor rig's 600 does not carry over to devourer.
     uint16_t airtime_efficiency_permille = 0;
+    // §3.11 (Pass 162) RX-only bring-up: permit zero role:"tx" adapters.
+    // Derived from the archetype (cache-no-streams, §2 spectator), never a
+    // config key. With no TX, every TX-die knob above (ack_responder,
+    // unicast_returns, ldpc, stbc) refuses create — fail closed.
+    bool allow_rx_only = false;
 };
 
 class RadioAir : public AirIface {
@@ -85,10 +105,13 @@ class RadioAir : public AirIface {
     // Committed operating point → the TX adapter's rate-less default
     // (§9.5/§10.4). 20 MHz HT only in v0 (§1 craft constraint).
     void set_tx_mode(uint8_t mcs, bool sgi) override;
+    void set_mcs_probe(uint16_t period, uint16_t slot,
+                       uint8_t candidate_mcs) override;
     // §10.4 absolute power apply. In-process, so it always reports accepted
     // (§10.5's false means "backend refused"); devourer's own applied-qdb
     // return was never read by any caller.
     bool set_power_qdb(size_t adapter, int32_t qdb) override;
+    bool set_power_offset_qdb(size_t adapter, int32_t qdb) override;
     // Hardware TSF of one adapter (µs, control transfer — can fail under
     // heavy RX load; nullopt then, caller falls back to host time, §7.2).
     std::optional<uint64_t> read_tsf(size_t adapter) override;
@@ -112,7 +135,8 @@ class RadioAir : public AirIface {
     void set_stamp_net_id(uint8_t net_id) override;
     void set_filter_net_id(std::optional<uint8_t> net_id) override;
     // §15.5a scout: the uplink adapter the sweep roams, resolved from the
-    // role:"tx" adapter create() already requires.
+    // role:"tx" adapter. Meaningful only under has_tx(); an RX-only node
+    // reads 0, matching kernel-monitor (§3.11 Pass 162).
     size_t tx_index() const override;
     // §11.6 Pass 80 RX-liveness recovery: stop the RX loop, join it, re-run
     // the write-side bring-up at the target channel, restart the loop. Not a
@@ -141,10 +165,9 @@ class RadioAir : public AirIface {
     // curve resolve to re-apply on top. Differs from kernel-monitor (which
     // hands power back to the driver default) — the spec documents both.
     bool set_power_auto(size_t adapter) override;
-    // create() requires exactly one role:"tx" adapter, so a constructed
-    // RadioAir always has an uplink. (An RX-only devourer node is reachable by
-    // enumerating and declining to inject — that is a config shape this
-    // backend does not build today, not a hardware limit.)
+    // §3.11 (Pass 162): truthful. False on the RX-only bring-up
+    // (allow_rx_only, zero role:"tx"), where inject*/set_tx_mode report
+    // not-sent/no-op and the §15.3 TX counters stay 0.
     bool has_tx() const override;
     // §9.3a tier. Asserted, not probed — there is no netdev gate on raw MPDU
     // injection, and the two bounds devourer does have (no TX cap; the 16 KiB
@@ -159,6 +182,15 @@ class RadioAir : public AirIface {
         size_t bytes, bool include_pending,
         uint16_t packet_budget) const override;
     bool is_rf() const override { return true; }
+    // §10.6 (Pass 154): the per-unit EFUSE MAC read at bring-up
+    // (GetPermanentMacAddress), lowercase "aa:bb:cc:dd:ee:ff"; empty = the
+    // unit reports no identity (callers fail closed — D3).
+    std::string adapter_mac(size_t adapter) const override;
+    // §15.5a (Pass 155): devourer GetRxQuality — it SUBSUMES GetRxEnergy
+    // (drains the FA/CCA delta and the frame-quality window internally;
+    // devourer's contract forbids polling both on one cadence). A USB
+    // glitch folds into nullopt: a sweep must degrade, never crash.
+    std::optional<AirSense> rx_sense(size_t adapter) override;
 
     struct AdapterCounters {
         std::string name;
@@ -179,12 +211,47 @@ class RadioAir : public AirIface {
         // whose rate the backend could not resolve. Sums to rx_frames.
         uint64_t rx_mcs[kRxMcsBuckets] = {};
         uint64_t rx_mcs_unknown = 0;
+        // §9.4 Pass 163 guard 3: CRC/ICV-errored frames per descriptor MCS
+        // (pre-FCS rate; bodies dropped). Feeds the RX probe window only.
+        uint64_t rx_crc_mcs[kRxMcsBuckets] = {};
+        // §15.3 Pass 157: accepted frames whose RX path reported LDPC
+        // coding / a nonzero STBC stream count. ldpc_flag_ok is the static
+        // die truth (devourer ldpc_rx_flag) — when false the counters stay
+        // 0 however the air was coded, so a zero means nothing there.
+        uint64_t rx_ldpc = 0;
+        uint64_t rx_stbc = 0;
+        bool ldpc_flag_ok = false;
         bool rx_dead = false;  // §15.3 Pass 101: RX thread exited (definitive)
     };
     AdapterCounters counters(size_t adapter) const;
     uint64_t rx_frames(size_t adapter) const override {
         return counters(adapter).rx_frames;
     }
+
+    // §15.3 (Pass 158) per-adapter quality window over accepted frames,
+    // folded with devourer's RxQuality conventions (path-A raw; rssi<=0
+    // skipped; EVM only when present; PEAK RSSI — saturation trashes a
+    // fraction of frames to low apparent power, so a mean inverts the
+    // signal). Pass 159 amends the drain contract: the drain happens
+    // INSIDE the backend at most once per second, shared by this read and
+    // link_verdict() — both return the cached last window, so a second
+    // consumer can never split the delta.
+    struct RxQualityWindow {
+        uint32_t frames = 0;      // quality samples folded (0 = empty)
+        int32_t rssi_peak_dbm = 0;
+        int32_t rssi_mean_dbm = 0;
+        int32_t snr_db = 0;
+        int32_t evm_db = 0;       // lower (more negative) = cleaner
+        bool evm_valid = false;   // false = no frame carried EVM, not "0"
+        int32_t noise_dbm = 0;    // passive floor: rssi_dbm - snr_db
+        bool noise_valid = false;
+    };
+    RxQualityWindow rx_quality_window(size_t adapter);
+    // §3.16 (Pass 159) node link verdict (0..6, types.h link_verdict),
+    // classified at the shared drain from the best-peak ear's window via
+    // the vendored thresholds — frame-metric legs only, the energy/IGI
+    // legs stay with the scout (Pass 155).
+    uint8_t link_verdict();
 
     // TX adapter's cumulative (tx_submitted, tx_reports) for the §9.10
     // wedge watchdog — cheap per-iteration accessor, no string copies.

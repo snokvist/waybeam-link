@@ -24,7 +24,7 @@ const char* kSample = R"({
     { "name": "wlan0", "bus": "1-1.2", "role": "tx",
       "channel": 5805, "bw": 20,
       "power_map": "/etc/waybeam-link/power.wlan0.txt",
-      "max_power_qdb": 2000,
+      "max_power_qdb": 108,
       "power_presets_qdb": [60, 76, 84] },
     { "name": "wlan1", "bus": "1-1.3", "role": "rx", "channel": 5805, "bw": 20 }
   ],
@@ -37,6 +37,7 @@ const char* kSample = R"({
   "policy": {
     "report_hz": 10, "report_timeout_ms": 500,
     "select": { "demote_milli": 20, "emergency_loss_milli": 180,
+                "verdict_ttl_s": 4.5,
                 "loss_min_uniq": 40, "loss_persist_score": 6,
                 "rung_lockout_s": 12.5, "rung_lockout_latch_count": 5,
                 "rssi_floor_dbm": -85,
@@ -104,7 +105,7 @@ int main() {
             CHECK_EQ_U(c.adapters[0].channel_mhz, 5805);
             CHECK_EQ_U(c.adapters[0].bw, 20);
             CHECK(c.adapters[0].max_power_qdb.has_value() &&
-                  *c.adapters[0].max_power_qdb == 2000);
+                  *c.adapters[0].max_power_qdb == 108);
             CHECK(!c.adapters[1].max_power_qdb.has_value());
             // §11.7 0x0A (Pass 135): all three sit under max_power_qdb, so
             // none is clamped and the list survives verbatim.
@@ -129,6 +130,9 @@ int main() {
             CHECK(c.policy.select.rung_lockout_s == 12.5);
             CHECK_EQ_U(c.policy.select.rung_lockout_latch_count, 5);
             CHECK(c.policy.select.rssi_floor_dbm == -85);
+            // §9.4 Pass 160: value-visible parse proof (an unknown key
+            // would be silently ignored — the loader never enumerates).
+            CHECK(c.policy.select.verdict_ttl_s == 4.5);
             CHECK_EQ_U(c.policy.arq.fwd_clamp_blocks, 4);
             CHECK(c.policy.fec.scheme == FecScheme::kNone);
             CHECK_EQ_U(c.policy.ret.guard_us, 300);
@@ -259,6 +263,173 @@ int main() {
         }
     }
 
+    // --- §3.0/§15.2 tx_retry_limit coupling (Pass 156) ----------------------
+    {
+        // Default seeds 8 (operator-ruled); parse override works.
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->air.tx_retry_limit, 8);
+        auto r2 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "tx_retry_limit": 16}})");
+        CHECK(bool(r2));
+        if (r2) CHECK_EQ_U(r2.value->air.tx_retry_limit, 16);
+    }
+    // The hybrid armed with retries disabled is refused, not run inert —
+    // either half arms it.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","ack_responder":true,"tx_retry_limit":0}})",
+                     "silently inert");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","tx_retry_limit":0},
+          "policy":{"return":{"unicast":true}}})",
+                     "silently inert");
+    }
+    // Limit 0 alone is legal (the WFB posture, hybrid off) — and the
+    // kernel-monitor control: the kernel MAC owns retries there, so the
+    // coupling never fires (frozen, #120).
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "tx_retry_limit": 0}})");
+        CHECK(bool(r));
+        auto r2 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "kernel-monitor", "tx_retry_limit": 0},
+          "adapters": [{"name":"m","ifname":"wlan9","role":"tx",
+                        "channel":5805}],
+          "policy": {"return": {"unicast": true}}})");
+        CHECK(bool(r2));
+    }
+    // Descriptor field width is enforced — both arms, and the boundary
+    // value itself is accepted.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","tx_retry_limit":64}})",
+                     "out of range 0..63");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","tx_retry_limit":-1}})",
+                     "out of range 0..63");
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "tx_retry_limit": 63}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->air.tx_retry_limit, 63);
+    }
+    // --- §15.2 air.ldpc / air.stbc (Pass 157) -------------------------------
+    // Defaults off; radio accepts both; any other backend refuses each key
+    // (Pass 154 mac posture — a dead key on udp, an unverifiable leg on
+    // frozen kernel-monitor, #120).
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(!r.value->air.ldpc);
+            CHECK(!r.value->air.stbc);
+        }
+        auto r2 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "ldpc": true, "stbc": true}})");
+        CHECK(bool(r2));
+        if (r2) {
+            CHECK(r2.value->air.ldpc);
+            CHECK(r2.value->air.stbc);
+        }
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"udp","ldpc":true}})",
+                     "air.ldpc is a radio-backend key");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"kernel-monitor","stbc":true},
+          "adapters":[{"name":"m","ifname":"wlan9","role":"tx",
+                       "channel":5805}]})",
+                     "air.stbc is a radio-backend key");
+    }
+    // --- §15.2 air.mcs_probe (Pass 163) -------------------------------------
+    // Default off; radio TX node accepts; any other backend refuses (same
+    // posture), and so does an rx-role node (silently dead knob otherwise).
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "tx"},
+          "air": {"kind": "radio", "mcs_probe": true}})");
+        CHECK(bool(r));
+        if (r) CHECK(r.value->air.mcs_probe);
+        expect_error(R"({"node":{"originator":3,"role":"tx"},
+          "air":{"kind":"udp","mcs_probe":true}})",
+                     "air.mcs_probe is a radio-backend key");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","mcs_probe":true}})",
+                     "air.mcs_probe is a TX-node key");
+        expect_error(R"({"node":{"originator":3,"role":"tx"},
+          "air":{"kind":"radio"},
+          "policy":{"select":{"probe_veto_permille":1500}}})",
+                     "probe_veto_permille");
+    }
+    // Both hybrid halves on at once: the refusal names ack_responder (the
+    // message ternary's first branch), and the udp dev backend is a second
+    // non-radio control alongside kernel-monitor above.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio","ack_responder":true,"tx_retry_limit":0},
+          "policy":{"return":{"unicast":true}}})",
+                     "air.ack_responder");
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "udp", "tx_retry_limit": 0},
+          "policy": {"return": {"unicast": true}}})");
+        CHECK(bool(r));
+    }
+
+    // --- §15.2 adapters[].mac (Pass 154) ------------------------------------
+    {
+        // Parsed and normalized to lowercase on the radio backend.
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio"},
+          "adapters": [
+            { "name": "up", "role": "tx", "channel": 5805,
+              "mac": "84:FC:14:50:BC:DE" },
+            { "name": "ear", "role": "rx", "channel": 5805 }]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK(r.value->adapters[0].mac == "84:fc:14:50:bc:de");
+            CHECK(r.value->adapters[1].mac.empty());
+        }
+    }
+    // Malformed MACs are a config error, not a silently dead pin.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio"},
+          "adapters":[{"name":"up","role":"tx","channel":5805,
+                       "mac":"84fc1450bcde"}]})",
+                     "mac must be");
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio"},
+          "adapters":[{"name":"up","role":"tx","channel":5805,
+                       "mac":"84:fc:14:50:bc:zz"}]})",
+                     "mac must be");
+    }
+    // Two stanzas pinned to one unit cannot both bind it.
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"radio"},
+          "adapters":[
+            {"name":"a","role":"tx","channel":5805,"mac":"84:fc:14:50:bc:de"},
+            {"name":"b","role":"rx","channel":5805,"mac":"84:FC:14:50:BC:DE"}]})",
+                     "duplicate mac");
+    }
+    // The key is radio-only: on any other backend it would promise a binding
+    // that never happens (kernel-monitor is frozen, ruling #120).
+    {
+        expect_error(R"({"node":{"originator":3,"role":"rx"},
+          "air":{"kind":"kernel-monitor"},
+          "adapters":[{"name":"up","ifname":"wlan0","role":"tx",
+                       "channel":5805,"mac":"84:fc:14:50:bc:de"}]})",
+                     "radio-backend key");
+    }
+
     // --- frame-shm binding + fec block (§15.4/§14.1) ------------------------
     {
         auto r = load_config_json(R"({
@@ -279,6 +450,8 @@ int main() {
             CHECK_EQ_U(s.fec.i_rate_permille, 300u);
             CHECK_EQ_U(s.fec.p_rate_permille, 120u);
             CHECK_EQ_U(s.fec.min_k, 4u);
+            // §14.1a: absent e_rate_permille => unset (inherit p_rate).
+            CHECK(!s.fec.e_rate_permille.has_value());
         }
         expect_error(R"({"node":{"originator":7,"role":"tx"},
           "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
@@ -352,6 +525,67 @@ int main() {
       "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
         "bind":{"kind":"frame-shm"}}]})",
                  "name");
+    // §14.1a fec.e_rate_permille: present, explicit null, and the bounds.
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 7, "role": "tx"},
+          "streams": [{ "stream_id": 0, "stream_type": "RTP", "dir": "in",
+            "bind": { "kind": "frame-shm", "name": "venc_frame" },
+            "fec": { "scheme": "rlc256", "e_rate_permille": 0 } }]})");
+        CHECK(bool(r));
+        if (r) {
+            const StreamCfg& s = r.value->streams[0];
+            CHECK(s.fec.e_rate_permille.has_value());
+            CHECK_EQ_U(*s.fec.e_rate_permille, 0u);  // 0 != unset
+        }
+        // Explicit null is the same as absent — "inherit p_rate".
+        auto n = load_config_json(R"({
+          "node": {"originator": 7, "role": "tx"},
+          "streams": [{ "stream_id": 0, "stream_type": "RTP", "dir": "in",
+            "bind": { "kind": "frame-shm", "name": "venc_frame" },
+            "fec": { "scheme": "rlc256", "e_rate_permille": null } }]})");
+        CHECK(bool(n));
+        if (n) CHECK(!n.value->streams[0].fec.e_rate_permille.has_value());
+    }
+    expect_error(R"({"node":{"originator":7,"role":"tx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"frame-shm","name":"venc_frame"},
+        "fec":{"scheme":"rlc256","e_rate_permille":4001}}]})",
+                 "0..4000");
+    // A rate with no scheme to apply it is a config error, not a silent no-op.
+    expect_error(R"({"node":{"originator":7,"role":"tx"},
+      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
+        "bind":{"kind":"frame-shm","name":"venc_frame"},
+        "fec":{"scheme":"none","e_rate_permille":0}}]})",
+                 "rlc256");
+    // §10.5 (Pass 150): the boot offset may not start above its own bound —
+    // a node must never boot at a power the runtime latch would refuse.
+    expect_error(R"({"node":{"originator":7,"role":"tx"},
+      "adapters":[{"name":"wlan0","role":"tx","channel":5805,
+        "power_offset_qdb":8,"power_offset_max_qdb":0}]})",
+                 "exceeds power_offset_max_qdb");
+    expect_error(R"({"node":{"originator":7,"role":"tx"},
+      "adapters":[{"name":"wlan0","role":"tx","channel":5805,
+        "power_offset_qdb":-9999}]})",
+                 "-511..511");
+    {
+        // Defaults: safe-by-default seed, bound at 0. Absent keys must give
+        // the seed, not 0 — 0 is the uncharacterised efuse default.
+        auto r = load_config_json(R"({"node":{"originator":7,"role":"tx"},
+          "adapters":[{"name":"wlan0","role":"tx","channel":5805}]})");
+        CHECK(bool(r));
+        if (r) {
+            CHECK_EQ_U(static_cast<int64_t>(r.value->adapters[0].power_offset_qdb) + 24, 0);
+            CHECK_EQ_U(r.value->adapters[0].power_offset_max_qdb, 0);
+        }
+        // Positive headroom is supported when explicitly opted into — efuse
+        // tables are per-module and some ship conservative.
+        auto p = load_config_json(R"({"node":{"originator":7,"role":"tx"},
+          "adapters":[{"name":"wlan0","role":"tx","channel":5805,
+            "power_offset_qdb":16,"power_offset_max_qdb":40}]})");
+        CHECK(bool(p));
+        if (p) CHECK_EQ_U(p.value->adapters[0].power_offset_qdb, 16);
+    }
     // fec.scheme only on a frame-shm binding.
     expect_error(R"({"node":{"originator":1,"role":"rx"},
       "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
@@ -630,7 +864,9 @@ int main() {
                 CHECK_EQ_U(derive_bitrate_kbps(t.value->profiles[i]),
                            kPass111Bitrates[i]);
             }
-            CHECK_EQ_U(table_version(*t.value), 0x80);  // Pass 122 (was 0xBF)
+            CHECK_EQ_U(table_version(*t.value), 0xC1);  // Pass 163 (was 0x80)
+            CHECK_EQ_U(t.value->probe_period, 64);
+            CHECK_EQ_U(t.value->probe_slot, 4);
         }
     }
     {
@@ -674,6 +910,32 @@ int main() {
            "bitrate_min_kbps":2200,"reserve_bps":{"control":64000,"telemetry":32000}}],
           "floor_profile":0})");
         CHECK(!t);
+    }
+    {
+        // §3.6 Pass 163 probe schedule: parsed, hashed, and slot < period
+        // enforced. Absence keeps 0/0 (probing structurally off).
+        const char* one = R"({"profiles":[
+          {"id":0,"mcs":0,"guard_interval":"long","tx_power_level":4,
+           "airtime_budget_frac":0.6,"arq_deadline_ms":{"iframe":80,"pframe":25},
+           "bitrate_min_kbps":2200,"reserve_bps":{"control":64000,"telemetry":32000}}],
+          "floor_profile":0)";
+        auto plain = load_profile_table_json(std::string(one) + "}");
+        CHECK(bool(plain));
+        auto probed = load_profile_table_json(
+            std::string(one) + R"(,"probe":{"period":64,"slot":4}})");
+        CHECK(bool(probed));
+        if (plain && probed) {
+            CHECK_EQ_U(plain.value->probe_period, 0);
+            CHECK_EQ_U(probed.value->probe_period, 64);
+            CHECK_EQ_U(probed.value->probe_slot, 4);
+            // The schedule is hashed content (§3.6): same profiles, different
+            // schedule => different table_version.
+            CHECK(table_version(*plain.value) != table_version(*probed.value));
+        }
+        auto bad = load_profile_table_json(
+            std::string(one) + R"(,"probe":{"period":16,"slot":16}})");
+        CHECK(!bad);
+        CHECK(bad.error.find("probe.slot") != std::string::npos);
     }
 
     // --- §14.2 enforce flag (Pass 38): parse + default off -----------------
@@ -783,36 +1045,50 @@ int main() {
         CHECK(bool(d));
         if (d) {
             const CalibrationPolicy& c = d.value->policy.calibration;
-            // Pass 132 burst sizes: at 100 probes one loss is 10permille
-            // (inside loss_ok_milli) and five are 50permille (the bad wall),
-            // so every reading is decidable first time. That is what retired
-            // uplink_ambiguous_epochs rather than tuning it.
-            CHECK(c.uplink_probe_epochs == 100);
-            CHECK(c.uplink_verify_epochs == 200);
-            CHECK(c.uplink_drain_ms == 600);
-            CHECK(c.uplink_liveness_ms == 2000);
+            // §3.16 (Pass 153) dwell seeds: at 500 probes one loss is
+            // 2permille — decidable first time, and the verify dwell finally
+            // has the n the estimator arithmetic demands.
+            CHECK(c.dwell_probe_frames == 500);
+            CHECK(c.dwell_verify_frames == 1000);
+            CHECK(c.probe_pace_us == 2000);
+            CHECK(c.tally_wait_ms == 500);
+            CHECK(c.tally_retries == 3);
+            CHECK(c.feed_quiet_ms == 2000);
             CHECK(c.settle_ms == 300);
         }
     }
-    // Pass 132: a burst too small to resolve the walls decides on noise. One
-    // lost probe must be <= loss_ok_milli, so with the 15permille seed a
-    // 40-probe burst (25permille per loss) is refused -- that reading is
-    // exactly what the retired ambiguous extension existed to paper over.
+    // Pass 132 (kept on the new primitive): a burst too small to resolve the
+    // walls decides on noise — one lost probe must be <= loss_ok_milli, so
+    // with the 15permille seed a 40-probe burst (25permille) is refused.
     expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"calibration":{"uplink_probe_epochs":40}}})",
+      "policy":{"calibration":{"dwell_probe_frames":40}}})",
         "too small to resolve loss_ok_milli");
-    // A config still carrying the retired key loads, with it ignored.
+    // Configs still carrying Pass-152-era keys load, with them ignored.
     {
         auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"},
-          "policy":{"calibration":{"uplink_ambiguous_epochs":80}}})");
+          "policy":{"calibration":{"uplink_ambiguous_epochs":80,
+            "uplink_probe_epochs":100, "uplink_drain_ms":600,
+            "uplink_floor_min_samples":300, "calib_min_report_hz":6,
+            "probe_dwell_ms":1200, "report_loss_abort_ms":3000}}})");
         CHECK(bool(d));
     }
+    // §3.16: dwell bursts bounded by the receiver's exact-dedup bitmap.
     expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"calibration":{"uplink_verify_epochs":0}}})",
-        "must be >= 1");
+      "policy":{"calibration":{"dwell_verify_frames":0}}})",
+        "must be 1..1024");
     expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "policy":{"calibration":{"uplink_drain_ms":0}}})",
+      "policy":{"calibration":{"dwell_verify_frames":2048}}})",
+        "must be 1..1024");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"tally_wait_ms":0}}})",
         "must be >= 1");
+    {
+        auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "policy":{"calibration":{"tally_retries":0,
+            "dwell_probe_frames":100}}})");
+        CHECK(bool(ok) && ok.value->policy.calibration.tally_retries == 0 &&
+              ok.value->policy.calibration.dwell_probe_frames == 100);
+    }
     // W4/W8: the seek moves in whole steps and judges the cap wall on a >= 2 dB
     // (8 qdb) commanded rise. Zero or negative never terminates and walks an
     // unbounded negative qdb into set_power_qdb; under 8 the cap wall can never
@@ -830,6 +1106,26 @@ int main() {
         auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
           "policy":{"calibration":{"seek_step_qdb":8}}})");
         CHECK(bool(ok) && ok.value->policy.calibration.seek_step_qdb == 8);
+    }
+    // §10.6 (Pass 151): the relative-backend step. Bounded on BOTH sides —
+    // under 2 qdb aliases on the 0.5 dB TXAGC families (devourer Jaguar1/2;
+    // Jaguar3 resolves 1 qdb), and over 6 dB leaves the default 24 qdb
+    // window with two probes, which is the condition the key exists to
+    // prevent.
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"offset_seek_step_qdb":1}}})",
+        "offset_seek_step_qdb must be 2..24");
+    expect_error(R"({"node":{"originator":9,"role":"rx"},
+      "policy":{"calibration":{"offset_seek_step_qdb":32}}})",
+        "offset_seek_step_qdb must be 2..24");
+    {
+        auto d = load_config_json(R"({"node":{"originator":9,"role":"rx"}})");
+        CHECK(bool(d) &&
+              d.value->policy.calibration.offset_seek_step_qdb == 8);
+        auto ok = load_config_json(R"({"node":{"originator":9,"role":"rx"},
+          "policy":{"calibration":{"offset_seek_step_qdb":2}}})");
+        CHECK(bool(ok) &&
+              ok.value->policy.calibration.offset_seek_step_qdb == 2);
     }
 
     // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------
@@ -994,13 +1290,13 @@ int main() {
         CHECK(bool(r));
         if (r) {
             CHECK_EQ_U(r.value->adapters[0].power_presets_qdb.size(), 3);
-            CHECK(r.value->adapters[0].power_presets_qdb[2] == 2000);
+            CHECK(r.value->adapters[0].power_presets_qdb[2] == 108);
         }
     }
     {
         // No ceiling configured: nothing to clamp against, list kept as-is.
         auto r = load_config_json(
-            subst(kSample, "\"max_power_qdb\": 2000,", ""));
+            subst(kSample, "\"max_power_qdb\": 108,", ""));
         CHECK(bool(r));
         if (r) {
             CHECK(!r.value->adapters[0].max_power_qdb.has_value());

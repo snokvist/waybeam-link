@@ -92,6 +92,14 @@ class ReportGate {
         return latched_ ? latched_->first : 0;
     }
 
+    // §3.16 (Pass 153): the latched session, for the calibration family's
+    // exact-tuple acceptance. 0 = unknown (no latch yet, or a §3.5 Pass 115
+    // force_latch whose session the next accepted report will fill in) — the
+    // caller treats 0 as "originator match suffices".
+    uint32_t latched_session() const {
+        return latched_ ? latched_->second : 0;
+    }
+
     uint64_t rejected() const { return rejected_; }
 
   private:

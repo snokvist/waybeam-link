@@ -55,10 +55,13 @@
 #include "wblink/quietgap.h"
 #include "wblink/recovery.h"
 #include "wblink/report_gate.h"
+#include "wblink/mcs_probe.h"
 #include "wblink/reporter.h"
 #include "wblink/ring.h"
 #include "wblink/rx.h"
 #include "wblink/scheduler.h"
+#include "wblink/scout_sense.h"
+#include "wblink/scout_store.h"
 #include "wblink/selector.h"
 #include "wblink/calib_store.h"
 #include "wblink/calibrate.h"
@@ -71,7 +74,7 @@
 #include "wblink/video_slot_cadence.h"
 #include "wblink/uplink_calib_store.h"
 #include "wblink/uplink_calibrate.h"
-#include "wblink/uplink_quality.h"
+#include "wblink/calib_dwell.h"
 #include "wblink/air_mon.h"
 #if WBLINK_RADIO
 #include "wblink/air_radio.h"
@@ -327,7 +330,7 @@ const char* packet_type_name(const uint8_t* frame, size_t len) {
         "other",       "data",         "nack",        "link_report",
         "heartbeat",   "csa",          "recovery",    "jscc_feedback",
         "cache_status", "cache_request", "cache_reply", "announce",
-        "cache_assign", "vehicle_cmd", "selector_state", "uplink_quality"};
+        "cache_assign", "vehicle_cmd", "selector_state", "extended"};
     return kNames[frame[2] & 0x0F];
 }
 
@@ -637,6 +640,17 @@ class ScoutEngine {
         std::function<void(uint16_t chan_mhz, uint8_t bw)> retune_all;  // all ears
         std::function<void(std::optional<uint8_t> net_id)> set_filter;
         std::function<bool(uint16_t originator)> psk_known;
+        // §15.5a (Pass 155): frame-free channel sense of one adapter,
+        // delta-on-read (the throwaway barrier call and the dwell-end read
+        // are the same hook). Null/nullopt = sensor-less backend — the
+        // occupancy derivation falls back structurally.
+        std::function<std::optional<AirIface::AirSense>(size_t adapter)>
+            sense;
+        // §15.5a (Pass 161): the scout adapter's calibration-domain key
+        // ("mac/<efuse>" else "idx/N") and the node's §3.16 verdict for
+        // the one-classifier rule. Null hooks degrade (fixed key, Unknown).
+        std::function<std::string()> domain;
+        std::function<uint8_t()> verdict;
     };
     ScoutEngine(Hooks h, uint8_t bw, uint16_t rest_chan,
                 std::optional<uint8_t> rest_filter, size_t scout_adapter)
@@ -662,6 +676,9 @@ class ScoutEngine {
         if (channels.empty()) return "no channels to scan";
         channels_ = std::move(channels);
         dwell_ms_ = dwell_ms ? dwell_ms : 300;
+        // §15.5a (Pass 161): the sweep FOLDS into the store; results_ stays
+        // the last sweep's raw occupancy view.
+        store_.begin_sweep(h_.domain ? h_.domain() : "idx/0", channels_);
         results_.clear();
         chan_idx_ = 0;
         phase_ = Phase::kScanning;
@@ -730,6 +747,20 @@ class ScoutEngine {
     // first resolved candidate.
     void tick(uint64_t now_ms) {
         if (phase_ != Phase::kScanning) return;
+        // §15.5a (Pass 155): settle elapsed → one throwaway sense read
+        // drains the FA/CCA deltas and the frame-quality window; the
+        // observe window for the interference denominator starts here.
+        // One attempt per dwell; a FAILED drain (USB glitch → nullopt)
+        // must NOT arm the observe window — the delta would span back to
+        // the last successful drain and read as a saturated interference
+        // score on a pristine channel. The dwell falls back sensor-less.
+        if (!barrier_done_ && now_ms >= barrier_at_ms_) {
+            barrier_done_ = true;
+            if (h_.sense && h_.sense(scout_adapter_)) {
+                barrier_drained_ = true;
+                observe_start_ms_ = now_ms;
+            }
+        }
         if (now_ms < dwell_deadline_ms_) {
             if (!extended_ || accum_.candidates.empty()) return;
         } else if (!extended_ && accum_.frames > 0 &&
@@ -746,7 +777,10 @@ class ScoutEngine {
         enter_channel(now_ms);
     }
 
-    std::string results_json() const {
+    std::string results_json(uint64_t now_ms) const {
+        // §15.5a (Pass 161): ranked, explained, accumulated.
+        const ScoutRanking rk = store_.rank(
+            now_ms, rest_chan_, h_.verdict ? h_.verdict() : 0);
         std::string out = "{\"scanning\":";
         out += scanning() ? "true" : "false";
         out += ",\"current_chan\":";
@@ -763,7 +797,11 @@ class ScoutEngine {
                    ",\"occupancy\":{\"wifi_util_permille\":" +
                    std::to_string(o.wifi_util_permille) +
                    ",\"util_permille\":" + std::to_string(o.util_permille) +
-                   ",\"interference_util_permille\":null,\"noise_dbm\":" +
+                   ",\"interference_util_permille\":" +
+                   (o.have_interference
+                        ? std::to_string(o.interference_util_permille)
+                        : "null") +
+                   ",\"noise_dbm\":" +
                    (o.have_noise ? std::to_string(o.noise_dbm) : "null") +
                    ",\"bss_count\":" + std::to_string(o.bss_count) +
                    ",\"quality_permille\":" + std::to_string(o.quality_permille) +
@@ -785,7 +823,40 @@ class ScoutEngine {
                        ",\"psk_known\":" + (c.psk_known ? "true" : "false") + "}";
             }
         }
-        out += "]}";
+        // domain is JSON-safe by construction: snprintf %02x MAC or
+        // "idx/N" — nothing quotable can appear (pinned here because the
+        // invariant lives in air_radio.cpp, three files away).
+        out += "],\"ranking\":{\"rounds\":" + std::to_string(rk.rounds) +
+               ",\"domain\":\"" + store_.domain() + "\"" +
+               ",\"confidence_permille\":" +
+               std::to_string(rk.confidence_permille) +
+               ",\"rejects\":{\"domain_reset\":" +
+               std::to_string(store_.domain_resets()) +
+               ",\"implausible\":" +
+               std::to_string(store_.rejected_implausible()) +
+               ",\"stale\":" + std::to_string(rk.stale_samples) +
+               "},\"recommendation\":{\"chan\":" +
+               (rk.reason == ScoutRecReason::kOk
+                    ? std::to_string(rk.recommended_chan)
+                    : std::string("null")) +
+               ",\"reason\":\"" + scout_rec_reason_name(rk.reason) +
+               "\"},\"bins\":[";
+        bool bcomma = false;
+        for (const ScoutBinRank& b : rk.bins) {
+            if (bcomma) out += ',';
+            bcomma = true;
+            out += "{\"chan\":" + std::to_string(b.chan_mhz) +
+                   ",\"score\":" + std::to_string(b.score) +
+                   ",\"burstiness\":" + std::to_string(b.burstiness) +
+                   ",\"samples\":" + std::to_string(b.samples) +
+                   ",\"qualified\":" + (b.qualified ? "true" : "false") +
+                   ",\"age_ms\":" +
+                   std::to_string(now_ms >= b.last_seen_ms
+                                      ? now_ms - b.last_seen_ms
+                                      : 0) +
+                   "}";
+        }
+        out += "]}}";
         return out;
     }
 
@@ -815,24 +886,22 @@ class ScoutEngine {
         }
         return found;
     }
-    // Emptiest allowlisted channel by measured wifi_util (lowest wins), skipping
-    // `except` (the craft's current channel). 0 if no occupancy for any allowed
-    // channel (caller then falls back to an explicit target).
+    // Emptiest allowlisted channel (lowest wins), skipping `except` (the
+    // craft's current channel). §15.5a (Pass 155): ranks on `util_permille`
+    // — the interference-inclusive TOTAL — because ranking on decoded
+    // airtime alone scored a channel saturated by a non-decodable emitter
+    // as pristine. On a sensor-less backend util == wifi_util by
+    // construction, so the v1 behaviour is the structural fallback. 0 if
+    // no occupancy for any allowed channel (caller then falls back to an
+    // explicit target).
     uint16_t emptiest(const std::vector<uint16_t>& allowlist,
                       uint16_t except) const {
-        uint16_t best = 0;
-        uint32_t best_util = 1001;  // > any per-mille
-        for (const uint16_t ch : allowlist) {
-            if (ch == except) continue;
-            for (const auto& r : results_) {
-                if (r.chan != ch) continue;
-                if (r.occ.wifi_util_permille < best_util) {
-                    best_util = r.occ.wifi_util_permille;
-                    best = ch;
-                }
-            }
+        std::vector<ChannelUtil> measured;
+        measured.reserve(results_.size());
+        for (const auto& r : results_) {
+            measured.push_back(ChannelUtil{r.chan, r.occ.util_permille});
         }
-        return best;
+        return emptiest_channel(measured, allowlist, except);
     }
 
   private:
@@ -840,6 +909,10 @@ class ScoutEngine {
     struct Occupancy {
         uint16_t wifi_util_permille = 0;
         uint16_t util_permille = 0;
+        // §15.5a (Pass 155): frame-free interference index; invalid = JSON
+        // null (sensor-less backend / generation without the counter).
+        bool have_interference = false;
+        uint16_t interference_util_permille = 0;
         bool have_noise = false;
         int noise_dbm = 0;
         uint16_t bss_count = 0;
@@ -876,6 +949,13 @@ class ScoutEngine {
         entered_ms_ = now_ms;
         extended_ = false;
         dwell_deadline_ms_ = now_ms + dwell_ms_;
+        // §15.5a (Pass 155) dwell hygiene: the discard barrier fires after
+        // the settle, from tick() — the delta counters must not charge this
+        // bin with its own retune.
+        barrier_done_ = false;
+        barrier_drained_ = false;
+        barrier_at_ms_ = now_ms + kSenseSettleMs;
+        observe_start_ms_ = 0;
     }
     void finalize_current(uint64_t now_ms) {
         ChannelResult r;
@@ -891,17 +971,45 @@ class ScoutEngine {
                            1000u, accum_.airtime_us * 1000u / dwell_us))
                      : 0u;
         r.occ.wifi_util_permille = static_cast<uint16_t>(util);
-        r.occ.util_permille = static_cast<uint16_t>(util);  // v1: Wi-Fi only
         r.occ.bss_count = static_cast<uint16_t>(accum_.transmitters.size());
-        r.occ.availability_permille = static_cast<uint16_t>(1000u - util);
-        r.occ.quality_permille = r.occ.availability_permille;  // v1 proxy
-        if (accum_.frames > 0) {
+        // §15.5a (Pass 155): fold the frame-free sensor delta accumulated
+        // since the barrier. The observe window is barrier→now; a dwell too
+        // short for its barrier reads no sensor and falls back whole.
+        std::optional<AirIface::AirSense> sense;
+        if (h_.sense && barrier_drained_) {
+            sense = h_.sense(scout_adapter_);
+        }
+        const uint64_t observe_us =
+            (barrier_drained_ && now_ms > observe_start_ms_)
+                ? (now_ms - observe_start_ms_) * 1000u
+                : 0u;
+        const OccupancyDerived d = derive_occupancy(
+            sense, r.occ.wifi_util_permille, observe_us);
+        r.occ.util_permille = d.util_permille;
+        r.occ.have_interference = d.interference_valid;
+        r.occ.interference_util_permille = d.interference_util_permille;
+        r.occ.availability_permille =
+            static_cast<uint16_t>(1000u - r.occ.util_permille);
+        r.occ.quality_permille = r.occ.availability_permille;  // #100 owns more
+        if (d.noise_valid) {
+            r.occ.have_noise = true;
+            r.occ.noise_dbm = d.noise_dbm;
+        } else if (accum_.frames > 0) {
+            // Sensor-less fallback: the v1 min-RSSI-of-decoded-frames proxy.
             r.occ.have_noise = true;
             r.occ.noise_dbm = accum_.min_rssi;
         }
         for (auto& [k, c] : accum_.candidates) {
             c.frames = accum_.frames_by_orig[k];  // §15.5a (Pass 66) evidence
             r.candidates.push_back(c);
+        }
+        // §15.5a (Pass 161): fold this dwell into the evidence store.
+        {
+            ScoutSample smp;
+            smp.chan_mhz = r.chan;
+            smp.util_permille = r.occ.util_permille;
+            smp.at_ms = now_ms;
+            store_.fold(smp);
         }
         results_.push_back(std::move(r));
     }
@@ -927,8 +1035,16 @@ class ScoutEngine {
     static constexpr uint64_t kExtendMs = 1200;
     uint64_t entered_ms_ = 0;
     bool extended_ = false;
+    // §15.5a (Pass 155) discard-barrier state, reset per channel entry.
+    // done = the one attempt was made; drained = it actually returned a
+    // value, which is what arms the observe window and the finalize read.
+    bool barrier_done_ = false;
+    bool barrier_drained_ = false;
+    uint64_t barrier_at_ms_ = 0;
+    uint64_t observe_start_ms_ = 0;
     Accum accum_;
     std::vector<ChannelResult> results_;
+    ScoutStore store_;  // §15.5a Pass 161 accumulated evidence
 };
 
 // §15.2 policy.csa → the core engine's parameter block (string PSK to raw
@@ -1269,6 +1385,9 @@ SelectorPolicy selector_policy(const Config& cfg) {
     p.rung_rssi_floor_dbm = s.rung_rssi_floor_dbm;
     p.promote_rssi_hyst_db = s.promote_rssi_hyst_db;
     p.promote_dwell_ms = s_to_ms(s.promote_dwell_s);
+    p.verdict_ttl_ms = s_to_ms(s.verdict_ttl_s);  // §9.4 Pass 160
+    p.probe_veto_permille = s.probe_veto_permille;  // §9.4 Pass 163
+    p.probe_veto_ttl_ms = s_to_ms(s.probe_veto_ttl_s);
     p.bitrate_lead_ms = s_to_ms(s.bitrate_lead_s);
     p.mcs_up_grace_ms = s_to_ms(s.mcs_up_grace_s);
     p.mcs_settle_ms = s_to_ms(s.mcs_settle_s);
@@ -1293,6 +1412,58 @@ QuietGapPolicy quietgap_policy(const Config& cfg) {
     p.guard_us = cfg.policy.ret.guard_us;
     p.window_us = cfg.policy.ret.return_window_us;
     return p;
+}
+
+// §7.2 aim instrumentation (issue #99 stage 1, Tier-2 bench knob — no spec
+// surface, findings.md 2026-08-07): WBLINK_AIM_LOG=1 histograms (a) release
+// lateness past the computed return deadline and (b) the ReadTsf() control
+// transfer cost — the §7.2 error term with no measured number — dumped to
+// stderr every 30 s. Distributions, not means: the tail is the contract.
+struct AimHist {
+    uint64_t n = 0, sum_us = 0, max_us = 0;
+    uint64_t b[8] = {};  // <50 <100 <200 <500 <1000 <2000 <5000 >=5000
+    void add(uint64_t us) {
+        static constexpr uint64_t edge[7] = {50, 100, 200, 500,
+                                             1000, 2000, 5000};
+        ++n;
+        sum_us += us;
+        if (us > max_us) max_us = us;
+        size_t i = 0;
+        while (i < 7 && us >= edge[i]) ++i;
+        ++b[i];
+    }
+    void dump(const char* name) const {
+        if (n == 0) return;
+        std::fprintf(stderr,
+                     "aim: %s n=%llu mean=%lluus max=%lluus "
+                     "buckets[<50,<100,<200,<500,<1k,<2k,<5k,>=5k]="
+                     "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                     name, (unsigned long long)n,
+                     (unsigned long long)(sum_us / n),
+                     (unsigned long long)max_us, (unsigned long long)b[0],
+                     (unsigned long long)b[1], (unsigned long long)b[2],
+                     (unsigned long long)b[3], (unsigned long long)b[4],
+                     (unsigned long long)b[5], (unsigned long long)b[6],
+                     (unsigned long long)b[7]);
+    }
+};
+inline bool aim_log_enabled() {
+    static const bool on = std::getenv("WBLINK_AIM_LOG") != nullptr;
+    return on;
+}
+// rx-role only: the 30 s dump lives in the run_rx loop — a tx node with
+// the flag set collects and never prints (findings.md says so).
+static AimHist g_aim_release;   // release lateness past the return deadline
+static AimHist g_aim_read_tsf;  // ReadTsf() control-transfer cost
+
+// #101 stage-0 verifier (Tier-2 bench knob, findings.md 2026-08-08):
+// WBLINK_MCS_TRACE=1 dumps one stderr line per received DATA frame —
+// (wire seq, PHY rx_mcs, adapter, rssi) — so an offline correlator can
+// check the commanded per-packet rate flew frame-for-frame against the
+// TX side's WBLINK_MCS_CYCLE schedule (mcs = seq % 8). rx-role only.
+inline bool mcs_trace_enabled() {
+    static const bool on = std::getenv("WBLINK_MCS_TRACE") != nullptr;
+    return on;
 }
 
 // ---- air backend selection (udp dev backend | devourer radio, §3.0) --------
@@ -1348,6 +1519,10 @@ struct AirBackend {
     // channel_mhz, so before the first retune the card is on whatever mon-up
     // left it. RadioAir does apply it at create.
     std::vector<uint16_t> chan_by_adapter;
+
+    // §10.6 (Pass 154) per-unit EFUSE identity, empty where the backend has
+    // none (udp, kernel-monitor, an unprogrammed unit). Contract passthrough.
+    std::string adapter_mac(size_t i) const { return iface()->adapter_mac(i); }
 
     uint16_t mtu_supported() const { return iface()->mtu_supported(); }
 
@@ -1406,14 +1581,25 @@ struct AirBackend {
             rc.filter_net_id = cfg.node.net_id;
             rc.originator = cfg.node.originator;
             rc.rx_drop_permille = cfg.air.rx_drop_permille;
-            // §3.0 Pass 12 hardware-ACK hybrid halves.
+            // §3.0 Pass 12 hardware-ACK hybrid halves + the Pass 156
+            // retry half of the same decision.
             rc.ack_responder = cfg.air.ack_responder;
             rc.unicast_returns = cfg.policy.ret.unicast;
+            rc.tx_retry_limit = cfg.air.tx_retry_limit;
+            rc.ldpc = cfg.air.ldpc;  // §3.0 Pass 157 node coding
+            rc.stbc = cfg.air.stbc;
+            rc.mcs_probe = cfg.air.mcs_probe;  // §9.4 Pass 163
             rc.disable_cca = cfg.air.disable_cca;
             // §14.2 (Pass 143): the authored calibration reaches both RF
             // backends. Zero keeps the estimate unavailable.
             rc.airtime_efficiency_permille =
                 cfg.air.airtime_efficiency_permille;
+            // §3.11 (Pass 162): same uplink-free archetypes as the monitor
+            // branch above — dedicated cache with no media streams, §2
+            // passive spectator (Pass 74).
+            rc.allow_rx_only =
+                (cfg.cache.store.enabled && cfg.streams.empty()) ||
+                cfg.node.spectator;
             auto a = RadioAir::create(rc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
@@ -1533,14 +1719,33 @@ struct AirBackend {
     // §10.2-vs-driver-default split behind set_power_auto, nullopt TSF where
     // there is no hardware clock) — see io/include/wblink/air_iface.h.
     void set_tx_mode(uint8_t mcs, bool sgi) { iface()->set_tx_mode(mcs, sgi); }
+    // §9.4 Pass 163 (radio-real; no-op elsewhere by the iface contract).
+    void set_mcs_probe(uint16_t period, uint16_t slot, uint8_t mcs) {
+        iface()->set_mcs_probe(period, slot, mcs);
+    }
     bool set_power_qdb(size_t adapter, int32_t qdb) {
         return iface()->set_power_qdb(adapter, qdb);
+    }
+    // §10.5 (Pass 150) relative contract, resolved natively per backend.
+    bool set_power_offset_qdb(size_t adapter, int32_t qdb) {
+        return iface()->set_power_offset_qdb(adapter, qdb);
     }
     void set_power_auto(size_t adapter) {
         (void)iface()->set_power_auto(adapter);
     }
     std::optional<uint64_t> read_tsf(uint8_t adapter) {
-        return iface()->read_tsf(adapter);
+        if (!aim_log_enabled()) {
+            return iface()->read_tsf(adapter);
+        }
+        // Issue #99: the §7.2 term with no number — time the control
+        // transfer (bench knob; the steady clock is never on a wire).
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto r = iface()->read_tsf(adapter);
+        g_aim_read_tsf.add(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t0)
+                .count()));
+        return r;
     }
     // §11.6 intra-process atomic switch: every local adapter retunes at
     // T_switch (a straggler follows because a sibling heard the CSA). On the
@@ -1756,8 +1961,23 @@ struct AirBackend {
             AdapterStats as;
             as.name = c.name;
             as.rx = c.rx_frames;
-            as.rssi_best = c.rssi_last;
-            as.rssi_mean = c.rssi_last;
+            // §15.3 Pass 158: the quality window (drained here — this loop
+            // is the single reader). Empty window keeps the pre-158
+            // last-frame RSSI so a quiet adapter still shows its last level.
+            const auto qw = radio->rx_quality_window(i);
+            if (qw.frames > 0) {
+                as.rssi_best = qw.rssi_peak_dbm;
+                as.rssi_mean = qw.rssi_mean_dbm;
+                as.snr = qw.snr_db;
+                if (qw.noise_valid) as.noise = qw.noise_dbm;
+                if (qw.evm_valid) {
+                    as.evm = qw.evm_db;
+                    as.evm_valid = true;
+                }
+            } else {
+                as.rssi_best = c.rssi_last;
+                as.rssi_mean = c.rssi_last;
+            }
             as.tx_submitted = c.tx_submitted;
             as.tx_failed = c.tx_failed;
             as.drop = c.rx_dropped;
@@ -1770,6 +1990,9 @@ struct AirBackend {
                 as.rx_mcs[m] = c.rx_mcs[m];  // §15.3 Pass 118
             }
             as.rx_mcs_unknown = c.rx_mcs_unknown;
+            as.rx_ldpc = c.rx_ldpc;  // §15.3 Pass 157
+            as.rx_stbc = c.rx_stbc;
+            as.ldpc_flag_ok = c.ldpc_flag_ok;
             as.tx_wedged = c.tx && tx_wedged;
             as.rx_dead = c.rx_dead;  // §15.3 Pass 101 (RadioAir only)
             snap.adapters.push_back(std::move(as));
@@ -1779,6 +2002,26 @@ struct AirBackend {
         (void)tsf_fallbacks;
         (void)tx_wedged;
 #endif
+    }
+
+    // §9.4 Pass 163 guard 3: cumulative CRC/ICV-errored frames per
+    // descriptor MCS, summed across adapters. false = the backend has no
+    // such surface (udp, kernel-monitor).
+    bool crc_mcs_totals(uint64_t (&out)[kRxMcsBuckets]) const {
+#if WBLINK_RADIO
+        if (radio) {
+            for (size_t m = 0; m < kRxMcsBuckets; ++m) out[m] = 0;
+            for (size_t i = 0; i < radio->rx_adapters(); ++i) {
+                const auto c = radio->counters(i);
+                for (size_t m = 0; m < kRxMcsBuckets; ++m) {
+                    out[m] += c.rx_crc_mcs[m];
+                }
+            }
+            return true;
+        }
+#endif
+        (void)out;
+        return false;
     }
 
     // §15.3 return-block unicast counters (radio backend; no-op on udp).
@@ -1832,9 +2075,11 @@ CalibrateParams calib_params_from(const CalibrationPolicy& c) {
     p.min_qdb = c.min_qdb;
     p.max_qdb = c.max_qdb;
     p.settle_ms = static_cast<uint32_t>(c.settle_ms);
-    p.probe_dwell_ms = static_cast<uint32_t>(c.probe_dwell_ms);
-    p.verify_dwell_ms = static_cast<uint32_t>(c.verify_dwell_ms);
-    p.report_loss_abort_ms = static_cast<uint32_t>(c.report_loss_abort_ms);
+    p.dwell_probe_frames = static_cast<uint16_t>(c.dwell_probe_frames);
+    p.dwell_verify_frames = static_cast<uint16_t>(c.dwell_verify_frames);
+    p.dwell.probe_pace_us = static_cast<uint32_t>(c.probe_pace_us);
+    p.dwell.tally_wait_ms = static_cast<uint32_t>(c.tally_wait_ms);
+    p.dwell.tally_retries = static_cast<uint32_t>(c.tally_retries);
     p.hard_cap_ms = static_cast<uint32_t>(c.hard_cap_ms);
     return p;
 }
@@ -1857,10 +2102,15 @@ struct TxCore {
         uint64_t jscc_decision_frames = 0;
         uint64_t jscc_valid_decisions = 0;
         uint64_t jscc_fallback_decisions = 0;
-        // §14.2 enforcement (Pass 38).
+        // §14.2 enforcement (Pass 38). NOTE: every counter below must also
+        // be zeroed in reset_stats() — two of them were not, and a §15.5
+        // reset left them at lifetime totals against restarted denominators.
         bool jscc_enforce = false;
         uint64_t jscc_enforced_frames = 0;
         uint64_t jscc_discarded_frames = 0;
+        // §14.2 Pass 149: valid decisions skipped because the frame is
+        // non-referenced (§14.1a) and exempt from enforcement entirely.
+        uint64_t jscc_exempt_frames = 0;
     };
 
     TxCore(const Config& cfg, uint32_t session, const ProfileTable* table,
@@ -1915,7 +2165,8 @@ struct TxCore {
             }
             // §10.5 override targets: EVERY tx adapter, curve or not.
             power_targets_.push_back(
-                PowerTarget{a.name, i, a.max_power_qdb, a.power_presets_qdb});
+                PowerTarget{a.name, i, a.max_power_qdb, a.power_presets_qdb,
+                            a.power_offset_qdb, a.power_offset_max_qdb});
             if (a.power_map.empty()) {
                 continue;
             }
@@ -1952,6 +2203,7 @@ struct TxCore {
                 fc.fec.scheme = s.fec.scheme;
                 fc.fec.i_rate_permille = s.fec.i_rate_permille;
                 fc.fec.p_rate_permille = s.fec.p_rate_permille;
+                fc.fec.e_rate_permille = s.fec.e_rate_permille;  // §14.1a
                 fc.fec.min_k = s.fec.min_k;
                 fc.fec.min_r = s.fec.min_r;
                 st.frame_framer.emplace(fc);
@@ -2055,6 +2307,9 @@ struct TxCore {
             VencFrameMeta meta;
             const bool have_meta = read_frame_meta(blob, len, &meta);
             const bool idr = have_meta && (meta.flags & kFrameFlagIdr) != 0;
+            // §14.1a non-referenced class (IDR wins, matching FrameFramer).
+            const bool enhance =
+                have_meta && !idr && (meta.flags & kFrameFlagEnhance) != 0;
             if (fps_ladder_ && have_meta && !idr) {
                 fps_ladder_->note_p_frame(
                     static_cast<uint32_t>(std::min<size_t>(
@@ -2076,9 +2331,12 @@ struct TxCore {
                 JsccShadowFrameInput input;
                 input.source_k = k;
                 input.deadline_us = frame_deadline_us(idr);
+                // §14.1a: a non-referenced frame is never ARQ-eligible, so the
+                // shadow must not model an ARQ that cannot occur.
                 input.arq_capable =
-                    (idr ||
-                     s.frame_framer->arq_mode() == FrameArqMode::kAllFrames) &&
+                    (idr || (s.frame_framer->arq_mode() ==
+                                 FrameArqMode::kAllFrames &&
+                             !enhance)) &&
                     !arq_fps_suppressed_;  // §4.1 Pass 40 cutoff
                 input.now_ms = now;
                 if (estimate_airtime) {
@@ -2099,14 +2357,23 @@ struct TxCore {
                 // §14.2 enforcement (Pass 38): a VALID decision actuates for
                 // this one frame; any fallback keeps the fixed §14.1 path.
                 if (s.jscc_enforce && s.jscc_latest.valid) {
-                    if (s.jscc_latest.decision.discard) {
+                    if (enhance) {
+                        // §14.2 (Pass 149, operator ruling): non-referenced
+                        // frames are exempt from enforcement ENTIRELY — no
+                        // parity replacement (rule 1), no deadline discard
+                        // (rule 2), and rule 3 is moot since §14.1a makes the
+                        // class ARQ-ineligible. The shadow still evaluated it
+                        // above, so telemetry stays comparable.
+                        ++s.jscc_exempt_frames;
+                    } else if (s.jscc_latest.decision.discard) {
                         ++s.jscc_discarded_frames;  // rule 2: drop, not queue
                         return;
+                    } else {
+                        s.frame_framer->set_next_frame_override(
+                            s.jscc_latest.decision.parity_symbols,
+                            s.jscc_latest.decision.arq_eligible);
+                        ++s.jscc_enforced_frames;
                     }
-                    s.frame_framer->set_next_frame_override(
-                        s.jscc_latest.decision.parity_symbols,
-                        s.jscc_latest.decision.arq_eligible);
-                    ++s.jscc_enforced_frames;
                 }
             }
             s.frame_framer->on_frame(
@@ -2190,23 +2457,102 @@ struct TxCore {
             // §15.3 heard-ratio.
             if (selector_.on_report(*r, now)) {
                 ++reports_received_;
-                note_report_health(now);
-                // §3.16 (Pass 125): the SAME freshness gate feeds the uplink
-                // quality counters. A redundant copy carries no new epoch, so
-                // counting it would tell the ground its uplink delivered more
-                // than it did — the one number §10.7's loss estimator divides
-                // by. Rejected reports never reach here at all.
-                quality_.note_accepted(r->prefix.originator,
-                                       r->prefix.session_id, r->report_epoch,
-                                       rx_rssi, rx_mcs);
-            }
-            if (calibrator_) {
-                // §10.6: every ACCEPTED report feeds the calibration dwell
-                // (the engine discards samples inside its settle window).
-                calibrator_->on_report(static_cast<int8_t>(r->rssi_mean),
-                                       r->loss_postdiv_prearq, r->uniq, now);
             }
             return false;
+        }
+        if (const LinkVerdictPkt* v = std::get_if<LinkVerdictPkt>(&dec)) {
+            // §3.16 (Pass 159) acceptance = the §3.5 filter: addressed to
+            // us, target tuple is us, sender is the report-latched tuple,
+            // epoch monotone (a reordered verdict must not regress the
+            // craft's view). Anything else drops without counting.
+            if (v->prefix.destination != originator_ ||
+                v->target_originator != originator_ ||
+                v->target_session != session_) {
+                return false;
+            }
+            if (report_gate_.latched_originator() != v->prefix.originator) {
+                return false;
+            }
+            const uint32_t ls = report_gate_.latched_session();
+            if (ls != 0 && ls != v->prefix.session_id) return false;
+            // The monotone gate is SCOPED to the sender identity — a ground
+            // reboot restarts its epoch counter near 1, and an unscoped
+            // high-water mark would drop the rebooted ground's verdicts for
+            // thousands of epochs (mirrors on_report's per-identity epoch
+            // domain, selector.cpp).
+            const std::pair<uint16_t, uint32_t> vid{v->prefix.originator,
+                                                    v->prefix.session_id};
+            if (!verdict_epoch_src_ || *verdict_epoch_src_ != vid) {
+                verdict_epoch_src_ = vid;
+                verdict_epoch_seen_ = 0;
+            }
+            if (verdict_epoch_seen_ != 0 &&
+                v->report_epoch < verdict_epoch_seen_) {
+                return false;
+            }
+            verdict_epoch_seen_ = v->report_epoch;
+            selector_.on_verdict(v->verdict, now);
+            verdict_rx_ms_ = now;
+            return false;
+        }
+        if (const CalibProbe* pr = std::get_if<CalibProbe>(&dec)) {
+            // §3.16 acceptance: addressed to us, from the report-latched
+            // ground tuple — the only peer whose probes may pause the feed
+            // (D-C ruling) or draw tallies.
+            if (pr->prefix.destination != originator_) return false;
+            if (report_gate_.latched_originator() != pr->prefix.originator) {
+                return false;
+            }
+            const uint32_t ls = report_gate_.latched_session();
+            if (ls != 0 && ls != pr->prefix.session_id) return false;
+            const DwellTallyOut t = calib_rx_.on_probe(
+                pr->run_id, pr->dwell_id, pr->seq, pr->count, rx_rssi, rx_mcs,
+                now);
+            if (t.new_run) {
+                std::fprintf(stderr,
+                             "calibrate: uplink run %u from ground %u — "
+                             "video feed PAUSED (input-starve, §3.16)\n",
+                             t.run_id, pr->prefix.originator);
+            }
+            if (t.send && send_calib) {
+                CalibTally out;
+                out.prefix.originator = originator_;
+                out.prefix.destination = pr->prefix.originator;
+                out.prefix.session_id = session_;
+                out.run_id = t.run_id;
+                out.dwell_id = t.dwell_id;
+                out.received = t.received;
+                out.rssi_sum_dbm = t.rssi_sum_dbm;
+                out.rx_mcs = t.rx_mcs;
+                out.adapter_fingerprint = calib_ident_fingerprint_;
+                uint8_t tb[kCalibTallySize];
+                const size_t tn = encode_calib_tally(out, tb, sizeof tb);
+                if (tn != 0) {
+                    send_calib(tb, tn);
+                    ++calib_tallies_tx_;
+                }
+            }
+            return false;
+        }
+        if (const CalibTally* t = std::get_if<CalibTally>(&dec)) {
+            // §3.16: our own §10.6 run's evidence, from the accepted reporter.
+            if (t->prefix.destination != originator_) return false;
+            if (report_gate_.latched_originator() != t->prefix.originator) {
+                return false;
+            }
+            const uint32_t ls = report_gate_.latched_session();
+            if (ls != 0 && ls != t->prefix.session_id) return false;
+            if (calibrator_) {
+                calibrator_->on_tally(t->run_id, t->dwell_id, t->received,
+                                      t->rssi_sum_dbm, t->rx_mcs,
+                                      t->adapter_fingerprint);
+                ++calib_tallies_rx_;
+                calib_rx_mcs_ = t->rx_mcs;
+            }
+            return false;
+        }
+        if (std::holds_alternative<ExtUnknown>(dec)) {
+            return false;  // §3.16: newer peer — feature unavailable
         }
         if (const RecoveryRequest* r = std::get_if<RecoveryRequest>(&dec)) {
             if (r->target_originator != originator_ ||
@@ -2259,6 +2605,22 @@ struct TxCore {
                 apply_mode(act.commit->mcs,
                            act.commit->gi == GuardInterval::kShort);
             }
+            // §9.4 Pass 163: re-derive the up-candidate for the new
+            // operating point through the live table; disarm at the top
+            // rung / same-MCS adjacency (probe_up_candidate_mcs nullopt).
+            if (apply_probe) {
+                std::optional<uint8_t> cand;
+                if (table_ != nullptr && table_->probe_period != 0) {
+                    cand = probe_up_candidate_mcs(*table_,
+                                                  act.commit->profile_id);
+                }
+                if (cand) {
+                    apply_probe(table_->probe_period, table_->probe_slot,
+                                *cand);
+                } else {
+                    apply_probe(0, 0, 0);
+                }
+            }
             // ...and the §10 per-adapter power resolve, applied inside the
             // same sequenced transition through the apply_power hook (both RF
             // backends, §10.5; a logged intent on the udp dev backend). While
@@ -2277,14 +2639,30 @@ struct TxCore {
         venc_.poll(now);
         // §10.6: drive the calibration engine at loop cadence.
         calibrate_service(now);
+        calibrate_probe_service(now);
+        // §3.16 (Pass 153): resume a probe-paused feed once the ground's
+        // uplink run has gone quiet — the bounded, self-clearing D-C edge.
+        if (calib_rx_.run_id() != 0 &&
+            calib_rx_.quiet_for(now, feed_quiet_ms_)) {
+            calib_rx_.expire_run();
+            std::fprintf(stderr,
+                         "calibrate: uplink probes quiet — video feed "
+                         "RESUMED\n");
+        }
         // Push the CURRENT target every tick: write-on-change (§9.6) makes
         // this a no-op normally, and a failed push (encoder briefly down)
         // retries next tick instead of waiting for the next rung change.
         if (selector_.bitrate_kbps() > 0) {
             venc_.set_bitrate(selector_.bitrate_kbps());
         }
-        // §9.6 cadence estimate: frames over a ~1 s window.
-        if (cadence_start_ms_ != 0 && now >= cadence_start_ms_ + 1000) {
+        // §9.6 cadence estimate: frames over a ~1 s window. Frozen while
+        // the feed is paused (Pass 153): a starved input is not evidence
+        // about the encoder's cadence, and the §9.6/§9.11 ladder inputs must
+        // hold at their pre-pause values.
+        if (feed_paused()) {
+            cadence_frames_ = 0;
+            cadence_start_ms_ = now;
+        } else if (cadence_start_ms_ != 0 && now >= cadence_start_ms_ + 1000) {
             frame_cadence_us_ = cadence_frames_ > 0
                 ? (now - cadence_start_ms_) * 1000ull / cadence_frames_
                 : 0;
@@ -2338,6 +2716,12 @@ struct TxCore {
                 const FrameFecConfig& fec = s.frame_framer->fec();
                 if (fec.scheme != FecScheme::kNone) {
                     in.i_rate_permille = fec.i_rate_permille;
+                    // §9.6 caps stay on the P rate even when §14.1a lowers the
+                    // non-referenced class: max_p_bytes is then conservative
+                    // (net of more parity than is actually emitted), so freed
+                    // airtime is NOT handed back to the encoder. Deliberate —
+                    // e_rate has no validated non-default setting (§14.1a), and
+                    // a blended rate would have to track measured density.
                     in.p_rate_permille = fec.p_rate_permille;
                 }
                 in.symbol_size = static_cast<uint16_t>(
@@ -2362,8 +2746,18 @@ struct TxCore {
     // §11.3: freeze the cascade + pause the watchdog across the CSA blackout.
     void csa_freeze(uint64_t until_ms) { selector_.csa_freeze(until_ms); }
 
-    UplinkQualityCounters quality_;  // §3.16 (Pass 125)
-    uint8_t quality_fingerprint_ = 0;
+    // §3.16 (Pass 153): receiver half of the dwell primitive — counts the
+    // ground's uplink probes and answers tallies; its run lifecycle also
+    // drives the D-C feed pause.
+    DwellReceiver calib_rx_;
+    Inject send_calib;  // wired to the air inject in run_tx
+    uint8_t calib_ident_fingerprint_ = 0;
+    uint32_t feed_quiet_ms_ = 2000;  // §15.2 feed_quiet_ms
+    // §15.3 probe-exchange counters (role-neutral).
+    uint64_t calib_probes_tx_ = 0;
+    uint64_t calib_tallies_rx_ = 0;
+    uint64_t calib_tallies_tx_ = 0;
+    uint8_t calib_rx_mcs_ = kUplinkRxMcsUnknown;
 
     // §3.5 Pass 115: report authority is ONE authority across both return
     // gates. These wrap the pair deliberately — moving report_gate_ alone
@@ -2433,14 +2827,11 @@ struct TxCore {
         }
         return s;
     }
-    // §3.16 craft->ground uplink feedback. Returns nullopt when there is
-    // nothing honest to say: no latched reporter, or no accepted report yet in
-    // this counter domain. Pass 131 removed the key — see §3.16/§13.
-    std::optional<UplinkQuality> uplink_quality() const {
-        return quality_.build(originator_, session_, quality_fingerprint_);
-    }
-    void set_quality_identity(uint8_t fingerprint) {
-        quality_fingerprint_ = fingerprint;
+    // §3.16 (Pass 153): the CRC-8 of this craft's TX-adapter canonical
+    // calibration identity — stamped into every TALLY we return so the
+    // ground's artifact can identity-gate its evidence source.
+    void set_calib_identity(uint8_t fingerprint) {
+        calib_ident_fingerprint_ = fingerprint;
     }
 
     // §11.6: CSA_ARMED on every outgoing DATA frame while the campaign holds.
@@ -2469,7 +2860,8 @@ struct TxCore {
     // §14.1 live FEC-rate retune for a frame-shm stream. Returns false if the
     // stream_id is unknown or is not a frame-shm (FrameFramer) stream.
     bool set_stream_fec(uint8_t stream_id, uint16_t i_permille,
-                        uint16_t p_permille, uint16_t min_k, uint16_t min_r) {
+                        uint16_t p_permille, uint16_t min_k, uint16_t min_r,
+                        std::optional<uint16_t> e_permille) {
         for (Stream& s : streams_) {
             if (s.stream_id != stream_id) {
                 continue;
@@ -2477,7 +2869,8 @@ struct TxCore {
             if (!s.frame_framer) {
                 return false;  // udp stream: no per-stream FEC (§15.2)
             }
-            s.frame_framer->set_fec_rates(i_permille, p_permille, min_k, min_r);
+            s.frame_framer->set_fec_rates(i_permille, p_permille, min_k, min_r,
+                                          e_permille);
             return true;
         }
         return false;
@@ -2565,20 +2958,24 @@ struct TxCore {
                 if (arg > 1) return false;
                 if (!calibrator_) return false;
                 if (arg == 1) {
-                    if (!apply_power) return false;  // udp: logged intent only
-                    if (report_gate_.latched_originator() == 0) return false;
-                    // §10.6 (Pass 134): feedback health, measured on the link
-                    // AT REST. §10.6 scores every dwell from §3.5 reports, so
-                    // a return path running at half cadence reads as fewer
-                    // observed losses — every probe clean at every power, and
-                    // the sweep places the whole curve at its ceiling. That is
-                    // not a state to measure through; it is a state to refuse
-                    // to start in. Latched-but-starved is invisible to the
-                    // check above, which only asks whether a reporter exists.
-                    if (report_health_hz_milli_ <
-                        calib_min_report_hz_ * 1000u) {
+                    // §10.6 (Pass 151): whichever actuator this backend's
+                    // space uses must exist. On udp both are absent and the
+                    // run stays a logged intent, so it is refused as before.
+                    if (backend_relative_) {
+                        // The Pass 150 blanket refusal is lifted: the sweep now
+                        // runs in offset space, bounded by the §10.5 band. A
+                        // config that leaves no band (bound at or under the
+                        // safe offset) still has nothing to sweep.
+                        if (!apply_power_offset) return false;
+                        if (!offset_window()) return false;
+                    } else if (!apply_power) {
                         return false;
                     }
+                    if (report_gate_.latched_originator() == 0) return false;
+                    // Pass 153: no report-health precondition — probe/tally
+                    // delivery is its own health check, and a run that cannot
+                    // exchange evidence fails loudly at its first dwell
+                    // (evidence_lost) instead of being refused by a proxy.
                     return calibrator_->start(now);
                 }
                 return calibrator_->abort(now);
@@ -2620,12 +3017,20 @@ struct TxCore {
     // the §9.3 table's per-rung tx_power_level tapers it. Without this the
     // one operation that deliberately walks a rung into overload was the one
     // operation the ceiling did not cover.
+    // Split from init_calibration (Pass 154): the §3.16 tally-receiver path
+    // and its feed-quiet expiry run on every craft, including a D3 unit
+    // whose calibrator is refused — the policy seeds must not be gated on
+    // the calibrator existing, or feed_quiet_ms is silently dead exactly on
+    // the node whose identity is missing.
+    void seed_calib_policy(const CalibrationPolicy& c) {
+        calib_policy_ = c;
+        feed_quiet_ms_ = static_cast<uint32_t>(c.feed_quiet_ms);
+    }
+
     void init_calibration(const CalibrationPolicy& c,
                           std::optional<int32_t> max_power_qdb) {
-        calib_min_report_hz_ = static_cast<uint32_t>(c.calib_min_report_hz);
-        calib_policy_ = c;
+        seed_calib_policy(c);
         CalibrateParams p = calib_params_from(c);
-        if (max_power_qdb) p.max_qdb = std::min(p.max_qdb, *max_power_qdb);
         if (table_ != nullptr) {
             for (const Profile& pr : table_->profiles) {
                 if (pr.mcs < p.levels.size()) {
@@ -2633,28 +3038,48 @@ struct TxCore {
                 }
             }
         }
+        if (const auto w = offset_window()) {
+            // §10.6 (Pass 151): offset space. min_qdb/max_qdb and the §10.3
+            // absolute ceiling do not apply here at all — the §10.5 band IS
+            // the window, so the sweep cannot place hotter than
+            // power_offset_max_qdb nor colder than the safe offset it began
+            // at, and it climbs from the safe end as every live-link sweep
+            // must. `levels` still encodes the §10.2 curve; it just stops
+            // narrowing the ceiling (see taper_rung_ceiling).
+            p.min_qdb = w->first;
+            p.max_qdb = w->second;
+            p.seek_step_qdb = c.offset_seek_step_qdb;
+            p.taper_rung_ceiling = false;
+        } else if (max_power_qdb) {
+            p.max_qdb = std::min(p.max_qdb, *max_power_qdb);
+        }
         calibrator_.emplace(p);
+    }
+
+    // §10.6 (Pass 151): the relative-backend sweep window, or nullopt on an
+    // absolute backend. One sweep drives every tx adapter, so the band must be
+    // safe for all of them: the top is the LOWEST §10.5 bound, and the bottom
+    // is the COLDEST safe offset — starting at the warmest would command an
+    // adapter above its own boot offset, which is the state Pass 150 exists to
+    // forbid.
+    std::optional<std::pair<int32_t, int32_t>> offset_window() const {
+        if (!backend_relative_ || power_targets_.empty()) return std::nullopt;
+        int32_t lo = power_targets_.front().offset_qdb;
+        int32_t hi = power_targets_.front().offset_max_qdb;
+        for (const PowerTarget& t : power_targets_) {
+            lo = std::min(lo, t.offset_qdb);
+            hi = std::min(hi, t.offset_max_qdb);
+        }
+        // A config whose bound sits at or under its own safe offset leaves no
+        // band to sweep. Refusing here keeps §11.7 CALIBRATE honest (REJECTED)
+        // rather than running a one-point sweep and calling it a curve.
+        if (hi <= lo) return std::nullopt;
+        return std::make_pair(lo, hi);
     }
     // §10.6 (Pass 134) accepted-report cadence over the last closed window.
     // A whole window rather than an instantaneous gap, because the §7.2
     // return path is bursty by construction — one report per video EOB gap,
     // so gaps are normal and only the aggregate rate is meaningful.
-    static constexpr uint64_t kReportHealthWindowMs = 4000;
-    void note_report_health(uint64_t now) {
-        if (report_health_start_ms_ == 0) {
-            report_health_start_ms_ = now;
-            report_health_count_ = 0;
-        }
-        ++report_health_count_;
-        const uint64_t el = now - report_health_start_ms_;
-        if (el >= kReportHealthWindowMs) {
-            report_health_hz_milli_ =
-                static_cast<uint32_t>(report_health_count_ * 1000000ull / el);
-            report_health_start_ms_ = now;
-            report_health_count_ = 0;
-        }
-    }
-    uint32_t report_health_hz_milli() const { return report_health_hz_milli_; }
 
     bool cmd_arq_enabled() const { return cmd_arq_enabled_; }
     bool cmd_selector_frozen() const { return cmd_selector_frozen_; }
@@ -2676,6 +3101,13 @@ struct TxCore {
                 s.jscc_decision_frames = 0;
                 s.jscc_valid_decisions = 0;
                 s.jscc_fallback_decisions = 0;
+                // Pass 149: the enforcement counters were omitted here, so a
+                // §15.5 reset left them at lifetime totals while the decision
+                // denominators restarted — enforced/decisions could read >1
+                // and every windowed measurement was silently wrong.
+                s.jscc_enforced_frames = 0;
+                s.jscc_discarded_frames = 0;
+                s.jscc_exempt_frames = 0;
             }
             s.sched.reset_counters();
         }
@@ -2707,6 +3139,8 @@ struct TxCore {
                 st.arq_frames = s.frame_framer->stats().arq_frames;
                 st.arq_cutoff_frames =
                     s.frame_framer->stats().arq_cutoff_frames;
+                st.fec_enhance_frames =
+                    s.frame_framer->stats().fec_enhance_frames;  // §14.1a
             }
             if (s.jscc_shadow) {
                 const JsccShadowResult& js = s.jscc_latest;
@@ -2736,6 +3170,7 @@ struct TxCore {
                 st.jscc_feedback_age_ms = js.feedback_age_ms;
                 st.jscc_enforced_frames = s.jscc_enforced_frames;
                 st.jscc_discarded_frames = s.jscc_discarded_frames;
+                st.jscc_exempt_frames = s.jscc_exempt_frames;
             }
             st.resends_sent = s.sched.counters().resends_sent;
             st.arq_lock_holder = s.sched.counters().lock_holder;
@@ -2799,6 +3234,11 @@ struct TxCore {
             snap.link.calib_fingerprint = calib_fingerprint_;
             snap.link.calib_stale = calib_stale_;
         }
+        // §3.16 (Pass 153) probe-exchange counters + the input-starve state.
+        snap.link.calib_probes_sent = calib_probes_tx_;
+        snap.link.calib_tallies_rx = calib_tallies_rx_;
+        snap.link.calib_rx_mcs = calib_rx_mcs_;
+        snap.link.feed_paused = feed_paused();
         // cmd_resolution_select / cmd_framing_select stay 0 until the venc
         // knobs exist (§11.7 staged, Pass 71).
         if (fps_ladder_) {
@@ -2832,6 +3272,18 @@ struct TxCore {
         snap.ret.report_latch_holder = report_gate_.latched_originator();
         snap.link.report_latch_holder = report_gate_.latched_originator();
         snap.link.report_latch_known = true;   // local gate; always known here
+        // §15.3 Pass 159/160: last ACCEPTED §3.16 verdict + the climb-gate
+        // suppression count. verdict 0 with age 0 = none this session.
+        snap.link.verdict = selector_.verdict();
+        snap.link.verdict_age_ms =
+            verdict_rx_ms_ == 0
+                ? 0
+                : static_cast<uint32_t>(std::min<uint64_t>(
+                      now - verdict_rx_ms_, 0xFFFFFFFFull));
+        snap.link.promote_blocked_saturated =
+            selector_.promote_blocked_saturated();
+        snap.link.promote_blocked_probe =
+            selector_.promote_blocked_probe();  // §15.3 Pass 163
     }
 
     struct PowerAdapter {
@@ -2846,13 +3298,37 @@ struct TxCore {
     struct PowerTarget {
         std::string name;
         size_t adapter_idx;
-        std::optional<int32_t> ceiling;  // §10.3 — the ONE clamp on overrides
+        std::optional<int32_t> ceiling;  // §10.3 — kernel-monitor reference
         std::vector<int32_t> presets_qdb;  // §11.7 0x0A selectable ceilings
+        // §10.5 (Pass 150) relative contract: the safe boot offset and the
+        // bound the runtime latch may not exceed.
+        int32_t offset_qdb = -24;
+        int32_t offset_max_qdb = 0;
     };
 
     // §10.4 curve resolve for the committed operating point, through the
     // change-detection cache (apply only when the resolved value moves).
     void resolve_and_apply_power(uint8_t mcs, uint8_t level) {
+        // §10.5 (Pass 150) / §10.6 (Pass 151): a curve's numbers only mean
+        // something in a known space. An offset-space curve is one THIS
+        // backend's own calibration authored — the Pass 146 fingerprint is
+        // backend-scoped, so a foreign one cannot load — and it actuates. An
+        // explicit config `power_map` is not backend-scoped and carries no
+        // space at all, so on a relative backend it stays refused: a 108 qdb
+        // entry there is +27 dB, not 27 dBm, and one profile commit would
+        // silently undo the boot offset.
+        if (!power_.empty() && !curve_actuates()) {
+            if (!warned_curve_refused_) {
+                warned_curve_refused_ = true;
+                std::fprintf(stderr,
+                             "power: §10.2 curve REFUSED on a relative backend "
+                             "(§10.5 Pass 150) — config power_map holds "
+                             "absolute qdb; running on the §10.5 boot offset "
+                             "instead. Run §10.6 calibration to author an "
+                             "offset-space curve.\n");
+            }
+            return;
+        }
         for (PowerAdapter& pa : power_) {
             const auto qdb =
                 resolve_power_qdb(pa.curve, mcs, level, pa.ceiling);
@@ -2860,7 +3336,9 @@ struct TxCore {
                 // §10.5: cache only what the backend accepted — a failed
                 // write retries at the next commit/re-assert.
                 bool ok = true;
-                if (apply_power) {
+                if (backend_relative_ && apply_power_offset) {
+                    ok = apply_power_offset(pa.adapter_idx, *qdb);
+                } else if (!backend_relative_ && apply_power) {
                     ok = apply_power(pa.adapter_idx, *qdb);
                 } else {
                     std::fprintf(stderr, "power: %s mcs=%u level=%u -> %d qdb\n",
@@ -2883,6 +3361,15 @@ struct TxCore {
         // would be left at whatever power the abandoned sweep last commanded.
         // §10.5 latching takes the same position (the run yields first).
         if (calibrating()) return false;
+        // §10.3/§11.7 0x0A (Pass 151): `power_presets_qdb` are ABSOLUTE qdb
+        // and there is no offset-space tier. Applying one on a relative
+        // backend replaces the §10.5 offset bound (0) with an absolute preset
+        // (60..108) as the resolve clamp — removing the one guard that keeps a
+        // resolved curve inside the window — while §15.3 reported the tier
+        // effective. Reachable TODAY: the flying craft config carries
+        // `power_presets_qdb: [60,76,84,92,108]` and runs devourer. REJECTED
+        // until tiers are re-based with the rest of §10.5.
+        if (backend_relative_) return false;
         // ALL-OR-NOTHING. Validate every configured list before touching any
         // ceiling: applying the tier to one tx adapter, skipping another whose
         // list is shorter, and still reporting success would leave two
@@ -2959,24 +3446,76 @@ struct TxCore {
     // while one is held the tier plainly reaches hardware even with no curve
     // — device-shown, tier 0 (ceiling 60) clamping a 120 qdb latch to 15 dBm
     // while `effective` claimed the tier bound nothing.
+    // §10.5 (Pass 150): a held latch no longer passes through the §10.3
+    // ceiling — set_power_override does not read t.ceiling at all — so a tier
+    // cannot claim to be effective on the strength of one.
     bool power_tier_effective() const {
-        return has_power_curve() || power_override_.has_value();
+        // A curve that resolve_and_apply_power() refuses reaches no hardware,
+        // so reporting the tier effective would be the same lie Pass 136
+        // removed for the latch — and on a relative backend a tier is REJECTED
+        // outright (Pass 151), so nothing there can be effective either.
+        return curve_actuates() && !backend_relative_;
     }
 
-    // §10.5 (Pass 114) override-latch: latch an absolute qdb on every tx
-    // adapter; the §10.4 commit resolve yields until cleared. Ceiling-clamped
-    // per adapter (§10.3) — nothing else bounds it.
-    void set_power_override(int32_t qdb) {
-        power_override_ = qdb;
+    // The one predicate for "resolve_and_apply_power() will reach hardware".
+    // Pass 150 spelled this test out at three call sites and they drifted
+    // apart within a single pass; there is one copy now.
+    bool curve_actuates() const {
+        return has_power_curve() &&
+               (!backend_relative_ || curve_is_offset_space_);
+    }
+
+    // §10.5 (Pass 150) override-latch: latch a RELATIVE offset on every tx
+    // adapter; the §10.4 commit resolve yields until cleared. Bounded by
+    // power_offset_max_qdb and rejected past it — the §10.3 ceiling no longer
+    // clamps it, because on an offset backend it clamped the offset.
+    // §10.5 (Pass 150): the latch is a RELATIVE offset, bounded by each
+    // adapter's power_offset_max_qdb and REJECTED past it — never silently
+    // clamped. The old min(qdb, max_power_qdb) clamp is gone: on an offset
+    // backend it clamped the offset, so a documented safety ceiling became a
+    // boost permit. All-or-nothing, matching set_power_tier: validate every
+    // target before touching any, so a partial apply cannot leave two tx
+    // adapters on different offsets with nothing saying so.
+    bool set_power_override(int32_t qdb) {
         for (const PowerTarget& t : power_targets_) {
-            const int32_t v =
-                t.ceiling ? std::min(qdb, *t.ceiling) : qdb;
-            if (apply_power) {
-                apply_power(t.adapter_idx, v);
+            if (qdb > t.offset_max_qdb) return false;
+        }
+        // A node with no tx adapter has no bound to check against; latching
+        // an unbounded value there would report authority nobody holds.
+        if (power_targets_.empty()) return false;
+        bool all_ok = true;
+        for (const PowerTarget& t : power_targets_) {
+            if (apply_power_offset) {
+                all_ok = apply_power_offset(t.adapter_idx, qdb) && all_ok;
             } else {
-                std::fprintf(stderr, "power: %s override -> %d qdb\n",
-                             t.name.c_str(), v);
+                std::fprintf(stderr, "power: %s offset -> %+d qdb\n",
+                             t.name.c_str(), static_cast<int>(qdb));
             }
+        }
+        // §15.3 must not report a latch the radio refused (air_iface.h: a
+        // false return means the caller must not cache it as applied).
+        if (!all_ok) return false;
+        power_override_ = qdb;
+        return true;
+    }
+
+    // §10.5 (Pass 150): the forced safe boot point. Applied once at startup on
+    // every role:"tx" adapter so no node ever transmits at the uncharacterised
+    // efuse default (offset 0), which Pass 150 measured as a compressing
+    // operating point on the fleet's 8822EU.
+    void apply_boot_power_offsets() {
+        for (const PowerTarget& t : power_targets_) {
+            const bool ok =
+                apply_power_offset && apply_power_offset(t.adapter_idx,
+                                                         t.offset_qdb);
+            // Say what happened. A safety control that logs an intent it did
+            // not achieve is worse than one that logs nothing.
+            std::fprintf(stderr,
+                         "power: %s §10.5 boot offset %+d qdb (bound %+d) -> "
+                         "%s\n",
+                         t.name.c_str(), static_cast<int>(t.offset_qdb),
+                         static_cast<int>(t.offset_max_qdb),
+                         ok ? "applied" : "NOT APPLIED");
         }
     }
 
@@ -2986,9 +3525,14 @@ struct TxCore {
     // without waiting for the next profile change.
     void clear_power_override() {
         power_override_.reset();
-        if (apply_power_auto) {
-            for (const PowerTarget& t : power_targets_) {
-                apply_power_auto(t.adapter_idx);
+        // §10.5 (Pass 150): auto resolves to the adapter's configured safe
+        // offset, NOT the backend default. apply_power_auto was offset 0 on
+        // devourer — the uncharacterised point, and the worst setting on a
+        // compressing unit. §11.6 recovery ends here (Pass 48), so this is
+        // also what an unattended recovery lands on.
+        for (const PowerTarget& t : power_targets_) {
+            if (apply_power_offset) {
+                apply_power_offset(t.adapter_idx, t.offset_qdb);
             }
         }
         for (PowerAdapter& pa : power_) {
@@ -3006,12 +3550,22 @@ struct TxCore {
             set_power_override(*power_override_);
             return;
         }
+        bool any_curve = false;
         for (PowerAdapter& pa : power_) {
             if (pa.applied_qdb && apply_power) {
+                any_curve = true;
                 if (!apply_power(pa.adapter_idx, *pa.applied_qdb)) {
                     pa.applied_qdb.reset();  // §10.5: retry at next commit
                 }
             }
+        }
+        // §10.5 (Pass 150): with no latch and no curve this used to restore
+        // NOTHING, so a §11.6 recovery — which ends in `txpower auto` on
+        // kernel-monitor — permanently lost the boot offset on the default
+        // config. The boot offset is the floor of this precedence, not an
+        // absent case.
+        if (!any_curve) {
+            apply_boot_power_offsets();
         }
     }
 
@@ -3021,8 +3575,21 @@ struct TxCore {
     // Actuation hooks (§10.4/§10.5); unset = logged intent. apply_mode is
     // radio-only by design (Pass 13: monitor carries MCS per-packet).
     std::function<void(uint8_t mcs, bool sgi)> apply_mode;
+    // §9.4 Pass 163: (period, slot, candidate_mcs) probe schedule refresh;
+    // installed only when air.mcs_probe is on (radio backend). (0,0,0)
+    // disarms.
+    std::function<void(uint16_t, uint16_t, uint8_t)> apply_probe;
     std::function<bool(size_t adapter_idx, int32_t qdb)> apply_power;
     std::function<void(size_t adapter_idx)> apply_power_auto;
+    // §10.5 (Pass 150) relative actuator — bound for EVERY backend, unlike
+    // apply_power which is radio-only.
+    std::function<bool(size_t adapter_idx, int32_t qdb)> apply_power_offset;
+    // §10.5 (Pass 150): true when the backend's power lever is RELATIVE
+    // (devourer). The §10.2 absolute curve and the §10.6 absolute sweep are
+    // then not merely inaccurate but dangerous — their 60..108 qdb values
+    // become +15..+27 dB of boost — so both are refused until re-based.
+    void set_backend_relative(bool on) { backend_relative_ = on; }
+    bool backend_relative() const { return backend_relative_; }
     std::function<std::optional<uint32_t>(size_t bytes, bool include_pending,
                                           uint16_t packet_budget)>
         estimate_airtime;
@@ -3051,6 +3618,10 @@ struct TxCore {
     uint8_t boot_max_profile_ = 255;
     ReportGate feedback_gate_;             // §3.10 Pass 55
     ReportGate report_gate_;               // §3.5 Pass 41
+    uint32_t verdict_epoch_seen_ = 0;      // §3.16 Pass 159 monotone gate
+    std::optional<std::pair<uint16_t, uint32_t>>
+        verdict_epoch_src_;                // ...scoped to (orig, session)
+    uint64_t verdict_rx_ms_ = 0;           // last accepted verdict (§15.3)
     uint64_t frame_cadence_us_ = 0; // windowed ingress cadence estimate
     uint64_t cadence_start_ms_ = 0;
     uint32_t cadence_frames_ = 0;
@@ -3059,16 +3630,18 @@ struct TxCore {
     int power_tier_ = -1;                         // §11.7 0x0A, -1 = unset
     CalibrationPolicy calib_policy_;              // for a tier re-init
     std::optional<int32_t> power_override_;       // §10.5 latch (volatile)
+    bool backend_relative_ = false;  // §10.5 Pass 150
+    // §10.6 (Pass 151): set when the loaded curve was authored by THIS
+    // backend's calibration, so its numbers are in this backend's space. A
+    // config power_map never sets it — it is not backend-scoped.
+    bool curve_is_offset_space_ = false;
+    bool warned_curve_refused_ = false;
     std::optional<uint8_t> last_commit_mcs_;      // §10.5 clear-restore point
     uint8_t last_commit_level_ = 4;
     uint32_t reports_received_ = 0;
     // §10.6 (Pass 134) report-health window. NOT reset by reset_stats(): it
     // gates whether a calibration may start, and an operator zeroing the
     // stats display must not open that gate.
-    uint64_t report_health_start_ms_ = 0;
-    uint32_t report_health_count_ = 0;
-    uint32_t report_health_hz_milli_ = 0;
-    uint32_t calib_min_report_hz_ = 6;
     std::vector<Stream> streams_;
 
   public:
@@ -3106,12 +3679,12 @@ struct TxCore {
                 // past it, so "skip the resolve" alone strands the last
                 // probe value on the hardware).
                 set_power_override(*power_override_);
-            } else if (has_power_curve()) {
+            } else if (curve_actuates()) {
                 if (last_commit_mcs_) {
                     resolve_and_apply_power(*last_commit_mcs_,
                                             last_commit_level_);
                 }
-            } else if (apply_power_auto) {
+            } else if (apply_power_offset) {
                 // No curve and no override: no in-process authority knows the
                 // pre-run power, but the BACKEND does — this is exactly the
                 // §10.5 `{"auto": true}` condition ("release power authority
@@ -3124,11 +3697,15 @@ struct TxCore {
                 // the actuator on exactly the runs the refusal exists to
                 // catch. Device-confirmed: a bench-range run left the craft
                 // at 15.00 dBm (rung 7's mask ceiling) indefinitely.
+                // §10.5 (Pass 150): "backend auto" on a relative backend is
+                // offset 0 — the uncharacterised efuse default, measured to be
+                // a compressing operating point. Land on the configured safe
+                // offset instead, matching clear_power_override().
                 for (const PowerTarget& t : power_targets_) {
-                    apply_power_auto(t.adapter_idx);
+                    apply_power_offset(t.adapter_idx, t.offset_qdb);
                 }
                 std::fprintf(stderr,
-                             "calibrate: restore -> backend auto "
+                             "calibrate: restore -> safe offset "
                              "(no curve, no override)\n");
             } else {
                 // udp/dev backend: no actuator at all, so there is nothing to
@@ -3151,6 +3728,19 @@ struct TxCore {
             // §10.6: every tx adapter, curve or not (power_targets_) — the
             // run exists precisely because no curve may be loaded yet.
             for (const PowerTarget& t : power_targets_) {
+                if (backend_relative_) {
+                    // §10.6 (Pass 151): the sweep is in offset space, so it
+                    // drives the SAME actuator §10.5 boots this node with,
+                    // bounded by the same key. Belt and braces on the clamp:
+                    // offset_window() already caps the seek, but a probe is
+                    // the one thing in the process that deliberately walks
+                    // toward a wall.
+                    const int32_t v = std::min(*a.set_qdb, t.offset_max_qdb);
+                    if (apply_power_offset) {
+                        (void)apply_power_offset(t.adapter_idx, v);
+                    }
+                    continue;
+                }
                 const int32_t v = t.ceiling
                                       ? std::min(*a.set_qdb, *t.ceiling)
                                       : *a.set_qdb;
@@ -3161,6 +3751,43 @@ struct TxCore {
             selector_.set_profile_pin(*a.pin_rung, *a.pin_rung);
         }
     }
+    // §3.16 (Pass 153): the video input is starved while EITHER direction
+    // runs — our own §10.6 run, or a ground-driven §10.7 run observed as an
+    // active probe run at the receiver half.
+    bool feed_paused() const {
+        return calibrating() || calib_rx_.run_id() != 0;
+    }
+
+    // §3.16 (Pass 153): drain the §10.6 run's probe emissions. Probes go
+    // through send_calib (plain air inject) — they are their own traffic
+    // class, never ride the §7.2 held queue, and with the feed paused there
+    // is no video to pace against anyway.
+    void calibrate_probe_service(uint64_t now) {
+        if (!calibrator_ || !send_calib) return;
+        calibrator_->new_tick();
+        const uint16_t dest = report_gate_.latched_originator();
+        if (dest == 0) return;
+        for (;;) {
+            const DwellProbeOut po = calibrator_->next_probe(now);
+            if (!po.send) break;
+            CalibProbe pr;
+            pr.prefix.originator = originator_;
+            pr.prefix.destination = dest;
+            pr.prefix.session_id = session_;
+            pr.run_id = calibrator_->probe_run_id();
+            pr.dwell_id = calibrator_->probe_dwell_id();
+            pr.seq = po.seq;
+            pr.count = calibrator_->probe_dwell_count();
+            uint8_t buf[mtu_tier::kHighBudget];
+            const size_t n = encode_calib_probe(
+                pr, mtu_effective(), buf, sizeof buf);
+            if (n != 0) {
+                send_calib(buf, n);
+                ++calib_probes_tx_;
+            }
+        }
+    }
+
     bool has_power_curve() const { return !power_.empty(); }
     // §10.6: install/replace the tx adapters' §10.2 curve (calibration
     // artifact or boot auto-load) so the commit resolve uses it.
@@ -3168,9 +3795,19 @@ struct TxCore {
         power_.clear();
         for (const PowerTarget& t : power_targets_) {
             power_.push_back(
-                PowerAdapter{t.name, t.adapter_idx, c, t.ceiling,
+                PowerAdapter{t.name, t.adapter_idx, c,
+                             // §10.6 (Pass 151): in offset space the §10.5
+                             // bound is the ceiling; the §10.3 absolute one
+                             // is not a comparable quantity.
+                             backend_relative_
+                                 ? std::optional<int32_t>(t.offset_max_qdb)
+                                 : t.ceiling,
                              t.presets_qdb, std::nullopt});
         }
+        // An installed curve came from THIS backend's artifact (the Pass 146
+        // fingerprint is backend-scoped), so on a relative backend it holds
+        // offsets and the §10.4 resolve may actuate it.
+        curve_is_offset_space_ = backend_relative_;
     }
     bool calibrating() const {
         return calibrator_ &&
@@ -3197,6 +3834,7 @@ struct RxCore {
                                              1000.0 / cfg.policy.report_hz)
                                        : 0},
                     table_version),
+          probe_window_(table, table_version, McsProbeWindow::Params{}),
           feedback_period_ms_(cfg.policy.report_hz > 0
                                   ? static_cast<uint32_t>(
                                         1000.0 / cfg.policy.report_hz)
@@ -3220,22 +3858,60 @@ struct RxCore {
 
     void on_air(uint8_t adapter, const uint8_t* d, size_t n, uint64_t now,
                 const RxEngine::Deliver& deliver, int8_t rssi = 0,
-                const RxEngine::EarlyDeliver& early_deliver = {}) {
+                const RxEngine::EarlyDeliver& early_deliver = {},
+                uint8_t rx_mcs = kUplinkRxMcsUnknown) {
         const Decoded dec = decode(d, n);
         if (const DataView* v = std::get_if<DataView>(&dec)) {
+            // §9.4 Pass 163: the probe window tracks the video stream only,
+            // scoped to one sender tuple — a different tuple is another
+            // operating context and resets the evidence. Review fix: gate on
+            // the ACCEPTED originator (0 = none yet), or an interleaving
+            // stranger stream (Pass 144: they do reach this callback)
+            // thrash-resets the window and silently suppresses the veto.
+            if (v->hdr.stream_type == stream_type::kRtp &&
+                probe_originator_ != 0 &&
+                v->hdr.prefix.originator == probe_originator_) {
+                const StreamKey key{v->hdr.prefix.originator,
+                                    v->hdr.prefix.session_id,
+                                    v->hdr.stream_id};
+                if (!probe_key_ || !(*probe_key_ == key)) {
+                    probe_window_.reset();
+                    probe_key_ = key;
+                }
+                probe_window_.on_data(v->hdr.seq, v->hdr.active_profile,
+                                      v->hdr.table_version, rx_mcs, now);
+            }
             engine_.on_data(adapter, *v, now, deliver, rssi, early_deliver);
             return;
         }
         if (const SelectorState* s = std::get_if<SelectorState>(&dec)) {
+            bool any_rtp = false;
             for (const RxStreamInfo& info : engine_.streams()) {
-                if (info.stream_type == stream_type::kRtp &&
-                    selector_state_admissible(
+                if (info.stream_type != stream_type::kRtp) {
+                    continue;
+                }
+                any_rtp = true;
+                if (selector_state_admissible(
                         *s, local_table_version_, info.key.originator,
                         info.key.session_id)) {
+                    // §3.15 (Pass 153): latch the accepted tuple — acceptance
+                    // survives the §2 idle teardown a §3.16 pause causes.
+                    word_source_ = {info.key.originator, info.key.session_id};
                     remote_selector_state_ = *s;
                     remote_selector_state_ms_ = now;
                     return;
                 }
+            }
+            // The latch stands in ONLY while no live RTP stream exists (the
+            // teardown case it exists for). With a live stream present, a
+            // non-matching word is a stale session — a rebooted craft
+            // re-latches through its new stream, never through the old latch.
+            if (!any_rtp && word_source_ &&
+                selector_state_admissible(*s, local_table_version_,
+                                          word_source_->first,
+                                          word_source_->second)) {
+                remote_selector_state_ = *s;
+                remote_selector_state_ms_ = now;
             }
         }
     }
@@ -3263,10 +3939,6 @@ struct RxCore {
     // work: it counts reports the radio actually TOOK, so the calibrator can
     // size a burst and then divide by the ground's own exact count instead of
     // reconstructing it from the craft's anchors.
-    void set_probe_budget(uint32_t n) { reporter_.set_probe_budget(n); }
-    void clear_probe_mode() { reporter_.clear_probe_mode(); }
-    bool probing() const { return reporter_.probing(); }
-    bool probe_spent() const { return reporter_.probe_spent(); }
     // The injector's half of the §3.5 emission contract: the number to stamp
     // into the frame at the radio call, and the commit that spends it.
     uint32_t next_report_epoch() const { return reporter_.next_epoch(); }
@@ -3310,10 +3982,27 @@ struct RxCore {
         return static_cast<int>(remote_selector_state_->report_latch_holder);
     }
 
+    // §9.4 Pass 163 guard 3: CRC-errored descriptor rates from the radio
+    // backend, delta-fed by the loop (the bodies were dropped pre-parse).
+    void on_crc_frames(uint8_t rx_mcs, uint32_t count, uint64_t now) {
+        probe_window_.on_crc_frames(rx_mcs, count, now);
+    }
+
+    // §9.4 Pass 163: the loop's active selection scopes the probe feed.
+    void set_probe_originator(uint16_t originator) {
+        probe_originator_ = originator;
+    }
+
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
               const Inject& inject_report, const Inject& inject_nack,
-              bool emit_nacks = true) {
+              bool emit_nacks = true, uint8_t link_verdict_now = 0,
+              const Inject* inject_verdict = nullptr) {
         engine_.tick(now, deliver);
+        // §3.5 Pass 163: refresh the up-candidate evidence for the video
+        // stream before building; unfilled/stale fails closed to kNoProbe.
+        if (probe_key_) {
+            reporter_.set_probe_per(*probe_key_, probe_window_.probe_per(now));
+        }
         // §7.3: LINK_REPORTs ride the same uplink as NACKs. The epoch is
         // stamped by the injector at the radio call, not here — see
         // Reporter::next_epoch().
@@ -3324,6 +4013,34 @@ struct RxCore {
             uint8_t frame[kLinkReportSize];
             if (encode_link_report(r, frame, sizeof(frame)) > 0) {
                 inject_report(frame, sizeof(frame), r.target_originator);
+            }
+            // §3.16 (Pass 159): the verdict travels with report authority —
+            // ≤1 Hz, only while reports flow, only when the sensor has a
+            // cause (Unknown = no radio backend / nothing heard). Its OWN
+            // inject path: the report injector stamps+commits a §3.5 epoch
+            // per frame, which on a 23 B verdict would burn a phantom epoch
+            // into the §10.7 seek.
+            if (inject_verdict != nullptr &&
+                link_verdict_now != link_verdict::kUnknown &&
+                now - verdict_emit_ms_ >= 1000) {
+                LinkVerdictPkt v;
+                v.prefix.originator = originator_;
+                v.prefix.destination = r.target_originator;
+                v.prefix.session_id = session_;
+                v.target_originator = r.target_originator;
+                v.target_session = r.target_session;
+                // Reporter::build leaves r.report_epoch 0 — the real epoch
+                // is stamped into the FRAME at injection. The verdict wants
+                // the sender's current counter (monotone, ties it to the
+                // report stream) WITHOUT committing one: a burned epoch is
+                // phantom loss in the §10.7 seek denominator.
+                v.report_epoch = next_report_epoch();
+                v.verdict = link_verdict_now;
+                uint8_t vf[kLinkVerdictSize];
+                if (encode_link_verdict(v, vf, sizeof(vf)) > 0) {
+                    (*inject_verdict)(vf, sizeof(vf), r.target_originator);
+                    verdict_emit_ms_ = now;
+                }
             }
         }
         if (!emit_nacks) {
@@ -3437,14 +4154,28 @@ struct RxCore {
         }
         bool selector_source_current = false;
         if (remote_selector_state_) {
+            bool any_rtp = false;
             for (const RxStreamInfo& info : engine_.streams()) {
-                if (info.stream_type == stream_type::kRtp &&
-                    selector_state_admissible(
+                if (info.stream_type != stream_type::kRtp) {
+                    continue;
+                }
+                any_rtp = true;
+                if (selector_state_admissible(
                         *remote_selector_state_, local_table_version_,
                         info.key.originator, info.key.session_id)) {
                     selector_source_current = true;
                     break;
                 }
+            }
+            // §3.15 (Pass 153): the acceptance latch keeps the mirrored word
+            // current across the §2 teardown a calibration pause causes —
+            // same no-live-stream gate as the admission path.
+            if (!selector_source_current && !any_rtp && word_source_ &&
+                selector_state_admissible(*remote_selector_state_,
+                                          local_table_version_,
+                                          word_source_->first,
+                                          word_source_->second)) {
+                selector_source_current = true;
             }
         }
         if (selector_source_current &&
@@ -3526,6 +4257,7 @@ struct RxCore {
         next_feedback_ms_ = 0;
         remote_selector_state_.reset();
         remote_selector_state_ms_ = 0;
+        word_source_.reset();  // §3.15: the latch never crosses crafts
     }
 
     std::optional<uint16_t> selected_originator() const {
@@ -3636,6 +4368,13 @@ struct RxCore {
     std::optional<uint8_t> local_table_version_;
     RxEngine engine_;
     Reporter reporter_;
+    // §9.4 Pass 163: RX probe evidence for the accepted sender's video
+    // stream (always-on — rate-verification keeps it inert when nothing
+    // probes or the backend has no PHY rate).
+    McsProbeWindow probe_window_;
+    std::optional<StreamKey> probe_key_;
+    uint16_t probe_originator_ = 0;  // accepted sender; 0 = feed disabled
+    uint64_t verdict_emit_ms_ = 0;  // §3.16 Pass 159 ≤1 Hz emit guard
     uint32_t feedback_period_ms_ = 0;
     uint64_t next_feedback_ms_ = 0;
     uint32_t feedback_epoch_ = 0;
@@ -3644,6 +4383,9 @@ struct RxCore {
     std::vector<LatchStream> latch_scratch_;  // reused; see emit_latch_recovery
     std::optional<SelectorState> remote_selector_state_;
     uint64_t remote_selector_state_ms_ = 0;
+    // §3.15 (Pass 153) acceptance latch: the (originator, session) tuple of
+    // the last summary accepted through a live-consumed RTP stream.
+    std::optional<std::pair<uint16_t, uint32_t>> word_source_;
 };
 
 // ---- shared setup -----------------------------------------------------------
@@ -3726,11 +4468,9 @@ struct UplinkStatsFill {
     int32_t power_qdb = 0;
     uint8_t fingerprint = 0;
     bool stale = false;
-    bool quality_valid = false;
-    uint32_t quality_age_ms = 0;
-    uint32_t report_epoch = 0;
-    uint32_t reports = 0;
-    int32_t rssi_mean = 0;
+    // §3.16 (Pass 153) probe-exchange counters for the local node's run.
+    uint64_t probes_sent = 0;
+    uint64_t tallies_rx = 0;
     uint8_t rx_mcs = kUplinkRxMcsUnknown;
     // §10.3/§10.5/§11.7 0x0A (Pass 135). Only TxCore::fill_stats sets the
     // link.tx_power_* fields, and the ground has no TxCore — so its §15.3
@@ -3788,12 +4528,9 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
         snap.link.uplink_calib_power_qdb = uplink->power_qdb;
         snap.link.uplink_calib_fingerprint = uplink->fingerprint;
         snap.link.uplink_calib_stale = uplink->stale;
-        snap.link.uplink_quality_valid = uplink->quality_valid;
-        snap.link.uplink_quality_age_ms = uplink->quality_age_ms;
-        snap.link.uplink_quality_report_epoch = uplink->report_epoch;
-        snap.link.uplink_quality_reports = uplink->reports;
-        snap.link.uplink_quality_rssi_mean = uplink->rssi_mean;
-        snap.link.uplink_quality_rx_mcs = uplink->rx_mcs;
+        snap.link.calib_probes_sent = uplink->probes_sent;
+        snap.link.calib_tallies_rx = uplink->tallies_rx;
+        snap.link.calib_rx_mcs = uplink->rx_mcs;
         snap.link.tx_power_tier = uplink->tx_power_tier;
         snap.link.tx_power_ceiling_qdb = uplink->tx_power_ceiling_qdb;
         snap.link.tx_power_tier_effective = uplink->tx_power_tier_effective;
@@ -3821,6 +4558,15 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     }
     if (rx != nullptr) {
         rx->fill_stats(snap, now);
+#if WBLINK_RADIO
+        // §15.3 Pass 159 role-dependent view: a radio GROUND shows the
+        // cause it computes (what it sends); the craft's accepted-verdict
+        // fill lives in its own tx fill and is not touched here.
+        if (air != nullptr && air->radio != nullptr) {
+            snap.link.verdict = air->radio->link_verdict();
+            snap.link.verdict_age_ms = 0;
+        }
+#endif
     }
     // §6.3a frame-shm egress: fold each reassembler's frame-level outcomes into
     // the matching stream (by stream_id). recovered_arq / delivered / loss stay
@@ -3964,7 +4710,14 @@ std::string build_info_json(const Loaded& l, uint32_t session,
                 : a.channel_mhz;
         s += "{\"name\":\"" + a.name + "\",\"role\":\"";
         s += (a.role == Role::kTx ? "tx" : "rx");
-        s += "\",\"channel\":" + std::to_string(chan) + "}";
+        s += "\",\"channel\":" + std::to_string(chan);
+        // §15.5 (Pass 154): the per-unit EFUSE identity the §10.6 artifacts
+        // key on; null where the backend reports none (D3 posture visible).
+        const std::string mac =
+            air != nullptr ? air->adapter_mac(i) : std::string{};
+        s += ",\"mac\":";
+        s += mac.empty() ? "null" : "\"" + mac + "\"";
+        s += "}";
     }
     s += "]";
     if (self != nullptr) {  // Pass 113 TX self state
@@ -4032,38 +4785,76 @@ int run_tx(const Loaded& l) {
     TxCore tx(l.cfg, session, l.have_table ? &l.table : nullptr, l.tv,
               air.value->mtu_supported());
     const AdapterCfg* calib_tx_adapter = nullptr;
-    for (const AdapterCfg& a : l.cfg.adapters) {
-        if (a.role == Role::kTx) {
-            calib_tx_adapter = &a;
+    size_t calib_tx_idx = 0;
+    for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+        if (l.cfg.adapters[i].role == Role::kTx) {
+            calib_tx_adapter = &l.cfg.adapters[i];
+            calib_tx_idx = i;
             break;
         }
     }
+    // §10.6 (Pass 154): the canonical calibration identity, resolved ONCE
+    // against the live per-unit EFUSE MAC the backend read at bring-up.
+    // Empty = an identity-less unit on the radio backend — the D3 fail-closed
+    // answer: no calibrator, no artifact read or write, no absolute curve.
+    // The §10.5 safe boot offset still applies, so the node stays flyable.
+    const std::string calib_ident =
+        calib_tx_adapter
+            ? calib_identity(*calib_tx_adapter, l.cfg.air.kind,
+                             air.value->adapter_mac(calib_tx_idx))
+            : "udp";
+    if (calib_tx_adapter != nullptr && calib_ident.empty()) {
+        std::fprintf(stderr,
+                     "calibrate: adapter \"%s\" reports no EFUSE identity — "
+                     "§10.6 calibration and any absolute curve are REFUSED "
+                     "(Pass 154 D3); running at the §10.5 safe boot offset\n",
+                     calib_tx_adapter->name.c_str());
+    }
+    // §10.5 (Pass 150): ONLY devourer's lever is relative. NOT is_radio() —
+    // that is is_rf(), which kernel-monitor also answers true to, and gating on
+    // it refused the §10.2 curve and §10.6 calibration on the one backend where
+    // absolute qdb is CORRECT, making calibration unreachable fleet-wide.
+    //
+    // This must precede init_calibration: §10.6 (Pass 151) derives its sweep
+    // window from the backend's space, so a flag set afterwards would build an
+    // absolute-space calibrator on a relative backend — the exact +27 dB
+    // hazard Pass 150 refused the run to avoid.
+    tx.set_backend_relative(l.cfg.air.kind == AirCfg::Kind::kRadio);
     // §10.6 (Pass 120): craft-resident calibration — engine seeds, artifact
     // persistence, and the boot auto-load with the fingerprint gate. The
     // §10.3 ceiling (Pass 134) comes from the same adapter the sweep drives.
-    tx.init_calibration(l.cfg.policy.calibration,
-                        calib_tx_adapter != nullptr
-                            ? calib_tx_adapter->max_power_qdb
-                            : std::nullopt);
-    {
-        // §3.16 (Pass 125): the craft's half of the identity pair the ground
-        // stale-checks its uplink artifact against. Same canonical identity
-        // §10.6 already keys its own artifact on, hashed to the one byte the
-        // wire has room for.
-        const std::string ident =
-            calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
-        tx.set_quality_identity(
-            crc8_dvbs2(reinterpret_cast<const uint8_t*>(ident.data()),
-                       ident.size()));
+    // Not constructed at all without an identity (Pass 154 D3): a run whose
+    // artifact could never be keyed must refuse at start, not at persist.
+    // The policy seeds (feed-quiet expiry) apply either way — the §3.16
+    // tally receiver runs on a D3 craft too.
+    tx.seed_calib_policy(l.cfg.policy.calibration);
+    if (!calib_ident.empty()) {
+        tx.init_calibration(l.cfg.policy.calibration,
+                            calib_tx_adapter != nullptr
+                                ? calib_tx_adapter->max_power_qdb
+                                : std::nullopt);
     }
+    // §3.16 (Pass 153): the craft's half of the identity pair, stamped
+    // into every TALLY. Same canonical identity §10.6 keys its own
+    // artifact on, hashed to the one byte the wire has room for. An empty
+    // identity hashes to 0 — exactly the wire's "unknown" sentinel.
+    tx.set_calib_identity(
+        crc8_dvbs2(reinterpret_cast<const uint8_t*>(calib_ident.data()),
+                   calib_ident.size()));
     // The last persisted artifact (boot-loaded or written this session) —
     // GET /api/v1/calibration must never report a fingerprint with no body.
     std::optional<CalibArtifact> last_artifact;
     tx.on_calib_artifact = [&](const CalibArtifact& art) {
-        const std::string ident =
-            calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
+        if (calib_ident.empty()) {
+            // Unreachable while D3 refuses the calibrator whole; kept as the
+            // belt so no future start path can persist an unkeyed artifact.
+            std::fprintf(stderr,
+                         "calibrate: artifact write refused — no adapter "
+                         "identity (Pass 154 D3)\n");
+            return;
+        }
         const uint8_t fp = calib_store_write(
-            l.cfg.policy.calibration.artifact_dir, ident, art);
+            l.cfg.policy.calibration.artifact_dir, calib_ident, art);
         if (fp == 0) {
             std::fprintf(stderr, "calibrate: artifact write FAILED (%s)\n",
                          l.cfg.policy.calibration.artifact_dir.c_str());
@@ -4078,12 +4869,28 @@ int run_tx(const Loaded& l) {
         tx.calib_stale_ = false;
         std::fprintf(stderr, "calibrate: artifact persisted fp=0x%02x\n", fp);
     };
-    if (auto stored =
-            calib_store_load(l.cfg.policy.calibration.artifact_dir);
+    if (auto stored = calib_ident.empty()
+                          ? Result<CalibStored>::fail("no identity (D3)")
+                          : calib_store_load(
+                                l.cfg.policy.calibration.artifact_dir);
         stored) {
-        const std::string ident =
-            calib_tx_adapter ? calib_identity(*calib_tx_adapter, l.cfg.air.kind) : "udp";
-        if (stored.value->identity == ident) {
+        const std::string& ident = calib_ident;
+        // §10.6 (Pass 151): the backend-scoped identity proves which BACKEND
+        // authored the artifact, not which SPACE — and on devourer those came
+        // apart exactly once, in the window before Pass 150 refused the run.
+        // Such an artifact holds absolute rungs (4..108) that would now be
+        // read as offsets, clamp onto the §10.5 bound, and park the node on
+        // the uncharacterised efuse default this pass exists to keep it off.
+        // A placement outside the live window is that artifact; refuse it the
+        // same way a fingerprint mismatch is refused.
+        const auto win = tx.offset_window();
+        bool space_ok = true;
+        if (win) {
+            for (const int32_t q : stored.value->artifact.placement_qdb) {
+                if (q < win->first || q > win->second) space_ok = false;
+            }
+        }
+        if (stored.value->identity == ident && space_ok) {
             // Explicit config power_map wins; the artifact fills the gap.
             if (!tx.has_power_curve()) {
                 tx.install_curve(stored.value->curve);
@@ -4096,8 +4903,10 @@ int run_tx(const Loaded& l) {
         } else {
             tx.calib_stale_ = true;  // §10.6: surface, never apply
             std::fprintf(stderr,
-                         "calibrate: STALE artifact (stored %s, live %s)\n",
-                         stored.value->identity.c_str(), ident.c_str());
+                         "calibrate: STALE artifact (stored %s, live %s%s)\n",
+                         stored.value->identity.c_str(), ident.c_str(),
+                         space_ok ? "" : ", placements outside the §10.5 "
+                                         "offset window — wrong power space");
         }
     }
     tx.estimate_airtime = [&](size_t bytes, bool include_pending,
@@ -4105,10 +4914,23 @@ int run_tx(const Loaded& l) {
         return air.value->estimate_airtime_us(bytes, include_pending,
                                               packet_budget);
     };
+    // §10.5 (Pass 150): the relative actuator is backend-agnostic — each
+    // backend resolves the offset against its own calibrated reference.
+    tx.apply_power_offset = [&](size_t idx, int32_t qdb) {
+        return air.value->set_power_offset_qdb(idx, qdb);
+    };
     if (air.value->is_radio()) {
         tx.apply_mode = [&](uint8_t mcs, bool sgi) {
             air.value->set_tx_mode(mcs, sgi);
         };
+        // §9.4 Pass 163: fail-closed — the hook exists only when the
+        // operator armed air.mcs_probe on this stage-0-proven unit.
+        if (l.cfg.air.mcs_probe) {
+            tx.apply_probe = [&](uint16_t period, uint16_t slot,
+                                 uint8_t mcs) {
+                air.value->set_mcs_probe(period, slot, mcs);
+            };
+        }
         tx.apply_power = [&](size_t idx, int32_t qdb) {
             return air.value->set_power_qdb(idx, qdb);
         };
@@ -4170,7 +4992,10 @@ int run_tx(const Loaded& l) {
     ArqTimingTracker arq_timing;
     uint64_t now_us_it = now_us();
     VideoSlotCadence selector_state_cadence(500);
-    VideoSlotCadence uplink_quality_cadence(500);  // §3.16 2 Hz (Pass 125)
+    // §3.15 word while the feed is paused (Pass 153): with no live slots the
+    // prepend below never fires, so a plain 2 Hz timer keeps the operator's
+    // only calibration progress view alive.
+    uint64_t next_paused_word_ms = 0;
     const auto send_raw = [&](const uint8_t* f, size_t n) {
         // Pass 110 operator boundary: the 2 Hz selector summary owns no TX
         // opportunity. When due, prepend it inside an already-active live RTP
@@ -4187,21 +5012,6 @@ int run_tx(const Loaded& l) {
                 if (sn != 0) {
                     (void)selector_state_cadence.note_submitted(
                         air.value->inject(sf, sn), slot_ms);
-                }
-            }
-            // §3.16 (Pass 125): same guard-cost boundary, own cadence. It
-            // rides an already-active live slot and never opens one — video
-            // still ends the slot and alone arms the §7.2 quiet gap, so no
-            // live DATA means no fresh quality, which is exactly what makes
-            // §10.7 refuse to start or abort.
-            if (uplink_quality_cadence.due(live_video_slot, slot_ms)) {
-                if (const std::optional<UplinkQuality> q = tx.uplink_quality()) {
-                    uint8_t qf[kUplinkQualitySize];
-                    const size_t qn = encode_uplink_quality(*q, qf, sizeof(qf));
-                    if (qn != 0) {
-                        (void)uplink_quality_cadence.note_submitted(
-                            air.value->inject(qf, qn), slot_ms);
-                    }
                 }
             }
         }
@@ -4224,6 +5034,11 @@ int run_tx(const Loaded& l) {
     const TxCore::Inject inject_resend = [&](const uint8_t* f, size_t n) {
         air.value->inject_resend(f, n);
         arq_timing.note_resend_submitted(f, n, now_us());
+    };
+    // §3.16 (Pass 153): probes and tallies are control-plane — plain inject,
+    // never the §7.2 held queue (they must not arm or ride quiet gaps).
+    tx.send_calib = [&](const uint8_t* f, size_t n) {
+        air.value->inject(f, n);
     };
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
     // retunes the (single) radio at the TSF-anchored T_switch. In announced
@@ -4337,7 +5152,11 @@ int run_tx(const Loaded& l) {
             }
             if (qdb < -511 || qdb > 511)
                 return "qdb out of range (-511..511)";
-            tx.set_power_override(qdb);
+            // §10.5 (Pass 150): bounded and REJECTED, not clamped — the
+            // operator learns instead of wondering why nothing moved.
+            if (!tx.set_power_override(qdb))
+                return "qdb exceeds power_offset_max_qdb on a role:\"tx\" "
+                       "adapter (§10.5); raise the bound to opt in";
             return "";
         };
         h.calibration_json = [&] {  // §10.6 Pass 120
@@ -4410,16 +5229,19 @@ int run_tx(const Loaded& l) {
             }
             return {200, std::string("{\"ok\":true}")};
         };
-        h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
+        h.fec = [&](int sid, int ip, int pp, int mk, int mr,
+                    std::optional<uint16_t> ep) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
             if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
                 mr < 0 || mr > 255)
                 return "bad fec rates (0..4000 permille, min_k>=1, min_r 0..255)";
+            // §14.1a: the control server already range-checked e_permille;
+            // nullopt here means "inherit p_permille" (full replacement).
             return tx.set_stream_fec(static_cast<uint8_t>(sid),
                                      static_cast<uint16_t>(ip),
                                      static_cast<uint16_t>(pp),
                                      static_cast<uint16_t>(mk),
-                                     static_cast<uint16_t>(mr))
+                                     static_cast<uint16_t>(mr), ep)
                        ? ""
                        : "no frame-shm stream with that id";
         };
@@ -4568,6 +5390,10 @@ int run_tx(const Loaded& l) {
         std::fprintf(stderr, "control: REST on %s (tx)\n",
                      l.cfg.control.bind.c_str());
     }
+    // §10.5 (Pass 150): forced safe boot offset on every role:"tx" adapter,
+    // applied before the first frame goes out — a node must never transmit at
+    // the uncharacterised efuse default even briefly.
+    tx.apply_boot_power_offsets();
     std::fprintf(stderr, "tx: session=%u, running%s\n", session,
                  qg.enabled() ? " (quiet-gap pacing)" : "");
     std::optional<uint16_t> prior_bound_issuer;
@@ -4731,10 +5557,17 @@ int run_tx(const Loaded& l) {
         // Air readiness comes first in the unified wait. SHM readiness only
         // marks a ring pending; a small bounded burst per ring is consumed
         // below without allowing a producer to monopolise the vehicle loop.
+        // §3.16 (Pass 153) input-starve: while a calibration direction runs,
+        // the video input is not read at all — ring event fds stay out of the
+        // wait set, UDP ingress datagrams are consumed and dropped, and the
+        // frame-shm drain below is skipped. venc keeps encoding; frames drop
+        // at the ring (drop-not-block). Resume is the same edge as the
+        // rate/power restore (own run) or the probe-quiet expiry (D-C).
+        const bool feed_paused = tx.feed_paused();
         std::vector<int> ready_fds = air.value->wait_fds();
         const size_t air_fd_count = ready_fds.size();
         for (const ShmIn& si : shm_ins) {
-            if (si.ring) {
+            if (si.ring && !feed_paused) {
                 ready_fds.push_back(si.ring->event_fd());
             }
         }
@@ -4755,12 +5588,15 @@ int run_tx(const Loaded& l) {
         };
         // Held frames need µs-scale reactivity — don't sleep in poll then.
         bool shm_pending = false;
-        for (const ShmIn& si : shm_ins) shm_pending |= si.pending;
+        if (!feed_paused) {
+            for (const ShmIn& si : shm_ins) shm_pending |= si.pending;
+        }
         const int in_timeout =
             held.empty() && !air.value->tx_pending() && !shm_pending ? 2 : 0;
         bindings.value->poll_once(
             in_timeout,
             [&](const IngressEvent& ev) {
+                if (feed_paused) return;  // Pass 153: consumed and dropped
                 tx.on_ingress(ev.stream_id, ev.data, ev.len, now, inject);
             },
             ready_fds, on_ready);
@@ -4773,6 +5609,7 @@ int run_tx(const Loaded& l) {
         const uint64_t service_now = now_ms();
         service_air(service_now);
         for (ShmIn& si : shm_ins) {
+            if (feed_paused) break;  // Pass 153: leave pending for resume
             if (!si.ring || !si.pending) continue;
             // B5: match the buffer to the producer's declared slot size (grows
             // at most once per larger geometry, including a producer swap). An
@@ -4797,6 +5634,18 @@ int run_tx(const Loaded& l) {
             // loop iteration continues draining without waiting for an edge.
         }
         now_us_it = now_us();
+        // §3.15 word while paused (Pass 153): no live slots exist, so the
+        // 2 Hz summary gets its own timer instead of the send_raw prepend.
+        if (feed_paused) {
+            const uint64_t nowp = now_us_it / 1000;
+            if (nowp >= next_paused_word_ms) {
+                const SelectorState st = tx.selector_state(nowp);
+                uint8_t sf[kSelectorStateCalibSize];
+                const size_t sn = encode_selector_state(st, sf, sizeof sf);
+                if (sn != 0) (void)air.value->inject(sf, sn);
+                next_paused_word_ms = nowp + 500;
+            }
+        }
         // §3.2 bit 4 / §11.6 (Pass 89): CSA_ARMED tracks the whole campaign —
         // set on accept, cleared on COMMITTED (or on the §11.5 revert back to
         // IDLE). Driven from follower state rather than pinned at the accept
@@ -4927,6 +5776,14 @@ int run_rx(const Loaded& l) {
     // runs through. Its actuators are wired below, once the radio exists.
     UplinkPower upwr;
     upwr.mcs = l.cfg.air.uplink_mcs;
+    // §10.5/§10.7 (Pass 151): the ground's power space, decided ONCE from the
+    // backend kind and read by the §10.7 sweep window, its actuator, and the
+    // owner's apply alike. Pass 150's second review found this half-converted
+    // — the sweep measured absolute while the applier commanded relative, so
+    // an 84 qdb placement became 108+84 = 192 — so measurement and actuation
+    // move together here or not at all. Every ground in the fleet is on
+    // kernel-monitor today, where this is false and nothing changes.
+    const bool uplink_relative = l.cfg.air.kind == AirCfg::Kind::kRadio;
     if (uplink_adapter != nullptr) {
         upwr.ceiling_qdb = uplink_adapter->max_power_qdb;
         upwr.presets_qdb = uplink_adapter->power_presets_qdb;
@@ -4965,53 +5822,69 @@ int run_rx(const Loaded& l) {
     RxCore rx(l.cfg, session, l.have_table ? &l.table : nullptr,
               l.have_table ? std::optional<uint8_t>(l.tv) : std::nullopt);
 
-    // §3.16 accept gate + §10.7 calibrator. The gate needs the currently
-    // selected DATA source, which the calibrator has no notion of, so the two
-    // stay separate and the poll loop routes samples between them.
-    UplinkQualityGate quality_gate(l.cfg.node.originator, session);
+    // §3.16 (Pass 153): the craft adapter fingerprint arrives on TALLYs now
+    // (D-A ruling) — 0 until the first run's first tally this session.
+    uint8_t craft_tally_fp = 0;
     uint32_t selected_craft_session = 0;
     UplinkCalibParams ucal_params;
     {
         const CalibrationPolicy& cp = l.cfg.policy.calibration;
         ucal_params.seek = Calibrator::seek_params(calib_params_from(cp));
-        // §10.3 (Pass 134): the adapter's opt-in sanity ceiling bounds the
-        // sweep, not only the §10.7 apply below. The ground half carries the
-        // stronger case for it — this placement auto-applies at boot with no
-        // operator between the measurement and the actuator.
-        if (upwr.ceiling_qdb) {
+        if (uplink_relative && uplink_adapter != nullptr &&
+            uplink_adapter->power_offset_max_qdb >
+                uplink_adapter->power_offset_qdb) {
+            // §10.7 (Pass 151): offset space, derived from the same §10.5 keys
+            // that boot this uplink — so the sweep climbs from the safe offset
+            // and stops at the bound. The §10.3 absolute ceiling below is not
+            // a comparable quantity here and is deliberately not folded in.
+            ucal_params.seek.min_qdb = uplink_adapter->power_offset_qdb;
+            ucal_params.seek.max_qdb = uplink_adapter->power_offset_max_qdb;
+            ucal_params.seek.seek_step_qdb = cp.offset_seek_step_qdb;
+            // §10.5 (Pass 153): the window may extend above the efuse
+            // reference, but an unbracketed placement never does.
+            ucal_params.seek.no_bracket_cap_qdb = 0;
+            ucal_params.taper_rung_ceiling = false;
+        } else if (upwr.ceiling_qdb) {
+            // §10.3 (Pass 134): the adapter's opt-in sanity ceiling bounds the
+            // sweep, not only the §10.7 apply below. The ground half carries
+            // the stronger case for it — this placement auto-applies at boot
+            // with no operator between the measurement and the actuator.
             ucal_params.seek.max_qdb =
                 std::min(ucal_params.seek.max_qdb, *upwr.ceiling_qdb);
         }
         ucal_params.settle_ms = static_cast<uint32_t>(cp.settle_ms);
-        ucal_params.probe_epochs =
-            static_cast<uint32_t>(cp.uplink_probe_epochs);
-        ucal_params.verify_epochs =
-            static_cast<uint32_t>(cp.uplink_verify_epochs);
-        ucal_params.liveness_ms = static_cast<uint32_t>(cp.uplink_liveness_ms);
-        ucal_params.drain_ms = static_cast<uint32_t>(cp.uplink_drain_ms);
+        ucal_params.dwell_probe_frames =
+            static_cast<uint16_t>(cp.dwell_probe_frames);
+        ucal_params.dwell_verify_frames =
+            static_cast<uint16_t>(cp.dwell_verify_frames);
+        ucal_params.dwell.probe_pace_us =
+            static_cast<uint32_t>(cp.probe_pace_us);
+        ucal_params.dwell.tally_wait_ms =
+            static_cast<uint32_t>(cp.tally_wait_ms);
+        ucal_params.dwell.tally_retries =
+            static_cast<uint32_t>(cp.tally_retries);
         ucal_params.hard_cap_ms = static_cast<uint32_t>(cp.hard_cap_ms);
-        // §10.7 (Pass 131): rung -> rate identity from the §9.3 table, so a
-        // calibrated placement's GI is the GI the uplink would actually be
-        // commanded to. The seeded defaults already match the authored table;
-        // reading it here means a deployment that authored a different one
-        // agrees without a code change, and core/ still needs no table
-        // dependency — the resolve happens on this side of the seam.
+        // §10.7 (Pass 153): THE rung is the configured operating point; its
+        // rate identity and §10.3 taper level come from the §9.3 table row
+        // that carries it, so a deployment that authored a different table
+        // agrees without a code change (core/ keeps no table dependency).
+        ucal_params.rate =
+            UplinkRate{l.cfg.air.uplink_mcs, l.cfg.air.uplink_sgi};
         if (l.have_table) {
             for (const Profile& pr : l.table.profiles) {
-                if (pr.id < kUplinkRungs) {
-                    ucal_params.rungs[pr.id] =
-                        UplinkRate{pr.mcs, pr.gi == GuardInterval::kShort};
-                    // §10.3 (Pass 134): the same table row carries the per-rung
-                    // power intent the sweep ceiling is tapered by.
-                    ucal_params.levels[pr.id] = pr.tx_power_level;
+                if (pr.mcs == l.cfg.air.uplink_mcs &&
+                    (pr.gi == GuardInterval::kShort) ==
+                        l.cfg.air.uplink_sgi) {
+                    ucal_params.rung_level = pr.tx_power_level;
+                    break;
                 }
             }
         }
     }
     UplinkCalibrator uplink_cal(ucal_params);
-    // The placement for the rung the uplink actually transmits at. §10.7
-    // measures all eight and persists all eight, but only this one is
-    // resolved onto the actuator — the rest are for a future rate policy.
+    // The placement for the rung the uplink actually transmits at — since
+    // Pass 153 the only rung measured; the lookup shape survives so an older
+    // eight-entry artifact resolves the matching entry.
     const auto uplink_measured_qdb = [&]() -> std::optional<int32_t> {
         for (const UplinkPlacement& pl : uplink_cal.placements()) {
             if (pl.mcs == l.cfg.air.uplink_mcs &&
@@ -5056,13 +5929,38 @@ int run_rx(const Loaded& l) {
     // (`active_selection`, `quality_gate`, `operating_chan`) rather than up
     // with the config tier, because the CRAFT half of the identity does not
     // exist at config-load time.
+    // §10.6 (Pass 154): resolved against the live per-unit EFUSE MAC the
+    // backend read at bring-up. Empty = identity-less unit on the radio
+    // backend — §10.7 runs are refused (D3) and no stored artifact can match.
     const std::string uplink_identity =
-        uplink_adapter != nullptr ? calib_identity(*uplink_adapter, l.cfg.air.kind) : "udp";
+        uplink_adapter != nullptr
+            ? calib_identity(*uplink_adapter, l.cfg.air.kind,
+                             air.value->adapter_mac(uplink_idx))
+            : "udp";
+    if (uplink_adapter != nullptr && uplink_identity.empty()) {
+        std::fprintf(stderr,
+                     "uplink: adapter \"%s\" reports no EFUSE identity — "
+                     "§10.7 calibration and any absolute curve are REFUSED "
+                     "(Pass 154 D3); running at the §10.5 safe boot offset\n",
+                     uplink_adapter->name.c_str());
+    }
+    // §3.16 (Pass 153): the ground's receiver half (craft §10.6 downlink
+    // probes → tallies) and the probe-exchange observability counters.
+    DwellReceiver dcal_rx;
+    const uint8_t ground_ident_fp = crc8_dvbs2(
+        reinterpret_cast<const uint8_t*>(uplink_identity.data()),
+        uplink_identity.size());
+    uint64_t ucal_probes_tx = 0;
+    uint64_t ucal_tallies_rx = 0;
+    uint64_t ucal_tallies_tx = 0;
+    uint8_t ucal_rx_mcs = kUplinkRxMcsUnknown;
     std::optional<UplinkArtifact> uplink_artifact;
     uint8_t uplink_artifact_fp = 0;
     bool uplink_artifact_stale = false;
-    if (auto stored =
-            uplink_calib_store_load(l.cfg.policy.calibration.artifact_dir);
+    if (auto stored = uplink_identity.empty()
+                          ? Result<UplinkArtifact>::fail("no identity (D3)")
+                          : uplink_calib_store_load(
+                                l.cfg.policy.calibration.artifact_dir);
         stored) {
         uplink_artifact_fp = uplink_calib_fingerprint(*stored.value);
         if (stored.value->local_adapter_identity != uplink_identity) {
@@ -5074,15 +5972,13 @@ int run_rx(const Loaded& l) {
         }
         uplink_artifact = std::move(*stored.value);
     }
-    // The craft's §3.16 adapter fingerprint as the ARTIFACT records it: the RX
-    // chain the placement was measured against, taken from live feedback and
-    // not from config. 0 until feedback arrives, which is why a fresh boot
-    // resolves to no-artifact until the craft is both selected and reporting.
-    const auto uplink_craft_fp = [&]() -> uint8_t {
-        return quality_gate.have()
-                   ? quality_gate.last().craft_adapter_fingerprint
-                   : uint8_t{0};
-    };
+    // The craft's adapter fingerprint as the ARTIFACT records it: the RX
+    // chain the placement was measured against. Since Pass 153 it arrives on
+    // the run's §3.16 TALLYs (D-A) — so before any run this session it is 0
+    // = UNKNOWN, and the artifact resolve below defers the craft-adapter
+    // check to the rest of the tuple; the first tally with a different
+    // fingerprint flips the artifact STALE through the pairing key.
+    const auto uplink_craft_fp = [&]() -> uint8_t { return craft_tally_fp; };
     const auto uplink_artifact_qdb = [&]() -> std::optional<int32_t> {
         if (!uplink_artifact) return std::nullopt;
         // §10.7: "Apply it only when the same craft is selected and both local
@@ -5090,10 +5986,13 @@ int run_rx(const Loaded& l) {
         // leave hardware at the higher-precedence source." The local half was
         // checked at load; the rest cannot be, so the FULL tuple is checked
         // here, at every resolve — the same tuple the writer stamps in.
+        const uint8_t live_fp = uplink_craft_fp();
+        const uint8_t fp_for_match =
+            live_fp != 0 ? live_fp
+                         : uplink_artifact->craft_adapter_fingerprint;
         if (!uplink_calib_matches(*uplink_artifact, uplink_identity,
-                                  active_selection.originator,
-                                  uplink_craft_fp(), operating_chan,
-                                  op_bw_mhz)) {
+                                  active_selection.originator, fp_for_match,
+                                  operating_chan, op_bw_mhz)) {
             uplink_artifact_stale = true;
             return std::nullopt;
         }
@@ -5145,11 +6044,6 @@ int run_rx(const Loaded& l) {
     // Power precedence now lives in UplinkPower::apply() — ONE copy, which is
     // what this comment used to warn about having four of.
     const auto uplink_restore_actuators = [&]() {
-        // Probe mode first, and unconditionally: it is the one actuator that
-        // is not the adapter's, so an early return on a missing uplink
-        // adapter must not leave the reporter stuck in a spent burst — which
-        // would silence LINK_REPORT entirely, for good.
-        rx.clear_probe_mode();
         if (uplink_adapter == nullptr) return;
         air.value->latch_uplink_rate(l.cfg.air.uplink_mcs,
                                      l.cfg.air.uplink_sgi);
@@ -5160,10 +6054,42 @@ int run_rx(const Loaded& l) {
     // min(qdb, max_power_qdb) per adapter, while GET/§15.3 report the latched
     // request value." UplinkPower::hw_qdb() applies that clamp;
     // reported_qdb() deliberately does not.
+    // §10.5 (Pass 150): the uplink is a role:"tx" adapter like any other, so
+    // it runs the same relative contract. `set_power_qdb` here would be
+    // absolute on kernel-monitor and an OFFSET on devourer — the divergence
+    // this pass removes — and the ground is the half of the fleet that still
+    // transmits on monitor today.
+    // §10.5/§10.7 (Pass 150 review, re-based Pass 151): every value the owner
+    // precedence can produce — artifact placement, power_map resolve, latch —
+    // is in whatever space the §10.7 sweep measured in, so the applier reads
+    // the same `uplink_relative` the sweep window did. Converting one without
+    // the other turned an 84 qdb placement into 108+84 = 192 qdb.
     upwr.apply_qdb = [&](int32_t q) {
+        if (uplink_relative) {
+            (void)air.value->set_power_offset_qdb(uplink_idx, q);
+            return;
+        }
         (void)air.value->set_power_qdb(uplink_idx, q);
     };
-    upwr.apply_auto = [&] { air.value->set_power_auto(uplink_idx); };
+    // "auto" must land on the configured safe offset, never the backend
+    // default (offset 0 = the uncharacterised efuse point).
+    upwr.apply_auto = [&] {
+        if (uplink_adapter != nullptr) {
+            (void)air.value->set_power_offset_qdb(
+                uplink_idx, uplink_adapter->power_offset_qdb);
+        }
+    };
+    // §10.5 forced safe boot offset, before the uplink carries anything.
+    if (uplink_adapter != nullptr) {
+        const bool ok = air.value->set_power_offset_qdb(
+            uplink_idx, uplink_adapter->power_offset_qdb);
+        std::fprintf(stderr,
+                     "power: %s §10.5 boot offset %+d qdb (bound %+d) -> %s\n",
+                     uplink_adapter->name.c_str(),
+                     static_cast<int>(uplink_adapter->power_offset_qdb),
+                     static_cast<int>(uplink_adapter->power_offset_max_qdb),
+                     ok ? "applied" : "NOT APPLIED");
+    }
     uplink_restore_actuators();
     uplink_pairing_key = uplink_pairing_now();
     if (uplink_adapter != nullptr) {
@@ -5220,24 +6146,10 @@ int run_rx(const Loaded& l) {
         // hardware got — reported_qdb() is the half of the split that does
         // not apply the ceiling. The craft half does the same.
         u.tx_power_qdb = upwr.reported_qdb().value_or(0);
-        // §3.16: valid/age track LIVENESS (packet arrival), not counter
-        // progress — that is the clock §10.7's abort watches.
-        u.quality_valid = quality_gate.live(now_ms(), ucal_params.liveness_ms);
-        u.quality_age_ms =
-            quality_gate.have()
-                ? static_cast<uint32_t>(now_ms() - quality_gate.liveness_ms())
-                : 0;
-        if (quality_gate.have()) {
-            const UplinkQuality& q = quality_gate.last();
-            u.report_epoch = q.last_report_epoch;
-            u.reports = q.reports_received;
-            u.rx_mcs = q.last_rx_mcs;
-            u.rssi_mean =
-                q.reports_received != 0
-                    ? static_cast<int32_t>(q.rssi_sum_dbm) /
-                          static_cast<int32_t>(q.reports_received)
-                    : 0;
-        }
+        // §3.16 (Pass 153) probe-exchange counters.
+        u.probes_sent = ucal_probes_tx;
+        u.tallies_rx = ucal_tallies_rx;
+        u.rx_mcs = ucal_rx_mcs;
         return u;
     };
 
@@ -5472,10 +6384,6 @@ int run_rx(const Loaded& l) {
     // Disabled (default) they inject immediately — §7.1 baseline.
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> urgent_ret_held;
-    // §7.2/§10.7: how many queued LINK_REPORTs one quiet gap can absorb.
-    // Ordinary operation queues one, so this only binds during a §10.7 probe
-    // burst — which is exactly where overflowing the gap is invisible loss.
-    static constexpr size_t kReportsPerReturnWindow = 1;
     std::deque<std::pair<std::vector<uint8_t>, uint16_t>> report_ret_held;
     // §7.2 Pass 78: anchored report batches re-fire once at the NEXT return
     // window (spread across two listen gaps; a blind fallback batch is not
@@ -5711,7 +6619,7 @@ int run_rx(const Loaded& l) {
         // Drain the single-shot restore edge here rather than leaving it to
         // the service loop: shutdown never reaches the loop again.
         const UplinkCalibActions ua =
-            uplink_cal.tick(now_ms(), rx.report_epoch(), true, true);
+            uplink_cal.tick(now_ms());
         if (ua.restore) uplink_restore_actuators();
         // Empty on a cache-assignment node, which never gets the issuer
         // handlers — calling it unguarded would throw bad_function_call.
@@ -5744,6 +6652,24 @@ int run_rx(const Loaded& l) {
                 return !l.cfg.policy.csa.psk.empty() ||
                        discovery.token_for(orig).has_value();
             },
+            // §15.5a (Pass 155): frame-free sense of the scout adapter;
+            // nullopt on sensor-less backends.
+            [&](size_t a) { return air.value->iface()->rx_sense(a); },
+            // §15.5a (Pass 161): calibration-domain key + §3.16 verdict.
+            [&, scout_idx]() -> std::string {
+                const std::string m =
+                    air.value->iface()->adapter_mac(scout_idx);
+                return m.empty() ? "idx/" + std::to_string(scout_idx)
+                                 : "mac/" + m;
+            },
+            [&]() -> uint8_t {
+#if WBLINK_RADIO
+                if (air.value->radio != nullptr) {
+                    return air.value->radio->link_verdict();
+                }
+#endif
+                return 0;
+            },
         },
         op_bw_mhz, op_chan, l.cfg.node.net_id, scout_idx);
     // §15.5 REST control plane. RX/ground node owns the CSA trigger (replaces
@@ -5771,7 +6697,7 @@ int run_rx(const Loaded& l) {
         h.discovery_json = [&] {
             return discovery.json(now_ms(), rx.stream_keys());
         };
-        h.scout_results = [&] { return scout.results_json(); };
+        h.scout_results = [&] { return scout.results_json(now_ms()); };
         h.selection_json = [&] {
             const uint64_t at = now_ms();
             size_t following = 0;
@@ -5964,6 +6890,22 @@ int run_rx(const Loaded& l) {
                     if (target < 0) {
                         return "quickconnect requires target.originator";
                     }
+                    // §15.5a (Pass 161) one-classifier rule: a fresh
+                    // Weak/Saturated on the ACTIVE link means the impairment
+                    // is range or self-jam — a channel move will not help.
+#if WBLINK_RADIO
+                    if (air.value->radio != nullptr) {
+                        const uint8_t v = air.value->radio->link_verdict();
+                        if (v == link_verdict::kWeak ||
+                            v == link_verdict::kSaturated) {
+                            return std::string("refused: active impairment ") +
+                                   (v == link_verdict::kWeak ? "WEAK"
+                                                             : "SATURATED") +
+                                   " is not channel-attributable "
+                                   "(§15.5a Pass 161)";
+                        }
+                    }
+#endif
                     return do_claim(target, 0);  // pick the emptiest channel
                 }
                 cancel_calibration("scout sweep");
@@ -5996,6 +6938,20 @@ int run_rx(const Loaded& l) {
                 if (qdb < -511 || qdb > 511) {
                     return "qdb out of range (-511..511)";
                 }
+                // §10.5 (Pass 151): the bound follows the space, because the
+                // latch flows into UplinkPower::apply_qdb — which is the
+                // RELATIVE actuator once `uplink_relative`. Unbounded there, a
+                // plain `{"qdb":84}` becomes +21 dB of offset from REST, which
+                // is the hazard this whole conversion exists to remove. On an
+                // absolute ground (every ground in the fleet today) the value
+                // is an absolute qdb and a relative bound would reject every
+                // sane one, so it stays unbounded exactly as before.
+                if (uplink_relative && uplink_adapter != nullptr &&
+                    qdb > uplink_adapter->power_offset_max_qdb) {
+                    return "qdb exceeds power_offset_max_qdb on this "
+                           "role:\"tx\" adapter (§10.5); raise the bound to "
+                           "opt in";
+                }
                 upwr.override_qdb = qdb;
                 uplink_restore_actuators();
                 return "";
@@ -6027,12 +6983,9 @@ int run_rx(const Loaded& l) {
                 s += ",\"fingerprint\":" + std::to_string(u.fingerprint);
                 s += ",\"stale\":";
                 s += u.stale ? "true" : "false";
-                s += ",\"quality\":{\"valid\":";
-                s += u.quality_valid ? "true" : "false";
-                s += ",\"age_ms\":" + std::to_string(u.quality_age_ms);
-                s += ",\"last_report_epoch\":" + std::to_string(u.report_epoch);
-                s += ",\"reports_received\":" + std::to_string(u.reports);
-                s += ",\"rssi_mean\":" + std::to_string(u.rssi_mean);
+                s += ",\"probes\":{\"sent\":" +
+                     std::to_string(u.probes_sent);
+                s += ",\"tallies_rx\":" + std::to_string(u.tallies_rx);
                 s += ",\"rx_mcs\":" + std::to_string(u.rx_mcs);
                 s += "},\"artifact\":";
                 if (uplink_artifact) {
@@ -6208,9 +7161,6 @@ int run_rx(const Loaded& l) {
                                ? "craft has no report latch holder"
                                : "another ground holds the craft's report latch";
                 }
-                if (!quality_gate.live(now_ms(), ucal_params.liveness_ms)) {
-                    return "no fresh §3.16 feedback";
-                }
                 if (upwr.override_qdb) {
                     return "§10.5 TX-power override is latched";
                 }
@@ -6218,12 +7168,22 @@ int run_rx(const Loaded& l) {
                 if (issuer.active()) return "CSA campaign active (issuer)";
                 if (follower.campaign_active()) return "CSA campaign active";
                 // The craft must not be calibrating its own downlink: §10.7
-                // drives ground power to min_qdb, which starves the report
-                // stream every §10.6 dwell and its abort clock depend on.
+                // drives ground power to min_qdb, which starves the uplink
+                // return path every §10.6 tally rides (§3.16).
                 if (rx.craft_calibrating()) {
                     return "craft downlink calibration is running";
                 }
-                if (!uplink_cal.start(now_ms(), rx.report_epoch())) {
+                // Pass 153: no feedback-freshness or floor precondition —
+                // with the craft's feed paused the contention floor is
+                // structurally zero (absolute walls), and probe/tally
+                // delivery is its own health check.
+                if (uplink_identity.empty()) {
+                    // Pass 154 D3: an identity-less unit cannot key the
+                    // artifact §10.7 exists to persist — refuse at start,
+                    // not at persist.
+                    return "adapter reports no EFUSE identity (Pass 154 D3)";
+                }
+                if (!uplink_cal.start(now_ms())) {
                     return "calibration already running";
                 }
                 uplink_cal_craft = active_selection.originator;
@@ -6476,6 +7436,14 @@ int run_rx(const Loaded& l) {
         const uint64_t now = now_ms();
         now_us_it = now_us();
         deliver_now = now;  // the deliver lambda's clock for reassembler pushes
+        if (aim_log_enabled()) {
+            static uint64_t aim_next_dump_ms = 0;
+            if (now >= aim_next_dump_ms) {
+                aim_next_dump_ms = now + 30000;
+                g_aim_release.dump("release_lateness");
+                g_aim_read_tsf.dump("read_tsf_cost");
+            }
+        }
         // Fire the coalesced return window. Reports prefer an EOB midpoint and
         // degrade to opportunistic return only after the bounded fallback.
         const bool have_returns =
@@ -6500,6 +7468,11 @@ int run_rx(const Loaded& l) {
             }
             csa_copy_held.reset();
             csa_copy_fallback_us.reset();
+        }
+        if (return_deadline_due && aim_log_enabled()) {
+            // Issue #99: how late past the computed §7.2 deadline the host
+            // loop actually released the window.
+            g_aim_release.add(now_us_it - *ret_at_us);
         }
         if (return_deadline_due || report_fallback_due) {
             for (const auto& [f, target] : urgent_ret_held) {
@@ -6539,8 +7512,7 @@ int run_rx(const Loaded& l) {
             // bench as the craft seeing ~4.8 epochs/s instead of 10 and
             // tripping REPORT_TIMEOUT on staleness — a healthy-looking link
             // (RSSI -54, 2.7M packets) with a starved return path.
-            size_t window_budget =
-                rx.probing() ? kReportsPerReturnWindow : report_ret_held.size();
+            size_t window_budget = report_ret_held.size();
             while (!report_ret_held.empty() && window_budget-- > 0) {
                 auto& [f, target] = report_ret_held.front();
                 // Stamps in place, so the redundancy copy must be taken AFTER
@@ -6560,12 +7532,7 @@ int run_rx(const Loaded& l) {
                 ++ret_window_misses;
             }
             urgent_ret_held.clear();
-            // During a burst, whatever did not fit is the next window's batch
-            // (bounded by the burst size, issued once per dwell). Outside one
-            // the loop above drained it, so this is a no-op — but it is stated
-            // rather than assumed, because leaving stale reports queued on the
-            // ordinary path is exactly the regression above.
-            if (!rx.probing()) report_ret_held.clear();
+            report_ret_held.clear();
             ret_at_us.reset();
             report_fallback_us.reset();
             ret_tsf_anchored = false;
@@ -6579,16 +7546,7 @@ int run_rx(const Loaded& l) {
         // abort, the §10.5 latch) has no other drain point. Gating this on
         // kRunning stranded probe power on exactly those paths.
         {
-            const UplinkCalibActions ua = uplink_cal.tick(
-                now_ms(), rx.report_epoch(),
-                quality_gate.live(now_ms(), ucal_params.liveness_ms),
-                // The burst is finished when it has been built AND the paced
-                // queue has actually gone out. `probe_spent()` alone is the
-                // BUILD signal; with §7.2 pacing a 400-probe verify takes ~50
-                // windows to leave, which is longer than the drain — opening
-                // the drain on the build signal would score a dwell whose
-                // probes were still departing.
-                rx.probe_spent() && report_ret_held.empty());
+            const UplinkCalibActions ua = uplink_cal.tick(now_ms());
             // Rate before power (§10.7 R4 order): the rung is what the power
             // is being measured FOR, so commanding power first would spend a
             // settle window at the new level on the old rung.
@@ -6596,11 +7554,44 @@ int run_rx(const Loaded& l) {
                 air.value->set_tx_mode(ua.set_rate->mcs, ua.set_rate->short_gi);
             }
             if (ua.set_qdb && uplink_adapter != nullptr) {
-                (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
+                // §10.7 (Pass 151): the probe drives the same actuator the
+                // window was derived against — see `uplink_relative`.
+                if (uplink_relative) {
+                    (void)air.value->set_power_offset_qdb(
+                        uplink_idx,
+                        std::min(*ua.set_qdb,
+                                 uplink_adapter->power_offset_max_qdb));
+                } else {
+                    (void)air.value->set_power_qdb(uplink_idx, *ua.set_qdb);
+                }
             }
-            // §10.7 (Pass 132): the burst. 0 opens the drain window, so the
-            // craft's counter settles before the dwell is scored.
-            if (ua.probe_budget) rx.set_probe_budget(*ua.probe_budget);
+            // §3.16 (Pass 153): drain the run's probe emissions — MTU-padded,
+            // paced by the engine, unicast to the craft the run is bound to.
+            if (uplink_adapter != nullptr &&
+                uplink_cal.state() == CalibState::kRunning &&
+                uplink_cal_craft != 0) {
+                uplink_cal.new_tick();
+                for (;;) {
+                    const DwellProbeOut po = uplink_cal.next_probe(now_ms());
+                    if (!po.send) break;
+                    CalibProbe pr;
+                    pr.prefix.originator = l.cfg.node.originator;
+                    pr.prefix.destination = uplink_cal_craft;
+                    pr.prefix.session_id = session;
+                    pr.run_id = uplink_cal.probe_run_id();
+                    pr.dwell_id = uplink_cal.probe_dwell_id();
+                    pr.seq = po.seq;
+                    pr.count = uplink_cal.probe_dwell_count();
+                    uint8_t buf[mtu_tier::kHighBudget];
+                    const size_t n = encode_calib_probe(
+                        pr, mtu_effective, buf, sizeof buf);
+                    if (n != 0) {
+                        (void)air.value->inject_return(uplink_cal_craft, buf,
+                                                       n, false);
+                        ++ucal_probes_tx;
+                    }
+                }
+            }
             if (ua.restore) uplink_restore_actuators();
             // §10.7 per-dwell trace. The campaign's deliverable is a per-run
             // record (duration, samples/dwell, loss, RSSI, bracket); without
@@ -6636,17 +7627,22 @@ int run_rx(const Loaded& l) {
                     uplink_restore_actuators();
                 }
             }
-            if (ua.artifact_ready) {
+            if (ua.artifact_ready && uplink_identity.empty()) {
+                // Unreachable while D3 refuses the start; kept as the same
+                // belt the craft persist carries — no future start path may
+                // persist an artifact keyed on "" (it would match nothing
+                // and read permanently stale).
+                std::fprintf(stderr,
+                             "uplink: artifact write refused — no adapter "
+                             "identity (Pass 154 D3)\n");
+            } else if (ua.artifact_ready) {
                 UplinkArtifact art;
                 art.local_adapter_identity = uplink_identity;
                 art.craft_originator = active_selection.originator;
                 // The craft half of the pairing comes from the feedback that
                 // produced this measurement, not from config — it identifies
                 // the RX chain the placement was actually measured against.
-                art.craft_adapter_fingerprint =
-                    quality_gate.have()
-                        ? quality_gate.last().craft_adapter_fingerprint
-                        : 0;
+art.craft_adapter_fingerprint = craft_tally_fp;
                 art.channel_mhz = operating_chan;
                 art.bw_mhz = op_bw_mhz;
                 art.t_unix = static_cast<int64_t>(::time(nullptr));
@@ -6665,8 +7661,7 @@ int run_rx(const Loaded& l) {
                                  "run FAILED, placement not persisted\n",
                                  l.cfg.policy.calibration.artifact_dir.c_str());
                     uplink_cal.fail_persist();
-                    const UplinkCalibActions fa = uplink_cal.tick(
-                        now_ms(), rx.report_epoch(), true, true);
+                    const UplinkCalibActions fa = uplink_cal.tick(now_ms());
                     if (fa.restore) uplink_restore_actuators();
                 } else {
                     uplink_artifact = std::move(art);
@@ -6725,6 +7720,17 @@ int run_rx(const Loaded& l) {
                 meta.rssi != 0 ? meta.rssi : l.cfg.loopback.rssi_dbm;
             // §11 taps (cheap header decode; DATA still flows to the engine).
             const Decoded dec = decode(d, n);
+            if (mcs_trace_enabled()) {  // #101 stage-0 verifier (Tier-2)
+                if (const DataView* dv = std::get_if<DataView>(&dec)) {
+                    // sid: seq spaces are per-stream — a gap analysis over
+                    // this trace must never conflate streams' counters.
+                    std::fprintf(stderr,
+                                 "mcstrace seq=%u mcs=%u ad=%u rssi=%d sid=%u\n",
+                                 dv->hdr.seq, meta.rx_mcs, meta.adapter_id,
+                                 static_cast<int>(rssi),
+                                 static_cast<unsigned>(dv->hdr.stream_id));
+                }
+            }
             discovery.observe(dec, now, meta.net_id);
             scout.on_frame(meta, dec, d, n);  // §15.5a sweep aggregation
             // §15.5a (Pass 144): the sweep widen is node-wide, so foreign
@@ -6763,15 +7769,56 @@ int run_rx(const Loaded& l) {
                 }
                 return;
             }
-            // §3.16: uplink feedback from the craft we are currently taking
-            // DATA from. The gate owns every accept rule; all that happens
-            // here is routing the sample.
-            if (const UplinkQuality* uq = std::get_if<UplinkQuality>(&dec)) {
-                const QualitySample s = quality_gate.accept(
-                    *uq, active_selection.originator, selected_craft_session,
-                    now);
-                uplink_cal.on_sample(s, now);
+            // §3.16 (Pass 153): the calibration family, scoped to the craft
+            // we are currently taking DATA from.
+            if (const CalibProbe* cp = std::get_if<CalibProbe>(&dec)) {
+                // Ground as RECEIVER: the craft's §10.6 downlink probes.
+                if (cp->prefix.destination == l.cfg.node.originator &&
+                    cp->prefix.originator == active_selection.originator &&
+                    (selected_craft_session == 0 ||
+                     cp->prefix.session_id == selected_craft_session)) {
+                    const DwellTallyOut t = dcal_rx.on_probe(
+                        cp->run_id, cp->dwell_id, cp->seq, cp->count,
+                        meta.rssi, meta.rx_mcs, now);
+                    if (t.send && uplink_adapter != nullptr) {
+                        CalibTally out;
+                        out.prefix.originator = l.cfg.node.originator;
+                        out.prefix.destination = cp->prefix.originator;
+                        out.prefix.session_id = session;
+                        out.run_id = t.run_id;
+                        out.dwell_id = t.dwell_id;
+                        out.received = t.received;
+                        out.rssi_sum_dbm = t.rssi_sum_dbm;
+                        out.rx_mcs = t.rx_mcs;
+                        out.adapter_fingerprint = ground_ident_fp;
+                        uint8_t tb[kCalibTallySize];
+                        const size_t tn =
+                            encode_calib_tally(out, tb, sizeof tb);
+                        if (tn != 0) {
+                            (void)air.value->inject_return(
+                                cp->prefix.originator, tb, tn, false);
+                            ++ucal_tallies_tx;
+                        }
+                    }
+                }
                 return;
+            }
+            if (const CalibTally* ct = std::get_if<CalibTally>(&dec)) {
+                // Ground as SENDER: the craft's per-dwell receipt for our
+                // §10.7 uplink run.
+                if (ct->prefix.destination == l.cfg.node.originator &&
+                    ct->prefix.originator == active_selection.originator) {
+                    uplink_cal.on_tally(ct->run_id, ct->dwell_id,
+                                        ct->received, ct->rssi_sum_dbm,
+                                        ct->rx_mcs, ct->adapter_fingerprint);
+                    craft_tally_fp = ct->adapter_fingerprint;
+                    ucal_rx_mcs = ct->rx_mcs;
+                    ++ucal_tallies_rx;
+                }
+                return;
+            }
+            if (std::holds_alternative<ExtUnknown>(dec)) {
+                return;  // §3.16: newer peer — feature unavailable
             }
             if (const DataView* v = std::get_if<DataView>(&dec)) {
                 // The craft's session comes from the stream we are actually
@@ -6818,7 +7865,7 @@ int run_rx(const Loaded& l) {
                 return;  // a ground never acts on a command
             }
             rx.on_air(meta.adapter_id, d, n, now, deliver, rssi,
-                      early_deliver);
+                      early_deliver, meta.rx_mcs);
             if (qg.enabled() && frame_is_paced_eob(d, n)) {
                 // Anchor on the SAME adapter's TSF (clocks never cross
                 // adapters); a failed read falls back to host arrival.
@@ -6844,8 +7891,53 @@ int run_rx(const Loaded& l) {
         service_cache_repair(now);
         // §6.4 RX-local emission gate (§15.5 POST /api/v1/arq) composes with
         // the quiet-gap repair-tail hold.
+#if WBLINK_RADIO
+        // §3.16 (Pass 159): the node cause from the shared quality drain;
+        // Unknown off the radio backend, and the verdict frame rides its own
+        // inject (no §3.5 epoch stamp/commit — see RxCore::tick).
+        const uint8_t lv = air.value->radio != nullptr
+                               ? air.value->radio->link_verdict()
+                               : link_verdict::kUnknown;
+#else
+        const uint8_t lv = link_verdict::kUnknown;
+#endif
+        const RxCore::Inject inject_verdict =
+            [&](const uint8_t* f, size_t n, uint16_t target) {
+                uint8_t tmp[kLinkVerdictSize];
+                if (n > sizeof(tmp)) return;
+                std::memcpy(tmp, f, n);
+                (void)air.value->inject_return(target, tmp, n, false);
+            };
+        // §9.4 Pass 163: scope the probe feed to the accepted sender, then
+        // feed CRC-errored descriptor rates as deltas (guard 3 — the
+        // backend dropped the bodies pre-parse).
+        rx.set_probe_originator(active_selection.originator);
+        {
+            static uint64_t crc_last[kRxMcsBuckets] = {};
+            uint64_t crc_now[kRxMcsBuckets];
+            if (air.value->crc_mcs_totals(crc_now)) {
+                for (size_t m = 0; m < kRxMcsBuckets; ++m) {
+                    if (crc_now[m] < crc_last[m]) {
+                        // Counter regressed (backend recreate): resync
+                        // without feeding a wrapped delta.
+                        crc_last[m] = crc_now[m];
+                        continue;
+                    }
+                    const uint64_t d = crc_now[m] - crc_last[m];
+                    if (d != 0) {
+                        rx.on_crc_frames(
+                            static_cast<uint8_t>(m),
+                            static_cast<uint32_t>(
+                                std::min<uint64_t>(d, 0xFFFFFFFFull)),
+                            now);
+                    }
+                    crc_last[m] = crc_now[m];
+                }
+            }
+        }
         rx.tick(now, deliver, inject_report, inject_nack,
-                arq_rx_enabled && (!qg.enabled() || repair_tail_closed));
+                arq_rx_enabled && (!qg.enabled() || repair_tail_closed), lv,
+                &inject_verdict);
         air.value->heartbeat(l.cfg.node.originator, session, now);
         // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
         // so a stalled block never wedges frame-shm egress.
@@ -7382,16 +8474,19 @@ int run_loopback(const Loaded& l) {
                                static_cast<uint8_t>(mx));
             return "";
         };
-        h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
+        h.fec = [&](int sid, int ip, int pp, int mk, int mr,
+                    std::optional<uint16_t> ep) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
             if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
                 mr < 0 || mr > 255)
                 return "bad fec rates (0..4000 permille, min_k>=1, min_r 0..255)";
+            // §14.1a: the control server already range-checked e_permille;
+            // nullopt here means "inherit p_permille" (full replacement).
             return tx.set_stream_fec(static_cast<uint8_t>(sid),
                                      static_cast<uint16_t>(ip),
                                      static_cast<uint16_t>(pp),
                                      static_cast<uint16_t>(mk),
-                                     static_cast<uint16_t>(mr))
+                                     static_cast<uint16_t>(mr), ep)
                        ? ""
                        : "no frame-shm stream with that id";
         };

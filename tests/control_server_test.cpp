@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <cstdlib>
+#include <optional>
 #include <cstring>
 #include <string>
 
@@ -83,6 +84,8 @@ int main() {
     std::string ucal_action, ucal_refuse;
     int ucal_calls = 0;
     int latch_calls = 0, latch_clear = -1, latch_orig = -1;
+    std::optional<uint16_t> fec_e;  // §14.1a; nullopt = inherit p_permille
+    int fec_calls = 0;
     int fec_sid = -1, fec_i = -1, fec_p = -1, fec_k = -1, fec_r = -1;
     bool fec_ok = true;
     int reset_calls = 0;
@@ -141,12 +144,15 @@ int main() {
         ++ucal_calls;
         return ucal_refuse;  // non-empty = failed prerequisite -> 409
     };
-    h.fec = [&](int sid, int ip, int pp, int mk, int mr) -> std::string {
+    h.fec = [&](int sid, int ip, int pp, int mk, int mr,
+                std::optional<uint16_t> ep) -> std::string {
         fec_sid = sid;
         fec_i = ip;
         fec_p = pp;
         fec_k = mk;
         fec_r = mr;
+        fec_e = ep;  // §14.1a: nullopt = inherit p_permille
+        ++fec_calls;
         return fec_ok ? "" : "no frame-shm stream with that id";
     };
     h.reset_stats = [&] { ++reset_calls; };
@@ -468,6 +474,28 @@ int main() {
         CHECK_EQ_U(fec_p, 120);
         CHECK_EQ_U(fec_k, 4);
         CHECK_EQ_U(fec_r, 3);
+        CHECK(!fec_e.has_value());  // §14.1a: omitted => inherit p_permille
+    }
+    // §14.1a e_permille: accepted, explicit null clears, out-of-range and
+    // non-integer are 400s that never reach the handler (a throw here would
+    // unwind out of the server, so the type guard is the point).
+    {
+        auto post = [&](const std::string& body) {
+            return status_of(roundtrip(
+                s, port,
+                "POST /api/v1/fec HTTP/1.0\r\nContent-Length: " +
+                    std::to_string(body.size()) + "\r\n\r\n" + body));
+        };
+        CHECK_EQ_U(post("{\"stream_id\":0,\"e_permille\":0}"), 200);
+        CHECK(fec_e.has_value());
+        CHECK_EQ_U(*fec_e, 0u);  // 0 is a value, not "unset"
+        CHECK_EQ_U(post("{\"stream_id\":0,\"e_permille\":null}"), 200);
+        CHECK(!fec_e.has_value());
+        const int before = fec_calls;
+        CHECK_EQ_U(post("{\"stream_id\":0,\"e_permille\":4001}"), 400);
+        CHECK_EQ_U(post("{\"stream_id\":0,\"e_permille\":-1}"), 400);
+        CHECK_EQ_U(post("{\"stream_id\":0,\"e_permille\":\"x\"}"), 400);
+        CHECK_EQ_U(fec_calls, before);  // none of them actuated
     }
     // fec min_r defaults to 2 when the body omits it.
     {

@@ -96,10 +96,20 @@ class MonAir : public AirIface {
     size_t tx_index() const override;
     // Frames go on real RF through the kernel driver.
     bool is_rf() const override { return true; }
+    // Deliberately empty: kernel-monitor is deprecated-frozen (ruling #120)
+    // and keeps its own §10.6 identity tiers (calib_id/ifname) — it gains no
+    // Pass 154 MAC leg.
+    std::string adapter_mac(size_t) const override { return {}; }
+    // No frame-free sensor through nl80211 monitor RX; §15.5a occupancy
+    // falls back structurally (util == wifi_util) — frozen, #120.
+    std::optional<AirSense> rx_sense(size_t) override { return std::nullopt; }
 
     // --- control plane (main thread only) --------------------------------
     // Committed operating point → stamped into each frame's radiotap MCS.
     void set_tx_mode(uint8_t mcs, bool sgi) override;
+    // §9.4 Pass 163: probing is radio-only (`air.mcs_probe` refused here,
+    // #120 frozen backend) — frames always fly the committed mode.
+    void set_mcs_probe(uint16_t, uint16_t, uint8_t) override {}
     // §15.5a scout: decouple the two net_id roles at runtime. The scout widens
     // the RX filter to hear all net_ids during a sweep, then narrows it to the
     // claimed craft's net_id post-lock; the stamp follows so return traffic
@@ -112,6 +122,7 @@ class MonAir : public AirIface {
     // actuation matrix (Pass 114). False on CLI failure — callers must not
     // cache the value as applied (§10.5).
     bool set_power_qdb(size_t adapter, int32_t qdb) override;
+    bool set_power_offset_qdb(size_t adapter, int32_t qdb) override;
     // §10.5 auto restore: `iw set txpower auto` — hand power back to the
     // driver default / per-rate TXAGC curve (the mon-up.sh posture).
     bool set_power_auto(size_t adapter) override;

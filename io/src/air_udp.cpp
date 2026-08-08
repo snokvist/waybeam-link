@@ -288,6 +288,16 @@ bool UdpAir::set_power_qdb(size_t adapter, int32_t qdb) {
     return true;  // logged intent; accepted like an in-process write
 }
 
+// §10.5 (Pass 150): no radio, so the relative contract is accepted like the
+// absolute one — the udp-air harness models intent, not hardware.
+bool UdpAir::set_power_offset_qdb(size_t adapter, int32_t qdb) {
+    (void)adapter;
+    (void)qdb;
+    // No actuator: false, so the §10.5 boot log says NOT APPLIED and the latch
+    // does not report success for a write that reached no hardware.
+    return false;
+}
+
 bool UdpAir::set_power_auto(size_t adapter) {
     (void)adapter;
     return true;

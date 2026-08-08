@@ -35,6 +35,9 @@ struct StreamFecCfg {
     FecScheme scheme = FecScheme::kNone;
     uint16_t i_rate_permille = 250;
     uint16_t p_rate_permille = 100;
+    // §14.1a non-referenced (SVC-T droppable) class. UNSET => inherit
+    // p_rate_permille, i.e. identical to a config predating Pass 149.
+    std::optional<uint16_t> e_rate_permille;
     uint16_t min_k = 3;
     uint16_t min_r = 2;  // §14.1 (Pass 98) minimum repair floor per FEC'd frame
 };
@@ -74,14 +77,31 @@ struct AdapterCfg {
     // udp/radio backends (devourer matches on `bus`).
     std::string ifname;
     // §10.7 (Pass 146): explicit calibration identity for this physical
-    // adapter. Wins over every derived form; the only option for a
-    // dongle whose USB serial is blank or duplicated across a fleet.
+    // adapter. kernel-monitor only since Pass 154 (frozen, ruling #120) —
+    // on the radio backend identity is derived from the EFUSE MAC.
     std::string calib_id;
+    // §15.2 (Pass 154): EFUSE-MAC pin for this stanza, lowercase
+    // "aa:bb:cc:dd:ee:ff". Radio backend only; match precedence
+    // mac > bus > first-free, with bus kept as an explicit port pin.
+    // Absent at bring-up = D2 fallback (safe offset, curve withheld).
+    std::string mac;
     Role role = Role::kRx;
     uint16_t channel_mhz = 0;  // center freq MHz, band-agnostic (§11.1 style)
     uint8_t bw = 20;           // 20 / 40 / 80
     std::string power_map;     // §10.2 per-adapter absolute power table path
-    std::optional<int32_t> max_power_qdb;  // §10.3 opt-in sanity ceiling
+    // §10.3 (Pass 150): NO LONGER a TX ceiling. On kernel-monitor this is the
+    // absolute REFERENCE the §10.5 relative offset applies to; on devourer the
+    // efuse per-rate table is the reference and this is ignored with a warning.
+    std::optional<int32_t> max_power_qdb;
+    // §10.5 (Pass 150) relative TX offset in quarter-dB against the backend's
+    // calibrated reference, applied at boot on every role:"tx" adapter.
+    // Seed -24 (-6 dB) — a SEED from one 8822EU, not a measurement; 0 is the
+    // uncharacterised efuse default and was measured to be compressing.
+    int32_t power_offset_qdb = -24;
+    // §10.5 bound on the runtime latch. Default 0 keeps the node at or below
+    // its chip's calibrated table. Positives are supported but must be opted
+    // into: efuse tables are per-module and some ship conservative.
+    int32_t power_offset_max_qdb = 0;
     // §10.3/§11.7 0x0A (Pass 135): selectable ceilings, <=5 per the §11.7
     // preset-index bound. Each entry is clamped to max_power_qdb at load, so
     // the runtime path can only ever LOWER power.
@@ -120,6 +140,11 @@ struct SelectPolicy {
     int8_t rssi_fade_arm_dbm = -65;
     double promote_rssi_hyst_db = 6.0;
     double promote_dwell_s = 0.5;
+    // §9.4 Pass 160: Saturated-verdict freshness window for the climb gate.
+    double verdict_ttl_s = 3.0;
+    // §9.4 Pass 163 probe veto: threshold + evidence freshness (§17 seeds).
+    uint16_t probe_veto_permille = 50;
+    double probe_veto_ttl_s = 3.0;
     double mcs_settle_s = 5.0;
     double down_cooldown_s = 0.2;
     double ewma_alpha = 0.3;
@@ -287,43 +312,28 @@ struct CalibrationPolicy {
     int loss_ok_milli = 15;
     int loss_bad_milli = 50;
     int seek_step_qdb = 16;  // Pass 121 max-power seek
+    // §10.6 (Pass 151) step for a RELATIVE air backend, where min_qdb/max_qdb
+    // do not apply at all: the window is derived per-adapter from
+    // power_offset_qdb .. power_offset_max_qdb. Separate from seek_step_qdb
+    // because that window is 24 qdb by default against a 16 qdb step, and two
+    // probes is not a measurement. Parsed and ignored on absolute backends.
+    int offset_seek_step_qdb = 8;  // 2 dB
     int rssi_guard_dbm = -6;
     int min_qdb = 4;
     int max_qdb = 108;
-    // Pass 132: 800 -> 300. It was sized as TXAGC settle plus one report
-    // window, and the report-window term was carrying the §10.7 case where a
-    // dwell had to wait for the cadence to produce a sample. A burst starts
-    // emitting the instant settle ends, so only the TXAGC term is real; §10.6
-    // still covers its own 100 ms window inside the 300.
-    int settle_ms = 300;
-    int probe_dwell_ms = 1200;
-    int verify_dwell_ms = 2500;
-    int report_loss_abort_ms = 3000;
+    int settle_ms = 300;  // TXAGC settle (Pass 153: no report window)
     int hard_cap_ms = 600000;
-    // §10.6 (Pass 134): whole-run accepted-report rate floor. The 3 s abort
-    // above catches SILENCE; this catches a return path at HALF rate, which
-    // reads as fewer observed losses and places every rung at its ceiling.
-    // Seeded well under the 10 Hz nominal so ordinary dwell-edge gaps and
-    // bounded overload blackouts never trip it.
-    int calib_min_report_hz = 6;
+    // §3.16 (Pass 153) shared dwell knobs, both directions and both node
+    // roles. Tier-2 seeds; frames are PROBE COUNTS, not milliseconds, and
+    // Pass 132's decidability rule (1000/N <= loss_ok_milli) still gates the
+    // probe burst at load.
+    int dwell_probe_frames = 500;
+    int dwell_verify_frames = 1000;
+    int probe_pace_us = 2000;   // inter-probe pacing
+    int tally_wait_ms = 500;    // tally re-elicitation window
+    int tally_retries = 3;      // bounded re-elicitation
+    int feed_quiet_ms = 2000;   // craft feed-pause resume timeout (D-C)
     std::string artifact_dir = "/etc/waybeam-link/calibration";
-    // §10.7 (Pass 125) ground-uplink gates. The walls, step, min/max, settle
-    // and artifact_dir above are shared; only these differ, because the uplink
-    // measures sparse LINK_REPORT epochs instead of live video. They are
-    // EPOCH COUNTS, not milliseconds: a slow report cadence must lengthen the
-    // run, never let an unobserved dwell score as clean. The craft-only ms
-    // dwells and report_loss_abort_ms are unused on the ground.
-    // Pass 132 burst sizes. 100 puts one lost probe at 10permille (inside
-    // loss_ok_milli) and five at 50permille (the bad wall). The old 40 put one
-    // loss at 25permille, BETWEEN the walls, which is the only reason
-    // `uplink_ambiguous_epochs` existed — it is retired, and a config still
-    // carrying the key simply loads with it ignored.
-    int uplink_probe_epochs = 100;
-    int uplink_verify_epochs = 200;
-    // Silence after a burst so the craft's counter reflects all of it before
-    // scoring. Must exceed one §3.16 period (500 ms at 2 Hz).
-    int uplink_drain_ms = 600;
-    int uplink_liveness_ms = 2000;
 };
 
 struct Policy {
@@ -395,6 +405,25 @@ struct AirCfg {
     // own SA (craft half of the gate-4 A/B). Opt-in — makes a passive
     // monitor transmit ACKs.
     bool ack_responder = false;
+    // §15.2 (Pass 156): per-frame hardware retry limit for unicast
+    // ACK-policy TX (devourer dc.tx.retry_limit; 0-63, descriptor width).
+    // Default 8 = the operator-ruled sweep point for an airtime-precious
+    // link with a §14 FEC floor. Inert for broadcast (no ACK policy => the
+    // MAC never retries). Coupling law: on the radio backend, unicast
+    // returns or the ACK responder with retry limit 0 is a CONFIG ERROR —
+    // the armed hybrid must never run silently inert (§3.0).
+    int tx_retry_limit = 8;
+    // §15.2 (Pass 157) node TX coding, radio backend only (refused
+    // elsewhere): LDPC FEC / one-stream STBC in every frame's radiotap MCS
+    // field. Both default off — the enable is a measured operator action
+    // (issue #97 cliff A/B), and flipping ldpc re-derives §9.3.
+    bool ldpc = false;
+    bool stbc = false;
+    // §9.4 Pass 163: enables the sequence-derived TX rate probe on the video
+    // stream. Radio-only, default off — fail-closed per stage-0 (issue
+    // #101): only dies/units whose per-packet commanded rate is proven may
+    // probe. Inert unless the table also carries a nonzero probe.period.
+    bool mcs_probe = false;
     // §10.7 (Pass 125) the rx-node's uplink operating point. Before this an
     // rx node never called set_tx_mode at all and rode the TxRate struct
     // default, which happens to be exactly these seeds — so committed

@@ -2,6 +2,7 @@
 #include "wblink/wire.h"
 
 #include <cstring>
+#include <algorithm>
 
 #include "wblink/endian.h"
 
@@ -356,29 +357,86 @@ Decoded decode_cache_assign(const uint8_t* buf, size_t len) {
     return a;
 }
 
-Decoded decode_uplink_quality(const uint8_t* buf, size_t len) {
-    if (len != kUplinkQualitySize) {
-        return len < kUplinkQualitySize ? DecodeError::kTruncated
-                                        : DecodeError::kLengthMismatch;
+Decoded decode_extended(const uint8_t* buf, size_t len) {
+    // §3.16 (Pass 153): the first payload byte is the extended type ID —
+    // ONE shared dispatch point for every 0xF frame. It needs to exist
+    // before it can be read; below that even ExtUnknown is unreachable.
+    if (len < kCommonPrefixSize + 1) return DecodeError::kTruncated;
+    const uint8_t ext_id = buf[11];
+    switch (ext_id) {
+        case ext_type::kReservedInvalid:
+            return DecodeError::kInvalidField;  // 0x00: reserved-invalid
+        case ext_type::kCalProbe: {
+            // The one variable-length non-DATA type: fixed fields plus zero
+            // padding to the sender's negotiated §9.3a budget, so length is a
+            // RANGE check against the largest tier, not an exact size.
+            if (len < kCalibProbeFixedSize) return DecodeError::kTruncated;
+            if (len > mtu_tier::kHighBudget) {
+                return DecodeError::kLengthMismatch;
+            }
+            CalibProbe pr;
+            pr.prefix = decode_prefix(buf);
+            pr.run_id = be32_read(buf + 12);
+            pr.dwell_id = be16_read(buf + 16);
+            pr.seq = be16_read(buf + 18);
+            pr.count = be16_read(buf + 20);
+            pr.wire_len = static_cast<uint16_t>(len);
+            // §3.16: dwell_id starts at 1, seq is 1..count — zero in any of
+            // them is structurally invalid, as is seq past the burst size.
+            // destination MUST be non-zero: calibration is addressed, never
+            // broadcast.
+            if (pr.dwell_id == 0 || pr.seq == 0 || pr.count == 0 ||
+                pr.seq > pr.count || pr.prefix.destination == 0) {
+                return DecodeError::kInvalidField;
+            }
+            return pr;
+        }
+        case ext_type::kCalTally: {
+            if (len != kCalibTallySize) {
+                return len < kCalibTallySize ? DecodeError::kTruncated
+                                             : DecodeError::kLengthMismatch;
+            }
+            CalibTally t;
+            t.prefix = decode_prefix(buf);
+            t.run_id = be32_read(buf + 12);
+            t.dwell_id = be16_read(buf + 16);
+            t.received = be16_read(buf + 18);
+            t.rssi_sum_dbm = be32_read(buf + 20);
+            t.rx_mcs = buf[24];
+            t.adapter_fingerprint = buf[25];
+            if (t.dwell_id == 0 || t.prefix.destination == 0) {
+                return DecodeError::kInvalidField;
+            }
+            return t;
+        }
+        case ext_type::kLinkVerdict: {
+            // §3.16 (Pass 159): exact-length, addressed, verdict 0..6.
+            if (len != kLinkVerdictSize) {
+                return len < kLinkVerdictSize ? DecodeError::kTruncated
+                                              : DecodeError::kLengthMismatch;
+            }
+            LinkVerdictPkt v;
+            v.prefix = decode_prefix(buf);
+            v.target_originator = be16_read(buf + 12);
+            v.target_session = be32_read(buf + 14);
+            v.report_epoch = be32_read(buf + 18);
+            v.verdict = buf[22];
+            if (v.verdict > link_verdict::kMax ||
+                v.prefix.destination == 0) {
+                return DecodeError::kInvalidField;
+            }
+            return v;
+        }
+        default: {
+            // §3.16: an unknown extended type ID is a DECODED value, not an
+            // error — additive growth must degrade to "feature unavailable"
+            // while the frame still counts as valid RX for liveness (§11.4).
+            ExtUnknown u;
+            u.prefix = decode_prefix(buf);
+            u.ext_id = ext_id;
+            return u;
+        }
     }
-    UplinkQuality q;
-    q.prefix = decode_prefix(buf);
-    q.target_originator = be16_read(buf + 11);
-    q.target_session = be32_read(buf + 13);
-    q.last_report_epoch = be32_read(buf + 17);
-    q.reports_received = be32_read(buf + 21);
-    q.rssi_sum_dbm = be32_read(buf + 25);
-    q.craft_adapter_fingerprint = buf[29];
-    q.last_rx_mcs = buf[30];
-    // §3.16: target_originator MUST be non-zero and equal `destination`. Both
-    // are properties of the packet itself, so they are structural — the
-    // receiver-relative checks (is this MY tuple, MY selected craft) belong to
-    // the §10.7 accept gate, not here.
-    if (q.target_originator == 0 ||
-        q.target_originator != q.prefix.destination) {
-        return DecodeError::kInvalidField;
-    }
-    return q;
 }
 
 Decoded decode_vehicle_cmd(const uint8_t* buf, size_t len) {
@@ -449,8 +507,8 @@ Decoded decode(const uint8_t* buf, size_t len) {
             return decode_announce(buf, len);
         case PacketType::kCacheAssign:
             return decode_cache_assign(buf, len);
-        case PacketType::kUplinkQuality:
-            return decode_uplink_quality(buf, len);
+        case PacketType::kExtended:
+            return decode_extended(buf, len);
         case PacketType::kVehicleCmd:
             return decode_vehicle_cmd(buf, len);
         case PacketType::kSelectorState:
@@ -620,24 +678,60 @@ size_t encode_vehicle_cmd(const VehicleCmd& pkt, uint8_t* out, size_t cap) {
     return kVehicleCmdSize;
 }
 
-size_t encode_uplink_quality(const UplinkQuality& pkt, uint8_t* out,
-                             size_t cap) {
-    // §3.16: the same structural invariant decode_uplink_quality enforces —
-    // refuse to mint a packet an honest receiver would reject.
-    if (out == nullptr || cap < kUplinkQualitySize ||
-        pkt.target_originator == 0 ||
-        pkt.target_originator != pkt.prefix.destination) {
+size_t encode_calib_probe(const CalibProbe& pkt, uint16_t pad_to, uint8_t* out,
+                          size_t cap) {
+    // §3.16: the same structural invariants decode_calibration enforces —
+    // refuse to mint a frame an honest receiver would reject. pad_to is the
+    // negotiated §9.3a budget, clamped into the decoder's accepted range.
+    const size_t total =
+        std::min<size_t>(std::max<size_t>(pad_to, kCalibProbeFixedSize),
+                         mtu_tier::kHighBudget);
+    if (out == nullptr || cap < total || pkt.dwell_id == 0 || pkt.seq == 0 ||
+        pkt.count == 0 || pkt.seq > pkt.count ||
+        pkt.prefix.destination == 0) {
         return 0;
     }
-    encode_prefix(pkt.prefix, PacketType::kUplinkQuality, out);
-    be16_write(out + 11, pkt.target_originator);
-    be32_write(out + 13, pkt.target_session);
-    be32_write(out + 17, pkt.last_report_epoch);
-    be32_write(out + 21, pkt.reports_received);
-    be32_write(out + 25, pkt.rssi_sum_dbm);
-    out[29] = pkt.craft_adapter_fingerprint;
-    out[30] = pkt.last_rx_mcs;
-    return kUplinkQualitySize;
+    encode_prefix(pkt.prefix, PacketType::kExtended, out);
+    out[11] = ext_type::kCalProbe;
+    be32_write(out + 12, pkt.run_id);
+    be16_write(out + 16, pkt.dwell_id);
+    be16_write(out + 18, pkt.seq);
+    be16_write(out + 20, pkt.count);
+    std::memset(out + kCalibProbeFixedSize, 0,
+                total - kCalibProbeFixedSize);
+    return total;
+}
+
+size_t encode_calib_tally(const CalibTally& pkt, uint8_t* out, size_t cap) {
+    if (out == nullptr || cap < kCalibTallySize || pkt.dwell_id == 0 ||
+        pkt.prefix.destination == 0) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kExtended, out);
+    out[11] = ext_type::kCalTally;
+    be32_write(out + 12, pkt.run_id);
+    be16_write(out + 16, pkt.dwell_id);
+    be16_write(out + 18, pkt.received);
+    be32_write(out + 20, pkt.rssi_sum_dbm);
+    out[24] = pkt.rx_mcs;
+    out[25] = pkt.adapter_fingerprint;
+    return kCalibTallySize;
+}
+
+size_t encode_link_verdict(const LinkVerdictPkt& pkt, uint8_t* out,
+                           size_t cap) {
+    // §3.16 (Pass 159): addressed, never broadcast; verdict 0..6.
+    if (out == nullptr || cap < kLinkVerdictSize ||
+        pkt.prefix.destination == 0 || pkt.verdict > link_verdict::kMax) {
+        return 0;
+    }
+    encode_prefix(pkt.prefix, PacketType::kExtended, out);
+    out[11] = ext_type::kLinkVerdict;
+    be16_write(out + 12, pkt.target_originator);
+    be32_write(out + 14, pkt.target_session);
+    be32_write(out + 18, pkt.report_epoch);
+    out[22] = pkt.verdict;
+    return kLinkVerdictSize;
 }
 
 size_t encode_csa(const CsaPacket& pkt, uint8_t* out, size_t cap) {

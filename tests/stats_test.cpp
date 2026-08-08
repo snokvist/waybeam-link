@@ -44,6 +44,14 @@ StatsSnapshot sample_snapshot() {
     a.rx_mcs[6] = 5;
     a.rx_mcs[7] = 0;
     a.rx_mcs_unknown = 2;
+    // §15.3 Pass 158: negative EVM so the golden pins signed serialization.
+    a.evm = -24;
+    a.evm_valid = true;
+    // §15.3 Pass 157: distinct values so the golden pins order and the bool
+    // serializes as true/false, not 1/0.
+    a.rx_ldpc = 77;
+    a.rx_stbc = 6;
+    a.ldpc_flag_ok = true;
     a.adapter_stalled = false;
     s.adapters.push_back(a);
     StreamStats st;
@@ -150,6 +158,10 @@ StatsSnapshot sample_snapshot() {
     s.link.safe_floor_profile = 1;
     s.link.report_latch_holder = 9;   // §3.15a Pass 117
     s.link.report_latch_known = true;
+    // §15.3 Pass 159/160: distinct values so the golden pins order.
+    s.link.verdict = 2;
+    s.link.verdict_age_ms = 740;
+    s.link.promote_blocked_saturated = 3;
     s.link.selector_state_valid = true;
     s.link.selector_state_age_ms = 75;
     s.link.lockout_active = true;
@@ -202,12 +214,10 @@ StatsSnapshot sample_snapshot() {
     s.link.uplink_calib_power_qdb = -44;
     s.link.uplink_calib_fingerprint = 0x2A;
     s.link.uplink_calib_stale = true;
-    s.link.uplink_quality_valid = true;
-    s.link.uplink_quality_age_ms = 137;
-    s.link.uplink_quality_report_epoch = 9001;
-    s.link.uplink_quality_reports = 8640;
-    s.link.uplink_quality_rssi_mean = -37;
-    s.link.uplink_quality_rx_mcs = 7;
+    s.link.calib_probes_sent = 12345;
+    s.link.calib_tallies_rx = 42;
+    s.link.calib_rx_mcs = 7;
+    s.link.feed_paused = true;
     return s;
 }
 
@@ -216,11 +226,13 @@ const char* kGolden =
     "{\"t_ms\":172834,\"node\":17,\"session\":2748291,"
     "\"adapters\":[{\"name\":\"wlan0\",\"rx\":10234,\"dup\":812,"
     "\"rssi_best\":-58,\"rssi_mean\":-63,\"snr\":22,\"noise\":-85,"
+    "\"evm\":-24,\"evm_valid\":true,"
     "\"tx_submitted\":540,\"tx_failed\":2,\"tx_timeout\":0,"
     "\"drop\":3,\"filtered\":0,\"kernel_drop\":0,\"bpf_filtered\":0,\"tsf_fallback\":1,"
     "\"tx_reports\":40,"
     "\"tx_report_fails\":2,"
     "\"rx_mcs\":[1,2,3,4,118,10099,5,0],\"rx_mcs_unknown\":2,"
+    "\"rx_ldpc\":77,\"rx_stbc\":6,\"ldpc_flag_ok\":true,"
     "\"adapter_stalled\":false,\"rx_dead\":false,\"tx_wedged\":false}],"
     "\"streams\":[{\"stream_id\":0,\"type\":\"RTP\",\"seq\":90233,"
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
@@ -257,6 +269,7 @@ const char* kGolden =
     "\"jscc_output_arq_eligible\":true,\"jscc_output_discard\":false,"
     "\"jscc_feedback_epoch\":1821,\"jscc_feedback_age_ms\":42,"
     "\"jscc_enforced_frames\":0,\"jscc_discarded_frames\":0,"
+    "\"jscc_exempt_frames\":0,"
     "\"shm_health_valid\":false,\"shm_full_drops\":0,"
     "\"shm_throttle_permille\":0,\"shm_oversize_drops\":0,"
     "\"shm_bad_slots\":0,\"shm_ring_full\":0,"
@@ -271,7 +284,7 @@ const char* kGolden =
     "\"source_symbols_sent\":4120300,\"repair_symbols_sent\":358944,"
     "\"fec_oversize_frames\":0,\"mtu_fec_guard_frames\":1234,"
     "\"idr_frames\":17,\"arq_frames\":68342,"
-    "\"arq_cutoff_frames\":0,"
+    "\"arq_cutoff_frames\":0,\"fec_enhance_frames\":0,"
     "\"decode_errors\":0,\"active_profile\":4,\"table_version\":178}],"
     "\"arq_timing\":{"
     "\"eob_to_nack_build\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
@@ -294,6 +307,8 @@ const char* kGolden =
     "\"loss_window_milli\":48,\"loss_ewma_milli\":36,\"loss_uniq\":100,"
     "\"loss_score\":5,\"safe_floor_profile\":1,"
     "\"report_latch_holder\":9,\"report_latch_known\":true,"
+    "\"verdict\":2,\"verdict_age_ms\":740,\"promote_blocked_saturated\":3,"
+    "\"promote_blocked_probe\":0,"
     "\"selector_state_valid\":true,\"selector_state_age_ms\":75,"
     "\"lockout_active\":true,\"lockout_latched\":false,"
     "\"lockout_profile\":5,\"lockout_ceiling_profile\":4,"
@@ -318,10 +333,9 @@ const char* kGolden =
     "\"calib_fingerprint\":191,\"calib_stale\":true,"
     "\"uplink_calib_state\":\"done\",\"uplink_calib_rung\":3,"
     "\"uplink_calib_power_qdb\":-44,\"uplink_calib_fingerprint\":42,"
-    "\"uplink_calib_stale\":true,\"uplink_quality_valid\":true,"
-    "\"uplink_quality_age_ms\":137,\"uplink_quality_report_epoch\":9001,"
-    "\"uplink_quality_reports\":8640,\"uplink_quality_rssi_mean\":-37,"
-    "\"uplink_quality_rx_mcs\":7}}\n";
+    "\"uplink_calib_stale\":true,\"calib_probes_sent\":12345,"
+    "\"calib_tallies_rx\":42,\"calib_rx_mcs\":7,"
+    "\"feed_paused\":true}}\n";
 
 }  // namespace
 

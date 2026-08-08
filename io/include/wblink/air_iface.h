@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "wblink/radiotap.h"  // kRxMcsUnknown (AirRxMeta.rx_mcs)
@@ -114,6 +115,11 @@ class AirIface {
     // §10.5: false = the backend did NOT accept the value, and the caller must
     // not cache it as applied.
     virtual bool set_power_qdb(size_t adapter, int32_t qdb) = 0;
+    // §10.5 (Pass 150): ONE relative contract — qdb is an offset against this
+    // backend's calibrated reference, resolved natively by each backend
+    // (devourer: the efuse per-rate table; kernel-monitor: the adapter's
+    // max_power_qdb). Returns false when the backend has no reference.
+    virtual bool set_power_offset_qdb(size_t adapter, int32_t qdb) = 0;
 
     // §10.5 auto restore. G7: the two RF backends mean different things by
     // "auto" — kernel-monitor returns the driver default (`txpower auto`),
@@ -127,6 +133,14 @@ class AirIface {
 
     // Applies to the TX adapter. Not per-adapter: a node has one uplink.
     virtual void set_tx_mode(uint8_t mcs, bool sgi) = 0;
+
+    // §9.4 Pass 163 sequence-derived rate probe: first-send video DATA
+    // frames with seq % period == slot fly candidate_mcs instead of the
+    // set_tx_mode() rate. period 0 disarms. Real on the radio backend only
+    // (`air.mcs_probe` is refused elsewhere); kernel-monitor and udp-air
+    // no-op — their frames always fly the committed mode.
+    virtual void set_mcs_probe(uint16_t period, uint16_t slot,
+                               uint8_t candidate_mcs) = 0;
 
     // ---- §3.0 identity ---------------------------------------------------
 
@@ -157,6 +171,34 @@ class AirIface {
     // True for a backend that puts frames on real RF. Distinguishes both RF
     // backends from the udp dev transport — it is not "is devourer".
     virtual bool is_rf() const = 0;
+
+    // §10.6 (Pass 154) per-unit adapter identity: the EFUSE MAC as lowercase
+    // "aa:bb:cc:dd:ee:ff", read at bring-up on the radio backend. Empty =
+    // the backend has no per-unit identity for this adapter — the caller
+    // fails closed (no absolute curve), it must never substitute a weaker
+    // key. Kernel-monitor answers empty by design: it is deprecated-frozen
+    // (ruling #120) and its identity stays the §10.6 monitor tiers.
+    virtual std::string adapter_mac(size_t adapter) const = 0;
+
+    // §15.5a (Pass 155): one adapter's frame-free channel-energy DELTA since
+    // the previous read (delta-on-read — a throwaway call is the §15.5a
+    // discard barrier). Backend-agnostic mirror of the radio backend's
+    // sensor; no devourer types cross this boundary. nullopt = this backend
+    // has no frame-free sensor (udp bench; kernel-monitor is frozen, #120)
+    // — §15.5a occupancy then falls back structurally to decoded-frame
+    // accounting. Main-thread only (control-plane register I/O).
+    struct AirSense {
+        bool fa_valid = false;
+        uint32_t fa_ofdm = 0;   // false alarms: non-decodable energy events
+        uint32_t cca_ofdm = 0;  // channel-busy detections (incl. decodes)
+        bool igi_valid = false;
+        int igi = 0;            // DIG initial-gain index (floor proxy)
+        bool nf_valid = false;
+        double nf_dbm = 0.0;    // passive floor: mean rssi − snr over frames
+        bool abs_nf_valid = false;
+        int8_t abs_nf_dbm = 0;  // absolute idle floor (opt-in generations)
+    };
+    virtual std::optional<AirSense> rx_sense(size_t adapter) = 0;
 
     // §11.6 Pass 80 liveness baseline: accepted frames on one adapter. Only
     // this counter is on the contract — the full per-backend counters structs

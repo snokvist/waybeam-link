@@ -26,10 +26,17 @@ struct AdapterStats {
     std::string name;
     uint64_t rx = 0;
     uint64_t dup = 0;
+    // §15.3 Pass 158: on the radio backend these four are a per-stats-tick
+    // quality window — rssi_best is the window PEAK (saturation-proof),
+    // snr the mean dB, noise the passive floor rssi−snr. evm (mean dB,
+    // lower = cleaner) is the saturation discriminator; evm_valid=false
+    // means no frame carried EVM, not perfect coding.
     int32_t rssi_best = 0;
     int32_t rssi_mean = 0;
     int32_t snr = 0;
     int32_t noise = 0;
+    int32_t evm = 0;
+    bool evm_valid = false;
     uint64_t tx_submitted = 0;
     uint64_t tx_failed = 0;
     uint64_t tx_timeout = 0;
@@ -47,6 +54,12 @@ struct AdapterStats {
     // Advisory observation only — no control path reads these.
     uint64_t rx_mcs[kRxMcsBuckets] = {};
     uint64_t rx_mcs_unknown = 0;
+    // §15.3 Pass 157: received-coding counters + the static die truth of
+    // whether they can ever be nonzero (devourer ldpc_rx_flag). Advisory,
+    // like rx_mcs; 0/false off the radio backend.
+    uint64_t rx_ldpc = 0;
+    uint64_t rx_stbc = 0;
+    bool ldpc_flag_ok = false;
     bool adapter_stalled = false;  // §6.5 liveness watchdog verdict (heuristic)
     bool rx_dead = false;          // §15.3 Pass 101: RX loop terminated (definitive)
     bool tx_wedged = false;        // §9.10 CCX-liveness verdict (TX adapter)
@@ -121,6 +134,7 @@ struct StreamStats {
     // §14.2 enforcement (Pass 38): actuated valid decisions + rule-2 drops.
     uint64_t jscc_enforced_frames = 0;
     uint64_t jscc_discarded_frames = 0;
+    uint64_t jscc_exempt_frames = 0;  // §14.2 Pass 149 §14.1a exemption
     // §15.3 Pass 109: ingress producer health is optional at ring version 1.
     // When valid, full_drops is the delta since attach/reset and throttle is a
     // gauge. shm_ring_full remains independent consumer-side evidence.
@@ -155,6 +169,7 @@ struct StreamStats {
     uint64_t idr_frames = 0;
     uint64_t arq_frames = 0;
     uint64_t arq_cutoff_frames = 0;  // §4.1 Pass 40 cadence suppression
+    uint64_t fec_enhance_frames = 0;  // §14.1a observed droppable density
     uint64_t decode_errors = 0;
     uint8_t active_profile = 0;
     uint8_t table_version = 0;
@@ -229,6 +244,14 @@ struct LinkStats {
     // same answer as holder 0.
     uint16_t report_latch_holder = 0;
     bool report_latch_known = false;
+    // §15.3 Pass 159/160 role-dependent verdict view (0 = Unknown/none):
+    // craft = last ACCEPTED §3.16 verdict + age; radio ground = the cause
+    // it computes (age 0). promote_blocked_saturated is craft-only.
+    uint8_t verdict = 0;
+    uint32_t verdict_age_ms = 0;
+    uint64_t promote_blocked_saturated = 0;
+    // §15.3 Pass 163: climbs suppressed by the §9.4 probe veto; craft-only.
+    uint64_t promote_blocked_probe = 0;
     bool flap_freeze = false;
     std::string csa_state = "IDLE";
     // §11 follow-me: current RF operating channel (center MHz). 0 when the node
@@ -280,15 +303,13 @@ struct LinkStats {
     int32_t uplink_calib_power_qdb = 0;
     uint8_t uplink_calib_fingerprint = 0;
     bool uplink_calib_stale = false;
-    // §3.16 feedback. age_ms is LIVENESS (any accepted packet), which is the
-    // clock §10.7's 2 s abort watches; counter progress is uplink_quality_
-    // reports, and conflating them is the thing Pass 125 exists to prevent.
-    bool uplink_quality_valid = false;
-    uint32_t uplink_quality_age_ms = 0;
-    uint32_t uplink_quality_report_epoch = 0;
-    uint32_t uplink_quality_reports = 0;
-    int32_t uplink_quality_rssi_mean = 0;
-    uint8_t uplink_quality_rx_mcs = kUplinkRxMcsUnknown;  // 255 = unknown
+    // §3.16 (Pass 153) probe-exchange counters, role-neutral: the local
+    // node's current/last calibration run. feed_paused is the §10.6
+    // input-starve state (craft-local; false on a ground node).
+    uint64_t calib_probes_sent = 0;
+    uint64_t calib_tallies_rx = 0;
+    uint8_t calib_rx_mcs = kUplinkRxMcsUnknown;  // 255 = unknown
+    bool feed_paused = false;
 };
 
 // §15.3 cache blocks — present only when the §14.3 role is enabled.

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "wblink/config.h"
 
+#include "wblink/calib_dwell.h"  // kMaxDwellFrames (§3.16)
+
 #include "wblink/fps_ladder.h"  // §9.11 ladder-membership validation
 
 #include <cctype>
@@ -163,7 +165,44 @@ Result<Config> load_config_json(const std::string& json_text) {
             ac.ifname = a.value("ifname", std::string{});
             // §10.7 (Pass 146): pins the calibration artifact to this
             // physical adapter regardless of ifname/serial/bus path.
+            // kernel-monitor only since Pass 154 (frozen, ruling #120).
             ac.calib_id = a.value("calib_id", std::string{});
+            // §15.2 (Pass 154): EFUSE-MAC stanza pin, radio backend only
+            // (cross-checked against air.kind after the air block parses).
+            // Normalized to lowercase so it compares against the backend's
+            // formatted identity byte-for-byte.
+            ac.mac = a.value("mac", std::string{});
+            if (!ac.mac.empty()) {
+                if (ac.mac.size() != 17) {
+                    return Result<Config>::fail(
+                        "adapter " + ac.name +
+                        ": mac must be aa:bb:cc:dd:ee:ff");
+                }
+                for (size_t k = 0; k < ac.mac.size(); ++k) {
+                    char& c = ac.mac[k];
+                    if (k % 3 == 2) {
+                        if (c != ':') {
+                            return Result<Config>::fail(
+                                "adapter " + ac.name +
+                                ": mac must be aa:bb:cc:dd:ee:ff");
+                        }
+                    } else if (c >= 'A' && c <= 'F') {
+                        c = static_cast<char>(c - 'A' + 'a');
+                    } else if (!((c >= '0' && c <= '9') ||
+                                 (c >= 'a' && c <= 'f'))) {
+                        return Result<Config>::fail(
+                            "adapter " + ac.name +
+                            ": mac must be aa:bb:cc:dd:ee:ff");
+                    }
+                }
+                for (const AdapterCfg& other : cfg.adapters) {
+                    if (other.mac == ac.mac) {
+                        return Result<Config>::fail(
+                            "adapter " + ac.name + ": duplicate mac " +
+                            ac.mac + " (also on \"" + other.name + "\")");
+                    }
+                }
+            }
             auto arole = parse_role(a.at("role").get<std::string>(),
                                     ("adapter " + ac.name).c_str());
             if (!arole) return Result<Config>::fail(arole.error);
@@ -190,6 +229,45 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (a.contains("max_power_qdb")) {
                 ac.max_power_qdb = a.at("max_power_qdb").get<int32_t>();
+                // §10.3 (Pass 150): this is now kernel-monitor's absolute
+                // REFERENCE, fed to `iw txpower fixed (ref + offset)`. The
+                // pre-150 "disable the ceiling" idiom of a huge value (the
+                // sample configs shipped 2000 = 500 dBm) would hand the driver
+                // a nonsense absolute, so the range is now enforced.
+                if (*ac.max_power_qdb < -40 || *ac.max_power_qdb > 120) {
+                    return Result<Config>::fail(
+                        "adapter " + ac.name + ": max_power_qdb " +
+                        std::to_string(*ac.max_power_qdb) +
+                        " out of range -40..120 qdb — since Pass 150 this is "
+                        "the kernel-monitor absolute reference, not a ceiling "
+                        "(§10.3/§10.5)");
+                }
+            }
+            // §10.5 (Pass 150): relative offset + its bound. Parsed for every
+            // adapter; only role:"tx" ever applies them.
+            if (a.contains("power_offset_max_qdb")) {
+                ac.power_offset_max_qdb =
+                    a.at("power_offset_max_qdb").get<int32_t>();
+            }
+            if (a.contains("power_offset_qdb")) {
+                ac.power_offset_qdb = a.at("power_offset_qdb").get<int32_t>();
+            }
+            if (ac.power_offset_qdb < -511 || ac.power_offset_qdb > 511 ||
+                ac.power_offset_max_qdb < -511 ||
+                ac.power_offset_max_qdb > 511) {
+                return Result<Config>::fail(
+                    "adapter " + ac.name +
+                    ": power_offset_qdb/power_offset_max_qdb must be "
+                    "-511..511 qdb (§10.5)");
+            }
+            // The boot point may not start above its own bound — otherwise a
+            // node boots at a power the runtime latch would refuse to set.
+            if (ac.power_offset_qdb > ac.power_offset_max_qdb) {
+                return Result<Config>::fail(
+                    "adapter " + ac.name + ": power_offset_qdb (" +
+                    std::to_string(ac.power_offset_qdb) +
+                    ") exceeds power_offset_max_qdb (" +
+                    std::to_string(ac.power_offset_max_qdb) + ") (§10.5)");
             }
             // §11.7 0x0A TX_POWER preset list (Pass 135). Same rx rejection as
             // power_map above, and for the same reason: an rx adapter never
@@ -317,10 +395,28 @@ Result<Config> load_config_json(const std::string& json_text) {
                 sc.fec.p_rate_permille = f.value("p_rate_permille", uint16_t{100});
                 sc.fec.min_k = f.value("min_k", uint16_t{3});
                 sc.fec.min_r = f.value("min_r", uint16_t{2});
+                // §14.1a: optional third class. Absent (or explicit null) =>
+                // inherit p_rate_permille, byte-identical to a pre-Pass-149
+                // config. Never defaulted to 0 — that would silently strip
+                // authored protection when a producer switched preset.
+                if (f.contains("e_rate_permille") && !f.at("e_rate_permille").is_null()) {
+                    const auto e = f.at("e_rate_permille").get<int64_t>();
+                    if (e < 0 || e > 4000) {
+                        return Result<Config>::fail(
+                            "stream " + std::to_string(sid) +
+                            ": fec.e_rate_permille must be 0..4000 (§14.1a)");
+                    }
+                    sc.fec.e_rate_permille = static_cast<uint16_t>(e);
+                }
                 if (sc.fec.scheme != FecScheme::kNone && sc.bind.kind != BindKind::kFrameShm) {
                     return Result<Config>::fail(
                         "stream " + std::to_string(sid) +
                         ": fec.scheme is only valid on a frame-shm binding (§14.1)");
+                }
+                if (sc.fec.e_rate_permille && sc.fec.scheme == FecScheme::kNone) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": fec.e_rate_permille needs fec.scheme \"rlc256\" (§14.1a)");
                 }
             }
             if (s.contains("jscc_shadow")) {
@@ -443,6 +539,12 @@ Result<Config> load_config_json(const std::string& json_text) {
                 sel.promote_rssi_hyst_db =
                     ps.value("promote_rssi_hyst_db", sel.promote_rssi_hyst_db);
                 sel.promote_dwell_s = ps.value("promote_dwell_s", sel.promote_dwell_s);
+                sel.verdict_ttl_s =
+                    ps.value("verdict_ttl_s", sel.verdict_ttl_s);
+                sel.probe_veto_permille =
+                    ps.value("probe_veto_permille", sel.probe_veto_permille);
+                sel.probe_veto_ttl_s =
+                    ps.value("probe_veto_ttl_s", sel.probe_veto_ttl_s);
                 sel.mcs_settle_s = ps.value("mcs_settle_s", sel.mcs_settle_s);
                 sel.down_cooldown_s = ps.value("down_cooldown_s", sel.down_cooldown_s);
                 sel.ewma_alpha = ps.value("ewma_alpha", sel.ewma_alpha);
@@ -604,30 +706,33 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cal.loss_bad_milli =
                     pk.value("loss_bad_milli", cal.loss_bad_milli);
                 cal.seek_step_qdb = pk.value("seek_step_qdb", cal.seek_step_qdb);
+                cal.offset_seek_step_qdb =
+                    pk.value("offset_seek_step_qdb", cal.offset_seek_step_qdb);
                 cal.rssi_guard_dbm =
                     pk.value("rssi_guard_dbm", cal.rssi_guard_dbm);
                 cal.min_qdb = pk.value("min_qdb", cal.min_qdb);
                 cal.max_qdb = pk.value("max_qdb", cal.max_qdb);
                 cal.settle_ms = pk.value("settle_ms", cal.settle_ms);
-                cal.probe_dwell_ms =
-                    pk.value("probe_dwell_ms", cal.probe_dwell_ms);
-                cal.verify_dwell_ms =
-                    pk.value("verify_dwell_ms", cal.verify_dwell_ms);
-                cal.report_loss_abort_ms =
-                    pk.value("report_loss_abort_ms", cal.report_loss_abort_ms);
                 cal.hard_cap_ms = pk.value("hard_cap_ms", cal.hard_cap_ms);
-                cal.calib_min_report_hz =
-                    pk.value("calib_min_report_hz", cal.calib_min_report_hz);
                 cal.artifact_dir = pk.value("artifact_dir", cal.artifact_dir);
-                // §10.7 uplink gates — epoch counts, never milliseconds.
-                cal.uplink_probe_epochs =
-                    pk.value("uplink_probe_epochs", cal.uplink_probe_epochs);
-                cal.uplink_verify_epochs =
-                    pk.value("uplink_verify_epochs", cal.uplink_verify_epochs);
-                cal.uplink_liveness_ms =
-                    pk.value("uplink_liveness_ms", cal.uplink_liveness_ms);
-                cal.uplink_drain_ms =
-                    pk.value("uplink_drain_ms", cal.uplink_drain_ms);
+                // §3.16 (Pass 153) shared dwell knobs — probe COUNTS, never
+                // milliseconds. The Pass-152-era keys (probe_dwell_ms,
+                // verify_dwell_ms, report_loss_abort_ms, calib_min_report_hz,
+                // uplink_probe_epochs, uplink_verify_epochs, uplink_drain_ms,
+                // uplink_liveness_ms, uplink_floor_min_samples) are retired
+                // and ignored.
+                cal.dwell_probe_frames =
+                    pk.value("dwell_probe_frames", cal.dwell_probe_frames);
+                cal.dwell_verify_frames =
+                    pk.value("dwell_verify_frames", cal.dwell_verify_frames);
+                cal.probe_pace_us =
+                    pk.value("probe_pace_us", cal.probe_pace_us);
+                cal.tally_wait_ms =
+                    pk.value("tally_wait_ms", cal.tally_wait_ms);
+                cal.tally_retries =
+                    pk.value("tally_retries", cal.tally_retries);
+                cal.feed_quiet_ms =
+                    pk.value("feed_quiet_ms", cal.feed_quiet_ms);
                 if (cal.min_qdb > cal.max_qdb) {
                     return Result<Config>::fail(
                         "policy.calibration: min_qdb > max_qdb (§10.6)");
@@ -643,25 +748,46 @@ Result<Config> load_config_json(const std::string& json_text) {
                         "policy.calibration: seek_step_qdb must be >= 8 (2 dB "
                         "— the cap wall's minimum commanded step, §10.6)");
                 }
-                if (cal.uplink_probe_epochs < 1 ||
-                    cal.uplink_verify_epochs < 1 ||
-                    cal.uplink_liveness_ms < 1 || cal.uplink_drain_ms < 1) {
+                // §10.6 (Pass 151): the offset window is 24 qdb by default,
+                // so this step decides how many probes a relative-backend
+                // sweep gets. Bounded on both sides — the devourer TXAGC
+                // granularity is 2 qdb (0.5 dB) on Jaguar1/2 and 1 qdb on
+                // Jaguar3, so under 2 qdb the sweep aliases on the coarser
+                // families (two probes landing on one register value); over
+                // 24 leaves a default window with two probes, which is the
+                // condition this key exists to prevent.
+                if (cal.offset_seek_step_qdb < 2 ||
+                    cal.offset_seek_step_qdb > 24) {
                     return Result<Config>::fail(
-                        "policy.calibration: uplink burst/drain/liveness "
-                        "gates must be >= 1 (§10.7)");
+                        "policy.calibration: offset_seek_step_qdb must be "
+                        "2..24 qdb (0.5..6 dB, §10.6 Pass 151)");
                 }
-                // Pass 132: a burst too small to resolve the walls decides on
-                // noise. One lost probe must land at or under loss_ok_milli,
-                // i.e. 1000/N <= loss_ok_milli — otherwise a single unlucky
-                // probe reads as ambiguous or bad and the placement is a
-                // coin-flip. This is the check that replaces the ambiguous
-                // extension rather than reintroducing it.
-                if (cal.loss_ok_milli > 0 &&
-                    1000 / cal.uplink_probe_epochs > cal.loss_ok_milli) {
+                // §3.16 (Pass 153): dwell bursts are bounded below by 1 and
+                // above by the receiver's exact-dedup bitmap.
+                if (cal.dwell_probe_frames < 1 ||
+                    cal.dwell_probe_frames > int{kMaxDwellFrames} ||
+                    cal.dwell_verify_frames < 1 ||
+                    cal.dwell_verify_frames > int{kMaxDwellFrames}) {
                     return Result<Config>::fail(
-                        "policy.calibration: uplink_probe_epochs too small to "
+                        "policy.calibration: dwell_probe_frames/"
+                        "dwell_verify_frames must be 1..1024 (§3.16)");
+                }
+                if (cal.probe_pace_us < 1 || cal.tally_wait_ms < 1 ||
+                    cal.tally_retries < 0 || cal.feed_quiet_ms < 1) {
+                    return Result<Config>::fail(
+                        "policy.calibration: probe pacing / tally gates must "
+                        "be >= 1 (tally_retries >= 0) (§3.16)");
+                }
+                // Pass 132 (kept verbatim on the new primitive): a burst too
+                // small to resolve the walls decides on noise. One lost probe
+                // must land at or under loss_ok_milli, i.e. 1000/N <=
+                // loss_ok_milli.
+                if (cal.loss_ok_milli > 0 &&
+                    1000 / cal.dwell_probe_frames > cal.loss_ok_milli) {
+                    return Result<Config>::fail(
+                        "policy.calibration: dwell_probe_frames too small to "
                         "resolve loss_ok_milli — one lost probe must be <= it "
-                        "(§10.7)");
+                        "(§3.16)");
                 }
             }
             if (p.contains("cmd")) {
@@ -986,6 +1112,22 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.air.disable_cca = a.value("disable_cca", cfg.air.disable_cca);
             cfg.air.ack_responder =
                 a.value("ack_responder", cfg.air.ack_responder);
+            // §15.2 (Pass 156): unicast hardware-retry limit, 0-63 (the
+            // TX-descriptor field width).
+            cfg.air.tx_retry_limit =
+                a.value("tx_retry_limit", cfg.air.tx_retry_limit);
+            if (cfg.air.tx_retry_limit < 0 || cfg.air.tx_retry_limit > 63) {
+                return Result<Config>::fail(
+                    "air.tx_retry_limit " +
+                    std::to_string(cfg.air.tx_retry_limit) +
+                    " out of range 0..63 (§15.2 Pass 156)");
+            }
+            // §15.2 (Pass 157) node TX coding; radio-only enforcement is
+            // below, once kind resolves.
+            cfg.air.ldpc = a.value("ldpc", cfg.air.ldpc);
+            cfg.air.stbc = a.value("stbc", cfg.air.stbc);
+            // §9.4 Pass 163; radio-only enforcement below, with ldpc/stbc.
+            cfg.air.mcs_probe = a.value("mcs_probe", cfg.air.mcs_probe);
             if (kind == "radio") {
                 cfg.air.kind = AirCfg::Kind::kRadio;
             } else if (kind == "kernel-monitor") {
@@ -1080,6 +1222,67 @@ Result<Config> load_config_json(const std::string& json_text) {
                         ge.at("p_bg").get<double>(),
                         ge.at("loss_g").get<double>(),
                         ge.at("loss_b").get<double>()};
+                }
+            }
+        }
+
+        // §3.0/§15.2 (Pass 156) coupling law: the hardware-ACK hybrid's
+        // knobs are ONE decision. Enabling unicast returns or the ACK
+        // responder with a zero retry limit arms an ARQ loop at one end and
+        // disables it at the other — a knob that reads enabled while doing
+        // nothing, refused rather than run inert. Radio backend only: the
+        // kernel MAC owns its own retries on kernel-monitor (frozen, #120).
+        if (cfg.air.kind == AirCfg::Kind::kRadio &&
+            cfg.air.tx_retry_limit == 0 &&
+            (cfg.air.ack_responder || cfg.policy.ret.unicast)) {
+            return Result<Config>::fail(
+                std::string("air.tx_retry_limit is 0 while ") +
+                (cfg.air.ack_responder ? "air.ack_responder"
+                                       : "return.unicast") +
+                " is enabled — the hardware-ACK hybrid would run silently "
+                "inert (§3.0 Pass 156); set a nonzero limit or disable the "
+                "hybrid");
+        }
+
+        // §15.2 (Pass 157): TX coding keys are radio-backend-only — a dead
+        // key on udp-air, an unverifiable leg on frozen kernel-monitor
+        // (#120). Same posture as adapters[].mac below.
+        if (cfg.air.kind != AirCfg::Kind::kRadio &&
+            (cfg.air.ldpc || cfg.air.stbc)) {
+            return Result<Config>::fail(
+                std::string(cfg.air.ldpc ? "air.ldpc" : "air.stbc") +
+                " is a radio-backend key (§15.2 Pass 157); remove it or set "
+                "air.kind \"radio\"");
+        }
+        // §9.4 Pass 163: same posture — probing is a radio TX-die property.
+        if (cfg.air.kind != AirCfg::Kind::kRadio && cfg.air.mcs_probe) {
+            return Result<Config>::fail(
+                "air.mcs_probe is a radio-backend key (§15.2 Pass 163); "
+                "remove it or set air.kind \"radio\"");
+        }
+        // ...and a TX-NODE property: on an rx-role node it would be a
+        // silently dead knob (apply_probe is installed only in the tx loop).
+        if (cfg.air.mcs_probe && cfg.node.role != Role::kTx) {
+            return Result<Config>::fail(
+                "air.mcs_probe is a TX-node key (§15.2 Pass 163); only a "
+                "role \"tx\" node probes");
+        }
+        if (cfg.policy.select.probe_veto_permille > 1000) {
+            return Result<Config>::fail(
+                "policy.select.probe_veto_permille must be 0..1000 "
+                "(§9.4 Pass 163; above 1000 the veto could never fire)");
+        }
+
+        // §15.2 (Pass 154): adapters[].mac is the radio backend's EFUSE
+        // identity pin — on any other backend it would be a silently dead
+        // key promising a binding that never happens, so it is rejected.
+        if (cfg.air.kind != AirCfg::Kind::kRadio) {
+            for (const AdapterCfg& a : cfg.adapters) {
+                if (!a.mac.empty()) {
+                    return Result<Config>::fail(
+                        "adapter " + a.name +
+                        ": mac is a radio-backend key (§15.2 Pass 154); "
+                        "kernel-monitor derives identity from ifname");
                 }
             }
         }
@@ -1182,6 +1385,23 @@ Result<ProfileTable> load_profile_table_json(const std::string& json_text) {
             return Result<ProfileTable>::fail("profile table: floor_profile out of u8 range");
         }
         table.floor_profile = static_cast<uint8_t>(floor);
+        // §3.6/§9.4 Pass 163: optional probe schedule — hashed content, so
+        // absence (0/0) and presence hash differently by design.
+        if (j.contains("probe")) {
+            const json& pr = j.at("probe");
+            const uint64_t period = pr.at("period").get<uint64_t>();
+            const uint64_t slot = pr.value("slot", uint64_t{0});
+            if (period > 0xFFFF || slot > 0xFFFF) {
+                return Result<ProfileTable>::fail(
+                    "profile table: probe.period/slot out of u16 range");
+            }
+            if (period != 0 && slot >= period) {
+                return Result<ProfileTable>::fail(
+                    "profile table: probe.slot must be < probe.period");
+            }
+            table.probe_period = static_cast<uint16_t>(period);
+            table.probe_slot = static_cast<uint16_t>(slot);
+        }
     } catch (const json::exception& e) {
         return Result<ProfileTable>::fail(std::string("profile table: ") + e.what());
     }
@@ -1217,6 +1437,11 @@ std::string dump_config_summary(const Config& cfg) {
     for (const AdapterCfg& a : cfg.adapters) {
         ss << "  " << a.name << " role=" << (a.role == Role::kTx ? "tx" : "rx")
            << " ch=" << a.channel_mhz << " bw=" << unsigned(a.bw);
+        if (!a.mac.empty()) {
+            ss << " mac=" << a.mac;  // §15.2 Pass 154 stanza pin
+        }
+        ss << " power_offset_qdb=" << a.power_offset_qdb
+           << " power_offset_max_qdb=" << a.power_offset_max_qdb;
         if (a.max_power_qdb) {
             ss << " max_power_qdb=" << *a.max_power_qdb;
         }

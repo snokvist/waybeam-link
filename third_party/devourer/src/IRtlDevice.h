@@ -329,6 +329,33 @@ public:
 
   virtual SelectedChannel GetSelectedChannel() = 0;
 
+  /* Per-unit hardware identity: the MAC address burned in the adapter's EFUSE —
+   * the same value the vendor kernel driver programs into the netdev, and hence
+   * the thing udev's predictable name `wlx<mac>` is derived from.
+   *
+   * Why this is on the interface at all: a consumer that keeps per-adapter state
+   * (a measured TX-power curve, a calibration, anything tied to one specific
+   * dongle) has to answer "is this the same physical adapter I measured last
+   * time?" across a re-plug, a reboot and a port change. Neither key otherwise
+   * available can answer it. A USB bus path identifies a *port*, not a device.
+   * And the USB serial descriptor is not unique: on every RTL88x2 part measured
+   * it is the constant placeholder "123456", burned into the EFUSE a few bytes
+   * from the MAC itself. Keying on it is worse than useless — two adapters in
+   * one host would share state and silently apply each other's measurements.
+   *
+   * `out` receives the 6 bytes in wire order. Returns false where the EFUSE
+   * value is unprogrammed/unreadable — and, on any generation, possibly before
+   * Init/InitWrite: the EFUSE is only guaranteed readable on a brought-up chip,
+   * and this accessor never powers the chip on as a side effect (Kestrel serves
+   * the bring-up parse; the others fall back to a best-effort pre-init read
+   * that degrades to false on an unpowered adapter). Callers must treat false
+   * as "no stable identity available" rather than substituting a weaker one
+   * silently; for a guaranteed answer on a programmed unit, ask after bring-up.
+   * Implemented on every generation (per-chip offsets at each HAL's perm_mac /
+   * efuse parse); the interface default stays false so a future generation
+   * degrades gracefully rather than fabricating an identity. */
+  virtual bool GetPermanentMacAddress(uint8_t /*out*/[6]) { return false; }
+
   /* Read the 64-bit hardware TSF (Timing Synchronization Function) timer — the
    * 802.11 MAC's free-running microsecond clock (REG_TSFTR). It runs off the
    * chip's crystal and is latched into every RX descriptor at receive

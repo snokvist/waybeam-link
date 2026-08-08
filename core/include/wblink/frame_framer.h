@@ -31,6 +31,12 @@ struct FrameFecConfig {
     FecScheme scheme = FecScheme::kNone;
     uint16_t i_rate_permille = 250;  // IDR repair overhead
     uint16_t p_rate_permille = 100;  // P-frame repair overhead
+    // §14.1a non-referenced (SVC-T droppable) repair overhead. UNSET =>
+    // inherit p_rate_permille, i.e. bit-for-bit pre-Pass-149 behaviour.
+    // Deliberately not defaulted to 0: that would strip authored protection
+    // the moment a producer switched preset. Note the min_r trap — 0 is the
+    // only value that yields genuinely zero parity (see repair_count()).
+    std::optional<uint16_t> e_rate_permille;
     uint16_t min_k = 3;              // k <= min_k => ARQ-only (r = 0)
     // §14.1 (Pass 98) minimum repair floor: a FEC'd frame gets at least this
     // many repair symbols, so small frames are not left on r = ceil(k·rate)=1
@@ -60,7 +66,16 @@ struct FrameFramerStats {
     uint64_t idr_frames = 0;
     uint64_t arq_frames = 0;
     uint64_t arq_cutoff_frames = 0;  // §4.1 Pass 40 high-cadence suppression
+    // §14.1a: frames carrying the non-referenced flag. Its ratio to `frames`
+    // is the observed droppable density — the only detector for producer/link
+    // preset drift — so it counts whether or not e_rate is configured.
+    uint64_t fec_enhance_frames = 0;
 };
+
+// §14.1a classification, in priority order. IDR wins over kEnhance because no
+// producer marks an IDR non-referenced; the framer RESOLVES rather than relies
+// on that, so a producer that ever set both bits gets IDR protection.
+enum class FrameFecClass : uint8_t { kP = 0, kEnhance = 1, kIdr = 2 };
 
 class FrameFramer {
   public:
@@ -100,9 +115,11 @@ class FrameFramer {
     // construction (rlc256 vs none is structural); only the per-mille repair
     // overheads and the ARQ-only threshold move. Effective on the next frame.
     void set_fec_rates(uint16_t i_permille, uint16_t p_permille,
-                       uint16_t min_k, uint16_t min_r) {
+                       uint16_t min_k, uint16_t min_r,
+                       std::optional<uint16_t> e_permille = std::nullopt) {
         cfg_.fec.i_rate_permille = i_permille;
         cfg_.fec.p_rate_permille = p_permille;
+        cfg_.fec.e_rate_permille = e_permille;  // §14.1a full replacement
         cfg_.fec.min_k = min_k;
         cfg_.fec.min_r = min_r;
     }
@@ -149,7 +166,12 @@ class FrameFramer {
     // r for a frame of k symbols per the §14.1 adaptive policy; 0 if FEC off,
     // ARQ-only (k <= min_k), or the k+r>256 cap trips (records fec_oversize_k).
     // §14.1: arq_eligible gates the min_k ARQ-only rule (Pass 94).
-    uint16_t repair_count(uint16_t k, bool is_idr, bool arq_eligible);
+    uint16_t repair_count(uint16_t k, FrameFecClass cls, bool arq_eligible);
+
+    // §14.1/§14.1a per-class repair rate; kEnhance falls back to the P rate
+    // when e_rate is unset. Shared by repair_count() and the §9.3a guard so
+    // the two can never disagree about a frame's rate.
+    uint16_t class_rate(FrameFecClass cls) const;
 
     FrameFramerConfig cfg_;
     FrameFramerStats stats_;

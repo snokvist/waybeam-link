@@ -28,7 +28,8 @@ enum class PacketType : uint8_t {
     kCacheAssign = 0xC,  // §3.13 receiver-owned cache following
     kVehicleCmd = 0xD,  // §3.14 remote vehicle command (rides §11 machinery)
     kSelectorState = 0xE,  // §3.15 craft-owned adaptive state summary
-    kUplinkQuality = 0xF,  // §3.16 authenticated craft→ground uplink feedback
+    kExtended = 0xF,  // §3.16 EXTENDED type — first payload byte is the
+                      // extended type ID registry (Pass 153)
 };
 
 // §3.4 stream-type registry. Values 0x10–0xEF are user/build-defined,
@@ -119,12 +120,37 @@ inline constexpr size_t kVehicleCmdSize = 23;  // §3.14: MAC covers bytes 0..18
 inline constexpr size_t kSelectorStateCalibSize = 36;
 inline constexpr size_t kSelectorStateSize = 34;
 inline constexpr size_t kSelectorStateLegacySize = 32;
-// §3.16 (Pass 131): 31 bytes — the 4-byte quality_mac is deleted, the packet
-// is unauthenticated. Still exact-length with no flags byte, so the shape is
-// fixed and last_rx_mcs has to ship in it rather than be appended later.
-inline constexpr size_t kUplinkQualitySize = 31;
-// §3.16 last_rx_mcs sentinel: no radiotap MCS field, a non-HT rate, or no
-// accepted report yet. Mirrors io's kRxMcsUnknown, restated here because
+// §3.16 (Pass 153) EXTENDED type-ID registry: the first payload byte of
+// every 0xF frame. 0x00 is reserved-invalid, unknown IDs are ignored, and
+// additive growth allocates new IDs here — the version nibble is reserved
+// for breaking changes only. CAL_PROBE is fixed 22 bytes zero-padded to the
+// negotiated §9.3a budget — the one variable-length non-DATA layout, so its
+// decoder range-checks [kCalibProbeFixedSize, mtu_tier::kHighBudget].
+// CAL_TALLY is exact-length.
+namespace ext_type {
+inline constexpr uint8_t kReservedInvalid = 0x00;
+inline constexpr uint8_t kCalProbe = 0x01;
+inline constexpr uint8_t kCalTally = 0x02;
+inline constexpr uint8_t kLinkVerdict = 0x03;  // §3.16 Pass 159
+}  // namespace ext_type
+inline constexpr size_t kCalibProbeFixedSize = 22;
+inline constexpr size_t kCalibTallySize = 26;
+inline constexpr size_t kLinkVerdictSize = 23;  // §3.16 Pass 159, exact-length
+// §3.16 (Pass 159) LINK_VERDICT values — the CAUSE, never a vendor scalar.
+// 0/stale = absence of evidence, gates nothing (§9.4 Pass 160). >6 = decode
+// error.
+namespace link_verdict {
+inline constexpr uint8_t kUnknown = 0;
+inline constexpr uint8_t kNoSignal = 1;
+inline constexpr uint8_t kSaturated = 2;
+inline constexpr uint8_t kInterference = 3;
+inline constexpr uint8_t kWeak = 4;
+inline constexpr uint8_t kMarginal = 5;
+inline constexpr uint8_t kHealthy = 6;
+inline constexpr uint8_t kMax = 6;
+}  // namespace link_verdict
+// §3.16 rx_mcs sentinel: no radiotap MCS field, a non-HT rate, or no
+// accepted probe yet. Mirrors io's kRxMcsUnknown, restated here because
 // core/ stays dependency-free (it is vendored standalone).
 inline constexpr uint8_t kUplinkRxMcsUnknown = 0xFF;
 

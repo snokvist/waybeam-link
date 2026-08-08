@@ -37,6 +37,8 @@
 #define WBLINK_APP_TEST 1
 #include "app/main.cpp"
 
+#include <fstream>
+
 #include "wbtest.h"
 
 namespace {
@@ -73,18 +75,47 @@ PowerCurve flat_curve(int32_t qdb) {
     return c;
 }
 
+// A §10.2 power-map FILE, because the config path is the one that still has to
+// be refused on a relative backend and it is reachable only through the loader.
+// Five rows: the first three cover the CCK/OFDM rates the parser skips, the
+// last two carry HT MCS0-7 (rate index 12..19).
+std::string write_flat_power_map(const char* name, double dbm) {
+    std::string path = std::string("/tmp/") + name;
+    std::ofstream f(path, std::ios::trunc);
+    f << "#[5G]A\n";
+    for (int row = 0; row < 5; ++row) {
+        f << "[0] 0xE08 0xffffffff";
+        for (int i = 0; i < 4; ++i) f << " " << dbm;
+        f << "\n";
+    }
+    return path;
+}
+
 // Records what actually reached the actuator, which is the only thing that
 // matters for a power control — GET reporting the right number while the radio
 // sits somewhere else is exactly the class of bug this file exists for.
 struct PowerSpy {
     std::vector<std::pair<size_t, int32_t>> applied;
+    std::vector<std::pair<size_t, int32_t>> offsets;   // apply_power_offset
+    std::vector<std::pair<size_t, int32_t>> absolutes; // apply_power (§10.2)
     int autos = 0;
     void attach(TxCore& tx) {
         tx.apply_power = [this](size_t idx, int32_t qdb) {
             applied.emplace_back(idx, qdb);
+            absolutes.emplace_back(idx, qdb);
             return true;
         };
         tx.apply_power_auto = [this](size_t) { ++autos; };
+        // §10.5 (Pass 150): record the two actuators SEPARATELY. They share a
+        // signature and, on devourer, the same register write with opposite
+        // documented meanings — so a test that funnels both cannot tell an
+        // absolute write from an offset one, which is this pass's whole
+        // subject.
+        tx.apply_power_offset = [this](size_t idx, int32_t qdb) {
+            applied.emplace_back(idx, qdb);
+            offsets.emplace_back(idx, qdb);
+            return true;
+        };
     }
     bool empty() const { return applied.empty(); }
     // Sentinel rather than .back() on an empty vector. wbtest is built so one
@@ -95,7 +126,7 @@ struct PowerSpy {
     int32_t last_qdb() const {
         return applied.empty() ? INT32_MIN : applied.back().second;
     }
-    void clear() { applied.clear(); autos = 0; }
+    void clear() { applied.clear(); offsets.clear(); absolutes.clear(); }
 };
 
 // ---- §10.3/§11.7 0x0A power tier -------------------------------------------
@@ -181,27 +212,264 @@ void test_tier_rejected_with_no_preset_list() {
     CHECK_EQ_U(static_cast<int64_t>(tx.power_tier()) + 1, 0);  // stays -1
 }
 
-// §10.5 says the §10.3 ceiling is the ONE clamp on an override. A lowered tier
-// must therefore re-assert a held latch through the NEW clamp; skipping that
-// left the hardware on the old, higher value — a safety control that visibly
-// did nothing, which is the worst possible outcome for one.
-void test_lowered_tier_reasserts_a_held_override() {
+// §10.5 (Pass 150) REPLACES the pre-150 contract this test used to encode.
+// The §10.3 ceiling is no longer the clamp on an override — on a relative
+// backend it clamped the OFFSET, so a "cannot cook a PA" ceiling of 108
+// silently authorised +27 dB. The latch is now bounded by
+// power_offset_max_qdb and REJECTED past it, never clamped.
+void test_override_is_bounded_and_rejected_not_clamped() {
     TxCore tx(one_tx_config(108, {60, 108}), 1, nullptr, 0);
     PowerSpy spy;
     spy.attach(tx);
 
-    tx.set_power_override(120);            // above every ceiling
+    // Above the bound (default 0): refused outright, and nothing reaches
+    // hardware — the pre-150 behaviour silently applied 108 here.
+    CHECK(!tx.set_power_override(120));
+    CHECK(spy.empty());
+
+    // At or below the bound: applied verbatim, NOT clamped to any ceiling.
+    CHECK(tx.set_power_override(-8));
     CHECK(!spy.empty());
-    CHECK(spy.last_qdb() == 108);          // clamped at the boot ceiling
+    CHECK(spy.last_qdb() == -8);
     spy.clear();
 
-    CHECK(tx.set_power_tier(0));           // ceiling 60
-    CHECK(!spy.empty());                   // the latch was re-applied...
-    CHECK(spy.last_qdb() == 60);           // ...through the NEW clamp
+    // 0 is the bound's default and is allowed — it is the efuse default, so
+    // it is a legal request even though it is not a safe boot value.
+    CHECK(tx.set_power_override(0));
+    CHECK(spy.last_qdb() == 0);
+}
 
-    // And §15.5 `effective` counts a held latch: the ceiling plainly reaches
-    // hardware through it, even on a node with no curve.
-    CHECK(tx.power_tier_effective());
+// §10.5 (Pass 150): the forced safe boot offset. The whole point is that a
+// node never transmits at the uncharacterised efuse default, so this must
+// reach the actuator for EVERY role:"tx" adapter before the first frame.
+void test_boot_offset_applied_to_every_tx_adapter() {
+    Config c = one_tx_config(108, {});
+    c.adapters.push_back(tx_adapter("tx1", 108, {}));
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[1].power_offset_qdb = -24;
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+
+    tx.apply_boot_power_offsets();
+    CHECK_EQ_U(spy.applied.size(), 2u);
+    for (const auto& [idx, qdb] : spy.applied) {
+        (void)idx;
+        CHECK(qdb == -24);
+    }
+}
+
+// §10.5 (Pass 150): auto must land on the configured safe offset, NOT the
+// backend default. Pre-150 it called apply_power_auto, which on devourer was
+// offset 0 — the compressing point — and §11.6 recovery ends here (Pass 48),
+// so an unattended recovery could drop a node onto it.
+void test_auto_restores_safe_offset_not_backend_default() {
+    Config c = one_tx_config(108, {});
+    c.adapters[0].power_offset_qdb = -24;
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+
+    CHECK(tx.set_power_override(-8));
+    spy.clear();
+    tx.clear_power_override();
+    CHECK(!spy.empty());
+    CHECK(spy.last_qdb() == -24);  // the safe offset, not 0
+}
+
+// §10.5 (Pass 150) CRITICAL regression, narrowed by §10.6 (Pass 151): a
+// CONFIG `power_map` holds ABSOLUTE qdb and is not backend-scoped, so on a
+// relative backend a profile commit would rewrite the boot offset with
+// 60..108 qdb reinterpreted as +15..+27 dB. That one stays refused. What is
+// no longer refused is a curve this backend's own calibration authored — the
+// Pass 146 fingerprint is backend-scoped, so it cannot have come from the
+// other space, and it actuates through the OFFSET lever bounded by §10.5.
+void test_config_curve_refused_on_relative_backend() {
+    Config c = one_tx_config(108, {});
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[0].power_map = write_flat_power_map("wblink_p151_map.txt", 27.0);
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+    tx.set_backend_relative(true);
+    CHECK(tx.has_power_curve());        // the config curve loaded...
+
+    tx.apply_boot_power_offsets();
+    spy.clear();
+    tx.resolve_and_apply_power(5, 4);   // a §10.4 commit
+
+    CHECK(spy.absolutes.empty());       // ...but reached no actuator at all
+    CHECK(spy.offsets.empty());
+    CHECK(!tx.power_tier_effective());  // and §15.5 does not claim otherwise
+
+    // On an absolute backend the same config curve DOES resolve — the refusal
+    // is scoped to the backend, not a disabling of §10.2.
+    TxCore mon(c, 1, nullptr, 0);
+    PowerSpy mspy;
+    mspy.attach(mon);
+    mon.set_backend_relative(false);
+    mon.resolve_and_apply_power(5, 4);
+    CHECK(!mspy.absolutes.empty());
+}
+
+// §10.6 (Pass 151): an artifact-authored curve on a relative backend actuates
+// as OFFSETS, never as absolutes, and never above the §10.5 bound. Without
+// this the craft can be calibrated but the result reaches nothing — which is
+// the state Pass 150 shipped and this pass exists to end.
+void test_artifact_curve_actuates_as_offset() {
+    Config c = one_tx_config(108, {});
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[0].power_offset_max_qdb = 0;
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+    tx.set_backend_relative(true);
+    tx.install_curve(flat_curve(-16));   // an offset-space curve
+    CHECK(tx.has_power_curve());
+    // §11.7 0x0A tiers are a different matter: the presets are absolute qdb,
+    // so a tier is REJECTED here and never reported effective (Pass 151).
+    CHECK(!tx.power_tier_effective());
+
+    tx.apply_boot_power_offsets();
+    spy.clear();
+    tx.resolve_and_apply_power(5, 4);
+
+    CHECK(spy.absolutes.empty());        // the absolute lever is never touched
+    CHECK(spy.offsets.size() == 1);
+    CHECK(spy.offsets[0].second == -16);
+
+    // A curve entry above the §10.5 bound is clamped to it, not applied. The
+    // bound is the whole safety property of the Pass 151 window.
+    TxCore hot(c, 1, nullptr, 0);
+    PowerSpy hspy;
+    hspy.attach(hot);
+    hot.set_backend_relative(true);
+    hot.install_curve(flat_curve(64));
+    hot.resolve_and_apply_power(5, 4);
+    CHECK(!hspy.offsets.empty());
+    CHECK(hspy.offsets.back().second == 0);
+    CHECK(hspy.absolutes.empty());
+}
+
+// §10.6 (Pass 151): the safety property the whole re-base rests on. A
+// relative-backend sweep drives the OFFSET lever and never leaves the §10.5
+// window — Pass 150 refused the run outright precisely because the absolute
+// sweep walked its rungs to 108 qdb, which there is +27 dB.
+void test_relative_sweep_stays_inside_the_offset_window() {
+    Config c = one_tx_config(108, {});
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[0].power_offset_max_qdb = 0;
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+    tx.set_backend_relative(true);
+
+    CalibrationPolicy pol;
+    pol.settle_ms = 100;
+    pol.dwell_probe_frames = 20;
+    pol.dwell_verify_frames = 40;
+    pol.probe_pace_us = 100;
+    pol.tally_wait_ms = 20;
+    pol.tally_retries = 2;
+    tx.init_calibration(pol, c.adapters[0].max_power_qdb);
+
+    const auto w = tx.offset_window();
+    CHECK(w.has_value());
+    CHECK(w->first == -24);   // the safe boot offset — the sweep's floor
+    CHECK(w->second == 0);    // the §10.5 bound — its ceiling
+
+    // A channel with a real wall, so the run COMPLETES rather than tripping
+    // the Pass 134 "no wall anywhere" refusal — the success path is the one
+    // that persists an artifact and therefore the one worth pinning. The
+    // evidence is the real §3.16 exchange: engine probes into a real
+    // DwellReceiver, tallies back.
+    uint64_t now = 1000;
+    DwellReceiver ground;
+    CHECK(tx.calibrator_->start(now));
+    for (int i = 0; i < 120000 && tx.calibrating(); ++i) {
+        now += 1;
+        tx.calibrate_service(now);
+        tx.calibrator_->new_tick();
+        for (;;) {
+            const DwellProbeOut po = tx.calibrator_->next_probe(now);
+            if (!po.send) break;
+            const int32_t at =
+                spy.offsets.empty() ? -24 : spy.offsets.back().second;
+            const uint16_t loss = at >= -8 ? 900 : 5;  // wall at -8
+            const uint32_t n = tx.calibrator_->probe_dwell_count();
+            if (po.seq <= n * loss / 1000) continue;
+            const DwellTallyOut t = ground.on_probe(
+                tx.calibrator_->probe_run_id(),
+                tx.calibrator_->probe_dwell_id(), po.seq,
+                static_cast<uint16_t>(n), -40, 5, now);
+            if (t.send) {
+                tx.calibrator_->on_tally(t.run_id, t.dwell_id, t.received,
+                                         t.rssi_sum_dbm, t.rx_mcs, 0);
+            }
+        }
+    }
+    CHECK(!tx.calibrating());
+    CHECK(tx.calibrator_->state() == CalibState::kDone);
+    CHECK(!spy.offsets.empty());        // it really did drive the radio
+    CHECK(spy.absolutes.empty());       // and never through the absolute lever
+    for (const auto& o : spy.offsets) {
+        CHECK(o.second >= -24 && o.second <= 0);
+    }
+    // Every rung placed below the wall, and the taper did NOT collapse the
+    // high-order rungs onto the window floor (Pass 151 taper_rung_ceiling).
+    const CalibArtifact& art = tx.calibrator_->artifact();
+    for (int m = 0; m < 8; ++m) {
+        CHECK(art.placement_qdb[m] == -16);
+        CHECK(art.ceilings[m].has_bad);
+    }
+}
+
+// §10.3/§11.7 0x0A (Pass 151): `power_presets_qdb` are ABSOLUTE qdb, so a tier
+// on a relative backend would install one (60..108) as the clamp on an OFFSET
+// resolve — replacing the §10.5 bound with a number 15..27 dB above it. The
+// flying craft config carries a preset list AND runs devourer, so this is
+// reachable today, not hypothetical.
+void test_tier_rejected_on_relative_backend() {
+    Config c = one_tx_config(108, {60, 84, 108});
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[0].power_offset_max_qdb = 0;
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+    tx.set_backend_relative(true);
+    tx.install_curve(flat_curve(-16));
+
+    CHECK(!tx.set_power_tier(0));           // REJECTED, not silently applied
+    CHECK(!tx.power_tier_effective());      // and §15.3 does not claim it
+    // The §10.5 bound is intact: the resolve still clamps at 0, not at 60.
+    spy.clear();
+    tx.resolve_and_apply_power(5, 4);
+    CHECK(!spy.offsets.empty());
+    CHECK(spy.offsets.back().second == -16);
+
+    // The same tier on an absolute backend is accepted, unchanged.
+    TxCore mon(c, 1, nullptr, 0);
+    mon.set_backend_relative(false);
+    mon.install_curve(flat_curve(108));
+    CHECK(mon.set_power_tier(0));
+    CHECK(mon.power_tier_ceiling().value_or(-1) == 60);
+}
+
+// §10.6 (Pass 151): a config whose bound sits at or under its own safe offset
+// leaves no band, so there is nothing to sweep. REJECTED beats a one-point
+// "curve" that reports success.
+void test_empty_offset_window_has_no_sweep() {
+    Config c = one_tx_config(108, {});
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[0].power_offset_max_qdb = -24;   // bound == floor
+    TxCore tx(c, 1, nullptr, 0);
+    tx.set_backend_relative(true);
+    CHECK(!tx.offset_window().has_value());
+
+    // An absolute backend is unaffected by the §10.5 keys entirely.
+    TxCore mon(c, 1, nullptr, 0);
+    mon.set_backend_relative(false);
+    CHECK(!mon.offset_window().has_value());
 }
 
 // §10.3 Pass 136. A running §10.6 sweep owns the power actuator, and applying
@@ -489,9 +757,17 @@ class FakeAir : public AirIface {
         return true;
     }
     bool set_power_qdb(size_t, int32_t) override { return true; }
+    // §10.5 Pass 150 relative contract; record it so the boot-offset
+    // and latch tests can assert what actually reached the backend.
+    std::vector<std::pair<size_t, int32_t>> power_offsets;
+    bool set_power_offset_qdb(size_t i, int32_t q) override {
+        power_offsets.emplace_back(i, q);
+        return true;
+    }
     bool set_power_auto(size_t) override { return true; }
     std::optional<uint64_t> read_tsf(size_t) override { return std::nullopt; }
     void set_tx_mode(uint8_t, bool) override {}
+    void set_mcs_probe(uint16_t, uint16_t, uint8_t) override {}
     void set_stamp_net_id(uint8_t) override { ++stamp_sets; }
     void set_filter_net_id(std::optional<uint8_t>) override { ++filter_sets; }
     size_t tx_index() const override { return 0; }
@@ -502,6 +778,9 @@ class FakeAir : public AirIface {
         return std::nullopt;
     }
     bool is_rf() const override { return rf; }
+    std::string adapter_mac(size_t) const override { return {}; }
+    std::optional<AirSense> rx_sense(size_t) override { return sense; }
+    std::optional<AirSense> sense;  // §15.5a: injectable for scout tests
     uint64_t rx_frames(size_t a) const override { return 100 * (a + 1); }
 };
 
@@ -664,7 +943,14 @@ int main() {
     test_ceiling_and_presets_come_from_the_same_adapter();
     test_tier_is_all_or_nothing_across_adapters();
     test_tier_rejected_with_no_preset_list();
-    test_lowered_tier_reasserts_a_held_override();
+    test_override_is_bounded_and_rejected_not_clamped();
+    test_boot_offset_applied_to_every_tx_adapter();
+    test_auto_restores_safe_offset_not_backend_default();
+    test_config_curve_refused_on_relative_backend();
+    test_artifact_curve_actuates_as_offset();
+    test_relative_sweep_stays_inside_the_offset_window();
+    test_tier_rejected_on_relative_backend();
+    test_empty_offset_window_has_no_sweep();
     test_tier_refused_during_calibration();
     test_power_tier_json_shape();
     test_uplink_unowned_goes_to_backend_auto();

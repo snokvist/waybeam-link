@@ -81,6 +81,20 @@ void test_tx_ht_bytes() {
     CHECK_EQ_U(b[9], 0x00);
     CHECK_EQ_U(b[10], 0x37);
     CHECK_EQ_U(b[12], 3);
+
+    // §3.0 Pass 157 coding: FEC=LDPC is flags bit 4, STBC stream count is
+    // bits 6:5 — the known mask already claimed both, so only the flags
+    // byte moves, and the default (off) stays byte-identical to Pass 118.
+    (void)radiotap_tx_ht(b, 5, /*sgi=*/false, /*bw=*/20, kTxFlagsNoAck,
+                         /*ldpc=*/true, /*stbc=*/0);
+    CHECK_EQ_U(b[10], 0x37);
+    CHECK_EQ_U(b[11], 0x10);  // LDPC alone
+    (void)radiotap_tx_ht(b, 5, /*sgi=*/true, /*bw=*/20, kTxFlagsNoAck,
+                         /*ldpc=*/true, /*stbc=*/1);
+    CHECK_EQ_U(b[11], 0x34);  // SGI | LDPC | one STBC stream
+    (void)radiotap_tx_ht(b, 5, /*sgi=*/false, /*bw=*/20, kTxFlagsNoAck,
+                         /*ldpc=*/false, /*stbc=*/3);
+    CHECK_EQ_U(b[11], 0x60);  // stream count saturates the 2-bit field
 }
 
 // §15.3 Pass 118: an RX radiotap carrying TSFT|FLAGS|DBM_ANTSIGNAL|MCS.

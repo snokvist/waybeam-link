@@ -102,9 +102,11 @@ class UdpAir : public AirIface {
     bool reapply_tx_power(size_t /*adapter*/) override { return true; }
     // Power is logged intent, accepted the same way an in-process write is.
     bool set_power_qdb(size_t adapter, int32_t qdb) override;
+    bool set_power_offset_qdb(size_t adapter, int32_t qdb) override;
     bool set_power_auto(size_t adapter) override;
     // No PHY: there is no rate to stamp and no hardware clock to read.
     void set_tx_mode(uint8_t /*mcs*/, bool /*sgi*/) override {}
+    void set_mcs_probe(uint16_t, uint16_t, uint8_t) override {}  // no PHY
     std::optional<uint64_t> read_tsf(size_t /*adapter*/) override {
         return std::nullopt;
     }
@@ -118,6 +120,10 @@ class UdpAir : public AirIface {
     // Compatibility tier: no driver matrix to assert anything better.
     uint16_t mtu_supported() const override { return kDefaultMaxPayload; }
     bool is_rf() const override { return false; }
+    // No hardware, no per-unit identity (§10.6 Pass 154).
+    std::string adapter_mac(size_t) const override { return {}; }
+    // No RF, no frame-free sensor (§15.5a Pass 155).
+    std::optional<AirSense> rx_sense(size_t) override { return std::nullopt; }
 
   private:
     std::vector<UdpEgress> targets_;

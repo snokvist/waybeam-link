@@ -54,7 +54,7 @@ Profile example_profile(uint8_t id) {
 // Pinned golden hash of the example table. Every vendored copy of the codec
 // (e.g. Waybeam-android :wifi) must reproduce this value for this table;
 // recompute only on a deliberate §3.6 canonical-form revision.
-constexpr uint8_t kGoldenExampleHash = 0x80;  // Pass 122 packet-budget ceilings
+constexpr uint8_t kGoldenExampleHash = 0xC1;  // Pass 163 probe schedule 64/4
 
 ProfileTable example_table() {
     ProfileTable t;
@@ -62,6 +62,8 @@ ProfileTable example_table() {
         t.profiles.push_back(example_profile(id));
     }
     t.floor_profile = 0;
+    t.probe_period = 64;  // §3.6 Pass 163 seeds — matches the example file
+    t.probe_slot = 4;
     return t;
 }
 
@@ -70,11 +72,15 @@ ProfileTable example_table() {
 int main() {
     const ProfileTable table = example_table();
 
-    // Canonical size: count + 8*27 + floor (§3.6, 27 bytes/profile — Pass 82).
+    // Canonical size: count + 8*27 + floor + probe schedule (§3.6 Pass 163).
     const auto canon = canonical_serialize(table);
-    CHECK_EQ_U(canon.size(), 2 + 8 * kCanonicalProfileSize);
+    CHECK_EQ_U(canon.size(), 2 + 8 * kCanonicalProfileSize + 4);
     CHECK_EQ_U(canon[0], 8);                  // count
-    CHECK_EQ_U(canon[canon.size() - 1], 0);   // floor_profile
+    CHECK_EQ_U(canon[canon.size() - 5], 0);   // floor_profile
+    CHECK_EQ_U(canon[canon.size() - 4], 0);   // probe_period 64 BE (Pass 163)
+    CHECK_EQ_U(canon[canon.size() - 3], 64);
+    CHECK_EQ_U(canon[canon.size() - 2], 0);   // probe_slot 4 BE
+    CHECK_EQ_U(canon[canon.size() - 1], 4);
     // First profile's first bytes: id 0, mcs 0, gi long(0), power 4, 0x0258=600.
     CHECK_EQ_U(canon[1], 0);
     CHECK_EQ_U(canon[2], 0);
@@ -97,6 +103,8 @@ int main() {
     {
         ProfileTable shuffled;
         shuffled.floor_profile = 0;
+        shuffled.probe_period = 64;
+        shuffled.probe_slot = 4;
         for (int id : {5, 0, 7, 3, 1, 6, 2, 4}) {
             shuffled.profiles.push_back(
                 example_profile(static_cast<uint8_t>(id)));
@@ -156,13 +164,13 @@ int main() {
         CHECK(has_duplicate_ids(dup));
     }
 
-    // Empty table: count 0 + floor byte only.
+    // Empty table: count 0 + floor byte + probe schedule (Pass 163).
     {
         ProfileTable empty;
         const auto c = canonical_serialize(empty);
-        CHECK_EQ_U(c.size(), 2);
-        const uint8_t expect[2] = {0x00, 0x00};
-        CHECK_EQ_U(table_version(empty), crc8_dvbs2(expect, 2));
+        CHECK_EQ_U(c.size(), 6);
+        const uint8_t expect[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        CHECK_EQ_U(table_version(empty), crc8_dvbs2(expect, 6));
     }
 
     // §3.6 Pass 82: cross-check the SPEC, not just ourselves. The golden hash
@@ -188,8 +196,11 @@ int main() {
         p.max_payload = 0x99AA;
         t.profiles.push_back(p);
         t.floor_profile = 0x0F;
+        t.probe_period = 0x1234;  // §3.6 Pass 163 appended schedule
+        t.probe_slot = 0x5678;
 
         // count u8 | 27 bytes big-endian, §3.6 order | floor_profile u8
+        // | probe_period u16 | probe_slot u16 (Pass 163)
         const uint8_t spec[] = {
             0x01,                                      // count
             0x11,                                      // id
@@ -206,9 +217,11 @@ int main() {
             0x55, 0x66, 0x77, 0x88,                    // reserve_telemetry_bps
             0x99, 0xAA,                                // max_payload (Pass 82)
             0x0F,                                      // floor_profile
+            0x12, 0x34,                                // probe_period (Pass 163)
+            0x56, 0x78,                                // probe_slot
         };
         const auto got = canonical_serialize(t);
-        CHECK_EQ_U(got.size(), sizeof(spec));  // 1 + 27 + 1
+        CHECK_EQ_U(got.size(), sizeof(spec));  // 1 + 27 + 1 + 4
         CHECK_EQ_U(std::memcmp(got.data(), spec, sizeof(spec)), 0);
         CHECK_EQ_U(table_version(t), crc8_dvbs2(spec, sizeof(spec)));
     }
