@@ -136,7 +136,22 @@ prose. Until the harness in `docs/config-harness-plan.md` exists:
 ## Build & test
 
 ```
-cmake --build --preset dev && ctest --preset dev   # merge gate: 61 suites, ASan+UBSan
+scripts/gates.sh            # EVERY merge gate; what CI runs. --quick = dev + ctest only
+```
+
+Run that rather than a remembered checklist. It covers the eight presets, the
+61-suite `ctest`, the B7 embed check, the install/`find_package` round trip and
+the four `deploy/*.json` `--check`s, and it **fails on a diagnostic for our
+targets even when the build exits 0**. Toolchains the host lacks are SKIPPED
+loudly and counted separately — a skip is never a pass. Export
+`WBLINK_SSC338Q_TOOLCHAIN` and `WBLINK_ANDROID_NDK` to get the cross presets.
+`.github/workflows/gates.yml` calls the same script, so local and CI cannot
+drift.
+
+The individual commands, when you want one of them:
+
+```
+cmake --build --preset dev && ctest --preset dev   # 61 suites, ASan+UBSan
 cmake --build --preset ssc338q                      # ARMv7 cross (SigmaStar target)
 ```
 
