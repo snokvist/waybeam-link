@@ -2376,9 +2376,11 @@ regulatory clamp).
 **It does not bind an UNCALIBRATED node, and that is deliberate (operator
 ruling, Pass 134).** With no `power_map` and no artifact, `resolve_power_qdb()`
 returns `nullopt` and the controller issues **no power command at all** — the
-adapter stays on the backend default (measured 19.00 dBm on
-the fleet's ground 8812EU and 27.00 dBm on the craft's, via `iw txpower auto`
-on the then-current kernel-monitor grounds). `max_power_qdb`
+adapter stays on the backend default — on devourer the efuse per-rate table at
+offset 0, which §10.5 (Pass 150) measured as a compressing operating point.
+(The 19.00 / 27.00 dBm figures once quoted here were `iw txpower auto` readings
+on the retired kernel-monitor grounds and do not describe devourer.)
+`max_power_qdb`
 therefore bounds the sweep and clamps what the resolve applies; it is **not** an
 unconditional PA limiter. Making it one would mean asserting a fixed power at
 startup and after every retune with no curve loaded, which contradicts §10.3's
@@ -2469,8 +2471,10 @@ assertion.
   §10.7 artifact exists, else to `power_offset_qdb` — **never** to the raw
   efuse default (Pass 150). Before this, `auto` was literally offset 0, i.e.
   the uncharacterised default, which on a compressing unit is the worst
-  setting available; §11.6 recovery restores the backend default (Pass 48), so
-  an unattended recovery could drop a node onto it. It clears the latch **and
+  setting available; a §11.6 recovery can reset hardware power (Pass 48 — on
+  kernel-monitor it ended in `txpower auto`; on devourer the RX-path restart
+  does not itself move power, and §10.4 re-asserts regardless), so an
+  unattended recovery could drop a node onto it. It clears the latch **and
   forces one immediate restore** (it
   must not wait for the next profile change): on the radio backend a one-shot
   offset 0 undoes the latch, then the §10.2 curve resolve resumes when a
@@ -3644,7 +3648,7 @@ everything below is behaviour.
 | `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
 | `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the tallies come from the accepted reporter, and the loop is blind without them, §3.16). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen and the **video feed paused** (input-starve, Pass 153) — the operator chooses the moment (recommended: near-bench 2–10 m separation, §10.6 Pass 121) |
 | `0x09` | `MTU_TIER` | 0=Default, 1=Medium, 2=High | Requests the §9.3a global packet-budget tier. The craft accepts only when the requested budget is ≤ the minimum capability of every active craft TX adapter; otherwise it consumes the nonce and echoes `REJECTED` (no silent clamp). Acceptance commits at the next frame/block boundary. Unlike the other commands, binding release resets this state to Default, preventing an absent owner's jumbo choice from silently governing a future receiver fleet |
-| `0x0A` | `TX_POWER` | preset index 0..4 | Selects the node's §10.3 power **ceiling** from `adapters[].power_presets_qdb` (§15.2) — the baseline the Pass 134 per-rung mask is derived from, so one choice moves the whole tapered curve and the calibrated per-rung *shape* is preserved. This is deliberately NOT the §10.5 override latch, which is rung-agnostic by construction and would flatten a curve whose whole point is that MCS0 and MCS7 want different power. Applying a tier sets the runtime ceiling on the §10.4 resolve, the §10.5 clamp, and a future §10.6/§10.7 sweep, then forces one re-resolve at the committed operating point. **A tier can only ever LOWER power** (operator ruling): every preset is clamped at config load to that adapter's boot `max_power_qdb`, so §10.3 remains the operator's hard ceiling and no runtime path can raise power past it. `REJECTED` when no `role:"tx"` adapter carries a preset list, `arg` is past its length, a §10.6 calibration is running (Pass 136 — the run owns the actuator), or **the air backend is relative** (Pass 151): `power_presets_qdb` are absolute qdb and there is no offset-space tier, so applying one would install a 60..108 preset as the clamp on an offset resolve — replacing the §10.5 bound with a number 15..27 dB above it while §15.3 reported the tier effective. **Since Pass 164 every RF backend is relative, so this command is REJECTED on every node that has an actuator** — it is inert, not removed, and whether to retire it is a later ruling. Tiers are re-based with the rest of §10.5. On a node with no curve and no artifact the tier is accepted and recorded but **moves nothing** — per §10.3 the ceiling binds only where a number of ours reaches the actuator. Craft-session volatile like the rest of §11.7; unlike `0x09` MTU_TIER it is **not** reset on binding release, because a tier only lowers power, so a departed owner's choice is never the hazardous direction and resetting it would move power mid-flight |
+| `0x0A` | `TX_POWER` | preset index 0..4 | Selects the node's §10.3 power **ceiling** from `adapters[].power_presets_qdb` (§15.2) — the baseline the Pass 134 per-rung mask is derived from, so one choice moves the whole tapered curve and the calibrated per-rung *shape* is preserved. This is deliberately NOT the §10.5 override latch, which is rung-agnostic by construction and would flatten a curve whose whole point is that MCS0 and MCS7 want different power. Applying a tier sets the runtime ceiling on the §10.4 resolve, the §10.5 clamp, and a future §10.6/§10.7 sweep, then forces one re-resolve at the committed operating point. **A tier can only ever LOWER power** (operator ruling): every preset is clamped at config load to that adapter's boot `max_power_qdb`, so §10.3 remains the operator's hard ceiling and no runtime path can raise power past it. `REJECTED` when no `role:"tx"` adapter carries a preset list, `arg` is past its length, a §10.6 calibration is running (Pass 136 — the run owns the actuator), or **the air backend is relative** (Pass 151): `power_presets_qdb` are absolute qdb and there is no offset-space tier, so applying one would install a 60..108 preset as the clamp on an offset resolve — replacing the §10.5 bound with a number 15..27 dB above it while §15.3 reported the tier effective. Since Pass 164 the only RF backend is relative, so the **craft-side** `0x0A` apply is refused on every RF node. **The §15.5 `POST /api/v1/tx/power_tier` ground path carries no such refusal** — it still installs a preset as `ceiling_qdb`, which reaches hardware through the §10.5 override clamp and the §10.7 sweep bound. That asymmetry is a **known Pass-151 gap on the ground**, recorded here rather than asserted away; closing it is a behaviour change and needs its own ruling. Tiers are re-based with the rest of §10.5. On a node with no curve and no artifact the tier is accepted and recorded but **moves nothing** — per §10.3 the ceiling binds only where a number of ours reaches the actuator. Craft-session volatile like the rest of §11.7; unlike `0x09` MTU_TIER it is **not** reset on binding release, because a tier only lowers power, so a departed owner's choice is never the hazardous direction and resetting it would move power mid-flight |
 | `0x0B`–`0x1F` | *reserved* | — | not specified |
 
 **v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
@@ -4655,12 +4659,18 @@ act, supported because efuse tables are per-module and some ship conservative.
 Load-time rule: `power_offset_qdb <= power_offset_max_qdb`, else the config is
 rejected.
 
-`max_power_qdb` is **no longer a TX ceiling** (§10.3 amendment) and, since
-Pass 164 retired the backend it referenced, has no live consumer: it is
-accepted with a warning and ignored, and `--check --strict` reports it inert.
-`adapters[].calib_id`, `adapters[].ifname` and `adapters[].power_presets_qdb`
-are inert for the same reason (§10.7 tiers 2–4, §11.7 `0x0A`). All four still
-load; retiring the keys is a later pass.
+`max_power_qdb` is **no longer a TX ceiling** (§10.3 amendment) and is not the
+§10.5 reference either — that role went with kernel-monitor (Pass 164). It
+nevertheless **remains live on every backend** as the §10.3 ceiling: it clamps
+`power_presets_qdb` at load, it is reported as §15.3 `tx_power_ceiling_qdb`, it
+is the one clamp on a §10.5 override latch, and it bounds a §10.7 sweep. So is
+`power_presets_qdb`, through §15.5 `power_tier`. Neither is inert, and
+`--check --strict` must not say they are.
+
+What Pass 164 *did* strand is `adapters[].ifname` and `adapters[].calib_id`:
+both lost their only reader with the backend (§10.7 tiers 2–4), nothing else
+reads either, and `--check --strict` reports them **inert**. They still load;
+retiring the keys is a later pass.
 
 `scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
   `"rlc256"` enables §14.1. Rates are integer per-mille (project convention). On
