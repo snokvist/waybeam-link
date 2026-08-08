@@ -2,11 +2,23 @@
 cmake_minimum_required(VERSION 3.22)
 project(waybeam-link CXX C)
 
+# Early, not next to install(): CMAKE_INSTALL_INCLUDEDIR is expanded into
+# wblink_core's INSTALL_INTERFACE below, which is evaluated where it is
+# written — including GNUInstallDirs only at the install block would expand it
+# to the empty string and point the exported target at the prefix root.
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(WBLINK_BUILD_TESTS "Build unit tests" ON)
+# Everything that is "the daemon's world" — the app, the tests, the bench
+# tools — defaults to ON standalone and OFF when this tree is embedded in
+# another project via add_subdirectory (B7). Measured before this existed: an
+# embedding consumer got 133 targets, including the daemon and all 61 test
+# binaries, none of which it asked for. The options stay individually
+# settable; only their DEFAULT is derived.
+option(WBLINK_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
 option(WBLINK_SANITIZE "Build with ASan+UBSan (host dev builds)" OFF)
 option(WBLINK_FUZZ "Build the libFuzzer wire fuzz target (clang only)" OFF)
 option(WBLINK_RADIO "Build the devourer radio air backend (§3.0/§7)" ON)
@@ -18,7 +30,7 @@ option(WBLINK_RADIO "Build the devourer radio air backend (§3.0/§7)" ON)
 option(WBLINK_FRAME_SHM "Build the frame-SHM ring (§15.4)" ON)
 option(WBLINK_CONTROL_SERVER "Build the REST/SSE control server (§15.5)" ON)
 option(WBLINK_VENC "Build venc HTTP actuation (§9.6)" ON)
-option(WBLINK_BUILD_APP "Build the waybeam-link daemon" ON)
+option(WBLINK_BUILD_APP "Build the waybeam-link daemon" ${PROJECT_IS_TOP_LEVEL})
 # Promote our own warnings to errors. OFF by default so a dev build still
 # compiles with a squiggle; ON for the android-arm64 gate, whose whole purpose
 # is catching portability diagnostics (nfds_t narrowing was the first). Without
@@ -87,20 +99,37 @@ endif()
 # headers and empty libs, and the real static target usb-1.0 is linked
 # directly (devourer before usb-1.0 — static archive order).
 if(WBLINK_RADIO)
-    set(BUILD_SHARED_LIBS        OFF CACHE BOOL "" FORCE)
-    set(LIBUSB_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-    set(LIBUSB_BUILD_EXAMPLES    OFF CACHE BOOL "" FORCE)
-    set(LIBUSB_BUILD_TESTING     OFF CACHE BOOL "" FORCE)
-    set(LIBUSB_INSTALL_TARGETS   OFF CACHE BOOL "" FORCE)
+    # NORMAL variables, not `CACHE ... FORCE` (B7). CMP0077 is NEW at our
+    # cmake_minimum_required, so `option()` in the vendored trees honours a
+    # plain variable, and a plain variable shadows the cache for this
+    # directory and everything below it — same effect on our build, no entry
+    # written to the consumer's cache. With FORCE, embedding this tree
+    # silently flipped the CONSUMER's BUILD_SHARED_LIBS to OFF, turning its
+    # own shared libraries static (measured).
+    set(BUILD_SHARED_LIBS        OFF)
+    set(LIBUSB_BUILD_SHARED_LIBS OFF)
+    set(LIBUSB_BUILD_EXAMPLES    OFF)
+    set(LIBUSB_BUILD_TESTING     OFF)
+    set(LIBUSB_INSTALL_TARGETS   OFF)
     # No hotplug enumeration needed and the SSC338Q cross toolchain has no
     # libudev — the netlink fallback covers both hosts.
-    set(LIBUSB_ENABLE_UDEV       OFF CACHE BOOL "" FORCE)
+    set(LIBUSB_ENABLE_UDEV       OFF)
+    # CURRENT, not CMAKE_BINARY_DIR: embedded, the latter is the CONSUMER's
+    # build root, so a consumer that also vendors libusb-cmake at the
+    # conventional spot collides with "binary directory is already used".
+    # Waybeam-android does exactly that today, which means its hand-copy must
+    # be deleted in the same commit that adds add_subdirectory(waybeam-link) —
+    # the migration cannot be staged.
     add_subdirectory(third_party/libusb-cmake
-                     ${CMAKE_BINARY_DIR}/libusb EXCLUDE_FROM_ALL)
+                     ${CMAKE_CURRENT_BINARY_DIR}/libusb EXCLUDE_FROM_ALL)
 
+    # Likewise scoped. As a FORCE cache entry this redirected the ENTIRE
+    # consuming project's pkg-config to a shim that answers libusb-1.0 and
+    # exits 1 on anything else — so every other pkg_check_modules() in the
+    # consumer failed. find_program() honours a normal variable and leaves
+    # the cache untouched (verified: devourer still resolves libusb 1.0.30).
     set(PKG_CONFIG_EXECUTABLE
-        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkgconf-libusb.sh
-        CACHE FILEPATH "" FORCE)
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkgconf-libusb.sh)
     # Chip selection per build flavor. Each enabled family carries its fw
     # blobs, so vehicle builds trim (the SSC338Q overlay is ~5.7 MB) while
     # ground builds have no size pressure and enable everything USB:
@@ -140,17 +169,45 @@ if(WBLINK_RADIO)
             "WBLINK_DEVOURER_CHIPS must be fleet, au, eu, or all (got "
             "'${WBLINK_DEVOURER_CHIPS}')")
     endif()
-    set(DEVOURER_JAGUAR1       ${_wblink_j1}   CACHE BOOL "" FORCE)
-    set(DEVOURER_8814          ${_wblink_extra} CACHE BOOL "" FORCE)
-    set(DEVOURER_JAGUAR2_8822B ${_wblink_extra} CACHE BOOL "" FORCE)
-    set(DEVOURER_JAGUAR2_8821C ${_wblink_extra} CACHE BOOL "" FORCE)
-    set(DEVOURER_JAGUAR3_8822C ${_wblink_j3c}   CACHE BOOL "" FORCE)
-    set(DEVOURER_JAGUAR3_8822E ${_wblink_j3e}   CACHE BOOL "" FORCE)
-    set(DEVOURER_KESTREL_8852B ${_wblink_extra} CACHE BOOL "" FORCE)
-    set(DEVOURER_KESTREL_8852C ${_wblink_extra} CACHE BOOL "" FORCE)
-    set(DEVOURER_PCIE          OFF             CACHE BOOL "" FORCE)
+    # Normal variables for the same reason as the libusb block above. The
+    # Kestrel pair matters most: devourer defaults them ON, our fleet builds
+    # force them OFF, and this is the exact wiring the Android consumer
+    # hand-copied and will acquire silently when its devourer submodule is
+    # bumped to ours (B7). Owning it here is what lets that copy be deleted.
+    set(DEVOURER_JAGUAR1       ${_wblink_j1})
+    set(DEVOURER_8814          ${_wblink_extra})
+    set(DEVOURER_JAGUAR2_8822B ${_wblink_extra})
+    set(DEVOURER_JAGUAR2_8821C ${_wblink_extra})
+    set(DEVOURER_JAGUAR3_8822C ${_wblink_j3c})
+    set(DEVOURER_JAGUAR3_8822E ${_wblink_j3e})
+    set(DEVOURER_KESTREL_8852B ${_wblink_extra})
+    set(DEVOURER_KESTREL_8852C ${_wblink_extra})
+    set(DEVOURER_PCIE          OFF)
     add_subdirectory(third_party/devourer
-                     ${CMAKE_BINARY_DIR}/devourer EXCLUDE_FROM_ALL)
+                     ${CMAKE_CURRENT_BINARY_DIR}/devourer EXCLUDE_FROM_ALL)
+
+    # Prove the normal variables above were actually honoured. They rely on
+    # CMP0077 being NEW inside the vendored tree, which is true only while its
+    # own cmake_minimum_required stays >= 3.13 — and a re-vendor could lower
+    # it. Under CMP0077 OLD, option() would overwrite our value in devourer's
+    # scope ONLY, so ours still reads OFF and checking it would prove nothing:
+    # the honest witness is what devourer actually compiled. Silently gaining
+    # two 11ax families in a vehicle build is the exact failure the old
+    # `CACHE ... FORCE` made impossible, so it must not become possible now.
+    get_target_property(_wblink_dv_defs devourer INTERFACE_COMPILE_DEFINITIONS)
+    foreach(_k 8852B 8852C)
+        if(NOT _wblink_extra AND "DEVOURER_HAVE_KESTREL_${_k}=1" IN_LIST
+                                 _wblink_dv_defs)
+            message(FATAL_ERROR
+                "devourer built Kestrel ${_k} despite WBLINK_DEVOURER_CHIPS="
+                "'${WBLINK_DEVOURER_CHIPS}'. The vendored tree is not honouring "
+                "our option values — check CMP0077 (its cmake_minimum_required "
+                "must stay >= 3.13) after any re-vendor.")
+        endif()
+    endforeach()
+    message(STATUS
+        "devourer chips '${WBLINK_DEVOURER_CHIPS}': jaguar1=${_wblink_j1} "
+        "8822c=${_wblink_j3c} 8822e=${_wblink_j3e} extra=${_wblink_extra}")
 endif()
 
 # --- wblink_core: zero-dependency portable wire/session library (PROTOCOL.md
@@ -181,7 +238,21 @@ add_library(wblink_core STATIC
     core/src/csa.cpp
     core/src/vehicle_cmd.cpp
     core/src/recovery.cpp)
-target_include_directories(wblink_core PUBLIC core/include)
+target_include_directories(wblink_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+# C++20 is a usage requirement, not a local setting. CMAKE_CXX_STANDARD is
+# directory-scoped and does NOT travel with an exported or embedded target, so
+# without this a find_package() consumer at its compiler's default standard
+# fails inside our own headers (measured: table.h's defaulted operator==).
+target_compile_features(wblink_core PUBLIC cxx_std_20)
+add_library(wblink::core ALIAS wblink_core)
+# EXPORT_NAME, not just the ALIAS: install(EXPORT NAMESPACE wblink::) prefixes
+# the TARGET name, so without this the installed package would offer
+# wblink::wblink_core while an embedding consumer links wblink::core — the
+# same library under two spellings depending on how it was consumed. (Found by
+# building a find_package() consumer, not by reading.)
+set_target_properties(wblink_core PROPERTIES EXPORT_NAME core)
 target_compile_options(wblink_core PRIVATE ${WBLINK_WARNINGS})
 
 # --- wblink_io: config/bindings/stats (§15). POSIX sockets + the vendored
@@ -199,7 +270,10 @@ add_library(wblink_io STATIC
     io/src/scout_store.cpp
     io/src/uplink_calib_store.cpp
     io/src/modes.cpp)
-target_include_directories(wblink_io PUBLIC io/include)
+target_include_directories(wblink_io PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/io/include>)
+target_compile_features(wblink_io PUBLIC cxx_std_20)
+add_library(wblink::io ALIAS wblink_io)
 target_include_directories(wblink_io SYSTEM PRIVATE third_party)
 target_compile_options(wblink_io PRIVATE ${WBLINK_WARNINGS})
 target_link_libraries(wblink_io PUBLIC wblink_core)
@@ -244,7 +318,8 @@ endif()
 
 # Native-only real-video bench. Keep GStreamer out of the target binary and
 # cross build; the tool still uses the production FrameShmRing implementation.
-if(WBLINK_FRAME_SHM AND NOT CMAKE_CROSSCOMPILING AND EXISTS "/usr/bin/pkg-config")
+if(WBLINK_FRAME_SHM AND PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING
+   AND EXISTS "/usr/bin/pkg-config")
     execute_process(
         COMMAND /usr/bin/pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0
         OUTPUT_VARIABLE WBLINK_GST_CFLAGS
@@ -269,7 +344,7 @@ endif()
 # Synthetic frame-SHM bench endpoint (deterministic pattern producer +
 # verifying consumer) — no GStreamer, so it runs on any dev host. Used by
 # tools/cache_repair_bench.sh.
-if(WBLINK_FRAME_SHM AND NOT CMAKE_CROSSCOMPILING)
+if(WBLINK_FRAME_SHM AND PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
     add_executable(frame_shm_feed tools/frame_shm_feed.cpp)
     target_compile_options(frame_shm_feed PRIVATE ${WBLINK_WARNINGS})
     target_link_libraries(frame_shm_feed PRIVATE wblink_io)
@@ -278,4 +353,64 @@ endif()
 if(WBLINK_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+# --- install / export (docs/library-extraction-plan.md B7) -------------------
+#
+# ONLY wblink_core is installed and exported, and that asymmetry is deliberate
+# rather than unfinished. wblink_io PUBLIC-links two vendored static libraries
+# (devourer, usb-1.0); install(EXPORT) refuses a target whose link interface
+# names targets outside the export set, and devourer has no install() rule of
+# its own while libusb-cmake's are force-disabled here because we link its
+# static target directly. Exporting wblink_io would therefore mean authoring
+# install rules for third-party trees we may not edit, whose interface include
+# directories point into OUR source tree. So:
+#
+#   find_package(wblink)   -> wblink::core, the dependency-free wire library
+#   add_subdirectory(...)  -> wblink::core AND wblink::io, radio wiring included
+#
+# The second form is what closes B7: an embedding consumer links wblink::io and
+# deletes its hand-copy of the libusb force-block, the devourer chip selection
+# and the static archive link order. examples/embed-consumer/ is that consumer,
+# reduced to the smallest thing that proves it.
+if(PROJECT_IS_TOP_LEVEL)
+
+    install(TARGETS wblink_core EXPORT wblinkTargets
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(DIRECTORY core/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(EXPORT wblinkTargets
+            FILE wblinkTargets.cmake
+            NAMESPACE wblink::
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/wblink)
+
+    # No version file: the library has no released version yet, and a
+    # fabricated one would let a consumer write a compatibility constraint
+    # that means nothing. Add it with the first tagged release; until then
+    # find_package(wblink 1.0) fails loudly with "version: unknown".
+    #
+    # Component handling is not boilerplate here: the package deliberately
+    # ships one target out of two, so without it find_package(wblink
+    # COMPONENTS io) reports SUCCESS and leaves wblink::io undefined —
+    # precisely the mistake this asymmetry invites.
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/wblinkConfig.cmake" [[
+include("${CMAKE_CURRENT_LIST_DIR}/wblinkTargets.cmake")
+# Only wblink::core is in this package. Answer a COMPONENTS request honestly
+# instead of reporting success with the target undefined.
+foreach(_wblink_c ${wblink_FIND_COMPONENTS})
+    if(TARGET wblink::${_wblink_c})
+        set(wblink_${_wblink_c}_FOUND 1)
+    else()
+        set(wblink_${_wblink_c}_FOUND 0)
+        if(wblink_FIND_REQUIRED_${_wblink_c})
+            set(wblink_FOUND 0)
+            set(wblink_NOT_FOUND_MESSAGE
+                "wblink component '${_wblink_c}' is not in the installed \
+package; only 'core' is exported. wblink::io links vendored devourer/usb-1.0, \
+which have no install rules -- consume it with add_subdirectory() instead.")
+        endif()
+    endif()
+endforeach()
+]])
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/wblinkConfig.cmake"
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/wblink)
 endif()

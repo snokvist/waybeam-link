@@ -162,6 +162,43 @@ Waybeam-android's `:wifi`. It exists because `ssc338q` proves ARMv7 and
 narrower there, all of which this preset catches at build time rather than
 in the consumer.
 
+`cmake -S examples/embed-consumer -B build/embed && cmake --build build/embed`
+is the **embedding gate**. It is the smallest project that consumes this tree
+by `add_subdirectory` and links `wblink::io`, and it asserts at configure time
+that embedding does not build **our** daemon's world, does not write
+`BUILD_SHARED_LIBS` into the consumer's cache, and does not hijack the
+consumer's `PKG_CONFIG_EXECUTABLE`. All three regressed before it existed.
+**Anything added at the top of `CMakeLists.txt` with `CACHE ... FORCE` will
+break it** — use a normal variable, which shadows the cache for this directory
+and below without writing to the consumer's.
+
+Two limits worth knowing rather than discovering. Embedding still leaks ~70
+`EXCLUDE_FROM_ALL` targets from the vendored trees (devourer's example
+executables, libusb's selftests); nothing extra is *built*, but a consumer
+with its own `doctor` or `sense` target hits a target-name collision, and we
+cannot gate that without editing `third_party/`. And a consumer's explicit
+`-DDEVOURER_*` or `-DPKG_CONFIG_EXECUTABLE` is ignored inside our subtree —
+`WBLINK_DEVOURER_CHIPS` is the supported knob. (`FORCE` overrode them too,
+more destructively; do not "fix" this with `if(NOT DEFINED ...)`, which would
+let a stale cache entry win.)
+
+Do not `cmake --install` a `dev` build: it ships an ASan-instrumented
+`libwblink_core.a` whose exported target carries no `-fsanitize` usage
+requirement, so the consumer's link fails on `__asan_*`. Install from
+`release`.
+
+Two consumption shapes, deliberately not symmetric:
+
+| shape | gets | why |
+|---|---|---|
+| `find_package(wblink)` | `wblink::core` | the dependency-free wire library, installable on its own |
+| `add_subdirectory(...)` | `wblink::core` **and** `wblink::io` | `wblink_io` PUBLIC-links vendored `devourer`/`usb-1.0`, which have no install rules of their own, so it cannot be exported without authoring install rules for `third_party/` |
+
+Use the namespaced aliases (`wblink::core`, `wblink::io`) in anything new;
+the bare names exist for this file's own targets. `wblink_core` carries
+`cxx_std_20` as a PUBLIC usage requirement — `CMAKE_CXX_STANDARD` is
+directory-scoped and does not travel with an exported target.
+
 The library feature options — `WBLINK_FRAME_SHM`, `WBLINK_CONTROL_SERVER`,
 `WBLINK_VENC`, `WBLINK_BUILD_APP` — all default **ON**, so every flying
 build is unaffected. They exist for a consumer that links `wblink_io`
