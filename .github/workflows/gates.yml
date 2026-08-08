@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Issue #143. Until this existed the repo had no CI at all, and two of its
+# gates — the B7 embed check and the install/find_package round trip — exist
+# specifically to catch regressions a normal build cannot see. They only ran
+# when somebody remembered.
+#
+# The logic lives in scripts/gates.sh, not here, so `scripts/gates.sh` locally
+# and CI cannot drift apart. Toolchains this runner does not have are SKIPPED
+# by that script, loudly and counted — never silently passed.
+name: gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain deps
+        # GStreamer is optional (frame_shm_gst_bench is guarded on pkg-config
+        # being present); everything else is vendored under third_party/.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ pkg-config libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+      # The runner exports ANDROID_NDK_ROOT / ANDROID_NDK_HOME itself, and
+      # gates.sh honours either, so nothing is set here. (An `env:` block
+      # referencing ${{ env.ANDROID_NDK_LATEST_HOME }} would be WORSE than
+      # nothing: the `env` context holds workflow-level variables, not the
+      # runner's environment, so it expands empty and overrides the real one.)
+      # That NDK is generally not the pinned 26.3.11579264 and the build warns
+      # about exactly that; the bionic gate still earns its keep, because the
+      # portability breaks it catches do not depend on the revision matching.
+      # SSC338Q has no public toolchain, so those three presets skip here and
+      # stay a local gate.
+      - name: Run gates
+        run: ./scripts/gates.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Gates run by scripts/gates.sh. Skipped presets are printed" >> "$GITHUB_STEP_SUMMARY"
+          echo "above and counted separately — a skip is not a pass." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Not covered here: SSC338Q cross builds (no public toolchain)" >> "$GITHUB_STEP_SUMMARY"
+          echo "and hardware trials (issue #140 — they need a rig, and the TX" >> "$GITHUB_STEP_SUMMARY"
+          echo "mode radiates)." >> "$GITHUB_STEP_SUMMARY"

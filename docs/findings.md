@@ -12,6 +12,45 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-08 — TX confirmed over the air on merged Phase-1 code: 500/500 submitted, 500/500 reported, 499 received
+
+Follows the RX-only run below (#140 legs A1/A3/B1–B5), which deliberately never
+transmitted. This is the TX half, on `main` at `e65047b`.
+
+Setup: one host, two dongles, kernel drivers unloaded. **Two processes**,
+because a single `RadioAir` drops frames stamped with its own originator and so
+can never hear itself — 8812CU at `5-1` as an RX ear (`originator 2`), 8812AU
+at `8-1` as the uplink (`originator 1`), both `net_id 7`, ch 5805 MHz. Sweeping
+from the safe end per repo law: **MCS 0** and a **−24 qdb power offset**, i.e.
+the most robust rate well below the die default.
+
+```
+TX:  inject_ok=500  submitted=500  failed=0  reports=500  report_fails=0
+RX:  rx_frames=499  filtered=0  dropped=0
+```
+
+**Every frame was submitted, every frame got a CCX TX-status report, none
+failed, and the ear accepted 499 of 500 (99.8%).** The single loss is ordinary
+air loss at a bench gap. So the whole §3.0 encapsulation → radiotap → inject →
+air → decap → filter → accept chain is intact on the merged Phase 1a/1b/1a′
+code, which until now had only been verified by compiling it.
+
+**Two harness traps found, both worth knowing before writing another one.**
+
+- **A §3.0 payload is not free-form.** `dot11_parse`'s pre-check requires the
+  §3.1 magic `0x57 0x42` as the first two payload bytes. A filler burst without
+  it put **236 frames in the ear's `rx_filtered` counter and zero in
+  `rx_frames`** — which reads exactly like a TX failure and is not. The filter
+  was doing its job; that run had already proven frames were crossing the air.
+- **CCX reports arrive asynchronously.** Reading `tx_reports` immediately after
+  the inject loop gave 353/500; the same run read after a 3 s settle gives
+  500/500. A counter read too early looks like a TX-wedge signal (§15.3 Pass
+  8's detector is exactly "reports stalling while `tx_submitted` advances").
+
+**Open:** this is one direction, one rate, one power, at bench range, with no
+ARQ, no FEC and no video. It confirms the TX path is alive on merged code; it
+is not a link-quality measurement and must not be quoted as one.
+
 ## 2026-08-08 — Phase 1b on hardware: B11's last leg PASSES, and wrapped-fd identity is source-independent
 
 First hardware run of anything from #109's Phase 1 (issues #140 legs A1, A3,
