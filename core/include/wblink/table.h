@@ -42,6 +42,11 @@ struct Profile {
 struct ProfileTable {
     std::vector<Profile> profiles;
     uint8_t floor_profile = 0;
+    // §9.4 Pass 163 sequence-derived probe schedule — hashed content (§3.6):
+    // a first-send video DATA frame with seq % period == slot flies the
+    // up-candidate MCS. period 0 = probing structurally off.
+    uint16_t probe_period = 0;
+    uint16_t probe_slot = 0;
 };
 
 // Canonical serialization size: count u8 + 27 B per profile + floor u8.

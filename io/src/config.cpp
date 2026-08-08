@@ -541,6 +541,10 @@ Result<Config> load_config_json(const std::string& json_text) {
                 sel.promote_dwell_s = ps.value("promote_dwell_s", sel.promote_dwell_s);
                 sel.verdict_ttl_s =
                     ps.value("verdict_ttl_s", sel.verdict_ttl_s);
+                sel.probe_veto_permille =
+                    ps.value("probe_veto_permille", sel.probe_veto_permille);
+                sel.probe_veto_ttl_s =
+                    ps.value("probe_veto_ttl_s", sel.probe_veto_ttl_s);
                 sel.mcs_settle_s = ps.value("mcs_settle_s", sel.mcs_settle_s);
                 sel.down_cooldown_s = ps.value("down_cooldown_s", sel.down_cooldown_s);
                 sel.ewma_alpha = ps.value("ewma_alpha", sel.ewma_alpha);
@@ -1122,6 +1126,8 @@ Result<Config> load_config_json(const std::string& json_text) {
             // below, once kind resolves.
             cfg.air.ldpc = a.value("ldpc", cfg.air.ldpc);
             cfg.air.stbc = a.value("stbc", cfg.air.stbc);
+            // §9.4 Pass 163; radio-only enforcement below, with ldpc/stbc.
+            cfg.air.mcs_probe = a.value("mcs_probe", cfg.air.mcs_probe);
             if (kind == "radio") {
                 cfg.air.kind = AirCfg::Kind::kRadio;
             } else if (kind == "kernel-monitor") {
@@ -1248,6 +1254,12 @@ Result<Config> load_config_json(const std::string& json_text) {
                 " is a radio-backend key (§15.2 Pass 157); remove it or set "
                 "air.kind \"radio\"");
         }
+        // §9.4 Pass 163: same posture — probing is a radio TX-die property.
+        if (cfg.air.kind != AirCfg::Kind::kRadio && cfg.air.mcs_probe) {
+            return Result<Config>::fail(
+                "air.mcs_probe is a radio-backend key (§15.2 Pass 163); "
+                "remove it or set air.kind \"radio\"");
+        }
 
         // §15.2 (Pass 154): adapters[].mac is the radio backend's EFUSE
         // identity pin — on any other backend it would be a silently dead
@@ -1361,6 +1373,23 @@ Result<ProfileTable> load_profile_table_json(const std::string& json_text) {
             return Result<ProfileTable>::fail("profile table: floor_profile out of u8 range");
         }
         table.floor_profile = static_cast<uint8_t>(floor);
+        // §3.6/§9.4 Pass 163: optional probe schedule — hashed content, so
+        // absence (0/0) and presence hash differently by design.
+        if (j.contains("probe")) {
+            const json& pr = j.at("probe");
+            const uint64_t period = pr.at("period").get<uint64_t>();
+            const uint64_t slot = pr.value("slot", uint64_t{0});
+            if (period > 0xFFFF || slot > 0xFFFF) {
+                return Result<ProfileTable>::fail(
+                    "profile table: probe.period/slot out of u16 range");
+            }
+            if (period != 0 && slot >= period) {
+                return Result<ProfileTable>::fail(
+                    "profile table: probe.slot must be < probe.period");
+            }
+            table.probe_period = static_cast<uint16_t>(period);
+            table.probe_slot = static_cast<uint16_t>(slot);
+        }
     } catch (const json::exception& e) {
         return Result<ProfileTable>::fail(std::string("profile table: ") + e.what());
     }

@@ -233,6 +233,15 @@ bool Selector::saturated_fresh(uint64_t now_ms) const {
            now_ms - verdict_ms_ < policy_.verdict_ttl_ms;
 }
 
+bool Selector::probe_veto_fresh(uint64_t now_ms) const {
+    // §9.4 Pass 163: fresh up-candidate PER at/above the threshold vetoes a
+    // climb. kNoProbe / stale = absence of evidence, gates nothing.
+    return probe_per_ != kNoProbe &&
+           probe_per_ >= policy_.probe_veto_permille && probe_per_ms_ != 0 &&
+           now_ms >= probe_per_ms_ &&
+           now_ms - probe_per_ms_ < policy_.probe_veto_ttl_ms;
+}
+
 bool Selector::on_report(const LinkReport& r, uint64_t now_ms) {
     // ReportGate has already authorized this identity. A session change is a
     // reporter reboot and a source change is a silence-based re-latch; both
@@ -255,6 +264,14 @@ bool Selector::on_report(const LinkReport& r, uint64_t now_ms) {
         return false;
     }
     last_epoch_ = r.report_epoch;
+
+    // §9.4 Pass 163: up-candidate probe evidence. kNoProbe leaves the last
+    // value to age out through probe_veto_ttl_ms rather than clearing an
+    // active veto on a momentarily under-filled window.
+    if (r.probe_per != kNoProbe) {
+        probe_per_ = r.probe_per;
+        probe_per_ms_ = now_ms;
+    }
 
     const double rssi = static_cast<double>(r.rssi_mean);
     const double loss = static_cast<double>(r.loss_postdiv_prearq);
@@ -356,6 +373,10 @@ void Selector::reset_environment_state(uint64_t now_ms) {
     failsafe_next_step_ms_ = 0;
     last_demote_ms_ = 0;
     last_change_ms_ = now_ms;
+    // §9.4 Pass 163: probe evidence is scoped to the reporter/environment
+    // that measured it — another context must never gate (or clear) a climb.
+    probe_per_ = kNoProbe;
+    probe_per_ms_ = 0;
 }
 
 void Selector::charge_lockout(size_t rung, uint64_t now_ms) {
@@ -406,6 +427,10 @@ void Selector::note_demote_for_flap(uint64_t now_ms) {
 void Selector::start_demote(size_t target, uint64_t now_ms,
                             SelectorActions& a, SelectorReason reason,
                             bool charge_rung) {
+    // §9.4 Pass 163: see start_promote — vacated-rung probe evidence dies
+    // with the rung. (Demotes themselves never consult it, §9.0.)
+    probe_per_ = kNoProbe;
+    probe_per_ms_ = 0;
     if (charge_rung) {
         charge_lockout(rung_, now_ms);
     }
@@ -433,6 +458,10 @@ void Selector::start_demote(size_t target, uint64_t now_ms,
 
 void Selector::start_promote(size_t target, uint64_t now_ms,
                              SelectorActions& a, SelectorReason reason) {
+    // §9.4 Pass 163: a rung change changes the up-candidate — evidence from
+    // the vacated operating point must not gate (or spare) the next climb.
+    probe_per_ = kNoProbe;
+    probe_per_ms_ = 0;
     pending_target_ = target;
     phase_ = Phase::kMcsGrace;
     phase_deadline_ms_ = now_ms + policy_.mcs_up_grace_ms;
@@ -551,6 +580,7 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
     const bool demote_ok =
         now_ms - last_demote_ms_ >= policy_.down_cooldown_ms;
     bool blocked_saturated = false;  // §9.4 Pass 160, counted once per tick
+    bool blocked_probe = false;      // §9.4 Pass 163, same counting rule
 
     // Rule 1 — acute loss: one confidence-qualified raw report moves
     // directly to the resolved safe floor. The event belongs to the rung on
@@ -598,8 +628,11 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
         !flap_frozen(now_ms)) {
         // §9.4 Pass 160: a fresh Saturated verdict suppresses EVERY climb —
         // gating only rule 6 would reroute the saturation flap through here.
+        // Pass 163: the probe veto gates both climbs for the same reason.
         if (saturated_fresh(now_ms)) {
             blocked_saturated = true;
+        } else if (probe_veto_fresh(now_ms)) {
+            blocked_probe = true;
         } else {
             last_demote_ms_ = now_ms;  // reuse the cooldown as the climb pacer
             start_promote(rung_ + 1, now_ms, a,
@@ -629,8 +662,12 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
         if (rssi_ewma_ >= need && now_ms - last_change_ms_ >= dwell) {
             // §9.4 Pass 160 saturation gate: strong RSSI is exactly what a
             // saturating front end shows — the one case margin cannot see.
+            // Pass 163 probe veto: the candidate rate measurably failing at
+            // the CURRENT rung's power is the other case margin cannot see.
             if (saturated_fresh(now_ms)) {
                 blocked_saturated = true;
+            } else if (probe_veto_fresh(now_ms)) {
+                blocked_probe = true;
             } else {
                 start_promote(next, now_ms, a, SelectorReason::kPromote);
                 return;
@@ -642,6 +679,9 @@ void Selector::evaluate(uint64_t now_ms, SelectorActions& a) {
     // not of rules).
     if (blocked_saturated) {
         ++promote_blocked_saturated_;
+    }
+    if (blocked_probe) {
+        ++promote_blocked_probe_;
     }
     state_ = flap_frozen(now_ms) ? "FREEZE" : "HOLD";
 }

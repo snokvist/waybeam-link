@@ -54,6 +54,10 @@ struct RadioAirCfg {
     // TxCaps reads the enabled coding unsupported (capability leg).
     bool ldpc = false;
     bool stbc = false;
+    // §9.4 Pass 163: sequence-derived rate probing intent — a TX-die
+    // property; create() refuses it on an RX-only node (fail closed). The
+    // schedule itself arrives later via set_mcs_probe().
+    bool mcs_probe = false;
     // Clear the MAC carrier-sense gate at bring-up (see AirCfg::disable_cca).
     bool disable_cca = false;
     // §14.2 authored transport-efficiency calibration (1..1000, 0 = off).
@@ -101,6 +105,8 @@ class RadioAir : public AirIface {
     // Committed operating point → the TX adapter's rate-less default
     // (§9.5/§10.4). 20 MHz HT only in v0 (§1 craft constraint).
     void set_tx_mode(uint8_t mcs, bool sgi) override;
+    void set_mcs_probe(uint16_t period, uint16_t slot,
+                       uint8_t candidate_mcs) override;
     // §10.4 absolute power apply. In-process, so it always reports accepted
     // (§10.5's false means "backend refused"); devourer's own applied-qdb
     // return was never read by any caller.
@@ -205,6 +211,9 @@ class RadioAir : public AirIface {
         // whose rate the backend could not resolve. Sums to rx_frames.
         uint64_t rx_mcs[kRxMcsBuckets] = {};
         uint64_t rx_mcs_unknown = 0;
+        // §9.4 Pass 163 guard 3: CRC/ICV-errored frames per descriptor MCS
+        // (pre-FCS rate; bodies dropped). Feeds the RX probe window only.
+        uint64_t rx_crc_mcs[kRxMcsBuckets] = {};
         // §15.3 Pass 157: accepted frames whose RX path reported LDPC
         // coding / a nonzero STBC stream count. ldpc_flag_ok is the static
         // die truth (devourer ldpc_rx_flag) — when false the counters stay

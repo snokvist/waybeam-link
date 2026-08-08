@@ -458,6 +458,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.verdict_age_ms);
     out += ",\"promote_blocked_saturated\":";
     append_u64(out, snap.link.promote_blocked_saturated);
+    out += ",\"promote_blocked_probe\":";
+    append_u64(out, snap.link.promote_blocked_probe);
     out += ",\"selector_state_valid\":";
     append_bool(out, snap.link.selector_state_valid);
     out += ",\"selector_state_age_ms\":";

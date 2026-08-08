@@ -112,6 +112,10 @@ struct RadioAir::Impl {
         // §15.3 Pass 118 per-MCS accepted-frame histogram + unresolved bucket.
         std::atomic<uint64_t> rx_mcs[kRxMcsBuckets] = {};
         std::atomic<uint64_t> rx_mcs_unknown{0};
+        // §9.4 Pass 163 guard 3: CRC/ICV-errored frames per descriptor MCS —
+        // the rate is pre-FCS, so a corrupt frame at the probe candidate is
+        // a rate-verified failure. Counters only; bodies stay dropped.
+        std::atomic<uint64_t> rx_crc_mcs[kRxMcsBuckets] = {};
         // §15.3 Pass 157 received-coding counters; ldpc_flag_ok is the die's
         // static ldpc_rx_flag cap (set at bring-up, read-only after).
         std::atomic<uint64_t> rx_ldpc{0};
@@ -155,6 +159,11 @@ struct RadioAir::Impl {
     // §3.0 Pass 118: the committed operating point, stamped into every
     // frame's radiotap. set_tx_mode keeps SetTxMode in lockstep with it.
     TxRate rate;
+    // §9.4 Pass 163 probe schedule (set_mcs_probe, same main-loop writer as
+    // rate above). period 0 = disarmed.
+    uint16_t probe_period = 0;
+    uint16_t probe_slot = 0;
+    uint8_t probe_mcs = 0;
     std::vector<uint8_t> tx_buf;
 
     // devourer's machine-event sink (Logger::events()) defaults to stdout,
@@ -356,6 +365,15 @@ struct RadioAir::Impl {
     void on_packet(Adapter& a, uint8_t adapter_id, const Packet& p) {
         if (p.RxAtrib.pkt_rpt_type != RX_PACKET_TYPE::NORMAL_RX ||
             p.RxAtrib.crc_err || p.RxAtrib.icv_err) {
+            // §9.4 Pass 163 guard 3: surface the descriptor rate of corrupt
+            // frames before the body is discarded — a CRC-errored frame at
+            // the probe candidate rate is a rate-verified failure.
+            if (p.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::NORMAL_RX) {
+                const uint8_t m = desc_rate_to_mcs(p.RxAtrib.data_rate);
+                if (m < kRxMcsBuckets) {
+                    a.rx_crc_mcs[m].fetch_add(1, std::memory_order_relaxed);
+                }
+            }
             return;
         }
         const auto mpdu_len = mpdu_len_without_fcs(p.Data.size());
@@ -469,6 +487,7 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                            : cfg.unicast_returns ? "policy.return.unicast"
                            : cfg.ldpc            ? "air.ldpc"
                            : cfg.stbc            ? "air.stbc"
+                           : cfg.mcs_probe       ? "air.mcs_probe"
                                                  : nullptr;
         if (knob != nullptr) {
             return Result<RadioAir>::fail(
@@ -878,6 +897,20 @@ size_t RadioAir::inject(const uint8_t* frame, size_t len) {
     if (mcs_cycle_enabled() && len >= 17 &&
         (frame[2] & 0x0F) == static_cast<uint8_t>(PacketType::kData)) {
         rate.mcs = frame[16] & 0x7;
+    } else if (im.probe_period != 0 && len >= 17 &&
+               (frame[2] & 0x0F) == static_cast<uint8_t>(PacketType::kData) &&
+               frame[12] == stream_type::kRtp) {
+        // §9.4 Pass 163 sequence-derived probe: first-send VIDEO DATA frames
+        // whose §3.2 seq (BE32 at 13) hits the hashed schedule fly the
+        // up-candidate MCS; everything else — including §12 resends via
+        // inject_resend — keeps the committed rate. The probe changes the
+        // MCS and nothing else.
+        const uint32_t seq = (uint32_t{frame[13]} << 24) |
+                             (uint32_t{frame[14]} << 16) |
+                             (uint32_t{frame[15]} << 8) | uint32_t{frame[16]};
+        if (seq % im.probe_period == im.probe_slot) {
+            rate.mcs = im.probe_mcs;
+        }
     }
     im.tx_buf.resize(kDot11TxPrefixLen + len);
     dot11_tx_prefix(im.tx_buf.data(), rate, im.cfg.stamp_net_id,
@@ -982,6 +1015,14 @@ void RadioAir::flush_rx() {
 int RadioAir::wait_fd() const { return impl_->ready_fd; }
 
 size_t RadioAir::rx_adapters() const { return impl_->adapters.size(); }
+
+void RadioAir::set_mcs_probe(uint16_t period, uint16_t slot,
+                             uint8_t candidate_mcs) {
+    // §9.4 Pass 163. Same single-writer main-loop discipline as set_tx_mode.
+    impl_->probe_period = period;
+    impl_->probe_slot = slot;
+    impl_->probe_mcs = candidate_mcs;
+}
 
 void RadioAir::set_tx_mode(uint8_t mcs, bool sgi) {
     // §3.0 Pass 118: radiotap is authoritative — this is what every injected
@@ -1312,6 +1353,7 @@ RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {
     c.tx_failed = a.tx_failed;
     for (size_t i = 0; i < kRxMcsBuckets; ++i) {
         c.rx_mcs[i] = a.rx_mcs[i].load(std::memory_order_relaxed);
+        c.rx_crc_mcs[i] = a.rx_crc_mcs[i].load(std::memory_order_relaxed);
     }
     c.rx_mcs_unknown = a.rx_mcs_unknown.load(std::memory_order_relaxed);
     c.rx_ldpc = a.rx_ldpc.load(std::memory_order_relaxed);

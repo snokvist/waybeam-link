@@ -106,6 +106,7 @@ class UdpAir : public AirIface {
     bool set_power_auto(size_t adapter) override;
     // No PHY: there is no rate to stamp and no hardware clock to read.
     void set_tx_mode(uint8_t /*mcs*/, bool /*sgi*/) override {}
+    void set_mcs_probe(uint16_t, uint16_t, uint8_t) override {}  // no PHY
     std::optional<uint64_t> read_tsf(size_t /*adapter*/) override {
         return std::nullopt;
     }

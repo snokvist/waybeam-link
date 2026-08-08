@@ -250,6 +250,8 @@ struct LinkStats {
     uint8_t verdict = 0;
     uint32_t verdict_age_ms = 0;
     uint64_t promote_blocked_saturated = 0;
+    // §15.3 Pass 163: climbs suppressed by the §9.4 probe veto; craft-only.
+    uint64_t promote_blocked_probe = 0;
     bool flap_freeze = false;
     std::string csa_state = "IDLE";
     // §11 follow-me: current RF operating channel (center MHz). 0 when the node

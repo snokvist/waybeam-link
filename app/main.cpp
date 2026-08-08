@@ -55,6 +55,7 @@
 #include "wblink/quietgap.h"
 #include "wblink/recovery.h"
 #include "wblink/report_gate.h"
+#include "wblink/mcs_probe.h"
 #include "wblink/reporter.h"
 #include "wblink/ring.h"
 #include "wblink/rx.h"
@@ -1385,6 +1386,8 @@ SelectorPolicy selector_policy(const Config& cfg) {
     p.promote_rssi_hyst_db = s.promote_rssi_hyst_db;
     p.promote_dwell_ms = s_to_ms(s.promote_dwell_s);
     p.verdict_ttl_ms = s_to_ms(s.verdict_ttl_s);  // §9.4 Pass 160
+    p.probe_veto_permille = s.probe_veto_permille;  // §9.4 Pass 163
+    p.probe_veto_ttl_ms = s_to_ms(s.probe_veto_ttl_s);
     p.bitrate_lead_ms = s_to_ms(s.bitrate_lead_s);
     p.mcs_up_grace_ms = s_to_ms(s.mcs_up_grace_s);
     p.mcs_settle_ms = s_to_ms(s.mcs_settle_s);
@@ -1585,6 +1588,7 @@ struct AirBackend {
             rc.tx_retry_limit = cfg.air.tx_retry_limit;
             rc.ldpc = cfg.air.ldpc;  // §3.0 Pass 157 node coding
             rc.stbc = cfg.air.stbc;
+            rc.mcs_probe = cfg.air.mcs_probe;  // §9.4 Pass 163
             rc.disable_cca = cfg.air.disable_cca;
             // §14.2 (Pass 143): the authored calibration reaches both RF
             // backends. Zero keeps the estimate unavailable.
@@ -1715,6 +1719,10 @@ struct AirBackend {
     // §10.2-vs-driver-default split behind set_power_auto, nullopt TSF where
     // there is no hardware clock) — see io/include/wblink/air_iface.h.
     void set_tx_mode(uint8_t mcs, bool sgi) { iface()->set_tx_mode(mcs, sgi); }
+    // §9.4 Pass 163 (radio-real; no-op elsewhere by the iface contract).
+    void set_mcs_probe(uint16_t period, uint16_t slot, uint8_t mcs) {
+        iface()->set_mcs_probe(period, slot, mcs);
+    }
     bool set_power_qdb(size_t adapter, int32_t qdb) {
         return iface()->set_power_qdb(adapter, qdb);
     }
@@ -1994,6 +2002,26 @@ struct AirBackend {
         (void)tsf_fallbacks;
         (void)tx_wedged;
 #endif
+    }
+
+    // §9.4 Pass 163 guard 3: cumulative CRC/ICV-errored frames per
+    // descriptor MCS, summed across adapters. false = the backend has no
+    // such surface (udp, kernel-monitor).
+    bool crc_mcs_totals(uint64_t (&out)[kRxMcsBuckets]) const {
+#if WBLINK_RADIO
+        if (radio) {
+            for (size_t m = 0; m < kRxMcsBuckets; ++m) out[m] = 0;
+            for (size_t i = 0; i < radio->rx_adapters(); ++i) {
+                const auto c = radio->counters(i);
+                for (size_t m = 0; m < kRxMcsBuckets; ++m) {
+                    out[m] += c.rx_crc_mcs[m];
+                }
+            }
+            return true;
+        }
+#endif
+        (void)out;
+        return false;
     }
 
     // §15.3 return-block unicast counters (radio backend; no-op on udp).
@@ -2576,6 +2604,22 @@ struct TxCore {
             if (apply_mode) {
                 apply_mode(act.commit->mcs,
                            act.commit->gi == GuardInterval::kShort);
+            }
+            // §9.4 Pass 163: re-derive the up-candidate for the new
+            // operating point through the live table; disarm at the top
+            // rung / same-MCS adjacency (probe_up_candidate_mcs nullopt).
+            if (apply_probe) {
+                std::optional<uint8_t> cand;
+                if (table_ != nullptr && table_->probe_period != 0) {
+                    cand = probe_up_candidate_mcs(*table_,
+                                                  act.commit->profile_id);
+                }
+                if (cand) {
+                    apply_probe(table_->probe_period, table_->probe_slot,
+                                *cand);
+                } else {
+                    apply_probe(0, 0, 0);
+                }
             }
             // ...and the §10 per-adapter power resolve, applied inside the
             // same sequenced transition through the apply_power hook (both RF
@@ -3238,6 +3282,8 @@ struct TxCore {
                       now - verdict_rx_ms_, 0xFFFFFFFFull));
         snap.link.promote_blocked_saturated =
             selector_.promote_blocked_saturated();
+        snap.link.promote_blocked_probe =
+            selector_.promote_blocked_probe();  // §15.3 Pass 163
     }
 
     struct PowerAdapter {
@@ -3529,6 +3575,10 @@ struct TxCore {
     // Actuation hooks (§10.4/§10.5); unset = logged intent. apply_mode is
     // radio-only by design (Pass 13: monitor carries MCS per-packet).
     std::function<void(uint8_t mcs, bool sgi)> apply_mode;
+    // §9.4 Pass 163: (period, slot, candidate_mcs) probe schedule refresh;
+    // installed only when air.mcs_probe is on (radio backend). (0,0,0)
+    // disarms.
+    std::function<void(uint16_t, uint16_t, uint8_t)> apply_probe;
     std::function<bool(size_t adapter_idx, int32_t qdb)> apply_power;
     std::function<void(size_t adapter_idx)> apply_power_auto;
     // §10.5 (Pass 150) relative actuator — bound for EVERY backend, unlike
@@ -3784,6 +3834,7 @@ struct RxCore {
                                              1000.0 / cfg.policy.report_hz)
                                        : 0},
                     table_version),
+          probe_window_(table, table_version, McsProbeWindow::Params{}),
           feedback_period_ms_(cfg.policy.report_hz > 0
                                   ? static_cast<uint32_t>(
                                         1000.0 / cfg.policy.report_hz)
@@ -3807,9 +3858,24 @@ struct RxCore {
 
     void on_air(uint8_t adapter, const uint8_t* d, size_t n, uint64_t now,
                 const RxEngine::Deliver& deliver, int8_t rssi = 0,
-                const RxEngine::EarlyDeliver& early_deliver = {}) {
+                const RxEngine::EarlyDeliver& early_deliver = {},
+                uint8_t rx_mcs = kUplinkRxMcsUnknown) {
         const Decoded dec = decode(d, n);
         if (const DataView* v = std::get_if<DataView>(&dec)) {
+            // §9.4 Pass 163: the probe window tracks the video stream only,
+            // scoped to one sender tuple — a different tuple is another
+            // operating context and resets the evidence.
+            if (v->hdr.stream_type == stream_type::kRtp) {
+                const StreamKey key{v->hdr.prefix.originator,
+                                    v->hdr.prefix.session_id,
+                                    v->hdr.stream_id};
+                if (!probe_key_ || !(*probe_key_ == key)) {
+                    probe_window_.reset();
+                    probe_key_ = key;
+                }
+                probe_window_.on_data(v->hdr.seq, v->hdr.active_profile,
+                                      v->hdr.table_version, rx_mcs, now);
+            }
             engine_.on_data(adapter, *v, now, deliver, rssi, early_deliver);
             return;
         }
@@ -3911,11 +3977,22 @@ struct RxCore {
         return static_cast<int>(remote_selector_state_->report_latch_holder);
     }
 
+    // §9.4 Pass 163 guard 3: CRC-errored descriptor rates from the radio
+    // backend, delta-fed by the loop (the bodies were dropped pre-parse).
+    void on_crc_frames(uint8_t rx_mcs, uint32_t count, uint64_t now) {
+        probe_window_.on_crc_frames(rx_mcs, count, now);
+    }
+
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
               const Inject& inject_report, const Inject& inject_nack,
               bool emit_nacks = true, uint8_t link_verdict_now = 0,
               const Inject* inject_verdict = nullptr) {
         engine_.tick(now, deliver);
+        // §3.5 Pass 163: refresh the up-candidate evidence for the video
+        // stream before building; unfilled/stale fails closed to kNoProbe.
+        if (probe_key_) {
+            reporter_.set_probe_per(*probe_key_, probe_window_.probe_per(now));
+        }
         // §7.3: LINK_REPORTs ride the same uplink as NACKs. The epoch is
         // stamped by the injector at the radio call, not here — see
         // Reporter::next_epoch().
@@ -4281,6 +4358,11 @@ struct RxCore {
     std::optional<uint8_t> local_table_version_;
     RxEngine engine_;
     Reporter reporter_;
+    // §9.4 Pass 163: RX probe evidence for the accepted sender's video
+    // stream (always-on — rate-verification keeps it inert when nothing
+    // probes or the backend has no PHY rate).
+    McsProbeWindow probe_window_;
+    std::optional<StreamKey> probe_key_;
     uint64_t verdict_emit_ms_ = 0;  // §3.16 Pass 159 ≤1 Hz emit guard
     uint32_t feedback_period_ms_ = 0;
     uint64_t next_feedback_ms_ = 0;
@@ -4830,6 +4912,14 @@ int run_tx(const Loaded& l) {
         tx.apply_mode = [&](uint8_t mcs, bool sgi) {
             air.value->set_tx_mode(mcs, sgi);
         };
+        // §9.4 Pass 163: fail-closed — the hook exists only when the
+        // operator armed air.mcs_probe on this stage-0-proven unit.
+        if (l.cfg.air.mcs_probe) {
+            tx.apply_probe = [&](uint16_t period, uint16_t slot,
+                                 uint8_t mcs) {
+                air.value->set_mcs_probe(period, slot, mcs);
+            };
+        }
         tx.apply_power = [&](size_t idx, int32_t qdb) {
             return air.value->set_power_qdb(idx, qdb);
         };
@@ -7764,7 +7854,7 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 return;  // a ground never acts on a command
             }
             rx.on_air(meta.adapter_id, d, n, now, deliver, rssi,
-                      early_deliver);
+                      early_deliver, meta.rx_mcs);
             if (qg.enabled() && frame_is_paced_eob(d, n)) {
                 // Anchor on the SAME adapter's TSF (clocks never cross
                 // adapters); a failed read falls back to host arrival.
@@ -7807,6 +7897,25 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 std::memcpy(tmp, f, n);
                 (void)air.value->inject_return(target, tmp, n, false);
             };
+        // §9.4 Pass 163 guard 3: feed CRC-errored descriptor rates to the
+        // probe window as deltas (the backend dropped the bodies pre-parse).
+        {
+            static uint64_t crc_last[kRxMcsBuckets] = {};
+            uint64_t crc_now[kRxMcsBuckets];
+            if (air.value->crc_mcs_totals(crc_now)) {
+                for (size_t m = 0; m < kRxMcsBuckets; ++m) {
+                    const uint64_t d = crc_now[m] - crc_last[m];
+                    if (d != 0) {
+                        rx.on_crc_frames(
+                            static_cast<uint8_t>(m),
+                            static_cast<uint32_t>(
+                                std::min<uint64_t>(d, 0xFFFFFFFFull)),
+                            now);
+                    }
+                    crc_last[m] = crc_now[m];
+                }
+            }
+        }
         rx.tick(now, deliver, inject_report, inject_nack,
                 arq_rx_enabled && (!qg.enabled() || repair_tail_closed), lv,
                 &inject_verdict);

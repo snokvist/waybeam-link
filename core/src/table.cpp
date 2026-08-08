@@ -49,6 +49,12 @@ std::vector<uint8_t> canonical_serialize(const ProfileTable& table) {
         out.insert(out.end(), f, f + kCanonicalProfileSize);
     }
     out.push_back(table.floor_profile);
+    // §3.6 Pass 163: the probe schedule is a both-ends protocol invariant —
+    // appended after floor_profile so a schedule difference rotates the hash.
+    uint8_t sched[4];
+    be16_write(sched, table.probe_period);
+    be16_write(sched + 2, table.probe_slot);
+    out.insert(out.end(), sched, sched + 4);
     return out;
 }
 
