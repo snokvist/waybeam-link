@@ -534,6 +534,19 @@ sound**. The three optional units are **leaves**. Re-measured at `56463c0`:
 - The two remaining `MonAir` mentions in `io/src/air_radio.cpp` (`:142`,
   `:1279`) are both comments.
 
+Grep is the weak form of that argument, so it was also checked at the link
+level, which is the form that actually decides whether the archive still
+resolves. Across all 16 objects in `build/dev/libwblink_io.a`, **no object
+other than the three themselves carries an undefined reference to
+`wblink::FrameShmRing`, `wblink::ControlServer` or the venc symbols**:
+
+```
+nm -C --undefined-only build/dev/libwblink_io.a \
+  | awk '/\.cpp\.o:$/{o=$0} /FrameShmRing|ControlServer|Venc/{print o" <- "$0}' \
+  | grep -v '^\(frame_shm\|control_server\|venc_http\).cpp.o'
+  → empty
+```
+
 **So the optional-unit half of 1a is CMake-only: three options and three
 `target_sources()` guards, with zero source edits in `io/`.** A `BindKind` a
 build cannot construct becomes a runtime config error, which is the honest
