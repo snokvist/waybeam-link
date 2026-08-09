@@ -1629,6 +1629,81 @@ wiring it to take them from the callback instead tests the seam against a
 decoder that exists, on a machine already on the bench. Then Android, then the
 RK3566 decoder (operator's order, 2026-08-09).
 
+### 4.12 The C ABI, and what the consumers turn out to want
+
+`node/include/wblink/node/rx_node_c.h` — four functions, `extern "C"`.
+
+**Both named consumers are C.** waybeam-hub is a C daemon; Android reaches
+native code through JNI. Without a shared shim each writes its own wrapper,
+and both have to invent an answer for the same problem: `run_rx` takes a
+`const std::atomic<int>&`, and a C caller cannot name that type. C11's
+`_Atomic int` is not guaranteed layout-compatible with it, so passing the flag
+across the boundary would be a portability bet. The shim owns the flag behind
+an opaque handle instead, and the question disappears.
+
+It deliberately does **not** own a thread. `wblink_rx_run` blocks and the
+caller supplies the thread — what `app/main.cpp` does and what the hub's module
+model already does. `node/` staying out of thread policy is the same argument
+that keeps it out of process policy (B9).
+
+**A handle runs once**, and that is the design decision review forced. The stop
+flag is sticky — `run_rx` takes it by const reference and cannot clear it — so
+a second run would fall straight out of the loop and return a healthy-looking
+**0** *after* claiming the adapter: a dead node that looks fine, against a
+consumer (the hub) whose model is start/stop/start. Clearing the flag on entry
+instead would lose a stop issued between spawning a thread and that thread
+reaching the call, which is a race to hand a user. So reuse returns 3, and a
+consumer creates a handle per start. Relatedly, a pre-stop now returns before
+`load_all` and `AirBackend::create`: the header promised that call was prompt
+while it was in fact ~1800 lines and one radio-open away.
+
+**The gate is a C translation unit, compiled with a dialect.**
+`examples/node-linkcheck` compiles `c_consumer.c` **as C11** with
+`-Wall -Wextra -Wpedantic -Wstrict-prototypes -Werror`, and links it beside
+the C++ side. Both halves of that matter, and review found both:
+
+- The first evidence for this gate was two mutants — `std::size_t` in the
+  header, and the `extern "C"` guard deleted — and **neither isolates the C
+  axis**. Both also fail the C++ TU, so the gate would have looked healthy
+  while proving nothing new. The mutants that actually isolate it are C-only:
+  a **default argument**, an **empty struct**, and an **unprototyped
+  function** — each valid C++, each rejected by the C compile, verified
+  independently (`C++ errors=0, C errors≥1` for all three).
+- Without a dialect and `-Wpedantic`, the last two of those are silent GCC
+  extensions. A header can be invalid ISO C and green here, and waybeam-hub
+  at `-std=c99 -pedantic-errors` would then be the thing that discovers it.
+
+**The gate also RUNS.** Two contract rules need no hardware, because a
+pre-stopped handle opens nothing: a pre-stop returns 0 without reading the
+config, and a second run on the same handle returns 3. `scripts/gates.sh`
+executes the binary rather than only building it — the first draft printed its
+verdict and exited 0, which is a gate that reports failure as success.
+Gates: 27 → 28.
+
+**`tools/frame_sink_probe` now drives the C ABI rather than `run_rx`**, so the
+runtime proof re-runs through the boundary the consumers will actually use —
+still byte-exact, 180 frames / 3960000 bytes. A C++ probe over the C++ API
+would have left the ABI unexercised at runtime, which is most of the point of
+having one.
+
+**Linking it from C is not free, and nothing said so.** This is a C++ library
+behind a C header: a C consumer needs `-lstdc++ -lm` (a bare `cc` link produces
+~3000 undefined references), the archives in order, and — since
+`find_package(wblink)` exports `wblink::core` alone — either `add_subdirectory`
+or a Makefile pointed at the build tree. That is now in the header, where the
+consumer will actually read it.
+
+**What the consumers turn out to want (operator, 2026-08-09).** This is not a
+second video source that lives beside frame-SHM. waybeam-hub will **drop
+frame-SHM on the ground** and run the node in-process, and the same module
+goes on the **vehicle** running a TX node — where the encoder's frame-SHM
+ingest stays, because that is venc→link and nothing replaces it. Two things
+follow: **`run_tx` still lives in `app/main.cpp`** and has to be lifted the way
+`run_rx` was before the vehicle half can start; and the eventual
+`protocols/frame-shm.md` edit is consumer-side only, since the producer path
+is untouched. The `wblink_rx_*` naming leaves room for `wblink_tx_*` beside it,
+so nothing landing here needs redesigning for that.
+
 ## 5. Loose ends worth knowing before starting
 
 - **The §15.3 counters schema** is the last per-backend dispatch in
