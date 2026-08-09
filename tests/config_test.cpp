@@ -1334,5 +1334,54 @@ int main() {
     expect_error(subst(kSample, "[60, 76, 84]", "[]"),
                  "power_presets_qdb is empty");
 
+    // §10.3/§11.7 0x0A (Pass 166): the offset-space list, term for term with
+    // the absolute one above but clamped to power_offset_max_qdb. Each case
+    // below is the offset twin of a case above; the FIRST one is the whole
+    // point of the key, so it is asserted on both the value and the count.
+    {
+        const std::string kOff =
+            "\"power_offset_max_qdb\": 24, "
+            "\"power_offset_presets_qdb\": [-72, -48, -24, 0, 24], ";
+        const std::string with = subst(kSample, "\"power_presets_qdb\"",
+                                       kOff + "\"power_presets_qdb\"");
+        auto r = load_config_json(with);
+        CHECK(bool(r));
+        if (r) {
+            const auto& p = r.value->adapters[0].power_offset_presets_qdb;
+            CHECK_EQ_U(p.size(), 5);
+            CHECK(p[0] == -72);
+            CHECK(p[4] == 24);   // == the bound: allowed, not clamped away
+            // The absolute list is still parsed alongside; the two coexist and
+            // the SPACE picks which governs, not the loader.
+            CHECK_EQ_U(r.value->adapters[0].power_presets_qdb.size(), 3);
+        }
+        // Above the bound is clamped to it, exactly as the absolute list is
+        // clamped to max_power_qdb. This is the "a tier only lowers" rule in
+        // the space where it now matters — the only RF backend is relative.
+        auto hot = load_config_json(
+            subst(with, "[-72, -48, -24, 0, 24]", "[-72, -48, 200]"));
+        CHECK(bool(hot));
+        if (hot) {
+            CHECK(hot.value->adapters[0].power_offset_presets_qdb[2] == 24);
+        }
+        // Unlike max_power_qdb, the bound is not optional — it defaults to 0,
+        // so omitting it clamps to 0 rather than leaving the list untouched.
+        auto dflt = load_config_json(
+            subst(with, "\"power_offset_max_qdb\": 24, ", ""));
+        CHECK(bool(dflt));
+        if (dflt) {
+            CHECK(dflt.value->adapters[0].power_offset_presets_qdb[4] == 0);
+        }
+        expect_error(subst(with, "[-72, -48, -24, 0, 24]",
+                           "[-96, -84, -72, -48, -24, 0]"),
+                     "more than 5 entries");
+        expect_error(subst(with, "[-72, -48, -24, 0, 24]", "[]"),
+                     "power_offset_presets_qdb is empty");
+        expect_error(subst(kSample, "\"1-1.3\", \"role\": \"rx\",",
+                           "\"1-1.3\", \"role\": \"rx\", "
+                           "\"power_offset_presets_qdb\": [-24],"),
+                     "power_offset_presets_qdb on a role:\"rx\" adapter");
+    }
+
     return wbtest_finish("config_test");
 }

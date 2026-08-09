@@ -2401,6 +2401,39 @@ boot `max_power_qdb`**, so the runtime path can only ever lower power; raising
 the hard ceiling stays a config edit. The clamp is logged when it binds, never
 silent.
 
+**A tier is selected in the node's own actuation space (Pass 166).** Since
+Pass 164 the only RF backend is relative (§10.5), and an absolute preset read
+as an offset is a 15..27 dB boost, so Pass 151 refused the tier there — which
+left the fleet with **no in-flight power lever at all**, `0x0A` being the only
+power command in the §11.7 table and §10.5's latch being management-HTTP only.
+The re-base §10.5 kept promising is this: a relative adapter names its
+selectable ceilings in **`adapters[].power_offset_presets_qdb`** (§15.2), the
+offset-space twin of `power_presets_qdb`, and every rule above holds term for
+term with `max_power_qdb` → `power_offset_max_qdb`:
+
+| | absolute backend | relative backend |
+|---|---|---|
+| preset list | `power_presets_qdb` | `power_offset_presets_qdb` |
+| clamped at load to | `max_power_qdb` | `power_offset_max_qdb` |
+| ceiling a tier installs | §10.3 absolute ceiling | the §10.5 bound |
+
+The wire is unchanged — `0x0A` still carries an ordinal `0..4` and never a
+power — so a ground and a craft in different spaces still agree on what index
+3 *means procedurally*, which is "the fourth entry of whichever list governs
+that node". A node reads exactly one of the two lists; the other is inert on
+it (§15.2), and neither is defaulted from the other. Deriving the offsets from
+the absolute list was considered and refused: `preset − max_power_qdb` puts the
+top tier at offset 0 on the flying configs, which is **below** their configured
+`power_offset_max_qdb: 24`, so a tier could never express the operator's own
+ceiling — and it would reintroduce an absolute anchor into the one section
+that states there is no absolute TX contract anywhere.
+
+**The top tier is the configured bound, not the safe seed** (operator ruling,
+2026-08-09). A tier adds no reach that §10.5 did not already grant: a latch to
+`power_offset_max_qdb` is accepted today, so an ordinal reaching the same point
+only spans the window already authorised. The load clamp is what keeps it
+honest — no tier can exceed the bound, whatever the config says.
+
 **A tier is REFUSED while a §10.6 or §10.7 calibration is running (Pass 136).**
 The run owns the power actuator and its seek is mid-descent against the old
 bound; re-basing the ceiling underneath it would score one dwell's evidence
@@ -2776,6 +2809,22 @@ which yields the property the absolute window never had:
 
 > Calibration can never place a relative backend hotter than
 > `power_offset_max_qdb`, nor colder than the safe offset it started from.
+
+**A §11.7 `0x0A` tier does NOT narrow this window (Pass 167, operator ruling
+2026-08-09).** On an absolute backend a tier bounds a future sweep (§10.3,
+Pass 134) and still does. In offset space it must not, and this is a measured
+rule rather than a symmetry argument. Pass 166 briefly folded the tier into
+the bound on both halves; on the bench, fleet tier 1 put the ceiling at −48
+while the window floor is `power_offset_qdb` −24, so `max < floor` and the
+ground's uplink run swept **one point**, reported `state: done` with no
+`fail_reason`, and **overwrote an artifact holding `last_clean_qdb: 24`** —
+destroying the record of measured headroom while claiming success
+(`docs/findings.md`, 2026-08-09). Calibration is how a unit's real maximum is
+found; the §10.5 band is a config-level safety property and nothing
+session-volatile may narrow it. The tier keeps the half it owns — flight
+power, through the §10.4 resolve clamp and the §10.5 latch clamp — and a
+craft whose tier sits below its safe floor therefore still calibrates over the
+full band and simply flies at the tier.
 
 A separate step is required because the default window is 24 qdb and
 `seek_step_qdb` is 16 — two probes is not a measurement. The sweep direction is
@@ -3648,7 +3697,7 @@ everything below is behaviour.
 | `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
 | `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the tallies come from the accepted reporter, and the loop is blind without them, §3.16). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen and the **video feed paused** (input-starve, Pass 153) — the operator chooses the moment (recommended: near-bench 2–10 m separation, §10.6 Pass 121) |
 | `0x09` | `MTU_TIER` | 0=Default, 1=Medium, 2=High | Requests the §9.3a global packet-budget tier. The craft accepts only when the requested budget is ≤ the minimum capability of every active craft TX adapter; otherwise it consumes the nonce and echoes `REJECTED` (no silent clamp). Acceptance commits at the next frame/block boundary. Unlike the other commands, binding release resets this state to Default, preventing an absent owner's jumbo choice from silently governing a future receiver fleet |
-| `0x0A` | `TX_POWER` | preset index 0..4 | Selects the node's §10.3 power **ceiling** from `adapters[].power_presets_qdb` (§15.2) — the baseline the Pass 134 per-rung mask is derived from, so one choice moves the whole tapered curve and the calibrated per-rung *shape* is preserved. This is deliberately NOT the §10.5 override latch, which is rung-agnostic by construction and would flatten a curve whose whole point is that MCS0 and MCS7 want different power. Applying a tier sets the runtime ceiling on the §10.4 resolve, the §10.5 clamp, and a future §10.6/§10.7 sweep, then forces one re-resolve at the committed operating point. **A tier can only ever LOWER power** (operator ruling): every preset is clamped at config load to that adapter's boot `max_power_qdb`, so §10.3 remains the operator's hard ceiling and no runtime path can raise power past it. `REJECTED` when no `role:"tx"` adapter carries a preset list, `arg` is past its length, a §10.6 calibration is running (Pass 136 — the run owns the actuator), or **the air backend is relative** (Pass 151): `power_presets_qdb` are absolute qdb and there is no offset-space tier, so applying one would install a 60..108 preset as the clamp on an offset resolve — replacing the §10.5 bound with a number 15..27 dB above it while §15.3 reported the tier effective. **The refusal binds BOTH halves (Pass 165).** Pass 151 stated it once and only the craft implemented it; the §15.5 `POST /api/v1/tx/power_tier` ground path applied the tier regardless, and its absolute `ceiling_qdb` then overwrote the **offset-space** §10.7 sweep bound. The sweep's own actuation is separately clamped to `power_offset_max_qdb`, so the run does not itself radiate above the §10.5 bound; the hazard is one step later. Every step above the bound commands the same clamped power, so the seek reads flat and can **persist a placement as high as the preset** — and the artifact apply path is *not* clamped by `power_offset_max_qdb`, so that placement reaches the chip on the next apply, pairing pass or boot. At the fleet seed that is 108 qdb of offset (**+27 dB**) instead of +24 qdb (+6 dB) — the operating point Pass 150 measured driving the PA into compression. The ground now refuses identically, before the tier is recorded, so the bound cannot move. **Residual, named not fixed:** the artifact apply remains unclamped by `power_offset_max_qdb`; with the bound pinned nothing can currently author a placement above it. Since Pass 164 the only RF backend is relative, so `0x0A` and its REST twin are reachable only on the udp bench; §10.5 `POST /api/v1/tx/power` is the actuation path on a relative node. Tiers are re-based with the rest of §10.5. On a node with no curve and no artifact the tier is accepted and recorded but **moves nothing** — per §10.3 the ceiling binds only where a number of ours reaches the actuator. Craft-session volatile like the rest of §11.7; unlike `0x09` MTU_TIER it is **not** reset on binding release, because a tier only lowers power, so a departed owner's choice is never the hazardous direction and resetting it would move power mid-flight |
+| `0x0A` | `TX_POWER` | preset index 0..4 | Selects the node's power **ceiling** from the preset list governing that node's actuation space (§10.3 Pass 166): `adapters[].power_presets_qdb` on an absolute backend, `adapters[].power_offset_presets_qdb` on a relative one (§15.2). The wire carries an ordinal and never a power, so the two spaces share one opcode. It is the baseline the Pass 134 per-rung mask is derived from, so one choice moves the whole tapered curve and the calibrated per-rung *shape* is preserved. This is deliberately NOT the §10.5 override latch, which is rung-agnostic by construction and would flatten a curve whose whole point is that MCS0 and MCS7 want different power. Applying a tier sets the runtime ceiling on the §10.4 resolve and the §10.5 clamp, then forces one re-resolve at the committed operating point. On an ABSOLUTE backend it also bounds a future §10.6/§10.7 sweep; in offset space it deliberately does **not** (Pass 167 — see §10.7, where a tier below the window floor was measured collapsing a run to one point and overwriting a good artifact while reporting success). **A tier can only ever LOWER power** (operator ruling): every preset is clamped at config load to that adapter's boot `max_power_qdb`, so §10.3 remains the operator's hard ceiling and no runtime path can raise power past it. `REJECTED` when no `role:"tx"` adapter carries a preset list, `arg` is past its length, a §10.6 calibration is running (Pass 136 — the run owns the actuator), or **this node's actuation space carries no preset list** (Pass 166) — an absolute backend reads `power_presets_qdb`, a relative one reads `power_offset_presets_qdb`, and a node with neither has no selectable ceiling to move. **History, because the refusal is still the reason the ground path exists.** Pass 151 refused the tier on a relative backend outright: `power_presets_qdb` are absolute qdb, so applying one installed a 60..108 preset as the clamp on an offset resolve — replacing the §10.5 bound with a number 15..27 dB above it while §15.3 reported the tier effective. **That refusal bound BOTH halves (Pass 165).** Pass 151 stated it once and only the craft implemented it; the §15.5 `POST /api/v1/tx/power_tier` ground path applied the tier regardless, and its absolute `ceiling_qdb` then overwrote the **offset-space** §10.7 sweep bound. The sweep's own actuation is separately clamped to `power_offset_max_qdb`, so the run does not itself radiate above the §10.5 bound; the hazard is one step later. Every step above the bound commands the same clamped power, so the seek reads flat and can **persist a placement as high as the preset** — and the artifact apply path is *not* clamped by `power_offset_max_qdb`, so that placement reaches the chip on the next apply, pairing pass or boot. At the fleet seed that is 108 qdb of offset (**+27 dB**) instead of +24 qdb (+6 dB) — the operating point Pass 150 measured driving the PA into compression. The ground refused identically from Pass 165 on, before the tier was recorded, so the bound could not move. **Pass 166 supersedes the refusal with the re-base** (§10.3): a relative node's tier is drawn from `power_offset_presets_qdb` and installs an offset-space ceiling, so the clamp and the resolve are finally the same quantity and the tier is live on RF again. **Pass 165's named residual closes with it, and closes structurally rather than by a new guard:** the §10.7 artifact resolve always clamped to the node's ceiling, but on a relative node that ceiling held the *absolute* `max_power_qdb` (108), so the `min` was a no-op against offsets. Seeding it from `power_offset_max_qdb` makes the existing clamp bind. Between Pass 164 and Pass 166 there was no in-flight power lever at all — `0x0A` is the only power command in this table, and §10.5's latch is management-HTTP only, unreachable from a ground with no IP path to the craft. On a node with no curve and no artifact the tier is accepted and recorded but **moves nothing** — per §10.3 the ceiling binds only where a number of ours reaches the actuator. Craft-session volatile like the rest of §11.7; unlike `0x09` MTU_TIER it is **not** reset on binding release, because a tier only lowers power, so a departed owner's choice is never the hazardous direction and resetting it would move power mid-flight |
 | `0x0B`–`0x1F` | *reserved* | — | not specified |
 
 **v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
@@ -4441,7 +4490,8 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
       "max_power_qdb": 108,
       "power_offset_qdb": -24,
       "power_offset_max_qdb": 0,
-      "power_presets_qdb": [60, 76, 84] },
+      "power_presets_qdb": [60, 76, 84],
+      "power_offset_presets_qdb": [-72, -48, -24, 0] },
     { "name": "wlan1", "bus": "1-1.3", "role": "rx", "channel": 5805, "bw": 20 }
   ],
   "streams": [
@@ -4659,13 +4709,56 @@ act, supported because efuse tables are per-module and some ship conservative.
 Load-time rule: `power_offset_qdb <= power_offset_max_qdb`, else the config is
 rejected.
 
+`power_offset_presets_qdb` (§10.3/§11.7 `0x0A`, Pass 166) is the offset-space
+twin of `power_presets_qdb`: the selectable ceilings on a **relative** backend.
+Same shape and same rules as its absolute counterpart — 1 to 5 entries
+(`0x0A` indexes at most five), `role:"tx"` adapters only, and **every entry
+clamped at load to that adapter's `power_offset_max_qdb`**, logged when the
+clamp binds. Ascending order is the convention, not a rule; the index is
+positional and the protocol reads no meaning into the values' order.
+A node reads exactly one of the two lists — the one matching its
+`air.kind` — and the other is **inert** on it, reported as such by
+`--check --strict`. Neither list is derived from or defaulted by the other:
+absolute presets are dBm-shaped targets and offsets are backoffs from a
+per-unit efuse table, and no arithmetic converts between them without an
+absolute reference this spec deliberately does not have (§10.5). Omitting the
+key on a relative node is legal and means "no tier is selectable here" —
+`0x0A` and `POST /api/v1/tx/power_tier` then REJECT, and §10.5's latch remains
+the actuation path.
+
 `max_power_qdb` is **no longer a TX ceiling** (§10.3 amendment) and is not the
-§10.5 reference either — that role went with kernel-monitor (Pass 164). It
-nevertheless **remains live on every backend** as the §10.3 ceiling: it clamps
+§10.5 reference either — that role went with kernel-monitor (Pass 164). On an
+**absolute** backend it remains the §10.3 ceiling: it clamps
 `power_presets_qdb` at load, it is reported as §15.3 `tx_power_ceiling_qdb`, it
-is the one clamp on a §10.5 override latch, and it bounds a §10.7 sweep. So is
-`power_presets_qdb`, through §15.5 `power_tier`. Neither is inert, and
-`--check --strict` must not say they are.
+is the one clamp on a §10.5 override latch, and it bounds a §10.7 sweep.
+
+**On a relative backend all four of those roles moved to the offset keys
+(Pass 166/167)**, and the ceiling a node reports and enforces is
+`power_offset_max_qdb`, lowered by a §11.7 `0x0A` tier. **§15.3
+`tx_power_ceiling_qdb` therefore carries the ceiling in the node's own
+actuation space**, exactly as `tx_power_qdb` beside it has carried an offset
+since Pass 150; read §15.5 `GET /api/v1/tx/power`'s `backend` to know which.
+One consequence worth naming: the field's documented `0 = none` sentinel now
+collides with a legal offset ceiling of 0 (the `power_offset_max_qdb`
+default), where before a relative node always reported 108 there. The fleet
+configures 24 so nothing reads it today; distinguishing them is a §15.3
+schema change and belongs to its own pass. So is
+`power_presets_qdb`, through §15.5 `power_tier`. Neither is inert on an
+absolute backend, and `--check --strict` must not say they are. The reader
+list above is ABSOLUTE-backend only; the paragraph below says where each role
+went on a relative one.
+
+**Pass 166 scopes the preset list by space.** On a relative backend
+`power_presets_qdb` is **inert** — the tier reads `power_offset_presets_qdb`
+there, and the offset keys supply the ceiling that §15.3, the §10.5 clamp and
+the §10.7 sweep bound all take. `max_power_qdb` is a *different claim* and this
+pass deliberately does not settle it: its remaining reader on a relative node
+is the load clamp of a list that is itself inert there, which looks like
+inertness and may well be, but proving it needs the mechanical
+reader-enumeration that Pass 164's review had to supply after the fact. It
+stays **unpredicated and live** until the retirement pass that also disposes of
+`ifname` and `calib_id`. A false "this key is dead" on a power key is the worse
+direction of the two, and it is the one this repo has already been wrong in.
 
 What Pass 164 *did* strand is `adapters[].ifname` and `adapters[].calib_id`:
 both lost their only reader with the backend (§10.7 tiers 2–4), nothing else
@@ -5311,8 +5404,8 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 |---|---|---|
 | `POST /api/v1/csa` | `{ "mhz": 5805, "class": 0 }` | start a §11 CSA campaign (issuer/ground node) |
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
-| `GET /api/v1/tx/power_tier` | — | §10.3/§11.7 `0x0A` power tier: `{tier, presets_qdb, ceiling_qdb, effective}` — `tier` is `-1` when no preset list is configured, and `effective` is false on a node with no curve, no artifact and no §10.5 latch, where the ceiling binds nothing (§10.3). A held latch counts (Pass 136): the ceiling is the one clamp on an override, so the tier reaches hardware through it |
-| `POST /api/v1/tx/power_tier` | `{ "tier": 1 }` \| `{ "tier": 1, "both": true }` | Selects the local ceiling by preset index; 400 on a missing/non-integer `tier`, 409 when unconfigured or out of range, and **409 when this node's uplink is on a relative backend** (§11.7 `0x0A` Pass 151, enforced here since Pass 165 — presets are absolute qdb and would be read as an offset by the §10.7 sweep bound; use `POST /api/v1/tx/power`). `both` additionally issues §11.7 `0x0A` to the bound craft — the one-action-both-directions shape `{"action":"start_both"}` already has for calibration. `both` on a node with no craft binding is a 409, not a silent local-only apply. 409 while a §10.6/§10.7 calibration is running (Pass 136) — the run owns the actuator and the ceiling is what it is measuring against |
+| `GET /api/v1/tx/power_tier` | — | §10.3/§11.7 `0x0A` power tier: `{tier, presets_qdb, ceiling_qdb, effective}` — `presets_qdb` and `ceiling_qdb` are in **this node's actuation space** (Pass 166), matching §15.3 `tx_power_qdb`, which has reported an offset on a relative backend since Pass 150; read `GET /api/v1/tx/power`'s `backend` to know which. `tier` is `-1` when no preset list is configured, and `effective` is false on a node with no curve, no artifact and no §10.5 latch, where the ceiling binds nothing (§10.3). A held latch counts (Pass 136): the ceiling is the one clamp on an override, so the tier reaches hardware through it |
+| `POST /api/v1/tx/power_tier` | `{ "tier": 1 }` \| `{ "tier": 1, "both": true }` | Selects the local ceiling by preset index; 400 on a missing/non-integer `tier`, 409 when unconfigured or out of range. Since Pass 166 the list is chosen by the uplink's actuation space — `power_presets_qdb` absolute, `power_offset_presets_qdb` relative — so a relative uplink is served rather than refused; **409 when this node's uplink carries no list in its own space**, which on a relative uplink means `power_offset_presets_qdb` is absent (§11.7 `0x0A`). The blanket relative-backend 409 of Pass 165 is withdrawn by the re-base, not by relaxation: `ceiling_qdb` now comes from the same space as the resolve it clamps. `both` additionally issues §11.7 `0x0A` to the bound craft — the one-action-both-directions shape `{"action":"start_both"}` already has for calibration. `both` on a node with no craft binding is a 409, not a silent local-only apply. 409 while a §10.6/§10.7 calibration is running (Pass 136) — the run owns the actuator and the ceiling is what it is measuring against |
 | `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (any node with a `role:"tx"` adapter, including an rx-node's §6.4 uplink — Pass 125) |
 | `POST /api/v1/calibration` | `{ "action": "start" }` \| `{ "action": "abort" }` \| `{ "action": "start_both" }` | §10.7 ground-uplink calibration; `start` requires its complete prerequisite set, `abort` is idempotent and cancels either phase, `start_both` additionally sequences the §11.7 downlink campaign after a successful uplink phase (ground/rx node) |
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2, "e_permille": 0 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node). `e_permille` (§14.1a) is optional and, like every other field here, participates in the POST's full-replacement semantics: omitting it — or sending `null` — restores the default of inheriting `p_permille` |

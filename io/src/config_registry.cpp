@@ -87,7 +87,18 @@ bool cache_store_enabled(const Config& c) { return c.cache.store.enabled; }
 // MAC and has deliberately no fallback tier, Pass 154 D3).
 bool never_live(const Config&) { return false; }
 
-// DO NOT PREDICATE adapters[].max_power_qdb OR adapters[].power_presets_qdb.
+// §10.3/§11.7 0x0A (Pass 166): the tier's preset list is chosen by the node's
+// actuation space, so exactly one of the two lists governs and the other is
+// read by nothing but its own load-time clamp. The selection has ONE site —
+// TxCore::set_backend_relative() promotes power_offset_presets_qdb into
+// presets_qdb, and run_rx seeds UplinkPower from the offset pair — so the
+// predicate is a restatement of `air.kind`, not a second model of it.
+bool backend_is_relative(const Config& c) {
+    return c.air.kind == AirCfg::Kind::kRadio;
+}
+bool backend_is_absolute(const Config& c) { return !backend_is_relative(c); }
+
+// DO NOT PREDICATE adapters[].max_power_qdb.
 // Pass 164's first cut declared both inert on the radio backend, reasoning
 // that every reader sits on the `!backend_relative_` arm. That covers the
 // craft TxCore sites and MISSES three that run on radio (line numbers drift —
@@ -108,6 +119,15 @@ bool never_live(const Config&) { return false; }
 // §10.5 reference role went with kernel-monitor, the §10.3 ceiling role did
 // not. Caught by pre-merge review, not by the seven mutation tests — those
 // proved only that the tests agreed with the wrong model.
+//
+// Pass 166 predicated power_presets_qdb after all — but on `air.kind` alone,
+// which the three readers above now follow rather than contradict: each one
+// reads the space-selected list, and on a relative node that list is
+// power_offset_presets_qdb. max_power_qdb is a DIFFERENT claim. On a relative
+// node its one remaining reader is the clamp of a list that is itself inert
+// there, which looks like inertness and may be — but that is the shape of the
+// error above, so it stays unpredicated until a pass that re-runs the
+// enumeration and can afford to be wrong about it.
 
 const char* kWhyNoUplink =
     "this node has no role:\"tx\" adapter on an RF backend, so \u00a715.2 gives "
@@ -122,6 +142,12 @@ const char* kWhyStoreOff = "cache.store.enabled is false";
 const char* kWhyIfnameGone =
     "the kernel-monitor backend that bound to this netdev was deleted in "
     "Pass 164, and nothing else reads it";
+const char* kWhyAbsolutePresets =
+    "air.kind is radio (a relative backend, \u00a710.5), whose \u00a711.7 "
+    "0x0A tier reads adapters[].power_offset_presets_qdb instead";
+const char* kWhyOffsetPresets =
+    "air.kind is not radio, so this node's TX actuation is absolute and its "
+    "\u00a711.7 0x0A tier reads adapters[].power_presets_qdb instead";
 const char* kWhyCalibIdGone =
     "\u00a710.6 identity tiers 2-4 went with kernel-monitor (Pass 164); the "
     "radio backend keys the calibration artifact on the EFUSE MAC and has no "
@@ -140,8 +166,9 @@ const KeyEntry kKeys[] = {
     {"adapters[].name",                           KeyType::kString},
     {"adapters[].power_map",                      KeyType::kString},
     {"adapters[].power_offset_max_qdb",           KeyType::kNumber},
+    {"adapters[].power_offset_presets_qdb",       KeyType::kArray, backend_is_relative, kWhyOffsetPresets},
     {"adapters[].power_offset_qdb",               KeyType::kNumber},
-    {"adapters[].power_presets_qdb",              KeyType::kArray},
+    {"adapters[].power_presets_qdb",              KeyType::kArray, backend_is_absolute, kWhyAbsolutePresets},
     {"adapters[].role",                           KeyType::kString},
     {"air",                                       KeyType::kObject},
     {"air.ack_responder",                         KeyType::kBool},

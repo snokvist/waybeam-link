@@ -90,10 +90,14 @@ struct AdapterCfg {
     uint16_t channel_mhz = 0;  // center freq MHz, band-agnostic (§11.1 style)
     uint8_t bw = 20;           // 20 / 40 / 80
     std::string power_map;     // §10.2 per-adapter absolute power table path
-    // §10.3 (Pass 150): NO LONGER a TX ceiling. Its one surviving role was
-    // kernel-monitor's absolute REFERENCE, and that went with the backend
-    // (Pass 164) — devourer's reference is the efuse per-rate table. INERT:
-    // ignored with a warning, reported by `--check --strict`.
+    // §10.3 (Pass 150): no longer the §10.5 REFERENCE — that role was
+    // kernel-monitor's and went with the backend (Pass 164); devourer's
+    // reference is the efuse per-rate table. It is still the §10.3 absolute
+    // ceiling and is NOT inert: it clamps power_presets_qdb at load, feeds
+    // §15.3 tx_power_ceiling_qdb and the §10.5 latch clamp on an absolute
+    // node, and bounds an absolute §10.7 sweep. A pre-merge review caught
+    // this header, the registry and the tests all asserting otherwise
+    // (Pass 164) — `--check --strict` must not report it inert.
     std::optional<int32_t> max_power_qdb;
     // §10.5 (Pass 150) relative TX offset in quarter-dB against the backend's
     // calibrated reference, applied at boot on every role:"tx" adapter.
@@ -106,10 +110,16 @@ struct AdapterCfg {
     int32_t power_offset_max_qdb = 0;
     // §10.3/§11.7 0x0A (Pass 135): selectable ceilings, <=5 per the §11.7
     // preset-index bound. Each entry is clamped to max_power_qdb at load, so
-    // the runtime path can only ever LOWER power. INERT since Pass 164: the
-    // vcmd is REJECTED on a relative backend (Pass 151) and every remaining
-    // actuator is relative.
+    // the runtime path can only ever LOWER power. ABSOLUTE space — read only
+    // on an absolute backend; inert on a relative one (Pass 166), which
+    // reads the twin below instead.
     std::vector<int32_t> power_presets_qdb;
+    // §10.3/§11.7 0x0A (Pass 166): the offset-space twin, read on a RELATIVE
+    // backend. Same shape and same rules with max_power_qdb ->
+    // power_offset_max_qdb, which is what each entry is clamped to at load.
+    // Not derived from power_presets_qdb: no arithmetic converts absolute
+    // dBm targets into per-unit efuse backoffs (§10.5).
+    std::vector<int32_t> power_offset_presets_qdb;
 };
 
 struct StreamCfg {

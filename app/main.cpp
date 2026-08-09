@@ -2096,9 +2096,10 @@ struct TxCore {
                 continue;
             }
             // §10.5 override targets: EVERY tx adapter, curve or not.
-            power_targets_.push_back(
-                PowerTarget{a.name, i, a.max_power_qdb, a.power_presets_qdb,
-                            a.power_offset_qdb, a.power_offset_max_qdb});
+            power_targets_.push_back(PowerTarget{
+                a.name, i, a.max_power_qdb, a.power_presets_qdb,
+                a.power_offset_presets_qdb, a.power_offset_qdb,
+                a.power_offset_max_qdb});
             if (a.power_map.empty()) {
                 continue;
             }
@@ -2109,9 +2110,10 @@ struct TxCore {
                              curve.error.c_str());
                 continue;
             }
-            power_.push_back(PowerAdapter{a.name, i, *curve.value,
-                                          a.max_power_qdb, a.power_presets_qdb,
-                                          std::nullopt});
+            power_.push_back(PowerAdapter{
+                a.name, i, *curve.value, a.max_power_qdb, a.power_presets_qdb,
+                a.power_offset_presets_qdb, a.power_offset_max_qdb,
+                std::nullopt});
         }
         for (const StreamCfg& s : cfg.streams) {
             if (s.dir != Dir::kIn) {
@@ -2996,6 +2998,15 @@ struct TxCore {
     // forbid.
     std::optional<std::pair<int32_t, int32_t>> offset_window() const {
         if (!backend_relative_ || power_targets_.empty()) return std::nullopt;
+        // The top is the CONFIG bound, deliberately not `ceiling` — a §11.7
+        // 0x0A tier does not narrow this window (Pass 167, operator ruling
+        // 2026-08-09). Pass 166 briefly made it do so, for symmetry with the
+        // absolute backend; the bench measured what that costs. See the
+        // §10.7 amendment: calibration must always be able to reach the
+        // configured bound, because that is how a unit's real maximum is
+        // found, and a session-volatile menu choice must not be able to hide
+        // it. The tier still bounds FLIGHT power — that is `ceiling`, applied
+        // in resolve_and_apply_power and hw_qdb, not here.
         int32_t lo = power_targets_.front().offset_qdb;
         int32_t hi = power_targets_.front().offset_max_qdb;
         for (const PowerTarget& t : power_targets_) {
@@ -3222,16 +3233,29 @@ struct TxCore {
         std::string name;
         size_t adapter_idx;  // position in cfg.adapters == radio index
         PowerCurve curve;
+        // The ceiling IN THIS NODE'S SPACE — absolute at construction,
+        // re-seeded from power_offset_max_qdb by set_backend_relative()
+        // (Pass 166). It clamps the curve resolve, and on a relative node it
+        // used to hold an absolute 108 against offsets, i.e. no clamp at all.
         std::optional<int32_t> ceiling;
         std::vector<int32_t> presets_qdb;  // §11.7 0x0A selectable ceilings
+        // Parsed alongside; set_backend_relative() promotes it into
+        // presets_qdb on a relative node so no downstream site branches.
+        std::vector<int32_t> offset_presets_qdb;
+        int32_t offset_max_qdb = 0;
         std::optional<int32_t> applied_qdb;
     };
     // §10.5 override targets: every role:"tx" adapter, curve or not.
     struct PowerTarget {
         std::string name;
         size_t adapter_idx;
-        std::optional<int32_t> ceiling;  // §10.3 — inert since Pass 164
+        // The ceiling in this node's space: §10.3 absolute at construction,
+        // re-seeded from offset_max_qdb by set_backend_relative() (Pass 166).
+        // It is what §15.3 tx_power_ceiling_qdb and §15.5 report.
+        std::optional<int32_t> ceiling;
         std::vector<int32_t> presets_qdb;  // §11.7 0x0A selectable ceilings
+        // Parsed alongside; promoted into presets_qdb on a relative node.
+        std::vector<int32_t> offset_presets_qdb;
         // §10.5 (Pass 150) relative contract: the safe boot offset and the
         // bound the runtime latch may not exceed.
         int32_t offset_qdb = -24;
@@ -3293,15 +3317,17 @@ struct TxCore {
         // would be left at whatever power the abandoned sweep last commanded.
         // §10.5 latching takes the same position (the run yields first).
         if (calibrating()) return false;
-        // §10.3/§11.7 0x0A (Pass 151): `power_presets_qdb` are ABSOLUTE qdb
-        // and there is no offset-space tier. Applying one on a relative
-        // backend replaces the §10.5 offset bound (0) with an absolute preset
-        // (60..108) as the resolve clamp — removing the one guard that keeps a
-        // resolved curve inside the window — while §15.3 reported the tier
-        // effective. Reachable TODAY: the flying craft config carries
-        // `power_presets_qdb: [60,76,84,92,108]` and runs devourer. REJECTED
-        // until tiers are re-based with the rest of §10.5.
-        if (backend_relative_) return false;
+        // §10.3/§11.7 0x0A: Pass 151 REJECTED outright on a relative backend,
+        // because `power_presets_qdb` are ABSOLUTE qdb and installing a
+        // 60..108 preset as the resolve clamp removes the one guard keeping a
+        // resolved curve inside the §10.5 window. Pass 166 re-bases instead:
+        // set_backend_relative() has already promoted
+        // `power_offset_presets_qdb` into `presets_qdb` on this node, so the
+        // list below is in the same space as the resolve it clamps and there
+        // is nothing left to refuse. A relative node that configured no
+        // offset list has an empty list and falls out of the
+        // `configured` check.
+        //
         // ALL-OR-NOTHING. Validate every configured list before touching any
         // ceiling: applying the tier to one tx adapter, skipping another whose
         // list is shorter, and still reporting success would leave two
@@ -3384,9 +3410,13 @@ struct TxCore {
     bool power_tier_effective() const {
         // A curve that resolve_and_apply_power() refuses reaches no hardware,
         // so reporting the tier effective would be the same lie Pass 136
-        // removed for the latch — and on a relative backend a tier is REJECTED
-        // outright (Pass 151), so nothing there can be effective either.
-        return curve_actuates() && !backend_relative_;
+        // removed for the latch. The `&& !backend_relative_` term is gone
+        // with Pass 166: a relative tier now installs an offset-space ceiling
+        // that clamps an offset-space curve, so it is effective on exactly
+        // the same condition as an absolute one — curve_actuates() already
+        // encodes the extra requirement that a relative curve be
+        // calibration-authored.
+        return curve_actuates();
     }
 
     // The one predicate for "resolve_and_apply_power() will reach hardware".
@@ -3417,11 +3447,24 @@ struct TxCore {
         if (power_targets_.empty()) return false;
         bool all_ok = true;
         for (const PowerTarget& t : power_targets_) {
+            // §10.3/§11.7 0x0A: a held tier clamps the latch (Pass 167
+            // review). Pass 150 removed the old `min(qdb, max_power_qdb)`
+            // because on an offset backend it clamped an offset by an
+            // absolute and so was a no-op dressed as a safety ceiling — but
+            // it removed the clamp entirely rather than fixing its space, and
+            // since Pass 166 `t.ceiling` IS in the actuator's space. Without
+            // this the craft latch outranked the tier while the ground's
+            // UplinkPower::hw_qdb() clamped correctly, so one spec sentence
+            // described two opposite behaviours. §10.5 still REPORTS the
+            // request, not the clamped value, and a request above
+            // power_offset_max_qdb is still rejected above rather than
+            // clamped here.
+            const int32_t hw = t.ceiling ? std::min(qdb, *t.ceiling) : qdb;
             if (apply_power_offset) {
-                all_ok = apply_power_offset(t.adapter_idx, qdb) && all_ok;
+                all_ok = apply_power_offset(t.adapter_idx, hw) && all_ok;
             } else {
                 std::fprintf(stderr, "power: %s offset -> %+d qdb\n",
-                             t.name.c_str(), static_cast<int>(qdb));
+                             t.name.c_str(), static_cast<int>(hw));
             }
         }
         // §15.3 must not report a latch the radio refused (air_iface.h: a
@@ -3519,7 +3562,34 @@ struct TxCore {
     // (devourer). The §10.2 absolute curve and the §10.6 absolute sweep are
     // then not merely inaccurate but dangerous — their 60..108 qdb values
     // become +15..+27 dB of boost — so both are refused until re-based.
-    void set_backend_relative(bool on) { backend_relative_ = on; }
+    // §10.5. Called once at startup, before any tier can be selected, which
+    // is what makes the re-seed below safe: it would clobber an applied tier
+    // if it ever ran twice.
+    void set_backend_relative(bool on) {
+        backend_relative_ = on;
+        if (!on) return;
+        // §10.3/§11.7 0x0A (Pass 166): on a relative node the tier lives in
+        // OFFSET space. Select the governing list and re-seed the boot
+        // ceiling from the §10.5 bound here, once, so that set_power_tier(),
+        // the curve resolve clamp, §15.3 tx_power_ceiling_qdb and §15.5 all
+        // read one space with no branch of their own — the four-copy
+        // precedence bug UplinkPower was written to end.
+        //
+        // The old absolute seeding is the craft-side twin of Pass 165's named
+        // residual: resolve_power_qdb() clamps to `ceiling`, and a 108 there
+        // is a no-op against an offset-space calibrated curve, so the clamp
+        // bound nothing on the one backend that still exists.
+        for (PowerAdapter& pa : power_) {
+            pa.presets_qdb = std::move(pa.offset_presets_qdb);
+            pa.offset_presets_qdb.clear();
+            pa.ceiling = pa.offset_max_qdb;
+        }
+        for (PowerTarget& t : power_targets_) {
+            t.presets_qdb = std::move(t.offset_presets_qdb);
+            t.offset_presets_qdb.clear();
+            t.ceiling = t.offset_max_qdb;
+        }
+    }
     bool backend_relative() const { return backend_relative_; }
     std::function<std::optional<uint32_t>(size_t bytes, bool include_pending,
                                           uint16_t packet_budget)>
@@ -3727,13 +3797,26 @@ struct TxCore {
         for (const PowerTarget& t : power_targets_) {
             power_.push_back(
                 PowerAdapter{t.name, t.adapter_idx, c,
-                             // §10.6 (Pass 151): in offset space the §10.5
-                             // bound is the ceiling; the §10.3 absolute one
-                             // is not a comparable quantity.
-                             backend_relative_
-                                 ? std::optional<int32_t>(t.offset_max_qdb)
-                                 : t.ceiling,
-                             t.presets_qdb, std::nullopt});
+                             // `t.ceiling` in BOTH spaces (Pass 167 review).
+                             // The relative arm used to seed offset_max_qdb,
+                             // a Pass 151 relic from when a tier was refused
+                             // here and `ceiling` held an incomparable
+                             // absolute 108. Since Pass 166 `ceiling` IS the
+                             // offset ceiling and a tier lowers it, so
+                             // re-seeding the bound discarded the tier —
+                             // install_curve runs on every completed §10.6
+                             // calibration, and nothing forbids calibrating
+                             // with a tier held, so a run silently RAISED
+                             // power back to the §10.5 bound while §15.3 and
+                             // §15.5 kept reporting the tier held. That is
+                             // the "a tier can only ever LOWER power" ruling
+                             // inverted, which is why it is a one-line arm.
+                             t.ceiling,
+                             // Already space-selected on the target by
+                             // set_backend_relative() (Pass 166), so the
+                             // offset list is spent and passed empty.
+                             t.presets_qdb, std::vector<int32_t>{},
+                             t.offset_max_qdb, std::nullopt});
         }
         // An installed curve came from THIS backend's artifact (the Pass 146
         // fingerprint is backend-scoped), so on a relative backend it holds
@@ -5154,7 +5237,9 @@ int run_tx(const Loaded& l) {
                 return {409,
                         std::string("{\"ok\":false,\"error\":\"no power "
                                     "preset at that index "
-                                    "(adapters[].power_presets_qdb)\"}")};
+                                    "(adapters[].power_presets_qdb, or "
+                                    ".power_offset_presets_qdb on a relative "
+                                    "backend)\"}")};
             }
             return {200, std::string("{\"ok\":true}")};
         };
@@ -5713,8 +5798,21 @@ int run_rx(const Loaded& l) {
     // move together here or not at all.
     const bool uplink_relative = l.cfg.air.kind == AirCfg::Kind::kRadio;
     if (uplink_adapter != nullptr) {
-        upwr.ceiling_qdb = uplink_adapter->max_power_qdb;
-        upwr.presets_qdb = uplink_adapter->power_presets_qdb;
+        // §10.3/§11.7 0x0A (Pass 166): the ceiling and the preset list come
+        // from the uplink's OWN actuation space. Seeding the absolute pair on
+        // a relative node was the Pass 165 residual: `hw_qdb()` and the
+        // artifact resolve both clamp to `ceiling_qdb`, and a 108 there is a
+        // no-op against offsets, so neither clamp bound anything. This is the
+        // single place the space is chosen; everything downstream —
+        // `set_tier`, §15.3 `tx_power_ceiling_qdb`, §15.5, the sweep-bound
+        // fold — reads `upwr` and needs no branch of its own.
+        upwr.ceiling_qdb =
+            uplink_relative
+                ? std::optional<int32_t>(uplink_adapter->power_offset_max_qdb)
+                : uplink_adapter->max_power_qdb;
+        upwr.presets_qdb = uplink_relative
+                               ? uplink_adapter->power_offset_presets_qdb
+                               : uplink_adapter->power_presets_qdb;
     }
     // The policy-level sweep bound, kept so a runtime tier can rebuild
     // ucal_params.seek.max_qdb from the same two inputs the startup fold used.
@@ -6601,6 +6699,21 @@ int run_rx(const Loaded& l) {
     // the removed stdin trigger); profile/fec are TX-only knobs → null → 409.
     StatsSnapshot last_snap;
     std::unique_ptr<ControlServer> control;
+    // §11.7 issuer, held as a NAMED local rather than reached through `h`,
+    // because ControlHandlers is std::move()d into the server once every
+    // handler is registered, so a lambda that captures `h` by reference and
+    // dereferences a sibling member at CALL time reads the moved-from husk.
+    //
+    // It is declared HERE, beside `control`, and NOT inside the block below
+    // (Pass 166). The server outlives that block and dispatches from the main
+    // loop, so a handler capturing a block-scoped local by reference reads a
+    // DESTROYED std::function — ASan `stack-use-after-scope`, and plain UB in
+    // a release build. Device-caught on the .242 ground the first time
+    // §11.7 0x0A `both:true` became reachable on an RF node; `main` at
+    // 02d6145 aborts identically on a udp-air uplink, so the bug predates
+    // Pass 166 and was merely shielded by Pass 165's blanket 409.
+    std::function<std::pair<int, std::string>(const std::string&, int)>
+        issue_vcmd;
     if (!l.cfg.control.bind.empty()) {
         auto cs = ControlServer::create(l.cfg.control.bind);
         if (!cs) {
@@ -6969,15 +7082,12 @@ int run_rx(const Loaded& l) {
             // §10.7 start prerequisites. Each returns the failed one so the
             // operator sees WHY, not just 409 — the list is long and every
             // entry is a real hazard, not a formality.
-            // §11.7 issuer, held as a NAMED local rather than reached
-            // through `h`. ControlHandlers is std::move()d into the server
-            // once every handler is registered, so a lambda that captures `h`
-            // by reference and dereferences a sibling member at CALL time
-            // reads the moved-from husk — every std::function in it is empty.
-            // Device-caught: `both:true` reported "no vehicle-command path on
-            // this node" on a ground that plainly had one.
-            std::function<std::pair<int, std::string>(const std::string&, int)>
-                issue_vcmd;
+            // `issue_vcmd` is declared at run_rx scope beside `control` — see
+            // the comment there. It used to live here, which made every
+            // handler that captured it by reference read a destroyed object
+            // once this block exited (the earlier symptom was `both:true`
+            // reporting "no vehicle-command path on this node" on a ground
+            // that plainly had one; the sharper one is an ASan abort).
             // §10.3/§11.7 0x0A (Pass 135): the ground's own uplink ceiling,
             // and with `both` the craft's too — one action, both directions,
             // the shape {"action":"start_both"} already has for calibration.
@@ -6992,7 +7102,9 @@ int run_rx(const Loaded& l) {
                     return {409,
                             std::string("{\"ok\":false,\"error\":\"no power "
                                         "preset at that index "
-                                        "(adapters[].power_presets_qdb)\"}")};
+                                        "(adapters[].power_presets_qdb, or "
+                                        ".power_offset_presets_qdb on a "
+                                        "relative backend)\"}")};
                 }
                 // A running §10.7 sweep owns the uplink actuator and is
                 // mid-descent against the OLD bound. Same position §10.5
@@ -7013,15 +7125,18 @@ int run_rx(const Loaded& l) {
                 // power_offset_max_qdb. On the flying ground that moved the
                 // next sweep's ceiling from +24 qdb (+6 dB) to 108 qdb read
                 // as an offset (+27 dB), the compressing point Pass 150
-                // measured. Refuse BEFORE set_tier so nothing is recorded.
-                if (uplink_relative) {
-                    return {409,
-                            std::string(
-                                "{\"ok\":false,\"error\":\"power tier is "
-                                "absolute qdb and this uplink is on a "
-                                "relative backend (\u00a711.7 0x0A, Pass 151) "
-                                "\u2014 use POST /api/v1/tx/power\"}")};
-                }
+                // measured.
+                //
+                // Pass 166 WITHDRAWS that refusal by re-base, not by
+                // relaxation: `upwr.presets_qdb` and `ceiling_qdb` are seeded
+                // from the OFFSET-space keys on a relative node, so the
+                // ceiling a tier installs and the resolve it clamps are
+                // finally the same quantity, and the sweep bound folded below
+                // moves inside the \u00a710.5 window instead of past it. The index
+                // check above carries the whole refusal now \u2014 a relative node
+                // with no `power_offset_presets_qdb` has an empty list and
+                // 409s there, before anything is recorded.
+                //
                 // `both` first: if the craft cannot be commanded, refuse the
                 // whole action rather than half-applying it locally and
                 // reporting an error the operator reads as "nothing happened".
@@ -7042,22 +7157,38 @@ int run_rx(const Loaded& l) {
                     return {409,
                             std::string("{\"ok\":false,\"error\":\"no power "
                                         "preset at that index "
-                                        "(adapters[].power_presets_qdb)\"}")};
+                                        "(adapters[].power_presets_qdb, or "
+                                        ".power_offset_presets_qdb on a "
+                                        "relative backend)\"}")};
                 }
                 // The sweep bound is NOT power and stays the caller's: folded
-                // once at startup, so without this a §10.7 run started after a
-                // tier change would still climb to the BOOT ceiling — the tier
-                // would bound flight power but not the one operation that
-                // deliberately walks a rung into overload.
+                // once at startup, so without this an ABSOLUTE §10.7 run
+                // started after a tier change would still climb to the BOOT
+                // ceiling — the tier would bound flight power but not the one
+                // operation that deliberately walks a rung into overload.
+                //
+                // ABSOLUTE ONLY (Pass 167, operator ruling). On a relative
+                // uplink this fold is what collapsed the sweep: the tier
+                // ceiling is an OFFSET (-48 at fleet tier 1) while the window
+                // floor is power_offset_qdb (-24), so max < floor and the run
+                // swept a single point, reported SUCCESS, and overwrote an
+                // artifact that recorded last_clean_qdb 24. Measured on the
+                // .242 ground, 2026-08-09; see docs/findings.md. In offset
+                // space the sweep window is the §10.5 band and nothing
+                // session-volatile may narrow it — that is how a unit's real
+                // maximum is found. The startup fold above is already
+                // branched this way; this one never was.
                 //
                 // It must go through the calibrator: UplinkCalibrator COPIES
                 // its params at construction, so assigning ucal_params here
                 // updated a struct nothing reads again and the bound never
                 // moved. ucal_params is kept in step because §15.3 and the
                 // §10.7 start gate still read liveness_ms from it.
-                ucal_params.seek.max_qdb =
-                    std::min(cp_max_qdb, *upwr.ceiling_qdb);
-                (void)uplink_cal.set_max_qdb(ucal_params.seek.max_qdb);
+                if (!uplink_relative && upwr.ceiling_qdb) {
+                    ucal_params.seek.max_qdb =
+                        std::min(cp_max_qdb, *upwr.ceiling_qdb);
+                    (void)uplink_cal.set_max_qdb(ucal_params.seek.max_qdb);
+                }
                 // Re-seed the pairing key: set_tier() already actuated, and
                 // leaving the key stale would make the next pairing pass fire
                 // a second, redundant restore.

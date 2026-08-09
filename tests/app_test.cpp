@@ -326,9 +326,16 @@ void test_artifact_curve_actuates_as_offset() {
     tx.set_backend_relative(true);
     tx.install_curve(flat_curve(-16));   // an offset-space curve
     CHECK(tx.has_power_curve());
-    // §11.7 0x0A tiers are a different matter: the presets are absolute qdb,
-    // so a tier is REJECTED here and never reported effective (Pass 151).
-    CHECK(!tx.power_tier_effective());
+    // §11.7 0x0A (Pass 151 → 166): the tier used to be REJECTED here because
+    // the presets were absolute qdb. It is now drawn from
+    // power_offset_presets_qdb, so a ceiling WOULD bind this offset-space
+    // curve and `effective` says so — exactly as it already did on an
+    // absolute node with a curve and no list configured. `effective` answers
+    // "would a ceiling reach the actuator", not "is a tier selected"; this
+    // config selects none (tier stays -1, and set_power_tier below refuses).
+    CHECK(tx.power_tier_effective());
+    CHECK_EQ_U(tx.power_tier(), -1);
+    CHECK(!tx.set_power_tier(0));  // no offset preset list on this adapter
 
     tx.apply_boot_power_offsets();
     spy.clear();
@@ -424,30 +431,47 @@ void test_relative_sweep_stays_inside_the_offset_window() {
     }
 }
 
-// §10.3/§11.7 0x0A (Pass 151): `power_presets_qdb` are ABSOLUTE qdb, so a tier
-// on a relative backend would install one (60..108) as the clamp on an OFFSET
-// resolve — replacing the §10.5 bound with a number 15..27 dB above it. The
-// flying craft config carries a preset list AND runs devourer, so this is
-// reachable today, not hypothetical.
-void test_tier_rejected_on_relative_backend() {
+// §10.3/§11.7 0x0A (Pass 151 → Pass 166). Pass 151 REJECTED a tier on a
+// relative backend because `power_presets_qdb` are ABSOLUTE qdb and installing
+// one (60..108) as the clamp on an OFFSET resolve replaces the §10.5 bound
+// with a number 15..27 dB above it. Pass 166 re-bases instead of refusing:
+// the tier reads `power_offset_presets_qdb` there. Both halves are pinned
+// here, because the dangerous outcome is not "the tier is refused" but "an
+// absolute number reaches an offset actuator".
+void test_tier_reads_the_backends_own_space() {
     Config c = one_tx_config(108, {60, 84, 108});
     c.adapters[0].power_offset_qdb = -24;
     c.adapters[0].power_offset_max_qdb = 0;
+    c.adapters[0].power_offset_presets_qdb = {-72, -48, -24};
     TxCore tx(c, 1, nullptr, 0);
     PowerSpy spy;
     spy.attach(tx);
     tx.set_backend_relative(true);
     tx.install_curve(flat_curve(-16));
 
-    CHECK(!tx.set_power_tier(0));           // REJECTED, not silently applied
-    CHECK(!tx.power_tier_effective());      // and §15.3 does not claim it
-    // The §10.5 bound is intact: the resolve still clamps at 0, not at 60.
+    // The absolute list is NOT what a relative node selects from.
+    CHECK(tx.power_presets().size() == 3);
+    CHECK(tx.power_presets()[0] == -72);
+    CHECK(tx.set_power_tier(0));
+    CHECK(tx.power_tier_ceiling().value_or(0) == -72);
+    CHECK(tx.power_tier_effective());  // an offset ceiling clamps an offset curve
+
+    // ...and it BINDS: the flat -16 curve resolves down to the -72 tier, where
+    // before Pass 166 the absolute ceiling (108) made the clamp a no-op.
     spy.clear();
     tx.resolve_and_apply_power(5, 4);
     CHECK(!spy.offsets.empty());
-    CHECK(spy.offsets.back().second == -16);
+    CHECK(spy.offsets.back().second == -72);
 
-    // The same tier on an absolute backend is accepted, unchanged.
+    // Boot ceiling on a relative node is the §10.5 bound, not max_power_qdb.
+    Config c2 = c;
+    c2.adapters[0].power_offset_presets_qdb.clear();
+    TxCore untiered(c2, 1, nullptr, 0);
+    untiered.set_backend_relative(true);
+    CHECK(untiered.power_tier_ceiling().value_or(-1) == 0);  // == offset_max
+    CHECK(!untiered.set_power_tier(0));  // no offset list -> REJECTED
+
+    // The same config on an absolute backend selects the absolute list.
     TxCore mon(c, 1, nullptr, 0);
     mon.set_backend_relative(false);
     mon.install_curve(flat_curve(108));
@@ -473,6 +497,99 @@ void test_tier_rejected_on_relative_backend() {
 //
 // If Phase 2a lifts the REST surface out of app/main.cpp, this becomes a unit
 // test and this comment becomes the spec for it.
+
+// §10.3/§10.7 (Pass 167, operator ruling 2026-08-09): a §11.7 0x0A tier bounds
+// FLIGHT power and must NOT narrow the offset-space calibration window.
+//
+// Pass 166 briefly made it do so, for symmetry with the absolute backend. The
+// bench measured the cost on the ground half, which had folded the tier into
+// seek.max_qdb since Pass 135: with fleet tier 1 the ceiling is -48 while the
+// window floor is power_offset_qdb -24, so max < floor, the run swept ONE
+// point, reported `state: done` with no fail_reason, and overwrote an artifact
+// holding last_clean_qdb 24. Calibration is how a unit's real maximum is
+// found; a session-volatile menu choice must not be able to hide it, still
+// less to destroy the record of it.
+void test_tier_does_not_narrow_the_relative_sweep_window() {
+    Config c = one_tx_config(108, {});
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[0].power_offset_max_qdb = 24;
+    c.adapters[0].power_offset_presets_qdb = {-72, -48, -24, 0, 24};
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+    tx.set_backend_relative(true);
+    tx.install_curve(flat_curve(20));   // an offset-space calibrated curve
+
+    const auto boot = tx.offset_window();
+    CHECK(boot.has_value());
+    if (boot) {
+        CHECK(boot->first == -24);   // the safe boot offset
+        CHECK(boot->second == 24);   // the §10.5 bound
+    }
+
+    // Every tier, including one far below the floor, leaves the window alone.
+    for (int ti : {3, 1, 0}) {
+        const uint8_t t = static_cast<uint8_t>(ti);
+        CHECK(tx.set_power_tier(t));
+        const auto w = tx.offset_window();
+        CHECK(w.has_value());
+        if (w) {
+            CHECK(w->first == -24);
+            CHECK(w->second == 24);  // NOT the tier
+        }
+    }
+
+    // ...while still bounding flight power, which is the half a tier owns.
+    // tier 0 = -72, so the +20 curve resolves down to it.
+    spy.clear();
+    tx.resolve_and_apply_power(5, 4);
+    CHECK(!spy.offsets.empty());
+    CHECK(spy.offsets.back().second == -72);
+}
+
+// A tier survives the events that REPLACE the power state, and keeps clamping
+// while it does. Both cases below were found by the Pass 167 pre-merge review,
+// and both are ORDER-dependent — every test above happens to install a curve
+// before selecting a tier, which is exactly the order that hides them.
+void test_tier_survives_install_curve_and_clamps_the_latch() {
+    Config c = one_tx_config(108, {});
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[0].power_offset_max_qdb = 24;
+    c.adapters[0].power_offset_presets_qdb = {-72, -48, -24, 0, 24};
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+    tx.set_backend_relative(true);
+
+    CHECK(tx.set_power_tier(0));                          // ceiling -72
+    CHECK(tx.power_tier_ceiling().value_or(0) == -72);
+
+    // §10.6: install_curve() runs on EVERY completed craft calibration, and
+    // nothing forbids calibrating with a tier held. Re-seeding the adapter
+    // ceiling from power_offset_max_qdb there silently RELEASED the tier
+    // upward to +24 while power_tier_ceiling() — read from a different
+    // vector — kept reporting -72. "A tier can only ever LOWER power",
+    // inverted, with §15.3 asserting the opposite.
+    tx.install_curve(flat_curve(20));
+    spy.clear();
+    tx.resolve_and_apply_power(5, 4);
+    CHECK(!spy.offsets.empty());
+    CHECK(spy.offsets.back().second == -72);              // NOT +20, NOT +24
+    CHECK(tx.power_tier_ceiling().value_or(0) == -72);    // and still agrees
+
+    // §10.5 latch: accepted (<= the +24 bound) but clamped by the tier before
+    // it reaches the actuator, matching UplinkPower::hw_qdb() on the ground.
+    // The craft used to bound only by power_offset_max_qdb, so a latch
+    // outranked the tier here while the ground clamped — one spec sentence
+    // describing two opposite behaviours.
+    spy.clear();
+    CHECK(tx.set_power_override(24));
+    CHECK(!spy.offsets.empty());
+    CHECK(spy.offsets.back().second == -72);
+
+    // Above the BOUND is still rejected outright, not clamped (§10.5).
+    CHECK(!tx.set_power_override(48));
+}
 
 // §10.6 (Pass 151): a config whose bound sits at or under its own safe offset
 // leaves no band, so there is nothing to sweep. REJECTED beats a one-point
@@ -968,7 +1085,9 @@ int main() {
     test_config_curve_refused_on_relative_backend();
     test_artifact_curve_actuates_as_offset();
     test_relative_sweep_stays_inside_the_offset_window();
-    test_tier_rejected_on_relative_backend();
+    test_tier_reads_the_backends_own_space();
+    test_tier_does_not_narrow_the_relative_sweep_window();
+    test_tier_survives_install_curve_and_clamps_the_latch();
     test_empty_offset_window_has_no_sweep();
     test_tier_refused_during_calibration();
     test_power_tier_json_shape();

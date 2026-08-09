@@ -492,3 +492,43 @@ Pass 152 addendum and the Pass 153 entry. See `review-log.md` Pass 153.
 
 Dissolved: the key is retired; the v2 dwell knobs are `dwell_probe_frames`
 (500) / `dwell_verify_frames` (1000). See `review-log.md` Pass 153.
+
+## 2026-08-09 — a tier below the sweep floor collapses an offset-space calibration and reports success
+
+Bench: `.242` ground (8812AU, bus `8-1`) ↔ `.232` craft, 5805→5765 after claim,
+both ends on the Pass 166 branch. Fleet ladder
+`power_offset_presets_qdb: [-72,-48,-24,0,24]`, `power_offset_qdb: -24`,
+`power_offset_max_qdb: 24`.
+
+With §11.7 `0x0A` tier 1 in force (`ceiling_qdb: -48`), `POST /api/v1/calibration
+{"action":"start"}` on the ground uplink:
+
+```
+state done   phase idle   fail_reason null   probes 1500
+placements: [{"mcs":0,"placement_qdb":-24,"last_clean_qdb":-24,
+              "first_bad_qdb":null,"placement_loss_milli":7}]
+```
+
+One point. The previous artifact — `fingerprint 94`, `last_clean_qdb: 24`,
+i.e. a sweep that had climbed to the configured bound cleanly — was
+**overwritten**. Restored by hand afterwards; the degraded copy is kept as
+evidence.
+
+Mechanism: the ground's *startup* window fold is branched by space and takes
+`[power_offset_qdb, power_offset_max_qdb]`, but the §15.5 tier handler's
+*runtime* fold was unconditional — `seek.max_qdb = min(cp_max_qdb,
+ceiling_qdb)` — so an offset ceiling of −48 landed under the −24 floor. The
+craft half refuses this case (`offset_window()` returns nullopt and §11.7
+CALIBRATE gates on it); the ground half had no equivalent, so a degenerate
+sweep looked like a successful one.
+
+Ruled Tier-1 the same day (Pass 167): in offset space a tier does not narrow
+the calibration window at all. That removes the mechanism rather than adding a
+refusal to it — but the asymmetry is worth remembering, because the ground
+still has no "refuse an empty window" guard of its own and a config with
+`power_offset_max_qdb == power_offset_qdb` falls to the ABSOLUTE startup arm
+(`app/main.cpp`, the `else if (upwr.ceiling_qdb)` after the relative window
+fold). Since Pass 166 the number folded there is an **offset**, not the 108
+`max_power_qdb` it used to be, so that arm mixes spaces and can reproduce the
+same one-point run from config alone. A future pass picking this up should
+start from that description, not from the pre-Pass-166 one.

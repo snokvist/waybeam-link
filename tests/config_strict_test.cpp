@@ -278,14 +278,27 @@ int main() {
         CHECK(!has(clean, "adapters[].ifname", KeyVerdict::kInert));
         CHECK(!has(clean, "adapters[].calib_id", KeyVerdict::kInert));
     }
-    // REGRESSION PIN (pre-merge review, Pass 164). max_power_qdb and
-    // power_presets_qdb were briefly declared inert on radio. They are NOT:
-    // §15.3 tx_power_ceiling_qdb, §15.5 GET /api/v1/tx/power_tier, the ground
-    // UplinkPower::hw_qdb() override clamp that reaches the actuator, and the
-    // load-time clamp of the presets to the ceiling all read them on a radio
-    // node, and BOTH flying configs set them. A predicate here tells the
-    // operator to delete a key that clamps TX power. See the DO NOT PREDICATE
-    // block in io/src/config_registry.cpp.
+    // REGRESSION PIN (pre-merge review, Pass 164), NARROWED by Pass 166.
+    //
+    // max_power_qdb was briefly declared inert on radio. On an ABSOLUTE
+    // backend it is plainly not: §15.3 tx_power_ceiling_qdb, §15.5 GET
+    // /api/v1/tx/power_tier, the ground UplinkPower::hw_qdb() override clamp
+    // that reaches the actuator, and the load-time clamp of the presets all
+    // read it there. Since Pass 166/167 those four roles belong to the offset
+    // keys on a relative backend, so on radio the honest statement is
+    // "possibly inert, not proven" — and the pin below still asserts NOT
+    // inert, deliberately, because a false "this key is dead" on a power key
+    // is the worse direction and the enumeration that would settle it has not
+    // been redone. See the DO NOT PREDICATE block in
+    // io/src/config_registry.cpp, which carries the same reasoning.
+    //
+    // power_presets_qdb IS predicated as of Pass 166, and on `air.kind`
+    // alone: a relative node's tier reads power_offset_presets_qdb instead,
+    // selected at one site (TxCore::set_backend_relative / the run_rx
+    // UplinkPower seed), so the readers listed above follow the space rather
+    // than contradicting it. The two keys are pinned in OPPOSITE directions
+    // here on purpose — that is the whole distinction Pass 164's review had
+    // to draw after the fact.
     {
         const char* kAbsAdapter =
             R"({ "name": "wlan0", "bus": "1-1", "role": "tx",
@@ -293,19 +306,39 @@ int main() {
                  "power_presets_qdb": [60, 76, 84] })";
         const auto radio = findings_for(cfg_json(kAbsAdapter, ""));
         CHECK(!has(radio, "adapters[].max_power_qdb", KeyVerdict::kInert));
-        CHECK(!has(radio, "adapters[].power_presets_qdb", KeyVerdict::kInert));
+        CHECK(has(radio, "adapters[].power_presets_qdb", KeyVerdict::kInert));
         const auto udp = findings_for(cfg_json(kAbsAdapter, "",
             R"({ "kind": "udp", "tx": ["127.0.0.1:1"], "rx": ["0.0.0.0:1"] })"));
         CHECK(!has(udp, "adapters[].max_power_qdb", KeyVerdict::kInert));
         CHECK(!has(udp, "adapters[].power_presets_qdb", KeyVerdict::kInert));
+
+        // §10.3 (Pass 166) the other way round: the offset list is live on
+        // radio and inert on udp. Without this the predicate could be
+        // one-sided and still pass — the failure #148's predicates had.
+        const char* kOffAdapter =
+            R"({ "name": "wlan0", "bus": "1-1", "role": "tx",
+                 "channel": 5805, "bw": 20, "power_offset_max_qdb": 24,
+                 "power_offset_presets_qdb": [-72, -48, -24, 0, 24] })";
+        const auto radio_off = findings_for(cfg_json(kOffAdapter, ""));
+        CHECK(!has(radio_off, "adapters[].power_offset_presets_qdb",
+                   KeyVerdict::kInert));
+        const auto udp_off = findings_for(cfg_json(kOffAdapter, "",
+            R"({ "kind": "udp", "tx": ["127.0.0.1:1"], "rx": ["0.0.0.0:1"] })"));
+        CHECK(has(udp_off, "adapters[].power_offset_presets_qdb",
+                  KeyVerdict::kInert));
+        // Neither list is reported on a config that omits it.
+        const auto clean = findings_for(cfg_json(kTxAndRx, ""));
+        CHECK(!has(clean, "adapters[].power_presets_qdb", KeyVerdict::kInert));
+        CHECK(!has(clean, "adapters[].power_offset_presets_qdb",
+                   KeyVerdict::kInert));
     }
     // Prefix-bleed guard, the trap that bit air.tx_retry_limit in #148. These
-    // are the RELATIVE §10.5 contract plus the two absolute-ceiling keys
-    // above: every one is live on every backend and must stay unpredicated.
+    // are the RELATIVE §10.5 contract plus the absolute ceiling: every one is
+    // live on every backend and must stay unpredicated. The two preset lists
+    // are deliberately absent — Pass 166 predicates both, each on air.kind.
     for (const char* p : {"adapters[].power_offset_qdb",
                           "adapters[].power_offset_max_qdb",
                           "adapters[].max_power_qdb",
-                          "adapters[].power_presets_qdb",
                           "adapters[].power_map", "adapters[].bus",
                           "adapters[].mac"}) {
         const KeyEntry* e = entry(p);

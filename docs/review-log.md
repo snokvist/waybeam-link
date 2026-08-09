@@ -24,6 +24,88 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 167 — a tier bounds flight power, not the offset-space sweep (2026-08-09)
+
+**Ruling (operator, 2026-08-09).** In offset space a §11.7 `0x0A` tier does
+**not** narrow the §10.6/§10.7 calibration window. It keeps the half it owns —
+flight power, via the §10.4 resolve clamp and the §10.5 latch clamp. On an
+absolute backend the Pass 134 behaviour is unchanged.
+
+**Measured first, ruled second.** Pass 166 folded the tier into the sweep bound
+for symmetry with the absolute backend. On the `.242`↔`.232` bench, fleet tier
+1 puts the ceiling at −48 while the window floor is `power_offset_qdb` −24, so
+`max < floor`: the ground's uplink run swept **one point**, reported
+`state: done` with no `fail_reason`, and **overwrote an artifact holding
+`last_clean_qdb: 24`** — a degenerate run claiming success and destroying the
+record of measured headroom, the failure `CLAUDE.md`'s "refuse false success"
+rule exists to prevent. Numbers in `docs/findings.md`.
+
+**Why remove the coupling rather than guard it.** Calibration is how a unit's
+real maximum is found. The §10.5 band is a config-level safety property; a
+tier is a session-volatile convenience reachable from a menu. Letting the
+second narrow the first means one button press can hide a unit's headroom for
+the session and destroy the artifact recording it.
+
+**Changed.** §10.3 (`0x0A` no longer claims the sweep in offset space), §10.7
+(the derived window is the §10.5 band, with the measurement as its reason),
+§11.7 `0x0A`.
+
+**Consequence for the ladder.** The top preset stays at
+`power_offset_max_qdb` (+24 on the fleet). A tier is a ceiling, never a
+command, so the top entry radiates nothing by itself — it is the "release the
+ceiling" position, and without it no tier restores full flight power once one
+is selected. Placements above the efuse reference are real on this fleet
+(ground `last_clean_qdb: 24`, craft +14/+10/+4), so a ladder topping at 0
+would clamp measured headroom.
+
+**Left open, deliberately.** The ground has no "refuse an empty sweep window"
+guard — the craft's `offset_window()` returns nullopt and §11.7 CALIBRATE
+gates on it; the ground has no twin. A tier can no longer produce that state,
+but `power_offset_max_qdb == power_offset_qdb` still falls to the ABSOLUTE
+startup arm, and since Pass 166 the number folded there is an **offset**
+(`upwr.ceiling_qdb`), not 108 — so that arm now mixes spaces. Its own pass.
+
+## Pass 166 — the `0x0A` power tier is re-based into offset space (2026-08-09)
+
+**Ruling (operator, 2026-08-09).** Re-base the tier; the top preset is the
+configured `power_offset_max_qdb`, not the safe seed.
+
+**Why now.** Pass 151 refused an absolute tier on a relative backend, Pass 165
+bound the ground half, and Pass 164 deleted the only absolute RF backend. The
+three together left the fleet with **no in-flight power lever at all**: `0x0A`
+is the only power command in the §11.7 table, and §10.5's latch is
+management-HTTP only — unreachable from a ground with no IP path to the craft.
+§10.5 had promised "tiers are re-based with the rest of §10.5"; this is it.
+
+**Changed.** §10.3 (space table, and why deriving was refused), §11.7 `0x0A`
+(REJECT condition; wire unchanged — still an ordinal `0..4`), §15.2 (new key,
+preset-list scoped by space), §15.5 `GET`/`POST /api/v1/tx/power_tier`. This
+Pass also folded the tier into the §10.7 sweep bound; **Pass 167 reverts that
+half before either shipped** — softened here rather than corrected on top,
+per `CLAUDE.md`.
+
+**The key.** `adapters[].power_offset_presets_qdb` — 1..5 entries, `role:"tx"`
+only, each clamped at load to `power_offset_max_qdb`, logged when the clamp
+binds. Term for term the absolute rules with `max_power_qdb` →
+`power_offset_max_qdb`. A node reads exactly one list; the other is inert on it
+(registered, schema- and `--strict`-visible).
+
+**Deriving was refused.** `preset − max_power_qdb` gives `[−48…0]` on both
+flying configs, below their configured `power_offset_max_qdb: 24`, so a tier
+could never express the operator's own ceiling — and it reintroduces an
+absolute anchor into the section that says there is none.
+
+**Pass 165's residual closes structurally**, not by a new guard: the §10.7
+artifact resolve always clamped to the node's ceiling, but on a relative node
+that ceiling held the absolute `max_power_qdb` (108), so the `min` was a no-op
+against offsets. Seeding it from `power_offset_max_qdb` makes it bind.
+
+**Deliberately NOT ruled:** whether `max_power_qdb` is inert on a relative
+backend. Its one remaining reader there clamps a list that is itself now
+inert, which looks like inertness — but Pass 164's review had to supply that
+enumeration after the fact, and a false "key is dead" on a power key is the
+worse direction. Live and unpredicated until the retirement pass.
+
 ## Pass 165 — the §11.7 `0x0A` relative-backend refusal binds the ground half (2026-08-09)
 
 **Verdict.** Pass 151 ruled a power tier REJECTED when the air backend is
