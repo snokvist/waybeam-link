@@ -107,10 +107,11 @@ if(WBLINK_BUILD_APP)
     target_include_directories(app_test PRIVATE ${CMAKE_SOURCE_DIR})
     target_include_directories(app_test SYSTEM PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party)
-    # With main() suppressed, run_tx/run_loopback/load_all/usage have no
-    # caller in THIS TU and every build would warn. (run_rx is no longer among
-    # them — it lives in node/src/rx_node.cpp since #109 Phase 2c step 2, and
-    # this TU reaches it by linking wblink_node like any other consumer.) They are not dead — the
+    # With main() suppressed, run_loopback/load_all/usage have no
+    # caller in THIS TU and every build would warn. (run_rx and run_tx are no
+    # longer among them — they live in node/src/{rx,tx}_node.cpp since #109
+    # Phase 2c step 2 and Phase 3, and this TU reaches them by linking
+    # wblink_node like any other consumer.) They are not dead — the
     # shipped binary calls all of them — so the warning is silenced here only,
     # never repo-wide, where it would hide genuinely unreachable code.
     target_compile_options(app_test PRIVATE -Wno-unused-function)
