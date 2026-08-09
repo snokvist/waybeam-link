@@ -51,6 +51,7 @@ BASES = {
     "2c step 1 — run_rx's free-function dependencies": "109a704^",
     "2c step 2 — the RX run loop": "109a704",
     "Phase 3 prep — Loaded's loader": "7c25796",
+    "Phase 3 — the TX run loop": "ac3b245",
 }
 
 # A step stops being checkable once its DESTINATION legitimately changes — the
@@ -67,6 +68,13 @@ VERIFIED_AT = {
 }
 
 STEPS = {
+    # 977 lines, and the ONLY step so far that is not a verbatim move: run_tx
+    # reaches four app-scope names where run_rx reached one, and three of them
+    # are the B9 process behaviours (the fork, the exit code, the stop flag).
+    # The five edits below are exactly that boundary — see tx_node.h.
+    "Phase 3 — the TX run loop": [
+        ("run_tx", 297, 1273, "node/src/tx_node.cpp"),
+    ],
     "2c step 1 — run_rx's free-function dependencies": [
         ("csa_params",             189, 206, N + "policy.h"),
         ("vcmd_params",            208, 221, N + "policy.h"),
@@ -98,6 +106,37 @@ STEPS = {
 # wider prefix forces on a multi-line signature. A move needing an edit that
 # is not listed here is not a move.
 EDITS = [
+    # Phase 3: B9's boundary, and nothing else, across 977 moved lines.
+    ("int run_tx(const Loaded& l) {",
+     "int run_tx(const Loaded& l, const std::atomic<int>& stop,\n"
+     "           const ModeApplyFn& mode_apply) {"),
+    ("while (g_stop == 0) {", "while (stop == 0) {"),
+    ("spawn_mode_applier(l.cfg.venc.mode_apply_cmd, name)",
+     "(mode_apply && mode_apply(l.cfg.venc.mode_apply_cmd, name))"),
+    ("return kExitTxWedged;", "return kTxWedged;"),
+    # Review of PR #164: the capability ADVERTISEMENT has to agree with what
+    # this node can do. A config naming an applier says nothing about whether
+    # this node may fork one, and a mode switcher that renders enabled and
+    # always fails is worse than one that renders disabled.
+    ('s += l.cfg.venc.mode_apply_cmd.empty() ? "false" : "true";',
+     's += (l.cfg.venc.mode_apply_cmd.empty() || !mode_apply) ? "false"\n'
+     '                                                                       : "true";'),
+    ("return modes_catalog_json(modes_dir, active_mode,\n"
+     "                                      !l.cfg.venc.mode_apply_cmd.empty());",
+     "return modes_catalog_json(\n"
+     "                modes_dir, active_mode,\n"
+     "                !l.cfg.venc.mode_apply_cmd.empty() && bool(mode_apply));"),
+    ('if (!(mode_apply && mode_apply(l.cfg.venc.mode_apply_cmd, name))) {\n'
+     '                return "failed to launch mode applier";\n'
+     '            }',
+     'if (!mode_apply) {\n'
+     '                // Distinct from a failed launch: nothing was attempted, and\n'
+     '                // nothing could be. apply_configured already says so.\n'
+     '                return "this node cannot apply modes";\n'
+     '            }\n'
+     '            if (!mode_apply(l.cfg.venc.mode_apply_cmd, name)) {\n'
+     '                return "failed to launch mode applier";\n'
+     '            }'),
     ("CsaParams csa_params(", "inline CsaParams csa_params("),
     ("VcmdParams vcmd_params(", "inline VcmdParams vcmd_params("),
     ("bool channel_allowed(", "inline bool channel_allowed("),
