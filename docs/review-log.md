@@ -24,6 +24,47 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 166 — the `0x0A` power tier is re-based into offset space (2026-08-09)
+
+**Ruling (operator, 2026-08-09).** Re-base the tier; the top preset is the
+configured `power_offset_max_qdb`, not the safe seed.
+
+**Why now.** Pass 151 refused an absolute tier on a relative backend, Pass 165
+bound the ground half, and Pass 164 deleted the only absolute RF backend. The
+three together left the fleet with **no in-flight power lever at all**: `0x0A`
+is the only power command in the §11.7 table, and §10.5's latch is
+management-HTTP only — unreachable from a ground with no IP path to the craft.
+§10.5 had promised "tiers are re-based with the rest of §10.5"; this is it.
+
+**Changed.** §10.3 (space table, and why deriving was refused), §11.7 `0x0A`
+(REJECT condition; wire unchanged — still an ordinal `0..4`), §15.2 (new key,
+preset-list scoped by space), §15.5 `GET`/`POST /api/v1/tx/power_tier`, §10.7
+(the derived sweep window's max).
+
+**The key.** `adapters[].power_offset_presets_qdb` — 1..5 entries, `role:"tx"`
+only, each clamped at load to `power_offset_max_qdb`, logged when the clamp
+binds. Term for term the absolute rules with `max_power_qdb` →
+`power_offset_max_qdb`. A node reads exactly one list; the other is inert on
+it. Harness-visible: registered, schema- and `--strict`-visible.
+
+**Deriving was refused.** `preset − max_power_qdb` gives `[−48…0]` on both
+flying configs, whose top is **below** their configured
+`power_offset_max_qdb: 24`, so a tier could never express the operator's own
+ceiling — and it reintroduces an absolute anchor into the section that says
+there is no absolute TX contract anywhere.
+
+**Pass 165's residual closes structurally**, not by a new guard: the §10.7
+artifact resolve always clamped to the node's ceiling, but that ceiling held
+the absolute `max_power_qdb` (108) on a relative node, so the `min` was a
+no-op against offsets. Seeding it from `power_offset_max_qdb` makes the
+existing clamp bind.
+
+**Deliberately NOT ruled:** whether `max_power_qdb` is inert on a relative
+backend. Its one remaining reader there clamps a list that is itself now
+inert, which looks like inertness — but Pass 164's review had to supply that
+enumeration after the fact, and a false "key is dead" on a power key is the
+worse direction. Live and unpredicated until the retirement pass.
+
 ## Pass 165 — the §11.7 `0x0A` relative-backend refusal binds the ground half (2026-08-09)
 
 **Verdict.** Pass 151 ruled a power tier REJECTED when the air backend is
