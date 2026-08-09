@@ -51,8 +51,9 @@ option(WBLINK_WERROR "Treat WBLINK_WARNINGS as errors (our targets only)" OFF)
 # options OFF, and it does — the headers are unconditional, only the .cpp
 # files are not. What it produces is an archive with unresolvable references,
 # which no CONFIGURE-time check can see and no compile-only preset can either.
-# B10 (docs/library-extraction-plan.md §4.8) removes the dependency; until
-# then this is a known, measured gap, not an oversight.
+# B10 (docs/library-extraction-plan.md §4.10) removed the dependency, and
+# examples/node-linkcheck is the gate that holds it: a LINK, since no
+# configure- or compile-time check can see an unresolved symbol in an archive.
 if(WBLINK_BUILD_APP)
     foreach(_feat FRAME_SHM CONTROL_SERVER VENC)
         if(NOT WBLINK_${_feat})
@@ -317,17 +318,19 @@ target_link_libraries(wblink_node PUBLIC wblink_io)
 target_compile_options(wblink_node PRIVATE ${WBLINK_WARNINGS})
 add_library(wblink::node ALIAS wblink_node)
 
-# The three optional units. Only the target_sources half of the WBLINK_RADIO
-# pattern above applies: none of these three has a single #if consumer, so a
-# feature macro would reach every flying build's command line for nothing.
-# Re-add one when a consumer needs to branch on it. All three are leaves —
-# nothing else in io/ carries an undefined reference to them (verified with nm
-# over libwblink_io.a).
+# The three optional units. WBLINK_VENC still needs only the target_sources
+# half — nothing branches on it. The other two now do: node/src/rx_node.cpp is
+# a consumer that must build and LINK without them (#109 B10), which is the
+# case the comment here used to say would justify re-adding the macros. All
+# three are leaves in io/ — nothing else there carries an undefined reference
+# to them (verified with nm over libwblink_io.a).
 if(WBLINK_FRAME_SHM)
     target_sources(wblink_io PRIVATE io/src/frame_shm.cpp)
+    target_compile_definitions(wblink_io PUBLIC WBLINK_FRAME_SHM=1)
 endif()
 if(WBLINK_CONTROL_SERVER)
     target_sources(wblink_io PRIVATE io/src/control_server.cpp)
+    target_compile_definitions(wblink_io PUBLIC WBLINK_CONTROL_SERVER=1)
 endif()
 if(WBLINK_VENC)
     target_sources(wblink_io PRIVATE io/src/venc_http.cpp)

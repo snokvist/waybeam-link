@@ -160,7 +160,7 @@ scripts/gates.sh            # EVERY merge gate; what CI runs. --quick = dev + ct
 ```
 
 Run that rather than a remembered checklist. It covers the eight presets, the
-71-suite `ctest`, the B7 embed check, the install/`find_package` round trip and
+71-suite `ctest`, the B7 embed check, the B10 node link check, the install/`find_package` round trip and
 the `deploy/*.json` `--check`s, and it **fails on a diagnostic for our
 targets even when the build exits 0**. Toolchains the host lacks are SKIPPED
 loudly and counted separately — a skip is never a pass. Export
@@ -278,12 +278,13 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
 - `node/` — node behaviour above `io/` (#109 Phase 2a/2c). STATIC since the RX
   run loop moved in: `src/rx_node.cpp` holds `run_rx`, and a consumer that
   links `wblink::node` can now RUN a receiving node rather than only build its
-  objects. **It does not yet LINK on bionic** — `run_rx` names `FrameShmRing`
-  and `ControlServer`, which `android-arm64` compiles out, and a static
-  archive does not resolve its own undefined symbols, so that preset is green
-  while `libwblink_node.a` carries nine unresolvable references. Closing that
-  is B10 (`docs/library-extraction-plan.md` §4.8), and the check for it is a
-  LINK, not a build. The headers:
+  objects. It links with `WBLINK_FRAME_SHM=OFF` / `WBLINK_CONTROL_SERVER=OFF`
+  since B10 added the `FrameSink` callback egress
+  (`docs/library-extraction-plan.md` §4.10). The gate for that is
+  `examples/node-linkcheck` and it is a **LINK**, not a build:
+  `android-arm64` is compile-only and a static archive does not resolve its
+  own undefined symbols, so that preset was green while `libwblink_node.a`
+  carried nine unresolvable references. The headers:
   `rx_node.h` (`run_rx` — the run loop, implemented in `src/rx_node.cpp`),
   `rx_core.h` (`RxCore` + `rx_policy()`), `discovery.h` (`DiscoveryCatalog`,
   `ScoutEngine`), `air_backend.h` (`AirBackend`, `PacketEventTrace`),

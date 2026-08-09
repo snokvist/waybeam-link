@@ -481,7 +481,7 @@ struct RxCore {
         }
     }
 
-    // §15.5 stats/reset. The frame-shm reassemblers live in run_rx (ShmOut),
+    // §15.5 stats/reset. The frame reassemblers live in run_rx (FrameOut),
     // so the caller resets those; here we zero the RX engine's counters.
     // §3.5: the reporter's loss window deltas are taken against the engine's
     // counters, so resetting one without the other underflows the next

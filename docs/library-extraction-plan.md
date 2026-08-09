@@ -305,14 +305,15 @@ One prerequisite falls out of this and belongs to Phase 3, not here: Android's
 devourer submodule is pinned at `73f1cb4` (2026-07-09), which **predates**
 `GetPermanentMacAddress` (#383/#386). See B7.
 
-### 2b. Still live — two
+### 2b. Still live — none; B9 and B10 both closed
 
 Ordered by how much they constrain the design, not by size. **Seven of the
 original nine have since closed in code and are kept below with a status
 line rather than deleted, because each one's reasoning is what the next
 phase is built on.** B6's residue and B12 closed with Phase 1a (PR #138);
 B1, B4 and B5 with Phase 1b; B7 with Phase 1a′; B8 with Phase 1c. What
-remains is **B9, B10**.
+remains is **nothing**: B9 closed structurally with Phase 2a (see §4.5), and
+B10 with §4.10 — the callback egress sink and the link gate that holds it.
 
 #### B1 — device acquisition: enumeration vs. a wrapped fd
 
@@ -530,6 +531,12 @@ path nor `recover()`'s USB reset is available, so the answer has to be a
 surfaced capability, not a substituted action.
 
 #### B10 — egress: RX video has no callback sink
+
+**CLOSED by §4.10.** `run_rx` takes an optional `FrameSink`; `BindKind` is
+unchanged at `{kUdp, kFrameShm}` and nothing in §15.2 moved, exactly as the
+survey below wanted ("additive"). The one thing the survey did not see is
+that it was not merely additive but *required*: without it `wblink::node`
+cannot link on the preset that models the phone.
 
 `BindKind` is still `{kUdp, kFrameShm}` (`io/include/wblink/config.h:23`).
 Android wants frames handed to MediaCodec. UDP-to-localhost works today with
@@ -1517,6 +1524,78 @@ is what fixes B10's scope. `scripts/gates.sh` meanwhile reports
 because the alternative — inventing the egress seam here — would have made a
 2661-line verbatim move unreviewable. B10 closes it, and the check that B10
 worked must be a **link**, since a build demonstrably is not one.
+
+### 4.10 B10, as landed — the callback egress sink
+
+`wblink::node` now links with `WBLINK_FRAME_SHM=OFF` and
+`WBLINK_CONTROL_SERVER=OFF`. That was the last thing standing between the layer
+and its Phase 3 consumer.
+
+**The seam is one `std::function`, and no config can select it.** Following the
+PR #139 precedent it is programmatic-only — no `BindKind` value, nothing in
+§15.2 — so it stays Tier 2 and needs no ruling:
+
+```cpp
+using FrameSink = std::function<void(uint8_t stream_id,
+                                     const uint8_t* frame, size_t len)>;
+int run_rx(const Loaded& l, const std::atomic<int>& stop,
+           const FrameSink& frame_out = {});
+```
+
+**What it takes, and what it deliberately does not.** §15.2's
+`bind.kind: "frame-shm"` is the *whole-frame* egress kind — blocks reassembled
+into a frame, frame handed on — and B10 makes *where* it is handed a choice
+rather than a constant. A supplied sink takes those streams. UDP-bound
+out-streams are datagram egress, a different thing, and are left alone;
+hijacking them would surprise a consumer that wanted only its video. The old
+`ShmOut` is `FrameOut` now, because a name that says "shm" on the
+Android-facing path would be a lie.
+
+**Both new `#if` arms fail closed.** A frame-shm stream configured on a build
+without the subsystem and without a sink is refused at startup, as is a
+`control.bind` on a build without the server. A node that silently dropped its
+video because the build lacked a subsystem its config asks for would look like
+a link fault and be debugged as one.
+
+**The gate is a LINK, and it had to be.** `examples/node-linkcheck` configures
+the tree exactly as a phone would — all three optional subsystems off, no
+daemon — and links an executable against `wblink::node`. `scripts/gates.sh`
+runs it (27 gates now, up from 25).
+
+It is a separate gate from `examples/embed-consumer` on purpose: that one holds
+B7 (embedding does not build the daemon's world), and folding two properties
+into one gate blurs what a red result means.
+
+Negative control, and the first attempt at it was wrong in a way worth
+recording: reverting the `#if` around the ring branch made the mutant fail to
+*compile*, and a check that counted "undefined reference" lines scored that as
+zero — a passing result for a broken build. Reverting the struct member as well
+lets the TU compile and puts the linker back in the loop, which is where the
+check lives: **3 undefined references, build exit 2.** Restored, it links and
+runs.
+
+Measured after: `llvm-nm -u build/android-arm64/libwblink_node.a` names
+**zero** `FrameShmRing` or `ControlServer` symbols, down from nine.
+
+**§15.3 stays honest on the sink path**, and the first draft of this did not.
+`frame_count`, `frame_bytes`, `frame_size_*`, `frame_interval_us` and
+`frame_jitter_us` come from the *ring's* counters, and `io/src/stats.cpp`
+emits those keys **unconditionally** — so simply skipping the entry for a
+sink-backed stream published zeros, which is precisely the stalled-egress
+reading the code comment claimed to be avoiding. `write_egress` now keeps the
+same counters itself, mirroring `FrameShmRing::note_frame` including its
+fixed-point jitter, so a consumer cannot tell which egress produced them. The
+ring-only fields (`reads`, `ring_full`, the producer-health block) stay zero
+because there is no ring to observe.
+
+**What is NOT proven yet.** The link check proves the sink resolves; nothing
+yet proves a frame comes out of it. `run_rx` opens adapters and blocks, so no
+unit test reaches the path. The runtime proof wants a real consumer, and the
+cheapest one is not Android: it is **waybeam-hub on the x86 dev host**, whose
+`mod_pixelpilot` / `mod_video_player` already consume whole frames from the
+frame-SHM ring. Wiring the hub to link `wblink::node` and take frames from the
+callback instead tests the seam against a decoder that exists, on a machine
+that is already on the bench — before any of it depends on a phone.
 
 ## 5. Loose ends worth knowing before starting
 

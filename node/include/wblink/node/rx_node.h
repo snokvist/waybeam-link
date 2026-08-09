@@ -17,15 +17,14 @@
 // the stop flag. So the lift is a move plus one parameter, and
 // `tools/move_identity.py` still gates it.
 //
-// WHAT THIS DOES NOT YET DO. `run_rx` names `FrameShmRing` and `ControlServer`
-// unconditionally, and the `android-arm64` preset — the one that exists to
-// prove the Phase 3 consumer — builds with `WBLINK_FRAME_SHM=OFF` and
-// `WBLINK_CONTROL_SERVER=OFF` (bionic has no `shm_open`). Compiling is not the
-// problem: the headers are always present, so this TU builds green on that
-// preset. LINKING is. A static archive does not resolve its own undefined
-// symbols, so the gap is invisible until a consumer links it. Closing that is
-// B10 (§4.8) — the callback egress sink — and it comes with the link check
-// that proves it, because a build cannot.
+// IT LINKS WITHOUT THE OPTIONAL SUBSYSTEMS, as of B10 (§4.10). It did not at
+// first: `run_rx` named `FrameShmRing` and `ControlServer` unconditionally,
+// while `android-arm64` — the preset that exists to prove the Phase 3
+// consumer — builds with both OFF (bionic has no `shm_open`). Compiling was
+// never the problem; the headers are always present, so that preset was GREEN
+// while the archive carried nine unresolvable references. A static archive
+// does not resolve its own undefined symbols, so only a LINK sees it, which
+// is why `examples/node-linkcheck` is a gate of its own.
 //
 // Layering rule (CLAUDE.md): node/ may use core/ and io/; neither may use
 // node/. `node/` owns no process: the signal handlers, `spawn_mode_applier`'s
@@ -34,6 +33,9 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 
 #include "wblink/node/stats_fill.h"
 
@@ -53,11 +55,32 @@ namespace node {
 //
 // The loop polls; it does not block on the flag. Expect up to one poll period
 // of latency between setting it and return.
+// A whole reassembled frame, ready for a decoder, and the stream it arrived
+// on (§15.2 `streams[].stream_id`). This is B10 of #109: the egress that
+// §15.2 spells `bind.kind: "frame-shm"` is *whole-frame* egress, and where the
+// frame goes stops being a constant.
+//
+// PROGRAMMATIC ONLY, following the PR #139 precedent — there is no `BindKind`
+// value for it and nothing in §15.2 changes, so a config cannot select it and
+// this needs no spec amendment. A supplied sink takes the frame-shm-bound
+// out-streams; UDP-bound ones are datagram egress and are left alone.
+//
+// It is called from the RX loop, synchronously, before the next frame is
+// reassembled: a slow sink is backpressure on the receiver. Copy what you need
+// and return — the buffer does not outlive the call.
+using FrameSink =
+    std::function<void(uint8_t stream_id, const uint8_t* frame, size_t len)>;
+
 static_assert(std::atomic<int>::is_always_lock_free,
               "run_rx's stop flag is documented as safe to set from a signal "
               "handler; that is only true while std::atomic<int> is lock-free");
 
-int run_rx(const Loaded& l, const std::atomic<int>& stop);
+// `frame_out` empty = egress goes where the config says. Non-empty = it takes
+// the frame-shm-bound out-streams instead, which is what lets a node run on a
+// build with WBLINK_FRAME_SHM=OFF. Configuring a frame-shm stream on such a
+// build with NO sink is refused at startup rather than silently dropped.
+int run_rx(const Loaded& l, const std::atomic<int>& stop,
+           const FrameSink& frame_out = {});
 
 }  // namespace node
 }  // namespace wblink

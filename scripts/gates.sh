@@ -47,6 +47,10 @@ run() {  # run <name> <cmd...>
         fi
     else
         echo "FAIL  $name"
+        # Diagnostics first, then the tail. Under -j the last 15 lines are
+        # often a DIFFERENT job's output, so a bare tail can show a failure
+        # that has nothing to do with the one that stopped the build.
+        grep -nE '(error|Error|undefined reference|FAILED):?' "$log" | head -10
         tail -15 "$log"
         FAIL+=("$name")
     fi
@@ -54,13 +58,17 @@ run() {  # run <name> <cmd...>
 }
 skip() { echo "SKIP  $1 ($2)"; SKIP+=("$1"); }
 
+# Every build below runs -j: unset, cmake --build is SERIAL, which was most of
+# this script's wall clock. WBLINK_GATE_JOBS overrides (1 to bisect a race).
+: "${WBLINK_GATE_JOBS:=$(nproc 2>/dev/null || echo 4)}"
+
 # Configure THEN build. `cmake --build --preset X` needs the build directory to
 # already exist, so a version of this script that only built worked on a
 # machine with warm build dirs and failed on a fresh clone — which is exactly
 # how CI found it on its first run.
 build_preset() {
     run "configure $1" cmake --preset "$1"
-    run "build $1"     cmake --build --preset "$1"
+    run "build $1"     cmake --build --preset "$1" -j "$WBLINK_GATE_JOBS"
 }
 
 build_preset dev
@@ -100,7 +108,16 @@ if [ "$QUICK" -eq 0 ]; then
     # the gate; the build then proves wblink::io actually links.
     run "embed-consumer configure" \
         cmake -S examples/embed-consumer -B build/gates-embed
-    run "embed-consumer build" cmake --build build/gates-embed
+    run "embed-consumer build" cmake --build build/gates-embed -j "$WBLINK_GATE_JOBS"
+
+    # #109 B10: wblink::node must LINK with the optional subsystems off. This
+    # cannot be folded into a preset — android-arm64 is compile-only, and a
+    # static archive does not resolve its own undefined symbols, so that gate
+    # was green while libwblink_node.a carried nine unresolvable references.
+    # Only a link sees it. Runs on the host, so it needs no NDK.
+    run "node-linkcheck configure" \
+        cmake -S examples/node-linkcheck -B build/gates-nodelink
+    run "node-linkcheck build" cmake --build build/gates-nodelink -j "$WBLINK_GATE_JOBS"
 
     # install + find_package round trip, from `release` — never from `dev`,
     # whose archive is ASan-instrumented and whose export carries no
@@ -123,7 +140,7 @@ EOF
     run "find_package(wblink)" \
         cmake -S build/gates-fp-src -B build/gates-fp \
               -DCMAKE_PREFIX_PATH="$PWD/build/gates-stage"
-    run "find_package build" cmake --build build/gates-fp
+    run "find_package build" cmake --build build/gates-fp -j "$WBLINK_GATE_JOBS"
 
     # Deploy-config sanity on the four flying nodes. --check parses and
     # validates; it does NOT prove the config says what you meant (CLAUDE.md).
