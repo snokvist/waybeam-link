@@ -160,7 +160,7 @@ scripts/gates.sh            # EVERY merge gate; what CI runs. --quick = dev + ct
 ```
 
 Run that rather than a remembered checklist. It covers the eight presets, the
-71-suite `ctest`, the B7 embed check, the B10 node link check, the install/`find_package` round trip and
+71-suite `ctest`, the B7 embed check, the B10 node link check (built AND run), the install/`find_package` round trip and
 the `deploy/*.json` `--check`s, and it **fails on a diagnostic for our
 targets even when the build exits 0**. Toolchains the host lacks are SKIPPED
 loudly and counted separately — a skip is never a pass. Export
@@ -286,6 +286,9 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   own undefined symbols, so that preset was green while `libwblink_node.a`
   carried nine unresolvable references. The headers:
   `rx_node.h` (`run_rx` — the run loop, implemented in `src/rx_node.cpp`),
+  `rx_node_c.h` (the **C ABI** — four `extern "C"` functions; waybeam-hub is
+  a C daemon and Android reaches native code through JNI, so the header is
+  compiled as C by `examples/node-linkcheck` to keep it honest),
   `rx_core.h` (`RxCore` + `rx_policy()`), `discovery.h` (`DiscoveryCatalog`,
   `ScoutEngine`), `air_backend.h` (`AirBackend`, `PacketEventTrace`),
   `tx_core.h` (`TxCore` + the §15.2->core policy adapters), `stats_fill.h`

@@ -7,6 +7,9 @@
 #include <cstdio>
 
 #include "wblink/node/rx_node.h"
+#include "wblink/node/rx_node_c.h"
+
+extern "C" int wblink_c_consumer_check(void);
 
 int main() {
     // The frame sink is the reason this configuration links at all (#109 B10):
@@ -19,8 +22,12 @@ int main() {
     };
     // Referenced, never called: run_rx opens adapters and blocks.
     auto* entry = &wblink::node::run_rx;
-    std::printf("node_linkcheck: run_rx=%p sink=%d\n",
+    const int c_rc = wblink_c_consumer_check();
+    std::printf("node_linkcheck: c_abi=%d run_rx=%p sink=%d\n", c_rc,
                 reinterpret_cast<const void*>(entry),
                 static_cast<int>(static_cast<bool>(sink)));
-    return 0;
+    // Propagate: the C-ABI contract checks print their verdict, and a gate
+    // that prints a failure while exiting 0 is not a gate. `cmake --build`
+    // only ever sees this number.
+    return c_rc;
 }

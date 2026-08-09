@@ -118,6 +118,11 @@ if [ "$QUICK" -eq 0 ]; then
     run "node-linkcheck configure" \
         cmake -S examples/node-linkcheck -B build/gates-nodelink
     run "node-linkcheck build" cmake --build build/gates-nodelink -j "$WBLINK_GATE_JOBS"
+    # And RUN it. Building proves the symbols resolve; the binary also
+    # asserts two C-ABI contract rules that need no hardware (a pre-stopped
+    # handle opens nothing, and a handle runs once), and a gate that only
+    # builds would never execute them.
+    run "node-linkcheck run" ./build/gates-nodelink/node_linkcheck
 
     # install + find_package round trip, from `release` — never from `dev`,
     # whose archive is ASan-instrumented and whose export carries no

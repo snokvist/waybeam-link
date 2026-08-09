@@ -308,7 +308,7 @@ endif()
 # `all` in a consumer's build, handing a project that links only wblink::io a
 # 4 MB archive of the RX loop it never asked for — and, until B10, one carrying
 # unresolvable references. Linking wblink::node still builds it.
-add_library(wblink_node STATIC node/src/rx_node.cpp)
+add_library(wblink_node STATIC node/src/rx_node.cpp node/src/rx_node_c.cpp)
 if(NOT PROJECT_IS_TOP_LEVEL)
     set_target_properties(wblink_node PROPERTIES EXCLUDE_FROM_ALL TRUE)
 endif()
