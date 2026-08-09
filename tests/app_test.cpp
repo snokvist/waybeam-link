@@ -498,37 +498,53 @@ void test_tier_reads_the_backends_own_space() {
 // If Phase 2a lifts the REST surface out of app/main.cpp, this becomes a unit
 // test and this comment becomes the spec for it.
 
-// §10.3/§10.7 (Pass 166): "a tier bounds a FUTURE sweep" has a craft half too.
-// offset_window() read the raw power_offset_max_qdb, so on a relative node the
-// tier moved flight power and left the one operation that deliberately walks a
-// rung into overload climbing to the boot bound — while the ground half folded
-// the tier into ucal_params.seek.max_qdb as it always has. The two halves would
-// have disagreed the moment tiers came back to RF.
-void test_tier_lowers_the_relative_sweep_bound() {
+// §10.3/§10.7 (Pass 167, operator ruling 2026-08-09): a §11.7 0x0A tier bounds
+// FLIGHT power and must NOT narrow the offset-space calibration window.
+//
+// Pass 166 briefly made it do so, for symmetry with the absolute backend. The
+// bench measured the cost on the ground half, which had folded the tier into
+// seek.max_qdb since Pass 135: with fleet tier 1 the ceiling is -48 while the
+// window floor is power_offset_qdb -24, so max < floor, the run swept ONE
+// point, reported `state: done` with no fail_reason, and overwrote an artifact
+// holding last_clean_qdb 24. Calibration is how a unit's real maximum is
+// found; a session-volatile menu choice must not be able to hide it, still
+// less to destroy the record of it.
+void test_tier_does_not_narrow_the_relative_sweep_window() {
     Config c = one_tx_config(108, {});
     c.adapters[0].power_offset_qdb = -24;
     c.adapters[0].power_offset_max_qdb = 24;
     c.adapters[0].power_offset_presets_qdb = {-72, -48, -24, 0, 24};
     TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
     tx.set_backend_relative(true);
+    tx.install_curve(flat_curve(20));   // an offset-space calibrated curve
 
-    auto w = tx.offset_window();
-    CHECK(w.has_value());
-    if (w) {
-        CHECK(w->first == -24);   // the safe boot offset, always the floor
-        CHECK(w->second == 24);   // boot: the §10.5 bound
+    const auto boot = tx.offset_window();
+    CHECK(boot.has_value());
+    if (boot) {
+        CHECK(boot->first == -24);   // the safe boot offset
+        CHECK(boot->second == 24);   // the §10.5 bound
     }
 
-    CHECK(tx.set_power_tier(3));  // 0 qdb
-    w = tx.offset_window();
-    CHECK(w.has_value());
-    if (w) CHECK(w->second == 0);  // the tier, not the bound
+    // Every tier, including one far below the floor, leaves the window alone.
+    for (int ti : {3, 1, 0}) {
+        const uint8_t t = static_cast<uint8_t>(ti);
+        CHECK(tx.set_power_tier(t));
+        const auto w = tx.offset_window();
+        CHECK(w.has_value());
+        if (w) {
+            CHECK(w->first == -24);
+            CHECK(w->second == 24);  // NOT the tier
+        }
+    }
 
-    // A tier BELOW the safe floor squeezes the band shut. Refusing the sweep
-    // is the honest outcome — there is nothing to climb — and §11.7 CALIBRATE
-    // already gates on offset_window() having a value.
-    CHECK(tx.set_power_tier(0));  // -72 qdb, under the -24 floor
-    CHECK(!tx.offset_window().has_value());
+    // ...while still bounding flight power, which is the half a tier owns.
+    // tier 0 = -72, so the +20 curve resolves down to it.
+    spy.clear();
+    tx.resolve_and_apply_power(5, 4);
+    CHECK(!spy.offsets.empty());
+    CHECK(spy.offsets.back().second == -72);
 }
 
 // §10.6 (Pass 151): a config whose bound sits at or under its own safe offset
@@ -1026,7 +1042,7 @@ int main() {
     test_artifact_curve_actuates_as_offset();
     test_relative_sweep_stays_inside_the_offset_window();
     test_tier_reads_the_backends_own_space();
-    test_tier_lowers_the_relative_sweep_bound();
+    test_tier_does_not_narrow_the_relative_sweep_window();
     test_empty_offset_window_has_no_sweep();
     test_tier_refused_during_calibration();
     test_power_tier_json_shape();

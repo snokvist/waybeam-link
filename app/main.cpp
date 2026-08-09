@@ -2998,18 +2998,20 @@ struct TxCore {
     // forbid.
     std::optional<std::pair<int32_t, int32_t>> offset_window() const {
         if (!backend_relative_ || power_targets_.empty()) return std::nullopt;
-        // The top is `ceiling`, not `offset_max_qdb`: they are the same at
-        // boot, and a §11.7 0x0A tier lowers the former (Pass 166). Reading
-        // the raw bound here would leave the craft half of "a tier bounds a
-        // future sweep" (§10.3) unimplemented — the ground half folds the
-        // tier into ucal_params.seek.max_qdb and always has, so the two
-        // would have disagreed on a relative node the moment tiers came back.
+        // The top is the CONFIG bound, deliberately not `ceiling` — a §11.7
+        // 0x0A tier does not narrow this window (Pass 167, operator ruling
+        // 2026-08-09). Pass 166 briefly made it do so, for symmetry with the
+        // absolute backend; the bench measured what that costs. See the
+        // §10.7 amendment: calibration must always be able to reach the
+        // configured bound, because that is how a unit's real maximum is
+        // found, and a session-volatile menu choice must not be able to hide
+        // it. The tier still bounds FLIGHT power — that is `ceiling`, applied
+        // in resolve_and_apply_power and hw_qdb, not here.
         int32_t lo = power_targets_.front().offset_qdb;
-        int32_t hi = power_targets_.front().ceiling.value_or(
-            power_targets_.front().offset_max_qdb);
+        int32_t hi = power_targets_.front().offset_max_qdb;
         for (const PowerTarget& t : power_targets_) {
             lo = std::min(lo, t.offset_qdb);
-            hi = std::min(hi, t.ceiling.value_or(t.offset_max_qdb));
+            hi = std::min(hi, t.offset_max_qdb);
         }
         // A config whose bound sits at or under its own safe offset leaves no
         // band to sweep. Refusing here keeps §11.7 CALIBRATE honest (REJECTED)
@@ -7138,19 +7140,33 @@ int run_rx(const Loaded& l) {
                                         "relative backend)\"}")};
                 }
                 // The sweep bound is NOT power and stays the caller's: folded
-                // once at startup, so without this a §10.7 run started after a
-                // tier change would still climb to the BOOT ceiling — the tier
-                // would bound flight power but not the one operation that
-                // deliberately walks a rung into overload.
+                // once at startup, so without this an ABSOLUTE §10.7 run
+                // started after a tier change would still climb to the BOOT
+                // ceiling — the tier would bound flight power but not the one
+                // operation that deliberately walks a rung into overload.
+                //
+                // ABSOLUTE ONLY (Pass 167, operator ruling). On a relative
+                // uplink this fold is what collapsed the sweep: the tier
+                // ceiling is an OFFSET (-48 at fleet tier 1) while the window
+                // floor is power_offset_qdb (-24), so max < floor and the run
+                // swept a single point, reported SUCCESS, and overwrote an
+                // artifact that recorded last_clean_qdb 24. Measured on the
+                // .242 ground, 2026-08-09; see docs/findings.md. In offset
+                // space the sweep window is the §10.5 band and nothing
+                // session-volatile may narrow it — that is how a unit's real
+                // maximum is found. The startup fold above is already
+                // branched this way; this one never was.
                 //
                 // It must go through the calibrator: UplinkCalibrator COPIES
                 // its params at construction, so assigning ucal_params here
                 // updated a struct nothing reads again and the bound never
                 // moved. ucal_params is kept in step because §15.3 and the
                 // §10.7 start gate still read liveness_ms from it.
-                ucal_params.seek.max_qdb =
-                    std::min(cp_max_qdb, *upwr.ceiling_qdb);
-                (void)uplink_cal.set_max_qdb(ucal_params.seek.max_qdb);
+                if (!uplink_relative && upwr.ceiling_qdb) {
+                    ucal_params.seek.max_qdb =
+                        std::min(cp_max_qdb, *upwr.ceiling_qdb);
+                    (void)uplink_cal.set_max_qdb(ucal_params.seek.max_qdb);
+                }
                 // Re-seed the pairing key: set_tier() already actuated, and
                 // leaving the key stale would make the next pairing pass fire
                 // a second, redundant restore.
