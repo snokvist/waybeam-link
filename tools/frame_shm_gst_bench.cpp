@@ -70,7 +70,15 @@ int produce(const std::string& ring_name, uint32_t bitrate_kbps,
     auto ring = std::move(*rr.value);
     const std::string desc =
         "videotestsrc is-live=true num-buffers=" + std::to_string(frames) +
-        " pattern=snow ! video/x-raw,width=1280,height=720,framerate=30/1 "
+        // format=I420 is not decoration. Leaving the raw format unpinned lets
+        // x265enc negotiate whatever its libx265 build prefers, and a multilib
+        // build picks 4:4:4 12-bit (profile=main-444-12). No VAAPI decoder
+        // accepts that, so a consumer fails with not-negotiated and restarts
+        // its pipeline about once a second -- which reads exactly like broken
+        // framing, and cost a run on waybeam-hub #195 before the control
+        // showed the same failure on the untouched SHM-ring path. The craft
+        // encodes 8-bit 4:2:0; this bench must too, or it is not a bench.
+        " pattern=snow ! video/x-raw,format=I420,width=1280,height=720,framerate=30/1 "
         "! x265enc bitrate=" + std::to_string(bitrate_kbps) +
         " key-int-max=30 tune=zerolatency speed-preset=ultrafast "
         "! h265parse config-interval=-1 "
