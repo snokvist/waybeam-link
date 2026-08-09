@@ -430,5 +430,98 @@ void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     emitter.emit(snap);
 }
 
+// §15.5 GET /info and GET /health payloads (#109 Phase 2c). Same family as
+// the §15.3 assembly above — the node's JSON output — and they read the same
+// three objects (`Loaded`, `AirBackend`, `StatsSnapshot`), so they belong
+// beside it rather than in a header of their own.
+
+// §15.5 GET /info — static identity. Hand-built (no json dep in app/); the
+// field values are numeric or house-controlled strings (no escaping needed).
+inline std::string build_info_json(const Loaded& l, uint32_t session,
+                                   const char* role,
+                                   const InfoSelfState* self = nullptr,
+                                   const AirBackend* air = nullptr) {
+    std::string s = "{\"role\":\"";
+    s += role;
+    s += "\",\"node\":" + std::to_string(l.cfg.node.originator);
+    s += ",\"session\":" + std::to_string(session);
+    s += ",\"table_version\":" + std::to_string(l.tv);
+    s += ",\"streams\":[";
+    bool first = true;
+    for (const StreamCfg& st : l.cfg.streams) {
+        if (!first) s += ',';
+        first = false;
+        s += "{\"stream_id\":" + std::to_string(st.stream_id);
+        s += ",\"dir\":\"";
+        s += (st.dir == Dir::kIn ? "in" : "out");
+        s += "\",\"bind\":\"";
+        s += (st.bind.kind == BindKind::kFrameShm ? "frame-shm" : "udp");
+        s += "\"}";
+    }
+    s += "],\"adapters\":[";
+    first = true;
+    for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+        const AdapterCfg& a = l.cfg.adapters[i];
+        if (!first) s += ',';
+        first = false;
+        // Live channel, not the boot config: a CSA switch, a craft-local
+        // retune (§15.5 Pass 113) or a scout sweep all move adapters without
+        // touching cfg. On the ground this is the ONLY channel in the object —
+        // there is no top-level `channel` outside the TX self-state — so a
+        // stale value here is the whole answer, not a detail.
+        const uint16_t chan =
+            (air != nullptr && i < air->chan_by_adapter.size())
+                ? air->chan_by_adapter[i]
+                : a.channel_mhz;
+        s += "{\"name\":\"" + a.name + "\",\"role\":\"";
+        s += (a.role == Role::kTx ? "tx" : "rx");
+        s += "\",\"channel\":" + std::to_string(chan);
+        // §15.5 (Pass 154): the per-unit EFUSE identity the §10.6 artifacts
+        // key on; null where the backend reports none (D3 posture visible).
+        const std::string mac =
+            air != nullptr ? air->adapter_mac(i) : std::string{};
+        s += ",\"mac\":";
+        s += mac.empty() ? "null" : "\"" + mac + "\"";
+        s += "}";
+    }
+    s += "]";
+    if (self != nullptr) {  // Pass 113 TX self state
+        s += ",\"channel\":" + std::to_string(self->channel_mhz);
+        s += ",\"psk_announced\":";
+        s += self->psk_announced ? "true" : "false";
+        s += ",\"claimed\":";
+        s += self->claimed_by ? "true" : "false";
+        s += ",\"claimed_by\":" + std::to_string(self->claimed_by.value_or(0));
+    }
+    s += ",\"control\":\"" + l.cfg.control.bind + "\"}";
+    return s;
+}
+
+// §15.5 GET /health — terse link summary from the freshest snapshot.
+inline std::string build_health_json(const StatsSnapshot& snap) {
+    int32_t rssi_best = 0;
+    bool have = false;
+    for (const AdapterStats& a : snap.adapters) {
+        if (!have || a.rssi_best > rssi_best) {
+            rssi_best = a.rssi_best;
+            have = true;
+        }
+    }
+    uint32_t loss_milli = 0;
+    uint64_t delivered = 0;
+    if (!snap.streams.empty()) {
+        loss_milli = snap.streams.front().loss_prediversity_milli;
+        delivered = snap.streams.front().delivered;
+    }
+    std::string s = "{\"state\":\"" + snap.link.state + "\"";
+    s += ",\"profile\":" + std::to_string(snap.link.profile);
+    s += ",\"mcs\":" + std::to_string(snap.link.mcs);
+    s += ",\"rssi_best\":" + std::to_string(have ? rssi_best : 0);
+    s += ",\"loss_milli\":" + std::to_string(loss_milli);
+    s += ",\"delivered\":" + std::to_string(delivered);
+    s += ",\"csa_state\":\"" + snap.link.csa_state + "\"}";
+    return s;
+}
+
 }  // namespace node
 }  // namespace wblink

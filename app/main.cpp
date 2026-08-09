@@ -74,7 +74,12 @@
 #include "wblink/node/tx_core.h"
 #include "wblink/node/stats_fill.h"
 #include "wblink/node/discovery.h"
+#include "wblink/node/entropy.h"
+#include "wblink/node/frame_kind.h"
+#include "wblink/node/policy.h"
 #include "wblink/node/rx_core.h"
+#include "wblink/node/uplink_power.h"
+#include "wblink/node/vcmd.h"
 #include "wblink/table.h"
 #include "wblink/airtime.h"
 #include "wblink/txwedge.h"
@@ -114,6 +119,22 @@ using wblink::node::DiscoveryCatalog;
 using wblink::node::PacketEventTrace;
 using wblink::node::RxCore;
 using wblink::node::ScoutEngine;
+using wblink::node::announce_token;
+using wblink::node::build_health_json;
+using wblink::node::build_info_json;
+using wblink::node::channel_allowed;
+using wblink::node::csa_params;
+using wblink::node::frame_is_eob;
+using wblink::node::frame_is_live_rtp_data;
+using wblink::node::frame_is_paced_eob;
+using wblink::node::mtu_tier_for_mode;
+using wblink::node::power_tier_json;
+using wblink::node::quietgap_policy;
+using wblink::node::session_nonce;
+using wblink::node::UplinkPower;
+using wblink::node::vcmd_id_for;
+using wblink::node::vcmd_name_for;
+using wblink::node::vcmd_params;
 
 volatile std::sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
@@ -186,291 +207,28 @@ bool spawn_mode_applier(const std::string& cmd, const std::string& name) {
 // ScoutEngine moved to node/include/wblink/node/discovery.h
 // (#109 Phase 2a). Its side effects were already injected Hooks.
 
-// §15.2 policy.csa → the core engine's parameter block (string PSK to raw
-// bytes, seconds to ms).
-CsaParams csa_params(const Config& cfg) {
-    const CsaPolicy& c = cfg.policy.csa;
-    CsaParams p;
-    p.psk.assign(c.psk.begin(), c.psk.end());
-    p.settle_ms = static_cast<uint32_t>(c.settle_s * 1000.0);
-    p.verify_timeout_ms = c.verify_timeout_ms;
-    p.min_interval_ms = c.min_interval_s * 1000;
-    p.ack_timeout_ms = c.ack_timeout_ms;
-    p.bind_release_ms = c.bind_release_s * 1000;
-    p.allowlist = c.channel_allowlist;
-    // §11.4a (Pass 85): only a passive spectator may follow an unauthenticated
-    // CSA. Craft/ground with an empty key are FAULTED, not unauthenticated,
-    // and fail closed — the permission rides the role, never an empty buffer.
-    p.allow_unauthenticated = cfg.node.spectator;
-    return p;
-}
+// csa_params + vcmd_params moved to node/include/wblink/node/policy.h
+// (#109 Phase 2c).
 
-// §15.2 policy.cmd → the §11.7 engine parameter block. The key follows the
-// §11.4a CSA provenance (secret here; announced token keyed by the caller).
-VcmdParams vcmd_params(const Config& cfg) {
-    const CmdPolicy& c = cfg.policy.cmd;
-    VcmdParams p;
-    p.psk.assign(cfg.policy.csa.psk.begin(), cfg.policy.csa.psk.end());
-    p.copies = static_cast<uint8_t>(c.copies);
-    p.copy_interval_ms = c.copy_interval_ms;
-    p.echo_copies = static_cast<uint8_t>(c.echo_copies);
-    p.ack_timeout_ms = c.ack_timeout_ms;
-    p.retry_cap = static_cast<uint8_t>(c.retry_cap);
-    p.min_interval_ms = c.min_interval_ms;
-    return p;
-}
+// vcmd_id_for moved to node/include/wblink/node/vcmd.h
+// (#109 Phase 2c).
 
-// §15.5 vehicle/command REST names ↔ §11.7 registry ids.
-uint8_t vcmd_id_for(const std::string& name) {
-    if (name == "arq") return vcmd_id::kArq;
-    if (name == "selector") return vcmd_id::kSelector;
-    if (name == "fps_ladder") return vcmd_id::kFpsLadder;
-    if (name == "fps_select") return vcmd_id::kFpsSelect;
-    if (name == "resolution") return vcmd_id::kResolution;
-    if (name == "framing") return vcmd_id::kFraming;
-    if (name == "mode") return vcmd_id::kMode;  // §11.7 Pass 105
-    if (name == "calibrate") return vcmd_id::kCalibrate;  // §10.6 Pass 120
-    if (name == "mtu_tier") return vcmd_id::kMtuTier;  // §9.3a Pass 122
-    if (name == "tx_power") return vcmd_id::kTxPower;  // §10.3 Pass 135
-    return 0;
-}
+// power_tier_json + UplinkPower moved to
+// node/include/wblink/node/uplink_power.h (#109 Phase 2c).
 
-
-static std::string power_tier_json(int tier, const std::vector<int32_t>& presets,
-                                   std::optional<int32_t> ceiling,
-                                   bool effective) {
-    std::string s = "{\"tier\":" + std::to_string(tier) + ",\"presets_qdb\":[";
-    for (size_t i = 0; i < presets.size(); ++i) {
-        if (i != 0) s += ",";
-        s += std::to_string(presets[i]);
-    }
-    s += "],\"ceiling_qdb\":";
-    s += ceiling ? std::to_string(*ceiling) : "null";
-    // §10.3 (Pass 134): a tier on a node with no curve is recorded and moves
-    // nothing. Report that rather than implying the setting reached hardware.
-    s += ",\"effective\":";
-    s += effective ? "true" : "false";
-    s += "}";
-    return s;
-}
-
-// §10.3/§10.5/§10.7/§11.7 0x0A — the ground uplink's power owner (Pass 138).
-//
-// ONE precedence path: §10.5 latch, then an explicit configured map, then a
-// matching artifact, then backend auto. run_rx spelled that ordering out FOUR
-// times — the actuation, the §15.3 fill, the startup log, and the §15.5
-// `effective` flag — under a comment warning that "a second copy of this
-// ordering is how the two drift". Two copies had in fact already drifted, and
-// both were Pass 136 bug fixes: `effective` claimed a tier bound hardware when
-// it did not, and the tier's own apply path reached no actuator at all in two
-// of three configurations. The hazard was documented rather than removed; this
-// removes it.
-//
-// Actuators are injected, exactly as TxCore does with apply_power, so every
-// rule below is reachable from a test with no radio, no file and no socket.
-struct UplinkPower {
-    enum class Owner { kNone, kOverride, kConfigMap, kArtifact };
-
-    std::function<void(int32_t qdb)> apply_qdb;
-    std::function<void()> apply_auto;
-    // §10.7 applicability is a function of the pairing tuple, which lives in
-    // run_rx and changes with selection/CSA — so this stays a callback. It
-    // returns an already-ceiling-clamped value, and has the side effect of
-    // updating the stale flag; both are properties of its own resolve.
-    std::function<std::optional<int32_t>()> artifact_qdb;
-
-    std::vector<int32_t> presets_qdb;
-    std::optional<int32_t> ceiling_qdb;   // §10.3, moved by a tier
-    std::optional<PowerCurve> curve;      // §10.2 config power_map, if any
-    uint8_t mcs = 0;                      // the uplink's fixed operating point
-    int tier = -1;                        // §11.7 0x0A, -1 = unset
-    std::optional<int32_t> owner_qdb;     // curve resolve under ceiling_qdb
-    std::optional<int32_t> override_qdb;  // §10.5 latch (volatile)
-
-    std::optional<int32_t> artifact() const {
-        return artifact_qdb ? artifact_qdb() : std::nullopt;
-    }
-
-    // Owner + the value that owner REQUESTS, resolved together in the one
-    // place the precedence is written. Walking the chain separately per
-    // accessor is how run_rx ended up with four copies of it, and the first
-    // draft of this struct promptly grew three of its own.
-    //
-    // Resolving once also matters because artifact() is not free: it re-runs
-    // the §10.7 pairing check and updates the stale flag as a side effect.
-    struct Resolved {
-        Owner owner = Owner::kNone;
-        std::optional<int32_t> qdb;
-    };
-    Resolved resolve() const {
-        if (override_qdb) return {Owner::kOverride, override_qdb};
-        if (owner_qdb) return {Owner::kConfigMap, owner_qdb};
-        if (const std::optional<int32_t> a = artifact()) {
-            return {Owner::kArtifact, a};
-        }
-        return {};
-    }
-
-    Owner owner() const { return resolve().owner; }
-
-    const char* owner_name() const {
-        switch (owner()) {
-            case Owner::kOverride: return "§10.5 override";
-            case Owner::kConfigMap: return "config power_map";
-            case Owner::kArtifact: return "artifact";
-            case Owner::kNone: break;
-        }
-        return "backend auto";
-    }
-
-    // What §15.3 REPORTS. §10.5 is explicit that a latch reports the REQUEST,
-    // not the clamped value the hardware got.
-    std::optional<int32_t> reported_qdb() const { return resolve().qdb; }
-
-    // What the ACTUATOR receives. Only the latch needs clamping here: the
-    // curve resolve takes the ceiling as an argument and the artifact resolve
-    // clamps at its source, so clamping them twice would be a no-op that
-    // invited someone to "simplify" one of the three away.
-    std::optional<int32_t> hw_qdb() const {
-        const Resolved r = resolve();
-        if (r.owner == Owner::kOverride && ceiling_qdb) {
-            return std::min(*r.qdb, *ceiling_qdb);
-        }
-        return r.qdb;
-    }
-
-    // The single convergence point. Every §10.5/§10.7/§11.7 path ends here.
-    void apply() {
-        if (const std::optional<int32_t> q = hw_qdb()) {
-            if (apply_qdb) apply_qdb(*q);
-        } else if (apply_auto) {
-            apply_auto();
-        }
-    }
-
-
-    // §10.3 Pass 134/136: a ceiling binds only where a number of ours reaches
-    // the actuator — a curve, an artifact, or a held latch clamped by it.
-    bool effective() const { return owner() != Owner::kNone; }
-
-    // Re-resolve the configured map under the CURRENT ceiling. Resolved once
-    // at startup and never again, this pinned the boot ceiling for the life of
-    // the process, so a tier could not lower a power_map-owned uplink.
-    void resolve_owner() {
-        if (!curve) return;
-        owner_qdb =
-            resolve_power_qdb(*curve, mcs, kPowerLevelBaseline, ceiling_qdb);
-    }
-
-    // §11.7 0x0A. false = REJECTED (no list, or index past its end). The
-    // calibrator's sweep bound is the CALLER's to move — it is not power.
-    bool set_tier(int t) {
-        if (t < 0 || static_cast<size_t>(t) >= presets_qdb.size()) return false;
-        tier = t;
-        ceiling_qdb = presets_qdb[static_cast<size_t>(t)];
-        resolve_owner();
-        apply();
-        return true;
-    }
-
-    std::string json() const {
-        return power_tier_json(tier, presets_qdb, ceiling_qdb, effective());
-    }
-};
-
-const char* vcmd_name_for(uint8_t id) {
-    switch (id) {
-        case vcmd_id::kArq: return "arq";
-        case vcmd_id::kSelector: return "selector";
-        case vcmd_id::kFpsLadder: return "fps_ladder";
-        case vcmd_id::kFpsSelect: return "fps_select";
-        case vcmd_id::kResolution: return "resolution";
-        case vcmd_id::kFraming: return "framing";
-        case vcmd_id::kMode: return "mode";  // §11.7 Pass 105
-        case vcmd_id::kCalibrate: return "calibrate";  // §10.6 Pass 120
-        case vcmd_id::kMtuTier: return "mtu_tier";  // §9.3a Pass 122
-        case vcmd_id::kTxPower: return "tx_power";  // §10.3 Pass 135
-    }
-    return "";
-}
-
-std::optional<uint8_t> mtu_tier_for_mode(const std::string& mode,
-                                         uint16_t supported) {
-    if (mode == "default") return mtu_tier::kDefault;
-    if (mode == "medium") return mtu_tier::kMedium;
-    if (mode == "high") return mtu_tier::kHigh;
-    if (mode == "auto") {
-        if (supported >= mtu_tier::kHighBudget) return mtu_tier::kHigh;
-        if (supported >= mtu_tier::kMediumBudget) return mtu_tier::kMedium;
-        return mtu_tier::kDefault;
-    }
-    return std::nullopt;
-}
+// vcmd_name_for + mtu_tier_for_mode moved to
+// node/include/wblink/node/vcmd.h (#109 Phase 2c).
 
 // bw_code moved to node/include/wblink/node/tx_core.h (#109 Phase 2a).
 
-bool channel_allowed(const std::vector<uint16_t>& allowlist, uint16_t chan) {
-    return std::find(allowlist.begin(), allowlist.end(), chan) !=
-           allowlist.end();
-}
+// channel_allowed moved to node/include/wblink/node/policy.h
+// (#109 Phase 2c).
 
-// §7.2: the pacer keys off END_OF_BLOCK frames in both directions.
-bool frame_is_eob(const uint8_t* f, size_t n) {
-    const Decoded dec = decode(f, n);
-    const DataView* v = std::get_if<DataView>(&dec);
-    return v != nullptr && (v->hdr.data_flags & data_flags::kEndOfBlock) != 0;
-}
+// frame_is_eob / frame_is_paced_eob / frame_is_live_rtp_data moved to
+// node/include/wblink/node/frame_kind.h (#109 Phase 2c).
 
-// §7.2 Pass 78 paced-stream semantics: only the RTP video stream's EOBs open
-// craft listen windows / re-anchor ground returns. A non-video datagram is a
-// one-datagram block whose EOB must not re-arm the gap (50 Hz audio EOBs
-// re-arming mid-flush is the measured rung-flapping failure).
-bool frame_is_paced_eob(const uint8_t* f, size_t n) {
-    const Decoded dec = decode(f, n);
-    const DataView* v = std::get_if<DataView>(&dec);
-    return v != nullptr &&
-           (v->hdr.data_flags & data_flags::kEndOfBlock) != 0 &&
-           v->hdr.stream_type == stream_type::kRtp;
-}
-
-bool frame_is_live_rtp_data(const uint8_t* f, size_t n) {
-    const Decoded dec = decode(f, n);
-    const DataView* v = std::get_if<DataView>(&dec);
-    return v != nullptr && v->hdr.stream_type == stream_type::kRtp &&
-           (v->hdr.data_flags & data_flags::kRetransmit) == 0;
-}
-
-// §2: random per-boot session nonce.
-uint32_t session_nonce() {
-    uint32_t nonce = 0;
-    if (FILE* f = std::fopen("/dev/urandom", "rb")) {
-        const size_t got = std::fread(&nonce, 1, sizeof(nonce), f);
-        std::fclose(f);
-        if (got == sizeof(nonce) && nonce != 0) {
-            return nonce;
-        }
-    }
-    return static_cast<uint32_t>(now_ms()) | 1u;  // degraded fallback
-}
-
-// §11.4a: per-boot 16-byte announced pairing token P (io/app entropy; the pure
-// core layer stays RNG-free and only verifies against a supplied key). Used as
-// the craft's CSA HMAC key AND advertised in ANNOUNCE (§3.12) when no operator
-// csa.psk is configured (announced mode).
-std::array<uint8_t, kAnnouncePskSize> announce_token() {
-    std::array<uint8_t, kAnnouncePskSize> t{};
-    if (FILE* f = std::fopen("/dev/urandom", "rb")) {
-        const size_t got = std::fread(t.data(), 1, t.size(), f);
-        std::fclose(f);
-        if (got == t.size()) return t;
-    }
-    // Degraded fallback: never key with all-zero. Mix the boot clock.
-    const uint64_t ms = now_ms();
-    for (size_t i = 0; i < t.size(); ++i) {
-        t[i] = static_cast<uint8_t>((ms >> ((i % 8) * 8)) ^ (i * 0x9du)) | 1u;
-    }
-    return t;
-}
+// session_nonce + announce_token moved to
+// node/include/wblink/node/entropy.h (#109 Phase 2c).
 
 // scheduler_policy moved to node/include/wblink/node/tx_core.h (#109 Phase 2a).
 
@@ -478,13 +236,8 @@ std::array<uint8_t, kAnnouncePskSize> announce_token() {
 
 // selector_policy moved to node/include/wblink/node/tx_core.h (#109 Phase 2a).
 
-QuietGapPolicy quietgap_policy(const Config& cfg) {
-    QuietGapPolicy p;
-    p.enabled = cfg.policy.ret.quiet_gap;
-    p.guard_us = cfg.policy.ret.guard_us;
-    p.window_us = cfg.policy.ret.return_window_us;
-    return p;
-}
+// quietgap_policy moved to node/include/wblink/node/policy.h
+// (#109 Phase 2c).
 
 // AimHist + aim_log_enabled moved to node/include/wblink/node/aim.h.
 
@@ -568,93 +321,11 @@ int load_all(const std::string& config_path, Loaded& out) {
 
 // InfoSelfState moved to node/include/wblink/node/stats_fill.h (#109 Phase 2a).
 
-// §15.5 GET /info — static identity. Hand-built (no json dep in app/); the
-// field values are numeric or house-controlled strings (no escaping needed).
-std::string build_info_json(const Loaded& l, uint32_t session,
-                            const char* role,
-                            const InfoSelfState* self = nullptr,
-                            const AirBackend* air = nullptr) {
-    std::string s = "{\"role\":\"";
-    s += role;
-    s += "\",\"node\":" + std::to_string(l.cfg.node.originator);
-    s += ",\"session\":" + std::to_string(session);
-    s += ",\"table_version\":" + std::to_string(l.tv);
-    s += ",\"streams\":[";
-    bool first = true;
-    for (const StreamCfg& st : l.cfg.streams) {
-        if (!first) s += ',';
-        first = false;
-        s += "{\"stream_id\":" + std::to_string(st.stream_id);
-        s += ",\"dir\":\"";
-        s += (st.dir == Dir::kIn ? "in" : "out");
-        s += "\",\"bind\":\"";
-        s += (st.bind.kind == BindKind::kFrameShm ? "frame-shm" : "udp");
-        s += "\"}";
-    }
-    s += "],\"adapters\":[";
-    first = true;
-    for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
-        const AdapterCfg& a = l.cfg.adapters[i];
-        if (!first) s += ',';
-        first = false;
-        // Live channel, not the boot config: a CSA switch, a craft-local
-        // retune (§15.5 Pass 113) or a scout sweep all move adapters without
-        // touching cfg. On the ground this is the ONLY channel in the object —
-        // there is no top-level `channel` outside the TX self-state — so a
-        // stale value here is the whole answer, not a detail.
-        const uint16_t chan =
-            (air != nullptr && i < air->chan_by_adapter.size())
-                ? air->chan_by_adapter[i]
-                : a.channel_mhz;
-        s += "{\"name\":\"" + a.name + "\",\"role\":\"";
-        s += (a.role == Role::kTx ? "tx" : "rx");
-        s += "\",\"channel\":" + std::to_string(chan);
-        // §15.5 (Pass 154): the per-unit EFUSE identity the §10.6 artifacts
-        // key on; null where the backend reports none (D3 posture visible).
-        const std::string mac =
-            air != nullptr ? air->adapter_mac(i) : std::string{};
-        s += ",\"mac\":";
-        s += mac.empty() ? "null" : "\"" + mac + "\"";
-        s += "}";
-    }
-    s += "]";
-    if (self != nullptr) {  // Pass 113 TX self state
-        s += ",\"channel\":" + std::to_string(self->channel_mhz);
-        s += ",\"psk_announced\":";
-        s += self->psk_announced ? "true" : "false";
-        s += ",\"claimed\":";
-        s += self->claimed_by ? "true" : "false";
-        s += ",\"claimed_by\":" + std::to_string(self->claimed_by.value_or(0));
-    }
-    s += ",\"control\":\"" + l.cfg.control.bind + "\"}";
-    return s;
-}
+// build_info_json moved to node/include/wblink/node/stats_fill.h
+// (#109 Phase 2c).
 
-// §15.5 GET /health — terse link summary from the freshest snapshot.
-std::string build_health_json(const StatsSnapshot& snap) {
-    int32_t rssi_best = 0;
-    bool have = false;
-    for (const AdapterStats& a : snap.adapters) {
-        if (!have || a.rssi_best > rssi_best) {
-            rssi_best = a.rssi_best;
-            have = true;
-        }
-    }
-    uint32_t loss_milli = 0;
-    uint64_t delivered = 0;
-    if (!snap.streams.empty()) {
-        loss_milli = snap.streams.front().loss_prediversity_milli;
-        delivered = snap.streams.front().delivered;
-    }
-    std::string s = "{\"state\":\"" + snap.link.state + "\"";
-    s += ",\"profile\":" + std::to_string(snap.link.profile);
-    s += ",\"mcs\":" + std::to_string(snap.link.mcs);
-    s += ",\"rssi_best\":" + std::to_string(have ? rssi_best : 0);
-    s += ",\"loss_milli\":" + std::to_string(loss_milli);
-    s += ",\"delivered\":" + std::to_string(delivered);
-    s += ",\"csa_state\":\"" + snap.link.csa_state + "\"}";
-    return s;
-}
+// build_health_json moved to node/include/wblink/node/stats_fill.h
+// (#109 Phase 2c).
 
 // ---- modes -------------------------------------------------------------------
 

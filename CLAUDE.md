@@ -160,7 +160,7 @@ scripts/gates.sh            # EVERY merge gate; what CI runs. --quick = dev + ct
 ```
 
 Run that rather than a remembered checklist. It covers the eight presets, the
-65-suite `ctest`, the B7 embed check, the install/`find_package` round trip and
+71-suite `ctest`, the B7 embed check, the install/`find_package` round trip and
 the `deploy/*.json` `--check`s, and it **fails on a diagnostic for our
 targets even when the build exits 0**. Toolchains the host lacks are SKIPPED
 loudly and counted separately — a skip is never a pass. Export
@@ -171,7 +171,7 @@ drift.
 The individual commands, when you want one of them:
 
 ```
-cmake --build --preset dev && ctest --preset dev   # 65 suites, ASan+UBSan
+cmake --build --preset dev && ctest --preset dev   # 71 suites, ASan+UBSan
 cmake --build --preset ssc338q                      # ARMv7 cross (SigmaStar target)
 ```
 
@@ -275,11 +275,16 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   `fprintf(stderr)` directly**, and the §15.3 line goes through
   `StatsEmitter`'s local sink, never `stdout` directly — both default to the
   old behaviour, and both exist so an embedding consumer is not deaf (#144).
-- `node/` — node behaviour above `io/` (#109 Phase 2a). Header-only so far:
+- `node/` — node behaviour above `io/` (#109 Phase 2a/2c). Header-only so far:
   `rx_core.h` (`RxCore` + `rx_policy()`), `discovery.h` (`DiscoveryCatalog`,
   `ScoutEngine`), `air_backend.h` (`AirBackend`, `PacketEventTrace`),
   `tx_core.h` (`TxCore` + the §15.2->core policy adapters), `stats_fill.h`
-  (`emit_stats` + `ArqTimingTracker`), `clock.h` (`now_ms`/`now_us`) and
+  (`emit_stats`, `ArqTimingTracker`, the §15.5 `/info` + `/health` payloads),
+  `uplink_power.h` (`UplinkPower` — the §10.3/§10.5/§10.7/§11.7 0x0A
+  precedence chain), `policy.h` (`csa_params`, `vcmd_params`,
+  `quietgap_policy`, `channel_allowed`), `vcmd.h` (§15.5 REST names ↔ §11.7
+  ids), `frame_kind.h` (§7.2 frame predicates), `entropy.h` (the two
+  /dev/urandom reads), `clock.h` (`now_ms`/`now_us`) and
   `aim.h` (§7.2 histograms). **`node/` owns no process** — no `exit`, no
   `fork`, no signal handling; those stay in `app/main.cpp`, and
   `tests/node_layering_test.py` fails the build if either rule breaks. **Layering rule:
@@ -288,8 +293,11 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   existed the only way to touch `RxCore` was `tests/app_test.cpp`
   `#include`-ing the whole of `app/main.cpp`, which is why several Pass
   165-167 defects could only be proven on hardware.
-- `app/main.cpp` — event loops (`tx`/`rx`/`loopback` modes). Still 8.2k
-  lines; Phase 2a is what turns it into a thin driver over `node/`.
+- `app/main.cpp` — event loops (`tx`/`rx`/`loopback` modes), 4.4k lines after
+  Phase 2a/2c (was 8.8k). What is left is the three loops themselves plus the
+  process-owning half — signals, `spawn_mode_applier`'s double fork, the
+  §9.10 wedge exit; lifting `run_rx` into `node/` is what turns the rest into
+  a thin driver.
 - `tests/` — one `_test.cpp` per unit, run via ctest.
 - `tools/` — bench analyzers: `gate2_rho.py` (cross-adapter loss correlation),
   `gate3_rtt.py` (NACK→RETRANSMIT latency), `rtp_feed.py` (synthetic RTP feeder).
