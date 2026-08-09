@@ -162,6 +162,14 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME node_layering_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/node_layering_test.py)
+    # Every wbtest.h suite must be able to FAIL. CHECK only counts; the exit
+    # code comes from wbtest_finish() alone, so a main() ending in `return 0`
+    # is a suite that runs every assertion and reports success regardless.
+    # Two files shipped that way (tx_node_c_test in review, mcs_probe_test for
+    # much longer) and nothing in the build could see either.
+    add_test(NAME test_verdict_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/test_verdict_test.py)
 else()
     # Registering nothing here leaves ctest GREEN on a host without python3
     # while five suites silently did not run — among them config_registry_test,
@@ -180,7 +188,7 @@ else()
     # its negative control used `ctest -R <name>`, which bypasses the preset
     # filter and therefore "passed".
     message(WARNING
-        "Python3 not found: 5 suites cannot run, including config_registry_test "
+        "Python3 not found: 6 suites cannot run, including config_registry_test "
         "(the registry-vs-loader drift guard). ctest will FAIL rather than "
         "silently pass. Install python3 to run the real gate.")
     add_test(NAME python_tests_unavailable_test
