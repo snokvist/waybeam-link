@@ -568,3 +568,57 @@ Two things this does NOT claim. It is not a bug in the lift — the references
 were latent, never live, and no shipped build was affected. And it is not
 proof that no other member of `wblink_node` carries the same latency: the check
 is specific to the TX sources, and the general property still has no gate.
+
+## 2026-08-09 — first coordinated RADIO decode through the in-process node; and the loss is not power
+
+**The decode.** waybeam-hub `ground_x86` with `WBLINK=1`, `pixelpilot.frame_shm.source=wblink`,
+running `wblink_rx_run()` in-process against a real craft (`.232`, 8812EU) over
+RF at 5805 MHz. Ground was a **single 8812AU on bus 5-1 acting as the TX/RX
+combo** (operator rule 2026-08-09: do not pair a second adapter for the ground
+role; `RadioAir`'s `role:"tx"` adapter is duplex and receives too).
+
+Sustained **27829 frames, 1920x1080 @ ~60 fps, ~10.2 Mbps**, with
+`shm_gate_bypasses 0` (the gate opened on a real IDR, not a bypass),
+`shm_reattach_count 0`, no pipeline rebuild, and no GStreamer error. Operator
+confirmed the picture on screen. This is the first end-to-end proof over a
+radio rather than the localhost `udp` air backend.
+
+**The loss, and what it is NOT.** The link sat at profile 2 with
+`transition_reason LOSS_PERSISTENT` and a ground-side `loss_ewma_milli` in the
+20-60 range. The obvious suspect at bench range was receiver overload: the
+ground read **RSSI -6..-8 dBm** while every rung of the craft's calibration
+artifact was measured with `last_clean_rssi` between **-22 and -35** — i.e. we
+were operating 14-27 dB hotter than anything the curve covers, which is the
+regime where PA compression normally shows up.
+
+It is not that. An ordered sweep (-72/-48/-24/0 qdb, one 18 s dwell each)
+suggested -48 was best (25 vs 49 milli), but an **alternating A/B** of 0 vs -48,
+three passes, 20 s dwell, reversed it:
+
+| pass | 0 qdb | -48 qdb |
+|---|---|---|
+| 1 | 6 | 44 |
+| 2 | 22 | 50 |
+| 3 | 63 | 62 |
+
+Cutting 14 dB never helped. RSSI -6 vs -20 against noise -38 vs -52 leaves
+**SNR ~32 dB either way**, so the link is not SNR-limited and power is the wrong
+knob. The single ordered sweep was noise; only the alternation showed it.
+
+**What the numbers actually say.** On the craft:
+`lockout_latched true`, `lockout_profile 3`, `lockout_strikes 4`,
+`lockout_active_mask 8` — **profile 3 was tried, failed four times and is
+latched out**, which is what pins `lockout_ceiling_profile` to 2. Separately
+`promote_blocked_saturated 18339`. The calibration itself is clean:
+`calib_stale false`, fingerprint 53, and all eight rungs report
+`placement_loss_milli 0`. So "the calibration is bad" is not supported —
+a runtime lockout plus saturation is.
+
+**Unexplained, and the reason this is a finding and not a ruling.** Loss rose
+monotonically across the ~8-minute A/B *regardless of the setting* — 6 -> 22 ->
+63 at 0 qdb and 44 -> 50 -> 62 at -48. Some time-dependent factor dominates both
+arms and no measurement here isolates it. Ruled out on the spot: the ground
+host's own WiFi (`wlp2s0` is on 5180 MHz, 625 MHz away). Not yet excluded:
+channel occupancy at 5805, craft thermal, venc rate behaviour under a held
+profile. **Chase this before trusting any loss number from this bench**, and
+note that an ordered sweep will lie about it — alternate.

@@ -1,5 +1,5 @@
 {
-  "_comment": "Mirrors /etc/waybeam-link/ground.json on the ground at 192.168.2.242, read from the node 2026-08-08. Devourer (air.kind radio). The 8812EU uplink is temporarily disconnected, so the 8812AU on bus 8-1 is the uplink and the 8812CU on 5-1 is RX diversity. The cache.repair stanza this file used to carry pointed at a .247 cache the running node does not configure.",
+  "_comment": "Mirrors /etc/waybeam-link/ground.json on the ground at 192.168.2.242, read from the node 2026-08-09. SINGLE 8812AU on bus 5-1 as the TX/RX combo (operator rule) - RadioAir's role:'tx' adapter is duplex and also receives, so no second adapter is paired for the ground role; the 8812CU diversity entry this file used to carry is gone. Bus was 8-1 in the previous revision and nothing is there now: USB bus paths shuffle on re-plug, so the path is measured (lsusb -t), never carried over. Devourer (air.kind radio); whole-frame SHM egress.",
   "node": {
     "originator": 9,
     "role": "rx",
@@ -21,7 +21,7 @@
         92,
         108
       ],
-      "bus": "8-1",
+      "bus": "5-1",
       "calib_id": "ground-au-1",
       "power_offset_presets_qdb": [
         -72,
@@ -31,13 +31,6 @@
         24
       ],
       "power_offset_max_qdb": 24
-    },
-    {
-      "name": "cu-diversity",
-      "role": "rx",
-      "channel": 5805,
-      "bw": 20,
-      "bus": "5-1"
     }
   ],
   "streams": [
