@@ -252,25 +252,25 @@ struct InfoSelfState {
     std::optional<uint16_t> claimed_by;
 };
 
-void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
-                uint64_t t0, const TxCore* tx, const RxCore* rx,
-                const AirBackend* air = nullptr,
-                uint64_t tsf_fallbacks = 0,
-                const char* csa_state = nullptr,
-                uint32_t ret_window_hits = 0,
-                uint32_t ret_window_misses = 0,
-                bool tx_wedged = false,
-                const std::vector<std::pair<uint8_t, FrameReassemblerStats>>*
-                    frame_stats = nullptr,
-                const std::vector<std::pair<uint8_t, FrameShmRing::Stats>>*
-                    shm_stats = nullptr,
-                const CacheRepairStatsOut* cache_repair = nullptr,
-                const CacheStoreStatsOut* cache_store = nullptr,
-                StatsSnapshot* out_snap = nullptr,
-                const ArqTimingStats* arq_timing = nullptr,
-                const VcmdStatsFill* vcmd = nullptr,
-                uint16_t channel_mhz = 0,
-                const UplinkStatsFill* uplink = nullptr) {
+inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
+                       uint64_t t0, const TxCore* tx, const RxCore* rx,
+                       const AirBackend* air = nullptr,
+                       uint64_t tsf_fallbacks = 0,
+                       const char* csa_state = nullptr,
+                       uint32_t ret_window_hits = 0,
+                       uint32_t ret_window_misses = 0,
+                       bool tx_wedged = false,
+                       const std::vector<std::pair<uint8_t, FrameReassemblerStats>>*
+                           frame_stats = nullptr,
+                       const std::vector<std::pair<uint8_t, FrameShmRing::Stats>>*
+                           shm_stats = nullptr,
+                       const CacheRepairStatsOut* cache_repair = nullptr,
+                       const CacheStoreStatsOut* cache_store = nullptr,
+                       StatsSnapshot* out_snap = nullptr,
+                       const ArqTimingStats* arq_timing = nullptr,
+                       const VcmdStatsFill* vcmd = nullptr,
+                       uint16_t channel_mhz = 0,
+                       const UplinkStatsFill* uplink = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
