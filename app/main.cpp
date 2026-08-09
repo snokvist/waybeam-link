@@ -2998,11 +2998,18 @@ struct TxCore {
     // forbid.
     std::optional<std::pair<int32_t, int32_t>> offset_window() const {
         if (!backend_relative_ || power_targets_.empty()) return std::nullopt;
+        // The top is `ceiling`, not `offset_max_qdb`: they are the same at
+        // boot, and a §11.7 0x0A tier lowers the former (Pass 166). Reading
+        // the raw bound here would leave the craft half of "a tier bounds a
+        // future sweep" (§10.3) unimplemented — the ground half folds the
+        // tier into ucal_params.seek.max_qdb and always has, so the two
+        // would have disagreed on a relative node the moment tiers came back.
         int32_t lo = power_targets_.front().offset_qdb;
-        int32_t hi = power_targets_.front().offset_max_qdb;
+        int32_t hi = power_targets_.front().ceiling.value_or(
+            power_targets_.front().offset_max_qdb);
         for (const PowerTarget& t : power_targets_) {
             lo = std::min(lo, t.offset_qdb);
-            hi = std::min(hi, t.offset_max_qdb);
+            hi = std::min(hi, t.ceiling.value_or(t.offset_max_qdb));
         }
         // A config whose bound sits at or under its own safe offset leaves no
         // band to sweep. Refusing here keeps §11.7 CALIBRATE honest (REJECTED)
