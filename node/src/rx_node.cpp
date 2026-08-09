@@ -97,7 +97,8 @@
 namespace wblink {
 namespace node {
 
-int run_rx(const Loaded& l, const std::atomic<int>& stop) {
+int run_rx(const Loaded& l, const std::atomic<int>& stop,
+           const FrameSink& frame_out) {
     auto air = AirBackend::create(l.cfg);
     if (!air) {
         std::fprintf(stderr, "air error: %s\n", air.error.c_str());
@@ -161,7 +162,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
     }
     // The policy-level sweep bound, kept so a runtime tier can rebuild
     // ucal_params.seek.max_qdb from the same two inputs the startup fold used.
-    const int32_t cp_max_qdb =
+    // Read only by the §15.5 tier handler, which is compiled out with the
+    // control server; the value is still the right one to keep here.
+    [[maybe_unused]] const int32_t cp_max_qdb =
         static_cast<int32_t>(l.cfg.policy.calibration.max_qdb);
     if (uplink_adapter != nullptr && !uplink_adapter->power_map.empty()) {
         auto curve = load_power_curve(uplink_adapter->power_map,
@@ -524,22 +527,43 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
     // §15.4 frame-shm egress: one producer ring + a §6.3a reassembler per
     // frame-shm out-stream. deliver_now carries the loop's per-iteration clock
     // into the deliver lambda (the reassembler needs now_ms for its deadlines).
-    struct ShmOut {
+    // §15.2 `bind.kind: "frame-shm"` is the WHOLE-FRAME egress kind: blocks
+    // are reassembled into a frame and the frame is handed on. Where it is
+    // handed is what B10 (#109) made a choice rather than a constant — a
+    // caller-supplied sink takes those streams instead of a ring, which is
+    // what lets a node run on a build with no frame-SHM at all. UDP-bound
+    // out-streams are untouched by the sink: they are datagram egress, a
+    // different thing, and hijacking them would surprise a consumer that
+    // wanted only its video.
+    struct FrameOut {
         uint8_t stream_id;
-        std::unique_ptr<FrameShmRing> ring;
+        // Already bound to this stream, so the two destinations look the same
+        // at the call site — the public FrameSink carries a stream_id the
+        // caller needs and this one does not.
+        std::function<void(const uint8_t*, size_t)> sink;
         std::unique_ptr<FrameReassembler> reasm;
         std::optional<StreamKey> source;
+        // §15.3 frame counters for a sink-backed stream. The ring keeps these
+        // for itself (FrameShmRing::note_frame), and stats.cpp emits the
+        // fields UNCONDITIONALLY — so without a local copy a live callback
+        // egress reports frame_count 0 and frame_interval_us 0, which reads as
+        // the stall it is not. Same shape and same units as the ring's, so a
+        // consumer cannot tell which egress produced them.
+        bool count_locally = false;
+        FrameShmRing::Stats counters;
+        uint64_t last_frame_us = 0;
+        uint64_t previous_interval_us = 0;
+        uint64_t jitter_q4_us = 0;
+#if WBLINK_FRAME_SHM
+        // Owned only so the ring outlives the sink that writes it, and read
+        // for the §15.3 counters, which have no meaning for a callback.
+        std::unique_ptr<FrameShmRing> ring;
+#endif
     };
-    std::vector<ShmOut> shm_outs;
+    std::vector<FrameOut> frame_outs;
     for (const StreamCfg& s : l.cfg.streams) {
         if (s.dir != Dir::kOut || s.bind.kind != BindKind::kFrameShm) {
             continue;
-        }
-        auto r = FrameShmRing::create(s.bind.name);
-        if (!r) {
-            std::fprintf(stderr, "frame-shm egress '%s': %s\n",
-                         s.bind.name.c_str(), r.error.c_str());
-            return 1;
         }
         FrameReassemblerConfig frc;
         // Map the drop deadline from the floor rung's I-frame budget when a
@@ -552,11 +576,46 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
                 }
             }
         }
-        std::fprintf(stderr, "rx: frame-shm egress '%s' created\n",
-                     s.bind.name.c_str());
-        shm_outs.push_back(ShmOut{s.stream_id, std::move(*r.value),
-                                  std::make_unique<FrameReassembler>(frc),
-                                  std::nullopt});
+        FrameOut fo;
+        fo.stream_id = s.stream_id;
+        fo.reasm = std::make_unique<FrameReassembler>(frc);
+        if (frame_out) {
+            const uint8_t sid = s.stream_id;
+            fo.sink = [&frame_out, sid](const uint8_t* f, size_t len) {
+                frame_out(sid, f, len);
+            };
+            fo.count_locally = true;
+            std::fprintf(stderr, "rx: frame egress stream %u -> caller sink\n",
+                         s.stream_id);
+        } else {
+#if WBLINK_FRAME_SHM
+            auto r = FrameShmRing::create(s.bind.name);
+            if (!r) {
+                std::fprintf(stderr, "frame-shm egress '%s': %s\n",
+                             s.bind.name.c_str(), r.error.c_str());
+                return 1;
+            }
+            fo.ring = std::move(*r.value);
+            // The pointee address survives the vector reallocating under
+            // push_back; the unique_ptr moves, the ring does not.
+            FrameShmRing* ring = fo.ring.get();
+            fo.sink = [ring](const uint8_t* f, size_t len) {
+                ring->write_frame(f, len);
+            };
+            std::fprintf(stderr, "rx: frame-shm egress '%s' created\n",
+                         s.bind.name.c_str());
+#else
+            // Fail closed. A node that silently dropped its video because the
+            // build lacked a subsystem its config asks for would look like a
+            // link fault, and be debugged as one.
+            std::fprintf(stderr,
+                         "frame-shm egress '%s' configured, but this build has "
+                         "WBLINK_FRAME_SHM=OFF and no frame sink was supplied\n",
+                         s.bind.name.c_str());
+            return 1;
+#endif
+        }
+        frame_outs.push_back(std::move(fo));
     }
     uint64_t deliver_now = now_ms();
 
@@ -565,7 +624,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
     std::unique_ptr<CacheUdp> cache_repair_sock;
     std::map<uint16_t, CacheEndpoint> cache_endpoints;  // originator -> ep
     FrameReassembler* cache_reasm = nullptr;
-    FrameShmRing* cache_ring = nullptr;
+    FrameOut* cache_out = nullptr;
     if (l.cfg.cache.repair.enabled) {
         const CacheRepairCfg& cr = l.cfg.cache.repair;
         for (const CacheEndpointCfg& e : cr.caches) {
@@ -603,10 +662,10 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
         cc.health_floor_permille = cr.health_floor_permille;
         cc.status_timeout_ms = cr.status_timeout_ms;
         cache_ctl = std::make_unique<CacheController>(cc);
-        for (ShmOut& so : shm_outs) {  // config validated the stream exists
-            if (so.stream_id == cr.stream_id) {
-                cache_reasm = so.reasm.get();
-                cache_ring = so.ring.get();
+        for (FrameOut& fo : frame_outs) {  // config validated the stream exists
+            if (fo.stream_id == cr.stream_id) {
+                cache_reasm = fo.reasm.get();
+                cache_out = &fo;
             }
         }
         std::fprintf(stderr, "rx: cache repair on stream %u (%zu caches)\n",
@@ -682,23 +741,56 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
     // §15.4 egress write + the §3.9 Pass 106 early exit: an IRAP reaching the
     // ring means the consumer has a start point, so the latch-recovery schedule
     // for that stream can stand down.
-    const auto write_egress = [&](FrameShmRing* ring, uint8_t stream_id,
-                                  const uint8_t* f, size_t len) {
-        ring->write_frame(f, len);
+    const auto write_egress = [&](FrameOut& fo, const uint8_t* f, size_t len) {
+        fo.sink(f, len);
+        if (fo.count_locally) {
+            // Mirrors FrameShmRing::note_frame, including the fixed-point
+            // J += (variation - J)/16 jitter, so the §15.3 numbers mean the
+            // same thing on both egress paths.
+            const uint32_t size = static_cast<uint32_t>(len);
+            FrameShmRing::Stats& c = fo.counters;
+            ++c.writes;
+            c.frame_bytes += len;
+            c.frame_size_last = size;
+            if (c.frame_size_min == 0 || size < c.frame_size_min) {
+                c.frame_size_min = size;
+            }
+            if (size > c.frame_size_max) c.frame_size_max = size;
+            const uint64_t t = now_us();
+            if (fo.last_frame_us != 0) {
+                const uint64_t interval = t - fo.last_frame_us;
+                c.frame_interval_us = interval;
+                if (fo.previous_interval_us != 0) {
+                    const uint64_t variation =
+                        interval > fo.previous_interval_us
+                            ? interval - fo.previous_interval_us
+                            : fo.previous_interval_us - interval;
+                    const uint64_t current = (fo.jitter_q4_us + 8u) >> 4u;
+                    if (variation >= current) {
+                        fo.jitter_q4_us += variation - current;
+                    } else {
+                        fo.jitter_q4_us -= current - variation;
+                    }
+                    c.frame_jitter_us = (fo.jitter_q4_us + 8u) >> 4u;
+                }
+                fo.previous_interval_us = interval;
+            }
+            fo.last_frame_us = t;
+        }
         VencFrameMeta meta;
         if (read_frame_meta(f, len, &meta) &&
             (meta.flags & kFrameFlagIdr) != 0) {
-            rx.note_egress_irap(stream_id);
+            rx.note_egress_irap(fo.stream_id);
         }
     };
     const RxEngine::Deliver deliver = [&](uint8_t sid, uint32_t block_id,
                                           uint8_t flags, const uint8_t* d,
                                           size_t n) {
-        for (ShmOut& so : shm_outs) {
-            if (so.stream_id == sid) {
-                so.reasm->push(block_id, flags, d, n, deliver_now,
+        for (FrameOut& fo : frame_outs) {
+            if (fo.stream_id == sid) {
+                fo.reasm->push(block_id, flags, d, n, deliver_now,
                                [&](const uint8_t* f, size_t len) {
-                                   write_egress(so.ring.get(), so.stream_id, f, len);
+                                   write_egress(fo, f, len);
                                });
                 return;
             }
@@ -711,18 +803,18 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
         [&](const StreamKey& source, uint8_t sid, uint32_t block_id,
             uint8_t flags, const uint8_t* d,
             size_t n) -> RxEngine::EarlyDeliverResult {
-        for (ShmOut& so : shm_outs) {
-            if (so.stream_id != sid) {
+        for (FrameOut& fo : frame_outs) {
+            if (fo.stream_id != sid) {
                 continue;
             }
-            if (!so.source || !(*so.source == source)) {
-                so.reasm->reset_stream();
-                so.source = source;
+            if (!fo.source || !(*fo.source == source)) {
+                fo.reasm->reset_stream();
+                fo.source = source;
             }
-            const bool complete = so.reasm->push(
+            const bool complete = fo.reasm->push(
                 block_id, flags, d, n, deliver_now,
                 [&](const uint8_t* f, size_t len) {
-                    write_egress(so.ring.get(), so.stream_id, f, len);
+                    write_egress(fo, f, len);
                 });
             return RxEngine::EarlyDeliverResult{/*handled=*/true, complete};
         }
@@ -730,9 +822,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
     };
     const auto apply_selection = [&](const LinkSelection& selected) {
         rx.select_originator(selected.originator);
-        for (ShmOut& so : shm_outs) {
-            so.reasm->reset_stream();
-            so.source.reset();
+        for (FrameOut& fo : frame_outs) {
+            fo.reasm->reset_stream();
+            fo.source.reset();
         }
         // §3.16 scopes its accept to the exact (originator, session) of the
         // stream we consume, and the session is LEARNED from that craft's
@@ -906,8 +998,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
                 [&](const uint8_t* f, size_t len) {
                     // §14.3 repair lands in the same egress ring, so it can
                     // also satisfy the §3.9 Pass 106 early exit.
-                    write_egress(cache_ring, l.cfg.cache.repair.stream_id, f,
-                                 len);
+                    write_egress(*cache_out, f, len);
                 },
                 /*air_path=*/false);
             if (emitted) {
@@ -1043,6 +1134,16 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
     // §15.5 REST control plane. RX/ground node owns the CSA trigger (replaces
     // the removed stdin trigger); profile/fec are TX-only knobs → null → 409.
     StatsSnapshot last_snap;
+#if !WBLINK_CONTROL_SERVER
+    // Fail closed, for the same reason the frame-shm branch does: a node whose
+    // control plane silently was not there is debugged as a network fault.
+    if (!l.cfg.control.bind.empty()) {
+        std::fprintf(stderr,
+                     "control: '%s' configured, but this build has "
+                     "WBLINK_CONTROL_SERVER=OFF\n", l.cfg.control.bind.c_str());
+        return 1;
+    }
+#else
     std::unique_ptr<ControlServer> control;
     // §11.7 issuer, held as a NAMED local rather than reached through `h`,
     // because ControlHandlers is std::move()d into the server once every
@@ -1825,9 +1926,15 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
         }
         h.reset_stats = [&] {
             rx.reset_stats();
-            for (ShmOut& so : shm_outs) {
-                so.reasm->reset_stats();
-                so.ring->reset_stats();
+            for (FrameOut& fo : frame_outs) {
+                fo.reasm->reset_stats();
+                fo.counters = FrameShmRing::Stats{};
+                fo.last_frame_us = 0;
+                fo.previous_interval_us = 0;
+                fo.jitter_q4_us = 0;
+#if WBLINK_FRAME_SHM
+                if (fo.ring) fo.ring->reset_stats();
+#endif
             }
             if (cache_ctl) {
                 cache_ctl->reset_stats();
@@ -1844,6 +1951,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop) {
         std::fprintf(stderr, "control: REST on %s (rx)\n",
                      l.cfg.control.bind.c_str());
     }
+#endif  // WBLINK_CONTROL_SERVER
     std::fprintf(stderr, "rx: session=%u, %zu adapters, running%s\n",
                  session, air.value->rx_adapters(),
                  qg.enabled() ? " (quiet-gap returns)" : "");
@@ -2358,9 +2466,9 @@ art.craft_adapter_fingerprint = craft_tally_fp;
         air.value->heartbeat(l.cfg.node.originator, session, now);
         // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
         // so a stalled block never wedges frame-shm egress.
-        for (ShmOut& so : shm_outs) {
-            so.reasm->tick(now, [&](const uint8_t* f, size_t len) {
-                write_egress(so.ring.get(), so.stream_id, f, len);
+        for (FrameOut& fo : frame_outs) {
+            fo.reasm->tick(now, [&](const uint8_t* f, size_t len) {
+                write_egress(fo, f, len);
             });
         }
         // §3.9 Pass 106: bootstrap a decoder behind a freshly latched stream.
@@ -2489,9 +2597,9 @@ art.craft_adapter_fingerprint = craft_tally_fp;
             }
         }
         std::vector<std::pair<uint8_t, JsccRepairFeedbackState>> feedback;
-        feedback.reserve(shm_outs.size());
-        for (const ShmOut& so : shm_outs) {
-            feedback.emplace_back(so.stream_id, so.reasm->jscc_feedback());
+        feedback.reserve(frame_outs.size());
+        for (const FrameOut& fo : frame_outs) {
+            feedback.emplace_back(fo.stream_id, fo.reasm->jscc_feedback());
         }
         rx.emit_jscc_feedback(now, feedback, inject_nack);
         // §11 campaign engine. The trigger is now POST /api/v1/csa (§15.5);
@@ -2682,18 +2790,32 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                           "resumed\n");
             }
         }
+#if WBLINK_CONTROL_SERVER
         if (control) {
             control->service(now);
         }
+#endif
         if (stats_period != 0 && now >= next_stats) {
             // §6.3a: fold the per-out-stream reassembler counters into stats.
             std::vector<std::pair<uint8_t, FrameReassemblerStats>> frame_stats;
             std::vector<std::pair<uint8_t, FrameShmRing::Stats>> shm_stats;
-            frame_stats.reserve(shm_outs.size());
-            shm_stats.reserve(shm_outs.size());
-            for (const ShmOut& so : shm_outs) {
-                frame_stats.emplace_back(so.stream_id, so.reasm->stats());
-                shm_stats.emplace_back(so.stream_id, so.ring->stats());
+            frame_stats.reserve(frame_outs.size());
+            shm_stats.reserve(frame_outs.size());
+            for (const FrameOut& fo : frame_outs) {
+                frame_stats.emplace_back(fo.stream_id, fo.reasm->stats());
+#if WBLINK_FRAME_SHM
+                if (fo.ring) {
+                    shm_stats.emplace_back(fo.stream_id, fo.ring->stats());
+                    continue;
+                }
+#endif
+                // A sink-backed stream reports the same fields from the
+                // counters write_egress keeps; the ring-only ones (reads,
+                // ring_full, the producer-health block) stay zero because
+                // there is no ring to observe, not because nothing happened.
+                if (fo.count_locally) {
+                    shm_stats.emplace_back(fo.stream_id, fo.counters);
+                }
             }
             // §15.3: cache blocks are emitted only when the role is enabled.
             CacheRepairStatsOut crs;
@@ -2746,9 +2868,11 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                        cache_ctl ? &crs : nullptr,
                        cache_store ? &css : nullptr, &last_snap, &timing,
                        &vfill, operating_chan, &ufill);
+#if WBLINK_CONTROL_SERVER
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
+#endif
             next_stats = now + stats_period;
         }
     }
