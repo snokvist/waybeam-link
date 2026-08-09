@@ -50,6 +50,20 @@ N = "node/include/wblink/node/"
 BASES = {
     "2c step 1 — run_rx's free-function dependencies": "109a704^",
     "2c step 2 — the RX run loop": "109a704",
+    "Phase 3 prep — Loaded's loader": "7c25796",
+}
+
+# A step stops being checkable once its DESTINATION legitimately changes — the
+# check compares moved text against a base, and later edits to the moved code
+# are not regressions. Recording where each one last passed keeps the evidence
+# without turning normal work into a red gate. Verify a historical step by
+# checking out the commit named here and running the tool there.
+#
+# `run_rx` diverged when B10 (#160) added the FrameSink parameter, which is
+# exactly the kind of edit this tool must NOT object to.
+VERIFIED_AT = {
+    "2c step 2 — the RX run loop": "7470417 (PR #159), before B10 changed the "
+                                   "signature",
 }
 
 STEPS = {
@@ -73,6 +87,9 @@ STEPS = {
     ],
     "2c step 2 — the RX run loop": [
         ("run_rx", 1310, 3970, "node/src/rx_node.cpp"),
+    ],
+    "Phase 3 prep — Loaded's loader": [
+        ("load_all", 276, 323, "node/include/wblink/node/load.h"),
     ],
 }
 
@@ -112,6 +129,8 @@ EDITS = [
     ("int run_rx(const Loaded& l) {",
      "int run_rx(const Loaded& l, const std::atomic<int>& stop) {"),
     ("    while (g_stop == 0) {", "    while (stop == 0) {"),
+    # Phase 3 prep: same header storage class as step 1's moves.
+    ("int load_all(", "inline int load_all("),
 ]
 
 
@@ -122,6 +141,11 @@ def main():
     checked = fails = 0
     for step, blocks in STEPS.items():
         if want and want not in step:
+            continue
+        if step in VERIFIED_AT and not override:
+            print(f"{step}: historical — passed at {VERIFIED_AT[step]}; "
+                  f"the destination has changed since, so it is no longer "
+                  f"re-checkable here")
             continue
         base = override or BASES[step]
         try:
