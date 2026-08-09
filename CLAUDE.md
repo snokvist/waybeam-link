@@ -276,8 +276,10 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   `StatsEmitter`'s local sink, never `stdout` directly — both default to the
   old behaviour, and both exist so an embedding consumer is not deaf (#144).
 - `node/` — node behaviour above `io/` (#109 Phase 2a). Header-only so far:
-  `rx_core.h` (`RxCore` + the `rx_policy()` adapter) and `discovery.h`
-  (`DiscoveryCatalog`, `ScoutEngine`). **Layering rule:
+  `rx_core.h` (`RxCore` + `rx_policy()`), `discovery.h` (`DiscoveryCatalog`,
+  `ScoutEngine`), `air_backend.h` (`AirBackend`, `PacketEventTrace`),
+  `tx_core.h` (`TxCore` + the §15.2->core policy adapters), `clock.h`
+  (`now_ms`/`now_us`) and `aim.h` (§7.2 histograms). **Layering rule:
   `node/` may use `core/` and `io/`; neither may use `node/`.** Anything
   moved here becomes reachable from a real unit test — before the layer
   existed the only way to touch `RxCore` was `tests/app_test.cpp`
