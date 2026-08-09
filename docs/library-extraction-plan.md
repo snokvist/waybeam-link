@@ -1210,9 +1210,23 @@ filter to hear all net_ids (a sweep that keeps the narrow filter finds only
 its own fleet and calls the band empty), and that `stop()` restores while
 `abandon()` deliberately does not.
 
-**Still ahead in 2a:** `AirBackend` (524 lines, and it takes
-`PacketEventTrace` with it — the one target with an app-layer dependency),
-`TxCore` (1812) and the stats emitter, then B9 — which binds at the end, when the
+**Third move — the first one that was not clean.** `AirBackend` (524 lines)
+carries `PacketEventTrace` (122) with it, so the two moved together rather
+than leaving a reference across the layer boundary. Pulling them out then
+forced four more pieces over, and each is a small argument for the layer:
+`packet_type_name` and `mcs_trace_enabled` (their only callers moved),
+`now_ms`/`now_us` into `clock.h`, and the §7.2 `AimHist` pair into `aim.h`.
+
+The clock and histogram moves are the ones worth reading. Both were
+file-static in `main.cpp`, which is identical to `inline` **in one translation
+unit and not otherwise** — a per-TU copy would mean `AirBackend` accumulating
+into one histogram while `run_rx` dumps another. They are `inline` variables
+now. Nothing about that was visible while the code had exactly one consumer;
+the move is what made the distinction real, which is the general shape of what
+this phase surfaces.
+
+**Still ahead in 2a:** `TxCore` (1812 lines — the one genuinely entangled with
+`run_rx`) and the stats emitter, then B9 — which binds at the end, when the
 layer owns enough to make "what does a library do instead of `exit()`" a
 question with a concrete answer.
 
