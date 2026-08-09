@@ -231,18 +231,24 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (a.contains("max_power_qdb")) {
                 ac.max_power_qdb = a.at("max_power_qdb").get<int32_t>();
-                // §10.3 (Pass 150): no longer a ceiling; its absolute-
-                // REFERENCE role went with kernel-monitor (Pass 164), so the
-                // key is inert. The range check stays: the pre-150 "disable
-                // the ceiling" idiom of a huge value (the sample configs
-                // shipped 2000 = 500 dBm) must not read as authored intent.
+                // §10.3: its absolute-REFERENCE role went with
+                // kernel-monitor (Pass 164), but it is NOT inert — on an
+                // absolute backend it is still the §10.3 ceiling (clamps
+                // power_presets_qdb here, feeds §15.3/§15.5, clamps a §10.5
+                // latch, bounds a §10.7 sweep). On a relative one those roles
+                // are the offset keys' since Pass 166/167 and its liveness is
+                // an open question, deliberately not settled. The range check
+                // stays either way: the pre-150 "disable the ceiling" idiom of
+                // a huge value (the sample configs shipped 2000 = 500 dBm)
+                // must not read as authored intent.
                 if (*ac.max_power_qdb < -40 || *ac.max_power_qdb > 120) {
                     return Result<Config>::fail(
                         "adapter " + ac.name + ": max_power_qdb " +
                         std::to_string(*ac.max_power_qdb) +
-                        " out of range -40..120 qdb — since Pass 150 this is "
-                        "not a ceiling, and since Pass 164 it has no consumer "
-                        "at all (§10.3/§10.5)");
+                        " out of range -40..120 qdb — it is the \u00a710.3 "
+                        "ceiling on an absolute backend; on a relative one "
+                        "use power_offset_max_qdb "
+                        "(\u00a710.3/\u00a710.5)");
                 }
             }
             // §10.5 (Pass 150): relative offset + its bound. Parsed for every

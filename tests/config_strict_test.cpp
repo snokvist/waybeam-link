@@ -280,13 +280,17 @@ int main() {
     }
     // REGRESSION PIN (pre-merge review, Pass 164), NARROWED by Pass 166.
     //
-    // max_power_qdb was briefly declared inert on radio and is NOT: §15.3
-    // tx_power_ceiling_qdb, §15.5 GET /api/v1/tx/power_tier, the ground
-    // UplinkPower::hw_qdb() override clamp that reaches the actuator, and the
-    // load-time clamp of the presets all read it, and BOTH flying configs set
-    // it. A predicate there tells the operator to delete a key that clamps TX
-    // power. It stays unpredicated — see the DO NOT PREDICATE block in
-    // io/src/config_registry.cpp.
+    // max_power_qdb was briefly declared inert on radio. On an ABSOLUTE
+    // backend it is plainly not: §15.3 tx_power_ceiling_qdb, §15.5 GET
+    // /api/v1/tx/power_tier, the ground UplinkPower::hw_qdb() override clamp
+    // that reaches the actuator, and the load-time clamp of the presets all
+    // read it there. Since Pass 166/167 those four roles belong to the offset
+    // keys on a relative backend, so on radio the honest statement is
+    // "possibly inert, not proven" — and the pin below still asserts NOT
+    // inert, deliberately, because a false "this key is dead" on a power key
+    // is the worse direction and the enumeration that would settle it has not
+    // been redone. See the DO NOT PREDICATE block in
+    // io/src/config_registry.cpp, which carries the same reasoning.
     //
     // power_presets_qdb IS predicated as of Pass 166, and on `air.kind`
     // alone: a relative node's tier reads power_offset_presets_qdb instead,

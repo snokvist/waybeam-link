@@ -4727,12 +4727,26 @@ key on a relative node is legal and means "no tier is selectable here" —
 the actuation path.
 
 `max_power_qdb` is **no longer a TX ceiling** (§10.3 amendment) and is not the
-§10.5 reference either — that role went with kernel-monitor (Pass 164). It
-nevertheless **remains live on every backend** as the §10.3 ceiling: it clamps
+§10.5 reference either — that role went with kernel-monitor (Pass 164). On an
+**absolute** backend it remains the §10.3 ceiling: it clamps
 `power_presets_qdb` at load, it is reported as §15.3 `tx_power_ceiling_qdb`, it
-is the one clamp on a §10.5 override latch, and it bounds a §10.7 sweep. So is
+is the one clamp on a §10.5 override latch, and it bounds a §10.7 sweep.
+
+**On a relative backend all four of those roles moved to the offset keys
+(Pass 166/167)**, and the ceiling a node reports and enforces is
+`power_offset_max_qdb`, lowered by a §11.7 `0x0A` tier. **§15.3
+`tx_power_ceiling_qdb` therefore carries the ceiling in the node's own
+actuation space**, exactly as `tx_power_qdb` beside it has carried an offset
+since Pass 150; read §15.5 `GET /api/v1/tx/power`'s `backend` to know which.
+One consequence worth naming: the field's documented `0 = none` sentinel now
+collides with a legal offset ceiling of 0 (the `power_offset_max_qdb`
+default), where before a relative node always reported 108 there. The fleet
+configures 24 so nothing reads it today; distinguishing them is a §15.3
+schema change and belongs to its own pass. So is
 `power_presets_qdb`, through §15.5 `power_tier`. Neither is inert on an
-absolute backend, and `--check --strict` must not say they are.
+absolute backend, and `--check --strict` must not say they are. The reader
+list above is ABSOLUTE-backend only; the paragraph below says where each role
+went on a relative one.
 
 **Pass 166 scopes the preset list by space.** On a relative backend
 `power_presets_qdb` is **inert** — the tier reads `power_offset_presets_qdb`

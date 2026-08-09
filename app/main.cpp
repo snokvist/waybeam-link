@@ -3447,11 +3447,24 @@ struct TxCore {
         if (power_targets_.empty()) return false;
         bool all_ok = true;
         for (const PowerTarget& t : power_targets_) {
+            // §10.3/§11.7 0x0A: a held tier clamps the latch (Pass 167
+            // review). Pass 150 removed the old `min(qdb, max_power_qdb)`
+            // because on an offset backend it clamped an offset by an
+            // absolute and so was a no-op dressed as a safety ceiling — but
+            // it removed the clamp entirely rather than fixing its space, and
+            // since Pass 166 `t.ceiling` IS in the actuator's space. Without
+            // this the craft latch outranked the tier while the ground's
+            // UplinkPower::hw_qdb() clamped correctly, so one spec sentence
+            // described two opposite behaviours. §10.5 still REPORTS the
+            // request, not the clamped value, and a request above
+            // power_offset_max_qdb is still rejected above rather than
+            // clamped here.
+            const int32_t hw = t.ceiling ? std::min(qdb, *t.ceiling) : qdb;
             if (apply_power_offset) {
-                all_ok = apply_power_offset(t.adapter_idx, qdb) && all_ok;
+                all_ok = apply_power_offset(t.adapter_idx, hw) && all_ok;
             } else {
                 std::fprintf(stderr, "power: %s offset -> %+d qdb\n",
-                             t.name.c_str(), static_cast<int>(qdb));
+                             t.name.c_str(), static_cast<int>(hw));
             }
         }
         // §15.3 must not report a latch the radio refused (air_iface.h: a
@@ -3784,12 +3797,21 @@ struct TxCore {
         for (const PowerTarget& t : power_targets_) {
             power_.push_back(
                 PowerAdapter{t.name, t.adapter_idx, c,
-                             // §10.6 (Pass 151): in offset space the §10.5
-                             // bound is the ceiling; the §10.3 absolute one
-                             // is not a comparable quantity.
-                             backend_relative_
-                                 ? std::optional<int32_t>(t.offset_max_qdb)
-                                 : t.ceiling,
+                             // `t.ceiling` in BOTH spaces (Pass 167 review).
+                             // The relative arm used to seed offset_max_qdb,
+                             // a Pass 151 relic from when a tier was refused
+                             // here and `ceiling` held an incomparable
+                             // absolute 108. Since Pass 166 `ceiling` IS the
+                             // offset ceiling and a tier lowers it, so
+                             // re-seeding the bound discarded the tier —
+                             // install_curve runs on every completed §10.6
+                             // calibration, and nothing forbids calibrating
+                             // with a tier held, so a run silently RAISED
+                             // power back to the §10.5 bound while §15.3 and
+                             // §15.5 kept reporting the tier held. That is
+                             // the "a tier can only ever LOWER power" ruling
+                             // inverted, which is why it is a one-line arm.
+                             t.ceiling,
                              // Already space-selected on the target by
                              // set_backend_relative() (Pass 166), so the
                              // offset list is spent and passed empty.

@@ -526,4 +526,9 @@ Ruled Tier-1 the same day (Pass 167): in offset space a tier does not narrow
 the calibration window at all. That removes the mechanism rather than adding a
 refusal to it — but the asymmetry is worth remembering, because the ground
 still has no "refuse an empty window" guard of its own and a config with
-`power_offset_max_qdb == power_offset_qdb` reaches the absolute branch.
+`power_offset_max_qdb == power_offset_qdb` falls to the ABSOLUTE startup arm
+(`app/main.cpp`, the `else if (upwr.ceiling_qdb)` after the relative window
+fold). Since Pass 166 the number folded there is an **offset**, not the 108
+`max_power_qdb` it used to be, so that arm mixes spaces and can reproduce the
+same one-point run from config alone. A future pass picking this up should
+start from that description, not from the pre-Pass-166 one.

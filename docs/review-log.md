@@ -58,12 +58,12 @@ is selected. Placements above the efuse reference are real on this fleet
 (ground `last_clean_qdb: 24`, craft +14/+10/+4), so a ladder topping at 0
 would clamp measured headroom.
 
-**Left open, deliberately.** The ground still has no "refuse an empty sweep
-window" guard of its own — the craft's `offset_window()` returns nullopt and
-§11.7 CALIBRATE gates on it, the ground has no equivalent. With the coupling
-gone a tier can no longer produce that state, but a config with
-`power_offset_max_qdb == power_offset_qdb` still reaches the absolute branch.
-Its own pass.
+**Left open, deliberately.** The ground has no "refuse an empty sweep window"
+guard — the craft's `offset_window()` returns nullopt and §11.7 CALIBRATE
+gates on it; the ground has no twin. A tier can no longer produce that state,
+but `power_offset_max_qdb == power_offset_qdb` still falls to the ABSOLUTE
+startup arm, and since Pass 166 the number folded there is an **offset**
+(`upwr.ceiling_qdb`), not 108 — so that arm now mixes spaces. Its own pass.
 
 ## Pass 166 — the `0x0A` power tier is re-based into offset space (2026-08-09)
 

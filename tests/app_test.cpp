@@ -547,6 +547,50 @@ void test_tier_does_not_narrow_the_relative_sweep_window() {
     CHECK(spy.offsets.back().second == -72);
 }
 
+// A tier survives the events that REPLACE the power state, and keeps clamping
+// while it does. Both cases below were found by the Pass 167 pre-merge review,
+// and both are ORDER-dependent — every test above happens to install a curve
+// before selecting a tier, which is exactly the order that hides them.
+void test_tier_survives_install_curve_and_clamps_the_latch() {
+    Config c = one_tx_config(108, {});
+    c.adapters[0].power_offset_qdb = -24;
+    c.adapters[0].power_offset_max_qdb = 24;
+    c.adapters[0].power_offset_presets_qdb = {-72, -48, -24, 0, 24};
+    TxCore tx(c, 1, nullptr, 0);
+    PowerSpy spy;
+    spy.attach(tx);
+    tx.set_backend_relative(true);
+
+    CHECK(tx.set_power_tier(0));                          // ceiling -72
+    CHECK(tx.power_tier_ceiling().value_or(0) == -72);
+
+    // §10.6: install_curve() runs on EVERY completed craft calibration, and
+    // nothing forbids calibrating with a tier held. Re-seeding the adapter
+    // ceiling from power_offset_max_qdb there silently RELEASED the tier
+    // upward to +24 while power_tier_ceiling() — read from a different
+    // vector — kept reporting -72. "A tier can only ever LOWER power",
+    // inverted, with §15.3 asserting the opposite.
+    tx.install_curve(flat_curve(20));
+    spy.clear();
+    tx.resolve_and_apply_power(5, 4);
+    CHECK(!spy.offsets.empty());
+    CHECK(spy.offsets.back().second == -72);              // NOT +20, NOT +24
+    CHECK(tx.power_tier_ceiling().value_or(0) == -72);    // and still agrees
+
+    // §10.5 latch: accepted (<= the +24 bound) but clamped by the tier before
+    // it reaches the actuator, matching UplinkPower::hw_qdb() on the ground.
+    // The craft used to bound only by power_offset_max_qdb, so a latch
+    // outranked the tier here while the ground clamped — one spec sentence
+    // describing two opposite behaviours.
+    spy.clear();
+    CHECK(tx.set_power_override(24));
+    CHECK(!spy.offsets.empty());
+    CHECK(spy.offsets.back().second == -72);
+
+    // Above the BOUND is still rejected outright, not clamped (§10.5).
+    CHECK(!tx.set_power_override(48));
+}
+
 // §10.6 (Pass 151): a config whose bound sits at or under its own safe offset
 // leaves no band, so there is nothing to sweep. REJECTED beats a one-point
 // "curve" that reports success.
@@ -1043,6 +1087,7 @@ int main() {
     test_relative_sweep_stays_inside_the_offset_window();
     test_tier_reads_the_backends_own_space();
     test_tier_does_not_narrow_the_relative_sweep_window();
+    test_tier_survives_install_curve_and_clamps_the_latch();
     test_empty_offset_window_has_no_sweep();
     test_tier_refused_during_calibration();
     test_power_tier_json_shape();
