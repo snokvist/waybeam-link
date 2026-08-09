@@ -24,6 +24,44 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 165 — the §11.7 `0x0A` relative-backend refusal binds the ground half (2026-08-09)
+
+**Verdict.** Pass 151 ruled that a power tier is REJECTED when the air backend
+is relative: `power_presets_qdb` are absolute qdb, there is no offset-space
+tier, and applying one installs a 60..108 preset where an offset belongs. Only
+the **craft** implemented it (`app/main.cpp:3305`). The §15.5
+`POST /api/v1/tx/power_tier` ground path applied the tier unconditionally, and
+`app/main.cpp:7040` then folded `ceiling_qdb` into the §10.7 sweep bound with
+no `uplink_relative` guard — overwriting the offset-space window the same
+function derives correctly at startup (`:5768`, which comments that the
+absolute ceiling "is deliberately not folded in"). The ground now refuses
+identically, **before** the tier is recorded, and the fold is unreachable on a
+relative uplink.
+
+**Reachable on the fleet, not hypothetical.** `deploy/ground-192.168.2.242.json`
+carries `power_presets_qdb: [60,76,84,92,108]` and `power_offset_max_qdb: 24`.
+One `POST /api/v1/tx/power_tier {"tier":4}` moved the next §10.7 uplink sweep's
+ceiling from **+24 qdb (+6 dB)** to **+108 qdb read as an offset (+27 dB)** —
+the operating point Pass 150 measured driving an 8822EU into compression at
+54 ‰ loss against 6 ‰ two dB below it. No calibration run had exercised the
+sequence, which is why it survived Passes 151–164.
+
+**Changed.** §11.7 `0x0A` (the refusal binds both halves; `0x0A` and its REST
+twin are reachable only on the udp bench since Pass 164, and §10.5
+`POST /api/v1/tx/power` is the actuation path on a relative node); §15.5
+`POST /api/v1/tx/power_tier` gains the 409.
+
+**Not changed, deliberately.** Re-basing `power_presets_qdb` into offset space
+— what §10.5 keeps promising — needs a ruling on what a tier *means* as an
+offset and stays queued. The two remaining absolute readers on a relative
+ground (`hw_qdb()`'s override clamp, the §10.7 placement clamp) are no-ops
+because `min(offset, 60..108)` never binds; they misreport §15.3
+`tx_power_ceiling_qdb` and nothing more. Both keys stay **live** in the §15.2
+registry for exactly that reason (Pass 164's corrected scope).
+
+**Evidence.** Found by the adversarial pre-merge review of the Pass 164 branch
+while re-tracing every reader of `max_power_qdb`/`power_presets_qdb`.
+
 ## Pass 164 — kernel-monitor is deleted; devourer is the only RF backend (2026-08-08)
 
 **Verdict.** Ruling #120 item 3 had `MonAir` *moved* to an external RX-only
