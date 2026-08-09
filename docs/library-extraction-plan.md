@@ -1433,6 +1433,91 @@ check that it worked is not "the android preset builds"; it is a link, which
 today means extending `examples/embed-consumer` or accepting that this stays
 unproven until `:wifi` links it.
 
+### 4.9 Phase 2c step 2, as landed — the RX run loop
+
+`run_rx` is in `node/src/rx_node.cpp`. `app/main.cpp` is **1714 lines**, down
+from 8808 before Phase 2a and 4363 before this step. `wblink_node` is STATIC —
+the `.cpp` the Phase 2a CMake comment said would arrive when something needed
+one.
+
+**It was a verbatim move, and §4.6's estimate of why it would not be was
+wrong in an instructive way.** The warning was that `run_rx` keeps its state
+in locals captured by reference from ~40 lambdas. That is true, and it is the
+structure that produced the Pass 166 `issue_vcmd` stack-use-after-scope crash.
+But it describes the function's *interior*, and a move only cares about its
+*exterior*. After step 1 moved the free functions, `run_rx` referenced exactly
+**one** app-scope name — the stop flag. So the whole 2661-line move is two
+edited lines, both declared in `tools/move_identity.py`:
+
+```
+int run_rx(const Loaded& l) {            ->  int run_rx(const Loaded& l, const std::atomic<int>& stop) {
+    while (g_stop == 0) {                ->      while (stop == 0) {
+```
+
+The lesson generalises the one Phase 2a already recorded about `TxCore`:
+**measure the coupling before believing an estimate of it.** Both times the
+plan's "entangled" call was made by reading the code's shape rather than by
+counting what it reaches.
+
+**The stop flag is the only design decision.** In `app/main.cpp` it was a
+file-scope `volatile sig_atomic_t` written by a signal handler. A library
+cannot own that, and the consumer that matters — Android — stops a node from
+another *thread*, where `volatile` says nothing at all. `std::atomic<int>` is
+both: lock-free on every target here, so it stays legal to write from a signal
+handler, and properly synchronised across threads. `app/main.cpp` keeps the
+flag, keeps the handlers, and passes a reference; `static_assert
+(std::atomic<int>::is_always_lock_free)` sits next to it so the
+signal-handler half cannot quietly stop being true.
+
+**What the move exposed: eight ODR violations, latent since Phase 2a.**
+`emit_stats`, `rx_policy`, `packet_type_name`, `bw_code`, `s_to_ms`,
+`selector_policy`, `scheduler_policy` and `calib_params_from` were all defined
+at namespace scope in `node/` headers **without `inline`**. Nothing could
+catch it: `app/main.cpp` was the only translation unit that included them, and
+one definition in one TU links fine. The instant the RX loop became a second
+TU in the same binary, the linker rejected `emit_stats` outright — the first
+thing this step did was fail to link.
+
+This is the same failure Phase 2a recorded for the aim histograms
+(file-`static` is identical to `inline` in one TU and not otherwise), arriving
+a second time by a different route. So it is now rule 3 of
+`tests/node_layering_test.py` rather than a thing to remember.
+
+**And the guard needed a guard.** Its first draft stripped `//` comments before
+the regex but not before the brace test, so `uint8_t bw_code(uint8_t w) {  //
+note` passed while the linker rejected it — the cheapest possible way to
+reintroduce exactly the bug the rule exists to catch, found in pre-merge
+review. The rule now joins a signature's continuation lines before deciding
+(which also stops it flagging a correctly wrapped *declaration*), covers
+variables as well as functions — a namespace-scope `static` variable in a
+header never link-errors at all, it just forks per TU, which is the
+aim-histogram failure and the worse one — and carries a `_SELF_TEST` table of
+shapes it must and must not catch, so a matcher that stops matching fails
+rather than passes. Its remaining limits (a column-0 anchor, explicit template
+specialisations) are stated in the file.
+
+**The android trap is no longer hypothetical — it is measured.** §4.8 predicted
+that a `node/` naming `FrameShmRing::create` without `frame_shm.cpp` in the
+build would go green on `android-arm64` and fail in a consumer's link. It does:
+
+```
+$ llvm-nm -u build/android-arm64/libwblink_node.a | wc -l          # 187 undefined
+$ ...minus symbols defined in the preset's own archives, the NDK sysroot,
+   and libunwind                                                   # -> 9
+$ llvm-nm -u build/android-arm64/libwblink_node.a \
+      | grep -cE 'FrameShmRing|ControlServer'                      # 9 — the same 9
+```
+
+Do the subtraction, not just the `grep`: the filtered form returns 9 whether or
+not a *third* unresolvable subsystem is present, so on its own it cannot verify
+the thing it is being used to verify. Done properly the answer is the same —
+five `FrameShmRing` symbols and four `ControlServer` ones, nothing else — which
+is what fixes B10's scope. `scripts/gates.sh` meanwhile reports
+`passed 25  failed 0  skipped 0`. **This step ships that state deliberately**,
+because the alternative — inventing the egress seam here — would have made a
+2661-line verbatim move unreviewable. B10 closes it, and the check that B10
+worked must be a **link**, since a build demonstrably is not one.
+
 ## 5. Loose ends worth knowing before starting
 
 - **The §15.3 counters schema** is the last per-backend dispatch in

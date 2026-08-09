@@ -43,6 +43,16 @@ option(WBLINK_WERROR "Treat WBLINK_WARNINGS as errors (our targets only)" OFF)
 # lacks any of them. Refuse at configure time rather than emit a compiler
 # error a hundred lines deep — an option matrix with a silently broken cell
 # is worse than no option.
+#
+# Since #109 Phase 2c step 2, node/src/rx_node.cpp is ALSO an unconditional
+# user of frame_shm.h and control_server.h, and it is compiled regardless of
+# WBLINK_BUILD_APP. There is deliberately no guard for that case: the whole
+# point of the android-arm64 preset is to build the libraries with those
+# options OFF, and it does — the headers are unconditional, only the .cpp
+# files are not. What it produces is an archive with unresolvable references,
+# which no CONFIGURE-time check can see and no compile-only preset can either.
+# B10 (docs/library-extraction-plan.md §4.8) removes the dependency; until
+# then this is a known, measured gap, not an oversight.
 if(WBLINK_BUILD_APP)
     foreach(_feat FRAME_SHM CONTROL_SERVER VENC)
         if(NOT WBLINK_${_feat})
@@ -286,17 +296,25 @@ if(WBLINK_RADIO)
         third_party/libusb-cmake/libusb/libusb)
     target_link_libraries(wblink_io PUBLIC devourer usb-1.0)
 endif()
-# --- wblink_node: node behaviour (#109 Phase 2a). The layer above io/ that
-# wires core/ into a running node. Header-only for now: RxCore is entirely
-# inline, so this adds NO translation unit and the `dev` TU set is unchanged
-# from before the move — the same no-change control Phase 1a used. It becomes
-# a STATIC library the moment something here needs a .cpp.
+# --- wblink_node: node behaviour (#109 Phase 2a/2c). The layer above io/ that
+# wires core/ into a running node. STATIC since Phase 2c step 2 lifted the RX
+# run loop out of app/main.cpp — that is the .cpp the Phase 2a comment here
+# said would arrive when something needed one.
 #
 # Layering rule: node/ may use core/ and io/; neither may use node/.
-add_library(wblink_node INTERFACE)
-target_include_directories(wblink_node INTERFACE
+# EXCLUDE_FROM_ALL when embedded (B7). As an INTERFACE target this produced no
+# artifact and the question never arose; as a STATIC one it would otherwise join
+# `all` in a consumer's build, handing a project that links only wblink::io a
+# 4 MB archive of the RX loop it never asked for — and, until B10, one carrying
+# unresolvable references. Linking wblink::node still builds it.
+add_library(wblink_node STATIC node/src/rx_node.cpp)
+if(NOT PROJECT_IS_TOP_LEVEL)
+    set_target_properties(wblink_node PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif()
+target_include_directories(wblink_node PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/node/include>)
-target_link_libraries(wblink_node INTERFACE wblink_io)
+target_link_libraries(wblink_node PUBLIC wblink_io)
+target_compile_options(wblink_node PRIVATE ${WBLINK_WARNINGS})
 add_library(wblink::node ALIAS wblink_node)
 
 # The three optional units. Only the target_sources half of the WBLINK_RADIO

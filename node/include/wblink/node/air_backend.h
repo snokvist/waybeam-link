@@ -45,7 +45,7 @@ namespace node {
 // §3.1 type nibble -> name, for the bench packet trace. Reads the wire byte
 // directly: this is the path for packets `decode` returned as neither DATA
 // nor NACK, including ones a mixed-version peer sent that we do not model.
-const char* packet_type_name(const uint8_t* frame, size_t len) {
+inline const char* packet_type_name(const uint8_t* frame, size_t len) {
     if (len < 3) return "other";
     static const char* const kNames[16] = {
         "other",       "data",         "nack",        "link_report",

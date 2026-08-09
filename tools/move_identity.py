@@ -13,12 +13,23 @@ requires, and asserts the result appears verbatim in the destination file.
 Anything else — a changed constant, a dropped line, a helpfully reworded
 comment — fails.
 
-    tools/move_identity.py [BASE_REV]     # default: the commit before HEAD
+    tools/move_identity.py                    # every step, each against its
+                                              # own recorded base
+    tools/move_identity.py - "step 2"         # one step
+    tools/move_identity.py HEAD~1 "step 2"    # override the base, for a step
+                                              # that has not landed yet
 
 BASE_REV is whatever `app/main.cpp` looked like before the step. It moves with
 every rebase, which is why this is a review-time tool rather than something
 `scripts/gates.sh` runs: after the step lands there is no fixed revision for
 it to compare against.
+
+What this does NOT prove, stated so it is not over-read: the destination
+check is a substring test, so it cannot see code ADDED around the moved block,
+and edits are applied to every occurrence, so it cannot tell one application
+from forty. The per-block line here reports how many edits actually fired,
+which is the number a reviewer should compare against the PR's claim; a diff
+in both directions is still the stronger check when one is warranted.
 
 Adding a step: append its blocks to STEPS with the source ranges as they were
 at that step's base, and add any new permitted edit to EDITS. Keep the edit
@@ -32,6 +43,15 @@ N = "node/include/wblink/node/"
 
 # (label, first, last, destination) — 1-indexed inclusive, as the block was in
 # app/main.cpp at BASE_REV.
+# Each step records the base its ranges were measured against, so a step can
+# be checked without remembering which commit that was — getting it wrong
+# fails all blocks at once, which reads alarmingly like a real regression.
+# BASE_REV on the command line overrides, for checking a step before it lands.
+BASES = {
+    "2c step 1 — run_rx's free-function dependencies": "109a704^",
+    "2c step 2 — the RX run loop": "109a704",
+}
+
 STEPS = {
     "2c step 1 — run_rx's free-function dependencies": [
         ("csa_params",             189, 206, N + "policy.h"),
@@ -50,6 +70,9 @@ STEPS = {
         ("UplinkPower",            257, 379, N + "uplink_power.h"),
         ("build_info_json",        571, 631, N + "stats_fill.h"),
         ("build_health_json",      633, 657, N + "stats_fill.h"),
+    ],
+    "2c step 2 — the RX run loop": [
+        ("run_rx", 1310, 3970, "node/src/rx_node.cpp"),
     ],
 }
 
@@ -84,32 +107,46 @@ EDITS = [
      "                                   const InfoSelfState* self = nullptr,\n"
      "                                   const AirBackend* air = nullptr) {"),
     ("std::string build_health_json(", "inline std::string build_health_json("),
+    # 2c step 2. `run_rx` reached exactly one app-scope name on the way out —
+    # the stop flag — so the whole 2661-line move is these two lines.
+    ("int run_rx(const Loaded& l) {",
+     "int run_rx(const Loaded& l, const std::atomic<int>& stop) {"),
+    ("    while (g_stop == 0) {", "    while (stop == 0) {"),
 ]
 
 
 def main():
-    base = sys.argv[1] if len(sys.argv) > 1 else "HEAD~1"
-    try:
-        old = subprocess.run(["git", "show", f"{base}:app/main.cpp"],
-                             capture_output=True, text=True,
-                             check=True).stdout.splitlines(keepends=True)
-    except subprocess.CalledProcessError as e:
-        print(f"cannot read app/main.cpp at {base}: {e.stderr.strip()}",
-              file=sys.stderr)
-        return 2
-
+    override = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != "-" else None
+    want = sys.argv[2] if len(sys.argv) > 2 else None
     dest = {}
     checked = fails = 0
     for step, blocks in STEPS.items():
+        if want and want not in step:
+            continue
+        base = override or BASES[step]
+        try:
+            old = subprocess.run(["git", "show", f"{base}:app/main.cpp"],
+                                 capture_output=True, text=True,
+                                 check=True).stdout.splitlines(keepends=True)
+        except subprocess.CalledProcessError as e:
+            print(f"cannot read app/main.cpp at {base}: {e.stderr.strip()}",
+                  file=sys.stderr)
+            return 2
         print(f"{step}: {len(blocks)} block(s) against {base}")
         for name, first, last, path in blocks:
             if path not in dest:
                 dest[path] = open(path).read()
             chunk = "".join(old[first - 1:last])
+            applied = 0
             for src, repl in EDITS:
-                chunk = chunk.replace(src, repl)
+                n_hits = chunk.count(src)
+                if n_hits:
+                    applied += n_hits
+                    chunk = chunk.replace(src, repl)
             checked += 1
             if chunk in dest[path]:
+                print(f"  ok   {name}: {last - first + 1} lines, "
+                      f"{applied} edit(s) applied")
                 continue
             fails += 1
             print(f"  MISS {name}: app/main.cpp@{base}:{first}-{last} is not "

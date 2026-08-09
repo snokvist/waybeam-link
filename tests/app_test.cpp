@@ -26,11 +26,17 @@
 //
 // The first seam (Pass 138)
 // -------------------------
-// run_rx() is a single 2.3k-line function whose state lives in locals captured
-// by lambdas, so none of it was reachable from here. Its §10.3/§10.5/§10.7
-// power ownership is now UplinkPower, a struct at namespace scope with
-// injected actuators — the same shape TxCore already had — and the ground-side
-// rules below are covered rather than device-verified only.
+// run_rx() is a single 2.6k-line function whose state lives in locals captured
+// by lambdas, so none of its interior was reachable from here. Its
+// §10.3/§10.5/§10.7 power ownership is now UplinkPower, a struct at namespace
+// scope with injected actuators — the same shape TxCore already had — and the
+// ground-side rules below are covered rather than device-verified only.
+//
+// Since #109 Phase 2c the function itself lives in node/src/rx_node.cpp and
+// UplinkPower in node/uplink_power.h, so both are reachable by LINKING rather
+// than by including this TU. That changed nothing about the coverage: the
+// interior state is still captured locals, and what this file reaches is what
+// it always reached.
 //
 // What this still does NOT reach: everything else in run_rx — selection, CSA,
 // the cache-repair controller, the calibration sequencer. Each is its own seam.

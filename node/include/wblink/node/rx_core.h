@@ -42,7 +42,7 @@ namespace node {
 // §15.2 -> §3 policy translation. Lived beside its siblings (arq_policy,
 // selector_policy, quietgap_policy) in main.cpp; those stay there until the
 // TX half of Phase 2a moves, because they have callers this layer does not.
-RxPolicy rx_policy(const Config& cfg) {
+inline RxPolicy rx_policy(const Config& cfg) {
     RxPolicy p;
     p.fwd_clamp_pkts = cfg.policy.rx.fwd_clamp_pkts;
     p.fwd_clamp_blocks = cfg.policy.arq.fwd_clamp_blocks;

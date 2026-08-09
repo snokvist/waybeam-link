@@ -49,11 +49,11 @@
 namespace wblink {
 namespace node {
 
-uint8_t bw_code(uint8_t width_mhz) {
+inline uint8_t bw_code(uint8_t width_mhz) {
     return width_mhz >= 80 ? 2 : width_mhz >= 40 ? 1 : 0;
 }
 
-SchedulerPolicy scheduler_policy(const Config& cfg) {
+inline SchedulerPolicy scheduler_policy(const Config& cfg) {
     SchedulerPolicy p;
     p.holddown_ms = cfg.policy.arq.holddown_ms;
     p.attempt_cap = cfg.policy.arq.attempt_cap;
@@ -67,11 +67,11 @@ SchedulerPolicy scheduler_policy(const Config& cfg) {
     return p;
 }
 
-uint32_t s_to_ms(double s) {
+inline uint32_t s_to_ms(double s) {
     return s <= 0.0 ? 0u : static_cast<uint32_t>(s * 1000.0 + 0.5);
 }
 
-SelectorPolicy selector_policy(const Config& cfg) {
+inline SelectorPolicy selector_policy(const Config& cfg) {
     const SelectPolicy& s = cfg.policy.select;
     SelectorPolicy p;
     p.demote_milli = s.demote_milli;
@@ -112,7 +112,7 @@ SelectorPolicy selector_policy(const Config& cfg) {
 // §15.2 policy.calibration -> the core engine seeds. Shared: §10.6's craft
 // calibrator and §10.7's ground uplink calibrator read the same block, and
 // only the gating differs (§10.7 uses epoch counts, not the ms dwells).
-CalibrateParams calib_params_from(const CalibrationPolicy& c) {
+inline CalibrateParams calib_params_from(const CalibrationPolicy& c) {
     CalibrateParams p;
     p.loss_ok_milli = static_cast<uint16_t>(c.loss_ok_milli);
     p.loss_bad_milli = static_cast<uint16_t>(c.loss_bad_milli);
