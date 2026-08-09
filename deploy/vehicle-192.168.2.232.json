@@ -23,6 +23,13 @@
       ],
       "bus": "1-1",
       "calib_id": "craft-eu-1",
+      "power_offset_presets_qdb": [
+        -72,
+        -48,
+        -24,
+        0,
+        24
+      ],
       "power_offset_max_qdb": 24
     }
   ],
