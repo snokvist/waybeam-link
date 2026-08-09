@@ -289,6 +289,17 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   `rx_node_c.h` (the **C ABI** — four `extern "C"` functions; waybeam-hub is
   a C daemon and Android reaches native code through JNI, so the header is
   compiled as C by `examples/node-linkcheck` to keep it honest),
+  `tx_node.h` / `tx_node_c.h` (`run_tx` and its C ABI — #109 Phase 3. **The TX
+  half of the archive is CONDITIONAL**: `run_tx` uses frame-SHM, the control
+  server and venc unconditionally, the same three `WBLINK_BUILD_APP` requires,
+  so `node/src/tx_node*.cpp` compile only when all three are ON and a
+  receive-only consumer gets the RX half alone. Compiled unconditionally they
+  put ~22 unresolvable references back into the archive, invisible until
+  something referenced them. `wblink_tx_run`'s failure codes are **negative**
+  because `run_tx` already owns 2 as the §9.10 wedge, so the RX shim's
+  numbering could not be reused. Gates: `examples/node-linkcheck` asserts the
+  TX sources stayed out and the header is C-clean; `tests/tx_node_c_test.cpp`
+  links and runs the handle contract where the symbols exist),
   `rx_core.h` (`RxCore` + `rx_policy()`), `discovery.h` (`DiscoveryCatalog`,
   `ScoutEngine`), `air_backend.h` (`AirBackend`, `PacketEventTrace`),
   `tx_core.h` (`TxCore` + the §15.2->core policy adapters), `stats_fill.h`

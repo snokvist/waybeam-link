@@ -1704,6 +1704,66 @@ follow: **`run_tx` still lives in `app/main.cpp`** and has to be lifted the way
 is untouched. The `wblink_rx_*` naming leaves room for `wblink_tx_*` beside it,
 so nothing landing here needs redesigning for that.
 
+### 4.13 The TX C ABI, and the archive property it exposed
+
+`node/include/wblink/node/tx_node_c.h` — the same four functions with `_tx_`
+where `_rx_` was, and the naming left room on purpose. Three things differ, and
+each of them is the interesting part.
+
+**It carries a callback IN, not out.** `run_tx` needs to apply an operating
+mode (§15.5 / §11.7 `0x07`) and the app-side implementation double-forks, which
+B9 forbids `node/` from doing. So the fork stays in the caller and arrives as a
+function pointer plus `void *user` — the mirror image of `wblink_frame_cb`.
+Passing NULL is a claim about the node, not an omission: every apply fails
+honestly and §15.5 reports `apply_configured: false`, which is the distinction
+review forced on the lift itself (#164) and would be pointless to lose here.
+
+**Its failure codes are negative, and could not be otherwise.**
+`wblink_rx_run` uses 2 for "NULL argument" and 3 for "handle reused". `run_tx`
+already owns 2: it is the §9.10 wedge (Pass 148) that `app/main.cpp` maps to
+exit 9 and a supervisor answers by restarting the transmitter. Copying the RX
+numbering would make a caller's NULL pointer indistinguishable from a wedged
+radio — a power-cycle in response to a programming error. So `WBLINK_TX_BAD_ARG`
+and `WBLINK_TX_REUSED` are negative and the non-negative space belongs entirely
+to `run_tx`. For the same reason `wblink_tx_run` does **not** forward
+`load_all`'s return code the way the RX shim does; it maps any load failure to
+`WBLINK_TX_ERROR`. That is one rename away from mattering.
+
+**And it exposed a property of the archive, which is the finding.**
+`examples/node-linkcheck` builds with frame-SHM, the control server and venc
+OFF and was green on the branch that had just lifted `run_tx`. Adding a single
+C caller of `wblink_tx_run` turned it red with ~22 undefined references —
+`FrameShmRing`, `ControlServer`, `VencActuator`. Nothing had broken: `run_tx`
+uses all three unconditionally (the same three `WBLINK_BUILD_APP` refuses to
+build without), and a static archive extracts a member only when something
+references it. Until this ABI existed, nothing did.
+
+That is §4.10's failure shape one level deeper. **A link gate proves the
+archive links, not that the archive resolves** — it can only see the members
+its consumer pulls in. So the TX sources now compile into `wblink_node` only
+when all three subsystems are ON, and `node-linkcheck` asserts against the
+target's `SOURCES` property rather than inferring it from the options; deleting
+the guard makes it fail at configure time (verified by mutation). Measured
+after: the `android-arm64` archive holds `rx_node.cpp.o` and `rx_node_c.cpp.o`
+alone, with **zero** undefined references to the three subsystems.
+
+The C-clean gate and the link/runtime gate therefore split, and the split is
+honest about what each can see: `c_consumer.c` exercises the header as C11 with
+`-Wpedantic` and cannot call into it (the symbols are absent by design), while
+`tests/tx_node_c_test.cpp` links and runs the handle contract — bad argument,
+pre-stop, reuse, load-failure-is-not-wedged — in the configuration a
+transmitter actually has. See `docs/findings.md`, 2026-08-09.
+
+**And that test shipped inert on its first draft**, which is worth recording
+because `wbtest.h` invites it. `CHECK` only increments a counter; the exit code
+comes from `wbtest_finish()` alone, so a `main()` ending in `return 0` runs
+every assertion, prints every failure to stderr, and reports success to CTest.
+Pre-merge review demonstrated it by breaking three behaviours at once and
+watching the suite stay green. Fixed, then re-verified by mutation: reuse
+returning OK, and the pre-stop guard deleted, each turn the test red.
+`tests/mcs_probe_test.cpp` has the same shape and predates this work — no lint
+or gate catches either, which is the part that should be fixed once.
+
 ## 5. Loose ends worth knowing before starting
 
 - **The §15.3 counters schema** is the last per-backend dispatch in

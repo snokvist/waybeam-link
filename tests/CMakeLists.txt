@@ -95,6 +95,27 @@ add_wb_test(node_air_backend_test wblink_io wblink_node)
 add_wb_test(node_tx_core_test wblink_io wblink_node)
 add_wb_test(node_uplink_power_test wblink_io wblink_node)
 
+# The TX C ABI (#109 Phase 3). Guarded on the same condition the top-level
+# CMakeLists uses to compile the TX half into wblink_node at all: run_tx needs
+# frame-SHM, the control server and venc, so with any of them OFF these four
+# symbols do not exist and this would be an unresolved reference rather than a
+# skipped test. examples/node-linkcheck covers the OFF side — it proves the
+# header is C-clean, which is all a build without the symbols can prove.
+#
+# Asserted, not assumed: an undefined WBLINK_NODE_TX is falsy, so a rename or a
+# typo upstream would silently unregister this test from every build — a green
+# suite with one fewer test in it, which is the failure mode this whole commit
+# is about.
+if(NOT DEFINED WBLINK_NODE_TX)
+    message(FATAL_ERROR
+        "WBLINK_NODE_TX is not defined. The top-level CMakeLists sets it "
+        "ON or OFF alongside wblink_node's source list; if it has been "
+        "renamed, fix it here rather than letting tx_node_c_test vanish.")
+endif()
+if(WBLINK_NODE_TX)
+    add_wb_test(tx_node_c_test wblink_io wblink_node)
+endif()
+
 # app_test #includes app/main.cpp whole (that file's contents are one anonymous
 # namespace, so there is nothing to link against) with WBLINK_APP_TEST
 # suppressing its entry point. It therefore needs the app's own include path

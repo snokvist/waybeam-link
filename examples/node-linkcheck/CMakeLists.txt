@@ -47,6 +47,21 @@ if(TARGET waybeam-link)
     message(FATAL_ERROR "node-linkcheck built the daemon; WBLINK_BUILD_APP leaked ON")
 endif()
 
+# And assert the TX half stayed OUT of the archive (#109 Phase 3). `run_tx`
+# uses all three subsystems above, so compiling it here would put ~22
+# unresolvable references into libwblink_node.a — invisible to this gate,
+# because a static archive extracts a member only when something references it
+# and nothing here does. That is the same silent-green shape the gate exists to
+# end, one level deeper, so it is checked against the target rather than
+# inferred from the options: delete the guard upstream and this goes red.
+get_target_property(_wblink_node_srcs wblink_node SOURCES)
+if(_wblink_node_srcs MATCHES "tx_node")
+    message(FATAL_ERROR
+        "wblink_node contains the TX sources in a build with FRAME_SHM/"
+        "CONTROL_SERVER/VENC off: ${_wblink_node_srcs}. run_tx needs all "
+        "three, so this archive would carry unresolvable references.")
+endif()
+
 # c_consumer.c is compiled as C on purpose: rx_node_c.h must be C-clean
 # for waybeam-hub and for JNI, and no C++ build can demonstrate that.
 add_executable(node_linkcheck main.cpp c_consumer.c)

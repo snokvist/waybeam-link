@@ -12,6 +12,7 @@
  * proves the two link together — the name mangling half of the ABI.
  */
 #include "wblink/node/rx_node_c.h"
+#include "wblink/node/tx_node_c.h"
 
 #include <stdio.h>
 
@@ -21,6 +22,17 @@ static void on_frame(uint8_t stream_id, const uint8_t *frame, size_t len,
     unsigned long *count = (unsigned long *)user;
     ++*count;
     printf("c_consumer: stream %u, %zu bytes\n", (unsigned)stream_id, len);
+}
+
+/* The other direction of the ABI: the type a TX consumer passes IN, carrying
+ * the double-fork B9 keeps out of node/. Defined so the typedef has something
+ * to bind, never called — see the note on the TX half below. */
+static int on_mode_apply(const char *cmd, const char *name, void *user) {
+    (void)cmd;
+    (void)name;
+    unsigned long *count = (unsigned long *)user;
+    ++*count;
+    return 1;
 }
 
 /* Exercises the handle's lifetime without opening a radio: create, ask to
@@ -62,5 +74,37 @@ int wblink_c_consumer_check(void) {
         return 1;
     }
     wblink_rx_destroy(rx);
+
+    /* The TX half of the ABI is DECLARATION-ONLY here, and deliberately so.
+     * This project configures frame-SHM, the control server and venc OFF —
+     * that is its whole purpose — and `run_tx` uses all three, so `wblink_tx_*`
+     * is not in this archive at all. Calling it would not test the TX ABI; it
+     * would test that the OFF configuration is not really OFF.
+     *
+     * What still belongs here is everything a C compiler can check without a
+     * link: that the header parses as C11 with -Wpedantic, that the callback
+     * type is C-nameable, and that the shim's failure codes stay OUT of
+     * run_tx's status space — 2 there is the §9.10 wedge a supervisor restarts
+     * the radio on, so a bad argument reported as 2 would be a power-cycle in
+     * response to a NULL pointer.
+     *
+     * The link and the runtime contract are proven where the symbols exist:
+     * tests/tx_node_c_test.cpp, guarded on the same three subsystems. */
+    {
+        /* Both types must be nameable in C, and the callback must be
+         * assignable to the typedef — that is what -Wstrict-prototypes and
+         * -Wpedantic check here, and it is a compile-time claim, not a runtime
+         * one. Deliberately NOT calling `apply`: it is this file's own static
+         * function, so calling it would exercise the test rather than the
+         * library. */
+        wblink_mode_apply_cb apply = on_mode_apply;
+        wblink_tx *tx = NULL;
+        (void)apply;
+        (void)tx;
+    }
+    if (WBLINK_TX_BAD_ARG >= 0 || WBLINK_TX_REUSED >= 0 ||
+        WBLINK_TX_BAD_ARG == WBLINK_TX_REUSED) {
+        return 1;
+    }
     return 0;
 }

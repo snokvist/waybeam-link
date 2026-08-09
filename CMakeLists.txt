@@ -308,8 +308,31 @@ endif()
 # `all` in a consumer's build, handing a project that links only wblink::io a
 # 4 MB archive of the RX loop it never asked for — and, until B10, one carrying
 # unresolvable references. Linking wblink::node still builds it.
-add_library(wblink_node STATIC node/src/rx_node.cpp node/src/rx_node_c.cpp
-                               node/src/tx_node.cpp)
+#
+# THE TX HALF IS CONDITIONAL, and the condition is not tidiness. `run_tx` uses
+# frame_shm.h, control_server.h and wblink/venc.h unconditionally — the same
+# three WBLINK_BUILD_APP refuses to build without, for the same reason. Compiled
+# into the archive regardless, it puts ~22 unresolvable references back into
+# libwblink_node.a: green everywhere, because a static archive extracts a member
+# only when something references it, and until the TX C ABI landed nothing did.
+# That is precisely the silent-green shape examples/node-linkcheck was written
+# to end (see its CMakeLists). Measured on the #164 branch: adding a single C
+# caller of wblink_tx_run turned the phone-configured link red.
+#
+# So a receive-only consumer (Android's :wifi, bionic — no shm_open) gets an
+# archive carrying no reference to a subsystem it did not build, and a consumer
+# that wants to transmit configures the subsystems a transmitter genuinely
+# needs. That is the measured claim and the whole claim: the bionic archive
+# still has ~193 undefined symbols like any other, and no gate resolves them on
+# bionic — android-arm64 is compile-only. See docs/findings.md, 2026-08-09.
+set(WBLINK_NODE_SRCS node/src/rx_node.cpp node/src/rx_node_c.cpp)
+if(WBLINK_FRAME_SHM AND WBLINK_CONTROL_SERVER AND WBLINK_VENC)
+    set(WBLINK_NODE_TX ON)
+    list(APPEND WBLINK_NODE_SRCS node/src/tx_node.cpp node/src/tx_node_c.cpp)
+else()
+    set(WBLINK_NODE_TX OFF)
+endif()
+add_library(wblink_node STATIC ${WBLINK_NODE_SRCS})
 if(NOT PROJECT_IS_TOP_LEVEL)
     set_target_properties(wblink_node PROPERTIES EXCLUDE_FROM_ALL TRUE)
 endif()
