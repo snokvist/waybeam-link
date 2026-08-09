@@ -257,5 +257,8 @@ int main() {
         CHECK(promoted);
     }
 
-    return 0;
+    // NOT `return 0`. CHECK only counts (tests/wbtest.h); the exit code
+    // comes from here alone, so a bare return runs every assertion and
+    // still reports success. tests/test_verdict_test.py now enforces this.
+    return wbtest_finish("mcs_probe_test");
 }

@@ -327,7 +327,17 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   The RX loop lives in `node/src/rx_node.cpp` now; what remains here is
   `run_tx`, `run_loopback`, argument handling, and the process-owning half —
   signal handlers, `spawn_mode_applier`'s double fork, the §9.10 wedge exit.
-- `tests/` — one `_test.cpp` per unit, run via ctest.
+- `tests/` — one `_test.cpp` per unit, run via ctest. **A suite must end**
+  **`return wbtest_finish("<name>")`** — `CHECK` only increments a counter
+  (`tests/wbtest.h`) and that function alone yields the exit code, so a
+  `main()` ending in `return 0` runs every assertion, prints every failure and
+  reports SUCCESS to ctest — and so does `wbtest_finish(...); return 0;`, which
+  discards the verdict it just computed. Two files shipped that way and nothing
+  in the build could see either; `tests/test_verdict_test.py` is now the gate.
+  It carries a self-test because a matcher that stops matching is the same class
+  of bug, and it reports the count it actually SCANNED — three suites
+  (`calibrate`, `calib_dwell`, `uplink_calibrate`) hand-roll their own verdict
+  and are named as uncovered rather than folded into a reassuring total.
 - `tools/` — bench analyzers: `gate2_rho.py` (cross-adapter loss correlation),
   `gate3_rtt.py` (NACK→RETRANSMIT latency), `rtp_feed.py` (synthetic RTP feeder).
 - `profiles/` — the §9.3 operating-point table (data, not code).

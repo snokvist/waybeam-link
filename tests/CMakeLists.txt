@@ -162,15 +162,26 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME node_layering_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/node_layering_test.py)
+    # Every wbtest.h suite must be able to FAIL. CHECK only counts; the exit
+    # code comes from wbtest_finish() alone, so a main() ending in `return 0`
+    # is a suite that runs every assertion and reports success regardless.
+    # Two files shipped that way (tx_node_c_test in review, mcs_probe_test for
+    # much longer) and nothing in the build could see either.
+    add_test(NAME test_verdict_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/test_verdict_test.py)
 else()
     # Registering nothing here leaves ctest GREEN on a host without python3
-    # while five suites silently did not run — among them config_registry_test,
+    # while seven suites silently did not run — among them config_registry_test,
     # which is the only thing keeping io/src/config_registry.cpp honest against
     # io/src/config.cpp. A registry whose drift guard can disappear is just a
     # second source of truth, so absence is failure, not silence.
     #
     # Measured with -DCMAKE_DISABLE_FIND_PACKAGE_Python3=ON: without this
-    # branch `ctest --preset dev` dropped from 64 tests to 59 and exited 0.
+    # branch `ctest --preset dev` dropped from 73 tests to 67 and exited 0
+    # (7 python suites lost, this 1 sentinel gained).
+    # Recount when adding a python test — the 5/6 that stood here were both
+    # stale, each left behind by a PR that added one and adjusted nothing.
     #
     # The name MUST end in "_test". The dev test preset filters on
     # `"name": "_test$"` (CMakePresets.json:101), so a sentinel named anything
@@ -180,7 +191,7 @@ else()
     # its negative control used `ctest -R <name>`, which bypasses the preset
     # filter and therefore "passed".
     message(WARNING
-        "Python3 not found: 5 suites cannot run, including config_registry_test "
+        "Python3 not found: 7 suites cannot run, including config_registry_test "
         "(the registry-vs-loader drift guard). ctest will FAIL rather than "
         "silently pass. Install python3 to run the real gate.")
     add_test(NAME python_tests_unavailable_test
