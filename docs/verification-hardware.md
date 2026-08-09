@@ -10,7 +10,7 @@ testing.
 | Node | Address / originator | Hardware and radio | Runtime |
 |---|---|---|---|
 | Vehicle | `192.168.2.232` / 17 | OpenIPC SSC338Q (`INFINITY6E SSC012B-S01A`), RTL8812EU `0bda:a81a`, `wlan0`, `8812eu` | `/usr/bin/waybeam-link`, `/etc/waybeam-link/craft.json`, `/etc/init.d/waybeam-link` |
-| x86 ground | `192.168.2.242` / 9 | AMD Ryzen 5 7640HS, RTL8812EU `0bda:a81a` (`wlx84fc1450bcde`, `rtl88x2eu`) and RTL8812CU `0bda:c812` (`wlx40a5ef2f2308`, `rtl88x2cu`) | `/usr/local/bin/waybeam-link`, `/etc/waybeam-link/ground.json`, `waybeam-ground.service` |
+| x86 ground | `192.168.2.242` / 9 | AMD Ryzen 5 7640HS, RTL8812EU `0bda:a81a` (`wlx84fc1450bcde`, `rtl88x2eu`) and RTL8812CU `0bda:c812` (`wlx40a5ef2f2308`, `rtl88x2cu`) | `/usr/local/bin/waybeam-link`, `/etc/waybeam-link/ground.json`, `waybeam-ground.service` (removed in Pass 164 — the node is driven manually, see `deploy/README.md`) |
 | RK3566 ground | `192.168.2.199` / 10 | Radxa ZERO 3, RTL8812CU `0bda:c812`, `wlx40a5ef2f229b`, `rtl88x2cu` | `/usr/bin/waybeam-link`, `/etc/waybeam-link/ground.json`, `/etc/init.d/S49waybeam-link` (unit file removed from this repo in Pass 164) |
 | Ethernet cache | `192.168.2.247` / 33 | Intel Celeron J4125 Debian host, MT7921 `14c3:7961` (`wlp3s0`, `mt7921e`) and RTL8812AU `0bda:8812` (`wlx200db0c4a76a`, `rtl88xxau_wfb`) | `/usr/local/bin/waybeam-link`, `/etc/waybeam-link/cache.json`, `waybeam-cache.service` (removed from this repo in Pass 164) |
 

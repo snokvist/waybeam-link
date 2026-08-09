@@ -14,7 +14,9 @@
 #   - pin rung:   POST craft :8091/api/v1/link/profile {"min":N,"max":N}
 #                 (craft control binds 127.0.0.1 -> reached via ssh+curl)
 #   - set power:  ssh craft "iw dev <ifname> set txpower fixed <mBm>"
-#                 (kernel-monitor backend; the sweep's power axis)
+#                 (the sweep's power axis; absolute qdb, so this script
+#                  targets the udp bench only since Pass 164 made devourer
+#                  -- whose lever is a relative offset -- the sole RF backend)
 #   - measure:    craft + ground /api/v1/stats snapshots at dwell start/end
 #
 # Restores profile window and txpower on exit, including on Ctrl-C/failure.

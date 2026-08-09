@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # §9.6 Pass-37 actuation verification harness — UDP-air backend (the §17
 # ruling: prove the contract here FIRST, then verify the radio and
-# kernel-monitor backends on the rig).
+# the radio backend on the rig).
 #
 #   frame_shm_feed ──> TX 17 (adaptive selector, venc actuation ──> fake_venc)
 #                        │ udp air

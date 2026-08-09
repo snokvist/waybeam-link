@@ -280,11 +280,12 @@ int main() {
     }
     // REGRESSION PIN (pre-merge review, Pass 164). max_power_qdb and
     // power_presets_qdb were briefly declared inert on radio. They are NOT:
-    // §15.3 tx_power_ceiling_qdb (app/main.cpp:3186), §15.5
-    // GET /api/v1/tx/power_tier (:5133), the ground override clamp that
-    // reaches the actuator (:1197) and the §10.7 sweep bound (:5934, :7041)
-    // all read them on a radio node, and BOTH flying configs set them. A
-    // predicate here tells the operator to delete a key that clamps TX power.
+    // §15.3 tx_power_ceiling_qdb, §15.5 GET /api/v1/tx/power_tier, the ground
+    // UplinkPower::hw_qdb() override clamp that reaches the actuator, and the
+    // load-time clamp of the presets to the ceiling all read them on a radio
+    // node, and BOTH flying configs set them. A predicate here tells the
+    // operator to delete a key that clamps TX power. See the DO NOT PREDICATE
+    // block in io/src/config_registry.cpp.
     {
         const char* kAbsAdapter =
             R"({ "name": "wlan0", "bus": "1-1", "role": "tx",

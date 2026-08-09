@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # §9.11 Pass-53 FPS-ladder verification — UDP-air backend (§17 ordering:
-# UDP first, then radio/kernel-monitor on the rig).
+# UDP first, then radio on the rig).
 #
 # Phases: sufficiently large P frames (hold preferred) -> undersized P frames
 # (step 100 -> 90 -> 75 -> 60 with dwell) -> large P frames (predictive,

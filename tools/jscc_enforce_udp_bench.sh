@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # §14.2 Pass-38 enforcement verification — UDP-air backend (§17 ordering:
-# UDP first, then radio/kernel-monitor on the rig).
+# UDP first, then radio on the rig).
 #
 # Phases (one TX with jscc_shadow.enforce=true, one RX feeding JSCC_FEEDBACK):
 #   A: pinned normal rung + synthetic loss  -> decisions become VALID and

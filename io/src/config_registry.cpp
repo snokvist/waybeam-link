@@ -90,16 +90,19 @@ bool never_live(const Config&) { return false; }
 // DO NOT PREDICATE adapters[].max_power_qdb OR adapters[].power_presets_qdb.
 // Pass 164's first cut declared both inert on the radio backend, reasoning
 // that every reader sits on the `!backend_relative_` arm. That covers the
-// craft TxCore sites (`app/main.cpp:3305`, `:3660`, `:2984`, `:3675`) and
-// MISSES four that run on radio:
-//   app/main.cpp:3186  snap.link.tx_power_ceiling_qdb = *power_tier_ceiling()
-//                      — §15.3, ungated by backend
-//   app/main.cpp:5133  §15.5 GET /api/v1/tx/power_tier emits presets_qdb and
-//                      ceiling_qdb, ungated
-//   app/main.cpp:1197  ground UplinkPower::hw_qdb() clamps a §10.5 override
-//                      latch by ceiling_qdb — it REACHES THE ACTUATOR
-//   app/main.cpp:5934 / :7041  the §10.7 artifact placement and the sweep
-//                      bound are clamped by ceiling_qdb
+// craft TxCore sites and MISSES three that run on radio (line numbers drift —
+// grep the expressions, they are unique):
+//   `snap.link.tx_power_ceiling_qdb = *power_tier_ceiling()` — §15.3,
+//       ungated by backend
+//   `h.tx_power_json` / power_tier_json — §15.5 GET /api/v1/tx/power_tier
+//       emits presets_qdb and ceiling_qdb, ungated
+//   `UplinkPower::hw_qdb()` — the ground clamps a §10.5 override latch by
+//       ceiling_qdb, and that REACHES THE ACTUATOR
+// plus the load-time clamp of power_presets_qdb to max_power_qdb in this file's
+// sibling, io/src/config.cpp. NOT the §10.7 sweep bound: Pass 165 made the
+// tier fold unreachable on a relative uplink, and both calibrators take the
+// offset-space window first — that reader is gone, and citing it would send a
+// future retire-the-key pass down a dead path.
 // Both keys are set on both flying configs, so the false predicate told the
 // operator to delete a key that clamps TX power. §15.2 says it plainly: the
 // §10.5 reference role went with kernel-monitor, the §10.3 ceiling role did

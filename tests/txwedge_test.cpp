@@ -2,7 +2,7 @@
 // §9.10 TX-wedge watchdog: fires only on completion-progress ABSENCE while
 // submissions advance; a progress deficit never trips it; idle windows hold
 // the previous verdict; disabled = transparent. Completion is CCX on
-// devourer and netdev tx_packets on kernel-monitor.
+// devourer. (The kernel-monitor netdev source was deleted in Pass 164.)
 #include "wblink/txwedge.h"
 
 #include "wbtest.h"
