@@ -455,6 +455,25 @@ void test_tier_rejected_on_relative_backend() {
     CHECK(mon.power_tier_ceiling().value_or(-1) == 60);
 }
 
+// GROUND TWIN (Pass 165). Pass 151 stated the refusal once and only this
+// craft-side half implemented it; the §15.5 POST /api/v1/tx/power_tier ground
+// path applied the tier anyway, and its absolute ceiling then overwrote the
+// OFFSET-space §10.7 sweep bound (app/main.cpp:7040, no uplink_relative
+// guard) -- +24 qdb becoming 108 qdb read as an offset, i.e. +6 dB -> +27 dB.
+// That path lives inside run_rx's REST lambda, which this suite cannot reach
+// (main() is suppressed), so it is verified on hardware instead. Measured A/B
+// on the .242 ground with the flying preset list [60,76,84,92,108]:
+//
+//   pre-fix   POST {"tier":4} -> 200 {"ok":true};  GET -> "tier":4
+//   post-fix  POST {"tier":4} -> 409 "...relative backend (§11.7 0x0A,
+//                                     Pass 151) -- use POST /api/v1/tx/power"
+//                               GET -> "tier":-1  (nothing recorded)
+//   post-fix  POST /api/v1/tx/power {"qdb":-24} -> 200 (the actuation path
+//                                                  the 409 points at works)
+//
+// If Phase 2a lifts the REST surface out of app/main.cpp, this becomes a unit
+// test and this comment becomes the spec for it.
+
 // §10.6 (Pass 151): a config whose bound sits at or under its own safe offset
 // leaves no band, so there is nothing to sweep. REJECTED beats a one-point
 // "curve" that reports success.

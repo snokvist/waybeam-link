@@ -7004,6 +7004,24 @@ int run_rx(const Loaded& l) {
                                         "calibration running — abort it "
                                         "first (§10.7)\"}")};
                 }
+                // §11.7 0x0A / Pass 151, ground half (Pass 165). The craft
+                // has refused this since Pass 151 (set_power_tier's
+                // `if (backend_relative_) return false`); this path never
+                // did, so a tier applied here and its absolute ceiling then
+                // overwrote the OFFSET-space §10.7 sweep bound below — the
+                // window derived correctly at startup from
+                // power_offset_max_qdb. On the flying ground that moved the
+                // next sweep's ceiling from +24 qdb (+6 dB) to 108 qdb read
+                // as an offset (+27 dB), the compressing point Pass 150
+                // measured. Refuse BEFORE set_tier so nothing is recorded.
+                if (uplink_relative) {
+                    return {409,
+                            std::string(
+                                "{\"ok\":false,\"error\":\"power tier is "
+                                "absolute qdb and this uplink is on a "
+                                "relative backend (\u00a711.7 0x0A, Pass 151) "
+                                "\u2014 use POST /api/v1/tx/power\"}")};
+                }
                 // `both` first: if the craft cannot be commanded, refuse the
                 // whole action rather than half-applying it locally and
                 // reporting an error the operator reads as "nothing happened".
