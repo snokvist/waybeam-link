@@ -1225,8 +1225,23 @@ now. Nothing about that was visible while the code had exactly one consumer;
 the move is what made the distinction real, which is the general shape of what
 this phase surfaces.
 
-**Still ahead in 2a:** `TxCore` (1812 lines — the one genuinely entangled with
-`run_rx`) and the stats emitter, then B9 — which binds at the end, when the
+**Fourth move: `TxCore`, and the entanglement was not where the plan thought.**
+1812 lines, flagged as the one genuinely tangled with `run_rx` — and it turned
+out to have **no app-layer code dependency at all**. The two `UplinkPower`
+mentions in it are comments about the ground half. What it actually needed were
+six free helpers (`s_to_ms`, `selector_policy`, `calib_params_from`,
+`bw_code`, `scheduler_policy`, plus `seed_calib_policy`, which is a member and
+travelled for free). `resolve_power_qdb` and `load_power_curve` did **not**
+move: they were already in `io/`, which is the layering working as intended.
+
+The real cost was invisible from `main.cpp`: **eleven headers** that TxCore had
+been getting transitively — `scheduler.h`, `framer.h`, `frame_framer.h`,
+`frame_caps.h`, `frame_shm.h`, `fps_ladder.h`, `jscc_runtime_shadow.h`,
+`mcs_probe.h`, `report_gate.h` and two more. Every one compiled fine inside the
+8.2k-line TU and none was declared. That is the tax the layer is collecting,
+and it is a one-time tax per move.
+
+**Still ahead in 2a:** the stats emitter, then B9 — which binds at the end, when the
 layer owns enough to make "what does a library do instead of `exit()`" a
 question with a concrete answer.
 
