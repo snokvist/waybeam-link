@@ -286,6 +286,19 @@ if(WBLINK_RADIO)
         third_party/libusb-cmake/libusb/libusb)
     target_link_libraries(wblink_io PUBLIC devourer usb-1.0)
 endif()
+# --- wblink_node: node behaviour (#109 Phase 2a). The layer above io/ that
+# wires core/ into a running node. Header-only for now: RxCore is entirely
+# inline, so this adds NO translation unit and the `dev` TU set is unchanged
+# from before the move — the same no-change control Phase 1a used. It becomes
+# a STATIC library the moment something here needs a .cpp.
+#
+# Layering rule: node/ may use core/ and io/; neither may use node/.
+add_library(wblink_node INTERFACE)
+target_include_directories(wblink_node INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/node/include>)
+target_link_libraries(wblink_node INTERFACE wblink_io)
+add_library(wblink::node ALIAS wblink_node)
+
 # The three optional units. Only the target_sources half of the WBLINK_RADIO
 # pattern above applies: none of these three has a single #if consumer, so a
 # feature macro would reach every flying build's command line for nothing.
@@ -305,7 +318,7 @@ endif()
 if(WBLINK_BUILD_APP)
     add_executable(waybeam-link app/main.cpp)
     target_compile_options(waybeam-link PRIVATE ${WBLINK_WARNINGS})
-    target_link_libraries(waybeam-link PRIVATE wblink_io)
+    target_link_libraries(waybeam-link PRIVATE wblink_io wblink_node)
 endif()
 
 # Strip the shipped binary on cross builds — the SSC338Q craft roots on a
