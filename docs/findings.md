@@ -532,3 +532,39 @@ fold). Since Pass 166 the number folded there is an **offset**, not the 108
 `max_power_qdb` it used to be, so that arm mixes spaces and can reproduce the
 same one-point run from config alone. A future pass picking this up should
 start from that description, not from the pre-Pass-166 one.
+
+## 2026-08-09 — the TX half of `node/` cannot ship in a receive-only archive (#109 Phase 3)
+
+Measured while adding the `wblink_tx_*` C ABI, not reasoned from the code.
+
+`examples/node-linkcheck` builds `wblink::node` with `WBLINK_FRAME_SHM`,
+`WBLINK_CONTROL_SERVER` and `WBLINK_VENC` **off** — the phone's configuration —
+and was green on the branch that had just lifted `run_tx` into
+`node/src/tx_node.cpp`. Adding one C caller of `wblink_tx_run` turned it red
+with **~22 undefined references**: `FrameShmRing::attach/read_frame/stats/…`,
+`ControlServer::create/service/publish_stats`, `VencActuator::set_fps/
+set_bitrate/request_idr/…`.
+
+Nothing had broken. `run_tx` uses all three subsystems unconditionally — the
+same three `WBLINK_BUILD_APP` already refuses to build without — and a static
+archive extracts a member only when something references it. Until the C ABI
+existed, nothing referenced `run_tx` in that configuration, so the member was
+never extracted and the gate never looked inside it.
+
+That is the failure shape `node-linkcheck` was written to end (its CMakeLists
+records the nine references B10 removed), reappearing one level deeper: the
+gate proves the archive *links*, which is not the same as proving the archive
+*resolves*. A link gate can only see the members its consumer pulls in.
+
+Fix: `node/src/tx_node.cpp` and `node/src/tx_node_c.cpp` compile into
+`wblink_node` only when all three subsystems are ON. A receive-only consumer
+(Android `:wifi`, bionic, no `shm_open`) gets an archive that resolves; a
+transmitter configures what a transmitter needs. The `node-linkcheck` project
+now asserts against the target's SOURCES property rather than inferring it
+from the options, and deleting the guard upstream makes it fail at configure
+time (verified by mutation).
+
+Two things this does NOT claim. It is not a bug in the lift — the references
+were latent, never live, and no shipped build was affected. And it is not
+proof that no other member of `wblink_node` carries the same latency: the check
+is specific to the TX sources, and the general property still has no gate.
