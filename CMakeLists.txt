@@ -385,6 +385,15 @@ if(WBLINK_FRAME_SHM AND PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
     target_link_libraries(frame_shm_feed PRIVATE wblink_io)
 endif()
 
+# B10 runtime probe (#109). node-linkcheck proves the sink's symbols resolve;
+# this proves a FRAME reaches it, which no unit test can — run_rx opens
+# adapters and blocks. Native + top-level only, like the other bench tools.
+if(PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
+    add_executable(frame_sink_probe tools/frame_sink_probe.cpp)
+    target_compile_options(frame_sink_probe PRIVATE ${WBLINK_WARNINGS})
+    target_link_libraries(frame_sink_probe PRIVATE wblink_node)
+endif()
+
 # Hardware trial harness (issue #140). Top-level + radio only, and native
 # only — it opens usbfs on the host it runs on. RX-only by construction, so it
 # cannot transmit; see the file header.

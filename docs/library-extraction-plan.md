@@ -1588,14 +1588,46 @@ fixed-point jitter, so a consumer cannot tell which egress produced them. The
 ring-only fields (`reads`, `ring_full`, the producer-health block) stay zero
 because there is no ring to observe.
 
-**What is NOT proven yet.** The link check proves the sink resolves; nothing
-yet proves a frame comes out of it. `run_rx` opens adapters and blocks, so no
-unit test reaches the path. The runtime proof wants a real consumer, and the
-cheapest one is not Android: it is **waybeam-hub on the x86 dev host**, whose
-`mod_pixelpilot` / `mod_video_player` already consume whole frames from the
-frame-SHM ring. Wiring the hub to link `wblink::node` and take frames from the
-callback instead tests the seam against a decoder that exists, on a machine
-that is already on the bench — before any of it depends on a phone.
+### 4.11 B10 proven at runtime — byte-exact, on localhost
+
+The link gate proves the sink's symbols resolve. It cannot prove a frame
+reaches it, and no unit test can either: `run_rx` opens adapters and blocks.
+
+`tools/frame_sink_probe` closes that. It is the smallest thing that is a real
+consumer — links `wblink::node`, supplies a `FrameSink`, counts what arrives —
+and `tools/frame_sink_bench.sh` drives it end to end with no radio, no
+hardware and no second repo:
+
+```
+frame_shm_feed produce   ->  waybeam-link tx (frame-shm ingest, FEC, udp air)
+                         ->  frame_sink_probe (egress = callback)
+
+producer frames=180 bytes=3960000 full_drop=0 oversize_drop=0
+probe:   stream 0: 180 frames, 3960000 bytes, size 20000..80000
+```
+
+**Byte-exact**, and the §15.3 counters the sink path now keeps for itself read
+`frame_count 180`, `frame_bytes 3960000`, `frame_interval_us 33291` at the
+producer's 30 fps. Had the first draft shipped — the one that skipped the
+stats entry for a sink-backed stream — every one of those would have been 0
+while video flowed.
+
+**The pairing is the trap, and it cost a run.** The first attempt fed the
+frame-shm RX from `config.air-tx.sample.json`, which ingests *RTP datagrams*.
+The RX received all 10799 of them and emitted **zero frames** — which reads
+exactly like a broken sink. It is not: whole-frame egress needs a TX that
+*framed* the input, so `config.frame-shm-tx.sample.json` is the only correct
+partner. What settled it was the control rather than the reasoning: stock `rx`
+mode on the same feed also reports `frame_count 0`, which exonerates the sink
+before any of its code is read. Run the control first.
+
+**What is still not proven** is that the frames are *decodable by a real
+consumer* — the probe counts bytes, it does not decode. That wants
+**waybeam-hub on the x86 dev host**, whose `mod_pixelpilot` /
+`mod_video_player` already consume whole frames from the frame-SHM ring;
+wiring it to take them from the callback instead tests the seam against a
+decoder that exists, on a machine already on the bench. Then Android, then the
+RK3566 decoder (operator's order, 2026-08-09).
 
 ## 5. Loose ends worth knowing before starting
 

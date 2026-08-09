@@ -25,6 +25,7 @@
 
 #include "wblink/config.h"
 #include "wblink/node/air_backend.h"
+#include "wblink/node/load.h"
 #include "wblink/node/rx_core.h"
 #include "wblink/node/tx_core.h"
 #include "wblink/table.h"
@@ -199,12 +200,10 @@ class ArqTimingTracker {
     std::optional<uint64_t> last_eob_us_;
 };
 
-struct Loaded {
-    Config cfg;
-    ProfileTable table;
-    bool have_table = false;
-    uint8_t tv = 0;
-};
+// Loaded + load_all moved to node/load.h (#109 Phase 3 prep):
+// a consumer that runs a node has to build one, and reaching it
+// through the §15.3 assembly header was an accident of where it
+// happened to land in Phase 2a.
 
 // §11.7/§15.3 command-surface fields not owned by Tx/RxCore (the engines
 // live in the mode loops): craft nonce, issuer campaign state, rx ARQ gate.
