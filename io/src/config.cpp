@@ -312,6 +312,49 @@ Result<Config> load_config_json(const std::string& json_text) {
                     }
                 }
             }
+            // §11.7 0x0A offset-space preset list (Pass 166). Every rule of
+            // the absolute list above, with max_power_qdb ->
+            // power_offset_max_qdb. Kept as a separate block rather than a
+            // shared helper: the two differ in which key clamps them and in
+            // one being optional-typed, and a helper taking both would have
+            // to branch on that anyway.
+            if (a.contains("power_offset_presets_qdb")) {
+                if (ac.role == Role::kRx) {
+                    return Result<Config>::fail(
+                        "adapter " + ac.name +
+                        ": power_offset_presets_qdb on a role:\"rx\" adapter "
+                        "is never applied (§10.3) — put it on the "
+                        "role:\"tx\" adapter");
+                }
+                for (const json& v : a.at("power_offset_presets_qdb")) {
+                    ac.power_offset_presets_qdb.push_back(v.get<int32_t>());
+                }
+                if (ac.power_offset_presets_qdb.size() > kVcmdMaxArg + 1u) {
+                    return Result<Config>::fail(
+                        "adapter " + ac.name +
+                        ": power_offset_presets_qdb holds more than 5 entries "
+                        "— §11.7 cmd_arg indexes at most 5 choices");
+                }
+                if (ac.power_offset_presets_qdb.empty()) {
+                    return Result<Config>::fail(
+                        "adapter " + ac.name +
+                        ": power_offset_presets_qdb is empty — omit the key "
+                        "instead");
+                }
+                // A tier may only LOWER power (Pass 135/166). Unlike the
+                // absolute clamp this one always runs: power_offset_max_qdb
+                // is not optional, it defaults to 0, and a config that omits
+                // it gets exactly the §10.5 posture that default encodes.
+                for (int32_t& q : ac.power_offset_presets_qdb) {
+                    if (q > ac.power_offset_max_qdb) {
+                        wb_logf("config: adapter %s: power offset preset %d "
+                                "qdb clamped to power_offset_max_qdb %d "
+                                "(§10.3/§10.5)\n",
+                                ac.name.c_str(), q, ac.power_offset_max_qdb);
+                        q = ac.power_offset_max_qdb;
+                    }
+                }
+            }
             cfg.adapters.push_back(std::move(ac));
         }
 
