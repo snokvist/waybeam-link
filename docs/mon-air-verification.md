@@ -1,5 +1,12 @@
 # Kernel-monitor backend + core verification (2026-07-11; updated 2026-07-19)
 
+> **RETIRED — historical record only.** The `kernel-monitor` backend was
+> deleted in **Pass 164** (2026-08-08, ruling #120 item 3 amended from
+> "relocate" to "drop"); `air.kind: "kernel-monitor"` no longer loads. This
+> file is kept because the **core** ARQ/broadcast verification it reports was
+> backend-independent and still stands. Nothing here describes a live
+> configuration — do not copy a config or a bring-up step out of it.
+
 Bench report for the `kernel-monitor` air backend (`MonAir`, PR #15) and the
 core ARQ/broadcast verification it enabled. Companion to `docs/step11-bench.md`.
 

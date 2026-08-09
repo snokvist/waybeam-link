@@ -317,11 +317,10 @@ int main() {
         CHECK(!r);
         if (!r) CHECK(r.error.find("out of range") != std::string::npos);
     }
-    // §10.7 Pass 146 (radio re-based Pass 154): identity resolution. The
-    // point is that an artifact survives a re-plug — the old bus-path form
-    // did not — while still differing per backend, so a monitor-measured
-    // curve reads STALE on devourer instead of being applied to a different
-    // actuator.
+    // §10.7 Pass 146 (radio re-based Pass 154; tiers 2-4 deleted Pass 164):
+    // identity resolution. The point is that an artifact survives a re-plug —
+    // the old bus-path form did not — and that a unit with no MAC gets NO
+    // identity rather than a weaker one.
     {
         AdapterCfg a;
         a.name = "uplink";
@@ -347,20 +346,17 @@ int main() {
         a.bus.clear();
         a.calib_id.clear();
 
-        // kernel-monitor keeps the Pass 146 tiers (frozen, ruling #120).
-        // An ifname derives from the netdev...
+        // Pass 164: the declared / ifname / bus tiers went with
+        // kernel-monitor. No non-radio backend has a power actuator, so none
+        // of these keys resolves an identity any more — they are inert, and
+        // the answer is the actuator-less "udp" regardless of what is set.
         a.ifname = "wlnosuchdev";
-        CHECK(calib_identity(a, AirCfg::Kind::kMonitor, {})
-                  .rfind("wlnosuchdev/", 0) == 0);
-        // ...and the declared calib_id wins over it, scoped by backend so
-        // the SAME operator-chosen name under another backend is a DIFFERENT
-        // identity — a monitor-measured curve must never silently reach
-        // devourer's offset actuator.
+        a.bus = "9-9";
         a.calib_id = "craft-eu-1";
-        CHECK(calib_identity(a, AirCfg::Kind::kMonitor, {}) ==
-              "id/monitor/craft-eu-1");
-        CHECK(calib_identity(a, AirCfg::Kind::kMonitor, {}) !=
-              calib_identity(a, AirCfg::Kind::kRadio, "84:fc:14:50:bc:de"));
+        CHECK(calib_identity(a, AirCfg::Kind::kUdp, {}) == "udp");
+        CHECK(calib_identity(a, AirCfg::Kind::kUdpBroadcast, {}) == "udp");
+        // ...and they still do not stand in for a missing MAC on radio.
+        CHECK(calib_identity(a, AirCfg::Kind::kRadio, {}).empty());
     }
 
     return wbtest_finish("uplink_calib_store_test");

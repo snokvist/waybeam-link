@@ -128,7 +128,7 @@ int main() {
     };
     h.tx_power_json = [&]() -> std::string {
         return std::string(
-            "{\"override_active\":false,\"backend\":\"kernel-monitor\"}");
+            "{\"override_active\":false,\"backend\":\"radio\"}");
     };
     // §10.7 (Pass 125): both directions answer at /api/v1/calibration, so
     // `direction` is what tells a Hub which one it is holding. This node

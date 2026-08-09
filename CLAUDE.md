@@ -1,6 +1,6 @@
 # waybeam-link
 
-A best-effort, latency-first broadcast video + telemetry link over monitor/
+A best-effort, latency-first broadcast video + telemetry link over raw
 injection WiFi (RTL8812AU/CU/EU via vendored OpenIPC devourer), with per-adapter
 RX diversity as primary redundancy, opt-in importance-gated ARQ, an adaptive
 link layer, and a follow-me channel switch. See `README.md` for the full pitch
@@ -97,8 +97,8 @@ cost — do not skip them to save time.
   FEC, channel), and sweep the FULL commanded range — terminating at the
   first wall placed a rung 14 dB wrong (Pass 133).
 - **Two adapters of the same part number are not a replicate** (Pass 139:
-  the "broken chip" behind the whole kernel-monitor posture was one bad
-  unit). Per-unit, not per-chip.
+  the "broken chip" behind the whole devourer-vs-kernel-monitor posture was
+  one bad unit). Per-unit, not per-chip.
 - Method lessons like these graduate to the coordination repo's memory, not
   into the review log.
 
@@ -110,8 +110,9 @@ Current phase order (operator direction, 2026-08-06): **consolidate → expand
 1. **Consolidate:** settle §10.5 offset-space actuation (PR #114), calibration
    v2 (`docs/calibration-v2-symmetric-probes.md` — design → ruling → impl),
    minimal strict config check (#106 first slice).
-2. **Expand:** devourer upside tranche #95–#101, in the order filed;
-   devourer is the TX-role backend, kernel-monitor stays for RX/spectator.
+2. **Expand:** devourer upside tranche #95–#101, in the order filed.
+   Since Pass 164 devourer is the ONLY air backend — kernel-monitor is
+   deleted, and RX/spectator nodes run on it via `allow_rx_only` (Pass 162).
 3. **Distill:** library extraction (#109) — `core/` plus a real "waybeam
    node" layer out of `app/main.cpp`; the calibration-v2 engine should land
    already library-shaped (pure core, injected send/tally callbacks).
@@ -141,8 +142,10 @@ prose. Until the harness in `docs/config-harness-plan.md` exists:
   then read the config dump — and remember `policy.csa.psk` must print
   redacted. `--strict` adds the unknown/inert key report; without it a typo
   still loads clean.
-- `deploy/*.json` are the four flying nodes and the reference for what a real
-  config looks like; `examples/*.json` are samples, not deployments.
+- `deploy/*.json` are the flying nodes that could be read from live hardware
+  and the reference for what a real config looks like; `examples/*.json` are
+  samples, not deployments. `.199` and `.247` are missing on purpose — see
+  `deploy/README.md`.
 - The archetype a config belongs to is not its `node.role`: a ground with an
   uplink is `node.role:"rx"` with one `role:"tx"` adapter, and a spectator
   differs from it by one boolean. See `docs/config-harness-plan.md` §1.
@@ -158,7 +161,7 @@ scripts/gates.sh            # EVERY merge gate; what CI runs. --quick = dev + ct
 
 Run that rather than a remembered checklist. It covers the eight presets, the
 65-suite `ctest`, the B7 embed check, the install/`find_package` round trip and
-the four `deploy/*.json` `--check`s, and it **fails on a diagnostic for our
+the `deploy/*.json` `--check`s, and it **fails on a diagnostic for our
 targets even when the build exits 0**. Toolchains the host lacks are SKIPPED
 loudly and counted separately — a skip is never a pass. Export
 `WBLINK_SSC338Q_TOOLCHAIN` and `WBLINK_ANDROID_NDK` to get the cross presets.
@@ -276,7 +279,8 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
 - `tools/` — bench analyzers: `gate2_rho.py` (cross-adapter loss correlation),
   `gate3_rtt.py` (NACK→RETRANSMIT latency), `rtp_feed.py` (synthetic RTP feeder).
 - `profiles/` — the §9.3 operating-point table (data, not code).
-- `examples/` — sample configs (loopback, udp-air tx/rx, radio tx/rx).
+- `examples/` — sample configs (loopback, udp-air tx/rx, radio tx/rx,
+  frame-shm tx/rx).
 - `docs/` — `build-order.md` (§19 order + §17 gates), `review-log.md` (live
   Tier-1 ruling log, Pass 153+), `review-log-archive-p001-152.md` (frozen
   Pass 1–152 history), `findings.md` (Tier-2 measurement notes),

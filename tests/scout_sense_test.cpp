@@ -121,7 +121,7 @@ void test_ranking() {
         CHECK_EQ_U(emptiest_channel({}, {5745, 5785}, 0), 0);
     }
     // Sensor-less rows (util == wifi_util) compete on equal terms — the
-    // structural kernel-monitor fallback needs no special case.
+    // structural no-sensor fallback needs no special case.
     {
         const std::vector<ChannelUtil> m{{5745, 120}, {5785, 90}};
         CHECK_EQ_U(emptiest_channel(m, {5745, 5785}, 0), 5785);

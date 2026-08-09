@@ -24,6 +24,85 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 165 — the §11.7 `0x0A` relative-backend refusal binds the ground half (2026-08-09)
+
+**Verdict.** Pass 151 ruled a power tier REJECTED when the air backend is
+relative: `power_presets_qdb` are absolute qdb and there is no offset-space
+tier. Only the **craft** implemented it (`app/main.cpp:3304`). The §15.5
+`POST /api/v1/tx/power_tier` ground path applied the tier unconditionally, and
+`:7058` folded its absolute `ceiling_qdb` into the **offset-space** §10.7 sweep
+bound — overwriting the window the same function derives correctly at startup
+(`:5769`, which comments that the absolute ceiling "is deliberately not folded
+in"). The ground now refuses identically, **before** the tier is recorded.
+
+**The chain, corrected in pre-merge review.** The sweep's own actuation is
+clamped to `power_offset_max_qdb` (`:7500`), so a moved bound does **not** make
+the run radiate above §10.5 — this Pass's first cut said it did. The hazard is
+one step later: every step above the bound commands the same clamped power, the
+seek reads flat, and it persists a **placement** as high as the preset.
+`uplink_artifact_qdb` clamps a stored placement only by the absolute
+`ceiling_qdb` (`:5935`, a no-op at 108), and `upwr.apply_qdb` (`:5993`) applies
+it with **no `power_offset_max_qdb` clamp** — so it reaches the chip on the next
+apply, pairing pass or boot.
+
+**Reachable on the fleet.** `deploy/ground-192.168.2.242.json` carries
+`power_presets_qdb: [60,76,84,92,108]` and `power_offset_max_qdb: 24`, so one
+`POST {"tier":4}` opened that chain toward 108 qdb of offset (**+27 dB**)
+against the intended +24 (+6 dB) — the point Pass 150 measured driving an
+8822EU into compression at 54 ‰ loss against 6 ‰ two dB below. No calibration
+run had exercised the sequence, which is why it survived Passes 151–164.
+
+**Changed.** §11.7 `0x0A` (the refusal binds both halves; `0x0A` and its REST
+twin are reachable only on the udp bench since Pass 164, and §10.5
+`POST /api/v1/tx/power` is the actuation path on a relative node); §15.5
+`POST /api/v1/tx/power_tier` gains the 409.
+
+**Named, not fixed.** The artifact apply stays unclamped by
+`power_offset_max_qdb` (with the bound pinned, nothing can author a placement
+above it); the §10.7 placement clamp is a no-op only while that bound is small,
+since the key validates to ±511; re-basing presets into offset space needs its
+own ruling. Found by adversarial pre-merge review, twice — the first pass found
+the gap, the second corrected the mechanism.
+
+## Pass 164 — kernel-monitor is deleted; devourer is the only RF backend (2026-08-08)
+
+**Verdict.** Ruling #120 item 3 had `MonAir` *moved* to an external RX-only
+repo at the library split, as its second proving consumer. The operator ruled
+**DROP** instead: the backend's last archetype is a spectator, and a devourer
+spectator with **zero `role:"tx"` adapters** delivered 19466 frames, uniq
+19466, diversity 19430, loss 0 ‰, both dies EFUSE-autoloaded. Both flying nodes
+migrated to devourer 2026-08-06; only the repo was stale. `air.kind
+"kernel-monitor"` is now rejected by the loader. Nothing on air changes — the
+backend was never wire-visible — so no §3.1 version event.
+
+**Changed.** §3.0 catalog (`air.kind` ∈ `udp | udp-broadcast | radio`, plus a
+retirement paragraph); §10.5 matrix loses the `iw` absolute row and
+`max_power_qdb`'s *reference* role; §10.6/§10.7 identity tiers 2–4
+(`id/monitor/`, `ifname/<MAC>`, `bus/`) retired, `mac/<efuse-mac>` stands
+alone; §15.5 `GET /api/v1/tx/power` `backend` ∈ `radio | udp`; §14.2
+`airtime_efficiency_permille` radio-only; §11.6 recovery is the devourer
+RX-path restart.
+
+**Stranded keys — two, inert not retired.** `adapters[].ifname` and
+`adapters[].calib_id` lose their last reader. Both still load; `--check
+--strict` reports them **inert**. Retiring them is a separate pass.
+
+> **Corrected before merge.** The first cut also called `max_power_qdb` and
+> `power_presets_qdb` inert. False — §15.3 `tx_power_ceiling_qdb`
+> (`app/main.cpp:3186`), §15.5 `GET /api/v1/tx/power_tier`, the ground
+> `UplinkPower::hw_qdb()` override clamp (`:1197`) and the §10.7 sweep bound
+> (`:5935`) read them on radio, and both are set on both flying configs:
+> `--strict` would have told the operator to delete a key that clamps TX power.
+> Predicate dropped and pinned. The same trace found the ground gap **Pass 165**
+> closes.
+
+**Deploy.** `.199` and `.247` deleted, not migrated: both offline, so their real
+state could not be read, and `gates.sh` `--check`s every `deploy/*.json`.
+Inventing content would ship configs no node ever loaded. Re-author when
+powered. §15.3 `bpf_filtered` keeps its slot at a permanent 0 (schema
+stability). #109 loses the split's second proving consumer; Phase 3 now rests
+on Android alone, and B6's `air_mon.cpp` leg closes by deletion.
+
 ## Pass 163 — sequence-derived rate probing: the §9.2 numerator closed, probe as veto (2026-08-08)
 
 **Verdict.** Issue #101's code stages, on two operator rulings: the probe

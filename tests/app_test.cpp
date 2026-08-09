@@ -455,6 +455,25 @@ void test_tier_rejected_on_relative_backend() {
     CHECK(mon.power_tier_ceiling().value_or(-1) == 60);
 }
 
+// GROUND TWIN (Pass 165). Pass 151 stated the refusal once and only this
+// craft-side half implemented it; the §15.5 POST /api/v1/tx/power_tier ground
+// path applied the tier anyway, and its absolute ceiling then overwrote the
+// OFFSET-space §10.7 sweep bound (app/main.cpp:7040, no uplink_relative
+// guard) -- +24 qdb becoming 108 qdb read as an offset, i.e. +6 dB -> +27 dB.
+// That path lives inside run_rx's REST lambda, which this suite cannot reach
+// (main() is suppressed), so it is verified on hardware instead. Measured A/B
+// on the .242 ground with the flying preset list [60,76,84,92,108]:
+//
+//   pre-fix   POST {"tier":4} -> 200 {"ok":true};  GET -> "tier":4
+//   post-fix  POST {"tier":4} -> 409 "...relative backend (§11.7 0x0A,
+//                                     Pass 151) -- use POST /api/v1/tx/power"
+//                               GET -> "tier":-1  (nothing recorded)
+//   post-fix  POST /api/v1/tx/power {"qdb":-24} -> 200 (the actuation path
+//                                                  the 409 points at works)
+//
+// If Phase 2a lifts the REST surface out of app/main.cpp, this becomes a unit
+// test and this comment becomes the spec for it.
+
 // §10.6 (Pass 151): a config whose bound sits at or under its own safe offset
 // leaves no band, so there is nothing to sweep. REJECTED beats a one-point
 // "curve" that reports success.
@@ -712,7 +731,7 @@ void test_bw_code() {
 //
 // FakeAir exists because the interface's whole point is that a backend states
 // its answer somewhere a test can read it. Before the contract there was
-// nothing to fake: AirBackend held concrete std::optional<MonAir>, so the
+// nothing to fake: AirBackend held concrete backend optionals, so the
 // capability gaps could only be observed on hardware.
 //
 // These cases pin the DECLARED LIMITS, not aspirations. Several assert that a
@@ -839,7 +858,7 @@ AirBackend backend_with(std::unique_ptr<FakeAir> f, size_t adapters) {
     return b;
 }
 
-// CHANGED IN THIS PASS: the monitor path used to flush unconditionally.
+// CHANGED IN PASS 143: the recover path used to flush unconditionally.
 // Flushing after a recovery that recovered nothing discards live backlog for
 // no benefit, and on a backend with no re-init path it is a pure loss.
 void test_recover_all_only_flushes_when_something_recovered() {
@@ -865,7 +884,7 @@ void test_recover_all_only_flushes_when_something_recovered() {
 
 // CHANGED IN THIS PASS: the radio path used to re-apply TX power even when the
 // retune had failed. Re-applying power for a channel the adapter is not on is
-// meaningless; the monitor path already only did it on success.
+// meaningless.
 void test_retune_all_reapplies_power_only_on_success() {
     auto f = std::make_unique<FakeAir>();
     f->adapters = 3;

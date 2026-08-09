@@ -14,10 +14,10 @@
 
 namespace wblink {
 
-// §3.0 Pass 118: one rate-carrying mechanism for both air backends — the
+// §3.0 Pass 118: one rate-carrying mechanism on the air backend — the
 // 13-byte HT radiotap prefix carries the per-packet MCS. Devourer honours it
 // and consults its committed SetTxMode (§9.5/§10.4) only for frames whose
-// radiotap has no rate; the kernel-monitor backend has no other mechanism.
+// radiotap has no rate.
 inline constexpr size_t kRadiotapTxLen = kRadiotapTxHtLen;
 inline constexpr size_t kDot11HdrLen = 24;
 inline constexpr size_t kDot11QosHdrLen = 26;  // + 2-byte QoS Control
@@ -55,8 +55,8 @@ inline constexpr uint8_t kWbSaPrefix1 = 0x42;
 inline constexpr uint8_t kWbBssid[6] = {0x56, 0x42, 0x4c, 0x4b, 0x00, 0x00};
 
 // Writes JUST the pinned 24-byte broadcast Data header into h (no radiotap) —
-// the single source of the §3.0 header, shared by dot11_tx_prefix and the
-// kernel-monitor backend's own send path. seq is the injector-incremented
+// the single source of the §3.0 header, used by dot11_tx_prefix.
+// seq is the injector-incremented
 // sequence number (fragment 0). NB devourer sets EN_HWSEQ in the TX
 // descriptor, so on that backend the chip restamps this field on air; no RX
 // path reads it (dot11_parse ignores bytes 22-23).

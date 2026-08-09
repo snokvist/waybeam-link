@@ -190,11 +190,11 @@ This is a measurement, not an implementation. **Do it before designing
 anything.** Three separate gates, none of them open today, and the
 fleet-default chip is the uncertain one.
 
-**B1a — kernel-monitor.** `scripts/mon-up.sh:20` runs
-`iw dev "$IF" set monitor otherbss`. There is no `fcsfail` flag, so mac80211
-does not deliver FCS-failed frames upward. Try `otherbss fcsfail`, then
-`fcsfail` alone, and record what the out-of-tree 88x2 drivers actually accept —
-they may reject the flag, accept and ignore it, or work.
+**B1a — kernel-monitor — DROPPED (Pass 164).** The backend and
+`scripts/mon-up.sh` are deleted, so this leg has no subject. It asked whether
+`iw dev "$IF" set monitor otherbss fcsfail` would make mac80211 deliver
+FCS-failed frames upward; the question dies with the backend. Only the
+devourer leg remains.
 
 **B1b — devourer Jaguar1/Jaguar2.** `rx.keep_corrupted`
 (`third_party/devourer/src/DeviceConfig.h:85`) sets `RCR_ACRC32|RCR_AICV` and

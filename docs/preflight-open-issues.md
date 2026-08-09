@@ -687,10 +687,12 @@ walk is also the missing gate-4 range sample (C2).
 
 - `deploy/README.md`: "profile/MCS 3" — the vehicle config has been adaptive
   `min 1 / max 5` since #47.
-- `deploy/README.md`: "the configured 27 dBm vehicle TX power" — nothing in
-  `deploy/vehicle-192.168.2.232.json` configures power, kernel-monitor power
-  actuation is a documented no-op, and `mon-up.sh` sets `txpower auto`. The
-  regulatory claim is unenforced.
+- ~~`deploy/README.md`: "the configured 27 dBm vehicle TX power"~~ — **FIXED
+  (Pass 164).** `deploy/README.md` now states the actual posture: the vehicle
+  runs at the §10.5 relative offset (`power_offset_qdb`, seed −24 qdb = −6 dB)
+  against the adapter's efuse table. kernel-monitor and `mon-up.sh` are
+  deleted. The regulatory limit is still the adapter/driver's to enforce, not
+  this repo's.
 - `deploy/README.md`: says the vehicle link is deliberately not linked into rcS;
   the craft now boots into waybeam-link via S96 (and S96 is not in this repo).
 - `ROADMAP.md`: still lists Passes 64–66 as active work; they merged.

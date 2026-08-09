@@ -173,12 +173,12 @@ class RadioAir : public AirIface {
     // paths); the filter is read per frame on every adapter's RX thread, so it
     // is an atomic here rather than a cfg field. Filtering is software-only in
     // this backend, so a widen takes effect on the next frame with no
-    // pre-filter to re-attach (kernel-monitor re-attaches BPF).
+    // kernel pre-filter to re-attach.
     void set_stamp_net_id(uint8_t net_id) override;
     void set_filter_net_id(std::optional<uint8_t> net_id) override;
     // §15.5a scout: the uplink adapter the sweep roams, resolved from the
     // role:"tx" adapter. Meaningful only under has_tx(); an RX-only node
-    // reads 0, matching kernel-monitor (§3.11 Pass 162).
+    // reads 0 (§3.11 Pass 162).
     size_t tx_index() const override;
     // §11.6 Pass 80 RX-liveness recovery: stop the RX loop, join it, re-run
     // the write-side bring-up at the target channel, restart the loop. Not a
@@ -191,7 +191,7 @@ class RadioAir : public AirIface {
     // §11.6 verify hygiene (Pass 69): discard the process-queue RX backlog
     // captured before a retune completed, so post-retune consumers only see
     // frames from the new channel. devourer's internal USB pipeline is below
-    // this boundary (same posture as driver buffers on kernel-monitor).
+    // this boundary, the same way driver buffers would be.
     void flush_rx() override;
 
     // --- declared limits -------------------------------------------------
@@ -204,8 +204,7 @@ class RadioAir : public AirIface {
     // Behaviour is preserved exactly; ids are docs/devourer-parity-plan.md.
 
     // §10.5 "auto": zero the offset, undoing the latch and leaving any §10.2
-    // curve resolve to re-apply on top. Differs from kernel-monitor (which
-    // hands power back to the driver default) — the spec documents both.
+    // curve resolve to re-apply on top (§10.5).
     bool set_power_auto(size_t adapter) override;
     // §3.11 (Pass 162): truthful. False on the RX-only bring-up
     // (allow_rx_only, zero role:"tx"), where inject*/set_tx_mode report

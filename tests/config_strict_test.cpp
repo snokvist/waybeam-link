@@ -21,9 +21,9 @@ using namespace wblink;
 namespace {
 
 // Minimal loadable node config. Callers splice extra stanzas in via `extra`.
-// `air.kind` matters: has_uplink() is per backend, and only the RF ones follow
-// the adapters (UdpAir::has_tx is hardcoded true). kernel-monitor is what
-// deploy/ground-192.168.2.199.json actually flies.
+// `air.kind` matters: has_uplink() is per backend, and only the RF one follows
+// the adapters (UdpAir::has_tx is hardcoded true). radio is what every flying
+// node runs since Pass 164 deleted kernel-monitor.
 const char* kUdpInStream =
     R"({ "stream_id": 0, "stream_type": "RTP", "dir": "in",
          "bind": { "kind": "udp", "listen": "127.0.0.1:5600" } })";
@@ -34,7 +34,7 @@ const char* kShmOutStream =
          "bind": { "kind": "frame-shm", "name": "wbtest_ring" } })";
 
 std::string cfg_json(const std::string& adapters, const std::string& extra,
-                     const std::string& air = R"({ "kind": "kernel-monitor" })",
+                     const std::string& air = R"({ "kind": "radio" })",
                      const std::string& streams = kUdpInStream) {
     return std::string(R"({
   "node": { "originator": 7, "role": "rx" },
@@ -44,10 +44,10 @@ std::string cfg_json(const std::string& adapters, const std::string& extra,
 }
 
 const char* kRxOnly =
-    R"({ "name": "wlan0", "ifname": "wlan0", "role": "rx", "channel": 5805, "bw": 20 })";
+    R"({ "name": "wlan0", "bus": "1-1", "role": "rx", "channel": 5805, "bw": 20 })";
 const char* kTxAndRx =
-    R"({ "name": "wlan0", "ifname": "wlan0", "role": "tx", "channel": 5805, "bw": 20 },)"
-    R"({ "name": "wlan1", "ifname": "wlan1", "role": "rx", "channel": 5805, "bw": 20 })";
+    R"({ "name": "wlan0", "bus": "1-1", "role": "tx", "channel": 5805, "bw": 20 },)"
+    R"({ "name": "wlan1", "bus": "5-1", "role": "rx", "channel": 5805, "bw": 20 })";
 
 // Load, then classify. Fails the test rather than returning junk if the
 // fixture itself does not load — a fixture that stopped parsing would
@@ -143,8 +143,10 @@ int main() {
     }
 
     // --- inert: the uplink-free case, which is the whole point --------------
-    // deploy/ground-192.168.2.199.json is this shape: a real spectator whose
-    // policy.return block is dead text (§15.2, PROTOCOL.md:4510).
+    // The RK3566 spectator archetype: a real spectator whose policy.return
+    // block is dead text (§15.2, PROTOCOL.md:4510). Its config,
+    // deploy/ground-192.168.2.199.json, was deleted in Pass 164 (node offline,
+    // could not be mirrored) -- this fixture is now the only copy of the shape.
     {
         const std::string ret =
             R"(, "policy": { "return": { "guard_us": 300, "quiet_gap": true } })";
@@ -197,7 +199,7 @@ int main() {
         CHECK(!has(off, "cache.repair.enabled", KeyVerdict::kInert));
         const auto on = findings_for(cfg_json(kTxAndRx,
             R"(, "cache": { "repair": { "enabled": true, )" + caches + " } }",
-            R"({ "kind": "kernel-monitor" })", kShmOutStream));
+            R"({ "kind": "radio" })", kShmOutStream));
         CHECK(!has(on, "cache.repair.listen", KeyVerdict::kInert));
     }
     {
@@ -251,6 +253,66 @@ int main() {
         if (cfg) {
             const auto f = check_config_keys(text, *cfg.value);
             CHECK(f.size() < 100);
+        }
+    }
+
+    // --- Pass 164 stranded keys --------------------------------------------
+    // adapters[].ifname and adapters[].calib_id lost their only reader when
+    // the kernel-monitor backend was deleted. They are inert on EVERY
+    // backend, so both arms of every fixture must report them.
+    {
+        const char* kIfnameAdapter =
+            R"({ "name": "wlan0", "bus": "1-1", "ifname": "wlan0",
+                 "calib_id": "craft-eu-1",
+                 "role": "tx", "channel": 5805, "bw": 20 })";
+        const auto radio = findings_for(cfg_json(kIfnameAdapter, ""));
+        CHECK(has(radio, "adapters[].ifname", KeyVerdict::kInert));
+        CHECK(has(radio, "adapters[].calib_id", KeyVerdict::kInert));
+        // ...and on udp too — these are not backend-conditional.
+        const auto udp = findings_for(cfg_json(kIfnameAdapter, "",
+            R"({ "kind": "udp", "tx": ["127.0.0.1:1"], "rx": ["0.0.0.0:1"] })"));
+        CHECK(has(udp, "adapters[].ifname", KeyVerdict::kInert));
+        CHECK(has(udp, "adapters[].calib_id", KeyVerdict::kInert));
+        // A config that omits them says nothing — inert must not be noise.
+        const auto clean = findings_for(cfg_json(kTxAndRx, ""));
+        CHECK(!has(clean, "adapters[].ifname", KeyVerdict::kInert));
+        CHECK(!has(clean, "adapters[].calib_id", KeyVerdict::kInert));
+    }
+    // REGRESSION PIN (pre-merge review, Pass 164). max_power_qdb and
+    // power_presets_qdb were briefly declared inert on radio. They are NOT:
+    // §15.3 tx_power_ceiling_qdb, §15.5 GET /api/v1/tx/power_tier, the ground
+    // UplinkPower::hw_qdb() override clamp that reaches the actuator, and the
+    // load-time clamp of the presets to the ceiling all read them on a radio
+    // node, and BOTH flying configs set them. A predicate here tells the
+    // operator to delete a key that clamps TX power. See the DO NOT PREDICATE
+    // block in io/src/config_registry.cpp.
+    {
+        const char* kAbsAdapter =
+            R"({ "name": "wlan0", "bus": "1-1", "role": "tx",
+                 "channel": 5805, "bw": 20, "max_power_qdb": 84,
+                 "power_presets_qdb": [60, 76, 84] })";
+        const auto radio = findings_for(cfg_json(kAbsAdapter, ""));
+        CHECK(!has(radio, "adapters[].max_power_qdb", KeyVerdict::kInert));
+        CHECK(!has(radio, "adapters[].power_presets_qdb", KeyVerdict::kInert));
+        const auto udp = findings_for(cfg_json(kAbsAdapter, "",
+            R"({ "kind": "udp", "tx": ["127.0.0.1:1"], "rx": ["0.0.0.0:1"] })"));
+        CHECK(!has(udp, "adapters[].max_power_qdb", KeyVerdict::kInert));
+        CHECK(!has(udp, "adapters[].power_presets_qdb", KeyVerdict::kInert));
+    }
+    // Prefix-bleed guard, the trap that bit air.tx_retry_limit in #148. These
+    // are the RELATIVE §10.5 contract plus the two absolute-ceiling keys
+    // above: every one is live on every backend and must stay unpredicated.
+    for (const char* p : {"adapters[].power_offset_qdb",
+                          "adapters[].power_offset_max_qdb",
+                          "adapters[].max_power_qdb",
+                          "adapters[].power_presets_qdb",
+                          "adapters[].power_map", "adapters[].bus",
+                          "adapters[].mac"}) {
+        const KeyEntry* e = entry(p);
+        CHECK(e != nullptr);
+        if (e != nullptr && e->live != nullptr) {
+            std::fprintf(stderr, "  %s must not be Pass-164-gated\n", p);
+            CHECK(false);
         }
     }
 

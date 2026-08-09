@@ -166,7 +166,8 @@ Result<Config> load_config_json(const std::string& json_text) {
             ac.ifname = a.value("ifname", std::string{});
             // §10.7 (Pass 146): pins the calibration artifact to this
             // physical adapter regardless of ifname/serial/bus path.
-            // kernel-monitor only since Pass 154 (frozen, ruling #120).
+            // INERT since Pass 164: identity tiers 2-4 went with
+            // kernel-monitor; radio derives identity from the EFUSE MAC.
             ac.calib_id = a.value("calib_id", std::string{});
             // §15.2 (Pass 154): EFUSE-MAC stanza pin, radio backend only
             // (cross-checked against air.kind after the air block parses).
@@ -230,18 +231,18 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             if (a.contains("max_power_qdb")) {
                 ac.max_power_qdb = a.at("max_power_qdb").get<int32_t>();
-                // §10.3 (Pass 150): this is now kernel-monitor's absolute
-                // REFERENCE, fed to `iw txpower fixed (ref + offset)`. The
-                // pre-150 "disable the ceiling" idiom of a huge value (the
-                // sample configs shipped 2000 = 500 dBm) would hand the driver
-                // a nonsense absolute, so the range is now enforced.
+                // §10.3 (Pass 150): no longer a ceiling; its absolute-
+                // REFERENCE role went with kernel-monitor (Pass 164), so the
+                // key is inert. The range check stays: the pre-150 "disable
+                // the ceiling" idiom of a huge value (the sample configs
+                // shipped 2000 = 500 dBm) must not read as authored intent.
                 if (*ac.max_power_qdb < -40 || *ac.max_power_qdb > 120) {
                     return Result<Config>::fail(
                         "adapter " + ac.name + ": max_power_qdb " +
                         std::to_string(*ac.max_power_qdb) +
                         " out of range -40..120 qdb — since Pass 150 this is "
-                        "the kernel-monitor absolute reference, not a ceiling "
-                        "(§10.3/§10.5)");
+                        "not a ceiling, and since Pass 164 it has no consumer "
+                        "at all (§10.3/§10.5)");
                 }
             }
             // §10.5 (Pass 150): relative offset + its bound. Parsed for every
@@ -673,7 +674,7 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pc.value("rx_liveness_ms", csa.rx_liveness_ms);
                 // §15.2 (Pass 92): the §11.6 RX-liveness guard exists to catch
                 // a half-applied retune. A verify window that outlives it lets
-                // a full monitor re-init fire in the middle of a switch that
+                // a full backend re-init fire in the middle of a switch that
                 // is still pending — the guard would be firing on a radio that
                 // is merely waiting, not deaf. Ordering is a config invariant,
                 // not a runtime tie-break.
@@ -1130,8 +1131,6 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.air.mcs_probe = a.value("mcs_probe", cfg.air.mcs_probe);
             if (kind == "radio") {
                 cfg.air.kind = AirCfg::Kind::kRadio;
-            } else if (kind == "kernel-monitor") {
-                cfg.air.kind = AirCfg::Kind::kMonitor;
             } else if (kind == "udp" || kind == "udp-broadcast") {
                 cfg.air.kind = kind == "udp" ? AirCfg::Kind::kUdp
                                                : AirCfg::Kind::kUdpBroadcast;
@@ -1152,21 +1151,28 @@ Result<Config> load_config_json(const std::string& json_text) {
                     return Result<Config>::fail(
                         "air: pace_mbps is only valid for udp-broadcast");
                 }
+            } else if (kind == "kernel-monitor") {
+                // Pass 164: the AF_PACKET backend is deleted. Name it rather
+                // than reporting "unknown" — every pre-164 RX/spectator config
+                // carries this value, and the fix is `radio`, not a typo hunt.
+                return Result<Config>::fail(
+                    "air: kind \"kernel-monitor\" was retired in Pass 164 — "
+                    "devourer is the only RF backend; use \"radio\" and give "
+                    "each adapter a \"bus\" (or \"mac\") instead of \"ifname\"");
             } else {
                 return Result<Config>::fail(
                     "air: kind \"" + kind +
-                    "\" unknown (udp | udp-broadcast | radio | kernel-monitor)");
+                    "\" unknown (udp | udp-broadcast | radio)");
             }
             // §14.2: the authored calibration is a transport-efficiency
-            // measurement, so it is valid on either RF backend (Pass 143) and
-            // meaningless on the udp bench transports. Per transport — the
-            // monitor rig's seed does not carry over to devourer.
-            if (cfg.air.kind != AirCfg::Kind::kMonitor &&
-                cfg.air.kind != AirCfg::Kind::kRadio &&
+            // measurement, so it is valid on the RF backend (Pass 143) and
+            // meaningless on the udp bench transports. The retired monitor
+            // rig's seed never carried over to devourer (§14.2).
+            if (cfg.air.kind != AirCfg::Kind::kRadio &&
                 cfg.air.airtime_efficiency_permille != 0) {
                 return Result<Config>::fail(
                     "air: airtime_efficiency_permille is only valid for "
-                    "kernel-monitor and radio");
+                    "the radio backend");
             }
             // §10.7 uplink_rate: the rx node's committed operating point.
             if (a.contains("uplink_rate")) {
@@ -1230,8 +1236,7 @@ Result<Config> load_config_json(const std::string& json_text) {
         // knobs are ONE decision. Enabling unicast returns or the ACK
         // responder with a zero retry limit arms an ARQ loop at one end and
         // disables it at the other — a knob that reads enabled while doing
-        // nothing, refused rather than run inert. Radio backend only: the
-        // kernel MAC owns its own retries on kernel-monitor (frozen, #120).
+        // nothing, refused rather than run inert. Radio backend only.
         if (cfg.air.kind == AirCfg::Kind::kRadio &&
             cfg.air.tx_retry_limit == 0 &&
             (cfg.air.ack_responder || cfg.policy.ret.unicast)) {
@@ -1245,8 +1250,7 @@ Result<Config> load_config_json(const std::string& json_text) {
         }
 
         // §15.2 (Pass 157): TX coding keys are radio-backend-only — a dead
-        // key on udp-air, an unverifiable leg on frozen kernel-monitor
-        // (#120). Same posture as adapters[].mac below.
+        // key on udp-air. Same posture as adapters[].mac below.
         if (cfg.air.kind != AirCfg::Kind::kRadio &&
             (cfg.air.ldpc || cfg.air.stbc)) {
             return Result<Config>::fail(
@@ -1281,8 +1285,7 @@ Result<Config> load_config_json(const std::string& json_text) {
                 if (!a.mac.empty()) {
                     return Result<Config>::fail(
                         "adapter " + a.name +
-                        ": mac is a radio-backend key (§15.2 Pass 154); "
-                        "kernel-monitor derives identity from ifname");
+                        ": mac is a radio-backend key (§15.2 Pass 154)");
                 }
             }
         }

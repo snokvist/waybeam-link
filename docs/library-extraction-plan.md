@@ -111,12 +111,24 @@ the announced-session-token mode (§11.4a, `psk_present=1`). Android matches
 today's posture with no secret provisioned. It becomes a question only if the
 fleet ever moves to operator-secret mode.
 
-**The MonAir external repo is the second proving consumer, by ruling.** Issue
-#120 item 3: at the library split, `MonAir` is *moved, not rewritten* into a
-new external RX-only repo that vendors the extracted core. That makes the
-split's success criterion concrete — the extraction is done when a repo
-outside this one can build a receiving node — and it removes `air_mon.cpp`
-from the conditional-compilation problem entirely (§2, B6).
+**~~The MonAir external repo is the second proving consumer~~ — SUPERSEDED
+(Pass 164).** Issue #120 item 3 had `MonAir` *moved, not rewritten* into an
+external RX-only repo that vendors the extracted core, making the split's
+success criterion concrete: the extraction is done when a repo outside this
+one can build a receiving node. The operator ruled **DROP** on 2026-08-08
+instead — a devourer spectator carries the archetype (19466 frames, loss 0 ‰,
+zero `role:"tx"` adapters), so the backend had no remaining user. `air_mon.cpp`
+is deleted, not relocated.
+
+**Consequence: Phase 3's proof rests on the Android consumer alone —
+RULED SUFFICIENT (operator, 2026-08-09).** There is no second outside repo
+queued and none is coming; the fleet is x86, RK3566, the SSC338Q craft and
+Android, and nothing else consumes this code. So the Phase-3 criterion is
+`:wifi` building a node, and the four in-tree cross-presets (`x86-ground`,
+`rk3566`, `ssc338q*`, `android-arm64`) carry the portability half. Do not
+invent a synthetic second consumer to restore the old two-consumer
+criterion — `examples/embed-consumer` stays what it is, a *linking* gate,
+and its scope is deliberately not widened.
 
 **OpenWRT is the easiest consumer** and mostly needs what the SSC338Q cross
 already proves, plus a musl build and an install/export target. It is not
@@ -209,7 +221,7 @@ dependencies. Re-checked, all four are answered without a TX die:
 | dependency | how it answers RX-only |
 |---|---|
 | `has_tx()` | truthful — returns `impl_->has_tx`, set at `air_radio.cpp:508` |
-| `tx_index()` | returns 0; meaningful only under `has_tx()`, so the §15.5a scout roams adapter 0, matching kernel-monitor |
+| `tx_index()` | returns 0; meaningful only under `has_tx()`, so the §15.5a scout roams adapter 0 |
 | `read_tsf(adapter)` | per-adapter (`dev->ReadTsf()`), never TX-specific |
 | `reapply_tx_power(adapter)` | per-adapter (`dev->ReApplyTxPower()`), never TX-specific |
 | `set_tx_mode` / `set_mcs_probe` | node-state writes; inert with nothing to send |
@@ -230,20 +242,20 @@ draft framed it; it did not decide what an uplink-free Android node is
 allowed to do, and the draft's own §0 promised three capabilities the
 resolution does not grant. That successor question is now the open one.
 
-**B3 — backend mix — DISSOLVED by ruling #120.** The draft asked whether
-`air.kind` should stay node-level or grow a per-adapter `backend` key, so a
-mixed devourer + kernel-monitor RX node could be represented. Ruling #120
-makes devourer the sole in-tree backend and moves `MonAir` out at the split.
-There is no second in-tree backend to mix with, so the question no longer has
-a subject. `#106` item 3 should be closed as overtaken rather than ruled.
+**B3 — backend mix — DISSOLVED by ruling #120, then moot (Pass 164).** The
+draft asked whether `air.kind` should stay node-level or grow a per-adapter
+`backend` key, so a mixed devourer + kernel-monitor RX node could be
+represented. Ruling #120 made devourer the sole in-tree backend; Pass 164
+deleted the other one outright. There is no second RF backend to mix with, so
+the question no longer has a subject. `#106` item 3 should be closed as overtaken rather than ruled.
 `air.kind` stays node-level; a consumer copying that shape copies the right
 one.
 
-**B6's `air_mon.cpp` leg — SOLVED BY RELOCATION, not conditional
-compilation.** Ruling #120 item 3 moves the file to an external repo at the
-split. It never needs a `WBLINK_MON` option; it needs a destination. This is
-the cheaper resolution by a wide margin — 927 lines plus its backend branches
-leave the tree instead of acquiring a build flag.
+**B6's `air_mon.cpp` leg — CLOSED BY DELETION (Pass 164).** The Pass-148
+draft proposed relocation to an external repo; the operator ruled DROP. It
+never needed a `WBLINK_MON` option and it no longer needs a destination:
+1103 lines plus every backend branch left the tree in one commit. Cheaper
+still than relocation, and it takes the §15.3 per-backend dispatch with it.
 
 **B11 — calibration identity under a wrapped fd — CLOSED 2026-08-08 on
 hardware.** The one unproven leg described below was run (issue #140, leg B2):
@@ -380,7 +392,7 @@ consumer already demonstrates the parameter's use.
 sentence below ("only `WBLINK_RADIO` exists as an option today") describes
 `56463c0`, not `main`.
 
-With `air_mon.cpp` leaving by relocation, **three** sources remain that
+With `air_mon.cpp` deleted (Pass 164), **three** sources remain that
 `wblink_io` compiles unconditionally and a phone cannot or should not have.
 Only `WBLINK_RADIO` exists as an option today (`CMakeLists.txt:12`).
 
@@ -448,9 +460,9 @@ and `StatsEmitter::set_local_sink()` for the §15.3 line. Defaults reproduce
 the old behaviour exactly, so no flying node changed. See §4.4. The survey
 below is kept because the *counting* is what the next phase inherits.
 
-`io/src` mentions `stderr` in **28 places** (was 24): `air_radio.cpp` 15,
-`air_mon.cpp` 8, `venc_http.cpp` 2, and one each in `calib_store.cpp`,
-`frame_shm.cpp`, `config.cpp`. Those are token hits, not write statements —
+`io/src` mentions `stderr` in **28 places** (was 24) as counted before
+Pass 164: `air_radio.cpp` 15, `air_mon.cpp` 8 (now deleted), `venc_http.cpp` 2,
+and one each in `calib_store.cpp`, `frame_shm.cpp`, `config.cpp`. Those are token hits, not write statements —
 in `air_radio.cpp` two are comments, one is a `set_diag_stream(stderr)`
 restore and one is the `fflush` half of a preceding write, so the real figure
 there is ~11. The other five files' counts are exact. That half of the blocker
@@ -681,9 +693,8 @@ as overtaken. Nothing here is extraction work; it constrains all of it.
 - 2c. A stable facade. C++ first — Android reaches it through JNI either way,
   and a C ABI is only worth its cost if a non-C++ consumer appears.
 
-**Phase 3 — the two consumers.** Move `MonAir` to its external RX-only repo
-(ruling #120 item 3) — the split's proof that an outside repo can build a
-receiving node. And on Android, in this order:
+**Phase 3 — the consumer.** The MonAir external repo is gone (Pass 164), so
+Android is the whole of Phase 3. In this order:
 
 1. Bump the devourer submodule from `73f1cb4` to match ours — a prerequisite
    for B11's identity — **and in the same commit force
@@ -738,8 +749,8 @@ sound**. The three optional units are **leaves**. Re-measured at `56463c0`:
   never an API call — is what matters and it holds either way.)
 - `control_server.cpp` and `venc_http.cpp` depend only on `binding.h`
   (`split_host_port`).
-- The two remaining `MonAir` mentions in `io/src/air_radio.cpp` (`:142`,
-  `:1279`) are both comments.
+- The `MonAir` mentions in `io/src/air_radio.cpp` were comments and are gone
+  with the backend (Pass 164).
 
 Grep is the weak form of that argument, so it was also checked at the link
 level, which is the form that actually decides whether the archive still
@@ -999,8 +1010,8 @@ rule at all, and libusb-cmake's are force-disabled here because we link its
 static target directly. Exporting `wblink_io` would mean authoring install
 rules for vendored trees we may not edit, whose interface include directories
 point into our source tree. So `find_package(wblink)` offers `wblink::core`;
-embedding offers both. Both named consumers (Android via Gradle, the MonAir
-external repo) embed, so nothing is blocked by this.
+embedding offers both. The remaining named consumer (Android via Gradle)
+embeds, so nothing is blocked by this.
 
 **Two defects found by building a consumer rather than reading the CMake**,
 worth recording because neither is visible in a source review: `install(EXPORT
@@ -1150,11 +1161,10 @@ byte-identical after literal concatenation, and `-Wformat` under
 ## 5. Loose ends worth knowing before starting
 
 - **The §15.3 counters schema** is the last per-backend dispatch in
-  `AirBackend` (`app/main.cpp:1471-1484`), set aside by Pass 140 because the
-  two backends' counter structs differ by real fields. Ruling #120 changes the
-  economics: with `MonAir` leaving the tree, the question may resolve by
-  subtraction rather than by unification. Worth revisiting at Phase 2a rather
-  than deciding now.
+  `AirBackend`, set aside by Pass 140 because the two backends' counter
+  structs differed by real fields. **Pass 164 resolved it by subtraction**: the
+  MonAir stats loop is deleted, so only the radio branch remains. Phase 2a
+  inherits one dispatch, not two.
 - **`profiles/` by relative cwd** (`CLAUDE.md`) is a smaller problem than it
   looks: `profile_table` is a config key and `load_profile_table_json()` takes
   a string, so a consumer passes the table as text and never touches a path.
@@ -1171,8 +1181,9 @@ byte-identical after literal concatenation, and `-Wformat` under
   Phase 3 should start by writing it down there.
 - **`app/main.cpp:111` misattributes a fork.** It credits `RadioAir` with
   `execvp('iw', …)` for channel retunes as precedent for the double-fork; that
-  is `MonAir` (`io/src/air_mon.cpp:261`, `:274`). `RadioAir` is fork-free,
-  which is the property that matters here. Still unfixed.
+  was `MonAir`, now deleted. `RadioAir` is fork-free, which is the property
+  that matters here. Still unfixed, and now the cited precedent does not exist
+  at all.
 
 ## 6. What changed in the 2026-08-08 refresh
 
@@ -1180,7 +1191,8 @@ For a reader of the Pass-148 draft. Conclusions that moved:
 
 - **B2 resolved** (Pass 162) — the draft's single hardest blocker, and it was
   answered by the expand tranche rather than by extraction work.
-- **B3 dissolved, B6's `air_mon` leg solved by relocation** (ruling #120).
+- **B3 dissolved, B6's `air_mon` leg closed by deletion** (ruling #120 as
+  amended by Pass 164 — DROP, not relocate).
 - **B11 closed** (Pass 154, EFUSE-MAC identity read off the die).
 - **§3.0 deleted** — #92 is closed and its implementation landed as Pass 149.
 - **The #95/#100 split recommendation is moot** — both landed whole; only

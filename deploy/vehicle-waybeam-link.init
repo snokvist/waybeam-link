@@ -3,8 +3,7 @@
 # 2026-07-23: the stationary RF/decoder gate passed and the apfpv AP bring-up is
 # retired. S95waybeam (venc) must start first — it feeds frame-shm venc_frame.
 #
-# The adapter runs on DEVOURER, not kernel monitor (B3 ruling: devourer owns
-# TX, kernel-monitor stays the RX-only backend for cache/spectator nodes). So
+# The adapter runs on DEVOURER, the only RF backend since Pass 164. So
 # there is no modprobe and no monitor bring-up here — the job is the opposite,
 # making sure no kernel driver holds the adapter, or libusb_open fails with a
 # bare "no matching Realtek device".

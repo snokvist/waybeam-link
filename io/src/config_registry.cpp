@@ -26,12 +26,15 @@ using json = nlohmann::json;
 
 // PROTOCOL.md:4510 — a spectator "generates no ARQ / NACK / LINK_REPORT
 // (return and §3.9 recovery paths no-op with no tx adapter)". The gate is the
-// TX adapter, not the spectator flag: deploy/cache-192.168.2.247.json is also
+// TX adapter, not the spectator flag: the Ethernet cache archetype is also
 // uplink-free and correctly omits policy.return, which keying on `spectator`
-// would have missed. Runtime: `iface()->has_tx()`, app/main.cpp:1657 / :3846.
+// would have missed. (Its config, deploy/cache-192.168.2.247.json, was deleted
+// in Pass 164 -- the node was offline and could not be mirrored -- so the
+// example is no longer checkable in-repo; the reasoning stands on the
+// archetype, not the file.) Runtime: `iface()->has_tx()`, app/main.cpp:1657 / :3846.
 //
-// has_tx() is per BACKEND, and only the two RF ones follow the adapters
-// (MonAir::has_tx / RadioAir::has_tx return impl_->has_tx). UdpAir hardcodes
+// has_tx() is per BACKEND, and only the RF one follows the adapters
+// (RadioAir::has_tx returns impl_->has_tx). UdpAir hardcodes
 // `return true` — "the dev backend has an uplink by construction"
 // (io/include/wblink/air_udp.h:119) — and udp configs carry no adapters at
 // all, so an adapters-only predicate called every policy.return key inert on
@@ -45,7 +48,6 @@ bool has_uplink(const Config& c) {
         case AirCfg::Kind::kNone:
             return true;  // loopback: no backend to point at, so claim nothing
         case AirCfg::Kind::kRadio:
-        case AirCfg::Kind::kMonitor:
             break;
     }
     for (const AdapterCfg& a : c.adapters) {
@@ -77,6 +79,36 @@ bool mode_configured(const Config& c) { return !c.venc.mode_apply_cmd.empty(); }
 bool cache_repair_enabled(const Config& c) { return c.cache.repair.enabled; }
 bool cache_store_enabled(const Config& c) { return c.cache.store.enabled; }
 
+// Pass 164 stranded these: the kernel-monitor backend was their only reader.
+// Not "inert on some backend" — inert everywhere, which is why the predicate
+// takes no decision. Grep is the gate here: `adapter.ifname` has no consumer
+// left in io/ or app/, and calib_store.cpp's calib_identity() no longer reads
+// calib_id (§10.6 tiers 2-4 went with the backend; radio keys on the EFUSE
+// MAC and has deliberately no fallback tier, Pass 154 D3).
+bool never_live(const Config&) { return false; }
+
+// DO NOT PREDICATE adapters[].max_power_qdb OR adapters[].power_presets_qdb.
+// Pass 164's first cut declared both inert on the radio backend, reasoning
+// that every reader sits on the `!backend_relative_` arm. That covers the
+// craft TxCore sites and MISSES three that run on radio (line numbers drift —
+// grep the expressions, they are unique):
+//   `snap.link.tx_power_ceiling_qdb = *power_tier_ceiling()` — §15.3,
+//       ungated by backend
+//   `h.tx_power_json` / power_tier_json — §15.5 GET /api/v1/tx/power_tier
+//       emits presets_qdb and ceiling_qdb, ungated
+//   `UplinkPower::hw_qdb()` — the ground clamps a §10.5 override latch by
+//       ceiling_qdb, and that REACHES THE ACTUATOR
+// plus the load-time clamp of power_presets_qdb to max_power_qdb in this file's
+// sibling, io/src/config.cpp. NOT the §10.7 sweep bound: Pass 165 made the
+// tier fold unreachable on a relative uplink, and both calibrators take the
+// offset-space window first — that reader is gone, and citing it would send a
+// future retire-the-key pass down a dead path.
+// Both keys are set on both flying configs, so the false predicate told the
+// operator to delete a key that clamps TX power. §15.2 says it plainly: the
+// §10.5 reference role went with kernel-monitor, the §10.3 ceiling role did
+// not. Caught by pre-merge review, not by the seven mutation tests — those
+// proved only that the tests agreed with the wrong model.
+
 const char* kWhyNoUplink =
     "this node has no role:\"tx\" adapter on an RF backend, so \u00a715.2 gives "
     "it no uplink and return/ARQ never run";
@@ -87,14 +119,22 @@ const char* kWhyNotUdp =
 const char* kWhyVencOff = "venc.enabled is false";
 const char* kWhyRepairOff = "cache.repair.enabled is false";
 const char* kWhyStoreOff = "cache.store.enabled is false";
+const char* kWhyIfnameGone =
+    "the kernel-monitor backend that bound to this netdev was deleted in "
+    "Pass 164, and nothing else reads it";
+const char* kWhyCalibIdGone =
+    "\u00a710.6 identity tiers 2-4 went with kernel-monitor (Pass 164); the "
+    "radio backend keys the calibration artifact on the EFUSE MAC and has no "
+    "fallback tier";
+
 
 const KeyEntry kKeys[] = {
     {"adapters",                                  KeyType::kArray},
     {"adapters[].bus",                            KeyType::kString},
     {"adapters[].bw",                             KeyType::kNumber},
-    {"adapters[].calib_id",                       KeyType::kString},
+    {"adapters[].calib_id",                       KeyType::kString, never_live, kWhyCalibIdGone},
     {"adapters[].channel",                        KeyType::kNumber},
-    {"adapters[].ifname",                         KeyType::kString},
+    {"adapters[].ifname",                         KeyType::kString, never_live, kWhyIfnameGone},
     {"adapters[].mac",                            KeyType::kString},
     {"adapters[].max_power_qdb",                  KeyType::kNumber},
     {"adapters[].name",                           KeyType::kString},

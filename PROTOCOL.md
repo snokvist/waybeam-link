@@ -184,21 +184,31 @@ at the driver boundary): receivers strip the trailer before the length-exact
 **Backend-agnostic frame; ONE rate-carrying mechanism (Pass 118; supersedes
 the Pass-13 two-mechanism split).** The 802.11 frame, SA filter, and FCS
 handling above are identical across air backends, and so is the way the PHY
-rate is selected: **both** backends prepend the **13-byte HT radiotap header
+rate is selected: an RF backend prepends the **13-byte HT radiotap header
 carrying a per-packet MCS field** (`TX_FLAGS | MCS`, `known =
 BW|MCS|GI|FEC|STBC`). Radiotap is authoritative for the rate of the frame it
 prefixes.
 
-- **kernel-monitor** (`air.kind "kernel-monitor"`: AF_PACKET raw injection
-  through the Linux driver in monitor mode, no devourer) has no out-of-band
-  rate control, so radiotap is its only mechanism.
-- **devourer** honours the radiotap rate fields on every generation
+- **devourer** — the sole RF backend since Pass 164 — honours the radiotap
+  rate fields on every generation
   (Jaguar1/2/3) and applies its `SetTxMode` default *only* to frames whose
   radiotap carries no rate. A TX node MUST still commit `SetTxMode` in
   lockstep at each §9.5 transition: it costs nothing on air (never consulted
   while radiotap carries a rate) and it bounds the failure mode — a
   malformed radiotap degrades to the committed operating point instead of
   silently airing the whole link at the driver's legacy default.
+
+**`kernel-monitor` is retired (Pass 164).** The AF_PACKET-over-Linux-monitor
+backend — `air.kind "kernel-monitor"`, no devourer — was frozen by the
+2026-08-07 backend ruling (issue #120) and is now deleted: the value is
+rejected by the loader, and the RF backends are devourer alone. RX-only and
+spectator nodes, its last archetypes, run on devourer since Pass 162
+(`allow_rx_only`, §3.11). Nothing on air changes — the backend was never a
+wire-visible fact — and no §3.1 version event arises. `air.kind` is now
+`udp | udp-broadcast | radio` (§15.2). What the retirement takes with it: the
+`iw`-forked power actuator and its absolute-reference row (§10.5), calibration
+identity tiers 2–4 (§10.6/§10.7), and the `kernel-monitor` value of the
+§15.5 `GET /api/v1/tx/power` `backend` field.
 
 Radiotap is a local injection convention, not wire format: it is **not**
 transmitted, so this changes no on-air byte and is not a §3.1 version event.
@@ -231,19 +241,17 @@ Proof over inference: devourer reports the *received* coding per frame
 (`RxAtrib.ldpc`/`stbc`) on dies whose `ldpc_rx_flag` reads true (the 8812A
 does; the 8814A decodes fine but the vendor wired no indicator), surfaced
 per adapter as §15.3 `rx_ldpc`/`rx_stbc` — an A/B's proof-of-flight is the
-reported bit on a flag-capable ear, not the delivery number. kernel-monitor
-gets no leg (frozen, #120): both knobs are refused on that backend, which
-moots the never-answered question of whether its driver strips the bits.
-LDPC moves the effective link margin of every §9.3 rung (≈ +3 dB at the
+reported bit on a flag-capable ear, not the delivery number. Both knobs are
+refused on any non-radio backend. LDPC moves the effective link margin of every §9.3 rung (≈ +3 dB at the
 10 %-delivery crossing, MCS7/20 MHz, devourer waterfall bench): a
 default-on flip is a §9.3/§17 RE-DERIVE trigger and a future amendment on
 the A/B evidence, not this pass.
 
 **RX rate is observable (Pass 118).** RX radiotap is parsed for
 `DBM_ANTSIGNAL` (RSSI), `TSFT` (the §7.2 per-adapter TSF), and the **`MCS`
-field**; on devourer the same value comes from the RX descriptor's rate code.
-The monitor netdev exposes no per-adapter TSF *read*, so the craft/ground fall
-back to host time (§7.2). Received-MCS is **observation only** in this pass —
+field**; on devourer the same value comes from the RX descriptor's rate code,
+and the §7.2 per-adapter TSF from `ReadTsf()`. A backend that reports no TSF
+falls back to host time (§7.2). Received-MCS is **observation only** in this pass —
 it is surfaced in §15.3 and consumed by no control path. It is the denominator
 half of a per-MCS PER ladder; the numerator (attributing a sequence gap to the
 MCS the *missing* packet would have carried) is an open §9.2 question, not
@@ -316,8 +324,8 @@ flew at the commanded rung. Pinned consequences:
   ARQ for the video path; the §1 no-MAC-ARQ invariant stands there).
 
 **Urgent ARQ lane.** NACKs and DATA packets carrying `RETRANSMIT=1` use
-QoS-Data TID 6 so monitor/devourer injection can select the voice access
-category; the monitor socket also sets `SO_PRIORITY=6`. When the destination is
+QoS-Data TID 6 so devourer injection can select the voice access
+category. When the destination is
 broadcast, radiotap keeps `NOACK`; an enabled unicast-return NACK keeps the
 hardware-ACK radiotap above. Live DATA and LINK_REPORT traffic remain TID 0 / the
 ordinary Data shape. This changes only 802.11 encapsulation, never the waybeam
@@ -606,8 +614,7 @@ all properties of a TX die the node does not have, so a config that sets any
 of them with no `role:"tx"` adapter fails create. Send paths report
 not-sent (0) and the §15.3 TX counters stay 0. `tx_index()` reads 0 on an
 RX-only node: state-mutating callers guard on `has_tx()`, while the §15.5a
-scout deliberately does not — it roams adapter 0, unchanged from
-kernel-monitor's RX-only behaviour.
+scout deliberately does not — it roams adapter 0.
 
 ### 3.9 RECOVERY_REQUEST packet (type `0x6`) — 18 bytes
 
@@ -1124,7 +1131,7 @@ Semantics:
   us, sender is the report-latched `(originator, session)`, epoch
   monotone. Anything else is dropped without counting.
 - **Radio-backend senders only** (the sensor is Pass 158); a
-  kernel-monitor or udp ground never emits one, the craft's verdict stays
+  udp ground never emits one, the craft's verdict stays
   `Unknown`, and every consumer MUST treat `Unknown`/stale as **absence of
   evidence, not health** — the shipped fleet's behaviour is unchanged by
   construction (§9.4 Pass 160).
@@ -1392,8 +1399,8 @@ surfaced as `adapter_stalled` in the stats (§15).
 channel trips it identically to a dead ear. A backend that *knows* an RX loop has
 terminated (the devourer `RadioAir` per-adapter RX thread exiting on a USB
 exception) additionally raises `rx_dead` (§15.3), a definitive death signal an
-OSD/hub can distinguish from a merely quiet adapter. Backends without a
-thread-exit death path (kernel-monitor) leave it `false` and rely on the stall
+OSD/hub can distinguish from a merely quiet adapter. A backend without a
+thread-exit death path leaves it `false` and relies on the stall
 watchdog. `rx_dead` is observability only; the §6.5 exclusion still keys on the
 stall verdict.
 
@@ -1470,7 +1477,7 @@ receive. The mechanism, using only RX-local hardware TSF (no clock crossing):
   known real limitation is a **40 MHz-bandwidth bug** → run the craft at **20 MHz**,
   which also matches the intra-band fast-retune path in §11.) The exact settle time
   is measured at §17 gate 4. Seeds: `guard_us = 300`, `return_window_us = 2000`.
-- A backend without a live TSF read (kernel monitor mode) MUST NOT add the
+- A backend without a live TSF read MUST NOT add the
   midpoint delay to a NACK after the repair-tail EOB has already arrived through
   the host/USB path: it submits that NACK immediately after FEC close. Periodic
   LINK_REPORTs remain normal-priority and wait for the next EOB midpoint; if no
@@ -1530,7 +1537,7 @@ against plain broadcast returns is a §17 bench slot.
 
 ### 7.4 Self-congestion guard
 Once authorized, a retransmit has queue priority over live video (802.11e TID 6
-on monitor/devourer and the dedicated resend queue on UDP-air), but the airtime
+on devourer and the dedicated resend queue on UDP-air), but the airtime
 cap remains a hard downlink fraction, with an attempt cap and per-interval bound.
 A burst needing more than a few repairs is past saving — let RTP concealment eat
 it. The uplink is a **pluggable transport** so a dedicated backchannel could
@@ -1848,7 +1855,7 @@ injection model has no such side stream, so that mechanism is **dropped**.
   response. Freshness is `policy.select.verdict_ttl_s` (seed **3.0 s**
   of report cadence; §17-overridable): a verdict older than the TTL, or
   `Unknown`, is **absence of evidence and gates nothing** — a
-  kernel-monitor ground never emits verdicts and its craft behaves exactly
+  udp ground never emits verdicts and its craft behaves exactly
   as pre-160. Demote paths NEVER consult the verdict (§9.0
   robustness-first: nothing may make demotion harder). Suppressions are
   counted (§15.3 `promote_blocked_saturated`). **Residual, deliberately
@@ -2134,15 +2141,15 @@ extension Pass 49).** Devourer uses per-frame CCX TX-status reports (Pass 8).
 Those reports are lossy under load *by design*: the step-11 bench measured
 healthy report return rates of 100% at ≤500 pps falling to ~25% at 4500 pps,
 so any deficit threshold misfires exactly when the link is busiest. A healthy
-chip returned *some* reports at every measured load. Kernel-monitor has no CCX
-surface; it uses the TX adapter's monotonic Linux netdev `tx_packets` counter
-as the completion-progress signal. This catches a measured CU failure where
-AF_PACKET `send()` returned success 915 times while `tx_packets` did not move
-and no RF frame aired.
+chip returned *some* reports at every measured load. The wedge is real and was
+measured through the retired kernel-monitor path, where `send()` returned
+success 915 times while the netdev `tx_packets` counter did not move and no RF
+frame aired — the failure is the chip's, not the backend's, so the detector
+stays.
 
 The detector evaluates one verdict per `wedge_window_ms` (seed 1000) from the
 backend's `(tx_submitted, tx_progress)` counter deltas (`tx_progress` = CCX
-reports on devourer, netdev TX packets on kernel-monitor):
+reports on devourer):
 
 - `Δtx_progress > 0` → not wedged (any completion proves the TX path alive);
 - `Δtx_progress == 0` and `Δtx_submitted >= wedge_min_submits` (seed 8) →
@@ -2315,12 +2322,15 @@ mis-authored table cannot silently cook a PA.
 > `min(qdb, max_power_qdb)` clamped the *offset*: the documented "cannot cook a
 > PA" ceiling became a permit for `max_power_qdb` **dB of boost** — measured at
 > +27 dB on the craft, which drove the PA into compression and collapsed the
-> link. `max_power_qdb` is therefore **no longer a TX ceiling**. It survives
-> only as kernel-monitor's absolute *reference* (§10.5). The safety role passes
+> link. `max_power_qdb` is therefore **no longer a TX ceiling**. Its one
+> surviving role, kernel-monitor's absolute *reference*, went with that backend
+> (Pass 164). The safety role passes
 > to `power_offset_max_qdb` (default 0) bounding a relative latch, and the
 > operating point to `power_offset_qdb` (seed −24 qdb), applied at boot on every
-> `role:"tx"` adapter. Configs carrying `max_power_qdb` still load; on a
-> devourer node it is accepted with a warning and ignored.
+> `role:"tx"` adapter. Configs carrying `max_power_qdb` still load; on every
+> remaining backend it is accepted with a warning and ignored, and
+> `--check --strict` reports it **inert**. Retiring the key itself is a later
+> pass.
 
 **The ceiling bounds the sweep, not only the resolve (Pass 134).** As written
 above, `max_power_qdb` was applied at §10.2 resolve and at §10.7 artifact
@@ -2366,8 +2376,11 @@ regulatory clamp).
 **It does not bind an UNCALIBRATED node, and that is deliberate (operator
 ruling, Pass 134).** With no `power_map` and no artifact, `resolve_power_qdb()`
 returns `nullopt` and the controller issues **no power command at all** — the
-adapter stays on the backend default (`iw txpower auto`; measured 19.00 dBm on
-the fleet's ground 8812EU and 27.00 dBm on the craft's). `max_power_qdb`
+adapter stays on the backend default — on devourer the efuse per-rate table at
+offset 0, which §10.5 (Pass 150) measured as a compressing operating point.
+(The 19.00 / 27.00 dBm figures once quoted here were `iw txpower auto` readings
+on the retired kernel-monitor grounds and do not describe devourer.)
+`max_power_qdb`
 therefore bounds the sweep and clamps what the resolve applies; it is **not** an
 unconditional PA limiter. Making it one would mean asserting a fixed power at
 startup and after every retune with no curve loaded, which contradicts §10.3's
@@ -2413,21 +2426,18 @@ re-resolved away at the next §10.4 profile commit, so setting an override
 makes the §10.2 curve resolve **yield** until the override is cleared.
 
 **The latch is RELATIVE (Pass 150).** `qdb` is an offset in quarter-dB against
-the adapter's **calibrated reference**, not an absolute power. One contract,
-realised natively per backend:
+the adapter's **calibrated reference**, not an absolute power. On the one
+remaining RF backend:
 
 - **devourer** — the efuse per-rate table, via `SetTxPowerOffsetQdb`. The
   calibrated per-rate *shape* is preserved; the offset moves the whole curve.
-- **kernel-monitor** — the adapter's configured `max_power_qdb` reference, via
-  `iw dev <if> set txpower fixed (max_power_qdb + qdb)`. An adapter with no
-  `max_power_qdb` has no reference, so the write is skipped and logged rather
-  than guessed.
 
 There is deliberately **no absolute TX contract anywhere**. devourer is the TX
 role (Passes 142–144) and its lever is natively relative; a dBm→TXAGC mapping
 would have to be built per unit, and Pass 150 measured that mapping at ±5 dB
-without a calibrated reference receiver. `max_power_qdb` survives only as
-kernel-monitor's *reference*, and is not a ceiling.
+without a calibrated reference receiver. The one absolute *reference* the spec
+ever carried was kernel-monitor's `max_power_qdb`, and it went with that
+backend (Pass 164).
 
 **Safe by default; headroom is earned.** Every `role:"tx"` adapter applies
 `power_offset_qdb` (§15.2, seed **−24 qdb = −6 dB**) at startup. The efuse
@@ -2450,7 +2460,7 @@ assertion.
   **yields** (a profile commit does not itself reset hardware power, so no
   write happens there); the latch is **re-asserted** after every event that
   can reset hardware power — a §11/§11.5 retune (the §10.4 `ReApplyTxPower`
-  slot) and a §11.6 recovery (which ends in `txpower auto`, Pass 48).
+  slot) and a §11.6 recovery (Pass 48).
   Accepted wire-range is `-511..511` qdb (400 outside — the actuator field
   width, checked before any bound). A request exceeding
   `power_offset_max_qdb` is **409 REJECTED** (Pass 150), not clamped; the
@@ -2461,16 +2471,17 @@ assertion.
   §10.7 artifact exists, else to `power_offset_qdb` — **never** to the raw
   efuse default (Pass 150). Before this, `auto` was literally offset 0, i.e.
   the uncharacterised default, which on a compressing unit is the worst
-  setting available; §11.6 recovery ends in `txpower auto` (Pass 48), so an
+  setting available; a §11.6 recovery can reset hardware power (Pass 48 — on
+  kernel-monitor it ended in `txpower auto`; on devourer the RX-path restart
+  does not itself move power, and §10.4 re-asserts regardless), so an
   unattended recovery could drop a node onto it. It clears the latch **and
   forces one immediate restore** (it
   must not wait for the next profile change): on the radio backend a one-shot
   offset 0 undoes the latch, then the §10.2 curve resolve resumes when a
-  curve is loaded; on kernel-monitor the driver default is restored via
-  `txpower auto`, after which the curve resolve resumes if a curve is loaded.
+  curve is loaded.
 - `GET /api/v1/tx/power` reports `{override_active, qdb, backend}`; the §15.3
   `link` object gains `tx_power_override` (bool) beside `tx_power_qdb`.
-- A failed actuator write (the forked `iw` on kernel-monitor) is logged and
+- A failed actuator write is logged and
   **not cached** as applied — the value is re-applied at the next commit
   resolve or re-assert point instead of being silently believed on-hardware.
 - **Scope (Pass 125).** The latch is available on **any node with a `role:"tx"`
@@ -2490,13 +2501,10 @@ actuator differs (the §3.0 rate split's power twin):
 | backend | fixed apply | auto restore |
 |---|---|---|
 | `radio` (devourer) | `SetTxPowerOffsetQdb(qdb)` (§10.4, unchanged) | resume curve resolve; offset 0 when no curve |
-| `kernel-monitor` | `iw dev <ifname> set txpower fixed <qdb×25 mBm>` (1 qdb = 25 mBm), forked with the §11.6 bounded-CLI deadline | `iw dev <ifname> set txpower auto` |
 | `udp` (dev bench) | logged intent only (no RF hardware) | logged intent only |
 
 Cadence law is unchanged: power moves at profile/override cadence only, never
-per frame. On kernel-monitor this also repairs the §10.4 gap where the commit
-resolve was a logged intent only — with this section, a loaded `power_map`
-actuates on **both** RF backends through the same `set_power_qdb` seam.
+per frame. A loaded `power_map` actuates through the `set_power_qdb` seam.
 
 ### 10.6 Craft-resident link calibration (Pass 120)
 
@@ -2637,11 +2645,7 @@ adapter set, antennas).
 
 **Adapter identity is per-actuator and must be stable across a re-plug**
 (operator-ruled 2026-08-06, Pass 146; re-based on the per-unit EFUSE MAC,
-Pass 154). The two backends drive different actuators — kernel-monitor writes
-nl80211 fixed power, devourer writes an offset relative to the efuse per-rate
-table — so a curve measured under one is **not** valid under the other, and
-the identity deliberately differs by backend so a mismatch reads STALE rather
-than being applied. Resolution:
+Pass 154). Resolution:
 
 1. **radio (devourer): `mac/<efuse-mac>` — the only tier (Pass 154).** The
    per-unit EFUSE MAC, read through `GetPermanentMacAddress()` at adapter
@@ -2656,17 +2660,15 @@ than being applied. Resolution:
    misapplication this rule exists to prevent. The former
    `id/radio/<calib_id>` and `bus/<bus-port>` identities are retired on
    radio; an artifact keyed to one reads STALE and a re-run re-keys it.
-2. `id/monitor/<adapters[].calib_id>` on kernel-monitor, when the operator
-   sets it — an explicit name for a physical adapter, backend-scoped for the
-   Pass 146 reason (an unscoped name would apply a monitor curve to
-   devourer's offset actuator without ever reading STALE).
-3. `ifname/<MAC>` on kernel-monitor, read from the netdev.
-4. `bus/<bus-port>` on kernel-monitor as a last resort, **logged as
-   unstable**: USB bus paths shuffle on any re-plug.
+2. `udp` — no actuator, so no identity.
 
-kernel-monitor's tiers are carried unchanged and **frozen with the backend**
-(deprecated-frozen per the 2026-08-07 backend ruling, issue #120); they gain
-no new semantics here.
+**Tiers 2–4 are retired with kernel-monitor (Pass 164).** The
+`id/monitor/<calib_id>`, `ifname/<MAC>` and `bus/<bus-port>` forms existed only
+for the AF_PACKET backend; with it gone, tier 1 stands alone and
+`adapters[].calib_id` no longer resolves an identity anywhere.
+It still loads, `--check --strict` reports it **inert**, and retiring the key
+is a later pass. An artifact keyed to a retired tier reads STALE and a re-run
+re-keys it.
 
 **The USB serial number is deliberately NOT used**, though it was the obvious
 candidate. Measured on the fleet: every RTL88x2 dongle to hand — an 8822EU and
@@ -2751,14 +2753,12 @@ Failure *reason* and the full report are management-HTTP only (§15.5
 **Forward validity — WITHDRAWN (Pass 151).** Passes 120–134 claimed the
 artifact "survives a backend move to devourer unchanged", on the theory that
 per-packet power is a finer actuator for the same per-rung maxima. That is
-false, and this section already contradicted itself: the Pass 146 identity rule
-above states that a curve measured under one backend is **not** valid under the
-other and deliberately scopes the fingerprint so a cross-backend load reads
-STALE. Pass 150 settled which is right — kernel-monitor commands an absolute
-nl80211 power while devourer commands an **offset** relative to the efuse
-per-rate table, so the two curves are not the same quantity and a monitor
-artifact applied on devourer is an overdrive, not a translation. The identity
-scoping stands; this paragraph is struck.
+false. Pass 150 settled it: the retired kernel-monitor backend commanded an
+absolute nl80211 power while devourer commands an **offset** relative to the
+efuse per-rate table, so the two curves were never the same quantity and a
+monitor-measured artifact applied on devourer is an overdrive, not a
+translation. Any such artifact reads STALE under the §10.7 identity rule above;
+this paragraph is struck.
 
 **Offset-space calibration on a relative backend (Pass 151).** §10.5 (Pass 150)
 made TX power relative on devourer, so a sweep in absolute qdb — `min_qdb` 4 to
@@ -2954,9 +2954,9 @@ floor entries close against this Pass.
 **Both §10.6 Pass 151 rules apply here unchanged**, because both live in the
 shared seek: the placement is the loss minimum rather than the first tolerable
 point, and on a **relative** ground backend the window and actuator are the
-offset-space ones derived from the uplink adapter's §10.5 keys. A ground on
-kernel-monitor — every ground in the fleet today — keeps absolute qdb end to
-end. The space is chosen once, from the air backend kind, and the sweep's
+offset-space ones derived from the uplink adapter's §10.5 keys. Since Pass 164
+every RF ground is devourer, so offset space is the only space a real run uses.
+The space is still chosen once, from the air backend kind, and the sweep's
 *measurement* and its *actuator* move together: a run that measures in one space
 and commands in the other places `108 + 84 = 192` qdb, which is how this was
 found (Pass 150 review, second round).
@@ -3407,7 +3407,7 @@ mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
   **`verify_timeout_ms` MUST be less than `rx_liveness_ms`** when the latter is
   enabled (§11.6), and config validation rejects a config where it is not. The
   guard exists to catch a half-applied retune; a verify window that outlives it
-  lets a full monitor re-init fire in the middle of a switch that is still
+  lets a full backend re-init fire in the middle of a switch that is still
   pending. This is the **only** automatic revert; it
   protects a switch that landed on a dead channel. **The window opens at the
   follower's landing** — the first engine tick after its blocking retune
@@ -3481,7 +3481,7 @@ direction** lets us make the strand class *never happen* rather than recover aft
   seeing `CSA_ARMED`** from the craft — not at T_switch (Pass 69). Once the
   campaign copies are out and the craft has ACKed, the issuer has no further
   business on the old channel; retuning at T_switch itself made the two
-  retunes simultaneous, and with measured kernel-monitor cross-channel
+  retunes simultaneous, and with measured cross-channel
   set-freq costs of 30–117 ms per adapter (serialized), the issuer landed
   after the craft's verify window was nearly spent, having transmitted
   nothing the craft could hear — a deterministic strand (proven 2026-07-23).
@@ -3583,8 +3583,8 @@ direction** lets us make the strand class *never happen* rather than recover aft
   satisfy the backstop (the Pass 66 stale-buffer artifact, observed as a
   false commit on the bench). Retune failures are logged; a failed commit
   retune leaves the revert path as the recovery.
-- **Craft post-retune RX-liveness guard (Pass 80, kernel-monitor):** an
-  in-place `iw set freq` on the RTL88x2 family can half-apply — TX keeps
+- **Craft post-retune RX-liveness guard (Pass 80):** an
+  in-place retune on the RTL88x2 family can half-apply — TX keeps
   airing on the new channel while the RX chain goes deaf (observed on the
   bench: rx counter frozen through a 4-minute FAILSAFE, fleet stranded
   because a deaf craft cannot hear the return-CSA). After ANY §11 retune
@@ -3592,8 +3592,10 @@ direction** lets us make the strand class *never happen* rather than recover aft
   (`csa.rx_liveness_ms`, seed **750**, `0` disables): the issuer's zero-dt
   rendezvous beacons blanket the verify window, so a craft that hears
   **nothing** for the full deadline treats the retune as half-applied and
-  performs **one** full monitor re-init on the adapter (link down → monitor
-  type → link up → set freq — the bring-up sequence), then continues the
+  performs **one** backend re-init on the adapter — on devourer an RX-path
+  restart (stop the RX loop, join it, re-run the write-side bring-up at the
+  target channel, restart the loop; `InitWrite` is one-shot and MUST NOT be
+  re-entered, Pass 143) — then continues the
   §11.5 machine unchanged. The recovery is one-shot per retune, loud in the
   log, and never reorders the state machine — it only restores the radio the
   machine already assumes it has.
@@ -3646,7 +3648,7 @@ everything below is behaviour.
 | `0x07` | `MODE` | catalog index 0..N-1 | Applies operating mode (§16) `modes/<name>.json[arg]`, where `arg` indexes the **name-sorted §15.5 catalog** (`GET /api/v1/modes` order — the craft maps the index through the *same* enumeration+sort the catalog is built from, so ground and craft agree on which index is which mode). The over-air twin of §15.5 `POST /api/v1/mode`: it forks the same §16 applier (`venc.mode_apply_cmd`, which restarts venc and self-reasserts bitrate, Pass 103). `REJECTED` when the craft has no `mode_apply_cmd` (not a mode-actuating node), or `arg` ≥ the catalog length (index past the end — a range error, not a structural drop; §3.14). A mode switch restarts the encoder (≈seconds of video outage) and re-bands the §9.7 selector envelope, so it is a **pre-flight** action; like all §11.7 state it is craft-session volatile — a reboot restores the boot `active_mode`. Unlike the v2 preset commands (`0x04`–`0x06`), MODE's choices are the deployment's mode files themselves, learned by the ground over management HTTP (§15.5), never over the air |
 | `0x08` | `CALIBRATE` | 0=abort, 1=start | Starts/aborts the §10.6 craft-resident link calibration. `start` is `REJECTED` when: a calibration is already running, the TX adapter has no power actuator (§10.5 backend matrix `udp` row), or no reporter is currently latched (§3.5 acceptance filter — the tallies come from the accepted reporter, and the loop is blind without them, §3.16). `abort` is `REJECTED` when none is running. Both are idempotent in effect. Like all §11.7 state the *run* is craft-session volatile; the calibration **artifact** persists per the §10.6 exception (Pass 120). Calibration sweeps rungs and power for ~2 min at default dwells (§10.6 hard cap 10 min) with the selector frozen and the **video feed paused** (input-starve, Pass 153) — the operator chooses the moment (recommended: near-bench 2–10 m separation, §10.6 Pass 121) |
 | `0x09` | `MTU_TIER` | 0=Default, 1=Medium, 2=High | Requests the §9.3a global packet-budget tier. The craft accepts only when the requested budget is ≤ the minimum capability of every active craft TX adapter; otherwise it consumes the nonce and echoes `REJECTED` (no silent clamp). Acceptance commits at the next frame/block boundary. Unlike the other commands, binding release resets this state to Default, preventing an absent owner's jumbo choice from silently governing a future receiver fleet |
-| `0x0A` | `TX_POWER` | preset index 0..4 | Selects the node's §10.3 power **ceiling** from `adapters[].power_presets_qdb` (§15.2) — the baseline the Pass 134 per-rung mask is derived from, so one choice moves the whole tapered curve and the calibrated per-rung *shape* is preserved. This is deliberately NOT the §10.5 override latch, which is rung-agnostic by construction and would flatten a curve whose whole point is that MCS0 and MCS7 want different power. Applying a tier sets the runtime ceiling on the §10.4 resolve, the §10.5 clamp, and a future §10.6/§10.7 sweep, then forces one re-resolve at the committed operating point. **A tier can only ever LOWER power** (operator ruling): every preset is clamped at config load to that adapter's boot `max_power_qdb`, so §10.3 remains the operator's hard ceiling and no runtime path can raise power past it. `REJECTED` when no `role:"tx"` adapter carries a preset list, `arg` is past its length, a §10.6 calibration is running (Pass 136 — the run owns the actuator), or **the air backend is relative** (Pass 151): `power_presets_qdb` are absolute qdb and there is no offset-space tier, so applying one would install a 60..108 preset as the clamp on an offset resolve — replacing the §10.5 bound with a number 15..27 dB above it while §15.3 reported the tier effective. Tiers are re-based with the rest of §10.5. On a node with no curve and no artifact the tier is accepted and recorded but **moves nothing** — per §10.3 the ceiling binds only where a number of ours reaches the actuator. Craft-session volatile like the rest of §11.7; unlike `0x09` MTU_TIER it is **not** reset on binding release, because a tier only lowers power, so a departed owner's choice is never the hazardous direction and resetting it would move power mid-flight |
+| `0x0A` | `TX_POWER` | preset index 0..4 | Selects the node's §10.3 power **ceiling** from `adapters[].power_presets_qdb` (§15.2) — the baseline the Pass 134 per-rung mask is derived from, so one choice moves the whole tapered curve and the calibrated per-rung *shape* is preserved. This is deliberately NOT the §10.5 override latch, which is rung-agnostic by construction and would flatten a curve whose whole point is that MCS0 and MCS7 want different power. Applying a tier sets the runtime ceiling on the §10.4 resolve, the §10.5 clamp, and a future §10.6/§10.7 sweep, then forces one re-resolve at the committed operating point. **A tier can only ever LOWER power** (operator ruling): every preset is clamped at config load to that adapter's boot `max_power_qdb`, so §10.3 remains the operator's hard ceiling and no runtime path can raise power past it. `REJECTED` when no `role:"tx"` adapter carries a preset list, `arg` is past its length, a §10.6 calibration is running (Pass 136 — the run owns the actuator), or **the air backend is relative** (Pass 151): `power_presets_qdb` are absolute qdb and there is no offset-space tier, so applying one would install a 60..108 preset as the clamp on an offset resolve — replacing the §10.5 bound with a number 15..27 dB above it while §15.3 reported the tier effective. **The refusal binds BOTH halves (Pass 165).** Pass 151 stated it once and only the craft implemented it; the §15.5 `POST /api/v1/tx/power_tier` ground path applied the tier regardless, and its absolute `ceiling_qdb` then overwrote the **offset-space** §10.7 sweep bound. The sweep's own actuation is separately clamped to `power_offset_max_qdb`, so the run does not itself radiate above the §10.5 bound; the hazard is one step later. Every step above the bound commands the same clamped power, so the seek reads flat and can **persist a placement as high as the preset** — and the artifact apply path is *not* clamped by `power_offset_max_qdb`, so that placement reaches the chip on the next apply, pairing pass or boot. At the fleet seed that is 108 qdb of offset (**+27 dB**) instead of +24 qdb (+6 dB) — the operating point Pass 150 measured driving the PA into compression. The ground now refuses identically, before the tier is recorded, so the bound cannot move. **Residual, named not fixed:** the artifact apply remains unclamped by `power_offset_max_qdb`; with the bound pinned nothing can currently author a placement above it. Since Pass 164 the only RF backend is relative, so `0x0A` and its REST twin are reachable only on the udp bench; §10.5 `POST /api/v1/tx/power` is the actuation path on a relative node. Tiers are re-based with the rest of §10.5. On a node with no curve and no artifact the tier is accepted and recorded but **moves nothing** — per §10.3 the ceiling binds only where a number of ours reaches the actuator. Craft-session volatile like the rest of §11.7; unlike `0x09` MTU_TIER it is **not** reset on binding release, because a tier only lowers power, so a departed owner's choice is never the hazardous direction and resetting it would move power mid-flight |
 | `0x0B`–`0x1F` | *reserved* | — | not specified |
 
 **v2 preset encoding (Pass 71).** The Pass 68 ≤5-choice bound meets open-ended
@@ -4169,8 +4171,8 @@ Unknown transport airtime or incomplete feedback makes the decision invalid and
 selects §14.1 fallback; the implementation must not manufacture a PHY rate,
 RTT, deadline, or guard.
 
-For `kernel-monitor`, the commanded HT20 MCS/GI is a TX-local fact, but Linux
-does not expose a reliable per-frame RF departure timestamp. An authored
+On an RF backend the commanded HT20 MCS/GI is a TX-local fact, but no
+reliable per-frame RF departure timestamp is exposed. An authored
 `air.airtime_efficiency_permille` (range 1–1000, default **0/off**) may therefore
 enable a conservative service-rate model:
 `service_kbps = HT20_PHY_kbps(mcs, gi) * efficiency_permille / 1000`.
@@ -4264,7 +4266,7 @@ selective-discard design it implies is out of scope here and belongs with
 a shadow soak on the same link class shows `jscc_valid_decisions ≥ 99%` of
 `jscc_decision_frames`, `jscc_repair_underpredicted_blocks` growing at
 < 1% of shadow blocks, and RTT readiness held throughout — measured on the
-UDP-air harness first (§17 verification order), then radio/kernel-monitor
+UDP-air harness first (§17 verification order), then radio
 on the rig. Enforcement telemetry is additive (§15.3):
 `jscc_enforced_frames` (valid decisions actuated) and
 `jscc_discarded_frames` (rule-2 drops).
@@ -4503,8 +4505,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   loud log, and every identity-bound absolute (`power_map`, calibration
   artifact) is withheld — fail closed, still flyable. Duplicate `mac`
   values across stanzas are a config error; the key is rejected on
-  non-radio backends (kernel-monitor is frozen, issue #120, and derives
-  identity from `ifname`).
+  non-radio backends.
 - `node.spectator` (default `false`, §2/§13 spectator RX, Pass 74) opts a display
   node into **passive, uplink-free reception** — the analog-video model. A
   spectator may run with **zero `role:"tx"` adapters**: it delivers by FEC +
@@ -4540,15 +4541,13 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   law (§3.0):** on the radio backend, `return.unicast` or `air.ack_responder`
   with `tx_retry_limit: 0` is a config error, and a `return.unicast` node
   whose resolved TX die reports `caps.tx_retry_limit_ok = false` refuses
-  bring-up (§3.0, capability leg). kernel-monitor is untouched (the kernel
-  MAC owns its retries; frozen, #120).
+  bring-up (§3.0, capability leg).
 - `air.ldpc`, `air.stbc` (radio backend only, Pass 157; both default
   **off**): per-frame TX coding — LDPC FEC, and one-stream STBC, in the
   radiotap MCS field (§3.0). Two knobs, not one: LDPC is coding gain on one
   spatial stream, STBC is transmit diversity across two chains — they are
   measured on separate arms. **Refused on any other backend** (a dead key
-  on udp-air; an unverifiable leg on frozen kernel-monitor, #120 — the
-  Pass 154 `adapters[].mac` posture). Enabling either on a TX die whose
+  on udp-air). Enabling either on a TX die whose
   `TxCaps` reads it unsupported refuses bring-up (§3.0 capability leg).
   Defaults stay off until the issue-#97 cliff A/B lands.
 - `air.mcs_probe` (radio backend only, Pass 163; default **off**): enables
@@ -4645,8 +4644,8 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   ```
   `power_offset_qdb` (§10.5, Pass 150) is the **relative** TX offset in
 quarter-dB applied to every `role:"tx"` adapter at startup, against the
-backend's calibrated reference (devourer: the efuse per-rate table;
-kernel-monitor: `max_power_qdb`). Default **−24 (−6 dB)** — a *seed*, not a
+backend's calibrated reference (devourer: the efuse per-rate
+table). Default **−24 (−6 dB)** — a *seed*, not a
 measurement: it comes from one 8822EU and is expected to be wrong for some
 module, which §10.6/§10.7 calibration exists to correct by walking each adapter
 up to its empirical maximum. It is deliberately not 0, because 0 is the
@@ -4660,9 +4659,18 @@ act, supported because efuse tables are per-module and some ship conservative.
 Load-time rule: `power_offset_qdb <= power_offset_max_qdb`, else the config is
 rejected.
 
-`max_power_qdb` is **no longer a TX ceiling** (§10.3 amendment). On
-kernel-monitor it is the absolute reference the offset applies to; on devourer
-it is accepted with a warning and ignored.
+`max_power_qdb` is **no longer a TX ceiling** (§10.3 amendment) and is not the
+§10.5 reference either — that role went with kernel-monitor (Pass 164). It
+nevertheless **remains live on every backend** as the §10.3 ceiling: it clamps
+`power_presets_qdb` at load, it is reported as §15.3 `tx_power_ceiling_qdb`, it
+is the one clamp on a §10.5 override latch, and it bounds a §10.7 sweep. So is
+`power_presets_qdb`, through §15.5 `power_tier`. Neither is inert, and
+`--check --strict` must not say they are.
+
+What Pass 164 *did* strand is `adapters[].ifname` and `adapters[].calib_id`:
+both lost their only reader with the backend (§10.7 tiers 2–4), nothing else
+reads either, and `--check --strict` reports them **inert**. They still load;
+retiring the keys is a later pass.
 
 `scheme` `"none"` (default) fragments + ARQs but emits no repair symbols;
   `"rlc256"` enables §14.1. Rates are integer per-mille (project convention). On
@@ -4922,9 +4930,7 @@ state (craft-local; `false` on a ground node).
 `loss_prediversity` vs `loss_postdiv_prearq` pair expose phantom diversity and the
 ρ decorrelation gauge — the two field-failure modes the design most fears.
 `tx_wedged` is the §9.10 backend-progress verdict (TX adapter only): CCX
-TX-status progress on devourer and Linux netdev `tx_packets` progress on
-kernel-monitor. `tx_reports` itself remains CCX-only and stays 0 on monitor;
-the monitor netdev counter is used internally rather than mislabelled as CCX.
+TX-status progress on devourer. `tx_reports` is the CCX report count.
 `uniq`/`diversity` are the §17 gate-2 estimator inputs; the `nack_rtt_*` /
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.
@@ -5059,8 +5065,11 @@ which remains backend/synthetic queue loss.
 self-originated receive frames. It is 0 where filtering occurs below an
 observable boundary.
 `bpf_filtered` is a **derived estimate** — the only §15.3 field that does *not*
-map 1:1 to a §16.2 counter — of how many frames the kernel-monitor backend's
-§3.0 BPF pre-filter rejected before the `recvmsg()` copy to userspace. It is
+map 1:1 to a §16.2 counter — of how many frames the retired kernel-monitor
+backend's
+§3.0 BPF pre-filter rejected before the `recvmsg()` copy to userspace. **It has
+no producer since Pass 164 and reads 0 on every backend**; the field is kept so
+the §15.3 schema does not break consumers. It was
 computed as the interface's sysfs `rx_packets` delta since socket open minus all
 userspace-observed frames (`rx + filtered + drop + kernel_drop`), floored at 0.
 Because `rx_packets` is a per-netdev driver counter incremented *below* the
@@ -5112,7 +5121,7 @@ empty window keeps the previous `rssi_best`/`rssi_mean` behaviour
 is **observation only** — no control path reads it; the §9.4 saturation
 gate and any wire carriage (§3.5) are separate rulings (issue #98 stages
 2–3, issue #125). Off the radio backend the fields keep their prior
-values: kernel-monitor radiotap carries no SNR/EVM.
+values.
 
 `link.verdict` / `link.verdict_age_ms` (Pass 159) are role-dependent views
 of the same §3.16 value: on a **craft**, the last *accepted* LINK_VERDICT
@@ -5133,8 +5142,7 @@ all (devourer `ldpc_rx_flag`; when false the counters stay 0 however the
 air was coded, so an A/B's proof-of-flight ear must be flag-capable — the
 counters prove coding flew, `ldpc_flag_ok` says whether a zero means
 anything). Advisory observation exactly like `rx_mcs`: no control path
-reads them; 0/false on `UdpAir` and on the frozen kernel-monitor backend
-(no RX-parse leg, #120).
+reads them; 0/false on `UdpAir`.
 
 A node with a §14.3 cache role enabled additionally emits the matching
 top-level object (absent when the role is off, like `stats.bind`):
@@ -5279,7 +5287,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
 | `GET /api/v1/calibration` | role-specific calibration surface. Craft/tx: §10.6 response plus `direction:"downlink"`. Ground/rx: §10.7 `{direction:"uplink",state,rung,power_qdb,fingerprint,stale,quality:{valid,age_ms,last_report_epoch,reports_received,rssi_mean,rx_mcs},artifact:{...,placements:[...]}|null,fail_reason}` |
 | `GET /api/v1/modes` | `{active, apply_configured, catalog_fingerprint, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist. A ground with an IP path reads it here; one without must hardcode a copy, and pins `catalog_fingerprint` (Pass 108) to detect index drift (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
-| `GET /api/v1/tx/power` | `{override_active, qdb, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`kernel-monitor`\|`udp` (any node with a `role:"tx"` adapter) |
+| `GET /api/v1/tx/power` | `{override_active, qdb, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`udp` (any node with a `role:"tx"` adapter; the `kernel-monitor` value is retired, Pass 164) |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -5304,7 +5312,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/csa` | `{ "mhz": 5805, "class": 0 }` | start a §11 CSA campaign (issuer/ground node) |
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
 | `GET /api/v1/tx/power_tier` | — | §10.3/§11.7 `0x0A` power tier: `{tier, presets_qdb, ceiling_qdb, effective}` — `tier` is `-1` when no preset list is configured, and `effective` is false on a node with no curve, no artifact and no §10.5 latch, where the ceiling binds nothing (§10.3). A held latch counts (Pass 136): the ceiling is the one clamp on an override, so the tier reaches hardware through it |
-| `POST /api/v1/tx/power_tier` | `{ "tier": 1 }` \| `{ "tier": 1, "both": true }` | Selects the local ceiling by preset index; 400 on a missing/non-integer `tier`, 409 when unconfigured or out of range. `both` additionally issues §11.7 `0x0A` to the bound craft — the one-action-both-directions shape `{"action":"start_both"}` already has for calibration. `both` on a node with no craft binding is a 409, not a silent local-only apply. 409 while a §10.6/§10.7 calibration is running (Pass 136) — the run owns the actuator and the ceiling is what it is measuring against |
+| `POST /api/v1/tx/power_tier` | `{ "tier": 1 }` \| `{ "tier": 1, "both": true }` | Selects the local ceiling by preset index; 400 on a missing/non-integer `tier`, 409 when unconfigured or out of range, and **409 when this node's uplink is on a relative backend** (§11.7 `0x0A` Pass 151, enforced here since Pass 165 — presets are absolute qdb and would be read as an offset by the §10.7 sweep bound; use `POST /api/v1/tx/power`). `both` additionally issues §11.7 `0x0A` to the bound craft — the one-action-both-directions shape `{"action":"start_both"}` already has for calibration. `both` on a node with no craft binding is a 409, not a silent local-only apply. 409 while a §10.6/§10.7 calibration is running (Pass 136) — the run owns the actuator and the ceiling is what it is measuring against |
 | `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (any node with a `role:"tx"` adapter, including an rx-node's §6.4 uplink — Pass 125) |
 | `POST /api/v1/calibration` | `{ "action": "start" }` \| `{ "action": "abort" }` \| `{ "action": "start_both" }` | §10.7 ground-uplink calibration; `start` requires its complete prerequisite set, `abort` is idempotent and cancels either phase, `start_both` additionally sequences the §11.7 downlink campaign after a successful uplink phase (ground/rx node) |
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2, "e_permille": 0 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node). `e_permille` (§14.1a) is optional and, like every other field here, participates in the POST's full-replacement semantics: omitting it — or sending `null` — restores the default of inheriting `p_permille` |
@@ -5524,7 +5532,7 @@ supported (§15.2 `scout`).
   field-fill that table reserved space for is **Pass 155**: on the radio
   backend the reserved fields are real frame-free measurements from
   devourer's energy sensors; on a backend with no such sensor
-  (kernel-monitor — frozen, issue #120 — and the udp bench) they stay
+  (the udp bench) they stay
   `null`/proxy exactly as v1 shipped them. Units are **per-mille** and
   **dBm**:
 
@@ -5756,7 +5764,7 @@ local-ingress polling interval.
 | `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
 | `wedge_exit_windows` | §9.10 v2 TX-node self-restart | both v1 conditions above met first; sized so a transient never bounces a healthy craft — 3 consecutive wedged windows at the 1000 ms seed, i.e. 3 s with zero backend TX progress. 0 disables (v1 behaviour). Vehicle loop only |
 | cache close timers (`tail_grace_ms`/`local_quiet_ms`/`min_collect_ms`/`hard_close_ms`) | §14.3 local-collection close | loss-position sweep at target fps on the Ethernet bench; close must beat next-block supersession with round-trip margin |
-| frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, profile transitions — operator sequencing 2026-07-16), then the radio/kernel-monitor backends on the rig |
+| frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, profile transitions — operator sequencing 2026-07-16), then the radio backend on the rig |
 | FPS ladder frame floor/hysteresis/timers (`min_p_frame_bytes`, `restore_hysteresis_bytes`, `sample_timeout_ms`, `reduce_after/reduce_dwell/restore_after/settle_ms`) | §9.11 frame-size-preservation loop | UDP-air frame-size ladder harness first; flight calibration against direct frame-SHM cadence and visual output |
 | `arq_max_fps` | §4.1 high-cadence ARQ cutoff | operator comfort floor 10 ms (2026-07-16); re-derive against gate-3 recovery latency at high fps |
 | §9.4 probe schedule + window (`probe.period`/`probe.slot` in the table; window `min_samples` 32, `max_age_ms` 8000, gap horizon 128; `probe_veto_permille` 50, `probe_veto_ttl_s` 3.0) | probe duty vs evidence rate; when the up-candidate's PER has an opinion and when it bars a climb | devourer's 64/(4) ≈1.6 % duty and 64-sample window are BENCH FITS to their fps/block structure — RE-DERIVE against ours: duty vs delivery cost at the cliff, window fill time vs rung dwell at our report cadence; veto threshold against the §9.1 demote band |
