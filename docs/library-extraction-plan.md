@@ -1296,6 +1296,13 @@ a caller — and it should follow the PR #139 precedent and be
 **programmatic-only**, with no `BindKind` value and no §15.2 surface, so it
 stays Tier-2 and needs no ruling.
 
+> **Half of that is wrong — see §4.8, measured while landing 2c step 1.**
+> The dependency runs *both* ways: B10's seam is unreachable until the lift
+> (true, above), and the lift cannot reach its target consumer until B10
+> exists. They land together. The paragraph is kept because everything else
+> in it — that the facade is not a thin wrapper, and that B10 stays
+> programmatic-only — still holds.
+
 **What that lift is, honestly.** `run_rx` keeps its state in locals captured
 by reference from ~40 lambdas. That structure is not incidental: it is exactly
 what produced the `issue_vcmd` stack-use-after-scope crash found during
@@ -1306,10 +1313,10 @@ the largest single piece of work left in #109. It wants a fresh session and
 its own byte-identity strategy, because unlike every 2a move it is **not** a
 verbatim relocation.
 
-**What is left of #109:** 2c (lift `run_rx` — the big one), then 2b (B10,
-small once 2c lands), then Phase 3 — Android — which binds at the end, when the
-layer owns enough to make "what does a library do instead of `exit()`" a
-question with a concrete answer.
+**What is left of #109:** 2c (lift `run_rx` — the big one) together with 2b
+(B10 — see §4.8 for why they cannot be separated), then Phase 3 — Android —
+which binds at the end, when the layer owns enough to make "what does a
+library do instead of `exit()`" a question with a concrete answer.
 
 ### 4.7 Phase 2c step 1, as landed — `run_rx`'s free-function dependencies
 
@@ -1376,6 +1383,55 @@ script, so a third kind of edit fails it. It is a review-time tool, not a
 merge gate: it compares against a base revision that moves, so `scripts/`
 deliberately does not run it. Mutating one moved line turns it red, which is
 the control that a substring check can otherwise pass vacuously.
+
+### 4.8 The real constraint on lifting `run_rx` — and why B10 comes with it
+
+§4.6 says the hard part of the lift is that `run_rx` keeps its state in
+locals captured by reference from ~40 lambdas. That is true, and it is a real
+hazard — it is the structure that produced the Pass 166 `issue_vcmd`
+stack-use-after-scope crash. But it is not what *blocks* the lift, and the
+difference decides the order of the remaining work.
+
+**What blocks it is a build configuration.** `run_rx` names `FrameShmRing` at
+5 sites and its local `ShmOut` wrapper — which holds one — at 11 more, plus
+`ControlServer` at 2, all unconditionally: there is no `#if` around any of
+them, because `WBLINK_BUILD_APP=ON` refuses to configure
+without all three optional subsystems, so `app/` has never had to care.
+`node/` does not get that luxury:
+
+```
+$ jq '.configurePresets[] | select(.name=="android-arm64") | .cacheVariables'
+{ "WBLINK_RADIO": "ON", "WBLINK_WERROR": "ON", "WBLINK_BUILD_APP": "OFF",
+  "WBLINK_BUILD_TESTS": "OFF", "WBLINK_FRAME_SHM": "OFF",
+  "WBLINK_CONTROL_SERVER": "OFF", "WBLINK_VENC": "OFF" }
+```
+
+`android-arm64` is the preset that exists **specifically** to prove the Phase 3
+consumer, and it builds with frame-shm off, because bionic has no `shm_open`
+(the same reason `io/include/wblink/cookie_stream.h` exists for
+`fopencookie`). A verbatim `run_rx` in `node/` therefore cannot serve the one
+consumer the whole extraction is for.
+
+So the dependency is mutual, and §4.6 recorded only one direction of it:
+
+- B10's seam is unreachable until the lift — nothing outside `app/main.cpp`'s
+  TU can call `run_rx`, so a sink would have no caller (§4.6, still true).
+- The lift cannot reach its target consumer until B10 — the egress path has
+  to survive `WBLINK_FRAME_SHM=OFF`, and a callback sink is exactly what that
+  takes.
+
+**They land together.** Neither is a follow-on to the other, and planning them
+as separate phases is what made the order look decidable.
+
+**One trap to design around rather than discover.** `android-arm64` is
+compile-only and builds libraries, and a static archive does not resolve its
+own undefined symbols. A `node/` that references `FrameShmRing::create`
+without `io/src/frame_shm.cpp` in the build would therefore go **green** on
+that preset and fail in a consumer's link instead — the gate that exists to
+catch bionic problems would sail past this one. Whatever shape B10 takes, the
+check that it worked is not "the android preset builds"; it is a link, which
+today means extending `examples/embed-consumer` or accepting that this stays
+unproven until `:wifi` links it.
 
 ## 5. Loose ends worth knowing before starting
 
