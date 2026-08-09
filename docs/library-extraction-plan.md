@@ -1269,8 +1269,45 @@ of the rule at the same time — that nothing in `core/` or `io/` includes a
 `io/stats.h` produces exactly one failure each. The guard also fails if
 `node/` has no sources, so it cannot pass vacuously.
 
-**What is left of #109:** Phase 2b (the B10 callback egress sink) and 2c (a
-stable facade), then Phase 3 — Android — which binds at the end, when the
+### 4.6 Phase 2b cannot go before 2c — measured, not planned
+
+The phasing above lists **2b (B10 callback egress sink) then 2c (facade)**.
+That order does not work, and the reason only became visible once 2a landed.
+
+B10 wants RX video frames handed to a consumer callback instead of a UDP
+socket. Every part of that path — `write_egress`, `egress_for`, the 13
+`shm_outs` sites, both `Deliver` lambdas — lives **inside `run_rx`**, a
+2662-line function in `app/main.cpp`'s anonymous namespace (opened at
+`app/main.cpp:90`). Nothing outside that translation unit can call it.
+
+So after 2a a consumer linking `wblink::node` can *build* an `RxCore`, a
+`TxCore` and an `AirBackend`, and can fill a §15.3 snapshot — but it **cannot
+run a node**, because `node/` exposes no run loop and the three that exist are
+unlinkable. Adding a callback sink now would create a seam nothing can attach
+to, which the repo's minimal-implementation rule specifically forbids
+("do not create abstractions for hypothetical future requirements"). The
+requirement is real — Android — but it is not reachable yet.
+
+**Revised order: 2c before 2b.** The facade is not a thin wrapper over the
+existing pieces; it is the job of lifting `run_rx`'s construction and event
+loop into `node/` so that something can own the sink. Once a consumer can
+construct and drive a node, B10 is a small additive change to a path that has
+a caller — and it should follow the PR #139 precedent and be
+**programmatic-only**, with no `BindKind` value and no §15.2 surface, so it
+stays Tier-2 and needs no ruling.
+
+**What that lift is, honestly.** `run_rx` keeps its state in locals captured
+by reference from ~40 lambdas. That structure is not incidental: it is exactly
+what produced the `issue_vcmd` stack-use-after-scope crash found during
+Pass 166 verification — a handler capturing a block-scoped local by reference
+while the ControlServer outlived the block. Lifting it means giving those
+locals an owning struct, which is worth doing for that reason alone, and it is
+the largest single piece of work left in #109. It wants a fresh session and
+its own byte-identity strategy, because unlike every 2a move it is **not** a
+verbatim relocation.
+
+**What is left of #109:** 2c (lift `run_rx` — the big one), then 2b (B10,
+small once 2c lands), then Phase 3 — Android — which binds at the end, when the
 layer owns enough to make "what does a library do instead of `exit()`" a
 question with a concrete answer.
 
