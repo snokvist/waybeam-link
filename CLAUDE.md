@@ -276,7 +276,8 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   `StatsEmitter`'s local sink, never `stdout` directly — both default to the
   old behaviour, and both exist so an embedding consumer is not deaf (#144).
 - `node/` — node behaviour above `io/` (#109 Phase 2a). Header-only so far:
-  `RxCore` and the `rx_policy()` adapter that feeds it. **Layering rule:
+  `rx_core.h` (`RxCore` + the `rx_policy()` adapter) and `discovery.h`
+  (`DiscoveryCatalog`, `ScoutEngine`). **Layering rule:
   `node/` may use `core/` and `io/`; neither may use `node/`.** Anything
   moved here becomes reachable from a real unit test — before the layer
   existed the only way to touch `RxCore` was `tests/app_test.cpp`

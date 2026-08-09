@@ -90,6 +90,7 @@ target_include_directories(modes_test SYSTEM PRIVATE
 # node/ layer (#109 Phase 2a): before the move, the only way to touch this
 # code was app_test's whole-TU include.
 add_wb_test(node_rx_core_test wblink_io wblink_node)
+add_wb_test(node_discovery_test wblink_io wblink_node)
 
 # app_test #includes app/main.cpp whole (that file's contents are one anonymous
 # namespace, so there is nothing to link against) with WBLINK_APP_TEST

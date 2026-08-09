@@ -1200,8 +1200,19 @@ the install package stays `wblink::core` alone. And the `embed-consumer` gate
 passes unchanged, which is the check that a new target has not leaked into a
 consumer's build.
 
-**Still ahead in 2a:** `AirBackend`, `ScoutEngine`, `DiscoveryCatalog`,
-`TxCore` and the stats emitter, then B9 — which binds at the end, when the
+**Second move, same shape:** `DiscoveryCatalog` (168 lines) and `ScoutEngine`
+(420) into `node/discovery.h`. Both were nominated clean and both were: no
+app-layer references at all. `ScoutEngine` was already built for injection —
+every side effect it has is a `Hooks` callback — which is why its test drives
+a full sweep with no radio, no socket and no clock, and can pin the two
+properties that are invisible from outside: that `start()` widens the RX
+filter to hear all net_ids (a sweep that keeps the narrow filter finds only
+its own fleet and calls the band empty), and that `stop()` restores while
+`abandon()` deliberately does not.
+
+**Still ahead in 2a:** `AirBackend` (524 lines, and it takes
+`PacketEventTrace` with it — the one target with an app-layer dependency),
+`TxCore` (1812) and the stats emitter, then B9 — which binds at the end, when the
 layer owns enough to make "what does a library do instead of `exit()`" a
 question with a concrete answer.
 
