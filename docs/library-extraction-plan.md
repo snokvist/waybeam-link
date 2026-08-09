@@ -120,11 +120,15 @@ instead — a devourer spectator carries the archetype (19466 frames, loss 0 ‰
 zero `role:"tx"` adapters), so the backend had no remaining user. `air_mon.cpp`
 is deleted, not relocated.
 
-**Consequence: Phase 3's proof rests on the Android consumer alone.** There is
-no second outside repo queued, so "an outside repo can build a node" is now
-proven by `:wifi` or not at all. If that is too thin a criterion, the
-replacement is a decision for whoever starts Phase 3 — the `embed-consumer`
-gate proves *linking*, not *building a node*.
+**Consequence: Phase 3's proof rests on the Android consumer alone —
+RULED SUFFICIENT (operator, 2026-08-09).** There is no second outside repo
+queued and none is coming; the fleet is x86, RK3566, the SSC338Q craft and
+Android, and nothing else consumes this code. So the Phase-3 criterion is
+`:wifi` building a node, and the four in-tree cross-presets (`x86-ground`,
+`rk3566`, `ssc338q*`, `android-arm64`) carry the portability half. Do not
+invent a synthetic second consumer to restore the old two-consumer
+criterion — `examples/embed-consumer` stays what it is, a *linking* gate,
+and its scope is deliberately not widened.
 
 **OpenWRT is the easiest consumer** and mostly needs what the SSC338Q cross
 already proves, plus a musl build and an install/export target. It is not

@@ -301,6 +301,16 @@ Two things make this safe to adopt:
 Suggested staging: `--check --strict` warns first, and becomes an error once
 the harness is what authors configs.
 
+**RULED (operator, 2026-08-09): promote it to an error.** The direction is
+settled; only the timing and the inert-key question are open. Two things must
+land first, and both are Tier-1 in their own right: (a) an **inert** key must
+not fail the gate the way an **unknown** key does — a key we retired is not an
+operator typo, and `adapters[].ifname`/`calib_id` are inert on every flying
+config today (Pass 164), so promoting without splitting the two verdicts turns
+every fleet file red; (b) the promotion needs its own numbered Pass, because
+`--check --strict` is `gates.sh`'s merge gate and an error there changes what
+merges. Do not fold this into an unrelated pass.
+
 ### Tracking waybeam-link as it changes
 
 This is the part that decides whether the harness is worth building, because a
