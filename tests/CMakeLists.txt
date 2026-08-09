@@ -132,6 +132,11 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME config_registry_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/config_registry_test.py)
+    # The standing answer to #109 blocker B9: node/ owns no process, and
+    # nothing below it depends on it. Source-level, no build artifact.
+    add_test(NAME node_layering_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/node_layering_test.py)
 else()
     # Registering nothing here leaves ctest GREEN on a host without python3
     # while five suites silently did not run — among them config_registry_test,

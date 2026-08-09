@@ -1241,7 +1241,36 @@ been getting transitively — `scheduler.h`, `framer.h`, `frame_framer.h`,
 8.2k-line TU and none was declared. That is the tax the layer is collecting,
 and it is a one-time tax per move.
 
-**Still ahead in 2a:** the stats emitter, then B9 — which binds at the end, when the
+**Final move: the §15.3 stats assembly.** `emit_stats()` (177 lines),
+`ArqTimingTracker`, `Loaded`, the two fill helpers and `InfoSelfState`. This
+one could not go earlier — `emit_stats()` reads `AirBackend`, `RxCore`,
+`TxCore` and `Loaded`, so it is the join point of the whole node and was
+always going to be last. It is also the piece that proves the layer: with it
+here, a consumer can produce a §15.3 line without `app/main.cpp` at all.
+
+### B9 — ANSWERED, and structurally rather than by design
+
+B9 asked "what does a library do instead of `exit()`", listing three
+process-level behaviours. Phase 2a did not have to decide: **all three stayed
+in `app/main.cpp`**, which is now the driver, while every node-behaviour
+object moved out. The Pass 148 sustained-wedge path was already
+`return kExitTxWedged` — a value `main()` propagates, not an `exit()` in the
+loop — and the signal handlers and `spawn_mode_applier`'s double fork never
+belonged to any of the moved objects.
+
+Measured, not asserted: `node/` contains **no** free-standing call to `exit`,
+`_exit`, `abort`, `fork`, `execl*`, `signal`, `sigaction`, `raise`, `atexit`
+or `longjmp`. All nine such calls in the tree are in `app/main.cpp`.
+
+`tests/node_layering_test.py` makes it stay true, and enforces the other half
+of the rule at the same time — that nothing in `core/` or `io/` includes a
+`node/` header. Both rules were mutation-checked independently: injecting a
+`::exit(1)` into `node/clock.h` and an `#include "wblink/node/clock.h"` into
+`io/stats.h` produces exactly one failure each. The guard also fails if
+`node/` has no sources, so it cannot pass vacuously.
+
+**What is left of #109:** Phase 2b (the B10 callback egress sink) and 2c (a
+stable facade), then Phase 3 — Android — which binds at the end, when the
 layer owns enough to make "what does a library do instead of `exit()`" a
 question with a concrete answer.
 

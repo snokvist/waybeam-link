@@ -72,6 +72,7 @@
 #include "wblink/node/air_backend.h"
 #include "wblink/node/clock.h"
 #include "wblink/node/tx_core.h"
+#include "wblink/node/stats_fill.h"
 #include "wblink/node/discovery.h"
 #include "wblink/node/rx_core.h"
 #include "wblink/table.h"
@@ -103,6 +104,12 @@ using wblink::node::selector_policy;
 using wblink::node::bw_code;
 using wblink::node::scheduler_policy;
 using wblink::node::TxCore;
+using wblink::node::ArqTimingTracker;
+using wblink::node::emit_stats;
+using wblink::node::InfoSelfState;
+using wblink::node::Loaded;
+using wblink::node::UplinkStatsFill;
+using wblink::node::VcmdStatsFill;
 using wblink::node::DiscoveryCatalog;
 using wblink::node::PacketEventTrace;
 using wblink::node::RxCore;
@@ -167,171 +174,7 @@ bool spawn_mode_applier(const std::string& cmd, const std::string& name) {
 
 
 
-class ArqTimingTracker {
-  public:
-    void note_eob(uint64_t at_us) { last_eob_us_ = at_us; }
-
-    void note_nack_built(const uint8_t* frame, size_t len, uint64_t at_us) {
-        const Decoded dec = decode(frame, len);
-        const NackView* n = std::get_if<NackView>(&dec);
-        if (n == nullptr) return;
-        if (last_eob_us_ && at_us >= *last_eob_us_) {
-            eob_to_build_.observe(at_us - *last_eob_us_);
-        }
-        for_each_seq(*n, [&](const Key& k) { built_[k] = at_us; });
-        trim(built_);
-    }
-
-    void note_nack_injected(const uint8_t* frame, size_t len,
-                            uint64_t at_us) {
-        const Decoded dec = decode(frame, len);
-        const NackView* n = std::get_if<NackView>(&dec);
-        if (n == nullptr) return;
-        bool sampled = false;
-        for_each_seq(*n, [&](const Key& k) {
-            const auto it = built_.find(k);
-            if (!sampled && it != built_.end() && at_us >= it->second) {
-                build_to_inject_.observe(at_us - it->second);
-                sampled = true;
-            }
-            injected_[k] = at_us;
-        });
-        trim(injected_);
-    }
-
-    void note_retransmit_arrived(const DataView& v, uint64_t at_us) {
-        if ((v.hdr.data_flags & data_flags::kRetransmit) == 0) return;
-        const Key k = key(v.hdr.prefix.originator, v.hdr.prefix.session_id,
-                          v.hdr.stream_id, v.hdr.seq);
-        if (const auto it = injected_.find(k);
-            it != injected_.end() && at_us >= it->second) {
-            inject_to_retransmit_.observe(at_us - it->second);
-            injected_.erase(it);
-        }
-        if (const auto it = built_.find(k);
-            it != built_.end() && at_us >= it->second) {
-            build_to_retransmit_.observe(at_us - it->second);
-            built_.erase(it);
-        }
-    }
-
-    void note_nack_received(const uint8_t* frame, size_t len,
-                            uint64_t at_us) {
-        const Decoded dec = decode(frame, len);
-        const NackView* n = std::get_if<NackView>(&dec);
-        if (n == nullptr) return;
-        for_each_seq(*n, [&](const Key& k) { received_[k] = at_us; });
-        trim(received_);
-    }
-
-    void note_resend_submitted(const uint8_t* frame, size_t len,
-                               uint64_t at_us) {
-        const Decoded dec = decode(frame, len);
-        const DataView* v = std::get_if<DataView>(&dec);
-        if (v == nullptr ||
-            (v->hdr.data_flags & data_flags::kRetransmit) == 0) return;
-        const Key k = key(v->hdr.prefix.originator,
-                          v->hdr.prefix.session_id, v->hdr.stream_id,
-                          v->hdr.seq);
-        const auto it = received_.find(k);
-        if (it != received_.end() && at_us >= it->second) {
-            receive_to_resend_.observe(at_us - it->second);
-            received_.erase(it);
-        }
-    }
-
-    ArqTimingStats snapshot() const {
-        ArqTimingStats out;
-        out.eob_to_nack_build = eob_to_build_.snapshot();
-        out.nack_build_to_inject = build_to_inject_.snapshot();
-        out.nack_inject_to_retransmit = inject_to_retransmit_.snapshot();
-        out.nack_build_to_retransmit = build_to_retransmit_.snapshot();
-        out.nack_receive_to_resend = receive_to_resend_.snapshot();
-        return out;
-    }
-
-    void reset() {
-        eob_to_build_.reset();
-        build_to_inject_.reset();
-        inject_to_retransmit_.reset();
-        build_to_retransmit_.reset();
-        receive_to_resend_.reset();
-        built_.clear();
-        injected_.clear();
-        received_.clear();
-        last_eob_us_.reset();
-    }
-
-  private:
-    class Series {
-      public:
-        void observe(uint64_t delta) {
-            const uint32_t us = static_cast<uint32_t>(
-                std::min<uint64_t>(delta, UINT32_MAX));
-            ++samples_;
-            max_ = std::max(max_, us);
-            recent_.push_back(us);
-            if (recent_.size() > 512) recent_.pop_front();
-        }
-        TimingMetricStats snapshot() const {
-            TimingMetricStats out{samples_, 0, max_};
-            if (recent_.empty()) return out;
-            std::vector<uint32_t> sorted(recent_.begin(), recent_.end());
-            std::sort(sorted.begin(), sorted.end());
-            const size_t rank = (sorted.size() * 95 + 99) / 100;
-            out.p95_us = sorted[rank - 1];
-            return out;
-        }
-        void reset() {
-            samples_ = 0;
-            max_ = 0;
-            recent_.clear();
-        }
-      private:
-        uint64_t samples_ = 0;
-        uint32_t max_ = 0;
-        std::deque<uint32_t> recent_;
-    };
-
-    struct Key {
-        uint16_t originator;
-        uint32_t session;
-        uint8_t stream_id;
-        uint32_t seq;
-        bool operator<(const Key& other) const {
-            return std::tie(originator, session, stream_id, seq) <
-                   std::tie(other.originator, other.session, other.stream_id,
-                            other.seq);
-        }
-    };
-    static Key key(uint16_t originator, uint32_t session, uint8_t stream_id,
-                   uint32_t seq) {
-        return Key{originator, session, stream_id, seq};
-    }
-    template <class F>
-    static void for_each_seq(const NackView& n, const F& fn) {
-        for (unsigned i = 0; i < static_cast<unsigned>(n.bitmap_len) * 8;
-             ++i) {
-            if ((n.bitmap[i / 8] & (1u << (i % 8))) != 0) {
-                fn(key(n.hdr.target_originator, n.hdr.target_session,
-                       n.hdr.target_stream_id, n.hdr.base_seq + i));
-            }
-        }
-    }
-    static void trim(std::map<Key, uint64_t>& m) {
-        while (m.size() > 4096) m.erase(m.begin());
-    }
-
-    Series eob_to_build_;
-    Series build_to_inject_;
-    Series inject_to_retransmit_;
-    Series build_to_retransmit_;
-    Series receive_to_resend_;
-    std::map<Key, uint64_t> built_;
-    std::map<Key, uint64_t> injected_;
-    std::map<Key, uint64_t> received_;
-    std::optional<uint64_t> last_eob_us_;
-};
+// ArqTimingTracker moved to node/include/wblink/node/stats_fill.h (#109 Phase 2a).
 
 // packet_type_name moved to node/include/wblink/node/air_backend.h (#109 Phase 2a).
 
@@ -666,12 +509,7 @@ QuietGapPolicy quietgap_policy(const Config& cfg) {
 
 // ---- shared setup -----------------------------------------------------------
 
-struct Loaded {
-    Config cfg;
-    ProfileTable table;
-    bool have_table = false;
-    uint8_t tv = 0;
-};
+// Loaded moved to node/include/wblink/node/stats_fill.h (#109 Phase 2a).
 
 int load_all(const std::string& config_path, Loaded& out) {
     auto cfg = load_config(config_path);
@@ -722,229 +560,13 @@ int load_all(const std::string& config_path, Loaded& out) {
     return 0;
 }
 
-// §11.7/§15.3 command-surface fields not owned by Tx/RxCore (the engines
-// live in the mode loops): craft nonce, issuer campaign state, rx ARQ gate.
-struct VcmdStatsFill {
-    uint32_t cmd_last_nonce = 0;       // craft
-    const char* vcmd_state = nullptr;  // issuer (null = not an issuer)
-    uint32_t vcmd_nonce = 0;
-    bool arq_rx_enabled = true;        // rx gate
-    const char* mtu_mode = nullptr;    // ground local preference
-    uint16_t mtu_requested = kDefaultMaxPayload;
-    uint16_t mtu_effective = kDefaultMaxPayload;
-    uint16_t mtu_supported = kDefaultMaxPayload;
-};
+// VcmdStatsFill moved to node/include/wblink/node/stats_fill.h (#109 Phase 2a).
 
-// §10.7 (Pass 125) ground-uplink stats. A struct rather than eleven more
-// parameters, and a pointer so every other role emits the role-neutral
-// idle/zero defaults without threading anything.
-struct UplinkStatsFill {
-    const char* state = "idle";
-    uint8_t rung = 0;
-    int32_t power_qdb = 0;
-    uint8_t fingerprint = 0;
-    bool stale = false;
-    // §3.16 (Pass 153) probe-exchange counters for the local node's run.
-    uint64_t probes_sent = 0;
-    uint64_t tallies_rx = 0;
-    uint8_t rx_mcs = kUplinkRxMcsUnknown;
-    // §10.3/§10.5/§11.7 0x0A (Pass 135). Only TxCore::fill_stats sets the
-    // link.tx_power_* fields, and the ground has no TxCore — so its §15.3
-    // reported tier -1 and power 0 no matter what was selected, while the
-    // endpoint reported the truth. The hub menu binds to §15.3, so the one
-    // row an operator reads was the one that could not move.
-    int tx_power_tier = -1;
-    int32_t tx_power_ceiling_qdb = 0;
-    bool tx_power_tier_effective = false;
-    bool tx_power_override = false;
-    int32_t tx_power_qdb = 0;
-};
+// UplinkStatsFill moved to node/include/wblink/node/stats_fill.h (#109 Phase 2a).
 
-void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
-                uint64_t t0, const TxCore* tx, const RxCore* rx,
-                const AirBackend* air = nullptr,
-                uint64_t tsf_fallbacks = 0,
-                const char* csa_state = nullptr,
-                uint32_t ret_window_hits = 0,
-                uint32_t ret_window_misses = 0,
-                bool tx_wedged = false,
-                const std::vector<std::pair<uint8_t, FrameReassemblerStats>>*
-                    frame_stats = nullptr,
-                const std::vector<std::pair<uint8_t, FrameShmRing::Stats>>*
-                    shm_stats = nullptr,
-                const CacheRepairStatsOut* cache_repair = nullptr,
-                const CacheStoreStatsOut* cache_store = nullptr,
-                StatsSnapshot* out_snap = nullptr,
-                const ArqTimingStats* arq_timing = nullptr,
-                const VcmdStatsFill* vcmd = nullptr,
-                uint16_t channel_mhz = 0,
-                const UplinkStatsFill* uplink = nullptr) {
-    const uint64_t now = now_ms();
-    StatsSnapshot snap;
-    snap.t_ms = now - t0;
-    snap.node = l.cfg.node.originator;
-    snap.session = session;
-    // §7.2 observability (ground): paced vs blind coalesced return batches.
-    snap.ret.return_window_hits = ret_window_hits;
-    snap.ret.return_window_misses = ret_window_misses;
-    // §3.0 Pass 12: unicast-return counters (radio backend only).
-    if (air != nullptr) {
-        air->fill_return_stats(snap.ret);
-    }
-    if (csa_state != nullptr) {
-        snap.link.csa_state = csa_state;
-    }
-    snap.link.channel_mhz = channel_mhz;  // §11 current operating channel (0 = not tracked)
-    if (tx != nullptr) {
-        tx->fill_stats(snap, now);
-    }
-    if (uplink != nullptr) {  // §10.7 Pass 125 (ground/rx node only)
-        snap.link.uplink_calib_state = uplink->state;
-        snap.link.uplink_calib_rung = uplink->rung;
-        snap.link.uplink_calib_power_qdb = uplink->power_qdb;
-        snap.link.uplink_calib_fingerprint = uplink->fingerprint;
-        snap.link.uplink_calib_stale = uplink->stale;
-        snap.link.calib_probes_sent = uplink->probes_sent;
-        snap.link.calib_tallies_rx = uplink->tallies_rx;
-        snap.link.calib_rx_mcs = uplink->rx_mcs;
-        snap.link.tx_power_tier = uplink->tx_power_tier;
-        snap.link.tx_power_ceiling_qdb = uplink->tx_power_ceiling_qdb;
-        snap.link.tx_power_tier_effective = uplink->tx_power_tier_effective;
-        snap.link.tx_power_override = uplink->tx_power_override;
-        snap.link.tx_power_qdb = uplink->tx_power_qdb;
-    }
-    if (vcmd != nullptr) {
-        snap.link.cmd_last_nonce = vcmd->cmd_last_nonce;
-        if (vcmd->vcmd_state != nullptr) {
-            snap.link.vcmd_state = vcmd->vcmd_state;
-            snap.link.vcmd_nonce = vcmd->vcmd_nonce;
-        }
-        snap.link.arq_rx_enabled = vcmd->arq_rx_enabled;
-        if (vcmd->mtu_mode != nullptr) {
-            snap.link.mtu_mode = vcmd->mtu_mode;
-            snap.link.mtu_requested = vcmd->mtu_requested;
-            snap.link.mtu_effective = vcmd->mtu_effective;
-            snap.link.mtu_supported = vcmd->mtu_supported;
-        }
-    }
-    // Air adapters first so RxCore::fill_stats can merge its per-adapter
-    // liveness view into them by index (radio backend; no-op on udp).
-    if (air != nullptr) {
-        air->fill_adapter_stats(snap, tsf_fallbacks, tx_wedged);
-    }
-    if (rx != nullptr) {
-        rx->fill_stats(snap, now);
-#if WBLINK_RADIO
-        // §15.3 Pass 159 role-dependent view: a radio GROUND shows the
-        // cause it computes (what it sends); the craft's accepted-verdict
-        // fill lives in its own tx fill and is not touched here.
-        if (air != nullptr && air->radio != nullptr) {
-            snap.link.verdict = air->radio->link_verdict();
-            snap.link.verdict_age_ms = 0;
-        }
-#endif
-    }
-    // §6.3a frame-shm egress: fold each reassembler's frame-level outcomes into
-    // the matching stream (by stream_id). recovered_arq / delivered / loss stay
-    // the packet-layer view from RxEngine; these are the frame-layer view.
-    if (frame_stats != nullptr) {
-        for (const auto& [sid, fr] : *frame_stats) {
-            StreamStats* st = nullptr;
-            for (StreamStats& s : snap.streams) {
-                if (s.stream_id == sid) {
-                    st = &s;
-                    break;
-                }
-            }
-            if (st == nullptr) {  // not latched yet — surface it anyway
-                snap.streams.push_back(StreamStats{});
-                st = &snap.streams.back();
-                st->stream_id = sid;
-                st->type = "RTP";
-            }
-            st->recovered_fec = fr.frames_fec;
-            st->fec_recovered_source_symbols =
-                fr.fec_recovered_source_symbols;
-            st->arq_recovered_source_symbols =
-                fr.arq_recovered_source_symbols;
-            st->arq_recovered_repair_symbols =
-                fr.arq_recovered_repair_symbols;
-            st->frames_with_arq = fr.frames_with_arq;
-            st->frames_fec_only = fr.frames_fec_only;
-            st->frames_fec_after_arq = fr.frames_fec_after_arq;
-            st->frames_fast = fr.frames_fast;
-            st->frames_unrecoverable = fr.frames_unrecoverable;
-            st->malformed = fr.malformed;
-            st->jscc_shadow_blocks = fr.jscc_shadow_blocks;
-            st->jscc_predicted_loss_symbols = fr.jscc_predicted_loss_symbols;
-            st->jscc_observed_loss_symbols = fr.jscc_observed_loss_symbols;
-            st->jscc_underpredicted_blocks = fr.jscc_underpredicted_blocks;
-            st->jscc_predicted_parity_symbols =
-                fr.jscc_predicted_parity_symbols;
-            st->jscc_predicted_repair_symbols =
-                fr.jscc_predicted_repair_symbols;
-            st->jscc_observed_repair_symbols =
-                fr.jscc_observed_repair_symbols;
-            st->jscc_repair_underpredicted_blocks =
-                fr.jscc_repair_underpredicted_blocks;
-            st->jscc_repair_demand_censored_blocks =
-                fr.jscc_repair_demand_censored_blocks;
-            st->jscc_repair_predicted_parity_symbols =
-                fr.jscc_repair_predicted_parity_symbols;
-            st->decode_errors = fr.decode_failures;
-            st->dropped_superseded = fr.frames_superseded;
-            st->dropped_deadline = fr.frames_deadline;
-        }
-    }
-    if (shm_stats != nullptr) {
-        for (const auto& [sid, ss] : *shm_stats) {
-            for (StreamStats& st : snap.streams) {
-                if (st.stream_id == sid) {
-                    st.frame_count = ss.reads + ss.writes;
-                    st.frame_bytes = ss.frame_bytes;
-                    st.frame_size_last = ss.frame_size_last;
-                    st.frame_size_min = ss.frame_size_min;
-                    st.frame_size_max = ss.frame_size_max;
-                    st.frame_interval_us = ss.frame_interval_us;
-                    st.frame_jitter_us = ss.frame_jitter_us;
-                    // §15.3 Pass 109: ingress full_drops/throttle are published
-                    // only by a producer carrying the exact health marker.
-                    // Egress retains its local producer counters; ring_full
-                    // remains independent consumer-side evidence.
-                    st.shm_health_valid = ss.health_valid;
-                    st.shm_full_drops = ss.full_drops;
-                    st.shm_throttle_permille = ss.throttle_permille;
-                    st.shm_oversize_drops = ss.oversize_drops;
-                    st.shm_bad_slots = ss.bad_slots;
-                    st.shm_ring_full = ss.ring_full;
-                    break;
-                }
-            }
-        }
-    }
-    // §15.3: cache blocks present only when the §14.3 role is enabled.
-    if (cache_repair != nullptr) {
-        snap.cache_repair = *cache_repair;
-    }
-    if (cache_store != nullptr) {
-        snap.cache_store = *cache_store;
-    }
-    if (arq_timing != nullptr) {
-        snap.arq_timing = *arq_timing;
-    }
-    if (out_snap != nullptr) {
-        *out_snap = snap;  // §15.5: GET /health reads the freshest snapshot
-    }
-    emitter.emit(snap);
-}
+// emit_stats moved to node/include/wblink/node/stats_fill.h (#109 Phase 2a).
 
-// §15.5 Pass 113: live TX self state appended to GET /info (channel, pairing
-// gate, §11.5a claim). Null on non-craft nodes.
-struct InfoSelfState {
-    uint16_t channel_mhz = 0;
-    bool psk_announced = false;
-    std::optional<uint16_t> claimed_by;
-};
+// InfoSelfState moved to node/include/wblink/node/stats_fill.h (#109 Phase 2a).
 
 // §15.5 GET /info — static identity. Hand-built (no json dep in app/); the
 // field values are numeric or house-controlled strings (no escaping needed).
