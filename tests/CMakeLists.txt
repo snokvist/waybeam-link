@@ -93,6 +93,7 @@ add_wb_test(node_rx_core_test wblink_io wblink_node)
 add_wb_test(node_discovery_test wblink_io wblink_node)
 add_wb_test(node_air_backend_test wblink_io wblink_node)
 add_wb_test(node_tx_core_test wblink_io wblink_node)
+add_wb_test(node_uplink_power_test wblink_io wblink_node)
 
 # app_test #includes app/main.cpp whole (that file's contents are one anonymous
 # namespace, so there is nothing to link against) with WBLINK_APP_TEST

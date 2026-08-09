@@ -1311,6 +1311,72 @@ small once 2c lands), then Phase 3 — Android — which binds at the end, when 
 layer owns enough to make "what does a library do instead of `exit()`" a
 question with a concrete answer.
 
+### 4.7 Phase 2c step 1, as landed — `run_rx`'s free-function dependencies
+
+`run_rx` cannot move while the things it calls stay behind it, so the first
+step measured what those actually are and moved that set. **Verbatim, checked
+byte-for-byte**, so this step carries no behaviour risk of its own and the
+lift that follows starts from a clean boundary.
+
+**The measurement is the useful part.** Of the twenty-odd free functions and
+structs left in `app/main.cpp`'s anonymous namespace, `run_rx` reads twelve,
+and — this is the part the plan had wrong — **`spawn_mode_applier` is not one
+of them**. The double fork is reached only from `run_tx` and `run_loopback`
+(`app/main.cpp:655`, `:887`, `:4143`), and the §9.10 `kExitTxWedged` return is
+likewise off the RX path. So two of B9's three process-level behaviours were
+never in `run_rx` at all, which is why 2a could answer B9 structurally without
+deciding anything: `run_rx` was already clean of them.
+
+Fifteen free functions and one struct moved, not twelve: `announce_token` and
+`frame_is_live_rtp_data` travelled with their families rather than leave one
+member behind a layer boundary, and `power_tier_json` is reached from the RX
+path only through `UplinkPower::json()`.
+
+What moved, and where it went:
+
+| destination | contents | why there |
+|---|---|---|
+| `node/policy.h` | `csa_params`, `vcmd_params`, `quietgap_policy`, `channel_allowed` | §15.2 Config → core param blocks. Siblings of the five already in `tx_core.h`, but read by BOTH loops, so they cannot live in a header named for the TX half. `channel_allowed` tests `policy.csa.channel_allowlist` — the block `csa_params` translates. |
+| `node/vcmd.h` | `vcmd_id_for`, `vcmd_name_for`, `mtu_tier_for_mode` | §15.5 REST spelling ↔ §11.7 ids. `core/` owns the ids in `types.h` and must not learn the control-plane vocabulary. |
+| `node/frame_kind.h` | `frame_is_eob`, `frame_is_paced_eob`, `frame_is_live_rtp_data` | §7.2 predicates. The third is TX-only and moved anyway: one family, one header. |
+| `node/entropy.h` | `session_nonce`, `announce_token` | `core/` is deliberately RNG-free and only ever verifies against a supplied key, so the two `/dev/urandom` reads have always belonged a layer up. |
+| `node/uplink_power.h` | `UplinkPower`, `power_tier_json` | The §10 precedence chain. See below. |
+| `stats_fill.h` | `build_info_json`, `build_health_json` | The node's JSON output, reading the same three objects the §15.3 assembly already reads. |
+
+**`UplinkPower` is the one that pays immediately.** It was already built for
+injection — `apply_qdb`, `apply_auto` and `artifact_qdb` are all callbacks —
+so the whole precedence chain was always *testable* with no radio, no file
+and no socket. It just was not *reachable*: the only path to it ran through
+`app_test`'s whole-TU `#include "app/main.cpp"`.
+
+Be precise about which chain, because the first draft of this section was
+not. The two order-dependent tier defects Pass 166/167 verification found —
+`install_curve()` re-seeding the adapter ceiling, and a craft latch
+outranking the tier — belong to **`TxCore`**, not to `UplinkPower`, and stay
+pinned in `tests/app_test.cpp` where they were found. `UplinkPower` is the
+**ground** uplink's twin of that chain: same two operations, same ordering,
+and the same never-exercised sequence, since every existing case installs a
+curve *before* selecting a tier. `tests/node_uplink_power_test.cpp` runs it
+both ways round and pins seven rules — latch reports the request while
+actuation is clamped; an out-of-range tier is REJECTED, not clamped; a tier
+re-lowers a configured map (the Pass 136 shape); `effective` follows the owner
+and not the tier; a configured map outranks an artifact; the artifact callback
+does not run above its rank (it has a stale-flag side effect); and `apply()`
+falls through to backend auto rather than to silence. Every mutant of those
+rules is killed.
+
+**The check.** `app/main.cpp` went 4692 → 4363 lines, 71 suites green.
+`tools/move_identity.py` verifies all sixteen moved blocks against a base
+revision of `app/main.cpp`: it takes each source line range, applies the
+permitted edits, and asserts the result appears verbatim in the destination.
+The **only** permitted edit is the storage-class prefix a header needs
+(`inline`; `static` → `inline` on `power_tier_json`) and the
+continuation-line realignment that prefix forces — both enumerated in the
+script, so a third kind of edit fails it. It is a review-time tool, not a
+merge gate: it compares against a base revision that moves, so `scripts/`
+deliberately does not run it. Mutating one moved line turns it red, which is
+the control that a substring check can otherwise pass vacuously.
+
 ## 5. Loose ends worth knowing before starting
 
 - **The §15.3 counters schema** is the last per-backend dispatch in

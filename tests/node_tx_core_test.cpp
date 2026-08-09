@@ -3,9 +3,11 @@
 //
 // The §10.3/§11.7 0x0A power-tier rules already have thorough coverage in
 // tests/app_test.cpp, which reaches TxCore by `#include`-ing the whole of
-// app/main.cpp. Those cases stay where they are for now — app_test still needs
-// the whole-TU include for UplinkPower, which has not moved yet, so splitting
-// them would buy nothing and lose the shared fixtures.
+// app/main.cpp. Those cases stay where they are: they are the pins for the two
+// order-dependent tier defects Pass 166/167 verification found, and moving a
+// regression case away from the fixtures it was written against buys nothing.
+// (UplinkPower — the GROUND-side twin of that chain, and a different struct —
+// moved out in Phase 2c and has its own suite, node_uplink_power_test.cpp.)
 //
 // What this file adds is the thing app_test cannot assert: that TxCore is
 // reachable from ONE header with no app layer at all. It pins the §15.2 ->
