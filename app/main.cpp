@@ -6675,6 +6675,21 @@ int run_rx(const Loaded& l) {
     // the removed stdin trigger); profile/fec are TX-only knobs → null → 409.
     StatsSnapshot last_snap;
     std::unique_ptr<ControlServer> control;
+    // §11.7 issuer, held as a NAMED local rather than reached through `h`,
+    // because ControlHandlers is std::move()d into the server once every
+    // handler is registered, so a lambda that captures `h` by reference and
+    // dereferences a sibling member at CALL time reads the moved-from husk.
+    //
+    // It is declared HERE, beside `control`, and NOT inside the block below
+    // (Pass 166). The server outlives that block and dispatches from the main
+    // loop, so a handler capturing a block-scoped local by reference reads a
+    // DESTROYED std::function — ASan `stack-use-after-scope`, and plain UB in
+    // a release build. Device-caught on the .242 ground the first time
+    // §11.7 0x0A `both:true` became reachable on an RF node; `main` at
+    // 02d6145 aborts identically on a udp-air uplink, so the bug predates
+    // Pass 166 and was merely shielded by Pass 165's blanket 409.
+    std::function<std::pair<int, std::string>(const std::string&, int)>
+        issue_vcmd;
     if (!l.cfg.control.bind.empty()) {
         auto cs = ControlServer::create(l.cfg.control.bind);
         if (!cs) {
@@ -7043,15 +7058,12 @@ int run_rx(const Loaded& l) {
             // §10.7 start prerequisites. Each returns the failed one so the
             // operator sees WHY, not just 409 — the list is long and every
             // entry is a real hazard, not a formality.
-            // §11.7 issuer, held as a NAMED local rather than reached
-            // through `h`. ControlHandlers is std::move()d into the server
-            // once every handler is registered, so a lambda that captures `h`
-            // by reference and dereferences a sibling member at CALL time
-            // reads the moved-from husk — every std::function in it is empty.
-            // Device-caught: `both:true` reported "no vehicle-command path on
-            // this node" on a ground that plainly had one.
-            std::function<std::pair<int, std::string>(const std::string&, int)>
-                issue_vcmd;
+            // `issue_vcmd` is declared at run_rx scope beside `control` — see
+            // the comment there. It used to live here, which made every
+            // handler that captured it by reference read a destroyed object
+            // once this block exited (the earlier symptom was `both:true`
+            // reporting "no vehicle-command path on this node" on a ground
+            // that plainly had one; the sharper one is an ASan abort).
             // §10.3/§11.7 0x0A (Pass 135): the ground's own uplink ceiling,
             // and with `both` the craft's too — one action, both directions,
             // the shape {"action":"start_both"} already has for calibration.
