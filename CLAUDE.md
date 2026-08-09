@@ -239,9 +239,10 @@ Two consumption shapes, deliberately not symmetric:
 | shape | gets | why |
 |---|---|---|
 | `find_package(wblink)` | `wblink::core` | the dependency-free wire library, installable on its own |
-| `add_subdirectory(...)` | `wblink::core` **and** `wblink::io` | `wblink_io` PUBLIC-links vendored `devourer`/`usb-1.0`, which have no install rules of their own, so it cannot be exported without authoring install rules for `third_party/` |
+| `add_subdirectory(...)` | `wblink::core`, `wblink::io` **and** `wblink::node` | `wblink_io` PUBLIC-links vendored `devourer`/`usb-1.0`, which have no install rules of their own, so it cannot be exported without authoring install rules for `third_party/` |
 
-Use the namespaced aliases (`wblink::core`, `wblink::io`) in anything new;
+Use the namespaced aliases (`wblink::core`, `wblink::io`, `wblink::node`)
+in anything new;
 the bare names exist for this file's own targets. `wblink_core` carries
 `cxx_std_20` as a PUBLIC usage requirement — `CMAKE_CXX_STANDARD` is
 directory-scoped and does not travel with an exported target.
@@ -274,7 +275,15 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   `fprintf(stderr)` directly**, and the §15.3 line goes through
   `StatsEmitter`'s local sink, never `stdout` directly — both default to the
   old behaviour, and both exist so an embedding consumer is not deaf (#144).
-- `app/main.cpp` — event loops (`tx`/`rx`/`loopback` modes).
+- `node/` — node behaviour above `io/` (#109 Phase 2a). Header-only so far:
+  `RxCore` and the `rx_policy()` adapter that feeds it. **Layering rule:
+  `node/` may use `core/` and `io/`; neither may use `node/`.** Anything
+  moved here becomes reachable from a real unit test — before the layer
+  existed the only way to touch `RxCore` was `tests/app_test.cpp`
+  `#include`-ing the whole of `app/main.cpp`, which is why several Pass
+  165-167 defects could only be proven on hardware.
+- `app/main.cpp` — event loops (`tx`/`rx`/`loopback` modes). Still 8.2k
+  lines; Phase 2a is what turns it into a thin driver over `node/`.
 - `tests/` — one `_test.cpp` per unit, run via ctest.
 - `tools/` — bench analyzers: `gate2_rho.py` (cross-adapter loss correlation),
   `gate3_rtt.py` (NACK→RETRANSMIT latency), `rtp_feed.py` (synthetic RTP feeder).

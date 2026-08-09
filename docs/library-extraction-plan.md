@@ -1158,6 +1158,53 @@ byte-identical after literal concatenation, and `-Wformat` under
   covers `cookie_stream.h` from `log.cpp` as well, so it no longer depends on
   `WBLINK_RADIO=ON` to compile the shim at all.
 
+### 4.5 Phase 2a, first move, as landed
+
+`RxCore` and `rx_policy()` out of `app/main.cpp` into `node/`, plus the
+`wblink_node` target and the layering rule. **No behaviour change, and no
+Tier-1 surface moves — there is no Pass entry for this and there should not
+be.**
+
+Scoped deliberately small. `RxCore` went first because the plan said it was
+already clean, and that held on inspection: 570 lines referencing no other
+app-layer structure — no `AirBackend`, no `ScoutEngine`, no `UplinkPower`, no
+`TxCore` — only `core/` plus `Config` and `StatsSnapshot` from `io/`.
+`rx_policy()` moved with it because `RxCore`'s constructor was its only
+caller; its siblings (`arq_policy`, `selector_policy`, `quietgap_policy`) have
+callers this layer does not and stay behind until the TX half moves.
+
+**Header-only, on purpose.** `RxCore` is entirely inline, so `node/` adds no
+translation unit and the `dev` TU set is unchanged from before the move — the
+same no-change control Phase 1a used. It becomes a STATIC library the moment
+something here needs a `.cpp`.
+
+**The gate that matters** is not the 25 green checks; it is that the struct
+is byte-identical to the one that left `main.cpp` (verified by substring
+against `git show HEAD:app/main.cpp`), so the move cannot have changed
+behaviour.
+
+**What it buys immediately:** `tests/node_rx_core_test.cpp` constructs
+`RxCore` from one `#include`, with no `app/main.cpp` include, no suppressed
+`main()`, and no `-Wno-unused-function`. That is the first time any of this
+code has been reachable from a real unit test, and it is the direct answer to
+why several Pass 165-167 defects could only be proven on hardware. Writing it
+immediately paid: the first draft asserted that `select_originator()` sets
+`selected_originator()`, and the real contract is that the accessor reports
+the *engine's* output-want pin — nullopt on a node with no `dir:"out"` stream,
+however often it is called. Both shapes are now pinned.
+
+**Two build-system notes.** `wblink_node` is an INTERFACE target linked into
+`waybeam-link`, `app_test` and the new suite; it is deliberately **not**
+exported by `find_package(wblink)`, for the same reason `wblink_io` is not —
+the install package stays `wblink::core` alone. And the `embed-consumer` gate
+passes unchanged, which is the check that a new target has not leaked into a
+consumer's build.
+
+**Still ahead in 2a:** `AirBackend`, `ScoutEngine`, `DiscoveryCatalog`,
+`TxCore` and the stats emitter, then B9 — which binds at the end, when the
+layer owns enough to make "what does a library do instead of `exit()`" a
+question with a concrete answer.
+
 ## 5. Loose ends worth knowing before starting
 
 - **The §15.3 counters schema** is the last per-backend dispatch in

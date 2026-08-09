@@ -85,6 +85,12 @@ add_wb_test(modes_test wblink_io)
 target_include_directories(modes_test SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 
+# node_rx_core_test reaches RxCore DIRECTLY — no app/main.cpp include, no
+# suppressed main(), no -Wno-unused-function. That is the whole point of the
+# node/ layer (#109 Phase 2a): before the move, the only way to touch this
+# code was app_test's whole-TU include.
+add_wb_test(node_rx_core_test wblink_io wblink_node)
+
 # app_test #includes app/main.cpp whole (that file's contents are one anonymous
 # namespace, so there is nothing to link against) with WBLINK_APP_TEST
 # suppressing its entry point. It therefore needs the app's own include path
@@ -92,7 +98,7 @@ target_include_directories(modes_test SYSTEM PRIVATE
 # Guarded on WBLINK_BUILD_APP for the same reason the daemon is: this TU IS
 # app/main.cpp, so it needs every subsystem that file uses unconditionally.
 if(WBLINK_BUILD_APP)
-    add_wb_test(app_test wblink_io)
+    add_wb_test(app_test wblink_io wblink_node)
     target_compile_definitions(app_test PRIVATE WBLINK_APP_TEST=1)
     target_include_directories(app_test PRIVATE ${CMAKE_SOURCE_DIR})
     target_include_directories(app_test SYSTEM PRIVATE
