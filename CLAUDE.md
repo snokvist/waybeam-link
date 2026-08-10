@@ -202,9 +202,13 @@ in the consumer.
 `build/dev/hwtrial_bringup` is the **hardware trial harness** (issue #140).
 It brings adapters up from either device source — `--auto`/`--bus <path>` for
 the enumerated path, `--fd <bus>/<dev>` for the wrapped-fd path — prints each
-unit's EFUSE identity and RX counters, and tears down. **It never transmits**
-(adapters are created `allow_rx_only`), which is what makes it safe to run
-without an RF session. The fd mode needs usbfs write access, so run it under
+unit's EFUSE identity and RX counters, and tears down. **It does not transmit
+unless `--tx N` is given** — without it adapters are created `allow_rx_only`,
+which is what makes the default invocation safe to run without an RF session;
+`--tx N` sets `role:"tx"`, takes `InitWrite` rather than `Init`, and radiates.
+(This line said "never transmits" flatly until 2026-08-10, contradicting the
+tool's own `--tx` note and cited as fact by a second tool.)
+The fd mode needs usbfs write access, so run it under
 `sudo` with the kernel drivers unloaded (`CLAUDE.md` bench notes), and restore
 them afterwards. It is the only way to exercise the Android-shaped path
 without an Android device.

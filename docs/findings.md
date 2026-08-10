@@ -42,10 +42,18 @@ same timing. `--on-wedge wait` changes nothing and watches the same object.
 `tx_submitted` climbed 1610 → 7710 and `tx_failed` 508 → 6608 — submissions
 advancing, zero backend progress, permanently, across ~2.6 minutes and five
 re-enumerations. Episode 1 is the clean replicate (induced, reauthorized,
-watched 25 s); episodes 2-5 are that same unhealed wedge continuing, which is
-itself the point. This reproduces Pass 147's "USB re-enumeration does not heal
-the dead libusb handle" on this unit, and it is what makes the next table
-attributable to the rebuild.
+watched 25 s); episodes 2-5 are that same unhealed wedge continuing, because
+the arm never rebuilds the object and so cannot produce independent replicates.
+**Effective n for "a fresh wedge does not self-heal" is 1**; the other four say
+"a 30-160 s old wedge does not self-heal", which is weaker but still evidence.
+This reproduces Pass 147's "USB re-enumeration does not heal the dead libusb
+handle" on this unit, and it is what makes the next table attributable to the
+rebuild.
+
+The two arms also started from a matched state, which is worth more than the
+episode count: control ep1 reached its verdict at `submitted=1610 failed=508
+reports=1102`, A1 ep1 at `submitted=1605 failed=505 reports=1100` — within
+0.3 %.
 
 ### Step 0 — healthy teardown/rebuild cycles (the gate)
 
@@ -64,12 +72,13 @@ actually cited. `task 1 → 1` after every destructor is direct evidence that
 |---|---|---|---|
 | **A0** live supervised deployment, `exit 9` → re-exec | 5 | 13.82 / 13.29 / 13.05 / 13.35 / 13.77 s | **13.46 s** |
 | **A1** in-process destroy + reconstruct, no unbind | 5 | 9.86 / 10.00 / 9.88 / 9.95 / 9.86 s | **9.91 s** |
-| **CONTROL** no recycle | 5 | never (0/5) | — |
+| **CONTROL** no recycle | 1 clean + 4 persistence (see below) | never (0/5) | — |
 | **A2** with the sysfs unbind | not run — see the open list |
 
 **A1 cleared 5/5**, and the restoration criterion has a **dwell**: first
 progress arms a 2 s hold, and the episode only scores when reports are still
-advancing at the end of it (`+374..378` reports over the dwell, `tx_failed 0`,
+advancing at the end of it (`+374..378` reports since the rebuild baseline, of
+which ~364-369 land inside the dwell itself; `tx_failed 0`,
 `tx_report_fails 0`). An earlier "8 reports, ever" criterion would have scored a
 burst-then-re-wedge as recovered. A1's 9.91 s therefore *includes* 2 s of
 proving durability; first progress arrives at **7.91 s** mean.
@@ -90,7 +99,7 @@ held across the recycle was **STILL ACCEPTING 5/5**.
 **The fault-path teardown does not leak.** Step 0 only ever tears down a
 *healthy* adapter; the one that matters is the yanked-device teardown, and it
 is now sampled per episode: **fd 12 → 12 and task 4 → 4 on all five**, RSS
-+100 kB on episode 1 then flat.
++100 kB on episode 1, +4 kB on episode 2, then flat.
 
 ### Step 2 — the hard-fail fallback still fires
 

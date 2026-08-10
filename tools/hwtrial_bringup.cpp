@@ -3,10 +3,13 @@
 // Hardware trial harness for the two RadioAir device sources (issue #140).
 // Brings adapters up, prints per-unit identity and RX counters, tears down.
 //
-// **It never transmits.** Adapters are created RX-only (`allow_rx_only`), so
-// no code path here can inject: bring-up is InitWrite + SetMonitorChannel +
-// StartRxLoop. That is what makes it safe to run unattended, and it is also
-// exactly the surface the Phase 1a/1b changes touched.
+// **It does not transmit unless you ask it to.** Without `--tx N` adapters are
+// created RX-only (`allow_rx_only = tx_frames == 0`), so no code path can
+// inject and it is safe to run unattended — that is the surface the Phase
+// 1a/1b changes touched. `--tx N` flips that: it makes the adapter role:"tx",
+// takes InitWrite rather than Init, and RADIATES. See the --tx note below.
+// (The line here used to say "it never transmits" flatly, which contradicted
+// that note 21 lines down and was cited as fact by a second tool.)
 //
 // Why this exists: Phase 1a (#138), 1b (#139) and 1a′ (#141) are all
 // compile-, unit- and byte-comparison-verified. Several of their behaviours
