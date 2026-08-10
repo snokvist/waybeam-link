@@ -30,12 +30,16 @@ coordinated **follow-me channel switch** — built on OpenIPC **devourer** for r
 > `cmake --preset ssc338q`).
 > Step 11 (field bring-up + the §17 bench gates) has **run** on the x86 bench
 > (2× RTL8812CU + 1× RTL8812AU): the §3.0 on-air encapsulation is
-> field-verified (monitor RX delivers the MPDU with a +4-byte FCS trailer,
-> stripped before parse); gate 1 **PASSED** (injector + monitor siblings mix
+> field-verified (RX delivers the MPDU with a +4-byte FCS trailer, stripped
+> before the length-exact §3.1 parse — devourer's monitor bring-up keeps
+> `APP_FCS`, so this is the encapsulation on the shipping path, not a property
+> of the retired backend; PROTOCOL.md §3.0); gate 1 **PASSED** (injector + monitor siblings mix
 > in one process, both chip families, per-frame CCX `tx.report` live); gate 3
 > **PASSED** (NACK→RETRANSMIT recovery P90 ≤4 ms at 65% airtime, well inside
 > the 40 ms I-frame deadline; ARQ ceases past saturation by design); gate 2 is
-> **RF-proven by a real MCS5 walk fade**: N=2 reduced 86‰ pre-diversity loss to
+> **RF-proven by a real MCS5 walk fade** — *measured on the kernel-monitor
+> backend retired in Pass 164, and ruled transferable to devourer 2026-08-10
+> (ρ is geometric)* — N=2 reduced 86‰ pre-diversity loss to
 > 24‰ post-diversity loss, then 10% GF(256) FEC recovered 599 source symbols
 > versus 52 by ARQ. A 37.1 s whole-link blackout confirmed that neither FEC nor
 > same-channel ARQ can repair the correlated SNR-edge tail. Gate 4 observables
@@ -224,7 +228,7 @@ frames into a POSIX shared-memory ring; waybeam-link ingests them, fragments eac
 into source symbols + GF(256) Cauchy-RS repair symbols (§14.1), injects over the
 air, and on the ground reassembles + FEC-decodes back into a **byte-identical**
 SHM slot for the decoder. SHM is same-host on each end; the air hop is either
-real monitor-mode injection or the udp-air bench sim.
+real devourer RF injection or the udp-air bench sim.
 
 ```
 venc(frame-shm://venc_frame) → wl tx (FrameFramer+FEC) → AIR → wl rx (reassemble+FEC) → frame-shm(venc_frame_out) → decoder
@@ -232,7 +236,7 @@ venc(frame-shm://venc_frame) → wl tx (FrameFramer+FEC) → AIR → wl rx (reas
 
 FEC is transparent to the RX (it decodes whatever the TX emits); `fec.scheme
 "none"` fragments + ARQs without repair symbols. Both ends must share
-`node.net_id` on the monitor/radio path. Adaptive MTU: symbols are sized from the
+`node.net_id` on the radio path. Adaptive MTU: symbols are sized from the
 active profile's `max_payload` (jumbo rungs keep large IDRs under the GF(256)
 k+r≤256 cap). Example configs: `examples/config.frame-shm-{tx,rx}.sample.json`.
 

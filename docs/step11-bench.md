@@ -173,6 +173,13 @@ is closed for both Jaguar1 and Jaguar3.
 
 ### Gate 2 — **PASSED** (synthetic accounting + physical vehicle walk fade)
 
+> **Provenance (2026-08-10).** The physical walk below ran on the
+> `kernel-monitor` backend, deleted in Pass 164. **RULED TRANSFERABLE (operator, 2026-08-10).** ρ is
+> cross-adapter loss *correlation* — a property of antenna geometry and the
+> channel — and the backend moves absolute loss, not how two co-located ears
+> correlate. The verdict and the 10% FEC seed stand on devourer. The
+> synthetic accounting leg was always backend-independent.
+
 Synthetic, 60 s @ `rx_drop_permille=150` on both ground adapters: measured
 15.3%/14.0% per-adapter, joint post-diversity **2.10%** vs independence-product
 **2.07%**, Pearson **ρ ≈ −0.36** (n=59 windows) — decorrelated. Accounting
@@ -298,7 +305,17 @@ Each item below is independently startable once its stated prerequisite PR
 has merged. None require re-reading this whole document — jump to the
 subsection.
 
-### 4.1 Real-fade gate-2 verdict — **COMPLETED 2026-07-19**
+### 4.1 Real-fade gate-2 verdict — **COMPLETED 2026-07-19; ruled transferable 2026-08-10**
+
+> **Provenance (2026-08-10).** This walk ran entirely on the
+> `kernel-monitor` backend, deleted in Pass 164 — the receivers were monitor
+> netdevs `229b`/`2308`. **RULED TRANSFERABLE (operator, 2026-08-10).** ρ is a property of antenna geometry
+> and the channel, not of how the host reads frames off the adapter; the
+> backend moves *absolute* loss, not the *correlation* between two co-located
+> ears. Pass 139 (a monitor-era premise about devourer refuted on hardware)
+> was weighed and does not apply — it concerned a devourer TX capability
+> claim, not a geometric property measured identically either way. The 10%
+> FEC seed stands. See `docs/findings.md` (2026-08-10).
 
 The physical walk result is recorded in §2 and
 `docs/mon-air-verification.md`: N=2 removed about 72% of pre-diversity loss,
@@ -609,7 +626,7 @@ alone will populate the histogram but far too slowly to read.
   diversity); no Jaguar1 in the config and unicast return is a RadioAir
   path. Needs a devourer ground bring-up; carried in §4.10.
 
-**§4.10 PER-numerator follow-up: measured, and it is closed on this fleet.**
+**§4.10 PER-numerator follow-up: measured, and the CRC-error route is closed on this fleet.**
 The Pass-119 B1 capability probe (see `docs/per-mcs-per-ladder-plan.md`
 findings) found **no path that delivers bad-FCS frames to userspace** on the
 fleet-default chips: rtl88x2cu accepts `fcsfail` (both `otherbss fcsfail`
@@ -619,10 +636,20 @@ frames, so the bit path exists); devourer `rx.keep_corrupted` is plumbed
 Jaguar1/Jaguar2 only, and Jaguar3's `monitor_rx_cfg` writes RCR
 `0xF410400F` with ACRC32/AICV **clear** — its own comment claims otherwise
 — with 0 corrupted deliveries in ~22k ambient frames when the flag was
-requested. The CRC-error numerator is blocked pending upstream/driver work,
-on both backends.
+requested. The CRC-error numerator is blocked pending upstream/driver work
+("on both backends" as written — since Pass 164 there is only devourer).
+**That block no longer gates anything:** the numerator came from Pass 163's
+sequence-derived probing instead, ruled 2026-08-10.
 
 #### 4.10 Follow-ups this pass opened
+
+**SUPERSEDED (2026-08-10) — the numerator IS sequence-derived after all.**
+Pass 163 shipped sequence-derived rate probing and closed §9.2's numerator by
+computation; the `DEVOURER_RX_KEEP_CORRUPTED` route described below was
+measured a no-op on Jaguar3 (the fleet default) by the Pass-119 B1 probe, so
+it never became the numerator. The paragraph stands as the reasoning at the
+time. See `docs/findings.md` (2026-08-10) and the ruling box in
+`docs/per-mcs-per-ladder-plan.md`.
 
 **The PER numerator is available and is not a sequence-gap inference.** Pass
 118 left the numerator open, reasoning that a sequence gap cannot carry the
