@@ -25,12 +25,16 @@
 // purpose: that is the surface waybeam-hub and Android will use, so the
 // runtime proof runs through the same boundary they do. A C++ probe over the
 // C++ API would leave the ABI itself unexercised at runtime.
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <atomic>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "wblink/node/rx_node_c.h"
 
@@ -53,15 +57,54 @@ struct StreamTally {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
+    if (argc < 2) {
         std::fprintf(stderr,
-                     "usage: %s <rx-config.json>\n\n"
+                     "usage: %s <rx-config.json> [--fd <bus>/<dev>]...\n\n"
                      "Runs an RX node with a callback frame sink and reports\n"
                      "what arrived. The config's out-stream must be\n"
                      "bind.kind \"frame-shm\" — that is the whole-frame egress\n"
-                     "kind, and the sink takes it.\n",
+                     "kind, and the sink takes it.\n\n"
+                     "--fd opens /dev/bus/usb/<bus>/<dev> and hands the\n"
+                     "descriptor to wblink_rx_set_adapter_fds, which is the\n"
+                     "ANDROID-SHAPED path: an unrooted app cannot enumerate\n"
+                     "usbfs, so its adapters can only arrive as UsbManager\n"
+                     "fds. libusb_wrap_sys_device takes any usbfs fd on Linux\n"
+                     "(waybeam-link #140), so the whole path is reachable on a\n"
+                     "bench with no phone. Repeat --fd per adapter, in the\n"
+                     "config's adapters[] order; needs usbfs write access, so\n"
+                     "run under sudo with the kernel driver unloaded.\n",
                      argv[0]);
         return 2;
+    }
+
+    const char* config_path = argv[1];
+    std::vector<int> fds;
+    std::vector<std::string> fd_paths;
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) != "--fd" || i + 1 >= argc) {
+            std::fprintf(stderr, "probe: unexpected argument \"%s\"\n", argv[i]);
+            return 2;
+        }
+        unsigned bus = 0, dev = 0;
+        if (std::sscanf(argv[++i], "%u/%u", &bus, &dev) != 2) {
+            std::fprintf(stderr, "probe: --fd wants <bus>/<dev>, got \"%s\"\n",
+                         argv[i]);
+            return 2;
+        }
+        char path[64];
+        std::snprintf(path, sizeof(path), "/dev/bus/usb/%03u/%03u", bus, dev);
+        const int fd = ::open(path, O_RDWR);
+        if (fd < 0) {
+            std::perror(path);
+            std::fprintf(stderr,
+                         "probe: cannot open %s — usbfs needs write access "
+                         "(sudo) and the kernel driver unloaded\n", path);
+            for (int held : fds) ::close(held);
+            return 1;
+        }
+        fds.push_back(fd);
+        fd_paths.emplace_back(path);
+        std::fprintf(stderr, "probe: %s -> fd %d\n", path, fd);
     }
 
     std::map<uint8_t, StreamTally> tally;
@@ -94,6 +137,17 @@ int main(int argc, char** argv) {
     }
     g_rx.store(rx, std::memory_order_relaxed);
 
+    if (!fds.empty()) {
+        const int src = wblink_rx_set_adapter_fds(rx, fds.data(), fds.size());
+        if (src != 0) {
+            std::fprintf(stderr,
+                         "probe: wblink_rx_set_adapter_fds failed (%d)\n", src);
+            wblink_rx_destroy(rx);
+            for (int held : fds) ::close(held);
+            return 1;
+        }
+    }
+
     // The driver owns the process, exactly as app/main.cpp does; node/ does not.
     struct sigaction sa{};
     sa.sa_handler = on_signal;
@@ -101,11 +155,18 @@ int main(int argc, char** argv) {
     ::sigaction(SIGINT, &sa, nullptr);
     ::sigaction(SIGTERM, &sa, nullptr);
 
-    const int rc = wblink_rx_run(rx, argv[1], on_frame, &tally);
+    const int rc = wblink_rx_run(rx, config_path, on_frame, &tally);
     // Clear BEFORE freeing: a signal landing between the two would otherwise
     // reach a destroyed handle, and the bench script sends SIGTERM twice.
     g_rx.store(nullptr, std::memory_order_relaxed);
     wblink_rx_destroy(rx);
+    // OWNERSHIP IS OURS. libusb marks a wrapped handle fd_keep, so tearing the
+    // node down leaves every fd open; closing them is this process's job and
+    // must happen only after wblink_rx_run has returned.
+    for (size_t i = 0; i < fds.size(); ++i) {
+        ::close(fds[i]);
+        std::fprintf(stderr, "probe: closed %s\n", fd_paths[i].c_str());
+    }
 
     std::fprintf(stderr, "\nprobe: summary (%zu stream(s))\n", tally.size());
     if (tally.empty()) {
