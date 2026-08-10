@@ -18,11 +18,14 @@
 // healthy adapter cannot survive the cycle, no wedge ever will, and the answer
 // is "keep exit 9" without touching a craft.
 //
-// IT MUST TRANSMIT, and that is not incidental. `hwtrial_bringup` creates
-// adapters `allow_rx_only`, which takes devourer's `Init` — NOT `InitWrite` —
-// so it never touches the `_coex_thread` hazard this exists to test. Every
-// adapter here is `role:"tx"`. Sweep from the safe end: the default power
-// offset is deep below the die default and the default rate is MCS 0.
+// IT MUST TRANSMIT, and that is not incidental — `InitWrite` is the whole
+// subject, and only a `role:"tx"` adapter reaches it. `hwtrial_bringup --tx N`
+// does reach it too (its `allow_rx_only = tx_frames == 0`), so the novelty here
+// is not "this one writes": it is that this one DESTROYS AND RECONSTRUCTS,
+// which nothing else does. Every adapter here is `role:"tx"` unconditionally,
+// so there is no invocation of this tool that quietly tests the read-only path
+// instead. Sweep from the safe end: the default power offset is deep below the
+// die default and the default rate is MCS 0.
 //
 // LIVENESS IS MEASURED BY CCX REPORTS, not by a second radio. This bench host
 // has one usable Realtek unit, so there is no ear. That is not a fudge: §9.10
@@ -56,14 +59,23 @@
 //     which matters when the baseline being compared against is ~12 s.
 //
 // Arms, matching the finding's A0/A1/A2:
-//   --on-wedge report            observe and stop (what exit 9 does today)
+//   --on-wedge report            observe the verdict and stop
+//   --on-wedge wait              CONTROL: change nothing, watch the same
+//                                object — separates "the rebuild healed it"
+//                                from "re-enumeration plus time healed it",
+//                                which no arm below can do on its own
 //   --on-wedge recycle           destroy + reconstruct, no unbind        (A1)
 //   --on-wedge recycle --unbind-driver X --unbind-if Y   + sysfs unbind  (A2)
+//
+// The A0 baseline is NOT an arm here: it is the live supervised deployment,
+// measured through its own control API.
 // ---------------------------------------------------------------------------
 
 #include <arpa/inet.h>
+#include <csignal>
 #include <dirent.h>
 #include <libusb.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -153,11 +165,13 @@ void usage() {
                  "       [--originator N] [--net-id N] [--dwell-ms N]\n"
                  "       [--rss-slack-kb N] [--lock-dir DIR]\n"
                  "  wedge mode (step 1):\n"
-                 "       --wedge-watch --episodes N --on-wedge report|recycle\n"
+                 "       --wedge-watch --episodes N\n"
+                 "       --on-wedge report|wait|recycle   (wait = control)\n"
                  "       [--unbind-driver NAME --unbind-if IFACE]\n"
                  "       [--usb-dev 1-1] [--induce-after-ms N] "
                  "[--down-ms N]\n"
                  "       [--settle-ms N] [--restore-timeout-ms N]\n"
+                 "       [--restore-dwell-ms N]\n"
                  "       [--wedge-window-ms N] [--wedge-min-submits N]\n"
                  "       [--wedge-exit-windows N] [--inject-hz N]\n"
                  "       [--hold-listen PORT]   listener-survival probe\n"
@@ -212,6 +226,25 @@ bool listener_alive(int listen_fd, uint16_t port) {
     return ok;
 }
 
+// A deauthorized adapter that nobody re-authorizes is a dead craft radio, and
+// the window is `down_ms` wide on every episode. So the path is recorded the
+// moment it is taken away and restored from the signal handler — write() and
+// _exit() are the only things called there, both async-signal-safe (fopen and
+// fprintf are not, which is why this does not reuse sysfs_write below).
+char g_authorized_path[256] = {0};
+
+extern "C" void restore_and_die(int sig) {
+    if (g_authorized_path[0] != '\0') {
+        const int fd = ::open(g_authorized_path, O_WRONLY);
+        if (fd >= 0) {
+            ssize_t n = ::write(fd, "1\n", 2);
+            (void)n;
+            ::close(fd);
+        }
+    }
+    ::_exit(128 + sig);
+}
+
 // Write one byte into a sysfs attribute. Returns false and says why — a silent
 // failure here would turn "the fault was never induced" into "recovery worked".
 bool sysfs_write(const std::string& path, const char* val) {
@@ -262,6 +295,7 @@ int main(int argc, char** argv) {
     int down_ms = 3000;          // how long the device stays deauthorized
     int settle_ms = 2000;        // after reauthorize, before reconstruct
     int restore_timeout_ms = 30000;
+    int restore_dwell_ms = 2000;   // progress must LAST this long
     int inject_hz = 200;
     int hold_listen_port = 0;  // 0 = do not test listener survival
     // Defaults are the shipped §9.10 seeds (io/include/wblink/config.h). Match
@@ -301,6 +335,8 @@ int main(int argc, char** argv) {
         else if (a == "--settle-ms" && next) { settle_ms = std::atoi(next); ++i; }
         else if (a == "--restore-timeout-ms" && next) {
             restore_timeout_ms = std::atoi(next); ++i;
+        } else if (a == "--restore-dwell-ms" && next) {
+            restore_dwell_ms = std::atoi(next); ++i;
         } else if (a == "--wedge-window-ms" && next) {
             wedge_window_ms = static_cast<uint32_t>(std::atoi(next)); ++i;
         } else if (a == "--wedge-min-submits" && next) {
@@ -317,8 +353,20 @@ int main(int argc, char** argv) {
     if (wedge_watch) {
         // --unbind-driver and --unbind-if are the A2 pair; one without the
         // other would silently run A1 under an A2 label.
+        // Negatives here are not merely odd: every one is cast to uint64_t
+        // in a deadline comparison, where -1 becomes ~1.8e19 ms and silently
+        // disables the timeout it was meant to shorten.
+        if (induce_after_ms < 0 || down_ms < 0 || settle_ms < 0 ||
+            restore_timeout_ms < 0 || restore_dwell_ms < 0 ||
+            hold_listen_port < 0 || hold_listen_port > 65535) {
+            std::fprintf(stderr,
+                         "millisecond options must be >= 0 and --hold-listen "
+                         "must be a valid port\n");
+            return 2;
+        }
         if (bus.empty() || usb_dev.empty() || episodes < 1 || inject_hz < 1 ||
-            (on_wedge != "report" && on_wedge != "recycle") ||
+            (on_wedge != "report" && on_wedge != "recycle" &&
+             on_wedge != "wait") ||
             unbind_driver.empty() != unbind_if.empty()) {
             usage();
             return 2;
@@ -367,15 +415,21 @@ int main(int argc, char** argv) {
 
     if (wedge_watch) {
         const std::string dev_path = "/sys/bus/usb/devices/" + usb_dev;
+        std::snprintf(g_authorized_path, sizeof g_authorized_path,
+                      "%s/authorized", dev_path.c_str());
+        std::signal(SIGINT, restore_and_die);
+        std::signal(SIGTERM, restore_and_die);
+        std::signal(SIGHUP, restore_and_die);
         std::fprintf(stderr,
                      "wedge mode: %d episode(s), on_wedge=%s, arm=%s\n"
                      "  policy: window %u ms, min_submits %u, exit_windows %u\n"
                      "  induction: %s authorized 0 -> wait %d ms -> 1, "
                      "settle %d ms\n",
                      episodes, on_wedge.c_str(),
-                     on_wedge == "report"        ? "A0-observer"
-                     : unbind_driver.empty()     ? "A1 (no unbind)"
-                                                 : "A2 (with unbind)",
+                     on_wedge == "report"    ? "observer"
+                     : on_wedge == "wait"    ? "CONTROL (no recycle)"
+                     : unbind_driver.empty() ? "A1 (no unbind)"
+                                             : "A2 (with unbind)",
                      wedge_window_ms, wedge_min_submits, wedge_exit_windows,
                      dev_path.c_str(), down_ms, settle_ms);
 
@@ -394,6 +448,7 @@ int main(int argc, char** argv) {
                          hold_listen_port);
         }
         int listener_lost = 0;
+        int fault_path_leaks = 0;
 
         auto air = build_air();
         if (!air) {
@@ -402,6 +457,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         int cleared = 0;
+        int cleared_without_recycle = 0;
         int attempted = 0;
         const auto inject_period =
             std::chrono::microseconds(1000000 / inject_hz);
@@ -412,11 +468,17 @@ int main(int argc, char** argv) {
             const uint64_t t_start = now_ms();
             uint64_t t_induced = 0, t_verdict = 0, t_reconstructed = 0;
             uint64_t reports_at_rebuild = 0, submitted_at_rebuild = 0;
-            bool down = false, up_again = false, recycled = false;
+            uint64_t t_first_progress = 0, reports_at_first_progress = 0;
+            bool down = false, up_again = false, armed = false;
+            bool did_recycle = false;
             bool episode_done = false, episode_ok = false;
             ++attempted;
 
-            std::fprintf(stderr, "--- episode %d/%d ---\n", ep, episodes);
+            const Sample ep_before = sample();
+            std::fprintf(stderr, "--- episode %d/%d --- (fd=%ld task=%ld "
+                                 "rss=%ldkB)\n",
+                         ep, episodes, ep_before.fds, ep_before.threads,
+                         ep_before.rss_kb);
             while (!episode_done) {
                 const uint64_t t = now_ms();
                 const uint64_t dt = t - t_start;
@@ -466,23 +528,45 @@ int main(int argc, char** argv) {
                 // reported 0/2 while its own numbers showed 5058 CCX reports
                 // on the reconstructed object. Progress after the rebuild is
                 // the claim; measure the claim.
-                if (recycled && !episode_done && air &&
-                    reports >= reports_at_rebuild + wedge_min_submits &&
-                    submitted > submitted_at_rebuild) {
+                // First progress after the rebuild arms a DWELL; it does
+                // not end the episode. "Eight reports, ever" would score an
+                // adapter that emits a burst and re-wedges as recovered, and
+                // on a craft with no second link the durability is the whole
+                // point.
+                if (armed && !episode_done && air && t_first_progress == 0 &&
+                    reports >= reports_at_rebuild + wedge_min_submits) {
+                    t_first_progress = now_ms();
+                    reports_at_first_progress = reports;
+                    std::fprintf(stderr,
+                                 "[%5llu ms] first progress (+%llu reports) — "
+                                 "holding %d ms to prove it lasts\n",
+                                 (unsigned long long)(t_first_progress - t_start),
+                                 (unsigned long long)(reports -
+                                                      reports_at_rebuild),
+                                 restore_dwell_ms);
+                }
+                if (armed && !episode_done && air && t_first_progress != 0 &&
+                    now_ms() - t_first_progress >=
+                        static_cast<uint64_t>(restore_dwell_ms) &&
+                    reports >= reports_at_first_progress + wedge_min_submits &&
+                    !wedge.wedged()) {
                     const uint64_t t_now = now_ms();
                     const auto c = air.value->counters(air.value->tx_index());
                     std::fprintf(
                         stderr,
-                        "[%5llu ms] RESTORED  submitted=%llu failed=%llu "
-                        "reports=%llu (+%llu reports since rebuild)\n"
+                        "[%5llu ms] RESTORED (%s)  submitted=%llu "
+                        "failed=%llu reports=%llu report_fails=%llu "
+                        "(+%llu reports since baseline)\n"
                         "  t(induce->verdict)=%llu ms  "
                         "t(verdict->reconstructed)=%llu ms  "
                         "t(reconstructed->restored)=%llu ms  "
                         "t(induce->restored)=%llu ms\n",
                         (unsigned long long)(t_now - t_start),
+                        did_recycle ? "after recycle" : "WITHOUT recycle",
                         (unsigned long long)c.tx_submitted,
                         (unsigned long long)c.tx_failed,
                         (unsigned long long)c.tx_reports,
+                        (unsigned long long)c.tx_report_fails,
                         (unsigned long long)(reports - reports_at_rebuild),
                         (unsigned long long)(t_verdict - t_induced),
                         (unsigned long long)(t_reconstructed - t_verdict),
@@ -499,11 +583,13 @@ int main(int argc, char** argv) {
                         if (!alive) ++listener_lost;
                     }
                     ++cleared;
+                    if (!did_recycle) ++cleared_without_recycle;
                     episode_ok = true;
                     episode_done = true;
                     continue;
                 }
-                if (!recycled && wedge.consecutive_wedged() >= wedge_exit_windows) {
+                if (!armed && t_induced != 0 &&
+                    wedge.consecutive_wedged() >= wedge_exit_windows) {
                     t_verdict = t;
                     const auto c = air.value->counters(air.value->tx_index());
                     std::fprintf(stderr,
@@ -515,11 +601,32 @@ int main(int argc, char** argv) {
                                  (unsigned long long)c.tx_submitted,
                                  (unsigned long long)c.tx_failed,
                                  (unsigned long long)c.tx_reports);
+                    if (on_wedge == "wait") {
+                        // THE CONTROL, and the reason the recycle arms mean
+                        // anything. The device has already been reauthorized
+                        // by now, so an arm that only ever measures
+                        // "wedge -> rebuild -> progress" cannot separate the
+                        // rebuild from the re-enumeration that preceded it.
+                        // This one changes nothing and watches for the same
+                        // long as a rebuild would have taken. If TX comes back
+                        // here too, the recycle is not what heals it.
+                        armed = true;
+                        did_recycle = false;
+                        t_reconstructed = now_ms();
+                        submitted_at_rebuild = submitted;
+                        reports_at_rebuild = reports;
+                        std::fprintf(stderr,
+                                     "  CONTROL arm: NOT recycling; watching "
+                                     "the SAME object for %d ms\n",
+                                     restore_timeout_ms);
+                        continue;
+                    }
                     if (on_wedge == "report") {
                         std::fprintf(stderr,
                                      "  arm A0-observer: this is where the "
                                      "daemon returns kTxWedged and exits 9\n");
-                        episode_ok = true;   // observing is the whole job here
+                        ++cleared;           // reaching a verdict IS the job
+                        episode_ok = true;
                         episode_done = true;
                         continue;
                     }
@@ -531,9 +638,17 @@ int main(int argc, char** argv) {
                         // respawn undoes that before every spawn.
                         std::fprintf(stderr, "  A2: unbind %s from %s\n",
                                      unbind_if.c_str(), unbind_driver.c_str());
-                        sysfs_write("/sys/bus/usb/drivers/" + unbind_driver +
-                                        "/unbind",
-                                    unbind_if.c_str());
+                        // Unchecked, a failed unbind runs A1 under an A2
+                        // label — exactly what the paired-argument guard
+                        // above exists to prevent.
+                        if (!sysfs_write("/sys/bus/usb/drivers/" +
+                                             unbind_driver + "/unbind",
+                                         unbind_if.c_str())) {
+                            std::fprintf(stderr,
+                                         "FAIL: A2 unbind failed; refusing to "
+                                         "report an A1 run as A2\n");
+                            return 1;
+                        }
                     }
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds(settle_ms));
@@ -557,7 +672,8 @@ int main(int argc, char** argv) {
                         continue;   // episode_ok stays false
                     }
                     t_reconstructed = now_ms();
-                    recycled = true;
+                    armed = true;
+                    did_recycle = true;
                     air.value->tx_report_counters(
                         submitted_at_rebuild, reports_at_rebuild);
                     std::fprintf(stderr,
@@ -580,7 +696,7 @@ int main(int argc, char** argv) {
                     // past printed next to the reconstruct that preceded it.
                     continue;
                 }
-                if (recycled && now_ms() >= t_reconstructed &&
+                if (armed && now_ms() >= t_reconstructed &&
                     now_ms() - t_reconstructed >
                         static_cast<uint64_t>(restore_timeout_ms)) {
                     std::fprintf(stderr,
@@ -599,8 +715,22 @@ int main(int argc, char** argv) {
                 }
                 std::this_thread::sleep_for(inject_period);
             }
-            if (!episode_ok) {
-                std::fprintf(stderr, "episode %d: NOT CLEARED\n", ep);
+            // Step 0 only ever tears down a HEALTHY adapter. The teardown
+            // that matters for adoption is this one — the device was yanked
+            // mid-transfer — so the fault path gets its own resource readout.
+            const Sample ep_after = sample();
+            std::fprintf(stderr,
+                         "episode %d: %s  fd=%ld->%ld task=%ld->%ld "
+                         "rss=%ldkB->%ldkB\n",
+                         ep, episode_ok ? "cleared" : "NOT CLEARED",
+                         ep_before.fds, ep_after.fds, ep_before.threads,
+                         ep_after.threads, ep_before.rss_kb, ep_after.rss_kb);
+            if (ep_after.fds > ep_before.fds ||
+                ep_after.threads > ep_before.threads) {
+                std::fprintf(stderr,
+                             "  FAULT-PATH LEAK: the yanked-device teardown "
+                             "did not return its fds/threads\n");
+                ++fault_path_leaks;
             }
             // Rebuild for the next episode if the arm ended without a live
             // adapter, so one bad episode does not poison the rest. Not after
@@ -629,10 +759,23 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "  listener survived %d/%d recycles\n",
                          cleared - listener_lost, cleared);
         }
+        if (fault_path_leaks != 0) {
+            std::fprintf(stderr, "  fault-path leaks in %d episode(s)\n",
+                         fault_path_leaks);
+        }
+        if (cleared_without_recycle != 0) {
+            std::fprintf(stderr,
+                         "  NOTE: %d episode(s) recovered WITHOUT a recycle — "
+                         "in the control arm that is the point; in a recycle "
+                         "arm it would mean the rebuild is not the cause\n",
+                         cleared_without_recycle);
+        }
         const bool pass = cleared == attempted && attempted > 0 &&
-                          listener_lost == 0;
-        std::fprintf(stderr, "CLEARED IN-PROCESS %d/%d — %s\n", cleared,
-                     attempted, pass ? "PASS" : "FAIL");
+                          listener_lost == 0 && fault_path_leaks == 0;
+        std::fprintf(stderr, "%s %d/%d — %s\n",
+                     on_wedge == "wait" ? "RECOVERED WITHOUT RECYCLE"
+                                        : "CLEARED IN-PROCESS",
+                     cleared, attempted, pass ? "PASS" : "FAIL");
         return pass ? 0 : 1;
     }
 
@@ -696,6 +839,18 @@ int main(int argc, char** argv) {
     // allocations (libusb, spdlog, the firmware blob) are not a leak, and
     // comparing to a pre-first-cycle sample would fail every healthy run.
     int failures = 0;
+    for (size_t i = 0; i < results.size(); ++i) {
+        const Sample& s = results[i].after;
+        if (s.fds < 0 || s.threads < 0 || s.rss_kb < 0) {
+            // Unread samples compare as -1 > -1 and -1 > -1 + slack, both
+            // false, so a total sampling failure would score PASS.
+            std::fprintf(stderr,
+                         "FAIL: cycle %zu resource sample unreadable "
+                         "(fd=%ld task=%ld rss=%ld) — the guard cannot see\n",
+                         i + 1, s.fds, s.threads, s.rss_kb);
+            ++failures;
+        }
+    }
     if (static_cast<int>(results.size()) != cycles) {
         std::fprintf(stderr,
                      "FAIL: only %zu of %d cycles ran — a construction failed\n",
