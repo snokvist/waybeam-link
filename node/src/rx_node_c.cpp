@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdio>
 #include <new>
+#include <vector>
 
 #include "wblink/node/load.h"
 #include "wblink/node/rx_node.h"
@@ -24,6 +25,10 @@ struct wblink_rx {
     // its thread and the thread reaching this function, which is a race a
     // library should not hand its user. One handle per run is neither.
     std::atomic<bool> used{false};
+    // Programmatic device source. Written only before `used` flips, read only
+    // after, so the `used` exchange in wblink_rx_run is the whole
+    // synchronisation — no lock needed and none implied to the caller.
+    std::vector<int> adapter_fds;
 };
 
 extern "C" {
@@ -32,6 +37,18 @@ wblink_rx* wblink_rx_create(void) { return new (std::nothrow) wblink_rx(); }
 
 void wblink_rx_request_stop(wblink_rx* rx) {
     if (rx != nullptr) rx->stop.store(1, std::memory_order_relaxed);
+}
+
+int wblink_rx_set_adapter_fds(wblink_rx* rx, const int* fds, size_t n) {
+    if (rx == nullptr) return 2;
+    if (fds == nullptr && n > 0) return 2;
+    // Reject after start rather than accept-and-ignore: the config is already
+    // consumed by then, so a caller that got the order wrong would otherwise
+    // watch the node enumerate by bus path and fail on a device it cannot
+    // see, with nothing pointing at the real mistake.
+    if (rx->used.load(std::memory_order_relaxed)) return 3;
+    rx->adapter_fds.assign(fds, fds + n);
+    return 0;
 }
 
 int wblink_rx_run(wblink_rx* rx, const char* config_path,
@@ -53,6 +70,9 @@ int wblink_rx_run(wblink_rx* rx, const char* config_path,
         std::fprintf(stderr, "wblink_rx_run: unhandled C++ exception in load\n");
         return 1;
     }
+    // After load_all, so a config can never smuggle these in, and before
+    // run_rx, which is where AirBackend::create reads them.
+    loaded.cfg.adapter_fds = rx->adapter_fds;
 
     // Empty when the caller passed no callback, which is the documented way to
     // say "egress goes where the config says" — NOT a sink that drops.

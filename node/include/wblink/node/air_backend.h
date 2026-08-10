@@ -289,6 +289,15 @@ struct AirBackend {
             rc.allow_rx_only =
                 (cfg.cache.store.enabled && cfg.streams.empty()) ||
                 cfg.node.spectator;
+            // Programmatic-only device source (unrooted Android). Empty is the
+            // shipped enumerate-by-bus-path behaviour, so a JSON-driven node
+            // is unchanged. RadioAir::create validates parallelism and the
+            // rest of the contract; the only thing that must be decided HERE
+            // is do_reset, because libusb_reset_device on a wrapped fd is
+            // precisely what B4 established must not happen — and a caller
+            // supplying fds has no other way to say so.
+            rc.adapter_fds = cfg.adapter_fds;
+            if (!cfg.adapter_fds.empty()) rc.do_reset = false;
             auto a = RadioAir::create(rc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);

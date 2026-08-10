@@ -549,6 +549,27 @@ struct Config {
     VencCfg venc;          // §9.6 encoder actuation
     AirCfg air;            // dev backend; empty until devourer lands
     LoopbackCfg loopback;  // loopback-mode loss injection
+
+    // --- programmatic-only device source, for unrooted Android.
+    //
+    // NOT parsed from JSON and never written by io/src/config.cpp — same
+    // ruling as RadioAirCfg::adapter_fds (2026-08-08): no config key, nothing
+    // for the #106 key registry, so a JSON-driven daemon gets exactly today's
+    // behaviour byte for byte. This field exists because a config-driven node
+    // otherwise has no way to reach RadioAirCfg::adapter_fds at all —
+    // AirBackend::create builds RadioAirCfg from this Config, and an unrooted
+    // Android app cannot enumerate usbfs, so its fds can only come from the
+    // Java UsbManager.
+    //
+    // Empty (the default) means "enumerate by bus path", the shipped path.
+    // Otherwise it must be exactly parallel to adapters[], with -1 in a slot
+    // meaning "enumerate this one"; RadioAir::create enforces that and owns
+    // the rest of the contract (fd_keep, caller-owned lifetime, no bus-path
+    // claiming for an fd-supplied stanza). See air_radio.h.
+    //
+    // Supplying any fd also forces do_reset off — libusb_reset_device on a
+    // wrapped fd is the one thing B4 established must not happen.
+    std::vector<int> adapter_fds;
 };
 
 // Minimal expected-style result (C++20 has no std::expected).

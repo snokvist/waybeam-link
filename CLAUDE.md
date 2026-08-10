@@ -290,9 +290,14 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   own undefined symbols, so that preset was green while `libwblink_node.a`
   carried nine unresolvable references. The headers:
   `rx_node.h` (`run_rx` — the run loop, implemented in `src/rx_node.cpp`),
-  `rx_node_c.h` (the **C ABI** — four `extern "C"` functions; waybeam-hub is
+  `rx_node_c.h` (the **C ABI** — five `extern "C"` functions; waybeam-hub is
   a C daemon and Android reaches native code through JNI, so the header is
-  compiled as C by `examples/node-linkcheck` to keep it honest),
+  compiled as C by `examples/node-linkcheck` to keep it honest. The fifth,
+  `wblink_rx_set_adapter_fds`, is the **only device source unrooted Android
+  has**: it cannot enumerate usbfs, so its fds come from the Java UsbManager
+  and reach libusb through `libusb_wrap_sys_device`. It is a call rather than
+  a config key by the 2026-08-08 ruling, and empty — the default — is
+  enumerate-by-bus-path, byte for byte today's behaviour),
   `tx_node.h` / `tx_node_c.h` (`run_tx` and its C ABI — #109 Phase 3. **The TX
   half of the archive is CONDITIONAL**: `run_tx` uses frame-SHM, the control
   server and venc unconditionally, the same three `WBLINK_BUILD_APP` requires,

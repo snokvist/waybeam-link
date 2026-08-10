@@ -55,6 +55,10 @@ add_wb_test(radio_decode_test wblink_io)
 if(WBLINK_RADIO)
     add_wb_test(radio_rx_only_test wblink_io)
     add_wb_test(radio_fd_source_test wblink_io)
+    # The Config -> AirBackend -> RadioAirCfg fd seam and its C ABI setter.
+    # Radio-only for the same reason as the two above: with WBLINK_RADIO off
+    # AirBackend::create's kRadio branch does not exist to test.
+    add_wb_test(node_fd_source_test wblink_io wblink_node)
 endif()
 add_wb_test(scout_sense_test wblink_io)
 add_wb_test(scout_store_test wblink_io)
