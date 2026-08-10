@@ -72,6 +72,13 @@ merge → stream egress.
 
 ### Gate 2 — physical N=2 walk fade (RF-proven, PASS)
 
+> **Provenance (2026-08-10).** This walk ran on the backend this file records,
+> which is retired. **RULED TRANSFERABLE (operator, 2026-08-10):** ρ is
+> cross-adapter loss *correlation*, a property of antenna geometry and the
+> channel rather than of how the host reads frames, so the verdict and the 10%
+> FEC seed carry to devourer. `docs/step11-bench.md` §4.1 points readers here,
+> which is why the ruling is repeated at this copy of the result.
+
 The deferred vehicle-range test ran on channel 161/HT20 with the standard
 `/usr/bin/waybeam` producer, MCS5, 10% GF(256) RLC on both frame classes, and
 two ground monitor receivers. `wlx40a5ef2f2308` was the designated return TX;

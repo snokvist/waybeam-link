@@ -37,10 +37,16 @@ MonAir was the sole consumer. Devourer takes FCS state from `RxAtrib.crc_err`
 and length from `mpdu_len_without_fcs()`, never from radiotap. So a passing
 test suite currently guards code no shipping path reaches, and
 `docs/verification-hardware.md`'s "monitor-frame FCS rule" documents its
-contract as if live. **Open:** delete the RX parser and its tests, or keep both
-as the specification of a future radiotap-RX path. Nothing forces the call;
-flagged rather than taken, because deleting tests that pass is a reachability
-change and this one has no defect driving it.
+contract as if live. Flagged rather than taken at first, because deleting tests
+that pass is a reachability change and this one had no defect driving it.
+
+**RULED (operator, 2026-08-10): delete.** Landed as **PR #170** — the parser,
+the struct and the four `test_rx_*` cases go; `radiotap_tx_ht` and the
+`kRxMcs*` buckets stay, and the FCS-at-end rule survives as documentation in
+`verification-hardware.md` for anyone who rebuilds a radiotap-RX path.
+Verified there: `dev` 73/73, and `scripts/gates.sh` 28/0/**0 skipped** with
+both cross toolchains, so the reduced header genuinely compiled on
+ssc338q{,-au,-eu} and android-arm64.
 
 **Find 2 — the record overstates coverage, and by more than one campaign.**
 `docs/followup-plan.md` carried DONE rows whose RF was collected on
@@ -80,20 +86,28 @@ in Pass 139, so monitor-era conclusions have transferred badly here before.
 changes absolute loss, not how two co-located ears correlate. Pass 139 was
 weighed and set aside — it refuted a devourer *TX capability* claim, not a
 property measured identically either way. The verdict and the 10% FEC seed
-stand on devourer. Provenance is now recorded (not flagged as open) at
-`step11-bench.md` §2 and §4.1, `frame-fec-plan.md:382`, `README.md`'s status
-block, and the `followup-plan.md` register.
+stand on devourer. Provenance is recorded at `step11-bench.md` §2 and §4.1,
+`frame-fec-plan.md:382`, `README.md`'s status block, `mon-air-verification.md`
+§"Gate 2" (which `step11-bench.md` §4.1 forwards readers to), and the
+`followup-plan.md` register. `devourer-integration-analysis.md:384,394` cite
+the walk's numbers as FEC design evidence and need no flag — under the ruling
+those numbers carry.
 
 **Find 4 — PROTOCOL.md §11's CSA machinery IS monitor-derived, and one live
-guard may now shield against a failure mode that cannot occur. TIER 1, ruling
-required.** This entry originally cleared §11 on the reasoning that
+guard may now shield against a failure mode that cannot occur. TIER 1 — RULED:
+MEASURE.** This entry originally cleared §11 on the reasoning that
 `FastRetune`/`SetMonitorChannel` are devourer API names and the craft never
 ran a kernel netdev. **The first half is true and the second is false**, and
 the pre-merge review caught it. The repo's own record: *"the craft ran
 kernel-monitor before Pass 145 and now runs devourer on the same adapter"*
-(`review-log-archive-p001-152.md:6818`), and Pass 145 measured the craft's
-**devourer** TX path as **10× worse** than monitor on the same channel/MCS/RSSI
-(`:7189`). What follows from that:
+(`review-log-archive-p001-152.md:6818`, which is Pass **146**). The craft's
+backend then moved *back*: **Pass 149** (`:7189`) measured its devourer TX path
+as **10× worse** than monitor on the same channel/MCS/RSSI — post-diversity
+loss 17–19‰ vs 1–2‰ — and *"everything below was therefore re-measured on the
+monitor backend"*. So the craft was on kernel-monitor later than Pass 146
+suggests, which **strengthens** this find rather than weakening it. The exact
+date it settled on devourer for good is not pinned here; Pass 164 is the upper
+bound, because after it there was no alternative. What follows:
 
 - **§11.6's craft post-retune RX-liveness guard (Pass 80) is a live spec
   mechanism characterised entirely on the retired path.** The half-retune it
@@ -134,7 +148,7 @@ directly.
 
 **Find 5 — the per-MCS PER ladder's blocker was already lifted, by a route
 the plan filed as a fallback. RULED (operator, 2026-08-10): sequence-derived.**
-`docs/per-mcs-per-ladder-plan.md` §5 recorded a STOP: neither backend could
+`docs/per-mcs-per-ladder-plan.md` §6 recorded a STOP: neither backend could
 deliver bad-FCS frames on the fleet-default chips, so the ladder had no
 numerator. Retiring kernel-monitor removes the *symmetry* constraint that made
 bad-FCS the choice in the first place — but the real answer is that Pass 163
@@ -145,8 +159,19 @@ That is the plan's own option 3.
 **Verified against the shipped code, and the plan is NOT fully closed by it.**
 `core/src/mcs_probe.cpp` + `core/include/wblink/mcs_probe.h` implement the
 schedule (`probe_slot_hit`), which rides `ProfileTable` as
-`probe_period`/`probe_slot` (`core/include/wblink/table.h:48-49`). Two limits
-matter: the probe is **up-candidate only** (Pass 163's second operator ruling
+`probe_period`/`probe_slot` (`core/include/wblink/table.h:48-49`).
+
+**"Rate is a pure function of `seq`" is Pass 163's shorthand, and it is
+looser than it sounds.** The probe rate resolves through
+`probe_up_candidate_mcs(table, active_profile)` (`mcs_probe.cpp:10-26`) — a
+function of `seq` **and** the sender's active profile **and** `table_version`.
+That is exactly why the RX window carries four guards rather than trusting the
+schedule: successes must be **rate-verified** against the candidate, gap losses
+are **epoch-gated** to windows where non-probe frames confirm the TX is flying
+the commanded rate, and at least one direct candidate-rate observation is
+required or a non-probing TX on the fleet-shared schedule would manufacture a
+phantom veto. The numerator is real; it is derived-and-verified, not derived
+alone. Two further limits: the probe is **up-candidate only** (Pass 163's second operator ruling
 — no down-slot, downshift stays loss-driven), and its evidence is a **veto,
 never a warrant**. So it gives PER at *one adjacent rate*, not the 8-rung
 PER-versus-RSSI waterfall the plan set out to build. Two other pieces already

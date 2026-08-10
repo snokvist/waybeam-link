@@ -42,11 +42,18 @@
 > CRC-error counts, rate-attributed pre-FCS) and the Pass 158 windowed
 > SNR/EVM quality accumulator.
 >
-> **Therefore Parts A and B below are superseded, not merely annotated.**
-> Part B's bad-FCS programme was the numerator; the numerator is closed. This
-> plan needs re-scoping around what exists — probe evidence, `rx_crc_mcs[]`,
-> the quality window — before any further work is started against it. Do not
-> implement §2's bad-FCS path.
+> **Therefore Part B is superseded, not merely annotated** — its bad-FCS
+> programme *was* the numerator, and the numerator is closed. Do not implement
+> §2's bad-FCS path; re-scope around what exists (probe evidence,
+> `rx_crc_mcs[]`, the Pass 158 quality window).
+>
+> **Part A is NOT superseded — it is a precondition of the new numerator.**
+> Part A verifies the *denominator*: that the rate attribution is honoured on
+> devourer (A1), that `rx_mcs_unknown` stays zero (A2), that buckets sum to
+> `rx` (A3). The probe depends on exactly that — `mcs_probe.h`'s guard 1
+> requires successes to be **rate-verified** (`rx_mcs` must match the
+> candidate), so a wrong denominator silently poisons the probe's evidence.
+> **A0 (`ssc338q` cross-build) and A6 are recorded NOT RUN.** Run Part A.
 
 ---
 
@@ -143,10 +150,13 @@ once the backend moves that way; the ladder must not depend on it.
 
 > **The backend moved (Pass 164).** Every node is a devourer node, so EVM is
 > now available everywhere the ladder runs and the "must not depend on it"
-> clause is spent. Given §5's finding that Jaguar3 never delivers a bad-FCS
-> frame to userspace at all, EVM is no longer excluded by anything structural
-> — but which numerator the ladder reads is a fresh design step with its own
-> operator ruling, and this note deliberately does not rank the candidates.
+> clause is spent. Given §6's finding that Jaguar3 never delivers a bad-FCS
+> frame to userspace at all, EVM is no longer excluded by anything structural.
+> **The numerator question has since been ruled (2026-08-10): sequence-derived,
+> per Pass 163 — see the ruling box at the top of this file.** EVM remains
+> available as a *quality* input to §9.4 (Pass 158 already harvests it, and
+> Pass 160 consumes the saturation verdict); it is simply not what closed the
+> numerator.
 
 `F_BADFCS` (`third_party/devourer/src/ieee80211_radiotap.h:88`) sits directly
 beside the `F_FCS` bit `radiotap_parse` already reads, and our parser already
@@ -276,14 +286,15 @@ Measure which is true. **Do not patch vendored code** — if the comment is
 wrong, that is an upstream report.
 
 **B1d — our own code drops them regardless.** Even with every RCR gate open,
-`io/src/air_radio.cpp:383` discards `crc_err || icv_err` frames near the top of
-`on_packet`. **Partly built already (2026-08-10):** Pass 163 inserted a live
-per-MCS CRC-error histogram *ahead* of that discard (`air_radio.cpp:385-391`
-`rx_crc_mcs[]`, plumbed through `air_radio.h:257`, `air_radio.cpp:1529` and
-`node/include/wblink/node/air_backend.h:679`), so a rate-attributed bad-FCS
-**count** already ships — what §5 found missing is the frame *body*, and with
-it RSSI-per-bad-frame. Re-scope this item against what `rx_crc_mcs[]` already
-provides before treating it as unstarted.
+`io/src/air_radio.cpp:382-383` discards `crc_err || icv_err` frames as the
+very first thing `on_packet` (`:381`) does. This is still the concrete change
+point on the devourer side. **Partly instrumented already (2026-08-10):** Pass
+163 added a per-MCS CRC-error histogram *inside* that discard branch
+(`air_radio.cpp:387-391` `rx_crc_mcs[]`, plumbed through
+`io/include/wblink/air_radio.h:257`, `air_radio.cpp:1529` and
+`node/include/wblink/node/air_backend.h:679`) — so a rate-attributed bad-FCS
+**count** already ships, harvested from a frame that is then dropped at `:393`.
+What §6 found missing is the frame *body*, and with it RSSI-per-bad-frame.
 
 **Exit criterion for B1:** a table of backend × chip × "does a bad-FCS frame
 reach userspace, yes/no", with the `iw` flags and config that were needed. If
@@ -421,8 +432,10 @@ From `docs/step11-bench.md` §4.10 — do not lose these:
   floor (`rssi_dbm − snr_db`). Devourer-only, so out of scope while symmetry
   is the constraint — but this is the first thing to revisit if the backend
   moves fully to devourer. **It did (Pass 164)**, so the deferral condition
-  written here has expired and this returns to the table as an available
-  option — see the numerator ruling in §6.
+  written here has expired. EVM is now harvested (Pass 158) and consumed by the
+  §9.4 saturation gate (Pass 160) — as a quality signal, not as the PER
+  numerator, which was ruled sequence-derived on 2026-08-10 (see the ruling box
+  at the top of this file).
 
 ---
 

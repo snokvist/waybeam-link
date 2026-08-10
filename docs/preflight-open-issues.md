@@ -676,10 +676,13 @@ deployed kernel-monitor craft. The deployed fleet runs the ~45% report-heard
 baseline, mitigated only by `report_redundancy=2`.
 
 > **The gate is open.** "Devourer-gated" described a fleet whose craft ran
-> kernel-monitor; since Pass 145 the craft runs devourer, and Pass 164 deleted
-> the alternative. The ~45% baseline and the `report_redundancy=2` mitigation
-> therefore no longer describe the deployed posture — **re-measure before
-> citing either.**
+> kernel-monitor. That backend was deleted in Pass 164, so every craft is a
+> devourer craft now and the gate cannot bind. (The craft's backend moved back
+> and forth before then — Pass 146 has it on devourer, Pass 149 moved it back
+> to monitor after measuring devourer TX 10× worse — so do not read a clean
+> "since Pass N" cutover into this; Pass 164 is the only safe anchor.) The
+> ~45% baseline and the `report_redundancy=2` mitigation therefore no longer
+> describe the deployed posture — **re-measure before citing either.**
 
 ### C6 — Pre-flight items already prescribed but not done
 
@@ -738,9 +741,11 @@ walk is also the missing gate-4 range sample (C2).
 - ~~`io/src/air_mon.cpp` issues a `setsockopt(SO_PRIORITY)` on **every** injected
   frame, and `counters()` does an open/read/close of a sysfs file per adapter per
   stats tick.~~ **MOOT (Pass 164)** — the file is deleted. `air_mon.cpp`'s other
-  appearances in this register are inside **DONE** entries (§B2, §B4) or the
-  "Checked and clean" assessment, which are accurate historical records and
-  stay as written.
+  appearances in this register are §B2 (**DONE**, PR #55), §B3 (**SHOULD-FIX**,
+  *partial* DONE — the monitor-spin throttle) and the "Checked and clean"
+  assessment. All three are accurate historical records and stay as written;
+  §B3's own open remainder is about a dead RX adapter being silent, which is
+  backend-independent and unaffected by the deletion.
 - The RECOVERY_REQUEST stderr line has no rate limit; stderr is unbuffered, so a
   looping ground becomes one `write()` syscall per packet.
 - `io/src/air_radio.cpp` startup failure paths after `libusb_init` skip

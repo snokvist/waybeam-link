@@ -60,16 +60,17 @@ not implemented yet.
 > radiotap. The **TX** half of `radiotap.h` (`radiotap_tx_ht`, the
 > `kRxMcs*` buckets) is fully live and unaffected.
 >
-> The rule below is therefore a **standing constraint on any future
-> radiotap-RX path**, not a description of shipping behaviour. Deleting the
-> RX parser is an open call (see `docs/findings.md`, 2026-08-10) — the tests
-> pass today and nothing forces the decision.
+> **Deleted (operator ruling 2026-08-10, PR #170.)** The parser, the struct and
+> the four `test_rx_*` cases are gone. The rule below is kept deliberately: it
+> is a **standing constraint on any future radiotap-RX path**, not a
+> description of shipping behaviour, and not something to rediscover the hard
+> way.
 
 Kernel monitor drivers do not agree on whether a captured 802.11 frame retains
 its trailing four-byte FCS. Never remove four bytes unconditionally.
 
-`RadiotapRx::fcs_at_end` must be derived from bit `0x10` of the radiotap FLAGS
-field. Strip exactly four bytes only when that bit is set; strip none when it
+A radiotap RX path's `fcs_at_end` must be derived from bit `0x10` of the
+radiotap FLAGS field (the field was `RadiotapRx::fcs_at_end` before PR #170). Strip exactly four bytes only when that bit is set; strip none when it
 is clear or FLAGS is absent. The BADFCS bit does not determine frame length.
 Waybeam's declared wire length is then validated strictly against the remaining
 payload.
@@ -80,10 +81,13 @@ This rig exercises both cases:
 - The RTL8812CU on the x86 ground has been observed with radiotap FLAGS `0x90`
   and the four-byte FCS present.
 
-Keep the paired FCS-present/FCS-absent cases in `radiotap_test` and run the full
-test suite after any radiotap, monitor RX, BPF, or 802.11 parsing change. A live
-check must also show increasing RX counts without malformed frames on at least
-one adapter of each behavior.
+~~Keep the paired FCS-present/FCS-absent cases in `radiotap_test`~~ — those
+cases were deleted with the parser (PR #170); there is nothing left to keep.
+**If a radiotap-RX path is ever rebuilt, restore both cases with it.** The live
+check still applies to whatever RX path exists: increasing RX counts without
+malformed frames on at least one adapter of each behaviour. On the shipping
+devourer path the equivalent length logic is `mpdu_len_without_fcs()`, covered
+by `tests/radio_decode_test.cpp`.
 
 ## Verified startup behavior
 

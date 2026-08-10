@@ -626,7 +626,7 @@ alone will populate the histogram but far too slowly to read.
   diversity); no Jaguar1 in the config and unicast return is a RadioAir
   path. Needs a devourer ground bring-up; carried in §4.10.
 
-**§4.10 PER-numerator follow-up: measured, and it is closed on this fleet.**
+**§4.10 PER-numerator follow-up: measured, and the CRC-error route is closed on this fleet.**
 The Pass-119 B1 capability probe (see `docs/per-mcs-per-ladder-plan.md`
 findings) found **no path that delivers bad-FCS frames to userspace** on the
 fleet-default chips: rtl88x2cu accepts `fcsfail` (both `otherbss fcsfail`
@@ -636,10 +636,20 @@ frames, so the bit path exists); devourer `rx.keep_corrupted` is plumbed
 Jaguar1/Jaguar2 only, and Jaguar3's `monitor_rx_cfg` writes RCR
 `0xF410400F` with ACRC32/AICV **clear** — its own comment claims otherwise
 — with 0 corrupted deliveries in ~22k ambient frames when the flag was
-requested. The CRC-error numerator is blocked pending upstream/driver work,
-on both backends.
+requested. The CRC-error numerator is blocked pending upstream/driver work
+("on both backends" as written — since Pass 164 there is only devourer).
+**That block no longer gates anything:** the numerator came from Pass 163's
+sequence-derived probing instead, ruled 2026-08-10.
 
 #### 4.10 Follow-ups this pass opened
+
+**SUPERSEDED (2026-08-10) — the numerator IS sequence-derived after all.**
+Pass 163 shipped sequence-derived rate probing and closed §9.2's numerator by
+computation; the `DEVOURER_RX_KEEP_CORRUPTED` route described below was
+measured a no-op on Jaguar3 (the fleet default) by the Pass-119 B1 probe, so
+it never became the numerator. The paragraph stands as the reasoning at the
+time. See `docs/findings.md` (2026-08-10) and the ruling box in
+`docs/per-mcs-per-ladder-plan.md`.
 
 **The PER numerator is available and is not a sequence-gap inference.** Pass
 118 left the numerator open, reasoning that a sequence gap cannot carry the

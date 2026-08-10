@@ -30,10 +30,10 @@ coordinated **follow-me channel switch** — built on OpenIPC **devourer** for r
 > `cmake --preset ssc338q`).
 > Step 11 (field bring-up + the §17 bench gates) has **run** on the x86 bench
 > (2× RTL8812CU + 1× RTL8812AU): the §3.0 on-air encapsulation is
-> field-verified (kernel-monitor RX delivered the MPDU with a +4-byte FCS
-> trailer, stripped before parse — that backend is retired, and devourer takes
-> FCS state from the RX descriptor instead; the §3.0 encapsulation it verified
-> is unchanged); gate 1 **PASSED** (injector + monitor siblings mix
+> field-verified (RX delivers the MPDU with a +4-byte FCS trailer, stripped
+> before the length-exact §3.1 parse — devourer's monitor bring-up keeps
+> `APP_FCS`, so this is the encapsulation on the shipping path, not a property
+> of the retired backend; PROTOCOL.md §3.0); gate 1 **PASSED** (injector + monitor siblings mix
 > in one process, both chip families, per-frame CCX `tx.report` live); gate 3
 > **PASSED** (NACK→RETRANSMIT recovery P90 ≤4 ms at 65% airtime, well inside
 > the 40 ms I-frame deadline; ARQ ceases past saturation by design); gate 2 is
