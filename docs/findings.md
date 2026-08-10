@@ -12,6 +12,88 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-10 — Kernel-monitor retirement audit: the code is clean, the RECORD is not — a whole bench campaign and one bench-gate verdict rest on the deleted backend
+
+**What was audited.** Every reference to the `kernel-monitor` / MonAir backend
+in this repo outside `third_party/`, after the Pass 164 deletion, asking one
+question per site: does anything **live** still depend on it?
+
+**Code — clean, confirmed by re-derivation, not by trusting the Pass.**
+`io/src/air_mon*`, `scripts/mon-up.sh` and the `deploy/` monitor configs are
+gone. `air.kind: "kernel-monitor"` is rejected at `io/src/config.cpp:1203-1208`
+with an explanatory message and tested at `tests/config_test.cpp:513`.
+`adapters[].ifname` — MonAir's only config key — is registered `never_live` at
+`io/src/config_registry.cpp:163` with inert-verdict tests for both the radio
+and udp paths (`tests/config_strict_test.cpp:269,274`). **Zero references
+exist outside this repo** — hub, builder, sbc-groundstations, venc and Android
+never named the backend.
+
+**Find 1 — `radiotap.h`'s RX half is dead code with a live test suite.** The
+retirement notes record radiotap.h as still in use, and it is: `radiotap_tx_ht`
+and the `kRxMcs*` buckets are live via `radio_decode.h`, `dot11.h`, `stats.h`,
+`air_iface.h`. But `radiotap_parse()` and `RadiotapRx` — the **RX** half — have
+**no production caller**; the only callers left are `tests/radiotap_test.cpp`.
+MonAir was the sole consumer. Devourer takes FCS state from `RxAtrib.crc_err`
+and length from `mpdu_len_without_fcs()`, never from radiotap. So a passing
+test suite currently guards code no shipping path reaches, and
+`docs/verification-hardware.md`'s "monitor-frame FCS rule" documents its
+contract as if live. **Open:** delete the RX parser and its tests, or keep both
+as the specification of a future radiotap-RX path. Nothing forces the call;
+flagged rather than taken, because deleting tests that pass is a reachability
+change and this one has no defect driving it.
+
+**Find 2 — the record overstates coverage, and by more than one campaign.**
+`docs/followup-plan.md` carried DONE rows whose RF was collected on
+kernel-monitor. The scope was **larger than the four rows previously
+identified**: reading `review-log-archive-p001-152.md` shows the entire
+2026-07-19 sequence — Passes 47, 48, 49, 50 and 52 — ran on monitor netdevs
+`229b`/`2308`. The row labelled "Stationary N=2 **radio** soak" is included:
+"radio" there means real RF, not `air.kind: "radio"`. Rows are now marked
+`[HISTORICAL — kernel-monitor]` with what carries over stated per row. Two
+that survive intact: Pass 50's 3 ms first-NACK grace measures an
+Ethernet/localhost round trip, not the air (RF only supplied the loss
+pattern), and Pass 52's controller regressions ran on **UDP-air**, not RF.
+One that is void: Pass 52's actuation result — Pass 164 deleted the
+`iw`-forked actuator it exercised.
+
+**Find 3 — §17 bench gate 2 is marked PASSED on evidence from the deleted
+backend, and a live seed hangs off it.** The only physical gate-2 measurement
+is the Pass 47 walk fade, run entirely on kernel-monitor. `step11-bench.md`
+§4.1 records it COMPLETED, and `frame-fec-plan.md:382` checks the **10% FEC
+operating point** off against it. The case for transfer is real — gate 2
+measures cross-adapter loss correlation ρ, a property of antenna geometry and
+the channel, and the backend moves *absolute* loss rather than the
+*correlation* between two co-located ears. The case against is precedent: the
+monitor-era "devourer cannot transmit MCS4+" premise was refuted on hardware
+in Pass 139, so monitor-era conclusions have transferred badly here before.
+**Open, operator ruling wanted:** re-run the walk on devourer, or rule the
+verdict transferable in writing. Either is fine; leaving it cited unqualified
+is not.
+
+**PROTOCOL.md — read through per §17's re-derive-on-backend-change rule, and
+no live constant rests solely on a monitor measurement.** All nine sites
+naming the backend (~201, ~2145, ~2326, ~2382, ~2472, ~2508, ~2698, ~2789,
+~4730, ~5161, ~5383) already state the retirement and what went with it. Two
+worth recording: §9.10's wedge detector (~2145) was measured through monitor,
+and its defence — the failure is the chip's, not the backend's — is now
+**independently confirmed on devourer** by the entry below (induced wedge,
+5/5 cleared by backend rebuild, 0/5 do-nothing control), so the seed is no
+longer monitor-only evidence. And §11's CSA retune budgets are **devourer**
+measurements despite the surrounding "monitor-mode" wording: `FastRetune` and
+`SetMonitorChannel` are devourer API names, and the craft is an SSC338Q that
+never ran a kernel netdev. **One wording flag, not amended here:** §18's
+"measured monitor-mode retunes (§11.2)" now reads as if it cites the retired
+backend when it means devourer operating the radio in monitor mode. That is a
+prose ambiguity with no contract change, so it needs an operator ruling before
+a spec edit; the equivalent wording in `README.md` was fixed directly.
+
+**Out of scope, ruled at the start:** the wfb_ng residue (waybeam-hub 18
+files, sbc-groundstations 15, builder 17, waybeam_venc 7). A separate
+retirement, already executed in hub #153 and sbc #16, related to monitor mode
+but not to MonAir.
+
+---
+
 ## 2026-08-10 — A §9.10 wedge clears by DESTROYING AND RECONSTRUCTING the backend in-process; re-enumeration alone never clears it (0/5 control)
 
 **Pass 148's "in-process re-init is impossible" is true of the thing it tested

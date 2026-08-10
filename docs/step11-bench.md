@@ -298,7 +298,17 @@ Each item below is independently startable once its stated prerequisite PR
 has merged. None require re-reading this whole document — jump to the
 subsection.
 
-### 4.1 Real-fade gate-2 verdict — **COMPLETED 2026-07-19**
+### 4.1 Real-fade gate-2 verdict — **COMPLETED 2026-07-19 (on the retired backend)**
+
+> **Provenance flag (2026-08-10).** This walk ran entirely on the
+> `kernel-monitor` backend, deleted in Pass 164 — the receivers were monitor
+> netdevs `229b`/`2308`. Whether the ρ verdict transfers to devourer is an
+> **open operator ruling**, not an assumption: the argument for is that ρ is a
+> property of antenna geometry and the channel rather than of how the host
+> reads frames; the argument against is Pass 139, where a monitor-era premise
+> about devourer was refuted on hardware. The 10% FEC seed rests on this
+> verdict. See `docs/findings.md` (2026-08-10) and the gate-2 transferability
+> row in `docs/followup-plan.md`.
 
 The physical walk result is recorded in §2 and
 `docs/mon-air-verification.md`: N=2 removed about 72% of pre-diversity loss,

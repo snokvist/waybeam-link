@@ -1,9 +1,28 @@
-# Known-good verification hardware
+# Known-good verification hardware (2026-07-22)
 
-This is the reference kernel-monitor test rig as verified on 2026-07-22. Keep
-the addresses, originators, channel, and interface names aligned with the
-deployment assets in `deploy/` when using this setup for regression or flight
-testing.
+> **RETIRED AS A BRING-UP GUIDE — historical record only.** Every node below
+> ran the `kernel-monitor` backend, deleted in **Pass 164**; `air.kind:
+> "kernel-monitor"` no longer loads, and the `waybeam-ground.service` /
+> `waybeam-cache.service` / `S49waybeam-link` unit files this file names were
+> deleted with it. **Do not copy a config, an interface name, or a bring-up
+> step out of this file.** The live rig is `deploy/README.md` +
+> `deploy/*.json`, mirrored from the two powered nodes on 2026-08-08.
+>
+> It is kept for one deliberate reason (`deploy/README.md`): the RK3566
+> spectator `192.168.2.199` and the Ethernet cache `192.168.2.247` were
+> offline when Pass 164 landed, so their configs were deleted rather than
+> migrated by guesswork. **This file is the surviving record of their
+> hardware** — re-author each from the live `/etc/waybeam-link/*.json` when
+> the node is powered, then check it with `--check --strict`.
+>
+> What still stands, backend-independently: the topology intent (one craft,
+> two diversity grounds, an Ethernet repair cache), the originator/session
+> isolation argument, and the flight-safety rule in the closing line. What
+> does **not**: every `iw`/monitor step, the FCS rule below (see its own
+> note), and the counter checks, which name a `waybeam-cache.service` that no
+> longer exists.
+
+This was the reference kernel-monitor test rig as verified on 2026-07-22.
 
 ## Topology
 
@@ -31,7 +50,20 @@ the RK3566 verification receiver does not become authoritative.
 The cache radios are receive-only in this setup. RF-inserted cache replies are
 not implemented yet.
 
-## Monitor-frame FCS rule
+## Monitor-frame FCS rule (no live consumer since Pass 164)
+
+> **The code this rule governs has no production caller.** `radiotap_parse()`
+> and `RadiotapRx` (`io/include/wblink/radiotap.h`) were read only by the
+> deleted `MonAir`; the sole remaining callers are `tests/radiotap_test.cpp`.
+> Devourer takes FCS state from `RxAtrib.crc_err` and the length from
+> `mpdu_len_without_fcs()` (`io/include/wblink/radio_decode.h`), never from
+> radiotap. The **TX** half of `radiotap.h` (`radiotap_tx_ht`, the
+> `kRxMcs*` buckets) is fully live and unaffected.
+>
+> The rule below is therefore a **standing constraint on any future
+> radiotap-RX path**, not a description of shipping behaviour. Deleting the
+> RX parser is an open call (see `docs/findings.md`, 2026-08-10) — the tests
+> pass today and nothing forces the decision.
 
 Kernel monitor drivers do not agree on whether a captured 802.11 frame retains
 its trailing four-byte FCS. Never remove four bytes unconditionally.

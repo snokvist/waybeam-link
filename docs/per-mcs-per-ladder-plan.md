@@ -4,6 +4,29 @@
 **Audience:** a Claude Code session with the bench rig attached.
 **Predecessor:** PR #79 (Pass 118) — must be verified on hardware first (Part A).
 
+> **Backend update (2026-08-10) — read before working this plan.** Pass 164
+> deleted the `kernel-monitor` backend. **devourer is the only backend**, so
+> every "on both backends" instruction below is now a single run, and the
+> `kernel-monitor` column of §2's table is dead.
+>
+> Two consequences that change the plan rather than merely annotate it:
+>
+> 1. **The symmetry constraint is gone, and with it §2's whole argument for
+>    choosing bad-FCS over EVM.** §2 picked `F_BADFCS` because it was the one
+>    PER-ish signal both backends could carry. With one backend there is
+>    nothing to be symmetric *with*: `RxAtrib.evm[4]`, `cfo_tail`, per-path
+>    `snr[4]` and `GetRxQuality()` are no longer "opportunistic enhancements"
+>    to be kept off the ladder — they are ordinary inputs. **Re-open the
+>    signal choice before building §2's bad-FCS path**, because §5 went on to
+>    measure that bad-FCS frames never reach userspace on Jaguar3 anyway.
+> 2. **Monitor-only signals are unavailable, not merely unpreferred** — Bad
+>    PLCP (`RX_FLAGS` `F_RX_BADPLCP`) has no devourer equivalent and drops out
+>    of scope entirely.
+>
+> Sections carrying results measured on the retired backend are marked
+> **[HISTORICAL — kernel-monitor]**; they record what happened, not what the
+> shipping path does.
+
 ---
 
 ## 0. Read this first
@@ -51,8 +74,12 @@ The dataset this plan builds is precisely the one that gate is guessing at:
 
 That is the modulation waterfall curve, measured on the actual hardware, on
 the actual channel. It is what should replace §9.4's hardcoded per-rung RSSI
-thresholds — and, unlike EVM or CFO, **it is obtainable identically on both
-air backends** (§2), which is the operator's stated constraint.
+thresholds — and, unlike EVM or CFO, ~~**it is obtainable identically on both
+air backends** (§2), which is the operator's stated constraint.~~ **That
+constraint expired with Pass 164** (see the banner): there is one backend, so
+the tie-break that selected bad-FCS over EVM no longer applies. The *goal* —
+a measured per-MCS waterfall replacing §9.4's hardcoded thresholds — is
+untouched; only the choice of input signal reopens.
 
 Every frame the receiver demodulates gives one sample: `(MCS, RSSI, ok|badfcs)`.
 No probe traffic, no wire change, no extra airtime.
@@ -64,17 +91,23 @@ looked at.
 
 ---
 
-## 2. Why bad-FCS and not EVM (the symmetry argument)
+## 2. Why bad-FCS and not EVM (the symmetry argument) — **[SUPERSEDED, Pass 164]**
+
+> **This argument no longer holds.** It exists to record why the choice was
+> made, and the table is still a useful field-by-field map of what devourer
+> exposes. The `kernel-monitor` column and the `symmetric` verdicts are dead:
+> there is one backend, so the constraint that ruled EVM out has no force.
+> See the banner at the top of this file.
 
 Checked field by field. `radiotap` is a standard; the Realtek RX descriptor is
-not. Where the standard has no field, the kernel-monitor backend has no path.
+not. Where the standard has no field, the kernel-monitor backend had no path.
 
-| Signal | kernel-monitor | devourer | symmetric |
+| Signal | ~~kernel-monitor~~ (retired) | devourer | ~~symmetric~~ |
 |---|---|---|---|
 | MCS of received frame | radiotap bit 19 | `RxAtrib.data_rate` | ✅ (Pass 118) |
 | RSSI | radiotap `DBM_ANTSIGNAL` (bit 5) | `RxAtrib.rssi[4]` | ✅ (already used) |
 | **Frame failed FCS** | radiotap `FLAGS` bit `F_BADFCS` (0x40) | `RxAtrib.crc_err` | ✅ **by standard** |
-| Bad PLCP | radiotap `RX_FLAGS` `F_RX_BADPLCP` | — | monitor only |
+| Bad PLCP | radiotap `RX_FLAGS` `F_RX_BADPLCP` | — | **UNAVAILABLE** — monitor-only, dropped with the backend |
 | Noise floor → SNR | radiotap `DBM_ANTNOISE` (bit 6) | `RxAtrib.snr[4]` | ⚠️ both exist, different quality |
 | A-MPDU grouping | radiotap `AMPDU_STATUS` (bit 20) | `paggr` / `ppdu_cnt` | ✅ roughly |
 | **EVM** | *no radiotap field exists* | `RxAtrib.evm[4]` | ❌ devourer only |
@@ -86,6 +119,13 @@ a constellation decodes — but it has no standard radiotap field, so carrying i
 on the monitor path would need a vendor namespace and a driver patch we do not
 control. It stays available as an *opportunistic enhancement on devourer nodes*
 once the backend moves that way; the ladder must not depend on it.
+
+> **The backend moved (Pass 164).** Every node is a devourer node, so EVM is
+> now available everywhere the ladder runs and the "must not depend on it"
+> clause is spent. Given §5's finding that Jaguar3 never delivers a bad-FCS
+> frame to userspace at all, EVM is the stronger candidate of the two — but
+> choosing it is a fresh design step with its own ruling, not a substitution
+> to make silently here.
 
 `F_BADFCS` (`third_party/devourer/src/ieee80211_radiotap.h:88`) sits directly
 beside the `F_FCS` bit `radiotap_parse` already reads, and our parser already
@@ -136,8 +176,10 @@ Confirm positively:
 3. Drive a rung change — a real §9.5 transition, or pin via
    `min_profile`/`max_profile` — and the mass **must move with it**, interval
    to interval.
-4. Repeat on the **devourer** backend specifically, not only kernel-monitor.
-   Kernel-monitor passing proves nothing about the path this pass changed.
+4. ~~Repeat on the **devourer** backend specifically, not only kernel-monitor.~~
+   **Moot since Pass 164** — devourer is the only backend, so every run is the
+   devourer run. The warning that produced this step still applies in spirit:
+   a green counter on a fallback path proves nothing about the path under test.
 
 If there is any doubt, the sharp version: build a throwaway diagnostic binary
 that injects with a radiotap MCS deliberately disagreeing with the last
@@ -146,10 +188,10 @@ reports. That is a scratch build, never a config knob, never committed.
 
 ### A2. `rx_mcs_unknown` stays at zero
 
-Against a conforming peer, on both backends. Non-zero means the rate did not
-resolve — on kernel-monitor a missing or `!HAVE_MCS` radiotap field, on
-devourer a rate code outside `DESC_RATEMCS0..+7`. Either is a real finding
-about the driver, not noise. Investigate before proceeding.
+Against a conforming peer. Non-zero means the rate did not resolve — on
+devourer, a rate code outside `DESC_RATEMCS0..+7`. (The kernel-monitor case,
+a missing or `!HAVE_MCS` radiotap field, retired with the backend.) That is a
+real finding about the driver, not noise. Investigate before proceeding.
 
 ### A3. Buckets sum to `rx`
 
@@ -213,7 +255,7 @@ Measure which is true. **Do not patch vendored code** — if the comment is
 wrong, that is an upstream report.
 
 **B1d — our own code drops them regardless.** Even with every RCR gate open,
-`io/src/air_radio.cpp:235-237` discards `crc_err || icv_err` frames
+`io/src/air_radio.cpp:383` discards `crc_err || icv_err` frames
 unconditionally as the very first thing `on_packet` does. This is the concrete
 change point on the devourer side.
 
@@ -232,13 +274,16 @@ So bad-FCS counting is biased toward *lightly* damaged frames and undercounts
 badly damaged ones — which is precisely the tail that matters near a rung's
 cliff, the exact regime the ladder exists to characterise.
 
-Worse on the monitor path: `attach_bpf_filter` (`io/src/air_mon.cpp:74`)
-applies the SA match **in kernel**, so a frame with a corrupted SA is dropped
-before userspace ever sees it and cannot even be counted as "unattributable".
+~~Worse on the monitor path: `attach_bpf_filter` applies the SA match **in
+kernel**, so a frame with a corrupted SA is dropped before userspace ever sees
+it.~~ **Void since Pass 164** — `io/src/air_mon.cpp` is deleted. On devourer
+the SA match is a userspace test, so a corrupted-SA frame at least *reaches*
+us; it is still unattributable, but it is countable. The bias above is
+unchanged.
 
 **Note `air.rx_drop_permille` cannot be used for this.** It is a synthetic
-*post-reception* drop in our own code (`io/src/air_radio.cpp:253`,
-`io/src/air_mon.cpp:428`), applied to frames that already passed FCS. It
+*post-reception* drop in our own code (`io/src/air_radio.cpp:406`), applied to
+frames that already passed FCS. It
 manufactures loss, not FCS errors. Real degradation is required: attenuators,
 distance, or pinning a rung above what the link budget supports (the last is
 cheapest on a bench — pin `min_profile == max_profile` at MCS7 and walk the
@@ -349,7 +394,8 @@ From `docs/step11-bench.md` §4.10 — do not lose these:
   discarded by us; `GetRxQuality()` already fuses them with a passive noise
   floor (`rssi_dbm − snr_db`). Devourer-only, so out of scope while symmetry
   is the constraint — but this is the first thing to revisit if the backend
-  moves fully to devourer.
+  moves fully to devourer. **It did (Pass 164), so this is now the leading
+  candidate**, not a deferred one.
 
 ---
 
@@ -371,8 +417,8 @@ ground is MonAir, no Jaguar1 in config. Pass 118 is hardware-verified.
 
 | Path | chip / driver | flag accepted | bad-FCS delivered |
 |---|---|---|---|
-| kernel-monitor | CU `rtl88x2cu` | `otherbss fcsfail` ✅, `fcsfail` ✅ (rc 0) | **NO** — 0 in 126k frames across 5805 / 5180 / 2412 (busy 2.4 incl.) |
-| kernel-monitor | EU `rtl88x2eu` | ✅ (rc 0) | inconclusive — EU heard only ~40 ambient 2.4 frames in 30 s (weak 2.4 RX); 0 bad-FCS observed |
+| ~~kernel-monitor~~ **[HISTORICAL — backend retired Pass 164]** | CU `rtl88x2cu` | `otherbss fcsfail` ✅, `fcsfail` ✅ (rc 0) | **NO** — 0 in 126k frames across 5805 / 5180 / 2412 (busy 2.4 incl.) |
+| ~~kernel-monitor~~ **[HISTORICAL]** | EU `rtl88x2eu` | ✅ (rc 0) | inconclusive — EU heard only ~40 ambient 2.4 frames in 30 s (weak 2.4 RX); 0 bad-FCS observed |
 | devourer | CU — enumerates **Jaguar3** | `rx.keep_corrupted` set in scratch build | **NO** — 0 corrupted in ~22k ambient frames |
 | devourer | Jaguar1 / Jaguar2 | — | untested: no such hardware on the desk (AU unplugged) |
 
@@ -403,15 +449,27 @@ on bad-FCS frames (§B3 early check) is unobservable for the same reason.
    requested). Whether the 8822C-family firmware then actually forwards
    CRC-failed MPDUs to the host is the follow-up empirical question — the
    RCR bits are necessary, not proven sufficient.
-2. Out-of-tree kernel-driver `fcsfail` support would open the monitor path,
-   but that tree is not ours either.
+2. ~~Out-of-tree kernel-driver `fcsfail` support would open the monitor path,
+   but that tree is not ours either.~~ **Dead since Pass 164** — there is no
+   monitor path to open, and `rtl88x2cu`/`rtl88x2eu` were deregistered from
+   the coordination repo on 2026-07-18.
 3. Alternatively, re-scope the numerator: the sequence-gap inference Pass 118
    originally recorded (with its known promoted-burst blind spot), or accept
    a devourer-only ladder once EVM/`snr[4]` become available after a full
    backend move — both are §4-style operator decisions.
 
+**Path 3 is now the only live one, and its precondition is met (2026-08-10).**
+The "full backend move" it waited on happened in Pass 164, so a devourer-only
+ladder is no longer a hypothetical concession — it is the sole remaining
+design. Lever 1 (an upstream devourer change) stays available and would
+restore the original bad-FCS numerator; lever 2 is gone. **Which numerator
+the ladder uses — EVM/`snr[4]`, upstream-unblocked bad-FCS, or sequence-gap
+inference — is an open operator ruling.**
+
 ### §4 rulings — now needed only if an unblock path is chosen
 
-The five §4 questions stand, but none is actionable until bad-FCS delivery
-exists on at least one symmetric path. Raised to the operator with this
-report rather than resolved here.
+The five §4 questions stand, but none is actionable until a numerator exists.
+~~bad-FCS delivery on at least one symmetric path~~ — symmetry is no longer a
+constraint (Pass 164); the question is now simply which devourer signal the
+ladder reads. Raised to the operator with this report rather than resolved
+here.

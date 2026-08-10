@@ -721,9 +721,12 @@ walk is also the missing gate-4 range sample (C2).
   silently disables stats entirely.
 - `quietgap_policy` never sets `p.skip_backlog`, so that knob is dead and the
   header default of 32 always applies.
-- `io/src/air_mon.cpp` issues a `setsockopt(SO_PRIORITY)` on **every** injected
+- ~~`io/src/air_mon.cpp` issues a `setsockopt(SO_PRIORITY)` on **every** injected
   frame, and `counters()` does an open/read/close of a sysfs file per adapter per
-  stats tick.
+  stats tick.~~ **MOOT (Pass 164)** — the file is deleted. Elsewhere in this
+  register `air_mon.cpp` appears inside **DONE** entries, which are accurate
+  historical records and stay as written; this was the one open item against a
+  file that no longer exists.
 - The RECOVERY_REQUEST stderr line has no rate limit; stderr is unbuffered, so a
   looping ground becomes one `write()` syscall per packet.
 - `io/src/air_radio.cpp` startup failure paths after `libusb_init` skip

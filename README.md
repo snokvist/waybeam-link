@@ -224,7 +224,7 @@ frames into a POSIX shared-memory ring; waybeam-link ingests them, fragments eac
 into source symbols + GF(256) Cauchy-RS repair symbols (§14.1), injects over the
 air, and on the ground reassembles + FEC-decodes back into a **byte-identical**
 SHM slot for the decoder. SHM is same-host on each end; the air hop is either
-real monitor-mode injection or the udp-air bench sim.
+real devourer RF injection or the udp-air bench sim.
 
 ```
 venc(frame-shm://venc_frame) → wl tx (FrameFramer+FEC) → AIR → wl rx (reassemble+FEC) → frame-shm(venc_frame_out) → decoder
@@ -232,7 +232,7 @@ venc(frame-shm://venc_frame) → wl tx (FrameFramer+FEC) → AIR → wl rx (reas
 
 FEC is transparent to the RX (it decodes whatever the TX emits); `fec.scheme
 "none"` fragments + ARQs without repair symbols. Both ends must share
-`node.net_id` on the monitor/radio path. Adaptive MTU: symbols are sized from the
+`node.net_id` on the radio path. Adaptive MTU: symbols are sized from the
 active profile's `max_payload` (jumbo rungs keep large IDRs under the GF(256)
 k+r≤256 cap). Example configs: `examples/config.frame-shm-{tx,rx}.sample.json`.
 

@@ -1,5 +1,15 @@
 # Devourer↔kernel-monitor parity — survey and working plan (2026-08-06)
 
+> **The counterparty is gone (Pass 164), and the register is closed.** This
+> plan measured devourer against `kernel-monitor` as its reference; that
+> backend was deleted two days after this was written, so "parity" no longer
+> names a target — devourer *is* the baseline. Every code item here is already
+> closed (see the register below), and its own conclusion, that the devourer
+> feature surface is **"upside available once the backend moves, not parity"**,
+> is the part that carried forward: the backend moved, and that upside is the
+> #95–#101 tranche. `MonAir` and `io/src/air_mon.cpp` citations below describe
+> deleted code and are kept as the record of what was compared.
+
 **Survey and planning only. No spec ruling is made here, so there is no
 `docs/review-log.md` Pass entry attached.** Every item below that touches
 `PROTOCOL.md` is marked as needing an operator ruling; when one is made it
