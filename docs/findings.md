@@ -46,15 +46,25 @@ change and this one has no defect driving it.
 `docs/followup-plan.md` carried DONE rows whose RF was collected on
 kernel-monitor. The scope was **larger than the four rows previously
 identified**: reading `review-log-archive-p001-152.md` shows the entire
-2026-07-19 sequence — Passes 47, 48, 49, 50 and 52 — ran on monitor netdevs
-`229b`/`2308`. The row labelled "Stationary N=2 **radio** soak" is included:
-"radio" there means real RF, not `air.kind: "radio"`. Rows are now marked
+2026-07-19 sequence — Passes 47 through 52 — ran on kernel-monitor. Passes
+47–50 name the ground monitor netdevs `229b`/`2308`; Pass 52 used a different
+pair (`:1292` — "8812EU TX→8812CU RX monitor link"); Pass 51 names no netdev.
+The row labelled "Stationary N=2 **radio** soak" is included: "radio" there
+means real RF, not `air.kind: "radio"`. Rows are now marked
 `[HISTORICAL — kernel-monitor]` with what carries over stated per row. Two
-that survive intact: Pass 50's 3 ms first-NACK grace measures an
-Ethernet/localhost round trip, not the air (RF only supplied the loss
-pattern), and Pass 52's controller regressions ran on **UDP-air**, not RF.
-One that is void: Pass 52's actuation result — Pass 164 deleted the
-`iw`-forked actuator it exercised.
+that survive intact: Pass 50's 3 ms first-NACK grace measures a **localhost**
+UDP/IP round trip, not the air — and the loss it was measured under was a
+**deterministic synthetic 150‰ post-radio drop** (`:1124`, `:1221`), not RF
+loss, which if anything strengthens the transfer — and Pass 52's controller
+gates ran on **UDP**, not RF. One that is void: Pass 52's actuation result —
+Pass 164 deleted the `iw`-forked actuator it exercised.
+
+**Pass 51 is the one whose *conclusion* hangs off the backend, not just its
+measurement.** It ruled that waybeam-link runs as root and creates
+`/venc_frame_out` `0666` because *"the kernel-monitor backend requires raw
+packet access"* (`:1241`, `:1256`). That premise is void — devourer uses
+libusb, not `AF_PACKET`. Whether the privilege posture should now change is an
+open question this audit does not answer.
 
 **Find 3 — §17 bench gate 2 is marked PASSED on evidence from the deleted
 backend, and a live seed hangs off it.** The only physical gate-2 measurement
@@ -68,24 +78,55 @@ monitor-era "devourer cannot transmit MCS4+" premise was refuted on hardware
 in Pass 139, so monitor-era conclusions have transferred badly here before.
 **Open, operator ruling wanted:** re-run the walk on devourer, or rule the
 verdict transferable in writing. Either is fine; leaving it cited unqualified
-is not.
+is not — so every citation site found is now flagged: `step11-bench.md` §2
+(the PASSED header) and §4.1, `frame-fec-plan.md:382`, `README.md`'s status
+block, and the `followup-plan.md` register.
 
-**PROTOCOL.md — read through per §17's re-derive-on-backend-change rule, and
-no live constant rests solely on a monitor measurement.** All nine sites
-naming the backend (~201, ~2145, ~2326, ~2382, ~2472, ~2508, ~2698, ~2789,
-~4730, ~5161, ~5383) already state the retirement and what went with it. Two
-worth recording: §9.10's wedge detector (~2145) was measured through monitor,
-and its defence — the failure is the chip's, not the backend's — is now
-**independently confirmed on devourer** by the entry below (induced wedge,
-5/5 cleared by backend rebuild, 0/5 do-nothing control), so the seed is no
-longer monitor-only evidence. And §11's CSA retune budgets are **devourer**
-measurements despite the surrounding "monitor-mode" wording: `FastRetune` and
-`SetMonitorChannel` are devourer API names, and the craft is an SSC338Q that
-never ran a kernel netdev. **One wording flag, not amended here:** §18's
-"measured monitor-mode retunes (§11.2)" now reads as if it cites the retired
-backend when it means devourer operating the radio in monitor mode. That is a
-prose ambiguity with no contract change, so it needs an operator ruling before
-a spec edit; the equivalent wording in `README.md` was fixed directly.
+**Find 4 — PROTOCOL.md §11's CSA machinery IS monitor-derived, and one live
+guard may now shield against a failure mode that cannot occur. TIER 1, ruling
+required.** This entry originally cleared §11 on the reasoning that
+`FastRetune`/`SetMonitorChannel` are devourer API names and the craft never
+ran a kernel netdev. **The first half is true and the second is false**, and
+the pre-merge review caught it. The repo's own record: *"the craft ran
+kernel-monitor before Pass 145 and now runs devourer on the same adapter"*
+(`review-log-archive-p001-152.md:6818`), and Pass 145 measured the craft's
+**devourer** TX path as **10× worse** than monitor on the same channel/MCS/RSSI
+(`:7189`). What follows from that:
+
+- **§11.6's craft post-retune RX-liveness guard (Pass 80) is a live spec
+  mechanism characterised entirely on the retired path.** The half-retune it
+  defends against was found on the craft 8812EU and is attributed explicitly
+  to *"the in-place `iw set freq` retune path"*, recovered by *"full monitor
+  bring-up"* (`archive:2345-2354`). `iw set freq` **is** the kernel netdev.
+  Devourer retunes through `FastRetune`/`SetMonitorChannel` instead, so the
+  open question is sharp: **does the half-retune failure mode exist on
+  devourer at all?** If it does not, a live guard is defending against
+  something that can no longer happen. If it does, it has never been confirmed
+  there. Either answer is a spec-relevant fact, and neither is in evidence.
+- **§11.2's `dt_to_switch_ms` class-0/1 budgets (150/500 ms) are not
+  monitor-derived either — they are unmeasured.** `step11-bench.md` §4.3 says
+  they were *"derived on paper against wfb_ng precedent, not measured against
+  this radio's actual hardware TSF latch behaviour"*, and `preflight-open-
+  issues.md` C3 records that run as **never done**. So the correct statement
+  is "unvalidated", not "devourer-measured".
+- **§18's "measured monitor-mode retunes (§11.2)"** therefore is not the
+  harmless wording ambiguity first recorded here. It may be citing the retired
+  backend literally.
+
+**This is the Tier-1 trigger.** No spec text was amended in this pass — that
+needs an operator ruling plus a numbered Pass, and the ruling wants a devourer
+CSA retune run behind it (which is also `preflight-open-issues.md` C3, open
+since 2026-07-24).
+
+**The rest of PROTOCOL.md is clean.** The eleven sites naming the backend
+(~201/202/210 as one, ~2145, ~2326, ~2382, ~2472, ~2508, ~2698, ~2789, ~4730,
+~5161, ~5383) all state the retirement and what went with it. §9.10's wedge
+detector (~2145) was monitor-measured, but its defence — the failure is the
+chip's, not the backend's — is now **independently confirmed on devourer** by
+the entry below (induced wedge, 5/5 cleared by backend rebuild, 0/5 do-nothing
+control, **PR #168**), so that seed is no longer monitor-only evidence. The
+equivalent "monitor" wording in `README.md`, which is not spec, was fixed
+directly.
 
 **Out of scope, ruled at the start:** the wfb_ng residue (waybeam-hub 18
 files, sbc-groundstations 15, builder 17, waybeam_venc 7). A separate

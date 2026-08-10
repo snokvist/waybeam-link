@@ -570,7 +570,15 @@ Where each bucket stands, so the next session does not re-derive the order.
 
 ## C. Verification still owed
 
-### C1 — Pass 80 10× alternating CSA soak — MET
+### C1 — Pass 80 10× alternating CSA soak — MET **on the retired backend**
+
+> **REOPENED 2026-08-10.** This soak exercised `MonAir::recover()`, and the
+> §11.6 guard it validates was characterised on the craft's in-place
+> `iw set freq` retune — the kernel netdev path deleted in Pass 164. Devourer
+> retunes via `FastRetune`/`SetMonitorChannel`, so it is unknown whether the
+> half-retune failure this guards against occurs there at all. See
+> `docs/findings.md` (2026-08-10) and the §11 CSA row in
+> `docs/followup-plan.md` — **Tier 1, operator ruling.**
 
 `docs/review-log.md` Pass 80 requires it and no doc records the run. It guards
 the worst in-flight scenario: craft TX moves, RX goes deaf, the craft cannot hear
@@ -661,11 +669,17 @@ attempt to do so is what uncovered the Pass 80 CSA wedge. AUDIO (Pass 77) has
 never flown, and it is the feature that destabilised the selector twice in three
 days (Passes 78, 79). Both grounds and the vehicle carry stream 1.
 
-### C5 — Uplink HW-ACK is devourer-gated
+### C5 — Uplink HW-ACK is devourer-gated — **premise changed (2026-08-10)**
 
 Validated on the desk only, and Pass 78 confirms it is unavailable on the
 deployed kernel-monitor craft. The deployed fleet runs the ~45% report-heard
 baseline, mitigated only by `report_redundancy=2`.
+
+> **The gate is open.** "Devourer-gated" described a fleet whose craft ran
+> kernel-monitor; since Pass 145 the craft runs devourer, and Pass 164 deleted
+> the alternative. The ~45% baseline and the `report_redundancy=2` mitigation
+> therefore no longer describe the deployed posture — **re-measure before
+> citing either.**
 
 ### C6 — Pre-flight items already prescribed but not done
 
@@ -723,10 +737,10 @@ walk is also the missing gate-4 range sample (C2).
   header default of 32 always applies.
 - ~~`io/src/air_mon.cpp` issues a `setsockopt(SO_PRIORITY)` on **every** injected
   frame, and `counters()` does an open/read/close of a sysfs file per adapter per
-  stats tick.~~ **MOOT (Pass 164)** — the file is deleted. Elsewhere in this
-  register `air_mon.cpp` appears inside **DONE** entries, which are accurate
-  historical records and stay as written; this was the one open item against a
-  file that no longer exists.
+  stats tick.~~ **MOOT (Pass 164)** — the file is deleted. `air_mon.cpp`'s other
+  appearances in this register are inside **DONE** entries (§B2, §B4) or the
+  "Checked and clean" assessment, which are accurate historical records and
+  stay as written.
 - The RECOVERY_REQUEST stderr line has no rate limit; stderr is unbuffered, so a
   looping ground becomes one `write()` syscall per packet.
 - `io/src/air_radio.cpp` startup failure paths after `libusb_init` skip

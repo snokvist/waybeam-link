@@ -171,7 +171,13 @@ Injector + monitor siblings mixed in one process, both chip families:
 Residual unknown from `docs/build-order.md` gate 1 ("injector + monitors mix")
 is closed for both Jaguar1 and Jaguar3.
 
-### Gate 2 — **PASSED** (synthetic accounting + physical vehicle walk fade)
+### Gate 2 — **PASSED** (synthetic accounting + physical vehicle walk fade) — **physical leg on the retired backend**
+
+> **Provenance flag (2026-08-10).** The physical walk below ran on the
+> `kernel-monitor` backend, deleted in Pass 164. Whether the ρ verdict
+> transfers to devourer is an **open operator ruling** — see §4.1 and
+> `docs/findings.md` (2026-08-10). The synthetic accounting leg is
+> backend-independent and unaffected.
 
 Synthetic, 60 s @ `rx_drop_permille=150` on both ground adapters: measured
 15.3%/14.0% per-adapter, joint post-diversity **2.10%** vs independence-product
