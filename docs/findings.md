@@ -12,6 +12,118 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-10 — H1 holds: a §9.10 wedge clears IN-PROCESS, 5/5 on the craft, in 7.9 s against a 13.8 s supervised baseline
+
+**Pass 148's "in-process re-init is impossible" is true of the thing it
+tested and not of the thing that was never tried.** That conclusion rests on
+devourer's `InitWrite` unconditionally assigning `_coex_thread` and
+`std::terminate`-ing on a second call — which is a statement about calling it
+twice **on one live object**. A freshly constructed device has a
+default-constructed, non-joinable `_coex_thread`, so the assignment at
+`third_party/devourer/src/jaguar3/RtlJaguar3Device.cpp:900` is legal, and both
+`Stop()` (`:684`) and the destructor (`:390`) set `_coex_stop` and join first.
+Destroy-the-object-and-construct-a-new-one was never measured. It works.
+
+Harness: `tools/hwtrial_reinit` (new). It uses the **production** detector —
+`wblink::TxWedge` is pure and clock-injected, so it polls exactly what
+`run_tx` polls — and it **induces the fault itself** (usbfs
+deauthorize/reauthorize, Pass 147's induction), so no interval below contains
+an operator's reaction time. Every adapter is `role:"tx"`: `hwtrial_bringup`
+creates them `allow_rx_only`, which takes `Init`, not `InitWrite`, and so
+never touches the hazard in question.
+
+### Step 0 — the healthy teardown/rebuild cycle (the gate)
+
+| unit | cycles | frames | fd | task | RSS |
+|---|---|---|---|---|---|
+| bench 8812AU, bus 5-1 (Jaguar1) | **20/20** | 4000/4000, `tx_failed 0`, 4000 reports | 4 → 4 | 1 → 1 | 5464 → 5484 kB (**+20 kB**) |
+| craft 8812EU, bus 1-1 (**Jaguar3/8822e**) | **5/5** | 500/500, `tx_failed 0` | 4 → 4 | 1 → 1 | 2568 → 2588 kB (**+20 kB**) |
+
+No `std::terminate`, no crash, fd and thread counts identical after every
+cycle. The EU run is the load-bearing replicate: it is the **Jaguar3** path,
+i.e. the very `RtlJaguar3Device::InitWrite` Pass 148 cited. A 4-cycle ASan/UBSan
+run on the bench produced **no AddressSanitizer error and no leak report** —
+only the three known vendored Jaguar1 UBSan items (`EepromManager.cpp:1568`
+misaligned u16, `HalModule.cpp:1221` and `RadioManagementModule.cpp:987`
+invalid enum), which `CLAUDE.md` already records as x86-dev-only noise. RSS
+grows ~3.7 MB/cycle under ASan; that is quarantine, and it is why the RSS
+verdict is taken from `release`.
+
+### Step 1 — clearing a real wedge on the craft (8812EU, ch 5805, MCS 0, −72 qdb)
+
+| arm | what | episodes | t(induce→restored) |
+|---|---|---|---|
+| **A0** control: live supervised deployment, `exit 9` → re-exec | 3 | 15.36 / 13.84 / 12.07 s (mean **13.76 s**) |
+| **A1** in-process destroy + reconstruct, **no** sysfs unbind | 5 | 7.84 / 7.89 / 7.75 / 7.88 / 7.89 s (mean **7.85 s**) |
+| **A2** …with the sysfs unbind | **not run** — see below |
+
+**A1: 5/5 cleared.** Breakdown per episode is near-identical: t(induce→verdict)
+≈ 3.33 s (three 1 s windows plus the poll), t(verdict→reconstructed) ≈ 4.45 s
+(of which 2.0 s is the configured settle), and **t(reconstructed→restored) 63–68
+ms** — the rebuilt adapter is reporting CCX completions almost immediately.
+A0's session id changed on every episode, confirming the process really
+re-execs and that `:8091` is down for each of those ~13.8 s.
+
+**The control server survives, measured not assumed.** The harness holds a
+listening socket on `127.0.0.1:8199` across the recycle and re-connects to it
+afterwards: **STILL ACCEPTING, 5/5**. The listener is owned by the process, not
+by the radio, and the recycle never returns from the run loop.
+
+**A2 was not needed, and the control says why.** With no waybeam process
+running, a deauthorize/reauthorize leaves `1-1:1.0` bound to **`rtl88x2eu`**
+(and `wlan0` present) within ~4 s — so during A1 the kernel driver *was*
+re-binding, and devourer took the adapter back anyway via
+`libusb_detach_kernel_driver()` (`third_party/devourer/src/UsbOpen.cpp:105`).
+The `free_adapter()` unbind that
+`deploy/vehicle-waybeam-link.init` performs before every spawn is therefore not
+what heals this failure mode. **H1, not H2.**
+
+### Step 2 — the hard-fail fallback still fires
+
+Adapter left deauthorized so it never returns: the rebuild retried for the
+bounded window, reported `reconstruct FAILED for 8000 ms: adapter "bus-1-1"
+claim/reset failed (in use?)`, ended the episode NOT CLEARED and exited
+**non-zero** — the path that in the daemon is `exit 9`. Log volume **37,457
+bytes for the episode**, against the Pass 147 bound of ~700 kB; `/tmp` moved
+4680 K → 4720 K with 40.7 MB free. No tmpfs pressure.
+
+### What this means
+
+In-process recovery is **viable and ~5.9 s faster** than the supervised
+restart, it keeps the control plane bound, and it needs no sysfs hook — so if
+it is adopted, the unbind stays a deployment concern and does not become a
+library one. It is **not** a replacement for `exit 9`: Step 2 is the reason the
+fallback must remain, and the recommendation is in-process attempt **first**,
+`exit 9` **after** a bounded number of failures.
+
+### What stays open
+
+- **Nothing is wired into the flying path.** `run_tx` is untouched; this is a
+  bench harness only. Adopting it means a config knob defaulting off, then a
+  Tier-1 amendment once the mechanism is settled — §9.10's exit contract and
+  `deploy/vehicle-waybeam-link.init` do not change here.
+- **One unit per chip family.** One 8812AU and one 8812EU. Pass 139's rule
+  stands: two adapters of the same part number are not a replicate, and these
+  are one each.
+- **One induction mechanism.** Every wedge here is a usbfs
+  deauthorize/reauthorize. A wedge arising from a *thermal* or firmware fault
+  with the device still enumerated may not clear the same way.
+- **No over-air confirmation.** Restoration is measured by CCX reports —
+  §9.10's own progress signal — not by a receiving node. The ground was not
+  running; A0's `rssi_best` was −128 throughout.
+- **Three instrument bugs were found and fixed before any number above was
+  believed**, which is the reason to distrust a first negative: (1) a stale
+  `t` compared against a post-rebuild timestamp underflowed `uint64` and
+  printed "NOT RESTORED" with a timestamp 5 s in the past; (2) restoration was
+  first keyed on `TxWedge`'s *cleared transition*, which a freshly reset
+  detector can never produce — it reported 0/2 while its own log showed 5058
+  CCX reports on the reconstructed object; (3) a mutation test appeared to pass
+  because the mutant had failed to compile and the stale binary ran. The
+  harness's own guards are mutation-verified: a deliberate fd leak turns it
+  red, a tightened RSS slack turns it red, and a bogus bus path turns it red.
+
+---
+
 ## 2026-08-08 — Legs A4 and A6 closed: §15.2 mac-pin re-bind, and recover() observed to perform no USB reset
 
 Issue #140. Run on the bench rig alongside PR #146, both dongles, kernel

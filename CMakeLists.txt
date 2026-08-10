@@ -429,6 +429,19 @@ if(WBLINK_RADIO AND PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
     target_link_libraries(hwtrial_bringup PRIVATE wblink_io)
 endif()
 
+# Teardown/reconstruct cycle harness (§9.10 v2 in-process recovery, Step 0).
+# Unlike hwtrial_bringup this one RADIATES by construction — its whole subject
+# is InitWrite, which the RX-only path never reaches. Built for cross targets
+# too: Step 1 runs it on the craft, and "native only" was a bench convention
+# rather than a constraint (a craft is a host that opens its own usbfs).
+if(WBLINK_RADIO AND PROJECT_IS_TOP_LEVEL)
+    add_executable(hwtrial_reinit tools/hwtrial_reinit.cpp)
+    target_compile_options(hwtrial_reinit PRIVATE ${WBLINK_WARNINGS})
+    target_include_directories(hwtrial_reinit SYSTEM PRIVATE
+        third_party/libusb-cmake/libusb/libusb)
+    target_link_libraries(hwtrial_reinit PRIVATE wblink_io)
+endif()
+
 if(WBLINK_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
