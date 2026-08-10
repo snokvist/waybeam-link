@@ -37,9 +37,9 @@ coordinated **follow-me channel switch** — built on OpenIPC **devourer** for r
 > in one process, both chip families, per-frame CCX `tx.report` live); gate 3
 > **PASSED** (NACK→RETRANSMIT recovery P90 ≤4 ms at 65% airtime, well inside
 > the 40 ms I-frame deadline; ARQ ceases past saturation by design); gate 2 is
-> **RF-proven by a real MCS5 walk fade** — *on the kernel-monitor backend,
-> retired in Pass 164; whether the verdict transfers to devourer is an open
-> ruling, see `docs/findings.md` 2026-08-10* — N=2 reduced 86‰ pre-diversity loss to
+> **RF-proven by a real MCS5 walk fade** — *measured on the kernel-monitor
+> backend retired in Pass 164, and ruled transferable to devourer 2026-08-10
+> (ρ is geometric)* — N=2 reduced 86‰ pre-diversity loss to
 > 24‰ post-diversity loss, then 10% GF(256) FEC recovered 599 source symbols
 > versus 52 by ARQ. A 37.1 s whole-link blackout confirmed that neither FEC nor
 > same-channel ARQ can repair the correlated SNR-edge tail. Gate 4 observables

@@ -14,11 +14,8 @@
 > 1. **The symmetry constraint is gone, and with it §2's whole argument for
 >    choosing bad-FCS over EVM.** §2 picked `F_BADFCS` because it was the one
 >    PER-ish signal both backends could carry. With one backend there is
->    nothing to be symmetric *with*: `RxAtrib.evm[4]`, `cfo_tail`, per-path
->    `snr[4]` and `GetRxQuality()` are no longer "opportunistic enhancements"
->    to be kept off the ladder — they are ordinary inputs. **Re-open the
->    signal choice before building §2's bad-FCS path**, because §5 went on to
->    measure that bad-FCS frames never reach userspace on Jaguar3 anyway.
+>    nothing to be symmetric *with*. **RULED (operator, 2026-08-10): the
+>    numerator is sequence-derived** — see the box below.
 > 2. **Monitor-only signals are unavailable, not merely unpreferred** — Bad
 >    PLCP (`RX_FLAGS` `F_RX_BADPLCP`) has no devourer equivalent and drops out
 >    of scope entirely.
@@ -26,6 +23,30 @@
 > Sections carrying results measured on the retired backend are marked
 > **[HISTORICAL — kernel-monitor]**; they record what happened, not what the
 > shipping path does.
+
+> **NUMERATOR RULING (operator, 2026-08-10) — this plan's blocker is gone, by
+> a route it listed as option 3.** Pass 163 shipped sequence-derived rate
+> probing: a first-send video DATA frame with `seq % probe_period ==
+> probe_slot` flies the up-candidate rate, and **both ends derive the probe
+> set from `seq` alone**. Rate becomes a pure function of `seq`, so a missing
+> probe-slot seq's rate is known by computation — which is exactly §9.2's open
+> numerator, and exactly what §5's STOP was waiting on. Neither an upstream
+> devourer change nor bad-FCS delivery is required.
+>
+> **What it does not give, stated precisely so this plan is not over-closed:**
+> the Pass 163 probe is **up-candidate only** (no down-slot; downshift stays
+> loss-driven) and its evidence is a **veto, never a warrant** — nothing
+> promotes on probe evidence alone. So it yields PER at *one adjacent rate*,
+> not the full 8-rung PER-versus-RSSI waterfall §1 set out to build. Two
+> further pieces already ship toward that: `rx_crc_mcs[]` (Pass 163 — per-MCS
+> CRC-error counts, rate-attributed pre-FCS) and the Pass 158 windowed
+> SNR/EVM quality accumulator.
+>
+> **Therefore Parts A and B below are superseded, not merely annotated.**
+> Part B's bad-FCS programme was the numerator; the numerator is closed. This
+> plan needs re-scoping around what exists — probe evidence, `rx_crc_mcs[]`,
+> the quality window — before any further work is started against it. Do not
+> implement §2's bad-FCS path.
 
 ---
 
@@ -464,18 +485,19 @@ on bad-FCS frames (§B3 early check) is unobservable for the same reason.
    a devourer-only ladder once EVM/`snr[4]` become available after a full
    backend move — both are §4-style operator decisions.
 
-**Path 3 is now the only live one, and its precondition is met (2026-08-10).**
-The "full backend move" it waited on happened in Pass 164, so a devourer-only
-ladder is no longer a hypothetical concession — it is the sole remaining
-design. Lever 1 (an upstream devourer change) stays available and would
-restore the original bad-FCS numerator; lever 2 is gone. **Which numerator
-the ladder uses — EVM/`snr[4]`, upstream-unblocked bad-FCS, or sequence-gap
-inference — is an open operator ruling.**
+**Path 3 was taken, and it has already shipped (ruled 2026-08-10).** The
+"full backend move" it waited on happened in Pass 164, and the sequence-gap
+inference it names landed as Pass 163's sequence-derived rate probing — both
+ends deriving the probe set from `seq` alone, closing §9.2's numerator by
+computation. Lever 1 (an upstream devourer change) stays available but is no
+longer on the critical path; lever 2 is gone. **The STOP recorded above is
+lifted** — see the numerator ruling box at the top of this file, including
+what the probe does *not* cover.
 
 ### §4 rulings — now needed only if an unblock path is chosen
 
-The five §4 questions stand, but none is actionable until a numerator exists.
-~~bad-FCS delivery on at least one symmetric path~~ — symmetry is no longer a
-constraint (Pass 164); the question is now simply which devourer signal the
-ladder reads. Raised to the operator with this report rather than resolved
-here.
+~~The five §4 questions stand, but none is actionable until a numerator
+exists.~~ **A numerator exists (Pass 163).** The §4 questions were framed
+around a bad-FCS ladder that is no longer the design, so they must be
+re-derived against the probe/`rx_crc_mcs[]`/quality-window surface during the
+re-scope, not answered as written.

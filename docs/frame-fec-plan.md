@@ -388,10 +388,9 @@ spec-first commit per project law.
       for importance-weighted production policy rather than being silently
       rewritten by this campaign result.
       **Provenance (2026-08-10):** "the monitor campaign" is literal — that
-      campaign ran on the `kernel-monitor` backend deleted in Pass 164, so
-      this box is checked against evidence from a path that no longer ships.
-      The 10% base is unchanged pending the gate-2 transferability ruling
-      (`docs/findings.md` 2026-08-10, `docs/followup-plan.md`).
+      campaign ran on the `kernel-monitor` backend deleted in Pass 164. **RULED TRANSFERABLE (operator, 2026-08-10).**
+      ρ is geometric, so the verdict and this 10% base carry to devourer
+      unchanged (`docs/findings.md` 2026-08-10).
 - [ ] **Repair symbol scheduling vs live priority:** §14 says parity is
       live-priority (budgeted from encoder bitrate). With frame-aligned FEC,
       repair symbols for the current frame are emitted immediately after the

@@ -171,13 +171,14 @@ Injector + monitor siblings mixed in one process, both chip families:
 Residual unknown from `docs/build-order.md` gate 1 ("injector + monitors mix")
 is closed for both Jaguar1 and Jaguar3.
 
-### Gate 2 — **PASSED** (synthetic accounting + physical vehicle walk fade) — **physical leg on the retired backend**
+### Gate 2 — **PASSED** (synthetic accounting + physical vehicle walk fade)
 
-> **Provenance flag (2026-08-10).** The physical walk below ran on the
-> `kernel-monitor` backend, deleted in Pass 164. Whether the ρ verdict
-> transfers to devourer is an **open operator ruling** — see §4.1 and
-> `docs/findings.md` (2026-08-10). The synthetic accounting leg is
-> backend-independent and unaffected.
+> **Provenance (2026-08-10).** The physical walk below ran on the
+> `kernel-monitor` backend, deleted in Pass 164. **RULED TRANSFERABLE (operator, 2026-08-10).** ρ is
+> cross-adapter loss *correlation* — a property of antenna geometry and the
+> channel — and the backend moves absolute loss, not how two co-located ears
+> correlate. The verdict and the 10% FEC seed stand on devourer. The
+> synthetic accounting leg was always backend-independent.
 
 Synthetic, 60 s @ `rx_drop_permille=150` on both ground adapters: measured
 15.3%/14.0% per-adapter, joint post-diversity **2.10%** vs independence-product
@@ -304,17 +305,17 @@ Each item below is independently startable once its stated prerequisite PR
 has merged. None require re-reading this whole document — jump to the
 subsection.
 
-### 4.1 Real-fade gate-2 verdict — **COMPLETED 2026-07-19 (on the retired backend)**
+### 4.1 Real-fade gate-2 verdict — **COMPLETED 2026-07-19; ruled transferable 2026-08-10**
 
-> **Provenance flag (2026-08-10).** This walk ran entirely on the
+> **Provenance (2026-08-10).** This walk ran entirely on the
 > `kernel-monitor` backend, deleted in Pass 164 — the receivers were monitor
-> netdevs `229b`/`2308`. Whether the ρ verdict transfers to devourer is an
-> **open operator ruling**, not an assumption: the argument for is that ρ is a
-> property of antenna geometry and the channel rather than of how the host
-> reads frames; the argument against is Pass 139, where a monitor-era premise
-> about devourer was refuted on hardware. The 10% FEC seed rests on this
-> verdict. See `docs/findings.md` (2026-08-10) and the gate-2 transferability
-> row in `docs/followup-plan.md`.
+> netdevs `229b`/`2308`. **RULED TRANSFERABLE (operator, 2026-08-10).** ρ is a property of antenna geometry
+> and the channel, not of how the host reads frames off the adapter; the
+> backend moves *absolute* loss, not the *correlation* between two co-located
+> ears. Pass 139 (a monitor-era premise about devourer refuted on hardware)
+> was weighed and does not apply — it concerned a devourer TX capability
+> claim, not a geometric property measured identically either way. The 10%
+> FEC seed stands. See `docs/findings.md` (2026-08-10).
 
 The physical walk result is recorded in §2 and
 `docs/mon-air-verification.md`: N=2 removed about 72% of pre-diversity loss,

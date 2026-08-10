@@ -76,10 +76,12 @@ the channel, and the backend moves *absolute* loss rather than the
 *correlation* between two co-located ears. The case against is precedent: the
 monitor-era "devourer cannot transmit MCS4+" premise was refuted on hardware
 in Pass 139, so monitor-era conclusions have transferred badly here before.
-**Open, operator ruling wanted:** re-run the walk on devourer, or rule the
-verdict transferable in writing. Either is fine; leaving it cited unqualified
-is not — so every citation site found is now flagged: `step11-bench.md` §2
-(the PASSED header) and §4.1, `frame-fec-plan.md:382`, `README.md`'s status
+**RULED TRANSFERABLE (operator, 2026-08-10).** ρ is geometric: the backend
+changes absolute loss, not how two co-located ears correlate. Pass 139 was
+weighed and set aside — it refuted a devourer *TX capability* claim, not a
+property measured identically either way. The verdict and the 10% FEC seed
+stand on devourer. Provenance is now recorded (not flagged as open) at
+`step11-bench.md` §2 and §4.1, `frame-fec-plan.md:382`, `README.md`'s status
 block, and the `followup-plan.md` register.
 
 **Find 4 — PROTOCOL.md §11's CSA machinery IS monitor-derived, and one live
@@ -113,10 +115,12 @@ kernel-monitor before Pass 145 and now runs devourer on the same adapter"*
   harmless wording ambiguity first recorded here. It may be citing the retired
   backend literally.
 
-**This is the Tier-1 trigger.** No spec text was amended in this pass — that
-needs an operator ruling plus a numbered Pass, and the ruling wants a devourer
-CSA retune run behind it (which is also `preflight-open-issues.md` C3, open
-since 2026-07-24).
+**This is the Tier-1 trigger, and the ruling is to measure.** **Operator,
+2026-08-10: run the devourer CSA retune trial** rather than rule §11 from the
+armchair — queued as an RF leg on issue #134. It answers three things at once:
+whether the half-retune failure mode exists on devourer, a real devourer
+retune cost to size §11.2 against, and `preflight-open-issues.md` **C3**, open
+since 2026-07-24. No spec text is amended until it reports.
 
 **The rest of PROTOCOL.md is clean.** The eleven sites naming the backend
 (~201/202/210 as one, ~2145, ~2326, ~2382, ~2472, ~2508, ~2698, ~2789, ~4730,
@@ -127,6 +131,29 @@ the entry below (induced wedge, 5/5 cleared by backend rebuild, 0/5 do-nothing
 control, **PR #168**), so that seed is no longer monitor-only evidence. The
 equivalent "monitor" wording in `README.md`, which is not spec, was fixed
 directly.
+
+**Find 5 — the per-MCS PER ladder's blocker was already lifted, by a route
+the plan filed as a fallback. RULED (operator, 2026-08-10): sequence-derived.**
+`docs/per-mcs-per-ladder-plan.md` §5 recorded a STOP: neither backend could
+deliver bad-FCS frames on the fleet-default chips, so the ladder had no
+numerator. Retiring kernel-monitor removes the *symmetry* constraint that made
+bad-FCS the choice in the first place — but the real answer is that Pass 163
+already closed §9.2's numerator by computation: rate is a pure function of
+`seq`, so a missing probe-slot seq's rate is known without any signalling.
+That is the plan's own option 3.
+
+**Verified against the shipped code, and the plan is NOT fully closed by it.**
+`core/src/mcs_probe.cpp` + `core/include/wblink/mcs_probe.h` implement the
+schedule (`probe_slot_hit`), which rides `ProfileTable` as
+`probe_period`/`probe_slot` (`core/include/wblink/table.h:48-49`). Two limits
+matter: the probe is **up-candidate only** (Pass 163's second operator ruling
+— no down-slot, downshift stays loss-driven), and its evidence is a **veto,
+never a warrant**. So it gives PER at *one adjacent rate*, not the 8-rung
+PER-versus-RSSI waterfall the plan set out to build. Two other pieces already
+ship toward that: `rx_crc_mcs[]` (per-MCS CRC-error counts, rate-attributed
+pre-FCS, `io/src/air_radio.cpp:385-391`) and the Pass 158 windowed SNR/EVM
+accumulator. **The plan's Parts A and B are superseded and need re-scoping
+against those three surfaces; §2's bad-FCS path should not be implemented.**
 
 **Out of scope, ruled at the start:** the wfb_ng residue (waybeam-hub 18
 files, sbc-groundstations 15, builder 17, waybeam_venc 7). A separate
