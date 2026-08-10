@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <atomic>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -39,6 +40,9 @@
 #include "wblink/node/rx_node_c.h"
 
 namespace {
+
+// Frames to dump; decremented per frame from the RX thread.
+std::atomic<long> g_inspect_left{0};
 
 // The C ABI owns the stop flag; the handle is what the handler reaches, so
 // the handle itself has to be safe to read from one. A plain pointer is not.
@@ -72,15 +76,24 @@ int main(int argc, char** argv) {
                      "(waybeam-link #140), so the whole path is reachable on a\n"
                      "bench with no phone. Repeat --fd per adapter, in the\n"
                      "config's adapters[] order; needs usbfs write access, so\n"
-                     "run under sudo with the kernel driver unloaded.\n",
+                     "run under sudo with the kernel driver unloaded.\n\n"
+                     "--inspect N dumps the §15.4 VencFrameMeta prefix and the\n"
+                     "first bytes after it for the first N frames, so a\n"
+                     "consumer can check what it will actually be fed before\n"
+                     "wiring a decoder to it.\n",
                      argv[0]);
         return 2;
     }
 
     const char* config_path = argv[1];
+    long inspect_n = 0;
     std::vector<int> fds;
     std::vector<std::string> fd_paths;
     for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--inspect" && i + 1 < argc) {
+            inspect_n = std::strtol(argv[++i], nullptr, 10);
+            continue;
+        }
         if (std::string(argv[i]) != "--fd" || i + 1 >= argc) {
             std::fprintf(stderr, "probe: unexpected argument \"%s\"\n", argv[i]);
             return 2;
@@ -107,11 +120,27 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "probe: %s -> fd %d\n", path, fd);
     }
 
+    g_inspect_left.store(inspect_n, std::memory_order_relaxed);
     std::map<uint8_t, StreamTally> tally;
     const auto on_frame = [](uint8_t stream_id, const uint8_t* frame,
                              size_t len, void* user) {
         auto& by_stream = *static_cast<std::map<uint8_t, StreamTally>*>(user);
-        (void)frame;  // a decoder would read it here; counting is the proof
+        if (g_inspect_left.fetch_sub(1, std::memory_order_relaxed) > 0 &&
+            frame != nullptr && len > 8) {
+            // §15.4: u32 pts | u8 codec | u8 flags | u8 gdr_pos | u8 gdr_len,
+            // then the Annex-B access unit. A consumer wiring a decoder needs
+            // to know these are what it thinks they are, and this is cheaper
+            // than finding out on a phone.
+            uint32_t pts = 0;
+            std::memcpy(&pts, frame, 4);
+            std::fprintf(stderr,
+                         "probe: meta pts=%u codec=0x%02x flags=0x%02x "
+                         "gdr=%u/%u | au[0..7]=%02x %02x %02x %02x %02x %02x "
+                         "%02x %02x (%zu B)\n",
+                         pts, frame[4], frame[5], frame[6], frame[7],
+                         frame[8], frame[9], frame[10], frame[11], frame[12],
+                         frame[13], frame[14], frame[15], len - 8);
+        }
         StreamTally& t = by_stream[stream_id];
         if (t.frames == 0) {
             std::fprintf(stderr, "probe: FIRST FRAME on stream %u, %zu bytes\n",
