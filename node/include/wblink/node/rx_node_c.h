@@ -9,7 +9,7 @@
  * wrapper: two wrappers, two lifetimes to get wrong, and the stop flag
  * exposed as a C++ type neither can name.
  *
- * The surface is deliberately four functions:
+ * The surface is deliberately five functions:
  *
  *   - THE SHIM OWNS THE STOP FLAG. A C caller cannot name `std::atomic<int>`,
  *     and C11's `_Atomic int` is not guaranteed layout-compatible with it, so
@@ -63,6 +63,32 @@ wblink_rx *wblink_rx_create(void);
  * costs nothing.
  */
 void wblink_rx_request_stop(wblink_rx *rx);
+
+/*
+ * Supply pre-opened USB device descriptors, parallel to the config's
+ * `adapters[]`, with -1 in a slot meaning "enumerate this one by bus path".
+ * Call BEFORE `wblink_rx_run`; a call after it has started is ignored and
+ * returns 3.
+ *
+ * THIS IS THE ONLY DEVICE SOURCE UNROOTED ANDROID HAS. It cannot enumerate
+ * usbfs, so its fds come from the Java UsbManager and reach libusb through
+ * `libusb_wrap_sys_device`. Everything else — a daemon reading JSON — should
+ * not call this at all: empty (the default) is enumerate-by-bus-path, byte for
+ * byte today's behaviour. There is deliberately no config key for it (ruling
+ * 2026-08-08), which is why it is a call rather than a field.
+ *
+ * OWNERSHIP STAYS WITH THE CALLER. libusb marks a wrapped handle `fd_keep`, so
+ * teardown closes the libusb handle and leaves the fd open. Each fd must stay
+ * valid for the whole run and be closed by the caller afterwards. The array
+ * itself is copied, so it need not outlive this call.
+ *
+ * Supplying any fd forces the bring-up `libusb_reset_device` off; a wrapped fd
+ * must not be reset.
+ *
+ * Returns 0 on success, 2 on a NULL handle or a NULL `fds` with `n > 0`, 3 if
+ * the node has already been started. Passing n == 0 clears any previous set.
+ */
+int wblink_rx_set_adapter_fds(wblink_rx *rx, const int *fds, size_t n);
 
 /*
  * Load `config_path` and run a receiving node until stopped. Blocks.
