@@ -243,6 +243,16 @@ struct AirBackend {
     uint16_t mtu_supported() const { return iface()->mtu_supported(); }
 
     static Result<AirBackend> create(const Config& cfg) {
+        // Fail closed on a device source the chosen backend cannot use, the
+        // same posture as air_radio.cpp's TX-knob refusals (Pass 156/157).
+        // Only the radio opens USB; a UDP backend would ignore these
+        // silently, leaving an Android caller with a node that quietly
+        // discarded its ONLY device source.
+        if (!cfg.adapter_fds.empty() && cfg.air.kind != AirCfg::Kind::kRadio) {
+            return Result<AirBackend>::fail(
+                "air: adapter_fds supplied but air.kind is not \"radio\" — "
+                "only the radio backend opens USB devices");
+        }
         AirBackend b;
         b.chan_by_adapter.reserve(cfg.adapters.size());
         for (const AdapterCfg& a : cfg.adapters) {

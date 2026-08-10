@@ -9,7 +9,7 @@
  * wrapper: two wrappers, two lifetimes to get wrong, and the stop flag
  * exposed as a C++ type neither can name.
  *
- * The surface is deliberately four functions:
+ * The surface is deliberately five functions:
  *
  *   - THE SHIM OWNS THE STOP FLAG. A C caller cannot name `std::atomic<int>`,
  *     and C11's `_Atomic int` is not guaranteed layout-compatible with it, so

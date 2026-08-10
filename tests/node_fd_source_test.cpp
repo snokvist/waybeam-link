@@ -45,9 +45,38 @@ Config fd_config(int fd_a, int fd_b) {
     return cfg;
 }
 
+// Every create() in this file must fail BEFORE the device-open loop. The
+// comment above says so; this function is what makes it checkable.
+//
+// air_radio.cpp:695 is the enumerate branch — reached whenever a stanza has
+// no fd — and it runs libusb_init, libusb_get_device_list, libusb_open on the
+// first Realtek VID it finds, and then claim_interface_then_reset, which
+// detaches the kernel driver and calls libusb_reset_device. On the bench rig
+// CLAUDE.md documents (sudo, kernel drivers unloaded) that is live flight
+// hardware being reset by a unit test.
+//
+// So: a create() that SUCCEEDS opened a device, and an error from the
+// enumerate path means we got there. Both are failures of this file's
+// contract, not just of the case under test — and the enumerate check must
+// come first, because an EACCES on an unprivileged host makes an enumerating
+// case look like a clean refusal. That accident is exactly what hid this once.
 bool create_fails_containing(const Config& cfg, const char* needle) {
     auto r = node::AirBackend::create(cfg);
-    if (r) return false;  // a pass here would have opened USB
+    CHECK(!r);  // a pass here means a USB device was opened and brought up
+    if (r) return false;
+    // Enumerate-path markers (air_radio.cpp:695 onwards). Any of these means
+    // the case escaped validation.
+    for (const char* escaped : {"libusb_init failed", "no matching Realtek",
+                                "libusb_get_device_list"}) {
+        if (r.error.find(escaped) != std::string::npos) {
+            std::fprintf(stderr,
+                         "FATAL: case reached the ENUMERATE path (%s). This "
+                         "test must never open a USB device.\n",
+                         r.error.c_str());
+            CHECK(false);
+            return false;
+        }
+    }
     return r.error.find(needle) != std::string::npos;
 }
 
@@ -74,21 +103,30 @@ void test_config_fds_reach_the_radio() {
         CHECK(create_fails_containing(cfg, "adapter_fds must be empty"));
     }
 
-    // NEGATIVE CONTROL for the two cases above. Same config, fds cleared —
-    // and it must NOT produce either message. Without this, a create() that
-    // failed for some unrelated reason would satisfy the greps above and the
-    // test would pass while proving nothing. Asserting only on the ABSENCE
-    // of the fd-path errors keeps this safe: an empty adapter_fds enumerates,
-    // so whatever this returns is not something to assert a value on.
+    // NEGATIVE CONTROL for the two cases above: with adapter_fds cleared,
+    // neither fd-path message may appear. Without it, a create() failing for
+    // some unrelated reason would satisfy the greps above and prove nothing.
+    //
+    // IT MUST ALSO NOT ENUMERATE, and that is the whole difficulty. An empty
+    // adapter_fds is precisely the shipped enumerate-by-bus-path config, so
+    // the obvious way to write this control walks straight into
+    // air_radio.cpp:695 and opens the host's dongle. The first version of
+    // this test did exactly that and looked safe only because an
+    // unprivileged libusb_open returns EACCES — safety by accident, and void
+    // under the sudo bench procedure CLAUDE.md documents.
+    //
+    // So drop `spectator`: with no role:"tx" adapter and no allow_rx_only,
+    // air_radio.cpp:493 refuses BEFORE any libusb call. Same two assertions,
+    // no device anywhere near it.
     {
         Config cfg = fd_config(-1, -1);
         cfg.adapter_fds.clear();
+        cfg.node.spectator = false;
+        CHECK(create_fails_containing(cfg, "exactly one adapter"));
         auto r = node::AirBackend::create(cfg);
-        if (!r) {
-            CHECK(r.error.find("libusb_wrap_sys_device") == std::string::npos);
-            CHECK(r.error.find("adapter_fds must be empty") ==
-                  std::string::npos);
-        }
+        CHECK(!r);
+        CHECK(r.error.find("libusb_wrap_sys_device") == std::string::npos);
+        CHECK(r.error.find("adapter_fds must be empty") == std::string::npos);
     }
 
     ::close(null_fd);

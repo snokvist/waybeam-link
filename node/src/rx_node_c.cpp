@@ -25,9 +25,13 @@ struct wblink_rx {
     // its thread and the thread reaching this function, which is a race a
     // library should not hand its user. One handle per run is neither.
     std::atomic<bool> used{false};
-    // Programmatic device source. Written only before `used` flips, read only
-    // after, so the `used` exchange in wblink_rx_run is the whole
-    // synchronisation — no lock needed and none implied to the caller.
+    // Programmatic device source. ORDERING IS THE CALLER'S CONTRACT — the
+    // header says "call BEFORE wblink_rx_run", and this field is not
+    // protected. The `used` check in the setter is best-effort DETECTION of a
+    // violated contract, not a barrier: a setter that reads `used == false`
+    // just before run() exchanges it can still be assigning while run() reads
+    // this vector, which is a data race. Do not read the `return 3` as
+    // thread-safety.
     std::vector<int> adapter_fds;
 };
 
@@ -47,7 +51,16 @@ int wblink_rx_set_adapter_fds(wblink_rx* rx, const int* fds, size_t n) {
     // watch the node enumerate by bus path and fail on a device it cannot
     // see, with nothing pointing at the real mistake.
     if (rx->used.load(std::memory_order_relaxed)) return 3;
-    rx->adapter_fds.assign(fds, fds + n);
+    // assign() allocates, so bad_alloc and length_error are both reachable
+    // from a caller-supplied n. Unwinding through C is undefined rather than
+    // merely bad — the same rule wblink_rx_run's two try blocks exist for.
+    try {
+        rx->adapter_fds.assign(fds, fds + n);
+    } catch (...) {
+        std::fprintf(stderr,
+                     "wblink_rx_set_adapter_fds: allocation failed\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -71,8 +84,14 @@ int wblink_rx_run(wblink_rx* rx, const char* config_path,
         return 1;
     }
     // After load_all, so a config can never smuggle these in, and before
-    // run_rx, which is where AirBackend::create reads them.
-    loaded.cfg.adapter_fds = rx->adapter_fds;
+    // run_rx, which is where AirBackend::create reads them. Inside a try for
+    // the same reason as the assign(): a vector copy allocates.
+    try {
+        loaded.cfg.adapter_fds = rx->adapter_fds;
+    } catch (...) {
+        std::fprintf(stderr, "wblink_rx_run: allocation failed\n");
+        return 1;
+    }
 
     // Empty when the caller passed no callback, which is the documented way to
     // say "egress goes where the config says" — NOT a sink that drops.

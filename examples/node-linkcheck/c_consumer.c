@@ -43,6 +43,23 @@ int wblink_c_consumer_check(void) {
         return 1;
     }
     wblink_rx_request_stop(rx); /* legal before run, per the header */
+    /* The Android device source. Referenced here because this gate is a LINK,
+     * not a build: a static archive does not resolve its own undefined
+     * symbols, so a function nothing calls is a function nothing proves. Both
+     * argument-validation paths, neither of which allocates or opens
+     * anything. */
+    if (wblink_rx_set_adapter_fds(NULL, NULL, 0) != 2) {
+        wblink_rx_destroy(rx);
+        return 1; /* NULL handle must be refused */
+    }
+    if (wblink_rx_set_adapter_fds(rx, NULL, 1) != 2) {
+        wblink_rx_destroy(rx);
+        return 1; /* NULL array with n > 0 must be refused */
+    }
+    if (wblink_rx_set_adapter_fds(rx, NULL, 0) != 0) {
+        wblink_rx_destroy(rx);
+        return 1; /* clearing is legal */
+    }
     wblink_rx_destroy(rx);
 
     /* Two contract rules, asserted here because a PRE-STOPPED handle runs

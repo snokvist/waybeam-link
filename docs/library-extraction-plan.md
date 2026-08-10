@@ -881,6 +881,18 @@ is untouched, no key is added, and the #106 registry learns nothing. The
 measured consequence is that all four `deploy/*.json` produce a
 **byte-identical `--check` dump** before and after.
 
+**Scope extension, 2026-08-10 (#171).** The ruling above covered `RadioAirCfg`,
+an `io/` struct. A config-driven node could not reach it — `AirBackend::create`
+builds `RadioAirCfg` from `Config` and never mentioned `adapter_fds` — so
+`wblink_rx_run`, the entry point Android's `:wifi` reaches through JNI, could
+not use the feature at all. `Config` therefore gains `adapter_fds` on the same
+terms: **not parsed, never written by `io/src/config.cpp`, no key, nothing for
+the #106 registry**, so the JSON surface stays byte-identical and `--strict`
+sees nothing new. It is set only through the new C ABI call
+`wblink_rx_set_adapter_fds`. Recording it here rather than leaving it to be
+inferred from a struct comment: extending a ruling to a second struct is a
+decision, not an implementation detail.
+
 **Two survey claims did not survive contact with the code.** Both were
 probe-executed, not re-read:
 
