@@ -12,6 +12,156 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-10 — A §9.10 wedge clears by DESTROYING AND RECONSTRUCTING the backend in-process; re-enumeration alone never clears it (0/5 control)
+
+**Pass 148's "in-process re-init is impossible" is true of the thing it tested
+and silent about the thing that was never tried.** It rests on devourer's
+`InitWrite` unconditionally assigning `_coex_thread` and `std::terminate`-ing on
+a second call — a statement about calling it twice **on one live object**. A
+freshly constructed device has a default-constructed, non-joinable
+`_coex_thread`, so the assignment at
+`third_party/devourer/src/jaguar3/RtlJaguar3Device.cpp:900` is legal, and both
+`Stop()` (`:684`) and the destructor (`:386-395`) set `_coex_stop` and join
+first. Destroy-the-object-and-construct-a-new-one had never been measured.
+
+Harness: `tools/hwtrial_reinit` (new). It uses the **production** detector
+(`wblink::TxWedge` is pure and clock-injected, so it polls what `run_tx` polls,
+with the craft's own policy) and **induces the fault itself** (Pass 147's usbfs
+deauthorize/reauthorize), so no interval below contains an operator's reaction
+time.
+
+### The control comes first, because without it the recycle arm proves nothing
+
+The device is reauthorized ~3 s after induction and the §9.10 verdict lands
+~0.3 s later, so a recycle arm on its own cannot separate *"the rebuild healed
+it"* from *"re-enumeration plus a few seconds healed it"* — both predict the
+same timing. `--on-wedge wait` changes nothing and watches the same object.
+
+**Craft 8812EU, 5 episodes: RECOVERED WITHOUT RECYCLE 0/5.**
+`tx_reports` froze at **1102** and stayed there for the rest of the run while
+`tx_submitted` climbed 1610 → 7710 and `tx_failed` 508 → 6608 — submissions
+advancing, zero backend progress, permanently, across ~2.6 minutes and five
+re-enumerations. Episode 1 is the clean replicate (induced, reauthorized,
+watched 25 s); episodes 2-5 are that same unhealed wedge continuing, because
+the arm never rebuilds the object and so cannot produce independent replicates.
+**Effective n for "a fresh wedge does not self-heal" is 1**; the other four say
+"a 30-160 s old wedge does not self-heal", which is weaker but still evidence.
+This reproduces Pass 147's "USB re-enumeration does not heal the dead libusb
+handle" on this unit, and it is what makes the next table attributable to the
+rebuild.
+
+The two arms also started from a matched state, which is worth more than the
+episode count: control ep1 reached its verdict at `submitted=1610 failed=508
+reports=1102`, A1 ep1 at `submitted=1605 failed=505 reports=1100` — within
+0.3 %.
+
+### Step 0 — healthy teardown/rebuild cycles (the gate)
+
+| unit | cycles | frames | fd | task | RSS |
+|---|---|---|---|---|---|
+| bench 8812AU, bus 5-1 (Jaguar1) | **20/20** | 4000/4000, `tx_failed 0`, 4000 reports | 4 → 4 | 1 → 1 | 5464 → 5484 kB (**+20 kB**) |
+| craft 8812EU, bus 1-1 (**Jaguar3/8822e**) | **5/5** | 500/500, `tx_failed 0` | 4 → 4 | 1 → 1 | 2568 → 2588 kB (**+20 kB**) |
+
+The EU row is the load-bearing replicate: it is the **Jaguar3** path Pass 148
+actually cited. `task 1 → 1` after every destructor is direct evidence that
+`_coex_thread` is joined.
+
+### Step 1 — clearing a real wedge (craft 8812EU, ch 5805, MCS 0, −72 qdb)
+
+| arm | episodes | t(induce→restored) | mean |
+|---|---|---|---|
+| **A0** live supervised deployment, `exit 9` → re-exec | 5 | 13.82 / 13.29 / 13.05 / 13.35 / 13.77 s | **13.46 s** |
+| **A1** in-process destroy + reconstruct, no unbind | 5 | 9.86 / 10.00 / 9.88 / 9.95 / 9.86 s | **9.91 s** |
+| **CONTROL** no recycle | 1 clean + 4 persistence (see below) | never (0/5) | — |
+| **A2** with the sysfs unbind | not run — see the open list |
+
+**A1 cleared 5/5**, and the restoration criterion has a **dwell**: first
+progress arms a 2 s hold, and the episode only scores when reports are still
+advancing at the end of it (`+374..378` reports since the rebuild baseline, of
+which ~364-369 land inside the dwell itself; `tx_failed 0`,
+`tx_report_fails 0`). An earlier "8 reports, ever" criterion would have scored a
+burst-then-re-wedge as recovered. A1's 9.91 s therefore *includes* 2 s of
+proving durability; first progress arrives at **7.91 s** mean.
+
+**Do not read 13.46 − 9.91 as the cost of `exec`.** The two arms reach
+different milestones and both carry arbitrary constants: A0's respawn path has a
+hardcoded `sleep 2` plus `free_adapter`'s `sleep 2`, then process start, config
+load and control-server bind, and its poll granularity is 200 ms; A1 carries
+`--settle-ms 2000`. What is comparable is the *shape*: a rebuild that reaches
+first CCX progress in 7.91 s versus a re-exec that reaches a serving daemon in
+13.46 s.
+
+**Control-plane downtime, measured rather than asserted.** In A0, `:8091`
+answers until the daemon's own §9.10 verdict at ~3.55 s and is then silent for
+**9.24-9.96 s (mean 9.62 s)** — not the whole 13.46 s. In A1 a listening socket
+held across the recycle was **STILL ACCEPTING 5/5**.
+
+**The fault-path teardown does not leak.** Step 0 only ever tears down a
+*healthy* adapter; the one that matters is the yanked-device teardown, and it
+is now sampled per episode: **fd 12 → 12 and task 4 → 4 on all five**, RSS
++100 kB on episode 1, +4 kB on episode 2, then flat.
+
+### Step 2 — the hard-fail fallback still fires
+
+Adapter left deauthorized: the rebuild retried for its bounded window, reported
+`reconstruct FAILED for 8000 ms: adapter "bus-1-1" claim/reset failed (in
+use?)`, ended NOT CLEARED and exited **non-zero** — the daemon's `exit 9` path.
+**37,457 bytes** of log for the episode against Pass 147's ~700 kB bound;
+`/tmp` 4680K → 4720K with 40.7 MB free.
+
+### What this supports, and what it does not
+
+In-process recovery **works and is attributable to the rebuild** (the control
+settles that), it keeps the control plane bound, and it reaches first progress
+sooner than a re-exec. It is **not** a replacement for `exit 9`: Step 2 is why
+the fallback must remain, and the recommendation is an in-process attempt
+**first**, `exit 9` **after** a bounded number of failures.
+
+### Open
+
+- **Nothing is wired into the flying path.** `run_tx`, `node/` and
+  `deploy/vehicle-waybeam-link.init` are untouched; §9.10's exit contract does
+  not change here. Adoption means a config knob defaulting off, then one
+  Tier-1 amendment once the mechanism settles.
+- **H2 is not excluded.** The finding shows the unbind is not *required*; it
+  does not show the kernel driver was competing. A control run — no waybeam
+  process, deauthorize/reauthorize — had `rtl88x2eu` bound within ~4 s, but A1
+  begins its rebuild ~2.3 s after reauthorize, and during A1 the old object
+  still held the libusb handle across the fault. Whether devourer's
+  `libusb_detach_kernel_driver` (`UsbOpen.cpp:105`, read in source, not
+  observed) was exercised is unknown. **A2 was not run.**
+- **The §15.5 server itself is untested.** The probe is a bare listening fd
+  with no serving thread, no handler holding a reference to the `RadioAir` that
+  the recycle destroys, and no request issued during the ~7 s with no radio
+  object. It proves the teardown closes no stray descriptor; it does not model
+  concurrent access to a destroyed backend, which is the real adoption hazard.
+- **One unit per chip family**, one 8812AU and one 8812EU (Pass 139: two of the
+  same part number are not a replicate — these are one each).
+- **One induction mechanism.** Every wedge here is a usbfs
+  deauthorize/reauthorize. A thermal or firmware wedge with the device still
+  enumerated may behave differently.
+- **The sanitized path is not the path under test.** The ASan/UBSan run was the
+  bench **Jaguar1** AU (no AddressSanitizer error, no leak report, only the
+  three vendored Jaguar1 items `CLAUDE.md` already calls noise) — and that run
+  ended FAIL on the harness's own RSS guard, which is ASan quarantine (~3.64
+  MB/cycle), not a leak. The Jaguar3 EU was release-only. **No TSan run
+  anywhere**, on a thread-lifetime question.
+- **No over-air confirmation.** Restoration is CCX reports — §9.10's own
+  progress signal — not a receiving node; the ground was not running
+  (`rssi_best` −128 throughout).
+- **Four instrument bugs were found and fixed before any number here was
+  believed**, every one of which first produced a confident FALSE result: a
+  stale timestamp that underflowed `uint64` into an instant "NOT RESTORED"; a
+  restoration test keyed on a detector transition a freshly-reset detector can
+  never emit (reported 0/2 while its own log showed 5058 reports on the
+  reconstructed object); a mutation test that "passed" because the mutant had
+  not compiled and the stale binary ran; and the missing control above, without
+  which A1 and "re-enumeration heals it" were indistinguishable. The harness's
+  own guards are mutation-verified — a deliberate fd leak, a tightened RSS
+  slack and a bogus bus path each turn it red.
+
+---
+
 ## 2026-08-08 — Legs A4 and A6 closed: §15.2 mac-pin re-bind, and recover() observed to perform no USB reset
 
 Issue #140. Run on the bench rig alongside PR #146, both dongles, kernel
