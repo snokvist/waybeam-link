@@ -947,3 +947,66 @@ host's own WiFi (`wlp2s0` is on 5180 MHz, 625 MHz away). Not yet excluded:
 channel occupancy at 5805, craft thermal, venc rate behaviour under a held
 profile. **Chase this before trusting any loss number from this bench**, and
 note that an ordered sweep will lie about it — alternate.
+
+## 2026-08-12 — Scout is a craft finder; its dwell was priced for occupancy
+
+**Tier 2.** Dwell counts, per `CLAUDE.md`. No spec text, no Pass.
+
+#173 established that ScoutEngine cannot report generic RF occupancy at all:
+FA/CCA are event counters with no duration semantics, and the one
+duration-capable primitive (phydm CLM) is unimplemented in the vendored
+devourer, which is off-limits. Occupancy is therefore not a goal the sweep can
+serve — which removes the reason the sweep was slow.
+
+**What the base dwell was buying.** `finalize_current` divides accumulated
+decoded airtime by the *elapsed* dwell to get `wifi_util_permille`. Leaving a
+channel early shortens that denominator and inflates the result, so `tick()`
+held the full base dwell on every channel and only broke out early on a channel
+whose dwell had *already* been extended. Every empty channel paid a full dwell
+to protect a denominator feeding a number that is published `duty_cycle_known:
+false` and rendered nowhere.
+
+**Measured, Android + RTL8812CU (Jaguar3), craft 17 @ 5805 MHz:**
+
+| | before | after (projected) |
+|---|---|---|
+| base dwell | 1000 ms | 250 ms |
+| `kExtendMs` | 1200 | 1500 |
+| full 38-ch sweep | ~50 s measured (38 s floor, 83.6 s ceiling) | ~12-14 s projected |
+
+**The change.** The base dwell becomes a short presence probe, and *anything
+heard* extends the dwell once — where the old form extended only when no
+candidate had resolved yet. An empty channel costs one base dwell; a channel
+with waybeam traffic gets base + `kExtendMs` to cover the announce cadence.
+The 250 ms base is safe *because* of that extension, not in spite of it: video
+is high-rate, so presence trips `frames > 0` long before an ANNOUNCE arrives.
+
+**A rejected design, recorded because it nearly shipped.** The first cut ended
+the dwell on the first *resolved candidate*, which is faster still. It is also
+wrong: `accum_.candidates` is non-empty at the FIRST announce, so a second
+craft sharing that channel — announcing independently, up to a second later —
+is silently dropped. It cost ~3 s of a ~12 s sweep and paid in missed craft,
+which is the worst failure available to a craft finder and one that leaves no
+trace, because the sweep still completes and still finds *a* craft. Note the
+old 1000 ms base dwell truncated the same way; always-extending is strictly
+better co-channel coverage than the behaviour being replaced, not merely equal
+to it. `test_a_second_craft_on_one_channel_is_not_truncated_away` pins it.
+
+**What did NOT change, deliberately.** The 30 ms sense barrier stays. It reads
+as an occupancy device, but `on_frame` gates on `barrier_done_`, so it is also
+the retune-leak guard that stops a settling frame being attributed to the
+channel just entered. That attribution is the finder's entire job, and #173
+records a still-open CU/Jaguar3 retune misattribution defect — removing the
+barrier for ~150 ms across a 14 s sweep would have traded the core function for
+1% of the runtime. The per-channel sense *read* was also kept for the same
+reason it is cheap: two register reads against a dwell budget it cannot
+meaningfully dent.
+
+**Known cost.** The airtime denominator is no longer uniform across a sweep:
+an empty channel is measured over ~250 ms and a channel with traffic over
+~1750 ms. `wifi_util_permille` was never comparable across channels in a
+strong sense, but it is now visibly less so, and a short quiet window makes a
+single stray frame read as a larger fraction of it. This is acceptable only
+because the number is published `duty_cycle_known:false` and rendered nowhere.
+If a future CLM primitive (#173) makes occupancy real, this pacing must be
+revisited first — a duration-based measurement needs a fixed window back.
