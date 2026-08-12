@@ -86,6 +86,7 @@
 #include "wblink/node/frame_kind.h"
 #include "wblink/node/policy.h"
 #include "wblink/node/rx_core.h"
+#include "wblink/node/rx_runtime_control.h"
 #include "wblink/node/tx_core.h"
 #include "wblink/node/uplink_power.h"
 #include "wblink/node/vcmd.h"
@@ -99,6 +100,11 @@ namespace node {
 
 int run_rx(const Loaded& l, const std::atomic<int>& stop,
            const FrameSink& frame_out) {
+    return run_rx(l, stop, frame_out, nullptr);
+}
+
+int run_rx(const Loaded& l, const std::atomic<int>& stop,
+           const FrameSink& frame_out, RxRuntimeControl* runtime_control) {
     auto air = AirBackend::create(l.cfg);
     if (!air) {
         std::fprintf(stderr, "air error: %s\n", air.error.c_str());
@@ -1131,6 +1137,115 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             },
         },
         op_bw_mhz, op_chan, l.cfg.node.net_id, scout_idx);
+
+    // One implementation for both the REST handler and the queued C ABI. The
+    // engine and every hook it owns are RX-loop state; callers outside this
+    // function may only enqueue an intent through RxRuntimeControl.
+    const auto start_scout_sweep = [&](const std::vector<uint16_t>& requested,
+                                       uint32_t dwell_ms) -> std::string {
+        if (cache_assignment_gate) {
+            return "controlled cache cannot scout independently";
+        }
+        cancel_calibration("scout sweep");
+        std::vector<uint16_t> channels = requested;
+        if (channels.empty()) channels = l.cfg.scout.channels;
+        if (channels.empty()) channels = l.cfg.policy.csa.channel_allowlist;
+        scout.set_rest_chan(operating_chan);
+        scout.set_rest_filter(active_selection.net_id);
+        const uint16_t selected_originator = active_selection.originator;
+        // preferred_originator is an operator pin even when the stream wants
+        // are wildcarded (Android's passive sink is), so RxCore's selected
+        // originator can still be zero here. Preserve that explicit trust.
+        const uint16_t trusted_originator =
+            l.cfg.node.preferred_originator != 0
+                ? l.cfg.node.preferred_originator
+                : ((selection_state == "tuned" ||
+                    selection_state == "committed")
+                       ? selected_originator
+                       : 0);
+        scout.set_trusted_rest_originator(
+            trusted_originator != 0
+                ? std::optional<uint16_t>(trusted_originator)
+                : std::nullopt);
+        return scout.start(channels,
+                           dwell_ms ? dwell_ms : l.cfg.scout.dwell_ms,
+                           now_ms());
+    };
+    const auto stop_scout_sweep = [&]() { scout.stop(now_ms()); };
+
+    // §2/§13 passive spectator selection. This intentionally resolves through
+    // ScoutEngine::candidate_for rather than trusting one public JSON row: the
+    // engine retains per-channel frame evidence and chooses the heard-most
+    // channel, which rejects retune-settling leakage onto an adjacent channel.
+    const auto select_scout_candidate = [&](uint16_t originator) -> std::string {
+        if (!l.cfg.node.spectator) {
+            return "passive scout selection requires node.spectator";
+        }
+        if (cache_assignment_gate) {
+            return "controlled cache cannot select independently";
+        }
+        if (originator == 0) return "invalid originator";
+        const auto candidate = scout.candidate_for(originator);
+        if (!candidate) return "unknown craft (run a scout first)";
+        const auto live_session = discovery.session_for(originator);
+        if (live_session && *live_session != candidate->session) {
+            return "stale candidate (craft rebooted since scout) — re-scout";
+        }
+        // A selection is what the sweep is for. Do not call stop(), whose
+        // restore would make an unnecessary round trip immediately before this
+        // retune; abandon still folds the current dwell.
+        if (scout.scanning()) scout.abandon(now_ms());
+        air.value->set_stamp_net_id(candidate->net_id);
+        air.value->set_filter_net_id(candidate->net_id);
+        if (!air.value->retune_all(candidate->chan, op_bw_mhz, false)) {
+            air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
+            air.value->set_filter_net_id(active_selection.net_id);
+            return "failed to tune onto feed channel";
+        }
+        active_selection =
+            LinkSelection{originator, candidate->chan, 0, candidate->net_id};
+        operating_chan = candidate->chan;
+        selection_state = "tuned";
+        scout.set_rest_chan(operating_chan);
+        scout.set_rest_filter(active_selection.net_id);
+        std::fprintf(stderr,
+                     "spectator: tuned originator=%u net_id=%u %u MHz\n",
+                     originator, candidate->net_id, candidate->chan);
+        return "";
+    };
+    const auto build_selection_json = [&]() {
+        const uint64_t at = now_ms();
+        size_t following = 0;
+        if (cache_ctl) {
+            for (const auto& [orig, ep] : cache_endpoints) {
+                (void)ep;
+                following += cache_ctl->has_fresh_target(
+                                 orig, active_selection.originator, at)
+                                 ? 1u
+                                 : 0u;
+            }
+        }
+        std::string out = "{\"state\":\"" + selection_state +
+                          "\",\"originator\":" +
+                          std::to_string(active_selection.originator) +
+                          ",\"channel\":" +
+                          std::to_string(active_selection.chan) +
+                          ",\"bw\":" +
+                          std::to_string(active_selection.bw) +
+                          ",\"net_id\":" +
+                          std::to_string(active_selection.net_id.value_or(0)) +
+                          ",\"caches_configured\":" +
+                          std::to_string(cache_endpoints.size()) +
+                          ",\"caches_following\":" +
+                          std::to_string(following);
+        if (pending_selection) {
+            out += ",\"pending_originator\":" +
+                   std::to_string(pending_selection->originator) +
+                   ",\"pending_channel\":" +
+                   std::to_string(pending_selection->chan);
+        }
+        return out + "}";
+    };
     // §15.5 REST control plane. RX/ground node owns the CSA trigger (replaces
     // the removed stdin trigger); profile/fec are TX-only knobs → null → 409.
     StatsSnapshot last_snap;
@@ -1182,39 +1297,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             return discovery.json(now_ms(), rx.stream_keys());
         };
         h.scout_results = [&] { return scout.results_json(now_ms()); };
-        h.selection_json = [&] {
-            const uint64_t at = now_ms();
-            size_t following = 0;
-            if (cache_ctl) {
-                for (const auto& [orig, ep] : cache_endpoints) {
-                    (void)ep;
-                    following += cache_ctl->has_fresh_target(
-                                     orig, active_selection.originator, at)
-                                     ? 1u
-                                     : 0u;
-                }
-            }
-            std::string out = "{\"state\":\"" + selection_state +
-                              "\",\"originator\":" +
-                              std::to_string(active_selection.originator) +
-                              ",\"channel\":" +
-                              std::to_string(active_selection.chan) +
-                              ",\"bw\":" +
-                              std::to_string(active_selection.bw) +
-                              ",\"net_id\":" +
-                              std::to_string(active_selection.net_id.value_or(0)) +
-                              ",\"caches_configured\":" +
-                              std::to_string(cache_endpoints.size()) +
-                              ",\"caches_following\":" +
-                              std::to_string(following);
-            if (pending_selection) {
-                out += ",\"pending_originator\":" +
-                       std::to_string(pending_selection->originator) +
-                       ",\"pending_channel\":" +
-                       std::to_string(pending_selection->chan);
-            }
-            return out + "}";
-        };
+        h.selection_json = build_selection_json;
         // Read-only MTU capability/state is available on every RX role,
         // including spectators and controlled caches.
         h.link_mtu_json = [&] {
@@ -1279,18 +1362,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             // preferred_originator picks up the stream. csa_psk stays
             // craft+ground; a CSA move is recovered by re-scout, not followed.
             if (l.cfg.node.spectator) {
-                air.value->set_stamp_net_id(cand->net_id);
-                air.value->set_filter_net_id(cand->net_id);
-                if (!air.value->retune_all(cand->chan, op_bw_mhz, false)) {
-                    return "failed to tune onto feed channel";
-                }
-                active_selection =
-                    LinkSelection{orig, cand->chan, 0, cand->net_id};
-                selection_state = "tuned";
-                std::fprintf(
-                    stderr, "spectator: tuned originator=%u net_id=%u %u MHz\n",
-                    orig, cand->net_id, cand->chan);
-                return "";
+                return select_scout_candidate(orig);
             }
             if (!air.value->supports_csa()) {
                 return "CSA unsupported by this backend";
@@ -1392,17 +1464,10 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
 #endif
                     return do_claim(target, 0);  // pick the emptiest channel
                 }
-                cancel_calibration("scout sweep");
-                std::vector<uint16_t> ch = chans;
-                if (ch.empty()) ch = l.cfg.scout.channels;
-                if (ch.empty()) ch = l.cfg.policy.csa.channel_allowlist;
-                scout.set_rest_chan(operating_chan);  // return here after dwell
-                scout.set_rest_filter(active_selection.net_id);
-                return scout.start(ch, dwell ? dwell : l.cfg.scout.dwell_ms,
-                                   now_ms());
+                return start_scout_sweep(chans, dwell);
             };
             h.scout_stop = [&]() -> std::string {
-                scout.stop(now_ms());
+                stop_scout_sweep();
                 return "";
             };
             // §10.5 override latch on the ground's uplink adapter.
@@ -1961,6 +2026,46 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         const uint64_t now = now_ms();
         now_us_it = now_us();
         deliver_now = now;  // the deliver lambda's clock for reassembler pushes
+        if (runtime_control != nullptr) {
+            if (auto command = runtime_control->take_command()) {
+                std::string error;
+                switch (command->kind) {
+                    case RxRuntimeControl::CommandKind::kScoutStart:
+                        error = start_scout_sweep(command->channels,
+                                                  command->dwell_ms);
+                        break;
+                    case RxRuntimeControl::CommandKind::kScoutStop:
+                        stop_scout_sweep();
+                        break;
+                    case RxRuntimeControl::CommandKind::kScoutSelect:
+                        // A queued caller cannot receive the helper's error
+                        // synchronously. Publish an outcome coupled to this
+                        // generation instead; otherwise a failed repeat-select
+                        // of the same originator can masquerade as the prior
+                        // "tuned" snapshot under a newer generation.
+                        selection_state = "selecting";
+                        error = select_scout_candidate(command->originator);
+                        if (!error.empty()) selection_state = "select_failed";
+                        break;
+                }
+                runtime_control->note_applied(command->generation);
+                if (!error.empty()) {
+                    std::fprintf(stderr,
+                                 "rx runtime control generation %llu: %s\n",
+                                 static_cast<unsigned long long>(
+                                     command->generation),
+                                 error.c_str());
+                }
+                // Publish the state represented by this applied generation
+                // immediately. A consumer can distinguish a queued command
+                // from a stale pre-command snapshot without touching loop
+                // state from its own thread.
+                runtime_control->publish_scout(
+                    scout.results_json(now), command->generation);
+                runtime_control->publish_selection(
+                    build_selection_json(), command->generation);
+            }
+        }
         if (aim_log_enabled()) {
             static uint64_t aim_next_dump_ms = 0;
             if (now >= aim_next_dump_ms) {
@@ -2781,6 +2886,22 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                                            // followed retune (not boot chan)
         }
         scout.tick(now);  // §15.5a advance the sweep when a dwell elapses
+        if (runtime_control != nullptr) {
+            const uint64_t generation =
+                runtime_control->applied_generation();
+            if (runtime_control->take_scout_snapshot_request()) {
+                runtime_control->publish_scout(scout.results_json(now),
+                                               generation);
+            }
+            if (runtime_control->take_discovery_snapshot_request()) {
+                runtime_control->publish_discovery(
+                    discovery.json(now, rx.stream_keys()));
+            }
+            if (runtime_control->take_selection_snapshot_request()) {
+                runtime_control->publish_selection(build_selection_json(),
+                                                   generation);
+            }
+        }
         if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
                 std::fprintf(stderr, "%s", wedge.wedged()
@@ -2875,6 +2996,13 @@ art.craft_adapter_fingerprint = craft_tally_fp;
 #endif
             next_stats = now + stats_period;
         }
+    }
+    if (runtime_control != nullptr) {
+        const uint64_t generation = runtime_control->applied_generation();
+        runtime_control->publish_scout(scout.results_json(now_ms()), generation);
+        runtime_control->publish_discovery(
+            discovery.json(now_ms(), rx.stream_keys()));
+        runtime_control->publish_selection(build_selection_json(), generation);
     }
     // §10.7: shutdown is an exit like any other. Without this a SIGTERM
     // mid-run leaves the uplink adapter at the last probe power until some

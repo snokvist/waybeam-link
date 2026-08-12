@@ -593,6 +593,12 @@ struct AirBackend {
         const bool tuned =
             iface()->retune(adapter, chan_mhz, width_mhz(bw), fast);
         if (tuned) note_chan(adapter, chan_mhz);
+        // A scout relabels subsequent frames with the new dwell channel. Drop
+        // process-queue residue from the previous channel at that boundary,
+        // just as retune_all() already does for CSA verification. The radio's
+        // USB pipeline sits below this seam, so ScoutEngine also keeps a short
+        // post-retune acceptance barrier.
+        iface()->flush_rx();
         return tuned;
     }
     bool set_udp_rx_drop(int permille) {

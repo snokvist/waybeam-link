@@ -71,6 +71,8 @@ namespace node {
 using FrameSink =
     std::function<void(uint8_t stream_id, const uint8_t* frame, size_t len)>;
 
+class RxRuntimeControl;
+
 static_assert(std::atomic<int>::is_always_lock_free,
               "run_rx's stop flag is documented as safe to set from a signal "
               "handler; that is only true while std::atomic<int> is lock-free");
@@ -81,6 +83,13 @@ static_assert(std::atomic<int>::is_always_lock_free,
 // build with NO sink is refused at startup rather than silently dropped.
 int run_rx(const Loaded& l, const std::atomic<int>& stop,
            const FrameSink& frame_out = {});
+
+// Runtime-control overload for in-process consumers. The mailbox owns no
+// thread; `run_rx` drains it on this same loop and publishes immutable
+// snapshots back to callers. The overload above remains as a real symbol for
+// existing C++ embedding consumers and forwards here with nullptr.
+int run_rx(const Loaded& l, const std::atomic<int>& stop,
+           const FrameSink& frame_out, RxRuntimeControl* runtime_control);
 
 }  // namespace node
 }  // namespace wblink

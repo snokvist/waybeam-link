@@ -20,8 +20,13 @@ int main() {
         (void)frame;
         (void)len;
     };
-    // Referenced, never called: run_rx opens adapters and blocks.
-    auto* entry = &wblink::node::run_rx;
+    // Referenced, never called: run_rx opens adapters and blocks. Spell the
+    // original three-argument type so this gate also proves the additive
+    // runtime-control overload did not remove that embedding symbol.
+    using RunRxEntry = int (*)(const wblink::node::Loaded&,
+                               const std::atomic<int>&,
+                               const wblink::node::FrameSink&);
+    const RunRxEntry entry = static_cast<RunRxEntry>(&wblink::node::run_rx);
     const int c_rc = wblink_c_consumer_check();
     std::printf("node_linkcheck: c_abi=%d run_rx=%p sink=%d\n", c_rc,
                 reinterpret_cast<const void*>(entry),

@@ -16,8 +16,8 @@ OccupancyDerived derive_occupancy(
         return out;
     }
     if (sense->fa_valid && observe_us >= kMinObserveUs) {
-        // Saturating index of non-decodable energy (spec §15.5a): the
-        // chanmig-proven bounded form, an index comparable within one
+        // Saturating score of non-decodable energy (spec §15.5a): the
+        // chanmig-proven bounded form, comparable within one
         // adapter — not an absolute duty cycle (FA events carry no
         // duration). CCA is deliberately not in the numerator: it counts
         // successful decodes too, which wifi_util already accounts.

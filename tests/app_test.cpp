@@ -1044,6 +1044,20 @@ void test_retune_all_passes_mhz_width_for_either_encoding() {
     }
 }
 
+// A one-ear Scout retune is also a channel-identity boundary. Old frames in
+// the process queue must be discarded before the engine labels new arrivals
+// with the requested dwell channel.
+void test_retune_one_flushes_old_channel_backlog() {
+    auto f = std::make_unique<FakeAir>();
+    f->adapters = 1;
+    FakeAir* spy = f.get();
+    AirBackend b = backend_with(std::move(f), 1);
+
+    CHECK(b.retune_one(0, 5805, 20, false));
+    CHECK_EQ_U(static_cast<unsigned>(spy->flushes), 1u);
+    CHECK_EQ_U(b.chan_by_adapter[0], 5805u);
+}
+
 // rx_frames_total sums the liveness counter across adapters through the
 // contract. It used to skip the udp backend entirely and read 0 there, so the
 // §11.6 watchdog saw a permanently dead link on the dev transport.
@@ -1112,6 +1126,7 @@ int main() {
     test_recover_all_only_flushes_when_something_recovered();
     test_retune_all_reapplies_power_only_on_success();
     test_retune_all_passes_mhz_width_for_either_encoding();
+    test_retune_one_flushes_old_channel_backlog();
     test_rx_frames_total_sums_through_the_contract();
     test_is_radio_follows_the_backend();
     test_heartbeat_suppressed_without_tx_on_any_backend();

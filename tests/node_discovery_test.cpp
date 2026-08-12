@@ -107,6 +107,118 @@ void test_stop_restores_but_abandon_does_not() {
     CHECK(abandoned.retuned_all.empty());           // nothing sent home
 }
 
+// Frames already in the USB pipeline can arrive after a retune. The sense
+// barrier is also the minimum candidate-attribution settle: pre-barrier frames
+// must not create a second sighting on the new channel. Once the barrier has
+// elapsed, published evidence includes its frame weight so consumers can show
+// the same heard-most resolution used by candidate_for().
+void test_scout_rejects_pre_settle_candidate_residue_and_publishes_weight() {
+    Spy spy;
+    ScoutEngine scout = make_scout(spy);
+    wblink::AirRxMeta meta{};
+    meta.adapter_id = 0;
+    meta.net_id = 0;
+    meta.rssi = -42;
+    wblink::Announce announce{};
+    announce.prefix.originator = 17;
+    announce.prefix.session_id = 99;
+    uint8_t raw[wblink::kHeartbeatSize]{};
+    wblink::be16_write(raw + 3, 17);
+
+    CHECK(scout.start({5745}, 300, 1000).empty());
+    scout.on_frame(meta, announce, raw, sizeof(raw));
+    scout.stop(1100);
+    CHECK(scout.results_json(1100).find("\"originator\":17") ==
+          std::string::npos);
+
+    CHECK(scout.start({5805}, 300, 2000).empty());
+    scout.tick(2030);  // arms the post-retune frame-acceptance barrier
+    scout.on_frame(meta, announce, raw, sizeof(raw));
+    scout.stop(2100);
+    const std::string json = scout.results_json(2100);
+    CHECK(json.find("\"originator\":17") != std::string::npos);
+    CHECK(json.find("\"frames\":1") != std::string::npos);
+    const auto fresh_resting = scout.candidate_for(17);
+    CHECK(fresh_resting.has_value());
+    if (fresh_resting) CHECK_EQ_U(fresh_resting->chan, 5805u);
+    CHECK(json.find("\"candidates\":[{\"originator\":17") !=
+          std::string::npos);
+    CHECK(json.find("\"chan\":5805,\"frames\":1,\"resolved\":true") !=
+          std::string::npos);
+}
+
+void test_scout_near_tie_prefers_proven_resting_channel() {
+    Spy spy;
+    ScoutEngine scout = make_scout(spy);  // resting channel is 5805
+    scout.set_trusted_rest_originator(17);
+    wblink::AirRxMeta meta{};
+    meta.adapter_id = 0;
+    wblink::Announce announce{};
+    announce.prefix.originator = 17;
+    announce.prefix.session_id = 99;
+    uint8_t raw[wblink::kHeartbeatSize]{};
+    wblink::be16_write(raw + 3, 17);
+
+    CHECK(scout.start({5745, 5805}, 300, 1000).empty());
+    scout.tick(1030);
+    for (int i = 0; i < 11; ++i) scout.on_frame(meta, announce, raw, sizeof(raw));
+    scout.tick(1300);  // finalize 5745, enter 5805
+    scout.tick(1330);
+    for (int i = 0; i < 10; ++i) scout.on_frame(meta, announce, raw, sizeof(raw));
+    scout.stop(1400);
+
+    const auto resolved = scout.candidate_for(17);
+    CHECK(resolved.has_value());
+    if (resolved) CHECK_EQ_U(resolved->chan, 5805u);
+    const std::string json = scout.results_json(1400);
+    CHECK(json.find("\"decoded_airtime_permille\":") != std::string::npos);
+    CHECK(json.find("\"ranking_score_permille\":") != std::string::npos);
+    CHECK(json.find("\"interference_score_permille\":") != std::string::npos);
+    CHECK(json.find("\"duty_cycle_known\":false") != std::string::npos);
+    CHECK(json.find("\"chan\":5805,\"frames\":10,\"resolved\":true") !=
+          std::string::npos);
+    CHECK(json.find("\"chan\":5745,\"tuned\":true,\"evidence_valid\":false") !=
+          std::string::npos);
+    CHECK(json.find("\"chan\":5805,\"tuned\":true,\"evidence_valid\":true") !=
+          std::string::npos);
+
+    Spy ambiguous_spy;
+    ScoutEngine ambiguous = make_scout(ambiguous_spy);
+    CHECK(ambiguous.start({5745, 5805}, 300, 1500).empty());
+    ambiguous.tick(1530);
+    for (int i = 0; i < 11; ++i) {
+        ambiguous.on_frame(meta, announce, raw, sizeof(raw));
+    }
+    ambiguous.tick(1800);
+    ambiguous.tick(1830);
+    for (int i = 0; i < 10; ++i) {
+        ambiguous.on_frame(meta, announce, raw, sizeof(raw));
+    }
+    ambiguous.stop(1900);
+    CHECK(!ambiguous.candidate_for(17).has_value());
+    const std::string ambiguous_json = ambiguous.results_json(1900);
+    CHECK(ambiguous_json.find("\"candidates\":[]") != std::string::npos);
+    CHECK(ambiguous_json.find("\"candidate_sightings\":[{\"originator\":17") !=
+          std::string::npos);
+    CHECK(ambiguous_json.find("\"chan\":5745,\"tuned\":true,\"evidence_valid\":false") !=
+          std::string::npos);
+    CHECK(ambiguous_json.find("\"chan\":5805,\"tuned\":true,\"evidence_valid\":false") !=
+          std::string::npos);
+
+    Spy moved_spy;
+    ScoutEngine moved = make_scout(moved_spy);
+    CHECK(moved.start({5745, 5805}, 300, 2000).empty());
+    moved.tick(2030);
+    for (int i = 0; i < 20; ++i) moved.on_frame(meta, announce, raw, sizeof(raw));
+    moved.tick(2300);
+    moved.tick(2330);
+    for (int i = 0; i < 10; ++i) moved.on_frame(meta, announce, raw, sizeof(raw));
+    moved.stop(2400);
+    const auto clearly_moved = moved.candidate_for(17);
+    CHECK(clearly_moved.has_value());
+    if (clearly_moved) CHECK_EQ_U(clearly_moved->chan, 5745u);
+}
+
 // Pass 17: the catalog is observational and bounded. An originator it has
 // never seen yields nullopt for both lookups — never a default-constructed
 // token or a zero session, either of which would read as a real value to the
@@ -129,6 +241,8 @@ int main() {
     test_scout_boots_idle_and_refuses_an_empty_sweep();
     test_scout_start_widens_the_filter_then_retunes();
     test_stop_restores_but_abandon_does_not();
+    test_scout_rejects_pre_settle_candidate_residue_and_publishes_weight();
+    test_scout_near_tie_prefers_proven_resting_channel();
     test_catalog_knows_nothing_about_an_unseen_originator();
     return wbtest_finish("node_discovery_test");
 }

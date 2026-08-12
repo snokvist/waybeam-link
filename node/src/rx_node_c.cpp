@@ -10,6 +10,7 @@
 
 #include "wblink/node/load.h"
 #include "wblink/node/rx_node.h"
+#include "wblink/node/rx_runtime_control.h"
 
 // The stop flag a C caller cannot name. Same type app/main.cpp uses, for the
 // same reason: lock-free everywhere we build, so it stays legal to set from a
@@ -33,7 +34,29 @@ struct wblink_rx {
     // this vector, which is a data race. Do not read the `return 3` as
     // thread-safety.
     std::vector<int> adapter_fds;
+    // Cross-thread scout/discovery surface. The caller only enqueues commands
+    // or copies immutable strings; run_rx alone touches its engine/catalog.
+    wblink::node::RxRuntimeControl runtime_control;
 };
+
+namespace {
+
+// Marks every exit after the run becomes externally controllable. Config and
+// backend failures are exits too; without this, later control calls would keep
+// accepting commands into a loop that no longer exists.
+class RuntimeRunGuard {
+  public:
+    explicit RuntimeRunGuard(wblink::node::RxRuntimeControl& control)
+        : control_(control) {
+        control_.start_run();
+    }
+    ~RuntimeRunGuard() { control_.stop_run(); }
+
+  private:
+    wblink::node::RxRuntimeControl& control_;
+};
+
+}  // namespace
 
 extern "C" {
 
@@ -64,6 +87,55 @@ int wblink_rx_set_adapter_fds(wblink_rx* rx, const int* fds, size_t n) {
     return 0;
 }
 
+int wblink_rx_scout_start(wblink_rx* rx, const uint16_t* channels,
+                          size_t channel_count, uint32_t dwell_ms,
+                          uint64_t* generation) {
+    if (rx == nullptr) return 2;
+    uint64_t ignored = 0;
+    return rx->runtime_control.enqueue_scout_start(
+        channels, channel_count, dwell_ms,
+        generation != nullptr ? generation : &ignored);
+}
+
+int wblink_rx_scout_stop(wblink_rx* rx, uint64_t* generation) {
+    if (rx == nullptr) return 2;
+    uint64_t ignored = 0;
+    return rx->runtime_control.enqueue_scout_stop(
+        generation != nullptr ? generation : &ignored);
+}
+
+int wblink_rx_scout_select(wblink_rx* rx, uint16_t originator,
+                           uint64_t* generation) {
+    if (rx == nullptr) return 2;
+    uint64_t ignored = 0;
+    return rx->runtime_control.enqueue_scout_select(
+        originator, generation != nullptr ? generation : &ignored);
+}
+
+int wblink_rx_scout_results(wblink_rx* rx, char* buffer, size_t capacity,
+                            size_t* required, uint64_t* applied_generation) {
+    if (rx == nullptr) return 2;
+    uint64_t ignored = 0;
+    return rx->runtime_control.copy_scout(
+        buffer, capacity, required,
+        applied_generation != nullptr ? applied_generation : &ignored);
+}
+
+int wblink_rx_discovery(wblink_rx* rx, char* buffer, size_t capacity,
+                        size_t* required) {
+    if (rx == nullptr) return 2;
+    return rx->runtime_control.copy_discovery(buffer, capacity, required);
+}
+
+int wblink_rx_selection(wblink_rx* rx, char* buffer, size_t capacity,
+                        size_t* required, uint64_t* applied_generation) {
+    if (rx == nullptr) return 2;
+    uint64_t ignored = 0;
+    return rx->runtime_control.copy_selection(
+        buffer, capacity, required,
+        applied_generation != nullptr ? applied_generation : &ignored);
+}
+
 int wblink_rx_run(wblink_rx* rx, const char* config_path,
                   wblink_frame_cb on_frame, void* user) {
     if (rx == nullptr || config_path == nullptr) return 2;
@@ -72,6 +144,7 @@ int wblink_rx_run(wblink_rx* rx, const char* config_path,
     // radio. The header promises this is prompt, and the first read of `stop`
     // inside the loop is ~1800 lines and one AirBackend::create away.
     if (rx->stop.load(std::memory_order_relaxed) != 0) return 0;
+    RuntimeRunGuard runtime_guard(rx->runtime_control);
 
     wblink::node::Loaded loaded;
     try {
@@ -106,7 +179,8 @@ int wblink_rx_run(wblink_rx* rx, const char* config_path,
     // throw — config parsing catches its own — but std::bad_alloc is always
     // reachable, and unwinding through C is undefined rather than merely bad.
     try {
-        return wblink::node::run_rx(loaded, rx->stop, sink);
+        return wblink::node::run_rx(loaded, rx->stop, sink,
+                                    &rx->runtime_control);
     } catch (...) {
         std::fprintf(stderr, "wblink_rx_run: unhandled C++ exception\n");
         return 1;

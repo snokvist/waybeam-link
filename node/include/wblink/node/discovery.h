@@ -240,6 +240,12 @@ class ScoutEngine {
     void set_rest_filter(std::optional<uint8_t> net_id) {
         rest_filter_ = net_id;
     }
+    // A near-tie may prefer the resting channel only when it came from an
+    // explicit prior operator selection (persisted preferred_originator or a
+    // successful selection in this process). An automatic latch is not enough.
+    void set_trusted_rest_originator(std::optional<uint16_t> originator) {
+        trusted_rest_originator_ = originator;
+    }
 
     bool scanning() const { return phase_ == Phase::kScanning; }
 
@@ -254,6 +260,7 @@ class ScoutEngine {
         // the last sweep's raw occupancy view.
         store_.begin_sweep(h_.domain ? h_.domain() : "idx/0", channels_);
         results_.clear();
+        results_folded_ = false;
         chan_idx_ = 0;
         phase_ = Phase::kScanning;
         h_.set_filter(std::nullopt);  // §15.5a: hear all net_ids during a sweep
@@ -264,6 +271,7 @@ class ScoutEngine {
     void stop(uint64_t now_ms) {
         if (phase_ == Phase::kIdle) return;
         finalize_current(now_ms);
+        fold_results();
         rest();
     }
 
@@ -276,6 +284,7 @@ class ScoutEngine {
     void abandon(uint64_t now_ms) {
         if (phase_ == Phase::kIdle) return;
         finalize_current(now_ms);
+        fold_results();
         phase_ = Phase::kIdle;
     }
 
@@ -285,8 +294,8 @@ class ScoutEngine {
         // §15.5a (Pass 65): survey only the scout adapter's frames — a diversity
         // ear parked on the resting channel would otherwise smear the craft across
         // every swept channel and inflate occupancy.
-        if (phase_ != Phase::kScanning || meta.adapter_id != scout_adapter_ ||
-            n < kHeartbeatSize) {
+        if (phase_ != Phase::kScanning || !channel_ready_ || !barrier_done_ ||
+            meta.adapter_id != scout_adapter_ || n < kHeartbeatSize) {
             return;
         }
         const uint16_t originator = be16_read(d + 3);  // §3.1 prefix offset
@@ -345,6 +354,7 @@ class ScoutEngine {
         }
         finalize_current(now_ms);
         if (++chan_idx_ >= channels_.size()) {
+            fold_results();
             rest();  // sweep complete
             return;
         }
@@ -368,13 +378,25 @@ class ScoutEngine {
             comma = true;
             const Occupancy& o = r.occ;
             out += "{\"chan\":" + std::to_string(r.chan) +
+                   ",\"tuned\":" + (r.tuned ? "true" : "false") +
+                   ",\"evidence_valid\":" +
+                   (channel_evidence_valid(r) ? "true" : "false") +
                    ",\"occupancy\":{\"wifi_util_permille\":" +
                    std::to_string(o.wifi_util_permille) +
+                   ",\"decoded_airtime_permille\":" +
+                   std::to_string(o.wifi_util_permille) +
                    ",\"util_permille\":" + std::to_string(o.util_permille) +
+                   ",\"ranking_score_permille\":" +
+                   std::to_string(o.util_permille) +
                    ",\"interference_util_permille\":" +
                    (o.have_interference
                         ? std::to_string(o.interference_util_permille)
                         : "null") +
+                   ",\"interference_score_permille\":" +
+                   (o.have_interference
+                        ? std::to_string(o.interference_util_permille)
+                        : "null") +
+                   ",\"duty_cycle_known\":false" +
                    ",\"noise_dbm\":" +
                    (o.have_noise ? std::to_string(o.noise_dbm) : "null") +
                    ",\"bss_count\":" + std::to_string(o.bss_count) +
@@ -382,10 +404,20 @@ class ScoutEngine {
                    ",\"availability_permille\":" +
                    std::to_string(o.availability_permille) + "}}";
         }
+        // `candidates` is the consumer-facing list: at most one row per
+        // originator and only when channel resolution succeeded. Raw
+        // per-dwell observations remain available under candidate_sightings
+        // so diagnostics do not turn into multiple selectable craft.
         out += "],\"candidates\":[";
         comma = false;
+        std::set<uint16_t> emitted;
         for (const auto& r : results_) {
             for (const auto& c : r.candidates) {
+                const auto resolved = candidate_for(c.originator);
+                if (!resolved || resolved->chan != c.chan ||
+                    !emitted.insert(c.originator).second) {
+                    continue;
+                }
                 if (comma) out += ',';
                 comma = true;
                 out += "{\"originator\":" + std::to_string(c.originator) +
@@ -394,7 +426,26 @@ class ScoutEngine {
                        ",\"claimed\":" + (c.claimed ? "true" : "false") +
                        ",\"claimed_by\":" + std::to_string(c.claimed_by) +
                        ",\"chan\":" + std::to_string(c.chan) +
+                       ",\"frames\":" + std::to_string(c.frames) +
+                       ",\"resolved\":true" +
                        ",\"psk_known\":" + (c.psk_known ? "true" : "false") + "}";
+            }
+        }
+        out += "],\"candidate_sightings\":[";
+        comma = false;
+        for (const auto& r : results_) {
+            for (const auto& c : r.candidates) {
+                if (comma) out += ',';
+                comma = true;
+                const auto resolved = candidate_for(c.originator);
+                out += "{\"originator\":" + std::to_string(c.originator) +
+                       ",\"net_id\":" + std::to_string(c.net_id) +
+                       ",\"session\":" + std::to_string(c.session) +
+                       ",\"chan\":" + std::to_string(c.chan) +
+                       ",\"frames\":" + std::to_string(c.frames) +
+                       ",\"resolved\":" +
+                       (resolved && resolved->chan == c.chan ? "true" : "false") +
+                       "}";
             }
         }
         // domain is JSON-safe by construction: snprintf %02x MAC or
@@ -441,22 +492,43 @@ class ScoutEngine {
         uint32_t session = 0;
         bool psk_known = false; // a usable CSA key is held (token or secret)
     };
-    // Best candidate for `originator` across the last sweep — the channel it was
-    // heard on most (§15.5a Pass 66) — or nullopt if it was never scouted (a claim
-    // requires a prior scout to learn its channel).
+    // Best candidate for `originator` across the last sweep. A clearly dominant
+    // channel wins; near-equal evidence prefers the resting channel only when
+    // an explicit prior selection already pinned that craft there. Otherwise
+    // the evidence is ambiguous and selection fails closed.
     std::optional<Claim> candidate_for(uint16_t originator) const {
         // §15.5a (Pass 66): pick the swept channel the craft was heard on with the
         // most frames — robust to a retune-settling leak onto an adjacent channel.
         // >= keeps the last channel on a tie (matches the pre-Pass-66 behaviour).
         std::optional<Claim> found;
+        std::optional<Claim> resting;
         uint64_t best_frames = 0;
+        uint64_t resting_frames = 0;
+        bool saw_competing_channel = false;
         for (const auto& r : results_) {
             for (const auto& c : r.candidates) {
-                if (c.originator == originator && c.frames >= best_frames) {
+                if (c.originator != originator) continue;
+                const Claim claim{c.chan, c.net_id, c.session, c.psk_known};
+                if (c.frames >= best_frames) {
                     best_frames = c.frames;
-                    found = Claim{c.chan, c.net_id, c.session, c.psk_known};
+                    found = claim;
+                }
+                if (c.chan == rest_chan_ && c.frames >= resting_frames) {
+                    resting_frames = c.frames;
+                    resting = claim;
+                } else if (c.chan != rest_chan_) {
+                    saw_competing_channel = true;
                 }
             }
+        }
+        // The resting channel needs at least 80% of the top evidence to keep
+        // the prior. A real move still wins; a 1166-vs-1137 retune artefact does
+        // not. The subtractive form cannot overflow even under a pathological
+        // frame counter.
+        if (resting && saw_competing_channel &&
+            resting_frames >= best_frames - best_frames / 5u) {
+            return trusted_rest_originator_ == originator ? resting
+                                                        : std::nullopt;
         }
         return found;
     }
@@ -505,6 +577,8 @@ class ScoutEngine {
     };
     struct ChannelResult {
         uint16_t chan = 0;
+        bool tuned = true;
+        uint64_t at_ms = 0;
         Occupancy occ;
         std::vector<Candidate> candidates;
     };
@@ -519,7 +593,7 @@ class ScoutEngine {
 
     void enter_channel(uint64_t now_ms) {
         accum_ = Accum{};
-        h_.retune(channels_[chan_idx_], bw_);
+        channel_ready_ = h_.retune(channels_[chan_idx_], bw_);
         entered_ms_ = now_ms;
         extended_ = false;
         dwell_deadline_ms_ = now_ms + dwell_ms_;
@@ -534,6 +608,12 @@ class ScoutEngine {
     void finalize_current(uint64_t now_ms) {
         ChannelResult r;
         r.chan = channels_[chan_idx_];
+        r.tuned = channel_ready_;
+        r.at_ms = now_ms;
+        if (!channel_ready_) {
+            results_.push_back(std::move(r));
+            return;
+        }
         // §15.5a (Pass 72): the actual elapsed dwell is the airtime
         // denominator — an extended (or early-resolved) dwell must not skew
         // wifi_util_permille.
@@ -577,15 +657,34 @@ class ScoutEngine {
             c.frames = accum_.frames_by_orig[k];  // §15.5a (Pass 66) evidence
             r.candidates.push_back(c);
         }
-        // §15.5a (Pass 161): fold this dwell into the evidence store.
-        {
+        results_.push_back(std::move(r));
+    }
+
+    // One Waybeam originator cannot occupy two channels simultaneously. If
+    // the same craft decodes under multiple dwell labels, only the resolver's
+    // channel is trustworthy; the others prove that channel attribution for
+    // those dwells failed. Keep them in raw diagnostics, but never let them
+    // contaminate occupancy ranking or look like real craft locations.
+    bool channel_evidence_valid(const ChannelResult& r) const {
+        if (!r.tuned) return false;
+        for (const Candidate& c : r.candidates) {
+            const auto resolved = candidate_for(c.originator);
+            if (!resolved || resolved->chan != r.chan) return false;
+        }
+        return true;
+    }
+
+    void fold_results() {
+        if (results_folded_) return;
+        for (const ChannelResult& r : results_) {
+            if (!channel_evidence_valid(r)) continue;
             ScoutSample smp;
             smp.chan_mhz = r.chan;
             smp.util_permille = r.occ.util_permille;
-            smp.at_ms = now_ms;
+            smp.at_ms = r.at_ms;
             store_.fold(smp);
         }
-        results_.push_back(std::move(r));
+        results_folded_ = true;
     }
     void rest() {
         phase_ = Phase::kIdle;
@@ -598,6 +697,7 @@ class ScoutEngine {
     uint8_t bw_;
     uint16_t rest_chan_;
     std::optional<uint8_t> rest_filter_;
+    std::optional<uint16_t> trusted_rest_originator_;
     size_t scout_adapter_;
     Phase phase_ = Phase::kIdle;
     std::vector<uint16_t> channels_;
@@ -614,10 +714,12 @@ class ScoutEngine {
     // value, which is what arms the observe window and the finalize read.
     bool barrier_done_ = false;
     bool barrier_drained_ = false;
+    bool channel_ready_ = false;
     uint64_t barrier_at_ms_ = 0;
     uint64_t observe_start_ms_ = 0;
     Accum accum_;
     std::vector<ChannelResult> results_;
+    bool results_folded_ = false;
     ScoutStore store_;  // §15.5a Pass 161 accumulated evidence
 };
 

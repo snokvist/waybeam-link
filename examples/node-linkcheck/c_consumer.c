@@ -60,6 +60,24 @@ int wblink_c_consumer_check(void) {
         wblink_rx_destroy(rx);
         return 1; /* clearing is legal */
     }
+    /* Runtime control: reference every additive symbol in the C translation
+     * unit and prove an inactive handle fails without touching node state. */
+    {
+        uint64_t generation = 0;
+        size_t required = 0;
+        if (wblink_rx_scout_start(NULL, NULL, 0, 0, &generation) != 2 ||
+            wblink_rx_scout_start(rx, NULL, 0, 0, &generation) != 3 ||
+            wblink_rx_scout_stop(rx, &generation) != 3 ||
+            wblink_rx_scout_select(rx, 1, &generation) != 3 ||
+            wblink_rx_scout_results(rx, NULL, 0, &required,
+                                    &generation) != 3 ||
+            wblink_rx_discovery(rx, NULL, 0, &required) != 3 ||
+            wblink_rx_selection(rx, NULL, 0, &required,
+                                &generation) != 3) {
+            wblink_rx_destroy(rx);
+            return 1;
+        }
+    }
     wblink_rx_destroy(rx);
 
     /* Two contract rules, asserted here because a PRE-STOPPED handle runs
