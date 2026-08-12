@@ -242,7 +242,7 @@ Control plane (§15.5), acts on the ground/rx node:
 | Method + path | Body | Effect |
 |---|---|---|
 | `POST /api/v1/scout/start` | `{ "channels":[...]?, "dwell_ms":?, "mode":"list"\|"quickconnect", "target":{"originator":?}? }` | begin a sweep |
-| `GET /api/v1/scout/results` | — | `{ scanning, current_chan, channels:[{chan, occupancy:{wifi_util_permille,util_permille,interference_util_permille,noise_dbm,bss_count,quality_permille,availability_permille}, nodes:[…]}], candidates:[{originator,net_id,session,claimed,claimed_by,chan,psk_known}] }` |
+| `GET /api/v1/scout/results` | — | `{ scanning, current_chan, channels:[{chan,evidence_valid,occupancy:{decoded_airtime_permille,ranking_score_permille,interference_score_permille,duty_cycle_known,...legacy aliases}}], candidates:[{originator,net_id,session,claimed,claimed_by,chan,frames,resolved,psk_known}], candidate_sightings:[{originator,net_id,session,chan,frames,resolved}] }` — `candidates` is deduplicated/resolved and actionable; `candidate_sightings` is raw diagnostic evidence; FA/CCA score is never presented as measured duty cycle. |
 | `POST /api/v1/scout/stop` | `{}` | end the sweep |
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto the given (or emptiest allowlisted) channel |
 
