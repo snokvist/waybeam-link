@@ -9,7 +9,10 @@
  * wrapper: two wrappers, two lifetimes to get wrong, and the stop flag
  * exposed as a C++ type neither can name.
  *
- * The surface is deliberately five functions:
+ * The original surface was deliberately five functions. The runtime-control
+ * additions below preserve the same ownership rule: they only enqueue work or
+ * copy immutable snapshots. They never call node state from the caller's
+ * thread, and the shim still does not own a thread.
  *
  *   - THE SHIM OWNS THE STOP FLAG. A C caller cannot name `std::atomic<int>`,
  *     and C11's `_Atomic int` is not guaranteed layout-compatible with it, so
@@ -89,6 +92,62 @@ void wblink_rx_request_stop(wblink_rx *rx);
  * the node has already been started. Passing n == 0 clears any previous set.
  */
 int wblink_rx_set_adapter_fds(wblink_rx *rx, const int *fds, size_t n);
+
+/*
+ * Queue a ScoutEngine sweep. The channels are MHz values and are copied before
+ * this call returns. `channels == NULL && channel_count == 0` selects the node
+ * config's `scout.channels`, then its CSA allowlist, exactly like the REST
+ * control path. `dwell_ms == 0` selects the configured dwell.
+ *
+ * The call is thread-safe but not signal-safe. It never retunes directly: the
+ * RX loop applies the newest queued intent and publishes its generation in the
+ * scout snapshot call below. A later start/stop/select supersedes a pending
+ * command, so the mailbox is bounded and lifecycle stop cannot wait behind a
+ * backlog.
+ *
+ * Returns 0 when queued, 2 for invalid arguments, 3 when no run is active, or
+ * 1 on allocation failure. `generation` may be NULL; otherwise it receives the
+ * monotonic accepted-command generation.
+ */
+int wblink_rx_scout_start(wblink_rx *rx, const uint16_t *channels,
+                          size_t channel_count, uint32_t dwell_ms,
+                          uint64_t *generation);
+
+/* Queue a sweep stop. Same threading, generation and return contract above. */
+int wblink_rx_scout_stop(wblink_rx *rx, uint64_t *generation);
+
+/*
+ * Queue passive selection of a scouted craft by originator. On a spectator the
+ * RX loop resolves ScoutEngine's heard-most channel (including private frame
+ * evidence), abandons any active sweep, pins the craft's net_id and retunes all
+ * ears. Non-spectator nodes refuse this Android-shaped passive-select command.
+ */
+int wblink_rx_scout_select(wblink_rx *rx, uint16_t originator,
+                           uint64_t *generation);
+
+/*
+ * Copy immutable JSON snapshots published by the RX loop. The JSON shapes are
+ * the existing §15.5/§15.5a scout, discovery and selection payloads; this ABI
+ * does not add fields to them.
+ *
+ * `buffer == NULL && capacity == 0` is a size query. `required` receives the
+ * byte count INCLUDING the trailing NUL. A successful copy is always
+ * NUL-terminated; an undersized buffer is left untouched. Snapshot calls also
+ * request a fresh publication from the RX loop, so the first call may report
+ * not-ready and a later poll observes it.
+ *
+ * Returns 0 on a size query/copy, 2 for invalid arguments, 3 when no snapshot
+ * has been published yet, or 4 when `capacity` is too small. Final snapshots
+ * remain readable after the run stops, until the handle is destroyed.
+ */
+int wblink_rx_scout_results(wblink_rx *rx, char *buffer, size_t capacity,
+                            size_t *required,
+                            uint64_t *applied_generation);
+int wblink_rx_discovery(wblink_rx *rx, char *buffer, size_t capacity,
+                        size_t *required);
+int wblink_rx_selection(wblink_rx *rx, char *buffer, size_t capacity,
+                        size_t *required,
+                        uint64_t *applied_generation);
 
 /*
  * Load `config_path` and run a receiving node until stopped. Blocks.

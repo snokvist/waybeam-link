@@ -30,13 +30,14 @@ struct OccupancyDerived {
     uint16_t interference_util_permille = 0;
     bool noise_valid = false;
     int noise_dbm = 0;
-    // Total occupancy (§15.5a): min(1000, wifi_util + interference). Equals
-    // wifi_util when the sensor legs are absent — the structural fallback
-    // the sensor-less backends ride.
+    // Composite ranking score (§15.5a): min(1000, decoded airtime +
+    // frame-free interference score). This is NOT RF duty cycle: FA events
+    // carry no duration. The legacy JSON name is util_permille; consumers
+    // should use ranking_score_permille for the same value.
     uint16_t util_permille = 0;
 };
 
-// Fold one dwell's frame-free sensor delta into the §15.5a fields.
+// Fold one dwell's frame-free sensor delta into the §15.5a ranking fields.
 // `observe_us` is the barrier→read window (the interference denominator —
 // NOT the full dwell, which charges the bin with its own retune). A missing
 // sensor, an invalid FA leg, or an observe window under kMinObserveUs

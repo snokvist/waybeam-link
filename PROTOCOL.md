@@ -5372,7 +5372,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]` (each `{name, role, channel, mac}` — `mac` is the §10.6 per-unit EFUSE identity on the radio backend, `null` where the backend reports none, Pass 154), `build`; on a TX/craft node also the live self state `channel`, `psk_announced`, `claimed`, `claimed_by` (Pass 113) |
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
 | `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |
-| `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[], ranking:{rounds, domain, confidence_permille, rejects:{}, recommendation:{}, bins:[]}}` (§15.5a Pass 161; ground/rx node) |
+| `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[], candidate_sightings:[], ranking:{rounds, domain, confidence_permille, rejects:{}, recommendation:{}, bins:[]}}`; `candidates` is resolved/deduplicated, sightings are diagnostic (§15.5a; ground/rx node) |
 | `GET /api/v1/link/selection` | receiver's configured/latched/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
@@ -5610,16 +5610,22 @@ supported (§15.2 `scout`).
   dwell** as its airtime denominator, so an extended dwell does not inflate or
   deflate `wifi_util_permille`.
 - **Candidate** = `{originator, net_id, session, claimed, claimed_by, chan,
-  psk_known}`. `psk_known` is a bool reporting whether the ground holds a usable
+  frames, resolved, psk_known}`. The consumer-facing `candidates[]` contains at
+  most one row per originator and only resolved rows. Raw per-dwell observations
+  are diagnostic `candidate_sightings[]` rows; they must not be counted as craft
+  or offered for selection. `psk_known` is a bool reporting whether the ground holds a usable
   CSA key for the craft: the **cached announced token** (the ground caches the
   ANNOUNCE `psk` from every beacon, Pass 63) or a configured `csa.psk` secret. The
   token is public and may be surfaced, but ownership is still *proven by
   connecting*, not read from the beacon: a MAC-valid CSA the craft follows is the
   proof. When a craft appears on more than one swept channel — a retune-settling
-  artifact where the scout adapter drains frames buffered from the previous channel
-  into the next dwell — its `chan` is the swept channel it was **heard on with the
-  most frames** (the true channel is heard for the whole dwell; a leak is a handful
-  of frames), so the claim retunes to the right channel regardless of scan order.
+  artifact where the scout adapter drains or decodes one feed under more than one
+  dwell label — a clearly dominant frame count wins. Near-equal evidence may keep
+  the resting channel only when an explicit prior operator selection already
+  pinned that originator there (a persisted `preferred_originator` or a successful
+  selection in this process). An automatic latch is not enough. Without either condition the
+  craft remains unresolved, both channel rows are `evidence_valid:false`, and
+  selection fails closed rather than guessing from scan order or stale config.
 - **Per-channel occupancy** is reported as a record whose field set is a superset
   aligned with the Realtek "Advanced Channel Scanning" survey. The hardware
   field-fill that table reserved space for is **Pass 155**: on the radio
@@ -5631,17 +5637,18 @@ supported (§15.2 `scout`).
 
   | field | source (radio backend, Pass 155) | sensor-less backend |
   |---|---|---|
-  | `wifi_util_permille` | decodable-frame airtime estimate (unchanged) | same |
-  | `util_permille` | **total occupancy**: `min(1000, wifi_util + interference)` | = `wifi_util` |
-  | `interference_util_permille` | saturating index of **non-decodable energy**: `1000·r/(r+H)`, `r` = frame-free false-alarm delta per second over the observe window, `H` the half-rate seed (200 FA/s, Tier-2) | `null` |
+  | `decoded_airtime_permille` (`wifi_util_permille` legacy alias) | airtime estimate of successfully decoded frames | same |
+  | `ranking_score_permille` (`util_permille` legacy alias) | **ranking score**, `min(1000, decoded_airtime + interference_score)`; not duty cycle | = decoded airtime |
+  | `interference_score_permille` (`interference_util_permille` legacy alias) | saturating chipset-local score of **non-decodable energy events**: `1000·r/(r+H)`, `r` = frame-free false-alarm delta per second over the observe window, `H` the half-rate seed (200 FA/s, Tier-2) | `null` |
+  | `duty_cycle_known` | always `false` for this sensor generation; FA/CCA events have no duration | `false` |
   | `noise_dbm` | the chip's **absolute idle floor** where the generation provides it, else the **passive floor** (mean `rssi − snr` over decoded frames), else the min-RSSI proxy | min-RSSI proxy (labeled: a proxy) |
   | `bss_count` | distinct waybeam transmitters heard (unchanged) | same |
-  | `quality_permille` / `availability_permille` | `availability = 1000 − util_permille` (total); `quality` remains the availability proxy until the #100 scoring layer | same, over `util` |
+  | `quality_permille` / `availability_permille` | legacy complements of the ranking score (`1000 − ranking_score`), not physical channel availability; retained for compatibility pending schema removal | same |
 
   Three deliberate boundaries on the new fields:
 
-  - `interference_util_permille` is an **index, not an absolute duty
-    cycle** — false-alarm counts have no per-event duration, and raw energy
+  - `interference_score_permille` is **not an absolute duty cycle** —
+    false-alarm counts have no per-event duration, and raw energy
     units are only comparable **within one adapter**. The saturating form is
     the one the vendored chanmig scorer proved on-air
     (`fa_rate/(fa_rate+fa_half)`); cross-adapter comparison needs the #100
@@ -5664,9 +5671,9 @@ supported (§15.2 `scout`).
   dwell as its denominator (Pass 72).
 
   **The ranking input moves with the fields (Pass 155).** `emptiest()` — the
-  quick-connect claim's channel choice — ranks on **`util_permille`**, the
-  interference-inclusive total. On a sensor-less backend `util_permille`
-  equals `wifi_util_permille` by construction, so the fallback to v1
+  quick-connect claim's channel choice — ranks on
+  **`ranking_score_permille`**, the interference-inclusive score. On a
+  sensor-less backend it equals `decoded_airtime_permille` by construction, so the fallback to v1
   behaviour is structural rather than a special case. Filling the fields
   without moving the ranking would leave the defect intact: a channel
   saturated by a non-decodable emitter would still rank pristine.

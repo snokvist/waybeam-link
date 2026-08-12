@@ -325,7 +325,10 @@ endif()
 # needs. That is the measured claim and the whole claim: the bionic archive
 # still has ~193 undefined symbols like any other, and no gate resolves them on
 # bionic — android-arm64 is compile-only. See docs/findings.md, 2026-08-09.
-set(WBLINK_NODE_SRCS node/src/rx_node.cpp node/src/rx_node_c.cpp)
+set(WBLINK_NODE_SRCS
+    node/src/rx_node.cpp
+    node/src/rx_node_c.cpp
+    node/src/rx_runtime_control.cpp)
 if(WBLINK_FRAME_SHM AND WBLINK_CONTROL_SERVER AND WBLINK_VENC)
     set(WBLINK_NODE_TX ON)
     list(APPEND WBLINK_NODE_SRCS node/src/tx_node.cpp node/src/tx_node_c.cpp)

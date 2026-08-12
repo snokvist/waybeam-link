@@ -24,6 +24,33 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 168 — scout evidence is resolved before it becomes actionable (2026-08-12)
+
+**Ruling (operator, 2026-08-12).** A scout result is actionable only after
+channel evidence resolves to one channel. `candidates[]` contains at most one
+resolved row per originator; raw per-dwell observations remain diagnostic in
+`candidate_sightings[]` and must not be counted as separate craft.
+
+**Resolution rule.** One uncontested channel resolves, including the resting
+channel on a fresh install. With evidence on competing channels, a clearly
+dominant frame count wins. Near-equal evidence fails closed unless an explicit
+prior operator selection already pinned that originator to the resting channel;
+an automatic latch is not trust. Invalid rows are not selectable.
+
+**Measurement semantics.** Realtek false-alarm and CCA counters count events,
+not busy duration. The legacy occupancy values are therefore named as decoded
+Waybeam airtime and a chipset-local ranking/interference score, retain their old
+aliases for compatibility, and publish `duty_cycle_known:false`. They must not
+be presented as generic RF or 802.11 channel occupancy.
+
+**Changed.** §15.5 endpoint schema and §15.5a candidate resolution,
+per-channel evidence, occupancy field semantics, and ranking input.
+
+**Evidence.** Android RTL8812CU/EU validation decoded the same 5805 craft under
+multiple dwell labels; RTL8812AU isolated it to 5805 while quiet adjacent bins
+still produced high false-alarm scores. Unit mutations cover ambiguous evidence,
+trusted-rest resolution, and an uncontested fresh resting-channel result.
+
 ## Pass 167 — a tier bounds flight power, not the offset-space sweep (2026-08-09)
 
 **Ruling (operator, 2026-08-09).** In offset space a §11.7 `0x0A` tier does
