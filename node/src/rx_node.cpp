@@ -86,6 +86,7 @@
 #include "wblink/node/frame_kind.h"
 #include "wblink/node/policy.h"
 #include "wblink/node/rx_core.h"
+#include "wblink/log.h"
 #include "wblink/node/rx_runtime_control.h"
 #include "wblink/node/tx_core.h"
 #include "wblink/node/uplink_power.h"
@@ -2112,11 +2113,18 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                 }
                 runtime_control->note_applied(command->generation);
                 if (!error.empty()) {
-                    std::fprintf(stderr,
-                                 "rx runtime control generation %llu: %s\n",
-                                 static_cast<unsigned long long>(
-                                     command->generation),
-                                 error.c_str());
+                    // wb_logf, not fprintf(stderr): this is the ONLY place a
+                    // queued command's refusal reason exists, and an
+                    // in-process consumer cannot see stderr. Measured on an
+                    // S22 — a claim that the mailbox accepted and the loop
+                    // then refused looked identical to one that was
+                    // transmitted and ignored by the craft. The rest of this
+                    // file still uses fprintf and is equally invisible there;
+                    // this is the line the C ABI made load-bearing.
+                    wb_logf("rx runtime control generation %llu: %s\n",
+                            static_cast<unsigned long long>(
+                                command->generation),
+                            error.c_str());
                 }
                 // Publish the state represented by this applied generation
                 // immediately. A consumer can distinguish a queued command
