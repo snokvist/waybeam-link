@@ -22,6 +22,8 @@ class RxRuntimeControl {
         kScoutStart,
         kScoutStop,
         kScoutSelect,
+        kClaim,           // §11.4 CSA claim of a scouted craft
+        kVehicleCommand,  // §11.7 command campaign toward the bound craft
     };
 
     struct Command {
@@ -30,7 +32,20 @@ class RxRuntimeControl {
         uint32_t dwell_ms = 0;
         uint16_t originator = 0;
         uint64_t generation = 0;
+        // kClaim: 0 means "the emptiest allowlisted channel", matching the
+        // claim helper's own contract rather than inventing a sentinel here.
+        uint16_t target_chan = 0;
+        // kVehicleCommand: the §15.5 REST spelling, resolved to a §11.7 id by
+        // the loop. Kept as a name and not an id because the name map is the
+        // control-plane vocabulary and lives in node/vcmd.h, not here.
+        std::string cmd;
+        int32_t arg = 0;
     };
+
+    // The longest §15.5 command name is 10 characters. A C caller hands us a
+    // pointer, so the copy is bounded before it is made rather than after —
+    // an unterminated or hostile string must not turn into an allocation.
+    static constexpr size_t kMaxCommandName = 32;
 
     RxRuntimeControl() = default;
     RxRuntimeControl(const RxRuntimeControl&) = delete;
@@ -53,6 +68,16 @@ class RxRuntimeControl {
                             uint32_t dwell_ms, uint64_t* generation);
     int enqueue_scout_stop(uint64_t* generation);
     int enqueue_scout_select(uint16_t originator, uint64_t* generation);
+    // §11.4 / §11.7. Same convention as the scout enqueues above, and the same
+    // single pending slot — a claim supersedes an un-taken sweep, exactly as
+    // the loop's own claim path abandons a running one. `target_chan` 0 asks
+    // for the emptiest allowlisted channel. `cmd` is copied; it need not
+    // outlive the call, and a name longer than kMaxCommandName is rejected as
+    // an invalid argument rather than truncated into a different command.
+    int enqueue_claim(uint16_t originator, uint16_t target_chan,
+                      uint64_t* generation);
+    int enqueue_vehicle_command(const char* cmd, int32_t arg,
+                                uint64_t* generation);
     std::optional<Command> take_command();
 
     void note_applied(uint64_t generation);
@@ -65,6 +90,7 @@ class RxRuntimeControl {
     bool take_scout_snapshot_request();
     bool take_discovery_snapshot_request();
     bool take_selection_snapshot_request();
+    bool take_command_snapshot_request();
 
     // Publication swaps an immutable string. Scout generation names the
     // command state represented by that JSON and is returned atomically with
@@ -72,6 +98,10 @@ class RxRuntimeControl {
     void publish_scout(std::string json, uint64_t generation);
     void publish_discovery(std::string json);
     void publish_selection(std::string json, uint64_t generation);
+    // The §11.7 campaign state, plus the synchronous verdict of the queued
+    // command that carried this generation. A queued caller cannot be handed
+    // the helper's return value, so the outcome has to arrive here or nowhere.
+    void publish_command(std::string json, uint64_t generation);
 
     // Buffer-copy contract for the C shim: `required` includes the trailing
     // NUL. NULL + zero is a size query. Returns 0 on success/query, 2 for bad
@@ -82,6 +112,8 @@ class RxRuntimeControl {
     int copy_discovery(char* buffer, size_t capacity, size_t* required);
     int copy_selection(char* buffer, size_t capacity, size_t* required,
                        uint64_t* generation);
+    int copy_command(char* buffer, size_t capacity, size_t* required,
+                     uint64_t* generation);
 
   private:
     struct GeneratedSnapshot {
@@ -99,9 +131,11 @@ class RxRuntimeControl {
     bool scout_snapshot_requested_ = false;
     bool discovery_snapshot_requested_ = false;
     bool selection_snapshot_requested_ = false;
+    bool command_snapshot_requested_ = false;
     std::shared_ptr<const GeneratedSnapshot> scout_snapshot_;
     std::shared_ptr<const std::string> discovery_snapshot_;
     std::shared_ptr<const GeneratedSnapshot> selection_snapshot_;
+    std::shared_ptr<const GeneratedSnapshot> command_snapshot_;
 };
 
 }  // namespace node

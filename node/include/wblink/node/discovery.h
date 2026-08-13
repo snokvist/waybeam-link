@@ -59,9 +59,19 @@ class DiscoveryCatalog {
             n.claimed = (an->flags & announce_flags::kClaimed) != 0;
             n.claimed_by = an->claimed_by;
             n.psk_present = (an->flags & announce_flags::kPskPresent) != 0;
-            if (n.psk_present) {  // Pass 63: announced token is public — cache it
-                std::memcpy(n.token.data(), an->psk, kAnnouncePskSize);
-                n.have_token = true;
+            // Pass 63: the announced token is public — cache it. It is kept
+            // OUTSIDE `nodes_` deliberately: `nodes_` is the presence view and
+            // `json()` ages it at 5 s, so a token stored there survived only
+            // while the craft was continuously heard. A sweep hears a craft for
+            // one ~500 ms dwell and the operator claims seconds later, so the
+            // key was reliably gone by then — and a ground polling its own
+            // discovery snapshot was the thing deleting it. Keyed by
+            // originator alone so a re-announce (incl. after a craft reboot,
+            // new session) overwrites rather than accumulating.
+            if (n.psk_present) {
+                TokenEntry& t = tokens_[p->originator];
+                std::memcpy(t.token.data(), an->psk, kAnnouncePskSize);
+                t.last_seen_ms = now;
             }
         }
         if (data != nullptr) {
@@ -127,20 +137,17 @@ class DiscoveryCatalog {
     }
 
     // Pass 63: the announced token cached from a craft's ANNOUNCE, for keying a
-    // CSA claim (§15.5a). Returns the most-recently-seen token for `originator`.
+    // CSA claim (§15.5a). Deliberately NOT aged with the presence view — see
+    // `observe()`. A token is not evidence the craft is still there; it is the
+    // public key material needed to address it, and the claim path has its own
+    // liveness checks (stale-session guard, then the §11.6 CSA_ARMED confirm
+    // that fails a campaign into a clean rollback). Aging it only ever turned a
+    // diagnosable "no CSA key" refusal into an unclaimable craft.
     std::optional<std::array<uint8_t, kAnnouncePskSize>> token_for(
         uint16_t originator) const {
-        std::optional<std::array<uint8_t, kAnnouncePskSize>> best;
-        uint64_t best_seen = 0;
-        for (const auto& [key, n] : nodes_) {
-            (void)key;
-            if (n.originator == originator && n.have_token &&
-                n.last_seen_ms >= best_seen) {
-                best = n.token;
-                best_seen = n.last_seen_ms;
-            }
-        }
-        return best;
+        const auto it = tokens_.find(originator);
+        if (it == tokens_.end()) return std::nullopt;
+        return it->second.token;
     }
 
     // §15.5a claim staleness (B9): the session `originator` most recently
@@ -170,8 +177,12 @@ class DiscoveryCatalog {
         bool claimed = false;
         uint16_t claimed_by = 0;
         bool psk_present = false;
-        bool have_token = false;  // Pass 63: cached announced token (public)
+    };
+    // Pass 63 token cache, keyed by originator and NOT aged — see `observe()`.
+    // `last_seen_ms` is diagnostic only; nothing evicts on it.
+    struct TokenEntry {
         std::array<uint8_t, kAnnouncePskSize> token{};
+        uint64_t last_seen_ms = 0;
     };
     struct Stream {
         uint16_t originator = 0;
@@ -195,9 +206,15 @@ class DiscoveryCatalog {
     void trim() {
         while (nodes_.size() > 64) nodes_.erase(nodes_.begin());
         while (streams_.size() > 64) streams_.erase(streams_.begin());
+        // The token cache has no aging, so this bound is the ONLY thing
+        // keeping it finite. Eviction is by lowest originator, matching the
+        // maps above; with one entry per craft the bound is far above any
+        // real fleet, so which entry goes is not worth a second policy.
+        while (tokens_.size() > 64) tokens_.erase(tokens_.begin());
     }
     std::map<uint64_t, Node> nodes_;
     std::map<uint64_t, Stream> streams_;
+    std::map<uint16_t, TokenEntry> tokens_;
 };
 
 // §15.5a ground scout: one sweep engine. Retunes the scout adapter across a

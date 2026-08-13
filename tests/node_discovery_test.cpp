@@ -239,6 +239,86 @@ void test_catalog_knows_nothing_about_an_unseen_originator() {
     CHECK(!cat.session_for(17).has_value());
 }
 
+// §11.4a: the announced token must outlive the PRESENCE view that carried it.
+//
+// This is the bug that made a scouted craft unclaimable, and the mechanism is
+// not the one two earlier theories blamed. `observe()` runs on the sweep path,
+// so a dwell DOES cache the token — but the token lived in `nodes_`, and
+// `json()` ages `nodes_` at 5 s. A ground polls the discovery snapshot on a
+// cadence, so the ground's own UI refresh was deleting the key its claim
+// needed, a few seconds after the ear moved off that channel. On the resting
+// channel the craft re-announces at 2 Hz and the entry never ages out, which
+// is exactly why this read as "only resting-channel discovery caches tokens".
+//
+// A sweep is ~21-38 s and the operator taps claim after it ends, so anything
+// keyed to continuous presence is useless to the claim path by construction.
+void test_an_announced_token_survives_the_presence_view_aging_out() {
+    DiscoveryCatalog cat;
+    wblink::Announce an{};
+    an.prefix.originator = 17;
+    an.prefix.session_id = 99;
+    an.flags = wblink::announce_flags::kPskPresent;
+    for (size_t i = 0; i < wblink::kAnnouncePskSize; ++i) {
+        an.psk[i] = static_cast<uint8_t>(0xA0 + i);
+    }
+    cat.observe(an, 1000, /*net_id=*/7);
+    CHECK(cat.token_for(17).has_value());
+    CHECK(cat.session_for(17).has_value());
+
+    // The ground's discovery snapshot, taken 6 s later — one poll of the very
+    // UI the operator is looking at while deciding which craft to claim.
+    const std::string snap = cat.json(7000, {});
+    CHECK(snap.find("\"originator\":17") == std::string::npos);  // aged, correct
+    // Presence is gone and SHOULD be — the craft is not being heard. The token
+    // is not presence. Losing it here is what stranded the claim.
+    CHECK(!cat.session_for(17).has_value());
+    const auto tok = cat.token_for(17);
+    CHECK(tok.has_value());
+    if (tok) CHECK_EQ_U((*tok)[0], 0xA0u);
+    if (tok) CHECK_EQ_U((*tok)[15], 0xAFu);
+}
+
+// A craft that reboots announces a NEW token under a new session. The cache is
+// keyed by originator alone, so the fresh token must overwrite — a claim keyed
+// with the pre-reboot token MACs against nothing and fails at CSA_ARMED with
+// no hint. Same-originator overwrite is the whole reason this is not a set.
+void test_a_re_announced_token_replaces_the_cached_one() {
+    DiscoveryCatalog cat;
+    wblink::Announce before{};
+    before.prefix.originator = 17;
+    before.prefix.session_id = 99;
+    before.flags = wblink::announce_flags::kPskPresent;
+    before.psk[0] = 0x11;
+    cat.observe(before, 1000, 7);
+
+    wblink::Announce after{};
+    after.prefix.originator = 17;
+    after.prefix.session_id = 100;  // rebooted
+    after.flags = wblink::announce_flags::kPskPresent;
+    after.psk[0] = 0x22;
+    cat.observe(after, 2000, 7);
+
+    const auto tok = cat.token_for(17);
+    CHECK(tok.has_value());
+    if (tok) CHECK_EQ_U((*tok)[0], 0x22u);
+}
+
+// An ANNOUNCE without kPskPresent carries an all-zero psk field (§3.12). It
+// must not register as a token: an all-zero key would be handed to set_psk as
+// a real one, and the claim would fail at the craft rather than refusing here
+// with "no CSA key for craft" — a diagnosable refusal turned into a silent
+// campaign timeout.
+void test_an_announce_without_a_token_caches_nothing() {
+    DiscoveryCatalog cat;
+    wblink::Announce an{};
+    an.prefix.originator = 17;
+    an.prefix.session_id = 99;
+    an.flags = wblink::announce_flags::kClaimed;  // claimed, but no token
+    cat.observe(an, 1000, 7);
+    CHECK(!cat.token_for(17).has_value());
+    CHECK(cat.session_for(17).has_value());  // presence still recorded
+}
+
 // Craft-finder pacing (findings.md 2026-08-12). The base dwell is a short
 // presence probe; anything heard extends it once to cover the >=1 Hz announce
 // cadence. An empty band is swept at dwell_ms per channel instead of holding a
@@ -374,6 +454,9 @@ int main() {
     test_scout_rejects_pre_settle_candidate_residue_and_publishes_weight();
     test_scout_near_tie_prefers_proven_resting_channel();
     test_catalog_knows_nothing_about_an_unseen_originator();
+    test_an_announced_token_survives_the_presence_view_aging_out();
+    test_a_re_announced_token_replaces_the_cached_one();
+    test_an_announce_without_a_token_caches_nothing();
     test_short_dwell_probes_but_anything_heard_extends();
     test_a_second_craft_on_one_channel_is_not_truncated_away();
     test_candidate_rssi_is_strongest_and_absent_reads_null();
