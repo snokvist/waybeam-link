@@ -1120,3 +1120,39 @@ disproved by measurement rather than by reading:**
 to an in-process consumer, so a refused claim and a transmitted-but-ignored one
 looked identical from the app. Routing the load-bearing one through `wb_logf`
 is what made round three diagnosable.
+
+## 2026-08-13 — at bench range, "heard-most frames" cannot pick a channel
+
+**Measured on an S22 + RTL8812AU against craft 17 (~2 m, 5805 MHz), four
+consecutive sweeps.** The scout resolved the craft's channel as **5745** on
+one sweep and **5805** on the other three. Per-channel sightings from the same
+sweep:
+
+```
+{"originator":17,"chan":5745,"frames":2299,"resolved":false}
+{"originator":17,"chan":5805,"frames":2350,"resolved":true}
+```
+
+**2299 vs 2350 — 2%.** The craft is 60 MHz away from 5745 and still decodes
+there: measured **-41 dBm** on 5745 against **-11..-18 dBm** on 5805, i.e.
+~23-30 dB of adjacent-channel rejection, which at 2 m is nowhere near enough
+to stop decoding. Both dwells then run for the same time against a
+continuously transmitting craft, so **the frame count saturates on dwell
+duration rather than on signal**, and the heard-most rule is left picking
+between two near-equal numbers.
+
+**Consequences.** `channel_evidence_valid()` is derived FROM the resolver — a
+channel is valid only if every candidate on it resolves to it — so the loser
+is retroactively marked invalid and its occupancy sample is dropped from the
+ranking store. A ground that resolves the wrong channel then retunes there to
+claim, and the campaign goes nowhere (cleanly: no `CSA_ARMED`, rollback).
+
+**RSSI separates these cases cleanly and the resolver does not use it**
+(-41 vs -11 is unambiguous where 2299 vs 2350 is noise). Not changed here:
+the ranking rule is Tier-1-adjacent and this is one chip family on one bench,
+so it wants its own measurement before a rule change. Recorded so the next
+bench does not read it as a claim bug.
+
+**Bench hygiene:** this is a near-field artifact. Separate the craft from the
+ground before trusting a scouted channel, or verify against the craft's own
+`GET /api/v1/info`.
