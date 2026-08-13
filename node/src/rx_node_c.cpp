@@ -112,6 +112,31 @@ int wblink_rx_scout_select(wblink_rx* rx, uint16_t originator,
         originator, generation != nullptr ? generation : &ignored);
 }
 
+int wblink_rx_claim(wblink_rx* rx, uint16_t originator, uint16_t target_chan,
+                    uint64_t* generation) {
+    if (rx == nullptr) return 2;
+    uint64_t ignored = 0;
+    return rx->runtime_control.enqueue_claim(
+        originator, target_chan, generation != nullptr ? generation : &ignored);
+}
+
+int wblink_rx_vehicle_command(wblink_rx* rx, const char* cmd, int32_t arg,
+                              uint64_t* generation) {
+    if (rx == nullptr) return 2;
+    uint64_t ignored = 0;
+    return rx->runtime_control.enqueue_vehicle_command(
+        cmd, arg, generation != nullptr ? generation : &ignored);
+}
+
+int wblink_rx_command_status(wblink_rx* rx, char* buffer, size_t capacity,
+                             size_t* required, uint64_t* applied_generation) {
+    if (rx == nullptr) return 2;
+    uint64_t ignored = 0;
+    return rx->runtime_control.copy_command(
+        buffer, capacity, required,
+        applied_generation != nullptr ? applied_generation : &ignored);
+}
+
 int wblink_rx_scout_results(wblink_rx* rx, char* buffer, size_t capacity,
                             size_t* required, uint64_t* applied_generation) {
     if (rx == nullptr) return 2;

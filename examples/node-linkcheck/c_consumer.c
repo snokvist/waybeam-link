@@ -77,6 +77,21 @@ int wblink_c_consumer_check(void) {
             wblink_rx_destroy(rx);
             return 1;
         }
+        /* Control TX. These are the symbols that make a FRAME_SHM/
+         * CONTROL_SERVER/VENC-OFF consumer able to claim and command, so the
+         * link gate has to reach them or the Android build is the first thing
+         * that discovers they did not resolve. */
+        if (wblink_rx_claim(NULL, 1, 0, &generation) != 2 ||
+            wblink_rx_claim(rx, 0, 0, &generation) != 2 ||
+            wblink_rx_claim(rx, 1, 0, &generation) != 3 ||
+            wblink_rx_vehicle_command(rx, NULL, 0, &generation) != 2 ||
+            wblink_rx_vehicle_command(rx, "", 0, &generation) != 2 ||
+            wblink_rx_vehicle_command(rx, "arq", 1, &generation) != 3 ||
+            wblink_rx_command_status(rx, NULL, 0, &required,
+                                     &generation) != 3) {
+            wblink_rx_destroy(rx);
+            return 1;
+        }
     }
     wblink_rx_destroy(rx);
 

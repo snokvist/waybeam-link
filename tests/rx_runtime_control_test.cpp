@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "wbtest.h"
 
@@ -219,11 +220,100 @@ void test_concurrent_publish_and_copy_stays_generation_coupled() {
     CHECK_EQ_U(mismatches.load(std::memory_order_relaxed), 0);
 }
 
+// §11.4 / §11.7. The mailbox is the only thing standing between a C caller's
+// arguments and a loop that will TRANSMIT on them, so the rejections matter as
+// much as the acceptances.
+void test_control_tx_commands() {
+    RxRuntimeControl ctl;
+    uint64_t gen = 77;
+
+    // Closed mailbox first: neither verb may fabricate a generation.
+    CHECK(ctl.enqueue_claim(1, 0, &gen) == 3);
+    CHECK(ctl.enqueue_vehicle_command("arq", 1, &gen) == 3);
+    CHECK_EQ_U(gen, 77);
+
+    ctl.start_run();
+
+    CHECK(ctl.enqueue_claim(0, 0, &gen) == 2);       // originator 0
+    CHECK(ctl.enqueue_claim(1, 0, nullptr) == 2);
+    CHECK(ctl.enqueue_vehicle_command(nullptr, 0, &gen) == 2);
+    CHECK(ctl.enqueue_vehicle_command("arq", 0, nullptr) == 2);
+    CHECK(ctl.enqueue_vehicle_command("", 0, &gen) == 2);  // empty name
+    CHECK_EQ_U(gen, 77);  // every refusal above left it untouched
+
+    // An over-long name is REJECTED, never truncated: a prefix of a long
+    // string can spell a different, valid command.
+    const std::string too_long(RxRuntimeControl::kMaxCommandName + 1, 'a');
+    CHECK(ctl.enqueue_vehicle_command(too_long.c_str(), 0, &gen) == 2);
+    // An unterminated buffer must be read no further than the bound. Sized
+    // exactly so a read of kMaxCommandName + 1 stays in bounds and finds no
+    // NUL, which is the rejection this asserts.
+    std::vector<char> unterminated(RxRuntimeControl::kMaxCommandName + 1, 'b');
+    CHECK(ctl.enqueue_vehicle_command(unterminated.data(), 0, &gen) == 2);
+    CHECK_EQ_U(gen, 77);
+
+    // The longest legal name is accepted at the boundary, not one short of it.
+    const std::string at_limit(RxRuntimeControl::kMaxCommandName, 'c');
+    CHECK(ctl.enqueue_vehicle_command(at_limit.c_str(), 0, &gen) == 0);
+    CHECK_EQ_U(gen, 1);
+
+    uint64_t claim_gen = 0;
+    CHECK(ctl.enqueue_claim(4242, 5805, &claim_gen) == 0);
+    CHECK_EQ_U(claim_gen, 2);  // supersedes the un-taken command above
+
+    auto cmd = ctl.take_command();
+    CHECK(cmd.has_value());
+    if (cmd) {
+        CHECK(cmd->kind == RxRuntimeControl::CommandKind::kClaim);
+        CHECK_EQ_U(cmd->originator, 4242);
+        CHECK_EQ_U(cmd->target_chan, 5805);
+        CHECK_EQ_U(cmd->generation, claim_gen);
+        CHECK(cmd->cmd.empty());
+    }
+    CHECK(!ctl.take_command().has_value());
+
+    // The name is COPIED — the caller's buffer may die immediately after.
+    {
+        std::string scratch = "fps_select";
+        uint64_t vgen = 0;
+        CHECK(ctl.enqueue_vehicle_command(scratch.c_str(), -3, &vgen) == 0);
+        scratch = "clobbered";
+        cmd = ctl.take_command();
+        CHECK(cmd.has_value());
+        if (cmd) {
+            CHECK(cmd->kind ==
+                  RxRuntimeControl::CommandKind::kVehicleCommand);
+            CHECK(cmd->cmd == "fps_select");
+            CHECK(cmd->arg == -3);  // range is the loop's call, not ours
+            CHECK_EQ_U(cmd->generation, vgen);
+        }
+    }
+
+    // The campaign snapshot follows the same publish/copy contract as the
+    // other three, including not-ready before the first publication.
+    RxRuntimeControl fresh;
+    std::array<char, 64> out{};
+    size_t required = 0;
+    uint64_t snap_gen = 0;
+    CHECK(fresh.copy_command(out.data(), out.size(), &required, &snap_gen) ==
+          3);
+    CHECK(fresh.take_command_snapshot_request());  // the copy attempt asked
+    CHECK(!fresh.take_command_snapshot_request());  // and the edge cleared
+    fresh.publish_command("{\"campaign\":{}}", 9);
+    CHECK(fresh.copy_command(out.data(), out.size(), &required, &snap_gen) ==
+          0);
+    CHECK_EQ_U(snap_gen, 9);
+    CHECK(std::strcmp(out.data(), "{\"campaign\":{}}") == 0);
+    CHECK(fresh.copy_command(out.data(), 3, &required, &snap_gen) == 4);
+    CHECK_EQ_U(required, std::strlen("{\"campaign\":{}}") + 1);
+}
+
 }  // namespace
 
 int main() {
     test_lifecycle_and_latest_intent();
     test_snapshot_requests_and_copies();
     test_concurrent_publish_and_copy_stays_generation_coupled();
+    test_control_tx_commands();
     return wbtest_finish("rx_runtime_control_test");
 }

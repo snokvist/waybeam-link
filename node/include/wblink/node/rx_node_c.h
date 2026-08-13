@@ -14,6 +14,15 @@
  * copy immutable snapshots. They never call node state from the caller's
  * thread, and the shim still does not own a thread.
  *
+ * That rule is what lets `wblink_rx_claim` and `wblink_rx_vehicle_command`
+ * exist here at all. They cause the node to TRANSMIT, which reads like a
+ * second radio owner and is not one: they enqueue, and the RX loop issues on
+ * its own thread through the same code the REST control plane calls. A
+ * receiving node has always owned a designated role:"tx" uplink adapter; only
+ * the trigger was missing, and it was missing because it sat behind
+ * WBLINK_CONTROL_SERVER. `run_tx` — the VIDEO transmitter, which really is
+ * absent from a frame-SHM-less build — is not involved.
+ *
  *   - THE SHIM OWNS THE STOP FLAG. A C caller cannot name `std::atomic<int>`,
  *     and C11's `_Atomic int` is not guaranteed layout-compatible with it, so
  *     handing the flag across the boundary would be a portability bet. An
@@ -126,6 +135,61 @@ int wblink_rx_scout_select(wblink_rx *rx, uint16_t originator,
                            uint64_t *generation);
 
 /*
+ * §11.4. Queue a CSA claim of a scouted craft: re-key the issuer from the
+ * craft's key, bind the link to its net_id, move every ear onto its channel to
+ * be heard, and issue a §11 campaign moving it to `target_chan`.
+ * `target_chan == 0` asks for the emptiest allowlisted channel.
+ *
+ * THIS IS THE CONTROL TRANSMITTER, AND IT IS NOT A SECOND RADIO OWNER. The
+ * command is queued from your thread and applied by the RX loop on its own,
+ * exactly as the scout commands above are; nothing outside `wblink_rx_run`
+ * ever touches the radio, the issuers or the ScoutEngine. That is the whole
+ * reason a consumer built with WBLINK_FRAME_SHM / WBLINK_CONTROL_SERVER /
+ * WBLINK_VENC OFF can transmit control frames at all: `run_tx` is the VIDEO
+ * transmitter and is genuinely absent from such a build, but a receiving node
+ * has always owned a designated role:"tx" uplink adapter and issued claims on
+ * it. Only the trigger was missing.
+ *
+ * A claim SUPERSEDES a queued-but-untaken sweep command, matching the loop's
+ * own behaviour — the claim path abandons a running sweep, because a claim is
+ * what a sweep is for.
+ *
+ * Queueing is not succeeding. The synchronous refusals (unknown craft, stale
+ * candidate, no key, retune failure) and the asynchronous outcome (the campaign
+ * committing or rolling back) both surface through `wblink_rx_selection`,
+ * whose `state` moves through "claiming" to committed or back. A controlled
+ * cache refuses outright: it follows its receiver's selection and must not be
+ * able to split from it.
+ *
+ * Same return contract as the scout calls: 0 queued, 2 invalid argument
+ * (originator 0), 3 no active run, 1 allocation failure.
+ */
+int wblink_rx_claim(wblink_rx *rx, uint16_t originator, uint16_t target_chan,
+                    uint64_t *generation);
+
+/*
+ * §11.7. Queue a command campaign toward the claimed craft. `cmd` is the §15.5
+ * REST spelling ("arq", "fps_select", "mode", "mtu_tier", ...; the map is
+ * `node/vcmd.h`) and is copied before this call returns — it need not outlive
+ * the call. A name longer than 32 bytes is rejected rather than truncated,
+ * since a truncated name could name a DIFFERENT command.
+ *
+ * This is the untyped entry point, so commands §15.5 restricts to a typed REST
+ * endpoint are refused rather than issued with a bare integer argument.
+ *
+ * A campaign needs a craft claimed first: §11.7 has no bootstrap, and a craft
+ * silently drops commands from an issuer whose CSA it has not accepted, so an
+ * unclaimed send would report accepted and then always time out. Call
+ * `wblink_rx_claim` first.
+ *
+ * 0 queued, 2 invalid argument (NULL/empty/over-long `cmd`), 3 no active run,
+ * 1 allocation failure. A queued command that the loop then REFUSES still
+ * returns 0 here — read `wblink_rx_command_status` for the verdict.
+ */
+int wblink_rx_vehicle_command(wblink_rx *rx, const char *cmd, int32_t arg,
+                              uint64_t *generation);
+
+/*
  * Copy immutable JSON snapshots published by the RX loop. The JSON shapes are
  * the existing §15.5/§15.5a scout, discovery and selection payloads; this ABI
  * does not add fields to them.
@@ -148,6 +212,26 @@ int wblink_rx_discovery(wblink_rx *rx, char *buffer, size_t capacity,
 int wblink_rx_selection(wblink_rx *rx, char *buffer, size_t capacity,
                         size_t *required,
                         uint64_t *applied_generation);
+
+/*
+ * The §11.7 campaign readout, and the ONLY place a queued command's verdict is
+ * visible — an enqueue call returns before the loop has judged it.
+ *
+ *   {"campaign":{"nonce":N,"cmd":"...","arg":N,"state":"..."},
+ *    "verdict":{"code":200,"result":{...}}}
+ *
+ * `campaign` is the live §11.7 state, identical to what §15.5's
+ * /vehicle/command GET returns, and advances on its own as the craft ACKs.
+ * `verdict` is present ONLY when `applied_generation` names a generation that
+ * tried to start a campaign — so a poll after a claim, or a plain refresh
+ * between commands, shows a campaign with no verdict attached rather than an
+ * older verdict that would read as this command's.
+ *
+ * Same buffer/return contract as the three calls above.
+ */
+int wblink_rx_command_status(wblink_rx *rx, char *buffer, size_t capacity,
+                             size_t *required,
+                             uint64_t *applied_generation);
 
 /*
  * Load `config_path` and run a receiving node until stopped. Blocks.

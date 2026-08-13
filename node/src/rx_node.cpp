@@ -1067,8 +1067,28 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     uint16_t mtu_requested = kDefaultMaxPayload;
     uint16_t mtu_effective = kDefaultMaxPayload;
     bool mtu_reissue_pending = false;
+    // §11.7 issuers, held as NAMED locals rather than reached through `h`,
+    // because ControlHandlers is std::move()d into the server once every
+    // handler is registered, so a lambda that captures `h` by reference and
+    // dereferences a sibling member at CALL time reads the moved-from husk.
+    //
+    // They are declared HERE, at run_rx scope, and NOT inside the control
+    // block below (Pass 166). The server outlives that block and dispatches
+    // from the main loop, so a handler capturing a block-scoped local by
+    // reference reads a DESTROYED std::function — ASan `stack-use-after-scope`,
+    // and plain UB in a release build. Device-caught on the .242 ground the
+    // first time §11.7 0x0A `both:true` became reachable on an RF node; `main`
+    // at 02d6145 aborts identically on a udp-air uplink, so the bug predates
+    // Pass 166 and was merely shielded by Pass 165's blanket 409.
+    //
+    // `issue_vcmd` joined it here when the assignments were hoisted for the
+    // C ABI: it is the UNTYPED entry point (it refuses the §15.5 commands that
+    // require a typed REST endpoint), which is what both the generic
+    // /vehicle/command handler and a queued C caller need.
     std::function<std::pair<int, std::string>(const std::string&, int)>
         start_vehicle_command;
+    std::function<std::pair<int, std::string>(const std::string&, int)>
+        issue_vcmd;
     // §10.7: "abort, process shutdown, retune conflict, and failure must never
     // leave the last probe power active." ONE convergence path for every
     // cancel — the alternative is a restore call per exit site, and the sites
@@ -1246,6 +1266,226 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         }
         return out + "}";
     };
+    // §11.4 claim and the §11.7 command campaign, hoisted to run_rx scope
+    // for the reason start_scout_sweep states above: ONE implementation for
+    // both the REST handler and the queued C ABI. They were block-local to
+    // the control-server branch until the Android consumer needed them, and
+    // a second copy behind WBLINK_CONTROL_SERVER=OFF is exactly the drift
+    // this layer exists to prevent.
+    //
+    // Each one now carries its OWN cache-assignment refusal. It used to be
+    // the `if (!cache_assignment_gate)` that wrapped handler REGISTRATION
+    // below, so hoisting them out from under it would have silently handed a
+    // controlled cache the independent claim/CSA surface that guard exists to
+    // deny — see its comment there. start_scout_sweep already self-guards the
+    // same way; this matches it rather than inventing a second pattern.
+    // §15.5a claim: CSA-grab a scouted craft. Re-keys the issuer with the
+    // craft's key (configured secret, or the cached announced token §11.4a),
+    // binds the link to its net_id, moves onto its channel to be heard, then
+    // issues a §11 campaign to target_chan (0 → the emptiest allowlisted
+    // channel). The loop's issuer.tick drives the copies/commit; post-claim
+    // the net_id stamp/filter and channel hold until an explicit re-scout.
+    const auto do_claim = [&](int originator_i, int target_chan_i) -> std::string {
+        // Was the enclosing `if (!cache_assignment_gate)` around handler
+        // registration until this lambda was hoisted; see the header comment.
+        if (cache_assignment_gate) {
+            return "controlled cache cannot claim independently";
+        }
+        if (originator_i <= 0 || originator_i > 0xFFFF) {
+            return "invalid originator";
+        }
+        const uint16_t orig = static_cast<uint16_t>(originator_i);
+        const auto cand = scout.candidate_for(orig);
+        if (!cand) return "unknown craft (run a scout first)";
+        // §15.5a / B9: a scout candidate that predates a craft reboot points
+        // at the craft's OLD channel — the claim would retune there and then
+        // abort (no CSA_ARMED) with no hint to the operator. If the craft has
+        // announced a different session more recently than the scout saw it,
+        // the candidate is stale; demand a re-scout instead of a silent abort.
+        const auto live_sess = discovery.session_for(orig);
+        if (live_sess && *live_sess != cand->session) {
+            return "stale candidate (craft rebooted since scout) — re-scout";
+        }
+        // §2/§13 passive spectator (Pass 74): no uplink for a §11 issuer
+        // campaign, so "select" is a passive tune. Retune all ears onto the
+        // scouted feed's channel + net_id; §2 first-latch /
+        // preferred_originator picks up the stream. csa_psk stays
+        // craft+ground; a CSA move is recovered by re-scout, not followed.
+        if (l.cfg.node.spectator) {
+            return select_scout_candidate(orig);
+        }
+        if (!air.value->supports_csa()) {
+            return "CSA unsupported by this backend";
+        }
+        // Configured secret wins; else the cached announced token (§11.4a).
+        std::vector<uint8_t> key = cparams.psk;
+        if (key.empty()) {
+            const auto tok = discovery.token_for(orig);
+            if (!tok) return "no CSA key for craft (no cached token)";
+            key.assign(tok->begin(), tok->end());
+        }
+        if (!issuer.set_psk(key)) return "claim busy (campaign active)";
+        if (!vissuer.set_psk(key)) {
+            return "claim busy (command campaign active)";
+        }
+        uint16_t target = static_cast<uint16_t>(target_chan_i);
+        if (target == 0) {
+            target =
+                scout.emptiest(l.cfg.policy.csa.channel_allowlist, cand->chan);
+        }
+        if (target == 0) return "no target channel (specify target_chan)";
+        // §15.5a (Pass 144): a claim is what a sweep is *for*, so it ends
+        // the sweep instead of racing it. Left running, the sweep finishes
+        // seconds later and its rest() restores the resting channel and
+        // net_id filter *over* the claim, with the campaign already in
+        // flight — the scout clobbering the operator's click. Placed after
+        // every cheap rejection, so a claim that never happens leaves a
+        // running sweep alone. abandon() rather than stop(): the very next
+        // lines retune every ear and re-pin the filter, so stop()'s restore
+        // would be a full round trip to the resting channel and back, in
+        // front of a campaign the craft is timing.
+        if (scout.scanning()) {
+            scout.abandon(now_ms());
+        }
+        // §15.5a: bind the link to the craft's net_id and move all ears onto
+        // its current channel so the campaign and CSA_ARMED return are heard.
+        air.value->set_stamp_net_id(cand->net_id);
+        air.value->set_filter_net_id(cand->net_id);
+        if (!air.value->retune_all(cand->chan, op_bw_mhz, false)) {
+            air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
+            air.value->set_filter_net_id(active_selection.net_id);
+            air.value->retune_all(active_selection.chan, op_bw_mhz, false);
+            return "failed to retune onto craft channel";
+        }
+        // retune_class 1 (500 ms dt budget) gives the craft slack for the iw
+        // shell-out retune before its §11.5 verify timeout. bw code 0 = 20 MHz
+        // (v1 single-width, matching the /csa trigger).
+        const CommonPrefix pre{l.cfg.node.originator, 0, session};
+        if (!issuer.start(pre, target, 0, 1, cand->chan, 0, 4, now_us_it)) {
+            air.value->retune_all(active_selection.chan, op_bw_mhz, false);
+            air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
+            air.value->set_filter_net_id(active_selection.net_id);
+            return "rejected (active campaign or rate-limit)";
+        }
+        previous_selection = active_selection;
+        previous_selection_state = selection_state;
+        pending_selection = LinkSelection{orig, target, 0, cand->net_id};
+        selection_state = "claiming";
+        std::fprintf(stderr, "csa: claim originator=%u net_id=%u %u->%u MHz\n",
+                     orig, cand->net_id, cand->chan, target);
+        return "";
+    };
+
+    start_vehicle_command = [&](const std::string& cmd, int arg)
+        -> std::pair<int, std::string> {
+        // Same refusal as do_claim's, and for the same reason: a controlled
+        // cache must not command the craft its receiver owns.
+        if (cache_assignment_gate) {
+            return {409,
+                    "{\"ok\":false,\"error\":\"controlled cache cannot issue "
+                    "vehicle commands\"}"};
+        }
+        const uint8_t id = vcmd_id_for(cmd);
+        if (id == 0) {
+            return {400, "{\"ok\":false,\"error\":\"unknown cmd\"}"};
+        }
+        // §10.7 (D6): "while §10.7 runs the ground refuses to issue a
+        // §11.7 CALIBRATE campaign." Only the reverse direction was
+        // implemented. Without this the craft starts its §10.6 run
+        // with the ground uplink deliberately at min_qdb, starving
+        // the report stream every §10.6 dwell and its abort clock
+        // depend on. The sequencer's own downlink issue is exempt: by
+        // then the uplink phase is terminal.
+        if (id == vcmd_id::kCalibrate && arg != 0 &&
+            uplink_cal.state() == CalibState::kRunning) {
+            return {409,
+                    "{\"ok\":false,\"error\":\"ground uplink "
+                    "calibration is running\"}"};
+        }
+        // §11.7/§3.14: MODE (Pass 105) rides the full u8 — the catalog
+        // lives on the craft, so an over-range index is the craft's
+        // REJECTED to give, not a local 400. Every other command is
+        // capped at 0..4 (Pass 68).
+        const int arg_max = (id == vcmd_id::kMode) ? 255 : kVcmdMaxArg;
+        if (arg < 0 || arg > arg_max) {
+            return {400,
+                    "{\"ok\":false,\"error\":\"arg out of range\"}"};
+        }
+        // §11.7/§15.5: refused up front, not timed out — a campaign
+        // needs a bound craft. Pass 108 deliberately does NOT admit a
+        // `latched` selection here, unlike /csa: §11.7 "no bootstrap"
+        // makes the craft silently drop commands from an issuer it has
+        // not accepted a CSA from, so sending on a latch alone returns
+        // 200 and then always times out (bench-confirmed). Name the
+        // remedy instead of pretending the command went anywhere.
+        if (selection_state != "committed" ||
+            active_selection.originator == 0) {
+            return {409,
+                    "{\"ok\":false,\"error\":\"craft not claimed — "
+                    "§11.7 commands need a CSA claim first "
+                    "(/api/v1/csa or scout/quickconnect)\"}"};
+        }
+        if (vissuer.active()) {
+            return {409,
+                    "{\"ok\":false,\"error\":\"campaign pending\"}"};
+        }
+        // §15.5a / B9, Pass 108: re-key from the craft's LIVE announced
+        // token before every campaign, exactly as /csa does. Previously
+        // only do_claim ever keyed this issuer, so a craft reached by
+        // latch alone had no key at all and every command died as a bare
+        // "rate-limit or no key". The configured-secret path is stable;
+        // skip it there.
+        if (cparams.psk.empty()) {
+            const auto tok =
+                discovery.token_for(active_selection.originator);
+            if (!tok) {
+                return {400,
+                        "{\"ok\":false,\"error\":\"no live command key "
+                        "for craft (secret-mode, or not heard for "
+                        ">5 s)\"}"};
+            }
+            const std::vector<uint8_t> key(tok->begin(), tok->end());
+            if (!vissuer.set_psk(key)) {
+                return {409,
+                        "{\"ok\":false,\"error\":\"command issuer busy "
+                        "(campaign active)\"}"};
+            }
+        }
+        if (!vissuer.start(
+                CommonPrefix{l.cfg.node.originator, 0, session},
+                active_selection.originator, id,
+                static_cast<uint8_t>(arg), now_us_it)) {
+            return {409,
+                    "{\"ok\":false,\"error\":\"rejected (rate-limit "
+                    "or no key)\"}"};
+        }
+        std::fprintf(stderr, "vcmd: campaign %s=%d nonce=%u -> %u\n",
+                     cmd.c_str(), arg, vissuer.nonce(),
+                     active_selection.originator);
+        return {200, "{\"ok\":true,\"nonce\":" +
+                         std::to_string(vissuer.nonce()) + "}"};
+    };
+
+    // §11.7 campaign state (§15.5 /vehicle/command GET). Hoisted with the two
+    // above because the queued C caller needs the same readout the REST client
+    // polls — it is the only place a campaign's outcome becomes visible, since
+    // a command that was accepted still has to be ACKed by the craft.
+    const auto command_campaign_json = [&] {
+        return std::string("{\"nonce\":") + std::to_string(vissuer.nonce()) +
+               ",\"cmd\":\"" + vcmd_name_for(vissuer.cmd_id()) +
+               "\",\"arg\":" + std::to_string(vissuer.cmd_arg()) +
+               ",\"state\":\"" + vissuer.state_str() + "\"}";
+    };
+    issue_vcmd = [&](const std::string& cmd, int arg) {
+        const uint8_t id = vcmd_id_for(cmd);
+        if (vcmd_id::typed_endpoint_only(id)) {
+            return std::pair<int, std::string>{
+                400,
+                "{\"ok\":false,\"error\":\"command requires typed "
+                "endpoint\"}"};
+        }
+        return start_vehicle_command(cmd, arg);
+    };
     // §15.5 REST control plane. RX/ground node owns the CSA trigger (replaces
     // the removed stdin trigger); profile/fec are TX-only knobs → null → 409.
     StatsSnapshot last_snap;
@@ -1260,21 +1500,6 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     }
 #else
     std::unique_ptr<ControlServer> control;
-    // §11.7 issuer, held as a NAMED local rather than reached through `h`,
-    // because ControlHandlers is std::move()d into the server once every
-    // handler is registered, so a lambda that captures `h` by reference and
-    // dereferences a sibling member at CALL time reads the moved-from husk.
-    //
-    // It is declared HERE, beside `control`, and NOT inside the block below
-    // (Pass 166). The server outlives that block and dispatches from the main
-    // loop, so a handler capturing a block-scoped local by reference reads a
-    // DESTROYED std::function — ASan `stack-use-after-scope`, and plain UB in
-    // a release build. Device-caught on the .242 ground the first time
-    // §11.7 0x0A `both:true` became reachable on an RF node; `main` at
-    // 02d6145 aborts identically on a udp-air uplink, so the bug predates
-    // Pass 166 and was merely shielded by Pass 165's blanket 409.
-    std::function<std::pair<int, std::string>(const std::string&, int)>
-        issue_vcmd;
     if (!l.cfg.control.bind.empty()) {
         auto cs = ControlServer::create(l.cfg.control.bind);
         if (!cs) {
@@ -1334,106 +1559,14 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                 return out + "}";
             };
         }
-        // §15.5a claim: CSA-grab a scouted craft. Re-keys the issuer with the
-        // craft's key (configured secret, or the cached announced token §11.4a),
-        // binds the link to its net_id, moves onto its channel to be heard, then
-        // issues a §11 campaign to target_chan (0 → the emptiest allowlisted
-        // channel). The loop's issuer.tick drives the copies/commit; post-claim
-        // the net_id stamp/filter and channel hold until an explicit re-scout.
-        auto do_claim = [&](int originator_i, int target_chan_i) -> std::string {
-            if (originator_i <= 0 || originator_i > 0xFFFF) {
-                return "invalid originator";
-            }
-            const uint16_t orig = static_cast<uint16_t>(originator_i);
-            const auto cand = scout.candidate_for(orig);
-            if (!cand) return "unknown craft (run a scout first)";
-            // §15.5a / B9: a scout candidate that predates a craft reboot points
-            // at the craft's OLD channel — the claim would retune there and then
-            // abort (no CSA_ARMED) with no hint to the operator. If the craft has
-            // announced a different session more recently than the scout saw it,
-            // the candidate is stale; demand a re-scout instead of a silent abort.
-            const auto live_sess = discovery.session_for(orig);
-            if (live_sess && *live_sess != cand->session) {
-                return "stale candidate (craft rebooted since scout) — re-scout";
-            }
-            // §2/§13 passive spectator (Pass 74): no uplink for a §11 issuer
-            // campaign, so "select" is a passive tune. Retune all ears onto the
-            // scouted feed's channel + net_id; §2 first-latch /
-            // preferred_originator picks up the stream. csa_psk stays
-            // craft+ground; a CSA move is recovered by re-scout, not followed.
-            if (l.cfg.node.spectator) {
-                return select_scout_candidate(orig);
-            }
-            if (!air.value->supports_csa()) {
-                return "CSA unsupported by this backend";
-            }
-            // Configured secret wins; else the cached announced token (§11.4a).
-            std::vector<uint8_t> key = cparams.psk;
-            if (key.empty()) {
-                const auto tok = discovery.token_for(orig);
-                if (!tok) return "no CSA key for craft (no cached token)";
-                key.assign(tok->begin(), tok->end());
-            }
-            if (!issuer.set_psk(key)) return "claim busy (campaign active)";
-            if (!vissuer.set_psk(key)) {
-                return "claim busy (command campaign active)";
-            }
-            uint16_t target = static_cast<uint16_t>(target_chan_i);
-            if (target == 0) {
-                target =
-                    scout.emptiest(l.cfg.policy.csa.channel_allowlist, cand->chan);
-            }
-            if (target == 0) return "no target channel (specify target_chan)";
-            // §15.5a (Pass 144): a claim is what a sweep is *for*, so it ends
-            // the sweep instead of racing it. Left running, the sweep finishes
-            // seconds later and its rest() restores the resting channel and
-            // net_id filter *over* the claim, with the campaign already in
-            // flight — the scout clobbering the operator's click. Placed after
-            // every cheap rejection, so a claim that never happens leaves a
-            // running sweep alone. abandon() rather than stop(): the very next
-            // lines retune every ear and re-pin the filter, so stop()'s restore
-            // would be a full round trip to the resting channel and back, in
-            // front of a campaign the craft is timing.
-            if (scout.scanning()) {
-                scout.abandon(now_ms());
-            }
-            // §15.5a: bind the link to the craft's net_id and move all ears onto
-            // its current channel so the campaign and CSA_ARMED return are heard.
-            air.value->set_stamp_net_id(cand->net_id);
-            air.value->set_filter_net_id(cand->net_id);
-            if (!air.value->retune_all(cand->chan, op_bw_mhz, false)) {
-                air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
-                air.value->set_filter_net_id(active_selection.net_id);
-                air.value->retune_all(active_selection.chan, op_bw_mhz, false);
-                return "failed to retune onto craft channel";
-            }
-            // retune_class 1 (500 ms dt budget) gives the craft slack for the iw
-            // shell-out retune before its §11.5 verify timeout. bw code 0 = 20 MHz
-            // (v1 single-width, matching the /csa trigger).
-            const CommonPrefix pre{l.cfg.node.originator, 0, session};
-            if (!issuer.start(pre, target, 0, 1, cand->chan, 0, 4, now_us_it)) {
-                air.value->retune_all(active_selection.chan, op_bw_mhz, false);
-                air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
-                air.value->set_filter_net_id(active_selection.net_id);
-                return "rejected (active campaign or rate-limit)";
-            }
-            previous_selection = active_selection;
-            previous_selection_state = selection_state;
-            pending_selection = LinkSelection{orig, target, 0, cand->net_id};
-            selection_state = "claiming";
-            std::fprintf(stderr, "csa: claim originator=%u net_id=%u %u->%u MHz\n",
-                         orig, cand->net_id, cand->chan, target);
-            return "";
-        };
         // A controlled cache is a follower of its receiver.  It must not expose
         // an independent scout/claim/CSA control surface that could split it
         // from the receiver's committed selection.
         if (!cache_assignment_gate) {
-            // Capture do_claim BY VALUE: it is a block-local lambda, but the
-            // handlers outlive this block (moved into `control`, invoked from
-            // the event loop below), so a by-reference capture would dangle —
-            // a stack-use-after-scope on the first quickconnect. scout_quickconnect
-            // already copies it (assignment below); scout_start must too.
+            // do_claim is captured BY VALUE. It lives at run_rx scope now, so
+            // this no longer guards against a dangling block-local — but the
+            // handlers are moved into `control` and invoked from the event
+            // loop, so copying stays the honest expression of that lifetime.
             // §10.7 (D2): scout_idx IS the role:"tx" uplink adapter, so a
             // sweep roams the calibration actuator. The liveness clock cannot
             // catch it — §3.16 keeps arriving on the diversity RX adapters
@@ -1593,12 +1726,12 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             // §10.7 start prerequisites. Each returns the failed one so the
             // operator sees WHY, not just 409 — the list is long and every
             // entry is a real hazard, not a formality.
-            // `issue_vcmd` is declared at run_rx scope beside `control` — see
-            // the comment there. It used to live here, which made every
-            // handler that captured it by reference read a destroyed object
-            // once this block exited (the earlier symptom was `both:true`
-            // reporting "no vehicle-command path on this node" on a ground
-            // that plainly had one; the sharper one is an ASan abort).
+            // `issue_vcmd` is declared and assigned at run_rx scope — see the
+            // comment at its declaration. It used to live here, which made
+            // every handler that captured it by reference read a destroyed
+            // object once this block exited (the earlier symptom was
+            // `both:true` reporting "no vehicle-command path on this node" on
+            // a ground that plainly had one; the sharper one is an ASan abort).
             // §10.3/§11.7 0x0A (Pass 135): the ground's own uplink ceiling,
             // and with `both` the craft's too — one action, both directions,
             // the shape {"action":"start_both"} already has for calibration.
@@ -1778,105 +1911,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             };
             h.scout_quickconnect = do_claim;
             // §11.7 command campaign toward the bound craft (§15.5).
-            h.vehicle_command_json = [&] {
-                return std::string("{\"nonce\":") +
-                       std::to_string(vissuer.nonce()) + ",\"cmd\":\"" +
-                       vcmd_name_for(vissuer.cmd_id()) +
-                       "\",\"arg\":" + std::to_string(vissuer.cmd_arg()) +
-                       ",\"state\":\"" + vissuer.state_str() + "\"}";
-            };
-            start_vehicle_command = [&](const std::string& cmd, int arg)
-                -> std::pair<int, std::string> {
-                const uint8_t id = vcmd_id_for(cmd);
-                if (id == 0) {
-                    return {400, "{\"ok\":false,\"error\":\"unknown cmd\"}"};
-                }
-                // §10.7 (D6): "while §10.7 runs the ground refuses to issue a
-                // §11.7 CALIBRATE campaign." Only the reverse direction was
-                // implemented. Without this the craft starts its §10.6 run
-                // with the ground uplink deliberately at min_qdb, starving
-                // the report stream every §10.6 dwell and its abort clock
-                // depend on. The sequencer's own downlink issue is exempt: by
-                // then the uplink phase is terminal.
-                if (id == vcmd_id::kCalibrate && arg != 0 &&
-                    uplink_cal.state() == CalibState::kRunning) {
-                    return {409,
-                            "{\"ok\":false,\"error\":\"ground uplink "
-                            "calibration is running\"}"};
-                }
-                // §11.7/§3.14: MODE (Pass 105) rides the full u8 — the catalog
-                // lives on the craft, so an over-range index is the craft's
-                // REJECTED to give, not a local 400. Every other command is
-                // capped at 0..4 (Pass 68).
-                const int arg_max = (id == vcmd_id::kMode) ? 255 : kVcmdMaxArg;
-                if (arg < 0 || arg > arg_max) {
-                    return {400,
-                            "{\"ok\":false,\"error\":\"arg out of range\"}"};
-                }
-                // §11.7/§15.5: refused up front, not timed out — a campaign
-                // needs a bound craft. Pass 108 deliberately does NOT admit a
-                // `latched` selection here, unlike /csa: §11.7 "no bootstrap"
-                // makes the craft silently drop commands from an issuer it has
-                // not accepted a CSA from, so sending on a latch alone returns
-                // 200 and then always times out (bench-confirmed). Name the
-                // remedy instead of pretending the command went anywhere.
-                if (selection_state != "committed" ||
-                    active_selection.originator == 0) {
-                    return {409,
-                            "{\"ok\":false,\"error\":\"craft not claimed — "
-                            "§11.7 commands need a CSA claim first "
-                            "(/api/v1/csa or scout/quickconnect)\"}"};
-                }
-                if (vissuer.active()) {
-                    return {409,
-                            "{\"ok\":false,\"error\":\"campaign pending\"}"};
-                }
-                // §15.5a / B9, Pass 108: re-key from the craft's LIVE announced
-                // token before every campaign, exactly as /csa does. Previously
-                // only do_claim ever keyed this issuer, so a craft reached by
-                // latch alone had no key at all and every command died as a bare
-                // "rate-limit or no key". The configured-secret path is stable;
-                // skip it there.
-                if (cparams.psk.empty()) {
-                    const auto tok =
-                        discovery.token_for(active_selection.originator);
-                    if (!tok) {
-                        return {400,
-                                "{\"ok\":false,\"error\":\"no live command key "
-                                "for craft (secret-mode, or not heard for "
-                                ">5 s)\"}"};
-                    }
-                    const std::vector<uint8_t> key(tok->begin(), tok->end());
-                    if (!vissuer.set_psk(key)) {
-                        return {409,
-                                "{\"ok\":false,\"error\":\"command issuer busy "
-                                "(campaign active)\"}"};
-                    }
-                }
-                if (!vissuer.start(
-                        CommonPrefix{l.cfg.node.originator, 0, session},
-                        active_selection.originator, id,
-                        static_cast<uint8_t>(arg), now_us_it)) {
-                    return {409,
-                            "{\"ok\":false,\"error\":\"rejected (rate-limit "
-                            "or no key)\"}"};
-                }
-                std::fprintf(stderr, "vcmd: campaign %s=%d nonce=%u -> %u\n",
-                             cmd.c_str(), arg, vissuer.nonce(),
-                             active_selection.originator);
-                return {200, "{\"ok\":true,\"nonce\":" +
-                                 std::to_string(vissuer.nonce()) + "}"};
-            };
-            issue_vcmd = [&](const std::string& cmd, int arg) {
-                const uint8_t id = vcmd_id_for(cmd);
-                if (vcmd_id::typed_endpoint_only(id)) {
-                    return std::pair<int, std::string>{
-                        400,
-                        "{\"ok\":false,\"error\":\"command requires typed "
-                        "endpoint\"}"};
-                }
-                return start_vehicle_command(cmd, arg);
-            };
+            h.vehicle_command_json = command_campaign_json;
             h.vehicle_command = issue_vcmd;
             h.link_mtu = [&](const std::string& mode)
                 -> std::pair<int, std::string> {
@@ -2029,6 +2064,10 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         if (runtime_control != nullptr) {
             if (auto command = runtime_control->take_command()) {
                 std::string error;
+                // Empty unless this command produced a synchronous verdict a
+                // queued caller would otherwise never see (§11.7 only — the
+                // others report through the scout/selection snapshots).
+                std::string command_verdict;
                 switch (command->kind) {
                     case RxRuntimeControl::CommandKind::kScoutStart:
                         error = start_scout_sweep(command->channels,
@@ -2047,6 +2086,29 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                         error = select_scout_candidate(command->originator);
                         if (!error.empty()) selection_state = "select_failed";
                         break;
+                    case RxRuntimeControl::CommandKind::kClaim:
+                        // do_claim leaves selection_state at "claiming" on
+                        // success and untouched on refusal, so unlike select
+                        // there is nothing to stage here. The claim's real
+                        // outcome lands later, when the campaign commits or
+                        // rolls back — the selection snapshot is where a
+                        // consumer watches for it.
+                        error = do_claim(command->originator,
+                                         command->target_chan);
+                        break;
+                    case RxRuntimeControl::CommandKind::kVehicleCommand: {
+                        // The untyped entry point, matching what a REST client
+                        // reaches through /vehicle/command: commands that
+                        // §15.5 restricts to a typed endpoint are refused
+                        // rather than silently issued with a bare integer.
+                        const auto [code, body] =
+                            issue_vcmd(command->cmd, command->arg);
+                        command_verdict =
+                            "{\"code\":" + std::to_string(code) +
+                            ",\"result\":" + body + "}";
+                        if (code != 200) error = body;
+                        break;
+                    }
                 }
                 runtime_control->note_applied(command->generation);
                 if (!error.empty()) {
@@ -2064,6 +2126,18 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                     scout.results_json(now), command->generation);
                 runtime_control->publish_selection(
                     build_selection_json(), command->generation);
+                // The campaign readout always carries the live §11.7 state;
+                // `verdict` is present only when this generation was the one
+                // that tried to start a campaign. A consumer that polls after
+                // a kClaim therefore sees the campaign it did not issue, with
+                // no verdict claiming it did.
+                runtime_control->publish_command(
+                    "{\"campaign\":" + command_campaign_json() +
+                        (command_verdict.empty()
+                             ? std::string()
+                             : ",\"verdict\":" + command_verdict) +
+                        "}",
+                    command->generation);
             }
         }
         if (aim_log_enabled()) {
@@ -2901,6 +2975,14 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 runtime_control->publish_selection(build_selection_json(),
                                                    generation);
             }
+            if (runtime_control->take_command_snapshot_request()) {
+                // No verdict here: this refresh belongs to no command. A
+                // campaign's state advances on its own as the craft ACKs, and
+                // that is what a poller between commands is watching.
+                runtime_control->publish_command(
+                    "{\"campaign\":" + command_campaign_json() + "}",
+                    generation);
+            }
         }
         if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
@@ -3003,6 +3085,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
         runtime_control->publish_discovery(
             discovery.json(now_ms(), rx.stream_keys()));
         runtime_control->publish_selection(build_selection_json(), generation);
+        runtime_control->publish_command(
+            "{\"campaign\":" + command_campaign_json() + "}", generation);
     }
     // §10.7: shutdown is an exit like any other. Without this a SIGTERM
     // mid-run leaves the uplink adapter at the last probe power until some

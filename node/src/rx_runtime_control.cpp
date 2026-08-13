@@ -43,8 +43,12 @@ int RxRuntimeControl::enqueue_scout_start(const uint16_t* channels, size_t n,
     if (!running_) return 3;
     if (next_generation_ == std::numeric_limits<uint64_t>::max()) return 1;
     const uint64_t gen = ++next_generation_;
-    pending_ = Command{CommandKind::kScoutStart, std::move(copied), dwell_ms,
-                       0, gen};
+    Command cmd;
+    cmd.kind = CommandKind::kScoutStart;
+    cmd.channels = std::move(copied);
+    cmd.dwell_ms = dwell_ms;
+    cmd.generation = gen;
+    pending_ = std::move(cmd);
     *generation = gen;
     return 0;
 }
@@ -55,7 +59,10 @@ int RxRuntimeControl::enqueue_scout_stop(uint64_t* generation) {
     if (!running_) return 3;
     if (next_generation_ == std::numeric_limits<uint64_t>::max()) return 1;
     const uint64_t gen = ++next_generation_;
-    pending_ = Command{CommandKind::kScoutStop, {}, 0, 0, gen};
+    Command cmd;
+    cmd.kind = CommandKind::kScoutStop;
+    cmd.generation = gen;
+    pending_ = std::move(cmd);
     *generation = gen;
     return 0;
 }
@@ -67,7 +74,60 @@ int RxRuntimeControl::enqueue_scout_select(uint16_t originator,
     if (!running_) return 3;
     if (next_generation_ == std::numeric_limits<uint64_t>::max()) return 1;
     const uint64_t gen = ++next_generation_;
-    pending_ = Command{CommandKind::kScoutSelect, {}, 0, originator, gen};
+    Command cmd;
+    cmd.kind = CommandKind::kScoutSelect;
+    cmd.originator = originator;
+    cmd.generation = gen;
+    pending_ = std::move(cmd);
+    *generation = gen;
+    return 0;
+}
+
+int RxRuntimeControl::enqueue_claim(uint16_t originator, uint16_t target_chan,
+                                    uint64_t* generation) {
+    if (originator == 0 || generation == nullptr) return 2;
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_) return 3;
+    if (next_generation_ == std::numeric_limits<uint64_t>::max()) return 1;
+    const uint64_t gen = ++next_generation_;
+    Command cmd;
+    cmd.kind = CommandKind::kClaim;
+    cmd.originator = originator;
+    cmd.target_chan = target_chan;
+    cmd.generation = gen;
+    pending_ = std::move(cmd);
+    *generation = gen;
+    return 0;
+}
+
+int RxRuntimeControl::enqueue_vehicle_command(const char* cmd, int32_t arg,
+                                              uint64_t* generation) {
+    if (cmd == nullptr || generation == nullptr) return 2;
+    // Bound the read before the copy: strlen on a caller-owned pointer with no
+    // terminator inside the bound is the failure this exists to avoid.
+    size_t len = 0;
+    while (len <= kMaxCommandName && cmd[len] != '\0') ++len;
+    if (len == 0 || len > kMaxCommandName) return 2;
+
+    // Copy outside the lock, as enqueue_scout_start does, so a bad allocation
+    // cannot stall the RX loop while it takes a command.
+    std::string name;
+    try {
+        name.assign(cmd, len);
+    } catch (...) {
+        return 1;  // no C++ exception may escape the eventual C shim
+    }
+
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_) return 3;
+    if (next_generation_ == std::numeric_limits<uint64_t>::max()) return 1;
+    const uint64_t gen = ++next_generation_;
+    Command out;
+    out.kind = CommandKind::kVehicleCommand;
+    out.cmd = std::move(name);
+    out.arg = arg;
+    out.generation = gen;
+    pending_ = std::move(out);
     *generation = gen;
     return 0;
 }
@@ -111,6 +171,13 @@ bool RxRuntimeControl::take_selection_snapshot_request() {
     return requested;
 }
 
+bool RxRuntimeControl::take_command_snapshot_request() {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const bool requested = command_snapshot_requested_;
+    command_snapshot_requested_ = false;
+    return requested;
+}
+
 void RxRuntimeControl::publish_scout(std::string json, uint64_t generation) {
     auto next =
         std::make_shared<const GeneratedSnapshot>(std::move(json), generation);
@@ -130,6 +197,13 @@ void RxRuntimeControl::publish_selection(std::string json,
         std::make_shared<const GeneratedSnapshot>(std::move(json), generation);
     const std::lock_guard<std::mutex> lock(mutex_);
     selection_snapshot_ = std::move(next);
+}
+
+void RxRuntimeControl::publish_command(std::string json, uint64_t generation) {
+    auto next =
+        std::make_shared<const GeneratedSnapshot>(std::move(json), generation);
+    const std::lock_guard<std::mutex> lock(mutex_);
+    command_snapshot_ = std::move(next);
 }
 
 int RxRuntimeControl::copy_scout(char* buffer, size_t capacity,
@@ -195,6 +269,34 @@ int RxRuntimeControl::copy_selection(char* buffer, size_t capacity,
         const std::lock_guard<std::mutex> lock(mutex_);
         selection_snapshot_requested_ = true;
         snapshot = selection_snapshot_;
+    }
+    if (!snapshot) {
+        *required = 0;
+        *generation = applied_generation();
+        return 3;
+    }
+    if (snapshot->json.size() == std::numeric_limits<size_t>::max()) return 1;
+    const size_t need = snapshot->json.size() + 1;
+    *required = need;
+    *generation = snapshot->generation;
+    if (buffer == nullptr) return capacity == 0 ? 0 : 2;
+    if (capacity < need) return 4;
+    std::memcpy(buffer, snapshot->json.c_str(), need);
+    return 0;
+}
+
+int RxRuntimeControl::copy_command(char* buffer, size_t capacity,
+                                   size_t* required, uint64_t* generation) {
+    if (required == nullptr || generation == nullptr ||
+        (buffer == nullptr && capacity != 0)) {
+        return 2;
+    }
+
+    std::shared_ptr<const GeneratedSnapshot> snapshot;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        command_snapshot_requested_ = true;
+        snapshot = command_snapshot_;
     }
     if (!snapshot) {
         *required = 0;
