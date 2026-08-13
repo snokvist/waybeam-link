@@ -1074,3 +1074,49 @@ idle-craft number.
 
 Untested: Jaguar3/CU at these dwells. Two adapters of one part number are not a
 replicate, and two chip families certainly are not.
+
+## 2026-08-13 — a ground's own discovery polling deleted its claim key
+
+**Symptom.** A craft resolved by a scout sweep was unclaimable seconds later:
+`do_claim` refused with "no CSA key for craft". It worked only for a craft
+sitting on the ground's *resting* channel, which read as "the §11.4a token is
+only cached from resting-channel discovery".
+
+**That reading is wrong, and it cost two bench rounds and one unnecessary code
+change.** `discovery.observe()` is on the sweep path (`rx_node.cpp`, next to
+`scout.on_frame`), so a dwell **does** cache the token. The token was stored in
+`DiscoveryCatalog::nodes_` — the *presence* view — and `json()` ages that at
+5 s. Taking a discovery snapshot is what ages it, so the ground's own UI poll
+was deleting the key its claim needed. On the resting channel the craft
+re-announces at 2 Hz and the entry never ages out; that asymmetry is the whole
+illusion.
+
+**Fix.** The token cache is its own map keyed by originator, not aged, bounded
+at 64 (`node/include/wblink/node/discovery.h`). A token is key material, not
+evidence of presence — the claim path has its own liveness guards
+(stale-session, then the §11.6 `CSA_ARMED` confirm that rolls a failed campaign
+back cleanly). Reproduction:
+`tests/node_discovery_test.cpp::test_an_announced_token_survives_the_presence_view_aging_out`,
+which fails against the pre-fix catalog.
+
+**Two wrong theories, recorded because each was plausible and each was
+disproved by measurement rather than by reading:**
+
+1. *"Occupancy ties at zero, so `emptiest()` degenerates to first-in-list."*
+   Disproved on an S22: with `channel_allowlist` reordered to lead with UNII-3
+   and the new order verified on the device, `target_chan 0` still chose 5180 —
+   twice. Occupancy **is** ranked; it ranked a live AP channel emptier than four
+   quiet UNII-3 channels. That is issue #173 demonstrated on hardware.
+2. *"The token can only be heard on the craft's channel, so the claim must
+   retune before keying."* This became an operator ruling and shipped. The
+   retune-first build **still refused on hardware** — `token_for` is synchronous
+   and cannot wait for a 2 Hz announce — which is what finally localised the
+   cause to aging. The ordering has been reverted now that the cache is fixed:
+   keying is a local lookup with no radio effect, so doing it first keeps a
+   key-less claim from paying a retune out and back. The §15.5a air-visible
+   order is unchanged — the CSA is still issued after the retune.
+
+**Method note.** The claim path's refusals went to `fprintf(stderr)`, invisible
+to an in-process consumer, so a refused claim and a transmitted-but-ignored one
+looked identical from the app. Routing the load-bearing one through `wb_logf`
+is what made round three diagnosable.

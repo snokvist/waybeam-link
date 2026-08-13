@@ -1337,52 +1337,49 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         if (scout.scanning()) {
             scout.abandon(now_ms());
         }
+        // KEYING HAPPENS BEFORE THE RETUNE, and the history matters because it
+        // moved the other way first. §11.4a's announced token is cached by
+        // `DiscoveryCatalog` from ANY dwell the scout spends on the craft's
+        // channel, so by the time a claim is possible at all — it needs a scout
+        // candidate, refused above — the key is already in hand. The 2026-08-13
+        // ruling to key AFTER the retune was made on a premise that turned out
+        // to be wrong: the token was believed to reach the catalog only from
+        // resting-channel discovery. It never did; the token was being cached
+        // from the sweep and then AGED OUT with the presence view, by the
+        // ground polling its own discovery snapshot (`discovery.h`, and
+        // `node_discovery_test.cpp` holds the reproduction). With the cache
+        // fixed, retuning first buys nothing and costs a key-less claim a
+        // retune out and back — `token_for` is synchronous and cannot wait for
+        // a 2 Hz announce, which is exactly why the retune-first build still
+        // refused on hardware.
+        //
+        // So every refusal that needs no radio stays above the retune and stays
+        // cheap; `claim_rollback` covers the one failure that can still happen
+        // after the ears have moved.
+        //
+        // Configured secret wins; else the cached announced token (§11.4a).
+        std::vector<uint8_t> key = cparams.psk;
+        if (key.empty()) {
+            const auto tok = discovery.token_for(orig);
+            if (!tok) return "no CSA key for craft (never announced one)";
+            key.assign(tok->begin(), tok->end());
+        }
+        if (!issuer.set_psk(key)) return "claim busy (campaign active)";
+        if (!vissuer.set_psk(key)) {
+            return "claim busy (command campaign active)";
+        }
         // §15.5a: bind the link to the craft's net_id and move all ears onto
         // its current channel so the campaign and CSA_ARMED return are heard.
-        air.value->set_stamp_net_id(cand->net_id);
-        air.value->set_filter_net_id(cand->net_id);
-        if (!air.value->retune_all(cand->chan, op_bw_mhz, false)) {
-            air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
-            air.value->set_filter_net_id(active_selection.net_id);
-            air.value->retune_all(active_selection.chan, op_bw_mhz, false);
-            return "failed to retune onto craft channel";
-        }
-        // KEYING HAPPENS HERE, AFTER THE RETUNE, and that ordering is the
-        // whole point (operator ruling 2026-08-13). §11.4a's announced token
-        // can only be heard ON THE CRAFT'S CHANNEL, and this used to be
-        // checked ~30 lines earlier, before the ears had moved — so the
-        // prerequisite was gated behind the step that satisfies it. Measured
-        // on an S22: a craft the sweep had just resolved on 5180 was
-        // unclaimable with "no CSA key for craft (no cached token)" while the
-        // node rested on 5805, because the token only ever came from
-        // resting-channel discovery. A craft that moves becomes unreachable.
-        //
-        // The cost is deliberate: a claim that fails for want of a key now
-        // pays a retune out and back, which is why every branch below rolls
-        // the ears home. Cheap rejections that need no key still sit above
-        // the retune and stay cheap.
         const auto claim_rollback = [&] {
             air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
             air.value->set_filter_net_id(active_selection.net_id);
             air.value->retune_all(active_selection.chan, op_bw_mhz, false);
         };
-        // Configured secret wins; else the cached announced token (§11.4a).
-        std::vector<uint8_t> key = cparams.psk;
-        if (key.empty()) {
-            const auto tok = discovery.token_for(orig);
-            if (!tok) {
-                claim_rollback();
-                return "no CSA key for craft (not announced on its channel)";
-            }
-            key.assign(tok->begin(), tok->end());
-        }
-        if (!issuer.set_psk(key)) {
+        air.value->set_stamp_net_id(cand->net_id);
+        air.value->set_filter_net_id(cand->net_id);
+        if (!air.value->retune_all(cand->chan, op_bw_mhz, false)) {
             claim_rollback();
-            return "claim busy (campaign active)";
-        }
-        if (!vissuer.set_psk(key)) {
-            claim_rollback();
-            return "claim busy (command campaign active)";
+            return "failed to retune onto craft channel";
         }
         // retune_class 1 (500 ms dt budget) gives the craft slack for the iw
         // shell-out retune before its §11.5 verify timeout. bw code 0 = 20 MHz
