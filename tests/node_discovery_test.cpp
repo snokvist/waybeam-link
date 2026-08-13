@@ -159,18 +159,21 @@ void test_scout_near_tie_prefers_proven_resting_channel() {
     uint8_t raw[wblink::kHeartbeatSize]{};
     wblink::be16_write(raw + 3, 17);
 
+    // Clock note: a channel that heard frames extends once (base + kExtendMs),
+    // so 5745 finalizes at 1000+300+1500 rather than at its base deadline.
     CHECK(scout.start({5745, 5805}, 300, 1000).empty());
     scout.tick(1030);
     for (int i = 0; i < 11; ++i) scout.on_frame(meta, announce, raw, sizeof(raw));
-    scout.tick(1300);  // finalize 5745, enter 5805
-    scout.tick(1330);
+    scout.tick(1300);  // base deadline: extends, stays on 5745
+    scout.tick(2800);  // extended deadline: finalize 5745, enter 5805
+    scout.tick(2830);
     for (int i = 0; i < 10; ++i) scout.on_frame(meta, announce, raw, sizeof(raw));
-    scout.stop(1400);
+    scout.stop(2900);
 
     const auto resolved = scout.candidate_for(17);
     CHECK(resolved.has_value());
     if (resolved) CHECK_EQ_U(resolved->chan, 5805u);
-    const std::string json = scout.results_json(1400);
+    const std::string json = scout.results_json(2900);
     CHECK(json.find("\"decoded_airtime_permille\":") != std::string::npos);
     CHECK(json.find("\"ranking_score_permille\":") != std::string::npos);
     CHECK(json.find("\"interference_score_permille\":") != std::string::npos);
@@ -189,14 +192,15 @@ void test_scout_near_tie_prefers_proven_resting_channel() {
     for (int i = 0; i < 11; ++i) {
         ambiguous.on_frame(meta, announce, raw, sizeof(raw));
     }
-    ambiguous.tick(1800);
-    ambiguous.tick(1830);
+    ambiguous.tick(1800);  // base deadline: extends
+    ambiguous.tick(3300);  // extended deadline: finalize 5745, enter 5805
+    ambiguous.tick(3330);
     for (int i = 0; i < 10; ++i) {
         ambiguous.on_frame(meta, announce, raw, sizeof(raw));
     }
-    ambiguous.stop(1900);
+    ambiguous.stop(3400);
     CHECK(!ambiguous.candidate_for(17).has_value());
-    const std::string ambiguous_json = ambiguous.results_json(1900);
+    const std::string ambiguous_json = ambiguous.results_json(3400);
     CHECK(ambiguous_json.find("\"candidates\":[]") != std::string::npos);
     CHECK(ambiguous_json.find("\"candidate_sightings\":[{\"originator\":17") !=
           std::string::npos);
@@ -235,6 +239,132 @@ void test_catalog_knows_nothing_about_an_unseen_originator() {
     CHECK(!cat.session_for(17).has_value());
 }
 
+// Craft-finder pacing (findings.md 2026-08-12). The base dwell is a short
+// presence probe; anything heard extends it once to cover the >=1 Hz announce
+// cadence. An empty band is swept at dwell_ms per channel instead of holding a
+// full second for an airtime denominator nothing publishes.
+//
+// Arm 1 is the control and the reason the rest is evidence: "the sweep got
+// faster" means nothing unless a dwell that SHOULD run long still does.
+void test_short_dwell_probes_but_anything_heard_extends() {
+    wblink::AirRxMeta meta{};
+    meta.adapter_id = 0;
+    meta.net_id = 0;
+    meta.rssi = -42;
+    uint8_t raw[wblink::kHeartbeatSize]{};
+    wblink::be16_write(raw + 3, 17);
+
+    // Arm 1 — silent channel: ends at the base deadline, not before, not after.
+    Spy quiet;
+    ScoutEngine a = make_scout(quiet);
+    CHECK(a.start({5745, 5805}, 250, 1000).empty());
+    a.tick(1030);                                    // arm the settle barrier
+    a.tick(1100);
+    CHECK_EQ_U(quiet.retuned.size(), 1u);            // still probing 5745
+    a.tick(1250);                                    // base deadline
+    CHECK_EQ_U(quiet.retuned.size(), 2u);
+    if (quiet.retuned.size() > 1) CHECK_EQ_U(quiet.retuned[1], 5805u);
+
+    // Arm 2 — traffic but no ANNOUNCE yet: extends once. This is what makes a
+    // 250 ms base dwell safe rather than lossy; a craft's video is high-rate,
+    // so presence trips long before its announce lands.
+    Spy heard;
+    ScoutEngine b = make_scout(heard);
+    CHECK(b.start({5745, 5805}, 250, 1000).empty());
+    b.tick(1030);
+    b.on_frame(meta, wblink::Heartbeat{}, raw, sizeof(raw));
+    b.tick(1250);                                    // extends, does not advance
+    CHECK_EQ_U(heard.retuned.size(), 1u);
+    b.tick(2000);                                    // inside 1000+250+1500
+    CHECK_EQ_U(heard.retuned.size(), 1u);
+    b.tick(2750);
+    CHECK_EQ_U(heard.retuned.size(), 2u);
+}
+
+// Two craft can share a channel and announce independently. An earlier draft
+// of the pacing above ended the dwell on the FIRST resolved candidate, which
+// swept ~3 s off a ~12 s sweep and silently dropped every co-channel peer —
+// the worst failure available to a craft finder, and invisible without this
+// test because the sweep still "worked" and still found *a* craft.
+void test_a_second_craft_on_one_channel_is_not_truncated_away() {
+    uint8_t raw17[wblink::kHeartbeatSize]{};
+    wblink::be16_write(raw17 + 3, 17);
+    uint8_t raw4[wblink::kHeartbeatSize]{};
+    wblink::be16_write(raw4 + 3, 4);
+    wblink::Announce first{};
+    first.prefix.originator = 17;
+    first.prefix.session_id = 99;
+    wblink::Announce second{};
+    second.prefix.originator = 4;
+    second.prefix.session_id = 100;
+    wblink::AirRxMeta meta{};
+    meta.adapter_id = 0;
+    meta.rssi = -30;
+
+    Spy spy;
+    ScoutEngine scout = make_scout(spy);
+    CHECK(scout.start({5805}, 250, 1000).empty());
+    scout.tick(1030);
+    scout.on_frame(meta, first, raw17, sizeof(raw17));    // craft 17 announces
+    scout.tick(1250);                                     // must NOT advance
+    meta.rssi = -70;
+    scout.on_frame(meta, second, raw4, sizeof(raw4));     // craft 4, same dwell
+    scout.stop(1400);
+
+    const std::string json = scout.results_json(1400);
+    CHECK(json.find("\"originator\":17") != std::string::npos);
+    CHECK(json.find("\"originator\":4") != std::string::npos);
+    CHECK(scout.candidate_for(17).has_value());
+    CHECK(scout.candidate_for(4).has_value());
+    // Each keeps its own signal — one craft's rssi must not leak onto another.
+    CHECK(json.find("\"rssi_dbm\":-30") != std::string::npos);
+    CHECK(json.find("\"rssi_dbm\":-70") != std::string::npos);
+}
+
+// §15.5a: candidates carry the STRONGEST rssi seen for that originator, and 0
+// is the no-reading sentinel rather than a legal 0 dBm. Emitting 0 as a number
+// would render as the strongest possible craft on a radio that reported
+// nothing — the failure mode worth a test.
+void test_candidate_rssi_is_strongest_and_absent_reads_null() {
+    wblink::Announce announce{};
+    announce.prefix.originator = 17;
+    announce.prefix.session_id = 99;
+    uint8_t raw[wblink::kHeartbeatSize]{};
+    wblink::be16_write(raw + 3, 17);
+
+    Spy spy;
+    ScoutEngine scout = make_scout(spy);
+    CHECK(scout.start({5805}, 250, 1000).empty());
+    scout.tick(1030);
+    wblink::AirRxMeta meta{};
+    meta.adapter_id = 0;
+    for (const int8_t rssi : {int8_t{-70}, int8_t{-16}, int8_t{-55}}) {
+        meta.rssi = rssi;                            // strongest is -16
+        scout.on_frame(meta, announce, raw, sizeof(raw));
+    }
+    scout.stop(1100);
+    const std::string json = scout.results_json(1100);
+    CHECK(json.find("\"rssi_dbm\":-16") != std::string::npos);
+    CHECK(json.find("\"rssi_dbm\":-70") == std::string::npos);
+    // Occupancy stays fail-closed no matter what the sweep heard (#173).
+    CHECK(json.find("\"duty_cycle_known\":false") != std::string::npos);
+    CHECK(json.find("\"duty_cycle_known\":true") == std::string::npos);
+
+    Spy silent;
+    ScoutEngine no_rssi = make_scout(silent);
+    CHECK(no_rssi.start({5805}, 250, 1000).empty());
+    no_rssi.tick(1030);
+    wblink::AirRxMeta unreported{};
+    unreported.adapter_id = 0;
+    unreported.rssi = 0;                             // radio reported nothing
+    no_rssi.on_frame(unreported, announce, raw, sizeof(raw));
+    no_rssi.stop(1100);
+    const std::string quiet_json = no_rssi.results_json(1100);
+    CHECK(quiet_json.find("\"originator\":17") != std::string::npos);
+    CHECK(quiet_json.find("\"rssi_dbm\":null") != std::string::npos);
+    CHECK(quiet_json.find("\"rssi_dbm\":0") == std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -244,5 +374,8 @@ int main() {
     test_scout_rejects_pre_settle_candidate_residue_and_publishes_weight();
     test_scout_near_tie_prefers_proven_resting_channel();
     test_catalog_knows_nothing_about_an_unseen_originator();
+    test_short_dwell_probes_but_anything_heard_extends();
+    test_a_second_craft_on_one_channel_is_not_truncated_away();
+    test_candidate_rssi_is_strongest_and_absent_reads_null();
     return wbtest_finish("node_discovery_test");
 }

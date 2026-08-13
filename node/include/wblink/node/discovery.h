@@ -310,6 +310,14 @@ class ScoutEngine {
         }
         accum_.transmitters.insert(originator);
         ++accum_.frames_by_orig[originator];  // §15.5a (Pass 66): evidence weight
+        // RSSI is negative dBm, so "strongest" is the MAXIMUM. 0 stays the
+        // no-reading sentinel: an unreported rssi must not read as 0 dBm, the
+        // strongest value representable.
+        if (meta.rssi != 0) {
+            auto [it, fresh] = accum_.best_rssi_by_orig.try_emplace(
+                originator, meta.rssi);
+            if (!fresh && meta.rssi > it->second) it->second = meta.rssi;
+        }
         if (const Announce* an = std::get_if<Announce>(&dec)) {
             Candidate& c = accum_.candidates[originator];
             c.originator = originator;
@@ -328,6 +336,14 @@ class ScoutEngine {
     // extends once (up to dwell_ms + kExtendMs total) — the announce cadence
     // (§3.12 ≥1 Hz) can exceed a short base dwell. An extension ends at the
     // first resolved candidate.
+    //
+    // Craft-finder pacing (findings.md 2026-08-12): the base dwell is now a
+    // short presence probe and the extension carries the announce wait. The
+    // old shape held a full second on all 38 channels because the dwell is
+    // wifi_util's airtime denominator; #173 established no duty cycle is
+    // derivable from FA/CCA at all, so that denominator guards a number
+    // published duty_cycle_known:false and rendered nowhere. Empty channels
+    // stop paying for it; channels with traffic still listen long.
     void tick(uint64_t now_ms) {
         if (phase_ != Phase::kScanning) return;
         // §15.5a (Pass 155): settle elapsed → one throwaway sense read
@@ -344,10 +360,19 @@ class ScoutEngine {
                 observe_start_ms_ = now_ms;
             }
         }
-        if (now_ms < dwell_deadline_ms_) {
-            if (!extended_ || accum_.candidates.empty()) return;
-        } else if (!extended_ && accum_.frames > 0 &&
-                   accum_.candidates.empty()) {
+        if (now_ms < dwell_deadline_ms_) return;
+        // Anything heard extends the dwell once, whether or not a candidate
+        // already resolved. This is what lets the base dwell be short: an
+        // empty channel costs dwell_ms, and only a channel with waybeam
+        // traffic on it pays for the >=1 Hz announce cadence (§3.12).
+        //
+        // The extension deliberately does NOT stop at the first candidate.
+        // Two craft can share a channel, they announce independently, and a
+        // dwell that ended on the first ANNOUNCE would silently drop the
+        // second — the worst failure available to a page whose whole job is
+        // finding craft. Ending early here would have bought ~3 s of a ~12 s
+        // sweep and paid for it in missed craft.
+        if (!extended_ && accum_.frames > 0) {
             extended_ = true;
             dwell_deadline_ms_ = entered_ms_ + dwell_ms_ + kExtendMs;
             return;
@@ -428,6 +453,8 @@ class ScoutEngine {
                        ",\"chan\":" + std::to_string(c.chan) +
                        ",\"frames\":" + std::to_string(c.frames) +
                        ",\"resolved\":true" +
+                       ",\"rssi_dbm\":" +
+                       (c.rssi_dbm != 0 ? std::to_string(c.rssi_dbm) : "null") +
                        ",\"psk_known\":" + (c.psk_known ? "true" : "false") + "}";
             }
         }
@@ -574,6 +601,10 @@ class ScoutEngine {
         bool psk_known = false;
         uint16_t chan = 0;
         uint64_t frames = 0;  // §15.5a (Pass 66): heard-most channel wins the claim
+        // §15.5a: strongest RSSI decoded from this originator on this channel;
+        // 0 = none reported (meta.rssi == 0), emitted as JSON null. Strongest,
+        // not mean — the consumer question is "which craft is nearest".
+        int rssi_dbm = 0;
     };
     struct ChannelResult {
         uint16_t chan = 0;
@@ -589,6 +620,10 @@ class ScoutEngine {
         std::set<uint16_t> transmitters;
         std::map<uint16_t, Candidate> candidates;
         std::map<uint16_t, uint64_t> frames_by_orig;  // §15.5a (Pass 66)
+        // Strongest RSSI seen per originator this dwell. Keyed like
+        // frames_by_orig so a craft heard before its ANNOUNCE still carries
+        // its signal into the candidate row.
+        std::map<uint16_t, int> best_rssi_by_orig;
     };
 
     void enter_channel(uint64_t now_ms) {
@@ -655,6 +690,10 @@ class ScoutEngine {
         }
         for (auto& [k, c] : accum_.candidates) {
             c.frames = accum_.frames_by_orig[k];  // §15.5a (Pass 66) evidence
+            if (const auto it = accum_.best_rssi_by_orig.find(k);
+                it != accum_.best_rssi_by_orig.end()) {
+                c.rssi_dbm = it->second;
+            }
             r.candidates.push_back(c);
         }
         results_.push_back(std::move(r));
@@ -705,8 +744,11 @@ class ScoutEngine {
     size_t chan_idx_ = 0;
     uint64_t dwell_deadline_ms_ = 0;
     // §15.5a (Pass 72): extension budget past the base dwell — one full
-    // worst-case 1 Hz announce period (§3.12) plus margin.
-    static constexpr uint64_t kExtendMs = 1200;
+    // worst-case 1 Hz announce period (§3.12) plus margin. Raised 1200->1500
+    // (findings.md 2026-08-12) because the craft-finder base dwell shrank to
+    // 250 ms: the extension now carries the announce wait almost alone, where
+    // it used to sit on top of a full second.
+    static constexpr uint64_t kExtendMs = 1500;
     uint64_t entered_ms_ = 0;
     bool extended_ = false;
     // §15.5a (Pass 155) discard-barrier state, reset per channel entry.

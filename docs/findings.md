@@ -947,3 +947,130 @@ host's own WiFi (`wlp2s0` is on 5180 MHz, 625 MHz away). Not yet excluded:
 channel occupancy at 5805, craft thermal, venc rate behaviour under a held
 profile. **Chase this before trusting any loss number from this bench**, and
 note that an ordered sweep will lie about it — alternate.
+
+## 2026-08-12 — Scout is a craft finder; its dwell was priced for occupancy
+
+**Tier 2.** Dwell counts, per `CLAUDE.md`. No spec text, no Pass.
+
+#173 established that ScoutEngine cannot report generic RF occupancy at all:
+FA/CCA are event counters with no duration semantics, and the one
+duration-capable primitive (phydm CLM) is unimplemented in the vendored
+devourer, which is off-limits. Occupancy is therefore not a goal the sweep can
+serve — which removes the reason the sweep was slow.
+
+**What the base dwell was buying.** `finalize_current` divides accumulated
+decoded airtime by the *elapsed* dwell to get `wifi_util_permille`. Leaving a
+channel early shortens that denominator and inflates the result, so `tick()`
+held the full base dwell on every channel and only broke out early on a channel
+whose dwell had *already* been extended. Every empty channel paid a full dwell
+to protect a denominator feeding a number that is published `duty_cycle_known:
+false` and rendered nowhere.
+
+**Measured, Android + RTL8812CU (Jaguar3), craft 17 @ 5805 MHz:**
+
+| | before | after (projected) |
+|---|---|---|
+| base dwell | 1000 ms | 250 ms |
+| `kExtendMs` | 1200 | 1500 |
+| full 38-ch sweep | ~50 s measured (38 s floor, 83.6 s ceiling) | ~12-14 s projected |
+
+**The change.** The base dwell becomes a short presence probe, and *anything
+heard* extends the dwell once — where the old form extended only when no
+candidate had resolved yet. An empty channel costs one base dwell; a channel
+with waybeam traffic gets base + `kExtendMs` to cover the announce cadence.
+The 250 ms base is safe *because* of that extension, not in spite of it: video
+is high-rate, so presence trips `frames > 0` long before an ANNOUNCE arrives.
+
+**A rejected design, recorded because it nearly shipped.** The first cut ended
+the dwell on the first *resolved candidate*, which is faster still. It is also
+wrong: `accum_.candidates` is non-empty at the FIRST announce, so a second
+craft sharing that channel — announcing independently, up to a second later —
+is silently dropped. It cost ~3 s of a ~12 s sweep and paid in missed craft,
+which is the worst failure available to a craft finder and one that leaves no
+trace, because the sweep still completes and still finds *a* craft. Note the
+old 1000 ms base dwell truncated the same way; always-extending is strictly
+better co-channel coverage than the behaviour being replaced, not merely equal
+to it. `test_a_second_craft_on_one_channel_is_not_truncated_away` pins it.
+
+**What did NOT change, deliberately.** The 30 ms sense barrier stays. It reads
+as an occupancy device, but `on_frame` gates on `barrier_done_`, so it is also
+the retune-leak guard that stops a settling frame being attributed to the
+channel just entered. That attribution is the finder's entire job, and #173
+records a still-open CU/Jaguar3 retune misattribution defect — removing the
+barrier for ~150 ms across a 14 s sweep would have traded the core function for
+1% of the runtime. The per-channel sense *read* was also kept for the same
+reason it is cheap: two register reads against a dwell budget it cannot
+meaningfully dent.
+
+**Known cost.** The airtime denominator is no longer uniform across a sweep:
+an empty channel is measured over ~250 ms and a channel with traffic over
+~1750 ms. `wifi_util_permille` was never comparable across channels in a
+strong sense, but it is now visibly less so, and a short quiet window makes a
+single stray frame read as a larger fraction of it. This is acceptable only
+because the number is published `duty_cycle_known:false` and rendered nowhere.
+If a future CLM primitive (#173) makes occupancy real, this pacing must be
+revisited first — a duration-based measurement needs a fixed window back.
+
+## 2026-08-13 — the radio is deaf for ~250 ms after every retune
+
+**Tier 2.** Measured, not derived. Changes no code in this repo; it prices the
+`dwell_ms` a caller may safely ask for.
+
+Hardware trial of the craft-finder pacing (previous entry) on Waybeam-android,
+Samsung S22 + **RTL8812AU (Jaguar1)**, craft 17 transmitting video on
+5805 MHz (~1000 decoded frames/s on its channel).
+
+**The sweep worked and then intermittently did not.** Three consecutive sweeps
+found the craft; later sweeps missed it entirely, reporting
+`candidates=[none]`. Detection came out **14/18** at a 250 ms base dwell.
+
+**Mechanism, from the per-retune log timestamps.** devourer logs every channel
+set, so the dwell actually spent on the craft's channel is directly
+observable:
+
+| sweep | result | ch161 dwell |
+|---|---|---|
+| hit ×4 | `17@5805` | 1.74-1.75 s (extension fired) |
+| miss ×2 | `[none]` | **0.255 / 0.267 s** (extension never fired) |
+
+On the misses the scout heard **nothing at all** on a channel carrying ~1000
+frames/s, so `frames > 0` never tripped and the extension never armed. The
+craft was not idle and was not weak (-12 dBm).
+
+Channel-to-channel gaps track `dwell_ms` almost exactly (250 ms dwell -> 255 ms
+gap), so the `retune()` call itself costs only ~5 ms. **The dead time is inside
+the dwell**: the adapter delivers no frames for roughly **220-270 ms** after
+retuning, presumably AGC/BB reconvergence plus USB URB pipeline refill. The
+first half of any short dwell is silent regardless of what is on the channel.
+
+**Detection vs base dwell**, same craft, same session, 10 sweeps per point:
+
+| base dwell | detection | sweep |
+|---|---|---|
+| 250 ms | 14/18 | 12.9 s |
+| 300 ms | 10/10 | ~15.5 s |
+| 400 ms | 10/10 | ~17.8 s |
+| 500 ms | 10/10 | 21.4 s |
+| 1000 ms (pre-change control) | 3/3 | 38.5 s |
+
+The knee is sharp and sits between 250 and 300 ms — i.e. exactly where the
+listening window after the silent period goes to zero. Android ships **500 ms**
+(~2x the knee) rather than 300 ms, because the knee is adjacent and only one
+chip family was measured.
+
+**`kSenseSettleMs` is unrelated and must not be "fixed" for this.** Its 30 ms
+models the retune-leak barrier for frame *attribution*, not the radio's
+time-to-first-frame. Raising it would shorten listening and make this worse.
+
+**Open, and the reason the trial did not settle it.** An *idle* craft
+(ANNOUNCE 2 Hz + HEARTBEAT 1 Hz, no video) emits roughly one frame per 333 ms.
+After ~250 ms of silence a 500 ms dwell leaves ~250 ms of listening, so
+P(hear >=1) is only ~50% per sweep, against ~90% for the old 1000 ms dwell.
+**A powered craft that is not streaming is therefore less reliably found than
+before, and pressing Scan twice is the current answer.** Not measured — the
+craft could not be made announce-only without stopping venc on the SigmaStar,
+which risks the known mi_* close-deadlock reboot. Measure it before quoting an
+idle-craft number.
+
+Untested: Jaguar3/CU at these dwells. Two adapters of one part number are not a
+replicate, and two chip families certainly are not.
