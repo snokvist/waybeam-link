@@ -1334,9 +1334,6 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         // lines retune every ear and re-pin the filter, so stop()'s restore
         // would be a full round trip to the resting channel and back, in
         // front of a campaign the craft is timing.
-        if (scout.scanning()) {
-            scout.abandon(now_ms());
-        }
         // KEYING HAPPENS BEFORE THE RETUNE, and the history matters because it
         // moved the other way first. §11.4a's announced token is cached by
         // `DiscoveryCatalog` from ANY dwell the scout spends on the craft's
@@ -1367,6 +1364,23 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         if (!issuer.set_psk(key)) return "claim busy (campaign active)";
         if (!vissuer.set_psk(key)) {
             return "claim busy (command campaign active)";
+        }
+        // §15.5a (Pass 144): a claim is what a sweep is *for*, so it ends the
+        // sweep instead of racing it. Left running, the sweep finishes seconds
+        // later and its rest() restores the resting channel and net_id filter
+        // *over* the claim, with the campaign already in flight — the scout
+        // clobbering the operator's click.
+        //
+        // THIS MUST STAY DIRECTLY ABOVE THE RETUNE. abandon() deliberately
+        // skips rest(), on the contract that the caller is about to retune and
+        // re-pin the filter itself — so any refusal BETWEEN the abandon and the
+        // retune ends the sweep and leaves every ear parked on the sweep's last
+        // dwell with the filter still widened, i.e. no video until something
+        // else retunes. Keying moved above the retune and took this with it for
+        // one commit; the three refusals just above (no key, and either issuer
+        // busy) were reachable in exactly that stranded state.
+        if (scout.scanning()) {
+            scout.abandon(now_ms());
         }
         // §15.5a: bind the link to the craft's net_id and move all ears onto
         // its current channel so the campaign and CSA_ARMED return are heard.
