@@ -1010,3 +1010,67 @@ single stray frame read as a larger fraction of it. This is acceptable only
 because the number is published `duty_cycle_known:false` and rendered nowhere.
 If a future CLM primitive (#173) makes occupancy real, this pacing must be
 revisited first — a duration-based measurement needs a fixed window back.
+
+## 2026-08-13 — the radio is deaf for ~250 ms after every retune
+
+**Tier 2.** Measured, not derived. Changes no code in this repo; it prices the
+`dwell_ms` a caller may safely ask for.
+
+Hardware trial of the craft-finder pacing (previous entry) on Waybeam-android,
+Samsung S22 + **RTL8812AU (Jaguar1)**, craft 17 transmitting video on
+5805 MHz (~1000 decoded frames/s on its channel).
+
+**The sweep worked and then intermittently did not.** Three consecutive sweeps
+found the craft; later sweeps missed it entirely, reporting
+`candidates=[none]`. Detection came out **14/18** at a 250 ms base dwell.
+
+**Mechanism, from the per-retune log timestamps.** devourer logs every channel
+set, so the dwell actually spent on the craft's channel is directly
+observable:
+
+| sweep | result | ch161 dwell |
+|---|---|---|
+| hit ×4 | `17@5805` | 1.74-1.75 s (extension fired) |
+| miss ×2 | `[none]` | **0.255 / 0.267 s** (extension never fired) |
+
+On the misses the scout heard **nothing at all** on a channel carrying ~1000
+frames/s, so `frames > 0` never tripped and the extension never armed. The
+craft was not idle and was not weak (-12 dBm).
+
+Channel-to-channel gaps track `dwell_ms` almost exactly (250 ms dwell -> 255 ms
+gap), so the `retune()` call itself costs only ~5 ms. **The dead time is inside
+the dwell**: the adapter delivers no frames for roughly **220-270 ms** after
+retuning, presumably AGC/BB reconvergence plus USB URB pipeline refill. The
+first half of any short dwell is silent regardless of what is on the channel.
+
+**Detection vs base dwell**, same craft, same session, 10 sweeps per point:
+
+| base dwell | detection | sweep |
+|---|---|---|
+| 250 ms | 14/18 | 12.9 s |
+| 300 ms | 10/10 | ~15.5 s |
+| 400 ms | 10/10 | ~17.8 s |
+| 500 ms | 10/10 | 21.4 s |
+| 1000 ms (pre-change control) | 3/3 | 38.5 s |
+
+The knee is sharp and sits between 250 and 300 ms — i.e. exactly where the
+listening window after the silent period goes to zero. Android ships **500 ms**
+(~2x the knee) rather than 300 ms, because the knee is adjacent and only one
+chip family was measured.
+
+**`kSenseSettleMs` is unrelated and must not be "fixed" for this.** Its 30 ms
+models the retune-leak barrier for frame *attribution*, not the radio's
+time-to-first-frame. Raising it would shorten listening and make this worse.
+
+**Open, and the reason the trial did not settle it.** An *idle* craft
+(ANNOUNCE 2 Hz + HEARTBEAT 1 Hz, no video) emits roughly one frame per 333 ms.
+After ~250 ms of silence a 500 ms dwell leaves ~250 ms of listening, so
+P(hear >=1) is only ~50% per sweep, against ~90% for the old 1000 ms dwell.
+**A powered craft that is not streaming is therefore less reliably found than
+before, and pressing Scan twice is the current answer.** Not measured — the
+craft could not be made announce-only without stopping venc on the SigmaStar,
+which risks the known mi_* close-deadlock reboot. Measure it before quoting an
+idle-craft number.
+
+Untested: Jaguar3/CU at these dwells. Two adapters of one part number are not a
+replicate, and two chip families certainly are not.
