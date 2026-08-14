@@ -2523,7 +2523,13 @@ assertion.
   usable negative travel is exactly the calibrated baseline index, and past
   that rail every further step commands the **same power** while the write
   keeps succeeding. `saturated_low` / `saturated_high` say the last apply
-  clamped at least one rate at a rail. All three are **omitted until a write
+  clamped at least one rate at a rail. **The flag is the load-bearing field,
+  not `applied_qdb`** — they are two different rails and the per-rate one
+  fires far earlier. Measured 2026-08-14: the craft's 8822EU reports
+  `saturated_low` from -64 qdb (-16 dB) while `applied_qdb` still equals the
+  request all the way to -126, so a consumer that compared only request
+  against applied would have seen agreement across the entire dead region.
+  All three are **omitted until a write
   has happened**, so "nothing applied yet" is distinguishable from "applied
   0", and all three are absent on a backend with no power actuator. Measured
   2026-08-14 (`docs/findings.md`): a craft stopped responding below ~-12 dB of
