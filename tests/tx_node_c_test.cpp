@@ -6,7 +6,7 @@
 // control server and venc OFF, and `run_tx` uses all three, so `wblink_tx_*` is
 // not in that archive — it proves the header is C-clean and stops there. This
 // test is the other half: it runs in the configuration a transmitter actually
-// has, so it LINKS the four symbols and exercises the handle contract.
+// has, so it LINKS the wblink_tx_* surface and exercises the handle contract.
 //
 // Everything here is reachable without a radio, because a pre-stopped or
 // mis-called handle opens nothing. That is deliberate: the rules below

@@ -31,7 +31,7 @@
  *    `run_tx`. Read the constants, do not assume the numbering.
  *
  * 3. IT IS NOT IN EVERY BUILD. `run_tx` uses frame-SHM, the REST control server
- *    and venc actuation unconditionally, so these four symbols exist only when
+ *    and venc actuation unconditionally, so every symbol here exists only when
  *    WBLINK_FRAME_SHM, WBLINK_CONTROL_SERVER and WBLINK_VENC are all ON — the
  *    same three WBLINK_BUILD_APP already requires. A receive-only consumer
  *    (Android's `:wifi` on bionic, which has no shm_open) links `wblink::node`
