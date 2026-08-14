@@ -202,6 +202,24 @@ class AirIface {
     // (ruling #120) and its identity stays the §10.6 monitor tiers.
     virtual std::string adapter_mac(size_t adapter) const = 0;
 
+    // §15.5 (Pass 172): what this die can do, as a stated per-adapter answer.
+    // All four fields are static per-die facts read once at bring-up — a
+    // capability is an answer on the contract, not a log line an embedder
+    // scrapes. `chip` is the backend's chip-generation name ("udp" on the
+    // bench backend). `power_actuator` is the §10.5 actuator discriminator
+    // (Pass 171): false = every offset is inert and refused. `ldpc_rx_flag`
+    // is per-frame LDPC *reporting* (§15.3 Pass 157) — the 8812A decodes
+    // LDPC while reporting none, so false taints the stats field, not the
+    // link. `fastretune` says the lean retune override exists on this die.
+    // No devourer types cross this boundary (the rx_sense rule).
+    struct AdapterCapsView {
+        std::string chip = "unknown";
+        bool power_actuator = false;
+        bool ldpc_rx_flag = false;
+        bool fastretune = false;
+    };
+    virtual AdapterCapsView adapter_caps(size_t adapter) const = 0;
+
     // §15.5a (Pass 155): one adapter's frame-free channel-energy DELTA since
     // the previous read (delta-on-read — a throwaway call is the §15.5a
     // discard barrier). Backend-agnostic mirror of the radio backend's

@@ -152,6 +152,12 @@ int wblink_rx_discovery(wblink_rx* rx, char* buffer, size_t capacity,
     return rx->runtime_control.copy_discovery(buffer, capacity, required);
 }
 
+int wblink_rx_adapters(wblink_rx* rx, char* buffer, size_t capacity,
+                       size_t* required) {
+    if (rx == nullptr) return 2;
+    return rx->runtime_control.copy_adapters(buffer, capacity, required);
+}
+
 int wblink_rx_selection(wblink_rx* rx, char* buffer, size_t capacity,
                         size_t* required, uint64_t* applied_generation) {
     if (rx == nullptr) return 2;

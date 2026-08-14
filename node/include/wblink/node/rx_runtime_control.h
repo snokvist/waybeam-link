@@ -97,6 +97,11 @@ class RxRuntimeControl {
     // it by copy_scout.
     void publish_scout(std::string json, uint64_t generation);
     void publish_discovery(std::string json);
+    // §15.5 (Pass 172): the per-die capability answers. Published once at
+    // backend bring-up — the fields are static per die, so there is no
+    // snapshot-request edge for the loop to serve; the bring-up publish IS
+    // the freshest state for the life of the run.
+    void publish_adapters(std::string json);
     void publish_selection(std::string json, uint64_t generation);
     // The §11.7 campaign state, plus the synchronous verdict of the queued
     // command that carried this generation. A queued caller cannot be handed
@@ -110,6 +115,7 @@ class RxRuntimeControl {
     int copy_scout(char* buffer, size_t capacity, size_t* required,
                    uint64_t* generation);
     int copy_discovery(char* buffer, size_t capacity, size_t* required);
+    int copy_adapters(char* buffer, size_t capacity, size_t* required);
     int copy_selection(char* buffer, size_t capacity, size_t* required,
                        uint64_t* generation);
     int copy_command(char* buffer, size_t capacity, size_t* required,
@@ -134,6 +140,7 @@ class RxRuntimeControl {
     bool command_snapshot_requested_ = false;
     std::shared_ptr<const GeneratedSnapshot> scout_snapshot_;
     std::shared_ptr<const std::string> discovery_snapshot_;
+    std::shared_ptr<const std::string> adapters_snapshot_;
     std::shared_ptr<const GeneratedSnapshot> selection_snapshot_;
     std::shared_ptr<const GeneratedSnapshot> command_snapshot_;
 };

@@ -120,6 +120,12 @@ void test_snapshot_requests_and_copies() {
     CHECK(ctl.take_selection_snapshot_request());
     CHECK(!ctl.take_selection_snapshot_request());
 
+    // §15.5 (Pass 172) adapters: not-ready before the bring-up publish, and
+    // deliberately NO snapshot-request edge — the fields are static per die,
+    // so there is nothing for the loop to refresh.
+    CHECK(ctl.copy_adapters(nullptr, 0, &required) == 3);
+    CHECK_EQ_U(required, 0);
+
     const std::string scout = "{\"scanning\":true}";
     const std::string discovery = "{\"nodes\":[],\"streams\":[]}";
     const std::string selection =
@@ -150,6 +156,21 @@ void test_snapshot_requests_and_copies() {
     CHECK(out.front() == 'y');
     CHECK(ctl.copy_discovery(out.data(), discovery.size() + 1, &required) == 0);
     CHECK(std::strcmp(out.data(), discovery.c_str()) == 0);
+
+    // §15.5 (Pass 172) adapters: same buffer contract as the calls above —
+    // size query includes NUL, undersize copies no partial JSON.
+    const std::string adapters =
+        "{\"adapters\":[{\"name\":\"a0\",\"chip\":\"udp\"}]}";
+    ctl.publish_adapters(adapters);
+    CHECK(ctl.copy_adapters(nullptr, 0, &required) == 0);
+    CHECK_EQ_U(required, adapters.size() + 1);
+    out.fill('z');
+    CHECK(ctl.copy_adapters(out.data(), adapters.size(), &required) == 4);
+    CHECK(out.front() == 'z');
+    CHECK(ctl.copy_adapters(out.data(), adapters.size() + 1, &required) == 0);
+    CHECK(std::strcmp(out.data(), adapters.c_str()) == 0);
+    CHECK(ctl.copy_adapters(nullptr, 1, &required) == 2);
+    CHECK(ctl.copy_adapters(out.data(), out.size(), nullptr) == 2);
 
     CHECK(ctl.copy_selection(nullptr, 0, &required, &generation) == 0);
     CHECK_EQ_U(required, selection.size() + 1);

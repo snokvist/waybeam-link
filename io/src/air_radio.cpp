@@ -126,6 +126,10 @@ struct RadioAir::Impl {
         // three above it must answer before any write, because the whole point
         // is that the write will never mean anything.
         bool power_actuator_ok = true;
+        // §15.5 (Pass 172): the rest of the per-die answers, cached at the
+        // same bring-up read so adapter_caps() never touches USB.
+        std::string chip = "unknown";
+        bool fastretune_ok = false;
         std::thread rx_thread;
         // RX-thread-owned counters (relaxed atomics; read from stats).
         std::atomic<uint64_t> rx_frames{0};
@@ -877,8 +881,13 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         }
         ad.dev->InitWrite(SelectedChannel{chan, 0, CHANNEL_WIDTH_20});
         // §15.3 (Pass 157): whether this die reports received coding at
-        // all — static per die, so read once here.
-        ad.ldpc_flag_ok = ad.dev->GetAdapterCaps().ldpc_rx_flag;
+        // all — static per die, so read once here. §15.5 (Pass 172): the
+        // chip generation and fastretune answer are cached from the same
+        // read, so adapter_caps() serves them without touching USB.
+        const devourer::AdapterCaps dcaps = ad.dev->GetAdapterCaps();
+        ad.ldpc_flag_ok = dcaps.ldpc_rx_flag;
+        ad.chip = devourer::generation_name(dcaps.generation);
+        ad.fastretune_ok = dcaps.fastretune_ok;
         // §10.5 (Pass 171): whether this die has a TX-power lever at all,
         // read at the same moment and for the same reason. ANNOUNCED on a
         // role:"tx" adapter, because the node keeps flying without one (the
@@ -1316,6 +1325,15 @@ std::optional<AirIface::TxPowerApplied> RadioAir::tx_power_applied(
     if (!a.power_applied_valid) return std::nullopt;
     return TxPowerApplied{a.power_applied_qdb, a.power_saturated_low,
                           a.power_saturated_high, true};
+}
+
+AirIface::AdapterCapsView RadioAir::adapter_caps(size_t adapter) const {
+    if (adapter >= impl_->adapters.size()) return AdapterCapsView{};
+    const Impl::Adapter& a = *impl_->adapters[adapter];
+    // All four cached at bring-up (§15.5 Pass 172) — this read is USB-free,
+    // the same property tx_power_applied() latches for.
+    return AdapterCapsView{a.chip, a.power_actuator_ok, a.ldpc_flag_ok,
+                           a.fastretune_ok};
 }
 
 // §10.5 (Pass 150): devourer's native lever already IS the relative one —

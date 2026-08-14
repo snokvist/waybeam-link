@@ -113,6 +113,14 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     }
     PacketEventTrace packet_trace("rx");
     air.value->set_packet_trace(&packet_trace);
+    // §15.5 (Pass 172): publish the per-die capability answers the moment the
+    // backend can state them. Static for the life of the run, so this one
+    // publish serves every later wblink_rx_adapters copy — including on an
+    // embedder built WBLINK_CONTROL_SERVER=OFF, where it is the ONLY surface.
+    if (runtime_control != nullptr) {
+        runtime_control->publish_adapters(
+            "{\"adapters\":" + build_adapters_array(l, &*air.value) + "}");
+    }
     // §10.7 (Pass 125): commit the uplink operating point. Before this an rx
     // node never called set_tx_mode at all and rode the TxRate struct default;
     // the seeds match it, so this changes no bytes on air. What it buys is

@@ -191,6 +191,12 @@ void RxRuntimeControl::publish_discovery(std::string json) {
     discovery_snapshot_ = std::move(next);
 }
 
+void RxRuntimeControl::publish_adapters(std::string json) {
+    auto next = std::make_shared<const std::string>(std::move(json));
+    const std::lock_guard<std::mutex> lock(mutex_);
+    adapters_snapshot_ = std::move(next);
+}
+
 void RxRuntimeControl::publish_selection(std::string json,
                                          uint64_t generation) {
     auto next =
@@ -243,6 +249,30 @@ int RxRuntimeControl::copy_discovery(char* buffer, size_t capacity,
         const std::lock_guard<std::mutex> lock(mutex_);
         discovery_snapshot_requested_ = true;
         snapshot = discovery_snapshot_;
+    }
+    if (!snapshot) {
+        *required = 0;
+        return 3;
+    }
+    if (snapshot->size() == std::numeric_limits<size_t>::max()) return 1;
+    const size_t need = snapshot->size() + 1;
+    *required = need;
+    if (buffer == nullptr) return capacity == 0 ? 0 : 2;
+    if (capacity < need) return 4;
+    std::memcpy(buffer, snapshot->c_str(), need);
+    return 0;
+}
+
+int RxRuntimeControl::copy_adapters(char* buffer, size_t capacity,
+                                    size_t* required) {
+    if (required == nullptr || (buffer == nullptr && capacity != 0)) return 2;
+
+    std::shared_ptr<const std::string> snapshot;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        // No request flag: the fields are static per die and the bring-up
+        // publish is the freshest state for the life of the run (Pass 172).
+        snapshot = adapters_snapshot_;
     }
     if (!snapshot) {
         *required = 0;

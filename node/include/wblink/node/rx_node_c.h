@@ -58,6 +58,10 @@ typedef struct wblink_rx wblink_rx;
  * arrived on. Called SYNCHRONOUSLY on the RX loop thread, before the next
  * frame is reassembled: copy what you need and return. `frame` does not
  * outlive the call, and a slow callback is backpressure on the receiver.
+ *
+ * The RX loop thread IS the thread that called wblink_rx_run — the node
+ * spawns no dispatch thread, so every callback arrives on that one thread
+ * for the life of the run (a JNI consumer attaches it once; Pass 172).
  */
 typedef void (*wblink_frame_cb)(uint8_t stream_id, const uint8_t *frame,
                                 size_t len, void *user);
@@ -209,6 +213,23 @@ int wblink_rx_scout_results(wblink_rx *rx, char *buffer, size_t capacity,
                             uint64_t *applied_generation);
 int wblink_rx_discovery(wblink_rx *rx, char *buffer, size_t capacity,
                         size_t *required);
+/*
+ * §15.5 (Pass 172) the per-die capability answers, as the /info adapters[]
+ * array wrapped in one object:
+ *
+ *   {"adapters":[{"name":"...","role":"rx","channel":N,"mac":...,
+ *                 "chip":"...","power_actuator":B,"ldpc_rx_flag":B,
+ *                 "fastretune":B}, ...]}
+ *
+ * Published ONCE at backend bring-up — the fields are static per die, so
+ * unlike the snapshot calls above there is no fresh-publication request to
+ * poll for: 3 means the backend has not come up yet (or run_rx was never
+ * called), and after the first success the answer never changes for the life
+ * of the run. On a consumer built WBLINK_CONTROL_SERVER=OFF this call is the
+ * only capability surface. Same buffer/return contract as the calls above.
+ */
+int wblink_rx_adapters(wblink_rx *rx, char *buffer, size_t capacity,
+                       size_t *required);
 int wblink_rx_selection(wblink_rx *rx, char *buffer, size_t capacity,
                         size_t *required,
                         uint64_t *applied_generation);

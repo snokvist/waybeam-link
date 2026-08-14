@@ -127,6 +127,11 @@ class UdpAir : public AirIface {
     // Compatibility tier: no driver matrix to assert anything better.
     uint16_t mtu_supported() const override { return kDefaultMaxPayload; }
     bool is_rf() const override { return false; }
+    // §15.5 (Pass 172): no silicon — every capability stated false, and the
+    // chip name says which backend answered.
+    AdapterCapsView adapter_caps(size_t /*adapter*/) const override {
+        return AdapterCapsView{"udp", false, false, false};
+    }
     // No hardware, no per-unit identity (§10.6 Pass 154).
     std::string adapter_mac(size_t) const override { return {}; }
     // No RF, no frame-free sensor (§15.5a Pass 155).

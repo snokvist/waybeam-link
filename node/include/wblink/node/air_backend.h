@@ -239,6 +239,9 @@ struct AirBackend {
     // §10.6 (Pass 154) per-unit EFUSE identity, empty where the backend has
     // none (udp, an unprogrammed unit). Contract passthrough.
     std::string adapter_mac(size_t i) const { return iface()->adapter_mac(i); }
+    AirIface::AdapterCapsView adapter_caps(size_t i) const {
+        return iface()->adapter_caps(i);
+    }
 
     uint16_t mtu_supported() const { return iface()->mtu_supported(); }
 
