@@ -67,6 +67,18 @@
       }
     },
     {
+      "name": "cv610",
+      "displayName": "HiSilicon CV610 cross (ARMv7 soft-float)",
+      "binaryDir": "${sourceDir}/build/cv610",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-cv610.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WBLINK_WERROR": "ON",
+        "WBLINK_BUILD_TESTS": "OFF",
+        "WBLINK_DEVOURER_CHIPS": "fleet"
+      }
+    },
+    {
       "name": "android-arm64",
       "displayName": "Android arm64 / bionic (compile-only verify; radio ON and -Werror are load-bearing, see CLAUDE.md)",
       "binaryDir": "${sourceDir}/build/android-arm64",
@@ -91,6 +103,7 @@
     { "name": "ssc338q", "configurePreset": "ssc338q" },
     { "name": "ssc338q-au", "configurePreset": "ssc338q-au" },
     { "name": "ssc338q-eu", "configurePreset": "ssc338q-eu" },
+    { "name": "cv610", "configurePreset": "cv610" },
     { "name": "android-arm64", "configurePreset": "android-arm64" }
   ],
   "testPresets": [

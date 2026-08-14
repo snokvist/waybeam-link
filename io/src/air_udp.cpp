@@ -11,6 +11,12 @@
 namespace wblink {
 
 namespace {
+constexpr size_t kPacedQueueCap = 8192;
+/* A 100 fps whole-frame producer can enqueue roughly one encoded frame while
+ * the node is busy with FEC.  Keep catch-up bounded, but large enough to drain
+ * that work on small embedded CPUs before the next frame arrives. */
+constexpr size_t kPacedCatchupCap = 64;
+
 const CommonPrefix* prefix_of(const Decoded& dec) {
     if (const auto* p = std::get_if<DataView>(&dec)) return &p->hdr.prefix;
     if (const auto* p = std::get_if<NackView>(&dec)) return &p->hdr.prefix;
@@ -60,7 +66,6 @@ size_t UdpAir::inject(const uint8_t* frame, size_t len) {
             ++tx_failed_;
             return 0;
         }
-        constexpr size_t kPacedQueueCap = 8192;
         if (tx_queue_.size() + resend_queue_.size() >= kPacedQueueCap) {
             ++tx_failed_;
             return 0;
@@ -99,7 +104,6 @@ size_t UdpAir::inject_resend(const uint8_t* frame, size_t len) {
         ++tx_failed_;
         return 0;
     }
-    constexpr size_t kPacedQueueCap = 8192;
     if (tx_queue_.size() + resend_queue_.size() >= kPacedQueueCap) {
         ++tx_failed_;
         return 0;
@@ -142,9 +146,8 @@ void UdpAir::service_paced_tx() {
     const auto now = std::chrono::steady_clock::now();
     if (next_tx_.time_since_epoch().count() == 0) next_tx_ = now;
     size_t serviced = 0;
-    constexpr size_t kCatchupCap = 16;
     while ((!tx_queue_.empty() || !resend_queue_.empty()) && now >= next_tx_ &&
-           serviced < kCatchupCap) {
+           serviced < kPacedCatchupCap) {
         const bool resend = !resend_queue_.empty();
         const std::vector<uint8_t>& frame =
             resend ? resend_queue_.front() : tx_queue_.front();
@@ -171,7 +174,7 @@ void UdpAir::service_paced_tx() {
         ++serviced;
     }
     if ((!tx_queue_.empty() || !resend_queue_.empty()) &&
-        serviced == kCatchupCap && now >= next_tx_) {
+        serviced == kPacedCatchupCap && now >= next_tx_) {
         // Process stalls must not be repaid as an unbounded host-speed burst.
         const uint64_t ns =
             (static_cast<uint64_t>((!resend_queue_.empty()
@@ -304,4 +307,3 @@ bool UdpAir::set_power_auto(size_t adapter) {
 }
 
 }  // namespace wblink
-

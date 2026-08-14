@@ -376,6 +376,9 @@ restores the craft configuration on exit. See `docs/jscc-controller-review.md`.
 ```sh
 cmake --build --preset release -j
 cmake --build --preset ssc338q -j
+WBLINK_CV610_TOOLCHAIN=../waybeam_venc/toolchain/toolchain.hisilicon-hi3516cv6xx \
+  cmake --preset cv610
+cmake --build --preset cv610 -j
 tools/jscc_ethernet_bench.sh start
 ```
 

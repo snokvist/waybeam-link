@@ -164,7 +164,8 @@ Run that rather than a remembered checklist. It covers the eight presets, the
 the `deploy/*.json` `--check`s, and it **fails on a diagnostic for our
 targets even when the build exits 0**. Toolchains the host lacks are SKIPPED
 loudly and counted separately — a skip is never a pass. Export
-`WBLINK_SSC338Q_TOOLCHAIN` and `WBLINK_ANDROID_NDK` to get the cross presets.
+`WBLINK_SSC338Q_TOOLCHAIN`, `WBLINK_CV610_TOOLCHAIN`, and
+`WBLINK_ANDROID_NDK` to get the cross presets.
 `.github/workflows/gates.yml` calls the same script, so local and CI cannot
 drift.
 
@@ -173,6 +174,7 @@ The individual commands, when you want one of them:
 ```
 cmake --build --preset dev && ctest --preset dev   # 71 suites, ASan+UBSan
 cmake --build --preset ssc338q                      # ARMv7 cross (SigmaStar target)
+cmake --build --preset cv610                        # ARMv7 soft-float (HiSilicon target)
 ```
 
 Additional flavors (chip families via `WBLINK_DEVOURER_CHIPS` = fleet | au |
