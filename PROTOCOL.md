@@ -2512,8 +2512,25 @@ assertion.
   must not wait for the next profile change): on the radio backend a one-shot
   offset 0 undoes the latch, then the §10.2 curve resolve resumes when a
   curve is loaded.
-- `GET /api/v1/tx/power` reports `{override_active, qdb, backend}`; the §15.3
-  `link` object gains `tx_power_override` (bool) beside `tx_power_qdb`.
+- `GET /api/v1/tx/power` reports
+  `{override_active, qdb, applied_qdb, saturated_low, saturated_high, backend}`;
+  the §15.3 `link` object gains `tx_power_override` (bool) beside
+  `tx_power_qdb`.
+- **The request and the applied value are different quantities (Pass 169).**
+  `qdb` is what was latched; `applied_qdb` is what the actuator took. A
+  relative backend folds the offset into a hardware index and clamps it —
+  devourer's `effective = clamp(baseline + steps, 0, index_max)` — so the
+  usable negative travel is exactly the calibrated baseline index, and past
+  that rail every further step commands the **same power** while the write
+  keeps succeeding. `saturated_low` / `saturated_high` say the last apply
+  clamped at least one rate at a rail. All three are **omitted until a write
+  has happened**, so "nothing applied yet" is distinguishable from "applied
+  0", and all three are absent on a backend with no power actuator. Measured
+  2026-08-14 (`docs/findings.md`): a craft stopped responding below ~-12 dB of
+  commanded offset while 18 dB of the commanded range reported success to two
+  independent receivers. This reports the rail; it does not change what any
+  caller does about it, and §10.6/§10.7 rung placement is unchanged pending
+  its own ruling.
 - A failed actuator write is logged and
   **not cached** as applied — the value is re-applied at the next commit
   resolve or re-assert point instead of being silently believed on-hardware.
@@ -5380,7 +5397,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
 | `GET /api/v1/calibration` | role-specific calibration surface. Craft/tx: §10.6 response plus `direction:"downlink"`. Ground/rx: §10.7 `{direction:"uplink",state,rung,power_qdb,fingerprint,stale,quality:{valid,age_ms,last_report_epoch,reports_received,rssi_mean,rx_mcs},artifact:{...,placements:[...]}|null,fail_reason}` |
 | `GET /api/v1/modes` | `{active, apply_configured, catalog_fingerprint, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist. A ground with an IP path reads it here; one without must hardcode a copy, and pins `catalog_fingerprint` (Pass 108) to detect index drift (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
-| `GET /api/v1/tx/power` | `{override_active, qdb, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`udp` (any node with a `role:"tx"` adapter; the `kernel-monitor` value is retired, Pass 164) |
+| `GET /api/v1/tx/power` | `{override_active, qdb, applied_qdb, saturated_low, saturated_high, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`udp` (any node with a `role:"tx"` adapter; the `kernel-monitor` value is retired, Pass 164). **`applied_qdb` is what the ACTUATOR took, which is not `qdb` once the TXAGC index rails** (Pass 169, §10.5) — with `saturated_low`/`saturated_high` naming the rail. The three are omitted until a write has happened and on a backend with no actuator, so an absent `applied_qdb` never reads as 0 |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;

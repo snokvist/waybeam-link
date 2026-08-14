@@ -24,6 +24,39 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 169 — §10.5 reports what the actuator took, not only what was asked (2026-08-14)
+
+**Ruling (operator, 2026-08-14 — #180 items 1-3 authorised, item 4 held).**
+`POST /api/v1/tx/power` returning success
+means the backend accepted the write. It has never meant the chip moved, and
+until now nothing in the response said so. §15.5 `GET /api/v1/tx/power` gains
+`applied_qdb`, `saturated_low` and `saturated_high`.
+
+**Changed §10.5, §15.5** (`GET /api/v1/tx/power` row).
+
+**Why.** devourer folds a relative offset into a TXAGC index and clamps it:
+`effective = clamp(baseline + steps, 0, index_max)`
+(`third_party/devourer/src/TxPower.h:17`). The usable negative travel is
+therefore exactly the calibrated baseline index; past that rail every further
+step commands the same power. devourer reports both halves —
+`SetTxPowerOffsetQdb` returns the APPLIED qdb, and `GetTxPowerState` carries
+the rail flags, documented as *"the signal a closed-loop controller uses to
+know the knob has run out of travel"* — and `RadioAir::set_power_qdb` discarded
+the first with `(void)` while nothing anywhere read the second.
+
+**Evidence.** 2026-08-14, `docs/findings.md`: craft 17 stepped over
+`POST /api/v1/tx/power` while two independent receivers watched (8812AU
+Jaguar1, 8812CU Jaguar3). Both saw RSSI track ~6-7 dB per 6 dB commanded down
+to -12 dB, then stop dead — **18 dB of commanded range moved nothing** and
+every write reported success. Two different RX chips agreeing places the rail
+at the transmitter.
+
+**Scope.** Reporting only. No caller changes behaviour on the new fields, and
+§10.6/§10.7 rung placement is untouched — a calibration that refuses or marks
+a railed rung is a behaviour change and wants its own ruling (issue #180).
+The fields are omitted before any write and on a backend with no actuator, so
+an absent `applied_qdb` can never be read as 0.
+
 ## Pass 168 — scout evidence is resolved before it becomes actionable (2026-08-12)
 
 **Ruling (operator, 2026-08-12).** A scout result is actionable only after
