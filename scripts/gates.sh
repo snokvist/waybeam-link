@@ -110,10 +110,14 @@ if [ "$QUICK" -eq 0 ]; then
     # the one in cmake/toolchain-cv610.cmake; they are the same path.
     _cv610_tc="${WBLINK_CV610_TOOLCHAIN:-\
 ../waybeam_venc/toolchain/arm-openipc-linux-musleabi_sdk-buildroot}"
-    if [ -x "${_cv610_tc}/bin/arm-openipc-linux-musleabi-gcc" ]; then
+    # Probe g++, not gcc: toolchain-cv610.cmake FATAL_ERRORs on a missing
+    # -g++, so that is the precondition this gate is actually standing in
+    # for. A toolchain with one and not the other would otherwise pass here
+    # and fail the preset.
+    if [ -x "${_cv610_tc}/bin/arm-openipc-linux-musleabi-g++" ]; then
         build_preset cv610
     else
-        skip "cv610" "no arm-openipc-linux-musleabi-gcc under ${_cv610_tc}"
+        skip "cv610" "no arm-openipc-linux-musleabi-g++ under ${_cv610_tc}"
     fi
 
     if [ -n "${WBLINK_ANDROID_NDK:-}${ANDROID_NDK_HOME:-}${ANDROID_NDK_ROOT:-}" ]; then
