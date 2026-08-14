@@ -24,6 +24,45 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 174 — the TX node states its own status: `wblink_tx_status` + `wblink_tx_adapters` (2026-08-14)
+
+**Ruling (operator-approved plan, coordination
+`specs/cross/2026-08-14-wblink-library-parity` R2 slice 2).** A TX embedder
+reads the node's state from published snapshots instead of re-deriving
+liveness from `run()`'s return timing — the hub's `mod_wblink_running()`
+latch exists only because `wblink_tx_run` can return in milliseconds on a
+missing radio with nothing in the log. Two C calls on the buffer contract
+the RX surface set (0/2/3/4, size query includes NUL, reads stay valid
+after stop until destroy):
+
+- **`wblink_tx_adapters`** — the Pass 172 adapters/caps object, published
+  once at backend bring-up. Closes Pass 172's named TX deferral.
+- **`wblink_tx_status`** — republished at 1 Hz on its own cadence,
+  deliberately independent of `stats.hz` so a node with §15.3 output
+  disabled does not blind its embedder:
+  `{"session":N,"channel":N,"csa":"...","claimed":B,"claimed_by":N,
+    "mode":{"active":"...","apply_configured":B},
+    "wedge":{"enabled":B,"progress_proven":B,"wedged":B,"consecutive":N,
+    "windows":N}}`
+  Every field keeps its existing semantics: `mode` mirrors §15.5
+  `GET /api/v1/mode`; `wedge` mirrors §9.10 — Pass 170's
+  `progress_proven` makes an inert watchdog *visible here*, which was
+  that pass's REPORTED-not-silent condition; `claimed`/`claimed_by`
+  mirror §11.4; `channel` is the live channel, CSA/retune included.
+
+**Mechanism.** `TxRuntimeInfo` — the snapshot half of the RX mailbox
+pattern (publish swaps an immutable string under a mutex; the caller only
+copies). Deliberately no command half: TX runtime *control* is a later
+pass, and grafting it here would smuggle an ownership decision this entry
+does not make. `run_tx` gains the runtime-info overload; the 3-arg symbol
+stays as a real symbol and forwards nullptr (the RX precedent).
+
+**Changed.** No wire, no §15.x surface — the C ABI headers and this entry.
+
+**Evidence.** Coordination sweep item 3 + hub feedback ("the only thing
+between a dead node and a permanently black screen"); Pass 172's deferral
+note; `txwedge.h` accessors (already public, never before surfaced).
+
 ## Pass 173 — TX gets the device source RX has: `wblink_tx_set_adapter_fds` (2026-08-14)
 
 **Ruling (operator-approved plan, coordination
