@@ -1564,16 +1564,13 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         // Pass 178: published only now, after a successful bind, and from the
         // socket rather than the config — an embedder reading 3 knows there
         // is no control plane rather than being handed a dead address.
-        if (runtime_control != nullptr) {
+        if (runtime_control != nullptr &&
+            !control->bound_endpoint().empty()) {
             runtime_control->publish_control_endpoint(
                 control->bound_endpoint());
         }
         ControlHandlers h;
-        h.stats_line = [&]() -> std::string {
-            std::string s = emitter.last_line();
-            if (!s.empty() && s.back() == '\n') s.pop_back();
-            return s;
-        };
+        h.stats_line = [&] { return stats_line_string(emitter); };
         h.info_json = [&] {
             return build_info_json(l, session, "rx", nullptr,
                                    air.value ? &*air.value : nullptr);
@@ -3167,7 +3164,7 @@ art.craft_adapter_fingerprint = craft_tally_fp;
             // same link view through the C ABI. One fill path, three
             // transports.
             if (runtime_control != nullptr) {
-                runtime_control->publish_stats(emitter.last_line());
+                runtime_control->publish_stats(stats_line_string(emitter));
                 runtime_control->publish_health(build_health_json(last_snap));
             }
             next_stats = now + stats_period;

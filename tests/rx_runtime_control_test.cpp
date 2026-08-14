@@ -355,6 +355,28 @@ void test_stats_and_health_slots() {
     CHECK(ctl.copy_health(nullptr, 1, &required) == 2);
     CHECK(ctl.copy_health(out.data(), out.size(), nullptr) == 2);
 
+    // 2026-08-14 review (D2): a REFUSED copy must not arm the snapshot
+    // request. The Pass 176 fold briefly inverted this, which would have made
+    // a caller polling with a bad argument drive the RX loop to re-serialise
+    // scout/selection/command JSON on every iteration, forever, for answers
+    // it never receives. Assert the flag stays clear, not just the return.
+    {
+        wblink::node::RxRuntimeControl fresh;
+        uint64_t gen = 0;
+        std::array<char, 32> buf{};
+        CHECK(fresh.copy_scout(buf.data(), buf.size(), nullptr, &gen) == 2);
+        CHECK(fresh.copy_selection(buf.data(), buf.size(), nullptr, &gen) == 2);
+        CHECK(fresh.copy_command(buf.data(), buf.size(), nullptr, &gen) == 2);
+        CHECK(fresh.copy_scout(buf.data(), buf.size(), &required, nullptr) == 2);
+        CHECK(!fresh.take_scout_snapshot_request());
+        CHECK(!fresh.take_selection_snapshot_request());
+        CHECK(!fresh.take_command_snapshot_request());
+        // Control: a well-formed copy DOES arm it, so the assertions above
+        // cannot pass because the flags never work.
+        CHECK(fresh.copy_scout(nullptr, 0, &required, &gen) == 3);
+        CHECK(fresh.take_scout_snapshot_request());
+    }
+
     // Pass 178: the control endpoint is a bare "addr:port" string, not JSON,
     // and it round-trips through the same contract.
     CHECK(ctl.copy_control_endpoint(nullptr, 0, &required) == 3);

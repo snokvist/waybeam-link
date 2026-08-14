@@ -216,16 +216,27 @@ void RxRuntimeControl::publish_command(std::string json, uint64_t generation) {
 
 int RxRuntimeControl::copy_scout(char* buffer, size_t capacity,
                                  size_t* required, uint64_t* generation) {
+    // Validate BEFORE the lock: a refused call must not arm the snapshot
+    // request, or a caller polling with a bad argument would drive the RX
+    // loop to re-serialise on every iteration for answers it never gets.
+    if (required == nullptr || generation == nullptr ||
+        (buffer == nullptr && capacity != 0)) {
+        return 2;
+    }
     std::shared_ptr<const GeneratedSnapshot> snapshot;
+    uint64_t applied = 0;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         scout_snapshot_requested_ = true;
         snapshot = scout_snapshot_;
+        // Same acquire as the snapshot: one lock, and a fallback that cannot
+        // be torn against the value it stands in for.
+        applied = applied_generation_;
     }
     // Contract in snapshot_copy.h (Pass 176 fold); this method owns only the
     // lock and the request-flag side effect — same split as the plain copies.
-    return copy_generated_snapshot_json(snapshot, applied_generation(), buffer,
-                                        capacity, required, generation);
+    return copy_generated_snapshot_json(snapshot, applied, buffer, capacity,
+                                        required, generation);
 }
 
 int RxRuntimeControl::copy_discovery(char* buffer, size_t capacity,
@@ -255,26 +266,48 @@ int RxRuntimeControl::copy_adapters(char* buffer, size_t capacity,
 
 int RxRuntimeControl::copy_selection(char* buffer, size_t capacity,
                                      size_t* required, uint64_t* generation) {
+    // Validate BEFORE the lock: a refused call must not arm the snapshot
+    // request, or a caller polling with a bad argument would drive the RX
+    // loop to re-serialise on every iteration for answers it never gets.
+    if (required == nullptr || generation == nullptr ||
+        (buffer == nullptr && capacity != 0)) {
+        return 2;
+    }
     std::shared_ptr<const GeneratedSnapshot> snapshot;
+    uint64_t applied = 0;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         selection_snapshot_requested_ = true;
         snapshot = selection_snapshot_;
+        // Same acquire as the snapshot: one lock, and a fallback that cannot
+        // be torn against the value it stands in for.
+        applied = applied_generation_;
     }
-    return copy_generated_snapshot_json(snapshot, applied_generation(), buffer,
-                                        capacity, required, generation);
+    return copy_generated_snapshot_json(snapshot, applied, buffer, capacity,
+                                        required, generation);
 }
 
 int RxRuntimeControl::copy_command(char* buffer, size_t capacity,
                                    size_t* required, uint64_t* generation) {
+    // Validate BEFORE the lock: a refused call must not arm the snapshot
+    // request, or a caller polling with a bad argument would drive the RX
+    // loop to re-serialise on every iteration for answers it never gets.
+    if (required == nullptr || generation == nullptr ||
+        (buffer == nullptr && capacity != 0)) {
+        return 2;
+    }
     std::shared_ptr<const GeneratedSnapshot> snapshot;
+    uint64_t applied = 0;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         command_snapshot_requested_ = true;
         snapshot = command_snapshot_;
+        // Same acquire as the snapshot: one lock, and a fallback that cannot
+        // be torn against the value it stands in for.
+        applied = applied_generation_;
     }
-    return copy_generated_snapshot_json(snapshot, applied_generation(), buffer,
-                                        capacity, required, generation);
+    return copy_generated_snapshot_json(snapshot, applied, buffer, capacity,
+                                        required, generation);
 }
 
 void RxRuntimeControl::publish_stats(std::string json) {

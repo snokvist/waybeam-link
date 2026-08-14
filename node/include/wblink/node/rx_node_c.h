@@ -265,25 +265,39 @@ int wblink_rx_health(wblink_rx *rx, char *buffer, size_t capacity,
  * handle) never transitions, so a late double-start cannot overwrite the
  * real run's record.
  */
+
+int wblink_rx_state(wblink_rx *rx, int *exit_rc);
+
 /*
  * Pass 178: where this node's §15.5 control server is ACTUALLY listening,
  * "addr:port", under the same buffer contract as the snapshot calls above.
  *
  * The value is resolved from the listening socket, not echoed from
  * `control.bind` — `host:0` is a legal request that binds an ephemeral port,
- * so the config string is a wish and the socket is the fact. Published only
- * after a successful bind: 3 means there is no control plane to talk to
- * (none configured, or a build with the control server compiled out), which
- * is a different answer from "here is an address" and must stay that way.
- * That distinction is the whole point — an embedder that resolves the
- * endpoint from its own parallel config key instead (waybeam-hub's
- * `metrics.waybeam_link`) 502s every route when the two files disagree,
- * with a plausible-looking address in both.
+ * so the config string is a wish and the resolved PORT is the fact. The
+ * ADDRESS half is whatever was bound, and a wildcard bind stays a wildcard:
+ * the fleet's `"0.0.0.0:8091"` reads back as `0.0.0.0`, which names the
+ * interface set, not a host to dial. A local embedder should dial loopback
+ * with this port; nothing here invents an address it cannot verify.
+ *
+ * Published only after a successful bind, and 3 means there is no control
+ * plane to talk to — none configured, the control server compiled out, or
+ * the bind's own address could not be read back. That is deliberately a
+ * different answer from "here is an address", because an embedder that
+ * resolves the endpoint from its own parallel config key instead
+ * (waybeam-hub's `metrics.waybeam_link`) 502s every route when the two files
+ * disagree, with a plausible-looking address in both.
+ *
+ * LIKE EVERY SNAPSHOT HERE, IT DESCRIBES THE RUN THAT PUBLISHED IT and
+ * survives that run's exit — the control server is gone once the run
+ * returns, but this still answers 0. Pair it with wblink_rx_state() when you
+ * need to know whether the endpoint is still live; a getter that erased
+ * itself would break the deliberate read-the-final-state property the other
+ * snapshots rely on.
  */
 int wblink_rx_control_endpoint(wblink_rx *rx, char *buffer, size_t capacity,
                                size_t *required);
 
-int wblink_rx_state(wblink_rx *rx, int *exit_rc);
 int wblink_rx_selection(wblink_rx *rx, char *buffer, size_t capacity,
                         size_t *required,
                         uint64_t *applied_generation);

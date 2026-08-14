@@ -599,6 +599,20 @@ inline std::string build_tx_power_json(
     return s;
 }
 
+// The §15.3 line as a NON-STREAM transport serves it (Pass 176). StatsEmitter
+// terminates the line with '\n' because the §15.3 output is NDJSON, and the
+// SSE push keeps it — but GET /api/v1/stats promises "no trailing newline"
+// (control_server.h ControlHandlers) and the C-ABI snapshot must agree with
+// REST byte for byte, which is the entire point of publishing from one fill
+// path. Three call sites, one strip: the REST hook used to hand-roll this and
+// the first draft of the C-ABI publish did not, so the two transports differed
+// by a byte.
+inline std::string stats_line_string(const StatsEmitter& emitter) {
+    std::string s = emitter.last_line();
+    if (!s.empty() && s.back() == '\n') s.pop_back();
+    return s;
+}
+
 // §15.5 GET /health — terse link summary from the freshest snapshot.
 inline std::string build_health_json(const StatsSnapshot& snap) {
     int32_t rssi_best = 0;
