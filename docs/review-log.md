@@ -24,6 +24,37 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 170 — a §9.10 wedge presupposes progress, so the verdict needs proof of it (2026-08-14)
+
+**Ruling (operator, 2026-08-14).** The TX-wedge verdict is withheld until this
+backend has been observed completing at least one frame. Until then the
+detector reports `unproven` and renders no verdict.
+
+**Changed §9.10.**
+
+**Why.** The rule was "submissions advanced, zero completions → wedged". That
+conflates *has never completed* with *has stopped completing*. On a backend
+with no CCX report path the first is permanent, so the verdict is a permanent
+false alarm.
+
+**Evidence.** 2026-08-14, CV610 + RTL8733BU (`third_party/devourer/src/rtl8733b`
+implements no TxReport path — grep finds no CCX site in the family). The
+in-process node reached `tx_submitted` 1320 with `tx_reports` 0 and the hub
+logged *"tx node WEDGED (§9.10) — the transmitter is dead"*. A second radio
+(8812AU) on 5805 simultaneously received **22 087 frames from that adapter,
+21 093 delivered at 2 permille loss**, RSSI -26. The transmitter was healthy;
+only the evidence channel was absent.
+
+**Cost, stated not hidden.** A backend that wedges before its first completion
+is no longer caught — that state is indistinguishable from one that never
+reports. `unproven` is therefore reported rather than silent, so an inert
+watchdog is visible.
+
+**Not taken.** A per-family capability gate. `AdapterCaps` carries no
+TX-report flag, so it would have meant hardcoding a chip family in our code —
+brittle, and wrong the moment devourer adds reports for that family. The
+proven-progress precondition is family-agnostic and self-correcting.
+
 ## Pass 169 — §10.5 reports what the actuator took, not only what was asked (2026-08-14)
 
 **Ruling (operator, 2026-08-14 — #180 items 1-3 authorised, item 4 held).**

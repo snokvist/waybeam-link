@@ -2153,9 +2153,31 @@ reports on devourer):
 
 - `Δtx_progress > 0` → not wedged (any completion proves the TX path alive);
 - `Δtx_progress == 0` and `Δtx_submitted >= wedge_min_submits` (seed 8) →
-  **wedged**;
+  **wedged**, *but only once this backend has been PROVEN to report progress
+  at all* — see below;
 - too few submissions to judge → hold the previous verdict (an idle TX is
   not evidence either way).
+
+**A wedge is progress CEASING, so it presupposes progress (Pass 170).** The
+verdict is withheld until at least one completion has been observed from this
+backend — either a `Δtx_progress > 0` window, or a nonzero `tx_progress` at
+the watchdog's first poll. Until then the detector reports `unproven` and
+renders no verdict.
+
+Without that precondition the rule reads "this backend has never completed a
+frame" as "this backend has stopped completing frames", which is a different
+claim and, on a family that emits no reports, a permanent false alarm. Measured
+2026-08-14: the RTL8733BU backend implements no CCX report path at all, so
+`tx_progress` stayed 0 while `tx_submitted` reached 1320 and the watchdog
+declared the transmitter dead — while a second radio on the same channel
+received **22 087 frames from it, 21 093 delivered at 2 permille loss**. The
+transmitter was entirely healthy.
+
+The cost is stated rather than hidden: a backend that wedges *before its first
+completion* is no longer caught, because that state is genuinely
+indistinguishable from one that never reports. `unproven` is therefore a
+reported state, not a silent one — a node that never leaves it has a watchdog
+that is inert, and an operator must be able to see that.
 
 **Action (v2, operator-ruled 2026-08-06, Pass 148) — the TX node restarts
 itself.** The verdict is surfaced per adapter as `tx_wedged` (§15.3) and logged
