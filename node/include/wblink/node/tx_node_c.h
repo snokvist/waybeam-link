@@ -42,6 +42,8 @@
 #ifndef WBLINK_NODE_TX_NODE_C_H
 #define WBLINK_NODE_TX_NODE_C_H
 
+#include <stddef.h> /* size_t (Pass 173: wblink_tx_set_adapter_fds) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -99,6 +101,27 @@ typedef int (*wblink_mode_apply_cb)(const char *cmd, const char *name,
 
 /* NULL on allocation failure. */
 wblink_tx *wblink_tx_create(void);
+
+/*
+ * Pre-opened USB device fds for the node's adapters, one per config
+ * `adapters[]` slot, with -1 meaning "enumerate this one by bus path". Call
+ * BEFORE `wblink_tx_run`; a call after it has started is ignored and returns
+ * 3. The TX twin of `wblink_rx_set_adapter_fds` under the same 2026-08-08
+ * contract (Pass 173): a call, not a config key; OWNERSHIP STAYS WITH THE
+ * CALLER (libusb marks a wrapped handle `fd_keep`, so teardown closes the
+ * handle and leaves the fd open — each fd must stay valid for the whole run
+ * and be closed by the caller afterwards; the array itself is copied);
+ * supplying any fd forces the bring-up `libusb_reset_device` off, because a
+ * wrapped fd must not be reset. Everything else — a daemon reading JSON —
+ * should not call this at all: empty (the default) is enumerate-by-bus-path,
+ * byte for byte today's behaviour.
+ *
+ * Returns 0 on success, 2 on a NULL handle or a NULL `fds` with `n > 0`, 3 if
+ * the node has already been started. Passing n == 0 clears any previous set.
+ * (Plain 0/2/3 like the RX twin — this is not a run status, so the
+ * WBLINK_TX_* space does not apply.)
+ */
+int wblink_tx_set_adapter_fds(wblink_tx *tx, const int *fds, size_t n);
 
 /*
  * Ask a running node to stop. Safe from any thread, and from a signal handler:
