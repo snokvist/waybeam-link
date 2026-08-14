@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <new>
 #include <string>
+#include <vector>
 
 #include "wblink/node/load.h"
 #include "wblink/node/tx_node.h"
@@ -17,6 +18,10 @@
 struct wblink_tx {
     std::atomic<int> stop{0};
     std::atomic<bool> used{false};
+    // Programmatic device source (Pass 173). Same caveat as the RX twin: the
+    // `used` check in the setter is best-effort DETECTION of a violated
+    // call-before-run contract, not a barrier.
+    std::vector<int> adapter_fds;
 };
 
 // The status space is `run_tx`'s (0/1/2) plus this shim's negatives; the two
@@ -34,6 +39,26 @@ wblink_tx* wblink_tx_create(void) { return new (std::nothrow) wblink_tx(); }
 
 void wblink_tx_request_stop(wblink_tx* tx) {
     if (tx != nullptr) tx->stop.store(1, std::memory_order_relaxed);
+}
+
+int wblink_tx_set_adapter_fds(wblink_tx* tx, const int* fds, size_t n) {
+    if (tx == nullptr) return 2;
+    if (fds == nullptr && n > 0) return 2;
+    // Reject after start rather than accept-and-ignore — same reasoning as
+    // the RX twin: the config is consumed by then, and a caller with the
+    // order wrong would watch enumerate-by-bus-path fail on a device it
+    // cannot see, with nothing pointing at the real mistake.
+    if (tx->used.load(std::memory_order_relaxed)) return 3;
+    // assign() allocates, so bad_alloc and length_error are both reachable
+    // from a caller-supplied n, and unwinding through C is undefined.
+    try {
+        tx->adapter_fds.assign(fds, fds + n);
+    } catch (...) {
+        std::fprintf(stderr,
+                     "wblink_tx_set_adapter_fds: allocation failed\n");
+        return 1;
+    }
+    return 0;
 }
 
 int wblink_tx_run(wblink_tx* tx, const char* config_path,
@@ -55,6 +80,16 @@ int wblink_tx_run(wblink_tx* tx, const char* config_path,
         }
     } catch (...) {
         std::fprintf(stderr, "wblink_tx_run: unhandled C++ exception in load\n");
+        return WBLINK_TX_ERROR;
+    }
+    // After load_all, so a config can never smuggle these in, and before
+    // run_tx, which is where AirBackend::create reads them (Pass 173 — the
+    // same ordering the RX shim documents). In a try because a vector copy
+    // allocates.
+    try {
+        loaded.cfg.adapter_fds = tx->adapter_fds;
+    } catch (...) {
+        std::fprintf(stderr, "wblink_tx_run: allocation failed\n");
         return WBLINK_TX_ERROR;
     }
 

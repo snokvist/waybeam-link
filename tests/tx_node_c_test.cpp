@@ -56,6 +56,16 @@ int main() {
     CHECK(tx != nullptr);
     CHECK(wblink_tx_run(tx, nullptr, wblink_tx_c_test_apply, &g_applies) ==
           WBLINK_TX_BAD_ARG);
+    // Pass 173 device-source contract, same shape as the RX twin: NULL handle
+    // and NULL fds with n > 0 are refused (2); a valid set and an n == 0
+    // clear both succeed before the run.
+    {
+        const int fds[2] = {-1, -1};
+        CHECK(wblink_tx_set_adapter_fds(nullptr, fds, 2) == 2);
+        CHECK(wblink_tx_set_adapter_fds(tx, nullptr, 1) == 2);
+        CHECK(wblink_tx_set_adapter_fds(tx, fds, 2) == 0);
+        CHECK(wblink_tx_set_adapter_fds(tx, nullptr, 0) == 0);
+    }
     // A refused call must NOT have consumed the handle — otherwise a caller who
     // passed a null path once could never start this node, and the next run
     // would report reuse rather than the real mistake.
@@ -66,6 +76,12 @@ int main() {
     // not fired, a nonexistent path would have produced WBLINK_TX_ERROR.
     CHECK(wblink_tx_run(tx, kNoSuchConfig, wblink_tx_c_test_apply, &g_applies) ==
           WBLINK_TX_REUSED);
+    // Pass 173: after the handle has run, the setter reports the violated
+    // call-before-run contract (3) instead of accepting fds nothing will read.
+    {
+        const int fd = -1;
+        CHECK(wblink_tx_set_adapter_fds(tx, &fd, 1) == 3);
+    }
     wblink_tx_destroy(tx);
 
     // A fresh handle with a real (still nonexistent) path: load fails, and the
