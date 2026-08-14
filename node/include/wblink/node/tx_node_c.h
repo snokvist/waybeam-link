@@ -31,7 +31,7 @@
  *    `run_tx`. Read the constants, do not assume the numbering.
  *
  * 3. IT IS NOT IN EVERY BUILD. `run_tx` uses frame-SHM, the REST control server
- *    and venc actuation unconditionally, so these four symbols exist only when
+ *    and venc actuation unconditionally, so every symbol here exists only when
  *    WBLINK_FRAME_SHM, WBLINK_CONTROL_SERVER and WBLINK_VENC are all ON — the
  *    same three WBLINK_BUILD_APP already requires. A receive-only consumer
  *    (Android's `:wifi` on bionic, which has no shm_open) links `wblink::node`
@@ -43,6 +43,8 @@
 #define WBLINK_NODE_TX_NODE_C_H
 
 #include <stddef.h> /* size_t (Pass 173: wblink_tx_set_adapter_fds) */
+
+#include "wblink/node/node_state_c.h" /* Pass 177: WBLINK_NODE_* */
 
 #ifdef __cplusplus
 extern "C" {
@@ -161,6 +163,66 @@ int wblink_tx_adapters(wblink_tx *tx, char *buffer, size_t capacity,
  */
 int wblink_tx_status(wblink_tx *tx, char *buffer, size_t capacity,
                      size_t *required);
+
+/*
+ * Pass 176: the §15.3 stats line and the §15.4 health object — byte for byte
+ * what the control server serves as GET /api/v1/stats and /api/v1/health,
+ * because all three transports copy the SAME strings the run loop publishes
+ * from its one fill path. Republished at the stats cadence, so `stats.hz`
+ * governs freshness and `stats.hz=0` leaves them unpublished (3): an
+ * embedder that disables the stats walk has chosen a blind link view, and
+ * these getters do not re-enable it behind its back. The always-on surface
+ * is `wblink_tx_status`. Same buffer contract as the calls above.
+ */
+int wblink_tx_stats(wblink_tx *tx, char *buffer, size_t capacity,
+                    size_t *required);
+int wblink_tx_health(wblink_tx *tx, char *buffer, size_t capacity,
+                     size_t *required);
+
+/*
+ * Pass 177: the handle's lifecycle, stated by the library instead of
+ * re-derived by every embedder. Returns WBLINK_NODE_CREATED / RUNNING /
+ * EXITED (node_state_c.h; -1 on a NULL handle). Once EXITED and when
+ * `exit_rc` is non-NULL, the run's return code — the WBLINK_TX_* space — is
+ * written through it; before EXITED, `*exit_rc` is left untouched. A wedge
+ * reads as EXITED with WBLINK_TX_WEDGED: there is deliberately no separate
+ * state for it, because the rc space is already the supervisor's contract.
+ * Safe from any thread. A refused run (NULL argument, reused handle) never
+ * transitions — WBLINK_TX_REUSED cannot overwrite the real run's record.
+ */
+
+int wblink_tx_state(wblink_tx *tx, int *exit_rc);
+
+/*
+ * Pass 178: where this node's §15.5 control server is ACTUALLY listening,
+ * "addr:port", under the same buffer contract as the snapshot calls above.
+ *
+ * The value is resolved from the listening socket, not echoed from
+ * `control.bind` — `host:0` is a legal request that binds an ephemeral port,
+ * so the config string is a wish and the resolved PORT is the fact. The
+ * ADDRESS half is whatever was bound, and a wildcard bind stays a wildcard:
+ * the fleet's `"0.0.0.0:8091"` reads back as `0.0.0.0`, which names the
+ * interface set, not a host to dial. A local embedder should dial loopback
+ * with this port; nothing here invents an address it cannot verify.
+ *
+ * Published only after a successful bind, and 3 means there is no control
+ * plane to talk to — none configured, the control server compiled out, or
+ * the bind's own address could not be read back. That is deliberately a
+ * different answer from "here is an address", because an embedder that
+ * resolves the endpoint from its own parallel config key instead
+ * (waybeam-hub's `metrics.waybeam_link`) 502s every route when the two files
+ * disagree, with a plausible-looking address in both.
+ *
+ * LIKE EVERY SNAPSHOT HERE, IT DESCRIBES THE RUN THAT PUBLISHED IT and
+ * survives that run's exit — the control server is gone once the run
+ * returns, but this still answers 0. Pair it with wblink_tx_state() when you
+ * need to know whether the endpoint is still live; a getter that erased
+ * itself would break the deliberate read-the-final-state property the other
+ * snapshots rely on.
+ */
+int wblink_tx_control_endpoint(wblink_tx *tx, char *buffer, size_t capacity,
+                               size_t *required);
+
 
 /*
  * Ask a running node to stop. Safe from any thread, and from a signal handler:

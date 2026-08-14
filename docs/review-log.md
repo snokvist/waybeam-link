@@ -24,6 +24,103 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 178 — the control endpoint is answered by the socket, not the config (2026-08-14)
+
+**Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
+R3, slice 3).** `wblink_rx_control_endpoint()` /
+`wblink_tx_control_endpoint()` report where this node's §15.5 control
+server is **actually listening**, under the `snapshot_copy.h` buffer
+contract. Published after a successful bind and never before: an
+embedder that reads 3 knows there is no control plane to talk to,
+rather than being handed an address that answers nothing.
+
+**The value comes from `getsockname`, not from `control.bind`.**
+`ControlServer` gains `bound_endpoint()` computed at create time,
+because the configured string is a *request*: `host:0` is legal, parses,
+and binds an ephemeral port, so echoing config back would recreate the
+very failure this getter exists to kill — two sources of truth for one
+endpoint that silently disagree (hub `metrics.waybeam_link` vs the
+node's own `control.bind`; every route 502s and the address looks
+right in both files).
+
+**Scope.** A build with `WBLINK_CONTROL_SERVER=OFF` publishes nothing
+and the getters answer 3 — the same answer that build already gives by
+refusing to start with a non-empty `control.bind`. No REST route
+changes; `/info` continues to report the configured string as its own
+`control` field, which is what an operator authored.
+
+**Evidence.** Branch `feat/r3-telemetry-abi` (stacked on Passes
+176-177); `io/src/control_server.cpp` bind path; publication at both
+run loops' control-server construction; endpoint cases in
+`tests/tx_node_c_test.cpp` and `tests/node_fd_source_test.cpp`
+(unpublished → 3 on a node that never bound).
+
+## Pass 177 — the library states its own liveness (2026-08-14)
+
+**Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
+R3, slice 2).** Both C handles carry an explicit lifecycle state:
+`wblink_rx_state()` / `wblink_tx_state()` return
+`WBLINK_NODE_CREATED` / `RUNNING` / `EXITED` (shared constants,
+`node_state_c.h`) and, once EXITED, write the run's return code through
+the out-param. Transitions are owned by the run wrapper: RUNNING the
+moment the one-run claim succeeds, EXITED (rc first, state second) on
+every return after it — including stop-before-start (a clean 0) and
+config-load failure. A NULL-argument or reused-handle refusal never ran
+and therefore never transitions.
+
+**Two deliberate narrowings of the spec text.** (1) No separate WEDGED
+state: the wedge is `EXITED` with `WBLINK_TX_WEDGED` as the rc — the
+role-specific return spaces are already law (Pass 148 /
+`tx_node_c.h` note 2), and a duplicate state would be a second decoder
+for the same fact. (2) No terminal-exit reason *string* in the ABI: rc
+is the machine-actionable reason; human-readable causes are log lines
+and belong to the embedder's `wb_log_set_sink` (R6's gate), not to a
+second string surface the loop would have to thread through every
+error return.
+
+**What this retires.** waybeam-hub's `mod_wblink_running()` re-derives
+liveness because `wblink_rx_run` returns within milliseconds on a
+missing radio (hub #195 review); Android keeps an equivalent latch.
+Both can now read `state == RUNNING` from the handle's owner.
+
+**Evidence.** Branch `feat/r3-telemetry-abi` (stacked on Pass 176);
+lifecycle cases through the real shims (stop-before-start run,
+bad-arg/reuse non-transitions) in `tests/tx_node_c_test.cpp` and
+`tests/node_fd_source_test.cpp`.
+
+## Pass 176 — health and stats are C-ABI snapshots from the one fill path (2026-08-14)
+
+**Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
+R3, slice 1).** The §15.3 stats line and the §15.4 health object become
+readable through the C ABI on both roles: `wblink_rx_stats` /
+`wblink_rx_health` / `wblink_tx_stats` / `wblink_tx_health`, under the
+snapshot buffer contract (`snapshot_copy.h`). Both strings are published
+by the run loop at the **same site** that feeds the control server —
+`emit_stats()` + `build_health_json(last_snap)` — so REST, NDJSON and
+the C ABI are three transports of one generation path; no second
+serializer exists, and the publication is NOT guarded by
+`WBLINK_CONTROL_SERVER` (a receive-only Android build gets the same
+view the hub does).
+
+**Cadence is stats.hz, by design.** These surfaces ARE the §15.3 walk:
+`stats.hz=0` disables the walk, so the getters answer 3 (unpublished).
+The always-on liveness surface remains the Pass 174 status snapshot
+(and the lifecycle-state slice that follows it); an embedder that
+disables stats has chosen a blind link view, and the contract does not
+silently re-enable the walk behind its back.
+
+**Consolidation rider (2026-08-14 review, finding 8 remainder).** The
+three generation-carrying RX copy bodies (`copy_scout`,
+`copy_selection`, `copy_command`) fold onto one
+`copy_generated_snapshot_json()` beside the plain contract in
+`snapshot_copy.h`; `GeneratedSnapshot` moves there with it. Behaviour
+is bit-identical — the existing runtime-control tests are the proof.
+
+**Evidence.** Branch `feat/r3-telemetry-abi`; publication sites
+`node/src/rx_node.cpp` (stats tick) and `node/src/tx_node.cpp` (stats
+tick); mailboxes `RxRuntimeControl` / `TxRuntimeInfo`; tests
+`rx_runtime_control_test.cpp`, `tx_runtime_info_test.cpp`.
+
 ## Pass 175 — recovery is prep + construct, and prep already lives in the library (2026-08-14)
 
 **Ruling (operator-approved plan, coordination

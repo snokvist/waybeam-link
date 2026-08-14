@@ -46,6 +46,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "wblink/node/node_state_c.h" /* Pass 177: WBLINK_NODE_* */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -235,6 +237,67 @@ int wblink_rx_discovery(wblink_rx *rx, char *buffer, size_t capacity,
  */
 int wblink_rx_adapters(wblink_rx *rx, char *buffer, size_t capacity,
                        size_t *required);
+/*
+ * Pass 176: the §15.3 stats line and the §15.4 health object — byte for byte
+ * what the control server serves as GET /api/v1/stats and /api/v1/health,
+ * published from the run loop's one fill path. Deliberately available in a
+ * receive-only build (control server compiled out): the C ABI is that
+ * build's only telemetry surface. Republished at the stats cadence, so
+ * `stats.hz` governs freshness and `stats.hz=0` leaves them unpublished (3)
+ * by design rather than re-enabling the walk behind the embedder's back.
+ * Same buffer contract as the snapshot calls above.
+ */
+int wblink_rx_stats(wblink_rx *rx, char *buffer, size_t capacity,
+                    size_t *required);
+int wblink_rx_health(wblink_rx *rx, char *buffer, size_t capacity,
+                     size_t *required);
+
+/*
+ * Pass 177: the handle's lifecycle, stated by the library instead of
+ * re-derived by every embedder — wblink_rx_run returns within milliseconds
+ * on a missing radio or a bad config, and every consumer of this header has
+ * grown its own "is it actually running" latch in response (waybeam-hub's
+ * mod_wblink_running, Android's resume latch). Returns WBLINK_NODE_CREATED /
+ * RUNNING / EXITED (node_state_c.h; -1 on a NULL handle). Once EXITED and
+ * when `exit_rc` is non-NULL, the run's return code — THIS header's 0/1/2/3
+ * space — is written through it; before EXITED, `*exit_rc` is left
+ * untouched. Safe from any thread. A refused run (NULL argument, reused
+ * handle) never transitions, so a late double-start cannot overwrite the
+ * real run's record.
+ */
+
+int wblink_rx_state(wblink_rx *rx, int *exit_rc);
+
+/*
+ * Pass 178: where this node's §15.5 control server is ACTUALLY listening,
+ * "addr:port", under the same buffer contract as the snapshot calls above.
+ *
+ * The value is resolved from the listening socket, not echoed from
+ * `control.bind` — `host:0` is a legal request that binds an ephemeral port,
+ * so the config string is a wish and the resolved PORT is the fact. The
+ * ADDRESS half is whatever was bound, and a wildcard bind stays a wildcard:
+ * the fleet's `"0.0.0.0:8091"` reads back as `0.0.0.0`, which names the
+ * interface set, not a host to dial. A local embedder should dial loopback
+ * with this port; nothing here invents an address it cannot verify.
+ *
+ * Published only after a successful bind, and 3 means there is no control
+ * plane to talk to — none configured, the control server compiled out, or
+ * the bind's own address could not be read back. That is deliberately a
+ * different answer from "here is an address", because an embedder that
+ * resolves the endpoint from its own parallel config key instead
+ * (waybeam-hub's `metrics.waybeam_link`) 502s every route when the two files
+ * disagree, with a plausible-looking address in both.
+ *
+ * LIKE EVERY SNAPSHOT HERE, IT DESCRIBES THE RUN THAT PUBLISHED IT and
+ * survives that run's exit — the control server is gone once the run
+ * returns, but this still answers 0. Pair it with wblink_rx_state() when you
+ * need to know whether the endpoint is still live; a getter that erased
+ * itself would break the deliberate read-the-final-state property the other
+ * snapshots rely on.
+ */
+int wblink_rx_control_endpoint(wblink_rx *rx, char *buffer, size_t capacity,
+                               size_t *required);
+
 int wblink_rx_selection(wblink_rx *rx, char *buffer, size_t capacity,
                         size_t *required,
                         uint64_t *applied_generation);

@@ -76,9 +76,35 @@ static void test_republish_replaces_and_slots_are_independent() {
     CHECK(info.copy_adapters(nullptr, 0, &required) == 3);
 }
 
+// Pass 176: the stats/health slots follow the same contract and stay
+// independent — unpublished (3) until the stats cadence writes them, which
+// is exactly the stats.hz=0 embedder experience.
+static void test_stats_and_health_slots() {
+    TxRuntimeInfo info;
+    size_t required = 77;
+    CHECK(info.copy_stats(nullptr, 0, &required) == 3);
+    CHECK_EQ_U(required, 0);
+    CHECK(info.copy_health(nullptr, 0, &required) == 3);
+
+    const std::string stats = "{\"t_ms\":5,\"streams\":[]}";
+    const std::string health = "{\"state\":\"HOLD\",\"profile\":2}";
+    info.publish_stats(stats);
+    info.publish_health(health);
+    std::array<char, 64> out{};
+    out.fill('x');
+    CHECK(info.copy_stats(out.data(), stats.size(), &required) == 4);
+    CHECK(out.front() == 'x');
+    CHECK(info.copy_stats(out.data(), out.size(), &required) == 0);
+    CHECK(std::strcmp(out.data(), stats.c_str()) == 0);
+    CHECK(info.copy_health(out.data(), out.size(), &required) == 0);
+    CHECK(std::strcmp(out.data(), health.c_str()) == 0);
+    CHECK(info.copy_health(out.data(), out.size(), nullptr) == 2);
+}
+
 int main() {
     test_not_ready_before_publication();
     test_publish_and_copy_contract();
     test_republish_replaces_and_slots_are_independent();
+    test_stats_and_health_slots();
     return wbtest_finish("tx_runtime_info_test");
 }

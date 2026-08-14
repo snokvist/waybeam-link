@@ -6,7 +6,7 @@
 // control server and venc OFF, and `run_tx` uses all three, so `wblink_tx_*` is
 // not in that archive — it proves the header is C-clean and stops there. This
 // test is the other half: it runs in the configuration a transmitter actually
-// has, so it LINKS the four symbols and exercises the handle contract.
+// has, so it LINKS the wblink_tx_* surface and exercises the handle contract.
 //
 // Everything here is reachable without a radio, because a pre-stopped or
 // mis-called handle opens nothing. That is deliberate: the rules below
@@ -81,6 +81,15 @@ int main() {
         CHECK(wblink_tx_status(tx, nullptr, 0, &required) == 3);
         CHECK_EQ_U(required, 0);
     }
+    // Pass 177: a handle that has never claimed a run is CREATED, and the
+    // NULL-argument refusal above must not have transitioned it. `exit_rc`
+    // stays untouched before EXITED — primed with a sentinel to prove it.
+    {
+        int rc = 55;
+        CHECK(wblink_tx_state(nullptr, &rc) == -1);
+        CHECK(wblink_tx_state(tx, &rc) == WBLINK_NODE_CREATED);
+        CHECK(rc == 55);
+    }
     // A refused call must NOT have consumed the handle — otherwise a caller who
     // passed a null path once could never start this node, and the next run
     // would report reuse rather than the real mistake.
@@ -91,6 +100,15 @@ int main() {
     // not fired, a nonexistent path would have produced WBLINK_TX_ERROR.
     CHECK(wblink_tx_run(tx, kNoSuchConfig, wblink_tx_c_test_apply, &g_applies) ==
           WBLINK_TX_REUSED);
+    // Pass 177: the stop-before-start run is a real (clean) run — EXITED with
+    // rc 0 — and the reuse refusal after it did not overwrite that record
+    // with WBLINK_TX_REUSED.
+    {
+        int rc = 55;
+        CHECK(wblink_tx_state(tx, &rc) == WBLINK_NODE_EXITED);
+        CHECK(rc == WBLINK_TX_OK);
+        CHECK(wblink_tx_state(tx, nullptr) == WBLINK_NODE_EXITED);
+    }
     // Pass 173: after the handle has run, the setter reports the violated
     // call-before-run contract (3) instead of accepting fds nothing will read.
     {
@@ -103,6 +121,14 @@ int main() {
         size_t required = 77;
         CHECK(wblink_tx_adapters(tx, nullptr, 0, &required) == 3);
         CHECK(wblink_tx_status(tx, nullptr, 0, &required) == 3);
+        // Pass 176/178: same for the stats, health and control-endpoint
+        // surfaces. The endpoint answer matters most here — a node that
+        // never bound must not hand back an address, or an embedder would
+        // poll a control plane that does not exist.
+        CHECK(wblink_tx_stats(tx, nullptr, 0, &required) == 3);
+        CHECK(wblink_tx_health(tx, nullptr, 0, &required) == 3);
+        CHECK(wblink_tx_control_endpoint(tx, nullptr, 0, &required) == 3);
+        CHECK(wblink_tx_control_endpoint(nullptr, nullptr, 0, &required) == 2);
     }
     wblink_tx_destroy(tx);
 
@@ -114,6 +140,13 @@ int main() {
     CHECK(tx != nullptr);
     CHECK(wblink_tx_run(tx, kNoSuchConfig, wblink_tx_c_test_apply, &g_applies) ==
           WBLINK_TX_ERROR);
+    // Pass 177: a config-load failure is a run that happened — EXITED with
+    // the error, not stuck in RUNNING or reset to CREATED.
+    {
+        int rc = 55;
+        CHECK(wblink_tx_state(tx, &rc) == WBLINK_NODE_EXITED);
+        CHECK(rc == WBLINK_TX_ERROR);
+    }
     wblink_tx_destroy(tx);
 
     // Nothing above should have reached the flight loop, so the mode applier

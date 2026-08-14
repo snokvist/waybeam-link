@@ -26,6 +26,10 @@ struct wblink_tx {
     // Cross-thread status/adapters surface (Pass 174). The caller only
     // copies immutable strings; run_tx alone publishes.
     wblink::node::TxRuntimeInfo runtime_info;
+    // Pass 177 lifecycle. Written only by wblink_tx_run's wrapper; readable
+    // from any thread through wblink_tx_state.
+    std::atomic<int> state{WBLINK_NODE_CREATED};
+    std::atomic<int> exit_rc{0};
 };
 
 // The status space is `run_tx`'s (0/1/2) plus this shim's negatives; the two
@@ -65,10 +69,12 @@ int wblink_tx_set_adapter_fds(wblink_tx* tx, const int* fds, size_t n) {
     return 0;
 }
 
-int wblink_tx_run(wblink_tx* tx, const char* config_path,
-                  wblink_mode_apply_cb on_mode_apply, void* user) {
-    if (tx == nullptr || config_path == nullptr) return WBLINK_TX_BAD_ARG;
-    if (tx->used.exchange(true)) return WBLINK_TX_REUSED;
+// The body of the claimed run, split out so wblink_tx_run can record the
+// Pass 177 lifecycle transitions at exactly two points instead of at every
+// return site below.
+static int wblink_tx_run_claimed(wblink_tx* tx, const char* config_path,
+                                 wblink_mode_apply_cb on_mode_apply,
+                                 void* user) {
     // Stopped before it started: return without loading a config or opening a
     // radio.
     if (tx->stop.load(std::memory_order_relaxed) != 0) return WBLINK_TX_OK;
@@ -119,6 +125,21 @@ int wblink_tx_run(wblink_tx* tx, const char* config_path,
     }
 }
 
+int wblink_tx_run(wblink_tx* tx, const char* config_path,
+                  wblink_mode_apply_cb on_mode_apply, void* user) {
+    if (tx == nullptr || config_path == nullptr) return WBLINK_TX_BAD_ARG;
+    if (tx->used.exchange(true)) return WBLINK_TX_REUSED;
+    // Pass 177: the refusals above never ran and never transition; from the
+    // successful claim on, the handle's state is this wrapper's to tell. The
+    // rc is stored BEFORE the EXITED flip so a reader that observes EXITED
+    // always reads the real code, never the initializer.
+    tx->state.store(WBLINK_NODE_RUNNING);
+    const int rc = wblink_tx_run_claimed(tx, config_path, on_mode_apply, user);
+    tx->exit_rc.store(rc);
+    tx->state.store(WBLINK_NODE_EXITED);
+    return rc;
+}
+
 int wblink_tx_adapters(wblink_tx* tx, char* buffer, size_t capacity,
                        size_t* required) {
     if (tx == nullptr) return 2;
@@ -129,6 +150,33 @@ int wblink_tx_status(wblink_tx* tx, char* buffer, size_t capacity,
                      size_t* required) {
     if (tx == nullptr) return 2;
     return tx->runtime_info.copy_status(buffer, capacity, required);
+}
+
+int wblink_tx_stats(wblink_tx* tx, char* buffer, size_t capacity,
+                    size_t* required) {
+    if (tx == nullptr) return 2;
+    return tx->runtime_info.copy_stats(buffer, capacity, required);
+}
+
+int wblink_tx_health(wblink_tx* tx, char* buffer, size_t capacity,
+                     size_t* required) {
+    if (tx == nullptr) return 2;
+    return tx->runtime_info.copy_health(buffer, capacity, required);
+}
+
+int wblink_tx_control_endpoint(wblink_tx* tx, char* buffer, size_t capacity,
+                               size_t* required) {
+    if (tx == nullptr) return 2;
+    return tx->runtime_info.copy_control_endpoint(buffer, capacity, required);
+}
+
+int wblink_tx_state(wblink_tx* tx, int* exit_rc) {
+    if (tx == nullptr) return -1;
+    const int state = tx->state.load();
+    if (state == WBLINK_NODE_EXITED && exit_rc != nullptr) {
+        *exit_rc = tx->exit_rc.load();
+    }
+    return state;
 }
 
 void wblink_tx_destroy(wblink_tx* tx) { delete tx; }

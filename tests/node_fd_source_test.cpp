@@ -161,15 +161,53 @@ void test_c_abi_set_adapter_fds() {
     CHECK(wblink_rx_set_adapter_fds(rx, fds, 0) == 0);  // clears
     CHECK(wblink_rx_set_adapter_fds(rx, fds, 2) == 0);
 
+    // Pass 177: before any claimed run the handle is CREATED, and `exit_rc`
+    // is untouched — primed with a sentinel so a spurious write is visible.
+    {
+        int rc = 55;
+        CHECK(wblink_rx_state(nullptr, &rc) == -1);
+        CHECK(wblink_rx_state(rx, &rc) == WBLINK_NODE_CREATED);
+        CHECK(rc == 55);
+    }
+
     // Ordering guard. Stop first so the run returns 0 WITHOUT loading a config
     // or opening a radio — the header's documented pre-stop path — which is
     // what makes this assertion safe to make with real fds in the handle.
     wblink_rx_request_stop(rx);
     CHECK(wblink_rx_run(rx, "/nonexistent/config.json", nullptr, nullptr) == 0);
 
+    // Pass 177: that pre-stopped run still counts as a run — EXITED with rc
+    // 0. A reader latching on "state == RUNNING" therefore stops trusting a
+    // node that returned in microseconds, which is the whole point.
+    {
+        int rc = 55;
+        CHECK(wblink_rx_state(rx, &rc) == WBLINK_NODE_EXITED);
+        CHECK(rc == 0);
+    }
+
     // The handle is now used; setting fds after the config was consumed is
     // refused rather than silently ignored.
     CHECK(wblink_rx_set_adapter_fds(rx, fds, 2) == 3);
+
+    // Pass 176/178: a run that never reached a backend published no stats,
+    // no health and — the one that matters — no control endpoint. An
+    // embedder reading 3 knows there is no control plane, rather than being
+    // handed an address that answers nothing.
+    {
+        size_t required = 77;
+        CHECK(wblink_rx_stats(rx, nullptr, 0, &required) == 3);
+        CHECK(wblink_rx_health(rx, nullptr, 0, &required) == 3);
+        CHECK(wblink_rx_control_endpoint(rx, nullptr, 0, &required) == 3);
+        CHECK(wblink_rx_control_endpoint(nullptr, nullptr, 0, &required) == 2);
+    }
+
+    // A reuse refusal (3) must not overwrite the real run's record.
+    CHECK(wblink_rx_run(rx, "/nonexistent/config.json", nullptr, nullptr) == 3);
+    {
+        int rc = 55;
+        CHECK(wblink_rx_state(rx, &rc) == WBLINK_NODE_EXITED);
+        CHECK(rc == 0);
+    }
 
     wblink_rx_destroy(rx);
 }

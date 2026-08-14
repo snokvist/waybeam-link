@@ -473,12 +473,13 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             return 1;
         }
         control = std::move(*cs.value);
+        // Pass 178: the socket's answer, published only after a successful
+        // bind. See the RX twin.
+        if (runtime_info != nullptr && !control->bound_endpoint().empty()) {
+            runtime_info->publish_control_endpoint(control->bound_endpoint());
+        }
         ControlHandlers h;
-        h.stats_line = [&]() -> std::string {
-            std::string s = emitter.last_line();
-            if (!s.empty() && s.back() == '\n') s.pop_back();
-            return s;
-        };
+        h.stats_line = [&] { return stats_line_string(emitter); };
         h.info_json = [&] {
             InfoSelfState self;
             self.channel_mhz = cur_chan;
@@ -1154,6 +1155,12 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                        &vfill, cur_chan);
             if (control) {
                 control->publish_stats(emitter.last_line());
+            }
+            // Pass 176: the same two strings the control server serves,
+            // readable through the C ABI — one fill path, three transports.
+            if (runtime_info != nullptr) {
+                runtime_info->publish_stats(stats_line_string(emitter));
+                runtime_info->publish_health(build_health_json(last_snap));
             }
             next_stats = now + stats_period;
         }
