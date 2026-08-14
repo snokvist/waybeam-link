@@ -1136,10 +1136,38 @@ sweep:
 **2299 vs 2350 — 2%.** The craft is 60 MHz away from 5745 and still decodes
 there: measured **-41 dBm** on 5745 against **-11..-18 dBm** on 5805, i.e.
 ~23-30 dB of adjacent-channel rejection, which at 2 m is nowhere near enough
-to stop decoding. Both dwells then run for the same time against a
-continuously transmitting craft, so **the frame count saturates on dwell
-duration rather than on signal**, and the heard-most rule is left picking
-between two near-equal numbers.
+to stop decoding.
+
+**Amended 2026-08-14 — the mechanism above was wrong.** This entry first read
+"both dwells run for the same time against a continuously transmitting craft,
+so the frame count saturates on dwell duration rather than on signal". The
+measurements are unchanged; the reading of them is not. Per
+`third_party/devourer/docs/bench-testing-near-field.md`, the RTL88xx front end
+**starts compressing around -10 to -20 dBm** and is linear around -40 to -70.
+So -11 dBm on 5805 is not "a strong signal"; it is **a receiver in
+compression**, while -41 dBm on 5745 sits in the linear sweet spot — the
+adjacent-channel filter was acting as the 30 dB attenuator the bench did not
+have. The true channel's frame count was not tied, it was **suppressed**, by
+the EVM collapse that overload produces while SNR holds flat (measured in that
+doc's power sweep: SNR 18 dB unchanged from low to full power, EVM -28 -> -13).
+
+The two readings predict different things, and a second case discriminates
+them. **Craft at 5180, ground resting at 5805 (far):** the scout answered
+**5240 on four consecutive sweeps**, rejecting 5180 each time; a fifth sweep
+resolved 5180 and the claim landed at once. Counts-saturate-on-dwell-time
+predicts near-ties with a random winner (case 1 fits). Only
+true-channel-decodes-worse-than-its-own-leakage predicts a **systematic** loss.
+
+We already found this effect on the link path and compensated for it there:
+`io/include/wblink/air_radio.h` Pass 158 — *"PEAK RSSI — saturation trashes a
+fraction of frames to low apparent power, so a mean inverts the signal"*. The
+scout is already peak-shaped (`best_rssi_by_orig` keeps the max), so its RSSI
+is sound even under compression; only the frame count is not.
+
+**Not settled:** case 2's candidate rows appear at **+60 and +120 MHz** but not
+at +20/+40, which no filter skirt produces. Compression does (adjacent-channel
+rejection collapses along with EVM), but re-read the raw sweep JSON before
+treating either the skirt or its span as measured.
 
 **Consequences.** `channel_evidence_valid()` is derived FROM the resolver — a
 channel is valid only if every candidate on it resolves to it — so the loser
@@ -1153,6 +1181,29 @@ the ranking rule is Tier-1-adjacent and this is one chip family on one bench,
 so it wants its own measurement before a rule change. Recorded so the next
 bench does not read it as a claim bug.
 
-**Bench hygiene:** this is a near-field artifact. Separate the craft from the
-ground before trusting a scouted channel, or verify against the craft's own
-`GET /api/v1/info`.
+**What the sensing surface can and cannot contribute** (checked against the
+vendored `third_party/devourer/docs/rx-spectrum-sensing.md`, not from memory):
+the resolver needs **no new devourer call** — `Candidate::rssi_dbm` already
+holds the strongest per-originator, per-channel reading from the scout adapter
+alone. Ruled out for this defect: normalising to a per-dwell absolute noise
+floor (`abs_noise_floor_dbm` is measured **once at bring-up** on Jaguar1 — a
+live read wedges RX — and is never available on Jaguar3, which is both of our
+scout chips); and narrowband 5 MHz sensing (Jaguar3/8821C only, and it cannot
+decode an ANNOUNCE, which is what a candidate *is*). The NHM histogram belongs
+to #173, not here. Per-candidate EVM would need plumbing — `AirRxMeta` carries
+`rssi` only; EVM exists in the per-adapter `RxQualityWindow`.
+
+**Bench hygiene — lower the power, do not (only) add distance.** That doc puts
+free-space loss at ~28 dB at 10 cm and ~57 dB at 3 m, and wants **>=40 dB of
+loss between units**; ten feet in a reflective room is past hard clipping and
+squarely in the multipath-desense regime, so "move it further away" does not
+by itself buy a valid bench. The craft's power is reachable over RF as the
+§11.7 `tx_power` tier (a tier can only ever LOWER power), so drop it to the
+lowest preset and re-sweep. Failing that, verify the channel against the
+craft's own `GET /api/v1/info`.
+
+**The control this finding still owes:** one sweep at reduced craft power, same
+~2 m, everything else held. If the ordering inverts back to the true channel,
+compression is proven and the skirt reading is dead; if it does not, the skirt
+survives and the RSSI-margin fix has to be sized for it instead. Until that
+runs, neither mechanism is measured — only the numbers above are.
