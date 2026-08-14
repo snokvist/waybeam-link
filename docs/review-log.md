@@ -40,9 +40,10 @@ chip-generation name (`"udp"` on the bench backend, where the other three
 are `false`); `power_actuator` is §10.5's `actuator` discriminator as a
 boolean (Pass 171 — `false` = every offset is inert and refused);
 `ldpc_rx_flag` is per-frame LDPC **reporting** (the §15.3 Pass 157 flag —
-the 8812A decodes LDPC fine while reporting none, so absence taints the
-stats field, not the link); `fastretune` says the lean retune override
-exists on this die.
+the 8814A decodes LDPC fine while reporting none, so absence taints the
+stats field, not the link; the 8812A HAS the descriptor bit — measured on
+this machine's AU at first device verify, correcting the sweep's claim);
+`fastretune` says the lean retune override exists on this die.
 
 **C ABI.** The same JSON reaches control-server-less embedders (Android's
 `:wifi` builds `WBLINK_CONTROL_SERVER=OFF`, so REST cannot be the only

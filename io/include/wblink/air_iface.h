@@ -208,9 +208,11 @@ class AirIface {
     // scrapes. `chip` is the backend's chip-generation name ("udp" on the
     // bench backend). `power_actuator` is the §10.5 actuator discriminator
     // (Pass 171): false = every offset is inert and refused. `ldpc_rx_flag`
-    // is per-frame LDPC *reporting* (§15.3 Pass 157) — the 8812A decodes
-    // LDPC while reporting none, so false taints the stats field, not the
-    // link. `fastretune` says the lean retune override exists on this die.
+    // is per-frame LDPC *reporting* (§15.3 Pass 157) — the 8814A decodes
+    // LDPC while reporting none (AdapterCaps.h: rxdesc offsets unparsed on
+    // that die; the 8812A HAS the descriptor bit, measured 2026-08-14), so
+    // false taints the stats field, not the link. `fastretune` says the
+    // lean retune override exists on this die.
     // No devourer types cross this boundary (the rx_sense rule).
     struct AdapterCapsView {
         std::string chip = "unknown";
