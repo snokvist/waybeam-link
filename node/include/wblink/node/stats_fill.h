@@ -434,6 +434,26 @@ inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
 // three objects (`Loaded`, `AirBackend`, `StatsSnapshot`), so they belong
 // beside it rather than in a header of their own.
 
+// Minimal JSON string escape for the few fields whose value is NOT
+// house-controlled: config adapter names are checked only for
+// non-emptiness/uniqueness (config.cpp), and a §11.7 MODE label is a readdir
+// filename stem — either can carry a quote or backslash that would break
+// every consumer of the hand-built JSON (2026-08-14 review finding). Control
+// characters are dropped rather than \u-encoded: no legitimate name has any.
+inline std::string json_escape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (const char c : in) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += c;
+        } else if (static_cast<unsigned char>(c) >= 0x20) {
+            out += c;
+        }
+    }
+    return out;
+}
+
 // §15.5 (Pass 172) the adapters[] array, shared by /info and the C ABI
 // snapshot (wblink_rx_adapters) so the two surfaces cannot drift — one
 // builder is the whole mechanism that keeps every consumer shape reading
@@ -455,7 +475,7 @@ inline std::string build_adapters_array(const Loaded& l,
             (air != nullptr && i < air->chan_by_adapter.size())
                 ? air->chan_by_adapter[i]
                 : a.channel_mhz;
-        s += "{\"name\":\"" + a.name + "\",\"role\":\"";
+        s += "{\"name\":\"" + json_escape(a.name) + "\",\"role\":\"";
         s += (a.role == Role::kTx ? "tx" : "rx");
         s += "\",\"channel\":" + std::to_string(chan);
         // §15.5 (Pass 154): the per-unit EFUSE identity the §10.6 artifacts

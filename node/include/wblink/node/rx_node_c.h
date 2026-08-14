@@ -101,8 +101,9 @@ void wblink_rx_request_stop(wblink_rx *rx);
  * Supplying any fd forces the bring-up `libusb_reset_device` off; a wrapped fd
  * must not be reset.
  *
- * Returns 0 on success, 2 on a NULL handle or a NULL `fds` with `n > 0`, 3 if
- * the node has already been started. Passing n == 0 clears any previous set.
+ * Returns 0 on success, 1 if copying the array failed to allocate, 2 on a
+ * NULL handle or a NULL `fds` with `n > 0`, 3 if the node has already been
+ * started. Passing n == 0 clears any previous set.
  */
 int wblink_rx_set_adapter_fds(wblink_rx *rx, const int *fds, size_t n);
 
@@ -205,8 +206,10 @@ int wblink_rx_vehicle_command(wblink_rx *rx, const char *cmd, int32_t arg,
  * not-ready and a later poll observes it.
  *
  * Returns 0 on a size query/copy, 2 for invalid arguments, 3 when no snapshot
- * has been published yet, or 4 when `capacity` is too small. Final snapshots
- * remain readable after the run stops, until the handle is destroyed.
+ * has been published yet, or 4 when `capacity` is too small (1 is reserved
+ * for an internal size overflow that no real snapshot can reach). Final
+ * snapshots remain readable after the run stops, until the handle is
+ * destroyed.
  */
 int wblink_rx_scout_results(wblink_rx *rx, char *buffer, size_t capacity,
                             size_t *required,
@@ -221,12 +224,14 @@ int wblink_rx_discovery(wblink_rx *rx, char *buffer, size_t capacity,
  *                 "chip":"...","power_actuator":B,"ldpc_rx_flag":B,
  *                 "fastretune":B}, ...]}
  *
- * Published ONCE at backend bring-up — the fields are static per die, so
- * unlike the snapshot calls above there is no fresh-publication request to
- * poll for: 3 means the backend has not come up yet (or run_rx was never
- * called), and after the first success the answer never changes for the life
- * of the run. On a consumer built WBLINK_CONTROL_SERVER=OFF this call is the
- * only capability surface. Same buffer/return contract as the calls above.
+ * Published at backend bring-up and republished at ~1 Hz. The capability
+ * fields are static per die and never change between publishes; `channel`
+ * is LIVE (CSA, craft-local retunes and scout dwells all move it), current
+ * as of the last publish. Unlike the snapshot calls above there is no
+ * fresh-publication request to poll for: 3 means the backend has not come
+ * up yet (or run_rx was never called). On a consumer built
+ * WBLINK_CONTROL_SERVER=OFF this call is the only capability surface. Same
+ * buffer/return contract as the calls above.
  */
 int wblink_rx_adapters(wblink_rx *rx, char *buffer, size_t capacity,
                        size_t *required);

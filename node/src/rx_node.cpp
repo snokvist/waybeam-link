@@ -1052,6 +1052,12 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     StatsEmitter emitter(l.cfg.stats.to_stdout, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
     uint64_t next_stats = t0;
+    // Pass 172 (2026-08-14 review fix): the adapters snapshot carries the
+    // LIVE channel, which CSA, craft-local retunes and scout dwells all move
+    // — a one-shot publish would freeze it for the life of the run while
+    // /info kept reporting the truth. Republished at 1 Hz; the caps fields
+    // are static, so only `channel` ever changes between publishes.
+    uint64_t next_adapters_pub = t0 + 1000;
     const uint64_t stats_period =
         l.cfg.stats.hz > 0 ? static_cast<uint64_t>(1000.0 / l.cfg.stats.hz)
                            : 0;
@@ -3051,6 +3057,11 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     "{\"campaign\":" + command_campaign_json() + "}",
                     generation);
             }
+        }
+        if (runtime_control != nullptr && now >= next_adapters_pub) {
+            runtime_control->publish_adapters(
+                "{\"adapters\":" + build_adapters_array(l, &*air.value) + "}");
+            next_adapters_pub = now + 1000;
         }
         if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
