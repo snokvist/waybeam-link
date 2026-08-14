@@ -125,6 +125,22 @@ class AirIface {
     // latch but leaves any §10.2 curve resolve to re-apply on top.
     virtual bool set_power_auto(size_t adapter) = 0;
 
+    // §10.5 (Pass 169): what the ACTUATOR did with the last write, as opposed
+    // to what was asked for. The two diverge because a relative backend folds
+    // the offset into a hardware index that rails —
+    // effective = clamp(baseline + steps, 0, index_max) — so past the rail
+    // every further step commands the same power while the write still
+    // succeeds. `qdb` is the offset the chip carries; `saturated_low/high`
+    // say the last apply clamped at least one rate at a rail. nullopt on a
+    // backend with no power actuator, or before any write.
+    struct TxPowerApplied {
+        int32_t qdb = 0;
+        bool saturated_low = false;
+        bool saturated_high = false;
+    };
+    virtual std::optional<TxPowerApplied> tx_power_applied(
+        size_t adapter) const = 0;
+
     // §7.2 TSF-anchored quiet gap.
     virtual std::optional<uint64_t> read_tsf(size_t adapter) = 0;
 

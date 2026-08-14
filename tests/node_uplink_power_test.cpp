@@ -17,11 +17,15 @@
 // So `test_tier_relowers_a_configured_map` runs them both ways round.
 #include "wblink/node/uplink_power.h"
 
+#include <string>
+
+#include "wblink/node/stats_fill.h"  // §15.5 build_tx_power_json (Pass 169)
 #include "wbtest.h"
 
 namespace {
 
 using wblink::node::UplinkPower;
+using wblink::node::build_tx_power_json;
 
 // A curve with one authored level-4 point per MCS, so resolve_power_qdb has
 // something to return and the ceiling has something to clamp.
@@ -179,6 +183,41 @@ void test_apply_converges_on_one_actuator() {
     CHECK_EQ_U(autos, 1);                            // and auto NOT re-run
 }
 
+// §15.5 GET /api/v1/tx/power (Pass 169). The latch says what was ASKED for;
+// `applied_qdb` says what the chip took. They diverge whenever the backend's
+// TXAGC index rails — measured 2026-08-14, where a craft swallowed 18 dB of
+// commanded range behind a 200 OK and nothing in the response disagreed.
+void test_tx_power_json_reports_the_applied_value_and_the_rail() {
+    // Nothing written yet: the applied fields are ABSENT, not zero, so a
+    // reader can tell "never applied" from "applied 0".
+    CHECK(build_tx_power_json(std::nullopt, std::nullopt, true) ==
+          "{\"override_active\":false,\"backend\":\"radio\"}");
+
+    // Applied == requested: still reported, and explicitly not railed — a
+    // consumer must not have to infer health from an absent field.
+    const std::string ok = build_tx_power_json(
+        -24, wblink::AirIface::TxPowerApplied{-24, false, false}, true);
+    CHECK(ok.find("\"applied_qdb\":-24") != std::string::npos);
+    CHECK(ok.find("\"saturated_low\":false") != std::string::npos);
+
+    // The measured failure: -120 qdb commanded, the chip took -48 and railed.
+    // Both numbers must survive, because the pair is the whole finding.
+    const std::string railed = build_tx_power_json(
+        -120, wblink::AirIface::TxPowerApplied{-48, true, false}, true);
+    CHECK(railed.find("\"qdb\":-120") != std::string::npos);
+    CHECK(railed.find("\"applied_qdb\":-48") != std::string::npos);
+    CHECK(railed.find("\"saturated_low\":true") != std::string::npos);
+}
+
+// A backend with no actuator reports no applied value rather than echoing the
+// request back as if the chip had confirmed it.
+void test_tx_power_json_omits_applied_where_there_is_no_actuator() {
+    const std::string udp = build_tx_power_json(20, std::nullopt, false);
+    CHECK(udp.find("applied_qdb") == std::string::npos);
+    CHECK(udp.find("\"saturated_low\"") == std::string::npos);
+    CHECK(udp.find("\"backend\":\"udp\"") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -189,5 +228,7 @@ int main() {
     test_artifact_is_not_consulted_above_its_rank();
     test_config_map_outranks_the_artifact();
     test_apply_converges_on_one_actuator();
+    test_tx_power_json_reports_the_applied_value_and_the_rail();
+    test_tx_power_json_omits_applied_where_there_is_no_actuator();
     return wbtest_finish("node_uplink_power_test");
 }

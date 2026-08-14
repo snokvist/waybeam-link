@@ -1679,15 +1679,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                 return "";
             };
             h.tx_power_json = [&] {
-                std::string s = "{\"override_active\":";
-                s += upwr.override_qdb ? "true" : "false";
-                if (upwr.override_qdb) {
-                    s += ",\"qdb\":" + std::to_string(*upwr.override_qdb);
-                }
-                s += ",\"backend\":\"";
-                s += l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio" : "udp";
-                s += "\"}";
-                return s;
+                return build_tx_power_json(
+                    upwr.override_qdb, air.value->tx_power_applied(uplink_idx),
+                    l.cfg.air.kind == AirCfg::Kind::kRadio);
             };
             // §10.7 GET: the ground's OWN uplink state. The craft response
             // keeps the §10.6 schema; `direction` is what tells a Hub which
