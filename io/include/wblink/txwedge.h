@@ -21,6 +21,19 @@ class TxWedge {
 
     bool enabled() const { return p_.window_ms != 0; }
     bool wedged() const { return wedged_; }
+    // §9.10 (Pass 170): has this backend ever been seen completing a frame?
+    // A wedge is progress CEASING, so it presupposes progress: until this is
+    // true the detector renders no verdict, because "has never completed" and
+    // "has stopped completing" are different claims and only the second is a
+    // wedge. Measured on the RTL8733BU, whose backend emits no CCX reports at
+    // all: tx_submitted 1320 / tx_progress 0 read as a dead transmitter while
+    // a second radio received 22087 frames from it.
+    //
+    // REPORTED, not silent. The cost of the precondition is that a backend
+    // wedging before its first completion is never caught — indistinguishable
+    // from one that never reports — so a node stuck here has an inert
+    // watchdog and an operator has to be able to see that.
+    bool progress_proven() const { return progress_proven_; }
     uint64_t wedge_windows() const { return wedge_windows_; }
     // §9.10 v2 (Pass 148): CONSECUTIVE wedged windows, the input to the TX
     // node's self-restart. Distinct from wedge_windows(), which is a lifetime
@@ -42,6 +55,10 @@ class TxWedge {
             next_eval_ms_ = now_ms + p_.window_ms;
             last_submitted_ = tx_submitted;
             last_progress_ = tx_progress;
+            // A watchdog armed after the backend has already been reporting
+            // is proven from the start — otherwise a late arm would spend a
+            // window unable to judge a chip that is plainly completing.
+            if (tx_progress > 0) progress_proven_ = true;
             return false;
         }
         if (now_ms < next_eval_ms_) {
@@ -54,19 +71,22 @@ class TxWedge {
         next_eval_ms_ = now_ms + p_.window_ms;
         const bool was = wedged_;
         if (d_progress > 0) {
+            progress_proven_ = true;  // §9.10 Pass 170
             wedged_ = false;  // any completion proves the TX path alive
             consecutive_ = 0;
-        } else if (d_sub >= p_.min_submits) {
-            wedged_ = true;  // submissions advanced, zero completions
+        } else if (d_sub >= p_.min_submits && progress_proven_) {
+            wedged_ = true;  // submissions advanced, completions STOPPED
             ++wedge_windows_;
             ++consecutive_;
-        }  // else: idle window — not evidence either way, hold the verdict
+        }  // else: idle window, or a backend never seen completing (Pass 170)
+           // — neither is evidence, so hold the verdict
         return wedged_ != was;
     }
 
   private:
     TxWedgePolicy p_;
     bool primed_ = false;
+    bool progress_proven_ = false;
     bool wedged_ = false;
     uint64_t wedge_windows_ = 0;
     uint32_t consecutive_ = 0;
