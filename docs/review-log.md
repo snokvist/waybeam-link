@@ -24,6 +24,39 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 177 — the library states its own liveness (2026-08-14)
+
+**Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
+R3, slice 2).** Both C handles carry an explicit lifecycle state:
+`wblink_rx_state()` / `wblink_tx_state()` return
+`WBLINK_NODE_CREATED` / `RUNNING` / `EXITED` (shared constants,
+`node_state_c.h`) and, once EXITED, write the run's return code through
+the out-param. Transitions are owned by the run wrapper: RUNNING the
+moment the one-run claim succeeds, EXITED (rc first, state second) on
+every return after it — including stop-before-start (a clean 0) and
+config-load failure. A NULL-argument or reused-handle refusal never ran
+and therefore never transitions.
+
+**Two deliberate narrowings of the spec text.** (1) No separate WEDGED
+state: the wedge is `EXITED` with `WBLINK_TX_WEDGED` as the rc — the
+role-specific return spaces are already law (Pass 148 /
+`tx_node_c.h` note 2), and a duplicate state would be a second decoder
+for the same fact. (2) No terminal-exit reason *string* in the ABI: rc
+is the machine-actionable reason; human-readable causes are log lines
+and belong to the embedder's `wb_log_set_sink` (R6's gate), not to a
+second string surface the loop would have to thread through every
+error return.
+
+**What this retires.** waybeam-hub's `mod_wblink_running()` re-derives
+liveness because `wblink_rx_run` returns within milliseconds on a
+missing radio (hub #195 review); Android keeps an equivalent latch.
+Both can now read `state == RUNNING` from the handle's owner.
+
+**Evidence.** Branch `feat/r3-telemetry-abi` (stacked on Pass 176);
+lifecycle cases through the real shims (stop-before-start run,
+bad-arg/reuse non-transitions) in `tests/tx_node_c_test.cpp` and
+`tests/node_fd_source_test.cpp`.
+
 ## Pass 176 — health and stats are C-ABI snapshots from the one fill path (2026-08-14)
 
 **Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
