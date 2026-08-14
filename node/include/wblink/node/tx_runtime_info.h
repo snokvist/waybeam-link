@@ -14,11 +14,11 @@
 #pragma once
 
 #include <cstddef>
-#include <cstring>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
+
+#include "wblink/node/snapshot_copy.h"
 
 namespace wblink {
 namespace node {
@@ -57,25 +57,14 @@ class TxRuntimeInfo {
 
     int copy(const Snap& slot, char* buffer, size_t capacity,
              size_t* required) {
-        if (required == nullptr || (buffer == nullptr && capacity != 0)) {
-            return 2;
-        }
         Snap snapshot;
         {
             const std::lock_guard<std::mutex> lock(mutex_);
             snapshot = slot;
         }
-        if (!snapshot) {
-            *required = 0;
-            return 3;
-        }
-        if (snapshot->size() == std::numeric_limits<size_t>::max()) return 1;
-        const size_t need = snapshot->size() + 1;
-        *required = need;
-        if (buffer == nullptr) return capacity == 0 ? 0 : 2;
-        if (capacity < need) return 4;
-        std::memcpy(buffer, snapshot->c_str(), need);
-        return 0;
+        // The contract itself lives once, in snapshot_copy.h (2026-08-14
+        // review) — this method only owns the lock.
+        return copy_snapshot_json(snapshot, buffer, capacity, required);
     }
 
     std::mutex mutex_;

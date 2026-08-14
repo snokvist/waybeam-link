@@ -668,12 +668,14 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         // link and CSA never restart. active_mode is the label, restored from
         // config at boot and set optimistically on accept.
         h.mode_get = [&]() -> std::string {
-            std::string s = "{\"active\":\"" + active_mode + "\"";
-            s += ",\"apply_configured\":";
-            s += (l.cfg.venc.mode_apply_cmd.empty() || !mode_apply) ? "false"
-                                                                       : "true";
-            s += "}";
-            return s;
+            // Shared with the Pass 174 status snapshot — one builder, one
+            // predicate, so the two surfaces cannot report opposite booleans
+            // for the same node (2026-08-14 review; app/main.cpp's hand copy
+            // had already drifted once).
+            return build_mode_json(
+                active_mode,
+                mode_apply_configured(l.cfg.venc.mode_apply_cmd,
+                                      bool(mode_apply)));
         };
         h.mode_set = [&](const std::string& name) -> std::string {
             if (l.cfg.venc.mode_apply_cmd.empty()) {
@@ -833,6 +835,38 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 tx.drain_resends(service_now, inject_resend);
             }
         });
+    };
+    // Pass 174 (2026-08-14 review fix): ONE lambda builds the status object
+    // so the 1 Hz publish, the §9.10 wedge exit and the clean stop all emit
+    // the same shape — the wedge exit used to return ABOVE the publish site,
+    // so the final readable status never carried the wedge that ended the
+    // run. Field semantics: mode mirrors §15.5 GET /mode (shared builder),
+    // wedge mirrors §9.10 (progress_proven = Pass 170's visible inert
+    // watchdog), claimed/claimed_by mirror §11.4.
+    const auto publish_status_now = [&](uint64_t at_ms) {
+        if (runtime_info == nullptr) return;
+        const std::optional<uint16_t> latched = csa.latched_issuer();
+        std::string s = "{\"session\":" + std::to_string(session);
+        s += ",\"channel\":" + std::to_string(cur_chan);
+        s += ",\"csa\":\"" + std::string(csa.state_str()) + "\"";
+        s += ",\"claimed\":";
+        s += latched.has_value() ? "true" : "false";
+        s += ",\"claimed_by\":" + std::to_string(latched.value_or(0));
+        s += ",\"mode\":" +
+             build_mode_json(active_mode,
+                             mode_apply_configured(l.cfg.venc.mode_apply_cmd,
+                                                   bool(mode_apply)));
+        s += ",\"wedge\":{\"enabled\":";
+        s += wedge.enabled() ? "true" : "false";
+        s += ",\"progress_proven\":";
+        s += wedge.progress_proven() ? "true" : "false";
+        s += ",\"wedged\":";
+        s += wedge.wedged() ? "true" : "false";
+        s += ",\"consecutive\":" + std::to_string(wedge.consecutive_wedged());
+        s += ",\"windows\":" + std::to_string(wedge.wedge_windows());
+        s += "}}";
+        runtime_info->publish_status(std::move(s));
+        next_status = at_ms + 1000;
     };
     while (stop == 0) {
         // One timestamp per iteration: every callback and the tick share it,
@@ -1085,38 +1119,21 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                              "air: TX WEDGED for %u consecutive windows — "
                              "exiting for supervisor re-exec (§9.10 v2)\n",
                              wedge.consecutive_wedged());
+                // Pass 174 review fix: the terminal snapshot must carry the
+                // wedge that ended the run — this return used to sit above
+                // the publish site, so a supervisor reading the final status
+                // after WBLINK_TX_WEDGED recorded a healthy node.
+                publish_status_now(now);
                 return kTxWedged;
             }
         }
-        // Pass 174: the embedder-facing status snapshot. Every field keeps
-        // its existing semantics — mode mirrors §15.5 GET /mode, wedge
-        // mirrors §9.10 (progress_proven makes an inert watchdog visible,
-        // Pass 170's REPORTED-not-silent condition), claimed/claimed_by
-        // mirror §11.4.
         if (runtime_info != nullptr && now >= next_status) {
-            const std::optional<uint16_t> latched = csa.latched_issuer();
-            std::string s = "{\"session\":" + std::to_string(session);
-            s += ",\"channel\":" + std::to_string(cur_chan);
-            s += ",\"csa\":\"" + std::string(csa.state_str()) + "\"";
-            s += ",\"claimed\":";
-            s += latched.has_value() ? "true" : "false";
-            s += ",\"claimed_by\":" + std::to_string(latched.value_or(0));
-            s += ",\"mode\":{\"active\":\"" + active_mode + "\"";
-            s += ",\"apply_configured\":";
-            s += (l.cfg.venc.mode_apply_cmd.empty() || !mode_apply) ? "false"
-                                                                    : "true";
-            s += "},\"wedge\":{\"enabled\":";
-            s += wedge.enabled() ? "true" : "false";
-            s += ",\"progress_proven\":";
-            s += wedge.progress_proven() ? "true" : "false";
-            s += ",\"wedged\":";
-            s += wedge.wedged() ? "true" : "false";
-            s += ",\"consecutive\":" +
-                 std::to_string(wedge.consecutive_wedged());
-            s += ",\"windows\":" + std::to_string(wedge.wedge_windows());
-            s += "}}";
-            runtime_info->publish_status(std::move(s));
-            next_status = now + 1000;
+            publish_status_now(now);
+            // Pass 172 review fix (2026-08-14): the adapters object carries
+            // the LIVE channel, so it republishes on the same cadence — the
+            // caps fields are static, only `channel` moves between publishes.
+            runtime_info->publish_adapters(
+                "{\"adapters\":" + build_adapters_array(l, &*air.value) + "}");
         }
         if (control) {
             control->service(now);
@@ -1141,6 +1158,9 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             next_stats = now + stats_period;
         }
     }
+    // Pass 174 review fix: a final snapshot on the clean-stop path too, so
+    // the last readable status is the state the run actually ended in.
+    publish_status_now(now_ms());
     return 0;
 }
 

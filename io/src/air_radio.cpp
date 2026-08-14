@@ -894,14 +894,10 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // 2026-08-14 ruling) and the operator's only other clue would be a
         // §15.5 field nobody thought to read.
         ad.power_actuator_ok = ad.dev->GetTxPowerCaps().supported;
-        if (!ad.power_actuator_ok && cfg.adapters[i].role == Role::kTx) {
-            wb_logf(
-                "radio: adapter \"%s\" has NO TX-power actuator (devourer "
-                "reports caps.supported=false) — §10.5 offsets are INERT on "
-                "it, including the power_offset_qdb boot backoff; the chip "
-                "runs at its backend-fixed power\n",
-                ad.name.c_str());
-        }
+        // The Pass 171 no-actuator ANNOUNCEMENT moved below the §15.2
+        // re-bind (2026-08-14 review): this loop's index is the provisional
+        // unit-to-stanza mapping, so gating on the stanza's role here could
+        // warn about an RX ear while staying silent about the real TX die.
         // §10.6 (Pass 154): the per-unit identity, read while it is reliably
         // readable (the accessor folds USB glitches into false — a unit with
         // no answer has no identity, and callers fail closed on that).
@@ -1004,6 +1000,23 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                 ad.dev->SetMonitorChannel(
                     SelectedChannel{chan, 0, CHANNEL_WIDTH_20});
             }
+        }
+    }
+
+    // §10.5 (Pass 171) no-actuator announcement, AFTER the §15.2 re-bind so
+    // it names the unit actually bound to a role:"tx" stanza — the unit, not
+    // the provisional claim order (2026-08-14 review: with a mac-pin
+    // permutation the old pre-rebind check could warn about an RX ear and
+    // stay silent about the real TX die).
+    for (size_t i = 0; i < im.adapters.size(); ++i) {
+        const Impl::Adapter& ad = *im.adapters[i];
+        if (ad.tx && !ad.power_actuator_ok) {
+            wb_logf(
+                "radio: adapter \"%s\" has NO TX-power actuator (devourer "
+                "reports caps.supported=false) — §10.5 offsets are INERT on "
+                "it, including the power_offset_qdb boot backoff; the chip "
+                "runs at its backend-fixed power\n",
+                ad.name.c_str());
         }
     }
 

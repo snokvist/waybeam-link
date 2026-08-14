@@ -310,7 +310,18 @@ struct AirBackend {
             // precisely what B4 established must not happen — and a caller
             // supplying fds has no other way to say so.
             rc.adapter_fds = cfg.adapter_fds;
-            if (!cfg.adapter_fds.empty()) rc.do_reset = false;
+            // Gate on a REAL fd, not a non-empty array (2026-08-14 review):
+            // an all-(-1) array means "enumerate everything by bus path" per
+            // the C headers, and must keep the bring-up reset — only an
+            // actual wrapped fd (>= 0) forbids it. do_reset is backend-wide,
+            // so one wrapped fd turns it off for the node, which is the safe
+            // direction.
+            for (const int fd : cfg.adapter_fds) {
+                if (fd >= 0) {
+                    rc.do_reset = false;
+                    break;
+                }
+            }
             auto a = RadioAir::create(rc);
             if (!a) {
                 return Result<AirBackend>::fail(a.error);
