@@ -24,6 +24,47 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 175 — recovery is prep + construct, and prep already lives in the library (2026-08-14)
+
+**Ruling (operator-approved plan, coordination
+`specs/cross/2026-08-14-wblink-library-parity` R2/R7).** The supported
+recovery shape on BOTH roles is **destroy → create → run on a fresh
+handle**, in-process or across processes. No in-place `recover()` enters
+the ABI: #168 measured fresh-object recovery 5/5 and the in-place
+runtime-control path 0/5, and a second `InitWrite` on a live devourer
+object terminates the process (#197). The one-handle-one-run contract has
+encoded half of this since Phase 3; this pass states the other half — a
+fresh create in the same process is *required to work* — in the C headers
+where a supervisor author looks.
+
+**Measured: the external prep is redundant on the devourer path.** The
+coordination R7 inventory found three prep implementations (the ground
+unit's `ExecStartPre` sysfs unbind, the vehicle init's `free_adapter()`,
+Android's claim seam). Probed 2026-08-14 on the x86 bench: a node claims
+an 8812AU with `rtw_8812au` BOUND — no rmmod, no unbind — because
+`claim_interface_then_reset` detaches an active kernel driver before the
+claim (`third_party/devourer/src/UsbOpen.cpp:105`, read not edited) and
+retries BUSY at 6×250 ms. What `create()` already owns: presence → loud
+named failure; bound driver → detach; stale claim → BUSY retry; two
+stanzas on one unit → dev_key refusal. The scripts stay (harmless
+belt-and-braces) but are no longer part of any embedder contract — an
+in-process supervisor needs NO root sysfs help, which is what actually
+unblocks the hub's #197 vehicle TX role.
+
+**One residue.** devourer detaches explicitly (not libusb auto-detach),
+so the kernel driver stays detached after exit (measured:
+`Driver=[none]`) until re-plug or manual rebind. A deployment where
+devourer owns the dongle never notices; a bench returning it to the
+kernel driver does so by hand.
+
+**Changed.** No wire, no §15.x — the recovery-loop contract enters
+`rx_node_c.h` / `tx_node_c.h`.
+
+**Evidence.** #168 (5/5 fresh vs 0/5 in-place); #197 (InitWrite
+terminate); the 2026-08-14 bench probe (bound driver → `/info` served);
+`deploy/vehicle-waybeam-link.init:28-34` and the ground unit's prep
+script as the inventoried externals.
+
 ## Pass 174 — the TX node states its own status: `wblink_tx_status` + `wblink_tx_adapters` (2026-08-14)
 
 **Ruling (operator-approved plan, coordination
