@@ -216,6 +216,43 @@ void test_tx_power_json_omits_applied_where_there_is_no_actuator() {
     CHECK(udp.find("applied_qdb") == std::string::npos);
     CHECK(udp.find("\"saturated_low\"") == std::string::npos);
     CHECK(udp.find("\"backend\":\"udp\"") != std::string::npos);
+    // ...and it names no actuator either: `actuator` describes a radio
+    // adapter's chip, and the udp bench has no chip to describe.
+    CHECK(udp.find("\"actuator\"") == std::string::npos);
+}
+
+// §10.5 (Pass 171). A RADIO adapter whose chip has no lever is the case the
+// three fields above cannot express: devourer answers an unsupported knob with
+// 0, so `applied_qdb:0, saturated_low:false` is byte-identical to a successful
+// zero-offset apply — the exact surface the RTL8733BU produced on 2026-08-14
+// while 18 dB of commanded offset aired nothing. `actuator` has to be a stated
+// value, because omission is already taken: it means "no write yet".
+void test_tx_power_json_states_whether_an_actuator_exists_at_all() {
+    // No actuator: said out loud, and the three that would lie are gone.
+    const std::string none = build_tx_power_json(
+        -24, wblink::AirIface::TxPowerApplied{0, false, false, false}, true);
+    CHECK(none.find("\"actuator\":\"none\"") != std::string::npos);
+    CHECK(none.find("applied_qdb") == std::string::npos);
+    CHECK(none.find("\"saturated_low\"") == std::string::npos);
+    CHECK(none.find("\"saturated_high\"") == std::string::npos);
+    // The latched request still reports — the operator asked for it, and the
+    // point of the refusal is that they learn it did not land.
+    CHECK(none.find("\"qdb\":-24") != std::string::npos);
+
+    // A working actuator says so, so a consumer never has to read "actuator
+    // absent" as "actuator fine". This is the half that would make deleting
+    // the field look harmless if only the `none` case were pinned.
+    const std::string offset = build_tx_power_json(
+        -24, wblink::AirIface::TxPowerApplied{-24, false, false, true}, true);
+    CHECK(offset.find("\"actuator\":\"offset\"") != std::string::npos);
+    CHECK(offset.find("\"applied_qdb\":-24") != std::string::npos);
+
+    // And "no write yet" stays distinguishable from both: nullopt names no
+    // actuator at all, so the three-way distinction the field exists for
+    // (unknown / none / working) survives.
+    const std::string unwritten = build_tx_power_json(-24, std::nullopt, true);
+    CHECK(unwritten.find("\"actuator\"") == std::string::npos);
+    CHECK(unwritten.find("applied_qdb") == std::string::npos);
 }
 
 }  // namespace
@@ -230,5 +267,6 @@ int main() {
     test_apply_converges_on_one_actuator();
     test_tx_power_json_reports_the_applied_value_and_the_rail();
     test_tx_power_json_omits_applied_where_there_is_no_actuator();
+    test_tx_power_json_states_whether_an_actuator_exists_at_all();
     return wbtest_finish("node_uplink_power_test");
 }

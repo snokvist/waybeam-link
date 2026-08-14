@@ -121,6 +121,11 @@ struct RadioAir::Impl {
         int32_t power_applied_qdb = 0;
         bool power_saturated_low = false;
         bool power_saturated_high = false;
+        // §10.5 (Pass 171): does this die have a power lever AT ALL. Static
+        // per die, read once at bring-up beside `ldpc_flag_ok` — unlike the
+        // three above it must answer before any write, because the whole point
+        // is that the write will never mean anything.
+        bool power_actuator_ok = true;
         std::thread rx_thread;
         // RX-thread-owned counters (relaxed atomics; read from stats).
         std::atomic<uint64_t> rx_frames{0};
@@ -874,6 +879,20 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // §15.3 (Pass 157): whether this die reports received coding at
         // all — static per die, so read once here.
         ad.ldpc_flag_ok = ad.dev->GetAdapterCaps().ldpc_rx_flag;
+        // §10.5 (Pass 171): whether this die has a TX-power lever at all,
+        // read at the same moment and for the same reason. ANNOUNCED on a
+        // role:"tx" adapter, because the node keeps flying without one (the
+        // 2026-08-14 ruling) and the operator's only other clue would be a
+        // §15.5 field nobody thought to read.
+        ad.power_actuator_ok = ad.dev->GetTxPowerCaps().supported;
+        if (!ad.power_actuator_ok && cfg.adapters[i].role == Role::kTx) {
+            wb_logf(
+                "radio: adapter \"%s\" has NO TX-power actuator (devourer "
+                "reports caps.supported=false) — §10.5 offsets are INERT on "
+                "it, including the power_offset_qdb boot backoff; the chip "
+                "runs at its backend-fixed power\n",
+                ad.name.c_str());
+        }
         // §10.6 (Pass 154): the per-unit identity, read while it is reliably
         // readable (the accessor folds USB glitches into false — a unit with
         // no answer has no identity, and callers fail closed on that).
@@ -1248,6 +1267,19 @@ bool RadioAir::set_power_qdb(size_t adapter, int32_t qdb) {
     // commanded range reported success. So keep what devourer returns — the
     // APPLIED qdb — and latch the rail flags it sets at the same apply.
     Impl::Adapter& a = *impl_->adapters[adapter];
+    // §10.5 (Pass 171): a die with no lever answers every request with 0, so
+    // issuing the write would only manufacture a cached applied_qdb of 0 that
+    // reads exactly like a successful zero-offset apply. Issue nothing, claim
+    // nothing — tx_power_applied() reports actuator=false from bring-up and
+    // the announcement there already named this adapter once.
+    //
+    // `true` is deliberate and is NOT a claim that power moved: it is what
+    // keeps resolve_and_apply_power from re-attempting the same dead write at
+    // every profile commit for the life of the node, since it caches only on
+    // success. The §15.5 surface, not this bool, is where a caller learns.
+    if (!a.power_actuator_ok) {
+        return true;
+    }
     a.power_applied_qdb =
         static_cast<int32_t>(a.dev->SetTxPowerOffsetQdb(static_cast<int>(qdb)));
     const devourer::TxPowerState st = a.dev->GetTxPowerState();
@@ -1274,9 +1306,16 @@ std::optional<AirIface::TxPowerApplied> RadioAir::tx_power_applied(
     size_t adapter) const {
     if (adapter >= impl_->adapters.size()) return std::nullopt;
     const Impl::Adapter& a = *impl_->adapters[adapter];
+    // §10.5 (Pass 171): an adapter with no lever answers from BRING-UP, not
+    // from the first write. Waiting for a write would be the one case where
+    // "nothing applied yet" and "nothing will ever apply" look the same, and
+    // it is the second that a caller has to refuse on.
+    if (!a.power_actuator_ok) {
+        return TxPowerApplied{0, false, false, false};
+    }
     if (!a.power_applied_valid) return std::nullopt;
     return TxPowerApplied{a.power_applied_qdb, a.power_saturated_low,
-                          a.power_saturated_high};
+                          a.power_saturated_high, true};
 }
 
 // §10.5 (Pass 150): devourer's native lever already IS the relative one —

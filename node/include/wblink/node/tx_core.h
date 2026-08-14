@@ -1006,6 +1006,11 @@ struct TxCore {
                 if (arg > 1) return false;
                 if (!calibrator_) return false;
                 if (arg == 1) {
+                    // §10.6 (Pass 171): a wired hook is not a working lever.
+                    // Refuse before the space checks below, because on a chip
+                    // with no actuator the offset window is perfectly valid
+                    // and every rung in it commands the same power.
+                    if (!power_actuator_) return false;
                     // §10.6 (Pass 151): whichever actuator this backend's
                     // space uses must exist. On udp both are absent and the
                     // run stays a logged intent, so it is refused as before.
@@ -1672,6 +1677,14 @@ struct TxCore {
     // §10.5 (Pass 150) relative actuator — bound for EVERY backend, unlike
     // apply_power which is radio-only.
     std::function<bool(size_t adapter_idx, int32_t qdb)> apply_power_offset;
+    // §10.5/§10.6 (Pass 171): does this node's role:"tx" adapter have a power
+    // lever AT ALL. Distinct from the hooks above, which say whether a lever
+    // is WIRED here — both can be bound while the chip behind them ignores
+    // every write (devourer answers an unsupported knob with 0). Set once at
+    // startup beside set_backend_relative(). A §10.6 run on such a chip reads
+    // flat at every rung and would persist that as an artifact which the
+    // resolve, a pairing pass and the next boot all believe.
+    void set_power_actuator(bool ok) { power_actuator_ = ok; }
     // §10.5 (Pass 150): true when the backend's power lever is RELATIVE
     // (devourer). The §10.2 absolute curve and the §10.6 absolute sweep are
     // then not merely inaccurate but dangerous — their 60..108 qdb values
@@ -1746,6 +1759,7 @@ struct TxCore {
     CalibrationPolicy calib_policy_;              // for a tier re-init
     std::optional<int32_t> power_override_;       // §10.5 latch (volatile)
     bool backend_relative_ = false;  // §10.5 Pass 150
+    bool power_actuator_ = true;     // §10.5 Pass 171
     // §10.6 (Pass 151): set when the loaded curve was authored by THIS
     // backend's calibration, so its numbers are in this backend's space. A
     // config power_map never sets it — it is not backend-scoped.

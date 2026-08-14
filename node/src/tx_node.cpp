@@ -164,6 +164,12 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
     // absolute-space calibrator on a relative backend — the exact +27 dB
     // hazard Pass 150 refused the run to avoid.
     tx.set_backend_relative(l.cfg.air.kind == AirCfg::Kind::kRadio);
+    // §10.5/§10.6 (Pass 171): and whether the lever exists on the silicon, not
+    // just in the wiring. Read here for the same reason as the line above —
+    // before anything can start a run against it.
+    if (const auto ap = air.value->tx_power_applied(calib_tx_idx)) {
+        tx.set_power_actuator(ap->actuator);
+    }
     // §10.6 (Pass 120): craft-resident calibration — engine seeds, artifact
     // persistence, and the boot auto-load with the fingerprint gate. The
     // §10.3 ceiling (Pass 134) comes from the same adapter the sweep drives.
@@ -496,6 +502,14 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             }
             if (qdb < -511 || qdb > 511)
                 return "qdb out of range (-511..511)";
+            // §10.5 (Pass 171): refuse rather than return 200 for a move the
+            // chip cannot make. Checked after the `auto` branch on purpose —
+            // clearing a latch is meaningful whatever the hardware does.
+            const auto ap = air.value->tx_power_applied(calib_tx_idx);
+            if (ap && !ap->actuator)
+                return "this node's role:\"tx\" adapter has no TX-power "
+                       "actuator (§10.5); the offset would report applied and "
+                       "move nothing";
             // §10.5 (Pass 150): bounded and REJECTED, not clamped — the
             // operator learns instead of wondering why nothing moved.
             if (!tx.set_power_override(qdb))
