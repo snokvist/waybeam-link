@@ -353,6 +353,7 @@ endif()
 # still has ~193 undefined symbols like any other, and no gate resolves them on
 # bionic — android-arm64 is compile-only. See docs/findings.md, 2026-08-09.
 set(WBLINK_NODE_SRCS
+    node/src/build_info_c.cpp
     node/src/rx_node.cpp
     node/src/rx_node_c.cpp
     node/src/rx_runtime_control.cpp)
@@ -363,6 +364,21 @@ else()
     set(WBLINK_NODE_TX OFF)
 endif()
 add_library(wblink_node STATIC ${WBLINK_NODE_SRCS})
+# Pass 180: the build_info string is a fact about the BUILD, so CMake states
+# it — CMake is the only place that knows. Not read from the feature macros in
+# C++: WBLINK_VENC has never been one (it gates target_sources and "nothing
+# branches on it", above), so `#if WBLINK_VENC` silently means OFF and a
+# string derived that way reports a full build as having no venc and no
+# transmitter. It did, until a receive-only build was compared against a full
+# one. WBLINK_NODE_TX is likewise taken from the variable CMake already
+# computed rather than re-deriving the three-way conjunction in a second
+# place.
+target_compile_definitions(wblink_node PRIVATE
+    WBLINK_BI_FRAME_SHM=$<IF:$<BOOL:${WBLINK_FRAME_SHM}>,1,0>
+    WBLINK_BI_CONTROL_SERVER=$<IF:$<BOOL:${WBLINK_CONTROL_SERVER}>,1,0>
+    WBLINK_BI_VENC=$<IF:$<BOOL:${WBLINK_VENC}>,1,0>
+    WBLINK_BI_RADIO=$<IF:$<BOOL:${WBLINK_RADIO}>,1,0>
+    WBLINK_BI_NODE_TX=$<IF:$<BOOL:${WBLINK_NODE_TX}>,1,0>)
 if(NOT PROJECT_IS_TOP_LEVEL)
     set_target_properties(wblink_node PROPERTIES EXCLUDE_FROM_ALL TRUE)
 endif()
