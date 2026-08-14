@@ -12,6 +12,111 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-14 — The RTL8733BU has no §10.5 power actuator at all, and the node cannot tell: 18 dB of commanded offset moved the air by nothing, with `{"ok":true}` every time
+
+**Setup.** CV610 (192.168.2.181) transmitting on 5805/20 through the integrated
+waybeam-hub `mod_wblink` node, adapter `cv610-8733b` (`0bda:f72b`, bus 1-1.2).
+Ground receiver: x86 dev host, RTL8812AU on bus 8-1, `role:"tx"` uplink,
+kernel driver unloaded. Offsets commanded with `POST /api/v1/tx/power` on the
+craft's `127.0.0.1:8091`; five samples of the ground's own `adapters[0]`
+`rssi_best` / `evm` read one second apart at each rung, after a 6 s settle.
+
+**Positive control first, same session, same receiver, same bench geometry.**
+The craft at 192.168.2.232 (8822EU) swept over the identical rungs immediately
+before, so the question "does this receiver track a working actuator at this
+range?" is answered by measurement rather than assumption — the near-field
+compression trap flattens RSSI on its own and would otherwise make a flat
+result unreadable:
+
+| cmd (qdb) | ground `rssi_best` (5 samples) | mean | craft reports |
+|---|---|---|---|
+| −24 | −26 −26 −26 −26 −24 | −25.6 | `applied_qdb:-24`, `saturated_low:false` |
+| −48 | −32 −32 −30 −30 −32 | −31.2 | `applied_qdb:-48`, `saturated_low:false` |
+| −96 | −32 −32 −32 −30 −32 | −31.6 | `applied_qdb:-96`, `saturated_low:**true**` |
+| −24 | −24 −24 −24 −24 −24 | −24.0 | back, fully reversible |
+
+**5.6 dB of air for a 6 dB command** on the first rung, then the §10.5 rail
+with `saturated_low` set — the receiver reads this actuator cleanly at this
+range.
+
+**The 8733BU, immediately after, on the same ground adapter.** EVM is carried
+too, because it is the tell that survives receiver compression:
+
+| cmd (qdb) | ground `rssi_best` (5 samples) | mean | `evm` | POST |
+|---|---|---|---|---|
+| −24 | −30 −28 −26 −28 −28 | −28.0 | −22 ×5 | `{"ok":true}` |
+| −48 | −28 −28 −30 −28 −28 | −28.4 | −22 ×5 | `{"ok":true}` |
+| −96 | −28 −26 −28 −26 −26 | −26.8 | −22 ×5 | `{"ok":true}` |
+| −24 | −28 −28 −28 −28 −26 | −27.6 | −22 ×5 | `{"ok":true}` |
+
+**72 qdb — 18 dB — of commanded range, and the air did not move.** The 1.6 dB
+spread between rung means is smaller than the within-rung scatter and is not
+monotonic in the command; EVM is bit-identical at −22 across every rung, where
+the 2026-08-14 AU measurement in this same file saw EVM travel 14 dB for 6 dB
+of real power. Nothing was actuated.
+
+**Why, from source — this is a certainty, not an inference.**
+`src/rtl8733b/Rtl8733bDevice.{h,cpp}` overrides **none** of the `IRtlDevice`
+runtime-power family: not `SetTxPowerOffsetQdb`, not `GetTxPowerCaps`, not
+`SetTxPowerIndexOverride`, not `GetTxPowerState`, not `ReApplyTxPower`. Only
+`jaguar1`, `jaguar2`, `jaguar3` and `kestrel` do. So the call lands on
+`third_party/devourer/src/IRtlDevice.h:134`, whose whole body is
+`(void)qdb; return 0;` — the documented "unsupported" answer. **Zero register
+writes occur.** There is no mechanism by which the sweep above could have
+moved anything, and the sweep is the confirmation, not the proof.
+
+**What the chip is actually running at.** Not an uncharacterised maximum —
+`Rtl8733bDevice::configure_tx_power` puts a TSSI-offset PG unit into
+closed-loop TSSI against `kSafeTssiTargetQdbm8733b` (**64 qdBm = 16 dBm**), and
+a unit without TSSI calibration onto the flat `kSafeTxAgcIndex8733b`. Both are
+deliberately conservative devourer bring-up values. The §10.5 safety argument
+is therefore **not** "this craft is airing at full power"; it is "this craft is
+pinned at a fixed power that no waybeam-link knob can move, while every
+waybeam-link surface says the knob worked."
+
+**What a consumer sees — both fields read fine.** After the sweep:
+
+```
+{"override_active":true,"qdb":-24,"applied_qdb":0,
+ "saturated_low":false,"saturated_high":false,"backend":"radio"}
+```
+
+§10.5 tells consumers the saturation flag is the load-bearing field and
+`applied_qdb` is not. Here the flag says "travel remains" and `applied_qdb`
+says "0 applied", which is exactly what a *successful* zero-offset apply looks
+like. The only discriminator on the whole surface is the one line
+`radio: adapter "cv610-8733b" power offset -24 qdb applied as 0 qdb` that Pass
+169 added to the log — and a log line is not something a controller reads.
+§10.5's own sentence "all three are absent on a backend with no power actuator"
+was written for the `udp` backend and does not reach a *radio* backend whose
+chip has no actuator.
+
+**Blocked on this adapter, all reporting success:** `adapters[].power_offset_qdb`
+(the §10.5 safe boot backoff — the seed of −24 qdb never reaches the chip),
+the §11.7 `0x0A` power tier, and any §10.6/§10.7 calibration, which would walk
+rungs in offset space and attribute whatever the air did to a knob that is not
+connected.
+
+**Upstream, not here.** `third_party/devourer` is vendored at `a0dfd17`, which
+**is** upstream `OpenIPC/devourer` HEAD as of today — there is no fix waiting to
+be pulled. The actuator is missing in the backend, not in the silicon: the
+8733B has a TXAGC block devourer already writes and reads back
+(`Phy8733b::set_flat_tx_power` / `read_txagc_state`, refs at BB `0x4308` plus
+the `0x3a00..0x3a10` per-rate diffs), and on a TSSI unit an absolute qdBm
+target the loop already drives to. `TxPowerCaps` even reserves `index_max = 0`
+for exactly that shape ("dBm model"). This is an upstream feature request, and
+we do not edit `third_party/`.
+
+**Open — needs an operator ruling (Tier 1, §10.5/§10.3).** What should a node
+do when a `role:"tx"` adapter's chip reports no power actuator? "Refuse false
+success" is settled practice, so the reporting half is not really in doubt —
+`GetTxPowerCaps().supported` is the clean per-adapter discriminator and would
+let the three fields be omitted, as §10.5 already specifies for an
+actuator-less backend. What needs ruling is the **operational** half: does a
+node with an unactuatable TX adapter refuse to start, or start with an
+announcement? Refusing would today take the only CV610 link off the air. This
+is the second instance of the same question as #180 item 4.
+
 ## 2026-08-10 — Kernel-monitor retirement audit: the code is clean, the RECORD is not — a whole bench campaign and one bench-gate verdict rest on the deleted backend
 
 **What was audited.** Every reference to the `kernel-monitor` / MonAir backend
