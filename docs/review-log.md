@@ -24,6 +24,39 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 176 — health and stats are C-ABI snapshots from the one fill path (2026-08-14)
+
+**Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
+R3, slice 1).** The §15.3 stats line and the §15.4 health object become
+readable through the C ABI on both roles: `wblink_rx_stats` /
+`wblink_rx_health` / `wblink_tx_stats` / `wblink_tx_health`, under the
+snapshot buffer contract (`snapshot_copy.h`). Both strings are published
+by the run loop at the **same site** that feeds the control server —
+`emit_stats()` + `build_health_json(last_snap)` — so REST, NDJSON and
+the C ABI are three transports of one generation path; no second
+serializer exists, and the publication is NOT guarded by
+`WBLINK_CONTROL_SERVER` (a receive-only Android build gets the same
+view the hub does).
+
+**Cadence is stats.hz, by design.** These surfaces ARE the §15.3 walk:
+`stats.hz=0` disables the walk, so the getters answer 3 (unpublished).
+The always-on liveness surface remains the Pass 174 status snapshot
+(and the lifecycle-state slice that follows it); an embedder that
+disables stats has chosen a blind link view, and the contract does not
+silently re-enable the walk behind its back.
+
+**Consolidation rider (2026-08-14 review, finding 8 remainder).** The
+three generation-carrying RX copy bodies (`copy_scout`,
+`copy_selection`, `copy_command`) fold onto one
+`copy_generated_snapshot_json()` beside the plain contract in
+`snapshot_copy.h`; `GeneratedSnapshot` moves there with it. Behaviour
+is bit-identical — the existing runtime-control tests are the proof.
+
+**Evidence.** Branch `feat/r3-telemetry-abi`; publication sites
+`node/src/rx_node.cpp` (stats tick) and `node/src/tx_node.cpp` (stats
+tick); mailboxes `RxRuntimeControl` / `TxRuntimeInfo`; tests
+`rx_runtime_control_test.cpp`, `tx_runtime_info_test.cpp`.
+
 ## Pass 175 — recovery is prep + construct, and prep already lives in the library (2026-08-14)
 
 **Ruling (operator-approved plan, coordination
