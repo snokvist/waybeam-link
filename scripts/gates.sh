@@ -99,10 +99,25 @@ if [ "$QUICK" -eq 0 ]; then
         skip "ssc338q{,-au,-eu}" "set WBLINK_SSC338Q_TOOLCHAIN"
     fi
 
-    if [ -n "${WBLINK_CV610_TOOLCHAIN:-}" ]; then
+    # cv610 PROBES for its compiler, like rk3566 above, instead of demanding
+    # the env var. cmake/toolchain-cv610.cmake resolves an in-tree default
+    # (the sibling waybeam_venc checkout), so gating on the variable meant
+    # this preset reported SKIP on every machine that had the toolchain
+    # sitting right there — including the one that wrote the code. A gate
+    # that skips where it could have run is the same defect as one that only
+    # runs on the author's machine, pointed the other way, and it is worse
+    # here because a skip is never a pass. Keep this default in step with
+    # the one in cmake/toolchain-cv610.cmake; they are the same path.
+    _cv610_tc="${WBLINK_CV610_TOOLCHAIN:-\
+../waybeam_venc/toolchain/arm-openipc-linux-musleabi_sdk-buildroot}"
+    # Probe g++, not gcc: toolchain-cv610.cmake FATAL_ERRORs on a missing
+    # -g++, so that is the precondition this gate is actually standing in
+    # for. A toolchain with one and not the other would otherwise pass here
+    # and fail the preset.
+    if [ -x "${_cv610_tc}/bin/arm-openipc-linux-musleabi-g++" ]; then
         build_preset cv610
     else
-        skip "cv610" "set WBLINK_CV610_TOOLCHAIN"
+        skip "cv610" "no arm-openipc-linux-musleabi-g++ under ${_cv610_tc}"
     fi
 
     if [ -n "${WBLINK_ANDROID_NDK:-}${ANDROID_NDK_HOME:-}${ANDROID_NDK_ROOT:-}" ]; then
