@@ -178,6 +178,15 @@ void wblink_tx_request_stop(wblink_tx *tx);
  * the adapter — a dead node that looks healthy. Reuse returns WBLINK_TX_REUSED.
  * Create a handle per start.
  *
+ * THAT IS ALSO THE RECOVERY CONTRACT (Pass 175). On WBLINK_TX_WEDGED (§9.10),
+ * a supervisor — in-process or external — destroys the handle and creates a
+ * fresh one; no external prep, no root sysfs help. create() owns adapter
+ * preparation: a missing adapter fails loudly by name, a kernel driver bound
+ * to the interface is detached at claim, a stale claim is retried (BUSY,
+ * 6x250 ms). Fresh-object recovery measured 5/5; every in-place alternative
+ * measured 0/5 or terminates the process (a second InitWrite on a live
+ * devourer object), which is why no recover() call exists.
+ *
  * `on_mode_apply` may be NULL; that is a claim about the node, not an omission.
  *
  * LINKING: this is a C++ library behind a C header. A C consumer must link the
