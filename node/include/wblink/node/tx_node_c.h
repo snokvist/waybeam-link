@@ -124,6 +124,42 @@ wblink_tx *wblink_tx_create(void);
 int wblink_tx_set_adapter_fds(wblink_tx *tx, const int *fds, size_t n);
 
 /*
+ * §15.5 (Pass 172/174) the per-die capability answers — the same
+ * `{"adapters":[...]}` object `wblink_rx_adapters` documents, published once
+ * at backend bring-up. 3 means the backend has not come up yet; after the
+ * first success the answer never changes for the life of the run.
+ *
+ * Buffer contract (both calls below): `buffer == NULL && capacity == 0` is a
+ * size query; `required` receives the byte count INCLUDING the trailing NUL;
+ * a successful copy is NUL-terminated; an undersized buffer is left
+ * untouched. Returns 0 on a size query/copy, 2 for invalid arguments, 3
+ * before the first publication, 4 when `capacity` is too small. Final
+ * snapshots remain readable after the run stops, until the handle is
+ * destroyed.
+ */
+int wblink_tx_adapters(wblink_tx *tx, char *buffer, size_t capacity,
+                       size_t *required);
+
+/*
+ * The TX node's own account of its state (Pass 174), republished at 1 Hz on
+ * its own cadence — deliberately independent of `stats.hz`, so a node with
+ * §15.3 output disabled does not blind its embedder:
+ *
+ *   {"session":N,"channel":N,"csa":"...","claimed":B,"claimed_by":N,
+ *    "mode":{"active":"...","apply_configured":B},
+ *    "wedge":{"enabled":B,"progress_proven":B,"wedged":B,"consecutive":N,
+ *             "windows":N}}
+ *
+ * Every field keeps its existing semantics: `mode` mirrors §15.5 GET
+ * /api/v1/mode; `wedge` mirrors §9.10 — `progress_proven` false with
+ * `enabled` true is Pass 170's inert-watchdog state, VISIBLE here by
+ * design; `claimed`/`claimed_by` mirror §11.4; `channel` is live (CSA and
+ * retune included). Same buffer contract as wblink_tx_adapters.
+ */
+int wblink_tx_status(wblink_tx *tx, char *buffer, size_t capacity,
+                     size_t *required);
+
+/*
  * Ask a running node to stop. Safe from any thread, and from a signal handler:
  * the flag underneath is a lock-free atomic. Returns immediately — the loop
  * polls, so expect up to one poll period before `wblink_tx_run` returns.

@@ -66,6 +66,21 @@ int main() {
         CHECK(wblink_tx_set_adapter_fds(tx, fds, 2) == 0);
         CHECK(wblink_tx_set_adapter_fds(tx, nullptr, 0) == 0);
     }
+    // Pass 174 snapshot calls: bad args → 2, and not-ready → 3 before any
+    // run — no backend has published, so both surfaces must say so rather
+    // than hand back an empty string that parses.
+    {
+        size_t required = 77;
+        char buf[8];
+        CHECK(wblink_tx_adapters(nullptr, nullptr, 0, &required) == 2);
+        CHECK(wblink_tx_status(nullptr, nullptr, 0, &required) == 2);
+        CHECK(wblink_tx_adapters(tx, buf, sizeof buf, nullptr) == 2);
+        CHECK(wblink_tx_adapters(tx, nullptr, 0, &required) == 3);
+        CHECK_EQ_U(required, 0);
+        required = 77;
+        CHECK(wblink_tx_status(tx, nullptr, 0, &required) == 3);
+        CHECK_EQ_U(required, 0);
+    }
     // A refused call must NOT have consumed the handle — otherwise a caller who
     // passed a null path once could never start this node, and the next run
     // would report reuse rather than the real mistake.
@@ -81,6 +96,13 @@ int main() {
     {
         const int fd = -1;
         CHECK(wblink_tx_set_adapter_fds(tx, &fd, 1) == 3);
+    }
+    // Pass 174: a run that never reached the backend published nothing —
+    // still 3, not an empty success.
+    {
+        size_t required = 77;
+        CHECK(wblink_tx_adapters(tx, nullptr, 0, &required) == 3);
+        CHECK(wblink_tx_status(tx, nullptr, 0, &required) == 3);
     }
     wblink_tx_destroy(tx);
 
