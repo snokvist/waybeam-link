@@ -24,6 +24,44 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 179 — config is an API, and so is selection (2026-08-15)
+
+**Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
+R4).** Three additions, one theme: an embedder should not have to own a
+file, or the library's own config vocabulary, to start a node.
+
+1. **Config as text.** `wblink_{rx,tx}_set_config_json()` supplies the
+   config as a string; `run()` is then called with a NULL path. Supplying
+   both is BAD_ARG rather than a precedence rule — an ambiguity the
+   caller can only resolve by guessing is not a contract. The io layer
+   already parsed from text (`load_config_json`); only `node/` insisted
+   on a path.
+
+2. **Selection as a call.** `wblink_rx_set_selection(originator, net_id,
+   channel_mhz)` overrides the three fields a scouted selection pins,
+   applied after load and before the run. It moves EVERY adapter to the
+   craft's channel, matching what the runtime §15.5a select already does
+   to a spectator's ears — not `adapters[0]` alone, which is only
+   correct on a single-ear node. This retires Waybeam-android's
+   `applyScoutSelection`, which re-serialised the whole config through
+   `org.json` to write three fields and had to hard-code
+   `preferred_originator` / `net_id` / `channel` — library vocabulary
+   living in a consumer, where a rename cannot reach it.
+
+3. **Load diagnostics stop being stderr-only.** `load_all` reported
+   config and profile-table errors with `std::fprintf(stderr, ...)`,
+   which on Android goes nowhere a user will ever see. They go through
+   `wb_logf()` now, so the sink an embedder already installs (#144)
+   receives them. No new error-string ABI: the sink IS that channel, and
+   a second one would be a second thing to keep in sync.
+
+**Not in this pass.** A parsed-struct config surface (`Config` is C++
+and the C ABI would need a mirror of 263 keys) and any *runtime*
+reconfiguration — a handle still runs once, and a config still binds at
+run.
+
+**Evidence.** Branch `feat/r4-config-as-api`; `tests/node_config_api_test.cpp`.
+
 ## Pass 178 — the control endpoint is answered by the socket, not the config (2026-08-14)
 
 **Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
