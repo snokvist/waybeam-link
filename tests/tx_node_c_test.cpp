@@ -56,6 +56,31 @@ int main() {
     CHECK(tx != nullptr);
     CHECK(wblink_tx_run(tx, nullptr, wblink_tx_c_test_apply, &g_applies) ==
           WBLINK_TX_BAD_ARG);
+    // Pass 173 device-source contract, same shape as the RX twin: NULL handle
+    // and NULL fds with n > 0 are refused (2); a valid set and an n == 0
+    // clear both succeed before the run.
+    {
+        const int fds[2] = {-1, -1};
+        CHECK(wblink_tx_set_adapter_fds(nullptr, fds, 2) == 2);
+        CHECK(wblink_tx_set_adapter_fds(tx, nullptr, 1) == 2);
+        CHECK(wblink_tx_set_adapter_fds(tx, fds, 2) == 0);
+        CHECK(wblink_tx_set_adapter_fds(tx, nullptr, 0) == 0);
+    }
+    // Pass 174 snapshot calls: bad args → 2, and not-ready → 3 before any
+    // run — no backend has published, so both surfaces must say so rather
+    // than hand back an empty string that parses.
+    {
+        size_t required = 77;
+        char buf[8];
+        CHECK(wblink_tx_adapters(nullptr, nullptr, 0, &required) == 2);
+        CHECK(wblink_tx_status(nullptr, nullptr, 0, &required) == 2);
+        CHECK(wblink_tx_adapters(tx, buf, sizeof buf, nullptr) == 2);
+        CHECK(wblink_tx_adapters(tx, nullptr, 0, &required) == 3);
+        CHECK_EQ_U(required, 0);
+        required = 77;
+        CHECK(wblink_tx_status(tx, nullptr, 0, &required) == 3);
+        CHECK_EQ_U(required, 0);
+    }
     // A refused call must NOT have consumed the handle — otherwise a caller who
     // passed a null path once could never start this node, and the next run
     // would report reuse rather than the real mistake.
@@ -66,6 +91,19 @@ int main() {
     // not fired, a nonexistent path would have produced WBLINK_TX_ERROR.
     CHECK(wblink_tx_run(tx, kNoSuchConfig, wblink_tx_c_test_apply, &g_applies) ==
           WBLINK_TX_REUSED);
+    // Pass 173: after the handle has run, the setter reports the violated
+    // call-before-run contract (3) instead of accepting fds nothing will read.
+    {
+        const int fd = -1;
+        CHECK(wblink_tx_set_adapter_fds(tx, &fd, 1) == 3);
+    }
+    // Pass 174: a run that never reached the backend published nothing —
+    // still 3, not an empty success.
+    {
+        size_t required = 77;
+        CHECK(wblink_tx_adapters(tx, nullptr, 0, &required) == 3);
+        CHECK(wblink_tx_status(tx, nullptr, 0, &required) == 3);
+    }
     wblink_tx_destroy(tx);
 
     // A fresh handle with a real (still nonexistent) path: load fails, and the

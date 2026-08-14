@@ -446,11 +446,11 @@ int run_loopback(const Loaded& l) {
         // §15.5 operating-mode selection (Pass 96) — same as tx, so the bench
         // can exercise it. See the tx block for the full contract.
         h.mode_get = [&]() -> std::string {
-            std::string s = "{\"active\":\"" + loop_active_mode + "\"";
-            s += ",\"apply_configured\":";
-            s += l.cfg.venc.mode_apply_cmd.empty() ? "false" : "true";
-            s += "}";
-            return s;
+            // Shared builder (2026-08-14 review): this hand copy had already
+            // drifted from the tx predicate once. The loopback bench always
+            // owns an applier (spawn_mode_applier), so configured == cmd set.
+            return wblink::node::build_mode_json(
+                loop_active_mode, !l.cfg.venc.mode_apply_cmd.empty());
         };
         h.mode_set = [&](const std::string& name) -> std::string {
             if (l.cfg.venc.mode_apply_cmd.empty()) {

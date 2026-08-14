@@ -24,6 +24,114 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 175 — recovery is prep + construct, and prep already lives in the library (2026-08-14)
+
+**Ruling (operator-approved plan, coordination
+`specs/cross/2026-08-14-wblink-library-parity` R2/R7).** The supported
+recovery shape on BOTH roles is **destroy → create → run on a fresh
+handle**, in-process or across processes. No in-place `recover()` enters
+the ABI: #168 measured fresh-object recovery 5/5 and the in-place
+runtime-control path 0/5, and a second `InitWrite` on a live devourer
+object terminates the process (#197). The one-handle-one-run contract has
+encoded half of this since Phase 3; this pass states the other half — a
+fresh create in the same process is *required to work* — in the C headers
+where a supervisor author looks.
+
+**Measured: the external prep is redundant on the devourer path.** The
+coordination R7 inventory found three prep implementations (the ground
+unit's `ExecStartPre` sysfs unbind, the vehicle init's `free_adapter()`,
+Android's claim seam). Probed 2026-08-14 on the x86 bench: a node claims
+an 8812AU with `rtw_8812au` BOUND — no rmmod, no unbind — because
+`claim_interface_then_reset` detaches an active kernel driver before the
+claim (`third_party/devourer/src/UsbOpen.cpp:105`, read not edited) and
+retries BUSY at 6×250 ms. What `create()` already owns: presence → loud
+named failure; bound driver → detach; stale claim → BUSY retry; two
+stanzas on one unit → dev_key refusal. The scripts stay (harmless
+belt-and-braces) but are no longer part of any embedder contract — an
+in-process supervisor needs NO root sysfs help, which is what actually
+unblocks the hub's #197 vehicle TX role.
+
+**One residue.** devourer detaches explicitly (not auto-detach), so the
+kernel driver stays detached after exit (measured: `Driver=[none]`) until
+re-plug or manual rebind — invisible where devourer owns the dongle.
+
+**Changed.** No wire, no §15.x — the recovery-loop contract enters
+`rx_node_c.h` / `tx_node_c.h`.
+
+**Evidence.** #168 (5/5 fresh vs 0/5 in-place); #197 (InitWrite
+terminate); the 2026-08-14 bench probe (bound driver → `/info` served);
+`deploy/vehicle-waybeam-link.init:28-34` and the ground unit's prep
+script as the inventoried externals.
+
+## Pass 174 — the TX node states its own status: `wblink_tx_status` + `wblink_tx_adapters` (2026-08-14)
+
+**Ruling (operator-approved plan, coordination
+`specs/cross/2026-08-14-wblink-library-parity` R2 slice 2).** A TX embedder
+reads the node's state from published snapshots instead of re-deriving
+liveness from `run()`'s return timing — the hub's `mod_wblink_running()`
+latch exists only because `wblink_tx_run` can return in milliseconds on a
+missing radio with nothing in the log. Two C calls on the buffer contract
+the RX surface set (0/2/3/4, size query includes NUL, reads stay valid
+after stop until destroy):
+
+- **`wblink_tx_adapters`** — the Pass 172 adapters/caps object, published
+  at bring-up and republished at ~1 Hz (the object carries the LIVE
+  channel — 2026-08-14 review fix). Closes Pass 172's named TX deferral.
+- **`wblink_tx_status`** — republished at 1 Hz, independent of `stats.hz`
+  (stats-off nodes still inform their embedder), and published ONE FINAL
+  TIME on every exit path — the §9.10 wedge exit used to return above the
+  publish site, so a supervisor reading the terminal status after
+  WBLINK_TX_WEDGED recorded a healthy node (2026-08-14 review fix):
+  `{"session":N,"channel":N,"csa":"...","claimed":B,"claimed_by":N,
+    "mode":{"active":"...","apply_configured":B},
+    "wedge":{"enabled":B,"progress_proven":B,"wedged":B,"consecutive":N,
+    "windows":N}}`
+  Every field keeps its existing semantics: `mode` mirrors §15.5
+  `GET /api/v1/mode`; `wedge` mirrors §9.10 — Pass 170's
+  `progress_proven` makes an inert watchdog *visible here*, which was
+  that pass's REPORTED-not-silent condition; `claimed`/`claimed_by`
+  mirror §11.4; `channel` is the live channel, CSA/retune included.
+
+**Mechanism.** `TxRuntimeInfo` — the snapshot half of the RX mailbox
+pattern (publish swaps an immutable string; the caller only copies).
+Deliberately no command half: TX runtime *control* is a later pass.
+`run_tx` gains the runtime-info overload; the 3-arg symbol stays and
+forwards nullptr (the RX precedent).
+
+**Changed.** No wire, no §15.x surface — the C ABI headers and this entry.
+
+**Evidence.** Coordination sweep item 3 + hub feedback; Pass 172's
+deferral note; `txwedge.h` accessors (public, never before surfaced).
+
+## Pass 173 — TX gets the device source RX has: `wblink_tx_set_adapter_fds` (2026-08-14)
+
+**Ruling (operator-approved plan, coordination
+`specs/cross/2026-08-14-wblink-library-parity` R2 first slice).** The TX C
+ABI accepts pre-opened USB fds under the exact contract the RX call set on
+2026-08-08: a **call, not a config key**; caller keeps fd ownership
+(libusb `fd_keep` — teardown closes the handle, never the fd); supplying
+any fd forces the bring-up `libusb_reset_device` off (B4: a wrapped fd
+must not be reset); refused after the run has started (3), because the
+config is consumed by then and a caller with the order wrong would watch
+enumerate-by-bus-path fail on a device it cannot see.
+
+**Changed.** No wire, no §15.x surface — the contract lives in
+`tx_node_c.h` beside the RX twin, and this entry. `run_tx`'s fd plumbing
+rides the same role-shared `AirBackend::create` path RX uses; nothing
+adapter-facing forks by role.
+
+**Why.** The RX call is THE device source unrooted Android has; TX had no
+equivalent, so an Android transmit path could never enter the library the
+way its receive path does — the asymmetry the coordination sweep named
+(R2), now closed one slice at a time. The vehicle daemon case is
+unaffected: empty (the default) stays enumerate-by-bus-path, byte for
+byte.
+
+**Evidence.** `rx_node_c.h` fd-source contract (2026-08-08 ruling);
+coordination sweep memory `waybeam_link_library_sweep_2026_08.md` item 3;
+`node/include/wblink/node/air_backend.h` (`adapter_fds` consumed
+role-agnostically at create).
+
 ## Pass 172 — a capability is an answer, not a log line: §15.5 `/info` carries the per-die caps (2026-08-14)
 
 **Ruling (operator-approved plan, coordination

@@ -42,6 +42,8 @@
 #ifndef WBLINK_NODE_TX_NODE_C_H
 #define WBLINK_NODE_TX_NODE_C_H
 
+#include <stddef.h> /* size_t (Pass 173: wblink_tx_set_adapter_fds) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -101,6 +103,66 @@ typedef int (*wblink_mode_apply_cb)(const char *cmd, const char *name,
 wblink_tx *wblink_tx_create(void);
 
 /*
+ * Pre-opened USB device fds for the node's adapters, one per config
+ * `adapters[]` slot, with -1 meaning "enumerate this one by bus path". Call
+ * BEFORE `wblink_tx_run`; a call after it has started is ignored and returns
+ * 3. The TX twin of `wblink_rx_set_adapter_fds` under the same 2026-08-08
+ * contract (Pass 173): a call, not a config key; OWNERSHIP STAYS WITH THE
+ * CALLER (libusb marks a wrapped handle `fd_keep`, so teardown closes the
+ * handle and leaves the fd open — each fd must stay valid for the whole run
+ * and be closed by the caller afterwards; the array itself is copied);
+ * supplying any fd forces the bring-up `libusb_reset_device` off, because a
+ * wrapped fd must not be reset. Everything else — a daemon reading JSON —
+ * should not call this at all: empty (the default) is enumerate-by-bus-path,
+ * byte for byte today's behaviour.
+ *
+ * Returns 0 on success, 1 if copying the array failed to allocate, 2 on a
+ * NULL handle or a NULL `fds` with `n > 0`, 3 if the node has already been
+ * started. Passing n == 0 clears any previous set. (Plain small ints like
+ * the RX twin — this is not a run status, so the WBLINK_TX_* space does not
+ * apply.)
+ */
+int wblink_tx_set_adapter_fds(wblink_tx *tx, const int *fds, size_t n);
+
+/*
+ * §15.5 (Pass 172/174) the per-die capability answers — the same
+ * `{"adapters":[...]}` object `wblink_rx_adapters` documents, published at
+ * backend bring-up and republished at ~1 Hz — the caps fields are static
+ * per die, but `channel` is LIVE (CSA and craft-local retunes move it).
+ * 3 means the backend has not come up yet.
+ *
+ * Buffer contract (both calls below): `buffer == NULL && capacity == 0` is a
+ * size query; `required` receives the byte count INCLUDING the trailing NUL;
+ * a successful copy is NUL-terminated; an undersized buffer is left
+ * untouched. Returns 0 on a size query/copy, 2 for invalid arguments, 3
+ * before the first publication, 4 when `capacity` is too small (1 is
+ * reserved for an internal size overflow no real snapshot can reach). Final
+ * snapshots remain readable after the run stops, until the handle is
+ * destroyed.
+ */
+int wblink_tx_adapters(wblink_tx *tx, char *buffer, size_t capacity,
+                       size_t *required);
+
+/*
+ * The TX node's own account of its state (Pass 174), republished at 1 Hz on
+ * its own cadence — deliberately independent of `stats.hz`, so a node with
+ * §15.3 output disabled does not blind its embedder:
+ *
+ *   {"session":N,"channel":N,"csa":"...","claimed":B,"claimed_by":N,
+ *    "mode":{"active":"...","apply_configured":B},
+ *    "wedge":{"enabled":B,"progress_proven":B,"wedged":B,"consecutive":N,
+ *             "windows":N}}
+ *
+ * Every field keeps its existing semantics: `mode` mirrors §15.5 GET
+ * /api/v1/mode; `wedge` mirrors §9.10 — `progress_proven` false with
+ * `enabled` true is Pass 170's inert-watchdog state, VISIBLE here by
+ * design; `claimed`/`claimed_by` mirror §11.4; `channel` is live (CSA and
+ * retune included). Same buffer contract as wblink_tx_adapters.
+ */
+int wblink_tx_status(wblink_tx *tx, char *buffer, size_t capacity,
+                     size_t *required);
+
+/*
  * Ask a running node to stop. Safe from any thread, and from a signal handler:
  * the flag underneath is a lock-free atomic. Returns immediately — the loop
  * polls, so expect up to one poll period before `wblink_tx_run` returns.
@@ -118,6 +180,15 @@ void wblink_tx_request_stop(wblink_tx *tx);
  * fall straight out of the loop and report a clean stop having already claimed
  * the adapter — a dead node that looks healthy. Reuse returns WBLINK_TX_REUSED.
  * Create a handle per start.
+ *
+ * THAT IS ALSO THE RECOVERY CONTRACT (Pass 175). On WBLINK_TX_WEDGED (§9.10),
+ * a supervisor — in-process or external — destroys the handle and creates a
+ * fresh one; no external prep, no root sysfs help. create() owns adapter
+ * preparation: a missing adapter fails loudly by name, a kernel driver bound
+ * to the interface is detached at claim, a stale claim is retried (BUSY,
+ * 6x250 ms). Fresh-object recovery measured 5/5; every in-place alternative
+ * measured 0/5 or terminates the process (a second InitWrite on a live
+ * devourer object), which is why no recover() call exists.
  *
  * `on_mode_apply` may be NULL; that is a claim about the node, not an omission.
  *
