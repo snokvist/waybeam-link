@@ -2559,9 +2559,53 @@ assertion.
   independent receivers. This reports the rail; it does not change what any
   caller does about it, and §10.6/§10.7 rung placement is unchanged pending
   its own ruling.
+- **An adapter whose chip has NO actuator at all (Pass 171).** The bullet above
+  covers a lever that has run out of travel; this one covers a lever that was
+  never connected. devourer answers an unsupported knob by returning **0**,
+  which is byte-identical to a successful zero-offset apply, so neither
+  `applied_qdb` nor the rail flags can carry the difference — `saturated_low`
+  reads `false`, i.e. "travel remains", on a knob with none. The static
+  discriminator is **`GetTxPowerCaps().supported`**, read once per adapter at
+  bring-up (a per-die property, like §15.3's `ldpc_flag_ok`). Measured
+  2026-08-14 (`docs/findings.md`) on an RTL8733BU: **18 dB of commanded offset
+  aired nothing** while every write reported success, against a matched
+  positive control on the same receiver that moved 5.6 dB for a 6 dB command.
+  - **The node STARTS.** It does not refuse (operator ruling 2026-08-14). The
+    chip is not at an *unknown* power — devourer pins it at a fixed backend
+    target — so §10.2's "no adapter may run at an uncharacterised power" is not
+    in fact breached, and grounding a board's only link buys nothing that
+    announcing does not. What was breached is reporting integrity, and that is
+    what this amendment fixes.
+  - The node **announces once per `role:"tx"` adapter** at bring-up, naming the
+    adapter and saying the offsets are inert on it.
+  - `GET /api/v1/tx/power` carries **`actuator`**: `"offset"` on an actuating
+    adapter, `"none"` on one with no lever. On `"none"` the three Pass 169
+    fields are **omitted** — the same absence this section already gives an
+    actuator-less *backend*, now reachable per-adapter inside `radio`. The
+    field is always present, so a consumer tests a value rather than inferring
+    from absence, which on the Pass 169 fields already means "no write yet".
+  - `POST /api/v1/tx/power` with `qdb` on such a node is **400** — refuse false
+    success rather than return 200 for a move the chip cannot make.
+    `{"auto": true}` still succeeds: clearing a latch is meaningful whatever
+    the hardware does, and the §10.2 resolve it hands back to is equally inert.
+  - §10.6/§10.7 **calibration refuses to start.** A run walks rungs in offset
+    space and attributes what the air did to the knob; on a knob that moves
+    nothing the artifact is noise wearing a calibration's name, and it would
+    then be *believed* by every later resolve.
+  - The §15.2 `power_offset_qdb` boot seed is **not** a startup error. It is
+    attempted, announced, and reported inert — the node is flying either way,
+    and a config a board cannot honour is not a reason to refuse the config.
+  - §11.7 `0x0A` is unaffected in wire terms: it selects a §10.3 ceiling, and a
+    craft that cannot actuate simply logs the same announcement when the
+    resolve reaches the dead lever. There is no status code to refuse with over
+    RF, which is exactly why the ground-side `GET` must carry `actuator`.
 - A failed actuator write is logged and
   **not cached** as applied — the value is re-applied at the next commit
   resolve or re-assert point instead of being silently believed on-hardware.
+  **This is why an absent actuator is not modelled as a failed write
+  (Pass 171):** `resolve_and_apply_power` caches only on success, so a `false`
+  here would re-attempt the same dead write at every profile commit for the
+  life of the node. The write is issued and reported honestly instead.
 - **Scope (Pass 125).** The latch is available on **any node with a `role:"tx"`
   adapter**, not only a tx-node — including an rx-node's single designated
   §6.4 uplink adapter. Range, §10.3 clamp, re-assert points, and restore
@@ -5425,7 +5469,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/mode` | `{active, apply_configured}` — the active operating-mode label (§16 of `docs/venc-mode-matrix.md`) and whether an applier is configured (TX/craft node) |
 | `GET /api/v1/calibration` | role-specific calibration surface. Craft/tx: §10.6 response plus `direction:"downlink"`. Ground/rx: §10.7 `{direction:"uplink",state,rung,power_qdb,fingerprint,stale,quality:{valid,age_ms,last_report_epoch,reports_received,rssi_mean,rx_mcs},artifact:{...,placements:[...]}|null,fail_reason}` |
 | `GET /api/v1/modes` | `{active, apply_configured, catalog_fingerprint, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist. A ground with an IP path reads it here; one without must hardcode a copy, and pins `catalog_fingerprint` (Pass 108) to detect index drift (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
-| `GET /api/v1/tx/power` | `{override_active, qdb, applied_qdb, saturated_low, saturated_high, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`udp` (any node with a `role:"tx"` adapter; the `kernel-monitor` value is retired, Pass 164). **`applied_qdb` is what the ACTUATOR took, which is not `qdb` once the TXAGC index rails** (Pass 169, §10.5) — with `saturated_low`/`saturated_high` naming the rail. The three are omitted until a write has happened and on a backend with no actuator, so an absent `applied_qdb` never reads as 0 |
+| `GET /api/v1/tx/power` | `{override_active, qdb, actuator, applied_qdb, saturated_low, saturated_high, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`udp` (any node with a `role:"tx"` adapter; the `kernel-monitor` value is retired, Pass 164). **`applied_qdb` is what the ACTUATOR took, which is not `qdb` once the TXAGC index rails** (Pass 169, §10.5) — with `saturated_low`/`saturated_high` naming the rail. The three are omitted until a write has happened and on a backend with no actuator, so an absent `applied_qdb` never reads as 0. **`actuator` ∈ `offset`\|`none`** (Pass 171, §10.5) says whether this adapter's chip has a power lever at all — `none` omits the three and makes a POST of `qdb` a 400, because devourer answers an unsupported knob with `0`, which is indistinguishable from a successful zero-offset apply |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -5451,8 +5495,8 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/link/profile` | `{ "min": 3, "max": 3 }` | §9.7 profile pin; `min==max` freezes the operating point, `{ "max": 255 }` unpins (TX node) |
 | `GET /api/v1/tx/power_tier` | — | §10.3/§11.7 `0x0A` power tier: `{tier, presets_qdb, ceiling_qdb, effective}` — `presets_qdb` and `ceiling_qdb` are in **this node's actuation space** (Pass 166), matching §15.3 `tx_power_qdb`, which has reported an offset on a relative backend since Pass 150; read `GET /api/v1/tx/power`'s `backend` to know which. `tier` is `-1` when no preset list is configured, and `effective` is false on a node with no curve, no artifact and no §10.5 latch, where the ceiling binds nothing (§10.3). A held latch counts (Pass 136): the ceiling is the one clamp on an override, so the tier reaches hardware through it |
 | `POST /api/v1/tx/power_tier` | `{ "tier": 1 }` \| `{ "tier": 1, "both": true }` | Selects the local ceiling by preset index; 400 on a missing/non-integer `tier`, 409 when unconfigured or out of range. Since Pass 166 the list is chosen by the uplink's actuation space — `power_presets_qdb` absolute, `power_offset_presets_qdb` relative — so a relative uplink is served rather than refused; **409 when this node's uplink carries no list in its own space**, which on a relative uplink means `power_offset_presets_qdb` is absent (§11.7 `0x0A`). The blanket relative-backend 409 of Pass 165 is withdrawn by the re-base, not by relaxation: `ceiling_qdb` now comes from the same space as the resolve it clamps. `both` additionally issues §11.7 `0x0A` to the bound craft — the one-action-both-directions shape `{"action":"start_both"}` already has for calibration. `both` on a node with no craft binding is a 409, not a silent local-only apply. 409 while a §10.6/§10.7 calibration is running (Pass 136) — the run owns the actuator and the ceiling is what it is measuring against |
-| `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (any node with a `role:"tx"` adapter, including an rx-node's §6.4 uplink — Pass 125) |
-| `POST /api/v1/calibration` | `{ "action": "start" }` \| `{ "action": "abort" }` \| `{ "action": "start_both" }` | §10.7 ground-uplink calibration; `start` requires its complete prerequisite set, `abort` is idempotent and cancels either phase, `start_both` additionally sequences the §11.7 downlink campaign after a successful uplink phase (ground/rx node) |
+| `POST /api/v1/tx/power` | `{ "qdb": 20 }` \| `{ "auto": true }` | §10.5 override-latch: latch an absolute TX power on every `role:"tx"` adapter (selector power yields), or clear it (immediate restore). Exactly one of `qdb`/`auto`, `qdb` in `-511..511` — else 400 (any node with a `role:"tx"` adapter, including an rx-node's §6.4 uplink — Pass 125). **400 on an adapter whose chip has no power actuator** (Pass 171, §10.5) — refusing beats returning 200 for a move the chip cannot make; `{"auto":true}` still succeeds there, since clearing a latch is meaningful whatever the hardware does |
+| `POST /api/v1/calibration` | `{ "action": "start" }` \| `{ "action": "abort" }` \| `{ "action": "start_both" }` | §10.7 ground-uplink calibration; `start` requires its complete prerequisite set, `abort` is idempotent and cancels either phase, `start_both` additionally sequences the §11.7 downlink campaign after a successful uplink phase (ground/rx node). **Refused when the uplink adapter's chip has no power actuator** (Pass 171, §10.5) — the run walks rungs in offset space and attributes the air to the knob, so on a dead knob it would persist noise as a calibration artifact and every later resolve would believe it |
 | `POST /api/v1/fec` | `{ "stream_id": 0, "i_permille": 250, "p_permille": 100, "min_k": 3, "min_r": 2, "e_permille": 0 }` | retune a `frame-shm` stream's §14.1 FEC rates + minimum repair floor (TX node). `e_permille` (§14.1a) is optional and, like every other field here, participates in the POST's full-replacement semantics: omitting it — or sending `null` — restores the default of inheriting `p_permille` |
 | `POST /api/v1/stats/reset` | `{}` | zero the cumulative counters — a clean measurement window |
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
