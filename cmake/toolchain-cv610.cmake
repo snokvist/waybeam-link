@@ -18,8 +18,12 @@ if(WBLINK_CV610_TOOLCHAIN STREQUAL "")
     if(NOT "$ENV{WBLINK_CV610_TOOLCHAIN}" STREQUAL "")
         set(WBLINK_CV610_TOOLCHAIN "$ENV{WBLINK_CV610_TOOLCHAIN}")
     else()
+        # The upstream tarball unpacks to
+        # arm-openipc-linux-musleabi_sdk-buildroot/, NOT to a
+        # toolchain.hisilicon-hi3516cv6xx/ directory — measured 2026-08-14, so
+        # the previous default named a path nothing produces.
         get_filename_component(_wblink_tc_default
-            "${CMAKE_CURRENT_LIST_DIR}/../../waybeam_venc/toolchain/toolchain.hisilicon-hi3516cv6xx"
+            "${CMAKE_CURRENT_LIST_DIR}/../../waybeam_venc/toolchain/arm-openipc-linux-musleabi_sdk-buildroot"
             ABSOLUTE)
         set(WBLINK_CV610_TOOLCHAIN "${_wblink_tc_default}")
     endif()
@@ -30,9 +34,13 @@ set(_wblink_cv610_prefix
 if(NOT EXISTS "${_wblink_cv610_prefix}-g++")
     message(FATAL_ERROR
         "CV610 toolchain not found at '${WBLINK_CV610_TOOLCHAIN}'. "
-        "Set -DWBLINK_CV610_TOOLCHAIN or env WBLINK_CV610_TOOLCHAIN to the "
-        "OpenIPC toolchain.hisilicon-hi3516cv6xx root (see "
-        "waybeam_venc/Makefile for the download recipe).")
+        "Download "
+        "https://github.com/openipc/firmware/releases/download/toolchain/"
+        "toolchain.hisilicon-hi3516cv6xx.tgz and unpack it — it creates "
+        "arm-openipc-linux-musleabi_sdk-buildroot/. Point "
+        "-DWBLINK_CV610_TOOLCHAIN or env WBLINK_CV610_TOOLCHAIN at that "
+        "directory. (waybeam_venc/Makefile has no CV610 recipe; it carries "
+        "sigmastar-infinity6e and -infinity6c only.)")
 endif()
 
 set(CMAKE_C_COMPILER   "${_wblink_cv610_prefix}-gcc")
