@@ -264,6 +264,60 @@ int main() {
         }
     }
 
+    // The paced catch-up bound. A process stall accrues pacing credit, and
+    // repaying all of it in one service call is a host-speed burst — the thing
+    // the cap exists to prevent. Pinned to the VALUE, not just to "bounded":
+    // the cap was raised 16 -> 64 for a 100 fps whole-frame producer, and the
+    // suite passed identically at both, so nothing constrained the change.
+    // Any future move must now be deliberate.
+    {
+        AirUdpCfg rx_cfg;
+        rx_cfg.rx = {"127.0.0.1:0"};
+        auto rx = UdpAir::create(rx_cfg);
+        CHECK(bool(rx));
+        if (rx) {
+            AirUdpCfg tx_cfg;
+            tx_cfg.pace_mbps = 1000;  // ~8 ns/byte: credit accrues fast
+            tx_cfg.tx = {"127.0.0.1:" +
+                         std::to_string(rx.value->adapter_port(0))};
+            auto tx = UdpAir::create(tx_cfg);
+            CHECK(bool(tx));
+            if (tx) {
+                // Two traps in staging this, both of which read as a working
+                // bound while proving nothing:
+                //   1. service_paced_tx() returns EARLY on an empty queue,
+                //      before it seeds next_tx_ — so priming the clock with
+                //      the queue empty accrues no credit at all.
+                //   2. the seeding call sets next_tx_ = now, i.e. ZERO credit,
+                //      so it always drains exactly one frame.
+                // Credit only accrues while the clock is already seeded, so:
+                // queue, seed, THEN stall.
+                const uint8_t one[] = {7};
+                CHECK_EQ_U(tx.value->inject(one, sizeof(one)), 1u);
+                tx.value->poll_once(0, discard);        // seeds next_tx_
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                static constexpr size_t kQueued = 200;  // > any sane cap
+                for (size_t i = 0; i < kQueued; ++i) {
+                    CHECK_EQ_U(tx.value->inject(one, sizeof(one)), 1u);
+                }
+                const uint64_t before = tx.value->tx_submitted();
+                tx.value->poll_once(0, discard);  // ONE service call
+                const uint64_t drained = tx.value->tx_submitted() - before;
+                // Unbounded catch-up would empty all 200 here.
+                CHECK(drained > 0);
+                CHECK_EQ_U(drained, 64u);
+                CHECK(tx.value->tx_pending());
+                // ...and the backlog still drains, so the bound delays the
+                // burst rather than stranding the queue.
+                for (int i = 0; i < 200 && tx.value->tx_pending(); ++i) {
+                    tx.value->poll_once(0, discard);
+                    std::this_thread::sleep_for(std::chrono::microseconds(200));
+                }
+                CHECK(!tx.value->tx_pending());
+            }
+        }
+    }
+
     {
         AirUdpCfg cfg;
         cfg.rx = {"127.0.0.1:0"};

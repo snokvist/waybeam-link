@@ -12,6 +12,7 @@
 # Gates needing a toolchain we do not have are SKIPPED, loudly, and counted in
 # the summary — a skip must never read as a pass:
 #   ssc338q*       needs WBLINK_SSC338Q_TOOLCHAIN
+#   cv610          needs WBLINK_CV610_TOOLCHAIN
 #   android-arm64  needs WBLINK_ANDROID_NDK / ANDROID_NDK_HOME / ANDROID_NDK_ROOT
 #   rk3566         needs an aarch64 cross gcc
 #   deploy --check needs each config's absolute profile_table on THIS host
@@ -96,6 +97,12 @@ if [ "$QUICK" -eq 0 ]; then
         done
     else
         skip "ssc338q{,-au,-eu}" "set WBLINK_SSC338Q_TOOLCHAIN"
+    fi
+
+    if [ -n "${WBLINK_CV610_TOOLCHAIN:-}" ]; then
+        build_preset cv610
+    else
+        skip "cv610" "set WBLINK_CV610_TOOLCHAIN"
     fi
 
     if [ -n "${WBLINK_ANDROID_NDK:-}${ANDROID_NDK_HOME:-}${ANDROID_NDK_ROOT:-}" ]; then

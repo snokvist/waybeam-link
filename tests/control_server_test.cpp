@@ -8,6 +8,10 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+// `struct timeval` for SO_RCVTIMEO. glibc reaches it transitively through
+// <sys/socket.h>; musl does not, so the cv610 (arm-openipc-linux-musleabi)
+// cross-build fails here without it.
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <cstdlib>
