@@ -24,6 +24,35 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 173 — TX gets the device source RX has: `wblink_tx_set_adapter_fds` (2026-08-14)
+
+**Ruling (operator-approved plan, coordination
+`specs/cross/2026-08-14-wblink-library-parity` R2 first slice).** The TX C
+ABI accepts pre-opened USB fds under the exact contract the RX call set on
+2026-08-08: a **call, not a config key**; caller keeps fd ownership
+(libusb `fd_keep` — teardown closes the handle, never the fd); supplying
+any fd forces the bring-up `libusb_reset_device` off (B4: a wrapped fd
+must not be reset); refused after the run has started (3), because the
+config is consumed by then and a caller with the order wrong would watch
+enumerate-by-bus-path fail on a device it cannot see.
+
+**Changed.** No wire, no §15.x surface — the contract lives in
+`tx_node_c.h` beside the RX twin, and this entry. `run_tx`'s fd plumbing
+rides the same role-shared `AirBackend::create` path RX uses; nothing
+adapter-facing forks by role.
+
+**Why.** The RX call is THE device source unrooted Android has; TX had no
+equivalent, so an Android transmit path could never enter the library the
+way its receive path does — the asymmetry the coordination sweep named
+(R2), now closed one slice at a time. The vehicle daemon case is
+unaffected: empty (the default) stays enumerate-by-bus-path, byte for
+byte.
+
+**Evidence.** `rx_node_c.h` fd-source contract (2026-08-08 ruling);
+coordination sweep memory `waybeam_link_library_sweep_2026_08.md` item 3;
+`node/include/wblink/node/air_backend.h` (`adapter_fds` consumed
+role-agnostically at create).
+
 ## Pass 172 — a capability is an answer, not a log line: §15.5 `/info` carries the per-die caps (2026-08-14)
 
 **Ruling (operator-approved plan, coordination
