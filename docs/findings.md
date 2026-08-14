@@ -1321,3 +1321,27 @@ appears nowhere in the tree. `GET /api/v1/tx/power` answers
 So §10.5 reports success for an offset the chip never reached, and §10.6/§10.7
 calibration places rungs on the assumption that the commanded rung is the
 delivered one. Filed separately.
+
+**Confirmed directly 2026-08-14 (Pass 169 / #181), and the rail is where the
+RSSI said.** With the flags plumbed through §15.5, each unit was asked where
+its own rail is instead of the rail being inferred from a plateau:
+
+| unit | family | `index_max` | step | offset-range clamp | **per-rate rail (`saturated_low`)** |
+|---|---|---:|---:|---|---|
+| 8812AU ground | Jaguar1 | 63 | 2 qdb | -126 qdb (-63 steps) | not bisected |
+| 8812CU ground | Jaguar3 | 127 | 1 qdb | -127 qdb (-127 steps) | **-41 qdb (-10.25 dB)** |
+| 8822EU craft | Jaguar3 | 127 | 1 qdb | -127 qdb | **-64 qdb (-16 dB)** |
+
+The craft's -16 dB lands inside the -12..-18 dB window the two-receiver RSSI
+plateau bracketed, by a completely independent method. The AU and CU reaching
+their offset-range clamp at -126 and -127 through different arithmetic (63x2
+against 127x1) is the cross-family check that the reporting is not echoing a
+constant.
+
+**There are TWO rails, and the issue emphasised the wrong one.** The
+offset-range clamp is what makes `applied_qdb != qdb`. The per-rate TXAGC rail
+sets `saturated_low` **while `applied_qdb` still equals the request exactly** —
+on the craft the flag fires at -64 while applied tracked the request all the
+way to -126. A consumer diffing request against applied would have seen
+perfect agreement across the entire dead region. **`applied_qdb` alone would
+not have caught the floor this finding is about; the flag is the signal.**
