@@ -24,6 +24,51 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 172 — a capability is an answer, not a log line: §15.5 `/info` carries the per-die caps (2026-08-14)
+
+**Ruling (operator-approved plan, 2026-08-14 — coordination
+`specs/cross/2026-08-14-wblink-library-parity` R1).** What a die can and
+cannot do is a **stated per-adapter answer** on the library's contract, not
+something an embedder scrapes from a bring-up log or infers from a refusal.
+`AirIface` grows `adapter_caps(size_t)` — pure virtual, every backend states
+its answer — and the one `/info` builder serves it to every consumer shape.
+
+**Changed §15.5** (`GET /api/v1/info` `adapters[]` row): each entry gains
+`chip`, `power_actuator`, `ldpc_rx_flag`, `fastretune`. All four are static
+per-die answers read once at bring-up. `chip` is the backend's
+chip-generation name (`"udp"` on the bench backend, where the other three
+are `false`); `power_actuator` is §10.5's `actuator` discriminator as a
+boolean (Pass 171 — `false` = every offset is inert and refused);
+`ldpc_rx_flag` is per-frame LDPC **reporting** (the §15.3 Pass 157 flag —
+the 8812A decodes LDPC fine while reporting none, so absence taints the
+stats field, not the link); `fastretune` says the lean retune override
+exists on this die.
+
+**C ABI.** The same JSON reaches control-server-less embedders (Android's
+`:wifi` builds `WBLINK_CONTROL_SERVER=OFF`, so REST cannot be the only
+surface) as `wblink_rx_adapters()` — a snapshot copy published once at
+backend bring-up, on the established enqueue-or-copy ownership rule. TX C
+ABI parity is deliberately deferred to the TX-lifecycle item (R2), where
+the TX snapshot surface lands as one piece.
+
+**Why now.** `air_radio.cpp` has read `GetAdapterCaps()`/`GetTxPowerCaps()`
+at bring-up since Passes 157/171 and re-exported none of it; devourer's
+caps table (LDPC trio, TxPowerCaps, fastretune) is the measured truth and
+was reachable only by reading a log line. An embedder planning power policy
+on an 8733BU had no query to fail early on.
+
+**Threading contract, stated with it.** The node spawns no dispatch thread:
+`FrameSink`/`wblink_frame_cb` fire on the thread that called `run_rx`, the
+mode applier on the thread that called `run_tx` — one thread each, stable
+for the life of the run. Both embedders already depend on this (hub
+push_frame injection, Android JNI thread-attach) with nothing in writing;
+now the headers state it.
+
+**Evidence.** Coordination sweep memory
+`waybeam_link_library_sweep_2026_08.md`; `io/src/air_radio.cpp:881-894`
+(reads, no re-export); Pass 171's surface (`actuator` field) as the shape
+this generalizes.
+
 ## Pass 171 — an adapter with no power actuator announces and keeps flying, but never reports success (2026-08-14)
 
 **Ruling (operator, 2026-08-14).** A node whose `role:"tx"` adapter has no
