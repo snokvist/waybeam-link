@@ -30,6 +30,9 @@ struct wblink_tx {
     // from any thread through wblink_tx_state.
     std::atomic<int> state{WBLINK_NODE_CREATED};
     std::atomic<int> exit_rc{0};
+    // Pass 179: config as text. No selection twin — pinning a scouted craft
+    // is what a RECEIVER does; a craft is the thing being selected.
+    std::string config_json;
 };
 
 // The status space is `run_tx`'s (0/1/2) plus this shim's negatives; the two
@@ -47,6 +50,18 @@ wblink_tx* wblink_tx_create(void) { return new (std::nothrow) wblink_tx(); }
 
 void wblink_tx_request_stop(wblink_tx* tx) {
     if (tx != nullptr) tx->stop.store(1, std::memory_order_relaxed);
+}
+
+int wblink_tx_set_config_json(wblink_tx* tx, const char* json) {
+    if (tx == nullptr || json == nullptr || *json == '\0') return 2;
+    if (tx->used.load(std::memory_order_relaxed)) return 3;
+    try {
+        tx->config_json.assign(json);
+    } catch (...) {
+        std::fprintf(stderr, "wblink_tx_set_config_json: allocation failed\n");
+        return 1;
+    }
+    return 0;
 }
 
 int wblink_tx_set_adapter_fds(wblink_tx* tx, const int* fds, size_t n) {
@@ -81,7 +96,12 @@ static int wblink_tx_run_claimed(wblink_tx* tx, const char* config_path,
 
     wblink::node::Loaded loaded;
     try {
-        if (wblink::node::load_all(config_path, loaded) != 0) {
+        // Exactly one source, guaranteed by the wrapper (Pass 179).
+        const int lrc = tx->config_json.empty()
+                            ? wblink::node::load_all(config_path, loaded)
+                            : wblink::node::load_all_json(tx->config_json,
+                                                          loaded);
+        if (lrc != 0) {
             // Deliberately NOT `return rc`. load_all's failure is 1 today, but
             // this function's 2 means "the transmitter wedged, restart me", so
             // passing an unrelated function's code through would be one rename
@@ -127,7 +147,11 @@ static int wblink_tx_run_claimed(wblink_tx* tx, const char* config_path,
 
 int wblink_tx_run(wblink_tx* tx, const char* config_path,
                   wblink_mode_apply_cb on_mode_apply, void* user) {
-    if (tx == nullptr || config_path == nullptr) return WBLINK_TX_BAD_ARG;
+    if (tx == nullptr) return WBLINK_TX_BAD_ARG;
+    // Pass 179: exactly one config source — see the RX twin.
+    const bool have_json = !tx->config_json.empty();
+    if (config_path == nullptr && !have_json) return WBLINK_TX_BAD_ARG;
+    if (config_path != nullptr && have_json) return WBLINK_TX_BAD_ARG;
     if (tx->used.exchange(true)) return WBLINK_TX_REUSED;
     // Pass 177: the refusals above never ran and never transition; from the
     // successful claim on, the handle's state is this wrapper's to tell. The

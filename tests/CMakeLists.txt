@@ -59,6 +59,7 @@ if(WBLINK_RADIO)
     # Radio-only for the same reason as the two above: with WBLINK_RADIO off
     # AirBackend::create's kRadio branch does not exist to test.
     add_wb_test(node_fd_source_test wblink_io wblink_node)
+    add_wb_test(node_config_api_test wblink_io wblink_node)
 endif()
 add_wb_test(scout_sense_test wblink_io)
 add_wb_test(scout_store_test wblink_io)

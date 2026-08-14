@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdio>
 #include <new>
+#include <string>
 #include <vector>
 
 #include "wblink/node/load.h"
@@ -41,6 +42,12 @@ struct wblink_rx {
     // from any thread through wblink_rx_state.
     std::atomic<int> state{WBLINK_NODE_CREATED};
     std::atomic<int> exit_rc{0};
+    // Pass 179: config as text, and a scouted selection pinned before the
+    // run. Both are call-before-run under the same contract as adapter_fds —
+    // the run consumes them and nothing rereads them afterwards.
+    std::string config_json;
+    bool have_selection = false;
+    wblink::node::Selection selection;
 };
 
 namespace {
@@ -88,6 +95,33 @@ int wblink_rx_set_adapter_fds(wblink_rx* rx, const int* fds, size_t n) {
                      "wblink_rx_set_adapter_fds: allocation failed\n");
         return 1;
     }
+    return 0;
+}
+
+int wblink_rx_set_config_json(wblink_rx* rx, const char* json) {
+    if (rx == nullptr || json == nullptr || *json == '\0') return 2;
+    if (rx->used.load(std::memory_order_relaxed)) return 3;
+    try {
+        rx->config_json.assign(json);
+    } catch (...) {
+        std::fprintf(stderr, "wblink_rx_set_config_json: allocation failed\n");
+        return 1;
+    }
+    return 0;
+}
+
+int wblink_rx_set_selection(wblink_rx* rx, uint16_t originator, uint8_t net_id,
+                            uint16_t channel_mhz) {
+    if (rx == nullptr) return 2;
+    // Bounds are the library's to state, not each consumer's to re-derive:
+    // originator 0 is "none" (§12) and a selection naming it is a caller
+    // bug, and a 0 MHz channel would silently build a node tuned nowhere.
+    if (originator == 0 || channel_mhz == 0) return 2;
+    if (rx->used.load(std::memory_order_relaxed)) return 3;
+    rx->selection.originator = originator;
+    rx->selection.net_id = net_id;
+    rx->selection.channel_mhz = channel_mhz;
+    rx->have_selection = true;
     return 0;
 }
 
@@ -196,9 +230,14 @@ static int wblink_rx_run_claimed(wblink_rx* rx, const char* config_path,
 
     wblink::node::Loaded loaded;
     try {
-        if (const int rc = wblink::node::load_all(config_path, loaded);
-            rc != 0) {
-            return rc;
+        // Exactly one source, guaranteed by the wrapper (Pass 179).
+        const int rc = rx->config_json.empty()
+                           ? wblink::node::load_all(config_path, loaded)
+                           : wblink::node::load_all_json(rx->config_json,
+                                                         loaded);
+        if (rc != 0) return rc;
+        if (rx->have_selection) {
+            wblink::node::apply_selection(rx->selection, loaded);
         }
     } catch (...) {
         std::fprintf(stderr, "wblink_rx_run: unhandled C++ exception in load\n");
@@ -237,7 +276,13 @@ static int wblink_rx_run_claimed(wblink_rx* rx, const char* config_path,
 
 int wblink_rx_run(wblink_rx* rx, const char* config_path,
                   wblink_frame_cb on_frame, void* user) {
-    if (rx == nullptr || config_path == nullptr) return 2;
+    if (rx == nullptr) return 2;
+    // Pass 179: exactly one config source. Neither is nothing to run; both
+    // is an ambiguity only a guess could resolve, so it is refused rather
+    // than silently ranked.
+    const bool have_json = !rx->config_json.empty();
+    if (config_path == nullptr && !have_json) return 2;  // nothing to run
+    if (config_path != nullptr && have_json) return 2;   // two, ambiguous
     if (rx->used.exchange(true)) return 3;  // see the comment on `used`
     // Pass 177: the refusals above never ran and never transition; from the
     // successful claim on, the handle's state is this wrapper's to tell. The
