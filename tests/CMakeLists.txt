@@ -65,12 +65,7 @@ if(WBLINK_RADIO)
     # independent paths — so a derivation that goes wrong inside the library TU
     # (as it did, reading a WBLINK_VENC macro that does not exist) fails here
     # instead of agreeing with itself.
-    target_compile_definitions(build_info_test PRIVATE
-        WBLINK_BI_EXPECT_FRAME_SHM=$<IF:$<BOOL:${WBLINK_FRAME_SHM}>,1,0>
-        WBLINK_BI_EXPECT_CONTROL_SERVER=$<IF:$<BOOL:${WBLINK_CONTROL_SERVER}>,1,0>
-        WBLINK_BI_EXPECT_VENC=$<IF:$<BOOL:${WBLINK_VENC}>,1,0>
-        WBLINK_BI_EXPECT_RADIO=$<IF:$<BOOL:${WBLINK_RADIO}>,1,0>
-        WBLINK_BI_EXPECT_NODE_TX=$<IF:$<BOOL:${WBLINK_NODE_TX}>,1,0>)
+    target_compile_definitions(build_info_test PRIVATE ${WBLINK_BI_EXPECT_DEFS})
 endif()
 
 # Pass 179, deliberately OUTSIDE the WBLINK_RADIO gate: the fixture is

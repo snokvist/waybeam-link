@@ -4,6 +4,28 @@
 // build most likely to be asked whether it has a transmitter.
 #include "wblink/node/build_info_c.h"
 
+// A missing definition is the one failure the value checks cannot see: `#if`
+// on an undefined identifier is 0 with no diagnostic, and in a reduced build
+// 0 is also the correct answer, so "the defines never arrived" and "the
+// feature is off" are indistinguishable. -Wundef would catch it but cannot be
+// enabled globally — ~20 pre-existing sites legitimately test macros that only
+// exist when ON. Five #ifndefs cost nothing and cover every configuration.
+#ifndef WBLINK_BI_FRAME_SHM
+#error "WBLINK_BI_FRAME_SHM not defined - see target_compile_definitions(wblink_node)"
+#endif
+#ifndef WBLINK_BI_CONTROL_SERVER
+#error "WBLINK_BI_CONTROL_SERVER not defined - see target_compile_definitions(wblink_node)"
+#endif
+#ifndef WBLINK_BI_VENC
+#error "WBLINK_BI_VENC not defined - see target_compile_definitions(wblink_node)"
+#endif
+#ifndef WBLINK_BI_RADIO
+#error "WBLINK_BI_RADIO not defined - see target_compile_definitions(wblink_node)"
+#endif
+#ifndef WBLINK_BI_NODE_TX
+#error "WBLINK_BI_NODE_TX not defined - see target_compile_definitions(wblink_node)"
+#endif
+
 namespace {
 
 // The WBLINK_BI_* macros come from CMake (see the target_compile_definitions

@@ -370,15 +370,29 @@ add_library(wblink_node STATIC ${WBLINK_NODE_SRCS})
 # branches on it", above), so `#if WBLINK_VENC` silently means OFF and a
 # string derived that way reports a full build as having no venc and no
 # transmitter. It did, until a receive-only build was compared against a full
-# one. WBLINK_NODE_TX is likewise taken from the variable CMake already
-# computed rather than re-deriving the three-way conjunction in a second
-# place.
-target_compile_definitions(wblink_node PRIVATE
-    WBLINK_BI_FRAME_SHM=$<IF:$<BOOL:${WBLINK_FRAME_SHM}>,1,0>
-    WBLINK_BI_CONTROL_SERVER=$<IF:$<BOOL:${WBLINK_CONTROL_SERVER}>,1,0>
-    WBLINK_BI_VENC=$<IF:$<BOOL:${WBLINK_VENC}>,1,0>
-    WBLINK_BI_RADIO=$<IF:$<BOOL:${WBLINK_RADIO}>,1,0>
-    WBLINK_BI_NODE_TX=$<IF:$<BOOL:${WBLINK_NODE_TX}>,1,0>)
+# one.
+#
+# The names are CONSTRUCTED from this one list rather than written out per
+# field, and each source variable is asserted DEFINED (2026-08-15 review). A
+# typo at a use site — `${WBLINK_RADI0}` — is not an error in CMake: it
+# expands to empty, `$<BOOL:>` reads false, and BOTH the library and the test
+# then agree on a wrong answer, in every configuration. No test can catch
+# that, because both sides read the same symbol; the loop is what makes the
+# symbol unmistakable and the assertion is what turns a typo into a configure
+# failure instead of a quiet false.
+set(WBLINK_BI_FIELDS FRAME_SHM CONTROL_SERVER VENC RADIO NODE_TX)
+foreach(_bi_f IN LISTS WBLINK_BI_FIELDS)
+    if(NOT DEFINED WBLINK_${_bi_f})
+        message(FATAL_ERROR
+            "build_info: WBLINK_${_bi_f} is not defined - the field list and "
+            "the option names have drifted apart")
+    endif()
+    list(APPEND WBLINK_BI_DEFS
+        WBLINK_BI_${_bi_f}=$<IF:$<BOOL:${WBLINK_${_bi_f}}>,1,0>)
+    list(APPEND WBLINK_BI_EXPECT_DEFS
+        WBLINK_BI_EXPECT_${_bi_f}=$<IF:$<BOOL:${WBLINK_${_bi_f}}>,1,0>)
+endforeach()
+target_compile_definitions(wblink_node PRIVATE ${WBLINK_BI_DEFS})
 if(NOT PROJECT_IS_TOP_LEVEL)
     set_target_properties(wblink_node PROPERTIES EXCLUDE_FROM_ALL TRUE)
 endif()

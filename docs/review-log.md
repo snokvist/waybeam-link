@@ -27,39 +27,43 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 ## Pass 180 — a build states what it can do (2026-08-15)
 
 **Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
-R6).** `wblink_build_info()` returns the compiled feature set as a JSON
-object — `{"frame_shm":B,"control_server":B,"venc":B,"radio":B,
-"node_tx":B}` — from a string baked into the archive at ITS compile
-time, not the consumer's.
+R6).** `wblink_build_info()` returns the compiled feature set as JSON —
+`{"frame_shm":B,"control_server":B,"venc":B,"radio":B,"node_tx":B}` —
+baked into the archive at ITS compile time, not the consumer's.
 
 **Why a feature set and not a version.** The install rules already
-refuse to fabricate a version ("a fabricated one would let a consumer
-write a compatibility constraint that means nothing", `CMakeLists.txt`),
-and that reasoning does not stop at CMake. What a consumer actually
-needs to check is not a number but a capability, because the failures
-are capability failures: waybeam-hub configured
+refuse to fabricate a version, and the reasoning does not stop at CMake:
+the failures are capability failures. waybeam-hub configured
 `pixelpilot.frame_shm.source: wblink` against a library built
 `WBLINK_FRAME_SHM=OFF` renders a permanently black screen with every
-counter reporting healthy, and a receive-only build linking the TX half
-fails only at link, with a named symbol, if it fails at all.
+counter reporting healthy.
 
 **Baked, not recomputed.** The string is a constant in the library's own
 translation unit, so it describes the archive a consumer LINKED, not the
-headers it compiled against. That is the distinction that makes it worth
-having: the hub consumes this tree by sibling path
-(`WBLINK_SRCDIR ?= ../waybeam-link`) and its Makefile passes only
-`-I.../node/include`, so its own compile sees none of the feature macros
-and could not compute an expectation to compare — but it can read what
-the linked archive says and refuse a configuration the archive cannot
-serve.
+headers it compiled against. The hub consumes this tree by sibling path
+and its Makefile passes only `-I.../node/include`, so its own compile
+sees none of the feature macros and could not compute an expectation to
+compare — but it can read what the linked archive says.
 
-**No new failure mode is claimed for it.** It does NOT catch waybeam-hub's
-`WBLINK=1` stale-object trap: a `hub_main.o` compiled without the define
-registers no module at all, so nothing is left to call this.
+**No new failure mode is claimed for it.** It does NOT catch the hub's
+`WBLINK=1` stale-object trap: a `hub_main.o` compiled without the
+define registers no module, so nothing is left to call this.
 
-**Evidence.** Branch `feat/r6-build-info`; `tests/build_info_test.cpp`
-asserts the string agrees with the macros the test itself was compiled
-with, so a build where the two disagree fails rather than reports.
+**What the guard does and does not cover.** `tests/build_info_test.cpp`
+takes its expectation from CMake through a different target than the
+library's own definitions, so a derivation that goes wrong on one side
+fails against the other. It cannot catch a mistyped variable NAME —
+both sides would read the same undefined symbol and agree on "false" in
+every configuration — so the five names are constructed from one list
+whose members are asserted `DEFINED`, which turns that typo into a
+configure error. `scripts/gates.sh` additionally runs the test in a
+REDUCED build (frame-SHM/control/venc off, radio on) because every
+preset that runs tests leaves all five options on, so the false
+direction had never once been executed.
+
+**Evidence.** Branch `feat/r6-build-info`; three configurations measured
+(full, receive-only, reduced-mixed).
+
 ## Pass 179 — config is an API, and so is selection (2026-08-15)
 
 **Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
