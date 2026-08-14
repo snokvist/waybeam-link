@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "wblink/node/snapshot_copy.h"
+
 namespace wblink {
 namespace node {
 
@@ -107,6 +109,14 @@ class RxRuntimeControl {
     // command that carried this generation. A queued caller cannot be handed
     // the helper's return value, so the outcome has to arrive here or nowhere.
     void publish_command(std::string json, uint64_t generation);
+    // Pass 176: the §15.3 stats line and §15.4 health object, published by
+    // the run loop at the stats cadence from the ONE fill path
+    // (emit_stats / build_health_json). No snapshot-request edge: the loop
+    // republishes on its own stats.hz beat, and stats.hz=0 means these stay
+    // unpublished by design — the always-on surface is the status/lifecycle
+    // snapshot, not a silently re-enabled stats walk.
+    void publish_stats(std::string json);
+    void publish_health(std::string json);
 
     // Buffer-copy contract for the C shim: `required` includes the trailing
     // NUL. NULL + zero is a size query. Returns 0 on success/query, 2 for bad
@@ -120,15 +130,12 @@ class RxRuntimeControl {
                        uint64_t* generation);
     int copy_command(char* buffer, size_t capacity, size_t* required,
                      uint64_t* generation);
+    int copy_stats(char* buffer, size_t capacity, size_t* required);
+    int copy_health(char* buffer, size_t capacity, size_t* required);
 
   private:
-    struct GeneratedSnapshot {
-        explicit GeneratedSnapshot(std::string value, uint64_t gen)
-            : json(std::move(value)), generation(gen) {}
-        const std::string json;
-        const uint64_t generation;
-    };
-
+    // GeneratedSnapshot moved to snapshot_copy.h with the copy contract
+    // (Pass 176).
     mutable std::mutex mutex_;
     bool running_ = false;
     uint64_t next_generation_ = 0;
@@ -143,6 +150,8 @@ class RxRuntimeControl {
     std::shared_ptr<const std::string> adapters_snapshot_;
     std::shared_ptr<const GeneratedSnapshot> selection_snapshot_;
     std::shared_ptr<const GeneratedSnapshot> command_snapshot_;
+    std::shared_ptr<const std::string> stats_snapshot_;
+    std::shared_ptr<const std::string> health_snapshot_;
 };
 
 }  // namespace node

@@ -3155,6 +3155,14 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 control->publish_stats(emitter.last_line());
             }
 #endif
+            // Pass 176: deliberately OUTSIDE the control-server guard — a
+            // receive-only build (Android :wifi) has no REST yet gets the
+            // same link view through the C ABI. One fill path, three
+            // transports.
+            if (runtime_control != nullptr) {
+                runtime_control->publish_stats(emitter.last_line());
+                runtime_control->publish_health(build_health_json(last_snap));
+            }
             next_stats = now + stats_period;
         }
     }

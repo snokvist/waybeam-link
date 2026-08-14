@@ -329,6 +329,33 @@ void test_control_tx_commands() {
     CHECK_EQ_U(required, std::strlen("{\"campaign\":{}}") + 1);
 }
 
+// Pass 176: stats/health slots — plain snapshot contract, no request edge
+// (the loop republishes on the stats.hz beat), unpublished (3) until the
+// first beat, and readable after stop_run like every other snapshot.
+void test_stats_and_health_slots() {
+    wblink::node::RxRuntimeControl ctl;
+    size_t required = 77;
+    std::array<char, 64> out{};
+    CHECK(ctl.copy_stats(nullptr, 0, &required) == 3);
+    CHECK_EQ_U(required, 0);
+    CHECK(ctl.copy_health(nullptr, 0, &required) == 3);
+
+    ctl.start_run();
+    ctl.publish_stats("{\"t_ms\":9}");
+    ctl.publish_health("{\"state\":\"RAISE\"}");
+    ctl.stop_run();
+    // Survives stop_run — the embedder inspects the final link view after
+    // joining the RX thread, exactly as the scout snapshots promise.
+    CHECK(ctl.copy_stats(out.data(), out.size(), &required) == 0);
+    CHECK(std::strcmp(out.data(), "{\"t_ms\":9}") == 0);
+    CHECK(ctl.copy_health(out.data(), out.size(), &required) == 0);
+    CHECK(std::strcmp(out.data(), "{\"state\":\"RAISE\"}") == 0);
+    CHECK(ctl.copy_stats(out.data(), 4, &required) == 4);
+    CHECK_EQ_U(required, std::strlen("{\"t_ms\":9}") + 1);
+    CHECK(ctl.copy_health(nullptr, 1, &required) == 2);
+    CHECK(ctl.copy_health(out.data(), out.size(), nullptr) == 2);
+}
+
 }  // namespace
 
 int main() {
@@ -336,5 +363,6 @@ int main() {
     test_snapshot_requests_and_copies();
     test_concurrent_publish_and_copy_stays_generation_coupled();
     test_control_tx_commands();
+    test_stats_and_health_slots();
     return wbtest_finish("rx_runtime_control_test");
 }

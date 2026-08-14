@@ -34,6 +34,12 @@ class TxRuntimeInfo {
     // Pass 174: republished at 1 Hz by the run loop, on its own cadence so a
     // node with §15.3 stats disabled does not blind its embedder.
     void publish_status(std::string json) { publish(status_, std::move(json)); }
+    // Pass 176: the §15.3 stats line and §15.4 health object, published at
+    // the stats cadence from the ONE fill path (emit_stats /
+    // build_health_json). stats.hz=0 leaves them unpublished by design — the
+    // always-on surface is the status snapshot above.
+    void publish_stats(std::string json) { publish(stats_, std::move(json)); }
+    void publish_health(std::string json) { publish(health_, std::move(json)); }
 
     // Buffer-copy contract shared with RxRuntimeControl: `required` includes
     // the trailing NUL. NULL + zero is a size query. Returns 0 on
@@ -44,6 +50,12 @@ class TxRuntimeInfo {
     }
     int copy_status(char* buffer, size_t capacity, size_t* required) {
         return copy(status_, buffer, capacity, required);
+    }
+    int copy_stats(char* buffer, size_t capacity, size_t* required) {
+        return copy(stats_, buffer, capacity, required);
+    }
+    int copy_health(char* buffer, size_t capacity, size_t* required) {
+        return copy(health_, buffer, capacity, required);
     }
 
   private:
@@ -70,6 +82,8 @@ class TxRuntimeInfo {
     std::mutex mutex_;
     Snap adapters_;
     Snap status_;
+    Snap stats_;
+    Snap health_;
 };
 
 }  // namespace node

@@ -131,6 +131,18 @@ int wblink_tx_status(wblink_tx* tx, char* buffer, size_t capacity,
     return tx->runtime_info.copy_status(buffer, capacity, required);
 }
 
+int wblink_tx_stats(wblink_tx* tx, char* buffer, size_t capacity,
+                    size_t* required) {
+    if (tx == nullptr) return 2;
+    return tx->runtime_info.copy_stats(buffer, capacity, required);
+}
+
+int wblink_tx_health(wblink_tx* tx, char* buffer, size_t capacity,
+                     size_t* required) {
+    if (tx == nullptr) return 2;
+    return tx->runtime_info.copy_health(buffer, capacity, required);
+}
+
 void wblink_tx_destroy(wblink_tx* tx) { delete tx; }
 
 }  // extern "C"

@@ -216,30 +216,16 @@ void RxRuntimeControl::publish_command(std::string json, uint64_t generation) {
 
 int RxRuntimeControl::copy_scout(char* buffer, size_t capacity,
                                  size_t* required, uint64_t* generation) {
-    if (required == nullptr || generation == nullptr ||
-        (buffer == nullptr && capacity != 0)) {
-        return 2;
-    }
-
     std::shared_ptr<const GeneratedSnapshot> snapshot;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         scout_snapshot_requested_ = true;
         snapshot = scout_snapshot_;
     }
-    if (!snapshot) {
-        *required = 0;
-        *generation = applied_generation();
-        return 3;
-    }
-    if (snapshot->json.size() == std::numeric_limits<size_t>::max()) return 1;
-    const size_t need = snapshot->json.size() + 1;
-    *required = need;
-    *generation = snapshot->generation;
-    if (buffer == nullptr) return capacity == 0 ? 0 : 2;
-    if (capacity < need) return 4;
-    std::memcpy(buffer, snapshot->json.c_str(), need);
-    return 0;
+    // Contract in snapshot_copy.h (Pass 176 fold); this method owns only the
+    // lock and the request-flag side effect — same split as the plain copies.
+    return copy_generated_snapshot_json(snapshot, applied_generation(), buffer,
+                                        capacity, required, generation);
 }
 
 int RxRuntimeControl::copy_discovery(char* buffer, size_t capacity,
@@ -269,58 +255,60 @@ int RxRuntimeControl::copy_adapters(char* buffer, size_t capacity,
 
 int RxRuntimeControl::copy_selection(char* buffer, size_t capacity,
                                      size_t* required, uint64_t* generation) {
-    if (required == nullptr || generation == nullptr ||
-        (buffer == nullptr && capacity != 0)) {
-        return 2;
-    }
-
     std::shared_ptr<const GeneratedSnapshot> snapshot;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         selection_snapshot_requested_ = true;
         snapshot = selection_snapshot_;
     }
-    if (!snapshot) {
-        *required = 0;
-        *generation = applied_generation();
-        return 3;
-    }
-    if (snapshot->json.size() == std::numeric_limits<size_t>::max()) return 1;
-    const size_t need = snapshot->json.size() + 1;
-    *required = need;
-    *generation = snapshot->generation;
-    if (buffer == nullptr) return capacity == 0 ? 0 : 2;
-    if (capacity < need) return 4;
-    std::memcpy(buffer, snapshot->json.c_str(), need);
-    return 0;
+    return copy_generated_snapshot_json(snapshot, applied_generation(), buffer,
+                                        capacity, required, generation);
 }
 
 int RxRuntimeControl::copy_command(char* buffer, size_t capacity,
                                    size_t* required, uint64_t* generation) {
-    if (required == nullptr || generation == nullptr ||
-        (buffer == nullptr && capacity != 0)) {
-        return 2;
-    }
-
     std::shared_ptr<const GeneratedSnapshot> snapshot;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         command_snapshot_requested_ = true;
         snapshot = command_snapshot_;
     }
-    if (!snapshot) {
-        *required = 0;
-        *generation = applied_generation();
-        return 3;
+    return copy_generated_snapshot_json(snapshot, applied_generation(), buffer,
+                                        capacity, required, generation);
+}
+
+void RxRuntimeControl::publish_stats(std::string json) {
+    auto next = std::make_shared<const std::string>(std::move(json));
+    const std::lock_guard<std::mutex> lock(mutex_);
+    stats_snapshot_ = std::move(next);
+}
+
+void RxRuntimeControl::publish_health(std::string json) {
+    auto next = std::make_shared<const std::string>(std::move(json));
+    const std::lock_guard<std::mutex> lock(mutex_);
+    health_snapshot_ = std::move(next);
+}
+
+int RxRuntimeControl::copy_stats(char* buffer, size_t capacity,
+                                 size_t* required) {
+    std::shared_ptr<const std::string> snapshot;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        // No request flag: the loop republishes on the stats.hz beat
+        // (Pass 176), and stats.hz=0 leaves this unpublished by design.
+        snapshot = stats_snapshot_;
     }
-    if (snapshot->json.size() == std::numeric_limits<size_t>::max()) return 1;
-    const size_t need = snapshot->json.size() + 1;
-    *required = need;
-    *generation = snapshot->generation;
-    if (buffer == nullptr) return capacity == 0 ? 0 : 2;
-    if (capacity < need) return 4;
-    std::memcpy(buffer, snapshot->json.c_str(), need);
-    return 0;
+    return copy_snapshot_json(snapshot, buffer, capacity, required);
+}
+
+int RxRuntimeControl::copy_health(char* buffer, size_t capacity,
+                                  size_t* required) {
+    std::shared_ptr<const std::string> snapshot;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        snapshot = health_snapshot_;
+    }
+    return copy_snapshot_json(snapshot, buffer, capacity, required);
 }
 
 }  // namespace node

@@ -235,6 +235,20 @@ int wblink_rx_discovery(wblink_rx *rx, char *buffer, size_t capacity,
  */
 int wblink_rx_adapters(wblink_rx *rx, char *buffer, size_t capacity,
                        size_t *required);
+/*
+ * Pass 176: the §15.3 stats line and the §15.4 health object — byte for byte
+ * what the control server serves as GET /api/v1/stats and /api/v1/health,
+ * published from the run loop's one fill path. Deliberately available in a
+ * receive-only build (control server compiled out): the C ABI is that
+ * build's only telemetry surface. Republished at the stats cadence, so
+ * `stats.hz` governs freshness and `stats.hz=0` leaves them unpublished (3)
+ * by design rather than re-enabling the walk behind the embedder's back.
+ * Same buffer contract as the snapshot calls above.
+ */
+int wblink_rx_stats(wblink_rx *rx, char *buffer, size_t capacity,
+                    size_t *required);
+int wblink_rx_health(wblink_rx *rx, char *buffer, size_t capacity,
+                     size_t *required);
 int wblink_rx_selection(wblink_rx *rx, char *buffer, size_t capacity,
                         size_t *required,
                         uint64_t *applied_generation);

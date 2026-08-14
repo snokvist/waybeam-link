@@ -1155,6 +1155,12 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
+            // Pass 176: the same two strings the control server serves,
+            // readable through the C ABI — one fill path, three transports.
+            if (runtime_info != nullptr) {
+                runtime_info->publish_stats(emitter.last_line());
+                runtime_info->publish_health(build_health_json(last_snap));
+            }
             next_stats = now + stats_period;
         }
     }

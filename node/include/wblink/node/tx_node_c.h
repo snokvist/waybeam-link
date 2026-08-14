@@ -163,6 +163,21 @@ int wblink_tx_status(wblink_tx *tx, char *buffer, size_t capacity,
                      size_t *required);
 
 /*
+ * Pass 176: the §15.3 stats line and the §15.4 health object — byte for byte
+ * what the control server serves as GET /api/v1/stats and /api/v1/health,
+ * because all three transports copy the SAME strings the run loop publishes
+ * from its one fill path. Republished at the stats cadence, so `stats.hz`
+ * governs freshness and `stats.hz=0` leaves them unpublished (3): an
+ * embedder that disables the stats walk has chosen a blind link view, and
+ * these getters do not re-enable it behind its back. The always-on surface
+ * is `wblink_tx_status`. Same buffer contract as the calls above.
+ */
+int wblink_tx_stats(wblink_tx *tx, char *buffer, size_t capacity,
+                    size_t *required);
+int wblink_tx_health(wblink_tx *tx, char *buffer, size_t capacity,
+                     size_t *required);
+
+/*
  * Ask a running node to stop. Safe from any thread, and from a signal handler:
  * the flag underneath is a lock-free atomic. Returns immediately — the loop
  * polls, so expect up to one poll period before `wblink_tx_run` returns.
