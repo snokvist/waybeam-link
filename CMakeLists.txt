@@ -150,34 +150,49 @@ if(WBLINK_RADIO)
     #                     8812AU-equipped craft.
     #   eu             — rtl8822e only: smallest vehicle binary for
     #                     8812EU-equipped craft.
+    #   8733b          — RTL8731BU/8733BU only (HALMAC 87xx 11n): smallest
+    #                     binary for a board carrying that part, e.g. the
+    #                     CV610 bring-up. A separate family, NOT a Jaguar3
+    #                     variant.
     #   all            — every USB family devourer supports (adds 8814AU,
-    #                     Jaguar2 8822BU/8821CU, Kestrel 8852B/C 11ax) for
-    #                     ground-side adapter tests. PCIe stays off.
+    #                     Jaguar2 8822BU/8821CU, RTL8733B 11n, Kestrel
+    #                     8852B/C 11ax) for ground-side adapter tests. PCIe
+    #                     stays off.
     set(WBLINK_DEVOURER_CHIPS "fleet" CACHE STRING
-        "devourer chip families: fleet | au | eu | all")
+        "devourer chip families: fleet | au | eu | 8733b | all")
     if(WBLINK_DEVOURER_CHIPS STREQUAL "all")
         set(_wblink_j1 ON)
         set(_wblink_j3c ON)
         set(_wblink_j3e ON)
+        set(_wblink_8733b ON)
         set(_wblink_extra ON)
     elseif(WBLINK_DEVOURER_CHIPS STREQUAL "au")
         set(_wblink_j1 ON)
         set(_wblink_j3c OFF)
         set(_wblink_j3e OFF)
+        set(_wblink_8733b OFF)
         set(_wblink_extra OFF)
     elseif(WBLINK_DEVOURER_CHIPS STREQUAL "eu")
         set(_wblink_j1 OFF)
         set(_wblink_j3c OFF)
         set(_wblink_j3e ON)
+        set(_wblink_8733b OFF)
+        set(_wblink_extra OFF)
+    elseif(WBLINK_DEVOURER_CHIPS STREQUAL "8733b")
+        set(_wblink_j1 OFF)
+        set(_wblink_j3c OFF)
+        set(_wblink_j3e OFF)
+        set(_wblink_8733b ON)
         set(_wblink_extra OFF)
     elseif(WBLINK_DEVOURER_CHIPS STREQUAL "fleet")
         set(_wblink_j1 ON)
         set(_wblink_j3c ON)
         set(_wblink_j3e ON)
+        set(_wblink_8733b OFF)
         set(_wblink_extra OFF)
     else()
         message(FATAL_ERROR
-            "WBLINK_DEVOURER_CHIPS must be fleet, au, eu, or all (got "
+            "WBLINK_DEVOURER_CHIPS must be fleet, au, eu, 8733b, or all (got "
             "'${WBLINK_DEVOURER_CHIPS}')")
     endif()
     # Normal variables for the same reason as the libusb block above. The
@@ -191,6 +206,9 @@ if(WBLINK_RADIO)
     set(DEVOURER_JAGUAR2_8821C ${_wblink_extra})
     set(DEVOURER_JAGUAR3_8822C ${_wblink_j3c})
     set(DEVOURER_JAGUAR3_8822E ${_wblink_j3e})
+    # RTL8733B defaults ON upstream, like the Kestrel pair — so an unlisted
+    # variable here is not "off", it is "silently on in every vehicle build".
+    set(DEVOURER_8733B         ${_wblink_8733b})
     set(DEVOURER_KESTREL_8852B ${_wblink_extra})
     set(DEVOURER_KESTREL_8852C ${_wblink_extra})
     set(DEVOURER_PCIE          OFF)
@@ -216,9 +234,18 @@ if(WBLINK_RADIO)
                 "must stay >= 3.13) after any re-vendor.")
         endif()
     endforeach()
+    # Same witness for RTL8733B. It arrived in the 2026-08-14 re-vendor with
+    # its option defaulting ON, so every family the vendored tree gains needs
+    # a line here or the trim is a comment rather than a guarantee.
+    if(NOT _wblink_8733b AND "DEVOURER_HAVE_8733B=1" IN_LIST _wblink_dv_defs)
+        message(FATAL_ERROR
+            "devourer built RTL8733B despite WBLINK_DEVOURER_CHIPS="
+            "'${WBLINK_DEVOURER_CHIPS}' — see the Kestrel note above.")
+    endif()
     message(STATUS
         "devourer chips '${WBLINK_DEVOURER_CHIPS}': jaguar1=${_wblink_j1} "
-        "8822c=${_wblink_j3c} 8822e=${_wblink_j3e} extra=${_wblink_extra}")
+        "8822c=${_wblink_j3c} 8822e=${_wblink_j3e} 8733b=${_wblink_8733b} "
+        "extra=${_wblink_extra}")
 endif()
 
 # --- wblink_core: zero-dependency portable wire/session library (PROTOCOL.md
