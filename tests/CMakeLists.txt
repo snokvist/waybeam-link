@@ -59,6 +59,18 @@ if(WBLINK_RADIO)
     # Radio-only for the same reason as the two above: with WBLINK_RADIO off
     # AirBackend::create's kRadio branch does not exist to test.
     add_wb_test(node_fd_source_test wblink_io wblink_node)
+    add_wb_test(build_info_test wblink_io wblink_node)
+    # Pass 180: the test's expectation comes from CMake's variables, through a
+    # DIFFERENT target than the library's own definitions. Same authority, two
+    # independent paths — so a derivation that goes wrong inside the library TU
+    # (as it did, reading a WBLINK_VENC macro that does not exist) fails here
+    # instead of agreeing with itself.
+    target_compile_definitions(build_info_test PRIVATE
+        WBLINK_BI_EXPECT_FRAME_SHM=$<IF:$<BOOL:${WBLINK_FRAME_SHM}>,1,0>
+        WBLINK_BI_EXPECT_CONTROL_SERVER=$<IF:$<BOOL:${WBLINK_CONTROL_SERVER}>,1,0>
+        WBLINK_BI_EXPECT_VENC=$<IF:$<BOOL:${WBLINK_VENC}>,1,0>
+        WBLINK_BI_EXPECT_RADIO=$<IF:$<BOOL:${WBLINK_RADIO}>,1,0>
+        WBLINK_BI_EXPECT_NODE_TX=$<IF:$<BOOL:${WBLINK_NODE_TX}>,1,0>)
 endif()
 
 # Pass 179, deliberately OUTSIDE the WBLINK_RADIO gate: the fixture is
