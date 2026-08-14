@@ -269,6 +269,14 @@ int wblink_rx_command_status(wblink_rx *rx, char *buffer, size_t capacity,
  * flag on entry instead would lose a stop issued between spawning a thread and
  * that thread reaching this call. Create a handle per start; that is race-free.
  *
+ * THAT IS ALSO THE RECOVERY CONTRACT (Pass 175): after any failed or wedged
+ * run, destroy the handle and create a fresh one IN THE SAME PROCESS — no
+ * external prep, no root sysfs help. create() owns adapter preparation:
+ * a missing adapter fails loudly by name, a kernel driver bound to the
+ * interface is detached at claim, a stale claim is retried (BUSY, 6x250 ms).
+ * Fresh-object recovery measured 5/5; every in-place alternative measured
+ * 0/5 or terminates the process, which is why no recover() call exists.
+ *
  * Returns 0 on a clean stop (or a pre-stop), 1 on a startup/runtime failure,
  * 2 on a NULL argument, 3 on reuse. `on_frame` may be NULL, in which case
  * egress goes wherever the config says — which, on a build without frame-SHM,
