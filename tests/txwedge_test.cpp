@@ -49,20 +49,26 @@ int main() {
     // directions — an idle TX is not evidence.
     {
         TxWedge w(pol);
-        w.poll(0, 0, 0);
-        CHECK(!w.poll(1000, 7, 0));  // 7 < min_submits: no verdict
+        // Prime with a nonzero report count: §9.10 (Pass 170) withholds the
+        // verdict until this backend is PROVEN to complete frames, so a
+        // wedge case must describe a backend that reports.
+        w.poll(0, 0, 1);
+        CHECK(!w.poll(1000, 7, 1));  // 7 < min_submits: no verdict
         CHECK(!w.wedged());
-        CHECK(w.poll(2000, 100, 0));  // now enough evidence
+        CHECK(w.poll(2000, 100, 1));  // now enough evidence
         CHECK(w.wedged());
-        CHECK(!w.poll(3000, 103, 0));  // idle again: stays wedged
+        CHECK(!w.poll(3000, 103, 1));  // idle again: stays wedged
         CHECK(w.wedged());
     }
 
     // Exactly min_submits with zero reports fires; one report saves it.
     {
         TxWedge w(pol);
-        w.poll(0, 0, 0);
-        CHECK(w.poll(1000, 8, 0));
+        // Prime with a nonzero report count: §9.10 (Pass 170) withholds the
+        // verdict until this backend is PROVEN to complete frames, so a
+        // wedge case must describe a backend that reports.
+        w.poll(0, 0, 1);
+        CHECK(w.poll(1000, 8, 1));
         CHECK(w.wedged());
     }
     {
@@ -78,11 +84,14 @@ int main() {
     // restart with no fault present.
     {
         TxWedge w(pol);
-        w.poll(0, 0, 0);
+        // Prime with a nonzero report count: §9.10 (Pass 170) withholds the
+        // verdict until this backend is PROVEN to complete frames, so a
+        // wedge case must describe a backend that reports.
+        w.poll(0, 0, 1);
         CHECK(w.consecutive_wedged() == 0);
-        w.poll(1000, 100, 0);  // wedged window 1
+        w.poll(1000, 100, 1);  // wedged window 1
         CHECK(w.consecutive_wedged() == 1);
-        w.poll(2000, 200, 0);  // wedged window 2
+        w.poll(2000, 200, 1);  // wedged window 2
         CHECK(w.consecutive_wedged() == 2);
         // Any backend progress clears it, even while the lifetime total keeps
         // its history. Both counters are CUMULATIVE, so a healthy window has
@@ -104,13 +113,16 @@ int main() {
     // idle TX is evidence of nothing, exactly as it is for the verdict itself.
     {
         TxWedge w(pol);
-        w.poll(0, 0, 0);
-        w.poll(1000, 100, 0);
+        // Prime with a nonzero report count: §9.10 (Pass 170) withholds the
+        // verdict until this backend is PROVEN to complete frames, so a
+        // wedge case must describe a backend that reports.
+        w.poll(0, 0, 1);
+        w.poll(1000, 100, 1);
         CHECK(w.consecutive_wedged() == 1);
-        w.poll(2000, 101, 0);  // 1 submit — below min_submits, no verdict
+        w.poll(2000, 101, 1);  // 1 submit — below min_submits, no verdict
         CHECK(w.consecutive_wedged() == 1);
         CHECK(w.wedged());
-        w.poll(3000, 201, 0);  // back to real submissions, still no progress
+        w.poll(3000, 201, 1);  // back to real submissions, still no progress
         CHECK(w.consecutive_wedged() == 2);
     }
 
@@ -121,6 +133,52 @@ int main() {
         CHECK(!w.poll(0, 0, 0));
         CHECK(!w.poll(5000, 100'000, 0));
         CHECK(!w.wedged());
+    }
+
+    // §9.10 (Pass 170): a backend that has NEVER completed a frame is not a
+    // wedged backend. Verbatim shape of the 2026-08-14 CV610 measurement —
+    // the RTL8733BU emits no CCX reports at all, so tx_progress stays 0 while
+    // tx_submitted climbs; the old rule called that a dead transmitter while
+    // a second radio was receiving 22087 frames from it.
+    {
+        TxWedge w(pol);
+        w.poll(0, 0, 0);  // no reports at prime: unproven
+        CHECK(!w.progress_proven());
+        uint64_t sub = 0;
+        for (uint64_t t = 1000; t <= 20'000; t += 1000) {
+            sub += 660;  // the measured ~660 submits/s, zero reports ever
+            CHECK(!w.poll(t, sub, 0));
+            CHECK(!w.wedged());
+        }
+        CHECK_EQ_U(w.wedge_windows(), 0);
+        CHECK_EQ_U(w.consecutive_wedged(), 0);
+        CHECK(!w.progress_proven());
+    }
+
+    // ...and the detector is WITHHELD, not disabled: the same backend, once it
+    // has completed even one frame, wedges exactly as before. Without this the
+    // fix above would be indistinguishable from deleting the watchdog.
+    {
+        TxWedge w(pol);
+        w.poll(0, 0, 0);
+        CHECK(!w.poll(1000, 100, 0));  // unproven — no verdict yet
+        CHECK(!w.wedged());
+        CHECK(!w.poll(2000, 200, 1));  // one completion: proven, and alive
+        CHECK(w.progress_proven());
+        CHECK(w.poll(3000, 300, 1));   // now reports stop -> a REAL wedge
+        CHECK(w.wedged());
+        CHECK_EQ_U(w.wedge_windows(), 1);
+    }
+
+    // Proof can also arrive at the prime, for a watchdog armed after the
+    // backend was already reporting — otherwise a late arm would spend a
+    // window unable to judge a chip that is plainly completing.
+    {
+        TxWedge w(pol);
+        w.poll(0, 500, 40);  // already reporting when armed
+        CHECK(w.progress_proven());
+        CHECK(w.poll(1000, 600, 40));
+        CHECK(w.wedged());
     }
 
     return wbtest_finish("txwedge_test");
