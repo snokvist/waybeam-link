@@ -6,6 +6,8 @@
 #include <new>
 #include <utility>
 
+#include "wblink/node/snapshot_copy.h"
+
 namespace wblink {
 namespace node {
 
@@ -242,49 +244,27 @@ int RxRuntimeControl::copy_scout(char* buffer, size_t capacity,
 
 int RxRuntimeControl::copy_discovery(char* buffer, size_t capacity,
                                      size_t* required) {
-    if (required == nullptr || (buffer == nullptr && capacity != 0)) return 2;
-
     std::shared_ptr<const std::string> snapshot;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         discovery_snapshot_requested_ = true;
         snapshot = discovery_snapshot_;
     }
-    if (!snapshot) {
-        *required = 0;
-        return 3;
-    }
-    if (snapshot->size() == std::numeric_limits<size_t>::max()) return 1;
-    const size_t need = snapshot->size() + 1;
-    *required = need;
-    if (buffer == nullptr) return capacity == 0 ? 0 : 2;
-    if (capacity < need) return 4;
-    std::memcpy(buffer, snapshot->c_str(), need);
-    return 0;
+    // Contract in snapshot_copy.h (2026-08-14 review); this method owns only
+    // the lock and the request-flag side effect.
+    return copy_snapshot_json(snapshot, buffer, capacity, required);
 }
 
 int RxRuntimeControl::copy_adapters(char* buffer, size_t capacity,
                                     size_t* required) {
-    if (required == nullptr || (buffer == nullptr && capacity != 0)) return 2;
-
     std::shared_ptr<const std::string> snapshot;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        // No request flag: the fields are static per die and the bring-up
-        // publish is the freshest state for the life of the run (Pass 172).
+        // No request flag: the loop republishes on its own ~1 Hz cadence
+        // (Pass 172 review fix — the caps are static but `channel` is live).
         snapshot = adapters_snapshot_;
     }
-    if (!snapshot) {
-        *required = 0;
-        return 3;
-    }
-    if (snapshot->size() == std::numeric_limits<size_t>::max()) return 1;
-    const size_t need = snapshot->size() + 1;
-    *required = need;
-    if (buffer == nullptr) return capacity == 0 ? 0 : 2;
-    if (capacity < need) return 4;
-    std::memcpy(buffer, snapshot->c_str(), need);
-    return 0;
+    return copy_snapshot_json(snapshot, buffer, capacity, required);
 }
 
 int RxRuntimeControl::copy_selection(char* buffer, size_t capacity,

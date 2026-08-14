@@ -51,11 +51,9 @@ belt-and-braces) but are no longer part of any embedder contract — an
 in-process supervisor needs NO root sysfs help, which is what actually
 unblocks the hub's #197 vehicle TX role.
 
-**One residue.** devourer detaches explicitly (not libusb auto-detach),
-so the kernel driver stays detached after exit (measured:
-`Driver=[none]`) until re-plug or manual rebind. A deployment where
-devourer owns the dongle never notices; a bench returning it to the
-kernel driver does so by hand.
+**One residue.** devourer detaches explicitly (not auto-detach), so the
+kernel driver stays detached after exit (measured: `Driver=[none]`) until
+re-plug or manual rebind — invisible where devourer owns the dongle.
 
 **Changed.** No wire, no §15.x — the recovery-loop contract enters
 `rx_node_c.h` / `tx_node_c.h`.
@@ -77,10 +75,13 @@ the RX surface set (0/2/3/4, size query includes NUL, reads stay valid
 after stop until destroy):
 
 - **`wblink_tx_adapters`** — the Pass 172 adapters/caps object, published
-  once at backend bring-up. Closes Pass 172's named TX deferral.
-- **`wblink_tx_status`** — republished at 1 Hz on its own cadence,
-  deliberately independent of `stats.hz` so a node with §15.3 output
-  disabled does not blind its embedder:
+  at bring-up and republished at ~1 Hz (the object carries the LIVE
+  channel — 2026-08-14 review fix). Closes Pass 172's named TX deferral.
+- **`wblink_tx_status`** — republished at 1 Hz, independent of `stats.hz`
+  (stats-off nodes still inform their embedder), and published ONE FINAL
+  TIME on every exit path — the §9.10 wedge exit used to return above the
+  publish site, so a supervisor reading the terminal status after
+  WBLINK_TX_WEDGED recorded a healthy node (2026-08-14 review fix):
   `{"session":N,"channel":N,"csa":"...","claimed":B,"claimed_by":N,
     "mode":{"active":"...","apply_configured":B},
     "wedge":{"enabled":B,"progress_proven":B,"wedged":B,"consecutive":N,
@@ -92,17 +93,15 @@ after stop until destroy):
   mirror §11.4; `channel` is the live channel, CSA/retune included.
 
 **Mechanism.** `TxRuntimeInfo` — the snapshot half of the RX mailbox
-pattern (publish swaps an immutable string under a mutex; the caller only
-copies). Deliberately no command half: TX runtime *control* is a later
-pass, and grafting it here would smuggle an ownership decision this entry
-does not make. `run_tx` gains the runtime-info overload; the 3-arg symbol
-stays as a real symbol and forwards nullptr (the RX precedent).
+pattern (publish swaps an immutable string; the caller only copies).
+Deliberately no command half: TX runtime *control* is a later pass.
+`run_tx` gains the runtime-info overload; the 3-arg symbol stays and
+forwards nullptr (the RX precedent).
 
 **Changed.** No wire, no §15.x surface — the C ABI headers and this entry.
 
-**Evidence.** Coordination sweep item 3 + hub feedback ("the only thing
-between a dead node and a permanently black screen"); Pass 172's deferral
-note; `txwedge.h` accessors (already public, never before surfaced).
+**Evidence.** Coordination sweep item 3 + hub feedback; Pass 172's
+deferral note; `txwedge.h` accessors (public, never before surfaced).
 
 ## Pass 173 — TX gets the device source RX has: `wblink_tx_set_adapter_fds` (2026-08-14)
 

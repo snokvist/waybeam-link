@@ -505,6 +505,25 @@ inline std::string build_adapters_array(const Loaded& l,
     return s;
 }
 
+// §15.5 GET /api/v1/mode and the Pass 174 status snapshot share ONE
+// predicate and ONE object builder. app/main.cpp's hand copy of the
+// predicate drifted once already (it omitted the applier term), which is the
+// whole argument for a single site (2026-08-14 review). `active_mode` is
+// escaped: the §11.7 RF MODE path assigns a raw readdir filename stem, the
+// one route on which a quote can enter it.
+inline bool mode_apply_configured(const std::string& mode_apply_cmd,
+                                  bool have_applier) {
+    return !mode_apply_cmd.empty() && have_applier;
+}
+inline std::string build_mode_json(const std::string& active_mode,
+                                   bool apply_configured) {
+    std::string s = "{\"active\":\"" + json_escape(active_mode) + "\"";
+    s += ",\"apply_configured\":";
+    s += apply_configured ? "true" : "false";
+    s += "}";
+    return s;
+}
+
 // §15.5 GET /info — static identity. Hand-built (no json dep in app/); the
 // field values are numeric or house-controlled strings (no escaping needed).
 inline std::string build_info_json(const Loaded& l, uint32_t session,
