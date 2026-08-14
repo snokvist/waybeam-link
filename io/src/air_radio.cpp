@@ -1260,7 +1260,7 @@ bool RadioAir::set_power_qdb(size_t adapter, int32_t qdb) {
         // request and nothing else would record a power the chip never
         // reached, which is what §10.6/§10.7 rung placement assumes it can
         // trust.
-        wb_logf("radio: adapter \"%s\" power offset %d qdb applied as %d qdb%s",
+        wb_logf("radio: adapter \"%s\" power offset %d qdb applied as %d qdb%s\n",
                 a.name.c_str(), static_cast<int>(qdb),
                 static_cast<int>(a.power_applied_qdb),
                 a.power_saturated_low
