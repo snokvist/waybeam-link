@@ -528,17 +528,12 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                                     tx.calib_stale_, reason, art);
         };
         h.tx_power_json = [&] {
-            const auto ov = tx.power_override();
-            std::string s = "{\"override_active\":";
-            s += ov ? "true" : "false";
-            if (ov) {
-                s += ",\"qdb\":";
-                s += std::to_string(*ov);
-            }
-            s += ",\"backend\":\"";
-            s += l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio" : "udp";
-            s += "\"}";
-            return s;
+            // §10.5 (Pass 169): the craft is the node whose rail was measured
+            // (docs/findings.md 2026-08-14), so this half is the one a ground
+            // stepping power over §11.7 depends on.
+            return build_tx_power_json(
+                tx.power_override(), air.value->tx_power_applied(calib_tx_idx),
+                l.cfg.air.kind == AirCfg::Kind::kRadio);
         };
         // §10.3/§11.7 0x0A (Pass 135). A craft has no bound craft of its own,
         // so `both` is a 409 rather than a silently local-only apply.

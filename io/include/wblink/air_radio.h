@@ -206,6 +206,11 @@ class RadioAir : public AirIface {
     // §10.5 "auto": zero the offset, undoing the latch and leaving any §10.2
     // curve resolve to re-apply on top (§10.5).
     bool set_power_auto(size_t adapter) override;
+    // §10.5 (Pass 169): the actuator's own account of the last write —
+    // devourer's applied offset plus its rail flags, latched AT the apply
+    // because that is what `saturated_low/high` describe. Latching also keeps
+    // this read free of USB, so the §15.5 GET cannot touch the control plane.
+    std::optional<TxPowerApplied> tx_power_applied(size_t adapter) const override;
     // §3.11 (Pass 162): truthful. False on the RX-only bring-up
     // (allow_rx_only, zero role:"tx"), where inject*/set_tx_mode report
     // not-sent/no-op and the §15.3 TX counters stay 0.

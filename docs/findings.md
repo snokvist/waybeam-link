@@ -1136,10 +1136,40 @@ sweep:
 **2299 vs 2350 — 2%.** The craft is 60 MHz away from 5745 and still decodes
 there: measured **-41 dBm** on 5745 against **-11..-18 dBm** on 5805, i.e.
 ~23-30 dB of adjacent-channel rejection, which at 2 m is nowhere near enough
-to stop decoding. Both dwells then run for the same time against a
-continuously transmitting craft, so **the frame count saturates on dwell
-duration rather than on signal**, and the heard-most rule is left picking
-between two near-equal numbers.
+to stop decoding.
+
+**Amended 2026-08-14 — the mechanism above was wrong.** This entry first read
+"both dwells run for the same time against a continuously transmitting craft,
+so the frame count saturates on dwell duration rather than on signal". The
+measurements are unchanged; the reading of them is not. Per
+`third_party/devourer/docs/bench-testing-near-field.md`, the RTL88xx front end
+**starts compressing around -10 to -20 dBm** and is linear around -40 to -70.
+So -11 dBm on 5805 is not "a strong signal"; it is **a receiver in
+compression**, while -41 dBm on 5745 sits in the linear sweet spot — the
+adjacent-channel filter was acting as the 30 dB attenuator the bench did not
+have. The true channel's frame count was not tied, it was **suppressed**, by
+the EVM collapse that overload produces while SNR holds flat (measured in that
+doc's power sweep: SNR 18 dB unchanged from low to full power, EVM -28 -> -13).
+
+The two readings predict different things, and a second case discriminates
+them. **Craft at 5180, ground resting at 5805 (far):** the scout answered
+**5240 on four consecutive sweeps**, rejecting 5180 each time; a fifth sweep
+resolved 5180 and the claim landed at once. Counts-saturate-on-dwell-time
+predicts near-ties with a random winner (case 1 fits). Only
+true-channel-decodes-worse-than-its-own-leakage predicts a **systematic** loss.
+
+We already found this effect on the link path and compensated for it there:
+`io/include/wblink/air_radio.h` Pass 158 — *"PEAK RSSI — saturation trashes a
+fraction of frames to low apparent power, so a mean inverts the signal"*. The
+scout is already peak-shaped (`best_rssi_by_orig` keeps the max), so its RSSI
+is sound even under compression; only the frame count is not.
+
+**Not settled:** case 2's candidate rows appear at **+60 and +120 MHz** but not
+at +20/+40, which no filter skirt produces. An earlier draft of this entry
+guessed that compression explains it by collapsing adjacent-channel rejection;
+the 2026-08-14 power control below **failed to reproduce any bleed at all**, so
+that guess is withdrawn and the shape is unexplained. Re-read the raw sweep JSON
+before treating either the skirt or its span as measured.
 
 **Consequences.** `channel_evidence_valid()` is derived FROM the resolver — a
 channel is valid only if every candidate on it resolves to it — so the loser
@@ -1153,6 +1183,165 @@ the ranking rule is Tier-1-adjacent and this is one chip family on one bench,
 so it wants its own measurement before a rule change. Recorded so the next
 bench does not read it as a claim bug.
 
-**Bench hygiene:** this is a near-field artifact. Separate the craft from the
-ground before trusting a scouted channel, or verify against the craft's own
-`GET /api/v1/info`.
+**What the sensing surface can and cannot contribute** (checked against the
+vendored `third_party/devourer/docs/rx-spectrum-sensing.md`, not from memory):
+the resolver needs **no new devourer call** — `Candidate::rssi_dbm` already
+holds the strongest per-originator, per-channel reading from the scout adapter
+alone. Ruled out for this defect: normalising to a per-dwell absolute noise
+floor (`abs_noise_floor_dbm` is measured **once at bring-up** on Jaguar1 — a
+live read wedges RX — and is never available on Jaguar3, which is both of our
+scout chips); and narrowband 5 MHz sensing (Jaguar3/8821C only, and it cannot
+decode an ANNOUNCE, which is what a candidate *is*). The NHM histogram belongs
+to #173, not here. Per-candidate EVM would need plumbing — `AirRxMeta` carries
+`rssi` only; EVM exists in the per-adapter `RxQualityWindow`.
+
+**Bench hygiene — lower the power, do not (only) add distance.** That doc puts
+free-space loss at ~28 dB at 10 cm and ~57 dB at 3 m, and wants **>=40 dB of
+loss between units**; ten feet in a reflective room is past hard clipping and
+squarely in the multipath-desense regime, so "move it further away" does not
+by itself buy a valid bench. The craft's power is reachable over RF as the
+§11.7 `tx_power` tier (a tier can only ever LOWER power), so drop it to the
+lowest preset and re-sweep. Failing that, verify the channel against the
+craft's own `GET /api/v1/info`.
+
+## 2026-08-14 — the power control: compression proven, adjacent-channel bleed NOT
+
+**Rig:** x86 ground (`.2.242`, 8812AU on bus 8-1, dev build, scout dwell 300 ms
+over 5745/5765/5785/5805/5825) against craft 17 (`.2.232`, 8812EU) transmitting
+video on 5805 under its own supervisor. The craft's §10.5 offset was stepped
+down over `POST /api/v1/tx/power` and restored to `auto` afterwards.
+
+| craft power | RSSI dBm | SNR dB | **EVM dB** | passive noise dBm | 5805 frames |
+|---|---:|---:|---:|---:|---:|
+| auto (run 1) | -8 | 30 | **-13** | -54 | 2047 |
+| auto (run 2) | -8 | 30 | **-15** | -55 | 2042 |
+| -6 dB | -18 | 29 | **-27** | -64 | 3272 |
+| -12 dB | -24 | 27 | -28 | -71 | 2473 |
+| -18 dB | -26 | 25 | -27 | -71 | 2624 |
+| -24 dB | -26 | 25 | -27 | -71 | 3249 |
+| -30 dB | -26 | 25 | -27 | -71 | 2671 |
+
+**Compression at bench range is proven, and it is invisible to SNR.** Backing
+the craft off 6 dB moved SNR by **1 dB** and EVM by **14 dB**. That is the
+`bench-testing-near-field.md` signature exactly, run in reverse: at its default
+power this ground sits well past the saturation knee with a collapsed
+constellation while SNR reports a healthy 30 dB. The passive floor rising 17 dB
+with power (-71 -> -54) is the same doc's self-jamming tell.
+
+**Frame suppression on the true channel: supported, not proven.** The `auto`
+row reproduced to within 5 frames across two runs (2047, 2042) and is the
+**lowest** of all seven points; every backed-off point is 2473-3272. Direction
+consistent, but per-step n=1 and dwell length varies with extension, so this
+corroborates the mechanism rather than measuring it.
+
+**The adjacent-channel half did NOT reproduce — withdraw the ACR-collapse
+reading.** At **no** power, including EVM -13 dB, did any channel other than
+5805 produce a candidate row for craft 17 (`other_chans` empty on all seven
+sweeps). The 2026-08-13 amendment above speculated that compression collapses
+adjacent-channel rejection and so explains case 2's +60/+120 MHz rows; **this
+control does not support that** and it should not be repeated. Compression is
+real and present, but **on this adapter** it does not by itself manufacture a
+neighbouring candidate.
+
+**Read the 8812CU entry below before concluding from this one.** Swapping only
+the ground adapter reproduces the bleed at every power and reproduces the
+one-frame tie itself, so the negative here is a property of the Jaguar1 AU, not
+evidence that the phone's rows were spurious.
+
+**Consequence for the resolver fix.** Unchanged in direction: RSSI still
+separates the cases the phone saw, and peak RSSI stays sound under compression.
+But the "saturated dwell" refusal proposed on #178 must not be justified by the
+bleed story — its justification is that a compressed dwell's *frame count* is
+untrustworthy, which is what the table above shows.
+
+## 2026-08-14 — same run on an 8812CU: the bleed IS reproducible, and it peaks at a mid power
+
+Identical rig, craft and script; only the ground adapter changed, **8812AU
+(Jaguar1, bus 8-1) -> 8812CU (Jaguar3, bus 1-1)**. This is the control the AU
+run could not provide, because the AU never presented a second candidate.
+
+| craft power | RSSI dBm | SNR dB | EVM dB | 5805 frames | **5745 frames** | 5745/5805 |
+|---|---:|---:|---:|---:|---:|---:|
+| auto | -15 | 36 | -18 | 1850 | **67** | 0.04 |
+| -6 dB | -22 | 35 | -31 | 2128 | **2129** | **1.00** |
+| -12 dB | -29 | 35 | -32 | 2656 | 2216 | 0.83 |
+| -18 dB | -31 | 36 | -33 | 2729 | 1631 | 0.60 |
+| -24 dB | -31 | 36 | -33 | 3033 | 1503 | 0.50 |
+| -30 dB | -31 | 36 | -33 | 2328 | 1070 | 0.46 |
+
+**The 2026-08-13 failure reproduced exactly.** At -6 dB the craft, transmitting
+on 5805, was heard **2129 times on 5745 and 2128 times on 5805** — the neighbour
+won the heard-most rule by one frame, against 2299-vs-2350 on the phone.
+
+**It is chip-dependent.** The AU produced **zero** neighbouring candidates at
+every power including EVM -13; the CU produces them at every power. The
+2026-08-13 entry's "the craft is 60 MHz away and still decodes there" is
+therefore a property of that receiver, not of the range.
+
+**The bleed is NON-MONOTONIC in power, which no filter skirt explains.** It is
+*lowest* at the highest power (0.04), peaks at -6 dB (1.00), then falls away. A
+constant-ratio skirt plus a decode threshold gives a monotone decline; it cannot
+put the minimum at maximum power. The mid-power peak is where the leakage lands
+inside the receiver's linear window — above it the 5745 dwell is itself
+overloaded and decodes badly, below it the leakage fades. So the earlier ACR
+guess was wrong in mechanism but the right family: **overload governs the
+neighbour dwell too**, and it suppresses rather than creates its decodes.
+
+**Why the sweep still resolved correctly here.** `candidate_for()`'s 80%
+resting-channel tie-break caught it: this ground rests on 5805 with
+`preferred_originator: 17`, so the trusted prior returned the resting channel
+despite 5745 leading on frames. That is exactly why #178 case 2 failed and case
+1 mostly did not — there the ground rested on 5805 while the craft was at 5180,
+so the prior was WRONG and the rule fell through to heard-most. **The tie-break
+is load-bearing, and it only works when the ground is already resting on the
+right channel.**
+
+## 2026-08-14 — the craft's TX power rails below ~-12 dB of commanded offset
+
+Two different receivers agree, so this is the transmitter, not a reporting
+artifact. Commanded offset vs RSSI: **AU** -18, -24, -26, -26, -26; **CU** -22,
+-29, -31, -31, -31 for -6, -12, -18, -24, -30 dB. Both track ~6-7 dB per 6 dB
+commanded down to -12 dB, gain ~2 dB more by -18, then stop dead. EVM and SNR
+flatten at the same point.
+
+**Mechanism, from the vendored source.** devourer's model is
+`effective = clamp(baseline + offset_steps, 0, index_max)`
+(`third_party/devourer/src/TxPower.h:17`) — the TXAGC index rails at 0. It
+reports both halves: `SetTxPowerOffsetQdb` **returns the qdb it actually
+applied**, and `GetTxPowerState` carries `saturated_low` / `saturated_high`,
+documented as *"the signal a closed-loop controller uses to know the knob has
+run out of travel"*.
+
+**We read neither.** `RadioAir::set_power_qdb` (`io/src/air_radio.cpp:1226`)
+discards the return with `(void)` and its own comment says so — *"devourer
+returns the qdb it applied; no caller has ever read it"* — and `saturated_low`
+appears nowhere in the tree. `GET /api/v1/tx/power` answers
+`{"override_active":false,"backend":"radio"}`, i.e. commanded state only.
+
+So §10.5 reports success for an offset the chip never reached, and §10.6/§10.7
+calibration places rungs on the assumption that the commanded rung is the
+delivered one. Filed separately.
+
+**Confirmed directly 2026-08-14 (Pass 169 / #181), and the rail is where the
+RSSI said.** With the flags plumbed through §15.5, each unit was asked where
+its own rail is instead of the rail being inferred from a plateau:
+
+| unit | family | `index_max` | step | offset-range clamp | **per-rate rail (`saturated_low`)** |
+|---|---|---:|---:|---|---|
+| 8812AU ground | Jaguar1 | 63 | 2 qdb | -126 qdb (-63 steps) | not bisected |
+| 8812CU ground | Jaguar3 | 127 | 1 qdb | -127 qdb (-127 steps) | **-41 qdb (-10.25 dB)** |
+| 8822EU craft | Jaguar3 | 127 | 1 qdb | -127 qdb | **-64 qdb (-16 dB)** |
+
+The craft's -16 dB lands inside the -12..-18 dB window the two-receiver RSSI
+plateau bracketed, by a completely independent method. The AU and CU reaching
+their offset-range clamp at -126 and -127 through different arithmetic (63x2
+against 127x1) is the cross-family check that the reporting is not echoing a
+constant.
+
+**There are TWO rails, and the issue emphasised the wrong one.** The
+offset-range clamp is what makes `applied_qdb != qdb`. The per-rate TXAGC rail
+sets `saturated_low` **while `applied_qdb` still equals the request exactly** —
+on the craft the flag fires at -64 while applied tracked the request all the
+way to -126. A consumer diffing request against applied would have seen
+perfect agreement across the entire dead region. **`applied_qdb` alone would
+not have caught the floor this finding is about; the flag is the signal.**

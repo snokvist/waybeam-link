@@ -441,6 +441,11 @@ struct AirBackend {
     void set_power_auto(size_t adapter) {
         (void)iface()->set_power_auto(adapter);
     }
+    // §10.5 (Pass 169) what the actuator took, beside what was asked for.
+    std::optional<AirIface::TxPowerApplied> tx_power_applied(
+        size_t adapter) const {
+        return iface()->tx_power_applied(adapter);
+    }
     std::optional<uint64_t> read_tsf(uint8_t adapter) {
         if (!aim_log_enabled()) {
             return iface()->read_tsf(adapter);

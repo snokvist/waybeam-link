@@ -496,6 +496,37 @@ inline std::string build_info_json(const Loaded& l, uint32_t session,
     return s;
 }
 
+// §15.5 GET /api/v1/tx/power. One builder for both roles: the craft and the
+// ground answer the same path with the same schema, and before Pass 169 they
+// answered it from two hand-rolled copies.
+//
+// `applied` is the ACTUATOR's account (§10.5), which is a different question
+// from `override_qdb` — the latch is what was asked for, `applied_qdb` is what
+// the chip took, and they diverge once a relative backend's TXAGC index rails.
+// Absent when nothing has been written, so a reader can distinguish "nothing
+// applied yet" from "applied 0".
+inline std::string build_tx_power_json(
+    const std::optional<int32_t>& override_qdb,
+    const std::optional<AirIface::TxPowerApplied>& applied,
+    bool radio_backend) {
+    std::string s = "{\"override_active\":";
+    s += override_qdb ? "true" : "false";
+    if (override_qdb) {
+        s += ",\"qdb\":" + std::to_string(*override_qdb);
+    }
+    if (applied) {
+        s += ",\"applied_qdb\":" + std::to_string(applied->qdb);
+        s += ",\"saturated_low\":";
+        s += applied->saturated_low ? "true" : "false";
+        s += ",\"saturated_high\":";
+        s += applied->saturated_high ? "true" : "false";
+    }
+    s += ",\"backend\":\"";
+    s += radio_backend ? "radio" : "udp";
+    s += "\"}";
+    return s;
+}
+
 // §15.5 GET /health — terse link summary from the freshest snapshot.
 inline std::string build_health_json(const StatsSnapshot& snap) {
     int32_t rssi_best = 0;
