@@ -75,7 +75,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "WBLINK_WERROR": "ON",
         "WBLINK_BUILD_TESTS": "OFF",
-        "WBLINK_DEVOURER_CHIPS": "fleet"
+        "WBLINK_DEVOURER_CHIPS": "8733b"
       }
     },
     {
