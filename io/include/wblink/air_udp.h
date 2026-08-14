@@ -104,6 +104,13 @@ class UdpAir : public AirIface {
     bool set_power_qdb(size_t adapter, int32_t qdb) override;
     bool set_power_offset_qdb(size_t adapter, int32_t qdb) override;
     bool set_power_auto(size_t adapter) override;
+    // §10.5 (Pass 169): no actuator, so nothing can rail and there is no
+    // applied value distinct from the request. Written down rather than
+    // inherited from a default — the whole point of this contract.
+    std::optional<TxPowerApplied> tx_power_applied(
+        size_t /*adapter*/) const override {
+        return std::nullopt;
+    }
     // No PHY: there is no rate to stamp and no hardware clock to read.
     void set_tx_mode(uint8_t /*mcs*/, bool /*sgi*/) override {}
     void set_mcs_probe(uint16_t, uint16_t, uint8_t) override {}  // no PHY

@@ -907,6 +907,12 @@ class FakeAir : public AirIface {
         return true;
     }
     bool set_power_auto(size_t) override { return true; }
+    // §10.5 (Pass 169): programmable, like power_offsets above, so a test can
+    // stage a railed actuator without a radio.
+    std::optional<TxPowerApplied> applied_power;
+    std::optional<TxPowerApplied> tx_power_applied(size_t) const override {
+        return applied_power;
+    }
     std::optional<uint64_t> read_tsf(size_t) override { return std::nullopt; }
     void set_tx_mode(uint8_t, bool) override {}
     void set_mcs_probe(uint16_t, uint16_t, uint8_t) override {}

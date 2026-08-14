@@ -23,6 +23,7 @@
 #include "LinkHealth.h"  // §3.16 Pass 159: the vendored verdict thresholds
 #include "SelectedChannel.h"
 #include "TxMode.h"
+#include "TxPower.h"  // §10.5 Pass 169: TxPowerState's rail flags
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "logger.h"
@@ -110,6 +111,16 @@ struct RadioAir::Impl {
         libusb_device_handle* handle = nullptr;
         std::shared_ptr<devourer::UsbDeviceLock> lock;
         std::unique_ptr<IRtlDevice> dev;
+        // §10.5 (Pass 169): the actuator's account of the last power write,
+        // latched at the apply because that is the moment devourer's rail
+        // flags describe. Main-thread-owned — every power write and the §15.5
+        // read both run on the event loop, and the RX threads never touch
+        // TXAGC — so no atomics. `valid` stays false until a write happens,
+        // so a node that never wrote power reports nothing rather than 0.
+        bool power_applied_valid = false;
+        int32_t power_applied_qdb = 0;
+        bool power_saturated_low = false;
+        bool power_saturated_high = false;
         std::thread rx_thread;
         // RX-thread-owned counters (relaxed atomics; read from stats).
         std::atomic<uint64_t> rx_frames{0};
@@ -1227,12 +1238,45 @@ bool RadioAir::set_power_qdb(size_t adapter, int32_t qdb) {
     if (adapter >= impl_->adapters.size()) {
         return false;
     }
-    // devourer returns the qdb it applied; no caller has ever read it, and
-    // §10.5's bool means "the backend accepted the write", which an
-    // in-process offset always does.
-    (void)impl_->adapters[adapter]->dev->SetTxPowerOffsetQdb(
-        static_cast<int>(qdb));
+    // §10.5's bool still means "the backend accepted the write", which an
+    // in-process offset always does. What it CANNOT mean is that the chip
+    // moved: devourer folds the offset into a TXAGC index and clamps it —
+    // effective = clamp(baseline + steps, 0, index_max) — so once the index
+    // rails at 0, every further step commands the same power and every write
+    // still succeeds. Measured 2026-08-14 (docs/findings.md): a craft stopped
+    // responding below ~-12 dB of commanded offset while 18 dB of the
+    // commanded range reported success. So keep what devourer returns — the
+    // APPLIED qdb — and latch the rail flags it sets at the same apply.
+    Impl::Adapter& a = *impl_->adapters[adapter];
+    a.power_applied_qdb =
+        static_cast<int32_t>(a.dev->SetTxPowerOffsetQdb(static_cast<int>(qdb)));
+    const devourer::TxPowerState st = a.dev->GetTxPowerState();
+    a.power_saturated_low = st.valid && st.saturated_low;
+    a.power_saturated_high = st.valid && st.saturated_high;
+    a.power_applied_valid = true;
+    if (a.power_applied_qdb != qdb || a.power_saturated_low ||
+        a.power_saturated_high) {
+        // Not a failure — the write landed. But a caller that logged the
+        // request and nothing else would record a power the chip never
+        // reached, which is what §10.6/§10.7 rung placement assumes it can
+        // trust.
+        wb_logf("radio: adapter \"%s\" power offset %d qdb applied as %d qdb%s\n",
+                a.name.c_str(), static_cast<int>(qdb),
+                static_cast<int>(a.power_applied_qdb),
+                a.power_saturated_low
+                    ? " (TXAGC railed LOW — no further reduction available)"
+                    : (a.power_saturated_high ? " (TXAGC railed HIGH)" : ""));
+    }
     return true;
+}
+
+std::optional<AirIface::TxPowerApplied> RadioAir::tx_power_applied(
+    size_t adapter) const {
+    if (adapter >= impl_->adapters.size()) return std::nullopt;
+    const Impl::Adapter& a = *impl_->adapters[adapter];
+    if (!a.power_applied_valid) return std::nullopt;
+    return TxPowerApplied{a.power_applied_qdb, a.power_saturated_low,
+                          a.power_saturated_high};
 }
 
 // §10.5 (Pass 150): devourer's native lever already IS the relative one —
