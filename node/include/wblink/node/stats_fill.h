@@ -515,11 +515,19 @@ inline std::string build_tx_power_json(
         s += ",\"qdb\":" + std::to_string(*override_qdb);
     }
     if (applied) {
-        s += ",\"applied_qdb\":" + std::to_string(applied->qdb);
-        s += ",\"saturated_low\":";
-        s += applied->saturated_low ? "true" : "false";
-        s += ",\"saturated_high\":";
-        s += applied->saturated_high ? "true" : "false";
+        // §10.5 (Pass 171): `actuator` is stated, never inferred. Absence of
+        // the three below already means "no write yet", so a chip with no
+        // lever cannot be signalled by omission alone — it needs a value.
+        s += ",\"actuator\":\"";
+        s += applied->actuator ? "offset" : "none";
+        s += "\"";
+        if (applied->actuator) {
+            s += ",\"applied_qdb\":" + std::to_string(applied->qdb);
+            s += ",\"saturated_low\":";
+            s += applied->saturated_low ? "true" : "false";
+            s += ",\"saturated_high\":";
+            s += applied->saturated_high ? "true" : "false";
+        }
     }
     s += ",\"backend\":\"";
     s += radio_backend ? "radio" : "udp";

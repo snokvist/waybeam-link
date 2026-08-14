@@ -133,10 +133,19 @@ class AirIface {
     // succeeds. `qdb` is the offset the chip carries; `saturated_low/high`
     // say the last apply clamped at least one rate at a rail. nullopt on a
     // backend with no power actuator, or before any write.
+    //
+    // §10.5 (Pass 171): `actuator` is the one field that answers BEFORE any
+    // write, because it is a static per-die capability rather than a result.
+    // When it is false the other three carry nothing — a chip with no lever
+    // answers every offset request with 0, which is byte-identical to a
+    // successful zero-offset apply, and reports no rail while having no
+    // travel at all. Measured on an RTL8733BU (docs/findings.md 2026-08-14):
+    // 18 dB of commanded offset aired nothing, every write reporting success.
     struct TxPowerApplied {
         int32_t qdb = 0;
         bool saturated_low = false;
         bool saturated_high = false;
+        bool actuator = true;
     };
     virtual std::optional<TxPowerApplied> tx_power_applied(
         size_t adapter) const = 0;

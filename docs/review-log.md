@@ -24,6 +24,47 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 171 — an adapter with no power actuator announces and keeps flying, but never reports success (2026-08-14)
+
+**Ruling (operator, 2026-08-14).** A node whose `role:"tx"` adapter has no
+TX-power actuator **starts**. It announces the fact once at bring-up, reports
+it as a stated value, and refuses every operation that would otherwise return
+success for a move the chip cannot make. It does not refuse to fly.
+
+**Changed §10.5** (new bullet, plus the §15.5 rows for `GET`/`POST
+/api/v1/tx/power` and `POST /api/v1/calibration`).
+
+**Why.** Pass 169 covers a lever out of travel; this covers one never
+connected. devourer answers an unsupported knob with **0**, which is
+byte-identical to a successful zero-offset apply, and reports no rail while
+having no travel — so `applied_qdb:0, saturated_low:false` reads exactly like
+health on the field §10.5 itself calls load-bearing. `GetTxPowerCaps().supported`
+is the static per-die discriminator and nothing read it.
+
+**Why the node still flies.** The chip is not at an *unknown* power: devourer
+pins the 8733B at `kSafeTssiTargetQdbm8733b` (16 dBm) or the flat safe index.
+§10.2's "no adapter may run at an uncharacterised power" is therefore not
+breached — reporting integrity was, and that is what this amends. Refusing to
+start would ground a board's only link and buy nothing announcing does not.
+
+**Surface.** `actuator` ∈ `offset`|`none` on `GET /api/v1/tx/power`, always
+present because omission is already taken (it means "no write yet"); `none`
+omits the three Pass 169 fields, 400s a `qdb` POST, and refuses a §10.6/§10.7
+calibration start. `{"auto":true}` still succeeds.
+
+**Evidence.** `docs/findings.md` 2026-08-14 — CV610 + RTL8733BU: 18 dB of
+commanded offset aired **nothing**, EVM flat at −22 across every rung, every
+POST `{"ok":true}`. Matched positive control on the same receiver minutes
+earlier: an 8822EU moved 5.6 dB of air for a 6 dB command, then railed with
+`saturated_low`. Root cause certain from source — `Rtl8733bDevice` overrides
+none of the `IRtlDevice` power family, so the call reaches
+`IRtlDevice.h:134`'s `(void)qdb; return 0;` and no register is written.
+Upstream tracked at `snokvist/devourer#1`.
+
+**Not taken.** Modelling it as a failed actuator write. `resolve_and_apply_power`
+caches only on success, so a `false` would re-attempt the same dead write at
+every profile commit for the life of the node.
+
 ## Pass 170 — a §9.10 wedge presupposes progress, so the verdict needs proof of it (2026-08-14)
 
 **Ruling (operator, 2026-08-14).** The TX-wedge verdict is withheld until this

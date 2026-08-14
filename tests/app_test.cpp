@@ -437,6 +437,48 @@ void test_relative_sweep_stays_inside_the_offset_window() {
     }
 }
 
+// §10.6 (Pass 171): a wired actuator hook is not a working lever. On a chip
+// with no TXAGC knob every rung of the sweep commands the SAME power, so the
+// seek reads flat, the run "succeeds", and the artifact it persists is then
+// believed by the resolve, by a pairing pass and by the next boot. Refuse the
+// start instead. Measured shape: an RTL8733BU took 18 dB of commanded offset
+// and aired none of it (docs/findings.md 2026-08-14).
+//
+// BOTH arms are the test. Everything about the two nodes is identical except
+// set_power_actuator, so the accept arm fails if the guard refuses a healthy
+// node and the refuse arm fails if the guard is deleted — neither can pass by
+// agreeing with itself.
+void test_calibration_start_refuses_a_chip_with_no_power_actuator() {
+    auto start_calibration_on = [](bool actuator) {
+        Config c = one_tx_config(108, {});
+        c.adapters[0].power_offset_qdb = -24;
+        c.adapters[0].power_offset_max_qdb = 0;
+        auto tx = std::make_unique<TxCore>(c, 1, nullptr, 0);
+        tx->set_backend_relative(true);
+        tx->apply_power_offset = [](size_t, int32_t) { return true; };
+        tx->set_power_actuator(actuator);
+        CalibrationPolicy pol;
+        pol.settle_ms = 100;
+        pol.dwell_probe_frames = 20;
+        pol.dwell_verify_frames = 40;
+        pol.probe_pace_us = 100;
+        pol.tally_wait_ms = 20;
+        pol.tally_retries = 2;
+        tx->init_calibration(pol, c.adapters[0].max_power_qdb);
+        // §10.6 needs a latched reporter — the loop is blind without §3.5
+        // reports, and without this both arms would refuse for that reason
+        // instead and the test would prove nothing.
+        tx->report_authority_set(9, 1000);
+        // The §10.5 window is what a sweep walks, so pin that it EXISTS in
+        // both arms: a guard that worked by emptying the window would be a
+        // different mechanism wearing this one's name.
+        CHECK(tx->offset_window().has_value());
+        return tx->apply_command(vcmd_id::kCalibrate, 1, 1000);
+    };
+    CHECK(start_calibration_on(true));    // healthy lever: the run starts
+    CHECK(!start_calibration_on(false));  // no lever: refused, not swept
+}
+
 // §10.3/§11.7 0x0A (Pass 151 → Pass 166). Pass 151 REJECTED a tier on a
 // relative backend because `power_presets_qdb` are ABSOLUTE qdb and installing
 // one (60..108) as the clamp on an OFFSET resolve replaces the §10.5 bound
@@ -1136,5 +1178,6 @@ int main() {
     test_rx_frames_total_sums_through_the_contract();
     test_is_radio_follows_the_backend();
     test_heartbeat_suppressed_without_tx_on_any_backend();
+    test_calibration_start_refuses_a_chip_with_no_power_actuator();
     return wbtest_finish("app_test");
 }

@@ -1660,6 +1660,15 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                 if (qdb < -511 || qdb > 511) {
                     return "qdb out of range (-511..511)";
                 }
+                // §10.5 (Pass 171): refuse rather than return 200 for a move
+                // the chip cannot make. After the `auto` branch on purpose —
+                // clearing a latch is meaningful whatever the hardware does.
+                const auto ap = air.value->tx_power_applied(uplink_idx);
+                if (ap && !ap->actuator) {
+                    return "this node's uplink adapter has no TX-power "
+                           "actuator (§10.5); the offset would report applied "
+                           "and move nothing";
+                }
                 // §10.5 (Pass 151): the bound follows the space, because the
                 // latch flows into UplinkPower::apply_qdb — which is the
                 // RELATIVE actuator once `uplink_relative`. Unbounded there, a
@@ -1891,6 +1900,16 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                 }
                 if (uplink_adapter == nullptr) {
                     return "no designated role:\"tx\" uplink adapter";
+                }
+                // §10.5/§10.7 (Pass 171): a run walks rungs in offset space
+                // and attributes what the air did to the knob. On a chip with
+                // no knob every rung commands the same power, so the seek
+                // reads flat and PERSISTS noise as an artifact — which every
+                // later resolve, pairing pass and boot then believes. Refuse.
+                if (const auto ap = air.value->tx_power_applied(uplink_idx);
+                    ap && !ap->actuator) {
+                    return "uplink adapter has no TX-power actuator (§10.5) — "
+                           "a calibration would persist noise as an artifact";
                 }
                 if (active_selection.originator == 0 ||
                     selected_craft_session == 0) {
