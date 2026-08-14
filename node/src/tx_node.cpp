@@ -93,6 +93,7 @@
 #include "wblink/node/rx_core.h"
 #include "wblink/node/stats_fill.h"
 #include "wblink/node/tx_core.h"
+#include "wblink/node/tx_runtime_info.h"
 #include "wblink/node/uplink_power.h"
 #include "wblink/node/vcmd.h"
 
@@ -105,10 +106,21 @@ namespace node {
 
 int run_tx(const Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply) {
+    return run_tx(l, stop, mode_apply, nullptr);
+}
+
+int run_tx(const Loaded& l, const std::atomic<int>& stop,
+           const ModeApplyFn& mode_apply, TxRuntimeInfo* runtime_info) {
     auto air = AirBackend::create(l.cfg);
     if (!air) {
         std::fprintf(stderr, "air error: %s\n", air.error.c_str());
         return 1;
+    }
+    // §15.5 (Pass 172/174): publish the per-die capability answers the moment
+    // the backend can state them — the same one-builder object /info serves.
+    if (runtime_info != nullptr) {
+        runtime_info->publish_adapters(
+            "{\"adapters\":" + build_adapters_array(l, &*air.value) + "}");
     }
     PacketEventTrace packet_trace("tx");
     air.value->set_packet_trace(&packet_trace);
@@ -329,6 +341,10 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
     StatsEmitter emitter(l.cfg.stats.to_stdout, bindings.value->stats_egress());
     const uint64_t t0 = now_ms();
     uint64_t next_stats = t0;
+    // Pass 174: the status snapshot's own cadence, deliberately independent
+    // of stats.hz so a node with §15.3 output disabled still informs its
+    // embedder.
+    uint64_t next_status = t0;
     const uint64_t stats_period =
         l.cfg.stats.hz > 0 ? static_cast<uint64_t>(1000.0 / l.cfg.stats.hz)
                            : 0;
@@ -1071,6 +1087,36 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                              wedge.consecutive_wedged());
                 return kTxWedged;
             }
+        }
+        // Pass 174: the embedder-facing status snapshot. Every field keeps
+        // its existing semantics — mode mirrors §15.5 GET /mode, wedge
+        // mirrors §9.10 (progress_proven makes an inert watchdog visible,
+        // Pass 170's REPORTED-not-silent condition), claimed/claimed_by
+        // mirror §11.4.
+        if (runtime_info != nullptr && now >= next_status) {
+            const std::optional<uint16_t> latched = csa.latched_issuer();
+            std::string s = "{\"session\":" + std::to_string(session);
+            s += ",\"channel\":" + std::to_string(cur_chan);
+            s += ",\"csa\":\"" + std::string(csa.state_str()) + "\"";
+            s += ",\"claimed\":";
+            s += latched.has_value() ? "true" : "false";
+            s += ",\"claimed_by\":" + std::to_string(latched.value_or(0));
+            s += ",\"mode\":{\"active\":\"" + active_mode + "\"";
+            s += ",\"apply_configured\":";
+            s += (l.cfg.venc.mode_apply_cmd.empty() || !mode_apply) ? "false"
+                                                                    : "true";
+            s += "},\"wedge\":{\"enabled\":";
+            s += wedge.enabled() ? "true" : "false";
+            s += ",\"progress_proven\":";
+            s += wedge.progress_proven() ? "true" : "false";
+            s += ",\"wedged\":";
+            s += wedge.wedged() ? "true" : "false";
+            s += ",\"consecutive\":" +
+                 std::to_string(wedge.consecutive_wedged());
+            s += ",\"windows\":" + std::to_string(wedge.wedge_windows());
+            s += "}}";
+            runtime_info->publish_status(std::move(s));
+            next_status = now + 1000;
         }
         if (control) {
             control->service(now);

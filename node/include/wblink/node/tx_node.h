@@ -75,10 +75,19 @@ static_assert(std::atomic<int>::is_always_lock_free,
               "run_tx's stop flag is documented as safe to set from a signal "
               "handler; that is only true while std::atomic<int> is lock-free");
 
+class TxRuntimeInfo;
+
 // Blocks until `stop` is set or the loop gives up. Owns no process: it does
 // not exit, fork, or install a signal handler. See the header note above.
 int run_tx(const Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply = {});
+
+// Runtime-info overload (Pass 174): the loop publishes immutable status and
+// adapters/caps snapshots into the mailbox for in-process consumers. The
+// overload above remains a real symbol for existing embedders and forwards
+// here with nullptr.
+int run_tx(const Loaded& l, const std::atomic<int>& stop,
+           const ModeApplyFn& mode_apply, TxRuntimeInfo* runtime_info);
 
 }  // namespace wblink::node
 

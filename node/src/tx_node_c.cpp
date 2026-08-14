@@ -11,6 +11,7 @@
 
 #include "wblink/node/load.h"
 #include "wblink/node/tx_node.h"
+#include "wblink/node/tx_runtime_info.h"
 
 // Same shape as `wblink_rx`, and for the same two reasons: a C caller cannot
 // name std::atomic<int>, and a handle must refuse a second run rather than
@@ -22,6 +23,9 @@ struct wblink_tx {
     // `used` check in the setter is best-effort DETECTION of a violated
     // call-before-run contract, not a barrier.
     std::vector<int> adapter_fds;
+    // Cross-thread status/adapters surface (Pass 174). The caller only
+    // copies immutable strings; run_tx alone publishes.
+    wblink::node::TxRuntimeInfo runtime_info;
 };
 
 // The status space is `run_tx`'s (0/1/2) plus this shim's negatives; the two
@@ -107,11 +111,24 @@ int wblink_tx_run(wblink_tx* tx, const char* config_path,
     // undefined rather than merely bad. std::bad_alloc is always reachable, and
     // here so is anything the caller's own callback throws back through us.
     try {
-        return wblink::node::run_tx(loaded, tx->stop, mode_apply);
+        return wblink::node::run_tx(loaded, tx->stop, mode_apply,
+                                    &tx->runtime_info);
     } catch (...) {
         std::fprintf(stderr, "wblink_tx_run: unhandled C++ exception\n");
         return WBLINK_TX_ERROR;
     }
+}
+
+int wblink_tx_adapters(wblink_tx* tx, char* buffer, size_t capacity,
+                       size_t* required) {
+    if (tx == nullptr) return 2;
+    return tx->runtime_info.copy_adapters(buffer, capacity, required);
+}
+
+int wblink_tx_status(wblink_tx* tx, char* buffer, size_t capacity,
+                     size_t* required) {
+    if (tx == nullptr) return 2;
+    return tx->runtime_info.copy_status(buffer, capacity, required);
 }
 
 void wblink_tx_destroy(wblink_tx* tx) { delete tx; }

@@ -99,6 +99,10 @@ add_wb_test(rx_runtime_control_test wblink_io wblink_node)
 add_wb_test(node_air_backend_test wblink_io wblink_node)
 add_wb_test(node_tx_core_test wblink_io wblink_node)
 add_wb_test(node_uplink_power_test wblink_io wblink_node)
+# TxRuntimeInfo is header-only and part of the RX-half of the archive's
+# include set, so this runs in EVERY build — including receive-only ones
+# where the wblink_tx_* symbols that feed it do not exist (Pass 174).
+add_wb_test(tx_runtime_info_test wblink_io wblink_node)
 
 # The TX C ABI (#109 Phase 3). Guarded on the same condition the top-level
 # CMakeLists uses to compile the TX half into wblink_node at all: run_tx needs
