@@ -434,6 +434,77 @@ inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
 // three objects (`Loaded`, `AirBackend`, `StatsSnapshot`), so they belong
 // beside it rather than in a header of their own.
 
+// Minimal JSON string escape for the few fields whose value is NOT
+// house-controlled: config adapter names are checked only for
+// non-emptiness/uniqueness (config.cpp), and a §11.7 MODE label is a readdir
+// filename stem — either can carry a quote or backslash that would break
+// every consumer of the hand-built JSON (2026-08-14 review finding). Control
+// characters are dropped rather than \u-encoded: no legitimate name has any.
+inline std::string json_escape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (const char c : in) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += c;
+        } else if (static_cast<unsigned char>(c) >= 0x20) {
+            out += c;
+        }
+    }
+    return out;
+}
+
+// §15.5 (Pass 172) the adapters[] array, shared by /info and the C ABI
+// snapshot (wblink_rx_adapters) so the two surfaces cannot drift — one
+// builder is the whole mechanism that keeps every consumer shape reading
+// the same answer.
+inline std::string build_adapters_array(const Loaded& l,
+                                        const AirBackend* air) {
+    std::string s = "[";
+    bool first = true;
+    for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+        const AdapterCfg& a = l.cfg.adapters[i];
+        if (!first) s += ',';
+        first = false;
+        // Live channel, not the boot config: a CSA switch, a craft-local
+        // retune (§15.5 Pass 113) or a scout sweep all move adapters without
+        // touching cfg. On the ground this is the ONLY channel in the object —
+        // there is no top-level `channel` outside the TX self-state — so a
+        // stale value here is the whole answer, not a detail.
+        const uint16_t chan =
+            (air != nullptr && i < air->chan_by_adapter.size())
+                ? air->chan_by_adapter[i]
+                : a.channel_mhz;
+        s += "{\"name\":\"" + json_escape(a.name) + "\",\"role\":\"";
+        s += (a.role == Role::kTx ? "tx" : "rx");
+        s += "\",\"channel\":" + std::to_string(chan);
+        // §15.5 (Pass 154): the per-unit EFUSE identity the §10.6 artifacts
+        // key on; null where the backend reports none (D3 posture visible).
+        const std::string mac =
+            air != nullptr ? air->adapter_mac(i) : std::string{};
+        s += ",\"mac\":";
+        s += mac.empty() ? "null" : "\"" + mac + "\"";
+        // §15.5 (Pass 172): the per-die capability answers, stated even with
+        // no backend (a /info served before bring-up) — then they carry the
+        // contract's defaults: chip "unknown", every flag false. Absence is
+        // already taken (pre-172 payloads), so a reader never infers a
+        // capability from a missing key.
+        const AirIface::AdapterCapsView caps =
+            air != nullptr ? air->adapter_caps(i)
+                           : AirIface::AdapterCapsView{};
+        s += ",\"chip\":\"" + caps.chip + "\"";
+        s += ",\"power_actuator\":";
+        s += caps.power_actuator ? "true" : "false";
+        s += ",\"ldpc_rx_flag\":";
+        s += caps.ldpc_rx_flag ? "true" : "false";
+        s += ",\"fastretune\":";
+        s += caps.fastretune ? "true" : "false";
+        s += "}";
+    }
+    s += "]";
+    return s;
+}
+
 // §15.5 GET /info — static identity. Hand-built (no json dep in app/); the
 // field values are numeric or house-controlled strings (no escaping needed).
 inline std::string build_info_json(const Loaded& l, uint32_t session,
@@ -457,33 +528,7 @@ inline std::string build_info_json(const Loaded& l, uint32_t session,
         s += (st.bind.kind == BindKind::kFrameShm ? "frame-shm" : "udp");
         s += "\"}";
     }
-    s += "],\"adapters\":[";
-    first = true;
-    for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
-        const AdapterCfg& a = l.cfg.adapters[i];
-        if (!first) s += ',';
-        first = false;
-        // Live channel, not the boot config: a CSA switch, a craft-local
-        // retune (§15.5 Pass 113) or a scout sweep all move adapters without
-        // touching cfg. On the ground this is the ONLY channel in the object —
-        // there is no top-level `channel` outside the TX self-state — so a
-        // stale value here is the whole answer, not a detail.
-        const uint16_t chan =
-            (air != nullptr && i < air->chan_by_adapter.size())
-                ? air->chan_by_adapter[i]
-                : a.channel_mhz;
-        s += "{\"name\":\"" + a.name + "\",\"role\":\"";
-        s += (a.role == Role::kTx ? "tx" : "rx");
-        s += "\",\"channel\":" + std::to_string(chan);
-        // §15.5 (Pass 154): the per-unit EFUSE identity the §10.6 artifacts
-        // key on; null where the backend reports none (D3 posture visible).
-        const std::string mac =
-            air != nullptr ? air->adapter_mac(i) : std::string{};
-        s += ",\"mac\":";
-        s += mac.empty() ? "null" : "\"" + mac + "\"";
-        s += "}";
-    }
-    s += "]";
+    s += "],\"adapters\":" + build_adapters_array(l, air);
     if (self != nullptr) {  // Pass 113 TX self state
         s += ",\"channel\":" + std::to_string(self->channel_mhz);
         s += ",\"psk_announced\":";

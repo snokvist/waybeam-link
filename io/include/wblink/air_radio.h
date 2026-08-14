@@ -211,6 +211,9 @@ class RadioAir : public AirIface {
     // because that is what `saturated_low/high` describe. Latching also keeps
     // this read free of USB, so the §15.5 GET cannot touch the control plane.
     std::optional<TxPowerApplied> tx_power_applied(size_t adapter) const override;
+    // §15.5 (Pass 172): the per-die answers, cached at bring-up beside
+    // ldpc_flag_ok/power_actuator_ok so this read never touches USB.
+    AdapterCapsView adapter_caps(size_t adapter) const override;
     // §3.11 (Pass 162): truthful. False on the RX-only bring-up
     // (allow_rx_only, zero role:"tx"), where inject*/set_tx_mode report
     // not-sent/no-op and the §15.3 TX counters stay 0.

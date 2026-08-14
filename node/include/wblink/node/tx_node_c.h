@@ -75,7 +75,9 @@ enum {
  * Called SYNCHRONOUSLY from the flight loop, so it MUST NOT BLOCK — applying a
  * mode restarts venc, which takes seconds. `app/main.cpp`'s implementation
  * double-forks and returns immediately; a consumer that cannot spawn processes
- * should pass NULL rather than block here.
+ * should pass NULL rather than block here. The flight loop is the thread that
+ * called wblink_tx_run — no dispatch thread exists, so every apply arrives on
+ * that one thread for the life of the run (Pass 172).
  *
  * NEITHER POINTER OUTLIVES THE CALL — the same rule `wblink_frame_cb` states
  * for its frame, and it needs saying twice as loudly here because the two

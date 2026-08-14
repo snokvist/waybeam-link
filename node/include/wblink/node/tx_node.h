@@ -46,6 +46,9 @@ inline std::string mode_catalog_dir(const wblink::VencCfg& venc) {
 // Apply an operating mode by name (§15.5 / §11.7 0x07). Returns false if the
 // mode could not be applied. Called from the flight loop, so it MUST NOT
 // block — the app-side implementation double-forks and returns immediately.
+// The flight loop is the thread that called run_tx (Pass 172 threading
+// contract): no dispatch thread exists, so every apply arrives on that one
+// thread for the life of the run.
 //
 // An empty function means this node cannot apply modes; run_tx treats that
 // exactly as a failed apply, which is the honest answer for a consumer that

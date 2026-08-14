@@ -72,6 +72,7 @@ int wblink_c_consumer_check(void) {
             wblink_rx_scout_results(rx, NULL, 0, &required,
                                     &generation) != 3 ||
             wblink_rx_discovery(rx, NULL, 0, &required) != 3 ||
+            wblink_rx_adapters(rx, NULL, 0, &required) != 3 ||
             wblink_rx_selection(rx, NULL, 0, &required,
                                 &generation) != 3) {
             wblink_rx_destroy(rx);

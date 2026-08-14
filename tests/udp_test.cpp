@@ -25,6 +25,14 @@ int main() {
         auto air = UdpAir::create(cfg);
         CHECK(bool(air));
         if (air) {
+            // §15.5 (Pass 172): the bench backend STATES its capability shape
+            // — no silicon, so every flag false and the chip names the
+            // backend. Written down rather than inherited from a default.
+            const AirIface::AdapterCapsView caps = air.value->adapter_caps(0);
+            CHECK(caps.chip == "udp");
+            CHECK(!caps.power_actuator);
+            CHECK(!caps.ldpc_rx_flag);
+            CHECK(!caps.fastretune);
             unsigned accepted_events = 0;
             air.value->set_trace(
                 [&](const char* direction, const char* outcome, int adapter,

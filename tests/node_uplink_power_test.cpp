@@ -257,8 +257,34 @@ void test_tx_power_json_states_whether_an_actuator_exists_at_all() {
 
 }  // namespace
 
+// §15.5 (Pass 172). The adapters[] array states the per-die capability
+// answers on every entry — and with NO backend yet (an /info served before
+// bring-up, or the C snapshot's not-ready window) the fields still appear,
+// carrying the stated defaults rather than vanishing: absence is already
+// taken by pre-Pass-172 payloads, so a reader must never have to infer a
+// capability from a missing key.
+void test_adapters_array_states_caps_on_every_entry() {
+    wblink::node::Loaded l;
+    wblink::AdapterCfg a;
+    a.name = "gnd0";
+    a.role = wblink::Role::kTx;
+    a.channel_mhz = 5805;
+    l.cfg.adapters.push_back(a);
+
+    const std::string no_air = wblink::node::build_adapters_array(l, nullptr);
+    CHECK(no_air.find("\"name\":\"gnd0\"") != std::string::npos);
+    CHECK(no_air.find("\"role\":\"tx\"") != std::string::npos);
+    CHECK(no_air.find("\"channel\":5805") != std::string::npos);
+    CHECK(no_air.find("\"mac\":null") != std::string::npos);
+    CHECK(no_air.find("\"chip\":\"unknown\"") != std::string::npos);
+    CHECK(no_air.find("\"power_actuator\":false") != std::string::npos);
+    CHECK(no_air.find("\"ldpc_rx_flag\":false") != std::string::npos);
+    CHECK(no_air.find("\"fastretune\":false") != std::string::npos);
+}
+
 int main() {
     test_latch_reports_request_and_actuates_clamped();
+    test_adapters_array_states_caps_on_every_entry();
     test_set_tier_rejects_out_of_range();
     test_tier_relowers_a_configured_map();
     test_effective_follows_the_owner_not_the_tier();

@@ -24,6 +24,43 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 172 — a capability is an answer, not a log line: §15.5 `/info` carries the per-die caps (2026-08-14)
+
+**Ruling (operator-approved plan, coordination
+`specs/cross/2026-08-14-wblink-library-parity` R1).** What a die can and
+cannot do is a **stated per-adapter answer** on the library's contract, not
+something an embedder scrapes from a bring-up log. `AirIface` grows
+`adapter_caps(size_t)` — pure virtual, every backend states its answer —
+and ONE builder serves every consumer shape.
+
+**Changed §15.5** (`GET /api/v1/info` `adapters[]` row): each entry gains
+`chip`, `power_actuator`, `ldpc_rx_flag`, `fastretune` — static per-die
+answers read once at bring-up. `chip` is the chip-generation name (`"udp"`
+on the bench backend, other three false); `power_actuator` is §10.5's
+`actuator` discriminator as a boolean (Pass 171); `ldpc_rx_flag` is
+per-frame LDPC **reporting** (§15.3 Pass 157 — the 8814A decodes LDPC
+while reporting none; the 8812A HAS the descriptor bit, measured at first
+device verify, correcting the sweep's claim); `fastretune` is the lean
+retune override.
+
+**C ABI.** The same JSON reaches control-server-less embedders (Android's
+`:wifi` builds `WBLINK_CONTROL_SERVER=OFF`) as `wblink_rx_adapters()` —
+published at bring-up and republished at ~1 Hz, because the array also
+carries the LIVE channel (CSA, craft-local retunes and scout dwells move
+it; a one-shot publish froze it — 2026-08-14 review fix). The caps fields
+never change between publishes. TX parity deferred to R2.
+
+**Threading contract, stated with it.** The node spawns no dispatch
+thread: `FrameSink`/`wblink_frame_cb` fire on the thread that called
+`run_rx`, the mode applier on `run_tx`'s — one thread each, stable for
+the life of the run. Both embedders already depend on this (hub
+push_frame injection, Android JNI thread-attach); now the headers say it.
+
+**Evidence.** Coordination sweep memory
+`waybeam_link_library_sweep_2026_08.md`; `io/src/air_radio.cpp:881-894`
+(reads, no re-export); Pass 171's `actuator` field as the shape this
+generalizes.
+
 ## Pass 171 — an adapter with no power actuator announces and keeps flying, but never reports success (2026-08-14)
 
 **Ruling (operator, 2026-08-14).** A node whose `role:"tx"` adapter has no
