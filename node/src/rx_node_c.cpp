@@ -37,6 +37,10 @@ struct wblink_rx {
     // Cross-thread scout/discovery surface. The caller only enqueues commands
     // or copies immutable strings; run_rx alone touches its engine/catalog.
     wblink::node::RxRuntimeControl runtime_control;
+    // Pass 177 lifecycle. Written only by wblink_rx_run's wrapper; readable
+    // from any thread through wblink_rx_state.
+    std::atomic<int> state{WBLINK_NODE_CREATED};
+    std::atomic<int> exit_rc{0};
 };
 
 namespace {
@@ -179,10 +183,11 @@ int wblink_rx_selection(wblink_rx* rx, char* buffer, size_t capacity,
         applied_generation != nullptr ? applied_generation : &ignored);
 }
 
-int wblink_rx_run(wblink_rx* rx, const char* config_path,
-                  wblink_frame_cb on_frame, void* user) {
-    if (rx == nullptr || config_path == nullptr) return 2;
-    if (rx->used.exchange(true)) return 3;  // see the comment on `used`
+// The body of the claimed run, split out so wblink_rx_run can record the
+// Pass 177 lifecycle transitions at exactly two points instead of at every
+// return site below.
+static int wblink_rx_run_claimed(wblink_rx* rx, const char* config_path,
+                                 wblink_frame_cb on_frame, void* user) {
     // Stopped before it started: return without loading a config or opening a
     // radio. The header promises this is prompt, and the first read of `stop`
     // inside the loop is ~1800 lines and one AirBackend::create away.
@@ -228,6 +233,30 @@ int wblink_rx_run(wblink_rx* rx, const char* config_path,
         std::fprintf(stderr, "wblink_rx_run: unhandled C++ exception\n");
         return 1;
     }
+}
+
+int wblink_rx_run(wblink_rx* rx, const char* config_path,
+                  wblink_frame_cb on_frame, void* user) {
+    if (rx == nullptr || config_path == nullptr) return 2;
+    if (rx->used.exchange(true)) return 3;  // see the comment on `used`
+    // Pass 177: the refusals above never ran and never transition; from the
+    // successful claim on, the handle's state is this wrapper's to tell. The
+    // rc is stored BEFORE the EXITED flip so a reader that observes EXITED
+    // always reads the real code, never the initializer.
+    rx->state.store(WBLINK_NODE_RUNNING);
+    const int rc = wblink_rx_run_claimed(rx, config_path, on_frame, user);
+    rx->exit_rc.store(rc);
+    rx->state.store(WBLINK_NODE_EXITED);
+    return rc;
+}
+
+int wblink_rx_state(wblink_rx* rx, int* exit_rc) {
+    if (rx == nullptr) return -1;
+    const int state = rx->state.load();
+    if (state == WBLINK_NODE_EXITED && exit_rc != nullptr) {
+        *exit_rc = rx->exit_rc.load();
+    }
+    return state;
 }
 
 void wblink_rx_destroy(wblink_rx* rx) { delete rx; }

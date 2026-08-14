@@ -46,6 +46,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "wblink/node/node_state_c.h" /* Pass 177: WBLINK_NODE_* */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -249,6 +251,21 @@ int wblink_rx_stats(wblink_rx *rx, char *buffer, size_t capacity,
                     size_t *required);
 int wblink_rx_health(wblink_rx *rx, char *buffer, size_t capacity,
                      size_t *required);
+
+/*
+ * Pass 177: the handle's lifecycle, stated by the library instead of
+ * re-derived by every embedder — wblink_rx_run returns within milliseconds
+ * on a missing radio or a bad config, and every consumer of this header has
+ * grown its own "is it actually running" latch in response (waybeam-hub's
+ * mod_wblink_running, Android's resume latch). Returns WBLINK_NODE_CREATED /
+ * RUNNING / EXITED (node_state_c.h; -1 on a NULL handle). Once EXITED and
+ * when `exit_rc` is non-NULL, the run's return code — THIS header's 0/1/2/3
+ * space — is written through it; before EXITED, `*exit_rc` is left
+ * untouched. Safe from any thread. A refused run (NULL argument, reused
+ * handle) never transitions, so a late double-start cannot overwrite the
+ * real run's record.
+ */
+int wblink_rx_state(wblink_rx *rx, int *exit_rc);
 int wblink_rx_selection(wblink_rx *rx, char *buffer, size_t capacity,
                         size_t *required,
                         uint64_t *applied_generation);

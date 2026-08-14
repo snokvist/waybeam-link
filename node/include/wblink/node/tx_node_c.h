@@ -44,6 +44,8 @@
 
 #include <stddef.h> /* size_t (Pass 173: wblink_tx_set_adapter_fds) */
 
+#include "wblink/node/node_state_c.h" /* Pass 177: WBLINK_NODE_* */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -176,6 +178,19 @@ int wblink_tx_stats(wblink_tx *tx, char *buffer, size_t capacity,
                     size_t *required);
 int wblink_tx_health(wblink_tx *tx, char *buffer, size_t capacity,
                      size_t *required);
+
+/*
+ * Pass 177: the handle's lifecycle, stated by the library instead of
+ * re-derived by every embedder. Returns WBLINK_NODE_CREATED / RUNNING /
+ * EXITED (node_state_c.h; -1 on a NULL handle). Once EXITED and when
+ * `exit_rc` is non-NULL, the run's return code — the WBLINK_TX_* space — is
+ * written through it; before EXITED, `*exit_rc` is left untouched. A wedge
+ * reads as EXITED with WBLINK_TX_WEDGED: there is deliberately no separate
+ * state for it, because the rc space is already the supervisor's contract.
+ * Safe from any thread. A refused run (NULL argument, reused handle) never
+ * transitions — WBLINK_TX_REUSED cannot overwrite the real run's record.
+ */
+int wblink_tx_state(wblink_tx *tx, int *exit_rc);
 
 /*
  * Ask a running node to stop. Safe from any thread, and from a signal handler:
