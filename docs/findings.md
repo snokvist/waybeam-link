@@ -1165,9 +1165,11 @@ scout is already peak-shaped (`best_rssi_by_orig` keeps the max), so its RSSI
 is sound even under compression; only the frame count is not.
 
 **Not settled:** case 2's candidate rows appear at **+60 and +120 MHz** but not
-at +20/+40, which no filter skirt produces. Compression does (adjacent-channel
-rejection collapses along with EVM), but re-read the raw sweep JSON before
-treating either the skirt or its span as measured.
+at +20/+40, which no filter skirt produces. An earlier draft of this entry
+guessed that compression explains it by collapsing adjacent-channel rejection;
+the 2026-08-14 power control below **failed to reproduce any bleed at all**, so
+that guess is withdrawn and the shape is unexplained. Re-read the raw sweep JSON
+before treating either the skirt or its span as measured.
 
 **Consequences.** `channel_evidence_valid()` is derived FROM the resolver — a
 channel is valid only if every candidate on it resolves to it — so the loser
@@ -1202,8 +1204,55 @@ by itself buy a valid bench. The craft's power is reachable over RF as the
 lowest preset and re-sweep. Failing that, verify the channel against the
 craft's own `GET /api/v1/info`.
 
-**The control this finding still owes:** one sweep at reduced craft power, same
-~2 m, everything else held. If the ordering inverts back to the true channel,
-compression is proven and the skirt reading is dead; if it does not, the skirt
-survives and the RSSI-margin fix has to be sized for it instead. Until that
-runs, neither mechanism is measured — only the numbers above are.
+## 2026-08-14 — the power control: compression proven, adjacent-channel bleed NOT
+
+**Rig:** x86 ground (`.2.242`, 8812AU on bus 8-1, dev build, scout dwell 300 ms
+over 5745/5765/5785/5805/5825) against craft 17 (`.2.232`, 8812EU) transmitting
+video on 5805 under its own supervisor. The craft's §10.5 offset was stepped
+down over `POST /api/v1/tx/power` and restored to `auto` afterwards.
+
+| craft power | RSSI dBm | SNR dB | **EVM dB** | passive noise dBm | 5805 frames |
+|---|---:|---:|---:|---:|---:|
+| auto (run 1) | -8 | 30 | **-13** | -54 | 2047 |
+| auto (run 2) | -8 | 30 | **-15** | -55 | 2042 |
+| -6 dB | -18 | 29 | **-27** | -64 | 3272 |
+| -12 dB | -24 | 27 | -28 | -71 | 2473 |
+| -18 dB | -26 | 25 | -27 | -71 | 2624 |
+| -24 dB | -26 | 25 | -27 | -71 | 3249 |
+| -30 dB | -26 | 25 | -27 | -71 | 2671 |
+
+**Compression at bench range is proven, and it is invisible to SNR.** Backing
+the craft off 6 dB moved SNR by **1 dB** and EVM by **14 dB**. That is the
+`bench-testing-near-field.md` signature exactly, run in reverse: at its default
+power this ground sits well past the saturation knee with a collapsed
+constellation while SNR reports a healthy 30 dB. The passive floor rising 17 dB
+with power (-71 -> -54) is the same doc's self-jamming tell.
+
+**Frame suppression on the true channel: supported, not proven.** The `auto`
+row reproduced to within 5 frames across two runs (2047, 2042) and is the
+**lowest** of all seven points; every backed-off point is 2473-3272. Direction
+consistent, but per-step n=1 and dwell length varies with extension, so this
+corroborates the mechanism rather than measuring it.
+
+**The adjacent-channel half did NOT reproduce — withdraw the ACR-collapse
+reading.** At **no** power, including EVM -13 dB, did any channel other than
+5805 produce a candidate row for craft 17 (`other_chans` empty on all seven
+sweeps). The 2026-08-13 amendment above speculated that compression collapses
+adjacent-channel rejection and so explains case 2's +60/+120 MHz rows; **this
+control does not support that** and it should not be repeated. Compression is
+real and present, but on this rig it does not by itself manufacture a
+neighbouring candidate. Whatever produced the phone's bleed rows is not
+reproduced by the x86 ground at an equal-or-worse operating point, so it is
+still unexplained — geometry, antenna coupling or something S22-specific.
+
+**Consequence for the resolver fix.** Unchanged in direction: RSSI still
+separates the cases the phone saw, and peak RSSI stays sound under compression.
+But the "saturated dwell" refusal proposed on #178 must not be justified by the
+bleed story — its justification is that a compressed dwell's *frame count* is
+untrustworthy, which is what the table above shows.
+
+**Side observation, not chased:** the craft's radiated power stops falling below
+roughly -12 dB of commanded offset — RSSI floors at -26 dBm while the command
+goes to -30 dB. Either the offset actuation clamps or the efuse table runs out
+of range. It has no bearing on this finding but would matter to §10.6/§10.7
+calibration, which assumes the commanded rung is the delivered one.
