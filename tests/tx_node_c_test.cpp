@@ -121,6 +121,14 @@ int main() {
         size_t required = 77;
         CHECK(wblink_tx_adapters(tx, nullptr, 0, &required) == 3);
         CHECK(wblink_tx_status(tx, nullptr, 0, &required) == 3);
+        // Pass 176/178: same for the stats, health and control-endpoint
+        // surfaces. The endpoint answer matters most here — a node that
+        // never bound must not hand back an address, or an embedder would
+        // poll a control plane that does not exist.
+        CHECK(wblink_tx_stats(tx, nullptr, 0, &required) == 3);
+        CHECK(wblink_tx_health(tx, nullptr, 0, &required) == 3);
+        CHECK(wblink_tx_control_endpoint(tx, nullptr, 0, &required) == 3);
+        CHECK(wblink_tx_control_endpoint(nullptr, nullptr, 0, &required) == 2);
     }
     wblink_tx_destroy(tx);
 

@@ -40,6 +40,11 @@ class TxRuntimeInfo {
     // always-on surface is the status snapshot above.
     void publish_stats(std::string json) { publish(stats_, std::move(json)); }
     void publish_health(std::string json) { publish(health_, std::move(json)); }
+    // Pass 178: "addr:port" as resolved from the listening socket, published
+    // once, after a successful bind. Not JSON — a bare endpoint string.
+    void publish_control_endpoint(std::string endpoint) {
+        publish(control_endpoint_, std::move(endpoint));
+    }
 
     // Buffer-copy contract shared with RxRuntimeControl: `required` includes
     // the trailing NUL. NULL + zero is a size query. Returns 0 on
@@ -56,6 +61,10 @@ class TxRuntimeInfo {
     }
     int copy_health(char* buffer, size_t capacity, size_t* required) {
         return copy(health_, buffer, capacity, required);
+    }
+    int copy_control_endpoint(char* buffer, size_t capacity,
+                              size_t* required) {
+        return copy(control_endpoint_, buffer, capacity, required);
     }
 
   private:
@@ -84,6 +93,7 @@ class TxRuntimeInfo {
     Snap status_;
     Snap stats_;
     Snap health_;
+    Snap control_endpoint_;
 };
 
 }  // namespace node

@@ -265,6 +265,24 @@ int wblink_rx_health(wblink_rx *rx, char *buffer, size_t capacity,
  * handle) never transitions, so a late double-start cannot overwrite the
  * real run's record.
  */
+/*
+ * Pass 178: where this node's §15.5 control server is ACTUALLY listening,
+ * "addr:port", under the same buffer contract as the snapshot calls above.
+ *
+ * The value is resolved from the listening socket, not echoed from
+ * `control.bind` — `host:0` is a legal request that binds an ephemeral port,
+ * so the config string is a wish and the socket is the fact. Published only
+ * after a successful bind: 3 means there is no control plane to talk to
+ * (none configured, or a build with the control server compiled out), which
+ * is a different answer from "here is an address" and must stay that way.
+ * That distinction is the whole point — an embedder that resolves the
+ * endpoint from its own parallel config key instead (waybeam-hub's
+ * `metrics.waybeam_link`) 502s every route when the two files disagree,
+ * with a plausible-looking address in both.
+ */
+int wblink_rx_control_endpoint(wblink_rx *rx, char *buffer, size_t capacity,
+                               size_t *required);
+
 int wblink_rx_state(wblink_rx *rx, int *exit_rc);
 int wblink_rx_selection(wblink_rx *rx, char *buffer, size_t capacity,
                         size_t *required,

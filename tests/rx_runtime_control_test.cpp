@@ -354,6 +354,14 @@ void test_stats_and_health_slots() {
     CHECK_EQ_U(required, std::strlen("{\"t_ms\":9}") + 1);
     CHECK(ctl.copy_health(nullptr, 1, &required) == 2);
     CHECK(ctl.copy_health(out.data(), out.size(), nullptr) == 2);
+
+    // Pass 178: the control endpoint is a bare "addr:port" string, not JSON,
+    // and it round-trips through the same contract.
+    CHECK(ctl.copy_control_endpoint(nullptr, 0, &required) == 3);
+    ctl.publish_control_endpoint("127.0.0.1:8092");
+    CHECK(ctl.copy_control_endpoint(out.data(), out.size(), &required) == 0);
+    CHECK(std::strcmp(out.data(), "127.0.0.1:8092") == 0);
+    CHECK_EQ_U(required, std::strlen("127.0.0.1:8092") + 1);
 }
 
 }  // namespace

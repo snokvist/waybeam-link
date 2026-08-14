@@ -126,6 +126,23 @@ Result<std::unique_ptr<ControlServer>> ControlServer::create(
     set_nonblock(fd);
     std::unique_ptr<ControlServer> s(new ControlServer());
     s->listen_fd_ = fd;
+    // Pass 178: the endpoint an embedder is told to talk to comes from the
+    // socket, not from the config string that asked for it — `host:0` is
+    // legal and binds an ephemeral port, so echoing the request back would
+    // hand out an address nothing answers. Falls back to the requested
+    // string only if getsockname somehow fails on a socket we just bound.
+    s->endpoint_ = bind;
+    sockaddr_in actual{};
+    socklen_t alen = sizeof(actual);
+    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&actual), &alen) == 0 &&
+        actual.sin_family == AF_INET) {
+        char host[INET_ADDRSTRLEN] = {0};
+        if (::inet_ntop(AF_INET, &actual.sin_addr, host, sizeof(host)) !=
+            nullptr) {
+            s->endpoint_ = std::string(host) + ":" +
+                           std::to_string(ntohs(actual.sin_port));
+        }
+    }
     return R::ok(std::move(s));
 }
 

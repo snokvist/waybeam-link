@@ -189,6 +189,18 @@ void test_c_abi_set_adapter_fds() {
     // refused rather than silently ignored.
     CHECK(wblink_rx_set_adapter_fds(rx, fds, 2) == 3);
 
+    // Pass 176/178: a run that never reached a backend published no stats,
+    // no health and — the one that matters — no control endpoint. An
+    // embedder reading 3 knows there is no control plane, rather than being
+    // handed an address that answers nothing.
+    {
+        size_t required = 77;
+        CHECK(wblink_rx_stats(rx, nullptr, 0, &required) == 3);
+        CHECK(wblink_rx_health(rx, nullptr, 0, &required) == 3);
+        CHECK(wblink_rx_control_endpoint(rx, nullptr, 0, &required) == 3);
+        CHECK(wblink_rx_control_endpoint(nullptr, nullptr, 0, &required) == 2);
+    }
+
     // A reuse refusal (3) must not overwrite the real run's record.
     CHECK(wblink_rx_run(rx, "/nonexistent/config.json", nullptr, nullptr) == 3);
     {

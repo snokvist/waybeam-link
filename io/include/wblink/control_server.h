@@ -151,6 +151,12 @@ class ControlServer {
 
     int listen_fd() const { return listen_fd_; }
 
+    // Where this server is ACTUALLY listening, "addr:port", resolved from the
+    // socket at create() (Pass 178). Not the configured string: `host:0` is a
+    // legal request that binds an ephemeral port, and an embedder handed the
+    // request rather than the result would talk to nothing.
+    const std::string& bound_endpoint() const { return endpoint_; }
+
   private:
     ControlServer() = default;
 
@@ -168,6 +174,7 @@ class ControlServer {
     void publish_one(Conn& c, const std::string& line);  // one SSE frame
 
     int listen_fd_ = -1;
+    std::string endpoint_;  // Pass 178: resolved at create(), never mutated
     std::vector<Conn> conns_;
     ControlHandlers h_;
 };

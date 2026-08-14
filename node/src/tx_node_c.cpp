@@ -164,6 +164,12 @@ int wblink_tx_health(wblink_tx* tx, char* buffer, size_t capacity,
     return tx->runtime_info.copy_health(buffer, capacity, required);
 }
 
+int wblink_tx_control_endpoint(wblink_tx* tx, char* buffer, size_t capacity,
+                               size_t* required) {
+    if (tx == nullptr) return 2;
+    return tx->runtime_info.copy_control_endpoint(buffer, capacity, required);
+}
+
 int wblink_tx_state(wblink_tx* tx, int* exit_rc) {
     if (tx == nullptr) return -1;
     const int state = tx->state.load();

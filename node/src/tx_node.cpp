@@ -473,6 +473,11 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             return 1;
         }
         control = std::move(*cs.value);
+        // Pass 178: the socket's answer, published only after a successful
+        // bind. See the RX twin.
+        if (runtime_info != nullptr) {
+            runtime_info->publish_control_endpoint(control->bound_endpoint());
+        }
         ControlHandlers h;
         h.stats_line = [&]() -> std::string {
             std::string s = emitter.last_line();

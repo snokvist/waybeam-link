@@ -117,6 +117,9 @@ class RxRuntimeControl {
     // snapshot, not a silently re-enabled stats walk.
     void publish_stats(std::string json);
     void publish_health(std::string json);
+    // Pass 178: "addr:port" as resolved from the listening socket, published
+    // once, after a successful bind. Not JSON — a bare endpoint string.
+    void publish_control_endpoint(std::string endpoint);
 
     // Buffer-copy contract for the C shim: `required` includes the trailing
     // NUL. NULL + zero is a size query. Returns 0 on success/query, 2 for bad
@@ -132,6 +135,7 @@ class RxRuntimeControl {
                      uint64_t* generation);
     int copy_stats(char* buffer, size_t capacity, size_t* required);
     int copy_health(char* buffer, size_t capacity, size_t* required);
+    int copy_control_endpoint(char* buffer, size_t capacity, size_t* required);
 
   private:
     // GeneratedSnapshot moved to snapshot_copy.h with the copy contract
@@ -152,6 +156,7 @@ class RxRuntimeControl {
     std::shared_ptr<const GeneratedSnapshot> command_snapshot_;
     std::shared_ptr<const std::string> stats_snapshot_;
     std::shared_ptr<const std::string> health_snapshot_;
+    std::shared_ptr<const std::string> control_endpoint_;
 };
 
 }  // namespace node

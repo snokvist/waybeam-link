@@ -250,6 +250,13 @@ int wblink_rx_run(wblink_rx* rx, const char* config_path,
     return rc;
 }
 
+int wblink_rx_control_endpoint(wblink_rx* rx, char* buffer, size_t capacity,
+                               size_t* required) {
+    if (rx == nullptr) return 2;
+    return rx->runtime_control.copy_control_endpoint(buffer, capacity,
+                                                     required);
+}
+
 int wblink_rx_state(wblink_rx* rx, int* exit_rc) {
     if (rx == nullptr) return -1;
     const int state = rx->state.load();

@@ -311,5 +311,21 @@ int RxRuntimeControl::copy_health(char* buffer, size_t capacity,
     return copy_snapshot_json(snapshot, buffer, capacity, required);
 }
 
+void RxRuntimeControl::publish_control_endpoint(std::string endpoint) {
+    auto next = std::make_shared<const std::string>(std::move(endpoint));
+    const std::lock_guard<std::mutex> lock(mutex_);
+    control_endpoint_ = std::move(next);
+}
+
+int RxRuntimeControl::copy_control_endpoint(char* buffer, size_t capacity,
+                                            size_t* required) {
+    std::shared_ptr<const std::string> snapshot;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        snapshot = control_endpoint_;
+    }
+    return copy_snapshot_json(snapshot, buffer, capacity, required);
+}
+
 }  // namespace node
 }  // namespace wblink
