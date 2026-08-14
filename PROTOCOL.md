@@ -1,7 +1,10 @@
 # waybeam-link — Protocol Specification (v1)
 
 A best-effort broadcast video + telemetry link for monitor/injection WiFi
-(RTL8812AU/CU/EU via OpenIPC **devourer**), designed **latency-first and
+(RTL8812AU/CU/EU, plus RTL8733BU — supported with two stated capability
+holes: no TX-power actuator (§10.5 Pass 171) and no CCX/TX-report path, so
+the §9.10 wedge detector stays unproven on it (Pass 170) — via OpenIPC
+**devourer**), designed **latency-first and
 robustness-first**; bandwidth efficiency is subordinate. Broadcast, **no
 encryption / no authentication / no MAC layer on the data path** (one scoped
 exception: the channel-switch command, §11). Multi-adapter **receive diversity**
@@ -48,7 +51,7 @@ short correlated-fade band. RTP is carried opaque end-to-end.
   ├─────────────────────────────────────────────┤
   │ devourer (vendored)                          │  raw 802.11 inject / monitor
   ├─────────────────────────────────────────────┤
-  │ RTL8812AU/CU/EU radio(s)                      │  craft: 1 · ground: N (diversity)
+  │ RTL8812AU/CU/EU/8733BU radio(s)               │  craft: 1 · ground: N (diversity)
   └─────────────────────────────────────────────┘
 ```
 

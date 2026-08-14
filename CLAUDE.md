@@ -1,7 +1,9 @@
 # waybeam-link
 
 A best-effort, latency-first broadcast video + telemetry link over raw
-injection WiFi (RTL8812AU/CU/EU via vendored OpenIPC devourer), with per-adapter
+injection WiFi (RTL8812AU/CU/EU, plus RTL8733BU minus TX-power actuation and
+CCX wedge detection — §10.5 Pass 171 / §9.10 Pass 170 — via vendored OpenIPC
+devourer), with per-adapter
 RX diversity as primary redundancy, opt-in importance-gated ARQ, an adaptive
 link layer, and a follow-me channel switch. See `README.md` for the full pitch
 and current status.
