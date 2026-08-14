@@ -24,6 +24,37 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 178 — the control endpoint is answered by the socket, not the config (2026-08-14)
+
+**Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
+R3, slice 3).** `wblink_rx_control_endpoint()` /
+`wblink_tx_control_endpoint()` report where this node's §15.5 control
+server is **actually listening**, under the `snapshot_copy.h` buffer
+contract. Published after a successful bind and never before: an
+embedder that reads 3 knows there is no control plane to talk to,
+rather than being handed an address that answers nothing.
+
+**The value comes from `getsockname`, not from `control.bind`.**
+`ControlServer` gains `bound_endpoint()` computed at create time,
+because the configured string is a *request*: `host:0` is legal, parses,
+and binds an ephemeral port, so echoing config back would recreate the
+very failure this getter exists to kill — two sources of truth for one
+endpoint that silently disagree (hub `metrics.waybeam_link` vs the
+node's own `control.bind`; every route 502s and the address looks
+right in both files).
+
+**Scope.** A build with `WBLINK_CONTROL_SERVER=OFF` publishes nothing
+and the getters answer 3 — the same answer that build already gives by
+refusing to start with a non-empty `control.bind`. No REST route
+changes; `/info` continues to report the configured string as its own
+`control` field, which is what an operator authored.
+
+**Evidence.** Branch `feat/r3-telemetry-abi` (stacked on Passes
+176-177); `io/src/control_server.cpp` bind path; publication at both
+run loops' control-server construction; endpoint cases in
+`tests/tx_node_c_test.cpp` and `tests/node_fd_source_test.cpp`
+(unpublished → 3 on a node that never bound).
+
 ## Pass 177 — the library states its own liveness (2026-08-14)
 
 **Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`
