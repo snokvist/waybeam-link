@@ -43,6 +43,9 @@ class UdpIngress {
                                                 : 0;
     }
     void note_socket_filtered() { ++socket_filtered_; }
+    // §5.1: datagrams larger than the receive buffer, dropped whole rather
+    // than delivered truncated (MSG_TRUNC).
+    uint64_t truncated_drops() const { return truncated_drops_; }
 
     // One datagram; >0 = bytes, 0 = nothing pending, -1 = error.
     long recv_one(uint8_t* buf, size_t cap);
@@ -53,6 +56,7 @@ class UdpIngress {
     uint32_t kernel_drop_last_ = 0;
     uint64_t kernel_drops_ = 0;
     uint64_t socket_filtered_ = 0;
+    uint64_t truncated_drops_ = 0;
 };
 
 class UdpEgress {

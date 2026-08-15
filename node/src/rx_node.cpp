@@ -88,6 +88,7 @@
 #include "wblink/node/rx_core.h"
 #include "wblink/log.h"
 #include "wblink/node/rx_runtime_control.h"
+#include "wblink/node/uplink_data.h"
 #include "wblink/node/tx_core.h"
 #include "wblink/node/uplink_power.h"
 #include "wblink/node/vcmd.h"
@@ -206,6 +207,30 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         return 1;
     }
     const uint32_t session = session_nonce();
+    // §7.5 (Pass 183): a dir:"in" UDP stream on an rx node is uplink data
+    // ingress — TELEMETRY/CONTROL only, framed here and sent on the return
+    // path. Refused shapes fail startup rather than being silently ignored
+    // (the pre-§7.5 behaviour).
+    std::vector<UplinkDataStream> uplink_streams;
+    std::optional<uint64_t> uplink_fallback_us;
+    for (const StreamCfg& s : l.cfg.streams) {
+        if (s.dir != Dir::kIn) {
+            continue;
+        }
+        if (const char* err = uplink_shape_error(s, /*tx_role=*/false)) {
+            wb_logf("stream %u: %s\n", s.stream_id, err);
+            return 1;
+        }
+        FramerConfig fc;
+        fc.originator = l.cfg.node.originator;
+        fc.session_id = session;
+        fc.stream_id = s.stream_id;
+        fc.stream_type = s.stream_type;
+        // §3.1 destination stays advisory broadcast; §7.5 admission is
+        // bound-issuer, not destination. active_profile/table_version stay 0
+        // (§7.5 — uplink takes no part in profiles).
+        uplink_streams.emplace_back(s.stream_id, s.stream_type, fc);
+    }
     DiscoveryCatalog discovery;
     RxCore rx(l.cfg, session, l.have_table ? &l.table : nullptr,
               l.have_table ? std::optional<uint8_t>(l.tv) : std::nullopt);
@@ -882,6 +907,17 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                                  bool urgent) {
         if (urgent) arq_timing.note_nack_injected(f, n, now_us());
         air.value->inject_return(target, f, n, urgent);
+    };
+    // §7.5: release held uplink DATA. Fired on the coalesced return window
+    // (after NACKs, before reports) or on the blind fallback when no anchored
+    // window opened within uplink.fallback_ms.
+    const auto flush_uplink = [&]() {
+        for (UplinkDataStream& us : uplink_streams) {
+            us.flush([&](const uint8_t* f, size_t n) {
+                send_return(active_selection.originator, f, n, false);
+            });
+        }
+        uplink_fallback_us.reset();
     };
     // §3.5/§10.7: the epoch is stamped HERE, at the radio call, and advances
     // only on a successful submit. Reports are built well before they are
@@ -2135,6 +2171,34 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         const uint64_t now = now_ms();
         now_us_it = now_us();
         deliver_now = now;  // the deliver lambda's clock for reassembler pushes
+        // §7.5 uplink ingress: drain datagrams, frame, then hold for the
+        // return window — or send immediately when no window is scheduled
+        // (§7.1 baseline / craft not transmitting = craft always listening).
+        if (!uplink_streams.empty()) {
+            bindings.value->poll_once(0, [&](const IngressEvent& ev) {
+                for (UplinkDataStream& us : uplink_streams) {
+                    if (us.stream_id != ev.stream_id) {
+                        continue;
+                    }
+                    const bool gated = qg.enabled() && ret_tsf_anchored;
+                    const bool held_one = us.on_datagram(
+                        ev.data, ev.len, now, now_us_it, gated,
+                        l.cfg.policy.uplink,
+                        [&](const uint8_t* f, size_t n) {
+                            send_return(active_selection.originator, f, n,
+                                        false);
+                        });
+                    if (held_one && !uplink_fallback_us) {
+                        uplink_fallback_us =
+                            now_us_it +
+                            static_cast<uint64_t>(
+                                l.cfg.policy.uplink.fallback_ms) *
+                                1000;
+                    }
+                    return;
+                }
+            });
+        }
         if (runtime_control != nullptr) {
             if (auto command = runtime_control->take_command()) {
                 std::string error;
@@ -2263,6 +2327,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             for (const auto& [f, target] : urgent_ret_held) {
                 send_return(target, f.data(), f.size(), true);
             }
+            // §7.5: uplink DATA rides the same window, after repair traffic
+            // (NACKs protect video) and before reports.
+            flush_uplink();
             // Pass 78: last window's anchored reports repeat here, before
             // the fresh batch so epochs stay monotonic at the receiver.
             for (const auto& [f, target] : report_repeat_held) {
@@ -2321,6 +2388,12 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             ret_at_us.reset();
             report_fallback_us.reset();
             ret_tsf_anchored = false;
+        }
+        // §7.5 blind fallback: held uplink frames whose anchored window never
+        // fired go opportunistic rather than holding RC hostage to video
+        // cadence.
+        if (uplink_fallback_us && now_us_it >= *uplink_fallback_us) {
+            flush_uplink();
         }
         // §10.7 calibrator service. `restore` is single-shot and set on EVERY
         // terminal path, so this is the one place probe power is handed back
@@ -2489,8 +2562,21 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                                                 : "");
             }
         }
-        const int air_timeout =
-            urgent_ret_held.empty() && report_ret_held.empty() ? 2 : 0;
+        // §7.5: held uplink frames wait on the same ret_at_us deadline as
+        // NACKs, so they get the same 0-timeout aim (a 2 ms poll would eat
+        // the ±1 ms window budget, issue #99).
+        bool uplink_held_any = false;
+        for (const UplinkDataStream& us : uplink_streams) {
+            if (!us.held.empty()) {
+                uplink_held_any = true;
+                break;
+            }
+        }
+        const int air_timeout = urgent_ret_held.empty() &&
+                                        report_ret_held.empty() &&
+                                        !uplink_held_any
+                                    ? 2
+                                    : 0;
         air.value->poll_once(air_timeout, [&](const AirRxMeta& meta,
                                               const uint8_t* d, size_t n) {
             // udp-air carries no real RSSI; fall back to the loopback
@@ -3137,6 +3223,11 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                                       mtu_mode.c_str(), mtu_requested,
                                       mtu_effective, mtu_supported};
             const UplinkStatsFill ufill = uplink_fill();
+            std::vector<UplinkDataStreamStats> uplink_data_stats;
+            uplink_data_stats.reserve(uplink_streams.size());
+            for (const UplinkDataStream& us : uplink_streams) {
+                uplink_data_stats.push_back(us.st);
+            }
             emit_stats(emitter, l, session, t0, nullptr, &rx, &*air.value,
                        tsf_fallbacks,
                        issuer.active() ? issuer.state_str()
@@ -3145,7 +3236,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                        &frame_stats, &shm_stats,
                        cache_ctl ? &crs : nullptr,
                        cache_store ? &css : nullptr, &last_snap, &timing,
-                       &vfill, operating_chan, &ufill);
+                       &vfill, operating_chan, &ufill,
+                       uplink_streams.empty() ? nullptr : &uplink_data_stats);
 #if WBLINK_CONTROL_SERVER
             if (control) {
                 control->publish_stats(emitter.last_line());

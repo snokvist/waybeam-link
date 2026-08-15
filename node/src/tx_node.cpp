@@ -95,6 +95,7 @@
 #include "wblink/node/stats_fill.h"
 #include "wblink/node/tx_core.h"
 #include "wblink/node/tx_runtime_info.h"
+#include "wblink/node/uplink_data.h"
 #include "wblink/node/uplink_power.h"
 #include "wblink/node/vcmd.h"
 
@@ -129,6 +130,20 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
     if (!bindings) {
         wb_logf("binding error: %s\n", bindings.error.c_str());
         return 1;
+    }
+    // §7.5 (Pass 183): a dir:"out" stream on a tx node is uplink data
+    // delivery — TELEMETRY/CONTROL over udp only, refused otherwise rather
+    // than silently ignored (the pre-§7.5 behaviour).
+    std::vector<UplinkAcceptor> uplink_accepts;
+    for (const StreamCfg& s : l.cfg.streams) {
+        if (s.dir != Dir::kOut) {
+            continue;
+        }
+        if (const char* err = uplink_shape_error(s, /*tx_role=*/true)) {
+            wb_logf("stream %u: %s\n", s.stream_id, err);
+            return 1;
+        }
+        uplink_accepts.emplace_back(s.stream_id, s.stream_type);
     }
     const uint32_t session = session_nonce();
     // §11.4a key provenance: csa.psk configured ⇒ secret (token off the air);
@@ -811,6 +826,28 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 // follower can refresh the binding on the bound issuer's traffic.
                 csa.note_valid_rx(service_us, be16_read(d + 3));
             }
+            if (const DataView* dv = std::get_if<DataView>(&dec)) {
+                // §7.5 uplink data plane: bound-issuer only, monotonic seq,
+                // delivered through the dir:"out" egress. Rejections are
+                // silent drops + counters (the §11.7 no-probe-oracle
+                // posture). An unmatched stream_id is not counted — on a
+                // shared channel that is another node's stream, not a
+                // rejection. Binding freshness was already refreshed above by
+                // note_valid_rx, per §11.5a / §7.5.
+                for (UplinkAcceptor& ua : uplink_accepts) {
+                    if (ua.on_data(*dv, csa.latched_issuer(),
+                                   [&](const uint8_t* p, size_t pn) {
+                                       if (UdpEgress* out =
+                                               bindings.value->egress_for(
+                                                   ua.stream_id)) {
+                                           out->send(p, pn);
+                                       }
+                                   })) {
+                        return;
+                    }
+                }
+                return;
+            }
             if (const VehicleCmd* vc = std::get_if<VehicleCmd>(&dec)) {
                 // §11.7: bound-issuer-only; the engine handles MAC / nonce /
                 // duplicate re-echo / REJECTED, tx.apply_command actuates.
@@ -1140,10 +1177,16 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             const ArqTimingStats timing = arq_timing.snapshot();
             const VcmdStatsFill vfill{craft_cmd.last_nonce(), nullptr, 0,
                                       true};
+            std::vector<UplinkDataStreamStats> uplink_data_stats;
+            uplink_data_stats.reserve(uplink_accepts.size());
+            for (const UplinkAcceptor& ua : uplink_accepts) {
+                uplink_data_stats.push_back(ua.st);
+            }
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
                        csa.state_str(), 0, 0, wedge.wedged(), nullptr,
                        &shm_stats, nullptr, nullptr, &last_snap, &timing,
-                       &vfill, cur_chan);
+                       &vfill, cur_chan, nullptr,
+                       uplink_accepts.empty() ? nullptr : &uplink_data_stats);
             if (control) {
                 control->publish_stats(emitter.last_line());
             }

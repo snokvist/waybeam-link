@@ -71,6 +71,7 @@
 #include "wblink/stats.h"
 #include "wblink/node/aim.h"
 #include "wblink/node/air_backend.h"
+#include "wblink/node/uplink_data.h"
 #include "wblink/node/clock.h"
 #include "wblink/node/tx_core.h"
 #include "wblink/node/stats_fill.h"
@@ -600,6 +601,19 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "binding error: %s\n",
                          bindings.error.c_str());
             return 1;
+        }
+        // §7.5: the uplink stream shape is role-dependent, so the loader
+        // cannot rule on it — but --check knows the mode, and the deploy
+        // gate runs --check on every config, so refusing here keeps the
+        // spec's "refused at --check" promise honest (a bad shape must not
+        // pass validation and then fail at flight start).
+        if (mode == "tx" || mode == "rx") {
+            for (const StreamCfg& s : l.cfg.streams) {
+                if (const char* err = uplink_shape_error(s, mode == "tx")) {
+                    std::fprintf(stderr, "stream %u: %s\n", s.stream_id, err);
+                    return 1;
+                }
+            }
         }
         std::fprintf(stderr, "bindings: OK\n");
         if (strict) {

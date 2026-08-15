@@ -341,12 +341,32 @@ struct CacheStoreStatsOut {
     uint16_t health_permille = 0;  // gauge
 };
 
+// §7.5 (Pass 183) uplink data-plane counters — one entry per uplink stream,
+// appended to the §15.3 "streams" array with only its own fields. `tx` picks
+// the side: true on the originating ground (submitted/sent/dropped_*), false
+// on the accepting craft (accepted/rej_*/dup).
+struct UplinkDataStreamStats {
+    uint8_t stream_id = 0;
+    std::string type;  // registry name, "CONTROL" / "TELEMETRY"
+    bool tx = false;
+    uint64_t submitted = 0;
+    uint64_t sent = 0;
+    uint64_t dropped_stale = 0;
+    uint64_t dropped_budget = 0;
+    uint64_t dropped_oversize = 0;
+    uint64_t accepted = 0;
+    uint64_t rej_unbound = 0;
+    uint64_t rej_stream = 0;
+    uint64_t dup = 0;
+};
+
 struct StatsSnapshot {
     uint64_t t_ms = 0;
     uint16_t node = 0;
     uint32_t session = 0;
     std::vector<AdapterStats> adapters;
     std::vector<StreamStats> streams;
+    std::vector<UplinkDataStreamStats> uplink_streams;  // §7.5
     std::optional<CacheRepairStatsOut> cache_repair;
     std::optional<CacheStoreStatsOut> cache_store;
     ReturnStats ret;

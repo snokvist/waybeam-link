@@ -438,6 +438,13 @@ its own local profile table (§3.6)**, MUST treat that stream under the
 supersession/deadline/adaptive logic — and raise a stat. A new type or a diverged
 table can therefore never make an older/mismatched client misbehave.
 
+**Uplink direction (Pass 183):** TELEMETRY and CONTROL are the only stream
+types that may travel ground→craft as DATA — the uplink data plane, §7.5.
+RTP and AUDIO are downlink-only (refused at `--check` and at node
+startup on an uplink stream — the pure loader cannot decide, the shape
+is role-dependent). The uplink acceptor's admission rules are §7.5's,
+not this section's unknown-type rule (which governs RxEngine consumers).
+
 **Best-effort suspends profile logic, never §6.6 clamp state (Pass 87).**
 `max_block` and the delivery cursor are *clamp* state, not profile state, and MUST
 keep ratcheting in best-effort — only the `BlockInfo` deadline/supersession
@@ -1545,6 +1552,75 @@ cap remains a hard downlink fraction, with an attempt cap and per-interval bound
 A burst needing more than a few repairs is past saving — let RTP concealment eat
 it. The uplink is a **pluggable transport** so a dedicated backchannel could
 replace it later without touching the core.
+
+### 7.5 Uplink data streams (Pass 183)
+
+A ground (rx node) MAY originate DATA frames for stream types `0x02
+TELEMETRY` and `0x03 CONTROL` (§3.4) — the uplink data plane that carries
+RC and ground→FC telemetry when there is no LAN. Wire format is §3.2
+unchanged; every uplink datagram is one block (`END_OF_BLOCK` set, no
+ARQ flags — the AUDIO one-datagram-one-block shape, §3.4).
+
+- **Config shape.** `dir` stays socket-local; **node role fixes air
+  direction.** An rx node's `dir:"in"` UDP stream is uplink ingress
+  (previously silently ignored — this is additive); a tx node's
+  `dir:"out"` UDP stream is uplink delivery through its egress binding.
+  `frame-shm` uplink is invalid; RTP/AUDIO uplink is refused at
+  `--check` and at node startup (role-dependent shape — the loader
+  alone cannot rule).
+- **Profiles do not apply.** Uplink DATA stamps `active_profile = 0` and
+  `table_version = 0`; the craft ignores both fields for uplink
+  admission. Uplink streams take no part in §9 — Pass 79 already bars
+  non-RTP streams from LINK_REPORT and selection — and are **best-effort
+  by construction** (operator ruling 2026-08-15): no NACK, no resend
+  ring, no FEC, craft emits nothing about them. Reliability rides source
+  cadence (RC is periodic state — a fresh frame supersedes a lost one);
+  anything needing delivery guarantees uses §11.7 campaigns instead.
+- **Admission (craft).** Accept iff **all** hold: (1) the frame matches a
+  configured `dir:"out"` stream by `(stream_id, stream_type)`; (2) the
+  sender originator **is the §11.5a bound issuer** — an unbound craft, or
+  any other issuer, is a silent drop + counter (the §11.7 no-probe-oracle
+  posture, minus MAC/nonce; operator ruling 2026-08-15: bound-issuer
+  only, consistent with §13 harden-not-prevent and §18); (3) `seq` is
+  strictly greater than the last accepted seq for the **current sender
+  session** — else drop + dup counter. The stream keeps ONE cursor: a new
+  `(originator, session_id)` replaces it and prior sessions are forgotten
+  (bounded state; per-session replay memory would buy nothing against the
+  no-MAC threat model, which already admits an invented session). The
+  compare is plain u32 — a sender session is assumed never to exceed 2^32
+  uplink frames (the §2.1 no-wrap posture). Latest-state semantics: no
+  reorder buffer, no reassembly. **Binding-freshness note:** any decodable
+  frame naming the bound issuer refreshes §11.5a freshness *before*
+  admission runs — §7.5 rejection classes (dup, stream mismatch) are
+  admission outcomes, not sender-authentication verdicts, so a rejected
+  frame from the bound issuer still refreshes, exactly as a NACK or
+  HEARTBEAT would.
+- **Pacing (the Pass 78 law applies).** Uplink DATA is a return flush
+  class — flushed after CSA copies and NACKs, before report repeats and
+  fresh reports. It is gap-gated exactly like every return and **never
+  re-arms a listen window**. Hold policy while gated: CONTROL depth 1 —
+  a newer datagram replaces the held one (`uplink_dropped_stale`);
+  TELEMETRY is FIFO capped at `uplink.telemetry_hold` (seed **32**),
+  drop-oldest. **Blind fallback:** if no anchored window has opened for
+  `uplink.fallback_ms` (seed **50**), held uplink frames are sent §7.1
+  opportunistic — CONTROL is periodic actuation state and must not be
+  hostage to video cadence (an idle link produces no EOBs at all). Held
+  frames also flush on an unanchored (TSF-fallback) return deadline —
+  the same degradation reports take. A per-stream rate cap
+  `uplink.pps_budget` (seed **100**, must be ≥ 1) drops excess at ingress
+  (`uplink_dropped_budget`), counted over a tumbling one-second window
+  anchored at the first datagram after each expiry. All three seeds
+  RE-DERIVE at §17 gate 4 alongside `guard_us`/`return_window_us`.
+- **Size budget.** An uplink datagram larger than **1398 bytes** (§3.2's
+  1424-byte wire budget minus the 26-byte DATA header) is dropped at
+  ingress with `uplink_dropped_oversize` — never framed, never truncated
+  (§5.1). A zero-length datagram is not carriable uplink (ingress treats
+  it as end-of-drain); CONTROL/TELEMETRY payloads are ≥ 1 byte.
+- **Stats (§15.3).** Ground, per uplink stream: `uplink_submitted`,
+  `uplink_sent`, `uplink_dropped_stale`, `uplink_dropped_budget`,
+  `uplink_dropped_oversize`. Craft, per uplink stream:
+  `uplink_accepted`, `uplink_rej_unbound`, `uplink_rej_stream`,
+  `uplink_dup`.
 
 ---
 
@@ -4607,6 +4683,8 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     "fec":    { "scheme": "none", "overhead_frac": 0.0 },
     "return": { "guard_us": 300, "return_window_us": 2000,
                 "unicast": false, "report_redundancy": 2 },
+    "uplink": { "fallback_ms": 50, "pps_budget": 100,
+                "telemetry_hold": 32 },
     "csa":    { "psk": "<optional; auto-generated + announced when absent, §11.4a>",
                 "settle_s": 3.0, "verify_timeout_ms": 500,
                 "rx_liveness_ms": 750,
@@ -4633,7 +4711,9 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 ```
 - RX nodes use `"dir":"out"` streams (UDP `send` targets) and `role:"rx"` adapters
   (diversity = same `channel`; a scout may sit on a different channel on another
-  adapter).
+  adapter). An RX node's `"dir":"in"` UDP stream is §7.5 uplink ingress
+  (TELEMETRY/CONTROL only); the matching TX-node `"dir":"out"` stream is its
+  delivery egress. `policy.uplink.*` seeds the §7.5 pacing knobs.
 - `adapters[].mac` (radio backend only, Pass 154; lowercase
   `aa:bb:cc:dd:ee:ff`, normalized at load) pins a stanza to a physical unit
   by its §10.6 EFUSE-MAC identity. Match precedence is
@@ -5027,6 +5107,12 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "calib_probes_sent": 0, "calib_tallies_rx": 0,
     "calib_rx_mcs": 255, "feed_paused": false } }
 ```
+§7.5 uplink streams appear in `streams` with their own counter set — ground
+side `uplink_submitted`/`uplink_sent`/`uplink_dropped_stale`/
+`uplink_dropped_budget`/`uplink_dropped_oversize`, craft side `uplink_accepted`/`uplink_rej_unbound`/
+`uplink_rej_stream`/`uplink_dup` — and none of the RTP/ARQ/FEC/jscc fields,
+which do not apply to them.
+
 `csa_state` is the §11 follow-me state machine string (issuer states when a
 switch campaign is active, otherwise the follower's), and `channel` is the
 current RF operating channel (center MHz): the rx node's live committed
@@ -5964,6 +6050,7 @@ local-ingress polling interval.
 | retransmit airtime frac | resend cap vs downlink | raise until live-video jitter appears |
 | deadline budget (per class) | glass-to-glass minus pipeline | measured pipeline delay |
 | `guard_us` / `return_window_us` | §7.2 quiet gap | craft TX→RX settle + ground turnaround + return airtime |
+| `uplink.fallback_ms` / `uplink.pps_budget` / `uplink.telemetry_hold` | §7.5 uplink pacing | RC latency vs listen-window discipline at target fps; budget vs return-path airtime |
 | EWMA α, `mcs_settle_s` | §9 smoothing/settle | no-FEC loss spikiness |
 | `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
 | `wedge_exit_windows` | §9.10 v2 TX-node self-restart | both v1 conditions above met first; sized so a transient never bounces a healthy craft — 3 consecutive wedged windows at the 1000 ms seed, i.e. 3 s with zero backend TX progress. 0 disables (v1 behaviour). Vehicle loop only |

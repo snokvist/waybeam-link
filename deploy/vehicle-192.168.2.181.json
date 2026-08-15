@@ -1,0 +1,106 @@
+{
+  "_comment": "CV610 craft (.181): RTL8733BU on devourer at 5805/HT20, originator 18 / net_id 1 \u2014 distinct from the .232 craft (17/0) for dual-craft testing. 8733B has no TX-power actuator (\u00a710.5) so no power keys; venc actuation off until CV610 bitrate mutability is proven (#222 parity: fps/server are boot-mutable only). \u00a77.5 uplink streams mirror the .232 craft.",
+  "node": {
+    "originator": 18,
+    "role": "tx",
+    "preferred_originator": 0,
+    "net_id": 1
+  },
+  "profile_table": "/etc/waybeam-link/table-8733b.json",
+  "adapters": [
+    {
+      "name": "bu-craft",
+      "role": "tx",
+      "channel": 5745,
+      "bw": 20,
+      "bus": "1-1.2"
+    }
+  ],
+  "streams": [
+    {
+      "stream_id": 0,
+      "stream_type": "RTP",
+      "dir": "in",
+      "bind": {
+        "kind": "frame-shm",
+        "name": "venc_frame"
+      },
+      "arq_mode": "idr-only",
+      "fec": {
+        "scheme": "rlc256",
+        "i_rate_permille": 300,
+        "p_rate_permille": 200,
+        "min_k": 3
+      }
+    },
+    {
+      "stream_id": 1,
+      "stream_type": "AUDIO",
+      "dir": "in",
+      "bind": {
+        "kind": "udp",
+        "listen": "127.0.0.1:5611"
+      }
+    },
+    {
+      "_comment": "\u00a77.5 uplink RC delivery \u2014 into mod_telemetry's UDP bind",
+      "stream_id": 2,
+      "stream_type": "CONTROL",
+      "dir": "out",
+      "bind": {
+        "kind": "udp",
+        "send": "127.0.0.1:14550"
+      }
+    },
+    {
+      "_comment": "downlink telemetry ingest \u2014 hub telemetry.udp_target points here",
+      "stream_id": 3,
+      "stream_type": "TELEMETRY",
+      "dir": "in",
+      "bind": {
+        "kind": "udp",
+        "listen": "127.0.0.1:14651"
+      }
+    }
+  ],
+  "air": {
+    "kind": "radio"
+  },
+  "policy": {
+    "report_timeout_ms": 750,
+    "select": {
+      "min_profile": 2,
+      "max_profile": 5,
+      "demote_milli": 45
+    },
+    "return": {
+      "quiet_gap": true,
+      "guard_us": 300,
+      "return_window_us": 2000
+    },
+    "csa": {
+      "home_chan": 5745,
+      "channel_allowlist": [
+        5180,
+        5220,
+        5745,
+        5765,
+        5785,
+        5805,
+        5825
+      ],
+      "verify_timeout_ms": 600,
+      "rx_liveness_ms": 4000
+    }
+  },
+  "venc": {
+    "enabled": false
+  },
+  "stats": {
+    "hz": 1,
+    "stdout": false
+  },
+  "control": {
+    "bind": "127.0.0.1:8091"
+  }
+}

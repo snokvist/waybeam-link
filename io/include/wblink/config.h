@@ -287,6 +287,14 @@ struct ReturnPolicy {
     uint32_t report_redundancy = 2;
 };
 
+struct UplinkPolicy {
+    // §7.5 (Pass 183) ground->craft data-plane pacing. Seeds RE-DERIVE at
+    // §17 gate 4 alongside guard_us/return_window_us.
+    uint32_t fallback_ms = 50;     // no anchored window -> §7.1 opportunistic
+    uint32_t pps_budget = 100;     // per-stream ingress rate cap
+    uint32_t telemetry_hold = 32;  // TELEMETRY FIFO cap (CONTROL is always 1)
+};
+
 struct CsaPolicy {
     // SECRET (§15.2): present only on craft+ground configs; must never appear
     // in stats, logs, or dump_config_summary().
@@ -358,6 +366,7 @@ struct Policy {
     RxCfgPolicy rx;
     FecPolicy fec;
     ReturnPolicy ret;  // JSON key "return" (C++ keyword)
+    UplinkPolicy uplink;  // §7.5 uplink data plane
     CsaPolicy csa;
     CmdPolicy cmd;
     CalibrationPolicy calibration;
