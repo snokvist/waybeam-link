@@ -88,6 +88,7 @@
 #include "wblink/node/rx_core.h"
 #include "wblink/log.h"
 #include "wblink/node/rx_runtime_control.h"
+#include "wblink/node/uplink_data.h"
 #include "wblink/node/tx_core.h"
 #include "wblink/node/uplink_power.h"
 #include "wblink/node/vcmd.h"
@@ -210,15 +211,6 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     // ingress — TELEMETRY/CONTROL only, framed here and sent on the return
     // path. Refused shapes fail startup rather than being silently ignored
     // (the pre-§7.5 behaviour).
-    struct UplinkDataStream {
-        uint8_t stream_id = 0;
-        uint8_t stream_type = 0;
-        Framer framer;
-        std::deque<std::vector<uint8_t>> held;
-        uint64_t pps_win_start_us = 0;
-        uint32_t pps_in_win = 0;
-        UplinkDataStreamStats st;
-    };
     std::vector<UplinkDataStream> uplink_streams;
     std::optional<uint64_t> uplink_fallback_us;
     for (const StreamCfg& s : l.cfg.streams) {
@@ -240,13 +232,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         // §3.1 destination stays advisory broadcast; §7.5 admission is
         // bound-issuer, not destination. active_profile/table_version stay 0
         // (§7.5 — uplink takes no part in profiles).
-        UplinkDataStream us{s.stream_id, s.stream_type, Framer(fc), {}, 0, 0,
-                            {}};
-        us.st.stream_id = s.stream_id;
-        us.st.type = s.stream_type == stream_type::kControl ? "CONTROL"
-                                                            : "TELEMETRY";
-        us.st.tx = true;
-        uplink_streams.push_back(std::move(us));
+        uplink_streams.emplace_back(s.stream_id, s.stream_type, fc);
     }
     DiscoveryCatalog discovery;
     RxCore rx(l.cfg, session, l.have_table ? &l.table : nullptr,
@@ -930,12 +916,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     // window opened within uplink.fallback_ms.
     const auto flush_uplink = [&]() {
         for (UplinkDataStream& us : uplink_streams) {
-            for (const auto& f : us.held) {
-                send_return(active_selection.originator, f.data(), f.size(),
-                            false);
-                ++us.st.sent;
-            }
-            us.held.clear();
+            us.flush([&](const uint8_t* f, size_t n) {
+                send_return(active_selection.originator, f, n, false);
+            });
         }
         uplink_fallback_us.reset();
     };
@@ -2200,45 +2183,21 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                     if (us.stream_id != ev.stream_id) {
                         continue;
                     }
-                    ++us.st.submitted;
-                    if (now_us_it - us.pps_win_start_us >= 1000000) {
-                        us.pps_win_start_us = now_us_it;
-                        us.pps_in_win = 0;
-                    }
-                    if (++us.pps_in_win > l.cfg.policy.uplink.pps_budget) {
-                        ++us.st.dropped_budget;
-                        return;
-                    }
-                    us.framer.on_datagram(
-                        ev.data, ev.len, now,
-                        [&](const uint8_t* f, size_t n, const DataHeader&,
-                            uint64_t) {
-                            if (!qg.enabled() || !ret_tsf_anchored) {
-                                send_return(active_selection.originator, f, n,
-                                            false);
-                                ++us.st.sent;
-                                return;
-                            }
-                            if (us.stream_type == stream_type::kControl) {
-                                // depth 1: latest state wins
-                                if (!us.held.empty()) {
-                                    us.st.dropped_stale += us.held.size();
-                                    us.held.clear();
-                                }
-                            } else if (us.held.size() >=
-                                       l.cfg.policy.uplink.telemetry_hold) {
-                                ++us.st.dropped_stale;  // drop-oldest
-                                us.held.pop_front();
-                            }
-                            us.held.emplace_back(f, f + n);
-                            if (!uplink_fallback_us) {
-                                uplink_fallback_us =
-                                    now_us_it +
-                                    static_cast<uint64_t>(
-                                        l.cfg.policy.uplink.fallback_ms) *
-                                        1000;
-                            }
+                    const bool gated = qg.enabled() && ret_tsf_anchored;
+                    const bool held_one = us.on_datagram(
+                        ev.data, ev.len, now, now_us_it, gated,
+                        l.cfg.policy.uplink,
+                        [&](const uint8_t* f, size_t n) {
+                            send_return(active_selection.originator, f, n,
+                                        false);
                         });
+                    if (held_one && !uplink_fallback_us) {
+                        uplink_fallback_us =
+                            now_us_it +
+                            static_cast<uint64_t>(
+                                l.cfg.policy.uplink.fallback_ms) *
+                                1000;
+                    }
                     return;
                 }
             });

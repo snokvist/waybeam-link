@@ -95,6 +95,7 @@
 #include "wblink/node/stats_fill.h"
 #include "wblink/node/tx_core.h"
 #include "wblink/node/tx_runtime_info.h"
+#include "wblink/node/uplink_data.h"
 #include "wblink/node/uplink_power.h"
 #include "wblink/node/vcmd.h"
 
@@ -133,17 +134,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
     // §7.5 (Pass 183): a dir:"out" stream on a tx node is uplink data
     // delivery — TELEMETRY/CONTROL over udp only, refused otherwise rather
     // than silently ignored (the pre-§7.5 behaviour).
-    struct UplinkAccept {
-        uint8_t stream_id = 0;
-        uint8_t stream_type = 0;
-        // §7.5 strictly-monotonic accept cursor, reset per sender session.
-        uint16_t src_originator = 0;
-        uint32_t src_session = 0;
-        bool have_seq = false;
-        uint32_t last_seq = 0;
-        UplinkDataStreamStats st;
-    };
-    std::vector<UplinkAccept> uplink_accepts;
+    std::vector<UplinkAcceptor> uplink_accepts;
     for (const StreamCfg& s : l.cfg.streams) {
         if (s.dir != Dir::kOut) {
             continue;
@@ -155,14 +146,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                     "— TELEMETRY/CONTROL over udp only\n", s.stream_id);
             return 1;
         }
-        UplinkAccept ua;
-        ua.stream_id = s.stream_id;
-        ua.stream_type = s.stream_type;
-        ua.st.stream_id = s.stream_id;
-        ua.st.type = s.stream_type == stream_type::kControl ? "CONTROL"
-                                                            : "TELEMETRY";
-        ua.st.tx = false;
-        uplink_accepts.push_back(std::move(ua));
+        uplink_accepts.emplace_back(s.stream_id, s.stream_type);
     }
     const uint32_t session = session_nonce();
     // §11.4a key provenance: csa.psk configured ⇒ secret (token off the air);
@@ -853,36 +837,17 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 // shared channel that is another node's stream, not a
                 // rejection. Binding freshness was already refreshed above by
                 // note_valid_rx, per §11.5a / §7.5.
-                for (UplinkAccept& ua : uplink_accepts) {
-                    if (ua.stream_id != dv->hdr.stream_id) {
-                        continue;
-                    }
-                    if (ua.stream_type != dv->hdr.stream_type) {
-                        ++ua.st.rej_stream;
+                for (UplinkAcceptor& ua : uplink_accepts) {
+                    if (ua.on_data(*dv, csa.latched_issuer(),
+                                   [&](const uint8_t* p, size_t n) {
+                                       if (UdpEgress* out =
+                                               bindings.value->egress_for(
+                                                   ua.stream_id)) {
+                                           out->send(p, n);
+                                       }
+                                   })) {
                         return;
                     }
-                    const std::optional<uint16_t> bound = csa.latched_issuer();
-                    if (!bound || *bound != dv->hdr.prefix.originator) {
-                        ++ua.st.rej_unbound;
-                        return;
-                    }
-                    if (ua.have_seq &&
-                        ua.src_originator == dv->hdr.prefix.originator &&
-                        ua.src_session == dv->hdr.prefix.session_id &&
-                        dv->hdr.seq <= ua.last_seq) {
-                        ++ua.st.dup;
-                        return;
-                    }
-                    ua.src_originator = dv->hdr.prefix.originator;
-                    ua.src_session = dv->hdr.prefix.session_id;
-                    ua.have_seq = true;
-                    ua.last_seq = dv->hdr.seq;
-                    if (UdpEgress* out =
-                            bindings.value->egress_for(ua.stream_id)) {
-                        out->send(dv->payload, dv->payload_len);
-                    }
-                    ++ua.st.accepted;
-                    return;
                 }
                 return;
             }
@@ -1217,7 +1182,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                                       true};
             std::vector<UplinkDataStreamStats> uplink_data_stats;
             uplink_data_stats.reserve(uplink_accepts.size());
-            for (const UplinkAccept& ua : uplink_accepts) {
+            for (const UplinkAcceptor& ua : uplink_accepts) {
                 uplink_data_stats.push_back(ua.st);
             }
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,

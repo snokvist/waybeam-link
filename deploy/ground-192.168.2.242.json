@@ -52,6 +52,26 @@
         "kind": "udp",
         "send": "127.0.0.1:5601"
       }
+    },
+    {
+      "_comment": "§7.5 uplink RC ingress — hub telemetry.udp_target points here",
+      "stream_id": 2,
+      "stream_type": "CONTROL",
+      "dir": "in",
+      "bind": {
+        "kind": "udp",
+        "listen": "127.0.0.1:14650"
+      }
+    },
+    {
+      "_comment": "downlink FC telemetry delivery — into the ground hub's UDP bind",
+      "stream_id": 3,
+      "stream_type": "TELEMETRY",
+      "dir": "out",
+      "bind": {
+        "kind": "udp",
+        "send": "127.0.0.1:14550"
+      }
     }
   ],
   "air": {
