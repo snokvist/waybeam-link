@@ -24,6 +24,51 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 182 — the sweep retunes fast where the die says it can (2026-08-15)
+
+**Ruling (operator, 2026-08-15, with Pass 181).** The scout sweep's
+per-channel retune passes `fast=true` when the scout adapter's §15.5
+caps view states `fastretune`; the §11.2 class-0 path applies only to
+same-width hops, which a 20 MHz sweep always is. Dies without the
+capability keep the full retune — measured on the RTL8733B, whose
+"fast" path still blocks ~277 ms vs 345 ms full, which is why devourer
+reports `fastretune:false` there and why the gate is the caps bit
+rather than a try-it heuristic. Exit paths (selection, rest) stay
+`retune_all` + `reapply_tx_power`; mid-sweep the class-0 path leaves
+TXAGC untouched, which is not a regression — the full-path sweep never
+re-applied it either.
+
+**Changed:** §15.5a (sweep bullet). **Evidence:** findings.md
+2026-08-15 (AU fast call 41 ms vs full 130; CU 13 vs 32; BU 277 vs
+345, radio-live unchanged on all three); device sweeps on the .181
+8733BU, 10/10 detection at 300 ms and 500 ms dwells, caps gate
+self-disabling observed via `/api/v1/info`.
+
+## Pass 181 — dwell_ms buys listening, not retuning (2026-08-15)
+
+**Ruling (operator, 2026-08-15; direction decided by measurement per
+the operator's process note — the amendment follows the settled
+mechanism rather than preceding the experiment).** The scout's
+per-channel dwell deadline anchors when the retune hook RETURNS, not
+on the tick timestamp that triggered it. Every downstream deadline —
+dwell, extension base, §15.5a sense barrier — re-anchors with it. The
+engine takes an injected `Hooks::now` clock; a null hook preserves the
+tick anchoring byte for byte (both directions pinned in
+`node_discovery_test`).
+
+**Why.** The blocking retune call costs 32–345 ms per chip/host
+(findings 2026-08-15). Anchored pre-retune, the 8733BU listened
+~155 ms of a 500 ms dwell and would listen ZERO at the 300 ms floor —
+the Android dwell knee (memory `scout_retune_radio_silence`) is the
+same arithmetic with that platform's numbers. A per-chip settle
+constant in the caps view was rejected: the dominant term is per-host,
+so no static per-die number is valid across hosts.
+
+**Changed:** §15.5a (sweep bullet). **Evidence:** findings.md
+2026-08-15; device A/B on the .181 8733BU (old vs new binary, real
+craft emitter): detection 10/10 both, wall +0.8 s = the restored
+listening time.
+
 ## Pass 180 — a build states what it can do (2026-08-15)
 
 **Ruling (coordination `specs/cross/2026-08-14-wblink-library-parity`

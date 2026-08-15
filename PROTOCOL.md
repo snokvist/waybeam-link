@@ -5655,7 +5655,19 @@ supported (§15.2 `scout`).
 
 - **Sweep + discovery.** `scout/start` retunes the **uplink (`role:"tx"`) adapter**
   across `channels` (or `csa.channel_allowlist`), dwelling `dwell_ms` per channel
-  and aggregating the §15.5 passive-discovery view. For claim, the first heard
+  and aggregating the §15.5 passive-discovery view. **The dwell clock starts
+  when the retune returns** (Pass 181): `dwell_ms` buys listening time, and the
+  retune's own cost — a blocking call measured at 32–345 ms depending on chip
+  and host (findings 2026-08-15) — is charged to the sweep's wall clock, never
+  to the listening window. Anchored the old way (on the tick that triggered
+  the retune), an RTL8733B listened for ~155 ms of a 500 ms dwell and for
+  nothing at all below its own 345 ms call. The sweep's per-channel retune
+  uses the **§11.2 class-0 fast retune on dies whose §15.5 caps state
+  `fastretune`** (Pass 182) — same-width hops only, which a 20 MHz sweep
+  always satisfies; dies without the capability (the RTL8733B's "fast" path
+  still blocks ~277 ms) stay on the full retune. The sweep's exit paths —
+  selection and rest — remain full retune + §11.2 TXAGC re-apply on every
+  ear either way. For claim, the first heard
   candidate suffices — the §2 admission count (`N_admit`/`T_admit`) is the
   anti-flood gate for the *latch picker*, not a barrier to a deliberate operator
   claim. During a sweep the node's `net_id` filter is dropped **node-wide** —
