@@ -328,6 +328,35 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.table_version);
         out += '}';
     }
+    // §7.5 uplink streams share the array but carry only their own counters.
+    for (const UplinkDataStreamStats& u : snap.uplink_streams) {
+        if (!first) out += ',';
+        first = false;
+        out += "{\"stream_id\":";
+        append_u64(out, u.stream_id);
+        out += ",\"type\":";
+        append_escaped(out, u.type);
+        if (u.tx) {
+            out += ",\"uplink_submitted\":";
+            append_u64(out, u.submitted);
+            out += ",\"uplink_sent\":";
+            append_u64(out, u.sent);
+            out += ",\"uplink_dropped_stale\":";
+            append_u64(out, u.dropped_stale);
+            out += ",\"uplink_dropped_budget\":";
+            append_u64(out, u.dropped_budget);
+        } else {
+            out += ",\"uplink_accepted\":";
+            append_u64(out, u.accepted);
+            out += ",\"uplink_rej_unbound\":";
+            append_u64(out, u.rej_unbound);
+            out += ",\"uplink_rej_stream\":";
+            append_u64(out, u.rej_stream);
+            out += ",\"uplink_dup\":";
+            append_u64(out, u.dup);
+        }
+        out += '}';
+    }
     out += ']';
 
     // §15.3: cache blocks appear only when the §14.3 role is enabled.

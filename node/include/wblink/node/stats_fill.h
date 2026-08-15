@@ -269,7 +269,9 @@ inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                        const ArqTimingStats* arq_timing = nullptr,
                        const VcmdStatsFill* vcmd = nullptr,
                        uint16_t channel_mhz = 0,
-                       const UplinkStatsFill* uplink = nullptr) {
+                       const UplinkStatsFill* uplink = nullptr,
+                       const std::vector<UplinkDataStreamStats>* uplink_data =
+                           nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -303,6 +305,9 @@ inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
         snap.link.tx_power_tier_effective = uplink->tx_power_tier_effective;
         snap.link.tx_power_override = uplink->tx_power_override;
         snap.link.tx_power_qdb = uplink->tx_power_qdb;
+    }
+    if (uplink_data != nullptr) {
+        snap.uplink_streams = *uplink_data;  // §7.5
     }
     if (vcmd != nullptr) {
         snap.link.cmd_last_nonce = vcmd->cmd_last_nonce;
