@@ -83,6 +83,57 @@ wblink_rx *wblink_rx_create(void);
 void wblink_rx_request_stop(wblink_rx *rx);
 
 /*
+ * Pass 179: supply the config as TEXT instead of a file path. Call BEFORE
+ * `wblink_rx_run`, which is then called with a NULL `config_path`; a call
+ * after the run has started returns 3.
+ *
+ * EXACTLY ONE SOURCE. Passing a non-NULL path with a config set here is
+ * refused (2), not ranked — a precedence rule is something a caller resolves
+ * by guessing, and the guess is invisible until the wrong config flies. A
+ * run with neither is refused for the same reason it always was.
+ *
+ * The string is COPIED; it need not outlive the call. Returns 0, 1 if the
+ * copy failed to allocate, 2 on a NULL/empty argument, 3 after the run
+ * started. Parse and validation failures are reported when the run consumes
+ * it — through `wb_log_set_sink`, which is where every other library
+ * diagnostic goes.
+ */
+int wblink_rx_set_config_json(wblink_rx *rx, const char *json);
+
+/*
+ * Pass 179: pin a scouted craft before the run — the same three fields a
+ * §15.5a selection resolves, without the caller having to know they are
+ * spelled `preferred_originator`, `net_id` and `channel`, or having to
+ * rewrite the config to say so. Call BEFORE `wblink_rx_run`; after it,
+ * returns 3.
+ *
+ * EVERY adapter moves to `channel_mhz`, not `adapters[0]`: the runtime
+ * select retunes all of a spectator's ears onto the craft, and a pre-start
+ * selection that moved only the first would build a diversity node listening
+ * in two places for a craft that is only ever in one.
+ *
+ * `net_id` IS SIGNED, and negative means "leave the config's value alone".
+ * The config field is an optional whose nullopt means "unconfigured — accept
+ * any net_id", a state §3.0 keeps distinct from 0 because collapsing the two
+ * makes an unconfigured node deaf to every non-zero net_id. 0 is therefore
+ * not a usable stand-in for "unset", and the trap is not hypothetical: §15.5a
+ * serialises the live selection as `net_id.value_or(0)`, so a consumer that
+ * reads a selection back and hands it straight to this call would pin the
+ * filter on 0 and go silently deaf — by a round trip through our own API.
+ * Values above 255 are refused.
+ *
+ * `originator` 0 is refused (2) — it is §12's "no preference" sentinel, so a
+ * selection naming it is a caller bug rather than a selection — as is a
+ * 0 MHz channel, which would tune the node nowhere. Returns 0 on success.
+ *
+ * The selection is applied to the loaded config BEFORE the config summary is
+ * logged, so what an operator reads in the log is the channel the node will
+ * actually fly on.
+ */
+int wblink_rx_set_selection(wblink_rx *rx, uint16_t originator,
+                            int32_t net_id, uint16_t channel_mhz);
+
+/*
  * Supply pre-opened USB device descriptors, parallel to the config's
  * `adapters[]`, with -1 in a slot meaning "enumerate this one by bus path".
  * Call BEFORE `wblink_rx_run`; a call after it has started is ignored and

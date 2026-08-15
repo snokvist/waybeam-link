@@ -105,6 +105,25 @@ typedef int (*wblink_mode_apply_cb)(const char *cmd, const char *name,
 wblink_tx *wblink_tx_create(void);
 
 /*
+ * Pass 179: supply the config as TEXT instead of a file path. Call BEFORE
+ * `wblink_tx_run`, which is then called with a NULL `config_path`; a call
+ * after the run has started returns 3.
+ *
+ * EXACTLY ONE SOURCE. Passing a non-NULL path with a config set here is
+ * refused with WBLINK_TX_BAD_ARG (-1, NOT 2 — 2 is the §9.10 wedge in this
+ * header's space, and a supervisor acts on it), not ranked — a precedence rule is something a caller resolves
+ * by guessing, and the guess is invisible until the wrong config flies. A
+ * run with neither is refused for the same reason it always was.
+ *
+ * The string is COPIED; it need not outlive the call. Returns 0, 1 if the
+ * copy failed to allocate, 2 on a NULL/empty argument, 3 after the run
+ * started. Parse and validation failures are reported when the run consumes
+ * it — through `wb_log_set_sink`, which is where every other library
+ * diagnostic goes.
+ */
+int wblink_tx_set_config_json(wblink_tx *tx, const char *json);
+
+/*
  * Pre-opened USB device fds for the node's adapters, one per config
  * `adapters[]` slot, with -1 meaning "enumerate this one by bus path". Call
  * BEFORE `wblink_tx_run`; a call after it has started is ignored and returns

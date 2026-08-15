@@ -60,6 +60,13 @@ if(WBLINK_RADIO)
     # AirBackend::create's kRadio branch does not exist to test.
     add_wb_test(node_fd_source_test wblink_io wblink_node)
 endif()
+
+# Pass 179, deliberately OUTSIDE the WBLINK_RADIO gate: the fixture is
+# air.kind=udp and every run in it is refused before a backend exists, so
+# gating it left the exactly-one-config-source contract untested in exactly
+# the receive-only builds that motivated a text config.
+add_wb_test(node_config_api_test wblink_io wblink_node)
+
 add_wb_test(scout_sense_test wblink_io)
 add_wb_test(scout_store_test wblink_io)
 add_wb_test(radiotap_test wblink_io)
