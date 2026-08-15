@@ -74,7 +74,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "WBLINK_WERROR": "ON",
-        "WBLINK_DEVOURER_CHIPS": "8733b"
+        "WBLINK_DEVOURER_CHIPS": "8733b",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
     },
     {
