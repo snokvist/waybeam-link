@@ -12,6 +12,41 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-15 — 8733BU rung-5 drain ceiling is ~73% of the table-derived target; and one unsupported venc field (501) starves ALL bitrate pushes
+
+**Setup.** CV610 craft (.181, 8733BU, 5745/HT20, table-8733b all long-GI,
+rung 5 = MCS5 lgi, quiet_gap on, FEC 300/200) feeding 1080p100 frame-shm;
+ground = .242 in-process mod_wblink, near-field (RSSI −30, SNR 31). venc
+initially static 16 Mbps with `venc.enabled:false`. 20–30 s counter-delta
+windows on both ends.
+
+**Measured.** At 16 Mbps offered: link drains ~14.4 Mbps video at ~1740 pps,
+ring chronically full — `shm_full_drops` 12.4 fps (12.5% of frames dropped
+whole at the source), air loss only 1.1% pre-FEC, `tx_failed` 0. At 8 Mbps:
+0 source drops, 98.8 fps. `derive_bitrate_kbps` on table-8733b rung 5 says
+19.6 Mbps (52000 × 0.463 airtime × 0.82 FEC − 96 reserve) — the real
+8733BU drain is ~73% of that. The airtime/FEC constants are 8812/SSC338Q
+Pass-111 seeds; the 8733BU's per-packet cost (USB2, long-GI only, no
+aggregation tuning) eats the difference. **Open:** §17 re-derivation for the
+8733b hardware class; until then the derived target on EVERY rung overshoots
+by a similar factor, and `max_bitrate_kbps` only clamps the top — a demote to
+rung 2 (derived 9.3 Mbps, real ~6.8) will source-drop again at range.
+Source-side ring overflow produces NO air loss, so the §9.5 selector never
+sees it — it is invisible to demotion logic by construction.
+
+**Actuation fix + a trap.** Flipping `venc.enabled:true` with
+`max_bitrate_kbps:13000` (ceiling minus margin) holds 13.1 Mbps / 98.8 fps /
+0 source drops at rung 5. But the first attempt silently actuated NOTHING:
+CV610's venc returns **501** on `video0.maxIBytes`/`maxPBytes`, and the
+caps txn's failure hold-off (`no_retry_until_ms_`, shared across txn kinds in
+`io/src/venc_http.cpp`) starved the bitrate txn forever — 53 pushes, 53
+failures, `commanded_bitrate_kbps` 0, no log line. `venc.frame_caps:false`
+works around it. **Open:** the actuator should latch caps-unsupported on
+501/4xx the way it latches `live_fallback_` on 404, and a persistent
+all-pushes-failing state deserves a `wb_logf` line; residual ~1.2% pre-FEC
+air loss at SNR 31 near-field is a floor across 8–16 Mbps offered rates —
+unexplained, and where ground RX diversity would actually help.
+
 ## 2026-08-15 — 8733B refuses SGI at the TX-descriptor gate: a short-GI profile rung silently kills every DATA frame; and two crafts on one channel starve each other regardless of net_id
 
 **Setup.** First device deployment of `waybeam-link tx` on the CV610 craft
