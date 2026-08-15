@@ -1,5 +1,5 @@
 {
-  "_comment": "CV610 craft (.181): RTL8733BU on devourer at 5745/HT20, originator 18 / net_id 1 \u2014 distinct from the .232 craft (17/0) for dual-craft testing. 8733B has no TX-power actuator (\u00a710.5) so no power keys. venc \u00a79.6 bitrate actuation ON (live-verified 2026-08-15): max_bitrate_kbps 12000 \u2014 the 8733BU rung-5 drain ceiling is ~14.4 Mbps (long-GI, ~1740 pps) as a dedicated process, but this node now runs IN-PROCESS in waybeam-hub (mod_wblink tx) and hub residency costs ~1 Mbps of TX-pump margin (13000 was clean standalone, dropped 0.3-2.3 fps in-process; 12000 measures zero) \u2014 the table-8733b derived target (19.6 Mbps) overshoots because its airtime/FEC constants are 8812-calibrated seeds (\u00a717 re-derive pending). frame_caps false: CV610 venc returns 501 on video0.maxIBytes/maxPBytes and the failed caps txn's holdoff starves the bitrate push. \u00a77.5 uplink streams mirror the .232 craft.",
+  "_comment": "CV610 craft (.181): RTL8733BU on devourer at 5745/HT20, originator 18 / net_id 1 \u2014 distinct from the .232 craft (17/0) for dual-craft testing. 8733B has no TX-power actuator (\u00a710.5) so no power keys. venc \u00a79.6 bitrate actuation ON (live-verified 2026-08-15): max_bitrate_kbps 8000 for the 720p100 profile (venc video0.size 1280x720; ~1030 pps, air loss 0.3%, CPU ~60% of one core vs ~99% at 1080p/12000). Ceiling context: 8733BU rung-5 drain is ~14.4 Mbps standalone; IN-PROCESS (waybeam-hub mod_wblink tx) hub residency costs ~1 Mbps of TX-pump margin (13000 clean standalone dropped 0.3-2.3 fps in-process; 12000 measured zero at 1080p) \u2014 the table-8733b derived target (19.6 Mbps) overshoots because its airtime/FEC constants are 8812-calibrated seeds (\u00a717 re-derive pending). frame_caps false: CV610 venc returns 501 on video0.maxIBytes/maxPBytes and the failed caps txn's holdoff starves the bitrate push. \u00a77.5 uplink streams mirror the .232 craft.",
   "node": {
     "originator": 18,
     "role": "tx",
@@ -97,7 +97,7 @@
     "host": "127.0.0.1:80",
     "enabled": true,
     "recovery_enabled": true,
-    "max_bitrate_kbps": 12000,
+    "max_bitrate_kbps": 8000,
     "frame_caps": false
   },
   "stats": {
