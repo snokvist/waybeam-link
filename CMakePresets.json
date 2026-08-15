@@ -7,7 +7,8 @@
       "binaryDir": "${sourceDir}/build/dev",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "WBLINK_SANITIZE": "ON"
+        "WBLINK_SANITIZE": "ON",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
     },
     {
@@ -15,7 +16,8 @@
       "displayName": "Host release",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
     },
     {
@@ -24,7 +26,8 @@
       "binaryDir": "${sourceDir}/build/x86-ground",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "WBLINK_DEVOURER_CHIPS": "all"
+        "WBLINK_DEVOURER_CHIPS": "all",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
     },
     {
@@ -34,7 +37,8 @@
       "toolchainFile": "${sourceDir}/cmake/toolchain-rk3566.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "WBLINK_DEVOURER_CHIPS": "all"
+        "WBLINK_DEVOURER_CHIPS": "all",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
     },
     {
@@ -43,7 +47,8 @@
       "binaryDir": "${sourceDir}/build/ssc338q",
       "toolchainFile": "${sourceDir}/cmake/toolchain-ssc338q.cmake",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
     },
     {
@@ -53,7 +58,8 @@
       "toolchainFile": "${sourceDir}/cmake/toolchain-ssc338q.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "WBLINK_DEVOURER_CHIPS": "au"
+        "WBLINK_DEVOURER_CHIPS": "au",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
     },
     {
@@ -63,7 +69,8 @@
       "toolchainFile": "${sourceDir}/cmake/toolchain-ssc338q.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "WBLINK_DEVOURER_CHIPS": "eu"
+        "WBLINK_DEVOURER_CHIPS": "eu",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
     },
     {
@@ -74,7 +81,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "WBLINK_WERROR": "ON",
-        "WBLINK_DEVOURER_CHIPS": "8733b"
+        "WBLINK_DEVOURER_CHIPS": "8733b",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
     },
     {
@@ -90,7 +98,8 @@
         "WBLINK_BUILD_TESTS": "OFF",
         "WBLINK_FRAME_SHM": "OFF",
         "WBLINK_CONTROL_SERVER": "OFF",
-        "WBLINK_VENC": "OFF"
+        "WBLINK_VENC": "OFF",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
     }
   ],
