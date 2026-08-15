@@ -27,6 +27,7 @@
 
 #include "wblink/config.h"
 #include "wblink/frame_reassembler.h"
+#include "wblink/log.h"
 #include "wblink/mcs_probe.h"
 #include "wblink/recovery.h"
 #include "wblink/reporter.h"
@@ -578,11 +579,10 @@ struct RxCore {
                 continue;
             }
             inject(frame, sizeof(frame), req.target_originator);
-            std::fprintf(stderr,
-                         "rx: latch recovery stream=%u origin=%u attempt %u/%u\n",
-                         key.stream_id, key.originator,
-                         unsigned(latch_recovery_.attempts(key)),
-                         unsigned(LatchRecovery::kAttempts));
+            wb_logf("rx: latch recovery stream=%u origin=%u attempt %u/%u\n",
+                    key.stream_id, key.originator,
+                    unsigned(latch_recovery_.attempts(key)),
+                    unsigned(LatchRecovery::kAttempts));
         }
     }
 

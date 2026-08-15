@@ -108,7 +108,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
            const FrameSink& frame_out, RxRuntimeControl* runtime_control) {
     auto air = AirBackend::create(l.cfg);
     if (!air) {
-        std::fprintf(stderr, "air error: %s\n", air.error.c_str());
+        wb_logf("air error: %s\n", air.error.c_str());
         return 1;
     }
     PacketEventTrace packet_trace("rx");
@@ -191,19 +191,18 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             upwr.curve = *curve.value;
             upwr.resolve_owner();
             if (upwr.owner_qdb) {
-                std::fprintf(stderr,
-                             "uplink: power_map mcs=%u -> %d qdb (explicit)\n",
-                             l.cfg.air.uplink_mcs, *upwr.owner_qdb);
+                wb_logf("uplink: power_map mcs=%u -> %d qdb (explicit)\n",
+                        l.cfg.air.uplink_mcs, *upwr.owner_qdb);
             }
         } else {
-            std::fprintf(stderr, "uplink: power_map load failed: %s\n",
-                         curve.error.c_str());
+            wb_logf("uplink: power_map load failed: %s\n",
+                    curve.error.c_str());
         }
     }
 
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
-        std::fprintf(stderr, "binding error: %s\n", bindings.error.c_str());
+        wb_logf("binding error: %s\n", bindings.error.c_str());
         return 1;
     }
     const uint32_t session = session_nonce();
@@ -327,11 +326,10 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                              air.value->adapter_mac(uplink_idx))
             : "udp";
     if (uplink_adapter != nullptr && uplink_identity.empty()) {
-        std::fprintf(stderr,
-                     "uplink: adapter \"%s\" reports no EFUSE identity — "
-                     "§10.7 calibration and any absolute curve are REFUSED "
-                     "(Pass 154 D3); running at the §10.5 safe boot offset\n",
-                     uplink_adapter->name.c_str());
+        wb_logf("uplink: adapter \"%s\" reports no EFUSE identity — "
+                "§10.7 calibration and any absolute curve are REFUSED "
+                "(Pass 154 D3); running at the §10.5 safe boot offset\n",
+                uplink_adapter->name.c_str());
     }
     // §3.16 (Pass 153): the ground's receiver half (craft §10.6 downlink
     // probes → tallies) and the probe-exchange observability counters.
@@ -354,10 +352,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         uplink_artifact_fp = uplink_calib_fingerprint(*stored.value);
         if (stored.value->local_adapter_identity != uplink_identity) {
             uplink_artifact_stale = true;
-            std::fprintf(stderr,
-                         "uplink: artifact STALE (stored %s, live %s)\n",
-                         stored.value->local_adapter_identity.c_str(),
-                         uplink_identity.c_str());
+            wb_logf("uplink: artifact STALE (stored %s, live %s)\n",
+                    stored.value->local_adapter_identity.c_str(),
+                    uplink_identity.c_str());
         }
         uplink_artifact = std::move(*stored.value);
     }
@@ -469,12 +466,11 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     if (uplink_adapter != nullptr) {
         const bool ok = air.value->set_power_offset_qdb(
             uplink_idx, uplink_adapter->power_offset_qdb);
-        std::fprintf(stderr,
-                     "power: %s §10.5 boot offset %+d qdb (bound %+d) -> %s\n",
-                     uplink_adapter->name.c_str(),
-                     static_cast<int>(uplink_adapter->power_offset_qdb),
-                     static_cast<int>(uplink_adapter->power_offset_max_qdb),
-                     ok ? "applied" : "NOT APPLIED");
+        wb_logf("power: %s §10.5 boot offset %+d qdb (bound %+d) -> %s\n",
+                uplink_adapter->name.c_str(),
+                static_cast<int>(uplink_adapter->power_offset_qdb),
+                static_cast<int>(uplink_adapter->power_offset_max_qdb),
+                ok ? "applied" : "NOT APPLIED");
     }
     uplink_restore_actuators();
     uplink_pairing_key = uplink_pairing_now();
@@ -485,21 +481,21 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         const std::optional<int32_t> aq = uplink_artifact_qdb();
         // Names the owner from the SAME precedence the actuator ran through,
         // so the log cannot describe a different node than the radio is on.
-        std::fprintf(stderr, "uplink: power owner = %s", upwr.owner_name());
+        wb_logf("uplink: power owner = %s", upwr.owner_name());
         if (upwr.owner_qdb) {
-            std::fprintf(stderr, " (%d qdb)", *upwr.owner_qdb);
+            wb_logf(" (%d qdb)", *upwr.owner_qdb);
         } else if (aq) {
-            std::fprintf(stderr, " (%d qdb, fp=0x%02x)", *aq,
-                         uplink_artifact_fp);
+            wb_logf(" (%d qdb, fp=0x%02x)", *aq,
+                    uplink_artifact_fp);
         } else if (uplink_artifact && active_selection.originator == 0) {
             // Not stale in the operator sense — nothing is selected yet, so
             // the pairing simply cannot be evaluated. Saying STALE here would
             // send people looking for a mismatch that does not exist.
-            std::fprintf(stderr, " (artifact present, awaiting craft)");
+            wb_logf(" (artifact present, awaiting craft)");
         } else if (uplink_artifact_stale) {
-            std::fprintf(stderr, " (artifact present but STALE)");
+            wb_logf(" (artifact present but STALE)");
         }
-        std::fprintf(stderr, "\n");
+        wb_logf("\n");
     }
 
     // One place that turns live §10.7/§3.16 state into the §15.3 fields, so
@@ -600,14 +596,14 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                 frame_out(sid, f, len);
             };
             fo.count_locally = true;
-            std::fprintf(stderr, "rx: frame egress stream %u -> caller sink\n",
-                         s.stream_id);
+            wb_logf("rx: frame egress stream %u -> caller sink\n",
+                    s.stream_id);
         } else {
 #if WBLINK_FRAME_SHM
             auto r = FrameShmRing::create(s.bind.name);
             if (!r) {
-                std::fprintf(stderr, "frame-shm egress '%s': %s\n",
-                             s.bind.name.c_str(), r.error.c_str());
+                wb_logf("frame-shm egress '%s': %s\n",
+                        s.bind.name.c_str(), r.error.c_str());
                 return 1;
             }
             fo.ring = std::move(*r.value);
@@ -617,16 +613,15 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             fo.sink = [ring](const uint8_t* f, size_t len) {
                 ring->write_frame(f, len);
             };
-            std::fprintf(stderr, "rx: frame-shm egress '%s' created\n",
-                         s.bind.name.c_str());
+            wb_logf("rx: frame-shm egress '%s' created\n",
+                    s.bind.name.c_str());
 #else
             // Fail closed. A node that silently dropped its video because the
             // build lacked a subsystem its config asks for would look like a
             // link fault, and be debugged as one.
-            std::fprintf(stderr,
-                         "frame-shm egress '%s' configured, but this build has "
-                         "WBLINK_FRAME_SHM=OFF and no frame sink was supplied\n",
-                         s.bind.name.c_str());
+            wb_logf("frame-shm egress '%s' configured, but this build has "
+                    "WBLINK_FRAME_SHM=OFF and no frame sink was supplied\n",
+                    s.bind.name.c_str());
             return 1;
 #endif
         }
@@ -645,16 +640,16 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         for (const CacheEndpointCfg& e : cr.caches) {
             auto ep = CacheUdp::resolve(e.endpoint);
             if (!ep) {
-                std::fprintf(stderr, "cache.repair '%s': %s\n",
-                             e.endpoint.c_str(), ep.error.c_str());
+                wb_logf("cache.repair '%s': %s\n",
+                        e.endpoint.c_str(), ep.error.c_str());
                 return 1;
             }
             cache_endpoints.emplace(e.originator, *ep.value);
         }
         auto sock = CacheUdp::open(cr.listen);
         if (!sock) {
-            std::fprintf(stderr, "cache.repair listen: %s\n",
-                         sock.error.c_str());
+            wb_logf("cache.repair listen: %s\n",
+                    sock.error.c_str());
             return 1;
         }
         cache_repair_sock =
@@ -683,8 +678,8 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                 cache_out = &fo;
             }
         }
-        std::fprintf(stderr, "rx: cache repair on stream %u (%zu caches)\n",
-                     cr.stream_id, cr.caches.size());
+        wb_logf("rx: cache repair on stream %u (%zu caches)\n",
+                cr.stream_id, cr.caches.size());
     }
     std::unique_ptr<CacheStore> cache_store;
     std::unique_ptr<CacheUdp> cache_store_sock;
@@ -696,16 +691,16 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         const CacheStoreCfg& cs = l.cfg.cache.store;
         auto sock = CacheUdp::open(cs.listen);
         if (!sock) {
-            std::fprintf(stderr, "cache.store listen: %s\n",
-                         sock.error.c_str());
+            wb_logf("cache.store listen: %s\n",
+                    sock.error.c_str());
             return 1;
         }
         cache_store_sock = std::make_unique<CacheUdp>(std::move(*sock.value));
         for (const std::string& t : cs.status_to) {
             auto ep = CacheUdp::resolve(t);
             if (!ep) {
-                std::fprintf(stderr, "cache.store status_to '%s': %s\n",
-                             t.c_str(), ep.error.c_str());
+                wb_logf("cache.store status_to '%s': %s\n",
+                        t.c_str(), ep.error.c_str());
                 return 1;
             }
             cache_status_to.push_back(*ep.value);
@@ -721,16 +716,16 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         if (cs.controller) {
             auto ep = CacheUdp::resolve(cs.controller->endpoint);
             if (!ep) {
-                std::fprintf(stderr, "cache.store controller '%s': %s\n",
-                             cs.controller->endpoint.c_str(), ep.error.c_str());
+                wb_logf("cache.store controller '%s': %s\n",
+                        cs.controller->endpoint.c_str(), ep.error.c_str());
                 return 1;
             }
             cache_controller_endpoint = *ep.value;
             cache_assignment_gate = std::make_unique<CacheAssignmentGate>(
                 l.cfg.node.originator, cs.controller->originator);
         }
-        std::fprintf(stderr, "rx: cache store on '%s' (%zu streams)\n",
-                     cs.listen.c_str(), cs.stream_ids.size());
+        wb_logf("rx: cache store on '%s' (%zu streams)\n",
+                cs.listen.c_str(), cs.stream_ids.size());
     }
 
     uint32_t cache_assignment_epoch = 0;
@@ -907,10 +902,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             if (n > sizeof(tmp)) {
                 // Was a bare `return` — a dropped LINK_REPORT with no counter
                 // and no log, on the stream §10.6 scores its dwells from.
-                std::fprintf(stderr,
-                             "return: LINK_REPORT %zu B exceeds %zu B, "
-                             "dropped\n",
-                             n, sizeof(tmp));
+                wb_logf("return: LINK_REPORT %zu B exceeds %zu B, "
+                        "dropped\n",
+                        n, sizeof(tmp));
                 ++ret_window_misses;
                 return;
             }
@@ -1126,7 +1120,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         if (sa.abort_downlink && start_vehicle_command) {
             (void)start_vehicle_command("calibrate", 0);
         }
-        std::fprintf(stderr, "uplink-calib: CANCELLED (%s)\n", why);
+        wb_logf("uplink-calib: CANCELLED (%s)\n", why);
     };
     // §9.10: the ground's designated uplink TX adapter gets the same
     // CCX-liveness watchdog as the craft's radio.
@@ -1254,9 +1248,8 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         selection_state = "tuned";
         scout.set_rest_chan(operating_chan);
         scout.set_rest_filter(active_selection.net_id);
-        std::fprintf(stderr,
-                     "spectator: tuned originator=%u net_id=%u %u MHz\n",
-                     originator, candidate->net_id, candidate->chan);
+        wb_logf("spectator: tuned originator=%u net_id=%u %u MHz\n",
+                originator, candidate->net_id, candidate->chan);
         return "";
     };
     const auto build_selection_json = [&]() {
@@ -1436,8 +1429,8 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         previous_selection_state = selection_state;
         pending_selection = LinkSelection{orig, target, 0, cand->net_id};
         selection_state = "claiming";
-        std::fprintf(stderr, "csa: claim originator=%u net_id=%u %u->%u MHz\n",
-                     orig, cand->net_id, cand->chan, target);
+        wb_logf("csa: claim originator=%u net_id=%u %u->%u MHz\n",
+                orig, cand->net_id, cand->chan, target);
         return "";
     };
 
@@ -1524,9 +1517,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                     "{\"ok\":false,\"error\":\"rejected (rate-limit "
                     "or no key)\"}"};
         }
-        std::fprintf(stderr, "vcmd: campaign %s=%d nonce=%u -> %u\n",
-                     cmd.c_str(), arg, vissuer.nonce(),
-                     active_selection.originator);
+        wb_logf("vcmd: campaign %s=%d nonce=%u -> %u\n",
+                cmd.c_str(), arg, vissuer.nonce(),
+                active_selection.originator);
         return {200, "{\"ok\":true,\"nonce\":" +
                          std::to_string(vissuer.nonce()) + "}"};
     };
@@ -1558,9 +1551,8 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     // Fail closed, for the same reason the frame-shm branch does: a node whose
     // control plane silently was not there is debugged as a network fault.
     if (!l.cfg.control.bind.empty()) {
-        std::fprintf(stderr,
-                     "control: '%s' configured, but this build has "
-                     "WBLINK_CONTROL_SERVER=OFF\n", l.cfg.control.bind.c_str());
+        wb_logf("control: '%s' configured, but this build has "
+                "WBLINK_CONTROL_SERVER=OFF\n", l.cfg.control.bind.c_str());
         return 1;
     }
 #else
@@ -1568,7 +1560,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     if (!l.cfg.control.bind.empty()) {
         auto cs = ControlServer::create(l.cfg.control.bind);
         if (!cs) {
-            std::fprintf(stderr, "control: %s\n", cs.error.c_str());
+            wb_logf("control: %s\n", cs.error.c_str());
             return 1;
         }
         control = std::move(*cs.value);
@@ -1986,9 +1978,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                 }
                 uplink_cal_craft = active_selection.originator;
                 if (both) calib_seq.start(now_ms());
-                std::fprintf(stderr, "uplink-calib: START mcs=%u%s\n",
-                             l.cfg.air.uplink_mcs,
-                             both ? " (bi-directional)" : "");
+                wb_logf("uplink-calib: START mcs=%u%s\n",
+                        l.cfg.air.uplink_mcs,
+                        both ? " (bi-directional)" : "");
                 return "";
             };
             h.scout_quickconnect = do_claim;
@@ -2094,8 +2086,8 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         // §6.4 RX-local NACK-emission gate — this node only (§15.5).
         h.arq_enable = [&](bool enabled) -> std::string {
             if (arq_rx_enabled != enabled) {
-                std::fprintf(stderr, "arq: rx NACK emission %s\n",
-                             enabled ? "enabled" : "disabled");
+                wb_logf("arq: rx NACK emission %s\n",
+                        enabled ? "enabled" : "disabled");
             }
             arq_rx_enabled = enabled;
             return "";
@@ -2130,13 +2122,13 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             arq_timing.reset();
         };
         control->set_handlers(std::move(h));
-        std::fprintf(stderr, "control: REST on %s (rx)\n",
-                     l.cfg.control.bind.c_str());
+        wb_logf("control: REST on %s (rx)\n",
+                l.cfg.control.bind.c_str());
     }
 #endif  // WBLINK_CONTROL_SERVER
-    std::fprintf(stderr, "rx: session=%u, %zu adapters, running%s\n",
-                 session, air.value->rx_adapters(),
-                 qg.enabled() ? " (quiet-gap returns)" : "");
+    wb_logf("rx: session=%u, %zu adapters, running%s\n",
+            session, air.value->rx_adapters(),
+            qg.enabled() ? " (quiet-gap returns)" : "");
     while (stop == 0) {
         // One timestamp per iteration (see run_tx): callbacks and tick share
         // it so core-injected time never steps backward.
@@ -2394,12 +2386,11 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             if (const auto& dw = uplink_cal.last_dwell();
                 dw.seq != uplink_last_dwell_seq) {
                 uplink_last_dwell_seq = dw.seq;
-                std::fprintf(stderr,
-                             "uplink-calib: dwell#%u rung=%u %s qdb=%d "
-                             "sent=%u/%u received=%u loss=%upermille rssi=%d\n",
-                             dw.seq, dw.rung, dw.verify ? "VERIFY" : "probe ",
-                             dw.qdb, dw.sent, dw.target, dw.received,
-                             dw.loss_milli, dw.rssi_mean);
+                wb_logf("uplink-calib: dwell#%u rung=%u %s qdb=%d "
+                        "sent=%u/%u received=%u loss=%upermille rssi=%d\n",
+                        dw.seq, dw.rung, dw.verify ? "VERIFY" : "probe ",
+                        dw.qdb, dw.sent, dw.target, dw.received,
+                        dw.loss_milli, dw.rssi_mean);
             }
             // A craft change mid-run invalidates the measurement in progress
             // (D4) — the artifact stamps the craft identity, and the §3.16
@@ -2425,9 +2416,8 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                 // belt the craft persist carries — no future start path may
                 // persist an artifact keyed on "" (it would match nothing
                 // and read permanently stale).
-                std::fprintf(stderr,
-                             "uplink: artifact write refused — no adapter "
-                             "identity (Pass 154 D3)\n");
+                wb_logf("uplink: artifact write refused — no adapter "
+                        "identity (Pass 154 D3)\n");
             } else if (ua.artifact_ready) {
                 UplinkArtifact art;
                 art.local_adapter_identity = uplink_identity;
@@ -2449,10 +2439,9 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     // restore edge here so the actuator goes back to its
                     // pre-run owner instead of holding a placement that dies
                     // at the next boot.
-                    std::fprintf(stderr,
-                                 "uplink-calib: artifact write FAILED (%s) — "
-                                 "run FAILED, placement not persisted\n",
-                                 l.cfg.policy.calibration.artifact_dir.c_str());
+                    wb_logf("uplink-calib: artifact write FAILED (%s) — "
+                            "run FAILED, placement not persisted\n",
+                            l.cfg.policy.calibration.artifact_dir.c_str());
                     uplink_cal.fail_persist();
                     const UplinkCalibActions fa = uplink_cal.tick(now_ms());
                     if (fa.restore) uplink_restore_actuators();
@@ -2460,9 +2449,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     uplink_artifact = std::move(art);
                     uplink_artifact_fp = fp;
                     uplink_artifact_stale = false;
-                    std::fprintf(stderr,
-                                 "uplink-calib: DONE %zu rungs fp=0x%02x\n",
-                                 uplink_cal.placements().size(), fp);
+                    wb_logf("uplink-calib: DONE %zu rungs fp=0x%02x\n",
+                            uplink_cal.placements().size(), fp);
                     for (const UplinkPlacement& pl : uplink_cal.placements()) {
                         std::fprintf(
                             stderr,
@@ -2490,16 +2478,15 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 uplink_cal.state(), rx.craft_calib_state(), now_ms());
             if (sa.start_downlink) {
                 const auto r = start_vehicle_command("calibrate", 1);
-                std::fprintf(stderr,
-                             "calib-seq: uplink done -> downlink (%d)\n",
-                             r.first);
+                wb_logf("calib-seq: uplink done -> downlink (%d)\n",
+                        r.first);
             }
             if (!calib_seq.active()) {
-                std::fprintf(stderr, "calib-seq: %s%s%s\n",
-                             CalibSequencer::phase_name(calib_seq.phase()),
-                             calib_seq.fail_reason() ? " " : "",
-                             calib_seq.fail_reason() ? calib_seq.fail_reason()
-                                                     : "");
+                wb_logf("calib-seq: %s%s%s\n",
+                        CalibSequencer::phase_name(calib_seq.phase()),
+                        calib_seq.fail_reason() ? " " : "",
+                        calib_seq.fail_reason() ? calib_seq.fail_reason()
+                                                : "");
             }
         }
         const int air_timeout =
@@ -2517,11 +2504,10 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 if (const DataView* dv = std::get_if<DataView>(&dec)) {
                     // sid: seq spaces are per-stream — a gap analysis over
                     // this trace must never conflate streams' counters.
-                    std::fprintf(stderr,
-                                 "mcstrace seq=%u mcs=%u ad=%u rssi=%d sid=%u\n",
-                                 dv->hdr.seq, meta.rx_mcs, meta.adapter_id,
-                                 static_cast<int>(rssi),
-                                 static_cast<unsigned>(dv->hdr.stream_id));
+                    wb_logf("mcstrace seq=%u mcs=%u ad=%u rssi=%d sid=%u\n",
+                            dv->hdr.seq, meta.rx_mcs, meta.adapter_id,
+                            static_cast<int>(rssi),
+                            static_cast<unsigned>(dv->hdr.stream_id));
                 }
             }
             discovery.observe(dec, now, meta.net_id);
@@ -2557,8 +2543,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     // measured across two channels under one channel_mhz
                     // identity — worse than having no artifact at all.
                     cancel_calibration("CSA retune");
-                    std::fprintf(stderr, "csa: following -> %u MHz\n",
-                                 c->target_chan);
+                    wb_logf("csa: following -> %u MHz\n",
+                            c->target_chan);
                 }
                 return;
             }
@@ -2650,9 +2636,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     if (accepted && vc->cmd_id == vcmd_id::kMtuTier &&
                         std::strcmp(vissuer.state_str(), "acked") == 0) {
                         mtu_effective = mtu_tier::budget(vc->cmd_arg);
-                        std::fprintf(stderr,
-                                     "mtu: vehicle ACK tier=%u budget=%u\n",
-                                     vc->cmd_arg, mtu_effective);
+                        wb_logf("mtu: vehicle ACK tier=%u budget=%u\n",
+                                vc->cmd_arg, mtu_effective);
                     }
                 }
                 return;  // a ground never acts on a command
@@ -2761,10 +2746,9 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     active_selection.chan = static_cast<uint16_t>(operating_chan);
                     assign_caches(active_selection);
                     selection_state = "latched";
-                    std::fprintf(stderr,
-                                 "link: latched originator=%u (%u MHz) — "
-                                 "selection bound\n",
-                                 *latched, operating_chan);
+                    wb_logf("link: latched originator=%u (%u MHz) — "
+                            "selection bound\n",
+                            *latched, operating_chan);
                 }
             }
         }
@@ -2798,19 +2782,17 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     }
                     if (!air.value->retune_all(ca->target_chan, ca->target_bw,
                                                false)) {
-                        std::fprintf(stderr,
-                                     "cache: assignment retune to %u failed\n",
-                                     ca->target_chan);
+                        wb_logf("cache: assignment retune to %u failed\n",
+                                ca->target_chan);
                         continue;
                     }
                     air.value->set_filter_net_id(ca->target_net_id);
                     cache_store->assign_target(ca->target_originator);
                     cache_assignment_gate->commit(*ca);
-                    std::fprintf(stderr,
-                                 "cache: receiver %u assigned vehicle %u "
-                                 "channel %u net_id %u\n",
-                                 ca->prefix.originator, ca->target_originator,
-                                 ca->target_chan, ca->target_net_id);
+                    wb_logf("cache: receiver %u assigned vehicle %u "
+                            "channel %u net_id %u\n",
+                            ca->prefix.originator, ca->target_originator,
+                            ca->target_chan, ca->target_net_id);
                     continue;
                 }
                 const CacheRequestView* rq =
@@ -2915,9 +2897,9 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     // position of its ears must not verify with them —
                     // abandon the campaign; the armed craft reverts on its
                     // own verify timeout and reconverges on prev_chan.
-                    std::fprintf(stderr, "csa: commit retune to %u MHz "
-                                         "FAILED — campaign abandoned\n",
-                                 ia.chan_mhz);
+                    wb_logf("csa: commit retune to %u MHz "
+                                    "FAILED — campaign abandoned\n",
+                            ia.chan_mhz);
                     issuer.note_commit_failed();
                     if (previous_selection) {
                         air.value->retune_all(previous_selection->chan,
@@ -2944,7 +2926,7 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     scout.set_rest_filter(active_selection.net_id);
                     selection_state = "verifying";
                 }
-                std::fprintf(stderr, "csa: commit -> %u MHz\n", ia.chan_mhz);
+                wb_logf("csa: commit -> %u MHz\n", ia.chan_mhz);
                 break;
             case CsaIssuer::IssuerAction::Kind::kSendBeacon: {
                 // §11.6 rendezvous beacon (Pass 69) — campaign timing, never
@@ -2967,8 +2949,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 }
                 pending_selection.reset();
                 previous_selection.reset();
-                std::fprintf(stderr, "csa: campaign confirmed -> %u MHz\n",
-                             operating_chan);
+                wb_logf("csa: campaign confirmed -> %u MHz\n",
+                        operating_chan);
                 break;
             case CsaIssuer::IssuerAction::Kind::kRevert:
                 // Pass 67: the craft reverts to the campaign's prev_chan; this
@@ -2978,9 +2960,9 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     if (!air.value->retune_all(previous_selection->chan,
                                                previous_selection->bw,
                                                ia.fast)) {
-                        std::fprintf(stderr, "csa: revert retune to %u MHz "
-                                             "FAILED\n",
-                                     previous_selection->chan);
+                        wb_logf("csa: revert retune to %u MHz "
+                                        "FAILED\n",
+                                previous_selection->chan);
                     }
                     air.value->set_stamp_net_id(previous_selection->net_id.value_or(0));
                     air.value->set_filter_net_id(previous_selection->net_id);
@@ -2992,8 +2974,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 }
                 pending_selection.reset();
                 previous_selection.reset();
-                std::fprintf(stderr, "csa: selection reverted -> %u MHz\n",
-                             operating_chan);
+                wb_logf("csa: selection reverted -> %u MHz\n",
+                        operating_chan);
                 break;
             case CsaIssuer::IssuerAction::Kind::kAbort:
                 // §15.5a (Pass 65): a failed claim (no CSA_ARMED) rolls every ear
@@ -3001,9 +2983,9 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 // clean no-op rather than stranding a diversity ear on the craft.
                 if (!air.value->retune_all(active_selection.chan, op_bw_mhz,
                                            false)) {
-                    std::fprintf(stderr, "csa: abort retune to %u MHz "
-                                         "FAILED\n",
-                                 active_selection.chan);  // Pass 69
+                    wb_logf("csa: abort retune to %u MHz "
+                                    "FAILED\n",
+                            active_selection.chan);  // Pass 69
                 }
                 air.value->set_stamp_net_id(active_selection.net_id.value_or(0));
                 air.value->set_filter_net_id(active_selection.net_id);
@@ -3011,9 +2993,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 selection_state = previous_selection_state;
                 pending_selection.reset();
                 previous_selection.reset();
-                std::fprintf(stderr,
-                             "csa: aborted (no CSA_ARMED) -> resting %u MHz\n",
-                             operating_chan);
+                wb_logf("csa: aborted (no CSA_ARMED) -> resting %u MHz\n",
+                        operating_chan);
                 break;
             case CsaIssuer::IssuerAction::Kind::kNone:
                 break;
@@ -3080,11 +3061,11 @@ art.craft_adapter_fingerprint = craft_tally_fp;
         }
         if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
-                std::fprintf(stderr, "%s", wedge.wedged()
-                        ? "air: TX WEDGE — submissions advancing, zero "
-                          "backend TX progress over the window (§9.10)\n"
-                        : "air: tx wedge cleared — backend TX progress "
-                          "resumed\n");
+                wb_logf("%s", wedge.wedged()
+                   ? "air: TX WEDGE — submissions advancing, zero "
+                     "backend TX progress over the window (§9.10)\n"
+                   : "air: tx wedge cleared — backend TX progress "
+                     "resumed\n");
             }
         }
 #if WBLINK_CONTROL_SERVER

@@ -36,8 +36,15 @@
  *    same three WBLINK_BUILD_APP already requires. A receive-only consumer
  *    (Android's `:wifi` on bionic, which has no shm_open) links `wblink::node`
  *    with them OFF and gets the RX half alone. This header still compiles
- *    there; the reference is what fails, and it fails at LINK time with a
- *    named symbol rather than silently.
+ *    there — the types and constants below stay visible so a C compiler can
+ *    check them (examples/node-linkcheck does exactly that) — but the
+ *    FUNCTION prototypes are guarded on WBLINK_NODE_TX, which `wblink::node`
+ *    defines PUBLIC as 1 or 0 from the build that produced the archive. A
+ *    consumer of a TX-less archive that references a TX function now fails at
+ *    COMPILE time inside the guard, not at link time with an unresolved
+ *    symbol. Outside the build (no macro), everything is visible — an
+ *    out-of-tree reader gets the whole surface and the linker keeps being the
+ *    judge, byte for byte the old behaviour.
  */
 #ifndef WBLINK_NODE_TX_NODE_C_H
 #define WBLINK_NODE_TX_NODE_C_H
@@ -100,6 +107,10 @@ enum {
  */
 typedef int (*wblink_mode_apply_cb)(const char *cmd, const char *name,
                                     void *user);
+
+/* Everything from here to the end of the extern "C" block is a linkable
+ * symbol, present only in an archive built with the TX half — see note 3. */
+#if !defined(WBLINK_NODE_TX) || WBLINK_NODE_TX
 
 /* NULL on allocation failure. */
 wblink_tx *wblink_tx_create(void);
@@ -289,6 +300,8 @@ int wblink_tx_run(wblink_tx *tx, const char *config_path,
 
 /* Frees the handle. Must not be called while `wblink_tx_run` is in flight. */
 void wblink_tx_destroy(wblink_tx *tx);
+
+#endif /* WBLINK_NODE_TX */
 
 #ifdef __cplusplus
 } /* extern "C" */

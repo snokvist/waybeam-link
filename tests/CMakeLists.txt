@@ -193,6 +193,12 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME test_verdict_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/test_verdict_test.py)
+    # R6: library diagnostics go through the #144 sink — no fprintf(stderr)
+    # anywhere under io/ or node/. Source-level, no build artifact, carries
+    # its own matcher self-test.
+    add_test(NAME log_sink_gate_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/log_sink_gate_test.py)
 else()
     # Registering nothing here leaves ctest GREEN on a host without python3
     # while seven suites silently did not run — among them config_registry_test,

@@ -92,8 +92,7 @@ int wblink_rx_set_adapter_fds(wblink_rx* rx, const int* fds, size_t n) {
     try {
         rx->adapter_fds.assign(fds, fds + n);
     } catch (...) {
-        std::fprintf(stderr,
-                     "wblink_rx_set_adapter_fds: allocation failed\n");
+        wblink::wb_logf("wblink_rx_set_adapter_fds: allocation failed\n");
         return 1;
     }
     return 0;
@@ -245,7 +244,7 @@ static int wblink_rx_run_claimed(wblink_rx* rx, const char* config_path,
                 : wblink::node::load_all_json(rx->config_json, loaded, sel);
         if (rc != 0) return rc;
     } catch (...) {
-        std::fprintf(stderr, "wblink_rx_run: unhandled C++ exception in load\n");
+        wblink::wb_logf("wblink_rx_run: unhandled C++ exception in load\n");
         return 1;
     }
     // After load_all, so a config can never smuggle these in, and before
@@ -254,7 +253,7 @@ static int wblink_rx_run_claimed(wblink_rx* rx, const char* config_path,
     try {
         loaded.cfg.adapter_fds = rx->adapter_fds;
     } catch (...) {
-        std::fprintf(stderr, "wblink_rx_run: allocation failed\n");
+        wblink::wb_logf("wblink_rx_run: allocation failed\n");
         return 1;
     }
 
@@ -274,7 +273,7 @@ static int wblink_rx_run_claimed(wblink_rx* rx, const char* config_path,
         return wblink::node::run_rx(loaded, rx->stop, sink,
                                     &rx->runtime_control);
     } catch (...) {
-        std::fprintf(stderr, "wblink_rx_run: unhandled C++ exception\n");
+        wblink::wb_logf("wblink_rx_run: unhandled C++ exception\n");
         return 1;
     }
 }
