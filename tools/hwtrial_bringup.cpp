@@ -289,12 +289,11 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Settle mode is a measurement of the RX path; a DUT that also radiates
-    // would be measuring its own TX side effects. One adapter, RX-only.
-    if (settle_cycles != 0 && tx_frames != 0) {
-        std::fprintf(stderr, "--settle and --tx are mutually exclusive\n");
-        return 2;
-    }
+    // --settle + --tx together = the TX-after-fast-hop proof: the injection
+    // moves AFTER the settle cycles (see the reordering at the TX block), so
+    // the frames air through whatever TSSI/channel state the hops left
+    // behind — with a witness ear, that is the "TSSI stays coherent across
+    // FastRetune" evidence. Without --tx, settle stays RX-only as before.
 
     const std::vector<Unit> units = enumerate();
     if (automatic) {
@@ -402,15 +401,19 @@ int main(int argc, char** argv) {
             std::vector<uint8_t> payload(200, 0xA5);
             payload[0] = 0x57;
             payload[1] = 0x42;
-            size_t sent = 0;
-            for (int f = 0; f < tx_frames; ++f) {
-                sent += a.inject(payload.data(), payload.size());
-                // ~1 kHz. Deliberately unhurried: this is a liveness proof,
-                // not a throughput test, and a tight loop would just measure
-                // the USB bulk queue.
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            // With --settle the burst moves AFTER the hops (below): airing
+            // through post-FastRetune TSSI/channel state is the point there.
+            if (settle_cycles == 0) {
+                size_t sent = 0;
+                for (int f = 0; f < tx_frames; ++f) {
+                    sent += a.inject(payload.data(), payload.size());
+                    // ~1 kHz. Deliberately unhurried: this is a liveness
+                    // proof, not a throughput test, and a tight loop would
+                    // just measure the USB bulk queue.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                tx_sent = sent;
             }
-            tx_sent = sent;
         }
         if (settle_cycles != 0) {
             if (a.rx_adapters() != 1) {
@@ -490,6 +493,26 @@ int main(int argc, char** argv) {
                                  deaf.size(), timeouts, tainted, retune_fails,
                                  deaf.front(), pct(0.5), pct(0.9),
                                  deaf.back());
+                }
+                // The deferred --tx burst: air through whatever TSSI and
+                // channel state the fast hops left behind. The DUT sits on
+                // --chan-mhz after the last cycle; a witness ear there
+                // counting ~tx_frames accepted frames is the coherence
+                // proof a submit counter cannot give on this CCX-less die.
+                if (tx_frames != 0) {
+                    std::vector<uint8_t> payload(200, 0xA5);
+                    payload[0] = 0x57;
+                    payload[1] = 0x42;
+                    std::fprintf(stderr,
+                                 "settle: post-hop TX burst of %d frames\n",
+                                 tx_frames);
+                    size_t sent = 0;
+                    for (int f = 0; f < tx_frames; ++f) {
+                        sent += a.inject(payload.data(), payload.size());
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(1));
+                    }
+                    tx_sent = sent;
                 }
             }
         }
