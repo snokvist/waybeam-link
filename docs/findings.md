@@ -12,7 +12,67 @@ has closed, with a pointer to the Pass.
 
 ---
 
-## 2026-08-14 — The RTL8733BU has no §10.5 power actuator at all, and the node cannot tell: 18 dB of commanded offset moved the air by nothing, with `{"ok":true}` every time
+## 2026-08-15 — Retune settle is a per-HOST quantity, not a per-chip one: the same jaguar1 family reads ~42 ms on x86 and ~250 ms on Android, and the 8733BU's *call* blocks 345 ms
+
+**Setup.** `hwtrial_bringup --settle` (new in this branch): DUT adapter
+RX-only, continuous ~1 kHz emitter (`--tx` loop, second unit) on 5805/20,
+quiet channel 5180, 20 cycles + 2 unsummarized warm-ups per arm. Deafness is
+anchored at retune-call START and polled from a second thread, because the
+first AU run proved the single-threaded, return-anchored definition
+unmeasurable: on x86 the jaguar1 full retune blocks ~130 ms and the radio is
+already live at return (deaf-from-return = 0.0 on all 20 cycles), while the
+2026-08-13 Android scout measurement had a ~5 ms call and ~250 ms of
+post-return silence. Same code, same chip family — the settle sits on a
+different side of the call boundary per platform, so only the start-anchored
+number compares across rigs.
+
+**Numbers** (p50 over 20 clean cycles; spreads were tight, ≤2 ms except BU ≤10):
+
+| chip | host | retune class | call blocks | radio live (start→first frame) |
+|---|---|---|---|---|
+| 8812AU (jaguar1) | x86 .242 | full | ~130 ms | **42.4 ms** (41.9–43.0) |
+| 8812AU | x86 .242 | fast | ~41 ms | 42.2 ms |
+| 8812CU (jaguar3) | x86 .242 | full | ~32 ms | **21.1 ms** (20.5–23.7) |
+| 8812CU | x86 .242 | fast | ~13 ms | 12.6 ms |
+| 8733BU | CV610 .181 | full | **~345 ms** | **70.1 ms** (61–80) |
+| 8733BU | CV610 .181 | fast | (short) | 70.2 ms |
+| 8812AU | Android S22 | full | ~5 ms | ~250 ms (2026-08-13 scout inference) |
+
+Controls: no-emitter arm → exit 1, 0 clean samples, 20 honest TIMEOUTs;
+quiet=emitter-channel arm → every sample flagged TAINTED and refused. Both
+guards demonstrated firing, not just present.
+
+**What it means.**
+
+1. **The 8733BU retunes** (the fail-early question answered), and its fast
+   class works: intrinsic settle ~70 ms either way.
+2. **The ~250 ms "AU settle" was never a chip constant.** x86 shows the same
+   silicon family live at 42 ms. The dominant term moves between the blocking
+   call (x86: 130 ms; CV610+BU: 345 ms) and post-return silence (Android:
+   ~250 ms) depending on the host's USB stack. A `retune_settle_ms` keyed on
+   chip generation in `AdapterCapsView` would be wrong on every host it
+   wasn't measured on.
+3. **The scout charges the call against the dwell.** `ScoutEngine::
+   enter_channel` sets `dwell_deadline = now + dwell_ms` with `now` sampled
+   BEFORE the blocking retune, and `retune_one`'s post-call `flush_rx`
+   discards every frame that arrived mid-call. On the BU that leaves
+   ~155 ms of listening out of the shipped 500 ms dwell; a 300 ms dwell
+   would listen for **zero** and miss every craft on every channel. The
+   knee memory `scout_retune_radio_silence` found at 250→300 ms on Android
+   is this same arithmetic with that platform's numbers.
+4. Anchoring the dwell deadline AFTER the retune returns would make
+   `dwell_ms` mean *listening time* on every chip/host without any per-chip
+   constant — the scout would charge itself the measured cost instead of
+   guessing it — leaving only genuinely post-return deafness (observed only
+   on Android so far) to a settle allowance.
+
+**Open.** 8812EU pending (.232 powered off during the session) — an
+SSC338Q-hosted arm is also the second embedded-host data point. Android
+re-measurement with the start-anchored harness (needs the wrapped-fd path;
+R4's open Android half). Whether BU's 345 ms call is chip (11n HALMAC init
+sequence) or host (CV610 USB control-transfer latency) — separable only by
+moving a jaguar die onto the CV610 or the BU onto x86. Design ruling for the
+Pass: dwell-deadline re-anchoring vs per-chip caps constant vs both.
 
 **Setup.** CV610 (192.168.2.181) transmitting on 5805/20 through the integrated
 waybeam-hub `mod_wblink` node, adapter `cv610-8733b` (`0bda:f72b`, bus 1-1.2).

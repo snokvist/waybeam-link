@@ -49,6 +49,7 @@
 #include <libusb.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -131,7 +132,84 @@ void usage() {
                  "[--fd <bus>/<dev>]... [--chan-mhz N] [--seconds N] "
                  "[--lock-dir DIR]\n"
                  "       TX (RADIATES): [--tx <frames>] [--mcs N] "
-                 "[--power-offset-qdb N] [--originator N] [--net-id N]\n");
+                 "[--power-offset-qdb N] [--originator N] [--net-id N]\n"
+                 "       settle (RX-only): [--settle <cycles>] "
+                 "[--settle-quiet-mhz N] [--settle-timeout-ms N] "
+                 "[--settle-fast]\n");
+}
+
+// R5 retune-settle measurement (docs/findings.md). Deafness is the gap
+// between retune() RETURNING and the first frame the RX callback ACCEPTS on
+// the new channel — rx_frames increments in devourer's RX thread at parse
+// time, so polling the counter observes arrival, not poll_once() service.
+// Needs a continuous known emitter on --chan-mhz (the ~1 kHz --tx loop of a
+// second unit, or a live craft); the quiet channel provides the "away" half
+// of the hop and is verified quiet each cycle, because a frame heard there
+// would satisfy the poll before the hop even happens.
+struct SettleSample {
+    double retune_call_ms = 0;  // inside the retune() call itself
+    double deaf_ms = -1;        // call START -> first accepted frame; -1 = timeout
+    uint64_t quiet_frames = 0;  // frames heard on the quiet channel (taint)
+    bool away_failed = false;   // the hop TO the quiet channel was refused
+    bool tune_failed = false;   // the hop back to the target was refused
+};
+
+// Anchored at call START, not call return, and polled from a SECOND thread:
+// the first AU run showed why. On x86 the jaguar1 full retune BLOCKS ~130 ms
+// and the radio is already live at return (deaf-from-return = 0.0 on all 20
+// cycles), while the 2026-08-13 Android measurement had a ~5 ms call and
+// ~250 ms of post-return silence. Same code, same chip family — the settle
+// sits on a different side of the call boundary per platform, so only the
+// start-anchored number is comparable across rigs. A single-threaded poll
+// cannot see when, inside a blocking call, frames began to flow.
+SettleSample settle_cycle(wblink::RadioAir& a, uint16_t quiet_mhz,
+                          uint16_t target_mhz, bool fast, int timeout_ms) {
+    using clock = std::chrono::steady_clock;
+    SettleSample s;
+    // Away: full retune, then let the pipeline drain well past the deafness
+    // under test so old-channel residue cannot be double-counted below.
+    // Checked (review 2026-08-15): a refused away-hop leaves the DUT on the
+    // target channel, where every "quiet" frame is really the emitter — the
+    // cycle would read TAINTED with a misleading diagnosis, so name the real
+    // cause instead.
+    if (!a.retune(0, quiet_mhz, 20, false)) {
+        s.away_failed = true;
+        return s;
+    }
+    a.flush_rx();
+    // Quiet-channel taint check across the WHOLE away dwell (review
+    // 2026-08-15: a 100 ms tail window missed sporadic emitters with a
+    // period above it), and the poll baseline read immediately before the
+    // hop so the un-instrumentable gap is only the retune call itself.
+    const uint64_t pre = a.counters(0).rx_frames;
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const uint64_t baseline = a.counters(0).rx_frames;
+    s.quiet_frames = baseline - pre;
+
+    const auto t0 = clock::now();
+    double first_ms = -1;
+    std::thread poller([&] {
+        const auto deadline = t0 + std::chrono::milliseconds(timeout_ms);
+        while (clock::now() < deadline) {
+            if (a.counters(0).rx_frames > baseline) {
+                first_ms = std::chrono::duration<double, std::milli>(
+                               clock::now() - t0)
+                               .count();
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    });
+    const bool tuned = a.retune(0, target_mhz, 20, fast);
+    s.retune_call_ms =
+        std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+    poller.join();
+    if (tuned) {
+        s.deaf_ms = first_ms;
+    } else {
+        s.tune_failed = true;
+    }
+    return s;
 }
 
 }  // namespace
@@ -149,6 +227,10 @@ int main(int argc, char** argv) {
     // Offset space (§10.5). Negative = below the die default: the safe end.
     int power_offset_qdb = -24;
     int mcs = 0;
+    int settle_cycles = 0;
+    uint16_t settle_quiet_mhz = 5180;
+    int settle_timeout_ms = 2000;
+    bool settle_fast = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -190,10 +272,28 @@ int main(int argc, char** argv) {
         } else if (a == "--mcs" && next) {
             mcs = std::atoi(next);
             ++i;
+        } else if (a == "--settle" && next) {
+            settle_cycles = std::atoi(next);
+            ++i;
+        } else if (a == "--settle-quiet-mhz" && next) {
+            settle_quiet_mhz = static_cast<uint16_t>(std::atoi(next));
+            ++i;
+        } else if (a == "--settle-timeout-ms" && next) {
+            settle_timeout_ms = std::atoi(next);
+            ++i;
+        } else if (a == "--settle-fast") {
+            settle_fast = true;
         } else {
             usage();
             return 2;
         }
+    }
+
+    // Settle mode is a measurement of the RX path; a DUT that also radiates
+    // would be measuring its own TX side effects. One adapter, RX-only.
+    if (settle_cycles != 0 && tx_frames != 0) {
+        std::fprintf(stderr, "--settle and --tx are mutually exclusive\n");
+        return 2;
     }
 
     const std::vector<Unit> units = enumerate();
@@ -311,6 +411,87 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             tx_sent = sent;
+        }
+        if (settle_cycles != 0) {
+            if (a.rx_adapters() != 1) {
+                std::fprintf(stderr,
+                             "FAIL: --settle wants exactly one adapter (the "
+                             "DUT), got %zu\n",
+                             a.rx_adapters());
+                rc = 1;
+            } else {
+                const auto caps = a.adapter_caps(0);
+                std::fprintf(stderr,
+                             "settle: chip=%s %s-retune, %u -> %u MHz, %d "
+                             "cycles (+2 warm-up), timeout %d ms\n",
+                             caps.chip.c_str(), settle_fast ? "fast" : "full",
+                             settle_quiet_mhz, chan_mhz, settle_cycles,
+                             settle_timeout_ms);
+                // Two warm-up cycles: the first hops after bring-up carry
+                // one-time state (initial AGC history, first USB URB fill)
+                // that the steady-state scout hop does not. Printed, never
+                // summarized.
+                std::vector<double> deaf;
+                int timeouts = 0, tainted = 0, retune_fails = 0;
+                for (int cyc = -2; cyc < settle_cycles; ++cyc) {
+                    const SettleSample s = settle_cycle(
+                        a, settle_quiet_mhz, chan_mhz, settle_fast,
+                        settle_timeout_ms);
+                    char deaf_str[32];
+                    if (s.away_failed || s.tune_failed) {
+                        std::snprintf(deaf_str, sizeof deaf_str,
+                                      "RETUNE-FAIL(%s)",
+                                      s.away_failed ? "away" : "target");
+                    } else if (s.deaf_ms < 0) {
+                        std::snprintf(deaf_str, sizeof deaf_str, "TIMEOUT");
+                    } else {
+                        std::snprintf(deaf_str, sizeof deaf_str, "%.1f ms",
+                                      s.deaf_ms);
+                    }
+                    std::fprintf(
+                        stderr, "  settle[%d]: call=%.2f ms deaf=%s%s\n", cyc,
+                        s.retune_call_ms, deaf_str,
+                        s.quiet_frames
+                            ? "  <-- TAINTED: quiet channel heard frames"
+                            : "");
+                    if (cyc < 0) continue;  // warm-up
+                    if (s.away_failed || s.tune_failed) {
+                        ++retune_fails;
+                    } else if (s.quiet_frames) {
+                        ++tainted;
+                    } else if (s.deaf_ms < 0) {
+                        ++timeouts;
+                    } else {
+                        deaf.push_back(s.deaf_ms);
+                    }
+                }
+                std::sort(deaf.begin(), deaf.end());
+                if (deaf.empty()) {
+                    // No sample = no measurement. An emitter that was never
+                    // heard must not read as "settles instantly" — and a
+                    // broken retune path must not read as a silent emitter
+                    // (review 2026-08-15: the two need different fixes).
+                    std::fprintf(stderr,
+                                 "FAIL settle: 0 clean samples (%d timeouts, "
+                                 "%d tainted, %d retune-fails) — %s\n",
+                                 timeouts, tainted, retune_fails,
+                                 retune_fails ? "retune path broken?"
+                                              : "no emitter heard?");
+                    rc = 1;
+                } else {
+                    const auto pct = [&](double p) {
+                        return deaf[static_cast<size_t>(
+                            p * static_cast<double>(deaf.size() - 1))];
+                    };
+                    std::fprintf(stderr,
+                                 "settle summary: n=%zu timeouts=%d "
+                                 "tainted=%d retune_fails=%d  min=%.1f "
+                                 "p50=%.1f p90=%.1f max=%.1f ms\n",
+                                 deaf.size(), timeouts, tainted, retune_fails,
+                                 deaf.front(), pct(0.5), pct(0.9),
+                                 deaf.back());
+                }
+            }
         }
         // Dwell so the RX threads actually run, then report. Frames are not
         // required (an idle channel is legitimate); a live counter proves the

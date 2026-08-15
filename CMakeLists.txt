@@ -478,10 +478,14 @@ if(PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
     target_link_libraries(frame_sink_probe PRIVATE wblink_node)
 endif()
 
-# Hardware trial harness (issue #140). Top-level + radio only, and native
-# only — it opens usbfs on the host it runs on. RX-only by construction, so it
-# cannot transmit; see the file header.
-if(WBLINK_RADIO AND PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
+# Hardware trial harness (issue #140). Top-level + radio only. Cross targets
+# get it too, on hwtrial_reinit's reasoning below: a craft is a host that
+# opens its own usbfs, and the R5 retune-settle sweep (--settle) has to run
+# on the embedded hosts — the 8733BU only exists on the CV610 vehicle, and
+# the x86-vs-Android split in the settle numbers is exactly a per-host
+# question a native-only harness cannot answer. NOT for android-arm64 (a
+# compile-only, libraries-only gate; see hwtrial_reinit).
+if(WBLINK_RADIO AND PROJECT_IS_TOP_LEVEL AND NOT ANDROID)
     add_executable(hwtrial_bringup tools/hwtrial_bringup.cpp)
     target_compile_options(hwtrial_bringup PRIVATE ${WBLINK_WARNINGS})
     target_include_directories(hwtrial_bringup SYSTEM PRIVATE
