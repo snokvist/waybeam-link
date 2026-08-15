@@ -12,6 +12,41 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-15 — 8733B refuses SGI at the TX-descriptor gate: a short-GI profile rung silently kills every DATA frame; and two crafts on one channel starve each other regardless of net_id
+
+**Setup.** First device deployment of `waybeam-link tx` on the CV610 craft
+(.181, RTL8733BU, devourer, 5805/HT20, 1080p100 16 Mbps frame-shm ingest;
+`deploy/vehicle-192.168.2.181.json`). Symptom: `tx_submitted` climbing at
+~4.5 k/s with `tx_failed` = submitted − 190 — exactly 190 frames ever
+succeeded, then a hard stop, with **zero log lines** (the reject is
+`build_tx_block` returning 0, before the logging bulk-send path).
+
+**Mechanism.** `profiles/table.example.json` rungs 3+ carry
+`guard_interval: "short"`; the vendored 8733B TX path refuses HT with
+SGI/LDPC/STBC outright (`ht_request_supported_8733b`:
+`mcs<=7 && (bw 20|40) && !sgi && !ldpc && !stbc`). The craft boots on a
+long-GI rung (the 190 good frames), the selector commits an SGI rung, and
+every subsequent frame dies silently. Fix that works:
+`profiles/table-8733b.json` — the same table with every rung long-GI —
+verified 49k+ submits, 0 failed, sustained.
+
+**What it means / what stays open.**
+- The link commits a `TxRate` the die cannot fly and the failure is a
+  per-frame silent counter, not a refusal. The right fix is caps-shaped
+  (like `fastretune`): surface no-SGI in `AdapterCapsView` and clamp at
+  rate commit with a stat — filed as an issue.
+- A craft on the 8733B table has a different `table_version` than the
+  fleet (0xA4 vs 0x5B) — fine solo (the §3.4 mismatch rule makes a future
+  mismatched consumer best-effort), but a dual-craft ground consuming both
+  needs a ruling on per-craft tables before it can run profile logic on
+  this craft.
+- **Co-channel occupancy is real and immediate:** with the CV610 at its
+  §9.8 lost-feedback floor (MCS2 long-GI, 16 Mbps offered) on 5805, the
+  .232 craft's link demoted 5→2 within a minute — `net_id` separates
+  identity, not airtime. Moving the CV610 to 5745 restored .232 to
+  profile 5 in seconds. Dual-craft-on-one-channel needs an airtime story
+  (or per-craft channels) before it is a supported shape.
+
 ## 2026-08-15 — Retune settle is a per-HOST quantity, not a per-chip one: the same jaguar1 family reads ~42 ms on x86 and ~250 ms on Android, and the 8733BU's *call* blocks 345 ms
 
 **Setup.** `hwtrial_bringup --settle` (new in this branch): DUT adapter

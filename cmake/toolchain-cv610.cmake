@@ -47,6 +47,13 @@ set(CMAKE_C_COMPILER   "${_wblink_cv610_prefix}-gcc")
 set(CMAKE_CXX_COMPILER "${_wblink_cv610_prefix}-g++")
 set(CMAKE_STRIP        "${_wblink_cv610_prefix}-strip")
 
+# The CV610 rootfs ships NO C++ runtime — /usr/lib has neither libstdc++.so.6
+# nor libgcc_s.so.1, and the ~5 MB overlay has no room to add them (measured
+# on the .181 device 2026-08-15: dynamic linking fails at exec with
+# "_ZTVN10__cxxabiv117__class_type_infoE: symbol not found"). Static-link
+# both, exactly as waybeam-hub's cv610 WBLINK link group already does.
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-static-libstdc++ -static-libgcc")
+
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
