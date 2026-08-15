@@ -47,6 +47,18 @@ all-pushes-failing state deserves a `wb_logf` line; residual ~1.2% pre-FEC
 air loss at SNR 31 near-field is a floor across 8–16 Mbps offered rates —
 unexplained, and where ground RX diversity would actually help.
 
+**In-process addendum (same day).** After the craft migrated to waybeam-hub's
+in-process `mod_wblink` (tx role, hub PR #197 path — first RF deployment of
+it), the 13 Mbps clamp that measured ZERO source drops as a standalone
+process dropped 0.3→2.3 fps across three windows (7/19/70 per window,
+worsening), with the SoC at ~50% idle — not CPU starvation but TX-pump
+scheduling margin lost to hub residency (the hub's own threads; its
+`:8091` stats scrape is already 1 Hz-limited and is not the driver).
+12000 kbps restores steady zero (0/0 drops across consecutive 30 s
+windows, 99.5 fps, 12.2 Mbps). **Rule of thumb until the §17 re-derivation:
+an in-process CV610 craft prices ~1 Mbps of clamp below the
+dedicated-process ceiling.**
+
 ## 2026-08-15 — 8733B refuses SGI at the TX-descriptor gate: a short-GI profile rung silently kills every DATA frame; and two crafts on one channel starve each other regardless of net_id
 
 **Setup.** First device deployment of `waybeam-link tx` on the CV610 craft
