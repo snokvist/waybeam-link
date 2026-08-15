@@ -76,6 +76,30 @@ build_preset dev
 run "ctest dev"  ctest --preset dev
 
 if [ "$QUICK" -eq 0 ]; then
+    # Pass 180 (2026-08-15 review): every preset that runs tests leaves all
+    # five feature options ON, so build_info_test only ever executed its
+    # "true" branches — the FALSE direction, which is the one that matters,
+    # was never run by any gate. The permitted failure is the inverse of the
+    # documented one: a receive-only archive claiming frame_shm:true is what
+    # makes waybeam-hub proceed into the permanent-black-screen configuration
+    # the call exists to refuse. This arm also covers what the test's
+    # two-target design cannot — a typo in a CMake variable NAME, which both
+    # sides would read as "false" and agree on, but which cannot survive a
+    # configuration where the correct answers differ.
+    #
+    # RADIO stays ON here on purpose, and that is the whole force of the arm:
+    # it makes the five fields DISAGREE (radio true, the rest false), so every
+    # field is exercised in both directions across the two runs. An all-OFF
+    # arm would let a typo'd variable and the truth agree on "false" — checked,
+    # and it did.
+    run "configure reduced" cmake -S . -B build/reduced \
+        -DCMAKE_BUILD_TYPE=Release -DWBLINK_BUILD_APP=OFF \
+        -DWBLINK_FRAME_SHM=OFF -DWBLINK_CONTROL_SERVER=OFF \
+        -DWBLINK_VENC=OFF -DWBLINK_RADIO=ON
+    run "build reduced" cmake --build build/reduced --target build_info_test \
+        -j "$WBLINK_GATE_JOBS"
+    run "build_info reduced" ./build/reduced/tests/build_info_test
+
     for p in release x86-ground; do
         build_preset "$p"
     done

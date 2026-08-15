@@ -353,6 +353,7 @@ endif()
 # still has ~193 undefined symbols like any other, and no gate resolves them on
 # bionic — android-arm64 is compile-only. See docs/findings.md, 2026-08-09.
 set(WBLINK_NODE_SRCS
+    node/src/build_info_c.cpp
     node/src/rx_node.cpp
     node/src/rx_node_c.cpp
     node/src/rx_runtime_control.cpp)
@@ -363,6 +364,35 @@ else()
     set(WBLINK_NODE_TX OFF)
 endif()
 add_library(wblink_node STATIC ${WBLINK_NODE_SRCS})
+# Pass 180: the build_info string is a fact about the BUILD, so CMake states
+# it — CMake is the only place that knows. Not read from the feature macros in
+# C++: WBLINK_VENC has never been one (it gates target_sources and "nothing
+# branches on it", above), so `#if WBLINK_VENC` silently means OFF and a
+# string derived that way reports a full build as having no venc and no
+# transmitter. It did, until a receive-only build was compared against a full
+# one.
+#
+# The names are CONSTRUCTED from this one list rather than written out per
+# field, and each source variable is asserted DEFINED (2026-08-15 review). A
+# typo at a use site — `${WBLINK_RADI0}` — is not an error in CMake: it
+# expands to empty, `$<BOOL:>` reads false, and BOTH the library and the test
+# then agree on a wrong answer, in every configuration. No test can catch
+# that, because both sides read the same symbol; the loop is what makes the
+# symbol unmistakable and the assertion is what turns a typo into a configure
+# failure instead of a quiet false.
+set(WBLINK_BI_FIELDS FRAME_SHM CONTROL_SERVER VENC RADIO NODE_TX)
+foreach(_bi_f IN LISTS WBLINK_BI_FIELDS)
+    if(NOT DEFINED WBLINK_${_bi_f})
+        message(FATAL_ERROR
+            "build_info: WBLINK_${_bi_f} is not defined - the field list and "
+            "the option names have drifted apart")
+    endif()
+    list(APPEND WBLINK_BI_DEFS
+        WBLINK_BI_${_bi_f}=$<IF:$<BOOL:${WBLINK_${_bi_f}}>,1,0>)
+    list(APPEND WBLINK_BI_EXPECT_DEFS
+        WBLINK_BI_EXPECT_${_bi_f}=$<IF:$<BOOL:${WBLINK_${_bi_f}}>,1,0>)
+endforeach()
+target_compile_definitions(wblink_node PRIVATE ${WBLINK_BI_DEFS})
 if(NOT PROJECT_IS_TOP_LEVEL)
     set_target_properties(wblink_node PROPERTIES EXCLUDE_FROM_ALL TRUE)
 endif()
