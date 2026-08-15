@@ -107,6 +107,45 @@ void test_stop_restores_but_abandon_does_not() {
     CHECK(abandoned.retuned_all.empty());           // nothing sent home
 }
 
+// The dwell clock starts when the retune RETURNS, not when the tick that
+// triggered it was stamped. Measured 2026-08-15 (findings.md): the blocking
+// full-retune call costs 32-345 ms depending on chip and host — anchored on
+// the tick's pre-retune timestamp, an 8733BU listened ~155 ms of a 500 ms
+// dwell and would have listened ZERO at 300 ms. Hooks::now is sampled after
+// each retune returns; a null hook keeps the caller's timestamp, and this
+// test pins BOTH directions so neither can silently become the other.
+void test_dwell_deadline_anchors_after_the_blocking_retune() {
+    Spy spy;
+    uint64_t clock = 1000;
+    ScoutEngine::Hooks h = spy.hooks();
+    h.retune = [&](uint16_t mhz, uint8_t) {
+        spy.retuned.push_back(mhz);
+        clock += 345;  // the blocking call, visible through Hooks::now
+        return true;
+    };
+    h.now = [&] { return clock; };
+    ScoutEngine scout(std::move(h), /*bw=*/20, /*rest_chan=*/5805,
+                      std::optional<uint8_t>(0), /*scout_adapter=*/0);
+    CHECK(scout.start({5180, 5805}, 300, clock).empty());
+    // start at 1000, retune blocks to 1345 -> deadline 1645. Pre-retune
+    // anchoring would have put it at 1300 — already inside the call.
+    clock = 1600;
+    scout.tick(clock);
+    CHECK_EQ_U(spy.retuned.size(), 1);  // still listening on 5180
+    clock = 1650;
+    scout.tick(clock);
+    CHECK_EQ_U(spy.retuned.size(), 2);  // full dwell listened, advanced
+    if (spy.retuned.size() == 2) CHECK_EQ_U(spy.retuned.back(), 5805);
+
+    // Null hook = the old anchoring, byte for byte: deadline from the
+    // caller's tick timestamp.
+    Spy legacy;
+    ScoutEngine old = make_scout(legacy);
+    CHECK(old.start({5180, 5805}, 300, 1000).empty());
+    old.tick(1310);                          // 1310 >= 1000 + 300
+    CHECK_EQ_U(legacy.retuned.size(), 2);    // advanced on the tick clock
+}
+
 // Frames already in the USB pipeline can arrive after a retune. The sense
 // barrier is also the minimum candidate-attribution settle: pre-barrier frames
 // must not create a second sighting on the new channel. Once the barrier has
@@ -451,6 +490,7 @@ int main() {
     test_scout_boots_idle_and_refuses_an_empty_sweep();
     test_scout_start_widens_the_filter_then_retunes();
     test_stop_restores_but_abandon_does_not();
+    test_dwell_deadline_anchors_after_the_blocking_retune();
     test_scout_rejects_pre_settle_candidate_residue_and_publishes_weight();
     test_scout_near_tie_prefers_proven_resting_channel();
     test_catalog_knows_nothing_about_an_unseen_originator();

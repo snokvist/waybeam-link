@@ -66,13 +66,27 @@ guards demonstrated firing, not just present.
    guessing it — leaving only genuinely post-return deafness (observed only
    on Android so far) to a settle allowance.
 
-**Open.** 8812EU pending (.232 powered off during the session) — an
-SSC338Q-hosted arm is also the second embedded-host data point. Android
-re-measurement with the start-anchored harness (needs the wrapped-fd path;
-R4's open Android half). Whether BU's 345 ms call is chip (11n HALMAC init
-sequence) or host (CV610 USB control-transfer latency) — separable only by
-moving a jaguar die onto the CV610 or the BU onto x86. Design ruling for the
-Pass: dwell-deadline re-anchoring vs per-chip caps constant vs both.
+**Closed by Passes 181/182 (same day):** dwell re-anchoring + caps-gated
+fast sweep; the per-chip caps constant was rejected (per-host dominance).
+Device A/B on the .181 8733BU, old vs new binary: detection 10/10 at both
+300 and 500 ms dwells, wall +0.8 s = the restored listening time. Two
+additions from that session: the BU's **"fast" path still blocks ~277 ms**
+(vs 345 full, radio-live ~60-70 ms either way) — devourer's
+`fastretune:false` for the die is honest and the caps gate self-disables
+correctly (`/api/v1/info` observed); and the A/B's intended 3 Hz idle-craft
+arm was **contaminated by a real powered craft** (originator 17, net_id 0,
+5805, ~1.3 kHz, −1 dBm — a bench vehicle running its flight stack,
+IP-unreachable), so detection was saturated in every arm and the
+listening-time claim rests on the harness + unit test, not on detection
+deltas. The net_id-7 idle emitter itself was measured honest by a
+filtered ear: 6 frames/3 s accepted at net_id 7.
+
+**Still open.** 8812EU pending (.232 powered off throughout) — also the
+second embedded-host data point. Android re-measurement with the
+start-anchored harness (needs the wrapped-fd path; R4's open Android
+half). Whether the BU's 345 ms call is chip (11n HALMAC init sequence) or
+host (CV610 USB control-transfer latency) — separable only by moving a
+jaguar die onto the CV610 or the BU onto x86.
 
 **Setup.** CV610 (192.168.2.181) transmitting on 5805/20 through the integrated
 waybeam-hub `mod_wblink` node, adapter `cv610-8733b` (`0bda:f72b`, bus 1-1.2).

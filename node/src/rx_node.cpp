@@ -1137,10 +1137,18 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     // filter during a sweep; psk_known reports a usable CSA key (configured
     // secret, or a cached announced token, Pass 63).
     const size_t scout_idx = air.value->tx_index();
+    // Sweep with the §11.2 fast retune class on dies that state the
+    // capability (Pass 172 caps view): same measured radio-live time as the
+    // full path on every chip measured (findings.md 2026-08-15), a fraction
+    // of the blocking call — 345 ms -> ~80 ms per channel on the 8733BU.
+    // retune() itself falls back to the full path for any non-20 MHz sweep
+    // width, and the sweep's exit paths (selection, rest) stay retune_all
+    // + reapply_tx_power, so the §11.2 TXAGC posture is unchanged.
+    const bool scout_fast = air.value->adapter_caps(scout_idx).fastretune;
     ScoutEngine scout(
         ScoutEngine::Hooks{
-            [&, scout_idx](uint16_t ch, uint8_t bw) {
-                return air.value->retune_one(scout_idx, ch, bw, false);
+            [&, scout_idx, scout_fast](uint16_t ch, uint8_t bw) {
+                return air.value->retune_one(scout_idx, ch, bw, scout_fast);
             },
             [&](uint16_t ch, uint8_t bw) {
                 air.value->retune_all(ch, bw, false);
@@ -1170,6 +1178,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
 #endif
                 return 0;
             },
+            // Post-retune dwell re-anchor (Hooks::now): dwell_ms must buy
+            // listening, not the 32-345 ms the blocking retune costs.
+            [] { return now_ms(); },
         },
         op_bw_mhz, op_chan, l.cfg.node.net_id, scout_idx);
 

@@ -242,6 +242,14 @@ class ScoutEngine {
         // the one-classifier rule. Null hooks degrade (fixed key, Unknown).
         std::function<std::string()> domain;
         std::function<uint8_t()> verdict;
+        // Wall clock, re-sampled AFTER the blocking retune hook returns so
+        // dwell_ms buys listening time, not retune time. Measured 2026-08-15
+        // (findings.md): the full-retune call blocks 32-345 ms depending on
+        // chip and host — anchored on the tick's pre-retune timestamp, an
+        // 8733BU listened for ~155 ms of a 500 ms dwell and would listen
+        // ZERO at 300 ms. Null = keep the caller's tick timestamp (the
+        // synthetic-time tests, and exactly the old behaviour).
+        std::function<uint64_t()> now;
     };
     ScoutEngine(Hooks h, uint8_t bw, uint16_t rest_chan,
                 std::optional<uint8_t> rest_filter, size_t scout_adapter)
@@ -646,6 +654,10 @@ class ScoutEngine {
     void enter_channel(uint64_t now_ms) {
         accum_ = Accum{};
         channel_ready_ = h_.retune(channels_[chan_idx_], bw_);
+        // Re-anchor on the post-retune clock (hook comment above): every
+        // downstream deadline — dwell, extension base, sense barrier — must
+        // charge the retune to the sweep, never to the listening window.
+        if (h_.now) now_ms = h_.now();
         entered_ms_ = now_ms;
         extended_ = false;
         dwell_deadline_ms_ = now_ms + dwell_ms_;
