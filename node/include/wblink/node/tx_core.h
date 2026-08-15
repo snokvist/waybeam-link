@@ -31,6 +31,7 @@
 #include "wblink/fps_ladder.h"
 #include "wblink/frame_framer.h"
 #include "wblink/jscc_runtime_shadow.h"
+#include "wblink/log.h"
 #include "wblink/mcs_probe.h"
 #include "wblink/frame_caps.h"
 #include "wblink/frame_shm.h"
@@ -220,8 +221,8 @@ struct TxCore {
             auto curve =
                 load_power_curve(a.power_map, a.channel_mhz >= 4000);
             if (!curve) {
-                std::fprintf(stderr, "power: %s: %s\n", a.name.c_str(),
-                             curve.error.c_str());
+                wb_logf("power: %s: %s\n", a.name.c_str(),
+                        curve.error.c_str());
                 continue;
             }
             power_.push_back(PowerAdapter{
@@ -557,10 +558,9 @@ struct TxCore {
                 pr->run_id, pr->dwell_id, pr->seq, pr->count, rx_rssi, rx_mcs,
                 now);
             if (t.new_run) {
-                std::fprintf(stderr,
-                             "calibrate: uplink run %u from ground %u — "
-                             "video feed PAUSED (input-starve, §3.16)\n",
-                             t.run_id, pr->prefix.originator);
+                wb_logf("calibrate: uplink run %u from ground %u — "
+                        "video feed PAUSED (input-starve, §3.16)\n",
+                        t.run_id, pr->prefix.originator);
             }
             if (t.send && send_calib) {
                 CalibTally out;
@@ -611,10 +611,9 @@ struct TxCore {
                 if (s.stream_id == r->target_stream_id &&
                     s.stream_type == stream_type::kRtp) {
                     const bool queued = venc_.request_idr(now);
-                    std::fprintf(stderr,
-                                 "venc: decoder recovery stream=%u requester=%u %s\n",
-                                 r->target_stream_id, r->prefix.originator,
-                                 queued ? "requested" : "suppressed");
+                    wb_logf("venc: decoder recovery stream=%u requester=%u %s\n",
+                            r->target_stream_id, r->prefix.originator,
+                            queued ? "requested" : "suppressed");
                     return false;
                 }
             }
@@ -693,9 +692,8 @@ struct TxCore {
         if (calib_rx_.run_id() != 0 &&
             calib_rx_.quiet_for(now, feed_quiet_ms_)) {
             calib_rx_.expire_run();
-            std::fprintf(stderr,
-                         "calibrate: uplink probes quiet — video feed "
-                         "RESUMED\n");
+            wb_logf("calibrate: uplink probes quiet — video feed "
+                    "RESUMED\n");
         }
         // Push the CURRENT target every tick: write-on-change (§9.6) makes
         // this a no-op normally, and a failed push (encoder briefly down)
@@ -1048,9 +1046,8 @@ struct TxCore {
                         s.frame_framer->set_negotiated_packet_budget(requested);
                     }
                 }
-                std::fprintf(stderr,
-                             "mtu: accepted tier=%u budget=%u (supported=%u)\n",
-                             arg, requested, mtu_supported_);
+                wb_logf("mtu: accepted tier=%u budget=%u (supported=%u)\n",
+                        arg, requested, mtu_supported_);
                 return true;
             }
             default:
@@ -1395,12 +1392,11 @@ struct TxCore {
         if (!power_.empty() && !curve_actuates()) {
             if (!warned_curve_refused_) {
                 warned_curve_refused_ = true;
-                std::fprintf(stderr,
-                             "power: §10.2 curve REFUSED on a relative backend "
-                             "(§10.5 Pass 150) — config power_map holds "
-                             "absolute qdb; running on the §10.5 boot offset "
-                             "instead. Run §10.6 calibration to author an "
-                             "offset-space curve.\n");
+                wb_logf("power: §10.2 curve REFUSED on a relative backend "
+                        "(§10.5 Pass 150) — config power_map holds "
+                        "absolute qdb; running on the §10.5 boot offset "
+                        "instead. Run §10.6 calibration to author an "
+                        "offset-space curve.\n");
             }
             return;
         }
@@ -1416,8 +1412,8 @@ struct TxCore {
                 } else if (!backend_relative_ && apply_power) {
                     ok = apply_power(pa.adapter_idx, *qdb);
                 } else {
-                    std::fprintf(stderr, "power: %s mcs=%u level=%u -> %d qdb\n",
-                                 pa.name.c_str(), mcs, level, *qdb);
+                    wb_logf("power: %s mcs=%u level=%u -> %d qdb\n",
+                            pa.name.c_str(), mcs, level, *qdb);
                 }
                 if (ok) pa.applied_qdb = *qdb;
             }
@@ -1582,8 +1578,8 @@ struct TxCore {
             if (apply_power_offset) {
                 all_ok = apply_power_offset(t.adapter_idx, hw) && all_ok;
             } else {
-                std::fprintf(stderr, "power: %s offset -> %+d qdb\n",
-                             t.name.c_str(), static_cast<int>(hw));
+                wb_logf("power: %s offset -> %+d qdb\n",
+                        t.name.c_str(), static_cast<int>(hw));
             }
         }
         // §15.3 must not report a latch the radio refused (air_iface.h: a
@@ -1604,12 +1600,11 @@ struct TxCore {
                                                          t.offset_qdb);
             // Say what happened. A safety control that logs an intent it did
             // not achieve is worse than one that logs nothing.
-            std::fprintf(stderr,
-                         "power: %s §10.5 boot offset %+d qdb (bound %+d) -> "
-                         "%s\n",
-                         t.name.c_str(), static_cast<int>(t.offset_qdb),
-                         static_cast<int>(t.offset_max_qdb),
-                         ok ? "applied" : "NOT APPLIED");
+            wb_logf("power: %s §10.5 boot offset %+d qdb (bound %+d) -> "
+                    "%s\n",
+                    t.name.c_str(), static_cast<int>(t.offset_qdb),
+                    static_cast<int>(t.offset_max_qdb),
+                    ok ? "applied" : "NOT APPLIED");
         }
     }
 
@@ -1833,25 +1828,23 @@ struct TxCore {
                 for (const PowerTarget& t : power_targets_) {
                     apply_power_offset(t.adapter_idx, t.offset_qdb);
                 }
-                std::fprintf(stderr,
-                             "calibrate: restore -> safe offset "
-                             "(no curve, no override)\n");
+                wb_logf("calibrate: restore -> safe offset "
+                        "(no curve, no override)\n");
             } else {
                 // udp/dev backend: no actuator at all, so there is nothing to
                 // hand back. Say so rather than implying a restore happened.
-                std::fprintf(stderr,
-                             "calibrate: restore has no power authority and "
-                             "no auto actuator — TX power left at the last "
-                             "probe value\n");
+                wb_logf("calibrate: restore has no power authority and "
+                        "no auto actuator — TX power left at the last "
+                        "probe value\n");
             }
-            std::fprintf(stderr, "calibrate: %s%s%s\n",
-                         calibrator_->state() == CalibState::kDone
-                             ? "done"
-                             : "failed",
-                         calibrator_->fail_reason() ? " reason=" : "",
-                         calibrator_->fail_reason()
-                             ? calibrator_->fail_reason()
-                             : "");
+            wb_logf("calibrate: %s%s%s\n",
+                    calibrator_->state() == CalibState::kDone
+                        ? "done"
+                        : "failed",
+                    calibrator_->fail_reason() ? " reason=" : "",
+                    calibrator_->fail_reason()
+                        ? calibrator_->fail_reason()
+                        : "");
         }
         if (a.set_qdb) {
             // §10.6: every tx adapter, curve or not (power_targets_) — the

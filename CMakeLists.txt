@@ -364,6 +364,15 @@ else()
     set(WBLINK_NODE_TX OFF)
 endif()
 add_library(wblink_node STATIC ${WBLINK_NODE_SRCS})
+# R6: the TX headers guard their function prototypes on this macro, so a
+# receive-only consumer that references a TX symbol fails at COMPILE time
+# with a named guard instead of at link time with an unresolved symbol —
+# advertising a declaration the archive cannot honour is a reachability
+# change. PUBLIC: the consumer's TUs are where the references live. The
+# types/enums stay unguarded — examples/node-linkcheck names them in a
+# TX-less build on purpose (C-cleanliness is a compile-time claim).
+target_compile_definitions(wblink_node
+    PUBLIC WBLINK_NODE_TX=$<IF:$<BOOL:${WBLINK_NODE_TX}>,1,0>)
 # Pass 180: the build_info string is a fact about the BUILD, so CMake states
 # it — CMake is the only place that knows. Not read from the feature macros in
 # C++: WBLINK_VENC has never been one (it gates target_sources and "nothing

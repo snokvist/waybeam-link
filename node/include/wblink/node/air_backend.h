@@ -69,7 +69,7 @@ class PacketEventTrace {
         }
         out_ = std::fopen(path, "w");
         if (out_ == nullptr) {
-            std::fprintf(stderr, "packet-trace: cannot open %s\n", path);
+            wb_logf("packet-trace: cannot open %s\n", path);
             return;
         }
         static constexpr size_t kBufferBytes = 1024 * 1024;
@@ -511,9 +511,9 @@ struct AirBackend {
         const ReassertRate guard(*this);
         AirIface* a = iface();
         if (!a->is_rf()) {
-            std::fprintf(stderr, "csa: retune -> %u MHz bw=%u%s (udp backend, "
-                                 "intent only)\n",
-                         chan_mhz, bw, fast ? " fast" : "");
+            wb_logf("csa: retune -> %u MHz bw=%u%s (udp backend, "
+                            "intent only)\n",
+                    chan_mhz, bw, fast ? " fast" : "");
         }
         const uint8_t width = width_mhz(bw);
         bool ok = true;
@@ -523,9 +523,8 @@ struct AirBackend {
                 a->reapply_tx_power(i);  // §11.2 post-retune TXAGC
             } else {
                 ok = false;
-                std::fprintf(stderr,
-                             "csa: adapter %zu retune to %u MHz failed\n", i,
-                             chan_mhz);
+                wb_logf("csa: adapter %zu retune to %u MHz failed\n", i,
+                        chan_mhz);
             }
         }
         // Pass 69 §11.6 verify hygiene: pre-retune backlog is old-channel

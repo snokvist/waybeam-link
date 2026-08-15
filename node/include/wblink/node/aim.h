@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "wblink/log.h"
+
 namespace wblink {
 namespace node {
 
@@ -39,17 +41,16 @@ struct AimHist {
     }
     void dump(const char* name) const {
         if (n == 0) return;
-        std::fprintf(stderr,
-                     "aim: %s n=%llu mean=%lluus max=%lluus "
-                     "buckets[<50,<100,<200,<500,<1k,<2k,<5k,>=5k]="
-                     "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
-                     name, (unsigned long long)n,
-                     (unsigned long long)(sum_us / n),
-                     (unsigned long long)max_us, (unsigned long long)b[0],
-                     (unsigned long long)b[1], (unsigned long long)b[2],
-                     (unsigned long long)b[3], (unsigned long long)b[4],
-                     (unsigned long long)b[5], (unsigned long long)b[6],
-                     (unsigned long long)b[7]);
+        wb_logf("aim: %s n=%llu mean=%lluus max=%lluus "
+                "buckets[<50,<100,<200,<500,<1k,<2k,<5k,>=5k]="
+                "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                name, (unsigned long long)n,
+                (unsigned long long)(sum_us / n),
+                (unsigned long long)max_us, (unsigned long long)b[0],
+                (unsigned long long)b[1], (unsigned long long)b[2],
+                (unsigned long long)b[3], (unsigned long long)b[4],
+                (unsigned long long)b[5], (unsigned long long)b[6],
+                (unsigned long long)b[7]);
     }
 };
 

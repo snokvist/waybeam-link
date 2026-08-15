@@ -57,6 +57,7 @@
 #include "wblink/framer.h"
 #include "wblink/hmac_sha256.h"
 #include "wblink/jscc_runtime_shadow.h"
+#include "wblink/log.h"
 #include "wblink/loss_model.h"
 #include "wblink/mcs_probe.h"
 #include "wblink/power.h"
@@ -113,7 +114,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply, TxRuntimeInfo* runtime_info) {
     auto air = AirBackend::create(l.cfg);
     if (!air) {
-        std::fprintf(stderr, "air error: %s\n", air.error.c_str());
+        wb_logf("air error: %s\n", air.error.c_str());
         return 1;
     }
     // §15.5 (Pass 172/174): publish the per-die capability answers the moment
@@ -126,7 +127,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
     air.value->set_packet_trace(&packet_trace);
     auto bindings = BindingSet::create(l.cfg);
     if (!bindings) {
-        std::fprintf(stderr, "binding error: %s\n", bindings.error.c_str());
+        wb_logf("binding error: %s\n", bindings.error.c_str());
         return 1;
     }
     const uint32_t session = session_nonce();
@@ -160,11 +161,10 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                              air.value->adapter_mac(calib_tx_idx))
             : "udp";
     if (calib_tx_adapter != nullptr && calib_ident.empty()) {
-        std::fprintf(stderr,
-                     "calibrate: adapter \"%s\" reports no EFUSE identity — "
-                     "§10.6 calibration and any absolute curve are REFUSED "
-                     "(Pass 154 D3); running at the §10.5 safe boot offset\n",
-                     calib_tx_adapter->name.c_str());
+        wb_logf("calibrate: adapter \"%s\" reports no EFUSE identity — "
+                "§10.6 calibration and any absolute curve are REFUSED "
+                "(Pass 154 D3); running at the §10.5 safe boot offset\n",
+                calib_tx_adapter->name.c_str());
     }
     // §10.5 (Pass 150): ONLY devourer's lever is relative. Keyed on the
     // backend kind, not on is_rf() — the retired kernel-monitor backend also
@@ -210,16 +210,15 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         if (calib_ident.empty()) {
             // Unreachable while D3 refuses the calibrator whole; kept as the
             // belt so no future start path can persist an unkeyed artifact.
-            std::fprintf(stderr,
-                         "calibrate: artifact write refused — no adapter "
-                         "identity (Pass 154 D3)\n");
+            wb_logf("calibrate: artifact write refused — no adapter "
+                    "identity (Pass 154 D3)\n");
             return;
         }
         const uint8_t fp = calib_store_write(
             l.cfg.policy.calibration.artifact_dir, calib_ident, art);
         if (fp == 0) {
-            std::fprintf(stderr, "calibrate: artifact write FAILED (%s)\n",
-                         l.cfg.policy.calibration.artifact_dir.c_str());
+            wb_logf("calibrate: artifact write FAILED (%s)\n",
+                    l.cfg.policy.calibration.artifact_dir.c_str());
             return;
         }
         last_artifact = art;
@@ -229,7 +228,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         tx.install_curve(c);
         tx.calib_fingerprint_ = fp;
         tx.calib_stale_ = false;
-        std::fprintf(stderr, "calibrate: artifact persisted fp=0x%02x\n", fp);
+        wb_logf("calibrate: artifact persisted fp=0x%02x\n", fp);
     };
     if (auto stored = calib_ident.empty()
                           ? Result<CalibStored>::fail("no identity (D3)")
@@ -256,19 +255,17 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             // Explicit config power_map wins; the artifact fills the gap.
             if (!tx.has_power_curve()) {
                 tx.install_curve(stored.value->curve);
-                std::fprintf(stderr,
-                             "calibrate: boot auto-load fp=0x%02x (%s)\n",
-                             stored.value->fingerprint, ident.c_str());
+                wb_logf("calibrate: boot auto-load fp=0x%02x (%s)\n",
+                        stored.value->fingerprint, ident.c_str());
             }
             tx.calib_fingerprint_ = stored.value->fingerprint;
             last_artifact = stored.value->artifact;  // §15.5 GET surface
         } else {
             tx.calib_stale_ = true;  // §10.6: surface, never apply
-            std::fprintf(stderr,
-                         "calibrate: STALE artifact (stored %s, live %s%s)\n",
-                         stored.value->identity.c_str(), ident.c_str(),
-                         space_ok ? "" : ", placements outside the §10.5 "
-                                         "offset window — wrong power space");
+            wb_logf("calibrate: STALE artifact (stored %s, live %s%s)\n",
+                    stored.value->identity.c_str(), ident.c_str(),
+                    space_ok ? "" : ", placements outside the §10.5 "
+                                    "offset window — wrong power space");
         }
     }
     tx.estimate_airtime = [&](size_t bytes, bool include_pending,
@@ -325,12 +322,11 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         auto r = FrameShmRing::attach(s.bind.name);
         if (r) {
             si.ring = std::move(*r.value);
-            std::fprintf(stderr, "tx: frame-shm '%s' attached\n",
-                         s.bind.name.c_str());
+            wb_logf("tx: frame-shm '%s' attached\n",
+                    s.bind.name.c_str());
         } else {
-            std::fprintf(stderr,
-                         "tx: frame-shm '%s' not up yet (%s); retrying\n",
-                         s.bind.name.c_str(), r.error.c_str());
+            wb_logf("tx: frame-shm '%s' not up yet (%s); retrying\n",
+                    s.bind.name.c_str(), r.error.c_str());
         }
         shm_ins.push_back(std::move(si));
     }
@@ -453,8 +449,8 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 return false;
             }
             active_mode = name;  // optimistic; the applier is authoritative
-            std::fprintf(stderr, "vcmd: MODE[%u] -> %s (applier %s)\n", arg,
-                         name.c_str(), l.cfg.venc.mode_apply_cmd.c_str());
+            wb_logf("vcmd: MODE[%u] -> %s (applier %s)\n", arg,
+                    name.c_str(), l.cfg.venc.mode_apply_cmd.c_str());
             return true;
         }
         return tx.apply_command(id, arg, now_ms());
@@ -469,7 +465,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
     if (!l.cfg.control.bind.empty()) {
         auto cs = ControlServer::create(l.cfg.control.bind);
         if (!cs) {
-            std::fprintf(stderr, "control: %s\n", cs.error.c_str());
+            wb_logf("control: %s\n", cs.error.c_str());
             return 1;
         }
         control = std::move(*cs.value);
@@ -514,7 +510,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 return "no role:\"tx\" adapter on this node";
             if (is_auto) {
                 tx.clear_power_override();
-                std::fprintf(stderr, "power: §10.5 override cleared (auto)\n");
+                wb_logf("power: §10.5 override cleared (auto)\n");
                 return "";
             }
             if (qdb < -511 || qdb > 511)
@@ -648,8 +644,8 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         // otherwise never re-push). Side-effect only.
         h.venc_reassert = [&] {
             tx.reassert_venc();
-            std::fprintf(stderr, "venc: reassert — actuator cache dropped, "
-                                 "re-asserting on next tick\n");
+            wb_logf("venc: reassert — actuator cache dropped, "
+                            "re-asserting on next tick\n");
         };
         // §15.5 craft-local FPS-ladder toggle (Pass 99). Routes through the
         // exact §11.7 FPS_LADDER transition the over-air path uses, so local
@@ -697,8 +693,8 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 return "failed to launch mode applier";
             }
             active_mode = name;  // optimistic; the applier is authoritative
-            std::fprintf(stderr, "mode: applying \"%s\" via %s\n", name.c_str(),
-                         l.cfg.venc.mode_apply_cmd.c_str());
+            wb_logf("mode: applying \"%s\" via %s\n", name.c_str(),
+                    l.cfg.venc.mode_apply_cmd.c_str());
             return "";
         };
         // §15.5 Pass 104: GET /api/v1/modes — the catalog. modes_dir defaults to
@@ -741,8 +737,8 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             // reporting, since its own traffic refreshes the silence timer.
             tx.report_authority_clear();
             cur_chan = chan;
-            std::fprintf(stderr, "channel: local retune -> %u MHz (Pass 113)\n",
-                         chan);
+            wb_logf("channel: local retune -> %u MHz (Pass 113)\n",
+                    chan);
             return "";
         };
         // §11.4a Pass 113 runtime pairing gate. false = fresh token + new
@@ -761,20 +757,20 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             } else {
                 psk_announced = false;
             }
-            std::fprintf(stderr, "psk: pairing %s (Pass 113)\n",
-                         enabled ? "locked" : "open");
+            wb_logf("psk: pairing %s (Pass 113)\n",
+                    enabled ? "locked" : "open");
             return "";
         };
         control->set_handlers(std::move(h));
-        std::fprintf(stderr, "control: REST on %s (tx)\n",
-                     l.cfg.control.bind.c_str());
+        wb_logf("control: REST on %s (tx)\n",
+                l.cfg.control.bind.c_str());
     }
     // §10.5 (Pass 150): forced safe boot offset on every role:"tx" adapter,
     // applied before the first frame goes out — a node must never transmit at
     // the uncharacterised efuse default even briefly.
     tx.apply_boot_power_offsets();
-    std::fprintf(stderr, "tx: session=%u, running%s\n", session,
-                 qg.enabled() ? " (quiet-gap pacing)" : "");
+    wb_logf("tx: session=%u, running%s\n", session,
+            qg.enabled() ? " (quiet-gap pacing)" : "");
     std::optional<uint16_t> prior_bound_issuer;
     const auto service_air = [&](uint64_t service_now) {
         const uint64_t service_us = now_us();
@@ -804,10 +800,9 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                     // Pass 89: the flag is owned by the campaign_active()
                     // edge check on the loop body — one writer, so the
                     // clearing edge cannot be missed.
-                    std::fprintf(stderr,
-                                 "csa: armed -> %u MHz (nonce %u, dt %u ms)\n",
-                                 c->target_chan, c->csa_nonce,
-                                 c->dt_to_switch_ms);
+                    wb_logf("csa: armed -> %u MHz (nonce %u, dt %u ms)\n",
+                            c->target_chan, c->csa_nonce,
+                            c->dt_to_switch_ms);
                 }
                 return;
             }
@@ -821,10 +816,9 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 // duplicate re-echo / REJECTED, tx.apply_command actuates.
                 if (craft_cmd.on_cmd(*vc, service_us, csa.latched_issuer(),
                                      apply_cmd)) {
-                    std::fprintf(stderr,
-                                 "vcmd: applied %s=%u (nonce %u, from %u)\n",
-                                 vcmd_name_for(vc->cmd_id), vc->cmd_arg,
-                                 vc->cmd_nonce, vc->prefix.originator);
+                    wb_logf("vcmd: applied %s=%u (nonce %u, from %u)\n",
+                            vcmd_name_for(vc->cmd_id), vc->cmd_arg,
+                            vc->cmd_nonce, vc->prefix.originator);
                 }
                 return;
             }
@@ -893,16 +887,16 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             const bool retuned =
                 air.value->retune_all(ca.chan_mhz, ca.bw, ca.fast);
             if (!retuned) {
-                std::fprintf(stderr, "csa: retune to %u MHz FAILED\n",
-                             ca.chan_mhz);  // Pass 69: never silent
+                wb_logf("csa: retune to %u MHz FAILED\n",
+                        ca.chan_mhz);  // Pass 69: never silent
             } else {
                 tx.reassert_power();  // §10.5: retune may reset power
                 tx.on_rf_environment(ca.chan_mhz, ca.bw, now);
                 cur_chan = ca.chan_mhz;
                 cur_bw = ca.bw;
             }
-            std::fprintf(stderr, "csa: %s -> %u MHz\n", csa.state_str(),
-                         ca.chan_mhz);
+            wb_logf("csa: %s -> %u MHz\n", csa.state_str(),
+                    ca.chan_mhz);
             // §11.6 Pass 80: arm the post-retune RX-liveness guard. The
             // issuer's beacons blanket the verify window, so total silence
             // for the deadline means the in-place retune half-applied.
@@ -919,16 +913,15 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         const std::optional<uint16_t> bound_now = csa.latched_issuer();
         if (prior_bound_issuer && bound_now != prior_bound_issuer) {
             tx.reset_negotiated_mtu();
-            std::fprintf(stderr, "mtu: claim released/changed -> Default\n");
+            wb_logf("mtu: claim released/changed -> Default\n");
         }
         prior_bound_issuer = bound_now;
         if (now >= next_shm_identity_check_ms) {
             for (ShmIn& si : shm_ins) {
                 if (si.ring && !si.ring->backing_object_current()) {
-                    std::fprintf(stderr,
-                                 "tx: frame-shm '%s' producer replaced; "
-                                 "reattaching\n",
-                                 si.name.c_str());
+                    wb_logf("tx: frame-shm '%s' producer replaced; "
+                            "reattaching\n",
+                            si.name.c_str());
                     si.ring.reset();
                     si.pending = false;
                 }
@@ -959,8 +952,8 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 if (auto r = FrameShmRing::attach(si.name)) {
                     si.ring = std::move(*r.value);
                     si.pending = false;
-                    std::fprintf(stderr, "tx: frame-shm '%s' attached\n",
-                                 si.name.c_str());
+                    wb_logf("tx: frame-shm '%s' attached\n",
+                            si.name.c_str());
                 }
             }
             next_shm_attach_ms = now + 500;
@@ -1070,12 +1063,11 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         }
         if (csa_liveness_deadline_ms && now >= *csa_liveness_deadline_ms) {
             if (air.value->rx_frames_total() == csa_liveness_rx_baseline) {
-                std::fprintf(stderr,
-                             "csa: RX SILENT %u ms after retune to %u MHz — "
-                             "half-applied retune, monitor re-init (§11.6 "
-                             "Pass 80)\n",
-                             l.cfg.policy.csa.rx_liveness_ms,
-                             csa_liveness_chan);
+                wb_logf("csa: RX SILENT %u ms after retune to %u MHz — "
+                        "half-applied retune, monitor re-init (§11.6 "
+                        "Pass 80)\n",
+                        l.cfg.policy.csa.rx_liveness_ms,
+                        csa_liveness_chan);
                 air.value->recover_all(csa_liveness_chan, csa_liveness_bw);
                 // §10.5: a recovery can reset hardware power (Pass 48) — put
                 // the latch / resolved curve value back regardless.
@@ -1100,11 +1092,11 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         }
         if (const auto trc = air.value->tx_progress_counters()) {
             if (wedge.poll(now, trc->first, trc->second)) {
-                std::fprintf(stderr, "%s", wedge.wedged()
-                        ? "air: TX WEDGE — submissions advancing, zero "
-                          "backend TX progress over the window (§9.10)\n"
-                        : "air: tx wedge cleared — backend TX progress "
-                          "resumed\n");
+                wb_logf("%s", wedge.wedged()
+                   ? "air: TX WEDGE — submissions advancing, zero "
+                     "backend TX progress over the window (§9.10)\n"
+                   : "air: tx wedge cleared — backend TX progress "
+                     "resumed\n");
             }
             // §9.10 v2 (Pass 148). This adapter IS the video transmitter, so a
             // sustained wedge means the link is already dead — the restart
@@ -1116,10 +1108,9 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             // where the wedged adapter is the uplink and RX/video still work.
             if (l.cfg.air.wedge_exit_windows != 0 &&
                 wedge.consecutive_wedged() >= l.cfg.air.wedge_exit_windows) {
-                std::fprintf(stderr,
-                             "air: TX WEDGED for %u consecutive windows — "
-                             "exiting for supervisor re-exec (§9.10 v2)\n",
-                             wedge.consecutive_wedged());
+                wb_logf("air: TX WEDGED for %u consecutive windows — "
+                        "exiting for supervisor re-exec (§9.10 v2)\n",
+                        wedge.consecutive_wedged());
                 // Pass 174 review fix: the terminal snapshot must carry the
                 // wedge that ended the run — this return used to sit above
                 // the publish site, so a supervisor reading the final status

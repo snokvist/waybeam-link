@@ -79,8 +79,7 @@ int wblink_tx_set_adapter_fds(wblink_tx* tx, const int* fds, size_t n) {
     try {
         tx->adapter_fds.assign(fds, fds + n);
     } catch (...) {
-        std::fprintf(stderr,
-                     "wblink_tx_set_adapter_fds: allocation failed\n");
+        wblink::wb_logf("wblink_tx_set_adapter_fds: allocation failed\n");
         return 1;
     }
     return 0;
@@ -111,7 +110,7 @@ static int wblink_tx_run_claimed(wblink_tx* tx, const char* config_path,
             return WBLINK_TX_ERROR;
         }
     } catch (...) {
-        std::fprintf(stderr, "wblink_tx_run: unhandled C++ exception in load\n");
+        wblink::wb_logf("wblink_tx_run: unhandled C++ exception in load\n");
         return WBLINK_TX_ERROR;
     }
     // After load_all, so a config can never smuggle these in, and before
@@ -121,7 +120,7 @@ static int wblink_tx_run_claimed(wblink_tx* tx, const char* config_path,
     try {
         loaded.cfg.adapter_fds = tx->adapter_fds;
     } catch (...) {
-        std::fprintf(stderr, "wblink_tx_run: allocation failed\n");
+        wblink::wb_logf("wblink_tx_run: allocation failed\n");
         return WBLINK_TX_ERROR;
     }
 
@@ -142,7 +141,7 @@ static int wblink_tx_run_claimed(wblink_tx* tx, const char* config_path,
         return wblink::node::run_tx(loaded, tx->stop, mode_apply,
                                     &tx->runtime_info);
     } catch (...) {
-        std::fprintf(stderr, "wblink_tx_run: unhandled C++ exception\n");
+        wblink::wb_logf("wblink_tx_run: unhandled C++ exception\n");
         return WBLINK_TX_ERROR;
     }
 }

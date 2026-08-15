@@ -77,6 +77,12 @@ static_assert(std::atomic<int>::is_always_lock_free,
 
 class TxRuntimeInfo;
 
+// R6: the prototypes are guarded like tx_node_c.h's — `wblink::node` defines
+// WBLINK_NODE_TX PUBLIC as 1/0, so a receive-only build that references
+// run_tx fails at compile time; without the macro (out-of-tree reader) the
+// whole surface stays visible and the linker judges, as before.
+#if !defined(WBLINK_NODE_TX) || WBLINK_NODE_TX
+
 // Blocks until `stop` is set or the loop gives up. Owns no process: it does
 // not exit, fork, or install a signal handler. See the header note above.
 int run_tx(const Loaded& l, const std::atomic<int>& stop,
@@ -88,6 +94,8 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
 // here with nullptr.
 int run_tx(const Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply, TxRuntimeInfo* runtime_info);
+
+#endif  // WBLINK_NODE_TX
 
 }  // namespace wblink::node
 
