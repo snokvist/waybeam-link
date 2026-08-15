@@ -150,6 +150,8 @@ struct SettleSample {
     double retune_call_ms = 0;  // inside the retune() call itself
     double deaf_ms = -1;        // call START -> first accepted frame; -1 = timeout
     uint64_t quiet_frames = 0;  // frames heard on the quiet channel (taint)
+    bool away_failed = false;   // the hop TO the quiet channel was refused
+    bool tune_failed = false;   // the hop back to the target was refused
 };
 
 // Anchored at call START, not call return, and polled from a SECOND thread:
@@ -166,14 +168,21 @@ SettleSample settle_cycle(wblink::RadioAir& a, uint16_t quiet_mhz,
     SettleSample s;
     // Away: full retune, then let the pipeline drain well past the deafness
     // under test so old-channel residue cannot be double-counted below.
-    a.retune(0, quiet_mhz, 20, false);
+    // Checked (review 2026-08-15): a refused away-hop leaves the DUT on the
+    // target channel, where every "quiet" frame is really the emitter — the
+    // cycle would read TAINTED with a misleading diagnosis, so name the real
+    // cause instead.
+    if (!a.retune(0, quiet_mhz, 20, false)) {
+        s.away_failed = true;
+        return s;
+    }
     a.flush_rx();
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
-    // Quiet-channel taint check: baseline over the last 100 ms of the away
-    // dwell. Anything heard here means the "quiet" channel is not, and the
-    // sample cannot distinguish settle from luck.
+    // Quiet-channel taint check across the WHOLE away dwell (review
+    // 2026-08-15: a 100 ms tail window missed sporadic emitters with a
+    // period above it), and the poll baseline read immediately before the
+    // hop so the un-instrumentable gap is only the retune call itself.
     const uint64_t pre = a.counters(0).rx_frames;
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     const uint64_t baseline = a.counters(0).rx_frames;
     s.quiet_frames = baseline - pre;
 
@@ -197,6 +206,8 @@ SettleSample settle_cycle(wblink::RadioAir& a, uint16_t quiet_mhz,
     poller.join();
     if (tuned) {
         s.deaf_ms = first_ms;
+    } else {
+        s.tune_failed = true;
     }
     return s;
 }
@@ -421,13 +432,17 @@ int main(int argc, char** argv) {
                 // that the steady-state scout hop does not. Printed, never
                 // summarized.
                 std::vector<double> deaf;
-                int timeouts = 0, tainted = 0;
+                int timeouts = 0, tainted = 0, retune_fails = 0;
                 for (int cyc = -2; cyc < settle_cycles; ++cyc) {
                     const SettleSample s = settle_cycle(
                         a, settle_quiet_mhz, chan_mhz, settle_fast,
                         settle_timeout_ms);
                     char deaf_str[32];
-                    if (s.deaf_ms < 0) {
+                    if (s.away_failed || s.tune_failed) {
+                        std::snprintf(deaf_str, sizeof deaf_str,
+                                      "RETUNE-FAIL(%s)",
+                                      s.away_failed ? "away" : "target");
+                    } else if (s.deaf_ms < 0) {
                         std::snprintf(deaf_str, sizeof deaf_str, "TIMEOUT");
                     } else {
                         std::snprintf(deaf_str, sizeof deaf_str, "%.1f ms",
@@ -440,7 +455,9 @@ int main(int argc, char** argv) {
                             ? "  <-- TAINTED: quiet channel heard frames"
                             : "");
                     if (cyc < 0) continue;  // warm-up
-                    if (s.quiet_frames) {
+                    if (s.away_failed || s.tune_failed) {
+                        ++retune_fails;
+                    } else if (s.quiet_frames) {
                         ++tainted;
                     } else if (s.deaf_ms < 0) {
                         ++timeouts;
@@ -451,11 +468,15 @@ int main(int argc, char** argv) {
                 std::sort(deaf.begin(), deaf.end());
                 if (deaf.empty()) {
                     // No sample = no measurement. An emitter that was never
-                    // heard must not read as "settles instantly".
+                    // heard must not read as "settles instantly" — and a
+                    // broken retune path must not read as a silent emitter
+                    // (review 2026-08-15: the two need different fixes).
                     std::fprintf(stderr,
                                  "FAIL settle: 0 clean samples (%d timeouts, "
-                                 "%d tainted) — no emitter heard?\n",
-                                 timeouts, tainted);
+                                 "%d tainted, %d retune-fails) — %s\n",
+                                 timeouts, tainted, retune_fails,
+                                 retune_fails ? "retune path broken?"
+                                              : "no emitter heard?");
                     rc = 1;
                 } else {
                     const auto pct = [&](double p) {
@@ -464,10 +485,11 @@ int main(int argc, char** argv) {
                     };
                     std::fprintf(stderr,
                                  "settle summary: n=%zu timeouts=%d "
-                                 "tainted=%d  min=%.1f p50=%.1f p90=%.1f "
-                                 "max=%.1f ms\n",
-                                 deaf.size(), timeouts, tainted, deaf.front(),
-                                 pct(0.5), pct(0.9), deaf.back());
+                                 "tainted=%d retune_fails=%d  min=%.1f "
+                                 "p50=%.1f p90=%.1f max=%.1f ms\n",
+                                 deaf.size(), timeouts, tainted, retune_fails,
+                                 deaf.front(), pct(0.5), pct(0.9),
+                                 deaf.back());
                 }
             }
         }
