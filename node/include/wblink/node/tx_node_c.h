@@ -106,11 +106,12 @@ wblink_tx *wblink_tx_create(void);
 
 /*
  * Pass 179: supply the config as TEXT instead of a file path. Call BEFORE
- * `wblink_rx_run`, which is then called with a NULL `config_path`; a call
+ * `wblink_tx_run`, which is then called with a NULL `config_path`; a call
  * after the run has started returns 3.
  *
  * EXACTLY ONE SOURCE. Passing a non-NULL path with a config set here is
- * refused (2), not ranked — a precedence rule is something a caller resolves
+ * refused with WBLINK_TX_BAD_ARG (-1, NOT 2 — 2 is the §9.10 wedge in this
+ * header's space, and a supervisor acts on it), not ranked — a precedence rule is something a caller resolves
  * by guessing, and the guess is invisible until the wrong config flies. A
  * run with neither is refused for the same reason it always was.
  *

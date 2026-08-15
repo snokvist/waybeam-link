@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "wblink/log.h"
 #include "wblink/node/load.h"
 #include "wblink/node/tx_node.h"
 #include "wblink/node/tx_runtime_info.h"
@@ -53,12 +54,13 @@ void wblink_tx_request_stop(wblink_tx* tx) {
 }
 
 int wblink_tx_set_config_json(wblink_tx* tx, const char* json) {
-    if (tx == nullptr || json == nullptr || *json == '\0') return 2;
+    if (tx == nullptr) return 2;
     if (tx->used.load(std::memory_order_relaxed)) return 3;
+    if (json == nullptr || *json == '\0') return 2;
     try {
         tx->config_json.assign(json);
     } catch (...) {
-        std::fprintf(stderr, "wblink_tx_set_config_json: allocation failed\n");
+        wblink::wb_logf("wblink_tx_set_config_json: allocation failed\n");
         return 1;
     }
     return 0;

@@ -34,6 +34,29 @@ struct Loaded {
     uint8_t tv = 0;
 };
 
+// net_id is SIGNED and negative means "leave the config's value alone".
+// `Config::node.net_id` is an optional whose nullopt is "unconfigured — accept
+// any net_id", a state §3.0 keeps distinct from 0 precisely because
+// "collapsing it to 0 made an unconfigured node deaf to every non-zero net_id"
+// (rx_node.cpp). A plain uint8_t here would have no way to say "don't pin
+// one", and 0 is not a safe stand-in: §15.5a serialises the live selection as
+// `net_id.value_or(0)`, so a consumer that reads a selection back and feeds it
+// to this call would pin the filter on 0 and go silently deaf — the exact
+// failure, arrived at by a round trip through our own API.
+struct Selection {
+    uint16_t originator = 0;
+    int32_t net_id = -1;
+    uint16_t channel_mhz = 0;
+};
+
+inline void apply_selection(const Selection& sel, Loaded& out) {
+    out.cfg.node.preferred_originator = sel.originator;
+    if (sel.net_id >= 0) {
+        out.cfg.node.net_id = static_cast<uint8_t>(sel.net_id);
+    }
+    for (AdapterCfg& a : out.cfg.adapters) a.channel_mhz = sel.channel_mhz;
+}
+
 // The half that runs once a Config exists, whatever produced it. Split out
 // by Pass 179 so a config supplied as TEXT and a config read from a PATH are
 // validated by the same code rather than by two that drift.
@@ -82,26 +105,33 @@ inline int load_finish(Loaded& out) {
     return 0;
 }
 
-inline int load_all(const std::string& config_path, Loaded& out) {
+inline int load_all(const std::string& config_path, Loaded& out,
+                    const Selection* sel = nullptr) {
     auto cfg = load_config(config_path);
     if (!cfg) {
         wb_logf("config error: %s\n", cfg.error.c_str());
         return 1;
     }
     out.cfg = std::move(*cfg.value);
+    // BEFORE load_finish, which prints the config summary: a selection applied
+    // after it would leave the operator's log naming the channel the node was
+    // configured for rather than the one it will actually fly on.
+    if (sel != nullptr) apply_selection(*sel, out);
     return load_finish(out);
 }
 
 // Pass 179: the same loader, given the config as TEXT. An embedder that
 // composes its config in memory (Android extracts one from its assets) does
 // not have to own a file to start a node.
-inline int load_all_json(const std::string& config_json, Loaded& out) {
+inline int load_all_json(const std::string& config_json, Loaded& out,
+                         const Selection* sel = nullptr) {
     auto cfg = load_config_json(config_json);
     if (!cfg) {
         wb_logf("config error: %s\n", cfg.error.c_str());
         return 1;
     }
     out.cfg = std::move(*cfg.value);
+    if (sel != nullptr) apply_selection(*sel, out);
     return load_finish(out);
 }
 
@@ -114,17 +144,5 @@ inline int load_all_json(const std::string& config_json, Loaded& out) {
 // spectator's ears onto the craft, and a pre-start selection that moved one
 // would build a diversity node listening in two places for a craft that is
 // only ever in one.
-struct Selection {
-    uint16_t originator = 0;
-    uint8_t net_id = 0;
-    uint16_t channel_mhz = 0;
-};
-
-inline void apply_selection(const Selection& sel, Loaded& out) {
-    out.cfg.node.preferred_originator = sel.originator;
-    out.cfg.node.net_id = sel.net_id;
-    for (AdapterCfg& a : out.cfg.adapters) a.channel_mhz = sel.channel_mhz;
-}
-
 }  // namespace node
 }  // namespace wblink

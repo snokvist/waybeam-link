@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "wblink/log.h"
 #include "wblink/node/load.h"
 #include "wblink/node/rx_node.h"
 #include "wblink/node/rx_runtime_control.h"
@@ -99,25 +100,30 @@ int wblink_rx_set_adapter_fds(wblink_rx* rx, const int* fds, size_t n) {
 }
 
 int wblink_rx_set_config_json(wblink_rx* rx, const char* json) {
-    if (rx == nullptr || json == nullptr || *json == '\0') return 2;
+    if (rx == nullptr) return 2;
     if (rx->used.load(std::memory_order_relaxed)) return 3;
+    if (json == nullptr || *json == '\0') return 2;
     try {
         rx->config_json.assign(json);
     } catch (...) {
-        std::fprintf(stderr, "wblink_rx_set_config_json: allocation failed\n");
+        wblink::wb_logf("wblink_rx_set_config_json: allocation failed\n");
         return 1;
     }
     return 0;
 }
 
-int wblink_rx_set_selection(wblink_rx* rx, uint16_t originator, uint8_t net_id,
+int wblink_rx_set_selection(wblink_rx* rx, uint16_t originator, int32_t net_id,
                             uint16_t channel_mhz) {
     if (rx == nullptr) return 2;
+    // Started-check first, so the documented 3 is what a late caller gets
+    // rather than an argument complaint about a call that was too late
+    // regardless (2026-08-15 review).
+    if (rx->used.load(std::memory_order_relaxed)) return 3;
     // Bounds are the library's to state, not each consumer's to re-derive:
     // originator 0 is "none" (§12) and a selection naming it is a caller
     // bug, and a 0 MHz channel would silently build a node tuned nowhere.
     if (originator == 0 || channel_mhz == 0) return 2;
-    if (rx->used.load(std::memory_order_relaxed)) return 3;
+    if (net_id > 255) return 2;   // negative = leave it alone; >255 is a bug
     rx->selection.originator = originator;
     rx->selection.net_id = net_id;
     rx->selection.channel_mhz = channel_mhz;
@@ -231,14 +237,13 @@ static int wblink_rx_run_claimed(wblink_rx* rx, const char* config_path,
     wblink::node::Loaded loaded;
     try {
         // Exactly one source, guaranteed by the wrapper (Pass 179).
-        const int rc = rx->config_json.empty()
-                           ? wblink::node::load_all(config_path, loaded)
-                           : wblink::node::load_all_json(rx->config_json,
-                                                         loaded);
+        const wblink::node::Selection* sel =
+            rx->have_selection ? &rx->selection : nullptr;
+        const int rc =
+            rx->config_json.empty()
+                ? wblink::node::load_all(config_path, loaded, sel)
+                : wblink::node::load_all_json(rx->config_json, loaded, sel);
         if (rc != 0) return rc;
-        if (rx->have_selection) {
-            wblink::node::apply_selection(rx->selection, loaded);
-        }
     } catch (...) {
         std::fprintf(stderr, "wblink_rx_run: unhandled C++ exception in load\n");
         return 1;

@@ -112,12 +112,26 @@ int wblink_rx_set_config_json(wblink_rx *rx, const char *json);
  * selection that moved only the first would build a diversity node listening
  * in two places for a craft that is only ever in one.
  *
+ * `net_id` IS SIGNED, and negative means "leave the config's value alone".
+ * The config field is an optional whose nullopt means "unconfigured — accept
+ * any net_id", a state §3.0 keeps distinct from 0 because collapsing the two
+ * makes an unconfigured node deaf to every non-zero net_id. 0 is therefore
+ * not a usable stand-in for "unset", and the trap is not hypothetical: §15.5a
+ * serialises the live selection as `net_id.value_or(0)`, so a consumer that
+ * reads a selection back and hands it straight to this call would pin the
+ * filter on 0 and go silently deaf — by a round trip through our own API.
+ * Values above 255 are refused.
+ *
  * `originator` 0 is refused (2) — it is §12's "no preference" sentinel, so a
  * selection naming it is a caller bug rather than a selection — as is a
  * 0 MHz channel, which would tune the node nowhere. Returns 0 on success.
+ *
+ * The selection is applied to the loaded config BEFORE the config summary is
+ * logged, so what an operator reads in the log is the channel the node will
+ * actually fly on.
  */
 int wblink_rx_set_selection(wblink_rx *rx, uint16_t originator,
-                            uint8_t net_id, uint16_t channel_mhz);
+                            int32_t net_id, uint16_t channel_mhz);
 
 /*
  * Supply pre-opened USB device descriptors, parallel to the config's
