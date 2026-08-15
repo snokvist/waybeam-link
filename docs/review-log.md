@@ -24,6 +24,38 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 183 — the uplink data plane exists, and it is best-effort (2026-08-15)
+
+**Ruling (operator, 2026-08-15; closes the contract half of issue #177).**
+A ground MAY originate DATA for TELEMETRY/CONTROL — new §7.5. Four rulings,
+all operator-selected from presented options:
+
+1. **Auth: bound-issuer only.** The craft accepts uplink DATA solely from
+   the §11.5a latched originator (the `vehicle_cmd.cpp` identity check,
+   minus MAC/nonce); unbound or other-issuer frames are silent drops.
+   Consistent with §13 harden-not-prevent and §18's data-path posture.
+2. **ARQ: best-effort by construction (v1).** No NACKs, no resend ring, no
+   FEC; craft emits nothing about uplink streams (Pass 79 already bars
+   non-RTP from reports/selection). Guarantees belong to §11.7 campaigns.
+3. **Pacing: gap-gated + blind fallback.** Uplink is a return flush class
+   (after CSA/NACK, before reports), never re-arms a listen window
+   (Pass 78 law). CONTROL holds depth 1 latest-state; TELEMETRY FIFO 32
+   drop-oldest; no anchored window for `uplink.fallback_ms` (seed 50) →
+   §7.1 opportunistic; `uplink.pps_budget` (seed 100) caps ingress.
+   Seeds RE-DERIVE at §17 gate 4.
+4. **Delivery: existing egress bindings.** `dir` stays socket-local; node
+   role fixes air direction — rx-node `dir:"in"` = uplink ingress,
+   tx-node `dir:"out"` = uplink delivery. RTP/AUDIO/frame-shm uplink
+   refused at config load. Uplink DATA stamps `active_profile`/
+   `table_version` 0; the craft ignores both; seq is a per-(originator,
+   session, stream) strictly-monotonic accept cursor.
+
+**Changed:** new §7.5; §3.4 uplink note; §15.2 `policy.uplink.*` + stream
+bullet; §15.3 uplink counters; §17 knob row. **Evidence:** issue #177
+(gap inventory: no craft DataView arm, no ground framer instance, no §7
+contract), issue #99 (airtime budget context), coordination memory
+Pass 78/79 measurements; implementation + loopback E2E in this PR.
+
 ## Pass 182 — the sweep retunes fast where the die says it can (2026-08-15)
 
 **Ruling (operator, 2026-08-15, with Pass 181).** The scout sweep's
