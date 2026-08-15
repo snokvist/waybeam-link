@@ -35,7 +35,9 @@ number compares across rigs.
 | 8812CU (jaguar3) | x86 .242 | full | ~32 ms | **21.1 ms** (20.5–23.7) |
 | 8812CU | x86 .242 | fast | ~13 ms | 12.6 ms |
 | 8733BU | CV610 .181 | full | **~345 ms** | **70.1 ms** (61–80) |
-| 8733BU | CV610 .181 | fast | (short) | 70.2 ms |
+| 8733BU | CV610 .181 | fast | ~277 ms | 70.2 ms |
+| 8812EU (jaguar3) | SSC338Q .232 | full | ~21 ms | **8.1 ms** (6.1–11.3) |
+| 8812EU | SSC338Q .232 | fast | (short) | 8.3 ms |
 | 8812AU | Android S22 | full | ~5 ms | ~250 ms (2026-08-13 scout inference) |
 
 Controls: no-emitter arm → exit 1, 0 clean samples, 20 honest TIMEOUTs;
@@ -81,12 +83,21 @@ listening-time claim rests on the harness + unit test, not on detection
 deltas. The net_id-7 idle emitter itself was measured honest by a
 filtered ear: 6 frames/3 s accepted at net_id 7.
 
-**Still open.** 8812EU pending (.232 powered off throughout) — also the
-second embedded-host data point. Android re-measurement with the
-start-anchored harness (needs the wrapped-fd path; R4's open Android
-half). Whether the BU's 345 ms call is chip (11n HALMAC init sequence) or
-host (CV610 USB control-transfer latency) — separable only by moving a
-jaguar die onto the CV610 or the BU onto x86.
+**EU arm measured 2026-08-15 (same day, .232 powered on):** the 8812EU on
+the SSC338Q craft is the FASTEST of the fleet — full call ~21 ms, radio
+live 8.1 ms p50 — on an embedded host. That answers the chip-vs-host
+question for the BU without moving any die: the second embedded host is
+fast, so the 8733B's 345 ms call is predominantly the chip (11n HALMAC
+init sequence), not the CV610's USB stack. The per-host spread the entry
+opened with still stands — the same jaguar silicon reads 42 ms (x86 AU),
+21 ms (x86 CU), 8 ms (SSC338Q EU) and ~250 ms (S22 AU) — so the Pass 181
+re-anchoring remains the right mechanism: it charges whatever the local
+cost is, measured or not. One warm-up cycle was flagged TAINTED by the
+widened full-dwell taint window (a stray 5180 frame) — the review-round
+guard catching a real event on its first field run.
+
+**Still open.** Android re-measurement with the start-anchored harness
+(needs the wrapped-fd path; R4's open Android half).
 
 **Setup.** CV610 (192.168.2.181) transmitting on 5805/20 through the integrated
 waybeam-hub `mod_wblink` node, adapter `cv610-8733b` (`0bda:f72b`, bus 1-1.2).
