@@ -205,6 +205,62 @@ void ground_pps_budget() {
     CHECK(us.st.sent == 3 && us.st.dropped_budget == 1);
 }
 
+void ground_oversize_budget() {
+    UplinkDataStream us(3, stream_type::kTelemetry,
+                        ground_cfg(3, stream_type::kTelemetry));
+    UplinkPolicy pol;
+    DeliverLog wire;
+    // Exactly at the §7.5 budget: framed and sent.
+    const auto ok = payload_bytes(0x11, kUplinkMaxDatagram);
+    CHECK(!us.on_datagram(ok.data(), ok.size(), 1000, 1000000, false, pol,
+                          wire.sink()));
+    CHECK(us.st.sent == 1 && us.st.dropped_oversize == 0);
+    // One byte over: dropped whole with its own counter, never framed.
+    const auto big = payload_bytes(0x12, kUplinkMaxDatagram + 1);
+    CHECK(!us.on_datagram(big.data(), big.size(), 1001, 1001000, false, pol,
+                          wire.sink()));
+    CHECK(us.st.dropped_oversize == 1 && us.st.sent == 1);
+    CHECK(wire.out.size() == 1);
+    // §15.3 accounting closes: submitted = sent + dropped_*.
+    CHECK(us.st.submitted == us.st.sent + us.st.dropped_stale +
+                                 us.st.dropped_budget +
+                                 us.st.dropped_oversize);
+}
+
+void shape_rule() {
+    StreamCfg s;
+    s.stream_id = 2;
+    s.stream_type = stream_type::kControl;
+    s.dir = Dir::kIn;
+    s.bind.kind = BindKind::kUdp;
+    // rx-node uplink ingress: CONTROL/TELEMETRY over udp pass...
+    CHECK(uplink_shape_error(s, /*tx_role=*/false) == nullptr);
+    s.stream_type = stream_type::kTelemetry;
+    CHECK(uplink_shape_error(s, false) == nullptr);
+    // ...RTP / AUDIO / frame-shm are refused...
+    s.stream_type = stream_type::kRtp;
+    CHECK(uplink_shape_error(s, false) != nullptr);
+    s.stream_type = stream_type::kAudio;
+    CHECK(uplink_shape_error(s, false) != nullptr);
+    s.stream_type = stream_type::kControl;
+    s.bind.kind = BindKind::kFrameShm;
+    CHECK(uplink_shape_error(s, false) != nullptr);
+    // ...and the same stream is NOT an uplink stream on the other role, so
+    // a tx node's RTP dir:"in" (video ingest) stays legal.
+    s.stream_type = stream_type::kRtp;
+    s.bind.kind = BindKind::kFrameShm;
+    CHECK(uplink_shape_error(s, /*tx_role=*/true) == nullptr);
+    // tx-node dir:"out" mirror.
+    s.dir = Dir::kOut;
+    s.bind.kind = BindKind::kUdp;
+    s.stream_type = stream_type::kControl;
+    CHECK(uplink_shape_error(s, true) == nullptr);
+    s.stream_type = stream_type::kRtp;
+    CHECK(uplink_shape_error(s, true) != nullptr);
+    // rx-node dir:"out" RTP (video egress) stays legal.
+    CHECK(uplink_shape_error(s, false) == nullptr);
+}
+
 void wire_round_trip_ground_to_craft() {
     UplinkDataStream us(2, stream_type::kControl,
                         ground_cfg(2, stream_type::kControl));
@@ -243,6 +299,8 @@ int main() {
     ground_control_latest_state();
     ground_telemetry_fifo_cap();
     ground_pps_budget();
+    ground_oversize_budget();
+    shape_rule();
     wire_round_trip_ground_to_craft();
     return wbtest_finish("uplink_data_test");
 }

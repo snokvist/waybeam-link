@@ -353,6 +353,7 @@ struct UplinkDataStreamStats {
     uint64_t sent = 0;
     uint64_t dropped_stale = 0;
     uint64_t dropped_budget = 0;
+    uint64_t dropped_oversize = 0;
     uint64_t accepted = 0;
     uint64_t rej_unbound = 0;
     uint64_t rej_stream = 0;

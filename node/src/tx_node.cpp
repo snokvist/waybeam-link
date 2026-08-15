@@ -139,11 +139,8 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         if (s.dir != Dir::kOut) {
             continue;
         }
-        if (s.bind.kind == BindKind::kFrameShm ||
-            (s.stream_type != stream_type::kTelemetry &&
-             s.stream_type != stream_type::kControl)) {
-            wb_logf("stream %u: tx-node dir:\"out\" is §7.5 uplink delivery "
-                    "— TELEMETRY/CONTROL over udp only\n", s.stream_id);
+        if (const char* err = uplink_shape_error(s, /*tx_role=*/true)) {
+            wb_logf("stream %u: %s\n", s.stream_id, err);
             return 1;
         }
         uplink_accepts.emplace_back(s.stream_id, s.stream_type);

@@ -440,9 +440,10 @@ table can therefore never make an older/mismatched client misbehave.
 
 **Uplink direction (Pass 183):** TELEMETRY and CONTROL are the only stream
 types that may travel ground→craft as DATA — the uplink data plane, §7.5.
-RTP and AUDIO are downlink-only (refused at config load on an uplink
-stream). The uplink acceptor's admission rules are §7.5's, not this
-section's unknown-type rule (which governs RxEngine consumers).
+RTP and AUDIO are downlink-only (refused at `--check` and at node
+startup on an uplink stream — the pure loader cannot decide, the shape
+is role-dependent). The uplink acceptor's admission rules are §7.5's,
+not this section's unknown-type rule (which governs RxEngine consumers).
 
 **Best-effort suspends profile logic, never §6.6 clamp state (Pass 87).**
 `max_block` and the delivery cursor are *clamp* state, not profile state, and MUST
@@ -1564,7 +1565,9 @@ ARQ flags — the AUDIO one-datagram-one-block shape, §3.4).
   direction.** An rx node's `dir:"in"` UDP stream is uplink ingress
   (previously silently ignored — this is additive); a tx node's
   `dir:"out"` UDP stream is uplink delivery through its egress binding.
-  `frame-shm` uplink is invalid; RTP/AUDIO uplink is refused at load.
+  `frame-shm` uplink is invalid; RTP/AUDIO uplink is refused at
+  `--check` and at node startup (role-dependent shape — the loader
+  alone cannot rule).
 - **Profiles do not apply.** Uplink DATA stamps `active_profile = 0` and
   `table_version = 0`; the craft ignores both fields for uplink
   admission. Uplink streams take no part in §9 — Pass 79 already bars
@@ -1579,11 +1582,19 @@ ARQ flags — the AUDIO one-datagram-one-block shape, §3.4).
   any other issuer, is a silent drop + counter (the §11.7 no-probe-oracle
   posture, minus MAC/nonce; operator ruling 2026-08-15: bound-issuer
   only, consistent with §13 harden-not-prevent and §18); (3) `seq` is
-  strictly greater than the last accepted seq for `(originator,
-  session_id, stream_id)` — else drop + dup counter. Latest-state
-  semantics: no reorder buffer, no reassembly. A new sender session opens
-  a fresh seq cursor. An accepted uplink frame refreshes §11.5a binding
-  freshness like any other bound-issuer packet.
+  strictly greater than the last accepted seq for the **current sender
+  session** — else drop + dup counter. The stream keeps ONE cursor: a new
+  `(originator, session_id)` replaces it and prior sessions are forgotten
+  (bounded state; per-session replay memory would buy nothing against the
+  no-MAC threat model, which already admits an invented session). The
+  compare is plain u32 — a sender session is assumed never to exceed 2^32
+  uplink frames (the §2.1 no-wrap posture). Latest-state semantics: no
+  reorder buffer, no reassembly. **Binding-freshness note:** any decodable
+  frame naming the bound issuer refreshes §11.5a freshness *before*
+  admission runs — §7.5 rejection classes (dup, stream mismatch) are
+  admission outcomes, not sender-authentication verdicts, so a rejected
+  frame from the bound issuer still refreshes, exactly as a NACK or
+  HEARTBEAT would.
 - **Pacing (the Pass 78 law applies).** Uplink DATA is a return flush
   class — flushed after CSA copies and NACKs, before report repeats and
   fresh reports. It is gap-gated exactly like every return and **never
@@ -1593,14 +1604,23 @@ ARQ flags — the AUDIO one-datagram-one-block shape, §3.4).
   drop-oldest. **Blind fallback:** if no anchored window has opened for
   `uplink.fallback_ms` (seed **50**), held uplink frames are sent §7.1
   opportunistic — CONTROL is periodic actuation state and must not be
-  hostage to video cadence (an idle link produces no EOBs at all). A
-  per-stream rate cap `uplink.pps_budget` (seed **100**) drops excess at
-  ingress (`uplink_dropped_budget`). All three seeds RE-DERIVE at §17
-  gate 4 alongside `guard_us`/`return_window_us`.
+  hostage to video cadence (an idle link produces no EOBs at all). Held
+  frames also flush on an unanchored (TSF-fallback) return deadline —
+  the same degradation reports take. A per-stream rate cap
+  `uplink.pps_budget` (seed **100**, must be ≥ 1) drops excess at ingress
+  (`uplink_dropped_budget`), counted over a tumbling one-second window
+  anchored at the first datagram after each expiry. All three seeds
+  RE-DERIVE at §17 gate 4 alongside `guard_us`/`return_window_us`.
+- **Size budget.** An uplink datagram larger than **1398 bytes** (§3.2's
+  1424-byte wire budget minus the 26-byte DATA header) is dropped at
+  ingress with `uplink_dropped_oversize` — never framed, never truncated
+  (§5.1). A zero-length datagram is not carriable uplink (ingress treats
+  it as end-of-drain); CONTROL/TELEMETRY payloads are ≥ 1 byte.
 - **Stats (§15.3).** Ground, per uplink stream: `uplink_submitted`,
-  `uplink_sent`, `uplink_dropped_stale`, `uplink_dropped_budget`. Craft,
-  per uplink stream: `uplink_accepted`, `uplink_rej_unbound`,
-  `uplink_rej_stream`, `uplink_dup`.
+  `uplink_sent`, `uplink_dropped_stale`, `uplink_dropped_budget`,
+  `uplink_dropped_oversize`. Craft, per uplink stream:
+  `uplink_accepted`, `uplink_rej_unbound`, `uplink_rej_stream`,
+  `uplink_dup`.
 
 ---
 
@@ -5089,7 +5109,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
 ```
 §7.5 uplink streams appear in `streams` with their own counter set — ground
 side `uplink_submitted`/`uplink_sent`/`uplink_dropped_stale`/
-`uplink_dropped_budget`, craft side `uplink_accepted`/`uplink_rej_unbound`/
+`uplink_dropped_budget`/`uplink_dropped_oversize`, craft side `uplink_accepted`/`uplink_rej_unbound`/
 `uplink_rej_stream`/`uplink_dup` — and none of the RTP/ARQ/FEC/jscc fields,
 which do not apply to them.
 

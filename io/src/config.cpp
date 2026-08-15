@@ -724,6 +724,12 @@ Result<Config> load_config_json(const std::string& json_text) {
                     return Result<Config>::fail(
                         "policy.uplink.telemetry_hold: must be >= 1");
                 }
+                if (cfg.policy.uplink.pps_budget < 1) {
+                    // 0 would silently blackhole the stream (§7.5: the cap
+                    // must be >= 1; there is no "unlimited" spelling).
+                    return Result<Config>::fail(
+                        "policy.uplink.pps_budget: must be >= 1");
+                }
             }
             if (p.contains("csa")) {
                 const json& pc = p.at("csa");

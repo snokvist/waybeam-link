@@ -46,9 +46,12 @@ all operator-selected from presented options:
 4. **Delivery: existing egress bindings.** `dir` stays socket-local; node
    role fixes air direction — rx-node `dir:"in"` = uplink ingress,
    tx-node `dir:"out"` = uplink delivery. RTP/AUDIO/frame-shm uplink
-   refused at config load. Uplink DATA stamps `active_profile`/
-   `table_version` 0; the craft ignores both; seq is a per-(originator,
-   session, stream) strictly-monotonic accept cursor.
+   refused at `--check` and node startup (role-dependent shape). Uplink
+   DATA stamps `active_profile`/`table_version` 0; the craft ignores
+   both; seq is a strictly-monotonic accept cursor over the current
+   sender session (one cursor per stream; a new session replaces it).
+   Datagrams over 1398 B (§3.2 budget minus header) drop at ingress
+   with a counter, never truncated.
 
 **Changed:** new §7.5; §3.4 uplink note; §15.2 `policy.uplink.*` + stream
 bullet; §15.3 uplink counters; §17 knob row. **Evidence:** issue #177

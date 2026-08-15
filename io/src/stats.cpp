@@ -345,6 +345,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
             append_u64(out, u.dropped_stale);
             out += ",\"uplink_dropped_budget\":";
             append_u64(out, u.dropped_budget);
+            out += ",\"uplink_dropped_oversize\":";
+            append_u64(out, u.dropped_oversize);
         } else {
             out += ",\"uplink_accepted\":";
             append_u64(out, u.accepted);

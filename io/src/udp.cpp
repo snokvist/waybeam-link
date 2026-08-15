@@ -163,31 +163,44 @@ Result<UdpIngress> UdpIngress::open(const std::string& listen,
 }
 
 long UdpIngress::recv_one(uint8_t* buf, size_t cap) {
-    iovec iov{buf, cap};
-    alignas(cmsghdr) uint8_t control[CMSG_SPACE(sizeof(uint32_t))]{};
-    msghdr msg{};
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = control;
-    msg.msg_controllen = sizeof(control);
-    const ssize_t n = ::recvmsg(fd_, &msg, 0);
-    if (n >= 0) {
-        for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c != nullptr;
-             c = CMSG_NXTHDR(&msg, c)) {
-            if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_RXQ_OVFL &&
-                c->cmsg_len >= CMSG_LEN(sizeof(uint32_t))) {
-                uint32_t count = 0;
-                std::memcpy(&count, CMSG_DATA(c), sizeof(count));
-                kernel_drops_ += static_cast<uint32_t>(count - kernel_drop_last_);
-                kernel_drop_last_ = count;
+    for (;;) {
+        iovec iov{buf, cap};
+        alignas(cmsghdr) uint8_t control[CMSG_SPACE(sizeof(uint32_t))]{};
+        msghdr msg{};
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control;
+        msg.msg_controllen = sizeof(control);
+        const ssize_t n = ::recvmsg(fd_, &msg, 0);
+        if (n >= 0) {
+            for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c != nullptr;
+                 c = CMSG_NXTHDR(&msg, c)) {
+                if (c->cmsg_level == SOL_SOCKET &&
+                    c->cmsg_type == SO_RXQ_OVFL &&
+                    c->cmsg_len >= CMSG_LEN(sizeof(uint32_t))) {
+                    uint32_t count = 0;
+                    std::memcpy(&count, CMSG_DATA(c), sizeof(count));
+                    kernel_drops_ +=
+                        static_cast<uint32_t>(count - kernel_drop_last_);
+                    kernel_drop_last_ = count;
+                }
             }
+            // §5.1: oversize is dropped, never truncated. A datagram bigger
+            // than cap arrives truncated with MSG_TRUNC set — delivering it
+            // as an exactly-cap datagram would hand a silently corrupted
+            // payload to the framer (found by the §7.5 review; RTP never got
+            // near cap). Skip it and keep draining.
+            if ((msg.msg_flags & MSG_TRUNC) != 0) {
+                ++truncated_drops_;
+                continue;
+            }
+            return n;
         }
-        return n;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return 0;
+        }
+        return -1;
     }
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return 0;
-    }
-    return -1;
 }
 
 // ---- UdpEgress ------------------------------------------------------------

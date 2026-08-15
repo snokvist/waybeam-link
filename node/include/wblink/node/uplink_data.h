@@ -24,6 +24,32 @@
 
 namespace wblink {
 
+// §7.5 size budget: §3.2's 1424-byte wire budget minus the 26-byte DATA
+// header. Larger datagrams drop at ingress with a counter — never framed,
+// never truncated (§5.1). Keeps every uplink frame inside the same air MTU
+// the video path enforces (Profile.max_payload default).
+inline constexpr size_t kUplinkMaxDatagram = 1424 - kDataHeaderSize;
+
+// §7.5 shape rule, shared by --check and node startup (the pure loader
+// cannot rule — the shape is role-dependent): on an rx node `dir:"in"` is
+// uplink ingress, on a tx node `dir:"out"` is uplink delivery, and both
+// admit TELEMETRY/CONTROL over udp only. Returns nullptr when `s` is not
+// an uplink stream for that role, or is well-shaped; else the refusal text.
+inline const char* uplink_shape_error(const StreamCfg& s, bool tx_role) {
+    if (tx_role ? s.dir != Dir::kOut : s.dir != Dir::kIn) {
+        return nullptr;
+    }
+    if (s.bind.kind == BindKind::kFrameShm ||
+        (s.stream_type != stream_type::kTelemetry &&
+         s.stream_type != stream_type::kControl)) {
+        return tx_role ? "tx-node dir:\"out\" is §7.5 uplink delivery — "
+                         "TELEMETRY/CONTROL over udp only"
+                       : "rx-node dir:\"in\" is §7.5 uplink ingress — "
+                         "TELEMETRY/CONTROL over udp only";
+    }
+    return nullptr;
+}
+
 struct UplinkDataStream {
     uint8_t stream_id = 0;
     uint8_t stype = 0;
@@ -50,6 +76,14 @@ struct UplinkDataStream {
                      uint64_t now_us_in, bool gated, const UplinkPolicy& pol,
                      const SendNow& send_now) {
         ++st.submitted;
+        // §7.5 size budget: over-air-MTU datagrams drop here with their own
+        // counter, so §15.3 accounting stays closed (submitted = sent + held
+        // + dropped_*). The framer's own 4096 ceiling is unreachable behind
+        // this check.
+        if (n > kUplinkMaxDatagram) {
+            ++st.dropped_oversize;
+            return false;
+        }
         if (now_us_in - pps_win_start_us >= 1000000) {
             pps_win_start_us = now_us_in;
             pps_in_win = 0;

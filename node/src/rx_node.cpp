@@ -217,11 +217,8 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         if (s.dir != Dir::kIn) {
             continue;
         }
-        if (s.bind.kind == BindKind::kFrameShm ||
-            (s.stream_type != stream_type::kTelemetry &&
-             s.stream_type != stream_type::kControl)) {
-            wb_logf("stream %u: rx-node dir:\"in\" is §7.5 uplink ingress — "
-                    "TELEMETRY/CONTROL over udp only\n", s.stream_id);
+        if (const char* err = uplink_shape_error(s, /*tx_role=*/false)) {
+            wb_logf("stream %u: %s\n", s.stream_id, err);
             return 1;
         }
         FramerConfig fc;
@@ -2565,8 +2562,21 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                                                 : "");
             }
         }
-        const int air_timeout =
-            urgent_ret_held.empty() && report_ret_held.empty() ? 2 : 0;
+        // §7.5: held uplink frames wait on the same ret_at_us deadline as
+        // NACKs, so they get the same 0-timeout aim (a 2 ms poll would eat
+        // the ±1 ms window budget, issue #99).
+        bool uplink_held_any = false;
+        for (const UplinkDataStream& us : uplink_streams) {
+            if (!us.held.empty()) {
+                uplink_held_any = true;
+                break;
+            }
+        }
+        const int air_timeout = urgent_ret_held.empty() &&
+                                        report_ret_held.empty() &&
+                                        !uplink_held_any
+                                    ? 2
+                                    : 0;
         air.value->poll_once(air_timeout, [&](const AirRxMeta& meta,
                                               const uint8_t* d, size_t n) {
             // udp-air carries no real RSSI; fall back to the loopback
