@@ -839,11 +839,11 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 // note_valid_rx, per §11.5a / §7.5.
                 for (UplinkAcceptor& ua : uplink_accepts) {
                     if (ua.on_data(*dv, csa.latched_issuer(),
-                                   [&](const uint8_t* p, size_t n) {
+                                   [&](const uint8_t* p, size_t pn) {
                                        if (UdpEgress* out =
                                                bindings.value->egress_for(
                                                    ua.stream_id)) {
-                                           out->send(p, n);
+                                           out->send(p, pn);
                                        }
                                    })) {
                         return;
