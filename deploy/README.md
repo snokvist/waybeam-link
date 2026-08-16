@@ -102,6 +102,17 @@ the configured 500 ms retry cadence.
 - Keep the cache controller endpoint paired with receiver originator 9 and
   `192.168.2.242:5802`; changing either requires updating both deployments.
 - Make the SHM viewer persistent or start it explicitly before every test.
+- **The channel allowlist spans the full 5 GHz band (25 channels) and most of
+  it is DFS.** UNII-1 (5180–5240) and UNII-3 (5745–5825) are non-DFS, 9
+  channels between them; UNII-2A (5260–5320) and UNII-2C (5500–5720) are the
+  other 16 and are **radar-protected bands in most regulatory domains**. This
+  stack does raw injection and implements **no radar detection**, so operating
+  there is an operator decision about the test site, not something the software
+  can make safe. Trim `policy.csa.channel_allowlist` and `scout.channels` to
+  the non-DFS 9 for any deployment that must not touch DFS.
+  Scout cost scales linearly: 25 channels at `dwell_ms` 300 is a ~7.5 s sweep
+  (~12.5 s at the 500 ms the 8812AU retune-deafness finding recommends), where
+  the previous 7-channel list swept in ~2 s.
 - Verify channel 161 is permitted at the test site. NOTE: the vehicle TX power
   runs at the §10.5 relative offset (`power_offset_qdb`, seed −24 qdb = −6 dB)
   against the adapter's efuse table — an offset, not an absolute. Any

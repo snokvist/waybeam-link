@@ -1,0 +1,11 @@
+# apply-mode.conf — CV610 craft (.181). Install as
+# /etc/waybeam-link/modes/apply-mode.conf alongside apply-mode.sh, which
+# sources it. §15.5 forks the applier with execl() and no environment, so this
+# file is the only place a craft can state how it differs.
+#
+# api, not init: S95waybeam's stop() ends in `$LOADER stop`, which unloads the
+# ~25 open_* CV610 MPP modules. That takes the board off the network and needs
+# a power cycle — so an init restart in flight is unrecoverable, where venc's
+# own POST /api/v1/restart re-execs the daemon and leaves the loader alone.
+VENC_RESTART=api
+VENC_CTRL=127.0.0.1:80

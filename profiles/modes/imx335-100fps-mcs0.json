@@ -1,6 +1,6 @@
 {
   "_mode": "Low latency / High range (docs/venc-mode-matrix.md §16.3)",
-  "_derivation": "bpp = kbps/(fps*pixels). Floor rung 0 (2829 kbps) -> 0.0480 bpp; top rung 2 (10303 kbps) -> 0.175 bpp. Encode size is a mult-of-8 16:9 frame (venc requires height % 8 == 0) that clears the 0.04 bpp floor at rung 0. 1024x576 is exact 16:9; 960x540 (the raw bpp pick) is rejected by venc. Rung bitrates are §9.5 derived from the Pass 122 table (table_version 0x80).",
+  "_derivation": "bpp = kbps*1000/(fps*pixels). Floor rung 0 (2829 kbps) -> 0.0307 bpp; top rung 2 (10303 kbps) -> 0.112 bpp. THE ONE CELL THAT DOES NOT CLEAR THE 0.04 FLOOR: the operator ruled 1280x720 the minimum encode size across every mode table (2026-08-16), and the bpp ceiling here is 707k pixels. The floor rung is therefore traded away deliberately — a soft MCS0 picture is preferred to a sub-720p one. 1024x576 was the pre-ruling pick (raw bpp wanted 960x540, which venc rejects on height % 8). Rung bitrates are §9.5 derived from the Pass 122 table (table_version 0x80).",
   "_apply": "venc fields go to waybeam_venc (sensor.mode and video0.size are restart_required, so this is a pre-flight choice); link fields are merged into /etc/waybeam-link/craft.json. Restart venc (S95waybeam) then the link (S96waybeam-link), then re-scout + quickconnect — a craft restart leaves CSA silently dead otherwise (B9).",
   "venc": {
     "sensor": {
@@ -8,7 +8,7 @@
     },
     "video0": {
       "fps": 100,
-      "size": "1024x576",
+      "size": "1280x720",
       "resilience": "range"
     }
   },

@@ -21,6 +21,10 @@
 # (json_cli, style-preserving) so a reboot reproduces the mode. The link is the
 # authority for the active-mode label; venc.active_mode is written to craft.json
 # for the same reason.
+#
+# Every path and both mechanisms below are env-overridable, because the crafts
+# genuinely differ: the CV610 board ships no curl (busybox wget only) and cannot
+# survive its init script's stop(). See VENC_RESTART and http_post().
 set -u
 
 NAME="${1:?usage: apply-mode.sh <mode-name>}"
@@ -30,6 +34,41 @@ LINK_CFG="${LINK_CFG:-/etc/waybeam-link/craft.json}"
 LINK_CTRL="${LINK_CTRL:-127.0.0.1:8091}"
 JSON_CLI="${JSON_CLI:-json_cli}"
 VENC_INIT="${VENC_INIT:-/etc/init.d/S95waybeam}"
+VENC_CTRL="${VENC_CTRL:-127.0.0.1:80}"      # venc's own HTTP API
+# How step 4 makes sensor.mode/size take effect: `init` (default) or `api`.
+#
+# `init` is right for the SigmaStar crafts, whose init script restarts the
+# daemon and nothing else. The CV610 craft MUST set `api`: its S95waybeam
+# stop() ends in `$LOADER stop`, which unloads the ~25 open_* MPP modules and
+# takes the board off the network — a restart in flight would be
+# unrecoverable. venc's own POST /api/v1/restart re-execs the daemon without
+# touching the loader, which is the seam the CV610 init script's own header
+# documents ("API restart forks a short-lived waybeam-resp helper").
+VENC_RESTART="${VENC_RESTART:-init}"
+
+# Per-craft overrides. §15.5 forks this applier with execl(cmd, cmd, name) —
+# no shell, no environment — so a craft that needs different mechanisms has
+# nowhere else to say so. Sourced AFTER the defaults and therefore
+# authoritative, matching the PLATFORM_CONFIG pattern S95waybeam already uses
+# on these boards. Bench override: APPLY_MODE_CONF=/dev/null.
+APPLY_MODE_CONF="${APPLY_MODE_CONF:-$MODES_DIR/apply-mode.conf}"
+# A conf that EXISTS but cannot be read or sourced must not fall through to the
+# defaults. The default is VENC_RESTART=init, and on the CV610 that runs
+# S95waybeam restart -> $LOADER stop -> the MPP module stack unloads and the
+# board leaves the network until someone power-cycles it. Silently choosing the
+# one path this file exists to avoid is the wrong direction to fail, and a
+# truncated conf is not hypothetical: the SSC338Q roots on a 5.7 MB overlay
+# that has been observed 98% full. `-e` not `-r` on purpose — unreadable is the
+# same class as unparseable. /dev/null still sources clean, so the documented
+# APPLY_MODE_CONF=/dev/null bench override keeps working.
+if [ -e "$APPLY_MODE_CONF" ]; then
+  # shellcheck disable=SC1090
+  . "$APPLY_MODE_CONF" || {
+    echo "apply-mode: $APPLY_MODE_CONF exists but could not be sourced —" \
+         "refusing rather than falling back to VENC_RESTART=$VENC_RESTART" >&2
+    exit 2
+  }
+fi
 
 MODE_JSON="$MODES_DIR/$NAME.json"
 [ -f "$MODE_JSON" ] || { echo "apply-mode: no such mode: $MODE_JSON" >&2; exit 2; }
@@ -38,6 +77,15 @@ MODE_JSON="$MODES_DIR/$NAME.json"
 # around; keep it boring.
 case "$NAME" in
   *[!A-Za-z0-9._-]*) echo "apply-mode: bad mode name: $NAME" >&2; exit 2 ;;
+esac
+
+# Checked HERE, not at step 4 where it is used: everything between writes the
+# venc and link configs, so a bad value discovered later would leave the craft
+# persisted into a mode it never restarted into.
+case "$VENC_RESTART" in
+  init|api) ;;
+  *) echo "apply-mode: bad VENC_RESTART '$VENC_RESTART' (want init|api)" >&2
+     exit 2 ;;
 esac
 
 get() { "$JSON_CLI" -g "$1" -i "$MODE_JSON" --raw 2>/dev/null; }
@@ -57,11 +105,35 @@ done
 
 echo "apply-mode: $NAME -> sensor.mode=$SENSOR_MODE video0=${SIZE}@${FPS} resilience=${RESILIENCE:-default} MCS ${MINP}-${MAXP} fps=${FPS_MODE}"
 
+# One POST, whichever HTTP client the craft has. The CV610 board ships no curl
+# at all (busybox 1.36.1 wget is the only client on it), and every call below is
+# best-effort — the persisted config reproduces the mode on next start — so this
+# returns the client's status and never aborts the apply.
+# curl's -f is what makes the two clients agree. Without it curl exits 0 on an
+# HTTP 4xx/5xx while wget exits nonzero, so the identical server rejection would
+# print "live pin applied" on a curl craft and "WARN not applied" on a wget one.
+http_post() {  # $1 = full URL, $2 = json body
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 4 -X POST "$1" \
+      -H 'Content-Type: application/json' -d "$2" >/dev/null 2>&1
+  else
+    wget -q -O /dev/null -T 4 --header 'Content-Type: application/json' \
+      --post-data "$2" "$1" >/dev/null 2>&1
+  fi
+}
+
+http_get() {  # $1 = full URL; only used as a liveness probe
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 2 "$1" >/dev/null 2>&1
+  else
+    wget -q -O /dev/null -T 2 "$1" >/dev/null 2>&1
+  fi
+}
+
 # §9.11 ladder toggle, LIVE through the link (Pass 99). Same lever as the
 # over-air §11.7 FPS_LADDER command; no link/CSA restart. Best-effort.
 link_fps() {  # $1 = true|false
-  curl -sS --max-time 4 -X POST "http://$LINK_CTRL/api/v1/link/fps" \
-    -H 'Content-Type: application/json' -d "{\"ladder\":$1}" >/dev/null 2>&1 \
+  http_post "http://$LINK_CTRL/api/v1/link/fps" "{\"ladder\":$1}" \
     && echo "apply-mode: live fps ladder=$1" \
     || echo "apply-mode: WARN fps ladder=$1 not applied (link down?)" >&2
 }
@@ -75,9 +147,7 @@ fi
 
 # 1) Range pin, LIVE through the link (no restart). Best-effort: if the link is
 #    down this is a no-op and the persisted pin below takes effect on next start.
-curl -sS --max-time 4 -X POST "http://$LINK_CTRL/api/v1/link/profile" \
-  -H 'Content-Type: application/json' \
-  -d "{\"min\":$MINP,\"max\":$MAXP}" >/dev/null 2>&1 \
+http_post "http://$LINK_CTRL/api/v1/link/profile" "{\"min\":$MINP,\"max\":$MAXP}" \
   && echo "apply-mode: live pin applied ${MINP}-${MAXP}" \
   || echo "apply-mode: WARN live pin not applied (link down?) — persisted only" >&2
 
@@ -103,7 +173,40 @@ fi
 
 # 4) Restart venc so sensor.mode/size take effect. The link keeps running and
 #    re-acquires the new video stream; it owns bitrate/fps live from here.
-"$VENC_INIT" restart
+#    Unlike every other HTTP call here this one is NOT best-effort: if the
+#    encoder never restarts, the persisted sensor.mode/size never take effect
+#    and the mode has silently not been applied.
+case "$VENC_RESTART" in
+  init)
+    "$VENC_INIT" restart
+    ;;
+  api)
+    # GET, not POST: waybeam_venc's httpd registers EVERY route as GET,
+    # /api/v1/restart included (venc_api.c "venc_httpd_route(\"GET\", ...)"),
+    # so a POST here 405s and the encoder never picks up the new
+    # sensor.mode/size. Measured on .181 — the guard below caught it, but the
+    # mode was silently not applied until this was a GET.
+    if ! http_get "http://$VENC_CTRL/api/v1/restart"; then
+      echo "apply-mode: venc API restart FAILED — mode not applied" >&2
+      exit 3
+    fi
+    echo "apply-mode: venc re-exec requested via $VENC_CTRL"
+    # Wait for the successor, do not guess at it. The POST returns while the
+    # old process is still re-exec'ing, and step 6's reassert is what takes the
+    # fresh encoder off its persisted-config bitrate — fire it into a dead
+    # httpd and the craft sits at the seed. /api/v1/modes answers only once
+    # bring-up reached init, which is exactly the readiness we need.
+    i=0
+    while [ "$i" -lt 30 ] && ! http_get "http://$VENC_CTRL/api/v1/modes"; do
+      sleep 1
+      i=$((i + 1))
+    done
+    if [ "$i" -ge 30 ]; then
+      echo "apply-mode: WARN venc did not answer within 30s — the mode is" \
+           "persisted but the encoder may be stranded at its config bitrate" >&2
+    fi
+    ;;
+esac
 
 # 5) VARIABLE: hand fps back to the ladder now that venc is up at the seed fps.
 if [ "$FPS_MODE" = "variable" ]; then
@@ -118,8 +221,7 @@ fi
 #    did not change). This POST drops that cache so the link re-asserts on its
 #    next tick. Best-effort: if the link is down the persisted config already
 #    reproduces the mode on next start.
-curl -sS --max-time 4 -X POST "http://$LINK_CTRL/api/v1/venc/reassert" \
-  -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 \
+http_post "http://$LINK_CTRL/api/v1/venc/reassert" '{}' \
   && echo "apply-mode: link re-asserted encoder" \
   || echo "apply-mode: WARN venc/reassert not applied (link down?)" >&2
 
