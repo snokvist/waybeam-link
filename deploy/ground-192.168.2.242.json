@@ -9,6 +9,7 @@
   "profile_table": "/etc/waybeam-link/table.example.json",
   "adapters": [
     {
+      "_power_comment": "§10.5 offset space. 8812AU uplink floor MEASURED at the craft 2026-08-16: 0/-24/-48/-72 qdb read -45/-50/-56/-63 dBm (exactly 0.25 dB/qdB), -96 reports saturated_low true and -128 clamps to -126. 18 dB of travel; the ladder's existing bottom rung IS the floor. The ground's own receive RSSI held -56 throughout — the control that says only its TX moved. BENCH-LOW for 50 cm geometry — raise before any range or flight test.",
       "name": "au-uplink",
       "role": "tx",
       "channel": 5805,
@@ -30,7 +31,8 @@
         0,
         24
       ],
-      "power_offset_max_qdb": 24
+      "power_offset_max_qdb": 24,
+      "power_offset_qdb": -72
     }
   ],
   "streams": [

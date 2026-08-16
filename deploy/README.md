@@ -102,6 +102,36 @@ the configured 500 ms retry cadence.
 - Keep the cache controller endpoint paired with receiver originator 9 and
   `192.168.2.242:5802`; changing either requires updating both deployments.
 - Make the SHM viewer persistent or start it explicitly before every test.
+- **RAISE TX POWER. Every deploy config here is pinned to its adapter's
+  measured floor for 50 cm bench geometry** — `power_offset_qdb` −96 / −48 /
+  −72 on `.181` / `.232` / `.242`, which is 24 / 14 / 18 dB below the EFUSE
+  table. That is deliberate: at bench range the near field compresses RSSI and
+  hides real link behaviour. It is also useless for anything but the bench.
+  Set `power_offset_qdb` back to 0 (or delete the key — the default seed is
+  −24) on every node before a range or flight test.
+
+  | node | adapter | floor | travel | RSSI at 0 → floor |
+  |---|---|---|---|---|
+  | `.181` | RTL8733BU | −96 qdb | 24 dB | −32 → −56 |
+  | `.232` | RTL8812EU | −48 qdb | 14 dB | −13 → −27 |
+  | `.242` | RTL8812AU | −72 qdb | 18 dB | −45 → −63 |
+
+  Each floor is where that unit stops responding, measured at the far end
+  2026-08-16 — past it the actuator reports `saturated_low: true` rather than
+  pretending. `docs/findings.md` has the full sweeps.
+- **Two crafts of different families cannot share this bench.** Measured
+  2026-08-16 with the 8812EU craft on 5745 and the CV610/8733BU on 5660 —
+  **85 MHz apart** — the 8812EU cost the CV610 60% of its received beacon
+  frames and a fifth of its scout detections. Unplugging it restored 10/10
+  detections and ~2046 frames from ~820. This is the ground's single 8812AU
+  receiver being desensed by a signal 36 dB above the one it is trying to hear,
+  so channel separation does not fix it and neither does the §10.5 knob: at
+  both crafts' floors the 8812EU still lands ~20 dB high. Run one craft at a
+  time, or pad the loud one physically.
+- Verify channel 161 is permitted at the test site. NOTE: TX power runs at the
+  §10.5 relative offset (`power_offset_qdb`) against the adapter's efuse
+  table — an offset, not an absolute. Any regulatory power limit must be met at
+  the adapter/driver, not assumed from this repo.
 - **The channel allowlist spans the full 5 GHz band (25 channels) and most of
   it is DFS.** UNII-1 (5180–5240) and UNII-3 (5745–5825) are non-DFS, 9
   channels between them; UNII-2A (5260–5320) and UNII-2C (5500–5720) are the
