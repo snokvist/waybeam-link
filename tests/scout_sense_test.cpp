@@ -151,12 +151,20 @@ void test_ranking() {
         const std::vector<ChannelUtil> m{{5500, 1000}, {5560, 900}, {5580, 800}};
         CHECK_EQ_U(emptiest_channel(m, {5500, 5560, 5580}, 0, 40), 5580);
     }
-    // An occupied channel excluded by `except` still guards its neighbours —
-    // `except` means "the craft is here, move it", not "this energy is gone".
+    // `except` is the craft we are relocating, so its own 1000 must NOT guard
+    // the channels around it — that emission leaves with the craft. Another
+    // craft's does not. Here 5745 is the mover and 5825 is somebody else:
+    //   5765  guard 50   (5745 skipped, 5785's 20 inside the band)
+    //   5785  guard 1000 (5825, 40 MHz out, is staying put)
+    //   5500  guard 60
+    // so 5765 wins. Counting the mover would push it to 1000 and hand out
+    // 5500; ranking per channel would hand out 5785, next to a live craft.
     {
-        const std::vector<ChannelUtil> m{{5740, 0}, {5745, 1000}, {5765, 20},
-                                         {5825, 30}};
-        CHECK_EQ_U(emptiest_channel(m, {5765, 5825}, 5745, 40), 5825);
+        const std::vector<ChannelUtil> m{{5745, 1000}, {5765, 50}, {5785, 20},
+                                         {5825, 1000}, {5500, 60}};
+        const std::vector<uint16_t> allow{5500, 5765, 5785};
+        CHECK_EQ_U(emptiest_channel(m, allow, 5745, 40), 5765);
+        CHECK_EQ_U(emptiest_channel(m, allow, 5745, 0), 5785);
     }
     // guard 0 is the pre-guard per-channel ranking, byte for byte. A
     // non-DFS-only deployment has 9 channels and a 40 MHz guard costs it 5

@@ -58,6 +58,11 @@ uint16_t emptiest_channel(const std::vector<ChannelUtil>& measured,
         bool measured_here = false;
         uint32_t guard = 0, own = 0;
         for (const ChannelUtil& m : measured) {
+            // `except` is the craft being relocated. Its own emission moves
+            // with it, so it must not guard the channels around where it
+            // happens to be sitting right now — that would cost four
+            // perfectly good targets on every claim.
+            if (except != 0 && m.chan == except && m.chan != ch) continue;
             const int df = std::abs(static_cast<int>(m.chan) -
                                     static_cast<int>(ch));
             if (df > guard_mhz) continue;

@@ -68,15 +68,48 @@ and the offset curve with craft 17 back on its home 5805 (nominal 60):
 distinguishes a working link from a jammed one here; delivered frame rate at
 the sink was the only signal that moved.
 
+**How much the guard actually buys — measured, not assumed.** The bad pick
+was seen once and could NOT be reproduced on demand: with craft 17 parked at
+5280 (mid-band, so its neighbours are in the low-scoring cluster) and the
+guard disabled, five consecutive quick-connects all landed ≥60 MHz away, and
+so did three with the guard on. The pick is noise-driven, so the bench cannot
+be made to fail on cue. Replaying `emptiest_channel()` over a real
+`/api/v1/scout/results` snapshot is what shows the exposure:
+
+```
+craft 17 live on 5280; craft 18 being moved off 5220
+chan   util   guard40   
+5240   938    1000     ADJACENT (40 MHz)
+5260   932    1000     ADJACENT (20 MHz)
+5300   928    1000     ADJACENT (20 MHz)
+5320   891    1000     ADJACENT (40 MHz)   <- 7th lowest of 24 unguarded
+5600   821    881      <- picked, either way
+```
+
+Two things follow. **The interference score does not see the neighbour**: the
+four channels flanking a live craft read 891–938, squarely inside the
+empty-band population (847–953) — an earlier guess that adjacent-channel
+energy would already deprioritise them is wrong. And **the guard removes a
+class of picks rather than changing this one**: 5320 at 891 beats seven other
+allowlisted channels and is a live candidate on any sweep whose noise favours
+it; guarded, it cannot be chosen at all. Both configurations picked 5600 here.
+
+**One correction to the guard itself, found the same way.** The first version
+let `except` — the craft being relocated — guard its own neighbours. Replayed
+against the snapshot above that excluded 5180/5200/5240/5260 because craft 18
+was sitting on 5220, which it is about to leave. The mover's emission travels
+with it and must not guard; another craft's must. Fixed, with a test that
+separates the two cases.
+
 **Open.** (a) The 40 MHz seed comes from one power ratio on one pair — a
 higher-power craft plausibly needs more, and an HT40 deployment certainly
 does. (b) `emptiest()` still ignores the scout's own candidate list, which
-*names* the other craft and its channel; the guard reaches the same answer
-through occupancy, but only because the other craft's traffic decodes.
-(c) The empty-band floor of ~930 permille makes `ranking.recommendation`
-return `BROAD_DEGRADATION` on a genuinely empty band — the `#173`
-FA-index-vs-occupancy question, unchanged by this finding.
-(d) The health-contract blind spot above.
+*names* the other craft and its channel. That list is strictly better
+evidence than occupancy here — it survives a craft whose traffic the ground
+cannot decode, and it is the obvious next step. (c) The empty-band floor of
+~850–950 permille makes `ranking.recommendation` return `BROAD_DEGRADATION`
+on a genuinely empty band — the `#173` FA-index-vs-occupancy question,
+unchanged by this finding. (d) The health-contract blind spot above.
 
 ---
 
