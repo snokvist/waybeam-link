@@ -1374,8 +1374,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         }
         uint16_t target = static_cast<uint16_t>(target_chan_i);
         if (target == 0) {
-            target =
-                scout.emptiest(l.cfg.policy.csa.channel_allowlist, cand->chan);
+            target = scout.emptiest(
+                l.cfg.policy.csa.channel_allowlist, cand->chan,
+                static_cast<int>(l.cfg.policy.csa.adjacent_guard_mhz));
         }
         if (target == 0) return "no target channel (specify target_chan)";
         // §15.5a (Pass 144): a claim is what a sweep is *for*, so it ends

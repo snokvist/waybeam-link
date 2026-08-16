@@ -591,15 +591,16 @@ class ScoutEngine {
     // as pristine. On a sensor-less backend util == wifi_util by
     // construction, so the v1 behaviour is the structural fallback. 0 if
     // no occupancy for any allowed channel (caller then falls back to an
-    // explicit target).
-    uint16_t emptiest(const std::vector<uint16_t>& allowlist,
-                      uint16_t except) const {
+    // explicit target). `guard_mhz` spreads each channel's occupancy over
+    // the neighbours it actually reaches — see scout_sense.h.
+    uint16_t emptiest(const std::vector<uint16_t>& allowlist, uint16_t except,
+                      int guard_mhz) const {
         std::vector<ChannelUtil> measured;
         measured.reserve(results_.size());
         for (const auto& r : results_) {
             measured.push_back(ChannelUtil{r.chan, r.occ.util_permille});
         }
-        return emptiest_channel(measured, allowlist, except);
+        return emptiest_channel(measured, allowlist, except, guard_mhz);
     }
 
   private:

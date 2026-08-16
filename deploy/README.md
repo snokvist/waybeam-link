@@ -113,6 +113,19 @@ the configured 500 ms retry cadence.
   Scout cost scales linearly: 25 channels at `dwell_ms` 300 is a ~7.5 s sweep
   (~12.5 s at the 500 ms the 8812AU retune-deafness finding recommends), where
   the previous 7-channel list swept in ~2 s.
+- **Two crafts in the air need 60 MHz between them — three HT20 slots.**
+  Measured 2026-08-16 with `.232` (8812EU) and `.181` (8733BU, ~15 dB weaker
+  at the ground): with the strong craft transmitting, the weak one delivered
+  0.0–0.9 fps of a nominal 60 at ±20 MHz, 20.8 at ±40 and 54.5 at ±60;
+  silencing the strong craft restored the same channels to 59.9. Each craft
+  alone walked all 25 channels fine (25/25 and 23/25, the two misses being
+  exactly the neighbours of the other craft). Nothing in `/link/health` shows
+  this — `rssi_best` and `loss_milli` were flat across the whole range and the
+  state stayed `committed`/`HOLD` on a link carrying no video, so judge it by
+  delivered frame rate at the sink. `policy.csa.adjacent_guard_mhz` (seed 40)
+  keeps a quick-connect claim from picking a neighbour, but it can only see
+  emitters the scout measured; it is not a substitute for planning the
+  separation. `docs/findings.md` 2026-08-16 has the full curve.
 - Verify channel 161 is permitted at the test site. NOTE: the vehicle TX power
   runs at the §10.5 relative offset (`power_offset_qdb`, seed −24 qdb = −6 dB)
   against the adapter's efuse table — an offset, not an absolute. Any

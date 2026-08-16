@@ -107,24 +107,69 @@ void test_ranking() {
     // the interference-inclusive total must NOT pick it.
     {
         const std::vector<ChannelUtil> m{{5745, 810}, {5785, 100}, {5825, 40}};
-        CHECK_EQ_U(emptiest_channel(m, {5745, 5785, 5825}, 0), 5825);
+        CHECK_EQ_U(emptiest_channel(m, {5745, 5785, 5825}, 0, 40), 5825);
     }
     // `except` skips the craft's current channel even when it is emptiest.
     {
         const std::vector<ChannelUtil> m{{5745, 10}, {5785, 100}};
-        CHECK_EQ_U(emptiest_channel(m, {5745, 5785}, 5745), 5785);
+        CHECK_EQ_U(emptiest_channel(m, {5745, 5785}, 5745, 40), 5785);
     }
     // Channels outside the allowlist never win; nothing measured = 0.
     {
         const std::vector<ChannelUtil> m{{5180, 0}};
-        CHECK_EQ_U(emptiest_channel(m, {5745, 5785}, 0), 0);
-        CHECK_EQ_U(emptiest_channel({}, {5745, 5785}, 0), 0);
+        CHECK_EQ_U(emptiest_channel(m, {5745, 5785}, 0, 40), 0);
+        CHECK_EQ_U(emptiest_channel({}, {5745, 5785}, 0, 40), 0);
     }
     // Sensor-less rows (util == wifi_util) compete on equal terms — the
-    // structural no-sensor fallback needs no special case.
+    // structural no-sensor fallback needs no special case. Both sit inside
+    // each other's guard band, so the guard-band key ties and the tie-break
+    // on own utilisation decides, exactly as it did before the guard existed.
     {
         const std::vector<ChannelUtil> m{{5745, 120}, {5785, 90}};
-        CHECK_EQ_U(emptiest_channel(m, {5745, 5785}, 0), 5785);
+        CHECK_EQ_U(emptiest_channel(m, {5745, 5785}, 0, 40), 5785);
+    }
+    // The bench failure, 2026-08-16. A craft transmits on 5720, so 5720 reads
+    // 1000 and is correctly ranked last. Every OTHER channel reads the
+    // empty-band floor, which a real 25-channel sweep measured as 891-968 —
+    // a 77-permille spread with nothing in it, so which empty channel wins is
+    // decided by noise. Here the noise favours 5700, one slot from the live
+    // craft, and the per-channel ranking hands it over. The guard band is what
+    // makes 5720's occupancy reach the channels it actually jams.
+    {
+        const std::vector<ChannelUtil> m{
+            {5660, 935}, {5680, 934}, {5700, 929}, {5720, 1000}, {5745, 936}};
+        const std::vector<uint16_t> allow{5660, 5680, 5700, 5720, 5745};
+        const uint16_t pick = emptiest_channel(m, allow, 0, 40);
+        CHECK(pick != 5700);   // 20 MHz out — measured 0.0 fps of a nominal 60
+        CHECK(pick != 5680);   // 40 MHz out — measured 20.8 fps
+        CHECK(pick != 5745);   // 25 MHz out on the other side — measured 0.4
+        CHECK_EQ_U(pick, 5660);  // 60 MHz out — the first separation that works
+    }
+    // ...and it must not overreach: a busy channel outside the guard band
+    // still leaves its distant neighbours rankable on their own merit.
+    {
+        const std::vector<ChannelUtil> m{{5500, 1000}, {5560, 900}, {5580, 800}};
+        CHECK_EQ_U(emptiest_channel(m, {5500, 5560, 5580}, 0, 40), 5580);
+    }
+    // An occupied channel excluded by `except` still guards its neighbours —
+    // `except` means "the craft is here, move it", not "this energy is gone".
+    {
+        const std::vector<ChannelUtil> m{{5740, 0}, {5745, 1000}, {5765, 20},
+                                         {5825, 30}};
+        CHECK_EQ_U(emptiest_channel(m, {5765, 5825}, 5745, 40), 5825);
+    }
+    // guard 0 is the pre-guard per-channel ranking, byte for byte. A
+    // non-DFS-only deployment has 9 channels and a 40 MHz guard costs it 5
+    // per occupied channel, so turning the guard off has to give back exactly
+    // the old behaviour rather than something almost like it.
+    {
+        const std::vector<ChannelUtil> m{
+            {5660, 935}, {5680, 934}, {5700, 929}, {5720, 1000}, {5745, 936}};
+        const std::vector<uint16_t> allow{5660, 5680, 5700, 5720, 5745};
+        CHECK_EQ_U(emptiest_channel(m, allow, 0, 0), 5700);
+        const std::vector<ChannelUtil> n{{5740, 0}, {5745, 1000}, {5765, 20},
+                                         {5825, 30}};
+        CHECK_EQ_U(emptiest_channel(n, {5765, 5825}, 5745, 0), 5765);
     }
 }
 

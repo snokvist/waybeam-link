@@ -316,6 +316,15 @@ struct CsaPolicy {
     bool persist_channel = false;    // §11.5 boot onto last-committed channel
     uint16_t home_chan = 0;  // config-pinned power-on default (§11.1, §11.5)
     std::vector<uint16_t> channel_allowlist;
+    // Tier-2 seed (findings.md 2026-08-16): how far a channel's measured
+    // occupancy is taken to reach when ranking claim targets. 0 restores the
+    // per-channel ranking. Measured on the two-craft bench, one HT20 emitter
+    // ~16 dB above the other: +/-20 MHz took the weak link to 0 fps of a
+    // nominal 60, +/-40 to 20.8, +/-60 to 54.5 — so 40 is where the wall is
+    // for HT20. A knob because it is a seed from one power ratio, and because
+    // a non-DFS-only deployment has 9 channels and a 40 MHz guard costs it 5
+    // of them per occupied channel.
+    uint16_t adjacent_guard_mhz = 40;
 };
 
 // §15.2 policy.cmd — the §11.7 VEHICLE_CMD campaign seeds (§17 RE-DERIVE).

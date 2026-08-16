@@ -54,8 +54,23 @@ struct ChannelUtil {
     uint16_t chan = 0;
     uint16_t util_permille = 0;
 };
+
+// A 20 MHz emitter does not stop at its channel edge, so ranking channels as
+// independent bins picks neighbours of a busy channel as if they were clear.
+// Measured on the two-craft bench 2026-08-16 (8812EU craft ~16 dB above an
+// 8733BU craft, both HT20): with the strong craft transmitting, the weak one
+// delivered 0.0-0.9 fps of a nominal 60 at +/-20 MHz, 20.8 fps at +/-40, and
+// 54.5 fps at +/-60. Silencing the strong craft restored the same channels to
+// 59.9 fps, so the cause is adjacency and nothing else. quickconnect had put
+// the weak craft on 5700 with the strong one on 5720 — the ranker correctly
+// scored 5720 occupied and then handed out the channel next to it.
+//
+// `guard_mhz` (policy.csa.adjacent_guard_mhz, Tier-2 seed 40) ranks a channel
+// on the WORST utilisation within +/-guard_mhz of it, breaking ties on the
+// channel's own utilisation so equally-guarded channels still order by what
+// was measured on them. 0 is the pre-guard per-channel ranking.
 uint16_t emptiest_channel(const std::vector<ChannelUtil>& measured,
                           const std::vector<uint16_t>& allowlist,
-                          uint16_t except);
+                          uint16_t except, int guard_mhz);
 
 }  // namespace wblink
