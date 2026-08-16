@@ -52,8 +52,23 @@ VENC_RESTART="${VENC_RESTART:-init}"
 # authoritative, matching the PLATFORM_CONFIG pattern S95waybeam already uses
 # on these boards. Bench override: APPLY_MODE_CONF=/dev/null.
 APPLY_MODE_CONF="${APPLY_MODE_CONF:-$MODES_DIR/apply-mode.conf}"
-# shellcheck disable=SC1090
-[ -r "$APPLY_MODE_CONF" ] && . "$APPLY_MODE_CONF"
+# A conf that EXISTS but cannot be read or sourced must not fall through to the
+# defaults. The default is VENC_RESTART=init, and on the CV610 that runs
+# S95waybeam restart -> $LOADER stop -> the MPP module stack unloads and the
+# board leaves the network until someone power-cycles it. Silently choosing the
+# one path this file exists to avoid is the wrong direction to fail, and a
+# truncated conf is not hypothetical: the SSC338Q roots on a 5.7 MB overlay
+# that has been observed 98% full. `-e` not `-r` on purpose — unreadable is the
+# same class as unparseable. /dev/null still sources clean, so the documented
+# APPLY_MODE_CONF=/dev/null bench override keeps working.
+if [ -e "$APPLY_MODE_CONF" ]; then
+  # shellcheck disable=SC1090
+  . "$APPLY_MODE_CONF" || {
+    echo "apply-mode: $APPLY_MODE_CONF exists but could not be sourced —" \
+         "refusing rather than falling back to VENC_RESTART=$VENC_RESTART" >&2
+    exit 2
+  }
+fi
 
 MODE_JSON="$MODES_DIR/$NAME.json"
 [ -f "$MODE_JSON" ] || { echo "apply-mode: no such mode: $MODE_JSON" >&2; exit 2; }
