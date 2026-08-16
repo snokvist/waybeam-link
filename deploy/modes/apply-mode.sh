@@ -166,7 +166,12 @@ case "$VENC_RESTART" in
     "$VENC_INIT" restart
     ;;
   api)
-    if ! http_post "http://$VENC_CTRL/api/v1/restart" '{}'; then
+    # GET, not POST: waybeam_venc's httpd registers EVERY route as GET,
+    # /api/v1/restart included (venc_api.c "venc_httpd_route(\"GET\", ...)"),
+    # so a POST here 405s and the encoder never picks up the new
+    # sensor.mode/size. Measured on .181 — the guard below caught it, but the
+    # mode was silently not applied until this was a GET.
+    if ! http_get "http://$VENC_CTRL/api/v1/restart"; then
       echo "apply-mode: venc API restart FAILED — mode not applied" >&2
       exit 3
     fi
