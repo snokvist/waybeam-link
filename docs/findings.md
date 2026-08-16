@@ -12,6 +12,107 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-16 — quickconnect parked a craft one channel from a live craft; adjacency is as fatal as co-channel
+
+**Setup.** Two crafts live at once for the first time: `.232` (SSC338Q,
+8812EU, originator 17) and `.181` (CV610, 8733BU, originator 18, the weaker
+radio by ~14–16 dB at the ground). Ground `.242`, single 8812AU TX/RX combo,
+in-process `mod_wblink`. Channel lists widened from 7 to the full 25-channel
+5 GHz band on all three nodes. Craft 18 running `imx662-060fps-mcs1`, nominal
+60 fps; delivered fps read at the ground sink over 4–8 s windows.
+
+**Measured.** `POST /api/v1/scout/quickconnect {"originator":18}` committed
+craft 18 onto **5700 while craft 17 was transmitting on 5720**. The link
+reported `state: committed`, `HOLD`, `rssi_best −30`, and carried
+**0.2 fps at 0.02 Mbps** — a dead video link the control plane called healthy.
+
+Full 25-channel CSA walk of each craft, one at a time:
+
+| craft | result |
+|---|---|
+| 17 (8812EU) | **25/25** channels carried video, 96.5–100.2 fps, RSSI −16…−32 |
+| 18 (8733BU) | 23/25; the two failures were 5745 and 5700 — the channels adjacent to craft 17, then parked on 5720 |
+
+Controls, same craft, same ground, same channels, only craft 17's transmitter
+changing:
+
+| ch (craft 18) | Δf from craft 17 | 17 transmitting | 17 stopped |
+|---|---|---|---|
+| 5700 | 20 MHz | 1.9 fps | **59.9** |
+| 5745 | 25 MHz | 0.4 fps | **59.9** |
+| 5500 | 220 MHz | 50.9 fps | 60.4 |
+
+and the offset curve with craft 17 back on its home 5805 (nominal 60):
+
+| Δf | ±20 | ±40 | ±60 | ±85 | ≥105 |
+|---|---|---|---|---|---|
+| fps | 0.0–0.9 | 20.8 | 54.5 | 54.8 | 37.5–50.4 |
+
+**What it means.** Two things, and only the second is a bug in this repo.
+
+1. **Minimum craft separation is 60 MHz (three HT20 slots).** 20 MHz is
+   indistinguishable from co-channel; 40 MHz gives a third of nominal.
+   This is a deployment rule, not something software can fix.
+2. **`emptiest_channel()` ranked channels as independent bins.** It correctly
+   scored 5720 occupied (`util_permille` 1000, its traffic decodes) and then
+   handed out the channel next to it. The 25-channel sweep shows why nothing
+   stopped it: every *empty* channel reads 891–968 permille — a 77-permille
+   spread with no signal in it — so which empty channel wins is decided by
+   noise, and one of the noise winners is 20 MHz from a live craft. Fixed by
+   ranking on the worst utilisation within `policy.csa.adjacent_guard_mhz`
+   (seed **40**, 0 = old behaviour), tie-broken on the channel's own value.
+
+**Also measured, not yet acted on.** `rssi_best` (−24…−32) and `loss_milli`
+(213–260) were **flat** across the whole range from 0 fps to 60 fps, and
+`/link/health` reported `HOLD` throughout. No field in the health contract
+distinguishes a working link from a jammed one here; delivered frame rate at
+the sink was the only signal that moved.
+
+**How much the guard actually buys — measured, not assumed.** The bad pick
+was seen once and could NOT be reproduced on demand: with craft 17 parked at
+5280 (mid-band, so its neighbours are in the low-scoring cluster) and the
+guard disabled, five consecutive quick-connects all landed ≥60 MHz away, and
+so did three with the guard on. The pick is noise-driven, so the bench cannot
+be made to fail on cue. Replaying `emptiest_channel()` over a real
+`/api/v1/scout/results` snapshot is what shows the exposure:
+
+```
+craft 17 live on 5280; craft 18 being moved off 5220
+chan   util   guard40   
+5240   938    1000     ADJACENT (40 MHz)
+5260   932    1000     ADJACENT (20 MHz)
+5300   928    1000     ADJACENT (20 MHz)
+5320   891    1000     ADJACENT (40 MHz)   <- 7th lowest of 24 unguarded
+5600   821    881      <- picked, either way
+```
+
+Two things follow. **The interference score does not see the neighbour**: the
+four channels flanking a live craft read 891–938, squarely inside the
+empty-band population (847–953) — an earlier guess that adjacent-channel
+energy would already deprioritise them is wrong. And **the guard removes a
+class of picks rather than changing this one**: 5320 at 891 beats seven other
+allowlisted channels and is a live candidate on any sweep whose noise favours
+it; guarded, it cannot be chosen at all. Both configurations picked 5600 here.
+
+**One correction to the guard itself, found the same way.** The first version
+let `except` — the craft being relocated — guard its own neighbours. Replayed
+against the snapshot above that excluded 5180/5200/5240/5260 because craft 18
+was sitting on 5220, which it is about to leave. The mover's emission travels
+with it and must not guard; another craft's must. Fixed, with a test that
+separates the two cases.
+
+**Open.** (a) The 40 MHz seed comes from one power ratio on one pair — a
+higher-power craft plausibly needs more, and an HT40 deployment certainly
+does. (b) `emptiest()` still ignores the scout's own candidate list, which
+*names* the other craft and its channel. That list is strictly better
+evidence than occupancy here — it survives a craft whose traffic the ground
+cannot decode, and it is the obvious next step. (c) The empty-band floor of
+~850–950 permille makes `ranking.recommendation` return `BROAD_DEGRADATION`
+on a genuinely empty band — the `#173` FA-index-vs-occupancy question,
+unchanged by this finding. (d) The health-contract blind spot above.
+
+---
+
 ## 2026-08-15 — 8733BU rung-5 drain ceiling is ~73% of the table-derived target; and one unsupported venc field (501) starves ALL bitrate pushes
 
 **Setup.** CV610 craft (.181, 8733BU, 5745/HT20, table-8733b all long-GI,

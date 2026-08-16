@@ -49,17 +49,36 @@ OccupancyDerived derive_occupancy(
 
 uint16_t emptiest_channel(const std::vector<ChannelUtil>& measured,
                           const std::vector<uint16_t>& allowlist,
-                          uint16_t except) {
+                          uint16_t except, int guard_mhz) {
     uint16_t best = 0;
-    uint32_t best_util = 1001;  // > any per-mille
+    uint32_t best_guard = 1001;  // > any per-mille
+    uint32_t best_own = 1001;
     for (const uint16_t ch : allowlist) {
         if (ch == except) continue;
+        bool measured_here = false;
+        uint32_t guard = 0, own = 0;
         for (const ChannelUtil& m : measured) {
-            if (m.chan != ch) continue;
-            if (m.util_permille < best_util) {
-                best_util = m.util_permille;
-                best = ch;
+            // `except` is the craft being relocated. Its own emission moves
+            // with it, so it must not guard the channels around where it
+            // happens to be sitting right now — that would cost four
+            // perfectly good targets on every claim.
+            if (except != 0 && m.chan == except && m.chan != ch) continue;
+            const int df = std::abs(static_cast<int>(m.chan) -
+                                    static_cast<int>(ch));
+            if (df > guard_mhz) continue;
+            guard = std::max<uint32_t>(guard, m.util_permille);
+            if (m.chan == ch) {
+                measured_here = true;
+                own = m.util_permille;
             }
+        }
+        // Unchanged: a channel nobody measured never wins, however quiet its
+        // neighbours look.
+        if (!measured_here) continue;
+        if (guard < best_guard || (guard == best_guard && own < best_own)) {
+            best_guard = guard;
+            best_own = own;
+            best = ch;
         }
     }
     return best;

@@ -290,6 +290,7 @@ const KeyEntry kKeys[] = {
     {"policy.cmd.retry_cap",                      KeyType::kNumber},
     {"policy.csa",                                KeyType::kObject},
     {"policy.csa.ack_timeout_ms",                 KeyType::kNumber},
+    {"policy.csa.adjacent_guard_mhz",             KeyType::kNumber},
     {"policy.csa.bind_release_s",                 KeyType::kNumber},
     {"policy.csa.channel_allowlist",              KeyType::kArray},
     {"policy.csa.home_chan",                      KeyType::kNumber},

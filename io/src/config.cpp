@@ -760,6 +760,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 csa.persist_channel =
                     pc.value("persist_channel", csa.persist_channel);
                 csa.home_chan = pc.value("home_chan", csa.home_chan);
+                csa.adjacent_guard_mhz =
+                    pc.value("adjacent_guard_mhz", csa.adjacent_guard_mhz);
                 if (pc.contains("channel_allowlist")) {
                     for (const json& c : pc.at("channel_allowlist")) {
                         csa.channel_allowlist.push_back(c.get<uint16_t>());
