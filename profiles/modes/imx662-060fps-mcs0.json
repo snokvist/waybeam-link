@@ -1,0 +1,23 @@
+{
+  "_mode": "Medium latency / High range — CV610/IMX662 (profiles/modes/README.md)",
+  "_derivation": "bpp = kbps*1000/(fps*pixels). Floor rung 0 (2829 kbps) -> 0.0512 bpp; top rung 2 (9264 kbps) -> 0.1675 bpp. The 8733B ladder (profiles/table-8733b.json, §9.5 derived) is 2829/5754/9264/12384/16213/19646 kbps; the craft pins venc.max_bitrate_kbps=12288 (operator, 2026-08-16 — the earlier 8000 was too strict), so the EFFECTIVE ladder is 2829/5754/9264/12288/12288/12288 and only rungs 3-5 are capped. Second limiter, which IMX335 never had: encoder CPU. Measured on .181 — 1280x720@100 (92 Mpx/s) ~60% of one core, 1080p@12000 (207 Mpx/s) ~99%, so ~0.65% per Mpx/s. Size is min(bpp ceiling, 720p floor, ~130 Mpx/s budget); here the bpp ceiling is 1.18 Mpx and this cell is 55 Mpx/s.",
+  "_apply": "venc fields go to waybeam_venc (sensor.mode and video0.size are restart_required, so this is a pre-flight choice); link fields are merged into /etc/waybeam-link/craft.json. The CV610 craft runs waybeam-link IN-PROCESS inside waybeam-hub, so there is no separate link service to restart and no B9 re-pair: apply-mode.sh pins the range live over 127.0.0.1:8091 and restarts only the encoder. That restart MUST go through venc's own POST /api/v1/restart (VENC_RESTART=api in apply-mode.conf) — S95waybeam restart ends in $LOADER stop, which unloads the CV610 MPP module stack and takes the board off the network.",
+  "venc": {
+    "sensor": {
+      "mode": 1
+    },
+    "video0": {
+      "fps": 60,
+      "size": "1280x720"
+    }
+  },
+  "link": {
+    "policy": {
+      "select": {
+        "min_profile": 0,
+        "max_profile": 2
+      },
+      "fps_mode": "static"
+    }
+  }
+}
