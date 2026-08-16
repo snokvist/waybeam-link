@@ -12,6 +12,98 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-16 — the RTL8733BU actuator lands, and all three fleet floors are measured
+
+**Setup.** devourer re-vendored `c8f3531` → `5bf059a` (#399), which gives the
+RTL8733BU a §10.5 TX-power actuator on the TSSI target table. Nothing on this
+side changed: `io/src/air_radio.cpp` sets
+`power_actuator_ok = dev->GetTxPowerCaps().supported`, that flips false→true on
+the vendor bump, and the CV610 craft's `/api/v1/tx/power` went from
+`"actuator":"none"` to `"actuator":"offset"` on the first restart.
+
+**Method.** Each node's offset was driven from its own control plane and judged
+at the FAR END — ground RSSI for a craft's TX, craft RSSI for the ground's
+uplink. The API echo is deliberately not the evidence: the pre-#399 8733BU
+failure was an endpoint reporting `applied_qdb` correctly while writing
+nothing. Each sweep carries the opposite direction as a control.
+
+| node | adapter | floor | travel | far-end RSSI, 0 → floor |
+|---|---|---|---|---|
+| `.181` craft | RTL8733BU | **−96 qdb** | 24 dB | −32 → −56 |
+| `.232` craft | RTL8812EU | **−48 qdb** | 14 dB | −13 → −27 |
+| `.242` ground | RTL8812AU | **−72 qdb** | 18 dB | −45 → −63 |
+
+The 8733BU sweep (0/−16/−32/−48/−64/−80/−96 → −32/−38/−40/−42/−46/−54/−56)
+is **96 qdb commanded, 24 dB delivered — dead-on the 0.25 dB/qdB nominal**,
+with delivered video flat at ~100 fps and loss flat at 7‰ at every step, and
+the craft's own RX of the uplink flat at −49/−50 throughout. −112 and −128 add
+nothing; past −128 `saturated_low` goes true and `applied_qdb` clamps at the
+int8 rail. This is cleaner than the 2026-08-14 register-level measurement on
+the x86 host (0.222–0.231 dB/qdB with a half-slope knee below −52) — different
+unit and geometry, so the knee is a per-unit property, not a family one.
+
+The 8812AU held exactly 0.25 dB/qdB to −72 and saturated at −96; its config
+ladder's existing bottom rung is therefore precisely its floor. The 8812EU is
+the outlier: only 14 dB, pinned from −72 down, so two of its five ladder rungs
+sit below the floor (they saturate honestly, so they were left alone).
+
+**A hypothesis that did NOT survive.** During the 8812EU sweep, delivered fps
+climbed 30 → 100 monotonically as power dropped, which looks exactly like
+near-field RX compression. Re-running 0 / −48 / 0 / −48 gave 87.3 / 74.8 /
+93.5 / 99.8 with loss flat at 11‰ — no correlation with power at all. The climb
+was the craft settling into its 100 fps mode after the claim. **RSSI was
+reversible within 2 dB; fps was not a function of power.** Near-field
+compression may still be real at this geometry, but this run is not evidence
+for it.
+
+**Consequence.** All three `deploy/*.json` now pin `power_offset_qdb` at the
+measured floor, because bench sessions restart the link constantly and a
+runtime-only backoff is lost every time. `deploy/README.md` carries the
+raise-before-flight warning and the table.
+
+**A second hypothesis that did not survive, and the real cause behind it.** At
+−96 the CV610 craft was missed by 2 of 4 scout sweeps that found the 8812EU
+craft every time, which looked like bench-low power costing discovery. It is
+not power. Pooled over every level tested, all with the 8812EU craft live:
+
+| craft TX offset | scout detections |
+|---|---|
+| −96 qdb | 12/16 (75%) |
+| −72 qdb | 10/12 (83%) |
+| −48 qdb | 3/4 (75%) |
+| 8812EU craft, any level | **28/28 (100%)** |
+
+Nor is it dwell: at −96, `dwell_ms` 300 and 500 both gave 5/6.
+
+**It is the other craft.** Operator hypothesis, tested by unplugging the 8812EU
+craft and repeating the sweep by hand at the CV610's *lowest* setting (−96):
+
+| 8812EU craft | CV610 detections | CV610 beacon frames | CV610 RSSI |
+|---|---|---|---|
+| live, 5745, −16 dBm | ~78% pooled | ~820–840 | −50…−54 |
+| **unplugged** | **10/10** | **~2046** | −48, ±0 |
+
+The CV610 was on 5660 and the 8812EU on 5745 — **85 MHz apart, and the strong
+craft still cost the weak one 60% of its received beacon frames and a fifth of
+its detections.** This is the same desense as the adjacency wall above but
+reaching far beyond a guard band: it is the ground's single 8812AU receiver
+being pulled down by a signal 36 dB above the one it is trying to hear, not a
+channel-overlap effect.
+
+**Consequence: the 60 MHz separation rule is necessary but NOT sufficient.**
+What governs is the *power imbalance at the receiver*, and on this bench it
+cannot be fixed with the §10.5 knob alone — at both crafts' measured floors the
+8812EU still lands ~20 dB above the CV610 at the ground (−28 vs −48). Balancing
+a mixed-family pair needs physical attenuation on the loud craft, much more
+separation, or not running both at once. `emptiest_channel`'s guard band
+(2026-08-16, above) does not address this and was never meant to.
+
+**Open.** (a) The 8812EU's 14 dB is short of the 8812AU's 18 dB on the same
+ladder — unexplained, and worth a register-level look before trusting the EU
+ladder's lower rungs. (b) How far the cross-craft desense reaches is not
+bounded: 85 MHz was measured, the band edge was not. (c) The 8812EU floor is
+what blocks a balanced two-craft bench; whether the unported flat TXAGC index
+or a physical pad is the answer is undecided.
 ## 2026-08-16 — quickconnect parked a craft one channel from a live craft; adjacency is as fatal as co-channel
 
 **Setup.** Two crafts live at once for the first time: `.232` (SSC338Q,

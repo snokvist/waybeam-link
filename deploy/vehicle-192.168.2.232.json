@@ -9,6 +9,7 @@
   "profile_table": "/etc/waybeam-link/table.example.json",
   "adapters": [
     {
+      "_power_comment": "§10.5 offset space. 8812EU craft floor MEASURED at the ground 2026-08-16: 0/-24/-48 qdb read -13/-20/-27 dBm and -72/-96/-128 all pin at -28 with saturated_low true. 14 dB of travel; -48 is the last rung that moves the air, so the ladder's -72 bottom rung is below the floor and kept only because it saturates honestly. Reversibility checked (0/-48/0/-48 repeated within 2 dB). BENCH-LOW for 50 cm geometry — raise before any range or flight test.",
       "name": "eu-craft",
       "role": "tx",
       "channel": 5805,
@@ -30,7 +31,8 @@
         0,
         24
       ],
-      "power_offset_max_qdb": 24
+      "power_offset_max_qdb": 24,
+      "power_offset_qdb": -48
     }
   ],
   "streams": [
