@@ -127,7 +127,7 @@
       ]
     },
     "mode_apply_cmd": "/etc/waybeam-link/modes/apply-mode.sh",
-    "active_mode": "imx335-60fps-lowrange",
+    "active_mode": "imx335-060fps-mcs2",
     "fps_ladder": {
       "enabled": false,
       "min": 30,
