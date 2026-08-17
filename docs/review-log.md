@@ -63,6 +63,17 @@ part, because the craft build compiles INFO out and the link silences
 devourer's event sink: **10974 → 4347 bulk-OUT URBs for identical frames**
 at an identical 1098 fps (frames/URB 1.00 → 2.52 — not 3.00, and the
 shortfall is the design: partial runs and unbatched control frames).
+
+Neither of those would notice frames arriving corrupted, duplicated or
+reordered — pps and URB counts look identical either way — so correctness
+was measured separately and end to end: 8733BU TX to an 8812AU running a
+real `rx` node, `tools/frame_shm_feed` stamping payload byte j of frame i
+as `(i*31+j)&0xff` and verifying every byte after §6.3a reassembly.
+**400 frames, bad=0, in both arms.** Not a delivery count — every byte.
+
+Limitation, stated rather than left implicit: both craft A/B runs took
+agg_off first, so strict order-effect bias is not excluded by the A/B
+alone. It is excluded by the URB count, which is causal and order-free.
 Upstream half: OpenIPC/devourer#400. Consumer default stays 0, so only
 `deploy/vehicle-192.168.2.181.json` changes behaviour.
 
