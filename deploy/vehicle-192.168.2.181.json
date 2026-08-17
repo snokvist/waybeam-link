@@ -74,7 +74,9 @@
     }
   ],
   "air": {
-    "kind": "radio"
+    "kind": "radio",
+    "_comment_usb_tx_agg": "USB TX aggregation: frames per bulk-OUT URB. Host CPU only — same frames, same airtime, and it defers nothing, because it batches only frames the framer already emitted back to back. Measured on THIS craft 2026-08-17 at ~1100 pps: 337->260 and 316->223 us/frame, 8.6-10.5 points of one core, pps unchanged (1104->1101, 1107->1100). Mechanism confirmed at the kernel on the same 8733BU part: 10974 -> 4347 bulk-OUT URBs for identical frames, frames/URB 1.00 -> 2.52 — not 3.00, because partial runs flush at fan-out boundaries and control frames stay unbatched.",
+    "usb_tx_agg": 3
   },
   "policy": {
     "report_timeout_ms": 750,
