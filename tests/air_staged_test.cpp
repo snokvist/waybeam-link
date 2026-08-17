@@ -9,12 +9,23 @@
 // the difference, which is why the ordering contract is pinned here rather
 // than left to the device bench.
 //
-// This suite exercises the CONTRACT on AirIface, not the radio: RadioAir needs
-// a USB device, and the property under test — order in, order out, nothing
-// held back — belongs to the interface. The devourer side (that a packed URB
-// airs three DISTINCT frames rather than re-airing block 1) is not a thing a
-// unit test can see; it is pinned on hardware by stamped distinctness, in
-// third_party/devourer/tests/txagg_bench.sh.
+// WHAT IS UNDER TEST: node::StagedAir, the production seam that run_tx routes
+// every air write through. Its send_now()/resend() flush before submitting,
+// which is what makes an unbatched frame unable to overtake a staged one.
+//
+// The first version of this file did NOT test that. It defined a fake with
+// its own staging and asserted against the fake's behaviour, so deleting all
+// ten flush calls from tx_node.cpp left the suite green — verified by doing
+// exactly that. The fix was structural: the rule moved into StagedAir, and
+// the tests below instantiate that template, so a mutation to the rule fails
+// here. The fake is now only a recorder.
+//
+// Still NOT covered here, and covered on hardware instead: RadioAir's own
+// staging (it needs a USB device), and the devourer property that a packed
+// URB airs three DISTINCT frames rather than re-airing block 1 — measured by
+// stamped distinctness, third_party/devourer/tests/txagg_bench.sh.
+#include "wblink/node/staged_air.h"
+
 #include "wblink/air_iface.h"
 
 #include <cstdint>
@@ -114,9 +125,6 @@ class FakeStagingAir : public AirIface {
 void stage(AirIface& air, const char* s) {
     air.inject_staged(reinterpret_cast<const uint8_t*>(s), strlen(s));
 }
-void send_now(AirIface& air, const char* s) {
-    air.inject(reinterpret_cast<const uint8_t*>(s), strlen(s));
-}
 
 // The default implementation must be indistinguishable from inject(). This is
 // what lets udp-air and every test double ignore the feature entirely.
@@ -154,80 +162,91 @@ void test_batch_fills_and_submits_once() {
     CHECK(air.aired[0] == "f0" && air.aired[1] == "f1" && air.aired[2] == "f2");
 }
 
-// A partial batch must never be stranded: the caller flushes at every fan-out
-// boundary, and the frames must be on the air when it does.
-void test_partial_batch_is_not_stranded() {
-    FakeStagingAir air(3);
-    stage(air, "f0");
-    stage(air, "f1");
-    CHECK_EQ_U(air.flush_staged(), 2u);
-    CHECK_EQ_U(air.aired.size(), 2u);
-    CHECK_EQ_U(air.pending(), 0u);
-    // Flushing an empty batch is a no-op, not a zero-length submission.
-    CHECK_EQ_U(air.flush_staged(), 0u);
-    CHECK_EQ_U(air.submissions.size(), 1u);
-}
 
-// THE regression this suite exists for. An unbatched send (selector state, a
-// §12 resend, a vehicle-command echo) must flush first, or it overtakes video
-// staged before it — and the wire order would then depend on whether batching
-// happened to be on.
-void test_unbatched_send_must_not_overtake_staged_frames() {
+// ---- StagedAir: the production rule ---------------------------------------
+//
+// These instantiate node::StagedAir over the recorder above, so the code they
+// exercise is the shipped template, not a restatement of it.
+
+using wblink::node::StagedAir;
+
+// THE regression. An unbatched send (selector state, a §12 resend, the §11.7
+// echo) must not overtake video staged before it — the wire order must not
+// depend on whether batching is on.
+//
+// MUTATION: delete the flush() from StagedAir::send_now and this fails.
+void test_send_now_cannot_overtake_staged_frames() {
     FakeStagingAir air(3);
-    stage(air, "video0");
-    stage(air, "video1");
-    // What tx_node.cpp does at every unbatched site.
-    air.flush_staged();
-    send_now(air, "control");
+    StagedAir<FakeStagingAir> sa(air);
+    sa.stage(reinterpret_cast<const uint8_t*>("video0"), 6);
+    sa.stage(reinterpret_cast<const uint8_t*>("video1"), 6);
+    CHECK_EQ_U(air.aired.size(), 0u);  // both still staged
+    sa.send_now(reinterpret_cast<const uint8_t*>("control"), 7);
     CHECK_EQ_U(air.aired.size(), 3u);
     CHECK(air.aired[0] == "video0");
     CHECK(air.aired[1] == "video1");
-    CHECK(air.aired[2] == "control");  // control is LAST, as issued
-
-    // The mutation: drop the flush and the control frame jumps the queue.
-    FakeStagingAir bad(3);
-    stage(bad, "video0");
-    stage(bad, "video1");
-    send_now(bad, "control");
-    CHECK(bad.aired.size() == 1 && bad.aired[0] == "control");
-    bad.flush_staged();
-    CHECK(bad.aired[1] == "video0");  // reordered — this is what we prevent
+    CHECK(air.aired[2] == "control");  // LAST, as issued
 }
 
-// §7.2: the quiet gap must not re-arm while the EOB that opens it is still
-// staged, or the listen window starts before its own frame is on the air.
-void test_eob_is_on_the_air_before_the_gap_rearms() {
+// Same rule for the §12 resend path, which is separate on the interface
+// because the backends account it separately.
+//
+// MUTATION: delete the flush() from StagedAir::resend and this fails.
+void test_resend_cannot_overtake_staged_frames() {
     FakeStagingAir air(3);
-    stage(air, "v0");
-    stage(air, "eob");
-    // send_raw's order: stage, flush, THEN note_eob_sent.
-    const size_t flushed = air.flush_staged();
-    CHECK_EQ_U(flushed, 2u);
-    bool gap_armed = false;
-    gap_armed = true;  // stands in for qg.note_eob_sent()
-    CHECK(gap_armed);
-    CHECK_EQ_U(air.pending(), 0u);  // nothing of the block left behind
-    CHECK(air.aired.back() == "eob");
+    StagedAir<FakeStagingAir> sa(air);
+    sa.stage(reinterpret_cast<const uint8_t*>("v"), 1);
+    sa.resend(reinterpret_cast<const uint8_t*>("resend"), 6);
+    CHECK_EQ_U(air.aired.size(), 2u);
+    CHECK(air.aired[0] == "v");
+    CHECK(air.aired[1] == "resend");
 }
 
-// Ordering must not depend on the batch depth: cap 1 (off) and cap 3 produce
-// the same wire sequence, which is what makes the knob safe to flip.
+// §7.2: send_raw stages the EOB, flushes, THEN calls note_eob_sent — so a
+// listen window never opens while the frame that opened it is still staged.
+// Modelled here as "the EOB is on the air before the observer runs".
+void test_eob_is_aired_before_the_gap_observer_runs() {
+    FakeStagingAir air(3);
+    StagedAir<FakeStagingAir> sa(air);
+    sa.stage(reinterpret_cast<const uint8_t*>("v0"), 2);
+    sa.stage(reinterpret_cast<const uint8_t*>("eob"), 3);
+    size_t aired_when_gap_armed = 0;
+    sa.flush();
+    aired_when_gap_armed = air.aired.size();  // stands in for note_eob_sent
+    CHECK_EQ_U(aired_when_gap_armed, 2u);     // BOTH out before the gap arms
+    CHECK(air.aired.back() == "eob");
+    CHECK_EQ_U(air.pending(), 0u);
+}
+
+// A partial batch is never stranded: the boundary flush submits it.
+void test_boundary_flush_submits_a_partial_batch() {
+    FakeStagingAir air(3);
+    StagedAir<FakeStagingAir> sa(air);
+    sa.stage(reinterpret_cast<const uint8_t*>("a"), 1);
+    sa.stage(reinterpret_cast<const uint8_t*>("b"), 1);
+    CHECK_EQ_U(sa.flush(), 2u);
+    CHECK_EQ_U(air.aired.size(), 2u);
+    CHECK_EQ_U(sa.flush(), 0u);  // idempotent, not a zero-length submission
+    CHECK_EQ_U(air.submissions.size(), 1u);
+}
+
+// The knob must not be able to change the wire order. Same sequence through
+// StagedAir at cap 1 (off) and cap 3 (on) must air identically.
 void test_wire_order_is_independent_of_batch_depth() {
     const char* seq[] = {"a", "b", "c", "d", "e"};
     std::vector<std::string> off, on;
-    {
-        FakeStagingAir air(1);
-        for (const char* s : seq) stage(air, s);
-        air.flush_staged();
-        off = air.aired;
+    for (size_t cap : {size_t{1}, size_t{3}}) {
+        FakeStagingAir air(cap);
+        StagedAir<FakeStagingAir> sa(air);
+        for (size_t i = 0; i < 5; ++i) {
+            // Interleave an unbatched send, the case most able to reorder.
+            if (i == 3) sa.send_now(reinterpret_cast<const uint8_t*>("ctl"), 3);
+            sa.stage(reinterpret_cast<const uint8_t*>(seq[i]), 1);
+        }
+        sa.flush();
+        (cap == 1 ? off : on) = air.aired;
     }
-    {
-        FakeStagingAir air(3);
-        for (const char* s : seq) stage(air, s);
-        air.flush_staged();
-        on = air.aired;
-    }
-    CHECK_EQ_U(off.size(), 5u);
+    CHECK_EQ_U(off.size(), 6u);
     CHECK(off == on);
 }
 
@@ -236,9 +255,10 @@ void test_wire_order_is_independent_of_batch_depth() {
 int main() {
     test_default_staging_is_immediate_injection();
     test_batch_fills_and_submits_once();
-    test_partial_batch_is_not_stranded();
-    test_unbatched_send_must_not_overtake_staged_frames();
-    test_eob_is_on_the_air_before_the_gap_rearms();
+    test_send_now_cannot_overtake_staged_frames();
+    test_resend_cannot_overtake_staged_frames();
+    test_eob_is_aired_before_the_gap_observer_runs();
+    test_boundary_flush_submits_a_partial_batch();
     test_wire_order_is_independent_of_batch_depth();
     return wbtest_finish("air_staged_test");
 }

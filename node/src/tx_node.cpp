@@ -92,6 +92,7 @@
 #include "wblink/node/policy.h"
 #include "wblink/node/load.h"
 #include "wblink/node/rx_core.h"
+#include "wblink/node/staged_air.h"
 #include "wblink/node/stats_fill.h"
 #include "wblink/node/tx_core.h"
 #include "wblink/node/tx_runtime_info.h"
@@ -366,6 +367,10 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
     // override degrades to §7.1 under load.
     QuietGap qg(quietgap_policy(l.cfg));
     std::deque<std::vector<uint8_t>> held;
+    // Pass 184: every air write below goes through this. stage() may batch;
+    // send_now()/resend() flush first by construction, so no unbatched frame
+    // can overtake a staged one.
+    StagedAir<AirBackend> sa(*air.value);
     ArqTimingTracker arq_timing;
     uint64_t now_us_it = now_us();
     VideoSlotCadence selector_state_cadence(500);
@@ -391,21 +396,20 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                     // frame has no result yet. Flush first or this control
                     // frame would overtake video already staged — the wire
                     // order must not depend on whether batching is on.
-                    (void)air.value->flush_staged();
                     (void)selector_state_cadence.note_submitted(
-                        air.value->inject(sf, sn), slot_ms);
+                        sa.send_now(sf, sn), slot_ms);
                 }
             }
         }
         // Pass 78: only video EOBs open a listen window; a held audio
         // datagram flushing here must not re-arm the gap on the rest.
         const bool eob = qg.enabled() && frame_is_paced_eob(f, n);
-        air.value->inject_staged(f, n);
+        sa.stage(f, n);
         if (eob) {
             // The gap must not re-arm while the EOB that opened it is still
             // staged: a listen window that starts before its own frame is on
             // the air is a §7.2 violation. Flush, then note.
-            (void)air.value->flush_staged();
+            (void)sa.flush();
             qg.note_eob_sent(now_us_it);
         }
     };
@@ -423,15 +427,13 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         // no co-available siblings, and delaying one behind a partial batch
         // would add latency to the one path that exists to remove it. Flush
         // so a resend never overtakes video staged before it.
-        (void)air.value->flush_staged();
-        air.value->inject_resend(f, n);
+        sa.resend(f, n);
         arq_timing.note_resend_submitted(f, n, now_us());
     };
     // §3.16 (Pass 153): probes and tallies are control-plane — plain inject,
     // never the §7.2 held queue (they must not arm or ride quiet gaps).
     tx.send_calib = [&](const uint8_t* f, size_t n) {
-        (void)air.value->flush_staged();  // control-plane: never reordered
-        air.value->inject(f, n);
+        sa.send_now(f, n);
     };
     // §11 craft follower: validates campaigns, arms the CSA_ARMED flag, and
     // retunes the (single) radio at the TSF-anchored T_switch. In announced
@@ -992,7 +994,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         }
         // The drain is a fan-out too: whatever it staged must be on the air
         // before the tick moves on to decisions that assume it.
-        (void)air.value->flush_staged();
+        (void)sa.flush();
         // Lazy (re)attach of any frame-shm producer that wasn't up at startup.
         bool any_pending = false;
         for (const ShmIn& si : shm_ins) {
@@ -1061,7 +1063,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 // Fan-out boundary: on_ingress emits every frame of a
                 // datagram through one reusable producer buffer, so anything
                 // staged is complete here and must not straddle the tick.
-                (void)air.value->flush_staged();
+                (void)sa.flush();
             },
             ready_fds, on_ready);
         // Nothing to wait on yet (no UDP ingress and every frame-shm producer
@@ -1095,7 +1097,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 // The dominant fan-out: one video frame becomes many
                 // data+parity MPDUs through one reusable producer buffer.
                 // Staging spans exactly this call and no further.
-                (void)air.value->flush_staged();
+                (void)sa.flush();
                 ++drained;
             }
             // If the budget was exhausted, leave pending set so the next main
@@ -1110,10 +1112,7 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                 const SelectorState st = tx.selector_state(nowp);
                 uint8_t sf[kSelectorStateCalibSize];
                 const size_t sn = encode_selector_state(st, sf, sizeof sf);
-                if (sn != 0) {
-                    (void)air.value->flush_staged();
-                    (void)air.value->inject(sf, sn);
-                }
+                if (sn != 0) (void)sa.send_now(sf, sn);
                 next_paused_word_ms = nowp + 500;
             }
         }
@@ -1146,14 +1145,13 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         while (const auto echo = craft_cmd.tick(now_us_it)) {
             uint8_t ef[kVehicleCmdSize];
             if (encode_vehicle_cmd(*echo, ef, sizeof(ef)) == sizeof(ef)) {
-                (void)air.value->flush_staged();
-                air.value->inject(ef, sizeof(ef));
+                sa.send_now(ef, sizeof(ef));
             }
         }
         tx.tick(service_now, inject, inject_resend);
         // Last fan-out of the tick. After this the loop consults tx_pending()
         // and the poll timeout, both of which assume nothing is held back.
-        (void)air.value->flush_staged();
+        (void)sa.flush();
         air.value->heartbeat(l.cfg.node.originator, session, service_now);
         {
             const std::optional<uint16_t> latched = csa.latched_issuer();

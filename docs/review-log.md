@@ -69,7 +69,20 @@ reordered — pps and URB counts look identical either way — so correctness
 was measured separately and end to end: 8733BU TX to an 8812AU running a
 real `rx` node, `tools/frame_shm_feed` stamping payload byte j of frame i
 as `(i*31+j)&0xff` and verifying every byte after §6.3a reassembly.
-**400 frames, bad=0, in both arms.** Not a delivery count — every byte.
+**bad=0 in every run** — not a delivery count, every byte. Five paired runs
+delivered 400/400/399/400/400 unbatched against 400/397/398/399/400 batched:
+both arms drop the occasional frame, so that is RF, not the knob.
+
+**What is NOT measured, stated plainly.** Three MPDUs in one TXDMA
+submission air back to back where each was previously separated by a host
+submission (~248 µs on this craft). That changes on-air burst structure,
+which is the axis per-frame FEC's loss-independence assumption sits on.
+CPU, pps and URB counts cannot see it, and five 400-frame runs cannot
+exclude a ~1-in-400 effect. The claim this Pass makes is therefore about
+host cost and ordering, NOT about PER or loss-run length; the earlier
+wording "adds no latency… never the timing" also overstated — a frame is
+held for the microseconds it takes to stage its one or two neighbours, and
+the §7.2 drain flushes after its loop rather than inside it.
 
 Limitation, stated rather than left implicit: both craft A/B runs took
 agg_off first, so strict order-effect bias is not excluded by the A/B

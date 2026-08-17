@@ -863,11 +863,20 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // RX-only ear never injects and broadcast frames carry no ACK
         // policy, so it binds exactly on the hybrid's unicast returns.
         dc.tx.retry_limit = cfg.tx_retry_limit;
-        // USB TX aggregation. Set on every adapter for the same reason
-        // retry_limit is: an RX-only ear never injects, so the knob is inert
-        // there, and a uniform bring-up posture beats a conditional one. 0
-        // leaves send_packets on its per-frame fallback, byte-identical.
-        dc.tx.usb_agg_max = static_cast<unsigned>(cfg.usb_tx_agg);
+        // USB TX aggregation — INJECTING ADAPTER ONLY, unlike tx.report and
+        // retry_limit above. Those two are descriptor-only and therefore
+        // genuinely inert on an ear. This one is not: on Jaguar1 a nonzero
+        // usb_agg_max flips _usbTxAggMode at bring-up and writes
+        // REG_DWBCN0_CTRL_8812 (TDECTRL BLK_DESC_NUM) inside ordinary HAL
+        // init — see third_party/devourer/src/jaguar1/HalModule.cpp, whose
+        // own comment promises "a no-knob bring-up stays byte-identical".
+        // Setting it on a diversity ear would take that MAC-init change for
+        // no benefit, since run_rx never stages a frame. The mac-pin caveat
+        // that makes tx.report unconditional does not apply: this only has
+        // to be right before the first STAGED send, and re-binding finishes
+        // before any TX starts.
+        dc.tx.usb_agg_max =
+            ad->tx ? static_cast<unsigned>(cfg.usb_tx_agg) : 0u;
         // MAC carrier-sense gate. Applied to every adapter, not just the TX
         // one: an RX-only ear that defers has nothing to defer, but the
         // bring-up posture stays uniform across the node.
@@ -1130,7 +1139,7 @@ static bool mcs_cycle_enabled() {
     return on;
 }
 
-// The per-frame rate decision, factored out of inject() so inject_batch()
+// The per-frame rate decision, factored out of inject() so inject_staged()
 // cannot drift from it. Both bench knob and §9.4 probe are PER FRAME, which is
 // why a batch is still legal: every frame carries its own radiotap, and
 // devourer builds each block's descriptor from that frame's header — so
@@ -1196,17 +1205,28 @@ size_t RadioAir::inject_staged(const uint8_t* frame, size_t len) {
                                     im.probe_mcs, frame, len);
     std::vector<uint8_t>& b = im.tx_bufs[im.staged];
     b.resize(kDot11TxPrefixLen + len);
-    // im.seq++ here, at STAGE time, so the wire sequence is the order the
-    // producer emitted in — indistinguishable from N inject() calls, which
-    // matters because the RX loss estimator reads it.
+    // im.seq++ here, at STAGE time, so the 802.11 seq-ctl advances in the
+    // order the producer emitted in — indistinguishable from N inject()
+    // calls. (It is not what the §9 loss estimator reads; that is the §3.2
+    // BE32 the framer wrote before this function was entered, and devourer
+    // restamps seq-ctl on air anyway — see io/include/wblink/dot11.h. The
+    // point is only that staging must not reorder what inject() would have
+    // stamped.)
     dot11_tx_prefix(b.data(), rate, im.cfg.stamp_net_id, im.cfg.originator,
                     static_cast<uint8_t>(im.tx_idx), im.seq++);
     std::memcpy(b.data() + kDot11TxPrefixLen, frame, len);
     im.tx_views[im.staged] = TxPacketView{b.data(), b.size()};
     ++im.staged;
 
-    if (im.staged >= cap) flush_staged();
-    return 1;
+    // Report what the auto-flush actually achieved, not "accepted". The
+    // caller (AirBackend::inject_staged) advances the TX-liveness stamp on a
+    // nonzero return, and that stamp gates the 1 Hz heartbeat: returning 1
+    // unconditionally would keep the stamp fresh through a bulk-OUT that
+    // fails every URB, suppressing the heartbeat exactly when the link is
+    // dying — and only when batching is ON, which is the one place the knob
+    // must not change behaviour.
+    if (im.staged >= cap) return flush_staged();
+    return 1;  // staged, not yet submitted; the flush below reports the rest
 }
 
 size_t RadioAir::flush_staged() {
@@ -1214,7 +1234,12 @@ size_t RadioAir::flush_staged() {
     if (im.staged == 0) return 0;
     const size_t n = im.staged;
     im.staged = 0;  // reset first: a throwing/failing submit must not re-send
-    if (!im.has_tx) return 0;
+    // has_tx is already refused in inject_staged, so nothing can be staged
+    // without it; if that ever changes this must not silently drop a batch.
+    if (!im.has_tx) {
+        wb_logf("radio: %zu staged frame(s) dropped — no TX adapter\n", n);
+        return 0;
+    }
     Impl::Adapter& tx = *im.adapters[im.tx_idx];
     tx.tx_submitted += n;
     // One staged frame is not a batch — send_packets would fall back to its
@@ -1635,12 +1660,27 @@ uint16_t RadioAir::mtu_supported() const {
 std::optional<uint32_t> RadioAir::estimate_airtime_us(
     size_t bytes, bool include_pending, uint16_t packet_budget) const {
     // §14.2 (Pass 143). The conservative service-rate model without the
-    // pending term: devourer's send_packet is a synchronous
-    // bulk-OUT that returns once the transfer has completed or failed, so the
-    // frame is already with the chip and there is no queue to query. Absent by
-    // construction, not approximated — which is why include_pending is ignored
-    // here rather than treated as an unmet request.
+    // pending term: devourer's send_packet is a synchronous bulk-OUT that
+    // returns once the transfer has completed or failed, so the frame is
+    // already with the chip and there is no queue to query.
+    //
+    // Pass 184 narrowed that from "absent by construction" to "absent when
+    // asked". With usb_tx_agg > 1 up to cap-1 frames sit in im.tx_bufs, NOT
+    // with the chip — a real, if tiny, pending queue. It is empty at every
+    // caller of this function because tx_node.cpp flushes at each fan-out
+    // boundary and the one caller that passes include_pending=true (the JSCC
+    // shadow, reached from on_frame) runs after the previous fan-out's
+    // flush. So the answer is still right, but it is now the CALLER's
+    // discipline that makes it right, not this backend's shape. If a flush
+    // site ever moves, this becomes an understatement rather than a
+    // certainty — hence im.staged is asserted empty rather than assumed.
     (void)include_pending;
+    if (impl_->staged != 0) {
+        wb_logf("radio: airtime estimate with %zu frame(s) still staged — "
+                "a §14.2 pending term now exists and is unmodelled "
+                "(Pass 184)\n",
+                impl_->staged);
+    }
     const Impl& im = *impl_;
     if (!im.has_tx) {
         return std::nullopt;  // §3.11 Pass 162: nothing airs
