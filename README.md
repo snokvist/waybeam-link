@@ -1,525 +1,562 @@
 # waybeam-link
 
-A best-effort, **latency-first** broadcast video + telemetry link for
-monitor/injection WiFi (RTL8812AU/CU/EU, plus RTL8733BU with two stated
-capability holes — no TX-power actuator and no CCX/TX-report path; §10.5
-Pass 171 / §9.10 Pass 170) with per-adapter receive **diversity** as
-the primary redundancy, opt-in importance-gated **ARQ** as an opportunistic patch,
-an **adaptive link layer** (per-MCS rate/power + encoder-bitrate control), and a
-coordinated **follow-me channel switch** — built on OpenIPC **devourer** for raw
-802.11 monitor/injection.
+**A latency-first digital video link for drones and remote vehicles, built on
+raw 802.11 injection.**
 
-> **Status: IMPLEMENTATION IN PROGRESS — build-order steps 1–10 built.**
-> Wire codec, I/O/config/stats, TX framer + resend ring, merged RX engine,
-> resend scheduler + arbitration, the loopback bench + udp-air dev backend,
-> the §4.1 NAL-type ARQ classifier, the §9/§10 adaptive layer (RX metric
-> reporter, TX decision cascade with sequenced MCS↔bitrate transitions,
-> flap-freeze + fail-safe, venc bitrate actuation, per-adapter TX-power
-> resolve), and the **radio path** — vendored devourer behind the §3.0
-> pinned encapsulation (`air.kind: "radio"`, per-adapter RX threads, real
-> RSSI/TSF, `SetTxMode` + `SetTxPowerOffsetQdb` at profile commit) with the
-> §7.2 TSF quiet-gap pacer, and the **follow-me CSA** (§11: HMAC-SHA-256'd
-> campaigns, craft follower with TSF-anchored switch + jump-failed backout +
-> committed channel hold, ground issuer with commit-after-CSA_ARMED, §11.3 selector
-> freeze; ground trigger = `POST /api/v1/csa`, §15.5), plus the **ground scout
-> + quickconnect path** (§15.5a: ANNOUNCE discovery, channel sweep, token-keyed
-> claim, multi-adapter uplink scouting with all-ear retune/rollback, and
-> heard-most candidate-channel selection), plus **receiver-owned Ethernet cache
-> following** (claim commit replaces the RX sender subscription and repeatedly
-> assigns the same vehicle/channel/net-id tuple to the receiver's cache until
-> matching status proves readiness) — are implemented and tested
-> (`ctest --preset dev`, ASan+UBSan; SSC338Q cross-verified via
-> `cmake --preset ssc338q`).
-> Step 11 (field bring-up + the §17 bench gates) has **run** on the x86 bench
-> (2× RTL8812CU + 1× RTL8812AU): the §3.0 on-air encapsulation is
-> field-verified (RX delivers the MPDU with a +4-byte FCS trailer, stripped
-> before the length-exact §3.1 parse — devourer's monitor bring-up keeps
-> `APP_FCS`, so this is the encapsulation on the shipping path, not a property
-> of the retired backend; PROTOCOL.md §3.0); gate 1 **PASSED** (injector + monitor siblings mix
-> in one process, both chip families, per-frame CCX `tx.report` live); gate 3
-> **PASSED** (NACK→RETRANSMIT recovery P90 ≤4 ms at 65% airtime, well inside
-> the 40 ms I-frame deadline; ARQ ceases past saturation by design); gate 2 is
-> **RF-proven by a real MCS5 walk fade** — *measured on the kernel-monitor
-> backend retired in Pass 164, and ruled transferable to devourer 2026-08-10
-> (ρ is geometric)* — N=2 reduced 86‰ pre-diversity loss to
-> 24‰ post-diversity loss, then 10% GF(256) FEC recovered 599 source symbols
-> versus 52 by ARQ. A 37.1 s whole-link blackout confirmed that neither FEC nor
-> same-channel ARQ can repair the correlated SNR-edge tail. Gate 4 observables
-> and the clean desk A/B are live: the 300/2000 µs guard/window seeds stand,
-> while range-sensitive return-path and adaptive-loop stability remain to be
-> validated. See `docs/step11-bench.md` for the
-> full bench report and the remaining-work plan. Try it without hardware:
-> `./build/dev/waybeam-link loopback -c examples/config.loopback.sample.json`
-> or the two-process udp-air pair (`examples/config.air-{tx,rx}.sample.json`);
-> with radios, `examples/config.radio-{tx,rx}.sample.json`.
-
-## What this is
-
-- **Broadcast, no data-path auth**, semi-anarchy: any node may view and NACK any
-  stream; the TX arbitrates who it *repairs* (first-latcher lock with
-  preferred-node preemption, §12).
-- A **per-node merged RX state machine** combining that node's adapters (diversity
-  by packet-seq dedup). Multiple RX *nodes* on-air are first-class. **The craft has
-  one radio; diversity is ground-only.**
-- Nodes addressed by a **stable `originator` ID**; NACK/LINK_REPORT are ordinary
-  originator-addressed control packets carrying a target descriptor.
-- **RTP carried opaque** end-to-end; the only codec awareness is an isolated RTP
-  profile (NAL classifier) setting one importance bit.
-- An **adaptive controller** (RX reports / TX decides) driving MCS, per-adapter TX
-  power, and the encoder's bitrate via a local same-SoC API call.
-- **Follow-me channel switch** (§11): ground-led CSA, TSF-anchored, authenticated
-  by a 4-byte MAC (the sole crypto, off the data path), strand-proofed by a
-  craft-ACK-before-commit handshake.
-
-## What is genuinely new vs. borrowed (be honest about this)
-
-The **transport core** — same-channel multi-adapter RX diversity + dedup +
-injection — already exists in `waybeam_wfb_ng`. The genuinely novel contributions
-here are:
-1. **opportunistic ARQ** (instead of FEC) targeting the short correlated-fade band,
-2. the **opaque passive-latch session model** with **originator-addressed
-   semi-anarchy** (any node views/NACKs; TX-side first-latcher arbitration), and
-3. a clean, minimal, **FEC-free** reimplementation decoupled from the wfb_ng/wfb
-   pipeline (the reason the Android devourer path was built in the first place).
-
-The **adaptive link layer (§9–10)** is **lifted and adapted** from the production
-`waybeam_wfb_ng` `link_controller` — its control discipline (reactive-demote,
-MCS↔bitrate sequencing, flap-freeze) and its constants are reused as seeds. But the
-objective is **inverted to latency/robustness-first** (not energy/airtime-first),
-the demote threshold is **re-derived for the no-FEC regime**, and the probe-promote
-is **replaced by RSSI-margin promote** (no wfb probe side-stream under injection).
-Several seed constants are marked RE-DERIVE and settled on the bench, not on paper.
-
-## Layout
+waybeam-link carries live video, telemetry and control between a vehicle and
+one or more ground stations over ordinary USB WiFi adapters — with no access
+point, no association, no TCP, and no kernel WiFi stack in the path. It is the
+radio layer of the [Waybeam](https://github.com/snokvist) FPV ecosystem, and it
+is designed around a single priority: **a frame that arrives late is worse than
+a frame that never arrives at all.**
 
 ```
-PROTOCOL.md            Canonical protocol spec (§1–19). Single source of truth.
-docs/
-  findings-pass3.md    The adversarial-review arbitration (Parts A–I) + operator
-                       rulings + Pass-3b; the raw material PROTOCOL.md v1 folds in.
-  groundwork.md        Calibration source-of-truth: every adaptive/TX-power constant
-                       traced to link_controller.c / venc_api.c / the rtl88x2 driver
-                       and devourer, with file:line citations + corrections.
-  build-order.md       Build order (§19) + the four de-risking bench gates (§17).
-  review-log.md        Running log of review passes (1, 2, 3, 3b).
-profiles/
-  table.example.json   The §9.3 operating-point table (data, not code).
+  camera ─► encoder ─► waybeam-link ─► ((( RF ))) ─► waybeam-link ─► decoder ─► screen
+            (vehicle)                                  (ground)
 ```
 
-## Bench tools
+> **Status: flying on the bench, not yet a shipping product.**
+> The transport, the adaptive link layer, FEC, ARQ, the follow-me channel
+> switch and the discovery/pairing path are implemented, unit-tested and
+> hardware-verified end to end on real RF. Field range validation and the
+> stability of the adaptive loop under sustained flight are still open. See
+> [Maturity](#maturity) for the honest breakdown.
 
-Scripts under `tools/` support the §17 bench gates:
+---
 
-- `tools/rtp_feed.py <duration-s> <pps> [fps=60]` — frame-structured synthetic
-  H.265 RTP to `127.0.0.1:5600`: `<fps>` access units/s, per-AU M-bit on the
-  last packet, one IDR (NAL 19) per second. The saturation feeder for gates 3/4.
-- `tools/gate2_rho.py <ground-stats.jsonl> [min-seq-delta=30]` — the §17 gate-2
-  windowed cross-adapter loss correlation, ground-side self-aligned on the
-  stream's own seq deltas (immune to craft/ground start-time skew). Reports
-  per-adapter mean/P95 loss, joint post-diversity loss vs. the independence
-  product, and Pearson ρ between adapters.
-- `tools/gate3_rtt.py <ground-stats.jsonl> [iframe-deadline-ms=50]` — the §17
-  gate-3 NACK→RETRANSMIT latency report, diffed from the run's cumulative
-  `nack_rtt_*`/`arq_rec_*` histograms and segment-aware across stream
-  relatches. Reports P50/P90 plus the share provably inside the I-frame
-  deadline.
+## Table of contents
 
-Bench knob: `air.rx_drop_permille` (per-adapter independent synthetic RX
-drop; bench-only, default off) — used to manufacture known-independent loss
-for gate-2 machinery validation and to exercise FEC recovery. Honored by all
-air backends (`udp`, `udp-broadcast`, `radio`).
+- [Why this exists](#why-this-exists)
+- [The design in one page](#the-design-in-one-page)
+- [Architecture](#architecture)
+  - [The node model](#the-node-model)
+  - [The video path](#the-video-path)
+  - [The return path](#the-return-path)
+  - [The adaptive link layer](#the-adaptive-link-layer)
+  - [Loss recovery: diversity, FEC, ARQ](#loss-recovery-diversity-fec-arq)
+  - [Discovery, pairing and the follow-me channel switch](#discovery-pairing-and-the-follow-me-channel-switch)
+  - [Operating modes](#operating-modes)
+- [Hardware](#hardware)
+- [Getting started](#getting-started)
+- [Configuration](#configuration)
+- [Control plane and observability](#control-plane-and-observability)
+- [Using it as a library](#using-it-as-a-library)
+- [Building](#building)
+- [Maturity](#maturity)
+- [Documentation map](#documentation-map)
+- [Licensing and credits](#licensing-and-credits)
 
-### Real-video frame-SHM/UDP bench
+---
 
-On a host with GStreamer development packages plus `x265enc`, `h265parse`, and
-`avdec_h265`, the native build adds `frame_shm_gst_bench`. The orchestrator
-runs two real `waybeam-link` processes with a paired UDP return path and two
-virtual diversity adapters:
+## Why this exists
 
-```text
-GStreamer H.265 -> frame-SHM -> TX -> UDP-air x2 -> RX -> frame-SHM
-                                                       -> H.265 decoder
+Analogue FPV is low-latency and degrades gracefully. Digital FPV is sharp but
+usually degrades *catastrophically* — a WiFi link built on association,
+retries and buffering will happily trade 300 ms of latency for a frame you no
+longer care about.
+
+Broadcast injection links solve this by throwing away the parts of 802.11 that
+buy reliability at the cost of time: no association, no MAC-layer ARQ, no
+rate-adaptation state machine hidden in a driver. waybeam-link belongs to that
+family — the same lineage as [wfb-ng](https://github.com/svpcom/wfb-ng) and
+OpenIPC — but it makes a different set of trades:
+
+| | Typical injection link | waybeam-link |
+|---|---|---|
+| Primary redundancy | Forward error correction | **Multi-adapter receive diversity** |
+| Repair of short fades | More FEC overhead | **Opportunistic, deadline-aware ARQ** |
+| Unit of transport | Fixed-size packet blocks | **Whole encoded video frames** |
+| Rate control | Split across scripts/daemons | **One controller owns MCS + TX power + encoder bitrate** |
+| Kernel WiFi driver | Required (monitor mode) | **Not used** — userspace USB driver |
+| Session model | Keyed, paired | **Open broadcast, anyone may watch** |
+
+The result is a link where the *common* case — brief, correlated fades of
+5–30 ms — is repaired by a targeted retransmission that still lands inside the
+frame's display deadline, while the *hard* case — a real signal-strength cliff
+— is absorbed by having more than one antenna listening rather than by paying
+FEC overhead on every single frame forever.
+
+**Deliberate non-goals.** waybeam-link is not encrypted, not authenticated on
+the data path, and not a general-purpose network device. It broadcasts. It
+assumes a clear-ish band, one vehicle at a time, and an operator who owns the
+spectrum they are transmitting in. See §13 and §18 of
+[`PROTOCOL.md`](PROTOCOL.md).
+
+---
+
+## The design in one page
+
+Five ideas carry almost everything else:
+
+**1. The vehicle has one radio. The ground has several.**
+This is a fixed physical constraint, not a configuration choice. The vehicle
+timeshares its single adapter between transmitting video (dominant) and
+listening for the ground (opportunistic), which is why the return path is
+best-effort *by physics*. The ground runs N adapters in one process and merges
+them into a single stream — diversity is a ground-only capability.
+
+**2. Video is transported as frames, not as packets.**
+The encoder hands over a complete encoded frame through shared memory.
+waybeam-link fragments it, protects it, transmits it, and reassembles a
+**byte-identical** frame on the other side. Because the transport knows where
+frame boundaries are, it can make per-frame decisions: how much redundancy this
+frame deserves, whether it is worth retransmitting, and when it is too late to
+bother.
+
+**3. Everything is broadcast; nothing is negotiated.**
+There is no handshake and no session setup. A vehicle transmits; any receiver
+in range may decode it. Receivers *latch* onto a stream passively. Control
+traffic (retransmission requests, link reports) is addressed to a stable
+numeric `originator` ID rather than to a MAC address or a connection.
+
+**4. The receiver measures; the transmitter decides.**
+Ground stations continuously report what they are actually seeing — RSSI, SNR,
+loss before and after diversity merge. The vehicle collects those reports and
+runs a single control loop that picks the modulation rate, the transmit power,
+*and* the encoder's bitrate together, as one coordinated operating point.
+
+**5. Changing channel is a coordinated manoeuvre, not a reconnect.**
+Because the vehicle has one radio and cannot be in two places at once, moving
+to a new frequency is a "follow-me" switch: authenticated, scheduled against
+the radio's own hardware clock, acknowledged before commit, and backed out
+automatically if the vehicle fails to arrive.
+
+---
+
+## Architecture
+
+<!-- DIAGRAM SLOT 1: System overview -->
+<!-- See docs/diagram-brief.md, Figure 1 -->
+
+### The node model
+
+Every waybeam-link process is a **node** with a stable numeric identity and a
+role. Nodes see each other's broadcasts; roles describe intent, not permission.
+
+| Node | Radios | Transmits | Purpose |
+|---|---|---|---|
+| **Craft** (vehicle) | 1 | Video, telemetry | The camera platform. Runs alongside the encoder. |
+| **Ground** (receiver) | N (1 must be TX-capable) | Return traffic only | The pilot's station. Merges diversity, owns pairing and control. |
+| **Spectator** | N (all receive-only) | Nothing | A second screen. Watches without touching the link. |
+| **Cache store** | N (all receive-only) | Nothing over RF | An additional listening post wired to the ground over Ethernet, extending coverage without adding a transmitter. |
+
+Because the medium is broadcast, multiple ground nodes on the same channel are
+first-class — a spectator adds no load and needs no permission. What *is*
+arbitrated is repair: the vehicle serves retransmission requests to one latched
+receiver at a time (first-latcher lock, with preemption by a preferred node), so
+a room full of spectators cannot storm the return path.
+
+### The video path
+
+<!-- DIAGRAM SLOT 2: Video data path -->
+<!-- See docs/diagram-brief.md, Figure 2 -->
+
 ```
+                    VEHICLE                              GROUND
+  ┌──────────┐   shared    ┌──────────────┐         ┌──────────────┐   shared   ┌─────────┐
+  │ encoder  │─── memory ─►│ waybeam-link │         │ waybeam-link │── memory ─►│ decoder │
+  │  (venc)  │   ring      │      TX      │         │      RX      │   ring     │         │
+  └──────────┘             └──────┬───────┘         └──────▲───────┘            └─────────┘
+                                  │                        │
+                       fragment into source symbols   merge N adapters,
+                       + GF(256) repair symbols       dedup, reassemble,
+                                  │                   FEC-decode
+                                  ▼                        │
+                            ┌───────────┐   ((( RF )))  ┌──┴──┐ ┌─────┐ ┌─────┐
+                            │  1 radio  │──────────────►│ rx1 │ │ rx2 │ │ rx3 │
+                            └───────────┘               └─────┘ └─────┘ └─────┘
+```
+
+The encoder publishes each completed frame into a POSIX shared-memory ring.
+waybeam-link picks it up in the same process tick, splits it into **source
+symbols** sized to fit the current modulation's payload budget, generates
+**GF(256) Reed–Solomon repair symbols** for it, and injects the lot. On the
+ground, symbols arriving on any adapter feed one merged receive state machine
+that deduplicates by sequence number, reassembles the frame, decodes FEC if
+symbols were lost, and writes the result into an outgoing shared-memory ring for
+the decoder.
+
+The reconstructed frame is byte-identical to what the encoder produced — this is
+verified continuously in the test suite and has been confirmed on hardware.
+
+Video may also be ingested as ordinary **RTP over UDP** if you are feeding
+waybeam-link from GStreamer or an existing pipeline. The transport treats RTP as
+opaque; the only codec awareness anywhere in the system is a small classifier
+that decides whether a given packet is important enough to be worth
+retransmitting.
+
+Alongside video, the same wire carries **telemetry**, **control** (RC uplink)
+and **audio** stream types, each with its own delivery discipline.
+
+### The return path
+
+The vehicle can only hear the ground while its own radio is not transmitting.
+waybeam-link therefore paces the return path against the radio's hardware
+timestamp counter: the vehicle advertises quiet gaps, and the ground aims its
+return traffic into them. Everything the ground sends upstream — retransmission
+requests, link reports, channel-switch commands, RC and telemetry uplink —
+shares that narrow, best-effort window, in a strict priority order.
+
+This is why a ground station is expected to have one adapter appointed as the
+**designated uplink transmitter**: while it is transmitting it is deaf, and its
+diversity siblings cover the blind spot.
+
+### The adaptive link layer
+
+<!-- DIAGRAM SLOT 3: Adaptive control loop -->
+<!-- See docs/diagram-brief.md, Figure 3 -->
+
+```
+   ground: measure                        vehicle: decide
+   ┌────────────────────┐  link report   ┌──────────────────────┐
+   │ RSSI / SNR         │───────────────►│  selector            │
+   │ pre-diversity loss │                │   ├─ demote on loss  │
+   │ post-diversity loss│                │   ├─ promote on margin│
+   │ per-adapter health │                │   └─ freeze on flap  │
+   └────────────────────┘                └──────────┬───────────┘
+                                                    │  one operating point
+                                    ┌───────────────┼───────────────┐
+                                    ▼               ▼               ▼
+                                  MCS          TX power        encoder bitrate
+                            (modulation)    (per adapter)     (via local API)
+```
+
+A single controller on the vehicle owns all three knobs and moves them as a
+coordinated sequence — bitrate down *before* modulation down, modulation up
+*before* bitrate up — so the link never spends a moment asking the radio to
+carry more than it can. Demotion is reactive (loss happened, react now);
+promotion is conservative and gated on signal margin. A flap-freeze prevents
+oscillation, and a fail-safe drops to the most robust operating point if reports
+stop arriving at all.
+
+**waybeam-link is the sole owner of the encoder's bitrate.** The encoder has no
+arbitration — last writer wins — so nothing else in the system may write it
+while waybeam-link is running. This is a hard deployment invariant.
+
+### Loss recovery: diversity, FEC, ARQ
+
+Three mechanisms, deliberately layered, each aimed at a different failure shape:
+
+| Mechanism | Repairs | Cost | Role |
+|---|---|---|---|
+| **Receive diversity** | Uncorrelated per-antenna loss | Extra adapters | **Primary.** Load-bearing. |
+| **FEC** (GF(256) RS) | Random symbol loss within a frame | Constant airtime overhead | Configurable per stream, higher rate on keyframes |
+| **ARQ** (retransmission) | Short correlated fades, ~5–30 ms | Return-path airtime, only when needed | **Opportunistic.** Never load-bearing. |
+
+The ordering matters. ARQ is explicitly *not* a reliability guarantee: it is
+importance-gated (keyframes by default), deadline-aware (a repair that cannot
+arrive in time is never sent), and it quietly does less as the channel
+saturates. When the link is in real trouble, waybeam-link degrades toward pure
+diversity — that is the designed floor, not a failure.
+
+Measured on the bench during a real signal-strength fade: two adapters reduced
+86 ‰ pre-diversity loss to 24 ‰ post-diversity, after which 10 % FEC recovered
+599 source symbols against ARQ's 52. Neither mechanism can repair a total
+blackout, and the design does not pretend otherwise.
+
+### Discovery, pairing and the follow-me channel switch
+
+<!-- DIAGRAM SLOT 4: Discovery → claim → channel switch -->
+<!-- See docs/diagram-brief.md, Figure 4 -->
+
+A vehicle powers on and broadcasts a periodic announcement on its channel. A
+ground station that does not know where the vehicle is **scouts**: it sweeps its
+adapters across the allowed channel list, dwelling long enough on each to
+actually hear an announcement, and reports what it found.
+
+Pairing is a **claim**: the ground sends a token-keyed claim to the vehicle,
+which binds to that originator as its command source. From then on the vehicle
+accepts control traffic only from that ground station.
+
+Changing frequency is the delicate part, because the vehicle has one radio and a
+mistimed switch means a lost aircraft. The **follow-me channel switch** handles
+it as a campaign:
+
+1. Ground announces the target channel, authenticated by a shared key.
+2. Vehicle acknowledges — the ground does not commit until it has.
+3. Both sides schedule the switch against the radio's hardware clock so they
+   arrive together.
+4. If the vehicle does not appear on the new channel, it **backs out** to the
+   old one automatically.
+5. Once the link is proven on the new channel, it is committed and held.
+
+This is the only cryptography in the system, and it is deliberately off the data
+path.
+
+### Operating modes
+
+Rather than exposing modulation indices and frame rates to a pilot, each vehicle
+ships a small catalog of named **operating modes** — a bundle of resolution,
+frame rate and the modulation window the link is allowed to use. The user picks
+along two axes:
+
+| Axis | The pilot sees | What it actually sets |
+|---|---|---|
+| **Latency** | Low / Medium / High | Sensor mode and frame rate (100 / 60 / 30 fps) |
+| **Range** | High / Medium / Low | The modulation band the link may select within |
+
+Modes can be applied over HTTP on a bench, or over RF in flight. The ground
+carries a fingerprint of the vehicle's catalog so that a mismatch is *detected*
+rather than silently applying the wrong mode.
+
+---
+
+## Hardware
+
+**Vehicle side** — one USB WiFi adapter, one SoC running the encoder.
+Verified on SigmaStar SSC338Q and HiSilicon CV610 camera boards.
+
+**Ground side** — one to three USB WiFi adapters on x86, ARM64 (RK3566), or
+Android.
+
+**Supported radios** (all via the vendored [OpenIPC
+devourer](https://github.com/OpenIPC/devourer) userspace driver — the kernel
+driver must be unloaded):
+
+| Chip | Inject | Receive | TX power control | Notes |
+|---|---|---|---|---|
+| RTL8812AU | ✅ | ✅ | ✅ | Best uplink latency; preferred as the ground's transmit adapter |
+| RTL8812CU | ✅ | ✅ | ✅ | Good diversity ear; higher transmit-path latency |
+| RTL8812EU | ✅ | ✅ | ✅ | Common vehicle adapter; run 20 MHz |
+| RTL8733BU | ✅ | ✅ | ✅ | No per-frame transmit-report path; retunes slower (~345 ms) |
+
+Adapters are matched by USB bus path or by their per-unit EFUSE MAC identity —
+never by network interface name, which is not stable.
+
+---
+
+## Getting started
+
+### Without any radios
+
+The fastest way to see the whole pipeline work is the built-in loopback:
 
 ```sh
-cmake --preset release
-cmake --build --preset release -j
-tools/frame_shm_udp_bench.sh
-RX_DROP_PERMILLE=100 BITRATES=4000 tools/frame_shm_udp_bench.sh
+cmake --preset dev && cmake --build --preset dev -j
+./build/dev/waybeam-link loopback -c examples/config.loopback.sample.json
 ```
 
-The clean sweep defaults to 1/4/8 Mbit/s. It checks frame metadata, Annex-B,
-PTS monotonicity, decoder EOS, frame counts, both UDP adapter counters, FEC,
-ARQ, malformed/decode outcomes, and SHM producer drops. `FRAMES`, `BITRATES`,
-`WARMUP_FRAMES`, `RX_DROP_PERMILLE`, and `BUILD` are overridable. Set
-`KEEP_TMP=1` to retain configs, logs, and stats JSONL after a failure.
-Synthetic `x265enc` uses periodic IDRs and deliberately fails on a 512 KB SHM
-oversize. Stress-only runs may set `ALLOW_PRODUCER_OVERSIZE=1`; this accepts
-only an oversize-only producer result with no full-ring drops and enough usable
-frames for the consumer. Normal runs continue to fail on every oversize.
-
-ARQ stress uses one listener (fully correlated/single-path loss), disables FEC,
-and permits the consumer to finish with fewer frames while requiring the actual
-NACK/retransmit/recovery counters to advance:
+For something closer to reality, run two real processes with a simulated air
+interface over UDP — one transmitter, one receiver, with virtual diversity
+paths and a matched return path:
 
 ```sh
-FRAMES=300 BITRATES=8000 AIR_KIND=udp-broadcast RX_LISTENERS=1 \
-RX_DROP_PERMILLE=20 FEC_SCHEME=none ALLOW_FRAME_LOSS=1 EXPECT_ARQ=1 \
-CONSUMER_TIMEOUT_MS=15000 ARQ_IFRAME_DEADLINE_MS=16 \
-ARQ_PFRAME_DEADLINE_MS=16 tools/frame_shm_udp_bench.sh
+./build/dev/waybeam-link tx -c examples/config.air-tx.sample.json &
+./build/dev/waybeam-link rx -c examples/config.air-rx.sample.json
 ```
 
-Deadline overrides generate a temporary matched profile table for both local
-processes. They do not edit `profiles/table.example.json`.
+With GStreamer installed, `tools/frame_shm_udp_bench.sh` runs the complete
+encode → transport → decode chain end to end and validates the result frame by
+frame.
 
-### Fleet monitor (live dashboard)
-
-`tools/link_monitor.py` — a stdlib-only bridge that turns the §15.3 stats
-NDJSON into a browser dashboard for human link evaluation. Point each
-instance's stats egress at the monitor host (every instance may share one
-port; snapshots key by `(src-ip, node, session)`):
-
-```json
-"stats": { "hz": 5, "bind": { "kind": "udp", "send": "<monitor-ip>:9110" } }
-```
-
-Then:
-
-```
-python3 tools/link_monitor.py          # HTTP :8099, UDP :9110
-python3 tools/link_monitor.py --label 192.168.2.201=vehicle --label 192.168.2.242=ground
-```
-
-Open `http://localhost:8099/`. Each instance gets a card: link state /
-profile / MCS / tx-power / CSA, per-adapter RSSI/SNR/tx-fail/wedged, per-stream
-delivered-rate / pre+post loss / ARQ + FEC recovery / superseded+deadline
-drops / decode-errors / NACK-RTT, and return-path health — all SSE-live with
-staleness dots. The bridge never touches the binaries; it only consumes the
-stats push (`GET /api/instances` for a JSON snapshot, `GET /api/stream` for the
-SSE feed).
-
-The dashboard separates those groups into tabs and keeps five minutes of
-browser-side trend history. Hover an underlined label for its precise meaning.
-Frame-SHM streams report successful local frame transfers, cumulative bytes,
-last/min/max frame size, latest arrival interval, and smoothed arrival jitter.
-The finite bench additionally writes its per-frame trace and summary to
-`frames.csv` and `summary.json`. It converts that data to the versioned
-`controller-trace.jsonl` contract and deterministically replays it into
-`controller-decisions.jsonl`. The initial deadline is excess inter-arrival time
-over the run's median cadence; it is not cross-host one-way latency. VFRM PTS
-is retained as an opaque SDK correlation value and is not treated as
-milliseconds. Override the provisional 16 ms budget with `JSCC_DEADLINE_MS=25`.
-Finite runs also enable the capped UDP packet-event observer and emit
-`{tx,rx}-packets.jsonl`, `controller-packet-trace.jsonl`, and
-`controller-packet-decisions.jsonl`. `PACKET_TRACE_MAX` defaults to 75,000
-events per process; `trace_end.events_dropped` makes an incomplete capture
-explicit. `controller-matrix.json` contains the standard nine recorded/loss
-scenarios crossed with four FEC/ARQ/deadline ablations.
-Vehicle packet traces default to the SD card at
-`/mnt/mmcblk0p1/waybeam-link-traces` and are removed after retrieval. Override
-the location with `REMOTE_TRACE_DIR`; avoid `/tmp` for extended captures because
-it is a small RAM-backed filesystem on the SSC338Q.
-`FEC_I_RATE_PERMILLE`, `FEC_P_RATE_PERMILLE`, and `FEC_MIN_K` override only the
-generated/deployed waybeam-link bench config. They never edit venc settings;
-set both rates to zero for an ARQ-only hardware run.
-
-## Frame-SHM video transport (PROTOCOL.md §5.1a/§6.3a/§14.1/§15.4)
-
-The low-latency video path. The encoder (`waybeam_venc`) publishes whole encoded
-frames into a POSIX shared-memory ring; waybeam-link ingests them, fragments each
-into source symbols + GF(256) Cauchy-RS repair symbols (§14.1), injects over the
-air, and on the ground reassembles + FEC-decodes back into a **byte-identical**
-SHM slot for the decoder. SHM is same-host on each end; the air hop is either
-real devourer RF injection or the udp-air bench sim.
-
-```
-venc(frame-shm://venc_frame) → wl tx (FrameFramer+FEC) → AIR → wl rx (reassemble+FEC) → frame-shm(venc_frame_out) → decoder
-```
-
-FEC is transparent to the RX (it decodes whatever the TX emits); `fec.scheme
-"none"` fragments + ARQs without repair symbols. Both ends must share
-`node.net_id` on the radio path. Adaptive MTU: symbols are sized from the
-active profile's `max_payload` (jumbo rungs keep large IDRs under the GF(256)
-k+r≤256 cap). Example configs: `examples/config.frame-shm-{tx,rx}.sample.json`.
-
-### Vehicle / craft side — TX (frame-shm ingress)
-
-Point venc at the ring, then restart it:
-`json_cli -s .outgoing.server '"frame-shm://venc_frame"' -i /etc/waybeam.json`.
-TX stream + FEC:
-
-```json
-"streams": [
-  { "stream_id": 0, "stream_type": "RTP", "dir": "in",
-    "bind": { "kind": "frame-shm", "name": "venc_frame" },
-    "fec": { "scheme": "rlc256", "i_rate_permille": 250, "p_rate_permille": 100, "min_k": 3 } }
-]
-```
-
-**(a) RF injection** — `air.kind "radio"` (devourer/libusb) is the verified craft
-path for the 8812EU: the kernel driver is unbound so libusb owns the raw USB
-device and injects directly (the `rtl88x2eu` driver does **not** inject via
-mac80211 monitor — `iw set monitor` leaves `tx_packets=0`). Use the bench init
-script `/etc/init.d/waybeam-link {start|stop}`, which does `adapter stop` +
-`rmmod 8812eu` before launching:
-
-```json
-"adapters": [{ "name": "eu-craft", "bus": "", "role": "tx", "channel": 5805, "bw": 20,
-               "power_map": "/etc/waybeam-link/power.craft.floor.txt", "max_power_qdb": -40 }],
-"air": { "kind": "radio" },
-"policy": { "select": { "min_profile": 0, "max_profile": 0 } }
-```
-
-Craft runs 20 MHz, MCS pinned low at 5805 (§10, 8812EU sub-band limits).
-`air.kind "kernel-monitor"` — AF_PACKET injection through a mac80211 monitor
-netdev — was **retired in Pass 164**; devourer is the only RF backend, and a
-config carrying the old value is rejected with a message that says so.
-
-**(b) UDP sim (no radios)** — DATA fanned out over ethernet to the ground:
-
-```json
-"air": { "kind": "udp", "tx": ["<ground-ip>:5801"], "rx": ["0.0.0.0:5810"] }
-```
-
-Run (repo root as cwd for `profiles/`): `waybeam-link tx -c <tx>.json`.
-
-### Ground / air side — RX (frame-shm egress)
-
-```json
-"streams": [
-  { "stream_id": 0, "stream_type": "RTP", "dir": "out", "originator": 17,
-    "bind": { "kind": "frame-shm", "name": "venc_frame_out" } }
-]
-```
-
-**(a) Devourer RX** — one or more adapters on the craft's channel (extra
-`role":"rx"` adapters add diversity; one `role":"tx"` carries NACK/LINK_REPORT
-returns). Adapters are matched by USB `bus` — or by `mac`, the per-unit EFUSE
-identity (§15.2 Pass 154) — never by netdev name:
-
-```json
-"adapters": [{ "name": "wlan1", "bus": "5-1", "role": "rx", "channel": 5805, "bw": 20 }],
-"air": { "kind": "radio" }
-```
-
-A dedicated `cache.store` node with no media streams is one exception to the
-designated-uplink rule, and a `node.spectator` display node is the other: all
-of their adapters may be `role:"rx"` (§3.11 Pass 162 `allow_rx_only`).
-Such a node is RF receive-only; cache status, requests, and replies use its
-configured UDP/IP endpoints.
-For production MVP it is linked to one receiver with
-`cache.store.controller`; that receiver is the only vehicle-selection authority.
-The cache never scouts or chooses a vehicle and accepts CACHE_ASSIGN only from
-the configured receiver originator and exact UDP source endpoint.
-
-**(b) UDP sim** — mirror the TX targets:
-
-```json
-"air": { "kind": "udp", "rx": ["0.0.0.0:5801"], "tx": ["<craft-ip>:5810"] }
-```
-
-For UDP benches with ARQ, generate the reciprocal pair from one topology file
-so node identities, diversity endpoints, return injection, and preferred peers
-cannot drift independently:
+### With radios
 
 ```sh
-tools/expand_arq_topology.py examples/topology.frame-shm-udp.sample.json \
-  --out-dir /tmp/waybeam-pair
+# unload whatever kernel driver owns the adapter first
+sudo rmmod 88x2cu rtw88_8812au
+
+sudo ./build/dev/waybeam-link tx -c examples/config.radio-tx.sample.json   # vehicle
+sudo ./build/dev/waybeam-link rx -c examples/config.radio-rx.sample.json   # ground
 ```
 
-The expander writes `tx.json` and `rx.json`. `udp.downlink_ports` defines the
-virtual diversity paths and `udp.return_port` defines the matched NACK/report
-path. It rejects duplicate identities, duplicate downlink ports, and collisions
-between the forward and return paths.
-Once the named SHM producer exists, validate each generated node with
-`waybeam-link tx -c /tmp/waybeam-pair/tx.json --check` and the corresponding
-`rx` command.
+Both ends must agree on channel, bandwidth and network ID. Run from the repo
+root — the operating-point table is loaded by relative path.
 
-For a closer RF-broadcast analogue on one Linux host, put both nodes on one
-shared loopback broadcast channel:
+> Transmitting on 5 GHz is regulated. You are responsible for operating within
+> the rules of your jurisdiction and for the power levels you configure.
+
+---
+
+## Configuration
+
+One JSON file per node, covering identity, adapters, streams, policy and
+observability:
 
 ```json
-"air": {
-  "kind": "udp-broadcast",
-  "tx": ["127.255.255.255:5801"],
-  "rx": ["0.0.0.0:5801"],
-  "pace_mbps": 10
+{
+  "node":    { "originator": 17, "net_id": 42, "role": "tx" },
+  "adapters": [
+    { "name": "craft", "bus": "1-1", "role": "tx", "channel": 5805, "bw": 20 }
+  ],
+  "air":     { "kind": "radio" },
+  "streams": [
+    { "stream_id": 0, "stream_type": "RTP", "dir": "in",
+      "bind": { "kind": "frame-shm", "name": "venc_frame" },
+      "fec":  { "scheme": "rlc256", "i_rate_permille": 250, "p_rate_permille": 100 } }
+  ],
+  "control": { "bind": "127.0.0.1:8091" },
+  "stats":   { "hz": 5 }
 }
 ```
 
-Each node receives foreign waybeam packets from the shared channel and filters
-its own originator before the socket queue. `pace_mbps` prevents encoded-frame
-bursts from becoming accidental host queue loss. Exercise the full frame-SHM
-video chain with `AIR_KIND=udp-broadcast tools/frame_shm_udp_bench.sh`.
-
-Run: `waybeam-link rx -c <rx>.json`.
-
-### Verify
-
-Read the ground egress ring with any `venc_frame_ring` consumer, e.g.
-`waybeam_venc/tools/frame_shm_consumer_test venc_frame_out <seconds>` — it
-validates `VencFrameMeta`, Annex-B start codes, IDR flags, and pts monotonicity
-(exit 0 = PASS). Add `air.rx_drop_permille` to the RX config to exercise FEC
-recovery under synthetic loss.
-
-**Verified end-to-end** (Star6E .201 → x86 ground): venc `frame-shm://venc_frame`
-→ craft `radio` inject (8812EU, MCS0, 5805) → ground `radio` RX → reassemble
-→ `venc_frame_out`, read back **byte-clean** (bad_meta=0, bad_startcode=0,
-pts_regress=0) at ~90 fps, `decode_errors=0`. Also proven over the udp-air sim
-(same, at full bitrate) and the in-process `frame_shm_loopback_test` (FEC recovery
-byte-exact).
-
-For a repeatable live-encoder Ethernet run, use
-`tools/jscc_ethernet_bench.sh`. It temporarily switches the craft encoder to
-frame-SHM, simulates two ground diversity observations over UDP, validates the
-reconstructed stream with GStreamer, records per-frame size/arrival data, and
-restores the craft configuration on exit. See `docs/jscc-controller-review.md`.
+Configs are **coupled across nodes** — network ID, channel, allowed channel
+list and originator references have to agree fleet-wide. Validate before
+deploying:
 
 ```sh
-cmake --build --preset release -j
-cmake --build --preset ssc338q -j
-cmake --preset cv610   # toolchain auto-found at
-                       # ../waybeam_venc/toolchain/arm-openipc-linux-musleabi_sdk-buildroot
-cmake --build --preset cv610 -j
-tools/jscc_ethernet_bench.sh start
+waybeam-link tx -c my-node.json --check --strict   # parses, binds, reports unknown keys
+waybeam-link config-schema --json                  # the full declared key surface
 ```
 
-The dedicated Ethernet bench leaves encoder bitrate control manual by default,
-so changes made through venc remain stable. Decoder-recovery IDR requests stay
-enabled independently and do not write encoder configuration. Set
-`VENC_CONTROL_ENABLED=1` only when testing waybeam-link's adaptive bitrate
-actuator instead.
-On the dual-core SSC338Q it also defaults the TX/FEC main thread to CPU 1 and
-the SHM readiness thread to CPU 0; override with `VEHICLE_MAIN_CPU` and
-`VEHICLE_SHM_CPU` when testing scheduler placement.
+`--strict` matters: the loader reads keys by name and silently ignores anything
+it does not recognise, so a typo loads perfectly cleanly without doing what you
+meant. `examples/` holds annotated samples; `deploy/` holds real configs read
+back off flying hardware.
 
-The detached bench keeps running after the command returns. View both nodes at
-`http://192.168.2.242:8099/`; inspect it with
-`tools/jscc_ethernet_bench.sh status`, and stop both endpoints plus restore the
-encoder with `tools/jscc_ethernet_bench.sh stop`. For a foreground finite
-recorded run, use `FRAMES=1440 tools/jscc_ethernet_bench.sh finite`.
+---
 
-Continuous `start` defaults to leaving the ground egress ring for an external
-decoder such as Radeon-VRX:
+## Control plane and observability
+
+Every node optionally exposes a small HTTP/1.0 REST surface, folded into the
+main event loop — no threads, no locks, no authentication (bind it to localhost
+or to a trusted network only).
 
 ```sh
-tools/jscc_ethernet_bench.sh stop
-tools/jscc_ethernet_bench.sh start
-tools/jscc_ethernet_bench.sh status
-# After Radeon-VRX creates/recreates its decoder pipeline:
-tools/jscc_ethernet_bench.sh recover-video
-# In-process UDP loss ramp; estimator state is preserved and loss resets to 0:
-RAMP_DWELL_S=4 tools/jscc_ethernet_bench.sh loss-ramp
+curl -s http://127.0.0.1:8091/api/v1/stats | jq .link      # full statistics object
+curl -s http://127.0.0.1:8091/api/v1/health                # terse link summary
+curl -N http://127.0.0.1:8091/api/v1/stats/stream          # live SSE feed
 ```
 
-For the opt-in P-frame ARQ Ethernet experiment, restart with
-`ARQ_MODE=all-frames tools/jscc_ethernet_bench.sh start`. This stamps
-non-IDRs retransmit-eligible while retaining the P-frame deadline; the default
-is `idr-only`.
+Writes take effect immediately, without a restart:
 
-The stable application SHM name is `venc_frame_out` (POSIX object
-`/venc_frame_out`). `status` prints the active name and consumer mode. To run
-the built-in continuous validator instead, stop any external decoder and use
-`BENCH_CONSUMER=gst tools/jscc_ethernet_bench.sh start`. The harness rejects a
-detected second consumer because the venc frame ring is strictly
-single-consumer. Foreground `finite` runs always use the GStreamer trace
-consumer.
+| Endpoint | Effect |
+|---|---|
+| `POST /api/v1/link/profile` | Pin or unpin the modulation/bitrate operating point |
+| `POST /api/v1/tx/power` | Set transmit power offset |
+| `POST /api/v1/fec` | Change FEC rates per stream |
+| `POST /api/v1/csa` | Trigger a follow-me channel switch |
+| `POST /api/v1/scout/start` · `/quickconnect` | Discover and pair with a vehicle |
+| `POST /api/v1/mode` · `GET /api/v1/modes` | Apply / enumerate operating modes |
+| `POST /api/v1/vehicle/command` | Send a command to the paired vehicle over RF |
+| `POST /api/v1/video/recover` | Request one keyframe to bootstrap a decoder |
 
-Replay an artifact with a different relative deadline without rerunning the
-encoder:
+Independently of REST, every node emits a newline-delimited JSON statistics
+record at a configurable rate. `tools/link_monitor.py` — stdlib Python, no
+dependencies — turns that stream into a live browser dashboard for a whole
+fleet, with per-adapter signal, per-stream loss before and after diversity, FEC
+and ARQ recovery counts, and return-path health.
 
 ```sh
-python3 tools/jscc_replay.py replay \
-  artifacts/jscc-ethernet-*/controller-trace.jsonl \
-  --deadline-ms 25 --output /tmp/jscc-decisions.jsonl
+python3 tools/link_monitor.py     # dashboard on :8099, stats intake on :9110
 ```
 
-Each frame records its encoded size, raw SDK PTS/arrival cadence, calculated
-symbol size, `k`, target/emitted parity, and whether `k+m <= 256`. Per-frame
-path delivery and RTT are explicitly `null` until packet-event and uplink
-tracing are added; replay does not infer data the Ethernet frame trace cannot
-observe.
+<!-- DIAGRAM SLOT 5: Control plane & observability -->
+<!-- See docs/diagram-brief.md, Figure 5 -->
 
-Packet-event traces group the existing DATA/NACK wire records by frame block.
-They retain source/repair symbol identity, both virtual listener outcomes,
-synthetic drops, retransmissions, NACK timing, and final replay outcome. Replay
-can replace recorded delivery with deterministic failure models and pin FEC,
-ARQ, or deadline discard for ablation:
+---
 
-```sh
-python3 tools/jscc_replay.py replay controller-packet-trace.jsonl \
-  --loss-model burst --loss-period 100 --burst-length 12 \
-  --path-correlation correlated --fec on --arq eligible \
-  --rtt-ms 4 --deadline-ms 16
-```
+## Using it as a library
 
-Loss models are `recorded`, `none`, `burst`, `incremental`, `low-frequency`,
-and `high-frequency`. Synthetic diversity defaults to independent paths;
-`--path-correlation correlated` applies the same loss decision to every path.
-All timing remains receiver-host-relative. Kernel queue drops are cumulative
-stats and cannot be reconstructed as individual packet events.
+waybeam-link is structured so that other applications can embed the link rather
+than shell out to a daemon. The Android ground station and the C-based
+`waybeam-hub` daemon both do exactly this.
 
-`recover-video` sends a receiver-to-transmitter recovery request for the
-latched RTP stream. The vehicle then requests one IDR from venc; steady-state
-GDR remains unchanged. Invoke it only after the replacement decoder pipeline is
-PLAYING and accepting SHM buffers. VFRM v1 has no consumer-generation field, so
-waybeam-link cannot infer a Radeon-only disconnect/reconnect from the ring while
-Radeon continues advancing `read_idx`.
-
-## REST control plane (PROTOCOL.md §15.5)
-
-Every mode (`tx` / `rx` / `loopback`) exposes an optional HTTP/1.0 control
-surface — config-gated, folded into the single event loop (no threads/locks),
-no auth (bind `127.0.0.1` for host-local, a routable addr on a trusted net):
-
-```json
-"control": { "bind": "0.0.0.0:8091" }
-```
-
-**Read** (any node): `GET /api/v1/stats` (the §15.3 object), `…/stats/stream`
-(SSE, one object per stats tick), `…/info` (identity), `…/health` (terse
-`{state,mcs,profile,rssi_best,loss_milli,…}`), and `…/discovery` (bounded
-HEARTBEAT-derived nodes plus DATA-derived stream candidates/latches). **Write**
-(live, no restart):
-
-| Endpoint | Body | Where |
+| Layer | Contains | Dependencies |
 |---|---|---|
-| `POST /api/v1/csa` | `{"mhz":5805,"class":0}` | rx / ground (replaces the old stdin trigger) |
-| `POST /api/v1/link/profile` | `{"min":3,"max":3}` | tx (`min==max` pins the MCS+bitrate operating point; `{"max":255}` unpins) |
-| `POST /api/v1/fec` | `{"stream_id":0,"i_permille":250,"p_permille":100,"min_k":3}` | tx (frame-shm streams) |
-| `POST /api/v1/video/recover` | `{"stream_id":0}` (optional with one latch) | rx / ground; request one decoder-bootstrap IDR from the matched TX |
-| `POST /api/v1/stats/reset` | `{}` | any (fresh measurement window) |
+| `core/` | Wire format, receive engine, scheduler, FEC, adaptive selector, channel-switch logic. No sockets, no threads, no wall clock. | C++ standard library only |
+| `io/` | Configuration, UDP and shared-memory bindings, the radio backend, statistics, encoder actuation | devourer, libusb |
+| `node/` | Runnable node behaviour — a complete receiving or transmitting node you can start from your own process | `core` + `io` |
 
-A write that doesn't apply to the running mode returns `409`; a malformed body
-`400`. Examples:
+`node/` also exposes a **C ABI**, because the two real consumers are a C daemon
+and an Android app reaching native code through JNI. On unrooted Android, USB
+file descriptors come from the Java `UsbManager` and are handed in directly —
+there is no device enumeration to do.
 
+```cmake
+find_package(wblink)              # gives wblink::core, installable standalone
+# or
+add_subdirectory(waybeam-link)    # gives wblink::core, wblink::io, wblink::node
 ```
-curl -s http://127.0.0.1:8091/api/v1/stats | jq .link
-curl -s http://127.0.0.1:8091/api/v1/link/profile -d '{"min":2,"max":2}'   # pin MCS2
-curl -s http://127.0.0.1:8091/api/v1/csa          -d '{"mhz":5745}'         # switch channel
-curl -N http://127.0.0.1:8091/api/v1/stats/stream                          # live SSE
+
+The wire format is **vendored, not reimplemented**, into every consumer, so
+there is exactly one implementation of the packet format in the ecosystem.
+
+---
+
+## Building
+
+```sh
+cmake --preset dev && cmake --build --preset dev -j    # x86 debug + sanitizers
+ctest --preset dev                                     # 71 test suites
+scripts/gates.sh                                       # everything CI runs
 ```
 
-The `tools/link_monitor.py` fleet dashboard rides the UDP stats push and needs
-no `control` block; with `control` enabled you can additionally point tooling
-straight at each instance's `GET /api/v1/stats/stream`.
+Cross-compilation presets exist for the SigmaStar SSC338Q (`ssc338q`), HiSilicon
+CV610 (`cv610`), Rockchip RK3566 (`rk3566`), a multi-chip x86 ground build
+(`x86-ground`), and Android arm64 (`android-arm64`). Toolchains the host does
+not have are skipped loudly rather than silently passing.
 
-## Deployment invariant (must hold before this can drive a craft)
+`scripts/gates.sh` is the single source of truth for what "green" means — it
+covers every preset, the full test suite, the library embedding and install
+round-trips, and validation of every deployed config. CI runs the same script,
+so local and CI cannot drift.
 
-waybeam-link must be the **sole writer** of the encoder's bitrate. venc has no
-arbitration flag — last writer wins. On the craft: disable waybeam-hub's
-`venc.bitrate_enabled` if hub is present, and do **not** run wfb_ng
-`link_controller` (waybeam-link replaces it). See PROTOCOL.md §9.6. The craft runs
-**20 MHz** (8812EU 40 MHz bug).
+---
 
-## Licensing
+## Maturity
 
-GPL-2.0-or-later (it will vendor devourer, GPL-2.0). See `LICENSE` / `NOTICE`.
+Being straightforward about what is proven and what is not:
 
-## Consumers (future)
+**Verified on real hardware**
+- End-to-end byte-identical video: encoder → RF → decoder, at ~90 fps.
+- Injection and monitoring from two chip families mixed in one process.
+- Retransmission round-trip P90 ≤ 4 ms at 65 % airtime — well inside a
+  keyframe's display deadline.
+- Diversity gain and FEC recovery through a real signal-strength fade.
+- The follow-me channel switch, including automatic back-out.
+- Discovery, pairing, and mode application over both HTTP and RF.
 
-The wire codec (`core/`, once written) is vendored — not reimplemented — into
-consumers so there is **one** implementation of the packet format. First target:
-`Waybeam-android` `:wifi` (which already vendors devourer/libusb the same way).
-This avoids the CRSF-style "N independent implementations must stay byte-identical"
-drift trap.
+**Still open**
+- Range-limited behaviour of the return path in flight.
+- Long-run stability of the adaptive control loop under real flight dynamics.
+- Several timing constants are bench seeds pending field re-derivation.
+
+**Known limitations**
+- No encryption or authentication on the data path — by design.
+- One vehicle per channel; two vehicles need real spectral separation.
+- The vehicle's return-path reception is best-effort and always will be.
+- No 802.11 MAC-layer retries: application-level resend is the only retry.
+
+**What is genuinely novel here, and what is not.** Multi-adapter same-channel
+diversity with deduplication is prior art — that part is a clean
+reimplementation. The novel contributions are the frame-aligned, deadline-aware
+opportunistic ARQ, the open broadcast passive-latch session model, and unifying
+modulation, power and encoder bitrate under one controller. The adaptive control
+discipline itself is lifted and adapted from a production wfb-ng
+`link_controller`, with its objective inverted from airtime-first to
+latency-first. Credits in [`NOTICE`](NOTICE).
+
+---
+
+## Documentation map
+
+| Document | What it is |
+|---|---|
+| [`PROTOCOL.md`](PROTOCOL.md) | **The specification.** Wire format, state machines, configuration semantics. Normative — this is the contract a second implementation would be written against. |
+| [`docs/bench-and-tools.md`](docs/bench-and-tools.md) | Bench harnesses, the fleet dashboard, replay and trace tooling, hardware bring-up notes |
+| [`docs/build-order.md`](docs/build-order.md) | Build order and the de-risking bench gates |
+| [`docs/findings.md`](docs/findings.md) | Dated measurement notes — anything still being characterised |
+| [`docs/review-log.md`](docs/review-log.md) | Numbered log of every specification ruling and why it was made |
+| [`docs/groundwork.md`](docs/groundwork.md) | Provenance of every constant, traced to its source |
+| [`deploy/README.md`](deploy/README.md) | Real deployed node configurations |
+| [`profiles/modes/README.md`](profiles/modes/README.md) | The operating-mode catalog format |
+| [`CLAUDE.md`](CLAUDE.md) | Contributor conventions and the specification process |
+
+---
+
+## Licensing and credits
+
+GPL-2.0-or-later. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+
+waybeam-link vendors and builds on:
+
+- **[OpenIPC devourer](https://github.com/OpenIPC/devourer)** (GPL-2.0) — the
+  userspace RTL8812/8733 driver that makes kernel-free injection possible.
+- **[libusb](https://github.com/libusb/libusb)** (LGPL-2.1-or-later)
+- **[nlohmann/json](https://github.com/nlohmann/json)** (MIT)
+
+Design and calibration groundwork draws on wfb-ng's `link_controller`, the
+`waybeam_venc` encoder API, and Realtek's per-rate power tables. The
+[wfb-ng](https://github.com/svpcom/wfb-ng) and
+[OpenIPC](https://github.com/OpenIPC) projects established the injection-link
+approach this builds on.
