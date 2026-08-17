@@ -57,6 +57,7 @@ that can write whole frames into shared memory, or with a plain RTP source.
 - [Using it as a library](#using-it-as-a-library)
 - [Building](#building)
 - [Maturity](#maturity)
+- [Where this is going](#where-this-is-going)
 - [Documentation map](#documentation-map)
 - [Contributing](#contributing)
 - [Licensing and credits](#licensing-and-credits)
@@ -65,10 +66,12 @@ that can write whole frames into shared memory, or with a plain RTP source.
 
 ## Why this exists
 
-Analogue FPV is low-latency and degrades gracefully. Digital FPV is sharp but
-usually degrades *catastrophically* — a WiFi link built on association,
-retries and buffering will happily trade 300 ms of latency for a frame you no
-longer care about.
+You are flying something you can only see through its camera. What you need
+from the link is not throughput and not perfect delivery — it is that what you
+see is *happening now*. Analogue FPV gets this right and degrades gracefully.
+Digital FPV is sharper but usually degrades catastrophically, because a WiFi
+link built on association, retries and buffering will happily spend a third of
+a second delivering a frame you no longer care about.
 
 Broadcast injection links solve this by throwing away the parts of 802.11 that
 buy reliability at the cost of time: no association, no MAC-layer ARQ, no
@@ -85,11 +88,10 @@ OpenIPC — but it makes a different set of trades:
 | Kernel WiFi driver | Required (monitor mode) | **Not used** — userspace USB driver |
 | Session model | Keyed, paired | **Open broadcast, anyone may watch** |
 
-The result is a link where the *common* case — brief, correlated fades of
-5–30 ms — is repaired by a targeted retransmission that still lands inside the
-frame's display deadline, while the *hard* case — a real signal-strength cliff
-— is absorbed by having more than one antenna listening rather than by paying
-FEC overhead on every single frame forever.
+The result is a link where the common case — a brief fade — is repaired by a
+targeted retransmission that still arrives in time to be displayed, while the
+hard case — a real drop in signal strength — is absorbed by having more than one
+antenna listening, rather than by paying FEC overhead on every frame forever.
 
 **Deliberate non-goals.** waybeam-link is not encrypted, not authenticated on
 the data path, and not a general-purpose network device. It broadcasts. It
@@ -104,37 +106,30 @@ spectrum they are transmitting in. See §13 and §18 of
 Five ideas carry almost everything else:
 
 **1. The vehicle has one radio. The ground has several.**
-This is a fixed physical constraint, not a configuration choice. The vehicle
-timeshares its single adapter between transmitting video (dominant) and
-listening for the ground (opportunistic), which is why the return path is
-best-effort *by physics*. The ground runs N adapters in one process and merges
-them into a single stream — diversity is a ground-only capability.
+A physical constraint, not a configuration choice. The vehicle timeshares its
+single adapter between sending video and listening for the ground, which is why
+the return path is best-effort by physics. Diversity is a ground-only
+capability.
 
 **2. Video is transported as frames, not as packets.**
-The encoder hands over a complete encoded frame through shared memory.
-waybeam-link fragments it, protects it, transmits it, and reassembles a
-**byte-identical** frame on the other side. Because the transport knows where
-frame boundaries are, it can make per-frame decisions: how much redundancy this
-frame deserves, whether it is worth retransmitting, and when it is too late to
-bother.
+Because the transport knows where frame boundaries are, it can decide per
+frame: how much redundancy this one deserves, whether it is worth
+retransmitting, and when it is too late to bother.
 
 **3. Everything is broadcast; nothing is negotiated.**
-There is no handshake and no session setup. A vehicle transmits; any receiver
-in range may decode it. Receivers *latch* onto a stream passively. Control
-traffic (retransmission requests, link reports) is addressed to a stable
-numeric `originator` ID rather than to a MAC address or a connection.
+No handshake, no session setup. A vehicle transmits; any receiver in range may
+decode it. Receivers latch on passively, and control traffic is addressed to a
+stable node ID rather than to a MAC address or a connection.
 
 **4. The receiver measures; the transmitter decides.**
-Ground stations continuously report what they are actually seeing — RSSI, SNR,
-loss before and after diversity merge. The vehicle collects those reports and
-runs a single control loop that picks the modulation rate, the transmit power,
-*and* the encoder's bitrate together, as one coordinated operating point.
+Ground stations report what they are actually seeing. The vehicle collects
+those reports and runs one control loop that picks modulation, transmit power
+*and* encoder bitrate together, as a single operating point.
 
 **5. Changing channel is a coordinated manoeuvre, not a reconnect.**
-Because the vehicle has one radio and cannot be in two places at once, moving
-to a new frequency is a "follow-me" switch: authenticated, scheduled against
-the radio's own hardware clock, acknowledged before commit, and backed out
-automatically if the vehicle fails to arrive.
+The vehicle cannot be in two places at once, so moving frequency is a
+"follow-me" switch: authenticated, scheduled so both ends arrive together, and
+backed out automatically if the vehicle fails to show up.
 
 ---
 
@@ -153,12 +148,11 @@ role. Nodes see each other's broadcasts; roles describe intent, not permission.
 | **Craft** (vehicle) | 1 | Video, telemetry | The camera platform. Runs alongside the encoder. |
 | **Ground** (receiver) | N (1 must be TX-capable) | Return traffic only | The pilot's station. Merges diversity, owns pairing and control. |
 | **Spectator** | N (all receive-only) | Nothing | A second screen. Watches without touching the link. |
-| **Cache store** | N (all receive-only) | Nothing over RF | An additional listening post wired to the ground over Ethernet, extending coverage without adding a transmitter. |
+| **Cache store** | N (all receive-only) | Nothing over RF | A listening post placed elsewhere and wired back over Ethernet, extending coverage without adding another transmitter. |
 
-Because the medium is broadcast, multiple ground nodes on the same channel are
-first-class — a spectator adds no load and needs no permission. What *is*
-arbitrated is repair: the vehicle serves retransmission requests to one latched
-receiver at a time (first-latcher lock, with preemption by a preferred node), so
+Because the medium is broadcast, extra receivers are first-class — a spectator
+adds no load to the link and needs nobody's permission. What *is* arbitrated is
+repair: the vehicle serves retransmission requests to one receiver at a time, so
 a room full of spectators cannot storm the return path.
 
 ### The video path
@@ -182,39 +176,33 @@ a room full of spectators cannot storm the return path.
                             └───────────┘               └─────┘ └─────┘ └─────┘
 ```
 
-The encoder publishes each completed frame into a POSIX shared-memory ring.
-waybeam-link picks it up in the same process tick, splits it into **source
-symbols** sized to fit the current modulation's payload budget, generates
-**GF(256) Reed–Solomon repair symbols** for it, and injects the lot. On the
-ground, symbols arriving on any adapter feed one merged receive state machine
-that deduplicates by sequence number, reassembles the frame, decodes FEC if
-symbols were lost, and writes the result into an outgoing shared-memory ring for
-the decoder.
+The encoder publishes each completed frame into a shared-memory ring.
+waybeam-link splits it into **source symbols**, adds **repair symbols**, and
+injects the lot. On the ground, symbols arriving on any adapter feed one merged
+receive state machine that deduplicates, reassembles the frame, repairs it from
+the FEC if symbols were lost, and hands it to the decoder through a
+shared-memory ring on that side.
 
-The reconstructed frame is byte-identical to what the encoder produced — this is
-verified continuously in the test suite and has been confirmed on hardware.
+The frame that comes out is byte-identical to the one that went in.
 
-Video may also be ingested as ordinary **RTP over UDP** if you are feeding
+Video can also arrive as ordinary **RTP over UDP**, if you are feeding
 waybeam-link from GStreamer or an existing pipeline. The transport treats RTP as
-opaque; the only codec awareness anywhere in the system is a small classifier
-that decides whether a given packet is important enough to be worth
-retransmitting.
+opaque — the only codec awareness anywhere in the system is a small classifier
+deciding whether a packet is important enough to be worth retransmitting.
 
-Alongside video, the same wire carries **telemetry**, **control** (RC uplink)
-and **audio** stream types, each with its own delivery discipline.
+The same wire also carries **telemetry**, **control** (RC uplink) and **audio**,
+each with its own delivery discipline.
 
 ### The return path
 
 The vehicle can only hear the ground while its own radio is not transmitting.
-waybeam-link therefore paces the return path against the radio's hardware
-timestamp counter: the vehicle advertises quiet gaps, and the ground aims its
-return traffic into them. Everything the ground sends upstream — retransmission
-requests, link reports, channel-switch commands, RC and telemetry uplink —
-shares that narrow, best-effort window, in a strict priority order.
+So the vehicle advertises its quiet gaps, timed against the radio's own clock,
+and the ground aims its return traffic into them. Everything travelling
+upstream — retransmission requests, link reports, channel-switch commands, RC
+and telemetry uplink — shares that narrow window, in a strict priority order.
 
-This is why a ground station is expected to have one adapter appointed as the
-**designated uplink transmitter**: while it is transmitting it is deaf, and its
-diversity siblings cover the blind spot.
+This is why one ground adapter is appointed the **uplink transmitter**: while it
+is transmitting it is deaf, and its diversity siblings cover the blind spot.
 
 ### The adaptive link layer
 
@@ -236,13 +224,12 @@ diversity siblings cover the blind spot.
                             (modulation)    (per adapter)     (via local API)
 ```
 
-A single controller on the vehicle owns all three knobs and moves them as a
-coordinated sequence — bitrate down *before* modulation down, modulation up
+One controller on the vehicle owns all three knobs and moves them in a
+coordinated order — bitrate down *before* modulation down, modulation up
 *before* bitrate up — so the link never spends a moment asking the radio to
-carry more than it can. Demotion is reactive (loss happened, react now);
-promotion is conservative and gated on signal margin. A flap-freeze prevents
-oscillation, and a fail-safe drops to the most robust operating point if reports
-stop arriving at all.
+carry more than it can. It backs off quickly when loss appears, climbs back only
+when the evidence says the next rung will hold, refuses to oscillate, and falls
+to its most robust setting if the ground's reports stop arriving altogether.
 
 **waybeam-link is the sole owner of the encoder's bitrate.** The encoder has no
 arbitration — last writer wins — so nothing else in the system may write it
@@ -254,21 +241,21 @@ Three mechanisms, deliberately layered, each aimed at a different failure shape:
 
 | Mechanism | Repairs | Cost | Role |
 |---|---|---|---|
-| **Receive diversity** | Uncorrelated per-antenna loss | Extra adapters | **Primary.** Load-bearing. |
-| **FEC** (GF(256) RS) | Random symbol loss within a frame | Constant airtime overhead | Configurable per stream, higher rate on keyframes |
-| **ARQ** (retransmission) | Short correlated fades, ~5–30 ms | Return-path airtime, only when needed | **Opportunistic.** Never load-bearing. |
+| **Receive diversity** | Loss that hits one antenna but not the others | Extra adapters | **Primary.** Load-bearing. |
+| **FEC** (GF(256) Reed–Solomon) | Scattered symbol loss within a frame | Constant airtime overhead | Configurable per stream, higher rate on keyframes |
+| **ARQ** (retransmission) | Brief fades that hit every antenna at once | Return-path airtime, only when needed | **Opportunistic.** Never load-bearing. |
 
-The ordering matters. ARQ is explicitly *not* a reliability guarantee: it is
-importance-gated (keyframes by default), deadline-aware (a repair that cannot
-arrive in time is never sent), and it quietly does less as the channel
-saturates. When the link is in real trouble, waybeam-link degrades toward pure
-diversity — that is the designed floor, not a failure.
+The ordering matters. ARQ is explicitly *not* a reliability guarantee: it only
+asks for frames worth repairing, it never sends a repair that cannot arrive in
+time, and it quietly does less as the channel fills up. When the link is in real
+trouble, waybeam-link degrades toward pure diversity — the designed floor, not a
+failure.
 
-Measured during a real signal-strength fade: two adapters reduced 8.6 % loss
-before the merge to 2.4 % after it, and 10 % FEC then recovered 599 source
-symbols where ARQ recovered 52. In the same run a 37-second total blackout
-proved that neither mechanism repairs a link that has genuinely gone away — and
-the design does not pretend otherwise.
+All three have been measured together through a real fade on real hardware. A
+second antenna cut the loss the merge had to deal with by most of it; FEC then
+recovered the large majority of what remained, with ARQ picking up a useful
+remainder. The same run also included a total blackout, which nothing repaired —
+when the link is genuinely gone, no amount of redundancy invents it back.
 
 ### Discovery, pairing and the follow-me channel switch
 
@@ -325,21 +312,16 @@ Verified on SigmaStar SSC338Q and HiSilicon CV610 camera boards.
 **Ground side** — one to three USB WiFi adapters on x86, ARM64 (RK3566), or
 Android.
 
-**Supported radios.** All four chips inject, receive, and accept transmit-power
-control, through the vendored [OpenIPC
-devourer](https://github.com/OpenIPC/devourer) userspace driver. The kernel
-driver must be unloaded first — devourer talks to the USB device directly.
+**Supported radios** — RTL8812AU, RTL8812CU, RTL8812EU and RTL8733BU, all
+through the vendored [OpenIPC
+devourer](https://github.com/OpenIPC/devourer) userspace driver. All four are
+tested and working, on the vehicle side and on the ground side alike; which
+chip goes where is your choice.
 
-| Chip | Best used as | Worth knowing |
-|---|---|---|
-| **RTL8812AU** | The ground's transmit adapter | Lowest transmit-path latency by a wide margin — ~0.1 ms to air versus ~2 ms on the CU/EU generation. That matters because the return path has to fit in a narrow window. |
-| **RTL8812CU** | A ground diversity ear | Fine as a receiver; avoid appointing it the uplink transmitter if an AU is available. |
-| **RTL8812EU** | A vehicle adapter | Run it at 20 MHz — 40 MHz is broken on this part. |
-| **RTL8733BU** | A vehicle adapter | No per-frame transmit-report path, so the link infers transmit health differently. Changes channel more slowly (~345 ms), which lengthens a channel sweep. |
-
-Adapters are matched by USB bus path, or by the per-unit MAC burned into the
-adapter's EFUSE — never by network interface name, which is not stable across
-reboots or re-plugs.
+The kernel driver has to be unloaded before use — devourer talks to the USB
+device directly. Adapters are matched by USB bus path, or by the per-unit MAC
+burned into the adapter's EFUSE — never by network interface name, which is not
+stable across reboots or re-plugs.
 
 ---
 
@@ -513,25 +495,26 @@ so local and CI cannot drift.
 
 Being straightforward about what is proven and what is not:
 
-**Verified on real hardware**
-- End-to-end byte-identical video — encoder → RF → decoder, at ~90 fps, with
-  zero decode errors.
-- Retransmission round-trip P90 ≤ 4 ms at 65 % airtime, comfortably inside a
-  keyframe's display deadline.
-- Diversity gain and FEC recovery measured through a real signal-strength fade.
-- Two different radio chips injecting and receiving in the same process.
+**Proven on real hardware**
+- Video arrives byte-identical to what the encoder produced, at full frame
+  rate, with no decode errors — encoder to decoder, over RF.
+- Retransmissions come back fast enough to still matter, under a saturated
+  channel.
+- Diversity and FEC both measurably recover a real fade.
+- Different radio chips injecting and receiving in the same process.
 - The follow-me channel switch, including the automatic back-out.
 - Discovery, pairing, and operating-mode application over both HTTP and RF.
 
 **Still open**
-- Range-limited behaviour of the return path in flight.
-- Long-run stability of the adaptive control loop under real flight dynamics.
-- Several timing constants are bench seeds pending field re-derivation.
+- How the return path behaves at the edge of range, in flight.
+- Long-run stability of the adaptive loop under real flight dynamics.
+- Several timing constants are bench-derived and want field re-derivation.
 
 **Known limitations**
 - No encryption or authentication on the data path — by design.
 - One vehicle per channel; two vehicles need real spectral separation.
-- The vehicle's return-path reception is best-effort and always will be.
+- Fleet-wide 20 MHz channels in v1.
+- The vehicle's return-path reception is best-effort, and always will be.
 - No 802.11 MAC-layer retries: application-level resend is the only retry.
 
 **What is genuinely new here, and what is not.** Multi-adapter same-channel
@@ -542,6 +525,48 @@ reliability layer; the open broadcast passive-latch session model with
 originator-addressed control; and putting modulation, transmit power and
 encoder bitrate under one controller with a latency-first objective instead of
 an airtime-first one.
+
+---
+
+## Where this is going
+
+Work that is started, not merely wished for.
+
+**Choosing a channel by how busy it is, not by how loud** (#173, #178). The
+scout ranks candidate channels by how much it hears on them, which cannot
+separate a genuinely congested channel from a quiet neighbour sitting right next
+to the antenna. Moving to a measure of how long the channel is actually
+occupied.
+
+**More than one vehicle in the air** (#99). Out of scope for v1, and honestly
+so — today two vehicles need real spectral separation. The prerequisite is
+knowing how precisely the vehicle's quiet gaps can be predicted; that budget is
+being measured now. Anything resembling time-sharing a channel waits on the
+answer.
+
+**Configuration that generates itself** (#106). Node configs are dense and
+coupled across the fleet. The goal is one machine-readable schema, a generator,
+and a validator that catches a mismatch between two nodes on the ground rather
+than leaving it to be discovered in the air.
+
+**Calibrating transmit power against what the receiver actually sees** (#125).
+Signal strength alone cannot see the point where an amplifier starts
+compressing. Carrying receiver-side signal quality through the calibration
+exchange would make that knee visible.
+
+**Cutting the vehicle's CPU cost** (#209). Small camera SoCs have very little
+headroom, and transmitting is not free. Batching USB transfers and trimming the
+remaining per-packet work is being measured now.
+
+**Recovering a wedged radio without restarting.** USB radios occasionally stop
+transmitting and need rebuilding. Doing that in-process has been demonstrated;
+adopting it — with exiting and letting a supervisor restart as the bounded
+fallback — is the remaining step.
+
+**Running inside other applications.** The Android ground station and the
+`waybeam-hub` daemon already run a *receiving* node in-process rather than
+shelling out to a daemon. Lifting the transmitting half out on the same terms
+is in progress.
 
 ---
 
