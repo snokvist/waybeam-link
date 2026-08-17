@@ -73,16 +73,24 @@ as `(i*31+j)&0xff` and verifying every byte after §6.3a reassembly.
 delivered 400/400/399/400/400 unbatched against 400/397/398/399/400 batched:
 both arms drop the occasional frame, so that is RF, not the knob.
 
-**What is NOT measured, stated plainly.** Three MPDUs in one TXDMA
-submission air back to back where each was previously separated by a host
-submission (~248 µs on this craft). That changes on-air burst structure,
-which is the axis per-frame FEC's loss-independence assumption sits on.
-CPU, pps and URB counts cannot see it, and five 400-frame runs cannot
-exclude a ~1-in-400 effect. The claim this Pass makes is therefore about
-host cost and ordering, NOT about PER or loss-run length; the earlier
-wording "adds no latency… never the timing" also overstated — a frame is
-held for the microseconds it takes to stage its one or two neighbours, and
-the §7.2 drain flushes after its loop rather than inside it.
+**This is not A-MPDU, and it does not burst.** The two are separate
+capabilities in the driver — USB TX aggregation is host-to-chip transport,
+A-MPDU (`SetAmpduMode`, never called here) is the MAC folding MPDUs into one
+PPDU. Each frame keeps its own preamble and contention cycle, so no airtime
+is saved. The remaining worry was SPACING: frames arriving in the TXDMA
+together might key up back to back, changing the burst structure that
+per-frame FEC's loss-independence assumption sits on. **Measured at a
+witness's chip TSF, and they do not**: 33.7k inter-frame gaps, batched and
+unbatched, give p10/p50/p90 of 205/222/232 µs either way, with **0.0% of
+frames closer than 200 µs in both arms**. At MCS7 the air was already the
+pacer and the host never was — what changed is how frames reach the chip,
+not how the chip airs them.
+
+Residual caveats, smaller but real: five 400-frame delivery runs cannot
+exclude a ~1-in-400 PER effect, and the earlier wording "adds no latency…
+never the timing" overstated — a frame waits the microseconds it takes to
+stage its neighbours, and the §7.2 drain flushes after its loop rather than
+inside it.
 
 Limitation, stated rather than left implicit: both craft A/B runs took
 agg_off first, so strict order-effect bias is not excluded by the A/B

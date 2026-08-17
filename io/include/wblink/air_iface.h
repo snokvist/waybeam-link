@@ -73,11 +73,14 @@ class AirIface {
     // Stage a frame to be carried with its neighbours, and submit what is
     // staged. NOT a queue and NOT a pacing hint: every frame staged is one
     // the caller already decided to air now, so a backend may choose how
-    // frames are *carried*, never in what order. It is not entirely free of
-    // timing: a staged frame waits the microseconds it takes to stage its
-    // neighbours, and three MPDUs then air back to back where host
-    // submissions previously separated them — a burst-structure change that
-    // CPU and pps measurements cannot see (Pass 184). The RF backend folds up to
+    // frames are *carried*, never in what order. This is NOT A-MPDU: each
+    // MPDU keeps its own PPDU, preamble and contention cycle, so no airtime
+    // is saved and nothing is amortized on air. Measured rather than assumed
+    // (Pass 184): inter-frame spacing at a witness is identical batched and
+    // unbatched — p10/p50/p90 205/222/232 us either way, 0% of frames closer
+    // than 200 us. The chip, not the host, was already the pacer. The only
+    // timing cost is that a staged frame waits the microseconds it takes to
+    // stage its neighbours. The RF backend folds up to
     // cfg.usb_tx_agg of them into one bulk-OUT URB, which on a small SoC
     // removes two host submissions in three (~248 us of CPU each on the CV610
     // craft, ~87% of it the kernel USB path).
