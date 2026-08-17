@@ -1,15 +1,17 @@
 # Diagram brief — README architecture figures
 
-Source material for generating the five architecture figures referenced by
-`README.md` (`<!-- DIAGRAM SLOT n -->`). Hand the whole of this file to an
-image/diagram generator; it is written to be self-contained so the generator
-does not have to infer any system facts.
+Source material for the architecture figures in `README.md`. Hand the whole of
+this file to an image/diagram generator; it is written to be self-contained so
+the generator does not have to infer any system facts.
 
-Replace each slot comment in `README.md` with the finished image:
+**What shipped (2026-08-17):** one composite asset,
+`docs/images/architecture.png`, laying the five figures out as labelled panels
+— 1 and 2 full width, then 3/4/5 across a single row. It replaced a per-figure
+SVG attempt that came back poorly. Regenerate from this brief and keep the two
+in sync when either changes.
 
-```markdown
-![System overview](docs/images/fig1-system-overview.svg)
-```
+The style rules and system facts below are the load-bearing part and apply to
+any regeneration, composite or not.
 
 ---
 

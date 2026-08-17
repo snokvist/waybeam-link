@@ -135,8 +135,9 @@ backed out automatically if the vehicle fails to show up.
 
 ## Architecture
 
-<!-- DIAGRAM SLOT 1: System overview -->
-<!-- See docs/diagram-brief.md, Figure 1 -->
+[![waybeam-link architecture — system overview, the video data path, the adaptive control loop, discovery and channel switching, and the control plane](docs/images/architecture.png)](docs/images/architecture.png)
+
+<sup>Click for full size. The five panels map to the five sections below.</sup>
 
 ### The node model
 
@@ -156,9 +157,6 @@ repair: the vehicle serves retransmission requests to one receiver at a time, so
 a room full of spectators cannot storm the return path.
 
 ### The video path
-
-<!-- DIAGRAM SLOT 2: Video data path -->
-<!-- See docs/diagram-brief.md, Figure 2 -->
 
 ```
                     VEHICLE                              GROUND
@@ -205,9 +203,6 @@ This is why one ground adapter is appointed the **uplink transmitter**: while it
 is transmitting it is deaf, and its diversity siblings cover the blind spot.
 
 ### The adaptive link layer
-
-<!-- DIAGRAM SLOT 3: Adaptive control loop -->
-<!-- See docs/diagram-brief.md, Figure 3 -->
 
 ```
    ground: measure                        vehicle: decide
@@ -258,9 +253,6 @@ remainder. The same run also included a total blackout, which nothing repaired �
 when the link is genuinely gone, no amount of redundancy invents it back.
 
 ### Discovery, pairing and the follow-me channel switch
-
-<!-- DIAGRAM SLOT 4: Discovery → claim → channel switch -->
-<!-- See docs/diagram-brief.md, Figure 4 -->
 
 A vehicle powers on and broadcasts a periodic announcement on its channel. A
 ground station that does not know where the vehicle is **scouts**: it sweeps its
@@ -437,9 +429,6 @@ and ARQ recovery counts, and return-path health.
 ```sh
 python3 tools/link_monitor.py     # dashboard on :8099, stats intake on :9110
 ```
-
-<!-- DIAGRAM SLOT 5: Control plane & observability -->
-<!-- See docs/diagram-brief.md, Figure 5 -->
 
 ---
 
