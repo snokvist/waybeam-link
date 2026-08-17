@@ -1339,6 +1339,14 @@ Result<Config> load_config_json(const std::string& json_text) {
                 " is a radio-backend key (§15.2 Pass 157); remove it or set "
                 "air.kind \"radio\"");
         }
+        // §15.2 Pass 184: same posture — a bulk-OUT URB is a USB-radio
+        // concept, so the key is meaningless on udp-air and would read
+        // enabled while doing nothing.
+        if (cfg.air.kind != AirCfg::Kind::kRadio && cfg.air.usb_tx_agg != 0) {
+            return Result<Config>::fail(
+                "air.usb_tx_agg is a radio-backend key (§15.2 Pass 184); "
+                "remove it or set air.kind \"radio\"");
+        }
         // §9.4 Pass 163: same posture — probing is a radio TX-die property.
         if (cfg.air.kind != AirCfg::Kind::kRadio && cfg.air.mcs_probe) {
             return Result<Config>::fail(
