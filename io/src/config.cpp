@@ -1193,6 +1193,17 @@ Result<Config> load_config_json(const std::string& json_text) {
                     std::to_string(cfg.air.tx_retry_limit) +
                     " out of range 0..63 (§15.2 Pass 156)");
             }
+            // USB TX aggregation depth. 0/1 = off (one frame per URB); the
+            // HalMAC families parse at most 3 descriptors per bulk transfer
+            // and devourer clamps, so refuse above that here rather than let
+            // a config silently mean less than it says.
+            cfg.air.usb_tx_agg =
+                a.value("usb_tx_agg", cfg.air.usb_tx_agg);
+            if (cfg.air.usb_tx_agg < 0 || cfg.air.usb_tx_agg > 3) {
+                return Result<Config>::fail(
+                    "air.usb_tx_agg " + std::to_string(cfg.air.usb_tx_agg) +
+                    " out of range 0..3 (HalMAC BLK_DESC_NUM)");
+            }
             // §15.2 (Pass 157) node TX coding; radio-only enforcement is
             // below, once kind resolves.
             cfg.air.ldpc = a.value("ldpc", cfg.air.ldpc);

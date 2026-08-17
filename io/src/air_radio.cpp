@@ -193,6 +193,16 @@ struct RadioAir::Impl {
     uint16_t probe_slot = 0;
     uint8_t probe_mcs = 0;
     std::vector<uint8_t> tx_buf;
+    // Staging state. inject() reuses ONE tx_buf because the frame is with the
+    // chip before it returns; staged frames are all live at once, so each
+    // needs its own storage until the URB goes out. Members, so capacity is
+    // reused rather than reallocated per batch — the whole point of this path
+    // is host CPU.
+    std::vector<std::vector<uint8_t>> tx_bufs;
+    std::vector<TxPacketView> tx_views;
+    size_t staged = 0;
+    // Frames per URB (config air.usb_tx_agg). <= 1 disables staging entirely.
+    int usb_tx_agg = 0;
 
     // devourer's machine-event sink (Logger::events()) defaults to stdout,
     // which would interleave with our stats stream. A cookie stream both
@@ -597,6 +607,7 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                                       std::strerror(errno));
     }
     im.cfg = cfg;
+    im.usb_tx_agg = cfg.usb_tx_agg;
     im.has_tx = n_tx == 1;  // §3.11 Pass 162; roles never change post-create
     im.filter_net_id.store(cfg.filter_net_id
                                ? static_cast<int16_t>(*cfg.filter_net_id)
@@ -852,6 +863,11 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // RX-only ear never injects and broadcast frames carry no ACK
         // policy, so it binds exactly on the hybrid's unicast returns.
         dc.tx.retry_limit = cfg.tx_retry_limit;
+        // USB TX aggregation. Set on every adapter for the same reason
+        // retry_limit is: an RX-only ear never injects, so the knob is inert
+        // there, and a uniform bring-up posture beats a conditional one. 0
+        // leaves send_packets on its per-frame fallback, byte-identical.
+        dc.tx.usb_agg_max = static_cast<unsigned>(cfg.usb_tx_agg);
         // MAC carrier-sense gate. Applied to every adapter, not just the TX
         // one: an RX-only ear that defers has nothing to defer, but the
         // bring-up posture stays uniform across the node.
@@ -1114,17 +1130,20 @@ static bool mcs_cycle_enabled() {
     return on;
 }
 
-size_t RadioAir::inject(const uint8_t* frame, size_t len) {
-    Impl& im = *impl_;
-    if (!im.has_tx) return 0;  // §3.11 Pass 162: not-sent, never adapter 0
-    Impl::Adapter& tx = *im.adapters[im.tx_idx];
-    TxRate rate = im.rate;
+// The per-frame rate decision, factored out of inject() so inject_batch()
+// cannot drift from it. Both bench knob and §9.4 probe are PER FRAME, which is
+// why a batch is still legal: every frame carries its own radiotap, and
+// devourer builds each block's descriptor from that frame's header — so
+// packing does not flatten a mixed-rate run to one rate.
+static TxRate tx_rate_for(TxRate base, uint16_t probe_period,
+                          uint16_t probe_slot, uint8_t probe_mcs,
+                          const uint8_t* frame, size_t len) {
     // §3.1 type nibble at byte 2; §3.2 seq BE32 at 13 — low byte carries
     // seq % 8 exactly (8 divides 256).
     if (mcs_cycle_enabled() && len >= 17 &&
         (frame[2] & 0x0F) == static_cast<uint8_t>(PacketType::kData)) {
-        rate.mcs = frame[16] & 0x7;
-    } else if (im.probe_period != 0 && len >= 17 &&
+        base.mcs = frame[16] & 0x7;
+    } else if (probe_period != 0 && len >= 17 &&
                (frame[2] & 0x0F) == static_cast<uint8_t>(PacketType::kData) &&
                frame[12] == stream_type::kRtp) {
         // §9.4 Pass 163 sequence-derived probe: first-send VIDEO DATA frames
@@ -1135,10 +1154,19 @@ size_t RadioAir::inject(const uint8_t* frame, size_t len) {
         const uint32_t seq = (uint32_t{frame[13]} << 24) |
                              (uint32_t{frame[14]} << 16) |
                              (uint32_t{frame[15]} << 8) | uint32_t{frame[16]};
-        if (seq % im.probe_period == im.probe_slot) {
-            rate.mcs = im.probe_mcs;
+        if (seq % probe_period == probe_slot) {
+            base.mcs = probe_mcs;
         }
     }
+    return base;
+}
+
+size_t RadioAir::inject(const uint8_t* frame, size_t len) {
+    Impl& im = *impl_;
+    if (!im.has_tx) return 0;  // §3.11 Pass 162: not-sent, never adapter 0
+    Impl::Adapter& tx = *im.adapters[im.tx_idx];
+    const TxRate rate = tx_rate_for(im.rate, im.probe_period, im.probe_slot,
+                                    im.probe_mcs, frame, len);
     im.tx_buf.resize(kDot11TxPrefixLen + len);
     dot11_tx_prefix(im.tx_buf.data(), rate, im.cfg.stamp_net_id,
                     im.cfg.originator, static_cast<uint8_t>(im.tx_idx),
@@ -1150,6 +1178,58 @@ size_t RadioAir::inject(const uint8_t* frame, size_t len) {
     }
     ++tx.tx_failed;
     return 0;
+}
+
+size_t RadioAir::inject_staged(const uint8_t* frame, size_t len) {
+    Impl& im = *impl_;
+    if (!im.has_tx) return 0;  // §3.11 Pass 162: not-sent, never adapter 0
+    // Knob off: no staging at all, so the whole path is the one that shipped.
+    if (im.usb_tx_agg <= 1) return inject(frame, len);
+
+    const size_t cap = static_cast<size_t>(im.usb_tx_agg);
+    if (im.tx_bufs.size() < cap) im.tx_bufs.resize(cap);
+    if (im.tx_views.size() < cap) im.tx_views.resize(cap);
+
+    // Build the wire frame NOW — the producer's buffer is reused on the next
+    // callback, so a staged frame cannot be a borrowed pointer.
+    const TxRate rate = tx_rate_for(im.rate, im.probe_period, im.probe_slot,
+                                    im.probe_mcs, frame, len);
+    std::vector<uint8_t>& b = im.tx_bufs[im.staged];
+    b.resize(kDot11TxPrefixLen + len);
+    // im.seq++ here, at STAGE time, so the wire sequence is the order the
+    // producer emitted in — indistinguishable from N inject() calls, which
+    // matters because the RX loss estimator reads it.
+    dot11_tx_prefix(b.data(), rate, im.cfg.stamp_net_id, im.cfg.originator,
+                    static_cast<uint8_t>(im.tx_idx), im.seq++);
+    std::memcpy(b.data() + kDot11TxPrefixLen, frame, len);
+    im.tx_views[im.staged] = TxPacketView{b.data(), b.size()};
+    ++im.staged;
+
+    if (im.staged >= cap) flush_staged();
+    return 1;
+}
+
+size_t RadioAir::flush_staged() {
+    Impl& im = *impl_;
+    if (im.staged == 0) return 0;
+    const size_t n = im.staged;
+    im.staged = 0;  // reset first: a throwing/failing submit must not re-send
+    if (!im.has_tx) return 0;
+    Impl::Adapter& tx = *im.adapters[im.tx_idx];
+    tx.tx_submitted += n;
+    // One staged frame is not a batch — send_packets would fall back to its
+    // own per-frame loop anyway, so go straight there.
+    size_t ok = 0;
+    if (n == 1) {
+        ok = tx.dev->send_packet(im.tx_views[0].data,
+                                 im.tx_views[0].len)
+                 ? 1u
+                 : 0u;
+    } else {
+        ok = tx.dev->send_packets(im.tx_views.data(), n);
+    }
+    if (ok < n) tx.tx_failed += (n - ok);
+    return ok;
 }
 
 size_t RadioAir::inject_resend(const uint8_t* frame, size_t len) {

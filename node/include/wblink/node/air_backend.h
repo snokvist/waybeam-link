@@ -289,6 +289,7 @@ struct AirBackend {
             rc.ack_responder = cfg.air.ack_responder;
             rc.unicast_returns = cfg.policy.ret.unicast;
             rc.tx_retry_limit = cfg.air.tx_retry_limit;
+            rc.usb_tx_agg = cfg.air.usb_tx_agg;
             rc.ldpc = cfg.air.ldpc;  // §3.0 Pass 157 node coding
             rc.stbc = cfg.air.stbc;
             rc.mcs_probe = cfg.air.mcs_probe;  // §9.4 Pass 163
@@ -347,6 +348,20 @@ struct AirBackend {
         }
         return sent;
     }
+
+    // Staged submission (AirIface::inject_staged). `last_tx_ms` is the
+    // liveness stamp the wedge detector reads, so it moves when the frame is
+    // ACCEPTED, not when the URB goes out: a staged frame is one the node
+    // decided to air, and holding the stamp back for at most two more frames
+    // would make batching look like a TX stall.
+    size_t inject_staged(const uint8_t* f, size_t n) {
+        const size_t sent = iface()->inject_staged(f, n);
+        if (sent > 0) {
+            last_tx_ms = now_ms();
+        }
+        return sent;
+    }
+    size_t flush_staged() { return iface()->flush_staged(); }
 
     size_t inject_resend(const uint8_t* f, size_t n) {
         const size_t sent = iface()->inject_resend(f, n);

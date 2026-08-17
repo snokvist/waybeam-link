@@ -70,6 +70,36 @@ class AirIface {
 
     virtual size_t inject(const uint8_t* frame, size_t len) = 0;
 
+    // Stage a frame to be carried with its neighbours, and submit what is
+    // staged. NOT a queue and NOT a pacing hint: every frame staged is one
+    // the caller already decided to air now, so a backend may choose how
+    // frames are *carried*, never when. The RF backend folds up to
+    // cfg.usb_tx_agg of them into one bulk-OUT URB, which on a small SoC
+    // removes two host submissions in three (~248 us of CPU each on the CV610
+    // craft, ~87% of it the kernel USB path).
+    //
+    // Staging rather than a collect-then-submit call is forced by lifetime:
+    // the producer (FrameFramer) emits every frame of a fan-out through ONE
+    // reusable `frame_buf_`, so a pointer held past the callback is
+    // overwritten by the next frame. inject_staged() must therefore copy
+    // immediately — which the backend was going to do anyway when it built
+    // the radiotap prefix, so staging costs no extra copy while collecting
+    // pointers would have cost one.
+    //
+    // Both default to the unbatched behaviour, exactly as devourer defaults
+    // IRtlDevice::send_packets (third_party/devourer/src/IRtlDevice.h) and for
+    // the same reason: udp-air and every test double keep working untouched.
+    // inject_staged returns 1 if the frame was accepted for submission (a
+    // staged frame is not yet on the air); flush_staged returns the number
+    // actually submitted.
+    //
+    // CALLER CONTRACT: flush before anything that must observe those frames as
+    // sent — an unbatched send, a §7.2 gap re-arm, or the end of a tick.
+    virtual size_t inject_staged(const uint8_t* frame, size_t len) {
+        return inject(frame, len);
+    }
+    virtual size_t flush_staged() { return 0; }
+
     // §8.4 resend path. Separate from inject() because the radio backends
     // account it separately, not because the wire differs.
     virtual size_t inject_resend(const uint8_t* frame, size_t len) = 0;

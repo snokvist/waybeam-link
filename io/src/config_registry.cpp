@@ -187,6 +187,7 @@ const KeyEntry kKeys[] = {
     {"air.uplink_rate.bw",                        KeyType::kNumber},
     {"air.uplink_rate.mcs",                       KeyType::kNumber},
     {"air.uplink_rate.sgi",                       KeyType::kBool},
+    {"air.usb_tx_agg",                            KeyType::kNumber},
     {"air.wedge_exit_windows",                    KeyType::kNumber},
     {"air.wedge_min_submits",                     KeyType::kNumber},
     {"air.wedge_window_ms",                       KeyType::kNumber},
