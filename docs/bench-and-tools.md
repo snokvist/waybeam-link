@@ -444,9 +444,9 @@ straight at each instance's `GET /api/v1/stats/stream`.
 
 waybeam-link must be the **sole writer** of the encoder's bitrate. venc has no
 arbitration flag — last writer wins. On the craft: disable waybeam-hub's
-`venc.bitrate_enabled` if hub is present, and do **not** run wfb_ng
-`link_controller` (waybeam-link replaces it). See PROTOCOL.md §9.6. The craft runs
-**20 MHz** (8812EU 40 MHz bug).
+`venc.bitrate_enabled` if hub is present, and make sure no other rate
+controller is running — waybeam-link replaces it. See PROTOCOL.md §9.6. The
+craft runs **20 MHz** (8812EU 40 MHz bug).
 
 ## Consumers
 

@@ -5,22 +5,36 @@ raw 802.11 injection.**
 
 waybeam-link carries live video, telemetry and control between a vehicle and
 one or more ground stations over ordinary USB WiFi adapters — with no access
-point, no association, no TCP, and no kernel WiFi stack in the path. It is the
-radio layer of the [Waybeam](https://github.com/snokvist) FPV ecosystem, and it
-is designed around a single priority: **a frame that arrives late is worse than
-a frame that never arrives at all.**
+point, no association, no TCP, and no kernel WiFi stack in the path. It is
+designed around a single priority: **a frame that arrives late is worse than a
+frame that never arrives at all.**
 
 ```
   camera ─► encoder ─► waybeam-link ─► ((( RF ))) ─► waybeam-link ─► decoder ─► screen
             (vehicle)                                  (ground)
 ```
 
-> **Status: flying on the bench, not yet a shipping product.**
+See it run without owning a radio:
+
+```sh
+cmake --preset dev && cmake --build --preset dev -j
+./build/dev/waybeam-link loopback -c examples/config.loopback.sample.json
+```
+
+> **Status: working on real hardware, not yet a shipping product.**
 > The transport, the adaptive link layer, FEC, ARQ, the follow-me channel
 > switch and the discovery/pairing path are implemented, unit-tested and
-> hardware-verified end to end on real RF. Field range validation and the
-> stability of the adaptive loop under sustained flight are still open. See
+> verified end to end over real RF. Field range validation and the stability of
+> the adaptive loop under sustained flight are still open. See
 > [Maturity](#maturity) for the honest breakdown.
+
+**Where this sits.** waybeam-link is the radio layer of the Waybeam FPV
+ecosystem. It does not encode video and it does not decode it — it moves what
+an encoder produces to wherever a decoder is waiting. On the vehicle it runs
+next to `waybeam_venc` (the camera/encoder daemon); on the ground its output
+feeds a decoder such as `waybeam-hub`, the Android ground station, or any
+consumer of its shared-memory ring. It is usable on its own with any encoder
+that can write whole frames into shared memory, or with a plain RTP source.
 
 ---
 
@@ -44,6 +58,7 @@ a frame that never arrives at all.**
 - [Building](#building)
 - [Maturity](#maturity)
 - [Documentation map](#documentation-map)
+- [Contributing](#contributing)
 - [Licensing and credits](#licensing-and-credits)
 
 ---
@@ -66,7 +81,7 @@ OpenIPC — but it makes a different set of trades:
 | Primary redundancy | Forward error correction | **Multi-adapter receive diversity** |
 | Repair of short fades | More FEC overhead | **Opportunistic, deadline-aware ARQ** |
 | Unit of transport | Fixed-size packet blocks | **Whole encoded video frames** |
-| Rate control | Split across scripts/daemons | **One controller owns MCS + TX power + encoder bitrate** |
+| Rate control | Radio and encoder tuned separately | **One controller owns MCS + TX power + encoder bitrate** |
 | Kernel WiFi driver | Required (monitor mode) | **Not used** — userspace USB driver |
 | Session model | Keyed, paired | **Open broadcast, anyone may watch** |
 
@@ -249,10 +264,11 @@ arrive in time is never sent), and it quietly does less as the channel
 saturates. When the link is in real trouble, waybeam-link degrades toward pure
 diversity — that is the designed floor, not a failure.
 
-Measured on the bench during a real signal-strength fade: two adapters reduced
-86 ‰ pre-diversity loss to 24 ‰ post-diversity, after which 10 % FEC recovered
-599 source symbols against ARQ's 52. Neither mechanism can repair a total
-blackout, and the design does not pretend otherwise.
+Measured during a real signal-strength fade: two adapters reduced 8.6 % loss
+before the merge to 2.4 % after it, and 10 % FEC then recovered 599 source
+symbols where ARQ recovered 52. In the same run a 37-second total blackout
+proved that neither mechanism repairs a link that has genuinely gone away — and
+the design does not pretend otherwise.
 
 ### Discovery, pairing and the follow-me channel switch
 
@@ -309,19 +325,21 @@ Verified on SigmaStar SSC338Q and HiSilicon CV610 camera boards.
 **Ground side** — one to three USB WiFi adapters on x86, ARM64 (RK3566), or
 Android.
 
-**Supported radios** (all via the vendored [OpenIPC
-devourer](https://github.com/OpenIPC/devourer) userspace driver — the kernel
-driver must be unloaded):
+**Supported radios.** All four chips inject, receive, and accept transmit-power
+control, through the vendored [OpenIPC
+devourer](https://github.com/OpenIPC/devourer) userspace driver. The kernel
+driver must be unloaded first — devourer talks to the USB device directly.
 
-| Chip | Inject | Receive | TX power control | Notes |
-|---|---|---|---|---|
-| RTL8812AU | ✅ | ✅ | ✅ | Best uplink latency; preferred as the ground's transmit adapter |
-| RTL8812CU | ✅ | ✅ | ✅ | Good diversity ear; higher transmit-path latency |
-| RTL8812EU | ✅ | ✅ | ✅ | Common vehicle adapter; run 20 MHz |
-| RTL8733BU | ✅ | ✅ | ✅ | No per-frame transmit-report path; retunes slower (~345 ms) |
+| Chip | Best used as | Worth knowing |
+|---|---|---|
+| **RTL8812AU** | The ground's transmit adapter | Lowest transmit-path latency by a wide margin — ~0.1 ms to air versus ~2 ms on the CU/EU generation. That matters because the return path has to fit in a narrow window. |
+| **RTL8812CU** | A ground diversity ear | Fine as a receiver; avoid appointing it the uplink transmitter if an AU is available. |
+| **RTL8812EU** | A vehicle adapter | Run it at 20 MHz — 40 MHz is broken on this part. |
+| **RTL8733BU** | A vehicle adapter | No per-frame transmit-report path, so the link infers transmit health differently. Changes channel more slowly (~345 ms), which lengthens a channel sweep. |
 
-Adapters are matched by USB bus path or by their per-unit EFUSE MAC identity —
-never by network interface name, which is not stable.
+Adapters are matched by USB bus path, or by the per-unit MAC burned into the
+adapter's EFUSE — never by network interface name, which is not stable across
+reboots or re-plugs.
 
 ---
 
@@ -329,31 +347,28 @@ never by network interface name, which is not stable.
 
 ### Without any radios
 
-The fastest way to see the whole pipeline work is the built-in loopback:
-
-```sh
-cmake --preset dev && cmake --build --preset dev -j
-./build/dev/waybeam-link loopback -c examples/config.loopback.sample.json
-```
-
-For something closer to reality, run two real processes with a simulated air
-interface over UDP — one transmitter, one receiver, with virtual diversity
-paths and a matched return path:
+Everything but the RF hop runs on one machine. The built-in `loopback` mode
+(shown at the top of this page) exercises the whole transport in a single
+process. To run two *real* processes against a simulated air interface — one
+transmitter, one receiver, with virtual diversity paths and a matched return
+path:
 
 ```sh
 ./build/dev/waybeam-link tx -c examples/config.air-tx.sample.json &
 ./build/dev/waybeam-link rx -c examples/config.air-rx.sample.json
 ```
 
-With GStreamer installed, `tools/frame_shm_udp_bench.sh` runs the complete
-encode → transport → decode chain end to end and validates the result frame by
-frame.
+With GStreamer installed, `tools/frame_shm_udp_bench.sh` drives the complete
+encode → transport → decode chain and validates the result frame by frame —
+metadata, byte-exactness, timestamp monotonicity, FEC and ARQ counters.
 
 ### With radios
 
+The kernel driver has to release the adapter first, because devourer opens the
+USB device directly:
+
 ```sh
-# unload whatever kernel driver owns the adapter first
-sudo rmmod 88x2cu rtw88_8812au
+sudo rmmod <whatever module currently claims your adapter>   # e.g. 88x2cu, rtw88_8812au
 
 sudo ./build/dev/waybeam-link tx -c examples/config.radio-tx.sample.json   # vehicle
 sudo ./build/dev/waybeam-link rx -c examples/config.radio-rx.sample.json   # ground
@@ -362,8 +377,9 @@ sudo ./build/dev/waybeam-link rx -c examples/config.radio-rx.sample.json   # gro
 Both ends must agree on channel, bandwidth and network ID. Run from the repo
 root — the operating-point table is loaded by relative path.
 
-> Transmitting on 5 GHz is regulated. You are responsible for operating within
-> the rules of your jurisdiction and for the power levels you configure.
+> **Transmitting on 5 GHz is regulated.** You are responsible for operating
+> within the rules of your jurisdiction, on frequencies you are licensed to
+> use, at power levels you are permitted to radiate.
 
 ---
 
@@ -477,7 +493,7 @@ there is exactly one implementation of the packet format in the ecosystem.
 
 ```sh
 cmake --preset dev && cmake --build --preset dev -j    # x86 debug + sanitizers
-ctest --preset dev                                     # 71 test suites
+ctest --preset dev                                     # the unit test suite
 scripts/gates.sh                                       # everything CI runs
 ```
 
@@ -498,13 +514,14 @@ so local and CI cannot drift.
 Being straightforward about what is proven and what is not:
 
 **Verified on real hardware**
-- End-to-end byte-identical video: encoder → RF → decoder, at ~90 fps.
-- Injection and monitoring from two chip families mixed in one process.
-- Retransmission round-trip P90 ≤ 4 ms at 65 % airtime — well inside a
+- End-to-end byte-identical video — encoder → RF → decoder, at ~90 fps, with
+  zero decode errors.
+- Retransmission round-trip P90 ≤ 4 ms at 65 % airtime, comfortably inside a
   keyframe's display deadline.
-- Diversity gain and FEC recovery through a real signal-strength fade.
-- The follow-me channel switch, including automatic back-out.
-- Discovery, pairing, and mode application over both HTTP and RF.
+- Diversity gain and FEC recovery measured through a real signal-strength fade.
+- Two different radio chips injecting and receiving in the same process.
+- The follow-me channel switch, including the automatic back-out.
+- Discovery, pairing, and operating-mode application over both HTTP and RF.
 
 **Still open**
 - Range-limited behaviour of the return path in flight.
@@ -517,14 +534,14 @@ Being straightforward about what is proven and what is not:
 - The vehicle's return-path reception is best-effort and always will be.
 - No 802.11 MAC-layer retries: application-level resend is the only retry.
 
-**What is genuinely novel here, and what is not.** Multi-adapter same-channel
-diversity with deduplication is prior art — that part is a clean
-reimplementation. The novel contributions are the frame-aligned, deadline-aware
-opportunistic ARQ, the open broadcast passive-latch session model, and unifying
-modulation, power and encoder bitrate under one controller. The adaptive control
-discipline itself is lifted and adapted from a production wfb-ng
-`link_controller`, with its objective inverted from airtime-first to
-latency-first. Credits in [`NOTICE`](NOTICE).
+**What is genuinely new here, and what is not.** Multi-adapter same-channel
+receive diversity with deduplication is prior art; this is a clean, FEC-free
+reimplementation of it rather than an invention. What is new is the rest: ARQ
+that is frame-aligned, importance-gated and deadline-aware instead of a
+reliability layer; the open broadcast passive-latch session model with
+originator-addressed control; and putting modulation, transmit power and
+encoder bitrate under one controller with a latency-first objective instead of
+an airtime-first one.
 
 ---
 
@@ -544,6 +561,28 @@ latency-first. Credits in [`NOTICE`](NOTICE).
 
 ---
 
+## Contributing
+
+Issues and pull requests are welcome. Two things are worth knowing before you
+open one:
+
+- **[`PROTOCOL.md`](PROTOCOL.md) is the contract.** Anything that changes a
+  wire format, a state machine peers depend on, or configuration semantics is a
+  specification change: the spec is amended first, in its own commit, and the
+  reasoning is recorded in [`docs/review-log.md`](docs/review-log.md). Anything
+  still being *measured* — thresholds, dwell times, seeds — is a configuration
+  knob and a dated note in [`docs/findings.md`](docs/findings.md), not spec
+  text.
+- **`scripts/gates.sh` is what "green" means.** Run it before opening a PR. It
+  builds every preset the host can build, runs the full test suite under
+  sanitizers, and checks the library embedding and install paths. Toolchains
+  you do not have are skipped loudly rather than passing silently.
+
+[`CLAUDE.md`](CLAUDE.md) holds the longer version of both, plus the runtime and
+bench gotchas that cost real debugging time to discover.
+
+---
+
 ## Licensing and credits
 
 GPL-2.0-or-later. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
@@ -555,8 +594,7 @@ waybeam-link vendors and builds on:
 - **[libusb](https://github.com/libusb/libusb)** (LGPL-2.1-or-later)
 - **[nlohmann/json](https://github.com/nlohmann/json)** (MIT)
 
-Design and calibration groundwork draws on wfb-ng's `link_controller`, the
-`waybeam_venc` encoder API, and Realtek's per-rate power tables. The
-[wfb-ng](https://github.com/svpcom/wfb-ng) and
-[OpenIPC](https://github.com/OpenIPC) projects established the injection-link
-approach this builds on.
+The per-adapter transmit-power tables reuse the row format from Realtek's
+`PHY_REG_PG` driver data. The [OpenIPC](https://github.com/OpenIPC) and
+[wfb-ng](https://github.com/svpcom/wfb-ng) projects established the broadcast
+injection-link approach that this builds on.
