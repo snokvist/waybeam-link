@@ -206,12 +206,12 @@ is transmitting it is deaf, and its diversity siblings cover the blind spot.
 
 ```
    ground: measure                        vehicle: decide
-   ┌────────────────────┐  link report   ┌──────────────────────┐
-   │ RSSI / SNR         │───────────────►│  selector            │
-   │ pre-diversity loss │                │   ├─ demote on loss  │
-   │ post-diversity loss│                │   ├─ promote on margin│
-   │ per-adapter health │                │   └─ freeze on flap  │
-   └────────────────────┘                └──────────┬───────────┘
+   ┌────────────────────┐  link report   ┌───────────────────────┐
+   │ RSSI / SNR         │───────────────►│  selector             │
+   │ pre-diversity loss │                │   ├─ demote on loss   │
+   │ post-diversity loss│                │   ├─ promote on proof │
+   │ per-adapter health │                │   └─ freeze on flap   │
+   └────────────────────┘                └──────────┬────────────┘
                                                     │  one operating point
                                     ┌───────────────┼───────────────┐
                                     ▼               ▼               ▼
