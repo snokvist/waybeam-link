@@ -444,6 +444,16 @@ struct AirCfg {
     // returns or the ACK responder with retry limit 0 is a CONFIG ERROR —
     // the armed hybrid must never run silently inert (§3.0).
     int tx_retry_limit = 8;
+    // USB TX aggregation: how many already-decided frames the radio backend
+    // may fold into ONE bulk-OUT URB (devourer send_packets; the HalMAC
+    // families parse at most 3, and the driver clamps). Host-CPU only — same
+    // frames, same airtime, no wire change — and it defers nothing, because
+    // it batches only frames the framer already emitted back to back.
+    //
+    // Default 0 = off, so every deployment stays byte-identical until a
+    // profile opts in. Worth about 7-8 points of one core on the CV610 craft,
+    // where a single submission costs ~248 us against ~22 us on x86.
+    int usb_tx_agg = 0;
     // §15.2 (Pass 157) node TX coding, radio backend only (refused
     // elsewhere): LDPC FEC / one-stream STBC in every frame's radiotap MCS
     // field. Both default off — the enable is a measured operator action

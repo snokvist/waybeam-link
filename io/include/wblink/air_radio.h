@@ -49,6 +49,9 @@ struct RadioAirCfg {
     // constructed RadioAir with either hybrid half on always has this
     // nonzero.
     int tx_retry_limit = 8;
+    // Frames per bulk-OUT URB (devourer cfg.tx.usb_agg_max). 0/1 = off, the
+    // per-frame path, byte-identical. See config.h's air.usb_tx_agg.
+    int usb_tx_agg = 0;
     // §3.0 (Pass 157) node TX coding, stamped into every frame's radiotap
     // MCS field. Both default off; create() refuses when the TX die's
     // TxCaps reads the enabled coding unsupported (capability leg).
@@ -123,6 +126,10 @@ class RadioAir : public AirIface {
     // Send one wire packet on the TX adapter (§3.0 encapsulation added
     // here). Returns 1 when submitted, 0 on failure.
     size_t inject(const uint8_t* frame, size_t len) override;
+    // Folds up to cfg.usb_tx_agg frames into one bulk-OUT URB (devourer
+    // send_packets). Contract and rationale on AirIface::inject_staged.
+    size_t inject_staged(const uint8_t* frame, size_t len) override;
+    size_t flush_staged() override;
     size_t inject_resend(const uint8_t* frame, size_t len) override;
 
     // Send one return (NACK/LINK_REPORT) toward dest_originator. With

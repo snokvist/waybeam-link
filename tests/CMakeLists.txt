@@ -113,6 +113,7 @@ add_wb_test(rx_runtime_control_test wblink_io wblink_node)
 # §7.5 uplink data plane: hold/budget policy + craft admission matrix — both
 # halves live in node/uplink_data.h precisely so this suite can reach them.
 add_wb_test(uplink_data_test wblink_io wblink_node)
+add_wb_test(air_staged_test wblink_io wblink_node)
 add_wb_test(node_air_backend_test wblink_io wblink_node)
 add_wb_test(node_tx_core_test wblink_io wblink_node)
 add_wb_test(node_uplink_power_test wblink_io wblink_node)

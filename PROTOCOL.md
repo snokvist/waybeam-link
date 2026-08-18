@@ -4696,7 +4696,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
                 "min_interval_ms": 250 }
   },
   "air":   { "kind": "radio", "ack_responder": false, "tx_retry_limit": 8,
-             "ldpc": false, "stbc": false,
+             "ldpc": false, "stbc": false, "usb_tx_agg": 0,
              "wedge_window_ms": 1000, "wedge_min_submits": 8,
              "wedge_exit_windows": 3 },
   "stats": { "hz": 1, "bind": { "kind": "udp", "send": "127.0.0.1:9110" } },
@@ -4714,6 +4714,19 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   adapter). An RX node's `"dir":"in"` UDP stream is §7.5 uplink ingress
   (TELEMETRY/CONTROL only); the matching TX-node `"dir":"out"` stream is its
   delivery egress. `policy.uplink.*` seeds the §7.5 pacing knobs.
+- `air.usb_tx_agg` (radio backend only, Pass 184; 0..3, default **0** = off)
+  is how many already-decided frames the host may carry in ONE USB bulk-OUT
+  transfer. It is a **carrier** choice, not a pacing one: it never changes
+  which frames air, in what order, at what rate, or with what radiotap — only
+  how many share a submission. It is therefore not wire-visible and a peer
+  cannot observe it. Batching is confined to frames the framer already emitted
+  back to back (one video frame's data + parity fan-out), so nothing is ever
+  held waiting for a partner; a partial run is submitted at its fan-out
+  boundary, and the §7.2 paced EOB, §12 resends and every control frame are
+  submitted unbatched so ordering and gap-arming are unchanged. The ceiling is
+  the hardware's: the HalMAC families parse at most 3 descriptors per bulk
+  transfer, and a value above 3 is a config error rather than a silent clamp.
+  Rejected on non-radio backends.
 - `adapters[].mac` (radio backend only, Pass 154; lowercase
   `aa:bb:cc:dd:ee:ff`, normalized at load) pins a stanza to a physical unit
   by its §10.6 EFUSE-MAC identity. Match precedence is

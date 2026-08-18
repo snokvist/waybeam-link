@@ -24,6 +24,86 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 184 — how frames are carried is not how they are paced (2026-08-17)
+
+**Verdict.** New §15.2 `air.usb_tx_agg` (0..3, default 0 = off): how many
+already-decided frames the host may put in ONE USB bulk-OUT transfer. Host
+cost only — this is the first §15.2 key that changes nothing a peer can
+observe, which is exactly why it needed a ruling on where the line sits.
+
+**The distinction the key rests on.** A transport knob that groups frames
+usually means pacing, and pacing is wire-visible: it changes when frames air.
+This one cannot, because it batches only frames the framer emitted back to
+back within a single fan-out (one video frame's data + parity), all of which
+were already decided and would have gone out in that order microseconds
+apart. Nothing is ever held waiting for a partner to arrive: a partial run is
+submitted at its fan-out boundary. So the key selects a *carrier*, not a
+schedule, and stays out of §3 and §7 entirely.
+
+**Ordering is the invariant, not throughput.** The failure mode is silent —
+a frame that overtakes another looks exactly like ordinary RF loss to every
+consumer, and no counter would show it. Three rules keep it, and all three
+are in the code rather than in this document's good intentions: every
+unbatched send flushes the batch first (§10.6 selector state, §12 resends,
+the §11.7 command echo); a §7.2 paced EOB is submitted *before*
+`note_eob_sent` re-arms the listen window, so a window never opens while the
+frame that opened it is still staged; and every fan-out boundary flushes, so
+nothing straddles a tick. The 802.11 sequence the §9 loss estimator reads is
+stamped at stage time, in producer order.
+
+**Ceiling is the hardware's.** The HalMAC families parse at most 3
+descriptors per bulk transfer (`BLK_DESC_NUM`), so >3 is a config error, not
+a silent clamp — a config that says 8 would otherwise quietly mean 3.
+
+**Evidence.** Device A/B on the CV610 craft .181 at ~1100 pps, its own
+config and frame-SHM ingress, two interleaved runs: 316→223 and 337→260
+µs/frame, **8.6–10.5 points of one core**, pps unchanged (1107→1100,
+1104→1101). Mechanism measured separately with usbmon on the same 8733BU
+part, because the craft build compiles INFO out and the link silences
+devourer's event sink: **10974 → 4347 bulk-OUT URBs for identical frames**
+at an identical 1098 fps (frames/URB 1.00 → 2.52 — not 3.00, and the
+shortfall is the design: partial runs and unbatched control frames).
+
+Neither of those would notice frames arriving corrupted, duplicated or
+reordered — pps and URB counts look identical either way — so correctness
+was measured separately and end to end: 8733BU TX to an 8812AU running a
+real `rx` node, `tools/frame_shm_feed` stamping payload byte j of frame i
+as `(i*31+j)&0xff` and verifying every byte after §6.3a reassembly.
+**bad=0 in every run** — not a delivery count, every byte. Five paired runs
+delivered 400/400/399/400/400 unbatched against 400/397/398/399/400 batched:
+both arms drop the occasional frame, so that is RF, not the knob.
+
+**This is not A-MPDU, and it does not burst.** The two are separate
+capabilities in the driver — USB TX aggregation is host-to-chip transport,
+A-MPDU (`SetAmpduMode`, never called here) is the MAC folding MPDUs into one
+PPDU. Each frame keeps its own preamble and contention cycle, so no airtime
+is saved. The remaining worry was SPACING: frames arriving in the TXDMA
+together might key up back to back, changing the burst structure that
+per-frame FEC's loss-independence assumption sits on. **Measured at a
+witness's chip TSF, and they do not**: 33.7k inter-frame gaps, batched and
+unbatched, give p10/p50/p90 of 205/222/232 µs either way, with **0.0% of
+frames closer than 200 µs in both arms**. At MCS7 the air was already the
+pacer and the host never was — what changed is how frames reach the chip,
+not how the chip airs them.
+
+Residual caveats, smaller but real: five 400-frame delivery runs cannot
+exclude a ~1-in-400 PER effect, and the earlier wording "adds no latency…
+never the timing" overstated — a frame waits the microseconds it takes to
+stage its neighbours, and the §7.2 drain flushes after its loop rather than
+inside it.
+
+Limitation, stated rather than left implicit: both craft A/B runs took
+agg_off first, so strict order-effect bias is not excluded by the A/B
+alone. It is excluded by the URB count, which is causal and order-free.
+Upstream half: OpenIPC/devourer#400. Consumer default stays 0, so only
+`deploy/vehicle-192.168.2.181.json` changes behaviour.
+
+**Process note.** This amendment landed AFTER its implementing commit,
+inverting the tier-1 order ("spec amendments commit FIRST"). Recorded rather
+than hidden by a rebase: the key was treated as a host-side build detail
+until review asked whether a §15.2 addition can ever be tier 2, and the
+answer is no.
+
 ## Pass 183 — the uplink data plane exists, and it is best-effort (2026-08-15)
 
 **Ruling (operator, 2026-08-15; closes the contract half of issue #177).**

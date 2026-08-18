@@ -263,6 +263,38 @@ int main() {
         }
     }
 
+    // --- §15.2 usb_tx_agg (Pass 184) ---------------------------------------
+    {
+        // Default is OFF, which is what keeps every existing deployment on
+        // the per-frame path byte for byte.
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->air.usb_tx_agg, 0);
+        auto r3 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "usb_tx_agg": 3}})");
+        CHECK(bool(r3));
+        if (r3) CHECK_EQ_U(r3.value->air.usb_tx_agg, 3);
+        // Above the HalMAC BLK_DESC_NUM ceiling is a config ERROR, not a
+        // silent clamp: a config saying 8 would otherwise quietly mean 3.
+        auto r4 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "usb_tx_agg": 8}})");
+        CHECK(!bool(r4));
+        // A bulk-OUT URB is a USB-radio concept; on udp-air the key would
+        // read enabled while doing nothing.
+        auto r5 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "udp", "usb_tx_agg": 3}})");
+        CHECK(!bool(r5));
+        // ...but omitting it on udp-air is fine — the refusal is about a
+        // SET key, not about the backend carrying a default.
+        auto r6 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "udp"}})");
+        CHECK(bool(r6));
+    }
+
     // --- §3.0/§15.2 tx_retry_limit coupling (Pass 156) ----------------------
     {
         // Default seeds 8 (operator-ruled); parse override works.
