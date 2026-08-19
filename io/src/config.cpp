@@ -469,6 +469,26 @@ Result<Config> load_config_json(const std::string& json_text) {
                         ": fec.e_rate_permille needs fec.scheme \"rlc256\" (§14.1a)");
                 }
             }
+            // §6.3b spatial salvage + slice concealment (frame-shm egress).
+            if (s.contains("conceal")) {
+                const json& c = s.at("conceal");
+                const auto mode = c.value("mode", std::string("off"));
+                if (mode != "off" && mode != "slice-skip") {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": conceal.mode must be \"off\" or \"slice-skip\" "
+                        "(§6.3b)");
+                }
+                if (sc.bind.kind != BindKind::kFrameShm ||
+                    sc.dir != Dir::kOut) {
+                    return Result<Config>::fail(
+                        "stream " + std::to_string(sid) +
+                        ": conceal is only valid on frame-shm egress (§6.3b)");
+                }
+                sc.conceal_enabled = (mode == "slice-skip");
+                sc.conceal_freeze_frame =
+                    c.value("freeze_frame", sc.conceal_freeze_frame);
+            }
             if (s.contains("jscc_shadow")) {
                 if (sc.bind.kind != BindKind::kFrameShm || sc.dir != Dir::kIn) {
                     return Result<Config>::fail(

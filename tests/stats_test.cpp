@@ -79,6 +79,10 @@ StatsSnapshot sample_snapshot() {
     st.frame_interval_us = 11106;
     st.frame_jitter_us = 184;
     st.frames_fast = 89571;
+    st.frames_salvaged = 12;
+    st.frames_frozen = 3;
+    st.salvage_failed = 1;
+    st.slices_synthesized = 27;
     st.frames_unrecoverable = 0;
     st.malformed = 0;
     st.jscc_shadow_blocks = 89681;
@@ -247,7 +251,10 @@ const char* kGolden =
     "\"frame_size_min\":8120,\"frame_size_max\":241810,"
     "\"frame_interval_us\":11106,\"frame_jitter_us\":184,"
     "\"frames_fast\":89571,\"frames_unrecoverable\":0,"
-    "\"malformed\":0,\"jscc_shadow_blocks\":89681,"
+    "\"malformed\":0,"
+    "\"frames_salvaged\":12,\"frames_frozen\":3,"
+    "\"salvage_failed\":1,\"slices_synthesized\":27,"
+    "\"jscc_shadow_blocks\":89681,"
     "\"jscc_predicted_loss_symbols\":3,"
     "\"jscc_observed_loss_symbols\":1,"
     "\"jscc_underpredicted_blocks\":72,"

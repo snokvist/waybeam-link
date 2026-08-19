@@ -49,7 +49,14 @@ struct FrameReassemblerStats {
     uint64_t frames_superseded = 0;
     uint64_t frames_deadline = 0;
     uint64_t frames_unrecoverable = 0;  // finalized with < k, no way to decode
-    uint64_t frames_salvaged = 0;       // §6.3b hook repaired + emitted
+    // §6.3b outcomes. The reassembler itself counts frames_salvaged as "the
+    // hook emitted" (salvaged + frozen combined); the node layer overwrites
+    // all four from SpatialRepairStats at snapshot time, which splits
+    // salvaged (>= 1 surviving slice) from frozen (whole-frame synthesis).
+    uint64_t frames_salvaged = 0;
+    uint64_t frames_frozen = 0;
+    uint64_t salvage_failed = 0;
+    uint64_t slices_synthesized = 0;
     uint64_t decode_failures = 0;
     uint64_t malformed = 0;
     uint64_t jscc_shadow_blocks = 0;
@@ -90,7 +97,9 @@ struct RepairCandidate {
 
 // §6.3b: view of a block being finalized below k — its verified received
 // source chunks (chunk i = blob bytes [i*s, i*s+size)) and known geometry.
-// s/frame_len are 0 when no symbol named them.
+// s/frame_len are 0 when no symbol named them. Valid ONLY for the duration
+// of the SalvageHook call: the block (and the map sources points into) is
+// erased as soon as the hook returns.
 struct SalvageView {
     uint32_t block_id = 0;
     uint16_t k = 0;

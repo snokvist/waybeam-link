@@ -136,6 +136,10 @@ struct StreamCfg {
     // §14.1 FEC for frame-shm streams (ignored on udp streams).
     StreamFecCfg fec;
     std::optional<JsccShadowCfg> jscc_shadow;
+    // §6.3b spatial salvage on frame-shm egress. "off" (default) or
+    // "slice-skip"; freeze_frame read only when the mode is not off.
+    bool conceal_enabled = false;
+    bool conceal_freeze_frame = true;
 };
 
 // §9.1 cascade + §9.4/§9.5/§9.7/§9.8/§9.9 constants (seeds; RE-DERIVE per

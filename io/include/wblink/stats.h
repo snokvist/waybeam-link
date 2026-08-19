@@ -102,6 +102,11 @@ struct StreamStats {
     uint64_t frames_fast = 0;
     uint64_t frames_unrecoverable = 0;
     uint64_t malformed = 0;
+    // §6.3b spatial salvage outcomes (0 with conceal.mode "off").
+    uint64_t frames_salvaged = 0;
+    uint64_t frames_frozen = 0;
+    uint64_t salvage_failed = 0;
+    uint64_t slices_synthesized = 0;
     uint64_t jscc_shadow_blocks = 0;
     uint16_t jscc_predicted_loss_symbols = 0;
     uint16_t jscc_observed_loss_symbols = 0;
