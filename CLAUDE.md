@@ -64,7 +64,7 @@ before merge instead of stacking a correction on top.
   is **silently ignored**. `--check` passing proves the config parses, not that
   it says what you meant. See "Authoring configs" below.
   `waybeam-link config-schema --json` prints the declared key surface
-  (`io/src/config_registry.cpp`, 263 keys) so a key can be checked without
+  (`io/src/config_registry.cpp`, 273 keys) so a key can be checked without
   reading the loader. The registry is not a second source of truth:
   `tests/config_registry_test.py` reconstructs every accessor site in
   `config.cpp` and fails the build if the two disagree in either direction.
@@ -121,7 +121,7 @@ Current phase order (operator direction, 2026-08-06): **consolidate → expand
 
 ## Authoring configs
 
-Node configs are dense (263 registered keys, `config-schema --json`) and
+Node configs are dense (273 registered keys, `config-schema --json`) and
 **coupled across nodes**: the
 cache's `store.controller.endpoint` must equal the owning ground's
 `cache.repair.listen`, the ground's `cache.repair.caches[]` must name the
@@ -174,7 +174,7 @@ drift.
 The individual commands, when you want one of them:
 
 ```
-cmake --build --preset dev && ctest --preset dev   # 71 suites, ASan+UBSan
+cmake --build --preset dev && ctest --preset dev   # 83 suites, ASan+UBSan
 cmake --build --preset ssc338q                      # ARMv7 cross (SigmaStar target)
 cmake --build --preset cv610                        # ARMv7 soft-float (HiSilicon target)
 ```
