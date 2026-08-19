@@ -42,6 +42,17 @@ s=500, r=2, IRAP protected as ARQ would):
 All emitted streams decode to full frame count; the only decoder complaints
 are refs to genuinely dropped frames.
 
+**Production-chain confirmation** (`tools/spatial_conceal_bench`: real
+FrameFramer → xorshift symbol loss → FrameReassembler → SpatialRepair, IDR
+loss exempt as ARQ would make it; 1080p 4-slice x265, p_rate 100‰):
+16% source-symbol loss → 0/40 dropped (23 salvaged, 3 frozen); 31% → 0/40
+(27 salvaged, 11 frozen); every output decodes fully on ffmpeg, GStreamer
+`h265parse ! avdec_h265` (the ground hub's x86 graph), and HM-18.0. Salvage
+cost avg 97 µs / max 211 µs per repaired frame (x86 release); bare synthesis
+21.6 µs per quarter-1080p CTU32 slice. HM in the loop caught two conformance
+bugs (extra end_of_subset alignment bit; missing WPP entry points) that
+ffmpeg/libde265 tolerated — keep it in every writer change.
+
 **Open.** SSC338Q slice-split output shape (packs vs `packetInfo[8]` clamp),
 per-slice bitrate overhead at 4/8 slices, on-device repair latency, RK3566 /
 Android MediaCodec acceptance of repaired AUs (VAAPI-class ffmpeg decode is

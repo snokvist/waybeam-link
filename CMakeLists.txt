@@ -487,6 +487,9 @@ if(PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
     add_executable(hevc_conceal_cli tools/hevc_conceal_cli.cpp)
     target_compile_options(hevc_conceal_cli PRIVATE ${WBLINK_WARNINGS})
     target_link_libraries(hevc_conceal_cli PRIVATE wblink_core)
+    add_executable(spatial_conceal_bench tools/spatial_conceal_bench.cpp)
+    target_compile_options(spatial_conceal_bench PRIVATE ${WBLINK_WARNINGS})
+    target_link_libraries(spatial_conceal_bench PRIVATE wblink_core)
 endif()
 
 # B10 runtime probe (#109). node-linkcheck proves the sink's symbols resolve;
