@@ -12,6 +12,44 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-19 — slice-skip concealment measured offline: the FEC cliff becomes a slope
+
+**Setup.** Offline, no radios: 512×512 @ 100 fps test content, 4 independent
+slices/picture, P-only, 1 ref. Encoders: x265 3.5 (WPP forced — x265 refuses
+multi-slice without it) and HM-18.0 (`SliceMode=1`, no WPP, SAO **on**,
+TMVP both off and on — the shapes a hardware encoder emits). Decoders:
+ffmpeg 6.1 (`framemd5`) and libde265 1.0.15. Harness:
+`tools/spatial_conceal/` (this branch).
+
+**Substitution proof.** Replacing any 1, any 2 (adjacent and scattered), or
+all 4 slices of a P picture with synthesized all-skip slices decodes clean on
+both decoders; the concealed region's interior is byte-equal to the previous
+picture, untouched slices byte-equal to the reference decode, and the next
+IDR resyncs exactly. A 41–1460 B coded slice is replaced by a **10–12 B**
+concealment slice. Error propagates only inside the concealed region (plus
+motion bleed) until the next IDR/GDR pass — the desired HDZero-like shape.
+
+**Full-chain sim** (blob → s-byte chunks → i.i.d. loss → §14.1 model:
+full decode iff received ≥ k, else salvage → §6.3b rebuild → decode;
+s=500, r=2, IRAP protected as ARQ would):
+
+| loss | clean | FEC | salvaged | frozen | dropped (was) |
+|---|---|---|---|---|---|
+| 15% | 41 | 65 | 11 | 3 | **0** (14) |
+| 25% | 18 | 53 | 34 | 15 | **0** (49) |
+| 40% | 6 | 22 | 57 | 34 | **1** (92) |
+
+All emitted streams decode to full frame count; the only decoder complaints
+are refs to genuinely dropped frames.
+
+**Open.** SSC338Q slice-split output shape (packs vs `packetInfo[8]` clamp),
+per-slice bitrate overhead at 4/8 slices, on-device repair latency, RK3566 /
+Android MediaCodec acceptance of repaired AUs (VAAPI-class ffmpeg decode is
+covered above), GDR × concealment convergence measurement. Closed to contract
+by Pass 185 (§6.3b); these numbers stay Tier-2.
+
+---
+
 ## 2026-08-16 — the RTL8733BU actuator lands, and all three fleet floors are measured
 
 **Setup.** devourer re-vendored `c8f3531` → `5bf059a` (#399), which gives the

@@ -1353,10 +1353,14 @@ frames instead of forwarding per-packet payloads:
 3. **Sources missing but ≥ `k` total** (source + repair): GF(256) decode (§14.1)
    recovers the missing source symbols, trim to `frame_len`, then egress.
 4. **< `k` after deadline / on supersession (§6.2):** frame lost, **nothing is
-   egressed** — a partial frame is useless to the decoder (no partial slots).
+   egressed** — a *partial* frame is useless to the decoder (no partial slots).
+   When the stream enables §6.3b spatial salvage, this outcome first attempts
+   slice-level concealment; only a frame §6.3b cannot repair is lost.
 5. The egressed slot is **byte-identical** to the producer's original slot
    (§15.4) — the metadata prefix rides through transparently; the RX never
-   parses the Annex-B payload.
+   parses the Annex-B payload. Exception: a §6.3b-repaired frame is a
+   *reconstructed* slot — surviving slices byte-identical, erased slices
+   replaced — and is the one egress that is not the producer's bytes.
 6. Successful fast/FEC completion marks the block packet-complete in the merged
    RX engine. Every pending gap belonging to that block becomes FEC-satisfied,
    advances without a packet-drop charge, and is excluded from all later NACK
@@ -1373,6 +1377,78 @@ This is §5.3 Option A. (Option B — RTP re-packetization for a decoder that ca
 consume SHM — is out of scope for v1; a `udp` egress on a `frame-shm`-ingested
 stream is rejected at config load, since the wire payloads are frame *fragments*,
 not RTP packets.)
+
+### 6.3b Spatial salvage + slice concealment (`streams[].conceal`, default off)
+
+Opt-in per frame-SHM egress stream. When a block finalizes below `k`
+(deadline / supersession, §6.3a outcome 4), the verified source symbols that
+DID arrive are not discarded with the block: §14.1 FEC is systematic, so a
+received source symbol is plaintext frame bytes regardless of whether the
+block as a whole could decode. Symbol trust states are therefore:
+
+- **RECEIVED** — source symbol delivered on air/cache. Integrity = the same
+  §13 posture as the fast path: chip-validated 802.11 FCS + length-exact §3.1
+  parse + §5.1a subheader cross-checks. No weaker than what egresses today.
+- **RECOVERED** — produced by a successful full §14.1 decode (only exists on
+  the ≥ `k` path; a failed decode recovers nothing).
+- **ERASED** — everything else. Never guessed at, never partially used.
+
+The salvage path reconstructs what it can at the **HEVC slice** level (the
+producer emits multiple independent slice segments per picture, §15.4):
+
+1. Present byte ranges of the `[VencFrameMeta][Annex-B]` blob follow from the
+   received source indices (chunk `i` = bytes `[i*s, i*s+len_i)`); `s` must be
+   known (any non-last source or any repair names it), else salvage fails.
+2. Slice boundaries come from Annex-B start-code scan **inside present ranges
+   only** (emulation prevention guarantees no false positives). A slice is
+   *complete* iff every byte from its start code to the next start code (or to
+   `frame_len`) is present. `frame_len` unknown ⇒ the trailing slice is
+   incomplete. Slices whose bytes touch any erasure are wholly ERASED — no
+   partially-corrupt entropy data is ever emitted (§13 discipline).
+3. Slice geometry (the expected `slice_segment_address` list) is learned from
+   previously delivered frames of the same stream, never assumed. Survivor
+   addresses outside the learned geometry ⇒ salvage fails (fail toward §6.3a
+   outcome 4, the pre-§6.3b behaviour).
+4. Each erased slice is replaced by a **synthesized all-skip P slice segment**
+   for the same address span: slice header rewritten from a surviving slice of
+   the same picture (picture-level fields are identical across a picture's
+   slice headers per HEVC §7.4.7.1), SAO off, `MaxNumMergeCand = 1`, CABAC
+   payload of skip CTUs. The decoder reconstructs that region from the
+   reference picture — a frozen region, not a dropped picture. The synthesized
+   slice is syntactically complete, standards-valid HEVC; the hardware decoder
+   is never handed intentionally malformed data.
+5. The rebuilt access unit egresses through the normal §6.3a slot write with
+   the original `VencFrameMeta` when chunk 0 survived, else a synthesized meta
+   (`codec` H.265, flags 0, PTS extrapolated). Ordering: a salvaged frame
+   emits only if no newer block has already emitted (zero-reorder rule of
+   §6.3a holds; a stale salvage is dropped, not reordered).
+
+Refusals (all fall back to the pre-§6.3b drop): any surviving slice of the
+picture is an IRAP (intra pictures are ARQ/`i_rate`-protected instead, §4.1 +
+§14.1 — concealment needs a reference picture); `VencFrameMeta.flags` IDR set;
+dependent slice segments; slice geometry unknown or mismatched; `s` unknown.
+
+**Whole-frame freeze** (`conceal.freeze_frame`, default true): when not a
+single slice survived but geometry + a donor header from an earlier delivered
+P picture are cached, the entire picture is synthesized as skip slices with
+`slice_pic_order_cnt_lsb` advanced by one. This converts "frame dropped" into
+"frame frozen", keeping the decoder's timeline continuous. A freeze emitted
+where the true (lost) frame was an IRAP leaves the same reference gap the
+drop would have — §3.9 recovery covers both identically.
+
+GDR interaction: a concealed region inside an active GDR cycle voids that
+cycle's clean-area claim for the affected rows; the region converges on the
+following refresh pass. `gdr_pos`/`gdr_len` metadata rides through unchanged.
+
+Config (§15.2): `streams[].conceal.mode` — `"off"` (default) or
+`"slice-skip"`; `streams[].conceal.freeze_frame` — bool, default true,
+read only when mode is not `"off"`. Valid only on frame-SHM egress streams.
+
+Stats (§15.3, per stream): `frames_salvaged` (emitted with ≥1 surviving
+slice), `frames_frozen` (whole-frame synthesis), `salvage_failed` (attempted,
+refused — the frame then dropped as before), `slices_synthesized` (total
+replacement slices written). `frames_unrecoverable` counts only frames that
+actually dropped; a salvaged/frozen frame increments `frames_delivered`.
 
 ### 6.4 NACK generation
 - For a lost seq that is `ARQ`- or `PFRAME_ARQ`-flagged, not superseded, within
@@ -4145,7 +4221,9 @@ config (`fec.i_rate_permille` / `fec.p_rate_permille`), not a recompile.
   decode. With ≥ `k` total symbols (any source/repair mix) → GF(256) Gaussian
   elimination on the received rows recovers the missing source symbols
   (guaranteed by MDS). With < `k` after the block deadline / on supersession →
-  frame lost (§6.2), no partial delivery.
+  frame lost (§6.2), no partial delivery — unless the stream enables §6.3b,
+  which salvages the block's verified systematic source symbols for
+  slice-level concealment instead of discarding them.
 - **Emission order:** all `k` source symbols first (source-first delivers the
   no-loss case without any FEC decode), then the `r` repair symbols (same
   `block_id`). `END_OF_BLOCK` is on the final repair when `r > 0`, otherwise on
@@ -4877,6 +4955,10 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
     "fec": { "scheme": "rlc256", "i_rate_permille": 250,
              "p_rate_permille": 100, "min_k": 3, "min_r": 2 } }
   ```
+  A frame-SHM **egress** (`dir:"out"`) stream may carry the optional §6.3b
+  `conceal` block: `"conceal": { "mode": "slice-skip", "freeze_frame": true }`.
+  `mode` defaults to `"off"` (behaviour unchanged); the block is rejected on
+  non-frame-shm and on ingress streams.
   `power_offset_qdb` (§10.5, Pass 150) is the **relative** TX offset in
 quarter-dB applied to every `role:"tx"` adapter at startup, against the
 backend's calibrated reference (devourer: the efuse per-rate
@@ -5042,6 +5124,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "frame_size_max": 241810, "frame_interval_us": 11106,
     "frame_jitter_us": 184,
     "frames_fast": 89571, "frames_unrecoverable": 0, "malformed": 0,
+    "frames_salvaged": 0, "frames_frozen": 0, "salvage_failed": 0,
+    "slices_synthesized": 0,
     "jscc_shadow_blocks": 89681, "jscc_predicted_loss_symbols": 3,
     "jscc_observed_loss_symbols": 1, "jscc_underpredicted_blocks": 72,
     "jscc_predicted_parity_symbols": 271044,
@@ -5243,7 +5327,10 @@ symbols, `frames_fast` = frames delivered all-source with no decode,
 `frames_unrecoverable` = frames finalized below `k` (no way to decode),
 `decode_errors` = FEC decode returned an error, `malformed` = symbols rejected
 before decode, and `dropped_superseded`/`dropped_deadline` = frames dropped by
-supersession / past their deadline. On a UDP (RTP/telemetry) stream the
+supersession / past their deadline. With §6.3b enabled, `frames_salvaged` /
+`frames_frozen` / `salvage_failed` / `slices_synthesized` count concealment
+outcomes; a salvaged or frozen frame is delivered, so it is excluded from
+`frames_unrecoverable`. On a UDP (RTP/telemetry) stream the
 per-frame fields (`frames_fast`, `frames_unrecoverable`, `malformed`) stay 0.
 On frame-SHM ingress, `malformed` counts whole frames rejected by FrameFramer;
 RX-only reassembly outcome fields remain 0.
