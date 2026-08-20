@@ -64,7 +64,6 @@ class SpatialRepair {
         uint32_t nal_off = 0;   // first NAL header byte
         uint32_t end_off = 0;   // next start code / end of frame
         bool complete = false;  // every byte to end_off verified present
-        bool end_known = false;
         bool is_vcl = false;
         hevc::SliceInfo slice;  // valid iff is_vcl && header parsed
         bool header_ok = false;
@@ -75,7 +74,7 @@ class SpatialRepair {
         return false;
     }
     bool freeze(uint32_t total_ctbs, const Emit& emit);
-    void append_conceal_meta(uint32_t poc);
+    void append_conceal_meta();
 
     SpatialRepairConfig cfg_;
     SpatialRepairStats stats_;
@@ -99,8 +98,8 @@ class SpatialRepair {
     // reference set. Cycling GOP patterns (HM lowdelay) never satisfy it; a
     // flat 1-ref stream satisfies it everywhere except the first P after an
     // IDR (smaller DPB => legitimately different set), so this is a per-frame
-    // condition — last two donors equal — not a latched verdict.
-    std::vector<uint8_t> donor_rps_bits_;
+    // condition — last two donors' RPS bit spans equal — not a latched
+    // verdict. Compared in place against donor_ (no per-frame allocation).
     bool rps_stable_ = false;
     uint32_t last_poc_ = 0;
     bool have_poc_ = false;
@@ -112,6 +111,8 @@ class SpatialRepair {
     // scratch (steady-state allocation-free once warmed)
     hevc::ConcealScratch conceal_scratch_;
     std::vector<uint8_t> present_;     // byte-presence bitmap scratch
+    std::vector<uint8_t> assembly_;    // frame-bytes scratch (repair())
+    std::vector<uint32_t> addr_scratch_;  // per-frame address list (learn())
     std::vector<FoundNal> found_;
     std::vector<uint8_t> rebuilt_;
     hevc::SliceInfo parsed_slice_;     // reused parse target in learn()

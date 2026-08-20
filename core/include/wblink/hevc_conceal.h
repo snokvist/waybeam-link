@@ -131,6 +131,8 @@ struct ConcealScratch {
     std::vector<uint8_t> payload_bits;  // slice-data bit accumulator
     std::vector<uint8_t> rbsp;          // packed header bytes
     std::vector<uint8_t> payload_rbsp;  // packed slice-data bytes
+    std::vector<uint32_t> segment_starts;  // WPP substream byte offsets
+    std::vector<uint32_t> entry_points;    // WPP entry_point_offset values
 };
 
 // Synthesize a complete concealment slice NAL for CTU raster addresses

@@ -597,7 +597,15 @@ bool parse_slice_header(const uint8_t* nal, size_t len, const SpsInfo& sps,
     if (len < 3) {
         return false;
     }
-    out = SliceInfo{};
+    // Reset while keeping header_rbsp's capacity: the same SliceInfo is the
+    // reused parse target on the per-frame learn() path, and a plain brace
+    // reset freed and reallocated the buffer on every slice.
+    {
+        std::vector<uint8_t> keep(std::move(out.header_rbsp));
+        keep.clear();
+        out = SliceInfo{};
+        out.header_rbsp = std::move(keep);
+    }
     out.nal_header[0] = nal[0];
     out.nal_header[1] = nal[1];
     out.nal_unit_type = nal_type(nal);
@@ -1007,7 +1015,9 @@ bool make_conceal_slice(const SpsInfo& sps, const PpsInfo& pps,
 
     const bool wpp = pps.entropy_coding_sync_enabled;
     const uint32_t width = sps.pic_width_ctbs;
-    std::vector<uint32_t> segment_starts{0};  // payload byte offsets
+    std::vector<uint32_t>& segment_starts = scratch.segment_starts;
+    segment_starts.clear();
+    segment_starts.push_back(0);  // payload byte offsets
     for (uint32_t n = 0; n < num_ctbs; ++n) {
         const uint32_t addr = address + n;
         st.cur_ctb = addr;
@@ -1047,7 +1057,8 @@ bool make_conceal_slice(const SpsInfo& sps, const PpsInfo& pps,
     // Escaped byte length per substream segment (except the last). Each
     // segment ends in a nonzero byte (the flush's final 1 bit lives in it),
     // so zero-runs never span segments and per-segment counts are exact.
-    std::vector<uint32_t> entry_points;
+    std::vector<uint32_t>& entry_points = scratch.entry_points;
+    entry_points.clear();
     if (wpp && segment_starts.size() > 1) {
         for (size_t i = 0; i + 1 < segment_starts.size(); ++i) {
             uint32_t esc = 0;

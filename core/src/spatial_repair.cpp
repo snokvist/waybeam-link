@@ -13,25 +13,24 @@ namespace wblink {
 
 namespace {
 
-// The donor's short_term_ref_pic_set + long-term block as a canonical
-// bit-aligned byte string, so successive P pictures' sets can be compared.
-std::vector<uint8_t> rps_bits(const wblink::hevc::SliceInfo& si) {
-    std::vector<uint8_t> out;
-    uint8_t acc = 0;
-    uint32_t n = 0;
-    for (uint32_t p = si.strps_bit_begin; p < si.strps_bit_end; ++p) {
-        const uint8_t bit = (si.header_rbsp[p >> 3] >> (7 - (p & 7))) & 1;
-        acc = static_cast<uint8_t>((acc << 1) | bit);
-        if (++n % 8 == 0) {
-            out.push_back(acc);
-            acc = 0;
+// §6.3b freeze gate: are two slices' [strps_bit_begin, strps_bit_end) RPS
+// spans bit-identical? Compared in place — the per-frame learn() path must
+// not serialize a canonical byte string per picture just to get a bool.
+bool rps_span_equal(const wblink::hevc::SliceInfo& a,
+                    const wblink::hevc::SliceInfo& b) {
+    const uint32_t n = a.strps_bit_end - a.strps_bit_begin;
+    if (n != b.strps_bit_end - b.strps_bit_begin) {
+        return false;
+    }
+    for (uint32_t k = 0; k < n; ++k) {
+        const uint32_t pa = a.strps_bit_begin + k;
+        const uint32_t pb = b.strps_bit_begin + k;
+        if (((a.header_rbsp[pa >> 3] >> (7 - (pa & 7))) & 1) !=
+            ((b.header_rbsp[pb >> 3] >> (7 - (pb & 7))) & 1)) {
+            return false;
         }
     }
-    if (n % 8) {
-        out.push_back(static_cast<uint8_t>(acc << (8 - n % 8)));
-    }
-    out.push_back(static_cast<uint8_t>(n));  // disambiguate lengths
-    return out;
+    return true;
 }
 
 uint32_t rd_le32(const uint8_t* p) {
@@ -63,7 +62,8 @@ void SpatialRepair::learn(const uint8_t* blob, size_t len) {
 
     const uint8_t* p = blob + kVencFrameMetaSize;
     const size_t n = len - kVencFrameMetaSize;
-    std::vector<uint32_t> addrs;
+    std::vector<uint32_t>& addrs = addr_scratch_;  // capacity reused per frame
+    addrs.clear();
     bool geometry_ok = true;
     bool saw_vcl = false;
     size_t i = 0;
@@ -116,9 +116,8 @@ void SpatialRepair::learn(const uint8_t* blob, size_t len) {
                     }
                     if (parsed_slice_.slice_type == 1 &&
                         !hevc::nal_is_irap(t) && addrs.size() == 1) {
-                        std::vector<uint8_t> rps = rps_bits(parsed_slice_);
-                        rps_stable_ = have_donor_ && rps == donor_rps_bits_;
-                        donor_rps_bits_ = std::move(rps);
+                        rps_stable_ = have_donor_ &&
+                            rps_span_equal(parsed_slice_, donor_);
                         donor_ = parsed_slice_;  // vector copy; small header
                         have_donor_ = true;
                     }
@@ -127,7 +126,9 @@ void SpatialRepair::learn(const uint8_t* blob, size_t len) {
                 }
             }
         }
-        i = nal_off;
+        // The extent scan already found the next start code at j — resume
+        // there instead of re-walking the NAL body byte by byte.
+        i = j;
     }
     if (saw_vcl) {
         if (geometry_ok && !addrs.empty() && addrs.front() == 0 &&
@@ -140,7 +141,7 @@ void SpatialRepair::learn(const uint8_t* blob, size_t len) {
             if (addrs == geometry_pending_ && addrs != geometry_) {
                 geometry_ = addrs;
             }
-            geometry_pending_ = std::move(addrs);
+            std::swap(geometry_pending_, addrs);  // addrs is the scratch
         } else if (!geometry_ok) {
             geometry_.clear();
             geometry_pending_.clear();
@@ -149,7 +150,7 @@ void SpatialRepair::learn(const uint8_t* blob, size_t len) {
     }
 }
 
-void SpatialRepair::append_conceal_meta(uint32_t /*poc*/) {
+void SpatialRepair::append_conceal_meta() {
     uint8_t meta[kVencFrameMetaSize];
     std::memcpy(meta, meta_template_, kVencFrameMetaSize);
     wr_le32(meta, last_pts_ + pts_delta_);
@@ -165,7 +166,7 @@ bool SpatialRepair::freeze(uint32_t total_ctbs, const Emit& emit) {
     const uint32_t poc =
         (last_poc_ + 1) & ((1u << sps_.log2_max_poc_lsb) - 1);
     rebuilt_.clear();
-    append_conceal_meta(poc);
+    append_conceal_meta();
     for (size_t gi = 0; gi < geometry_.size(); ++gi) {
         const uint32_t addr = geometry_[gi];
         const uint32_t end_addr =
@@ -208,7 +209,7 @@ bool SpatialRepair::repair(uint16_t k, uint16_t s, uint32_t frame_len,
         return fail();
     }
     present_.assign(total, 0);
-    std::vector<uint8_t> assembly(total);  // NOLINT: scratch, reused sizes
+    assembly_.assign(total, 0);  // member scratch: capacity reused per salvage
     for (const auto& [idx, chunk] : sources) {
         const uint64_t off = static_cast<uint64_t>(idx) * s;
         if (off >= total) {
@@ -217,7 +218,7 @@ bool SpatialRepair::repair(uint16_t k, uint16_t s, uint32_t frame_len,
         // total is capped at max_frame_bytes, so these fit size_t on 32-bit.
         const size_t nbytes = static_cast<size_t>(
             std::min<uint64_t>(chunk.size(), total - off));
-        std::memcpy(assembly.data() + off, chunk.data(), nbytes);
+        std::memcpy(assembly_.data() + off, chunk.data(), nbytes);
         std::memset(present_.data() + off, 1, nbytes);
     }
     const auto span_present = [&](uint64_t off, uint64_t nbytes) {
@@ -235,15 +236,15 @@ bool SpatialRepair::repair(uint16_t k, uint16_t s, uint32_t frame_len,
     // VencFrameMeta (chunk 0 head). IDR frames are never concealed.
     const bool meta_present = span_present(0, kVencFrameMetaSize);
     if (meta_present) {
-        if (assembly[4] != kFrameCodecH265 ||
-            (assembly[5] & kFrameFlagIdr) != 0) {
+        if (assembly_[4] != kFrameCodecH265 ||
+            (assembly_[5] & kFrameFlagIdr) != 0) {
             return fail();
         }
     }
 
     // Start-code scan inside present ranges only.
     found_.clear();
-    const uint8_t* p = assembly.data();
+    const uint8_t* p = assembly_.data();
     for (uint32_t i = kVencFrameMetaSize; i + 3 <= total; ++i) {
         if (!(present_[i] && present_[i + 1] && present_[i + 2] &&
               p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1)) {
@@ -265,7 +266,6 @@ bool SpatialRepair::repair(uint16_t k, uint16_t s, uint32_t frame_len,
         const uint32_t next_sc =
             fi + 1 < found_.size() ? found_[fi + 1].sc_off : total;
         f.end_off = next_sc;
-        f.end_known = true;
         f.complete = span_present(f.sc_off, next_sc - f.sc_off) &&
                      (fi + 1 < found_.size() || frame_len != 0);
         if (f.end_off > f.nal_off && f.end_off < total &&
@@ -324,13 +324,13 @@ bool SpatialRepair::repair(uint16_t k, uint16_t s, uint32_t frame_len,
     // Rebuild: meta, leading complete non-VCL NALs, then the slice sequence.
     rebuilt_.clear();
     if (meta_present) {
-        rebuilt_.insert(rebuilt_.end(), assembly.data(),
-                        assembly.data() + kVencFrameMetaSize);
+        rebuilt_.insert(rebuilt_.end(), assembly_.data(),
+                        assembly_.data() + kVencFrameMetaSize);
     } else {
         if (!have_meta_) {
             return fail();
         }
-        append_conceal_meta(donor->poc_lsb);
+        append_conceal_meta();
     }
     const uint32_t first_vcl_sc = [&] {
         for (const FoundNal& f : found_) {
@@ -383,7 +383,6 @@ void SpatialRepair::reset_stream() {
     have_pps_ = false;
     geometry_.clear();
     have_donor_ = false;
-    donor_rps_bits_.clear();
     rps_stable_ = false;
     have_poc_ = false;
     have_meta_ = false;
