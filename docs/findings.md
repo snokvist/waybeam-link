@@ -89,6 +89,19 @@ Confirming A/B for Phase C/E (knob already exists, no code needed): same
 loss run with `freeze_frame` on vs off on the rk3566 hub, count
 `MPP: presenting partial frame errinfo` lines and IDR requests.
 
+Decoded-frame A/B on the capture (same AU 83 lost both ways, ffmpeg
+`-threads 1`): freeze emits an imperceptible repeat (luma mean 0.99 vs
+truth) and the stream is **bit-exact again 2 frames later** at the next
+base picture; a plain drop makes the next frame decode against a
+substituted reference — one visibly smeared frame (mean 19.7, max 123,
+worst in the moving band) that is precisely the errinfo frame MPP
+presents — then heals at the same base. Both heal fast because this
+craft's SVC-T base frames reference only the long-term chain, so
+enhance-frame damage cannot cross a base boundary. Bonus control: a
+freeze from a *base* donor (CLI-only, gate bypassed) evicts the live LT
+base from the DPB and desyncs the whole picture permanently (mean 69) —
+empirical proof the RPS-steady-state gate is load-bearing.
+
 **Open:** Phase C MPP (rk3566) and Android deferred by operator ruling
 2026-08-20. Phase E (live RF walk-down) needs an operator-attended RF
 session — numeric prep is done, the visual judgment is the operator's.
