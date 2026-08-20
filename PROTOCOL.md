@@ -1406,7 +1406,11 @@ producer emits multiple independent slice segments per picture, §15.4):
    incomplete. Slices whose bytes touch any erasure are wholly ERASED — no
    partially-corrupt entropy data is ever emitted (§13 discipline).
 3. Slice geometry (the expected `slice_segment_address` list) is learned from
-   previously delivered frames of the same stream, never assumed. Survivor
+   previously delivered frames of the same stream, never assumed — and
+   adopted only when **two consecutive delivered pictures agree on it**: the
+   SSC338Q GDR refresh AU is a one-picture 17-slice shape whose addresses
+   superset the steady 4-slice list, and adopting it for one frame would let
+   a partial loss in the next picture synthesize overlapping slices. Survivor
    addresses outside the learned geometry ⇒ salvage fails (fail toward §6.3a
    outcome 4, the pre-§6.3b behaviour).
 4. Each erased slice is replaced by a **synthesized all-skip P slice segment**
@@ -1439,7 +1443,15 @@ per-picture RPS never satisfies this and a flat 1-ref stream satisfies it
 everywhere except the first P after an IDR, whose smaller DPB legitimately
 shrinks the set; slice-level salvage, whose donor is the same picture, is
 unaffected) — the entire picture is synthesized as skip slices with
-`slice_pic_order_cnt_lsb` advanced by one. This converts "frame dropped" into
+`slice_pic_order_cnt_lsb` advanced by one. The donor must additionally be a
+**sub-layer reference** picture (TRAIL_R-class; a TRAIL_N/…_N donor is
+refused): the synthesized picture inherits the donor's `nal_unit_type` while
+succeeding real pictures may reference it, and the copied RPS names the
+donor's own picture — freezing from a sub-layer non-reference donor would
+both offer a non-referenceable stand-in and mark a `_N` picture
+used-by-curr, two HEVC 7.4.2.2 stream violations (measured on the SSC338Q
+SVC-T stream, whose every fifth picture is TRAIL_N; HM asserts on both).
+Slice-level salvage is unaffected — its donor is the same picture. This converts "frame dropped" into
 "frame frozen", keeping the decoder's timeline continuous. A freeze emitted
 where the true (lost) frame was an IRAP leaves the same reference gap the
 drop would have — §3.9 recovery covers both identically.
