@@ -12,6 +12,43 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — §10.7 needed no recalibration for long GI, and the ground could not write an artifact at all
+
+**The premise was wrong, checked before acting on it.** The claim that the
+guard-interval change stranded §10.7 artifacts on rungs 2+ does not survive
+contact with the system: calibration-v2 §2.2 scopes an uplink run to the
+configured `air.uplink_rate` rung **alone**, the ground config sets no
+override so that rung is **MCS 0**, and MCS 0 was always long GI. The stored
+artifact holds exactly one placement, `{mcs:0, short_gi:false}` — there were
+never any short-GI entries to strand. Retracted in PROTOCOL.md §9.5.
+
+The artifact *was* stale, for unrelated reasons: captured on **channel 5765**
+while the link now runs 5805, and `craft_adapter_fingerprint` 136 against a
+live 212. So it was worth re-running anyway.
+
+**Ground-host defect, found by running it: `artifact_write_failed`.**
+`/etc/waybeam-link/calibration/` was `root:root` 755 while the ground hub runs
+as **`snokvist`**, so the engine swept the full range (26502 probes, power
+−34 → 0 qdb) and then correctly **refused to report success** it could not
+persist — the §17 "refuse false success" rule doing its job rather than
+silently producing an unusable placement. `chown -R snokvist:snokvist` on that
+directory fixed it. Any calibration on this host would have failed the same
+way; the artifact on disk dated from a root-run standalone `waybeam-link`.
+
+Re-run after the fix: **done, `stale:false`**, 54002 probes / 103 tallies,
+channel **5805**, placement `{mcs:0, short_gi:false, qdb:-2, rssi:-39 dBm,
+loss:5‰, last_clean:24, first_bad:null}`. `first_bad:null` means the sweep
+**never found a failing point** across the whole commanded range — at 50 cm
+bench geometry the uplink is clean everywhere, so this is a bench placement,
+not a range-valid one, exactly as the ground config's own `_power_comment`
+warns.
+
+**Read the drop counter with that in mind.** `shm_full_drops` jumped 18 →
+8552 across the run and then froze. That is the §2.4 video-input starve, not a
+fault: the run silences video and restores it, and nothing resets the counter
+afterwards, so a post-calibration craft looks alarming until you check that it
+is static. Throttle returned to 1000, ground receiving at rssi −28 / snr 29.
+
 ## 2026-08-20 — the airtime ceiling moved UP since Pass 111: rung 4's clean point is >21000, not ~19000
 
 Long GI deployed to both ends (craft `.232` + this ground, `table_version` 91
