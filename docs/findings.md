@@ -74,6 +74,21 @@ synthetic 996/1000 for the same three reasons: bigger frames (37 KB vs
 20 KB → more chunks in danger per picture), narrower freeze eligibility,
 and the TRAIL_N donor refusal.
 
+**Whole-frame freeze vs plain drop (operator question 2026-08-20,
+decision).** The freeze is NOT only pacing on the shipped ground stack:
+waybeam-hub's MPP decoder defaults to `DECODER_ERROR_MODE_PARTIAL`
+(`src/pixelpilot/config.c:263`) — after a dropped reference it **presents**
+the dependent errinfo frames (real corruption on screen, not a skip) and
+every errinfo fires `idr_requester_handle_warning`
+(`src/pixelpilot/video_decoder.c:1358`), i.e. sustained drops become IDR
+request storms exactly at the loss levels §6.3b operates in. A freeze keeps
+the DPB conformant: no errinfo on the followers, no corrupt presentation,
+no IDR bandwidth spike; the residual heals over GDR. Decision: **keep
+`freeze_frame` default true**; it is fail-safe gated and costs ~58 µs.
+Confirming A/B for Phase C/E (knob already exists, no code needed): same
+loss run with `freeze_frame` on vs off on the rk3566 hub, count
+`MPP: presenting partial frame errinfo` lines and IDR requests.
+
 **Open:** Phase C MPP (rk3566) and Android deferred by operator ruling
 2026-08-20. Phase E (live RF walk-down) needs an operator-attended RF
 session — numeric prep is done, the visual judgment is the operator's.
