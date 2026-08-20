@@ -70,6 +70,35 @@ means two ground stations can display different pixels from one stream.
 **Filed against venc, not §6.3b** — every decode-compare must expect this
 1-in-5 divergence as a baseline or it will be misattributed to concealment.
 
+## 2026-08-20 — sliceCount 17 device-verified on .232 (structural half of the Phase B extension)
+
+venc ceiling raised (`VENC_SLICE_COUNT_MAX` 32, venc `a12ff32`), deployed to
+`.232` (md5-matched both ends), and the request that used to be refused now
+lands exactly as the quantization model predicted:
+
+```
+VENC: H.265 slice split ON: sliceCount 17 -> 17 slices of 1 CTU-64 rows (SDK unit 2 32-px rows)
+VENC: slice split readback: enable=1 rows=2
+```
+
+Recorded 8 MB from the SD at that setting: **247 of 249 AUs carry exactly 17
+slices**, at CTU addresses **0,30,60,…,480** — one CTU-64 row each, the same
+geometry the GDR refresh AU has always used. (The two outliers are the
+partial opening AU and the AU my `dd` cut truncated.) `isp_fps` **60**,
+`venc_bitrate_kbps` **18025** — both held. **Truncation WARN count: 0** at 60
+frames/s, i.e. ~1,800 seventeen-NAL AUs per 30 s rather than the refresh AU's
+0.5/s. That closes the per-pack question: a 17-NAL access unit is delivered
+as multiple packs of ≤8 and the walker handles it.
+
+Mean AU 33,634 B (1,978 B/slice = 1.39 chunks) against 37,836 B at
+sliceCount 4 — **this says nothing about coding cost**. Different scene
+moment on a static bench, where CBR undershoots on easy content; the QP
+comparison still needs motion in frame. Craft restored to `sliceCount 4`,
+config byte-identical to the pre-session backup.
+
+Remaining before the default moves: the QP/quality cost at {4,6,9,17} across
+the 2500-25000 kbps range, on a moving scene.
+
 ## 2026-08-20 — the sliceCount ceiling is 6 today, and the reason given for the cap is a misreading
 
 Trying to set `video0.sliceCount=17` on the craft was refused by venc's own
