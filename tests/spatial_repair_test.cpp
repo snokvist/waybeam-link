@@ -224,7 +224,10 @@ int main() {
     CHECK_EQ_U(count_slices(got.data(), got.size()), 3);
     CHECK_EQ_U(sr.stats().slices_synthesized, synth_before + 2);
 
-    // -- whole frame erased: freeze --------------------------------------
+    // -- whole frame erased on a CYCLING-RPS stream: freeze refuses -------
+    // The HM lowdelay GOP-4 vector cycles its per-picture reference set, so
+    // the donor's RPS is invalid at POC+1 and the freeze path must fall back
+    // to drop (rps_stable_ guard); slice-level salvage above was unaffected.
     sr.learn(blobs[6].data(), blobs[6].size());
     {
         got.clear();
@@ -236,10 +239,51 @@ int main() {
             all.push_back(i);
         }
         auto tail_only = chunks(blobs[7], s, all);
-        CHECK(sr.repair(k, s, static_cast<uint32_t>(blobs[7].size()),
+        CHECK(!sr.repair(k, s, static_cast<uint32_t>(blobs[7].size()),
+                         tail_only, grab));
+        CHECK_EQ_U(sr.stats().frames_frozen, 0);
+    }
+
+    // -- whole frame erased with a STABLE RPS: freeze succeeds ------------
+    // Stability = the last two donors' RPS spans agree, so feed the same P
+    // picture twice (the unit-level stand-in for a constant-RPS stream).
+    {
+        SpatialRepair sf(cfg);
+        sf.learn(blobs[0].data(), blobs[0].size());  // IDR: SPS/PPS/geometry
+        sf.learn(blobs[1].data(), blobs[1].size());  // first donor: not yet
+        sf.learn(blobs[1].data(), blobs[1].size());  // same RPS twice: stable
+        got.clear();
+        const uint16_t k =
+            static_cast<uint16_t>((blobs[2].size() + s - 1) / s);
+        std::vector<int> all;
+        for (int i = 0; i + 1 < k; ++i) {
+            all.push_back(i);
+        }
+        auto tail_only = chunks(blobs[2], s, all);
+        CHECK(sf.repair(k, s, static_cast<uint32_t>(blobs[2].size()),
                         tail_only, grab));
         CHECK_EQ_U(count_slices(got.data(), got.size()), 3);
-        CHECK_EQ_U(sr.stats().frames_frozen, 1);
+        CHECK_EQ_U(sf.stats().frames_frozen, 1);
+        // A donor with a different RPS then disables freeze but not salvage.
+        sf.learn(blobs[3].data(), blobs[3].size());
+        got.clear();
+        const uint16_t k4 =
+            static_cast<uint16_t>((blobs[4].size() + s - 1) / s);
+        std::vector<int> all4;
+        for (int i = 0; i + 1 < k4; ++i) {
+            all4.push_back(i);
+        }
+        auto tail4 = chunks(blobs[4], s, all4);
+        CHECK(!sf.repair(k4, s, static_cast<uint32_t>(blobs[4].size()),
+                         tail4, grab));
+        CHECK_EQ_U(sf.stats().frames_frozen, 1);
+        const int ci = interior_chunk(blobs[4], 1, s);
+        CHECK(ci > 0);
+        got.clear();
+        auto src = chunks(blobs[4], s, {ci});
+        CHECK(sf.repair(k4, s, static_cast<uint32_t>(blobs[4].size()), src,
+                        grab));
+        CHECK_EQ_U(sf.stats().frames_salvaged, 1);
     }
 
     // -- refusals ----------------------------------------------------------

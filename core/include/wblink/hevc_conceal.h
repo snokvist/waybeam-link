@@ -100,6 +100,12 @@ struct SliceInfo {
     bool temporal_mvp = false;
     int32_t qp_delta = 0;
     uint16_t num_used_refs = 0;  // NumPicTotalCurr for lists_modification
+    // §7.4.7.1 consistency: collocated_ref_idx (and the ref list shape it
+    // indexes) must match across a picture's slices, so the synthesized
+    // header mirrors the donor's L0 count and collocated index when TMVP is
+    // on instead of forcing a 1-entry list.
+    uint16_t num_ref_l0 = 1;
+    uint16_t collocated_ref_idx = 0;
     // bit span [begin, end) of st_rps + long-term block within header_rbsp
     uint32_t strps_bit_begin = 0;
     uint32_t strps_bit_end = 0;

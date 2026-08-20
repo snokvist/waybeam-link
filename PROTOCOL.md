@@ -1412,11 +1412,14 @@ producer emits multiple independent slice segments per picture, §15.4):
 4. Each erased slice is replaced by a **synthesized all-skip P slice segment**
    for the same address span: slice header rewritten from a surviving slice of
    the same picture (picture-level fields are identical across a picture's
-   slice headers per HEVC §7.4.7.1), SAO off, `MaxNumMergeCand = 1`, CABAC
-   payload of skip CTUs. The decoder reconstructs that region from the
-   reference picture — a frozen region, not a dropped picture. The synthesized
-   slice is syntactically complete, standards-valid HEVC; the hardware decoder
-   is never handed intentionally malformed data.
+   slice headers per HEVC §7.4.7.1 — including, when TMVP is on, the donor's
+   L0 ref count and `collocated_ref_idx`, which §7.4.7.1 also requires to
+   agree across the picture), SAO off, `MaxNumMergeCand = 1`, CABAC payload
+   of skip CTUs. The decoder reconstructs that region from the reference
+   picture — a frozen region with TMVP off, motion-extrapolated with TMVP
+   on — not a dropped picture. The synthesized slice is syntactically
+   complete, standards-valid HEVC; the hardware decoder is never handed
+   intentionally malformed data.
 5. The rebuilt access unit egresses through the normal §6.3a slot write with
    the original `VencFrameMeta` when chunk 0 survived, else a synthesized meta
    (`codec` H.265, flags 0, PTS extrapolated). Ordering: a salvaged frame
@@ -1430,7 +1433,12 @@ dependent slice segments; slice geometry unknown or mismatched; `s` unknown.
 
 **Whole-frame freeze** (`conceal.freeze_frame`, default true): when not a
 single slice survived but geometry + a donor header from an earlier delivered
-P picture are cached, the entire picture is synthesized as skip slices with
+P picture are cached — and the reference set is in a steady state (the last
+two delivered P pictures carried identical short-term RPS bits: a cycling
+per-picture RPS never satisfies this and a flat 1-ref stream satisfies it
+everywhere except the first P after an IDR, whose smaller DPB legitimately
+shrinks the set; slice-level salvage, whose donor is the same picture, is
+unaffected) — the entire picture is synthesized as skip slices with
 `slice_pic_order_cnt_lsb` advanced by one. This converts "frame dropped" into
 "frame frozen", keeping the decoder's timeline continuous. A freeze emitted
 where the true (lost) frame was an IRAP leaves the same reference gap the

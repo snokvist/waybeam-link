@@ -742,7 +742,7 @@ bool parse_slice_header(const uint8_t* nal, size_t len, const SpsInfo& sps,
             }
             if ((collocated_from_l0 && num_ref_l0 > 1) ||
                 (!collocated_from_l0 && num_ref_l1 > 1)) {
-                r.ue();  // collocated_ref_idx
+                out.collocated_ref_idx = static_cast<uint16_t>(r.ue());
             }
         }
         if ((pps.weighted_pred && out.slice_type == 1) ||
@@ -750,6 +750,7 @@ bool parse_slice_header(const uint8_t* nal, size_t len, const SpsInfo& sps,
             return false;  // §6.3b scope guard: no weighted prediction
         }
         r.ue();  // five_minus_max_num_merge_cand
+        out.num_ref_l0 = num_ref_l0;
     }
     out.qp_delta = r.se();
     return !r.failed();
@@ -798,10 +799,15 @@ void write_conceal_header(BitWriter& bw, const SpsInfo& sps,
         bw.u(0, 1);  // slice_sao_luma off
         bw.u(0, 1);  // slice_sao_chroma off
     }
-    // P slice, one active ref
-    if (pps.num_ref_idx_l0_default != 1) {
+    // P slice ref list. TMVP off: one active ref (frozen-region conceal).
+    // TMVP on: §7.4.7.1 requires collocated_ref_idx — and the L0 shape it
+    // indexes — to agree across the picture's slices, so mirror the donor
+    // (the temporal merge candidate then motion-extrapolates the region).
+    const uint16_t num_ref_l0 =
+        donor.temporal_mvp ? std::max<uint16_t>(donor.num_ref_l0, 1) : 1;
+    if (pps.num_ref_idx_l0_default != num_ref_l0) {
         bw.u(1, 1);  // num_ref_idx_active_override
-        bw.ue(0);    // num_ref_idx_l0_active_minus1
+        bw.ue(static_cast<uint32_t>(num_ref_l0 - 1));
     } else {
         bw.u(0, 1);
     }
@@ -811,8 +817,12 @@ void write_conceal_header(BitWriter& bw, const SpsInfo& sps,
     if (pps.cabac_init_present) {
         bw.u(0, 1);
     }
-    // temporal_mvp: P slice, collocated_from_l0 inferred, num_ref_l0 == 1
-    // => no collocated syntax.
+    if (donor.temporal_mvp) {
+        // P slice: collocated_from_l0 inferred 1; index present iff > 1 ref.
+        if (num_ref_l0 > 1) {
+            bw.ue(donor.collocated_ref_idx);
+        }
+    }
     bw.ue(4);  // five_minus_max_num_merge_cand => MaxNumMergeCand = 1
     bw.se(donor.qp_delta);
     if (pps.slice_chroma_qp_offsets_present) {

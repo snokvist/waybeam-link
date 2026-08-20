@@ -41,7 +41,12 @@ Payload: per CTU, `split_cu_flag=0`, `cu_skip_flag=1`, terminate — every CU
 merges to a zero (or, with TMVP on, collocated) motion vector with no
 residual, so the decoder reconstructs the span from the reference picture.
 Partial CTUs at the picture's right/bottom edge take the inferred-split
-quadtree path; WPP streams get real entry-point offsets. 10–21 B per slice.
+quadtree path (validated on real CTU-32 HM content with a partial bottom
+row); WPP streams get real entry-point offsets; TMVP-on streams mirror the
+donor's L0 count and collocated_ref_idx (§7.4.7.1 cross-slice consistency —
+the concealment is then motion-extrapolated rather than frozen). Whole-frame
+freeze additionally requires the last two P pictures' RPS bits to agree
+(cycling-GOP donors are invalid at POC+1). 10–21 B per slice.
 
 ## Measured (x86, release; test content 1920×1080@100 4 slices, x265)
 

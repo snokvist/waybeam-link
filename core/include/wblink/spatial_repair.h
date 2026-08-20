@@ -88,6 +88,14 @@ class SpatialRepair {
     std::vector<uint32_t> geometry_;   // expected slice_segment_address list
     hevc::SliceInfo donor_{};          // freeze-frame donor (last P slice 0)
     bool have_donor_ = false;
+    // Freeze reuses the donor's short-term RPS at POC+1, which is only valid
+    // in a steady state where consecutive P pictures carry the same relative
+    // reference set. Cycling GOP patterns (HM lowdelay) never satisfy it; a
+    // flat 1-ref stream satisfies it everywhere except the first P after an
+    // IDR (smaller DPB => legitimately different set), so this is a per-frame
+    // condition — last two donors equal — not a latched verdict.
+    std::vector<uint8_t> donor_rps_bits_;
+    bool rps_stable_ = false;
     uint32_t last_poc_ = 0;
     bool have_poc_ = false;
     uint8_t meta_template_[8] = {0};   // last delivered VencFrameMeta

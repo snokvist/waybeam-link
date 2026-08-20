@@ -13,6 +13,27 @@ namespace wblink {
 
 namespace {
 
+// The donor's short_term_ref_pic_set + long-term block as a canonical
+// bit-aligned byte string, so successive P pictures' sets can be compared.
+std::vector<uint8_t> rps_bits(const wblink::hevc::SliceInfo& si) {
+    std::vector<uint8_t> out;
+    uint8_t acc = 0;
+    uint32_t n = 0;
+    for (uint32_t p = si.strps_bit_begin; p < si.strps_bit_end; ++p) {
+        const uint8_t bit = (si.header_rbsp[p >> 3] >> (7 - (p & 7))) & 1;
+        acc = static_cast<uint8_t>((acc << 1) | bit);
+        if (++n % 8 == 0) {
+            out.push_back(acc);
+            acc = 0;
+        }
+    }
+    if (n % 8) {
+        out.push_back(static_cast<uint8_t>(acc << (8 - n % 8)));
+    }
+    out.push_back(static_cast<uint8_t>(n));  // disambiguate lengths
+    return out;
+}
+
 uint32_t rd_le32(const uint8_t* p) {
     return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
            (static_cast<uint32_t>(p[2]) << 16) |
@@ -94,6 +115,9 @@ void SpatialRepair::learn(const uint8_t* blob, size_t len) {
                     }
                     if (parsed_slice_.slice_type == 1 &&
                         !hevc::nal_is_irap(t) && addrs.size() == 1) {
+                        std::vector<uint8_t> rps = rps_bits(parsed_slice_);
+                        rps_stable_ = have_donor_ && rps == donor_rps_bits_;
+                        donor_rps_bits_ = std::move(rps);
                         donor_ = parsed_slice_;  // vector copy; small header
                         have_donor_ = true;
                     }
@@ -126,7 +150,7 @@ void SpatialRepair::append_conceal_meta(uint32_t /*poc*/) {
 
 bool SpatialRepair::freeze(uint32_t total_ctbs, const Emit& emit) {
     if (!cfg_.freeze_frame || !have_donor_ || !have_poc_ || !have_meta_ ||
-        geometry_.empty()) {
+        geometry_.empty() || !rps_stable_) {
         return fail();
     }
     const uint32_t poc =
@@ -349,6 +373,8 @@ void SpatialRepair::reset_stream() {
     have_pps_ = false;
     geometry_.clear();
     have_donor_ = false;
+    donor_rps_bits_.clear();
+    rps_stable_ = false;
     have_poc_ = false;
     have_meta_ = false;
     last_pts_ = 0;

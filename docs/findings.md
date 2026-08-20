@@ -12,6 +12,55 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — CTU32 content, TMVP conformance, RPS-gated freeze, GDR convergence
+
+Four §6.3b results from the x86 continuation session, all offline/loopback.
+
+**CTU32 (the SSC338Q shape) validated on real coded content.** HM-18.0,
+1280×720, `MaxCUWidth=32`, 40×23 CTU grid with a partial bottom row, 4
+slices, SAO on, TMVP on: single/bottom/pair concealment all decode clean on
+HM + ffmpeg with pixel-exact frozen regions and byte-exact untouched slices.
+The forced-split partial-CTU path now has real-encoder coverage, not just
+synthesis-side.
+
+**TMVP conformance bug found and fixed.** The synthesized header used to
+force a 1-entry L0 list; HEVC §7.4.7.1 requires `collocated_ref_idx` (and
+the list shape it indexes) to agree across a picture's slices, so on a
+TMVP-on stream with >1 ref (HM lowdelay, 4 refs) the mix was nonconformant —
+every decoder stayed SILENT while *other* slices of the picture decoded
+wrong (untouched-rows maxdiff 148). Pixel assertions caught what three
+decoders' error paths did not. Fix: mirror the donor's L0 count and
+collocated index; TMVP-on concealment is motion-extrapolated rather than
+frozen, TMVP-off unchanged.
+
+**Freeze is now RPS-steady-state-gated.** Whole-frame freeze replays the
+donor's RPS at POC+1, which HM's cycling GOP-4 sets made invalid ("Could
+not find ref" on the freeze output). Guard: freeze only when the last two
+delivered P pictures carried identical RPS bits. A first "any change ever"
+latch was wrong the other way — x265's first P after each IDR legitimately
+shrinks the set (smaller DPB) and the latch killed freeze forever (udp-air
+20%: frozen 150 → 0, failed 4 → 177). The per-frame form restores it
+(frozen 153, failed 6 = the transients, delivered 994/1000).
+
+**GDR × concealment, measured.** x265 `--intra-refresh` (wave period 100):
+a 10-frame burst concealing one slice band propagates slowly (luma MAD
+0.44 → 1.05 over 90 frames), the first refresh wave cuts it ~10× (→0.39),
+and later waves keep shrinking it — but convergence is asymptotic (~0.2 MAD
+residual creeping with motion), because x265's PIR does not perfectly
+isolate the dirty region. Control on the IDR stream: identical burst, exact
+**0.000** at the next IDR — the concealment slices are byte-clean; the
+residual is the encoder's PIR looseness. Under *sustained* 20% i.i.d. loss a
+GDR stream sits at an error equilibrium (~45 MAD on moving test content) —
+convergence needs loss-free wave windows; IDR streams resync exactly
+regardless. Also observed: with no IDR ever delivered (all four died at
+20%), salvage correctly refuses everything until the first header-carrying
+AU lands (219 refusals, all in the first 2 s, zero after) — those frames are
+undecodable downstream anyway; §3.9 recovery shortens the window in
+production. SigmaStar's own GDR enforcement may be tighter or looser than
+x265's — measure on device (runbook Phase F).
+
+---
+
 ## 2026-08-20 — Phase D: the two-node link over udp-air holds the timeline through 30% loss
 
 **Setup.** Real TX + RX `waybeam-link` processes on one x86 host, udp-air on

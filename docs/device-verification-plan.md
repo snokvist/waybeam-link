@@ -99,8 +99,9 @@ path; repaired frames may add ≤~1 ms on RK3566-class CPUs — verify).
 ## Phase F — deferred / follow-ups
 
 - Android MediaCodec acceptance (Waybeam-android `:wifi` consumer).
-- GDR × concealment: force loss inside an active GDR cycle, measure rows-
-  to-clean convergence on the next pass.
+- GDR × concealment: measured offline 2026-08-20 (asymptotic convergence
+  under x265 PIR, exact resync at IDR). Remaining: the same burst
+  measurement against the SigmaStar IntraRefresh implementation.
 - Restore encoder tools one by one (SAO, TMVP already handled; weighted
   pred / B frames stay refused) and re-measure.
 - `cabac_init_flag=1` donors: parse handles it; synthesis always writes 0 —
