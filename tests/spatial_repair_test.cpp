@@ -311,5 +311,49 @@ int main() {
     sr.reset_stream();
     CHECK(!sr.geometry_known());
 
+    // -- geometry adoption needs two consecutive agreeing pictures ---------
+    // A one-picture anomalous shape (the SSC338Q 17-slice GDR refresh AU is
+    // the real case) must not become the expectation for the next frame.
+    {
+        SpatialRepair sg(cfg);
+        for (int i = 0; i < 3; ++i) {
+            sg.learn(blobs[i].data(), blobs[i].size());
+        }
+        CHECK(sg.geometry_known());
+        // blobs[3] minus its middle slice = a delivered 2-slice picture
+        // (addresses {0,6} — a subset of the steady {0,3,6}).
+        std::vector<uint8_t> anom = blobs[3];
+        size_t ab = 0;
+        size_t ae = 0;
+        slice_span(anom, 1, &ab, &ae);
+        anom.erase(anom.begin() + static_cast<long>(ab),
+                   anom.begin() + static_cast<long>(ae));
+        sg.learn(anom.data(), anom.size());
+        // One anomalous picture: geometry stays {0,3,6}, so losing the
+        // middle slice of the next frame still synthesizes it (pre-fix the
+        // flipped {0,6} geometry emitted a 2-slice picture, silently).
+        got.clear();
+        const int cm = interior_chunk(blobs[4], 1, s);
+        CHECK(cm > 0);
+        auto src = chunks(blobs[4], s, {cm});
+        const uint16_t k4 =
+            static_cast<uint16_t>((blobs[4].size() + s - 1) / s);
+        CHECK(sg.repair(k4, s, static_cast<uint32_t>(blobs[4].size()), src,
+                        grab));
+        CHECK_EQ_U(count_slices(got.data(), got.size()), 3);
+        // A second consecutive anomalous picture DOES adopt the new shape:
+        // a survivor at the old middle address is then outside the learned
+        // geometry and salvage refuses.
+        sg.learn(anom.data(), anom.size());
+        got.clear();
+        const int cz = interior_chunk(blobs[5], 0, s);
+        CHECK(cz > 0);
+        auto src2 = chunks(blobs[5], s, {cz});
+        const uint16_t k5 =
+            static_cast<uint16_t>((blobs[5].size() + s - 1) / s);
+        CHECK(!sg.repair(k5, s, static_cast<uint32_t>(blobs[5].size()), src2,
+                         grab));
+    }
+
     return wbtest_finish("spatial_repair_test");
 }

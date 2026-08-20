@@ -13,9 +13,12 @@ Usage: validate.py <ref.265> <rep.265> <W> <H> <frame_idx> <slice_rows_spec>
 import sys, subprocess, numpy as np
 
 def decode(path, w, h):
+    # -threads 1: SSC338Q captures mix TRAIL_N/TRAIL_R inside one picture
+    # (non-conformant), and ffmpeg's frame-threaded recovery of that mix is
+    # non-deterministic — two decodes of the same file diverge.
     out = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", path, "-pix_fmt", "yuv420p",
-         "-f", "rawvideo", "-"],
+        ["ffmpeg", "-v", "error", "-threads", "1", "-i", path,
+         "-pix_fmt", "yuv420p", "-f", "rawvideo", "-"],
         capture_output=True)
     err = out.stderr.decode()
     frames = np.frombuffer(out.stdout, dtype=np.uint8)

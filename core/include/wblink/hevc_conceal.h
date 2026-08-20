@@ -51,6 +51,10 @@ struct SpsInfo {
     // parse a slice header that references them.
     std::vector<uint16_t> st_rps_num_delta;
     std::vector<uint16_t> st_rps_num_used;
+    // used_by_curr_pic_lt_sps_flag per SPS long-term entry: an unused entry
+    // must not count toward NumPicTotalCurr (SSC338Q TRAIL_N slices carry a
+    // used=0 long-term pic, and miscounting it desyncs lists_modification).
+    std::vector<uint8_t> lt_sps_used;
     // derived
     uint32_t pic_width_ctbs = 0;
     uint32_t pic_height_ctbs = 0;

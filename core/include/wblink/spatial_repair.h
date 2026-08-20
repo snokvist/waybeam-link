@@ -86,6 +86,12 @@ class SpatialRepair {
     bool have_sps_ = false;
     bool have_pps_ = false;
     std::vector<uint32_t> geometry_;   // expected slice_segment_address list
+    // last delivered picture's address list: geometry_ adopts a new shape
+    // only when two consecutive delivered pictures agree (the SSC338Q GDR
+    // refresh AU is a one-picture 17-slice shape whose addresses superset
+    // the steady 4-slice one — single-frame adoption would let the next
+    // partial loss synthesize overlapping slices).
+    std::vector<uint32_t> geometry_pending_;
     hevc::SliceInfo donor_{};          // freeze-frame donor (last P slice 0)
     bool have_donor_ = false;
     // Freeze reuses the donor's short-term RPS at POC+1, which is only valid

@@ -90,6 +90,7 @@ void SpatialRepair::learn(const uint8_t* blob, size_t len) {
                     if (have_sps_ && (s.pic_size_ctbs != sps_.pic_size_ctbs ||
                                       s.log2_ctb != sps_.log2_ctb)) {
                         geometry_.clear();  // geometry changed with the SPS
+                        geometry_pending_.clear();
                         have_donor_ = false;
                     }
                     sps_ = s;
@@ -132,9 +133,17 @@ void SpatialRepair::learn(const uint8_t* blob, size_t len) {
         if (geometry_ok && !addrs.empty() && addrs.front() == 0 &&
             std::is_sorted(addrs.begin(), addrs.end()) &&
             std::adjacent_find(addrs.begin(), addrs.end()) == addrs.end()) {
-            geometry_ = std::move(addrs);
+            // Adopt only a shape two consecutive delivered pictures agree
+            // on: a one-picture geometry (SSC338Q 17-slice GDR refresh AU,
+            // addresses a superset of the steady shape) must not become the
+            // expectation for the very next picture.
+            if (addrs == geometry_pending_ && addrs != geometry_) {
+                geometry_ = addrs;
+            }
+            geometry_pending_ = std::move(addrs);
         } else if (!geometry_ok) {
             geometry_.clear();
+            geometry_pending_.clear();
             have_donor_ = false;
         }
     }

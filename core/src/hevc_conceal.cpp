@@ -503,7 +503,7 @@ bool parse_sps(const uint8_t* nal, size_t len, SpsInfo& out) {
         out.num_long_term_ref_pics_sps = static_cast<uint8_t>(n);
         for (uint32_t i = 0; i < n; ++i) {
             r.u(out.log2_max_poc_lsb);
-            r.u(1);
+            out.lt_sps_used.push_back(static_cast<uint8_t>(r.u(1)));
         }
     }
     out.temporal_mvp_enabled = r.u(1) != 0;
@@ -672,6 +672,7 @@ bool parse_slice_header(const uint8_t* nal, size_t len, const SpsInfo& sps,
             }
             for (uint32_t i = 0; i < num_lt_sps + num_lt_pics; ++i) {
                 if (i < num_lt_sps) {
+                    uint32_t idx = 0;
                     if (sps.num_long_term_ref_pics_sps > 1) {
                         uint8_t bits = 0;
                         while ((1u << bits) <
@@ -679,17 +680,27 @@ bool parse_slice_header(const uint8_t* nal, size_t len, const SpsInfo& sps,
                                    sps.num_long_term_ref_pics_sps)) {
                             ++bits;
                         }
-                        r.u(bits);
+                        idx = r.u(bits);
+                    }
+                    if (idx < sps.lt_sps_used.size() &&
+                        sps.lt_sps_used[idx]) {
+                        ++num_lt;
                     }
                 } else {
                     r.u(sps.log2_max_poc_lsb);
-                    r.u(1);
+                    // used_by_curr_pic_lt_flag: only a used entry counts
+                    // toward NumPicTotalCurr (§7.4.7.2) — SSC338Q TRAIL_N
+                    // slices carry a used=0 long-term pic, and counting it
+                    // desyncs the lists_modification condition between this
+                    // parser, the synthesis writer, and the decoder.
+                    if (r.u(1)) {
+                        ++num_lt;
+                    }
                 }
                 if (r.u(1)) {  // delta_poc_msb_present
                     r.ue();
                 }
             }
-            num_lt = static_cast<uint16_t>(num_lt_sps + num_lt_pics);
         }
         out.strps_bit_end = r.pos();
         if (sps.temporal_mvp_enabled) {
@@ -953,6 +964,16 @@ bool make_conceal_slice(const SpsInfo& sps, const PpsInfo& pps,
     if (pps.tiles_enabled || pps.transquant_bypass_enabled ||
         donor.dependent || !donor.has_poc || donor.slice_type == 2 ||
         nal_is_irap(donor.nal_unit_type)) {
+        return false;
+    }
+    // Whole-frame freeze (poc_lsb_override >= 0) refuses a sub-layer
+    // non-reference donor (TRAIL_N/…_N, the even VCL types): the synthesized
+    // picture inherits the donor's nal_unit_type while later real pictures
+    // may reference it, and the copied RPS names the donor's own picture —
+    // both HEVC 7.4.2.2 violations when the donor is a _N picture (§6.3b).
+    // Same-picture salvage donors are exempt: the picture's type is its own.
+    if (poc_lsb_override >= 0 && donor.nal_unit_type <= 14 &&
+        (donor.nal_unit_type & 1) == 0) {
         return false;
     }
     if (sps.pic_size_ctbs == 0 || num_ctbs == 0 ||

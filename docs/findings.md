@@ -12,6 +12,75 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — Phase A: the real SSC338Q 4-slice stream, its shape, and two freeze defects it exposed
+
+Bench session, craft `.232` (SSC338Q, venc 0.66.0 `video0.sliceCount: 4`,
+1080p60, `intraRefresh balanced lines/P=2`, SVC-T `refPred base=1 enhance=4`).
+Boot log printed `VENC: H.265 slice split ON: 9 CTU rows/slice (34 rows -> 4
+slices)` and the packetInfo-cap WARN never fired. 6 s raw ES captured with
+the on-board recorder (`record.format=hevc`, byte-identical packetInfo walk
+to the frame-ring blob), 362 AUs, md5-verified both ends.
+
+**The measured stream shape** (`capture_232_4slice.265`, kept on the bench):
+
+- **CTU is 64, not 32.** SPS says 30×17 CTBs. The SDK read our "9 rows" in
+  32-px units and rounded up to 5 CTU rows: slice addresses {0,150,300,450}
+  = pixel bands {0,320,640,960} (5/5/5/2 CTU rows) — 4 slices requested, 4
+  delivered, at fixed addresses on every AU shape. The venc log line's "CTU
+  rows" wording is off by the unit but the outcome is right; higher
+  sliceCounts will quantize (Phase B measures).
+- **Independent slices** (`dependent_slice_segment_flag=0` everywhere)
+  though the PPS *enables* dependent slices. No tiles, no WPP. SAO ON,
+  TMVP ON, `lists_modification_present=1`, `long_term_ref_pics_present=1`.
+- **SVC-T rides long-term refs**: base pictures (POC%5==0) carry an empty
+  st RPS + LT(prev base, used=1); enhance pictures carry st(prev, used=1) +
+  LT(cur base, used=0); every fifth picture (POC%5==4) is **TRAIL_N** —
+  and only its FIRST slice: the encoder mixes TRAIL_N/TRAIL_R inside one
+  picture, which is non-conformant (H.265 7.4.2.2) — HM tolerates it,
+  ffmpeg warns and its **frame-threaded decode goes non-deterministic**
+  (two decodes of the same capture diverge). Judge fix: `validate.py` now
+  decodes `-threads 1`.
+- **GDR refresh AUs have their own geometry**: every 120th AU (the 2 s GOP
+  boundary) is a 17-slice picture, one CTU row per slice, preceded by
+  re-emitted VPS/SPS/PPS. Only the first AU (recorder-forced) is an IDR;
+  IDR AU = 7 NALs (VPS+SPS+PPS+4 slices), inside the 8-entry table.
+  Delivery is multi-pack: the capture holds all 17 NALs, so no pack
+  exceeded the table.
+
+**Judging on the real capture** (hevc_conceal_cli + validate.py + HM-18.0 +
+ffmpeg + GStreamer): single-slice and short-last-slice conceal pass — frame
+counts equal, pre-frames identical, untouched rows byte-identical once the
+validator uses the real {0,320,640,960} geometry, HM zero-assert. TMVP-on
+means the concealed interior is motion-extrapolated, not frozen (as
+documented). GDR wash-out is asymptotic: repair error mean 0.30→0.12,
+p99 2 gray levels after one refresh wave; exact resync never happens
+without an IDR — on this craft IDRs are on-demand only.
+
+**Defect 1 — unused long-term pics counted into NumPicTotalCurr.** The
+parser summed ALL long-term entries into `num_used_refs`; a TRAIL_N donor
+(LT used=0, real NumPicTotalCurr=1) made parser and writer disagree with
+the decoder over the `lists_modification` bit — one-bit shift, HM
+`readByteAlignment` assert. Fixed: only `used_by_curr_pic_lt_flag=1`
+entries count (SPS-level flags now stored). Pinned in `hevc_conceal_test`
+with the real capture's SPS/PPS/TRAIL_N header bytes.
+
+**Defect 2 — whole-frame freeze from a TRAIL_N donor is structurally
+unsound.** The synth inherits the donor's `nal_unit_type` (later real
+pictures then reference a sub-layer non-reference picture) and its copied
+RPS names the donor's own TRAIL_N picture as used — HEVC 7.4.2.2 both
+ways; HM asserts in `applyReferencePictureSet`. Production-reachable: the
+RPS-steady-state gate passes inside a base period (AUs 81–84 carry
+identical RPS bits). Ruled on-branch (§6.3b freeze paragraph amended):
+freeze refuses sub-layer non-reference donors — on this craft 1 in 5
+whole-frame losses falls back to the pre-§6.3b drop; slice salvage is
+unaffected.
+
+**Open:** Phase B (encoder cost of sliceCount ∈ {1,2,4,8}); Phase D re-run
+with this capture as `CONCEAL_ES`; whether waybeam-link's RX parser needs
+anything for the 17-slice refresh geometry (learned-geometry rule says a
+refresh AU's survivors mismatch the 4-slice geometry → salvage refuses →
+frozen/dropped; measure how often that bites in Phase D/E).
+
 ## 2026-08-20 — CTU32 content, TMVP conformance, RPS-gated freeze, GDR convergence
 
 Four §6.3b results from the x86 continuation session, all offline/loopback.
