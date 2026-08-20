@@ -78,9 +78,12 @@ freeze additionally requires the last two P pictures' RPS bits to agree
    path feeds MPP whole AUs with split-parse; MediaCodec gets them via the
    Android consumer). ffmpeg/GStreamer/HM acceptance is necessary, not
    sufficient.
-4. **GDR interaction**: a concealed region voids that GDR cycle's clean-area
-   claim for the affected rows; convergence on the following pass is the
-   design assumption — measure real error persistence on hardware.
+4. **GDR interaction — measured offline** (findings 2026-08-20): a
+   concealment burst converges asymptotically under x265 PIR (first wave
+   cuts the error ~10×; a ~0.2-MAD residual creeps with motion — the
+   encoder's dirty-region looseness, proven by an exact-zero IDR control);
+   sustained loss holds a GDR stream at an error equilibrium. SigmaStar's
+   own IntraRefresh enforcement still needs the on-device measurement.
 5. **B slices / weighted prediction / tiles / dependent slice segments**:
    out of the supported envelope, refused at parse. The fleet encoder emits
    none of them.
