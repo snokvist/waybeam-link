@@ -50,6 +50,34 @@ Real SSC338Q elementary streams: capture one AU stream via the venc recorder
 (`waybeam_venc` raw HEVC ES recording) with `video0.sliceCount > 1` and feed
 it through the same loop before trusting a new encoder configuration.
 
+## Acceptance readout (`decode_compare.py` + `slice_drop.py`)
+
+A decoder's error flags are not an acceptance signal — MPP decodes an
+intra-picture slice gap with `errinfo == 0` while ~8% of the picture is
+wrong. Compare the pictures instead:
+
+```
+# does the hardware decoder agree with software on the repaired stream?
+python3 tools/spatial_conceal/decode_compare.py ref.265 repaired.265 \
+    --ref-decoder ffmpeg --decoder gst:vah265dec        # rk3566: gst:<mpp element>
+
+# the negative control: what a decoder sees WITHOUT §6.3b
+python3 tools/spatial_conceal/slice_drop.py ref.265 gap.265 --au 50 --slice 1
+```
+
+`decode_compare.py` reports per-frame luma PSNR and the damaged **CTU-64 row**
+indices, so a slice-band failure is named rather than averaged away. Three
+traps, all paid for once (findings 2026-08-20):
+
+- **Cut the reference at an AU boundary** (`ffmpeg -c copy -frames:v N`). A
+  `head -c` cut truncates the last AU and fabricates ~11 dB of "damage".
+- **Run the do-nothing control** (`ref` against `ref`) before reading any
+  number. On the SSC338Q every 5th picture decodes ~42 dB differently between
+  software and hardware — the TRAIL_N mixed-NAL-type non-conformance, not
+  concealment.
+- **Always pair a repaired-stream test with the gap-AU control**, or decoder
+  acceptance of the repair does not show the repair was necessary.
+
 ## Fault/recovery gallery (`ab_gallery.py`)
 
 Renders the operator-review image set from any capture — the one behind the

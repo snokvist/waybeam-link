@@ -144,6 +144,25 @@ is a short craft run, not an RF session.
    decoded-output compare or visual judgment. The hub already runs
    `MPP_DEC_SET_DISABLE_ERROR 0xffff` + PARTIAL mode, so the H.264-class
    error latch is defused; no hub change is part of this phase.
+4. **Readout** — `tools/spatial_conceal/decode_compare.py ref.265 out.265
+   --decoder gst:<mpp element> --ref-decoder ffmpeg` gives per-frame PSNR and
+   the damaged CTU-64 rows, so "MPP agrees with software" is a number rather
+   than an absence of log lines. Run the **negative control** in the same
+   session — `slice_drop.py` builds a gap AU — otherwise decoder acceptance
+   of the repaired stream does not establish that the repair was needed.
+   Expect a ~42 dB baseline divergence on every 5th picture even on a clean
+   stream (the TRAIL_N mixed-NAL-type non-conformance, findings 2026-08-20);
+   subtract it before attributing anything to concealment.
+5. **Filed for this phase — hub `split_parse` (needs rk3566, not done):**
+   `src/pixelpilot/video_decoder.c:1045` sets `base:split_parse 1`, but the
+   frame-SHM path already feeds exactly one whole AU per `MppPacket`, so the
+   splitter re-derives boundaries it was handed. The external lab measured
+   that with `split_parse=1` a picture missing its first slice is appended to
+   the previous AU and disappears from the output (8 losses → 82 frames of
+   90); their recommendation for AU-per-packet feeding is `split_parse=0`.
+   We never ship gap AUs, so this is latent rather than active — but it is a
+   free failure mode to remove. A/B it on rk3566 while the decode-compare
+   readout is already set up.
 3. Same feed on x86 `ground_x86` (vah265dec) if a VAAPI host is handy.
 
 ## Phase D — two-node link, synthetic loss (udp-air, no RF) — **DONE on x86 (2026-08-20)**

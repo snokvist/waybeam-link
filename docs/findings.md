@@ -12,6 +12,126 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — x86 negative control: AMD VAAPI does not fail on a gap AU, and §6.3b's x86 value is DETERMINISM not dB
+
+New tools: `tools/spatial_conceal/slice_drop.py` (builds the gap AU — the
+stream a decoder would see *without* §6.3b) and `decode_compare.py` (decodes
+two streams and compares the pictures — per-frame luma PSNR plus damaged
+CTU-64 row extent, with `--decoder gst:<element>` so the same readout runs
+against VAAPI here and MPP on rk3566 in Phase C).
+
+Corpus: first 100 AUs of the real `.232` capture, AU-aligned (`ffmpeg -c copy
+-frames:v 100` — an arbitrary `head -c` cut truncates the last AU and
+manufactured a 11.6 dB artifact that briefly looked like a finding).
+One slice (index 1, 9,827 B) removed from AU 50; the §6.3b repair of the same
+AU/slice via `hevc_conceal_cli`.
+
+| stream | decoder | worst frame | worst PSNR |
+|---|---|---:|---:|
+| gap AU (no §6.3b) | ffmpeg sw | 85 | **36.81 dB** |
+| gap AU | AMD VAAPI `vah265dec` | 50 | 46.21 dB |
+| §6.3b repaired | ffmpeg sw | 50 | **47.33 dB** |
+| §6.3b repaired | AMD VAAPI | 50 | **47.33 dB** |
+
+**Their VAAPI finding does not reproduce on AMD.** The external lab's Intel
+iHD result was a *fatal* `vaSyncSurface` decoding error that made ffmpeg
+discard a good surface. On this host (AMD Radeon, `va` plugin) the gap AU
+decoded all 100 frames with no pipeline error and no dropped picture. That is
+a driver-and-stack difference, not a contradiction — but it means their
+libavutil patch is not something our x86 ground needs.
+
+**The repaired stream decodes bit-identically on both decoders** (47.33 dB,
+frame 50, rows 4-10 — the same numbers to two decimals). The gap AU does not:
+36.81 dB on software against 46.21 on hardware, and the software damage
+*peaks 35 frames later* (frame 85), i.e. it propagates rather than heals. So
+on x86 the repair buys ~1 dB against AMD's own concealment but ~10 dB against
+software, and — the part that actually matters — it makes the picture the
+same everywhere. A conformant AU is decoder-independent; a gap AU is a
+different picture on every stack. That is the argument against the external
+lab's "ship the gap and let hardware conceal" simplification, and it is
+stronger than the dB gap.
+
+**Caveat on how far this generalises.** This is one missing slice in one AU.
+Our reassembler never emits a gap AU — without §6.3b the frame is *dropped*,
+so the operative comparison for the feature's value stays repair-vs-drop
+(Phase D: 231 vs 50 of 362 at 20% loss). The gap AU exists only to price the
+"don't repair, ship partial" alternative.
+
+**Unrelated defect found by the do-nothing control: the craft's stream
+decodes DIFFERENTLY on software and hardware, on every 5th picture.** Clean
+capture, ffmpeg vs AMD VAAPI: 20 of 100 frames differ, at 41.7-43.1 dB over
+CTU rows 3-16, and every one of them has frame index ≡ 4 (mod 5) — exactly
+the SVC-T TRAIL_N pictures, which carry mixed TRAIL_N/TRAIL_R NAL types
+inside a single picture (HEVC 7.4.2.2 non-conformance, already recorded as
+the reason `-threads 1` is mandatory). It is now clear this is not merely an
+ffmpeg threading artifact: two independent decoder implementations
+reconstruct 20% of our pictures differently. Mild (~42 dB) but real, and it
+means two ground stations can display different pixels from one stream.
+**Filed against venc, not §6.3b** — every decode-compare must expect this
+1-in-5 divergence as a baseline or it will be misattributed to concealment.
+
+## 2026-08-20 — the sliceCount ceiling is 6 today, and the reason given for the cap is a misreading
+
+Trying to set `video0.sliceCount=17` on the craft was refused by venc's own
+validator: `video0.slice_count must be 1..8` (`src/venc_api.c:1257`), with
+`venc_config.c:645` clamping to the same range. Since 7 and 8 both quantize
+to 6 delivered slices, **the fleet's reachable maximum today is 6** — 9 and
+17 cannot be requested at all.
+
+The cap's stated rationale (`ui_slice_count`, `venc_api.c:475`) is *"Capped
+at 8 by the SDK's 8-entry per-pack NAL table."* The table is real —
+`packetInfo[8]` in `include/sigmastar_types.h:660/1051` — but it bounds NALs
+**per pack**, and the output walker iterates packs
+(`for (i = 0; i < stream->count; ++i)`, `star6e_output.c:918`); `packNum` is
+per-pack. So it is not an AU-level slice limit.
+
+**Measured, decisively:** the GDR refresh AU is a 17-slice picture (verified
+in the capture at addresses 0,30,…,480), it is emitted every 2 s GOP at every
+sliceCount, and `.232` has been running the abort-not-truncate build for 6 h
+— roughly 10,800 such AUs through that exact walker — with the truncation
+WARN count at **zero**. A 17-NAL access unit already flows; it arrives as
+multiple packs of ≤8.
+
+So raising the validator ceiling is well-founded rather than speculative.
+Open before flipping any default: the ceiling change itself (venc, PR #236
+territory), then a deploy and a structural check (delivered count really 17,
+fps holds, WARN stays silent at 60 frames/s rather than 0.5/s).
+
+**The quality half is blocked on scene motion, not on RF.** Slice overhead
+under CBR surfaces as QP, and a static bench scene at 18 Mbps runs
+quality-saturated, so a QP sweep taken now would measure nothing
+([[feedback_moving_scene_required_for_venc_rate_tests]]). The
+sliceCount x bitrate matrix needs motion in frame.
+
+**Why a matrix and not a sweep (operator input 2026-08-20): the link runs
+2500-25000 kbps**, and the optimum tracks frame size. At 60 fps the knee
+`N* = frame_bytes/1424` moves from 3.7 (2.5 Mbps) to 36.6 (25 Mbps) — so no
+single value serves the range. At 2.5 Mbps a 17-slice picture is ~306 B per
+slice, far past the knee, where the CABAC-reset overhead is paid for zero
+granularity gain; at 18 Mbps a 4-slice picture leaves 6.65 chunks per slice
+and 77% of the picture synthesized at 20% loss. Indicative mapping at 60 fps
+(`N*` snapped onto the achievable set {1,2,3,4,5,6,9,17}):
+
+| bitrate | frame B | chunks | N\* | pick |
+|---:|---:|---:|---:|---:|
+| 2500 | 5,208 | 3.7 | 3.7 | 4 |
+| 5000 | 10,417 | 7.3 | 7.3 | 6 |
+| 8000 | 16,667 | 11.7 | 11.7 | 9 |
+| 12000 | 25,000 | 17.6 | 17.6 | 17 |
+| 18000-25000 | 37.5k-52k | 26-37 | capped | 17 |
+
+That is either a per-mode static choice (modes already bundle fps and
+resolution, so a slice count fits the same object) or a link-driven
+actuation, since waybeam-link is already the sole rate controller and would
+be the only thing that knows the current bitrate. Two things make the
+dynamic version cheap if it is wanted: slice layout is per-picture syntax, so
+changing it needs **no IDR and no SPS/PPS change**, and the repair layer
+already refuses to adopt a new geometry until two consecutive pictures agree,
+so a switch costs a couple of frames of salvage refusal and nothing else.
+Open ruling: static-per-mode vs link-actuated, and whether the actuation is
+restart-class (it is today — `MUT_RESTART`, `venc_api.c:640`) or can be made
+live via `MI_VENC_SetH265SliceSplit` on a running channel.
+
 ## 2026-08-20 — how many slices 1080p can actually have, and why the FPV default should be 17 not 4
 
 Measured on the real `.232` capture (362 AUs, `tools/` parser); craft live
