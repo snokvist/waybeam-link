@@ -558,10 +558,10 @@ Current §9.5 derived bitrate (25000 kbps `venc.max_bitrate_kbps` ceiling):
 |---|---|---|---:|---:|---:|
 | 0 | 0 | long | 3804 | 2829 (250‰ FEC) | **2829** (600‰ airtime) |
 | 1 | 1 | long | 7704 | 5754 (250‰ FEC) | **5754** (600‰ airtime) |
-| 2 | 2 | short | 12903 | 10303 (200‰ FEC) | **10303** (600‰ airtime) |
-| 3 | 3 | short | 17236 | 13769 (200‰ FEC) | **13769** (600‰ airtime) |
-| 4 | 4 | short | 25000 (clamped) | 21223 (180‰ FEC) | **18025** (510‰ airtime) |
-| 5 | 5 | short | 25000 (clamped) | 25000 (clamped) | **21839** (463‰ airtime) |
+| 2 | 2 | long | 11604 | 9264 (200‰ FEC) | **9264** (600‰ airtime) |
+| 3 | 3 | long | 15504 | 12384 (200‰ FEC) | **12384** (600‰ airtime) |
+| 4 | 4 | long | 23304 | 19092 (180‰ FEC) | **16213** (510‰ airtime) |
+| 5 | 5 | long | 25000 (clamped) | 25000 (clamped) | **19646** (463‰ airtime) |
 
 Read back from the shipped table via `derive_bitrate_kbps()`, not estimated.
 Pass 95 corrected parity accounting; Pass 111 retains its conservative lower
@@ -620,10 +620,10 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 |---|---|---|---|---|---|
 | 0 | 2829 | 0.102 | 0.051 | 0.034 | 0.031 |
 | 1 | 5754 | 0.208 | 0.104 | 0.069 | 0.062 |
-| 2 | 10303 | 0.373 | 0.186 | 0.124 | 0.112 |
-| 3 | 13769 | 0.498 | 0.249 | 0.166 | 0.149 |
-| 4 | 18025 | 0.652 | 0.326 | 0.217 | 0.196 |
-| 5 | 21839 | 0.790 | 0.395 | 0.263 | 0.237 |
+| 2 | 9264 | 0.335 | 0.168 | 0.112 | 0.101 |
+| 3 | 12384 | 0.448 | 0.224 | 0.149 | 0.134 |
+| 4 | 16213 | 0.586 | 0.293 | 0.195 | 0.176 |
+| 5 | 19646 | 0.711 | 0.355 | 0.237 | 0.213 |
 
 **1920×1080 (2 073 600 px)**
 
@@ -631,10 +631,10 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 |---|---|---|---|---|---|
 | 0 | 2829 | 0.045 | 0.023 | 0.015 | 0.014 |
 | 1 | 5754 | 0.092 | 0.046 | 0.031 | 0.028 |
-| 2 | 10303 | 0.166 | 0.083 | 0.055 | 0.050 |
-| 3 | 13769 | 0.221 | 0.111 | 0.074 | 0.066 |
-| 4 | 18025 | 0.290 | 0.145 | 0.097 | 0.087 |
-| 5 | 21839 | 0.351 | 0.176 | 0.117 | 0.105 |
+| 2 | 9264 | 0.149 | 0.074 | 0.050 | 0.045 |
+| 3 | 12384 | 0.199 | 0.100 | 0.066 | 0.060 |
+| 4 | 16213 | 0.261 | 0.130 | 0.087 | 0.078 |
+| 5 | 19646 | 0.316 | 0.158 | 0.105 | 0.095 |
 
 **960×540 (518 400 px)**
 
@@ -642,10 +642,10 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 |---|---|---|---|---|---|
 | 0 | 2829 | 0.182 | 0.091 | 0.061 | 0.055 |
 | 1 | 5754 | 0.370 | 0.185 | 0.123 | 0.111 |
-| 2 | 10303 | 0.662 | 0.331 | 0.221 | 0.199 |
-| 3 | 13769 | 0.885 | 0.443 | 0.295 | 0.266 |
-| 4 | 18025 | 1.159 | 0.580 | 0.386 | 0.348 |
-| 5 | 21839 | 1.404 | 0.702 | 0.468 | 0.421 |
+| 2 | 9264 | 0.596 | 0.298 | 0.199 | 0.179 |
+| 3 | 12384 | 0.796 | 0.398 | 0.265 | 0.239 |
+| 4 | 16213 | 1.043 | 0.521 | 0.348 | 0.313 |
+| 5 | 19646 | 1.263 | 0.632 | 0.421 | 0.379 |
 
 This is the matrix's real shape, and it reproduces the operator's intuition
 correctly — but inverted from §4's first reading. It is not that low
@@ -779,12 +779,13 @@ its top rung.
 
 | | **Range High** (MCS 0–2) | **Range Medium** (MCS 1–4) | **Range Low** (MCS 2–5) |
 |---|---|---|---|
-| **Latency Low** (100 fps) | 960×540 · 0.055→0.199 | 1280×720 · 0.062→0.196 | 1920×1080 · 0.050→0.105 |
-| **Latency Medium** (60 fps) | 1280×720 · 0.051→0.186 | 1920×1080 · 0.046→0.145 | 1920×1080 · 0.083→0.176 |
-| **Latency High** (30 fps) | 1920×1080 · 0.046→0.166 | 1920×1080 · 0.093→0.290 | 1920×1080 · 0.166→0.351 |
+| **Latency Low** (100 fps) | 960×540 · 0.055→0.179 | 1280×720 · 0.062→0.176 | 1920×1080 · 0.045→0.095 |
+| **Latency Medium** (60 fps) | 1280×720 · 0.051→0.168 | 1920×1080 · 0.046→0.130 | 1920×1080 · 0.074→0.158 |
+| **Latency High** (30 fps) | 1920×1080 · 0.045→0.149 | 1920×1080 · 0.092→0.261 | 1920×1080 · 0.149→0.316 |
 
 Rung bitrates are §9.5-derived from the **Pass 111 table** (`table_version`
-0x80 after Pass 122) — 2829 / 5754 / 10303 / 13769 / 18025 / 21839 kbps. Pass 95's graduated
+0xA4 since the §9.5 long-GI ruling 2026-08-20) — 2829 / 5754 / 9264 / 12384 /
+16213 / 19646 kbps. Pass 95's graduated
 FEC overhead remains in force; Pass 111 adds the measured local-service ceiling
 for MCS4–5. The floor rungs that choose each resolution are unchanged, so no
 mode changes size. **(Latency Low, Range Medium)** remains the knife edge:

@@ -909,13 +909,21 @@ int main() {
             CHECK_EQ_U(t.value->profiles[7].max_payload, 3072);
             CHECK_EQ_U(t.value->profiles[0].fec_overhead_permille, 250);
             CHECK_EQ_U(t.value->profiles[5].fec_overhead_permille, 180);
+            // Pass 111 airtime permille, but long GI on every rung (§9.5
+            // operator ruling 2026-08-20) — so no rung takes the x10/9
+            // short-GI term any more.
             static constexpr uint32_t kPass111Bitrates[] = {
-                2829, 5754, 10303, 13769, 18025, 21839, 23249, 24658};
+                2829, 5754, 9264,  12384, 16213, 19646, 20914, 22183};
             for (size_t i = 0; i < t.value->profiles.size(); ++i) {
                 CHECK_EQ_U(derive_bitrate_kbps(t.value->profiles[i]),
                            kPass111Bitrates[i]);
             }
-            CHECK_EQ_U(table_version(*t.value), 0xC1);  // Pass 163 (was 0x80)
+            CHECK_EQ_U(table_version(*t.value), 0xA4);  // long GI everywhere
+                                                        // (was 0xC1; Pass 163
+                                                        // was 0x80). The hash is
+                                                        // wire-visible: craft and
+                                                        // ground must update
+                                                        // together.
             CHECK_EQ_U(t.value->probe_period, 64);
             CHECK_EQ_U(t.value->probe_slot, 4);
         }

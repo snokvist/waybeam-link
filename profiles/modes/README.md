@@ -69,7 +69,7 @@ cell moves together and the structure survives.
 | **High latency** 30 fps | 1920×1080 · 0.046→0.166 | 1920×1080 · 0.093→0.290 | 1920×1080 · 0.166→0.351 |
 
 Rung bitrates come from the Pass 122 table (`table_version` 0x80): 2829 / 5754 /
-10303 / 13769 / 18025 / 21839 kbps. `(Low latency, Range Medium)` is the one
+9264 / 12384 / 16213 / 19646 kbps (long GI on every rung, §9.5 ruling 2026-08-20). `(Low latency, Range Medium)` is the one
 knife-edge — 1600×900 lands at 0.0400 bpp, 0.1 % under the floor, so the
 smaller size is taken. Raise the floor at all and that cell becomes 1600×900.
 
