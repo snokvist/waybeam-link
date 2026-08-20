@@ -1,6 +1,6 @@
 {
   "_mode": "High latency / Medium range (docs/venc-mode-matrix.md §16.3)",
-  "_derivation": "bpp = kbps/(fps*pixels). Floor rung 1 (5754 kbps) -> 0.0925 bpp; top rung 4 (18025 kbps) -> 0.290 bpp. Encode size is the largest on the ladder clearing the 0.04 bpp floor at rung 1. Rung bitrates are §9.5 derived from the Pass 122 table (table_version 0x80), not estimated.",
+  "_derivation": "bpp = kbps/(fps*pixels). Floor rung 1 (5754 kbps) -> 0.0925 bpp; top rung 4 (16213 kbps) -> 0.290 bpp. Encode size is the largest on the ladder clearing the 0.04 bpp floor at rung 1. Rung bitrates are §9.5 derived from the Pass 122 table (table_version 0x80), not estimated.",
   "_apply": "venc fields go to waybeam_venc (sensor.mode and video0.size are restart_required, so this is a pre-flight choice); link fields are merged into /etc/waybeam-link/craft.json. Restart venc (S95waybeam) then the link (S96waybeam-link), then re-scout + quickconnect — a craft restart leaves CSA silently dead otherwise (B9).",
   "venc": {
     "sensor": {
@@ -22,5 +22,5 @@
       "fps_mode": "static"
     }
   },
-  "_slices": "sliceCount 17 (§6.3b). The concealed area on a loss is max(1/N, the byte fraction actually lost), so once a slice is about one 1424 B FEC chunk the area is chunk-limited and finer slices only cost ~26 B each (measured 2026-08-20); coarser ones leave area on the table. Pick the smallest deliverable N at or above that knee, evaluated at this mode's FLOOR rung 1 (5754 kbps, 30 fps) where the overhead is the largest share of the frame: a frame is 16.84 chunks, so N*=16.84 and 1080p can deliver 1/2/3/4/5/6/9/17 (the SDK rounds slice height up to whole CTU-64 rows)."
+  "_slices": "sliceCount 17 (§6.3b). The concealed area on a loss is max(1/N, the byte fraction actually lost), so once a slice is about one 1424 B FEC chunk the area is chunk-limited and finer slices only cost ~26 B each (measured 2026-08-20); coarser ones leave area on the table. Pick the smallest deliverable N at or above that knee, evaluated at this mode's FLOOR rung 1 (5754 kbps at long GI, 30 fps) where the overhead is the largest share of the frame: a frame is 16.84 chunks, so N*=16.84 and 1080p can deliver 1/2/3/4/5/6/9/17 (the SDK rounds slice height up to whole CTU-64 rows)."
 }

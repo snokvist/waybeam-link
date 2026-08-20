@@ -2069,10 +2069,26 @@ MCS and bitrate never move together:
   clean point are retained; oversubscribed rungs use the greatest integer
   `airtime_budget_permille` whose derived rate is no more than 95% of that clean
   point. This yields airtime permille
-  `{600,600,600,600,510,463,438,418}` and unclamped derived kbps
+  `{600,600,600,600,510,463,438,418}`, and — as calibrated, with short GI on
+  rungs 2–7 — unclamped derived kbps
   `{2829,5754,10303,13769,18025,21839,23249,24658}` for MCS0–7. These are fleet
   seeds, not universal RF truth: re-measure after a channel width, driver,
-  framing/FEC, pacer, camera cadence, or hardware-class change. Ordinary
+  framing/FEC, pacer, camera cadence, or hardware-class change.
+- **Long GI on every rung (operator ruling 2026-08-20).** The shipped tables
+  now set `guard_interval: "long"` for all MCS, trading ~10% PHY rate for
+  multipath robustness on a moving craft. The `×10/9` short-GI term therefore
+  applies to no fleet rung, and the derived kbps become
+  `{2829,5754,9264,12384,16213,19646,20914,22183}` — rungs 0 and 1 were
+  already long GI and are unchanged. **The airtime permille are deliberately
+  NOT retuned**: they are a fraction of airtime, not a GI-dependent quantity,
+  so the change is expressed where it belongs, in the PHY rate. The
+  consequence is that every rung above 1 now derives ~10% *below* the Pass 111
+  clean point instead of at 95% of it — conservative, not oversubscribed.
+  Re-measuring that ceiling under long GI, and retuning the permille to sit at
+  95% of the new one, is open work and is exactly the "framing change"
+  re-measure trigger named above. Note also that §10.7 uplink calibration
+  entries carry `(mcs, short_gi)` in their identity, so artifacts captured on
+  the short-GI rungs no longer match and those rungs need recalibrating. Ordinary
   channel interference belongs to §9.1/§9.2; it must not be baked into this
   local service-boundary calibration.
 - **`fec_overhead_frac` MUST be non-zero on any rung whose streams run
