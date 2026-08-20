@@ -200,6 +200,14 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.frames_unrecoverable);
         out += ",\"malformed\":";
         append_u64(out, s.malformed);
+        out += ",\"frames_salvaged\":";
+        append_u64(out, s.frames_salvaged);
+        out += ",\"frames_frozen\":";
+        append_u64(out, s.frames_frozen);
+        out += ",\"salvage_failed\":";
+        append_u64(out, s.salvage_failed);
+        out += ",\"slices_synthesized\":";
+        append_u64(out, s.slices_synthesized);
         out += ",\"jscc_shadow_blocks\":";
         append_u64(out, s.jscc_shadow_blocks);
         out += ",\"jscc_predicted_loss_symbols\":";

@@ -555,5 +555,99 @@ int main() {
         CHECK_EQ_U(ra.stats().frames_delivered, 1u);
     }
 
+    {
+        // §6.3b salvage hook: a block finalizing below k hands its surviving
+        // source chunks to the hook (deadline AND supersession), a successful
+        // hook emit counts as delivered (not dropped), and the zero-reorder
+        // guard blocks a salvage behind a newer emitted block.
+        FrameReassemblerConfig rc2;
+        rc2.deadline_ms = 50;
+        FrameReassembler ra(rc2);
+        uint32_t hook_calls = 0;
+        uint32_t seen_block = 0;
+        uint16_t seen_k = 0;
+        uint16_t seen_s = 0;
+        size_t seen_sources = 0;
+        bool hook_result = true;
+        // The view is hook-scoped (the block is erased on return) — copy out
+        // what the assertions need.
+        ra.set_salvage_hook([&](const SalvageView& v,
+                                const FrameReassembler::Emit& emit) {
+            ++hook_calls;
+            seen_block = v.block_id;
+            seen_k = v.k;
+            seen_s = v.s;
+            seen_sources = v.sources != nullptr ? v.sources->size() : 0;
+            if (!hook_result) {
+                return false;
+            }
+            const uint8_t fake[1] = {0x42};
+            emit(fake, 1);
+            return true;
+        });
+        std::vector<std::vector<uint8_t>> got;
+        const FrameReassembler::Emit emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+        };
+
+        FrameFramer f1(framer_cfg(FecScheme::kRlc256, 250, 100, 1));
+        auto blob = make_frame(6000, /*idr=*/false, 9);
+        auto syms = produce(f1, blob);  // block 0
+        // k sources + 2 repairs; feed all but three so the block stays one
+        // symbol below k forever.
+        for (size_t i = 0; i + 3 < syms.size(); ++i) {
+            ra.push(syms[i].block_id, syms[i].flags, syms[i].payload.data(),
+                    syms[i].payload.size(), 1000, emit);
+        }
+        CHECK_EQ_U(hook_calls, 0u);
+        ra.tick(1051, emit);  // deadline -> salvage fires
+        CHECK_EQ_U(hook_calls, 1u);
+        CHECK_EQ_U(seen_block, 0u);
+        CHECK(seen_k > 0 && seen_s > 0);
+        CHECK(seen_sources > 0);
+        CHECK_EQ_U(got.size(), 1u);
+        CHECK_EQ_U(ra.stats().frames_salvaged, 1u);
+        CHECK_EQ_U(ra.stats().frames_delivered, 1u);
+        CHECK_EQ_U(ra.stats().frames_unrecoverable, 0u);
+        CHECK_EQ_U(ra.stats().frames_deadline, 0u);
+
+        // Supersession path: partial block 1, then block 2 arrives.
+        auto blob2 = make_frame(6000, false, 10);
+        auto syms2 = produce(f1, blob2);  // block 1
+        ra.push(syms2[0].block_id, syms2[0].flags, syms2[0].payload.data(),
+                syms2[0].payload.size(), 1060, emit);
+        auto blob3 = make_frame(6000, false, 11);
+        auto syms3 = produce(f1, blob3);  // block 2
+        ra.push(syms3[0].block_id, syms3[0].flags, syms3[0].payload.data(),
+                syms3[0].payload.size(), 1061, emit);
+        CHECK_EQ_U(hook_calls, 2u);  // block 1 salvaged on supersession
+        CHECK_EQ_U(seen_block, 1u);
+        CHECK_EQ_U(ra.stats().frames_salvaged, 2u);
+        CHECK_EQ_U(ra.stats().frames_superseded, 0u);
+
+        // Hook refusal -> the pre-§6.3b drop accounting.
+        hook_result = false;
+        ra.tick(1200, emit);  // block 2 hits its deadline
+        CHECK_EQ_U(hook_calls, 3u);
+        CHECK_EQ_U(ra.stats().frames_unrecoverable, 1u);
+        CHECK_EQ_U(ra.stats().frames_deadline, 1u);
+        CHECK_EQ_U(ra.stats().frames_salvaged, 2u);
+    }
+
+    {
+        // No hook set: behaviour identical to pre-§6.3b (drop, count).
+        FrameReassemblerConfig rc2;
+        rc2.deadline_ms = 50;
+        FrameReassembler ra(rc2);
+        FrameFramer f1(framer_cfg(FecScheme::kRlc256, 250, 100, 1));
+        auto blob = make_frame(6000, false, 9);
+        auto syms = produce(f1, blob);
+        ra.push(syms[0].block_id, syms[0].flags, syms[0].payload.data(),
+                syms[0].payload.size(), 1000, noop);
+        ra.tick(1051, noop);
+        CHECK_EQ_U(ra.stats().frames_unrecoverable, 1u);
+        CHECK_EQ_U(ra.stats().frames_salvaged, 0u);
+    }
+
     return wbtest_finish("frame_reassembler_test");
 }

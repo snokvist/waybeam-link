@@ -193,6 +193,7 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
             scratch_.insert(scratch_.end(), kv.second.begin(), kv.second.end());
         }
         emit(scratch_.data(), scratch_.size());
+        note_emitted(id);
         observe_shadow(id, b);
         stats_.arq_recovered_source_symbols += b.arq_sources.size();
         stats_.frames_with_arq += !b.arq_sources.empty();
@@ -224,6 +225,7 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
             if (dec.decode(scratch_.data())) {
                 scratch_.resize(b.frame_len);  // trim last-symbol padding
                 emit(scratch_.data(), scratch_.size());
+                note_emitted(id);
                 observe_shadow(id, b);
                 stats_.fec_recovered_source_symbols +=
                     k - b.sources.size();
@@ -245,16 +247,22 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
     return false;
 }
 
-void FrameReassembler::supersede(uint32_t new_highest, const Emit& /*emit*/) {
+void FrameReassembler::supersede(uint32_t new_highest, const Emit& emit) {
     for (auto it = blocks_.begin(); it != blocks_.end();) {
         // Blocks still in the map are incomplete (completed ones are erased).
         if (bid_diff(new_highest, it->first) >
             static_cast<int32_t>(cfg_.max_blocks_ahead)) {
             const Block& b = it->second;
             if (b.k == 0 || b.sources.size() + b.repairs.size() < b.k) {
-                ++stats_.frames_unrecoverable;
+                if (try_salvage(it->first, b, emit)) {
+                    // §6.3b: delivered after repair — not dropped.
+                } else {
+                    ++stats_.frames_unrecoverable;
+                    ++stats_.frames_superseded;
+                }
+            } else {
+                ++stats_.frames_superseded;
             }
-            ++stats_.frames_superseded;
             observe_shadow(it->first, it->second);
             finalize(it->first);
             it = blocks_.erase(it);
@@ -264,20 +272,57 @@ void FrameReassembler::supersede(uint32_t new_highest, const Emit& /*emit*/) {
     }
 }
 
-void FrameReassembler::tick(uint64_t now_ms, const Emit& /*emit*/) {
+void FrameReassembler::tick(uint64_t now_ms, const Emit& emit) {
     for (auto it = blocks_.begin(); it != blocks_.end();) {
         if (now_ms >= it->second.first_ms + cfg_.deadline_ms) {
             const Block& b = it->second;
             if (b.k == 0 || b.sources.size() + b.repairs.size() < b.k) {
-                ++stats_.frames_unrecoverable;
+                if (try_salvage(it->first, b, emit)) {
+                    // §6.3b: delivered after repair — not dropped.
+                } else {
+                    ++stats_.frames_unrecoverable;
+                    ++stats_.frames_deadline;
+                }
+            } else {
+                ++stats_.frames_deadline;
             }
-            ++stats_.frames_deadline;
             observe_shadow(it->first, it->second);
             finalize(it->first);
             it = blocks_.erase(it);
         } else {
             ++it;
         }
+    }
+}
+
+bool FrameReassembler::try_salvage(uint32_t id, const Block& b,
+                                   const Emit& emit) {
+    if (!salvage_ || b.k == 0 || b.sources.empty()) {
+        return false;
+    }
+    // §6.3a zero-reorder rule: never emit behind a newer delivered block.
+    if (have_emitted_ && bid_diff(id, last_emitted_) <= 0) {
+        return false;
+    }
+    SalvageView view;
+    view.block_id = id;
+    view.k = b.k;
+    view.s = b.s;
+    view.frame_len = b.frame_len;
+    view.sources = &b.sources;
+    if (!salvage_(view, emit)) {
+        return false;
+    }
+    note_emitted(id);
+    ++stats_.frames_delivered;
+    ++stats_.frames_salvaged;
+    return true;
+}
+
+void FrameReassembler::note_emitted(uint32_t id) {
+    if (!have_emitted_ || bid_diff(id, last_emitted_) > 0) {
+        last_emitted_ = id;
+        have_emitted_ = true;
     }
 }
 
@@ -384,6 +429,8 @@ void FrameReassembler::reset_stream() {
     blocks_.clear();
     highest_block_ = 0;
     have_highest_ = false;
+    last_emitted_ = 0;
+    have_emitted_ = false;
     finalized_upto_ = 0;
     have_finalized_ = false;
     scratch_.clear();

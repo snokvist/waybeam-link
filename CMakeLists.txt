@@ -262,6 +262,8 @@ add_library(wblink_core STATIC
     core/src/framer.cpp
     core/src/frame_framer.cpp
     core/src/frame_reassembler.cpp
+    core/src/hevc_conceal.cpp
+    core/src/spatial_repair.cpp
     core/src/cache_store.cpp
     core/src/cache_controller.cpp
     core/src/cache_assignment.cpp
@@ -476,6 +478,18 @@ if(WBLINK_FRAME_SHM AND PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
     add_executable(frame_shm_feed tools/frame_shm_feed.cpp)
     target_compile_options(frame_shm_feed PRIVATE ${WBLINK_WARNINGS})
     target_link_libraries(frame_shm_feed PRIVATE wblink_io)
+endif()
+
+# §6.3b decoder-in-the-loop harness: repairs a .265 with the production
+# concealment code so real decoders can judge it (docs/findings.md
+# 2026-08-19). Native + top-level only, like the other bench tools.
+if(PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CROSSCOMPILING)
+    add_executable(hevc_conceal_cli tools/hevc_conceal_cli.cpp)
+    target_compile_options(hevc_conceal_cli PRIVATE ${WBLINK_WARNINGS})
+    target_link_libraries(hevc_conceal_cli PRIVATE wblink_core)
+    add_executable(spatial_conceal_bench tools/spatial_conceal_bench.cpp)
+    target_compile_options(spatial_conceal_bench PRIVATE ${WBLINK_WARNINGS})
+    target_link_libraries(spatial_conceal_bench PRIVATE wblink_core)
 endif()
 
 # B10 runtime probe (#109). node-linkcheck proves the sink's symbols resolve;

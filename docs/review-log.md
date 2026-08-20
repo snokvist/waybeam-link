@@ -24,6 +24,35 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 185 — a failed FEC block is not an empty one (2026-08-19)
+
+**Verdict.** New §6.3b (operator-directed, 2026-08-19): opt-in per frame-SHM
+egress stream (`streams[].conceal.mode: "slice-skip"`, default `"off"`), the
+verified systematic source symbols of a block that finalizes below `k` are
+salvaged instead of discarded, HEVC slice completeness is reconstructed from
+the surviving byte ranges, and each erased slice is replaced by a synthesized
+all-skip P slice so the decoder receives a complete, standards-valid access
+unit with the lost region frozen from the reference picture. §6.3a outcome 4
+and §14.1's "no partial delivery" now defer to §6.3b when enabled; §6.3a
+point 5's byte-identity gains its one exception (a repaired slot is
+reconstructed, not the producer's bytes). Off = bit-for-bit today's behaviour.
+
+**What stays contract.** Integrity tiering (RECEIVED = FCS + length-exact +
+subheader cross-checks, RECOVERED = full-decode only, ERASED = never used);
+IRAP pictures are never concealed (ARQ/`i_rate` own them); zero-reorder holds
+— a salvage that would emit behind a newer block is dropped; every refusal
+falls back to the pre-§6.3b drop. No wire change: salvage consumes only what
+§5.1a/§14.1 subheaders already carry (`k`, `i`, `s`, `frame_len`).
+
+**Evidence.** Offline proof, branch `claude/waybeam-spatial-hevc-dkoqq3`:
+x265 (WPP) + HM-18.0 (no-WPP, SAO on, TMVP on/off) multi-slice vectors,
+synthesized-slice substitution decoded clean by ffmpeg 6.1 and libde265
+1.0.15; concealed region byte-equal to the previous picture's co-located
+interior; untouched slices byte-equal to the reference decode; next IDR
+resyncs exactly. Full-chain sim (chunk → loss → salvage → rebuild → decode):
+25% i.i.d. symbol loss, r=2 — 0/120 frames dropped (34 repaired, 15 frozen)
+vs 49/120 dropped under §6.3a outcome 4. See `docs/findings.md` 2026-08-19.
+
 ## Pass 184 — how frames are carried is not how they are paced (2026-08-17)
 
 **Verdict.** New §15.2 `air.usb_tx_agg` (0..3, default 0 = off): how many

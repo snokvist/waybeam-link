@@ -49,6 +49,14 @@ struct FrameReassemblerStats {
     uint64_t frames_superseded = 0;
     uint64_t frames_deadline = 0;
     uint64_t frames_unrecoverable = 0;  // finalized with < k, no way to decode
+    // §6.3b outcomes. The reassembler itself counts frames_salvaged as "the
+    // hook emitted" (salvaged + frozen combined); the node layer overwrites
+    // all four from SpatialRepairStats at snapshot time, which splits
+    // salvaged (>= 1 surviving slice) from frozen (whole-frame synthesis).
+    uint64_t frames_salvaged = 0;
+    uint64_t frames_frozen = 0;
+    uint64_t salvage_failed = 0;
+    uint64_t slices_synthesized = 0;
     uint64_t decode_failures = 0;
     uint64_t malformed = 0;
     uint64_t jscc_shadow_blocks = 0;
@@ -87,13 +95,33 @@ struct RepairCandidate {
     std::array<uint8_t, 32> have_repairs{};
 };
 
+// §6.3b: view of a block being finalized below k — its verified received
+// source chunks (chunk i = blob bytes [i*s, i*s+size)) and known geometry.
+// s/frame_len are 0 when no symbol named them. Valid ONLY for the duration
+// of the SalvageHook call: the block (and the map sources points into) is
+// erased as soon as the hook returns.
+struct SalvageView {
+    uint32_t block_id = 0;
+    uint16_t k = 0;
+    uint16_t s = 0;
+    uint32_t frame_len = 0;
+    const std::map<uint16_t, std::vector<uint8_t>>* sources = nullptr;
+};
+
 class FrameReassembler {
   public:
     // emit(frame, len): one whole [VencFrameMeta][Annex-B] blob, valid only
     // during the call. The caller writes it to the frame-shm egress ring.
     using Emit = std::function<void(const uint8_t* frame, size_t len)>;
 
+    // §6.3b salvage hook: called when a block finalizes unrecoverable (and no
+    // newer block has already emitted). Returns true iff it emitted a
+    // repaired frame through the provided Emit. Unset = pre-§6.3b behaviour.
+    using SalvageHook = std::function<bool(const SalvageView&, const Emit&)>;
+
     explicit FrameReassembler(const FrameReassemblerConfig& cfg) : cfg_(cfg) {}
+
+    void set_salvage_hook(SalvageHook hook) { salvage_ = std::move(hook); }
 
     // Feed one deduped DATA symbol of this stream. is_repair from
     // data_flags & FEC_REPAIR; eob from data_flags & END_OF_BLOCK.
@@ -155,12 +183,20 @@ class FrameReassembler {
     void supersede(uint32_t new_highest, const Emit& emit);
     void finalize(uint32_t id);  // advance the done/dropped watermark
     void observe_shadow(uint32_t id, Block& b);
+    // §6.3b: last chance for a block finalizing below k. Returns true iff the
+    // hook emitted; ordering-guarded so a salvage never emits behind a newer
+    // already-emitted block (§6.3a zero-reorder rule).
+    bool try_salvage(uint32_t id, const Block& b, const Emit& emit);
+    void note_emitted(uint32_t id);
 
     FrameReassemblerConfig cfg_;
     FrameReassemblerStats stats_;
+    SalvageHook salvage_;
     std::map<uint32_t, Block> blocks_;
     uint32_t highest_block_ = 0;
     bool have_highest_ = false;
+    uint32_t last_emitted_ = 0;
+    bool have_emitted_ = false;
     uint32_t finalized_upto_ = 0;   // block_ids <= this are done/dropped
     bool have_finalized_ = false;
     std::vector<uint8_t> scratch_;  // reused decode/concat buffer

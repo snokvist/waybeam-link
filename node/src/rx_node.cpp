@@ -50,6 +50,7 @@
 #include "wblink/frame_caps.h"
 #include "wblink/frame_framer.h"
 #include "wblink/frame_reassembler.h"
+#include "wblink/spatial_repair.h"
 #include "wblink/frame_shm.h"
 #include "wblink/frame_shm_format.h"
 #include "wblink/framer.h"
@@ -590,6 +591,8 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         uint64_t last_frame_us = 0;
         uint64_t previous_interval_us = 0;
         uint64_t jitter_q4_us = 0;
+        // §6.3b spatial salvage engine (conceal.mode "slice-skip" only).
+        std::unique_ptr<SpatialRepair> repair;
 #if WBLINK_FRAME_SHM
         // Owned only so the ring outlives the sink that writes it, and read
         // for the §15.3 counters, which have no meaning for a callback.
@@ -615,6 +618,21 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         FrameOut fo;
         fo.stream_id = s.stream_id;
         fo.reasm = std::make_unique<FrameReassembler>(frc);
+        if (s.conceal_enabled) {
+            SpatialRepairConfig rc;
+            rc.freeze_frame = s.conceal_freeze_frame;
+            rc.max_frame_bytes = frc.max_frame_bytes;
+            fo.repair = std::make_unique<SpatialRepair>(rc);
+            // Pointee addresses survive the vector's push_back moves; the
+            // unique_ptrs move, the objects do not (same rule as the ring).
+            SpatialRepair* rp = fo.repair.get();
+            fo.reasm->set_salvage_hook(
+                [rp](const SalvageView& v, const FrameReassembler::Emit& emit) {
+                    return rp->repair(v.k, v.s, v.frame_len, *v.sources, emit);
+                });
+            wb_logf("rx: stream %u §6.3b conceal enabled (freeze_frame=%d)\n",
+                    s.stream_id, s.conceal_freeze_frame ? 1 : 0);
+        }
         if (frame_out) {
             const uint8_t sid = s.stream_id;
             fo.sink = [&frame_out, sid](const uint8_t* f, size_t len) {
@@ -778,6 +796,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     // for that stream can stand down.
     const auto write_egress = [&](FrameOut& fo, const uint8_t* f, size_t len) {
         fo.sink(f, len);
+        if (fo.repair) {
+            fo.repair->learn(f, len);  // §6.3b geometry/donor tracking
+        }
         if (fo.count_locally) {
             // Mirrors FrameShmRing::note_frame, including the fixed-point
             // J += (variation - J)/16 jitter, so the §15.3 numbers mean the
@@ -844,6 +865,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             }
             if (!fo.source || !(*fo.source == source)) {
                 fo.reasm->reset_stream();
+                if (fo.repair) {
+                    fo.repair->reset_stream();
+                }
                 fo.source = source;
             }
             const bool complete = fo.reasm->push(
@@ -3168,6 +3192,16 @@ art.craft_adapter_fingerprint = craft_tally_fp;
             shm_stats.reserve(frame_outs.size());
             for (const FrameOut& fo : frame_outs) {
                 frame_stats.emplace_back(fo.stream_id, fo.reasm->stats());
+                if (fo.repair) {
+                    // §6.3b: split the reassembler's combined hook count into
+                    // salvaged / frozen and add the repair-side counters.
+                    const SpatialRepairStats& rs = fo.repair->stats();
+                    FrameReassemblerStats& fr = frame_stats.back().second;
+                    fr.frames_salvaged = rs.frames_salvaged;
+                    fr.frames_frozen = rs.frames_frozen;
+                    fr.salvage_failed = rs.salvage_failed;
+                    fr.slices_synthesized = rs.slices_synthesized;
+                }
 #if WBLINK_FRAME_SHM
                 if (fo.ring) {
                     shm_stats.emplace_back(fo.stream_id, fo.ring->stats());

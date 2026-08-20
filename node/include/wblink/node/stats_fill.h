@@ -371,6 +371,10 @@ inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
             st->frames_fast = fr.frames_fast;
             st->frames_unrecoverable = fr.frames_unrecoverable;
             st->malformed = fr.malformed;
+            st->frames_salvaged = fr.frames_salvaged;
+            st->frames_frozen = fr.frames_frozen;
+            st->salvage_failed = fr.salvage_failed;
+            st->slices_synthesized = fr.slices_synthesized;
             st->jscc_shadow_blocks = fr.jscc_shadow_blocks;
             st->jscc_predicted_loss_symbols = fr.jscc_predicted_loss_symbols;
             st->jscc_observed_loss_symbols = fr.jscc_observed_loss_symbols;

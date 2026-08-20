@@ -4,7 +4,9 @@
   "profile_table": "profiles/table.example.json",
   "streams": [
     { "stream_id": 0, "stream_type": "RTP", "dir": "out", "originator": 17,
-      "bind": { "kind": "frame-shm", "name": "venc_frame_out" } }
+      "bind": { "kind": "frame-shm", "name": "venc_frame_out" },
+      "_conceal_comment": "§6.3b spatial salvage: with a multi-slice producer (waybeam_venc video0.sliceCount > 1), a block that finalizes below k is repaired at the HEVC slice level instead of dropped — erased slices become synthesized skip slices (frozen region). mode 'off' (the default) is the pre-§6.3b behaviour bit-for-bit.",
+      "conceal": { "mode": "slice-skip", "freeze_frame": true } }
   ],
   "air": {
     "kind": "udp",

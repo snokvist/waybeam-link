@@ -7,6 +7,8 @@
 //
 //   frame_shm_feed produce <ring> <frames> <fps> <p_bytes> <idr_every>
 //   frame_shm_feed consume <ring> <min_frames> <idle_ms> <total_ms>
+//   frame_shm_feed play    <ring> <file.265> <fps> [loops=1] [settle_ms]
+//   frame_shm_feed dump    <ring> <out.265> <idle_ms> <total_ms>
 //
 // produce: creates the ring (the waybeam-link TX attaches as consumer). IDR
 // frames (every idr_every, starting at 0) are 4x p_bytes. Prints the
@@ -14,6 +16,13 @@
 // consume: attaches to the RX-created ring, reads until no frame arrives for
 // idle_ms (or total_ms elapses), verifies every byte, prints
 // "consumer frames=N bad=B" and exits 0 iff N >= min_frames and B == 0.
+// play: the §6.3b bench feeder — splits a real Annex-B HEVC elementary
+// stream into access units the way the venc producer publishes them
+// ([VencFrameMeta][AU] per slot, IDR flag from the NAL types, VPS/SPS/PPS
+// riding in their IDR's AU) and paces them into the ring at <fps>.
+// dump: attaches to the RX egress ring and appends each frame's Annex-B
+// payload (meta stripped) to <out.265> so a real decoder can judge it;
+// prints "dump frames=N bytes=B idr=K".
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -145,6 +154,163 @@ int run_consume(const std::string& ring_name, uint32_t min_frames,
     return (frames >= min_frames && bad == 0) ? 0 : 1;
 }
 
+// Split an Annex-B elementary stream into per-AU [VencFrameMeta][AU] blobs
+// (new AU at each VCL NAL with first_slice_segment_in_pic_flag; VPS/SPS/PPS
+// prefix NALs attach to the AU that follows them).
+std::vector<std::vector<uint8_t>> split_aus(const std::vector<uint8_t>& es,
+                                            uint32_t fps) {
+    struct Nal {
+        size_t sc;
+        size_t off;
+        size_t end;
+    };
+    std::vector<Nal> nals;
+    for (size_t i = 0; i + 3 <= es.size(); ++i) {
+        if (es[i] == 0 && es[i + 1] == 0 && es[i + 2] == 1) {
+            nals.push_back(
+                {(i > 0 && es[i - 1] == 0) ? i - 1 : i, i + 3, 0});
+            i += 2;
+        }
+    }
+    for (size_t k = 0; k < nals.size(); ++k) {
+        nals[k].end = k + 1 < nals.size() ? nals[k + 1].sc : es.size();
+    }
+    std::vector<std::vector<uint8_t>> aus;
+    std::vector<uint8_t> prefix;
+    for (const Nal& n : nals) {
+        const uint8_t t = (es[n.off] >> 1) & 0x3F;
+        if (t > 31) {  // non-VCL: rides with the next AU
+            prefix.insert(prefix.end(),
+                          es.begin() + static_cast<long>(n.sc),
+                          es.begin() + static_cast<long>(n.end));
+            continue;
+        }
+        if ((es[n.off + 2] >> 7) & 1) {  // first slice: new AU
+            std::vector<uint8_t> b(kVencFrameMetaSize, 0);
+            VencFrameMeta meta;
+            meta.pts = static_cast<uint32_t>(aus.size()) *
+                       (fps > 0 ? 1000000u / fps : 10000u);
+            meta.codec = kFrameCodecH265;
+            meta.flags = (16 <= t && t <= 23) ? kFrameFlagIdr : 0;
+            meta.gdr_pos = 0;
+            meta.gdr_len = 0;
+            std::memcpy(b.data(), &meta, kVencFrameMetaSize);
+            b.insert(b.end(), prefix.begin(), prefix.end());
+            prefix.clear();
+            aus.push_back(std::move(b));
+        }
+        if (aus.empty()) {
+            continue;  // VCL before any AU start: skip
+        }
+        aus.back().insert(aus.back().end(),
+                          es.begin() + static_cast<long>(n.sc),
+                          es.begin() + static_cast<long>(n.end));
+    }
+    return aus;
+}
+
+int run_play(const std::string& ring_name, const char* path, uint32_t fps,
+             uint32_t loops, uint32_t settle_ms) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) {
+        std::perror("open");
+        return 1;
+    }
+    std::vector<uint8_t> es;
+    uint8_t buf[65536];
+    size_t got = 0;
+    while ((got = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+        es.insert(es.end(), buf, buf + got);
+    }
+    std::fclose(f);
+    const auto aus = split_aus(es, fps);
+    if (aus.empty()) {
+        std::fprintf(stderr, "no access units in '%s'\n", path);
+        return 1;
+    }
+    auto ring = FrameShmRing::create(ring_name);
+    if (!ring) {
+        std::fprintf(stderr, "create '%s': %s\n", ring_name.c_str(),
+                     ring.error.c_str());
+        return 1;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
+    const auto period =
+        std::chrono::microseconds(fps > 0 ? 1000000 / fps : 10000);
+    uint32_t written = 0;
+    auto next = std::chrono::steady_clock::now();
+    for (uint32_t l = 0; l < loops; ++l) {
+        for (const auto& au : aus) {
+            written += (*ring.value)->write_frame(au.data(), au.size());
+            next += period;
+            std::this_thread::sleep_until(next);
+        }
+    }
+    const FrameShmRing::Stats& st = (*ring.value)->stats();
+    std::printf("play frames=%u aus=%zu loops=%u full_drop=%llu "
+                "oversize_drop=%llu\n",
+                written, aus.size(), loops,
+                static_cast<unsigned long long>(st.full_drops),
+                static_cast<unsigned long long>(st.oversize_drops));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    return st.oversize_drops == 0 ? 0 : 1;
+}
+
+int run_dump(const std::string& ring_name, const char* path, uint32_t idle_ms,
+             uint32_t total_ms) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(total_ms);
+    std::unique_ptr<FrameShmRing> ring;
+    while (!ring && std::chrono::steady_clock::now() < deadline) {
+        auto r = FrameShmRing::attach(ring_name);
+        if (r) {
+            ring = std::move(*r.value);
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+    if (!ring) {
+        std::fprintf(stderr, "attach '%s': timed out\n", ring_name.c_str());
+        return 1;
+    }
+    FILE* out = std::fopen(path, "wb");
+    if (!out) {
+        std::perror("open out");
+        return 1;
+    }
+    std::vector<uint8_t> buf(kFrameRingDefaultSlotSize);
+    uint64_t frames = 0;
+    uint64_t idr = 0;
+    uint64_t bytes = 0;
+    auto last_frame = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() < deadline) {
+        const long n = ring->read_frame(buf.data(), buf.size());
+        if (n > static_cast<long>(kVencFrameMetaSize)) {
+            VencFrameMeta meta;
+            if (read_frame_meta(buf.data(), static_cast<size_t>(n), &meta)) {
+                idr += (meta.flags & kFrameFlagIdr) != 0;
+            }
+            const size_t au = static_cast<size_t>(n) - kVencFrameMetaSize;
+            std::fwrite(buf.data() + kVencFrameMetaSize, 1, au, out);
+            bytes += au;
+            ++frames;
+            last_frame = std::chrono::steady_clock::now();
+            continue;
+        }
+        if (frames > 0 && std::chrono::steady_clock::now() - last_frame >
+                              std::chrono::milliseconds(idle_ms)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::fclose(out);
+    std::printf("dump frames=%llu bytes=%llu idr=%llu\n",
+                static_cast<unsigned long long>(frames),
+                static_cast<unsigned long long>(bytes),
+                static_cast<unsigned long long>(idr));
+    return frames > 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -164,10 +330,26 @@ int main(int argc, char** argv) {
                            static_cast<uint32_t>(std::atol(argv[4])),
                            static_cast<uint32_t>(std::atol(argv[5])));
     }
+    if ((argc >= 5 && argc <= 7) && std::strcmp(argv[1], "play") == 0) {
+        const uint32_t loops =
+            argc >= 6 ? static_cast<uint32_t>(std::atol(argv[5])) : 1;
+        const uint32_t settle_ms =
+            argc == 7 ? static_cast<uint32_t>(std::atol(argv[6])) : 1500;
+        return run_play(argv[2], argv[3],
+                        static_cast<uint32_t>(std::atol(argv[4])),
+                        loops > 0 ? loops : 1, settle_ms);
+    }
+    if (argc == 6 && std::strcmp(argv[1], "dump") == 0) {
+        return run_dump(argv[2], argv[3],
+                        static_cast<uint32_t>(std::atol(argv[4])),
+                        static_cast<uint32_t>(std::atol(argv[5])));
+    }
     std::fprintf(stderr,
                  "usage: %s produce <ring> <frames> <fps> <p_bytes> "
                  "<idr_every> [settle_ms]\n"
-                 "       %s consume <ring> <min_frames> <idle_ms> <total_ms>\n",
-                 argv[0], argv[0]);
+                 "       %s consume <ring> <min_frames> <idle_ms> <total_ms>\n"
+                 "       %s play <ring> <file.265> <fps> [loops] [settle_ms]\n"
+                 "       %s dump <ring> <out.265> <idle_ms> <total_ms>\n",
+                 argv[0], argv[0], argv[0], argv[0]);
     return 2;
 }

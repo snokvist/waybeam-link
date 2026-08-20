@@ -12,6 +12,715 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — low-bitrate arm: per-slice overhead is ~26 BYTES, and 17 is free at 2.8 Mbps too
+
+The bitrate axis is reachable after all — **not** by fighting the rate
+controller but by using it. `POST /api/v1/link/profile {"min":N,"max":N}` on
+the craft's link (`127.0.0.1:8091`) pins the profile, and the link then
+actuates venc to that profile's budget: profile 1 → **5754 kbps**, profile 0
+→ **2829 kbps**, both at 60 fps with zero ring drops. Craft config pins
+`min_profile: 1, max_profile: 4`, which is what to restore.
+
+Static scene, 2829 kbps, 62 s dwells, 6 MB tails from offset 8 MB:
+
+| N | mean AU | Mbps@60 | QP mean | QP sd |
+|---:|---:|---:|---:|---:|
+| 4 | 5,525 | 2.65 | 30.385 | 0.531 |
+| 6 | 5,514 | 2.65 | 30.500 | 0.563 |
+| 9 | 5,508 | 2.64 | 30.559 | 0.555 |
+| 17 | 5,895 | 2.83 | 30.534 | 0.544 |
+| 4 *(control)* | 4,927 | 2.37 | 30.566 | 0.588 |
+
+The single pass could not separate overhead from drift — mean AU fell 11%
+between the two N=4 points while N=17 sat 7% above them — so it was repeated
+**interleaved, A-B-A-B**:
+
+| order | N | mean AU | Mbps | QP mean |
+|---:|---:|---:|---:|---:|
+| 1 | 4 | 5,525 | 2.65 | **30.381** |
+| 2 | 17 | 5,861 | 2.81 | **30.509** |
+| 3 | 4 | 3,725 | 1.79 | **31.104** |
+| 4 | 17 | 5,486 | 2.63 | **30.515** |
+
+**The two N=4 points differ by 0.72 QP; the two N=17 points differ by
+0.006.** The N=4 self-variance is four times any N=4-vs-N=17 gap, so there is
+again no resolvable quality cost — this arm's resolution is ~0.7 QP, weaker
+than the 18 Mbps arm's ~0.36, because the "static" scene is not actually
+static (AE/content wander).
+
+**The one clean number comes from the adjacent pair.** Points 1 and 2 are 62 s
+apart, so drift is minimal: +336 B for +13 slices at +0.13 QP → **≈26 bytes
+of overhead per additional slice**. That is far below the ~100 B/slice the
+CABAC-reset argument predicted, and it scales the whole question:
+
+| bitrate | frame bytes | 4→17 overhead | as % of frame |
+|---:|---:|---:|---:|
+| 2829 kbps | 5,525 | 336 B | **6.1%** |
+| 18025 kbps | 36,964 | 336 B | **0.9%** |
+
+So the earlier prediction that 17 slices would be "wasteful" below the
+one-slice-per-chunk knee is **quantified and much smaller than assumed**:
+6% of the bit budget at 2.8 Mbps, under 1% at 18 Mbps. It is a real cost at
+the low end but not a disqualifying one, and the low end is also where the
+frame is only ~4 chunks so the granularity argument for a high N disappears
+anyway — the case for a lower N down there now rests on "no benefit", not on
+"large penalty".
+
+## 2026-08-20 — the QP cost of slicing is BELOW the scene-drift floor: 17 slices is free at 18 Mbps
+
+Moving scene (operator-supplied), 1080p60, CBR pinned at 18025 by
+waybeam-link, hub consuming the ring, venc `a12ff32`. Per point: 60 s dwell,
+record to SD, analyse a 14 MB tail taken from byte offset 60 MB so the sample
+sits in steady state. Sweep order 4, 6, 9, 17, then **4 again as a drift
+control**.
+
+| N | mean AU | Mbps@60 | AUcv | **QP mean** | QP sd |
+|---:|---:|---:|---:|---:|---:|
+| 4 | 36,964 | 17.74 | 0.146 | **27.723** | 0.448 |
+| 6 | 37,043 | 17.78 | 0.151 | 27.558 | 0.497 |
+| 9 | 37,040 | 17.78 | 0.138 | 27.441 | 0.497 |
+| 17 | 36,833 | 17.68 | 0.146 | **27.410** | 0.492 |
+| 4 *(control repeat)* | 36,848 | 17.69 | 0.148 | **27.363** | 0.481 |
+
+**Read the control, not the trend.** The two identical N=4 points differ by
+**0.36 QP** with no configuration change between them — that is the scene
+drifting over the five minutes of the sweep. The entire spread across
+N=4→17 is 0.31 QP, smaller than the drift and pointing the same direction as
+it, because N was swept upward while the scene drifted. So the slice-count
+effect is **not resolvable by this measurement**: |ΔQP(4→17)| < 0.4 QP, and
+the apparent "17 is better" is a time-ordering artifact, not a finding.
+
+**Conclusion: 17 slices costs no measurable quality at the flagship operating
+point.** The 0.5-1.5 QP predicted from HEVC slice-overhead literature did not
+appear. Plausibly because this stream already breaks prediction along CTU-row
+boundaries for GDR, and `loop_filter_across_slices=1` means the deblocking
+filter still crosses the new boundaries.
+
+**Scope: 18 Mbps only.** The low end is NOT measured — waybeam-link is the
+rate controller and **reasserts its profile budget on every venc restart**
+(observed directly: `video0.bitrate` set to 8000 read back as 18025 after the
+next reinit), so the bitrate axis cannot be swept while the link runs. At
+2500 kbps a 17-slice picture is ~306 B/slice, far past the one-slice-per-chunk
+knee, where the CABAC-reset overhead is a much larger fraction — that arm
+still needs either a link-profile lock or a link-stopped run with some other
+ring consumer.
+
+**Two measurement traps, both paid for here.**
+1. **The first sweep was entirely invalid** and looked plausible: 22 s dwells
+   meant every capture began inside the post-restart transient, where the
+   link node has not re-attached to the freshly created ring. Symptoms —
+   18-29 IDRs per 330 AUs on a craft that emits none unprompted, GDR refresh
+   AUs absent, CBR undershooting 14.8-17.1 Mbps, QP sd ~3.5. The tell was the
+   comparison against a known-good capture (QP sd **0.441**, AUcv 0.166,
+   18.16 Mbps, 1 IDR). **Validity gates for any venc rate capture: IDR≈0,
+   achieved bitrate on target, AUcv < 0.2, QP sd < 0.6.**
+2. `wbnode_progress_proven=1` and a static `wblink_shm_full_drops` are *not*
+   sufficient evidence that a capture is clean — both read healthy while the
+   captures were garbage, because they were sampled after the transient had
+   passed.
+
+**Correction to an earlier claim in this file.** The GDR refresh AU has its
+own geometry, **independent of `sliceCount`**, and it is not fixed: in these
+evening captures it is consistently **9 slices of 2 CTU rows** (addresses
+0,60,120,…,480) at every 2 s GOP boundary, at both N=4 and N=17 — where the
+morning capture at the same sliceCount 4 showed **17 slices of 1 CTU row**
+(0,30,…,480). What varies it is unknown. Consequence: the earlier "at N=17
+the steady and refresh geometries coincide, so the two-frame adoption gate
+never sees a shape change" argument is **withdrawn** — on this evidence it is
+N=9 that coincides, and under any N the refresh AU generally presents a
+different address list once per GOP. That is exactly what the two-frame gate
+exists to refuse, and it does; it was never a reason to prefer 17.
+
+## 2026-08-20 — x86 negative control: AMD VAAPI does not fail on a gap AU, and §6.3b's x86 value is DETERMINISM not dB
+
+New tools: `tools/spatial_conceal/slice_drop.py` (builds the gap AU — the
+stream a decoder would see *without* §6.3b) and `decode_compare.py` (decodes
+two streams and compares the pictures — per-frame luma PSNR plus damaged
+CTU-64 row extent, with `--decoder gst:<element>` so the same readout runs
+against VAAPI here and MPP on rk3566 in Phase C).
+
+Corpus: first 100 AUs of the real `.232` capture, AU-aligned (`ffmpeg -c copy
+-frames:v 100` — an arbitrary `head -c` cut truncates the last AU and
+manufactured a 11.6 dB artifact that briefly looked like a finding).
+One slice (index 1, 9,827 B) removed from AU 50; the §6.3b repair of the same
+AU/slice via `hevc_conceal_cli`.
+
+| stream | decoder | worst frame | worst PSNR |
+|---|---|---:|---:|
+| gap AU (no §6.3b) | ffmpeg sw | 85 | **36.81 dB** |
+| gap AU | AMD VAAPI `vah265dec` | 50 | 46.21 dB |
+| §6.3b repaired | ffmpeg sw | 50 | **47.33 dB** |
+| §6.3b repaired | AMD VAAPI | 50 | **47.33 dB** |
+
+**Their VAAPI finding does not reproduce on AMD.** The external lab's Intel
+iHD result was a *fatal* `vaSyncSurface` decoding error that made ffmpeg
+discard a good surface. On this host (AMD Radeon, `va` plugin) the gap AU
+decoded all 100 frames with no pipeline error and no dropped picture. That is
+a driver-and-stack difference, not a contradiction — but it means their
+libavutil patch is not something our x86 ground needs.
+
+**The repaired stream decodes bit-identically on both decoders** (47.33 dB,
+frame 50, rows 4-10 — the same numbers to two decimals). The gap AU does not:
+36.81 dB on software against 46.21 on hardware, and the software damage
+*peaks 35 frames later* (frame 85), i.e. it propagates rather than heals. So
+on x86 the repair buys ~1 dB against AMD's own concealment but ~10 dB against
+software, and — the part that actually matters — it makes the picture the
+same everywhere. A conformant AU is decoder-independent; a gap AU is a
+different picture on every stack. That is the argument against the external
+lab's "ship the gap and let hardware conceal" simplification, and it is
+stronger than the dB gap.
+
+**Caveat on how far this generalises.** This is one missing slice in one AU.
+Our reassembler never emits a gap AU — without §6.3b the frame is *dropped*,
+so the operative comparison for the feature's value stays repair-vs-drop
+(Phase D: 231 vs 50 of 362 at 20% loss). The gap AU exists only to price the
+"don't repair, ship partial" alternative.
+
+**Unrelated defect found by the do-nothing control: the craft's stream
+decodes DIFFERENTLY on software and hardware, on every 5th picture.** Clean
+capture, ffmpeg vs AMD VAAPI: 20 of 100 frames differ, at 41.7-43.1 dB over
+CTU rows 3-16, and every one of them has frame index ≡ 4 (mod 5) — exactly
+the SVC-T TRAIL_N pictures, which carry mixed TRAIL_N/TRAIL_R NAL types
+inside a single picture (HEVC 7.4.2.2 non-conformance, already recorded as
+the reason `-threads 1` is mandatory). It is now clear this is not merely an
+ffmpeg threading artifact: two independent decoder implementations
+reconstruct 20% of our pictures differently. Mild (~42 dB) but real, and it
+means two ground stations can display different pixels from one stream.
+**Filed against venc, not §6.3b** — every decode-compare must expect this
+1-in-5 divergence as a baseline or it will be misattributed to concealment.
+
+## 2026-08-20 — sliceCount 17 device-verified on .232 (structural half of the Phase B extension)
+
+venc ceiling raised (`VENC_SLICE_COUNT_MAX` 32, venc `a12ff32`), deployed to
+`.232` (md5-matched both ends), and the request that used to be refused now
+lands exactly as the quantization model predicted:
+
+```
+VENC: H.265 slice split ON: sliceCount 17 -> 17 slices of 1 CTU-64 rows (SDK unit 2 32-px rows)
+VENC: slice split readback: enable=1 rows=2
+```
+
+Recorded 8 MB from the SD at that setting: **247 of 249 AUs carry exactly 17
+slices**, at CTU addresses **0,30,60,…,480** — one CTU-64 row each, the same
+geometry the GDR refresh AU has always used. (The two outliers are the
+partial opening AU and the AU my `dd` cut truncated.) `isp_fps` **60**,
+`venc_bitrate_kbps` **18025** — both held. **Truncation WARN count: 0** at 60
+frames/s, i.e. ~1,800 seventeen-NAL AUs per 30 s rather than the refresh AU's
+0.5/s. That closes the per-pack question: a 17-NAL access unit is delivered
+as multiple packs of ≤8 and the walker handles it.
+
+Mean AU 33,634 B (1,978 B/slice = 1.39 chunks) against 37,836 B at
+sliceCount 4 — **this says nothing about coding cost**. Different scene
+moment on a static bench, where CBR undershoots on easy content; the QP
+comparison still needs motion in frame. Craft restored to `sliceCount 4`,
+config byte-identical to the pre-session backup.
+
+Remaining before the default moves: the QP/quality cost at {4,6,9,17} across
+the 2500-25000 kbps range, on a moving scene.
+
+## 2026-08-20 — the sliceCount ceiling is 6 today, and the reason given for the cap is a misreading
+
+Trying to set `video0.sliceCount=17` on the craft was refused by venc's own
+validator: `video0.slice_count must be 1..8` (`src/venc_api.c:1257`), with
+`venc_config.c:645` clamping to the same range. Since 7 and 8 both quantize
+to 6 delivered slices, **the fleet's reachable maximum today is 6** — 9 and
+17 cannot be requested at all.
+
+The cap's stated rationale (`ui_slice_count`, `venc_api.c:475`) is *"Capped
+at 8 by the SDK's 8-entry per-pack NAL table."* The table is real —
+`packetInfo[8]` in `include/sigmastar_types.h:660/1051` — but it bounds NALs
+**per pack**, and the output walker iterates packs
+(`for (i = 0; i < stream->count; ++i)`, `star6e_output.c:918`); `packNum` is
+per-pack. So it is not an AU-level slice limit.
+
+**Measured, decisively:** the GDR refresh AU is a 17-slice picture (verified
+in the capture at addresses 0,30,…,480), it is emitted every 2 s GOP at every
+sliceCount, and `.232` has been running the abort-not-truncate build for 6 h
+— roughly 10,800 such AUs through that exact walker — with the truncation
+WARN count at **zero**. A 17-NAL access unit already flows; it arrives as
+multiple packs of ≤8.
+
+So raising the validator ceiling is well-founded rather than speculative.
+Open before flipping any default: the ceiling change itself (venc, PR #236
+territory), then a deploy and a structural check (delivered count really 17,
+fps holds, WARN stays silent at 60 frames/s rather than 0.5/s).
+
+**The quality half is blocked on scene motion, not on RF.** Slice overhead
+under CBR surfaces as QP, and a static bench scene at 18 Mbps runs
+quality-saturated, so a QP sweep taken now would measure nothing
+([[feedback_moving_scene_required_for_venc_rate_tests]]). The
+sliceCount x bitrate matrix needs motion in frame.
+
+**Why a matrix and not a sweep (operator input 2026-08-20): the link runs
+2500-25000 kbps**, and the optimum tracks frame size. At 60 fps the knee
+`N* = frame_bytes/1424` moves from 3.7 (2.5 Mbps) to 36.6 (25 Mbps) — so no
+single value serves the range. At 2.5 Mbps a 17-slice picture is ~306 B per
+slice, far past the knee, where the CABAC-reset overhead is paid for zero
+granularity gain; at 18 Mbps a 4-slice picture leaves 6.65 chunks per slice
+and 77% of the picture synthesized at 20% loss. Indicative mapping at 60 fps
+(`N*` snapped onto the achievable set {1,2,3,4,5,6,9,17}):
+
+| bitrate | frame B | chunks | N\* | pick |
+|---:|---:|---:|---:|---:|
+| 2500 | 5,208 | 3.7 | 3.7 | 4 |
+| 5000 | 10,417 | 7.3 | 7.3 | 6 |
+| 8000 | 16,667 | 11.7 | 11.7 | 9 |
+| 12000 | 25,000 | 17.6 | 17.6 | 17 |
+| 18000-25000 | 37.5k-52k | 26-37 | capped | 17 |
+
+That is either a per-mode static choice (modes already bundle fps and
+resolution, so a slice count fits the same object) or a link-driven
+actuation, since waybeam-link is already the sole rate controller and would
+be the only thing that knows the current bitrate. Two things make the
+dynamic version cheap if it is wanted: slice layout is per-picture syntax, so
+changing it needs **no IDR and no SPS/PPS change**, and the repair layer
+already refuses to adopt a new geometry until two consecutive pictures agree,
+so a switch costs a couple of frames of salvage refusal and nothing else.
+Open ruling: static-per-mode vs link-actuated, and whether the actuation is
+restart-class (it is today — `MUT_RESTART`, `venc_api.c:640`) or can be made
+live via `MI_VENC_SetH265SliceSplit` on a running channel.
+
+## 2026-08-20 — how many slices 1080p can actually have, and why the FPV default should be 17 not 4
+
+Measured on the real `.232` capture (362 AUs, `tools/` parser); craft live
+config read the same day: 1920x1080, 60 fps, CBR **18025 kbps**, gop 2.0 s,
+`sliceCount: 4`, `resilience: "racing"`.
+
+**The achievable set is not 1..N — it is {1,2,3,4,5,6,9,17}.** venc maps
+`sliceCount` to the SDK's 32-px `u32SliceRowCount`, which the SDK rounds UP
+to whole CTU-64 rows; 1080p is 17 CTU rows, so the delivered count is
+`ceil(17 / r)` for `r = ceil(ceil(1080/N/32)/2)` CTU rows per slice. 7, 8 and
+10..16 are unreachable — they collapse onto 6 and 9. This predicts both
+measured data points exactly: request 4 → 32-px unit 9 → SDK stores 10 →
+r=5 → **4**; request 8 → unit 5 → stores 6 → r=3 → **6**.
+
+**Per-slice size, measured.** Mean AU 37,836 B (= the 37,552 B CBR budget).
+FEC chunk payload is 1424 B (§3.2), so a frame is **26.6 chunks**.
+
+| N | CTU rows/slice | slice px | mean slice B | chunks/slice | 1/N |
+|---:|---|---:|---:|---:|---:|
+| 4 | 5,5,5,2 | 320/128 | 9,464 *(meas.)* | **6.65** *(meas.)* | 25% |
+| 6 | 3x5, 2 | 192/128 | 6,306 | 4.43 | 16.7% |
+| 9 | 2x8, 1 | 128/64 | 4,204 | 2.95 | 11.1% |
+| 17 | 1x17 | 64 | 2,101 *(meas.)* | **1.47** *(meas.)* | 5.9% |
+
+The N=17 row is measured, not extrapolated: the GDR refresh AU **already is**
+a 17-slice picture, and this capture holds three of them (AU 120/240/360) at
+addresses **0,30,60,…,480** — one CTU row each, 34.6–36.5 kB total.
+
+**Why more slices pays.** A lost chunk destroys every slice it touches, so
+the concealed area is `bytes_lost_fraction + bursts/N`: **1/N is a pure
+granularity penalty** paid on top of the real loss. Expected intact picture
+fraction `(1-q)^(chunks per slice)`:
+
+| chunk loss q | N=4 | N=9 | N=17 |
+|---:|---:|---:|---:|
+| 10% | 49.6% | 73.3% | 84.8% |
+| 20% | **22.7%** | 51.8% | **70.6%** |
+| 30% | 9.3% | 34.9% | 59.2% |
+
+**Where it stops paying: one slice per chunk.** Below ~1424 B/slice a single
+lost chunk spans two slices and finer buys nothing but coding cost. That knee
+is at `N* = frame_bytes / 1424` = **26.6** here — *above* the encoder's 17
+ceiling, so at this operating point more slices pays monotonically all the
+way up. N\* is bitrate-dependent: 12 Mbps@60 → 17.6 (still 17); 8 Mbps@60 →
+11.7 (→ 9); 18 Mbps@100 fps → 15.8 (17, at the knee). **Rule for the mode
+store: N = clamp(frame_bytes/1424) onto the achievable set, capped at the
+picture's CTU-row count** (1080p 17, 720p 12).
+
+**One design simplification falls out at 17:** slices become uniform — N=4's
+last slice is 2 rows against the others' 5, so today both the loss exposure
+and the concealed area are lopsided.
+
+> ~~(a) The steady AU and the GDR refresh AU become the *same* 17-address
+> geometry, so the shape change that forced the two-frame adoption gate never
+> occurs again.~~ **WITHDRAWN** by the QP-sweep entry above (same date): the
+> refresh AU's geometry is independent of `sliceCount` and was measured at
+> **9 slices of 2 CTU rows** at both N=4 and N=17 that evening, having been
+> 17 slices of 1 row that morning. Under any N the refresh AU generally
+> presents a different address list once per GOP — which is what the
+> two-frame gate is for.
+
+**Costs, priced.** Per-slice NAL overhead ~0.4% of the frame. Our repair
+CPU scales with N (57.6 µs salvage at 4 → ~200 µs at 17, against a 16.7 ms
+frame). Plumbing is **already proven at 17 NALs/AU** — the refresh AUs flow
+through the frame ring and the venc packetInfo walker today with no
+truncation WARN — but at 0.5/s, not 60/s.
+
+**Open — the one unmeasured number.** Slice breaks reset CABAC and cut
+prediction, which under CBR surfaces as QP (quality), not bitrate. Measured
+only at N=4 (**≤0.9 QP**). Expect 3–8% BD-rate for 1080p HEVC at 16 slices,
+i.e. ~0.5–1.5 QP. **Phase B extension** (short craft run, no RF judgment):
+same scene, hold `resilience`/bitrate/fps fixed, sweep `sliceCount` ∈
+{4, 6, 9, 17}, record delivered count (confirm 17 is really 17), achieved
+QP, achieved bitrate, fps hold, and that the packetInfo WARN stays silent at
+60 frames/s. Also watch `maxPBytes` (31,291 B) for interaction with the
+extra overhead. **Ship 17 unless its QP cost exceeds ~1 step over 4; fall
+back to 9 if it does.** The trade is clean-frame quality against damaged-frame
+area, and an FPV link at range lives near the cliff where the damaged frames
+are the ones being flown by.
+
+## 2026-08-20 — external cross-check: rkvdec-slice-lab (RK3588 MPP / Intel VAAPI fed damaged bitstreams) vs §6.3b
+
+An independent lab (github.com/josephnef/rkvdec-slice-lab) fed slice-dropped,
+truncated and replayed H.264/H.265 to RK3588 vendor MPP and Intel iHD VAAPI.
+Corpus: majestic SSC30KQ camera streams, 4-slice HEVC, **IDR every 20
+frames** — no SVC-T, no LT refs, no GDR. Checked against our solution.
+
+**Confirms four §6.3b decisions independently.**
+- Truncated slice corrupts *following* slices (their 28.5 dB, worse than a
+  clean drop's 29.4) → the venc abort-not-truncate fix is right.
+- H.265 first-slice loss discards the whole picture (MPP parser refuses) →
+  our first-slice synthesis is load-bearing, not optional.
+- A mid-picture slice gap decodes **silently wrong on MPP HEVC**: errinfo 0
+  on all 161 frames, deterministic, ~8% of the picture damaged → never ship
+  a gap AU. Our repair emits complete AUs or drops whole frames; MPP never
+  sees a gap from us.
+- Verbatim slice replay is decoder-specific: helps on MPP, **rejected**
+  (H.264 frame_num validation) or **−20 dB** (H.265, 42.95 vs 62.97 drop) on
+  VAAPI. Their own close: portable repair "requires rewriting slice headers
+  with current picture parameters… not merely copying them" — which is
+  exactly what §6.3b does, and why our repaired streams pass HM + vah265dec.
+
+**Their central recommendation is already in our ground stack.** "Fix the
+error policy, don't repair the bitstream" = `MPP_DEC_SET_DISABLE_ERROR
+0xffff` + present-don't-discard: waybeam-hub has shipped both for a while
+(`src/pixelpilot/video_decoder.c:1055`, PARTIAL mode + errinfo→IDR-request
+at `:1349-1360`). Their H.264 freeze-latch root cause (ref_err gates HW
+submission; parser/callback race under back-pressure; sticky dpb_err_flag
+clears only on I-slices — bad news for a GDR stream) is the mechanism
+*behind* why that flag matters; the class is defused on our ground.
+
+**The "let hardware conceal" simplification is NOT available to us.** Their
+result leans on the corpus: damage self-heals at the next IDR, ≤20 frames
+away. Our craft emits none unprompted, and the errinfo-silent failure means
+the hub's IDR requester would never fire — a gap AU would smear via TMVP
+with no signal and no bound. First-slice losses (1-in-4 at our geometry)
+lose the picture outright, and the x86 ground (GStreamer vah265dec) and
+Android MediaCodec would need their patched-decoder treatment per stack.
+Phase D already priced repair vs drop on our stream: 231 vs 50 of 362.
+
+**Residue worth keeping (parked, operator call): replay-with-rewrite.** On
+camera content their replay measured 64.1 dB against a 31.6 dB ideal
+temporal copy — last frame's *motion+residuals* against shifted refs beats
+a pure freeze (H.264/MPP numbers). §6.3b already owns the hard half (donor
+header rewrite: POC, RPS span, first-slice); the variant would splice the
+previous picture's co-located slice *payload* under the rewritten header
+instead of synthesizing all-skip. Open risks before it is worth building:
+CABAC payload assumes the donor's ref-list length and slice-QP (must match
+or carry qp_delta/cabac_init from the donor header); our SVC-T LT-ref
+ladder shifts what "previous picture at this address" references; and their
+only HEVC replay datapoint was *negative*. Our all-skip with TMVP merge
+already extrapolates motion, so our baseline sits above a plain temporal
+copy. Measure against the real capture before believing the +dB.
+
+**Phase C methodology note.** MPP errinfo silence is necessary but NOT
+sufficient (their errinfo-0-while-8%-wrong result): pair the rk3566
+acceptance with a decoded-output compare or visual check, not log absence
+alone. Their per-MB-row damage-localization diff (compare_yuv.py) is a
+good shape to borrow for that readout.
+
+## 2026-08-20 — Phases B/C1/D on the real capture: 4 is the fleet default, and SVC-T narrows freeze to ~3/5 of positions
+
+Continuation of the Phase A bench session (same craft, same 18.0 Mbps CBR
+1080p60 scene, hub running so the ring has its consumer — see the trap
+below).
+
+**Phase B — encoder cost of `sliceCount` ∈ {1,2,4,8}** (6 s capture each,
+md5-verified, hub running):
+
+| requested | delivered | mean frame | mean SliceQP | max slice | p99 slice | rate |
+|---|---|---|---|---|---|---|
+| 1 | 1 | 36.8 KB | 26.3 | 60.2 KB | 42.7 KB | 18.1 Mbps |
+| 2 | 2 (9/8 CTU rows) | 36.9 KB | 26.7 | 43.9 KB | 33.0 KB | 18.2 Mbps |
+| 4 | 4 (5/5/5/2) | 36.8 KB | 26.8 | 24.6 KB | 18.1 KB | 18.2 Mbps |
+| 8 | **6** (3 rows each) | 37.1 KB | 27.2 | 15.7 KB | 11.5 KB | 18.3 Mbps |
+
+60 fps at every level, CBR holds target, QP cost ≤ 0.9 across the whole
+range. **N=8 quantizes to 6** (the SDK rounds the 32-px row request up to
+whole CTU-64 rows), so request what divides: **fleet default = 4** —
+delivered exactly, max slice 25 KB, QP cost 0.5. The 17-slice GDR refresh
+AU appears at EVERY sliceCount including 1 — it is `intraRefresh`'s own
+geometry, so today's fleet stream already carries multi-NAL refresh packs
+through the frame ring.
+
+**The no-consumer trap.** With the hub stopped (ring unconsumed), venc
+degrades to an IDR storm — one IDR every ~7 frames, GDR suppressed, CBR
+undershooting a static scene at 2.7 Mbps. A first sweep taken that way was
+same-conditions-valid but flight-unreal; discard rate numbers captured with
+no ring consumer.
+
+**Phase C step 1** (production chain `spatial_conceal_bench`, real capture,
+200‰ seed 42): 262/362 delivered (fast 2, fec 50, salvaged 180, frozen 30,
+dropped 100), salvage cost **avg 57.6 µs, max 129 µs** (release, x86). HM
+zero-assert on the output; **vah265dec (VAAPI hardware) accepts it** —
+first hardware-decoder acceptance of repaired real-content streams. The
+plan's "confirm dropped=0" was a synthetic-content expectation: on this
+stream freeze is only eligible where the last two delivered pictures carry
+identical RPS bits, and the enhance slices' long-term entry names the
+*current base* POC, so RPS bits change every 5 frames — freeze eligibility
+is ~3/5 of positions, and the new sub-layer non-reference donor refusal
+removes the slot right after each TRAIL_N. dropped=0 is not reachable at
+20% on SVC-T content by design; widening freeze eligibility would need
+position-relative treatment of `poc_lsb_lt` (an operator ruling, not a
+knob).
+
+**Phase D re-run with the real capture as `CONCEAL_ES`** (udp-air, release
+binaries, 60 fps, 362 frames, p_rate 100‰):
+
+| loss | conceal | delivered | salvaged/frozen | salvage_failed |
+|---|---|---|---|---|
+| 20% | slice-skip | **231/362** | 144 / 38 | 131 |
+| 20% | off | **50/362** | — | — |
+| 30% | slice-skip | 136/362 | 93 / 39 | 226 |
+
+4.6× the control at 20%. Egress judgment: HM zero-assert, GStreamer clean,
+ffmpeg shows only the expected missing-ref lines from wholly-dropped frames
+(the ride-the-gap behaviour; on this GDR craft they heal asymptotically —
+there is no next IDR unless requested). Absolute delivery is below the
+synthetic 996/1000 for the same three reasons: bigger frames (37 KB vs
+20 KB → more chunks in danger per picture), narrower freeze eligibility,
+and the TRAIL_N donor refusal.
+
+**Whole-frame freeze vs plain drop (operator question 2026-08-20,
+decision).** The freeze is NOT only pacing on the shipped ground stack:
+waybeam-hub's MPP decoder defaults to `DECODER_ERROR_MODE_PARTIAL`
+(`src/pixelpilot/config.c:263`) — after a dropped reference it **presents**
+the dependent errinfo frames (real corruption on screen, not a skip) and
+every errinfo fires `idr_requester_handle_warning`
+(`src/pixelpilot/video_decoder.c:1358`), i.e. sustained drops become IDR
+request storms exactly at the loss levels §6.3b operates in. A freeze keeps
+the DPB conformant: no errinfo on the followers, no corrupt presentation,
+no IDR bandwidth spike; the residual heals over GDR. Decision: **keep
+`freeze_frame` default true**; it is fail-safe gated and costs ~58 µs.
+Confirming A/B for Phase C/E (knob already exists, no code needed): same
+loss run with `freeze_frame` on vs off on the rk3566 hub, count
+`MPP: presenting partial frame errinfo` lines and IDR requests.
+
+Decoded-frame A/B on the capture (same AU 83 lost both ways, ffmpeg
+`-threads 1`): freeze emits an imperceptible repeat (luma mean 0.99 vs
+truth) and the stream is **bit-exact again 2 frames later** at the next
+base picture; a plain drop makes the next frame decode against a
+substituted reference — one visibly smeared frame (mean 19.7, max 123,
+worst in the moving band) that is precisely the errinfo frame MPP
+presents — then heals at the same base. Both heal fast because this
+craft's SVC-T base frames reference only the long-term chain, so
+enhance-frame damage cannot cross a base boundary. Bonus control: a
+freeze from a *base* donor (CLI-only, gate bypassed) evicts the live LT
+base from the DPB and desyncs the whole picture permanently (mean 69) —
+empirical proof the RPS-steady-state gate is load-bearing.
+
+**Open:** Phase C MPP (rk3566) and Android deferred by operator ruling
+2026-08-20. Phase E (live RF walk-down) needs an operator-attended RF
+session — numeric prep is done, the visual judgment is the operator's.
+
+## 2026-08-20 — Phase A: the real SSC338Q 4-slice stream, its shape, and two freeze defects it exposed
+
+Bench session, craft `.232` (SSC338Q, venc 0.66.0 `video0.sliceCount: 4`,
+1080p60, `intraRefresh balanced lines/P=2`, SVC-T `refPred base=1 enhance=4`).
+Boot log printed `VENC: H.265 slice split ON: 9 CTU rows/slice (34 rows -> 4
+slices)` and the packetInfo-cap WARN never fired. 6 s raw ES captured with
+the on-board recorder (`record.format=hevc`, byte-identical packetInfo walk
+to the frame-ring blob), 362 AUs, md5-verified both ends.
+
+**The measured stream shape** (`capture_232_4slice.265`, kept on the bench):
+
+- **CTU is 64, not 32.** SPS says 30×17 CTBs. The SDK read our "9 rows" in
+  32-px units and rounded up to 5 CTU rows: slice addresses {0,150,300,450}
+  = pixel bands {0,320,640,960} (5/5/5/2 CTU rows) — 4 slices requested, 4
+  delivered, at fixed addresses on every AU shape. The venc log line's "CTU
+  rows" wording is off by the unit but the outcome is right; higher
+  sliceCounts will quantize (Phase B measures).
+- **Independent slices** (`dependent_slice_segment_flag=0` everywhere)
+  though the PPS *enables* dependent slices. No tiles, no WPP. SAO ON,
+  TMVP ON, `lists_modification_present=1`, `long_term_ref_pics_present=1`.
+- **SVC-T rides long-term refs**: base pictures (POC%5==0) carry an empty
+  st RPS + LT(prev base, used=1); enhance pictures carry st(prev, used=1) +
+  LT(cur base, used=0); every fifth picture (POC%5==4) is **TRAIL_N** —
+  and only its FIRST slice: the encoder mixes TRAIL_N/TRAIL_R inside one
+  picture, which is non-conformant (H.265 7.4.2.2) — HM tolerates it,
+  ffmpeg warns and its **frame-threaded decode goes non-deterministic**
+  (two decodes of the same capture diverge). Judge fix: `validate.py` now
+  decodes `-threads 1`.
+- **GDR refresh AUs have their own geometry**: every 120th AU (the 2 s GOP
+  boundary) is a 17-slice picture, one CTU row per slice, preceded by
+  re-emitted VPS/SPS/PPS. Only the first AU (recorder-forced) is an IDR;
+  IDR AU = 7 NALs (VPS+SPS+PPS+4 slices), inside the 8-entry table.
+  Delivery is multi-pack: the capture holds all 17 NALs, so no pack
+  exceeded the table.
+
+**Judging on the real capture** (hevc_conceal_cli + validate.py + HM-18.0 +
+ffmpeg + GStreamer): single-slice and short-last-slice conceal pass — frame
+counts equal, pre-frames identical, untouched rows byte-identical once the
+validator uses the real {0,320,640,960} geometry, HM zero-assert. TMVP-on
+means the concealed interior is motion-extrapolated, not frozen (as
+documented). GDR wash-out is asymptotic: repair error mean 0.30→0.12,
+p99 2 gray levels after one refresh wave; exact resync never happens
+without an IDR — on this craft IDRs are on-demand only.
+
+**Defect 1 — unused long-term pics counted into NumPicTotalCurr.** The
+parser summed ALL long-term entries into `num_used_refs`; a TRAIL_N donor
+(LT used=0, real NumPicTotalCurr=1) made parser and writer disagree with
+the decoder over the `lists_modification` bit — one-bit shift, HM
+`readByteAlignment` assert. Fixed: only `used_by_curr_pic_lt_flag=1`
+entries count (SPS-level flags now stored). Pinned in `hevc_conceal_test`
+with the real capture's SPS/PPS/TRAIL_N header bytes.
+
+**Defect 2 — whole-frame freeze from a TRAIL_N donor is structurally
+unsound.** The synth inherits the donor's `nal_unit_type` (later real
+pictures then reference a sub-layer non-reference picture) and its copied
+RPS names the donor's own TRAIL_N picture as used — HEVC 7.4.2.2 both
+ways; HM asserts in `applyReferencePictureSet`. Production-reachable: the
+RPS-steady-state gate passes inside a base period (AUs 81–84 carry
+identical RPS bits). Ruled on-branch (§6.3b freeze paragraph amended):
+freeze refuses sub-layer non-reference donors — on this craft 1 in 5
+whole-frame losses falls back to the pre-§6.3b drop; slice salvage is
+unaffected.
+
+**Open:** Phase B (encoder cost of sliceCount ∈ {1,2,4,8}); Phase D re-run
+with this capture as `CONCEAL_ES`; whether waybeam-link's RX parser needs
+anything for the 17-slice refresh geometry (learned-geometry rule says a
+refresh AU's survivors mismatch the 4-slice geometry → salvage refuses →
+frozen/dropped; measure how often that bites in Phase D/E).
+
+## 2026-08-20 — CTU32 content, TMVP conformance, RPS-gated freeze, GDR convergence
+
+Four §6.3b results from the x86 continuation session, all offline/loopback.
+
+**CTU32 (the SSC338Q shape) validated on real coded content.** HM-18.0,
+1280×720, `MaxCUWidth=32`, 40×23 CTU grid with a partial bottom row, 4
+slices, SAO on, TMVP on: single/bottom/pair concealment all decode clean on
+HM + ffmpeg with pixel-exact frozen regions and byte-exact untouched slices.
+The forced-split partial-CTU path now has real-encoder coverage, not just
+synthesis-side.
+
+**TMVP conformance bug found and fixed.** The synthesized header used to
+force a 1-entry L0 list; HEVC §7.4.7.1 requires `collocated_ref_idx` (and
+the list shape it indexes) to agree across a picture's slices, so on a
+TMVP-on stream with >1 ref (HM lowdelay, 4 refs) the mix was nonconformant —
+every decoder stayed SILENT while *other* slices of the picture decoded
+wrong (untouched-rows maxdiff 148). Pixel assertions caught what three
+decoders' error paths did not. Fix: mirror the donor's L0 count and
+collocated index; TMVP-on concealment is motion-extrapolated rather than
+frozen, TMVP-off unchanged.
+
+**Freeze is now RPS-steady-state-gated.** Whole-frame freeze replays the
+donor's RPS at POC+1, which HM's cycling GOP-4 sets made invalid ("Could
+not find ref" on the freeze output). Guard: freeze only when the last two
+delivered P pictures carried identical RPS bits. A first "any change ever"
+latch was wrong the other way — x265's first P after each IDR legitimately
+shrinks the set (smaller DPB) and the latch killed freeze forever (udp-air
+20%: frozen 150 → 0, failed 4 → 177). The per-frame form restores it
+(frozen 153, failed 6 = the transients, delivered 994/1000).
+
+**GDR × concealment, measured.** x265 `--intra-refresh` (wave period 100):
+a 10-frame burst concealing one slice band propagates slowly (luma MAD
+0.44 → 1.05 over 90 frames), the first refresh wave cuts it ~10× (→0.39),
+and later waves keep shrinking it — but convergence is asymptotic (~0.2 MAD
+residual creeping with motion), because x265's PIR does not perfectly
+isolate the dirty region. Control on the IDR stream: identical burst, exact
+**0.000** at the next IDR — the concealment slices are byte-clean; the
+residual is the encoder's PIR looseness. Under *sustained* 20% i.i.d. loss a
+GDR stream sits at an error equilibrium (~45 MAD on moving test content) —
+convergence needs loss-free wave windows; IDR streams resync exactly
+regardless. Also observed: with no IDR ever delivered (all four died at
+20%), salvage correctly refuses everything until the first header-carrying
+AU lands (219 refusals, all in the first 2 s, zero after) — those frames are
+undecodable downstream anyway; §3.9 recovery shortens the window in
+production. SigmaStar's own GDR enforcement may be tighter or looser than
+x265's — measure on device (runbook Phase F).
+
+---
+
+## 2026-08-20 — Phase D: the two-node link over udp-air holds the timeline through 30% loss
+
+**Setup.** Real TX + RX `waybeam-link` processes on one x86 host, udp-air on
+loopback, single path (one tx socket, one rx listen — the drop knob IS the
+symbol loss). Ingress: 1000 frames of 1920×1080@100 4-slice x265 played into
+the TX `venc_frame` ring at wire rate (`frame_shm_feed play`, new); egress:
+the RX `venc_frame_out` ring dumped back to Annex-B (`frame_shm_feed dump`,
+new) and judged by ffmpeg + GStreamer `h265parse ! avdec_h265`. FEC
+p_rate 100‰, min_k 3, arq_mode idr-only; `air.rx_drop_permille` swept.
+Runner: `tools/spatial_conceal/udp_air_run.sh`.
+
+| drop | conceal | delivered | fast | FEC | salvaged | frozen | failed | decode |
+|---|---|---|---|---|---|---|---|---|
+| 0 | on | **1000**/1000 | 999 | 1 | 0 | 0 | 0 | 1000, clean, byte-total exact |
+| 10% | on | **999** | 218 | 528 | 205 | 48 | 1 | 999, 0 errors, 2 ref-misses |
+| 15% | on | **999** | 88 | 437 | 383 | 91 | 1 | clean |
+| 20% | on | **996** | 32 | 262 | 552 | 150 | 4 | 996, 0 errors, 6 ref-misses |
+| 30% | on | **992** | 3 | 52 | 651 | 286 | 8 | 992, 0 errors, 14 ref-misses |
+| 20% | **off** | **313** | 32 | 281 | — | — | — | 313, 436 ref-misses |
+
+`salvage_failed` stays in single digits and every one becomes a plain drop
+(fail-safe held); GStreamer accepted every conceal-on egress silently.
+
+**The IDR observation** (matters for Phase E): delivered-as-IDR count falls
+with loss (10 → 9 → 6 → 2 of 10). §6.3a's zero-reorder rule gives IDR ARQ
+only until the next block's first symbol arrives (~one frame period), so at
+blanket 20–30% loss some IDR blocks finalize below k and the freeze path
+stands in with a P — the stream then rides on reference gaps (single-digit
+ref-misses end-to-end) until the next IDR. Pre-existing supersession
+behaviour interacting with §6.3b, not introduced by it; production has §3.9
+recovery + venc recovery-IDR on top. Watch it on RF; if the ride-through
+looks bad visually, the lever is i_rate/min_r for IDR blocks, not the
+concealment.
+
+**Open.** Phases A/B/E (craft `.232` stream shape, slice-count cost, live
+RF) still pending — this host cannot reach the bench LAN. rk3566 and
+Android deliberately deferred.
+
+---
+
+## 2026-08-19 — slice-skip concealment measured offline: the FEC cliff becomes a slope
+
+**Setup.** Offline, no radios: 512×512 @ 100 fps test content, 4 independent
+slices/picture, P-only, 1 ref. Encoders: x265 3.5 (WPP forced — x265 refuses
+multi-slice without it) and HM-18.0 (`SliceMode=1`, no WPP, SAO **on**,
+TMVP both off and on — the shapes a hardware encoder emits). Decoders:
+ffmpeg 6.1 (`framemd5`) and libde265 1.0.15. Harness:
+`tools/spatial_conceal/` (this branch).
+
+**Substitution proof.** Replacing any 1, any 2 (adjacent and scattered), or
+all 4 slices of a P picture with synthesized all-skip slices decodes clean on
+both decoders; the concealed region's interior is byte-equal to the previous
+picture, untouched slices byte-equal to the reference decode, and the next
+IDR resyncs exactly. A 41–1460 B coded slice is replaced by a **10–12 B**
+concealment slice. Error propagates only inside the concealed region (plus
+motion bleed) until the next IDR/GDR pass — the desired HDZero-like shape.
+
+**Full-chain sim** (blob → s-byte chunks → i.i.d. loss → §14.1 model:
+full decode iff received ≥ k, else salvage → §6.3b rebuild → decode;
+s=500, r=2, IRAP protected as ARQ would):
+
+| loss | clean | FEC | salvaged | frozen | dropped (was) |
+|---|---|---|---|---|---|
+| 15% | 41 | 65 | 11 | 3 | **0** (14) |
+| 25% | 18 | 53 | 34 | 15 | **0** (49) |
+| 40% | 6 | 22 | 57 | 34 | **1** (92) |
+
+All emitted streams decode to full frame count; the only decoder complaints
+are refs to genuinely dropped frames.
+
+**Production-chain confirmation** (`tools/spatial_conceal_bench`: real
+FrameFramer → xorshift symbol loss → FrameReassembler → SpatialRepair, IDR
+loss exempt as ARQ would make it; 1080p 4-slice x265, p_rate 100‰):
+16% source-symbol loss → 0/40 dropped (23 salvaged, 3 frozen); 31% → 0/40
+(27 salvaged, 11 frozen); every output decodes fully on ffmpeg, GStreamer
+`h265parse ! avdec_h265` (the ground hub's x86 graph), and HM-18.0. Salvage
+cost avg 97 µs / max 211 µs per repaired frame (x86 release); bare synthesis
+21.6 µs per quarter-1080p CTU32 slice. HM in the loop caught two conformance
+bugs (extra end_of_subset alignment bit; missing WPP entry points) that
+ffmpeg/libde265 tolerated — keep it in every writer change.
+
+**Open.** SSC338Q slice-split output shape (packs vs `packetInfo[8]` clamp),
+per-slice bitrate overhead at 4/8 slices, on-device repair latency, RK3566 /
+Android MediaCodec acceptance of repaired AUs (VAAPI-class ffmpeg decode is
+covered above), GDR × concealment convergence measurement. Closed to contract
+by Pass 185 (§6.3b); these numbers stay Tier-2.
+
+---
+
 ## 2026-08-16 — the RTL8733BU actuator lands, and all three fleet floors are measured
 
 **Setup.** devourer re-vendored `c8f3531` → `5bf059a` (#399), which gives the

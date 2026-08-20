@@ -44,6 +44,11 @@
       "bind": {
         "kind": "frame-shm",
         "name": "venc_frame_out"
+      },
+      "_conceal_comment": "§6.3b freeze/salvage option — parity knob for the freeze on/off A/B on either ground decoder backend (x86 vah265dec here; the rk3566 ground carries the same key in its on-device link config). 'off' = pre-§6.3b behaviour bit-for-bit; flip mode to 'slice-skip' to arm.",
+      "conceal": {
+        "mode": "off",
+        "freeze_frame": true
       }
     },
     {
