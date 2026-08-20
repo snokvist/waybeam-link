@@ -2,13 +2,57 @@
 
 For the Claude Code CLI session on the bench machine that picks this branch
 up. Everything below assumes the offline story is DONE and green (see
-`docs/spatial-concealment.md`, findings 2026-08-19, Pass 185): the question
-on the table is no longer "does slice concealment work" but "does the real
-SSC338Q bitstream, the real radios, and the real hardware decoders agree".
+`docs/spatial-concealment.md`, findings 2026-08-19 + 2026-08-20, Pass 185):
+the question on the table is no longer "does slice concealment work" but
+"does the real SSC338Q bitstream, the real radios, and the real hardware
+decoders agree".
+
+**Status as of 2026-08-20 (end of the x86-only session).** Done: Phase D
+(udp-air, 996/1000 at 20% loss vs 313 conceal-off), CTU32 real-content
+validation, GDR convergence measurement, plus three defects found and fixed
+by that work (TMVP §7.4.7.1 collocated mirroring; RPS-steady-state freeze
+gate; its per-frame — not latched — form). Remaining and bench-only:
+**Phase A → B → Phase D re-run with the real capture → E**, in that order.
+rk3566 and Android are deliberately deferred (operator, 2026-08-20).
+Draft PRs: waybeam-link #218, waybeam_venc #236.
 
 Branches (same name in all three repos): `claude/waybeam-spatial-hevc-dkoqq3`
 — waybeam-link (spec §6.3b + core + RX wiring + tools), waybeam_venc (0.66.0
 `video0.sliceCount`), waybeam-hub (no changes needed; AUs are opaque to it).
+
+## Setup on the bench (nothing from the cloud session carries over)
+
+The cloud container's toolchains, HM build, and test vectors were all local
+to it. A fresh bench session needs:
+
+1. **waybeam_venc cross toolchain**: `make toolchain` in waybeam_venc
+   (fetches the OpenIPC Infinity6E tarball), then `make verify` — the deploy
+   binary is `out/star6e/waybeam`.
+2. **waybeam-link dev build**: `cmake --preset dev && cmake --build --preset
+   dev` (needs no radios for Phases A/D; `hevc_conceal_cli`,
+   `spatial_conceal_bench`, `frame_shm_feed` land in `build/dev/`). For the
+   §15.3-timing-honest bench numbers use `--preset release` (dev carries
+   ASan, ~12× slower salvage).
+3. **HM reference decoder** (the conformance judge — it caught two bugs
+   ffmpeg/libde265 tolerated; keep it in the loop):
+   ```
+   curl -LO https://vcgit.hhi.fraunhofer.de/jvet/HM/-/archive/HM-18.0/HM-HM-18.0.tar.gz
+   tar xzf HM-HM-18.0.tar.gz && cd HM-HM-18.0
+   cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-error -w" \
+         -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+   make -C build -j TAppDecoder     # binary under bin/umake/*/release/
+   ```
+4. **A synthetic ES** until Phase A supplies a real capture (this is the
+   exact vector behind the Phase D numbers; `udp_air_run.sh` defaults
+   `CONCEAL_ES` to `$CONCEAL_WORK/long.265`):
+   ```
+   ffmpeg -f lavfi -i testsrc2=size=1920x1080:rate=100:duration=10 \
+     -pix_fmt yuv420p -c:v libx265 -x265-params \
+     "slices=4:bframes=0:ref=1:keyint=100:no-sao=1:no-temporal-mvp=1:no-weightp=1:rc-lookahead=0:frame-threads=1:repeat-headers=1:crf=30:scenecut=0" \
+     -f hevc long.265
+   ```
+5. ffmpeg + gstreamer (`h265parse`/`avdec_h265`) for the decode judgments;
+   `tools/spatial_conceal/README.md` has the full judging loop.
 
 Feature is opt-in end to end: `video0.sliceCount` defaults to 1 and
 `streams[].conceal.mode` defaults to `"off"` — nothing changes on any craft
