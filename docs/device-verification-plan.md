@@ -16,6 +16,19 @@ gate; its per-frame — not latched — form). Remaining and bench-only:
 rk3566 and Android are deliberately deferred (operator, 2026-08-20).
 Draft PRs: waybeam-link #218, waybeam_venc #236.
 
+**Status as of 2026-08-20 (bench session).** Phases A, B, C step 1, and the
+Phase D real-capture re-run are DONE — evidence in `docs/findings.md`
+(2026-08-20, the two bench entries). venc 0.66.0 verified on `.232` (slice
+split line clean, no packetInfo WARN at any sliceCount; craft left on
+`sliceCount: 4`, recorder pointed at the SD card). Three §6.3b defects the
+real stream exposed are fixed on this branch (NumPicTotalCurr with unused
+long-term pics; whole-frame freeze refuses sub-layer non-reference donors —
+spec amended; geometry adoption needs two agreeing pictures — spec
+amended). vah265dec (VAAPI hardware) accepts repaired streams. Remaining:
+Phase C MPP/Android (operator-deferred) and **Phase E**, which needs an
+operator-attended RF session (the walk-down visual is the operator's
+judgment; salvage cost measured at 57.6 µs avg on x86 release).
+
 Branches (same name in all three repos): `claude/waybeam-spatial-hevc-dkoqq3`
 — waybeam-link (spec §6.3b + core + RX wiring + tools), waybeam_venc (0.66.0
 `video0.sliceCount`), waybeam-hub (no changes needed; AUs are opaque to it).

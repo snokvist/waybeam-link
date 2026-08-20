@@ -12,6 +12,72 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — Phases B/C1/D on the real capture: 4 is the fleet default, and SVC-T narrows freeze to ~3/5 of positions
+
+Continuation of the Phase A bench session (same craft, same 18.0 Mbps CBR
+1080p60 scene, hub running so the ring has its consumer — see the trap
+below).
+
+**Phase B — encoder cost of `sliceCount` ∈ {1,2,4,8}** (6 s capture each,
+md5-verified, hub running):
+
+| requested | delivered | mean frame | mean SliceQP | max slice | p99 slice | rate |
+|---|---|---|---|---|---|---|
+| 1 | 1 | 36.8 KB | 26.3 | 60.2 KB | 42.7 KB | 18.1 Mbps |
+| 2 | 2 (9/8 CTU rows) | 36.9 KB | 26.7 | 43.9 KB | 33.0 KB | 18.2 Mbps |
+| 4 | 4 (5/5/5/2) | 36.8 KB | 26.8 | 24.6 KB | 18.1 KB | 18.2 Mbps |
+| 8 | **6** (3 rows each) | 37.1 KB | 27.2 | 15.7 KB | 11.5 KB | 18.3 Mbps |
+
+60 fps at every level, CBR holds target, QP cost ≤ 0.9 across the whole
+range. **N=8 quantizes to 6** (the SDK rounds the 32-px row request up to
+whole CTU-64 rows), so request what divides: **fleet default = 4** —
+delivered exactly, max slice 25 KB, QP cost 0.5. The 17-slice GDR refresh
+AU appears at EVERY sliceCount including 1 — it is `intraRefresh`'s own
+geometry, so today's fleet stream already carries multi-NAL refresh packs
+through the frame ring.
+
+**The no-consumer trap.** With the hub stopped (ring unconsumed), venc
+degrades to an IDR storm — one IDR every ~7 frames, GDR suppressed, CBR
+undershooting a static scene at 2.7 Mbps. A first sweep taken that way was
+same-conditions-valid but flight-unreal; discard rate numbers captured with
+no ring consumer.
+
+**Phase C step 1** (production chain `spatial_conceal_bench`, real capture,
+200‰ seed 42): 262/362 delivered (fast 2, fec 50, salvaged 180, frozen 30,
+dropped 100), salvage cost **avg 57.6 µs, max 129 µs** (release, x86). HM
+zero-assert on the output; **vah265dec (VAAPI hardware) accepts it** —
+first hardware-decoder acceptance of repaired real-content streams. The
+plan's "confirm dropped=0" was a synthetic-content expectation: on this
+stream freeze is only eligible where the last two delivered pictures carry
+identical RPS bits, and the enhance slices' long-term entry names the
+*current base* POC, so RPS bits change every 5 frames — freeze eligibility
+is ~3/5 of positions, and the new sub-layer non-reference donor refusal
+removes the slot right after each TRAIL_N. dropped=0 is not reachable at
+20% on SVC-T content by design; widening freeze eligibility would need
+position-relative treatment of `poc_lsb_lt` (an operator ruling, not a
+knob).
+
+**Phase D re-run with the real capture as `CONCEAL_ES`** (udp-air, release
+binaries, 60 fps, 362 frames, p_rate 100‰):
+
+| loss | conceal | delivered | salvaged/frozen | salvage_failed |
+|---|---|---|---|---|
+| 20% | slice-skip | **231/362** | 144 / 38 | 131 |
+| 20% | off | **50/362** | — | — |
+| 30% | slice-skip | 136/362 | 93 / 39 | 226 |
+
+4.6× the control at 20%. Egress judgment: HM zero-assert, GStreamer clean,
+ffmpeg shows only the expected missing-ref lines from wholly-dropped frames
+(the ride-the-gap behaviour; on this GDR craft they heal asymptotically —
+there is no next IDR unless requested). Absolute delivery is below the
+synthetic 996/1000 for the same three reasons: bigger frames (37 KB vs
+20 KB → more chunks in danger per picture), narrower freeze eligibility,
+and the TRAIL_N donor refusal.
+
+**Open:** Phase C MPP (rk3566) and Android deferred by operator ruling
+2026-08-20. Phase E (live RF walk-down) needs an operator-attended RF
+session — numeric prep is done, the visual judgment is the operator's.
+
 ## 2026-08-20 — Phase A: the real SSC338Q 4-slice stream, its shape, and two freeze defects it exposed
 
 Bench session, craft `.232` (SSC338Q, venc 0.66.0 `video0.sliceCount: 4`,
