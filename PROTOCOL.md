@@ -2084,9 +2084,14 @@ MCS and bitrate never move together:
   so the change is expressed where it belongs, in the PHY rate. The
   consequence is that every rung above 1 now derives ~10% *below* the Pass 111
   clean point instead of at 95% of it — conservative, not oversubscribed.
-  Note also that §10.7 uplink calibration entries carry `(mcs, short_gi)` in
-  their identity, so artifacts captured on the short-GI rungs no longer match
-  and those rungs need recalibrating.
+  §10.7 uplink calibration entries do carry `(mcs, short_gi)` in their
+  identity, but **this change invalidates none of them**: calibration-v2 §2.2
+  scopes an uplink run to the configured `air.uplink_rate` rung alone, and that
+  rung is MCS 0, which was already long GI. Verified on the bench
+  2026-08-20 — the stored artifact holds a single `{mcs:0, short_gi:false}`
+  placement, so there were never any short-GI entries to strand. (An earlier
+  draft of this bullet claimed rungs 2+ needed recalibrating; that was wrong
+  and is retracted here.)
 - **Rung 4 re-calibrated to 600 permille (measured 2026-08-20, long GI).** The
   clean-point re-measure named above was run on the `.232` craft with the
   ground receiving: at rung 4, video held `shm_throttle_permille == 1000` with
