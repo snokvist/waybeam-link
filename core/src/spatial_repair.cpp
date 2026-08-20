@@ -205,8 +205,9 @@ bool SpatialRepair::repair(uint16_t k, uint16_t s, uint32_t frame_len,
         if (off >= total) {
             continue;
         }
-        const size_t nbytes =
-            std::min<uint64_t>(chunk.size(), total - off);
+        // total is capped at max_frame_bytes, so these fit size_t on 32-bit.
+        const size_t nbytes = static_cast<size_t>(
+            std::min<uint64_t>(chunk.size(), total - off));
         std::memcpy(assembly.data() + off, chunk.data(), nbytes);
         std::memset(present_.data() + off, 1, nbytes);
     }
@@ -215,7 +216,7 @@ bool SpatialRepair::repair(uint16_t k, uint16_t s, uint32_t frame_len,
             return false;
         }
         for (uint64_t b = off; b < off + nbytes; ++b) {
-            if (!present_[b]) {
+            if (!present_[static_cast<size_t>(b)]) {
                 return false;
             }
         }
