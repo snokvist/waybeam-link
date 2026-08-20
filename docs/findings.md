@@ -12,6 +12,71 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — the QP cost of slicing is BELOW the scene-drift floor: 17 slices is free at 18 Mbps
+
+Moving scene (operator-supplied), 1080p60, CBR pinned at 18025 by
+waybeam-link, hub consuming the ring, venc `a12ff32`. Per point: 60 s dwell,
+record to SD, analyse a 14 MB tail taken from byte offset 60 MB so the sample
+sits in steady state. Sweep order 4, 6, 9, 17, then **4 again as a drift
+control**.
+
+| N | mean AU | Mbps@60 | AUcv | **QP mean** | QP sd |
+|---:|---:|---:|---:|---:|---:|
+| 4 | 36,964 | 17.74 | 0.146 | **27.723** | 0.448 |
+| 6 | 37,043 | 17.78 | 0.151 | 27.558 | 0.497 |
+| 9 | 37,040 | 17.78 | 0.138 | 27.441 | 0.497 |
+| 17 | 36,833 | 17.68 | 0.146 | **27.410** | 0.492 |
+| 4 *(control repeat)* | 36,848 | 17.69 | 0.148 | **27.363** | 0.481 |
+
+**Read the control, not the trend.** The two identical N=4 points differ by
+**0.36 QP** with no configuration change between them — that is the scene
+drifting over the five minutes of the sweep. The entire spread across
+N=4→17 is 0.31 QP, smaller than the drift and pointing the same direction as
+it, because N was swept upward while the scene drifted. So the slice-count
+effect is **not resolvable by this measurement**: |ΔQP(4→17)| < 0.4 QP, and
+the apparent "17 is better" is a time-ordering artifact, not a finding.
+
+**Conclusion: 17 slices costs no measurable quality at the flagship operating
+point.** The 0.5-1.5 QP predicted from HEVC slice-overhead literature did not
+appear. Plausibly because this stream already breaks prediction along CTU-row
+boundaries for GDR, and `loop_filter_across_slices=1` means the deblocking
+filter still crosses the new boundaries.
+
+**Scope: 18 Mbps only.** The low end is NOT measured — waybeam-link is the
+rate controller and **reasserts its profile budget on every venc restart**
+(observed directly: `video0.bitrate` set to 8000 read back as 18025 after the
+next reinit), so the bitrate axis cannot be swept while the link runs. At
+2500 kbps a 17-slice picture is ~306 B/slice, far past the one-slice-per-chunk
+knee, where the CABAC-reset overhead is a much larger fraction — that arm
+still needs either a link-profile lock or a link-stopped run with some other
+ring consumer.
+
+**Two measurement traps, both paid for here.**
+1. **The first sweep was entirely invalid** and looked plausible: 22 s dwells
+   meant every capture began inside the post-restart transient, where the
+   link node has not re-attached to the freshly created ring. Symptoms —
+   18-29 IDRs per 330 AUs on a craft that emits none unprompted, GDR refresh
+   AUs absent, CBR undershooting 14.8-17.1 Mbps, QP sd ~3.5. The tell was the
+   comparison against a known-good capture (QP sd **0.441**, AUcv 0.166,
+   18.16 Mbps, 1 IDR). **Validity gates for any venc rate capture: IDR≈0,
+   achieved bitrate on target, AUcv < 0.2, QP sd < 0.6.**
+2. `wbnode_progress_proven=1` and a static `wblink_shm_full_drops` are *not*
+   sufficient evidence that a capture is clean — both read healthy while the
+   captures were garbage, because they were sampled after the transient had
+   passed.
+
+**Correction to an earlier claim in this file.** The GDR refresh AU has its
+own geometry, **independent of `sliceCount`**, and it is not fixed: in these
+evening captures it is consistently **9 slices of 2 CTU rows** (addresses
+0,60,120,…,480) at every 2 s GOP boundary, at both N=4 and N=17 — where the
+morning capture at the same sliceCount 4 showed **17 slices of 1 CTU row**
+(0,30,…,480). What varies it is unknown. Consequence: the earlier "at N=17
+the steady and refresh geometries coincide, so the two-frame adoption gate
+never sees a shape change" argument is **withdrawn** — on this evidence it is
+N=9 that coincides, and under any N the refresh AU generally presents a
+different address list once per GOP. That is exactly what the two-frame gate
+exists to refuse, and it does; it was never a reason to prefer 17.
+
 ## 2026-08-20 — x86 negative control: AMD VAAPI does not fail on a gap AU, and §6.3b's x86 value is DETERMINISM not dB
 
 New tools: `tools/spatial_conceal/slice_drop.py` (builds the gap AU — the
@@ -209,12 +274,18 @@ way up. N\* is bitrate-dependent: 12 Mbps@60 → 17.6 (still 17); 8 Mbps@60 →
 store: N = clamp(frame_bytes/1424) onto the achievable set, capped at the
 picture's CTU-row count** (1080p 17, 720p 12).
 
-**Two design simplifications fall out at 17, both real.** (a) The steady AU
-and the GDR refresh AU become the *same* 17-address geometry, so the shape
-change that forced the two-frame adoption gate never occurs again (at 9 it
-still jumps 9→17→9 every 2 s). (b) Slices become uniform — N=4's last slice
-is 2 rows against the others' 5, so today both the loss exposure and the
-concealed area are lopsided.
+**One design simplification falls out at 17:** slices become uniform — N=4's
+last slice is 2 rows against the others' 5, so today both the loss exposure
+and the concealed area are lopsided.
+
+> ~~(a) The steady AU and the GDR refresh AU become the *same* 17-address
+> geometry, so the shape change that forced the two-frame adoption gate never
+> occurs again.~~ **WITHDRAWN** by the QP-sweep entry above (same date): the
+> refresh AU's geometry is independent of `sliceCount` and was measured at
+> **9 slices of 2 CTU rows** at both N=4 and N=17 that evening, having been
+> 17 slices of 1 row that morning. Under any N the refresh AU generally
+> presents a different address list once per GOP — which is what the
+> two-frame gate is for.
 
 **Costs, priced.** Per-slice NAL overhead ~0.4% of the frame. Our repair
 CPU scales with N (57.6 µs salvage at 4 → ~200 µs at 17, against a 16.7 ms
