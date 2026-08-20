@@ -12,6 +12,60 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — low-bitrate arm: per-slice overhead is ~26 BYTES, and 17 is free at 2.8 Mbps too
+
+The bitrate axis is reachable after all — **not** by fighting the rate
+controller but by using it. `POST /api/v1/link/profile {"min":N,"max":N}` on
+the craft's link (`127.0.0.1:8091`) pins the profile, and the link then
+actuates venc to that profile's budget: profile 1 → **5754 kbps**, profile 0
+→ **2829 kbps**, both at 60 fps with zero ring drops. Craft config pins
+`min_profile: 1, max_profile: 4`, which is what to restore.
+
+Static scene, 2829 kbps, 62 s dwells, 6 MB tails from offset 8 MB:
+
+| N | mean AU | Mbps@60 | QP mean | QP sd |
+|---:|---:|---:|---:|---:|
+| 4 | 5,525 | 2.65 | 30.385 | 0.531 |
+| 6 | 5,514 | 2.65 | 30.500 | 0.563 |
+| 9 | 5,508 | 2.64 | 30.559 | 0.555 |
+| 17 | 5,895 | 2.83 | 30.534 | 0.544 |
+| 4 *(control)* | 4,927 | 2.37 | 30.566 | 0.588 |
+
+The single pass could not separate overhead from drift — mean AU fell 11%
+between the two N=4 points while N=17 sat 7% above them — so it was repeated
+**interleaved, A-B-A-B**:
+
+| order | N | mean AU | Mbps | QP mean |
+|---:|---:|---:|---:|---:|
+| 1 | 4 | 5,525 | 2.65 | **30.381** |
+| 2 | 17 | 5,861 | 2.81 | **30.509** |
+| 3 | 4 | 3,725 | 1.79 | **31.104** |
+| 4 | 17 | 5,486 | 2.63 | **30.515** |
+
+**The two N=4 points differ by 0.72 QP; the two N=17 points differ by
+0.006.** The N=4 self-variance is four times any N=4-vs-N=17 gap, so there is
+again no resolvable quality cost — this arm's resolution is ~0.7 QP, weaker
+than the 18 Mbps arm's ~0.36, because the "static" scene is not actually
+static (AE/content wander).
+
+**The one clean number comes from the adjacent pair.** Points 1 and 2 are 62 s
+apart, so drift is minimal: +336 B for +13 slices at +0.13 QP → **≈26 bytes
+of overhead per additional slice**. That is far below the ~100 B/slice the
+CABAC-reset argument predicted, and it scales the whole question:
+
+| bitrate | frame bytes | 4→17 overhead | as % of frame |
+|---:|---:|---:|---:|
+| 2829 kbps | 5,525 | 336 B | **6.1%** |
+| 18025 kbps | 36,964 | 336 B | **0.9%** |
+
+So the earlier prediction that 17 slices would be "wasteful" below the
+one-slice-per-chunk knee is **quantified and much smaller than assumed**:
+6% of the bit budget at 2.8 Mbps, under 1% at 18 Mbps. It is a real cost at
+the low end but not a disqualifying one, and the low end is also where the
+frame is only ~4 chunks so the granularity argument for a high N disappears
+anyway — the case for a lower N down there now rests on "no benefit", not on
+"large penalty".
+
 ## 2026-08-20 — the QP cost of slicing is BELOW the scene-drift floor: 17 slices is free at 18 Mbps
 
 Moving scene (operator-supplied), 1080p60, CBR pinned at 18025 by
