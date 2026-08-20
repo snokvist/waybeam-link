@@ -1,0 +1,111 @@
+# §6.3b device verification plan — the continuation runbook
+
+For the Claude Code CLI session on the bench machine that picks this branch
+up. Everything below assumes the offline story is DONE and green (see
+`docs/spatial-concealment.md`, findings 2026-08-19, Pass 185): the question
+on the table is no longer "does slice concealment work" but "does the real
+SSC338Q bitstream, the real radios, and the real hardware decoders agree".
+
+Branches (same name in all three repos): `claude/waybeam-spatial-hevc-dkoqq3`
+— waybeam-link (spec §6.3b + core + RX wiring + tools), waybeam_venc (0.66.0
+`video0.sliceCount`), waybeam-hub (no changes needed; AUs are opaque to it).
+
+Feature is opt-in end to end: `video0.sliceCount` defaults to 1 and
+`streams[].conceal.mode` defaults to `"off"` — nothing changes on any craft
+until both are set. Rollback at any phase = unset them.
+
+Bench context (from the repo CLAUDE.md files — re-verify, buses shuffle):
+craft `.232` = SSC338Q + RTL8812EU on 5805; ground station `192.168.2.20`
+(RK3566, deploy via waybeam-hub's `deploy-ground` skill); x86 rig has the
+8812AU (`6-1`) and two 8812CUs; unload kernel drivers before radio runs and
+kill bench processes only from a script file (SIGTERM).
+
+## Phase A — SSC338Q stream shape (top risk, do first)
+
+The one thing offline could not answer: how the SDK exposes N slices through
+`MI_VENC_GetStream` — one pack per slice, or several `packetInfo[]` entries
+per pack — and whether an IDR AU (VPS+SPS+PPS+N slices) stays inside the
+8-entry table. Everything downstream assumes the frame-ring blob carries all
+N slice NALs.
+
+1. Deploy venc 0.66.0 to `.232` (`scripts/star6e_direct_deploy.sh`), set
+   `video0.sliceCount: 4` (`/api/v1/set`), restart-class → venc restarts.
+2. Boot log must show `VENC: H.265 slice split ON: <r> CTU rows/slice
+   (<rows> rows -> 4 slices)` and MUST NOT show the new
+   `WARN: pack has %u NALs, packetInfo caps at %u` line. That WARN firing =
+   the 8-entry clamp is real at this count → lower sliceCount until quiet
+   and record the ceiling in findings.
+3. Capture ~5 s of raw HEVC ES (venc recorder, or the frame-SHM consumer
+   test tool) **including at least two IDRs**, pull it to the bench.
+4. Judge the capture with the offline loop (this is the same loop that
+   validated x265/HM vectors):
+   ```
+   build/dev/hevc_conceal_cli capture.265 <P-au> 1 rep.265
+   python3 tools/spatial_conceal/validate.py capture.265 rep.265 W H <au> <rows>
+   TAppDecoder -b rep.265 -o /dev/null       # zero asserts required
+   ```
+   Expected: parse reports 4 independent (non-dependent) slices at fixed
+   addresses, no tiles, no WPP; conceal+validate pass as on HM vectors.
+   Parse refusals here = a stream shape outside the §6.3b envelope — stop,
+   file a finding with the SPS/PPS dump before writing any code.
+5. Record in findings: TMVP flag (frozen vs motion-extrapolated conceal),
+   slice sizes, IDR AU NAL count.
+
+## Phase B — encoder cost of N slices
+
+Same scene, fixed bitrate, `sliceCount` ∈ {1, 2, 4, 8}: record achieved
+bitrate/QP (venc stats), slice-size distribution, and any fps drop. Pick the
+fleet default from this table (expectation: 4). Findings entry.
+
+## Phase C — RK3566 + hub decode of repaired AUs
+
+1. On the bench: `build/release/spatial_conceal_bench capture.265 out.265
+   200 42` (real SSC338Q content now), confirm `dropped=0`.
+2. Ground station on the hub branch (unchanged code, just current): feed
+   `out.265` AUs through the frame-SHM path (waybeam-link
+   `tools/frame_shm_feed`, ring `venc_frame_out`) into the hub's rk3566
+   pipeline. Watch `GET /pixelpilot/stats`: frame count advancing at the
+   feed rate, zero pipeline rebuilds; hub log must not print
+   `MPP: dropping/presenting partial frame errinfo=...` for repaired AUs.
+   MPP acceptance is the point — ffmpeg/GStreamer/HM already passed offline.
+3. Same feed on x86 `ground_x86` (vah265dec) if a VAAPI host is handy.
+
+## Phase D — two-node link, synthetic loss (udp-air, no RF)
+
+TX + RX `waybeam-link` on the bench per `examples/config.frame-shm-tx/rx`
+(the RX sample already carries the `conceal` block), venc capture replayed
+into the TX ring, `air.rx_drop_permille` swept 0 → 400. Watch §15.3:
+`frames_salvaged` / `frames_frozen` climbing while `frames_unrecoverable`
+stays ~0 past the FEC cliff; `salvage_failed` should stay rare — a rising
+count means real streams hit a refusal path the vectors didn't (dump one
+failing block's symbol map before touching code). A/B against
+`conceal.mode: "off"` for the dropped-frame count.
+
+## Phase E — live RF around the FEC cliff
+
+The Pass-175-shaped run: craft `.232` TX, single 8812AU ground. Attenuate /
+walk the link down from the safe end (never sweep from the wall). Desired
+visual: clean → one/few frozen regions → more regions → heavily degraded but
+temporally continuous; compare with `conceal.mode: "off"` (whole-frame
+stutter). Record §15.3 lines both sides; screen capture for the doc.
+Measure end-to-end latency unchanged when clean (salvage is off the hot
+path; repaired frames may add ≤~1 ms on RK3566-class CPUs — verify).
+
+## Phase F — deferred / follow-ups
+
+- Android MediaCodec acceptance (Waybeam-android `:wifi` consumer).
+- GDR × concealment: force loss inside an active GDR cycle, measure rows-
+  to-clean convergence on the next pass.
+- Restore encoder tools one by one (SAO, TMVP already handled; weighted
+  pred / B frames stay refused) and re-measure.
+- `cabac_init_flag=1` donors: parse handles it; synthesis always writes 0 —
+  fine (per-slice field), but confirm the SDK never emits donor shapes the
+  parser refuses.
+- Consider a per-frame "slices repaired" debug overlay in the hub OSD.
+
+## Merge criteria
+
+Phases A, C, D green (+ E strongly preferred) → undraft. Any phase that
+fails in a way requiring a spec change goes through a new Pass, not a quiet
+edit — §6.3b's refusal-to-drop fallback means a failed phase never blocks
+shipping the branch dark (defaults off).
