@@ -49,3 +49,30 @@ that ffmpeg and libde265 silently tolerated.
 Real SSC338Q elementary streams: capture one AU stream via the venc recorder
 (`waybeam_venc` raw HEVC ES recording) with `video0.sliceCount > 1` and feed
 it through the same loop before trusting a new encoder configuration.
+
+## Fault/recovery gallery (`ab_gallery.py`)
+
+Renders the operator-review image set from any capture — the one behind the
+2026-08-20 "Spatial Concealment A/B" review page. One command:
+
+```
+python3 tools/spatial_conceal/ab_gallery.py capture.265 outdir \
+  --whole-au 83 --slice-au 50 --slice 1
+```
+
+It builds three variants of the capture (slice salvage via
+`hevc_conceal_cli`, whole-frame freeze via `all`, plain drop by deleting the
+AU's NALs), decodes each with `ffmpeg -threads 1` (threaded decode of the
+SSC338Q TRAIL_N/TRAIL_R mix is non-deterministic), and writes full-frame
+JPEGs plus |Δluma|×6 heatmaps with per-frame mean/max over the fault→heal
+window. The review page is those images inlined as data URIs into a static
+HTML shell — nothing beyond the images and the printed numbers.
+
+To redo it with a **moving scene**: capture with motion in frame (the drop
+scenario's smear scales with motion; salvage and freeze are
+content-independent), then pick the AUs by eye. Two donor traps, measured
+2026-08-20 (`docs/findings.md`): the CLI bypasses the production RPS gate,
+so a `--whole-au` right after a base picture (POC%5==1 on the SSC338Q
+SVC-T ladder) freezes from a base donor and reproduces the permanent-desync
+gate-bypass case, not production behaviour — pick mid base-period; and a
+TRAIL_N donor (previous AU at POC%5==4) is refused, as in production.
