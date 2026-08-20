@@ -114,6 +114,19 @@ Same scene, fixed bitrate, `sliceCount` ∈ {1, 2, 4, 8}: record achieved
 bitrate/QP (venc stats), slice-size distribution, and any fps drop. Pick the
 fleet default from this table (expectation: 4). Findings entry.
 
+**Extension — re-open the default at the top of the range (findings
+2026-08-20).** 4 was picked before the granularity model existed. Only
+{1,2,3,4,5,6,9,17} are reachable at 1080p (the SDK rounds the 32-px slice
+unit up to whole CTU-64 rows over 17 rows), the concealed area carries a
+`1/N` granularity penalty on every loss event, and the one-slice-per-chunk
+knee sits at N≈26.6 at 18 Mbps — above the 17 ceiling, so more slices pays
+all the way up. 17 also makes the steady AU and the GDR refresh AU the same
+geometry. Sweep `sliceCount` ∈ {4, 6, 9, 17} on the same scene with
+`resilience`/bitrate/fps held: delivered slice count, achieved QP, achieved
+bitrate, fps hold, packetInfo WARN silence at 60 frames/s, `maxPBytes`
+interaction. Ship 17 unless its QP cost exceeds ~1 step over 4; else 9. This
+is a short craft run, not an RF session.
+
 ## Phase C — RK3566 + hub decode of repaired AUs
 
 1. On the bench: `build/release/spatial_conceal_bench capture.265 out.265

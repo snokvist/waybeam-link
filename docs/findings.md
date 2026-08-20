@@ -12,6 +12,80 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — how many slices 1080p can actually have, and why the FPV default should be 17 not 4
+
+Measured on the real `.232` capture (362 AUs, `tools/` parser); craft live
+config read the same day: 1920x1080, 60 fps, CBR **18025 kbps**, gop 2.0 s,
+`sliceCount: 4`, `resilience: "racing"`.
+
+**The achievable set is not 1..N — it is {1,2,3,4,5,6,9,17}.** venc maps
+`sliceCount` to the SDK's 32-px `u32SliceRowCount`, which the SDK rounds UP
+to whole CTU-64 rows; 1080p is 17 CTU rows, so the delivered count is
+`ceil(17 / r)` for `r = ceil(ceil(1080/N/32)/2)` CTU rows per slice. 7, 8 and
+10..16 are unreachable — they collapse onto 6 and 9. This predicts both
+measured data points exactly: request 4 → 32-px unit 9 → SDK stores 10 →
+r=5 → **4**; request 8 → unit 5 → stores 6 → r=3 → **6**.
+
+**Per-slice size, measured.** Mean AU 37,836 B (= the 37,552 B CBR budget).
+FEC chunk payload is 1424 B (§3.2), so a frame is **26.6 chunks**.
+
+| N | CTU rows/slice | slice px | mean slice B | chunks/slice | 1/N |
+|---:|---|---:|---:|---:|---:|
+| 4 | 5,5,5,2 | 320/128 | 9,464 *(meas.)* | **6.65** *(meas.)* | 25% |
+| 6 | 3x5, 2 | 192/128 | 6,306 | 4.43 | 16.7% |
+| 9 | 2x8, 1 | 128/64 | 4,204 | 2.95 | 11.1% |
+| 17 | 1x17 | 64 | 2,101 *(meas.)* | **1.47** *(meas.)* | 5.9% |
+
+The N=17 row is measured, not extrapolated: the GDR refresh AU **already is**
+a 17-slice picture, and this capture holds three of them (AU 120/240/360) at
+addresses **0,30,60,…,480** — one CTU row each, 34.6–36.5 kB total.
+
+**Why more slices pays.** A lost chunk destroys every slice it touches, so
+the concealed area is `bytes_lost_fraction + bursts/N`: **1/N is a pure
+granularity penalty** paid on top of the real loss. Expected intact picture
+fraction `(1-q)^(chunks per slice)`:
+
+| chunk loss q | N=4 | N=9 | N=17 |
+|---:|---:|---:|---:|
+| 10% | 49.6% | 73.3% | 84.8% |
+| 20% | **22.7%** | 51.8% | **70.6%** |
+| 30% | 9.3% | 34.9% | 59.2% |
+
+**Where it stops paying: one slice per chunk.** Below ~1424 B/slice a single
+lost chunk spans two slices and finer buys nothing but coding cost. That knee
+is at `N* = frame_bytes / 1424` = **26.6** here — *above* the encoder's 17
+ceiling, so at this operating point more slices pays monotonically all the
+way up. N\* is bitrate-dependent: 12 Mbps@60 → 17.6 (still 17); 8 Mbps@60 →
+11.7 (→ 9); 18 Mbps@100 fps → 15.8 (17, at the knee). **Rule for the mode
+store: N = clamp(frame_bytes/1424) onto the achievable set, capped at the
+picture's CTU-row count** (1080p 17, 720p 12).
+
+**Two design simplifications fall out at 17, both real.** (a) The steady AU
+and the GDR refresh AU become the *same* 17-address geometry, so the shape
+change that forced the two-frame adoption gate never occurs again (at 9 it
+still jumps 9→17→9 every 2 s). (b) Slices become uniform — N=4's last slice
+is 2 rows against the others' 5, so today both the loss exposure and the
+concealed area are lopsided.
+
+**Costs, priced.** Per-slice NAL overhead ~0.4% of the frame. Our repair
+CPU scales with N (57.6 µs salvage at 4 → ~200 µs at 17, against a 16.7 ms
+frame). Plumbing is **already proven at 17 NALs/AU** — the refresh AUs flow
+through the frame ring and the venc packetInfo walker today with no
+truncation WARN — but at 0.5/s, not 60/s.
+
+**Open — the one unmeasured number.** Slice breaks reset CABAC and cut
+prediction, which under CBR surfaces as QP (quality), not bitrate. Measured
+only at N=4 (**≤0.9 QP**). Expect 3–8% BD-rate for 1080p HEVC at 16 slices,
+i.e. ~0.5–1.5 QP. **Phase B extension** (short craft run, no RF judgment):
+same scene, hold `resilience`/bitrate/fps fixed, sweep `sliceCount` ∈
+{4, 6, 9, 17}, record delivered count (confirm 17 is really 17), achieved
+QP, achieved bitrate, fps hold, and that the packetInfo WARN stays silent at
+60 frames/s. Also watch `maxPBytes` (31,291 B) for interaction with the
+extra overhead. **Ship 17 unless its QP cost exceeds ~1 step over 4; fall
+back to 9 if it does.** The trade is clean-frame quality against damaged-frame
+area, and an FPV link at range lives near the cliff where the damaged frames
+are the ones being flown by.
+
 ## 2026-08-20 — external cross-check: rkvdec-slice-lab (RK3588 MPP / Intel VAAPI fed damaged bitstreams) vs §6.3b
 
 An independent lab (github.com/josephnef/rkvdec-slice-lab) fed slice-dropped,
