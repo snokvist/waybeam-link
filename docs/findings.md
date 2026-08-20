@@ -12,6 +12,96 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — §10.7 needed no recalibration for long GI, and the ground could not write an artifact at all
+
+**The premise was wrong, checked before acting on it.** The claim that the
+guard-interval change stranded §10.7 artifacts on rungs 2+ does not survive
+contact with the system: calibration-v2 §2.2 scopes an uplink run to the
+configured `air.uplink_rate` rung **alone**, the ground config sets no
+override so that rung is **MCS 0**, and MCS 0 was always long GI. The stored
+artifact holds exactly one placement, `{mcs:0, short_gi:false}` — there were
+never any short-GI entries to strand. Retracted in PROTOCOL.md §9.5.
+
+The artifact *was* stale, for unrelated reasons: captured on **channel 5765**
+while the link now runs 5805, and `craft_adapter_fingerprint` 136 against a
+live 212. So it was worth re-running anyway.
+
+**Ground-host defect, found by running it: `artifact_write_failed`.**
+`/etc/waybeam-link/calibration/` was `root:root` 755 while the ground hub runs
+as **`snokvist`**, so the engine swept the full range (26502 probes, power
+−34 → 0 qdb) and then correctly **refused to report success** it could not
+persist — the §17 "refuse false success" rule doing its job rather than
+silently producing an unusable placement. `chown -R snokvist:snokvist` on that
+directory fixed it. Any calibration on this host would have failed the same
+way; the artifact on disk dated from a root-run standalone `waybeam-link`.
+
+Re-run after the fix: **done, `stale:false`**, 54002 probes / 103 tallies,
+channel **5805**, placement `{mcs:0, short_gi:false, qdb:-2, rssi:-39 dBm,
+loss:5‰, last_clean:24, first_bad:null}`. `first_bad:null` means the sweep
+**never found a failing point** across the whole commanded range — at 50 cm
+bench geometry the uplink is clean everywhere, so this is a bench placement,
+not a range-valid one, exactly as the ground config's own `_power_comment`
+warns.
+
+**Read the drop counter with that in mind.** `shm_full_drops` jumped 18 →
+8552 across the run and then froze. That is the §2.4 video-input starve, not a
+fault: the run silences video and restores it, and nothing resets the counter
+afterwards, so a post-calibration craft looks alarming until you check that it
+is static. Throttle returned to 1000, ground receiving at rssi −28 / snr 29.
+
+## 2026-08-20 — the airtime ceiling moved UP since Pass 111: rung 4's clean point is >21000, not ~19000
+
+Long GI deployed to both ends (craft `.232` + this ground, `table_version` 91
+→ 62), then the §9.5 clean-point re-measure. Method is the Pass 111 one: a
+steady full-cadence source is clean only while `shm_throttle_permille == 1000`
+with the ring at idle occupancy and `shm_full_drops` not advancing. Profile
+pinned, bitrate stepped (it is a **live** venc field, so no restart and no
+ring re-attach transient), stats reset per step, sampled 25 s apart.
+
+**Rung 4 (MCS4, long GI):**
+
+| target kbps | throttle | full_drops | ring_full | verdict |
+|---:|---:|---:|---:|---|
+| 16213 (derived) | 1000 | 0 | 0 | CLEAN |
+| 17000 | 1000 | 0 | 0 | CLEAN |
+| 18025 (old short-GI rate) | 1000 | 0 | 0 | CLEAN |
+| 19000 | 1000 | 0 | 0 | CLEAN |
+| 20000 | 1000 | 0 | 0 | CLEAN |
+| **21000** | **1000** | **0** | **0** | **CLEAN** |
+| 22000 | **740** | 0 | 0 | THROTTLED |
+
+So the clean point is **21000–22000, above the ~19000 Pass 111 found under
+short GI** — with *less* airtime available. **The bottleneck at this rung is
+not airtime**; the encode → frame-SHM → FEC → injection path got faster since
+Pass 111, and the obvious candidate is the USB bulk-OUT TX aggregation
+(#216/#217). The Pass 111 permille were stale by more than the guard interval
+costs.
+
+Applying the §9.5 rule (600 is the policy cap; the clean point only ever
+lowers it): rung 4 at 600 derives 19092 ≤ 95% of 21000 = 19950, so it is no
+longer oversubscribed → **permille 510 → 600**. Net effect of both changes
+together: rung 4 goes 18025 (short GI) → 16213 (long GI) → **19092**, i.e.
+**higher than before while also more robust**.
+
+**Rung 5 measured clean at every rate up to 25000** — but 25000 is
+`venc.max_bitrate_kbps` (§9.6), not a link limit, so its clean point is
+**censored, not measured**, and the 95% rule cannot be applied. Raising rung 5
+alone on the censored bound would also derive 23739 against rung 6's 20914 —
+a **non-monotonic ladder**, where promoting a rung would *lower* the bitrate.
+Rungs 5–7 therefore stay at 463/438/418. Retuning them needs their clean
+points measured together with the §9.6 ceiling raised far enough not to censor
+the answer.
+
+Final ladder `{2829,5754,9264,12384,19092,19646,20914,22183}`, monotonic.
+Deployed to both ends, `table_version` **104** on each; craft steady at 19092
+with `shm_throttle_permille` 1000 and `full_drops` flat over 40 s, ground
+receiving at rssi −28 / snr 30.
+
+**`table-8733b.json` is deliberately NOT retuned.** That is the CV610/`.181`
+craft's table and its clean point was not measured here; that craft is
+CPU-limited and pins `venc.max_bitrate_kbps=12288`, which caps rungs 3–5
+anyway. The two tables now legitimately differ at rung 4 (600 vs 510).
+
 ## 2026-08-20 — low-bitrate arm: per-slice overhead is ~26 BYTES, and 17 is free at 2.8 Mbps too
 
 The bitrate axis is reachable after all — **not** by fighting the rate

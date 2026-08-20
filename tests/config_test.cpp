@@ -900,7 +900,7 @@ int main() {
             CHECK_EQ_U(t.value->profiles.size(), 8);
             CHECK_EQ_U(t.value->floor_profile, 0);
             CHECK_EQ_U(t.value->profiles[0].airtime_budget_permille, 600);
-            CHECK_EQ_U(t.value->profiles[4].airtime_budget_permille, 510);
+            CHECK_EQ_U(t.value->profiles[4].airtime_budget_permille, 600);
             CHECK_EQ_U(t.value->profiles[5].airtime_budget_permille, 463);
             CHECK_EQ_U(t.value->profiles[6].airtime_budget_permille, 438);
             CHECK_EQ_U(t.value->profiles[7].airtime_budget_permille, 418);
@@ -909,21 +909,20 @@ int main() {
             CHECK_EQ_U(t.value->profiles[7].max_payload, 3072);
             CHECK_EQ_U(t.value->profiles[0].fec_overhead_permille, 250);
             CHECK_EQ_U(t.value->profiles[5].fec_overhead_permille, 180);
-            // Pass 111 airtime permille, but long GI on every rung (§9.5
-            // operator ruling 2026-08-20) — so no rung takes the x10/9
-            // short-GI term any more.
-            static constexpr uint32_t kPass111Bitrates[] = {
-                2829, 5754, 9264,  12384, 16213, 19646, 20914, 22183};
+            // Long GI on every rung (§9.5 ruling 2026-08-20), so no rung
+            // takes the x10/9 short-GI term. Rung 4 is re-calibrated to
+            // 600 permille — measured clean past 21000 kbps, where Pass
+            // 111 had found ~19000 on the pre-USB-aggregation pipeline.
+            static constexpr uint32_t kDerivedBitrates[] = {
+                2829, 5754, 9264,  12384, 19092, 19646, 20914, 22183};
             for (size_t i = 0; i < t.value->profiles.size(); ++i) {
                 CHECK_EQ_U(derive_bitrate_kbps(t.value->profiles[i]),
-                           kPass111Bitrates[i]);
+                           kDerivedBitrates[i]);
             }
-            CHECK_EQ_U(table_version(*t.value), 0xA4);  // long GI everywhere
-                                                        // (was 0xC1; Pass 163
-                                                        // was 0x80). The hash is
-                                                        // wire-visible: craft and
-                                                        // ground must update
-                                                        // together.
+            // 0x80 (Pass 163) -> 0xC1 -> 0xA4 (long GI) -> 0xF2
+            // (rung 4 airtime 510->600). The hash is wire-visible:
+            // craft and ground must be updated together.
+            CHECK_EQ_U(table_version(*t.value), 0xF2);
             CHECK_EQ_U(t.value->probe_period, 64);
             CHECK_EQ_U(t.value->probe_slot, 4);
         }

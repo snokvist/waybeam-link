@@ -2084,11 +2084,36 @@ MCS and bitrate never move together:
   so the change is expressed where it belongs, in the PHY rate. The
   consequence is that every rung above 1 now derives ~10% *below* the Pass 111
   clean point instead of at 95% of it — conservative, not oversubscribed.
-  Re-measuring that ceiling under long GI, and retuning the permille to sit at
-  95% of the new one, is open work and is exactly the "framing change"
-  re-measure trigger named above. Note also that §10.7 uplink calibration
-  entries carry `(mcs, short_gi)` in their identity, so artifacts captured on
-  the short-GI rungs no longer match and those rungs need recalibrating. Ordinary
+  §10.7 uplink calibration entries do carry `(mcs, short_gi)` in their
+  identity, but **this change invalidates none of them**: calibration-v2 §2.2
+  scopes an uplink run to the configured `air.uplink_rate` rung alone, and that
+  rung is MCS 0, which was already long GI. Verified on the bench
+  2026-08-20 — the stored artifact holds a single `{mcs:0, short_gi:false}`
+  placement, so there were never any short-GI entries to strand. (An earlier
+  draft of this bullet claimed rungs 2+ needed recalibrating; that was wrong
+  and is retracted here.)
+- **Rung 4 re-calibrated to 600 permille (measured 2026-08-20, long GI).** The
+  clean-point re-measure named above was run on the `.232` craft with the
+  ground receiving: at rung 4, video held `shm_throttle_permille == 1000` with
+  no ring-full and no full-drops at **21000 kbps**, and throttled to 740 at
+  22000 — so the clean point is 21000–22000, *above* the ~19000 Pass 111 found
+  under short GI. The bottleneck at this rung is therefore **not airtime**: the
+  encode → frame-SHM → FEC → injection path got faster since Pass 111 (the
+  USB bulk-OUT TX aggregation, #216/#217). Rung 4 is consequently no longer
+  oversubscribed at the 600 policy cap — derived 19092 ≤ 95% of 21000 — so its
+  permille returns to 600 and the airtime permille become
+  `{600,600,600,600,600,463,438,418}`, deriving
+  `{2829,5754,9264,12384,19092,19646,20914,22183}`. Long GI plus this
+  re-calibration leaves rung 4 **higher** than the short-GI 18025 it replaced.
+- **Rungs 5–7 are deliberately left at 463/438/418.** Rung 5 measured clean at
+  every rate up to 25000 kbps, but that is `venc.max_bitrate_kbps` (§9.6), not
+  a link limit — the clean point is **censored, not measured**, so the 95% rule
+  cannot be applied to it. Raising rung 5 alone on the censored bound would
+  also make the ladder **non-monotonic** (rung 5 would derive above rung 6),
+  which is a promotion defect, not a gain. Rungs 6–7 are unmeasured and
+  unreachable under the fleet's current `max_profile`. Retuning any of them
+  requires measuring their clean points together, with the §9.6 ceiling raised
+  far enough not to censor the result. Ordinary
   channel interference belongs to §9.1/§9.2; it must not be baked into this
   local service-boundary calibration.
 - **`fec_overhead_frac` MUST be non-zero on any rung whose streams run

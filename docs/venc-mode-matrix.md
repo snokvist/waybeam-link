@@ -560,7 +560,7 @@ Current §9.5 derived bitrate (25000 kbps `venc.max_bitrate_kbps` ceiling):
 | 1 | 1 | long | 7704 | 5754 (250‰ FEC) | **5754** (600‰ airtime) |
 | 2 | 2 | long | 11604 | 9264 (200‰ FEC) | **9264** (600‰ airtime) |
 | 3 | 3 | long | 15504 | 12384 (200‰ FEC) | **12384** (600‰ airtime) |
-| 4 | 4 | long | 23304 | 19092 (180‰ FEC) | **16213** (510‰ airtime) |
+| 4 | 4 | long | 23304 | 19092 (180‰ FEC) | **19092** (600‰ airtime) |
 | 5 | 5 | long | 25000 (clamped) | 25000 (clamped) | **19646** (463‰ airtime) |
 
 Read back from the shipped table via `derive_bitrate_kbps()`, not estimated.
@@ -622,7 +622,7 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 | 1 | 5754 | 0.208 | 0.104 | 0.069 | 0.062 |
 | 2 | 9264 | 0.335 | 0.168 | 0.112 | 0.101 |
 | 3 | 12384 | 0.448 | 0.224 | 0.149 | 0.134 |
-| 4 | 16213 | 0.586 | 0.293 | 0.195 | 0.176 |
+| 4 | 19092 | 0.691 | 0.345 | 0.230 | 0.207 |
 | 5 | 19646 | 0.711 | 0.355 | 0.237 | 0.213 |
 
 **1920×1080 (2 073 600 px)**
@@ -633,7 +633,7 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 | 1 | 5754 | 0.092 | 0.046 | 0.031 | 0.028 |
 | 2 | 9264 | 0.149 | 0.074 | 0.050 | 0.045 |
 | 3 | 12384 | 0.199 | 0.100 | 0.066 | 0.060 |
-| 4 | 16213 | 0.261 | 0.130 | 0.087 | 0.078 |
+| 4 | 19092 | 0.307 | 0.153 | 0.102 | 0.092 |
 | 5 | 19646 | 0.316 | 0.158 | 0.105 | 0.095 |
 
 **960×540 (518 400 px)**
@@ -644,7 +644,7 @@ resolution) cell is whether the resulting bpp is watchable. From the corrected
 | 1 | 5754 | 0.370 | 0.185 | 0.123 | 0.111 |
 | 2 | 9264 | 0.596 | 0.298 | 0.199 | 0.179 |
 | 3 | 12384 | 0.796 | 0.398 | 0.265 | 0.239 |
-| 4 | 16213 | 1.043 | 0.521 | 0.348 | 0.313 |
+| 4 | 19092 | 1.228 | 0.614 | 0.409 | 0.368 |
 | 5 | 19646 | 1.263 | 0.632 | 0.421 | 0.379 |
 
 This is the matrix's real shape, and it reproduces the operator's intuition
@@ -779,13 +779,13 @@ its top rung.
 
 | | **Range High** (MCS 0–2) | **Range Medium** (MCS 1–4) | **Range Low** (MCS 2–5) |
 |---|---|---|---|
-| **Latency Low** (100 fps) | 960×540 · 0.055→0.179 | 1280×720 · 0.062→0.176 | 1920×1080 · 0.045→0.095 |
-| **Latency Medium** (60 fps) | 1280×720 · 0.051→0.168 | 1920×1080 · 0.046→0.130 | 1920×1080 · 0.074→0.158 |
-| **Latency High** (30 fps) | 1920×1080 · 0.045→0.149 | 1920×1080 · 0.092→0.261 | 1920×1080 · 0.149→0.316 |
+| **Latency Low** (100 fps) | 960×540 · 0.055→0.179 | 1280×720 · 0.062→0.207 | 1920×1080 · 0.045→0.095 |
+| **Latency Medium** (60 fps) | 1280×720 · 0.051→0.168 | 1920×1080 · 0.046→0.153 | 1920×1080 · 0.074→0.158 |
+| **Latency High** (30 fps) | 1920×1080 · 0.045→0.149 | 1920×1080 · 0.092→0.307 | 1920×1080 · 0.149→0.316 |
 
 Rung bitrates are §9.5-derived from the **Pass 111 table** (`table_version`
-0xA4 since the §9.5 long-GI ruling 2026-08-20) — 2829 / 5754 / 9264 / 12384 /
-16213 / 19646 kbps. Pass 95's graduated
+0xF2 since the §9.5 long-GI + rung-4 recalibration, 2026-08-20) — 2829 / 5754 / 9264 / 12384 /
+19092 / 19646 kbps. Pass 95's graduated
 FEC overhead remains in force; Pass 111 adds the measured local-service ceiling
 for MCS4–5. The floor rungs that choose each resolution are unchanged, so no
 mode changes size. **(Latency Low, Range Medium)** remains the knife edge:
@@ -802,8 +802,8 @@ The IMX335 has no 4:3 mode above 60 fps, so **4:3 has no Latency-Low row**.
 
 | | **Range High** | **Range Medium** | **Range Low** |
 |---|---|---|---|
-| **Latency Medium** (60 fps) | 1280×960 · 0.042→0.143 | 1440×1080 · 0.068→0.227 | 1440×1080 · 0.113→0.268 |
-| **Latency High** (30 fps) | 1440×1080 · 0.066→0.226 | 1440×1080 · 0.135→0.455 | 1440×1080 · 0.226→0.536 |
+| **Latency Medium** (60 fps) | 1280×720 · 0.051→0.168 | 1920×1080 · 0.046→0.153 | 1920×1080 · 0.074→0.158 |
+| **Latency High** (30 fps) | 1920×1080 · 0.045→0.149 | 1920×1080 · 0.092→0.307 | 1920×1080 · 0.149→0.316 |
 
 `1280×960 · 0.042` is the tightest cell in the design.
 
