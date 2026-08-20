@@ -12,6 +12,66 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — external cross-check: rkvdec-slice-lab (RK3588 MPP / Intel VAAPI fed damaged bitstreams) vs §6.3b
+
+An independent lab (github.com/josephnef/rkvdec-slice-lab) fed slice-dropped,
+truncated and replayed H.264/H.265 to RK3588 vendor MPP and Intel iHD VAAPI.
+Corpus: majestic SSC30KQ camera streams, 4-slice HEVC, **IDR every 20
+frames** — no SVC-T, no LT refs, no GDR. Checked against our solution.
+
+**Confirms four §6.3b decisions independently.**
+- Truncated slice corrupts *following* slices (their 28.5 dB, worse than a
+  clean drop's 29.4) → the venc abort-not-truncate fix is right.
+- H.265 first-slice loss discards the whole picture (MPP parser refuses) →
+  our first-slice synthesis is load-bearing, not optional.
+- A mid-picture slice gap decodes **silently wrong on MPP HEVC**: errinfo 0
+  on all 161 frames, deterministic, ~8% of the picture damaged → never ship
+  a gap AU. Our repair emits complete AUs or drops whole frames; MPP never
+  sees a gap from us.
+- Verbatim slice replay is decoder-specific: helps on MPP, **rejected**
+  (H.264 frame_num validation) or **−20 dB** (H.265, 42.95 vs 62.97 drop) on
+  VAAPI. Their own close: portable repair "requires rewriting slice headers
+  with current picture parameters… not merely copying them" — which is
+  exactly what §6.3b does, and why our repaired streams pass HM + vah265dec.
+
+**Their central recommendation is already in our ground stack.** "Fix the
+error policy, don't repair the bitstream" = `MPP_DEC_SET_DISABLE_ERROR
+0xffff` + present-don't-discard: waybeam-hub has shipped both for a while
+(`src/pixelpilot/video_decoder.c:1055`, PARTIAL mode + errinfo→IDR-request
+at `:1349-1360`). Their H.264 freeze-latch root cause (ref_err gates HW
+submission; parser/callback race under back-pressure; sticky dpb_err_flag
+clears only on I-slices — bad news for a GDR stream) is the mechanism
+*behind* why that flag matters; the class is defused on our ground.
+
+**The "let hardware conceal" simplification is NOT available to us.** Their
+result leans on the corpus: damage self-heals at the next IDR, ≤20 frames
+away. Our craft emits none unprompted, and the errinfo-silent failure means
+the hub's IDR requester would never fire — a gap AU would smear via TMVP
+with no signal and no bound. First-slice losses (1-in-4 at our geometry)
+lose the picture outright, and the x86 ground (GStreamer vah265dec) and
+Android MediaCodec would need their patched-decoder treatment per stack.
+Phase D already priced repair vs drop on our stream: 231 vs 50 of 362.
+
+**Residue worth keeping (parked, operator call): replay-with-rewrite.** On
+camera content their replay measured 64.1 dB against a 31.6 dB ideal
+temporal copy — last frame's *motion+residuals* against shifted refs beats
+a pure freeze (H.264/MPP numbers). §6.3b already owns the hard half (donor
+header rewrite: POC, RPS span, first-slice); the variant would splice the
+previous picture's co-located slice *payload* under the rewritten header
+instead of synthesizing all-skip. Open risks before it is worth building:
+CABAC payload assumes the donor's ref-list length and slice-QP (must match
+or carry qp_delta/cabac_init from the donor header); our SVC-T LT-ref
+ladder shifts what "previous picture at this address" references; and their
+only HEVC replay datapoint was *negative*. Our all-skip with TMVP merge
+already extrapolates motion, so our baseline sits above a plain temporal
+copy. Measure against the real capture before believing the +dB.
+
+**Phase C methodology note.** MPP errinfo silence is necessary but NOT
+sufficient (their errinfo-0-while-8%-wrong result): pair the rk3566
+acceptance with a decoded-output compare or visual check, not log absence
+alone. Their per-MB-row damage-localization diff (compare_yuv.py) is a
+good shape to borrow for that readout.
+
 ## 2026-08-20 — Phases B/C1/D on the real capture: 4 is the fleet default, and SVC-T narrows freeze to ~3/5 of positions
 
 Continuation of the Phase A bench session (same craft, same 18.0 Mbps CBR

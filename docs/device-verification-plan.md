@@ -125,6 +125,12 @@ fleet default from this table (expectation: 4). Findings entry.
    feed rate, zero pipeline rebuilds; hub log must not print
    `MPP: dropping/presenting partial frame errinfo=...` for repaired AUs.
    MPP acceptance is the point — ffmpeg/GStreamer/HM already passed offline.
+   Errinfo silence is necessary but NOT sufficient: MPP's HEVC parser
+   decodes intra-picture damage with errinfo 0 (external lab, findings
+   2026-08-20 rkvdec-slice-lab entry) — pair the log check with a
+   decoded-output compare or visual judgment. The hub already runs
+   `MPP_DEC_SET_DISABLE_ERROR 0xffff` + PARTIAL mode, so the H.264-class
+   error latch is defused; no hub change is part of this phase.
 3. Same feed on x86 `ground_x86` (vah265dec) if a VAAPI host is handy.
 
 ## Phase D — two-node link, synthetic loss (udp-air, no RF) — **DONE on x86 (2026-08-20)**
