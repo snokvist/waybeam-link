@@ -12,6 +12,59 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — the airtime ceiling moved UP since Pass 111: rung 4's clean point is >21000, not ~19000
+
+Long GI deployed to both ends (craft `.232` + this ground, `table_version` 91
+→ 62), then the §9.5 clean-point re-measure. Method is the Pass 111 one: a
+steady full-cadence source is clean only while `shm_throttle_permille == 1000`
+with the ring at idle occupancy and `shm_full_drops` not advancing. Profile
+pinned, bitrate stepped (it is a **live** venc field, so no restart and no
+ring re-attach transient), stats reset per step, sampled 25 s apart.
+
+**Rung 4 (MCS4, long GI):**
+
+| target kbps | throttle | full_drops | ring_full | verdict |
+|---:|---:|---:|---:|---|
+| 16213 (derived) | 1000 | 0 | 0 | CLEAN |
+| 17000 | 1000 | 0 | 0 | CLEAN |
+| 18025 (old short-GI rate) | 1000 | 0 | 0 | CLEAN |
+| 19000 | 1000 | 0 | 0 | CLEAN |
+| 20000 | 1000 | 0 | 0 | CLEAN |
+| **21000** | **1000** | **0** | **0** | **CLEAN** |
+| 22000 | **740** | 0 | 0 | THROTTLED |
+
+So the clean point is **21000–22000, above the ~19000 Pass 111 found under
+short GI** — with *less* airtime available. **The bottleneck at this rung is
+not airtime**; the encode → frame-SHM → FEC → injection path got faster since
+Pass 111, and the obvious candidate is the USB bulk-OUT TX aggregation
+(#216/#217). The Pass 111 permille were stale by more than the guard interval
+costs.
+
+Applying the §9.5 rule (600 is the policy cap; the clean point only ever
+lowers it): rung 4 at 600 derives 19092 ≤ 95% of 21000 = 19950, so it is no
+longer oversubscribed → **permille 510 → 600**. Net effect of both changes
+together: rung 4 goes 18025 (short GI) → 16213 (long GI) → **19092**, i.e.
+**higher than before while also more robust**.
+
+**Rung 5 measured clean at every rate up to 25000** — but 25000 is
+`venc.max_bitrate_kbps` (§9.6), not a link limit, so its clean point is
+**censored, not measured**, and the 95% rule cannot be applied. Raising rung 5
+alone on the censored bound would also derive 23739 against rung 6's 20914 —
+a **non-monotonic ladder**, where promoting a rung would *lower* the bitrate.
+Rungs 5–7 therefore stay at 463/438/418. Retuning them needs their clean
+points measured together with the §9.6 ceiling raised far enough not to censor
+the answer.
+
+Final ladder `{2829,5754,9264,12384,19092,19646,20914,22183}`, monotonic.
+Deployed to both ends, `table_version` **104** on each; craft steady at 19092
+with `shm_throttle_permille` 1000 and `full_drops` flat over 40 s, ground
+receiving at rssi −28 / snr 30.
+
+**`table-8733b.json` is deliberately NOT retuned.** That is the CV610/`.181`
+craft's table and its clean point was not measured here; that craft is
+CPU-limited and pins `venc.max_bitrate_kbps=12288`, which caps rungs 3–5
+anyway. The two tables now legitimately differ at rung 4 (600 vs 510).
+
 ## 2026-08-20 — low-bitrate arm: per-slice overhead is ~26 BYTES, and 17 is free at 2.8 Mbps too
 
 The bitrate axis is reachable after all — **not** by fighting the rate
