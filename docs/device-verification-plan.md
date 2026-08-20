@@ -70,16 +70,21 @@ fleet default from this table (expectation: 4). Findings entry.
    MPP acceptance is the point — ffmpeg/GStreamer/HM already passed offline.
 3. Same feed on x86 `ground_x86` (vah265dec) if a VAAPI host is handy.
 
-## Phase D — two-node link, synthetic loss (udp-air, no RF)
+## Phase D — two-node link, synthetic loss (udp-air, no RF) — **DONE on x86 (2026-08-20)**
 
-TX + RX `waybeam-link` on the bench per `examples/config.frame-shm-tx/rx`
-(the RX sample already carries the `conceal` block), venc capture replayed
-into the TX ring, `air.rx_drop_permille` swept 0 → 400. Watch §15.3:
-`frames_salvaged` / `frames_frozen` climbing while `frames_unrecoverable`
-stays ~0 past the FEC cliff; `salvage_failed` should stay rare — a rising
-count means real streams hit a refusal path the vectors didn't (dump one
-failing block's symbol map before touching code). A/B against
-`conceal.mode: "off"` for the dropped-frame count.
+Run with `tools/spatial_conceal/udp_air_run.sh <drop_permille> <mode> <tag>`
+(`frame_shm_feed play/dump` carry real HEVC through the rings). Result —
+findings 2026-08-20: x265 1080p 4-slice, 1000 frames, p_rate 100‰:
+20% loss delivered **996** frames conceal-on vs **313** conceal-off; 30%
+still 992; every conceal-on egress decoded clean on ffmpeg + GStreamer;
+`salvage_failed` single digits, all fail-safe drops.
+
+**Re-run once with a real `.232` capture as `CONCEAL_ES`** (after Phase A) —
+the synthetic-content pass does not re-prove the SSC338Q stream shape.
+Carry-over for Phase E: IDR ARQ convergence is partial under blanket loss
+(6/10 IDR AUs at 20%) — the freeze stands in and the stream rides ref-gaps
+to the next IDR; if that looks bad on RF, raise IDR protection
+(i_rate/min_r), don't touch the concealment.
 
 ## Phase E — live RF around the FEC cliff
 

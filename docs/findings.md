@@ -12,6 +12,46 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-20 — Phase D: the two-node link over udp-air holds the timeline through 30% loss
+
+**Setup.** Real TX + RX `waybeam-link` processes on one x86 host, udp-air on
+loopback, single path (one tx socket, one rx listen — the drop knob IS the
+symbol loss). Ingress: 1000 frames of 1920×1080@100 4-slice x265 played into
+the TX `venc_frame` ring at wire rate (`frame_shm_feed play`, new); egress:
+the RX `venc_frame_out` ring dumped back to Annex-B (`frame_shm_feed dump`,
+new) and judged by ffmpeg + GStreamer `h265parse ! avdec_h265`. FEC
+p_rate 100‰, min_k 3, arq_mode idr-only; `air.rx_drop_permille` swept.
+Runner: `tools/spatial_conceal/udp_air_run.sh`.
+
+| drop | conceal | delivered | fast | FEC | salvaged | frozen | failed | decode |
+|---|---|---|---|---|---|---|---|---|
+| 0 | on | **1000**/1000 | 999 | 1 | 0 | 0 | 0 | 1000, clean, byte-total exact |
+| 10% | on | **999** | 218 | 528 | 205 | 48 | 1 | 999, 0 errors, 2 ref-misses |
+| 15% | on | **999** | 88 | 437 | 383 | 91 | 1 | clean |
+| 20% | on | **996** | 32 | 262 | 552 | 150 | 4 | 996, 0 errors, 6 ref-misses |
+| 30% | on | **992** | 3 | 52 | 651 | 286 | 8 | 992, 0 errors, 14 ref-misses |
+| 20% | **off** | **313** | 32 | 281 | — | — | — | 313, 436 ref-misses |
+
+`salvage_failed` stays in single digits and every one becomes a plain drop
+(fail-safe held); GStreamer accepted every conceal-on egress silently.
+
+**The IDR observation** (matters for Phase E): delivered-as-IDR count falls
+with loss (10 → 9 → 6 → 2 of 10). §6.3a's zero-reorder rule gives IDR ARQ
+only until the next block's first symbol arrives (~one frame period), so at
+blanket 20–30% loss some IDR blocks finalize below k and the freeze path
+stands in with a P — the stream then rides on reference gaps (single-digit
+ref-misses end-to-end) until the next IDR. Pre-existing supersession
+behaviour interacting with §6.3b, not introduced by it; production has §3.9
+recovery + venc recovery-IDR on top. Watch it on RF; if the ride-through
+looks bad visually, the lever is i_rate/min_r for IDR blocks, not the
+concealment.
+
+**Open.** Phases A/B/E (craft `.232` stream shape, slice-count cost, live
+RF) still pending — this host cannot reach the bench LAN. rk3566 and
+Android deliberately deferred.
+
+---
+
 ## 2026-08-19 — slice-skip concealment measured offline: the FEC cliff becomes a slope
 
 **Setup.** Offline, no radios: 512×512 @ 100 fps test content, 4 independent
