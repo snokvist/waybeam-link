@@ -45,9 +45,9 @@
         "kind": "frame-shm",
         "name": "venc_frame_out"
       },
-      "_conceal_comment": "§6.3b freeze/salvage option — parity knob for the freeze on/off A/B on either ground decoder backend (x86 vah265dec here; the rk3566 ground carries the same key in its on-device link config). 'off' = pre-§6.3b behaviour bit-for-bit; flip mode to 'slice-skip' to arm.",
+      "_conceal_comment": "§6.3b spatial salvage — ARMED here first because this is the ground whose decode path is verified end to end: a repaired stream decodes bit-identically on ffmpeg and on this host's AMD vah265dec, while an unrepaired gap AU does not (findings 2026-08-20). 'off' restores pre-§6.3b behaviour bit-for-bit. freeze_frame stays on: the hub's MPP default presents errinfo frames and fires the IDR requester on a drop, so freezing is cheaper than dropping. The rk3566 ground carries the same key in its on-device link config and stays 'off' until Phase C MPP acceptance is measured there.",
       "conceal": {
-        "mode": "off",
+        "mode": "slice-skip",
         "freeze_frame": true
       }
     },

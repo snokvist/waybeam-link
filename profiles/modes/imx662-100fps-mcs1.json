@@ -8,7 +8,8 @@
     },
     "video0": {
       "fps": 100,
-      "size": "1280x720"
+      "size": "1280x720",
+      "sliceCount": 6
     }
   },
   "link": {
@@ -19,5 +20,6 @@
       },
       "fps_mode": "static"
     }
-  }
+  },
+  "_slices": "sliceCount 6 (§6.3b). The concealed area on a loss is max(1/N, the byte fraction actually lost), so once a slice is about one 1424 B FEC chunk the area is chunk-limited and finer slices only cost ~26 B each (measured 2026-08-20); coarser ones leave area on the table. Pick the smallest deliverable N at or above that knee, evaluated at this mode's FLOOR rung 1 (5754 kbps, 100 fps) where the overhead is the largest share of the frame: a frame is 5.05 chunks, so N*=5.05 and 720p can deliver 1/2/3/4/6/12 (the SDK rounds slice height up to whole CTU-64 rows)."
 }
