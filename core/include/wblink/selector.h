@@ -179,14 +179,18 @@ class Selector {
     // must be the live value: a §11.7 SELECTOR freeze pins min == max ==
     // current, which disarms the probe with no commit to hang the change on.
     uint8_t max_profile() const { return policy_.max_profile; }
-    // §9.4 Pass 187: the ceiling the climb rules ACTUALLY honour — max_profile
-    // narrowed by the §9.2 lockout — as a profile ID, so it can feed
-    // probe_up_candidate_mcs(). This is evaluate()'s `adaptive_hi` and is
+    // The ceiling the climb rules ACTUALLY honour — max_profile narrowed by the
+    // §9.2 lockout — as a profile ID. This is evaluate()'s `adaptive_hi`,
     // derived the same way on purpose, conflict fallback included: where a
     // lockout collides with the operator envelope the envelope retains
     // precedence and the lockout is ignored, here as there. Unlike
-    // max_profile() this is TIME-DEPENDENT (a lockout expires), which is why
-    // the probe re-derives per tick rather than only on commit/pin.
+    // max_profile() it is TIME-DEPENDENT, because a lockout expires.
+    //
+    // Pass 188 removed its production caller — the §9.4 probe now arms on the
+    // §9.7 pin alone. It is kept because the Pass 188 invariant ("the veto is
+    // clamped by the `rung_ < adaptive_hi` gate, so arming wider is safe") is
+    // only checkable if that ceiling is observable, and a test that re-derived
+    // it would be reimplementing the logic under test.
     uint8_t effective_ceiling_profile(uint64_t now_ms) const;
     void set_pressure(bool on, uint64_t now_ms);  // §9.9 gauge
     SelectorActions tick(uint64_t now_ms);

@@ -265,13 +265,12 @@ void test_calibration_pin_maps_mcs_to_a_profile_id() {
     CHECK_EQ_U(tx2.profile_id_for_mcs(3).value(), 4);
 }
 
-// §9.4 Pass 187, the case the pin-only tests CANNOT see: a §9.2 lockout puts
-// the effective ceiling BELOW max_profile, and the probe must follow the
-// lockout. Written after mutation-testing showed the earlier tests survived
-// reverting the clamp to max_profile — they never created a state where the
-// two ceilings differ, so they were testing the seam's plumbing and not its
-// rule.
-void test_probe_follows_the_lockout_ceiling_not_just_the_pin() {
+// §9.4 Pass 188: a §9.2 lockout puts the effective ceiling BELOW max_profile,
+// and the probe must KEEP MEASURING across that gap while the veto stays
+// clamped by the climb gate. Builds the one state the pin-only tests cannot
+// reach — the two ceilings disagreeing — which is where both the Pass 187
+// behaviour and its Pass 188 reversal are visible.
+void test_probe_keeps_measuring_through_a_lockout() {
     wblink::ProfileTable t;
     for (uint8_t i = 0; i < 8; ++i) {
         wblink::Profile p;
@@ -345,19 +344,27 @@ void test_probe_follows_the_lockout_ceiling_not_just_the_pin() {
     CHECK_EQ_U(armed_period, 64);
     CHECK_EQ_U(armed_mcs, 6);
 
-    // One rung up, with 7 locked out, the candidate is ABOVE the effective
-    // ceiling — even though max_profile still says 7. No probe may fly: a veto
-    // cannot help where §9.2 has already barred the climb, and the lockout
-    // window is exactly when the link can least afford the duty. Reverting the
-    // clamp to max_profile arms at mcs 7 here instead, which is the mutation
-    // this case exists to kill.
+    // §9.4 Pass 188: one rung up, with 7 locked out, the probe KEEPS MEASURING.
+    // Pass 187 disarmed here; a range walk then measured that the probe was off
+    // for 46% of a degrading link and the veto never fired once, because loss
+    // locks the rung above and nothing is left measuring the candidate rate by
+    // the time it matters. Arming follows the §9.7 pin alone now.
     tx.refresh_probe(6, 6900);
-    CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
-    CHECK_EQ_U(armed_period, 0);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, 7);
+    CHECK_EQ_U(armed_period, 64);
+    CHECK_EQ_U(armed_mcs, 7);
 
-    // After the lockout expires the ceiling returns to the pin, and the same
-    // rung that was barred a moment ago re-arms — with no commit anywhere,
-    // which is why the seam has to run per tick rather than on commit edges.
+    // ...and the VETO is still clamped, with no code in the arming path: the
+    // climb rules gate on `rung_ < adaptive_hi` before probe_veto_fresh() is
+    // consulted, so while rung 7 is locked the effective ceiling sits at 6 and
+    // a climb into 7 is unreachable however bad the evidence is. That gap
+    // between the two ceilings is the whole Pass 188 argument, so pin it.
+    CHECK_EQ_U(tx.selector_.max_profile(), 7);
+    CHECK_EQ_U(tx.selector_.effective_ceiling_profile(6900), 6);
+
+    // After the lockout expires the two ceilings agree again, and the evidence
+    // gathered DURING the lockout is what §9.2 re-entry now has to judge on —
+    // the reason Pass 188 keeps the probe running through it.
     run(110000, 111000, -30, 0);
     CHECK_EQ_U(tx.selector_.effective_ceiling_profile(111000), 7);
     tx.refresh_probe(6, 111000);
@@ -460,7 +467,7 @@ int main() {
     test_effective_ceiling_is_the_pin_when_nothing_is_locked_out();
     test_no_probe_schedule_never_arms();
     test_calibration_pin_maps_mcs_to_a_profile_id();
-    test_probe_follows_the_lockout_ceiling_not_just_the_pin();
+    test_probe_keeps_measuring_through_a_lockout();
     test_calibration_seam_pins_by_id_not_by_mcs();
     test_calibration_refuses_an_mcs_the_ladder_cannot_select();
     return wbtest_finish("node_tx_core_test");

@@ -1681,14 +1681,23 @@ struct TxCore {
         if (!apply_probe) return;
         std::optional<uint8_t> cand;
         if (table_ != nullptr && table_->probe_period != 0) {
-            // §9.4 Pass 187: the EFFECTIVE ceiling — the §9.7 pin narrowed by
-            // the §9.2 lockout — not max_profile alone. A rung §9.2 has barred
-            // cannot be climbed to, so probing it spends duty on evidence no
-            // path can act on, in the window where the link is least able to
-            // afford it.
-            cand = probe_up_candidate_mcs(
-                *table_, profile_id,
-                selector_.effective_ceiling_profile(now_ms));
+            // §9.4 Pass 188: the §9.7 pin ALONE, deliberately not the
+            // effective ceiling. Pass 187 clamped this to
+            // effective_ceiling_profile() so a rung §9.2 had barred was not
+            // probed; a range walk then measured what that costs — the probe
+            // was off for 46% of a degrading link, 100% correlated with
+            // lockout_active, and the veto never fired once. Loss locks the
+            // rung above, the clamp switches the probe off, and nothing is
+            // measuring the candidate rate by the time it matters.
+            //
+            // The VETO is still clamped, with no code here: both climb rules
+            // gate on `rung_ < adaptive_hi` before probe_veto_fresh() is
+            // consulted, so a climb to a locked-out rung is unreachable and
+            // evidence about it can suppress nothing. What the evidence can do
+            // is be fresh when the lockout expires, which is the one moment
+            // §9.2 has to judge re-entry — today on the RSSI floor alone.
+            cand = probe_up_candidate_mcs(*table_, profile_id,
+                                          selector_.max_profile());
         }
         const uint8_t next = cand ? *cand : kProbeMcsNone;
         // Change-guard, and it is what makes a per-tick call correct rather
