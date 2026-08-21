@@ -407,9 +407,13 @@ class Calibrator {
         dwell_start_ms_ = 0;  // set when the pin/power action is emitted
         return true;
     }
-    bool abort(uint64_t now_ms) {
+    // `reason` is what the artifact and §15.3 report. It defaults to the
+    // operator-abort case; a caller that fails a run for a STRUCTURAL reason
+    // (Pass 187: an MCS the §9.3 ladder carries no profile for, so §9.7 cannot
+    // pin the rung) must say so, or a config defect reads as a cancelled run.
+    bool abort(uint64_t now_ms, const char* reason = "abort") {
         if (state_ != CalibState::kRunning) return false;
-        finish(CalibState::kFailed, "abort", now_ms);
+        finish(CalibState::kFailed, reason, now_ms);
         return true;
     }
 

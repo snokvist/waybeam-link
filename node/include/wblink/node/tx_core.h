@@ -633,6 +633,12 @@ struct TxCore {
     void tick(uint64_t now, const Inject& inject,
               const Inject& inject_resend = {}) {
         const SelectorActions act = selector_.tick(now);
+        // §9.4 Pass 186/187: re-derive the probe candidate through the live
+        // table, the live §9.7 pin and the live §9.2 lockout. Per tick rather
+        // than on the commit below, because the effective ceiling moves with
+        // lockout state and expiry, neither of which produces a commit; the
+        // change-guard inside means a steady link writes the radio zero times.
+        refresh_probe(selector_.profile_id(), now);
         if (act.commit) {
             // §9.5 commit: the operating point stamped on every DATA packet
             // (drives RX deadlines + supersession budgets)...
@@ -652,9 +658,6 @@ struct TxCore {
                 apply_mode(act.commit->mcs,
                            act.commit->gi == GuardInterval::kShort);
             }
-            // §9.4 Pass 163/186: re-derive the up-candidate for the new
-            // operating point through the live table and the live §9.7 pin.
-            refresh_probe(act.commit->profile_id);
             // ...and the §10 per-adapter power resolve, applied inside the
             // same sequenced transition through the apply_power hook (both RF
             // backends, §10.5; a logged intent on the udp dev backend). While
@@ -884,7 +887,8 @@ struct TxCore {
     // §15.5 control-plane knobs -------------------------------------------
     // §9.7 profile pin: clamp the operating-point ladder to [min,max] by id.
     void set_profile_pin(uint8_t min_profile, uint8_t max_profile) {
-        apply_profile_pin(min_profile, max_profile);
+        // The §9.4 probe follows within one tick (see refresh_probe).
+        selector_.set_profile_pin(min_profile, max_profile);
     }
     // §15.5 Pass 103: forget the venc actuator's write-on-change cache so the
     // next tick re-asserts bitrate/caps/fps — called after an out-of-loop venc
@@ -945,9 +949,9 @@ struct TxCore {
                 // sampling at freeze-lift.
                 if (cmd_selector_frozen_) {
                     const uint8_t p = selector_.profile_id();
-                    apply_profile_pin(p, p);
+                    selector_.set_profile_pin(p, p);
                 } else {
-                    apply_profile_pin(boot_min_profile_,
+                    selector_.set_profile_pin(boot_min_profile_,
                                                       boot_max_profile_);
                 }
                 return true;
@@ -1666,31 +1670,33 @@ struct TxCore {
     // disarms.
     std::function<void(uint16_t, uint16_t, uint8_t)> apply_probe;
 
-    // §9.7 pin + §9.4 probe move together (Pass 186). The probe candidate is
-    // clamped to max_profile, so a pin change that is never followed by a
-    // commit — a §11.7 SELECTOR freeze is exactly that, it pins the CURRENT
-    // rung so nothing can commit afterwards — would otherwise strand the
-    // previous arming on the radio. Every pin write goes through here.
-    void apply_profile_pin(uint8_t min_profile, uint8_t max_profile) {
-        selector_.set_profile_pin(min_profile, max_profile);
-        refresh_probe(selector_.profile_id());
-    }
-
     // §9.4: (re)derive the up-candidate for `profile_id` through the live
     // table and the live §9.7 ceiling, and push it at the radio. Disarms
     // (period 0) at the top rung, at same-MCS adjacency, and above the pin —
     // all three are probe_up_candidate_mcs returning nullopt.
-    void refresh_probe(uint8_t profile_id) {
+    void refresh_probe(uint8_t profile_id, uint64_t now_ms) {
         // §9.4 fail-closed: the hook exists only where the operator armed
         // air.mcs_probe on a stage-0-proven unit. Not armed => not probing,
         // and §15.3 must keep saying so.
         if (!apply_probe) return;
         std::optional<uint8_t> cand;
         if (table_ != nullptr && table_->probe_period != 0) {
-            cand = probe_up_candidate_mcs(*table_, profile_id,
-                                          selector_.max_profile());
+            // §9.4 Pass 187: the EFFECTIVE ceiling — the §9.7 pin narrowed by
+            // the §9.2 lockout — not max_profile alone. A rung §9.2 has barred
+            // cannot be climbed to, so probing it spends duty on evidence no
+            // path can act on, in the window where the link is least able to
+            // afford it.
+            cand = probe_up_candidate_mcs(
+                *table_, profile_id,
+                selector_.effective_ceiling_profile(now_ms));
         }
-        probe_candidate_mcs_ = cand ? *cand : kProbeMcsNone;  // §15.3
+        const uint8_t next = cand ? *cand : kProbeMcsNone;
+        // Change-guard, and it is what makes a per-tick call correct rather
+        // than merely tolerable: the effective ceiling moves with §9.2 state,
+        // so this must be re-derived on a cadence rather than on commit/pin
+        // edges — but a steady link then writes the radio zero times.
+        if (next == probe_candidate_mcs_) return;
+        probe_candidate_mcs_ = next;  // §15.3
         if (cand) {
             apply_probe(table_->probe_period, table_->probe_slot, *cand);
         } else {
@@ -1828,9 +1834,9 @@ struct TxCore {
             }
             if (cmd_selector_frozen_) {
                 const uint8_t pf = selector_.profile_id();
-                apply_profile_pin(pf, pf);
+                selector_.set_profile_pin(pf, pf);
             } else {
-                apply_profile_pin(boot_min_profile_,
+                selector_.set_profile_pin(boot_min_profile_,
                                                   boot_max_profile_);
             }
             if (power_override_) {
@@ -1905,8 +1911,53 @@ struct TxCore {
             }
         }
         if (a.pin_rung) {
-            apply_profile_pin(*a.pin_rung, *a.pin_rung);
+            // §10.6 Pass 187: pin_rung is an MCS — the calibrator's artifact
+            // is a per-MCS curve (§10.2 resolves power as curve_qdb[mcs]) —
+            // while §9.7 pins take profile IDs. They coincide only on a ladder
+            // whose ids equal its MCS values, and conflating them is SILENT:
+            // §9.7 saturates an unmatched id to the top rung, so the sweep
+            // would run unpinned and every dwell would measure whatever rung
+            // the selector drifted to.
+            if (table_ == nullptr) {
+                // No §9.3 ladder to resolve against. The pin could not select
+                // a rung here before this Pass either — clamp_rung() has no
+                // ladder to clamp — so the write is preserved verbatim rather
+                // than turned into a new failure: "no table" is a different
+                // condition from "table without this MCS", and only the second
+                // is what #228 is about.
+                selector_.set_profile_pin(*a.pin_rung, *a.pin_rung);
+            } else if (const auto pin_id = profile_id_for_mcs(*a.pin_rung)) {
+                selector_.set_profile_pin(*pin_id, *pin_id);
+            } else {
+                // Refuse false success: an MCS this ladder cannot select is
+                // unmeasurable, and an unpinned dwell would place a power for
+                // a rate it never flew.
+                wb_logf(
+                    "calibrate: ladder has no profile at mcs %u — cannot pin "
+                    "the rung, aborting the run\n",
+                    static_cast<unsigned>(*a.pin_rung));
+                if (calibrator_) {
+                    (void)calibrator_->abort(now, "mcs_not_in_ladder");
+                }
+                return;
+            }
         }
+    }
+
+    // §10.6/§9.7 seam: the first profile carrying `mcs`, or nullopt when the
+    // ladder cannot select that rate at all. Ascending-id order is the §9.3
+    // ladder's own order, so a table with two profiles at one MCS pins the
+    // lower — the same one §9.4's up-candidate walk would name.
+    std::optional<uint8_t> profile_id_for_mcs(uint8_t mcs) const {
+        if (table_ == nullptr) return std::nullopt;
+        const Profile* best = nullptr;
+        for (const Profile& p : table_->profiles) {
+            if (p.mcs == mcs && (best == nullptr || p.id < best->id)) {
+                best = &p;
+            }
+        }
+        if (best == nullptr) return std::nullopt;
+        return best->id;
     }
     // §3.16 (Pass 153): the video input is starved while EITHER direction
     // runs — our own §10.6 run, or a ground-driven §10.7 run observed as an
