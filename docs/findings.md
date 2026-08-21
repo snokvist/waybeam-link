@@ -12,6 +12,101 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-21 — walk test: on a real degrading link the §9.4 probe veto has NO operating regime, because §9.2 disarms the probe first
+
+First real range data for the §9.4 probe (#226 Leg A). Craft on battery, both
+ends raised off their bench floors to `power_offset_qdb: 0`, shipped selector
+values otherwise. 8.4 min of ground record at 2 Hz, 2.5 min of craft record at
+1 Hz written to the craft's SD card — the craft half exists because
+`promote_blocked_probe` is **craft-only** (§15.3) and the grounds cannot see it.
+
+**Headline: `promote_blocked_probe` stayed 0 for the entire walk**, while
+`promote_blocked_saturated` reached **25159**. The veto did not fire once on a
+link that reached −86 dBm and flapped through LOSS_EMERGENCY repeatedly.
+
+**Why, and it is structural rather than bad luck.** The probe was **disarmed for
+46 % of the walk** (66 of 143 craft samples read `probe_candidate_mcs: 255`),
+and the correlation is total:
+
+| samples with probe disarmed | 66 |
+|---|---|
+| ...of those, `lockout_active` true | **66 (100 %)** |
+| lockout ceilings seen while disarmed | 1, 2, 3 |
+| profiles seen while disarmed | 1, 2, 3, 4 |
+
+In every case the §9.2 lockout ceiling had fallen **to the current rung**, so
+the up-candidate sat above the effective ceiling and Pass 187's clamp turned
+the probe off. Worked example from the craft log:
+
+```
+ up   rssi prof cand  lock_act lock_ceil lock_rem  reason
+  45   -68    2    3     False         5        0  PROMOTE
+  48   -76    1    2      True         2    28385  LOSS_EMERGENCY
+  52   -87    1  255      True         1    28085  LOSS_PERSISTENT
+  73   -86    1  255      True         1     7828  LOSS_PERSISTENT
+  81   -81    3    4     False         5        0  PROMOTE     <- lockout expired, probe back
+  88   -80    3  255      True         3    23185  PROMOTE
+```
+
+So the sequence on any degrading link is: loss → §9.2 locks the rung above →
+the probe clamp disarms → no evidence → `probe_per` reads `65535` → the veto
+has nothing to act on. **By the time the candidate rate is worth vetoing, §9.2
+has already barred it and switched the probe off.**
+
+**This is Pass 187 behaving exactly as ruled (#227), and the ruling's cost is
+now measured.** The operator ruling — clamp the candidate to the effective
+ceiling including the lockout — was argued on the grounds that a veto cannot
+help where policy already bars the climb, and that the lockout window is when
+the link can least afford the duty. Both still hold. What neither side of that
+argument weighed is the *combination*: §9.2 covers the degraded regime so
+completely that the probe now has no regime left. The band where the veto can
+fire requires **all** of: candidate rung not locked out, promote otherwise
+eligible (RSSI + dwell + `loss_ewma < demote_milli`), `probe_per ≥ 50 ‰` and
+fresh, and no fresh `Saturated` verdict — which `core/src/selector.cpp` checks
+**first** in the same `else if` chain, so saturation shadows the veto whenever
+both apply. That band was never entered in 8.4 minutes of real link.
+
+**Open, and it is a §9.4 ruling, not tuning.** Either accept that the veto is
+vestigial on a link with §9.2 lockouts and say so in the spec — the probe's
+value then being the §15.3 `probe_per` readout that Pass 186 added, not a
+control input — or decouple *arming* the probe from *clamping* the candidate,
+so a locked-out rung is still measured for observability (and potentially to
+inform §9.2 re-entry, which today is RSSI-only) while the veto stays clamped.
+The second reopens the duty question the #227 ruling settled, now with the
+knowledge that the duty buys the only rate evidence available in the regime
+that matters.
+
+**Second finding: the uplink is ~30 dB weaker than the downlink at the same
+offset.** At the far point the ground heard the craft at **−56 dBm** while the
+craft heard the ground at **−86 dBm**, both adapters at `power_offset_qdb: 0`.
+§7.3 LINK_REPORTs and §12 NACKs ride that uplink, and §9.8 descends on report
+timeout, so **the return path is the range limit, not the video path** — and a
+range test that only watches ground-side RSSI will misjudge where the link
+ends. The two adapters are different parts (8812AU ground, 8812EU craft) with
+different EFUSE per-rate tables, so offset 0 is not a common reference point.
+Worth its own measurement before any flight test.
+
+**Third: §6.3b did substantial real work** (Phase E data, on the `.242`
+ground): **95 frames salvaged, 116 frozen, 709 slices synthesized**, against 5
+`salvage_failed` and 5 `frames_unrecoverable` over 141233 delivered and 699 FEC
+recoveries. Freeze engaged far more often than on the bench, as expected when
+loss finally exceeds the FEC budget. No decode complaints from the in-process
+consumer.
+
+**Fourth, smaller: `probe_per` reports less often as RSSI falls.** Even where
+the probe stayed armed, the fraction of samples reporting `65535` rose from
+~23 % at −30..−21 dBm to 83–100 % below −40. Higher loss means fewer probe
+frames arrive, so the window cannot reach `min_samples` inside `max_age_ms`.
+The probe goes quiet precisely when its evidence would be most informative —
+independent of, and additive to, the reset-gap porosity found earlier the same
+day.
+
+**Caveats.** One walk, one geometry, one craft. RSSI above −20 dBm is near-field
+compressed and is excluded from the bucketed numbers. The craft's clock has no
+RTC and resets on a battery boot, so the craft log's wall time is wrong by
+weeks; uptime is the correct axis and is what the analysis uses. The bench
+floors (craft −48, ground −72) were restored afterwards.
+
 ## 2026-08-21 — the §9.4 veto FIRES, and it is porous: a window reset reads as "no opinion" and a promote walks through the gap
 
 The veto path had never engaged — `promote_blocked_probe` was 0 on every node in
