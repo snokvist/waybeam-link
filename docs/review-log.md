@@ -24,6 +24,66 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 187 — the probe clamp follows the EFFECTIVE ceiling, and §10.6 stops conflating an MCS with a profile ID (2026-08-21)
+
+**Verdict.** Two amendments, both found by adversarially reviewing Pass 186
+rather than by running anything. Filed as issues #227 and #228 first, so the
+ruling is on the record separately from the patch.
+
+**(a) §9.4 — the candidate clamps to `adaptive_hi`, not to `max_profile`
+(operator ruling 2026-08-21, issue #227).** Pass 186 clamped the probe
+candidate to the §9.7 operator pin. The ceiling the climb rules *actually*
+honour is that pin **narrowed by the §9.2 lockout**, so a rung §9.2 had barred
+was still being probed at the full `1/period` duty — the same waste Pass 186
+removed, through the other door.
+
+The ruling was genuinely two-sided and is recorded in §9.4 as such. Against
+clamping: a locked-out rung is the only one whose current viability is
+directly measurable, and §9.2 expiry otherwise re-enters on RSSI margin alone.
+For clamping, decisively: **probe evidence is a veto and can never authorize
+the re-entry**, so it could at best block one the RSSI floor would have
+allowed — while the lockout window is by construction the moment the link is
+weakest, and therefore the most expensive one in which to fly a share of video
+frames at a rate that has just demonstrably failed. Re-entry is not left blind
+either; the rung floor plus `reentry_backoff_s`/`reentry_dwell_s` gate it.
+Conflict fallback is inherited unchanged: where a lockout collides with the
+operator envelope the envelope wins and the lockout is ignored, in the clamp
+exactly as in `evaluate()`.
+
+Because the effective ceiling moves with §9.2 state rather than only with
+commits and pin writes, the candidate is now re-derived **every selector
+tick**, with the radio written only on an actual change — a steady link issues
+no traffic for this.
+
+**(b) §10.6 — the calibration sweep index is an MCS, and §9.7 pins take
+profile IDs (issue #228).** `CalibActions::pin_rung` carries the calibrator's
+loop variable, which indexes a **per-MCS** artifact (`curve_qdb[mcs]` is how
+§10.2 resolves power). It was being handed straight to `set_profile_pin`,
+which takes profile **IDs**. The two coincide only on a ladder whose ids equal
+its MCS values — which the fleet table happens to be, which is why nothing
+ever failed. On any other ladder §9.7 resolves the unmatched id by saturating
+to the top rung, so the sweep runs **unpinned** and every dwell measures
+whatever rung the selector drifts to, silently, producing a §10.2 curve
+attributed to the wrong rates.
+
+§10.6 now states the two spaces and the mapping between them, and requires
+that an MCS the ladder cannot select **fails the run** with a distinct reason
+rather than sweeping an unpinned rung. **Pre-existing, not a Pass 186
+regression** — Pass 186 only routed the same call through a seam that made the
+value matter twice, which is how it surfaced.
+
+**What stays contract.** No wire change in either. (a) can only ever reduce
+the set of frames flying the candidate rate. (b) changes no artifact format:
+`curve_qdb` stays per-MCS and every stored artifact remains valid.
+
+**Evidence.** (a) is a ruling, not a measurement — the mechanism is
+`core/src/selector.cpp:621-622` (`adaptive_hi`) against Pass 186's clamp
+reading only `max_profile`. (b) is read from the code: `rung_` initialised 0
+(`calibrate.h:402`), bounded `>= 7` (`:593`), indexing `placement_qdb[rung_]`
+(`:508`) and `levels` documented "per MCS" (`:301`), with `init_calibration`
+writing `p.levels[pr.mcs]` — an MCS space end to end, against
+`selector.h:90` / `selector.cpp:81` requiring IDs.
+
 ## Pass 186 — the §9.4 probe becomes observable, and stops probing above its own ceiling (2026-08-21)
 
 **Verdict.** Two amendments to §9.4, both found by the first device run of the

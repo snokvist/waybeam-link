@@ -147,6 +147,21 @@ size_t Selector::lockout_ceiling_rung(uint64_t now_ms, size_t lo, size_t hi,
     return hi;
 }
 
+uint8_t Selector::effective_ceiling_profile(uint64_t now_ms) const {
+    const size_t n = ladder_size();
+    if (n == 0) {
+        return policy_.max_profile;  // no ladder: nothing to narrow it with
+    }
+    // clamp_rung() rather than a fresh rung_of_id() pair, so this cannot drift
+    // from evaluate()'s lo/hi if the §9.7 resolution ever changes.
+    const size_t lo = clamp_rung(0);
+    const size_t hi = clamp_rung(n - 1);
+    bool conflict = false;
+    const size_t ceiling = lockout_ceiling_rung(now_ms, lo, hi, &conflict);
+    const size_t eff = conflict ? hi : std::min(hi, ceiling);
+    return table_->profiles[eff].id;
+}
+
 uint8_t Selector::profile_id() const {
     return ladder_size() > 0 ? table_->profiles[rung_].id : 0;
 }

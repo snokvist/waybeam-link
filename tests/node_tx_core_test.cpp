@@ -16,6 +16,8 @@
 // layering holds.
 #include "wblink/node/tx_core.h"
 
+#include <string>
+
 #include "wbtest.h"
 
 namespace {
@@ -83,15 +85,13 @@ void test_bw_code_maps_widths() {
     CHECK_EQ_U(bw_code(80), 2);
 }
 
-}  // namespace
-
-// §9.4 Pass 186: the probe candidate is clamped to the LIVE §9.7 pin, and a
-// pin change re-derives it. Before this, the arming happened only inside the
-// commit branch, so a pin that forbids every climb — which a §11.7 SELECTOR
-// freeze installs by pinning min == max == current, after which nothing can
-// commit — left the previous arming on the radio, spending a 1/period duty on
-// evidence whose only consumer (a veto) had nothing left to veto.
-void test_probe_arming_follows_the_live_pin() {
+// §9.4 Pass 186/187: the probe candidate follows the EFFECTIVE ceiling — the
+// live §9.7 pin narrowed by the §9.2 lockout — and is re-derived every
+// selector tick, because the lockout half of that moves with time and expiry
+// and produces no commit to hang a refresh on. refresh_probe() is called
+// directly here: driving a real §9.2 lockout needs a whole loss campaign, and
+// this is a test of the arming seam, not of the lockout.
+void test_probe_arming_follows_the_effective_ceiling() {
     wblink::ProfileTable t;
     for (auto [id, mcs] : {std::pair<uint8_t, uint8_t>{2, 1},
                            {4, 3},
@@ -111,48 +111,97 @@ void test_probe_arming_follows_the_live_pin() {
     c.policy.select.max_profile = 6;  // unpinned within this ladder
     TxCore tx(c, 12345, &t, 0xF2);
 
-    // The hook is what §9.4 fail-closed enablement installs; without it the
-    // node is not probing and must keep saying so.
     struct Armed {
         uint16_t period = 0xFFFF;
         uint16_t slot = 0xFFFF;
         uint8_t mcs = 0xFF;
         int calls = 0;
     } armed;
+
+    // §9.4 fail-closed: with no hook installed the node is not probing, and
+    // §15.3 must keep saying so however often the seam runs.
     CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
-    tx.set_profile_pin(2, 6);
-    CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);  // no hook
+    tx.refresh_probe(2, 1000);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
+    CHECK_EQ_U(armed.calls, 0);
 
     tx.apply_probe = [&armed](uint16_t period, uint16_t slot, uint8_t mcs) {
         armed = {period, slot, mcs, armed.calls + 1};
     };
 
     // Unpinned at the ladder floor (profile 2): candidate is id 4's mcs 3.
-    tx.set_profile_pin(2, 6);
+    tx.refresh_probe(2, 1000);
     CHECK_EQ_U(armed.calls, 1);
     CHECK_EQ_U(armed.period, 64);
     CHECK_EQ_U(armed.slot, 4);
     CHECK_EQ_U(armed.mcs, 3);
     CHECK_EQ_U(tx.probe_candidate_mcs_, 3);
 
-    // Pinned AT the current rung — the SELECTOR-freeze shape. Nothing can
-    // climb, so the probe disarms: period 0, and §15.3 reads "not probing".
+    // THE CHANGE-GUARD, and it is what makes a per-tick call affordable: the
+    // seam now runs at tick cadence, so re-deriving the same answer must not
+    // write the radio. Without this the arming would be re-issued ~10x/s
+    // forever on a steady link.
+    for (int i = 0; i < 25; ++i) tx.refresh_probe(2, 1000 + i * 100);
+    CHECK_EQ_U(armed.calls, 1);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, 3);
+
+    // Pinned AT the current rung — the §11.7 SELECTOR-freeze shape. Nothing
+    // can climb, so the probe disarms: period 0, and §15.3 reads "not
+    // probing". No commit happens here; the tick seam is what catches it.
     tx.set_profile_pin(2, 2);
+    tx.refresh_probe(2, 4000);
     CHECK_EQ_U(armed.calls, 2);
     CHECK_EQ_U(armed.period, 0);
     CHECK_EQ_U(armed.mcs, 0);
     CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
 
-    // Lifting the pin re-arms without waiting for a commit.
+    // Lifting the pin re-arms, again without a commit.
     tx.set_profile_pin(2, 6);
+    tx.refresh_probe(2, 5000);
     CHECK_EQ_U(armed.calls, 3);
     CHECK_EQ_U(armed.period, 64);
     CHECK_EQ_U(armed.mcs, 3);
     CHECK_EQ_U(tx.probe_candidate_mcs_, 3);
 }
 
-// A table with no probe schedule disarms on every path, so a fleet that has
-// not adopted the §3.6 probe block never flies one.
+// §9.4 Pass 187: the ceiling the clamp reads is Selector::effective_ceiling_
+// profile(), which is evaluate()'s adaptive_hi. With no lockout it is the
+// §9.7 pin, so a fresh selector must answer the pin exactly — that equality is
+// what lets the probe clamp be stated in terms of one ceiling rather than two.
+void test_effective_ceiling_is_the_pin_when_nothing_is_locked_out() {
+    wblink::ProfileTable t;
+    for (auto [id, mcs] : {std::pair<uint8_t, uint8_t>{2, 1},
+                           {4, 3},
+                           {6, 5}}) {
+        wblink::Profile p;
+        p.id = id;
+        p.mcs = mcs;
+        p.max_payload = 1424;
+        t.profiles.push_back(p);
+    }
+    t.floor_profile = 2;
+
+    wblink::SelectorPolicy pol;
+    pol.min_profile = 2;
+    pol.max_profile = 6;
+    wblink::Selector sel(pol, &t);
+    CHECK_EQ_U(sel.effective_ceiling_profile(1000), 6);
+    sel.set_profile_pin(2, 4);
+    CHECK_EQ_U(sel.effective_ceiling_profile(1000), 4);
+    sel.set_profile_pin(2, 2);
+    CHECK_EQ_U(sel.effective_ceiling_profile(1000), 2);
+    // §9.7 saturation: an id absent from the ladder resolves to the top rung,
+    // so 255 still means unpinned rather than clamping everything away.
+    sel.set_profile_pin(2, 255);
+    CHECK_EQ_U(sel.effective_ceiling_profile(1000), 6);
+}
+
+// A table with no §3.6 probe block never flies a probe, and — with the Pass
+// 187 change-guard — never writes the radio at all to say so. That is the
+// right answer rather than a weaker one: RadioAir's own probe_period starts at
+// 0, so an explicit disarm here would be a redundant write repeated at tick
+// cadence, forever, on every node in a fleet that has not adopted the block.
+// The assertion is therefore "zero calls AND not probing", not "disarmed".
 void test_no_probe_schedule_never_arms() {
     wblink::ProfileTable t;
     for (auto [id, mcs] : {std::pair<uint8_t, uint8_t>{2, 1}, {4, 3}}) {
@@ -165,19 +214,254 @@ void test_no_probe_schedule_never_arms() {
     t.floor_profile = 2;  // probe_period stays 0
 
     TxCore tx(tx_config(), 12345, &t, 0x68);
-    uint16_t period = 0xFFFF;
-    tx.apply_probe = [&period](uint16_t p, uint16_t, uint8_t) { period = p; };
-    tx.set_profile_pin(2, 4);
-    CHECK_EQ_U(period, 0);
+    int calls = 0;
+    tx.apply_probe = [&calls](uint16_t, uint16_t, uint8_t) { ++calls; };
+    for (int i = 0; i < 20; ++i) tx.refresh_probe(2, 1000 + i * 100);
+    CHECK_EQ_U(calls, 0);
     CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
 }
+
+// §10.6 Pass 187: CalibActions::pin_rung is an MCS and §9.7 pins take profile
+// IDs. On a ladder whose ids differ from its MCS values the old code pinned
+// the MCS directly, §9.7 saturated the unmatched id to the top rung, and the
+// sweep ran UNPINNED — every dwell measuring whatever rung the selector had
+// drifted to, silently. The mapping is asserted here through the same lookup
+// the calibration seam uses.
+void test_calibration_pin_maps_mcs_to_a_profile_id() {
+    wblink::ProfileTable t;
+    // ids and MCS deliberately disjoint: id 2 carries mcs 1, id 4 carries
+    // mcs 3, id 6 carries mcs 5. Pinning "mcs 3" as an id would name profile
+    // 3, which does not exist.
+    for (auto [id, mcs] : {std::pair<uint8_t, uint8_t>{2, 1},
+                           {4, 3},
+                           {6, 5}}) {
+        wblink::Profile p;
+        p.id = id;
+        p.mcs = mcs;
+        p.max_payload = 1424;
+        t.profiles.push_back(p);
+    }
+    t.floor_profile = 2;
+
+    TxCore tx(tx_config(), 12345, &t, 0xF2);
+    CHECK_EQ_U(tx.profile_id_for_mcs(1).value(), 2);
+    CHECK_EQ_U(tx.profile_id_for_mcs(3).value(), 4);
+    CHECK_EQ_U(tx.profile_id_for_mcs(5).value(), 6);
+    // The MCS values the calibrator sweeps that this ladder cannot select —
+    // it walks 0..7 regardless — must be reported as unmappable, not
+    // silently pinned to something else.
+    CHECK(!tx.profile_id_for_mcs(0).has_value());
+    CHECK(!tx.profile_id_for_mcs(2).has_value());
+    CHECK(!tx.profile_id_for_mcs(4).has_value());
+    CHECK(!tx.profile_id_for_mcs(7).has_value());
+    // Two profiles at one MCS: the lower id wins, matching the ascending-id
+    // order §9.4's up-candidate walk uses.
+    wblink::Profile dup;
+    dup.id = 9;
+    dup.mcs = 3;
+    dup.max_payload = 1424;
+    t.profiles.push_back(dup);
+    TxCore tx2(tx_config(), 12345, &t, 0xF2);
+    CHECK_EQ_U(tx2.profile_id_for_mcs(3).value(), 4);
+}
+
+// §9.4 Pass 187, the case the pin-only tests CANNOT see: a §9.2 lockout puts
+// the effective ceiling BELOW max_profile, and the probe must follow the
+// lockout. Written after mutation-testing showed the earlier tests survived
+// reverting the clamp to max_profile — they never created a state where the
+// two ceilings differ, so they were testing the seam's plumbing and not its
+// rule.
+void test_probe_follows_the_lockout_ceiling_not_just_the_pin() {
+    wblink::ProfileTable t;
+    for (uint8_t i = 0; i < 8; ++i) {
+        wblink::Profile p;
+        p.id = i;
+        p.mcs = i;
+        p.gi = wblink::GuardInterval::kLong;
+        p.tx_power_level = 4;
+        p.airtime_budget_permille = 600;
+        p.bitrate_min_kbps = 2200;
+        p.max_payload = 1424;
+        t.profiles.push_back(p);
+    }
+    t.floor_profile = 0;
+    t.probe_period = 64;
+    t.probe_slot = 4;
+
+    Config c = tx_config();
+    c.policy.select.max_profile = 7;   // unpinned: the pin can never explain
+    c.policy.select.rung_lockout_s = 100.0;  // long enough to stay latched
+    TxCore tx(c, 12345, &t, 0xF2);
+
+    uint8_t armed_mcs = 0xFE;
+    uint16_t armed_period = 0xFFFF;
+    tx.apply_probe = [&](uint16_t period, uint16_t, uint8_t mcs) {
+        armed_period = period;
+        armed_mcs = mcs;
+    };
+
+    uint32_t epoch = 0;
+    auto report = [&](uint64_t now, int8_t rssi, uint16_t loss) {
+        wblink::LinkReport r;
+        r.prefix.originator = 9;
+        r.prefix.session_id = 1;
+        r.report_epoch = ++epoch;
+        r.rssi_best = rssi;
+        r.rssi_mean = rssi;
+        r.loss_postdiv_prearq = loss;
+        r.uniq = 100;
+        r.adapters = 2;
+        tx.selector_.on_report(r, now);
+    };
+    auto run = [&](uint64_t from, uint64_t to, int8_t rssi, uint16_t loss) {
+        uint64_t next = from;
+        for (uint64_t now = from; now <= to; now += 10) {
+            if (now >= next) {
+                report(now, rssi, loss);
+                next = now + 100;
+            }
+            (void)tx.selector_.tick(now);
+        }
+    };
+
+    (void)tx.selector_.tick(0);          // boot
+    run(0, 6000, -40, 0);                // clean + strong: climb to the top
+    CHECK_EQ_U(tx.selector_.profile_id(), 7);
+    run(6000, 6900, -40, 100);           // loss at the top: demote + lock it
+    CHECK_EQ_U(tx.selector_.profile_id(), 6);
+    CHECK(tx.selector_.lockout(6900).active);
+
+    // The two ceilings now DISAGREE, which is the whole point of the case.
+    CHECK_EQ_U(tx.selector_.max_profile(), 7);
+    CHECK_EQ_U(tx.selector_.effective_ceiling_profile(6900), 6);
+
+    // Below the locked rung the probe still flies: profile 5's up-candidate is
+    // profile 6, which is AT the effective ceiling, and the clamp is "not
+    // above" rather than "strictly below". Arming here first is what makes the
+    // disarm below a visible TRANSITION rather than a state that was never
+    // entered.
+    tx.refresh_probe(5, 6900);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, 6);
+    CHECK_EQ_U(armed_period, 64);
+    CHECK_EQ_U(armed_mcs, 6);
+
+    // One rung up, with 7 locked out, the candidate is ABOVE the effective
+    // ceiling — even though max_profile still says 7. No probe may fly: a veto
+    // cannot help where §9.2 has already barred the climb, and the lockout
+    // window is exactly when the link can least afford the duty. Reverting the
+    // clamp to max_profile arms at mcs 7 here instead, which is the mutation
+    // this case exists to kill.
+    tx.refresh_probe(6, 6900);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
+    CHECK_EQ_U(armed_period, 0);
+
+    // After the lockout expires the ceiling returns to the pin, and the same
+    // rung that was barred a moment ago re-arms — with no commit anywhere,
+    // which is why the seam has to run per tick rather than on commit edges.
+    run(110000, 111000, -30, 0);
+    CHECK_EQ_U(tx.selector_.effective_ceiling_profile(111000), 7);
+    tx.refresh_probe(6, 111000);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, 7);
+    CHECK_EQ_U(armed_period, 64);
+    CHECK_EQ_U(armed_mcs, 7);
+}
+
+// §10.6 Pass 187 at the SEAM. test_calibration_pin_maps_mcs_to_a_profile_id
+// above checks the lookup in isolation, and mutation-testing showed that is
+// not enough: bypassing the lookup at the call site left it green. This drives
+// a real calibration through calibrate_service() and reads what actually
+// reached the §9.7 pin.
+void test_calibration_seam_pins_by_id_not_by_mcs() {
+    wblink::ProfileTable t;
+    // ids and MCS deliberately offset by two, so pinning the MCS directly
+    // names a profile that does not exist and §9.7 silently saturates.
+    for (auto [id, mcs] : {std::pair<uint8_t, uint8_t>{2, 0},
+                           {3, 1},
+                           {4, 2}}) {
+        wblink::Profile p;
+        p.id = id;
+        p.mcs = mcs;
+        p.gi = wblink::GuardInterval::kLong;
+        p.tx_power_level = 4;
+        p.airtime_budget_permille = 600;
+        p.bitrate_min_kbps = 2200;
+        p.max_payload = 1424;
+        t.profiles.push_back(p);
+    }
+    t.floor_profile = 2;
+
+    Config c = tx_config();
+    c.policy.select.min_profile = 2;
+    c.policy.select.max_profile = 4;
+    TxCore tx(c, 12345, &t, 0xF2);
+    tx.init_calibration(c.policy.calibration, std::nullopt);
+    CHECK(tx.calibrator_.has_value());
+    CHECK(tx.calibrator_->start(1000));
+
+    // The first action of a run enters rung 0 — i.e. MCS 0, which this ladder
+    // carries on profile id 2.
+    tx.calibrate_service(1000);
+    // min==max is the §10.6 pin shape; max_profile() is the readable half.
+    CHECK_EQ_U(tx.selector_.max_profile(), 2);   // the ID, not the MCS 0
+    CHECK_EQ_U(tx.selector_.effective_ceiling_profile(1000), 2);
+    // Still running: a mappable MCS must not abort the sweep.
+    CHECK(tx.calibrating());
+}
+
+// ...and the refusal. The calibrator walks MCS 0..7 whatever the ladder holds,
+// so a ladder that cannot select one of them makes that rung unmeasurable. An
+// unpinned dwell would place a power for a rate the radio never flew, so the
+// run FAILS with its own reason rather than reporting a curve it did not
+// measure (§10.6 refuses false success).
+void test_calibration_refuses_an_mcs_the_ladder_cannot_select() {
+    wblink::ProfileTable t;
+    // No profile at MCS 0 — the very first rung the calibrator enters.
+    for (auto [id, mcs] : {std::pair<uint8_t, uint8_t>{2, 3},
+                           {4, 5}}) {
+        wblink::Profile p;
+        p.id = id;
+        p.mcs = mcs;
+        p.gi = wblink::GuardInterval::kLong;
+        p.tx_power_level = 4;
+        p.airtime_budget_permille = 600;
+        p.bitrate_min_kbps = 2200;
+        p.max_payload = 1424;
+        t.profiles.push_back(p);
+    }
+    t.floor_profile = 2;
+
+    Config c = tx_config();
+    c.policy.select.min_profile = 2;
+    c.policy.select.max_profile = 4;
+    TxCore tx(c, 12345, &t, 0xF2);
+    tx.init_calibration(c.policy.calibration, std::nullopt);
+    CHECK(tx.calibrator_->start(1000));
+    tx.calibrate_service(1000);
+    CHECK(!tx.calibrating());
+    CHECK(tx.calibrator_->state() == wblink::CalibState::kFailed);
+    // A distinct reason: a structural config defect must not read as an
+    // operator cancellation.
+    const char* why = tx.calibrator_->fail_reason();
+    CHECK(why != nullptr);
+    // Guarded rather than constructed straight into std::string: when this
+    // case regresses the run does not fail at all, why is null, and an
+    // unguarded construction throws instead of reporting.
+    CHECK(why != nullptr && std::string(why) == "mcs_not_in_ladder");
+}
+
+}  // namespace
 
 int main() {
     test_constructs_without_a_profile_table();
     test_s_to_ms_rounds_and_floors();
     test_selector_policy_carries_the_config();
     test_bw_code_maps_widths();
-    test_probe_arming_follows_the_live_pin();
+    test_probe_arming_follows_the_effective_ceiling();
+    test_effective_ceiling_is_the_pin_when_nothing_is_locked_out();
     test_no_probe_schedule_never_arms();
+    test_calibration_pin_maps_mcs_to_a_profile_id();
+    test_probe_follows_the_lockout_ceiling_not_just_the_pin();
+    test_calibration_seam_pins_by_id_not_by_mcs();
+    test_calibration_refuses_an_mcs_the_ladder_cannot_select();
     return wbtest_finish("node_tx_core_test");
 }

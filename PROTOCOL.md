@@ -1977,15 +1977,32 @@ injection model has no such side stream, so that mechanism is **dropped**.
   headroom. The candidate is the next ascending-id profile's `mcs`, resolved
   through the live table (never `rung_index == mcs`); no probe fires at the
   top rung or when the adjacent profile shares the current MCS.
-- **The candidate is clamped to the §9.7 ceiling (Pass 186).** No probe fires
-  when the adjacent profile's id is above the live `max_profile` pin — which
-  includes the pin a §11.7 `SELECTOR` freeze installs (`min == max ==`
-  current). This is not an optimization. The probe's only consumer is a veto,
-  and a veto can only suppress a climb; where policy already forbids the
-  climb, the duty buys evidence no path can act on. The clamp reads the
-  **live** pin, so it re-derives on a pin change as well as on a commit.
-  Ceiling resolution is §9.7's: an id absent from the table saturates to the
-  top rung, so `max_profile = 255` still means unpinned.
+- **The candidate is clamped to the EFFECTIVE ceiling (Pass 186, widened
+  Pass 187).** No probe fires when the adjacent profile's id is above the
+  ceiling the climb rules actually honour — the live §9.7 `max_profile` pin
+  (which includes the pin a §11.7 `SELECTOR` freeze installs, `min == max ==`
+  current) **narrowed by the §9.2 lockout ceiling**. It is exactly the
+  `adaptive_hi` both climb rules gate on, conflict fallback included: when a
+  lockout collides with the operator envelope the envelope retains precedence
+  and the lockout is ignored, here as there.
+  This is not an optimization. The probe's only consumer is a veto, and a veto
+  can only suppress a climb; where policy already forbids the climb, the duty
+  buys evidence no path can act on. Ceiling resolution is §9.7's: an id absent
+  from the table saturates to the top rung, so `max_profile = 255` still means
+  unpinned.
+  **Why the lockout counts (operator ruling 2026-08-21).** A locked-out rung is
+  the one case where the probe looks most useful and is worth least. It is the
+  only *direct* measurement of whether that rung has recovered — but probe
+  evidence is a veto and can never authorize the re-entry, so at best it blocks
+  a re-entry the RSSI floor would have allowed, and §9.2 expiry is not blind
+  anyway (the rung floor plus `reentry_backoff_s`/`reentry_dwell_s` gate it).
+  Against that, the lockout window is by construction when the link is
+  weakest, which is the most expensive moment to spend a `1/period` share of
+  video frames on a rate that has just demonstrably failed.
+  Because the effective ceiling moves with §9.2 state and not only with
+  commits and pin writes, the candidate is **re-derived every selector tick**;
+  the radio is written only when the resolved candidate actually changes, so a
+  steady link issues no traffic for this.
   Because `max_profile` is node-local policy and not table content, **the
   receiver cannot know it** — the RX window keeps deriving the unclamped
   candidate and simply never observes it, which guard (4) below already
@@ -2902,9 +2919,25 @@ through the §3.15 acceptance latch: the pause starves the RTP stream past
 the §2 idle teardown, and a live-stream-only acceptance rule would refuse
 every word the pause exemption mandates.
 
+**The sweep index is an MCS, and the pin takes a profile ID (Pass 187).** The
+§10.2 artifact this run authors is a **per-MCS** power curve — `curve_qdb[mcs]`
+is how §10.2 resolves power at commit time — so the loop below walks MCS
+values `0..7`, not ladder positions. Reaching a given MCS on air is a
+different act: it means pinning §9.7 to a profile that **carries** that MCS,
+and §9.7 pins are profile **IDs**. The two spaces coincide only on a ladder
+whose ids happen to equal its MCS values, and conflating them is silent —
+§9.7 resolves an unmatched id by saturating to the top rung, so the sweep
+would run **unpinned** and every dwell would measure whatever rung the
+selector drifted to, with no error anywhere. An implementation MUST therefore
+map MCS → profile id through the live table before pinning, and where the
+ladder carries **no** profile at that MCS the rung is unmeasurable: the run
+MUST fail with a distinct reason rather than sweep an unpinned rung
+(§10.6 refuses false success like every other path here).
+
 **Procedure (Pass 121 — max-power seek; supersedes the Pass 120
-target-band steer).** For each rung in the §9.3 ladder: pin the rung (§9.7
-`min==max`), then ramp the TX adapter's power via `set_power_qdb` upward
+target-band steer).** For each MCS the ladder can select: pin a profile that
+carries it (§9.7 `min==max`, by **id** — see above), then ramp the TX
+adapter's power via `set_power_qdb` upward
 in `seek_step_qdb` steps (rung 0 from `min_qdb`; later rungs from one step
 below the previous rung's placement), evaluating each probe dwell against
 two walls. The **loss wall**: the dwell's tally loss crosses
