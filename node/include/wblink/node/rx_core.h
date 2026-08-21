@@ -393,6 +393,29 @@ struct RxCore {
             as.adapter_stalled = a.stalled;
             snap.adapters.push_back(std::move(as));
         }
+        // §15.3 Pass 186 ground view of the §9.4 probe: what this window
+        // computes and reports THIS tick, so the age is 0 by construction,
+        // plus the guard evidence standing behind it. probe_observed (guard 4)
+        // is the one that says whether anything is actually probing on air —
+        // the value the probe's first device run had to reconstruct by hand
+        // from per-MCS RX histograms.
+        //
+        // UNCONDITIONAL, and deliberately ahead of the §3.15 selector-state
+        // block below: this window is fed by our own on_data() from received
+        // frames and owes nothing to the craft's mirrored selector word. Filled
+        // inside that gate, a stale or absent word would blank these to
+        // "nothing is probing" while the window was full of evidence — the
+        // exact unreadable-silence this Pass exists to remove.
+        const auto probe_per = probe_window_.probe_per(now);
+        snap.link.probe_per = probe_per ? *probe_per : kNoProbe;
+        snap.link.probe_per_age_ms = 0;  // computed this tick, by construction
+        const auto probe_cand = probe_window_.candidate_mcs();
+        snap.link.probe_candidate_mcs =
+            probe_cand ? *probe_cand : kProbeMcsNone;
+        snap.link.probe_successes = probe_window_.successes();
+        snap.link.probe_failures = probe_window_.failures();
+        snap.link.probe_observed = probe_window_.observed();
+
         bool selector_source_current = false;
         if (remote_selector_state_) {
             bool any_rtp = false;

@@ -125,6 +125,38 @@ void test_unknown_block_has_no_nack() {
     CHECK(!rx.block_had_nack(7, 4242));
 }
 
+// §15.3 Pass 186: the six probe_* fields describe THIS receiver's own §9.4
+// window, which is fed by our on_data() and owes nothing to the craft's §3.15
+// selector word. They were briefly filled inside the `selector_source_current
+// && selector_state_fresh` gate, where an absent or stale word left them
+// reading "nothing is probing" while the window held evidence — the same
+// unreadable silence Pass 186 exists to remove, reintroduced one level down.
+//
+// The snapshot is POISONED first on purpose. An idle window's honest answer is
+// byte-identical to the struct's defaults, so asserting the defaults would pass
+// whether the fill ran or not — a test of the stimulus, not the effect. With
+// the poison in place this fails on the gated version and passes on the
+// unconditional one.
+void test_probe_fields_do_not_depend_on_the_craft_selector_word() {
+    RxCore rx(rx_config(), 12345, nullptr, std::nullopt);
+    wblink::StatsSnapshot snap;
+    snap.link.probe_per = 1234;
+    snap.link.probe_per_age_ms = 5678;
+    snap.link.probe_candidate_mcs = 3;
+    snap.link.probe_successes = 11;
+    snap.link.probe_failures = 22;
+    snap.link.probe_observed = 33;
+    // An idle node has no remote selector state at all, which is precisely the
+    // condition the gated version could not report through.
+    rx.fill_stats(snap, 1000);
+    CHECK_EQ_U(snap.link.probe_per, wblink::kNoProbe);
+    CHECK_EQ_U(snap.link.probe_per_age_ms, 0);
+    CHECK_EQ_U(snap.link.probe_candidate_mcs, wblink::kProbeMcsNone);
+    CHECK_EQ_U(snap.link.probe_successes, 0);
+    CHECK_EQ_U(snap.link.probe_failures, 0);
+    CHECK_EQ_U(snap.link.probe_observed, 0);
+}
+
 }  // namespace
 
 int main() {
@@ -133,5 +165,6 @@ int main() {
     test_spectator_emits_no_recovery();
     test_fill_stats_on_an_idle_node();
     test_unknown_block_has_no_nack();
+    test_probe_fields_do_not_depend_on_the_craft_selector_word();
     return wbtest_finish("node_rx_core_test");
 }

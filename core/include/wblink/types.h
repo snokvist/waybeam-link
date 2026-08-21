@@ -234,6 +234,10 @@ inline constexpr size_t kFecSrcOffSymIndex = 2;
 inline constexpr uint16_t kFecMaxSymbols = 256;
 // §3.5 — probe_per value meaning "no probe ran this interval".
 inline constexpr uint16_t kNoProbe = 0xFFFF;
+// §15.3 Pass 186 — probe_candidate_mcs value meaning "no candidate": on a TX
+// the node is not probing (air.mcs_probe off, top rung, same-MCS adjacency,
+// or above the §9.7 pin); on an RX the window is idle.
+inline constexpr uint8_t kProbeMcsNone = 0xFF;
 
 // §2 — all per-stream RX state is keyed by the full tuple.
 struct StreamKey {

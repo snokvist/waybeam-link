@@ -166,6 +166,14 @@ StatsSnapshot sample_snapshot() {
     s.link.verdict = 2;
     s.link.verdict_age_ms = 740;
     s.link.promote_blocked_saturated = 3;
+    // §15.3 Pass 186: six distinct values, none of them the field default —
+    // an all-defaults golden would pass with two members swapped.
+    s.link.probe_per = 62;
+    s.link.probe_per_age_ms = 1180;
+    s.link.probe_candidate_mcs = 5;
+    s.link.probe_successes = 231;
+    s.link.probe_failures = 14;
+    s.link.probe_observed = 245;
     s.link.selector_state_valid = true;
     s.link.selector_state_age_ms = 75;
     s.link.lockout_active = true;
@@ -316,6 +324,9 @@ const char* kGolden =
     "\"report_latch_holder\":9,\"report_latch_known\":true,"
     "\"verdict\":2,\"verdict_age_ms\":740,\"promote_blocked_saturated\":3,"
     "\"promote_blocked_probe\":0,"
+    "\"probe_per\":62,\"probe_per_age_ms\":1180,"
+    "\"probe_candidate_mcs\":5,\"probe_successes\":231,"
+    "\"probe_failures\":14,\"probe_observed\":245,"
     "\"selector_state_valid\":true,\"selector_state_age_ms\":75,"
     "\"lockout_active\":true,\"lockout_latched\":false,"
     "\"lockout_profile\":5,\"lockout_ceiling_profile\":4,"

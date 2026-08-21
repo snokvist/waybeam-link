@@ -1977,6 +1977,20 @@ injection model has no such side stream, so that mechanism is **dropped**.
   headroom. The candidate is the next ascending-id profile's `mcs`, resolved
   through the live table (never `rung_index == mcs`); no probe fires at the
   top rung or when the adjacent profile shares the current MCS.
+- **The candidate is clamped to the §9.7 ceiling (Pass 186).** No probe fires
+  when the adjacent profile's id is above the live `max_profile` pin — which
+  includes the pin a §11.7 `SELECTOR` freeze installs (`min == max ==`
+  current). This is not an optimization. The probe's only consumer is a veto,
+  and a veto can only suppress a climb; where policy already forbids the
+  climb, the duty buys evidence no path can act on. The clamp reads the
+  **live** pin, so it re-derives on a pin change as well as on a commit.
+  Ceiling resolution is §9.7's: an id absent from the table saturates to the
+  top rung, so `max_profile = 255` still means unpinned.
+  Because `max_profile` is node-local policy and not table content, **the
+  receiver cannot know it** — the RX window keeps deriving the unclamped
+  candidate and simply never observes it, which guard (4) below already
+  covers: zero candidate-rate observations report `0xFFFF`. One-sided
+  knowledge degrades to absence of evidence, never to wrong evidence.
 - **Probe evidence is a VETO, not a WARRANT.** Power resolves per-rung
   (§10.2), so an up-probe flies under conditions at least as favourable as
   the target profile — sound as a veto ("MCS+1 fails even at current power ⇒
@@ -1988,6 +2002,20 @@ injection model has no such side stream, so that mechanism is **dropped**.
   `probe_per = 0xFFFF` or a stale value is absence of evidence and gates
   nothing; **no code path may authorize a promote on probe evidence alone.**
   Suppressions are counted (§15.3 `promote_blocked_probe`).
+- **The evidence itself is observable (Pass 186).** `promote_blocked_probe`
+  counts only the case where a climb was *both attempted and vetoed*, so on
+  its own it cannot distinguish "the probe has no opinion" from "the probe
+  has a favourable opinion" — and a fleet could enable probing and never
+  confirm it produces evidence at all. §15.3 therefore carries the value and
+  the guard tallies behind it: `probe_per` + `probe_per_age_ms` +
+  `probe_candidate_mcs` on both roles, and `probe_successes` /
+  `probe_failures` / `probe_observed` on the receiver that computes them.
+  `probe_observed` is guard (4)'s counter and is the operational proof that a
+  TX is probing *and* that this receiver can see it; a nonzero value is the
+  only reading that separates a working probe from a scheduled one.
+  Observability is not optional here: the probe is a per-unit fail-closed
+  enablement (below), so "is it on, and is it working" is a question the
+  operator must be able to answer per node.
 - **Receiver window guards (normative — the subtlety lives here).** The RX
   accumulates per-candidate evidence in a probe window that MUST enforce:
   (1) **successes are rate-verified** — a probe-slot seq counts only when the
@@ -5240,6 +5268,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "report_latch_holder": 9, "report_latch_known": true,
     "verdict": 0, "verdict_age_ms": 0, "promote_blocked_saturated": 0,
     "promote_blocked_probe": 0,
+    "probe_per": 65535, "probe_per_age_ms": 0, "probe_candidate_mcs": 255,
+    "probe_successes": 0, "probe_failures": 0, "probe_observed": 0,
     "selector_state_valid": true, "selector_state_age_ms": 0,
     "lockout_active": true, "lockout_latched": false,
     "lockout_profile": 5, "lockout_ceiling_profile": 4,
@@ -5566,6 +5596,28 @@ blocked — a gauge of blocked *time*, not of rules); craft-only, 0
 elsewhere. `link.promote_blocked_probe` (Pass 163) is the same gauge for
 the §9.4 probe veto — fresh `probe_per ≥ probe_veto_permille` suppressing
 an otherwise-eligible climb; craft-only, 0 elsewhere.
+
+The six `probe_*` fields (Pass 186) make the §9.4 probe itself observable,
+and like `verdict` they are **role-dependent views**, not two counters:
+
+| field | craft (TX) | radio ground (RX) |
+|---|---|---|
+| `probe_per` | last value **received** in a §3.5 report — what the veto reads | the value this window **computes** and reports this tick |
+| `probe_per_age_ms` | ms since that report arrived; compare against `probe_veto_ttl_s` to see whether it is still gating | 0 — computed this tick, by construction |
+| `probe_candidate_mcs` | the MCS this node is **flying** on probe slots; `255` = not probing (`air.mcs_probe` off, top rung, same-MCS adjacency, or above the §9.7 pin) | the candidate the window is **scoring**; `255` = window idle |
+| `probe_successes` / `probe_failures` | 0 | guard (1)+(2)+(3) tallies for the current window |
+| `probe_observed` | 0 | guard (4): direct candidate-rate observations |
+
+`probe_per = 65535` (`kNoProbe`) is **"no opinion" and is not the same
+answer as 0** — 0 means the candidate rate was observed and never failed.
+Reading them together is what separates the three states the operator
+actually cares about: `probe_candidate_mcs == 255` is *not armed*;
+`probe_observed == 0` with a candidate set is *armed but nothing is
+probing on air* (a TX that never enabled `air.mcs_probe`, or one clamped
+by its own pin — one-sided enablement, which §9.4 requires to degrade to
+inert stats); and `probe_observed > 0` is a probe that is **working**,
+whatever `probe_per` then says. `probe_successes + probe_failures` below
+`min_samples` explains a `65535` that has observations behind it.
 
 `rx_ldpc` / `rx_stbc` (Pass 157) count accepted frames whose RX path
 reported LDPC coding / a nonzero STBC stream count, and `ldpc_flag_ok` is

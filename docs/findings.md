@@ -12,6 +12,113 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-21 — Pass 186 on hardware: the clamp works, the probe measures every rung, and the veto cannot be reached from this bench
+
+Fleet on the Pass 186 build (`.232` craft, `.242` + `.199` grounds), table
+`0xF2`, `probe {period:64, slot:4}`.
+
+**The ceiling clamp, as a clean A/B.** The craft sat at profile 4 with
+`max_profile: 4`. Restarting it onto the clamping build moved
+`probe_candidate_mcs` from 5 to **255** — not probing — and both grounds went
+from ~230 candidate observations per 8 s window to **exactly 0**. Nothing else
+changed: same table, same `air.mcs_probe: true`, same channel.
+
+**The RX asymmetry behaves as §9.4 requires, measured rather than argued.**
+With the craft disarmed, both grounds still reported `probe_candidate_mcs: 6`
+— they derive the unclamped candidate because `max_profile` is node-local
+policy and never reaches them — and both reported `probe_per: 65535`. Guard
+(4) turned one-sided knowledge into *absence of evidence*, not into a phantom
+veto.
+
+**What the probe actually measures.** Given headroom (`max_profile` 5, later
+6) the up-candidate PER reads **0–8 ‰ at every rung**, candidates MCS 2
+through 6, at RSSI −28 dBm. Against `probe_veto_permille` 50 that is a
+uniformly favourable opinion — the reading that was indistinguishable from
+"no opinion" before Pass 186 exposed it. Raising the craft's ceiling from 4
+to 5 on that evidence promoted cleanly and held: profile 5, `HOLD`,
+`loss_ewma_milli` 2, three frames salvaged in the first minute.
+
+**The veto did not fire, and two independent mechanisms explain why.**
+`promote_blocked_probe` stayed 0 throughout.
+
+1. **RSSI-margin promote outruns evidence formation.** §9.4 resets the window
+   on any `active_profile` change, and evidence needs `min_samples` 32 inside
+   `max_age_ms` 8000. At the shipped `promote_dwell_s` 0.5 the craft climbed
+   **0 → 4 → 6 in about four seconds**, with at most **4** observations at any
+   rung — the veto branch is only reached when a promote is *otherwise
+   eligible*, and eligibility arrived first every time. Raising
+   `promote_dwell_s` to 12 fixed that half: evidence then formed at every rung
+   (186, 214, 132 observations).
+2. **The veto reads the last window, not a trend.** Even with evidence
+   present, `Selector::probe_veto_fresh` gates on the most recently *reported*
+   `probe_per`. A candidate that fails intermittently — MCS 6 here, one
+   failure per few thousand probes — produces mostly `0` reports with an
+   occasional `4`–`8`, so the latched value at the instant the dwell elapsed
+   was `0`. Lowering `probe_veto_permille` to **1** did not change that: the
+   climb 5 → 6 still went through.
+
+Neither is a defect. Together they say the veto's operating regime is a link
+that **dwells** under marginal conditions, not one that is climbing — which is
+consistent with its design as a veto rather than a warrant, but means **the
+veto path remains unproven end to end.** It needs a candidate that fails in
+most 8 s windows, i.e. a range or power walk-down (Phase E), not a 50 cm bench
+at −28 dBm. Worth deciding then whether a single clean window should be able
+to clear a veto, or whether the freshness rule wants hysteresis.
+
+**Fleet left at:** profile 5 / MCS 5 (the shipped envelope), craft
+`probe_candidate_mcs: 255` — at its ceiling it spends no probe duty at all,
+which is exactly what Pass 186 was for. Craft config reverted to shipped
+values; `probe_veto_permille: 1` and `promote_dwell_s: 12` were test-only and
+are gone.
+
+## 2026-08-21 — the x86 ground had the §6.3b config key and a binary that could not read it
+
+`deploy/ground-192.168.2.242.json` carried `conceal.mode: "slice-skip"` from
+2026-08-20 (Pass "§6.3b on by default"), and on that basis the ground was
+reported armed. It was not. The node's `waybeam_hub` was built **2026-08-16**
+and §6.3b landed **2026-08-20 22:28**, so the in-process node linked a wblink
+that had never heard of the key. Three independent reads agree:
+
+| artifact | `conceal` strings | `salvag` strings |
+|---|---|---|
+| running `/usr/local/bin/waybeam_hub` (Aug 16) | **0** | **0** |
+| rebuilt `ground_x86/waybeam_hub` (Aug 21) | 11 | 3 |
+| `.199` known-good rk3566 build | 7 | — |
+
+And the node's own `/etc/waybeam-link/ground.json` had **no `conceal` block at
+all** — the repo file and the live file had drifted in *both* directions: the
+repo carried the conceal key the node lacked, while the node carried a `mac`
+pin, `policy.csa.adjacent_guard_mhz: 40`, and `bus: "8-1"` against the repo's
+stale `5-1` (the 8812AU is on bus 8 — `lsusb -t`, re-measured). Both files now
+agree on every non-comment key.
+
+**A repo `deploy/*.json` is not evidence about a node, and neither is a git
+log.** The config says what the node would do if it were running code that
+reads the key; only the binary says whether it does. When a feature is
+"deployed", check the artifact that executes — `strings` on the running file,
+or the log line the feature emits at startup. Here the honest signal was
+already designed in and simply never looked for:
+
+```
+rx: stream 0 §6.3b conceal enabled (freeze_frame=1)
+```
+
+Absent from every x86 boot before 2026-08-21, present on the first one after.
+Within the first 20 minutes stream 0 reported **6 frames salvaged and 11
+slices synthesized** against `recovered_fec` 6572 — §6.3b working on the x86
+ground, not merely configured. (The first 30 s showed `frames_salvaged: 0`
+with one `salvage_failed`, which is a two-event sample, not a result; the
+salvage rate per FEC recovery runs ~9× lower here than on `.199` because this
+ground sits at RSSI −26 against `.199`'s −35 and fewer of its losses exceed
+the FEC budget.)
+
+**What stays open.** The rebuild is a plain `make ground_x86` against
+`build/x86-ground`, and nothing in either repo notices when the hub's linked
+wblink is older than the feature the config asks for. A version or feature
+handshake between `mod_wblink` and the config it loads would turn this from a
+silent no-op into a refusal. Note also that the hub's link rule does not
+depend on the wblink archives, so `make ground_x86` after a library change is
+a **no-op that silently ships the old binary** — remove the target first.
 ## 2026-08-21 — the §9.4 probe actuates exactly as specified, and `probe_per` is invisible
 
 First device run of the §9.4 Pass 163 rate probe. `probe {period:64, slot:4}`

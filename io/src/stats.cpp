@@ -499,6 +499,18 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.promote_blocked_saturated);
     out += ",\"promote_blocked_probe\":";
     append_u64(out, snap.link.promote_blocked_probe);
+    out += ",\"probe_per\":";
+    append_u64(out, snap.link.probe_per);
+    out += ",\"probe_per_age_ms\":";
+    append_u64(out, snap.link.probe_per_age_ms);
+    out += ",\"probe_candidate_mcs\":";
+    append_u64(out, snap.link.probe_candidate_mcs);
+    out += ",\"probe_successes\":";
+    append_u64(out, snap.link.probe_successes);
+    out += ",\"probe_failures\":";
+    append_u64(out, snap.link.probe_failures);
+    out += ",\"probe_observed\":";
+    append_u64(out, snap.link.probe_observed);
     out += ",\"selector_state_valid\":";
     append_bool(out, snap.link.selector_state_valid);
     out += ",\"selector_state_age_ms\":";

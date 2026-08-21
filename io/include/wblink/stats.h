@@ -259,6 +259,19 @@ struct LinkStats {
     uint64_t promote_blocked_saturated = 0;
     // §15.3 Pass 163: climbs suppressed by the §9.4 probe veto; craft-only.
     uint64_t promote_blocked_probe = 0;
+    // §15.3 Pass 186: the §9.4 probe made observable. Role-dependent like
+    // `verdict` above — on a CRAFT, probe_per is the last value RECEIVED in a
+    // §3.5 report (what the veto reads) and probe_candidate_mcs is the rate
+    // this node flies on probe slots; on a radio GROUND, probe_per is what
+    // this window COMPUTES this tick (so age is 0 by construction) and the
+    // three tallies are the guard evidence behind it. kNoProbe is "no
+    // opinion" and is NOT the same answer as 0.
+    uint16_t probe_per = kNoProbe;
+    uint32_t probe_per_age_ms = 0;
+    uint8_t probe_candidate_mcs = kProbeMcsNone;
+    uint32_t probe_successes = 0;  // ground-only (guards 1-3)
+    uint32_t probe_failures = 0;   // ground-only (guards 1-3)
+    uint32_t probe_observed = 0;   // ground-only (guard 4) — the working proof
     bool flap_freeze = false;
     std::string csa_state = "IDLE";
     // §11 follow-me: current RF operating channel (center MHz). 0 when the node
