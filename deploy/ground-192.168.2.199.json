@@ -1,0 +1,88 @@
+{
+  "_comment": "RK3566 ground (.199), devourer radio RX. Re-brought-up 2026-08-21 from the Aug-1 kernel-monitor config: that backend was DELETED in Pass 164, so the old config no longer loads at all. 8812CU on USB bus 1-1 (measured with lsusb -t; bus paths shuffle on re-plug, so re-measure \u2014 never carry one over). rtl88x2cu must be unloaded before start; S49waybeam-link does it. Spectator with originator 10 keeps the x86 ground (9) authoritative. cache.repair dropped: 192.168.2.247 does not answer. policy.return dropped: \u00a715.2 withholds it from a node with no role:\"tx\" adapter, so it was inert here.",
+  "node": {
+    "originator": 10,
+    "spectator": true,
+    "role": "rx",
+    "preferred_originator": 17,
+    "net_id": 0
+  },
+  "profile_table": "/etc/waybeam-link/table.example.json",
+  "adapters": [
+    {
+      "name": "cu-rk-ground",
+      "role": "rx",
+      "channel": 5805,
+      "bw": 20,
+      "bus": "1-1"
+    }
+  ],
+  "streams": [
+    {
+      "stream_id": 0,
+      "stream_type": "RTP",
+      "dir": "out",
+      "originator": 17,
+      "_conceal_comment": "\u00a76.3b armed 2026-08-21, after Phase C acceptance was measured ON THIS DECODER (findings 2026-08-21): MPP agrees with ffmpeg to 89 dB over two CTU rows on a repaired stream, disagrees at 39.4 dB over the whole frame on a gap AU, and reports errinfo 0 discard 0 on BOTH \u2014 so waybeam-hub's errinfo||discard branch, and the IDR requester it gates, never fire for this fault class. 'off' restores pre-\u00a76.3b behaviour bit-for-bit. freeze_frame on: the hub's default presents errinfo frames, so freezing is cheaper than dropping.",
+      "conceal": {
+        "mode": "slice-skip",
+        "freeze_frame": true
+      },
+      "bind": {
+        "kind": "frame-shm",
+        "name": "venc_frame_out"
+      }
+    },
+    {
+      "stream_id": 1,
+      "stream_type": "AUDIO",
+      "dir": "out",
+      "bind": {
+        "kind": "udp",
+        "send": "127.0.0.1:5601"
+      }
+    }
+  ],
+  "air": {
+    "kind": "radio"
+  },
+  "policy": {
+    "csa": {
+      "home_chan": 5805,
+      "channel_allowlist": [
+        5180,
+        5200,
+        5220,
+        5240,
+        5260,
+        5280,
+        5300,
+        5320,
+        5500,
+        5520,
+        5540,
+        5560,
+        5580,
+        5600,
+        5620,
+        5640,
+        5660,
+        5680,
+        5700,
+        5720,
+        5745,
+        5765,
+        5785,
+        5805,
+        5825
+      ]
+    }
+  },
+  "control": {
+    "bind": "127.0.0.1:8092"
+  },
+  "stats": {
+    "hz": 10,
+    "stdout": false
+  }
+}

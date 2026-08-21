@@ -10,15 +10,25 @@ The two nodes read from live hardware on 2026-08-08:
 |---|---|---|---|
 | Vehicle | `192.168.2.232` | RTL8812EU TX/RX, ch 5805 HT20, bus `1-1` | `vehicle-waybeam-link.init`, `vehicle-192.168.2.232.json` |
 | x86 ground | `192.168.2.242` | RTL8812AU uplink TX (`8-1`) + RTL8812CU RX (`5-1`) | drive manually; `ground-192.168.2.242.json` |
+| RK3566 spectator | `192.168.2.199` | RTL8812CU RX, ch 5805 HT20, bus `1-1` | `rk3566-waybeam-link.init`, `ground-192.168.2.199.json` |
 
-**Missing, deliberately.** The RK3566 spectator (`192.168.2.199`) and the
-Ethernet cache (`192.168.2.247`) were **offline when Pass 164 landed**, so
-their configs and their monitor-mode unit files were deleted rather than
-migrated by guesswork — an invented devourer config is a config no node has
-ever loaded. Both nodes still exist. Re-author each from the live
-`/etc/waybeam-link/*.json` when it is powered, as #149 did for the two above,
-and check it with `--check --strict`. `docs/verification-hardware.md` still
-records their hardware.
+`.199` was re-authored on 2026-08-21 the way this file asks: read from its
+live `/etc/waybeam-link/ground.json`, moved off the deleted kernel-monitor
+backend, `--check --strict` clean (0 findings), then run. Two things the old
+config carried that did not survive: `cache.repair` (`192.168.2.247` does not
+answer) and `policy.return.*` (§15.2 withholds it from a node with no
+`role:"tx"` adapter, so it was inert). Its init script drops the
+`waybeam-mon-up` call and `rmmod`s the driver instead — and the module is
+**`88x2cu`** while the USB driver it registers is `rtl88x2cu`, so `rmmod
+rtl88x2cu` exits nonzero and silently leaves the adapter held.
+
+**Missing, deliberately.** The Ethernet cache (`192.168.2.247`) was
+**offline when Pass 164 landed**, so its config and its monitor-mode unit
+file were deleted rather than migrated by guesswork — an invented devourer
+config is a config no node has ever loaded. The node still exists.
+Re-author it from the live `/etc/waybeam-link/*.json` when it is powered, as
+#149 did for the others, and check it with `--check --strict`.
+`docs/verification-hardware.md` still records its hardware.
 
 The x86 ground's old `waybeam-ground.service` went with them: its
 `waybeam-mon-up` pre-start would leave a kernel driver holding the adapter,
