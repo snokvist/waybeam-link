@@ -24,6 +24,54 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 186 — the §9.4 probe becomes observable, and stops probing above its own ceiling (2026-08-21)
+
+**Verdict.** Two amendments to §9.4, both found by the first device run of the
+Pass 163 probe (`docs/findings.md` 2026-08-21) rather than by reading.
+
+**(a) The candidate is clamped to the §9.7 `max_profile` pin.**
+`probe_up_candidate_mcs()` took `(table, active_profile)` and walked to the
+next ascending id with no knowledge of the ceiling. The measured craft pins
+`policy.select.max_profile: 4` while sitting at profile 4, so its probe flew
+a 1/64 duty producing evidence whose only consumer — a veto — could only ever
+suppress a climb policy already forbids. The clamp reads the **live** pin, so
+a §11.7 `SELECTOR` freeze (`min == max == current`) disarms the probe too;
+ceiling resolution is §9.7's, an absent id saturating to the top rung so
+`max_profile = 255` still unpins. The **receiver is deliberately not
+clamped**: `max_profile` is node-local policy, not table content, so the RX
+cannot know it — its window keeps deriving the unclamped candidate, observes
+nothing, and guard (4) reports `0xFFFF`. One-sided knowledge degrades to
+absence of evidence, which is the property §9.4 already requires.
+
+**(b) `probe_per` and its guard tallies enter §15.3.** The value was computed
+on the RX, encoded into the §3.5 report, consumed by the selector — and
+exposed nowhere, on either end. The single observable was
+`promote_blocked_probe`, which moves only when a climb is *both attempted and
+vetoed*, so "no opinion" and "favourable opinion" were indistinguishable and a
+fleet could enable probing and never confirm it produced evidence. Six
+role-dependent fields (`verdict`'s precedent): `probe_per`,
+`probe_per_age_ms`, `probe_candidate_mcs` on both roles; `probe_successes`,
+`probe_failures`, `probe_observed` on the receiver. `probe_observed` is guard
+(4)'s counter and is the operational proof — a nonzero value is the only
+reading that separates a probe that is *working* from one that is merely
+*scheduled*.
+
+**What stays contract.** No wire change: the §3.5 `probe_per` field, its
+`0xFFFF` sentinel, the four receiver guards, veto-not-warrant, and the
+fail-closed per-unit `air.mcs_probe` enablement are all untouched. (a) can
+only ever *reduce* the set of frames that fly the candidate rate, so a fleet
+mid-upgrade sees strictly less probing, never mis-scored probing.
+
+**Evidence.** `docs/findings.md` 2026-08-21 — probe verified on the live
+fleet at `probe {period:64, slot:4}`: both grounds independently derived the
+same probe set from `seq` (2013 vs 2012 frames at MCS 5 in one 60 s window,
+1988 vs 1987 in the repeat), shares 1.527 % / 1.504 % against the ideal
+1.563 %, an `air.mcs_probe: false` control reading exactly 0 on both, and no
+measurable cost (`delivered/rx` 97.56 / 97.52 / 97.53 %). That run is also
+what proved both defects: the craft was at its pin, and the only way to
+confirm the probe was working at all was to reconstruct it by hand from
+per-MCS RX histograms.
+
 ## Pass 185 — a failed FEC block is not an empty one (2026-08-19)
 
 **Verdict.** New §6.3b (operator-directed, 2026-08-19): opt-in per frame-SHM
