@@ -12,6 +12,96 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-21 — the §9.4 veto FIRES, and it is porous: a window reset reads as "no opinion" and a promote walks through the gap
+
+The veto path had never engaged — `promote_blocked_probe` was 0 on every node in
+every configuration tried (finding below, issue #226). It engages now, and the
+run also showed **why it does not hold**.
+
+**Method — synthetic, and the synthesis is the point.** A rate-selective
+failure cannot be produced at 50 cm: the 8812EU craft is already at its
+measured power floor (`power_offset_qdb −48`, below which it saturates), and at
+RSSI −26 nothing fails, MCS 7 included. So the loss was manufactured
+**rate-independently** with the bench knob `air.rx_drop_permille: 90` on the
+ground, and the craft was configured so the veto was the only thing left that
+could block a climb:
+
+| knob | value | why |
+|---|---|---|
+| `air.rx_drop_permille` (ground) | 90 | ~9 % synthetic per-adapter RX drop, probes included |
+| `policy.select.demote_milli` (craft) | **150** (seed 45) | so the §9.0 loss gate does not block the promote first |
+| `policy.select.promote_dwell_s` | **12** (seed 0.5) | so 32 samples can accumulate before the promote becomes eligible |
+| `policy.select.probe_veto_permille` | **50, the shipped seed** | deliberately NOT relaxed |
+| `min/max_profile` | 4 / 6 | headroom, so a climb is pending |
+
+**Result: `promote_blocked_probe` 0 → 1062 → 2100 → 3148 → 4201 → 5157 → 6331**
+over about 50 s. The craft held at profile 4 for ~24 s with the ground
+reporting `probe_per` 63–129 ‰ against the 50 ‰ threshold, while
+`loss_ewma_milli` sat at 70–93 ‰ — **below** the raised `demote_milli` 150, so
+the loss gate was demonstrably not the blocker. The counter is a per-tick
+gauge, so its magnitude is blocked *time*, not blocked rules.
+
+**That is the whole chain proven end to end for the first time:** RX window →
+§3.5 report → `Selector::probe_veto_fresh` → both climb paths suppressed →
+counter. Every link in it had been exercised only in unit tests until now.
+
+**The porosity, which is the finding that matters.** The craft still climbed
+4 → 5 → 6. It escaped in the gap that the §9.4 freshness rule opens:
+
+```
+t6   ground per=69     obs=147   craft prof=4  BLOCKED=4201
+t7   ground per=65535  obs=2     craft prof=5  BLOCKED=5157   <-- promoted
+...
+t10  ground per=70     obs=159   craft prof=5  BLOCKED=5513
+t11  ground per=65535  obs=0     craft prof=6  BLOCKED=6331   <-- promoted
+```
+
+Both escapes land on a sample where the reported value is `65535`. The window
+rolls every `max_age_ms` (8 s); on the roll `successes`/`failures` reset, the
+count falls under `min_samples` (32), and `probe_per()` returns `kNoProbe`.
+§9.4 says that "is absence of evidence and gates nothing" — so for the second
+or so it takes to refill, **the veto is off**, and any promote whose dwell
+elapses in that window goes through. A 12 s dwell against an 8 s window found
+the gap twice in a row; a 0.5 s dwell would find it far more often.
+
+The rule that makes `kNoProbe` gate nothing is correct in isolation — it is
+what stops a non-probing TX manufacturing a phantom veto (guard 4). It is the
+*combination* with a periodic reset that leaks: a window that reported 129 ‰
+one tick ago is not "no evidence", it is evidence that has just been thrown
+away on a timer.
+
+**Open ruling, now with numbers behind it (#226).** Options: hold the maximum
+reported value over `probe_veto_ttl_ms` rather than the last one; carry the
+previous window's verdict across the roll until the new one fills; require N
+consecutive clean windows to clear a veto; or make the reset overlapping
+rather than hard. Any of these changes veto strength, so it is a §9.4
+amendment, not a tuning knob.
+
+**A second structural point, free from the same run.** The shipped seeds put
+`probe_veto_permille` (**50 ‰**) *above* `demote_milli` (**45 ‰**). For loss
+that is not rate-selective, the demote gate therefore always fires before the
+veto can — which is why `demote_milli` had to be raised to 150 to observe the
+veto at all. That ordering is defensible on purpose (the veto exists for
+*rate* headroom, and uniform loss is the demote path's business), but it means
+the veto is unreachable under any uniform degradation, and nothing says so.
+
+**Pass 187 verified on the same run.** With the craft at profile 6 —
+`max_profile` 6, i.e. its ceiling — `probe_candidate_mcs` read **255** and
+`promote_blocked_probe` froze at 6331: no probe duty and nothing left to
+block. Meanwhile both grounds reported `probe_candidate_mcs: 6`/`7` with
+`probe_observed: 0`, deriving the unclamped candidate they cannot know is
+barred and correctly reporting no opinion. The clamp and the §9.4 asymmetry,
+on the deployed binary.
+
+**What this does NOT show.** The loss was uniform and synthetic. It proves the
+mechanism, its timing hole, and the seed ordering — **not** that a real
+rate-selective failure produces these numbers, and not what `probe_per` reads
+when MCS+1 genuinely fails while MCS holds. That still needs a marginal link:
+a range or power walk-down, #226 Leg A on the #134 queue.
+
+Fleet reverted to shipped config afterwards; `rx_drop_permille` removed,
+`demote_milli` back to 45, `promote_dwell_s` and the pin restored.
+
 ## 2026-08-21 — Pass 186 on hardware: the clamp works, the probe measures every rung, and the veto cannot be reached from this bench
 
 Fleet on the Pass 186 build (`.232` craft, `.242` + `.199` grounds), table
