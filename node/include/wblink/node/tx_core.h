@@ -638,7 +638,7 @@ struct TxCore {
         // than on the commit below, because the effective ceiling moves with
         // lockout state and expiry, neither of which produces a commit; the
         // change-guard inside means a steady link writes the radio zero times.
-        refresh_probe(selector_.profile_id(), now);
+        refresh_probe(selector_.profile_id());
         if (act.commit) {
             // §9.5 commit: the operating point stamped on every DATA packet
             // (drives RX deadlines + supersession budgets)...
@@ -1674,7 +1674,12 @@ struct TxCore {
     // table and the live §9.7 ceiling, and push it at the radio. Disarms
     // (period 0) at the top rung, at same-MCS adjacency, and above the pin —
     // all three are probe_up_candidate_mcs returning nullopt.
-    void refresh_probe(uint8_t profile_id, uint64_t now_ms) {
+    // No time argument: since Pass 188 the candidate depends only on the
+    // table, the active profile and the §9.7 pin, none of which are
+    // time-varying. The per-tick call site stays — profile_id moves on a
+    // commit and max_profile on a pin write, and the change-guard makes
+    // polling both free.
+    void refresh_probe(uint8_t profile_id) {
         // §9.4 fail-closed: the hook exists only where the operator armed
         // air.mcs_probe on a stage-0-proven unit. Not armed => not probing,
         // and §15.3 must keep saying so.

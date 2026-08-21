@@ -121,7 +121,7 @@ void test_probe_arming_follows_the_effective_ceiling() {
     // §9.4 fail-closed: with no hook installed the node is not probing, and
     // §15.3 must keep saying so however often the seam runs.
     CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
-    tx.refresh_probe(2, 1000);
+    tx.refresh_probe(2);
     CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
     CHECK_EQ_U(armed.calls, 0);
 
@@ -130,7 +130,7 @@ void test_probe_arming_follows_the_effective_ceiling() {
     };
 
     // Unpinned at the ladder floor (profile 2): candidate is id 4's mcs 3.
-    tx.refresh_probe(2, 1000);
+    tx.refresh_probe(2);
     CHECK_EQ_U(armed.calls, 1);
     CHECK_EQ_U(armed.period, 64);
     CHECK_EQ_U(armed.slot, 4);
@@ -141,7 +141,7 @@ void test_probe_arming_follows_the_effective_ceiling() {
     // seam now runs at tick cadence, so re-deriving the same answer must not
     // write the radio. Without this the arming would be re-issued ~10x/s
     // forever on a steady link.
-    for (int i = 0; i < 25; ++i) tx.refresh_probe(2, 1000 + i * 100);
+    for (int i = 0; i < 25; ++i) tx.refresh_probe(2);
     CHECK_EQ_U(armed.calls, 1);
     CHECK_EQ_U(tx.probe_candidate_mcs_, 3);
 
@@ -149,7 +149,7 @@ void test_probe_arming_follows_the_effective_ceiling() {
     // can climb, so the probe disarms: period 0, and §15.3 reads "not
     // probing". No commit happens here; the tick seam is what catches it.
     tx.set_profile_pin(2, 2);
-    tx.refresh_probe(2, 4000);
+    tx.refresh_probe(2);
     CHECK_EQ_U(armed.calls, 2);
     CHECK_EQ_U(armed.period, 0);
     CHECK_EQ_U(armed.mcs, 0);
@@ -157,7 +157,7 @@ void test_probe_arming_follows_the_effective_ceiling() {
 
     // Lifting the pin re-arms, again without a commit.
     tx.set_profile_pin(2, 6);
-    tx.refresh_probe(2, 5000);
+    tx.refresh_probe(2);
     CHECK_EQ_U(armed.calls, 3);
     CHECK_EQ_U(armed.period, 64);
     CHECK_EQ_U(armed.mcs, 3);
@@ -216,7 +216,7 @@ void test_no_probe_schedule_never_arms() {
     TxCore tx(tx_config(), 12345, &t, 0x68);
     int calls = 0;
     tx.apply_probe = [&calls](uint16_t, uint16_t, uint8_t) { ++calls; };
-    for (int i = 0; i < 20; ++i) tx.refresh_probe(2, 1000 + i * 100);
+    for (int i = 0; i < 20; ++i) tx.refresh_probe(2);
     CHECK_EQ_U(calls, 0);
     CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
 }
@@ -339,7 +339,7 @@ void test_probe_keeps_measuring_through_a_lockout() {
     // above" rather than "strictly below". Arming here first is what makes the
     // disarm below a visible TRANSITION rather than a state that was never
     // entered.
-    tx.refresh_probe(5, 6900);
+    tx.refresh_probe(5);
     CHECK_EQ_U(tx.probe_candidate_mcs_, 6);
     CHECK_EQ_U(armed_period, 64);
     CHECK_EQ_U(armed_mcs, 6);
@@ -349,7 +349,7 @@ void test_probe_keeps_measuring_through_a_lockout() {
     // for 46% of a degrading link and the veto never fired once, because loss
     // locks the rung above and nothing is left measuring the candidate rate by
     // the time it matters. Arming follows the §9.7 pin alone now.
-    tx.refresh_probe(6, 6900);
+    tx.refresh_probe(6);
     CHECK_EQ_U(tx.probe_candidate_mcs_, 7);
     CHECK_EQ_U(armed_period, 64);
     CHECK_EQ_U(armed_mcs, 7);
@@ -367,7 +367,7 @@ void test_probe_keeps_measuring_through_a_lockout() {
     // the reason Pass 188 keeps the probe running through it.
     run(110000, 111000, -30, 0);
     CHECK_EQ_U(tx.selector_.effective_ceiling_profile(111000), 7);
-    tx.refresh_probe(6, 111000);
+    tx.refresh_probe(6);
     CHECK_EQ_U(tx.probe_candidate_mcs_, 7);
     CHECK_EQ_U(armed_period, 64);
     CHECK_EQ_U(armed_mcs, 7);
