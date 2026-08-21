@@ -83,12 +83,15 @@
     }
   ],
   "air": {
-    "kind": "radio"
+    "kind": "radio",
+    "_mcs_probe_comment": "§9.4 ARMED on this node since 2026-08-21. TX-side half only — the schedule is table content hashed into table_version, so this key does nothing unless the table carries a probe block AND every receiver has the identical table. It is a PER-UNIT enablement, not a per-part one: §9.4 fail-closed requires the die's per-packet commanded rate to be stage-0-proven, and the proof here is for THIS craft's 8812EU 98:03:cf:cf:a4:28 (findings 2026-08-21 — both grounds independently derived the same probe set from seq, and an off control read exactly 0). Do not copy this key onto another craft without its own proof. Since Pass 186 the candidate is also clamped to policy.select.max_profile, so a craft sitting at its ceiling flies no probes at all.",
+    "mcs_probe": true
   },
   "policy": {
     "report_timeout_ms": 750,
     "select": {
-      "min_profile": 2,
+      "_profile_pin_comment": "Read back from the node 2026-08-21. min_profile is 1, not the 2 this file used to carry: a LOWER floor is the more robust value (§9.0 nothing may make demotion harder), so the node's is the one that wins. max_profile 5 is the shipped envelope and the node had drifted DOWN to 4 — which Pass 186 turned from cosmetic into load-bearing, since the probe candidate is now clamped to this pin and a craft pinned at its own rung flies no probes.",
+      "min_profile": 1,
       "max_profile": 5,
       "demote_milli": 45
     },
@@ -147,7 +150,8 @@
       ]
     },
     "mode_apply_cmd": "/etc/waybeam-link/modes/apply-mode.sh",
-    "active_mode": "imx335-060fps-mcs2",
+    "_active_mode_comment": "Read back from the node 2026-08-21; this file said mcs2 while the craft has been running mcs1. Unrelated to §9.4 — recorded here because leaving a known-wrong value in a reference config is how the §6.3b parity gap happened.",
+    "active_mode": "imx335-060fps-mcs1",
     "fps_ladder": {
       "enabled": false,
       "min": 30,

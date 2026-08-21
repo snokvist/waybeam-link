@@ -1,5 +1,5 @@
 {
-  "_comment": "Mirrors /etc/waybeam-link/ground.json on the ground at 192.168.2.242, read from the node 2026-08-09. SINGLE 8812AU on bus 5-1 as the TX/RX combo (operator rule) - RadioAir's role:'tx' adapter is duplex and also receives, so no second adapter is paired for the ground role; the 8812CU diversity entry this file used to carry is gone. Bus was 8-1 in the previous revision and nothing is there now: USB bus paths shuffle on re-plug, so the path is measured (lsusb -t), never carried over. Devourer (air.kind radio); whole-frame SHM egress.",
+  "_comment": "Mirrors /etc/waybeam-link/ground.json on the ground at 192.168.2.242, re-read from the node 2026-08-21. SINGLE 8812AU on bus 8-1 as the TX/RX combo (operator rule) - RadioAir's role:'tx' adapter is duplex and also receives, so no second adapter is paired for the ground role; the 8812CU diversity entry this file used to carry is gone. Devourer (air.kind radio); whole-frame SHM egress. Since 2026-08-16 the link runs IN-PROCESS inside waybeam_hub (mod_wblink, wblink.config_path in /etc/waybeam_hub/waybeam_ground.conf points here) — there is no standalone waybeam-link on this node, so a config change takes a waybeam-hub.service restart.",
   "node": {
     "originator": 9,
     "role": "rx",
@@ -22,7 +22,9 @@
         92,
         108
       ],
-      "bus": "5-1",
+      "_bus_comment": "Re-measured on the node 2026-08-21 (lsusb -t): the 8812AU is on bus 8-1. This file said 5-1 while the node ran 8-1 — USB bus paths shuffle on re-plug, so read the node, never carry the path over.",
+      "bus": "8-1",
+      "mac": "20:0d:b0:c4:a7:6a",
       "calib_id": "ground-au-1",
       "power_offset_presets_qdb": [
         -72,
@@ -45,7 +47,7 @@
         "kind": "frame-shm",
         "name": "venc_frame_out"
       },
-      "_conceal_comment": "§6.3b spatial salvage — ARMED here first because this is the ground whose decode path is verified end to end: a repaired stream decodes bit-identically on ffmpeg and on this host's AMD vah265dec, while an unrepaired gap AU does not (findings 2026-08-20). 'off' restores pre-§6.3b behaviour bit-for-bit. freeze_frame stays on: the hub's MPP default presents errinfo frames and fires the IDR requester on a drop, so freezing is cheaper than dropping. The rk3566 ground carries the same key in its on-device link config and stays 'off' until Phase C MPP acceptance is measured there.",
+      "_conceal_comment": "§6.3b spatial salvage — ARMED here first because this is the ground whose decode path is verified end to end: a repaired stream decodes bit-identically on ffmpeg and on this host's AMD vah265dec, while an unrepaired gap AU does not (findings 2026-08-20). 'off' restores pre-§6.3b behaviour bit-for-bit. freeze_frame stays on: the hub's MPP default presents errinfo frames and fires the IDR requester on a drop, so freezing is cheaper than dropping. Phase C measured MPP on the rk3566 ground 2026-08-21 — it accepts a repair (89 dB vs ffmpeg over 2 CTU rows) and disagrees at 39 dB on the gap it replaces — so that ground carries the same key set to slice-skip. NOTE this key only reached THIS node's running process on 2026-08-21: the binary here was a pre-§6.3b build until then, and the file having the key is not the node having it.",
       "conceal": {
         "mode": "slice-skip",
         "freeze_frame": true
@@ -118,7 +120,9 @@
         5785,
         5805,
         5825
-      ]
+      ],
+      "_adjacent_guard_comment": "§11 quick-connect guard, on the node since 2026-08-16: refuse a claim whose channel sits within 40 MHz of another emitter the scout measured. It is not a substitute for planning separation — it can only see emitters the scout saw — and two crafts in the air still need 60 MHz between them (findings 2026-08-16).",
+      "adjacent_guard_mhz": 40
     },
     "calibration": {
       "offset_seek_step_qdb": 2
