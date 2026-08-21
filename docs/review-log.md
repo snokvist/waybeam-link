@@ -24,6 +24,46 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 188 — the probe keeps measuring a locked-out rung; only the veto stays clamped (2026-08-21)
+
+**Verdict.** Operator ruling 2026-08-21, reversing the *arming* half of Pass
+187 (a) while keeping its control property. §9.4 arming follows the §9.7
+`max_profile` pin alone; the candidate is no longer clamped to the effective
+ceiling.
+
+**What changed the answer: a measurement, not an argument.** Pass 187 clamped
+to `adaptive_hi` on the reasoning that a veto cannot help where §9.2 has
+already barred the climb. The reasoning is still correct about the veto. It is
+wrong about the *measurement*, and the first real range walk showed by how
+much: the probe was **disarmed for 46 % of a degrading link**, 100 % correlated
+with `lockout_active` (66 of 66 samples), and `promote_blocked_probe` never
+moved once in 8.4 minutes on a link that reached −86 dBm. The sequence is
+self-defeating — loss locks the rung above, the clamp switches the probe off,
+and by the time the candidate rate is worth knowing about nothing is measuring
+it. §9.2 re-entry then runs on the RSSI floor alone, exactly as blind as before
+the probe existed. `docs/findings.md` 2026-08-21.
+
+**The veto needs no new mechanism to stay clamped.** Both climb rules are
+gated on `rung_ < adaptive_hi` *before* `probe_veto_fresh` is consulted
+(`core/src/selector.cpp`), so a climb to a locked-out rung is unreachable and
+evidence about it can suppress nothing. Pass 187's control property therefore
+survives the reversal for free — which is the fact that makes this a one-line
+change rather than a redesign, and it should have been noticed when Pass 187
+was written.
+
+**Cost, stated rather than buried.** A `1/period` share of video frames now
+flies a rate that has just demonstrably failed, in the window when the link can
+least afford it, and most of those frames are expected to be lost. That is the
+accepted price of having rate evidence in the only regime where it is
+actionable. Reducing rather than removing the duty under a lockout — a longer
+effective period — is recorded as an open refinement, not adopted.
+
+**What stays contract.** No wire change. Pass 187's other half (§10.6 pinning
+by profile ID, not MCS) is untouched, as is the per-tick re-derivation and its
+change-guard.
+
+**Evidence.** `docs/findings.md` 2026-08-21 walk test; issue #226.
+
 ## Pass 187 — the probe clamp follows the EFFECTIVE ceiling, and §10.6 stops conflating an MCS with a profile ID (2026-08-21)
 
 **Verdict.** Two amendments, both found by adversarially reviewing Pass 186

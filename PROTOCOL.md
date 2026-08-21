@@ -1977,32 +1977,37 @@ injection model has no such side stream, so that mechanism is **dropped**.
   headroom. The candidate is the next ascending-id profile's `mcs`, resolved
   through the live table (never `rung_index == mcs`); no probe fires at the
   top rung or when the adjacent profile shares the current MCS.
-- **The candidate is clamped to the EFFECTIVE ceiling (Pass 186, widened
-  Pass 187).** No probe fires when the adjacent profile's id is above the
-  ceiling the climb rules actually honour — the live §9.7 `max_profile` pin
-  (which includes the pin a §11.7 `SELECTOR` freeze installs, `min == max ==`
-  current) **narrowed by the §9.2 lockout ceiling**. It is exactly the
-  `adaptive_hi` both climb rules gate on, conflict fallback included: when a
-  lockout collides with the operator envelope the envelope retains precedence
-  and the lockout is ignored, here as there.
-  This is not an optimization. The probe's only consumer is a veto, and a veto
-  can only suppress a climb; where policy already forbids the climb, the duty
-  buys evidence no path can act on. Ceiling resolution is §9.7's: an id absent
-  from the table saturates to the top rung, so `max_profile = 255` still means
-  unpinned.
-  **Why the lockout counts (operator ruling 2026-08-21).** A locked-out rung is
-  the one case where the probe looks most useful and is worth least. It is the
-  only *direct* measurement of whether that rung has recovered — but probe
-  evidence is a veto and can never authorize the re-entry, so at best it blocks
-  a re-entry the RSSI floor would have allowed, and §9.2 expiry is not blind
-  anyway (the rung floor plus `reentry_backoff_s`/`reentry_dwell_s` gate it).
-  Against that, the lockout window is by construction when the link is
-  weakest, which is the most expensive moment to spend a `1/period` share of
-  video frames on a rate that has just demonstrably failed.
-  Because the effective ceiling moves with §9.2 state and not only with
-  commits and pin writes, the candidate is **re-derived every selector tick**;
-  the radio is written only when the resolved candidate actually changes, so a
-  steady link issues no traffic for this.
+- **The candidate is clamped to the §9.7 pin — and to nothing else (Pass 186;
+  widened Pass 187, narrowed back Pass 188).** No probe fires when the adjacent
+  profile's id is above the live `max_profile` pin, which includes the pin a
+  §11.7 `SELECTOR` freeze installs (`min == max ==` current). Ceiling
+  resolution is §9.7's: an id absent from the table saturates to the top rung,
+  so `max_profile = 255` still means unpinned. The candidate is re-derived
+  **every selector tick** and the radio is written only when the resolved
+  candidate actually changes, so a steady link issues no traffic for this.
+- **The probe keeps measuring a rung §9.2 has locked out (Pass 188, operator
+  ruling 2026-08-21).** Pass 187 additionally clamped the candidate to the
+  **effective** ceiling — `max_profile` narrowed by the §9.2 lockout — on the
+  reasoning that a veto cannot help where the climb is already barred. That is
+  sound about the *veto* and wrong about the *measurement*, and a range walk
+  measured the difference: the probe was disarmed for **46 %** of a degrading
+  link, 100 % correlated with `lockout_active`, and `promote_blocked_probe`
+  never moved once (`docs/findings.md` 2026-08-21). Loss locks the rung above,
+  the clamp switches the probe off, and by the time the candidate rate is worth
+  knowing about there is nothing measuring it — so §9.2 re-entry happens on the
+  RSSI floor alone, exactly as blind as before the probe existed.
+  Arming therefore follows the §9.7 pin only. **The veto stays clamped without
+  any additional mechanism**, because both climb rules are already gated on
+  `rung_ < adaptive_hi` before the veto is consulted: a climb to a locked-out
+  rung is unreachable, so evidence about it can suppress nothing. What the
+  evidence *can* do is be fresh at the moment the lockout expires, which is the
+  one moment §9.2 has to decide whether re-entry is sane.
+  **State the cost plainly:** a `1/period` share of video frames flies a rate
+  that has just demonstrably failed, during the window when the link can least
+  afford it, and most of those frames are expected to be lost. That is the
+  accepted price of having rate evidence in the only regime where it is
+  actionable. Reducing rather than removing the duty under a lockout (a longer
+  effective period) is an open refinement, not current behaviour.
   Because `max_profile` is node-local policy and not table content, **the
   receiver cannot know it** — the RX window keeps deriving the unclamped
   candidate and simply never observes it, which guard (4) below already
