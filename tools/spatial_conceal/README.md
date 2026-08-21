@@ -19,6 +19,9 @@ tests cannot do.
   with ffmpeg and assert: same frame count, frames before the repair
   identical, the concealed rows' interior byte-equal to the previous frame,
   untouched rows byte-equal to the reference, resync at the next IDR.
+- `mpp_dec_yuv.c` — device-side Rockchip MPP decoder (aarch64) that writes
+  cropped I420 and prints per-frame `errinfo`/`discard`, configured exactly as
+  `mod_pixelpilot` configures its own. See "rk3566" below.
 - `salvage_sim.py <in.265> <s> <r> <loss%> <seed> <out.265>` — whole-pipeline
   simulation (chunking, i.i.d. loss, MDS-model FEC, salvage, rebuild) with
   the Python generator. The C++ twin over the real FrameFramer/Reassembler
@@ -59,11 +62,44 @@ wrong. Compare the pictures instead:
 ```
 # does the hardware decoder agree with software on the repaired stream?
 python3 tools/spatial_conceal/decode_compare.py ref.265 repaired.265 \
-    --ref-decoder ffmpeg --decoder gst:vah265dec        # rk3566: gst:<mpp element>
+    --ref-decoder ffmpeg --decoder gst:vah265dec        # x86 VAAPI
 
 # the negative control: what a decoder sees WITHOUT §6.3b
 python3 tools/spatial_conceal/slice_drop.py ref.265 gap.265 --au 50 --slice 1
 ```
+
+### rk3566 — decode on the device, compare here
+
+There is no gst MPP element to point `--decoder` at: the shipped OpenIPC SBC
+GS image carries 28 gstreamer plugins with no rockchip plugin, no
+`mpi_dec_test`, no compiler and no numpy. It does carry
+`librockchip_mpp.so.1`, so `mpp_dec_yuv.c` produces the picture there and
+`--decoder raw` compares it here.
+
+```
+SR=sbc-groundstations/output/waybeam_radxa3e_defconfig/host/aarch64-buildroot-linux-gnu/sysroot
+aarch64-none-linux-gnu-gcc -O2 -Wall -Wextra mpp_dec_yuv.c --sysroot=$SR \
+    -I$SR/usr/include/rockchip -lrockchip_mpp -o mpp_dec_yuv
+scp mpp_dec_yuv ref.265 rep.265 root@<rk3566>:/tmp/
+ssh root@<rk3566> 'cd /tmp && ./mpp_dec_yuv rep.265 rep_mpp.yuv'
+scp root@<rk3566>:/tmp/rep_mpp.yuv .
+python3 decode_compare.py rep.265 rep_mpp.yuv --size 1920x1080 \
+    --ref-decoder ffmpeg --decoder raw
+```
+
+Two things it must do, both learned the hard way (findings 2026-08-21):
+
+- **Configure the decoder the way the hub does.** `mpp_dec_yuv.c` copies
+  `set_mpp_decoding_parameters()` out of
+  `waybeam-hub/src/pixelpilot/video_decoder.c`. Stock `mpi_dec_test` decodes
+  with MPP defaults, which is not what any operator runs.
+- **Hand MPP a buffer group at info-change.** Relying on the internal pool
+  deadlocks the feed loop partway through the stream (measured: 14 of 40
+  frames). 24 buffers is both `mpi_dec_test`'s count and the hub's
+  `DECODER_MAX_FRAMES`.
+
+MPP reports `errinfo 0 discard 0` on a gap AU, so the device-side log is not
+a readout — only the compared pictures are.
 
 `decode_compare.py` reports per-frame luma PSNR and the damaged **CTU-64 row**
 indices, so a slice-band failure is named rather than averaged away. Three
