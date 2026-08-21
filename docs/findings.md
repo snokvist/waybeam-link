@@ -12,6 +12,74 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-21 — the §9.4 probe actuates exactly as specified, and `probe_per` is invisible
+
+First device run of the §9.4 Pass 163 rate probe. `probe {period:64, slot:4}`
+added to the **deployed** table (never the repo file) and pushed identically to
+`.232`, `.242` and `.199`; `air.mcs_probe: true` on the craft only. All three
+came up at `table_version=0xF2`, up from `0x68` without the block — the
+lockstep worked and the hash moved exactly as `--check` predicted offline.
+
+Craft at profile 4 / MCS 4, so the up-candidate is MCS 5, and the MCS-5 bucket
+of `adapters[].rx_mcs[]` read exactly 0 on both grounds beforehand. 60 s
+windows, two independent receivers:
+
+| window | `.242` MCS-5 share | `.199` MCS-5 share | `.242` delivered/rx |
+|---|---|---|---|
+| probe ON | 1.527 % (2013 frames) | 1.505 % (2012 frames) | 97.56 % |
+| probe OFF (control) | **0.000 %** (0) | **0.000 %** (0) | 97.52 % |
+| probe ON (repeat) | 1.527 % (1988) | 1.504 % (1987) | 97.53 % |
+
+Ideal is 1/64 = 1.563 %; the shortfall is the non-video traffic in `rx` that
+never probes. **The two receivers saw the same probe frames** — 2013 against
+2012, then 1988 against 1987 — which is the property that matters: both
+derived the schedule from `seq` alone, with nothing on the wire saying which
+frames were probes.
+
+The control was taken by flipping `air.mcs_probe` on the craft **without
+touching the table**, so `table_version` stayed `0xF2` across all three
+windows and the only variable was TX actuation. The repeat ON window
+reproduces the first to three decimals, which bounds scene drift.
+
+**This is the per-unit stage-0 proof** the §9.4 enablement gate asks for, for
+the craft's 8812EU (`98:03:cf:cf:a4:28`): the unit honours a per-frame
+radiotap rate. It was previously proven per-part, not per-unit.
+
+**Cost: none measurable.** `delivered/rx` moves 97.56 / 97.52 / 97.53 % across
+ON/OFF/ON and `recovered_fec` 500 / 522 / 506 — no direction, let alone a
+1.5 % penalty. Expected: MCS 5 delivers fine at this RSSI (−34/−48). The duty
+cost only becomes real where MCS+1 starts failing, which is exactly where the
+veto is supposed to earn it back.
+
+**Two things this run did NOT verify, and one is a gap.**
+
+- **`probe_per` is exposed nowhere.** Not in the §15.3 stats NDJSON, not on
+  any REST path. The only probe observable is `link.promote_blocked_probe`,
+  a downstream effect counter that moves only when a climb is both attempted
+  *and* vetoed. So there is no way to tell "the RX has no opinion" (guard 4:
+  `candidate_observed_ == 0`, too few samples, or stale) from "the RX has an
+  opinion and it is favourable". **A rollout would be flying blind** — you
+  could enable the probe fleet-wide and never confirm it is producing
+  evidence. Exposing `probe_per` should precede any rollout.
+- **The veto was not exercised, and the reason is structural.** The craft's
+  own config pins `policy.select.max_profile: 4` while it sits at profile 4,
+  so profile 5 is not a promotion target the selector is ever allowed to
+  pick — there is no climb for the veto to block. `probe_up_candidate_mcs()`
+  (`core/src/mcs_probe.cpp:10`) takes only `(table, active_profile)` and
+  walks to the next profile **by id**; it has no knowledge of `max_profile`.
+  **So on this node as configured the probe's 1.5 % duty buys nothing** — it
+  can only ever veto a promotion policy already forbids. Either the
+  candidate should be clamped to the selector's `max_profile` (and the probe
+  suppressed when `active_profile == max_profile`), or a probing node has to
+  be configured with headroom above it. Worth an issue before rollout;
+  exercising the veto for real additionally needs the cliff — a power
+  walk-down or range — not this 50 cm bench geometry.
+
+`probe.period`/`probe.slot` remain the §17 seeds inherited from the
+devourer/wfb_ng bench fit. This run shows the mechanism actuates at 64/4; it
+says nothing about whether 64/4 is the right fit for our fps and block
+structure.
+
 ## 2026-08-21 — Phase C: Rockchip MPP accepts a §6.3b repair and is SILENT on the gap it replaces
 
 Phase C acceptance on the rk3566 ground (`.199`, OpenIPC SBC GS, kernel

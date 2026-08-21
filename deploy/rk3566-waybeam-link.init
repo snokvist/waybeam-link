@@ -1,0 +1,36 @@
+#!/bin/sh
+
+DAEMON="waybeam-link"
+CONFIG="/etc/waybeam-link/ground.json"
+PIDFILE="/var/run/waybeam-link.pid"
+LOGFILE="/var/log/waybeam-link.log"
+# Devourer claims the 8812CU over usbfs, so the kernel driver must not hold
+# it. There is no interface to bring up and no monitor mode to set: the old
+# waybeam-mon-up call belonged to the kernel-monitor backend deleted in
+# Pass 164. wait_for_ip is gone with cache.repair — nothing binds a LAN
+# address any more (control is 127.0.0.1).
+
+start() {
+	# The MODULE is 88x2cu; the usb driver it registers is rtl88x2cu. rmmod
+	# takes the module name, so the obvious one silently does nothing.
+	rmmod 88x2cu 2>/dev/null
+	/usr/bin/$DAEMON rx -c "$CONFIG" --check || return 1
+	echo -n "Starting $DAEMON: "
+	start-stop-daemon -S -b -m -p "$PIDFILE" -O "$LOGFILE" \
+		-x /usr/bin/$DAEMON -- rx -c "$CONFIG"
+	echo "OK"
+}
+
+stop() {
+	echo -n "Stopping $DAEMON: "
+	start-stop-daemon -K -q -p "$PIDFILE"
+	rm -f "$PIDFILE"
+	echo "OK"
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; sleep 1; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
