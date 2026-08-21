@@ -15,8 +15,13 @@ Usage:
 
     --size WxH        frame size (default: probed from ref)
     --decoder SPEC    ffmpeg (default) | gst:<element>, e.g. gst:vah265dec
-                      (VAAPI) or gst:mppvideodec (rk3566). Applies to BOTH
-                      streams unless --ref-decoder is given.
+                      (VAAPI) | raw (the file is already packed I420 at
+                      --size, decoded elsewhere). Applies to BOTH streams
+                      unless --ref-decoder is given.
+                      `raw` is how the rk3566 is measured: the shipped
+                      OpenIPC ground image has librockchip_mpp but no
+                      gstreamer rockchip plugin, so the picture is produced
+                      on the device by mpp_dec_yuv.c and compared here.
     --ref-decoder S   decode the reference with a different decoder — use
                       ffmpeg for the reference and gst:<hw> for the test to
                       ask "does the hardware decoder agree with software?"
@@ -58,6 +63,9 @@ def probe_size(path):
 
 def decode(path, spec):
     """Decode to raw I420 bytes. Returns (bytes, stderr_text)."""
+    if spec == "raw":
+        with open(path, "rb") as f:
+            return f.read(), ""
     if spec == "ffmpeg":
         # -threads 1: the SSC338Q mixes TRAIL_N/TRAIL_R inside one picture
         # (non-conformant), and ffmpeg's frame-threaded recovery of that mix
@@ -71,7 +79,8 @@ def decode(path, spec):
                "h265parse", "!", element, "!", "videoconvert", "!",
                "video/x-raw,format=I420", "!", "fdsink", "fd=1", "sync=false"]
     else:
-        sys.exit(f"unknown --decoder {spec!r} (want ffmpeg or gst:<element>)")
+        sys.exit(f"unknown --decoder {spec!r} "
+                 f"(want ffmpeg, raw, or gst:<element>)")
     out = subprocess.run(cmd, capture_output=True)
     return out.stdout, out.stderr.decode()
 

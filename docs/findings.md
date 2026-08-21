@@ -12,6 +12,72 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-21 — Phase C: Rockchip MPP accepts a §6.3b repair and is SILENT on the gap it replaces
+
+Phase C acceptance on the rk3566 ground (`.199`, OpenIPC SBC GS, kernel
+6.1.84). The README's `--decoder gst:<mpp element>` recipe has nothing to bind
+to on the shipped image: 28 gstreamer plugins, no rockchip plugin, no
+`mpi_dec_test`, no compiler, no numpy. What the image does have is
+`librockchip_mpp.so.1` — the library `mod_pixelpilot` links. So the picture is
+produced on the device by `tools/spatial_conceal/mpp_dec_yuv.c`, which copies
+the four settings from `waybeam-hub/src/pixelpilot/video_decoder.c`
+`set_mpp_decoding_parameters()` verbatim (`base:split_parse=1`,
+`DISABLE_ERROR` / `IMMEDIATE_OUT` / `ENABLE_FAST_PLAY` = `0xffff`) and is
+compared on x86 through `decode_compare.py --decoder raw`. **Testing against
+MPP defaults would not have been an acceptance test** — the hub does not ship
+defaults.
+
+Vector: 40 AUs cut from `capture_232_4slice.265` at an AU boundary
+(`ffmpeg -c copy -frames:v 40`), AU 22 (4 slices, 14207/14245/13458/5118 B),
+slice 1 either repaired by `hevc_conceal_cli` (14249 B -> a 20 B all-skip
+slice) or deleted by `slice_drop.py`.
+
+| comparison | worst dB | damaged CTU-64 rows | frames differing |
+|---|---|---|---|
+| C0 ffmpeg(ref) vs MPP(ref) | 41.70 | 3-16 | 8/40 — exactly n≡4 (mod 5) |
+| C1 MPP(ref) vs MPP(rep) | 46.63 | **4-10**, healing | 3/40 |
+| C2 MPP(ref) vs MPP(gap) | 42.14 | **4-16**, worsening | 3/40 |
+| C3 ffmpeg(rep) vs MPP(rep) | **89.04** at the repair | 4-5 | C0's 8, plus 22 and 23 |
+| C4 ffmpeg(gap) vs MPP(gap) | **39.44** at the fault | 3-16 | C0's 8, plus 22, 23, 24 |
+
+Peak/mean luma delta, computed independently of `decode_compare.py`:
+frame 22 rep 32/0.338 against gap 59/0.538; frame 24 rep 28/0.144 against gap
+56/0.577.
+
+**Three things this establishes.**
+
+1. **MPP accepts the repair.** On the repaired stream the two decoders agree
+   to 89 dB over two CTU rows — rounding, not divergence. Everything else is
+   C0. On the gap stream they produce materially different pictures (39.4 dB
+   over the whole frame): two ground stations would show different pixels and
+   neither would be right.
+2. **The gap costs the rest of the picture.** Same decoder, same reference:
+   the repair stays inside rows 4-10 and decays by frame 24; the gap reaches
+   row 16 — the bottom — and is *worse* at frame 24 than at 22. The heatmap
+   shows a bright seam at the slice boundary with error smeared below it.
+3. **MPP reported `errinfo 0 discard 0` on all 40 frames of all three
+   streams, including the gap.** The external lab's claim reproduces on our
+   hardware, our stream and our decoder configuration. `video_decoder.c:1352`
+   gates the partial-frame log *and the IDR requester* on
+   `errinfo || discard`, so **this fault class never fires either.** A
+   ground that logged nothing has not shown it received anything good.
+
+C0 is the third independent decoder to disagree on TRAIL_N pictures — ffmpeg,
+AMD VAAPI and now MPP — at the same ~42 dB, the same 1-in-5 cadence, the same
+full-frame extent, while the other 32/40 frames are bit-identical between
+ffmpeg and MPP. MPP's own log says `h265d: nal: type mismatch 0 1`, the same
+complaint ffmpeg makes. The venc-side non-conformance is not an ffmpeg
+artifact.
+
+**Open.** Conceal is NOT armed on `.199`: its `waybeam-link` is the Aug-4
+binary and its config still declares `"air": {"kind": "kernel-monitor"}`, the
+backend deleted in Pass 164, with the adapter named by `ifname`. Arming
+requires a node re-bring-up (devourer on bus 1-1 with `rtl88x2cu` unloaded,
+current table, current binary), not a config key — and `.199` is live-RX right
+now (3.42M packets, RSSI -28), so that takes a working receiver off the air.
+Its `/etc/waybeam-link/table.example.json` is also the Aug-1 short-GI table
+(`b154d494`) where `.232` and `.242` both carry `017f9c18`.
+
 ## 2026-08-20 — §10.7 needed no recalibration for long GI, and the ground could not write an artifact at all
 
 **The premise was wrong, checked before acting on it.** The claim that the
