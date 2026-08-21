@@ -1,0 +1,53 @@
+#!/bin/sh
+# Craft-side walk logger (#226 Leg A / §6.3b Phase E, 2026-08-21).
+#
+# Exists because promote_blocked_probe is CRAFT-ONLY (§15.3) — the grounds get
+# the craft's §3.15 selector word, but not the veto counter, and that counter is
+# the number the walk is for. The craft is unreachable in the field, so the only
+# way to keep it is the SD card.
+#
+# Runs AFTER S97waybeam-hub by sort order. Writes to the SD card, never the
+# 5.7 MB overlay. Wall clock is recorded but may be wrong on a cold battery
+# boot with no NTP, so uptime is recorded too and is the reliable axis.
+DIR=/mnt/mmcblk0p1/walklog
+PIDF=/var/run/walklog.pid
+URL=http://127.0.0.1:8091/api/v1/stats
+
+start() {
+    [ -d /mnt/mmcblk0p1 ] || { echo "walklog: SD not mounted, not starting"; exit 0; }
+    mkdir -p "$DIR" 2>/dev/null
+    F="$DIR/walk-$(date +%Y%m%d-%H%M%S)-up$(cut -d. -f1 /proc/uptime).ndjson"
+    (
+      # Wait for the hub's control server rather than racing it.
+      i=0
+      while [ $i -lt 120 ]; do
+          curl -sS --max-time 2 "$URL" >/dev/null 2>&1 && break
+          i=$((i+1)); sleep 1
+      done
+      echo "{\"marker\":\"start\",\"t_wall\":$(date +%s),\"t_up\":$(cut -d' ' -f1 /proc/uptime)}" >> "$F"
+      while true; do
+          S=$(curl -sS --max-time 2 "$URL" 2>/dev/null)
+          if [ -n "$S" ]; then
+              echo "{\"t_wall\":$(date +%s),\"t_up\":$(cut -d' ' -f1 /proc/uptime),\"s\":$S}" >> "$F"
+          fi
+          sleep 1
+      done
+    ) &
+    echo $! > "$PIDF"
+    echo "walklog: started -> $F"
+}
+stop() {
+    if [ -f "$PIDF" ]; then
+        kill -TERM "$(cat $PIDF)" 2>/dev/null
+        rm -f "$PIDF"
+    fi
+    # SIGTERM only, never SIGKILL on SigmaStar.
+    echo "walklog: stopped"
+    sync
+}
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    *) echo "usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
