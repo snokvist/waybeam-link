@@ -652,22 +652,9 @@ struct TxCore {
                 apply_mode(act.commit->mcs,
                            act.commit->gi == GuardInterval::kShort);
             }
-            // §9.4 Pass 163: re-derive the up-candidate for the new
-            // operating point through the live table; disarm at the top
-            // rung / same-MCS adjacency (probe_up_candidate_mcs nullopt).
-            if (apply_probe) {
-                std::optional<uint8_t> cand;
-                if (table_ != nullptr && table_->probe_period != 0) {
-                    cand = probe_up_candidate_mcs(*table_,
-                                                  act.commit->profile_id);
-                }
-                if (cand) {
-                    apply_probe(table_->probe_period, table_->probe_slot,
-                                *cand);
-                } else {
-                    apply_probe(0, 0, 0);
-                }
-            }
+            // §9.4 Pass 163/186: re-derive the up-candidate for the new
+            // operating point through the live table and the live §9.7 pin.
+            refresh_probe(act.commit->profile_id);
             // ...and the §10 per-adapter power resolve, applied inside the
             // same sequenced transition through the apply_power hook (both RF
             // backends, §10.5; a logged intent on the udp dev backend). While
@@ -897,7 +884,7 @@ struct TxCore {
     // §15.5 control-plane knobs -------------------------------------------
     // §9.7 profile pin: clamp the operating-point ladder to [min,max] by id.
     void set_profile_pin(uint8_t min_profile, uint8_t max_profile) {
-        selector_.set_profile_pin(min_profile, max_profile);
+        apply_profile_pin(min_profile, max_profile);
     }
     // §15.5 Pass 103: forget the venc actuator's write-on-change cache so the
     // next tick re-asserts bitrate/caps/fps — called after an out-of-loop venc
@@ -958,10 +945,10 @@ struct TxCore {
                 // sampling at freeze-lift.
                 if (cmd_selector_frozen_) {
                     const uint8_t p = selector_.profile_id();
-                    selector_.set_profile_pin(p, p);
+                    apply_profile_pin(p, p);
                 } else {
-                    selector_.set_profile_pin(boot_min_profile_,
-                                              boot_max_profile_);
+                    apply_profile_pin(boot_min_profile_,
+                                                      boot_max_profile_);
                 }
                 return true;
             case vcmd_id::kFpsLadder:
@@ -1343,6 +1330,17 @@ struct TxCore {
             selector_.promote_blocked_saturated();
         snap.link.promote_blocked_probe =
             selector_.promote_blocked_probe();  // §15.3 Pass 163
+        // §15.3 Pass 186 craft view of the §9.4 probe: the evidence the veto
+        // is reading (kNoProbe = none received), how old it is against
+        // probe_veto_ttl_ms, and the rate we are actually flying on probe
+        // slots. The three ground-only tallies stay 0 here.
+        snap.link.probe_per = selector_.probe_per();
+        snap.link.probe_per_age_ms =
+            selector_.probe_per_ms() == 0
+                ? 0
+                : static_cast<uint32_t>(std::min<uint64_t>(
+                      now - selector_.probe_per_ms(), 0xFFFFFFFFull));
+        snap.link.probe_candidate_mcs = probe_candidate_mcs_;
     }
 
     struct PowerAdapter {
@@ -1667,6 +1665,38 @@ struct TxCore {
     // installed only when air.mcs_probe is on (radio backend). (0,0,0)
     // disarms.
     std::function<void(uint16_t, uint16_t, uint8_t)> apply_probe;
+
+    // §9.7 pin + §9.4 probe move together (Pass 186). The probe candidate is
+    // clamped to max_profile, so a pin change that is never followed by a
+    // commit — a §11.7 SELECTOR freeze is exactly that, it pins the CURRENT
+    // rung so nothing can commit afterwards — would otherwise strand the
+    // previous arming on the radio. Every pin write goes through here.
+    void apply_profile_pin(uint8_t min_profile, uint8_t max_profile) {
+        selector_.set_profile_pin(min_profile, max_profile);
+        refresh_probe(selector_.profile_id());
+    }
+
+    // §9.4: (re)derive the up-candidate for `profile_id` through the live
+    // table and the live §9.7 ceiling, and push it at the radio. Disarms
+    // (period 0) at the top rung, at same-MCS adjacency, and above the pin —
+    // all three are probe_up_candidate_mcs returning nullopt.
+    void refresh_probe(uint8_t profile_id) {
+        // §9.4 fail-closed: the hook exists only where the operator armed
+        // air.mcs_probe on a stage-0-proven unit. Not armed => not probing,
+        // and §15.3 must keep saying so.
+        if (!apply_probe) return;
+        std::optional<uint8_t> cand;
+        if (table_ != nullptr && table_->probe_period != 0) {
+            cand = probe_up_candidate_mcs(*table_, profile_id,
+                                          selector_.max_profile());
+        }
+        probe_candidate_mcs_ = cand ? *cand : kProbeMcsNone;  // §15.3
+        if (cand) {
+            apply_probe(table_->probe_period, table_->probe_slot, *cand);
+        } else {
+            apply_probe(0, 0, 0);
+        }
+    }
     std::function<bool(size_t adapter_idx, int32_t qdb)> apply_power;
     std::function<void(size_t adapter_idx)> apply_power_auto;
     // §10.5 (Pass 150) relative actuator — bound for EVERY backend, unlike
@@ -1739,6 +1769,11 @@ struct TxCore {
     bool cmd_fps_enabled_ = true;
     uint8_t boot_min_profile_ = 0;   // §9.7 boot envelope for SELECTOR run
     uint8_t boot_max_profile_ = 255;
+    // §15.3 Pass 186: the MCS this node is currently flying on §9.4 probe
+    // slots. kProbeMcsNone until refresh_probe() arms one, and back to it on
+    // every disarm — so it reads "not probing" for a node with air.mcs_probe
+    // off, at the top rung, at same-MCS adjacency, or above its §9.7 pin.
+    uint8_t probe_candidate_mcs_ = kProbeMcsNone;
     ReportGate feedback_gate_;             // §3.10 Pass 55
     ReportGate report_gate_;               // §3.5 Pass 41
     uint32_t verdict_epoch_seen_ = 0;      // §3.16 Pass 159 monotone gate
@@ -1793,10 +1828,10 @@ struct TxCore {
             }
             if (cmd_selector_frozen_) {
                 const uint8_t pf = selector_.profile_id();
-                selector_.set_profile_pin(pf, pf);
+                apply_profile_pin(pf, pf);
             } else {
-                selector_.set_profile_pin(boot_min_profile_,
-                                          boot_max_profile_);
+                apply_profile_pin(boot_min_profile_,
+                                                  boot_max_profile_);
             }
             if (power_override_) {
                 // §10.5: the latch owns power — re-assert it (probes wrote
@@ -1870,7 +1905,7 @@ struct TxCore {
             }
         }
         if (a.pin_rung) {
-            selector_.set_profile_pin(*a.pin_rung, *a.pin_rung);
+            apply_profile_pin(*a.pin_rung, *a.pin_rung);
         }
     }
     // §3.16 (Pass 153): the video input is starved while EITHER direction

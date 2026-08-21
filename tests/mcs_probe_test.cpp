@@ -74,6 +74,27 @@ int main() {
     CHECK(!probe_up_candidate_mcs(t, 9).has_value());
     CHECK(!probe_up_candidate_mcs(t, 7).has_value());
 
+    // ---- §9.7 ceiling clamp (Pass 186) --------------------------------
+    // The default is unpinned and must not change any answer above.
+    CHECK_EQ_U(probe_up_candidate_mcs(t, 2, 255).value(), 3);
+    CHECK_EQ_U(probe_up_candidate_mcs(t, 4, 255).value(), 5);
+    // At the pin: the craft that motivated this sits at id 4 pinned to 4, so
+    // the candidate (id 6) is above the ceiling and no probe fires.
+    CHECK(!probe_up_candidate_mcs(t, 4, 4).has_value());
+    CHECK(!probe_up_candidate_mcs(t, 2, 2).has_value());
+    // Below the pin the probe still fires, and the candidate AT the pin is
+    // allowed — the clamp is "not above", not "strictly below": promoting
+    // INTO the ceiling rung is exactly the climb the evidence can inform.
+    CHECK_EQ_U(probe_up_candidate_mcs(t, 2, 4).value(), 3);
+    CHECK_EQ_U(probe_up_candidate_mcs(t, 4, 6).value(), 5);
+    CHECK_EQ_U(probe_up_candidate_mcs(t, 4, 9).value(), 5);
+    // A pin id absent from the table saturates to the top rung (§9.7
+    // rung_of_id semantics) rather than clamping everything away.
+    CHECK_EQ_U(probe_up_candidate_mcs(t, 2, 7).value(), 3);
+    CHECK_EQ_U(probe_up_candidate_mcs(t, 4, 0).value(), 5);
+    // The clamp never RESCUES a candidate the other rules disarmed.
+    CHECK(!probe_up_candidate_mcs(t, 6, 9).has_value());  // same-MCS adjacent
+
     McsProbeWindow::Params prm;
     prm.min_samples = 4;
     prm.gap_horizon = 8;

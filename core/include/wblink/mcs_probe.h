@@ -23,8 +23,18 @@ inline bool probe_slot_hit(uint32_t seq, uint16_t period, uint16_t slot) {
 // rung_index == mcs). nullopt when active_profile is unknown, at the top
 // rung, or when the adjacent profile shares the current MCS — a probe there
 // would be rate-unverifiable at the receiver.
+//
+// max_profile is the §9.7 ceiling as a profile ID (Pass 186): a candidate
+// above it returns nullopt, because the probe's only consumer is a veto and
+// a veto cannot help where policy already forbids the climb. Resolution is
+// §9.7's — an id absent from the table saturates to the top rung, so the
+// default 255 (and any other unpinned value) never clamps. TX callers pass
+// the LIVE pin; the RX cannot know it and deliberately keeps the default —
+// its window then observes nothing and guard 4 reports kNoProbe, which is
+// how one-sided knowledge stays absence-of-evidence rather than mis-evidence.
 std::optional<uint8_t> probe_up_candidate_mcs(const ProfileTable& table,
-                                              uint8_t active_profile);
+                                              uint8_t active_profile,
+                                              uint8_t max_profile = 255);
 
 // RX-side probe evidence window (§9.4 Pass 163). One instance per node,
 // scoped to the video stream of the accepted sender. All three normative
@@ -78,6 +88,10 @@ class McsProbeWindow {
     // Introspection (tests/stats).
     uint32_t successes() const { return successes_; }
     uint32_t failures() const { return failures_; }
+    // Guard 4's counter (§15.3 Pass 186 `probe_observed`): direct
+    // candidate-rate observations this window. Zero is the reading that says
+    // nothing is probing on air, as distinct from "probing and failing".
+    uint32_t observed() const { return candidate_observed_; }
     bool confirmed() const { return confirmed_; }
     std::optional<uint8_t> candidate_mcs() const { return candidate_; }
 

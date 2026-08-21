@@ -8,9 +8,12 @@
 namespace wblink {
 
 std::optional<uint8_t> probe_up_candidate_mcs(const ProfileTable& table,
-                                              uint8_t active_profile) {
+                                              uint8_t active_profile,
+                                              uint8_t max_profile) {
     const Profile* cur = nullptr;
     const Profile* next = nullptr;
+    uint8_t top_id = 0;
+    bool ceiling_in_table = false;
     for (const Profile& p : table.profiles) {
         if (p.id == active_profile) {
             cur = &p;
@@ -18,8 +21,18 @@ std::optional<uint8_t> probe_up_candidate_mcs(const ProfileTable& table,
                    (next == nullptr || p.id < next->id)) {
             next = &p;
         }
+        if (p.id == max_profile) ceiling_in_table = true;
+        if (p.id > top_id) top_id = p.id;
     }
     if (cur == nullptr || next == nullptr || next->mcs == cur->mcs) {
+        return std::nullopt;
+    }
+    // §9.7 pin (Pass 186). Resolved the way Selector::rung_of_id does it: an
+    // id absent from the table saturates to the top rung, so 255 — and any
+    // other unpinned value — leaves the candidate alone. top_id is only read
+    // once `next` exists, so an empty table cannot reach here.
+    const uint8_t ceiling = ceiling_in_table ? max_profile : top_id;
+    if (next->id > ceiling) {
         return std::nullopt;
     }
     return next->mcs;

@@ -85,10 +85,99 @@ void test_bw_code_maps_widths() {
 
 }  // namespace
 
+// §9.4 Pass 186: the probe candidate is clamped to the LIVE §9.7 pin, and a
+// pin change re-derives it. Before this, the arming happened only inside the
+// commit branch, so a pin that forbids every climb — which a §11.7 SELECTOR
+// freeze installs by pinning min == max == current, after which nothing can
+// commit — left the previous arming on the radio, spending a 1/period duty on
+// evidence whose only consumer (a veto) had nothing left to veto.
+void test_probe_arming_follows_the_live_pin() {
+    wblink::ProfileTable t;
+    for (auto [id, mcs] : {std::pair<uint8_t, uint8_t>{2, 1},
+                           {4, 3},
+                           {6, 5}}) {
+        wblink::Profile p;
+        p.id = id;
+        p.mcs = mcs;
+        p.max_payload = 1424;
+        t.profiles.push_back(p);
+    }
+    t.floor_profile = 2;
+    t.probe_period = 64;
+    t.probe_slot = 4;
+
+    Config c = tx_config();
+    c.policy.select.min_profile = 2;
+    c.policy.select.max_profile = 6;  // unpinned within this ladder
+    TxCore tx(c, 12345, &t, 0xF2);
+
+    // The hook is what §9.4 fail-closed enablement installs; without it the
+    // node is not probing and must keep saying so.
+    struct Armed {
+        uint16_t period = 0xFFFF;
+        uint16_t slot = 0xFFFF;
+        uint8_t mcs = 0xFF;
+        int calls = 0;
+    } armed;
+    CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
+    tx.set_profile_pin(2, 6);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);  // no hook
+
+    tx.apply_probe = [&armed](uint16_t period, uint16_t slot, uint8_t mcs) {
+        armed = {period, slot, mcs, armed.calls + 1};
+    };
+
+    // Unpinned at the ladder floor (profile 2): candidate is id 4's mcs 3.
+    tx.set_profile_pin(2, 6);
+    CHECK_EQ_U(armed.calls, 1);
+    CHECK_EQ_U(armed.period, 64);
+    CHECK_EQ_U(armed.slot, 4);
+    CHECK_EQ_U(armed.mcs, 3);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, 3);
+
+    // Pinned AT the current rung — the SELECTOR-freeze shape. Nothing can
+    // climb, so the probe disarms: period 0, and §15.3 reads "not probing".
+    tx.set_profile_pin(2, 2);
+    CHECK_EQ_U(armed.calls, 2);
+    CHECK_EQ_U(armed.period, 0);
+    CHECK_EQ_U(armed.mcs, 0);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
+
+    // Lifting the pin re-arms without waiting for a commit.
+    tx.set_profile_pin(2, 6);
+    CHECK_EQ_U(armed.calls, 3);
+    CHECK_EQ_U(armed.period, 64);
+    CHECK_EQ_U(armed.mcs, 3);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, 3);
+}
+
+// A table with no probe schedule disarms on every path, so a fleet that has
+// not adopted the §3.6 probe block never flies one.
+void test_no_probe_schedule_never_arms() {
+    wblink::ProfileTable t;
+    for (auto [id, mcs] : {std::pair<uint8_t, uint8_t>{2, 1}, {4, 3}}) {
+        wblink::Profile p;
+        p.id = id;
+        p.mcs = mcs;
+        p.max_payload = 1424;
+        t.profiles.push_back(p);
+    }
+    t.floor_profile = 2;  // probe_period stays 0
+
+    TxCore tx(tx_config(), 12345, &t, 0x68);
+    uint16_t period = 0xFFFF;
+    tx.apply_probe = [&period](uint16_t p, uint16_t, uint8_t) { period = p; };
+    tx.set_profile_pin(2, 4);
+    CHECK_EQ_U(period, 0);
+    CHECK_EQ_U(tx.probe_candidate_mcs_, wblink::kProbeMcsNone);
+}
+
 int main() {
     test_constructs_without_a_profile_table();
     test_s_to_ms_rounds_and_floors();
     test_selector_policy_carries_the_config();
     test_bw_code_maps_widths();
+    test_probe_arming_follows_the_live_pin();
+    test_no_probe_schedule_never_arms();
     return wbtest_finish("node_tx_core_test");
 }

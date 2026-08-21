@@ -169,6 +169,16 @@ class Selector {
     }
     // §9.4 Pass 163: climbs suppressed by fresh probe evidence (§15.3).
     uint64_t promote_blocked_probe() const { return promote_blocked_probe_; }
+    // §15.3 Pass 186: the evidence itself, not just its effect —
+    // promote_blocked_probe moves only when a climb was both attempted and
+    // vetoed, so it cannot tell "no opinion" from "favourable opinion".
+    // kNoProbe = none received; _ms 0 = never (age is meaningless then).
+    uint16_t probe_per() const { return probe_per_; }
+    uint64_t probe_per_ms() const { return probe_per_ms_; }
+    // §9.7 live pin. Pass 186 clamps the §9.4 probe candidate to it, and it
+    // must be the live value: a §11.7 SELECTOR freeze pins min == max ==
+    // current, which disarms the probe with no commit to hang the change on.
+    uint8_t max_profile() const { return policy_.max_profile; }
     void set_pressure(bool on, uint64_t now_ms);  // §9.9 gauge
     SelectorActions tick(uint64_t now_ms);
 
