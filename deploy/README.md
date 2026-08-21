@@ -10,7 +10,44 @@ The two nodes read from live hardware on 2026-08-08:
 |---|---|---|---|
 | Vehicle | `192.168.2.232` | RTL8812EU TX/RX, ch 5805 HT20, bus `1-1` | `vehicle-waybeam-link.init`, `vehicle-192.168.2.232.json` |
 | x86 ground | `192.168.2.242` | RTL8812AU uplink TX (`8-1`) + RTL8812CU RX (`5-1`) | drive manually; `ground-192.168.2.242.json` |
-| RK3566 spectator | `192.168.2.199` | RTL8812CU RX, ch 5805 HT20, bus `1-1` | `rk3566-waybeam-link.init`, `ground-192.168.2.199.json` |
+| RK3566 spectator | `192.168.2.199` | RTL8812CU RX, ch 5805 HT20, bus `1-1` | in-process in `waybeam_hub` since 2026-08-21; `ground-192.168.2.199.json` |
+
+**Every node now runs the link IN-PROCESS inside `waybeam_hub`** (`mod_wblink`).
+`.199` was the last holdout and was migrated on 2026-08-21; `rk3566-waybeam-link.init`
+is kept only as the reference for the standalone shape. The link config is
+untouched by that migration — the hub reads the same
+`/etc/waybeam-link/ground.json` through `wblink.config_path`, so what moves is
+the launcher, not the config. On `.199` the hub also needs
+`pixelpilot.frame_shm.source: "wblink"`, which takes frames from the node's
+callback instead of the `venc_frame_out` ring the standalone process used to
+fill; the ring keys stay in the config as the fallback.
+
+**Two traps that migration paid for.**
+
+- **`rcS` globs `/etc/init.d/S??*`, so a renamed-but-still-`S`-prefixed init
+  script still runs at boot.** `.199` carried `S49waybeam-link.bak-20260821` and
+  `S49waybeam-link.orig` beside the live one, and all three matched the glob —
+  meaning that box had been starting (and failing to start) duplicate link
+  instances on every boot, competing for the same adapter, before anyone
+  noticed. Disable an init script by renaming it **out of the glob** (`K49…`),
+  not by suffixing it. Verify with
+  `for i in /etc/init.d/S??*; do case "$i" in *waybeam-link*) echo "$i";; esac; done`.
+- **The rk3566 hub is a buildroot package, not a `make ground` cross-build.**
+  `make ground` has no `SYSROOT`/`TOOLCHAIN` variables the way `vehicle` does —
+  it calls **bare `pkg-config`**, so passing `PKG_CONFIG=` is inert and the host's
+  gstreamer/libdrm headers get used, which the cross gcc rejects with "unsafe
+  header/library path". Buildroot makes it work by putting its own `host/bin`
+  first on `PATH`. To reproduce a binary without a full image build:
+
+  ```sh
+  BR=sbc-groundstations/output/waybeam_radxa3e_defconfig
+  PATH="$BR/host/bin:$PATH" make ground \
+      CC="$BR/host/bin/aarch64-none-linux-gnu-gcc" \
+      WBLINK_GROUND_BUILDDIR=../waybeam-link/build/rk3566
+  ```
+
+  Linking wblink takes that binary from ~1.6 MB to ~11 MB; `.199` has room, but
+  check before shipping it anywhere smaller.
 
 `.199` was re-authored on 2026-08-21 the way this file asks: read from its
 live `/etc/waybeam-link/ground.json`, moved off the deleted kernel-monitor
