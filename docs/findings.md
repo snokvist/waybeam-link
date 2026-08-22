@@ -76,15 +76,29 @@ The second reopens the duty question the #227 ruling settled, now with the
 knowledge that the duty buys the only rate evidence available in the regime
 that matters.
 
-**Second finding: the uplink is ~30 dB weaker than the downlink at the same
-offset.** At the far point the ground heard the craft at **−56 dBm** while the
-craft heard the ground at **−86 dBm**, both adapters at `power_offset_qdb: 0`.
-§7.3 LINK_REPORTs and §12 NACKs ride that uplink, and §9.8 descends on report
-timeout, so **the return path is the range limit, not the video path** — and a
-range test that only watches ground-side RSSI will misjudge where the link
-ends. The two adapters are different parts (8812AU ground, 8812EU craft) with
-different EFUSE per-rate tables, so offset 0 is not a common reference point.
-Worth its own measurement before any flight test.
+**Second: the return path is the range limit, and that is expected — not a
+defect.** At the far point the ground heard the craft at **−56 dBm** while the
+craft heard the ground at **−86 dBm**, both at `power_offset_qdb: 0`. A bench
+sweep the same day put the gap at **22 dB** at fixed geometry (the uncompressed
+−48 row; see the entry below), roughly constant across the offset range, so it
+is the radios rather than the path.
+
+**That asymmetry is the system working as designed.** `power_offset_qdb: 0`
+means each adapter sits on its own EFUSE per-rate table — i.e. **each end runs
+at its own maximum**, which is what both ends are supposed to do. Two different
+parts (8812AU ground, 8812EU craft) have different maxima, so the two
+directions are unequal, and there is nothing to compensate: you cannot raise
+the weaker end past its own ceiling, and lowering the stronger one would only
+throw away downlink range. An earlier draft of this entry called offset 0 "not
+a common reference point" and asked for the offsets to be chosen to equalise
+EIRP — that was wrong, and it is retracted (operator, 2026-08-22).
+
+What survives is purely operational: §7.3 LINK_REPORTs and §12 NACKs ride the
+weaker direction and §9.8 descends on report timeout, so **the craft starts
+fail-safing while ground-side RSSI still looks healthy**. A range test that
+watches only the ground misjudges where the link ends, and link budget should
+be sized by the return path. In the field that means reading craft-side RSSI
+off the SD logger in `tools/walk/`, since the craft is unreachable.
 
 **Third: §6.3b did substantial real work** (Phase E data, on the `.242`
 ground): **95 frames salvaged, 116 frozen, 709 slices synthesized**, against 5
