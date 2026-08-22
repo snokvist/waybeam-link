@@ -10,19 +10,36 @@ The two nodes read from live hardware on 2026-08-08:
 |---|---|---|---|
 | Vehicle | `192.168.2.232` | RTL8812EU TX/RX, ch 5805 HT20, bus `1-1` | `vehicle-waybeam-link.init`, `vehicle-192.168.2.232.json` |
 | x86 ground | `192.168.2.242` | RTL8812AU uplink TX (`8-1`) + RTL8812CU RX (`5-1`) | drive manually; `ground-192.168.2.242.json` |
-| RK3566 spectator | `192.168.2.199` | RTL8812CU RX, ch 5805 HT20, bus `1-1` | in-process in `waybeam_hub` since 2026-08-21; `ground-192.168.2.199.json` |
+| RK3566 spectator | `192.168.2.199` | RTL8812CU RX, ch 5805 HT20, bus `1-1` | **standalone** `S49waybeam-link` (see below); `ground-192.168.2.199.json` |
 
-**Every node now runs the link IN-PROCESS inside `waybeam_hub`** (`mod_wblink`).
-`.199` was the last holdout and was migrated on 2026-08-21; `rk3566-waybeam-link.init`
-is kept only as the reference for the standalone shape. The link config is
-untouched by that migration — the hub reads the same
-`/etc/waybeam-link/ground.json` through `wblink.config_path`, so what moves is
-the launcher, not the config. On `.199` the hub also needs
-`pixelpilot.frame_shm.source: "wblink"`, which takes frames from the node's
-callback instead of the `venc_frame_out` ring the standalone process used to
-fill; the ring keys stay in the config as the fallback.
+**`.232` and `.242` run the link IN-PROCESS inside `waybeam_hub`**
+(`mod_wblink`). **`.199` does not, and the claim that it did was wrong.**
 
-**Two traps that migration paid for.**
+`.199` was migrated on 2026-08-21 and this file said the fleet was uniformly
+in-process. It is not, for a reason the migration missed: the rk3566 in-process
+video source — `pixelpilot.frame_shm.source: "wblink"` as consumed by
+`pipeline.c`/`mod_pixelpilot` — exists only on an **unmerged waybeam-hub
+branch**. On hub `main`, `FRAME_SHM_SOURCE_WBLINK` is read only by
+`mod_video_player.c`, which is the x86 path. A main-built ground binary
+therefore registers the module, carries the node code, and still reports
+`video_source: "none"`, because the rk3566 graph never selects it.
+
+**The migration verified the wrong half.** It checked that the in-process RX
+node was receiving — `delivered` climbing, §6.3b salvaging, cold-boot survived
+— and never confirmed that the *video pipeline* consumed those frames. The link
+half genuinely worked; the display half never did.
+
+`.199` now runs a **standalone `S49waybeam-link`** with
+`frame_shm.source: "ring"` and `wblink.enabled: false`, boot-persistent and
+cold-boot verified, and by operator ruling (2026-08-22) it **stays that way** —
+it carries the DVR recorder build, which needs that arrangement. Restore the
+in-process shape only once the rk3566 source lands on hub main; before
+deploying any hub build there, check the binary actually consumes
+`FRAME_SHM_SOURCE_WBLINK` outside `mod_video_player`.
+
+`rk3566-waybeam-link.init` is therefore live reference, not history.
+
+**Two traps that migration paid for anyway.**
 
 - **`rcS` globs `/etc/init.d/S??*`, so a renamed-but-still-`S`-prefixed init
   script still runs at boot.** `.199` carried `S49waybeam-link.bak-20260821` and
