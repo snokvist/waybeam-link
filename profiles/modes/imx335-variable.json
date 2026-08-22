@@ -1,7 +1,7 @@
 {
-  "_mode": "Variable fps / maximum range (docs/venc-mode-matrix.md §16.6)",
-  "_derivation": "The tenth mode, outside the matrix and NOT record-friendly. 1280x720, MCS band 0-5 (the full link envelope), fps free to float 30-100 via the §9.11 ladder (Pass 39/99). It spans the whole envelope because it trades cadence for rung all the way down: as the selector drops the MCS and the derived bitrate, P-frames shrink and the ladder lowers fps to keep each frame's FEC block useful. bpp is self-correcting — at MCS0 (2829 kbps) the ladder settles low fps so bpp stays well above the 0.04 floor. video0.fps below is only the boot seed; the ladder owns it once running.",
-  "_apply": "fps_mode=variable makes apply-mode.sh turn the §9.11 ladder ON (live, via POST /api/v1/link/fps) AFTER the venc restart, and persist venc.fps_ladder.enabled=true so a reboot boots variable. The ladder span (min 30 / preferred 100) is a per-craft constant in craft.json (venc.fps_ladder). VFR + GDR intra-refresh => live-view only, do not record.",
+  "_mode": "Variable fps / maximum range (docs/venc-mode-matrix.md \u00a716.6)",
+  "_derivation": "The tenth mode, outside the matrix and NOT record-friendly. 1280x720, MCS band 0-5 (the full link envelope), fps free to float 30-100 via the \u00a79.11 ladder (Pass 39/99). It spans the whole envelope because it trades cadence for rung all the way down: as the selector drops the MCS and the derived bitrate, P-frames shrink and the ladder lowers fps to keep each frame's FEC block useful. bpp is self-correcting \u2014 at MCS0 (2829 kbps) the ladder settles low fps so bpp stays well above the 0.04 floor. video0.fps below is only the boot seed; the ladder owns it once running.",
+  "_apply": "fps_mode=variable makes apply-mode.sh turn the \u00a79.11 ladder ON (live, via POST /api/v1/link/fps) AFTER the venc restart, and persist venc.fps_ladder.enabled=true so a reboot boots variable. The ladder span (min 30 / preferred 100) is a per-craft constant in craft.json (venc.fps_ladder). VFR + GDR intra-refresh => live-view only, do not record.",
   "venc": {
     "sensor": {
       "mode": 3
@@ -9,7 +9,7 @@
     "video0": {
       "fps": 100,
       "size": "1280x720",
-      "resilience": "range",
+      "resilience": "racing",
       "sliceCount": 3
     }
   },
@@ -22,5 +22,5 @@
       "fps_mode": "variable"
     }
   },
-  "_slices": "sliceCount 3 (§6.3b). The concealed area on a loss is max(1/N, the byte fraction actually lost), so once a slice is about one 1424 B FEC chunk the area is chunk-limited and finer slices only cost ~26 B each (measured 2026-08-20); coarser ones leave area on the table. Pick the smallest deliverable N at or above that knee, evaluated at this mode's FLOOR rung 0 (2829 kbps at long GI, 100 fps) where the overhead is the largest share of the frame: a frame is 2.48 chunks, so N*=2.48 and 720p can deliver 1/2/3/4/6/12 (the SDK rounds slice height up to whole CTU-64 rows)."
+  "_slices": "sliceCount 3 (\u00a76.3b). The concealed area on a loss is max(1/N, the byte fraction actually lost), so once a slice is about one 1424 B FEC chunk the area is chunk-limited and finer slices only cost ~26 B each (measured 2026-08-20); coarser ones leave area on the table. Pick the smallest deliverable N at or above that knee, evaluated at this mode's FLOOR rung 0 (2829 kbps at long GI, 100 fps) where the overhead is the largest share of the frame: a frame is 2.48 chunks, so N*=2.48 and 720p can deliver 1/2/3/4/6/12 (the SDK rounds slice height up to whole CTU-64 rows)."
 }

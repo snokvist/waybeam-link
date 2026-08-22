@@ -1,7 +1,7 @@
 {
-  "_mode": "High latency / High range — CV610/IMX662 (profiles/modes/README.md)",
-  "_derivation": "bpp = kbps*1000/(fps*pixels). Floor rung 0 (2829 kbps) -> 0.0455 bpp; top rung 2 (9264 kbps) -> 0.1489 bpp. The 8733B ladder (profiles/table-8733b.json, §9.5 derived) is 2829/5754/9264/12384/16213/19646 kbps; the craft pins venc.max_bitrate_kbps=12288 (operator, 2026-08-16 — the earlier 8000 was too strict), so the EFFECTIVE ladder is 2829/5754/9264/12288/12288/12288 and only rungs 3-5 are capped. Second limiter, which IMX335 never had: encoder CPU. Measured on .181 — 1280x720@100 (92 Mpx/s) ~60% of one core, 1080p@12000 (207 Mpx/s) ~99%, so ~0.65% per Mpx/s. Size is min(bpp ceiling, 720p floor, ~130 Mpx/s budget); here the bpp ceiling is 2.36 Mpx and this cell is 62 Mpx/s.",
-  "_apply": "venc fields go to waybeam_venc (sensor.mode and video0.size are restart_required, so this is a pre-flight choice); link fields are merged into /etc/waybeam-link/craft.json. The CV610 craft runs waybeam-link IN-PROCESS inside waybeam-hub, so there is no separate link service to restart and no B9 re-pair: apply-mode.sh pins the range live over 127.0.0.1:8091 and restarts only the encoder. That restart MUST go through venc's own POST /api/v1/restart (VENC_RESTART=api in apply-mode.conf) — S95waybeam restart ends in $LOADER stop, which unloads the CV610 MPP module stack and takes the board off the network.",
+  "_mode": "High latency / High range \u2014 CV610/IMX662 (profiles/modes/README.md)",
+  "_derivation": "bpp = kbps*1000/(fps*pixels). Floor rung 0 (2829 kbps) -> 0.0455 bpp; top rung 2 (9264 kbps) -> 0.1489 bpp. The 8733B ladder (profiles/table-8733b.json, \u00a79.5 derived) is 2829/5754/9264/12384/16213/19646 kbps; the craft pins venc.max_bitrate_kbps=12288 (operator, 2026-08-16 \u2014 the earlier 8000 was too strict), so the EFFECTIVE ladder is 2829/5754/9264/12288/12288/12288 and only rungs 3-5 are capped. Second limiter, which IMX335 never had: encoder CPU. Measured on .181 \u2014 1280x720@100 (92 Mpx/s) ~60% of one core, 1080p@12000 (207 Mpx/s) ~99%, so ~0.65% per Mpx/s. Size is min(bpp ceiling, 720p floor, ~130 Mpx/s budget); here the bpp ceiling is 2.36 Mpx and this cell is 62 Mpx/s.",
+  "_apply": "venc fields go to waybeam_venc (sensor.mode and video0.size are restart_required, so this is a pre-flight choice); link fields are merged into /etc/waybeam-link/craft.json. The CV610 craft runs waybeam-link IN-PROCESS inside waybeam-hub, so there is no separate link service to restart and no B9 re-pair: apply-mode.sh pins the range live over 127.0.0.1:8091 and restarts only the encoder. That restart MUST go through venc's own POST /api/v1/restart (VENC_RESTART=api in apply-mode.conf) \u2014 S95waybeam restart ends in $LOADER stop, which unloads the CV610 MPP module stack and takes the board off the network.",
   "venc": {
     "sensor": {
       "mode": 0
@@ -9,6 +9,7 @@
     "video0": {
       "fps": 30,
       "size": "1920x1080",
+      "resilience": "racing",
       "sliceCount": 9
     }
   },
@@ -21,5 +22,5 @@
       "fps_mode": "static"
     }
   },
-  "_slices": "sliceCount 9 (§6.3b). The concealed area on a loss is max(1/N, the byte fraction actually lost), so once a slice is about one 1424 B FEC chunk the area is chunk-limited and finer slices only cost ~26 B each (measured 2026-08-20); coarser ones leave area on the table. Pick the smallest deliverable N at or above that knee, evaluated at this mode's FLOOR rung 0 (2829 kbps at long GI, 30 fps) where the overhead is the largest share of the frame: a frame is 8.28 chunks, so N*=8.28 and 1080p can deliver 1/2/3/4/5/6/9/17 (the SDK rounds slice height up to whole CTU-64 rows)."
+  "_slices": "sliceCount 9 (\u00a76.3b). The concealed area on a loss is max(1/N, the byte fraction actually lost), so once a slice is about one 1424 B FEC chunk the area is chunk-limited and finer slices only cost ~26 B each (measured 2026-08-20); coarser ones leave area on the table. Pick the smallest deliverable N at or above that knee, evaluated at this mode's FLOOR rung 0 (2829 kbps at long GI, 30 fps) where the overhead is the largest share of the frame: a frame is 8.28 chunks, so N*=8.28 and 1080p can deliver 1/2/3/4/5/6/9/17 (the SDK rounds slice height up to whole CTU-64 rows)."
 }

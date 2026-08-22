@@ -1,7 +1,7 @@
 {
-  "_mode": "Low latency / High range (docs/venc-mode-matrix.md §16.3)",
-  "_derivation": "bpp = kbps*1000/(fps*pixels). Floor rung 0 (2829 kbps) -> 0.0307 bpp; top rung 2 (9264 kbps) -> 0.112 bpp. THE ONE CELL THAT DOES NOT CLEAR THE 0.04 FLOOR: the operator ruled 1280x720 the minimum encode size across every mode table (2026-08-16), and the bpp ceiling here is 707k pixels. The floor rung is therefore traded away deliberately — a soft MCS0 picture is preferred to a sub-720p one. 1024x576 was the pre-ruling pick (raw bpp wanted 960x540, which venc rejects on height % 8). Rung bitrates are §9.5 derived from the Pass 122 table (table_version 0x80).",
-  "_apply": "venc fields go to waybeam_venc (sensor.mode and video0.size are restart_required, so this is a pre-flight choice); link fields are merged into /etc/waybeam-link/craft.json. Restart venc (S95waybeam) then the link (S96waybeam-link), then re-scout + quickconnect — a craft restart leaves CSA silently dead otherwise (B9).",
+  "_mode": "Low latency / High range (docs/venc-mode-matrix.md \u00a716.3)",
+  "_derivation": "bpp = kbps*1000/(fps*pixels). Floor rung 0 (2829 kbps) -> 0.0307 bpp; top rung 2 (9264 kbps) -> 0.112 bpp. THE ONE CELL THAT DOES NOT CLEAR THE 0.04 FLOOR: the operator ruled 1280x720 the minimum encode size across every mode table (2026-08-16), and the bpp ceiling here is 707k pixels. The floor rung is therefore traded away deliberately \u2014 a soft MCS0 picture is preferred to a sub-720p one. 1024x576 was the pre-ruling pick (raw bpp wanted 960x540, which venc rejects on height % 8). Rung bitrates are \u00a79.5 derived from the Pass 122 table (table_version 0x80).",
+  "_apply": "venc fields go to waybeam_venc (sensor.mode and video0.size are restart_required, so this is a pre-flight choice); link fields are merged into /etc/waybeam-link/craft.json. Restart venc (S95waybeam) then the link (S96waybeam-link), then re-scout + quickconnect \u2014 a craft restart leaves CSA silently dead otherwise (B9).",
   "venc": {
     "sensor": {
       "mode": 3
@@ -9,7 +9,7 @@
     "video0": {
       "fps": 100,
       "size": "1280x720",
-      "resilience": "range",
+      "resilience": "racing",
       "sliceCount": 3
     }
   },
@@ -22,5 +22,5 @@
       "fps_mode": "static"
     }
   },
-  "_slices": "sliceCount 3 (§6.3b). The concealed area on a loss is max(1/N, the byte fraction actually lost), so once a slice is about one 1424 B FEC chunk the area is chunk-limited and finer slices only cost ~26 B each (measured 2026-08-20); coarser ones leave area on the table. Pick the smallest deliverable N at or above that knee, evaluated at this mode's FLOOR rung 0 (2829 kbps at long GI, 100 fps) where the overhead is the largest share of the frame: a frame is 2.48 chunks, so N*=2.48 and 720p can deliver 1/2/3/4/6/12 (the SDK rounds slice height up to whole CTU-64 rows)."
+  "_slices": "sliceCount 3 (\u00a76.3b). The concealed area on a loss is max(1/N, the byte fraction actually lost), so once a slice is about one 1424 B FEC chunk the area is chunk-limited and finer slices only cost ~26 B each (measured 2026-08-20); coarser ones leave area on the table. Pick the smallest deliverable N at or above that knee, evaluated at this mode's FLOOR rung 0 (2829 kbps at long GI, 100 fps) where the overhead is the largest share of the frame: a frame is 2.48 chunks, so N*=2.48 and 720p can deliver 1/2/3/4/6/12 (the SDK rounds slice height up to whole CTU-64 rows)."
 }
