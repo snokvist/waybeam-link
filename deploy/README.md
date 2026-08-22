@@ -10,36 +10,47 @@ The two nodes read from live hardware on 2026-08-08:
 |---|---|---|---|
 | Vehicle | `192.168.2.232` | RTL8812EU TX/RX, ch 5805 HT20, bus `1-1` | `vehicle-waybeam-link.init`, `vehicle-192.168.2.232.json` |
 | x86 ground | `192.168.2.242` | RTL8812AU uplink TX (`8-1`) + RTL8812CU RX (`5-1`) | drive manually; `ground-192.168.2.242.json` |
-| RK3566 spectator | `192.168.2.199` | RTL8812CU RX, ch 5805 HT20, bus `1-1` | **standalone** `S49waybeam-link` (see below); `ground-192.168.2.199.json` |
+| RK3566 spectator | `192.168.2.199` | RTL8812CU RX, ch 5805 HT20, bus `1-1` | in-process `mod_wblink` under `S99waybeam_hub`; `ground-192.168.2.199.json` |
 
-**`.232` and `.242` run the link IN-PROCESS inside `waybeam_hub`**
-(`mod_wblink`). **`.199` does not, and the claim that it did was wrong.**
+**The whole fleet — `.232`, `.242` and `.199` — runs the link IN-PROCESS
+inside `waybeam_hub`** (`mod_wblink`). `.199` completed on 2026-08-22 and is
+the last node that ran a standalone `waybeam-link`.
 
-`.199` was migrated on 2026-08-21 and this file said the fleet was uniformly
-in-process. It is not, for a reason the migration missed: the rk3566 in-process
+**It took two attempts, and the first one's failure is the reusable part.**
+The 2026-08-21 migration reported success and was wrong: the rk3566 in-process
 video source — `pixelpilot.frame_shm.source: "wblink"` as consumed by
-`pipeline.c`/`mod_pixelpilot` — exists only on an **unmerged waybeam-hub
-branch**. On hub `main`, `FRAME_SHM_SOURCE_WBLINK` is read only by
-`mod_video_player.c`, which is the x86 path. A main-built ground binary
-therefore registers the module, carries the node code, and still reports
-`video_source: "none"`, because the rk3566 graph never selects it.
+`pipeline.c`/`mod_pixelpilot` — did not exist. Only `mod_video_player.c` (the
+x86 path) read `FRAME_SHM_SOURCE_WBLINK`, so a main-built ground binary
+registered the module, carried the node code, received frames, and still
+reported `video_source: "none"` because the rk3566 graph never selected it.
 
-**The migration verified the wrong half.** It checked that the in-process RX
-node was receiving — `delivered` climbing, §6.3b salvaging, cold-boot survived
-— and never confirmed that the *video pipeline* consumed those frames. The link
-half genuinely worked; the display half never did.
+**That migration verified the wrong half.** It checked the in-process RX node
+was *receiving* — `delivered` climbing, §6.3b salvaging, cold-boot survived —
+and never that the *video pipeline* consumed those frames. The link half
+genuinely worked; the display half never did. **On a two-stage path, verify the
+CONSUMER.** Here that means `video_source` plus a **climbing** `frame_count`
+from `GET :8060/pixelpilot/stats`, and a non-zero `decode` in
+`GET :8060/pipeline/stats` — ingress counters alone cannot tell a decoding
+pipeline from a starved one.
 
-`.199` now runs a **standalone `S49waybeam-link`** with
-`frame_shm.source: "ring"` and `wblink.enabled: false`, boot-persistent and
-cold-boot verified, and by operator ruling (2026-08-22) it **stays that way** —
-it carries the DVR recorder build, which needs that arrangement. Restore the
-in-process shape only once the rk3566 source lands on hub main; before
-deploying any hub build there, check the binary actually consumes
-`FRAME_SHM_SOURCE_WBLINK` outside `mod_video_player`.
+waybeam-hub **PR #218** wrote the missing rk3566 half, and `.199` was migrated
+on it and **cold-boot verified**: `video_source: "shm"`, `frame_count` 3902 →
+4625 in 12 s (≈60 fps), decode avg 21.5 ms, `shm_reattach_count: 0`, exactly
+one `waybeam_hub` process and no `waybeam-link`. `shm_producer_epoch` reads
+**0** on this path — there is no ring to have a dev/ino identity — which is the
+cheapest way to tell push mode from ring mode in a stats dump. Recording
+(hub #216) writes at the full stream rate on it.
 
-`rk3566-waybeam-link.init` is therefore live reference, not history.
+The **kernel driver needs no preparation**: `88x2cu` is loaded at boot with
+refcount 0 and the node claims through it (devourer detach-at-claim). The
+standalone init's `rmmod 88x2cu` was tested for and is not needed, matching
+`.242`, whose systemd unit has no `ExecStartPre`.
 
-**Two traps that migration paid for anyway.**
+`S49waybeam-link` on `.199` is renamed `K49waybeam-link.superseded-20260822` —
+out of the boot glob, binary kept as a rollback. `rk3566-waybeam-link.init` is
+now reference for a standalone rk3566 node, not a description of `.199`.
+
+**Two traps that first migration paid for anyway.**
 
 - **`rcS` globs `/etc/init.d/S??*`, so a renamed-but-still-`S`-prefixed init
   script still runs at boot.** `.199` carried `S49waybeam-link.bak-20260821` and
