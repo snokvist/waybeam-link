@@ -93,17 +93,33 @@ get() { "$JSON_CLI" -g "$1" -i "$MODE_JSON" --raw 2>/dev/null; }
 SENSOR_MODE=$(get .venc.sensor.mode)
 FPS=$(get .venc.video0.fps)
 SIZE=$(get .venc.video0.size)
-RESILIENCE=$(get .venc.video0.resilience)   # GDR intra-refresh vs GOP; optional
+# REQUIRED, not optional (2026-08-22). Both were previously either absent or
+# skipped when absent, and "skip" means the encoder keeps whatever the PREVIOUS
+# mode left it on — a mode that silently inherits is worse than one that
+# refuses. resilience is now "racing" on every mode by operator ruling (GDR
+# intra-refresh only, no RefEnhance); sliceCount is the §6.3b granularity and
+# was authored into all 19 modes but read by NOTHING until now, so every craft
+# has been running the encoder default (4) whatever its mode said.
+RESILIENCE=$(get .venc.video0.resilience)
+SLICE_COUNT=$(get .venc.video0.sliceCount)
 MINP=$(get .link.policy.select.min_profile)
 MAXP=$(get .link.policy.select.max_profile)
 FPS_MODE=$(get .link.policy.fps_mode)        # static|variable; §9.11 Pass 99
 [ -n "$FPS_MODE" ] || FPS_MODE=static        # default: fps pinned, recordable
 
-for v in "$SENSOR_MODE" "$FPS" "$SIZE" "$MINP" "$MAXP"; do
-  [ -n "$v" ] || { echo "apply-mode: $MODE_JSON missing a field" >&2; exit 2; }
+# Name the missing key. The old message said only "missing a field", which on a
+# hand-edited mode file is a hunt.
+for kv in "venc.sensor.mode=$SENSOR_MODE" "venc.video0.fps=$FPS" \
+          "venc.video0.size=$SIZE" "venc.video0.resilience=$RESILIENCE" \
+          "venc.video0.sliceCount=$SLICE_COUNT" \
+          "link.policy.select.min_profile=$MINP" \
+          "link.policy.select.max_profile=$MAXP"; do
+  case "$kv" in
+    *=) echo "apply-mode: $MODE_JSON missing ${kv%=}" >&2; exit 2 ;;
+  esac
 done
 
-echo "apply-mode: $NAME -> sensor.mode=$SENSOR_MODE video0=${SIZE}@${FPS} resilience=${RESILIENCE:-default} MCS ${MINP}-${MAXP} fps=${FPS_MODE}"
+echo "apply-mode: $NAME -> sensor.mode=$SENSOR_MODE video0=${SIZE}@${FPS} resilience=${RESILIENCE} slices=${SLICE_COUNT} MCS ${MINP}-${MAXP} fps=${FPS_MODE}"
 
 # One POST, whichever HTTP client the craft has. The CV610 board ships no curl
 # at all (busybox 1.36.1 wget is the only client on it), and every call below is
@@ -169,7 +185,35 @@ fi
 "$JSON_CLI" -s .sensor.mode "$SENSOR_MODE" -i "$VENC_CFG"
 "$JSON_CLI" -s .video0.size "\"$SIZE\"" -i "$VENC_CFG"
 "$JSON_CLI" -s .video0.fps "$FPS" -i "$VENC_CFG"
-[ -n "$RESILIENCE" ] && "$JSON_CLI" -s .video0.resilience "\"$RESILIENCE\"" -i "$VENC_CFG"
+# Write a venc field only if THIS encoder knows it. The CV610 implements
+# neither sliceCount nor resilience yet (operator, 2026-08-22) and will later.
+# The probe is the persisted config rather than the board name, so the day
+# venc gains a field this starts applying it with no change here — and until
+# then a mode that asks for it says so out loud instead of planting an unknown
+# key in a config that will never read it.
+venc_set_if_supported() {  # $1 = json path, $2 = value (pre-quoted if string)
+  # CANARY FIRST. An empty probe result means "venc lacks this field" only if
+  # the probe itself works — otherwise a missing json_cli, a bad $VENC_CFG path
+  # or a malformed config would read as "unsupported" and silently skip every
+  # field, applying a mode with none of its video settings and reporting
+  # success. .video0.fps is required above and always present, so it proves the
+  # probe before any answer from it is believed.
+  if [ -z "$("$JSON_CLI" -g .video0.fps -i "$VENC_CFG" --raw 2>/dev/null)" ]; then
+    echo "apply-mode: cannot read .video0.fps from $VENC_CFG — probe broken, refusing to guess" >&2
+    exit 4
+  fi
+  if [ -n "$("$JSON_CLI" -g "$1" -i "$VENC_CFG" --raw 2>/dev/null)" ]; then
+    "$JSON_CLI" -s "$1" "$2" -i "$VENC_CFG"
+  else
+    echo "apply-mode: this venc has no $1 — skipped (mode asked for $2)"
+  fi
+}
+
+venc_set_if_supported .video0.resilience "\"$RESILIENCE\""
+# §6.3b: concealment only does anything on a multi-slice stream, so this is the
+# key that makes the whole salvage path useful. venc restarts below, so it does
+# not matter whether the encoder takes it live.
+venc_set_if_supported .video0.sliceCount "$SLICE_COUNT"
 
 # 4) Restart venc so sensor.mode/size take effect. The link keeps running and
 #    re-acquires the new video stream; it owns bitrate/fps live from here.
