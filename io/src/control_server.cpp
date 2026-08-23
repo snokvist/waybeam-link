@@ -304,6 +304,10 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         if (path == "/api/v1/info") {
             return reply(200, "OK", h_.info_json ? h_.info_json() : "{}");
         }
+        if (path == "/api/v1/features") {
+            return reply(200, "OK",
+                         h_.features_json ? h_.features_json() : "{}");
+        }
         if (path == "/api/v1/health") {
             return reply(200, "OK", h_.health_json ? h_.health_json() : "{}");
         }

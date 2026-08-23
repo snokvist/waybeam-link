@@ -83,6 +83,7 @@
 #include "wblink/node/air_backend.h"
 #include "wblink/node/clock.h"
 #include "wblink/node/discovery.h"
+#include "wblink/node/features.h"
 #include "wblink/node/entropy.h"
 #include "wblink/node/frame_kind.h"
 #include "wblink/node/policy.h"
@@ -1638,6 +1639,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         h.info_json = [&] {
             return build_info_json(l, session, "rx", nullptr,
                                    air.value ? &*air.value : nullptr);
+        };
+        h.features_json = [&] {
+            return build_features_json(l, arq_rx_enabled, false);
         };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.discovery_json = [&] {

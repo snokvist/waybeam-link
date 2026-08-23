@@ -87,6 +87,7 @@
 #include "wblink/node/air_backend.h"
 #include "wblink/node/clock.h"
 #include "wblink/node/discovery.h"
+#include "wblink/node/features.h"
 #include "wblink/node/entropy.h"
 #include "wblink/node/frame_kind.h"
 #include "wblink/node/policy.h"
@@ -516,6 +517,10 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
             self.claimed_by = csa.latched_issuer();
             return build_info_json(l, session, "tx", &self,
                                    air.value ? &*air.value : nullptr);
+        };
+        h.features_json = [&] {
+            return build_features_json(l, tx.cmd_arq_enabled(),
+                                       tx.cmd_fps_ladder());
         };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.link_mtu_json = [&] {

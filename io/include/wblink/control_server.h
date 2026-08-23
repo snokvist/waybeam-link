@@ -29,6 +29,7 @@ struct ControlHandlers {
     // trailing newline). A null hook yields 503 (not ready).
     std::function<std::string()> stats_line;
     std::function<std::string()> info_json;
+    std::function<std::string()> features_json;
     std::function<std::string()> health_json;
     std::function<std::string()> discovery_json;
     // §15.5a ground scout state (GET); null → 503 like the other reads.

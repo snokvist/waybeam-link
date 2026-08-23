@@ -106,6 +106,11 @@ int main() {
     ControlHandlers h;
     h.stats_line = [] { return std::string("{\"t_ms\":1,\"node\":7}"); };
     h.info_json = [] { return std::string("{\"role\":\"tx\"}"); };
+    h.features_json = [] {
+        return std::string(
+            "{\"air\":{\"backend\":\"radio\"},"
+            "\"video\":{\"present\":true}}");
+    };
     h.health_json = [] { return std::string("{\"state\":\"HOLD\"}"); };
     h.discovery_json = [] {
         return std::string(
@@ -271,6 +276,13 @@ int main() {
             roundtrip(s, port, "GET /api/v1/info HTTP/1.0\r\n\r\n");
         CHECK_EQ_U(status_of(r), 200);
         CHECK(body_of(r).find("\"role\":\"tx\"") != std::string::npos);
+    }
+    {
+        const std::string r =
+            roundtrip(s, port, "GET /api/v1/features HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"backend\":\"radio\"") != std::string::npos);
+        CHECK(body_of(r).find("\"present\":true") != std::string::npos);
     }
     {
         const std::string r =
