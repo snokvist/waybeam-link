@@ -178,6 +178,7 @@ class Selector {
     // §9.7 live pin. Pass 186 clamps the §9.4 probe candidate to it, and it
     // must be the live value: a §11.7 SELECTOR freeze pins min == max ==
     // current, which disarms the probe with no commit to hang the change on.
+    uint8_t min_profile() const { return policy_.min_profile; }
     uint8_t max_profile() const { return policy_.max_profile; }
     // The ceiling the climb rules ACTUALLY honour — max_profile narrowed by the
     // §9.2 lockout — as a profile ID. This is evaluate()'s `adaptive_hi`,

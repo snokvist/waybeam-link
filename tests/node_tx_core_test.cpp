@@ -77,6 +77,24 @@ void test_selector_policy_carries_the_config() {
     CHECK_EQ_U(p.max_bitrate_kbps, 9000);
 }
 
+// §15.5 GET /link/profile reads the live envelope and the immutable restore
+// target from TxCore. A POST must move only the former.
+void test_profile_envelope_observability() {
+    Config c = tx_config();
+    c.policy.select.min_profile = 2;
+    c.policy.select.max_profile = 5;
+    TxCore tx(c, 12345, nullptr, 0);
+    CHECK_EQ_U(tx.min_profile(), 2);
+    CHECK_EQ_U(tx.max_profile(), 5);
+    CHECK_EQ_U(tx.boot_min_profile(), 2);
+    CHECK_EQ_U(tx.boot_max_profile(), 5);
+    tx.set_profile_pin(4, 4);
+    CHECK_EQ_U(tx.min_profile(), 4);
+    CHECK_EQ_U(tx.max_profile(), 4);
+    CHECK_EQ_U(tx.boot_min_profile(), 2);
+    CHECK_EQ_U(tx.boot_max_profile(), 5);
+}
+
 // The dot11 bandwidth code is not the width in MHz. Getting this wrong sends
 // a correct-looking channel spec that the chip reads as a different width.
 void test_bw_code_maps_widths() {
@@ -462,6 +480,7 @@ int main() {
     test_constructs_without_a_profile_table();
     test_s_to_ms_rounds_and_floors();
     test_selector_policy_carries_the_config();
+    test_profile_envelope_observability();
     test_bw_code_maps_widths();
     test_probe_arming_follows_the_effective_ceiling();
     test_effective_ceiling_is_the_pin_when_nothing_is_locked_out();

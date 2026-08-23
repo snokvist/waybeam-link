@@ -528,6 +528,30 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
         h.discovery_json = [&] {
             return discovery.json(now_ms(), {});
         };
+        h.profile_json = [&] {
+            std::string s = "{\"min\":" +
+                            std::to_string(tx.min_profile()) +
+                            ",\"max\":" + std::to_string(tx.max_profile()) +
+                            ",\"boot_min\":" +
+                            std::to_string(tx.boot_min_profile()) +
+                            ",\"boot_max\":" +
+                            std::to_string(tx.boot_max_profile()) +
+                            ",\"pinned\":";
+            s += tx.min_profile() == tx.max_profile() ? "true" : "false";
+            s += ",\"profiles\":[";
+            bool first = true;
+            for (const Profile& p : l.table.profiles) {
+                if (!first) s += ',';
+                first = false;
+                s += "{\"id\":" + std::to_string(p.id);
+                s += ",\"mcs\":" + std::to_string(p.mcs);
+                s += ",\"sgi\":";
+                s += p.gi == GuardInterval::kShort ? "true" : "false";
+                s += "}";
+            }
+            s += "]}";
+            return s;
+        };
         h.profile = [&](int mn, int mx) -> std::string {
             if (mn < 0 || mn > 255 || mx < 0 || mx > 255)
                 return "min/max must be 0..255";

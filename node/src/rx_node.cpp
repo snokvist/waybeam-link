@@ -2153,9 +2153,17 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             arq_rx_enabled = enabled;
             return "";
         };
-        if (air.value->udp) {
+        if (air.value->supports_rx_drop()) {
+            h.bench_rx_drop_json = [&] {
+                std::string s = "{\"permille\":" +
+                                std::to_string(air.value->rx_drop_permille());
+                s += ",\"backend\":\"";
+                s += l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio" : "udp";
+                s += "\"}";
+                return s;
+            };
             h.bench_rx_drop = [&](int permille) -> std::string {
-                return air.value->set_udp_rx_drop(permille)
+                return air.value->set_rx_drop(permille)
                     ? std::string() : "permille must be 0..1000";
             };
         }
