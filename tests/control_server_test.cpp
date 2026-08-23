@@ -106,6 +106,11 @@ int main() {
     ControlHandlers h;
     h.stats_line = [] { return std::string("{\"t_ms\":1,\"node\":7}"); };
     h.info_json = [] { return std::string("{\"role\":\"tx\"}"); };
+    h.features_json = [] {
+        return std::string(
+            "{\"air\":{\"backend\":\"radio\"},"
+            "\"video\":{\"present\":true}}");
+    };
     h.health_json = [] { return std::string("{\"state\":\"HOLD\"}"); };
     h.discovery_json = [] {
         return std::string(
@@ -117,6 +122,12 @@ int main() {
     };
     h.cache_assignment_json = [] {
         return std::string("{\"controller\":9,\"target_originator\":17}");
+    };
+    h.profile_json = [] {
+        return std::string(
+            "{\"min\":1,\"max\":5,\"boot_min\":1,\"boot_max\":5,"
+            "\"pinned\":false,\"profiles\":[{\"id\":1,\"mcs\":1,"
+            "\"sgi\":false}]}");
     };
     h.profile = [&](int mn, int mx) -> std::string {
         if (mx != 255 && mn > mx) return "min>max";
@@ -175,6 +186,11 @@ int main() {
         if (permille < 0 || permille > 1000) return "out of range";
         bench_drop = permille;
         return "";
+    };
+    h.bench_rx_drop_json = [&] {
+        return std::string("{\"permille\":") +
+               std::to_string(bench_drop < 0 ? 0 : bench_drop) +
+               ",\"backend\":\"radio\"}";
     };
     // §11.7 vehicle command: typed {code, body} outcome + campaign GET.
     std::string vcmd_last_cmd;
@@ -263,8 +279,30 @@ int main() {
     }
     {
         const std::string r =
+            roundtrip(s, port, "GET /api/v1/features HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"backend\":\"radio\"") != std::string::npos);
+        CHECK(body_of(r).find("\"present\":true") != std::string::npos);
+    }
+    {
+        const std::string r =
             roundtrip(s, port, "GET /api/v1/health HTTP/1.0\r\n\r\n");
         CHECK_EQ_U(status_of(r), 200);
+    }
+    {
+        const std::string r = roundtrip(
+            s, port, "GET /api/v1/link/profile HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"boot_min\":1") != std::string::npos);
+        CHECK(body_of(r).find("\"mcs\":1") != std::string::npos);
+    }
+    {
+        const std::string r = roundtrip(
+            s, port, "GET /api/v1/bench/rx-drop HTTP/1.0\r\n\r\n");
+        CHECK_EQ_U(status_of(r), 200);
+        CHECK(body_of(r).find("\"permille\":0") != std::string::npos);
+        CHECK(body_of(r).find("\"backend\":\"radio\"") !=
+              std::string::npos);
     }
     {
         const std::string r =
@@ -464,6 +502,17 @@ int main() {
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }
+    // profile type/range validation must fail before narrowing or dispatch.
+    {
+        const auto post = [&](const std::string& body) {
+            return status_of(roundtrip(
+                s, port,
+                "POST /api/v1/link/profile HTTP/1.0\r\nContent-Length: " +
+                    std::to_string(body.size()) + "\r\n\r\n" + body));
+        };
+        CHECK_EQ_U(post("{\"min\":\"3\",\"max\":3}"), 400);
+        CHECK_EQ_U(post("{\"min\":3,\"max\":4294967551}"), 400);
+    }
     // fec round-trip.
     {
         const std::string body =
@@ -568,11 +617,22 @@ int main() {
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
         CHECK_EQ_U(bench_drop, 175);
+        const std::string state = roundtrip(
+            s, port, "GET /api/v1/bench/rx-drop HTTP/1.0\r\n\r\n");
+        CHECK(body_of(state).find("\"permille\":175") != std::string::npos);
     }
     {
         const std::string body = "{\"permille\":1001}";
         const std::string req =
             "POST /api/v1/bench/rx-drop HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    {
+        const std::string body = "{\"permille\":\"25\"}";
+        const std::string req =
+            "POST /api/v1/bench/rx-drop HTTP/1.0\r\nContent-Type: "
+            "application/json\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }

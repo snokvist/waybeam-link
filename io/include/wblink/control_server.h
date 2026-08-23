@@ -29,6 +29,7 @@ struct ControlHandlers {
     // trailing newline). A null hook yields 503 (not ready).
     std::function<std::string()> stats_line;
     std::function<std::string()> info_json;
+    std::function<std::string()> features_json;
     std::function<std::string()> health_json;
     std::function<std::string()> discovery_json;
     // §15.5a ground scout state (GET); null → 503 like the other reads.
@@ -39,8 +40,12 @@ struct ControlHandlers {
     std::function<std::string()> vehicle_command_json;
     // §9.3a negotiated packet-budget state (every node when wired).
     std::function<std::string()> link_mtu_json;
+    // §9.7 live/boot profile envelope and valid local table (TX only).
+    std::function<std::string()> profile_json;
     // §10.5 TX-power override-latch state (GET; TX node only, null → 409).
     std::function<std::string()> tx_power_json;
+    // Local synthetic RX loss state (RX only; null → 409).
+    std::function<std::string()> bench_rx_drop_json;
     // §10.6 (Pass 120) calibration surface (GET; TX node only, null → 409).
     std::function<std::string()> calibration_json;
     // §10.7 (Pass 125) POST /api/v1/calibration on a ground/rx node: "start"

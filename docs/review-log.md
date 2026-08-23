@@ -24,6 +24,28 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 191 — local debug reads the process, never guesses from files (2026-08-23)
+
+**Verdict.** Operator ruling 2026-08-23. The co-located Hub may inspect and
+mutate only its own Link node over the existing trusted management HTTP plane.
+Profile-envelope and synthetic RX-loss controls are volatile local levers; no
+RF command, port, persistence, or authentication surface is added.
+
+**Effective configuration is a Link answer.** `GET /api/v1/features` reports a
+sanitized role-neutral summary of the validated configuration and profile table
+the running process actually loaded, plus the live ARQ and FPS-ladder gates.
+The Hub must not re-parse the config file: it can change after startup, embeds
+may supply config as text, and duplicating Link defaults would manufacture a
+plausible but false status page. Paths, binds, and secrets are omitted.
+
+**Changed sections.** §15.5 gains the TX-local profile GET/POST, RX-local
+synthetic-loss GET/POST, and the read-only effective-feature summary. §9.7's
+existing profile envelope and §6.3b's concealment semantics are unchanged.
+
+**Evidence.** `feature/link-debug-controls`; waybeam-hub
+`feature/link-debug-webui`; coordination
+`specs/cross/2026-08-23-link-debug-webui`.
+
 ## Pass 189 — a salvaged frame says so: §15.4 `flags` bit 3 (2026-08-23)
 
 **Verdict.** Operator ruling 2026-08-23. §15.4 `VencFrameMeta.flags` gains

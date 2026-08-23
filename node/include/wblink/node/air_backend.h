@@ -634,12 +634,30 @@ struct AirBackend {
         iface()->flush_rx();
         return tuned;
     }
-    bool set_udp_rx_drop(int permille) {
-        if (!udp || permille < 0 || permille > 1000) {
-            return false;
+    bool supports_rx_drop() const {
+        if (udp != nullptr) return true;
+#if WBLINK_RADIO
+        if (radio != nullptr) return true;
+#endif
+        return false;
+    }
+    bool set_rx_drop(int permille) {
+        if (permille < 0 || permille > 1000) return false;
+        if (udp != nullptr) {
+            udp->set_rx_drop_permille(static_cast<uint16_t>(permille));
+            return true;
         }
-        udp->set_rx_drop_permille(static_cast<uint16_t>(permille));
-        return true;
+#if WBLINK_RADIO
+        if (radio != nullptr) return radio->set_rx_drop_permille(permille);
+#endif
+        return false;
+    }
+    uint16_t rx_drop_permille() const {
+        if (udp != nullptr) return udp->rx_drop_permille();
+#if WBLINK_RADIO
+        if (radio != nullptr) return radio->rx_drop_permille();
+#endif
+        return 0;
     }
     // §9.10: the watchdog runs in the mode loop (it owns the clock); its
     // verdict is grafted onto the TX adapter's stats entry here.

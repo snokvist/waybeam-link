@@ -304,8 +304,26 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         if (path == "/api/v1/info") {
             return reply(200, "OK", h_.info_json ? h_.info_json() : "{}");
         }
+        if (path == "/api/v1/features") {
+            return reply(200, "OK",
+                         h_.features_json ? h_.features_json() : "{}");
+        }
         if (path == "/api/v1/health") {
             return reply(200, "OK", h_.health_json ? h_.health_json() : "{}");
+        }
+        if (path == "/api/v1/link/profile") {
+            if (!h_.profile_json) {
+                return reply(409, "Conflict",
+                             json_err("profile envelope not available in this mode"));
+            }
+            return reply(200, "OK", h_.profile_json());
+        }
+        if (path == "/api/v1/bench/rx-drop") {
+            if (!h_.bench_rx_drop_json) {
+                return reply(409, "Conflict",
+                             json_err("RX drop not available in this mode"));
+            }
+            return reply(200, "OK", h_.bench_rx_drop_json());
         }
         if (path == "/api/v1/tx/power") {  // §10.5 Pass 114
             if (!h_.tx_power_json) {
@@ -474,10 +492,18 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
     }
     if (path == "/api/v1/link/profile") {
         if (!h_.profile) return na();
-        if (!j.contains("min") || !j.contains("max")) {
-            return reply(400, "Bad Request", json_err("min and max required"));
+        if (!j.contains("min") || !j["min"].is_number_integer() ||
+            !j.contains("max") || !j["max"].is_number_integer()) {
+            return reply(400, "Bad Request",
+                         json_err("min and max integers required"));
         }
-        return done(h_.profile(j.value("min", 0), j.value("max", 255)));
+        const int64_t mn = j["min"].get<int64_t>();
+        const int64_t mx = j["max"].get<int64_t>();
+        if (mn < 0 || mn > 255 || mx < 0 || mx > 255) {
+            return reply(400, "Bad Request",
+                         json_err("min/max must be 0..255"));
+        }
+        return done(h_.profile(static_cast<int>(mn), static_cast<int>(mx)));
     }
     if (path == "/api/v1/tx/power") {  // §10.5 Pass 114
         if (!h_.tx_power_set) return na();
@@ -616,10 +642,16 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
     }
     if (path == "/api/v1/bench/rx-drop") {
         if (!h_.bench_rx_drop) return na();
-        if (!j.contains("permille")) {
-            return reply(400, "Bad Request", json_err("permille required"));
+        if (!j.contains("permille") || !j["permille"].is_number_integer()) {
+            return reply(400, "Bad Request",
+                         json_err("permille integer required"));
         }
-        return done(h_.bench_rx_drop(j.value("permille", -1)));
+        const int64_t permille = j["permille"].get<int64_t>();
+        if (permille < 0 || permille > 1000) {
+            return reply(400, "Bad Request",
+                         json_err("permille must be 0..1000"));
+        }
+        return done(h_.bench_rx_drop(static_cast<int>(permille)));
     }
     if (path == "/api/v1/vehicle/command") {
         if (!h_.vehicle_command) return na();

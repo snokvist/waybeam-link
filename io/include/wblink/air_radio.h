@@ -183,6 +183,10 @@ class RadioAir : public AirIface {
     // kernel pre-filter to re-attach.
     void set_stamp_net_id(uint8_t net_id) override;
     void set_filter_net_id(std::optional<uint8_t> net_id) override;
+    // Local synthetic-loss debug control. The setter runs on the node event
+    // loop while RX threads read the value before queueing accepted frames.
+    bool set_rx_drop_permille(int value);
+    uint16_t rx_drop_permille() const;
     // §15.5a scout: the uplink adapter the sweep roams, resolved from the
     // role:"tx" adapter. Meaningful only under has_tx(); an RX-only node
     // reads 0 (§3.11 Pass 162).

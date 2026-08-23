@@ -886,6 +886,10 @@ struct TxCore {
 
     // §15.5 control-plane knobs -------------------------------------------
     // §9.7 profile pin: clamp the operating-point ladder to [min,max] by id.
+    uint8_t min_profile() const { return selector_.min_profile(); }
+    uint8_t max_profile() const { return selector_.max_profile(); }
+    uint8_t boot_min_profile() const { return boot_min_profile_; }
+    uint8_t boot_max_profile() const { return boot_max_profile_; }
     void set_profile_pin(uint8_t min_profile, uint8_t max_profile) {
         // The §9.4 probe follows within one tick (see refresh_probe).
         selector_.set_profile_pin(min_profile, max_profile);

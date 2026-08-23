@@ -159,6 +159,10 @@ struct RadioAir::Impl {
     };
 
     RadioAirCfg cfg;
+    // Written by the node/control loop and read by every adapter RX thread.
+    // Keep runtime state out of immutable cfg and make the cross-thread seam
+    // explicit; relaxed ordering is sufficient for this independent knob.
+    std::atomic<uint16_t> rx_drop_permille{0};
     Logger_t logger;
     std::vector<std::unique_ptr<Adapter>> adapters;
     size_t tx_idx = 0;
@@ -433,13 +437,15 @@ struct RadioAir::Impl {
         }
         // Bench-only synthetic RX loss, independent per adapter: a dropped
         // frame vanishes exactly like real air loss (before every counter).
-        if (cfg.rx_drop_permille != 0) {
+        const uint16_t drop_permille =
+            rx_drop_permille.load(std::memory_order_relaxed);
+        if (drop_permille != 0) {
             uint32_t r = a.drop_rng;
             r ^= r << 13;
             r ^= r >> 17;
             r ^= r << 5;
             a.drop_rng = r;
-            if (r % 1000 < cfg.rx_drop_permille) {
+            if (r % 1000 < drop_permille) {
                 a.rx_dropped.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
@@ -509,6 +515,17 @@ RadioAir::RadioAir() : impl_(new Impl) {}
 RadioAir::RadioAir(RadioAir&&) noexcept = default;
 RadioAir& RadioAir::operator=(RadioAir&&) noexcept = default;
 RadioAir::~RadioAir() = default;
+
+bool RadioAir::set_rx_drop_permille(int value) {
+    if (value < 0 || value > 1000) return false;
+    impl_->rx_drop_permille.store(static_cast<uint16_t>(value),
+                                  std::memory_order_relaxed);
+    return true;
+}
+
+uint16_t RadioAir::rx_drop_permille() const {
+    return impl_->rx_drop_permille.load(std::memory_order_relaxed);
+}
 
 Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     if (cfg.adapters.empty()) {
@@ -607,6 +624,8 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                                       std::strerror(errno));
     }
     im.cfg = cfg;
+    im.rx_drop_permille.store(cfg.rx_drop_permille,
+                              std::memory_order_relaxed);
     im.usb_tx_agg = cfg.usb_tx_agg;
     im.has_tx = n_tx == 1;  // §3.11 Pass 162; roles never change post-create
     im.filter_net_id.store(cfg.filter_net_id

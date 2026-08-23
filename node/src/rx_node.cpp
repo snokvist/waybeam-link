@@ -83,6 +83,7 @@
 #include "wblink/node/air_backend.h"
 #include "wblink/node/clock.h"
 #include "wblink/node/discovery.h"
+#include "wblink/node/features.h"
 #include "wblink/node/entropy.h"
 #include "wblink/node/frame_kind.h"
 #include "wblink/node/policy.h"
@@ -1639,6 +1640,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             return build_info_json(l, session, "rx", nullptr,
                                    air.value ? &*air.value : nullptr);
         };
+        h.features_json = [&] {
+            return build_features_json(l, arq_rx_enabled, false);
+        };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.discovery_json = [&] {
             return discovery.json(now_ms(), rx.stream_keys());
@@ -2153,9 +2157,17 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             arq_rx_enabled = enabled;
             return "";
         };
-        if (air.value->udp) {
+        if (air.value->supports_rx_drop()) {
+            h.bench_rx_drop_json = [&] {
+                std::string s = "{\"permille\":" +
+                                std::to_string(air.value->rx_drop_permille());
+                s += ",\"backend\":\"";
+                s += l.cfg.air.kind == AirCfg::Kind::kRadio ? "radio" : "udp";
+                s += "\"}";
+                return s;
+            };
             h.bench_rx_drop = [&](int permille) -> std::string {
-                return air.value->set_udp_rx_drop(permille)
+                return air.value->set_rx_drop(permille)
                     ? std::string() : "permille must be 0..1000";
             };
         }
