@@ -194,9 +194,16 @@ int main() {
         CHECK(std::search(got.begin(), got.end(), body, body + body_len) !=
               got.end());
     }
-    // meta rides through untouched
-    CHECK(std::memcmp(got.data(), blobs[3].data(),
-                      wblink::kVencFrameMetaSize) == 0);
+    // meta rides through untouched EXCEPT §15.4 bit 3: the emitted frame is
+    // decodable but is NOT what was sent, and the bit is what says so.
+    {
+        std::vector<uint8_t> want(
+            blobs[3].begin(), blobs[3].begin() + wblink::kVencFrameMetaSize);
+        CHECK_EQ_U(want[5] & wblink::kFrameFlagSalvaged, 0);  // input is clean
+        want[5] |= wblink::kFrameFlagSalvaged;
+        CHECK(std::memcmp(got.data(), want.data(),
+                          wblink::kVencFrameMetaSize) == 0);
+    }
 
     // -- meta chunk + first slice erased ----------------------------------
     sr.learn(blobs[3].data(), blobs[3].size());
@@ -206,6 +213,9 @@ int main() {
     CHECK_EQ_U(count_slices(got.data(), got.size()), 3);
     CHECK_EQ_U(got[4], wblink::kFrameCodecH265);  // synthesized meta
     CHECK_EQ_U(got[5] & wblink::kFrameFlagIdr, 0);
+    // A rebuilt meta is stamped too — the bit is set at emit, after
+    // append_conceal_meta() has masked the inherited flags.
+    CHECK((got[5] & wblink::kFrameFlagSalvaged) != 0);
 
     // -- last slice erased, frame_len UNKNOWN ----------------------------
     sr.learn(blobs[4].data(), blobs[4].size());
@@ -264,6 +274,9 @@ int main() {
                         tail_only, grab));
         CHECK_EQ_U(count_slices(got.data(), got.size()), 3);
         CHECK_EQ_U(sf.stats().frames_frozen, 1);
+        // A whole-frame freeze is the least trustworthy output of all: it
+        // must carry the bit as much as a slice salvage does.
+        CHECK((got[5] & wblink::kFrameFlagSalvaged) != 0);
         // A donor with a different RPS then disables freeze but not salvage.
         sf.learn(blobs[3].data(), blobs[3].size());
         got.clear();

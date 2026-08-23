@@ -24,6 +24,45 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 189 — a salvaged frame says so: §15.4 `flags` bit 3 (2026-08-23)
+
+**Verdict.** Operator ruling 2026-08-23. §15.4 `VencFrameMeta.flags` gains
+bit 3, **salvaged**, set by the §6.3b RX path on every blob it emits — slice
+salvage and whole-frame freeze alike. It is the only bit an encoder never
+writes.
+
+**The gap it closes.** §6.3b rebuilds a failed block into a decodable access
+unit and hands it on as an ordinary frame. That is right for display and wrong
+for every consumer that treats a frame as a *trustworthy picture*: waybeam-hub's
+recorder was advertising salvaged frames as seek points (a cue is a promise
+that decoding can start there, which a frame of synthesized all-skip slices
+cannot keep) and could cache parameter sets out of one. The hub had no way to
+know — the RTP depayloader it no longer uses could flag damage, and neither the
+ring nor the C ABI could.
+
+**No interface change, which is why this is small.** `write_egress`
+(`node/src/rx_node.cpp`) hands the ring writer and the `FrameSink` C-ABI
+consumer the same `[VencFrameMeta][Annex-B]` blob, so a bit inside the payload
+prefix reaches both with no signature change and no source break for existing
+consumers. An earlier draft of the consuming spec assumed a flags argument had
+to be added to `wblink_frame_cb`; reading `write_egress` retired that.
+
+**What the bit does NOT assert.** Absence means "not known to be salvaged", not
+"intact" — a producer predating the bit leaves it clear, so a consumer that
+treats absence as today's behaviour fails safe. The §6.3a byte-identical
+guarantee is narrowed in the same amendment to the fast and FEC paths, which is
+where it was ever true.
+
+**Blast radius.** No over-air change: this is metadata on a frame the link
+already delivers. `kFrameFlagsKnown` gains the bit, so the frame-shm bench
+validator does not start counting salvaged frames as bad metadata. The
+canonical header is `waybeam_venc/include/venc_frame_ring.h`; reserving bit 3
+there is filed as follow-up so a future encoder flag cannot collide with it.
+
+**Evidence.** waybeam-hub #221 (the recorder-side guards, device-verified on
+the `.170` rk3566 ground under induced loss) and coordination
+`specs/cross/2026-08-23-frame-damage-flag`.
+
 ## Pass 188 — the probe keeps measuring a locked-out rung; only the veto stays clamped (2026-08-21)
 
 **Verdict.** Operator ruling 2026-08-21, reversing the *arming* half of Pass
