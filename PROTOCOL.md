@@ -1365,6 +1365,16 @@ frames instead of forwarding per-packet payloads:
    RX engine. Every pending gap belonging to that block becomes FEC-satisfied,
    advances without a packet-drop charge, and is excluded from all later NACK
    construction. Cache-delivered completion uses the same edge.
+7. **Egress acceptance is part of delivery.** A ring write is accepted only
+   when `FrameShmRing::write_frame()` commits the slot; an in-process sink is
+   accepted only when its acknowledgement callback returns accepted. A refusal
+   finalizes the already-reconstructed radio block (retransmitting its symbols
+   cannot repair a local output failure), but it does **not** increment any
+   successful-frame/recovery attribution counter, advance the delivered-frame
+   ordering watermark, teach §6.3b decoder geometry/donor state, or satisfy
+   §3.9's "IRAP reached the decoder boundary" early exit. It increments
+   `frames_egress_rejected` instead. The frame is not retried: both SHM and the
+   callback path are latency-first, drop-not-block boundaries.
 
 There is no completed-frame reorder buffer. On observing any packet from block
 `N`, every incomplete block older than `N` is finalized as superseded. Once
@@ -1468,10 +1478,14 @@ Config (§15.2): `streams[].conceal.mode` — `"off"` (default) or
 read only when mode is not `"off"`. Valid only on frame-SHM egress streams.
 
 Stats (§15.3, per stream): `frames_salvaged` (emitted with ≥1 surviving
-slice), `frames_frozen` (whole-frame synthesis), `salvage_failed` (attempted,
-refused — the frame then dropped as before), `slices_synthesized` (total
-replacement slices written). `frames_unrecoverable` counts only frames that
-actually dropped; a salvaged/frozen frame increments `frames_delivered`.
+slice), `frames_frozen` (whole-frame synthesis), `salvage_failed` (repair
+construction attempted but unavailable/refused — the frame then dropped as
+before), `slices_synthesized` (total replacement slices written).
+`frames_unrecoverable` counts only frames that
+could not be reconstructed; a salvaged/frozen frame increments
+`frames_delivered` only when egress accepts it. A successfully synthesized
+frame refused by egress is `frames_egress_rejected`, not `salvage_failed` or
+`frames_unrecoverable`, and its tentative donor/POC/PTS state is discarded.
 
 ### 6.4 NACK generation
 - For a lost seq that is `ARQ`- or `PFRAME_ARQ`-flagged, not superseded, within
@@ -5253,7 +5267,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "frame_size_last": 65432, "frame_size_min": 8120,
     "frame_size_max": 241810, "frame_interval_us": 11106,
     "frame_jitter_us": 184,
-    "frames_fast": 89571, "frames_unrecoverable": 0, "malformed": 0,
+    "frames_fast": 89571, "frames_unrecoverable": 0,
+    "frames_egress_rejected": 0, "malformed": 0,
     "frames_salvaged": 0, "frames_frozen": 0, "salvage_failed": 0,
     "slices_synthesized": 0,
     "jscc_shadow_blocks": 89681, "jscc_predicted_loss_symbols": 3,
@@ -5457,6 +5472,8 @@ On a **`frame-shm` egress** stream (§6.3a) the per-frame reassembler counters
 map onto these fields directly: `recovered_fec` = frames rebuilt from repair
 symbols, `frames_fast` = frames delivered all-source with no decode,
 `frames_unrecoverable` = frames finalized below `k` (no way to decode),
+`frames_egress_rejected` = complete or successfully synthesized frames refused
+by the local ring/callback boundary,
 `decode_errors` = FEC decode returned an error, `malformed` = symbols rejected
 before decode, and `dropped_superseded`/`dropped_deadline` = frames dropped by
 supersession / past their deadline. With §6.3b enabled, `frames_salvaged` /
@@ -5797,6 +5814,16 @@ clear, so a consumer fails safe by treating absence as today's behaviour.
 The bit rides the same payload prefix as the rest of the metadata, so it reaches
 a ring consumer and a §15.4 `FrameSink` C-ABI consumer identically, with no
 change to either interface.
+
+**In-process acceptance callback.** The C++ `FrameSink` and the additive C ABI
+acknowledgement callback return whether the synchronous consumer accepted the
+frame. `WBLINK_FRAME_ACCEPTED` means the consumer took responsibility for the
+bytes before returning; `WBLINK_FRAME_REJECTED` means it did not. The original
+void `wblink_frame_cb` / `wblink_rx_run` entry point remains available and is
+adapted as always-accepted for source/ABI compatibility — it preserves its
+historic accounting limitation by construction. New embedders, and embedders
+that can reject during pipeline rebuild/backpressure, use
+`wblink_frame_ack_cb` / `wblink_rx_run_ack`.
 
 ### 15.5 Control plane (REST/HTTP)
 Optional, config-gated: `"control": { "bind": "<addr>:<port>" }` (absent = off;

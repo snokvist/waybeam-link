@@ -24,6 +24,13 @@ static void on_frame(uint8_t stream_id, const uint8_t *frame, size_t len,
     printf("c_consumer: stream %u, %zu bytes\n", (unsigned)stream_id, len);
 }
 
+static wblink_frame_result on_frame_ack(uint8_t stream_id,
+                                        const uint8_t *frame, size_t len,
+                                        void *user) {
+    on_frame(stream_id, frame, len, user);
+    return WBLINK_FRAME_ACCEPTED;
+}
+
 /* The other direction of the ABI: the type a TX consumer passes IN, carrying
  * the double-fork B9 keeps out of node/. Defined so the typedef has something
  * to bind, never called — see the note on the TX half below. */
@@ -121,6 +128,27 @@ int wblink_c_consumer_check(void) {
         return 1; /* a handle runs once; reuse must be refused, not ignored */
     }
     if (frames != 0) {
+        wblink_rx_destroy(rx);
+        return 1;
+    }
+    wblink_rx_destroy(rx);
+
+    /* The additive acknowledgment entry point has the same pre-stop and
+     * one-run lifecycle as the legacy ABI. This also forces its symbol to
+     * resolve in the C consumer gate. */
+    rx = wblink_rx_create();
+    if (rx == NULL) {
+        return 1;
+    }
+    frames = 0;
+    wblink_rx_request_stop(rx);
+    if (wblink_rx_run_ack(rx, "/nonexistent/wblink-linkcheck.json",
+                          on_frame_ack, &frames) != 0 || frames != 0) {
+        wblink_rx_destroy(rx);
+        return 1;
+    }
+    if (wblink_rx_run_ack(rx, "/nonexistent/wblink-linkcheck.json",
+                          on_frame_ack, &frames) != 3) {
         wblink_rx_destroy(rx);
         return 1;
     }

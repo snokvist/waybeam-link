@@ -16,6 +16,7 @@ class DashboardSchemaTest(unittest.TestCase):
     def test_frame_shm_counters_are_rendered(self):
         for field in (
             "frames_fast", "recovered_fec", "frames_unrecoverable",
+            "frames_egress_rejected",
             "fec_recovered_source_symbols",
             "arq_recovered_source_symbols", "arq_recovered_repair_symbols",
             "frames_with_arq", "frames_fec_only", "frames_fec_after_arq",

@@ -64,9 +64,24 @@ typedef struct wblink_rx wblink_rx;
  * The RX loop thread IS the thread that called wblink_rx_run — the node
  * spawns no dispatch thread, so every callback arrives on that one thread
  * for the life of the run (a JNI consumer attaches it once; Pass 172).
+ * This legacy callback cannot report refusal and is therefore treated as
+ * accepted after it returns. New consumers use wblink_frame_ack_cb below.
  */
 typedef void (*wblink_frame_cb)(uint8_t stream_id, const uint8_t *frame,
                                 size_t len, void *user);
+
+/*
+ * Acceptance-reporting counterpart for consumers that can refuse a frame.
+ * The callback is synchronous like wblink_frame_cb: return ACCEPTED only once
+ * the consumer has taken responsibility for the bytes. REJECTED is a terminal
+ * local drop for this frame; the node will not count or learn it as delivered.
+ */
+typedef enum wblink_frame_result {
+    WBLINK_FRAME_REJECTED = 0,
+    WBLINK_FRAME_ACCEPTED = 1
+} wblink_frame_result;
+typedef wblink_frame_result (*wblink_frame_ack_cb)(
+    uint8_t stream_id, const uint8_t *frame, size_t len, void *user);
 
 /* NULL on allocation failure. */
 wblink_rx *wblink_rx_create(void);
@@ -406,7 +421,12 @@ int wblink_rx_command_status(wblink_rx *rx, char *buffer, size_t capacity,
 int wblink_rx_run(wblink_rx *rx, const char *config_path,
                   wblink_frame_cb on_frame, void *user);
 
-/* Frees the handle. Must not be called while `wblink_rx_run` is in flight. */
+/* Additive acceptance-reporting entry point; lifecycle/return codes match
+ * wblink_rx_run exactly. A NULL callback keeps config-selected egress. */
+int wblink_rx_run_ack(wblink_rx *rx, const char *config_path,
+                      wblink_frame_ack_cb on_frame, void *user);
+
+/* Frees the handle. Must not be called while either run entry is in flight. */
 void wblink_rx_destroy(wblink_rx *rx);
 
 #ifdef __cplusplus

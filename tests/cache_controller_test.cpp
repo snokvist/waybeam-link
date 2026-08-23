@@ -267,6 +267,7 @@ int main() {
         int emitted = 0;
         const FrameReassembler::Emit emit = [&](const uint8_t*, size_t) {
             ++emitted;
+            return true;
         };
         // k=4 block 7: feed sources 0 and 3 (3 = EOB tail).
         const auto s0 = wrapped_source(7, 4, 0);

@@ -226,7 +226,8 @@ int wblink_rx_selection(wblink_rx* rx, char* buffer, size_t capacity,
 // Pass 177 lifecycle transitions at exactly two points instead of at every
 // return site below.
 static int wblink_rx_run_claimed(wblink_rx* rx, const char* config_path,
-                                 wblink_frame_cb on_frame, void* user) {
+                                 wblink_frame_cb on_frame,
+                                 wblink_frame_ack_cb on_frame_ack, void* user) {
     // Stopped before it started: return without loading a config or opening a
     // radio. The header promises this is prompt, and the first read of `stop`
     // inside the loop is ~1800 lines and one AirBackend::create away.
@@ -260,10 +261,17 @@ static int wblink_rx_run_claimed(wblink_rx* rx, const char* config_path,
     // Empty when the caller passed no callback, which is the documented way to
     // say "egress goes where the config says" — NOT a sink that drops.
     wblink::node::FrameSink sink;
-    if (on_frame != nullptr) {
+    if (on_frame_ack != nullptr) {
+        sink = [on_frame_ack, user](uint8_t stream_id, const uint8_t* frame,
+                                    size_t len) {
+            return on_frame_ack(stream_id, frame, len, user) ==
+                   WBLINK_FRAME_ACCEPTED;
+        };
+    } else if (on_frame != nullptr) {
         sink = [on_frame, user](uint8_t stream_id, const uint8_t* frame,
                                 size_t len) {
             on_frame(stream_id, frame, len, user);
+            return true;
         };
     }
     // No C++ exception may cross into a C caller. Nothing below is known to
@@ -278,8 +286,9 @@ static int wblink_rx_run_claimed(wblink_rx* rx, const char* config_path,
     }
 }
 
-int wblink_rx_run(wblink_rx* rx, const char* config_path,
-                  wblink_frame_cb on_frame, void* user) {
+static int wblink_rx_run_common(wblink_rx* rx, const char* config_path,
+                                wblink_frame_cb on_frame,
+                                wblink_frame_ack_cb on_frame_ack, void* user) {
     if (rx == nullptr) return 2;
     // Pass 179: exactly one config source. Neither is nothing to run; both
     // is an ambiguity only a guess could resolve, so it is refused rather
@@ -293,10 +302,21 @@ int wblink_rx_run(wblink_rx* rx, const char* config_path,
     // rc is stored BEFORE the EXITED flip so a reader that observes EXITED
     // always reads the real code, never the initializer.
     rx->state.store(WBLINK_NODE_RUNNING);
-    const int rc = wblink_rx_run_claimed(rx, config_path, on_frame, user);
+    const int rc = wblink_rx_run_claimed(rx, config_path, on_frame,
+                                         on_frame_ack, user);
     rx->exit_rc.store(rc);
     rx->state.store(WBLINK_NODE_EXITED);
     return rc;
+}
+
+int wblink_rx_run(wblink_rx* rx, const char* config_path,
+                  wblink_frame_cb on_frame, void* user) {
+    return wblink_rx_run_common(rx, config_path, on_frame, nullptr, user);
+}
+
+int wblink_rx_run_ack(wblink_rx* rx, const char* config_path,
+                      wblink_frame_ack_cb on_frame, void* user) {
+    return wblink_rx_run_common(rx, config_path, nullptr, on_frame, user);
 }
 
 int wblink_rx_control_endpoint(wblink_rx* rx, char* buffer, size_t capacity,

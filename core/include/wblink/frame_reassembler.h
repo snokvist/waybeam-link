@@ -37,6 +37,7 @@ struct FrameReassemblerStats {
     uint64_t frames_delivered = 0;
     uint64_t frames_fast = 0;      // all-sources, no decode
     uint64_t frames_fec = 0;       // recovered via FEC
+    uint64_t frames_egress_rejected = 0;  // reconstructed, local sink refused
     // Recovery attribution for successfully delivered frames only. A symbol
     // is counted once, when its block completes; duplicate retransmits do not
     // inflate these counters.
@@ -111,8 +112,9 @@ struct SalvageView {
 class FrameReassembler {
   public:
     // emit(frame, len): one whole [VencFrameMeta][Annex-B] blob, valid only
-    // during the call. The caller writes it to the frame-shm egress ring.
-    using Emit = std::function<void(const uint8_t* frame, size_t len)>;
+    // during the call. True means the local egress accepted responsibility
+    // for it; false is a terminal local drop (§6.3a outcome 7).
+    using Emit = std::function<bool(const uint8_t* frame, size_t len)>;
 
     // §6.3b salvage hook: called when a block finalizes unrecoverable (and no
     // newer block has already emitted). Returns true iff it emitted a
@@ -125,9 +127,9 @@ class FrameReassembler {
 
     // Feed one deduped DATA symbol of this stream. is_repair from
     // data_flags & FEC_REPAIR; eob from data_flags & END_OF_BLOCK.
-    // Returns true exactly when this symbol completes and emits the block.
-    // Callers use that edge to retire any packet-level ARQ still pending for
-    // a frame which FEC has already made whole.
+    // Returns true exactly when this symbol completes and attempts to emit the
+    // block. A rejected local egress still retires packet-level ARQ because
+    // retransmitting an already-complete radio block cannot repair it.
     bool push(uint32_t block_id, uint8_t flags, const uint8_t* payload,
               size_t payload_len, uint64_t now_ms, const Emit& emit,
               bool air_path = true);
@@ -183,10 +185,10 @@ class FrameReassembler {
     void supersede(uint32_t new_highest, const Emit& emit);
     void finalize(uint32_t id);  // advance the done/dropped watermark
     void observe_shadow(uint32_t id, Block& b);
-    // §6.3b: last chance for a block finalizing below k. Returns true iff the
-    // hook emitted; ordering-guarded so a salvage never emits behind a newer
-    // already-emitted block (§6.3a zero-reorder rule).
-    bool try_salvage(uint32_t id, const Block& b, const Emit& emit);
+    enum class SalvageOutcome { kUnavailable, kAccepted, kRejected };
+    // §6.3b: last chance for a block finalizing below k. Ordering-guarded so a
+    // salvage never emits behind a newer accepted block (§6.3a zero-reorder).
+    SalvageOutcome try_salvage(uint32_t id, const Block& b, const Emit& emit);
     void note_emitted(uint32_t id);
 
     FrameReassemblerConfig cfg_;

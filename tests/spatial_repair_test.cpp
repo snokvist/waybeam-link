@@ -142,6 +142,7 @@ int main() {
     std::vector<uint8_t> got;
     const SpatialRepair::Emit grab = [&](const uint8_t* f, size_t n) {
         got.assign(f, f + n);
+        return true;
     };
     // Small chunks so every slice spans several of them and an erasure can
     // target exactly one slice.
@@ -319,6 +320,37 @@ int main() {
                          grab));
     }
     CHECK_EQ_U(sr.stats().salvage_failed, failed_before + 2);
+
+    // A syntactically valid repair refused by the local egress is not a
+    // salvage construction failure. Its tentative decoder model is discarded
+    // so a picture the decoder never saw cannot become a future donor.
+    {
+        SpatialRepair rejected(cfg);
+        rejected.learn(blobs[0].data(), blobs[0].size());
+        rejected.learn(blobs[1].data(), blobs[1].size());
+        rejected.learn(blobs[2].data(), blobs[2].size());
+        CHECK(rejected.geometry_known());
+        const int ci = interior_chunk(blobs[3], 1, s);
+        CHECK(ci > 0);
+        auto src = chunks(blobs[3], s, {ci});
+        const uint16_t k = static_cast<uint16_t>(
+            (blobs[3].size() + s - 1) / s);
+        bool called = false;
+        const SpatialRepair::Emit refuse =
+            [&](const uint8_t*, size_t) {
+                called = true;
+                return false;
+            };
+        CHECK(!rejected.repair(k, s,
+                               static_cast<uint32_t>(blobs[3].size()), src,
+                               refuse));
+        CHECK(called);  // construction succeeded; the boundary refused it
+        CHECK(!rejected.geometry_known());
+        CHECK_EQ_U(rejected.stats().frames_salvaged, 0u);
+        CHECK_EQ_U(rejected.stats().frames_frozen, 0u);
+        CHECK_EQ_U(rejected.stats().slices_synthesized, 0u);
+        CHECK_EQ_U(rejected.stats().salvage_failed, 0u);
+    }
 
     // reset_stream forgets the learned shape.
     sr.reset_stream();

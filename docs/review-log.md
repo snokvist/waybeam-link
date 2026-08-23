@@ -46,6 +46,34 @@ existing profile envelope and §6.3b's concealment semantics are unchanged.
 `feature/link-debug-webui`; coordination
 `specs/cross/2026-08-23-link-debug-webui`.
 
+## Pass 192 — delivery ends at an accepting egress, not a void callback (2026-08-23)
+
+**Verdict.** §6.3a/§6.3b/§15.3/§15.4 now distinguish reconstruction from
+delivery. A complete frame refused by the local SHM writer or in-process sink
+is finalized without retry, but is not counted as delivered/recovered, is not
+learned by `SpatialRepair`, and cannot settle §3.9 merely because it was an
+IRAP. It increments `frames_egress_rejected`, not
+`frames_unrecoverable`/`salvage_failed`.
+
+**Why terminal.** The radio block is already complete; another NACK cannot
+make a full local ring or detached decoder accept it. Retrying the frame would
+add latency and violate the drop-not-block egress contract. The next accepted
+frame resumes delivery; decoder bootstrap remains governed by §3.9.
+
+**API compatibility.** C++ `FrameSink` returns acceptance. The C ABI adds
+`wblink_frame_ack_cb` + `wblink_rx_run_ack`; the original void callback and
+`wblink_rx_run` stay exported and adapt their callback as always accepted.
+Existing Android/vendor pins therefore do not require a flag-day update, while
+waybeam-hub can report its real GStreamer handoff result.
+
+**Blast radius.** No over-air or VFRM layout change. waybeam-link owns the
+reassembler/state/stats change; waybeam-hub adopts the ack API. Android remains
+source/ABI compatible and can opt in when its deliberate vendor bump lands.
+Evidence is the byte-exact accept/reject regression, independent link/hub builds,
+and the `.242` x86 ground running against the `.232` SSC338Q craft. A controlled
+pipeline restart rejected five boundary frames without increasing unrecoverable
+loss, held the IDR gate through four deltas, and resumed at about 60 fps / 19 Mbps.
+
 ## Pass 189 — a salvaged frame says so: §15.4 `flags` bit 3 (2026-08-23)
 
 **Verdict.** Operator ruling 2026-08-23. §15.4 `VencFrameMeta.flags` gains

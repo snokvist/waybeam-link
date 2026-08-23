@@ -28,10 +28,10 @@ bool FrameReassembler::push(uint32_t block_id, uint8_t flags,
         return false;
     }
 
-    bool emitted = false;
+    bool emission_attempted = false;
     const Emit tracked_emit = [&](const uint8_t* frame, size_t len) {
-        emitted = true;
-        emit(frame, len);
+        emission_attempted = true;
+        return emit(frame, len);
     };
 
     const bool is_repair = (flags & data_flags::kFecRepair) != 0;
@@ -162,7 +162,7 @@ bool FrameReassembler::push(uint32_t block_id, uint8_t flags,
         try_complete(block_id, it->second, tracked_emit)) {
         blocks_.erase(it);
     }
-    return emitted;
+    return emission_attempted;
 }
 
 bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
@@ -192,13 +192,17 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
         for (const auto& kv : b.sources) {  // ordered 0..k-1
             scratch_.insert(scratch_.end(), kv.second.begin(), kv.second.end());
         }
-        emit(scratch_.data(), scratch_.size());
-        note_emitted(id);
+        const bool accepted = emit(scratch_.data(), scratch_.size());
         observe_shadow(id, b);
-        stats_.arq_recovered_source_symbols += b.arq_sources.size();
-        stats_.frames_with_arq += !b.arq_sources.empty();
-        ++stats_.frames_delivered;
-        ++stats_.frames_fast;
+        if (accepted) {
+            note_emitted(id);
+            stats_.arq_recovered_source_symbols += b.arq_sources.size();
+            stats_.frames_with_arq += !b.arq_sources.empty();
+            ++stats_.frames_delivered;
+            ++stats_.frames_fast;
+        } else {
+            ++stats_.frames_egress_rejected;
+        }
         finalize(id);
         return true;
     }
@@ -224,20 +228,26 @@ bool FrameReassembler::try_complete(uint32_t id, Block& b, const Emit& emit) {
             scratch_.assign(static_cast<size_t>(k) * s, 0);
             if (dec.decode(scratch_.data())) {
                 scratch_.resize(b.frame_len);  // trim last-symbol padding
-                emit(scratch_.data(), scratch_.size());
-                note_emitted(id);
+                const bool accepted = emit(scratch_.data(), scratch_.size());
                 observe_shadow(id, b);
-                stats_.fec_recovered_source_symbols +=
-                    k - b.sources.size();
-                stats_.arq_recovered_source_symbols += b.arq_sources.size();
-                stats_.arq_recovered_repair_symbols += b.arq_repairs.size();
-                const bool used_arq =
-                    !b.arq_sources.empty() || !b.arq_repairs.empty();
-                stats_.frames_with_arq += used_arq;
-                stats_.frames_fec_after_arq += used_arq;
-                stats_.frames_fec_only += !used_arq;
-                ++stats_.frames_delivered;
-                ++stats_.frames_fec;
+                if (accepted) {
+                    note_emitted(id);
+                    stats_.fec_recovered_source_symbols +=
+                        k - b.sources.size();
+                    stats_.arq_recovered_source_symbols +=
+                        b.arq_sources.size();
+                    stats_.arq_recovered_repair_symbols +=
+                        b.arq_repairs.size();
+                    const bool used_arq =
+                        !b.arq_sources.empty() || !b.arq_repairs.empty();
+                    stats_.frames_with_arq += used_arq;
+                    stats_.frames_fec_after_arq += used_arq;
+                    stats_.frames_fec_only += !used_arq;
+                    ++stats_.frames_delivered;
+                    ++stats_.frames_fec;
+                } else {
+                    ++stats_.frames_egress_rejected;
+                }
                 finalize(id);
                 return true;
             }
@@ -254,9 +264,9 @@ void FrameReassembler::supersede(uint32_t new_highest, const Emit& emit) {
             static_cast<int32_t>(cfg_.max_blocks_ahead)) {
             const Block& b = it->second;
             if (b.k == 0 || b.sources.size() + b.repairs.size() < b.k) {
-                if (try_salvage(it->first, b, emit)) {
-                    // §6.3b: delivered after repair — not dropped.
-                } else {
+                const SalvageOutcome outcome =
+                    try_salvage(it->first, b, emit);
+                if (outcome == SalvageOutcome::kUnavailable) {
                     ++stats_.frames_unrecoverable;
                     ++stats_.frames_superseded;
                 }
@@ -277,9 +287,9 @@ void FrameReassembler::tick(uint64_t now_ms, const Emit& emit) {
         if (now_ms >= it->second.first_ms + cfg_.deadline_ms) {
             const Block& b = it->second;
             if (b.k == 0 || b.sources.size() + b.repairs.size() < b.k) {
-                if (try_salvage(it->first, b, emit)) {
-                    // §6.3b: delivered after repair — not dropped.
-                } else {
+                const SalvageOutcome outcome =
+                    try_salvage(it->first, b, emit);
+                if (outcome == SalvageOutcome::kUnavailable) {
                     ++stats_.frames_unrecoverable;
                     ++stats_.frames_deadline;
                 }
@@ -295,14 +305,14 @@ void FrameReassembler::tick(uint64_t now_ms, const Emit& emit) {
     }
 }
 
-bool FrameReassembler::try_salvage(uint32_t id, const Block& b,
-                                   const Emit& emit) {
+FrameReassembler::SalvageOutcome FrameReassembler::try_salvage(
+    uint32_t id, const Block& b, const Emit& emit) {
     if (!salvage_ || b.k == 0 || b.sources.empty()) {
-        return false;
+        return SalvageOutcome::kUnavailable;
     }
     // §6.3a zero-reorder rule: never emit behind a newer delivered block.
     if (have_emitted_ && bid_diff(id, last_emitted_) <= 0) {
-        return false;
+        return SalvageOutcome::kUnavailable;
     }
     SalvageView view;
     view.block_id = id;
@@ -310,13 +320,25 @@ bool FrameReassembler::try_salvage(uint32_t id, const Block& b,
     view.s = b.s;
     view.frame_len = b.frame_len;
     view.sources = &b.sources;
-    if (!salvage_(view, emit)) {
-        return false;
+    bool attempted = false;
+    bool accepted = false;
+    const Emit tracked_emit = [&](const uint8_t* frame, size_t len) {
+        attempted = true;
+        accepted = emit(frame, len);
+        return accepted;
+    };
+    const bool repaired = salvage_(view, tracked_emit);
+    if (attempted && !accepted) {
+        ++stats_.frames_egress_rejected;
+        return SalvageOutcome::kRejected;
+    }
+    if (!repaired || !attempted) {
+        return SalvageOutcome::kUnavailable;
     }
     note_emitted(id);
     ++stats_.frames_delivered;
     ++stats_.frames_salvaged;
-    return true;
+    return SalvageOutcome::kAccepted;
 }
 
 void FrameReassembler::note_emitted(uint32_t id) {

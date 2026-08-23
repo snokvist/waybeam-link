@@ -370,6 +370,7 @@ inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
             st->frames_fec_after_arq = fr.frames_fec_after_arq;
             st->frames_fast = fr.frames_fast;
             st->frames_unrecoverable = fr.frames_unrecoverable;
+            st->frames_egress_rejected = fr.frames_egress_rejected;
             st->malformed = fr.malformed;
             st->frames_salvaged = fr.frames_salvaged;
             st->frames_frozen = fr.frames_frozen;

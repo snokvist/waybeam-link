@@ -162,6 +162,7 @@ int main(int argc, char** argv) {
                         len - kVencFrameMetaSize, out);
         }
         ++frames_out;
+        return true;
     };
 
     const uint32_t frame_ms = 1000 / (fps ? fps : 100);

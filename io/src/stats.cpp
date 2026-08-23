@@ -198,6 +198,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.frames_fast);
         out += ",\"frames_unrecoverable\":";
         append_u64(out, s.frames_unrecoverable);
+        out += ",\"frames_egress_rejected\":";
+        append_u64(out, s.frames_egress_rejected);
         out += ",\"malformed\":";
         append_u64(out, s.malformed);
         out += ",\"frames_salvaged\":";

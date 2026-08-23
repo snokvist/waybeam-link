@@ -19,6 +19,7 @@ int main() {
         (void)stream_id;
         (void)frame;
         (void)len;
+        return true;
     };
     // Referenced, never called: run_rx opens adapters and blocks. Spell the
     // original three-argument type so this gate also proves the additive

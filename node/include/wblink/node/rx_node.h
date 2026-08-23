@@ -67,7 +67,9 @@ namespace node {
 //
 // It is called from the RX loop, synchronously, before the next frame is
 // reassembled: a slow sink is backpressure on the receiver. Copy what you need
-// and return — the buffer does not outlive the call.
+// and return — the buffer does not outlive the call. Return true only after the
+// consumer accepted responsibility for the frame; false is a terminal local
+// drop and is excluded from delivered-frame accounting/repair learning.
 //
 // THE RX LOOP IS THE THREAD THAT CALLED run_rx (Pass 172 threading contract,
 // stated because two embedders depend on it undocumented): the node spawns no
@@ -75,7 +77,7 @@ namespace node {
 // for the life of the run — a JNI consumer attaches it once, and anything the
 // sink blocks on stalls the receive path itself, never a helper.
 using FrameSink =
-    std::function<void(uint8_t stream_id, const uint8_t* frame, size_t len)>;
+    std::function<bool(uint8_t stream_id, const uint8_t* frame, size_t len)>;
 
 class RxRuntimeControl;
 
