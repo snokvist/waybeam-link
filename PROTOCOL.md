@@ -1426,7 +1426,10 @@ producer emits multiple independent slice segments per picture, §15.4):
    intentionally malformed data.
 5. The rebuilt access unit egresses through the normal §6.3a slot write with
    the original `VencFrameMeta` when chunk 0 survived, else a synthesized meta
-   (`codec` H.265, flags 0, PTS extrapolated). Ordering: a salvaged frame
+   (`codec` H.265, inherited flags cleared except GDR, PTS extrapolated).
+   **Either way the emitted meta carries `flags` bit 3 (salvaged, §15.4)** —
+   it is stamped last, after any synthesis, so a rebuilt prefix announces
+   itself exactly as a surviving one does. Ordering: a salvaged frame
    emits only if no newer block has already emitted (zero-reorder rule of
    §6.3a holds; a stale salvage is dropped, not reordered).
 
