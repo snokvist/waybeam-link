@@ -95,7 +95,7 @@ void deliver_lossy(FrameReassembler& ra, FrameShmRing& out_prod,
                    uint64_t t) {
     size_t dropped = 0;
     const auto emit = [&](const uint8_t* f, size_t n) {
-        out_prod.write_frame(f, n);
+        return out_prod.write_frame(f, n);
     };
     for (const Pkt& p : pkts) {
         const bool is_rep = (p.flags & data_flags::kFecRepair) != 0;
@@ -226,7 +226,9 @@ int main() {
                 const uint8_t* data, size_t len) {
                 const bool complete = ra.push(
                     block_id, flags, data, len, 1500,
-                    [&](const uint8_t* f, size_t n) { op.write_frame(f, n); });
+                    [&](const uint8_t* f, size_t n) {
+                        return op.write_frame(f, n);
+                    });
                 return RxEngine::EarlyDeliverResult{true, complete};
             };
 
@@ -283,10 +285,53 @@ int main() {
         CHECK_EQ_U(oc.read_frame(obuf.data(), obuf.size()), 0);  // no frame out
         // Deadline expiry finalizes the block as unrecoverable — still no blob.
         ra.tick(2000 + rc.deadline_ms + 1,
-                [&](const uint8_t* f, size_t n) { op.write_frame(f, n); });
+                [&](const uint8_t* f, size_t n) {
+                    return op.write_frame(f, n);
+                });
         CHECK_EQ_U(oc.read_frame(obuf.data(), obuf.size()), 0);
         CHECK_EQ_U(ra.stats().frames_delivered, 0u);
         CHECK(ra.stats().frames_deadline >= 1u);
+    }
+
+    // --- a full egress ring rejects without claiming delivery ------------
+    {
+        const auto filler = make_frame(64, /*idr=*/false, 90);
+        for (uint32_t i = 0; i < kFrameRingDefaultSlots; ++i) {
+            CHECK(op.write_frame(filler.data(), filler.size()));
+        }
+        const uint64_t drops_before = op.stats().full_drops;
+
+        FrameFramerConfig fc;
+        fc.stream_type = stream_type::kRtp;
+        fc.fec.scheme = FecScheme::kNone;
+        FrameFramer ff(fc);
+        ff.set_operating_point(0, 0, kDefaultMaxPayload);
+        FrameReassemblerConfig rc;
+        FrameReassembler ra(rc);
+        const auto rejected = make_frame(3000, /*idr=*/true, 91);
+        const auto pkts = frame_to_packets(ip, ic, ff, rejected, 3000, rbuf);
+        bool completed = false;
+        for (const Pkt& p : pkts) {
+            completed |= ra.push(
+                p.block_id, p.flags, p.payload.data(), p.payload.size(), 3000,
+                [&](const uint8_t* f, size_t n) {
+                    return op.write_frame(f, n);
+                });
+        }
+        CHECK(completed);
+        CHECK_EQ_U(ra.stats().frames_delivered, 0u);
+        CHECK_EQ_U(ra.stats().frames_fast, 0u);
+        CHECK_EQ_U(ra.stats().frames_egress_rejected, 1u);
+        CHECK_EQ_U(op.stats().full_drops, drops_before + 1);
+
+        // Only the fillers committed. The refused blob never became a slot.
+        for (uint32_t i = 0; i < kFrameRingDefaultSlots; ++i) {
+            const long got = oc.read_frame(obuf.data(), obuf.size());
+            CHECK_EQ_U(static_cast<unsigned long long>(got), filler.size());
+            CHECK(got > 0 &&
+                  std::memcmp(obuf.data(), filler.data(), filler.size()) == 0);
+        }
+        CHECK_EQ_U(oc.read_frame(obuf.data(), obuf.size()), 0);
     }
 
     // Rings' destructors join reader threads + unlink; reaching finish without

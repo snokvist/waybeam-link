@@ -84,6 +84,7 @@ StatsSnapshot sample_snapshot() {
     st.salvage_failed = 1;
     st.slices_synthesized = 27;
     st.frames_unrecoverable = 0;
+    st.frames_egress_rejected = 4;
     st.malformed = 0;
     st.jscc_shadow_blocks = 89681;
     st.jscc_predicted_loss_symbols = 3;
@@ -259,6 +260,7 @@ const char* kGolden =
     "\"frame_size_min\":8120,\"frame_size_max\":241810,"
     "\"frame_interval_us\":11106,\"frame_jitter_us\":184,"
     "\"frames_fast\":89571,\"frames_unrecoverable\":0,"
+    "\"frames_egress_rejected\":4,"
     "\"malformed\":0,"
     "\"frames_salvaged\":12,\"frames_frozen\":3,"
     "\"salvage_failed\":1,\"slices_synthesized\":27,"

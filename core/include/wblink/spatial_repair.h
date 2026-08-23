@@ -35,7 +35,7 @@ struct SpatialRepairStats {
 
 class SpatialRepair {
   public:
-    using Emit = std::function<void(const uint8_t* frame, size_t len)>;
+    using Emit = std::function<bool(const uint8_t* frame, size_t len)>;
 
     explicit SpatialRepair(const SpatialRepairConfig& cfg) : cfg_(cfg) {}
 
@@ -47,7 +47,8 @@ class SpatialRepair {
     // §6.3b: attempt to repair a failed block from its surviving source
     // chunks (chunk i = blob bytes [i*s, i*s+chunk.size())). frame_len 0 =
     // unknown. Emits the rebuilt [VencFrameMeta][Annex-B] blob and returns
-    // true on success; false = caller drops the frame (pre-§6.3b behaviour).
+    // true only when the local egress accepts it. A rejected emit discards
+    // tentative donor/POC/PTS state without counting salvage_failed.
     bool repair(uint16_t k, uint16_t s, uint32_t frame_len,
                 const std::map<uint16_t, std::vector<uint8_t>>& sources,
                 const Emit& emit);

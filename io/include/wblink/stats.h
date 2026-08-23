@@ -101,6 +101,7 @@ struct StreamStats {
     // (all-source, no decode), finalized-below-k, and pre-decode rejects.
     uint64_t frames_fast = 0;
     uint64_t frames_unrecoverable = 0;
+    uint64_t frames_egress_rejected = 0;
     uint64_t malformed = 0;
     // §6.3b spatial salvage outcomes (0 with conceal.mode "off").
     uint64_t frames_salvaged = 0;

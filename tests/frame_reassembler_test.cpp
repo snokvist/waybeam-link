@@ -62,7 +62,7 @@ std::vector<Sym> produce(FrameFramer& ff, const std::vector<uint8_t>& blob) {
 }
 
 // A no-op emit for drops.
-FrameReassembler::Emit noop = [](const uint8_t*, size_t) {};
+FrameReassembler::Emit noop = [](const uint8_t*, size_t) { return true; };
 
 }  // namespace
 
@@ -77,13 +77,49 @@ int main() {
         auto syms = produce(ff, blob);
         FrameReassembler ra(rc);
         std::vector<std::vector<uint8_t>> got;
-        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+            return true;
+        };
         for (const Sym& s : syms) ra.push(s.block_id, s.flags, s.payload.data(),
                                           s.payload.size(), 1000, emit);
         CHECK_EQ_U(got.size(), 1u);
         CHECK(got[0] == blob);
         CHECK_EQ_U(ra.stats().frames_fast, 1u);
         CHECK_EQ_U(ra.stats().frames_fec, 0u);
+    }
+
+    // --- local egress acceptance is the delivery boundary ----------------
+    {
+        FrameFramer ff(framer_cfg(FecScheme::kNone, 0, 0, 3));
+        const auto accepted_blob = make_frame(3000, /*idr=*/true, 40);
+        const auto rejected_blob = make_frame(3100, /*idr=*/false, 41);
+        FrameReassembler ra(rc);
+        std::vector<uint8_t> accepted;
+        bool allow = true;
+        const FrameReassembler::Emit emit =
+            [&](const uint8_t* f, size_t n) {
+                if (!allow) return false;
+                accepted.assign(f, f + n);
+                return true;
+            };
+        for (const Sym& s : produce(ff, accepted_blob)) {
+            ra.push(s.block_id, s.flags, s.payload.data(), s.payload.size(),
+                    1000, emit);
+        }
+        CHECK(accepted == accepted_blob);  // exact bytes, not just length
+        allow = false;
+        bool completed = false;
+        for (const Sym& s : produce(ff, rejected_blob)) {
+            completed |= ra.push(s.block_id, s.flags, s.payload.data(),
+                                 s.payload.size(), 1001, emit);
+        }
+        CHECK(completed);  // local refusal still retires packet ARQ
+        CHECK(accepted == accepted_blob);  // rejected bytes never replace it
+        CHECK_EQ_U(ra.stats().frames_delivered, 1u);
+        CHECK_EQ_U(ra.stats().frames_fast, 1u);
+        CHECK_EQ_U(ra.stats().frames_egress_rejected, 1u);
+        CHECK_EQ_U(ra.stats().frames_unrecoverable, 0u);
     }
 
     // --- §3.10 repair feedback is causal and ready after 20 blocks ---------
@@ -122,7 +158,10 @@ int main() {
         CHECK(nrep >= 2);
         FrameReassembler ra(rc);
         std::vector<std::vector<uint8_t>> got;
-        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+            return true;
+        };
         // Drop the first 2 source symbols; feed the rest (incl. repairs).
         size_t dropped = 0;
         for (const Sym& s : syms) {
@@ -153,6 +192,7 @@ int main() {
         std::vector<std::vector<uint8_t>> got;
         auto emit = [&](const uint8_t* f, size_t n) {
             got.emplace_back(f, f + n);
+            return true;
         };
         CHECK(syms.size() > 2);
         const Sym& missing = syms.front();
@@ -191,6 +231,7 @@ int main() {
         std::vector<std::vector<uint8_t>> got;
         auto emit = [&](const uint8_t* f, size_t n) {
             got.emplace_back(f, f + n);
+            return true;
         };
         const Sym* repair = nullptr;
         bool dropped_source = false;
@@ -231,6 +272,7 @@ int main() {
         std::vector<std::vector<uint8_t>> got;
         auto emit = [&](const uint8_t* f, size_t n) {
             got.emplace_back(f, f + n);
+            return true;
         };
         std::vector<const Sym*> missing;
         const Sym* repair = nullptr;
@@ -273,7 +315,10 @@ int main() {
         auto syms = produce(ff, blob);
         FrameReassembler ra(rc);
         std::vector<std::vector<uint8_t>> got;
-        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+            return true;
+        };
         // Feed repairs first, then a source dropped, then all sources twice.
         for (const Sym& s : syms)
             if (s.flags & data_flags::kFecRepair)
@@ -296,7 +341,10 @@ int main() {
         auto syms = produce(ff, blob);
         FrameReassembler ra(rc);
         std::vector<std::vector<uint8_t>> got;
-        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+            return true;
+        };
         // Drop half the source symbols (>> r): unrecoverable.
         size_t si = 0;
         for (const Sym& s : syms) {
@@ -320,7 +368,10 @@ int main() {
 
         FrameReassembler ra(rc);
         std::vector<std::vector<uint8_t>> got;
-        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+            return true;
+        };
 
         ra.push(syms[0].block_id, syms[0].flags, syms[0].payload.data(),
                 syms[0].payload.size(), 1000, emit);
@@ -377,6 +428,7 @@ int main() {
                     1000,
                     [&](const uint8_t* f, size_t n) {
                         got.emplace_back(f, f + n);
+                        return true;
                     });
         }
         CHECK_EQ_U(got.size(), 1);
@@ -422,7 +474,10 @@ int main() {
         auto syms = produce(ff, blob);
         FrameReassembler ra(rc);
         std::vector<std::vector<uint8_t>> got;
-        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+            return true;
+        };
 
         bool forged_one = false;
         for (const Sym& s : syms) {
@@ -457,7 +512,10 @@ int main() {
         {
             FrameReassembler ra(rc);
             std::vector<std::vector<uint8_t>> got;
-            auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+            auto emit = [&](const uint8_t* f, size_t n) {
+                got.emplace_back(f, f + n);
+                return true;
+            };
             for (const Sym& s : syms) ra.push(s.block_id, s.flags, s.payload.data(),
                                               s.payload.size(), 200, emit);
             CHECK_EQ_U(got.size(), 1u);
@@ -467,7 +525,10 @@ int main() {
         {
             FrameReassembler ra(rc);
             std::vector<std::vector<uint8_t>> got;
-            auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+            auto emit = [&](const uint8_t* f, size_t n) {
+                got.emplace_back(f, f + n);
+                return true;
+            };
             bool dropped_first = false;
             for (const Sym& s : syms) {
                 if (!dropped_first) { dropped_first = true; continue; }
@@ -484,7 +545,10 @@ int main() {
         FrameFramer ff(framer_cfg(FecScheme::kRlc256, 250, 100, 3));
         FrameReassembler ra(rc);
         std::vector<std::vector<uint8_t>> got;
-        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+            return true;
+        };
         std::vector<std::vector<uint8_t>> blobs;
         for (int fr = 0; fr < 4; ++fr) {
             auto blob = make_frame(6000 + fr * 500, fr == 0, static_cast<uint8_t>(10 + fr));
@@ -509,7 +573,10 @@ int main() {
 
         FrameReassembler ra(rc);
         std::vector<std::vector<uint8_t>> got;
-        auto emit = [&](const uint8_t* f, size_t n) { got.emplace_back(f, f + n); };
+        auto emit = [&](const uint8_t* f, size_t n) {
+            got.emplace_back(f, f + n);
+            return true;
+        };
         // Leave the old block incomplete, then release the complete newer one.
         for (size_t i = 1; i < old_syms.size(); ++i) {
             const Sym& s = old_syms[i];
@@ -582,12 +649,12 @@ int main() {
                 return false;
             }
             const uint8_t fake[1] = {0x42};
-            emit(fake, 1);
-            return true;
+            return emit(fake, 1);
         });
         std::vector<std::vector<uint8_t>> got;
         const FrameReassembler::Emit emit = [&](const uint8_t* f, size_t n) {
             got.emplace_back(f, f + n);
+            return true;
         };
 
         FrameFramer f1(framer_cfg(FecScheme::kRlc256, 250, 100, 1));
@@ -632,6 +699,32 @@ int main() {
         CHECK_EQ_U(ra.stats().frames_unrecoverable, 1u);
         CHECK_EQ_U(ra.stats().frames_deadline, 1u);
         CHECK_EQ_U(ra.stats().frames_salvaged, 2u);
+    }
+
+    // A repaired frame that the local egress refuses is neither a salvage
+    // failure nor a radio-unrecoverable frame. It has its own outcome.
+    {
+        FrameReassembler ra(rc);
+        ra.set_salvage_hook([](const SalvageView&,
+                               const FrameReassembler::Emit& emit) {
+            const uint8_t repaired[2] = {0x12, 0x34};
+            return emit(repaired, sizeof(repaired));
+        });
+        FrameFramer ff(framer_cfg(FecScheme::kRlc256, 250, 100, 1));
+        const auto syms = produce(ff, make_frame(6000, false, 42));
+        CHECK(syms.size() > 3);
+        for (size_t i = 0; i + 3 < syms.size(); ++i) {
+            ra.push(syms[i].block_id, syms[i].flags,
+                    syms[i].payload.data(), syms[i].payload.size(), 2000,
+                    [](const uint8_t*, size_t) { return false; });
+        }
+        ra.tick(2000 + rc.deadline_ms + 1,
+                [](const uint8_t*, size_t) { return false; });
+        CHECK_EQ_U(ra.stats().frames_egress_rejected, 1u);
+        CHECK_EQ_U(ra.stats().frames_delivered, 0u);
+        CHECK_EQ_U(ra.stats().frames_salvaged, 0u);
+        CHECK_EQ_U(ra.stats().frames_unrecoverable, 0u);
+        CHECK_EQ_U(ra.stats().frames_deadline, 0u);
     }
 
     {

@@ -578,7 +578,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         // Already bound to this stream, so the two destinations look the same
         // at the call site — the public FrameSink carries a stream_id the
         // caller needs and this one does not.
-        std::function<void(const uint8_t*, size_t)> sink;
+        std::function<bool(const uint8_t*, size_t)> sink;
         std::unique_ptr<FrameReassembler> reasm;
         std::optional<StreamKey> source;
         // §15.3 frame counters for a sink-backed stream. The ring keeps these
@@ -637,7 +637,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
         if (frame_out) {
             const uint8_t sid = s.stream_id;
             fo.sink = [&frame_out, sid](const uint8_t* f, size_t len) {
-                frame_out(sid, f, len);
+                return frame_out(sid, f, len);
             };
             fo.count_locally = true;
             wb_logf("rx: frame egress stream %u -> caller sink\n",
@@ -655,7 +655,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             // push_back; the unique_ptr moves, the ring does not.
             FrameShmRing* ring = fo.ring.get();
             fo.sink = [ring](const uint8_t* f, size_t len) {
-                ring->write_frame(f, len);
+                return ring->write_frame(f, len);
             };
             wb_logf("rx: frame-shm egress '%s' created\n",
                     s.bind.name.c_str());
@@ -796,7 +796,13 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     // ring means the consumer has a start point, so the latch-recovery schedule
     // for that stream can stand down.
     const auto write_egress = [&](FrameOut& fo, const uint8_t* f, size_t len) {
-        fo.sink(f, len);
+        if (!fo.sink(f, len)) {
+            // Decoder state must describe pictures the decoder really saw.
+            // A local drop breaks that chain; fail closed until accepted
+            // pictures establish geometry/donors again.
+            if (fo.repair) fo.repair->reset_stream();
+            return false;
+        }
         if (fo.repair) {
             fo.repair->learn(f, len);  // §6.3b geometry/donor tracking
         }
@@ -839,6 +845,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             (meta.flags & kFrameFlagIdr) != 0) {
             rx.note_egress_irap(fo.stream_id);
         }
+        return true;
     };
     const RxEngine::Deliver deliver = [&](uint8_t sid, uint32_t block_id,
                                           uint8_t flags, const uint8_t* d,
@@ -847,7 +854,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             if (fo.stream_id == sid) {
                 fo.reasm->push(block_id, flags, d, n, deliver_now,
                                [&](const uint8_t* f, size_t len) {
-                                   write_egress(fo, f, len);
+                                   return write_egress(fo, f, len);
                                });
                 return;
             }
@@ -874,7 +881,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             const bool complete = fo.reasm->push(
                 block_id, flags, d, n, deliver_now,
                 [&](const uint8_t* f, size_t len) {
-                    write_egress(fo, f, len);
+                    return write_egress(fo, f, len);
                 });
             return RxEngine::EarlyDeliverResult{/*handled=*/true, complete};
         }
@@ -1068,7 +1075,7 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                 [&](const uint8_t* f, size_t len) {
                     // §14.3 repair lands in the same egress ring, so it can
                     // also satisfy the §3.9 Pass 106 early exit.
-                    write_egress(*cache_out, f, len);
+                    return write_egress(*cache_out, f, len);
                 },
                 /*air_path=*/false);
             if (emitted) {
@@ -2844,7 +2851,7 @@ art.craft_adapter_fingerprint = craft_tally_fp;
         // so a stalled block never wedges frame-shm egress.
         for (FrameOut& fo : frame_outs) {
             fo.reasm->tick(now, [&](const uint8_t* f, size_t len) {
-                write_egress(fo, f, len);
+                return write_egress(fo, f, len);
             });
         }
         // §3.9 Pass 106: bootstrap a decoder behind a freshly latched stream.

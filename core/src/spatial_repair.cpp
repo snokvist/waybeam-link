@@ -193,12 +193,15 @@ bool SpatialRepair::freeze(uint32_t total_ctbs, const Emit& emit) {
     if (rebuilt_.size() > cfg_.max_frame_bytes) {
         return fail();
     }
+    mark_salvaged(rebuilt_);
+    if (!emit(rebuilt_.data(), rebuilt_.size())) {
+        reset_stream();
+        return false;
+    }
     last_pts_ += pts_delta_;
     last_poc_ = poc;
     stats_.slices_synthesized += geometry_.size();
     ++stats_.frames_frozen;
-    mark_salvaged(rebuilt_);
-    emit(rebuilt_.data(), rebuilt_.size());
     return true;
 }
 
@@ -380,14 +383,19 @@ bool SpatialRepair::repair(uint16_t k, uint16_t s, uint32_t frame_len,
     if (rebuilt_.size() > cfg_.max_frame_bytes) {
         return fail();
     }
+    mark_salvaged(rebuilt_);
+    const bool donor_has_poc = donor->has_poc;
+    const uint32_t donor_poc = donor->poc_lsb;
+    if (!emit(rebuilt_.data(), rebuilt_.size())) {
+        reset_stream();
+        return false;
+    }
     stats_.slices_synthesized += synthesized;
     ++stats_.frames_salvaged;
-    if (donor->has_poc) {
-        last_poc_ = donor->poc_lsb;
+    if (donor_has_poc) {
+        last_poc_ = donor_poc;
         have_poc_ = true;
     }
-    mark_salvaged(rebuilt_);
-    emit(rebuilt_.data(), rebuilt_.size());
     return true;
 }
 
