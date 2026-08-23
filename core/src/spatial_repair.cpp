@@ -46,6 +46,17 @@ void wr_le32(uint8_t* p, uint32_t v) {
     p[3] = static_cast<uint8_t>(v >> 24);
 }
 
+// §15.4 bit 3 on the way out. Every blob leaving this class was rebuilt with
+// synthesized slices, so it is decodable but not what the encoder sent — the
+// bit is what lets a consumer tell the two apart, since it reaches the ring
+// writer and the C-ABI frame sink alike inside the payload prefix. Stamped
+// here, at the single point that knows, rather than at either emit site.
+void mark_salvaged(std::vector<uint8_t>& blob) {
+    if (blob.size() >= wblink::kVencFrameMetaSize) {
+        blob[5] |= wblink::kFrameFlagSalvaged;  // VencFrameMeta.flags
+    }
+}
+
 }  // namespace
 
 void SpatialRepair::learn(const uint8_t* blob, size_t len) {
@@ -186,6 +197,7 @@ bool SpatialRepair::freeze(uint32_t total_ctbs, const Emit& emit) {
     last_poc_ = poc;
     stats_.slices_synthesized += geometry_.size();
     ++stats_.frames_frozen;
+    mark_salvaged(rebuilt_);
     emit(rebuilt_.data(), rebuilt_.size());
     return true;
 }
@@ -374,6 +386,7 @@ bool SpatialRepair::repair(uint16_t k, uint16_t s, uint32_t frame_len,
         last_poc_ = donor->poc_lsb;
         have_poc_ = true;
     }
+    mark_salvaged(rebuilt_);
     emit(rebuilt_.data(), rebuilt_.size());
     return true;
 }

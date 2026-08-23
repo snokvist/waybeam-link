@@ -56,8 +56,15 @@ inline constexpr uint8_t kFrameCodecH265 = 0x01;
 inline constexpr uint8_t kFrameFlagIdr = 0x01;  // VencFrameMeta.flags bit 0
 inline constexpr uint8_t kFrameFlagGdr = 0x02;  // rolling intra stripe active
 inline constexpr uint8_t kFrameFlagEnhance = 0x04;  // SVC-T droppable layer
+// Set by the RX side (§6.3b), never by an encoder: this frame was rebuilt with
+// synthesized replacement slices, so it is decodable but NOT what was sent.
+// Consumers that would otherwise treat it as a trustworthy picture — a
+// recorder writing a seek point, anything caching parameter sets — must not.
+// Absence means "not known to be salvaged", never a guarantee of integrity:
+// a producer predating this bit leaves it clear.
+inline constexpr uint8_t kFrameFlagSalvaged = 0x08;
 inline constexpr uint8_t kFrameFlagsKnown =
-    kFrameFlagIdr | kFrameFlagGdr | kFrameFlagEnhance;
+    kFrameFlagIdr | kFrameFlagGdr | kFrameFlagEnhance | kFrameFlagSalvaged;
 
 struct VencFrameMeta {
     uint32_t pts = 0;       // encoder capture timestamp (SDK units), truncated
