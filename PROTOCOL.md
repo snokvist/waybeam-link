@@ -5765,7 +5765,7 @@ codes preserved):
 |---|---|---|---|
 | 0 | 4 | `pts` | u32; encoder capture timestamp (SDK units), truncated |
 | 4 | 1 | `codec` | u8; `0x01` = H.265 (only value emitted) |
-| 5 | 1 | `flags` | u8; bit 0 = IDR, bit 1 = GDR active, bit 2 = SVC-T enhancement layer; other bits reserved 0 |
+| 5 | 1 | `flags` | u8; bit 0 = IDR, bit 1 = GDR active, bit 2 = SVC-T enhancement layer, bit 3 = **salvaged** (§6.3b, set by RX — see below); other bits reserved 0 |
 | 6 | 1 | `gdr_pos` | u8; zero-based GDR cycle position, 0 when inactive |
 | 7 | 1 | `gdr_len` | u8; GDR cycle length, 0 when inactive; when active `gdr_pos < gdr_len` |
 | 8 | N | frame | raw Annex-B (start codes + NAL units) |
@@ -5775,6 +5775,25 @@ on egress (§6.3a) the reassembled blob is written back byte-identical. The
 metadata (`pts`, `codec`, IDR `flags`) therefore rides TX→RX transparently inside
 the opaque payload — no DATA-header change, no re-derivation. FrameFramer reads
 `flags` bit 0 for §4.1 ARQ; nothing else parses the blob.
+
+**`flags` bit 3 — salvaged (RX-set).** The byte-identical guarantee above holds
+for the fast and FEC paths. It cannot hold for a §6.3b salvaged frame, which is
+by construction *not* what was sent: erased slices are replaced with synthesized
+all-skip slices, or the whole picture is a freeze. Bit 3 is the announcement of
+exactly that, set by the RX salvage path on the blob it emits — the only bit an
+encoder never writes.
+
+A consumer that merely displays frames can ignore it and behave as before. A
+consumer that would otherwise treat the frame as a *trustworthy picture* must
+not: a recorder must not advertise it as a seek point (a cue is a promise that
+decoding can start there, and a salvaged frame cannot keep it), and nothing may
+cache parameter sets out of one. **Absence is not a guarantee of integrity** —
+it means "not known to be salvaged", and a producer predating this bit leaves it
+clear, so a consumer fails safe by treating absence as today's behaviour.
+
+The bit rides the same payload prefix as the rest of the metadata, so it reaches
+a ring consumer and a §15.4 `FrameSink` C-ABI consumer identically, with no
+change to either interface.
 
 ### 15.5 Control plane (REST/HTTP)
 Optional, config-gated: `"control": { "bind": "<addr>:<port>" }` (absent = off;
