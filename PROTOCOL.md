@@ -1847,7 +1847,7 @@ resolved floor is actually MCS0.
 8 PROMOTE · 9 REPIN · 10 ENVIRONMENT_RESET`.
 
 **Pass 109 boundary:** producer health read from frame-SHM (§15.4) is
-observability-only. `full_drops` and `throttle_permille` do not feed this
+observability-only. `full_drops` and `low_water_slots` do not feed this
 cascade, call `set_pressure`, or alter MCS, bitrate, FEC, FPS, pins, freezes, or
 flap state. A later operator ruling must define cadence and precedence before
 either field becomes selector evidence.
@@ -2162,10 +2162,20 @@ MCS and bitrate never move together:
 - **Empirical airtime ceiling (Pass 111):** the PHY expression is a starting
   model, not proof that the complete encode → frame-SHM → FEC → quiet-gap →
   injection path sustains that rate. A rung is clean only when a steady
-  full-cadence source holds `shm_throttle_permille == 1000`, the frame-SHM ring
-  stays at its one-frame idle occupancy, and producer `shm_full_drops` does not
-  advance. Any throttle excursion is an overload verdict even if the short
-  sample records no full drop. The seed HT20/100-fps table was calibrated on
+  full-cadence source holds `shm_low_water_slots <= 1` and producer
+  `shm_full_drops` does not advance. `<= 1` **is** the one-frame idle occupancy:
+  the producer samples immediately after writing, so a consumer that is keeping
+  up still leaves the frame just written in the ring, and a reading of 0 simply
+  means it drained between the write and the sample. Any window whose low-water
+  reaches 2 or more is an overload verdict even if the short sample records no
+  full drop — the ring failed to return to idle at any point in that window,
+  which is the leading edge of dropping whole frames.
+  **Criterion restated at ring v2** (venc 0.69.0): it previously read
+  `shm_throttle_permille == 1000`, the producer's own bitrate clamp sitting
+  unengaged. venc no longer clamps, so the criterion now rests on the raw
+  occupancy the clamp was reacting to — and on the same threshold, since the
+  clamp recovered at `<= 1` slot and engaged at `>= 2`. The verdict is
+  unchanged; the earlier form was this measurement seen through a controller. The seed HT20/100-fps table was calibrated on
   hardware at 5805 MHz: existing derived rates already below 95% of the highest
   clean point are retained; oversubscribed rungs use the greatest integer
   `airtime_budget_permille` whose derived rate is no more than 95% of that clean
@@ -2206,6 +2216,10 @@ MCS and bitrate never move together:
   `{600,600,600,600,600,463,438,418}`, deriving
   `{2829,5754,9264,12384,19092,19646,20914,22183}`. Long GI plus this
   re-calibration leaves rung 4 **higher** than the short-GI 18025 it replaced.
+  (That run predates ring v2 and is recorded in the field names it used;
+  `shm_throttle_permille == 1000` there is `shm_low_water_slots <= 1` today,
+  and "throttled to 740" is the clamp that no longer exists — the equivalent
+  modern evidence is a low-water window reaching 2 slots or more.)
 - **Rungs 5–7 are deliberately left at 463/438/418.** Rung 5 measured clean at
   every rate up to 25000 kbps, but that is `venc.max_bitrate_kbps` (§9.6), not
   a link limit — the clean point is **censored, not measured**, so the 95% rule
@@ -5327,7 +5341,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "jscc_enforced_frames": 0, "jscc_discarded_frames": 0,
     "jscc_exempt_frames": 0,
     "shm_health_valid": true, "shm_full_drops": 0,
-    "shm_throttle_permille": 1000, "shm_oversize_drops": 0,
+    "shm_low_water_slots": 1, "shm_oversize_drops": 0,
     "shm_bad_slots": 0, "shm_ring_full": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
@@ -5569,7 +5583,7 @@ histogram on RX. They describe the bounded trailing sample window used in
 §3.10; zero samples means the P95 is unavailable. Stats reset clears the RTT
 window and therefore clears JSCC RTT readiness.
 
-`shm_health_valid`, `shm_full_drops`, `shm_throttle_permille`,
+`shm_health_valid`, `shm_full_drops`, `shm_low_water_slots`,
 `shm_oversize_drops`, `shm_bad_slots`, and `shm_ring_full` expose ring
 backpressure/ABI health separately from air/frame-reassembly loss. They are
 false/0 on UDP bindings.
@@ -5579,7 +5593,7 @@ Since waybeam_venc 0.57.0, a frame-SHM producer may publish `VHLT` health in the
 On ingress, `shm_full_drops` is then the increase in the producer's lifetime
 counter since this consumer attached or last reset its stats; an absent marker
 leaves the stream attached indefinitely with `shm_health_valid=false` and
-`shm_full_drops=0`. `shm_throttle_permille` is the latest producer gauge while
+`shm_full_drops=0`. `shm_low_water_slots` is the latest producer gauge while
 valid and 0 while unavailable. These fields are observations only (Pass 109);
 they cause no selector or actuator action.
 
@@ -5595,13 +5609,17 @@ owns:
 |---|---|---|
 | `shm_health_valid` | false (not a consumed producer header) | exact `VHLT` marker |
 | `shm_full_drops` | local producer counter — real | producer header delta when health valid; otherwise 0/unavailable |
-| `shm_throttle_permille` | 0 (not a consumed producer gauge) | producer header gauge when health valid; otherwise 0/unavailable |
+| `shm_low_water_slots` | 0 (not a consumed producer gauge) | producer header gauge when health valid; otherwise 0/unavailable |
 | `shm_oversize_drops` | producer ring — real | **not observable**, always 0 |
 | `shm_bad_slots` | 0 (producers never skip slots) | consumer ring — real |
 | `shm_ring_full` | 0 (producer counts drops instead) | consumer ring — real |
 
 A reader MUST NOT interpret ingress `shm_full_drops == 0` without
-`shm_health_valid` as "the producer is not dropping". `shm_ring_full` remains
+`shm_health_valid` as "the producer is not dropping". The same rule binds
+harder for `shm_low_water_slots`: at ring v1 the field it replaced could never
+legitimately read 0, so an unavailable gauge was self-evident, whereas `0` is a
+perfectly ordinary low-water reading. Without `shm_health_valid` it means "no
+gauge", never "the ring is draining". `shm_ring_full` remains
 independent leading evidence and stays visible whether or not the producer
 publishes health or has actually dropped a frame.
 
@@ -5794,7 +5812,7 @@ Producer-owned health fields carved from the unchanged 192-byte header:
 |---|---|---|---|
 | 76 | 4 | `health_magic` | u32 `0x56484C54` (`"VHLT"`); any other value means health unavailable |
 | 80 | 8 | `full_drops` | u64 producer-lifetime full-ring drops |
-| 88 | 2 | `throttle_permille` | u16 producer clamp; 1000 unclamped |
+| 88 | 2 | `low_water_slots` | u16 producer gauge: the lowest ring occupancy reached in its last 200 ms window, **in slots**. `<= 1` is the healthy band — the producer samples just after writing, so a consumer that is keeping up still leaves one frame queued — and `>= 2` sustained is standing backlog. Slots rather than a fraction of `slot_count`: at a 16-slot ring one slot is 62.5 permille, which truncates to 62 and converts back to 0, erasing the reading that separates healthy from drained. **Ring v1 carried `throttle_permille` here with the opposite polarity** (`1000` = healthy); that is why v2 is a version bump and not a rename |
 
 No attach validation depends on these fields. A consumer reads the counters
 only after seeing the exact marker and must tolerate a producer that leaves the

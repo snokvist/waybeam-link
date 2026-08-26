@@ -446,7 +446,7 @@ FrameShmRing::Stats FrameShmRing::stats() {
         kFrameHealthMagic) {
         out.full_drops = 0;
         out.health_valid = false;
-        out.throttle_permille = 0;
+        out.low_water_slots = 0;
         health_baseline_valid_ = false;
         health_full_drops_baseline_ = 0;
         return out;
@@ -455,8 +455,8 @@ FrameShmRing::Stats FrameShmRing::stats() {
     const uint64_t full_drops =
         atomic_load_u64(map_, kFrHdrFullDrops, __ATOMIC_RELAXED);
     out.health_valid = true;
-    out.throttle_permille =
-        atomic_load_u16(map_, kFrHdrThrottlePermille, __ATOMIC_RELAXED);
+    out.low_water_slots =
+        atomic_load_u16(map_, kFrHdrLowWaterSlots, __ATOMIC_RELAXED);
     if (!health_baseline_valid_ ||
         full_drops < health_full_drops_baseline_) {
         // A producer restart/counter reset rebases the public delta instead of

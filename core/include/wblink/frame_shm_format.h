@@ -20,7 +20,13 @@ namespace wblink {
 
 // §15.4 ring header.
 inline constexpr uint32_t kFrameRingMagic = 0x5646524D;  // "VFRM"
-inline constexpr uint32_t kFrameRingVersion = 1;
+// v2 (venc 0.69.0): offset 88 changed meaning -- it carried throttle_permille,
+// the producer's self-imposed bitrate clamp, and now carries low_water_slots,
+// the raw ring occupancy the clamp was reacting to. The two have OPPOSITE
+// polarity (1000 was healthy; a HIGH slot count is now the unhealthy end), so
+// the producer bumped the version deliberately rather than renaming in place:
+// attach() refuses a mismatch, which turns a silent misread into a loud one.
+inline constexpr uint32_t kFrameRingVersion = 2;
 inline constexpr size_t kFrameRingHeaderSize = 192;  // 3x 64-byte cache lines
 
 // Byte offsets within the 192-byte ring header (line 0 = immutable config,
@@ -37,7 +43,11 @@ inline constexpr size_t kFrHdrWriteIdx = 64;       // u64 (producer, line 1)
 inline constexpr size_t kFrHdrFutexSeq = 72;       // u32
 inline constexpr size_t kFrHdrHealthMagic = 76;    // u32 ("VHLT" when valid)
 inline constexpr size_t kFrHdrFullDrops = 80;      // u64 (producer cumulative)
-inline constexpr size_t kFrHdrThrottlePermille = 88;  // u16 (250..1000)
+// u16, in SLOTS (not a fraction of slot_count). The healthy band is <= 1: the
+// producer samples just after writing, so a consumer that is keeping up still
+// leaves one frame queued. A fraction cannot carry that -- at a 16-slot ring
+// one slot is 62.5 permille, truncating to 62 and converting back to 0.
+inline constexpr size_t kFrHdrLowWaterSlots = 88;
 inline constexpr size_t kFrHdrReadIdx = 128;       // u64 (consumer, line 2)
 inline constexpr size_t kFrHdrConsumerWaiting = 136;  // u32
 inline constexpr uint32_t kFrameHealthMagic = 0x56484C54;  // "VHLT"
