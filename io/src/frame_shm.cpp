@@ -447,25 +447,37 @@ FrameShmRing::Stats FrameShmRing::stats() {
         out.full_drops = 0;
         out.health_valid = false;
         out.low_water_slots = 0;
+        out.other_drops = 0;
         health_baseline_valid_ = false;
         health_full_drops_baseline_ = 0;
+        health_other_drops_baseline_ = 0;
         return out;
     }
 
     const uint64_t full_drops =
         atomic_load_u64(map_, kFrHdrFullDrops, __ATOMIC_RELAXED);
+    const uint64_t other_drops =
+        atomic_load_u64(map_, kFrHdrOtherDrops, __ATOMIC_RELAXED);
     out.health_valid = true;
     out.low_water_slots =
         atomic_load_u16(map_, kFrHdrLowWaterSlots, __ATOMIC_RELAXED);
+    // Both counters rebase together: they come from one producer, so a restart
+    // that rolls one back rolls back the other, and rebasing only the counter
+    // that happened to decrease would leave the survivor reporting the old
+    // producer's lifetime total as a delta.
     if (!health_baseline_valid_ ||
-        full_drops < health_full_drops_baseline_) {
+        full_drops < health_full_drops_baseline_ ||
+        other_drops < health_other_drops_baseline_) {
         // A producer restart/counter reset rebases the public delta instead of
         // underflowing into an enormous cumulative count.
         health_full_drops_baseline_ = full_drops;
+        health_other_drops_baseline_ = other_drops;
         health_baseline_valid_ = true;
         out.full_drops = 0;
+        out.other_drops = 0;
     } else {
         out.full_drops = full_drops - health_full_drops_baseline_;
+        out.other_drops = other_drops - health_other_drops_baseline_;
     }
     return out;
 }
@@ -480,9 +492,12 @@ void FrameShmRing::reset_stats() {
             kFrameHealthMagic) {
         health_full_drops_baseline_ =
             atomic_load_u64(map_, kFrHdrFullDrops, __ATOMIC_RELAXED);
+        health_other_drops_baseline_ =
+            atomic_load_u64(map_, kFrHdrOtherDrops, __ATOMIC_RELAXED);
         health_baseline_valid_ = true;
     } else {
         health_full_drops_baseline_ = 0;
+        health_other_drops_baseline_ = 0;
         health_baseline_valid_ = false;
     }
 }

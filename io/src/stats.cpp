@@ -284,6 +284,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.shm_full_drops);
         out += ",\"shm_low_water_slots\":";
         append_u64(out, s.shm_low_water_slots);
+        out += ",\"shm_other_drops\":";
+        append_u64(out, s.shm_other_drops);
         out += ",\"shm_oversize_drops\":";
         append_u64(out, s.shm_oversize_drops);
         out += ",\"shm_bad_slots\":";

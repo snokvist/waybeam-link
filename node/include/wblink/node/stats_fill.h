@@ -415,6 +415,7 @@ inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                     st.shm_health_valid = ss.health_valid;
                     st.shm_full_drops = ss.full_drops;
                     st.shm_low_water_slots = ss.low_water_slots;
+                    st.shm_other_drops = ss.other_drops;
                     st.shm_oversize_drops = ss.oversize_drops;
                     st.shm_bad_slots = ss.bad_slots;
                     st.shm_ring_full = ss.ring_full;

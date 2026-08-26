@@ -48,6 +48,12 @@ inline constexpr size_t kFrHdrFullDrops = 80;      // u64 (producer cumulative)
 // leaves one frame queued. A fraction cannot carry that -- at a 16-slot ring
 // one slot is 62.5 permille, truncating to 62 and converting back to 0.
 inline constexpr size_t kFrHdrLowWaterSlots = 88;
+// u64, producer cumulative: frames the PRODUCER discarded for a reason other
+// than a full ring (an access unit it could not build at all). Kept apart from
+// full_drops because the two demand opposite responses -- full_drops is
+// congestion this node is causing and slowing down helps, other_drops is not
+// congestion and slowing down fixes nothing.
+inline constexpr size_t kFrHdrOtherDrops = 96;
 inline constexpr size_t kFrHdrReadIdx = 128;       // u64 (consumer, line 2)
 inline constexpr size_t kFrHdrConsumerWaiting = 136;  // u32
 inline constexpr uint32_t kFrameHealthMagic = 0x56484C54;  // "VHLT"

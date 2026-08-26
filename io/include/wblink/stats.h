@@ -152,6 +152,10 @@ struct StreamStats {
     bool shm_health_valid = false;
     uint64_t shm_full_drops = 0;
     uint16_t shm_low_water_slots = 0;
+    // Producer discards that are NOT congestion -- an access unit the producer
+    // could not build. Never fold into shm_full_drops: a rate controller must
+    // not slow down for these.
+    uint64_t shm_other_drops = 0;
     uint64_t shm_oversize_drops = 0;
     uint64_t shm_bad_slots = 0;
     uint64_t shm_ring_full = 0;

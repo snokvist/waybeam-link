@@ -40,7 +40,7 @@ std::vector<uint8_t> pattern(size_t len, uint8_t seed) {
 }
 
 bool write_health(const char* name, uint32_t magic, uint64_t full_drops,
-                  uint16_t low_water_slots) {
+                  uint16_t low_water_slots, uint64_t other_drops = 0) {
     const int fd = ::shm_open(name, O_RDWR, 0);
     if (fd < 0) {
         return false;
@@ -59,6 +59,9 @@ bool write_health(const char* name, uint32_t magic, uint64_t full_drops,
     __atomic_store_n(
         reinterpret_cast<uint16_t*>(header + kFrHdrLowWaterSlots),
         low_water_slots, __ATOMIC_RELAXED);
+    __atomic_store_n(
+        reinterpret_cast<uint64_t*>(header + kFrHdrOtherDrops), other_drops,
+        __ATOMIC_RELAXED);
     // Publish the marker last, matching the producer extension contract.
     __atomic_store_n(reinterpret_cast<uint32_t*>(header + kFrHdrHealthMagic),
                      magic, __ATOMIC_RELEASE);
@@ -77,6 +80,7 @@ int main() {
     CHECK_EQ_U(kFrHdrHealthMagic, 76);
     CHECK_EQ_U(kFrHdrFullDrops, 80);
     CHECK_EQ_U(kFrHdrLowWaterSlots, 88);
+    CHECK_EQ_U(kFrHdrOtherDrops, 96);
     CHECK_EQ_U(kFrameHealthMagic, 0x56484C54u);
     CHECK_EQ_U(kFrameShmIngressDrainBudget, 4);
 
@@ -283,6 +287,30 @@ int main() {
             CHECK(hs.health_valid);
             CHECK_EQ_U(hs.full_drops, 3);
             CHECK_EQ_U(hs.low_water_slots, 2);
+
+            // other_drops is a delta like full_drops, and the two must stay
+            // independent: a rate controller slows down for congestion and
+            // must NOT slow down for a frame the producer could not build.
+            CHECK(write_health(kHealth, kFrameHealthMagic, 103, 2, 7));
+            hs = c.stats();
+            CHECK_EQ_U(hs.other_drops, 7);
+            CHECK_EQ_U(hs.full_drops, 3);
+            // A producer restart rolls both back together.
+            CHECK(write_health(kHealth, kFrameHealthMagic, 2, 1, 1));
+            hs = c.stats();
+            CHECK_EQ_U(hs.other_drops, 0);
+            CHECK_EQ_U(hs.full_drops, 0);
+            CHECK(write_health(kHealth, kFrameHealthMagic, 5, 1, 4));
+            hs = c.stats();
+            CHECK_EQ_U(hs.other_drops, 3);
+            CHECK_EQ_U(hs.full_drops, 3);
+            // Hand the counters back exactly as this block found them: the
+            // assertions below continue the 103-based arithmetic, and a
+            // baseline left at other_drops=4 would make their write_health()
+            // (which defaults other_drops to 0) look like another restart and
+            // rebase full_drops out from under them.
+            CHECK(write_health(kHealth, kFrameHealthMagic, 103, 2, 0));
+            (void)c.stats();
 
             c.reset_stats();
             CHECK_EQ_U(c.stats().full_drops, 0);

@@ -110,6 +110,10 @@ class FrameShmRing {
         // low-water reading. Never read low_water_slots without health_valid.
         bool health_valid = false;
         uint16_t low_water_slots = 0;
+        // Producer discards that are NOT congestion (§15.4 offset 96), as a
+        // delta since attach/reset like full_drops. Do not fold the two
+        // together: they call for opposite reactions.
+        uint64_t other_drops = 0;
     };
     Stats stats();
     void reset_stats();
@@ -142,6 +146,7 @@ class FrameShmRing {
     bool warned_undersized_ = false;  // B5: log the buf-too-small wedge once
     bool health_baseline_valid_ = false;
     uint64_t health_full_drops_baseline_ = 0;
+    uint64_t health_other_drops_baseline_ = 0;
 };
 
 }  // namespace wblink
