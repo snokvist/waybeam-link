@@ -31,7 +31,7 @@ std::vector<StreamKey> LatchRecovery::due(
         if (e == nullptr) {
             // First sight of this key: due immediately, schedule from now.
             entries_.push_back(Entry{s.key, s.local_stream_id, 0, now_ms,
-                                     false});
+                                     false, false, 0});
             e = &entries_.back();
         }
         // The local id can change if the same wire stream is re-bound; keep the
@@ -42,6 +42,13 @@ std::vector<StreamKey> LatchRecovery::due(
         }
         ++e->attempts;
         e->next_ms = now_ms + kPeriodMs;
+        if (e->attempts >= kAttempts) {
+            // This round has just spent its bound. If nothing answers it, a
+            // later note_damage() must wait out the backoff measured from
+            // HERE -- from the exhaustion, not from whenever damage happens
+            // to be noticed -- or the effective backoff shortens to nothing.
+            e->rearm_not_before_ms = now_ms + kRearmBackoffMs;
+        }
         out.push_back(e->key);
     }
     return out;
@@ -51,7 +58,27 @@ void LatchRecovery::note_irap(uint8_t local_stream_id) {
     for (Entry& e : entries_) {
         if (e.local_stream_id == local_stream_id) {
             e.done = true;
+            // Remember that this stream can be answered, so a later
+            // note_damage() re-arms without waiting out the backoff.
+            e.answered = true;
         }
+    }
+}
+
+void LatchRecovery::note_damage(uint8_t local_stream_id, uint64_t now_ms) {
+    for (Entry& e : entries_) {
+        if (e.local_stream_id != local_stream_id) continue;
+        // Already asking: leave the in-flight schedule and its bound alone.
+        if (!e.done && e.attempts < kAttempts) continue;
+        // Stood down unanswered: nothing is honouring these, so back off
+        // rather than restarting a burst on every damaged frame.
+        if (!e.answered && now_ms < e.rearm_not_before_ms) continue;
+        e.attempts = 0;
+        e.done = false;
+        e.next_ms = now_ms;  // due immediately
+        // Each round must re-prove that it can be answered; the backoff for
+        // this new round is set when (and if) it spends its bound in due().
+        e.answered = false;
     }
 }
 

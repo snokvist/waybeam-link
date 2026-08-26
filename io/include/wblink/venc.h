@@ -147,6 +147,9 @@ class VencActuator {
     std::optional<std::pair<uint32_t, uint32_t>> want_caps_;
     std::optional<uint16_t> want_fps_;
     bool want_idr_ = false;
+    // One-shot: a RECOVERY_REQUEST refused because venc.recovery_enabled is
+    // false is otherwise a completely silent failure.
+    bool recovery_disabled_warned_ = false;
 
     // Non-blocking HTTP transaction state.
     HttpPhase phase_ = HttpPhase::kIdle;

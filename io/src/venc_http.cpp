@@ -46,6 +46,15 @@ void VencActuator::set_fps(uint16_t fps) {
 
 bool VencActuator::request_idr(uint64_t now_ms) {
     if (!cfg_.recovery_enabled) {
+        // Say so once. Without this the refusal is invisible: the requesting
+        // RX simply burns its §3.9 attempt bound and stands down, and the
+        // operator sees a stream that never gets a start point with nothing
+        // anywhere to explain it. Latched, because the RX retries at 1 Hz.
+        if (!recovery_disabled_warned_) {
+            recovery_disabled_warned_ = true;
+            wb_logf("venc: IDR request refused — venc.recovery_enabled is "
+                    "false; §3.9 decoder recovery is disabled on this craft\n");
+        }
         return false;
     }
     if (now_ms < next_idr_ms_) {
