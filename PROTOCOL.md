@@ -5797,7 +5797,9 @@ and reads only the 8-byte metadata prefix.
 **Ring:** POSIX SHM object `/<bind.name>` (default `venc_frame`). Producer-owned
 (creates `O_EXCL`, `shm_unlink`s stale + on teardown). SPSC (single producer,
 single consumer), lock-free, futex consumer-wake. Header magic `0x5646524D`
-("VFRM"), version 1; default geometry 16 slots × 512 KB (~8 MB). Free-running
+("VFRM"), **version 2** (see the offset-88 note below); default geometry 16
+slots × 512 KB (~8 MB) for a waybeam-link egress producer — a venc producer
+creates 8 slots. Free-running
 `write_idx`/`read_idx`; on a full ring the producer **drops and keeps running**
 (never blocks). A waybeam-link egress producer sets the object mode to `0666`
 after creation, independent of its process umask, so an unprivileged local
@@ -5812,7 +5814,8 @@ Producer-owned health fields carved from the unchanged 192-byte header:
 |---|---|---|---|
 | 76 | 4 | `health_magic` | u32 `0x56484C54` (`"VHLT"`); any other value means health unavailable |
 | 80 | 8 | `full_drops` | u64 producer-lifetime full-ring drops |
-| 88 | 2 | `low_water_slots` | u16 producer gauge: the lowest ring occupancy reached in its last 200 ms window, **in slots**. `<= 1` is the healthy band — the producer samples just after writing, so a consumer that is keeping up still leaves one frame queued — and `>= 2` sustained is standing backlog. Slots rather than a fraction of `slot_count`: at a 16-slot ring one slot is 62.5 permille, which truncates to 62 and converts back to 0, erasing the reading that separates healthy from drained. **Ring v1 carried `throttle_permille` here with the opposite polarity** (`1000` = healthy); that is why v2 is a version bump and not a rename |
+| 96 | 8 | `other_drops` | u64 producer cumulative: frames the producer discarded for a reason other than a full ring (an access unit it could not build at all). Added at v2. Kept apart from `full_drops` because the two call for opposite reactions — `full_drops` is congestion this node is causing, `other_drops` is not congestion and slowing down fixes nothing. Only meaningful when the health marker is valid |
+| 88 | 2 | `low_water_slots` | u16 producer gauge: the lowest ring occupancy reached in its last 200 ms window, **in slots**. `<= 1` is the healthy band — the producer samples just after writing, so a consumer that is keeping up still leaves one frame queued — and `>= 2` sustained is standing backlog. Slots rather than a fraction of `slot_count`, because whether a fraction round-trips that 1 depends on the geometry — at the 8 slots venc creates it does, at 16 it does not (62.5 truncates to 62, back to 0) — and the header does not fix `slot_count`. **Ring v1 carried `throttle_permille` here with the opposite polarity** (`1000` = healthy); that is why v2 is a version bump and not a rename |
 
 No attach validation depends on these fields. A consumer reads the counters
 only after seeing the exact marker and must tolerate a producer that leaves the

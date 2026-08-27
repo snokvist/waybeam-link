@@ -45,8 +45,9 @@ inline constexpr size_t kFrHdrHealthMagic = 76;    // u32 ("VHLT" when valid)
 inline constexpr size_t kFrHdrFullDrops = 80;      // u64 (producer cumulative)
 // u16, in SLOTS (not a fraction of slot_count). The healthy band is <= 1: the
 // producer samples just after writing, so a consumer that is keeping up still
-// leaves one frame queued. A fraction cannot carry that -- at a 16-slot ring
-// one slot is 62.5 permille, truncating to 62 and converting back to 0.
+// leaves one frame queued. Whether a fraction round-trips that 1 depends on the
+// geometry -- at the 8 slots venc creates it does, at 16 it does not (62.5
+// truncates to 62, back to 0) -- and the header does not fix slot_count.
 inline constexpr size_t kFrHdrLowWaterSlots = 88;
 // u64, producer cumulative: frames the PRODUCER discarded for a reason other
 // than a full ring (an access unit it could not build at all). Kept apart from
