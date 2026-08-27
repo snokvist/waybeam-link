@@ -288,7 +288,7 @@ const char* kGolden =
     "\"jscc_enforced_frames\":0,\"jscc_discarded_frames\":0,"
     "\"jscc_exempt_frames\":0,"
     "\"shm_health_valid\":false,\"shm_full_drops\":0,"
-    "\"shm_throttle_permille\":0,\"shm_oversize_drops\":0,"
+    "\"shm_low_water_slots\":0,\"shm_other_drops\":0,\"shm_oversize_drops\":0,"
     "\"shm_bad_slots\":0,\"shm_ring_full\":0,"
     "\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"

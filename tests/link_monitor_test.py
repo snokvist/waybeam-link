@@ -22,7 +22,7 @@ class DashboardSchemaTest(unittest.TestCase):
             "frames_with_arq", "frames_fec_only", "frames_fec_after_arq",
             "malformed", "decode_errors", "dropped_superseded",
             "dropped_deadline", "shm_health_valid", "shm_full_drops",
-            "shm_throttle_permille", "shm_oversize_drops", "shm_bad_slots",
+            "shm_low_water_slots", "shm_other_drops", "shm_oversize_drops", "shm_bad_slots",
             "shm_ring_full",
             "frame_count", "frame_bytes", "frame_size_last",
             "frame_size_min", "frame_size_max", "frame_interval_us",

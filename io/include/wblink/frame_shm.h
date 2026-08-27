@@ -98,8 +98,22 @@ class FrameShmRing {
         uint64_t ring_full = 0;
         // §15.4 Pass 109 producer-health extension. These are meaningful only
         // on an attached ingress ring with the exact "VHLT" marker.
+        //
+        // low_water_slots: lowest ring occupancy in the producer's last
+        // window, in SLOTS. <= 1 is healthy (it samples just after writing, so
+        // a keeping-up consumer still leaves one frame queued); >= 2 sustained
+        // is standing backlog.
+        //
+        // health_valid is load-bearing here in a way it was not for the v1
+        // throttle gauge this replaced: 0 was an impossible clamp value and so
+        // self-evidently meant "unavailable", but 0 is a perfectly ordinary
+        // low-water reading. Never read low_water_slots without health_valid.
         bool health_valid = false;
-        uint16_t throttle_permille = 0;
+        uint16_t low_water_slots = 0;
+        // Producer discards that are NOT congestion (§15.4 offset 96), as a
+        // delta since attach/reset like full_drops. Do not fold the two
+        // together: they call for opposite reactions.
+        uint64_t other_drops = 0;
     };
     Stats stats();
     void reset_stats();
@@ -132,6 +146,7 @@ class FrameShmRing {
     bool warned_undersized_ = false;  // B5: log the buf-too-small wedge once
     bool health_baseline_valid_ = false;
     uint64_t health_full_drops_baseline_ = 0;
+    uint64_t health_other_drops_baseline_ = 0;
 };
 
 }  // namespace wblink

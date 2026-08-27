@@ -143,12 +143,19 @@ struct StreamStats {
     uint64_t jscc_enforced_frames = 0;
     uint64_t jscc_discarded_frames = 0;
     uint64_t jscc_exempt_frames = 0;  // §14.2 Pass 149 §14.1a exemption
-    // §15.3 Pass 109: ingress producer health is optional at ring version 1.
-    // When valid, full_drops is the delta since attach/reset and throttle is a
-    // gauge. shm_ring_full remains independent consumer-side evidence.
+    // §15.3 Pass 109: ingress producer health rides the "VHLT" marker.
+    // When valid, full_drops is the delta since attach/reset and low_water is
+    // a gauge. shm_ring_full remains independent consumer-side evidence.
+    // shm_low_water_slots is ring occupancy in SLOTS (<= 1 healthy) and is
+    // only meaningful when shm_health_valid -- 0 is a healthy reading, not a
+    // sentinel.
     bool shm_health_valid = false;
     uint64_t shm_full_drops = 0;
-    uint16_t shm_throttle_permille = 0;
+    uint16_t shm_low_water_slots = 0;
+    // Producer discards that are NOT congestion -- an access unit the producer
+    // could not build. Never fold into shm_full_drops: a rate controller must
+    // not slow down for these.
+    uint64_t shm_other_drops = 0;
     uint64_t shm_oversize_drops = 0;
     uint64_t shm_bad_slots = 0;
     uint64_t shm_ring_full = 0;
