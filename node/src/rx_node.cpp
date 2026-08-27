@@ -841,9 +841,18 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             fo.last_frame_us = t;
         }
         VencFrameMeta meta;
-        if (read_frame_meta(f, len, &meta) &&
-            (meta.flags & kFrameFlagIdr) != 0) {
-            rx.note_egress_irap(fo.stream_id);
+        if (read_frame_meta(f, len, &meta)) {
+            if ((meta.flags & kFrameFlagIdr) != 0) {
+                rx.note_egress_irap(fo.stream_id);
+            } else if ((meta.flags & kFrameFlagSalvaged) != 0) {
+                // §3.9 mid-stream re-arm: this frame was repaired, so it is
+                // decodable but is not what was sent and the reference chain
+                // is damaged from here. Checked only when the frame is NOT an
+                // IRAP -- a salvaged IRAP is itself a fresh start point, so
+                // asking for another would be spending the largest frame in
+                // the stream to fix damage that just healed.
+                rx.note_egress_damage(fo.stream_id, now_ms());
+            }
         }
         return true;
     };

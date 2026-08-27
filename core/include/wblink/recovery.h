@@ -38,6 +38,9 @@ class LatchRecovery {
   public:
     static constexpr uint8_t kAttempts = 5;
     static constexpr uint64_t kPeriodMs = 1000;
+    // Minimum spacing between re-arms that were never answered. See
+    // note_damage(); 2x the duration of a full unanswered burst.
+    static constexpr uint64_t kRearmBackoffMs = 10000;
 
     // Reconcile against the currently latched set and return the keys due a
     // RECOVERY_REQUEST now, counting an attempt against each. Keys absent from
@@ -48,8 +51,34 @@ class LatchRecovery {
 
     // §3.9 early exit: this local egress stream received an IRAP, so whatever
     // is behind it now has a start point. Idempotent, and safe to call for a
-    // stream that was never tracked.
+    // stream that was never tracked. Also records that a request on this
+    // stream can actually be answered — see note_damage().
     void note_irap(uint8_t local_stream_id);
+
+    // §3.9 mid-stream re-arm: this local egress stream was handed a frame the
+    // receiver had to repair (§6.3b concealment, §15.4 flags bit 3). That frame
+    // is decodable but is NOT what was sent, so the decoder's reference chain
+    // is damaged from here until it gets a fresh start point.
+    //
+    // A latch is not the only bootstrap-relevant moment after all; it is only
+    // the one this layer could originally detect. The salvaged flag is the
+    // second, and unlike decoder readiness it IS observable here.
+    //
+    // Re-arms the schedule for that stream, subject to two guards:
+    //
+    //   - A schedule already in flight is left alone. It is asking already;
+    //     resetting its attempt count on every damaged frame of a bad patch
+    //     would defeat the bound.
+    //   - A schedule that stood down WITHOUT ever seeing an IRAP is backed off
+    //     for kRearmBackoffMs. Nothing is answering -- a craft with
+    //     venc.recovery_enabled false, or one whose encoder ignores the call --
+    //     and §3.9's whole reason for a bounded schedule is that this state is
+    //     otherwise unobservable. A schedule that WAS answered re-arms at once,
+    //     because the mechanism is demonstrably working on this craft and the
+    //     next damage genuinely needs another start point.
+    //
+    // Idempotent and safe for an untracked stream. Caller supplies the clock.
+    void note_damage(uint8_t local_stream_id, uint64_t now_ms);
 
     // Attempts already spent on a key (0 when untracked). Diagnostics + tests.
     uint8_t attempts(const StreamKey& key) const;
@@ -63,6 +92,11 @@ class LatchRecovery {
         uint8_t attempts = 0;
         uint64_t next_ms = 0;
         bool done = false;
+        // An IRAP was observed since this round armed: proof that a request on
+        // this stream reaches something that answers.
+        bool answered = false;
+        // Earliest re-arm for a round that was never answered.
+        uint64_t rearm_not_before_ms = 0;
     };
 
     const Entry* find(const StreamKey& key) const;

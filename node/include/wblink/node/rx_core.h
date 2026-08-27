@@ -617,6 +617,16 @@ struct RxCore {
         latch_recovery_.note_irap(local_stream_id);
     }
 
+    // §3.9 mid-stream re-arm: a frame this receiver had to repair (§6.3b, §15.4
+    // flags bit 3) is decodable but is not what was sent, so the decoder's
+    // reference chain is damaged until it gets a fresh start point. Same
+    // gate as the latch trigger -- a spectator has no uplink, and a node with
+    // node.recovery_on_latch false does not emit §3.9 at all.
+    void note_egress_damage(uint8_t local_stream_id, uint64_t now_ms) {
+        if (!recovery_on_latch_) return;
+        latch_recovery_.note_damage(local_stream_id, now_ms);
+    }
+
     std::vector<StreamKey> stream_keys() const {
         std::vector<StreamKey> out;
         for (const RxStreamInfo& info : engine_.streams()) {

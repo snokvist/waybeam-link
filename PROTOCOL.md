@@ -653,6 +653,36 @@ moment at which an IRAP is guaranteed absent from everything that consumer will
 ever see. Emitting there costs one 18-byte return per latched stream and is
 absorbed by the TX's existing one-per-second actuation gate.
 
+**A repaired frame is the second bootstrap event.** A latch is not the only
+moment at which a consumer needs a fresh start point — it is only the one this
+layer could originally detect. §6.3b concealment gives the RX a second, and
+unlike decoder readiness it *is* observable: a frame emitted with §15.4 flags
+bit 3 (**salvaged**) is decodable but is **not what was sent**, so the decoder's
+reference chain is damaged from there until it gets an IRAP. The RX therefore
+re-arms the schedule below for that stream when it writes such a frame to
+egress, subject to two guards:
+
+- **A schedule already in flight is left alone.** It is asking already, and
+  resetting its attempt count on every damaged frame of a bad patch would
+  defeat the bound outright.
+- **A round that stood down without ever being answered is backed off** for
+  10 s, measured from the exhaustion. This is exactly the state the bound
+  exists for — a craft with `venc.recovery_enabled` false, or one whose encoder
+  never honours the call — and re-arming freely there would draw a return every
+  second for the remainder of the flight. A round that *was* answered re-arms at
+  once, because the mechanism is demonstrably working on that craft and the next
+  damage genuinely needs another start point. Each re-armed round must re-prove
+  that it can be answered; one answered round does not grant immediate re-arms
+  forever.
+
+A **salvaged IRAP** does not re-arm: it is itself a fresh start point, so asking
+for another would spend the largest frame in the stream repairing damage that
+just healed.
+
+`node.recovery_on_latch` governs **both** triggers — it is the switch for
+whether this node emits §3.9 at all — and a §2 spectator never emits either,
+having no uplink. The key keeps its original name for compatibility.
+
 The latch-triggered emission repeats at that same one-second cadence for a
 **bounded** number of attempts (5). On frame-SHM egress (§15.4) it stops early
 once an IRAP-flagged frame has been written to the egress ring — the link's own
@@ -664,7 +694,11 @@ encoder never honours the request, must not draw a return every second for the
 remainder of the flight.
 
 The TX accepts a request only when `target_originator` and `target_session`
-match itself and `target_stream_id` names a configured RTP ingress. Requests
+match itself and `target_stream_id` names a configured RTP ingress. A craft with
+`venc.recovery_enabled` false refuses the actuation and **says so once** in its
+log: the refusal is otherwise invisible, since the requesting RX simply spends
+its attempt bound and stands down, leaving a stream that never gets a start
+point with nothing anywhere to explain it. Requests
 are rate-limited to one encoder actuation per second; duplicates and forged
 floods inside that window are harmless. The packet is best-effort and may be
 repeated by the local controller after one second if decoder output has not
