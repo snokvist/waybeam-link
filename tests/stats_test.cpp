@@ -191,6 +191,8 @@ StatsSnapshot sample_snapshot() {
     s.link.venc_max_p_bytes = 19444;
     s.link.venc_pushes = 6;
     s.link.venc_failures = 0;
+    s.link.venc_live_fallback = true;
+    s.link.venc_persisted_writes = 2;
     s.link.venc_settling = false;
     s.link.venc_fps = 90;
     s.link.venc_p_frame_bytes = 12345;
@@ -337,7 +339,9 @@ const char* kGolden =
     "\"lockout_conflict\":false,\"flap_freeze\":false,"
     "\"csa_state\":\"IDLE\",\"channel\":5805,\"venc_bitrate_kbps\":14000,"
     "\"venc_max_i_bytes\":70000,\"venc_max_p_bytes\":19444,"
-    "\"venc_pushes\":6,\"venc_failures\":0,\"venc_settling\":false,"
+    "\"venc_pushes\":6,\"venc_failures\":0,"
+    "\"venc_live_fallback\":true,\"venc_persisted_writes\":2,"
+    "\"venc_settling\":false,"
     "\"venc_fps\":90,\"venc_p_frame_bytes\":12345,"
     "\"venc_p_frame_target_bytes\":10000,"
     "\"venc_fps_ladder_state\":\"HOLD\","

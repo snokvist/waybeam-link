@@ -293,6 +293,13 @@ struct LinkStats {
     uint32_t venc_max_p_bytes = 0;
     uint64_t venc_pushes = 0;
     uint64_t venc_failures = 0;
+    // §9.6 write path (Pass 192). venc_live_fallback: the persisting /set
+    // fallback is latched, so the NEXT commanded change writes venc's config
+    // file. venc_persisted_writes: /set writes that already reached it, for
+    // the life of the process (0 = this link has never written encoder flash).
+    // Neither is derivable from venc_failures, which counts transport errors.
+    bool venc_live_fallback = false;
+    uint64_t venc_persisted_writes = 0;
     bool venc_settling = false;
     uint16_t venc_fps = 0;  // §9.11 last commanded fps (0 = never)
     uint32_t venc_p_frame_bytes = 0;  // §9.11 non-IDR payload EWMA

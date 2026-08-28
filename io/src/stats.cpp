@@ -553,6 +553,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.venc_pushes);
     out += ",\"venc_failures\":";
     append_u64(out, snap.link.venc_failures);
+    out += ",\"venc_live_fallback\":";
+    append_bool(out, snap.link.venc_live_fallback);
+    out += ",\"venc_persisted_writes\":";
+    append_u64(out, snap.link.venc_persisted_writes);
     out += ",\"venc_settling\":";
     append_bool(out, snap.link.venc_settling);
     out += ",\"venc_fps\":";

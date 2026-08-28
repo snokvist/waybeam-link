@@ -236,6 +236,11 @@ assert link["venc_failures"] == 0, link
 assert link["venc_bitrate_kbps"] == bitrates[-1], link
 assert (link["venc_max_i_bytes"], link["venc_max_p_bytes"]) == caps[-1], link
 assert link["venc_pushes"] == len(writes), (link["venc_pushes"], len(writes))
+# §9.6 volatile-first regression control (Pass 192): fake_venc answers 200 on
+# /api/v1/live/set, so a healthy actuator never reaches the persisting /set.
+# A non-zero count here means the link wrote the encoder's config file.
+assert link["venc_persisted_writes"] == 0, link
+assert link["venc_live_fallback"] is False, link
 active = next(p for p in table["profiles"] if p["id"] == link["profile"])
 strict = expected_caps(bitrates[-1], active["arq_deadline_ms"]["iframe"],
                        active.get("max_payload", 1424) - 26 - 11)
