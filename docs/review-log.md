@@ -24,6 +24,43 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 192 — the §9.6 write path is contract state, so §15.3 publishes it (2026-08-28)
+
+**Verdict.** §9.6 Pass 73 makes "never written to `/etc/waybeam.json`" a
+guarantee, but the actuator's knowledge of which path it is on
+(`VencActuator::live_fallback()`) never left the process. §15.3 now carries
+`venc_live_fallback` and `venc_persisted_writes`. A guarantee a consumer
+cannot read is not a contract, and this one was being re-derived by hand on a
+craft.
+
+**Two fields, not one — neither is sufficient alone.** The latch heals on the
+10-min re-probe, so a bool read after a heal reports `false` while the flash
+writes it caused stay invisible; and under write-on-change a latched actuator
+on a steady link leaves the counter flat, so a low count does not mean the
+next change is safe. `venc_live_fallback` answers "will the next commanded
+change write flash", `venc_persisted_writes` answers "has this process ever
+written flash". `0` on the counter is the affirmative form of the §9.6
+guarantee.
+
+**Not resettable.** Both are read straight from the actuator, matching
+`venc_pushes`/`venc_failures`, and so are outside `POST /api/v1/stats/reset`.
+Spelled out in §15.3 because the partial-reset surface has misled a rate
+calculation before.
+
+**Excluded:** `/request/idr` — not a config write, and it returns from
+`finish_txn()` before the persistence branch.
+
+**Changed:** §9.6 (volatile-first bullet — the path is observable, and
+`venc_failures` is explicitly *not* a proxy for it), §15.3 (both fields, the
+sample object, the reset exclusion).
+
+**Evidence.** Craft `.232` (SSC338Q Star6E, venc 0.70.0, hub with in-process
+wblink TX), 2026-08-28: a forced `GET /api/v1/restart` drove a full re-assert
+ladder — `venc_pushes` 56→99, 8 `maxFrameSize changed` transitions — with zero
+`[venc_config] Config saved` lines and an unchanged `/etc/waybeam.json` mtime
+(1787930869 before and after). Settling that required shell on the craft and a
+deliberate encoder restart; it is now two fields in `/api/v1/stats`. Issue #248.
+
 ## Pass 191 — local debug reads the process, never guesses from files (2026-08-23)
 
 **Verdict.** Operator ruling 2026-08-23. The co-located Hub may inspect and
