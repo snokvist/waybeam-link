@@ -196,35 +196,63 @@ for k, v in writes:
 
 # §9.5 sequencing recomputes caps at BOTH transition steps: the bitrate
 # step (new budget, old rung deadline) and the MCS commit (new deadline).
-# Invariants replayable from the log alone: every caps write uses the
-# bitrate currently in force, and its maxI matches SOME table rung's
-# I-deadline at that budget; every bitrate change is followed by at least
-# one caps write before the next bitrate change (unless caps are unchanged).
-current = None
-caps_since_bitrate = True  # startup: bitrate is pushed before caps
-prev_caps = None
-for k, v in writes:
-    if k == "bitrate":
-        assert caps_since_bitrate, f"bitrate {v}: prior change got no caps"
-        current = v
-        caps_since_bitrate = False
-    else:
-        assert current is not None, "caps written before any bitrate"
-        candidates = {
-            expected_caps(current, p["arq_deadline_ms"]["iframe"],
-                          p.get("max_payload", 1424) - 26 - 11)
-            for p in table["profiles"]}
-        assert v in candidates, (
-            f"caps {v} not derivable at bitrate {current}: {sorted(candidates)}")
-        caps_since_bitrate = True
-        prev_caps = v
-# A trailing bitrate change may legitimately leave caps unchanged (dedupe):
-if not caps_since_bitrate:
-    candidates = {
-        expected_caps(current, p["arq_deadline_ms"]["iframe"],
+#
+# §9.6 Pass 112 fixed the ORDER of those writes: when caps and bitrate are
+# both pending the actuator applies caps FIRST and bitrate LAST, because
+# SigmaStar's cap apply perturbs RC state. The observed grammar per
+# transition is therefore `caps(new budget, old deadline) -> bitrate(new) ->
+# caps(new budget, new deadline)`, and the very first write of a run is a
+# caps write, before any bitrate exists. This checker predated Pass 112 and
+# still assumed bitrate-then-caps; it is not in scripts/gates.sh, so nothing
+# caught the drift and it had been failing at "caps written before any
+# bitrate" ever since.
+#
+# Two invariants, restated for the real order:
+#   1. Every caps write is derivable from the bitrate it belongs to. That is
+#      the bitrate in force (the MCS-commit recompute) OR the one it
+#      immediately precedes (the pre-bitrate write carries the NEW budget
+#      under the OLD deadline). Measured on a full three-phase run: 14 of 29
+#      caps writes resolve against the current bitrate, 15 against the next,
+#      none against neither.
+#   2. Every bitrate change is PRECEDED by a caps write since the previous
+#      bitrate — unless write-on-change legitimately suppressed it because
+#      the caps in force are already the ones this budget derives, which is
+#      checked rather than waved through.
+def cap_candidates(kbps):
+    return {
+        expected_caps(kbps, p["arq_deadline_ms"]["iframe"],
                       p.get("max_payload", 1424) - 26 - 11)
         for p in table["profiles"]}
-    assert prev_caps in candidates, "final bitrate change got no caps write"
+
+next_bitrate = [None] * len(writes)
+pending = None
+for i in range(len(writes) - 1, -1, -1):
+    next_bitrate[i] = pending
+    if writes[i][0] == "bitrate":
+        pending = writes[i][1]
+
+current = None
+caps_since_bitrate = 0
+prev_caps = None
+for i, (k, v) in enumerate(writes):
+    if k == "bitrate":
+        if caps_since_bitrate == 0:
+            # Dedupe: allowed only when the caps already in force are the
+            # ones this budget derives. Never allowed before the first caps
+            # write, since then nothing is in force to be unchanged.
+            assert prev_caps is not None and prev_caps in cap_candidates(v), (
+                f"bitrate {v}: no preceding caps write and the caps in force "
+                f"({prev_caps}) are not derivable at it")
+        current = v
+        caps_since_bitrate = 0
+    else:
+        governing = [b for b in (current, next_bitrate[i]) if b is not None]
+        assert governing, "caps written with no bitrate before or after it"
+        assert any(v in cap_candidates(b) for b in governing), (
+            f"caps {v} not derivable at bitrate(s) {governing}: "
+            f"{sorted(set().union(*(cap_candidates(b) for b in governing)))}")
+        caps_since_bitrate += 1
+        prev_caps = v
 
 # Strict final check: at steady state the active rung (TX stats) must map
 # the last bitrate + its own deadline to the last commanded caps exactly.
