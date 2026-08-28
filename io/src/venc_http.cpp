@@ -356,6 +356,11 @@ void VencActuator::finish_txn(int status, uint64_t now_ms) {
 
     // this was the persisting /set (either a 404 chain or a latched skip)
     if (ok) {
+        // Pass 192: counted here and nowhere else — this is the only branch
+        // where a write actually reached venc's config file. The /live/set
+        // attempt that preceded a 404 chain must not count, and the kIdr
+        // branch returned above.
+        ++persisted_writes_;
         commit();
         if (txn_latch_on_ok_) {
             if (!live_fallback_) {

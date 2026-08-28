@@ -1265,6 +1265,8 @@ struct TxCore {
         snap.link.venc_max_p_bytes = venc_.commanded_max_p_bytes();
         snap.link.venc_pushes = venc_.pushes();
         snap.link.venc_failures = venc_.failures();
+        snap.link.venc_live_fallback = venc_.live_fallback();
+        snap.link.venc_persisted_writes = venc_.persisted_writes();
         snap.link.venc_settling = venc_.settling(now);
         snap.link.venc_fps = venc_.commanded_fps();
         snap.link.cmd_arq = cmd_arq_enabled_;

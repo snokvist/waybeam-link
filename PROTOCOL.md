@@ -2290,7 +2290,15 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
   10 min — a venc upgrade or a wrongly-read transient 404 heals without a
   link restart. Latch and heal each log once. Persistence of encoder
   settings is exclusively an operator act through venc's own UI/config —
-  never a link-side write.
+  never a link-side write. **The write path is observable, not merely
+  logged:** §15.3 publishes `venc_live_fallback` (the actuator is on the
+  persisting path *now*) and `venc_persisted_writes` (cumulative successful
+  `/set` writes, i.e. writes that reached flash). Both are required because
+  neither alone is sufficient — a heal clears the flag while leaving the
+  writes it caused invisible, and write-on-change leaves the counter flat on
+  a steady link that is nonetheless latched. A consumer MUST NOT infer the
+  write path from `venc_failures`, which counts transport and non-404 errors:
+  a venc restart alone adds tens of them without a single persisted write.
 - **Write only on change:** push bitrate only when the target actually
   changes, never at the 10 Hz report rate. Load-bearing for flash wear on the
   fallback path (every `/set` persists), and still the discipline on the live
@@ -5384,6 +5392,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "channel": 5805,
     "venc_bitrate_kbps": 14000, "venc_max_i_bytes": 70000,
     "venc_max_p_bytes": 19444, "venc_pushes": 6, "venc_failures": 0,
+    "venc_live_fallback": false, "venc_persisted_writes": 0,
     "venc_settling": false, "venc_fps": 90,
     "cmd_arq": true, "cmd_selector_frozen": false,
     "cmd_fps_ladder": true, "cmd_last_nonce": 0,
@@ -5419,6 +5428,18 @@ bitrate and frame caps (0 = never pushed), cumulative pushes/failures, and
 (the doc-model "pending transition"; commanded = applied at HTTP 2xx since
 venc's `/live/set` — and the `/set` fallback — is synchronous). Zero/false on
 nodes without `venc.enabled`.
+
+`venc_live_fallback` and `venc_persisted_writes` report the §9.6
+volatile-first *write path*. `venc_live_fallback` is true while the persisting
+`/api/v1/set` fallback is latched — i.e. the next commanded change will be
+written to the encoder's config file; it clears when the 10-min re-probe finds
+`/live/set` again. `venc_persisted_writes` counts successful `/set` writes for
+the life of the process: `0` is the affirmative statement that this link has
+never written encoder flash. `/request/idr` is not a config write and is
+excluded. Neither field participates in `POST /api/v1/stats/reset` — like
+`venc_pushes`/`venc_failures` they are read straight from the actuator, so a
+consumer measuring a rate MUST difference two samples rather than reset
+between them.
 
 The selector/loss/lockout fields are authoritative on the craft TX and mirrored
 from fresh §3.15 state on an RX. `selector_state_valid=false` means no compatible

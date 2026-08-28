@@ -118,6 +118,7 @@ int main() {
         CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
         CHECK_EQ_U(act.pushes(), 1);
         CHECK_EQ_U(act.failures(), 0);
+        CHECK_EQ_U(act.persisted_writes(), 0);  // Pass 192: no flash written
     }
 
     // §9.6 Pass 112: coupled updates apply caps first and bitrate last.
@@ -137,6 +138,7 @@ int main() {
         CHECK(p[0] ==
               "/api/v1/live/set?video0.maxIBytes=21761&video0.maxPBytes=4096");
         CHECK(p[1] == "/api/v1/live/set?video0.bitrate=2829");
+        CHECK_EQ_U(act.persisted_writes(), 0);
     }
 
     // A pre-live venc: 404 + successful /set re-send latches the fallback
@@ -150,14 +152,19 @@ int main() {
         CHECK(act.live_fallback());
         CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
         CHECK_EQ_U(act.pushes(), 1);  // one logical push, even with the 404 chain
+        CHECK_EQ_U(act.persisted_writes(), 1);  // the /set re-send hit flash
         act.set_fps(60);
         pump(act, 2000);
         CHECK(act.live_fallback());
+        CHECK_EQ_U(act.persisted_writes(), 2);  // latched: straight to /set
         // Past the re-probe window the volatile route is tried again and a
         // 2xx clears the latch.
         act.set_fps(90);
         pump(act, 1000 + 600000);
         CHECK(!act.live_fallback());
+        // Pass 192, the reason both fields exist: the heal clears the flag,
+        // but the two writes it already cost must stay visible.
+        CHECK_EQ_U(act.persisted_writes(), 2);
         const auto& p = venc.paths();
         CHECK_EQ_U(p.size(), 4);
         CHECK(p[0] == "/api/v1/live/set?video0.bitrate=8192");
@@ -177,10 +184,12 @@ int main() {
         CHECK(!act.live_fallback());
         CHECK_EQ_U(act.commanded_bitrate_kbps(), 0);  // both failed: uncommitted
         CHECK_EQ_U(act.failures(), 1);
+        CHECK_EQ_U(act.persisted_writes(), 0);  // a 404 /set wrote nothing
         act.set_bitrate(8192);
         pump(act, 2000);  // past holdoff: volatile again
         CHECK(!act.live_fallback());
         CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
+        CHECK_EQ_U(act.persisted_writes(), 0);
         const auto& p = venc.paths();
         CHECK_EQ_U(p.size(), 3);
         CHECK(p[2] == "/api/v1/live/set?video0.bitrate=8192");
@@ -199,6 +208,7 @@ int main() {
         act.set_bitrate(8192);
         pump(act, 2000);  // past the holdoff
         CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
+        CHECK_EQ_U(act.persisted_writes(), 0);
         const auto& p = venc.paths();
         CHECK_EQ_U(p.size(), 2);
         CHECK(p[1] == "/api/v1/live/set?video0.bitrate=8192");
@@ -221,6 +231,7 @@ int main() {
         const auto& p = venc.paths();
         CHECK_EQ_U(p.size(), 1);
         CHECK(p[0] == "/request/idr");
+        CHECK_EQ_U(act.persisted_writes(), 0);  // an IDR is not a config write
     }
 
     // §15.5 Pass 103 invalidate(): a venc restart strands the encoder because
@@ -260,11 +271,16 @@ int main() {
         act.set_bitrate(8192);
         pump(act, 1000);
         CHECK(act.live_fallback());
+        CHECK_EQ_U(act.persisted_writes(), 1);
         act.invalidate();
         CHECK(!act.live_fallback());  // latch cleared
+        // Pass 192: a mode apply resets what we BELIEVE venc holds, never the
+        // record of flash already written.
+        CHECK_EQ_U(act.persisted_writes(), 1);
         act.set_bitrate(8192);
         pump(act, 2000);
         CHECK_EQ_U(act.commanded_bitrate_kbps(), 8192);
+        CHECK_EQ_U(act.persisted_writes(), 1);
         const auto& p = venc.paths();
         CHECK_EQ_U(p.size(), 3);
         CHECK(p[2] == "/api/v1/live/set?video0.bitrate=8192");  // volatile retried

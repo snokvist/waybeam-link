@@ -81,6 +81,11 @@ class VencActuator {
 
     uint64_t pushes() const { return pushes_; }
     uint64_t failures() const { return failures_; }
+    // §15.3 Pass 192: successful writes that reached the PERSISTING /set, and
+    // so venc's config file. 0 is the affirmative form of the §9.6 guarantee.
+    // Lifetime of the process — deliberately NOT cleared by invalidate(), so a
+    // mode apply cannot erase the record of flash we already wrote.
+    uint64_t persisted_writes() const { return persisted_writes_; }
     uint64_t idr_requests() const { return idr_requests_; }
     uint64_t idr_failures() const { return idr_failures_; }
     bool enabled() const { return cfg_.enabled; }
@@ -137,6 +142,7 @@ class VencActuator {
     uint64_t no_retry_until_ms_ = 0;
     uint64_t pushes_ = 0;
     uint64_t failures_ = 0;
+    uint64_t persisted_writes_ = 0;
     uint64_t next_idr_ms_ = 0;
     uint64_t idr_requests_ = 0;
     uint64_t idr_failures_ = 0;
