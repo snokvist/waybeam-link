@@ -74,6 +74,18 @@
       }
     },
     {
+      "name": "ssc378qe-au",
+      "displayName": "SigmaStar SSC378QE / Infinity6C cross, 8812AU-only (musl hard-float)",
+      "binaryDir": "${sourceDir}/build/ssc378qe-au",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-ssc378qe.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WBLINK_WERROR": "ON",
+        "WBLINK_DEVOURER_CHIPS": "au",
+        "DEVOURER_LOG_MAX_LEVEL": "WARN"
+      }
+    },
+    {
       "name": "cv610",
       "displayName": "HiSilicon CV610 cross (ARMv7 soft-float)",
       "binaryDir": "${sourceDir}/build/cv610",
@@ -111,6 +123,7 @@
     { "name": "ssc338q", "configurePreset": "ssc338q" },
     { "name": "ssc338q-au", "configurePreset": "ssc338q-au" },
     { "name": "ssc338q-eu", "configurePreset": "ssc338q-eu" },
+    { "name": "ssc378qe-au", "configurePreset": "ssc378qe-au" },
     { "name": "cv610", "configurePreset": "cv610" },
     { "name": "android-arm64", "configurePreset": "android-arm64" }
   ],
