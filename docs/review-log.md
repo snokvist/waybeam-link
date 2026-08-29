@@ -24,6 +24,44 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 194 — §15.2 aggregation becomes observable: tx_bulk / tx_bulk_failed (2026-08-29)
+
+**Verdict.** `air.usb_tx_agg` has been shippable since Pass 184 and could not
+be verified from a running node. §15.3 publishes two new per-adapter counters,
+`tx_bulk` and `tx_bulk_failed`, taken from the backend's transport counters
+(devourer `TxStats`), so `tx_submitted / tx_bulk` states whether frames were
+actually packed.
+
+**Changed:** §15.3 (two adapter fields added; example and prose updated).
+Additive — no field removed, no semantics altered, no config key added.
+
+**Why nothing existing could answer it.** `tx_submitted` counts FRAMES on both
+paths: `RadioAir::flush_staged()` adds the whole batch at once
+(`io/src/air_radio.cpp`), so the counter reads identically at
+`usb_tx_agg` 0 and 3. Devourer emits a per-URB `tx.agg` event carrying the real
+frame count, but `RadioAir::Impl::ev_write` consumes and drops every event that
+is not `tx.report`, and nothing in this tree called `IRtlDevice::GetTxStats()`.
+A node therefore published no signal that distinguished packing from not
+packing.
+
+**Evidence.** 8812EU craft (Jaguar3, SSC338Q, 1920x1080@60, ~19 Mbps,
+2026-08-29), four alternating 20–25 s arms against an x86 ground: at
+`usb_tx_agg` 0 the craft's `tx_submitted` ran 2134–2155/s and at 3 it ran
+2146–2152/s — indistinguishable, while hub CPU moved 26.2–28.7% → 20.2–20.6%
+and softirq 4.1% → 2.5%. The CPU moved and the published counters did not,
+which is the gap this Pass closes.
+
+**Why the backend's count and not our flushes.** A HAL that clamps descriptors
+per bulk window splits one `flush_staged()` across several transfers — Jaguar1
+takes 1 per window (`third_party/devourer/src/jaguar1/RtlJaguarDevice.cpp`) —
+so a flush counter would report an aggregation the chip never performed. That
+is precisely the case under investigation on 8812AU, where `usb_tx_agg` 2 and 3
+both cut craft CPU ~35 points and took the link to 966‰ loss and 0 fps.
+
+**Reading a zero.** `IRtlDevice::GetTxStats()` defaults to `{}`, and the udp
+air backend has no transport counters, so `tx_bulk` 0 means "not reported" and
+never "no transfers". §15.3 says so.
+
 ## Pass 193 — §9.6 horizon frame caps are withdrawn: they never bound (2026-08-29)
 
 **Verdict.** The per-frame ceilings this spec has commanded since Pass 37
