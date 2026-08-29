@@ -28,6 +28,12 @@ StatsSnapshot sample_snapshot() {
     a.noise = -85;
     a.tx_submitted = 540;
     a.tx_failed = 2;
+    // §15.2: 540 frames carried in 180 bulk-OUT transfers — a 3:1 ratio, so
+    // the fixture pins the aggregation semantics and not just the key names.
+    // Distinct from tx_submitted/tx_failed on purpose: equal values would let
+    // a mis-wired field pass.
+    a.tx_bulk = 180;
+    a.tx_bulk_failed = 1;
     a.tx_timeout = 0;
     a.drop = 3;
     a.tsf_fallback = 1;
@@ -240,7 +246,8 @@ const char* kGolden =
     "\"adapters\":[{\"name\":\"wlan0\",\"rx\":10234,\"dup\":812,"
     "\"rssi_best\":-58,\"rssi_mean\":-63,\"snr\":22,\"noise\":-85,"
     "\"evm\":-24,\"evm_valid\":true,"
-    "\"tx_submitted\":540,\"tx_failed\":2,\"tx_timeout\":0,"
+    "\"tx_submitted\":540,\"tx_failed\":2,"
+    "\"tx_bulk\":180,\"tx_bulk_failed\":1,\"tx_timeout\":0,"
     "\"drop\":3,\"filtered\":0,\"kernel_drop\":0,\"bpf_filtered\":0,\"tsf_fallback\":1,"
     "\"tx_reports\":40,"
     "\"tx_report_fails\":2,"

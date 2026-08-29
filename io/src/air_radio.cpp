@@ -1777,6 +1777,17 @@ RadioAir::AdapterCounters RadioAir::counters(size_t adapter) const {
     c.rssi_last = a.rssi_last.load(std::memory_order_relaxed);
     c.tx_submitted = a.tx_submitted;
     c.tx_failed = a.tx_failed;
+    // §15.2: bulk-OUT transfers behind those frames (see AdapterCounters).
+    // Read for every adapter, not just the injecting one — the counter is a
+    // property of the device's transport, and an ear that never injects
+    // reports 0 truthfully. Plain relaxed atomic loads inside devourer
+    // (UsbTransport::tx_stats), so this stays a non-blocking read like the
+    // rest of counters().
+    if (a.dev) {
+        const devourer::TxStats ts = a.dev->GetTxStats();
+        c.tx_bulk = ts.submitted;
+        c.tx_bulk_failed = ts.failed;
+    }
     for (size_t i = 0; i < kRxMcsBuckets; ++i) {
         c.rx_mcs[i] = a.rx_mcs[i].load(std::memory_order_relaxed);
         c.rx_crc_mcs[i] = a.rx_crc_mcs[i].load(std::memory_order_relaxed);

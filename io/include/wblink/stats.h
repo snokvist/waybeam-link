@@ -39,6 +39,13 @@ struct AdapterStats {
     bool evm_valid = false;
     uint64_t tx_submitted = 0;
     uint64_t tx_failed = 0;
+    // §15.2: USB bulk-OUT transfers the submitted frames went out in, and
+    // those that did not complete OK. tx_submitted counts frames whether or
+    // not air.usb_tx_agg packed them, so tx_submitted / tx_bulk is what says
+    // whether packing actually happened. 0 = the backend reports no bulk
+    // accounting (udp air, or a device without TxStats), not zero transfers.
+    uint64_t tx_bulk = 0;
+    uint64_t tx_bulk_failed = 0;
     uint64_t tx_timeout = 0;
     uint64_t drop = 0;          // radio backend RX-queue overflow drops
     uint64_t filtered = 0;      // malformed/non-network/self receive frames
