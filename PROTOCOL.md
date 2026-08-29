@@ -2257,7 +2257,6 @@ Live HTTP, `MUT_LIVE`, sub-ms, no reinit:
 
 ```
 GET /api/v1/live/set?video0.bitrate=<kbps>     Host 127.0.0.1:80  # volatile (Pass 73)
-GET /api/v1/live/set?video0.maxIBytes=<B>&video0.maxPBytes=<B>    # one live group
 GET /api/v1/set?…                              # persisting fallback (pre-live venc)
 GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
 ```
@@ -2274,8 +2273,7 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
   load otherwise) and should exceed the table `bitrate_min_kbps` to bind.
 - **Single bitrate authority (deployment rule, not a flag):** venc's API is
   last-writer-wins with no arbitration. waybeam-link MUST be the only writer of
-  `video0.bitrate` (and, with frame caps enabled, of `video0.maxIBytes`/
-  `maxPBytes`): if waybeam-hub is present set its `venc.bitrate_enabled=false`
+  `video0.bitrate`: if waybeam-hub is present set its `venc.bitrate_enabled=false`
   (that flag lives in hub `mod_venc`, not venc); do not run wfb_ng
   `link_controller` — waybeam-link replaces it.
 - **Volatile-first actuation (Pass 73; closes review-log R-E):** every
@@ -2307,53 +2305,53 @@ GET /api/v1/dual/set?bitrate=<kbps>            # Star6E ch1 only; 501 on Maruko
   oscillates fps; waybeam-link MAY command `video0.resilience=racing` at the low
   end (coarse, hysteretic — `resilience` is heavier than a bitrate tweak).
 
-**Per-frame size caps — horizon actuation (Pass 37).** With `venc.enabled`
-and a frame-shm ingress stream, waybeam-link additionally commands venc's
-per-frame ceilings (`maxIBytes`/`maxPBytes`, FRAMEBITS_FIRST) so a burst
-frame can never be encoded larger than the active rung can carry inside its
-deadline. **A per-frame budget channel is ruled OUT OF SCOPE** (operator,
-2026-07-16): venc control is HTTP (persist-on-set at ruling time; volatile
-since Pass 73 — the transport argument stands either way), and Salsify-style
-next-frame commands would need a new transport. The caps are therefore
-**horizon caps** — pure functions of slow inputs, recomputed only when an
-input changes and pushed under the same write-on-change/holdoff rules as
-bitrate, riding the same §9.5 transition moments:
+**Per-frame size caps — REMOVED (2026-08-29).** waybeam-link previously
+commanded venc's per-frame ceilings (`maxIBytes`/`maxPBytes` under
+FRAMEBITS_FIRST) as "horizon caps" derived from the active rung's budget, the
+ladder-snapped cadence and the §14.1 parity rates, so a burst frame could not
+be encoded larger than the rung could carry inside its deadline. **The caps
+never bound, and they are gone from both sides.**
 
-- `frame_period_us` — a **windowed frames-per-ingress-second estimate**
-  (frame count over a ~1 s window; the §15.3 last-gap `frame_interval_us`
-  is batch-drain-skewed and unsuitable), **snapped to the nearest ladder
-  fps** `{30, 45, 60, 75, 90, 100, 120, 144}` so cadence jitter cannot
-  churn the caps; `venc.fps_hint` (seed 100, matching the preferred low-latency
-  mode) until measured.
-- `budget_bps` — the active rung's §9.5 derived bitrate target (already net
-  of airtime fraction, table FEC overhead, and control/telemetry reserves).
-- `maxP = budget_bps · frame_period_us / 8·10⁶ · 1000/(1000 + p_rate‰) ·
-  p_headroom‰/1000` — the deadline-safe P ceiling: one frame period of rung
-  budget, net of the stream's §14.1 P parity.
-- `maxI = budget_bps · arq_deadline_iframe_ms / 8000 · 1000/(1000 + i_rate‰)
-  · i_headroom‰/1000` — the I-class recoverable window (§4.1/§8), net of I
-  parity: an I-frame is sized to what ARQ/FEC can still rescue, not to one
-  frame period.
-- Clamps: `maxI ≥ maxP`; if the I-class deadline/FEC ceiling is tighter than
-  the independently derived P cap, lower `maxP` to `maxI` (never raise I past
-  its recoverable ceiling). Both are floored at venc's own 4096-byte cap floor
-  (never command sub-floor) and ceilinged at
-  `min(cap_ceiling_bytes, s·⌊256000/(1000 + rate‰)⌋)` — the §14.1
-  GF(256) eligibility bound at the rung's symbol size `s`.
-- Headroom seeds 1000 ‰ (= exactly the deadline-safe ceiling); all seeds
-  §17 RE-DERIVE. `venc.frame_caps=false` disables cap writes while keeping
-  bitrate authority.
+Device-measured on a SSC338Q (1280x720@60, H.265 CBR): across `maxPBytes`
+33144 -> 25000 -> 16000 -> 10000 -> 6000 bytes the delivered rate moved under
+0.3% and every access unit exceeded the commanded cap; `maxIBytes` 91788 ->
+26000 -> 8000 -> 2000 left IDR size at 66-81 KB across 16 sampled IDRs. The
+encoder accepted the values, reported them back, and logged FRAMEBITS_FIRST.
 
-**Coupled apply order (Pass 112).** When both a bitrate target and frame caps
-are pending, the actuator MUST apply `maxIBytes`/`maxPBytes` first and bitrate
-last. This ordering is safe in both directions: a demotion tightens the burst
-ceiling before lowering bitrate, while a promotion only loosens the ceiling
-under the old lower bitrate before raising the target. The final bitrate write
-is load-bearing on SigmaStar: applying RC parameters for the frame caps after a
-bitrate write can leave CBR persistently underfilling even though the configured
-bitrate, SHM throttle, and commanded cap values all report correctly. This rule
-also applies when §15.5 re-asserts the full tuple after a venc restart. A
-standalone bitrate or cap change still writes only the changed field.
+**Scope the claim honestly.** venc 0.45.0 recorded `maxPBytes=2000` moving a
+Star6E from 5619 to 1868 kbps — real influence, 3x below this sweep's floor.
+But 1868 kbps at 60 fps is ~3892 B/frame against a 2000 B cap: ~1.95x over. So
+the knob *influences* below ~6000 B and still does not *bind* anywhere it has
+been measured, which is why it cannot serve as a ceiling. Independently reported in OpenIPC/waybeam_venc#111. venc drops
+the fields in contract `0.21.0` (co-requisite, not yet released at the time of
+writing — this side must deploy FIRST); this side removed `venc.frame_caps`,
+`venc.cap_ceiling_bytes` and `venc.i_/p_headroom_permille` with them, along
+with the derivation and the `venc_max_i_bytes`/`venc_max_p_bytes` stats fields.
+
+The Pass 112 coupled apply order goes with them: with no cap transaction there
+is nothing to order against a bitrate write, and the actuator now issues
+bitrate, fps and idr only.
+
+Two consequences a controller or dashboard will observe. A rung transition used
+to emit `caps -> bitrate -> caps`, so **`venc_pushes` drops from 3 to 1 per
+transition** — a dashboard trending it is rebaselined, not broken. And the §9.6
+settling anchor (`last_change_ms_`, refreshed on every commit) used to land on
+the trailing caps write; it now lands on the bitrate write, so the
+`ACTUATOR_SETTLE` hold on the §9.11 FPS ladder ends measurably earlier after
+each rung change.
+
+**Bounding I-frame size instead.** `video0.qpDelta` is the knob that acts --
+measured over a 68x range on the same rig (-12 -> ~3.8 KB IDRs, 0 -> ~67-82 KB,
++12 -> ~261 KB), and it does not keyframe. It is venc-side configuration, not a
+waybeam-link actuator, so this spec makes no claim on it.
+
+**Caveat, and it matters here.** venc issue #255 is OPEN: `qpDelta` applied
+from venc's startup path logs success and does not reach the encoder, so a
+craft boots with IDRs ~20x larger than its config asks for. Only a live write
+takes effect today. Because this spec deliberately does not actuate `qpDelta`,
+the startup path is the operator's only route, and it is the broken one --
+track #255 before relying on this.
+
 
 The doc-level actuator model (commanded / effective / pending): venc applies
 a 2xx `/set` synchronously, so **commanded = applied** at HTTP success; the
@@ -2559,9 +2557,7 @@ loop with much larger hysteresis. The §9 selector first holds encoder bitrate
 inside the PHY budget. The FPS ladder then preserves a useful frame-aligned FEC
 block size: if the measured encoded P frames become too small, fewer frames per
 second at the same bitrate give each frame more bytes/source symbols and hence
-more absolute repair symbols at the configured FEC ratio. `maxIBytes` and
-`maxPBytes` remain live ceilings, not promises that the encoder will fill a
-frame to that size.
+more absolute repair symbols at the configured FEC ratio.
 
 **Instantiate vs. run (Pass 99).** The ladder object is **instantiated whenever
 `venc.enabled`** — it is a cheap controller and its mere existence commands
@@ -2604,11 +2600,6 @@ spans are deferred.
 - **Settling:** after a command the ladder freezes for `settle_ms`
   (seed 1500; venc's live fps apply + IDR recovery is ~0.5–1 s), discards the
   pre-change EWMA, and waits for new P-frame evidence.
-- **Cap coupling:** while the ladder is enabled, the §9.6 cap cadence input
-  is the **commanded ladder fps** (authoritative immediately), not the
-  measured cadence. Both live `maxIBytes`/`maxPBytes` ceilings are recomputed
-  after every FPS step; observed P-frame size, not the derived ceiling, closes
-  the ladder loop.
 - All values are §17 RE-DERIVE seeds; emergency reduction (bypassing dwell
   on persistent deadline misses) is deferred until bench data motivates it.
 
@@ -4982,9 +4973,7 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   "scout": { "dwell_ms": 300, "channels": null },
   "venc": { "host": "127.0.0.1:80", "enabled": false,
             "recovery_enabled": true,
-            "frame_caps": true, "fps_hint": 100,
-            "i_headroom_permille": 1000, "p_headroom_permille": 1000,
-            "cap_ceiling_bytes": 196608, "settle_ms": 750 }
+            "fps_hint": 100, "settle_ms": 750 }
 }
 ```
 - RX nodes use `"dir":"out"` streams (UDP `send` targets) and `role:"rx"` adapters
@@ -5390,8 +5379,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "lockout_conflict": false,
     "flap_freeze": false, "csa_state": "IDLE",
     "channel": 5805,
-    "venc_bitrate_kbps": 14000, "venc_max_i_bytes": 70000,
-    "venc_max_p_bytes": 19444, "venc_pushes": 6, "venc_failures": 0,
+    "venc_bitrate_kbps": 14000, "venc_pushes": 6, "venc_failures": 0,
     "venc_live_fallback": false, "venc_persisted_writes": 0,
     "venc_settling": false, "venc_fps": 90,
     "cmd_arq": true, "cmd_selector_frozen": false,
@@ -5980,7 +5968,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/channel` | `{ "mhz": 5805 }` | locally retune the craft to an **allowlisted** channel outside any §11 campaign: retunes all adapters, informs the §9 selector, arms the §11.6 RX-liveness guard, clears any in-flight CSA campaign and drops the §11.5a binding (the ground must re-scout). 400 off-allowlist; **volatile** — a reboot returns to the boot channel (Pass 113, TX/craft node) |
 | `POST /api/v1/psk` | `{ "enabled": true\|false }` | §11.4a runtime pairing gate: `false` = re-key with a fresh announced token + drop the §11.5a binding (open pairing), `true` = stop announcing the current key (locked). Craft-session volatile (Pass 113, TX/craft node) |
 | `POST /api/v1/reports/latch` | `{ "clear": true }` or `{ "originator": N }` | §3.5 report-authority override: `clear` releases the LINK_REPORT + JSCC_FEEDBACK latch so the next reporter takes it within `relatch_ms`; `originator` forces it to a specific node (bench). Exactly one of the two per request; 400 otherwise. Refused with 400 when `preferred_originator` is configured — config outranks the override, and the refusal is explicit rather than a silent no-op. Volatile (Pass 115, TX/craft node) |
-| `POST /api/v1/venc/reassert` | `{}` | drop the §9.6 venc-actuator write-on-change cache so the next tick re-asserts bitrate + frame-caps + fps onto the encoder. Called by the §16 applier **after** it restarts venc; closes the stranded-bitrate gap a restart would otherwise leave (Pass 103, TX/craft node) |
+| `POST /api/v1/venc/reassert` | `{}` | drop the §9.6 venc-actuator write-on-change cache so the next tick re-asserts bitrate + fps onto the encoder. Called by the §16 applier **after** it restarts venc; closes the stranded-bitrate gap a restart would otherwise leave (Pass 103, TX/craft node) |
 
 Endpoints act only where meaningful — `csa` on the issuer, `link/profile`,
 `fec`, `link/fps` and `mode` on the TX, and `bench/rx-drop` on an RX node's
@@ -6435,7 +6423,7 @@ local-ingress polling interval.
 | `wedge_window_ms` / `wedge_min_submits` | §9.10 TX-wedge watchdog | silent across a healthy 500–4500 pps sweep; fires within one window of an induced USB wedge |
 | `wedge_exit_windows` | §9.10 v2 TX-node self-restart | both v1 conditions above met first; sized so a transient never bounces a healthy craft — 3 consecutive wedged windows at the 1000 ms seed, i.e. 3 s with zero backend TX progress. 0 disables (v1 behaviour). Vehicle loop only |
 | cache close timers (`tail_grace_ms`/`local_quiet_ms`/`min_collect_ms`/`hard_close_ms`) | §14.3 local-collection close | loss-position sweep at target fps on the Ethernet bench; close must beat next-block supersession with round-trip margin |
-| frame-cap headrooms (`i/p_headroom_permille`, `cap_ceiling_bytes`, `fps_hint`) | §9.6 horizon caps | UDP-air actuation harness FIRST (fake venc, profile transitions — operator sequencing 2026-07-16), then the radio backend on the rig |
+| `fps_hint` | §9.6 cadence seed until measured | UDP-air actuation harness FIRST (fake venc, profile transitions — operator sequencing 2026-07-16), then the radio backend on the rig |
 | FPS ladder frame floor/hysteresis/timers (`min_p_frame_bytes`, `restore_hysteresis_bytes`, `sample_timeout_ms`, `reduce_after/reduce_dwell/restore_after/settle_ms`) | §9.11 frame-size-preservation loop | UDP-air frame-size ladder harness first; flight calibration against direct frame-SHM cadence and visual output |
 | `arq_max_fps` | §4.1 high-cadence ARQ cutoff | operator comfort floor 10 ms (2026-07-16); re-derive against gate-3 recovery latency at high fps |
 | §9.4 probe schedule + window (`probe.period`/`probe.slot` in the table; window `min_samples` 32, `max_age_ms` 8000, gap horizon 128; `probe_veto_permille` 50, `probe_veto_ttl_s` 3.0) | probe duty vs evidence rate; when the up-candidate's PER has an opinion and when it bars a climb | devourer's 64/(4) ≈1.6 % duty and 64-sample window are BENCH FITS to their fps/block structure — RE-DERIVE against ours: duty vs delivery cost at the cliff, window fill time vs rung dwell at our report cadence; veto threshold against the §9.1 demote band |
