@@ -102,6 +102,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, a.tx_submitted);
         out += ",\"tx_failed\":";
         append_u64(out, a.tx_failed);
+        out += ",\"tx_bulk\":";
+        append_u64(out, a.tx_bulk);
+        out += ",\"tx_bulk_failed\":";
+        append_u64(out, a.tx_bulk_failed);
         out += ",\"tx_timeout\":";
         append_u64(out, a.tx_timeout);
         out += ",\"drop\":";

@@ -718,6 +718,8 @@ struct AirBackend {
             }
             as.tx_submitted = c.tx_submitted;
             as.tx_failed = c.tx_failed;
+            as.tx_bulk = c.tx_bulk;  // §15.2 aggregation witness
+            as.tx_bulk_failed = c.tx_bulk_failed;
             as.drop = c.rx_dropped;
             as.filtered = c.rx_filtered;  // Pass 114 audit: was computed+dropped
             // Node-wide §7.2 TSF-read fallback count, surfaced once.

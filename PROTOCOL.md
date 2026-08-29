@@ -5293,7 +5293,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
   "adapters": [ { "name": "wlan0", "rx": 10234, "dup": 812,
     "rssi_best": -58, "rssi_mean": -63, "snr": 22, "noise": -85,
     "evm": -24, "evm_valid": true,
-    "tx_submitted": 540, "tx_failed": 2, "tx_timeout": 0,
+    "tx_submitted": 540, "tx_failed": 2,
+    "tx_bulk": 180, "tx_bulk_failed": 1, "tx_timeout": 0,
     "drop": 0, "filtered": 0, "kernel_drop": 0, "bpf_filtered": 0, "tsf_fallback": 0,
     "tx_reports": 531, "tx_report_fails": 0,
     "rx_mcs": [0, 0, 0, 0, 118, 10116, 0, 0], "rx_mcs_unknown": 0,
@@ -5503,6 +5504,19 @@ state (craft-local; `false` on a ground node).
 ρ decorrelation gauge — the two field-failure modes the design most fears.
 `tx_wedged` is the §9.10 backend-progress verdict (TX adapter only): CCX
 TX-status progress on devourer. `tx_reports` is the CCX report count.
+`tx_bulk`/`tx_bulk_failed` are the §15.2 bulk-OUT accounting, taken from the
+backend's own transport counters: the USB transfers the `tx_submitted` frames
+were carried in, and those that did not complete OK. `tx_submitted` counts
+FRAMES on both the staged and unstaged paths, so it does not move when
+`air.usb_tx_agg` starts packing — **`tx_submitted / tx_bulk` is the only
+published witness that packing happened**: 1.0 is one frame per transfer, and
+the ratio approaches `air.usb_tx_agg` when the depth is achieved. It is
+deliberately the backend's count rather than a count of our own flushes,
+because a HAL that clamps descriptors per bulk window splits one flush across
+several transfers, and a flush counter would then report an aggregation the
+chip never performed. Both are `0` where the backend publishes no bulk
+accounting (`air.kind "udp"`, or a device without transport counters); read a
+zero as "not reported", never as "no transfers".
 `uniq`/`diversity` are the §17 gate-2 estimator inputs; the `nack_rtt_*` /
 `arq_rec_*` histograms (cumulative, ms upper bounds 1,2,4,8,16,32,64,+inf) are
 the §17 gate-3 estimator outputs.

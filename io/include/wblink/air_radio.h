@@ -261,6 +261,21 @@ class RadioAir : public AirIface {
         int8_t rssi_last = -128;  // dBm of the last accepted frame
         uint64_t tx_submitted = 0;
         uint64_t tx_failed = 0;
+        // §15.2 bulk-OUT accounting, straight from devourer's TxStats. The
+        // two counters above count FRAMES on both paths — flush_staged()
+        // adds the whole batch — so with air.usb_tx_agg on they say nothing
+        // about whether the frames were actually packed. These count the USB
+        // bulk-OUT transfers those frames went out in, so tx_submitted /
+        // tx_bulk IS the aggregation witness: 1.0 = one frame per URB,
+        // approaching air.usb_tx_agg = packing at the configured depth. It
+        // matters that this is devourer's number and not a count of our
+        // flushes: a HAL that clamps descriptors per bulk window (Jaguar1
+        // takes 1) splits one flush across several URBs, and a flush counter
+        // would report packing that never happened. 0 on a backend whose
+        // device reports no TxStats (IRtlDevice's default) — read a zero as
+        // "not reported", never as "no transfers".
+        uint64_t tx_bulk = 0;
+        uint64_t tx_bulk_failed = 0;
         // Per-frame TX-status CCX reports (devourer tx.report, Pass 8) —
         // TX adapter only. Reports stalling while tx_submitted advances is
         // the TX-wedge signal; fails counts state != 0 (retry/lifetime
