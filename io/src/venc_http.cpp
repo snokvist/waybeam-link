@@ -26,17 +26,6 @@ void VencActuator::set_bitrate(uint32_t kbps) {
     want_bitrate_ = kbps;  // §9.6 write-on-change resolved against last_ in poll
 }
 
-void VencActuator::set_max_frame_size(uint32_t max_i_bytes,
-                                      uint32_t max_p_bytes) {
-    if (!cfg_.enabled || !cfg_.frame_caps) {
-        return;
-    }
-    if (max_i_bytes == 0 && max_p_bytes == 0) {
-        return;  // §9.6: insufficient cap inputs — leave venc alone
-    }
-    want_caps_ = {max_i_bytes, max_p_bytes};
-}
-
 void VencActuator::set_fps(uint16_t fps) {
     if (!cfg_.enabled || fps == 0) {
         return;
@@ -74,12 +63,11 @@ void VencActuator::invalidate() {
     // restart (the §16 mode applier) wiped its live/volatile state, so drop any
     // transaction in flight to the now-dead process and clear the
     // write-on-change cache. want_* (the desired targets) stay; with last_*
-    // empty the next poll() re-asserts bitrate + caps + fps onto the fresh
+    // empty the next poll() re-asserts bitrate + fps onto the fresh
     // encoder. Re-probe the volatile path (a pre-restart fallback latch no
     // longer applies) and clear the retry hold-off so re-assertion is prompt.
     close_conn();
     last_.reset();
-    last_caps_.reset();
     last_fps_.reset();
     last_change_ms_ = 0;
     live_fallback_ = false;
@@ -117,9 +105,6 @@ std::string VencActuator::txn_query() const {
     switch (txn_kind_) {
         case TxnKind::kBitrate:
             return "video0.bitrate=" + std::to_string(txn_bitrate_);
-        case TxnKind::kCaps:
-            return "video0.maxIBytes=" + std::to_string(txn_caps_.first) +
-                   "&video0.maxPBytes=" + std::to_string(txn_caps_.second);
         case TxnKind::kFps:
             return "video0.fps=" + std::to_string(txn_fps_);
         case TxnKind::kIdr:
@@ -129,17 +114,11 @@ std::string VencActuator::txn_query() const {
 }
 
 // Choose the next pending transaction from want_ vs last_. Returns false when
-// there is nothing to do. Priority: finish a 404 fallback chain, then caps,
-// bitrate, fps, idr. §9.6 Pass 112: SigmaStar cap application perturbs RC, so
-// bitrate must be the final write when both are pending.
+// there is nothing to do. Priority: finish a 404 fallback chain, then bitrate,
+// fps, idr.
 bool VencActuator::select_pending(uint64_t now_ms) {
     if (chain_persist_) {
         return true;  // txn_* already holds the value that drew the 404
-    }
-    if (want_caps_ && (!last_caps_ || *want_caps_ != *last_caps_)) {
-        txn_kind_ = TxnKind::kCaps;
-        txn_caps_ = *want_caps_;
-        return true;
     }
     if (want_bitrate_ && (!last_ || *want_bitrate_ != *last_)) {
         txn_kind_ = TxnKind::kBitrate;
@@ -321,9 +300,6 @@ void VencActuator::finish_txn(int status, uint64_t now_ms) {
         switch (txn_kind_) {
             case TxnKind::kBitrate:
                 last_ = txn_bitrate_;
-                break;
-            case TxnKind::kCaps:
-                last_caps_ = txn_caps_;
                 break;
             case TxnKind::kFps:
                 last_fps_ = txn_fps_;

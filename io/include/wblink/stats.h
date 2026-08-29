@@ -289,8 +289,6 @@ struct LinkStats {
     // §9.6 actuator state (Pass 37): last COMMANDED values (0 = never
     // pushed) + the settling window; zero/false without venc.enabled.
     uint32_t venc_bitrate_kbps = 0;
-    uint32_t venc_max_i_bytes = 0;
-    uint32_t venc_max_p_bytes = 0;
     uint64_t venc_pushes = 0;
     uint64_t venc_failures = 0;
     // §9.6 write path (Pass 192). venc_live_fallback: the persisting /set

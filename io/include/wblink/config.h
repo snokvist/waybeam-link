@@ -212,12 +212,8 @@ struct VencCfg {
     // §9.6 Pass 75 encoder-capability ceiling: clamp the §9.5-derived bitrate
     // to min(derived, this). 0 = unlimited. Must be >= 1000 if set.
     uint32_t max_bitrate_kbps = 0;
-    // §9.6 Pass 37 horizon frame caps (maxIBytes/maxPBytes; §17 seeds).
-    bool frame_caps = true;         // cap writes (gated by `enabled` too)
+    // §9.6 cadence/settling inputs (§17 seeds).
     uint16_t fps_hint = 100;        // cadence fallback until measured
-    uint16_t i_headroom_permille = 1000;
-    uint16_t p_headroom_permille = 1000;
-    uint32_t cap_ceiling_bytes = 196608;
     uint32_t settle_ms = 750;       // encoder-output settling window
     FpsLadderCfg fps_ladder;        // §9.11 (Pass 39)
     // §11.7 v2 command presets (Pass 71): ≤5 entries each, cmd_arg indexes.

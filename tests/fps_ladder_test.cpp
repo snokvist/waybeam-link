@@ -139,5 +139,22 @@ int main() {
         CHECK_EQ_U(ladder.current_fps(), 120);
     }
 
+    // snap_frame_period_us: moved here with the deleted frame_caps.h, whose
+    // test held the only coverage for it. It still governs the §4.1 ARQ
+    // high-cadence cutoff (tx_core.h), and it now reads kFpsLadder rather than
+    // its own copy of the ladder — so a change to that constant moves the ARQ
+    // threshold, and these cases are what would catch it.
+    {
+        CHECK_EQ_U(snap_frame_period_us(0), 0);          // unmeasured
+        CHECK_EQ_U(snap_frame_period_us(11111), 11111);  // exactly 90 fps
+        CHECK_EQ_U(snap_frame_period_us(11100), 11111);  // jitter below 90
+        CHECK_EQ_U(snap_frame_period_us(16800), 16666);  // jitter around 60
+        CHECK_EQ_U(snap_frame_period_us(33000), 33333);  // jitter around 30
+        // Clamps: outside the ladder in either direction it saturates at the
+        // nearest end, it never extrapolates.
+        CHECK_EQ_U(snap_frame_period_us(1), 6944);       // faster than 144
+        CHECK_EQ_U(snap_frame_period_us(10000000), 33333);  // slower than 30
+    }
+
     return wbtest_finish("fps_ladder_test");
 }

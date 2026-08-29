@@ -33,7 +33,6 @@
 #include "wblink/jscc_runtime_shadow.h"
 #include "wblink/log.h"
 #include "wblink/mcs_probe.h"
-#include "wblink/frame_caps.h"
 #include "wblink/frame_shm.h"
 #include "wblink/framer.h"
 #include "wblink/scheduler.h"
@@ -706,7 +705,7 @@ struct TxCore {
             cadence_start_ms_ = now;
         }
         // §9.11 FPS ladder: preserve measured P-frame FEC block size. Bitrate
-        // and cap transitions get first claim on the resulting frame evidence.
+        // transitions get first claim on the resulting frame evidence.
         // §11.7 FPS_LADDER off: the loop stops issuing commands and the fps
         // holds where it is (current_fps stays the cadence input below).
         if (fps_ladder_ && cmd_fps_enabled_) {
@@ -722,7 +721,7 @@ struct TxCore {
             venc_.set_fps(cmd_fps_select_hz_);
         }
         // §4.1 Pass 40 high-cadence ARQ cutoff, driven by the same cadence
-        // input the §9.6 caps use (ladder-commanded, else measured, else
+        // input the §9.6 cadence estimate uses (ladder-commanded, else measured, else
         // hint). Sticky on the framers until the cadence drops back.
         {
             const uint32_t snapped = snap_frame_period_us(cadence_period_us());
@@ -732,43 +731,6 @@ struct TxCore {
                 if (s.frame_framer) {
                     s.frame_framer->set_arq_suppressed(arq_fps_suppressed_);
                 }
-            }
-        }
-        // §9.6 Pass 37 horizon caps: recomputed from slow inputs (rung
-        // budget, ladder-snapped cadence, I deadline, live §14.1 rates);
-        // write-on-change makes the steady state a no-op.
-        if (venc_.frame_caps_enabled() && selector_.bitrate_kbps() > 0) {
-            for (Stream& s : streams_) {
-                if (!s.frame_framer) {
-                    continue;  // caps apply to frame-shm ingress only (§9.6)
-                }
-                FrameCapInputs in;
-                in.budget_kbps = selector_.bitrate_kbps();
-                // §9.11: while the ladder runs, the COMMANDED fps is the
-                // authoritative cadence — measurement lags a change by ~1 s.
-                in.frame_period_us = snap_frame_period_us(cadence_period_us());
-                in.iframe_deadline_ms = static_cast<uint16_t>(
-                    frame_deadline_us(true) / 1000u);
-                const FrameFecConfig& fec = s.frame_framer->fec();
-                if (fec.scheme != FecScheme::kNone) {
-                    in.i_rate_permille = fec.i_rate_permille;
-                    // §9.6 caps stay on the P rate even when §14.1a lowers the
-                    // non-referenced class: max_p_bytes is then conservative
-                    // (net of more parity than is actually emitted), so freed
-                    // airtime is NOT handed back to the encoder. Deliberate —
-                    // e_rate has no validated non-default setting (§14.1a), and
-                    // a blended rate would have to track measured density.
-                    in.p_rate_permille = fec.p_rate_permille;
-                }
-                in.symbol_size = static_cast<uint16_t>(
-                    max_payload_for(selector_.profile_id()) -
-                    kDataHeaderSize - kFecRepairSubheaderSize);
-                in.ceiling_bytes = venc_knobs_.cap_ceiling_bytes;
-                in.i_headroom_permille = venc_knobs_.i_headroom_permille;
-                in.p_headroom_permille = venc_knobs_.p_headroom_permille;
-                const FrameCaps caps = derive_frame_caps(in);
-                venc_.set_max_frame_size(caps.max_i_bytes, caps.max_p_bytes);
-                break;  // single video stream (§9.6)
             }
         }
         drain_resends(now, inject_resend ? inject_resend : inject);
@@ -895,7 +857,7 @@ struct TxCore {
         selector_.set_profile_pin(min_profile, max_profile);
     }
     // §15.5 Pass 103: forget the venc actuator's write-on-change cache so the
-    // next tick re-asserts bitrate/caps/fps — called after an out-of-loop venc
+    // next tick re-asserts bitrate/fps — called after an out-of-loop venc
     // restart (the §16 mode applier) which the actuator cannot otherwise see.
     void reassert_venc() { venc_.invalidate(); }
     // §14.1 live FEC-rate retune for a frame-shm stream. Returns false if the
@@ -1261,8 +1223,6 @@ struct TxCore {
         snap.link.flap_freeze = selector_.flap_frozen(now);
         // §9.6 actuator state (Pass 37).
         snap.link.venc_bitrate_kbps = venc_.commanded_bitrate_kbps();
-        snap.link.venc_max_i_bytes = venc_.commanded_max_i_bytes();
-        snap.link.venc_max_p_bytes = venc_.commanded_max_p_bytes();
         snap.link.venc_pushes = venc_.pushes();
         snap.link.venc_failures = venc_.failures();
         snap.link.venc_live_fallback = venc_.live_fallback();
@@ -1779,7 +1739,7 @@ struct TxCore {
     const ProfileTable* table_;
     Selector selector_;
     VencActuator venc_;
-    VencCfg venc_knobs_;            // §9.6 cap knobs (Pass 37)
+    VencCfg venc_knobs_;            // §9.6 fps_hint + §11.7 presets
     std::optional<FpsLadder> fps_ladder_;  // §9.11 (Pass 39)
     uint16_t arq_max_fps_ = 100;           // §4.1 Pass 40 cutoff
     bool arq_fps_suppressed_ = false;

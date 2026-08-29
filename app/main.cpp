@@ -44,7 +44,6 @@
 #include "wblink/vehicle_cmd.h"
 #include "wblink/endian.h"
 #include "wblink/fps_ladder.h"
-#include "wblink/frame_caps.h"
 #include "wblink/frame_framer.h"
 #include "wblink/frame_reassembler.h"
 #include "wblink/frame_shm.h"
