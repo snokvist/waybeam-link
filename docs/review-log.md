@@ -24,6 +24,45 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 193 — §9.6 horizon frame caps are withdrawn: they never bound (2026-08-29)
+
+**Verdict.** The per-frame ceilings this spec has commanded since Pass 37
+(`video0.maxIBytes`/`maxPBytes` under `FRAMEBITS_FIRST`) do not constrain the
+encoder. They are removed from the spec and the implementation, together with
+`venc.frame_caps`, `venc.cap_ceiling_bytes` and `venc.i_/p_headroom_permille`,
+the `derive_frame_caps()` derivation, the `kCaps` transaction, and the
+`venc_max_i_bytes`/`venc_max_p_bytes` §15.3 fields.
+
+**Changed:** §9.6 (horizon-cap section replaced with the withdrawal; the Pass
+112 caps-then-bitrate ordering rule deleted with it), §9.11 (cap-coupling
+bullet deleted), §15.3 (two stats fields removed; example corrected), §17
+RE-DERIVE table (cap-headroom row reduced to `fps_hint`).
+
+**Evidence.** SSC338Q 1280x720@60 H.265 CBR GDR, 2026-08-28: across `maxPBytes`
+33144 → 25000 → 16000 → 10000 → 6000 B the delivered rate moved <0.3% and every
+one of 863 access units exceeded the cap; `maxIBytes` 91788 → 2000 left IDR
+size 66–81 KB across 16 sampled IDRs. Controls: CBR held its target to 98.8%,
+`minQp=30` on the same scene gave ~490 B/frame, every step re-read from
+`/api/v1/get`. Independently reported in OpenIPC/waybeam_venc#111.
+
+**Bounded, deliberately.** venc 0.45.0 measured `maxPBytes=2000` moving a
+Star6E 5619 → 1868 kbps — influence, 3× below this sweep's floor. It
+reconciles: 1868 kbps at 60 fps is ~3892 B/frame against a 2000 B cap, ~1.95×
+over. The caps influence below ~6000 B and bind nowhere measured. Not-binding
+is what disqualifies a ceiling, not absence of effect — the spec says so
+rather than claiming they do nothing.
+
+**Consequences to observe.** `venc_pushes` falls 3 → 1 per rung transition,
+and the §9.6 settling anchor now lands on the bitrate write instead of a
+trailing caps write, so the §9.11 `ACTUATOR_SETTLE` hold ends earlier after
+each transition. Both are documented in §9.6.
+
+**Co-requisite, craft-side ordering.** venc drops the fields in contract
+0.21.0. On each craft, deploy this side FIRST: a stale actuator's cap
+transaction 404s at the head of its queue forever and starves bitrate, fps and
+IDR with it — the starvation already observed on CV610's 501
+(`docs/findings.md`, `deploy/vehicle-192.168.2.181.json`).
+
 ## Pass 192 — the §9.6 write path is contract state, so §15.3 publishes it (2026-08-28)
 
 **Verdict.** §9.6 Pass 73 makes "never written to `/etc/waybeam.json`" a
