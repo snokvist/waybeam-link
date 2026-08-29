@@ -187,8 +187,6 @@ StatsSnapshot sample_snapshot() {
     s.link.csa_state = "IDLE";
     s.link.channel_mhz = 5805;
     s.link.venc_bitrate_kbps = 14000;
-    s.link.venc_max_i_bytes = 70000;
-    s.link.venc_max_p_bytes = 19444;
     s.link.venc_pushes = 6;
     s.link.venc_failures = 0;
     s.link.venc_live_fallback = true;
@@ -338,7 +336,6 @@ const char* kGolden =
     "\"lockout_active_mask\":32,\"lockout_latched_mask\":0,"
     "\"lockout_conflict\":false,\"flap_freeze\":false,"
     "\"csa_state\":\"IDLE\",\"channel\":5805,\"venc_bitrate_kbps\":14000,"
-    "\"venc_max_i_bytes\":70000,\"venc_max_p_bytes\":19444,"
     "\"venc_pushes\":6,\"venc_failures\":0,"
     "\"venc_live_fallback\":true,\"venc_persisted_writes\":2,"
     "\"venc_settling\":false,"

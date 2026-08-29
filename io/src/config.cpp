@@ -1069,20 +1069,10 @@ Result<Config> load_config_json(const std::string& json_text) {
                     "venc: max_bitrate_kbps must be 0 (unlimited) or >= 1000 "
                     "(§9.6 venc hard floor, Pass 75)");
             }
-            cfg.venc.frame_caps = v.value("frame_caps", cfg.venc.frame_caps);
             cfg.venc.fps_hint = v.value("fps_hint", cfg.venc.fps_hint);
-            cfg.venc.i_headroom_permille = v.value(
-                "i_headroom_permille", cfg.venc.i_headroom_permille);
-            cfg.venc.p_headroom_permille = v.value(
-                "p_headroom_permille", cfg.venc.p_headroom_permille);
-            cfg.venc.cap_ceiling_bytes =
-                v.value("cap_ceiling_bytes", cfg.venc.cap_ceiling_bytes);
             cfg.venc.settle_ms = v.value("settle_ms", cfg.venc.settle_ms);
-            if (cfg.venc.fps_hint == 0 ||
-                cfg.venc.i_headroom_permille > 1000 ||
-                cfg.venc.p_headroom_permille > 1000) {
-                return Result<Config>::fail(
-                    "venc: fps_hint must be >= 1 and headrooms 0..1000");
+            if (cfg.venc.fps_hint == 0) {
+                return Result<Config>::fail("venc: fps_hint must be >= 1");
             }
             if (v.contains("fps_ladder")) {
                 const json& fl = v.at("fps_ladder");

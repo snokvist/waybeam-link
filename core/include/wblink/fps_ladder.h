@@ -15,6 +15,28 @@ namespace wblink {
 inline constexpr std::array<uint16_t, 8> kFpsLadder = {30, 45,  60,  75,
                                                        90, 100, 120, 144};
 
+// §9.6: snap a measured frame interval to the nearest ladder fps so cadence
+// jitter cannot churn a consumer. 0 in => 0 out (unmeasured). Moved here from
+// the deleted frame_caps.h, which carried its own copy of the ladder values —
+// this reads them from kFpsLadder instead, so there is one table again.
+inline uint32_t snap_frame_period_us(uint64_t measured_us) {
+    if (measured_us == 0) {
+        return 0;
+    }
+    uint32_t best = 0;
+    uint64_t best_diff = UINT64_MAX;
+    for (const uint16_t fps : kFpsLadder) {
+        const uint32_t period = 1000000u / fps;
+        const uint64_t diff = period > measured_us ? period - measured_us
+                                                   : measured_us - period;
+        if (diff < best_diff) {
+            best_diff = diff;
+            best = period;
+        }
+    }
+    return best;
+}
+
 inline bool fps_ladder_member(uint16_t fps) {
     for (const uint16_t f : kFpsLadder) {
         if (f == fps) return true;
@@ -49,7 +71,7 @@ class FpsLadder {
         last_sample_ms_ = now_ms;
     }
 
-    // actuator_settling means bitrate/caps are still taking effect; those
+    // actuator_settling means a bitrate write is still taking effect; those
     // changes get first claim on observed frame-size evidence. Returns an fps
     // to command exactly once per change (first call commands preferred).
     std::optional<uint16_t> tick(uint64_t now_ms,

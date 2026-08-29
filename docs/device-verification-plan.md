@@ -123,7 +123,7 @@ knee sits at N≈26.6 at 18 Mbps — above the 17 ceiling, so more slices pays
 all the way up. 17 also makes the steady AU and the GDR refresh AU the same
 geometry. Sweep `sliceCount` ∈ {4, 6, 9, 17} on the same scene with
 `resilience`/bitrate/fps held: delivered slice count, achieved QP, achieved
-bitrate, fps hold, packetInfo WARN silence at 60 frames/s, `maxPBytes`
+bitrate, fps hold, packetInfo WARN silence at 60 frames/s
 interaction. Ship 17 unless its QP cost exceeds ~1 step over 4; else 9. This
 is a short craft run, not an RF session.
 

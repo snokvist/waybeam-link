@@ -54,11 +54,6 @@ class VencActuator {
     // value). The push itself happens in poll(). No-op when disabled or already
     // at the target. Callers may invoke this every tick.
     void set_bitrate(uint32_t kbps);
-    // §9.6 Pass 37 horizon caps: one /set carrying both fields (venc applies
-    // them as one live group). Same write-on-change discipline; gated on
-    // cfg.enabled AND cfg.frame_caps. {0,0} is a no-op (never command
-    // "unlimited" implicitly).
-    void set_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes);
     // §9.11 FPS ladder: write-on-change like the others; venc applies fps
     // live (skipping no-op rebinds) and requests an IDR after a real change.
     void set_fps(uint16_t fps);
@@ -68,7 +63,7 @@ class VencActuator {
     bool request_idr(uint64_t now_ms);
 
     // §15.5 Pass 103: a venc restart (the §16 mode applier) discards the
-    // encoder's live/volatile bitrate/caps/fps but leaves this actuator's
+    // encoder's live/volatile bitrate/fps but leaves this actuator's
     // write-on-change cache intact, so the setters would see want_==last_ and
     // never re-push — the encoder is stranded at its persisted config. Called
     // AFTER the restart (POST /api/v1/venc/reassert), this drops the cache so
@@ -90,17 +85,10 @@ class VencActuator {
     uint64_t idr_failures() const { return idr_failures_; }
     bool enabled() const { return cfg_.enabled; }
     bool recovery_enabled() const { return cfg_.recovery_enabled; }
-    bool frame_caps_enabled() const { return cfg_.enabled && cfg_.frame_caps; }
     // §15.3 actuator state: last commanded values (0 = never pushed) and the
     // doc-model "pending transition" — within settle_ms of the last accepted
     // value-changing push.
     uint32_t commanded_bitrate_kbps() const { return last_ ? *last_ : 0; }
-    uint32_t commanded_max_i_bytes() const {
-        return last_caps_ ? last_caps_->first : 0;
-    }
-    uint32_t commanded_max_p_bytes() const {
-        return last_caps_ ? last_caps_->second : 0;
-    }
     uint16_t commanded_fps() const { return last_fps_ ? *last_fps_ : 0; }
     bool settling(uint64_t now_ms) const {
         return last_change_ms_ != 0 &&
@@ -113,7 +101,7 @@ class VencActuator {
 
   private:
     enum class HttpPhase { kIdle, kConnecting, kSending, kReceiving };
-    enum class TxnKind { kBitrate, kCaps, kFps, kIdr };
+    enum class TxnKind { kBitrate, kFps, kIdr };
 
     void start_next_txn(uint64_t now_ms);   // pick pending work, open socket
     void advance_txn(uint64_t now_ms);      // step the in-flight state machine
@@ -136,7 +124,6 @@ class VencActuator {
     bool live_fallback_ = false;
     uint64_t live_reprobe_ms_ = 0;
     std::optional<uint32_t> last_;
-    std::optional<std::pair<uint32_t, uint32_t>> last_caps_;
     std::optional<uint16_t> last_fps_;
     uint64_t last_change_ms_ = 0;
     uint64_t no_retry_until_ms_ = 0;
@@ -150,7 +137,6 @@ class VencActuator {
     // Desired state — recorded by the setters, reconciled by poll(). A value
     // differing from its last_ counterpart is pending work.
     std::optional<uint32_t> want_bitrate_;
-    std::optional<std::pair<uint32_t, uint32_t>> want_caps_;
     std::optional<uint16_t> want_fps_;
     bool want_idr_ = false;
     // One-shot: a RECOVERY_REQUEST refused because venc.recovery_enabled is
@@ -171,7 +157,6 @@ class VencActuator {
     bool chain_persist_ = false;    // a 404 wants the same value re-sent on /set
     // The value snapshotted at txn start (also the value re-sent on a 404).
     uint32_t txn_bitrate_ = 0;
-    std::pair<uint32_t, uint32_t> txn_caps_{0, 0};
     uint16_t txn_fps_ = 0;
 };
 

@@ -545,10 +545,6 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.channel_mhz);
     out += ",\"venc_bitrate_kbps\":";
     append_u64(out, snap.link.venc_bitrate_kbps);
-    out += ",\"venc_max_i_bytes\":";
-    append_u64(out, snap.link.venc_max_i_bytes);
-    out += ",\"venc_max_p_bytes\":";
-    append_u64(out, snap.link.venc_max_p_bytes);
     out += ",\"venc_pushes\":";
     append_u64(out, snap.link.venc_pushes);
     out += ",\"venc_failures\":";

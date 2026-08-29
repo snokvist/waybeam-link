@@ -11,9 +11,8 @@
 #
 # Three phases: clean (selector promotes), loss ramp (demotes), clean again
 # (re-promotes). The checker then replays the fake-venc log against the
-# §9.5/§9.6 integer math: every commanded bitrate must map to a table rung's
-# derived budget, every cap write must equal derive_frame_caps() for the
-# rung active at that moment, caps must accompany every bitrate change, and
+# §9.5 integer math: every commanded bitrate must map to a table rung's
+# derived budget, and
 # write-on-change must hold (no duplicate consecutive writes).
 set -euo pipefail
 
@@ -120,19 +119,15 @@ sleep 2
 kill -TERM "${pids[1]}" "${pids[2]}" 2>/dev/null || true
 wait "${pids[1]}" "${pids[2]}" 2>/dev/null || true
 
-python3 - "$TMP/venc.jsonl" "$TMP/tx.jsonl" "$TABLE" "$FPS" <<'PY'
+python3 - "$TMP/venc.jsonl" "$TMP/tx.jsonl" "$TABLE" <<'PY'
 import json
 import sys
 from urllib.parse import parse_qs, urlparse
 
-venc_log, tx_stats, table_path, fps = (
-    sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]))
+venc_log, tx_stats, table_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
-# --- mirror the §9.5 Pass-6 budget + §9.6 cap math (all-integer) -----------
+# --- mirror the §9.5 Pass-6 budget math (all-integer) ---------------------
 HT20 = [6500, 13000, 19500, 26000, 39000, 52000, 58500, 65000]
-LADDER = [30, 45, 60, 75, 90, 100, 120, 144]
-I_RATE, P_RATE = 250, 100          # stream fec config in tx.json
-CEILING, FLOOR = 196608, 4096      # venc.cap_ceiling_bytes seed, venc floor
 
 table = json.load(open(table_path, encoding="utf-8"))
 def permille(frac):
@@ -148,27 +143,6 @@ for p in table["profiles"]:
     kbps = max(kbps - reserve if kbps > reserve else 0, p["bitrate_min_kbps"])
     rungs[kbps] = p
 
-def snap_period_us(f):
-    return 1000000 // min(LADDER, key=lambda x: abs(1000000 // x - 1000000 // f))
-
-def window_bytes(kbps, window_us, rate, headroom=1000):
-    bits = kbps * window_us // 1000
-    b = bits // 8
-    b = b * 1000 // (1000 + rate)
-    return b * headroom // 1000
-
-def expected_caps(kbps, deadline_ms, s):
-    period = snap_period_us(fps)
-    max_p = window_bytes(kbps, period, P_RATE)
-    max_i = window_bytes(kbps, deadline_ms * 1000, I_RATE)
-    p_ceil = min(CEILING, (256000 // (1000 + P_RATE)) * s)
-    i_ceil = min(CEILING, (256000 // (1000 + I_RATE)) * s)
-    max_p = min(max_p, p_ceil)
-    max_i = min(max_i, i_ceil)
-    if max_i < max_p:
-        max_i = min(max_p, i_ceil)
-    return max(max_i, FLOOR), max(max_p, FLOOR)
-
 # --- replay the fake-venc log ------------------------------------------------
 writes = []
 for line in open(venc_log, encoding="utf-8"):
@@ -176,12 +150,7 @@ for line in open(venc_log, encoding="utf-8"):
     q = parse_qs(urlparse(rec["path"]).query)
     if "video0.bitrate" in q:
         writes.append(("bitrate", int(q["video0.bitrate"][0])))
-    elif "video0.maxIBytes" in q:
-        writes.append(("caps", (int(q["video0.maxIBytes"][0]),
-                                int(q["video0.maxPBytes"][0]))))
-
 bitrates = [v for k, v in writes if k == "bitrate"]
-caps = [v for k, v in writes if k == "caps"]
 assert len(set(bitrates)) >= 3, f"too few rung transitions: {bitrates}"
 assert any(b < a for a, b in zip(bitrates, bitrates[1:])), "no demote seen"
 assert any(b > a for a, b in zip(bitrates, bitrates[1:])), "no promote seen"
@@ -194,89 +163,25 @@ for k, v in writes:
     assert last.get(k) != v, f"duplicate {k} write: {v}"
     last[k] = v
 
-# §9.5 sequencing recomputes caps at BOTH transition steps: the bitrate
-# step (new budget, old rung deadline) and the MCS commit (new deadline).
-#
-# §9.6 Pass 112 fixed the ORDER of those writes: when caps and bitrate are
-# both pending the actuator applies caps FIRST and bitrate LAST, because
-# SigmaStar's cap apply perturbs RC state. The observed grammar per
-# transition is therefore `caps(new budget, old deadline) -> bitrate(new) ->
-# caps(new budget, new deadline)`, and the very first write of a run is a
-# caps write, before any bitrate exists. This checker predated Pass 112 and
-# still assumed bitrate-then-caps; it is not in scripts/gates.sh, so nothing
-# caught the drift and it had been failing at "caps written before any
-# bitrate" ever since.
-#
-# Two invariants, restated for the real order:
-#   1. Every caps write is derivable from the bitrate it belongs to. That is
-#      the bitrate in force (the MCS-commit recompute) OR the one it
-#      immediately precedes (the pre-bitrate write carries the NEW budget
-#      under the OLD deadline). Measured on a full three-phase run: 14 of 29
-#      caps writes resolve against the current bitrate, 15 against the next,
-#      none against neither.
-#   2. Every bitrate change is PRECEDED by a caps write since the previous
-#      bitrate — unless write-on-change legitimately suppressed it because
-#      the caps in force are already the ones this budget derives, which is
-#      checked rather than waved through.
-def cap_candidates(kbps):
-    return {
-        expected_caps(kbps, p["arq_deadline_ms"]["iframe"],
-                      p.get("max_payload", 1424) - 26 - 11)
-        for p in table["profiles"]}
-
-next_bitrate = [None] * len(writes)
-pending = None
-for i in range(len(writes) - 1, -1, -1):
-    next_bitrate[i] = pending
-    if writes[i][0] == "bitrate":
-        pending = writes[i][1]
-
-current = None
-caps_since_bitrate = 0
-prev_caps = None
-for i, (k, v) in enumerate(writes):
-    if k == "bitrate":
-        if caps_since_bitrate == 0:
-            # Dedupe: allowed only when the caps already in force are the
-            # ones this budget derives. Never allowed before the first caps
-            # write, since then nothing is in force to be unchanged.
-            assert prev_caps is not None and prev_caps in cap_candidates(v), (
-                f"bitrate {v}: no preceding caps write and the caps in force "
-                f"({prev_caps}) are not derivable at it")
-        current = v
-        caps_since_bitrate = 0
-    else:
-        governing = [b for b in (current, next_bitrate[i]) if b is not None]
-        assert governing, "caps written with no bitrate before or after it"
-        assert any(v in cap_candidates(b) for b in governing), (
-            f"caps {v} not derivable at bitrate(s) {governing}: "
-            f"{sorted(set().union(*(cap_candidates(b) for b in governing)))}")
-        caps_since_bitrate += 1
-        prev_caps = v
-
-# Strict final check: at steady state the active rung (TX stats) must map
-# the last bitrate + its own deadline to the last commanded caps exactly.
-
+# §9.6 Pass 112's caps-then-bitrate ordering check is gone with the caps
+# themselves: the actuator now issues bitrate, fps and idr only, so there is
+# no second write kind to order against. What survives is the §9.5 rung
+# grammar above plus the stats agreement below.
 # TX stats must agree with the last commanded values, with zero failures.
 rows = [json.loads(l) for l in open(tx_stats, encoding="utf-8") if l.strip()]
 link = rows[-1]["link"]
 assert link["venc_failures"] == 0, link
 assert link["venc_bitrate_kbps"] == bitrates[-1], link
-assert (link["venc_max_i_bytes"], link["venc_max_p_bytes"]) == caps[-1], link
 assert link["venc_pushes"] == len(writes), (link["venc_pushes"], len(writes))
 # §9.6 volatile-first regression control (Pass 192): fake_venc answers 200 on
 # /api/v1/live/set, so a healthy actuator never reaches the persisting /set.
 # A non-zero count here means the link wrote the encoder's config file.
 assert link["venc_persisted_writes"] == 0, link
 assert link["venc_live_fallback"] is False, link
-active = next(p for p in table["profiles"] if p["id"] == link["profile"])
-strict = expected_caps(bitrates[-1], active["arq_deadline_ms"]["iframe"],
-                       active.get("max_payload", 1424) - 26 - 11)
-assert caps[-1] == strict, (caps[-1], strict, link["profile"])
 assert link["venc_settling"] is False, link
 
-print("actuation: %d writes (%d bitrate, %d caps), rungs %s -> formula-exact"
-      % (len(writes), len(bitrates), len(caps),
+print("actuation: %d writes (%d bitrate), rungs %s -> formula-exact"
+      % (len(writes), len(bitrates),
          sorted(set(bitrates))))
 PY
 echo "actuation UDP bench: PASS"

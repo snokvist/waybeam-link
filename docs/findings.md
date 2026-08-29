@@ -1473,8 +1473,13 @@ CV610's venc returns **501** on `video0.maxIBytes`/`maxPBytes`, and the
 caps txn's failure hold-off (`no_retry_until_ms_`, shared across txn kinds in
 `io/src/venc_http.cpp`) starved the bitrate txn forever — 53 pushes, 53
 failures, `commanded_bitrate_kbps` 0, no log line. `venc.frame_caps:false`
-works around it. **Open:** the actuator should latch caps-unsupported on
-501/4xx the way it latches `live_fallback_` on 404, and a persistent
+worked around it. **CLOSED 2026-08-29**: the caps and that config key are
+removed on both sides, so the specific trigger is gone — a CV610 craft has no
+cap txn left to 501. The general hazard is NOT closed and keeps its own
+follow-up: the failure hold-off is still shared across txn kinds, so any 4xx
+on one kind still starves the others. **Open:** the actuator should latch an
+unsupported txn kind on 501/4xx the way it latches `live_fallback_` on 404,
+and a persistent
 all-pushes-failing state deserves a `wb_logf` line; residual ~1.2% pre-FEC
 air loss at SNR 31 near-field is a floor across 8–16 Mbps offered rates —
 unexplained, and where ground RX diversity would actually help.
