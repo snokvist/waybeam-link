@@ -370,6 +370,11 @@ struct CalibrationPolicy {
 struct Policy {
     double report_hz = 10.0;
     uint32_t report_timeout_ms = 500;
+    // §9.3a ground MTU/jumbo tier seed: default|medium|high|auto. The RX
+    // re-asserts this on every bind (claim-success reissue), so a configured
+    // jumbo default applies without a runtime POST /api/v1/link/mtu. Reset to
+    // Default on binding release like any commanded tier.
+    std::string mtu_default = "default";
     SelectPolicy select;
     ArqPolicy arq;
     RxCfgPolicy rx;

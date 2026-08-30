@@ -541,6 +541,20 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.policy.report_hz = p.value("report_hz", cfg.policy.report_hz);
             cfg.policy.report_timeout_ms =
                 p.value("report_timeout_ms", cfg.policy.report_timeout_ms);
+            {
+                // §9.3a ground MTU/jumbo tier seed. Validate the string here;
+                // the budget-vs-adapter-support check is runtime (mtu_supported
+                // is not known until the air backend is up).
+                const std::string m =
+                    p.value("mtu_default", cfg.policy.mtu_default);
+                if (m != "default" && m != "medium" && m != "high" &&
+                    m != "auto") {
+                    return Result<Config>::fail(
+                        "policy.mtu_default must be one of "
+                        "default|medium|high|auto");
+                }
+                cfg.policy.mtu_default = m;
+            }
             if (p.contains("select")) {
                 const json& ps = p.at("select");
                 SelectPolicy& sel = cfg.policy.select;
