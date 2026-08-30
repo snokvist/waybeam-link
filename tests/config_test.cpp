@@ -353,6 +353,16 @@ int main() {
         CHECK(!load_config_json(R"({
           "node": {"originator": 3, "role": "rx"},
           "air": {"kind": "radio", "ack_timeout_us": 0}})"));
+        // TYPE, not just range. .value<int>() would take a float by
+        // truncation (128.7 -> 128) and a bool as 1 — and 1 PASSES the range
+        // check while meaning a 1 us ACK window, i.e. a ~150 m range budget
+        // on a key whose whole point is that the operator's budget is real.
+        CHECK(!load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "ack_timeout_us": 128.7}})"));
+        CHECK(!load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "ack_timeout_us": true}})"));
     }
 
     // --- §3.0 policy.return.unicast_stale_ms (Pass 198) ---------------------
@@ -368,6 +378,17 @@ int main() {
           "policy": {"return": {"unicast_stale_ms": 0}}})");
         CHECK(bool(r2));
         if (r2) CHECK_EQ_U(r2.value->policy.ret.unicast_stale_ms, 0u);
+        // A NEGATIVE must be refused, not wrapped. The field is uint32_t, so
+        // -100 two's-complements to 4294967196 ms (~49.7 days) — which is
+        // behaviourally the reserved 0 "never expire" sentinel, reached by a
+        // sign typo, with no diagnostic. That silently disarms the very
+        // storm guard this pass adds, so it is the one that must fail loud.
+        CHECK(!load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"},
+          "policy": {"return": {"unicast_stale_ms": -100}}})"));
+        CHECK(!load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"},
+          "policy": {"return": {"unicast_stale_ms": 1000.5}}})"));
     }
     // The hybrid armed with retries disabled is refused, not run inert —
     // either half arms it.

@@ -394,9 +394,11 @@ seeds (150 ms / 500 ms) need raising.
 was measured under the PRE-Pass-198 shape — retry 8, a never-expiring SA latch
 and NACK/LINK_REPORT only. All three changed, so these numbers are context, not
 a baseline the current build can be compared against. Two fleet gates are named
-in the runbook and must be settled first: the `.181` craft is an 8733BU with no
-ACK responder at all, and the `.242` ground's 8812AU uplink hardcodes the
-descriptor BMC bit, which would make its unicast returns solicit no ACK.
+in the runbook: the `.181` craft is an 8733BU with no ACK responder at all
+(ported upstream in OpenIPC/devourer#406, not yet vendored). The companion
+concern about the `.242` ground's 8812AU hardcoded descriptor BMC bit was
+**disproven on air 2026-08-30** — that die solicits ACKs correctly; see
+`docs/hwack-hybrid-bringup.md` §2b.
 
 **STATUS 2026-07-11: groundwork LANDED** (spec Pass 12 + implementation,
 `impl/step11-wedge-hwack`): §3.0 pins the unicast QoS-Data return shape;
@@ -601,8 +603,8 @@ alone will populate the histogram but far too slowly to read.
 
 6. **8812AU (Jaguar1) unicast return still ACKs.** Not caused by this change,
    but this pass rebuilt the unicast prefix, so re-confirm `unicast_sent` vs
-   `unicast_fallback` behaves as it did before. See the open Jaguar1 `BMC`
-   question in §4.10 below.
+   `unicast_fallback` behaves as it did before. The Jaguar1 `BMC` question
+   this used to defer to is CLOSED (2026-08-30): the AU does solicit.
 
 #### Bench results (2026-08-01, craft .232 SSC338Q/8812EU ↔ ground .242 x86 EU+CU, ch 5805/HT20, 1 dBm floor)
 

@@ -1,9 +1,10 @@
 # Hardware-ACK hybrid — bring-up and verification on hardware
 
-A runbook for the bench session that turns Pass 198 on for the first time.
-Everything here is desk-verified only: the code builds, gates pass, and the
-config shapes below `--check --strict` clean. **No part of Pass 198 has been on
-air.** The §4.4 numbers everyone quotes (86.9 % → 99.9 % at 3000 pps) were
+A runbook for turning Pass 198 on. **First bench session ran 2026-08-30**
+(ground `.242` 8812AU ↔ craft `.232` 8812EU, 5540 MHz): the §2b die question
+is settled, the §6 A/B is measured, and the §7 storm guard is proven. Sections
+carry their results inline; what remains open is named in §9. The §4.4 numbers
+everyone quotes (86.9 % → 99.9 % at 3000 pps) were
 measured with retry 8, a never-expiring latch, and NACK/LINK_REPORT only —
 all three have since changed, so §4.4 is context, not a baseline you can
 compare against.
@@ -34,11 +35,11 @@ point of the stale-latch clause: enable the two knobs and an out-of-range craft
 stops being unicast-addressed after one second. Section 3 is how you *prove*
 it, not how you turn it on.
 
-## 2. Two hardware gates — read before touching a config
+## 2. Two die questions — one still real, one settled
 
-Both are properties of the dies in the current fleet, not of the code, and both
-were established by reading devourer's descriptor builders. Neither has been
-confirmed on air.
+Both were raised by reading devourer's descriptor builders. **§2b has since
+been settled on air and is NOT a gate** — the 8812AU solicits correctly. §2a
+is still real today, but has an upstream fix in flight.
 
 ### 2a. The `.181` craft cannot be a responder at all
 
@@ -53,50 +54,57 @@ radio: ack responder unsupported on "bu-craft"
 
 and the run continues with returns received as broadcast. That is §3.0's
 loud-degrade path working correctly, but it means **`.181` is not the craft to
-A/B on**. Filed upstream as snokvist/devourer#2 (which also covers that die
-hardcoding REG_ACKTO to 33 µs and having no CCX `tx.report` path).
+A/B on** — today. Filed upstream as snokvist/devourer#2 (which also covers that
+die hardcoding REG_ACKTO to 33 µs and having no CCX `tx.report` path), and
+**closed by OpenIPC/devourer#406**, which ports `SetAckResponder` and applies
+`tx.ack_timeout_us` on the 8733B and measures the responder at ack_rate 1.00
+armed / 0.00 disarmed. Once #406 lands upstream and is vendored here, re-run
+§6 with `.181` as the craft and delete this subsection.
 
 Use **`.232`** — the 8812EU craft (Jaguar3). devourer's own responder matrix
 measures the 8812EU at 98 % on / 0 % off, the joint-best cell in the table.
 
-### 2b. The `.242` ground's uplink is the one die with the BMC bug
+### 2b. The `.242` ground's uplink AU — SETTLED 2026-08-30, the concern was wrong
 
-This is the gate that decides whether the whole A/B measures anything.
+This was raised as the gate that decided whether the whole A/B measured
+anything. **It is not a gate. The 8812AU solicits ACKs correctly.**
 
-`.242` is the only ground in the fleet with a `role:"tx"` adapter (`.199` is
-RX-only and will *refuse bring-up* if you set `policy.return.unicast` on it,
-per §3.11). Its uplink is `au-uplink`, an **8812AU — Jaguar1**. Jaguar1 is the
-only generation that does not derive the descriptor BMC bit from addr1:
+The concern was structural and worth raising: `.242`'s uplink is an
+**8812AU — Jaguar1**, the only generation that does not derive the descriptor
+BMC bit from addr1 but hardcodes it:
 
 | generation | descriptor BMC |
 |---|---|
-| Jaguar1 (8812AU/8821AU) | **hardcoded `1`** — `RtlJaguarDevice.cpp:1224`, cleared only in the `bf.ndpa_period > 0` branch |
-| Jaguar2 | `dot11[4] & 0x01` — `RtlJaguar2Device.cpp:1536` |
-| Jaguar3 | `dot11[4] & 0x01` — `RtlJaguar3Device.cpp:2028` |
-| RTL8733B | `dot11[4] & 1u` — `Rtl8733bDevice.cpp:729` |
+| Jaguar1 (8812AU/8821AU) | **hardcoded `1`** — `src/jaguar1/RtlJaguarDevice.cpp:1224`, cleared only in the `bf.ndpa_period > 0` branch |
+| Jaguar2 | `dot11[4] & 0x01` — `src/jaguar2/RtlJaguar2Device.cpp:1536` |
+| Jaguar3 | `dot11[4] & 0x01` — `src/jaguar3/RtlJaguar3Device.cpp:2028` |
+| RTL8733B | `dot11[4] & 1u` — `src/rtl8733b/Rtl8733bDevice.cpp:729` |
 
-BMC=1 tells the MAC the frame is broadcast/multicast, i.e. **no ACK expected**.
-If that reading holds on air, every unicast return the `.242` ground sends is
-descriptor-marked broadcast, solicits no ACK, and gets no retries — while
-`unicast_sent` climbs happily and the config looks enabled. That is precisely
-the silently-inert failure the Pass 156 coupling law exists to prevent, and it
-slips past that law because the law checks the retry limit, not the descriptor.
+BMC=1 reads as "broadcast/multicast, no ACK expected", so the prediction was
+that `.242`'s unicast returns would solicit nothing while `unicast_sent`
+climbed and the config looked enabled.
 
-**So settle §5 (the BMC probe) before running any A/B on `.242`.** A "the
-hybrid does nothing" result on that ground is more likely to be this bug than a
-verdict on the hybrid.
+**Measured, and the prediction failed.** Ground `.242` (8812AU uplink) against
+craft `.232` (8812EU), 90 s arms, `.232` on 5540 MHz:
 
-If the BMC reading is confirmed, the options are, in order of preference:
+| craft responder | `unicast_sent` | `tx_report_fails` |
+|---|---|---|
+| **off** | 2796 | **2796 — 1:1** |
+| **on** | 2790 | **48 (1.7 %)** |
 
-1. Report it upstream (issue on the devourer fork, same shape as #2) and A/B
-   against a Jaguar3 ground uplink if one can be plugged. The `.242` box
-   already carries an 8812CU ear.
-2. Elect the CU as uplink instead of the AU. **This costs the §7.2 quiet gap**
-   — finding #99 measured the CU's `ReadTsf` at ~1234 µs mean against the AU's
-   184 µs, which puts the ±1000 µs release window structurally out of reach.
-   Arguably acceptable *for this test specifically*, since hardware retries are
-   what the quiet gap was compensating for, but that is a real trade and an
-   operator call, not a bench shortcut. Do not do it silently.
+A frame the MAC really treated as broadcast carries no ACK policy and cannot
+report a retry-exhaustion failure at all. 1:1 failures with nothing answering
+mean the AU requested an ACK on **every** frame and exhausted its retry limit
+every time; arming the craft's responder collapsing that to 1.7 % means the
+loop closes. So the hardcoded descriptor BMC bit does **not** gate the MAC's
+ACK-policy decision on this die — the two are less tightly coupled than the
+descriptor docs imply.
+
+This closes a question open since the Pass 12 notes. `.242`'s 8812AU is a
+valid A/B ground: no CU fallback, no §7.2 quiet-gap trade, no upstream issue
+needed. Independently corroborated by OpenIPC/devourer#406, whose responder
+matrix uses an **8812AU as the soliciting side** and sees retries pinned at
+the limit in its disarmed control.
 
 ## 3. The config edits
 
@@ -150,9 +158,18 @@ From `CLAUDE.md`, each of these cost real debugging time before:
 - Two adapters of the same part number are not a replicate (Pass 139). If a
   result looks like a broken chip, try the other unit before believing it.
 
-## 5. Probe first: does the AU actually solicit an ACK?
+## 5. Does the uplink actually solicit an ACK?
 
-Do this before any A/B. It is the cheapest way to avoid measuring nothing.
+**Answered for the 8812AU (§2b): yes.** Keep this method for any NEW uplink
+die — it is still the cheapest way to avoid measuring nothing — but it is no
+longer a gate on `.242`.
+
+The cheapest form needs no capture at all: run one arm with
+`policy.return.unicast` ON and the craft's responder OFF, and read
+`tx_report_fails`. Climbing 1:1 with `unicast_sent` proves the MAC is
+soliciting (and exhausting the limit, since nothing is answering). Staying ~0
+while `unicast_sent` climbs is the silently-inert signature — that die is
+descriptor-marking the return as broadcast.
 
 The direct read is a capture: put a third adapter in monitor mode, or use
 devourer's own witness tooling, and look at a ground→craft return frame. What
@@ -215,13 +232,56 @@ What to record per arm, all from the §15.3 line:
 Also worth one run: **retry 3 vs 8**, since Pass 198 changed the default and
 nothing has measured the difference on our return path (only in devourer's
 collision regime). Set `air.tx_retry_limit: 8` on the ground for one arm and
-compare `reports_received` and downlink airtime. If 3 costs real delivery, say
-so — the ruled band is 3–5 and 4/5 are unmeasured, so there is room to move
-without reopening the ruling.
+compare `reports_received` and downlink airtime.
+
+### Results, 2026-08-30
+
+Ground `.242` (8812AU uplink, elected by `adapters:{auto}` over a CU and a BU)
+↔ craft `.232` (8812EU, originator 17, 5540 MHz, live ~58 fps venc feed),
+~-22 dBm bench geometry, 90 s per arm:
+
+| arm | gnd `return.unicast` | craft `ack_responder` | reports received | `tx_report_fails` | downlink loss |
+|---|---|---|---|---|---|
+| A | off | off | 820/900 = **91.11 %** | 0 / 2796 | 3 ‰ |
+| B | on | off | 902/902 = **100.00 %** | **2796 / 2796** | 14 ‰ |
+| C | off | on | 829/901 = **92.01 %** | 0 / 2793 | 3 ‰ |
+| D | on | on | 900/900 = **100.00 %** | 48 / 2790 = **1.7 %** | 5 ‰ |
+
+Arm B is the informative one: unicast **alone** reaches 100 % by brute
+hardware retransmission with nothing ACKing, at 4.7× the downlink loss. Arm C
+≈ arm A, so arming a responder costs a mostly-transmitting craft nothing.
+
+**Retry 3 vs 8**, interleaved, in the doomed-frame regime (unicast on,
+responder off — where retry depth actually costs):
+
+| retry limit | downlink loss | reports received |
+|---|---|---|
+| 3 | **13–14 ‰** (two runs) | 100 % |
+| 8 | **29 ‰** | 100 % |
+
+So 8 costs ~2.2× the airtime of an unanswered return and buys no delivery.
+That supports the ruling; the band stays 3–5 and 4/5 remain unmeasured. In the
+healthy hybrid (arm D) the difference is inside noise: 5 ‰ @3 vs 6 ‰ @8,
+`tx_report_fails` 1.7 % @3 vs 0.14 % @8.
+
+**Watch the channel.** The live ground config's `policy.csa.home_chan` was
+5700, which silently latched craft **19** (`.181`) with `table_version 164`
+against the ground's 242 — that forces §3.4 BEST-EFFORT, which disables ARQ,
+and the return path measures nothing. Pin `adapters.auto.channel` and
+`node.preferred_originator` to the craft you mean.
 
 ## 7. Proving the storm guard
 
-This is the part that has never run, and it is the reason Pass 198 exists.
+**Run 2026-08-30. It holds — numbers at the end of this section.** Repeat it
+on any new ground/craft pair; the method below is what was actually used.
+
+A note on provocation: you do not need to kill the craft. `POST
+/api/v1/bench/rx-drop {"permille":1000}` on the ground drops frames at
+`io/src/air_radio.cpp:650`, which is **before** `latch_sa` at `:673`, so the
+latch starves exactly as it would for a departed craft — with no SoC stop, no
+overlay risk, and instant release, because the craft never stopped
+transmitting. Check that drop-vs-stamp ordering before reusing the trick for
+any other latch.
 
 **Setup:** ground and craft linked, arm D, confirmed healthy (`unicast_sent`
 climbing, `unicast_stale` 0).
@@ -247,13 +307,24 @@ resume, with no operator action and no campaign: the first accepted frame
 re-latches. Re-acquisition being automatic is half the design; a guard that
 needed a manual re-arm would be worse than none.
 
-**Also measure the thing we could not:** with a spectrum analyser or a witness
-capture, compare channel occupancy from the ground during 10 s of "craft gone"
-with and without the guard (`policy.return.unicast_stale_ms: 0` restores the old
-never-expiring behaviour and exists for exactly this A/B). The predicted
-difference is the storm — bounded per frame by the retry limit, unbounded in
-time without the guard. Put the measured number in `findings.md`; it is
-currently an argument, not a measurement.
+**Measured 2026-08-30** (ground `.242` 8812AU ↔ craft `.232` 8812EU, retry 3,
+provoked with `bench/rx-drop` as above):
+
+| | `unicast_sent` after last heard frame | `tx_report_fails` | `unicast_stale` |
+|---|---|---|---|
+| guarded, `unicast_stale_ms: 1000` | **+2**, then frozen | froze at the same instant | 84 (broadcast fallback) |
+| control, `unicast_stale_ms: 0` | **+83** | climbed 1:1 to 355 | 0 |
+
+Age-out landed ~1.0 s after the last accepted frame; on release `unicast_sent`
+resumed within 1 s with no operator action. Derived post-loss airtime (4
+airings per unanswered unicast at retry 3, 1 per broadcast fallback): ~92 vs
+~332 airings, **3.6×**; soliciting frames 2 vs 83, **41×**.
+
+**One correction to the argument this pass was built on:** the unguarded storm
+is *not* unbounded in time. It self-terminated after ~5 s, when the ground's
+own return generation stopped for want of RX. The guard is still the right
+fix — it turns an incidental ~5 s tail into a controlled ~1 s one — but the
+"forever" framing was wrong and §3.0 now says so.
 
 ## 8. The live toggle
 

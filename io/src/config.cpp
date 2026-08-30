@@ -911,8 +911,22 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cfg.policy.ret.unicast =
                     pr.value("unicast", cfg.policy.ret.unicast);
                 // §3.0 (Pass 198) SA-latch age-out. 0 = never expire.
-                cfg.policy.ret.unicast_stale_ms = pr.value(
-                    "unicast_stale_ms", cfg.policy.ret.unicast_stale_ms);
+                // Typed and sign-checked before the read: the field is
+                // uint32_t, so a negative would two's-complement into ~49.7
+                // days and read EXACTLY like the reserved 0 sentinel — the
+                // storm guard silently disarmed by a sign typo, which is the
+                // one failure this clause exists to prevent.
+                if (pr.contains("unicast_stale_ms")) {
+                    const json& v = pr.at("unicast_stale_ms");
+                    if (!v.is_number_integer() || v.get<int64_t>() < 0 ||
+                        v.get<int64_t>() > 0xffffffffLL) {
+                        return Result<Config>::fail(
+                            "policy.return.unicast_stale_ms: must be a "
+                            "non-negative integer (0 = never expire)");
+                    }
+                    cfg.policy.ret.unicast_stale_ms =
+                        static_cast<uint32_t>(v.get<int64_t>());
+                }
                 cfg.policy.ret.report_redundancy = pr.value(
                     "report_redundancy", cfg.policy.ret.report_redundancy);
                 if (cfg.policy.ret.report_redundancy < 1) {
@@ -1404,6 +1418,17 @@ Result<Config> load_config_json(const std::string& json_text) {
             // width). Refused rather than clamped — devourer clamps
             // silently, and an authored 500 that ran as 255 would be a range
             // budget the operator believes and does not have.
+            // Typed before the range check: .value<int>() silently accepts
+            // a float (128.7 -> 128) and a bool (true -> 1, a 1 us window,
+            // i.e. a ~150 m range budget). Both pass a range check and both
+            // are exactly the "budget the operator believes and does not
+            // have" this key refuses out-of-range values to avoid.
+            if (a.contains("ack_timeout_us") &&
+                !a.at("ack_timeout_us").is_number_integer()) {
+                return Result<Config>::fail(
+                    "air.ack_timeout_us: must be an integer 1..255 "
+                    "(§15.2 Pass 198)");
+            }
             cfg.air.ack_timeout_us =
                 a.value("ack_timeout_us", cfg.air.ack_timeout_us);
             if (cfg.air.ack_timeout_us < 1 || cfg.air.ack_timeout_us > 255) {

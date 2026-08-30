@@ -657,7 +657,16 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             return reply(400, "Bad Request",
                          json_err("armed boolean required"));
         }
-        return done(h_.ack_responder_set(j["armed"].get<bool>()));
+        // NOT done(): that maps any refusal to 400, and §15.5's two refusals
+        // are CAPABILITY answers, not malformed bodies — no role:"tx"
+        // adapter, or a die whose SetAckResponder said no. Both are the
+        // §10.7 shape (a well-formed request this node cannot honour), so
+        // both are 409, exactly as §15.5 states. A hub that cannot tell
+        // "this die cannot" from "you sent garbage" re-POSTs into a refusal
+        // forever, which is what latching `supported` was meant to end.
+        const std::string err = h_.ack_responder_set(j["armed"].get<bool>());
+        return err.empty() ? reply(200, "OK", json_ok())
+                           : reply(409, "Conflict", json_err(err));
     }
     if (path == "/api/v1/bench/rx-drop") {
         if (!h_.bench_rx_drop) return na();

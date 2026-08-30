@@ -420,9 +420,13 @@ struct AirBackend {
         return iface()->wait_fds();
     }
 
-    // Returns (NACK/LINK_REPORT) carry their target so the radio backend
-    // can address them as §3.0 unicast when return.unicast is on; the udp
-    // dev backend has no L2 addressing and ignores the target.
+    // SINGLE-TARGET returns carry their target so the radio backend can
+    // address them as §3.0 unicast when return.unicast is on. Since Pass 198
+    // that is every single-target class, not just NACK/LINK_REPORT: §7.5
+    // uplink DATA, §10.7 calib probes and tallies, §3.4 verdicts and §11.7
+    // VEHICLE_CMD too. §11 CSA copies and the §3.2 downlink stay on inject()
+    // because they are fleet-addressed. The udp dev backend has no L2
+    // addressing and ignores the target.
     size_t inject_return(uint16_t target, const uint8_t* f, size_t n,
                          bool urgent = false) {
         const size_t sent = iface()->inject_return(target, f, n, urgent);
@@ -827,7 +831,14 @@ struct AirBackend {
     // there and the endpoint a 409 rather than a lie.
     std::optional<std::string> ack_responder_json() const {
 #if WBLINK_RADIO
-        if (radio) {
+        // has_tx(), not just the backend kind: §15.5 and control_server.h
+        // both scope this to a node with a role:"tx" adapter, and the setter
+        // already gates on it. Without the same gate an RX-only radio node
+        // answered 200 with `supported:true` — a value that can never become
+        // false there, because arm_ack_responder() returns on !has_tx before
+        // SetAckResponder is ever called. GET and POST disagreeing about
+        // whether the feature exists on one node is the worse bug.
+        if (radio && radio->has_tx()) {
             const auto s = radio->ack_responder_state();
             std::string out = "{\"armed\":";
             out += s.armed ? "true" : "false";

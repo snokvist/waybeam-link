@@ -354,10 +354,16 @@ flew at the commanded rung. Pinned consequences:
   `unicast_stale`. Without this the hybrid has no out-of-range posture at
   all — the Pass 12 latch was write-only, so a craft heard once was
   unicast-addressed for the rest of the session, and a fly-away turned every
-  return into `tx_retry_limit + 1` copies plus a full ACK window per retry,
-  forever. The hardware bounds the cost **per frame** (that is what the
-  retry limit is) and bounds nothing about how long we keep paying it; this
-  clause is the missing half. It is a *broadcast* fallback, never a mute:
+  return into `tx_retry_limit + 1` copies plus a full ACK window per retry
+  for as long as the ground kept generating returns at all. Measured
+  2026-08-30 (`docs/hwack-hybrid-bringup.md` §7): with the guard off, 83
+  such returns went out after the craft stopped transmitting, over ~5 s,
+  ending only when the ground's own RX starved and return generation
+  stopped on its own — bounded, but bounded by accident. With the guard on
+  the same provocation aired 2. The hardware bounds the cost **per frame**
+  (that is what the retry limit is) and bounds nothing about how long we
+  keep paying it; this clause is the missing half, and it turns an
+  incidental ~5 s tail into a controlled ~1 s one. It is a *broadcast* fallback, never a mute:
   the return still airs, once, exactly as a pre-Pass-12 node would air it,
   which is what makes re-acquisition possible — a craft that comes back is
   re-latched by its first accepted frame and unicast resumes with no

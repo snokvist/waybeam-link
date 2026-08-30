@@ -40,7 +40,10 @@ fly-away cannot storm the link.
 2. **Out-of-range — the defect this pass exists for.** The Pass 12 SA latch was
    **write-only**: `SaEntry{orig, sa}` carried no timestamp and `lookup_sa` never
    aged out, so a craft heard once stayed unicast-addressed for the session. The
-   hardware bounds retries *per frame*; nothing bounded how long we pay. Ruled:
+   hardware bounds retries *per frame*; nothing DELIBERATELY bounded how long
+   we paid it — only an incidental ~5 s RX-starvation tail did, measured
+   2026-08-30 (`docs/hwack-hybrid-bringup.md` §7), and the guard turns that
+   into a controlled ~1 s. Ruled:
    staleness (`policy.return.unicast_stale_ms`, seed 1000 ms) → broadcast
    fallback, counted `unicast_stale`. Fallback, never mute — the first accepted
    frame re-latches with no handshake.
