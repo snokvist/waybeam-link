@@ -208,6 +208,10 @@ struct AirBackend {
 #endif
     uint64_t last_tx_ms = 0;
     uint64_t last_announce_ms = 0;  // §3.12 ANNOUNCE cadence (own timer)
+    // §15.5 (Pass 198): the BOOT air.ack_responder, kept so the endpoint can
+    // report `configured` beside the live `armed` — the toggle is volatile,
+    // and an operator needs to see what a restart would go back to.
+    bool cfg_ack_responder = false;
 
     // The ONE place that decides which backend is engaged. Every method below
     // goes through it, so the precedence lives here instead of being retyped
@@ -320,6 +324,11 @@ struct AirBackend {
             rc.ack_responder = cfg.air.ack_responder;
             rc.unicast_returns = cfg.policy.ret.unicast;
             rc.tx_retry_limit = cfg.air.tx_retry_limit;
+            rc.ack_timeout_us = cfg.air.ack_timeout_us;  // §15.2 Pass 198
+            // §3.0 (Pass 198): the SA-latch age-out — the hybrid's
+            // out-of-range posture. Lives on policy.return because it gates
+            // returns, applies in RadioAir because that is where the latch is.
+            rc.unicast_stale_ms = cfg.policy.ret.unicast_stale_ms;
             rc.usb_tx_agg = cfg.air.usb_tx_agg;
             rc.ldpc = cfg.air.ldpc;  // §3.0 Pass 157 node coding
             rc.stbc = cfg.air.stbc;
@@ -361,6 +370,7 @@ struct AirBackend {
             auto owned = std::make_unique<RadioAir>(std::move(*a.value));
             b.radio = owned.get();
             b.air = std::move(owned);
+            b.cfg_ack_responder = cfg.air.ack_responder;  // §15.5 Pass 198
             // THE WRITE-BACK. Under auto this is where the synthesized stanzas
             // — elected roles, per-unit MACs, one channel — enter the Config
             // the rest of the node reads. Under the array form it assigns the
@@ -410,9 +420,13 @@ struct AirBackend {
         return iface()->wait_fds();
     }
 
-    // Returns (NACK/LINK_REPORT) carry their target so the radio backend
-    // can address them as §3.0 unicast when return.unicast is on; the udp
-    // dev backend has no L2 addressing and ignores the target.
+    // SINGLE-TARGET returns carry their target so the radio backend can
+    // address them as §3.0 unicast when return.unicast is on. Since Pass 198
+    // that is every single-target class, not just NACK/LINK_REPORT: §7.5
+    // uplink DATA, §10.7 calib probes and tallies, §3.4 verdicts and §11.7
+    // VEHICLE_CMD too. §11 CSA copies and the §3.2 downlink stay on inject()
+    // because they are fleet-addressed. The udp dev backend has no L2
+    // addressing and ignores the target.
     size_t inject_return(uint16_t target, const uint8_t* f, size_t n,
                          bool urgent = false) {
         const size_t sent = iface()->inject_return(target, f, n, urgent);
@@ -812,11 +826,65 @@ struct AirBackend {
         return false;
     }
 
+    // §3.0/§15.5 (Pass 198) hardware ACK responder. Both return nullopt /
+    // false off the radio backend, which is what makes the §15.5 hook null
+    // there and the endpoint a 409 rather than a lie.
+    std::optional<std::string> ack_responder_json() const {
+#if WBLINK_RADIO
+        // has_tx(), not just the backend kind: §15.5 and control_server.h
+        // both scope this to a node with a role:"tx" adapter, and the setter
+        // already gates on it. Without the same gate an RX-only radio node
+        // answered 200 with `supported:true` — a value that can never become
+        // false there, because arm_ack_responder() returns on !has_tx before
+        // SetAckResponder is ever called. GET and POST disagreeing about
+        // whether the feature exists on one node is the worse bug.
+        if (radio && radio->has_tx()) {
+            const auto s = radio->ack_responder_state();
+            std::string out = "{\"armed\":";
+            out += s.armed ? "true" : "false";
+            out += ",\"supported\":";
+            out += s.supported ? "true" : "false";
+            out += ",\"configured\":";
+            out += cfg_ack_responder ? "true" : "false";
+            out += ",\"mac\":";
+            if (s.mac.empty()) {
+                out += "null";
+            } else {
+                out += '"';
+                out += s.mac;
+                out += '"';
+            }
+            out += '}';
+            return out;
+        }
+#endif
+        return std::nullopt;
+    }
+    // "" on success, else the refusal string (§15.5 maps it to 400).
+    std::string set_ack_responder(bool armed) {
+#if WBLINK_RADIO
+        if (radio) {
+            if (!radio->has_tx()) {
+                return "no role:\"tx\" adapter on this node";
+            }
+            if (radio->set_ack_responder(armed)) return "";
+            // Only arming can be refused; the helper reports a disarm on a
+            // never-armed die as success, because "not responding" is then
+            // already the requested state.
+            return "this die does not implement the hardware ACK responder "
+                   "(devourer SetAckResponder refused)";
+        }
+#endif
+        (void)armed;
+        return "ack responder is a radio-backend control";
+    }
+
     // §15.3 return-block unicast counters (radio backend; no-op on udp).
     void fill_return_stats(ReturnStats& ret) const {
 #if WBLINK_RADIO
         if (radio) {
-            radio->return_counters(ret.unicast_sent, ret.unicast_fallback);
+            radio->return_counters(ret.unicast_sent, ret.unicast_fallback,
+                                   ret.unicast_stale);
         }
 #else
         (void)ret;

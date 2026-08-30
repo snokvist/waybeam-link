@@ -627,6 +627,18 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
                 tx.power_override(), air.value->tx_power_applied(calib_tx_idx),
                 l.cfg.air.kind == AirCfg::Kind::kRadio);
         };
+        // §3.0/§15.5 (Pass 198) live ACK-responder toggle. Null hooks off
+        // the radio backend, so the endpoint is a 409 there rather than a
+        // 200 reporting a responder that cannot exist.
+        if (air.value->ack_responder_json().has_value()) {
+            h.ack_responder_json = [&]() -> std::string {
+                return air.value->ack_responder_json().value_or(
+                    std::string("{}"));
+            };
+            h.ack_responder_set = [&](bool armed) -> std::string {
+                return air.value->set_ack_responder(armed);
+            };
+        }
         // §10.3/§11.7 0x0A (Pass 135). A craft has no bound craft of its own,
         // so `both` is a 409 rather than a silently local-only apply.
         h.tx_power_tier_json = [&] {

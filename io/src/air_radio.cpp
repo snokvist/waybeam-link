@@ -307,6 +307,15 @@ struct RadioAir::Impl {
     std::vector<std::unique_ptr<Adapter>> adapters;
     size_t tx_idx = 0;
     bool has_tx = false;  // §3.11 Pass 162: false on the RX-only bring-up
+    // §3.0/§15.5 (Pass 198) live responder state. `ack_supported` starts
+    // true and only ever falls: devourer publishes no capability flag for
+    // the responder — `SetAckResponder` answering false at arm time is the
+    // only signal there is — so this reports "not known to be unsupported",
+    // never a static die truth. Main thread only, like every other §15.5
+    // write path (the control server runs inside the event loop).
+    bool ack_armed = false;
+    bool ack_supported = true;
+    std::string ack_mac;
     uint16_t seq = 0;
     // §15.5a runtime net_id roles. The stamp is TX-side and main-thread only
     // (the inject* paths read cfg.stamp_net_id directly). The filter is read
@@ -428,12 +437,21 @@ struct RadioAir::Impl {
     struct SaEntry {
         uint16_t orig;
         uint8_t sa[6];
+        // §3.0 (Pass 198): when this SA was last HEARD. The Pass 12 entry
+        // carried no time at all, which is exactly why the latch never
+        // expired and a departed craft was retried at forever.
+        uint64_t last_ms;
     };
+    // §3.0 (Pass 198) latch outcome. The two miss reasons are counted apart
+    // because they mean different things to an operator: kAbsent is a node
+    // we have never heard, kStale is one that went away.
+    enum class SaLookup : uint8_t { kFresh, kAbsent, kStale };
     std::mutex sa_mu;
     std::vector<SaEntry> sa_latch;
     // Main-thread unicast-return counters (§15.3).
     uint64_t ret_unicast_sent = 0;
     uint64_t ret_unicast_fallback = 0;
+    uint64_t ret_unicast_stale = 0;
 
     // One RX loop thread per adapter (the proven N=3 pattern). Used at
     // bring-up and again by recover() — the two must stay identical, which is
@@ -466,25 +484,87 @@ struct RadioAir::Impl {
         e.sa[3] = static_cast<uint8_t>(d.originator >> 8);
         e.sa[4] = static_cast<uint8_t>(d.originator & 0xff);
         e.sa[5] = d.adapter_idx;
+        // Freshness is stamped on the RX thread at acceptance, which is the
+        // only place that knows the target is still on the air.
+        e.last_ms = steady_ms();
         std::lock_guard<std::mutex> lk(sa_mu);
         for (SaEntry& s : sa_latch) {
             if (s.orig == e.orig) {
                 std::memcpy(s.sa, e.sa, 6);
+                s.last_ms = e.last_ms;
                 return;
             }
         }
         sa_latch.push_back(e);
     }
 
-    bool lookup_sa(uint16_t orig, uint8_t out[6]) {
+    // §3.0/§15.5 (Pass 198): the ONE place the responder MACID is derived,
+    // so the boot arm and a live re-arm cannot drift — §15.5 promises they
+    // are byte-identical and this is what makes that true rather than a
+    // claim. Disarm is net_type back to No Link, leaving the MACID standing
+    // (devourer's own recipe, src/AckResponder.h). Returns false only when
+    // arming was REFUSED; a disarm on a die that never armed is a no-op and
+    // still true, because "it is not responding" is the requested state.
+    bool arm_ack_responder(bool armed) {
+        if (!has_tx || adapters.empty() || tx_idx >= adapters.size()) {
+            return false;
+        }
+        Adapter& tx = *adapters[tx_idx];
+        if (!tx.dev) return false;
+        if (!armed) {
+            tx.dev->ClearAckResponder();
+            ack_armed = false;
+            ack_mac.clear();
+            wb_logf("radio: ack responder disarmed on \"%s\"\n",
+                    tx.name.c_str());
+            return true;
+        }
+        devourer::MacAddr mac;
+        mac.bytes = {kWbSaPrefix0,
+                     kWbSaPrefix1,
+                     cfg.stamp_net_id,
+                     static_cast<uint8_t>(cfg.originator >> 8),
+                     static_cast<uint8_t>(cfg.originator & 0xff),
+                     static_cast<uint8_t>(tx_idx)};
+        if (!tx.dev->SetAckResponder(mac)) {
+            // §3.0's loud-degrade leg. Since Pass 198 it also latches, so
+            // §15.5 can answer "this die cannot" instead of the caller
+            // re-POSTing into a refusal forever.
+            ack_supported = false;
+            ack_armed = false;
+            ack_mac.clear();
+            wb_logf("radio: ack responder unsupported on \"%s\"\n",
+                    tx.name.c_str());
+            return false;
+        }
+        char buf[24];
+        std::snprintf(buf, sizeof buf, "%02x:%02x:%02x:%02x:%02x:%02x",
+                      mac.bytes[0], mac.bytes[1], mac.bytes[2], mac.bytes[3],
+                      mac.bytes[4], mac.bytes[5]);
+        ack_mac = buf;
+        ack_armed = true;
+        wb_logf("radio: ack responder armed on \"%s\" (%s)\n", tx.name.c_str(),
+                ack_mac.c_str());
+        return true;
+    }
+
+    // §3.0 (Pass 198). `now_ms` is passed rather than read here so the
+    // caller's one clock read governs a whole return, and so a test can
+    // drive the age-out without sleeping.
+    SaLookup lookup_sa(uint16_t orig, uint64_t now_ms, uint8_t out[6]) {
         std::lock_guard<std::mutex> lk(sa_mu);
         for (const SaEntry& s : sa_latch) {
-            if (s.orig == orig) {
-                std::memcpy(out, s.sa, 6);
-                return true;
+            if (s.orig != orig) continue;
+            // The predicate itself is RadioAir::sa_fresh — public and static
+            // so the 0-disables rule and the cross-thread clock race are
+            // testable without a radio. See its contract there.
+            if (!RadioAir::sa_fresh(now_ms, s.last_ms, cfg.unicast_stale_ms)) {
+                return SaLookup::kStale;
             }
+            std::memcpy(out, s.sa, 6);
+            return SaLookup::kFresh;
         }
-        return false;
+        return SaLookup::kAbsent;
     }
 
     ~Impl() {
@@ -1179,6 +1259,12 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
         // RX-only ear never injects and broadcast frames carry no ACK
         // policy, so it binds exactly on the hybrid's unicast returns.
         dc.tx.retry_limit = cfg.tx_retry_limit;
+        // §15.2 (Pass 198) hardware ACK window — the ARQ RANGE lever. Set
+        // uniformly for the same reason retry_limit is: it is the soliciting
+        // side's register and an ear never solicits. devourer defaults to
+        // this same 128, so a node that has not authored the key programs
+        // byte-identically to before the key existed.
+        dc.tx.ack_timeout_us = cfg.ack_timeout_us;
         // USB TX aggregation — INJECTING ADAPTER ONLY, unlike tx.report and
         // retry_limit above. Those two are descriptor-only and therefore
         // genuinely inert on an ear. This one is not: on Jaguar1 a nonzero
@@ -1535,23 +1621,10 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
     // responder with its own SA — the exact addr1 the ground's unicast
     // returns will carry. Opt-in: this makes a passive monitor transmit.
     if (cfg.ack_responder) {
-        Impl::Adapter& tx = *im.adapters[im.tx_idx];
-        devourer::MacAddr mac;
-        mac.bytes = {kWbSaPrefix0,
-                     kWbSaPrefix1,
-                     cfg.stamp_net_id,
-                     static_cast<uint8_t>(cfg.originator >> 8),
-                     static_cast<uint8_t>(cfg.originator & 0xff),
-                     static_cast<uint8_t>(im.tx_idx)};
-        if (tx.dev->SetAckResponder(mac)) {
-            wb_logf("radio: ack responder armed on \"%s\" "
-                    "(56:42:%02x:%02x:%02x:%02x)\n",
-                    tx.name.c_str(), mac.bytes[2], mac.bytes[3],
-                    mac.bytes[4], mac.bytes[5]);
-        } else {
-            wb_logf("radio: ack responder unsupported on \"%s\"\n",
-                    tx.name.c_str());
-        }
+        // Pass 198 routes the boot arm through the same helper §15.5 uses,
+        // so the two can never derive a different MACID. The refusal is
+        // still non-fatal — §3.0 keeps the run going and degrades loudly.
+        (void)im.arm_ack_responder(true);
     }
     return Result<RadioAir>::ok(std::move(air));
 }
@@ -1710,9 +1783,20 @@ size_t RadioAir::inject_return(uint16_t dest_originator, const uint8_t* frame,
     if (!im.cfg.unicast_returns) {
         return urgent ? inject_resend(frame, len) : inject(frame, len);
     }
-    if (!im.lookup_sa(dest_originator, sa)) {
-        ++im.ret_unicast_fallback;  // no SA heard yet — broadcast (§3.0)
-        return urgent ? inject_resend(frame, len) : inject(frame, len);
+    switch (im.lookup_sa(dest_originator, steady_ms(), sa)) {
+        case Impl::SaLookup::kFresh:
+            break;
+        case Impl::SaLookup::kStale:
+            // §3.0 (Pass 198): the target went quiet. Broadcast rather than
+            // keep soliciting ACKs nobody is answering — air.tx_retry_limit
+            // bounds ONE frame's cost, this is what bounds how long we pay
+            // it. Still aired, so the craft that comes back re-latches off
+            // its first accepted frame and unicast resumes by itself.
+            ++im.ret_unicast_stale;
+            return urgent ? inject_resend(frame, len) : inject(frame, len);
+        case Impl::SaLookup::kAbsent:
+            ++im.ret_unicast_fallback;  // no SA heard yet — broadcast (§3.0)
+            return urgent ? inject_resend(frame, len) : inject(frame, len);
     }
     Impl::Adapter& tx = *im.adapters[im.tx_idx];
     im.tx_buf.resize(kDot11TxUnicastPrefixLen + len);
@@ -1730,8 +1814,23 @@ size_t RadioAir::inject_return(uint16_t dest_originator, const uint8_t* frame,
     return 0;
 }
 
+bool RadioAir::set_ack_responder(bool armed) {
+    return impl_->arm_ack_responder(armed);
+}
+
+RadioAir::AckResponderState RadioAir::ack_responder_state() const {
+    AckResponderState s;
+    s.armed = impl_->ack_armed;
+    s.supported = impl_->ack_supported;
+    s.has_tx = impl_->has_tx;
+    s.mac = impl_->ack_mac;
+    return s;
+}
+
 void RadioAir::return_counters(uint64_t& unicast_sent,
-                               uint64_t& unicast_fallback) const {
+                               uint64_t& unicast_fallback,
+                               uint64_t& unicast_stale) const {
+    unicast_stale = impl_->ret_unicast_stale;
     unicast_sent = impl_->ret_unicast_sent;
     unicast_fallback = impl_->ret_unicast_fallback;
 }

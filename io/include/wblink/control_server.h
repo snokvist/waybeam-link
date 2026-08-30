@@ -44,6 +44,9 @@ struct ControlHandlers {
     std::function<std::string()> profile_json;
     // §10.5 TX-power override-latch state (GET; TX node only, null → 409).
     std::function<std::string()> tx_power_json;
+    // §3.0/§15.5 (Pass 198) hardware ACK-responder state (GET; radio backend
+    // with a role:"tx" adapter, null → 409).
+    std::function<std::string()> ack_responder_json;
     // Local synthetic RX loss state (RX only; null → 409).
     std::function<std::string()> bench_rx_drop_json;
     // §10.6 (Pass 120) calibration surface (GET; TX node only, null → 409).
@@ -65,6 +68,12 @@ struct ControlHandlers {
     // §10.5 (Pass 114) TX-power override-latch: is_auto=true clears the
     // latch (qdb ignored), else latch the absolute qdb on every tx adapter.
     std::function<std::string(bool is_auto, int qdb)> tx_power_set;
+    // §3.0/§15.5 (Pass 198) live ACK-responder arm/disarm — the RESPONDER
+    // half of the hybrid, and the only half with a live form (devourer holds
+    // its DeviceConfig const, so the soliciting side's retry limit and ACK
+    // window are fixed at bring-up). Volatile: a restart returns to
+    // air.ack_responder. Returns "" on success, else the refusal.
+    std::function<std::string(bool armed)> ack_responder_set;
     // e_permille: §14.1a third class; nullopt = inherit p_permille. The
     // POST is a full replacement, so an omitted e_permille restores that.
     std::function<std::string(int stream_id, int i_permille, int p_permille,

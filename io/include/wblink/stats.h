@@ -258,6 +258,12 @@ struct ReturnStats {
     // (no SA latched for the target yet).
     uint64_t unicast_sent = 0;
     uint64_t unicast_fallback = 0;
+    // §3.0 (Pass 198) the OTHER fallback: a latch that aged out
+    // (policy.return.unicast_stale_ms). Counted apart from unicast_fallback
+    // because they answer different questions — fallback is a target that
+    // has not arrived, stale is one that left, and only stale rising while
+    // unicast_sent stalls is the out-of-range signal an operator wants.
+    uint64_t unicast_stale = 0;
 };
 
 struct TimingMetricStats {

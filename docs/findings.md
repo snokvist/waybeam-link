@@ -12,6 +12,106 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-30 — hardware-ACK hybrid on air: the AU solicits, and the storm is ~5 s
+
+First bench run of Pass 198. Ground `.242` (x86, 8812AU uplink elected by
+`adapters:{auto}` over a CU and a BU) ↔ craft `.232` (8812EU, originator 17,
+5540 MHz, live ~58 fps venc feed), ~-22 dBm, 90 s arms. The ground ran PR-258
+code standalone; **the craft ran its pre-PR binary**, which is sufficient
+because the storm guard is entirely ground-side.
+
+**1. The Jaguar1 descriptor-BMC concern is disproven.** `RtlJaguarDevice.cpp:1224`
+hardcodes `SET_TX_DESC_BMC_8812(usb_frame, 1)` unconditionally outside the NDPA
+branch, and the runbook called that a blocking gate. On air, with unicast on
+and the craft responder OFF, `tx_report_fails` ran **2796/2796 — exactly 1:1
+with `unicast_sent`**. A frame the MAC treats as broadcast carries no ACK
+policy and cannot report retry exhaustion at all, so 1:1 failures prove the AU
+solicits on every frame. Arming the responder collapsed that to **48/2790
+(1.7 %)**. The descriptor BMC bit does not gate ACK policy on this die.
+Corroborated by OpenIPC/devourer#406, whose responder matrix uses an 8812AU as
+the soliciting side. **Closes** a question open since the Pass 12 notes.
+
+**2. The A/B.** A (off/off) 820/900 = 91.11 %, `tx_report_fails` 0, downlink
+3 ‰. B (on/off) 902/902 = 100 %, fails 2796/2796, downlink 14 ‰. C (off/on)
+829/901 = 92.01 %, fails 0, downlink 3 ‰. D (on/on) 900/900 = 100 %, fails
+48/2790, downlink 5 ‰. Arm B says unicast **alone** reaches 100 % by brute
+retransmission at 4.7× the downlink cost; arm C says arming a responder costs
+a mostly-transmitting craft nothing.
+
+**3. Retry 3 vs 8 — supports the ruling.** In the doomed-frame regime (unicast
+on, responder off), interleaved: retry 3 = 13–14 ‰ downlink loss over two
+runs, retry 8 = **29 ‰**, reports 100 % either way. So 8 costs ~2.2× the
+airtime of an unanswered return and buys no delivery. Seed 3 stands on
+measurement now, not just on the devourer sweep. 4 and 5 remain unmeasured.
+
+**4. The storm guard holds, and the storm is smaller than argued.** Provoked
+with `POST /api/v1/bench/rx-drop {"permille":1000}`, which drops at
+`air_radio.cpp:650`, before `latch_sa` at `:673` — so the latch starves as it
+would for a departed craft, with no craft-side action. Guarded
+(`unicast_stale_ms: 1000`): `unicast_sent` advanced **+2** after the last heard
+frame then froze, `tx_report_fails` froze with it, 84 returns aired as
+broadcast fallback, age-out ~1.0 s, re-latch automatic within 1 s of release.
+Control (`unicast_stale_ms: 0`): `unicast_sent` **+83**, fails climbed 1:1 to
+355. Derived post-loss airtime 92 vs 332 airings (3.6×); soliciting frames 2 vs
+83 (41×).
+
+**OPEN / corrected:** the unguarded storm is **not unbounded in time** as §3.0
+argued — it self-terminated after ~5 s when the ground's own return generation
+stopped for want of RX. The guard is still right (an incidental ~5 s tail
+becomes a controlled ~1 s one) but the "forever" framing was wrong; §3.0,
+`review-log.md` and the runbook now say so. What a *fly-away* costs, where the
+craft is intermittently heard rather than cleanly gone, is still unmeasured and
+could be worse than either arm here.
+
+**Still unverified on hardware:** the craft-side §15.5 endpoint and the
+`create()` boot-arm refactor (craft ran pre-PR code); §11.7 VEHICLE_CMD via
+`inject_return`; and the `.181` 8733BU loud-degrade path.
+
+---
+
+## 2026-08-30 — hardware-ACK hybrid seeds: retry 3, stale 1000 ms, ACK window 128 us
+
+Pass 198 turns the Pass 12 hybrid into the return path's ARQ. Three of its
+numbers are SEEDS, not measurements, and are recorded here rather than argued
+in the spec.
+
+**`air.tx_retry_limit` 3 (was 8).** Operator-ruled band 3-5; 3 is the only rung
+inside it the devourer sweep actually measured (99.72% delivered, 0.26%
+residual, vs 8's 99.97%/0.03%). 4 and 5 are authorable and unmeasured. The
+trade is airtime per UNDELIVERABLE frame — 4 copies rather than 9, each retry
+also waiting a full ACK window. **Open:** the delivery cost of dropping from 8
+to 3 has never been measured on OUR return path, only in devourer's collision
+regime; and finding #96 still stands — at bench SNR the retry distribution is
+degenerate (`tx_report_fails` 0, the ceiling never touched), so the number that
+matters only appears on a marginal link.
+
+**`policy.return.unicast_stale_ms` 1000.** Derived, not measured: an order of
+magnitude above the §1 correlated-fade band (~5-30 ms) so a fade the hybrid
+exists to punch through cannot disarm it, 10x the §7.3 LINK_REPORT interval,
+and an order of magnitude below §2 `idle_teardown_ms` so the latch always ages
+out before the stream is torn down. **Open:** the real question is the worst
+fade a healthy link produces at range, which is a gate-4 measurement. Watch
+`unicast_stale` rising while `unicast_sent` stalls — that pair IS the
+out-of-range signal, and a nonzero `unicast_stale` on a link nobody considers
+out of range means the seed is too tight.
+
+**`air.ack_timeout_us` 128.** Not a new value — devourer's own unified default,
+so this changes nothing on air. It becomes a key because the number is a range
+budget (~6.7 us/km round trip, so ~15 km once ~50 us of ACK flight and
+detection margin is out) that used to be inherited silently. Operator ruling:
+128 is the fleet value and a longer link leans on §3.4 fallback video.
+**Open, and it is a real one:** the fleet's `.181` craft is an **8733BU**,
+where devourer hardcodes REG_ACKTO to 0x21 = **33 us** in `init_wmac()` and
+never reads `tx.ack_timeout_us` at all (snokvist/devourer#2). That die also has
+no ACK responder and no CCX `tx.report`, so on the `.181` craft the hybrid's
+craft half cannot be armed and the per-frame retry-drop sensor does not exist.
+Today that costs nothing — the craft is the responder, not the solicitor, and
+the responder half is what is missing — but any future craft-side unicast on
+that die would run a 33 us window without saying so.
+
+**Not measured at all yet:** the whole pass is bench-unvalidated. §4.4's
+86.9% -> 99.9% at 3000 pps was measured with retry 8, a never-expiring latch and
+NACK/LINK_REPORT only. Every one of those three has changed.
 ## 2026-08-30 — the §3.7 loss ratios are session averages, and AIR is mean-per-EAR
 
 Operator: the OSD **AIR** bar shows full while the picture is fine, and

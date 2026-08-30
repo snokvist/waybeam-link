@@ -132,6 +132,10 @@ class VcmdIssuer {
     uint32_t nonce() const { return tmpl_.cmd_nonce; }
     uint8_t cmd_id() const { return tmpl_.cmd_id; }
     uint8_t cmd_arg() const { return tmpl_.cmd_arg; }
+    // §3.0 (Pass 198): the bound craft this campaign addresses, so the
+    // injector can send copies as unicast rather than broadcast. 0 while
+    // idle — a campaign always sets it in start().
+    uint16_t target() const { return target_; }
 
   private:
     enum class State : uint8_t {

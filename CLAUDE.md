@@ -64,7 +64,7 @@ before merge instead of stacking a correction on top.
   is **silently ignored**. `--check` passing proves the config parses, not that
   it says what you meant. See "Authoring configs" below.
   `waybeam-link config-schema --json` prints the declared key surface
-  (`io/src/config_registry.cpp`, 273 keys) so a key can be checked without
+  (`io/src/config_registry.cpp`, 283 keys) so a key can be checked without
   reading the loader. The registry is not a second source of truth:
   `tests/config_registry_test.py` reconstructs every accessor site in
   `config.cpp` and fails the build if the two disagree in either direction.
@@ -121,7 +121,7 @@ Current phase order (operator direction, 2026-08-06): **consolidate → expand
 
 ## Authoring configs
 
-Node configs are dense (273 registered keys, `config-schema --json`) and
+Node configs are dense (283 registered keys, `config-schema --json`) and
 **coupled across nodes**: the
 cache's `store.controller.endpoint` must equal the owning ground's
 `cache.repair.listen`, the ground's `cache.repair.caches[]` must name the
@@ -376,7 +376,9 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   remaining-work plan), `config-harness-plan.md` (the config generator /
   agent-facing schema proposal, with two open rulings),
   `calibration-v2-symmetric-probes.md` (the calibration redesign, Tier 2
-  until ruled).
+  until ruled), `hwack-hybrid-bringup.md` (the §3.0 hardware-ACK hybrid's
+  hardware runbook — Pass 198 is desk-verified only, and that doc names the
+  two fleet dies that gate it).
 
 ## Runtime / bench gotchas
 

@@ -1825,6 +1825,18 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                     upwr.override_qdb, air.value->tx_power_applied(uplink_idx),
                     l.cfg.air.kind == AirCfg::Kind::kRadio);
             };
+            // §3.0/§15.5 (Pass 198) live ACK-responder toggle. Null hooks
+            // off the radio backend, so the endpoint is a 409 there rather
+            // than a 200 reporting a responder that cannot exist.
+            if (air.value->ack_responder_json().has_value()) {
+                h.ack_responder_json = [&]() -> std::string {
+                    return air.value->ack_responder_json().value_or(
+                        std::string("{}"));
+                };
+                h.ack_responder_set = [&](bool armed) -> std::string {
+                    return air.value->set_ack_responder(armed);
+                };
+            }
             // §10.7 GET: the ground's OWN uplink state. The craft response
             // keeps the §10.6 schema; `direction` is what tells a Hub which
             // of the two it is holding, since both live at this path.
@@ -3194,14 +3206,22 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 if (result.first == 200) mtu_reissue_pending = false;
             }
         }
-        // §11.7 command campaign copies ride the same uplink as CSA copies.
+        // §11.7 command campaign copies ride the same uplink as CSA copies —
+        // but NOT the same addressing since Pass 198. A command names one
+        // bound craft and no other node consumes it (a non-bound issuer's
+        // command is a silent drop, and a ground returns early without
+        // acting), so it meets §3.0's single-target test and goes through
+        // inject_return: unicast + hardware retries when the target is
+        // fresh, broadcast when it is not. CSA copies stay on inject()
+        // because they ARE fleet-addressed.
         {
             const VcmdIssuer::Action va = vissuer.tick(now_us_it);
             if (va.kind == VcmdIssuer::Action::Kind::kSendCopy) {
                 uint8_t frame[kVehicleCmdSize];
                 if (encode_vehicle_cmd(va.pkt, frame, sizeof(frame)) ==
                     sizeof(frame)) {
-                    air.value->inject(frame, sizeof(frame));
+                    air.value->inject_return(vissuer.target(), frame,
+                                             sizeof(frame), false);
                 }
             }
         }
