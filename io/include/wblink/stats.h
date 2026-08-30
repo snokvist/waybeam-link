@@ -207,6 +207,15 @@ struct StreamStats {
     // rather than reading 0: a silent link is not a clean one.
     uint32_t loss_prediversity_window_milli = 0;
     uint32_t loss_postdiv_window_milli = 0;
+    // §3.7 (Pass 198) the BEST ear's live loss. The pre-diversity figure above
+    // sums opportunities across adapters, so it is the MEAN per-ear loss —
+    // measured on a two-ear ground, one ear saw ~100% of unique packets and
+    // the other 2.7%, so the mean read ~50% while every packet arrived and the
+    // picture was clean. That makes it useless as an "air quality" indicator
+    // on any receiver with more than one ear, which §15.2 auto-adapters made
+    // the norm. This is the loss on the ear currently hearing best: what the
+    // air is actually doing on the path carrying the link.
+    uint32_t loss_best_ear_window_milli = 0;
     // §17 gate-3 estimator: cumulative NACK→RETRANSMIT latency histograms,
     // ms upper bounds 1,2,4,8,16,32,64,+inf. nack_rtt = most-recent-NACK
     // anchor (pure round-trip); arq_rec = first-NACK anchor (recovery vs

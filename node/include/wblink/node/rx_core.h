@@ -666,6 +666,34 @@ struct RxCore {
                       info.counters.lost_declared);
         st.loss_prediversity_window_milli = o.pre_milli;
         st.loss_postdiv_window_milli = o.post_milli;
+
+        // Best ear: window each adapter SEPARATELY and take the minimum, not
+        // the minimum of a differenced "best" pair. Which ear is best can
+        // change between samples, and a delta whose numerator came from one
+        // ear and denominator from another is not a rate of anything.
+        uint32_t best = 0;
+        bool have_best = false;
+        for (const RxStreamInfo::AdapterLoss& al : info.per_adapter) {
+            LossWindow* ew = nullptr;
+            for (auto& [key, cand] : ear_windows_) {
+                if (key.first == info.local_stream_id &&
+                    key.second == al.adapter_id) { ew = &cand; break; }
+            }
+            if (ew == nullptr) {
+                ear_windows_.emplace_back(
+                    std::pair<uint8_t, uint8_t>{info.local_stream_id,
+                                                al.adapter_id},
+                    LossWindow{kLossWindowMs});
+                ew = &ear_windows_.back().second;
+            }
+            const LossWindow::Out eo =
+                ew->update(now, al.expected, al.lost, 0, 0);
+            if (!have_best || eo.pre_milli < best) {
+                best = eo.pre_milli;
+                have_best = true;
+            }
+        }
+        st.loss_best_ear_window_milli = best;
     }
 
     // §3.4: is the VIDEO stream currently running degraded? /features
@@ -732,6 +760,9 @@ struct RxCore {
     // fill_stats is const and its call site holds a `const RxCore*` — this is
     // derived reporting state, not node state.
     mutable std::vector<std::pair<uint8_t, LossWindow>> loss_windows_;
+    // Keyed (local_stream_id, adapter_id); see the best-ear block above.
+    mutable std::vector<std::pair<std::pair<uint8_t, uint8_t>, LossWindow>>
+        ear_windows_;
     std::optional<SelectorState> remote_selector_state_;
     uint64_t remote_selector_state_ms_ = 0;
     // §3.15 (Pass 153) acceptance latch: the (originator, session) tuple of
