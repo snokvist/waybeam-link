@@ -6,6 +6,7 @@
 // pre-position commit-on-armed + rendezvous beacons, ack-timeout abort,
 // revert-on-no-video at the T_switch-anchored deadline), and the §11.3
 // selector freeze pause.
+#include <cstdio>
 #include "wblink/csa.h"
 
 #include <string_view>
@@ -794,6 +795,45 @@ int main() {
             // T_switch - commit: the pre-position silence.
             CHECK_EQ_U(static_cast<uint64_t>(dt_ms[klass]) * 1000 - commit_us[klass],
                        klass == 0 ? 199'000u : 399'000u);
+        }
+    }
+
+    // §11.2 (Pass 197) A CAMPAIGN MUST ALWAYS TERMINATE. kAnnounce's only exit
+    // used to be emitting all kCopies, and the only campaign timeout lives in
+    // kAwaitAck — so an issuer that ran out of copy window with copies still
+    // owed sat in kAnnounce forever: never committing, never aborting, and
+    // refusing every later claim with "claim busy (campaign active)". Latent
+    // since Pass 90 and REACHED by this Pass: class 0's 300 ms dt leaves a
+    // 250 ms copy window, and an in-process hub sharing a thread with decode
+    // and OSD render does not tick 5 times inside it. Device-observed on the
+    // .242 ground before the fix; pinned here at tick periods either side of
+    // the boundary, for BOTH classes, because a class-1 regression would be
+    // just as stuck.
+    {
+        CsaParams term_pol = policy_with_psk();
+        const uint64_t ticks[] = {1'000, 20'000, 60'000, 80'000, 100'000,
+                                  250'000};
+        for (uint8_t klass = 0; klass < 2; ++klass) {
+            for (uint64_t tk : ticks) {
+                CsaIssuer is(term_pol);
+                CHECK(is.start({9, 0, 1234}, 5745, 0, klass, 5805, 0, 4, 0));
+                bool ended = false;
+                // No craft ever ACKs, so the only correct end is kAbort.
+                for (uint64_t t = 0; t <= 5'000'000 && !ended; t += tk) {
+                    if (is.tick(t).kind ==
+                        CsaIssuer::IssuerAction::Kind::kAbort) {
+                        ended = true;
+                    }
+                }
+                if (!ended) {
+                    std::fprintf(stderr,
+                                 "  campaign WEDGED: class %u, tick %llu us\n",
+                                 unsigned(klass),
+                                 static_cast<unsigned long long>(tk));
+                }
+                CHECK(ended);
+                CHECK(!is.active());
+            }
         }
     }
 

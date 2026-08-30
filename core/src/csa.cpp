@@ -386,6 +386,22 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
                     state_ = State::kAwaitAck;
                 }
             }
+            // §11.2 (Pass 197): the copy window closing is ALSO an exit. Until
+            // now the only way out of kAnnounce was emitting all kCopies, and
+            // the only campaign timeout lives in kAwaitAck — so an issuer that
+            // ran out of window with copies still owed sat here forever, never
+            // committing, never aborting, and refusing every later claim with
+            // "claim busy (campaign active)". Latent since Pass 90 and reached
+            // by Pass 197: class 0's 300 ms dt leaves a 250 ms copy window, so
+            // a caller ticking slower than ~kCopySpacing (measured: an
+            // in-process hub sharing a thread with decode and OSD render) does
+            // not get kCopies emissions into it. Whatever went out has gone
+            // out; wait for the ACK and let kAwaitAck's ack_timeout end the
+            // campaign. Fewer copies is a weaker campaign, never a stuck one.
+            if (state_ == State::kAnnounce &&
+                switch_at_us_ <= now_us + kCopyCutoffUs) {
+                state_ = State::kAwaitAck;
+            }
             break;
         case State::kAwaitAck:
             // §11.2 (Pass 90): keep re-sending copies until the craft ACKs or
