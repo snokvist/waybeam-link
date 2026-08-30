@@ -24,6 +24,48 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 198 — §3.7 loss gets a live view; the cumulative pair is a session average (2026-08-30)
+
+**Verdict.** Operator report: the OSD **AIR** bar sits full while the picture is
+clean, and "degrades very slowly and is not live". Both halves are real and
+neither is a wrong binding. §3.7's two ratios are computed from totals since
+latch, so inertia grows without bound — measured, pre-diversity moved
+**33.6 -> 33.4 across 90 s and 88,000 delivered frames**. Worse, a §15.5a scout
+sweep parks one ear off-channel and bakes a 100%-loss stretch into the mean for
+the rest of the session, which is enough to pin a loss bar at alert on a link
+delivering cleanly. §15.3 now also publishes both ratios over a short trailing
+window. Second finding, same amendment: the pre-diversity figure sums
+opportunities across adapters, so it is the **mean per-ear** loss — a two-ear
+ground measured **491 permille pre against 1 post**, one ear seeing ~100% of
+packets and the other 2.7%. §15.3 gains a best-ear figure for air quality.
+
+**Changed:** §3.7 (the cumulative pair is explicitly a session average; a
+receiver MUST also publish the windowed pair; empty denominator holds rather
+than reads zero; pre-diversity is mean-per-ear and must be labelled as such),
+§15.3 (`loss_prediversity_window_milli`, `loss_postdiv_window_milli`,
+`loss_best_ear_window_milli` — ears windowed separately, minimum taken). No
+wire change and no packet field — both ends compute locally, and the window length
+is a §17 seed (500 ms), not a constant either peer depends on.
+
+**Why a window and not an EWMA.** A window forgets completely where an EWMA
+trails a tail past the event — the exact complaint. Anchored on the oldest
+sample still inside it rather than a fixed sample count, because the emit
+cadence is config (`stats.hz`) and a stalled emitter must not silently widen
+the span it reports.
+
+**What the tests pin.** `tests/loss_window_test.cpp` asserts the forgetting,
+and every case also asserts the cumulative ratio would have answered
+DIFFERENTLY at that instant — without that they would pass against the average
+they replace. Mutation-verified: disabling the aging reports 800 permille where
+the window reports 0, and 71 where it reports 500.
+
+**Device result.** AIR bound to the best ear reads **0.0-1.6%, moving every
+sample**, against a mean-per-ear of ~49% and a session average frozen at 48.2%
+on the same link at the same instant.
+
+**Evidence.** Branch `impl/live-loss-window`; `docs/findings.md` 2026-08-30
+entry for the 90-second cumulative-drift measurement and the two-ear split.
+
 ## Pass 197 — §11.2 quick-connect was issuing the rejected retune class; §3.4 gets a voice (2026-08-30)
 
 **Verdict.** Two silent failures, one operator-visible symptom. (1) §11.2 Pass 91

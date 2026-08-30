@@ -12,6 +12,48 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-30 — the §3.7 loss ratios are session averages, and AIR is mean-per-EAR
+
+Operator: the OSD **AIR** bar shows full while the picture is fine, and
+"degrades very slowly and is not live". Investigated on the x86 ground against
+craft 19. Three separate facts, none of them a wrong OSD binding.
+
+**1. Both ratios are cumulative since latch.** Sampled once every 10 s for 90 s
+on a running link:
+
+| t | pre_pct | post_pct | delivered |
+|---|---|---|---|
+| 0 s | 33.6 | 0.2 | 73,269 |
+| 90 s | 33.4 | 0.2 | 161,633 |
+
+88,000 frames delivered moved the headline number by **0.2 points**. The
+inertia grows with the stream, so late in a flight the bars are effectively
+frozen. A scout sweep is the pathological input: it parks one ear off-channel,
+and that 100%-loss stretch stays in the mean permanently.
+
+**2. AIR is the mean across diversity EARS, not "the air".**
+`RxEngine::streams()` sums `prediv_expected` / `prediv_lost` over every
+adapter. With a good ear at -49 dBm and a weak one at -56, that is a permanent
+~33% while post-diversity is **0.2%** and the picture is clean. The OSD's
+`warn 5 / alert 12` were calibrated when a ground had one ear; §15.2
+auto-adapters made multi-ear grounds normal, which is what turned AIR into a
+bar that is always red and therefore carries no information.
+
+**3. `wblink_loss_window_pct` / `wblink_loss_window_milli` are not a substitute.**
+They exist in the hub's key list but read 0.0 / 0 on a ground — they come from
+the §9.8 selector state, which is TX-side.
+
+**Fixed by Pass 198** for (1): §15.3 gains `loss_prediversity_window_milli` and
+`loss_postdiv_window_milli`, a 500 ms trailing window. (2) is a presentation
+decision left to the operator — the windowed pre-diversity figure is still
+mean-per-ear, it is just live. What windowing DOES fix for (2) is the scout
+poisoning, which was the dominant term in the 33% seen here.
+
+**Window length is a seed, not a measurement.** 500 ms at ~1400 pkt/s is ~700
+opportunities, so quantisation is ~1.4 permille — fine. At a floor-rung 2829
+kbps (~250 pkt/s) it is ~125 opportunities and ~8 permille, which will look
+jumpy. Raise it if that proves distracting; the cost is reaction time.
+
 ## 2026-08-30 — the CSA retune class, measured: class 1 loses 40% of campaigns class 0 wins
 
 The `.242` x86 ground (2 ears: 8812CU rx + 8812AU tx, auto-elected) against the

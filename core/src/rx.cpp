@@ -766,9 +766,11 @@ std::vector<RxStreamInfo> RxEngine::streams() const {
             std::min<size_t>(s.nack_rtt_ms.size(), UINT16_MAX));
         info.counters.nack_rtt_p95_us = p95_us(s.nack_rtt_ms);
         for (const auto& [adapter, a] : s.adapter_seq) {
-            (void)adapter;
             info.counters.prediv_expected += a.expected;
             info.counters.prediv_lost += a.expected - a.received;
+            info.per_adapter.push_back(
+                RxStreamInfo::AdapterLoss{adapter, a.expected,
+                                          a.expected - a.received});
         }
         out.push_back(std::move(info));
     }

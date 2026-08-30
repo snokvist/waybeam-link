@@ -30,6 +30,7 @@
 #include "wblink/frame_reassembler.h"
 #include "wblink/log.h"
 #include "wblink/mcs_probe.h"
+#include "wblink/node/loss_window.h"
 #include "wblink/recovery.h"
 #include "wblink/reporter.h"
 #include "wblink/rx.h"
@@ -367,6 +368,7 @@ struct RxCore {
                 denom == 0 ? 0
                            : static_cast<uint32_t>(
                                  info.counters.lost_declared * 1000 / denom);
+            fill_loss_window(st, info, now);
             st.recovered_arq = info.counters.recovered_arq;
             st.dropped_superseded = info.counters.dropped_superseded;
             st.dropped_deadline = info.counters.dropped_deadline;
@@ -642,6 +644,72 @@ struct RxCore {
         }
     }
 
+    // §15.3 (Pass 198) LIVE loss. The maths and its rationale live in
+    // node/loss_window.h so they are unit-testable without standing up a node
+    // and feeding it packets; this is the per-stream lookup around it.
+    static constexpr uint64_t kLossWindowMs = 500;  // §17 seed
+
+    void fill_loss_window(StreamStats& st, const RxStreamInfo& info,
+                          uint64_t now) const {
+        StreamLoss* w = nullptr;
+        for (StreamLoss& cand : loss_windows_) {
+            if (cand.local_stream_id == info.local_stream_id) { w = &cand; break; }
+        }
+        if (w == nullptr) {
+            loss_windows_.push_back(
+                StreamLoss{info.local_stream_id, LossWindow{kLossWindowMs}, 0});
+            w = &loss_windows_.back();
+        }
+        const LossWindow::Out o =
+            w->window.update(now, info.counters.prediv_expected,
+                      info.counters.prediv_lost, info.counters.uniq,
+                      info.counters.lost_declared);
+        st.loss_prediversity_window_milli = o.pre_milli;
+        st.loss_postdiv_window_milli = o.post_milli;
+
+        // Best ear: window each adapter SEPARATELY and take the minimum, not
+        // the minimum of a differenced "best" pair. Which ear is best can
+        // change between samples, and a delta whose numerator came from one
+        // ear and denominator from another is not a rate of anything.
+        uint32_t best = 0;
+        bool have_best = false;
+        for (const RxStreamInfo::AdapterLoss& al : info.per_adapter) {
+            LossWindow* ew = nullptr;
+            for (auto& [key, cand] : ear_windows_) {
+                if (key.first == info.local_stream_id &&
+                    key.second == al.adapter_id) { ew = &cand; break; }
+            }
+            if (ew == nullptr) {
+                ear_windows_.emplace_back(
+                    std::pair<uint8_t, uint8_t>{info.local_stream_id,
+                                                al.adapter_id},
+                    LossWindow{kLossWindowMs});
+                ew = &ear_windows_.back().second;
+            }
+            const LossWindow::Out eo =
+                ew->update(now, al.expected, al.lost, 0, 0);
+            // Only ears with evidence IN the window may compete. A silent ear
+            // holds its last reading, and a held 0 would win the minimum
+            // forever while the one live ear degrades — a bar reporting a
+            // perfect link on a failing one.
+            if (!eo.pre_valid) continue;
+            if (!have_best || eo.pre_milli < best) {
+                best = eo.pre_milli;
+                have_best = true;
+            }
+        }
+        // No ear had evidence at all (this stream is quiet): hold, for the
+        // same reason the stream-level window holds — silence is not health.
+        // The hold is PER STREAM. It was a single scalar until review: a node
+        // runs one RxCore for every dir:"out" stream (the deployed grounds
+        // configure RTP + AUDIO + TELEMETRY), fill_stats loops over all of
+        // them, and a shared hold made a stream with no traffic of its own
+        // report whichever number the previous stream in the loop had just
+        // computed. An idle AUDIO stream showed the VIDEO stream's loss.
+        if (have_best) w->best_ear_held = best;
+        st.loss_best_ear_window_milli = w->best_ear_held;
+    }
+
     // §3.4: is the VIDEO stream currently running degraded? /features
     // publishes ARQ as an operator latch, which cannot see this — the two
     // senses have to be distinguishable or "arq_enabled: true" keeps being
@@ -702,6 +770,21 @@ struct RxCore {
     std::vector<LatchStream> latch_scratch_;  // reused; see emit_latch_recovery
     // §3.4 one-shot-per-stream warn latch; see log_best_effort_edges.
     std::vector<uint8_t> best_effort_warned_;
+    // §15.3 (Pass 198) per-stream trailing-window loss. `mutable` because
+    // fill_stats is const and its call site holds a `const RxCore*` — this is
+    // derived reporting state, not node state.
+    // ALL per-stream loss state in one struct, so nothing here can be shared
+    // across streams by omission — which is exactly how the best-ear hold was
+    // wrong before review.
+    struct StreamLoss {
+        uint8_t local_stream_id = 0;
+        LossWindow window{kLossWindowMs};
+        uint32_t best_ear_held = 0;
+    };
+    mutable std::vector<StreamLoss> loss_windows_;
+    // Keyed (local_stream_id, adapter_id); see the best-ear block above.
+    mutable std::vector<std::pair<std::pair<uint8_t, uint8_t>, LossWindow>>
+        ear_windows_;
     std::optional<SelectorState> remote_selector_state_;
     uint64_t remote_selector_state_ms_ = 0;
     // §3.15 (Pass 153) acceptance latch: the (originator, session) tuple of

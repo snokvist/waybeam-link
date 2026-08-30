@@ -128,6 +128,9 @@ StatsSnapshot sample_snapshot() {
     st.nacks_sent = 18;
     st.best_effort = false;  // true case asserted separately below
     st.table_mismatch = 4111;
+    st.loss_prediversity_window_milli = 137;  // distinct from the cumulative 41
+    st.loss_postdiv_window_milli = 29;        // distinct from the cumulative 6
+    st.loss_best_ear_window_milli = 11;       // best ear beats the 137 mean
     st.nack_rtt_hist = {0, 2, 7, 6, 2, 1, 0, 0};
     st.nack_rtt_max_ms = 34;
     st.nack_rtt_samples = 24;
@@ -303,6 +306,8 @@ const char* kGolden =
     "\"dropped_deadline\":8,"
     "\"nacks_sent\":18,"
     "\"best_effort\":false,\"table_mismatch\":4111,"
+    "\"loss_prediversity_window_milli\":137,"
+    "\"loss_postdiv_window_milli\":29,\"loss_best_ear_window_milli\":11,"
     "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
     "\"nack_rtt_samples\":24,\"nack_rtt_p95_us\":2000,"
     "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
