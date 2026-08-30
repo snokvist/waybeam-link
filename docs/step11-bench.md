@@ -390,6 +390,14 @@ seeds (150 ms / 500 ms) need raising.
 
 ### 4.4 Uplink HW-ACK hybrid A/B
 
+**BRING-UP RUNBOOK: `docs/hwack-hybrid-bringup.md`** (Pass 198). The A/B below
+was measured under the PRE-Pass-198 shape — retry 8, a never-expiring SA latch
+and NACK/LINK_REPORT only. All three changed, so these numbers are context, not
+a baseline the current build can be compared against. Two fleet gates are named
+in the runbook and must be settled first: the `.181` craft is an 8733BU with no
+ACK responder at all, and the `.242` ground's 8812AU uplink hardcodes the
+descriptor BMC bit, which would make its unicast returns solicit no ACK.
+
 **STATUS 2026-07-11: groundwork LANDED** (spec Pass 12 + implementation,
 `impl/step11-wedge-hwack`): §3.0 pins the unicast QoS-Data return shape;
 `return.unicast` (ground) sends NACK/LINK_REPORT unicast to the target's

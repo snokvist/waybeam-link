@@ -376,7 +376,9 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   remaining-work plan), `config-harness-plan.md` (the config generator /
   agent-facing schema proposal, with two open rulings),
   `calibration-v2-symmetric-probes.md` (the calibration redesign, Tier 2
-  until ruled).
+  until ruled), `hwack-hybrid-bringup.md` (the §3.0 hardware-ACK hybrid's
+  hardware runbook — Pass 198 is desk-verified only, and that doc names the
+  two fleet dies that gate it).
 
 ## Runtime / bench gotchas
 
