@@ -626,9 +626,20 @@ no packet.
 makes the difference large.** The pre-diversity figure sums opportunities
 across every adapter, so it is the MEAN PER-EAR loss — one weak ear holds it
 high while every packet still arrives on some ear. Measured on a two-ear
-ground: 350 permille pre-diversity against 0 post-diversity. A consumer
-presenting "is the link healthy" wants post-diversity; pre-diversity is a
-per-ear RF quality indicator and must be labelled as one.
+ground, one ear seeing ~100% of unique packets and the other 2.7%: **491
+permille pre-diversity against 1 post-diversity**, with the picture clean. A
+consumer presenting "is the link healthy" wants post-diversity; the mean is a
+fleet-diagnostic ("is an ear failing"), not an air-quality indicator.
+
+For air quality a receiver MUST also publish `loss_best_ear_window_milli`
+(§15.3): the windowed loss of the ear currently hearing best, i.e. what the air
+is doing on the path actually carrying the link. Each ear is windowed
+SEPARATELY and the minimum taken — differencing a "best pair" instead would
+mix a numerator from one ear with a denominator from another whenever the best
+ear changes, which is a rate of nothing. On the ground measured above this
+reads **0-16 permille and moves every sample**, against the 491 the mean
+reports; the mean is what had pinned that operator's loss bar at alert for the
+life of every session.
 
 ### 3.8 HEARTBEAT packet (type `0x4`) — 11 bytes
 
@@ -5592,6 +5603,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "table_mismatch": 0,
     "loss_prediversity_window_milli": 0,
     "loss_postdiv_window_milli": 0,
+    "loss_best_ear_window_milli": 0,
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
     "resends_sent": 230, "arq_lock_holder": 9, "double_send_suppressed": 5,

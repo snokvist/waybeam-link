@@ -30,6 +30,7 @@
 #include "wblink/frame_reassembler.h"
 #include "wblink/log.h"
 #include "wblink/mcs_probe.h"
+#include "wblink/node/loss_window.h"
 #include "wblink/recovery.h"
 #include "wblink/reporter.h"
 #include "wblink/rx.h"
@@ -367,6 +368,7 @@ struct RxCore {
                 denom == 0 ? 0
                            : static_cast<uint32_t>(
                                  info.counters.lost_declared * 1000 / denom);
+            fill_loss_window(st, info, now);
             st.recovered_arq = info.counters.recovered_arq;
             st.dropped_superseded = info.counters.dropped_superseded;
             st.dropped_deadline = info.counters.dropped_deadline;
@@ -642,6 +644,30 @@ struct RxCore {
         }
     }
 
+    // §15.3 (Pass 198) LIVE loss. The maths and its rationale live in
+    // node/loss_window.h so they are unit-testable without standing up a node
+    // and feeding it packets; this is the per-stream lookup around it.
+    static constexpr uint64_t kLossWindowMs = 500;  // §17 seed
+
+    void fill_loss_window(StreamStats& st, const RxStreamInfo& info,
+                          uint64_t now) const {
+        LossWindow* w = nullptr;
+        for (auto& [id, cand] : loss_windows_) {
+            if (id == info.local_stream_id) { w = &cand; break; }
+        }
+        if (w == nullptr) {
+            loss_windows_.emplace_back(info.local_stream_id,
+                                       LossWindow{kLossWindowMs});
+            w = &loss_windows_.back().second;
+        }
+        const LossWindow::Out o =
+            w->update(now, info.counters.prediv_expected,
+                      info.counters.prediv_lost, info.counters.uniq,
+                      info.counters.lost_declared);
+        st.loss_prediversity_window_milli = o.pre_milli;
+        st.loss_postdiv_window_milli = o.post_milli;
+    }
+
     // §3.4: is the VIDEO stream currently running degraded? /features
     // publishes ARQ as an operator latch, which cannot see this — the two
     // senses have to be distinguishable or "arq_enabled: true" keeps being
@@ -702,6 +728,10 @@ struct RxCore {
     std::vector<LatchStream> latch_scratch_;  // reused; see emit_latch_recovery
     // §3.4 one-shot-per-stream warn latch; see log_best_effort_edges.
     std::vector<uint8_t> best_effort_warned_;
+    // §15.3 (Pass 198) per-stream trailing-window loss. `mutable` because
+    // fill_stats is const and its call site holds a `const RxCore*` — this is
+    // derived reporting state, not node state.
+    mutable std::vector<std::pair<uint8_t, LossWindow>> loss_windows_;
     std::optional<SelectorState> remote_selector_state_;
     uint64_t remote_selector_state_ms_ = 0;
     // §3.15 (Pass 153) acceptance latch: the (originator, session) tuple of

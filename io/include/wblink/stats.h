@@ -194,6 +194,19 @@ struct StreamStats {
     // disagreeing.
     bool best_effort = false;
     uint64_t table_mismatch = 0;
+    // §15.3 (Pass 198) LIVE loss, over a short trailing window rather than the
+    // whole stream. The two ratios above are cumulative since latch, so their
+    // inertia grows without bound: measured on the x86 ground, the
+    // pre-diversity figure moved 33.6 -> 33.4 across 90 s and 88,000 delivered
+    // frames. That makes them a session average, not a link indicator — a
+    // burst now barely moves them, and a transient minutes ago is still on
+    // screen. Worse for an operator, a scout sweep parks one ear off-channel
+    // and bakes a 100%-loss period into the average permanently. These two
+    // answer "what is the link doing NOW", which is what an OSD bar needs.
+    // Denominator empty (no traffic in the window) HOLDS the previous value
+    // rather than reading 0: a silent link is not a clean one.
+    uint32_t loss_prediversity_window_milli = 0;
+    uint32_t loss_postdiv_window_milli = 0;
     // §17 gate-3 estimator: cumulative NACK→RETRANSMIT latency histograms,
     // ms upper bounds 1,2,4,8,16,32,64,+inf. nack_rtt = most-recent-NACK
     // anchor (pure round-trip); arq_rec = first-NACK anchor (recovery vs

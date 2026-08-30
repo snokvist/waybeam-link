@@ -308,6 +308,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_bool(out, s.best_effort);
         out += ",\"table_mismatch\":";
         append_u64(out, s.table_mismatch);
+        out += ",\"loss_prediversity_window_milli\":";
+        append_u64(out, s.loss_prediversity_window_milli);
+        out += ",\"loss_postdiv_window_milli\":";
+        append_u64(out, s.loss_postdiv_window_milli);
         out += ",\"nack_rtt_hist\":";
         append_hist(out, s.nack_rtt_hist);
         out += ",\"nack_rtt_max_ms\":";
