@@ -129,6 +129,66 @@ void test_window_is_time_not_ticks() {
     }
 }
 
+// A SILENT ear must not win the best-ear minimum. It holds its last reading,
+// and if that was 0 it would win forever while the one live ear degrades —
+// a loss bar reporting a perfect link on a failing one. This is the reason
+// Out carries pre_valid at all.
+void test_a_silent_ear_cannot_win_the_minimum() {
+    LossWindow a(500), b(500);
+    uint64_t t = 0, aexp = 0, alost = 0, bexp = 0;
+    for (int i = 0; i < 10; ++i) {  // both ears perfect
+        t += 100; aexp += 1000; bexp += 1000;
+        a.update(t, aexp, alost, 0, 0);
+        b.update(t, bexp, 0, 0, 0);
+    }
+    LossWindow::Out ao{}, bo{};
+    for (int i = 0; i < 20; ++i) {  // B goes silent, A degrades to 30%
+        t += 100; aexp += 1000; alost += 300;
+        ao = a.update(t, aexp, alost, 0, 0);
+        bo = b.update(t, bexp, 0, 0, 0);  // B: no new opportunities
+    }
+    CHECK_EQ_U(ao.pre_milli, 300u);
+    CHECK(ao.pre_valid);
+    // B still REPORTS 0 — holding is correct for a single window — but it must
+    // declare itself stale so a caller comparing ears can exclude it.
+    CHECK_EQ_U(bo.pre_milli, 0u);
+    CHECK(!bo.pre_valid);
+
+    // The rule rx_core applies: valid ears only.
+    uint32_t best = 0; bool have = false;
+    for (const LossWindow::Out& o : {ao, bo}) {
+        if (!o.pre_valid) continue;
+        if (!have || o.pre_milli < best) { best = o.pre_milli; have = true; }
+    }
+    CHECK(have);
+    CHECK_EQ_U(best, 300u);  // NOT 0
+}
+
+// pre_valid must also be false while a live stream is merely quiet, so the
+// stream-level hold and the ear-level exclusion agree about what "no evidence"
+// means.
+void test_valid_flags_track_evidence() {
+    LossWindow w(500);
+    LossWindow::Out o = w.update(0, 0, 0, 0, 0);
+    CHECK(!o.pre_valid);   // first sample: no delta yet
+    CHECK(!o.post_valid);
+    o = w.update(100, 1000, 100, 900, 100);
+    CHECK(o.pre_valid);
+    CHECK(o.post_valid);
+    // Frozen counters are not enough on their own: while the window still
+    // spans the earlier real traffic there IS evidence, and pre_valid must
+    // stay true. It goes false only once every sample inside the window is
+    // frozen — which is the condition the ear-exclusion actually depends on.
+    o = w.update(200, 1000, 100, 900, 100);
+    CHECK(o.pre_valid);
+    for (uint64_t t = 300; t <= 1200; t += 100) {
+        o = w.update(t, 1000, 100, 900, 100);
+    }
+    CHECK(!o.pre_valid);
+    CHECK(!o.post_valid);
+    CHECK_EQ_U(o.pre_milli, 100u);  // ...but the held value survives
+}
+
 }  // namespace
 
 int main() {
@@ -138,5 +198,7 @@ int main() {
     test_pre_and_post_are_independent();
     test_counter_reset_reanchors();
     test_window_is_time_not_ticks();
+    test_a_silent_ear_cannot_win_the_minimum();
+    test_valid_flags_track_evidence();
     return wbtest_finish("loss_window_test");
 }

@@ -688,12 +688,20 @@ struct RxCore {
             }
             const LossWindow::Out eo =
                 ew->update(now, al.expected, al.lost, 0, 0);
+            // Only ears with evidence IN the window may compete. A silent ear
+            // holds its last reading, and a held 0 would win the minimum
+            // forever while the one live ear degrades — a bar reporting a
+            // perfect link on a failing one.
+            if (!eo.pre_valid) continue;
             if (!have_best || eo.pre_milli < best) {
                 best = eo.pre_milli;
                 have_best = true;
             }
         }
-        st.loss_best_ear_window_milli = best;
+        // No ear had evidence at all (the whole link is quiet): hold, for the
+        // same reason the stream-level window holds — silence is not health.
+        if (have_best) best_ear_held_ = best;
+        st.loss_best_ear_window_milli = best_ear_held_;
     }
 
     // §3.4: is the VIDEO stream currently running degraded? /features
@@ -763,6 +771,7 @@ struct RxCore {
     // Keyed (local_stream_id, adapter_id); see the best-ear block above.
     mutable std::vector<std::pair<std::pair<uint8_t, uint8_t>, LossWindow>>
         ear_windows_;
+    mutable uint32_t best_ear_held_ = 0;
     std::optional<SelectorState> remote_selector_state_;
     uint64_t remote_selector_state_ms_ = 0;
     // §3.15 (Pass 153) acceptance latch: the (originator, session) tuple of

@@ -27,6 +27,15 @@ class LossWindow {
     struct Out {
         uint32_t pre_milli = 0;
         uint32_t post_milli = 0;
+        // Did the window actually contain opportunities this call, or is
+        // pre_milli a HELD value? A caller comparing several windows against
+        // each other must exclude the held ones: a silent ear holds whatever
+        // it last measured, and if that was 0 it wins any minimum forever
+        // while the one live ear is losing. Measured before this flag existed:
+        // ear A losing 300 permille as the only live ear, dead ear B holding
+        // 0, min() reporting 0 — a bar claiming a perfect link.
+        bool pre_valid = false;
+        bool post_valid = false;
     };
 
     explicit LossWindow(uint64_t window_ms, size_t max_samples = 64)
@@ -70,12 +79,14 @@ class LossWindow {
             } else {
                 const uint64_t d_exp = cur.prediv_expected - old_s.prediv_expected;
                 const uint64_t d_lost = cur.prediv_lost - old_s.prediv_lost;
-                if (d_exp != 0) {
+                last_.pre_valid = d_exp != 0;
+                if (last_.pre_valid) {
                     last_.pre_milli = static_cast<uint32_t>(d_lost * 1000 / d_exp);
                 }
                 const uint64_t d_uniq = cur.uniq - old_s.uniq;
                 const uint64_t d_decl = cur.lost_declared - old_s.lost_declared;
-                if (d_uniq + d_decl != 0) {
+                last_.post_valid = d_uniq + d_decl != 0;
+                if (last_.post_valid) {
                     last_.post_milli = static_cast<uint32_t>(
                         d_decl * 1000 / (d_uniq + d_decl));
                 }
