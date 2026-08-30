@@ -603,6 +603,33 @@ so late adapter startup is not counted as loss. The missing set is bounded by
 the existing plausible-forward clamp. Stats reset zeros estimator totals while
 preserving each adapter's current sequence anchor.
 
+**Both §3.7 ratios are CUMULATIVE, and a live view is published beside them
+(Pass 198).** `loss_prediversity_milli` and `loss_postdiv_prearq_milli` are
+computed from totals since latch, so their inertia grows without bound: on the
+x86 ground the pre-diversity figure moved 33.6 -> 33.4 across 90 s and 88,000
+delivered frames. That is the correct definition for a session average and the
+wrong one for anything that has to react — a burst now barely moves it, and a
+scout sweep that parks one ear off-channel bakes a 100%-loss stretch in for the
+rest of the session, which is enough to pin an operator's loss bar at alert on
+a link that is delivering cleanly. A receiver MUST therefore also publish
+`loss_prediversity_window_milli` and `loss_postdiv_window_milli` (§15.3): the
+same two ratios over a short trailing window, anchored on the oldest sample
+still inside it so the span is bounded however irregularly the emitter ticks.
+The window forgets completely rather than decaying, because "loss in the last
+N ms" is what a consumer of these fields is asking. An empty denominator —
+no traffic in the window — MUST hold the previous value rather than report
+zero: a silent link is not a clean one. The window length is a §17 seed
+(500 ms), not a wire constant; both ends compute it locally and it appears in
+no packet.
+
+**Pre- and post-diversity answer different questions, and a multi-ear receiver
+makes the difference large.** The pre-diversity figure sums opportunities
+across every adapter, so it is the MEAN PER-EAR loss — one weak ear holds it
+high while every packet still arrives on some ear. Measured on a two-ear
+ground: 350 permille pre-diversity against 0 post-diversity. A consumer
+presenting "is the link healthy" wants post-diversity; pre-diversity is a
+per-ear RF quality indicator and must be labelled as one.
+
 ### 3.8 HEARTBEAT packet (type `0x4`) — 11 bytes
 
 The common prefix (§3.1) alone; there is no body (operator-ruled 2026-07-10). A
@@ -5563,6 +5590,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "nacks_sent": 18,
     "best_effort": false,
     "table_mismatch": 0,
+    "loss_prediversity_window_milli": 0,
+    "loss_postdiv_window_milli": 0,
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
     "resends_sent": 230, "arq_lock_holder": 9, "double_send_suppressed": 5,
