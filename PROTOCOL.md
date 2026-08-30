@@ -631,6 +631,14 @@ permille pre-diversity against 1 post-diversity**, with the picture clean. A
 consumer presenting "is the link healthy" wants post-diversity; the mean is a
 fleet-diagnostic ("is an ear failing"), not an air-quality indicator.
 
+Do not confuse these with the §3.5 `loss_window_milli` that rides the wire in a
+LINK_REPORT and feeds the §9.1 demote cascade: that one is the reporter's own
+short selector window, is a wire field both peers agree on, and is scoped to
+the adaptive decision. The `streams[].loss_*_window_milli` fields here are
+RX-local, appear in no packet, and exist for presentation. Both are called
+"window"; they are different windows with different lengths and different
+owners.
+
 For air quality a receiver MUST also publish `loss_best_ear_window_milli`
 (§15.3): the windowed loss of the ear currently hearing best, i.e. what the air
 is doing on the path actually carrying the link. Each ear is windowed
