@@ -710,6 +710,10 @@ struct AirBackend {
                 as.drop = udp->rx_dropped(i);
                 as.kernel_drop = udp->kernel_dropped(i);
                 if (i == 0) {
+                    // The udp dev backend has no per-adapter TX: index 0
+                    // carries the node's aggregate, so it is the one entry
+                    // that can honestly claim the uplink.
+                    as.tx = udp->has_tx();
                     as.tx_submitted = udp->tx_submitted();
                     as.tx_failed = udp->tx_failed();
                 }
@@ -719,6 +723,7 @@ struct AirBackend {
             if (n == 0 && (udp->tx_submitted() != 0 || udp->tx_failed() != 0)) {
                 AdapterStats as;
                 as.name = "udp-tx";
+                as.tx = true;
                 as.tx_submitted = udp->tx_submitted();
                 as.tx_failed = udp->tx_failed();
                 snap.adapters.push_back(std::move(as));
@@ -753,6 +758,7 @@ struct AirBackend {
                 as.rssi_best = c.rssi_last;
                 as.rssi_mean = c.rssi_last;
             }
+            as.tx = c.tx;  // §15.3 Pass 195: the ELECTED uplink, not inferred
             as.tx_submitted = c.tx_submitted;
             as.tx_failed = c.tx_failed;
             as.tx_bulk = c.tx_bulk;  // §15.2 aggregation witness

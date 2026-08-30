@@ -37,6 +37,19 @@ struct AdapterStats {
     int32_t noise = 0;
     int32_t evm = 0;
     bool evm_valid = false;
+    // §15.3 (Pass 195): is THIS adapter the designated uplink? Under the
+    // §15.2 auto form the tx/rx split is ELECTED at bring-up, so a stats
+    // consumer can no longer read it out of the config — and the distinction
+    // is operationally live: the elected uplink is not necessarily the best
+    // ear, so the diversity-best RSSI a consumer computes for VIDEO overstates
+    // the margin on the RETURN path. Measured on the x86 ground 2026-08-30:
+    // best ear -47 dBm, elected uplink -54 dBm, 7 dB apart on one node.
+    //
+    // Mirrors the `role` field §15.5 /api/v1/info already publishes; it is
+    // here so a consumer of the stats plane alone does not have to infer the
+    // uplink from tx_submitted, which reads false for every adapter until the
+    // node has actually transmitted.
+    bool tx = false;
     uint64_t tx_submitted = 0;
     uint64_t tx_failed = 0;
     // §15.2: USB bulk-OUT transfers the submitted frames went out in, and

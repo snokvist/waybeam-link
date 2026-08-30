@@ -98,6 +98,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_i32(out, a.evm);
         out += ",\"evm_valid\":";
         append_bool(out, a.evm_valid);
+        out += ",\"tx\":";
+        append_bool(out, a.tx);
         out += ",\"tx_submitted\":";
         append_u64(out, a.tx_submitted);
         out += ",\"tx_failed\":";

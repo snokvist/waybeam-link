@@ -5126,6 +5126,18 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 
   `air.kind` must be `"radio"`: the auto form has no meaning on the udp dev
   backend, and is refused there rather than ignored.
+- `adapters[].tx` (§15.3, Pass 195) marks the **designated uplink** — the same
+  split `role` carries in §15.5 `/api/v1/info`, published on the stats plane so
+  a consumer of stats alone does not have to infer it. It exists because the
+  §15.2 auto form ELECTS the split at bring-up rather than reading it from the
+  config, and because the elected uplink is not necessarily the best ear: a
+  consumer computing a diversity-best RSSI for VIDEO would otherwise report
+  that number as the margin on the RETURN path too. Measured on the x86 ground
+  2026-08-30 with two auto-elected adapters: best ear −47 dBm, elected uplink
+  −54 dBm — 7 dB apart on one node, and identical on every single-adapter node,
+  which is why the distinction had never surfaced. Inferring it from
+  `tx_submitted` instead is wrong until the node has actually transmitted.
+
 - `node.spectator` (default `false`, §2/§13 spectator RX, Pass 74) opts a display
   node into **passive, uplink-free reception** — the analog-video model. A
   spectator may run with **zero `role:"tx"` adapters**: it delivers by FEC +
@@ -5411,7 +5423,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
   "adapters": [ { "name": "wlan0", "rx": 10234, "dup": 812,
     "rssi_best": -58, "rssi_mean": -63, "snr": 22, "noise": -85,
     "evm": -24, "evm_valid": true,
-    "tx_submitted": 540, "tx_failed": 2,
+    "tx": true, "tx_submitted": 540, "tx_failed": 2,
     "tx_bulk": 180, "tx_bulk_failed": 1, "tx_timeout": 0,
     "drop": 0, "filtered": 0, "kernel_drop": 0, "bpf_filtered": 0, "tsf_fallback": 0,
     "tx_reports": 531, "tx_report_fails": 0,

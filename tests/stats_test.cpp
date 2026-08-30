@@ -245,7 +245,7 @@ const char* kGolden =
     "{\"t_ms\":172834,\"node\":17,\"session\":2748291,"
     "\"adapters\":[{\"name\":\"wlan0\",\"rx\":10234,\"dup\":812,"
     "\"rssi_best\":-58,\"rssi_mean\":-63,\"snr\":22,\"noise\":-85,"
-    "\"evm\":-24,\"evm_valid\":true,"
+    "\"evm\":-24,\"evm_valid\":true,\"tx\":false,"
     "\"tx_submitted\":540,\"tx_failed\":2,"
     "\"tx_bulk\":180,\"tx_bulk_failed\":1,\"tx_timeout\":0,"
     "\"drop\":3,\"filtered\":0,\"kernel_drop\":0,\"bpf_filtered\":0,\"tsf_fallback\":1,"
@@ -423,6 +423,26 @@ int main() {
         CHECK_EQ_U(static_cast<unsigned long long>(n), golden_len);
         CHECK(n >= 0 && static_cast<size_t>(n) == golden_len &&
               std::memcmp(buf, kGolden, golden_len) == 0);
+    }
+
+    // §15.3 (Pass 195) the elected-uplink flag renders BOTH values. The
+    // golden above pins "tx":false, which a build that never wired the field
+    // through would also satisfy — so the true case is asserted separately,
+    // and against the same emitter the golden uses.
+    {
+        StatsSnapshot s = sample_snapshot();
+        CHECK(!s.adapters.empty());
+        StatsEmitter em(/*to_stdout=*/false, nullptr);
+        s.adapters[0].tx = false;
+        em.emit(s);
+        CHECK(em.last_line().find("\"tx\":false,\"tx_submitted\"") !=
+              std::string::npos);
+        CHECK(em.last_line().find("\"tx\":true") == std::string::npos);
+        s.adapters[0].tx = true;
+        em.emit(s);
+        CHECK(em.last_line().find("\"tx\":true,\"tx_submitted\"") !=
+              std::string::npos);
+        CHECK(em.last_line().find("\"tx\":false") == std::string::npos);
     }
 
     // §15.3 cache blocks: absent by default, exact shape when enabled,
