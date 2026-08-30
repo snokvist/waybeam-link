@@ -12,6 +12,75 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-30 — hybrid on the DEPLOYED stack, and the quiet gap misses 89 %
+
+Second session, distinct from the entry below it: that one ran the ground
+standalone against a craft on a **pre-PR** binary. This one is the shipped
+topology — waybeam-hub with the in-process node on **both** ends, merged
+`f7f3a36`. Ground `.242` (x86, 8812AU uplink elected by `adapters:{auto}` over
+a CU and a BU) ↔ craft `.232` (8812EU, originator 17, table_version 242,
+5540 MHz, live ~58 fps venc feed), ~-22 dBm at roughly 50 cm, 90 s arms.
+The two sessions agree within ~1 pp, which is corroboration, not a conflict.
+
+| | control (hybrid off) | full hybrid |
+|---|---|---|
+| craft report delivery | 813/901 = **90.23 %** | 899/900 = **99.89 %** |
+| ground `tx_report_fails` | 0 / 2790 | 89 / 2796 = **3.2 %** |
+| downlink loss | 4 ‰ | 7 ‰ |
+
+**Soak, 6 min, same PIDs both ends** (ground 3542588, craft 3511), monotonic
+uptime asserted every 30 s: `unicast_fallback` 0 throughout, no new
+`unicast_stale`, downlink drifting 7 → 6 ‰, `tx_report_fails` steady at
+**1056/49706 = 2.1 %** cumulative. No restarts, no wedges.
+
+**§15.5 live toggle exercised as designed:** the craft was armed over
+`POST /api/v1/air/ack_responder` with **no restart**, reporting
+`mac 56:42:00:00:11:00` (prefix, net_id 00, originator 0x0011, adapter 0) and
+`configured:false` beside `armed:true` — which is how an operator sees that a
+restart would revert it. §11.7 command campaign reached `acked` over the
+now-unicast return path with `unicast_fallback` 0.
+
+**Unplanned storm-guard validation.** Later the same evening `.232` dropped off
+the network on its own (not provoked, not `bench/rx-drop`). `unicast_stale`
+advanced 88 → 170 and `unicast_sent` stopped: the guard fired on a real
+disappearance exactly as it did on the staged one.
+
+### OPEN — the quiet gap misses ~89 % of returns
+
+Measured on the running deployed stack: `return_window_hits` **15995** against
+`return_window_misses` **126351** — an **11.2 % hit rate**. §7.2 exists to
+schedule returns into gaps when the craft is not transmitting, and nearly nine
+in ten are landing while it is pushing ~58 fps of video. That is exactly when
+the craft's SIFS turnaround ACK is most likely to be missed, so it is a
+candidate explanation for the 2.1 % residual `tx_report_fails`. This predates
+Pass 198 — but the hybrid is what makes a miss *cost* something, so it is now
+worth chasing. Not yet attributed: no test separates "missed the window" from
+"ACK lost for other reasons".
+
+### OPEN — no posture for a craft that is present but cannot answer
+
+The stale latch gives the hybrid an out-of-range posture. There is no
+equivalent for a craft that is healthy, transmitting, and structurally unable
+to ACK — the `.181` 8733BU today, and every craft mid-rolling-upgrade. The
+latch keeps being refreshed by the craft's own video, so the guard never
+fires, and the ground pays `retry_limit + 1` copies of every return forever:
+measured at **14 ‰ downlink loss against 4 ‰** in arm B. The signal already
+exists — `tx_report_fails` running ~1:1 with `unicast_sent` — and nothing acts
+on it. See the issue filed against this entry.
+
+### OPEN — the hybrid is neither visible nor disarmable in flight
+
+`GET /api/v1/health` returns `{state, profile, mcs, rssi_best, loss_milli,
+delivered, csa_state}` — none of `unicast_sent`, `unicast_stale`,
+`tx_report_fails` or `armed`. Distinguishing "ACK loop closing" from "degraded
+to arm-B economics" means dividing two counters out of the full §15.3 stream by
+hand. And `policy.return.unicast` is consumed at `RadioAir::create()`, so the
+**ground** half needs a restart to disarm while the craft half toggles live.
+Both are acceptable for a hand-driven bench and neither is acceptable for a
+default.
+
+---
+
 ## 2026-08-30 — hardware-ACK hybrid on air: the AU solicits, and the storm is ~5 s
 
 First bench run of Pass 198. Ground `.242` (x86, 8812AU uplink elected by
