@@ -24,6 +24,74 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 195 — §15.2 `adapters` gains an auto form; §10.6 artifacts key by identity (2026-08-30)
+
+**Verdict.** `adapters` may be an OBJECT carrying an `auto` block instead of a
+hand-authored array. The node enumerates its own radios, elects one TX by part
+priority, and synthesizes the stanzas. Separately, the §10.6/§10.7 calibration
+artifacts move from one fixed filename per node to one per adapter identity.
+
+**Changed:** §15.2 (auto form, election law, enumeration filter, two
+fail-closed refusals), §10.6 (artifact filename carries the identity; legacy
+fallback), §11.5 (clarifies that `home_chan` was never read, and becomes live
+under auto). No wire change, no field removed, no existing config altered in
+meaning — an array-form config parses and behaves byte for byte as before.
+
+**Why election must follow bring-up.** RTL8812EU and RTL8812AU share USB PID
+`0x8812` (`third_party/devourer/src/WiFiDriver.cpp:45`), so the two highest
+priorities are indistinguishable from the descriptor; family comes from
+SYS_CFG2, read inside `CreateRtlDevice`, and the EFUSE MAC only during
+`InitWrite`. A pre-claim ranking cannot express the required order, and a
+separate probe pass is a second full bring-up. Auto therefore reuses the Pass
+154 sequence unchanged — claim provisionally, bring up, read identity, bind —
+and adds one branch at the point where mac pins already re-bind
+(`io/src/air_radio.cpp`).
+
+**Why RX-only needs no key.** §3.11 (Pass 162) already defines the uplink-free
+archetypes and `AirBackend::create` already derives `allow_rx_only` from
+`node.spectator || (cache.store && no streams)`. Auto elects a TX unless that
+holds, so a spectator ground stays TX-less and an ordinary ground never can be.
+Inventing an `rx_only` key would have created a second, drifting answer to a
+question the spec had settled.
+
+**The enumeration filter is a pre-existing bug.** The claim scan tested
+`idVendor != kRealtekVid` and nothing else (`io/src/air_radio.cpp`), so a
+first-free claim could open a Realtek Bluetooth, card-reader or ZeroCD device.
+Under auto — which claims up to `max_adapters` — that becomes routine rather
+than unlucky. The descriptor filter (vendor-specific interface with bulk
+IN+OUT) applies to both forms, and is preferred to a PID allowlist because a
+PID list goes stale and this does not.
+
+**Why the artifact store changed with it.** Identity was already correct: a
+swapped unit reads STALE and is refused (Pass 154 D2/D3). But the store held
+one `artifact.json` per node, so swapping A→B destroyed A's measurement and
+swapping back left the operator re-running a calibration that had already been
+performed. Under auto, where the TX is elected rather than pinned, that turns
+from an inconvenience into the normal case. Per-identity filenames make
+swap-and-return lossless; a missing per-identity file falls back to the legacy
+name and is accepted only on an identity match, so a deployed node upgrades in
+place with no migration.
+
+**Two refusals, both fail-closed.** `air.mcs_probe` + auto is a config error:
+§9.4 gates probing on a per-unit stage-0 proof, and `deploy/vehicle-192.168.2.232.json`
+records that proof for one named 8812EU MAC — an election that may land on a
+different die cannot inherit it. `air.usb_tx_agg` is applied to every claimed
+unit under auto, because the elected unit does not exist when the devices are
+constructed; this is the same concession the Pass 154 re-bind already makes for
+`tx.report`, it costs an ear one MAC-init write, and the default 0 keeps every
+deployment byte-identical.
+
+**Declared, not inferred.** The standing rejection of auto-detected spectator
+mode (archive Pass, "silently drops ARQ") is not in tension with this: auto is
+an explicitly requested mode whose full outcome is logged, printed through the
+config summary, served by `GET /api/v1/info`, and reproducible as a pasteable
+array via `waybeam-link adapters --emit`.
+
+**Not done, deliberately.** No sticky TX election across replugs (operator
+ruling 2026-08-30) — the MAC tiebreak is deterministic and the array form is
+the pin. No mac-keyed per-unit power table — the auto block's power keys cover
+the elected TX, which is the whole of the single-adapter craft case.
+
 ## Pass 194 — §15.2 aggregation becomes observable: tx_bulk / tx_bulk_failed (2026-08-29)
 
 **Verdict.** `air.usb_tx_agg` has been shippable since Pass 184 and could not

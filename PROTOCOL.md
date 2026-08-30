@@ -3104,12 +3104,31 @@ the §9.4 banded-gate input) plus a **pairing fingerprint** (craft adapter
 identity, reporting `(originator)` and adapter count observed during the
 run, band, placement RSSI band, timestamp). Unlike all other §11.7 state,
 the artifact **persists** (`/etc/waybeam-link/calibration/`, atomic write,
-single last-good copy) and **auto-loads as the TX adapter's `power_map` on
-boot — only when the fingerprint's craft-adapter identity matches the live
-adapter**. On mismatch the node boots with no curve and surfaces
-CALIBRATION STALE (§15.3) — a curve calibrated for different hardware is
-never silently applied. Re-run on any pairing change (craft adapter, ground
-adapter set, antennas).
+**one last-good copy per adapter identity**) and **auto-loads as the TX
+adapter's `power_map` on boot — only when the fingerprint's craft-adapter
+identity matches the live adapter**. On mismatch the node boots with no curve
+and surfaces CALIBRATION STALE (§15.3) — a curve calibrated for different
+hardware is never silently applied. Re-run on any pairing change (craft
+adapter, ground adapter set, antennas).
+
+**AMENDED (Pass 195) — the store is keyed by identity, not by node.** The
+artifact was written to one fixed `artifact.json` per node (and the §10.7
+uplink artifact to one `uplink-artifact.json`), so a node that ran two units
+in turn kept only the last one's measurement: swap A→B and B overwrote A;
+swap back and A read STALE forever, with the operator's only remedy a full
+re-run of a calibration that had already been performed. The identity gate
+above was already correct — it refused to misapply B's curve to A — but a
+correct refusal on data that should not have been lost is still a loss.
+The filename therefore carries the identity: `artifact-<identity>.json` and
+`uplink-artifact-<identity>.json`, with the identity sanitized to
+`[0-9a-z._-]` (the §10.6 forms are already within that alphabet once `/` and
+`:` are mapped). Swap-and-return is lossless, and a node that legitimately
+rotates adapters accumulates one artifact per unit rather than one per node.
+A reader finding no per-identity file falls back to the legacy `artifact.json`
+and accepts it **only when its stored identity matches** — the same gate as
+before, so a pre-Pass-195 node upgrades in place with no re-run and no
+migration step. Nothing about the artifact body, its fingerprint, or the
+§3.15 wire word changes.
 
 **Adapter identity is per-actuator and must be stable across a re-plug**
 (operator-ruled 2026-08-06, Pass 146; re-based on the per-unit EFUSE MAC,
@@ -3929,6 +3948,16 @@ mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
   a craft holding any channel stays findable via the §15.5 scout sweep. With
   `persist_channel` (§15.2) the craft instead boots onto its last-committed
   channel; claim/bind state (§11.5a) always resets on boot regardless.
+
+  **CLARIFIED (Pass 195).** In the array form the power-on channel is
+  `adapters[].channel`, which is required per stanza; `home_chan` names the
+  same intent but **no code path reads it**, so on an array-form node it has
+  always been declarative only. That is now stated rather than implied:
+  `--check --strict` reports `policy.csa.home_chan` **inert** on an array-form
+  config, and the key becomes live in the §15.2 auto form, where it is the
+  default the synthesized stanzas take their channel from. A node that wants
+  one channel written once uses auto; an array-form node keeps writing it per
+  stanza, and the two must not silently disagree.
 
 ### 11.5a Command-source binding lifecycle (claim / hold / release)
 An accepted CSA (§11.4) both switches the channel and **binds** its issuer as the
@@ -5008,6 +5037,84 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   artifact) is withheld — fail closed, still flyable. Duplicate `mac`
   values across stanzas are a config error; the key is rejected on
   non-radio backends.
+- **`adapters` may instead be an OBJECT** (Pass 195, radio backend only), the
+  **auto** form. The two shapes are mutually exclusive: an object with a
+  non-empty array, or an object without an `auto` key, is a config error.
+
+  ```json
+  "adapters": { "auto": { "channel": 5805, "bw": 20, "max_adapters": 4,
+                          "tx_priority": ["8812EU","8812AU","8812CU","8733BU"],
+                          "power_offset_qdb": -48 } }
+  ```
+
+  The node then **discovers its own radios and synthesizes the stanza array**
+  the array form would have been written by hand. `channel` defaults to
+  `policy.csa.home_chan`; with neither set the config is refused, because no
+  channel is a safe guess. `bw` (20/40/80, default 20) applies to every
+  adapter. `max_adapters` (default 4) caps the claimed set **after** ranking,
+  so it keeps the best N rather than the first N. The per-unit power keys
+  (`power_map`, `max_power_qdb`, `power_offset_qdb`, `power_offset_max_qdb`,
+  `power_presets_qdb`, `power_offset_presets_qdb`) carry their array-form
+  meaning and apply to the **elected TX adapter only** — the same rule that
+  rejects them on a `role:"rx"` stanza.
+
+  **The candidate set is the supplied `adapter_fds` when non-empty, otherwise
+  the enumerated USB bus.** One rule, both device sources: a JSON-driven daemon
+  enumerates, and an unrooted Android caller that cannot enumerate usbfs hands
+  in its `UsbManager` fds and gets the same election. Under auto the fd array
+  is the device set outright, so the array-parallelism rule that governs it in
+  the array form does not apply.
+
+  **Enumeration is filtered by interface descriptor**, not by PID: a candidate
+  is a Realtek-VID device exposing a **vendor-specific (`0xFF`) interface with
+  at least one bulk IN and one bulk OUT** endpoint. That admits every radio
+  devourer supports and excludes the Realtek Bluetooth (`0xE0`), mass-storage
+  (`0x08`, including the ZeroCD `0bda:1a2b` identity) and HID devices sharing
+  the vendor id — which the unfiltered VID-only scan would otherwise open. The
+  filter applies to the **array form too**: claiming a Bluetooth dongle as a
+  first-free adapter was always wrong.
+
+  **Election runs AFTER bring-up, and must.** RTL8812EU and RTL8812AU share USB
+  PID `0x8812`; the family is only readable from SYS_CFG2, and the EFUSE MAC
+  only during `InitWrite`. So auto reuses the Pass 154 sequence exactly —
+  claim provisionally, bring every unit up, read part and identity, then bind
+  roles — and a design that ranked from the descriptor could not express the
+  priority order at all. Ranking is by `tx_priority` position, tiebroken by
+  **EFUSE MAC ascending**; a part absent from the list ranks below every listed
+  one. The tiebreak is the MAC and never the USB path, so the election is
+  **stable across a re-plug** for a fixed set of dongles. `tx_priority` entries
+  match the die name or any of its marketing aliases, case-insensitively and
+  with an optional `RTL` prefix, so `8812EU`, `RTL8812EU` and `RTL8822E` all
+  name the same part. The list is a **tier-2 seed**, not settled law
+  (`docs/findings.md`).
+
+  Rank 0 becomes the single `role:"tx"`; every other claimed unit becomes
+  `role:"rx"` diversity. **A TX is elected unless the node is one of the §3.11
+  uplink-free archetypes** — `node.spectator`, or a cache store with no streams
+  — which are exactly the nodes permitted zero `role:"tx"` adapters. An
+  ordinary ground therefore always elects one. This needs no key of its own:
+  auto reads the archetype the rest of the spec already defines.
+
+  Auto **declares** its outcome rather than inferring silently: the candidate
+  table (path or fd, part, MAC, rank, assigned role) is logged at bring-up, the
+  synthesized stanzas are printed through the ordinary config summary, and
+  `GET /api/v1/info` reports them exactly as authored stanzas. `waybeam-link
+  adapters -c <config>` performs the election and exits; `--emit` prints the
+  result as a paste-ready array-form `adapters` block, so an operator can
+  discover once and then freeze the assignment.
+
+  Two refusals, both fail-closed. `air.mcs_probe` with auto is a **config
+  error**: §9.4 gates probing on a *per-unit* stage-0 proof, and an election
+  that may land on a different die cannot inherit one unit's proof. And
+  `air.usb_tx_agg` is applied to **every** claimed unit under auto rather than
+  to the TX alone, because the elected unit is not known when the devices are
+  constructed — the same concession the Pass 154 re-bind already makes for
+  `tx.report`. It costs a diversity ear the aggregation MAC-init write and
+  nothing else; the default of 0 leaves every deployment byte-identical.
+
+  Zero surviving candidates is a hard error, the same posture as an empty array.
+  `air.kind` must be `"radio"`: the auto form has no meaning on the udp dev
+  backend, and is refused there rather than ignored.
 - `node.spectator` (default `false`, §2/§13 spectator RX, Pass 74) opts a display
   node into **passive, uplink-free reception** — the analog-video model. A
   spectator may run with **zero `role:"tx"` adapters**: it delivers by FEC +

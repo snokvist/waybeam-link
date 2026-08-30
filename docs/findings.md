@@ -12,6 +12,49 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-30 — the §15.2 auto TX-priority order is a seed, and it is not a ranking of "best radio"
+
+Pass 195 gives `adapters.auto.tx_priority` a default of
+`["8812EU", "8812AU", "8812CU", "8733BU"]`. That list is **tier-2 config, not
+spec law**, and this entry is why: nothing in the tree has ever measured these
+four parts against each other as *transmitters* under one controlled setup.
+The seed is an operator preference plus the scattered evidence below, and it is
+expected to move.
+
+**What is actually known, per part, from this repo's own runs:**
+
+- **8812EU (RTL8822E, Jaguar3)** — the craft TX on `.232` through every §9.4 and
+  §14 device session. USB TX aggregation verified at `usb_tx_agg` 3. It is also
+  the only part with a stage-0 proof for the §9.4 rate probe, and that proof is
+  recorded per-unit (MAC `98:03:cf:cf:a4:28`), not per-part.
+- **8812AU (RTL8812A, Jaguar1)** — the standing ground TX/RX combo. But
+  aggregation is **broken on air** on this family: at `usb_tx_agg` 2 and 3 craft
+  CPU falls ~35 points while the link goes to 966‰ loss and 0 fps (Pass 194).
+  Root-caused 2026-08-30: monitor-injected multi-block frames air 0 even with a
+  byte-correct vendor config, because injection cannot enter the
+  associated-station OQT path. So AU ranks second on general reliability while
+  being the one part that must never be paired with aggregation.
+- **8812CU (RTL8822C, Jaguar3)** — the only part whose TX-power step and
+  per-rate diffs devourer marks *measured* (`RtlJaguar3Device.cpp:1359,1371`),
+  which is a real argument for ranking it higher than third. Against it:
+  adjacent-channel bleed is reproducible on this part and peaks at a mid power
+  (2026-08-14), which an auto-elected TX cannot reason about.
+- **8733BU (RTL8733B)** — 802.11n only, 20/40 MHz, no 80. Gained a TX-power
+  actuator only in devourer #399. Aggregation verified at 3. Legitimately last
+  for a video uplink, on bandwidth alone.
+
+**What stays open.** (a) No head-to-head TX comparison at equal power, equal
+antenna, equal channel exists — the parts live on different hosts
+(`.242` AU, `.232` EU, `.181` BU), and two adapters of the same part number are
+not a replicate anyway, so a fair test needs several units per part. (b) The
+ordering conflates two different questions — which part transmits best, and
+which part the *rest of the feature set* works on (probe proofs, aggregation,
+power actuation) — and those may not have the same answer. (c) 8812CU's
+measured power step arguably outranks AU for any node that will be calibrated.
+Until (a) is run, treat the default as a starting position, not a result; a
+node that knows better sets `tx_priority`, and a node that knows exactly which
+unit it wants uses the array form.
+
 ## 2026-08-21 — walk test: on a real degrading link the §9.4 probe veto has NO operating regime, because §9.2 disarms the probe first
 
 First real range data for the §9.4 probe (#226 Leg A). Craft on battery, both
