@@ -34,10 +34,10 @@ latch, so inertia grows without bound — measured, pre-diversity moved
 sweep parks one ear off-channel and bakes a 100%-loss stretch into the mean for
 the rest of the session, which is enough to pin a loss bar at alert on a link
 delivering cleanly. §15.3 now also publishes both ratios over a short trailing
-window. Second finding recorded in the same amendment: the pre-diversity figure
-sums opportunities across adapters, so it is the **mean per-ear** loss — a
-two-ear ground measured **350 permille pre against 0 post**. The two answer
-different questions and a consumer must label which it is showing.
+window. Second finding, same amendment: the pre-diversity figure sums
+opportunities across adapters, so it is the **mean per-ear** loss — a two-ear
+ground measured **491 permille pre against 1 post**, one ear seeing ~100% of
+packets and the other 2.7%. §15.3 gains a best-ear figure for air quality.
 
 **Changed:** §3.7 (the cumulative pair is explicitly a session average; a
 receiver MUST also publish the windowed pair; empty denominator holds rather
