@@ -1147,11 +1147,28 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     // §9.3a: Automatic is local only. A successfully-created RadioAir means
     // every active adapter is a supported Realtek and may advertise High;
     // unknown backends resolve conservatively to Default.
-    std::string mtu_mode = "default";
+    // §9.3a: seed the ground MTU tier from policy.mtu_default. The
+    // claim-success reissue (below) re-asserts mtu_mode on every bind, so a
+    // configured jumbo default is commanded automatically without a runtime
+    // POST. Mirror the POST guard: a default the local adapter cannot carry
+    // degrades to Default with a warning rather than seeding an unsendable tier.
+    std::string mtu_mode = l.cfg.policy.mtu_default;
     const uint16_t mtu_supported = air.value->mtu_supported();
-    uint16_t mtu_requested = kDefaultMaxPayload;
+    auto mtu_default_tier = mtu_tier_for_mode(mtu_mode, mtu_supported);
+    if (mtu_default_tier &&
+        mtu_tier::budget(*mtu_default_tier) > mtu_supported) {
+        wb_logf("mtu: policy.mtu_default '%s' (%u) exceeds adapter support "
+                "%u — using Default\n",
+                mtu_mode.c_str(), mtu_tier::budget(*mtu_default_tier),
+                mtu_supported);
+        mtu_mode = "default";
+        mtu_default_tier = mtu_tier::kDefault;
+    }
+    uint16_t mtu_requested =
+        mtu_tier::budget(mtu_default_tier.value_or(mtu_tier::kDefault));
     uint16_t mtu_effective = kDefaultMaxPayload;
-    bool mtu_reissue_pending = false;
+    bool mtu_reissue_pending =
+        mtu_default_tier && *mtu_default_tier != mtu_tier::kDefault;
     // §11.7 issuers, held as NAMED locals rather than reached through `h`,
     // because ControlHandlers is std::move()d into the server once every
     // handler is registered, so a lambda that captures `h` by reference and

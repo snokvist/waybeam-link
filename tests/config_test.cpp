@@ -186,6 +186,7 @@ int main() {
             CHECK(c.node.role == Role::kRx);
             CHECK_EQ_U(c.node.preferred_originator, 0);
             CHECK_EQ_U(c.policy.report_timeout_ms, 500);
+            CHECK(c.policy.mtu_default == "default");  // §9.3a absent -> Default
             CHECK_EQ_U(c.policy.select.demote_milli, 45);  // §17 re-derive 2026-07-26
             CHECK_EQ_U(c.policy.select.emergency_loss_milli, 200);
             CHECK_EQ_U(c.policy.select.loss_min_uniq, 32);
@@ -206,6 +207,27 @@ int main() {
             CHECK(!c.stats.bind.has_value());
             CHECK(c.stats.to_stdout);  // A2: default on (bench/dev stream)
         }
+    }
+
+    // --- §9.3a: policy.mtu_default seeds the ground MTU/jumbo tier ----------
+    {
+        auto r = load_config_json(
+            R"({"node":{"originator":9,"role":"rx"},
+                "policy":{"mtu_default":"high"}})");
+        CHECK(bool(r));
+        if (r) CHECK(r.value->policy.mtu_default == "high");
+
+        auto r2 = load_config_json(
+            R"({"node":{"originator":9,"role":"rx"},
+                "policy":{"mtu_default":"auto"}})");
+        CHECK(bool(r2));
+        if (r2) CHECK(r2.value->policy.mtu_default == "auto");
+
+        // A typo must be rejected at load, not silently ignored.
+        expect_error(
+            R"({"node":{"originator":9,"role":"rx"},
+                "policy":{"mtu_default":"hgih"}})",
+            "mtu_default");
     }
 
     // --- A2: stats.stdout gates the §15.3 stdout NDJSON (production quiet) --
